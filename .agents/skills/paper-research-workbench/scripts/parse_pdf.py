@@ -15,6 +15,7 @@ from _paper_utils import (
     ensure_dir,
     extract_urls,
     file_sha256,
+    find_project_root,
     infer_tags_topics,
     infer_year_from_arxiv_id,
     load_yaml,
@@ -49,8 +50,7 @@ def load_pdf_reader_backend() -> tuple[Any, str]:
 
 
 def project_root_from_script() -> Path:
-    # <project>/skills/paper-research-workbench/scripts/parse_pdf.py
-    return Path(__file__).resolve().parents[3]
+    return find_project_root(Path(__file__).resolve())
 
 
 def collect_pdfs(input_path: Path) -> list[Path]:
@@ -291,35 +291,83 @@ def guess_year(metadata: dict[str, str], arxiv_id: str, file_name: str) -> int |
     return None
 
 
+def abstract_cutoff_index(tail: str) -> int:
+    """Find where abstract text likely ends before next section heading."""
+    patterns = (
+        r"(?im)^\s*(?:\d+\s*[\.\)]\s*|[ivxlcdm]+\s*[\.\)]\s*)?introduction\b",
+        r"(?im)^\s*(?:\d+\s*[\.\)]\s*|[ivxlcdm]+\s*[\.\)]\s*)?(?:index terms?|keywords?)\b",
+        r"(?im)^\s*contents\b",
+    )
+    starts: list[int] = []
+    for pattern in patterns:
+        match = re.search(pattern, tail)
+        if match:
+            starts.append(match.start())
+    return min(starts) if starts else len(tail)
+
+
+def sanitize_abstract_line(line: str) -> str:
+    cleaned = clean_text(line)
+    if not cleaned:
+        return ""
+    low = cleaned.lower()
+    if low.startswith("fig.") or low.startswith("figure "):
+        return ""
+    if re.search(r"(?:/C\d+){5,}", cleaned):
+        return ""
+    if "physical intelligence" in low and "san francisco" in low:
+        return ""
+
+    # Strip common PDF footer noise but preserve useful sentence prefix.
+    cleaned = re.sub(r"(?i)\barxiv:\s*[^\s]+.*$", "", cleaned)
+    cleaned = re.sub(r"(?i)\b(correspond(?:ence|ance)?\s+to:?)\s*", "", cleaned)
+    cleaned = re.sub(r"\b[\w.\-+%]+@[\w.\-]+\.\w+\b", "", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" ,;:-")
+
+    if not cleaned:
+        return ""
+    if sum(ch.isalpha() for ch in cleaned) < 6:
+        return ""
+    return cleaned
+
+
+def trim_sentence(text: str, max_len: int) -> str:
+    if len(text) <= max_len:
+        return text
+    clipped = text[:max_len]
+    sentence_end = max(clipped.rfind("."), clipped.rfind("?"), clipped.rfind("!"))
+    if sentence_end > 120:
+        return clipped[: sentence_end + 1].strip()
+    return clipped.strip()
+
+
 def extract_abstract(full_text: str) -> str:
     text = full_text.replace("-\n", "")
-    abstract_match = re.search(r"(?is)\babstract\b\s*[-:]*\s*", text)
+    abstract_match = re.search(r"(?is)\babstract\b\s*[-:\u2013\u2014]*\s*", text)
     if not abstract_match:
         return ""
     tail = text[abstract_match.end() :]
-    lines = [clean_text(line) for line in tail.splitlines()]
+    tail = tail[: abstract_cutoff_index(tail)]
+    lines = [sanitize_abstract_line(line) for line in tail.splitlines()]
     collected: list[str] = []
     for line in lines:
         if not line:
-            if collected and len(" ".join(collected)) > 900:
+            if collected and len(" ".join(collected)) > 700:
                 break
             continue
-        low = line.lower()
-        if "correspond" in low or "arxiv:" in low or "@" in line:
-            continue
-        normalized = re.sub(r"[^a-z0-9]", "", low)
+        normalized = re.sub(r"[^a-z0-9]", "", line.lower())
         if normalized.startswith(
             ("1introduction", "iintroduction", "introduction", "keywords", "contents")
         ):
             break
-        if low.startswith("fig."):
-            continue
         collected.append(line)
-        if len(" ".join(collected)) >= 6000:
+        if len(" ".join(collected)) >= 2600:
             break
 
     snippet = clean_text(" ".join(collected))
     snippet = re.sub(r"^[\-\u2013\u2014:\s]+", "", snippet)
+    snippet = re.sub(r"(?i)\s+(?:index terms?|keywords?)\s*[:\-].*$", "", snippet)
+    snippet = trim_sentence(snippet, max_len=2200)
     if len(snippet) < 80:
         return ""
     return snippet

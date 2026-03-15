@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{PAGE_TITLE}}</title>
+  <style>
+{{INLINE_CSS}}
+  </style>
+</head>
+<body data-default-tab="{{DEFAULT_TAB}}">
+  <div class="utility-dock">
+    <button id="themeToggle" class="icon-btn" type="button" aria-label="切换深色" title="切换主题"></button>
+    <a class="dock-link" href="graph.html" title="图谱专注页">图谱</a>
+  </div>
+
+  <div class="shell">
+    <aside class="rail">
+      <section class="card brand-card">
+        <p class="eyebrow">Paper Research Workbench</p>
+        <h1>论文知识工作台</h1>
+        <p class="brand-copy">集中浏览论文、关系、主题与想法，并进入单篇工作区完成阅读和编辑。</p>
+      </section>
+
+      <section class="card rail-tools">
+        <label class="field-label" for="searchInput">搜索论文</label>
+        <input id="searchInput" class="search-input" type="search" placeholder="标题 / 作者 / topic / tag">
+        <div id="chipbar" class="chipbar" aria-label="topic 筛选"></div>
+      </section>
+
+      <section class="card rail-list">
+        <div class="section-head">
+          <span>论文列表</span>
+          <span class="small-note">可点击打开</span>
+        </div>
+        <div id="paperList" class="paper-list"></div>
+      </section>
+    </aside>
+
+    <main class="main">
+      <header class="workspace-bar">
+        <div class="workspace-copy">
+          <p class="eyebrow">Workspace</p>
+          <h2>当前工作区</h2>
+          <p class="top-copy">从左侧选论文，在下方切换总览、关系图、主题、综合想法和单篇工作区。</p>
+        </div>
+        <div class="workspace-meta">
+          <span class="meta-chip">papers <strong id="paperCount">0</strong></span>
+          <span class="meta-chip">edges <strong id="edgeCount">0</strong></span>
+          <span class="meta-chip">topics <strong id="topicCount">0</strong></span>
+          <span class="meta-chip">ideas <strong id="ideaCount">0</strong></span>
+          <span class="meta-chip meta-time">更新于 <span id="generatedAt"></span></span>
+        </div>
+      </header>
+
+      <nav class="tabs" role="tablist" aria-label="主视图切换">
+        <button class="tab" data-tab="overview" role="tab">总览</button>
+        <button class="tab" data-tab="graph" role="tab">关系图</button>
+        <button class="tab" data-tab="topics" role="tab">主题</button>
+        <button class="tab" data-tab="ideas" role="tab">综合想法</button>
+        <button class="tab" data-tab="detail" role="tab">论文工作区</button>
+      </nav>
+
+      <section id="mdEditorOverlay" class="editor-overlay" aria-hidden="true">
+        <div class="editor-shell">
+          <div class="editor-head">
+            <div class="editor-title-wrap">
+              <h3 id="mdEditorTitle" class="editor-title">Markdown 编辑器</h3>
+              <p id="mdEditorPath" class="editor-path"></p>
+            </div>
+            <button id="mdEditorClose" class="btn ghost" type="button">收起</button>
+          </div>
+          <div class="editor-toolbar">
+            <div id="mdEditorStatus" class="editor-status">未打开文件</div>
+            <div class="top-actions">
+              <button id="mdEditorSwitchMode" class="btn ghost" type="button">仅预览</button>
+              <button id="mdEditorSave" class="btn" type="button">保存 (⌘/Ctrl+S)</button>
+            </div>
+          </div>
+          <div class="editor-body">
+            <div class="editor-pane editor-source-pane">
+              <div class="editor-pane-head">Editor</div>
+              <textarea id="mdEditorInput" class="editor-input" spellcheck="false"></textarea>
+            </div>
+            <div class="editor-pane editor-preview-pane">
+              <div class="editor-pane-head">Preview</div>
+              <div id="mdEditorPreview" class="editor-preview"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="panel-overview" class="panel">
+        <div class="overview-grid">
+          <div class="stack">
+            <article id="overviewHero" class="card hero-card"></article>
+            <article class="card surface-card">
+              <div class="section-head">
+                <span>浏览入口</span>
+                <span class="small-note">按任务进入</span>
+              </div>
+              <div id="overviewRoutes" class="route-grid"></div>
+            </article>
+            <article class="card surface-card">
+              <div class="section-head">
+                <span>最近论文</span>
+                <span class="small-note">点击进入工作区</span>
+              </div>
+              <div id="overviewPapers" class="stack"></div>
+            </article>
+          </div>
+          <div class="stack">
+            <article class="card surface-card">
+              <div class="section-head">
+                <span>当前论文摘要</span>
+                <span class="small-note">聚焦当前选择</span>
+              </div>
+              <div id="overviewSelection" class="stack"></div>
+            </article>
+            <article class="card surface-card">
+              <div class="section-head">
+                <span>常用文档</span>
+                <span class="small-note">原位查看</span>
+              </div>
+              <div class="path-list">
+                <button class="path-link md-view-link" type="button" data-md-path="topic-maps/index.md" data-md-title="topic maps">查看主题地图总表</button>
+                <button class="path-link md-view-link" type="button" data-md-path="syntheses/frontier-ideas.md" data-md-title="综合 idea 文档">查看综合 idea 文档</button>
+                <a class="path-link" href="graph.html">打开图谱专注页</a>
+              </div>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section id="panel-graph" class="panel">
+        <div class="graph-layout">
+          <article class="card graph-card">
+            <div class="graph-head">
+              <div>
+                <p class="section-title">关系图</p>
+                <p class="graph-note">滚轮缩放、空白处拖拽平移、拖动节点联动关系；Focus 模式只保留当前论文的直接连边。</p>
+              </div>
+              <div class="graph-controls">
+                <label class="range-wrap" for="edgeThreshold">
+                  Min score
+                  <span id="edgeThresholdValue">3.0</span>
+                </label>
+                <input id="edgeThreshold" class="range-input" type="range" min="3" max="20" step="0.5" value="3">
+                <div class="graph-button-row">
+                  <button id="resetView" class="btn ghost" type="button">重置视图</button>
+                  <button id="toggleLabels" class="btn ghost" type="button">Scope: Focus</button>
+                </div>
+              </div>
+            </div>
+            <div id="graphStatus" class="graph-status">ready</div>
+            <canvas id="graphCanvas" width="1280" height="780" aria-label="论文关系图"></canvas>
+          </article>
+          <aside id="graphDetail" class="card detail-card"></aside>
+        </div>
+      </section>
+
+      <section id="panel-topics" class="panel">
+        <div class="topics-layout">
+          <article class="card surface-card">
+            <div class="section-head">
+              <span>主题列表</span>
+              <span class="small-note">按 topic 聚合浏览</span>
+            </div>
+            <div id="topicList" class="topic-list"></div>
+          </article>
+          <aside class="stack">
+            <article class="card surface-card">
+              <div class="section-head">
+                <span>主题详情</span>
+                <span id="topicDetailBadge" class="small-note">未选择</span>
+              </div>
+              <div id="topicDetail" class="stack"></div>
+            </article>
+            <article class="card surface-card">
+              <div class="section-head">
+                <span>主题文档</span>
+                <span class="small-note">直接查看</span>
+              </div>
+              <div class="path-list">
+                <button id="topicOpenSelected" class="path-link md-view-link" type="button">查看当前主题地图</button>
+                <button class="path-link md-view-link" type="button" data-md-path="topic-maps/index.md" data-md-title="topic maps">查看主题总索引</button>
+              </div>
+            </article>
+          </aside>
+        </div>
+      </section>
+
+      <section id="panel-ideas" class="panel">
+        <div class="ideas-layout">
+          <article id="ideaSummary" class="card surface-card"></article>
+          <div id="ideaList" class="idea-list"></div>
+        </div>
+      </section>
+
+      <section id="panel-detail" class="panel">
+        <div id="detailPanel" class="detail-layout"></div>
+      </section>
+    </main>
+  </div>
+
+  <script id="app-data" type="application/json">{{DATA_JSON}}</script>
+  <script>
+{{INLINE_JS}}
+  </script>
+</body>
+</html>

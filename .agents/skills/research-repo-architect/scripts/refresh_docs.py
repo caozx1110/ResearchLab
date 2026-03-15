@@ -11,8 +11,11 @@ from _doc_utils import (
     load_summary,
     merge_summary,
     relative_to_root,
+    repo_doc_dir,
     resolve_repo_paths,
     seed_summary,
+    summary_path,
+    summary_seed_path,
 )
 
 
@@ -20,8 +23,9 @@ def write_generated_index(doc_root: Path, repo_names: list[str]) -> Path:
     rows = []
     framework_intersection: set[str] | None = None
     for repo_name in repo_names:
-        summary = load_summary(doc_root / repo_name / "summary.yaml")
-        facts = load_facts(doc_root / repo_name)
+        doc_dir = repo_doc_dir(doc_root, repo_name)
+        summary = load_summary(summary_path(doc_dir))
+        facts = load_facts(doc_dir)
         seeded = seed_summary(facts)
         frameworks = list_from_summary_or_seed(summary, seeded, "frameworks")
         entrypoints = list_from_summary_or_seed(summary, seeded, "entrypoints")
@@ -39,7 +43,7 @@ def write_generated_index(doc_root: Path, repo_names: list[str]) -> Path:
     lines = [
         "# Generated Index",
         "",
-        "This file is machine-generated from `summary.yaml` and `_scan/facts.json`. Review before copying content into `index.md`.",
+        "This file is machine-generated from `agent/summary.yaml` and `agent/facts.json`. Review before copying content into `index.md`.",
         "",
         "## Repository Table",
         "",
@@ -63,11 +67,11 @@ def write_generated_index(doc_root: Path, repo_names: list[str]) -> Path:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Refresh seeded docs from _scan facts without overwriting hand-written narrative notes.")
+    parser = argparse.ArgumentParser(description="Refresh seeded docs from agent facts without overwriting hand-written narrative notes.")
     parser.add_argument("repo_paths", nargs="+", help="One or more local repository paths")
-    parser.add_argument("--doc-root", type=Path, default=None, help="Directory that contains doc/<repo>/")
+    parser.add_argument("--doc-root", type=Path, default=None, help="Directory that contains doc/repos/<repo>/")
     parser.add_argument("--sync-derived", action="store_true", help="Overwrite derived summary fields such as repo_type, frameworks, entrypoints, key_modules, and external_dependencies")
-    parser.add_argument("--write-generated-index", action="store_true", help="Write doc/index.generated.md from the refreshed summaries")
+    parser.add_argument("--write-generated-index", action="store_true", help="Write doc/repos/index.generated.md from the refreshed summaries")
     return parser.parse_args()
 
 
@@ -77,21 +81,23 @@ def main() -> int:
     doc_root = args.doc_root.resolve() if args.doc_root else default_doc_root(repo_paths)
 
     for repo_path in repo_paths:
-        doc_dir = doc_root / repo_path.name
+        doc_dir = repo_doc_dir(doc_root, repo_path.name)
         facts = load_facts(doc_dir)
         seeded = seed_summary(facts)
-        scan_seed_path = doc_dir / "_scan" / "summary-seed.yaml"
-        scan_seed_path.write_text(dump_yaml_text(seeded), encoding="utf-8")
+        agent_seed_path = summary_seed_path(doc_dir)
+        agent_seed_path.parent.mkdir(parents=True, exist_ok=True)
+        agent_seed_path.write_text(dump_yaml_text(seeded), encoding="utf-8")
 
-        summary_path = doc_dir / "summary.yaml"
-        existing = load_summary(summary_path)
+        agent_summary_path = summary_path(doc_dir)
+        existing = load_summary(agent_summary_path)
         merged, changed = merge_summary(existing, seeded, sync_derived=args.sync_derived)
-        if changed or not summary_path.exists():
-            summary_path.write_text(dump_yaml_text(merged), encoding="utf-8")
-            print(f"[ok] refreshed {relative_to_root(summary_path, doc_root)}")
+        if changed or not agent_summary_path.exists():
+            agent_summary_path.parent.mkdir(parents=True, exist_ok=True)
+            agent_summary_path.write_text(dump_yaml_text(merged), encoding="utf-8")
+            print(f"[ok] refreshed {relative_to_root(agent_summary_path, doc_root)}")
         else:
             print(f"[ok] no summary changes for {repo_path.name}")
-        print(f"[ok] wrote {relative_to_root(scan_seed_path, doc_root)}")
+        print(f"[ok] wrote {relative_to_root(agent_seed_path, doc_root)}")
 
     if args.write_generated_index and len(repo_paths) > 1:
         index_path = write_generated_index(doc_root, [path.name for path in repo_paths])

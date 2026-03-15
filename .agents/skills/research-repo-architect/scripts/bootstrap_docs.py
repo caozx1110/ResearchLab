@@ -7,10 +7,13 @@ from pathlib import Path
 from _doc_utils import (
     default_doc_root,
     dump_yaml_text,
+    human_dir,
     load_facts,
     relative_to_root,
+    repo_doc_dir,
     resolve_repo_paths,
     seed_summary,
+    summary_path,
 )
 
 
@@ -30,10 +33,10 @@ def render_template(path: Path, repo_name: str) -> str:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Create missing architecture-doc files from scan facts and bundled templates.")
     parser.add_argument("repo_paths", nargs="+", help="One or more local repository paths")
-    parser.add_argument("--doc-root", type=Path, default=None, help="Directory that contains doc/<repo>/")
+    parser.add_argument("--doc-root", type=Path, default=None, help="Directory that contains doc/repos/<repo>/")
     parser.add_argument("--templates-root", type=Path, default=Path(__file__).resolve().parent.parent / "assets" / "templates", help="Template directory")
-    parser.add_argument("--refresh-summary", action="store_true", help="Overwrite summary.yaml from scan facts")
-    parser.add_argument("--with-index", action="store_true", help="Create doc/index.md from the index template if it is missing and several repos are passed")
+    parser.add_argument("--refresh-summary", action="store_true", help="Overwrite agent/summary.yaml from scan facts")
+    parser.add_argument("--with-index", action="store_true", help="Create doc/repos/index.md from the index template if it is missing and several repos are passed")
     return parser.parse_args()
 
 
@@ -63,14 +66,15 @@ def main() -> int:
     templates_root = args.templates_root.resolve()
 
     for repo_path in repo_paths:
-        doc_dir = doc_root / repo_path.name
+        doc_dir = repo_doc_dir(doc_root, repo_path.name)
         facts = load_facts(doc_dir)
         created = []
-        summary_path = doc_dir / "summary.yaml"
-        if maybe_write(summary_path, dump_yaml_text(seed_summary(facts)), overwrite=args.refresh_summary):
-            created.append(relative_to_root(summary_path, doc_root))
+        repo_human_dir = human_dir(doc_dir)
+        agent_summary_path = summary_path(doc_dir)
+        if maybe_write(agent_summary_path, dump_yaml_text(seed_summary(facts)), overwrite=args.refresh_summary):
+            created.append(relative_to_root(agent_summary_path, doc_root))
         for template_name, output_name in TEMPLATE_MAP.items():
-            output_path = doc_dir / output_name
+            output_path = repo_human_dir / output_name
             content = render_template(templates_root / template_name, repo_path.name)
             if maybe_write(output_path, content, overwrite=False):
                 created.append(relative_to_root(output_path, doc_root))

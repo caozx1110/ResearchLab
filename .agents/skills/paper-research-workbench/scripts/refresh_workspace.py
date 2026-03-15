@@ -8,10 +8,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+from _paper_utils import find_project_root
+
 
 def project_root_from_script() -> Path:
-    # <project>/skills/paper-research-workbench/scripts/refresh_workspace.py
-    return Path(__file__).resolve().parents[3]
+    return find_project_root(Path(__file__).resolve())
 
 
 def run_step(command: list[str], project_root: Path) -> None:
@@ -42,7 +43,8 @@ def main() -> None:
     args = parser.parse_args()
 
     project_root = project_root_from_script()
-    script_root = project_root / "skills" / "paper-research-workbench" / "scripts"
+    script_root = Path(__file__).resolve().parent
+    template_root = script_root.parent / "assets" / "templates"
     python_bin = sys.executable
 
     parse_cmd = [
@@ -90,7 +92,7 @@ def main() -> None:
         "--papers-root",
         "doc/papers/papers",
         "--template-root",
-        "skills/paper-research-workbench/assets/templates",
+        str(template_root),
         "--user-root",
         "doc/papers/user",
     ]
@@ -111,7 +113,7 @@ def main() -> None:
             "--output-root",
             "doc/papers/user/topic-maps",
             "--template",
-            "skills/paper-research-workbench/assets/templates/topic-map-template.md",
+            str(template_root / "topic-map-template.md"),
         ],
         project_root,
     )

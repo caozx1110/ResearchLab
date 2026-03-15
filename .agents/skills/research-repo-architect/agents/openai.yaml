@@ -1,4 +1,4 @@
 interface:
   display_name: "Research Repo Architect"
   short_description: "Analyze research repos and write architecture docs"
-  default_prompt: "Use $research-repo-architect to analyze one or more local research repositories and write structured architecture docs under doc/."
+  default_prompt: "Use $research-repo-architect to analyze one or more local research repositories and write structured architecture docs under doc/repos/, splitting each repository into human/ and agent/ subfolders."

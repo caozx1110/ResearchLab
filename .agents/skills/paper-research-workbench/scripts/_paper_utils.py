@@ -82,6 +82,40 @@ def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
+def find_project_root(start: Path) -> Path:
+    resolved = start.resolve()
+    for candidate in [resolved] + list(resolved.parents):
+        if (candidate / "raw").exists() and (candidate / "doc").exists():
+            return candidate
+    raise FileNotFoundError(f"Could not locate project root from: {start}")
+
+
+def find_skill_root(start: Path, skill_name: str = "paper-research-workbench") -> Path:
+    resolved = start.resolve()
+    for candidate in [resolved] + list(resolved.parents):
+        if candidate.name == skill_name and (candidate / "SKILL.md").exists():
+            return candidate
+    raise FileNotFoundError(f"Could not locate skill root from: {start}")
+
+
+def resolve_from_project_or_skill(
+    candidate: str | Path,
+    *,
+    project_root: Path,
+    skill_root: Path,
+) -> Path:
+    path = Path(candidate)
+    if path.is_absolute():
+        return path
+    project_path = (project_root / path).resolve()
+    if project_path.exists():
+        return project_path
+    skill_path = (skill_root / path).resolve()
+    if skill_path.exists():
+        return skill_path
+    return project_path
+
+
 def clean_text(text: str) -> str:
     text = text.replace("\u00a0", " ")
     text = text.replace("\u200b", "")

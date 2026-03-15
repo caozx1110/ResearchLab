@@ -101,13 +101,13 @@ Expected corpus files:
 Run from project root:
 
 ```bash
-python3 skills/paper-research-workbench/scripts/refresh_workspace.py --input raw
+python3 .agents/skills/paper-research-workbench/scripts/refresh_workspace.py --input raw
 ```
 
 Single paper:
 
 ```bash
-python3 skills/paper-research-workbench/scripts/refresh_workspace.py --input raw/2501.09747v1.pdf
+python3 .agents/skills/paper-research-workbench/scripts/refresh_workspace.py --input raw/2501.09747v1.pdf
 ```
 
 ## Resource Map
@@ -121,6 +121,7 @@ python3 skills/paper-research-workbench/scripts/refresh_workspace.py --input raw
 - `scripts/refresh_topic_maps.py`: generate topic map markdown pages.
 - `scripts/build_user_hub.py`: build the local HTML user entrypoint and graph view.
 - `scripts/refresh_workspace.py`: orchestrate the full refresh workflow.
+- `assets/ui/*`: fixed user-facing UI template, stylesheet, and behavior script.
 - `references/workspace-layout.md`: output directory conventions.
 - `references/metadata-schema.md`: metadata field contract.
 - `references/ai-kb-schema.md`: AI-readable knowledge layer contract.

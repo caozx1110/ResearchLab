@@ -5,7 +5,7 @@ Use this checklist to scan a repository before writing any architecture document
 ## 0. Fact Layer
 
 - Run `scripts/scan_repo.py` first when the repository is local.
-- Inspect `doc/<repo-name>/_scan/facts.yaml`, `report.md`, and `tree.txt`.
+- Inspect `doc/repos/<repo-name>/agent/facts.yaml`, `report.md`, and `tree.txt`.
 - Use those files to prioritize manual reading, not to replace it.
 - If the repository is a monorepo, identify the top-level subsystems before tracing fine-grained call paths.
 

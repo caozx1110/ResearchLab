@@ -7,12 +7,20 @@ import argparse
 from pathlib import Path
 from typing import Any
 
-from _paper_utils import ensure_dir, load_yaml, slugify, utc_now_iso, write_text_if_changed
+from _paper_utils import (
+    ensure_dir,
+    find_project_root,
+    find_skill_root,
+    load_yaml,
+    resolve_from_project_or_skill,
+    slugify,
+    utc_now_iso,
+    write_text_if_changed,
+)
 
 
 def project_root_from_script() -> Path:
-    # <project>/skills/paper-research-workbench/scripts/refresh_topic_maps.py
-    return Path(__file__).resolve().parents[3]
+    return find_project_root(Path(__file__).resolve())
 
 
 def render(template: str, context: dict[str, str]) -> str:
@@ -120,16 +128,21 @@ def main() -> None:
     )
     parser.add_argument(
         "--template",
-        default="skills/paper-research-workbench/assets/templates/topic-map-template.md",
+        default="assets/templates/topic-map-template.md",
         help="Topic map template file",
     )
     args = parser.parse_args()
 
     project_root = project_root_from_script()
+    skill_root = find_skill_root(Path(__file__).resolve())
     topics_index = (project_root / args.topics_index).resolve()
     papers_root = (project_root / args.papers_root).resolve()
     output_root = (project_root / args.output_root).resolve()
-    template_path = (project_root / args.template).resolve()
+    template_path = resolve_from_project_or_skill(
+        args.template,
+        project_root=project_root,
+        skill_root=skill_root,
+    ).resolve()
     ensure_dir(output_root)
 
     topics_payload = load_yaml(topics_index)

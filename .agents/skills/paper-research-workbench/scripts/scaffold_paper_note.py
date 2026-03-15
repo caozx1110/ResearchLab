@@ -9,7 +9,16 @@ import re
 from pathlib import Path
 from typing import Any
 
-from _paper_utils import compact_text, ensure_dir, load_yaml, pick_sentence, write_text_if_changed
+from _paper_utils import (
+    compact_text,
+    ensure_dir,
+    find_project_root,
+    find_skill_root,
+    load_yaml,
+    pick_sentence,
+    resolve_from_project_or_skill,
+    write_text_if_changed,
+)
 
 
 OLD_TEMPLATE_MARKERS = {
@@ -34,8 +43,7 @@ OLD_TEMPLATE_MARKERS = {
 
 
 def project_root_from_script() -> Path:
-    # <project>/skills/paper-research-workbench/scripts/scaffold_paper_note.py
-    return Path(__file__).resolve().parents[3]
+    return find_project_root(Path(__file__).resolve())
 
 
 def render(template: str, context: dict[str, str]) -> str:
@@ -43,6 +51,15 @@ def render(template: str, context: dict[str, str]) -> str:
     for key, value in context.items():
         output = output.replace(f"{{{{{key}}}}}", value)
     return output
+
+
+def strip_frontmatter(text: str) -> str:
+    if not text.startswith("---\n"):
+        return text
+    parts = text.split("\n---\n", 1)
+    if len(parts) == 2:
+        return parts[1]
+    return text
 
 
 def yaml_inline_list(values: list[str]) -> str:
@@ -122,7 +139,30 @@ def looks_like_placeholder(path: Path, kind: str, force: bool) -> bool:
         return True
     if "{{" in text:
         return True
-    return any(marker in text for marker in OLD_TEMPLATE_MARKERS[kind])
+    if any(marker in text for marker in OLD_TEMPLATE_MARKERS[kind]):
+        return True
+    if not re.search(r'(?m)^status:\s*["\']auto-generated["\']\s*$', text):
+        return False
+    body = strip_frontmatter(text)
+    compact = body.strip()
+    if len(compact) < 260:
+        return True
+    if kind == "note":
+        if re.search(r"(?m)^- (研究问题|核心方法|主要结论|自动判断的局限)：\s*$", body):
+            return True
+        if body.count("- ") < 10 or body.count("## ") < 3:
+            return True
+    elif kind == "ideas":
+        if re.search(r"(?m)^- (名称|方向|可执行动作|预期收益|主要风险)：\s*$", body):
+            return True
+        if body.count("## Idea") >= 3 and body.count("- ") < 10:
+            return True
+    elif kind == "feasibility":
+        if re.search(r"(?m)^- (总体建议|判断依据)：\s*$", body):
+            return True
+        if body.count("- ") < 8:
+            return True
+    return False
 
 
 def first_author(authors: list[str]) -> str:
@@ -570,7 +610,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--template-root",
-        default="skills/paper-research-workbench/assets/templates",
+        default="assets/templates",
         help="Template root path",
     )
     parser.add_argument(
@@ -596,8 +636,13 @@ def main() -> None:
     args = parser.parse_args()
 
     project_root = project_root_from_script()
+    skill_root = find_skill_root(Path(__file__).resolve())
     papers_root = (project_root / args.papers_root).resolve()
-    template_root = (project_root / args.template_root).resolve()
+    template_root = resolve_from_project_or_skill(
+        args.template_root,
+        project_root=project_root,
+        skill_root=skill_root,
+    ).resolve()
     relationships_path = (project_root / args.relationships_path).resolve()
     user_root = (project_root / args.user_root).resolve()
 

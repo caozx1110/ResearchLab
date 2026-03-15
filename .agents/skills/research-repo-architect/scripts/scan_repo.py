@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from _doc_utils import default_doc_root, dump_yaml_text, resolve_repo_paths
+from _doc_utils import agent_dir, default_doc_root, dump_yaml_text, repo_doc_dir, resolve_repo_paths
 
 
 IGNORE_DIR_NAMES = {
@@ -567,7 +567,7 @@ def build_facts(repo_root: Path, files: list[Path], entrypoint_limit: int) -> di
     top_files = [relative_path(path, repo_root) for path in top_level_files(repo_root)[:20]]
 
     notes = [
-        "Use _scan/report.md and _scan/tree.txt as a fact layer before writing narrative docs.",
+        "Use agent/report.md and agent/tree.txt as a fact layer before writing narrative docs.",
         "Treat framework and repo-type fields as heuristics; verify critical claims against source files.",
     ]
     if subsystems:
@@ -598,19 +598,19 @@ def build_facts(repo_root: Path, files: list[Path], entrypoint_limit: int) -> di
         "scan_notes": notes,
     }
 def write_outputs(repo_root: Path, doc_root: Path, facts: dict[str, Any]) -> None:
-    doc_dir = doc_root / repo_root.name
-    scan_dir = doc_dir / "_scan"
-    scan_dir.mkdir(parents=True, exist_ok=True)
-    (scan_dir / "facts.json").write_text(json.dumps(facts, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    (scan_dir / "facts.yaml").write_text(dump_yaml_text(facts), encoding="utf-8")
-    (scan_dir / "report.md").write_text(build_report(facts), encoding="utf-8")
-    (scan_dir / "tree.txt").write_text(build_tree(repo_root), encoding="utf-8")
+    doc_dir = repo_doc_dir(doc_root, repo_root.name)
+    repo_agent_dir = agent_dir(doc_dir)
+    repo_agent_dir.mkdir(parents=True, exist_ok=True)
+    (repo_agent_dir / "facts.json").write_text(json.dumps(facts, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    (repo_agent_dir / "facts.yaml").write_text(dump_yaml_text(facts), encoding="utf-8")
+    (repo_agent_dir / "report.md").write_text(build_report(facts), encoding="utf-8")
+    (repo_agent_dir / "tree.txt").write_text(build_tree(repo_root), encoding="utf-8")
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Scan research repositories and write fact-layer outputs under doc/<repo>/_scan/.")
+    parser = argparse.ArgumentParser(description="Scan research repositories and write fact-layer outputs under doc/repos/<repo>/agent/.")
     parser.add_argument("repo_paths", nargs="+", help="One or more local repository paths")
-    parser.add_argument("--doc-root", type=Path, default=None, help="Directory that contains doc/<repo>/")
+    parser.add_argument("--doc-root", type=Path, default=None, help="Directory that contains doc/repos/<repo>/")
     parser.add_argument("--max-depth", type=int, default=6, help="Maximum directory depth to walk during scanning")
     parser.add_argument("--entrypoint-limit", type=int, default=24, help="Maximum number of entrypoints to record")
     return parser.parse_args()
@@ -626,7 +626,7 @@ def main() -> int:
         files = iter_files(repo_path, max_depth=args.max_depth)
         facts = build_facts(repo_path, files, entrypoint_limit=args.entrypoint_limit)
         write_outputs(repo_path, doc_root, facts)
-        print(f"[ok] scanned {repo_path.name} -> {(doc_root / repo_path.name / '_scan').as_posix()}")
+        print(f"[ok] scanned {repo_path.name} -> {(doc_root / repo_path.name / 'agent').as_posix()}")
     return 0
 
 

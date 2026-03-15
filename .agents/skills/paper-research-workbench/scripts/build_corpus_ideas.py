@@ -11,6 +11,7 @@ from typing import Any
 from _paper_utils import (
     compact_text,
     ensure_dir,
+    find_project_root,
     load_yaml,
     utc_now_iso,
     write_text_if_changed,
@@ -19,8 +20,7 @@ from _paper_utils import (
 
 
 def project_root_from_script() -> Path:
-    # <project>/skills/paper-research-workbench/scripts/build_corpus_ideas.py
-    return Path(__file__).resolve().parents[3]
+    return find_project_root(Path(__file__).resolve())
 
 
 def load_metadata_records(papers_root: Path) -> list[dict[str, Any]]:

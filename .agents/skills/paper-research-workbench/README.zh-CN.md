@@ -29,22 +29,54 @@ AI 阅读区里是结构化知识库，给其他 skill 读取。
 处理整个 `raw/`：
 
 ```bash
-python3 skills/paper-research-workbench/scripts/refresh_workspace.py --input raw
+python3 .agents/skills/paper-research-workbench/scripts/refresh_workspace.py --input raw
 ```
 
 只处理一篇论文：
 
 ```bash
-python3 skills/paper-research-workbench/scripts/refresh_workspace.py --input raw/你的论文.pdf
+python3 .agents/skills/paper-research-workbench/scripts/refresh_workspace.py --input raw/你的论文.pdf
 ```
 
 强制重建已有论文的解析结果和用户区内容：
 
 ```bash
-python3 skills/paper-research-workbench/scripts/refresh_workspace.py --input raw --force
+python3 .agents/skills/paper-research-workbench/scripts/refresh_workspace.py --input raw --force
 ```
 
 ## 结果怎么看
+
+推荐直接双击项目根目录下的启动器：
+
+- `打开论文知识工作台.command`
+
+它会自动：
+
+- 在后台启动本地服务
+- 复用已启动的同一工作台服务，避免重复起多个实例
+- 自动打开浏览器到工作台首页
+- 当页面关闭后，若约 90 秒内没有新的请求，服务会自动退出
+
+如果你更习惯命令行，也可以手动运行：
+
+```bash
+python3 .agents/skills/paper-research-workbench/scripts/open_user_hub.py
+```
+
+如果你想改空闲退出时间，也可以传参：
+
+```bash
+python3 .agents/skills/paper-research-workbench/scripts/open_user_hub.py --idle-timeout 180
+```
+
+服务启动后，浏览器入口是：
+
+- `http://127.0.0.1:8765/doc/papers/user/index.html`
+- `http://127.0.0.1:8765/doc/papers/user/graph.html`
+
+底层服务脚本保留在：
+
+- `.agents/skills/paper-research-workbench/scripts/serve_user_hub.py`
 
 用户阅读区主入口：
 
@@ -72,11 +104,17 @@ AI 阅读区：
 - `doc/papers/ai/frontier-ideas.yaml`
 - `doc/papers/ai/papers/<paper-id>/node.yaml`
 
+UI 资源固定在 skill 资产目录：
+
+- `.agents/skills/paper-research-workbench/assets/ui/hub-template.html`
+- `.agents/skills/paper-research-workbench/assets/ui/hub.css`
+- `.agents/skills/paper-research-workbench/assets/ui/hub.js`
+
 ## 是否需要 Obsidian
 
-不需要。
+不必须，但推荐作为外置编辑器备用。
 
-- 用户阅读区已经提供了本地 HTML 入口，可以直接打开。
+- 用户阅读区在本地服务模式下支持内嵌 Markdown 实时编辑（note/ideas/feasibility）。
 - 如果你习惯用 Obsidian，也可以继续打开 `doc/papers/user/papers/` 里的 Markdown 文件进行编辑。
 
 ## 示例 Prompt

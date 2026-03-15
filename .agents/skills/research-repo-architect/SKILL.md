@@ -1,6 +1,6 @@
 ---
 name: research-repo-architect
-description: Analyze one or more local research software repositories and produce structured architecture notes under doc/repo-name/ for reading, onboarding, agent context-building, and follow-on development. Use when Codex needs to understand how a machine learning, robotics, VLA, or other research codebase is organized; identify entrypoints, config systems, data, model, training, evaluation, or inference pipelines; compare related repositories; surface extension points, risks, and improvement ideas; or refresh repository documentation before making changes.
+description: Analyze one or more local research software repositories and produce structured architecture notes under doc/repos/repo-name/ for reading, onboarding, agent context-building, and follow-on development. Use when Codex needs to understand how a machine learning, robotics, VLA, or other research codebase is organized; identify entrypoints, config systems, data, model, training, evaluation, or inference pipelines; compare related repositories; surface extension points, risks, and improvement ideas; or refresh repository documentation before making changes.
 ---
 
 # Research Repo Architect
@@ -11,16 +11,19 @@ Produce evidence-backed repository documentation for humans and agents. Focus on
 
 ## Output Contract
 
-- Write outputs under `doc/<repo-name>/`.
-- Keep generated scan artifacts under `doc/<repo-name>/_scan/`.
-- When analyzing more than one repository, also write `doc/index.md`.
+- Write outputs under `doc/repos/<repo-name>/`.
+- Split each repository into:
+  - `human/` for reader-facing narrative Markdown
+  - `agent/` for machine-friendly summaries and generated fact artifacts
+- Keep generated scan artifacts under `doc/repos/<repo-name>/agent/`.
+- When analyzing more than one repository, also write `doc/repos/index.md`.
 - Create these files for each repository unless the repository is too small to justify one:
-  - `summary.yaml`
-  - `overview.md`
-  - `architecture.md`
-  - `workflows.md`
-  - `research-notes.md`
-  - `todo.md`
+  - `agent/summary.yaml`
+  - `human/overview.md`
+  - `human/architecture.md`
+  - `human/workflows.md`
+  - `human/research-notes.md`
+  - `human/todo.md`
 - Reuse and update existing documentation instead of duplicating it.
 - Keep each document concise and navigable. Prefer key modules and mainline workflows over exhaustive listings.
 
@@ -38,14 +41,14 @@ Produce evidence-backed repository documentation for humans and agents. Focus on
 
 1. Scope the repositories.
    - Confirm the repository roots.
-   - Check whether `doc/<repo-name>/` already exists.
+   - Check whether `doc/repos/<repo-name>/` already exists.
    - Decide whether the task covers one repository, several repositories, or a comparative family.
 2. Run a focused scan before writing.
-   - Run `scripts/scan_repo.py` first to seed `doc/<repo-name>/_scan/` with facts, a shallow tree, and a scan report.
+   - Run `scripts/scan_repo.py` first to seed `doc/repos/<repo-name>/agent/` with facts, a shallow tree, and a scan report.
    - Read `README*`, dependency manifests, config roots, and top-level scripts first.
    - Identify the main entrypoints for training, evaluation, inference, data preparation, deployment, or simulation.
    - Use `references/analysis-checklist.md` as the scanning checklist.
-   - Treat `facts.yaml` and `report.md` as a fact layer, then manually verify the mainline workflows in source files.
+   - Treat `agent/facts.yaml` and `agent/report.md` as a fact layer, then manually verify the mainline workflows in source files.
 3. Build the architecture map.
    - Identify the main modules, ownership boundaries, and high-value call paths.
    - Trace how configuration enters the system and how artifacts flow through the pipeline.
@@ -53,11 +56,11 @@ Produce evidence-backed repository documentation for humans and agents. Focus on
    - If the repository is a mixed-language monorepo, describe its major subsystems separately before drilling into shared utilities.
 4. Write the documentation set.
    - Use `references/output-schema.md` to decide which sections to fill.
-   - If the docs are missing, use `scripts/bootstrap_docs.py` to create `summary.yaml` and the Markdown skeletons without overwriting existing files.
+   - If the docs are missing, use `scripts/bootstrap_docs.py` to create `agent/summary.yaml` and the `human/` Markdown skeletons without overwriting existing files.
    - Start from the templates in `assets/templates/` when creating new files.
    - Keep facts, inferences, and suggestions clearly separated.
 5. Review for actionability.
-   - Run `scripts/refresh_docs.py` after rescanning to write a fresh `summary-seed.yaml`, fill missing summary fields, and optionally generate `index.generated.md`.
+   - Run `scripts/refresh_docs.py` after rescanning to write a fresh `agent/summary-seed.yaml`, fill missing summary fields, and optionally generate `index.generated.md`.
    - Do not let automation overwrite hand-written narrative docs unless the user explicitly asks for that behavior.
    - Verify that another agent could answer "how do I run this, where do I modify it, and what should I improve next?" from the generated files.
    - Record unresolved ambiguity under `Open questions`.
@@ -89,9 +92,9 @@ Produce evidence-backed repository documentation for humans and agents. Focus on
 
 ## Multi-Repo Guidance
 
-- Keep each repository self-contained under its own `doc/<repo-name>/` directory.
-- Write `doc/index.md` when the user asks for cross-repository understanding or when several repositories share a research stack.
-- In `doc/index.md`, summarize:
+- Keep each repository self-contained under its own `doc/repos/<repo-name>/` directory.
+- Write `doc/repos/index.md` when the user asks for cross-repository understanding or when several repositories share a research stack.
+- In `doc/repos/index.md`, summarize:
   - each repository's purpose
   - key similarities and differences
   - reusable modules or patterns
@@ -99,9 +102,9 @@ Produce evidence-backed repository documentation for humans and agents. Focus on
 
 ## Resource Map
 
-- Run `scripts/scan_repo.py` to generate the `_scan/` fact layer for one or more repositories.
-- Run `scripts/bootstrap_docs.py` to seed missing docs from `_scan/facts.json` and the bundled templates.
-- Run `scripts/refresh_docs.py` to sync fresh scan facts into `summary.yaml` conservatively and optionally emit `index.generated.md`.
+- Run `scripts/scan_repo.py` to generate the `agent/` fact layer for one or more repositories.
+- Run `scripts/bootstrap_docs.py` to seed missing docs from `agent/facts.json` and the bundled templates.
+- Run `scripts/refresh_docs.py` to sync fresh scan facts into `agent/summary.yaml` conservatively and optionally emit `doc/repos/index.generated.md`.
 - Read `references/analysis-checklist.md` before scanning a new repository.
 - Read `references/output-schema.md` before creating or refreshing the documentation files.
 - Copy and adapt the templates in `assets/templates/` when creating new files from scratch.

@@ -1,22 +1,30 @@
 # Output Schema
 
-Use this schema when creating or refreshing `doc/<repo-name>/`.
+Use this schema when creating or refreshing `doc/repos/<repo-name>/`.
 
-## Optional `_scan/`
+## Per-Repo Layout
 
-When the repository is local and scripts are available, populate `doc/<repo-name>/_scan/` with:
+Each repository should contain:
 
-- `facts.json`
-- `facts.yaml`
-- `report.md`
-- `tree.txt`
-- `summary-seed.yaml` after refresh
+- `human/`
+  - `overview.md`
+  - `architecture.md`
+  - `workflows.md`
+  - `research-notes.md`
+  - `todo.md`
+- `agent/`
+  - `summary.yaml`
+  - `facts.json`
+  - `facts.yaml`
+  - `report.md`
+  - `tree.txt`
+  - `summary-seed.yaml` after refresh
 
-Treat these files as machine-generated evidence and scaffolding, not as final narrative documentation.
+Treat `agent/` as machine-oriented evidence and scaffolding, not as final narrative documentation. Treat `human/` as the reader-facing knowledge base.
 
 ## `summary.yaml`
 
-Keep this file compact and machine-readable. Prefer empty strings or empty lists over prose paragraphs.
+Keep `agent/summary.yaml` compact and machine-readable. Prefer empty strings or empty lists over prose paragraphs.
 
 Recommended keys:
 
@@ -40,6 +48,8 @@ open_questions: []
 
 ## `overview.md`
 
+Write this file to `human/overview.md`.
+
 Required sections:
 
 - Repository purpose
@@ -49,6 +59,8 @@ Required sections:
 - Quick orientation for readers and agents
 
 ## `architecture.md`
+
+Write this file to `human/architecture.md`.
 
 Required sections:
 
@@ -66,6 +78,8 @@ Optional sections:
 - Notable design tradeoffs
 
 ## `workflows.md`
+
+Write this file to `human/workflows.md`.
 
 Document only the workflows that are actually present.
 
@@ -86,6 +100,8 @@ Each workflow should answer:
 
 ## `research-notes.md`
 
+Write this file to `human/research-notes.md`.
+
 Required sections:
 
 - Observed strengths
@@ -102,6 +118,8 @@ For each improvement idea, include:
 
 ## `todo.md`
 
+Write this file to `human/todo.md`.
+
 Group tasks by priority.
 
 Suggested fields per task:
@@ -115,7 +133,7 @@ Suggested fields per task:
 
 ## `index.md`
 
-Create this file only for multi-repository work.
+Create this file only for multi-repository work, at `doc/repos/index.md`.
 
 Recommended sections:
 
@@ -125,4 +143,4 @@ Recommended sections:
 - Reuse opportunities
 - Comparative research directions
 
-If you want a machine-generated comparison before editing the human-facing index, use `scripts/refresh_docs.py --write-generated-index` to emit `doc/index.generated.md`.
+If you want a machine-generated comparison before editing the human-facing index, use `scripts/refresh_docs.py --write-generated-index` to emit `doc/repos/index.generated.md`.

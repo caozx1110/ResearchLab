@@ -6,6 +6,10 @@ from pathlib import Path
 from typing import Any
 
 
+DOC_ROOT_PARTS = ("doc", "repos")
+HUMAN_DIRNAME = "human"
+AGENT_DIRNAME = "agent"
+
 SUMMARY_LIST_KEYS = {
     "frameworks",
     "entrypoints",
@@ -103,7 +107,38 @@ def resolve_repo_paths(paths: list[str | Path]) -> list[Path]:
 
 def default_doc_root(repo_paths: list[Path]) -> Path:
     common_parent = Path(os.path.commonpath([str(path.parent) for path in repo_paths]))
-    return common_parent / "doc"
+    for candidate in (common_parent, *common_parent.parents):
+        doc_root = candidate.joinpath(*DOC_ROOT_PARTS)
+        if doc_root.exists():
+            return doc_root
+    for candidate in (common_parent, *common_parent.parents):
+        if (candidate / ".git").exists():
+            return candidate.joinpath(*DOC_ROOT_PARTS)
+    return common_parent.joinpath(*DOC_ROOT_PARTS)
+
+
+def repo_doc_dir(doc_root: Path, repo_name: str) -> Path:
+    return doc_root / repo_name
+
+
+def human_dir(doc_dir: Path) -> Path:
+    return doc_dir / HUMAN_DIRNAME
+
+
+def agent_dir(doc_dir: Path) -> Path:
+    return doc_dir / AGENT_DIRNAME
+
+
+def facts_path(doc_dir: Path) -> Path:
+    return agent_dir(doc_dir) / "facts.json"
+
+
+def summary_path(doc_dir: Path) -> Path:
+    return agent_dir(doc_dir) / "summary.yaml"
+
+
+def summary_seed_path(doc_dir: Path) -> Path:
+    return agent_dir(doc_dir) / "summary-seed.yaml"
 
 
 def relative_to_root(path: Path, doc_root: Path) -> str:
@@ -111,10 +146,10 @@ def relative_to_root(path: Path, doc_root: Path) -> str:
 
 
 def load_facts(doc_dir: Path) -> dict[str, Any]:
-    facts_path = doc_dir / "_scan" / "facts.json"
-    if not facts_path.exists():
-        raise FileNotFoundError(f"Missing scan facts: {facts_path}")
-    return json.loads(facts_path.read_text(encoding="utf-8"))
+    path = facts_path(doc_dir)
+    if not path.exists():
+        raise FileNotFoundError(f"Missing scan facts: {path}")
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def seed_summary(facts: dict[str, Any]) -> dict[str, Any]:
