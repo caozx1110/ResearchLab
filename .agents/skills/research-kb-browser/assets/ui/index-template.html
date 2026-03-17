@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{PAGE_TITLE}}</title>
+    <link rel="stylesheet" href="assets/kb.css" />
+  </head>
+  <body>
+    <div class="orb orb-a"></div>
+    <div class="orb orb-b"></div>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="top-row">
+          <nav id="tabNav" class="tab-nav-inline" aria-label="分类导航"></nav>
+          <div class="status-strip">
+            <span id="liveStatus" class="status-pill">loading</span>
+            <span id="updatedAt" class="status-note">等待首次快照...</span>
+          </div>
+        </div>
+        <div class="search-row">
+          <label class="search-box">
+            <span>搜索与筛选</span>
+            <input id="globalSearch" type="search" placeholder="输入关键词：论文标题、作者、tag、program、repo..." autocomplete="off" />
+          </label>
+          <div id="filterBar" class="filter-bar"></div>
+        </div>
+      </header>
+
+      <main class="workspace-main">
+        <aside class="list-panel">
+          <div class="panel-head">
+            <h2 id="listTitle">总览</h2>
+            <p id="listMeta" class="panel-subtle">0 条</p>
+          </div>
+          <div id="listContainer" class="list-container">
+            <div class="empty-state">正在加载快照...</div>
+          </div>
+        </aside>
+
+        <section class="detail-panel">
+          <div class="panel-head">
+            <h2 id="detailTitle">请先选择条目</h2>
+            <p id="detailMeta" class="panel-subtle">右侧展示结构化详情、摘要和文件入口</p>
+          </div>
+          <div id="detailBody" class="detail-body">
+            <div class="empty-state">
+              从左侧列表选择任意条目后，这里会展示更易读的 YAML / Markdown 信息。
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script>
+      window.RESEARCH_KB_BROWSER = {
+        snapshotUrl: "./snapshot.json",
+        versionUrl: "/api/version",
+        pollMs: {{VERSION_POLL_MS}}
+      };
+    </script>
+    <script src="assets/kb.js"></script>
+  </body>
+</html>

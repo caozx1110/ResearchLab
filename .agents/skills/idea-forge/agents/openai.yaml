@@ -1,0 +1,5 @@
+interface:
+  display_name: "Idea Forge"
+  short_description: "Generate scoped candidate ideas for a research program"
+  default_prompt: "Use $idea-forge to turn a program charter and literature evidence into several proposal.yaml idea candidates."
+

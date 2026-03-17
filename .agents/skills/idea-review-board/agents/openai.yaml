@@ -1,0 +1,5 @@
+interface:
+  display_name: "Idea Review Board"
+  short_description: "Score, challenge, and select research ideas"
+  default_prompt: "Use $idea-review-board to critique proposal.yaml files, detect evidence gaps, add kill-tests, and select the strongest idea to move forward."
+

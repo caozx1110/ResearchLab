@@ -1,0 +1,5 @@
+interface:
+  display_name: "Literature Corpus Builder"
+  short_description: "Ingest PDFs and URLs into the shared literature library"
+  default_prompt: "Use $literature-corpus-builder to import PDFs from raw/, canonicalize literature URLs, detect duplicates, and update doc/research/library/literature/."
+

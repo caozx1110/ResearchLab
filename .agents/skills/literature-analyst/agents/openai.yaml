@@ -1,0 +1,5 @@
+interface:
+  display_name: "Literature Analyst"
+  short_description: "Turn the literature library into program-level evidence maps"
+  default_prompt: "Use $literature-analyst to summarize the literature most relevant to a program, cluster themes, surface evidence gaps, and prepare grounded inputs for idea work."
+

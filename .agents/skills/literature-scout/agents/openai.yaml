@@ -1,0 +1,5 @@
+interface:
+  display_name: "Literature Scout"
+  short_description: "Capture external search results for later literature ingestion"
+  default_prompt: "Use $literature-scout to record external literature search results and hand shortlisted URLs to the literature corpus builder."
+

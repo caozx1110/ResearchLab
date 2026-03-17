@@ -1,0 +1,5 @@
+interface:
+  display_name: "Method Designer"
+  short_description: "Turn a selected idea into a concrete design and experiment pack"
+  default_prompt: "Use $method-designer to choose a repo, define interfaces, and generate a design and experiment pack for the selected idea."
+
