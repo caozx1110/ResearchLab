@@ -1,4 +1,0 @@
-interface:
-  display_name: "Paper Research Workbench"
-  short_description: "Parse PDFs and organize research paper workflows"
-  default_prompt: "Use $paper-research-workbench to parse PDFs under raw/, build paper notes, organize tags and topics, and evaluate follow-up research ideas."
