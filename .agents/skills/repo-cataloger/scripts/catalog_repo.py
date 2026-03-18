@@ -56,6 +56,10 @@ def intake_root(project_root: Path) -> Path:
 
 NOTE_TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "assets" / "repo-note-template.md"
 MANUAL_NOTE_HEADERS = ("## Working Notes", "## Manual Notes")
+NOTE_CONTEXT_NAME = "repo-note-context.md"
+NOTE_SCAFFOLD_MARKER = "<!-- repo-note-scaffold -->"
+LEGACY_AUTO_NOTE_MARKERS = ("Auto-generated repo analysis note.", NOTE_SCAFFOLD_MARKER)
+NOTE_AUTHOR_SCRIPT = Path(__file__).resolve().parents[2] / "research-note-author" / "scripts" / "prepare_note_assets.py"
 
 
 def canonical_repo_root(project_root: Path, repo_id: str) -> Path:
@@ -79,6 +83,13 @@ def _to_manifest_value(candidate: dict[str, Any]) -> dict[str, Any]:
 def _from_manifest_value(candidate: dict[str, Any]) -> dict[str, Any]:
     candidate["staged_source"] = Path(candidate["staged_source"])
     return candidate
+
+
+def prepare_note_assets_for_repo(repo_id: str, *, rewrite_generated_notes: bool = False) -> None:
+    cmd = [sys.executable, str(NOTE_AUTHOR_SCRIPT), "prepare-repo-note", "--repo-id", repo_id]
+    if rewrite_generated_notes:
+        cmd.append("--rewrite-generated-notes")
+    subprocess.run(cmd, check=True)
 
 
 def _read_repo_context(stage_source: Path) -> str:
@@ -118,13 +129,19 @@ def _clean_repo_context(text: str) -> str:
             continue
         if line.startswith("#") or line.startswith("![") or line.startswith("<img"):
             continue
+        if line.startswith(">"):
+            continue
         line = re.sub(r"!\[[^\]]*\]\([^)]+\)", " ", line)
         line = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", line)
         line = re.sub(r"<[^>]+>", " ", line)
         line = re.sub(r"https?://\S+", " ", line)
         line = re.sub(r"`([^`]*)`", r"\1", line)
+        line = re.sub(r"\*\*([^*]+)\*\*", r"\1", line)
         line = re.sub(r"[|]{2,}", " ", line)
         if re.fullmatch(r"[-*_=\s]+", line):
+            continue
+        lowered = line.lower()
+        if "primary contact" in lowered or "@" in lowered:
             continue
         cleaned_lines.append(clean_text(line))
     return "\n".join(cleaned_lines).strip()
@@ -138,14 +155,72 @@ def _repo_sentences(text: str) -> list[str]:
     return parts or [cleaned]
 
 
+def _looks_like_repo_meta_sentence(sentence: str) -> bool:
+    lowered = clean_text(sentence).lower()
+    if not lowered:
+        return True
+    if any(
+        token in lowered
+        for token in (
+            "primary contact",
+            "project website",
+            "we welcome discussion",
+            "no concrete timeline for open-sourcing",
+            "let's go for",
+            "continuously updating",
+        )
+    ):
+        return True
+    if lowered.startswith("towards ") and len(lowered.split()) <= 12:
+        return True
+    if lowered.count(",") >= 6:
+        return True
+    return False
+
+
+def _informative_repo_sentences(sentences: list[str], repo_name: str) -> list[str]:
+    repo_lower = repo_name.lower().strip()
+    preferred = [
+        sentence
+        for sentence in sentences
+        if not _looks_like_repo_meta_sentence(sentence)
+        and repo_lower
+        and repo_lower in sentence.lower()
+        and " is " in sentence.lower()
+    ]
+    if preferred:
+        return preferred
+    preferred = [
+        sentence
+        for sentence in sentences
+        if not _looks_like_repo_meta_sentence(sentence)
+        and any(
+            token in sentence.lower()
+            for token in (" is ", " are ", " framework", " repository", " codebase", " enables ", " supports ", " provides ")
+        )
+    ]
+    if preferred:
+        return preferred
+    return [sentence for sentence in sentences if not _looks_like_repo_meta_sentence(sentence)] or sentences
+
+
 def build_repo_short_summary(candidate: dict[str, Any], facts: dict[str, Any], context: str, *, max_chars: int = 320) -> str:
     repo_name = str(candidate.get("repo_name") or facts.get("repo_name") or "repository")
     cleaned_context = _clean_repo_context(context)
-    for sentence in _repo_sentences(cleaned_context):
+    sentences = _repo_sentences(cleaned_context)
+    preferred = _informative_repo_sentences(sentences, repo_name)
+    for sentence in preferred + sentences:
         lowered = sentence.lower()
         if len(sentence) < 40:
             continue
         if repo_name.lower() in lowered and len(sentence.split()) <= 6:
+            continue
+        if _looks_like_repo_meta_sentence(sentence):
+            continue
+        if not (
+            repo_name.lower() in lowered
+            or any(token in lowered for token in (" is ", " framework", " repository", " codebase", " enables ", " supports ", " provides "))
+        ):
             continue
         return _truncate_summary(sentence, max_chars=max_chars)
 
@@ -181,23 +256,186 @@ def ensure_summary_short_summary(summary: dict[str, Any], facts: dict[str, Any],
     return short_summary
 
 
+def _format_note_list(items: list[str], fallback: str) -> str:
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        normalized = _truncate_summary(clean_text(item), max_chars=280)
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            cleaned.append(normalized)
+    if not cleaned:
+        cleaned = [fallback]
+    return "\n".join(f"- {item}" for item in cleaned)
+
+
+def _categorize_entrypoints(facts: dict[str, Any]) -> dict[str, list[str]]:
+    categories = {"train": [], "eval": [], "deploy": [], "data": [], "other": []}
+    for item in facts.get("entrypoints", []):
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "").strip()
+        if not path:
+            continue
+        lowered = path.lower()
+        if any(token in lowered for token in ("train", "finetune", "fit")):
+            categories["train"].append(path)
+        elif any(token in lowered for token in ("eval", "benchmark", "rollout", "test")):
+            categories["eval"].append(path)
+        elif any(token in lowered for token in ("deploy", "serve", "server", "real", "onnx", "tensorrt", "export")):
+            categories["deploy"].append(path)
+        elif any(token in lowered for token in ("data", "convert", "dataset", "record", "collect", "prepare")):
+            categories["data"].append(path)
+        else:
+            categories["other"].append(path)
+    return categories
+
+
+def _note_context_path(note_path: Path) -> Path:
+    return note_path.parent / NOTE_CONTEXT_NAME
+
+
+def _is_generated_note_text(text: str) -> bool:
+    normalized = str(text or "")
+    return any(marker in normalized for marker in LEGACY_AUTO_NOTE_MARKERS)
+
+
+def _render_bullets(items: list[str]) -> str:
+    return "\n".join(f"- {item}" for item in items)
+
+
+def _context_language(path: Path) -> str:
+    suffix = path.suffix.lower()
+    return {
+        ".py": "python",
+        ".sh": "bash",
+        ".zsh": "bash",
+        ".yaml": "yaml",
+        ".yml": "yaml",
+        ".toml": "toml",
+        ".json": "json",
+        ".md": "markdown",
+    }.get(suffix, "")
+
+
+def _select_repo_context_files(source_root: Path, facts: dict[str, Any]) -> list[str]:
+    selected: list[str] = []
+    seen: set[str] = set()
+
+    def add(rel_path: str) -> None:
+        path = str(rel_path or "").strip()
+        if not path or path in seen or not (source_root / path).exists():
+            return
+        seen.add(path)
+        selected.append(path)
+
+    readme = next(iter(sorted(source_root.glob("README*"))), None)
+    if readme:
+        add(readme.relative_to(source_root).as_posix())
+
+    categorized = _categorize_entrypoints(facts)
+    for bucket, limit in (("train", 2), ("eval", 1), ("deploy", 1), ("data", 1), ("other", 2)):
+        for rel_path in categorized[bucket][:limit]:
+            add(rel_path)
+
+    return selected[:8]
+
+
+def build_repo_note_context(repo_id: str, summary: dict[str, Any], facts: dict[str, Any], context_text: str, *, note_path: Path) -> str:
+    source_root = note_path.parent / "source"
+    selected_files = _select_repo_context_files(source_root, facts)
+    readme_excerpt = _clean_repo_context(context_text or _read_repo_context(source_root))
+
+    lines = [
+        f"# Close-Reading Context: {summary.get('repo_name') or repo_id}",
+        "",
+        f"- Repo ID: `{repo_id}`",
+        f"- Note target: `repo-notes.md`",
+        f"- Helper context: `{NOTE_CONTEXT_NAME}`",
+        f"- Canonical remote: {summary.get('canonical_remote') or 'n/a'}",
+        f"- Primary language: `{summary.get('primary_language') or facts.get('primary_language') or 'unknown'}`",
+        f"- Repo type: `{summary.get('repo_type') or facts.get('repo_type_hint') or 'unknown'}`",
+        "",
+        "## Writing Targets",
+        "",
+        "- Read the README plus representative train/eval/deploy entrypoints before rewriting `repo-notes.md`.",
+        "- Focus on what the repo is for, how the main workflow is structured, what is reusable, and what is still risky or ambiguous.",
+        "- Keep claims grounded in the README, visible entrypoints, and the files excerpted below.",
+        "",
+        "## Snapshot Cues",
+        "",
+        f"- Frameworks: {_format_inline_values(summary.get('frameworks', []))}",
+        f"- Key dirs: {_format_inline_values(facts.get('key_dirs', []))}",
+        f"- Config roots: {_format_inline_values(facts.get('config_roots', []))}",
+        f"- Docs dirs: {_format_inline_values(facts.get('docs_dirs', []))}",
+        f"- Test dirs: {_format_inline_values(facts.get('test_dirs', []))}",
+    ]
+
+    if readme_excerpt:
+        lines.extend(
+            [
+                "",
+                "## README Excerpt",
+                "",
+                readme_excerpt[:10000],
+            ]
+        )
+
+    if selected_files:
+        lines.extend(
+            [
+                "",
+                "## Selected File Excerpts",
+                "",
+            ]
+        )
+        for rel_path in selected_files:
+            path = source_root / rel_path
+            excerpt = read_text_excerpt(path, limit=2800).rstrip()
+            if not excerpt:
+                continue
+            lines.extend(
+                [
+                    f"### `{rel_path}`",
+                    "",
+                    f"```{_context_language(path)}".rstrip(),
+                    excerpt,
+                    "```",
+                    "",
+                ]
+            )
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def _working_notes_block(note_path: Path) -> str:
+    default_block = (
+        "## Working Notes\n\n"
+        "- Replace the placeholder sections above after reading `repo-note-context.md`, the README, and the main entrypoints.\n"
+        "- Keep any concrete file-level evidence or open architecture questions here for future reuse.\n"
+    )
     if note_path.exists():
         existing = note_path.read_text(encoding="utf-8")
         for header in MANUAL_NOTE_HEADERS:
             start = existing.find(header)
             if start >= 0:
                 preserved = existing[start:].strip()
-                if preserved:
+                legacy_default = (
+                    "## Working Notes\n\n"
+                    "- Manual follow-up: verify architecture, runnable workflows, strengths, risks, and extension points against the real source tree."
+                )
+                if (
+                    preserved
+                    and preserved != legacy_default
+                    and "Pending deeper read: replace this scaffold with concrete architecture findings, risks, and extension points." not in preserved
+                ):
                     return preserved
-    return (
-        "## Working Notes\n\n"
-        "- Pending deeper read: replace this scaffold with concrete architecture findings, risks, and extension points.\n"
-    )
+    return default_block
 
 
-def build_repo_note(repo_id: str, summary: dict[str, Any], facts: dict[str, Any], *, note_path: Path) -> str:
-    short_summary = ensure_summary_short_summary(summary, facts, str(summary.get("readme_excerpt") or ""), rewrite=False)
+def build_repo_note(repo_id: str, summary: dict[str, Any], facts: dict[str, Any], context_text: str, *, note_path: Path) -> str:
+    source_root = note_path.parent / "source"
+    selected_files = _select_repo_context_files(source_root, facts)
     entrypoint_lines = []
     for item in facts.get("entrypoints", [])[:5]:
         if not isinstance(item, dict):
@@ -222,6 +460,12 @@ def build_repo_note(repo_id: str, summary: dict[str, Any], facts: dict[str, Any]
         f"- Repo type: `{summary.get('repo_type') or facts.get('repo_type_hint') or 'unknown'}`",
         f"- Owner/name: `{summary.get('owner_name') or summary.get('repo_name') or repo_id}`",
     ]
+    reading_lines = [
+        f"- README: {'available' if next(iter(sorted(source_root.glob('README*'))), None) else 'missing'}",
+        f"- Helper digest: `{NOTE_CONTEXT_NAME}`",
+        f"- Suggested files to inspect next: {_format_inline_values(selected_files)}",
+        "- Read at least one train/eval/deploy entrypoint if the repo exposes them before finalizing the note prose.",
+    ]
 
     note = _load_note_template()
     context = {
@@ -235,7 +479,48 @@ def build_repo_note(repo_id: str, summary: dict[str, Any], facts: dict[str, Any]
         "tags": _format_inline_values(summary.get("tags", [])),
         "topics": _format_inline_values(summary.get("topics", [])),
         "head_commit": str(summary.get("head_commit") or "n/a"),
-        "short_summary": short_summary or "No short summary available yet.",
+        "note_marker": NOTE_SCAFFOLD_MARKER,
+        "source_reading_coverage": "\n".join(reading_lines),
+        "executive_summary": _render_bullets(
+            [
+                "Replace with a short close-reading summary after reading the README and representative source files.",
+                "State the repo's scope, the main workflow it supports, and how reusable it looks for this workspace.",
+            ]
+        ),
+        "goal_scope": _render_bullets(
+            [
+                "Describe what problem the repo tries to solve and what deliverables it exposes.",
+                "Call out whether it is mostly training code, deployment code, data tooling, or a mixed stack.",
+            ]
+        ),
+        "architecture_analysis": _render_bullets(
+            [
+                "Summarize the main subsystem boundaries and how responsibilities are split across packages/scripts.",
+                "Mention config roots, core modules, and any obvious integration seams.",
+            ]
+        ),
+        "workflow_analysis": _render_bullets(
+            [
+                "Trace the runnable path: how someone trains, evaluates, or deploys with this repo.",
+                "Name the most important entrypoints and the handoff between them.",
+            ]
+        ),
+        "strengths": _render_bullets(
+            [
+                "Record what makes the repo reusable: coverage, documentation, modularity, testing, or clean interfaces.",
+            ]
+        ),
+        "limitations": _render_bullets(
+            [
+                "Record what is still risky or ambiguous: missing tests, missing configs, partial release, brittle setup, or unclear control flow.",
+            ]
+        ),
+        "future_work": _render_bullets(
+            [
+                "List the next files or extension points worth reading if this repo becomes an implementation base.",
+                "Mention missing validation or refactors that would reduce reuse risk.",
+            ]
+        ),
         "retrieval_cues": "\n".join(retrieval_lines),
         "structure_cues": "\n".join(structure_lines),
         "entrypoints": "\n".join(entrypoint_lines),
@@ -246,7 +531,43 @@ def build_repo_note(repo_id: str, summary: dict[str, Any], facts: dict[str, Any]
     return note.rstrip() + "\n"
 
 
-def refresh_repo_notes(project_root: Path, repo_ids: list[str] | None = None, *, rewrite_summary: bool = False) -> int:
+def _write_note_assets(
+    repo_id: str,
+    summary: dict[str, Any],
+    facts: dict[str, Any],
+    context_text: str,
+    *,
+    note_path: Path,
+    rewrite_generated_note: bool = False,
+) -> int:
+    changed = 0
+    context_path = _note_context_path(note_path)
+    context_payload = build_repo_note_context(repo_id, summary, facts, context_text, note_path=note_path)
+    before_context = context_path.read_text(encoding="utf-8") if context_path.exists() else ""
+    write_text_if_changed(context_path, context_payload)
+    if context_payload != before_context:
+        changed += 1
+
+    should_write_note = not note_path.exists()
+    if not should_write_note and rewrite_generated_note:
+        existing = note_path.read_text(encoding="utf-8")
+        should_write_note = _is_generated_note_text(existing)
+    if should_write_note:
+        note_payload = build_repo_note(repo_id, summary, facts, context_text, note_path=note_path)
+        before_note = note_path.read_text(encoding="utf-8") if note_path.exists() else ""
+        write_text_if_changed(note_path, note_payload)
+        if note_payload != before_note:
+            changed += 1
+    return changed
+
+
+def refresh_repo_notes(
+    project_root: Path,
+    repo_ids: list[str] | None = None,
+    *,
+    rewrite_summary: bool = False,
+    rewrite_generated_notes: bool = False,
+) -> int:
     repo_root = research_root(project_root) / "library" / "repos"
     summary_paths = (
         [repo_root / repo_id / "summary.yaml" for repo_id in repo_ids]
@@ -270,11 +591,14 @@ def refresh_repo_notes(project_root: Path, repo_ids: list[str] | None = None, *,
             write_yaml_if_changed(summary_path, summary)
             changed += 1
         note_path = summary_path.parent / "repo-notes.md"
-        note_text = build_repo_note(repo_id, summary, facts, note_path=note_path)
-        before_note = note_path.read_text(encoding="utf-8") if note_path.exists() else ""
-        write_text_if_changed(note_path, note_text)
-        if note_text != before_note:
-            changed += 1
+        changed += _write_note_assets(
+            repo_id,
+            summary,
+            facts,
+            context,
+            note_path=note_path,
+            rewrite_generated_note=rewrite_generated_notes,
+        )
     rebuild_repo_index(project_root)
     return changed
 
@@ -287,6 +611,7 @@ def stage_repo(project_root: Path, raw_source: str) -> tuple[Path, dict[str, Any
     import_type = "local-path"
     source_label = raw_source
     canonical_remote = ""
+    source_head_commit = ""
 
     if is_url(raw_source):
         import_type = "github-url"
@@ -296,14 +621,18 @@ def stage_repo(project_root: Path, raw_source: str) -> tuple[Path, dict[str, Any
         )
         canonical_remote = normalize_remote_url(raw_source)
         explicit_repo_name = Path(canonical_remote.rstrip("/")).name or "repo"
+        source_head_commit = git_head_commit(stage_source)
     else:
         local_path = Path(raw_source).resolve()
         canonical_remote = git_remote_url(local_path)
+        source_head_commit = git_head_commit(local_path)
         if local_path.is_relative_to(raw_root(project_root).resolve()):
             shutil.move(str(local_path), stage_source)
         else:
             copytree_filtered(local_path, stage_source)
         explicit_repo_name = local_path.name
+        if explicit_repo_name.lower() in {"source", "repo"} and canonical_remote:
+            explicit_repo_name = Path(canonical_remote.rstrip("/")).name or explicit_repo_name
 
     facts = load_legacy_repo_facts(project_root, stage_source)
     repo_name = explicit_repo_name or facts.get("repo_name", stage_source.name)
@@ -324,7 +653,7 @@ def stage_repo(project_root: Path, raw_source: str) -> tuple[Path, dict[str, Any
         "repo_type": facts.get("repo_type_hint", ""),
         "primary_language": facts.get("primary_language", ""),
         "source_label": source_label,
-        "head_commit": git_head_commit(stage_source),
+        "head_commit": source_head_commit or git_head_commit(stage_source),
         "readme_excerpt": context,
         "staged_source": stage_source,
     }
@@ -466,11 +795,10 @@ def finalize_new_repo(project_root: Path, candidate: dict[str, Any]) -> str:
             for idx, item in enumerate(facts.get("subsystems", []))
         ],
     }
-    notes = build_repo_note(repo_id, summary, facts, note_path=entry_root / "repo-notes.md")
     write_yaml_if_changed(entry_root / "summary.yaml", summary)
     write_yaml_if_changed(entry_root / "entrypoints.yaml", entrypoints)
     write_yaml_if_changed(entry_root / "modules.yaml", modules)
-    write_text_if_changed(entry_root / "repo-notes.md", notes)
+    prepare_note_assets_for_repo(repo_id, rewrite_generated_notes=True)
 
     payload = load_index(repo_index_path(project_root), "repo-index", "repo-cataloger")
     payload["generated_at"] = utc_now_iso()
@@ -595,8 +923,25 @@ def resolve_review(args: argparse.Namespace) -> int:
 def refresh_notes_cmd(args: argparse.Namespace) -> int:
     project_root = find_project_root()
     bootstrap_workspace(project_root)
-    changed = refresh_repo_notes(project_root, repo_ids=list(args.repo_id), rewrite_summary=args.rewrite_summary)
-    print(f"[ok] refreshed repo notes and summaries ({changed} file updates)")
+    summary_paths = (
+        [research_root(project_root) / "library" / "repos" / repo_id / "summary.yaml" for repo_id in args.repo_id]
+        if args.repo_id
+        else sorted((research_root(project_root) / "library" / "repos").glob("*/summary.yaml"))
+    )
+    changed = 0
+    for summary_path in summary_paths:
+        summary = load_yaml(summary_path, default={})
+        if not isinstance(summary, dict) or not summary.get("repo_id"):
+            raise SystemExit(f"Invalid repo summary: {summary_path}")
+        source_root = summary_path.parent / "source"
+        facts = load_legacy_repo_facts(project_root, source_root)
+        before_summary = clean_text(str(summary.get("short_summary") or ""))
+        short_summary = ensure_summary_short_summary(summary, facts, _read_repo_context(source_root), rewrite=args.rewrite_summary)
+        if short_summary != before_summary:
+            write_yaml_if_changed(summary_path, summary)
+            changed += 1
+        prepare_note_assets_for_repo(str(summary["repo_id"]), rewrite_generated_notes=args.rewrite_generated_notes)
+    print(f"[ok] delegated repo note preparation to research-note-author ({changed} summary updates)")
     return 0
 
 
@@ -617,9 +962,14 @@ def build_parser() -> argparse.ArgumentParser:
     rebuild_cmd = subparsers.add_parser("rebuild-index", help="Rebuild the repo index from canonical repo summaries")
     rebuild_cmd.set_defaults(func=lambda _args: (rebuild_repo_index(find_project_root()), print("[ok] rebuilt repo index"), 0)[2])
 
-    refresh_notes = subparsers.add_parser("refresh-notes", help="Refresh repo-notes.md and short_summary from canonical repo metadata")
+    refresh_notes = subparsers.add_parser("refresh-notes", help="Refresh short_summary and delegate note asset preparation to research-note-author")
     refresh_notes.add_argument("--repo-id", action="append", default=[], help="Canonical repo ID to refresh")
     refresh_notes.add_argument("--rewrite-summary", action="store_true", help="Regenerate short_summary even if one already exists")
+    refresh_notes.add_argument(
+        "--rewrite-generated-notes",
+        action="store_true",
+        help="Replace notes only when they still look auto-generated or scaffolding-based",
+    )
     refresh_notes.set_defaults(func=refresh_notes_cmd)
     return parser
 

@@ -1,6 +1,6 @@
 ---
 name: idea-forge
-description: Generate candidate research ideas under doc/research/programs/<program-id>/ideas/ from a program charter, literature evidence, and repo context. Use when Codex needs to propose multiple scoped directions, write proposal.yaml files, or seed idea candidates before critical review.
+description: Generate candidate research ideas as `proposal.yaml` files inside a program's `ideas/` directory from the charter, literature evidence, and repo context. Use when Codex needs to propose multiple scoped directions, write new proposal files, or seed idea candidates before critical review.
 ---
 
 # Idea Forge
@@ -32,3 +32,7 @@ python3 .agents/skills/idea-forge/scripts/seed_ideas.py --program-id my-program
 
 - Do not write `review.yaml` or `decision.yaml`.
 - Do not overfit the idea list to one favorite repo too early.
+
+## Retrospective Handoff
+
+- If this run exposed missing repo context, unclear proposal structure, or repeated manual cleanup, hand the observation to `skill-evolution-advisor` before ending the task.

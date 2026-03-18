@@ -1,0 +1,4 @@
+interface:
+  display_name: "Literature Tagger"
+  short_description: "Curate literature tags, topics, and taxonomy quality"
+  default_prompt: "Use $literature-tagger to refresh literature topics and tags, clean alias drift, and keep the shared taxonomy usable for downstream retrieval."

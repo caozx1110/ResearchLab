@@ -2,7 +2,7 @@
 
 # {{repo_name}}
 
-> Close-reading repo note scaffold. Read `repo-note-context.md`, the README, and representative entrypoints before replacing the placeholders below.
+> Close-reading repo note. Read `repo-note-context.md`, the README, and representative entrypoints before replacing the placeholders below.
 
 ## Snapshot
 

@@ -1,5 +1,4 @@
 interface:
   display_name: "Research Conductor"
-  short_description: "Coordinate programs, memory, and research workflow state"
-  default_prompt: "Use $research-conductor to create or resume a research program, update memory and workflow state, and route the next step to the right research skill."
-
+  short_description: "Coordinate programs, memory, workflow state, and weekly reports"
+  default_prompt: "Use $research-conductor to create or resume a research program, update memory and workflow state, write weekly status reports, and route the next step to the right research skill."

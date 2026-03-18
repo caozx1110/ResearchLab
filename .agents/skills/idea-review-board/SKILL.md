@@ -1,6 +1,6 @@
 ---
 name: idea-review-board
-description: Critically review and rank candidate ideas under doc/research/programs/<program-id>/ideas/, including novelty checks, overlap risk, evidence-gap detection, falsification plans, and final decision files. Use when Codex needs to shortlist or reject proposals, request more evidence, or choose a selected idea for method design.
+description: Critically review and rank candidate ideas in a program's `ideas/` directory, including novelty checks, overlap risk, evidence-gap detection, falsification plans, and decision files. Use when Codex needs to shortlist or reject proposals, request more evidence, or choose a selected idea for method design.
 ---
 
 # Idea Review Board
@@ -39,3 +39,7 @@ python3 .agents/skills/idea-review-board/scripts/review_ideas.py select-best --p
 - Do not rewrite the original proposal just because the review disagrees with it.
 - Do not silently pull in fresh outside knowledge; request it through the conductor workflow instead.
 - Do not auto-select an idea just because one looks strongest; only `select-best` should do that.
+
+## Retrospective Handoff
+
+- If review work exposed missing rubrics, weak novelty checks, or confusing selection handoffs, pass the observation to `skill-evolution-advisor` before closing the task.

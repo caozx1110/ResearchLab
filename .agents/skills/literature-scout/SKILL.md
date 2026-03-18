@@ -30,3 +30,7 @@ python3 .agents/skills/literature-corpus-builder/scripts/ingest_literature.py in
 
 - Do not write directly into `library/literature/`.
 - Keep search logs lightweight and auditable.
+
+## Retrospective Handoff
+
+- If search staging, freshness checks, or scout-to-ingest handoffs felt awkward, pass the observation to `skill-evolution-advisor` before closing the task.

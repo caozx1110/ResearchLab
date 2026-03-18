@@ -2,7 +2,7 @@
 
 # {{title}}
 
-> Close-reading note scaffold. Read `note-context.md` and the primary source before replacing the placeholders below.
+> Close-reading literature note. Read `note-context.md` and the source PDF before replacing the placeholders below.
 
 ## Snapshot
 

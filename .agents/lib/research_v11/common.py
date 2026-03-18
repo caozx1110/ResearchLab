@@ -1187,6 +1187,49 @@ def _extract_pdf_pages(reader: Any, limit: int = 4) -> list[str]:
     return pages
 
 
+def extract_pdf_context_pages(
+    pdf_path: Path,
+    *,
+    front_limit: int = 8,
+    back_limit: int = 4,
+    per_page_char_limit: int = 4000,
+) -> dict[str, Any]:
+    reader_backend = pdf_backend()
+    reader = reader_backend(str(pdf_path))
+    total_pages = len(reader.pages)
+    selected_indices: list[int] = list(range(min(front_limit, total_pages)))
+    if back_limit > 0 and total_pages > front_limit:
+        selected_indices.extend(range(max(front_limit, total_pages - back_limit), total_pages))
+
+    pages: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for idx in selected_indices:
+        if idx in seen or idx < 0 or idx >= total_pages:
+            continue
+        seen.add(idx)
+        try:
+            raw_text = reader.pages[idx].extract_text() or ""
+        except Exception:
+            raw_text = ""
+        text = clean_text(raw_text)
+        if not text:
+            continue
+        if per_page_char_limit and len(text) > per_page_char_limit:
+            trimmed = text[:per_page_char_limit].rsplit(" ", 1)[0].rstrip(" ,;:-")
+            text = f"{trimmed or text[:per_page_char_limit]}..."
+        pages.append(
+            {
+                "page": idx + 1,
+                "text": text,
+            }
+        )
+
+    return {
+        "total_pages": total_pages,
+        "pages": pages,
+    }
+
+
 def _parse_authors(raw: str) -> list[str]:
     if not raw:
         return []
@@ -1767,8 +1810,239 @@ def git_head_commit(repo_path: Path) -> str:
     return head_text
 
 
+def _fallback_repo_files(repo_path: Path, *, max_depth: int = 6) -> list[Path]:
+    ignored_dirs = {
+        ".git",
+        ".hg",
+        ".svn",
+        "__pycache__",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".venv",
+        "venv",
+        "node_modules",
+        "dist",
+        "build",
+        "checkpoints",
+        "weights",
+        "logs",
+    }
+    files: list[Path] = []
+    repo_path = repo_path.resolve()
+    for root, dirs, filenames in os.walk(repo_path):
+        root_path = Path(root)
+        try:
+            rel_parts = root_path.relative_to(repo_path).parts
+        except ValueError:
+            rel_parts = ()
+        if len(rel_parts) >= max_depth:
+            dirs[:] = []
+        else:
+            dirs[:] = [name for name in dirs if name not in ignored_dirs]
+        for filename in filenames:
+            path = root_path / filename
+            try:
+                path.relative_to(repo_path)
+            except ValueError:
+                continue
+            files.append(path)
+    return files
+
+
+def _fallback_repo_facts(repo_path: Path, *, max_depth: int = 6, entrypoint_limit: int = 24) -> dict[str, Any]:
+    files = _fallback_repo_files(repo_path, max_depth=max_depth)
+    ext_to_language = {
+        ".py": "Python",
+        ".ipynb": "Jupyter",
+        ".rs": "Rust",
+        ".cpp": "C++",
+        ".cc": "C++",
+        ".cxx": "C++",
+        ".c": "C",
+        ".hpp": "C++",
+        ".h": "C/C++",
+        ".cu": "CUDA",
+        ".go": "Go",
+        ".java": "Java",
+        ".scala": "Scala",
+        ".js": "JavaScript",
+        ".jsx": "JavaScript",
+        ".ts": "TypeScript",
+        ".tsx": "TypeScript",
+        ".sh": "Shell",
+        ".bash": "Shell",
+        ".zsh": "Shell",
+        ".nix": "Nix",
+        ".md": "Markdown",
+        ".toml": "TOML",
+        ".yaml": "YAML",
+        ".yml": "YAML",
+        ".json": "JSON",
+    }
+    language_counts: dict[str, int] = {}
+    key_dirs: list[str] = []
+    first_level_dirs: dict[str, int] = {}
+    config_roots: set[str] = set()
+    docs_dirs: set[str] = set()
+    test_dirs: set[str] = set()
+    frameworks: list[str] = []
+    entrypoint_candidates: list[tuple[int, str, str]] = []
+    repo_text_paths: list[Path] = []
+
+    framework_markers = [
+        ("PyTorch", ("torch", "pytorch")),
+        ("Transformers", ("transformers", "huggingface", "hf download")),
+        ("Diffusers", ("diffusers", "stable diffusion")),
+        ("DeepSpeed", ("deepspeed",)),
+        ("Accelerate", ("accelerate",)),
+        ("LeRobot", ("lerobot",)),
+        ("MuJoCo", ("mujoco",)),
+        ("Isaac Lab", ("isaac lab", "isaaclab", "omni.isaac.lab")),
+        ("Isaac Sim", ("isaac sim", "isaacsim", "omni.isaac")),
+        ("ROS", ("ros2", "rclpy", "roslaunch", "catkin")),
+        ("OpenCV", ("opencv", "cv2")),
+        ("Gradio", ("gradio",)),
+        ("Streamlit", ("streamlit",)),
+        ("JAX", ("jax", "flax")),
+        ("TensorFlow", ("tensorflow",)),
+        ("Tyro", ("tyro",)),
+        ("WandB", ("wandb",)),
+        ("Pinocchio", ("pinocchio",)),
+        ("ZeroMQ", ("zeromq", "zmq")),
+        ("Nix", ("flake.nix", "nix/", "pkgs.", "mkShell")),
+        ("Unitree SDK2", ("unitree", "sdk2")),
+        ("uv", ("uv sync", "uv.lock", "[tool.uv")),
+    ]
+
+    def add_framework(name: str) -> None:
+        if name not in frameworks:
+            frameworks.append(name)
+
+    for path in files:
+        rel_path = path.relative_to(repo_path).as_posix()
+        parts = rel_path.split("/")
+        if len(parts) > 1 and parts[0]:
+            first_level_dirs[parts[0]] = first_level_dirs.get(parts[0], 0) + 1
+        suffix = path.suffix.lower()
+        language = ext_to_language.get(suffix)
+        if language:
+            language_counts[language] = language_counts.get(language, 0) + 1
+        elif path.name == "Dockerfile":
+            language_counts["Docker"] = language_counts.get("Docker", 0) + 1
+
+        lowered_path = rel_path.lower()
+        if any(token in lowered_path for token in ("config", "configs", "conf/", "cfg", ".yaml", ".yml", ".toml", ".json")):
+            config_roots.add(parts[0] if parts else rel_path)
+        if any(token in lowered_path for token in ("docs/", "doc/", "readme", "examples/", "example/")):
+            docs_dirs.add(parts[0] if parts else rel_path)
+        if any(token in lowered_path for token in ("tests/", "test/", "_test.", "test_")):
+            test_dirs.add(parts[0] if parts else rel_path)
+
+        is_shell = suffix in {".sh", ".bash", ".zsh"}
+        is_python = suffix == ".py"
+        executable_name = path.stem.lower()
+        in_scripts = "scripts/" in lowered_path or lowered_path.startswith("scripts/")
+        priority = None
+        kind = ""
+        if is_shell:
+            priority = 0 if any(token in executable_name for token in ("train", "eval", "deploy", "serve", "run")) else 2
+            kind = "shell-script"
+        elif is_python and in_scripts:
+            priority = 1
+            kind = "python-script"
+        elif is_python and executable_name in {"main", "app", "train", "eval", "deploy", "serve"}:
+            priority = 2
+            kind = "python-entrypoint"
+        elif path.name == "pyproject.toml":
+            priority = 4
+            kind = "package-config"
+        if priority is not None:
+            entrypoint_candidates.append((priority, rel_path, kind))
+
+        if path.name.lower().startswith("readme") or path.suffix.lower() in {".md", ".toml", ".txt", ".yaml", ".yml", ".py", ".sh", ".nix"}:
+            repo_text_paths.append(path)
+
+    for name, _count in sorted(first_level_dirs.items(), key=lambda item: (-item[1], item[0])):
+        if name.startswith("."):
+            continue
+        if name not in key_dirs:
+            key_dirs.append(name)
+        if len(key_dirs) >= 8:
+            break
+
+    for path in repo_text_paths[:40]:
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")[:12000].lower()
+        except OSError:
+            continue
+        text = clean_text(text)
+        for framework_name, markers in framework_markers:
+            if any(marker in text for marker in markers):
+                add_framework(framework_name)
+
+    primary_language = ""
+    filtered_language_counts = {
+        name: count
+        for name, count in language_counts.items()
+        if name not in {"Markdown", "YAML", "JSON", "TOML"}
+    }
+    if filtered_language_counts:
+        primary_language = max(filtered_language_counts.items(), key=lambda item: (item[1], item[0]))[0]
+    elif language_counts:
+        primary_language = max(language_counts.items(), key=lambda item: (item[1], item[0]))[0]
+
+    repo_type_hint = "Research software repository"
+    if {"src", "scripts", "baselines"} & set(first_level_dirs):
+        repo_type_hint = "Mixed-language robotics or systems monorepo"
+    elif {"src", "scripts", "real"} & set(first_level_dirs):
+        repo_type_hint = "Robotics training and deployment repository"
+    elif "notebooks" in first_level_dirs or "examples" in first_level_dirs:
+        repo_type_hint = "Research codebase with runnable examples"
+    elif primary_language == "Python":
+        repo_type_hint = "Python research repository"
+
+    entrypoints: list[dict[str, Any]] = []
+    seen_entrypoints: set[str] = set()
+    for _priority, rel_path, kind in sorted(entrypoint_candidates, key=lambda item: (item[0], item[1])):
+        if rel_path in seen_entrypoints:
+            continue
+        seen_entrypoints.add(rel_path)
+        entrypoints.append({"path": rel_path, "kind": kind})
+        if len(entrypoints) >= entrypoint_limit:
+            break
+
+    subsystems: list[dict[str, Any]] = []
+    for dir_name in key_dirs[:6]:
+        if dir_name in {"assets", "docs", "examples"}:
+            continue
+        child_names = sorted(
+            {
+                child.name
+                for child in (repo_path / dir_name).iterdir()
+                if child.is_dir() and not child.name.startswith(".")
+            }
+        )[:8] if (repo_path / dir_name).exists() else []
+        subsystems.append({"path": dir_name, "children": child_names})
+
+    return {
+        "repo_name": repo_path.name,
+        "repo_type_hint": repo_type_hint,
+        "primary_language": primary_language or "unknown",
+        "framework_hints": frameworks,
+        "entrypoints": entrypoints,
+        "key_dirs": key_dirs,
+        "config_roots": sorted(config_roots),
+        "docs_dirs": sorted(docs_dirs),
+        "test_dirs": sorted(test_dirs),
+        "subsystems": subsystems,
+    }
+
+
 def load_legacy_repo_facts(project_root: Path, repo_path: Path, *, max_depth: int = 6, entrypoint_limit: int = 24) -> dict[str, Any]:
     scanner_path = project_root / ".agents" / "skills" / "research-repo-architect" / "scripts" / "scan_repo.py"
+    if not scanner_path.exists():
+        return _fallback_repo_facts(repo_path, max_depth=max_depth, entrypoint_limit=entrypoint_limit)
     scan_dir = scanner_path.parent
     sys.path.insert(0, str(scan_dir))
     try:
@@ -1779,6 +2053,8 @@ def load_legacy_repo_facts(project_root: Path, repo_path: Path, *, max_depth: in
         spec.loader.exec_module(module)
         files = module.iter_files(repo_path, max_depth=max_depth)
         return module.build_facts(repo_path, files, entrypoint_limit=entrypoint_limit)
+    except FileNotFoundError:
+        return _fallback_repo_facts(repo_path, max_depth=max_depth, entrypoint_limit=entrypoint_limit)
     finally:
         if str(scan_dir) in sys.path:
             sys.path.remove(str(scan_dir))

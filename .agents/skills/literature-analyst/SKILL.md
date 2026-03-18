@@ -1,6 +1,6 @@
 ---
 name: literature-analyst
-description: Build program-scoped literature evidence under doc/research/programs/<program-id>/evidence/ by reading the shared literature library. Use when Codex needs to summarize relevant sources, cluster themes, surface gaps and disagreements, or prepare grounded inputs for idea generation and idea review.
+description: Build program-scoped literature evidence in a program's `evidence/` directory by reading the shared literature library. Use when Codex needs to summarize relevant sources, cluster themes, surface gaps and disagreements, or prepare grounded inputs for idea generation and idea review.
 ---
 
 # Literature Analyst
@@ -32,3 +32,7 @@ python3 .agents/skills/literature-analyst/scripts/build_literature_map.py --prog
 
 - Do not invent freshness or novelty claims that are not grounded in the library.
 - Do not bypass the library by reasoning from raw PDFs or loose URLs once canonical entries exist.
+
+## Retrospective Handoff
+
+- If retrieval cues were weak, evidence formatting needed manual repair, or the library contract felt too thin, hand the issue to `skill-evolution-advisor` before ending the task.

@@ -1,5 +1,4 @@
 interface:
   display_name: "Repo Cataloger"
-  short_description: "Ingest and normalize reusable repositories into the shared repo library"
-  default_prompt: "Use $repo-cataloger to import a local repo or GitHub URL into doc/research/library/repos/, detect duplicates, and generate reusable repo metadata."
-
+  short_description: "Ingest repos into the canonical library"
+  default_prompt: "Use $repo-cataloger to import a local repo or GitHub URL into doc/research/library/repos/, detect duplicates, and stage canonical repo entries before handing off note writing to $research-note-author."

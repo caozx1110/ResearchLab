@@ -1,0 +1,4 @@
+interface:
+  display_name: "Research Note Author"
+  short_description: "Read full sources and write professional research notes"
+  default_prompt: "Use $research-note-author to prepare close-reading context for a canonical paper or repo, then read the source carefully and write a professional detailed note into the library."

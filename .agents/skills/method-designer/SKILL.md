@@ -1,6 +1,6 @@
 ---
 name: method-designer
-description: Turn a selected idea into an implementation-ready design pack under doc/research/programs/<program-id>/design/ and experiments/. Use when Codex needs to choose a repo, define interfaces, outline ablations, specify success criteria, or prepare a concrete implementation handoff without editing the code repository yet.
+description: Turn a selected idea into an implementation-ready design pack in a program's `design/` and `experiments/` directories. Use when Codex needs to choose a repo, define interfaces, outline ablations, specify success criteria, or prepare a concrete implementation handoff without editing the code repository yet.
 ---
 
 # Method Designer
@@ -37,3 +37,7 @@ python3 .agents/skills/method-designer/scripts/generate_design_pack.py --program
 - Do not change the code repository directly here.
 - Do not silently skip the selection workflow; if the idea is not explicitly selected, point back to `idea-forge` and `idea-review-board`.
 - Do not jump straight to a large rearchitecture when a narrower baseline-modification path exists.
+
+## Retrospective Handoff
+
+- If repo selection, interface specification, or design-pack generation required repeated manual glue, pass the observation to `skill-evolution-advisor` before ending the task.

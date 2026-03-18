@@ -38,3 +38,7 @@ python3 .agents/skills/research-kb-browser/scripts/serve_kb_browser.py
 - Do not treat this browser as the fact source; `doc/research/` remains canonical.
 - Do not depend on npm, React, or external frontend tooling for the first version.
 - Do not reuse `paper-research-workbench` assets, templates, or directory conventions.
+
+## Retrospective Handoff
+
+- If the browser build exposed missing snapshots, brittle rendering assumptions, or awkward read-only constraints, pass the observation to `skill-evolution-advisor` before closing the task.

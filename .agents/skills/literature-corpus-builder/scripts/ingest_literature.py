@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import re
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,7 @@ from research_v11.common import (
     discover_keyword_tags,
     domain_profile_path,
     ensure_research_runtime,
+    extract_pdf_context_pages,
     extract_pdf_record,
     fetch_url,
     file_sha256,
@@ -41,6 +43,7 @@ from research_v11.common import (
     load_yaml,
     make_source_id,
     merge_keyword_tags,
+    normalize_title,
     parse_arxiv_id,
     parse_openreview_id,
     pending_paper_reviews_path,
@@ -63,8 +66,12 @@ def intake_root(project_root: Path) -> Path:
     return research_root(project_root) / "intake" / "papers" / "downloads"
 
 
+NOTE_AUTHOR_SCRIPT = Path(__file__).resolve().parents[2] / "research-note-author" / "scripts" / "prepare_note_assets.py"
 NOTE_TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "assets" / "note-template.md"
 MANUAL_NOTE_HEADERS = ("## Working Notes", "## Manual Notes")
+NOTE_CONTEXT_NAME = "note-context.md"
+NOTE_SCAFFOLD_MARKER = "<!-- literature-note-scaffold -->"
+LEGACY_AUTO_NOTE_MARKERS = ("Auto-generated analysis note.", NOTE_SCAFFOLD_MARKER)
 
 
 def canonical_entry_root(project_root: Path, source_id: str) -> Path:
@@ -73,6 +80,13 @@ def canonical_entry_root(project_root: Path, source_id: str) -> Path:
 
 def log_progress(message: str) -> None:
     print(message, flush=True)
+
+
+def prepare_note_assets_for_source(source_id: str, *, rewrite_generated_notes: bool = False) -> None:
+    cmd = [sys.executable, str(NOTE_AUTHOR_SCRIPT), "prepare-literature-note", "--source-id", source_id]
+    if rewrite_generated_notes:
+        cmd.append("--rewrite-generated-notes")
+    subprocess.run(cmd, check=True)
 
 
 def relative_path(project_root: Path, path: Path) -> str:
@@ -278,19 +292,180 @@ def build_short_summary(title: str, abstract: str, *, max_chars: int = 320) -> s
     return _truncate_summary(summary or abstract, max_chars=max_chars)
 
 
+def _pick_analysis_sentences(
+    sentences: list[str],
+    keywords: tuple[str, ...],
+    *,
+    max_count: int = 2,
+    used: set[str] | None = None,
+) -> list[str]:
+    selected: list[str] = []
+    seen = used if used is not None else set()
+    for sentence in sentences:
+        normalized = clean_text(sentence)
+        if not normalized or normalized in seen:
+            continue
+        lowered = normalized.lower()
+        if any(keyword in lowered for keyword in keywords):
+            selected.append(normalized)
+            seen.add(normalized)
+            if len(selected) >= max_count:
+                break
+    return selected
+
+
+def _format_analysis_list(items: list[str], fallback: str) -> str:
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        normalized = _truncate_summary(clean_text(item), max_chars=280)
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            cleaned.append(normalized)
+    if not cleaned:
+        cleaned = [fallback]
+    return "\n".join(f"- {item}" for item in cleaned)
+
+
+def _capture_excerpt(note_path: Path, limit: int = 5000) -> str:
+    capture_path = note_path.parent / "source" / "capture.md"
+    if not capture_path.exists():
+        return ""
+    text = capture_path.read_text(encoding="utf-8", errors="ignore")[:limit]
+    text = re.sub(r"(?s)^# Capture\s+", "", text)
+    text = re.sub(r"- URL: .*?\n", "", text)
+    text = re.sub(r"- Captured At: .*?\n", "", text)
+    return clean_text(text)
+
+
+def _context_path(note_path: Path) -> Path:
+    return note_path.parent / NOTE_CONTEXT_NAME
+
+
+def _is_generated_note_text(text: str) -> bool:
+    normalized = str(text or "")
+    return any(marker in normalized for marker in LEGACY_AUTO_NOTE_MARKERS)
+
+
+def _render_bullets(items: list[str]) -> str:
+    return "\n".join(f"- {item}" for item in items)
+
+
+def _pdf_context_block(note_path: Path) -> str:
+    pdf_path = note_path.parent / "source" / "primary.pdf"
+    if not pdf_path.exists():
+        return "## PDF Excerpts\n\nNo primary PDF is available for this source.\n"
+    try:
+        payload = extract_pdf_context_pages(
+            pdf_path,
+            front_limit=8,
+            back_limit=4,
+            per_page_char_limit=3200,
+        )
+    except Exception as exc:
+        return f"## PDF Excerpts\n\nFailed to extract PDF text: `{clean_text(str(exc))}`\n"
+
+    lines = [
+        "## PDF Excerpts",
+        "",
+        f"- Primary PDF: `source/primary.pdf`",
+        f"- Total pages detected: `{payload.get('total_pages') or 'unknown'}`",
+        f"- Included pages: `{', '.join(str(item.get('page')) for item in payload.get('pages', [])) or 'none'}`",
+    ]
+    for item in payload.get("pages", []):
+        text = clean_text(str(item.get("text") or ""))
+        if not text:
+            continue
+        lines.extend(
+            [
+                "",
+                f"### Page {item['page']}",
+                "",
+                text,
+            ]
+        )
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def build_literature_note_context(source_id: str, metadata: dict[str, Any], *, note_path: Path) -> str:
+    abstract = _normalize_extracted_abstract(str(metadata.get("abstract") or ""))
+    if _is_noisy_abstract(abstract):
+        abstract = ""
+    capture_excerpt = _capture_excerpt(note_path, limit=8000)
+    lines = [
+        f"# Close-Reading Context: {metadata.get('canonical_title') or source_id}",
+        "",
+        f"- Source ID: `{source_id}`",
+        f"- Note target: `note.md`",
+        f"- Helper context: `{NOTE_CONTEXT_NAME}`",
+        f"- Source kind: `{metadata.get('source_kind') or 'paper'}`",
+    ]
+    authors = [str(author).strip() for author in metadata.get("authors", []) if str(author).strip()]
+    if authors:
+        lines.append(f"- Authors: {', '.join(authors)}")
+    if metadata.get("year"):
+        lines.append(f"- Year: `{metadata['year']}`")
+    if metadata.get("canonical_url"):
+        lines.append(f"- Canonical URL: {metadata['canonical_url']}")
+
+    lines.extend(
+        [
+            "",
+            "## Writing Targets",
+            "",
+            "- Summarize the motivation, core novelty, method, experiments, limitations, and realistic future work in your own words.",
+            "- Prefer claims grounded in the PDF or captured source text; avoid presenting guesses as evidence.",
+            "- If a limitation or future-work idea is your inference rather than the authors' wording, say that explicitly in `note.md`.",
+        ]
+    )
+
+    lines.extend(
+        [
+            "",
+            "## Abstract",
+            "",
+            abstract or "No clean abstract was extracted; rely on the PDF excerpts and capture text below.",
+            "",
+        ]
+    )
+
+    if capture_excerpt:
+        lines.extend(
+            [
+                "## Landing / Capture Excerpt",
+                "",
+                capture_excerpt,
+                "",
+            ]
+        )
+
+    lines.append(_pdf_context_block(note_path).rstrip())
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def _working_notes_block(note_path: Path) -> str:
+    default_block = (
+        "## Working Notes\n\n"
+        "- Replace the placeholder sections above after reading `note-context.md` and the primary source.\n"
+        "- Keep concrete page/section evidence here if you want a quick audit trail for later review.\n"
+    )
     if note_path.exists():
         existing = note_path.read_text(encoding="utf-8")
         for header in MANUAL_NOTE_HEADERS:
             start = existing.find(header)
             if start >= 0:
                 preserved = existing[start:].strip()
-                if preserved:
+                legacy_default = (
+                    "## Working Notes\n\n"
+                    "- Manual follow-up: verify motivation, method details, results, caveats, and future-work guesses against the full paper."
+                )
+                if (
+                    preserved
+                    and preserved != legacy_default
+                    and "Pending deeper read: replace this scaffold with concrete claims, method details, benchmarks, and caveats." not in preserved
+                ):
                     return preserved
-    return (
-        "## Working Notes\n\n"
-        "- Pending deeper read: replace this scaffold with concrete claims, method details, benchmarks, and caveats.\n"
-    )
+    return default_block
 
 
 def _render_note_template(context: dict[str, str]) -> str:
@@ -313,11 +488,10 @@ def ensure_metadata_short_summary(metadata: dict[str, Any], *, rewrite: bool = F
 
 
 def build_literature_note(source_id: str, metadata: dict[str, Any], *, note_path: Path) -> str:
-    summary = ensure_metadata_short_summary(metadata, rewrite=False)
     authors = [str(author).strip() for author in metadata.get("authors", []) if str(author).strip()]
     cleaned_abstract = _normalize_extracted_abstract(str(metadata.get("abstract") or ""))
     if _is_noisy_abstract(cleaned_abstract):
-        cleaned_abstract = "Abstract extraction looks noisy for this source. Inspect the PDF or landing page directly if you need the full text."
+        cleaned_abstract = _capture_excerpt(note_path, limit=5000) or "Abstract extraction looks noisy for this source. Inspect the PDF or landing page directly if you need the full text."
     retrieval_lines = [
         f"- Search tags: {_format_inline_values(metadata.get('tags', []))}",
         f"- Search topics: {_format_inline_values(metadata.get('topics', []))}",
@@ -326,6 +500,12 @@ def build_literature_note(source_id: str, metadata: dict[str, Any], *, note_path
         retrieval_lines.append(f"- Author cue: `{authors[0]}`")
     if metadata.get("year"):
         retrieval_lines.append(f"- Time cue: `{metadata['year']}`")
+    source_reading_coverage = [
+        f"- Primary PDF: {'`source/primary.pdf`' if (note_path.parent / 'source' / 'primary.pdf').exists() else 'not available'}",
+        f"- Landing capture: {'`source/capture.md`' if (note_path.parent / 'source' / 'capture.md').exists() else 'not available'}",
+        f"- Helper digest: `{NOTE_CONTEXT_NAME}`",
+        "- Read the abstract, introduction/problem framing, method section, experiments/results, and any conclusion/limitations text before replacing the placeholders below.",
+    ]
     context = {
         "title": str(metadata.get("canonical_title") or source_id),
         "source_id": source_id,
@@ -335,7 +515,50 @@ def build_literature_note(source_id: str, metadata: dict[str, Any], *, note_path
         "canonical_url": str(metadata.get("canonical_url") or "n/a"),
         "tags": _format_inline_values(metadata.get("tags", [])),
         "topics": _format_inline_values(metadata.get("topics", [])),
-        "short_summary": summary or "No short summary available yet.",
+        "note_marker": NOTE_SCAFFOLD_MARKER,
+        "source_reading_coverage": "\n".join(source_reading_coverage),
+        "executive_summary": _render_bullets(
+            [
+                "Replace with a 4-8 sentence close-reading summary after you read the paper or `note-context.md`.",
+                "Cover the paper's problem setting, main idea, and the strongest take-away result.",
+            ]
+        ),
+        "motivation": _render_bullets(
+            [
+                "Explain what gap, failure mode, or task constraint in prior work motivates this paper.",
+                "Note any assumptions about embodiment, sensing, data, or evaluation scope.",
+            ]
+        ),
+        "innovations": _render_bullets(
+            [
+                "List the paper's concrete contributions in your own words.",
+                "Separate true novelty from supporting engineering choices if the paper mixes both.",
+            ]
+        ),
+        "method_overview": _render_bullets(
+            [
+                "Describe the full method stack: representation, model/policy, training recipe, inference/control loop, and any special data pipeline.",
+                "Mention the modules or stages that matter most for downstream reuse.",
+            ]
+        ),
+        "results_summary": _render_bullets(
+            [
+                "Summarize the main experimental setup and headline metrics.",
+                "Call out which baselines, tasks, or ablations actually support the paper's core claim.",
+            ]
+        ),
+        "limitations": _render_bullets(
+            [
+                "Record limitations stated by the authors first.",
+                "Then add your own caveats if the evidence looks narrow, simulated, or under-ablated; label those as reviewer inference.",
+            ]
+        ),
+        "future_work": _render_bullets(
+            [
+                "Note future work explicitly named in the paper when available.",
+                "Add realistic next experiments or extensions that would matter for this workspace.",
+            ]
+        ),
         "retrieval_cues": "\n".join(retrieval_lines),
         "abstract": cleaned_abstract or "No abstract extracted yet.",
         "working_notes_block": _working_notes_block(note_path),
@@ -374,7 +597,41 @@ def build_placeholder_claims(source_id: str, abstract: str, *, source_inputs: li
     }
 
 
-def refresh_canonical_notes(project_root: Path, source_ids: list[str] | None = None, *, rewrite_summary: bool = False) -> int:
+def _write_note_assets(
+    source_id: str,
+    metadata: dict[str, Any],
+    *,
+    note_path: Path,
+    rewrite_generated_note: bool = False,
+) -> int:
+    changed = 0
+    context_path = _context_path(note_path)
+    context_text = build_literature_note_context(source_id, metadata, note_path=note_path)
+    before_context = context_path.read_text(encoding="utf-8") if context_path.exists() else ""
+    write_text_if_changed(context_path, context_text)
+    if context_text != before_context:
+        changed += 1
+
+    should_write_note = not note_path.exists()
+    if not should_write_note and rewrite_generated_note:
+        existing = note_path.read_text(encoding="utf-8")
+        should_write_note = _is_generated_note_text(existing)
+    if should_write_note:
+        note_text = build_literature_note(source_id, metadata, note_path=note_path)
+        before_note = note_path.read_text(encoding="utf-8") if note_path.exists() else ""
+        write_text_if_changed(note_path, note_text)
+        if note_text != before_note:
+            changed += 1
+    return changed
+
+
+def refresh_canonical_notes(
+    project_root: Path,
+    source_ids: list[str] | None = None,
+    *,
+    rewrite_summary: bool = False,
+    rewrite_generated_notes: bool = False,
+) -> int:
     literature_root = research_root(project_root) / "library" / "literature"
     metadata_paths = (
         [literature_root / source_id / "metadata.yaml" for source_id in source_ids]
@@ -395,11 +652,12 @@ def refresh_canonical_notes(project_root: Path, source_ids: list[str] | None = N
             write_yaml_if_changed(metadata_path, metadata)
             changed += 1
         note_path = metadata_path.parent / "note.md"
-        note_text = build_literature_note(source_id, metadata, note_path=note_path)
-        before_note = note_path.read_text(encoding="utf-8") if note_path.exists() else ""
-        write_text_if_changed(note_path, note_text)
-        if note_text != before_note:
-            changed += 1
+        changed += _write_note_assets(
+            source_id,
+            metadata,
+            note_path=note_path,
+            rewrite_generated_note=rewrite_generated_notes,
+        )
     rebuild_literature_index(project_root)
     return changed
 
@@ -822,11 +1080,10 @@ def finalize_new_candidate(project_root: Path, candidate: dict[str, Any]) -> str
         "Suggested": [],
         "OpenQuestions": [],
     }
-    note = build_literature_note(source_id, metadata, note_path=entry_root / "note.md")
     write_yaml_if_changed(entry_root / "metadata.yaml", metadata)
     write_yaml_if_changed(entry_root / "claims.yaml", claims)
     write_yaml_if_changed(entry_root / "methods.yaml", methods)
-    write_text_if_changed(entry_root / "note.md", note)
+    prepare_note_assets_for_source(source_id, rewrite_generated_notes=True)
     refresh_tag_views_for_source(project_root, metadata)
 
     index_payload = load_index(literature_index_path(project_root), "literature-index", "literature-corpus-builder")
@@ -993,12 +1250,23 @@ def resolve_review(args: argparse.Namespace) -> int:
 def refresh_notes(args: argparse.Namespace) -> int:
     project_root = find_project_root()
     bootstrap_workspace(project_root)
-    changed = refresh_canonical_notes(
-        project_root,
-        source_ids=list(args.source_id),
-        rewrite_summary=args.rewrite_summary,
+    metadata_paths = (
+        [research_root(project_root) / "library" / "literature" / source_id / "metadata.yaml" for source_id in args.source_id]
+        if args.source_id
+        else sorted((research_root(project_root) / "library" / "literature").glob("*/metadata.yaml"))
     )
-    print(f"[ok] refreshed literature notes and summaries ({changed} file updates)")
+    changed = 0
+    for metadata_path in metadata_paths:
+        metadata = load_yaml(metadata_path, default={})
+        if not isinstance(metadata, dict) or not metadata.get("id"):
+            raise SystemExit(f"Invalid literature metadata: {metadata_path}")
+        before_summary = clean_text(str(metadata.get("short_summary") or ""))
+        summary = ensure_metadata_short_summary(metadata, rewrite=args.rewrite_summary)
+        if summary != before_summary:
+            write_yaml_if_changed(metadata_path, metadata)
+            changed += 1
+        prepare_note_assets_for_source(str(metadata["id"]), rewrite_generated_notes=args.rewrite_generated_notes)
+    print(f"[ok] delegated literature note preparation to research-note-author ({changed} summary updates)")
     return 0
 
 
@@ -1033,9 +1301,14 @@ def build_parser() -> argparse.ArgumentParser:
     rebuild_cmd = subparsers.add_parser("rebuild-index", help="Rebuild the literature index and graph from canonical entries")
     rebuild_cmd.set_defaults(func=lambda _args: (rebuild_literature_index(find_project_root()), print("[ok] rebuilt literature index and graph"), 0)[2])
 
-    refresh_notes_cmd = subparsers.add_parser("refresh-notes", help="Refresh note.md and short_summary from canonical metadata")
+    refresh_notes_cmd = subparsers.add_parser("refresh-notes", help="Refresh short_summary and delegate note asset preparation to research-note-author")
     refresh_notes_cmd.add_argument("--source-id", action="append", default=[], help="Canonical literature source ID to refresh")
     refresh_notes_cmd.add_argument("--rewrite-summary", action="store_true", help="Regenerate short_summary even if one already exists")
+    refresh_notes_cmd.add_argument(
+        "--rewrite-generated-notes",
+        action="store_true",
+        help="Replace notes only when they still look auto-generated or scaffolding-based",
+    )
     refresh_notes_cmd.set_defaults(func=refresh_notes)
 
     refresh_claims_cmd = subparsers.add_parser("refresh-claims", help="Refresh claims.yaml as placeholder claim scaffolds")

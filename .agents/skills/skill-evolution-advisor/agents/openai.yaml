@@ -1,0 +1,7 @@
+interface:
+  display_name: "Skill Evolution Advisor"
+  short_description: "Review research-skill usage and suggest workflow upgrades"
+  default_prompt: "Use $skill-evolution-advisor after a research task to inspect which skills were used, capture friction, and generate a ready-to-send AI prompt with observed issues and concrete skill improvements."
+
+policy:
+  allow_implicit_invocation: true

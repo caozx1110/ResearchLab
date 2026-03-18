@@ -1,5 +1,6 @@
+---
 name: literature-tagger
-description: Curate topics, tags, and tag taxonomy for canonical literature under doc/research/library/literature/, including refreshing tags.yaml, heuristic retagging from title and abstract, manual tag assignment, alias normalization, and taxonomy lint or apply passes. Use when Codex needs to maintain a paper tagging system after ingestion, clean up noisy tags, or prepare a better-tagged library for downstream literature analysis.
+description: Curate topics, tags, and tag taxonomy for canonical literature in `doc/research/library/literature/`, including refreshing `tags.yaml`, heuristic retagging from title and abstract, manual tag assignment, alias normalization, and taxonomy lint or apply passes. Use when Codex needs to maintain a paper tagging system after ingestion, clean up noisy tags, or prepare a better-tagged library for downstream literature analysis.
 ---
 
 # Literature Tagger
@@ -51,3 +52,7 @@ python3 .agents/skills/literature-tagger/scripts/tag_literature.py taxonomy-appl
 - Inspect `library/literature/tag-taxonomy.yaml` whenever you add a new concept, alias, or naming rule.
 - Refresh and inspect `library/literature/index.yaml`, `graph.yaml`, and `tags.yaml` after any retag, taxonomy apply, or manual assignment batch.
 - If a tag looks too local, noisy, or duplicated, normalize it before ending the run.
+
+## Retrospective Handoff
+
+- If taxonomy curation exposed recurring alias drift, missing heuristics, or noisy tag generation, hand the issue to `skill-evolution-advisor` before ending the task.

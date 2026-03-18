@@ -36,3 +36,7 @@ python3 .agents/skills/research-landscape-analyst/scripts/survey_landscape.py li
 - Do not create or modify a `program` here; hand candidate directions to `research-conductor`.
 - Do not claim freshness beyond what is present in the current shared library snapshot.
 - Do not replace `literature-analyst` for program-scoped evidence synthesis once a concrete program already exists.
+
+## Retrospective Handoff
+
+- If survey scope, ranking cues, or landscape-to-program handoff felt weak, hand the observation to `skill-evolution-advisor` before ending the task.

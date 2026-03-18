@@ -1,6 +1,6 @@
 ---
 name: literature-corpus-builder
-description: Canonicalize literature sources into doc/research/library/literature/, including PDFs from raw/, arXiv or OpenReview links, paper pages, blogs, and project pages. Use when Codex needs to download or stage source material, deduplicate by hashes or metadata, move buffered PDFs into the library, resolve duplicate reviews, or refresh the shared literature graph and metadata files.
+description: Canonicalize literature sources into doc/research/library/literature/, including PDFs from raw/, arXiv or OpenReview links, paper pages, blogs, and project pages. Use when Codex needs to download or stage source material, deduplicate by hashes or metadata, move buffered PDFs into the library, resolve duplicate reviews, or refresh the shared literature graph and metadata files before note authoring.
 ---
 
 # Literature Corpus Builder
@@ -21,7 +21,8 @@ Treat `raw/` as a buffer, not as the library.
 - Populate `inputs` with the staged source path or source URL whenever possible.
 - If duplicate resolution is ambiguous, stop at the review queue and hand the decision back to `research-conductor`.
 - If a local PDF reveals a stable source ID such as arXiv or DOI, normalize `canonical_url` and `site_fingerprint` instead of leaving them as local-buffer placeholders.
-- Write a concise `short_summary` into canonical metadata and generate `note.md` from the note template so agents can triage papers without reopening the full source.
+- Write a concise `short_summary` into canonical metadata so the library index stays searchable.
+- Do not own final note authoring inside this skill. After canonical ingest, route immediately to `research-note-author` to prepare note assets and write `note.md`.
 - Treat ingest-time `claims.yaml` as a placeholder scaffold by default: mark it as unverified, note that it came from an abstract snippet, and do not present it as manually validated paper claims.
 - Seed initial `topics` and `tags` during ingest using `doc/research/memory/domain-profile.yaml`, then auto-discover a small set of salient keyword tags from the title and abstract so new themes can start showing up in the shared tag list immediately.
 - After a new canonical paper lands, refresh `tag-taxonomy.yaml` and `tags.yaml` just enough to register newly discovered keyword tags; leave heavier normalization and cleanup to `literature-tagger`.
@@ -35,8 +36,8 @@ python3 .agents/skills/literature-corpus-builder/scripts/ingest_literature.py in
 python3 .agents/skills/literature-corpus-builder/scripts/ingest_literature.py ingest --source "https://arxiv.org/abs/2501.09747"
 python3 .agents/skills/literature-corpus-builder/scripts/ingest_literature.py ingest --search-result doc/research/library/search/results/latest-vla.yaml
 python3 .agents/skills/literature-corpus-builder/scripts/ingest_literature.py resolve-review --review-id paper-review-... --decision existing --canonical-id lit-...
-python3 .agents/skills/literature-corpus-builder/scripts/ingest_literature.py refresh-notes --source-id lit-arxiv-2501-09747v1
 python3 .agents/skills/literature-corpus-builder/scripts/ingest_literature.py refresh-claims --source-id lit-arxiv-2501-09747v1
+python3 .agents/skills/research-note-author/scripts/prepare_note_assets.py prepare-literature-note --source-id lit-arxiv-2501-09747v1
 ```
 
 ## Boundaries
@@ -47,7 +48,8 @@ python3 .agents/skills/literature-corpus-builder/scripts/ingest_literature.py re
 - Keep `metadata.yaml`, `claims.yaml`, `methods.yaml`, and `note.md` lightweight but present for every canonical source.
 - Do not treat placeholder `claims.yaml` output as verified evidence extraction; promote claims only after manual reading or a dedicated claim pass.
 - Do not treat this skill as the long-term owner of literature tag curation.
-- Do not leave `note.md` as a raw abstract dump when a short summary and note scaffold can be generated.
+- Do not let this skill fabricate polished prose for `note.md`; that belongs to `research-note-author`.
+- Do not end the overall task after ingest if the user asked for notes; hand off to `research-note-author` first.
 
 ## Completion Checklist
 
@@ -57,6 +59,10 @@ python3 .agents/skills/literature-corpus-builder/scripts/ingest_literature.py re
 - Confirm PDFs sourced from workspace `raw/` were consumed into intake/library and are no longer left in `raw/`.
 - Spot-check title, authors, abstract, `canonical_url`, `site_fingerprint`, and `short_summary` on newly imported entries.
 - Spot-check `claims.yaml` status and guidance so placeholder claims are clearly marked and not easy to mistake for verified extraction.
-- Open `note.md` on at least one imported paper and confirm the template, quick summary, and retrieval cues are usable.
+- If the user asked for notes, confirm `research-note-author` ran and that `note.md` landed in the canonical entry.
 - Refresh and inspect `library/literature/index.yaml` and `graph.yaml` so batch-level provenance is present.
 - If downstream work depends on curated tags, hand off to `literature-tagger` and refresh `library/literature/tags.yaml` there.
+
+## Retrospective Handoff
+
+- If ingest exposed repeated duplicate-review friction, weak note scaffolds, or missing import utilities, hand the observation to `skill-evolution-advisor` before ending the task.
