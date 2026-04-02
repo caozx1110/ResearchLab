@@ -2117,6 +2117,7 @@ def bootstrap_workspace(project_root: Path) -> None:
                 **yaml_default("user-profile", "research-conductor", status="active"),
                 "research_interests": [],
                 "constraints": {"compute": "", "data": "", "hardware": ""},
+                "available_resources": [],
                 "language_preference": "zh-CN",
                 "risk_preference": "balanced",
                 "long_term_topics": [],

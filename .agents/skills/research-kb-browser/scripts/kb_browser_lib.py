@@ -16,7 +16,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 for candidate in [Path(__file__).resolve()] + list(Path(__file__).resolve().parents):
     lib_root = candidate / ".agents" / "lib"
@@ -39,7 +39,7 @@ SERVICE_NAME = "research-kb-browser"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 PORT_SCAN_LIMIT = 12
-READY_TIMEOUT_SECONDS = 8.0
+READY_TIMEOUT_SECONDS = 25.0
 POLL_INTERVAL_SECONDS = 0.25
 SNAPSHOT_POLL_MS = 3000
 WATCH_DEBOUNCE_SECONDS = 1.5
@@ -278,8 +278,17 @@ def choose_browser_runtime(project_root: Path) -> str:
 
 def fetch_json(url: str, timeout: float = 0.6) -> dict[str, Any] | None:
     request = urllib.request.Request(url, method="GET")
+    parsed = urlparse(url)
+    is_loopback = (parsed.hostname or "").lower() in {"127.0.0.1", "localhost", "::1"}
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        # Some shells export HTTP(S)_PROXY, which can break localhost health checks.
+        # Bypass proxies for loopback service probes to keep daemon readiness stable.
+        if is_loopback:
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            response_ctx = opener.open(request, timeout=timeout)
+        else:
+            response_ctx = urllib.request.urlopen(request, timeout=timeout)
+        with response_ctx as response:
             payload = json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
         return None

@@ -58,9 +58,9 @@ research v1.1 现在把“研究主题”从 skill 脚本里拆出来了。
 
 `research-conductor` / `idea-review-board` -> `literature-scout` -> `literature-corpus-builder`
 
-如果要单独整理 PDF 论文：
+如果要单独深读论文或整理 repo close-reading 笔记：
 
-`paper-research-workbench`
+`research-note-author`
 
 如果要快速摸清代码仓库：
 
@@ -305,6 +305,7 @@ python3 .agents/skills/research-conductor/scripts/run_with_runtime.py .agents/sk
 
 ```bash
 python3 .agents/skills/research-kb-browser/scripts/open_kb_browser.py
+python3 .agents/skills/research-kb-browser/scripts/open_user_hub.py   # legacy alias
 python3 .agents/skills/research-kb-browser/scripts/status_kb_browser.py
 python3 .agents/skills/research-kb-browser/scripts/stop_kb_browser.py
 ```
@@ -440,14 +441,14 @@ python3 .agents/skills/research-kb-browser/scripts/stop_kb_browser.py
 - `为这个 idea 设计一个最小可证伪的实验矩阵和 runbook。`
 - `结合 proposal 里推荐的 repo 和共享 repo 总结，给我一个有明确理由的宿主 repo 选择。`
 
-### `paper-research-workbench`
+### `research-note-author`
 
-作用：把本地 PDF 论文整理成持续更新的 paper workspace，生成解析文本、阅读笔记、topic map、关系图和 AI 可读知识库。
+作用：读取 canonical literature PDF 或 repo 源码快照，生成或刷新 `note.md` / `repo-notes.md`，用于 close reading、证据提炼和后续 idea / design 输入。
 
 示例 prompt：
 
-- `把 raw/ 里的论文都解析进 paper workspace，并刷新 user hub。`
-- `只处理这篇新 PDF，并把它和已有论文做关联分析。`
+- `把 lit-arxiv-2501-09747v1 的 note.md 刷新成结构化 close-reading 版本。`
+- `帮我重写 repo-nvidia-isaac-gr00t 的 repo-notes.md，强调训练/评测/部署接口。`
 
 ### `research-repo-architect`
 

@@ -52,6 +52,59 @@ DEFAULT_STAGES = (
     "implementation-planning",
 )
 REPORT_SHORT_TOKENS = {"vla", "wbc", "gr00t", "g1", "rt1", "rt2", "pi0", "pi05", "octo"}
+STABLE_MEMORY_CUES = (
+    "i have",
+    "we have",
+    "i've got",
+    "we've got",
+    "prefer",
+    "preferred",
+    "default to",
+    "reply in",
+    "respond in",
+    "risk preference",
+    "long term",
+    "long-term",
+    "focus on",
+    "access to",
+    "available to us",
+    "my setup",
+    "our setup",
+    "我有",
+    "我们有",
+    "现在有",
+    "手上有",
+    "可用",
+    "能用",
+    "配置",
+    "偏好",
+    "默认",
+    "中文回复",
+    "英文回复",
+    "风险偏好",
+    "长期方向",
+    "长期研究",
+    "长期关注",
+)
+ABUNDANT_ACCESS_CUES = ("ample", "plenty", "many", "abundant", "充足", "很多", "充裕")
+RESOURCE_AVAILABILITY_CUES = (
+    "i have",
+    "we have",
+    "i've got",
+    "we've got",
+    "access to",
+    "available",
+    "available to us",
+    "my setup",
+    "our setup",
+    "我有",
+    "我们有",
+    "现在有",
+    "手上有",
+    "可用",
+    "能用",
+    "配置",
+)
 
 
 def existing_program_root(project_root: Path, program_id: str) -> Path:
@@ -158,6 +211,360 @@ def list_strings(values: Any) -> list[str]:
     if not isinstance(values, list):
         return []
     return [str(item).strip() for item in values if str(item).strip()]
+
+
+def normalize_memory_value(text: Any) -> str:
+    return re.sub(r"\s+", " ", clean_text(str(text or ""))).casefold()
+
+
+def merge_unique_strings(existing: list[str], additions: list[str]) -> list[str]:
+    merged = [item for item in existing if str(item).strip()]
+    seen = {normalize_memory_value(item) for item in merged}
+    for item in additions:
+        value = clean_text(str(item or ""))
+        if not value:
+            continue
+        key = normalize_memory_value(value)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(value)
+    return merged
+
+
+def split_topic_candidates(text: str) -> list[str]:
+    if not text:
+        return []
+    parts = re.split(r"\s*(?:,|，|;|；|\band\b|与|和|以及|\bplus\b)\s*", text, flags=re.IGNORECASE)
+    return [part for part in parts if clean_text(part)]
+
+
+def normalize_topic_label(text: str) -> str:
+    value = clean_text(text).strip(" ,，。.;；:：()[]{}\"'")
+    value = re.sub(r"^(?:关于|做|研究|方向|主题|topic(?:s)?|focus(?:ing)? on|working on)\s+", "", value, flags=re.IGNORECASE)
+    value = re.sub(r"(?:方面|方向|主题)$", "", value)
+    for token, replacement in {
+        "vla": "VLA",
+        "vlm": "VLM",
+        "wbc": "WBC",
+        "gr00t": "GR00T",
+        "g1": "G1",
+        "pi0": "PI0",
+        "pi05": "PI0.5",
+    }.items():
+        value = re.sub(rf"\b{token}\b", replacement, value, flags=re.IGNORECASE)
+    return clean_text(value).strip()
+
+
+def merge_text_value(existing: Any, addition: str) -> str:
+    current = clean_text(str(existing or ""))
+    incoming = clean_text(addition)
+    if not incoming:
+        return current
+    if not current:
+        return incoming
+    current_norm = normalize_memory_value(current)
+
+    def covered(part: str) -> bool:
+        normalized = normalize_memory_value(part)
+        if not normalized:
+            return True
+        if normalized in current_norm:
+            return True
+        anchors = [
+            token
+            for token in re.findall(r"[a-z0-9]+", normalized)
+            if token
+            not in {
+                "access",
+                "to",
+                "ample",
+                "nvidia",
+                "gpus",
+                "gpu",
+                "rtx",
+                "robot",
+                "humanoid",
+                "workstation",
+                "platform",
+            }
+        ]
+        return bool(anchors) and all(token in current_norm for token in anchors)
+
+    new_parts = [part.strip() for part in incoming.split(";") if part.strip()]
+    uncovered = [part for part in new_parts if not covered(part)]
+    if not uncovered:
+        return current
+    return f"{current}; {'; '.join(uncovered)}"
+
+
+def summarize_resources(resources: list[str], *, kinds: tuple[str, ...]) -> str:
+    selected: list[str] = []
+    for resource in resources:
+        lowered = resource.casefold()
+        if "robot" in lowered or "humanoid" in lowered:
+            resource_kind = "hardware"
+        elif "dataset" in lowered or "data" in lowered or "demo" in lowered:
+            resource_kind = "data"
+        else:
+            resource_kind = "compute"
+        if resource_kind in kinds:
+            selected.append(resource)
+    return "; ".join(selected)
+
+
+def has_stable_memory_cue(statement: str) -> bool:
+    normalized = clean_text(statement).casefold()
+    return any(cue in normalized for cue in STABLE_MEMORY_CUES)
+
+
+def extract_language_preference(statement: str) -> str:
+    raw = clean_text(statement)
+    lowered = raw.casefold()
+    if any(phrase in raw for phrase in ("中英双语", "双语")) or any(
+        phrase in lowered for phrase in ("bilingual", "both chinese and english", "chinese and english")
+    ):
+        return "zh-CN/en-US"
+    if any(phrase in raw for phrase in ("中文回复", "中文回答", "中文交流", "用中文", "默认中文", "中文为主")) or any(
+        phrase in lowered for phrase in ("reply in chinese", "respond in chinese", "answer in chinese", "prefer chinese", "default to chinese")
+    ):
+        return "zh-CN"
+    if any(phrase in raw for phrase in ("英文回复", "英语回复", "英文回答", "用英文", "默认英文", "英语交流")) or any(
+        phrase in lowered for phrase in ("reply in english", "respond in english", "answer in english", "prefer english", "default to english")
+    ):
+        return "en-US"
+    return ""
+
+
+def extract_risk_preference(statement: str) -> str:
+    raw = clean_text(statement)
+    lowered = raw.casefold()
+    if any(phrase in raw for phrase in ("高风险高回报", "激进", "冒险", "大胆一些", "更激进")) or any(
+        phrase in lowered for phrase in ("high risk", "high-risk", "aggressive", "risk seeking", "higher risk")
+    ):
+        return "aggressive"
+    if any(phrase in raw for phrase in ("保守", "稳妥", "稳健", "谨慎", "别太冒险", "不要太冒险")) or any(
+        phrase in lowered for phrase in ("conservative", "risk averse", "risk-averse", "low risk", "safer")
+    ):
+        return "conservative"
+    if any(phrase in raw for phrase in ("平衡", "折中")) or any(
+        phrase in lowered for phrase in ("balanced", "middle ground", "moderate risk")
+    ):
+        return "balanced"
+    return ""
+
+
+def extract_long_term_topics(statement: str) -> list[str]:
+    raw = clean_text(statement)
+    topic_segments: list[str] = []
+    patterns = [
+        r"(?:长期研究方向(?:是|包括)?|长期方向(?:是|包括)?|长期想做|长期关注|长期重点(?:做|是)?|想长期做|未来想做|接下来主要做)\s*(.+)",
+        r"(?:long[- ]term (?:topics?|focus|direction)s?(?:\s+(?:is|are))?|long[- ]term interest(?:s)?(?:\s+(?:is|are))?|want to work on long[- ]term)\s+(.+)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, raw, flags=re.IGNORECASE)
+        if not match:
+            continue
+        tail = clean_text(match.group(1))
+        stop = re.split(r"[。.!?？；;]", tail, maxsplit=1)[0]
+        topic_segments.extend(split_topic_candidates(stop))
+
+    normalized = [normalize_topic_label(item) for item in topic_segments]
+    filtered = [item for item in normalized if item and len(item) >= 2]
+    return merge_unique_strings([], filtered)
+
+
+def extract_resource_facts(statement: str) -> list[str]:
+    raw = clean_text(statement)
+    lowered = raw.casefold()
+    resources: list[str] = []
+    availability_hint = any(cue in lowered for cue in RESOURCE_AVAILABILITY_CUES)
+    topic_hint = any(cue in lowered for cue in ("long term", "long-term", "focus", "方向", "长期", "想做", "关注"))
+
+    for match in re.finditer(r"(?<![a-z0-9])(?:rtx\s*)?((?:20|30|40|50)\d{2})(?![a-z0-9])", lowered, flags=re.IGNORECASE):
+        model = match.group(1).upper()
+        label = f"RTX {model} workstation" if ("workstation" in lowered or "工作站" in raw) else f"RTX {model} GPU"
+        resources.append(label)
+
+    for accelerator in ("H100", "H200", "A100", "A800", "L40S", "B200"):
+        if re.search(rf"(?<![a-z0-9]){accelerator}(?![a-z0-9])", lowered, flags=re.IGNORECASE):
+            label = f"NVIDIA {accelerator} GPUs"
+            if any(cue in raw for cue in ABUNDANT_ACCESS_CUES) or any(cue in lowered for cue in ABUNDANT_ACCESS_CUES):
+                label = f"Access to ample NVIDIA {accelerator} GPUs"
+            resources.append(label)
+
+    if re.search(r"(?<![a-z0-9])g1(?![a-z0-9])", lowered, flags=re.IGNORECASE) and (
+        "unitree" in lowered or "宇树" in raw or "机器人" in raw or "robot" in lowered or "humanoid" in lowered or "人形" in raw
+    ) and (availability_hint or not topic_hint):
+        resources.append("Unitree G1 humanoid robot")
+    elif ("人形机器人" in raw or "humanoid robot" in lowered) and availability_hint:
+        resources.append("humanoid robot platform")
+
+    return merge_unique_strings([], resources)
+
+
+def update_charter_constraints(project_root: Path, program_id: str, updates: dict[str, str], *, apply_changes: bool = True) -> list[str]:
+    if not program_id:
+        return []
+    program_root = existing_program_root(project_root, program_id)
+    charter_path = program_root / "charter.yaml"
+    payload = load_yaml(charter_path, default={})
+    if not isinstance(payload, dict):
+        payload = {}
+    payload.setdefault("constraints", {})
+    if not isinstance(payload["constraints"], dict):
+        payload["constraints"] = {}
+
+    changed_fields: list[str] = []
+    for field, addition in updates.items():
+        if field not in {"compute", "hardware", "data"}:
+            continue
+        merged = merge_text_value(payload["constraints"].get(field, ""), addition)
+        if merged != str(payload["constraints"].get(field, "") or ""):
+            payload["constraints"][field] = merged
+            changed_fields.append(field)
+
+    if changed_fields and apply_changes:
+        write_yaml_if_changed(charter_path, payload)
+    return changed_fields
+
+
+def capture_memory(args: argparse.Namespace) -> int:
+    project_root = find_project_root()
+    bootstrap_workspace(project_root)
+    ensure_research_runtime(project_root, "research-conductor")
+
+    statement = clean_text(args.statement)
+    resources = extract_resource_facts(statement)
+    language_preference = extract_language_preference(statement)
+    risk_preference = extract_risk_preference(statement)
+    long_term_topics = extract_long_term_topics(statement)
+    if not any([resources, language_preference, risk_preference, long_term_topics]):
+        print("[ok] no stable memory facts recognized")
+        print("captured: false")
+        return 0
+
+    profile_path = research_root(project_root) / "memory" / "user-profile.yaml"
+    profile = load_yaml(profile_path, default={})
+    if not isinstance(profile, dict):
+        profile = {**yaml_default("user-profile", "research-conductor", status="active")}
+    profile.setdefault("constraints", {})
+    if not isinstance(profile["constraints"], dict):
+        profile["constraints"] = {"compute": "", "data": "", "hardware": ""}
+    profile.setdefault("available_resources", [])
+    if not isinstance(profile["available_resources"], list):
+        profile["available_resources"] = []
+
+    profile_fields: list[str] = []
+    merged_resources = merge_unique_strings(list_strings(profile.get("available_resources")), resources)
+    if merged_resources != list_strings(profile.get("available_resources")):
+        profile["available_resources"] = merged_resources
+        profile_fields.append("available_resources")
+
+    compute_summary = summarize_resources(resources, kinds=("compute",))
+    if compute_summary:
+        merged_compute = merge_text_value(profile["constraints"].get("compute", ""), compute_summary)
+        if merged_compute != str(profile["constraints"].get("compute", "") or ""):
+            profile["constraints"]["compute"] = merged_compute
+            profile_fields.append("constraints.compute")
+
+    hardware_summary = summarize_resources(resources, kinds=("hardware",))
+    if hardware_summary:
+        merged_hardware = merge_text_value(profile["constraints"].get("hardware", ""), hardware_summary)
+        if merged_hardware != str(profile["constraints"].get("hardware", "") or ""):
+            profile["constraints"]["hardware"] = merged_hardware
+            profile_fields.append("constraints.hardware")
+
+    data_summary = summarize_resources(resources, kinds=("data",))
+    if data_summary:
+        merged_data = merge_text_value(profile["constraints"].get("data", ""), data_summary)
+        if merged_data != str(profile["constraints"].get("data", "") or ""):
+            profile["constraints"]["data"] = merged_data
+            profile_fields.append("constraints.data")
+
+    if language_preference and language_preference != str(profile.get("language_preference", "") or ""):
+        profile["language_preference"] = language_preference
+        profile_fields.append("language_preference")
+
+    if risk_preference and risk_preference != str(profile.get("risk_preference", "") or ""):
+        profile["risk_preference"] = risk_preference
+        profile_fields.append("risk_preference")
+
+    profile.setdefault("long_term_topics", [])
+    if not isinstance(profile["long_term_topics"], list):
+        profile["long_term_topics"] = []
+    merged_topics = merge_unique_strings(list_strings(profile.get("long_term_topics")), long_term_topics)
+    if merged_topics != list_strings(profile.get("long_term_topics")):
+        profile["long_term_topics"] = merged_topics
+        profile_fields.append("long_term_topics")
+
+    program_updates = {
+        field: summary
+        for field, summary in (
+            ("compute", compute_summary),
+            ("hardware", hardware_summary),
+            ("data", data_summary),
+        )
+        if summary
+    }
+    program_fields = (
+        update_charter_constraints(project_root, args.program_id, program_updates, apply_changes=not args.dry_run)
+        if args.program_id
+        else []
+    )
+
+    if args.dry_run:
+        print("[ok] analyzed memory statement")
+        print(f"stable_cue: {str(has_stable_memory_cue(statement)).lower()}")
+        print(f"resources: {', '.join(resources)}")
+        print(f"language_preference: {language_preference or 'none'}")
+        print(f"risk_preference: {risk_preference or 'none'}")
+        print(f"long_term_topics: {', '.join(long_term_topics) if long_term_topics else 'none'}")
+        print(f"profile_fields: {', '.join(profile_fields) if profile_fields else 'none'}")
+        print(f"program_fields: {', '.join(program_fields) if program_fields else 'none'}")
+        print("captured: false")
+        return 0
+
+    if not profile_fields and not program_fields:
+        print("[ok] no new memory updates were needed")
+        print(f"resources: {', '.join(resources)}")
+        print(f"language_preference: {language_preference or 'none'}")
+        print(f"risk_preference: {risk_preference or 'none'}")
+        print(f"long_term_topics: {', '.join(long_term_topics) if long_term_topics else 'none'}")
+        print("captured: false")
+        return 0
+
+    if profile_fields:
+        profile["generated_at"] = utc_now_iso()
+        write_yaml_if_changed(profile_path, profile)
+
+    append_history(
+        project_root,
+        {
+            "timestamp": utc_now_iso(),
+            "type": "memory-captured",
+            "source": args.source,
+            "statement": compact_text(statement, max_chars=240),
+            "stable_cue": has_stable_memory_cue(statement),
+            "resources": resources,
+            "language_preference": language_preference,
+            "risk_preference": risk_preference,
+            "long_term_topics": long_term_topics,
+            "profile_fields": profile_fields,
+            "program_id": args.program_id,
+            "program_fields": [f"constraints.{field}" for field in program_fields],
+        },
+    )
+
+    print("[ok] captured stable memory")
+    print(f"resources: {', '.join(resources)}")
+    print(f"language_preference: {language_preference or 'none'}")
+    print(f"risk_preference: {risk_preference or 'none'}")
+    print(f"long_term_topics: {', '.join(long_term_topics) if long_term_topics else 'none'}")
+    print(f"profile_fields: {', '.join(profile_fields) if profile_fields else 'none'}")
+    print(f"program_fields: {', '.join(program_fields) if program_fields else 'none'}")
+    print("captured: true")
+    return 0
 
 
 def load_program_context(project_root: Path, program_id: str) -> dict[str, Any]:
@@ -1425,6 +1832,16 @@ def build_parser() -> argparse.ArgumentParser:
     pref_cmd.add_argument("--key", required=True)
     pref_cmd.add_argument("--value", required=True)
     pref_cmd.set_defaults(func=set_preference)
+
+    capture_cmd = subparsers.add_parser(
+        "capture-memory",
+        help="Capture stable user resource facts or preferences from a natural-language statement",
+    )
+    capture_cmd.add_argument("--statement", required=True)
+    capture_cmd.add_argument("--program-id", default="")
+    capture_cmd.add_argument("--source", default="chat")
+    capture_cmd.add_argument("--dry-run", action="store_true")
+    capture_cmd.set_defaults(func=capture_memory)
 
     decision_cmd = subparsers.add_parser("append-decision", help="Append a markdown decision log entry")
     decision_cmd.add_argument("--program-id", required=True)

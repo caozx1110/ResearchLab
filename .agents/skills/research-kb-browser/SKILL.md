@@ -27,10 +27,18 @@ Build a local, read-only knowledge browser for research v1.1.
 ```bash
 python3 .agents/skills/research-kb-browser/scripts/build_kb_browser.py
 python3 .agents/skills/research-kb-browser/scripts/open_kb_browser.py
+python3 .agents/skills/research-kb-browser/scripts/open_user_hub.py   # legacy alias
 python3 .agents/skills/research-kb-browser/scripts/status_kb_browser.py
 python3 .agents/skills/research-kb-browser/scripts/stop_kb_browser.py
 python3 .agents/skills/research-kb-browser/scripts/serve_kb_browser.py
 ```
+
+Legacy compatibility:
+
+- Older workflows may still call `open_user_hub.py` from the historical
+  `paper-research-workbench` flow.
+- Use `open_kb_browser.py` as the canonical entrypoint; `open_user_hub.py`
+  is kept only as a compatibility shim.
 
 ## Boundaries
 
