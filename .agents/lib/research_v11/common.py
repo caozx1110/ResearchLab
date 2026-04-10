@@ -122,6 +122,10 @@ def research_root(project_root: Path) -> Path:
     return project_root / "doc" / "research"
 
 
+def program_root(project_root: Path, program_id: str) -> Path:
+    return research_root(project_root) / "programs" / program_id
+
+
 def raw_root(project_root: Path) -> Path:
     return project_root / "raw"
 
@@ -163,6 +167,17 @@ def yaml_default(doc_id: str, generated_by: str, status: str = "ready", confiden
         "inputs": [],
         "confidence": confidence,
     }
+
+
+def parse_iso_datetime(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    normalized = text.replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
 
 
 def yaml_scalar(value: Any) -> str:
@@ -1569,6 +1584,12 @@ def blank_list_document(doc_id: str, generated_by: str) -> dict[str, Any]:
     return payload
 
 
+def blank_reporting_events(program_id: str, generated_by: str = "weekly-report-author") -> dict[str, Any]:
+    payload = blank_list_document(f"{program_id}-reporting-events", generated_by)
+    payload["program_id"] = program_id
+    return payload
+
+
 def load_index(path: Path, doc_id: str, generated_by: str) -> dict[str, Any]:
     payload = load_yaml(path)
     if not isinstance(payload, dict):
@@ -1596,6 +1617,60 @@ def load_list_document(path: Path, doc_id: str, generated_by: str) -> dict[str, 
     payload.setdefault("confidence", 1.0)
     payload["items"] = _coerce_list(payload.get("items"))
     return payload
+
+
+def program_reporting_events_path(project_root: Path, program_id: str) -> Path:
+    return program_root(project_root, program_id) / "workflow" / "reporting-events.yaml"
+
+
+def load_program_reporting_events(project_root: Path, program_id: str) -> list[dict[str, Any]]:
+    payload = load_list_document(
+        program_reporting_events_path(project_root, program_id),
+        f"{program_id}-reporting-events",
+        "weekly-report-author",
+    )
+    events: list[dict[str, Any]] = []
+    for item in payload.get("items", []):
+        if not isinstance(item, dict):
+            continue
+        event = dict(item)
+        event["timestamp_dt"] = parse_iso_datetime(item.get("timestamp"))
+        events.append(event)
+    events.sort(key=lambda item: item.get("timestamp_dt") or datetime.min.replace(tzinfo=timezone.utc))
+    return events
+
+
+def append_program_reporting_event(
+    project_root: Path,
+    program_id: str,
+    event: dict[str, Any],
+    *,
+    generated_by: str,
+) -> Path:
+    path = program_reporting_events_path(project_root, program_id)
+    payload = load_list_document(path, f"{program_id}-reporting-events", generated_by)
+    payload["program_id"] = program_id
+    payload["generated_by"] = generated_by
+    payload["generated_at"] = utc_now_iso()
+    items = [item for item in payload.get("items", []) if isinstance(item, dict)]
+    normalized = dict(event)
+    normalized.setdefault("timestamp", utc_now_iso())
+    normalized["source_skill"] = str(normalized.get("source_skill") or generated_by).strip() or generated_by
+    normalized["event_type"] = str(normalized.get("event_type") or "update").strip() or "update"
+    normalized["title"] = str(normalized.get("title") or "").strip()
+    normalized["summary"] = str(normalized.get("summary") or "").strip()
+    for key in ("artifacts", "idea_ids", "paper_ids", "repo_ids", "tags"):
+        values = normalized.get(key, [])
+        if isinstance(values, list):
+            normalized[key] = [str(item) for item in values if str(item).strip()]
+        else:
+            normalized[key] = []
+    if "stage" in normalized:
+        normalized["stage"] = str(normalized.get("stage") or "").strip()
+    items.append(normalized)
+    payload["items"] = items
+    write_yaml_if_changed(path, payload)
+    return path
 
 
 def build_literature_graph(records: list[dict[str, Any]], generated_by: str = "literature-corpus-builder") -> dict[str, Any]:
@@ -2169,6 +2244,7 @@ def bootstrap_program(project_root: Path, program_id: str, *, question: str, goa
             "selected_idea_id": "",
             "selected_repo_id": "",
         },
+        program_root / "workflow" / "reporting-events.yaml": blank_reporting_events(program_id),
         program_root / "workflow" / "open-questions.yaml": blank_list_document(f"{program_id}-open-questions", "research-conductor"),
         program_root / "workflow" / "evidence-requests.yaml": blank_list_document(f"{program_id}-evidence-requests", "research-conductor"),
         program_root / "workflow" / "preferences.yaml": {

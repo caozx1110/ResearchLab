@@ -21,6 +21,7 @@ Normalize repositories into the shared repo library before using them in ideas o
 - Stop at the duplicate review queue when the canonical repo identity is uncertain.
 - Treat repos under workspace `raw/` as a consumable buffer: move them through intake into the library instead of leaving the raw copy behind.
 - Write a concise `short_summary` into canonical repo summaries so the library index stays searchable.
+- Keep canonical repo summaries structured enough that `weekly-report-author` can summarize recent repo ingest from `summary.yaml` without rereading the repo tree.
 - Do not own final repo note authoring inside this skill. After canonical ingest, route immediately to `research-note-author` to prepare note assets and write `repo-notes.md`.
 
 ## Commands

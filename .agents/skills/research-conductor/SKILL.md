@@ -1,6 +1,6 @@
 ---
 name: research-conductor
-description: Coordinate the end-to-end research workflow around program folders under `doc/research/programs/`, including program creation, stage tracking, decision logging, evidence requests, long-lived memory updates, and weekly report writing. Use when Codex needs to clarify research goals through dialogue, recover prior context, record preferences, synthesize weekly program status, or route the next step to literature, repo, idea, or method skills.
+description: Coordinate the end-to-end research workflow around program folders under `doc/research/programs/`, including program creation, stage tracking, decision logging, evidence requests, long-lived memory updates, and routing to the right downstream research skill. Use when Codex needs to clarify research goals through dialogue, recover prior context, record preferences, or move a program to its next stage.
 ---
 
 # Research Conductor
@@ -13,20 +13,19 @@ Keep the conversation anchored to a concrete `program`.
 2. Create or reopen a program under `doc/research/programs/<program-id>/`.
 3. If a landscape survey already proposed a good candidate, instantiate the program directly from that candidate seed instead of restating everything by hand.
 4. Update `workflow/state.yaml`, `workflow/decision-log.md`, and `memory/*` as the conversation advances.
-5. Write weekly reports under `doc/research/programs/<program-id>/weekly/` when the user wants a durable status report.
+5. Route weekly report requests to `weekly-report-author` instead of generating the report here.
 6. Route deterministic work to the other research skills instead of reproducing their logic here.
 7. When the user states stable first-person facts about available compute, hardware, data, language preference, risk preference, or long-term research direction, capture them to memory before continuing.
 
 ## Shared Contract
 
 - Treat `workflow/state.yaml` as the durable stage tracker and keep it explicit when the workflow changes.
+- Keep `workflow/reporting-events.yaml` present and available as the program's cross-skill weekly-report feed; downstream program skills should append concise report-ready updates there.
 - Durable unresolved questions belong in `workflow/open-questions.yaml`; durable blockers belong in `workflow/evidence-requests.yaml`.
 - Record stable decisions and preferences to files even if they are already clear in chat.
 - Treat statements like "I have access to H200s", "we have a Unitree G1", "I prefer Chinese responses", "keep the risk profile conservative", or "my long-term direction is humanoid VLA" as memory-capture triggers, not as chat-only context.
 - Own the remembered research runtime in `doc/research/memory/runtime-environments.yaml`, especially after a working Python interpreter with `PyYAML` and a PDF backend has been validated.
 - Keep theme-specific heuristics in `doc/research/memory/domain-profile.yaml` instead of embedding them into downstream skill scripts.
-- Weekly reports should synthesize canonical library metadata (`literature/*/metadata.yaml`, `repos/*/summary.yaml`), program workflow/design artifacts, and remembered history instead of reparsing raw PDFs or repo source trees.
-- Weekly report runs should append a `weekly-report-generated` event to `doc/research/memory/history/` so later reports can see what window was already covered.
 - Use the shared contracts in `doc/research/shared/schemas/shared-data-model.md` and `doc/research/shared/schemas/workflow-state-schema.md`.
 
 ## Commands
@@ -46,8 +45,13 @@ python3 .agents/skills/research-conductor/scripts/run_with_runtime.py .agents/sk
 python3 .agents/skills/research-conductor/scripts/manage_workspace.py append-decision --program-id my-program --stage idea-review --summary "..."
 python3 .agents/skills/research-conductor/scripts/manage_workspace.py set-stage --program-id my-program --stage literature-analysis
 python3 .agents/skills/research-conductor/scripts/manage_workspace.py add-open-question --program-id my-program --question-id q-1 --question "Which benchmark matters most?"
-python3 .agents/skills/research-conductor/scripts/manage_workspace.py write-weekly-report --program-id my-program --days 7 --end-date 2026-03-18
 python3 .agents/skills/research-conductor/scripts/run_with_runtime.py .agents/skills/literature-corpus-builder/scripts/ingest_literature.py ingest --source raw/example.pdf
+```
+
+Weekly report handoff:
+
+```bash
+python3 .agents/skills/weekly-report-author/scripts/write_weekly_report.py --program-id my-program --days 7 --end-date 2026-03-18
 ```
 
 ## Boundaries

@@ -15,6 +15,7 @@ for candidate in [Path(__file__).resolve()] + list(Path(__file__).resolve().pare
         break
 
 from research_v11.common import (
+    append_program_reporting_event,
     bootstrap_workspace,
     ensure_research_runtime,
     find_project_root,
@@ -533,6 +534,48 @@ def command_review(args: argparse.Namespace) -> int:
     open_evidence_requests(project_root, payload)
     update_index(project_root, payload, mode="review")
     update_state(project_root, payload, mode="review")
+    append_program_reporting_event(
+        project_root,
+        args.program_id,
+        {
+            "source_skill": "idea-review-board",
+            "event_type": "ideas-reviewed",
+            "title": "Idea review completed",
+            "summary": (
+                f"Reviewed {len(payload['proposals'])} idea proposal(s)"
+                + (
+                    f"; current top candidate is {payload['proposals'][0]['idea_id']}"
+                    if payload["proposals"]
+                    else ""
+                )
+                + "; selection still requires explicit confirmation."
+            ),
+            "artifacts": [
+                relative_path(project_root, payload["index_path"]),
+                *[relative_path(project_root, item["review_path"]) for item in payload["proposals"][:6]],
+                *[relative_path(project_root, item["decision_path"]) for item in payload["proposals"][:6]],
+            ],
+            "idea_ids": [item["idea_id"] for item in payload["proposals"]],
+            "paper_ids": sorted(
+                {
+                    link.split(":", 1)[1]
+                    for item in payload["proposals"]
+                    for link in evidence_links_for(item["proposal"])[0]
+                    if link.startswith("lit:")
+                }
+            ),
+            "repo_ids": sorted(
+                {
+                    link.split(":", 1)[1]
+                    for item in payload["proposals"]
+                    for link in evidence_links_for(item["proposal"])[1]
+                    if link.startswith("repo:")
+                }
+            ),
+            "stage": "idea-review",
+        },
+        generated_by="idea-review-board",
+    )
     print(
         f"[ok] reviewed {len(payload['proposals'])} idea(s) for program {args.program_id}; "
         "selection still requires explicit user confirmation"
@@ -561,6 +604,24 @@ def command_select_best(args: argparse.Namespace) -> int:
     open_evidence_requests(project_root, payload)
     update_index(project_root, payload, mode="select-best", selected_idea_id=best_id)
     update_state(project_root, payload, mode="select-best", selected_idea_id=best_id)
+    append_program_reporting_event(
+        project_root,
+        args.program_id,
+        {
+            "source_skill": "idea-review-board",
+            "event_type": "idea-selected",
+            "title": "Idea selected for design",
+            "summary": f"Auto-selected {best_id} after reviewing {len(payload['proposals'])} idea proposal(s).",
+            "artifacts": [
+                relative_path(project_root, payload["index_path"]),
+                *[relative_path(project_root, item["review_path"]) for item in payload["proposals"][:6]],
+                *[relative_path(project_root, item["decision_path"]) for item in payload["proposals"][:6]],
+            ],
+            "idea_ids": [item["idea_id"] for item in payload["proposals"]],
+            "stage": "method-design",
+        },
+        generated_by="idea-review-board",
+    )
     print(f"[ok] auto-selected `{best_id}` for program {args.program_id} at explicit user request")
     return 0
 

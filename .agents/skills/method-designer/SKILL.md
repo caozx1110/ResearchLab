@@ -19,6 +19,7 @@ Convert a selected idea into a bounded engineering plan.
 ## Shared Contract
 
 - Populate `inputs` with the selected idea files plus the repo index or repo summary that informed repo choice.
+- After the design pack lands, append a concise summary event to `workflow/reporting-events.yaml` with the selected idea, chosen repo(s), and key interface or metric counts so `weekly-report-author` can quote it directly.
 - Persist repo-choice provenance in `design/repo-choice.yaml`, including `selected_repo_summary`, `candidate_repos`, and concise selection reasons, so later skills can recover why a repo was chosen.
 - Treat `doc/research/memory/domain-profile.yaml` as the source of workspace-local repo-role hints and query heuristics; keep the design template itself field-agnostic.
 - If the design depends on more than one repo, persist the host/supporting split and interface seams in `design/coordination-contracts.yaml` instead of burying them in prose only.

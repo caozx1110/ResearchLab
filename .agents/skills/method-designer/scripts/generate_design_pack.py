@@ -15,6 +15,7 @@ for candidate in [Path(__file__).resolve()] + list(Path(__file__).resolve().pare
         break
 
 from research_v11.common import (
+    append_program_reporting_event,
     bootstrap_workspace,
     ensure_research_runtime,
     find_project_root,
@@ -476,6 +477,40 @@ def main() -> int:
         state["selected_idea_id"] = idea_id
         state["selected_repo_id"] = selected_repo.get("id", "")
         write_yaml_if_changed(state_path, state)
+
+    append_program_reporting_event(
+        project_root,
+        args.program_id,
+        {
+            "source_skill": "method-designer",
+            "event_type": "design-pack-generated",
+            "title": "Design pack refreshed",
+            "summary": (
+                f"Generated a design pack for {idea_id} using host repo {selected_repo.get('id', 'pending-repo')}; "
+                f"defined {len(interfaces.get('new_modules', []))} new modules and {len(interfaces.get('metrics', []))} tracked metrics."
+            ),
+            "artifacts": [
+                (program_root / "design" / "selected-idea.yaml").relative_to(project_root).as_posix(),
+                (program_root / "design" / "repo-choice.yaml").relative_to(project_root).as_posix(),
+                (program_root / "design" / "interfaces.yaml").relative_to(project_root).as_posix(),
+                (program_root / "design" / "coordination-contracts.yaml").relative_to(project_root).as_posix(),
+                (program_root / "design" / "system-design.md").relative_to(project_root).as_posix(),
+                (program_root / "experiments" / "matrix.yaml").relative_to(project_root).as_posix(),
+                (program_root / "experiments" / "runbook.md").relative_to(project_root).as_posix(),
+            ],
+            "idea_ids": [idea_id],
+            "repo_ids": [
+                str(selected_repo.get("id") or "").strip(),
+                *[
+                    str(item.get("repo_id") or "").strip()
+                    for item in supporting_repos
+                    if isinstance(item, dict) and str(item.get("repo_id") or "").strip()
+                ],
+            ],
+            "stage": "implementation-planning",
+        },
+        generated_by="method-designer",
+    )
 
     print(f"[ok] generated design pack for {idea_id}")
     return 0

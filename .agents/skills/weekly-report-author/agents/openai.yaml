@@ -1,0 +1,4 @@
+interface:
+  display_name: "Weekly Report Author"
+  short_description: "Write weekly research reports from program artifacts and reporting events"
+  default_prompt: "Use $weekly-report-author to generate a durable weekly report for a research program by reading reporting-events, workflow artifacts, and canonical library metadata."

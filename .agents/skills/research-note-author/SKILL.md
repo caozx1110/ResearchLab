@@ -40,6 +40,7 @@ python3 .agents/skills/research-note-author/scripts/prepare_note_assets.py prepa
 - Do not stop at an abstract rewrite.
 - Literature notes should cover motivation, novelty, method, experiments, limitations, and future work with evidence-aware wording.
 - Repo notes should cover goal, architecture, runnable workflow, strengths, risks, and extension points based on the visible source.
+- Keep the `Executive Summary` self-contained enough that `weekly-report-author` can paraphrase it without reopening the source immediately.
 - Keep the final note detailed enough that a later agent can reuse it without reopening the full source immediately.
 
 ## Handoff Rules

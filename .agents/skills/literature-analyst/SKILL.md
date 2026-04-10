@@ -17,6 +17,7 @@ Use the canonical library as the evidence base for a specific program.
 ## Shared Contract
 
 - Populate `inputs` with the charter plus the literature entries or indexes that grounded the map.
+- After writing a durable literature map, append a concise summary event to `workflow/reporting-events.yaml` so `weekly-report-author` can cite the refresh without reparsing the whole map.
 - Prefer retrieval that can be audited later: preserve the query terms, matched tag cues, and short summaries for the selected papers.
 - Treat `doc/research/memory/domain-profile.yaml` as the source of workspace-local query heuristics; do not hardcode field-specific short terms in this skill.
 - After writing the map, advance `workflow/state.yaml` to `literature-analysis` while preserving any later-stage selection fields.

@@ -17,6 +17,7 @@ Generate proposals without trying to defend them.
 ## Shared Contract
 
 - Use stable `lit:` and `repo:` references in proposal evidence links whenever possible.
+- After proposal generation lands, append a concise event to `workflow/reporting-events.yaml` with the refreshed idea inventory and any top repo signals so `weekly-report-author` can summarize the run directly.
 - Populate `inputs` with the charter, literature map, and any repo index consulted.
 - If repo evidence is used, persist the top repo candidates in `proposal.yaml.repo_context` with `repo_id`, `short_summary`, score, and short reasons so downstream skills do not need to rediscover them from scratch.
 - Treat `doc/research/memory/domain-profile.yaml` as the source of workspace-local query heuristics and repo-role vocabulary; proposal templates should stay field-agnostic.

@@ -22,6 +22,7 @@ Treat `raw/` as a buffer, not as the library.
 - If duplicate resolution is ambiguous, stop at the review queue and hand the decision back to `research-conductor`.
 - If a local PDF reveals a stable source ID such as arXiv or DOI, normalize `canonical_url` and `site_fingerprint` instead of leaving them as local-buffer placeholders.
 - Write a concise `short_summary` into canonical metadata so the library index stays searchable.
+- Keep canonical metadata concise and summary-rich enough that `weekly-report-author` can summarize recent ingest from `metadata.yaml` without reopening the raw PDF.
 - Do not own final note authoring inside this skill. After canonical ingest, route immediately to `research-note-author` to prepare note assets and write `note.md`.
 - Treat ingest-time `claims.yaml` as a placeholder scaffold by default: mark it as unverified, note that it came from an abstract snippet, and do not present it as manually validated paper claims.
 - Seed initial `topics` and `tags` during ingest using `doc/research/memory/domain-profile.yaml`, then auto-discover a small set of salient keyword tags from the title and abstract so new themes can start showing up in the shared tag list immediately.

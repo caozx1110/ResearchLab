@@ -15,6 +15,7 @@ for candidate in [Path(__file__).resolve()] + list(Path(__file__).resolve().pare
         break
 
 from research_v11.common import (
+    append_program_reporting_event,
     bootstrap_workspace,
     ensure_research_runtime,
     find_project_root,
@@ -157,6 +158,7 @@ def main() -> int:
     seeds = direction_titles or gap_titles or [charter.get("goal", "baseline direction")]
 
     created = 0
+    report_repo_ids: set[str] = set()
     for seed in seeds:
         if created >= args.limit:
             break
@@ -167,6 +169,7 @@ def main() -> int:
             continue
         repo_context = ranked_repo_contexts(project_root, charter, literature_map, title, limit=3)
         repo_candidates = [item["repo_id"] for item in repo_context if item.get("repo_id")]
+        report_repo_ids.update(repo_candidates)
         top_repo = repo_context[0] if repo_context else {}
         novelty = 4 if "light" in title.lower() or "new" in title.lower() else 3
         proposal = {
@@ -249,6 +252,32 @@ def main() -> int:
         elif not state.get("selected_idea_id"):
             state["active_idea_id"] = ""
         write_yaml_if_changed(state_path, state)
+    current_idea_ids = sorted(index_payload.get("items", {}).keys())
+    append_program_reporting_event(
+        project_root,
+        args.program_id,
+        {
+            "source_skill": "idea-forge",
+            "event_type": "ideas-seeded",
+            "title": "Idea proposals refreshed",
+            "summary": (
+                f"Seeded {created} idea proposal(s)"
+                + (f"; current inventory includes {', '.join(current_idea_ids[:3])}" if current_idea_ids else "")
+                + "."
+            ),
+            "artifacts": [
+                index_path.relative_to(project_root).as_posix(),
+                *[
+                    (program_root / "ideas" / idea_id / "proposal.yaml").relative_to(project_root).as_posix()
+                    for idea_id in current_idea_ids[:6]
+                ],
+            ],
+            "idea_ids": current_idea_ids,
+            "repo_ids": sorted(report_repo_ids),
+            "stage": "idea-generation",
+        },
+        generated_by="idea-forge",
+    )
     print(f"[ok] seeded {created} idea(s) for program {args.program_id}")
     return 0
 

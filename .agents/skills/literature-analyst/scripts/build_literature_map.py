@@ -16,6 +16,7 @@ for candidate in [Path(__file__).resolve()] + list(Path(__file__).resolve().pare
         break
 
 from research_v11.common import (
+    append_program_reporting_event,
     bootstrap_workspace,
     ensure_research_runtime,
     find_project_root,
@@ -298,6 +299,36 @@ def main() -> int:
         state["inputs"] = [str((program_root / "charter.yaml").relative_to(project_root)), output_path.relative_to(project_root).as_posix()]
         state["stage"] = "literature-analysis"
         write_yaml_if_changed(state_path, state)
+    retrieval = payload.get("retrieval", {}) if isinstance(payload, dict) else {}
+    selected_sources = retrieval.get("selected_sources", []) if isinstance(retrieval, dict) else []
+    query_tags = retrieval.get("query_tags", []) if isinstance(retrieval, dict) else []
+    query_tags = query_tags if isinstance(query_tags, list) else []
+    source_ids = [
+        str(item.get("source_id") or "").strip()
+        for item in selected_sources
+        if isinstance(item, dict) and str(item.get("source_id") or "").strip()
+    ]
+    append_program_reporting_event(
+        project_root,
+        args.program_id,
+        {
+            "source_skill": "literature-analyst",
+            "event_type": "literature-map-updated",
+            "title": "Literature map refreshed",
+            "summary": (
+                f"Selected {len(source_ids)} canonical sources for the literature map"
+                + (f" around tags {', '.join(str(tag) for tag in query_tags[:3])}." if query_tags else ".")
+            ),
+            "artifacts": [
+                output_path.relative_to(project_root).as_posix(),
+                state_path.relative_to(project_root).as_posix(),
+            ],
+            "paper_ids": source_ids,
+            "stage": "literature-analysis",
+            "tags": [str(tag) for tag in query_tags if str(tag).strip()],
+        },
+        generated_by="literature-analyst",
+    )
     print(f"[ok] wrote {output_path.as_posix()}")
     return 0
 

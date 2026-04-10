@@ -19,6 +19,7 @@ Be skeptical, explicit, and evidence-led.
 ## Shared Contract
 
 - Populate `inputs` with the reviewed proposal, literature map, and any staged search result used for novelty checking.
+- After durable review or selection outputs land, append a concise summary event to `workflow/reporting-events.yaml` so `weekly-report-author` can recover the review outcome without diffing every `review.yaml` and `decision.yaml`.
 - Move `workflow/state.yaml` to `idea-review` during collaborative review, and only advance to `method-design` after an explicit `selected_idea_id` exists.
 - Keep `review.yaml` skeptical and evidence-led without rewriting the underlying proposal.
 - If the user tries to pick an idea ad hoc, recommend running one full `idea-forge + idea-review-board` pass first so the choice is written down in `decision.yaml`.

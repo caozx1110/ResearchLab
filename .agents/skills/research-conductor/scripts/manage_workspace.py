@@ -28,6 +28,7 @@ from research_v11.common import (
     inspect_python_runtime,
     load_literature_records,
     load_list_document,
+    load_program_reporting_events,
     load_repo_summaries,
     load_runtime_registry,
     load_yaml,
@@ -1008,6 +1009,29 @@ def weekly_progress_items(project_root: Path, context: dict[str, Any], window_st
             items.append((timestamp, "Program workspace was initialized."))
         elif event_type == "program-created-from-landscape":
             items.append((timestamp, f"Program was bootstrapped from landscape survey `{event.get('survey_id') or 'n/a'}`."))
+        elif str(event.get("summary") or "").strip():
+            items.append((timestamp, compact_text(str(event.get("summary") or "").strip(), max_chars=220)))
+        elif event_type == "memory-captured":
+            resources = list_strings(event.get("resources"))
+            profile_fields = list_strings(event.get("profile_fields"))
+            program_fields = list_strings(event.get("program_fields"))
+            fragments: list[str] = []
+            if resources:
+                fragments.append(f"remembered resources `{', '.join(resources[:4])}`")
+            if program_fields:
+                fragments.append(f"updated program fields `{', '.join(program_fields)}`")
+            if profile_fields:
+                fragments.append(f"updated profile fields `{', '.join(profile_fields)}`")
+            if fragments:
+                items.append((timestamp, compact_text("Captured stable memory and " + "; ".join(fragments) + ".", max_chars=220)))
+
+    for event in load_program_reporting_events(project_root, str(context["state"].get("program_id") or context["charter"].get("program_id") or "")):
+        timestamp = event.get("timestamp_dt")
+        if not within_window(timestamp, window_start, window_end):
+            continue
+        summary = compact_text(event.get("summary") or event.get("title") or "", max_chars=220)
+        if summary:
+            items.append((timestamp, summary))
 
     for entry in parse_decision_log_entries(context["program_root"]):
         timestamp = entry.get("timestamp")
@@ -1876,7 +1900,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     weekly_cmd = subparsers.add_parser(
         "write-weekly-report",
-        help="Write a weekly markdown report with recent papers, repos, program progress, and current issues",
+        help="Legacy alias for weekly-report-author; write a weekly markdown report for a program",
     )
     weekly_cmd.add_argument("--program-id", required=True)
     weekly_cmd.add_argument("--days", type=int, default=7)
