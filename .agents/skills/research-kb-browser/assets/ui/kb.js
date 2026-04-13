@@ -216,6 +216,13 @@
     bubble: null,
   };
 
+  const workbenchSyncRuntime = {
+    syncing: false,
+    rafId: 0,
+  };
+
+  const MARKDOWN_LIST_ITEM_RE = /^(\s*)([-*+]|\d+\.)\s+(.*)$/;
+
   const storage = {
     sidebarWidth: "research-kb-sidebar-width",
     detailWidth: "research-kb-detail-width",
@@ -2198,6 +2205,132 @@
     };
   }
 
+  function markdownIndentWidth(value) {
+    return String(value || "").replace(/\t/g, "  ").length;
+  }
+
+  function parseMarkdownListMarker(line) {
+    const match = String(line || "").match(MARKDOWN_LIST_ITEM_RE);
+    if (!match) return null;
+    const marker = String(match[2] || "");
+    return {
+      indent: markdownIndentWidth(match[1] || ""),
+      type: /^\d+\.$/.test(marker) ? "ol" : "ul",
+      content: String(match[3] || ""),
+    };
+  }
+
+  function parseMarkdownList(lines, startIndex, currentPath) {
+    const roots = [];
+    const stack = [];
+    let index = startIndex;
+
+    function currentList() {
+      return stack.length ? stack[stack.length - 1] : null;
+    }
+
+    function currentItem() {
+      const list = currentList();
+      if (!list || !list.items.length) return null;
+      return list.items[list.items.length - 1];
+    }
+
+    function openList(indent, type, parentItem, lineNumber) {
+      const node = {
+        indent,
+        type,
+        line: lineNumber,
+        items: [],
+      };
+      if (parentItem) {
+        parentItem.children.push(node);
+      } else {
+        roots.push(node);
+      }
+      stack.push(node);
+      return node;
+    }
+
+    function closeToIndent(indent) {
+      while (stack.length && indent < stack[stack.length - 1].indent) {
+        stack.pop();
+      }
+    }
+
+    function renderListNode(node) {
+      const items = node.items.map((item) => {
+        const text = [item.content];
+        if (item.continuation.length) {
+          text.push(item.continuation.join("<br />"));
+        }
+        const childrenHtml = item.children.map((child) => renderListNode(child)).join("");
+        return `<li data-md-line="${item.line}">${text.filter(Boolean).join("<br />")}${childrenHtml}</li>`;
+      }).join("");
+      return `<${node.type} data-md-line="${node.line}">${items}</${node.type}>`;
+    }
+
+    while (index < lines.length) {
+      const raw = String(lines[index] || "");
+      const line = raw.trimEnd();
+      const marker = parseMarkdownListMarker(line);
+      if (!marker) {
+        if (!line.trim()) {
+          index += 1;
+          continue;
+        }
+        const list = currentList();
+        const item = currentItem();
+        const continuationIndent = markdownIndentWidth(line.match(/^\s*/)?.[0] || "");
+        if (!list || !item || continuationIndent <= list.indent) {
+          break;
+        }
+        item.continuation.push(markdownInline(line.trim(), currentPath));
+        index += 1;
+        continue;
+      }
+
+      const lineNumber = index + 1;
+      closeToIndent(marker.indent);
+      let list = currentList();
+
+      if (!list) {
+        list = openList(marker.indent, marker.type, null, lineNumber);
+      } else if (marker.indent > list.indent) {
+        const parent = currentItem();
+        if (!parent) break;
+        list = openList(marker.indent, marker.type, parent, lineNumber);
+      } else if (marker.indent === list.indent && list.type !== marker.type) {
+        stack.pop();
+        const parentList = currentList();
+        if (parentList && marker.indent > parentList.indent) {
+          const parent = parentList.items[parentList.items.length - 1];
+          if (parent) {
+            list = openList(marker.indent, marker.type, parent, lineNumber);
+          } else {
+            list = openList(marker.indent, marker.type, null, lineNumber);
+          }
+        } else {
+          list = openList(marker.indent, marker.type, null, lineNumber);
+        }
+      }
+
+      const active = currentList();
+      if (!active) break;
+      active.items.push({
+        line: lineNumber,
+        content: markdownInline(marker.content.trim(), currentPath),
+        continuation: [],
+        children: [],
+      });
+      index += 1;
+    }
+
+    return {
+      html: roots.map((node) => renderListNode(node)).join(""),
+      nextIndex: index,
+    };
+  }
+
   function renderMarkdown(text, currentPath) {
     const normalized = String(text || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
     const lines = normalized.split("\n");
@@ -2243,28 +2376,15 @@
       }
       if (/^>\s?/.test(line)) {
         flushParagraph(paragraph);
-        blocks.push(`<blockquote>${markdownInline(line.replace(/^>\s?/, ""), currentPath)}</blockquote>`);
+        blocks.push(`<blockquote data-md-line="${index + 1}">${markdownInline(line.replace(/^>\s?/, ""), currentPath)}</blockquote>`);
         index += 1;
         continue;
       }
-      if (/^(-|\*)\s+/.test(line)) {
+      if (parseMarkdownListMarker(line)) {
         flushParagraph(paragraph);
-        const items = [];
-        while (index < lines.length && /^(-|\*)\s+/.test(lines[index].trimEnd())) {
-          items.push(`<li>${markdownInline(lines[index].trimEnd().replace(/^(-|\*)\s+/, ""), currentPath)}</li>`);
-          index += 1;
-        }
-        blocks.push(`<ul>${items.join("")}</ul>`);
-        continue;
-      }
-      if (/^\d+\.\s+/.test(line)) {
-        flushParagraph(paragraph);
-        const items = [];
-        while (index < lines.length && /^\d+\.\s+/.test(lines[index].trimEnd())) {
-          items.push(`<li>${markdownInline(lines[index].trimEnd().replace(/^\d+\.\s+/, ""), currentPath)}</li>`);
-          index += 1;
-        }
-        blocks.push(`<ol>${items.join("")}</ol>`);
+        const parsedList = parseMarkdownList(lines, index, currentPath);
+        if (parsedList.html) blocks.push(parsedList.html);
+        index = parsedList.nextIndex;
         continue;
       }
       if (/^\|.+\|$/.test(line) && index + 1 < lines.length && /^\|?[\s:-]+\|[\s|:-]+$/.test(lines[index + 1].trim())) {
@@ -2544,6 +2664,56 @@
     elements.workbenchBody.innerHTML = mode === "split" ? `${editorPane}${previewPane}` : singlePane;
   }
 
+  function scrollProgress(element) {
+    if (!element) return 0;
+    const max = Math.max(0, element.scrollHeight - element.clientHeight);
+    if (max <= 0) return 0;
+    return clamp(element.scrollTop / max, 0, 1);
+  }
+
+  function applyScrollProgress(element, progress) {
+    if (!element) return;
+    const max = Math.max(0, element.scrollHeight - element.clientHeight);
+    element.scrollTop = max * clamp(progress, 0, 1);
+  }
+
+  function syncWorkbenchSplitScroll(source) {
+    if (workbenchSyncRuntime.syncing) return;
+    if (state.workbench.mode !== "split") return;
+    const editor = document.getElementById("workbenchEditor");
+    const preview = document.getElementById("workbenchPreview");
+    if (!editor || !preview) return;
+    const sourcePane = source === "preview" ? preview : editor;
+    const targetPane = source === "preview" ? editor : preview;
+    workbenchSyncRuntime.syncing = true;
+    applyScrollProgress(targetPane, scrollProgress(sourcePane));
+    workbenchSyncRuntime.syncing = false;
+  }
+
+  function queueWorkbenchSplitSync(source) {
+    if (workbenchSyncRuntime.rafId) {
+      cancelAnimationFrame(workbenchSyncRuntime.rafId);
+      workbenchSyncRuntime.rafId = 0;
+    }
+    workbenchSyncRuntime.rafId = window.requestAnimationFrame(() => {
+      workbenchSyncRuntime.rafId = 0;
+      syncWorkbenchSplitScroll(source);
+    });
+  }
+
+  function onWorkbenchPaneScroll(event) {
+    if (workbenchSyncRuntime.syncing) return;
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) return;
+    if (target.id === "workbenchEditor") {
+      syncWorkbenchSplitScroll("editor");
+      return;
+    }
+    if (target.id === "workbenchPreview") {
+      syncWorkbenchSplitScroll("preview");
+    }
+  }
+
   function renderWorkbench() {
     const wb = state.workbench;
     elements.appShell.classList.toggle("workbench-active", !!wb.path || wb.kind === "settings");
@@ -2584,6 +2754,7 @@
         ? `${basename(wb.path)} · workspace 研究知识库浏览器`
         : "workspace 研究知识库浏览器";
     typesetMath(wb.kind === "settings" ? elements.workbenchBody : document.getElementById("workbenchPreview"));
+    queueWorkbenchSplitSync("editor");
   }
 
   function updateWorkbenchLive() {
@@ -2599,6 +2770,7 @@
         ? renderMarkdown(wb.content, wb.path)
         : `<pre class="workbench-readonly">${escapeHtml(wb.content || "")}</pre>`;
       typesetMath(preview);
+      queueWorkbenchSplitSync("editor");
     }
   }
 
@@ -3501,6 +3673,7 @@
   document.addEventListener("mouseout", onPointerOut);
   document.addEventListener("focusin", onFocusIn);
   document.addEventListener("focusout", onFocusOut);
+  document.addEventListener("scroll", onWorkbenchPaneScroll, true);
   document.addEventListener("kb-mathjax-ready", () => {
     typesetMath(document.getElementById("workbenchPreview"));
     typesetMath(elements.detailBody);
