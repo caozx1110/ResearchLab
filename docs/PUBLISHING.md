@@ -49,10 +49,8 @@ When preparing changes for publication:
 1. Prefer relative paths over user-specific absolute paths.
 2. Avoid machine-specific interpreter locations in guidance; describe configured runtimes instead.
 3. Keep environment assumptions configurable.
-4. Treat `kb/` as the canonical runtime target and only keep `doc/research/` fallback behavior where migration compatibility is necessary.
 
 ## Runtime Compatibility
 
-Some scripts keep a compatibility fallback for legacy workspaces that still use `doc/research/`.
 
 This fallback is intended only to make migration safer. New setups should initialize and use `kb/`.
