@@ -20,11 +20,11 @@ from urllib.parse import quote, urlparse
 
 for candidate in [Path(__file__).resolve()] + list(Path(__file__).resolve().parents):
     lib_root = candidate / ".agents" / "lib"
-    if (lib_root / "research_v11" / "common.py").exists():
+    if (lib_root / "research" / "common.py").exists():
         sys.path.insert(0, str(lib_root))
         break
 
-from research_v11.common import (  # type: ignore
+from research.common import (  # type: ignore
     ensure_dir,
     ensure_research_runtime,
     find_project_root,

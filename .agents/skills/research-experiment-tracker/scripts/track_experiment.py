@@ -13,7 +13,7 @@ from typing import Any
 
 for candidate in [Path(__file__).resolve()] + list(Path(__file__).resolve().parents):
     lib_root = candidate / ".agents" / "lib"
-    if (lib_root / "research_v11" / "common.py").exists():
+    if (lib_root / "research" / "common.py").exists():
         sys.path.insert(0, str(lib_root))
         break
 
@@ -55,7 +55,7 @@ def _maybe_reexec_preferred_runtime() -> None:
 
 _maybe_reexec_preferred_runtime()
 
-from research_v11.common import (
+from research.common import (
     find_project_root,
     load_yaml,
     research_root,

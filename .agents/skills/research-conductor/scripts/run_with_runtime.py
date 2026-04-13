@@ -10,11 +10,11 @@ from pathlib import Path
 
 for candidate in [Path(__file__).resolve()] + list(Path(__file__).resolve().parents):
     lib_root = candidate / ".agents" / "lib"
-    if (lib_root / "research_v11" / "common.py").exists():
+    if (lib_root / "research" / "common.py").exists():
         sys.path.insert(0, str(lib_root))
         break
 
-from research_v11.common import find_project_root, load_runtime_registry, preferred_runtime_record
+from research.common import find_project_root, load_runtime_registry, preferred_runtime_record
 
 
 def resolve_runtime(project_root: Path, runtime_id: str) -> dict[str, str]:

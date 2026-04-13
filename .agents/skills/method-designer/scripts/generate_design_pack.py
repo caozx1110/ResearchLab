@@ -10,11 +10,11 @@ from typing import Any
 
 for candidate in [Path(__file__).resolve()] + list(Path(__file__).resolve().parents):
     lib_root = candidate / ".agents" / "lib"
-    if (lib_root / "research_v11" / "common.py").exists():
+    if (lib_root / "research" / "common.py").exists():
         sys.path.insert(0, str(lib_root))
         break
 
-from research_v11.common import (
+from research.common import (
     append_program_reporting_event,
     bootstrap_workspace,
     ensure_research_runtime,
