@@ -19,4 +19,10 @@ from open_kb_browser import main
 
 
 if __name__ == "__main__":
+    print(
+        "[shim] `research-kb-browser/scripts/open_user_hub.py` is a compatibility entrypoint; "
+        "delegating to `open_kb_browser.py`.",
+        file=sys.stderr,
+        flush=True,
+    )
     raise SystemExit(main())

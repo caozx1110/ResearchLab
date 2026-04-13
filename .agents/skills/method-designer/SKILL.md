@@ -15,6 +15,7 @@ Convert a selected idea into a bounded engineering plan.
 4. When top repos look complementary, write a dual-repo plan instead of flattening everything into one host-repo template.
 5. Write `design/selected-idea.yaml`, `design/repo-choice.yaml`, `design/interfaces.yaml`, `design/coordination-contracts.yaml`, `design/system-design.md`, and `experiments/*`, including the chosen repo summary, supporting repos, and the top-ranked alternatives.
 6. Keep the first iteration minimal and falsifiable.
+7. If route discussions become durable design memory, hand them to `research-discussion-archivist`; if implementation starts producing run-by-run evidence, hand that execution memory to `research-experiment-tracker`.
 
 ## Shared Contract
 
@@ -23,8 +24,9 @@ Convert a selected idea into a bounded engineering plan.
 - Persist repo-choice provenance in `design/repo-choice.yaml`, including `selected_repo_summary`, `candidate_repos`, and concise selection reasons, so later skills can recover why a repo was chosen.
 - Treat `doc/research/memory/domain-profile.yaml` as the source of workspace-local repo-role hints and query heuristics; keep the design template itself field-agnostic.
 - If the design depends on more than one repo, persist the host/supporting split and interface seams in `design/coordination-contracts.yaml` instead of burying them in prose only.
-- Write `selected_repo_id` back to `workflow/state.yaml` and move the stage to `implementation-planning` after the design pack lands.
+- Write `selected_repo_id` back to `workflow/state.yaml`; move stage to `implementation-planning` only when the idea is explicitly selected. Keep `--allow-unselected` output as draft design.
 - Prefer a narrow baseline-compatible edit surface before proposing a broader system rewrite.
+- Treat `experiments/*` created here as initial design-time planning surfaces, not as the long-term system of record for run-by-run execution history.
 
 ## Command
 
@@ -38,6 +40,7 @@ python3 .agents/skills/method-designer/scripts/generate_design_pack.py --program
 - Do not change the code repository directly here.
 - Do not silently skip the selection workflow; if the idea is not explicitly selected, point back to `idea-forge` and `idea-review-board`.
 - Do not jump straight to a large rearchitecture when a narrower baseline-modification path exists.
+- Do not turn this skill into the owner of ongoing experiment logs or long-lived discussion archives; route those to `research-experiment-tracker` and `research-discussion-archivist`.
 
 ## Retrospective Handoff
 

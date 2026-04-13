@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import copy
+import inspect
 import re
 import shutil
 import subprocess
@@ -17,7 +19,9 @@ for candidate in [Path(__file__).resolve()] + list(Path(__file__).resolve().pare
         sys.path.insert(0, str(lib_root))
         break
 
+from research_v11 import common as research_common
 from research_v11.common import (
+    append_program_reporting_event,
     bootstrap_workspace,
     canonical_literature_source,
     canonicalize_url,
@@ -47,7 +51,6 @@ from research_v11.common import (
     parse_arxiv_id,
     parse_openreview_id,
     pending_paper_reviews_path,
-    raw_root,
     research_root,
     rebuild_literature_index,
     rebuild_literature_tag_index,
@@ -68,7 +71,7 @@ def intake_root(project_root: Path) -> Path:
 
 NOTE_AUTHOR_SCRIPT = Path(__file__).resolve().parents[2] / "research-note-author" / "scripts" / "prepare_note_assets.py"
 NOTE_TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "assets" / "note-template.md"
-MANUAL_NOTE_HEADERS = ("## Working Notes", "## Manual Notes")
+MANUAL_NOTE_HEADERS = ("## 工作笔记 Working Notes", "## Working Notes", "## Manual Notes")
 NOTE_CONTEXT_NAME = "note-context.md"
 NOTE_SCAFFOLD_MARKER = "<!-- literature-note-scaffold -->"
 LEGACY_AUTO_NOTE_MARKERS = ("Auto-generated analysis note.", NOTE_SCAFFOLD_MARKER)
@@ -91,6 +94,91 @@ def prepare_note_assets_for_source(source_id: str, *, rewrite_generated_notes: b
 
 def relative_path(project_root: Path, path: Path) -> str:
     return path.resolve().relative_to(project_root.resolve()).as_posix()
+
+
+def program_stage(project_root: Path, program_id: str) -> str:
+    state_path = research_root(project_root) / "programs" / program_id / "workflow" / "state.yaml"
+    state = load_yaml(state_path, default={})
+    if not isinstance(state, dict):
+        return ""
+    return str(state.get("stage") or "").strip()
+
+
+def append_program_reporting_event_safe(
+    project_root: Path,
+    program_id: str,
+    event: dict[str, Any],
+    *,
+    generated_by: str,
+) -> bool:
+    program_id = str(program_id or "").strip()
+    if not program_id:
+        return False
+    program_root = research_root(project_root) / "programs" / program_id
+    if not program_root.exists():
+        log_progress(f"[warn] skipped program reporting event: program `{program_id}` does not exist")
+        return False
+    try:
+        append_program_reporting_event(
+            project_root,
+            program_id,
+            event,
+            generated_by=generated_by,
+        )
+    except Exception as exc:
+        message = clean_text(str(exc) or exc.__class__.__name__)
+        log_progress(f"[warn] failed to append program reporting event for `{program_id}`: {message}")
+        return False
+    return True
+
+
+def append_wiki_log_event(project_root: Path, event: dict[str, Any], *, generated_by: str) -> None:
+    helper = getattr(research_common, "append_wiki_log_event", None)
+    if not callable(helper):
+        return
+    event_type = str(event.get("type") or event.get("event_type") or "event").strip() or "event"
+    title = str(event.get("title") or event_type).strip() or event_type
+    summary = str(event.get("summary") or event.get("message") or "").strip()
+    occurred_at = event.get("timestamp") or event.get("occurred_at") or utc_now_iso()
+    metadata = {
+        key: value
+        for key, value in event.items()
+        if key not in {"type", "event_type", "title", "summary", "message", "timestamp", "occurred_at"}
+    }
+    signature: inspect.Signature | None = None
+    try:
+        signature = inspect.signature(helper)
+    except (TypeError, ValueError):
+        signature = None
+    parameters = signature.parameters if signature is not None else {}
+    if "event_type" in parameters and "title" in parameters:
+        helper(
+            project_root,
+            event_type,
+            title,
+            summary=summary,
+            metadata=metadata,
+            occurred_at=occurred_at,
+            generated_by=generated_by,
+        )
+        return
+    if "event" in parameters:
+        helper(project_root=project_root, event=event, generated_by=generated_by)
+        return
+    raise TypeError(
+        "Unsupported append_wiki_log_event helper signature; expected "
+        "`(project_root, event_type, title, ...)` or `(project_root, event, ...)`."
+    )
+
+
+def rebuild_wiki_index_markdown(project_root: Path) -> None:
+    helper = getattr(research_common, "rebuild_wiki_index_markdown", None)
+    if not callable(helper):
+        return
+    try:
+        helper(project_root)
+    except TypeError:
+        helper(project_root=project_root)
 
 
 def blank_tag_taxonomy_payload() -> dict[str, Any]:
@@ -354,7 +442,7 @@ def _render_bullets(items: list[str]) -> str:
 def _pdf_context_block(note_path: Path) -> str:
     pdf_path = note_path.parent / "source" / "primary.pdf"
     if not pdf_path.exists():
-        return "## PDF Excerpts\n\nNo primary PDF is available for this source.\n"
+        return "## PDF 摘录 PDF Excerpts\n\n该条目当前没有 `source/primary.pdf`。\n"
     try:
         payload = extract_pdf_context_pages(
             pdf_path,
@@ -363,14 +451,14 @@ def _pdf_context_block(note_path: Path) -> str:
             per_page_char_limit=3200,
         )
     except Exception as exc:
-        return f"## PDF Excerpts\n\nFailed to extract PDF text: `{clean_text(str(exc))}`\n"
+        return f"## PDF 摘录 PDF Excerpts\n\n抽取 PDF 文本失败：`{clean_text(str(exc))}`\n"
 
     lines = [
-        "## PDF Excerpts",
+        "## PDF 摘录 PDF Excerpts",
         "",
-        f"- Primary PDF: `source/primary.pdf`",
-        f"- Total pages detected: `{payload.get('total_pages') or 'unknown'}`",
-        f"- Included pages: `{', '.join(str(item.get('page')) for item in payload.get('pages', [])) or 'none'}`",
+        f"- 原始 PDF: `source/primary.pdf`",
+        f"- 检测到总页数: `{payload.get('total_pages') or 'unknown'}`",
+        f"- 纳入摘录页码: `{', '.join(str(item.get('page')) for item in payload.get('pages', [])) or 'none'}`",
     ]
     for item in payload.get("pages", []):
         text = clean_text(str(item.get("text") or ""))
@@ -379,7 +467,7 @@ def _pdf_context_block(note_path: Path) -> str:
         lines.extend(
             [
                 "",
-                f"### Page {item['page']}",
+                f"### 第 {item['page']} 页",
                 "",
                 text,
             ]
@@ -393,11 +481,11 @@ def build_literature_note_context(source_id: str, metadata: dict[str, Any], *, n
         abstract = ""
     capture_excerpt = _capture_excerpt(note_path, limit=8000)
     lines = [
-        f"# Close-Reading Context: {metadata.get('canonical_title') or source_id}",
+        f"# 精读上下文 Close-Reading Context: {metadata.get('canonical_title') or source_id}",
         "",
         f"- Source ID: `{source_id}`",
-        f"- Note target: `note.md`",
-        f"- Helper context: `{NOTE_CONTEXT_NAME}`",
+        f"- 笔记目标: `note.md`",
+        f"- 辅助上下文: `{NOTE_CONTEXT_NAME}`",
         f"- Source kind: `{metadata.get('source_kind') or 'paper'}`",
     ]
     authors = [str(author).strip() for author in metadata.get("authors", []) if str(author).strip()]
@@ -411,20 +499,20 @@ def build_literature_note_context(source_id: str, metadata: dict[str, Any], *, n
     lines.extend(
         [
             "",
-            "## Writing Targets",
+            "## 写作目标 Writing Targets",
             "",
-            "- Summarize the motivation, core novelty, method, experiments, limitations, and realistic future work in your own words.",
-            "- Prefer claims grounded in the PDF or captured source text; avoid presenting guesses as evidence.",
-            "- If a limitation or future-work idea is your inference rather than the authors' wording, say that explicitly in `note.md`.",
+            "- 用你自己的话总结研究动机、核心创新、方法、实验、局限和现实可行的后续工作。",
+            "- 尽量只写基于 PDF 正文或抓取文本的结论，不要把猜测写成证据。",
+            "- 如果某个 limitation 或 future-work 是你的推断，请在 `note.md` 里明确标出来。",
         ]
     )
 
     lines.extend(
         [
             "",
-            "## Abstract",
+            "## 摘要 Abstract",
             "",
-            abstract or "No clean abstract was extracted; rely on the PDF excerpts and capture text below.",
+            abstract or "没有抽取到干净摘要，请结合下面的 PDF 摘录和抓取文本继续阅读。",
             "",
         ]
     )
@@ -432,7 +520,7 @@ def build_literature_note_context(source_id: str, metadata: dict[str, Any], *, n
     if capture_excerpt:
         lines.extend(
             [
-                "## Landing / Capture Excerpt",
+                "## 落地页摘录 Landing / Capture Excerpt",
                 "",
                 capture_excerpt,
                 "",
@@ -445,9 +533,9 @@ def build_literature_note_context(source_id: str, metadata: dict[str, Any], *, n
 
 def _working_notes_block(note_path: Path) -> str:
     default_block = (
-        "## Working Notes\n\n"
-        "- Replace the placeholder sections above after reading `note-context.md` and the primary source.\n"
-        "- Keep concrete page/section evidence here if you want a quick audit trail for later review.\n"
+        "## 工作笔记 Working Notes\n\n"
+        "- 读完 `note-context.md` 和原始资料后，再把上面的占位内容替换成正式笔记。\n"
+        "- 如果你想保留快速审计线索，可以在这里记录具体页码、章节和原文证据。\n"
     )
     if note_path.exists():
         existing = note_path.read_text(encoding="utf-8")
@@ -735,8 +823,6 @@ def stage_local_pdf(project_root: Path, source: Path) -> tuple[Path, dict[str, A
     source_dir = stage_dir / "source"
     source_dir.mkdir(parents=True, exist_ok=True)
     staged_pdf = source_dir / source.name
-    raw_dir = raw_root(project_root).resolve()
-    consumed_from_raw = source.resolve().is_relative_to(raw_dir)
     shutil.copy2(source, staged_pdf)
     try:
         parsed = extract_pdf_record(staged_pdf)
@@ -783,8 +869,6 @@ def stage_local_pdf(project_root: Path, source: Path) -> tuple[Path, dict[str, A
     except Exception:
         shutil.rmtree(stage_dir, ignore_errors=True)
         raise
-    if consumed_from_raw:
-        source.unlink()
     return stage_dir, candidate
 
 
@@ -943,6 +1027,9 @@ def exact_match(existing: dict[str, Any], candidate: dict[str, Any]) -> bool:
 def register_resolved_review(project_root: Path, review_item: dict[str, Any]) -> None:
     payload = load_list_document(resolved_paper_reviews_path(project_root), "resolved-paper-reviews", "literature-corpus-builder")
     payload["generated_at"] = utc_now_iso()
+    review_id = str(review_item.get("review_id") or "").strip()
+    if review_id:
+        payload["items"] = [item for item in payload["items"] if item.get("review_id") != review_id]
     payload["items"].append(review_item)
     write_yaml_if_changed(resolved_paper_reviews_path(project_root), payload)
 
@@ -971,6 +1058,14 @@ def remove_pending_review(project_root: Path, review_id: str) -> dict[str, Any]:
     return matched
 
 
+def get_pending_review(project_root: Path, review_id: str) -> dict[str, Any]:
+    payload = load_list_document(pending_paper_reviews_path(project_root), "pending-paper-reviews", "literature-corpus-builder")
+    for item in payload["items"]:
+        if item.get("review_id") == review_id:
+            return item
+    raise SystemExit(f"Pending literature review not found: {review_id}")
+
+
 def update_graph(project_root: Path) -> None:
     rebuild_literature_index(project_root)
 
@@ -978,9 +1073,13 @@ def update_graph(project_root: Path) -> None:
 def attach_alias(project_root: Path, canonical_id: str, candidate: dict[str, Any], *, resolution: str) -> None:
     literature_root = research_root(project_root) / "library" / "literature"
     metadata_path = literature_root / canonical_id / "metadata.yaml"
-    metadata = load_yaml(metadata_path, default={})
-    if not isinstance(metadata, dict):
+    metadata_current = load_yaml(metadata_path, default={})
+    if not isinstance(metadata_current, dict):
         raise SystemExit(f"Missing canonical literature metadata: {metadata_path}")
+    metadata = copy.deepcopy(metadata_current)
+    index_path = literature_index_path(project_root)
+    index_current = load_index(index_path, "literature-index", "literature-corpus-builder")
+    index_payload = copy.deepcopy(index_current)
     alias_entry = {
         "alias_id": candidate["intake_id"],
         "source_label": candidate["source_label"],
@@ -996,120 +1095,162 @@ def attach_alias(project_root: Path, canonical_id: str, candidate: dict[str, Any
         metadata["file_hashes"].append(candidate["file_sha256"])
 
     alias_root = literature_root / canonical_id / "source" / "aliases" / candidate["intake_id"]
-    alias_root.mkdir(parents=True, exist_ok=True)
-    for staged_key, target_name in (("staged_pdf", "alias.pdf"), ("staged_html", "landing.html"), ("staged_capture", "capture.md")):
-        staged = candidate.get(staged_key)
-        if staged and Path(staged).exists():
-            shutil.move(str(staged), alias_root / target_name)
-    write_yaml_if_changed(metadata_path, metadata)
-
-    index_payload = load_index(literature_index_path(project_root), "literature-index", "literature-corpus-builder")
     item = index_payload["items"].get(canonical_id, {})
     item.setdefault("aliases", [])
     item["aliases"].append(alias_entry)
     item.setdefault("source_paths", {})
     item["source_paths"].setdefault("aliases", [])
-    item["source_paths"]["aliases"].append(alias_root.relative_to(find_project_root()).as_posix())
+    item["source_paths"]["aliases"].append(alias_root.relative_to(project_root).as_posix())
     item.setdefault("file_hashes", [])
     if candidate.get("file_sha256") and candidate["file_sha256"] not in item["file_hashes"]:
         item["file_hashes"].append(candidate["file_sha256"])
     index_payload["items"][canonical_id] = item
-    write_yaml_if_changed(literature_index_path(project_root), index_payload)
-    rebuild_literature_index(project_root)
+    try:
+        if alias_root.exists():
+            shutil.rmtree(alias_root, ignore_errors=True)
+        alias_root.mkdir(parents=True, exist_ok=True)
+        for staged_key, target_name in (("staged_pdf", "alias.pdf"), ("staged_html", "landing.html"), ("staged_capture", "capture.md")):
+            staged = candidate.get(staged_key)
+            if staged and Path(staged).exists():
+                shutil.copy2(staged, alias_root / target_name)
+        write_yaml_if_changed(metadata_path, metadata)
+        write_yaml_if_changed(index_path, index_payload)
+        rebuild_literature_index(project_root)
+    except Exception:
+        shutil.rmtree(alias_root, ignore_errors=True)
+        write_yaml_if_changed(metadata_path, metadata_current)
+        write_yaml_if_changed(index_path, index_current)
+        try:
+            rebuild_literature_index(project_root)
+        except Exception:
+            pass
+        raise
 
 
-def finalize_new_candidate(project_root: Path, candidate: dict[str, Any]) -> str:
+def finalize_new_candidate(project_root: Path, candidate: dict[str, Any], *, warning_sink: list[str] | None = None) -> str:
     source_id = unique_source_id(project_root, make_source_id(candidate))
     entry_root = canonical_entry_root(project_root, source_id)
+    if entry_root.exists():
+        raise SystemExit(f"Canonical literature entry already exists: {entry_root}")
+    index_path = literature_index_path(project_root)
+    index_current = load_index(index_path, "literature-index", "literature-corpus-builder")
+    index_payload = copy.deepcopy(index_current)
     source_root = entry_root / "source"
-    source_root.mkdir(parents=True, exist_ok=True)
     source_paths: dict[str, Any] = {}
-    if candidate.get("staged_pdf") and Path(candidate["staged_pdf"]).exists():
-        target = source_root / "primary.pdf"
-        shutil.move(str(candidate["staged_pdf"]), target)
-        source_paths["primary_pdf"] = target.relative_to(find_project_root()).as_posix()
-    if candidate.get("staged_html") and Path(candidate["staged_html"]).exists():
-        target = source_root / "landing.html"
-        shutil.move(str(candidate["staged_html"]), target)
-        source_paths["landing_html"] = target.relative_to(find_project_root()).as_posix()
-    if candidate.get("staged_capture") and Path(candidate["staged_capture"]).exists():
-        target = source_root / "capture.md"
-        shutil.move(str(candidate["staged_capture"]), target)
-        source_paths["capture"] = target.relative_to(find_project_root()).as_posix()
-    (source_root / "assets").mkdir(parents=True, exist_ok=True)
-    (source_root / "aliases").mkdir(parents=True, exist_ok=True)
-    source_inputs = [f"intake:{candidate['intake_id']}"]
-    if candidate.get("canonical_url"):
-        source_inputs.append(candidate["canonical_url"])
-    source_inputs.extend(source_paths.values())
+    metadata: dict[str, Any] = {}
+    try:
+        source_root.mkdir(parents=True, exist_ok=True)
+        if candidate.get("staged_pdf") and Path(candidate["staged_pdf"]).exists():
+            target = source_root / "primary.pdf"
+            shutil.copy2(candidate["staged_pdf"], target)
+            source_paths["primary_pdf"] = target.relative_to(project_root).as_posix()
+        if candidate.get("staged_html") and Path(candidate["staged_html"]).exists():
+            target = source_root / "landing.html"
+            shutil.copy2(candidate["staged_html"], target)
+            source_paths["landing_html"] = target.relative_to(project_root).as_posix()
+        if candidate.get("staged_capture") and Path(candidate["staged_capture"]).exists():
+            target = source_root / "capture.md"
+            shutil.copy2(candidate["staged_capture"], target)
+            source_paths["capture"] = target.relative_to(project_root).as_posix()
+        (source_root / "assets").mkdir(parents=True, exist_ok=True)
+        (source_root / "aliases").mkdir(parents=True, exist_ok=True)
+        source_inputs = [f"intake:{candidate['intake_id']}"]
+        if candidate.get("canonical_url"):
+            source_inputs.append(candidate["canonical_url"])
+        source_inputs.extend(source_paths.values())
 
-    metadata = {
-        **yaml_default(source_id, "literature-corpus-builder", status="active", confidence=0.9),
-        "inputs": source_inputs,
-        "source_kind": candidate["source_kind"],
-        "canonical_title": candidate["title"],
-        "short_summary": build_short_summary(candidate["title"], candidate.get("abstract", "")),
-        "authors": candidate.get("authors", []),
-        "year": candidate.get("year"),
-        "abstract": candidate.get("abstract", ""),
-        "canonical_url": candidate.get("canonical_url", ""),
-        "site_fingerprint": candidate.get("site_fingerprint", ""),
-        "external_ids": candidate.get("external_ids", {}),
-        "topics": candidate.get("topics", []),
-        "tags": candidate.get("tags", []),
-        "tagging": auto_tagging_payload(project_root, candidate),
-        "source_paths": source_paths,
-        "aliases": [],
-        "file_hashes": [candidate["file_sha256"]] if candidate.get("file_sha256") else [],
-    }
-    claims = build_placeholder_claims(
-        source_id,
-        str(candidate.get("abstract") or ""),
-        source_inputs=source_inputs,
-    )
-    methods = {
-        **yaml_default(f"{source_id}-methods", "literature-corpus-builder"),
-        "inputs": source_inputs,
-        "Observed": [
-            {
-                "module_id": f"{source_id}-method-1",
-                "summary": "Auto-generated placeholder. Replace with concrete method details after reading.",
-            }
-        ],
-        "Inferred": [],
-        "Suggested": [],
-        "OpenQuestions": [],
-    }
-    write_yaml_if_changed(entry_root / "metadata.yaml", metadata)
-    write_yaml_if_changed(entry_root / "claims.yaml", claims)
-    write_yaml_if_changed(entry_root / "methods.yaml", methods)
-    prepare_note_assets_for_source(source_id, rewrite_generated_notes=True)
-    refresh_tag_views_for_source(project_root, metadata)
-
-    index_payload = load_index(literature_index_path(project_root), "literature-index", "literature-corpus-builder")
-    index_payload["generated_at"] = utc_now_iso()
-    index_payload["items"][source_id] = {
-        "id": source_id,
-        "source_kind": candidate["source_kind"],
-        "canonical_title": candidate["title"],
-        "short_summary": metadata["short_summary"],
-        "authors": candidate.get("authors", []),
-        "year": candidate.get("year"),
-        "canonical_url": candidate.get("canonical_url", ""),
-        "site_fingerprint": candidate.get("site_fingerprint", ""),
-        "external_ids": candidate.get("external_ids", {}),
-        "aliases": [],
-        "topics": candidate.get("topics", []),
-        "tags": candidate.get("tags", []),
-        "source_paths": source_paths,
-        "file_hashes": [candidate["file_sha256"]] if candidate.get("file_sha256") else [],
-    }
-    write_yaml_if_changed(literature_index_path(project_root), index_payload)
-    rebuild_literature_index(project_root)
+        metadata = {
+            **yaml_default(source_id, "literature-corpus-builder", status="active", confidence=0.9),
+            "inputs": source_inputs,
+            "source_kind": candidate["source_kind"],
+            "canonical_title": candidate["title"],
+            "short_summary": build_short_summary(candidate["title"], candidate.get("abstract", "")),
+            "authors": candidate.get("authors", []),
+            "year": candidate.get("year"),
+            "abstract": candidate.get("abstract", ""),
+            "canonical_url": candidate.get("canonical_url", ""),
+            "site_fingerprint": candidate.get("site_fingerprint", ""),
+            "external_ids": candidate.get("external_ids", {}),
+            "topics": candidate.get("topics", []),
+            "tags": candidate.get("tags", []),
+            "tagging": auto_tagging_payload(project_root, candidate),
+            "source_paths": source_paths,
+            "aliases": [],
+            "file_hashes": [candidate["file_sha256"]] if candidate.get("file_sha256") else [],
+        }
+        claims = build_placeholder_claims(
+            source_id,
+            str(candidate.get("abstract") or ""),
+            source_inputs=source_inputs,
+        )
+        methods = {
+            **yaml_default(f"{source_id}-methods", "literature-corpus-builder"),
+            "inputs": source_inputs,
+            "Observed": [
+                {
+                    "module_id": f"{source_id}-method-1",
+                    "summary": "Auto-generated placeholder. Replace with concrete method details after reading.",
+                }
+            ],
+            "Inferred": [],
+            "Suggested": [],
+            "OpenQuestions": [],
+        }
+        write_yaml_if_changed(entry_root / "metadata.yaml", metadata)
+        write_yaml_if_changed(entry_root / "claims.yaml", claims)
+        write_yaml_if_changed(entry_root / "methods.yaml", methods)
+        index_payload["generated_at"] = utc_now_iso()
+        index_payload["items"][source_id] = {
+            "id": source_id,
+            "source_kind": candidate["source_kind"],
+            "canonical_title": candidate["title"],
+            "short_summary": metadata["short_summary"],
+            "authors": candidate.get("authors", []),
+            "year": candidate.get("year"),
+            "canonical_url": candidate.get("canonical_url", ""),
+            "site_fingerprint": candidate.get("site_fingerprint", ""),
+            "external_ids": candidate.get("external_ids", {}),
+            "aliases": [],
+            "topics": candidate.get("topics", []),
+            "tags": candidate.get("tags", []),
+            "source_paths": source_paths,
+            "file_hashes": [candidate["file_sha256"]] if candidate.get("file_sha256") else [],
+        }
+        write_yaml_if_changed(index_path, index_payload)
+        rebuild_literature_index(project_root)
+    except Exception:
+        shutil.rmtree(entry_root, ignore_errors=True)
+        write_yaml_if_changed(index_path, index_current)
+        try:
+            rebuild_literature_index(project_root)
+        except Exception:
+            pass
+        raise
+    try:
+        prepare_note_assets_for_source(source_id, rewrite_generated_notes=True)
+    except Exception as exc:
+        warning = clean_text(str(exc) or exc.__class__.__name__)
+        message = f"note assets skipped for {source_id}: {warning}"
+        log_progress(f"[warn] {message}")
+        if warning_sink is not None:
+            warning_sink.append(message)
+    try:
+        refresh_tag_views_for_source(project_root, metadata)
+    except Exception as exc:
+        warning = clean_text(str(exc) or exc.__class__.__name__)
+        message = f"tag views refresh skipped for {source_id}: {warning}"
+        log_progress(f"[warn] {message}")
+        if warning_sink is not None:
+            warning_sink.append(message)
     return source_id
 
 
-def ingest_candidate(project_root: Path, candidate: dict[str, Any]) -> tuple[str, str]:
+def ingest_candidate(
+    project_root: Path,
+    candidate: dict[str, Any],
+    *,
+    warning_sink: list[str] | None = None,
+) -> tuple[str, str]:
     index_payload = load_index(literature_index_path(project_root), "literature-index", "literature-corpus-builder")
     items = index_payload.get("items", {})
     for canonical_id, existing in items.items():
@@ -1143,7 +1284,7 @@ def ingest_candidate(project_root: Path, candidate: dict[str, Any]) -> tuple[str
         )
         return "pending-review", review_id
 
-    return "imported", finalize_new_candidate(project_root, candidate)
+    return "imported", finalize_new_candidate(project_root, candidate, warning_sink=warning_sink)
 
 
 def persist_manifest(stage_dir: Path, candidate: dict[str, Any], *, status: str, result: str) -> None:
@@ -1162,20 +1303,28 @@ def ingest_sources(args: argparse.Namespace) -> int:
     project_root = find_project_root()
     bootstrap_workspace(project_root)
     candidates = list(args.source)
+    search_program_id = ""
     if args.search_result:
         search_payload = load_yaml(Path(args.search_result), default={})
         if isinstance(search_payload, dict):
+            search_program_id = str(search_payload.get("program_id") or "").strip()
             for item in search_payload.get("candidates", []):
                 if isinstance(item, dict) and item.get("status", "shortlisted") in {"shortlisted", "selected"}:
                     url = item.get("url") or item.get("source_url")
                     if url:
                         candidates.append(str(url))
+    selected_program_id = str(args.program_id or "").strip() or search_program_id
     if not candidates:
         candidates = [str(path) for path in sorted(Path(args.raw_dir).glob("*.pdf"))]
     if not candidates:
         raise SystemExit("No literature sources found to ingest.")
 
     failures: list[str] = []
+    warnings: list[str] = []
+    imported_source_ids: list[str] = []
+    merged_source_ids: list[str] = []
+    pending_review_ids: list[str] = []
+    artifact_paths: list[str] = []
     total = len(candidates)
     for index, raw_source in enumerate(candidates, start=1):
         log_progress(f"[start {index}/{total}] {raw_source}")
@@ -1188,10 +1337,13 @@ def ingest_sources(args: argparse.Namespace) -> int:
             else:
                 log_progress(f"[stage {index}/{total}] staging local PDF")
                 stage_dir, candidate = stage_local_pdf(project_root, Path(raw_source).resolve())
+            if stage_dir:
+                artifact_paths.append(relative_path(project_root, stage_dir / "manifest.yaml"))
             log_progress(f"[dedupe {index}/{total}] {candidate['title']}")
-            status, result = ingest_candidate(project_root, candidate)
+            status, result = ingest_candidate(project_root, candidate, warning_sink=warnings)
             persist_manifest(stage_dir, candidate, status=status, result=result)
             if status == "pending-review":
+                pending_review_ids.append(result)
                 log_progress(f"[review] {candidate['title']} -> {result}")
             else:
                 register_resolved_review(
@@ -1204,6 +1356,19 @@ def ingest_sources(args: argparse.Namespace) -> int:
                         "canonical_id": result,
                     },
                 )
+                if status == "imported":
+                    imported_source_ids.append(result)
+                elif status == "merged":
+                    merged_source_ids.append(result)
+                metadata_path = research_root(project_root) / "library" / "literature" / result / "metadata.yaml"
+                note_path = metadata_path.parent / "note.md"
+                context_path = metadata_path.parent / NOTE_CONTEXT_NAME
+                if metadata_path.exists():
+                    artifact_paths.append(relative_path(project_root, metadata_path))
+                if note_path.exists():
+                    artifact_paths.append(relative_path(project_root, note_path))
+                if context_path.exists():
+                    artifact_paths.append(relative_path(project_root, context_path))
                 log_progress(f"[ok] {candidate['title']} -> {result} ({status})")
         except Exception as exc:
             message = clean_text(str(exc) or exc.__class__.__name__)
@@ -1211,6 +1376,49 @@ def ingest_sources(args: argparse.Namespace) -> int:
                 persist_manifest(stage_dir, candidate, status="failed", result=message)
             log_progress(f"[error] {raw_source} -> {message}")
             failures.append(f"{raw_source}: {message}")
+    all_source_ids = imported_source_ids + merged_source_ids
+    summary = (
+        f"Processed {total} source(s): imported {len(imported_source_ids)}, merged {len(merged_source_ids)}, "
+        f"pending review {len(pending_review_ids)}, failed {len(failures)}."
+    )
+    if warnings:
+        summary = f"{summary} Non-blocking warnings: {len(warnings)}."
+    rebuild_literature_index(project_root)
+    append_wiki_log_event(
+        project_root,
+        {
+            "source_skill": "literature-corpus-builder",
+            "event_type": "ingest",
+            "title": "Literature ingest completed",
+            "summary": summary,
+            "program_id": selected_program_id,
+            "source_id": all_source_ids[0] if len(all_source_ids) == 1 else "",
+            "source_ids": all_source_ids,
+            "review_ids": pending_review_ids,
+            "warnings": warnings,
+            "failures": failures,
+            "artifacts": sorted({path for path in artifact_paths if path}),
+        },
+        generated_by="literature-corpus-builder",
+    )
+    append_program_reporting_event_safe(
+        project_root,
+        selected_program_id,
+        {
+            "source_skill": "literature-corpus-builder",
+            "event_type": "literature-ingest-completed",
+            "title": "Literature ingest completed",
+            "summary": summary,
+            "stage": program_stage(project_root, selected_program_id),
+            "paper_ids": all_source_ids,
+            "artifacts": sorted({path for path in artifact_paths if path}),
+            "review_ids": pending_review_ids,
+            "warnings": warnings,
+            "failures": failures,
+        },
+        generated_by="literature-corpus-builder",
+    )
+    rebuild_wiki_index_markdown(project_root)
     if failures:
         log_progress(f"[summary] completed with {len(failures)} failure(s)")
         for item in failures:
@@ -1222,7 +1430,7 @@ def ingest_sources(args: argparse.Namespace) -> int:
 def resolve_review(args: argparse.Namespace) -> int:
     project_root = find_project_root()
     bootstrap_workspace(project_root)
-    review_item = remove_pending_review(project_root, args.review_id)
+    review_item = get_pending_review(project_root, args.review_id)
     stage_dir = intake_root(project_root) / review_item["intake_id"]
     candidate = load_manifest_candidate(stage_dir)
     if args.decision == "existing":
@@ -1243,6 +1451,49 @@ def resolve_review(args: argparse.Namespace) -> int:
             "canonical_id": resolution,
         },
     )
+    remove_pending_review(project_root, args.review_id)
+    metadata_path = research_root(project_root) / "library" / "literature" / resolution / "metadata.yaml"
+    note_path = metadata_path.parent / "note.md"
+    context_path = metadata_path.parent / NOTE_CONTEXT_NAME
+    artifacts = [
+        relative_path(project_root, stage_dir / "manifest.yaml"),
+        relative_path(project_root, resolved_paper_reviews_path(project_root)),
+    ]
+    if metadata_path.exists():
+        artifacts.append(relative_path(project_root, metadata_path))
+    if note_path.exists():
+        artifacts.append(relative_path(project_root, note_path))
+    if context_path.exists():
+        artifacts.append(relative_path(project_root, context_path))
+    append_wiki_log_event(
+        project_root,
+        {
+            "source_skill": "literature-corpus-builder",
+            "event_type": "ingest",
+            "title": "Literature duplicate review resolved",
+            "summary": f"Resolved {args.review_id} with decision `{args.decision}` to canonical source `{resolution}`.",
+            "review_id": args.review_id,
+            "source_id": resolution,
+            "source_ids": [resolution],
+            "artifacts": sorted({item for item in artifacts if item}),
+        },
+        generated_by="literature-corpus-builder",
+    )
+    append_program_reporting_event_safe(
+        project_root,
+        args.program_id,
+        {
+            "source_skill": "literature-corpus-builder",
+            "event_type": "literature-review-resolved",
+            "title": "Literature duplicate review resolved",
+            "summary": f"Resolved {args.review_id} with decision `{args.decision}` to canonical source `{resolution}`.",
+            "stage": program_stage(project_root, str(args.program_id or "").strip()),
+            "paper_ids": [resolution],
+            "artifacts": sorted({item for item in artifacts if item}),
+        },
+        generated_by="literature-corpus-builder",
+    )
+    rebuild_wiki_index_markdown(project_root)
     print(f"[ok] resolved {args.review_id} -> {resolution}")
     return 0
 
@@ -1256,16 +1507,42 @@ def refresh_notes(args: argparse.Namespace) -> int:
         else sorted((research_root(project_root) / "library" / "literature").glob("*/metadata.yaml"))
     )
     changed = 0
+    source_ids: list[str] = []
+    artifacts: list[str] = []
     for metadata_path in metadata_paths:
         metadata = load_yaml(metadata_path, default={})
         if not isinstance(metadata, dict) or not metadata.get("id"):
             raise SystemExit(f"Invalid literature metadata: {metadata_path}")
+        source_id = str(metadata["id"])
+        source_ids.append(source_id)
         before_summary = clean_text(str(metadata.get("short_summary") or ""))
         summary = ensure_metadata_short_summary(metadata, rewrite=args.rewrite_summary)
         if summary != before_summary:
             write_yaml_if_changed(metadata_path, metadata)
             changed += 1
-        prepare_note_assets_for_source(str(metadata["id"]), rewrite_generated_notes=args.rewrite_generated_notes)
+        prepare_note_assets_for_source(source_id, rewrite_generated_notes=args.rewrite_generated_notes)
+        artifacts.append(relative_path(project_root, metadata_path))
+        note_path = metadata_path.parent / "note.md"
+        context_path = metadata_path.parent / NOTE_CONTEXT_NAME
+        if note_path.exists():
+            artifacts.append(relative_path(project_root, note_path))
+        if context_path.exists():
+            artifacts.append(relative_path(project_root, context_path))
+    rebuild_literature_index(project_root)
+    append_wiki_log_event(
+        project_root,
+        {
+            "source_skill": "literature-corpus-builder",
+            "event_type": "note",
+            "title": "Literature note assets refreshed",
+            "summary": f"Refreshed note scaffolds for {len(source_ids)} literature source(s); updated {changed} metadata summary field(s).",
+            "source_id": source_ids[0] if len(source_ids) == 1 else "",
+            "source_ids": source_ids,
+            "artifacts": sorted({item for item in artifacts if item}),
+        },
+        generated_by="literature-corpus-builder",
+    )
+    rebuild_wiki_index_markdown(project_root)
     print(f"[ok] delegated literature note preparation to research-note-author ({changed} summary updates)")
     return 0
 
@@ -1273,11 +1550,32 @@ def refresh_notes(args: argparse.Namespace) -> int:
 def refresh_claims(args: argparse.Namespace) -> int:
     project_root = find_project_root()
     bootstrap_workspace(project_root)
+    source_ids = list(args.source_id)
+    if not source_ids:
+        source_ids = [path.parent.name for path in sorted((research_root(project_root) / "library" / "literature").glob("*/metadata.yaml"))]
     changed = refresh_placeholder_claims(
         project_root,
-        source_ids=list(args.source_id),
+        source_ids=source_ids,
         force=args.force,
     )
+    artifacts = [
+        relative_path(project_root, research_root(project_root) / "library" / "literature" / source_id / "claims.yaml")
+        for source_id in source_ids
+    ]
+    append_wiki_log_event(
+        project_root,
+        {
+            "source_skill": "literature-corpus-builder",
+            "event_type": "lint",
+            "title": "Literature placeholder claims refreshed",
+            "summary": f"Refreshed claim scaffolds for {len(source_ids)} source(s); changed {changed} claim file(s).",
+            "source_id": source_ids[0] if len(source_ids) == 1 else "",
+            "source_ids": source_ids,
+            "artifacts": sorted({item for item in artifacts if item}),
+        },
+        generated_by="literature-corpus-builder",
+    )
+    rebuild_wiki_index_markdown(project_root)
     print(f"[ok] refreshed placeholder claims ({changed} file updates)")
     return 0
 
@@ -1290,12 +1588,14 @@ def build_parser() -> argparse.ArgumentParser:
     ingest_cmd.add_argument("--source", action="append", default=[], help="Local PDF path or literature URL")
     ingest_cmd.add_argument("--raw-dir", default="raw", help="Fallback PDF buffer directory")
     ingest_cmd.add_argument("--search-result", default="", help="Optional search result YAML")
+    ingest_cmd.add_argument("--program-id", default="", help="Optional program ID for workflow/reporting-events feed")
     ingest_cmd.set_defaults(func=ingest_sources)
 
     resolve_cmd = subparsers.add_parser("resolve-review", help="Resolve a pending duplicate review")
     resolve_cmd.add_argument("--review-id", required=True)
     resolve_cmd.add_argument("--decision", choices=["existing", "new"], required=True)
     resolve_cmd.add_argument("--canonical-id", default="")
+    resolve_cmd.add_argument("--program-id", default="", help="Optional program ID for workflow/reporting-events feed")
     resolve_cmd.set_defaults(func=resolve_review)
 
     rebuild_cmd = subparsers.add_parser("rebuild-index", help="Rebuild the literature index and graph from canonical entries")

@@ -1,4 +1,4 @@
 interface:
   display_name: "Research Note Author"
-  short_description: "Read full sources and write professional research notes"
-  default_prompt: "Use $research-note-author to prepare close-reading context for a canonical paper or repo, then read the source carefully and write a professional detailed note into the library."
+  short_description: "Chinese-first close-reading notes for canonical papers and repos"
+  default_prompt: "Use $research-note-author to perform close reading on canonical papers or repos and write durable Chinese-first note pages (`note.md` or `repo-notes.md`) with clear observed-vs-inferred wording, without drifting into program-wide surveys or navigation bundles."

@@ -33,21 +33,69 @@ from research_v11.common import (
 )
 
 
-def choose_idea(program_root: Path, requested_idea_id: str) -> str:
+def choose_idea(program_root: Path, requested_idea_id: str, *, allow_unselected: bool = False) -> str:
     if requested_idea_id:
         return requested_idea_id
     state = load_yaml(program_root / "workflow" / "state.yaml", default={})
     if isinstance(state, dict) and state.get("selected_idea_id"):
         return str(state["selected_idea_id"])
+    if allow_unselected and isinstance(state, dict) and state.get("active_idea_id"):
+        return str(state["active_idea_id"])
     index_payload = load_index(program_root / "ideas" / "index.yaml", "ideas", "method-designer")
     for idea_id, item in index_payload.get("items", {}).items():
         if item.get("status") == "selected":
             return str(idea_id)
+    if allow_unselected:
+        for idea_id in sorted(index_payload.get("items", {}).keys()):
+            if str(idea_id).strip():
+                return str(idea_id)
+        raise SystemExit("No idea proposal found. Run idea-forge before method design.")
     raise SystemExit("No selected idea found. Run idea-review-board with --select-best or pass --idea-id.")
 
 
 def query_terms(text: str) -> list[str]:
     return query_keyword_terms(text)
+
+
+def extract_review_observed_signals(review: dict[str, Any]) -> list[str]:
+    if not isinstance(review, dict):
+        return []
+    signals: list[str] = []
+    root_observed = review.get("Observed")
+    if isinstance(root_observed, list):
+        signals.extend(str(item) for item in root_observed if str(item).strip())
+    for section_name in (
+        "strengths",
+        "comparison",
+        "novelty_assessment",
+        "evidence_gaps",
+        "collaboration",
+        "failure_modes",
+    ):
+        section = review.get(section_name)
+        if not isinstance(section, dict):
+            continue
+        observed = section.get("Observed")
+        if isinstance(observed, list):
+            signals.extend(str(item) for item in observed if str(item).strip())
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for signal in signals:
+        normalized = normalize_title(signal)
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            deduped.append(signal)
+    return deduped
+
+
+def first_observed_text(observed: Any, fallback: str) -> str:
+    if isinstance(observed, list):
+        for candidate in observed:
+            text = str(candidate).strip()
+            if text:
+                return text
+        return fallback
+    return fallback
 
 
 def load_selected_decision(decision_path: Path, idea_id: str, *, allow_unselected: bool = False) -> dict[str, Any]:
@@ -163,13 +211,14 @@ def repo_choice_breakdown(idea: dict[str, Any], review: dict[str, Any], repo_ite
         for item in idea.get("repo_context", [])
         if isinstance(item, dict) and str(item.get("repo_id") or "").strip()
     }
+    review_observed = extract_review_observed_signals(review if isinstance(review, dict) else {})
     idea_query = " ".join(
         [
             str(idea.get("title") or ""),
             str(idea.get("core_hypothesis") or ""),
             str(idea.get("mechanism") or ""),
             " ".join(str(item) for item in idea.get("required_changes", [])),
-            " ".join(str(item) for item in review.get("Observed", [])) if isinstance(review, dict) else "",
+            " ".join(review_observed),
         ]
     )
     query_terms_set = set(query_terms(idea_query))
@@ -234,7 +283,7 @@ def main() -> int:
     bootstrap_workspace(project_root)
     ensure_research_runtime(project_root, "method-designer")
     program_root = research_root(project_root) / "programs" / args.program_id
-    idea_id = choose_idea(program_root, args.idea_id)
+    idea_id = choose_idea(program_root, args.idea_id, allow_unselected=args.allow_unselected)
     proposal_path = program_root / "ideas" / idea_id / "proposal.yaml"
     review_path = program_root / "ideas" / idea_id / "review.yaml"
     decision_path = program_root / "ideas" / idea_id / "decision.yaml"
@@ -242,7 +291,10 @@ def main() -> int:
     review = load_yaml(review_path, default={})
     decision = load_selected_decision(decision_path, idea_id, allow_unselected=args.allow_unselected)
     decision_label = str(decision.get("decision") or decision.get("status") or "").strip().lower()
-    design_status = "selected" if decision_label == "selected" else "draft"
+    is_selected_decision = decision_label == "selected"
+    draft_mode = not is_selected_decision
+    design_status = "selected" if is_selected_decision else "draft"
+    workflow_stage = "implementation-planning" if is_selected_decision else ""
     if not isinstance(proposal, dict):
         raise SystemExit(f"Missing proposal for idea {idea_id}")
 
@@ -298,7 +350,14 @@ def main() -> int:
         ],
         "idea_id": idea_id,
         "title": proposal.get("title", ""),
-        "reason": str(decision.get("reason") or "Selected for method design based on idea-review-board output."),
+        "reason": str(
+            decision.get("reason")
+            or (
+                "Selected for method design based on idea-review-board output."
+                if is_selected_decision
+                else "Draft design generated before idea selection is finalized."
+            )
+        ),
     }
     repo_choice = {
         **yaml_default(f"{args.program_id}-repo-choice", "method-designer", status=design_status, confidence=0.68),
@@ -405,6 +464,11 @@ def main() -> int:
             "Complexity explodes before baseline parity is reached.",
         ],
     }
+    risk_note = "Need manual risk review."
+    if isinstance(review, dict):
+        failure_modes = review.get("failure_modes")
+        if isinstance(failure_modes, dict):
+            risk_note = first_observed_text(failure_modes.get("Observed"), risk_note)
     system_design = (
         f"# System Design: {proposal.get('title', idea_id)}\n\n"
         "## Goal\n\n"
@@ -441,7 +505,7 @@ def main() -> int:
             else "- Preserve a clear seam between the high-level policy stack and the low-level control stack, so each repo can still be validated independently.\n"
         )
         + "\n## Risks\n\n"
-        + f"- {review.get('failure_modes', {}).get('Observed', ['Need manual risk review.'])[0] if isinstance(review, dict) else 'Need manual risk review.'}\n"
+        + f"- {risk_note}\n"
     )
     runbook = (
         f"# Runbook: {idea_id}\n\n"
@@ -465,6 +529,7 @@ def main() -> int:
 
     state_path = program_root / "workflow" / "state.yaml"
     state = load_yaml(state_path, default={})
+    report_stage = workflow_stage or "idea-review"
     if isinstance(state, dict):
         state["generated_at"] = utc_now_iso()
         state["inputs"] = [
@@ -472,9 +537,15 @@ def main() -> int:
             review_path.relative_to(project_root).as_posix(),
             decision_path.relative_to(project_root).as_posix(),
         ]
-        state["stage"] = "implementation-planning"
-        state["active_idea_id"] = idea_id
-        state["selected_idea_id"] = idea_id
+        if is_selected_decision:
+            state["stage"] = workflow_stage
+        elif not str(state.get("stage") or "").strip():
+            state["stage"] = "idea-review"
+        report_stage = str(state.get("stage") or "idea-review")
+        if is_selected_decision or not str(state.get("selected_idea_id") or "").strip():
+            state["active_idea_id"] = idea_id
+        if is_selected_decision:
+            state["selected_idea_id"] = idea_id
         state["selected_repo_id"] = selected_repo.get("id", "")
         write_yaml_if_changed(state_path, state)
 
@@ -486,7 +557,7 @@ def main() -> int:
             "event_type": "design-pack-generated",
             "title": "Design pack refreshed",
             "summary": (
-                f"Generated a design pack for {idea_id} using host repo {selected_repo.get('id', 'pending-repo')}; "
+                f"{'Drafted' if draft_mode else 'Generated'} a design pack for {idea_id} using host repo {selected_repo.get('id', 'pending-repo')}; "
                 f"defined {len(interfaces.get('new_modules', []))} new modules and {len(interfaces.get('metrics', []))} tracked metrics."
             ),
             "artifacts": [
@@ -507,7 +578,9 @@ def main() -> int:
                     if isinstance(item, dict) and str(item.get("repo_id") or "").strip()
                 ],
             ],
-            "stage": "implementation-planning",
+            "stage": report_stage,
+            "draft": draft_mode,
+            "decision_status": decision_label or "missing-status",
         },
         generated_by="method-designer",
     )

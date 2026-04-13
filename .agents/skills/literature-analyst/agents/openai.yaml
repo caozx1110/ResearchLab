@@ -1,5 +1,4 @@
 interface:
   display_name: "Literature Analyst"
-  short_description: "Turn the literature library into program-level evidence maps"
-  default_prompt: "Use $literature-analyst to summarize the literature most relevant to a program, cluster themes, surface evidence gaps, and prepare grounded inputs for idea work."
-
+  short_description: "Program-scoped literature evidence maps from canonical library"
+  default_prompt: "Use $literature-analyst to query canonical literature for an existing program, produce a durable Chinese-first evidence map, and log high-value findings and gaps without drifting into pre-program landscape scans or user-facing reading bundles."

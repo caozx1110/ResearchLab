@@ -2,55 +2,55 @@
 
 # {{title}}
 
-> Close-reading note scaffold. Read `note-context.md` and the primary source before replacing the placeholders below.
+> 论文精读笔记模板。请先阅读 `note-context.md` 与原始资料，再替换下面的占位内容。
 
-## Snapshot
+## 快照 Snapshot
 
-- Source ID: `{{source_id}}`
-- Kind: `{{source_kind}}`
-- Year: `{{year}}`
-- Authors: {{authors}}
-- URL: {{canonical_url}}
-- Tags: {{tags}}
-- Topics: {{topics}}
+- 来源 ID Source ID: `{{source_id}}`
+- 类型 Kind: `{{source_kind}}`
+- 年份 Year: `{{year}}`
+- 作者 Authors: {{authors}}
+- 链接 URL: {{canonical_url}}
+- 标签 Tags: {{tags}}
+- 主题 Topics: {{topics}}
 
-## Source Reading Coverage
+## 阅读覆盖 Source Reading Coverage
 
 {{source_reading_coverage}}
 
-## Executive Summary
+## 执行摘要 Executive Summary
 
 {{executive_summary}}
 
-## Motivation / Problem Setting
+## 研究动机 / 问题设定 Motivation / Problem Setting
 
 {{motivation}}
 
-## Key Innovations
+## 关键创新 Key Innovations
 
 {{innovations}}
 
-## Method Overview
+## 方法概览 Method Overview
 
 {{method_overview}}
 
-## Main Experimental Results
+## 核心实验结果 Main Experimental Results
 
 {{results_summary}}
 
-## Limitations / Caveats
+## 局限与注意事项 Limitations / Caveats
 
 {{limitations}}
 
-## Future Work / Follow-ups
+## 后续工作 / 跟进 Future Work / Follow-ups
 
 {{future_work}}
 
-## Retrieval Cues
+## 检索线索 Retrieval Cues
 
 {{retrieval_cues}}
 
-## Abstract
+## 摘要 Abstract
 
 {{abstract}}
 

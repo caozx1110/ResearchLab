@@ -4,61 +4,441 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{{PAGE_TITLE}}</title>
+    <link rel="stylesheet" href="assets/vendor/xterm/xterm.css" />
     <link rel="stylesheet" href="assets/kb.css" />
   </head>
   <body>
-    <div class="orb orb-a"></div>
-    <div class="orb orb-b"></div>
-    <div class="app-shell">
-      <header class="topbar">
-        <div class="top-row">
-          <nav id="tabNav" class="tab-nav-inline" aria-label="分类导航"></nav>
-          <div class="status-strip">
-            <span id="liveStatus" class="status-pill">loading</span>
-            <span id="updatedAt" class="status-note">等待首次快照...</span>
-          </div>
+    <div id="appShell" class="app-shell">
+      <aside class="activity-bar" aria-label="工作台导航">
+        <div class="activity-brand">
+          <button
+            id="sidebarToggleBtn"
+            class="activity-utility brand"
+            type="button"
+            data-tip="切换亮色 / 暗色主题"
+            data-tip-side="right"
+            aria-label="切换亮色或暗色主题"
+          >
+            <span class="brand-mark" id="themeToggleMark">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 3.5V6.2"></path>
+                <path d="M12 17.8V20.5"></path>
+                <path d="M3.5 12H6.2"></path>
+                <path d="M17.8 12H20.5"></path>
+                <path d="M6 6L7.9 7.9"></path>
+                <path d="M16.1 16.1L18 18"></path>
+                <path d="M18 6L16.1 7.9"></path>
+                <path d="M7.9 16.1L6 18"></path>
+                <circle cx="12" cy="12" r="4.2"></circle>
+              </svg>
+            </span>
+          </button>
         </div>
-        <div class="search-row">
-          <label class="search-box">
-            <span>搜索与筛选</span>
-            <input id="globalSearch" type="search" placeholder="输入关键词：论文标题、作者、tag、program、repo..." autocomplete="off" />
-          </label>
-          <div id="filterBar" class="filter-bar"></div>
+        <div class="activity-stack">
+          <button
+            id="activitySearchBtn"
+            class="activity-utility"
+            type="button"
+            data-tip="切换全局搜索"
+            data-tip-side="right"
+            aria-label="切换全局搜索"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="11" cy="11" r="6.5"></circle>
+              <path d="M16 16L21 21"></path>
+            </svg>
+          </button>
+          <nav id="tabNav" class="activity-nav" aria-label="知识视图切换"></nav>
         </div>
-      </header>
+        <div class="activity-status" data-tip="知识库快照同步状态">
+          <span id="liveStatus" class="status-pill">loading</span>
+          <span id="updatedAt" class="status-note">--:--</span>
+        </div>
+        <div class="activity-stack bottom">
+          <button
+            id="refreshNowBtn"
+            class="activity-utility"
+            type="button"
+            data-tip="立即刷新快照"
+            data-tip-side="right"
+            aria-label="立即刷新快照"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M20 6V12H14"></path>
+              <path d="M4 18V12H10"></path>
+              <path d="M6.8 8.2A8 8 0 0 1 20 12"></path>
+              <path d="M17.2 15.8A8 8 0 0 1 4 12"></path>
+            </svg>
+          </button>
+          <button
+            id="detailToggleBtn"
+            class="activity-utility"
+            type="button"
+            data-tip="展开或收起右侧 Inspector"
+            data-tip-side="right"
+            aria-label="切换右侧 Inspector"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="4" y="5" width="16" height="14" rx="2"></rect>
+              <path d="M9 5V19"></path>
+              <path d="M12.5 9H16.5"></path>
+              <path d="M12.5 13H16.5"></path>
+            </svg>
+          </button>
+          <button
+            id="terminalToggleBtn"
+            class="activity-utility"
+            type="button"
+            data-tip="展开或收起底部终端面板"
+            data-tip-side="right"
+            aria-label="切换底部终端面板"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="3.5" y="5" width="17" height="14" rx="2"></rect>
+              <path d="M7.5 10L10.5 12L7.5 14"></path>
+              <path d="M12.5 15H16.5"></path>
+            </svg>
+          </button>
+          <button
+            id="settingsBtn"
+            class="activity-utility"
+            type="button"
+            data-tip="打开工作区设置"
+            data-tip-side="right"
+            aria-label="打开工作区设置"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="3"></circle>
+              <path d="M19.4 15A1 1 0 0 0 19.6 16.1L19.7 16.2A2 2 0 1 1 16.9 19L16.8 18.9A1 1 0 0 0 15.7 18.7A1 1 0 0 0 15 19.6V20A2 2 0 1 1 11 20V19.8A1 1 0 0 0 10.3 18.9A1 1 0 0 0 9.2 19.1L9.1 19.2A2 2 0 1 1 6.3 16.4L6.4 16.3A1 1 0 0 0 6.6 15.2A1 1 0 0 0 5.7 14.5H5A2 2 0 1 1 5 10.5H5.2A1 1 0 0 0 6.1 9.8A1 1 0 0 0 5.9 8.7L5.8 8.6A2 2 0 1 1 8.6 5.8L8.7 5.9A1 1 0 0 0 9.8 6.1A1 1 0 0 0 10.5 5.2V5A2 2 0 1 1 14.5 5V5.2A1 1 0 0 0 15.2 6.1A1 1 0 0 0 16.3 5.9L16.4 5.8A2 2 0 1 1 19.2 8.6L19.1 8.7A1 1 0 0 0 18.9 9.8A1 1 0 0 0 19.8 10.5H20A2 2 0 1 1 20 14.5H19.8A1 1 0 0 0 19.4 15Z"></path>
+            </svg>
+          </button>
+        </div>
+      </aside>
 
-      <main class="workspace-main">
-        <aside class="list-panel">
-          <div class="panel-head">
-            <h2 id="listTitle">总览</h2>
+      <aside id="primarySidebar" class="primary-sidebar">
+        <div class="panel-head sidebar-head">
+          <div>
+            <h1 id="listTitle">总览</h1>
             <p id="listMeta" class="panel-subtle">0 条</p>
           </div>
-          <div id="listContainer" class="list-container">
-            <div class="empty-state">正在加载快照...</div>
+          <div class="toolbar-group toolbar-group-tight">
+            <button
+              id="sidebarCollapseBtn"
+              class="toolbar-button toolbar-button-ghost toolbar-button-icon"
+              type="button"
+              data-tip="折叠左侧资源栏"
+              aria-label="折叠左侧资源栏"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M15 5L8 12L15 19"></path>
+              </svg>
+            </button>
           </div>
-        </aside>
+        </div>
 
-        <section class="detail-panel">
-          <div class="panel-head">
-            <h2 id="detailTitle">请先选择条目</h2>
-            <p id="detailMeta" class="panel-subtle">右侧展示结构化详情、摘要和文件入口</p>
+        <div id="sidebarSearch" class="sidebar-search">
+          <div class="section-head search-head">
+            <div class="search-head-copy">
+              <span class="section-label">Search</span>
+              <span id="searchSectionMeta" class="inline-hint">默认收起</span>
+            </div>
+            <button
+              id="searchSectionToggleBtn"
+              class="toolbar-button toolbar-button-ghost toolbar-button-icon search-section-toggle"
+              type="button"
+              data-tip="展开或收起搜索分栏"
+              aria-label="展开或收起搜索分栏"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M7 10L12 15L17 10"></path>
+              </svg>
+            </button>
           </div>
-          <div id="detailBody" class="detail-body">
-            <div class="empty-state">
-              从左侧列表选择任意条目后，这里会展示更易读的 YAML / Markdown 信息。
+          <div id="searchSectionBody" class="sidebar-search-body">
+            <label
+              class="search-box"
+              data-tip="统一搜索入口，支持按标题、作者、年份、领域、标签、Program、Repo、Wiki 检索。"
+            >
+              <span>搜索与筛选</span>
+              <input
+                id="globalSearch"
+                type="search"
+                placeholder="搜索标题、作者、年份、领域、标签、Program、Repo、Wiki"
+                autocomplete="off"
+              />
+            </label>
+            <div id="filterBar" class="filter-bar"></div>
+          </div>
+        </div>
+
+        <section class="sidebar-section quick-open-section">
+          <div class="section-head">
+            <span class="section-label">Quick Open</span>
+          </div>
+          <div id="quickOpenBar" class="quick-open-bar"></div>
+        </section>
+
+        <div id="listContainer" class="list-container">
+          <div class="empty-state">正在加载快照...</div>
+        </div>
+      </aside>
+
+      <div
+        id="listResizer"
+        class="panel-resizer panel-resizer-vertical"
+        aria-label="拖拽调整左侧资源栏宽度"
+        data-tip="按住拖拽，调整左侧资源栏宽度"
+      ></div>
+
+      <section class="center-stack">
+        <section class="workbench-panel">
+          <div class="panel-head workbench-head">
+            <div>
+              <h2 id="workbenchTitle">知识工作台</h2>
+              <p id="workbenchMeta" class="panel-subtle"></p>
+            </div>
+            <div class="workbench-controls">
+              <span id="workbenchStatus" class="status-pill workbench-status">未打开文件</span>
+              <div class="toolbar-group">
+                <button id="workbenchBackBtn" class="toolbar-button toolbar-button-icon" type="button" data-tip="返回上一个工作台页面" aria-label="返回上一个工作台页面">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M15 5L8 12L15 19"></path>
+                  </svg>
+                </button>
+                <button id="workbenchForwardBtn" class="toolbar-button toolbar-button-icon" type="button" data-tip="前进到下一个工作台页面" aria-label="前进到下一个工作台页面">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M9 5L16 12L9 19"></path>
+                  </svg>
+                </button>
+                <button id="workbenchModeSplit" class="toolbar-button toolbar-button-icon" type="button" data-tip="编辑与预览并排显示" aria-label="编辑与预览并排显示">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <rect x="4" y="5" width="16" height="14" rx="2"></rect>
+                    <path d="M12 5V19"></path>
+                  </svg>
+                </button>
+                <button id="workbenchModeEdit" class="toolbar-button toolbar-button-icon" type="button" data-tip="只显示编辑器" aria-label="只显示编辑器">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M5 19L9 18L18 9L15 6L6 15L5 19Z"></path>
+                    <path d="M13.5 7.5L16.5 10.5"></path>
+                  </svg>
+                </button>
+                <button id="workbenchModePreview" class="toolbar-button toolbar-button-icon active" type="button" data-tip="只显示预览" aria-label="只显示预览">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M2.5 12S6.5 5.5 12 5.5S21.5 12 21.5 12S17.5 18.5 12 18.5S2.5 12 2.5 12Z"></path>
+                    <circle cx="12" cy="12" r="2.8"></circle>
+                  </svg>
+                </button>
+              </div>
+              <div class="toolbar-group">
+                <button
+                  id="workbenchOpenExternalBtn"
+                  class="toolbar-button toolbar-button-icon"
+                  type="button"
+                  data-tip="在浏览器新标签页直接打开当前文件"
+                  aria-label="在浏览器新标签页直接打开当前文件"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M14 5H19V10"></path>
+                    <path d="M10 14L19 5"></path>
+                    <path d="M19 14V18.5H5.5V5H10"></path>
+                  </svg>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div class="workbench-shell">
+            <div class="workbench-pathbar">
+              <div class="path-group">
+                <span class="path-label">当前文件</span>
+                <code id="workbenchPath">尚未打开</code>
+              </div>
+            </div>
+
+            <div id="workbenchBody" class="workbench-body empty">
+              <div class="empty-state">
+                从左侧列表、Quick Open，或右侧 Inspector 的文件入口选择任意 Markdown / YAML / 文本文件，即可在这里打开。
+              </div>
             </div>
           </div>
         </section>
-      </main>
+
+        <div
+          id="terminalResizer"
+          class="panel-resizer panel-resizer-horizontal"
+          aria-label="拖拽调整底部终端面板高度"
+          data-tip="按住拖拽，调整底部终端面板高度"
+        ></div>
+
+        <section id="terminalPanel" class="terminal-panel">
+          <div class="panel-head terminal-head">
+            <div class="terminal-tabbar">
+              <button class="terminal-tab active" type="button">终端</button>
+              <span id="terminalTitle" hidden></span>
+              <span id="terminalMeta" hidden></span>
+            </div>
+            <div class="toolbar-group">
+              <button
+                id="terminalCodexBtn"
+                class="toolbar-button terminal-mode-button"
+                type="button"
+                data-tip="在内嵌终端里启动 Codex CLI"
+              >
+                Codex CLI
+              </button>
+              <button
+                id="terminalShellBtn"
+                class="toolbar-button terminal-mode-button"
+                type="button"
+                data-tip="启动更轻的工作区 shell"
+              >
+                Shell
+              </button>
+              <button
+                id="terminalCollapseBtn"
+                class="toolbar-button toolbar-button-icon"
+                type="button"
+                data-tip="收起底部终端面板"
+                aria-label="收起底部终端面板"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M7 15L12 10L17 15"></path>
+                </svg>
+              </button>
+            </div>
+          </div>
+
+          <div id="terminalViewport" class="terminal-viewport" tabindex="0" aria-label="工作区终端输出">
+            <div id="terminalScreen" class="terminal-screen">正在连接终端...</div>
+          </div>
+
+          <div id="terminalFoot" class="terminal-foot">
+            <div class="terminal-status-row">
+              <span id="terminalStatus" class="status-pill">初始化中</span>
+              <span id="terminalHint" class="panel-subtle">
+                支持直接点击终端区域输入；如果要满血体验，可用系统终端打开当前工作区。
+              </span>
+            </div>
+            <div id="terminalEntry" class="terminal-entry">
+              <span class="terminal-prompt">&gt;</span>
+              <input
+                id="terminalLineInput"
+                class="terminal-line-input"
+                type="text"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="输入命令或文本后按 Enter 发送到终端"
+              />
+              <button id="terminalSendBtn" class="toolbar-button toolbar-button-icon accent" type="button" data-tip="发送到终端" aria-label="发送到终端">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M4 11.5L20 4L13 20L11 13L4 11.5Z"></path>
+                </svg>
+              </button>
+              <button id="terminalCtrlCBtn" class="toolbar-button toolbar-button-icon" type="button" data-tip="向终端发送 Ctrl+C" aria-label="向终端发送 Ctrl+C">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M7 7L17 17"></path>
+                  <path d="M17 7L7 17"></path>
+                </svg>
+              </button>
+            </div>
+            <textarea id="terminalInputSink" class="terminal-input-sink" aria-hidden="true" autocomplete="off" spellcheck="false"></textarea>
+          </div>
+        </section>
+
+        <button
+          id="terminalCollapsedHandle"
+          class="panel-collapsed-handle terminal-collapsed-handle hidden"
+          type="button"
+          data-tip="展开底部终端面板"
+          aria-label="展开底部终端面板"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M7 15L12 10L17 15"></path>
+          </svg>
+        </button>
+      </section>
+
+      <div
+        id="detailResizer"
+        class="panel-resizer panel-resizer-vertical"
+        aria-label="拖拽调整右侧 Inspector 宽度"
+        data-tip="按住拖拽，调整右侧 Inspector 宽度"
+      ></div>
+
+      <aside id="detailPanel" class="detail-panel">
+        <div class="panel-head detail-head">
+          <div>
+            <h2 id="detailTitle">请先选择条目</h2>
+            <p id="detailMeta" class="panel-subtle">右侧显示结构化摘要、阶段细节和文件入口。</p>
+          </div>
+          <button
+            id="detailCollapseBtn"
+            class="toolbar-button toolbar-button-ghost toolbar-button-icon"
+            type="button"
+            data-tip="折叠右侧 Inspector"
+            aria-label="折叠右侧 Inspector"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M9 5L16 12L9 19"></path>
+            </svg>
+          </button>
+        </div>
+        <div id="detailBody" class="detail-body">
+          <div class="empty-state">左侧选择条目后，这里会显示结构化详情。</div>
+        </div>
+      </aside>
+
+      <button
+        id="detailCollapsedHandle"
+        class="panel-collapsed-handle detail-collapsed-handle hidden"
+        type="button"
+        data-tip="展开右侧 Inspector"
+        aria-label="展开右侧 Inspector"
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M15 5L8 12L15 19"></path>
+        </svg>
+      </button>
     </div>
 
     <script>
       window.RESEARCH_KB_BROWSER = {
         snapshotUrl: "./snapshot.json",
         versionUrl: "/api/version",
+        fileApiUrl: "/api/file",
+        terminalOpenUrl: "/api/terminal/open",
+        terminalPollUrl: "/api/terminal/poll",
+        terminalInputUrl: "/api/terminal/input",
+        terminalResizeUrl: "/api/terminal/resize",
+        systemTerminalOpenUrl: "/api/system-terminal/open",
+        systemTerminalTargetsUrl: "/api/system-terminal/targets",
         pollMs: {{VERSION_POLL_MS}}
       };
     </script>
+    <script>
+      window.MathJax = {
+        tex: {
+          inlineMath: [["$", "$"], ["\\(", "\\)"]],
+          displayMath: [["$$", "$$"], ["\\[", "\\]"]],
+          processEscapes: true
+        },
+        svg: {
+          fontCache: "global"
+        },
+        options: {
+          skipHtmlTags: ["script", "noscript", "style", "textarea", "pre", "code"]
+        },
+        startup: {
+          ready() {
+            MathJax.startup.defaultReady();
+            document.dispatchEvent(new CustomEvent("kb-mathjax-ready"));
+          }
+        }
+      };
+    </script>
+    <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
+    <script src="assets/vendor/xterm/xterm.js"></script>
+    <script src="assets/vendor/xterm/addon-fit.js"></script>
     <script src="assets/kb.js"></script>
   </body>
 </html>

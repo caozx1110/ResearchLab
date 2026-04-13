@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import copy
+import inspect
 import re
 import shutil
 import subprocess
@@ -17,7 +19,9 @@ for candidate in [Path(__file__).resolve()] + list(Path(__file__).resolve().pare
         sys.path.insert(0, str(lib_root))
         break
 
+from research_v11 import common as research_common
 from research_v11.common import (
+    append_program_reporting_event,
     bootstrap_workspace,
     clean_text,
     copytree_filtered,
@@ -35,7 +39,6 @@ from research_v11.common import (
     normalize_remote_url,
     owner_name_from_remote,
     pending_repo_reviews_path,
-    raw_root,
     read_text_excerpt,
     rebuild_repo_index,
     repo_index_path,
@@ -55,7 +58,7 @@ def intake_root(project_root: Path) -> Path:
 
 
 NOTE_TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "assets" / "repo-note-template.md"
-MANUAL_NOTE_HEADERS = ("## Working Notes", "## Manual Notes")
+MANUAL_NOTE_HEADERS = ("## 工作笔记 Working Notes", "## Working Notes", "## Manual Notes")
 NOTE_CONTEXT_NAME = "repo-note-context.md"
 NOTE_SCAFFOLD_MARKER = "<!-- repo-note-scaffold -->"
 LEGACY_AUTO_NOTE_MARKERS = ("Auto-generated repo analysis note.", NOTE_SCAFFOLD_MARKER)
@@ -64,6 +67,99 @@ NOTE_AUTHOR_SCRIPT = Path(__file__).resolve().parents[2] / "research-note-author
 
 def canonical_repo_root(project_root: Path, repo_id: str) -> Path:
     return research_root(project_root) / "library" / "repos" / repo_id
+
+
+def relative_path(project_root: Path, path: Path) -> str:
+    return path.resolve().relative_to(project_root.resolve()).as_posix()
+
+
+def program_stage(project_root: Path, program_id: str) -> str:
+    state_path = research_root(project_root) / "programs" / program_id / "workflow" / "state.yaml"
+    state = load_yaml(state_path, default={})
+    if not isinstance(state, dict):
+        return ""
+    return str(state.get("stage") or "").strip()
+
+
+def append_program_reporting_event_safe(
+    project_root: Path,
+    program_id: str,
+    event: dict[str, Any],
+    *,
+    generated_by: str,
+) -> bool:
+    program_id = str(program_id or "").strip()
+    if not program_id:
+        return False
+    program_root = research_root(project_root) / "programs" / program_id
+    if not program_root.exists():
+        log_progress(f"[warn] skipped program reporting event: program `{program_id}` does not exist")
+        return False
+    try:
+        append_program_reporting_event(
+            project_root,
+            program_id,
+            event,
+            generated_by=generated_by,
+        )
+    except Exception as exc:
+        message = clean_text(str(exc) or exc.__class__.__name__)
+        log_progress(f"[warn] failed to append program reporting event for `{program_id}`: {message}")
+        return False
+    return True
+
+
+def log_progress(message: str) -> None:
+    print(message, flush=True)
+
+
+def append_wiki_log_event(project_root: Path, event: dict[str, Any], *, generated_by: str) -> None:
+    helper = getattr(research_common, "append_wiki_log_event", None)
+    if not callable(helper):
+        return
+    event_type = str(event.get("type") or event.get("event_type") or "event").strip() or "event"
+    title = str(event.get("title") or event_type).strip() or event_type
+    summary = str(event.get("summary") or event.get("message") or "").strip()
+    occurred_at = event.get("timestamp") or event.get("occurred_at") or utc_now_iso()
+    metadata = {
+        key: value
+        for key, value in event.items()
+        if key not in {"type", "event_type", "title", "summary", "message", "timestamp", "occurred_at"}
+    }
+    signature: inspect.Signature | None = None
+    try:
+        signature = inspect.signature(helper)
+    except (TypeError, ValueError):
+        signature = None
+    parameters = signature.parameters if signature is not None else {}
+    if "event_type" in parameters and "title" in parameters:
+        helper(
+            project_root,
+            event_type,
+            title,
+            summary=summary,
+            metadata=metadata,
+            occurred_at=occurred_at,
+            generated_by=generated_by,
+        )
+        return
+    if "event" in parameters:
+        helper(project_root=project_root, event=event, generated_by=generated_by)
+        return
+    raise TypeError(
+        "Unsupported append_wiki_log_event helper signature; expected "
+        "`(project_root, event_type, title, ...)` or `(project_root, event, ...)`."
+    )
+
+
+def rebuild_wiki_index_markdown(project_root: Path) -> None:
+    helper = getattr(research_common, "rebuild_wiki_index_markdown", None)
+    if not callable(helper):
+        return
+    try:
+        helper(project_root)
+    except TypeError:
+        helper(project_root=project_root)
 
 
 def unique_repo_id(project_root: Path, base_id: str) -> str:
@@ -347,22 +443,22 @@ def build_repo_note_context(repo_id: str, summary: dict[str, Any], facts: dict[s
     readme_excerpt = _clean_repo_context(context_text or _read_repo_context(source_root))
 
     lines = [
-        f"# Close-Reading Context: {summary.get('repo_name') or repo_id}",
+        f"# 精读上下文 Close-Reading Context: {summary.get('repo_name') or repo_id}",
         "",
         f"- Repo ID: `{repo_id}`",
-        f"- Note target: `repo-notes.md`",
-        f"- Helper context: `{NOTE_CONTEXT_NAME}`",
+        f"- 笔记目标: `repo-notes.md`",
+        f"- 辅助上下文: `{NOTE_CONTEXT_NAME}`",
         f"- Canonical remote: {summary.get('canonical_remote') or 'n/a'}",
         f"- Primary language: `{summary.get('primary_language') or facts.get('primary_language') or 'unknown'}`",
         f"- Repo type: `{summary.get('repo_type') or facts.get('repo_type_hint') or 'unknown'}`",
         "",
-        "## Writing Targets",
+        "## 写作目标 Writing Targets",
         "",
-        "- Read the README plus representative train/eval/deploy entrypoints before rewriting `repo-notes.md`.",
-        "- Focus on what the repo is for, how the main workflow is structured, what is reusable, and what is still risky or ambiguous.",
-        "- Keep claims grounded in the README, visible entrypoints, and the files excerpted below.",
+        "- 改写 `repo-notes.md` 前，先读 README 和有代表性的 train/eval/deploy 入口。",
+        "- 聚焦这个仓库是做什么的、主流程怎么组织、哪里可复用、哪里仍然有风险或歧义。",
+        "- 所有判断都尽量落在 README、可见入口文件和下面摘录的源码片段上。",
         "",
-        "## Snapshot Cues",
+        "## 快照线索 Snapshot Cues",
         "",
         f"- Frameworks: {_format_inline_values(summary.get('frameworks', []))}",
         f"- Key dirs: {_format_inline_values(facts.get('key_dirs', []))}",
@@ -375,7 +471,7 @@ def build_repo_note_context(repo_id: str, summary: dict[str, Any], facts: dict[s
         lines.extend(
             [
                 "",
-                "## README Excerpt",
+                "## README 摘录 README Excerpt",
                 "",
                 readme_excerpt[:10000],
             ]
@@ -385,7 +481,7 @@ def build_repo_note_context(repo_id: str, summary: dict[str, Any], facts: dict[s
         lines.extend(
             [
                 "",
-                "## Selected File Excerpts",
+                "## 选定文件摘录 Selected File Excerpts",
                 "",
             ]
         )
@@ -410,9 +506,9 @@ def build_repo_note_context(repo_id: str, summary: dict[str, Any], facts: dict[s
 
 def _working_notes_block(note_path: Path) -> str:
     default_block = (
-        "## Working Notes\n\n"
-        "- Replace the placeholder sections above after reading `repo-note-context.md`, the README, and the main entrypoints.\n"
-        "- Keep any concrete file-level evidence or open architecture questions here for future reuse.\n"
+        "## 工作笔记 Working Notes\n\n"
+        "- 读完 `repo-note-context.md`、README 和主入口文件后，再把上面的占位内容替换成正式笔记。\n"
+        "- 如果你想保留后续复用线索，可以在这里记录具体文件证据和未解决的架构问题。\n"
     )
     if note_path.exists():
         existing = note_path.read_text(encoding="utf-8")
@@ -626,10 +722,7 @@ def stage_repo(project_root: Path, raw_source: str) -> tuple[Path, dict[str, Any
         local_path = Path(raw_source).resolve()
         canonical_remote = git_remote_url(local_path)
         source_head_commit = git_head_commit(local_path)
-        if local_path.is_relative_to(raw_root(project_root).resolve()):
-            shutil.move(str(local_path), stage_source)
-        else:
-            copytree_filtered(local_path, stage_source)
+        copytree_filtered(local_path, stage_source)
         explicit_repo_name = local_path.name
         if explicit_repo_name.lower() in {"source", "repo"} and canonical_remote:
             explicit_repo_name = Path(canonical_remote.rstrip("/")).name or explicit_repo_name
@@ -671,6 +764,9 @@ def load_manifest_candidate(stage_dir: Path) -> dict[str, Any]:
 def register_resolved_review(project_root: Path, review_item: dict[str, Any]) -> None:
     payload = load_list_document(resolved_repo_reviews_path(project_root), "resolved-repo-reviews", "repo-cataloger")
     payload["generated_at"] = utc_now_iso()
+    review_id = str(review_item.get("review_id") or "").strip()
+    if review_id:
+        payload["items"] = [item for item in payload["items"] if item.get("review_id") != review_id]
     payload["items"].append(review_item)
     write_yaml_if_changed(resolved_repo_reviews_path(project_root), payload)
 
@@ -699,6 +795,14 @@ def remove_pending_review(project_root: Path, review_id: str) -> dict[str, Any]:
     return matched
 
 
+def get_pending_review(project_root: Path, review_id: str) -> dict[str, Any]:
+    payload = load_list_document(pending_repo_reviews_path(project_root), "pending-repo-reviews", "repo-cataloger")
+    for item in payload["items"]:
+        if item.get("review_id") == review_id:
+            return item
+    raise SystemExit(f"Pending repo review not found: {review_id}")
+
+
 def exact_match(existing: dict[str, Any], candidate: dict[str, Any]) -> bool:
     if existing.get("canonical_remote") and existing.get("canonical_remote") == candidate.get("canonical_remote"):
         return True
@@ -709,9 +813,13 @@ def exact_match(existing: dict[str, Any], candidate: dict[str, Any]) -> bool:
 
 def attach_alias(project_root: Path, canonical_id: str, candidate: dict[str, Any], *, resolution: str) -> None:
     summary_path = research_root(project_root) / "library" / "repos" / canonical_id / "summary.yaml"
-    summary = load_yaml(summary_path, default={})
-    if not isinstance(summary, dict):
+    summary_current = load_yaml(summary_path, default={})
+    if not isinstance(summary_current, dict):
         raise SystemExit(f"Missing canonical repo summary: {summary_path}")
+    summary = copy.deepcopy(summary_current)
+    index_path = repo_index_path(project_root)
+    index_current = load_index(index_path, "repo-index", "repo-cataloger")
+    payload = copy.deepcopy(index_current)
     alias_entry = {
         "alias_id": candidate["intake_id"],
         "source_label": candidate["source_label"],
@@ -722,105 +830,135 @@ def attach_alias(project_root: Path, canonical_id: str, candidate: dict[str, Any
     }
     summary.setdefault("aliases", [])
     summary["aliases"].append(alias_entry)
-    write_yaml_if_changed(summary_path, summary)
 
-    payload = load_index(repo_index_path(project_root), "repo-index", "repo-cataloger")
     item = payload["items"].get(canonical_id, {})
     item.setdefault("aliases", [])
     item["aliases"].append(alias_entry)
     payload["items"][canonical_id] = item
-    write_yaml_if_changed(repo_index_path(project_root), payload)
-    rebuild_repo_index(project_root)
+    try:
+        write_yaml_if_changed(summary_path, summary)
+        write_yaml_if_changed(index_path, payload)
+        rebuild_repo_index(project_root)
+    except Exception:
+        write_yaml_if_changed(summary_path, summary_current)
+        write_yaml_if_changed(index_path, index_current)
+        try:
+            rebuild_repo_index(project_root)
+        except Exception:
+            pass
+        raise
 
-    if candidate.get("staged_source") and Path(candidate["staged_source"]).exists():
-        shutil.rmtree(candidate["staged_source"])
 
-
-def finalize_new_repo(project_root: Path, candidate: dict[str, Any]) -> str:
+def finalize_new_repo(project_root: Path, candidate: dict[str, Any], *, warning_sink: list[str] | None = None) -> str:
     repo_id = unique_repo_id(project_root, make_repo_id(candidate))
     entry_root = canonical_repo_root(project_root, repo_id)
     source_root = entry_root / "source"
-    source_root.parent.mkdir(parents=True, exist_ok=True)
-    if source_root.exists():
-        shutil.rmtree(source_root)
-    shutil.move(str(candidate["staged_source"]), source_root)
-    facts = load_legacy_repo_facts(project_root, source_root)
-    repo_inputs = [f"intake:{candidate['intake_id']}"]
-    if candidate.get("canonical_remote"):
-        repo_inputs.append(candidate["canonical_remote"])
-    repo_inputs.append(source_root.relative_to(find_project_root()).as_posix())
+    if entry_root.exists():
+        raise SystemExit(f"Canonical repo entry already exists: {entry_root}")
+    index_path = repo_index_path(project_root)
+    index_current = load_index(index_path, "repo-index", "repo-cataloger")
+    payload = copy.deepcopy(index_current)
+    summary: dict[str, Any] = {}
+    try:
+        source_root.parent.mkdir(parents=True, exist_ok=True)
+        if source_root.exists():
+            shutil.rmtree(source_root)
+        copytree_filtered(Path(candidate["staged_source"]), source_root)
+        facts = load_legacy_repo_facts(project_root, source_root)
+        repo_inputs = [f"intake:{candidate['intake_id']}"]
+        if candidate.get("canonical_remote"):
+            repo_inputs.append(candidate["canonical_remote"])
+        repo_inputs.append(source_root.relative_to(project_root).as_posix())
 
-    summary = {
-        **yaml_default(repo_id, "repo-cataloger", status="active", confidence=0.9),
-        "inputs": repo_inputs,
-        "repo_id": repo_id,
-        "repo_name": candidate["repo_name"],
-        "short_summary": "",
-        "canonical_remote": candidate.get("canonical_remote", ""),
-        "owner_name": candidate.get("owner_name", ""),
-        "import_type": candidate.get("import_type", ""),
-        "primary_language": candidate.get("primary_language", ""),
-        "frameworks": candidate.get("frameworks", []),
-        "topics": candidate.get("topics", []),
-        "tags": candidate.get("tags", []),
-        "repo_type": candidate.get("repo_type", ""),
-        "entrypoints": candidate.get("entrypoints", []),
-        "aliases": [],
-        "head_commit": candidate.get("head_commit", ""),
-    }
-    short_summary = ensure_summary_short_summary(summary, facts, candidate.get("readme_excerpt", ""), rewrite=True)
-    entrypoints = {
-        **yaml_default(f"{repo_id}-entrypoints", "repo-cataloger"),
-        "inputs": repo_inputs,
-        "entrypoints": facts.get("entrypoints", []),
-    }
-    modules = {
-        **yaml_default(f"{repo_id}-modules", "repo-cataloger"),
-        "inputs": repo_inputs,
-        "modules": [
-            {
-                "module_id": f"{repo_id}-module-{idx + 1}",
-                "path": path,
-                "role": "key-dir",
-            }
-            for idx, path in enumerate(facts.get("key_dirs", []))
-        ]
-        + [
-            {
-                "module_id": f"{repo_id}-subsystem-{idx + 1}",
-                "path": item["path"],
-                "role": "subsystem",
-                "children": item.get("children", []),
-            }
-            for idx, item in enumerate(facts.get("subsystems", []))
-        ],
-    }
-    write_yaml_if_changed(entry_root / "summary.yaml", summary)
-    write_yaml_if_changed(entry_root / "entrypoints.yaml", entrypoints)
-    write_yaml_if_changed(entry_root / "modules.yaml", modules)
-    prepare_note_assets_for_repo(repo_id, rewrite_generated_notes=True)
-
-    payload = load_index(repo_index_path(project_root), "repo-index", "repo-cataloger")
-    payload["generated_at"] = utc_now_iso()
-    payload["items"][repo_id] = {
-        "id": repo_id,
-        "repo_name": candidate["repo_name"],
-        "short_summary": short_summary,
-        "canonical_remote": candidate.get("canonical_remote", ""),
-        "owner_name": candidate.get("owner_name", ""),
-        "aliases": [],
-        "import_type": candidate.get("import_type", ""),
-        "frameworks": candidate.get("frameworks", []),
-        "entrypoints": candidate.get("entrypoints", []),
-        "topics": candidate.get("topics", []),
-        "tags": candidate.get("tags", []),
-    }
-    write_yaml_if_changed(repo_index_path(project_root), payload)
-    rebuild_repo_index(project_root)
+        summary = {
+            **yaml_default(repo_id, "repo-cataloger", status="active", confidence=0.9),
+            "inputs": repo_inputs,
+            "repo_id": repo_id,
+            "repo_name": candidate["repo_name"],
+            "short_summary": "",
+            "canonical_remote": candidate.get("canonical_remote", ""),
+            "owner_name": candidate.get("owner_name", ""),
+            "import_type": candidate.get("import_type", ""),
+            "primary_language": candidate.get("primary_language", ""),
+            "frameworks": candidate.get("frameworks", []),
+            "topics": candidate.get("topics", []),
+            "tags": candidate.get("tags", []),
+            "repo_type": candidate.get("repo_type", ""),
+            "entrypoints": candidate.get("entrypoints", []),
+            "aliases": [],
+            "head_commit": candidate.get("head_commit", ""),
+        }
+        short_summary = ensure_summary_short_summary(summary, facts, candidate.get("readme_excerpt", ""), rewrite=True)
+        entrypoints = {
+            **yaml_default(f"{repo_id}-entrypoints", "repo-cataloger"),
+            "inputs": repo_inputs,
+            "entrypoints": facts.get("entrypoints", []),
+        }
+        modules = {
+            **yaml_default(f"{repo_id}-modules", "repo-cataloger"),
+            "inputs": repo_inputs,
+            "modules": [
+                {
+                    "module_id": f"{repo_id}-module-{idx + 1}",
+                    "path": path,
+                    "role": "key-dir",
+                }
+                for idx, path in enumerate(facts.get("key_dirs", []))
+            ]
+            + [
+                {
+                    "module_id": f"{repo_id}-subsystem-{idx + 1}",
+                    "path": item["path"],
+                    "role": "subsystem",
+                    "children": item.get("children", []),
+                }
+                for idx, item in enumerate(facts.get("subsystems", []))
+            ],
+        }
+        write_yaml_if_changed(entry_root / "summary.yaml", summary)
+        write_yaml_if_changed(entry_root / "entrypoints.yaml", entrypoints)
+        write_yaml_if_changed(entry_root / "modules.yaml", modules)
+        payload["generated_at"] = utc_now_iso()
+        payload["items"][repo_id] = {
+            "id": repo_id,
+            "repo_name": candidate["repo_name"],
+            "short_summary": short_summary,
+            "canonical_remote": candidate.get("canonical_remote", ""),
+            "owner_name": candidate.get("owner_name", ""),
+            "aliases": [],
+            "import_type": candidate.get("import_type", ""),
+            "frameworks": candidate.get("frameworks", []),
+            "entrypoints": candidate.get("entrypoints", []),
+            "topics": candidate.get("topics", []),
+            "tags": candidate.get("tags", []),
+        }
+        write_yaml_if_changed(index_path, payload)
+        rebuild_repo_index(project_root)
+    except Exception:
+        shutil.rmtree(entry_root, ignore_errors=True)
+        write_yaml_if_changed(index_path, index_current)
+        try:
+            rebuild_repo_index(project_root)
+        except Exception:
+            pass
+        raise
+    try:
+        prepare_note_assets_for_repo(repo_id, rewrite_generated_notes=True)
+    except Exception as exc:
+        warning = clean_text(str(exc) or exc.__class__.__name__)
+        message = f"note assets skipped for {repo_id}: {warning}"
+        log_progress(f"[warn] {message}")
+        if warning_sink is not None:
+            warning_sink.append(message)
     return repo_id
 
 
-def catalog_candidate(project_root: Path, candidate: dict[str, Any]) -> tuple[str, str]:
+def catalog_candidate(
+    project_root: Path,
+    candidate: dict[str, Any],
+    *,
+    warning_sink: list[str] | None = None,
+) -> tuple[str, str]:
     payload = load_index(repo_index_path(project_root), "repo-index", "repo-cataloger")
     items = payload.get("items", {})
     for repo_id, existing in items.items():
@@ -851,7 +989,7 @@ def catalog_candidate(project_root: Path, candidate: dict[str, Any]) -> tuple[st
             },
         )
         return "pending-review", review_id
-    return "imported", finalize_new_repo(project_root, candidate)
+    return "imported", finalize_new_repo(project_root, candidate, warning_sink=warning_sink)
 
 
 def persist_manifest(stage_dir: Path, candidate: dict[str, Any], *, status: str, result: str) -> None:
@@ -871,31 +1009,111 @@ def ingest_sources(args: argparse.Namespace) -> int:
     bootstrap_workspace(project_root)
     if not args.repo:
         raise SystemExit("At least one --repo source is required.")
-    for raw_source in args.repo:
-        stage_dir, candidate = stage_repo(project_root, raw_source)
-        status, result = catalog_candidate(project_root, candidate)
-        persist_manifest(stage_dir, candidate, status=status, result=result)
-        if status == "pending-review":
-            print(f"[review] {candidate['repo_name']} -> {result}")
-        else:
-            register_resolved_review(
-                project_root,
-                {
-                    "review_id": f"resolved-{candidate['intake_id']}",
-                    "intake_id": candidate["intake_id"],
-                    "repo_name": candidate["repo_name"],
-                    "resolution": status,
-                    "canonical_id": result,
-                },
-            )
-            print(f"[ok] {candidate['repo_name']} -> {result} ({status})")
+    imported_repo_ids: list[str] = []
+    merged_repo_ids: list[str] = []
+    pending_review_ids: list[str] = []
+    artifact_paths: list[str] = []
+    failures: list[str] = []
+    warnings: list[str] = []
+    total = len(args.repo)
+    for index, raw_source in enumerate(args.repo, start=1):
+        log_progress(f"[start {index}/{total}] {raw_source}")
+        stage_dir: Path | None = None
+        candidate: dict[str, Any] | None = None
+        try:
+            stage_dir, candidate = stage_repo(project_root, raw_source)
+            artifact_paths.append(relative_path(project_root, stage_dir / "manifest.yaml"))
+            status, result = catalog_candidate(project_root, candidate, warning_sink=warnings)
+            persist_manifest(stage_dir, candidate, status=status, result=result)
+            if status == "pending-review":
+                pending_review_ids.append(result)
+                log_progress(f"[review] {candidate['repo_name']} -> {result}")
+            else:
+                register_resolved_review(
+                    project_root,
+                    {
+                        "review_id": f"resolved-{candidate['intake_id']}",
+                        "intake_id": candidate["intake_id"],
+                        "repo_name": candidate["repo_name"],
+                        "resolution": status,
+                        "canonical_id": result,
+                    },
+                )
+                if status == "imported":
+                    imported_repo_ids.append(result)
+                elif status == "merged":
+                    merged_repo_ids.append(result)
+                summary_path = research_root(project_root) / "library" / "repos" / result / "summary.yaml"
+                note_path = summary_path.parent / "repo-notes.md"
+                context_path = summary_path.parent / NOTE_CONTEXT_NAME
+                if summary_path.exists():
+                    artifact_paths.append(relative_path(project_root, summary_path))
+                if note_path.exists():
+                    artifact_paths.append(relative_path(project_root, note_path))
+                if context_path.exists():
+                    artifact_paths.append(relative_path(project_root, context_path))
+                log_progress(f"[ok] {candidate['repo_name']} -> {result} ({status})")
+        except Exception as exc:
+            message = clean_text(str(exc) or exc.__class__.__name__)
+            if stage_dir and candidate and stage_dir.exists():
+                persist_manifest(stage_dir, candidate, status="failed", result=message)
+            log_progress(f"[error] {raw_source} -> {message}")
+            failures.append(f"{raw_source}: {message}")
+    all_repo_ids = imported_repo_ids + merged_repo_ids
+    summary = (
+        f"Processed {total} repo source(s): imported {len(imported_repo_ids)}, merged {len(merged_repo_ids)}, "
+        f"pending review {len(pending_review_ids)}, failed {len(failures)}."
+    )
+    if warnings:
+        summary = f"{summary} Non-blocking warnings: {len(warnings)}."
+    rebuild_repo_index(project_root)
+    append_wiki_log_event(
+        project_root,
+        {
+            "source_skill": "repo-cataloger",
+            "event_type": "ingest",
+            "title": "Repository ingest completed",
+            "summary": summary,
+            "program_id": str(args.program_id or "").strip(),
+            "repo_id": all_repo_ids[0] if len(all_repo_ids) == 1 else "",
+            "repo_ids": all_repo_ids,
+            "review_ids": pending_review_ids,
+            "warnings": warnings,
+            "failures": failures,
+            "artifacts": sorted({path for path in artifact_paths if path}),
+        },
+        generated_by="repo-cataloger",
+    )
+    if not failures:
+        append_program_reporting_event_safe(
+            project_root,
+            args.program_id,
+            {
+                "source_skill": "repo-cataloger",
+                "event_type": "repo-ingest-completed",
+                "title": "Repository ingest completed",
+                "summary": summary,
+                "stage": program_stage(project_root, str(args.program_id or "").strip()),
+                "repo_ids": all_repo_ids,
+                "artifacts": sorted({path for path in artifact_paths if path}),
+                "review_ids": pending_review_ids,
+                "warnings": warnings,
+            },
+            generated_by="repo-cataloger",
+        )
+    rebuild_wiki_index_markdown(project_root)
+    if failures:
+        log_progress(f"[summary] completed with {len(failures)} failure(s)")
+        for item in failures:
+            log_progress(f"[failed] {item}")
+        return 1
     return 0
 
 
 def resolve_review(args: argparse.Namespace) -> int:
     project_root = find_project_root()
     bootstrap_workspace(project_root)
-    review_item = remove_pending_review(project_root, args.review_id)
+    review_item = get_pending_review(project_root, args.review_id)
     stage_dir = intake_root(project_root) / review_item["intake_id"]
     candidate = load_manifest_candidate(stage_dir)
     if args.decision == "existing":
@@ -916,6 +1134,49 @@ def resolve_review(args: argparse.Namespace) -> int:
             "canonical_id": resolution,
         },
     )
+    remove_pending_review(project_root, args.review_id)
+    summary_path = research_root(project_root) / "library" / "repos" / resolution / "summary.yaml"
+    note_path = summary_path.parent / "repo-notes.md"
+    context_path = summary_path.parent / NOTE_CONTEXT_NAME
+    artifacts = [
+        relative_path(project_root, stage_dir / "manifest.yaml"),
+        relative_path(project_root, resolved_repo_reviews_path(project_root)),
+    ]
+    if summary_path.exists():
+        artifacts.append(relative_path(project_root, summary_path))
+    if note_path.exists():
+        artifacts.append(relative_path(project_root, note_path))
+    if context_path.exists():
+        artifacts.append(relative_path(project_root, context_path))
+    append_wiki_log_event(
+        project_root,
+        {
+            "source_skill": "repo-cataloger",
+            "event_type": "ingest",
+            "title": "Repository duplicate review resolved",
+            "summary": f"Resolved {args.review_id} with decision `{args.decision}` to canonical repo `{resolution}`.",
+            "review_id": args.review_id,
+            "repo_id": resolution,
+            "repo_ids": [resolution],
+            "artifacts": sorted({item for item in artifacts if item}),
+        },
+        generated_by="repo-cataloger",
+    )
+    append_program_reporting_event_safe(
+        project_root,
+        args.program_id,
+        {
+            "source_skill": "repo-cataloger",
+            "event_type": "repo-review-resolved",
+            "title": "Repository duplicate review resolved",
+            "summary": f"Resolved {args.review_id} with decision `{args.decision}` to canonical repo `{resolution}`.",
+            "stage": program_stage(project_root, str(args.program_id or "").strip()),
+            "repo_ids": [resolution],
+            "artifacts": sorted({item for item in artifacts if item}),
+        },
+        generated_by="repo-cataloger",
+    )
+    rebuild_wiki_index_markdown(project_root)
     print(f"[ok] resolved {args.review_id} -> {resolution}")
     return 0
 
@@ -929,10 +1190,14 @@ def refresh_notes_cmd(args: argparse.Namespace) -> int:
         else sorted((research_root(project_root) / "library" / "repos").glob("*/summary.yaml"))
     )
     changed = 0
+    repo_ids: list[str] = []
+    artifacts: list[str] = []
     for summary_path in summary_paths:
         summary = load_yaml(summary_path, default={})
         if not isinstance(summary, dict) or not summary.get("repo_id"):
             raise SystemExit(f"Invalid repo summary: {summary_path}")
+        repo_id = str(summary["repo_id"])
+        repo_ids.append(repo_id)
         source_root = summary_path.parent / "source"
         facts = load_legacy_repo_facts(project_root, source_root)
         before_summary = clean_text(str(summary.get("short_summary") or ""))
@@ -940,7 +1205,43 @@ def refresh_notes_cmd(args: argparse.Namespace) -> int:
         if short_summary != before_summary:
             write_yaml_if_changed(summary_path, summary)
             changed += 1
-        prepare_note_assets_for_repo(str(summary["repo_id"]), rewrite_generated_notes=args.rewrite_generated_notes)
+        prepare_note_assets_for_repo(repo_id, rewrite_generated_notes=args.rewrite_generated_notes)
+        artifacts.append(relative_path(project_root, summary_path))
+        note_path = summary_path.parent / "repo-notes.md"
+        context_path = summary_path.parent / NOTE_CONTEXT_NAME
+        if note_path.exists():
+            artifacts.append(relative_path(project_root, note_path))
+        if context_path.exists():
+            artifacts.append(relative_path(project_root, context_path))
+    rebuild_repo_index(project_root)
+    append_wiki_log_event(
+        project_root,
+        {
+            "source_skill": "repo-cataloger",
+            "event_type": "note",
+            "title": "Repository note assets refreshed",
+            "summary": f"Refreshed note scaffolds for {len(repo_ids)} repo(s); updated {changed} summary field(s).",
+            "repo_id": repo_ids[0] if len(repo_ids) == 1 else "",
+            "repo_ids": repo_ids,
+            "artifacts": sorted({item for item in artifacts if item}),
+        },
+        generated_by="repo-cataloger",
+    )
+    append_program_reporting_event_safe(
+        project_root,
+        args.program_id,
+        {
+            "source_skill": "repo-cataloger",
+            "event_type": "repo-note-assets-refreshed",
+            "title": "Repository note assets refreshed",
+            "summary": f"Refreshed note scaffolds for {len(repo_ids)} repo(s); updated {changed} summary field(s).",
+            "stage": program_stage(project_root, str(args.program_id or "").strip()),
+            "repo_ids": repo_ids,
+            "artifacts": sorted({item for item in artifacts if item}),
+        },
+        generated_by="repo-cataloger",
+    )
+    rebuild_wiki_index_markdown(project_root)
     print(f"[ok] delegated repo note preparation to research-note-author ({changed} summary updates)")
     return 0
 
@@ -951,12 +1252,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     ingest_cmd = subparsers.add_parser("ingest", help="Catalog repo sources")
     ingest_cmd.add_argument("--repo", action="append", default=[], help="Local path or GitHub URL")
+    ingest_cmd.add_argument("--program-id", default="", help="Optional program ID for workflow/reporting-events feed")
     ingest_cmd.set_defaults(func=ingest_sources)
 
     resolve_cmd = subparsers.add_parser("resolve-review", help="Resolve a pending duplicate review")
     resolve_cmd.add_argument("--review-id", required=True)
     resolve_cmd.add_argument("--decision", choices=["existing", "new"], required=True)
     resolve_cmd.add_argument("--canonical-id", default="")
+    resolve_cmd.add_argument("--program-id", default="", help="Optional program ID for workflow/reporting-events feed")
     resolve_cmd.set_defaults(func=resolve_review)
 
     rebuild_cmd = subparsers.add_parser("rebuild-index", help="Rebuild the repo index from canonical repo summaries")
@@ -964,6 +1267,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     refresh_notes = subparsers.add_parser("refresh-notes", help="Refresh short_summary and delegate note asset preparation to research-note-author")
     refresh_notes.add_argument("--repo-id", action="append", default=[], help="Canonical repo ID to refresh")
+    refresh_notes.add_argument("--program-id", default="", help="Optional program ID for workflow/reporting-events feed")
     refresh_notes.add_argument("--rewrite-summary", action="store_true", help="Regenerate short_summary even if one already exists")
     refresh_notes.add_argument(
         "--rewrite-generated-notes",

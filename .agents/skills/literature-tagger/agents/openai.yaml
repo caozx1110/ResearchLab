@@ -1,4 +1,4 @@
 interface:
   display_name: "Literature Tagger"
-  short_description: "Curate literature tags, topics, and taxonomy quality"
-  default_prompt: "Use $literature-tagger to refresh literature topics and tags, clean alias drift, and keep the shared taxonomy usable for downstream retrieval."
+  short_description: "LLM-wiki lint/index owner for literature taxonomy quality"
+  default_prompt: "Use $literature-tagger to curate topics/tags, lint taxonomy drift, and write tag-quality query findings back into taxonomy and metadata wiki artifacts for reliable downstream retrieval."

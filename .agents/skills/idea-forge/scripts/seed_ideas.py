@@ -32,6 +32,16 @@ from research_v11.common import (
 )
 
 
+STAGE_ORDER = (
+    "problem-framing",
+    "literature-analysis",
+    "idea-generation",
+    "idea-review",
+    "method-design",
+    "implementation-planning",
+)
+
+
 def idea_id_from_title(program_id: str, title: str) -> str:
     return f"{program_id}-{slugify(title, max_words=5)}"
 
@@ -43,6 +53,34 @@ def repo_refs(project_root: Path) -> list[str]:
 
 def query_terms(text: str) -> list[str]:
     return query_keyword_terms(text)
+
+
+def first_observed_text(item: dict[str, Any], fallback: str = "gap") -> str:
+    observed = item.get("Observed")
+    if isinstance(observed, list):
+        for candidate in observed:
+            text = str(candidate).strip()
+            if text:
+                return text
+        return fallback
+    return fallback
+
+
+def stage_rank(stage: str) -> int:
+    try:
+        return STAGE_ORDER.index(str(stage or "").strip())
+    except ValueError:
+        return -1
+
+
+def should_promote_stage(current_stage: str, target_stage: str) -> bool:
+    current_rank = stage_rank(current_stage)
+    target_rank = stage_rank(target_stage)
+    if target_rank < 0:
+        return False
+    if current_rank < 0:
+        return True
+    return target_rank >= current_rank
 
 
 def proposal_query_text(charter: dict[str, Any], literature_map: dict[str, Any], seed: str) -> str:
@@ -154,7 +192,7 @@ def main() -> int:
     index_payload = load_index(index_path, f"{args.program_id}-ideas", "idea-forge")
     paper_refs = list(literature_map.get("paper_refs", []))
     direction_titles = [item.get("title", "") for item in literature_map.get("candidate_directions", []) if isinstance(item, dict)]
-    gap_titles = [item.get("Observed", ["gap"])[0] for item in literature_map.get("gaps", []) if isinstance(item, dict)]
+    gap_titles = [first_observed_text(item) for item in literature_map.get("gaps", []) if isinstance(item, dict)]
     seeds = direction_titles or gap_titles or [charter.get("goal", "baseline direction")]
 
     created = 0
@@ -246,7 +284,8 @@ def main() -> int:
     if isinstance(state, dict):
         state["generated_at"] = utc_now_iso()
         state["inputs"] = [literature_map_path.relative_to(project_root).as_posix(), index_path.relative_to(project_root).as_posix()]
-        state["stage"] = "idea-generation"
+        if should_promote_stage(str(state.get("stage") or ""), "idea-generation"):
+            state["stage"] = "idea-generation"
         if len(index_payload.get("items", {})) == 1:
             state["active_idea_id"] = next(iter(index_payload["items"]))
         elif not state.get("selected_idea_id"):

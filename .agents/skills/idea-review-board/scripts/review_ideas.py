@@ -37,6 +37,14 @@ COLLAB_RECOMMENDATION_TO_STATUS = {
     "needs-evidence": "needs-evidence",
     "needs-revision": "needs-revision",
 }
+STAGE_ORDER = (
+    "problem-framing",
+    "literature-analysis",
+    "idea-generation",
+    "idea-review",
+    "method-design",
+    "implementation-planning",
+)
 
 
 def normalize_legacy_argv(argv: list[str]) -> list[str]:
@@ -71,6 +79,23 @@ def compact_text(text: str, limit: int = 140) -> str:
     if len(normalized) <= limit:
         return normalized
     return normalized[: max(0, limit - 3)].rstrip() + "..."
+
+
+def stage_rank(stage: str) -> int:
+    try:
+        return STAGE_ORDER.index(str(stage or "").strip())
+    except ValueError:
+        return -1
+
+
+def should_promote_stage(current_stage: str, target_stage: str) -> bool:
+    current_rank = stage_rank(current_stage)
+    target_rank = stage_rank(target_stage)
+    if target_rank < 0:
+        return False
+    if current_rank < 0:
+        return True
+    return target_rank >= current_rank
 
 
 def proposal_paths(program_root: Path, *, idea_ids: list[str] | None = None) -> list[Path]:
@@ -507,9 +532,12 @@ def update_state(project_root: Path, payload: dict[str, Any], *, mode: str, sele
         state["selected_idea_id"] = selected_idea_id
     else:
         if not state.get("selected_idea_id"):
-            state["stage"] = "idea-review"
-        if top_id:
-            state["active_idea_id"] = top_id
+            if should_promote_stage(str(state.get("stage") or ""), "idea-review"):
+                state["stage"] = "idea-review"
+            if top_id:
+                state["active_idea_id"] = top_id
+        elif not str(state.get("active_idea_id") or "").strip():
+            state["active_idea_id"] = str(state.get("selected_idea_id") or "")
     write_yaml_if_changed(payload["state_path"], state)
 
 

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Research Experiment Tracker"
+  short_description: "Log experiment runs and refresh durable follow-up views"
+  default_prompt: "Use $research-experiment-tracker to write experiment run notes under experiments/runs/, update experiments/run-log.yaml plus follow-up.md, and persist statuses, metrics, failure modes, linked artifacts, and next actions for a concrete program."

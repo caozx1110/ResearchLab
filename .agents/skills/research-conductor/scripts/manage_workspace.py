@@ -18,10 +18,14 @@ for candidate in [Path(__file__).resolve()] + list(Path(__file__).resolve().pare
         break
 
 from research_v11.common import (
+    append_program_reporting_event,
+    append_wiki_log_event,
+    blank_reporting_events,
     bootstrap_program,
     bootstrap_workspace,
     clean_text,
     current_runtime_capabilities,
+    ensure_dir,
     ensure_research_runtime,
     find_project_root,
     format_runtime_report,
@@ -32,13 +36,17 @@ from research_v11.common import (
     load_repo_summaries,
     load_runtime_registry,
     load_yaml,
+    lint_wiki_workspace,
     normalize_title,
     preferred_runtime_record,
+    program_reporting_events_path,
     query_keyword_terms,
+    rebuild_wiki_index_markdown,
     remember_runtime as remember_runtime_record,
     research_root,
     slugify,
     utc_now_iso,
+    write_query_artifact,
     write_text_if_changed,
     write_yaml_if_changed,
     yaml_default,
@@ -905,6 +913,36 @@ def load_recent_items(
     return ranked
 
 
+def rank_items_for_query(
+    records: list[dict[str, Any]],
+    *,
+    scorer: Any,
+    context: dict[str, Any],
+    limit: int,
+) -> list[dict[str, Any]]:
+    ranked: list[dict[str, Any]] = []
+    for record in records:
+        score, reasons = scorer(record, context)
+        if score <= 0:
+            continue
+        ranked.append(
+            {
+                "record": record,
+                "generated_at": parse_iso_datetime(record.get("generated_at")),
+                "score": score,
+                "reasons": reasons,
+            }
+        )
+    ranked.sort(
+        key=lambda item: (
+            -item["score"],
+            item["generated_at"] or datetime.min.replace(tzinfo=timezone.utc),
+            str(item["record"].get("id") or item["record"].get("repo_id") or ""),
+        ),
+    )
+    return ranked[: max(limit, 0)]
+
+
 def parse_decision_log_entries(program_root: Path) -> list[dict[str, Any]]:
     path = program_root / "workflow" / "decision-log.md"
     if not path.exists():
@@ -1205,35 +1243,35 @@ def weekly_report_markdown(
     report_generated_at = utc_now_iso()
 
     lines = [
-        f"# Weekly Report: `{program_id}`",
+        f"# 周报 Weekly Report: `{program_id}`",
         "",
-        f"- Window: `{report_window_label(window_start, window_end)}`",
-        f"- Generated at: `{report_generated_at}`",
-        f"- Current stage: `{state.get('stage') or 'n/a'}`",
+        f"- 时间窗口: `{report_window_label(window_start, window_end)}`",
+        f"- 生成时间: `{report_generated_at}`",
+        f"- 当前阶段: `{state.get('stage') or 'n/a'}`",
         f"- Workflow active idea: `{state.get('active_idea_id') or 'n/a'}`",
         f"- Workflow selected idea: `{state.get('selected_idea_id') or 'n/a'}`",
         f"- Design-pack selected idea: `{selected_idea.get('idea_id') or 'n/a'}`",
         f"- Workflow selected repo: `{state.get('selected_repo_id') or 'n/a'}`",
         f"- Design-pack selected repo: `{repo_choice.get('selected_repo') or 'n/a'}`",
-        f"- Recent additions: `{len(recent_papers)}` papers, `{len(recent_repos)}` repos",
+        f"- 本窗口新增: `{len(recent_papers)}` 篇论文，`{len(recent_repos)}` 个 repo",
         "",
-        "## Executive Summary",
+        "## 执行摘要 Executive Summary",
         "",
     ]
     summary_lines = recent_item_overview_lines(recent_papers, recent_repos)
     summary_lines.insert(
         0,
-        "The program remains in a design-stage refinement loop, with the first design pack already present but workflow state, remembered stage transitions, and selected artifacts no longer fully aligned.",
+        "当前 program 仍处在设计阶段的反复收敛中：首版 design pack 已经存在，但 workflow state、历史阶段迁移和被选中的产物之间已经出现轻微漂移，需要继续收口。",
     )
     lines.extend(f"- {line}" for line in summary_lines)
 
-    lines.extend(["", "## Project Progress", ""])
+    lines.extend(["", "## 项目进展 Project Progress", ""])
     if progress_items:
         lines.extend(f"- {item}" for item in progress_items)
     else:
-        lines.append("- No program artifact updates were detected inside the selected window.")
+        lines.append("- 所选时间窗口内没有检测到新的 program 产物更新。")
 
-    lines.extend(["", "## New Literature This Week", ""])
+    lines.extend(["", "## 本周新增论文 New Literature This Week", ""])
     lines.append("| Added | Paper | Mode | Embodiment | Fit |")
     lines.append("| --- | --- | --- | --- | --- |")
     for item in recent_papers:
@@ -1253,7 +1291,7 @@ def weekly_report_markdown(
             + " |"
         )
 
-    lines.extend(["", "### Detailed Literature Notes", ""])
+    lines.extend(["", "### 论文细节笔记 Detailed Literature Notes", ""])
     detailed_papers = recent_papers[:max_detailed_papers]
     if detailed_papers:
         for item in detailed_papers:
@@ -1265,17 +1303,17 @@ def weekly_report_markdown(
                     f"- Added: `{item['generated_at'].date().isoformat() if item['generated_at'] else 'n/a'}`",
                     f"- Fit: `{fit_label(item['score'])}`",
                     f"- Focus: `{profile['mode']}` on `{profile['embodiment']}` problems",
-                    f"- Summary: {compact_text(record.get('short_summary') or record.get('abstract') or 'No summary available.', max_chars=320)}",
+                    f"- 摘要 Summary: {compact_text(record.get('short_summary') or record.get('abstract') or '暂无摘要。', max_chars=320)}",
                     f"- Why it matters: {paper_fit_reason(record, context, item['reasons'])}",
                 ]
             )
     else:
-        lines.append("- No detailed literature notes because no new papers were detected.")
+        lines.append("- 没有展开论文细节，因为本窗口内没有检测到新增论文。")
 
-    lines.extend(["", "### Literature Comparison", ""])
+    lines.extend(["", "### 论文对比 Literature Comparison", ""])
     lines.extend(f"- {line}" for line in paper_comparison_lines(recent_papers))
 
-    lines.extend(["", "## New Repos This Week", ""])
+    lines.extend(["", "## 本周新增 Repos New Repos This Week", ""])
     lines.append("| Added | Repo | Role | Coverage | Fit |")
     lines.append("| --- | --- | --- | --- | --- |")
     for item in recent_repos:
@@ -1295,7 +1333,7 @@ def weekly_report_markdown(
             + " |"
         )
 
-    lines.extend(["", "### Detailed Repo Notes", ""])
+    lines.extend(["", "### Repo 细节笔记 Detailed Repo Notes", ""])
     detailed_repos = recent_repos[:max_detailed_repos]
     if detailed_repos:
         for item in detailed_repos:
@@ -1308,27 +1346,27 @@ def weekly_report_markdown(
                     f"- Fit: `{fit_label(item['score'])}`",
                     f"- Role: `{profile['role']}`",
                     f"- Coverage: `{profile['coverage']}`",
-                    f"- Summary: {compact_text(record.get('short_summary') or 'No summary available.', max_chars=320)}",
+                    f"- 摘要 Summary: {compact_text(record.get('short_summary') or '暂无摘要。', max_chars=320)}",
                     f"- Why it matters: {repo_fit_reason(record, context, item['reasons'])}",
                 ]
             )
     else:
-        lines.append("- No detailed repo notes because no new repos were detected.")
+        lines.append("- 没有展开 repo 细节，因为本窗口内没有检测到新增 repo。")
 
-    lines.extend(["", "### Repo Comparison", ""])
+    lines.extend(["", "### Repo 对比 Repo Comparison", ""])
     lines.extend(f"- {line}" for line in repo_comparison_lines(recent_repos, context))
 
-    lines.extend(["", "## Current Issues", ""])
+    lines.extend(["", "## 当前问题 Current Issues", ""])
     if issues:
         lines.extend(f"- {issue}" for issue in issues)
     else:
-        lines.append("- No open issues detected from the current workflow files.")
+        lines.append("- 当前 workflow 文件里没有检测到显式 open issues。")
 
     if isinstance(interfaces, dict) and interfaces:
         lines.extend(
             [
                 "",
-                "## Implementation Signals Already Captured",
+                "## 已经落盘的实现信号 Implementation Signals Already Captured",
                 "",
                 f"- New modules already specified: `{', '.join(list_strings(interfaces.get('new_modules'))[:6]) or 'n/a'}`",
                 f"- Modified surfaces already specified: `{', '.join(list_strings(interfaces.get('modified_modules'))[:5]) or 'n/a'}`",
@@ -1337,6 +1375,291 @@ def weekly_report_markdown(
         )
 
     return "\n".join(lines).rstrip() + "\n"
+
+
+def query_program(args: argparse.Namespace) -> int:
+    project_root = find_project_root()
+    bootstrap_workspace(project_root)
+    ensure_research_runtime(project_root, "research-conductor")
+
+    question = clean_text(args.question)
+    if not question:
+        raise SystemExit("--question cannot be empty")
+
+    context = load_program_context(project_root, args.program_id)
+    query_terms = query_keyword_terms(
+        question,
+        stopwords={"question", "program", "analysis", "about", "please"},
+        project_root=project_root,
+    )
+    query_context = dict(context)
+    query_context["keyword_pool"] = set(context.get("keyword_pool", set()))
+    query_context["keyword_pool"].update(report_tokens(question))
+    query_context["keyword_pool"].update(query_terms)
+
+    paper_hits = rank_items_for_query(
+        load_literature_records(project_root),
+        scorer=paper_relevance,
+        context=query_context,
+        limit=args.max_papers,
+    )
+    repo_hits = rank_items_for_query(
+        load_repo_summaries(project_root),
+        scorer=repo_relevance,
+        context=query_context,
+        limit=args.max_repos,
+    )
+
+    top_paper_ids = [
+        str(item["record"].get("id") or "").strip()
+        for item in paper_hits
+        if str(item["record"].get("id") or "").strip()
+    ]
+    top_repo_ids = [
+        str(item["record"].get("repo_id") or item["record"].get("id") or "").strip()
+        for item in repo_hits
+        if str(item["record"].get("repo_id") or item["record"].get("id") or "").strip()
+    ]
+    stage = str(context.get("state", {}).get("stage") or "").strip()
+
+    lines = [
+        f"## Query",
+        f"- Program: `{args.program_id}`",
+        f"- Question: {question}",
+        f"- Stage: `{stage or 'unknown'}`",
+        f"- Query terms: `{', '.join(query_terms) if query_terms else 'n/a'}`",
+        "",
+        "## Synthesis",
+        "",
+        (
+            f"Top signals suggest {len(paper_hits)} literature hits and {len(repo_hits)} repo hits relevant to this question. "
+            "Use the highest-fit entries below as immediate evidence, and trigger literature-scout if freshness is uncertain."
+        ),
+        "",
+        "## Literature Evidence",
+    ]
+    if paper_hits:
+        for item in paper_hits:
+            record = item["record"]
+            source_id = str(record.get("id") or "").strip() or "unknown-lit"
+            title = str(record.get("canonical_title") or source_id)
+            reason = paper_fit_reason(record, query_context, item["reasons"])
+            lines.append(
+                f"- `{source_id}` ({fit_label(item['score'])} fit): {title}. Why: {compact_text(reason, max_chars=220)}"
+            )
+    else:
+        lines.append("- No high-confidence literature hits found from current canonical metadata.")
+
+    lines.extend(["", "## Repository Evidence"])
+    if repo_hits:
+        for item in repo_hits:
+            record = item["record"]
+            repo_id = str(record.get("repo_id") or record.get("id") or "").strip() or "unknown-repo"
+            name = str(record.get("repo_name") or repo_id)
+            reason = repo_fit_reason(record, query_context, item["reasons"])
+            lines.append(f"- `{repo_id}` ({fit_label(item['score'])} fit): {name}. Why: {compact_text(reason, max_chars=220)}")
+    else:
+        lines.append("- No high-confidence repository hits found from current canonical metadata.")
+
+    lines.extend(
+        [
+            "",
+            "## Follow-ups",
+            "- If the answer depends on the latest papers, run literature-scout and ingest new candidates before committing design decisions.",
+            "- Promote this query result into a durable artifact so future sessions can reuse it directly.",
+            "",
+        ]
+    )
+    result_markdown = "\n".join(lines)
+
+    artifact_path: Path | None = None
+    if not args.no_save:
+        artifact_path = write_query_artifact(
+            project_root,
+            query_text=question,
+            result_markdown=result_markdown,
+            title=args.title or f"{args.program_id} query",
+            query_type="query",
+            metadata={
+                "program_id": args.program_id,
+                "stage": stage,
+                "paper_ids": top_paper_ids,
+                "repo_ids": top_repo_ids,
+            },
+            generated_by="research-conductor",
+        )
+    else:
+        append_wiki_log_event(
+            project_root,
+            "query",
+            args.title or f"{args.program_id} ad-hoc query",
+            summary=question,
+            metadata={
+                "program_id": args.program_id,
+                "stage": stage,
+                "paper_ids": top_paper_ids,
+                "repo_ids": top_repo_ids,
+                "saved_artifact": False,
+            },
+            generated_by="research-conductor",
+        )
+
+    append_history(
+        project_root,
+        {
+            "timestamp": utc_now_iso(),
+            "type": "program-query-executed",
+            "program_id": args.program_id,
+            "question": compact_text(question, max_chars=220),
+            "artifact_path": artifact_path.relative_to(project_root).as_posix() if artifact_path else "",
+            "paper_ids": top_paper_ids,
+            "repo_ids": top_repo_ids,
+        },
+    )
+    append_program_reporting_event(
+        project_root,
+        args.program_id,
+        {
+            "source_skill": "research-conductor",
+            "event_type": "program-query-recorded",
+            "title": args.title or "Program query recorded",
+            "summary": (
+                f"Answered program query with {len(top_paper_ids)} literature references and {len(top_repo_ids)} repo references."
+            ),
+            "artifacts": [artifact_path.relative_to(project_root).as_posix()] if artifact_path else [],
+            "paper_ids": top_paper_ids,
+            "repo_ids": top_repo_ids,
+            "stage": stage,
+            "tags": query_terms[:8],
+        },
+        generated_by="research-conductor",
+    )
+
+    print(result_markdown)
+    if artifact_path:
+        print(f"[ok] wrote query artifact to {artifact_path.as_posix()}")
+    return 0
+
+
+def lint_workspace(args: argparse.Namespace) -> int:
+    project_root = find_project_root()
+    bootstrap_workspace(project_root)
+    ensure_research_runtime(project_root, "research-conductor")
+
+    report_path = lint_wiki_workspace(project_root, generated_by="research-conductor")
+    report_text = report_path.read_text(encoding="utf-8", errors="ignore")
+    status_match = re.search(r"^- status:\s*(.+)$", report_text, flags=re.MULTILINE)
+    issues_match = re.search(r"^- total_issues:\s*(\d+)$", report_text, flags=re.MULTILINE)
+    status = (status_match.group(1).strip() if status_match else "UNKNOWN").upper()
+    issue_count = int(issues_match.group(1)) if issues_match else 0
+
+    append_wiki_log_event(
+        project_root,
+        "lint",
+        "Workspace lint pass",
+        summary=f"status={status}, total_issues={issue_count}",
+        metadata={"report_path": report_path.relative_to(project_root).as_posix()},
+        generated_by="research-conductor",
+    )
+    append_history(
+        project_root,
+        {
+            "timestamp": utc_now_iso(),
+            "type": "workspace-linted",
+            "status": status,
+            "issue_count": issue_count,
+            "report_path": report_path.relative_to(project_root).as_posix(),
+        },
+    )
+
+    print(f"[ok] wrote lint report to {report_path.as_posix()}")
+    print(f"status: {status}")
+    print(f"issues: {issue_count}")
+    if args.strict and status != "PASS":
+        return 1
+    return 0
+
+
+def rebuild_wiki_index(args: argparse.Namespace) -> int:
+    project_root = find_project_root()
+    bootstrap_workspace(project_root)
+    ensure_research_runtime(project_root, "research-conductor")
+    index_path = rebuild_wiki_index_markdown(project_root)
+    append_wiki_log_event(
+        project_root,
+        "index",
+        "Wiki index rebuilt",
+        metadata={"index_path": index_path.relative_to(project_root).as_posix()},
+        generated_by="research-conductor",
+    )
+    append_history(
+        project_root,
+        {
+            "timestamp": utc_now_iso(),
+            "type": "wiki-index-rebuilt",
+            "index_path": index_path.relative_to(project_root).as_posix(),
+        },
+    )
+    print(f"[ok] rebuilt wiki index at {index_path.as_posix()}")
+    return 0
+
+
+def repair_program_files(args: argparse.Namespace) -> int:
+    project_root = find_project_root()
+    bootstrap_workspace(project_root)
+    ensure_research_runtime(project_root, "research-conductor")
+    programs_root = research_root(project_root) / "programs"
+    if not programs_root.exists():
+        print("[ok] no programs found")
+        return 0
+
+    available_ids = sorted(path.name for path in programs_root.iterdir() if path.is_dir() and not path.name.startswith("."))
+    target_ids = args.program_id if args.program_id else available_ids
+    created_paths: list[str] = []
+    missing_targets: list[str] = []
+
+    for program_id in target_ids:
+        program_root = programs_root / program_id
+        if not program_root.exists():
+            missing_targets.append(program_id)
+            continue
+        workflow_root = program_root / "workflow"
+        workflow_root.mkdir(parents=True, exist_ok=True)
+        reporting_path = program_reporting_events_path(project_root, program_id)
+        if not reporting_path.exists():
+            write_yaml_if_changed(reporting_path, blank_reporting_events(program_id, generated_by="research-conductor"))
+            created_paths.append(reporting_path.relative_to(project_root).as_posix())
+
+    index_path = rebuild_wiki_index_markdown(project_root)
+    append_wiki_log_event(
+        project_root,
+        "repair",
+        "Program workflow repair",
+        summary=f"Created {len(created_paths)} missing reporting-events files.",
+        metadata={
+            "created_paths": created_paths,
+            "missing_targets": missing_targets,
+            "index_path": index_path.relative_to(project_root).as_posix(),
+        },
+        generated_by="research-conductor",
+    )
+    append_history(
+        project_root,
+        {
+            "timestamp": utc_now_iso(),
+            "type": "program-files-repaired",
+            "created_count": len(created_paths),
+            "created_paths": created_paths,
+            "missing_targets": missing_targets,
+        },
+    )
+    print(f"[ok] repaired program files; created={len(created_paths)}")
+    if created_paths:
+        for path in created_paths:
+            print(f"- created: {path}")
+    if missing_targets:
+        print(f"- missing targets: {', '.join(missing_targets)}")
+    return 0
 
 
 def write_weekly_report(args: argparse.Namespace) -> int:
@@ -1897,6 +2220,38 @@ def build_parser() -> argparse.ArgumentParser:
     question_cmd.add_argument("--owner", default="research-conductor")
     question_cmd.add_argument("--notes", default="")
     question_cmd.set_defaults(func=add_open_question)
+
+    query_cmd = subparsers.add_parser(
+        "query-program",
+        help="Run a program-scoped query over canonical literature/repos and optionally save a durable wiki artifact",
+    )
+    query_cmd.add_argument("--program-id", required=True)
+    query_cmd.add_argument("--question", required=True)
+    query_cmd.add_argument("--title", default="")
+    query_cmd.add_argument("--max-papers", type=int, default=8)
+    query_cmd.add_argument("--max-repos", type=int, default=6)
+    query_cmd.add_argument("--no-save", action="store_true", help="Print query synthesis only; do not write a query artifact")
+    query_cmd.set_defaults(func=query_program)
+
+    lint_cmd = subparsers.add_parser(
+        "lint-workspace",
+        help="Run wiki-level workspace lint and write a durable lint report",
+    )
+    lint_cmd.add_argument("--strict", action="store_true", help="Exit non-zero when lint status is not PASS")
+    lint_cmd.set_defaults(func=lint_workspace)
+
+    rebuild_wiki_cmd = subparsers.add_parser(
+        "rebuild-wiki-index",
+        help="Regenerate doc/research/wiki/index.md from canonical workspace artifacts",
+    )
+    rebuild_wiki_cmd.set_defaults(func=rebuild_wiki_index)
+
+    repair_cmd = subparsers.add_parser(
+        "repair-program-files",
+        help="Backfill missing workflow/reporting-events.yaml files for existing programs",
+    )
+    repair_cmd.add_argument("--program-id", action="append", default=[], help="Optional program ID filter (repeatable)")
+    repair_cmd.set_defaults(func=repair_program_files)
 
     weekly_cmd = subparsers.add_parser(
         "write-weekly-report",

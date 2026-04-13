@@ -9,6 +9,12 @@ from pathlib import Path
 
 
 def main() -> int:
+    print(
+        "[deprecated] `paper-research-workbench/scripts/open_user_hub.py` is a legacy shim; "
+        "forwarding to `research-kb-browser/scripts/open_user_hub.py`.",
+        file=sys.stderr,
+        flush=True,
+    )
     target = Path(__file__).resolve().parents[2] / "research-kb-browser" / "scripts" / "open_user_hub.py"
     if not target.exists():
         raise SystemExit(

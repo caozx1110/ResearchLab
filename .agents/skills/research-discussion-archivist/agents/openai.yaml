@@ -1,0 +1,4 @@
+interface:
+  display_name: "Research Discussion Archivist"
+  short_description: "Archive technical route discussions into durable program notes"
+  default_prompt: "Use $research-discussion-archivist to convert important technical discussion outcomes into program discussion notes with conclusions, tradeoffs, open questions, next validation actions, and linked artifacts under doc/research/programs/<program-id>/discussions/."

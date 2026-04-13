@@ -1,4 +1,4 @@
 interface:
   display_name: "Research Conductor"
-  short_description: "Coordinate programs, memory, workflow state, and cross-skill handoffs"
-  default_prompt: "Use $research-conductor to create or resume a research program, update memory and workflow state, and route the next step to the right research skill."
+  short_description: "Route program lifecycle, state, and downstream research-skill handoffs"
+  default_prompt: "Use $research-conductor to create or resume a program, maintain workflow and memory state, route work to the correct downstream research skills, run program queries and lint, and keep doc/research/wiki/index.md plus log.md current without absorbing peer-skill responsibilities."

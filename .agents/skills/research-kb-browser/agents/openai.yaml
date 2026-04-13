@@ -1,4 +1,4 @@
 interface:
   display_name: "Research KB Browser"
-  short_description: "Visualize the research knowledge base and program artifacts"
-  default_prompt: "Use $research-kb-browser to build or open a live local browser for doc/research/, showing literature, repos, tags, landscapes, and program state in a human-friendly UI."
+  short_description: "Read-only browser for research artifacts and curated entry pages"
+  default_prompt: "Use $research-kb-browser to build or open a read-only local browser for `doc/research/` snapshots and curated user entry pages without mutating canonical artifacts or turning the browser into a writeback surface."

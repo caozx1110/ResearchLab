@@ -2,55 +2,55 @@
 
 # {{title}}
 
-> Close-reading literature note. Read `note-context.md` and the source PDF before replacing the placeholders below.
+> 论文精读笔记模板。请先阅读 `note-context.md` 与原始 PDF，再替换下面的占位内容。
 
-## Snapshot
+## 快照 Snapshot
 
-- Source ID: `{{source_id}}`
-- Kind: `{{source_kind}}`
-- Year: `{{year}}`
-- Authors: {{authors}}
-- URL: {{canonical_url}}
-- Tags: {{tags}}
-- Topics: {{topics}}
+- 来源 ID Source ID: `{{source_id}}`
+- 类型 Kind: `{{source_kind}}`
+- 年份 Year: `{{year}}`
+- 作者 Authors: {{authors}}
+- 链接 URL: {{canonical_url}}
+- 标签 Tags: {{tags}}
+- 主题 Topics: {{topics}}
 
-## Source Reading Coverage
-
-{{source_reading_coverage}}
-
-## Executive Summary
+## 执行摘要 Executive Summary
 
 {{executive_summary}}
 
-## Motivation / Problem Setting
+## 这篇论文到底想解决什么 Core Problem / Motivation
 
 {{motivation}}
 
-## Key Innovations
-
-{{innovations}}
-
-## Method Overview
+## 方法主线 How the Method Works
 
 {{method_overview}}
 
-## Main Experimental Results
+## 具体创新点 What Is Actually New
 
-{{results_summary}}
+{{innovations}}
 
-## Limitations / Caveats
+## 实验结果到底说明了什么 What the Results Actually Show
 
-{{limitations}}
+{{results_takeaways}}
 
-## Future Work / Follow-ups
+## 可改进之处 / 主要薄弱点 Improvement Opportunities / Weak Spots
 
-{{future_work}}
+{{improvement_opportunities}}
 
-## Retrieval Cues
+## 基于这篇论文能长出的新想法 Idea Seeds / Follow-ups
+
+{{idea_seeds}}
+
+## 阅读覆盖 Source Reading Coverage
+
+{{source_reading_coverage}}
+
+## 检索线索 Retrieval Cues
 
 {{retrieval_cues}}
 
-## Abstract
+## 摘要 Abstract
 
 {{abstract}}
 

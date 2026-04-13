@@ -5,48 +5,61 @@ description: Canonicalize local repositories and GitHub URLs into doc/research/l
 
 # Repo Cataloger
 
-Normalize repositories into the shared repo library before using them in ideas or design work.
+Normalize repositories into the shared repo library before idea, design, or implementation reuse.
+
+## LLM-Wiki Role Boundary (ingest/query/lint/index/log)
+
+- `ingest` (owner): stage local/GitHub repos and canonicalize into `library/repos/<repo-id>/`.
+- `query` (limited): perform duplicate/fingerprint checks and entrypoint discovery required for ingest.
+- `lint` (limited): validate repo summary schema and required metadata fields.
+- `index` (owner): refresh `library/repos/index.yaml` and related projections.
+- `log` (owner): persist intake provenance and duplicate-review outcomes.
+- Out of scope: polished repo note prose (`research-note-author`) and model/dataset download expansion unless requested.
 
 ## Workflow
 
 1. Stage each local path or GitHub URL under `doc/research/intake/repos/downloads/<intake-id>/`.
-2. Run duplicate checks against canonical remotes and owner/name fingerprints.
-3. If the match is fuzzy, write `intake/repos/review/pending.yaml` and wait for confirmation.
-4. If the repo is canonical, move the staged snapshot into `library/repos/<repo-id>/source/` and write summary, entrypoints, and modules.
+2. Treat intake snapshots as immutable evidence during ingest: no in-place rewrite of staged source trees.
+3. Run duplicate checks against canonical remotes and owner/name fingerprints.
+4. If the match is fuzzy, write `intake/repos/review/pending.yaml` and wait for confirmation.
+5. If canonical, materialize `library/repos/<repo-id>/source/`, `summary.yaml`, and entrypoint/module metadata.
+6. If notes are requested, route immediately to `research-note-author`.
 
 ## Shared Contract
 
-- Preserve the shared YAML top-level fields on repo summaries, entrypoints, modules, and index updates.
-- Populate `inputs` with the staged local path or canonical remote that produced the repo entry.
-- Stop at the duplicate review queue when the canonical repo identity is uncertain.
-- Treat repos under workspace `raw/` as a consumable buffer: move them through intake into the library instead of leaving the raw copy behind.
-- Write a concise `short_summary` into canonical repo summaries so the library index stays searchable.
-- Keep canonical repo summaries structured enough that `weekly-report-author` can summarize recent repo ingest from `summary.yaml` without rereading the repo tree.
-- Do not own final repo note authoring inside this skill. After canonical ingest, route immediately to `research-note-author` to prepare note assets and write `repo-notes.md`.
+- Preserve shared YAML top-level fields on summaries, entrypoints, modules, and index updates.
+- Populate `inputs` with the staged local path or canonical remote used for cataloging.
+- Stop at duplicate review queue when canonical repo identity is uncertain.
+- Write concise `short_summary` into `summary.yaml` so library search and weekly reports stay efficient.
+- High-value query outcomes during cataloging (duplicate rationale, key entrypoints, risk flags) must be written back to wiki artifacts (`summary.yaml`, review queue, index), not kept only in chat.
 
 ## Commands
 
 ```bash
 python3 .agents/skills/repo-cataloger/scripts/catalog_repo.py ingest --repo /path/to/local/repo
+python3 .agents/skills/repo-cataloger/scripts/catalog_repo.py ingest --repo /path/to/local/repo --program-id my-program
 python3 .agents/skills/repo-cataloger/scripts/catalog_repo.py ingest --repo https://github.com/example/project
-python3 .agents/skills/repo-cataloger/scripts/catalog_repo.py resolve-review --review-id repo-review-... --decision existing --canonical-id repo-...
+python3 .agents/skills/repo-cataloger/scripts/catalog_repo.py ingest --repo https://github.com/example/project --program-id my-program
+python3 .agents/skills/repo-cataloger/scripts/catalog_repo.py resolve-review --review-id repo-review-... --decision existing --canonical-id repo-... --program-id my-program
+python3 .agents/skills/repo-cataloger/scripts/catalog_repo.py refresh-notes --repo-id repo-example --program-id my-program
+python3 .agents/skills/research-conductor/scripts/run_with_runtime.py .agents/skills/repo-cataloger/scripts/catalog_repo.py ingest --repo https://github.com/example/project
+cat doc/research/programs/my-program/workflow/reporting-events.yaml
 python3 .agents/skills/research-note-author/scripts/prepare_note_assets.py prepare-repo-note --repo-id repo-example
 ```
 
 ## Boundaries
 
-- Do not treat a raw local path as the permanent fact source after cataloging.
-- Do not download datasets or checkpoints unless the user explicitly asks for that.
-- Do not let this skill fabricate polished prose for `repo-notes.md`; that belongs to `research-note-author`.
-- Do not end the overall task after ingest if the user asked for notes; hand off to `research-note-author` first.
+- Do not treat raw local paths as permanent fact sources after cataloging.
+- Do not silently download datasets or checkpoints unless explicitly requested.
+- Do not fabricate polished prose for `repo-notes.md`; that belongs to `research-note-author`.
 
 ## Completion Checklist
 
-- Check `intake/repos/review/pending.yaml` for fuzzy duplicate decisions before ending the run.
-- Confirm local repos staged from workspace `raw/` were consumed and do not remain in `raw/`.
-- If the user asked for notes, confirm `research-note-author` ran and that `repo-notes.md` landed in the canonical entry.
-- Refresh and inspect `library/repos/index.yaml` so provenance reflects the whole current library, not only the latest import.
+- Check `intake/repos/review/pending.yaml` for unresolved fuzzy duplicates.
+- Confirm staged raw repo artifacts were consumed into canonical library without orphaned intake leftovers.
+- If notes were requested, confirm `repo-notes.md` handoff completion.
+- Refresh and inspect `library/repos/index.yaml`.
 
 ## Retrospective Handoff
 
-- If repo intake exposed repeated duplicate ambiguity, thin repo notes, or missing summary tooling, hand the observation to `skill-evolution-advisor` before ending the task.
+- If duplicate ambiguity, summary quality, or repo provenance repeatedly causes friction, hand the observation to `skill-evolution-advisor`.

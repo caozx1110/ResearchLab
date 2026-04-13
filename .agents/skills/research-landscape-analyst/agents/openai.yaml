@@ -1,0 +1,4 @@
+interface:
+  display_name: "Research Landscape Analyst"
+  short_description: "Pre-program library survey for candidate research directions"
+  default_prompt: "Use $research-landscape-analyst to survey canonical literature and repos before program creation, produce Chinese-first landscape reports plus candidate seeds, and keep the analysis read-only without ingesting new sources or taking over navigation-page curation."

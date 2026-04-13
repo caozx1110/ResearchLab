@@ -154,6 +154,27 @@ def markdown_preview(path: Path, limit: int = 220) -> str:
     return compact_text(" ".join(lines), limit=limit)
 
 
+def file_preview(path: Path | None, limit: int = 220) -> str:
+    if not path or not path.exists():
+        return ""
+    suffix = path.suffix.lower()
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError):
+        return ""
+    if suffix in {".md", ".markdown"}:
+        return markdown_preview(path, limit=limit)
+    lines = []
+    for raw in strip_frontmatter(text).splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        lines.append(line)
+        if len(" ".join(lines)) >= limit:
+            break
+    return compact_text(" ".join(lines), limit=limit)
+
+
 def read_json(path: Path) -> dict[str, Any] | None:
     if not path.exists():
         return None
@@ -348,6 +369,15 @@ def relative_link_payload(project_root: Path, rel_path: str) -> dict[str, str]:
 def _max_timestamp(*values: str) -> str:
     cleaned = [str(value).strip() for value in values if str(value).strip()]
     return max(cleaned) if cleaned else ""
+
+
+def _path_mtime_iso(path: Path | None) -> str:
+    if not path or not path.exists():
+        return ""
+    try:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(path.stat().st_mtime))
+    except OSError:
+        return ""
 
 
 def _numeric_year(value: Any) -> int:
@@ -719,6 +749,174 @@ def build_program_items(project_root: Path) -> list[dict[str, Any]]:
     return items
 
 
+def build_user_entry_items(project_root: Path, program_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add(path: Path, title: str, group: str, *, preview_limit: int = 220) -> None:
+        if not path.exists() or not path.is_file():
+            return
+        rel = relative_path(project_root, path)
+        if rel in seen:
+            return
+        seen.add(rel)
+        entries.append(
+            {
+                "entry_id": rel,
+                "title": title,
+                "group": group,
+                "path": rel,
+                "href": web_path(rel),
+                "preview": file_preview(path, limit=preview_limit),
+                "updated_at": _path_mtime_iso(path),
+                "is_markdown": path.suffix.lower() in {".md", ".markdown"},
+            }
+        )
+
+    research = research_root(project_root)
+    add(research / "user" / "navigation.md", "研究导航", "entry")
+    add(research / "GETTING_STARTED.md", "Research Skills 上手指南", "entry")
+    add(research / "wiki" / "index.md", "Wiki Index", "wiki")
+    add(research / "wiki" / "log.md", "Wiki Log", "wiki")
+
+    reading_root = research / "user" / "reading-lists"
+    if reading_root.exists():
+        reading_files = sorted(
+            (path for path in reading_root.glob("*.md") if path.is_file()),
+            key=lambda path: (_path_mtime_iso(path), path.name),
+            reverse=True,
+        )
+        for path in reading_files[:6]:
+            add(path, path.stem.replace("-", " "), "reading")
+
+    reports_root = research / "user" / "reports"
+    if reports_root.exists():
+        report_files = sorted(
+            (path for path in reports_root.glob("*.md") if path.is_file()),
+            key=lambda path: (_path_mtime_iso(path), path.name),
+            reverse=True,
+        )
+        for path in report_files[:6]:
+            add(path, path.stem.replace("-", " "), "report")
+
+    for program in program_items[:4]:
+        links = _safe_dict(program.get("links"))
+        program_id = str(program.get("program_id") or "").strip() or "program"
+        if links.get("state", {}).get("path"):
+            add(project_root / str(links["state"]["path"]), f"{program_id} · workflow/state.yaml", "program")
+        if links.get("design_doc", {}).get("path"):
+            add(project_root / str(links["design_doc"]["path"]), f"{program_id} · system-design.md", "program")
+        if links.get("runbook", {}).get("path"):
+            add(project_root / str(links["runbook"]["path"]), f"{program_id} · experiments/runbook.md", "program")
+
+        weekly_root = research / "programs" / program_id / "weekly"
+        if weekly_root.exists():
+            weekly_files = sorted(
+                (path for path in weekly_root.glob("*.md") if path.is_file()),
+                key=lambda path: (_path_mtime_iso(path), path.name),
+                reverse=True,
+            )
+            if weekly_files:
+                add(weekly_files[0], f"{program_id} · 最新周报", "program", preview_limit=260)
+
+    entries.sort(key=lambda item: (str(item.get("group") or ""), str(item.get("updated_at") or ""), str(item.get("title") or "")), reverse=True)
+    return entries
+
+
+def _first_existing(paths: list[Path]) -> Path | None:
+    for path in paths:
+        if path.exists() and path.is_file():
+            return path
+    return None
+
+
+def _wiki_query_title(path: Path) -> str:
+    default = path.stem.replace("-", " ").replace("_", " ").strip() or path.name
+    if path.suffix.lower() not in {".md", ".markdown"}:
+        return default
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError):
+        return default
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("#"):
+            return line.lstrip("#").strip() or default
+        break
+    return default
+
+
+def build_wiki_query_items(project_root: Path) -> list[dict[str, Any]]:
+    queries_root = research_root(project_root) / "wiki" / "queries"
+    if not queries_root.exists():
+        return []
+    accepted_suffixes = {".md", ".markdown", ".yaml", ".yml", ".json", ".txt", ".log"}
+    files = [
+        path
+        for path in queries_root.rglob("*")
+        if path.is_file() and (path.suffix.lower() in accepted_suffixes or not path.suffix)
+    ]
+    files.sort(key=lambda path: (_path_mtime_iso(path), path.as_posix()), reverse=True)
+    items: list[dict[str, Any]] = []
+    for path in files[:120]:
+        rel_query_path = path.relative_to(queries_root).as_posix()
+        rel_project_path = relative_path(project_root, path)
+        items.append(
+            {
+                "query_id": rel_query_path,
+                "title": _wiki_query_title(path),
+                "query_path": rel_project_path,
+                "query_href": web_path(rel_project_path),
+                "preview": file_preview(path, limit=260),
+                "updated_at": _path_mtime_iso(path),
+            }
+        )
+    return items
+
+
+def build_wiki_payload(project_root: Path) -> tuple[dict[str, Any], list[str]]:
+    wiki_root = research_root(project_root) / "wiki"
+    index_path = _first_existing(
+        [
+            wiki_root / "index" / "latest.md",
+            wiki_root / "index" / "latest.txt",
+            wiki_root / "index" / "latest.log",
+            wiki_root / "index.md",
+        ]
+    )
+    log_path = _first_existing(
+        [
+            wiki_root / "log" / "latest.md",
+            wiki_root / "log" / "latest.txt",
+            wiki_root / "log" / "latest.log",
+            wiki_root / "log.md",
+        ]
+    )
+    lint_path = _first_existing(
+        [
+            wiki_root / "lint" / "latest.md",
+            wiki_root / "lint" / "latest.txt",
+            wiki_root / "lint.md",
+        ]
+    )
+    query_items = build_wiki_query_items(project_root)
+    timestamps = [
+        _path_mtime_iso(index_path),
+        _path_mtime_iso(log_path),
+        _path_mtime_iso(lint_path),
+        *[str(item.get("updated_at") or "") for item in query_items[:10]],
+    ]
+    payload = {
+        "wiki_index_preview": file_preview(index_path, limit=320),
+        "wiki_log_preview": file_preview(log_path, limit=320),
+        "wiki_query_items": query_items,
+        "wiki_lint_preview": file_preview(lint_path, limit=320),
+    }
+    return payload, timestamps
+
+
 def build_snapshot_payload(project_root: Path) -> dict[str, Any]:
     ensure_research_runtime(project_root, SERVICE_NAME)
     profile = build_workspace_profile(project_root)
@@ -727,6 +925,10 @@ def build_snapshot_payload(project_root: Path) -> dict[str, Any]:
     tag_items = build_tag_items(project_root, literature_items, repo_items)
     landscape_items = build_landscape_items(project_root)
     program_items = build_program_items(project_root)
+    user_entry_items = build_user_entry_items(project_root, program_items)
+    wiki_payload, wiki_timestamps = build_wiki_payload(project_root)
+    wiki_query_count = len(wiki_payload.get("wiki_query_items") or [])
+    wiki_base_card_count = 3
     generated_at = utc_now_iso()
     snapshot_version = generated_at
     last_updated = _max_timestamp(
@@ -736,6 +938,7 @@ def build_snapshot_payload(project_root: Path) -> dict[str, Any]:
         *[str(item.get("generated_at") or "") for item in repo_items[:5]],
         *[str(item.get("generated_at") or "") for item in landscape_items[:5]],
         *[str(item.get("generated_at") or "") for item in program_items[:5]],
+        *wiki_timestamps,
     )
     return {
         "service": SERVICE_NAME,
@@ -752,12 +955,16 @@ def build_snapshot_payload(project_root: Path) -> dict[str, Any]:
             "landscape_count": len(landscape_items),
             "program_count": len(program_items),
             "selected_program_count": sum(1 for item in program_items if item.get("selected_idea_id")),
+            "wiki_query_count": wiki_query_count,
+            "wiki_item_count": wiki_base_card_count + wiki_query_count,
         },
         "literature_items": literature_items,
         "repo_items": repo_items,
         "tag_items": tag_items,
         "landscape_items": landscape_items,
         "program_items": program_items,
+        "user_entry_items": user_entry_items,
+        **wiki_payload,
     }
 
 
@@ -778,6 +985,13 @@ def install_static_assets(project_root: Path, *, script_path: Path) -> None:
     for file_name in ("kb.css", "kb.js"):
         source = (assets_root / file_name).read_text(encoding="utf-8")
         write_text_atomic(output_assets / file_name, source)
+    vendor_root = assets_root / "vendor" / "xterm"
+    output_vendor_root = output_assets / "vendor" / "xterm"
+    ensure_dir(output_vendor_root)
+    for file_name in ("xterm.js", "xterm.css", "addon-fit.js"):
+        source_path = vendor_root / file_name
+        if source_path.exists():
+            write_text_atomic(output_vendor_root / file_name, source_path.read_text(encoding="utf-8"))
 
 
 def write_snapshot(project_root: Path, snapshot: dict[str, Any]) -> None:

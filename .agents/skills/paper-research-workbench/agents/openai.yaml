@@ -1,0 +1,7 @@
+interface:
+  display_name: "Paper Research Workbench (Legacy)"
+  short_description: "Legacy shim that forwards old prompts to Research KB Browser"
+  default_prompt: "Use $paper-research-workbench only for legacy compatibility, immediately route the request to $research-kb-browser, and avoid adding new logic here."
+
+policy:
+  allow_implicit_invocation: false

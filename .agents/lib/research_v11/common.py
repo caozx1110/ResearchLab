@@ -1478,7 +1478,6 @@ def extract_pdf_record(pdf_path: Path) -> dict[str, Any]:
     title = clean_text(" ".join(title_lines))
     authors = _guess_pdf_authors(metadata, pages, title_lines)
     abstract = _guess_pdf_abstract(pages, title_lines)
-    year = _guess_pdf_year(metadata, pages, pdf_path.name)
     arxiv_id = parse_arxiv_id(
         "\n".join(
             [
@@ -1491,6 +1490,13 @@ def extract_pdf_record(pdf_path: Path) -> dict[str, Any]:
             ]
         )
     )
+    year = _guess_pdf_year(metadata, pages, pdf_path.name)
+    if arxiv_id:
+        arxiv_year = 2000 + int(arxiv_id[:2])
+        # Some arXiv PDFs carry stale template creation dates; prefer the arXiv submission year
+        # whenever the embedded PDF year is missing or clearly inconsistent.
+        if year is None or abs(year - arxiv_year) > 1:
+            year = arxiv_year
     doi_match = re.search(
         r"(10\.\d{4,9}/[-._;()/:A-Za-z0-9]+)",
         "\n".join([metadata.get("DOI", ""), abstract, "\n".join(pages[:2]), metadata.get("Subject", "")]),
@@ -1554,6 +1560,30 @@ def literature_tag_taxonomy_path(project_root: Path) -> Path:
 
 def repo_index_path(project_root: Path) -> Path:
     return research_root(project_root) / "library" / "repos" / "index.yaml"
+
+
+def wiki_root(project_root: Path) -> Path:
+    return research_root(project_root) / "wiki"
+
+
+def wiki_index_path(project_root: Path) -> Path:
+    return wiki_root(project_root) / "index.md"
+
+
+def wiki_log_path(project_root: Path) -> Path:
+    return wiki_root(project_root) / "log.md"
+
+
+def wiki_queries_root(project_root: Path) -> Path:
+    return wiki_root(project_root) / "queries"
+
+
+def wiki_lint_root(project_root: Path) -> Path:
+    return wiki_root(project_root) / "lint"
+
+
+def wiki_lint_latest_path(project_root: Path) -> Path:
+    return wiki_lint_root(project_root) / "latest.md"
 
 
 def pending_paper_reviews_path(project_root: Path) -> Path:
@@ -2141,6 +2171,423 @@ def read_text_excerpt(path: Path, limit: int = 4000) -> str:
     return path.read_text(encoding="utf-8", errors="ignore")[:limit]
 
 
+def _default_wiki_index_markdown() -> str:
+    return (
+        "# Research Wiki Index\n\n"
+        "This index is generated from `doc/research/library` and `doc/research/programs`.\n"
+    )
+
+
+def _default_wiki_log_markdown() -> str:
+    return (
+        "# Research Wiki Log\n\n"
+        "Append-only operational log for wiki/query/lint events.\n"
+    )
+
+
+def ensure_wiki_workspace(project_root: Path) -> None:
+    ensure_dir(wiki_root(project_root))
+    ensure_dir(wiki_queries_root(project_root))
+    ensure_dir(wiki_lint_root(project_root))
+    if not wiki_index_path(project_root).exists():
+        write_text_if_changed(wiki_index_path(project_root), _default_wiki_index_markdown())
+    if not wiki_log_path(project_root).exists():
+        write_text_if_changed(wiki_log_path(project_root), _default_wiki_log_markdown())
+
+
+def _markdown_single_line(value: Any, *, fallback: str = "") -> str:
+    text = clean_text(str(value or ""))
+    text = text.replace("\n", " ").replace("|", "/")
+    return text if text else fallback
+
+
+def _coerce_event_timestamp(value: str | datetime | None = None) -> datetime:
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc).replace(microsecond=0)
+        return value.astimezone(timezone.utc).replace(microsecond=0)
+    parsed = parse_iso_datetime(value) if value is not None else None
+    if parsed is not None:
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc).replace(microsecond=0)
+    return datetime.now(timezone.utc).replace(microsecond=0)
+
+
+def _serialize_log_value(value: Any) -> str:
+    if isinstance(value, (list, tuple, dict)):
+        return _markdown_single_line(json.dumps(value, ensure_ascii=False, sort_keys=True))
+    return _markdown_single_line(value)
+
+
+def _relative_display_path(path: Path, project_root: Path) -> str:
+    try:
+        return path.relative_to(project_root).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def _compact_summary_line(text: str, *, limit: int = 180, fallback: str = "No summary available.") -> str:
+    cleaned = _markdown_single_line(text)
+    if not cleaned:
+        return fallback
+    if len(cleaned) <= limit:
+        return cleaned
+    trimmed = cleaned[:limit].rsplit(" ", 1)[0].rstrip(" ,;:-")
+    return f"{trimmed or cleaned[:limit]}..."
+
+
+def append_wiki_log_event(
+    project_root: Path,
+    event_type: str,
+    title: str,
+    *,
+    summary: str = "",
+    metadata: dict[str, Any] | None = None,
+    occurred_at: str | datetime | None = None,
+    generated_by: str = "llm-wiki",
+) -> Path:
+    ensure_wiki_workspace(project_root)
+    timestamp = _coerce_event_timestamp(occurred_at)
+    event_type_norm = re.sub(r"[^a-z0-9._-]+", "-", _markdown_single_line(event_type, fallback="event").lower()).strip("-") or "event"
+    title_norm = _markdown_single_line(title, fallback="untitled")
+    summary_norm = _compact_summary_line(summary, limit=220, fallback="")
+    heading = f"## [{timestamp.strftime('%Y-%m-%d')}] {event_type_norm} | {title_norm}"
+
+    entry_lines = [
+        heading,
+        f"- timestamp: {timestamp.isoformat()}",
+        f"- type: {event_type_norm}",
+        f"- title: {title_norm}",
+        f"- generated_by: {_markdown_single_line(generated_by, fallback='unknown')}",
+    ]
+    if summary_norm:
+        entry_lines.append(f"- summary: {summary_norm}")
+    for raw_key, raw_value in sorted((metadata or {}).items(), key=lambda item: str(item[0])):
+        key = re.sub(r"[^a-z0-9._-]+", "-", str(raw_key).strip().lower()).strip("-") or "meta"
+        value = _serialize_log_value(raw_value)
+        if value:
+            entry_lines.append(f"- {key}: {value}")
+    entry_lines.append("")
+
+    path = wiki_log_path(project_root)
+    existing = path.read_text(encoding="utf-8") if path.exists() else _default_wiki_log_markdown()
+    if not existing.endswith("\n"):
+        existing += "\n"
+    existing += "\n".join(entry_lines)
+    write_text_if_changed(path, existing)
+    return path
+
+
+def _load_query_artifact_summary(path: Path) -> tuple[str, str]:
+    title = path.stem
+    summary = ""
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return title, "Unreadable query artifact."
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("# "):
+            title = stripped[2:].strip() or title
+            break
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("- query:"):
+            summary = stripped.split(":", 1)[1].strip()
+            break
+    if not summary:
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or stripped.startswith("- "):
+                continue
+            summary = stripped
+            break
+    return _markdown_single_line(title, fallback=path.stem), _compact_summary_line(summary)
+
+
+def rebuild_wiki_index_markdown(project_root: Path) -> Path:
+    ensure_wiki_workspace(project_root)
+    generated_at = utc_now_iso()
+
+    literature_root = research_root(project_root) / "library" / "literature"
+    repo_root_dir = research_root(project_root) / "library" / "repos"
+    programs_dir = research_root(project_root) / "programs"
+
+    literature_payload = load_index(literature_index_path(project_root), "literature-index", "literature-corpus-builder")
+    repo_payload = load_index(repo_index_path(project_root), "repo-index", "repo-cataloger")
+
+    literature_items = literature_payload.get("items", {}) if isinstance(literature_payload, dict) else {}
+    repo_items = repo_payload.get("items", {}) if isinstance(repo_payload, dict) else {}
+    if not isinstance(literature_items, dict):
+        literature_items = {}
+    if not isinstance(repo_items, dict):
+        repo_items = {}
+
+    literature_dirs = (
+        sorted(path for path in literature_root.iterdir() if path.is_dir() and (path / "metadata.yaml").exists())
+        if literature_root.exists()
+        else []
+    )
+    repo_dirs = (
+        sorted(path for path in repo_root_dir.iterdir() if path.is_dir() and (path / "summary.yaml").exists())
+        if repo_root_dir.exists()
+        else []
+    )
+    program_dirs = (
+        sorted(path for path in programs_dir.iterdir() if path.is_dir() and not path.name.startswith("."))
+        if programs_dir.exists()
+        else []
+    )
+
+    lines: list[str] = [
+        "# Research Wiki Index",
+        "",
+        f"_Generated at: {generated_at}_",
+        "",
+        "## Snapshot",
+        f"- literature: index={len(literature_items)}, canonical_dirs={len(literature_dirs)}",
+        f"- repos: index={len(repo_items)}, canonical_dirs={len(repo_dirs)}",
+        f"- programs: {len(program_dirs)}",
+        "",
+        "## Literature",
+    ]
+
+    if literature_items:
+        for lit_id in sorted(literature_items):
+            item = literature_items.get(lit_id)
+            if not isinstance(item, dict):
+                continue
+            title = _markdown_single_line(item.get("canonical_title"), fallback=lit_id)
+            year = str(item.get("year") or "").strip()
+            summary = _compact_summary_line(str(item.get("short_summary") or ""), fallback="No literature summary yet.")
+            prefix = f"{year} · " if year else ""
+            lines.append(f"- `{lit_id}`: {prefix}{title} - {summary}")
+    else:
+        lines.append("- No literature entries indexed yet.")
+
+    lines.extend(["", "## Repositories"])
+    if repo_items:
+        for repo_id in sorted(repo_items):
+            item = repo_items.get(repo_id)
+            if not isinstance(item, dict):
+                continue
+            repo_name = _markdown_single_line(item.get("repo_name"), fallback=repo_id)
+            summary = _compact_summary_line(str(item.get("short_summary") or ""), fallback="No repository summary yet.")
+            lines.append(f"- `{repo_id}`: {repo_name} - {summary}")
+    else:
+        lines.append("- No repository entries indexed yet.")
+
+    lines.extend(["", "## Programs"])
+    if program_dirs:
+        for program_dir in program_dirs:
+            charter = load_yaml(program_dir / "charter.yaml", default={}, allow_simple_fallback=True)
+            state = load_yaml(program_dir / "workflow" / "state.yaml", default={}, allow_simple_fallback=True)
+            charter = charter if isinstance(charter, dict) else {}
+            state = state if isinstance(state, dict) else {}
+            program_id = _markdown_single_line(charter.get("program_id"), fallback=program_dir.name)
+            stage = _markdown_single_line(state.get("stage"), fallback="unknown")
+            question = _compact_summary_line(str(charter.get("question") or ""), fallback="")
+            goal = _compact_summary_line(str(charter.get("goal") or ""), fallback="")
+            one_line = question or goal or "No charter summary yet."
+            lines.append(f"- `{program_id}`: stage={stage} - {one_line}")
+    else:
+        lines.append("- No programs found.")
+
+    query_files = (
+        sorted(wiki_queries_root(project_root).glob("*.md"), key=lambda item: item.name, reverse=True)
+        if wiki_queries_root(project_root).exists()
+        else []
+    )
+    lines.extend(["", "## Queries"])
+    if query_files:
+        for query_path in query_files[:20]:
+            title, summary = _load_query_artifact_summary(query_path)
+            lines.append(f"- `{query_path.name}`: {title} - {summary}")
+    else:
+        lines.append("- No query artifacts yet.")
+
+    lint_path = wiki_lint_latest_path(project_root)
+    lines.extend(["", "## Lint"])
+    if lint_path.exists():
+        lint_text = lint_path.read_text(encoding="utf-8", errors="ignore")
+        status_match = re.search(r"^- status:\s*(.+)$", lint_text, flags=re.MULTILINE)
+        issues_match = re.search(r"^- total_issues:\s*(\d+)$", lint_text, flags=re.MULTILINE)
+        status = _markdown_single_line(status_match.group(1) if status_match else "UNKNOWN")
+        total_issues = _markdown_single_line(issues_match.group(1) if issues_match else "unknown")
+        lines.append(f"- latest: `{_relative_display_path(lint_path, project_root)}` (status={status}, issues={total_issues})")
+    else:
+        lines.append("- No lint report yet.")
+
+    lines.append("")
+    write_text_if_changed(wiki_index_path(project_root), "\n".join(lines))
+    return wiki_index_path(project_root)
+
+
+def write_query_artifact(
+    project_root: Path,
+    query_text: str,
+    result_markdown: str,
+    *,
+    title: str = "",
+    query_type: str = "query",
+    metadata: dict[str, Any] | None = None,
+    occurred_at: str | datetime | None = None,
+    generated_by: str = "llm-wiki",
+) -> Path:
+    ensure_wiki_workspace(project_root)
+    timestamp = _coerce_event_timestamp(occurred_at)
+    query_line = _markdown_single_line(query_text, fallback="(empty-query)")
+    title_line = _markdown_single_line(title, fallback="")
+    if not title_line:
+        title_line = _compact_summary_line(query_line, limit=80, fallback="untitled-query")
+    query_type_norm = re.sub(r"[^a-z0-9._-]+", "-", _markdown_single_line(query_type, fallback="query").lower()).strip("-") or "query"
+    artifact_slug = slugify(title_line, max_words=8)
+    artifact_name = f"{timestamp.strftime('%Y%m%d-%H%M%S')}-{artifact_slug}.md"
+    artifact_path = wiki_queries_root(project_root) / artifact_name
+    suffix = 2
+    while artifact_path.exists():
+        artifact_path = wiki_queries_root(project_root) / f"{timestamp.strftime('%Y%m%d-%H%M%S')}-{artifact_slug}-{suffix}.md"
+        suffix += 1
+
+    artifact_lines = [
+        f"# {title_line}",
+        "",
+        f"- timestamp: {timestamp.isoformat()}",
+        f"- type: {query_type_norm}",
+        f"- query: {query_line}",
+        f"- generated_by: {_markdown_single_line(generated_by, fallback='llm-wiki')}",
+    ]
+    for raw_key, raw_value in sorted((metadata or {}).items(), key=lambda item: str(item[0])):
+        key = re.sub(r"[^a-z0-9._-]+", "-", str(raw_key).strip().lower()).strip("-") or "meta"
+        value = _serialize_log_value(raw_value)
+        if value:
+            artifact_lines.append(f"- {key}: {value}")
+    artifact_lines.extend(
+        [
+            "",
+            "## Result",
+            "",
+            result_markdown.strip() or "_No result content provided._",
+            "",
+        ]
+    )
+    write_text_if_changed(artifact_path, "\n".join(artifact_lines))
+
+    log_metadata = dict(metadata or {})
+    log_metadata.update(
+        {
+            "query": query_line,
+            "artifact_path": _relative_display_path(artifact_path, project_root),
+        }
+    )
+    append_wiki_log_event(
+        project_root,
+        query_type_norm,
+        title_line,
+        summary=query_line,
+        metadata=log_metadata,
+        occurred_at=timestamp,
+        generated_by=generated_by,
+    )
+    rebuild_wiki_index_markdown(project_root)
+    return artifact_path
+
+
+def lint_wiki_workspace(project_root: Path, *, generated_by: str = "llm-wiki") -> Path:
+    ensure_wiki_workspace(project_root)
+    generated_at = utc_now_iso()
+
+    programs_dir = research_root(project_root) / "programs"
+    literature_root = research_root(project_root) / "library" / "literature"
+    repos_root = research_root(project_root) / "library" / "repos"
+
+    missing_reporting_events: list[str] = []
+    if programs_dir.exists():
+        for program_dir in sorted(path for path in programs_dir.iterdir() if path.is_dir() and not path.name.startswith(".")):
+            if not (program_dir / "workflow" / "reporting-events.yaml").exists():
+                missing_reporting_events.append(program_dir.name)
+
+    literature_dirs = (
+        sorted(path for path in literature_root.iterdir() if path.is_dir() and (path / "metadata.yaml").exists())
+        if literature_root.exists()
+        else []
+    )
+    repo_dirs = (
+        sorted(path for path in repos_root.iterdir() if path.is_dir() and (path / "summary.yaml").exists())
+        if repos_root.exists()
+        else []
+    )
+
+    literature_index_payload = load_index(literature_index_path(project_root), "literature-index", "literature-corpus-builder")
+    repo_index_payload = load_index(repo_index_path(project_root), "repo-index", "repo-cataloger")
+
+    literature_items = literature_index_payload.get("items", {}) if isinstance(literature_index_payload, dict) else {}
+    repo_items = repo_index_payload.get("items", {}) if isinstance(repo_index_payload, dict) else {}
+    literature_index_count = len(literature_items) if isinstance(literature_items, dict) else 0
+    repo_index_count = len(repo_items) if isinstance(repo_items, dict) else 0
+
+    literature_count_mismatch = literature_index_count != len(literature_dirs)
+    repo_count_mismatch = repo_index_count != len(repo_dirs)
+
+    missing_literature_notes = [path.name for path in literature_dirs if not (path / "note.md").exists()]
+    missing_repo_notes = [path.name for path in repo_dirs if not (path / "repo-notes.md").exists()]
+
+    total_issues = (
+        len(missing_reporting_events)
+        + (1 if literature_count_mismatch else 0)
+        + (1 if repo_count_mismatch else 0)
+        + len(missing_literature_notes)
+        + len(missing_repo_notes)
+    )
+    status = "PASS" if total_issues == 0 else "FAIL"
+
+    lines: list[str] = [
+        "# Wiki Lint Report",
+        "",
+        f"_Generated at: {generated_at}_",
+        "",
+        "## Summary",
+        f"- status: {status}",
+        f"- generated_by: {_markdown_single_line(generated_by, fallback='llm-wiki')}",
+        f"- total_issues: {total_issues}",
+        "",
+        "## Missing Program Reporting Events",
+    ]
+    if missing_reporting_events:
+        for program_id in missing_reporting_events:
+            lines.append(f"- `{program_id}` is missing `workflow/reporting-events.yaml`.")
+    else:
+        lines.append("- No missing `reporting-events.yaml` files.")
+
+    lines.extend(
+        [
+            "",
+            "## Library Index Count Mismatch",
+            f"- literature: index={literature_index_count}, canonical_dirs={len(literature_dirs)}, mismatch={str(literature_count_mismatch).lower()}",
+            f"- repos: index={repo_index_count}, canonical_dirs={len(repo_dirs)}, mismatch={str(repo_count_mismatch).lower()}",
+            "",
+            "## Missing Canonical Notes",
+        ]
+    )
+    if missing_literature_notes:
+        for entry_id in missing_literature_notes:
+            lines.append(f"- literature `{entry_id}` is missing `note.md`.")
+    else:
+        lines.append("- All canonical literature entries include `note.md`.")
+    if missing_repo_notes:
+        for entry_id in missing_repo_notes:
+            lines.append(f"- repo `{entry_id}` is missing `repo-notes.md`.")
+    else:
+        lines.append("- All canonical repo entries include `repo-notes.md`.")
+    lines.append("")
+
+    report_path = wiki_lint_latest_path(project_root)
+    write_text_if_changed(report_path, "\n".join(lines))
+    rebuild_wiki_index_markdown(project_root)
+    return report_path
+
+
 def bootstrap_workspace(project_root: Path) -> None:
     ensure_dir(raw_root(project_root))
     for directory in (
@@ -2152,6 +2599,8 @@ def bootstrap_workspace(project_root: Path) -> None:
         research_root(project_root) / "library" / "benchmarks",
         research_root(project_root) / "memory" / "history",
         research_root(project_root) / "programs",
+        wiki_queries_root(project_root),
+        wiki_lint_root(project_root),
     ):
         ensure_dir(directory)
     paths_with_defaults: list[tuple[Path, dict[str, Any]]] = [
@@ -2215,6 +2664,7 @@ def bootstrap_workspace(project_root: Path) -> None:
     for path, payload in paths_with_defaults:
         if not path.exists():
             write_yaml_if_changed(path, payload)
+    ensure_wiki_workspace(project_root)
 
 
 def bootstrap_program(project_root: Path, program_id: str, *, question: str, goal: str, constraints: dict[str, str] | None = None) -> Path:

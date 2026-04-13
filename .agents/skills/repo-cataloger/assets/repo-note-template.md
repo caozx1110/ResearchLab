@@ -2,61 +2,61 @@
 
 # {{repo_name}}
 
-> Close-reading repo note scaffold. Read `repo-note-context.md`, the README, and representative entrypoints before replacing the placeholders below.
+> 代码仓库精读笔记模板。请先阅读 `repo-note-context.md`、README 和代表性入口文件，再替换下面的占位内容。
 
-## Snapshot
+## 快照 Snapshot
 
-- Repo ID: `{{repo_id}}`
-- Remote: {{canonical_remote}}
-- Import type: `{{import_type}}`
-- Repo type: `{{repo_type}}`
-- Primary language: `{{primary_language}}`
-- Frameworks: {{frameworks}}
-- Tags: {{tags}}
-- Topics: {{topics}}
-- Head commit: `{{head_commit}}`
+- 仓库 ID Repo ID: `{{repo_id}}`
+- 远端 Remote: {{canonical_remote}}
+- 导入类型 Import type: `{{import_type}}`
+- 仓库类型 Repo type: `{{repo_type}}`
+- 主要语言 Primary language: `{{primary_language}}`
+- 框架 Frameworks: {{frameworks}}
+- 标签 Tags: {{tags}}
+- 主题 Topics: {{topics}}
+- 头部提交 Head commit: `{{head_commit}}`
 
-## Source Reading Coverage
+## 阅读覆盖 Source Reading Coverage
 
 {{source_reading_coverage}}
 
-## Executive Summary
+## 执行摘要 Executive Summary
 
 {{executive_summary}}
 
-## Goal / Scope
+## 目标 / 范围 Goal / Scope
 
 {{goal_scope}}
 
-## Architecture Signals
+## 架构信号 Architecture Signals
 
 {{architecture_analysis}}
 
-## Workflow Surfaces
+## 工作流入口 Workflow Surfaces
 
 {{workflow_analysis}}
 
-## Strengths
+## 优势 Strengths
 
 {{strengths}}
 
-## Risks / Limitations
+## 风险 / 局限 Risks / Limitations
 
 {{limitations}}
 
-## Extension Opportunities
+## 可扩展机会 Extension Opportunities
 
 {{future_work}}
 
-## Retrieval Cues
+## 检索线索 Retrieval Cues
 
 {{retrieval_cues}}
 
-## Structure Cues
+## 结构线索 Structure Cues
 
 {{structure_cues}}
 
-## Entrypoints
+## 关键入口 Entrypoints
 
 {{entrypoints}}
 

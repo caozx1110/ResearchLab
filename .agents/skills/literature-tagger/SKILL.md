@@ -5,26 +5,34 @@ description: Curate topics, tags, and tag taxonomy for canonical literature in `
 
 # Literature Tagger
 
-Use this after literature intake whenever the shared library needs cleaner topics, tags, a refreshed `tags.yaml`, or a stable `tag-taxonomy.yaml`.
+Use this after ingest whenever llm-wiki tag quality, taxonomy consistency, or retrieval cues need maintenance.
+
+## LLM-Wiki Role Boundary (ingest/query/lint/index/log)
+
+- `ingest` (not owner): does not import PDFs or URLs.
+- `query` (limited): read canonical metadata to derive candidate tags/topics.
+- `lint` (owner): detect alias drift, noisy tags, and taxonomy schema violations.
+- `index` (owner for tag-oriented projections): refresh `tags.yaml`, taxonomy projections, and tag-driven literature index views after tag updates.
+- `log` (owner): preserve lightweight tagging audit notes in metadata.
+- Out of scope: canonical source ingestion (`literature-corpus-builder`) and deep note writing (`research-note-author`).
 
 ## Workflow
 
 1. Read canonical `metadata.yaml` files under `doc/research/library/literature/`.
-2. Run `taxonomy-sync` after a batch import so current canonical tags are reflected in `tag-taxonomy.yaml`.
-3. Use `retag` for heuristic topic or tag refresh from title plus abstract, including emergent keyword-tag discovery for papers from a new subfield, or `assign` for manual additions.
-4. Use `taxonomy-upsert` to register canonical tags, aliases, topic hints, and descriptions when the current taxonomy is too thin.
-5. Use `taxonomy-lint` and `taxonomy-apply` to detect and then normalize alias or formatting drift.
-6. After a batch import in a new or shifting field, run at least one retag + taxonomy sync pass so downstream retrieval sees the finer-grained concepts defined by the current domain profile.
+2. Run `taxonomy-sync` after batch import so current canonical tags are represented in `tag-taxonomy.yaml`.
+3. Use `retag` for heuristic refresh from title plus abstract, or `assign` for manual updates.
+4. Use `taxonomy-upsert` to register canonical tags, aliases, topic hints, and descriptions.
+5. Run `taxonomy-lint` and `taxonomy-apply` to normalize alias and formatting drift.
+6. Refresh tag-oriented projections (`tags.yaml`, taxonomy files, and tag-driven index views) so retrieval remains consistent, without taking over canonical source creation or duplicate handling.
 
 ## Shared Contract
 
-- Only edit literature `metadata.yaml` fields related to `topics`, `tags`, lightweight `tagging` audit notes, and the shared `tag-taxonomy.yaml`.
-- Preserve bibliographic identity fields such as `canonical_title`, `authors`, `canonical_url`, and `external_ids` during normal tag curation.
-- After tag edits, refresh `library/literature/index.yaml`, `graph.yaml`, and `tags.yaml` so downstream skills see a consistent library snapshot.
-- Keep canonical tags short, stable, lowercase, and hyphenated; aliases belong in `tag-taxonomy.yaml`, not in paper metadata.
-- Prefer short, stable, lowercase slug tags unless the user asks for a different taxonomy.
-- Load theme-specific tag seeds, aliases, and topic hints from `doc/research/memory/domain-profile.yaml` instead of hardcoding a field-specific taxonomy in this skill.
-- When heuristic retagging discovers a strong new keyword tag that is not yet in the taxonomy, keep it in metadata and let `taxonomy-sync` register it as a discovered canonical tag instead of dropping it.
+- Only edit `topics`, `tags`, lightweight `tagging` notes, and taxonomy artifacts.
+- Preserve bibliographic identity fields (`canonical_title`, `authors`, `canonical_url`, `external_ids`) during tag curation.
+- Keep tags short, stable, lowercase, and hyphenated; aliases belong in `tag-taxonomy.yaml`.
+- Load theme-specific seeds, aliases, and topic hints from `doc/research/memory/domain-profile.yaml`.
+- High-value query findings from retagging (new emergent concepts, alias collisions, taxonomy gaps) must be written back to wiki artifacts (`tag-taxonomy.yaml`, `tags.yaml`, and per-source `metadata.yaml` notes), not left as ephemeral chat suggestions.
+- If retagging exposes canonical identity gaps, duplicate ambiguity, or missing ingest-time fields, hand that issue back to `literature-corpus-builder` instead of patching around it here.
 
 ## Commands
 
@@ -37,22 +45,23 @@ python3 .agents/skills/literature-tagger/scripts/tag_literature.py assign --sour
 python3 .agents/skills/literature-tagger/scripts/tag_literature.py taxonomy-upsert --tag long-horizon --alias longhorizon --topic robot-learning --description "Long-horizon execution or recovery."
 python3 .agents/skills/literature-tagger/scripts/tag_literature.py taxonomy-lint --all --strict
 python3 .agents/skills/literature-tagger/scripts/tag_literature.py taxonomy-apply --all
+cat doc/research/programs/my-program/workflow/reporting-events.yaml
 ```
 
 ## Boundaries
 
-- Do not ingest PDFs, download URLs, or resolve duplicate reviews here. That stays with `literature-corpus-builder`.
-- Do not silently rewrite bibliographic facts as part of tag cleanup.
-- Do not treat `tags.yaml` as the only fact source; canonical metadata remains the source of truth.
-- Do not use taxonomy aliases as an excuse to keep messy tags in metadata forever; normalize them when they become stable.
+- Do not ingest PDFs, download URLs, or resolve duplicate reviews.
+- Do not silently rewrite bibliographic facts during tag cleanup.
+- Do not treat `tags.yaml` as the only source of truth; canonical per-paper metadata stays authoritative.
+- Do not take over canonical ingest ownership or duplicate-resolution logic from `literature-corpus-builder`.
 
 ## Completion Checklist
 
-- Spot-check updated `metadata.yaml` entries to confirm `topics`, `tags`, and `tagging` notes match the intended curation.
-- Inspect `library/literature/tag-taxonomy.yaml` whenever you add a new concept, alias, or naming rule.
-- Refresh and inspect `library/literature/index.yaml`, `graph.yaml`, and `tags.yaml` after any retag, taxonomy apply, or manual assignment batch.
-- If a tag looks too local, noisy, or duplicated, normalize it before ending the run.
+- Spot-check updated `metadata.yaml` entries for `topics`, `tags`, and `tagging` notes.
+- Inspect `tag-taxonomy.yaml` when introducing new concepts or aliases.
+- Refresh and verify `index.yaml`, `graph.yaml`, and `tags.yaml` after batch operations.
+- Normalize noisy local tags before ending the run.
 
 ## Retrospective Handoff
 
-- If taxonomy curation exposed recurring alias drift, missing heuristics, or noisy tag generation, hand the issue to `skill-evolution-advisor` before ending the task.
+- If taxonomy curation repeatedly exposes alias drift, heuristic weakness, or noisy tag generation, hand the issue to `skill-evolution-advisor`.
