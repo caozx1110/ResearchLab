@@ -1,6 +1,6 @@
 ---
 name: weekly-report-author
-description: Write durable weekly markdown reports for a concrete research program under `doc/research/programs/program-id/weekly/` by synthesizing `workflow/reporting-events.yaml`, workflow and design artifacts, canonical literature and repo metadata, and remembered history. Use when Codex needs a weekly report, research digest, or progress summary for an existing program.
+description: Write durable weekly markdown reports for a concrete research program under `kb/programs/program-id/weekly/` by synthesizing `workflow/reporting-events.yaml`, workflow and design artifacts, canonical literature and repo metadata, and remembered history. Use when Codex needs a weekly report, research digest, or progress summary for an existing program.
 ---
 
 # Weekly Report Author
@@ -20,8 +20,8 @@ Summarize durable artifacts into time-bounded llm-wiki weekly pages.
 
 1. Read target program `workflow/reporting-events.yaml`, `workflow/*`, design pack, experiments, prior weekly reports, and any existing `discussions/` or `experiments/runs/` artifacts when they are present.
 2. Read canonical metadata referenced by the program (`literature/*/metadata.yaml`, `repos/*/summary.yaml`, note executive summaries).
-3. Write a bounded report under `doc/research/programs/<program-id>/weekly/`.
-4. Append a `weekly-report-generated` event in `doc/research/memory/history/`.
+3. Write a bounded report under `kb/programs/<program-id>/weekly/`.
+4. Append a `weekly-report-generated` event in `kb/memory/history/`.
 5. If the selected window is sparse, state that explicitly.
 
 ## Shared Contract
@@ -40,7 +40,7 @@ Summarize durable artifacts into time-bounded llm-wiki weekly pages.
 python3 .agents/skills/weekly-report-author/scripts/write_weekly_report.py --program-id my-program
 python3 .agents/skills/weekly-report-author/scripts/write_weekly_report.py --program-id my-program --days 7 --end-date 2026-04-03
 python3 .agents/skills/weekly-report-author/scripts/write_weekly_report.py --program-id my-program --days 14 --max-detailed-papers 10 --max-detailed-repos 8
-cat doc/research/programs/my-program/workflow/reporting-events.yaml
+cat kb/programs/my-program/workflow/reporting-events.yaml
 ```
 
 Legacy compatibility:

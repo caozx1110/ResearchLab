@@ -62,7 +62,7 @@ WRITABLE_TEXT_SUFFIXES = {".md", ".markdown", ".txt"}
 BLOCKED_WRITE_ROOTS = {
     ".git",
     "node_modules",
-    "doc/research/user/kb",
+    "kb/user/kb",
 }
 MAX_TEXT_FILE_BYTES = 1_500_000
 TERMINAL_BUFFER_LIMIT = 220_000
@@ -86,7 +86,7 @@ def relevant_change(project_root: Path, raw_path: str) -> bool:
         resolved = path.resolve()
     except FileNotFoundError:
         resolved = path.absolute()
-    research_root = project_root / "doc" / "research"
+    research_root = kb_root(project_root).parents[1]
     if not _is_relative_to(resolved, research_root):
         return False
     if _is_relative_to(resolved, kb_root(project_root)):
@@ -526,21 +526,36 @@ def _escape_applescript_string(text: str) -> str:
     return text.replace("\\", "\\\\").replace('"', '\\"')
 
 
+def _mac_app_exists(*names: str) -> bool:
+    for name in names:
+        completed = subprocess.run(
+            ["osascript", "-e", f'id of app "{name}"'],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode == 0:
+            return True
+    return False
+
+
 def system_terminal_targets() -> list[dict[str, Any]]:
     if sys.platform != "darwin":
-      return []
+        return []
+    terminal_available = _mac_app_exists("Terminal")
+    iterm_available = _mac_app_exists("iTerm", "iTerm2")
     return [
         {
             "id": "terminal",
             "label": "Terminal.app",
-            "available": Path("/System/Applications/Utilities/Terminal.app").exists() or Path("/Applications/Utilities/Terminal.app").exists() or Path("/Applications/Terminal.app").exists(),
-            "reason": "" if (Path("/System/Applications/Utilities/Terminal.app").exists() or Path("/Applications/Utilities/Terminal.app").exists() or Path("/Applications/Terminal.app").exists()) else "系统未检测到 Terminal.app",
+            "available": terminal_available,
+            "reason": "" if terminal_available else "系统未检测到 Terminal.app",
         },
         {
             "id": "iterm2",
             "label": "iTerm2",
-            "available": Path("/Applications/iTerm.app").exists(),
-            "reason": "" if Path("/Applications/iTerm.app").exists() else "当前机器未安装 iTerm2",
+            "available": iterm_available,
+            "reason": "" if iterm_available else "当前机器未安装 iTerm2",
         },
     ]
 
@@ -801,7 +816,7 @@ def main() -> None:
         terminal_manager=terminal_manager,
     )
     observer = Observer()
-    observer.schedule(ResearchKbEventHandler(project_root, coordinator), str(project_root / "doc" / "research"), recursive=True)
+    observer.schedule(ResearchKbEventHandler(project_root, coordinator), str(kb_root(project_root).parents[1]), recursive=True)
     observer.start()
     coordinator.start()
 
@@ -815,7 +830,7 @@ def main() -> None:
     signal.signal(signal.SIGINT, shutdown)
 
     print(f"[ok] serving project root: {project_root}", flush=True)
-    print(f"[ok] browser url: {browser_url(args.host, args.port)}", flush=True)
+    print(f"[ok] browser url: {browser_url(args.host, args.port, project_root)}", flush=True)
     print(f"[ok] version url: {version_url(args.host, args.port)}", flush=True)
     print(f"[ok] runtime log: {server_log_path(project_root)}", flush=True)
     try:

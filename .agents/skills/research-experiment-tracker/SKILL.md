@@ -1,6 +1,6 @@
 ---
 name: research-experiment-tracker
-description: Record experiment plans and run outcomes under `doc/research/programs/<program-id>/experiments/runs/`, maintain a durable follow-up view, and capture statuses, metrics, failure modes, linked artifacts, and next actions. Use when Codex needs to persist experiment execution details instead of leaving them in chat or only in a static experiment matrix.
+description: Record experiment plans and run outcomes under `kb/programs/<program-id>/experiments/runs/`, maintain a durable follow-up view, and capture statuses, metrics, failure modes, linked artifacts, and next actions. Use when Codex needs to persist experiment execution details instead of leaving them in chat or only in a static experiment matrix.
 ---
 
 # Research Experiment Tracker
@@ -9,13 +9,13 @@ Convert run-by-run experimentation into durable program memory.
 
 ## Workflow
 
-1. Read `AGENTS.md` plus `doc/research/memory/user-profile.yaml`.
+1. Read `AGENTS.md` plus `kb/memory/user-profile.yaml`.
 2. Default to Chinese user-facing prose when the profile prefers Chinese.
 3. Read the target program's `workflow/state.yaml` and existing `experiments/*` context.
-4. For each run, write a note under `doc/research/programs/<program-id>/experiments/runs/`.
+4. For each run, write a note under `kb/programs/<program-id>/experiments/runs/`.
 5. Update:
-   - `doc/research/programs/<program-id>/experiments/run-log.yaml`
-   - `doc/research/programs/<program-id>/experiments/follow-up.md`
+   - `kb/programs/<program-id>/experiments/run-log.yaml`
+   - `kb/programs/<program-id>/experiments/follow-up.md`
 6. Keep each run explicit about:
    - intent
    - setup / config notes

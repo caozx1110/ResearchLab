@@ -1,6 +1,6 @@
 ---
 name: literature-corpus-builder
-description: Canonicalize literature sources into doc/research/library/literature/, including PDFs from raw/, arXiv or OpenReview links, paper pages, blogs, and project pages. Use when Codex needs to download or stage source material, deduplicate by hashes or metadata, move buffered PDFs into the library, resolve duplicate reviews, or refresh the shared literature graph and metadata files before note authoring.
+description: Canonicalize literature sources into kb/library/literature/, including PDFs from raw/, arXiv or OpenReview links, paper pages, blogs, and project pages. Use when Codex needs to download or stage source material, deduplicate by hashes or metadata, move buffered PDFs into the library, resolve duplicate reviews, or refresh the shared literature graph and metadata files before note authoring.
 ---
 
 # Literature Corpus Builder
@@ -18,7 +18,7 @@ Treat `raw/` as immutable intake evidence and `library/literature/` as the canon
 
 ## Workflow
 
-1. Stage each local PDF or URL under `doc/research/intake/papers/downloads/<intake-id>/`.
+1. Stage each local PDF or URL under `kb/intake/papers/downloads/<intake-id>/`.
 2. Enforce raw-source immutability: never edit bytes in `raw/` or intake staging in place; only copy/move with hash checks and provenance.
 3. Run exact duplicate checks before fuzzy checks.
 4. If the match is fuzzy, write `intake/papers/review/pending.yaml` and stop canonical creation.
@@ -35,7 +35,7 @@ Treat `raw/` as immutable intake evidence and `library/literature/` as the canon
 - If a local PDF reveals a stable source ID such as arXiv or DOI, normalize `canonical_url` and `site_fingerprint` instead of leaving local-buffer placeholders.
 - Write a concise `short_summary` into canonical metadata so the library index stays searchable.
 - Treat ingest-time `claims.yaml` as a placeholder scaffold by default: mark it unverified and avoid presenting it as manually validated extraction.
-- Seed initial `topics` and `tags` from `doc/research/memory/domain-profile.yaml`, then register discovered keyword tags for downstream retrieval.
+- Seed initial `topics` and `tags` from `kb/memory/domain-profile.yaml`, then register discovered keyword tags for downstream retrieval.
 - Treat that tag seeding as ingest-time scaffolding only; alias governance, taxonomy normalization, and large-scale tag projection ownership belong to `literature-tagger`.
 - High-value ingest-time query outcomes (duplicate evidence, canonical ID decisions, source-quality caveats) must be written back to durable wiki artifacts (`intake/.../pending.yaml`, `metadata.yaml`, and `index.yaml`), not left in chat-only text.
 - Refuse to read shared YAML with a degraded runtime: if `PyYAML` or PDF backend is missing, fail early and hand back to `research-conductor` for runtime recovery.
@@ -47,12 +47,12 @@ python3 .agents/skills/literature-corpus-builder/scripts/ingest_literature.py in
 python3 .agents/skills/literature-corpus-builder/scripts/ingest_literature.py ingest --source raw/example.pdf
 python3 .agents/skills/literature-corpus-builder/scripts/ingest_literature.py ingest --source raw/example.pdf --program-id my-program
 python3 .agents/skills/literature-corpus-builder/scripts/ingest_literature.py ingest --source "https://arxiv.org/abs/2501.09747"
-python3 .agents/skills/literature-corpus-builder/scripts/ingest_literature.py ingest --search-result doc/research/library/search/results/latest-vla.yaml
-python3 .agents/skills/literature-corpus-builder/scripts/ingest_literature.py ingest --search-result doc/research/library/search/results/latest-vla.yaml --program-id my-program
+python3 .agents/skills/literature-corpus-builder/scripts/ingest_literature.py ingest --search-result kb/library/search/results/latest-vla.yaml
+python3 .agents/skills/literature-corpus-builder/scripts/ingest_literature.py ingest --search-result kb/library/search/results/latest-vla.yaml --program-id my-program
 python3 .agents/skills/literature-corpus-builder/scripts/ingest_literature.py resolve-review --review-id paper-review-... --decision existing --canonical-id lit-...
 python3 .agents/skills/literature-corpus-builder/scripts/ingest_literature.py refresh-claims --source-id lit-arxiv-2501-09747v1
 python3 .agents/skills/research-conductor/scripts/run_with_runtime.py .agents/skills/literature-corpus-builder/scripts/ingest_literature.py ingest --source raw/example.pdf
-cat doc/research/programs/my-program/workflow/reporting-events.yaml
+cat kb/programs/my-program/workflow/reporting-events.yaml
 python3 .agents/skills/research-note-author/scripts/prepare_note_assets.py prepare-literature-note --source-id lit-arxiv-2501-09747v1
 ```
 

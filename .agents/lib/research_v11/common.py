@@ -113,13 +113,25 @@ def ensure_dir(path: Path) -> None:
 def find_project_root(start: Path | None = None) -> Path:
     current = (start or Path.cwd()).resolve()
     for candidate in [current] + list(current.parents):
-        if (candidate / ".agents").exists() and (candidate / "doc").exists():
+        if (candidate / ".agents").exists() and (
+            (candidate / "AGENTS.md").exists()
+            or (candidate / "README.md").exists()
+            or (candidate / "kb").exists()
+            or (candidate / "docs").exists()
+            or (candidate / "doc").exists()
+        ):
             return candidate
     raise FileNotFoundError(f"Could not locate project root from {current}")
 
 
 def research_root(project_root: Path) -> Path:
-    return project_root / "doc" / "research"
+    kb_root = project_root / "kb"
+    legacy_root = project_root / "doc" / "research"
+    if kb_root.exists():
+        return kb_root
+    if legacy_root.exists():
+        return legacy_root
+    return kb_root
 
 
 def program_root(project_root: Path, program_id: str) -> Path:
@@ -2174,7 +2186,7 @@ def read_text_excerpt(path: Path, limit: int = 4000) -> str:
 def _default_wiki_index_markdown() -> str:
     return (
         "# Research Wiki Index\n\n"
-        "This index is generated from `doc/research/library` and `doc/research/programs`.\n"
+        "This index is generated from `kb/library` and `kb/programs`.\n"
     )
 
 

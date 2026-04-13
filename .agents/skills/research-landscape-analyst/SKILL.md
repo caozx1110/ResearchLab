@@ -20,7 +20,7 @@ Use this before `research-conductor` when direction selection is still open and 
 
 1. Read shared literature/repo library plus tag taxonomy if available.
 2. Rank relevant papers and repos using `tags`, `topics`, titles, and `short_summary`.
-3. Write a landscape report under `doc/research/library/landscapes/` with trend summaries, candidate program seeds, and conductor-ready prompts.
+3. Write a landscape report under `kb/library/landscapes/` with trend summaries, candidate program seeds, and conductor-ready prompts.
 4. For browse-only requests, use list output for concise inventories.
 5. Hand selected seeds to `research-conductor` via `create-program-from-landscape`.
 6. If the user mainly wants a reopen page, reading pack, or curated human entrypoint, route that work to `research-deliverable-curator` instead of treating the landscape summary as a navigation page.
@@ -29,7 +29,7 @@ Use this before `research-conductor` when direction selection is still open and 
 
 - Keep this skill library-scoped: synthesize trends without mutating canonical paper/repo metadata.
 - Keep scope explicit through `macro`, `focused`, or `micro` modes.
-- Read workspace-local heuristics from `doc/research/memory/domain-profile.yaml`.
+- Read workspace-local heuristics from `kb/memory/domain-profile.yaml`.
 - Keep human-facing landscape summaries Chinese-first while preserving stable machine-facing IDs and YAML keys.
 - Candidate programs must include question, goal, seed evidence, bootstrap prompt, and conductor-ready prompt with `survey_id` plus `program_seed_id`.
 - High-value query outcomes (trend breaks, overlooked clusters, seed prioritization rationale) must be written back to durable wiki pages under `library/landscapes/`, not left as chat-only recommendations.
@@ -46,7 +46,7 @@ python3 .agents/skills/research-conductor/scripts/manage_workspace.py create-pro
 
 ## Boundaries
 
-- Do not create or mutate `doc/research/programs/<program-id>/` here.
+- Do not create or mutate `kb/programs/<program-id>/` here.
 - Do not claim freshness beyond the current canonical library snapshot.
 - Do not replace `literature-analyst` for program-scoped synthesis once a concrete program exists.
 - Do not treat the landscape summary as the durable home for current-work navigation or reading bundles; route those to `research-deliverable-curator`.

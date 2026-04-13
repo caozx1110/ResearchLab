@@ -81,7 +81,7 @@ def main() -> int:
                 "host": host,
                 "port": discovered_port,
                 "pid": int(launcher_state.get("pid") or 0) if discovered_port == state_port else 0,
-                "browser_url": browser_url(host, discovered_port),
+                "browser_url": browser_url(host, discovered_port, project_root),
                 "version_url": version_url(host, discovered_port),
                 "log_path": str(launcher_state.get("log_path") or server_log_path(project_root)),
                 "runtime_python": str(launcher_state.get("runtime_python") or ""),

@@ -2242,7 +2242,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     rebuild_wiki_cmd = subparsers.add_parser(
         "rebuild-wiki-index",
-        help="Regenerate doc/research/wiki/index.md from canonical workspace artifacts",
+        help="Regenerate kb/wiki/index.md from canonical workspace artifacts",
     )
     rebuild_wiki_cmd.set_defaults(func=rebuild_wiki_index)
 

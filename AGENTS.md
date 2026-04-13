@@ -4,7 +4,7 @@ This repository implements an LLM-maintained research wiki and workflow workspac
 
 The goal is not only to ingest papers, blogs, and repositories, but to turn them into a durable Chinese-first research operating system: canonical source records, close-reading notes, cross-source synthesis, idea generation, technical route discussion, experiment tracking, weekly reporting, and polished exports.
 
-Treat this file as the schema layer described in `llm-wiki.md`. When there is ambiguity, prefer durable knowledge artifacts over chat-only output.
+Treat this file as the schema layer described in `docs/llm-wiki.md`. When there is ambiguity, prefer durable knowledge artifacts over chat-only output.
 
 ## Core Principles
 
@@ -25,14 +25,14 @@ Treat this file as the schema layer described in `llm-wiki.md`. When there is am
 
 ## Research Python Runtime
 
-- The canonical research runtime for this workspace is:
+- The canonical research runtime for this workspace is identified by:
   - runtime id: `runtime-research-default`
-  - python: `/Users/czx/miniconda3/bin/python3`
-- Treat `doc/research/memory/runtime-environments.yaml` as the durable source of truth for remembered research runtimes.
+  - python: a configured research interpreter with YAML and PDF tooling support
+- Treat `kb/memory/runtime-environments.yaml` as the durable source of truth for remembered research runtimes.
 - When a task reads or writes canonical YAML, parses PDFs, updates research library artifacts, or runs research skill scripts, prefer one of these two invocation styles:
-  - direct interpreter: ``/Users/czx/miniconda3/bin/python3 <script> ...``
+  - configured interpreter: ``${RESEARCH_PYTHON:-python3} <script> ...``
   - remembered runtime wrapper: ``python3 .agents/skills/research-conductor/scripts/run_with_runtime.py <script> ...``
-- Do not rely on the system Xcode Python for research workflows that need `PyYAML` or PDF tooling. In this workspace, `/Applications/Xcode.app/Contents/Developer/usr/bin/python3` is not the canonical research interpreter.
+- Do not rely on an unconfigured system Python when the workflow needs `PyYAML` or PDF tooling.
 - If the preferred runtime changes, update it through `research-conductor` and then keep this section aligned:
   - ``python3 .agents/skills/research-conductor/scripts/manage_workspace.py remember-runtime --python <path-to-python> --label research-default``
 
@@ -46,32 +46,32 @@ Treat this file as the schema layer described in `llm-wiki.md`. When there is am
 
 ### 2. Intake / Staging Layer
 
-- `doc/research/intake/`
+- `kb/intake/`
 - Temporary manifests, staged downloads, duplicate review queues, and ingest provenance.
 - Useful for auditability, not the primary reading surface.
 
 ### 3. Canonical Knowledge Library
 
-- `doc/research/library/literature/`
-- `doc/research/library/repos/`
-- `doc/research/library/landscapes/`
-- `doc/research/library/search/results/`
+- `kb/library/literature/`
+- `kb/library/repos/`
+- `kb/library/landscapes/`
+- `kb/library/search/results/`
 - This is the normalized knowledge base for sources and library-scoped syntheses.
 
 ### 4. Program Work Layer
 
-- `doc/research/programs/<program-id>/`
+- `kb/programs/<program-id>/`
 - This is the main place for a concrete research direction.
 - Store the program question, evidence, idea evolution, design pack, experiments, weekly reports, decisions, and unresolved questions here.
 
 ### 5. Cross-Program Wiki Layer
 
-- `doc/research/wiki/`
+- `kb/wiki/`
 - Store cross-program query artifacts, workspace-wide indexes, lint reports, and other reusable syntheses that should survive beyond a single conversation.
 
 ### 6. Human Navigation Layer
 
-- `doc/research/user/`
+- `kb/user/`
 - Keep user-facing entrypoints, reading indexes, navigation pages, report indexes, and browser build artifacts here.
 - If a human asks “where do I look?” or “how do I quickly open the original PDF?”, the answer should usually land here.
 
@@ -79,38 +79,38 @@ Treat this file as the schema layer described in `llm-wiki.md`. When there is am
 
 - `output/`
 - Store polished deliverables such as `.docx`, `.pptx`, or final markdown exports.
-- Do not let `output/` become the only durable copy of important research knowledge; the canonical version should still live under `doc/research/`.
+- Do not let `output/` become the only durable copy of important research knowledge; the canonical version should still live under `kb/`.
 
 ## Durable Artifact Rules
 
 Persist the following artifact types instead of leaving them only in chat:
 
 - Source canonicalization:
-  - Literature: `doc/research/library/literature/<source-id>/`
-  - Repos: `doc/research/library/repos/<repo-id>/`
+  - Literature: `kb/library/literature/<source-id>/`
+  - Repos: `kb/library/repos/<repo-id>/`
 - Source reading notes:
   - Paper note: `.../note.md`
   - Repo note: `.../repo-notes.md`
 - Library-scoped surveys or topic scans:
-  - `doc/research/library/landscapes/<survey-id>/`
+  - `kb/library/landscapes/<survey-id>/`
 - Program evidence maps:
-  - `doc/research/programs/<program-id>/evidence/`
+  - `kb/programs/<program-id>/evidence/`
 - Idea proposals, reviews, and decisions:
-  - `doc/research/programs/<program-id>/ideas/`
+  - `kb/programs/<program-id>/ideas/`
 - Technical design packs:
-  - `doc/research/programs/<program-id>/design/`
+  - `kb/programs/<program-id>/design/`
 - Experiment planning, execution, and follow-up:
-  - `doc/research/programs/<program-id>/experiments/`
+  - `kb/programs/<program-id>/experiments/`
   - Prefer adding `experiments/runs/` for per-run logs when experiment activity becomes substantial.
 - Technical route discussions, meeting-like summaries, and important Q&A conclusions:
-  - Prefer `doc/research/programs/<program-id>/discussions/`
+  - Prefer `kb/programs/<program-id>/discussions/`
   - Create the directory when needed instead of burying these artifacts in chat.
 - Weekly reports and digests:
-  - `doc/research/programs/<program-id>/weekly/`
+  - `kb/programs/<program-id>/weekly/`
 - Reusable high-value question answering artifacts:
-  - `doc/research/wiki/queries/`
+  - `kb/wiki/queries/`
 - Workspace health checks:
-  - `doc/research/wiki/lint/`
+  - `kb/wiki/lint/`
 - Polished external deliverables:
   - `output/doc/`, `output/ppt/`, or another explicit export folder
 
@@ -125,11 +125,11 @@ Persist the following artifact types instead of leaving them only in chat:
 
 ## Human-Facing Navigation Rules
 
-- Maintain `doc/research/user/navigation.md` as the first place to look for current outputs and reading entrypoints.
-- Maintain `doc/research/user/reading-lists/*.md` for active reading bundles and `doc/research/user/reports/*.md` for report/export entry pages.
+- Maintain `kb/user/navigation.md` as the first place to look for current outputs and reading entrypoints.
+- Maintain `kb/user/reading-lists/*.md` for active reading bundles and `kb/user/reports/*.md` for report/export entry pages.
 - When a new weekly report, comparison memo, discussion summary, or major exported deliverable is created, add it to the navigation page if a human is likely to reopen it.
 - If a source note is important for current work, add a direct link to both `note.md` and `source/primary.pdf` from a user-facing page instead of forcing deep manual folder traversal.
-- Keep `doc/research/user/kb/` read-only and generated. Do not treat it as the canonical authoring surface.
+- Keep `kb/user/kb/` read-only and generated. Do not treat it as the canonical authoring surface.
 
 ## Durable Template Conventions
 
@@ -144,7 +144,7 @@ Persist the following artifact types instead of leaving them only in chat:
 
 ## Skill Editing Guardrails
 
-- Use [$skill-creator](/Users/czx/.codex/skills/.system/skill-creator/SKILL.md) habits whenever creating or revising research skills:
+- Use `skill-creator` habits whenever creating or revising research skills:
   - tighten trigger and ownership wording in `SKILL.md` first
   - keep `SKILL.md` concise and move deterministic repetition into scripts or references only when needed
   - keep `agents/openai.yaml` aligned when a skill's scope or trigger wording changes
@@ -203,17 +203,23 @@ When working in this repository:
 
 ## Practical Reading Paths
 
-For current work, prefer these entrypoints before drilling into deep directories:
+For a freshly cloned open-source copy, prefer these entrypoints before drilling into runtime knowledge directories:
 
-- `doc/research/user/navigation.md`
-- `doc/research/wiki/index.md`
-- `doc/research/wiki/log.md`
-- `doc/research/user/kb/index.html`
+- `docs/GETTING_STARTED.md`
+- `docs/SKILLS_GUIDE.md`
+- `docs/PUBLISHING.md`
+
+Once a local `kb/` workspace exists, prefer these entrypoints before drilling into deep directories:
+
+- `kb/user/navigation.md`
+- `kb/wiki/index.md`
+- `kb/wiki/log.md`
+- `kb/user/kb/index.html`
 
 If the user specifically wants the original source file, link directly to:
 
-- Paper PDF: `doc/research/library/literature/<source-id>/source/primary.pdf`
-- Repo snapshot root: `doc/research/library/repos/<repo-id>/source/`
+- Paper PDF: `kb/library/literature/<source-id>/source/primary.pdf`
+- Repo snapshot root: `kb/library/repos/<repo-id>/source/`
 
 ## Evolution Rule
 

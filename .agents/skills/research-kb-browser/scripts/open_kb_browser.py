@@ -105,7 +105,7 @@ def main() -> int:
                 "host": args.host,
                 "port": port,
                 "pid": pid,
-                "browser_url": browser_url(args.host, port),
+                "browser_url": browser_url(args.host, port, project_root),
                 "version_url": version_url(args.host, port),
                 "log_path": str(log_path),
                 "runtime_python": runtime_python,
@@ -136,7 +136,7 @@ def main() -> int:
                     "host": args.host,
                     "port": port,
                     "pid": pid,
-                    "browser_url": browser_url(args.host, port),
+                    "browser_url": browser_url(args.host, port, project_root),
                     "version_url": version_url(args.host, port),
                     "log_path": str(log_path),
                     "runtime_python": runtime_python,
@@ -147,7 +147,7 @@ def main() -> int:
                 },
             )
             raise RuntimeError(detail) from exc
-    url = browser_url(args.host, port)
+    url = browser_url(args.host, port, project_root)
     write_json_atomic(
         state_path,
         {

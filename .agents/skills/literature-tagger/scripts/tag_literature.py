@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Curate literature topics, tags, and tag taxonomy under doc/research/library/literature/."""
+"""Curate literature topics, tags, and tag taxonomy under kb/library/literature/."""
 
 from __future__ import annotations
 

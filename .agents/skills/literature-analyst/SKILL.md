@@ -29,7 +29,7 @@ Use the canonical library as the evidence base for program-scoped llm-wiki synth
 
 - Populate `inputs` with charter plus literature entries/index artifacts that grounded the map.
 - Prefer retrieval that remains auditable: preserve query terms, matched tag cues, and selected summaries.
-- Treat `doc/research/memory/domain-profile.yaml` as workspace-local query heuristic source.
+- Treat `kb/memory/domain-profile.yaml` as workspace-local query heuristic source.
 - Keep human-facing synthesis in Chinese while preserving machine-facing YAML keys.
 - High-value query outcomes (theme clusters, conflicts, evidence gaps, shortlist rationales) must be written back to durable wiki pages (`evidence/literature-map.yaml` and reporting events), never kept only in chat.
 - Leave durable follow-up questions explicit so `research-conductor` can promote them into `workflow/open-questions.yaml`.
@@ -39,7 +39,7 @@ Use the canonical library as the evidence base for program-scoped llm-wiki synth
 ```bash
 python3 .agents/skills/literature-analyst/scripts/build_literature_map.py --program-id my-program
 python3 .agents/skills/research-conductor/scripts/manage_workspace.py set-stage --program-id my-program --stage literature-analysis
-cat doc/research/programs/my-program/workflow/reporting-events.yaml
+cat kb/programs/my-program/workflow/reporting-events.yaml
 ```
 
 ## Boundaries

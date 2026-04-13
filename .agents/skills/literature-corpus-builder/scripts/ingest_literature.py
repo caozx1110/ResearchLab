@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Ingest local PDFs and literature URLs into doc/research/library/literature."""
+"""Ingest local PDFs and literature URLs into kb/library/literature."""
 
 from __future__ import annotations
 

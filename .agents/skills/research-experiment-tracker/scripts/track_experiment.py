@@ -29,12 +29,17 @@ def _maybe_reexec_preferred_runtime() -> None:
     current = Path.cwd().resolve()
     project_root = None
     for candidate in [current] + list(current.parents):
-        if (candidate / ".agents").exists() and (candidate / "doc").exists():
+        if (candidate / ".agents").exists() and (
+            (candidate / "kb").exists() or (candidate / "doc").exists() or (candidate / "AGENTS.md").exists()
+        ):
             project_root = candidate
             break
     if project_root is None:
         return
-    runtime_path = project_root / "doc" / "research" / "memory" / "runtime-environments.yaml"
+    runtime_root = project_root / "kb"
+    if not runtime_root.exists():
+        runtime_root = project_root / "doc" / "research"
+    runtime_path = runtime_root / "memory" / "runtime-environments.yaml"
     if not runtime_path.exists():
         return
     match = re.search(r"^\s*python:\s*(.+?)\s*$", runtime_path.read_text(encoding="utf-8"), flags=re.MULTILINE)

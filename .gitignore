@@ -1,41 +1,19 @@
-doc/*
-!doc/research/
-doc/research/*
-!doc/research/user/
-!doc/research/wiki/
-!doc/research/programs/
-doc/research/user/*
-!doc/research/user/navigation.md
-!doc/research/user/reading-lists/
-!doc/research/user/reports/
-doc/research/user/reading-lists/*
-!doc/research/user/reading-lists/*.md
-doc/research/user/reports/*
-!doc/research/user/reports/*.md
-doc/research/programs/*
-!doc/research/programs/*/
-doc/research/programs/*/*
-!doc/research/programs/*/discussions/
-!doc/research/programs/*/experiments/
-doc/research/programs/*/discussions/*
-!doc/research/programs/*/discussions/*.md
-doc/research/programs/*/experiments/*
-!doc/research/programs/*/experiments/follow-up.md
-!doc/research/programs/*/experiments/run-log.yaml
-!doc/research/programs/*/experiments/runs/
-doc/research/programs/*/experiments/runs/*
-!doc/research/programs/*/experiments/runs/*.md
-doc/research/wiki/*
-!doc/research/wiki/skill-capability-matrix.md
+# Local runtime knowledge base
+kb/
 raw/
+
+# Legacy private workspace trees
+research/
+doc/
+output/
+.learnings/
+
+# Python/cache noise
 __pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OS/editor noise
 .DS_Store
-temp/
-tmp/
-/skills/
-
-
-
-
-# Ignore Smart Environment folder
-.smart-env

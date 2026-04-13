@@ -164,7 +164,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--root",
-        default="doc/research/memory/skill-evolution",
+        default="kb/memory/skill-evolution",
         help="Root directory for retrospective notes.",
     )
     return parser.parse_args()

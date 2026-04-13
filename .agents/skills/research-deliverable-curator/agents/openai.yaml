@@ -1,4 +1,4 @@
 interface:
   display_name: "Research Deliverable Curator"
   short_description: "Curate Chinese-first reading and deliverable entry pages"
-  default_prompt: "Use $research-deliverable-curator to refresh doc/research/user/navigation.md, build current reading lists, maintain weekly/export entry pages, and surface direct PDF or repo-source shortcuts for what the user should open next."
+  default_prompt: "Use $research-deliverable-curator to refresh kb/user/navigation.md, build current reading lists, maintain weekly/export entry pages, and surface direct PDF or repo-source shortcuts for what the user should open next."

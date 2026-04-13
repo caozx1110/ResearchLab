@@ -1,6 +1,6 @@
 ---
 name: literature-tagger
-description: Curate topics, tags, and tag taxonomy for canonical literature in `doc/research/library/literature/`, including refreshing `tags.yaml`, heuristic retagging from title and abstract, manual tag assignment, alias normalization, and taxonomy lint or apply passes. Use when Codex needs to maintain a paper tagging system after ingestion, clean up noisy tags, or prepare a better-tagged library for downstream literature analysis.
+description: Curate topics, tags, and tag taxonomy for canonical literature in `kb/library/literature/`, including refreshing `tags.yaml`, heuristic retagging from title and abstract, manual tag assignment, alias normalization, and taxonomy lint or apply passes. Use when Codex needs to maintain a paper tagging system after ingestion, clean up noisy tags, or prepare a better-tagged library for downstream literature analysis.
 ---
 
 # Literature Tagger
@@ -18,7 +18,7 @@ Use this after ingest whenever llm-wiki tag quality, taxonomy consistency, or re
 
 ## Workflow
 
-1. Read canonical `metadata.yaml` files under `doc/research/library/literature/`.
+1. Read canonical `metadata.yaml` files under `kb/library/literature/`.
 2. Run `taxonomy-sync` after batch import so current canonical tags are represented in `tag-taxonomy.yaml`.
 3. Use `retag` for heuristic refresh from title plus abstract, or `assign` for manual updates.
 4. Use `taxonomy-upsert` to register canonical tags, aliases, topic hints, and descriptions.
@@ -30,7 +30,7 @@ Use this after ingest whenever llm-wiki tag quality, taxonomy consistency, or re
 - Only edit `topics`, `tags`, lightweight `tagging` notes, and taxonomy artifacts.
 - Preserve bibliographic identity fields (`canonical_title`, `authors`, `canonical_url`, `external_ids`) during tag curation.
 - Keep tags short, stable, lowercase, and hyphenated; aliases belong in `tag-taxonomy.yaml`.
-- Load theme-specific seeds, aliases, and topic hints from `doc/research/memory/domain-profile.yaml`.
+- Load theme-specific seeds, aliases, and topic hints from `kb/memory/domain-profile.yaml`.
 - High-value query findings from retagging (new emergent concepts, alias collisions, taxonomy gaps) must be written back to wiki artifacts (`tag-taxonomy.yaml`, `tags.yaml`, and per-source `metadata.yaml` notes), not left as ephemeral chat suggestions.
 - If retagging exposes canonical identity gaps, duplicate ambiguity, or missing ingest-time fields, hand that issue back to `literature-corpus-builder` instead of patching around it here.
 
@@ -45,7 +45,7 @@ python3 .agents/skills/literature-tagger/scripts/tag_literature.py assign --sour
 python3 .agents/skills/literature-tagger/scripts/tag_literature.py taxonomy-upsert --tag long-horizon --alias longhorizon --topic robot-learning --description "Long-horizon execution or recovery."
 python3 .agents/skills/literature-tagger/scripts/tag_literature.py taxonomy-lint --all --strict
 python3 .agents/skills/literature-tagger/scripts/tag_literature.py taxonomy-apply --all
-cat doc/research/programs/my-program/workflow/reporting-events.yaml
+cat kb/programs/my-program/workflow/reporting-events.yaml
 ```
 
 ## Boundaries

@@ -15,7 +15,7 @@ Prefer precise suggestions over generic retrospectives. Only create feedback whe
 2. Separate observations from inferences. Capture concrete signals first: repeated manual steps, unclear routing, missing validation, missing templates, duplicated responsibilities, noisy outputs, or too-broad or too-narrow triggers.
 3. Read only the relevant skill folders before proposing a fix. Compare the observed friction against the current `SKILL.md`, scripts, and `agents/openai.yaml` metadata for the touched skills.
 4. Prefer the smallest change that would have prevented the friction: tighten a description, add or remove a workflow step, clarify a boundary, add a script, add a shared contract note, or split a responsibility only when overlap is recurring.
-5. If the user explicitly asked to evolve skills, patch the strongest suggestions directly. Otherwise, write a concise retrospective note under `doc/research/memory/skill-evolution/retrospectives/` and generate a ready-to-send AI improvement prompt in a fenced code block.
+5. If the user explicitly asked to evolve skills, patch the strongest suggestions directly. Otherwise, write a concise retrospective note under `kb/memory/skill-evolution/retrospectives/` and generate a ready-to-send AI improvement prompt in a fenced code block.
 6. If there is no material friction, say so briefly and do not invent work.
 
 ## Shared Contract

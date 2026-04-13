@@ -1,6 +1,6 @@
 ---
 name: literature-scout
-description: Capture external literature search results into doc/research/library/search/results/ without directly mutating the canonical literature library. Use when Codex needs to search for new papers, blogs, or project pages, stage external evidence for later ingestion, or document why more evidence is needed before an idea decision.
+description: Capture external literature search results into kb/library/search/results/ without directly mutating the canonical literature library. Use when Codex needs to search for new papers, blogs, or project pages, stage external evidence for later ingestion, or document why more evidence is needed before an idea decision.
 ---
 
 # Literature Scout
@@ -19,7 +19,7 @@ Capture external query signals first, then hand curated candidates to canonical 
 ## Workflow
 
 1. Search externally only when requested by user intent, evidence requests, or explicit freshness gaps.
-2. Record query text, recency assumptions, notes, and candidate URLs under `doc/research/library/search/results/<search-id>.yaml`.
+2. Record query text, recency assumptions, notes, and candidate URLs under `kb/library/search/results/<search-id>.yaml`.
 3. Mark high-confidence vs uncertain candidates explicitly instead of upgrading uncertain hits to facts.
 4. Hand shortlisted URLs to `literature-corpus-builder`, preferably via `ingest --search-result ...`.
 
@@ -35,7 +35,7 @@ Capture external query signals first, then hand curated candidates to canonical 
 ```bash
 python3 .agents/skills/literature-scout/scripts/record_search_results.py --search-id latest-vla --query "vision language action recovery" --candidate-url https://arxiv.org/abs/2501.09747
 python3 .agents/skills/literature-scout/scripts/record_search_results.py --search-id latest-vla --query "humanoid manipulation policy" --candidate-url https://openreview.net/forum?id=example
-python3 .agents/skills/literature-corpus-builder/scripts/ingest_literature.py ingest --search-result doc/research/library/search/results/latest-vla.yaml
+python3 .agents/skills/literature-corpus-builder/scripts/ingest_literature.py ingest --search-result kb/library/search/results/latest-vla.yaml
 python3 .agents/skills/research-conductor/scripts/manage_workspace.py add-open-question --program-id my-program --question-id q-freshness --question "Need newer evidence beyond current scout batch?"
 ```
 

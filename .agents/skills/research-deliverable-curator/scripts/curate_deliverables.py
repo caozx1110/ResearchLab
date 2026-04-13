@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Curate human-facing research entrypoints under doc/research/user/."""
+"""Curate human-facing research entrypoints under kb/user/."""
 
 from __future__ import annotations
 
@@ -28,12 +28,17 @@ def _maybe_reexec_preferred_runtime() -> None:
     current = Path.cwd().resolve()
     project_root = None
     for candidate in [current] + list(current.parents):
-        if (candidate / ".agents").exists() and (candidate / "doc").exists():
+        if (candidate / ".agents").exists() and (
+            (candidate / "kb").exists() or (candidate / "doc").exists() or (candidate / "AGENTS.md").exists()
+        ):
             project_root = candidate
             break
     if project_root is None:
         return
-    runtime_path = project_root / "doc" / "research" / "memory" / "runtime-environments.yaml"
+    runtime_root = project_root / "kb"
+    if not runtime_root.exists():
+        runtime_root = project_root / "doc" / "research"
+    runtime_path = runtime_root / "memory" / "runtime-environments.yaml"
     if not runtime_path.exists():
         return
     match = re.search(r"^\s*python:\s*(.+?)\s*$", runtime_path.read_text(encoding="utf-8"), flags=re.MULTILINE)
@@ -126,7 +131,7 @@ def resolve_program_id(project_root: Path, requested: str | None) -> str:
         return requested
     program_ids = available_program_ids(project_root)
     if not program_ids:
-        raise SystemExit("No programs found under doc/research/programs")
+        raise SystemExit("No programs found under kb/programs")
     if len(program_ids) == 1:
         return program_ids[0]
     return program_ids[0]
@@ -513,11 +518,11 @@ def build_navigation_markdown(
             "",
             "## 快速重开路径" if zh else "## Reopen Paths Quickly",
             "",
-            "- `doc/research/library/literature/<source-id>/source/primary.pdf`",
-            "- `doc/research/library/literature/<source-id>/note.md`",
-            "- `doc/research/library/repos/<repo-id>/summary.yaml`",
-            "- `doc/research/library/repos/<repo-id>/source/`",
-            "- `doc/research/programs/<program-id>/weekly/`",
+            "- `kb/library/literature/<source-id>/source/primary.pdf`",
+            "- `kb/library/literature/<source-id>/note.md`",
+            "- `kb/library/repos/<repo-id>/summary.yaml`",
+            "- `kb/library/repos/<repo-id>/source/`",
+            "- `kb/programs/<program-id>/weekly/`",
             "- `output/doc/`",
             "",
         ]

@@ -1,6 +1,6 @@
 ---
 name: research-note-author
-description: Read canonical literature PDFs or repo source snapshots in doc/research/library/, prepare close-reading context, and write professional detailed notes into note.md or repo-notes.md. Use when Codex needs to read a full paper, inspect a repo's README and main entrypoints, refresh stale notes, or finish note writing immediately after ingest.
+description: Read canonical literature PDFs or repo source snapshots in kb/library/, prepare close-reading context, and write professional detailed notes into note.md or repo-notes.md. Use when Codex needs to read a full paper, inspect a repo's README and main entrypoints, refresh stale notes, or finish note writing immediately after ingest.
 ---
 
 # Research Note Author
@@ -18,17 +18,17 @@ Use this after canonical ingest when a literature or repo entry needs durable cl
 
 ## Scope
 
-- Literature target: `doc/research/library/literature/<source-id>/note.md`
-- Repo target: `doc/research/library/repos/<repo-id>/repo-notes.md`
+- Literature target: `kb/library/literature/<source-id>/note.md`
+- Repo target: `kb/library/repos/<repo-id>/repo-notes.md`
 - Optional helper context:
-  - `doc/research/library/literature/<source-id>/note-context.md`
-  - `doc/research/library/repos/<repo-id>/repo-note-context.md`
+  - `kb/library/literature/<source-id>/note-context.md`
+  - `kb/library/repos/<repo-id>/repo-note-context.md`
 
 ## Workflow
 
 1. Prepare note assets with the bundled script.
 2. If helper context exists, read it end to end; otherwise read source PDF/repo files directly.
-3. For literature, read sections needed for a professional technical note; use [$pdf](/Users/czx/.codex/skills/pdf/SKILL.md) habits when layout/figures matter.
+3. For literature, read sections needed for a professional technical note; use `pdf`-style extraction habits when layout or figures matter.
 4. For repos, read README plus main train/eval/deploy/data entrypoints.
 5. Replace scaffolds with concrete notes in your own words, separating observed facts from inferred commentary.
 6. If the request becomes cross-source evidence synthesis, hand off to `literature-analyst` or `research-landscape-analyst` instead of stretching one note into a survey.
@@ -53,7 +53,7 @@ python3 .agents/skills/research-note-author/scripts/prepare_note_assets.py prepa
 python3 .agents/skills/research-note-author/scripts/prepare_note_assets.py prepare-repo-note --repo-id repo-example --with-context
 python3 .agents/skills/research-note-author/scripts/prepare_note_assets.py prepare-repo-note --repo-id repo-example --rewrite-generated-notes
 python3 .agents/skills/repo-cataloger/scripts/catalog_repo.py refresh-notes --repo-id repo-example --program-id my-program
-cat doc/research/programs/my-program/workflow/reporting-events.yaml
+cat kb/programs/my-program/workflow/reporting-events.yaml
 ```
 
 ## Handoff Rules

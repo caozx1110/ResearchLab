@@ -1,6 +1,6 @@
 ---
 name: research-discussion-archivist
-description: Archive important technical route discussions into durable program notes under `doc/research/programs/<program-id>/discussions/`, including decisions, tradeoffs, unresolved questions, next validation actions, and linked artifacts. Use when Codex needs to turn chat-level design discussion into a reusable record instead of leaving it only in thread history.
+description: Archive important technical route discussions into durable program notes under `kb/programs/<program-id>/discussions/`, including decisions, tradeoffs, unresolved questions, next validation actions, and linked artifacts. Use when Codex needs to turn chat-level design discussion into a reusable record instead of leaving it only in thread history.
 ---
 
 # Research Discussion Archivist
@@ -9,10 +9,10 @@ Persist technical discussion outcomes before they disappear into chat history.
 
 ## Workflow
 
-1. Read `AGENTS.md` plus `doc/research/memory/user-profile.yaml`.
+1. Read `AGENTS.md` plus `kb/memory/user-profile.yaml`.
 2. Default to Chinese user-facing prose when the profile prefers Chinese.
 3. Read the target program's `charter.yaml` and `workflow/state.yaml` for context.
-4. Write one discussion note under `doc/research/programs/<program-id>/discussions/`.
+4. Write one discussion note under `kb/programs/<program-id>/discussions/`.
 5. Keep sections explicit:
    - background
    - current conclusion
@@ -20,7 +20,7 @@ Persist technical discussion outcomes before they disappear into chat history.
    - open questions
    - next validation actions
    - linked artifacts
-6. Refresh `doc/research/programs/<program-id>/discussions/index.md`.
+6. Refresh `kb/programs/<program-id>/discussions/index.md`.
 7. Append a concise reporting event so weekly reporting can recover the discussion outcome later.
 
 ## Shared Contract

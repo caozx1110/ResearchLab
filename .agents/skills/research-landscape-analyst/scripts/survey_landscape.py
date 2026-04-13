@@ -616,7 +616,7 @@ def build_parser() -> argparse.ArgumentParser:
     survey_cmd.add_argument("--literature-limit", type=int, default=10, help="Maximum number of literature entries to include")
     survey_cmd.add_argument("--repo-limit", type=int, default=5, help="Maximum number of repo entries to include")
     survey_cmd.add_argument("--program-count", type=int, default=3, help="How many candidate program seeds to generate")
-    survey_cmd.add_argument("--survey-id", default="", help="Optional stable survey ID under doc/research/library/landscapes/")
+    survey_cmd.add_argument("--survey-id", default="", help="Optional stable survey ID under kb/library/landscapes/")
     survey_cmd.set_defaults(func=handle_survey)
 
     list_cmd = subparsers.add_parser("list", help="List concise paper or repo inventory rows")

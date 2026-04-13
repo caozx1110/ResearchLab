@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Catalog local and GitHub repositories into doc/research/library/repos."""
+"""Catalog local and GitHub repositories into kb/library/repos."""
 
 from __future__ import annotations
 

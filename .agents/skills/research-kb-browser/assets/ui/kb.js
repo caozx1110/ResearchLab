@@ -1208,7 +1208,7 @@
     const queryCards = queryItems.map((entry, index) => ({
       wiki_id: `wiki-query-${entry.query_id || index}`,
       title: entry.title || entry.query_id || `query-${index + 1}`,
-      subtitle: entry.query_path || "doc/research/wiki/queries",
+      subtitle: entry.query_path || "kb/wiki/queries",
       short_summary: entry.preview || "暂无 query 预览。",
       wiki_kind: "query",
       query_path: entry.query_path || "",

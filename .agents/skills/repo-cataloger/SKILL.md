@@ -1,6 +1,6 @@
 ---
 name: repo-cataloger
-description: Canonicalize local repositories and GitHub URLs into doc/research/library/repos/, including staged downloads, duplicate review, entrypoint scanning, and reusable repo summaries. Use when Codex needs to bring a repository into the shared library, snapshot it into the workspace, refresh index metadata, or resolve possible duplicate repos before note authoring or downstream reuse.
+description: Canonicalize local repositories and GitHub URLs into kb/library/repos/, including staged downloads, duplicate review, entrypoint scanning, and reusable repo summaries. Use when Codex needs to bring a repository into the shared library, snapshot it into the workspace, refresh index metadata, or resolve possible duplicate repos before note authoring or downstream reuse.
 ---
 
 # Repo Cataloger
@@ -18,7 +18,7 @@ Normalize repositories into the shared repo library before idea, design, or impl
 
 ## Workflow
 
-1. Stage each local path or GitHub URL under `doc/research/intake/repos/downloads/<intake-id>/`.
+1. Stage each local path or GitHub URL under `kb/intake/repos/downloads/<intake-id>/`.
 2. Treat intake snapshots as immutable evidence during ingest: no in-place rewrite of staged source trees.
 3. Run duplicate checks against canonical remotes and owner/name fingerprints.
 4. If the match is fuzzy, write `intake/repos/review/pending.yaml` and wait for confirmation.
@@ -43,7 +43,7 @@ python3 .agents/skills/repo-cataloger/scripts/catalog_repo.py ingest --repo http
 python3 .agents/skills/repo-cataloger/scripts/catalog_repo.py resolve-review --review-id repo-review-... --decision existing --canonical-id repo-... --program-id my-program
 python3 .agents/skills/repo-cataloger/scripts/catalog_repo.py refresh-notes --repo-id repo-example --program-id my-program
 python3 .agents/skills/research-conductor/scripts/run_with_runtime.py .agents/skills/repo-cataloger/scripts/catalog_repo.py ingest --repo https://github.com/example/project
-cat doc/research/programs/my-program/workflow/reporting-events.yaml
+cat kb/programs/my-program/workflow/reporting-events.yaml
 python3 .agents/skills/research-note-author/scripts/prepare_note_assets.py prepare-repo-note --repo-id repo-example
 ```
 

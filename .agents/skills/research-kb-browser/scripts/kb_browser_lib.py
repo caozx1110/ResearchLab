@@ -56,7 +56,13 @@ def project_root_from_script(script_path: Path, explicit_root: str = "") -> Path
 
 
 def research_root(project_root: Path) -> Path:
-    return project_root / "doc" / "research"
+    kb_root = project_root / "kb"
+    legacy_root = project_root / "doc" / "research"
+    if kb_root.exists():
+        return kb_root
+    if legacy_root.exists():
+        return legacy_root
+    return kb_root
 
 
 def kb_root(project_root: Path) -> Path:
@@ -95,8 +101,9 @@ def base_url(host: str, port: int) -> str:
     return f"http://{host}:{port}"
 
 
-def browser_url(host: str, port: int) -> str:
-    return f"{base_url(host, port)}/doc/research/user/kb/index.html"
+def browser_url(host: str, port: int, project_root: Path) -> str:
+    rel = relative_path(project_root, index_html_path(project_root))
+    return f"{base_url(host, port)}{web_path(rel)}"
 
 
 def health_url(host: str, port: int) -> str:
@@ -775,7 +782,7 @@ def build_user_entry_items(project_root: Path, program_items: list[dict[str, Any
 
     research = research_root(project_root)
     add(research / "user" / "navigation.md", "研究导航", "entry")
-    add(research / "GETTING_STARTED.md", "Research Skills 上手指南", "entry")
+    add(project_root / "docs" / "GETTING_STARTED.md", "Research Skills 上手指南", "entry")
     add(research / "wiki" / "index.md", "Wiki Index", "wiki")
     add(research / "wiki" / "log.md", "Wiki Log", "wiki")
 
