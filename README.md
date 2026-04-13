@@ -1,5 +1,7 @@
 # Open Research Workspace Skills
 
+![snapshot](./docs/figs/snapshot.png)
+
 这是一个开源的 research workspace 骨架。
 
 它不是现成知识库，而是一套让 Codex 持续维护科研工作区的规则、技能和文档。目标很简单：把论文、网页、仓库、idea、设计、实验记录和周报，尽量从聊天里搬到可复用的工作区文件里。
