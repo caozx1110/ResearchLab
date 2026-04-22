@@ -126,6 +126,7 @@ Persist the following artifact types instead of leaving them only in chat:
 ## Human-Facing Navigation Rules
 
 - Maintain `kb/user/navigation.md` as the first place to look for current outputs and reading entrypoints.
+- Maintain `kb/user/obsidian-start-here.md` as the markdown-first guide for humans browsing the workspace in Obsidian.
 - Maintain `kb/user/reading-lists/*.md` for active reading bundles and `kb/user/reports/*.md` for report/export entry pages.
 - When a new weekly report, comparison memo, discussion summary, or major exported deliverable is created, add it to the navigation page if a human is likely to reopen it.
 - If a source note is important for current work, add a direct link to both `note.md` and `source/primary.pdf` from a user-facing page instead of forcing deep manual folder traversal.
@@ -159,6 +160,7 @@ Persist the following artifact types instead of leaving them only in chat:
 
 Use existing skills with clear boundaries:
 
+- `llm-wiki`: workspace-level persistent wiki maintenance, cross-program query filing, wiki index/log upkeep, and Obsidian-friendly markdown organization; use as the adapter when the user speaks in generic wiki/knowledge-base terms
 - `research-conductor`: program orchestration, memory capture, stage tracking, durable query routing
 - `literature-corpus-builder`: paper/blog/project-page canonical ingest
 - `repo-cataloger`: repository canonical ingest
@@ -212,6 +214,7 @@ For a freshly cloned open-source copy, prefer these entrypoints before drilling 
 Once a local `kb/` workspace exists, prefer these entrypoints before drilling into deep directories:
 
 - `kb/user/navigation.md`
+- `kb/user/obsidian-start-here.md`
 - `kb/wiki/index.md`
 - `kb/wiki/log.md`
 - `kb/user/kb/index.html`

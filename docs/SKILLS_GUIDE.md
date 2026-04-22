@@ -6,7 +6,7 @@
 - 共享脚本库在 `.agents/lib/`
 - 科研事实源默认在 `kb/`
 
-这些 skill 主要能帮你做 6 类事：
+这些 skill 主要能帮你做 7 类事：
 
 1. 管理科研课题 workflow，包括 program、state、decision、preferences
 2. 把论文、网页、代码仓库整理成可复用的共享知识库，并维护论文 topic/tag 体系
@@ -14,6 +14,7 @@
 4. 解析本地 PDF 论文，搭建持续更新的 paper workspace
 5. 分析研究代码仓库结构，生成可读的架构文档
 6. 把当前 research workspace 生成人类可读、可自动更新的本地知识库网页
+7. 以 llm-wiki 的方式维护持续累积的知识库页面、query 资产，以及 Obsidian 友好的重开入口
 
 ## Theme Profile
 
@@ -53,6 +54,12 @@ research v1.1 现在把“研究主题”从 skill 脚本里拆出来了。
 如果你想直接把当前 knowledge base 和 program 产物可视化浏览：
 
 `research-kb-browser`
+
+如果你是按 “wiki / knowledge base / add to wiki / query wiki / lint wiki” 的心智模型来提需求：
+
+`llm-wiki` -> (`literature-corpus-builder` / `repo-cataloger`) -> `research-note-author` -> `research-deliverable-curator`
+
+说明：`llm-wiki` 在这里是上层适配器，负责把通用 wiki 操作翻译到当前 `raw/intake/library/programs/wiki/user/output` 分层，而不是取代各个 owner skill。
 
 如果需要最新外部信息：
 

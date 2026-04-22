@@ -12,10 +12,11 @@ Keep the conversation anchored to a concrete `program`.
 1. Initialize the shared workspace if `kb/` is missing, including the persistent wiki layer under `kb/wiki/`.
 2. Create or reopen a program under `kb/programs/<program-id>/`.
 3. If a landscape survey already proposed a good candidate, instantiate the program directly from that candidate seed instead of restating everything by hand.
-4. Orchestrate the full `ingest -> query -> lint` loop:
+4. Orchestrate the full `ingest -> query -> lint` loop for concrete programs:
    - Ingest: route source intake to `literature-corpus-builder` / `repo-cataloger`.
    - Query: run `query-program` and save durable query artifacts to `wiki/queries/`.
    - Lint: run `lint-workspace` and track unresolved issues.
+   - If the request is framed as generic workspace wiki / knowledge-base maintenance rather than program lifecycle work, route to `llm-wiki` instead of stretching this skill.
 5. Update `workflow/state.yaml`, `workflow/decision-log.md`, and `memory/*` as the conversation advances.
 6. Keep `wiki/index.md` and `wiki/log.md` current as part of durable bookkeeping.
 7. Route weekly report requests to `weekly-report-author` instead of generating the report here.
@@ -38,6 +39,7 @@ Keep the conversation anchored to a concrete `program`.
 - Keep theme-specific heuristics in `kb/memory/domain-profile.yaml` instead of embedding them into downstream skill scripts.
 - Use `workflow/state.yaml`, `workflow/reporting-events.yaml`, and `kb/wiki/{index,log}.md` as the canonical contract surfaces for cross-skill handoffs.
 - Treat `research-deliverable-curator`, `research-discussion-archivist`, and `research-experiment-tracker` as owner skills when those folders exist in the workspace; coordinate them, do not absorb their outputs here.
+- If `llm-wiki` exists in the workspace, treat it as the top-level adapter for generic "add/query/lint/update the wiki" requests and keep this skill focused on program lifecycle and state.
 
 ## Commands
 
@@ -75,6 +77,7 @@ python3 .agents/skills/weekly-report-author/scripts/write_weekly_report.py --pro
 - Do not skip writing `workflow/*` just because the answer is obvious in chat.
 - Keep global memory in `kb/memory/` and program-specific preferences in `workflow/preferences.yaml`.
 - Do not keep important query synthesis only in chat; save it as a durable wiki artifact.
+- Do not absorb generic `add to wiki`, `query the knowledge base`, or `lint the wiki` flows when `llm-wiki` is available; coordinate with it instead.
 - Do not auto-memory hypothetical or comparative statements; only persist stable facts that describe the user's actual setup, resources, or durable preferences.
 - Treat `memory/domain-profile.yaml` as workspace-local configuration: update it when the research theme changes instead of patching keyword lists into individual skills.
 - Do not claim deep weekly comparisons that require rereading raw PDFs or repo source if the canonical metadata is too thin; route the gap to `literature-analyst`, `literature-corpus-builder`, or `repo-cataloger` first.

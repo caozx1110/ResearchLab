@@ -1,0 +1,4 @@
+interface:
+  display_name: "LLM Wiki"
+  short_description: "Persistent research-wiki adapter for kb/wiki and Obsidian-friendly entrypoints"
+  default_prompt: "Use $llm-wiki when the user talks in wiki or knowledge-base terms: add a source to the workspace, query or lint the wiki, file a reusable comparison or topic page under kb/wiki, and keep index, log, plus Obsidian-friendly entrypoints aligned without collapsing owner research skills."
