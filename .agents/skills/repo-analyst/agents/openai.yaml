@@ -1,0 +1,4 @@
+interface:
+  display_name: "Repo Analyst"
+  short_description: "负责 repo structure scan、capability mapping 与 reuse judgement"
+  default_prompt: "使用 $repo-analyst 对 repo unit 做结构扫描、能力边界映射、复用判断与完整 note scaffold，并保持 AI judgement 默认待人工确认。"

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Discussion Archivist"
+  short_description: "Archive route discussions into durable program notes in v2"
+  default_prompt: "Use $discussion-archivist to turn an important research discussion into a durable note with conclusion, tradeoffs, open questions, and next actions."

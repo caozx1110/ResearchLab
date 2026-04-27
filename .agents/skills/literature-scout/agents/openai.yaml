@@ -1,4 +1,0 @@
-interface:
-  display_name: "Literature Scout"
-  short_description: "LLM-wiki query scout for external literature staging"
-  default_prompt: "Use $literature-scout to run external literature discovery, write auditable high-value query results into search-result wiki pages, and hand shortlisted URLs to $literature-corpus-builder for canonical ingest."

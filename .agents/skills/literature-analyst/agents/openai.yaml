@@ -1,4 +1,0 @@
-interface:
-  display_name: "Literature Analyst"
-  short_description: "Program-scoped literature evidence maps from canonical library"
-  default_prompt: "Use $literature-analyst to query canonical literature for an existing program, produce a durable Chinese-first evidence map, and log high-value findings and gaps without drifting into pre-program landscape scans or user-facing reading bundles."

@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+SCRIPT_PATH = Path(__file__).resolve()
+for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
+    lib = candidate / ".agents" / "lib"
+    if lib.exists():
+        sys.path.insert(0, str(lib))
+        PROJECT_ROOT = candidate
+        break
+else:
+    raise SystemExit("Could not locate .agents/lib")
+
+from research.common import write_text_if_changed, write_yaml_if_changed
+from research.v2 import append_history, build_index, locate_record, project_root, rel, write_record
+
+
+def summary_payload(record: dict) -> dict:
+    return {
+        "blog_id": record["id"],
+        "status": "pending_user_confirmation",
+        "information_types": ["fact", "inference", "evaluation", "unverified"],
+        "main_value": "待确认该博客适合做概念解释、原理分析还是工程辅助。",
+        "key_points": ["待提炼关键知识点", "待标记哪些结论需要核实"],
+        "best_use": "待确认其更适合阅读辅助、汇报素材还是长期引用。",
+    }
+
+
+def note_template(record: dict) -> str:
+    return f"""# {record.get('title', '')}\n\n## 内容定位\n\n- 主要解释什么：\n- 内容类型：\n- 适合在哪个阶段阅读：\n\n## 核心知识点\n\n\n## 直观 Insight\n\n\n## 可信度判断\n\n\n## 关联论文 / 仓库 / 方法\n\n\n## 可用于周报 / PPT 的素材\n\n\n## 用户批注\n\n\n"""
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Analyze blog units in v2.")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    for name in ("summarize", "complete-note", "confirm"):
+        cmd = subparsers.add_parser(name)
+        cmd.add_argument("--blog-id", required=True)
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    root = project_root(PROJECT_ROOT)
+    record, path = locate_record(root, args.blog_id)
+    if record.get("kind") != "blog":
+        raise SystemExit(f"{args.blog_id} is not a blog record")
+    unit_root = path.parent
+
+    if args.command == "summarize":
+        summary_path = unit_root / "summary.yaml"
+        payload = summary_payload(record)
+        write_yaml_if_changed(summary_path, payload)
+        record["payload"]["positioning"]["main_value"] = payload["main_value"]
+        record["payload"]["content"]["key_points"] = payload["key_points"]
+        record["status"] = "screened"
+        record["confirmation_status"] = "pending_user_confirmation"
+        record["needs_human_confirmation"] = True
+        record["information_types"] = ["fact", "inference", "evaluation", "unverified"]
+        record["summary"] = payload["main_value"]
+        append_history(record, action="blog-summarized", summary="Generated blog summary artifact.", information_types=["inference", "evaluation", "unverified"], artifacts=[rel(root, summary_path)])
+        write_record(root, record)
+        build_index(root)
+        print(f"[ok] wrote {summary_path.relative_to(root)}")
+        return 0
+
+    if args.command == "complete-note":
+        note_path = unit_root / "blog-note.md"
+        write_text_if_changed(note_path, note_template(record))
+        record["maturity"] = "complete"
+        record["confirmation_status"] = "pending_user_confirmation"
+        record["needs_human_confirmation"] = True
+        append_history(record, action="blog-note-created", summary="Created full blog note scaffold.", information_types=["inference", "evaluation", "unverified"], artifacts=[rel(root, note_path)])
+        write_record(root, record)
+        build_index(root)
+        print(f"[ok] wrote {note_path.relative_to(root)}")
+        return 0
+
+    if args.command == "confirm":
+        record["confirmation_status"] = "confirmed"
+        record["needs_human_confirmation"] = False
+        record["status"] = "active"
+        append_history(record, action="blog-confirmed", summary="Blog analysis confirmed by user.", information_types=["fact"])
+        write_record(root, record)
+        build_index(root)
+        print(f"[ok] confirmed {args.blog_id}")
+        return 0
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

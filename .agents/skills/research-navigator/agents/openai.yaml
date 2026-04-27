@@ -1,0 +1,4 @@
+interface:
+  display_name: "Research Navigator"
+  short_description: "Own v2 human entry pages plus the local research browser/workbench"
+  default_prompt: "Use $research-navigator to refresh kb/user entry pages or open the local navigator browser with Workbench, Markdown preview/edit, terminal, Codex CLI, and system-terminal controls."

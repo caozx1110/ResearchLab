@@ -1,0 +1,4 @@
+interface:
+  display_name: "Idea Workbench"
+  short_description: "负责 idea generate、review、review-assist、select-best 与多候选管理"
+  default_prompt: "使用 $idea-workbench 捕获或生成多个候选 idea，做 novelty/feasibility/review-assist，并只在显式要求时执行 select-best。"

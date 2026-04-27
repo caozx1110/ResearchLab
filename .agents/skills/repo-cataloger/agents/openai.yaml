@@ -1,4 +1,0 @@
-interface:
-  display_name: "Repo Cataloger"
-  short_description: "LLM-wiki ingest owner for canonical repo entries"
-  default_prompt: "Use $repo-cataloger to canonicalize local/GitHub repos into the repo wiki, preserve immutable intake provenance, refresh indexes, and hand off note authoring to $research-note-author when close reading is needed."

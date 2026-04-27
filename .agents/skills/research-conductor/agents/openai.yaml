@@ -1,4 +1,0 @@
-interface:
-  display_name: "Research Conductor"
-  short_description: "Route program lifecycle, state, and downstream research-skill handoffs"
-  default_prompt: "Use $research-conductor to create or resume a program, maintain workflow and memory state, and route work to the correct downstream research skills. Keep this skill focused on program lifecycle; if the request is framed as generic wiki or knowledge-base maintenance, hand it to $llm-wiki instead of absorbing it here."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Report Author"
+  short_description: "Own weekly reports and PPT materials sourced from reporting-events"
+  default_prompt: "Use $report-author to summarize a program's reporting-events into weekly reports, stage summaries, and PPT-ready material with reopen pointers."

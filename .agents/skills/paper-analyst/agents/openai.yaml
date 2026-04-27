@@ -1,0 +1,4 @@
+interface:
+  display_name: "Paper Analyst"
+  short_description: "负责论文 quick-screen、full note、figure extraction 与 structure refresh"
+  default_prompt: "使用 $paper-analyst 对已有 paper unit 做 quick-screen、完整笔记脚手架、figure mention 提取、结构刷新，并保持 AI judgement 默认待人工确认。"
