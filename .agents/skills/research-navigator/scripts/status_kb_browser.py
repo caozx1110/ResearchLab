@@ -33,7 +33,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def discover_running(project_root: Path, host: str, state_port: int) -> tuple[int, dict]:
+def discover_running(project_root: Path, host: str, state_port: int) -> tuple[int, dict, int]:
     candidates: list[int] = []
     seen: set[int] = set()
 
@@ -56,8 +56,8 @@ def discover_running(project_root: Path, host: str, state_port: int) -> tuple[in
         ):
             continue
         version_payload = fetch_json(version_url(host, port), timeout=0.6) or {}
-        return port, version_payload
-    return 0, {}
+        return port, version_payload, int(health.get("pid") or version_payload.get("pid") or 0)
+    return 0, {}, 0
 
 
 def main() -> int:
@@ -70,7 +70,7 @@ def main() -> int:
     version_payload = fetch_json(str(launcher_state.get("version_url") or "")) if launcher_state.get("version_url") else None
     running = bool(version_payload and version_payload.get("service") == SERVICE_NAME)
     if not running:
-        discovered_port, discovered_version = discover_running(project_root, host, state_port)
+        discovered_port, discovered_version, discovered_pid = discover_running(project_root, host, state_port)
         if discovered_port:
             running = True
             if discovered_version:
@@ -80,7 +80,7 @@ def main() -> int:
                 "project_root": str(project_root),
                 "host": host,
                 "port": discovered_port,
-                "pid": int(launcher_state.get("pid") or 0) if discovered_port == state_port else 0,
+                "pid": discovered_pid or (int(launcher_state.get("pid") or 0) if discovered_port == state_port else 0),
                 "browser_url": browser_url(host, discovered_port, project_root),
                 "version_url": version_url(host, discovered_port),
                 "log_path": str(launcher_state.get("log_path") or server_log_path(project_root)),
@@ -88,6 +88,17 @@ def main() -> int:
                 "status": "discovered",
                 "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
             }
+            write_json_atomic(launcher_state_path(project_root), healed_state)
+            launcher_state = healed_state
+    else:
+        live_port = int(launcher_state.get("port") or state_port or DEFAULT_PORT)
+        health_payload = fetch_json(health_url(host, live_port), timeout=0.6) or {}
+        live_pid = int(health_payload.get("pid") or (version_payload or {}).get("pid") or launcher_state.get("pid") or 0)
+        if live_pid and live_pid != int(launcher_state.get("pid") or 0):
+            healed_state = dict(launcher_state)
+            healed_state["pid"] = live_pid
+            healed_state["status"] = "healed"
+            healed_state["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
             write_json_atomic(launcher_state_path(project_root), healed_state)
             launcher_state = healed_state
 

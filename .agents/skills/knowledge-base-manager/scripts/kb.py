@@ -18,6 +18,7 @@ else:
 from research.v2 import (
     build_index,
     candidate_pools_path,
+    compact_unit_ids,
     ensure_v2_workspace,
     govern_records,
     link_records,
@@ -42,6 +43,9 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("init", help="Initialize the v2 knowledge base layout")
     subparsers.add_parser("lint", help="Validate record schemas and lifecycle fields")
     subparsers.add_parser("index", help="Rebuild kb/index.yaml and kb/index.md")
+    compact_ids = subparsers.add_parser("compact-ids", help="Shorten and regularize knowledge-unit ids")
+    compact_ids.add_argument("--kind", choices=["paper", "repo", "blog", "idea", "experiment"])
+    compact_ids.add_argument("--apply", action="store_true", help="Actually rename ids and unit folders")
     subparsers.add_parser("rebuild-governance", help="Rebuild topic taxonomy and candidate pool catalogs")
     subparsers.add_parser("taxonomy-sync", help="Alias of rebuild-governance")
 
@@ -111,6 +115,16 @@ def main() -> int:
     if args.command == "index":
         yaml_path, md_path = build_index(root)
         print(f"[ok] rebuilt index: {yaml_path.relative_to(root)} and {md_path.relative_to(root)}")
+        return 0
+    if args.command == "compact-ids":
+        payload = compact_unit_ids(root, kind=args.kind, apply=args.apply)
+        mode = "applied" if args.apply else "dry-run"
+        print(f"mode: {mode}")
+        print(f"changed: {payload['changed']}")
+        for item in payload["items"]:
+            print(f"- {item['old_id']} -> {item['new_id']} | {item['title']}")
+        if args.apply and payload["changed"]:
+            print("[ok] rebuilt governance and index")
         return 0
     if args.command in {"rebuild-governance", "taxonomy-sync"}:
         taxonomy_path, pools_path = rebuild_governance_catalogs(root)

@@ -87,7 +87,7 @@ def relevant_change(project_root: Path, raw_path: str) -> bool:
         resolved = path.resolve()
     except FileNotFoundError:
         resolved = path.absolute()
-    research_root = kb_root(project_root).parents[1]
+    research_root = project_root / "kb"
     if not _is_relative_to(resolved, research_root):
         return False
     if _is_relative_to(resolved, kb_root(project_root)):
@@ -637,11 +637,22 @@ def create_handler(*, project_root: Path):
                     "service": SERVICE_NAME,
                     "project_root": str(project_root),
                     "kb_root": str(kb_root(project_root)),
+                    "pid": os.getpid(),
                 }
             )
 
         def _handle_version(self) -> None:
             status_payload = load_build_status(project_root)
+            status_payload["pid"] = os.getpid()
+            self._send_json(status_payload)
+
+        def _handle_rebuild(self) -> None:
+            try:
+                status_payload = safe_rebuild(project_root, script_path=Path(__file__))
+                status_payload["pid"] = os.getpid()
+            except Exception as exc:  # noqa: BLE001
+                self._send_error_json(f"重建快照失败：{exc}", status=HTTPStatus.INTERNAL_SERVER_ERROR)
+                return
             self._send_json(status_payload)
 
         def _handle_system_terminal_targets(self) -> None:
@@ -776,6 +787,9 @@ def create_handler(*, project_root: Path):
                 return
             if parsed.path == "/api/system-terminal/open":
                 self._handle_system_terminal_open()
+                return
+            if parsed.path == "/api/rebuild":
+                self._handle_rebuild()
                 return
             self._send_error_json("不支持的 POST 接口", status=HTTPStatus.NOT_FOUND)
 

@@ -19,12 +19,12 @@ description: 负责 v2 paper unit 的 quick-screen、full note、figure extracti
 ## 常用命令
 
 ```bash
-${RESEARCH_PYTHON:-python3} .agents/skills/paper-analyst/scripts/paper.py screen --paper-id paper-foo
-${RESEARCH_PYTHON:-python3} .agents/skills/paper-analyst/scripts/paper.py complete-note --paper-id paper-foo
+${RESEARCH_PYTHON:-python3} .agents/skills/paper-analyst/scripts/paper.py screen --paper-id p-openvla-bf86ee46
+${RESEARCH_PYTHON:-python3} .agents/skills/paper-analyst/scripts/paper.py complete-note --paper-id p-openvla-bf86ee46
 ${RESEARCH_PYTHON:-python3} .agents/skills/paper-analyst/scripts/paper.py ensure-pdfimages
-${RESEARCH_PYTHON:-python3} .agents/skills/paper-analyst/scripts/paper.py extract-figures --paper-id paper-foo
-${RESEARCH_PYTHON:-python3} .agents/skills/paper-analyst/scripts/paper.py refresh-structure --paper-id paper-foo
-${RESEARCH_PYTHON:-python3} .agents/skills/paper-analyst/scripts/paper.py confirm --paper-id paper-foo
+${RESEARCH_PYTHON:-python3} .agents/skills/paper-analyst/scripts/paper.py extract-figures --paper-id p-openvla-bf86ee46
+${RESEARCH_PYTHON:-python3} .agents/skills/paper-analyst/scripts/paper.py refresh-structure --paper-id p-openvla-bf86ee46
+${RESEARCH_PYTHON:-python3} .agents/skills/paper-analyst/scripts/paper.py confirm --paper-id p-openvla-bf86ee46
 ```
 
 macOS 安装提示：

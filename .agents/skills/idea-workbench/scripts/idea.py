@@ -227,6 +227,19 @@ def review_assist_markdown(records: list[dict]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def print_idea_resolution(root: Path, requested_id: str, record: dict, path: Path) -> None:
+    actual_id = str(record.get("id") or "")
+    if requested_id == actual_id:
+        return
+    print(f"normalized idea id: {requested_id} -> {actual_id}")
+    print(f"canonical idea record: {path.relative_to(root)}")
+
+
+def print_created_idea(root: Path, record: dict, path: Path) -> None:
+    print(f"[ok] created idea_id: {record['id']}")
+    print(f"[ok] created {path.relative_to(root)}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Manage idea units in v2.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -287,7 +300,7 @@ def main() -> int:
         )
         path = write_record(root, record)
         build_index(root)
-        print(f"[ok] created {path.relative_to(root)}")
+        print_created_idea(root, record, path)
         return 0
 
     if args.command == "generate":
@@ -317,7 +330,7 @@ def main() -> int:
             )
             path = write_record(root, record)
             created.append(str(record["id"]))
-            print(f"[ok] created {path.relative_to(root)}")
+            print_created_idea(root, record, path)
         index_path = update_bundle(root, bundle_id, idea_ids=created)
         build_index(root)
         print(f"[ok] wrote {index_path.relative_to(root)}")
@@ -382,6 +395,7 @@ def main() -> int:
     record, path = locate_record(root, args.idea_id)
     if record.get("kind") != "idea":
         raise SystemExit(f"{args.idea_id} is not an idea record")
+    print_idea_resolution(root, args.idea_id, record, path)
     unit_root = path.parent
 
     if args.command == "analyze":
@@ -403,6 +417,7 @@ def main() -> int:
         )
         write_record(root, record)
         build_index(root)
+        print(f"[ok] canonical idea id: {record['id']}")
         print(f"[ok] wrote {analysis_path.relative_to(root)}")
         return 0
 
@@ -429,6 +444,7 @@ def main() -> int:
         )
         write_record(root, record)
         build_index(root)
+        print(f"[ok] canonical idea id: {record['id']}")
         print(f"[ok] wrote {review_path.relative_to(root)}")
         print(f"[ok] wrote {card_path.relative_to(root)}")
         return 0
@@ -440,7 +456,7 @@ def main() -> int:
         append_history(record, action="idea-selected", summary="Idea explicitly selected for method design.", information_types=["fact"])
         write_record(root, record)
         build_index(root)
-        print(f"[ok] selected {args.idea_id}")
+        print(f"[ok] selected {record['id']}")
         return 0
 
     if args.command == "archive":
@@ -448,7 +464,7 @@ def main() -> int:
         append_history(record, action="idea-archived", summary="Idea archived or merged into another direction.", information_types=["fact"])
         write_record(root, record)
         build_index(root)
-        print(f"[ok] archived {args.idea_id}")
+        print(f"[ok] archived {record['id']}")
         return 0
     return 1
 

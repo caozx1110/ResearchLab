@@ -17,8 +17,8 @@ description: 负责 v2 repo unit 的 structure scan、capability mapping、reuse
 ## 常用命令
 
 ```bash
-${RESEARCH_PYTHON:-python3} .agents/skills/repo-analyst/scripts/repo.py scan-structure --repo-id repo-foo
-${RESEARCH_PYTHON:-python3} .agents/skills/repo-analyst/scripts/repo.py map-capability --repo-id repo-foo
-${RESEARCH_PYTHON:-python3} .agents/skills/repo-analyst/scripts/repo.py complete-note --repo-id repo-foo
-${RESEARCH_PYTHON:-python3} .agents/skills/repo-analyst/scripts/repo.py confirm --repo-id repo-foo
+${RESEARCH_PYTHON:-python3} .agents/skills/repo-analyst/scripts/repo.py scan-structure --repo-id r-openvla-dadda683
+${RESEARCH_PYTHON:-python3} .agents/skills/repo-analyst/scripts/repo.py map-capability --repo-id r-openvla-dadda683
+${RESEARCH_PYTHON:-python3} .agents/skills/repo-analyst/scripts/repo.py complete-note --repo-id r-openvla-dadda683
+${RESEARCH_PYTHON:-python3} .agents/skills/repo-analyst/scripts/repo.py confirm --repo-id r-openvla-dadda683
 ```

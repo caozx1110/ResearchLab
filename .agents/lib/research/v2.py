@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import re
 import shutil
 from pathlib import Path
 from typing import Any
@@ -13,11 +14,13 @@ from .common import (
     infer_topics_and_tags,
     is_url,
     load_yaml,
+    program_root as common_program_root,
     research_root,
     slugify,
     utc_now_iso,
     write_text_if_changed,
     write_yaml_if_changed,
+    yaml_duplicate_key_issues,
 )
 
 UNIT_KIND_DIRS = {
@@ -89,6 +92,43 @@ DEFAULT_CANDIDATE_POOLS = {
         "default_membership_mode": "overwriteable",
     },
     "pools": {},
+}
+UNIT_KIND_PREFIXES = {
+    "paper": "p",
+    "repo": "r",
+    "blog": "b",
+    "idea": "i",
+    "experiment": "x",
+}
+COMPACT_UNIT_ID_MAX_WORDS = 4
+COMPACT_UNIT_ID_MAX_CHARS = 32
+COMPACT_UNIT_ID_HASH_LEN = 8
+TEXT_REWRITE_SUFFIXES = {".md", ".markdown", ".txt", ".yaml", ".yml", ".json"}
+GREEK_LETTER_ALIASES = {
+    "π": "pi",
+    "Π": "pi",
+    "ψ": "psi",
+    "Ψ": "psi",
+    "φ": "phi",
+    "Φ": "phi",
+    "α": "alpha",
+    "Α": "alpha",
+    "β": "beta",
+    "Β": "beta",
+    "γ": "gamma",
+    "Γ": "gamma",
+    "δ": "delta",
+    "Δ": "delta",
+    "λ": "lambda",
+    "Λ": "lambda",
+    "μ": "mu",
+    "Μ": "mu",
+    "σ": "sigma",
+    "Σ": "sigma",
+    "τ": "tau",
+    "Τ": "tau",
+    "ω": "omega",
+    "Ω": "omega",
 }
 
 
@@ -167,6 +207,17 @@ def _artifact_list(values: Any) -> list[str]:
     if not isinstance(values, list):
         return []
     return sorted({str(item).strip() for item in values if str(item).strip()})
+
+
+def _unique_text_list(values: Any) -> list[str]:
+    seen: set[str] = set()
+    items: list[str] = []
+    for item in _text_list(values):
+        if item in seen:
+            continue
+        seen.add(item)
+        items.append(item)
+    return items
 
 
 def _deep_fill_missing(target: Any, defaults: Any) -> Any:
@@ -429,10 +480,67 @@ def kind_payload_skeleton(kind: str, title: str = "") -> dict[str, Any]:
 
 
 def build_unit_id(kind: str, title: str, source: str = "") -> str:
+    return canonical_unit_id(kind, title=title, source=source)
+
+
+def _unit_slug_seed(title: str, source: str = "") -> str:
+    text = title.strip() or source.strip()
+    if "://" in text:
+        text = source.strip() or title.strip()
+    text = re.sub(r"^\d{4}(?:[-/]\d{1,2}){1,2}\s+", "", text)
+    for raw, alias in GREEK_LETTER_ALIASES.items():
+        text = text.replace(raw, f" {alias} ")
+    text = re.sub(r"([a-z])([A-Z][a-z])", r"\1 \2", text)
+    text = re.sub(r"([A-Z]{2,})([A-Z][a-z])", r"\1 \2", text)
+    return text.strip()
+
+
+def compact_unit_slug(seed: str, *, max_words: int = COMPACT_UNIT_ID_MAX_WORDS, max_chars: int = COMPACT_UNIT_ID_MAX_CHARS) -> str:
+    slug = slugify(_unit_slug_seed(seed), max_words=max_words) or "item"
+    if len(slug) <= max_chars:
+        return slug
+    chosen: list[str] = []
+    for part in slug.split("-"):
+        candidate = "-".join(chosen + [part]) if chosen else part
+        if len(candidate) > max_chars:
+            break
+        chosen.append(part)
+    if chosen:
+        return "-".join(chosen)
+    return slug[:max_chars].strip("-") or "item"
+
+
+def canonical_unit_id(kind: str, *, title: str, source: str = "", hash_size: int = COMPACT_UNIT_ID_HASH_LEN) -> str:
+    if kind not in UNIT_KIND_PREFIXES:
+        raise SystemExit(f"Unsupported unit kind: {kind}")
     seed = title or source or kind
-    base = slugify(seed, max_words=10) or kind
-    short_hash = hashlib.sha1(seed.encode("utf-8")).hexdigest()[:8]
-    return f"{kind}-{base}-{short_hash}"
+    slug_seed = title or source or kind
+    prefix = UNIT_KIND_PREFIXES[kind]
+    compact_slug = compact_unit_slug(slug_seed)
+    short_hash = hashlib.sha1(seed.encode("utf-8")).hexdigest()[: max(6, hash_size)]
+    return f"{prefix}-{compact_slug}-{short_hash}"
+
+
+def canonical_unit_id_with_hash(kind: str, *, title: str, source: str = "", hash_value: str = "") -> str:
+    if kind not in UNIT_KIND_PREFIXES:
+        raise SystemExit(f"Unsupported unit kind: {kind}")
+    compact_slug = compact_unit_slug(title or source or kind)
+    normalized_hash = re.sub(r"[^0-9a-f]", "", hash_value.lower())[:16]
+    if len(normalized_hash) < 6:
+        return canonical_unit_id(kind, title=title, source=source)
+    return f"{UNIT_KIND_PREFIXES[kind]}-{compact_slug}-{normalized_hash}"
+
+
+def is_canonical_unit_id(kind: str, unit_id: str) -> bool:
+    prefix = UNIT_KIND_PREFIXES.get(kind, "")
+    if not prefix:
+        return False
+    return bool(re.fullmatch(rf"{re.escape(prefix)}-[a-z0-9]+(?:-[a-z0-9]+)*-[0-9a-f]{{6,16}}", unit_id.strip()))
+
+
+def _extract_unit_id_hash(unit_id: str) -> str:
+    match = re.search(r"-([0-9a-f]{6,16})$", unit_id.strip().lower())
+    return match.group(1) if match else ""
 
 
 def _record_template(kind: str, *, title: str, maturity: str, source: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -440,6 +548,7 @@ def _record_template(kind: str, *, title: str, maturity: str, source: dict[str, 
     now = utc_now_iso()
     return {
         "id": unit_id,
+        "legacy_ids": [],
         "kind": kind,
         "title": title,
         "status": "draft",
@@ -549,6 +658,11 @@ def normalize_record_schema(record: dict[str, Any]) -> dict[str, Any]:
     normalized["status"] = str(normalized.get("status") or "draft")
     normalized["maturity"] = str(normalized.get("maturity") or "lightweight")
     normalized["confirmation_status"] = str(normalized.get("confirmation_status") or "auto_confirmed")
+    normalized["legacy_ids"] = [
+        item
+        for item in _unique_text_list(normalized.get("legacy_ids"))
+        if item and item != str(normalized.get("id") or "")
+    ]
     normalized["information_types"] = sorted(
         item for item in {str(value) for value in normalized.get("information_types", [])} if item in INFORMATION_TYPES
     ) or ["fact"]
@@ -794,6 +908,12 @@ def locate_record(project_root: Path, unit_id: str) -> tuple[dict[str, Any], Pat
             payload = load_yaml(path, default={})
             if isinstance(payload, dict):
                 return normalize_record_schema(payload), path
+    for record in iter_records(project_root):
+        if unit_id in _unique_text_list(record.get("legacy_ids")):
+            current_kind = str(record.get("kind") or "")
+            current_id = str(record.get("id") or "")
+            if current_kind in UNIT_KIND_DIRS and current_id:
+                return record, record_path(project_root, current_kind, current_id)
     raise SystemExit(f"Record not found: {unit_id}")
 
 
@@ -931,6 +1051,67 @@ def build_index(project_root: Path) -> tuple[Path, Path]:
     return yaml_path, md_path
 
 
+def lint_workspace_integrity(project_root: Path) -> list[str]:
+    issues: list[str] = []
+    yaml_paths: list[Path] = []
+
+    for record in iter_records(project_root):
+        yaml_paths.append(record_path(project_root, str(record.get("kind") or ""), str(record.get("id") or "")))
+
+    for base in [kb_root(project_root) / "programs", config_root(project_root), synthesis_root(project_root)]:
+        if not base.exists():
+            continue
+        yaml_paths.extend(sorted(base.rglob("*.yaml")))
+        yaml_paths.extend(sorted(base.rglob("*.yml")))
+
+    seen_paths: set[Path] = set()
+    for path in yaml_paths:
+        if path in seen_paths or not path.exists():
+            continue
+        seen_paths.add(path)
+        if "source" in path.parts or path.parts[-3:-1] == ("user", "kb"):
+            continue
+        for issue in yaml_duplicate_key_issues(path):
+            prefix = f"{project_root.as_posix()}/"
+            issues.append(issue.replace(prefix, ""))
+
+    programs_root = kb_root(project_root) / "programs"
+    if not programs_root.exists():
+        return issues
+
+    for state_file in sorted(programs_root.glob("*/state.yaml")):
+        program_id = state_file.parent.name
+        state_payload = load_yaml(state_file, default={})
+        if not isinstance(state_payload, dict):
+            issues.append(f"{rel(project_root, state_file)}: invalid YAML payload")
+            continue
+        active_unit_ids = _text_list(state_payload.get("active_unit_ids"))
+        for unit_id in active_unit_ids:
+            try:
+                record, _ = locate_record(project_root, unit_id)
+            except SystemExit:
+                issues.append(f"{rel(project_root, state_file)}: active_unit_id `{unit_id}` not found")
+                continue
+            if program_id not in _slug_list(record.get("program_ids")):
+                issues.append(f"{rel(project_root, state_file)}: `{unit_id}` missing reverse program_ids link to `{program_id}`")
+
+    for record in iter_records(project_root):
+        unit_id = str(record.get("id") or "")
+        for program_id in _slug_list(record.get("program_ids")):
+            state_file = common_program_root(project_root, program_id) / "state.yaml"
+            if not state_file.exists():
+                issues.append(f"{unit_id}: references missing program `{program_id}`")
+                continue
+            state_payload = load_yaml(state_file, default={})
+            if not isinstance(state_payload, dict):
+                issues.append(f"{unit_id}: referenced program `{program_id}` has invalid state payload")
+                continue
+            if unit_id not in _text_list(state_payload.get("active_unit_ids")):
+                issues.append(f"{unit_id}: program `{program_id}` missing reverse active_unit_ids link")
+
+    return issues
+
+
 def lint_records(project_root: Path) -> tuple[str, list[str]]:
     ensure_v2_workspace(project_root)
     issues: list[str] = []
@@ -946,6 +1127,8 @@ def lint_records(project_root: Path) -> tuple[str, list[str]]:
             issues.append("record without id")
         if kind not in UNIT_KIND_DIRS:
             issues.append(f"{unit_id}: invalid kind `{kind}`")
+        if kind in UNIT_KIND_DIRS and not is_canonical_unit_id(kind, unit_id):
+            issues.append(f"{unit_id}: non-canonical id, run `kb.py compact-ids --apply`")
         if str(record.get("status") or "") not in STATUS_VALUES:
             issues.append(f"{unit_id}: invalid status `{record.get('status')}`")
         if str(record.get("maturity") or "") not in MATURITY_LEVELS:
@@ -961,6 +1144,7 @@ def lint_records(project_root: Path) -> tuple[str, list[str]]:
             issues.append(f"{unit_id}: missing taxonomy block")
         if not isinstance(record.get("candidate_pools"), list):
             issues.append(f"{unit_id}: invalid candidate_pools")
+    issues.extend(lint_workspace_integrity(project_root))
     return ("PASS" if not issues else "FAIL"), issues
 
 
@@ -1193,6 +1377,162 @@ def detect_duplicate(project_root: Path, kind: str, source: str) -> dict[str, An
         if file_hash and file_hash == str(record_source.get("file_hash") or ""):
             return record
     return None
+
+
+def _sorted_id_pairs(mapping: dict[str, str]) -> list[tuple[str, str]]:
+    return sorted(mapping.items(), key=lambda item: len(item[0]), reverse=True)
+
+
+def _replace_ids_in_text(text: str, mapping: dict[str, str]) -> str:
+    updated = text
+    for old_id, new_id in _sorted_id_pairs(mapping):
+        updated = updated.replace(old_id, new_id)
+    return updated
+
+
+def _replace_ids_in_object(value: Any, mapping: dict[str, str]) -> Any:
+    if isinstance(value, dict):
+        return {key: _replace_ids_in_object(item, mapping) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_replace_ids_in_object(item, mapping) for item in value]
+    if isinstance(value, str):
+        return _replace_ids_in_text(value, mapping)
+    return value
+
+
+def _text_rewrite_allowed(project_root: Path, path: Path) -> bool:
+    if path.name == "record.yaml":
+        return False
+    if path.suffix.lower() not in TEXT_REWRITE_SUFFIXES:
+        return False
+    try:
+        rel_path = path.resolve().relative_to(kb_root(project_root).resolve())
+    except ValueError:
+        return False
+    if rel_path.parts[:2] == ("user", "kb"):
+        return False
+    if "source" in rel_path.parts:
+        return False
+    return True
+
+
+def _rename_paths_with_ids(project_root: Path, mapping: dict[str, str]) -> list[tuple[Path, Path]]:
+    if not mapping:
+        return []
+    root = kb_root(project_root)
+    renamed: list[tuple[Path, Path]] = []
+    paths = sorted(root.rglob("*"), key=lambda item: (len(item.parts), len(item.as_posix())), reverse=True)
+    for path in paths:
+        if not path.exists():
+            continue
+        try:
+            rel_path = path.resolve().relative_to(root.resolve())
+        except ValueError:
+            continue
+        if rel_path.parts[:2] == ("user", "kb"):
+            continue
+        if "source" in rel_path.parts:
+            continue
+        updated_name = _replace_ids_in_text(path.name, mapping)
+        if updated_name == path.name:
+            continue
+        destination = path.with_name(updated_name)
+        if destination.exists():
+            continue
+        path.rename(destination)
+        renamed.append((path, destination))
+    return renamed
+
+
+def compact_unit_ids(project_root: Path, *, kind: str | None = None, apply: bool = False) -> dict[str, Any]:
+    ensure_v2_workspace(project_root)
+    records = iter_records(project_root, kind=kind)
+    occupied_ids = {str(record.get("id") or "") for record in records if str(record.get("id") or "")}
+    reserved_new_ids: set[str] = set()
+    changes: list[dict[str, Any]] = []
+    mapping: dict[str, str] = {}
+
+    for record in records:
+        item_kind = str(record.get("kind") or "")
+        old_id = str(record.get("id") or "")
+        title = str(record.get("title") or "")
+        source_uri = str(record.get("source", {}).get("original_uri") or "")
+        if not old_id or item_kind not in UNIT_KIND_DIRS:
+            continue
+        old_hash = _extract_unit_id_hash(old_id)
+        new_id = canonical_unit_id_with_hash(item_kind, title=title, source=source_uri, hash_value=old_hash)
+        if new_id != old_id and (new_id in reserved_new_ids or (new_id in occupied_ids and new_id != old_id)):
+            for hash_size in (10, 12, 16):
+                candidate = canonical_unit_id(item_kind, title=title, source=source_uri, hash_size=hash_size)
+                if candidate == old_id or (candidate not in reserved_new_ids and (candidate not in occupied_ids or candidate == old_id)):
+                    new_id = candidate
+                    break
+        reserved_new_ids.add(new_id)
+        if new_id == old_id:
+            continue
+        mapping[old_id] = new_id
+        changes.append(
+            {
+                "kind": item_kind,
+                "title": title,
+                "old_id": old_id,
+                "new_id": new_id,
+            }
+        )
+
+    summary = {
+        "changed": len(changes),
+        "mapping": mapping,
+        "items": changes,
+        "renamed_paths": [],
+    }
+    if not apply or not changes:
+        return summary
+
+    for item in changes:
+        old_root = unit_root(project_root, item["kind"], item["old_id"])
+        new_root = unit_root(project_root, item["kind"], item["new_id"])
+        if new_root.exists() and new_root != old_root:
+            raise SystemExit(f"Target unit path already exists: {rel(project_root, new_root)}")
+
+    for item in changes:
+        old_root = unit_root(project_root, item["kind"], item["old_id"])
+        new_root = unit_root(project_root, item["kind"], item["new_id"])
+        ensure_dir(new_root.parent)
+        if old_root.exists() and old_root != new_root:
+            old_root.rename(new_root)
+
+    for record in records:
+        original_id = str(record.get("id") or "")
+        updated = _replace_ids_in_object(copy.deepcopy(record), mapping)
+        current_id = mapping.get(original_id, original_id)
+        updated["id"] = current_id
+        legacy_ids = _unique_text_list(updated.get("legacy_ids"))
+        if original_id in mapping:
+            legacy_ids.append(original_id)
+        updated["legacy_ids"] = [item for item in _unique_text_list(legacy_ids) if item and item != current_id]
+        write_record(project_root, updated)
+
+    renamed_paths = _rename_paths_with_ids(project_root, mapping)
+    for path in kb_root(project_root).rglob("*"):
+        if not path.is_file() or not _text_rewrite_allowed(project_root, path):
+            continue
+        try:
+            content = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        updated_content = _replace_ids_in_text(content, mapping)
+        if updated_content != content:
+            write_text_if_changed(path, updated_content)
+
+    rebuild_governance_catalogs(project_root)
+    build_index(project_root)
+
+    summary["renamed_paths"] = [
+        {"old": rel(project_root, old_path), "new": rel(project_root, new_path)}
+        for old_path, new_path in renamed_paths
+    ]
+    return summary
 
 
 def link_records(project_root: Path, from_id: str, to_id: str, relation: str, note: str = "") -> None:

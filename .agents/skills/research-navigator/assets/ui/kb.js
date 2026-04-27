@@ -9,6 +9,7 @@
   const terminalResizeUrl = config.terminalResizeUrl || "/api/terminal/resize";
   const systemTerminalOpenUrl = config.systemTerminalOpenUrl || "/api/system-terminal/open";
   const systemTerminalTargetsUrl = config.systemTerminalTargetsUrl || "/api/system-terminal/targets";
+  const rebuildUrl = config.rebuildUrl || "/api/rebuild";
   const pollMs = Number(config.pollMs || 3000);
 
   const TAB_CONFIG = [
@@ -3259,9 +3260,20 @@
     return response.json();
   }
 
+  async function requestRebuild() {
+    const response = await fetch(rebuildUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reason: "manual-refresh" }),
+      cache: "no-store",
+    });
+    if (!response.ok) throw new Error(`rebuild failed: ${response.status}`);
+    return response.json();
+  }
+
   async function refresh(force) {
     try {
-      const live = await fetchVersion();
+      const live = force ? await requestRebuild() : await fetchVersion();
       const nextVersion = String(live.snapshot_version || "");
       if (force || !state.snapshot || (nextVersion && nextVersion !== state.version)) {
         const snapshot = await fetchSnapshot(nextVersion || Date.now());

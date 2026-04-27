@@ -19,6 +19,8 @@ from kb_browser_lib import (
     choose_browser_runtime,
     choose_port,
     compact_text,
+    fetch_json,
+    health_url,
     is_matching_service,
     launcher_state_path,
     project_root_from_script,
@@ -73,6 +75,9 @@ def main() -> int:
         preferred_port = previous_port
     port, reused = choose_port(args.host, preferred_port, project_root)
     pid = int(previous_state.get("pid") or 0) if reused and previous_port == port else 0
+    if reused:
+        health_payload = fetch_json(health_url(args.host, port), timeout=0.6) or {}
+        pid = int(health_payload.get("pid") or pid or 0)
     runtime_python = ""
     if not reused:
         runtime_python = choose_browser_runtime(project_root)

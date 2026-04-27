@@ -23,12 +23,13 @@ from research.common import (
     ensure_dir,
     load_list_document,
     load_yaml,
+    program_file_lock,
     utc_now_iso,
     write_text_if_changed,
     write_yaml_if_changed,
     yaml_default,
 )
-from research.v2 import ensure_v2_workspace, kb_root, project_root
+from research.v2 import append_history, ensure_v2_workspace, kb_root, locate_record, project_root, write_record
 
 ROUTE_HINTS = {
     "论文": "paper-analyst",
@@ -97,6 +98,10 @@ def load_state(root: Path, program_id: str) -> dict:
             "resource_constraints": [],
             "selected_idea_id": "",
             "selected_repo_id": "",
+            "time_policy": {
+                "storage_timezone": "UTC",
+                "display_note": "human-facing markdown may localize when needed",
+            },
             "workflow_files": {
                 "open_questions": f"kb/programs/{program_id}/workflow/open-questions.yaml",
                 "evidence_requests": f"kb/programs/{program_id}/workflow/evidence-requests.yaml",
@@ -110,7 +115,47 @@ def load_state(root: Path, program_id: str) -> dict:
                 "decisions": 0,
             },
         }
+    payload.setdefault(
+        "time_policy",
+        {
+            "storage_timezone": "UTC",
+            "display_note": "human-facing markdown may localize when needed",
+        },
+    )
     return payload
+
+
+def write_state(root: Path, program_id: str, payload: dict[str, Any]) -> Path:
+    payload = refresh_state_counts(root, program_id, payload)
+    write_yaml_if_changed(state_path(root, program_id), payload)
+    return state_path(root, program_id)
+
+
+def print_normalized_unit_id(requested_id: str, resolved_id: str, path: Path, root: Path) -> None:
+    if requested_id == resolved_id:
+        return
+    print(f"normalized unit id: {requested_id} -> {resolved_id}")
+    print(f"canonical unit record: {path.relative_to(root)}")
+
+
+def ensure_unit_program_link(root: Path, program_id: str, unit_id: str) -> tuple[str, str]:
+    try:
+        record, record_path = locate_record(root, unit_id)
+    except SystemExit as exc:
+        return "", f"[warn] attach-unit could not sync reverse link for `{unit_id}`: {exc}"
+    canonical_id = str(record.get("id") or unit_id)
+    program_ids = normalize_list(record.get("program_ids"))
+    if program_id not in program_ids:
+        program_ids.append(program_id)
+        record["program_ids"] = sorted(set(program_ids))
+        append_history(
+            record,
+            action="program-attached",
+            summary=f"Attached unit to program `{program_id}`.",
+            information_types=["fact"],
+        )
+        write_record(root, record)
+    return canonical_id, ""
 
 
 def list_items(path: Path, doc_id: str, generated_by: str) -> list[dict[str, Any]]:
@@ -136,7 +181,8 @@ def ensure_program_files(root: Path, program_id: str) -> None:
         write_text_if_changed(
             decision_log_path(root, program_id),
             "# Decision Log\n\n"
-            "AI 推断、评估和取舍理由如果不是用户明确确认，默认保持待确认语义。\n",
+            "AI 推断、评估和取舍理由如果不是用户明确确认，默认保持待确认语义。\n\n"
+            "All script-generated timestamps are stored in UTC.\n",
         )
 
 
@@ -272,57 +318,57 @@ def main() -> int:
     ensure_v2_workspace(root)
 
     if args.command == "init-program":
-        ensure_program_files(root, args.program_id)
-        payload = load_state(root, args.program_id)
-        payload["question"] = args.question
-        payload["goal"] = args.goal
-        payload["stage"] = "init"
-        payload = refresh_state_counts(root, args.program_id, payload)
-        write_yaml_if_changed(state_path(root, args.program_id), payload)
-        append_program_reporting_event(
-            root,
-            args.program_id,
-            {
-                "source_skill": "research-orchestrator",
-                "event_type": "program-created",
-                "title": "Program initialized",
-                "summary": args.goal,
-                "stage": "init",
-                "tags": ["program-state"],
-                "artifacts": [state_path(root, args.program_id).relative_to(root).as_posix()],
-            },
-            generated_by="research-orchestrator",
-        )
-        payload = refresh_state_counts(root, args.program_id, payload)
-        write_yaml_if_changed(state_path(root, args.program_id), payload)
+        with program_file_lock(root, args.program_id):
+            ensure_program_files(root, args.program_id)
+            payload = load_state(root, args.program_id)
+            payload["question"] = args.question
+            payload["goal"] = args.goal
+            payload["stage"] = "init"
+            write_state(root, args.program_id, payload)
+            append_program_reporting_event(
+                root,
+                args.program_id,
+                {
+                    "source_skill": "research-orchestrator",
+                    "event_type": "program-created",
+                    "title": "Program initialized",
+                    "summary": args.goal,
+                    "stage": "init",
+                    "tags": ["program-state"],
+                    "artifacts": [state_path(root, args.program_id).relative_to(root).as_posix()],
+                },
+                generated_by="research-orchestrator",
+            )
+            write_state(root, args.program_id, load_state(root, args.program_id))
         print(f"[ok] created program {args.program_id}")
         return 0
     if args.command == "set-stage":
-        ensure_program_files(root, args.program_id)
-        payload = load_state(root, args.program_id)
-        payload["stage"] = args.stage
-        append_program_reporting_event(
-            root,
-            args.program_id,
-            {
-                "source_skill": "research-orchestrator",
-                "event_type": "stage-changed",
-                "title": f"Stage changed to {args.stage}",
-                "summary": f"Program stage updated to `{args.stage}`.",
-                "stage": args.stage,
-                "tags": ["program-state"],
-            },
-            generated_by="research-orchestrator",
-        )
-        payload = refresh_state_counts(root, args.program_id, payload)
-        write_yaml_if_changed(state_path(root, args.program_id), payload)
+        with program_file_lock(root, args.program_id):
+            ensure_program_files(root, args.program_id)
+            payload = load_state(root, args.program_id)
+            payload["stage"] = args.stage
+            append_program_reporting_event(
+                root,
+                args.program_id,
+                {
+                    "source_skill": "research-orchestrator",
+                    "event_type": "stage-changed",
+                    "title": f"Stage changed to {args.stage}",
+                    "summary": f"Program stage updated to `{args.stage}`.",
+                    "stage": args.stage,
+                    "tags": ["program-state"],
+                },
+                generated_by="research-orchestrator",
+            )
+            write_state(root, args.program_id, payload)
         print(f"[ok] updated stage to {args.stage}")
         return 0
     if args.command == "status":
-        ensure_program_files(root, args.program_id)
-        payload = load_state(root, args.program_id)
-        payload = refresh_state_counts(root, args.program_id, payload)
-        write_yaml_if_changed(state_path(root, args.program_id), payload)
+        with program_file_lock(root, args.program_id):
+            ensure_program_files(root, args.program_id)
+            payload = load_state(root, args.program_id)
+            write_state(root, args.program_id, payload)
+            payload = load_state(root, args.program_id)
         print(f"program_id: {payload['program_id']}")
         print(f"stage: {payload['stage']}")
         print(f"question: {payload['question']}")
@@ -340,157 +386,175 @@ def main() -> int:
         print("research-orchestrator")
         return 0
     if args.command == "attach-unit":
-        payload = load_state(root, args.program_id)
-        ensure_program_files(root, args.program_id)
-        unit_ids = normalize_list(payload.get("active_unit_ids"))
-        if args.unit_id not in unit_ids:
-            unit_ids.append(args.unit_id)
-        payload["active_unit_ids"] = sorted(set(unit_ids))
-        payload = refresh_state_counts(root, args.program_id, payload)
-        write_yaml_if_changed(state_path(root, args.program_id), payload)
-        print(f"[ok] attached {args.unit_id} to {args.program_id}")
+        warning = ""
+        canonical_id = args.unit_id
+        with program_file_lock(root, args.program_id):
+            ensure_program_files(root, args.program_id)
+            payload = load_state(root, args.program_id)
+            canonical_id, warning = ensure_unit_program_link(root, args.program_id, args.unit_id)
+            if not canonical_id:
+                if warning:
+                    print(warning)
+                return 1
+            unit_ids = normalize_list(payload.get("active_unit_ids"))
+            if canonical_id not in unit_ids:
+                unit_ids.append(canonical_id)
+            payload["active_unit_ids"] = sorted(set(unit_ids))
+            write_state(root, args.program_id, payload)
+            try:
+                resolved_record, resolved_path = locate_record(root, canonical_id)
+                print_normalized_unit_id(args.unit_id, str(resolved_record.get("id") or canonical_id), resolved_path, root)
+            except SystemExit:
+                pass
+        if warning:
+            print(warning)
+        print(f"[ok] attached {canonical_id} to {args.program_id}")
         return 0
     if args.command == "query-program":
-        query_root = program_root(root, args.program_id) / "queries"
-        ensure_dir(query_root)
-        slug = "".join(ch.lower() if ch.isalnum() else "-" for ch in args.question).strip("-")[:64] or "query"
-        query_path = query_root / f"{slug}.md"
-        state = load_state(root, args.program_id)
-        lines = [
-            f"# Program Query: {args.question}",
-            "",
-            f"- program_id: `{args.program_id}`",
-            f"- stage: `{state.get('stage', 'init')}`",
-            f"- active_unit_ids: {', '.join(state.get('active_unit_ids', [])) or '-'}",
-            "",
-            "## Notes",
-            "",
-            "- 待补充基于当前 units / decisions / evidence requests 的回答。",
-            "",
-        ]
-        write_text_if_changed(query_path, "\n".join(lines))
-        append_program_reporting_event(
-            root,
-            args.program_id,
-            {
-                "source_skill": "research-orchestrator",
-                "event_type": "program-query",
-                "title": args.question,
-                "summary": "Created a durable program query note.",
-                "stage": str(state.get("stage") or ""),
-                "artifacts": [query_path.relative_to(root).as_posix()],
-                "tags": ["query", "program"],
-            },
-            generated_by="research-orchestrator",
-        )
-        payload = refresh_state_counts(root, args.program_id, state)
-        write_yaml_if_changed(state_path(root, args.program_id), payload)
+        with program_file_lock(root, args.program_id):
+            query_root = program_root(root, args.program_id) / "queries"
+            ensure_dir(query_root)
+            slug = "".join(ch.lower() if ch.isalnum() else "-" for ch in args.question).strip("-")[:64] or "query"
+            query_path = query_root / f"{slug}.md"
+            state = load_state(root, args.program_id)
+            lines = [
+                f"# Program Query: {args.question}",
+                "",
+                f"- program_id: `{args.program_id}`",
+                f"- stage: `{state.get('stage', 'init')}`",
+                f"- active_unit_ids: {', '.join(state.get('active_unit_ids', [])) or '-'}",
+                "- time_policy: `UTC storage`",
+                "",
+                "## Notes",
+                "",
+                "- 待补充基于当前 units / decisions / evidence requests 的回答。",
+                "",
+            ]
+            write_text_if_changed(query_path, "\n".join(lines))
+            append_program_reporting_event(
+                root,
+                args.program_id,
+                {
+                    "source_skill": "research-orchestrator",
+                    "event_type": "program-query",
+                    "title": args.question,
+                    "summary": "Created a durable program query note.",
+                    "stage": str(state.get("stage") or ""),
+                    "artifacts": [query_path.relative_to(root).as_posix()],
+                    "tags": ["query", "program"],
+                },
+                generated_by="research-orchestrator",
+            )
+            write_state(root, args.program_id, load_state(root, args.program_id))
         print(query_path.relative_to(root))
         return 0
     if args.command == "add-open-question":
-        ensure_program_files(root, args.program_id)
-        path = append_list_item(
-            open_questions_path(root, args.program_id),
-            f"{args.program_id}-open-questions",
-            "research-orchestrator",
-            {
-                "question": args.question,
-                "context": args.context,
-                "priority": args.priority,
-                "owner": args.owner,
-                "related_unit_ids": normalize_list(args.related_unit),
-                "information_types": ["fact", "unverified"],
-            },
-        )
-        payload = refresh_state_counts(root, args.program_id, load_state(root, args.program_id))
-        write_yaml_if_changed(state_path(root, args.program_id), payload)
+        with program_file_lock(root, args.program_id):
+            ensure_program_files(root, args.program_id)
+            path = append_list_item(
+                open_questions_path(root, args.program_id),
+                f"{args.program_id}-open-questions",
+                "research-orchestrator",
+                {
+                    "question": args.question,
+                    "context": args.context,
+                    "priority": args.priority,
+                    "owner": args.owner,
+                    "related_unit_ids": normalize_list(args.related_unit),
+                    "information_types": ["fact", "unverified"],
+                },
+            )
+            write_state(root, args.program_id, load_state(root, args.program_id))
         print(path.relative_to(root))
         return 0
     if args.command == "request-evidence":
-        ensure_program_files(root, args.program_id)
-        path = append_list_item(
-            evidence_requests_path(root, args.program_id),
-            f"{args.program_id}-evidence-requests",
-            "research-orchestrator",
-            {
-                "question": args.question,
-                "needed": args.needed,
-                "source_type": args.source_type,
-                "priority": args.priority,
-                "blocking": bool(args.blocking),
-                "related_unit_ids": normalize_list(args.related_unit),
-                "information_types": ["fact", "unverified"],
-            },
-        )
-        append_program_reporting_event(
-            root,
-            args.program_id,
-            {
-                "source_skill": "research-orchestrator",
-                "event_type": "evidence-requested",
-                "title": args.question,
-                "summary": args.needed,
-                "stage": load_state(root, args.program_id).get("stage", ""),
-                "tags": ["evidence-request", args.source_type],
-                "artifacts": [path.relative_to(root).as_posix()],
-            },
-            generated_by="research-orchestrator",
-        )
-        payload = refresh_state_counts(root, args.program_id, load_state(root, args.program_id))
-        write_yaml_if_changed(state_path(root, args.program_id), payload)
+        with program_file_lock(root, args.program_id):
+            ensure_program_files(root, args.program_id)
+            current_state = load_state(root, args.program_id)
+            path = append_list_item(
+                evidence_requests_path(root, args.program_id),
+                f"{args.program_id}-evidence-requests",
+                "research-orchestrator",
+                {
+                    "question": args.question,
+                    "needed": args.needed,
+                    "source_type": args.source_type,
+                    "priority": args.priority,
+                    "blocking": bool(args.blocking),
+                    "related_unit_ids": normalize_list(args.related_unit),
+                    "information_types": ["fact", "unverified"],
+                },
+            )
+            append_program_reporting_event(
+                root,
+                args.program_id,
+                {
+                    "source_skill": "research-orchestrator",
+                    "event_type": "evidence-requested",
+                    "title": args.question,
+                    "summary": args.needed,
+                    "stage": current_state.get("stage", ""),
+                    "tags": ["evidence-request", args.source_type],
+                    "artifacts": [path.relative_to(root).as_posix()],
+                },
+                generated_by="research-orchestrator",
+            )
+            write_state(root, args.program_id, load_state(root, args.program_id))
         print(path.relative_to(root))
         return 0
     if args.command == "log-decision":
-        ensure_program_files(root, args.program_id)
-        state = load_state(root, args.program_id)
-        item = {
-            "timestamp": utc_now_iso(),
-            "decision": args.decision,
-            "rationale": args.rationale,
-            "stage": args.stage or state.get("stage", ""),
-            "evidence": normalize_list(args.evidence),
-            "alternatives": normalize_list(args.alternative),
-            "confirmation_status": args.confirmation_status,
-            "information_types": ["fact"] if args.confirmation_status in {"auto_confirmed", "confirmed"} else ["fact", "inference", "evaluation", "unverified"],
-        }
-        path = append_decision(root, args.program_id, item)
-        append_program_reporting_event(
-            root,
-            args.program_id,
-            {
-                "source_skill": "research-orchestrator",
-                "event_type": "decision",
-                "title": args.decision,
-                "summary": args.rationale,
-                "stage": item["stage"],
-                "tags": ["decision"],
-                "artifacts": [path.relative_to(root).as_posix(), *item["evidence"]],
-            },
-            generated_by="research-orchestrator",
-        )
-        state = refresh_state_counts(root, args.program_id, state)
-        state["last_decision"] = {"decision": args.decision, "timestamp": item["timestamp"], "confirmation_status": args.confirmation_status}
-        write_yaml_if_changed(state_path(root, args.program_id), state)
+        with program_file_lock(root, args.program_id):
+            ensure_program_files(root, args.program_id)
+            state = load_state(root, args.program_id)
+            item = {
+                "timestamp": utc_now_iso(),
+                "decision": args.decision,
+                "rationale": args.rationale,
+                "stage": args.stage or state.get("stage", ""),
+                "evidence": normalize_list(args.evidence),
+                "alternatives": normalize_list(args.alternative),
+                "confirmation_status": args.confirmation_status,
+                "information_types": ["fact"] if args.confirmation_status in {"auto_confirmed", "confirmed"} else ["fact", "inference", "evaluation", "unverified"],
+            }
+            path = append_decision(root, args.program_id, item)
+            append_program_reporting_event(
+                root,
+                args.program_id,
+                {
+                    "source_skill": "research-orchestrator",
+                    "event_type": "decision",
+                    "title": args.decision,
+                    "summary": args.rationale,
+                    "stage": item["stage"],
+                    "tags": ["decision"],
+                    "artifacts": [path.relative_to(root).as_posix(), *item["evidence"]],
+                },
+                generated_by="research-orchestrator",
+            )
+            state = load_state(root, args.program_id)
+            state["last_decision"] = {"decision": args.decision, "timestamp": item["timestamp"], "confirmation_status": args.confirmation_status}
+            write_state(root, args.program_id, state)
         print(path.relative_to(root))
         return 0
     if args.command == "add-reporting-event":
-        ensure_program_files(root, args.program_id)
-        path = append_program_reporting_event(
-            root,
-            args.program_id,
-            {
-                "source_skill": "research-orchestrator",
-                "event_type": args.event_type,
-                "title": args.title,
-                "summary": args.summary,
-                "stage": args.stage or load_state(root, args.program_id).get("stage", ""),
-                "tags": normalize_list(args.tag),
-                "artifacts": normalize_list(args.artifact),
-            },
-            generated_by="research-orchestrator",
-        )
-        payload = refresh_state_counts(root, args.program_id, load_state(root, args.program_id))
-        write_yaml_if_changed(state_path(root, args.program_id), payload)
+        with program_file_lock(root, args.program_id):
+            ensure_program_files(root, args.program_id)
+            current_state = load_state(root, args.program_id)
+            path = append_program_reporting_event(
+                root,
+                args.program_id,
+                {
+                    "source_skill": "research-orchestrator",
+                    "event_type": args.event_type,
+                    "title": args.title,
+                    "summary": args.summary,
+                    "stage": args.stage or current_state.get("stage", ""),
+                    "tags": normalize_list(args.tag),
+                    "artifacts": normalize_list(args.artifact),
+                },
+                generated_by="research-orchestrator",
+            )
+            write_state(root, args.program_id, load_state(root, args.program_id))
         print(path.relative_to(root))
         return 0
     return 1

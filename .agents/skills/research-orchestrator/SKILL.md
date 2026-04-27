@@ -14,12 +14,14 @@ Use this skill to anchor work to a concrete research program.
 3. Persist `workflow/open-questions.yaml`, `workflow/evidence-requests.yaml`, `workflow/decision-log.md`, and `workflow/reporting-events.yaml`.
 4. Route source work to `source-intake`, analysis to analyst skills, experiments to `experiment-workbench`, and reports to `report-author`.
 5. Keep user constraints and resource boundaries visible in the program state.
+6. Program writes are serialized per program; `attach-unit` also backfills the unit-side `program_ids`.
 
 ## Shared Contract
 
 - Program coordination artifacts are durable inputs for later reopen, not chat-only summaries.
 - Decision records may cite evidence, but if rationale contains AI judgement it should stay `pending_user_confirmation` unless the user explicitly confirms it.
 - `report-author` should read from `workflow/reporting-events.yaml`, so important state changes must emit reporting events.
+- Script-generated timestamps are stored in UTC.
 
 ## Commands
 

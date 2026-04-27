@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import fcntl
 import hashlib
 import importlib.util
 import json
@@ -10,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import unicodedata
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from functools import lru_cache
 from html import unescape
@@ -431,6 +433,66 @@ def write_text_if_changed(path: Path, text: str) -> None:
 
 def write_yaml_if_changed(path: Path, value: Any) -> None:
     write_text_if_changed(path, dump_yaml(value))
+
+
+@contextmanager
+def exclusive_file_lock(path: Path):
+    ensure_dir(path.parent)
+    with path.open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield handle
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def program_lock_path(project_root: Path, program_id: str) -> Path:
+    return program_root(project_root, program_id) / ".program.lock"
+
+
+@contextmanager
+def program_file_lock(project_root: Path, program_id: str):
+    with exclusive_file_lock(program_lock_path(project_root, program_id)) as handle:
+        yield handle
+
+
+def yaml_duplicate_key_issues(path: Path) -> list[str]:
+    if not path.exists():
+        return []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return [f"{path.as_posix()}: read error: {exc}"]
+    if not text.strip() or _yaml is None:
+        return []
+    try:
+        node = _yaml.compose(text)
+    except Exception as exc:  # noqa: BLE001
+        return [f"{path.as_posix()}: YAML parse error: {exc}"]
+    if node is None:
+        return []
+    issues: list[str] = []
+
+    def walk(current: Any, prefix: str) -> None:
+        node_id = getattr(current, "id", "")
+        if node_id == "mapping":
+            seen: set[str] = set()
+            for key_node, value_node in getattr(current, "value", []):
+                key = str(getattr(key_node, "value", "<complex-key>"))
+                dotted = f"{prefix}.{key}" if prefix else key
+                if key in seen:
+                    issues.append(f"{path.as_posix()}: duplicate key `{dotted}`")
+                else:
+                    seen.add(key)
+                walk(value_node, dotted)
+            return
+        if node_id == "sequence":
+            for index, item in enumerate(getattr(current, "value", [])):
+                child_prefix = f"{prefix}[{index}]" if prefix else f"[{index}]"
+                walk(item, child_prefix)
+
+    walk(node, "")
+    return issues
 
 
 def slugify(text: str, *, max_words: int = 8) -> str:
