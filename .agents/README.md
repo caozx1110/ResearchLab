@@ -87,7 +87,7 @@ python3 .agents/skills/research-conductor/scripts/manage_workspace.py show-runti
 如果默认 `python3` 不可靠，也可以通过 remembered runtime 启动别的 skill：
 
 ```text
-用 remembered runtime 运行 literature-corpus-builder，把 raw/ 里的 PDF 入库。
+用 remembered runtime 运行 literature-corpus-builder，把 kb/raw/ 里的 PDF 入库。
 ```
 
 对应脚本：
@@ -151,7 +151,7 @@ python3 .agents/skills/research-conductor/scripts/run_with_runtime.py .agents/sk
 示例 prompt：
 
 ```text
-把 raw/ 里的新论文入库到共享 literature library，并处理可能的重复项。
+把 kb/raw/ 里的新论文入库到共享 literature library，并处理可能的重复项。
 ```
 
 如果来源先在 `literature-scout` 里：
@@ -342,11 +342,11 @@ python3 .agents/skills/research-kb-browser/scripts/stop_kb_browser.py
 
 ### `literature-corpus-builder`
 
-作用：把 `raw/` 中的 PDF、arXiv/OpenReview/DOI/网页链接规范化进共享文献库，处理去重、review 队列和 canonical 条目，并为每篇论文生成 `short_summary`、`note.md`，以及明确标注为 placeholder 的 `claims.yaml` 脚手架。
+作用：把 `kb/raw/` 中的 PDF、arXiv/OpenReview/DOI/网页链接规范化进共享文献库，处理去重、review 队列和 canonical 条目，并为每篇论文生成 `short_summary`、`note.md`，以及明确标注为 placeholder 的 `claims.yaml` 脚手架。
 
 示例 prompt：
 
-- `把 raw/ 里的新论文入库，并处理可能的重复项。`
+- `把 kb/raw/ 里的新论文入库，并处理可能的重复项。`
 - `把这个 arXiv 链接加入共享 literature library：https://arxiv.org/abs/2501.09747`
 - `把 literature library 里现有论文的 short_summary 和 note.md 脚手架刷新一遍。`
 - `把 literature library 里现有论文的 claims.yaml 回填成明确的 placeholder 状态，避免误当成已验证 claim。`

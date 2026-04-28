@@ -29,7 +29,7 @@ from research.common import (
     write_yaml_if_changed,
     yaml_default,
 )
-from research.v2 import append_history, ensure_v2_workspace, kb_root, locate_record, project_root, write_record
+from research.v2 import append_history, ensure_v2_workspace, kb_root, locate_record, maybe_auto_checkpoint, project_root, write_record
 
 ROUTE_HINTS = {
     "论文": "paper-analyst",
@@ -341,6 +341,9 @@ def main() -> int:
             )
             write_state(root, args.program_id, load_state(root, args.program_id))
         print(f"[ok] created program {args.program_id}")
+        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: init program {args.program_id}")
+        if checkpoint.get("committed"):
+            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
         return 0
     if args.command == "set-stage":
         with program_file_lock(root, args.program_id):
@@ -362,6 +365,9 @@ def main() -> int:
             )
             write_state(root, args.program_id, payload)
         print(f"[ok] updated stage to {args.stage}")
+        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: set program stage {args.program_id} -> {args.stage}")
+        if checkpoint.get("committed"):
+            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
         return 0
     if args.command == "status":
         with program_file_lock(root, args.program_id):
@@ -409,6 +415,9 @@ def main() -> int:
         if warning:
             print(warning)
         print(f"[ok] attached {canonical_id} to {args.program_id}")
+        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: attach {canonical_id} to {args.program_id}")
+        if checkpoint.get("committed"):
+            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
         return 0
     if args.command == "query-program":
         with program_file_lock(root, args.program_id):
@@ -447,6 +456,9 @@ def main() -> int:
             )
             write_state(root, args.program_id, load_state(root, args.program_id))
         print(query_path.relative_to(root))
+        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: query program {args.program_id}")
+        if checkpoint.get("committed"):
+            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
         return 0
     if args.command == "add-open-question":
         with program_file_lock(root, args.program_id):
@@ -466,6 +478,9 @@ def main() -> int:
             )
             write_state(root, args.program_id, load_state(root, args.program_id))
         print(path.relative_to(root))
+        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: add open question {args.program_id}")
+        if checkpoint.get("committed"):
+            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
         return 0
     if args.command == "request-evidence":
         with program_file_lock(root, args.program_id):
@@ -501,6 +516,9 @@ def main() -> int:
             )
             write_state(root, args.program_id, load_state(root, args.program_id))
         print(path.relative_to(root))
+        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: request evidence {args.program_id}")
+        if checkpoint.get("committed"):
+            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
         return 0
     if args.command == "log-decision":
         with program_file_lock(root, args.program_id):
@@ -535,6 +553,9 @@ def main() -> int:
             state["last_decision"] = {"decision": args.decision, "timestamp": item["timestamp"], "confirmation_status": args.confirmation_status}
             write_state(root, args.program_id, state)
         print(path.relative_to(root))
+        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: log decision {args.program_id}")
+        if checkpoint.get("committed"):
+            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
         return 0
     if args.command == "add-reporting-event":
         with program_file_lock(root, args.program_id):
@@ -556,6 +577,9 @@ def main() -> int:
             )
             write_state(root, args.program_id, load_state(root, args.program_id))
         print(path.relative_to(root))
+        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: add reporting event {args.program_id}")
+        if checkpoint.get("committed"):
+            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
         return 0
     return 1
 

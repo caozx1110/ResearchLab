@@ -20,6 +20,6 @@ description: 把 paper / repo / blog source 先做 staging，再做去重与轻�
 ```bash
 ${RESEARCH_PYTHON:-python3} .agents/skills/source-intake/scripts/intake.py search --kind paper --query "humanoid vla recovery" --candidate-url https://arxiv.org/abs/2501.00001 --candidate-title "Example Paper"
 ${RESEARCH_PYTHON:-python3} .agents/skills/source-intake/scripts/intake.py show-stage --stage-id paper-search-humanoid-vla-recovery-xxxxxxx
-${RESEARCH_PYTHON:-python3} .agents/skills/source-intake/scripts/intake.py add --kind paper --source raw/paper.pdf --maturity lightweight
+${RESEARCH_PYTHON:-python3} .agents/skills/source-intake/scripts/intake.py add --kind paper --source kb/raw/paper.pdf --maturity lightweight
 ${RESEARCH_PYTHON:-python3} .agents/skills/source-intake/scripts/intake.py add --kind repo --stage-id repo-search-example-xxxxxxx --candidate-id repo-search-example-xxxxxxx-ab12cd --pool candidate-tools
 ```

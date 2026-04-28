@@ -141,7 +141,11 @@ def program_root(project_root: Path, program_id: str) -> Path:
 
 
 def raw_root(project_root: Path) -> Path:
-    return project_root / "raw"
+    return research_root(project_root) / "raw"
+
+
+def output_root(project_root: Path) -> Path:
+    return research_root(project_root) / "output"
 
 
 def runtime_memory_path(project_root: Path) -> Path:

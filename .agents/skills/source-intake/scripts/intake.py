@@ -24,6 +24,8 @@ from research.v2 import (
     ensure_v2_workspace,
     load_search_stage,
     mark_search_candidate,
+    maybe_auto_checkpoint,
+    normalize_storage_reference,
     project_root,
     resolve_search_candidate,
     stage_search_results,
@@ -110,6 +112,7 @@ def main() -> int:
         source = source or str(staged_candidate.get("url") or "")
     if not source:
         raise SystemExit("Provide --source or use --stage-id + --candidate-id.")
+    source = normalize_storage_reference(root, source) if not source.startswith("http") else source
 
     duplicate = detect_duplicate(root, args.kind, source)
     if duplicate:
@@ -154,6 +157,9 @@ def main() -> int:
     if args.stage_id and args.candidate_id:
         mark_search_candidate(root, args.stage_id, args.candidate_id, status="materialized", record_id=str(record["id"]))
     print(f"[ok] created {path.relative_to(root)}")
+    checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: intake {args.kind} {record['id']}")
+    if checkpoint.get("committed"):
+        print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
     return 0
 
 

@@ -30,12 +30,12 @@
 ## 2. v2 目录心智模型
 
 ```text
-raw/                 # immutable raw sources
+kb/raw/              # immutable raw sources
 kb/units/            # papers / repos / blogs / ideas / experiments
 kb/programs/         # concrete research programs
 kb/synthesis/        # surveys / trends / gaps / taxonomy notes
 kb/user/             # current-state / navigation / reading lists / report materials
-output/              # polished exports
+kb/output/           # polished exports
 ```
 
 最重要的约定：
@@ -127,7 +127,7 @@ python3 .agents/skills/knowledge-base-manager/scripts/kb.py lint
 python3 .agents/skills/knowledge-base-manager/scripts/kb.py index
 
 python3 .agents/skills/source-intake/scripts/intake.py search --kind paper --query "humanoid vla recovery"
-python3 .agents/skills/source-intake/scripts/intake.py add --kind paper --source raw/example.pdf --maturity lightweight
+python3 .agents/skills/source-intake/scripts/intake.py add --kind paper --source kb/raw/example.pdf --maturity lightweight
 python3 .agents/skills/paper-analyst/scripts/paper.py screen --paper-id paper-foo
 python3 .agents/skills/repo-analyst/scripts/repo.py map-capability --repo-id repo-foo
 python3 .agents/skills/blog-analyst/scripts/blog.py summarize --blog-id blog-foo

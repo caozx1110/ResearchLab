@@ -4,6 +4,8 @@ import copy
 import hashlib
 import re
 import shutil
+import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -14,12 +16,14 @@ from .common import (
     infer_topics_and_tags,
     is_url,
     load_yaml,
+    parse_iso_datetime,
     program_root as common_program_root,
     research_root,
     slugify,
     utc_now_iso,
     write_text_if_changed,
     write_yaml_if_changed,
+    yaml_default,
     yaml_duplicate_key_issues,
 )
 
@@ -70,6 +74,8 @@ DEFAULT_SETTINGS_MARKDOWN = """# Research Settings v2
 - [x] AI 评价默认等待人工确认
 - [x] 论文结构刷新 / figure 提取默认等待人工确认
 - [x] idea review / select-best 默认保留显式决策痕迹
+- [x] 知识库独立 Git 仓库默认启用
+- [x] 自动提交策略默认使用 milestone，可在 runtime preferences 调整
 """
 DEFAULT_TOPIC_TAXONOMY = {
     "id": "topic-taxonomy-v2",
@@ -104,6 +110,21 @@ COMPACT_UNIT_ID_MAX_WORDS = 4
 COMPACT_UNIT_ID_MAX_CHARS = 32
 COMPACT_UNIT_ID_HASH_LEN = 8
 TEXT_REWRITE_SUFFIXES = {".md", ".markdown", ".txt", ".yaml", ".yml", ".json"}
+VERSIONING_COMMIT_MODES = {"manual", "milestone", "aggressive"}
+KB_GITIGNORE_LINES = [
+    "# Runtime state",
+    ".runtime/",
+    "",
+    "# Raw and exported artifacts",
+    "raw/",
+    "output/",
+    "",
+    "# Generated browser workspace",
+    "user/kb/",
+    "",
+    "# Local noise",
+    ".DS_Store",
+]
 GREEK_LETTER_ALIASES = {
     "π": "pi",
     "Π": "pi",
@@ -152,6 +173,18 @@ def config_root(project_root: Path) -> Path:
     return kb_root(project_root) / "config"
 
 
+def raw_storage_root(project_root: Path) -> Path:
+    return kb_root(project_root) / "raw"
+
+
+def output_storage_root(project_root: Path) -> Path:
+    return kb_root(project_root) / "output"
+
+
+def kb_runtime_root(project_root: Path) -> Path:
+    return kb_root(project_root) / ".runtime"
+
+
 def synthesis_root(project_root: Path) -> Path:
     return kb_root(project_root) / "synthesis"
 
@@ -166,6 +199,18 @@ def topic_taxonomy_path(project_root: Path) -> Path:
 
 def candidate_pools_path(project_root: Path) -> Path:
     return config_root(project_root) / "candidate-pools.yaml"
+
+
+def runtime_preferences_path(project_root: Path) -> Path:
+    return config_root(project_root) / "runtime-preferences.yaml"
+
+
+def kb_gitignore_path(project_root: Path) -> Path:
+    return kb_root(project_root) / ".gitignore"
+
+
+def versioning_state_path(project_root: Path) -> Path:
+    return kb_runtime_root(project_root) / "versioning-state.yaml"
 
 
 def kind_dir(kind: str) -> str:
@@ -188,6 +233,91 @@ def search_stage_path(project_root: Path, stage_id: str) -> Path:
 
 def rel(project_root: Path, path: Path) -> str:
     return path.resolve().relative_to(project_root.resolve()).as_posix()
+
+
+def ensure_kb_gitignore(project_root: Path) -> Path:
+    path = kb_gitignore_path(project_root)
+    existing_lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    merged = list(existing_lines)
+    for line in KB_GITIGNORE_LINES:
+        if line in merged:
+            continue
+        if line == "" and merged and merged[-1] == "":
+            continue
+        merged.append(line)
+    while merged and merged[-1] == "":
+        merged.pop()
+    write_text_if_changed(path, "\n".join(merged).strip() + "\n")
+    return path
+
+
+def _legacy_storage_map(project_root: Path, value: str) -> tuple[Path | None, Path | None]:
+    text = str(value or "").strip()
+    if not text or is_url(text):
+        return None, None
+    new_roots = {
+        "raw": raw_storage_root(project_root).resolve(),
+        "output": output_storage_root(project_root).resolve(),
+    }
+    legacy_roots = {
+        "raw": (project_root / "raw").resolve(),
+        "output": (project_root / "output").resolve(),
+    }
+    path = Path(text).expanduser()
+    if path.is_absolute():
+        try:
+            resolved = path.resolve(strict=False)
+        except RuntimeError:
+            resolved = path
+        for name, legacy_root in legacy_roots.items():
+            try:
+                relative = resolved.relative_to(legacy_root)
+            except ValueError:
+                continue
+            return resolved, new_roots[name] / relative
+        for name, new_root in new_roots.items():
+            try:
+                relative = resolved.relative_to(new_root)
+            except ValueError:
+                continue
+            return resolved, new_root / relative
+        return resolved, None
+    normalized = text.replace("\\", "/").lstrip("./")
+    for name, new_root in new_roots.items():
+        if normalized == name or normalized.startswith(f"{name}/"):
+            relative = Path(normalized).relative_to(name) if normalized != name else Path()
+            return project_root / normalized, new_root / relative
+        kb_prefix = f"kb/{name}"
+        if normalized == kb_prefix or normalized.startswith(f"{kb_prefix}/"):
+            relative = Path(normalized).relative_to(kb_prefix) if normalized != kb_prefix else Path()
+            return project_root / normalized, new_root / relative
+    return project_root / normalized, None
+
+
+def resolve_local_reference(project_root: Path, value: str) -> Path | None:
+    original, remapped = _legacy_storage_map(project_root, value)
+    candidates = [remapped, original]
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        try:
+            if candidate.exists():
+                return candidate.resolve()
+        except OSError:
+            continue
+    return None
+
+
+def normalize_storage_reference(project_root: Path, value: str) -> str:
+    text = str(value or "").strip()
+    if not text or is_url(text):
+        return text
+    original, remapped = _legacy_storage_map(project_root, text)
+    if remapped is not None and remapped.exists():
+        return remapped.resolve().as_posix()
+    if original is not None and original.exists():
+        return original.resolve().as_posix()
+    return text
 
 
 def _slug_list(values: Any) -> list[str]:
@@ -230,6 +360,101 @@ def _deep_fill_missing(target: Any, defaults: Any) -> Any:
                 base[key] = _deep_fill_missing(base[key], value)
         return base
     return target if target is not None else copy.deepcopy(defaults)
+
+
+def default_runtime_preferences() -> dict[str, Any]:
+    return {
+        **yaml_default("runtime-preferences-v2", "research-config-manager", status="active"),
+        "browser": {
+            "default_workbench_mode": "preview",
+            "default_terminal_mode": "codex",
+            "auto_open_recent_file": True,
+        },
+        "pdf": {
+            "prefer_structured_source": True,
+            "auto_extract_figures": False,
+            "reuse_cached_parse": True,
+            "require_pdfimages": True,
+            "filter_blank_and_mask_images": True,
+        },
+        "versioning": {
+            "enabled": True,
+            "separate_repo": True,
+            "auto_init_repo": True,
+            "auto_commit_mode": "milestone",
+            "commit_on_browser_save": False,
+            "debounce_seconds": 30,
+            "ignored_paths": ["raw/", "output/", "user/kb/", ".runtime/"],
+        },
+    }
+
+
+def load_runtime_preferences(project_root: Path) -> dict[str, Any]:
+    ensure_v2_workspace(project_root)
+    payload = load_yaml(runtime_preferences_path(project_root), default={})
+    if not isinstance(payload, dict) or not payload:
+        payload = default_runtime_preferences()
+    normalized = _deep_fill_missing(payload, default_runtime_preferences())
+    browser = normalized.get("browser", {})
+    if not isinstance(browser, dict):
+        browser = {}
+    browser["default_workbench_mode"] = str(browser.get("default_workbench_mode") or "preview")
+    browser["default_terminal_mode"] = str(browser.get("default_terminal_mode") or "codex")
+    browser["auto_open_recent_file"] = bool(browser.get("auto_open_recent_file"))
+    normalized["browser"] = browser
+
+    pdf = normalized.get("pdf", {})
+    if not isinstance(pdf, dict):
+        pdf = {}
+    pdf["prefer_structured_source"] = bool(pdf.get("prefer_structured_source"))
+    pdf["auto_extract_figures"] = bool(pdf.get("auto_extract_figures"))
+    pdf["reuse_cached_parse"] = bool(pdf.get("reuse_cached_parse"))
+    pdf["require_pdfimages"] = bool(pdf.get("require_pdfimages"))
+    pdf["filter_blank_and_mask_images"] = bool(pdf.get("filter_blank_and_mask_images"))
+    normalized["pdf"] = pdf
+
+    versioning = normalized.get("versioning", {})
+    if not isinstance(versioning, dict):
+        versioning = {}
+    versioning["enabled"] = bool(versioning.get("enabled"))
+    versioning["separate_repo"] = bool(versioning.get("separate_repo"))
+    versioning["auto_init_repo"] = bool(versioning.get("auto_init_repo"))
+    mode = str(versioning.get("auto_commit_mode") or "milestone").strip().lower()
+    versioning["auto_commit_mode"] = mode if mode in VERSIONING_COMMIT_MODES else "milestone"
+    versioning["commit_on_browser_save"] = bool(versioning.get("commit_on_browser_save"))
+    try:
+        versioning["debounce_seconds"] = max(0, int(versioning.get("debounce_seconds") or 0))
+    except (TypeError, ValueError):
+        versioning["debounce_seconds"] = 30
+    ignored = versioning.get("ignored_paths", [])
+    normalized_ignored: list[str] = []
+    if isinstance(ignored, list):
+        for item in ignored:
+            text = str(item).strip()
+            if not text:
+                continue
+            if text.startswith("kb/"):
+                text = text[3:]
+            normalized_ignored.append(text)
+    versioning["ignored_paths"] = normalized_ignored
+    normalized["versioning"] = versioning
+    return normalized
+
+
+def write_runtime_preferences(project_root: Path, payload: dict[str, Any]) -> Path:
+    current = load_runtime_preferences(project_root)
+    merged = copy.deepcopy(current)
+    for key in ("browser", "pdf", "versioning"):
+        value = payload.get(key)
+        if isinstance(value, dict):
+            target = merged.setdefault(key, {})
+            if not isinstance(target, dict):
+                target = {}
+                merged[key] = target
+            target.update(value)
+    normalized = _deep_fill_missing(merged, default_runtime_preferences())
+    write_yaml_if_changed(runtime_preferences_path(project_root), normalized)
+    return runtime_preferences_path(project_root)
 
 
 def kind_payload_skeleton(kind: str, title: str = "") -> dict[str, Any]:
@@ -703,6 +928,10 @@ def ensure_v2_workspace(project_root: Path) -> None:
     ensure_dir(config_root(project_root))
     ensure_dir(synthesis_root(project_root))
     ensure_dir(source_search_root(project_root))
+    ensure_dir(raw_storage_root(project_root))
+    ensure_dir(output_storage_root(project_root))
+    ensure_dir(kb_runtime_root(project_root))
+    ensure_kb_gitignore(project_root)
     settings = config_root(project_root) / "research-settings.md"
     if not settings.exists():
         write_text_if_changed(settings, DEFAULT_SETTINGS_MARKDOWN)
@@ -716,6 +945,8 @@ def ensure_v2_workspace(project_root: Path) -> None:
         write_yaml_if_changed(topic_taxonomy_path(project_root), {**DEFAULT_TOPIC_TAXONOMY, "generated_at": utc_now_iso()})
     if not candidate_pools_path(project_root).exists():
         write_yaml_if_changed(candidate_pools_path(project_root), {**DEFAULT_CANDIDATE_POOLS, "generated_at": utc_now_iso()})
+    if not runtime_preferences_path(project_root).exists():
+        write_yaml_if_changed(runtime_preferences_path(project_root), default_runtime_preferences())
 
 
 def load_topic_taxonomy(project_root: Path) -> dict[str, Any]:
@@ -795,6 +1026,310 @@ def write_candidate_pools(project_root: Path, payload: dict[str, Any]) -> Path:
     payload["generated_at"] = utc_now_iso()
     write_yaml_if_changed(candidate_pools_path(project_root), payload)
     return candidate_pools_path(project_root)
+
+
+def load_versioning_state(project_root: Path) -> dict[str, Any]:
+    payload = load_yaml(versioning_state_path(project_root), default={})
+    if not isinstance(payload, dict) or not payload:
+        payload = {
+            "last_auto_commit_at": "",
+            "last_trigger": "",
+            "last_commit": "",
+            "history": [],
+        }
+    payload.setdefault("history", [])
+    return payload
+
+
+def write_versioning_state(project_root: Path, payload: dict[str, Any]) -> Path:
+    ensure_dir(kb_runtime_root(project_root))
+    write_yaml_if_changed(versioning_state_path(project_root), payload)
+    return versioning_state_path(project_root)
+
+
+def kb_repo_path(project_root: Path) -> Path:
+    return kb_root(project_root)
+
+
+def kb_repo_exists(project_root: Path) -> bool:
+    return (kb_repo_path(project_root) / ".git").exists()
+
+
+def _run_git(project_root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-C", str(kb_repo_path(project_root)), *args],
+        check=check,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _git_head_exists(project_root: Path) -> bool:
+    result = _run_git(project_root, "rev-parse", "--verify", "HEAD", check=False)
+    return result.returncode == 0
+
+
+def ensure_kb_git_repo(project_root: Path, *, create_initial_commit: bool = True, initial_message: str = "chore: initialize kb repo") -> dict[str, Any]:
+    ensure_v2_workspace(project_root)
+    created = False
+    if not kb_repo_exists(project_root):
+        subprocess.run(["git", "init", str(kb_repo_path(project_root))], check=True, capture_output=True, text=True)
+        created = True
+    ensure_kb_gitignore(project_root)
+    result = {
+        "created": created,
+        "repo_path": kb_repo_path(project_root).as_posix(),
+        "gitignore_path": kb_gitignore_path(project_root).as_posix(),
+        "initial_commit": False,
+        "head_exists": _git_head_exists(project_root),
+    }
+    if create_initial_commit and not result["head_exists"]:
+        checkpoint = git_checkpoint(project_root, initial_message, trigger="manual", auto_init=False)
+        result["initial_commit"] = checkpoint.get("committed", False)
+        result["head_exists"] = _git_head_exists(project_root)
+        result["checkpoint"] = checkpoint
+    return result
+
+
+def kb_git_status(project_root: Path) -> dict[str, Any]:
+    if not kb_repo_exists(project_root):
+        return {"repo_exists": False, "text": "kb git repo is not initialized"}
+    status = _run_git(project_root, "status", "--short", "--branch", check=False)
+    return {"repo_exists": True, "text": status.stdout.strip(), "code": status.returncode}
+
+
+def kb_git_log(project_root: Path, *, limit: int = 10) -> dict[str, Any]:
+    if not kb_repo_exists(project_root):
+        return {"repo_exists": False, "text": "kb git repo is not initialized"}
+    if not _git_head_exists(project_root):
+        return {"repo_exists": True, "text": "kb git repo has no commits yet"}
+    log = _run_git(project_root, "log", f"--max-count={max(1, int(limit))}", "--oneline", "--decorate", check=False)
+    return {"repo_exists": True, "text": log.stdout.strip(), "code": log.returncode}
+
+
+def git_checkpoint(
+    project_root: Path,
+    message: str,
+    *,
+    trigger: str = "manual",
+    auto_init: bool = True,
+) -> dict[str, Any]:
+    ensure_v2_workspace(project_root)
+    if not kb_repo_exists(project_root):
+        if auto_init:
+            ensure_kb_git_repo(project_root, create_initial_commit=False)
+        else:
+            return {"committed": False, "status": "missing-repo", "message": "kb git repo is not initialized"}
+    ensure_kb_gitignore(project_root)
+    _run_git(project_root, "add", "-A", ".", check=True)
+    staged = _run_git(project_root, "diff", "--cached", "--name-only", check=False)
+    staged_files = [line.strip() for line in staged.stdout.splitlines() if line.strip()]
+    if not staged_files:
+        return {"committed": False, "status": "no-changes", "message": "no kb changes to commit"}
+    commit = _run_git(project_root, "commit", "-m", message, check=False)
+    if commit.returncode != 0:
+        stderr = commit.stderr.strip() or commit.stdout.strip() or "git commit failed"
+        raise SystemExit(stderr)
+    head = _run_git(project_root, "rev-parse", "--short", "HEAD", check=False)
+    return {
+        "committed": True,
+        "status": "committed",
+        "trigger": trigger,
+        "message": message,
+        "commit": head.stdout.strip(),
+        "files": staged_files,
+    }
+
+
+def maybe_auto_checkpoint(project_root: Path, *, trigger: str, message: str) -> dict[str, Any]:
+    prefs = load_runtime_preferences(project_root)
+    versioning = prefs.get("versioning", {})
+    if not isinstance(versioning, dict) or not versioning.get("enabled", True):
+        return {"committed": False, "status": "disabled"}
+    mode = str(versioning.get("auto_commit_mode") or "milestone")
+    commit_on_browser_save = bool(versioning.get("commit_on_browser_save"))
+    should_commit = False
+    if trigger == "manual":
+        should_commit = True
+    elif trigger == "milestone":
+        should_commit = mode in {"milestone", "aggressive"}
+    elif trigger == "browser-save":
+        should_commit = mode == "aggressive" or commit_on_browser_save
+    if not should_commit:
+        return {"committed": False, "status": "skipped", "reason": f"trigger `{trigger}` disabled for mode `{mode}`"}
+
+    if not kb_repo_exists(project_root):
+        if versioning.get("auto_init_repo", True):
+            ensure_kb_git_repo(project_root, create_initial_commit=False)
+        else:
+            return {"committed": False, "status": "missing-repo", "reason": "kb git repo is not initialized"}
+
+    if trigger == "browser-save":
+        state = load_versioning_state(project_root)
+        last_commit_at = parse_iso_datetime(state.get("last_auto_commit_at"))
+        debounce_seconds = int(versioning.get("debounce_seconds") or 0)
+        if last_commit_at is not None and debounce_seconds > 0:
+            elapsed = (datetime.now(timezone.utc) - last_commit_at.astimezone(timezone.utc)).total_seconds()
+            if elapsed < debounce_seconds:
+                return {
+                    "committed": False,
+                    "status": "debounced",
+                    "reason": f"last browser-save commit was {elapsed:.1f}s ago",
+                }
+
+    result = git_checkpoint(project_root, message, trigger=trigger, auto_init=False)
+    if result.get("committed"):
+        state = load_versioning_state(project_root)
+        state["last_auto_commit_at"] = utc_now_iso()
+        state["last_trigger"] = trigger
+        state["last_commit"] = result.get("commit", "")
+        history = [item for item in state.get("history", []) if isinstance(item, dict)]
+        history.append(
+            {
+                "timestamp": state["last_auto_commit_at"],
+                "trigger": trigger,
+                "commit": result.get("commit", ""),
+                "message": message,
+            }
+        )
+        state["history"] = history[-50:]
+        write_versioning_state(project_root, state)
+    return result
+
+
+def _move_tree_item(src: Path, dst: Path) -> list[tuple[Path, Path]]:
+    moved: list[tuple[Path, Path]] = []
+    if not src.exists():
+        return moved
+    if src.is_dir():
+        ensure_dir(dst)
+        for child in sorted(src.iterdir()):
+            moved.extend(_move_tree_item(child, dst / child.name))
+        if src.exists():
+            try:
+                src.rmdir()
+            except OSError:
+                pass
+        return moved
+    if dst.exists():
+        return moved
+    ensure_dir(dst.parent)
+    shutil.move(str(src), str(dst))
+    moved.append((src, dst))
+    return moved
+
+
+def _copy_into_raw(backup: Path, target: Path) -> bool:
+    if target.exists():
+        return True
+    ensure_dir(target.parent)
+    if backup.is_dir():
+        shutil.copytree(backup, target)
+        return True
+    shutil.copy2(backup, target)
+    return True
+
+
+def prune_nested_repo_metadata(project_root: Path) -> list[str]:
+    removed: list[str] = []
+    repo_sources_root = units_root(project_root) / "repos"
+    if not repo_sources_root.exists():
+        return removed
+    for path in repo_sources_root.glob("*/source/*/.git"):
+        if not path.exists():
+            continue
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+        removed.append(rel(project_root, path))
+    return removed
+
+
+def _rewrite_storage_text(text: str, project_root: Path) -> str:
+    old_abs_raw = (project_root / "raw").resolve().as_posix()
+    new_abs_raw = raw_storage_root(project_root).resolve().as_posix()
+    old_abs_output = (project_root / "output").resolve().as_posix()
+    new_abs_output = output_storage_root(project_root).resolve().as_posix()
+    updated = text.replace(old_abs_raw, new_abs_raw).replace(old_abs_output, new_abs_output)
+    updated = re.sub(r"(?<!kb/)raw/", "kb/raw/", updated)
+    updated = re.sub(r"(?<!kb/)output/", "kb/output/", updated)
+    return updated
+
+
+def sync_storage_layout(project_root: Path) -> dict[str, Any]:
+    ensure_v2_workspace(project_root)
+    moved_paths: list[tuple[Path, Path]] = []
+    for name, destination_root in (("raw", raw_storage_root(project_root)), ("output", output_storage_root(project_root))):
+        source_root = project_root / name
+        if not source_root.exists():
+            continue
+        ensure_dir(destination_root)
+        for child in sorted(source_root.iterdir()):
+            moved_paths.extend(_move_tree_item(child, destination_root / child.name))
+        try:
+            source_root.rmdir()
+        except OSError:
+            pass
+
+    updated_records: list[str] = []
+    hydrated_paths: list[str] = []
+    for record in iter_records(project_root):
+        source = record.get("source", {})
+        if not isinstance(source, dict):
+            continue
+        original_uri = str(source.get("original_uri") or "").strip()
+        if not original_uri or is_url(original_uri):
+            continue
+        old_path, remapped_path = _legacy_storage_map(project_root, original_uri)
+        if remapped_path is None:
+            continue
+        backup_candidates = []
+        for rel_backup in source.get("backup_paths", []):
+            backup = project_root / str(rel_backup)
+            if backup.exists():
+                backup_candidates.append(backup)
+        if not remapped_path.exists() and backup_candidates:
+            _copy_into_raw(backup_candidates[0], remapped_path)
+            hydrated_paths.append(rel(project_root, remapped_path))
+        normalized_uri = remapped_path.resolve().as_posix() if remapped_path.exists() else remapped_path.as_posix()
+        if normalized_uri != original_uri:
+            source["original_uri"] = normalized_uri
+            record["source"] = source
+            write_record(project_root, record)
+            updated_records.append(str(record.get("id") or ""))
+
+    rewritten_files: list[str] = []
+    for root in [kb_root(project_root), project_root / ".agents", project_root / "AGENTS.md"]:
+        if isinstance(root, Path) and root.is_file():
+            paths = [root]
+        else:
+            paths = list(root.rglob("*")) if isinstance(root, Path) and root.exists() else []
+        for path in paths:
+            if not path.is_file():
+                continue
+            if path.suffix.lower() not in TEXT_REWRITE_SUFFIXES and path.name not in {"AGENTS.md", "SKILL.md"}:
+                continue
+            if ".git" in path.parts or ("source" in path.parts and path.suffix.lower() not in {".md", ".markdown", ".txt"}):
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                continue
+            updated = _rewrite_storage_text(text, project_root)
+            if updated != text:
+                write_text_if_changed(path, updated)
+                rewritten_files.append(rel(project_root, path))
+
+    removed_nested_git = prune_nested_repo_metadata(project_root)
+
+    return {
+        "moved_paths": [(src.as_posix(), dst.as_posix()) for src, dst in moved_paths],
+        "updated_records": updated_records,
+        "hydrated_paths": hydrated_paths,
+        "rewritten_files": rewritten_files,
+        "removed_nested_git": removed_nested_git,
+    }
 
 
 def load_record(project_root: Path, kind: str, unit_id: str) -> dict[str, Any]:
@@ -1328,7 +1863,7 @@ def mark_search_candidate(
 def _copy_dir(src: Path, dst: Path) -> None:
     if dst.exists():
         return
-    shutil.copytree(src, dst)
+    shutil.copytree(src, dst, ignore=shutil.ignore_patterns(".git", ".gitmodules"))
 
 
 def backup_source(project_root: Path, kind: str, unit_id: str, source: str) -> dict[str, Any]:
@@ -1339,7 +1874,9 @@ def backup_source(project_root: Path, kind: str, unit_id: str, source: str) -> d
         write_text_if_changed(txt, source.strip() + "\n")
         return {"original_uri": source, "backup_paths": [rel(project_root, txt)], "backup_kind": "url", "file_hash": ""}
 
-    src = Path(source).expanduser().resolve()
+    normalized_source = normalize_storage_reference(project_root, source)
+    resolved_source = resolve_local_reference(project_root, normalized_source)
+    src = resolved_source or Path(normalized_source).expanduser().resolve()
     if not src.exists():
         raise SystemExit(f"Source not found: {source}")
     dst = root / src.name
@@ -1361,10 +1898,10 @@ def backup_source(project_root: Path, kind: str, unit_id: str, source: str) -> d
 
 
 def detect_duplicate(project_root: Path, kind: str, source: str) -> dict[str, Any] | None:
-    normalized = source.strip()
+    normalized = normalize_storage_reference(project_root, source)
     file_hash = ""
     if not is_url(source):
-        path = Path(source).expanduser().resolve()
+        path = resolve_local_reference(project_root, normalized) or Path(normalized).expanduser().resolve()
         if path.exists() and path.is_file():
             file_hash = file_sha256(path)
             normalized = path.as_posix()

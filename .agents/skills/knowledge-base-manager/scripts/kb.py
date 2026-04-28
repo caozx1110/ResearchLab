@@ -19,18 +19,25 @@ from research.v2 import (
     build_index,
     candidate_pools_path,
     compact_unit_ids,
+    ensure_kb_git_repo,
     ensure_v2_workspace,
+    git_checkpoint,
     govern_records,
+    kb_git_log,
+    kb_git_status,
     link_records,
     lint_records,
+    maybe_auto_checkpoint,
     project_root,
     promote_record,
     rebuild_governance_catalogs,
     refresh_record_schemas,
     search_records,
+    sync_storage_layout,
     write_candidate_pools,
     write_topic_taxonomy,
     load_candidate_pools,
+    load_runtime_preferences,
     load_topic_taxonomy,
     topic_taxonomy_path,
 )
@@ -43,6 +50,15 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("init", help="Initialize the v2 knowledge base layout")
     subparsers.add_parser("lint", help="Validate record schemas and lifecycle fields")
     subparsers.add_parser("index", help="Rebuild kb/index.yaml and kb/index.md")
+    subparsers.add_parser("storage-sync", help="Move legacy raw/output into kb and rewrite old storage references")
+    git_init = subparsers.add_parser("git-init", help="Initialize kb as a nested Git repository")
+    git_init.add_argument("--no-initial-commit", action="store_true")
+    git_init.add_argument("--message", default="chore: initialize kb repo")
+    subparsers.add_parser("git-status", help="Show nested kb repo Git status")
+    git_log = subparsers.add_parser("git-log", help="Show nested kb repo history")
+    git_log.add_argument("--limit", type=int, default=10)
+    git_checkpoint_cmd = subparsers.add_parser("git-checkpoint", help="Create a Git checkpoint inside kb")
+    git_checkpoint_cmd.add_argument("--message", required=True)
     compact_ids = subparsers.add_parser("compact-ids", help="Shorten and regularize knowledge-unit ids")
     compact_ids.add_argument("--kind", choices=["paper", "repo", "blog", "idea", "experiment"])
     compact_ids.add_argument("--apply", action="store_true", help="Actually rename ids and unit folders")
@@ -106,6 +122,37 @@ def main() -> int:
         build_index(root)
         print("[ok] initialized kb v2 workspace")
         return 0
+    if args.command == "storage-sync":
+        payload = sync_storage_layout(root)
+        build_index(root)
+        print(f"[ok] moved paths: {len(payload['moved_paths'])}")
+        print(f"[ok] updated records: {len(payload['updated_records'])}")
+        print(f"[ok] hydrated raw paths: {len(payload['hydrated_paths'])}")
+        print(f"[ok] rewritten files: {len(payload['rewritten_files'])}")
+        print(f"[ok] removed nested repo metadata: {len(payload['removed_nested_git'])}")
+        return 0
+    if args.command == "git-init":
+        payload = ensure_kb_git_repo(root, create_initial_commit=not args.no_initial_commit, initial_message=args.message)
+        print(f"repo_path: {payload['repo_path']}")
+        print(f"created: {payload['created']}")
+        print(f"initial_commit: {payload['initial_commit']}")
+        return 0
+    if args.command == "git-status":
+        payload = kb_git_status(root)
+        print(payload["text"] or "[ok] clean")
+        return 0 if payload.get("repo_exists") else 1
+    if args.command == "git-log":
+        payload = kb_git_log(root, limit=args.limit)
+        print(payload["text"] or "[ok] no commits yet")
+        return 0 if payload.get("repo_exists") else 1
+    if args.command == "git-checkpoint":
+        payload = git_checkpoint(root, args.message, trigger="manual")
+        print(payload.get("message") or args.message)
+        if payload.get("committed"):
+            print(f"[ok] commit: {payload.get('commit')}")
+        else:
+            print(f"[ok] {payload.get('status')}")
+        return 0
     if args.command == "lint":
         status, issues = lint_records(root)
         print(f"status: {status}")
@@ -125,6 +172,9 @@ def main() -> int:
             print(f"- {item['old_id']} -> {item['new_id']} | {item['title']}")
         if args.apply and payload["changed"]:
             print("[ok] rebuilt governance and index")
+            checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: compact knowledge-unit ids ({payload['changed']})")
+            if checkpoint.get("committed"):
+                print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
         return 0
     if args.command in {"rebuild-governance", "taxonomy-sync"}:
         taxonomy_path, pools_path = rebuild_governance_catalogs(root)
@@ -172,6 +222,9 @@ def main() -> int:
             print(f"[ok] governed {path.relative_to(root)}")
         print(f"[ok] synced {topic_taxonomy_path(root).relative_to(root)}")
         print(f"[ok] synced {candidate_pools_path(root).relative_to(root)}")
+        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: update kb governance ({len(paths)} records)")
+        if checkpoint.get("committed"):
+            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
         return 0
     if args.command == "taxonomy-lint":
         taxonomy = load_topic_taxonomy(root)
@@ -201,6 +254,9 @@ def main() -> int:
         item["note"] = args.description
         path = write_topic_taxonomy(root, payload)
         print(f"[ok] updated {path.relative_to(root)}")
+        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: update topic {args.topic}")
+        if checkpoint.get("committed"):
+            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
         return 0
     if args.command == "pool-upsert":
         payload = load_candidate_pools(root)
@@ -211,16 +267,27 @@ def main() -> int:
         item["tags"] = sorted(set(item.get("tags", [])) | set(args.tag))
         path = write_candidate_pools(root, payload)
         print(f"[ok] updated {path.relative_to(root)}")
+        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: update pool {args.pool}")
+        if checkpoint.get("committed"):
+            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
         return 0
     if args.command == "link":
         link_records(root, args.from_id, args.to_id, args.relation, note=args.note)
         build_index(root)
         print(f"[ok] linked {args.from_id} -> {args.to_id} ({args.relation})")
+        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: link {args.from_id} to {args.to_id}")
+        if checkpoint.get("committed"):
+            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
         return 0
     if args.command == "promote":
         path = promote_record(root, args.id, status=args.status, maturity=args.maturity, confirmation_status=args.confirmation_status)
         build_index(root)
         print(f"[ok] updated {path.relative_to(root)}")
+        prefs = load_runtime_preferences(root)
+        trigger = "milestone" if prefs.get("versioning", {}).get("auto_commit_mode") != "manual" else "manual"
+        checkpoint = maybe_auto_checkpoint(root, trigger=trigger, message=f"milestone: promote {args.id}")
+        if checkpoint.get("committed"):
+            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
         return 0
     return 1
 

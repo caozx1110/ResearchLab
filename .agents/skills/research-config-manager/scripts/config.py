@@ -20,11 +20,16 @@ from research.common import load_yaml, slugify, write_text_if_changed, write_yam
 from research.v2 import (
     candidate_pools_path,
     config_root,
+    default_runtime_preferences,
     ensure_v2_workspace,
     load_candidate_pools,
+    load_runtime_preferences,
     load_topic_taxonomy,
+    maybe_auto_checkpoint,
     project_root,
+    runtime_preferences_path,
     topic_taxonomy_path,
+    write_runtime_preferences,
 )
 
 
@@ -34,11 +39,6 @@ def profile_path(root: Path) -> Path:
 
 def settings_path(root: Path) -> Path:
     return config_root(root) / "research-settings.md"
-
-
-def runtime_preferences_path(root: Path) -> Path:
-    return config_root(root) / "runtime-preferences.yaml"
-
 
 def _default_profile() -> dict:
     return {
@@ -56,24 +56,6 @@ def _default_profile() -> dict:
             "tag_overrides": {},
         },
         "history": [],
-    }
-
-
-def _default_runtime_preferences() -> dict:
-    return {
-        **yaml_default("runtime-preferences-v2", "research-config-manager", status="active"),
-        "browser": {
-            "default_workbench_mode": "preview",
-            "default_terminal_mode": "codex",
-            "auto_open_recent_file": True,
-        },
-        "pdf": {
-            "prefer_structured_source": True,
-            "auto_extract_figures": False,
-            "reuse_cached_parse": True,
-            "require_pdfimages": True,
-            "filter_blank_and_mask_images": True,
-        },
     }
 
 
@@ -199,8 +181,8 @@ def build_parser() -> argparse.ArgumentParser:
     pool.add_argument("--description", default="")
     pool.add_argument("--status", default="active")
 
-    runtime = subparsers.add_parser("set-runtime-pref", help="Persist browser / pdf runtime preferences")
-    runtime.add_argument("--section", required=True, choices=["browser", "pdf"])
+    runtime = subparsers.add_parser("set-runtime-pref", help="Persist browser / pdf / versioning runtime preferences")
+    runtime.add_argument("--section", required=True, choices=["browser", "pdf", "versioning"])
     runtime.add_argument("--key", required=True)
     runtime.add_argument("--value", required=True)
     return parser
@@ -215,7 +197,7 @@ def main() -> int:
         write_yaml_if_changed(profile_path(root), load_profile(root))
         load_topic_taxonomy(root)
         load_candidate_pools(root)
-        write_yaml_if_changed(runtime_preferences_path(root), _default_runtime_preferences())
+        write_yaml_if_changed(runtime_preferences_path(root), default_runtime_preferences())
         print(f"[ok] initialized {profile_path(root).relative_to(root)}")
         print(f"[ok] initialized {topic_taxonomy_path(root).relative_to(root)}")
         print(f"[ok] initialized {candidate_pools_path(root).relative_to(root)}")
@@ -292,15 +274,16 @@ def main() -> int:
         print(f"[ok] updated {path.relative_to(root)}")
         return 0
     if args.command == "set-runtime-pref":
-        payload = load_yaml(runtime_preferences_path(root), default={})
-        if not isinstance(payload, dict) or not payload:
-            payload = _default_runtime_preferences()
+        payload = load_runtime_preferences(root)
         payload.setdefault(args.section, {})
         if not isinstance(payload[args.section], dict):
             payload[args.section] = {}
         payload[args.section][args.key] = parse_value(args.value)
-        write_yaml_if_changed(runtime_preferences_path(root), payload)
+        write_runtime_preferences(root, payload)
         print(f"[ok] updated {runtime_preferences_path(root).relative_to(root)}")
+        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: update runtime pref {args.section}.{args.key}")
+        if checkpoint.get("committed"):
+            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
         return 0
     return 1
 

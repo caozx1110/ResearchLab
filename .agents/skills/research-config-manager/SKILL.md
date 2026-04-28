@@ -13,6 +13,7 @@ description: 管理 v2 研究系统配置，包括资源画像、语言偏好、
 2. 捕获资源、约束、偏好，并保持脚本可读。
 3. 显式维护 topic / tag taxonomy seed 与 candidate pool policy。
 4. 让其他 v2 skills 可以稳定读取统一配置。
+5. 管理 `kb` 独立仓库的 versioning 策略，例如 `manual | milestone | aggressive`。
 
 ## 常用命令
 
@@ -25,4 +26,5 @@ ${RESEARCH_PYTHON:-python3} .agents/skills/research-config-manager/scripts/confi
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-config-manager/scripts/config.py set-taxonomy-seed --topic humanoid-robotics --tag vla --tag whole-body-control --alias humanoid
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-config-manager/scripts/config.py set-pool --pool current-reading --topic humanoid-robotics --tag vla --description "当前优先阅读池"
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-config-manager/scripts/config.py set-runtime-pref --section browser --key default_terminal_mode --value codex
+${RESEARCH_PYTHON:-python3} .agents/skills/research-config-manager/scripts/config.py set-runtime-pref --section versioning --key auto_commit_mode --value milestone
 ```

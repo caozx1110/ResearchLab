@@ -17,7 +17,7 @@ else:
     raise SystemExit("Could not locate .agents/lib")
 
 from research.common import load_program_reporting_events, write_text_if_changed
-from research.v2 import ensure_v2_workspace, project_root, user_root
+from research.v2 import ensure_v2_workspace, maybe_auto_checkpoint, project_root, user_root
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -118,6 +118,9 @@ def main() -> int:
         path = reports_root / "stage-summary.md"
         write_text_if_changed(path, render_lines(f"Stage Summary: {args.program_id}", events, report_kind="stage-summary"))
     print(path.relative_to(root))
+    checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: generate {args.command} for {args.program_id}")
+    if checkpoint.get("committed"):
+        print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
     return 0
 
 

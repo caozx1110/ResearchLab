@@ -18,7 +18,17 @@ else:
     raise SystemExit("Could not locate .agents/lib")
 
 from research.common import clean_text, infer_repo_roles, infer_topics_and_tags, read_text_excerpt, write_text_if_changed, write_yaml_if_changed
-from research.v2 import append_history, apply_record_governance, build_index, locate_record, project_root, rel, write_record
+from research.v2 import (
+    append_history,
+    apply_record_governance,
+    build_index,
+    locate_record,
+    maybe_auto_checkpoint,
+    project_root,
+    rel,
+    resolve_local_reference,
+    write_record,
+)
 
 IGNORE_DIRS = {".git", "__pycache__", ".venv", "node_modules", "build", "dist", "outputs", "logs", ".mypy_cache"}
 ENTRYPOINT_HINTS = {
@@ -43,7 +53,7 @@ def _candidate_repo_roots(root: Path, record: dict) -> list[Path]:
             paths.append(path if path.is_dir() else path.parent)
     original_uri = str(source.get("original_uri") or "")
     if original_uri and not original_uri.startswith("http"):
-        path = Path(original_uri).expanduser()
+        path = resolve_local_reference(root, original_uri) or Path(original_uri).expanduser()
         if path.exists():
             paths.append(path.resolve() if path.is_dir() else path.resolve().parent)
     deduped: list[Path] = []
@@ -273,6 +283,9 @@ def main() -> int:
         write_record(root, record)
         build_index(root)
         print(f"[ok] wrote {scan_path.relative_to(root)}")
+        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: scan repo structure {args.repo_id}")
+        if checkpoint.get("committed"):
+            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
         return 0
 
     if args.command == "map-capability":
@@ -313,6 +326,9 @@ def main() -> int:
         write_record(root, record)
         build_index(root)
         print(f"[ok] wrote {map_path.relative_to(root)}")
+        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: map repo capability {args.repo_id}")
+        if checkpoint.get("committed"):
+            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
         return 0
 
     if args.command == "complete-note":
@@ -345,6 +361,9 @@ def main() -> int:
         build_index(root)
         print(f"[ok] wrote {note_path.relative_to(root)}")
         print(f"[ok] wrote {context_path.relative_to(root)}")
+        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: complete repo note {args.repo_id}")
+        if checkpoint.get("committed"):
+            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
         return 0
 
     if args.command == "confirm":
@@ -355,6 +374,9 @@ def main() -> int:
         write_record(root, record)
         build_index(root)
         print(f"[ok] confirmed {args.repo_id}")
+        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: confirm repo {args.repo_id}")
+        if checkpoint.get("committed"):
+            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
         return 0
     return 1
 

@@ -21,7 +21,17 @@ else:
     raise SystemExit("Could not locate .agents/lib")
 
 from research.common import clean_text, extract_pdf_context_pages, load_yaml, read_text_excerpt, write_text_if_changed, write_yaml_if_changed
-from research.v2 import append_history, apply_record_governance, build_index, locate_record, project_root, rel, write_record
+from research.v2 import (
+    append_history,
+    apply_record_governance,
+    build_index,
+    locate_record,
+    maybe_auto_checkpoint,
+    project_root,
+    rel,
+    resolve_local_reference,
+    write_record,
+)
 
 try:
     from PIL import Image
@@ -59,7 +69,7 @@ def _source_paths(root: Path, record: dict) -> list[Path]:
             paths.append(path)
     original_uri = str(source.get("original_uri") or "")
     if original_uri and not original_uri.startswith("http"):
-        path = Path(original_uri).expanduser()
+        path = resolve_local_reference(root, original_uri) or Path(original_uri).expanduser()
         if path.exists():
             paths.append(path.resolve())
     deduped: list[Path] = []
@@ -400,6 +410,9 @@ def main() -> int:
         write_record(root, record)
         build_index(root)
         print(f"[ok] wrote {screen_path.relative_to(root)}")
+        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: quick screen {args.paper_id}")
+        if checkpoint.get("committed"):
+            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
         return 0
 
     if args.command == "complete-note":
@@ -422,6 +435,9 @@ def main() -> int:
         build_index(root)
         print(f"[ok] wrote {note_path.relative_to(root)}")
         print(f"[ok] wrote {context_path.relative_to(root)}")
+        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: complete paper note {args.paper_id}")
+        if checkpoint.get("committed"):
+            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
         return 0
 
     if args.command == "extract-figures":
@@ -456,6 +472,9 @@ def main() -> int:
         write_record(root, record)
         build_index(root)
         print(f"[ok] wrote {figures_path.relative_to(root)}")
+        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: extract paper figures {args.paper_id}")
+        if checkpoint.get("committed"):
+            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
         return 0
 
     if args.command == "refresh-structure":
@@ -479,6 +498,9 @@ def main() -> int:
         write_record(root, record)
         build_index(root)
         print(f"[ok] wrote {structure_path.relative_to(root)}")
+        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: refresh paper structure {args.paper_id}")
+        if checkpoint.get("committed"):
+            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
         return 0
 
     if args.command == "confirm":
@@ -489,6 +511,9 @@ def main() -> int:
         write_record(root, record)
         build_index(root)
         print(f"[ok] confirmed {args.paper_id}")
+        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: confirm paper {args.paper_id}")
+        if checkpoint.get("committed"):
+            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
         return 0
 
     if args.command == "reject":
@@ -498,6 +523,9 @@ def main() -> int:
         write_record(root, record)
         build_index(root)
         print(f"[ok] rejected {args.paper_id}")
+        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: reject paper {args.paper_id}")
+        if checkpoint.get("committed"):
+            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
         return 0
 
     return 1

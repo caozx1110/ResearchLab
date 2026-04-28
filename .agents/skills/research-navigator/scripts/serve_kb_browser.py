@@ -55,6 +55,7 @@ from kb_browser_lib import (
     web_path,
     write_text_atomic,
 )
+from research.v2 import maybe_auto_checkpoint  # type: ignore
 
 WATCHED_SUFFIXES = {".yaml", ".yml", ".md", ".markdown", ".txt", ".log", ".json"}
 READABLE_TEXT_SUFFIXES = {".md", ".markdown", ".yaml", ".yml", ".txt", ".log", ".json", ".py", ".sh", ".toml"}
@@ -687,6 +688,13 @@ def create_handler(*, project_root: Path):
                 write_text_atomic(path, content)
                 self.server.coordinator.build_now(f"editor-save:{path.name}")  # type: ignore[attr-defined]
                 response = _file_payload(project_root, path)
+                checkpoint = maybe_auto_checkpoint(
+                    project_root,
+                    trigger="browser-save",
+                    message=f"save: update {path.resolve().relative_to(project_root.resolve()).as_posix()}",
+                )
+                if checkpoint.get("committed"):
+                    response["git_checkpoint"] = checkpoint.get("commit")
             except ValueError as exc:
                 self._send_error_json(str(exc))
                 return

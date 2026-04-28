@@ -15,6 +15,7 @@ description: 管理 v2 knowledge base 的统一 schema、索引、链接、taxon
 4. 治理 topic / tag / candidate pool，并回写 `kb/config/` 下的 catalog。
 5. 维护 links 与 lifecycle promotion。
 6. 维护紧凑型 unit id 规范，避免把整句标题塞进目录名。
+7. 管理 `kb/` 嵌套 Git 仓库，以及 `kb/raw/` / `kb/output/` 存储布局收口。
 
 ## 约束
 
@@ -27,6 +28,10 @@ description: 管理 v2 knowledge base 的统一 schema、索引、链接、taxon
 
 ```bash
 ${RESEARCH_PYTHON:-python3} .agents/skills/knowledge-base-manager/scripts/kb.py init
+${RESEARCH_PYTHON:-python3} .agents/skills/knowledge-base-manager/scripts/kb.py storage-sync
+${RESEARCH_PYTHON:-python3} .agents/skills/knowledge-base-manager/scripts/kb.py git-init
+${RESEARCH_PYTHON:-python3} .agents/skills/knowledge-base-manager/scripts/kb.py git-status
+${RESEARCH_PYTHON:-python3} .agents/skills/knowledge-base-manager/scripts/kb.py git-checkpoint --message "milestone: weekly refresh"
 ${RESEARCH_PYTHON:-python3} .agents/skills/knowledge-base-manager/scripts/kb.py lint
 ${RESEARCH_PYTHON:-python3} .agents/skills/knowledge-base-manager/scripts/kb.py compact-ids
 ${RESEARCH_PYTHON:-python3} .agents/skills/knowledge-base-manager/scripts/kb.py compact-ids --apply

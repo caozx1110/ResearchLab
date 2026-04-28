@@ -25,6 +25,7 @@ from research.v2 import (
     ensure_v2_workspace,
     iter_records,
     locate_record,
+    maybe_auto_checkpoint,
     project_root,
     rel,
     synthesis_root,
@@ -301,6 +302,9 @@ def main() -> int:
         path = write_record(root, record)
         build_index(root)
         print_created_idea(root, record, path)
+        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: capture idea {record['id']}")
+        if checkpoint.get("committed"):
+            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
         return 0
 
     if args.command == "generate":
@@ -334,6 +338,9 @@ def main() -> int:
         index_path = update_bundle(root, bundle_id, idea_ids=created)
         build_index(root)
         print(f"[ok] wrote {index_path.relative_to(root)}")
+        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: generate idea bundle {bundle_id}")
+        if checkpoint.get("committed"):
+            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
         return 0
 
     if args.command in {"review-assist", "select-best"}:
@@ -354,6 +361,9 @@ def main() -> int:
             update_bundle(root, bundle_id, idea_ids=[record["id"] for record in records])
             build_index(root)
             print(f"[ok] wrote {assist_path.relative_to(root)}")
+            checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: review assist bundle {bundle_id}")
+            if checkpoint.get("committed"):
+                print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
             return 0
         scored_records = []
         for record in records:
@@ -390,6 +400,9 @@ def main() -> int:
         build_index(root)
         print(f"[ok] selected {selected['id']}")
         print(f"[ok] wrote {selection_path.relative_to(root)}")
+        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: select best idea in {bundle_id}")
+        if checkpoint.get("committed"):
+            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
         return 0
 
     record, path = locate_record(root, args.idea_id)
@@ -419,6 +432,9 @@ def main() -> int:
         build_index(root)
         print(f"[ok] canonical idea id: {record['id']}")
         print(f"[ok] wrote {analysis_path.relative_to(root)}")
+        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: analyze idea {record['id']}")
+        if checkpoint.get("committed"):
+            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
         return 0
 
     if args.command == "review":
@@ -447,6 +463,9 @@ def main() -> int:
         print(f"[ok] canonical idea id: {record['id']}")
         print(f"[ok] wrote {review_path.relative_to(root)}")
         print(f"[ok] wrote {card_path.relative_to(root)}")
+        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: review idea {record['id']}")
+        if checkpoint.get("committed"):
+            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
         return 0
 
     if args.command == "select":
@@ -457,6 +476,9 @@ def main() -> int:
         write_record(root, record)
         build_index(root)
         print(f"[ok] selected {record['id']}")
+        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: select idea {record['id']}")
+        if checkpoint.get("committed"):
+            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
         return 0
 
     if args.command == "archive":
@@ -465,6 +487,9 @@ def main() -> int:
         write_record(root, record)
         build_index(root)
         print(f"[ok] archived {record['id']}")
+        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: archive idea {record['id']}")
+        if checkpoint.get("committed"):
+            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
         return 0
     return 1
 

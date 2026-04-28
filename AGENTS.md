@@ -19,12 +19,13 @@ Default preference order:
 
 ## Layout
 
-- `raw/`: immutable external source bytes. Never rewrite in place.
+- `kb/raw/`: immutable external source bytes. Never rewrite in place.
 - `kb/units/{papers,repos,blogs,ideas,experiments}/<unit-id>/`: canonical knowledge units.
 - `kb/programs/<program-id>/`: program state, design, experiments, reports.
 - `kb/synthesis/`: cross-unit surveys, taxonomy, trends, gaps.
 - `kb/user/`: human-facing navigation and reopen pages, not canonical source.
-- `output/`: exports only, never the sole source of truth.
+- `kb/output/`: exports only, never the sole source of truth.
+- `kb/` is allowed to be a nested Git repository; runtime state and browser snapshots stay ignored inside that repo.
 
 ## Unit Rules
 
