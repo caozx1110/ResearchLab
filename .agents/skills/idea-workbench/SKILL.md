@@ -5,6 +5,8 @@ description: 负责 v2 idea unit 的生成、多候选管理、review、review-a
 
 # Idea Workbench
 
+> 协议参考：`.agents/lib/research/SCHEMAS.md#unit-record` · `#config-files` · `#confirmation-gate`
+
 当任务是把研究方向收敛成可评审、可比较、可显式选择的 idea unit 时，使用这个 skill。
 
 ## 负责范围

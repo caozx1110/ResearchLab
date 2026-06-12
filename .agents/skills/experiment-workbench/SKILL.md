@@ -5,6 +5,8 @@ description: Manage v2 experiment units, including plans, classified run logs, f
 
 # Experiment Workbench
 
+> 协议参考：`.agents/lib/research/SCHEMAS.md#unit-record` · `#experiment-files` · `#program-files` · `#confirmation-gate`
+
 Use this skill for structured experiment memory rather than one-off chat summaries.
 
 ## Workflow
@@ -30,3 +32,44 @@ ${RESEARCH_PYTHON:-python3} .agents/skills/experiment-workbench/scripts/experime
 ${RESEARCH_PYTHON:-python3} .agents/skills/experiment-workbench/scripts/experiment.py diagnose --experiment-id experiment-foo --summary "Likely data / implementation mix-up" --category data --category implementation
 ${RESEARCH_PYTHON:-python3} .agents/skills/experiment-workbench/scripts/experiment.py confirm --experiment-id experiment-foo
 ```
+
+## Phase Plan / Feedback Integration (added 2026-05-13)
+
+When a program runs under the **phase-by-phase iterative workflow** (see `research-orchestrator` skill `Phase-by-Phase Iterative Development Workflow`), `experiment-workbench` is the durable home for **per-run execution records** that feed the phase-level feedback report.
+
+### Run-log ↔ Phase feedback mapping
+
+| Phase plan section | experiment-workbench artifact |
+|---|---|
+| Plan §X "Convergence criteria" | one `run-log` entry per training/eval run; `outcome` ∈ {pass, partial, fail} |
+| Plan §X "Experimental Arms Registry" | one `run-log` per arm × seed; `classification` tags the arm |
+| Phase feedback §2 "Final metrics" | aggregated stats.yaml across all converged runs |
+| Phase feedback §3 "Ablation decisions" | derived from comparing run-log entries within each arm |
+| Phase feedback §4 "Surprises" | `diagnoses.yaml` entries marked `unexpected_observation` |
+| Phase feedback §5 "Open issues" | `follow-up` items, `category=implementation` or `unknown` |
+
+### Recommended workflow for phase executor agents
+
+1. Create a parent experiment unit per phase: `experiment.py plan --title "phase-1-track-a" --program-id <pid> --idea-id <iid>`
+2. For each training run: `experiment.py log-run` with outcome + classification (arm name as tag)
+3. For each unexpected behavior: `experiment.py diagnose --category unknown` (becomes feedback §4)
+4. For each implementation issue blocking next step: `experiment.py follow-up --priority high` (becomes feedback §5)
+5. When phase converges: aggregate run-logs into the phase feedback report (per master plan §11)
+6. `experiment.py confirm` after user approves phase outcome
+
+### Standard feedback report file path
+
+Per `research-orchestrator` workflow:
+
+```
+runs/{phase-id}/feedback-to-main-agent-{YYYY-MM-DD}.md
+```
+
+This file is the **single hand-off artifact** to the main agent (user-facing AI). The main agent uses it to update program state. Without this file, no state advancement happens.
+
+### Confirmation gating
+
+Per shared contract, all AI judgements stay `pending_user_confirmation`. Phase executor agents:
+- can mark `run-log.outcome` as factual (pass/fail observed)
+- must keep `diagnoses` confirmation-gated
+- must keep recommended winners (ablation §3 of feedback) marked as `pending_user_confirmation` until user accepts

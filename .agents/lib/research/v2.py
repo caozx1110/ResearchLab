@@ -2,20 +2,27 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import os
 import re
 import shutil
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .common import (
+    KEYWORD_BLACKLIST,
+    STOPWORDS,
     ensure_dir,
     file_sha256,
     find_project_root,
     infer_topics_and_tags,
     is_url,
     load_yaml,
+    normalize_title,
+    normalize_remote_url,
+    parse_arxiv_id,
     parse_iso_datetime,
     program_root as common_program_root,
     research_root,
@@ -63,12 +70,15 @@ DEFAULT_SETTINGS_MARKDOWN = """# Research Settings v2
 - [x] 自动入库事实类基础信息
 - [x] 默认维护 topic / tag / candidate pool 治理目录
 - [x] 外部 source search 先进入 staging，再决定是否入库
+- [x] 新论文入库后自动快速筛选
+- [x] intake 阶段预热 PDF 解析缓存
 - [ ] 自动生成详细论文笔记
-- [ ] 快速筛选后自动进入完整入库
+- [ ] 完整笔记后自动提取 Figure / Table
+- [x] 完整笔记后自动刷新结构
 - [ ] 自动生成周报素材
 - [ ] 自动提炼 PPT 可用表述
 - [ ] 自动记录中间讨论过程
-- [x] PDF 图片导出前检查 pdfimages / poppler
+- [x] PDF Figure / Table 默认按 caption 裁整块版面
 - [x] PDF 图片导出时过滤纯白图和 mask-like 图
 - [x] AI 推断默认等待人工确认
 - [x] AI 评价默认等待人工确认
@@ -76,6 +86,10 @@ DEFAULT_SETTINGS_MARKDOWN = """# Research Settings v2
 - [x] idea review / select-best 默认保留显式决策痕迹
 - [x] 知识库独立 Git 仓库默认启用
 - [x] 自动提交策略默认使用 milestone，可在 runtime preferences 调整
+
+模式说明：
+
+- 论文完整笔记触发条件、完整笔记模式（`scaffold` / `draft`）请使用 runtime preferences 管理。
 """
 DEFAULT_TOPIC_TAXONOMY = {
     "id": "topic-taxonomy-v2",
@@ -106,11 +120,17 @@ UNIT_KIND_PREFIXES = {
     "idea": "i",
     "experiment": "x",
 }
-COMPACT_UNIT_ID_MAX_WORDS = 4
-COMPACT_UNIT_ID_MAX_CHARS = 32
+COMPACT_UNIT_ID_MAX_WORDS = 3
+COMPACT_UNIT_ID_MAX_CHARS = 18
 COMPACT_UNIT_ID_HASH_LEN = 8
 TEXT_REWRITE_SUFFIXES = {".md", ".markdown", ".txt", ".yaml", ".yml", ".json"}
 VERSIONING_COMMIT_MODES = {"manual", "milestone", "aggressive"}
+PAPER_AUTO_COMPLETE_CONDITIONS = {
+    "after_screen",
+    "suggested_worth_reading",
+    "strong_relevance",
+}
+PAPER_NOTE_MODES = {"scaffold", "draft"}
 KB_GITIGNORE_LINES = [
     "# Runtime state",
     ".runtime/",
@@ -370,11 +390,30 @@ def default_runtime_preferences() -> dict[str, Any]:
             "default_terminal_mode": "codex",
             "auto_open_recent_file": True,
         },
+        "paper": {
+            "auto_screen_on_intake": True,
+            "auto_complete_note": False,
+            "auto_complete_note_condition": "suggested_worth_reading",
+            "complete_note_mode": "scaffold",
+            "auto_extract_figures_after_note": False,
+            "auto_refresh_structure_after_note": True,
+            "parse_cache_prewarm_on_intake": True,
+            "parse_cache_front_limit": 8,
+            "parse_cache_back_limit": 0,
+            "parse_cache_per_page_char_limit": 3000,
+            "screening_mode": "heuristic_structured",
+            "screening_context_pages": 6,
+            "screening_max_chars": 12000,
+            "prompt_for_preference_updates": True,
+        },
         "pdf": {
             "prefer_structured_source": True,
             "auto_extract_figures": False,
             "reuse_cached_parse": True,
-            "require_pdfimages": True,
+            "figure_extraction_mode": "caption-region",
+            "figure_include_tables": True,
+            "figure_render_scale": 2.5,
+            "figure_crop_padding_pt": 12,
             "filter_blank_and_mask_images": True,
         },
         "versioning": {
@@ -403,13 +442,60 @@ def load_runtime_preferences(project_root: Path) -> dict[str, Any]:
     browser["auto_open_recent_file"] = bool(browser.get("auto_open_recent_file"))
     normalized["browser"] = browser
 
+    paper = normalized.get("paper", {})
+    if not isinstance(paper, dict):
+        paper = {}
+    paper["auto_screen_on_intake"] = bool(paper.get("auto_screen_on_intake", True))
+    paper["auto_complete_note"] = bool(paper.get("auto_complete_note"))
+    condition = str(paper.get("auto_complete_note_condition") or "suggested_worth_reading").strip()
+    paper["auto_complete_note_condition"] = (
+        condition if condition in PAPER_AUTO_COMPLETE_CONDITIONS else "suggested_worth_reading"
+    )
+    note_mode = str(paper.get("complete_note_mode") or "scaffold").strip()
+    paper["complete_note_mode"] = note_mode if note_mode in PAPER_NOTE_MODES else "scaffold"
+    paper["auto_extract_figures_after_note"] = bool(paper.get("auto_extract_figures_after_note"))
+    paper["auto_refresh_structure_after_note"] = bool(paper.get("auto_refresh_structure_after_note", True))
+    paper["parse_cache_prewarm_on_intake"] = bool(paper.get("parse_cache_prewarm_on_intake", True))
+    try:
+        paper["parse_cache_front_limit"] = max(1, int(paper.get("parse_cache_front_limit") or 8))
+    except (TypeError, ValueError):
+        paper["parse_cache_front_limit"] = 8
+    try:
+        paper["parse_cache_back_limit"] = max(0, int(paper.get("parse_cache_back_limit") or 0))
+    except (TypeError, ValueError):
+        paper["parse_cache_back_limit"] = 0
+    try:
+        paper["parse_cache_per_page_char_limit"] = max(500, int(paper.get("parse_cache_per_page_char_limit") or 3000))
+    except (TypeError, ValueError):
+        paper["parse_cache_per_page_char_limit"] = 3000
+    paper["screening_mode"] = str(paper.get("screening_mode") or "heuristic_structured").strip() or "heuristic_structured"
+    try:
+        paper["screening_context_pages"] = max(1, int(paper.get("screening_context_pages") or 6))
+    except (TypeError, ValueError):
+        paper["screening_context_pages"] = 6
+    try:
+        paper["screening_max_chars"] = max(1000, int(paper.get("screening_max_chars") or 12000))
+    except (TypeError, ValueError):
+        paper["screening_max_chars"] = 12000
+    paper["prompt_for_preference_updates"] = bool(paper.get("prompt_for_preference_updates", True))
+    normalized["paper"] = paper
+
     pdf = normalized.get("pdf", {})
     if not isinstance(pdf, dict):
         pdf = {}
     pdf["prefer_structured_source"] = bool(pdf.get("prefer_structured_source"))
     pdf["auto_extract_figures"] = bool(pdf.get("auto_extract_figures"))
     pdf["reuse_cached_parse"] = bool(pdf.get("reuse_cached_parse"))
-    pdf["require_pdfimages"] = bool(pdf.get("require_pdfimages"))
+    pdf["figure_extraction_mode"] = "caption-region"
+    pdf["figure_include_tables"] = bool(pdf.get("figure_include_tables", True))
+    try:
+        pdf["figure_render_scale"] = max(1.0, float(pdf.get("figure_render_scale") or 2.5))
+    except (TypeError, ValueError):
+        pdf["figure_render_scale"] = 2.5
+    try:
+        pdf["figure_crop_padding_pt"] = max(0.0, float(pdf.get("figure_crop_padding_pt") or 12))
+    except (TypeError, ValueError):
+        pdf["figure_crop_padding_pt"] = 12.0
     pdf["filter_blank_and_mask_images"] = bool(pdf.get("filter_blank_and_mask_images"))
     normalized["pdf"] = pdf
 
@@ -444,7 +530,7 @@ def load_runtime_preferences(project_root: Path) -> dict[str, Any]:
 def write_runtime_preferences(project_root: Path, payload: dict[str, Any]) -> Path:
     current = load_runtime_preferences(project_root)
     merged = copy.deepcopy(current)
-    for key in ("browser", "pdf", "versioning"):
+    for key in ("browser", "paper", "pdf", "versioning"):
         value = payload.get(key)
         if isinstance(value, dict):
             target = merged.setdefault(key, {})
@@ -469,6 +555,9 @@ def kind_payload_skeleton(kind: str, title: str = "") -> dict[str, Any]:
                 "source_url": "",
                 "code_url": "",
                 "project_url": "",
+                "abstract": "",
+                "arxiv_id": "",
+                "doi": "",
             },
             "source_search": {
                 "stage_ids": [],
@@ -484,6 +573,10 @@ def kind_payload_skeleton(kind: str, title: str = "") -> dict[str, Any]:
                 "reliability": "",
                 "novelty": "",
                 "relevance_to_current_research": "",
+                "screening_mode": "",
+                "screening_evidence_pages": [],
+                "risks": [],
+                "keyword_hits": {},
                 "takeaways": [],
                 "recommended_next_action": "",
             },
@@ -523,6 +616,8 @@ def kind_payload_skeleton(kind: str, title: str = "") -> dict[str, Any]:
                 "useful_for_review": False,
                 "useful_for_experiment": False,
                 "useful_for_writing": False,
+                "full_note_status": "not_started",
+                "note_generation_mode": "scaffold",
             },
         }
     if kind == "repo":
@@ -721,17 +816,22 @@ def _unit_slug_seed(title: str, source: str = "") -> str:
 
 
 def compact_unit_slug(seed: str, *, max_words: int = COMPACT_UNIT_ID_MAX_WORDS, max_chars: int = COMPACT_UNIT_ID_MAX_CHARS) -> str:
-    slug = slugify(_unit_slug_seed(seed), max_words=max_words) or "item"
-    if len(slug) <= max_chars:
-        return slug
+    words = (slugify(_unit_slug_seed(seed), max_words=12) or "item").split("-")
+    preferred = [word for word in words if word not in STOPWORDS and word not in KEYWORD_BLACKLIST]
+    candidate_words = preferred if preferred else [word for word in words if word not in STOPWORDS]
     chosen: list[str] = []
-    for part in slug.split("-"):
+    for part in candidate_words or words:
+        if len(chosen) >= max(1, max_words):
+            break
         candidate = "-".join(chosen + [part]) if chosen else part
         if len(candidate) > max_chars:
-            break
+            if chosen:
+                continue
+            return part[:max_chars].strip("-") or "item"
         chosen.append(part)
     if chosen:
         return "-".join(chosen)
+    slug = "-".join((candidate_words or words)[:max(1, max_words)]) or "item"
     return slug[:max_chars].strip("-") or "item"
 
 
@@ -1409,8 +1509,63 @@ def apply_record_governance(
     return normalized
 
 
+AI_INFORMATION_TYPES = {"inference", "evaluation", "user_opinion"}
+GATED_CONFIRMATION_VALUES = {"pending_user_confirmation", "rejected"}
+
+
+def _record_needs_gate(record: dict[str, Any]) -> tuple[bool, set[str], bool]:
+    info_types = {str(value) for value in record.get("information_types") or []}
+    ai_info_types = info_types & AI_INFORMATION_TYPES
+    source = record.get("source") or {}
+    source_is_ai = isinstance(source, dict) and str(source.get("kind") or "").lower() == "ai"
+    return bool(ai_info_types) or source_is_ai, ai_info_types, source_is_ai
+
+
+def validate_write(record: dict[str, Any], *, strict: bool | None = None) -> list[str]:
+    """Confirmation gate contract check (see lib/research/SCHEMAS.md#confirmation-gate).
+
+    AI-derived records (information_types ∩ {inference, evaluation, user_opinion}
+    or source.kind == "ai") must carry confirmation_status ∈
+    {pending_user_confirmation, rejected} and needs_human_confirmation = true.
+
+    Returns the list of contract violations (empty when clean). In strict mode
+    raises SystemExit; otherwise emits a stderr warning. Default is non-strict;
+    set RESEARCH_VALIDATE_STRICT=1 to opt into strict.
+    """
+    if strict is None:
+        strict = os.getenv("RESEARCH_VALIDATE_STRICT") == "1"
+    needs_gate, ai_info_types, source_is_ai = _record_needs_gate(record)
+    if not needs_gate:
+        return []
+    violations: list[str] = []
+    confirmation = str(record.get("confirmation_status") or "")
+    if confirmation not in GATED_CONFIRMATION_VALUES:
+        reason_parts = []
+        if ai_info_types:
+            reason_parts.append(f"information_types={sorted(ai_info_types)}")
+        if source_is_ai:
+            reason_parts.append("source.kind=ai")
+        violations.append(
+            f"record {record.get('id')!r}: confirmation_status={confirmation!r} "
+            f"too strong for AI-derived record ({', '.join(reason_parts)}); "
+            f"expected pending_user_confirmation or rejected."
+        )
+    if not record.get("needs_human_confirmation"):
+        violations.append(
+            f"record {record.get('id')!r}: needs_human_confirmation must be true "
+            f"for AI-derived record."
+        )
+    if violations:
+        msg = "validate_write contract violations:\n  - " + "\n  - ".join(violations)
+        if strict:
+            raise SystemExit(msg)
+        sys.stderr.write(f"[research/v2.validate_write] WARN: {msg}\n")
+    return violations
+
+
 def write_record(project_root: Path, record: dict[str, Any]) -> Path:
     normalized = normalize_record_schema(record)
+    validate_write(normalized)
     root = unit_root(project_root, str(normalized["kind"]), str(normalized["id"]))
     ensure_dir(root)
     path = root / "record.yaml"
@@ -1679,6 +1834,8 @@ def lint_records(project_root: Path) -> tuple[str, list[str]]:
             issues.append(f"{unit_id}: missing taxonomy block")
         if not isinstance(record.get("candidate_pools"), list):
             issues.append(f"{unit_id}: invalid candidate_pools")
+        for violation in validate_write(record):
+            issues.append(violation)
     issues.extend(lint_workspace_integrity(project_root))
     return ("PASS" if not issues else "FAIL"), issues
 
@@ -1872,7 +2029,7 @@ def backup_source(project_root: Path, kind: str, unit_id: str, source: str) -> d
     if is_url(source):
         txt = root / "source-url.txt"
         write_text_if_changed(txt, source.strip() + "\n")
-        return {"original_uri": source, "backup_paths": [rel(project_root, txt)], "backup_kind": "url", "file_hash": ""}
+        return {"original_uri": normalize_remote_url(source), "backup_paths": [rel(project_root, txt)], "backup_kind": "url", "file_hash": ""}
 
     normalized_source = normalize_storage_reference(project_root, source)
     resolved_source = resolve_local_reference(project_root, normalized_source)
@@ -1897,22 +2054,42 @@ def backup_source(project_root: Path, kind: str, unit_id: str, source: str) -> d
     }
 
 
-def detect_duplicate(project_root: Path, kind: str, source: str) -> dict[str, Any] | None:
-    normalized = normalize_storage_reference(project_root, source)
+def detect_duplicate(project_root: Path, kind: str, source: str, *, title: str = "") -> dict[str, Any] | None:
+    normalized = normalize_remote_url(source) if is_url(source) else normalize_storage_reference(project_root, source)
     file_hash = ""
+    candidate_arxiv_id = parse_arxiv_id(source)
+    candidate_title = normalize_title(title) if title else ""
     if not is_url(source):
         path = resolve_local_reference(project_root, normalized) or Path(normalized).expanduser().resolve()
         if path.exists() and path.is_file():
             file_hash = file_sha256(path)
             normalized = path.as_posix()
+            if not candidate_arxiv_id:
+                candidate_arxiv_id = parse_arxiv_id(path.name)
         elif path.exists():
             normalized = path.as_posix()
     for record in iter_records(project_root, kind=kind):
         record_source = record.get("source", {})
-        if normalized and normalized == str(record_source.get("original_uri") or ""):
+        record_original_uri = str(record_source.get("original_uri") or "")
+        record_normalized = normalize_remote_url(record_original_uri) if is_url(record_original_uri) else record_original_uri
+        if normalized and normalized == record_normalized:
             return record
         if file_hash and file_hash == str(record_source.get("file_hash") or ""):
             return record
+        if kind == "paper":
+            record_arxiv_id = parse_arxiv_id(
+                "\n".join(
+                    [
+                        record_original_uri,
+                        str(record.get("title") or ""),
+                        str(record.get("payload", {}).get("basic_info", {}).get("source_url") or ""),
+                    ]
+                )
+            )
+            if candidate_arxiv_id and record_arxiv_id and candidate_arxiv_id == record_arxiv_id:
+                return record
+            if candidate_title and candidate_title == normalize_title(str(record.get("title") or "")):
+                return record
     return None
 
 

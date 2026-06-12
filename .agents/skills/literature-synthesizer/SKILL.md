@@ -5,6 +5,8 @@ description: 负责跨 paper / repo / blog / idea 的 survey、taxonomy、topic 
 
 # Literature Synthesizer
 
+> 协议参考：`.agents/lib/research/SCHEMAS.md#unit-record` · `#config-files` · `#ownership`
+
 当任务是在多个知识单元之间做综述、趋势、taxonomy、topic map 或 pool review，而不是分析单个 source 时，使用这个 skill。
 
 ## 负责范围

@@ -5,6 +5,8 @@ description: Turn a selected v2 idea unit into a method design handoff with repo
 
 # Method Designer
 
+> 协议参考：`.agents/lib/research/SCHEMAS.md#unit-record` · `#program-files` · `#confirmation-gate`
+
 Use this skill only after an idea has been explicitly selected.
 
 ## Workflow
