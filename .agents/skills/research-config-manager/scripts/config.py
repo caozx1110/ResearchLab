@@ -40,6 +40,16 @@ def profile_path(root: Path) -> Path:
 def settings_path(root: Path) -> Path:
     return config_root(root) / "research-settings.md"
 
+
+TOGGLE_RUNTIME_PREFS = {
+    "新论文入库后自动快速筛选": [("paper", "auto_screen_on_intake", lambda on: on)],
+    "intake 阶段预热 PDF 解析缓存": [("paper", "parse_cache_prewarm_on_intake", lambda on: on)],
+    "自动生成详细论文笔记": [("paper", "auto_complete_note", lambda on: on)],
+    "完整笔记后自动提取 Figure / Table": [("paper", "auto_extract_figures_after_note", lambda on: on)],
+    "完整笔记后自动刷新结构": [("paper", "auto_refresh_structure_after_note", lambda on: on)],
+}
+
+
 def _default_profile() -> dict:
     return {
         **yaml_default("research-user-profile-v2", "research-config-manager", status="active"),
@@ -95,6 +105,67 @@ def parse_value(raw: str) -> object:
         return json.loads(text)
     except json.JSONDecodeError:
         return raw
+
+
+def _apply_runtime_pref(payload: dict, section: str, key: str, value: object) -> None:
+    payload.setdefault(section, {})
+    if not isinstance(payload[section], dict):
+        payload[section] = {}
+    payload[section][key] = value
+
+
+def sync_toggle_runtime_preferences(root: Path, *, key: str, on: bool) -> list[str]:
+    updates = TOGGLE_RUNTIME_PREFS.get(key, [])
+    if not updates:
+        return []
+    payload = load_runtime_preferences(root)
+    touched: list[str] = []
+    for section, pref_key, resolver in updates:
+        _apply_runtime_pref(payload, section, pref_key, resolver(on))
+        touched.append(f"{section}.{pref_key}")
+    write_runtime_preferences(root, payload)
+    return touched
+
+
+def _onoff(value: bool) -> str:
+    return "on" if value else "off"
+
+
+def print_guide(root: Path, *, focus: str) -> None:
+    runtime = load_runtime_preferences(root)
+    paper = runtime.get("paper", {})
+    pdf = runtime.get("pdf", {})
+    versioning = runtime.get("versioning", {})
+    if focus in {"all", "paper-intake"}:
+        print("[paper-intake]")
+        print(f"- 自动快速筛选: {_onoff(bool(paper.get('auto_screen_on_intake', True)))}")
+        print(f"- intake 预热解析缓存: {_onoff(bool(paper.get('parse_cache_prewarm_on_intake', True)))}")
+        print(f"- 自动完整笔记: {_onoff(bool(paper.get('auto_complete_note')))}")
+        print(f"- 完整笔记触发条件: {paper.get('auto_complete_note_condition')}")
+        print(f"- 完整笔记模式: {paper.get('complete_note_mode')}")
+        print(f"- 完整笔记后自动提图: {_onoff(bool(paper.get('auto_extract_figures_after_note')))}")
+        print(f"- 完整笔记后自动刷新结构: {_onoff(bool(paper.get('auto_refresh_structure_after_note', True)))}")
+        print(f"- PDF Figure 模式: {pdf.get('figure_extraction_mode')}")
+        print("")
+        print("建议修改：")
+        if not bool(paper.get("auto_complete_note")):
+            print(
+                "- 如果你希望值得读的论文默认自动生成完整笔记："
+                " set-runtime-pref --section paper --key auto_complete_note --value true"
+            )
+        if str(paper.get("complete_note_mode") or "scaffold") != "draft":
+            print(
+                "- 如果你希望默认直接生成更饱满的草稿："
+                " set-runtime-pref --section paper --key complete_note_mode --value draft"
+            )
+        if not bool(paper.get("auto_extract_figures_after_note")):
+            print(
+                "- 如果你希望完整笔记后顺手导出 Figure / Table："
+                " set-runtime-pref --section paper --key auto_extract_figures_after_note --value true"
+            )
+        if str(versioning.get("auto_commit_mode") or "milestone") == "aggressive":
+            print("- 当前 Git 自动提交较激进；如果你想少一点碎提交，可改回 milestone。")
+        print("- 用 toggle 管布尔开关，用 set-runtime-pref 管模式类选项。")
 
 
 def upsert_taxonomy_seed(root: Path, *, topic: str, aliases: list[str], tags: list[str], note: str, status: str) -> Path:
@@ -181,8 +252,11 @@ def build_parser() -> argparse.ArgumentParser:
     pool.add_argument("--description", default="")
     pool.add_argument("--status", default="active")
 
-    runtime = subparsers.add_parser("set-runtime-pref", help="Persist browser / pdf / versioning runtime preferences")
-    runtime.add_argument("--section", required=True, choices=["browser", "pdf", "versioning"])
+    guide = subparsers.add_parser("guide", help="Show practical guidance for current runtime modes")
+    guide.add_argument("--focus", choices=["all", "paper-intake"], default="all")
+
+    runtime = subparsers.add_parser("set-runtime-pref", help="Persist browser / paper / pdf / versioning runtime preferences")
+    runtime.add_argument("--section", required=True, choices=["browser", "paper", "pdf", "versioning"])
     runtime.add_argument("--key", required=True)
     runtime.add_argument("--value", required=True)
     return parser
@@ -241,7 +315,10 @@ def main() -> int:
         if not found:
             lines.append(f"- {marker} {args.key}")
         write_text_if_changed(path, "\n".join(lines).strip() + "\n")
+        touched = sync_toggle_runtime_preferences(root, key=args.key, on=on)
         print(f"[ok] toggled {args.key} -> {args.state}")
+        if touched:
+            print(f"[ok] synced runtime prefs: {', '.join(touched)}")
         return 0
     if args.command == "capture-resources":
         payload = load_profile(root)
@@ -273,12 +350,12 @@ def main() -> int:
         )
         print(f"[ok] updated {path.relative_to(root)}")
         return 0
+    if args.command == "guide":
+        print_guide(root, focus=args.focus)
+        return 0
     if args.command == "set-runtime-pref":
         payload = load_runtime_preferences(root)
-        payload.setdefault(args.section, {})
-        if not isinstance(payload[args.section], dict):
-            payload[args.section] = {}
-        payload[args.section][args.key] = parse_value(args.value)
+        _apply_runtime_pref(payload, args.section, args.key, parse_value(args.value))
         write_runtime_preferences(root, payload)
         print(f"[ok] updated {runtime_preferences_path(root).relative_to(root)}")
         checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: update runtime pref {args.section}.{args.key}")

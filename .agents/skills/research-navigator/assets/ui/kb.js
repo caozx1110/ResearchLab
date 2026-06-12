@@ -24,10 +24,12 @@
 
   const PROGRAM_STAGES = [
     { id: "problem-framing", label: "问题定义" },
+    { id: "idea-review-and-design", label: "想法评审/设计" },
     { id: "literature-analysis", label: "文献分析" },
     { id: "idea-generation", label: "想法生成" },
     { id: "idea-review", label: "方案评审" },
     { id: "method-design", label: "方法设计" },
+    { id: "phase-1-complete-interface-design", label: "Phase 1 完成/接口设计" },
     { id: "implementation-planning", label: "实现规划" },
   ];
 
@@ -671,16 +673,37 @@
     elements.activitySearchBtn.setAttribute("aria-label", expanded ? "收起搜索分栏" : "展开搜索分栏");
   }
 
+  function isPortraitLayoutViewport() {
+    return window.innerWidth <= 1280 && window.innerHeight >= window.innerWidth * 1.08;
+  }
+
+  function isStackedLayoutViewport() {
+    return window.innerWidth <= 1080 || isPortraitLayoutViewport();
+  }
+
   function renderLayout() {
     const sidebarVisible = !state.layout.sidebarCollapsed;
     const detailVisible = !state.layout.detailCollapsed;
     const panelVisible = !state.terminal.collapsed;
+    const stackedLayout = isStackedLayoutViewport();
+    const portraitLayout = isPortraitLayoutViewport();
 
     elements.appShell.classList.toggle("search-mode", !!state.layout.searchMode);
     elements.appShell.classList.toggle("sidebar-collapsed", !sidebarVisible);
+    elements.appShell.classList.toggle("stacked-layout", stackedLayout);
+    elements.appShell.classList.toggle("portrait-layout", portraitLayout);
+    document.documentElement.dataset.viewportMode = portraitLayout ? "portrait" : stackedLayout ? "stacked" : "desktop";
     document.documentElement.style.setProperty("--sidebar-current-width", sidebarVisible ? `${cssNumber("--sidebar-width", 320)}px` : "0px");
     document.documentElement.style.setProperty("--detail-current-width", detailVisible ? `${cssNumber("--detail-width", 360)}px` : "0px");
     document.documentElement.style.setProperty("--panel-current-height", panelVisible ? `${cssNumber("--panel-height", 260)}px` : "0px");
+    document.documentElement.style.setProperty(
+      "--portrait-nav-current-width",
+      sidebarVisible ? "var(--portrait-nav-width)" : "0px",
+    );
+    document.documentElement.style.setProperty(
+      "--portrait-detail-current-height",
+      detailVisible ? "var(--portrait-detail-height)" : "0px",
+    );
     document.documentElement.style.setProperty("--left-resizer-current", sidebarVisible ? "4px" : "0px");
     document.documentElement.style.setProperty("--right-resizer-current", detailVisible ? "4px" : "0px");
     document.documentElement.style.setProperty("--bottom-resizer-current", panelVisible ? "4px" : "0px");
@@ -691,8 +714,8 @@
     elements.listResizer.classList.toggle("hidden", !sidebarVisible);
     elements.detailResizer.classList.toggle("hidden", !detailVisible);
     elements.terminalResizer.classList.toggle("hidden", !panelVisible);
-    elements.detailCollapsedHandle.classList.toggle("hidden", detailVisible || window.innerWidth <= 1080);
-    elements.terminalCollapsedHandle.classList.toggle("hidden", panelVisible || window.innerWidth <= 1080);
+    elements.detailCollapsedHandle.classList.toggle("hidden", detailVisible || stackedLayout);
+    elements.terminalCollapsedHandle.classList.toggle("hidden", panelVisible || stackedLayout);
 
     elements.sidebarToggleBtn.classList.toggle("active", state.layout.theme === "light");
     elements.detailToggleBtn.classList.toggle("active", detailVisible);
@@ -1029,7 +1052,9 @@
   function quickOpenItems() {
     const snapshot = getSnapshot();
     const curated = Array.isArray(snapshot.user_entry_items) ? snapshot.user_entry_items : [];
-    return curated.filter((item) => item && item.path && item.href).slice(0, 14);
+    return curated
+      .filter((item) => item && item.path && item.href && String(item.group || "") !== "program")
+      .slice(0, 8);
   }
 
   function renderQuickOpenBar() {
@@ -1042,6 +1067,7 @@
       const group = String(item.group || "");
       const title = String(item.title || basename(item.path || ""));
       const path = normalizeInternalPath(item.path || "");
+      if (group === "program" && title.includes(" · ")) return title;
       if (title.includes("研究导航")) return "导航";
       if (title.includes("上手指南")) return "指南";
       if (title.includes("Current State")) return "当前状态";
@@ -1050,6 +1076,10 @@
       if (group === "report") return "成果";
       if (/weekly\//.test(path)) return "周报";
       if (/state\.yaml$/.test(path)) return "状态";
+      if (/README\.md$/i.test(path)) return "概览";
+      if (/idea-card\.md$/i.test(path)) return "Idea";
+      if (/progress-update|weekly-report|weekly\.md$/i.test(path)) return "进展";
+      if (/minimum-validation-matrix\.md$|matrix\.ya?ml$/i.test(path)) return "矩阵";
       if (/system-design\.md$/.test(path)) return "设计";
       if (/runbook\.md$/.test(path)) return "实验";
       return title.replace(/humanoid[-_ ]vla[-_ ]wholebody[-_ ]control/gi, "").trim() || basename(path);
@@ -2718,6 +2748,7 @@
   function renderWorkbench() {
     const wb = state.workbench;
     elements.appShell.classList.toggle("workbench-active", !!wb.path || wb.kind === "settings");
+    elements.appShell.classList.toggle("reader-focus", !!wb.path && wb.kind !== "settings");
     elements.workbenchTitle.textContent = wb.kind === "settings" ? "工作区设置" : wb.path ? basename(wb.path) : "知识工作台";
     elements.workbenchMeta.textContent = "";
     elements.workbenchPath.textContent = wb.kind === "settings" ? "kb://settings" : wb.path || "尚未打开";
@@ -2822,7 +2853,7 @@
     }
 
     handle.addEventListener("mousedown", (event) => {
-      if (window.innerWidth <= 1020 || state.terminal.collapsed) return;
+      if (isStackedLayoutViewport() || state.terminal.collapsed) return;
       dragging = true;
       startY = event.clientY;
       startHeight = cssNumber("--panel-height", 260);
@@ -2859,7 +2890,7 @@
     }
 
     handle.addEventListener("mousedown", (event) => {
-      if (window.innerWidth <= 1020 || state.layout.sidebarCollapsed) return;
+      if (isStackedLayoutViewport() || state.layout.sidebarCollapsed) return;
       dragging = true;
       startX = event.clientX;
       startWidth = cssNumber("--sidebar-width", 320);
@@ -2896,7 +2927,7 @@
     }
 
     handle.addEventListener("mousedown", (event) => {
-      if (window.innerWidth <= 1020 || state.layout.detailCollapsed) return;
+      if (isStackedLayoutViewport() || state.layout.detailCollapsed) return;
       dragging = true;
       startX = event.clientX;
       startWidth = cssNumber("--detail-width", 360);

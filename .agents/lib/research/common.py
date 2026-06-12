@@ -556,7 +556,11 @@ def canonicalize_url(url: str) -> str:
     path = re.sub(r"/+", "/", parsed.path or "/")
     query_pairs = parse_qs(parsed.query, keep_blank_values=False)
     keep_keys = []
-    if "openreview.net" in netloc:
+    if "arxiv.org" in netloc:
+        arxiv_id = parse_arxiv_id(url)
+        if arxiv_id:
+            path = f"/abs/{arxiv_id}"
+    elif "openreview.net" in netloc:
         keep_keys = ["id"]
     elif "doi.org" in netloc:
         keep_keys = []

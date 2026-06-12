@@ -838,6 +838,40 @@ def _idea_entry(project_root: Path, program_root: Path, idea_id: str, row: dict[
     }
 
 
+def _v2_idea_entry(project_root: Path, record: dict[str, Any]) -> dict[str, Any]:
+    idea_id = str(record.get("id") or "")
+    payload = _safe_dict(record.get("payload"))
+    hypothesis = _safe_dict(payload.get("hypothesis"))
+    review = _safe_dict(payload.get("review"))
+    unit_path = v2_record_path(project_root, "idea", idea_id).parent if idea_id else Path()
+    idea_card_path = unit_path / "idea-card.md" if unit_path else Path()
+    review_path = unit_path / "review.yaml" if unit_path else Path()
+    repo_ids = []
+    for link in record.get("links", []) or []:
+        if not isinstance(link, dict):
+            continue
+        target_id = str(link.get("target_id") or "")
+        if target_id.startswith("r-"):
+            repo_ids.append(target_id)
+    return {
+        "idea_id": idea_id,
+        "title": str(record.get("title") or idea_id),
+        "status": str(record.get("status") or ""),
+        "recommended_bucket": str(review.get("recommendation") or ""),
+        "hypothesis": compact_text(hypothesis.get("core_hypothesis") or record.get("summary") or "", limit=180),
+        "novelty_claim": compact_text(hypothesis.get("difference_from_prior_work") or "", limit=180),
+        "repo_ids": repo_ids[:3],
+        "review_recommendation": str(review.get("recommendation") or ""),
+        "reason": compact_text(record.get("summary") or "", limit=180),
+        "updated_at": str(record.get("updated_at") or ""),
+        "links": {
+            "proposal": relative_link_payload(project_root, relative_path(project_root, idea_card_path)) if idea_card_path.exists() else {"path": "", "href": ""},
+            "review": relative_link_payload(project_root, relative_path(project_root, review_path)) if review_path.exists() else {"path": "", "href": ""},
+            "decision": {"path": "", "href": ""},
+        },
+    }
+
+
 def _selected_idea_id(state: dict[str, Any], ideas: list[dict[str, Any]]) -> str:
     selected = str(state.get("selected_idea_id") or "").strip()
     if selected:
@@ -855,16 +889,24 @@ def build_program_items(project_root: Path) -> list[dict[str, Any]]:
         return items
     for program_root in sorted(path for path in programs_root.iterdir() if path.is_dir()):
         program_id = program_root.name
-        charter_path = program_root / "charter.yaml"
-        state_path = program_root / "workflow" / "state.yaml"
+        readme_path = program_root / "README.md"
+        legacy_charter_path = program_root / "charter.yaml"
+        charter_path = legacy_charter_path
+        charter_link_path = legacy_charter_path if legacy_charter_path.exists() else readme_path
+        legacy_state_path = program_root / "workflow" / "state.yaml"
+        state_path = legacy_state_path if legacy_state_path.exists() else program_root / "state.yaml"
         literature_map_path = program_root / "evidence" / "literature-map.yaml"
         ideas_index_path = program_root / "ideas" / "index.yaml"
         repo_choice_path = program_root / "design" / "repo-choice.yaml"
-        design_doc_path = program_root / "design" / "system-design.md"
+        legacy_design_doc_path = program_root / "design" / "system-design.md"
+        design_doc_path = legacy_design_doc_path if legacy_design_doc_path.exists() else readme_path
         interfaces_path = program_root / "design" / "interfaces.yaml"
         selected_idea_path = program_root / "design" / "selected-idea.yaml"
-        runbook_path = program_root / "experiments" / "runbook.md"
-        matrix_path = program_root / "experiments" / "matrix.yaml"
+        legacy_runbook_path = program_root / "experiments" / "runbook.md"
+        runbook_path = legacy_runbook_path if legacy_runbook_path.exists() else program_root / "experiments" / "minimum-validation-matrix.md"
+        legacy_matrix_path = program_root / "experiments" / "matrix.yaml"
+        matrix_path = legacy_matrix_path
+        matrix_link_path = legacy_matrix_path if legacy_matrix_path.exists() else program_root / "experiments" / "minimum-validation-matrix.md"
         decision_log_path = program_root / "workflow" / "decision-log.md"
         open_questions_path = program_root / "workflow" / "open-questions.yaml"
         evidence_requests_path = program_root / "workflow" / "evidence-requests.yaml"
@@ -882,9 +924,22 @@ def build_program_items(project_root: Path) -> list[dict[str, Any]]:
             if not isinstance(row, dict):
                 continue
             ideas.append(_idea_entry(project_root, program_root, str(idea_id), row))
+        active_unit_ids = set(normalize_list(state.get("active_unit_ids")))
+        selected_idea_from_state = str(state.get("selected_idea_id") or "").strip()
+        legacy_idea_ids = {str(item.get("idea_id") or "") for item in ideas}
+        for record in iter_v2_records(project_root, kind="idea"):
+            idea_id = str(record.get("id") or "")
+            if not idea_id or idea_id in legacy_idea_ids:
+                continue
+            record_program_ids = set(normalize_list(record.get("program_ids")))
+            if idea_id in active_unit_ids or idea_id == selected_idea_from_state or program_id in record_program_ids:
+                ideas.append(_v2_idea_entry(project_root, record))
+                legacy_idea_ids.add(idea_id)
         ideas.sort(key=_idea_sort_key)
         selected_id = _selected_idea_id(state, ideas)
         selected_idea = next((item for item in ideas if item.get("idea_id") == selected_id), {})
+        selected_idea_links = _safe_dict(selected_idea.get("links")) if selected_idea else {}
+        selected_idea_fallback_link = _safe_dict(selected_idea_links.get("proposal"))
         retrieval = _safe_dict(literature_map.get("retrieval"))
         top_sources = []
         for source in retrieval.get("selected_sources", []) or []:
@@ -901,11 +956,18 @@ def build_program_items(project_root: Path) -> list[dict[str, Any]]:
                 }
             )
         current_selected_repo = str(state.get("selected_repo_id") or repo_choice.get("selected_repo") or "")
+        active_experiment_count = sum(1 for unit_id in active_unit_ids if unit_id.startswith("x-"))
+        if not active_experiment_count:
+            active_experiment_count = sum(
+                1
+                for record in iter_v2_records(project_root, kind="experiment")
+                if program_id in set(normalize_list(record.get("program_ids")))
+            )
         items.append(
             {
                 "program_id": program_id,
-                "question": str(charter.get("question") or ""),
-                "goal": str(charter.get("goal") or ""),
+                "question": str(charter.get("question") or state.get("question") or ""),
+                "goal": str(charter.get("goal") or state.get("goal") or ""),
                 "stage": str(state.get("stage") or ""),
                 "active_idea_id": str(state.get("active_idea_id") or ""),
                 "selected_idea_id": selected_id,
@@ -920,18 +982,18 @@ def build_program_items(project_root: Path) -> list[dict[str, Any]]:
                 "decision_log_preview": markdown_preview(decision_log_path),
                 "open_question_count": _collection_count(open_questions, ["items", "questions", "open_questions"]),
                 "evidence_request_count": _collection_count(evidence_requests, ["items", "requests", "evidence_requests"]),
-                "experiment_count": _collection_count(matrix, ["items", "experiments", "rows", "entries", "matrix"]),
+                "experiment_count": active_experiment_count or _collection_count(matrix, ["items", "experiments", "rows", "entries", "matrix"]),
                 "links": {
-                    "charter": relative_link_payload(project_root, relative_path(project_root, charter_path)) if charter_path.exists() else {"path": "", "href": ""},
+                    "charter": relative_link_payload(project_root, relative_path(project_root, charter_link_path)) if charter_link_path.exists() else {"path": "", "href": ""},
                     "state": relative_link_payload(project_root, relative_path(project_root, state_path)) if state_path.exists() else {"path": "", "href": ""},
                     "literature_map": relative_link_payload(project_root, relative_path(project_root, literature_map_path)) if literature_map_path.exists() else {"path": "", "href": ""},
                     "ideas_index": relative_link_payload(project_root, relative_path(project_root, ideas_index_path)) if ideas_index_path.exists() else {"path": "", "href": ""},
                     "repo_choice": relative_link_payload(project_root, relative_path(project_root, repo_choice_path)) if repo_choice_path.exists() else {"path": "", "href": ""},
                     "design_doc": relative_link_payload(project_root, relative_path(project_root, design_doc_path)) if design_doc_path.exists() else {"path": "", "href": ""},
                     "interfaces": relative_link_payload(project_root, relative_path(project_root, interfaces_path)) if interfaces_path.exists() else {"path": "", "href": ""},
-                    "selected_idea": relative_link_payload(project_root, relative_path(project_root, selected_idea_path)) if selected_idea_path.exists() else {"path": "", "href": ""},
+                    "selected_idea": relative_link_payload(project_root, relative_path(project_root, selected_idea_path)) if selected_idea_path.exists() else selected_idea_fallback_link,
                     "runbook": relative_link_payload(project_root, relative_path(project_root, runbook_path)) if runbook_path.exists() else {"path": "", "href": ""},
-                    "matrix": relative_link_payload(project_root, relative_path(project_root, matrix_path)) if matrix_path.exists() else {"path": "", "href": ""},
+                    "matrix": relative_link_payload(project_root, relative_path(project_root, matrix_link_path)) if matrix_link_path.exists() else {"path": "", "href": ""},
                     "decision_log": relative_link_payload(project_root, relative_path(project_root, decision_log_path)) if decision_log_path.exists() else {"path": "", "href": ""},
                     "open_questions": relative_link_payload(project_root, relative_path(project_root, open_questions_path)) if open_questions_path.exists() else {"path": "", "href": ""},
                     "evidence_requests": relative_link_payload(project_root, relative_path(project_root, evidence_requests_path)) if evidence_requests_path.exists() else {"path": "", "href": ""},
@@ -940,12 +1002,15 @@ def build_program_items(project_root: Path) -> list[dict[str, Any]]:
                 "generated_at": _max_timestamp(
                     str(charter.get("generated_at") or ""),
                     str(state.get("generated_at") or ""),
+                    str(state.get("updated_at") or ""),
                     str(literature_map.get("generated_at") or ""),
                     str(ideas_index.get("generated_at") or ""),
                     str(repo_choice.get("generated_at") or ""),
                     str(matrix.get("generated_at") or ""),
                     str(open_questions.get("generated_at") or ""),
                     str(evidence_requests.get("generated_at") or ""),
+                    _path_mtime_iso(readme_path),
+                    _path_mtime_iso(state_path),
                 ),
             }
         )
@@ -1017,15 +1082,38 @@ def build_user_entry_items(project_root: Path, program_items: list[dict[str, Any
         for path in report_material_files[:6]:
             add(path, path.stem.replace("-", " "), "report")
 
-    for program in program_items[:4]:
+    def add_program_link(program_id: str, rel_path: str, label: str, *, preview_limit: int = 220) -> None:
+        rel = str(rel_path or "").strip()
+        if not rel:
+            return
+        add(project_root / rel, f"{program_id} · {label}", "program", preview_limit=preview_limit)
+
+    featured_programs = program_items[:1]
+    for program in featured_programs:
         links = _safe_dict(program.get("links"))
         program_id = str(program.get("program_id") or "").strip() or "program"
-        if links.get("state", {}).get("path"):
-            add(project_root / str(links["state"]["path"]), f"{program_id} · workflow/state.yaml", "program")
-        if links.get("design_doc", {}).get("path"):
-            add(project_root / str(links["design_doc"]["path"]), f"{program_id} · system-design.md", "program")
-        if links.get("runbook", {}).get("path"):
-            add(project_root / str(links["runbook"]["path"]), f"{program_id} · experiments/runbook.md", "program")
+        state_link = _safe_dict(links.get("state"))
+        charter_link = _safe_dict(links.get("charter"))
+        matrix_link = _safe_dict(links.get("matrix"))
+
+        add_program_link(program_id, str(state_link.get("path") or ""), "状态")
+
+        reports_root = research / "programs" / program_id / "reports"
+        report_files = []
+        if reports_root.exists():
+            report_files = sorted(
+                (path for path in reports_root.glob("*.md") if path.is_file()),
+                key=lambda path: (_path_mtime_iso(path), path.name),
+                reverse=True,
+            )
+        if report_files:
+            add(report_files[0], f"{program_id} · 最新进展", "program", preview_limit=260)
+
+        add_program_link(program_id, str(charter_link.get("path") or ""), "概览", preview_limit=260)
+
+        matrix_path = str(matrix_link.get("path") or "")
+        if matrix_path:
+            add_program_link(program_id, matrix_path, "验证矩阵", preview_limit=240)
 
         weekly_root = research / "programs" / program_id / "weekly"
         if weekly_root.exists():
@@ -1036,8 +1124,6 @@ def build_user_entry_items(project_root: Path, program_items: list[dict[str, Any
             )
             if weekly_files:
                 add(weekly_files[0], f"{program_id} · 最新周报", "program", preview_limit=260)
-
-    entries.sort(key=lambda item: (str(item.get("group") or ""), str(item.get("updated_at") or ""), str(item.get("title") or "")), reverse=True)
     return entries
 
 

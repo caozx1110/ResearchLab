@@ -48,6 +48,10 @@
   --editor-font-size: 0.84rem;
   --reader-line-height: 1.66;
   --preview-max-width: 68rem;
+  --portrait-nav-width: clamp(180px, 21vw, 240px);
+  --portrait-detail-height: clamp(72px, 10dvh, 120px);
+  --portrait-nav-current-width: var(--portrait-nav-width);
+  --portrait-detail-current-height: var(--portrait-detail-height);
 }
 
 html[data-theme="light"] {
@@ -2198,4 +2202,518 @@ html[data-theme="light"] .settings-checkbox {
   .terminal-line-input {
     grid-column: 1 / span 2;
   }
+}
+
+html[data-viewport-mode="stacked"] body {
+  overflow-y: auto;
+}
+
+.app-shell.stacked-layout {
+  height: auto;
+  min-height: 100%;
+  grid-template-columns: var(--activity-width) minmax(0, 1fr);
+  grid-template-rows: auto auto auto;
+}
+
+.app-shell.stacked-layout .activity-bar {
+  grid-row: 1 / span 3;
+}
+
+.app-shell.stacked-layout .primary-sidebar,
+.app-shell.stacked-layout .center-stack,
+.app-shell.stacked-layout .detail-panel {
+  grid-column: 2;
+  border-left: 1px solid var(--line);
+}
+
+.app-shell.stacked-layout .primary-sidebar {
+  grid-row: 1;
+}
+
+.app-shell.stacked-layout .center-stack {
+  grid-row: 2;
+  min-height: clamp(720px, 72dvh, 980px);
+}
+
+.app-shell.stacked-layout .detail-panel {
+  grid-row: 3;
+  border-top: 1px solid var(--line);
+}
+
+.app-shell.stacked-layout .panel-resizer,
+.app-shell.stacked-layout .detail-collapsed-handle,
+.app-shell.stacked-layout .terminal-collapsed-handle {
+  display: none !important;
+}
+
+.app-shell.stacked-layout .sidebar-search,
+.app-shell.stacked-layout .quick-open-section {
+  display: block;
+}
+
+.app-shell.stacked-layout .primary-sidebar.collapsed,
+.app-shell.stacked-layout .detail-panel.collapsed,
+.app-shell.stacked-layout .terminal-panel.collapsed {
+  visibility: visible;
+  pointer-events: auto;
+}
+
+.app-shell.portrait-layout {
+  height: 100dvh;
+  min-height: 100dvh;
+  overflow: hidden;
+  grid-template-columns: var(--portrait-nav-current-width) minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) var(--portrait-detail-current-height);
+}
+
+.app-shell.portrait-layout .activity-bar {
+  grid-column: 1 / -1;
+  grid-row: 1;
+  grid-template-rows: auto;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  border-right: 0;
+  border-bottom: 1px solid var(--line);
+  padding: 8px 10px;
+  gap: 8px;
+}
+
+.app-shell.portrait-layout .activity-brand,
+.app-shell.portrait-layout .activity-stack,
+.app-shell.portrait-layout .activity-status,
+.app-shell.portrait-layout .activity-nav {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+}
+
+.app-shell.portrait-layout .activity-stack {
+  justify-content: flex-start;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.app-shell.portrait-layout .activity-nav {
+  gap: 6px;
+  flex-wrap: nowrap;
+}
+
+.app-shell.portrait-layout .activity-stack.bottom {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-start;
+  min-width: 0;
+  gap: 6px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-top: 0;
+}
+
+.app-shell.portrait-layout .activity-status {
+  justify-content: flex-end;
+  gap: 6px;
+  padding: 0;
+}
+
+.app-shell.portrait-layout .activity-status .status-note {
+  max-width: 3.4em;
+  text-align: right;
+  line-height: 1.1;
+  font-size: 0.62rem;
+}
+
+.app-shell.portrait-layout .activity-utility,
+.app-shell.portrait-layout .tab-button {
+  width: 38px;
+  min-width: 38px;
+  min-height: 38px;
+  border-radius: 12px;
+}
+
+.app-shell.portrait-layout .primary-sidebar,
+.app-shell.portrait-layout .center-stack,
+.app-shell.portrait-layout .detail-panel {
+  border-left: 0;
+}
+
+.app-shell.portrait-layout .primary-sidebar {
+  grid-column: 1;
+  grid-row: 2;
+  align-self: stretch;
+  min-height: 0;
+  max-height: none;
+  grid-template-rows: auto auto auto auto;
+  border-right: 1px solid var(--line);
+}
+
+.app-shell.portrait-layout .sidebar-head {
+  min-height: 0;
+  padding: 10px 12px 8px;
+}
+
+.app-shell.portrait-layout .sidebar-search {
+  padding: 6px 12px;
+}
+
+.app-shell.portrait-layout .search-head {
+  margin-bottom: 0;
+}
+
+.app-shell.portrait-layout .quick-open-section {
+  padding: 6px 12px;
+}
+
+.app-shell.portrait-layout .listContainer,
+.app-shell.portrait-layout .list-container {
+  padding: 6px 8px 10px;
+}
+
+.app-shell.portrait-layout .list-card {
+  padding: 9px 10px 9px 12px;
+}
+
+.app-shell.portrait-layout .list-title {
+  font-size: 0.82rem;
+}
+
+.app-shell.portrait-layout .list-summary {
+  font-size: 0.72rem;
+}
+
+.app-shell.portrait-layout .center-stack {
+  grid-column: 2;
+  grid-row: 2;
+  min-height: 0;
+}
+
+.app-shell.portrait-layout .workbench-panel {
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.app-shell.portrait-layout .detail-panel {
+  grid-column: 1 / -1;
+  grid-row: 3;
+  align-self: stretch;
+  min-height: 0;
+  max-height: var(--portrait-detail-current-height);
+  grid-template-rows: auto minmax(0, 1fr);
+  border-top: 1px solid var(--line);
+}
+
+.app-shell.portrait-layout .detail-head {
+  min-height: 0;
+  padding: 8px 12px 6px;
+}
+
+.app-shell.portrait-layout .detail-head .panel-subtle {
+  display: none;
+}
+
+.app-shell.portrait-layout .detail-body {
+  padding: 4px 8px 8px;
+  gap: 4px;
+}
+
+.app-shell.portrait-layout .detail-section {
+  padding: 8px 10px;
+}
+
+.app-shell.portrait-layout .detail-section:not(:first-child) {
+  display: none;
+}
+
+.app-shell.portrait-layout .primary-sidebar.collapsed,
+.app-shell.portrait-layout .detail-panel.collapsed {
+  display: none;
+}
+
+.app-shell.portrait-layout .sidebar-head,
+.app-shell.portrait-layout .workbench-head,
+.app-shell.portrait-layout .terminal-head,
+.app-shell.portrait-layout .detail-head {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.app-shell.portrait-layout .workbench-status {
+  align-self: flex-start;
+}
+
+.app-shell.portrait-layout .workbench-pathbar,
+.app-shell.portrait-layout .section-head {
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.app-shell.portrait-layout .path-group {
+  width: 100%;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.app-shell.portrait-layout .workbench-pathbar code {
+  max-width: 100%;
+  white-space: normal;
+  word-break: break-all;
+}
+
+.app-shell.portrait-layout .quick-open-bar {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
+  gap: 8px;
+  overflow: visible;
+  padding-bottom: 0;
+}
+
+.app-shell.portrait-layout .quick-open-bar > * {
+  min-width: 0;
+}
+
+.app-shell.portrait-layout .workbench-body.mode-split {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(240px, 1fr) minmax(220px, 1fr);
+}
+
+.app-shell.portrait-layout .kv-grid,
+.app-shell.portrait-layout .settings-panel-grid,
+.app-shell.portrait-layout .settings-grid,
+.app-shell.portrait-layout .settings-section-grid,
+.app-shell.portrait-layout .settings-hero,
+.app-shell.portrait-layout .settings-compact-head {
+  grid-template-columns: 1fr;
+}
+
+.app-shell.portrait-layout .terminal-entry {
+  grid-template-columns: minmax(0, 1fr) auto auto;
+}
+
+.app-shell.portrait-layout .terminal-prompt {
+  display: none;
+}
+
+.app-shell.portrait-layout .terminal-line-input {
+  grid-column: auto;
+}
+
+.app-shell.portrait-layout:not(.workbench-active) .workbench-head {
+  display: none;
+}
+
+.app-shell.portrait-layout:not(.workbench-active) .workbench-pathbar {
+  display: none;
+}
+
+.app-shell.portrait-layout:not(.workbench-active) .workbench-body {
+  padding: 0;
+}
+
+.app-shell.portrait-layout:not(.workbench-active) .workbench-body.empty {
+  display: none;
+}
+
+.app-shell.portrait-layout:not(.workbench-active) .terminal-panel {
+  display: none;
+}
+
+.app-shell.portrait-layout:not(.workbench-active) .center-stack {
+  border-left: 1px solid var(--line);
+}
+
+.app-shell.portrait-layout:not(.workbench-active) .detail-panel {
+  grid-column: 2;
+  grid-row: 2;
+  max-height: none;
+  border-top: 0;
+  border-left: 1px solid var(--line);
+}
+
+.app-shell.portrait-layout:not(.workbench-active) .detail-head {
+  min-height: 0;
+  padding: 10px 12px 8px;
+}
+
+.app-shell.portrait-layout:not(.workbench-active) .detail-head .panel-subtle {
+  display: block;
+}
+
+.app-shell.portrait-layout:not(.workbench-active) .detail-body {
+  padding: 8px 10px 12px;
+  gap: 8px;
+}
+
+.app-shell.portrait-layout:not(.workbench-active) .detail-section:not(:first-child) {
+  display: block;
+}
+
+.app-shell.portrait-layout.workbench-active .workbench-head {
+  min-height: 0;
+  padding: 8px 10px 6px;
+}
+
+.app-shell.portrait-layout.workbench-active .workbench-pathbar {
+  min-height: 0;
+  padding: 4px 10px 6px;
+}
+
+.app-shell.portrait-layout.workbench-active .workbench-body {
+  padding: 4px;
+  gap: 4px;
+}
+
+.app-shell.portrait-layout.workbench-active .workbench-pane-head {
+  min-height: 26px;
+  padding: 0 8px;
+}
+
+.app-shell.portrait-layout.reader-focus {
+  --portrait-nav-width: clamp(148px, 17vw, 196px);
+  --portrait-detail-height: clamp(56px, 7dvh, 84px);
+}
+
+.app-shell.portrait-layout.reader-focus .primary-sidebar {
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+}
+
+.app-shell.portrait-layout.reader-focus .sidebar-head {
+  padding: 8px 8px 6px;
+}
+
+.app-shell.portrait-layout.reader-focus .sidebar-head .panel-subtle {
+  margin-top: 2px;
+  font-size: 0.68rem;
+}
+
+.app-shell.portrait-layout.reader-focus .sidebar-search {
+  padding: 4px 8px;
+}
+
+.app-shell.portrait-layout.reader-focus .search-head-copy .inline-hint {
+  font-size: 0.64rem;
+}
+
+.app-shell.portrait-layout.reader-focus .quick-open-section {
+  padding: 4px 8px;
+}
+
+.app-shell.portrait-layout.reader-focus .quick-open-bar {
+  grid-template-columns: 1fr;
+  gap: 6px;
+}
+
+.app-shell.portrait-layout.reader-focus .quick-open-bar > * {
+  min-height: 36px;
+}
+
+.app-shell.portrait-layout.reader-focus .list-container {
+  padding: 4px 6px 8px;
+  gap: 6px;
+}
+
+.app-shell.portrait-layout.reader-focus .list-card {
+  padding: 8px 8px 8px 10px;
+}
+
+.app-shell.portrait-layout.reader-focus .list-title {
+  font-size: 0.78rem;
+  line-height: 1.28;
+}
+
+.app-shell.portrait-layout.reader-focus .list-subtitle,
+.app-shell.portrait-layout.reader-focus .list-summary,
+.app-shell.portrait-layout.reader-focus .badge-row,
+.app-shell.portrait-layout.reader-focus .chip-row,
+.app-shell.portrait-layout.reader-focus .link-row,
+.app-shell.portrait-layout.reader-focus .list-actions {
+  display: none !important;
+}
+
+.app-shell.portrait-layout.reader-focus .workbench-head {
+  padding: 6px 8px 4px;
+}
+
+.app-shell.portrait-layout.reader-focus .workbench-head h2 {
+  font-size: 0.92rem;
+}
+
+.app-shell.portrait-layout.reader-focus .workbench-status {
+  min-height: 22px;
+  padding: 0 8px;
+  font-size: 0.7rem;
+}
+
+.app-shell.portrait-layout.reader-focus .toolbar-group {
+  gap: 6px;
+}
+
+.app-shell.portrait-layout.reader-focus .toolbar-button.toolbar-button-icon {
+  width: 28px;
+  min-width: 28px;
+}
+
+.app-shell.portrait-layout.reader-focus .workbench-pathbar {
+  padding: 2px 8px 4px;
+}
+
+.app-shell.portrait-layout.reader-focus .path-label {
+  font-size: 0.64rem;
+}
+
+.app-shell.portrait-layout.reader-focus .workbench-pathbar code {
+  font-size: 0.72rem;
+  padding: 3px 8px;
+}
+
+.app-shell.portrait-layout.reader-focus .workbench-body {
+  padding: 2px;
+}
+
+.app-shell.portrait-layout.reader-focus .markdown-preview {
+  padding: 10px 12px 14px;
+}
+
+.app-shell.portrait-layout.reader-focus .markdown-preview > *:not(pre):not(table):not(hr) {
+  max-width: 52rem;
+}
+
+.app-shell.portrait-layout.reader-focus .detail-head {
+  padding: 4px 8px 2px;
+}
+
+.app-shell.portrait-layout.reader-focus .detail-head h2 {
+  font-size: 0.82rem;
+}
+
+.app-shell.portrait-layout.reader-focus .detail-body {
+  padding: 0 6px 4px;
+}
+
+.app-shell.portrait-layout.reader-focus .detail-section {
+  padding: 6px 8px;
+}
+
+.app-shell.portrait-layout.reader-focus .detail-copy,
+.app-shell.portrait-layout.reader-focus .detail-list,
+.app-shell.portrait-layout.reader-focus .kv-grid dd {
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+
+.app-shell.portrait-layout.reader-focus .activity-bar {
+  padding: 6px 8px;
+  gap: 6px;
+}
+
+.app-shell.portrait-layout.reader-focus .activity-utility,
+.app-shell.portrait-layout.reader-focus .tab-button {
+  width: 34px;
+  min-width: 34px;
+  min-height: 34px;
+}
+
+.app-shell.portrait-layout.reader-focus .activity-status .status-pill {
+  min-height: 20px;
+  padding: 0 8px;
+  font-size: 0.7rem;
 }
