@@ -19,3 +19,11 @@ def test_schema_payload_sections_are_backed_by_skeleton_keys() -> None:
         documented = {token.split("{", 1)[0] for token in re.findall(r"`([^`]+)`", section_cell)}
         skeleton_keys = set(kind_payload_skeleton(kind))
         assert documented <= skeleton_keys
+
+
+def test_schema_confirmation_gate_documents_default_confirmer_and_evidence() -> None:
+    project_root = Path(__file__).resolve().parents[4]
+    text = (project_root / ".agents/lib/research/SCHEMAS.md").read_text(encoding="utf-8")
+
+    assert "`--confirmed-by` 或 `identity.default_confirmed_by`" in text
+    assert "至少一条 `--evidence`" in text

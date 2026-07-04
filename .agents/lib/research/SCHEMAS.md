@@ -23,7 +23,7 @@
 **确认门控规则**（见 [`confirmation gate`](#confirmation-gate)）：
 - 任一字段 `source.kind = "ai"` 或 `information_types` 包含 `{inference, evaluation, user_opinion}` 之一 → 期望 `confirmation_status` 是 `pending_user_confirmation` 或 `rejected`，且 `needs_human_confirmation = true`
 - 运行时默认只发出 warning；设置 `RESEARCH_VALIDATE_STRICT=1` 时才拦截 unit `record.yaml` 写入。program state / reporting events 等旁路文件目前不经过该 gate。
-- **确认溯源**：把 `confirmation_status` 迁到 `confirmed` 必须提供 `--confirmed-by`（非空）+ 至少一条 `--evidence`，否则 `apply_confirmation`/`promote_record` 直接拒绝（`SystemExit`）；确认时写入上方 `confirmation{by,at,evidence,method}` 块。其它状态（auto_confirmed/pending/rejected）无需 provenance。
+- **确认溯源**：把 `confirmation_status` 迁到 `confirmed` 必须提供确认人（`--confirmed-by` 或 `identity.default_confirmed_by` 二选一）+ 至少一条 `--evidence`，否则 `apply_confirmation`/`promote_record` 直接拒绝（`SystemExit`）；确认时写入上方 `confirmation{by,at,evidence,method}` 块。其它状态（auto_confirmed/pending/rejected）无需 provenance。
 
 ---
 
@@ -47,7 +47,7 @@ first_ingested_at: ''
 updated_at: ''
 last_human_confirmed_at: ''
 confirmation:                        # 仅在人工确认为 confirmed 时写入（apply_confirmation）
-  by: ''                             # 确认人（--confirmed-by，非空）
+  by: ''                             # 确认人（--confirmed-by 或 identity.default_confirmed_by，非空）
   at: ''                             # UTC iso
   evidence: []                       # 证据 kb-path / 用户原话（--evidence，至少一条）
   method: cli                        # 确认渠道，如 'kb.py promote' / 'paper.py confirm'
