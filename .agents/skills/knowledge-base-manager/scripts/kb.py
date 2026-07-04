@@ -194,9 +194,11 @@ def main() -> int:
         hits = search_records(root, args.query, kind=args.kind, pool=args.pool or None, confirmation_status=args.confirmation_status)
         for item in hits:
             pools = ",".join(item.get("candidate_pools", []))
+            score = item.get("_search_score")
+            score_text = f" | score={score}" if score is not None else ""
             print(
                 f"- {item['id']} | {item['kind']} | {item['title']} | "
-                f"{item.get('status')} | {item.get('confirmation_status')} | pools={pools or '-'}"
+                f"{item.get('status')} | {item.get('confirmation_status')} | pools={pools or '-'}{score_text}"
             )
         if not hits:
             print("[ok] no matches")

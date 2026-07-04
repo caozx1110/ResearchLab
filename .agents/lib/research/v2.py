@@ -48,6 +48,7 @@ from .ids import (
     compact_unit_slug,
     is_canonical_unit_id,
 )
+from .retrieval import rank_records
 
 UNIT_KIND_DIRS = {
     "paper": "papers",
@@ -1902,26 +1903,15 @@ def search_records(
     pool: str | None = None,
     confirmation_status: str | None = None,
 ) -> list[dict[str, Any]]:
-    tokens = [token for token in query.lower().split() if token]
     normalized_pool = slugify(str(pool), max_words=12) if pool else ""
-    hits: list[dict[str, Any]] = []
+    filtered: list[dict[str, Any]] = []
     for record in iter_records(project_root, kind=kind):
         if normalized_pool and normalized_pool not in record.get("candidate_pools", []):
             continue
         if confirmation_status and str(record.get("confirmation_status") or "") != confirmation_status:
             continue
-        haystack = " ".join(
-            [
-                str(record.get("title") or ""),
-                str(record.get("summary") or ""),
-                " ".join(str(tag) for tag in record.get("tags", [])),
-                " ".join(str(topic) for topic in record.get("topics", [])),
-                " ".join(str(pool_name) for pool_name in record.get("candidate_pools", [])),
-            ]
-        ).lower()
-        if all(token in haystack for token in tokens):
-            hits.append(record)
-    return hits
+        filtered.append(record)
+    return rank_records(filtered, query, markdown_paths_for=lambda record: _unit_markdown_paths(project_root, record))
 
 
 def govern_records(
