@@ -17,6 +17,7 @@
 ## Start Here
 
 - [Getting Started](docs/GETTING_STARTED.md)
+- [Features 功能总览](docs/FEATURES.md)
 - [Skills Guide](docs/SKILLS_GUIDE.md)
 - [Publishing Notes](docs/PUBLISHING.md)
 - [LLM Wiki Pattern](docs/llm-wiki.md)

@@ -119,6 +119,8 @@ kb/output/           # polished exports
 - **AI 推断 / AI 评价 / 详细笔记 / 创新性判断 / 失败诊断**：默认 `pending_user_confirmation`
 - **idea 演化 / 实验历史 / 周报**：保留历史，不直接覆盖
 
+**确认时必须留痕（确认溯源）**：把一个单元确认为 `confirmed` 必须带 `--confirmed-by <你> --evidence <凭据>`，否则命令直接拒绝——AI 不能自己给自己盖章。用 `kb.py review-queue` 一次看清所有待确认项。
+
 ## 5. 常用 CLI
 
 ```bash
@@ -126,22 +128,34 @@ python3 .agents/skills/knowledge-base-manager/scripts/kb.py init
 python3 .agents/skills/knowledge-base-manager/scripts/kb.py lint
 python3 .agents/skills/knowledge-base-manager/scripts/kb.py index
 
+# 检索（带排序的全文，连笔记正文都搜）+ 待确认收件箱
+python3 .agents/skills/knowledge-base-manager/scripts/kb.py query --query "humanoid vla recovery" --kind paper
+python3 .agents/skills/knowledge-base-manager/scripts/kb.py review-queue --limit 20
+
 python3 .agents/skills/source-intake/scripts/intake.py search --kind paper --query "humanoid vla recovery"
 python3 .agents/skills/source-intake/scripts/intake.py add --kind paper --source kb/raw/example.pdf --maturity lightweight
 python3 .agents/skills/paper-analyst/scripts/paper.py screen --paper-id paper-foo
+python3 .agents/skills/paper-analyst/scripts/paper.py confirm --paper-id paper-foo --confirmed-by czx --evidence kb/units/papers/paper-foo/paper-note.md
 python3 .agents/skills/repo-analyst/scripts/repo.py map-capability --repo-id repo-foo
 python3 .agents/skills/blog-analyst/scripts/blog.py summarize --blog-id blog-foo
 
 python3 .agents/skills/idea-workbench/scripts/idea.py capture --title "my idea"
-python3 .agents/skills/idea-workbench/scripts/idea.py select --idea-id idea-foo
+python3 .agents/skills/idea-workbench/scripts/idea.py select --idea-id idea-foo --confirmed-by czx --evidence kb/programs/my-program/decision-log.md
 python3 .agents/skills/method-designer/scripts/method.py design --idea-id idea-foo --program-id my-program
 
 python3 .agents/skills/experiment-workbench/scripts/experiment.py plan --title "baseline" --program-id my-program
+
+# program 编排：跨方向仪表盘 + 自动排下一步
+python3 .agents/skills/research-orchestrator/scripts/orchestrate.py dashboard
+python3 .agents/skills/research-orchestrator/scripts/orchestrate.py next
+
 python3 .agents/skills/report-author/scripts/report.py weekly --program-id my-program
 python3 .agents/skills/report-author/scripts/report.py writing-materials --program-id my-program
 python3 .agents/skills/research-navigator/scripts/navigate.py refresh
 python3 .agents/skills/research-navigator/scripts/open_kb_browser.py
 ```
+
+> 想要**通俗易懂的功能全景 + 原理**，见 [`docs/FEATURES.md`](FEATURES.md)。
 
 ## 6. 最短使用建议
 
