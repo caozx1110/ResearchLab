@@ -351,3 +351,29 @@ Part B 的 Top 6 已由 Codex 逐项单独提交（6 commits），并经 **7 单
 🎯 **北极星**：**让"下一步"成为系统第一等公民，而不是让用户拼命令。** 打通一条 **读状态→推荐一步→用模糊/默认解析好一切参数→执行→只在需要人拍板处（确认 AI judgement）停下来问** 的闭环：`orchestrate auto` 作执行引擎、`locate_record` 模糊解析消灭 id 转抄、config 默认值 + 批量确认把"一次授权"从"N 次输入"里解放。**治理红线（不自签、必留 evidence）不动——它恰应是这条流水线上唯一需要用户亲自介入的闸口。**
 
 > 建议施工顺序（都低耦合、可独立落地）：先 quick-win 批（B2/B3/B4/A3/A4/A5/C6/C7/D2/D4/D6，多为 S）→ 再 B1（模糊解析，中杠杆最高）→ 再 A1/A2（批量确认）→ 再 C1/C2（执行环）。
+
+---
+---
+
+## 16. Top 5 已实现 + review 修复 + UX 模拟采纳项（交 Codex）
+
+> Top 5（B1/B2B3/B4A3/A1A2/C1C2）已由 Codex 实现（commit `85a8df9`..`89ebd43`，74 测试过）。对抗性 review（5/6 单元 + 人工核验）结论：**治理红线守住**（`--evidence` 全路径仍强制；`orchestrate auto --execute` 双闸门永不自动 confirm/select）。以下是 review 查出的**必修项**（R 组）+ 一次端到端**用户模拟**（`docs/RESEARCH_SKILLS_UX_SIMULATION_2026-07-04.md`）采纳的改进（S 组）。
+
+### R 组 —— 修 Top-5 实现的缺陷（本批交 Codex）
+- **R1（回归，should-fix）** `_wikilink_target_exists`(v2.py:1700) 现在走了 B1 加宽后的模糊 `locate_record` → doctor/lint 查断链会把**部分/子串匹配**误判为"存在"。修：给 `locate_record` 加 `fuzzy: bool = True` 形参，wikilink/doctor 路径用 `fuzzy=False`（只走 exact + legacy）。已人工坐实。
+- **R2（一致性，should-fix）** `apply_batch_confirmation`(kb.py:150) 与 5 个 analyst 单确认不一致：**没清 AI `information_types`→fact、没设 `status=active`、没 `append_history`**，且 `confirm --id`/`--all-reviewed` **无 pending 守卫**（能误翻 `rejected`/已确认 record）。修：抽一个共享 `confirm_unit(record, kind, ...)`（收敛 info_types 复位 + status + history + apply_confirmation），单/批量都走它；批量只对 `pending_user_confirmation` 生效，非 pending 跳过并提示。
+- **R3（B1 nits）** `last`/`current` 分支被 prefix/title 抢先（title 含 "last" 即不可达）→ 应在 prefix/title 之前先解析保留字；id 前缀匹配大小写不一致（应统一 casefold）；删死参 `mode`（`_resolve_unique_record_reference`）。
+- **R4（去重）** `confirm_command`/`shell_command` 在 kb.py:71,91 / orchestrate.py:101,118 / intake.py:54,64 **复制了 3 份** → 抽到 `research.common`/`research.v2` 单一 helper。
+- **R5（doc）** SCHEMAS.md:26 仍写"确认必须提供非空 `--confirmed-by`"——B4/A3 后 confirmer 可来自 `identity.default_confirmed_by`；更新措辞（`--confirmed-by` 或 config 默认二选一，`--evidence` 仍强制）。
+- **R6（nit）** `--all-reviewed` 实际只确认 review-queue 前 `--limit`(默认 50) 条，">50 pending" 时名不副实 → 默认 unbounded 或打印 "已确认 X / 剩 Y，请重跑"。
+
+### S 组 —— 用户模拟采纳项（P0/P1 本批交 Codex；P2 记录为下一批）
+- **S1（P0，本批）** `idea.py select`/`select-best` 把 idea 整条写成 `confirmation_status=confirmed`，但 idea 含 AI novelty/feasibility（inference/evaluation）→ validate_write 警告，且**混淆"选择推进"与"确认 AI 判断"**。修：selection 只置 `status=selected`（记 selection provenance），**内容 `confirmation_status` 保持 `pending_user_confirmation`**；`review-queue` 继续列出 selected-but-content-pending 的 idea 提示后续确认。（= 早前 roadmap A4。）
+- **S2（P1 安全，本批）** 所有写脚本靠 `Path(__file__).resolve()` 找 root，`/tmp` 软链 `.agents` 会解析回真实仓库 → **误写真实 `kb/`**。修：所有 v2 脚本支持显式 `--root` / `RESEARCH_PROJECT_ROOT`；写命令启动时打印 resolved project root + kb root；`kb.py init`/`config.py init` 等高影响命令在 `cwd` 与 resolved root 不一致时醒目提示。
+- **S3（P1，下一批）** `report.py weekly` 默认输出偏事件索引，非自包含周报。→ polished renderer：按 背景/输入材料/阶段进展/关键证据/阻塞/风险/下周计划/provenance 聚合，每条标 evidence level（source fact / run fact / AI inference / pending decision），event dump 降为 appendix。（= roadmap U4，模拟证实，升级。）
+- **S4（P1，下一批）** `research-navigator current-state` 不够"下一步导向"。→ 每个 active program 展示 latest report / top blocking evidence / top open question / next action / pending confirmations；reading-list 也列关联 repo/idea/experiment；`paper-writing` stage 优先展示 report materials。（= roadmap U2/U3。）
+- **S5（P2，下一批）** `literature-synthesizer` 召回偏保守（成功但 0/1 命中）→ survey/review 加 strict/fuzzy（默认 fuzzy，复用已恢复的 `rank_records`），空结果时解释过滤条件 + 列 pool 内未命中 top items。
+- **S6（P2，下一批）** paper note `draft` 名实不符 + `reading_status` 不同步 → 区分 `scaffold`/`extractive-draft`/`analysis-draft`；`complete-note` 后同步 `reading_status`；note 顶部标读取覆盖范围（metadata / parse-cache / full PDF / manual excerpt）。
+- **S7（P2，下一批）** repo capability 缺"资源型 repo"标注 → `repo-analyst map-capability` 加 repo type（paper-page/asset-only/code-release/training-ready/eval-ready）；`method-designer` 选到无 entrypoints/training/eval 的 repo 时把 repo-choice 风险升为 blocking evidence（避免"到实验阶段才发现 repo 当不了 baseline host"）。
+
+> **本批交 Codex 范围** = R1-R6 + S1 + S2（review 必修 + 两个 P0/P1-安全）。S3-S7 已采纳，作为下一批。**约束**：治理红线不动（`--evidence` 强制、auto 不自签、S1 保持内容 pending）；import 面兼容；每项加测试、每步跑 `pytest -q`；逐项单独 commit。
