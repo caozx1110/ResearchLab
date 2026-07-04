@@ -1490,6 +1490,53 @@ def apply_confirmation(
     return record
 
 
+CONFIRM_UNIT_STATUS_BY_KIND = {
+    "paper": "active",
+    "repo": "active",
+    "blog": "active",
+}
+CONFIRM_UNIT_SUMMARY_BY_KIND = {
+    "paper": "Paper analysis confirmed by user.",
+    "repo": "Repo analysis confirmed by user.",
+    "blog": "Blog analysis confirmed by user.",
+    "idea": "Idea content confirmed by user.",
+    "experiment": "Experiment findings confirmed by user.",
+}
+
+
+def confirm_unit(
+    record: dict[str, Any],
+    kind: str | None = None,
+    *,
+    confirmed_by: str,
+    evidence: list[str] | str,
+    method: str = "cli",
+    project_root: Path | None = None,
+) -> dict[str, Any]:
+    unit_kind = str(kind or record.get("kind") or "")
+    if unit_kind not in UNIT_KIND_DIRS:
+        raise SystemExit(f"Unsupported unit kind: {unit_kind}")
+    record = apply_confirmation(
+        record,
+        confirmed_by=confirmed_by,
+        evidence=evidence,
+        method=method,
+        project_root=project_root,
+    )
+    if unit_kind in CONFIRM_UNIT_STATUS_BY_KIND:
+        record["status"] = CONFIRM_UNIT_STATUS_BY_KIND[unit_kind]
+    elif unit_kind == "experiment" and str(record.get("status") or "") == "running":
+        record["status"] = "completed"
+    record["information_types"] = ["fact"]
+    append_history(
+        record,
+        action=f"{unit_kind}-confirmed",
+        summary=CONFIRM_UNIT_SUMMARY_BY_KIND.get(unit_kind, f"{unit_kind} record confirmed by user."),
+        information_types=["fact"],
+    )
+    return record
+
+
 def _record_needs_gate(record: dict[str, Any]) -> tuple[bool, set[str], bool]:
     info_types = {str(value) for value in record.get("information_types") or []}
     ai_info_types = info_types & AI_INFORMATION_TYPES

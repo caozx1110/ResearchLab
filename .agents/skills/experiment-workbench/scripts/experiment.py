@@ -23,7 +23,7 @@ from research.common import (
     normalize_list,
     write_text_if_changed,
 )
-from research.v2 import append_history, apply_confirmation, build_index, default_record, ensure_v2_workspace, locate_record, project_root, rel, write_record
+from research.v2 import append_history, build_index, confirm_unit, default_record, ensure_v2_workspace, locate_record, project_root, rel, write_record
 
 RUN_OUTCOME_CHOICES = ["success", "partial", "failed", "blocked", "inconclusive"]
 CLASSIFICATION_CHOICES = ["method", "implementation", "data", "evaluation", "resource", "environment", "process", "unknown"]
@@ -383,10 +383,7 @@ def main() -> int:
         return 0
 
     if args.command == "confirm":
-        record = apply_confirmation(record, confirmed_by=args.confirmed_by, evidence=args.evidence, method="experiment.py confirm", project_root=root)
-        if record.get("status") == "running":
-            record["status"] = "completed"
-        append_history(record, action="experiment-confirmed", summary="Experiment findings confirmed by user.", information_types=["fact"])
+        record = confirm_unit(record, "experiment", confirmed_by=args.confirmed_by, evidence=args.evidence, method="experiment.py confirm", project_root=root)
         write_record(root, record)
         build_index(root)
         program_id = str(record.get("payload", {}).get("basic_info", {}).get("program_id") or "").strip()

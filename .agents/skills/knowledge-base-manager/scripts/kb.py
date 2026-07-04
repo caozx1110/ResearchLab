@@ -18,10 +18,10 @@ else:
 
 from research.common import parse_iso_datetime
 from research.v2 import (
-    apply_confirmation,
     build_index,
     candidate_pools_path,
     compact_unit_ids,
+    confirm_unit,
     ensure_kb_git_repo,
     ensure_v2_workspace,
     git_checkpoint,
@@ -150,8 +150,15 @@ def review_queue_records(
 def apply_batch_confirmation(root: Path, records: list[dict], *, confirmed_by: str, evidence: list[str], method: str) -> list[Path]:
     written: list[Path] = []
     for record in records:
-        updated = apply_confirmation(
+        unit_id = str(record.get("id") or "")
+        confirmation_status = str(record.get("confirmation_status") or "")
+        if confirmation_status != "pending_user_confirmation":
+            print(f"[skip] {unit_id}: confirmation_status={confirmation_status or '-'}")
+            continue
+        kind = str(record.get("kind") or "")
+        updated = confirm_unit(
             record,
+            kind,
             confirmed_by=confirmed_by,
             evidence=evidence,
             method=method,

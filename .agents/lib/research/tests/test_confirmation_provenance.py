@@ -167,9 +167,14 @@ def test_confirm_scripts_require_provenance_arguments() -> None:
         ("repo-analyst", "repo.py"),
         ("blog-analyst", "blog.py"),
         ("experiment-workbench", "experiment.py"),
-        ("idea-workbench", "idea.py"),
     ]:
         text = _script_text(skill, script_name)
-        assert "apply_confirmation" in text
+        assert "confirm_unit" in text
+        assert "apply_confirmation" not in text
         assert _has_optional_arg(text, "--confirmed-by"), skill
         assert _has_required_arg(text, "--evidence"), skill
+
+    idea_text = _script_text("idea-workbench", "idea.py")
+    assert "apply_confirmation" in idea_text
+    assert _has_optional_arg(idea_text, "--confirmed-by")
+    assert _has_required_arg(idea_text, "--evidence")

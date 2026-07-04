@@ -20,9 +20,9 @@ else:
 from research.common import clean_text, infer_repo_roles, infer_topics_and_tags, read_text_excerpt, write_text_if_changed, write_yaml_if_changed
 from research.v2 import (
     append_history,
-    apply_confirmation,
     apply_record_governance,
     build_index,
+    confirm_unit,
     locate_record,
     checkpoint_and_report,
     project_root,
@@ -369,10 +369,7 @@ def main() -> int:
         return 0
 
     if args.command == "confirm":
-        record = apply_confirmation(record, confirmed_by=args.confirmed_by, evidence=args.evidence, method="repo.py confirm", project_root=root)
-        record["status"] = "active"
-        record["information_types"] = ["fact"]
-        append_history(record, action="repo-confirmed", summary="Repo analysis confirmed by user.", information_types=["fact"])
+        record = confirm_unit(record, "repo", confirmed_by=args.confirmed_by, evidence=args.evidence, method="repo.py confirm", project_root=root)
         write_record(root, record)
         build_index(root)
         print(f"[ok] confirmed {args.repo_id}")

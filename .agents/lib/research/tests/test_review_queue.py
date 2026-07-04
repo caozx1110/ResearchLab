@@ -27,16 +27,24 @@ def _write_record(root: Path, record: dict) -> None:
     write_yaml_if_changed(record_path(root, record["kind"], record["id"]), record)
 
 
-def _record(unit_id: str, title: str, confirmation_status: str, updated_at: str) -> dict:
+def _record(
+    unit_id: str,
+    title: str,
+    confirmation_status: str,
+    updated_at: str,
+    *,
+    status: str = "active",
+    information_types: list[str] | None = None,
+) -> dict:
     return {
         "id": unit_id,
         "kind": "paper",
         "title": title,
-        "status": "active",
+        "status": status,
         "maturity": "lightweight",
         "confirmation_status": confirmation_status,
         "needs_human_confirmation": confirmation_status == "pending_user_confirmation",
-        "information_types": ["fact"],
+        "information_types": information_types or ["fact"],
         "summary": f"{title} summary",
         "tags": ["robotics"],
         "topics": [],
@@ -104,6 +112,61 @@ def test_batch_confirm_applies_one_evidence_to_multiple_units(tmp_path: Path) ->
         assert record["confirmation_status"] == "confirmed"
         assert record["confirmation"]["by"] == "czx-default"
         assert record["confirmation"]["evidence"] == ["kb/programs/p/decision-log.md"]
+
+
+def test_batch_confirm_collapses_ai_information_types_and_sets_lifecycle(tmp_path: Path) -> None:
+    kb = _load_kb_module()
+    ensure_v2_workspace(tmp_path)
+    write_yaml_if_changed(runtime_preferences_path(tmp_path), {"identity": {"default_confirmed_by": "czx-default"}})
+    _write_record(
+        tmp_path,
+        _record(
+            "p-ai-typed-123456",
+            "AI Typed",
+            "pending_user_confirmation",
+            "2026-01-01T00:00:00+00:00",
+            status="screened",
+            information_types=["fact", "inference", "evaluation", "unverified"],
+        ),
+    )
+    records = search_records(tmp_path, "", confirmation_status="pending_user_confirmation")
+
+    [path] = kb.apply_batch_confirmation(
+        tmp_path,
+        records,
+        confirmed_by="",
+        evidence=["kb/programs/p/decision-log.md"],
+        method="test batch",
+    )
+
+    record = load_yaml(path, default={})
+    assert record["confirmation_status"] == "confirmed"
+    assert record["status"] == "active"
+    assert record["information_types"] == ["fact"]
+    assert record["history"][-1]["action"] == "paper-confirmed"
+
+
+def test_batch_confirm_skips_non_pending_records(tmp_path: Path, capsys) -> None:
+    kb = _load_kb_module()
+    ensure_v2_workspace(tmp_path)
+    write_yaml_if_changed(runtime_preferences_path(tmp_path), {"identity": {"default_confirmed_by": "czx-default"}})
+    pending = _record("p-pending-123456", "Pending", "pending_user_confirmation", "2026-01-01T00:00:00+00:00")
+    rejected = _record("p-rejected-123456", "Rejected", "rejected", "2026-01-02T00:00:00+00:00", status="rejected")
+    _write_record(tmp_path, pending)
+    _write_record(tmp_path, rejected)
+
+    paths = kb.apply_batch_confirmation(
+        tmp_path,
+        [pending, rejected],
+        confirmed_by="",
+        evidence=["kb/programs/p/decision-log.md"],
+        method="test batch",
+    )
+
+    captured = capsys.readouterr()
+    assert len(paths) == 1
+    assert "[skip] p-rejected-123456: confirmation_status=rejected" in captured.out
+    assert load_yaml(record_path(tmp_path, "paper", "p-rejected-123456"), default={})["confirmation_status"] == "rejected"
 
 
 def test_review_queue_all_reviewed_empty_is_clean_noop(tmp_path: Path) -> None:

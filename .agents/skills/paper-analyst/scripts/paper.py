@@ -29,9 +29,9 @@ from research.pdf_layout import (
 )
 from research.v2 import (
     append_history,
-    apply_confirmation,
     apply_record_governance,
     build_index,
+    confirm_unit,
     load_runtime_preferences,
     locate_record,
     checkpoint_and_report,
@@ -776,9 +776,7 @@ def main() -> int:
         return 0
 
     if args.command == "confirm":
-        record = apply_confirmation(record, confirmed_by=args.confirmed_by, evidence=args.evidence, method="paper.py confirm", project_root=root)
-        record["status"] = "active"
-        append_history(record, action="paper-confirmed", summary="Paper analysis confirmed by user.", information_types=["fact"])
+        record = confirm_unit(record, "paper", confirmed_by=args.confirmed_by, evidence=args.evidence, method="paper.py confirm", project_root=root)
         write_record(root, record)
         print(f"[ok] confirmed {args.paper_id}")
         checkpoint = _finalize_post_actions(

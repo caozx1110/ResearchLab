@@ -16,7 +16,7 @@ else:
     raise SystemExit("Could not locate .agents/lib")
 
 from research.common import write_text_if_changed, write_yaml_if_changed
-from research.v2 import append_history, apply_confirmation, build_index, locate_record, project_root, rel, write_record
+from research.v2 import append_history, build_index, confirm_unit, locate_record, project_root, rel, write_record
 
 
 def add_confirmation_arguments(parser: argparse.ArgumentParser) -> None:
@@ -88,9 +88,7 @@ def main() -> int:
         return 0
 
     if args.command == "confirm":
-        record = apply_confirmation(record, confirmed_by=args.confirmed_by, evidence=args.evidence, method="blog.py confirm", project_root=root)
-        record["status"] = "active"
-        append_history(record, action="blog-confirmed", summary="Blog analysis confirmed by user.", information_types=["fact"])
+        record = confirm_unit(record, "blog", confirmed_by=args.confirmed_by, evidence=args.evidence, method="blog.py confirm", project_root=root)
         write_record(root, record)
         build_index(root)
         print(f"[ok] confirmed {args.blog_id}")
