@@ -4,6 +4,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 from research.common import confirm_command as shared_confirm_command, load_yaml, write_yaml_if_changed
 from research.v2 import ensure_v2_workspace, record_path, runtime_preferences_path, search_records
 
@@ -119,6 +121,60 @@ def test_batch_confirm_applies_one_evidence_to_multiple_units(tmp_path: Path) ->
         assert record["confirmation_status"] == "confirmed"
         assert record["confirmation"]["by"] == "czx-default"
         assert record["confirmation"]["evidence"] == ["kb/programs/p/decision-log.md"]
+
+
+def test_batch_confirm_without_evidence_rejects_before_write(tmp_path: Path) -> None:
+    kb = _load_kb_module()
+    ensure_v2_workspace(tmp_path)
+    write_yaml_if_changed(runtime_preferences_path(tmp_path), {"identity": {"default_confirmed_by": "czx-default"}})
+    pending = _record("p-no-evidence-123456", "No Evidence", "pending_user_confirmation", "2026-01-01T00:00:00+00:00")
+    _write_record(tmp_path, pending)
+
+    with pytest.raises(SystemExit, match="--evidence"):
+        kb.apply_batch_confirmation(
+            tmp_path,
+            [pending],
+            confirmed_by="czx",
+            evidence=[],
+            method="test missing evidence",
+        )
+
+    record = load_yaml(record_path(tmp_path, "paper", "p-no-evidence-123456"), default={})
+    assert record["confirmation_status"] == "pending_user_confirmation"
+    assert "confirmation" not in record
+    assert not (tmp_path / "kb" / "index.yaml").exists()
+
+
+def test_review_queue_confirm_without_evidence_rejects_before_write(tmp_path: Path, monkeypatch) -> None:
+    kb = _load_kb_module()
+    (tmp_path / ".agents").mkdir()
+    (tmp_path / "AGENTS.md").write_text("# test\n", encoding="utf-8")
+    ensure_v2_workspace(tmp_path)
+    write_yaml_if_changed(runtime_preferences_path(tmp_path), {"identity": {"default_confirmed_by": "czx-default"}})
+    _write_record(
+        tmp_path,
+        _record("p-cli-no-evidence-123456", "CLI No Evidence", "pending_user_confirmation", "2026-01-01T00:00:00+00:00"),
+    )
+    monkeypatch.setattr(kb, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "kb.py",
+            "review-queue",
+            "--confirm",
+            "--confirmed-by",
+            "czx",
+        ],
+    )
+
+    with pytest.raises(SystemExit, match="--evidence"):
+        kb.main()
+
+    record = load_yaml(record_path(tmp_path, "paper", "p-cli-no-evidence-123456"), default={})
+    assert record["confirmation_status"] == "pending_user_confirmation"
+    assert "confirmation" not in record
+    assert not (tmp_path / "kb" / "index.yaml").exists()
 
 
 def test_batch_confirm_collapses_ai_information_types_and_sets_lifecycle(tmp_path: Path) -> None:
