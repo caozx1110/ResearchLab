@@ -6,6 +6,17 @@
 2. 怎么开口
 3. 什么时候点名 skill
 
+## 0. 第一次用：先初始化（没有 `kb/` 时）
+
+如果当前目录还没有 `kb/`，先跑一次初始化，再做别的：
+
+```bash
+python3 .agents/skills/knowledge-base-manager/scripts/kb.py init          # 建 kb/ 骨架 + 索引
+python3 .agents/skills/research-config-manager/scripts/config.py init     # 建 user-profile（语言/资源画像）
+```
+
+> 只跑第一条也能用，但语言/资源偏好不会被记录——建议两条都跑一次。跑完再看下面的入口页。
+
 ## 1. 先看哪里
 
 如果 `kb/` 已经存在，优先看：

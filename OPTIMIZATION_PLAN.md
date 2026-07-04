@@ -293,3 +293,61 @@ Part B 的 Top 6 已由 Codex 逐项单独提交（6 commits），并经 **7 单
 🎯 **最大结构性投资**：**"声明式 skill 平台"三件套 C1（KIND_REGISTRY）+ C2（CLI harness）+ C3（类型化 RecordView）**，叠在 Part A 的 T-GODFILE-v2 之上。effort 大（L），但几乎是所有新功能的前置（F5 需 C1、C6 需 C2、C4 迁移执行点需 typed record），把"加一个 kind = 改 6 处"变成"注册一个对象"。应**紧随 T-GODFILE-v2/T-FINALIZE 之后**做，作为其自然延伸而非并行分叉。
 
 > 丢弃项：本地 embedding 语义检索（82 单元下 lexical 已够，收益随语料增长才显现，低优先 stretch）。
+
+---
+---
+
+# Part C —— 第 5 轮：UX / 易用性（"用户手动操作太多"专项）
+
+> 2026-07-04。7 个真实用户旅程的友好度审计（onboarding / add-source / idea / experiment / confirmation / input / nl-driven）→ 49 friction + 50 提案。用户直觉「对用户还不是特别友好，手动操作太多」**成立且可精确定位**——根因不是"步骤本身多"，而是**没默认值、没模糊解析、没批量、没成链、没执行环**，把本可省略的输入和往返压给了用户/agent。
+
+## 13. 诊断（已核实的硬证据）
+
+- **确认无批量**：全系统零 batch/bulk confirm（`--all` 只在 `govern`，✅核实）。一周 ~18 待确认单元 = 18 次调用 × 3 个无默认必填（exact-id + `--confirmed-by` + `--evidence`）= **54 个必填项**。更糟：paper 有 4 个写点（screen/complete-note/extract-figures/refresh-structure，`paper.py:658,686,730,759`）每步都把 record 翻回 pending → 确认数是 **units × steps**。
+- **exact hash id 必须手抄跨 skill**：`locate_record`(v2.py:1534) **只接受精确 id**（✅核实，`p-openvla-open` 缺 hash 直接 not found，`last` 也失败）；`intake add` 只 print 路径、不 print 裸 id/confirm 命令 → agent 每次抠 hash 粘到另一个 skill。
+- **最推荐的"起手式"对空 kb 瞎**：README/GETTING_STARTED 主推「判断我该做哪步」→ `orchestrate next/dashboard`，但空 kb 只 print「暂无」（只遍历 program 的 active_unit_ids，无视散落单元）。且 **onboarding 文档从不提 `kb.py init`**（✅核实 0 命中），首次用户撞空页。
+- **"就直接说话"断在最后一公里**：`next/dashboard/route` 都只 print、不执行、不给可运行命令；agent 每推进一步要 5-6 次往返（读状态→解析→查 id→映射 skill/subcommand/flags→执行）。
+- **已经做对的（不要动）**：`review-queue` 方向对（但只列不清、留占位符）；`orchestrate next` 入口设计对；**确认门控本身（不许自签、必留 evidence）是正确治理红线**——问题是它把"人的一次授权"变成"N 次重复输入"。
+
+## 14. 改进（按 userValue↓/effort↑，分 4 类负担；⚡=quick-win）
+
+**(B) 输入负担**
+- **B1 `locate_record` 模糊解析（exact→唯一 prefix→title 子串→`last`/`current`）**[high/M]——单点改动惠及**所有** per-unit 命令，消灭"先查 id"往返。**最高杠杆。**
+- **B2 ⚡ 所有输出 print 可直接运行的命令**（query/review-queue/next/intake 把建议渲染成已填真实 id 的整行）[high/S]。
+- **B3 ⚡ `intake add` 末尾 print 现成 confirm 命令**（id 已在 record，复用 kb.py confirm_command）[high/S]。
+- **B4 ⚡ confirm 的 `--evidence`/`--confirmed-by` 走默认**（evidence 默认单元 canonical note；confirmed-by 默认 config 身份）[high/S]。
+- **B5 top-level dispatcher + 位置参数 id**（`research paper confirm openvla`，砍 52 字符前缀）[high/M]；**B6 ⚡ 从 URL/扩展名推断 `--kind`**[med/S]；**B7 缺必填 flag 时 TTY 交互补全**[med/M]。
+
+**(A) 决策/确认负担**
+- **A1 批量确认 `kb.py confirm --all-reviewed`**（遍历 review-queue 各调 apply_confirmation，N→1）[high/M]。
+- **A2 `review-queue --confirm` 就地清空**（列出的同一命令加 `--confirm` 即清，而非 print 占位再重打）[high/M]。
+- **A3 ⚡ confirmed-by 走 config 默认**（`identity.default_confirmed_by`；evidence 仍强制留溯源）[med/S]。
+- **A4 ⚡ `select/select-best` 与事实门控解耦**（轻量选择记 `status=selected` 免 provenance，只在 promote-to-method 边界要 evidence）[high/S]。
+- **A5 ⚡ confirm 幂等**（仿 repo：复位 AI info_types + 清子状态，止住每次后续写的 validate_write WARN 噪音）[med/S]；**A6 分段/诊断级确认粒度**（gate 落到 diagnosis/section 而非整条 record）[med/L]。
+
+**(C) 步骤/编排负担**
+- **C1 `orchestrate auto` 真正的 status→recommend→execute 执行环**（读 dashboard→解析成 skill+subcommand+已解析 id→执行→循环；**遇 pending 即停交回用户，绝不自签**）[high/L]——把"万能起手式"从愿望变成一条命令。
+- **C2 `next/dashboard` 覆盖 loose unit + 输出可运行命令**（无 program 时也扫散落单元）[high/M]。
+- **C3 一命令 intake→confirm 链**（`intake add --confirm`，人决策仍显式但零 id 往返）[high/M]。
+- **C4 `idea iterate` 一命令多候选**（串 generate→analyze→review，停在评审卡片让人挑，~9→1）[high/M]。
+- **C5 让 experiment matrix 可执行**（`experiment plan --from-matrix`，预填 title/goal/metrics/gate，死数据复活）[high/M]。
+- **C6 ⚡ plan 携带 metric schema，log-run 只填值**（`--metric success_rate=0.91`）[high/S]；**C7 ⚡ log-run/diagnose 缺省继承 hypothesis/program-id**[med/S]；**C9 ⚡ 合并 analyze 进 review**[med/S]；**C11 让排名变真或不假装排名**（当前候选恒 total=6，select-best 实为 hash 字典序）[high/L]；**C12 ⚡ `select --rank N` + `idea list`**[med/S]；**C10 `orchestrate apply-feedback` 一命令一 cycle**[high/L]；**C13 repo/blog 纳入 intake 自动分析链**[med/M]。
+
+**(D) 认知负担**
+- **D1 ⚡ 已修**：GETTING_STARTED 补「第 0 步：先 `kb.py init`」（本轮已做）。
+- **D2 ⚡ 空 kb 时 next/dashboard 给 onboarding 建议**（"KB 为空，第一步 intake add 一篇论文"而非"暂无"）[high/S]。
+- **D3 `kb.py quickstart` 一命令零配置**（workspace+config+profile+index+页面，6 命令 4 skill→1）[high/M]；**D4 ⚡ 把 config bootstrap 折进 kb init**（顺带建 user-profile）[med/S]。
+- **D5 环境 doctor + 真实 requirements**（`config.py doctor` 查 python/yaml/pdf 后端 + 补 pypdf；intake 缺后端一行告警而非静默空笔记）[high/M]。
+- **D6 ⚡ navigate/browser 自愈 index 链接**（refresh 先 build_index 保证 `kb/index.md` 存在，去死链）[med/S]；**D7 ⚡ confirm 传播到子产物状态**[med/S]；**D8 URL paper 源抓取并解析 PDF**[med/M]。
+
+## 15. ⭐ Top 5「最能让用户省事」+ 北极星
+
+1. **B1 `locate_record` 模糊/last/title 解析** —— 全系统每条 per-unit 命令不再"先查 id"、不再拼错 hash 硬失败。所有 lens 反复指向的同一根因，杠杆最高。
+2. **A1+A2 批量确认 / review-queue 就地清** —— 兑现"把我刚看的这几篇都确认了"，一周 18 次授权压成 1 次。
+3. **B4+A3 confirm evidence/confirmed-by 走默认** —— 保留"显式确认+不自签"治理，同时每次确认必填从 3→最多 1。
+4. **C1+C2 `orchestrate auto` 执行环 + 覆盖 loose unit** —— 让"判断我该做哪步并直接执行"真的成链，遇确认即停；单次推进从 5-6 往返降到 1。
+5. **B2+B3 处处输出可直接运行的命令** —— 低成本 quick-win，把"眼看-抠 hash-重打"变成复制即跑。
+
+🎯 **北极星**：**让"下一步"成为系统第一等公民，而不是让用户拼命令。** 打通一条 **读状态→推荐一步→用模糊/默认解析好一切参数→执行→只在需要人拍板处（确认 AI judgement）停下来问** 的闭环：`orchestrate auto` 作执行引擎、`locate_record` 模糊解析消灭 id 转抄、config 默认值 + 批量确认把"一次授权"从"N 次输入"里解放。**治理红线（不自签、必留 evidence）不动——它恰应是这条流水线上唯一需要用户亲自介入的闸口。**
+
+> 建议施工顺序（都低耦合、可独立落地）：先 quick-win 批（B2/B3/B4/A3/A4/A5/C6/C7/D2/D4/D6，多为 S）→ 再 B1（模糊解析，中杠杆最高）→ 再 A1/A2（批量确认）→ 再 C1/C2（执行环）。
