@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -314,7 +315,15 @@ def execute_auto_plan(root: Path, plan: dict[str, Any]) -> int:
         return 0
     command_parts = [str(part) for part in plan.get("command_parts") or []]
     print(format_auto_plan(plan))
-    result = subprocess.run(executable_command(command_parts), cwd=root, text=True, capture_output=True, check=False)
+    child_env = {**os.environ, "RESEARCH_PROJECT_ROOT": str(root)}
+    result = subprocess.run(
+        executable_command(command_parts),
+        cwd=root,
+        env=child_env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
     for line in result.stdout.splitlines():
         if line.strip():
             print(f"[exec] {line}")

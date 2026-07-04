@@ -240,3 +240,55 @@ def test_orchestrator_auto_execute_stops_at_pending_confirmation(tmp_path: Path,
     assert "stop for human decision" in output
     assert "not executing" in output
     assert ".agents/skills/knowledge-base-manager/scripts/kb.py confirm --id p-gated-123456" in output
+
+
+def test_orchestrator_auto_execute_passes_root_to_child_under_symlinked_agents(tmp_path: Path) -> None:
+    orchestrate = _load_script("research-orchestrator", "orchestrate.py", "orchestrator_script_for_auto_child_root")
+    sandbox_root = tmp_path / "sandbox"
+    symlink_target = tmp_path / "symlink-target"
+    child_script = symlink_target / ".agents" / "skills" / "fake-skill" / "scripts" / "write_marker.py"
+    child_script.parent.mkdir(parents=True)
+    child_script.write_text(
+        "\n".join(
+                [
+                    "from pathlib import Path",
+                    "import sys",
+                    "SCRIPT_PATH = Path(__file__).resolve()",
+                    "for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:",
+                    "    lib = candidate / '.agents' / 'lib'",
+                    "    if lib.exists():",
+                    "        sys.path.insert(0, str(lib))",
+                    "        break",
+                    "else:",
+                    "    raise SystemExit('Could not locate .agents/lib')",
+                    "from research.common import find_project_root",
+                    "root = find_project_root(Path(__file__).resolve())",
+                "(root / 'kb' / 'child-root.txt').parent.mkdir(parents=True, exist_ok=True)",
+                "(root / 'kb' / 'child-root.txt').write_text(str(root), encoding='utf-8')",
+                "print(root)",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (symlink_target / ".agents" / "lib").symlink_to(_project_root() / ".agents" / "lib", target_is_directory=True)
+    (symlink_target / "AGENTS.md").write_text("# target\n", encoding="utf-8")
+    sandbox_root.mkdir()
+    (sandbox_root / ".agents").symlink_to(symlink_target / ".agents", target_is_directory=True)
+    (sandbox_root / "AGENTS.md").write_text("# sandbox\n", encoding="utf-8")
+
+    plan = {
+        "safe_execute": True,
+        "step_type": "refresh",
+        "reason": "fake safe write",
+        "command_parts": [
+            orchestrate.COMMAND_PREFIX,
+            ".agents/skills/fake-skill/scripts/write_marker.py",
+        ],
+    }
+
+    exit_code = orchestrate.execute_auto_plan(sandbox_root, plan)
+
+    assert exit_code == 0
+    assert (sandbox_root / "kb" / "child-root.txt").read_text(encoding="utf-8") == str(sandbox_root)
+    assert not (symlink_target / "kb" / "child-root.txt").exists()
