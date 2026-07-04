@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from shlex import quote
 
 SCRIPT_PATH = Path(__file__).resolve()
 for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
@@ -16,7 +15,7 @@ for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
 else:
     raise SystemExit("Could not locate .agents/lib")
 
-from research.common import parse_iso_datetime
+from research.common import confirm_command, parse_iso_datetime, shell_command
 from research.v2 import (
     build_index,
     candidate_pools_path,
@@ -67,17 +66,6 @@ NEXT_COMMAND_BY_KIND = {
     "experiment": "diagnose",
 }
 
-
-def shell_command(parts: list[str]) -> str:
-    rendered: list[str] = []
-    for index, part in enumerate(parts):
-        if (index == 0 and part == COMMAND_PREFIX) or (part.startswith("${") and part.endswith("}")):
-            rendered.append(part)
-        else:
-            rendered.append(quote(str(part)))
-    return " ".join(rendered)
-
-
 def review_sort_key(record: dict) -> tuple:
     timestamp = str(record.get("updated_at") or record.get("created_at") or record.get("first_ingested_at") or "")
     parsed = parse_iso_datetime(timestamp)
@@ -86,40 +74,6 @@ def review_sort_key(record: dict) -> tuple:
     if parsed:
         return (0, parsed.timestamp(), str(record.get("id") or ""))
     return (1, 0.0, str(record.get("id") or ""))
-
-
-def confirm_command(record: dict) -> str:
-    kind = str(record.get("kind") or "")
-    unit_id = str(record.get("id") or "")
-    if kind in SCRIPT_BY_KIND and kind != "idea":
-        return shell_command(
-            [
-                COMMAND_PREFIX,
-                SCRIPT_BY_KIND[kind],
-                "confirm",
-                ID_ARG_BY_KIND[kind],
-                unit_id,
-                "--confirmed-by",
-                "${RESEARCH_CONFIRMED_BY:?set-human-identity}",
-                "--evidence",
-                "${RESEARCH_CONFIRM_EVIDENCE:?set-human-evidence}",
-            ]
-        )
-    return shell_command(
-        [
-            COMMAND_PREFIX,
-            ".agents/skills/knowledge-base-manager/scripts/kb.py",
-            "promote",
-            "--id",
-            unit_id,
-            "--confirmation-status",
-            "confirmed",
-            "--confirmed-by",
-            "${RESEARCH_CONFIRMED_BY:?set-human-identity}",
-            "--evidence",
-            "${RESEARCH_CONFIRM_EVIDENCE:?set-human-evidence}",
-        ]
-    )
 
 
 def next_unit_command(record: dict) -> str:

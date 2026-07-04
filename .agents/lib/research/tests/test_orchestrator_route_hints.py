@@ -4,6 +4,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+from research.common import confirm_command as shared_confirm_command
+
 
 def _project_root() -> Path:
     return Path(__file__).resolve().parents[4]
@@ -37,3 +39,10 @@ def test_source_intake_routes_cover_new_source_tasks() -> None:
     assert module.ROUTE_HINTS["入库"] == "source-intake"
     assert module.ROUTE_HINTS["staging"] == "source-intake"
     assert module.ROUTE_HINTS["新论文"] == "source-intake"
+
+
+def test_orchestrator_confirm_command_uses_shared_helper() -> None:
+    module = _load_orchestrator_module()
+    record = {"kind": "experiment", "id": "e-run-12345678"}
+
+    assert module.confirm_command_for_record(record) == shared_confirm_command(record)

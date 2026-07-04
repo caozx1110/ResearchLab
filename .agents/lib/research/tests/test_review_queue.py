@@ -4,7 +4,7 @@ import importlib.util
 import sys
 from pathlib import Path
 
-from research.common import load_yaml, write_yaml_if_changed
+from research.common import confirm_command as shared_confirm_command, load_yaml, write_yaml_if_changed
 from research.v2 import ensure_v2_workspace, record_path, runtime_preferences_path, search_records
 
 
@@ -88,6 +88,13 @@ def test_query_output_helpers_emit_runnable_command_with_real_id() -> None:
     assert ".agents/skills/paper-analyst/scripts/paper.py confirm --paper-id p-query-123456" in confirm_command
     assert "<id>" not in next_command
     assert "<id>" not in confirm_command
+
+
+def test_kb_confirm_command_uses_shared_helper() -> None:
+    kb = _load_kb_module()
+    record = _record("p-query-123456", "Queryable", "pending_user_confirmation", "2026-01-01T00:00:00+00:00")
+
+    assert kb.confirm_command(record) == shared_confirm_command(record)
 
 
 def test_batch_confirm_applies_one_evidence_to_multiple_units(tmp_path: Path) -> None:

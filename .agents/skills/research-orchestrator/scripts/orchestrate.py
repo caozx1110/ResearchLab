@@ -5,7 +5,6 @@ import argparse
 import subprocess
 import sys
 from pathlib import Path
-from shlex import quote
 from typing import Any
 
 SCRIPT_PATH = Path(__file__).resolve()
@@ -23,11 +22,13 @@ from research.common import (
     append_program_reporting_event,
     blank_list_document,
     blank_reporting_events,
+    confirm_command as confirm_command_for_record,
     ensure_dir,
     load_list_document,
     load_yaml,
     normalize_list,
     program_file_lock,
+    shell_command,
     simple_slug,
     utc_now_iso,
     write_text_if_changed,
@@ -98,97 +99,11 @@ COMMAND_PREFIX = "${RESEARCH_PYTHON:-python3}"
 SAFE_AUTO_STEPS = {"screen", "build-index", "refresh", "generate-note"}
 
 
-def shell_command(parts: list[str]) -> str:
-    rendered: list[str] = []
-    for index, part in enumerate(parts):
-        if (index == 0 and part == COMMAND_PREFIX) or (part.startswith("${") and part.endswith("}")):
-            rendered.append(part)
-        else:
-            rendered.append(quote(str(part)))
-    return " ".join(rendered)
-
-
 def executable_command(parts: list[str]) -> list[str]:
     command = list(parts)
     if command and command[0] == COMMAND_PREFIX:
         command[0] = sys.executable or "python3"
     return command
-
-
-def confirm_command_for_record(record: dict[str, Any]) -> str:
-    kind = str(record.get("kind") or "")
-    unit_id = str(record.get("id") or "")
-    if kind == "paper":
-        return shell_command(
-            [
-                COMMAND_PREFIX,
-                ".agents/skills/paper-analyst/scripts/paper.py",
-                "confirm",
-                "--paper-id",
-                unit_id,
-                "--confirmed-by",
-                "${RESEARCH_CONFIRMED_BY:?set-human-identity}",
-                "--evidence",
-                "${RESEARCH_CONFIRM_EVIDENCE:?set-human-evidence}",
-            ]
-        )
-    if kind == "repo":
-        return shell_command(
-            [
-                COMMAND_PREFIX,
-                ".agents/skills/repo-analyst/scripts/repo.py",
-                "confirm",
-                "--repo-id",
-                unit_id,
-                "--confirmed-by",
-                "${RESEARCH_CONFIRMED_BY:?set-human-identity}",
-                "--evidence",
-                "${RESEARCH_CONFIRM_EVIDENCE:?set-human-evidence}",
-            ]
-        )
-    if kind == "blog":
-        return shell_command(
-            [
-                COMMAND_PREFIX,
-                ".agents/skills/blog-analyst/scripts/blog.py",
-                "confirm",
-                "--blog-id",
-                unit_id,
-                "--confirmed-by",
-                "${RESEARCH_CONFIRMED_BY:?set-human-identity}",
-                "--evidence",
-                "${RESEARCH_CONFIRM_EVIDENCE:?set-human-evidence}",
-            ]
-        )
-    if kind == "experiment":
-        return shell_command(
-            [
-                COMMAND_PREFIX,
-                ".agents/skills/experiment-workbench/scripts/experiment.py",
-                "confirm",
-                "--experiment-id",
-                unit_id,
-                "--confirmed-by",
-                "${RESEARCH_CONFIRMED_BY:?set-human-identity}",
-                "--evidence",
-                "${RESEARCH_CONFIRM_EVIDENCE:?set-human-evidence}",
-            ]
-        )
-    return shell_command(
-        [
-            COMMAND_PREFIX,
-            ".agents/skills/knowledge-base-manager/scripts/kb.py",
-            "promote",
-            "--id",
-            unit_id,
-            "--confirmation-status",
-            "confirmed",
-            "--confirmed-by",
-            "${RESEARCH_CONFIRMED_BY:?set-human-identity}",
-            "--evidence",
-            "${RESEARCH_CONFIRM_EVIDENCE:?set-human-evidence}",
-        ]
-    )
 
 
 def command_for_dashboard_item(item: dict[str, Any]) -> str:

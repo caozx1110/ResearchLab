@@ -6,7 +6,6 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from shlex import quote
 
 SCRIPT_PATH = Path(__file__).resolve()
 for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
@@ -18,7 +17,7 @@ for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
 else:
     raise SystemExit("Could not locate .agents/lib")
 
-from research.common import extract_pdf_record, parse_arxiv_id
+from research.common import confirm_command as shared_confirm_command, extract_pdf_record, parse_arxiv_id, shell_command
 from research.intake_cli import add_intake_add_arguments
 from research.v2 import (
     apply_record_governance,
@@ -51,76 +50,9 @@ def research_python() -> str:
     return os.environ.get("RESEARCH_PYTHON") or sys.executable or "python3"
 
 
-def shell_command(parts: list[str]) -> str:
-    rendered: list[str] = []
-    for part in parts:
-        if part.startswith("${") and part.endswith("}"):
-            rendered.append(part)
-        else:
-            rendered.append(quote(str(part)))
-    return " ".join(rendered)
-
-
 def confirm_command(record: dict) -> str:
-    kind = str(record.get("kind") or "")
-    unit_id = str(record.get("id") or "")
-    if kind == "paper":
-        return shell_command(
-            [
-                research_python(),
-                ".agents/skills/paper-analyst/scripts/paper.py",
-                "confirm",
-                "--paper-id",
-                unit_id,
-                "--confirmed-by",
-                "${RESEARCH_CONFIRMED_BY:?set-human-identity}",
-                "--evidence",
-                "${RESEARCH_CONFIRM_EVIDENCE:?set-human-evidence}",
-            ]
-        )
-    if kind == "repo":
-        return shell_command(
-            [
-                research_python(),
-                ".agents/skills/repo-analyst/scripts/repo.py",
-                "confirm",
-                "--repo-id",
-                unit_id,
-                "--confirmed-by",
-                "${RESEARCH_CONFIRMED_BY:?set-human-identity}",
-                "--evidence",
-                "${RESEARCH_CONFIRM_EVIDENCE:?set-human-evidence}",
-            ]
-        )
-    if kind == "blog":
-        return shell_command(
-            [
-                research_python(),
-                ".agents/skills/blog-analyst/scripts/blog.py",
-                "confirm",
-                "--blog-id",
-                unit_id,
-                "--confirmed-by",
-                "${RESEARCH_CONFIRMED_BY:?set-human-identity}",
-                "--evidence",
-                "${RESEARCH_CONFIRM_EVIDENCE:?set-human-evidence}",
-            ]
-        )
-    return shell_command(
-        [
-            research_python(),
-            ".agents/skills/knowledge-base-manager/scripts/kb.py",
-            "promote",
-            "--id",
-            unit_id,
-            "--confirmation-status",
-            "confirmed",
-            "--confirmed-by",
-            "${RESEARCH_CONFIRMED_BY:?set-human-identity}",
-            "--evidence",
-            "${RESEARCH_CONFIRM_EVIDENCE:?set-human-evidence}",
-        ]
-    )
+    python = research_python()
+    return shared_confirm_command(record, command_prefix=python, direct_kinds=("paper", "repo", "blog"))
 
 
 def infer_paper_metadata(root: Path, source: str) -> dict:

@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from functools import lru_cache
 from html import unescape
 from pathlib import Path
+from shlex import quote
 from typing import Any
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -25,6 +26,75 @@ from .yaml_io import dump_yaml, load_yaml, write_text_if_changed, write_yaml_if_
 
 
 RUNTIME_MODULES = ("yaml", "PyPDF2", "pypdf")
+COMMAND_PREFIX = "${RESEARCH_PYTHON:-python3}"
+CONFIRM_SCRIPT_BY_KIND = {
+    "paper": ".agents/skills/paper-analyst/scripts/paper.py",
+    "repo": ".agents/skills/repo-analyst/scripts/repo.py",
+    "blog": ".agents/skills/blog-analyst/scripts/blog.py",
+    "experiment": ".agents/skills/experiment-workbench/scripts/experiment.py",
+}
+CONFIRM_ID_ARG_BY_KIND = {
+    "paper": "--paper-id",
+    "repo": "--repo-id",
+    "blog": "--blog-id",
+    "experiment": "--experiment-id",
+}
+
+
+def shell_command(parts: list[str], *, command_prefix: str = COMMAND_PREFIX) -> str:
+    rendered: list[str] = []
+    preserve_command_prefix = command_prefix if command_prefix.startswith("${") and command_prefix.endswith("}") else ""
+    for index, part in enumerate(parts):
+        text = str(part)
+        if (index == 0 and preserve_command_prefix and text == preserve_command_prefix) or (text.startswith("${") and text.endswith("}")):
+            rendered.append(text)
+        else:
+            rendered.append(quote(text))
+    return " ".join(rendered)
+
+
+def confirm_command(
+    record: dict[str, Any],
+    *,
+    command_prefix: str = COMMAND_PREFIX,
+    direct_kinds: tuple[str, ...] | None = None,
+) -> str:
+    kind = str(record.get("kind") or "")
+    unit_id = str(record.get("id") or "")
+    direct_kind_set = set(CONFIRM_SCRIPT_BY_KIND) if direct_kinds is None else set(direct_kinds)
+    if kind in direct_kind_set and kind in CONFIRM_SCRIPT_BY_KIND:
+        return shell_command(
+            [
+                command_prefix,
+                CONFIRM_SCRIPT_BY_KIND[kind],
+                "confirm",
+                CONFIRM_ID_ARG_BY_KIND[kind],
+                unit_id,
+                "--confirmed-by",
+                "${RESEARCH_CONFIRMED_BY:?set-human-identity}",
+                "--evidence",
+                "${RESEARCH_CONFIRM_EVIDENCE:?set-human-evidence}",
+            ],
+            command_prefix=command_prefix,
+        )
+    return shell_command(
+        [
+            command_prefix,
+            ".agents/skills/knowledge-base-manager/scripts/kb.py",
+            "promote",
+            "--id",
+            unit_id,
+            "--confirmation-status",
+            "confirmed",
+            "--confirmed-by",
+            "${RESEARCH_CONFIRMED_BY:?set-human-identity}",
+            "--evidence",
+            "${RESEARCH_CONFIRM_EVIDENCE:?set-human-evidence}",
+        ],
+        command_prefix=command_prefix,
+    )
+
+
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
