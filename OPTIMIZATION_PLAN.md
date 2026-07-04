@@ -377,3 +377,16 @@ Part B 的 Top 6 已由 Codex 逐项单独提交（6 commits），并经 **7 单
 - **S7（P2，下一批）** repo capability 缺"资源型 repo"标注 → `repo-analyst map-capability` 加 repo type（paper-page/asset-only/code-release/training-ready/eval-ready）；`method-designer` 选到无 entrypoints/training/eval 的 repo 时把 repo-choice 风险升为 blocking evidence（避免"到实验阶段才发现 repo 当不了 baseline host"）。
 
 > **本批交 Codex 范围** = R1-R6 + S1 + S2（review 必修 + 两个 P0/P1-安全）。S3-S7 已采纳，作为下一批。**约束**：治理红线不动（`--evidence` 强制、auto 不自签、S1 保持内容 pending）；import 面兼容；每项加测试、每步跑 `pytest -q`；逐项单独 commit。
+
+---
+
+## 17. 修复批 review 结论 + 收尾项（F 组，交 Codex）
+
+> R1-R6+S1+S2 已实现（commit `ca40b87`..`a6ac697`，90 测试过）。对抗性 review（7 单元 + 逐条验证）：**11 findings，0 blocker，治理红线经验证守住**（`--evidence` 全路径强制含批量、auto 不自签、idea select 保持内容 pending 均已核实）。R1/R3 clean SHIP，其余 SHIP_WITH_NITS。以下收尾项：
+
+- **F1（should-fix，安全，CONFIRMED）** `orchestrate auto` 的 S2 root 安全**未覆盖自身子进程**：`execute_auto_plan`(orchestrate.py:317) `subprocess.run(..., cwd=root)` 既不带 `--root` 也不设 `RESEARCH_PROJECT_ROOT` env → 子脚本各自从 `Path(__file__).resolve()` 重算 root，故 `auto --root /sandbox --execute` 会把 writing safe-step 写到**真实仓库**（除非另外 export env）。非红线破坏（safe steps 无 confirm/select），但 S2 沙箱安全在自己的 fan-out 上漏了。修：给 command_parts 追加 `--root <root>` 且/或 `subprocess.run(..., env={**os.environ, "RESEARCH_PROJECT_ROOT": str(root)})`。加子进程 root 传递测试。
+- **F2（should-fix，一致性，PLAUSIBLE）** 6 个 kb-browser 写脚本（build/open/serve/status/stop_kb_browser.py）暴露的是 `--project-root` 而非 `--root`，走并行 helper `kb_browser_lib.project_root_from_script`。env 覆盖已生效（fall through 到共享 `find_project_root`），但 `--root` flag 会 argparse 报错 → 用户照搬 `--root` 会踩空回落到脆弱默认。修：给这些脚本加 `--root`（alias `--project-root`）走 `add_project_root_argument`，或文档统一说明 env 是 navigator 子系统的覆盖入口。
+- **F3（should-fix，治理测试，CONFIRMED）** 治理红线「`kb.py review-queue --confirm` 无 `--evidence` 时在任何写入前被拒」**无端到端测试**（其 argparse `--evidence` 是 `default=[]` 而非 required，仅靠 `confirm_unit→apply_confirmation→require_confirmation_provenance` 运行时拦截；行为经验证正确但无护栏）。修：加测试——写一个 pending record，`apply_batch_confirmation(root, [rec], confirmed_by='x', evidence=[])`（及 CLI `review-queue --confirm` 无 evidence）断言 raise `--evidence` 且盘上 record 仍 `pending_user_confirmation`（无半写）。
+- **F4（nit，测试补强）** ①R4 的 3 个 shared-helper 测试是同义反复（`wrapper(record)==shared(record)`）→ 改为断言**具体渲染的命令串**（脚本路径+id flag+`${RESEARCH_CONFIRM_EVIDENCE:?...}` 占位符）以真正锁字节输出；②S1 的 `test_review_queue_lists_selected_ideas_with_pending_content` 手写 record、没驱动 `idea.py select` → 改为端到端跑 select 再断言进 review-queue（或删，因 `test_idea_selection.py` 已覆盖核心）；③S2 加"符号链接威胁模型"测试（`.agents` symlink 指向另一 fake repo，断言 `--root`/env 写到 sandbox 而非 symlink 目标，且覆盖 write 命令而非仅 init）。
+
+> **交 Codex 范围** = F1+F2+F3（should-fix：补全 S2 安全的 fan-out + flag 一致性 + 锁治理红线测试）+ F4（测试补强）。约束同上：治理红线不动、import 面兼容、每项跑测试、逐项 commit。被 review 驳回 2 条（不做）。
