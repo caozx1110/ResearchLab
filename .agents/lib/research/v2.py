@@ -1628,14 +1628,15 @@ def _preserve_empty_governance_seeds(taxonomy: dict[str, Any], pools: dict[str, 
         }
 
 
-def rebuild_governance_catalogs(project_root: Path) -> tuple[Path, Path]:
+def rebuild_governance_catalogs(project_root: Path, *, records: list[dict[str, Any]] | None = None) -> tuple[Path, Path]:
     ensure_v2_workspace(project_root)
+    records = records if records is not None else iter_records(project_root)
     existing_taxonomy = load_topic_taxonomy(project_root)
     existing_pools = load_candidate_pools(project_root)
     taxonomy = {**existing_taxonomy, "topics": {}, "tags": {}}
     pools = {**existing_pools, "pools": {}}
 
-    for record in iter_records(project_root):
+    for record in records:
         unit_id = str(record.get("id") or "")
         record_tags = _slug_list(record.get("tags"))
         record_topics = _slug_list(record.get("topics"))
@@ -1709,9 +1710,10 @@ def rebuild_governance_catalogs(project_root: Path) -> tuple[Path, Path]:
 
 def build_index(project_root: Path) -> tuple[Path, Path]:
     ensure_v2_workspace(project_root)
-    rebuild_governance_catalogs(project_root)
+    records = iter_records(project_root)
+    rebuild_governance_catalogs(project_root, records=records)
     items = []
-    for record in sorted(iter_records(project_root), key=lambda x: (str(x.get("kind")), str(x.get("title")))):
+    for record in sorted(records, key=lambda x: (str(x.get("kind")), str(x.get("title")))):
         items.append(
             {
                 "id": record.get("id"),
