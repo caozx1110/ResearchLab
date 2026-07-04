@@ -1607,7 +1607,7 @@ def _record_modified_sort_key(project_root: Path, record: dict[str, Any]) -> tup
     return (mtime, parsed.timestamp() if parsed else 0.0, str(record.get("id") or ""))
 
 
-def locate_record(project_root: Path, unit_id: str, *, kind: str | None = None) -> tuple[dict[str, Any], Path]:
+def locate_record(project_root: Path, unit_id: str, *, kind: str | None = None, fuzzy: bool = True) -> tuple[dict[str, Any], Path]:
     exact_reference = str(unit_id)
     reference = exact_reference.strip()
     search_kinds = [kind] if kind else list(UNIT_KIND_DIRS)
@@ -1627,6 +1627,8 @@ def locate_record(project_root: Path, unit_id: str, *, kind: str | None = None) 
             current_id = str(record.get("id") or "")
             if current_kind in UNIT_KIND_DIRS and current_id:
                 return record, record_path(project_root, current_kind, current_id)
+    if not fuzzy:
+        raise SystemExit(f"Record not found: {unit_id}")
     lowered = reference.lower()
     if lowered:
         prefix_matches = [
@@ -1703,7 +1705,7 @@ def _wikilink_target_exists(project_root: Path, target: str, ref_keys: set[str])
         if not candidate:
             continue
         try:
-            locate_record(project_root, candidate)
+            locate_record(project_root, candidate, fuzzy=False)
             return True
         except SystemExit:
             pass
@@ -1947,7 +1949,7 @@ def lint_workspace_integrity(project_root: Path) -> list[str]:
         active_unit_ids = _text_list(state_payload.get("active_unit_ids"))
         for unit_id in active_unit_ids:
             try:
-                record, _ = locate_record(project_root, unit_id)
+                record, _ = locate_record(project_root, unit_id, fuzzy=False)
             except SystemExit:
                 issues.append(f"{rel(project_root, state_file)}: active_unit_id `{unit_id}` not found")
                 continue

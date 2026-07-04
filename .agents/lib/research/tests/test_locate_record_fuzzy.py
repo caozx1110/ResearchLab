@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from research.common import write_yaml_if_changed
-from research.v2 import ensure_v2_workspace, locate_record, record_path
+from research.v2 import ensure_v2_workspace, lint_records, locate_record, record_path
 
 
 def _record(
@@ -81,6 +81,20 @@ def test_locate_record_resolves_unique_case_insensitive_title_substring(tmp_path
     record, _ = locate_record(tmp_path, "vision-language-action")
 
     assert record["id"] == "p-openvla-abcdef12"
+
+
+def test_lint_reports_partial_wikilink_target_as_broken(tmp_path: Path) -> None:
+    ensure_v2_workspace(tmp_path)
+    record_path_written = _write_record(
+        tmp_path,
+        _record("p-openvla-abcdef12", "OpenVLA: An Open Vision-Language-Action Model"),
+    )
+    (record_path_written.parent / "note.md").write_text("See [[vision-language-action]] for details.\n", encoding="utf-8")
+
+    status, issues = lint_records(tmp_path)
+
+    assert status == "FAIL"
+    assert any("broken wikilink `vision-language-action`" in issue for issue in issues)
 
 
 def test_locate_record_last_is_kind_scoped_most_recently_modified_record(tmp_path: Path) -> None:
