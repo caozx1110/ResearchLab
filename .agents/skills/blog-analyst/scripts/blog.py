@@ -20,7 +20,7 @@ from research.v2 import append_history, apply_confirmation, build_index, locate_
 
 
 def add_confirmation_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--confirmed-by", required=True)
+    parser.add_argument("--confirmed-by", default="")
     parser.add_argument("--evidence", action="append", required=True)
 
 
@@ -88,7 +88,7 @@ def main() -> int:
         return 0
 
     if args.command == "confirm":
-        record = apply_confirmation(record, confirmed_by=args.confirmed_by, evidence=args.evidence, method="blog.py confirm")
+        record = apply_confirmation(record, confirmed_by=args.confirmed_by, evidence=args.evidence, method="blog.py confirm", project_root=root)
         record["status"] = "active"
         append_history(record, action="blog-confirmed", summary="Blog analysis confirmed by user.", information_types=["fact"])
         write_record(root, record)

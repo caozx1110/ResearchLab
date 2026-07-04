@@ -59,7 +59,7 @@ SECTION_PATTERNS = (
 
 
 def add_confirmation_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--confirmed-by", required=True)
+    parser.add_argument("--confirmed-by", default="")
     parser.add_argument("--evidence", action="append", required=True)
 
 def _source_paths(root: Path, record: dict) -> list[Path]:
@@ -776,7 +776,7 @@ def main() -> int:
         return 0
 
     if args.command == "confirm":
-        record = apply_confirmation(record, confirmed_by=args.confirmed_by, evidence=args.evidence, method="paper.py confirm")
+        record = apply_confirmation(record, confirmed_by=args.confirmed_by, evidence=args.evidence, method="paper.py confirm", project_root=root)
         record["status"] = "active"
         append_history(record, action="paper-confirmed", summary="Paper analysis confirmed by user.", information_types=["fact"])
         write_record(root, record)

@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from research.common import load_yaml, write_yaml_if_changed
-from research.v2 import ensure_v2_workspace, promote_record, record_path
+from research.v2 import ensure_v2_workspace, promote_record, record_path, runtime_preferences_path
 
 
 def _project_root() -> Path:
@@ -30,6 +30,23 @@ def _has_required_arg(text: str, arg_name: str) -> bool:
         for keyword in node.keywords:
             if keyword.arg == "required" and isinstance(keyword.value, ast.Constant) and keyword.value.value is True:
                 return True
+    return False
+
+
+def _has_optional_arg(text: str, arg_name: str) -> bool:
+    tree = ast.parse(text)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not isinstance(func, ast.Attribute) or func.attr != "add_argument":
+            continue
+        if not node.args or not isinstance(node.args[0], ast.Constant) or node.args[0].value != arg_name:
+            continue
+        for keyword in node.keywords:
+            if keyword.arg == "required" and isinstance(keyword.value, ast.Constant) and keyword.value.value is True:
+                return False
+        return True
     return False
 
 
@@ -57,6 +74,42 @@ def test_promote_to_confirmed_requires_human_provenance(tmp_path: Path) -> None:
 
     with pytest.raises(SystemExit, match="--evidence"):
         promote_record(tmp_path, "p-confirm-123456", confirmation_status="confirmed", confirmed_by="czx")
+
+
+def test_promote_to_confirmed_uses_configured_default_confirmed_by(tmp_path: Path) -> None:
+    ensure_v2_workspace(tmp_path)
+    write_yaml_if_changed(record_path(tmp_path, "paper", "p-confirm-123456"), _record())
+    write_yaml_if_changed(
+        runtime_preferences_path(tmp_path),
+        {
+            "identity": {"default_confirmed_by": "czx-default"},
+        },
+    )
+
+    path = promote_record(
+        tmp_path,
+        "p-confirm-123456",
+        confirmation_status="confirmed",
+        evidence=["kb/programs/p/decision-log.md"],
+    )
+
+    record = load_yaml(path, default={})
+    assert record["confirmation"]["by"] == "czx-default"
+    assert record["confirmation"]["evidence"] == ["kb/programs/p/decision-log.md"]
+
+
+def test_missing_evidence_is_rejected_even_with_default_confirmed_by(tmp_path: Path) -> None:
+    ensure_v2_workspace(tmp_path)
+    write_yaml_if_changed(record_path(tmp_path, "paper", "p-confirm-123456"), _record())
+    write_yaml_if_changed(
+        runtime_preferences_path(tmp_path),
+        {
+            "identity": {"default_confirmed_by": "czx-default"},
+        },
+    )
+
+    with pytest.raises(SystemExit, match="--evidence"):
+        promote_record(tmp_path, "p-confirm-123456", confirmation_status="confirmed")
 
 
 def test_promote_non_confirmed_does_not_require_provenance(tmp_path: Path) -> None:
@@ -118,5 +171,5 @@ def test_confirm_scripts_require_provenance_arguments() -> None:
     ]:
         text = _script_text(skill, script_name)
         assert "apply_confirmation" in text
-        assert _has_required_arg(text, "--confirmed-by"), skill
+        assert _has_optional_arg(text, "--confirmed-by"), skill
         assert _has_required_arg(text, "--evidence"), skill

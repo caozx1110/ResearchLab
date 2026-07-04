@@ -33,7 +33,7 @@ from research.v2 import (
 
 
 def add_confirmation_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--confirmed-by", required=True)
+    parser.add_argument("--confirmed-by", default="")
     parser.add_argument("--evidence", action="append", required=True)
 
 IGNORE_DIRS = {".git", "__pycache__", ".venv", "node_modules", "build", "dist", "outputs", "logs", ".mypy_cache"}
@@ -369,7 +369,7 @@ def main() -> int:
         return 0
 
     if args.command == "confirm":
-        record = apply_confirmation(record, confirmed_by=args.confirmed_by, evidence=args.evidence, method="repo.py confirm")
+        record = apply_confirmation(record, confirmed_by=args.confirmed_by, evidence=args.evidence, method="repo.py confirm", project_root=root)
         record["status"] = "active"
         record["information_types"] = ["fact"]
         append_history(record, action="repo-confirmed", summary="Repo analysis confirmed by user.", information_types=["fact"])

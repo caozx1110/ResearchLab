@@ -42,7 +42,7 @@ STRATEGIES = [
 
 
 def add_confirmation_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--confirmed-by", required=True)
+    parser.add_argument("--confirmed-by", default="")
     parser.add_argument("--evidence", action="append", required=True)
 
 
@@ -378,7 +378,7 @@ def main() -> int:
         for _, record in scored_records:
             if record["id"] == selected["id"]:
                 record["status"] = "selected"
-                record = apply_confirmation(record, confirmed_by=args.confirmed_by, evidence=args.evidence, method="idea.py select-best")
+                record = apply_confirmation(record, confirmed_by=args.confirmed_by, evidence=args.evidence, method="idea.py select-best", project_root=root)
                 record["payload"]["selection"]["selected_rank"] = "1"
                 record["payload"]["selection"]["selected_reason"] = "Highest reviewed total score in explicit select-best command."
             append_history(
@@ -466,7 +466,7 @@ def main() -> int:
 
     if args.command == "select":
         record["status"] = "selected"
-        record = apply_confirmation(record, confirmed_by=args.confirmed_by, evidence=args.evidence, method="idea.py select")
+        record = apply_confirmation(record, confirmed_by=args.confirmed_by, evidence=args.evidence, method="idea.py select", project_root=root)
         append_history(record, action="idea-selected", summary="Idea explicitly selected for method design.", information_types=["fact"])
         write_record(root, record)
         build_index(root)

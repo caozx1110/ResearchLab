@@ -342,6 +342,8 @@ topics:
 
 由 `research-config-manager` 写入。schema 见 `v2.py default_runtime_preferences()`，包含资源画像、语言偏好、自动化开关、versioning_commit_mode（`manual|milestone|aggressive`）等。
 
+- `identity.default_confirmed_by`: 可选的人类确认身份默认值。只用于补齐 `--confirmed-by`；`--evidence` 仍必须由调用方显式提供，系统不得默认使用 AI 写出的单元笔记作为 evidence。
+
 ### research-settings.md / user-profile.yaml
 
 人面向偏好与背景；只读契约，由 navigator/orchestrator 在生成 user-facing 页面时引用。

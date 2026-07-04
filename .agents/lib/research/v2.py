@@ -369,6 +369,9 @@ def default_runtime_preferences() -> dict[str, Any]:
             "default_terminal_mode": "codex",
             "auto_open_recent_file": True,
         },
+        "identity": {
+            "default_confirmed_by": "",
+        },
         "paper": {
             "auto_screen_on_intake": True,
             "auto_complete_note": False,
@@ -420,6 +423,12 @@ def load_runtime_preferences(project_root: Path) -> dict[str, Any]:
     browser["default_terminal_mode"] = str(browser.get("default_terminal_mode") or "codex")
     browser["auto_open_recent_file"] = bool(browser.get("auto_open_recent_file"))
     normalized["browser"] = browser
+
+    identity = normalized.get("identity", {})
+    if not isinstance(identity, dict):
+        identity = {}
+    identity["default_confirmed_by"] = str(identity.get("default_confirmed_by") or "").strip()
+    normalized["identity"] = identity
 
     paper = normalized.get("paper", {})
     if not isinstance(paper, dict):
@@ -509,7 +518,7 @@ def load_runtime_preferences(project_root: Path) -> dict[str, Any]:
 def write_runtime_preferences(project_root: Path, payload: dict[str, Any]) -> Path:
     current = load_runtime_preferences(project_root)
     merged = copy.deepcopy(current)
-    for key in ("browser", "paper", "pdf", "versioning"):
+    for key in ("browser", "identity", "paper", "pdf", "versioning"):
         value = payload.get(key)
         if isinstance(value, dict):
             target = merged.setdefault(key, {})
@@ -1428,18 +1437,46 @@ AI_INFORMATION_TYPES = {"inference", "evaluation", "user_opinion"}
 GATED_CONFIRMATION_VALUES = {"pending_user_confirmation", "rejected"}
 
 
-def require_confirmation_provenance(*, confirmed_by: str, evidence: list[str] | str) -> tuple[str, list[str]]:
+def default_confirmed_by(project_root: Path | None = None) -> str:
+    if project_root is None:
+        return ""
+    preferences = load_runtime_preferences(project_root)
+    identity = preferences.get("identity", {})
+    if not isinstance(identity, dict):
+        return ""
+    return str(identity.get("default_confirmed_by") or "").strip()
+
+
+def require_confirmation_provenance(
+    *,
+    confirmed_by: str,
+    evidence: list[str] | str,
+    project_root: Path | None = None,
+) -> tuple[str, list[str]]:
     actor = str(confirmed_by or "").strip()
+    if not actor:
+        actor = default_confirmed_by(project_root)
     evidence_items = _text_list([evidence] if isinstance(evidence, str) else evidence)
     if not actor:
-        raise SystemExit("Human confirmation requires --confirmed-by.")
+        raise SystemExit("Human confirmation requires --confirmed-by or identity.default_confirmed_by.")
     if not evidence_items:
         raise SystemExit("Human confirmation requires at least one --evidence.")
     return actor, evidence_items
 
 
-def apply_confirmation(record: dict[str, Any], *, confirmed_by: str, evidence: list[str] | str, method: str = "cli") -> dict[str, Any]:
-    actor, evidence_items = require_confirmation_provenance(confirmed_by=confirmed_by, evidence=evidence)
+def apply_confirmation(
+    record: dict[str, Any],
+    *,
+    confirmed_by: str,
+    evidence: list[str] | str,
+    method: str = "cli",
+    project_root: Path | None = None,
+) -> dict[str, Any]:
+    actor, evidence_items = require_confirmation_provenance(
+        confirmed_by=confirmed_by,
+        evidence=evidence,
+        project_root=project_root,
+    )
     now = utc_now_iso()
     record["confirmation_status"] = "confirmed"
     record["needs_human_confirmation"] = False
@@ -2441,7 +2478,13 @@ def promote_record(
         record["maturity"] = maturity
     if confirmation_status:
         if confirmation_status == "confirmed":
-            apply_confirmation(record, confirmed_by=confirmed_by, evidence=evidence or [], method=confirmation_method)
+            apply_confirmation(
+                record,
+                confirmed_by=confirmed_by,
+                evidence=evidence or [],
+                method=confirmation_method,
+                project_root=project_root,
+            )
         else:
             record["confirmation_status"] = confirmation_status
     append_history(record, action="promoted", summary="Updated record lifecycle state.")

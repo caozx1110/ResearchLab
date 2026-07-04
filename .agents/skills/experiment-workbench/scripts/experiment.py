@@ -32,7 +32,7 @@ FOLLOW_UP_PRIORITY_CHOICES = ["low", "normal", "high", "critical"]
 
 
 def add_confirmation_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--confirmed-by", required=True)
+    parser.add_argument("--confirmed-by", default="")
     parser.add_argument("--evidence", action="append", required=True)
 
 
@@ -383,7 +383,7 @@ def main() -> int:
         return 0
 
     if args.command == "confirm":
-        record = apply_confirmation(record, confirmed_by=args.confirmed_by, evidence=args.evidence, method="experiment.py confirm")
+        record = apply_confirmation(record, confirmed_by=args.confirmed_by, evidence=args.evidence, method="experiment.py confirm", project_root=root)
         if record.get("status") == "running":
             record["status"] = "completed"
         append_history(record, action="experiment-confirmed", summary="Experiment findings confirmed by user.", information_types=["fact"])

@@ -255,8 +255,8 @@ def build_parser() -> argparse.ArgumentParser:
     guide = subparsers.add_parser("guide", help="Show practical guidance for current runtime modes")
     guide.add_argument("--focus", choices=["all", "paper-intake"], default="all")
 
-    runtime = subparsers.add_parser("set-runtime-pref", help="Persist browser / paper / pdf / versioning runtime preferences")
-    runtime.add_argument("--section", required=True, choices=["browser", "paper", "pdf", "versioning"])
+    runtime = subparsers.add_parser("set-runtime-pref", help="Persist browser / identity / paper / pdf / versioning runtime preferences")
+    runtime.add_argument("--section", required=True, choices=["browser", "identity", "paper", "pdf", "versioning"])
     runtime.add_argument("--key", required=True)
     runtime.add_argument("--value", required=True)
     return parser
