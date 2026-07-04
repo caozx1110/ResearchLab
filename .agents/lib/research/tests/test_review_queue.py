@@ -185,6 +185,25 @@ def test_review_queue_all_reviewed_empty_is_clean_noop(tmp_path: Path) -> None:
     assert records == []
 
 
+def test_review_queue_lists_selected_ideas_with_pending_content(tmp_path: Path) -> None:
+    kb = _load_kb_module()
+    ensure_v2_workspace(tmp_path)
+    record = _record(
+        "i-selected-123456",
+        "Selected Idea",
+        "pending_user_confirmation",
+        "2026-01-01T00:00:00+00:00",
+        status="selected",
+        information_types=["user_opinion", "inference", "evaluation", "unverified"],
+    )
+    record["kind"] = "idea"
+    _write_record(tmp_path, record)
+
+    records = kb.review_queue_records(tmp_path, kind="idea", confirmation_status="pending_user_confirmation")
+
+    assert [record["id"] for record in records] == ["i-selected-123456"]
+
+
 def test_confirm_all_reviewed_default_limit_is_unbounded() -> None:
     kb = _load_kb_module()
 

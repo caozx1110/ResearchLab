@@ -16,10 +16,9 @@ for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
 else:
     raise SystemExit("Could not locate .agents/lib")
 
-from research.common import ensure_dir, load_yaml, slugify, write_text_if_changed, write_yaml_if_changed, yaml_default
+from research.common import ensure_dir, load_yaml, slugify, utc_now_iso, write_text_if_changed, write_yaml_if_changed, yaml_default
 from research.v2 import (
     append_history,
-    apply_confirmation,
     apply_record_governance,
     build_index,
     default_record,
@@ -29,6 +28,7 @@ from research.v2 import (
     checkpoint_and_report,
     project_root,
     rel,
+    require_confirmation_provenance,
     synthesis_root,
     write_record,
 )
@@ -247,6 +247,36 @@ def print_created_idea(root: Path, record: dict, path: Path) -> None:
     print(f"[ok] created {path.relative_to(root)}")
 
 
+def mark_idea_selected(
+    root: Path,
+    record: dict,
+    *,
+    confirmed_by: str,
+    evidence: list[str],
+    method: str,
+    selected_rank: str = "",
+    selected_reason: str = "",
+) -> dict:
+    actor, evidence_items = require_confirmation_provenance(
+        confirmed_by=confirmed_by,
+        evidence=evidence,
+        project_root=root,
+    )
+    selection = record.setdefault("payload", {}).setdefault("selection", {})
+    record["status"] = "selected"
+    record["confirmation_status"] = "pending_user_confirmation"
+    record["needs_human_confirmation"] = True
+    if selected_rank:
+        selection["selected_rank"] = selected_rank
+    if selected_reason:
+        selection["selected_reason"] = selected_reason
+    selection["selected_by"] = actor
+    selection["selected_at"] = utc_now_iso()
+    selection["selection_evidence"] = evidence_items
+    selection["selection_method"] = method
+    return record
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Manage idea units in v2.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -377,10 +407,15 @@ def main() -> int:
         selected = scored_records[0][1]
         for _, record in scored_records:
             if record["id"] == selected["id"]:
-                record["status"] = "selected"
-                record = apply_confirmation(record, confirmed_by=args.confirmed_by, evidence=args.evidence, method="idea.py select-best", project_root=root)
-                record["payload"]["selection"]["selected_rank"] = "1"
-                record["payload"]["selection"]["selected_reason"] = "Highest reviewed total score in explicit select-best command."
+                record = mark_idea_selected(
+                    root,
+                    record,
+                    confirmed_by=args.confirmed_by,
+                    evidence=args.evidence,
+                    method="idea.py select-best",
+                    selected_rank="1",
+                    selected_reason="Highest reviewed total score in explicit select-best command.",
+                )
             append_history(
                 record,
                 action="idea-selected" if record["id"] == selected["id"] else "idea-reviewed-for-selection",
@@ -465,8 +500,14 @@ def main() -> int:
         return 0
 
     if args.command == "select":
-        record["status"] = "selected"
-        record = apply_confirmation(record, confirmed_by=args.confirmed_by, evidence=args.evidence, method="idea.py select", project_root=root)
+        record = mark_idea_selected(
+            root,
+            record,
+            confirmed_by=args.confirmed_by,
+            evidence=args.evidence,
+            method="idea.py select",
+            selected_reason="Idea explicitly selected for method design.",
+        )
         append_history(record, action="idea-selected", summary="Idea explicitly selected for method design.", information_types=["fact"])
         write_record(root, record)
         build_index(root)

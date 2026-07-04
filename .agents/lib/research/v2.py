@@ -739,7 +739,10 @@ def kind_payload_skeleton(kind: str, title: str = "") -> dict[str, Any]:
             "selection": {
                 "selected_rank": "",
                 "selected_reason": "",
+                "selected_by": "",
                 "selected_at": "",
+                "selection_evidence": [],
+                "selection_method": "",
             },
             "state": {
                 "progress_state": "spark",
