@@ -15,6 +15,7 @@ for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
 else:
     raise SystemExit("Could not locate .agents/lib")
 
+from research.common import parse_iso_datetime
 from research.v2 import (
     build_index,
     candidate_pools_path,
@@ -30,12 +31,35 @@ from research.v2 import (
     checkpoint_and_report,
     project_root,
     promote_record,
+    record_path,
     rebuild_governance_catalogs,
+    rel,
     refresh_record_schemas,
     search_records,
     sync_storage_layout,
     topic_taxonomy_path,
 )
+
+CONFIRM_COMMANDS = {
+    "paper": ".agents/skills/paper-analyst/scripts/paper.py confirm --paper-id {id}",
+    "repo": ".agents/skills/repo-analyst/scripts/repo.py confirm --repo-id {id}",
+    "blog": ".agents/skills/blog-analyst/scripts/blog.py confirm --blog-id {id}",
+    "experiment": ".agents/skills/experiment-workbench/scripts/experiment.py confirm --experiment-id {id}",
+    "idea": ".agents/skills/knowledge-base-manager/scripts/kb.py promote --id {id} --confirmation-status confirmed",
+}
+
+
+def review_sort_key(record: dict) -> tuple[str, str]:
+    timestamp = str(record.get("updated_at") or record.get("created_at") or record.get("first_ingested_at") or "")
+    parsed = parse_iso_datetime(timestamp)
+    normalized = parsed.isoformat() if parsed else timestamp
+    return normalized, str(record.get("id") or "")
+
+
+def confirm_command(record: dict) -> str:
+    kind = str(record.get("kind") or "")
+    template = CONFIRM_COMMANDS.get(kind, ".agents/skills/knowledge-base-manager/scripts/kb.py promote --id {id} --confirmation-status confirmed")
+    return f"${{RESEARCH_PYTHON:-python3}} {template.format(id=record.get('id', ''))}"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -63,6 +87,12 @@ def build_parser() -> argparse.ArgumentParser:
     query.add_argument("--query", required=True)
     query.add_argument("--kind", choices=["paper", "repo", "blog", "idea", "experiment"])
     query.add_argument("--pool", default="")
+    query.add_argument("--confirmation-status", choices=["auto_confirmed", "pending_user_confirmation", "confirmed", "rejected"])
+
+    review = subparsers.add_parser("review-queue", help="List records waiting for confirmation")
+    review.add_argument("--kind", choices=["paper", "repo", "blog", "idea", "experiment"])
+    review.add_argument("--confirmation-status", default="pending_user_confirmation", choices=["auto_confirmed", "pending_user_confirmation", "confirmed", "rejected"])
+    review.add_argument("--limit", type=int, default=50)
 
     refresh = subparsers.add_parser("refresh-schema", help="Backfill the latest record schema")
     refresh.add_argument("--id", action="append", default=[])
@@ -159,7 +189,7 @@ def main() -> int:
         print(f"[ok] rebuilt {pools_path.relative_to(root)}")
         return 0
     if args.command == "query":
-        hits = search_records(root, args.query, kind=args.kind, pool=args.pool or None)
+        hits = search_records(root, args.query, kind=args.kind, pool=args.pool or None, confirmation_status=args.confirmation_status)
         for item in hits:
             pools = ",".join(item.get("candidate_pools", []))
             print(
@@ -168,6 +198,25 @@ def main() -> int:
             )
         if not hits:
             print("[ok] no matches")
+        return 0
+    if args.command == "review-queue":
+        hits = search_records(root, "", kind=args.kind, confirmation_status=args.confirmation_status)
+        hits = sorted(hits, key=review_sort_key)
+        if args.limit > 0:
+            hits = hits[: args.limit]
+        if not hits:
+            print("[ok] no pending confirmations")
+            return 0
+        for item in hits:
+            kind = str(item.get("kind") or "")
+            unit_id = str(item.get("id") or "")
+            path = rel(root, record_path(root, kind, unit_id)) if kind and unit_id else "-"
+            timestamp = str(item.get("updated_at") or item.get("created_at") or item.get("first_ingested_at") or "-")
+            print(f"- {unit_id} | {kind} | {item.get('title', '')}")
+            print(f"  status: {item.get('status')} | confirm: {item.get('confirmation_status')} | updated: {timestamp}")
+            print(f"  summary: {item.get('summary') or '-'}")
+            print(f"  path: {path}")
+            print(f"  confirm: {confirm_command(item)}")
         return 0
     if args.command == "refresh-schema":
         paths = refresh_record_schemas(root, unit_ids=args.id or None, kind=args.kind)

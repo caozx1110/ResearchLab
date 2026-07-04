@@ -1869,12 +1869,21 @@ def lint_records(project_root: Path) -> tuple[str, list[str]]:
     return ("PASS" if not issues else "FAIL"), issues
 
 
-def search_records(project_root: Path, query: str, *, kind: str | None = None, pool: str | None = None) -> list[dict[str, Any]]:
+def search_records(
+    project_root: Path,
+    query: str,
+    *,
+    kind: str | None = None,
+    pool: str | None = None,
+    confirmation_status: str | None = None,
+) -> list[dict[str, Any]]:
     tokens = [token for token in query.lower().split() if token]
     normalized_pool = slugify(str(pool), max_words=12) if pool else ""
     hits: list[dict[str, Any]] = []
     for record in iter_records(project_root, kind=kind):
         if normalized_pool and normalized_pool not in record.get("candidate_pools", []):
+            continue
+        if confirmation_status and str(record.get("confirmation_status") or "") != confirmation_status:
             continue
         haystack = " ".join(
             [
