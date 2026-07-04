@@ -1427,6 +1427,31 @@ AI_INFORMATION_TYPES = {"inference", "evaluation", "user_opinion"}
 GATED_CONFIRMATION_VALUES = {"pending_user_confirmation", "rejected"}
 
 
+def require_confirmation_provenance(*, confirmed_by: str, evidence: list[str] | str) -> tuple[str, list[str]]:
+    actor = str(confirmed_by or "").strip()
+    evidence_items = _text_list(evidence)
+    if not actor:
+        raise SystemExit("Human confirmation requires --confirmed-by.")
+    if not evidence_items:
+        raise SystemExit("Human confirmation requires at least one --evidence.")
+    return actor, evidence_items
+
+
+def apply_confirmation(record: dict[str, Any], *, confirmed_by: str, evidence: list[str] | str, method: str = "cli") -> dict[str, Any]:
+    actor, evidence_items = require_confirmation_provenance(confirmed_by=confirmed_by, evidence=evidence)
+    now = utc_now_iso()
+    record["confirmation_status"] = "confirmed"
+    record["needs_human_confirmation"] = False
+    record["last_human_confirmed_at"] = now
+    record["confirmation"] = {
+        "by": actor,
+        "at": now,
+        "evidence": evidence_items,
+        "method": str(method or "cli").strip() or "cli",
+    }
+    return record
+
+
 def _record_needs_gate(record: dict[str, Any]) -> tuple[bool, set[str], bool]:
     info_types = {str(value) for value in record.get("information_types") or []}
     ai_info_types = info_types & AI_INFORMATION_TYPES
@@ -2338,6 +2363,9 @@ def promote_record(
     status: str | None = None,
     maturity: str | None = None,
     confirmation_status: str | None = None,
+    confirmed_by: str = "",
+    evidence: list[str] | None = None,
+    confirmation_method: str = "kb.py promote",
 ) -> Path:
     record, _ = locate_record(project_root, unit_id)
     if status:
@@ -2345,9 +2373,9 @@ def promote_record(
     if maturity:
         record["maturity"] = maturity
     if confirmation_status:
-        record["confirmation_status"] = confirmation_status
         if confirmation_status == "confirmed":
-            record["last_human_confirmed_at"] = utc_now_iso()
-            record["needs_human_confirmation"] = False
+            apply_confirmation(record, confirmed_by=confirmed_by, evidence=evidence or [], method=confirmation_method)
+        else:
+            record["confirmation_status"] = confirmation_status
     append_history(record, action="promoted", summary="Updated record lifecycle state.")
     return write_record(project_root, record)

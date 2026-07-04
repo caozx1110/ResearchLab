@@ -41,11 +41,11 @@ from research.v2 import (
 )
 
 CONFIRM_COMMANDS = {
-    "paper": ".agents/skills/paper-analyst/scripts/paper.py confirm --paper-id {id}",
-    "repo": ".agents/skills/repo-analyst/scripts/repo.py confirm --repo-id {id}",
-    "blog": ".agents/skills/blog-analyst/scripts/blog.py confirm --blog-id {id}",
-    "experiment": ".agents/skills/experiment-workbench/scripts/experiment.py confirm --experiment-id {id}",
-    "idea": ".agents/skills/knowledge-base-manager/scripts/kb.py promote --id {id} --confirmation-status confirmed",
+    "paper": ".agents/skills/paper-analyst/scripts/paper.py confirm --paper-id {id} --confirmed-by <name> --evidence <path-or-note>",
+    "repo": ".agents/skills/repo-analyst/scripts/repo.py confirm --repo-id {id} --confirmed-by <name> --evidence <path-or-note>",
+    "blog": ".agents/skills/blog-analyst/scripts/blog.py confirm --blog-id {id} --confirmed-by <name> --evidence <path-or-note>",
+    "experiment": ".agents/skills/experiment-workbench/scripts/experiment.py confirm --experiment-id {id} --confirmed-by <name> --evidence <path-or-note>",
+    "idea": ".agents/skills/knowledge-base-manager/scripts/kb.py promote --id {id} --confirmation-status confirmed --confirmed-by <name> --evidence <path-or-note>",
 }
 
 
@@ -58,7 +58,7 @@ def review_sort_key(record: dict) -> tuple[str, str]:
 
 def confirm_command(record: dict) -> str:
     kind = str(record.get("kind") or "")
-    template = CONFIRM_COMMANDS.get(kind, ".agents/skills/knowledge-base-manager/scripts/kb.py promote --id {id} --confirmation-status confirmed")
+    template = CONFIRM_COMMANDS.get(kind, ".agents/skills/knowledge-base-manager/scripts/kb.py promote --id {id} --confirmation-status confirmed --confirmed-by <name> --evidence <path-or-note>")
     return f"${{RESEARCH_PYTHON:-python3}} {template.format(id=record.get('id', ''))}"
 
 
@@ -119,6 +119,8 @@ def build_parser() -> argparse.ArgumentParser:
     promote.add_argument("--status")
     promote.add_argument("--maturity", choices=["lightweight", "complete"])
     promote.add_argument("--confirmation-status", choices=["auto_confirmed", "pending_user_confirmation", "confirmed", "rejected"])
+    promote.add_argument("--confirmed-by", default="")
+    promote.add_argument("--evidence", action="append", default=[])
     return parser
 
 
@@ -257,7 +259,15 @@ def main() -> int:
         checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: link {args.from_id} to {args.to_id}")
         return 0
     if args.command == "promote":
-        path = promote_record(root, args.id, status=args.status, maturity=args.maturity, confirmation_status=args.confirmation_status)
+        path = promote_record(
+            root,
+            args.id,
+            status=args.status,
+            maturity=args.maturity,
+            confirmation_status=args.confirmation_status,
+            confirmed_by=args.confirmed_by,
+            evidence=args.evidence,
+        )
         build_index(root)
         print(f"[ok] updated {path.relative_to(root)}")
         checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: promote {args.id}")

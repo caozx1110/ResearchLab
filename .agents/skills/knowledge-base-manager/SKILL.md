@@ -70,5 +70,5 @@ ${RESEARCH_PYTHON:-python3} .agents/skills/knowledge-base-manager/scripts/kb.py 
 ${RESEARCH_PYTHON:-python3} .agents/skills/knowledge-base-manager/scripts/kb.py query --query "whole body control" --pool current-reading
 ${RESEARCH_PYTHON:-python3} .agents/skills/knowledge-base-manager/scripts/kb.py review-queue --kind paper --limit 20
 ${RESEARCH_PYTHON:-python3} .agents/skills/knowledge-base-manager/scripts/kb.py link --from-id p-openvla-bf86ee46 --to-id i-physics-aware-f7e91d86 --relation inspired
-${RESEARCH_PYTHON:-python3} .agents/skills/knowledge-base-manager/scripts/kb.py promote --id i-physics-aware-f7e91d86 --status selected --confirmation-status confirmed
+${RESEARCH_PYTHON:-python3} .agents/skills/knowledge-base-manager/scripts/kb.py promote --id i-physics-aware-f7e91d86 --status selected --confirmation-status confirmed --confirmed-by czx --evidence kb/programs/open-world-vla/decision-log.md
 ```

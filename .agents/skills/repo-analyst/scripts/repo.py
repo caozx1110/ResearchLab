@@ -20,6 +20,7 @@ else:
 from research.common import clean_text, infer_repo_roles, infer_topics_and_tags, read_text_excerpt, write_text_if_changed, write_yaml_if_changed
 from research.v2 import (
     append_history,
+    apply_confirmation,
     apply_record_governance,
     build_index,
     locate_record,
@@ -29,6 +30,11 @@ from research.v2 import (
     resolve_local_reference,
     write_record,
 )
+
+
+def add_confirmation_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--confirmed-by", required=True)
+    parser.add_argument("--evidence", action="append", required=True)
 
 IGNORE_DIRS = {".git", "__pycache__", ".venv", "node_modules", "build", "dist", "outputs", "logs", ".mypy_cache"}
 ENTRYPOINT_HINTS = {
@@ -239,6 +245,8 @@ def build_parser() -> argparse.ArgumentParser:
     for name in ("scan-structure", "map-capability", "complete-note", "confirm"):
         cmd = subparsers.add_parser(name)
         cmd.add_argument("--repo-id", required=True)
+        if name == "confirm":
+            add_confirmation_arguments(cmd)
     return parser
 
 
@@ -361,8 +369,7 @@ def main() -> int:
         return 0
 
     if args.command == "confirm":
-        record["confirmation_status"] = "confirmed"
-        record["needs_human_confirmation"] = False
+        record = apply_confirmation(record, confirmed_by=args.confirmed_by, evidence=args.evidence, method="repo.py confirm")
         record["status"] = "active"
         record["information_types"] = ["fact"]
         append_history(record, action="repo-confirmed", summary="Repo analysis confirmed by user.", information_types=["fact"])

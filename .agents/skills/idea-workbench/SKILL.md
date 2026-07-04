@@ -25,7 +25,7 @@ ${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py genera
 ${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py analyze --idea-id i-physics-aware-fb-compatible-f7e91d86
 ${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py review --idea-id i-physics-aware-fb-compatible-f7e91d86
 ${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py review-assist --pool current-ideas
-${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py select --idea-id i-physics-aware-fb-compatible-f7e91d86
-${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py select-best --pool current-ideas
+${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py select --idea-id i-physics-aware-fb-compatible-f7e91d86 --confirmed-by czx --evidence kb/programs/open-world-vla/decision-log.md
+${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py select-best --pool current-ideas --confirmed-by czx --evidence kb/programs/open-world-vla/decision-log.md
 ${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py archive --idea-id i-physics-aware-fb-compatible-f7e91d86
 ```

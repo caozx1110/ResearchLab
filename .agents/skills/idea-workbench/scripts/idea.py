@@ -19,6 +19,7 @@ else:
 from research.common import ensure_dir, load_yaml, slugify, write_text_if_changed, write_yaml_if_changed, yaml_default
 from research.v2 import (
     append_history,
+    apply_confirmation,
     apply_record_governance,
     build_index,
     default_record,
@@ -38,6 +39,11 @@ STRATEGIES = [
     ("evaluation-first", "先围绕评测与 failure probe 定义 idea。"),
     ("mechanism-first", "优先提出清晰机制假设与 kill test。"),
 ]
+
+
+def add_confirmation_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--confirmed-by", required=True)
+    parser.add_argument("--evidence", action="append", required=True)
 
 
 def review_payload(record: dict) -> dict:
@@ -264,6 +270,8 @@ def build_parser() -> argparse.ArgumentParser:
     for name in ("analyze", "review", "select", "archive"):
         cmd = subparsers.add_parser(name)
         cmd.add_argument("--idea-id", required=True)
+        if name == "select":
+            add_confirmation_arguments(cmd)
 
     assist = subparsers.add_parser("review-assist")
     assist.add_argument("--idea-id", action="append", default=[])
@@ -274,6 +282,7 @@ def build_parser() -> argparse.ArgumentParser:
     select_best.add_argument("--idea-id", action="append", default=[])
     select_best.add_argument("--pool", default="")
     select_best.add_argument("--bundle-id", default="")
+    add_confirmation_arguments(select_best)
     return parser
 
 
@@ -369,8 +378,7 @@ def main() -> int:
         for _, record in scored_records:
             if record["id"] == selected["id"]:
                 record["status"] = "selected"
-                record["confirmation_status"] = "confirmed"
-                record["needs_human_confirmation"] = False
+                record = apply_confirmation(record, confirmed_by=args.confirmed_by, evidence=args.evidence, method="idea.py select-best")
                 record["payload"]["selection"]["selected_rank"] = "1"
                 record["payload"]["selection"]["selected_reason"] = "Highest reviewed total score in explicit select-best command."
             append_history(
@@ -458,8 +466,7 @@ def main() -> int:
 
     if args.command == "select":
         record["status"] = "selected"
-        record["confirmation_status"] = "confirmed"
-        record["needs_human_confirmation"] = False
+        record = apply_confirmation(record, confirmed_by=args.confirmed_by, evidence=args.evidence, method="idea.py select")
         append_history(record, action="idea-selected", summary="Idea explicitly selected for method design.", information_types=["fact"])
         write_record(root, record)
         build_index(root)

@@ -29,6 +29,7 @@ from research.pdf_layout import (
 )
 from research.v2 import (
     append_history,
+    apply_confirmation,
     apply_record_governance,
     build_index,
     load_runtime_preferences,
@@ -55,6 +56,11 @@ SECTION_PATTERNS = (
     "conclusion",
     "appendix",
 )
+
+
+def add_confirmation_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--confirmed-by", required=True)
+    parser.add_argument("--evidence", action="append", required=True)
 
 def _source_paths(root: Path, record: dict) -> list[Path]:
     paths: list[Path] = []
@@ -583,6 +589,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     confirm = subparsers.add_parser("confirm")
     confirm.add_argument("--paper-id", required=True)
+    add_confirmation_arguments(confirm)
     confirm.add_argument("--defer-post-actions", action="store_true")
 
     reject = subparsers.add_parser("reject")
@@ -769,8 +776,7 @@ def main() -> int:
         return 0
 
     if args.command == "confirm":
-        record["confirmation_status"] = "confirmed"
-        record["needs_human_confirmation"] = False
+        record = apply_confirmation(record, confirmed_by=args.confirmed_by, evidence=args.evidence, method="paper.py confirm")
         record["status"] = "active"
         append_history(record, action="paper-confirmed", summary="Paper analysis confirmed by user.", information_types=["fact"])
         write_record(root, record)

@@ -23,12 +23,17 @@ from research.common import (
     normalize_list,
     write_text_if_changed,
 )
-from research.v2 import append_history, build_index, default_record, ensure_v2_workspace, locate_record, project_root, rel, write_record
+from research.v2 import append_history, apply_confirmation, build_index, default_record, ensure_v2_workspace, locate_record, project_root, rel, write_record
 
 RUN_OUTCOME_CHOICES = ["success", "partial", "failed", "blocked", "inconclusive"]
 CLASSIFICATION_CHOICES = ["method", "implementation", "data", "evaluation", "resource", "environment", "process", "unknown"]
 FOLLOW_UP_STATUS_CHOICES = ["open", "blocked", "done"]
 FOLLOW_UP_PRIORITY_CHOICES = ["low", "normal", "high", "critical"]
+
+
+def add_confirmation_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--confirmed-by", required=True)
+    parser.add_argument("--evidence", action="append", required=True)
 
 
 def parse_metrics(items: list[str]) -> dict[str, str]:
@@ -161,6 +166,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     confirm = subparsers.add_parser("confirm")
     confirm.add_argument("--experiment-id", required=True)
+    add_confirmation_arguments(confirm)
     return parser
 
 
@@ -377,8 +383,7 @@ def main() -> int:
         return 0
 
     if args.command == "confirm":
-        record["confirmation_status"] = "confirmed"
-        record["needs_human_confirmation"] = False
+        record = apply_confirmation(record, confirmed_by=args.confirmed_by, evidence=args.evidence, method="experiment.py confirm")
         if record.get("status") == "running":
             record["status"] = "completed"
         append_history(record, action="experiment-confirmed", summary="Experiment findings confirmed by user.", information_types=["fact"])

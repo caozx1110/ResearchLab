@@ -1,0 +1,99 @@
+from __future__ import annotations
+
+import ast
+from pathlib import Path
+
+import pytest
+
+from research.common import load_yaml, write_yaml_if_changed
+from research.v2 import ensure_v2_workspace, promote_record, record_path
+
+
+def _project_root() -> Path:
+    return Path(__file__).resolve().parents[4]
+
+
+def _script_text(skill: str, script_name: str) -> str:
+    return (_project_root() / ".agents" / "skills" / skill / "scripts" / script_name).read_text(encoding="utf-8")
+
+
+def _has_required_arg(text: str, arg_name: str) -> bool:
+    tree = ast.parse(text)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not isinstance(func, ast.Attribute) or func.attr != "add_argument":
+            continue
+        if not node.args or not isinstance(node.args[0], ast.Constant) or node.args[0].value != arg_name:
+            continue
+        for keyword in node.keywords:
+            if keyword.arg == "required" and isinstance(keyword.value, ast.Constant) and keyword.value.value is True:
+                return True
+    return False
+
+
+def _record(unit_id: str = "p-confirm-123456") -> dict:
+    return {
+        "id": unit_id,
+        "kind": "paper",
+        "title": "Confirm Me",
+        "status": "screened",
+        "maturity": "lightweight",
+        "confirmation_status": "pending_user_confirmation",
+        "needs_human_confirmation": True,
+        "information_types": ["fact"],
+        "source": {"original_uri": "", "file_hash": ""},
+        "payload": {},
+    }
+
+
+def test_promote_to_confirmed_requires_human_provenance(tmp_path: Path) -> None:
+    ensure_v2_workspace(tmp_path)
+    write_yaml_if_changed(record_path(tmp_path, "paper", "p-confirm-123456"), _record())
+
+    with pytest.raises(SystemExit, match="--confirmed-by"):
+        promote_record(tmp_path, "p-confirm-123456", confirmation_status="confirmed")
+
+    with pytest.raises(SystemExit, match="--evidence"):
+        promote_record(tmp_path, "p-confirm-123456", confirmation_status="confirmed", confirmed_by="czx")
+
+
+def test_promote_to_confirmed_persists_confirmation_provenance(tmp_path: Path, monkeypatch) -> None:
+    import research.v2 as v2
+
+    ensure_v2_workspace(tmp_path)
+    write_yaml_if_changed(record_path(tmp_path, "paper", "p-confirm-123456"), _record())
+    monkeypatch.setattr(v2, "utc_now_iso", lambda: "2026-07-04T00:00:00+00:00")
+
+    path = promote_record(
+        tmp_path,
+        "p-confirm-123456",
+        confirmation_status="confirmed",
+        confirmed_by="czx",
+        evidence=["kb/programs/p/decision-log.md"],
+    )
+
+    record = load_yaml(path, default={})
+    assert record["confirmation_status"] == "confirmed"
+    assert record["needs_human_confirmation"] is False
+    assert record["confirmation"] == {
+        "by": "czx",
+        "at": "2026-07-04T00:00:00+00:00",
+        "evidence": ["kb/programs/p/decision-log.md"],
+        "method": "kb.py promote",
+    }
+
+
+def test_confirm_scripts_require_provenance_arguments() -> None:
+    for skill, script_name in [
+        ("paper-analyst", "paper.py"),
+        ("repo-analyst", "repo.py"),
+        ("blog-analyst", "blog.py"),
+        ("experiment-workbench", "experiment.py"),
+        ("idea-workbench", "idea.py"),
+    ]:
+        text = _script_text(skill, script_name)
+        assert "apply_confirmation" in text
+        assert _has_required_arg(text, "--confirmed-by"), skill
+        assert _has_required_arg(text, "--evidence"), skill

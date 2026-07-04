@@ -16,7 +16,12 @@ else:
     raise SystemExit("Could not locate .agents/lib")
 
 from research.common import write_text_if_changed, write_yaml_if_changed
-from research.v2 import append_history, build_index, locate_record, project_root, rel, write_record
+from research.v2 import append_history, apply_confirmation, build_index, locate_record, project_root, rel, write_record
+
+
+def add_confirmation_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--confirmed-by", required=True)
+    parser.add_argument("--evidence", action="append", required=True)
 
 
 def summary_payload(record: dict) -> dict:
@@ -40,6 +45,8 @@ def build_parser() -> argparse.ArgumentParser:
     for name in ("summarize", "complete-note", "confirm"):
         cmd = subparsers.add_parser(name)
         cmd.add_argument("--blog-id", required=True)
+        if name == "confirm":
+            add_confirmation_arguments(cmd)
     return parser
 
 
@@ -81,8 +88,7 @@ def main() -> int:
         return 0
 
     if args.command == "confirm":
-        record["confirmation_status"] = "confirmed"
-        record["needs_human_confirmation"] = False
+        record = apply_confirmation(record, confirmed_by=args.confirmed_by, evidence=args.evidence, method="blog.py confirm")
         record["status"] = "active"
         append_history(record, action="blog-confirmed", summary="Blog analysis confirmed by user.", information_types=["fact"])
         write_record(root, record)
