@@ -7,12 +7,12 @@ import argparse
 import sys
 from pathlib import Path
 
-from kb_browser_lib import build_site_once, index_html_path, project_root_from_script, write_failure_status
+from kb_browser_lib import add_browser_project_root_argument, build_site_once, index_html_path, project_root_from_script, write_failure_status
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build the research navigator browser snapshot.")
-    parser.add_argument("--project-root", default="", help="Project root path. Auto-detected when omitted.")
+    add_browser_project_root_argument(parser)
     return parser.parse_args()
 
 

@@ -13,6 +13,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+from argparse import ArgumentParser
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlparse
@@ -56,9 +57,17 @@ def skill_root_from_script(script_path: Path) -> Path:
 
 
 def project_root_from_script(script_path: Path, explicit_root: str = "") -> Path:
-    if explicit_root:
-        return Path(explicit_root).resolve()
-    return find_project_root(script_path.resolve())
+    return find_project_root(script_path.resolve(), explicit_root=explicit_root)
+
+
+def add_browser_project_root_argument(parser: ArgumentParser) -> None:
+    parser.add_argument(
+        "--root",
+        "--project-root",
+        dest="project_root",
+        default="",
+        help="Explicit project root (overrides RESEARCH_PROJECT_ROOT and auto-discovery).",
+    )
 
 
 def research_root(project_root: Path) -> Path:

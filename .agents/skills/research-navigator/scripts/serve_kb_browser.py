@@ -36,6 +36,7 @@ from kb_browser_lib import (
     DEFAULT_PORT,
     SERVICE_NAME,
     WATCH_DEBOUNCE_SECONDS,
+    add_browser_project_root_argument,
     browser_url,
     compact_text,
     kb_root,
@@ -475,7 +476,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Serve the research navigator browser.")
     parser.add_argument("--host", default=DEFAULT_HOST, help="Bind host (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"Bind port (default: {DEFAULT_PORT})")
-    parser.add_argument("--project-root", default="", help="Project root path. Auto-detected when omitted.")
+    add_browser_project_root_argument(parser)
     parser.add_argument(
         "--debounce-seconds",
         type=float,

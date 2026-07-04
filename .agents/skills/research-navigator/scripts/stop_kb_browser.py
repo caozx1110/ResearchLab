@@ -15,6 +15,7 @@ from kb_browser_lib import (
     DEFAULT_PORT,
     PORT_SCAN_LIMIT,
     SERVICE_NAME,
+    add_browser_project_root_argument,
     fetch_json,
     health_url,
     launcher_state_path,
@@ -25,7 +26,7 @@ from kb_browser_lib import (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Stop the research navigator browser daemon.")
-    parser.add_argument("--project-root", default="", help="Project root path. Auto-detected when omitted.")
+    add_browser_project_root_argument(parser)
     return parser.parse_args()
 
 

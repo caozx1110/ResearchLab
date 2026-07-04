@@ -13,6 +13,7 @@ from kb_browser_lib import (
     DEFAULT_PORT,
     PORT_SCAN_LIMIT,
     SERVICE_NAME,
+    add_browser_project_root_argument,
     browser_url,
     fetch_json,
     health_url,
@@ -28,7 +29,7 @@ from kb_browser_lib import (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Show research navigator browser status.")
-    parser.add_argument("--project-root", default="", help="Project root path. Auto-detected when omitted.")
+    add_browser_project_root_argument(parser)
     parser.add_argument("--json", action="store_true", help="Print status as JSON.")
     return parser.parse_args()
 
