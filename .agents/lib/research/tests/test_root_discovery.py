@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -31,6 +33,45 @@ def test_project_root_env_and_flag_overrides_do_not_require_agents_marker(tmp_pa
 
     assert project_root(tmp_path) == env_root.resolve()
     assert project_root(tmp_path, explicit_root=flag_root) == flag_root.resolve()
+
+
+def test_write_command_root_and_env_override_symlinked_agents_target(tmp_path: Path) -> None:
+    real_root = _project_root()
+    symlink_target = tmp_path / "symlink-target"
+    sandbox_root = tmp_path / "sandbox"
+    symlink_target.mkdir()
+    sandbox_root.mkdir()
+    (symlink_target / ".agents").symlink_to(real_root / ".agents", target_is_directory=True)
+    (symlink_target / "AGENTS.md").write_text("# target\n", encoding="utf-8")
+    (sandbox_root / ".agents").symlink_to(symlink_target / ".agents", target_is_directory=True)
+    (sandbox_root / "AGENTS.md").write_text("# sandbox\n", encoding="utf-8")
+    script = sandbox_root / ".agents" / "skills" / "knowledge-base-manager" / "scripts" / "kb.py"
+    env = {**os.environ, "PYTHONPATH": str(real_root / ".agents" / "lib")}
+
+    root_result = subprocess.run(
+        [sys.executable, str(script), "--root", str(sandbox_root), "init"],
+        cwd=sandbox_root,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert root_result.returncode == 0, root_result.stderr
+    assert (sandbox_root / "kb" / "index.yaml").exists()
+    assert not (symlink_target / "kb").exists()
+
+    (sandbox_root / "kb").rename(sandbox_root / "kb-root-flag")
+    env_result = subprocess.run(
+        [sys.executable, str(script), "init"],
+        cwd=sandbox_root,
+        env={**env, "RESEARCH_PROJECT_ROOT": str(sandbox_root)},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert env_result.returncode == 0, env_result.stderr
+    assert (sandbox_root / "kb" / "index.yaml").exists()
+    assert not (symlink_target / "kb").exists()
 
 
 def test_kb_init_warns_when_cwd_differs_from_explicit_root(tmp_path: Path, monkeypatch, capsys) -> None:

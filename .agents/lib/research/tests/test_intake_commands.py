@@ -4,8 +4,6 @@ import importlib.util
 import sys
 from pathlib import Path
 
-from research.common import confirm_command as shared_confirm_command
-
 
 def _project_root() -> Path:
     return Path(__file__).resolve().parents[4]
@@ -36,8 +34,9 @@ def test_intake_confirm_command_uses_shared_helper_with_runtime_python() -> None
     intake = _load_intake_module()
     record = {"kind": "repo", "id": "r-openvla-12345678"}
 
-    assert intake.confirm_command(record) == shared_confirm_command(
-        record,
-        command_prefix=intake.research_python(),
-        direct_kinds=("paper", "repo", "blog"),
+    assert intake.confirm_command(record) == (
+        f"{intake.research_python()} .agents/skills/repo-analyst/scripts/repo.py confirm "
+        "--repo-id r-openvla-12345678 --confirmed-by "
+        "${RESEARCH_CONFIRMED_BY:?set-human-identity} --evidence "
+        "${RESEARCH_CONFIRM_EVIDENCE:?set-human-evidence}"
     )

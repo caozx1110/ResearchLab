@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from research.common import confirm_command as shared_confirm_command, load_yaml, write_yaml_if_changed
+from research.common import load_yaml, write_yaml_if_changed
 from research.v2 import ensure_v2_workspace, record_path, runtime_preferences_path, search_records
 
 
@@ -18,6 +18,17 @@ def _load_kb_module():
     root = _project_root()
     script = root / ".agents" / "skills" / "knowledge-base-manager" / "scripts" / "kb.py"
     spec = importlib.util.spec_from_file_location("knowledge_base_manager_script", script)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_idea_module():
+    root = _project_root()
+    script = root / ".agents" / "skills" / "idea-workbench" / "scripts" / "idea.py"
+    spec = importlib.util.spec_from_file_location("idea_workbench_script_for_review_queue", script)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -96,7 +107,11 @@ def test_kb_confirm_command_uses_shared_helper() -> None:
     kb = _load_kb_module()
     record = _record("p-query-123456", "Queryable", "pending_user_confirmation", "2026-01-01T00:00:00+00:00")
 
-    assert kb.confirm_command(record) == shared_confirm_command(record)
+    assert kb.confirm_command(record) == (
+        "${RESEARCH_PYTHON:-python3} .agents/skills/paper-analyst/scripts/paper.py confirm "
+        "--paper-id p-query-123456 --confirmed-by ${RESEARCH_CONFIRMED_BY:?set-human-identity} "
+        "--evidence ${RESEARCH_CONFIRM_EVIDENCE:?set-human-evidence}"
+    )
 
 
 def test_batch_confirm_applies_one_evidence_to_multiple_units(tmp_path: Path) -> None:
@@ -241,23 +256,46 @@ def test_review_queue_all_reviewed_empty_is_clean_noop(tmp_path: Path) -> None:
     assert records == []
 
 
-def test_review_queue_lists_selected_ideas_with_pending_content(tmp_path: Path) -> None:
+def test_review_queue_lists_selected_ideas_with_pending_content(tmp_path: Path, monkeypatch) -> None:
     kb = _load_kb_module()
+    idea = _load_idea_module()
+    (tmp_path / ".agents").mkdir()
+    (tmp_path / "AGENTS.md").write_text("# test\n", encoding="utf-8")
     ensure_v2_workspace(tmp_path)
     record = _record(
-        "i-selected-123456",
-        "Selected Idea",
+        "i-select-review-123456",
+        "Selectable Idea",
         "pending_user_confirmation",
         "2026-01-01T00:00:00+00:00",
-        status="selected",
+        status="pending",
         information_types=["user_opinion", "inference", "evaluation", "unverified"],
     )
     record["kind"] = "idea"
     _write_record(tmp_path, record)
+    monkeypatch.setattr(idea, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(idea, "checkpoint_and_report", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "idea.py",
+            "select",
+            "--idea-id",
+            "i-select-review-123456",
+            "--confirmed-by",
+            "czx",
+            "--evidence",
+            "kb/programs/p/decision-log.md",
+        ],
+    )
+
+    assert idea.main() == 0
 
     records = kb.review_queue_records(tmp_path, kind="idea", confirmation_status="pending_user_confirmation")
 
-    assert [record["id"] for record in records] == ["i-selected-123456"]
+    assert [record["id"] for record in records] == ["i-select-review-123456"]
+    assert records[0]["status"] == "selected"
+    assert records[0]["confirmation_status"] == "pending_user_confirmation"
 
 
 def test_confirm_all_reviewed_default_limit_is_unbounded() -> None:

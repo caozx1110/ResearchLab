@@ -4,8 +4,6 @@ import importlib.util
 import sys
 from pathlib import Path
 
-from research.common import confirm_command as shared_confirm_command
-
 
 def _project_root() -> Path:
     return Path(__file__).resolve().parents[4]
@@ -45,4 +43,8 @@ def test_orchestrator_confirm_command_uses_shared_helper() -> None:
     module = _load_orchestrator_module()
     record = {"kind": "experiment", "id": "e-run-12345678"}
 
-    assert module.confirm_command_for_record(record) == shared_confirm_command(record)
+    assert module.confirm_command_for_record(record) == (
+        "${RESEARCH_PYTHON:-python3} .agents/skills/experiment-workbench/scripts/experiment.py confirm "
+        "--experiment-id e-run-12345678 --confirmed-by ${RESEARCH_CONFIRMED_BY:?set-human-identity} "
+        "--evidence ${RESEARCH_CONFIRM_EVIDENCE:?set-human-evidence}"
+    )
