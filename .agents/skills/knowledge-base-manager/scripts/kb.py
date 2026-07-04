@@ -101,6 +101,14 @@ def review_queue_records(
     return hits
 
 
+def all_reviewed_confirmation_records(root: Path, *, kind: str | None = None, limit: int = 0) -> tuple[list[dict], int]:
+    pending = review_queue_records(root, kind=kind, confirmation_status="pending_user_confirmation", limit=0)
+    if limit > 0:
+        selected = pending[:limit]
+        return selected, max(0, len(pending) - len(selected))
+    return pending, 0
+
+
 def apply_batch_confirmation(root: Path, records: list[dict], *, confirmed_by: str, evidence: list[str], method: str) -> list[Path]:
     written: list[Path] = []
     for record in records:
@@ -161,7 +169,7 @@ def build_parser() -> argparse.ArgumentParser:
     confirm.add_argument("--id", action="append", default=[])
     confirm.add_argument("--all-reviewed", action="store_true", help="Confirm the current review queue")
     confirm.add_argument("--kind", choices=["paper", "repo", "blog", "idea", "experiment"])
-    confirm.add_argument("--limit", type=int, default=50)
+    confirm.add_argument("--limit", type=int, default=0)
     confirm.add_argument("--confirmed-by", default="")
     confirm.add_argument("--evidence", action="append", required=True)
 
@@ -312,8 +320,9 @@ def main() -> int:
         if bool(args.id) == bool(args.all_reviewed):
             raise SystemExit("Use either --id A --id B ... or --all-reviewed.")
         records = []
+        remaining = 0
         if args.all_reviewed:
-            records = review_queue_records(root, kind=args.kind, confirmation_status="pending_user_confirmation", limit=args.limit)
+            records, remaining = all_reviewed_confirmation_records(root, kind=args.kind, limit=args.limit)
             if not records:
                 print("[ok] no pending confirmations")
                 return 0
@@ -331,6 +340,8 @@ def main() -> int:
         build_index(root)
         for path in written:
             print(f"[ok] confirmed {path.relative_to(root)}")
+        if remaining:
+            print(f"[ok] confirmed {len(written)} / {remaining} remaining, re-run")
         checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: batch confirm ({len(written)} records)")
         return 0
     if args.command == "refresh-schema":

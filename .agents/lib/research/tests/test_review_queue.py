@@ -185,6 +185,54 @@ def test_review_queue_all_reviewed_empty_is_clean_noop(tmp_path: Path) -> None:
     assert records == []
 
 
+def test_confirm_all_reviewed_default_limit_is_unbounded() -> None:
+    kb = _load_kb_module()
+
+    args = kb.build_parser().parse_args(["confirm", "--all-reviewed", "--evidence", "kb/programs/p/decision-log.md"])
+
+    assert args.limit == 0
+
+
+def test_confirm_all_reviewed_reports_remaining_when_explicit_limit_caps_batch(tmp_path: Path, monkeypatch, capsys) -> None:
+    kb = _load_kb_module()
+    (tmp_path / ".agents").mkdir()
+    (tmp_path / "AGENTS.md").write_text("# test\n", encoding="utf-8")
+    ensure_v2_workspace(tmp_path)
+    write_yaml_if_changed(runtime_preferences_path(tmp_path), {"identity": {"default_confirmed_by": "czx-default"}})
+    for index in range(3):
+        _write_record(
+            tmp_path,
+            _record(
+                f"p-pending-{index:06d}",
+                f"Pending {index}",
+                "pending_user_confirmation",
+                f"2026-01-0{index + 1}T00:00:00+00:00",
+            ),
+        )
+    monkeypatch.setattr(kb, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(kb, "checkpoint_and_report", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "kb.py",
+            "confirm",
+            "--all-reviewed",
+            "--limit",
+            "2",
+            "--evidence",
+            "kb/programs/p/decision-log.md",
+        ],
+    )
+
+    assert kb.main() == 0
+
+    captured = capsys.readouterr()
+    assert "confirmed 2 / 1 remaining, re-run" in captured.out
+    remaining = search_records(tmp_path, "", confirmation_status="pending_user_confirmation")
+    assert [record["id"] for record in remaining] == ["p-pending-000002"]
+
+
 def test_review_queue_confirm_uses_listed_records(tmp_path: Path) -> None:
     kb = _load_kb_module()
     ensure_v2_workspace(tmp_path)
