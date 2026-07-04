@@ -1430,7 +1430,7 @@ GATED_CONFIRMATION_VALUES = {"pending_user_confirmation", "rejected"}
 
 def require_confirmation_provenance(*, confirmed_by: str, evidence: list[str] | str) -> tuple[str, list[str]]:
     actor = str(confirmed_by or "").strip()
-    evidence_items = _text_list(evidence)
+    evidence_items = _text_list([evidence] if isinstance(evidence, str) else evidence)
     if not actor:
         raise SystemExit("Human confirmation requires --confirmed-by.")
     if not evidence_items:

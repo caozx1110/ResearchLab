@@ -49,11 +49,14 @@ CONFIRM_COMMANDS = {
 }
 
 
-def review_sort_key(record: dict) -> tuple[str, str]:
+def review_sort_key(record: dict) -> tuple:
     timestamp = str(record.get("updated_at") or record.get("created_at") or record.get("first_ingested_at") or "")
     parsed = parse_iso_datetime(timestamp)
-    normalized = parsed.isoformat() if parsed else timestamp
-    return normalized, str(record.get("id") or "")
+    # Sort by the true instant (epoch seconds) so records written with different
+    # timezone offsets still order chronologically; unparseable timestamps sort last.
+    if parsed:
+        return (0, parsed.timestamp(), str(record.get("id") or ""))
+    return (1, 0.0, str(record.get("id") or ""))
 
 
 def confirm_command(record: dict) -> str:

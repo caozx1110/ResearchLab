@@ -27,5 +27,5 @@ description: Analyze blog and technical article units in the v2 research system,
 ```bash
 ${RESEARCH_PYTHON:-python3} .agents/skills/blog-analyst/scripts/blog.py summarize --blog-id b-example-12345678
 ${RESEARCH_PYTHON:-python3} .agents/skills/blog-analyst/scripts/blog.py complete-note --blog-id b-example-12345678
-${RESEARCH_PYTHON:-python3} .agents/skills/blog-analyst/scripts/blog.py confirm --blog-id b-example-12345678
+${RESEARCH_PYTHON:-python3} .agents/skills/blog-analyst/scripts/blog.py confirm --blog-id b-example-12345678 --confirmed-by czx --evidence kb/units/blogs/b-example-12345678/blog-note.md
 ```

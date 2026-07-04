@@ -59,6 +59,29 @@ def test_promote_to_confirmed_requires_human_provenance(tmp_path: Path) -> None:
         promote_record(tmp_path, "p-confirm-123456", confirmation_status="confirmed", confirmed_by="czx")
 
 
+def test_promote_non_confirmed_does_not_require_provenance(tmp_path: Path) -> None:
+    """Backward-compat guard: only confirmed transitions need provenance;
+    auto_confirmed / pending / rejected must still work without --confirmed-by/--evidence."""
+    ensure_v2_workspace(tmp_path)
+    for target in ("auto_confirmed", "pending_user_confirmation", "rejected"):
+        write_yaml_if_changed(record_path(tmp_path, "paper", "p-confirm-123456"), _record())
+        path = promote_record(tmp_path, "p-confirm-123456", confirmation_status=target)
+        record = load_yaml(path, default={})
+        assert record["confirmation_status"] == target
+        # no provenance block is stamped for non-confirmed transitions
+        assert "confirmation" not in record or not record["confirmation"].get("by")
+
+
+def test_confirmation_provenance_accepts_bare_string_evidence(tmp_path: Path) -> None:
+    """require_confirmation_provenance annotates evidence as list|str; a bare string
+    must be accepted (not silently rejected as empty)."""
+    from research.v2 import require_confirmation_provenance
+
+    actor, items = require_confirmation_provenance(confirmed_by="czx", evidence="kb/x/note.md")
+    assert actor == "czx"
+    assert items == ["kb/x/note.md"]
+
+
 def test_promote_to_confirmed_persists_confirmation_provenance(tmp_path: Path, monkeypatch) -> None:
     import research.v2 as v2
 
