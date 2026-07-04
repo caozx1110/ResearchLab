@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import subprocess
 import sys
 from pathlib import Path
 
@@ -26,10 +25,6 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("refresh")
     subparsers.add_parser("current-state")
     subparsers.add_parser("reading-list")
-    subparsers.add_parser("build-browser")
-    subparsers.add_parser("open-browser")
-    subparsers.add_parser("browser-status")
-    subparsers.add_parser("stop-browser")
     return parser
 
 
@@ -74,16 +69,6 @@ def render_reading_list(records: list[dict]) -> str:
 def main() -> int:
     args = build_parser().parse_args()
     root = project_root(PROJECT_ROOT)
-    scripts_root = Path(__file__).resolve().parent
-    python = sys.executable
-    if args.command == "build-browser":
-        raise SystemExit(subprocess.run([python, str(scripts_root / "build_kb_browser.py"), "--project-root", str(root)], check=False).returncode)
-    if args.command == "open-browser":
-        raise SystemExit(subprocess.run([python, str(scripts_root / "open_kb_browser.py"), "--project-root", str(root)], check=False).returncode)
-    if args.command == "browser-status":
-        raise SystemExit(subprocess.run([python, str(scripts_root / "status_kb_browser.py"), "--project-root", str(root)], check=False).returncode)
-    if args.command == "stop-browser":
-        raise SystemExit(subprocess.run([python, str(scripts_root / "stop_kb_browser.py"), "--project-root", str(root)], check=False).returncode)
     records = iter_records(root)
     current_path = user_root(root) / "current-state.md"
     nav_path = user_root(root) / "navigation.md"

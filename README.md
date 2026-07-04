@@ -27,19 +27,29 @@
 
 ```text
 kb/
-├── intake/
-├── library/
+├── raw/
+├── units/
+│   ├── papers/
+│   ├── repos/
+│   ├── blogs/
+│   ├── ideas/
+│   └── experiments/
 ├── programs/
-├── wiki/
+├── synthesis/
+├── config/
+├── output/
 ├── user/
-└── memory/
+└── .runtime/
 ```
 
 可以把它粗略理解成：
 
-- `library/`：资料入库
-- `programs/`：具体研究方向
-- `wiki/`：全局查询、索引、日志
+- `raw/`：不可变外部 source bytes
+- `units/`：paper / repo / blog / idea / experiment 的 canonical record
+- `programs/`：具体研究方向与 workflow
+- `synthesis/`：跨 unit 的 survey、taxonomy、trend、gap
+- `config/`：运行时偏好、taxonomy seed、candidate pool
+- `output/`：导出产物
 - `user/`：人类入口页
 
 ## Minimal Usage
@@ -61,7 +71,7 @@ program_id=<your-program-id>
 如果你知道自己想显式调用哪个 skill，也可以直接点名：
 
 ```text
-请用 $literature-analyst 为 <program-id> 刷新 literature map。
+请用 $literature-synthesizer 为 <program-id> 刷新 literature survey。
 ```
 
 文献/repo入库：

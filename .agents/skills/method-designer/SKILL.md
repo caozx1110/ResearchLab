@@ -28,5 +28,5 @@ Use this skill only after an idea has been explicitly selected.
 
 ```bash
 ${RESEARCH_PYTHON:-python3} .agents/skills/method-designer/scripts/method.py design --idea-id idea-foo --program-id my-program
-${RESEARCH_PYTHON:-python3} .agents/skills/method-designer/scripts/method.py design --idea-id idea-foo --program-id my-program --repo-id repo-bar --interface planner="planner emits subgoals" --metric success_rate
+${RESEARCH_PYTHON:-python3} .agents/skills/method-designer/scripts/method.py design --idea-id idea-foo --program-id my-program --repo-id repo-bar --interface planner="planner emits subgoals" --baseline closest-unmodified-repo-baseline --metric success_rate --risk interface-instability
 ```

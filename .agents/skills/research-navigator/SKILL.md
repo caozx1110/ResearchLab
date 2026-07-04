@@ -1,6 +1,6 @@
 ---
 name: research-navigator
-description: Build human-facing entrypoints for the v2 research system under `kb/user/`, including current state, navigation, reading lists, and report-material pages while keeping the navigation surface read-only.
+description: Build human-facing entrypoints for the v2 research system under `kb/user/`, including current state, navigation, reading lists, report-material pages, and an optional browser workbench.
 ---
 
 # Research Navigator
@@ -24,11 +24,11 @@ Use this skill to tell the human what to open next and to open a local browser f
 ## Scope
 
 - Refresh durable human-facing pages under `kb/user/`.
-- Build a local browser snapshot from `kb/units/`, `kb/programs/`, `kb/synthesis/`, `kb/user/`, and legacy `kb/library/` when present.
-- Program browser cards must support both legacy program layouts and v2 program-root `state.yaml` / `README.md` layouts.
+- Build a local browser snapshot from `kb/units/`, `kb/programs/`, `kb/synthesis/`, `kb/user/`, and `kb/config/`.
+- Program browser cards target the v2 program-root `state.yaml` / `README.md` layout.
 - Keep source records canonical; browser output is generated under `kb/user/kb/`.
 - The browser supports a Workbench, Markdown preview/edit for `.md`/`.txt`, a bottom terminal, Codex CLI launch, macOS system-terminal API, and portrait-friendly narrow-window adaptation.
-- Do not mutate raw sources or canonical YAML through the browser.
+- The browser editor is intentionally limited to `.md`/`.txt`; it can update markdown/text notes and trigger a configured checkpoint. Do not mutate raw sources or canonical YAML through the browser.
 
 ## Commands
 

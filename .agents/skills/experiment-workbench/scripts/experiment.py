@@ -17,11 +17,11 @@ else:
     raise SystemExit("Could not locate .agents/lib")
 
 from research.common import (
+    append_list_item,
     append_program_reporting_event,
     load_list_document,
-    utc_now_iso,
+    normalize_list,
     write_text_if_changed,
-    write_yaml_if_changed,
 )
 from research.v2 import append_history, build_index, default_record, ensure_v2_workspace, locate_record, project_root, rel, write_record
 
@@ -40,26 +40,17 @@ def parse_metrics(items: list[str]) -> dict[str, str]:
     return payload
 
 
-def normalize_list(values: list[str] | None) -> list[str]:
-    return [str(item).strip() for item in values or [] if str(item).strip()]
-
-
 def list_document_path(unit_root: Path, name: str) -> Path:
     return unit_root / f"{name}.yaml"
 
 
-def append_list_item(path: Path, doc_id: str, generated_by: str, item: dict[str, Any]) -> Path:
-    payload = load_list_document(path, doc_id, generated_by)
-    items = [entry for entry in payload.get("items", []) if isinstance(entry, dict)]
-    normalized = dict(item)
-    normalized.setdefault("id", f"{doc_id}-{len(items) + 1:03d}")
-    normalized.setdefault("created_at", utc_now_iso())
-    items.append(normalized)
-    payload["items"] = items
-    payload["generated_by"] = generated_by
-    payload["generated_at"] = utc_now_iso()
-    write_yaml_if_changed(path, payload)
-    return path
+def next_numbered_path(root: Path, prefix: str, suffix: str) -> Path:
+    index = 1
+    while True:
+        path = root / f"{prefix}-{index:03d}{suffix}"
+        if not path.exists():
+            return path
+        index += 1
 
 
 def summarize_yaml_list(path: Path, *, title: str, rows: list[str]) -> None:
@@ -216,7 +207,7 @@ def main() -> int:
     if args.command == "log-run":
         runs_dir = unit_root / "runs"
         runs_dir.mkdir(parents=True, exist_ok=True)
-        run_path = runs_dir / f"run-{len(list(runs_dir.glob('run-*.md'))) + 1:03d}.md"
+        run_path = next_numbered_path(runs_dir, "run", ".md")
         write_text_if_changed(
             run_path,
             "\n".join(

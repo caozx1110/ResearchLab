@@ -15,8 +15,20 @@ for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
 else:
     raise SystemExit("Could not locate .agents/lib")
 
-from research.common import append_program_reporting_event, ensure_dir, write_text_if_changed
+from research.common import append_program_reporting_event, ensure_dir, simple_slug, write_text_if_changed
 from research.v2 import project_root
+
+
+def next_available_path(root: Path, slug: str, suffix: str) -> Path:
+    path = root / f"{slug}{suffix}"
+    if not path.exists():
+        return path
+    index = 2
+    while True:
+        candidate = root / f"{slug}-{index}{suffix}"
+        if not candidate.exists():
+            return candidate
+        index += 1
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -38,8 +50,8 @@ def main() -> int:
     root = project_root(PROJECT_ROOT)
     out_root = root / "kb" / "programs" / args.program_id / "discussions"
     ensure_dir(out_root)
-    slug = "".join(ch.lower() if ch.isalnum() else "-" for ch in args.title).strip("-")[:64] or "discussion"
-    path = out_root / f"{slug}.md"
+    slug = simple_slug(args.title, "discussion")
+    path = next_available_path(out_root, slug, ".md")
     lines = [
         f"# {args.title}",
         "",

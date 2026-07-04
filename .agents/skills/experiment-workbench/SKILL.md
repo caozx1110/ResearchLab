@@ -41,17 +41,17 @@ When a program runs under the **phase-by-phase iterative workflow** (see `resear
 
 | Phase plan section | experiment-workbench artifact |
 |---|---|
-| Plan §X "Convergence criteria" | one `run-log` entry per training/eval run; `outcome` ∈ {pass, partial, fail} |
-| Plan §X "Experimental Arms Registry" | one `run-log` per arm × seed; `classification` tags the arm |
-| Phase feedback §2 "Final metrics" | aggregated stats.yaml across all converged runs |
-| Phase feedback §3 "Ablation decisions" | derived from comparing run-log entries within each arm |
-| Phase feedback §4 "Surprises" | `diagnoses.yaml` entries marked `unexpected_observation` |
+| Plan §X "Convergence criteria" | one `run-log` entry per training/eval run; `outcome` ∈ {success, partial, failed, blocked, inconclusive} |
+| Plan §X "Experimental Arms Registry" | one `run-log` per arm × seed; record the arm in `--change`, `--tested-hypothesis`, or artifacts |
+| Phase feedback §2 "Final metrics" | metrics captured as `--metric key=value` in run logs, then aggregated in the phase feedback report |
+| Phase feedback §3 "Ablation decisions" | derived in the feedback report by comparing run-log entries within each arm |
+| Phase feedback §4 "Surprises" | `diagnoses.yaml` entries with categories such as method / implementation / data / evaluation / resource / environment / process / unknown |
 | Phase feedback §5 "Open issues" | `follow-up` items, `category=implementation` or `unknown` |
 
 ### Recommended workflow for phase executor agents
 
 1. Create a parent experiment unit per phase: `experiment.py plan --title "phase-1-track-a" --program-id <pid> --idea-id <iid>`
-2. For each training run: `experiment.py log-run` with outcome + classification (arm name as tag)
+2. For each training run: `experiment.py log-run` with outcome + classification; use classification for issue category, not arm name
 3. For each unexpected behavior: `experiment.py diagnose --category unknown` (becomes feedback §4)
 4. For each implementation issue blocking next step: `experiment.py follow-up --priority high` (becomes feedback §5)
 5. When phase converges: aggregate run-logs into the phase feedback report (per master plan §11)

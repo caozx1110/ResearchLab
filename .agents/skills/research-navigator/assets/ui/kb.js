@@ -1079,9 +1079,7 @@
       if (/README\.md$/i.test(path)) return "概览";
       if (/idea-card\.md$/i.test(path)) return "Idea";
       if (/progress-update|weekly-report|weekly\.md$/i.test(path)) return "进展";
-      if (/minimum-validation-matrix\.md$|matrix\.ya?ml$/i.test(path)) return "矩阵";
-      if (/system-design\.md$/.test(path)) return "设计";
-      if (/runbook\.md$/.test(path)) return "实验";
+      if (/minimum-validation-matrix\.md$/i.test(path)) return "矩阵";
       return title.replace(/humanoid[-_ ]vla[-_ ]wholebody[-_ ]control/gi, "").trim() || basename(path);
     };
     elements.quickOpenBar.innerHTML = items
@@ -1837,7 +1835,7 @@
       ),
       section("关联文献样本", `<ul class="detail-list">${sampleLit}</ul>`),
       section("关联仓库样本", `<ul class="detail-list">${sampleRepos}</ul>`),
-      section("文件入口", detailLinks([linkChip(item.links.taxonomy, "tag-taxonomy.yaml")])),
+      section("文件入口", detailLinks([linkChip(item.links.taxonomy, "taxonomy seed")])),
     ].join("");
   }
 
@@ -1868,7 +1866,7 @@
       section(
         "文件入口",
         detailLinks([
-          linkChip(item.links.report, "landscape-report.yaml"),
+          linkChip(item.links.report, "synthesis report"),
           linkChip(item.links.summary, "summary.md"),
         ])
       ),
@@ -1960,7 +1958,7 @@
             ["研究目标", escapeHtml(program.goal || "暂无")],
             ["当前 stage", escapeHtml(program.stage || "未设置")],
           ])}
-          ${detailLinks([linkChip(links.charter, "charter.yaml"), linkChip(links.state, "workflow/state.yaml"), linkChip(links.preferences, "workflow/preferences.yaml")])}
+          ${detailLinks([linkChip(links.charter, "README.md"), linkChip(links.state, "state.yaml"), linkChip(links.preferences, "workflow/preferences.yaml")])}
         `
       );
     }
@@ -2003,7 +2001,6 @@
         `
           <p class="detail-copy">当前共 ${escapeHtml(String(program.idea_count || 0))} 个候选 idea。</p>
           <ul class="detail-list">${ideas}</ul>
-          ${detailLinks([linkChip(links.ideas_index, "ideas/index.yaml")])}
         `
       );
     }
@@ -2021,7 +2018,7 @@
           <div class="chip-row">
             ${(program.ideas || []).map((idea) => badge(`${idea.title || idea.idea_id}: ${idea.status || "unknown"}`, idea.status === "selected" ? "ok" : "soft")).join("")}
           </div>
-          ${detailLinks([linkChip(links.ideas_index, "ideas/index.yaml"), linkChip(links.decision_log, "workflow/decision-log.md"), linkChip(links.open_questions, "workflow/open-questions.yaml")])}
+          ${detailLinks([linkChip(links.decision_log, "workflow/decision-log.md"), linkChip(links.open_questions, "workflow/open-questions.yaml")])}
         `
       );
     }
@@ -2034,11 +2031,11 @@
             ["选中仓库", escapeHtml(program.selected_repo_id || "暂无")],
             ["仓库摘要", escapeHtml(program.selected_repo_summary || "暂无")],
           ])}
-          <p class="detail-copy">${escapeHtml(program.design_preview || "暂无 system design 摘要。")}</p>
+          <p class="detail-copy">${escapeHtml(program.design_preview || "暂无 README 摘要。")}</p>
           ${detailLinks([
             linkChip(links.repo_choice, "design/repo-choice.yaml"),
             linkChip(links.selected_idea, "design/selected-idea.yaml"),
-            linkChip(links.design_doc, "design/system-design.md"),
+            linkChip(links.design_doc, "README.md"),
             linkChip(links.interfaces, "design/interfaces.yaml"),
           ])}
         `
@@ -2047,15 +2044,15 @@
     return section(
       "阶段内容：实现规划",
       `
-        <p class="detail-copy">${escapeHtml(program.runbook_preview || "暂无 runbook 摘要。")}</p>
+        <p class="detail-copy">${escapeHtml(program.runbook_preview || "暂无验证矩阵摘要。")}</p>
         ${renderKeyValues([
           ["Open Questions", escapeHtml(String(program.open_question_count || 0))],
           ["Evidence Requests", escapeHtml(String(program.evidence_request_count || 0))],
           ["实验条目", escapeHtml(String(program.experiment_count || 0))],
         ])}
         ${detailLinks([
-          linkChip(links.runbook, "experiments/runbook.md"),
-          linkChip(links.matrix, "experiments/matrix.yaml"),
+          linkChip(links.runbook, "experiments/minimum-validation-matrix.md"),
+          linkChip(links.matrix, "experiments/minimum-validation-matrix.md"),
           linkChip(links.decision_log, "workflow/decision-log.md"),
           linkChip(links.open_questions, "workflow/open-questions.yaml"),
         ])}
@@ -2094,15 +2091,14 @@
       section(
         "全局文件入口",
         detailLinks([
-          linkChip(item.links.charter, "charter.yaml"),
-          linkChip(item.links.state, "workflow/state.yaml"),
+          linkChip(item.links.charter, "README.md"),
+          linkChip(item.links.state, "state.yaml"),
           linkChip(item.links.literature_map, "evidence/literature-map.yaml"),
-          linkChip(item.links.ideas_index, "ideas/index.yaml"),
           linkChip(item.links.repo_choice, "design/repo-choice.yaml"),
-          linkChip(item.links.design_doc, "design/system-design.md"),
+          linkChip(item.links.design_doc, "README.md"),
           linkChip(item.links.interfaces, "design/interfaces.yaml"),
-          linkChip(item.links.runbook, "experiments/runbook.md"),
-          linkChip(item.links.matrix, "experiments/matrix.yaml"),
+          linkChip(item.links.runbook, "experiments/minimum-validation-matrix.md"),
+          linkChip(item.links.matrix, "experiments/minimum-validation-matrix.md"),
         ])
       ),
     ].join("");

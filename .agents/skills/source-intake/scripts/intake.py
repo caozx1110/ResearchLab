@@ -18,6 +18,7 @@ else:
     raise SystemExit("Could not locate .agents/lib")
 
 from research.common import extract_pdf_record, parse_arxiv_id
+from research.intake_cli import add_intake_add_arguments
 from research.v2 import (
     apply_record_governance,
     backup_source,
@@ -29,7 +30,7 @@ from research.v2 import (
     load_search_stage,
     locate_record,
     mark_search_candidate,
-    maybe_auto_checkpoint,
+    checkpoint_and_report,
     normalize_storage_reference,
     project_root,
     resolve_local_reference,
@@ -133,13 +134,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     add = subparsers.add_parser("add", help="Add a paper, repo, or blog source")
-    add.add_argument("--kind", required=True, choices=["paper", "repo", "blog"])
-    add.add_argument("--source", default="")
-    add.add_argument("--maturity", default="lightweight", choices=["lightweight", "complete"])
-    add.add_argument("--title", default="")
-    add.add_argument("--stage-id", default="")
-    add.add_argument("--candidate-id", default="")
-    add.add_argument("--pool", action="append", default=[])
+    add_intake_add_arguments(add, include_stage_options=True)
 
     for search_name in ("search", "stage-search"):
         stage = subparsers.add_parser(search_name, help="Record search candidates before canonical intake")
@@ -293,9 +288,7 @@ def main() -> int:
     print(f"[ok] created {path.relative_to(root)}")
     for line in auto_outputs:
         print(f"[auto] {line}")
-    checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: intake {args.kind} {record['id']}")
-    if checkpoint.get("committed"):
-        print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
+    checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: intake {args.kind} {record['id']}")
     for hint in guidance_hints(paper_preferences, has_pdf=has_pdf, note_created=note_created):
         print(f"[hint] {hint}")
     return 0

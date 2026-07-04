@@ -16,12 +16,8 @@ for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
 else:
     raise SystemExit("Could not locate .agents/lib")
 
-from research.common import append_program_reporting_event, ensure_dir, load_yaml, write_text_if_changed, write_yaml_if_changed, yaml_default
+from research.common import append_program_reporting_event, ensure_dir, load_yaml, normalize_list, write_text_if_changed, write_yaml_if_changed, yaml_default
 from research.v2 import iter_records, locate_record, project_root, rel
-
-
-def normalize_list(values: list[str] | None) -> list[str]:
-    return [str(item).strip() for item in values or [] if str(item).strip()]
 
 
 def tokenize(text: str) -> set[str]:
@@ -46,8 +42,7 @@ def parse_name_detail(values: list[str], default_name: str) -> list[dict[str, st
 
 def repo_candidates(root: Path, record: dict[str, Any], pinned_repo_ids: list[str]) -> list[dict[str, Any]]:
     repo_records = iter_records(root, kind="repo")
-    if not repo_records:
-        return []
+    pinned_rank = {repo_id: index for index, repo_id in enumerate(pinned_repo_ids)}
 
     hypothesis = record.get("payload", {}).get("hypothesis", {})
     analysis = record.get("payload", {}).get("analysis", {})
@@ -66,10 +61,13 @@ def repo_candidates(root: Path, record: dict[str, Any], pinned_repo_ids: list[st
     )
 
     scored = []
+    seen_ids: set[str] = set()
     for repo in repo_records:
+        repo_id = str(repo.get("id") or "")
+        seen_ids.add(repo_id)
         repo_text = " ".join(
             [
-                str(repo.get("id") or ""),
+                repo_id,
                 str(repo.get("title") or ""),
                 str(repo.get("summary") or ""),
                 " ".join(str(item) for item in repo.get("tags", [])),
@@ -79,12 +77,12 @@ def repo_candidates(root: Path, record: dict[str, Any], pinned_repo_ids: list[st
             ]
         )
         overlap = sorted(query_tokens & tokenize(repo_text))
-        score = len(overlap) + (6 if str(repo.get("id") or "") in pinned_repo_ids else 0)
-        if pinned_repo_ids and str(repo.get("id") or "") not in pinned_repo_ids:
+        score = len(overlap) + (6 if repo_id in pinned_repo_ids else 0)
+        if pinned_repo_ids and repo_id not in pinned_repo_ids:
             score -= 1
         scored.append(
             {
-                "id": str(repo.get("id") or ""),
+                "id": repo_id,
                 "title": str(repo.get("title") or ""),
                 "summary": str(repo.get("summary") or ""),
                 "tags": normalize_list(repo.get("tags", [])),
@@ -94,7 +92,25 @@ def repo_candidates(root: Path, record: dict[str, Any], pinned_repo_ids: list[st
                 "score": score,
             }
         )
-    scored.sort(key=lambda item: (-item["score"], item["id"]))
+    for pinned_id in pinned_repo_ids:
+        if pinned_id in seen_ids:
+            continue
+        scored.append(
+            {
+                "id": pinned_id,
+                "title": "",
+                "summary": "",
+                "tags": [],
+                "topics": [],
+                "entrypoints": [],
+                "overlap": [],
+                "score": 6,
+            }
+        )
+    if pinned_repo_ids:
+        scored.sort(key=lambda item: (pinned_rank.get(str(item.get("id") or ""), len(pinned_rank)), -item["score"], item["id"]))
+    else:
+        scored.sort(key=lambda item: (-item["score"], item["id"]))
     return scored[:5]
 
 
@@ -161,7 +177,7 @@ def main() -> int:
             "## Core Hypothesis\n\n"
             f"{hypothesis.get('core_hypothesis', '')}\n\n"
             "## Repo Choice\n\n"
-            f"- Selected repo: `{selected_repo.get('id', 'pending')}`\n"
+            f"- Selected repo: `{selected_repo.get('id') or 'pending'}`\n"
             f"- Repo summary: {selected_repo.get('summary', '') or '待补充'}\n"
             f"- Overlap signals: {', '.join(selected_repo.get('overlap', [])) or 'manual selection required'}\n\n"
             "## Minimal Design\n\n"

@@ -140,7 +140,7 @@ python3 .agents/skills/experiment-workbench/scripts/experiment.py plan --title "
 python3 .agents/skills/report-author/scripts/report.py weekly --program-id my-program
 python3 .agents/skills/report-author/scripts/report.py writing-materials --program-id my-program
 python3 .agents/skills/research-navigator/scripts/navigate.py refresh
-python3 .agents/skills/research-navigator/scripts/navigate.py open-browser
+python3 .agents/skills/research-navigator/scripts/open_kb_browser.py
 ```
 
 ## 6. 最短使用建议

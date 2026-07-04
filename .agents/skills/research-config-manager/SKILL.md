@@ -13,7 +13,7 @@ description: 管理 v2 研究系统配置，包括资源画像、语言偏好、
 
 ## 负责范围
 
-1. 初始化可读的用户 profile 与 markdown settings。
+1. 初始化可读的用户 profile、taxonomy / pool seed catalog 与 runtime preferences；markdown settings 由 workspace bootstrap 保证存在，并通过 `toggle` 更新条目。
 2. 捕获资源、约束、偏好，并保持脚本可读。
 3. 显式维护 topic / tag taxonomy seed 与 candidate pool policy。
 4. 让其他 v2 skills 可以稳定读取统一配置。

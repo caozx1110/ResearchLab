@@ -23,7 +23,7 @@ from research.v2 import (
     apply_record_governance,
     build_index,
     locate_record,
-    maybe_auto_checkpoint,
+    checkpoint_and_report,
     project_root,
     rel,
     resolve_local_reference,
@@ -283,9 +283,7 @@ def main() -> int:
         write_record(root, record)
         build_index(root)
         print(f"[ok] wrote {scan_path.relative_to(root)}")
-        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: scan repo structure {args.repo_id}")
-        if checkpoint.get("committed"):
-            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
+        checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: scan repo structure {args.repo_id}")
         return 0
 
     if args.command == "map-capability":
@@ -326,9 +324,7 @@ def main() -> int:
         write_record(root, record)
         build_index(root)
         print(f"[ok] wrote {map_path.relative_to(root)}")
-        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: map repo capability {args.repo_id}")
-        if checkpoint.get("committed"):
-            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
+        checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: map repo capability {args.repo_id}")
         return 0
 
     if args.command == "complete-note":
@@ -361,22 +357,19 @@ def main() -> int:
         build_index(root)
         print(f"[ok] wrote {note_path.relative_to(root)}")
         print(f"[ok] wrote {context_path.relative_to(root)}")
-        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: complete repo note {args.repo_id}")
-        if checkpoint.get("committed"):
-            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
+        checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: complete repo note {args.repo_id}")
         return 0
 
     if args.command == "confirm":
         record["confirmation_status"] = "confirmed"
         record["needs_human_confirmation"] = False
         record["status"] = "active"
+        record["information_types"] = ["fact"]
         append_history(record, action="repo-confirmed", summary="Repo analysis confirmed by user.", information_types=["fact"])
         write_record(root, record)
         build_index(root)
         print(f"[ok] confirmed {args.repo_id}")
-        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: confirm repo {args.repo_id}")
-        if checkpoint.get("committed"):
-            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
+        checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: confirm repo {args.repo_id}")
         return 0
     return 1
 

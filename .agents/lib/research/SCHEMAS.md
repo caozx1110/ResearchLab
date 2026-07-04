@@ -20,9 +20,9 @@
 | `MATURITY_LEVELS` | `lightweight, complete` | unit 完备度 |
 | `UNIT_KIND_DIRS` | `paper→kb/units/papers, repo→kb/units/repos, blog→kb/units/blogs, idea→kb/units/ideas, experiment→kb/units/experiments` | unit 落盘目录 |
 
-**确认门控规则**（强制契约，见 [`confirmation gate`](#confirmation-gate)）：
-- 任一字段 `source = "ai"` 或 `information_types` 包含 `{inference, evaluation, user_opinion}` 之一 → `confirmation_status` 必须是 `pending_user_confirmation` 或 `rejected`
-- 只有 `human` 来源、纯 `fact` 的写入才能 `auto_confirmed` 或 `confirmed`
+**确认门控规则**（见 [`confirmation gate`](#confirmation-gate)）：
+- 任一字段 `source.kind = "ai"` 或 `information_types` 包含 `{inference, evaluation, user_opinion}` 之一 → 期望 `confirmation_status` 是 `pending_user_confirmation` 或 `rejected`，且 `needs_human_confirmation = true`
+- 运行时默认只发出 warning；设置 `RESEARCH_VALIDATE_STRICT=1` 时才拦截 unit `record.yaml` 写入。program state / reporting events 等旁路文件目前不经过该 gate。
 
 ---
 
@@ -91,11 +91,11 @@ history:                             # append_history() 写入
 
 | kind | payload 关键 section | 写入 skill |
 |---|---|---|
-| paper | `basic_info`, `quick_screen{judgement_reason, takeaways}`, `full_note`, `figures` | paper-analyst |
-| repo | `basic_info`, `capability{boundary, core_capabilities}`, `reuse_assessment` | repo-analyst |
-| blog | `basic_info`, `positioning`, `key_concepts`, `credibility` | blog-analyst |
+| paper | `basic_info`, `source_search`, `quick_screen{judgement_reason, takeaways}`, `core_content`, `structure`, `figures`, `critique`, `state` | paper-analyst |
+| repo | `basic_info`, `source_search`, `capability{boundary, core_capabilities}`, `structure`, `reuse`, `risk` | repo-analyst |
+| blog | `basic_info`, `source_search`, `positioning`, `content`, `credibility` | blog-analyst |
 | idea | `problem{problem_definition}`, `hypothesis{core_hypothesis}`, `review` | idea-workbench |
-| experiment | `basic_info{goal}`, `plan`, （另见 run-log/diagnoses/follow-ups 旁路文件） | experiment-workbench |
+| experiment | `basic_info{goal}`, `setup`, `process`, `results`, `diagnosis`（另见 run-log/diagnoses/follow-ups 旁路文件） | experiment-workbench |
 
 ---
 
@@ -346,7 +346,7 @@ topics:
 
 | artifact | 写入 skill | 读取 skill | 备注 |
 |---|---|---|---|
-| `kb/units/<kind>s/<id>/record.yaml` | source-intake (创建)、`<kind>`-analyst（精修）、knowledge-base-manager（合并/治理） | 全部 | confirmation gate 强制 |
+| `kb/units/<kind>s/<id>/record.yaml` | source-intake (创建)、`<kind>`-analyst（精修）、knowledge-base-manager（合并/治理） | 全部 | confirmation gate 默认 warning；strict 模式拦截 |
 | experiment run-log/diagnoses/follow-ups | experiment-workbench | report-author, research-orchestrator | 三文件职责严格分离 |
 | program state.yaml + workflow/* | research-orchestrator | report-author, navigator | 其它 skill emit reporting-event 让 orchestrator 写 |
 | program reporting-events.yaml | research-orchestrator（主要）、experiment-workbench / paper-analyst / method-designer / idea-workbench（事件附加） | report-author | 各 emit skill 必须填 `source_skill` |
@@ -361,18 +361,20 @@ topics:
 
 ## confirmation gate <a id="confirmation-gate"></a>
 
-**契约**：v2 系统中所有 AI 推断/评估/用户意见，必须经过用户显式确认后才能 `confirmed`。否则保持 `pending_user_confirmation`。
+**契约目标**：v2 系统中所有 AI 推断/评估/用户意见，必须经过用户显式确认后才能 `confirmed`。否则保持 `pending_user_confirmation`。
 
-**检查规则**（建议在 lib/research/v2.py 提供 `validate_write(record)` helper）：
+**当前运行行为**：`lib/research/v2.py` 提供 `validate_write(record)` helper。默认 `strict=False`，发现违规时写 stderr warning 并返回 violations；设置 `RESEARCH_VALIDATE_STRICT=1` 或显式 `strict=True` 时才 `SystemExit` 拦截。`write_record()` 会调用该 helper，但 program state、workflow files、reporting events 等非 unit record 写入暂不经过此 gate。
+
+**检查规则**：
 
 ```
 IF record["source"].get("kind") == "ai"
    OR any(t in record["information_types"] for t in {"inference", "evaluation", "user_opinion"}):
-   ASSERT record["confirmation_status"] in {"pending_user_confirmation", "rejected"}
-   ASSERT record["needs_human_confirmation"] is True
+   EXPECT record["confirmation_status"] in {"pending_user_confirmation", "rejected"}
+   EXPECT record["needs_human_confirmation"] is True
 ```
 
-跨 skill 一致性：所有 writer 脚本（`paper.py`, `intake.py`, `config.py`, `kb_browser_lib.py` 等）写入 unit/program/event 时统一过 `validate_write`，把契约从散文升级为代码约束。
+跨 skill 一致性：unit `record.yaml` 写入应统一走 `write_record()` 或显式调用 `validate_write()`。其它 artifact 若需要同等强度的门控，应另行实现并补测试。
 
 ---
 

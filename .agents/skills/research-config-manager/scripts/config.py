@@ -25,7 +25,7 @@ from research.v2 import (
     load_candidate_pools,
     load_runtime_preferences,
     load_topic_taxonomy,
-    maybe_auto_checkpoint,
+    checkpoint_and_report,
     project_root,
     runtime_preferences_path,
     topic_taxonomy_path,
@@ -358,9 +358,7 @@ def main() -> int:
         _apply_runtime_pref(payload, args.section, args.key, parse_value(args.value))
         write_runtime_preferences(root, payload)
         print(f"[ok] updated {runtime_preferences_path(root).relative_to(root)}")
-        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: update runtime pref {args.section}.{args.key}")
-        if checkpoint.get("committed"):
-            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
+        checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: update runtime pref {args.section}.{args.key}")
         return 0
     return 1
 

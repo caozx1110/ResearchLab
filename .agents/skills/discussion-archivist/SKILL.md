@@ -16,9 +16,9 @@ Use this skill when an important research discussion should become a durable not
 
 二者经常成对出现：先 `archive` 保存讨论过程，等用户拍板后再 `research-orchestrator log-decision` 引用本讨论笔记的 path 作为 evidence。
 
-## 必填要素
+## 输入要素
 
-`title`、`summary`、至少一项 `--tradeoff` 或 `--open-question`；`--decision` 留空时会自动写入"待确认"以示尚未拍板。
+CLI 只强制 `title` 与 `summary`；`--tradeoff`、`--open-question`、`--next-action` 可重复传入，也可留空由模板写入占位。`--decision` 留空时会自动写入"待确认"以示尚未拍板。
 
 ## 上下游
 

@@ -34,6 +34,8 @@ ${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchest
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py request-evidence --program-id open-world-vla --question "Can repo-X reproduce baseline?" --needed "Need baseline parity logs"
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py log-decision --program-id open-world-vla --decision "Choose repo-X as baseline host" --rationale "Best overlap with current validation path"
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py add-reporting-event --program-id open-world-vla --title "Baseline host chosen" --summary "Repo-X becomes the default baseline host"
+${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py attach-unit --program-id open-world-vla --unit-id p-openvla-bf86ee46
+${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py query-program --program-id open-world-vla --question "当前还缺哪些 evidence?"
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py status --program-id open-world-vla
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py route --task "分析新论文是否值得细读"
 ```

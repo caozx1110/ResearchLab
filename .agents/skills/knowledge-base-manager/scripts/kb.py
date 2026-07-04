@@ -27,18 +27,13 @@ from research.v2 import (
     kb_git_status,
     link_records,
     lint_records,
-    maybe_auto_checkpoint,
+    checkpoint_and_report,
     project_root,
     promote_record,
     rebuild_governance_catalogs,
     refresh_record_schemas,
     search_records,
     sync_storage_layout,
-    write_candidate_pools,
-    write_topic_taxonomy,
-    load_candidate_pools,
-    load_runtime_preferences,
-    load_topic_taxonomy,
     topic_taxonomy_path,
 )
 
@@ -63,7 +58,6 @@ def build_parser() -> argparse.ArgumentParser:
     compact_ids.add_argument("--kind", choices=["paper", "repo", "blog", "idea", "experiment"])
     compact_ids.add_argument("--apply", action="store_true", help="Actually rename ids and unit folders")
     subparsers.add_parser("rebuild-governance", help="Rebuild topic taxonomy and candidate pool catalogs")
-    subparsers.add_parser("taxonomy-sync", help="Alias of rebuild-governance")
 
     query = subparsers.add_parser("query", help="Search records by title, summary, tags, topics, or pools")
     query.add_argument("--query", required=True)
@@ -83,21 +77,6 @@ def build_parser() -> argparse.ArgumentParser:
     govern.add_argument("--all", action="store_true")
     govern.add_argument("--no-infer", action="store_true")
     govern.add_argument("--source-label", default="knowledge-base-manager")
-
-    taxonomy_lint = subparsers.add_parser("taxonomy-lint", help="Check taxonomy/pool files")
-    taxonomy_lint.add_argument("--strict", action="store_true")
-
-    subparsers.add_parser("taxonomy-apply", help="Alias of govern --all")
-
-    topic_upsert = subparsers.add_parser("topic-upsert", help="Add or update a topic entry")
-    topic_upsert.add_argument("--topic", required=True)
-    topic_upsert.add_argument("--description", default="")
-
-    pool_upsert = subparsers.add_parser("pool-upsert", help="Add or update a candidate pool entry")
-    pool_upsert.add_argument("--pool", required=True)
-    pool_upsert.add_argument("--summary", default="")
-    pool_upsert.add_argument("--topic", action="append", default=[])
-    pool_upsert.add_argument("--tag", action="append", default=[])
 
     link = subparsers.add_parser("link", help="Link two existing records")
     link.add_argument("--from-id", required=True)
@@ -172,11 +151,9 @@ def main() -> int:
             print(f"- {item['old_id']} -> {item['new_id']} | {item['title']}")
         if args.apply and payload["changed"]:
             print("[ok] rebuilt governance and index")
-            checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: compact knowledge-unit ids ({payload['changed']})")
-            if checkpoint.get("committed"):
-                print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
+            checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: compact knowledge-unit ids ({payload['changed']})")
         return 0
-    if args.command in {"rebuild-governance", "taxonomy-sync"}:
+    if args.command == "rebuild-governance":
         taxonomy_path, pools_path = rebuild_governance_catalogs(root)
         print(f"[ok] rebuilt {taxonomy_path.relative_to(root)}")
         print(f"[ok] rebuilt {pools_path.relative_to(root)}")
@@ -222,72 +199,19 @@ def main() -> int:
             print(f"[ok] governed {path.relative_to(root)}")
         print(f"[ok] synced {topic_taxonomy_path(root).relative_to(root)}")
         print(f"[ok] synced {candidate_pools_path(root).relative_to(root)}")
-        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: update kb governance ({len(paths)} records)")
-        if checkpoint.get("committed"):
-            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
-        return 0
-    if args.command == "taxonomy-lint":
-        taxonomy = load_topic_taxonomy(root)
-        pools = load_candidate_pools(root)
-        issues = []
-        if not isinstance(taxonomy.get("topics", {}), dict):
-            issues.append("topic taxonomy must contain topics mapping")
-        if not isinstance(taxonomy.get("tags", {}), dict):
-            issues.append("topic taxonomy must contain tags mapping")
-        if not isinstance(pools.get("pools", {}), dict):
-            issues.append("candidate pools must contain pools mapping")
-        status = "PASS" if not issues else "FAIL"
-        print(f"status: {status}")
-        for issue in issues:
-            print(f"- {issue}")
-        return 0 if status == "PASS" or not args.strict else 1
-    if args.command == "taxonomy-apply":
-        paths = govern_records(root, unit_ids=None, kind=None, explicit_topics=[], explicit_tags=[], explicit_pools=[], infer_missing=True, source_label="knowledge-base-manager")
-        build_index(root)
-        for path in paths[:20]:
-            print(f"[ok] governed {path.relative_to(root)}")
-        return 0
-    if args.command == "topic-upsert":
-        payload = load_topic_taxonomy(root)
-        topic_id = args.topic
-        item = payload["topics"].setdefault(topic_id, {"id": topic_id, "aliases": [], "tags": [], "pools": [], "member_ids": [], "count": 0, "note": "", "status": "active"})
-        item["note"] = args.description
-        path = write_topic_taxonomy(root, payload)
-        print(f"[ok] updated {path.relative_to(root)}")
-        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: update topic {args.topic}")
-        if checkpoint.get("committed"):
-            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
-        return 0
-    if args.command == "pool-upsert":
-        payload = load_candidate_pools(root)
-        pool_id = args.pool
-        item = payload["pools"].setdefault(pool_id, {"id": pool_id, "summary": "", "topic_hints": [], "tags": [], "member_ids": [], "kinds": [], "status": "active"})
-        item["summary"] = args.summary
-        item["topic_hints"] = sorted(set(item.get("topic_hints", [])) | set(args.topic))
-        item["tags"] = sorted(set(item.get("tags", [])) | set(args.tag))
-        path = write_candidate_pools(root, payload)
-        print(f"[ok] updated {path.relative_to(root)}")
-        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: update pool {args.pool}")
-        if checkpoint.get("committed"):
-            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
+        checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: update kb governance ({len(paths)} records)")
         return 0
     if args.command == "link":
         link_records(root, args.from_id, args.to_id, args.relation, note=args.note)
         build_index(root)
         print(f"[ok] linked {args.from_id} -> {args.to_id} ({args.relation})")
-        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: link {args.from_id} to {args.to_id}")
-        if checkpoint.get("committed"):
-            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
+        checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: link {args.from_id} to {args.to_id}")
         return 0
     if args.command == "promote":
         path = promote_record(root, args.id, status=args.status, maturity=args.maturity, confirmation_status=args.confirmation_status)
         build_index(root)
         print(f"[ok] updated {path.relative_to(root)}")
-        prefs = load_runtime_preferences(root)
-        trigger = "milestone" if prefs.get("versioning", {}).get("auto_commit_mode") != "manual" else "manual"
-        checkpoint = maybe_auto_checkpoint(root, trigger=trigger, message=f"milestone: promote {args.id}")
-        if checkpoint.get("committed"):
-            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
+        checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: promote {args.id}")
         return 0
     return 1
 

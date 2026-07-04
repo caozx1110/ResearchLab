@@ -17,21 +17,38 @@ else:
     raise SystemExit("Could not locate .agents/lib")
 
 from research.common import (
+    append_list_item,
     append_program_reporting_event,
     blank_list_document,
     blank_reporting_events,
     ensure_dir,
     load_list_document,
     load_yaml,
+    normalize_list,
     program_file_lock,
+    simple_slug,
     utc_now_iso,
     write_text_if_changed,
     write_yaml_if_changed,
     yaml_default,
 )
-from research.v2 import append_history, ensure_v2_workspace, kb_root, locate_record, maybe_auto_checkpoint, project_root, write_record
+from research.v2 import append_history, ensure_v2_workspace, kb_root, locate_record, checkpoint_and_report, project_root, write_record
 
 ROUTE_HINTS = {
+    "source": "source-intake",
+    "intake": "source-intake",
+    "staging": "source-intake",
+    "入库": "source-intake",
+    "摄入": "source-intake",
+    "新论文": "source-intake",
+    "新 paper": "source-intake",
+    "new paper": "source-intake",
+    "新仓库": "source-intake",
+    "新 repo": "source-intake",
+    "new repo": "source-intake",
+    "新博客": "source-intake",
+    "新 blog": "source-intake",
+    "new blog": "source-intake",
     "论文": "paper-analyst",
     "paper": "paper-analyst",
     "仓库": "repo-analyst",
@@ -40,12 +57,32 @@ ROUTE_HINTS = {
     "blog": "blog-analyst",
     "综述": "literature-synthesizer",
     "idea": "idea-workbench",
+    "方法": "method-designer",
+    "method": "method-designer",
+    "design": "method-designer",
+    "baseline": "method-designer",
+    "interface": "method-designer",
     "实验": "experiment-workbench",
     "周报": "report-author",
     "ppt": "report-author",
+    "配置": "research-config-manager",
+    "config": "research-config-manager",
+    "偏好": "research-config-manager",
+    "runtime": "research-config-manager",
+    "taxonomy seed": "research-config-manager",
+    "pool seed": "research-config-manager",
+    "治理": "knowledge-base-manager",
+    "索引": "knowledge-base-manager",
+    "schema": "knowledge-base-manager",
+    "lint": "knowledge-base-manager",
+    "governance": "knowledge-base-manager",
     "导航": "research-navigator",
     "讨论": "discussion-archivist",
     "discussion": "discussion-archivist",
+    "skill evolution": "skill-evolution-advisor",
+    "技能演化": "skill-evolution-advisor",
+    "skill drift": "skill-evolution-advisor",
+    "retrospective": "skill-evolution-advisor",
     "wiki": "wiki-adapter",
     "知识库": "wiki-adapter",
 }
@@ -77,10 +114,6 @@ def reporting_events_path(root: Path, program_id: str) -> Path:
 
 def decision_log_path(root: Path, program_id: str) -> Path:
     return workflow_root(root, program_id) / "decision-log.md"
-
-
-def normalize_list(values: list[str] | None) -> list[str]:
-    return [str(item).strip() for item in values or [] if str(item).strip()]
 
 
 def load_state(root: Path, program_id: str) -> dict:
@@ -211,21 +244,6 @@ def refresh_state_counts(root: Path, program_id: str, payload: dict) -> dict:
     return payload
 
 
-def append_list_item(path: Path, doc_id: str, generated_by: str, item: dict[str, Any]) -> Path:
-    payload = load_list_document(path, doc_id, generated_by)
-    items = [entry for entry in payload.get("items", []) if isinstance(entry, dict)]
-    normalized = dict(item)
-    normalized.setdefault("id", f"{doc_id}-{len(items) + 1:03d}")
-    normalized.setdefault("created_at", utc_now_iso())
-    normalized.setdefault("status", "open")
-    items.append(normalized)
-    payload["items"] = items
-    payload["generated_by"] = generated_by
-    payload["generated_at"] = utc_now_iso()
-    write_yaml_if_changed(path, payload)
-    return path
-
-
 def append_decision(root: Path, program_id: str, item: dict[str, Any]) -> Path:
     path = decision_log_path(root, program_id)
     existing = path.read_text(encoding="utf-8") if path.exists() else "# Decision Log\n\n"
@@ -341,9 +359,7 @@ def main() -> int:
             )
             write_state(root, args.program_id, load_state(root, args.program_id))
         print(f"[ok] created program {args.program_id}")
-        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: init program {args.program_id}")
-        if checkpoint.get("committed"):
-            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
+        checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: init program {args.program_id}")
         return 0
     if args.command == "set-stage":
         with program_file_lock(root, args.program_id):
@@ -365,9 +381,7 @@ def main() -> int:
             )
             write_state(root, args.program_id, payload)
         print(f"[ok] updated stage to {args.stage}")
-        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: set program stage {args.program_id} -> {args.stage}")
-        if checkpoint.get("committed"):
-            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
+        checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: set program stage {args.program_id} -> {args.stage}")
         return 0
     if args.command == "status":
         with program_file_lock(root, args.program_id):
@@ -415,15 +429,13 @@ def main() -> int:
         if warning:
             print(warning)
         print(f"[ok] attached {canonical_id} to {args.program_id}")
-        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: attach {canonical_id} to {args.program_id}")
-        if checkpoint.get("committed"):
-            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
+        checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: attach {canonical_id} to {args.program_id}")
         return 0
     if args.command == "query-program":
         with program_file_lock(root, args.program_id):
             query_root = program_root(root, args.program_id) / "queries"
             ensure_dir(query_root)
-            slug = "".join(ch.lower() if ch.isalnum() else "-" for ch in args.question).strip("-")[:64] or "query"
+            slug = simple_slug(args.question, "query")
             query_path = query_root / f"{slug}.md"
             state = load_state(root, args.program_id)
             lines = [
@@ -456,9 +468,7 @@ def main() -> int:
             )
             write_state(root, args.program_id, load_state(root, args.program_id))
         print(query_path.relative_to(root))
-        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: query program {args.program_id}")
-        if checkpoint.get("committed"):
-            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
+        checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: query program {args.program_id}")
         return 0
     if args.command == "add-open-question":
         with program_file_lock(root, args.program_id):
@@ -475,12 +485,11 @@ def main() -> int:
                     "related_unit_ids": normalize_list(args.related_unit),
                     "information_types": ["fact", "unverified"],
                 },
+                default_status="open",
             )
             write_state(root, args.program_id, load_state(root, args.program_id))
         print(path.relative_to(root))
-        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: add open question {args.program_id}")
-        if checkpoint.get("committed"):
-            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
+        checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: add open question {args.program_id}")
         return 0
     if args.command == "request-evidence":
         with program_file_lock(root, args.program_id):
@@ -499,6 +508,7 @@ def main() -> int:
                     "related_unit_ids": normalize_list(args.related_unit),
                     "information_types": ["fact", "unverified"],
                 },
+                default_status="open",
             )
             append_program_reporting_event(
                 root,
@@ -516,9 +526,7 @@ def main() -> int:
             )
             write_state(root, args.program_id, load_state(root, args.program_id))
         print(path.relative_to(root))
-        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: request evidence {args.program_id}")
-        if checkpoint.get("committed"):
-            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
+        checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: request evidence {args.program_id}")
         return 0
     if args.command == "log-decision":
         with program_file_lock(root, args.program_id):
@@ -553,9 +561,7 @@ def main() -> int:
             state["last_decision"] = {"decision": args.decision, "timestamp": item["timestamp"], "confirmation_status": args.confirmation_status}
             write_state(root, args.program_id, state)
         print(path.relative_to(root))
-        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: log decision {args.program_id}")
-        if checkpoint.get("committed"):
-            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
+        checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: log decision {args.program_id}")
         return 0
     if args.command == "add-reporting-event":
         with program_file_lock(root, args.program_id):
@@ -577,9 +583,7 @@ def main() -> int:
             )
             write_state(root, args.program_id, load_state(root, args.program_id))
         print(path.relative_to(root))
-        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: add reporting event {args.program_id}")
-        if checkpoint.get("committed"):
-            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
+        checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: add reporting event {args.program_id}")
         return 0
     return 1
 

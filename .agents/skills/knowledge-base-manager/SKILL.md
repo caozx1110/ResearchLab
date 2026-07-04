@@ -57,8 +57,10 @@ ${RESEARCH_PYTHON:-python3} .agents/skills/knowledge-base-manager/scripts/kb.py 
 ${RESEARCH_PYTHON:-python3} .agents/skills/knowledge-base-manager/scripts/kb.py storage-sync
 ${RESEARCH_PYTHON:-python3} .agents/skills/knowledge-base-manager/scripts/kb.py git-init
 ${RESEARCH_PYTHON:-python3} .agents/skills/knowledge-base-manager/scripts/kb.py git-status
+${RESEARCH_PYTHON:-python3} .agents/skills/knowledge-base-manager/scripts/kb.py git-log --limit 10
 ${RESEARCH_PYTHON:-python3} .agents/skills/knowledge-base-manager/scripts/kb.py git-checkpoint --message "milestone: weekly refresh"
 ${RESEARCH_PYTHON:-python3} .agents/skills/knowledge-base-manager/scripts/kb.py lint
+${RESEARCH_PYTHON:-python3} .agents/skills/knowledge-base-manager/scripts/kb.py index
 ${RESEARCH_PYTHON:-python3} .agents/skills/knowledge-base-manager/scripts/kb.py compact-ids
 ${RESEARCH_PYTHON:-python3} .agents/skills/knowledge-base-manager/scripts/kb.py compact-ids --apply
 ${RESEARCH_PYTHON:-python3} .agents/skills/knowledge-base-manager/scripts/kb.py refresh-schema --kind paper

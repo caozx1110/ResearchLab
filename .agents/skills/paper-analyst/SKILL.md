@@ -27,4 +27,5 @@ ${RESEARCH_PYTHON:-python3} .agents/skills/paper-analyst/scripts/paper.py comple
 ${RESEARCH_PYTHON:-python3} .agents/skills/paper-analyst/scripts/paper.py extract-figures --paper-id p-openvla-bf86ee46
 ${RESEARCH_PYTHON:-python3} .agents/skills/paper-analyst/scripts/paper.py refresh-structure --paper-id p-openvla-bf86ee46
 ${RESEARCH_PYTHON:-python3} .agents/skills/paper-analyst/scripts/paper.py confirm --paper-id p-openvla-bf86ee46
+${RESEARCH_PYTHON:-python3} .agents/skills/paper-analyst/scripts/paper.py reject --paper-id p-openvla-bf86ee46
 ```

@@ -13,15 +13,18 @@ from typing import Any
 
 from .common import (
     KEYWORD_BLACKLIST,
-    STOPWORDS,
     ensure_dir,
     file_sha256,
+    fetch_url,
     find_project_root,
+    html_to_text,
     infer_topics_and_tags,
     is_url,
     load_yaml,
+    normalize_ref_key,
     normalize_title,
     normalize_remote_url,
+    parse_wikilinks,
     parse_arxiv_id,
     parse_iso_datetime,
     program_root as common_program_root,
@@ -32,6 +35,18 @@ from .common import (
     write_yaml_if_changed,
     yaml_default,
     yaml_duplicate_key_issues,
+)
+from .ids import (
+    COMPACT_UNIT_ID_HASH_LEN,
+    COMPACT_UNIT_ID_MAX_CHARS,
+    COMPACT_UNIT_ID_MAX_WORDS,
+    GREEK_LETTER_ALIASES,
+    UNIT_KIND_PREFIXES,
+    build_unit_id,
+    canonical_unit_id,
+    canonical_unit_id_with_hash,
+    compact_unit_slug,
+    is_canonical_unit_id,
 )
 
 UNIT_KIND_DIRS = {
@@ -113,16 +128,7 @@ DEFAULT_CANDIDATE_POOLS = {
     },
     "pools": {},
 }
-UNIT_KIND_PREFIXES = {
-    "paper": "p",
-    "repo": "r",
-    "blog": "b",
-    "idea": "i",
-    "experiment": "x",
-}
-COMPACT_UNIT_ID_MAX_WORDS = 3
-COMPACT_UNIT_ID_MAX_CHARS = 18
-COMPACT_UNIT_ID_HASH_LEN = 8
+WEB_SNAPSHOT_MAX_CHARS = 120_000
 TEXT_REWRITE_SUFFIXES = {".md", ".markdown", ".txt", ".yaml", ".yml", ".json"}
 VERSIONING_COMMIT_MODES = {"manual", "milestone", "aggressive"}
 PAPER_AUTO_COMPLETE_CONDITIONS = {
@@ -145,34 +151,6 @@ KB_GITIGNORE_LINES = [
     "# Local noise",
     ".DS_Store",
 ]
-GREEK_LETTER_ALIASES = {
-    "π": "pi",
-    "Π": "pi",
-    "ψ": "psi",
-    "Ψ": "psi",
-    "φ": "phi",
-    "Φ": "phi",
-    "α": "alpha",
-    "Α": "alpha",
-    "β": "beta",
-    "Β": "beta",
-    "γ": "gamma",
-    "Γ": "gamma",
-    "δ": "delta",
-    "Δ": "delta",
-    "λ": "lambda",
-    "Λ": "lambda",
-    "μ": "mu",
-    "Μ": "mu",
-    "σ": "sigma",
-    "Σ": "sigma",
-    "τ": "tau",
-    "Τ": "tau",
-    "ω": "omega",
-    "Ω": "omega",
-}
-
-
 def project_root(start: Path | None = None) -> Path:
     return find_project_root(start)
 
@@ -799,70 +777,6 @@ def kind_payload_skeleton(kind: str, title: str = "") -> dict[str, Any]:
     raise SystemExit(f"Unsupported unit kind: {kind}")
 
 
-def build_unit_id(kind: str, title: str, source: str = "") -> str:
-    return canonical_unit_id(kind, title=title, source=source)
-
-
-def _unit_slug_seed(title: str, source: str = "") -> str:
-    text = title.strip() or source.strip()
-    if "://" in text:
-        text = source.strip() or title.strip()
-    text = re.sub(r"^\d{4}(?:[-/]\d{1,2}){1,2}\s+", "", text)
-    for raw, alias in GREEK_LETTER_ALIASES.items():
-        text = text.replace(raw, f" {alias} ")
-    text = re.sub(r"([a-z])([A-Z][a-z])", r"\1 \2", text)
-    text = re.sub(r"([A-Z]{2,})([A-Z][a-z])", r"\1 \2", text)
-    return text.strip()
-
-
-def compact_unit_slug(seed: str, *, max_words: int = COMPACT_UNIT_ID_MAX_WORDS, max_chars: int = COMPACT_UNIT_ID_MAX_CHARS) -> str:
-    words = (slugify(_unit_slug_seed(seed), max_words=12) or "item").split("-")
-    preferred = [word for word in words if word not in STOPWORDS and word not in KEYWORD_BLACKLIST]
-    candidate_words = preferred if preferred else [word for word in words if word not in STOPWORDS]
-    chosen: list[str] = []
-    for part in candidate_words or words:
-        if len(chosen) >= max(1, max_words):
-            break
-        candidate = "-".join(chosen + [part]) if chosen else part
-        if len(candidate) > max_chars:
-            if chosen:
-                continue
-            return part[:max_chars].strip("-") or "item"
-        chosen.append(part)
-    if chosen:
-        return "-".join(chosen)
-    slug = "-".join((candidate_words or words)[:max(1, max_words)]) or "item"
-    return slug[:max_chars].strip("-") or "item"
-
-
-def canonical_unit_id(kind: str, *, title: str, source: str = "", hash_size: int = COMPACT_UNIT_ID_HASH_LEN) -> str:
-    if kind not in UNIT_KIND_PREFIXES:
-        raise SystemExit(f"Unsupported unit kind: {kind}")
-    seed = title or source or kind
-    slug_seed = title or source or kind
-    prefix = UNIT_KIND_PREFIXES[kind]
-    compact_slug = compact_unit_slug(slug_seed)
-    short_hash = hashlib.sha1(seed.encode("utf-8")).hexdigest()[: max(6, hash_size)]
-    return f"{prefix}-{compact_slug}-{short_hash}"
-
-
-def canonical_unit_id_with_hash(kind: str, *, title: str, source: str = "", hash_value: str = "") -> str:
-    if kind not in UNIT_KIND_PREFIXES:
-        raise SystemExit(f"Unsupported unit kind: {kind}")
-    compact_slug = compact_unit_slug(title or source or kind)
-    normalized_hash = re.sub(r"[^0-9a-f]", "", hash_value.lower())[:16]
-    if len(normalized_hash) < 6:
-        return canonical_unit_id(kind, title=title, source=source)
-    return f"{UNIT_KIND_PREFIXES[kind]}-{compact_slug}-{normalized_hash}"
-
-
-def is_canonical_unit_id(kind: str, unit_id: str) -> bool:
-    prefix = UNIT_KIND_PREFIXES.get(kind, "")
-    if not prefix:
-        return False
-    return bool(re.fullmatch(rf"{re.escape(prefix)}-[a-z0-9]+(?:-[a-z0-9]+)*-[0-9a-f]{{6,16}}", unit_id.strip()))
-
-
 def _extract_unit_id_hash(unit_id: str) -> str:
     match = re.search(r"-([0-9a-f]{6,16})$", unit_id.strip().lower())
     return match.group(1) if match else ""
@@ -1297,6 +1211,13 @@ def maybe_auto_checkpoint(project_root: Path, *, trigger: str, message: str) -> 
     return result
 
 
+def checkpoint_and_report(project_root: Path, *, trigger: str, message: str) -> dict[str, Any]:
+    checkpoint = maybe_auto_checkpoint(project_root, trigger=trigger, message=message)
+    if checkpoint.get("committed"):
+        print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
+    return checkpoint
+
+
 def _move_tree_item(src: Path, dst: Path) -> list[tuple[Path, Path]]:
     moved: list[tuple[Path, Path]] = []
     if not src.exists():
@@ -1430,13 +1351,6 @@ def sync_storage_layout(project_root: Path) -> dict[str, Any]:
         "rewritten_files": rewritten_files,
         "removed_nested_git": removed_nested_git,
     }
-
-
-def load_record(project_root: Path, kind: str, unit_id: str) -> dict[str, Any]:
-    payload = load_yaml(record_path(project_root, kind, unit_id), default={})
-    if not isinstance(payload, dict):
-        raise SystemExit(f"Invalid record: {kind}/{unit_id}")
-    return normalize_record_schema(payload)
 
 
 def apply_record_governance(
@@ -1607,6 +1521,55 @@ def locate_record(project_root: Path, unit_id: str) -> tuple[dict[str, Any], Pat
     raise SystemExit(f"Record not found: {unit_id}")
 
 
+def _unit_id_slug_ref_key(unit_id: str) -> str:
+    parts = unit_id.split("-")
+    if len(parts) < 3 or parts[0] not in set(UNIT_KIND_PREFIXES.values()):
+        return ""
+    if not re.fullmatch(r"[0-9a-f]{6,40}", parts[-1]):
+        return ""
+    return normalize_ref_key("-".join(parts[1:-1]))
+
+
+def _record_wikilink_ref_keys(record: dict[str, Any]) -> set[str]:
+    keys: set[str] = set()
+    unit_id = str(record.get("id") or "")
+    for value in [unit_id, _unit_id_slug_ref_key(unit_id), str(record.get("title") or "")]:
+        key = normalize_ref_key(value)
+        if key:
+            keys.add(key)
+    for legacy_id in _unique_text_list(record.get("legacy_ids")):
+        for value in [legacy_id, _unit_id_slug_ref_key(legacy_id)]:
+            key = normalize_ref_key(value)
+            if key:
+                keys.add(key)
+    return keys
+
+
+def _unit_markdown_paths(project_root: Path, record: dict[str, Any]) -> list[Path]:
+    kind = str(record.get("kind") or "")
+    unit_id = str(record.get("id") or "")
+    if kind not in UNIT_KIND_DIRS or not unit_id:
+        return []
+    root = unit_root(project_root, kind, unit_id)
+    if not root.exists():
+        return []
+    paths = sorted({*root.rglob("*.md"), *root.rglob("*.markdown")})
+    return [path for path in paths if "source" not in path.relative_to(root).parts]
+
+
+def _wikilink_target_exists(project_root: Path, target: str, ref_keys: set[str]) -> bool:
+    candidates = [target.strip(), normalize_ref_key(target)]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            locate_record(project_root, candidate)
+            return True
+        except SystemExit:
+            pass
+    return normalize_ref_key(target) in ref_keys
+
+
 def refresh_record_schemas(project_root: Path, *, unit_ids: list[str] | None = None, kind: str | None = None) -> list[Path]:
     ensure_v2_workspace(project_root)
     paths: list[Path] = []
@@ -1618,6 +1581,51 @@ def refresh_record_schemas(project_root: Path, *, unit_ids: list[str] | None = N
     for record in iter_records(project_root, kind=kind):
         paths.append(write_record(project_root, record))
     return paths
+
+
+def _has_declared_members(item: dict[str, Any]) -> bool:
+    return bool(_text_list(item.get("member_ids"))) or int(item.get("count") or 0) > 0
+
+
+def _preserve_empty_governance_seeds(taxonomy: dict[str, Any], pools: dict[str, Any], existing_taxonomy: dict[str, Any], existing_pools: dict[str, Any]) -> None:
+    for topic, item in existing_taxonomy.get("topics", {}).items():
+        if topic in taxonomy["topics"] or _has_declared_members(item):
+            continue
+        taxonomy["topics"][topic] = {
+            "id": topic,
+            "aliases": _slug_list(item.get("aliases")),
+            "tags": _slug_list(item.get("tags")),
+            "pools": _slug_list(item.get("pools")),
+            "member_ids": [],
+            "count": 0,
+            "note": str(item.get("note") or "").strip(),
+            "status": str(item.get("status") or "active"),
+        }
+    for tag, item in existing_taxonomy.get("tags", {}).items():
+        if tag in taxonomy["tags"] or _has_declared_members(item):
+            continue
+        taxonomy["tags"][tag] = {
+            "id": tag,
+            "aliases": _slug_list(item.get("aliases")),
+            "topic_hints": _slug_list(item.get("topic_hints")),
+            "pools": _slug_list(item.get("pools")),
+            "member_ids": [],
+            "count": 0,
+            "note": str(item.get("note") or "").strip(),
+            "status": str(item.get("status") or "active"),
+        }
+    for pool, item in existing_pools.get("pools", {}).items():
+        if pool in pools["pools"] or _has_declared_members(item):
+            continue
+        pools["pools"][pool] = {
+            "id": pool,
+            "summary": str(item.get("summary") or "").strip(),
+            "topic_hints": _slug_list(item.get("topic_hints")),
+            "tags": _slug_list(item.get("tags")),
+            "member_ids": [],
+            "kinds": [],
+            "status": str(item.get("status") or "active"),
+        }
 
 
 def rebuild_governance_catalogs(project_root: Path) -> tuple[Path, Path]:
@@ -1689,6 +1697,11 @@ def rebuild_governance_catalogs(project_root: Path) -> tuple[Path, Path]:
             item["tags"] = sorted(set(item["tags"]) | set(record_tags))
             item["kinds"] = sorted(set(item["kinds"]) | {str(record.get("kind") or "")})
 
+    _preserve_empty_governance_seeds(taxonomy, pools, existing_taxonomy, existing_pools)
+    taxonomy["topics"] = {key: taxonomy["topics"][key] for key in sorted(taxonomy["topics"])}
+    taxonomy["tags"] = {key: taxonomy["tags"][key] for key in sorted(taxonomy["tags"])}
+    pools["pools"] = {key: pools["pools"][key] for key in sorted(pools["pools"])}
+
     taxonomy_path = write_topic_taxonomy(project_root, taxonomy)
     pools_path = write_candidate_pools(project_root, pools)
     return taxonomy_path, pools_path
@@ -1744,8 +1757,9 @@ def build_index(project_root: Path) -> tuple[Path, Path]:
 def lint_workspace_integrity(project_root: Path) -> list[str]:
     issues: list[str] = []
     yaml_paths: list[Path] = []
+    records = iter_records(project_root)
 
-    for record in iter_records(project_root):
+    for record in records:
         yaml_paths.append(record_path(project_root, str(record.get("kind") or ""), str(record.get("id") or "")))
 
     for base in [kb_root(project_root) / "programs", config_root(project_root), synthesis_root(project_root)]:
@@ -1764,6 +1778,19 @@ def lint_workspace_integrity(project_root: Path) -> list[str]:
         for issue in yaml_duplicate_key_issues(path):
             prefix = f"{project_root.as_posix()}/"
             issues.append(issue.replace(prefix, ""))
+
+    wikilink_ref_keys: set[str] = set()
+    for record in records:
+        wikilink_ref_keys.update(_record_wikilink_ref_keys(record))
+    for record in records:
+        for path in _unit_markdown_paths(project_root, record):
+            try:
+                markdown = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                continue
+            for target in parse_wikilinks(markdown):
+                if not _wikilink_target_exists(project_root, target, wikilink_ref_keys):
+                    issues.append(f"{rel(project_root, path)}: broken wikilink `{target}`")
 
     programs_root = kb_root(project_root) / "programs"
     if not programs_root.exists():
@@ -1785,7 +1812,7 @@ def lint_workspace_integrity(project_root: Path) -> list[str]:
             if program_id not in _slug_list(record.get("program_ids")):
                 issues.append(f"{rel(project_root, state_file)}: `{unit_id}` missing reverse program_ids link to `{program_id}`")
 
-    for record in iter_records(project_root):
+    for record in records:
         unit_id = str(record.get("id") or "")
         for program_id in _slug_list(record.get("program_ids")):
             state_file = common_program_root(project_root, program_id) / "state.yaml"
@@ -2023,13 +2050,42 @@ def _copy_dir(src: Path, dst: Path) -> None:
     shutil.copytree(src, dst, ignore=shutil.ignore_patterns(".git", ".gitmodules"))
 
 
+def _is_html_response(content_type: str, text: str) -> bool:
+    normalized = content_type.lower().strip()
+    if normalized in {"text/html", "application/xhtml+xml"} or normalized.endswith("+html"):
+        return True
+    prefix = text[:1000].lower()
+    return "<html" in prefix or "<!doctype html" in prefix
+
+
+def _truncate_snapshot_text(text: str) -> str:
+    if len(text) <= WEB_SNAPSHOT_MAX_CHARS:
+        return text
+    trimmed = text[:WEB_SNAPSHOT_MAX_CHARS].rsplit(" ", 1)[0].rstrip()
+    return (trimmed or text[:WEB_SNAPSHOT_MAX_CHARS]).rstrip() + "\n\n[truncated]\n"
+
+
 def backup_source(project_root: Path, kind: str, unit_id: str, source: str) -> dict[str, Any]:
     root = unit_root(project_root, kind, unit_id) / "source"
     ensure_dir(root)
     if is_url(source):
         txt = root / "source-url.txt"
         write_text_if_changed(txt, source.strip() + "\n")
-        return {"original_uri": normalize_remote_url(source), "backup_paths": [rel(project_root, txt)], "backup_kind": "url", "file_hash": ""}
+        backup_paths = [rel(project_root, txt)]
+        file_hash = ""
+        try:
+            content, content_type = fetch_url(source, timeout=15)
+            if isinstance(content, str) and _is_html_response(content_type, content):
+                body = _truncate_snapshot_text(html_to_text(content))
+                if body:
+                    snapshot_text = f"# Source Snapshot\n\nSource: {normalize_remote_url(source)}\n\n{body.rstrip()}\n"
+                    snapshot = root / "snapshot.md"
+                    write_text_if_changed(snapshot, snapshot_text)
+                    backup_paths.append(rel(project_root, snapshot))
+                    file_hash = hashlib.sha256(snapshot_text.encode("utf-8")).hexdigest()
+        except Exception:  # noqa: BLE001
+            file_hash = ""
+        return {"original_uri": normalize_remote_url(source), "backup_paths": backup_paths, "backup_kind": "url", "file_hash": file_hash}
 
     normalized_source = normalize_storage_reference(project_root, source)
     resolved_source = resolve_local_reference(project_root, normalized_source)

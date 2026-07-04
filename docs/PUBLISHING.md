@@ -23,12 +23,14 @@ kb/
 
 Expected runtime subtrees include:
 
-- `kb/intake/`
-- `kb/library/`
+- `kb/raw/`
+- `kb/units/`
 - `kb/programs/`
-- `kb/wiki/`
+- `kb/synthesis/`
+- `kb/config/`
+- `kb/output/`
 - `kb/user/`
-- `kb/memory/`
+- `kb/.runtime/`
 
 The repository can be published without a populated `kb/` tree. The open-source package provides the skills, scripts, and schema; users create their own local knowledge artifacts.
 
