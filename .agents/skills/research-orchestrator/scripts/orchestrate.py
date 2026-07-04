@@ -34,6 +34,9 @@ from research.common import (
 )
 from research.v2 import append_history, ensure_v2_workspace, kb_root, locate_record, checkpoint_and_report, project_root, write_record
 
+OPEN_QUESTION_OPEN_STATUSES = {"open"}
+EVIDENCE_REQUEST_OPEN_STATUSES = {"open"}
+
 ROUTE_HINTS = {
     "source": "source-intake",
     "intake": "source-intake",
@@ -196,6 +199,38 @@ def list_items(path: Path, doc_id: str, generated_by: str) -> list[dict[str, Any
     return [item for item in payload.get("items", []) if isinstance(item, dict)]
 
 
+def write_list_items(path: Path, doc_id: str, generated_by: str, items: list[dict[str, Any]]) -> Path:
+    payload = load_list_document(path, doc_id, generated_by)
+    payload["items"] = items
+    payload["generated_by"] = generated_by
+    payload["generated_at"] = utc_now_iso()
+    write_yaml_if_changed(path, payload)
+    return path
+
+
+def update_list_item_status(
+    path: Path,
+    doc_id: str,
+    generated_by: str,
+    item_id: str,
+    *,
+    status: str,
+    note_key: str,
+    note: str,
+) -> tuple[Path, dict[str, Any]]:
+    items = list_items(path, doc_id, generated_by)
+    for item in items:
+        if str(item.get("id") or "") != item_id:
+            continue
+        item["status"] = status
+        item["updated_at"] = utc_now_iso()
+        if note:
+            item[note_key] = note
+        write_list_items(path, doc_id, generated_by, items)
+        return path, item
+    raise SystemExit(f"Could not find workflow item `{item_id}` in {path}")
+
+
 def ensure_program_files(root: Path, program_id: str) -> None:
     ensure_dir(program_root(root, program_id))
     ensure_dir(workflow_root(root, program_id))
@@ -235,8 +270,8 @@ def refresh_state_counts(root: Path, program_id: str, payload: dict) -> dict:
         }
     )
     payload["counts"] = {
-        "open_questions": len([item for item in open_questions if item.get("status", "open") != "closed"]),
-        "evidence_requests": len([item for item in evidence_requests if item.get("status", "open") != "closed"]),
+        "open_questions": len([item for item in open_questions if str(item.get("status") or "open") in OPEN_QUESTION_OPEN_STATUSES]),
+        "evidence_requests": len([item for item in evidence_requests if str(item.get("status") or "open") in EVIDENCE_REQUEST_OPEN_STATUSES]),
         "reporting_events": len(reporting_events),
         "decisions": decision_log.count("\n## "),
     }
@@ -301,6 +336,16 @@ def build_parser() -> argparse.ArgumentParser:
     question.add_argument("--owner", default="")
     question.add_argument("--related-unit", action="append", default=[])
 
+    answer = subparsers.add_parser("answer-question", help="Mark a program open question as answered")
+    answer.add_argument("--program-id", required=True)
+    answer.add_argument("--question-id", required=True)
+    answer.add_argument("--answer", required=True)
+
+    drop_question = subparsers.add_parser("drop-question", help="Drop a program open question")
+    drop_question.add_argument("--program-id", required=True)
+    drop_question.add_argument("--question-id", required=True)
+    drop_question.add_argument("--reason", default="")
+
     evidence = subparsers.add_parser("request-evidence", help="Append an evidence request")
     evidence.add_argument("--program-id", required=True)
     evidence.add_argument("--question", required=True)
@@ -309,6 +354,17 @@ def build_parser() -> argparse.ArgumentParser:
     evidence.add_argument("--priority", default="normal", choices=["low", "normal", "high", "critical"])
     evidence.add_argument("--blocking", action="store_true")
     evidence.add_argument("--related-unit", action="append", default=[])
+
+    resolve = subparsers.add_parser("resolve-evidence", help="Mark an evidence request as fulfilled")
+    resolve.add_argument("--program-id", required=True)
+    resolve.add_argument("--evidence-id", required=True)
+    resolve.add_argument("--result", required=True)
+    resolve.add_argument("--artifact", action="append", default=[])
+
+    drop_evidence = subparsers.add_parser("drop-evidence", help="Drop an evidence request")
+    drop_evidence.add_argument("--program-id", required=True)
+    drop_evidence.add_argument("--evidence-id", required=True)
+    drop_evidence.add_argument("--reason", default="")
 
     decision = subparsers.add_parser("log-decision", help="Append a program decision")
     decision.add_argument("--program-id", required=True)
@@ -491,6 +547,40 @@ def main() -> int:
         print(path.relative_to(root))
         checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: add open question {args.program_id}")
         return 0
+    if args.command == "answer-question":
+        with program_file_lock(root, args.program_id):
+            ensure_program_files(root, args.program_id)
+            path, item = update_list_item_status(
+                open_questions_path(root, args.program_id),
+                f"{args.program_id}-open-questions",
+                "research-orchestrator",
+                args.question_id,
+                status="answered",
+                note_key="answer",
+                note=args.answer,
+            )
+            write_state(root, args.program_id, load_state(root, args.program_id))
+        print(f"[ok] answered {item.get('id')}")
+        print(path.relative_to(root))
+        checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: answer open question {args.program_id}")
+        return 0
+    if args.command == "drop-question":
+        with program_file_lock(root, args.program_id):
+            ensure_program_files(root, args.program_id)
+            path, item = update_list_item_status(
+                open_questions_path(root, args.program_id),
+                f"{args.program_id}-open-questions",
+                "research-orchestrator",
+                args.question_id,
+                status="dropped",
+                note_key="drop_reason",
+                note=args.reason,
+            )
+            write_state(root, args.program_id, load_state(root, args.program_id))
+        print(f"[ok] dropped {item.get('id')}")
+        print(path.relative_to(root))
+        checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: drop open question {args.program_id}")
+        return 0
     if args.command == "request-evidence":
         with program_file_lock(root, args.program_id):
             ensure_program_files(root, args.program_id)
@@ -527,6 +617,64 @@ def main() -> int:
             write_state(root, args.program_id, load_state(root, args.program_id))
         print(path.relative_to(root))
         checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: request evidence {args.program_id}")
+        return 0
+    if args.command == "resolve-evidence":
+        with program_file_lock(root, args.program_id):
+            ensure_program_files(root, args.program_id)
+            current_state = load_state(root, args.program_id)
+            path, item = update_list_item_status(
+                evidence_requests_path(root, args.program_id),
+                f"{args.program_id}-evidence-requests",
+                "research-orchestrator",
+                args.evidence_id,
+                status="fulfilled",
+                note_key="result",
+                note=args.result,
+            )
+            artifacts = normalize_list(args.artifact)
+            if artifacts:
+                items = list_items(path, f"{args.program_id}-evidence-requests", "research-orchestrator")
+                for saved_item in items:
+                    if str(saved_item.get("id") or "") == args.evidence_id:
+                        saved_item["artifacts"] = sorted(set(normalize_list(saved_item.get("artifacts")) + artifacts))
+                        item = saved_item
+                        break
+                write_list_items(path, f"{args.program_id}-evidence-requests", "research-orchestrator", items)
+            append_program_reporting_event(
+                root,
+                args.program_id,
+                {
+                    "source_skill": "research-orchestrator",
+                    "event_type": "evidence-fulfilled",
+                    "title": str(item.get("question") or args.evidence_id),
+                    "summary": args.result,
+                    "stage": current_state.get("stage", ""),
+                    "tags": ["evidence-request", "fulfilled"],
+                    "artifacts": artifacts,
+                },
+                generated_by="research-orchestrator",
+            )
+            write_state(root, args.program_id, load_state(root, args.program_id))
+        print(f"[ok] fulfilled {item.get('id')}")
+        print(path.relative_to(root))
+        checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: resolve evidence {args.program_id}")
+        return 0
+    if args.command == "drop-evidence":
+        with program_file_lock(root, args.program_id):
+            ensure_program_files(root, args.program_id)
+            path, item = update_list_item_status(
+                evidence_requests_path(root, args.program_id),
+                f"{args.program_id}-evidence-requests",
+                "research-orchestrator",
+                args.evidence_id,
+                status="dropped",
+                note_key="drop_reason",
+                note=args.reason,
+            )
+            write_state(root, args.program_id, load_state(root, args.program_id))
+        print(f"[ok] dropped {item.get('id')}")
+        print(path.relative_to(root))
+        checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: drop evidence {args.program_id}")
         return 0
     if args.command == "log-decision":
         with program_file_lock(root, args.program_id):

@@ -31,7 +31,11 @@ Use this skill to anchor work to a concrete research program.
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py init-program --program-id open-world-vla --question "..." --goal "..."
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py set-stage --program-id open-world-vla --stage literature-review
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py add-open-question --program-id open-world-vla --question "What evidence is still missing?"
+${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py answer-question --program-id open-world-vla --question-id open-world-vla-open-questions-001 --answer "Evidence now exists in run logs"
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py request-evidence --program-id open-world-vla --question "Can repo-X reproduce baseline?" --needed "Need baseline parity logs"
+${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py resolve-evidence --program-id open-world-vla --evidence-id open-world-vla-evidence-requests-001 --result "Baseline parity log attached"
+${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py drop-question --program-id open-world-vla --question-id open-world-vla-open-questions-002 --reason "Superseded"
+${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py drop-evidence --program-id open-world-vla --evidence-id open-world-vla-evidence-requests-002 --reason "No longer blocking"
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py log-decision --program-id open-world-vla --decision "Choose repo-X as baseline host" --rationale "Best overlap with current validation path"
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py add-reporting-event --program-id open-world-vla --title "Baseline host chosen" --summary "Repo-X becomes the default baseline host"
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py attach-unit --program-id open-world-vla --unit-id p-openvla-bf86ee46
