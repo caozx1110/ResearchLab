@@ -18,6 +18,7 @@ else:
 
 from research.common import parse_iso_datetime
 from research.v2 import (
+    apply_confirmation,
     build_index,
     candidate_pools_path,
     compact_unit_ids,
@@ -29,6 +30,7 @@ from research.v2 import (
     kb_git_status,
     link_records,
     lint_records,
+    locate_record,
     checkpoint_and_report,
     project_root,
     promote_record,
@@ -39,6 +41,7 @@ from research.v2 import (
     search_records,
     sync_storage_layout,
     topic_taxonomy_path,
+    write_record,
 )
 
 COMMAND_PREFIX = "${RESEARCH_PYTHON:-python3}"
@@ -130,6 +133,34 @@ def next_unit_command(record: dict) -> str:
     return shell_command([COMMAND_PREFIX, script, command, id_arg, unit_id])
 
 
+def review_queue_records(
+    root: Path,
+    *,
+    kind: str | None = None,
+    confirmation_status: str = "pending_user_confirmation",
+    limit: int = 50,
+) -> list[dict]:
+    hits = search_records(root, "", kind=kind, confirmation_status=confirmation_status)
+    hits = sorted(hits, key=review_sort_key)
+    if limit > 0:
+        hits = hits[:limit]
+    return hits
+
+
+def apply_batch_confirmation(root: Path, records: list[dict], *, confirmed_by: str, evidence: list[str], method: str) -> list[Path]:
+    written: list[Path] = []
+    for record in records:
+        updated = apply_confirmation(
+            record,
+            confirmed_by=confirmed_by,
+            evidence=evidence,
+            method=method,
+            project_root=root,
+        )
+        written.append(write_record(root, updated))
+    return written
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Manage the v2 research knowledge base.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -161,6 +192,17 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--kind", choices=["paper", "repo", "blog", "idea", "experiment"])
     review.add_argument("--confirmation-status", default="pending_user_confirmation", choices=["auto_confirmed", "pending_user_confirmation", "confirmed", "rejected"])
     review.add_argument("--limit", type=int, default=50)
+    review.add_argument("--confirm", action="store_true", help="Confirm the listed records in place")
+    review.add_argument("--confirmed-by", default="")
+    review.add_argument("--evidence", action="append", default=[])
+
+    confirm = subparsers.add_parser("confirm", help="Confirm multiple records with one explicit evidence authorization")
+    confirm.add_argument("--id", action="append", default=[])
+    confirm.add_argument("--all-reviewed", action="store_true", help="Confirm the current review queue")
+    confirm.add_argument("--kind", choices=["paper", "repo", "blog", "idea", "experiment"])
+    confirm.add_argument("--limit", type=int, default=50)
+    confirm.add_argument("--confirmed-by", default="")
+    confirm.add_argument("--evidence", action="append", required=True)
 
     refresh = subparsers.add_parser("refresh-schema", help="Backfill the latest record schema")
     refresh.add_argument("--id", action="append", default=[])
@@ -275,12 +317,24 @@ def main() -> int:
             print("[ok] no matches")
         return 0
     if args.command == "review-queue":
-        hits = search_records(root, "", kind=args.kind, confirmation_status=args.confirmation_status)
-        hits = sorted(hits, key=review_sort_key)
-        if args.limit > 0:
-            hits = hits[: args.limit]
+        hits = review_queue_records(root, kind=args.kind, confirmation_status=args.confirmation_status, limit=args.limit)
         if not hits:
             print("[ok] no pending confirmations")
+            return 0
+        if args.confirm:
+            if args.confirmation_status != "pending_user_confirmation":
+                raise SystemExit("review-queue --confirm only supports --confirmation-status pending_user_confirmation.")
+            written = apply_batch_confirmation(
+                root,
+                hits,
+                confirmed_by=args.confirmed_by,
+                evidence=args.evidence,
+                method="kb.py review-queue --confirm",
+            )
+            build_index(root)
+            for path in written:
+                print(f"[ok] confirmed {path.relative_to(root)}")
+            checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: batch confirm review queue ({len(written)} records)")
             return 0
         for item in hits:
             kind = str(item.get("kind") or "")
@@ -292,6 +346,31 @@ def main() -> int:
             print(f"  summary: {item.get('summary') or '-'}")
             print(f"  path: {path}")
             print(f"  confirm: {confirm_command(item)}")
+        return 0
+    if args.command == "confirm":
+        if bool(args.id) == bool(args.all_reviewed):
+            raise SystemExit("Use either --id A --id B ... or --all-reviewed.")
+        records = []
+        if args.all_reviewed:
+            records = review_queue_records(root, kind=args.kind, confirmation_status="pending_user_confirmation", limit=args.limit)
+            if not records:
+                print("[ok] no pending confirmations")
+                return 0
+        else:
+            for unit_id in args.id:
+                record, _ = locate_record(root, unit_id, kind=args.kind)
+                records.append(record)
+        written = apply_batch_confirmation(
+            root,
+            records,
+            confirmed_by=args.confirmed_by,
+            evidence=args.evidence,
+            method="kb.py confirm",
+        )
+        build_index(root)
+        for path in written:
+            print(f"[ok] confirmed {path.relative_to(root)}")
+        checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: batch confirm ({len(written)} records)")
         return 0
     if args.command == "refresh-schema":
         paths = refresh_record_schemas(root, unit_ids=args.id or None, kind=args.kind)

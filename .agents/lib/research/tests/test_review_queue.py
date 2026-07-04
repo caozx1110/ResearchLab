@@ -4,8 +4,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
-from research.common import write_yaml_if_changed
-from research.v2 import ensure_v2_workspace, record_path, search_records
+from research.common import load_yaml, write_yaml_if_changed
+from research.v2 import ensure_v2_workspace, record_path, runtime_preferences_path, search_records
 
 
 def _project_root() -> Path:
@@ -80,3 +80,64 @@ def test_query_output_helpers_emit_runnable_command_with_real_id() -> None:
     assert ".agents/skills/paper-analyst/scripts/paper.py confirm --paper-id p-query-123456" in confirm_command
     assert "<id>" not in next_command
     assert "<id>" not in confirm_command
+
+
+def test_batch_confirm_applies_one_evidence_to_multiple_units(tmp_path: Path) -> None:
+    kb = _load_kb_module()
+    ensure_v2_workspace(tmp_path)
+    write_yaml_if_changed(runtime_preferences_path(tmp_path), {"identity": {"default_confirmed_by": "czx-default"}})
+    _write_record(tmp_path, _record("p-one-123456", "One", "pending_user_confirmation", "2026-01-01T00:00:00+00:00"))
+    _write_record(tmp_path, _record("p-two-123456", "Two", "pending_user_confirmation", "2026-01-02T00:00:00+00:00"))
+    records = search_records(tmp_path, "", confirmation_status="pending_user_confirmation")
+
+    paths = kb.apply_batch_confirmation(
+        tmp_path,
+        records,
+        confirmed_by="",
+        evidence=["kb/programs/p/decision-log.md"],
+        method="test batch",
+    )
+
+    assert len(paths) == 2
+    for path in paths:
+        record = load_yaml(path, default={})
+        assert record["confirmation_status"] == "confirmed"
+        assert record["confirmation"]["by"] == "czx-default"
+        assert record["confirmation"]["evidence"] == ["kb/programs/p/decision-log.md"]
+
+
+def test_review_queue_all_reviewed_empty_is_clean_noop(tmp_path: Path) -> None:
+    kb = _load_kb_module()
+    ensure_v2_workspace(tmp_path)
+
+    records = kb.review_queue_records(tmp_path, confirmation_status="pending_user_confirmation")
+
+    assert records == []
+
+
+def test_review_queue_confirm_uses_listed_records(tmp_path: Path) -> None:
+    kb = _load_kb_module()
+    ensure_v2_workspace(tmp_path)
+    write_yaml_if_changed(runtime_preferences_path(tmp_path), {"identity": {"default_confirmed_by": "czx-default"}})
+    _write_record(tmp_path, _record("p-old-123456", "Old", "pending_user_confirmation", "2026-01-01T00:00:00+00:00"))
+    _write_record(tmp_path, _record("p-new-123456", "New", "pending_user_confirmation", "2026-01-02T00:00:00+00:00"))
+    listed = kb.review_queue_records(tmp_path, confirmation_status="pending_user_confirmation", limit=1)
+    listed_id = listed[0]["id"]
+
+    paths = kb.apply_batch_confirmation(
+        tmp_path,
+        listed,
+        confirmed_by="",
+        evidence=["kb/programs/p/review.md"],
+        method="test review queue confirm",
+    )
+
+    assert len(paths) == 1
+    records = {
+        unit_id: load_yaml(record_path(tmp_path, "paper", unit_id), default={})
+        for unit_id in ("p-old-123456", "p-new-123456")
+    }
+    assert records[listed_id]["confirmation_status"] == "confirmed"
+    for unit_id, record in records.items():
+        if unit_id != listed_id:
+            assert record["confirmation_status"] == "pending_user_confirmation"
