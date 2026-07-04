@@ -41,6 +41,8 @@ ${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchest
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py attach-unit --program-id open-world-vla --unit-id p-openvla-bf86ee46
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py query-program --program-id open-world-vla --question "当前还缺哪些 evidence?"
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py status --program-id open-world-vla
+${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py dashboard --limit 10
+${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py next --limit 5
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py route --task "分析新论文是否值得细读"
 ```
 

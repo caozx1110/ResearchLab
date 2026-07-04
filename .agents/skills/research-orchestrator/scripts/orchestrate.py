@@ -32,10 +32,12 @@ from research.common import (
     write_yaml_if_changed,
     yaml_default,
 )
-from research.v2 import append_history, ensure_v2_workspace, kb_root, locate_record, checkpoint_and_report, project_root, write_record
+from research.v2 import append_history, ensure_v2_workspace, iter_records, kb_root, locate_record, checkpoint_and_report, project_root, write_record
 
 OPEN_QUESTION_OPEN_STATUSES = {"open"}
 EVIDENCE_REQUEST_OPEN_STATUSES = {"open"}
+PRIORITY_SCORE = {"critical": 40, "high": 30, "normal": 10, "low": 5}
+TERMINAL_PROGRAM_STAGES = {"done", "completed", "archived", "published"}
 
 ROUTE_HINTS = {
     "source": "source-intake",
@@ -117,6 +119,13 @@ def reporting_events_path(root: Path, program_id: str) -> Path:
 
 def decision_log_path(root: Path, program_id: str) -> Path:
     return workflow_root(root, program_id) / "decision-log.md"
+
+
+def program_ids(root: Path) -> list[str]:
+    programs_root = kb_root(root) / "programs"
+    if not programs_root.exists():
+        return []
+    return sorted(path.name for path in programs_root.iterdir() if path.is_dir())
 
 
 def load_state(root: Path, program_id: str) -> dict:
@@ -231,6 +240,123 @@ def update_list_item_status(
     raise SystemExit(f"Could not find workflow item `{item_id}` in {path}")
 
 
+def _open_workflow_items(items: list[dict[str, Any]], open_statuses: set[str]) -> list[dict[str, Any]]:
+    return [item for item in items if str(item.get("status") or "open") in open_statuses]
+
+
+def _priority_value(item: dict[str, Any]) -> int:
+    return PRIORITY_SCORE.get(str(item.get("priority") or "normal"), 10)
+
+
+def _program_unit_ids(program_id: str, state: dict[str, Any], records: list[dict[str, Any]]) -> set[str]:
+    unit_ids = set(normalize_list(state.get("active_unit_ids")))
+    for key in ("selected_idea_id", "selected_repo_id"):
+        value = str(state.get(key) or "").strip()
+        if value:
+            unit_ids.add(value)
+    for record in records:
+        if program_id in normalize_list(record.get("program_ids")):
+            unit_ids.add(str(record.get("id") or ""))
+    return {unit_id for unit_id in unit_ids if unit_id}
+
+
+def program_dashboard_items(root: Path) -> list[dict[str, Any]]:
+    records = iter_records(root)
+    record_by_id = {str(record.get("id") or ""): record for record in records}
+    items: list[dict[str, Any]] = []
+    for program_id in program_ids(root):
+        state = load_state(root, program_id)
+        open_questions = _open_workflow_items(
+            list_items(open_questions_path(root, program_id), f"{program_id}-open-questions", "research-orchestrator"),
+            OPEN_QUESTION_OPEN_STATUSES,
+        )
+        evidence_requests = _open_workflow_items(
+            list_items(evidence_requests_path(root, program_id), f"{program_id}-evidence-requests", "research-orchestrator"),
+            EVIDENCE_REQUEST_OPEN_STATUSES,
+        )
+        blocking_evidence = [item for item in evidence_requests if bool(item.get("blocking"))]
+        high_questions = [item for item in open_questions if str(item.get("priority") or "") in {"critical", "high"}]
+        unit_ids = _program_unit_ids(program_id, state, records)
+        pending_units = [
+            record_by_id[unit_id]
+            for unit_id in sorted(unit_ids)
+            if unit_id in record_by_id and str(record_by_id[unit_id].get("confirmation_status") or "") == "pending_user_confirmation"
+        ]
+        score = (
+            100 * len(blocking_evidence)
+            + sum(_priority_value(item) for item in evidence_requests)
+            + sum(_priority_value(item) for item in open_questions)
+            + 10 * len(pending_units)
+        )
+        reasons: list[str] = []
+        if blocking_evidence:
+            reasons.append(f"{len(blocking_evidence)} blocking evidence")
+        if high_questions:
+            reasons.append(f"{len(high_questions)} high-priority open question")
+        if pending_units:
+            reasons.append(f"{len(pending_units)} pending confirmation")
+        if not reasons and str(state.get("stage") or "") not in TERMINAL_PROGRAM_STAGES:
+            reasons.append("stage review")
+            score += 1
+
+        if blocking_evidence:
+            next_action = f"Resolve blocking evidence: {blocking_evidence[0].get('needed') or blocking_evidence[0].get('question')}"
+        elif high_questions:
+            next_action = f"Answer high-priority question: {high_questions[0].get('question')}"
+        elif pending_units:
+            next_action = f"Review pending confirmation: {pending_units[0].get('id')}"
+        elif normalize_list(state.get("next_actions")):
+            next_action = normalize_list(state.get("next_actions"))[0]
+        else:
+            next_action = "Review program stage and next actions."
+
+        items.append(
+            {
+                "program_id": program_id,
+                "stage": str(state.get("stage") or ""),
+                "goal": str(state.get("goal") or ""),
+                "question": str(state.get("question") or ""),
+                "updated_at": str(state.get("updated_at") or ""),
+                "counts": state.get("counts") if isinstance(state.get("counts"), dict) else {},
+                "open_question_count": len(open_questions),
+                "evidence_request_count": len(evidence_requests),
+                "blocking_evidence_count": len(blocking_evidence),
+                "pending_confirmation_count": len(pending_units),
+                "score": score,
+                "reasons": reasons,
+                "next_action": next_action,
+            }
+        )
+    return sorted(items, key=lambda item: (-int(item.get("score") or 0), str(item.get("updated_at") or ""), str(item.get("program_id") or "")))
+
+
+def format_dashboard(items: list[dict[str, Any]], *, limit: int = 20) -> str:
+    selected = items[:limit] if limit > 0 else items
+    lines = ["# Program Dashboard", ""]
+    if not selected:
+        lines.append("- 暂无 program")
+        return "\n".join(lines).strip()
+    for item in selected:
+        reasons = ", ".join(item.get("reasons", [])) or "no urgent blocker"
+        lines.append(
+            f"- `{item['program_id']}` · stage={item.get('stage') or 'init'} · "
+            f"score={item.get('score', 0)} · {reasons}"
+        )
+        lines.append(f"  next: {item.get('next_action')}")
+    return "\n".join(lines).strip()
+
+
+def format_next(items: list[dict[str, Any]], *, limit: int = 5) -> str:
+    selected = items[:limit] if limit > 0 else items
+    lines = ["# Next Actions", ""]
+    if not selected:
+        lines.append("- 暂无 program next action")
+        return "\n".join(lines).strip()
+    for item in selected:
+        lines.append(f"- `{item['program_id']}`: {item.get('next_action')}")
+    return "\n".join(lines).strip()
+
+
 def ensure_program_files(root: Path, program_id: str) -> None:
     ensure_dir(program_root(root, program_id))
     ensure_dir(workflow_root(root, program_id))
@@ -316,6 +442,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     status = subparsers.add_parser("status", help="Show program status")
     status.add_argument("--program-id", required=True)
+
+    dashboard = subparsers.add_parser("dashboard", help="Show prioritized program dashboard")
+    dashboard.add_argument("--limit", type=int, default=20)
+
+    next_cmd = subparsers.add_parser("next", help="Show prioritized next actions across programs")
+    next_cmd.add_argument("--limit", type=int, default=5)
 
     route = subparsers.add_parser("route", help="Suggest the right v2 skill for a task")
     route.add_argument("--task", required=True)
@@ -452,6 +584,12 @@ def main() -> int:
         print(f"active_unit_ids: {payload.get('active_unit_ids', [])}")
         print(f"counts: {payload.get('counts', {})}")
         print(f"workflow_files: {payload.get('workflow_files', {})}")
+        return 0
+    if args.command == "dashboard":
+        print(format_dashboard(program_dashboard_items(root), limit=args.limit))
+        return 0
+    if args.command == "next":
+        print(format_next(program_dashboard_items(root), limit=args.limit))
         return 0
     if args.command == "route":
         lower = args.task.lower()

@@ -15,8 +15,8 @@ for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
 else:
     raise SystemExit("Could not locate .agents/lib")
 
-from research.common import write_text_if_changed
-from research.v2 import iter_records, project_root, user_root
+from research.common import load_yaml, write_text_if_changed
+from research.v2 import iter_records, kb_root, project_root, user_root
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -28,12 +28,37 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def render_current(records: list[dict]) -> str:
-    lines = ["# Current State", "", "## Confirmed Highlights", ""]
+def load_program_states(root: Path) -> list[dict]:
+    programs_root = kb_root(root) / "programs"
+    if not programs_root.exists():
+        return []
+    states = []
+    for path in sorted(programs_root.glob("*/state.yaml")):
+        payload = load_yaml(path, default={})
+        if isinstance(payload, dict):
+            payload.setdefault("program_id", path.parent.name)
+            states.append(payload)
+    return states
+
+
+def render_current(records: list[dict], program_states: list[dict] | None = None) -> str:
+    lines = ["# Current State", "", "## Programs", ""]
+    states = sorted(program_states or [], key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+    for state in states[:12]:
+        counts = state.get("counts") if isinstance(state.get("counts"), dict) else {}
+        lines.append(
+            f"- `{state.get('program_id')}` · stage={state.get('stage', 'init')} · "
+            f"OQ={counts.get('open_questions', 0)} · evidence={counts.get('evidence_requests', 0)} · "
+            f"{state.get('goal') or state.get('question') or ''}"
+        )
+    if len(lines) == 4:
+        lines.append("- 暂无 program state")
+    lines.extend(["", "## Confirmed Highlights", ""])
     confirmed = [item for item in records if item.get("confirmation_status") == "confirmed"]
+    start = len(lines)
     for item in confirmed[:12]:
         lines.append(f"- `{item['id']}` · {item['kind']} · {item['title']} · {item.get('summary', '')}")
-    if len(lines) == 4:
+    if len(lines) == start:
         lines.append("- 暂无已确认条目")
     return "\n".join(lines).strip() + "\n"
 
@@ -70,12 +95,13 @@ def main() -> int:
     args = build_parser().parse_args()
     root = project_root(PROJECT_ROOT)
     records = iter_records(root)
+    program_states = load_program_states(root)
     current_path = user_root(root) / "current-state.md"
     nav_path = user_root(root) / "navigation.md"
     reading_path = user_root(root) / "reading-lists" / "current-reading.md"
 
     if args.command in {"refresh", "current-state"}:
-        write_text_if_changed(current_path, render_current(records))
+        write_text_if_changed(current_path, render_current(records, program_states))
     if args.command == "refresh":
         write_text_if_changed(nav_path, render_navigation(records))
         write_text_if_changed(reading_path, render_reading_list(records))
