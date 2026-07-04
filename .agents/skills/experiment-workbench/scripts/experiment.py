@@ -205,7 +205,7 @@ def main() -> int:
         print(path.relative_to(root))
         return 0
 
-    record, path = locate_record(root, args.experiment_id)
+    record, path = locate_record(root, args.experiment_id, kind="experiment")
     if record.get("kind") != "experiment":
         raise SystemExit(f"{args.experiment_id} is not an experiment record")
     unit_root = path.parent

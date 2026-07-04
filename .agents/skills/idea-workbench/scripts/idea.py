@@ -194,7 +194,7 @@ def resolve_idea_records(root: Path, *, idea_ids: list[str], pool: str, bundle_i
             update_bundle(root, bundle_id, idea_ids=idea_ids)
     records = []
     for idea_id in idea_ids:
-        record, _ = locate_record(root, idea_id)
+        record, _ = locate_record(root, idea_id, kind="idea")
         if record.get("kind") == "idea":
             records.append(record)
     if not records:
@@ -405,7 +405,7 @@ def main() -> int:
         checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: select best idea in {bundle_id}")
         return 0
 
-    record, path = locate_record(root, args.idea_id)
+    record, path = locate_record(root, args.idea_id, kind="idea")
     if record.get("kind") != "idea":
         raise SystemExit(f"{args.idea_id} is not an idea record")
     print_idea_resolution(root, args.idea_id, record, path)

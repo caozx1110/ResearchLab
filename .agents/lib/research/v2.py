@@ -1531,19 +1531,96 @@ def iter_records(project_root: Path, *, kind: str | None = None) -> list[dict[st
     return items
 
 
-def locate_record(project_root: Path, unit_id: str) -> tuple[dict[str, Any], Path]:
-    for kind in UNIT_KIND_DIRS:
-        path = record_path(project_root, kind, unit_id)
+def _record_lookup_path(project_root: Path, record: dict[str, Any]) -> Path | None:
+    kind = str(record.get("kind") or "")
+    unit_id = str(record.get("id") or "")
+    if kind not in UNIT_KIND_DIRS or not unit_id:
+        return None
+    return record_path(project_root, kind, unit_id)
+
+
+def _record_hash_suffix(unit_id: str) -> str:
+    suffix = unit_id.rsplit("-", 1)[-1].lower()
+    if re.fullmatch(r"[0-9a-f]{6,40}", suffix):
+        return suffix
+    return ""
+
+
+def _ambiguous_record_reference(reference: str, records: list[dict[str, Any]]) -> None:
+    candidate_ids = sorted({str(record.get("id") or "") for record in records if str(record.get("id") or "")})
+    if candidate_ids:
+        raise SystemExit(f"Ambiguous record reference: {reference}\nCandidates:\n- " + "\n- ".join(candidate_ids))
+    raise SystemExit(f"Ambiguous record reference: {reference}")
+
+
+def _resolve_unique_record_reference(reference: str, records: list[dict[str, Any]], *, mode: str) -> dict[str, Any] | None:
+    if not records:
+        return None
+    if len(records) == 1:
+        return records[0]
+    _ambiguous_record_reference(reference, records)
+    return None
+
+
+def _record_modified_sort_key(project_root: Path, record: dict[str, Any]) -> tuple[float, float, str]:
+    path = _record_lookup_path(project_root, record)
+    mtime = path.stat().st_mtime if path and path.exists() else 0.0
+    timestamp = str(record.get("updated_at") or record.get("created_at") or record.get("first_ingested_at") or "")
+    parsed = parse_iso_datetime(timestamp)
+    return (mtime, parsed.timestamp() if parsed else 0.0, str(record.get("id") or ""))
+
+
+def locate_record(project_root: Path, unit_id: str, *, kind: str | None = None) -> tuple[dict[str, Any], Path]:
+    exact_reference = str(unit_id)
+    reference = exact_reference.strip()
+    search_kinds = [kind] if kind else list(UNIT_KIND_DIRS)
+    for search_kind in search_kinds:
+        if search_kind not in UNIT_KIND_DIRS:
+            raise SystemExit(f"Unsupported unit kind: {search_kind}")
+    for search_kind in search_kinds:
+        path = record_path(project_root, search_kind, exact_reference)
         if path.exists():
             payload = load_yaml(path, default={})
             if isinstance(payload, dict):
                 return normalize_record_schema(payload), path
-    for record in iter_records(project_root):
-        if unit_id in _unique_text_list(record.get("legacy_ids")):
+    records = iter_records(project_root, kind=kind) if kind else iter_records(project_root)
+    for record in records:
+        if exact_reference in _unique_text_list(record.get("legacy_ids")):
             current_kind = str(record.get("kind") or "")
             current_id = str(record.get("id") or "")
             if current_kind in UNIT_KIND_DIRS and current_id:
                 return record, record_path(project_root, current_kind, current_id)
+    lowered = reference.lower()
+    if lowered:
+        prefix_matches = [
+            record
+            for record in records
+            if str(record.get("id") or "").startswith(reference)
+            or bool(_record_hash_suffix(str(record.get("id") or "")).startswith(lowered))
+        ]
+        resolved = _resolve_unique_record_reference(reference, prefix_matches, mode="prefix")
+        if resolved:
+            path = _record_lookup_path(project_root, resolved)
+            if path:
+                return resolved, path
+        title_reference = reference.casefold()
+        title_matches = [
+            record
+            for record in records
+            if title_reference in str(record.get("title") or "").casefold()
+        ]
+        resolved = _resolve_unique_record_reference(reference, title_matches, mode="title")
+        if resolved:
+            path = _record_lookup_path(project_root, resolved)
+            if path:
+                return resolved, path
+    if lowered in {"last", "current"}:
+        modified_records = [record for record in records if _record_lookup_path(project_root, record)]
+        if modified_records:
+            resolved = max(modified_records, key=lambda record: _record_modified_sort_key(project_root, record))
+            path = _record_lookup_path(project_root, resolved)
+            if path:
+                return resolved, path
     raise SystemExit(f"Record not found: {unit_id}")
 
 

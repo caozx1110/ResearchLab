@@ -131,7 +131,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
     root = project_root(PROJECT_ROOT)
-    record, _ = locate_record(root, args.idea_id)
+    record, _ = locate_record(root, args.idea_id, kind="idea")
     if record.get("kind") != "idea":
         raise SystemExit(f"{args.idea_id} is not an idea record")
     if record.get("status") != "selected":

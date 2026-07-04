@@ -253,7 +253,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
     root = project_root(PROJECT_ROOT)
-    record, path = locate_record(root, args.repo_id)
+    record, path = locate_record(root, args.repo_id, kind="repo")
     if record.get("kind") != "repo":
         raise SystemExit(f"{args.repo_id} is not a repo record")
     unit_root = path.parent

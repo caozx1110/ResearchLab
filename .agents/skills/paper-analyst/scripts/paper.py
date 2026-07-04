@@ -603,7 +603,7 @@ def main() -> int:
     root = project_root(PROJECT_ROOT)
     runtime_preferences = load_runtime_preferences(root)
     paper_preferences = runtime_preferences.get("paper", {})
-    record, path = locate_record(root, args.paper_id)
+    record, path = locate_record(root, args.paper_id, kind="paper")
     if record.get("kind") != "paper":
         raise SystemExit(f"{args.paper_id} is not a paper record")
     unit_root = path.parent

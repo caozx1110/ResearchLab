@@ -53,7 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
     root = project_root(PROJECT_ROOT)
-    record, path = locate_record(root, args.blog_id)
+    record, path = locate_record(root, args.blog_id, kind="blog")
     if record.get("kind") != "blog":
         raise SystemExit(f"{args.blog_id} is not a blog record")
     unit_root = path.parent
