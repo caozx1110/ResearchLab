@@ -15,7 +15,7 @@ for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
 else:
     raise SystemExit("Could not locate .agents/lib")
 
-from research.common import append_program_reporting_event, ensure_dir, simple_slug, write_text_if_changed
+from research.common import add_project_root_argument, append_program_reporting_event, ensure_dir, print_resolved_project_roots, simple_slug, write_text_if_changed
 from research.v2 import project_root
 
 
@@ -33,6 +33,7 @@ def next_available_path(root: Path, slug: str, suffix: str) -> Path:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Archive a program discussion note.")
+    add_project_root_argument(parser)
     subparsers = parser.add_subparsers(dest="command", required=True)
     archive = subparsers.add_parser("archive")
     archive.add_argument("--program-id", required=True)
@@ -47,7 +48,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    root = project_root(PROJECT_ROOT)
+    root = project_root(PROJECT_ROOT, explicit_root=args.root)
+    print_resolved_project_roots(root)
     out_root = root / "kb" / "programs" / args.program_id / "discussions"
     ensure_dir(out_root)
     slug = simple_slug(args.title, "discussion")

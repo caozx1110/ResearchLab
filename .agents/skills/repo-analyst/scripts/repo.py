@@ -17,7 +17,7 @@ for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
 else:
     raise SystemExit("Could not locate .agents/lib")
 
-from research.common import clean_text, infer_repo_roles, infer_topics_and_tags, read_text_excerpt, write_text_if_changed, write_yaml_if_changed
+from research.common import add_project_root_argument, clean_text, infer_repo_roles, infer_topics_and_tags, print_resolved_project_roots, read_text_excerpt, write_text_if_changed, write_yaml_if_changed
 from research.v2 import (
     append_history,
     apply_record_governance,
@@ -241,6 +241,7 @@ def note_template(record: dict, structure_payload: dict, capability_payload: dic
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Analyze repo units in v2.")
+    add_project_root_argument(parser)
     subparsers = parser.add_subparsers(dest="command", required=True)
     for name in ("scan-structure", "map-capability", "complete-note", "confirm"):
         cmd = subparsers.add_parser(name)
@@ -252,7 +253,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    root = project_root(PROJECT_ROOT)
+    root = project_root(PROJECT_ROOT, explicit_root=args.root)
+    print_resolved_project_roots(root)
     record, path = locate_record(root, args.repo_id, kind="repo")
     if record.get("kind") != "repo":
         raise SystemExit(f"{args.repo_id} is not a repo record")

@@ -103,7 +103,10 @@ def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
-def find_project_root(start: Path | None = None) -> Path:
+def find_project_root(start: Path | None = None, *, explicit_root: str | Path | None = None) -> Path:
+    explicit = str(explicit_root or os.getenv("RESEARCH_PROJECT_ROOT") or "").strip()
+    if explicit:
+        return Path(explicit).expanduser().resolve()
     current = (start or Path.cwd()).resolve()
     for candidate in [current] + list(current.parents):
         if (candidate / ".agents").exists() and (
@@ -115,6 +118,28 @@ def find_project_root(start: Path | None = None) -> Path:
         ):
             return candidate
     raise FileNotFoundError(f"Could not locate project root from {current}")
+
+
+def add_project_root_argument(parser: Any) -> None:
+    parser.add_argument(
+        "--root",
+        default="",
+        help="Explicit project root (overrides RESEARCH_PROJECT_ROOT and auto-discovery).",
+    )
+
+
+def print_resolved_project_roots(project_root: Path) -> None:
+    print(f"[root] project: {project_root.resolve()}")
+    print(f"[root] kb: {research_root(project_root).resolve()}")
+
+
+def warn_if_cwd_differs_from_project_root(project_root: Path, *, command: str) -> None:
+    cwd = Path.cwd().resolve()
+    root = project_root.resolve()
+    if cwd != root:
+        print(f"[warn] {command}: cwd differs from resolved project root")
+        print(f"[warn] cwd: {cwd}")
+        print(f"[warn] project root: {root}")
 
 
 def research_root(project_root: Path) -> Path:

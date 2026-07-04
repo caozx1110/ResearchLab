@@ -16,7 +16,7 @@ for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
 else:
     raise SystemExit("Could not locate .agents/lib")
 
-from research.common import ensure_dir, load_yaml, slugify, utc_now_iso, write_text_if_changed, write_yaml_if_changed, yaml_default
+from research.common import add_project_root_argument, ensure_dir, load_yaml, print_resolved_project_roots, slugify, utc_now_iso, write_text_if_changed, write_yaml_if_changed, yaml_default
 from research.v2 import (
     append_history,
     apply_record_governance,
@@ -279,6 +279,7 @@ def mark_idea_selected(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Manage idea units in v2.")
+    add_project_root_argument(parser)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     capture = subparsers.add_parser("capture")
@@ -318,7 +319,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    root = project_root(PROJECT_ROOT)
+    root = project_root(PROJECT_ROOT, explicit_root=args.root)
+    print_resolved_project_roots(root)
     ensure_v2_workspace(root)
 
     if args.command == "capture":

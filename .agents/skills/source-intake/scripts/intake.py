@@ -17,7 +17,7 @@ for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
 else:
     raise SystemExit("Could not locate .agents/lib")
 
-from research.common import confirm_command as shared_confirm_command, extract_pdf_record, parse_arxiv_id, shell_command
+from research.common import add_project_root_argument, confirm_command as shared_confirm_command, extract_pdf_record, parse_arxiv_id, print_resolved_project_roots, shell_command
 from research.intake_cli import add_intake_add_arguments
 from research.v2 import (
     apply_record_governance,
@@ -136,6 +136,7 @@ def guidance_hints(preferences: dict, *, has_pdf: bool, note_created: bool) -> l
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Ingest a source into the v2 knowledge base.")
+    add_project_root_argument(parser)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     add = subparsers.add_parser("add", help="Add a paper, repo, or blog source")
@@ -166,7 +167,8 @@ def stage_candidates(args: argparse.Namespace) -> list[dict]:
 
 def main() -> int:
     args = build_parser().parse_args()
-    root = project_root(PROJECT_ROOT)
+    root = project_root(PROJECT_ROOT, explicit_root=args.root)
+    print_resolved_project_roots(root)
     ensure_v2_workspace(root)
 
     if args.command in {"search", "stage-search"}:

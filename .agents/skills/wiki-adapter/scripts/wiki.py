@@ -17,7 +17,7 @@ for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
 else:
     raise SystemExit("Could not locate .agents/lib")
 
-from research.common import ensure_dir, simple_slug, write_text_if_changed
+from research.common import add_project_root_argument, ensure_dir, print_resolved_project_roots, simple_slug, write_text_if_changed
 from research.intake_cli import add_intake_add_arguments, intake_add_argv
 from research.v2 import build_index, lint_records, project_root, search_records, synthesis_root
 
@@ -28,6 +28,7 @@ def research_python() -> str:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Thin wiki adapter for v2.")
+    add_project_root_argument(parser)
     subparsers = parser.add_subparsers(dest="command", required=True)
     query = subparsers.add_parser("query")
     query.add_argument("--question", required=True)
@@ -48,7 +49,8 @@ def run_intake_add(root: Path, args: argparse.Namespace) -> int:
 
 def main() -> int:
     args = build_parser().parse_args()
-    root = project_root(PROJECT_ROOT)
+    root = project_root(PROJECT_ROOT, explicit_root=args.root)
+    print_resolved_project_roots(root)
     if args.command == "lint":
         status, issues = lint_records(root)
         print(f"status: {status}")

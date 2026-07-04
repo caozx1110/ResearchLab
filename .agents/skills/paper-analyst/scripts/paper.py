@@ -18,7 +18,7 @@ for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
 else:
     raise SystemExit("Could not locate .agents/lib")
 
-from research.common import clean_text, extract_pdf_context_pages, load_yaml, read_text_excerpt, write_text_if_changed, write_yaml_if_changed
+from research.common import add_project_root_argument, clean_text, extract_pdf_context_pages, load_yaml, print_resolved_project_roots, read_text_excerpt, write_text_if_changed, write_yaml_if_changed
 from research.pdf_layout import (
     GRAY_RATIO_THRESHOLD,
     LAYOUT_DEFAULT_CROP_PADDING_PT,
@@ -562,6 +562,7 @@ def _finalize_post_actions(root: Path, *, trigger: str, message: str, defer_post
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Analyze paper units in v2.")
+    add_project_root_argument(parser)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     prewarm = subparsers.add_parser("prewarm-cache")
@@ -600,7 +601,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    root = project_root(PROJECT_ROOT)
+    root = project_root(PROJECT_ROOT, explicit_root=args.root)
+    print_resolved_project_roots(root)
     runtime_preferences = load_runtime_preferences(root)
     paper_preferences = runtime_preferences.get("paper", {})
     record, path = locate_record(root, args.paper_id, kind="paper")

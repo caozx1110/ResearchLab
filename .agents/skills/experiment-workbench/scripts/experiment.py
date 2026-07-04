@@ -17,10 +17,12 @@ else:
     raise SystemExit("Could not locate .agents/lib")
 
 from research.common import (
+    add_project_root_argument,
     append_list_item,
     append_program_reporting_event,
     load_list_document,
     normalize_list,
+    print_resolved_project_roots,
     write_text_if_changed,
 )
 from research.v2 import append_history, build_index, confirm_unit, default_record, ensure_v2_workspace, locate_record, project_root, rel, write_record
@@ -126,6 +128,7 @@ def sync_diagnosis_summary(unit_root: Path) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Manage experiment units in v2.")
+    add_project_root_argument(parser)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     plan = subparsers.add_parser("plan")
@@ -172,7 +175,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    root = project_root(PROJECT_ROOT)
+    root = project_root(PROJECT_ROOT, explicit_root=args.root)
+    print_resolved_project_roots(root)
     ensure_v2_workspace(root)
 
     if args.command == "plan":

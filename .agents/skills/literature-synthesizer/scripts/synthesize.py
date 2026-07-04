@@ -16,7 +16,7 @@ for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
 else:
     raise SystemExit("Could not locate .agents/lib")
 
-from research.common import ensure_dir, slugify, write_text_if_changed, write_yaml_if_changed, yaml_default
+from research.common import add_project_root_argument, ensure_dir, print_resolved_project_roots, slugify, write_text_if_changed, write_yaml_if_changed, yaml_default
 from research.v2 import iter_records, project_root, rel, synthesis_root
 
 
@@ -136,6 +136,7 @@ def render_summary(payload: dict) -> str:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Synthesize research units in v2.")
+    add_project_root_argument(parser)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     for name, label in (("survey", "field"), ("review", "query")):
@@ -157,7 +158,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    root = project_root(PROJECT_ROOT)
+    root = project_root(PROJECT_ROOT, explicit_root=args.root)
+    print_resolved_project_roots(root)
     mode = args.command
     query = getattr(args, "field", "") or getattr(args, "query", "")
     slug = slugify(query or args.topic or args.tag or args.pool or args.kind or mode, max_words=8) or mode

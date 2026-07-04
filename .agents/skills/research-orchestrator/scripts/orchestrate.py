@@ -18,6 +18,7 @@ else:
     raise SystemExit("Could not locate .agents/lib")
 
 from research.common import (
+    add_project_root_argument,
     append_list_item,
     append_program_reporting_event,
     blank_list_document,
@@ -28,6 +29,7 @@ from research.common import (
     load_yaml,
     normalize_list,
     program_file_lock,
+    print_resolved_project_roots,
     shell_command,
     simple_slug,
     utc_now_iso,
@@ -732,6 +734,7 @@ def append_decision(root: Path, program_id: str, item: dict[str, Any]) -> Path:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Manage v2 research programs.")
+    add_project_root_argument(parser)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     init_cmd = subparsers.add_parser("init-program", help="Create a new program")
@@ -827,7 +830,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    root = project_root(PROJECT_ROOT)
+    root = project_root(PROJECT_ROOT, explicit_root=args.root)
+    print_resolved_project_roots(root)
     ensure_v2_workspace(root)
 
     if args.command == "init-program":

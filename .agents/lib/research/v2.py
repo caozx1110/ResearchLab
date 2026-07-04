@@ -152,8 +152,8 @@ KB_GITIGNORE_LINES = [
     "# Local noise",
     ".DS_Store",
 ]
-def project_root(start: Path | None = None) -> Path:
-    return find_project_root(start)
+def project_root(start: Path | None = None, *, explicit_root: str | Path | None = None) -> Path:
+    return find_project_root(start, explicit_root=explicit_root)
 
 
 def kb_root(project_root: Path) -> Path:

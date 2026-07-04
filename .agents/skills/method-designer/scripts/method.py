@@ -16,7 +16,7 @@ for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
 else:
     raise SystemExit("Could not locate .agents/lib")
 
-from research.common import append_program_reporting_event, ensure_dir, load_yaml, normalize_list, write_text_if_changed, write_yaml_if_changed, yaml_default
+from research.common import add_project_root_argument, append_program_reporting_event, ensure_dir, load_yaml, normalize_list, print_resolved_project_roots, write_text_if_changed, write_yaml_if_changed, yaml_default
 from research.v2 import iter_records, locate_record, project_root, rel
 
 
@@ -116,6 +116,7 @@ def repo_candidates(root: Path, record: dict[str, Any], pinned_repo_ids: list[st
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Design a method from a selected idea.")
+    add_project_root_argument(parser)
     subparsers = parser.add_subparsers(dest="command", required=True)
     design = subparsers.add_parser("design")
     design.add_argument("--idea-id", required=True)
@@ -130,7 +131,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    root = project_root(PROJECT_ROOT)
+    root = project_root(PROJECT_ROOT, explicit_root=args.root)
+    print_resolved_project_roots(root)
     record, _ = locate_record(root, args.idea_id, kind="idea")
     if record.get("kind") != "idea":
         raise SystemExit(f"{args.idea_id} is not an idea record")

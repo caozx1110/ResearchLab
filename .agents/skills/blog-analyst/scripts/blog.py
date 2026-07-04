@@ -15,7 +15,7 @@ for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
 else:
     raise SystemExit("Could not locate .agents/lib")
 
-from research.common import write_text_if_changed, write_yaml_if_changed
+from research.common import add_project_root_argument, print_resolved_project_roots, write_text_if_changed, write_yaml_if_changed
 from research.v2 import append_history, build_index, confirm_unit, locate_record, project_root, rel, write_record
 
 
@@ -41,6 +41,7 @@ def note_template(record: dict) -> str:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Analyze blog units in v2.")
+    add_project_root_argument(parser)
     subparsers = parser.add_subparsers(dest="command", required=True)
     for name in ("summarize", "complete-note", "confirm"):
         cmd = subparsers.add_parser(name)
@@ -52,7 +53,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    root = project_root(PROJECT_ROOT)
+    root = project_root(PROJECT_ROOT, explicit_root=args.root)
+    print_resolved_project_roots(root)
     record, path = locate_record(root, args.blog_id, kind="blog")
     if record.get("kind") != "blog":
         raise SystemExit(f"{args.blog_id} is not a blog record")

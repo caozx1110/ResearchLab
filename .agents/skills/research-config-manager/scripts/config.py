@@ -16,7 +16,7 @@ for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
 else:
     raise SystemExit("Could not locate .agents/lib")
 
-from research.common import load_yaml, slugify, write_text_if_changed, write_yaml_if_changed, yaml_default
+from research.common import add_project_root_argument, load_yaml, print_resolved_project_roots, slugify, warn_if_cwd_differs_from_project_root, write_text_if_changed, write_yaml_if_changed, yaml_default
 from research.v2 import (
     candidate_pools_path,
     config_root,
@@ -219,6 +219,7 @@ def upsert_pool(root: Path, *, pool: str, topics: list[str], tags: list[str], de
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Manage v2 research configuration.")
+    add_project_root_argument(parser)
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("init", help="Initialize config files")
 
@@ -264,10 +265,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    root = project_root(PROJECT_ROOT)
+    root = project_root(PROJECT_ROOT, explicit_root=args.root)
+    print_resolved_project_roots(root)
     ensure_v2_workspace(root)
 
     if args.command == "init":
+        warn_if_cwd_differs_from_project_root(root, command="config.py init")
         write_yaml_if_changed(profile_path(root), load_profile(root))
         load_topic_taxonomy(root)
         load_candidate_pools(root)

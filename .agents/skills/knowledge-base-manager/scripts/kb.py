@@ -15,7 +15,7 @@ for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
 else:
     raise SystemExit("Could not locate .agents/lib")
 
-from research.common import confirm_command, parse_iso_datetime, shell_command
+from research.common import add_project_root_argument, confirm_command, parse_iso_datetime, print_resolved_project_roots, shell_command, warn_if_cwd_differs_from_project_root
 from research.v2 import (
     build_index,
     candidate_pools_path,
@@ -132,6 +132,7 @@ def apply_batch_confirmation(root: Path, records: list[dict], *, confirmed_by: s
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Manage the v2 research knowledge base.")
+    add_project_root_argument(parser)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("init", help="Initialize the v2 knowledge base layout")
@@ -205,9 +206,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    root = project_root(PROJECT_ROOT)
+    root = project_root(PROJECT_ROOT, explicit_root=args.root)
+    print_resolved_project_roots(root)
 
     if args.command == "init":
+        warn_if_cwd_differs_from_project_root(root, command="kb.py init")
         ensure_v2_workspace(root)
         build_index(root)
         print("[ok] initialized kb v2 workspace")

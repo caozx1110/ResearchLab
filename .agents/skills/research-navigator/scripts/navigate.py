@@ -15,12 +15,13 @@ for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
 else:
     raise SystemExit("Could not locate .agents/lib")
 
-from research.common import load_yaml, write_text_if_changed
+from research.common import add_project_root_argument, load_yaml, print_resolved_project_roots, write_text_if_changed
 from research.v2 import iter_records, kb_root, project_root, user_root
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Refresh v2 user-facing navigation pages.")
+    add_project_root_argument(parser)
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("refresh")
     subparsers.add_parser("current-state")
@@ -93,7 +94,8 @@ def render_reading_list(records: list[dict]) -> str:
 
 def main() -> int:
     args = build_parser().parse_args()
-    root = project_root(PROJECT_ROOT)
+    root = project_root(PROJECT_ROOT, explicit_root=args.root)
+    print_resolved_project_roots(root)
     records = iter_records(root)
     program_states = load_program_states(root)
     current_path = user_root(root) / "current-state.md"
