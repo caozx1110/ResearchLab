@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from shlex import quote
 from typing import Any
 
 SCRIPT_PATH = Path(__file__).resolve()
@@ -91,6 +92,104 @@ ROUTE_HINTS = {
     "wiki": "wiki-adapter",
     "知识库": "wiki-adapter",
 }
+
+COMMAND_PREFIX = "${RESEARCH_PYTHON:-python3}"
+
+
+def shell_command(parts: list[str]) -> str:
+    rendered: list[str] = []
+    for index, part in enumerate(parts):
+        if (index == 0 and part == COMMAND_PREFIX) or (part.startswith("${") and part.endswith("}")):
+            rendered.append(part)
+        else:
+            rendered.append(quote(str(part)))
+    return " ".join(rendered)
+
+
+def confirm_command_for_record(record: dict[str, Any]) -> str:
+    kind = str(record.get("kind") or "")
+    unit_id = str(record.get("id") or "")
+    if kind == "paper":
+        return shell_command(
+            [
+                COMMAND_PREFIX,
+                ".agents/skills/paper-analyst/scripts/paper.py",
+                "confirm",
+                "--paper-id",
+                unit_id,
+                "--confirmed-by",
+                "${RESEARCH_CONFIRMED_BY:?set-human-identity}",
+                "--evidence",
+                "${RESEARCH_CONFIRM_EVIDENCE:?set-human-evidence}",
+            ]
+        )
+    if kind == "repo":
+        return shell_command(
+            [
+                COMMAND_PREFIX,
+                ".agents/skills/repo-analyst/scripts/repo.py",
+                "confirm",
+                "--repo-id",
+                unit_id,
+                "--confirmed-by",
+                "${RESEARCH_CONFIRMED_BY:?set-human-identity}",
+                "--evidence",
+                "${RESEARCH_CONFIRM_EVIDENCE:?set-human-evidence}",
+            ]
+        )
+    if kind == "blog":
+        return shell_command(
+            [
+                COMMAND_PREFIX,
+                ".agents/skills/blog-analyst/scripts/blog.py",
+                "confirm",
+                "--blog-id",
+                unit_id,
+                "--confirmed-by",
+                "${RESEARCH_CONFIRMED_BY:?set-human-identity}",
+                "--evidence",
+                "${RESEARCH_CONFIRM_EVIDENCE:?set-human-evidence}",
+            ]
+        )
+    if kind == "experiment":
+        return shell_command(
+            [
+                COMMAND_PREFIX,
+                ".agents/skills/experiment-workbench/scripts/experiment.py",
+                "confirm",
+                "--experiment-id",
+                unit_id,
+                "--confirmed-by",
+                "${RESEARCH_CONFIRMED_BY:?set-human-identity}",
+                "--evidence",
+                "${RESEARCH_CONFIRM_EVIDENCE:?set-human-evidence}",
+            ]
+        )
+    return shell_command(
+        [
+            COMMAND_PREFIX,
+            ".agents/skills/knowledge-base-manager/scripts/kb.py",
+            "promote",
+            "--id",
+            unit_id,
+            "--confirmation-status",
+            "confirmed",
+            "--confirmed-by",
+            "${RESEARCH_CONFIRMED_BY:?set-human-identity}",
+            "--evidence",
+            "${RESEARCH_CONFIRM_EVIDENCE:?set-human-evidence}",
+        ]
+    )
+
+
+def command_for_dashboard_item(item: dict[str, Any]) -> str:
+    command = str(item.get("recommended_command") or "").strip()
+    if command:
+        return command
+    program_id = str(item.get("program_id") or "")
+    if program_id:
+        return shell_command([COMMAND_PREFIX, ".agents/skills/research-orchestrator/scripts/orchestrate.py", "status", "--program-id", program_id])
+    return ""
 
 
 def program_root(root: Path, program_id: str) -> Path:
@@ -305,10 +404,21 @@ def program_dashboard_items(root: Path) -> list[dict[str, Any]]:
             next_action = f"Answer high-priority question: {high_questions[0].get('question')}"
         elif pending_units:
             next_action = f"Review pending confirmation: {pending_units[0].get('id')}"
+            recommended_command = confirm_command_for_record(pending_units[0])
         elif normalize_list(state.get("next_actions")):
             next_action = normalize_list(state.get("next_actions"))[0]
+            recommended_command = shell_command(
+                [COMMAND_PREFIX, ".agents/skills/research-orchestrator/scripts/orchestrate.py", "status", "--program-id", program_id]
+            )
         else:
             next_action = "Review program stage and next actions."
+            recommended_command = shell_command(
+                [COMMAND_PREFIX, ".agents/skills/research-orchestrator/scripts/orchestrate.py", "status", "--program-id", program_id]
+            )
+        if blocking_evidence or high_questions:
+            recommended_command = shell_command(
+                [COMMAND_PREFIX, ".agents/skills/research-orchestrator/scripts/orchestrate.py", "status", "--program-id", program_id]
+            )
 
         items.append(
             {
@@ -325,6 +435,7 @@ def program_dashboard_items(root: Path) -> list[dict[str, Any]]:
                 "score": score,
                 "reasons": reasons,
                 "next_action": next_action,
+                "recommended_command": recommended_command,
             }
         )
     return sorted(items, key=lambda item: (-int(item.get("score") or 0), str(item.get("updated_at") or ""), str(item.get("program_id") or "")))
@@ -343,6 +454,9 @@ def format_dashboard(items: list[dict[str, Any]], *, limit: int = 20) -> str:
             f"score={item.get('score', 0)} · {reasons}"
         )
         lines.append(f"  next: {item.get('next_action')}")
+        command = command_for_dashboard_item(item)
+        if command:
+            lines.append(f"  command: {command}")
     return "\n".join(lines).strip()
 
 
@@ -354,6 +468,9 @@ def format_next(items: list[dict[str, Any]], *, limit: int = 5) -> str:
         return "\n".join(lines).strip()
     for item in selected:
         lines.append(f"- `{item['program_id']}`: {item.get('next_action')}")
+        command = command_for_dashboard_item(item)
+        if command:
+            lines.append(f"  command: {command}")
     return "\n".join(lines).strip()
 
 

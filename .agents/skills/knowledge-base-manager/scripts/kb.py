@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from shlex import quote
 
 SCRIPT_PATH = Path(__file__).resolve()
 for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
@@ -40,13 +41,38 @@ from research.v2 import (
     topic_taxonomy_path,
 )
 
-CONFIRM_COMMANDS = {
-    "paper": ".agents/skills/paper-analyst/scripts/paper.py confirm --paper-id {id} --confirmed-by <name> --evidence <path-or-note>",
-    "repo": ".agents/skills/repo-analyst/scripts/repo.py confirm --repo-id {id} --confirmed-by <name> --evidence <path-or-note>",
-    "blog": ".agents/skills/blog-analyst/scripts/blog.py confirm --blog-id {id} --confirmed-by <name> --evidence <path-or-note>",
-    "experiment": ".agents/skills/experiment-workbench/scripts/experiment.py confirm --experiment-id {id} --confirmed-by <name> --evidence <path-or-note>",
-    "idea": ".agents/skills/knowledge-base-manager/scripts/kb.py promote --id {id} --confirmation-status confirmed --confirmed-by <name> --evidence <path-or-note>",
+COMMAND_PREFIX = "${RESEARCH_PYTHON:-python3}"
+SCRIPT_BY_KIND = {
+    "paper": ".agents/skills/paper-analyst/scripts/paper.py",
+    "repo": ".agents/skills/repo-analyst/scripts/repo.py",
+    "blog": ".agents/skills/blog-analyst/scripts/blog.py",
+    "idea": ".agents/skills/idea-workbench/scripts/idea.py",
+    "experiment": ".agents/skills/experiment-workbench/scripts/experiment.py",
 }
+ID_ARG_BY_KIND = {
+    "paper": "--paper-id",
+    "repo": "--repo-id",
+    "blog": "--blog-id",
+    "idea": "--idea-id",
+    "experiment": "--experiment-id",
+}
+NEXT_COMMAND_BY_KIND = {
+    "paper": "screen",
+    "repo": "scan-structure",
+    "blog": "summarize",
+    "idea": "analyze",
+    "experiment": "diagnose",
+}
+
+
+def shell_command(parts: list[str]) -> str:
+    rendered: list[str] = []
+    for index, part in enumerate(parts):
+        if (index == 0 and part == COMMAND_PREFIX) or (part.startswith("${") and part.endswith("}")):
+            rendered.append(part)
+        else:
+            rendered.append(quote(str(part)))
+    return " ".join(rendered)
 
 
 def review_sort_key(record: dict) -> tuple:
@@ -61,8 +87,47 @@ def review_sort_key(record: dict) -> tuple:
 
 def confirm_command(record: dict) -> str:
     kind = str(record.get("kind") or "")
-    template = CONFIRM_COMMANDS.get(kind, ".agents/skills/knowledge-base-manager/scripts/kb.py promote --id {id} --confirmation-status confirmed --confirmed-by <name> --evidence <path-or-note>")
-    return f"${{RESEARCH_PYTHON:-python3}} {template.format(id=record.get('id', ''))}"
+    unit_id = str(record.get("id") or "")
+    if kind in SCRIPT_BY_KIND and kind != "idea":
+        return shell_command(
+            [
+                COMMAND_PREFIX,
+                SCRIPT_BY_KIND[kind],
+                "confirm",
+                ID_ARG_BY_KIND[kind],
+                unit_id,
+                "--confirmed-by",
+                "${RESEARCH_CONFIRMED_BY:?set-human-identity}",
+                "--evidence",
+                "${RESEARCH_CONFIRM_EVIDENCE:?set-human-evidence}",
+            ]
+        )
+    return shell_command(
+        [
+            COMMAND_PREFIX,
+            ".agents/skills/knowledge-base-manager/scripts/kb.py",
+            "promote",
+            "--id",
+            unit_id,
+            "--confirmation-status",
+            "confirmed",
+            "--confirmed-by",
+            "${RESEARCH_CONFIRMED_BY:?set-human-identity}",
+            "--evidence",
+            "${RESEARCH_CONFIRM_EVIDENCE:?set-human-evidence}",
+        ]
+    )
+
+
+def next_unit_command(record: dict) -> str:
+    kind = str(record.get("kind") or "")
+    unit_id = str(record.get("id") or "")
+    script = SCRIPT_BY_KIND.get(kind)
+    id_arg = ID_ARG_BY_KIND.get(kind)
+    command = NEXT_COMMAND_BY_KIND.get(kind)
+    if not script or not id_arg or not command:
+        return shell_command([COMMAND_PREFIX, ".agents/skills/knowledge-base-manager/scripts/kb.py", "query", "--query", unit_id])
+    return shell_command([COMMAND_PREFIX, script, command, id_arg, unit_id])
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -203,6 +268,9 @@ def main() -> int:
                 f"- {item['id']} | {item['kind']} | {item['title']} | "
                 f"{item.get('status')} | {item.get('confirmation_status')} | pools={pools or '-'}{score_text}"
             )
+            print(f"  next: {next_unit_command(item)}")
+            if str(item.get("confirmation_status") or "") == "pending_user_confirmation":
+                print(f"  confirm: {confirm_command(item)}")
         if not hits:
             print("[ok] no matches")
         return 0

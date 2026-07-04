@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from research.common import append_list_item, write_yaml_if_changed
+from research.v2 import record_path
 
 
 def _project_root() -> Path:
@@ -86,3 +87,50 @@ def test_orchestrator_dashboard_prioritizes_blocking_evidence(tmp_path: Path) ->
     assert items[0]["blocking_evidence_count"] == 1
     assert "Resolve blocking evidence: Need baseline parity logs" in dashboard
     assert "`p-next`: Resolve blocking evidence: Need baseline parity logs" in next_text
+    assert ".agents/skills/research-orchestrator/scripts/orchestrate.py status --program-id p-next" in dashboard
+    assert ".agents/skills/research-orchestrator/scripts/orchestrate.py status --program-id p-next" in next_text
+
+
+def test_orchestrator_pending_confirmation_command_uses_real_unit_id(tmp_path: Path) -> None:
+    orchestrate = _load_script("research-orchestrator", "orchestrate.py", "orchestrator_script_for_b2")
+    root = _make_workspace(tmp_path)
+    program_id = "p-confirm-next"
+    orchestrate.ensure_program_files(root, program_id)
+    write_yaml_if_changed(
+        orchestrate.state_path(root, program_id),
+        {
+            "program_id": program_id,
+            "stage": "literature-review",
+            "goal": "Confirm unit",
+            "active_unit_ids": ["p-pending-123456"],
+            "counts": {},
+        },
+    )
+    write_yaml_if_changed(
+        record_path(root, "paper", "p-pending-123456"),
+        {
+            "id": "p-pending-123456",
+            "kind": "paper",
+            "title": "Pending Paper",
+            "status": "screened",
+            "maturity": "lightweight",
+            "confirmation_status": "pending_user_confirmation",
+            "needs_human_confirmation": True,
+            "information_types": ["fact"],
+            "summary": "Pending summary",
+            "tags": [],
+            "topics": [],
+            "candidate_pools": [],
+            "source": {"original_uri": "", "file_hash": ""},
+            "payload": {"state": {}},
+        },
+    )
+
+    items = orchestrate.program_dashboard_items(root)
+    dashboard = orchestrate.format_dashboard(items)
+    next_text = orchestrate.format_next(items)
+
+    assert ".agents/skills/paper-analyst/scripts/paper.py confirm --paper-id p-pending-123456" in dashboard
+    assert ".agents/skills/paper-analyst/scripts/paper.py confirm --paper-id p-pending-123456" in next_text
+    assert "<id>" not in dashboard
+    assert "<id>" not in next_text

@@ -63,4 +63,20 @@ def test_review_queue_helpers_sort_oldest_first_and_emit_confirm_command() -> No
     older = _record("p-older-123456", "Older", "pending_user_confirmation", "2026-01-01T00:00:00+00:00")
 
     assert [item["id"] for item in sorted([newer, older], key=kb.review_sort_key)] == ["p-older-123456", "p-newer-123456"]
-    assert kb.confirm_command(older) == "${RESEARCH_PYTHON:-python3} .agents/skills/paper-analyst/scripts/paper.py confirm --paper-id p-older-123456 --confirmed-by <name> --evidence <path-or-note>"
+    command = kb.confirm_command(older)
+    assert "--paper-id p-older-123456" in command
+    assert "<id>" not in command
+    assert "${RESEARCH_CONFIRM_EVIDENCE:?set-human-evidence}" in command
+
+
+def test_query_output_helpers_emit_runnable_command_with_real_id() -> None:
+    kb = _load_kb_module()
+    record = _record("p-query-123456", "Queryable", "pending_user_confirmation", "2026-01-01T00:00:00+00:00")
+
+    next_command = kb.next_unit_command(record)
+    confirm_command = kb.confirm_command(record)
+
+    assert ".agents/skills/paper-analyst/scripts/paper.py screen --paper-id p-query-123456" in next_command
+    assert ".agents/skills/paper-analyst/scripts/paper.py confirm --paper-id p-query-123456" in confirm_command
+    assert "<id>" not in next_command
+    assert "<id>" not in confirm_command
