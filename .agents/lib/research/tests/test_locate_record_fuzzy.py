@@ -65,6 +65,15 @@ def test_locate_record_resolves_unique_id_prefix(tmp_path: Path) -> None:
     assert record["id"] == "p-openvla-abcdef12"
 
 
+def test_locate_record_resolves_case_insensitive_id_prefix(tmp_path: Path) -> None:
+    ensure_v2_workspace(tmp_path)
+    _write_record(tmp_path, _record("p-openvla-abcdef12", "OpenVLA"))
+
+    record, _ = locate_record(tmp_path, "P-OPENVLA")
+
+    assert record["id"] == "p-openvla-abcdef12"
+
+
 def test_locate_record_resolves_unique_hash_suffix_prefix(tmp_path: Path) -> None:
     ensure_v2_workspace(tmp_path)
     _write_record(tmp_path, _record("p-openvla-abcdef12", "OpenVLA"))
@@ -108,6 +117,19 @@ def test_locate_record_last_is_kind_scoped_most_recently_modified_record(tmp_pat
     os.utime(older, (now - 30, now - 30))
     os.utime(newer, (now - 20, now - 20))
     os.utime(repo, (now - 10, now - 10))
+
+    record, _ = locate_record(tmp_path, "last", kind="paper")
+
+    assert record["id"] == "p-newer-fedcba98"
+
+
+def test_locate_record_last_reserved_word_precedes_title_matching(tmp_path: Path) -> None:
+    ensure_v2_workspace(tmp_path)
+    titled_last = _write_record(tmp_path, _record("p-last-title-abcdef12", "Last Robot Policy"))
+    newer = _write_record(tmp_path, _record("p-newer-fedcba98", "Newer"))
+    now = time.time()
+    os.utime(titled_last, (now - 30, now - 30))
+    os.utime(newer, (now - 10, now - 10))
 
     record, _ = locate_record(tmp_path, "last", kind="paper")
 

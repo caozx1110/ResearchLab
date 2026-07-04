@@ -1637,7 +1637,7 @@ def _ambiguous_record_reference(reference: str, records: list[dict[str, Any]]) -
     raise SystemExit(f"Ambiguous record reference: {reference}")
 
 
-def _resolve_unique_record_reference(reference: str, records: list[dict[str, Any]], *, mode: str) -> dict[str, Any] | None:
+def _resolve_unique_record_reference(reference: str, records: list[dict[str, Any]]) -> dict[str, Any] | None:
     if not records:
         return None
     if len(records) == 1:
@@ -1676,34 +1676,34 @@ def locate_record(project_root: Path, unit_id: str, *, kind: str | None = None, 
                 return record, record_path(project_root, current_kind, current_id)
     if not fuzzy:
         raise SystemExit(f"Record not found: {unit_id}")
-    lowered = reference.lower()
-    if lowered:
+    folded = reference.casefold()
+    if folded in {"last", "current"}:
+        modified_records = [record for record in records if _record_lookup_path(project_root, record)]
+        if modified_records:
+            resolved = max(modified_records, key=lambda record: _record_modified_sort_key(project_root, record))
+            path = _record_lookup_path(project_root, resolved)
+            if path:
+                return resolved, path
+    if folded:
         prefix_matches = [
             record
             for record in records
-            if str(record.get("id") or "").startswith(reference)
-            or bool(_record_hash_suffix(str(record.get("id") or "")).startswith(lowered))
+            if str(record.get("id") or "").casefold().startswith(folded)
+            or bool(_record_hash_suffix(str(record.get("id") or "")).casefold().startswith(folded))
         ]
-        resolved = _resolve_unique_record_reference(reference, prefix_matches, mode="prefix")
+        resolved = _resolve_unique_record_reference(reference, prefix_matches)
         if resolved:
             path = _record_lookup_path(project_root, resolved)
             if path:
                 return resolved, path
-        title_reference = reference.casefold()
+        title_reference = folded
         title_matches = [
             record
             for record in records
             if title_reference in str(record.get("title") or "").casefold()
         ]
-        resolved = _resolve_unique_record_reference(reference, title_matches, mode="title")
+        resolved = _resolve_unique_record_reference(reference, title_matches)
         if resolved:
-            path = _record_lookup_path(project_root, resolved)
-            if path:
-                return resolved, path
-    if lowered in {"last", "current"}:
-        modified_records = [record for record in records if _record_lookup_path(project_root, record)]
-        if modified_records:
-            resolved = max(modified_records, key=lambda record: _record_modified_sort_key(project_root, record))
             path = _record_lookup_path(project_root, resolved)
             if path:
                 return resolved, path
