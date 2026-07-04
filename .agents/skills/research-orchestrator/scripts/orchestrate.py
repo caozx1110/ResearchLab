@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
 from pathlib import Path
 from shlex import quote
@@ -94,6 +95,7 @@ ROUTE_HINTS = {
 }
 
 COMMAND_PREFIX = "${RESEARCH_PYTHON:-python3}"
+SAFE_AUTO_STEPS = {"screen", "build-index", "refresh", "generate-note"}
 
 
 def shell_command(parts: list[str]) -> str:
@@ -104,6 +106,13 @@ def shell_command(parts: list[str]) -> str:
         else:
             rendered.append(quote(str(part)))
     return " ".join(rendered)
+
+
+def executable_command(parts: list[str]) -> list[str]:
+    command = list(parts)
+    if command and command[0] == COMMAND_PREFIX:
+        command[0] = sys.executable or "python3"
+    return command
 
 
 def confirm_command_for_record(record: dict[str, Any]) -> str:
@@ -190,6 +199,212 @@ def command_for_dashboard_item(item: dict[str, Any]) -> str:
     if program_id:
         return shell_command([COMMAND_PREFIX, ".agents/skills/research-orchestrator/scripts/orchestrate.py", "status", "--program-id", program_id])
     return ""
+
+
+def safe_unit_step(record: dict[str, Any]) -> dict[str, Any] | None:
+    kind = str(record.get("kind") or "")
+    unit_id = str(record.get("id") or "")
+    status = str(record.get("status") or "")
+    confirmation_status = str(record.get("confirmation_status") or "")
+    if confirmation_status == "pending_user_confirmation":
+        return {
+            "kind": "human-gate",
+            "step_type": "human-decision",
+            "record_id": unit_id,
+            "title": str(record.get("title") or ""),
+            "reason": f"{kind} `{unit_id}` 等待人工确认",
+            "command_parts": [
+                COMMAND_PREFIX,
+                ".agents/skills/knowledge-base-manager/scripts/kb.py",
+                "confirm",
+                "--id",
+                unit_id,
+                "--evidence",
+                "${RESEARCH_CONFIRM_EVIDENCE:?set-human-evidence}",
+            ],
+            "safe_execute": False,
+        }
+    if kind == "paper":
+        payload = record.get("payload", {})
+        quick = payload.get("quick_screen", {}) if isinstance(payload, dict) else {}
+        full_note_status = str((payload.get("state", {}) if isinstance(payload, dict) else {}).get("full_note_status") or "")
+        if not str(quick.get("screening_mode") or "").strip() and not quick.get("judgement_reason"):
+            return {
+                "kind": kind,
+                "step_type": "screen",
+                "record_id": unit_id,
+                "title": str(record.get("title") or ""),
+                "reason": f"unscreened paper `{unit_id}`",
+                "command_parts": [
+                    COMMAND_PREFIX,
+                    ".agents/skills/paper-analyst/scripts/paper.py",
+                    "screen",
+                    "--paper-id",
+                    unit_id,
+                ],
+                "safe_execute": True,
+            }
+        if str(record.get("maturity") or "") != "complete" and full_note_status == "not_started":
+            return {
+                "kind": kind,
+                "step_type": "generate-note",
+                "record_id": unit_id,
+                "title": str(record.get("title") or ""),
+                "reason": f"screened paper `{unit_id}` lacks a complete note",
+                "command_parts": [
+                    COMMAND_PREFIX,
+                    ".agents/skills/paper-analyst/scripts/paper.py",
+                    "complete-note",
+                    "--paper-id",
+                    unit_id,
+                    "--mode",
+                    "auto",
+                ],
+                "safe_execute": True,
+            }
+    if kind == "repo":
+        payload = record.get("payload", {})
+        structure = payload.get("structure", {}) if isinstance(payload, dict) else {}
+        if str(structure.get("scan_status") or "not_started") == "not_started":
+            return {
+                "kind": kind,
+                "step_type": "refresh",
+                "record_id": unit_id,
+                "title": str(record.get("title") or ""),
+                "reason": f"repo `{unit_id}` lacks structure scan",
+                "command_parts": [
+                    COMMAND_PREFIX,
+                    ".agents/skills/repo-analyst/scripts/repo.py",
+                    "scan-structure",
+                    "--repo-id",
+                    unit_id,
+                ],
+                "safe_execute": True,
+            }
+    if kind == "blog" and status == "draft":
+        return {
+            "kind": kind,
+            "step_type": "generate-note",
+            "record_id": unit_id,
+            "title": str(record.get("title") or ""),
+            "reason": f"blog `{unit_id}` needs summary",
+            "command_parts": [
+                COMMAND_PREFIX,
+                ".agents/skills/blog-analyst/scripts/blog.py",
+                "summarize",
+                "--blog-id",
+                unit_id,
+            ],
+            "safe_execute": True,
+        }
+    if kind == "idea":
+        payload = record.get("payload", {})
+        analysis = payload.get("analysis", {}) if isinstance(payload, dict) else {}
+        review = payload.get("review", {}) if isinstance(payload, dict) else {}
+        if status == "draft" and not str(analysis.get("novelty") or ""):
+            return {
+                "kind": kind,
+                "step_type": "refresh",
+                "record_id": unit_id,
+                "title": str(record.get("title") or ""),
+                "reason": f"idea `{unit_id}` needs analysis",
+                "command_parts": [
+                    COMMAND_PREFIX,
+                    ".agents/skills/idea-workbench/scripts/idea.py",
+                    "analyze",
+                    "--idea-id",
+                    unit_id,
+                ],
+                "safe_execute": True,
+            }
+        if status == "pending" and str(review.get("review_status") or "not_started") == "not_started":
+            return {
+                "kind": kind,
+                "step_type": "refresh",
+                "record_id": unit_id,
+                "title": str(record.get("title") or ""),
+                "reason": f"idea `{unit_id}` needs review artifact",
+                "command_parts": [
+                    COMMAND_PREFIX,
+                    ".agents/skills/idea-workbench/scripts/idea.py",
+                    "review",
+                    "--idea-id",
+                    unit_id,
+                ],
+                "safe_execute": True,
+            }
+    return None
+
+
+def auto_plan(root: Path) -> dict[str, Any]:
+    ensure_v2_workspace(root)
+    build_index_command = {
+        "kind": "kb",
+        "step_type": "build-index",
+        "record_id": "",
+        "title": "Build KB index",
+        "reason": "KB has records but index should be refreshed before deeper orchestration",
+        "command_parts": [COMMAND_PREFIX, ".agents/skills/knowledge-base-manager/scripts/kb.py", "index"],
+        "safe_execute": True,
+    }
+    records = iter_records(root)
+    if not records:
+        return {
+            "status": "empty",
+            "message": "KB 为空，第一步：intake add 一篇论文",
+            "command_parts": [
+                COMMAND_PREFIX,
+                ".agents/skills/source-intake/scripts/intake.py",
+                "add",
+                "--kind",
+                "paper",
+                "--source",
+                "${RESEARCH_SOURCE:?set-paper-source}",
+            ],
+            "safe_execute": False,
+        }
+    for record in records:
+        step = safe_unit_step(record)
+        if step:
+            return {"status": "planned", **step}
+    return {"status": "planned", **build_index_command}
+
+
+def format_auto_plan(plan: dict[str, Any]) -> str:
+    lines = ["# Orchestrate Auto", ""]
+    message = str(plan.get("message") or plan.get("reason") or "")
+    if message:
+        lines.append(f"- next: {message}")
+    command_parts = plan.get("command_parts") if isinstance(plan.get("command_parts"), list) else []
+    if command_parts:
+        lines.append(f"- command: {shell_command([str(part) for part in command_parts])}")
+    if not bool(plan.get("safe_execute")):
+        lines.append("- execute: stop for human decision")
+    else:
+        lines.append(f"- execute: safe {plan.get('step_type')}")
+    return "\n".join(lines).strip()
+
+
+def execute_auto_plan(root: Path, plan: dict[str, Any]) -> int:
+    if not bool(plan.get("safe_execute")):
+        print(format_auto_plan(plan))
+        print("[stop] human decision required; not executing")
+        return 0
+    step_type = str(plan.get("step_type") or "")
+    if step_type not in SAFE_AUTO_STEPS:
+        print(format_auto_plan(plan))
+        print("[stop] step is not in the safe auto-execute allowlist")
+        return 0
+    command_parts = [str(part) for part in plan.get("command_parts") or []]
+    print(format_auto_plan(plan))
+    result = subprocess.run(executable_command(command_parts), cwd=root, text=True, capture_output=True, check=False)
+    for line in result.stdout.splitlines():
+        if line.strip():
+            print(f"[exec] {line}")
+    for line in result.stderr.splitlines():
+        if line.strip():
+            print(f"[exec:err] {line}")
+    return result.returncode
 
 
 def program_root(root: Path, program_id: str) -> Path:
@@ -363,6 +578,7 @@ def program_dashboard_items(root: Path) -> list[dict[str, Any]]:
     records = iter_records(root)
     record_by_id = {str(record.get("id") or ""): record for record in records}
     items: list[dict[str, Any]] = []
+    attached_unit_ids: set[str] = set()
     for program_id in program_ids(root):
         state = load_state(root, program_id)
         open_questions = _open_workflow_items(
@@ -376,6 +592,7 @@ def program_dashboard_items(root: Path) -> list[dict[str, Any]]:
         blocking_evidence = [item for item in evidence_requests if bool(item.get("blocking"))]
         high_questions = [item for item in open_questions if str(item.get("priority") or "") in {"critical", "high"}]
         unit_ids = _program_unit_ids(program_id, state, records)
+        attached_unit_ids.update(unit_ids)
         pending_units = [
             record_by_id[unit_id]
             for unit_id in sorted(unit_ids)
@@ -438,6 +655,32 @@ def program_dashboard_items(root: Path) -> list[dict[str, Any]]:
                 "recommended_command": recommended_command,
             }
         )
+    for record in records:
+        unit_id = str(record.get("id") or "")
+        if not unit_id or unit_id in attached_unit_ids or normalize_list(record.get("program_ids")):
+            continue
+        step = safe_unit_step(record)
+        if not step:
+            continue
+        score = 20 if bool(step.get("safe_execute")) else 30
+        items.append(
+            {
+                "program_id": f"loose:{unit_id}",
+                "stage": "loose-unit",
+                "goal": str(record.get("title") or ""),
+                "question": "",
+                "updated_at": str(record.get("updated_at") or ""),
+                "counts": {},
+                "open_question_count": 0,
+                "evidence_request_count": 0,
+                "blocking_evidence_count": 0,
+                "pending_confirmation_count": 1 if not bool(step.get("safe_execute")) else 0,
+                "score": score,
+                "reasons": ["loose unit", str(step.get("step_type") or "")],
+                "next_action": str(step.get("reason") or ""),
+                "recommended_command": shell_command([str(part) for part in step.get("command_parts") or []]),
+            }
+        )
     return sorted(items, key=lambda item: (-int(item.get("score") or 0), str(item.get("updated_at") or ""), str(item.get("program_id") or "")))
 
 
@@ -445,7 +688,21 @@ def format_dashboard(items: list[dict[str, Any]], *, limit: int = 20) -> str:
     selected = items[:limit] if limit > 0 else items
     lines = ["# Program Dashboard", ""]
     if not selected:
-        lines.append("- 暂无 program")
+        lines.append("- KB 为空，第一步：intake add 一篇论文")
+        lines.append(
+            "  command: "
+            + shell_command(
+                [
+                    COMMAND_PREFIX,
+                    ".agents/skills/source-intake/scripts/intake.py",
+                    "add",
+                    "--kind",
+                    "paper",
+                    "--source",
+                    "${RESEARCH_SOURCE:?set-paper-source}",
+                ]
+            )
+        )
         return "\n".join(lines).strip()
     for item in selected:
         reasons = ", ".join(item.get("reasons", [])) or "no urgent blocker"
@@ -464,7 +721,21 @@ def format_next(items: list[dict[str, Any]], *, limit: int = 5) -> str:
     selected = items[:limit] if limit > 0 else items
     lines = ["# Next Actions", ""]
     if not selected:
-        lines.append("- 暂无 program next action")
+        lines.append("- KB 为空，第一步：intake add 一篇论文")
+        lines.append(
+            "  command: "
+            + shell_command(
+                [
+                    COMMAND_PREFIX,
+                    ".agents/skills/source-intake/scripts/intake.py",
+                    "add",
+                    "--kind",
+                    "paper",
+                    "--source",
+                    "${RESEARCH_SOURCE:?set-paper-source}",
+                ]
+            )
+        )
         return "\n".join(lines).strip()
     for item in selected:
         lines.append(f"- `{item['program_id']}`: {item.get('next_action')}")
@@ -565,6 +836,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     next_cmd = subparsers.add_parser("next", help="Show prioritized next actions across programs")
     next_cmd.add_argument("--limit", type=int, default=5)
+
+    auto = subparsers.add_parser("auto", help="Plan or execute the next safe orchestration step")
+    auto.add_argument("--max-steps", type=int, default=1)
+    auto.add_argument("--execute", action="store_true")
 
     route = subparsers.add_parser("route", help="Suggest the right v2 skill for a task")
     route.add_argument("--task", required=True)
@@ -708,6 +983,23 @@ def main() -> int:
     if args.command == "next":
         print(format_next(program_dashboard_items(root), limit=args.limit))
         return 0
+    if args.command == "auto":
+        exit_code = 0
+        for _ in range(max(1, int(args.max_steps or 1))):
+            plan = auto_plan(root)
+            if args.execute:
+                exit_code = execute_auto_plan(root, plan)
+                if exit_code != 0 or not bool(plan.get("safe_execute")):
+                    return exit_code
+            else:
+                print(format_auto_plan(plan))
+                return 0
+        if args.execute:
+            follow_up = auto_plan(root)
+            if not bool(follow_up.get("safe_execute")):
+                print(format_auto_plan(follow_up))
+                print("[stop] human decision required; not executing")
+        return exit_code
     if args.command == "route":
         lower = args.task.lower()
         for key, skill in ROUTE_HINTS.items():

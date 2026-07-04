@@ -134,3 +134,109 @@ def test_orchestrator_pending_confirmation_command_uses_real_unit_id(tmp_path: P
     assert ".agents/skills/paper-analyst/scripts/paper.py confirm --paper-id p-pending-123456" in next_text
     assert "<id>" not in dashboard
     assert "<id>" not in next_text
+
+
+def test_orchestrator_empty_kb_outputs_onboarding_command() -> None:
+    orchestrate = _load_script("research-orchestrator", "orchestrate.py", "orchestrator_script_for_empty_kb")
+
+    dashboard = orchestrate.format_dashboard([])
+    next_text = orchestrate.format_next([])
+
+    assert "KB 为空，第一步：intake add 一篇论文" in dashboard
+    assert ".agents/skills/source-intake/scripts/intake.py add --kind paper" in dashboard
+    assert "KB 为空，第一步：intake add 一篇论文" in next_text
+
+
+def test_orchestrator_dashboard_detects_loose_unscreened_unit(tmp_path: Path) -> None:
+    orchestrate = _load_script("research-orchestrator", "orchestrate.py", "orchestrator_script_for_loose_unit")
+    root = _make_workspace(tmp_path)
+    write_yaml_if_changed(
+        record_path(root, "paper", "p-loose-123456"),
+        {
+            "id": "p-loose-123456",
+            "kind": "paper",
+            "title": "Loose Paper",
+            "status": "active",
+            "maturity": "lightweight",
+            "confirmation_status": "auto_confirmed",
+            "needs_human_confirmation": False,
+            "information_types": ["fact"],
+            "summary": "Loose summary",
+            "tags": [],
+            "topics": [],
+            "candidate_pools": [],
+            "source": {"original_uri": "", "file_hash": ""},
+            "payload": {"quick_screen": {}, "state": {"full_note_status": "not_started"}},
+        },
+    )
+
+    items = orchestrate.program_dashboard_items(root)
+    dashboard = orchestrate.format_dashboard(items)
+
+    assert items[0]["program_id"] == "loose:p-loose-123456"
+    assert "unscreened paper `p-loose-123456`" in dashboard
+    assert ".agents/skills/paper-analyst/scripts/paper.py screen --paper-id p-loose-123456" in dashboard
+
+
+def test_orchestrator_auto_dry_run_plans_exact_command_for_loose_unit(tmp_path: Path) -> None:
+    orchestrate = _load_script("research-orchestrator", "orchestrate.py", "orchestrator_script_for_auto_plan")
+    root = _make_workspace(tmp_path)
+    write_yaml_if_changed(
+        record_path(root, "idea", "i-loose-123456"),
+        {
+            "id": "i-loose-123456",
+            "kind": "idea",
+            "title": "Loose Idea",
+            "status": "draft",
+            "maturity": "lightweight",
+            "confirmation_status": "auto_confirmed",
+            "needs_human_confirmation": False,
+            "information_types": ["fact"],
+            "summary": "Loose idea",
+            "tags": [],
+            "topics": [],
+            "candidate_pools": [],
+            "source": {"original_uri": "", "file_hash": ""},
+            "payload": {"analysis": {}, "review": {"review_status": "not_started"}},
+        },
+    )
+
+    text = orchestrate.format_auto_plan(orchestrate.auto_plan(root))
+
+    assert "idea `i-loose-123456` needs analysis" in text
+    assert ".agents/skills/idea-workbench/scripts/idea.py analyze --idea-id i-loose-123456" in text
+    assert "safe refresh" in text
+
+
+def test_orchestrator_auto_execute_stops_at_pending_confirmation(tmp_path: Path, capsys) -> None:
+    orchestrate = _load_script("research-orchestrator", "orchestrate.py", "orchestrator_script_for_auto_gate")
+    root = _make_workspace(tmp_path)
+    write_yaml_if_changed(
+        record_path(root, "paper", "p-gated-123456"),
+        {
+            "id": "p-gated-123456",
+            "kind": "paper",
+            "title": "Gated Paper",
+            "status": "screened",
+            "maturity": "lightweight",
+            "confirmation_status": "pending_user_confirmation",
+            "needs_human_confirmation": True,
+            "information_types": ["fact"],
+            "summary": "Gated summary",
+            "tags": [],
+            "topics": [],
+            "candidate_pools": [],
+            "source": {"original_uri": "", "file_hash": ""},
+            "payload": {"quick_screen": {"worth_deep_reading": "maybe"}},
+        },
+    )
+
+    plan = orchestrate.auto_plan(root)
+    exit_code = orchestrate.execute_auto_plan(root, plan)
+    output = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert plan["safe_execute"] is False
+    assert "stop for human decision" in output
+    assert "not executing" in output
+    assert ".agents/skills/knowledge-base-manager/scripts/kb.py confirm --id p-gated-123456" in output
