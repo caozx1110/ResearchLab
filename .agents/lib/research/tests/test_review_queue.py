@@ -192,6 +192,47 @@ def test_review_queue_confirm_without_evidence_rejects_before_write(tmp_path: Pa
     assert not (tmp_path / "kb" / "index.yaml").exists()
 
 
+def test_confirm_command_blank_evidence_rejects_before_any_batch_write(tmp_path: Path, monkeypatch) -> None:
+    kb = _load_kb_module()
+    (tmp_path / ".agents").mkdir()
+    (tmp_path / "AGENTS.md").write_text("# test\n", encoding="utf-8")
+    ensure_v2_workspace(tmp_path)
+    write_yaml_if_changed(runtime_preferences_path(tmp_path), {"identity": {"default_confirmed_by": "czx-default"}})
+    unit_ids = ["p-cli-empty-a-123456", "p-cli-empty-b-123456"]
+    for index, unit_id in enumerate(unit_ids, start=1):
+        _write_record(
+            tmp_path,
+            _record(unit_id, f"CLI Empty Evidence {index}", "pending_user_confirmation", f"2026-01-0{index}T00:00:00+00:00"),
+        )
+    monkeypatch.setattr(kb, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(kb, "checkpoint_and_report", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "kb.py",
+            "confirm",
+            "--id",
+            unit_ids[0],
+            "--id",
+            unit_ids[1],
+            "--confirmed-by",
+            "czx",
+            "--evidence",
+            "",
+        ],
+    )
+
+    with pytest.raises(SystemExit, match="--evidence"):
+        kb.main()
+
+    for unit_id in unit_ids:
+        record = load_yaml(record_path(tmp_path, "paper", unit_id), default={})
+        assert record["confirmation_status"] == "pending_user_confirmation"
+        assert "confirmation" not in record
+    assert not (tmp_path / "kb" / "index.yaml").exists()
+
+
 def test_batch_confirm_collapses_ai_information_types_and_sets_lifecycle(tmp_path: Path) -> None:
     kb = _load_kb_module()
     ensure_v2_workspace(tmp_path)

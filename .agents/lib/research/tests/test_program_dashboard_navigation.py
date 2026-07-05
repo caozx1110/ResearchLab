@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import sys
 from pathlib import Path
 
@@ -240,6 +241,49 @@ def test_orchestrator_auto_execute_stops_at_pending_confirmation(tmp_path: Path,
     assert "stop for human decision" in output
     assert "not executing" in output
     assert ".agents/skills/knowledge-base-manager/scripts/kb.py confirm --id p-gated-123456" in output
+
+
+def test_orchestrator_auto_execute_passes_root_env_and_arg_to_child(tmp_path: Path, monkeypatch) -> None:
+    orchestrate = _load_script("research-orchestrator", "orchestrate.py", "orchestrator_script_for_auto_child_call")
+    root = _make_workspace(tmp_path)
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0, stdout="child ok\n", stderr="")
+
+    monkeypatch.setattr(orchestrate.subprocess, "run", fake_run)
+    plan = {
+        "safe_execute": True,
+        "step_type": "refresh",
+        "reason": "root-aware child call",
+        "command_parts": [
+            orchestrate.COMMAND_PREFIX,
+            ".agents/skills/idea-workbench/scripts/idea.py",
+            "--root",
+            "/wrong-root",
+            "analyze",
+            "--idea-id",
+            "i-root-123456",
+        ],
+    }
+
+    exit_code = orchestrate.execute_auto_plan(root, plan)
+
+    assert exit_code == 0
+    assert len(calls) == 1
+    command, kwargs = calls[0]
+    assert command == [
+        sys.executable,
+        ".agents/skills/idea-workbench/scripts/idea.py",
+        "--root",
+        str(root),
+        "analyze",
+        "--idea-id",
+        "i-root-123456",
+    ]
+    assert kwargs["cwd"] == root
+    assert kwargs["env"]["RESEARCH_PROJECT_ROOT"] == str(root)
 
 
 def test_orchestrator_auto_execute_passes_root_to_child_under_symlinked_agents(tmp_path: Path) -> None:

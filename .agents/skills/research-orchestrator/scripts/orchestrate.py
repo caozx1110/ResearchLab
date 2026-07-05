@@ -100,12 +100,62 @@ ROUTE_HINTS = {
 
 COMMAND_PREFIX = "${RESEARCH_PYTHON:-python3}"
 SAFE_AUTO_STEPS = {"screen", "build-index", "refresh", "generate-note"}
+ROOT_AWARE_AUTO_SCRIPTS = {
+    ".agents/skills/blog-analyst/scripts/blog.py",
+    ".agents/skills/discussion-archivist/scripts/archive.py",
+    ".agents/skills/experiment-workbench/scripts/experiment.py",
+    ".agents/skills/idea-workbench/scripts/idea.py",
+    ".agents/skills/knowledge-base-manager/scripts/kb.py",
+    ".agents/skills/literature-synthesizer/scripts/synthesize.py",
+    ".agents/skills/method-designer/scripts/method.py",
+    ".agents/skills/paper-analyst/scripts/paper.py",
+    ".agents/skills/repo-analyst/scripts/repo.py",
+    ".agents/skills/research-config-manager/scripts/config.py",
+    ".agents/skills/research-navigator/scripts/navigate.py",
+    ".agents/skills/research-orchestrator/scripts/orchestrate.py",
+    ".agents/skills/source-intake/scripts/intake.py",
+    ".agents/skills/wiki-adapter/scripts/wiki.py",
+}
 
 
 def executable_command(parts: list[str]) -> list[str]:
     command = list(parts)
     if command and command[0] == COMMAND_PREFIX:
         command[0] = sys.executable or "python3"
+    return command
+
+
+def accepts_project_root_argument(script: str) -> bool:
+    normalized = script.replace(os.sep, "/")
+    return normalized in ROOT_AWARE_AUTO_SCRIPTS or any(
+        normalized.endswith(f"/{root_aware_script}")
+        for root_aware_script in ROOT_AWARE_AUTO_SCRIPTS
+    )
+
+
+def command_with_project_root(parts: list[str], root: Path) -> list[str]:
+    command = list(parts)
+    for part in command:
+        if accepts_project_root_argument(part):
+            cleaned: list[str] = []
+            cursor = 0
+            while cursor < len(command):
+                if command[cursor] == "--root":
+                    cursor += 2
+                    continue
+                cleaned.append(command[cursor])
+                cursor += 1
+            script_index = next(
+                cleaned_index
+                for cleaned_index, cleaned_part in enumerate(cleaned)
+                if accepts_project_root_argument(cleaned_part)
+            )
+            return [
+                *cleaned[: script_index + 1],
+                "--root",
+                str(root),
+                *cleaned[script_index + 1 :],
+            ]
     return command
 
 
@@ -316,8 +366,9 @@ def execute_auto_plan(root: Path, plan: dict[str, Any]) -> int:
     command_parts = [str(part) for part in plan.get("command_parts") or []]
     print(format_auto_plan(plan))
     child_env = {**os.environ, "RESEARCH_PROJECT_ROOT": str(root)}
+    child_command = command_with_project_root(command_parts, root)
     result = subprocess.run(
-        executable_command(command_parts),
+        executable_command(child_command),
         cwd=root,
         env=child_env,
         text=True,
