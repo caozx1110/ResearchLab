@@ -358,6 +358,9 @@ def create_handler(*, project_root: Path):
             except ValueError as exc:
                 self._send_error_json(str(exc))
                 return
+            except OSError as exc:
+                self._send_error_json(f"保存文件失败：{exc}", status=HTTPStatus.INTERNAL_SERVER_ERROR)
+                return
             self._send_json(response)
 
         def _handle_terminal_open(self) -> None:

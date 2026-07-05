@@ -44,6 +44,8 @@ def parse_metrics(items: list[str]) -> dict[str, str]:
         if "=" in item:
             key, value = item.split("=", 1)
             payload[key] = value
+        else:
+            sys.stderr.write(f"[experiment.parse_metrics] WARN: ignoring --metric without '=': {item}\n")
     return payload
 
 
