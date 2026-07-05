@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from research.v2 import _record_needs_gate, validate_write
+from research.v2 import _record_needs_gate, normalize_record_schema, validate_write
 
 
 def test_record_needs_gate_ignores_plain_source_facts() -> None:
@@ -45,6 +45,29 @@ def test_validate_write_requires_needs_human_confirmation(capsys: pytest.Capture
     assert len(violations) == 1
     assert "needs_human_confirmation must be true" in violations[0]
     assert "WARN" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("confirmation_status", "expected"),
+    [
+        ("pending_user_confirmation", True),
+        ("auto_confirmed", False),
+        ("confirmed", False),
+        ("rejected", False),
+    ],
+)
+def test_normalize_record_schema_syncs_needs_human_confirmation(confirmation_status: str, expected: bool) -> None:
+    normalized = normalize_record_schema(
+        {
+            "kind": "paper",
+            "title": "Schema Sync",
+            "maturity": "lightweight",
+            "confirmation_status": confirmation_status,
+            "needs_human_confirmation": not expected,
+        }
+    )
+
+    assert normalized["needs_human_confirmation"] is expected
 
 
 def test_validate_write_accepts_pending_ai_record(capsys: pytest.CaptureFixture[str]) -> None:

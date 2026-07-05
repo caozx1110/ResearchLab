@@ -87,3 +87,20 @@ def test_detect_duplicate_by_normalized_title(tmp_path: Path) -> None:
 
     assert duplicate is not None
     assert duplicate["id"] == "p-title-123456"
+
+
+def test_detect_duplicate_returns_none_for_distinct_source_and_title(tmp_path: Path) -> None:
+    ensure_v2_workspace(tmp_path)
+    _write_record(
+        tmp_path,
+        {
+            "id": "p-existing-123456",
+            "kind": "paper",
+            "title": "Existing Paper",
+            "source": {"original_uri": "https://example.com/existing", "file_hash": ""},
+        },
+    )
+
+    duplicate = detect_duplicate(tmp_path, "paper", "https://example.com/new", title="New Paper")
+
+    assert duplicate is None

@@ -189,9 +189,8 @@ def resolve_idea_records(root: Path, *, idea_ids: list[str], pool: str, bundle_i
     elif pool:
         normalized_pool = slugify(pool, max_words=12)
         idea_ids = [record["id"] for record in iter_records(root, kind="idea") if normalized_pool in record.get("candidate_pools", [])]
-        if not bundle_id:
-            bundle_id = normalized_pool or "idea-pool"
-            update_bundle(root, bundle_id, idea_ids=idea_ids)
+        bundle_id = normalized_pool or "idea-pool"
+        update_bundle(root, bundle_id, idea_ids=idea_ids)
     records = []
     for idea_id in idea_ids:
         record, _ = locate_record(root, idea_id, kind="idea")

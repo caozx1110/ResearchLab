@@ -11,7 +11,7 @@ except ModuleNotFoundError:
     _yaml = None
 
 
-def load_yaml(path: Path, default: Any | None = None, *, allow_simple_fallback: bool = False) -> Any:
+def load_yaml(path: Path, default: Any | None = None) -> Any:
     if not path.exists():
         return default
     text = path.read_text(encoding="utf-8")

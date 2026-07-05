@@ -20,6 +20,11 @@ def test_canonical_unit_id_uses_at_least_six_hash_chars() -> None:
     assert is_canonical_unit_id("repo", unit_id)
 
 
+def test_is_canonical_unit_id_rejects_invalid_ids() -> None:
+    assert not is_canonical_unit_id("paper", "r-openvla-123456")
+    assert not is_canonical_unit_id("dataset", "d-example-123456")
+
+
 def test_canonical_unit_id_with_short_hash_falls_back_to_title_hash() -> None:
     fallback = canonical_unit_id("blog", title="Fallback Title", source="https://example.com/a")
     generated = canonical_unit_id_with_hash("blog", title="Fallback Title", source="https://example.com/a", hash_value="abc")

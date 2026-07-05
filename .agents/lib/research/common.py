@@ -301,7 +301,7 @@ def _normalize_domain_taxonomy_seed(canonical_tag: str, item: dict[str, Any]) ->
 @lru_cache(maxsize=16)
 def _load_domain_profile_cached(project_root_str: str) -> dict[str, Any]:
     project_root = Path(project_root_str)
-    payload = load_yaml(domain_profile_path(project_root), default={}, allow_simple_fallback=True)
+    payload = load_yaml(domain_profile_path(project_root), default={})
     if not isinstance(payload, dict):
         payload = blank_domain_profile()
     payload.setdefault("id", "domain-profile")
@@ -510,7 +510,7 @@ def _coerce_list(value: Any) -> list[Any]:
 
 
 def load_runtime_registry(project_root: Path) -> dict[str, Any]:
-    payload = load_yaml(runtime_memory_path(project_root), default={}, allow_simple_fallback=True)
+    payload = load_yaml(runtime_memory_path(project_root), default={})
     if not isinstance(payload, dict):
         payload = blank_runtime_registry()
     payload.setdefault("id", "runtime-environments")

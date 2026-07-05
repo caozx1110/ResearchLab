@@ -142,7 +142,6 @@ def _file_kind(path: Path) -> str:
 def _is_writable_text(project_root: Path, path: Path) -> bool:
     if path.suffix.lower() not in WRITABLE_TEXT_SUFFIXES:
         return False
-    rel = path.resolve().relative_to(project_root.resolve()).as_posix()
     for blocked in BLOCKED_WRITE_ROOTS:
         blocked_root = (project_root / blocked).resolve()
         if path_is_relative_to(path, blocked_root):
@@ -358,6 +357,9 @@ def create_handler(*, project_root: Path):
                     response["git_checkpoint"] = checkpoint.get("commit")
             except ValueError as exc:
                 self._send_error_json(str(exc))
+                return
+            except OSError as exc:
+                self._send_error_json(f"保存文件失败：{exc}", status=HTTPStatus.INTERNAL_SERVER_ERROR)
                 return
             self._send_json(response)
 
