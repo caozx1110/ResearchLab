@@ -389,6 +389,7 @@ def default_runtime_preferences() -> dict[str, Any]:
         "pdf": {
             "prefer_structured_source": True,
             "auto_extract_figures": False,
+            "figure_extraction_mode": "caption-region",
             "reuse_cached_parse": True,
             "figure_include_tables": True,
             "figure_render_scale": 2.5,
@@ -477,6 +478,7 @@ def load_runtime_preferences(project_root: Path) -> dict[str, Any]:
         pdf = {}
     pdf["prefer_structured_source"] = bool(pdf.get("prefer_structured_source"))
     pdf["auto_extract_figures"] = bool(pdf.get("auto_extract_figures"))
+    pdf["figure_extraction_mode"] = "caption-region"
     pdf["reuse_cached_parse"] = bool(pdf.get("reuse_cached_parse"))
     pdf["figure_include_tables"] = bool(pdf.get("figure_include_tables", True))
     try:
