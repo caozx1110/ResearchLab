@@ -903,6 +903,7 @@ def normalize_record_schema(record: dict[str, Any]) -> dict[str, Any]:
     normalized["status"] = str(normalized.get("status") or "draft")
     normalized["maturity"] = str(normalized.get("maturity") or "lightweight")
     normalized["confirmation_status"] = str(normalized.get("confirmation_status") or "auto_confirmed")
+    normalized["needs_human_confirmation"] = normalized["confirmation_status"] == "pending_user_confirmation"
     normalized["legacy_ids"] = [
         item
         for item in _unique_text_list(normalized.get("legacy_ids"))
