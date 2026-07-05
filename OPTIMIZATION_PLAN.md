@@ -390,3 +390,78 @@ Part B 的 Top 6 已由 Codex 逐项单独提交（6 commits），并经 **7 单
 - **F4（nit，测试补强）** ①R4 的 3 个 shared-helper 测试是同义反复（`wrapper(record)==shared(record)`）→ 改为断言**具体渲染的命令串**（脚本路径+id flag+`${RESEARCH_CONFIRM_EVIDENCE:?...}` 占位符）以真正锁字节输出；②S1 的 `test_review_queue_lists_selected_ideas_with_pending_content` 手写 record、没驱动 `idea.py select` → 改为端到端跑 select 再断言进 review-queue（或删，因 `test_idea_selection.py` 已覆盖核心）；③S2 加"符号链接威胁模型"测试（`.agents` symlink 指向另一 fake repo，断言 `--root`/env 写到 sandbox 而非 symlink 目标，且覆盖 write 命令而非仅 init）。
 
 > **交 Codex 范围** = F1+F2+F3（should-fix：补全 S2 安全的 fan-out + flag 一致性 + 锁治理红线测试）+ F4（测试补强）。约束同上：治理红线不动、import 面兼容、每项跑测试、逐项 commit。被 review 驳回 2 条（不做）。
+
+---
+---
+
+# Part D —— 第 6 轮：经验/skill-演化记忆机制（§18，已与用户敲定）
+
+## 18. learnings 记忆机制（扩展 skill-evolution-advisor）
+
+> 目标：出错/走弯路/被用户纠正的**当下轻量记一笔**，服务两件事——① 帮 skill 后续迭代；② 让 agent 记住用户习惯与曾经的坑。与用户讨论敲定的方案（2026-07-05）。**核心边界：agent 绝不据此自动改 skill——skill 问题只记录，由用户阅读后决定是否优化。**
+
+### 归属
+扩展现有 `skill-evolution-advisor`（**保留目录名/skill 名**，避免牵动 openai.yaml/路由/文档；只拓宽 SKILL.md description 为"经验 + skill 演化记忆"）。已有的 `create_retrospective.py`（深度事后复盘）保留不动，新增轻量 capture/recall/promote。
+
+### 存储
+`kb/memory/learnings.yaml`（append-only）。条目：
+```yaml
+- id: lrn-<YYYYMMDD>-NNN
+  created_at: ''                 # UTC iso
+  category: skill-defect | user-preference | recurring-issue
+  text: ""                       # 自由文本，一句话
+  source: agent | user           # agent 自省 vs 用户指出
+  skill: ""                      # 可选，涉及的 skill
+  context: ""                    # 可选
+  status: pending | confirmed | dismissed   # 沿用确认门控
+  occurrences: 1                 # 相似条目命中则 +1，不新增行
+  last_seen_at: ''
+```
+（既有 `kb/memory/skill-evolution/retrospectives/` 不变。）
+
+### 命令（加到 skill-evolution-advisor 脚本，或同目录新脚本 `learnings.py`）
+- `log --category <c> --text "..." [--source agent|user] [--skill X] [--context ...]`：轻量捕获；对已有相似条目（同 category + 文本近似）**bump occurrences + last_seen_at**，否则新增，默认 `status=pending`。
+- `recall [--kind prefs|gotchas|defects|all] [--limit N]`：打印**确认过的** user-preference（习惯）+ recurring-issue（坑）摘要；`--kind defects` 列**待你审的 skill 问题**（按 occurrences 降序，复发的顶到前面）。供会话开始读一眼。
+- `promote --id <id>`：**由用户确认**把一条 user-preference 提升进 `runtime-preferences.yaml` 的 `learned_preferences` 块（agent 已会读的结构化配置，自动生效），并把该 learning 置 `confirmed`。
+- `review --id <id> --status confirmed|dismissed`：用户对 pending 条目拍板。
+
+### 分流（两类受众）
+- **`skill-defect` → 只记录、给用户审**。⚠️ **agent 不得据此改 skill**。`occurrences` 只提升可见度（"坑了你 N 次"），仍只供用户决定。用户可 `recall --kind defects` 阅读；需要时**用户**自己决定导入 OPTIMIZATION_PLAN 优化——agent 不自动导。
+- **`user-preference` / `recurring-issue` → agent 记忆**：确认后进结构化配置（习惯）或作为"已知坑"在 recall 摘要出现。
+
+### 召回半环（补上系统当前完全缺失的一半）
+1. **提升进结构化配置**：确认的 user-preference → `runtime-preferences.yaml: learned_preferences`。
+2. **会话开始 recall 摘要**：`navigate refresh` / `current-state` 读 `recall --kind all` 的紧凑摘要（已知习惯 + 已知坑 + 待审 skill 问题计数）；AGENTS.md 加一条：会话开始读一眼 recall。
+3. ❌ **不自动升级、不自动动 skill**（用户明确要求）。
+
+### 触发
+手动 + agent 自判。AGENTS.md 加一条习惯指令：**走弯路 / 被用户纠正时 `log` 一笔；skill 问题只记不改**。**无 hook**（"什么算错"难定义，易噪）。
+
+### 确认门控（与系统一致）
+捕获的是 AI 对"用户/系统"的**推断** → 默认 `pending`；用户 `review --confirmed` / `promote` 后才生效/被 agent 遵守，`dismissed` 归档。防止 agent 把错误假设当真。
+
+### 验收
+新增 capture/recall/promote/review 各带测试；`kb/memory/learnings.yaml` schema 写进 SCHEMAS.md；`navigate` 读 recall 的接线有测试；AGENTS.md + skill-evolution-advisor/SKILL.md 更新。import 面兼容、逐项 commit。
+
+---
+
+## 19. 遗留工作 necessity 分诊（2026-07-05，本轮只做 DO-NOW，其余留用户确认）
+
+> 用户指示：布置前先审必要性；只做**必须修**或**纯正向收益低风险**；不确定的留给用户。以下是对 plan 全部遗留项的分诊。
+
+### ✅ DO-NOW（本轮交 Codex：must-fix + 纯正向、零/低行为变更）
+- **§18 记忆机制**（用户明确要做）。
+- **§5 死代码清理**（纯负 diff、零行为变更）：v2.py 无用 import（:40）+ `figure_extraction_mode` 恒常量 flag（:467）+ compact_unit_ids 冗余守卫（:2184）；common.py `load_yaml` 死参 `allow_simple_fallback` + 2 处 `=True` 调用 + 孤儿 import；idea.py 恒真 `if not bundle_id`；kb_browser_lib.py 无用 os/shutil/re；open_kb_browser.py 无用 `import sys`；serve_kb_browser.py 无用 `rel`。**（先核实仍存在再删。）**
+- **§5 测试补强**（纯新增）：`validate_write` 默认 env 分支、`detect_duplicate` 返回 None、`is_canonical_unit_id` 拒绝分支——**若尚未覆盖**。
+- **§4.4 needs_human_confirmation 同步**（= C8 的 2 行）：`normalize_record_schema` 同步该字段与 confirmation_status（或改 SCHEMAS 注释）——纯一致性，低风险。
+- **B10 的"不再静默"半边**（must-fix 的安全子集）：`backup_source` 对无法归档的 binary/PDF 源**返回/打印显式 warning**，不再 `except: file_hash=''` 吞掉。⚠️ **只做"停止静默"，不做"实际下载 PDF"**（下载有网络/磁盘副作用，属 HOLD）。
+- **§5 error-handling 小修**（低风险）：experiment.py `parse_metrics` 丢弃无 `=` 的 `--metric` 时告警；orchestrate.py status 无守卫 `['key']`；serve_kb_browser.py PUT /api/file 捕获 OSError。
+
+### ⏸️ HOLD（留用户确认——大重构 / 新功能 / 有争议的行为变更）
+- **T-GODFILE-v2**（v2.py 7 模块拆分）、**T-FINALIZE**（finalize_unit_step——且刚硬化过确认流，改动有回归风险）、**T-CHECKPOINT**：大重构，留确认。
+- **C1/C2/C3**（KIND_REGISTRY / CLI harness / 类型化 RecordView）：结构性大投资，留确认。
+- **F2-F5**（gap→idea 闭环 / backlink 图 / reuse_flags→类型化边 / dataset kind）：新功能、改 schema，留确认。
+- **S3-S7**（周报 renderer / navigator 下一步 / synthesizer 召回 / paper note 覆盖 / repo readiness）：功能增强，留确认。
+- **D3 quickstart / D5 doctor / D8 URL PDF 抓取 / B10 下载半边**：新命令或网络/磁盘副作用，留确认。
+- **§4.5 god-file 拆分（kb_browser_lib/paper/orchestrate）**：结构重构，留确认。
+- **B8 workflow 生命周期命令的"补 answer/resolve/drop"**（若上一轮只修了计数、未加命令）：功能新增，留确认核实。
