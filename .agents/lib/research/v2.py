@@ -372,6 +372,9 @@ def default_runtime_preferences() -> dict[str, Any]:
         "identity": {
             "default_confirmed_by": "",
         },
+        "learned_preferences": {
+            "items": [],
+        },
         "paper": {
             "auto_screen_on_intake": True,
             "auto_complete_note": False,
@@ -429,6 +432,13 @@ def load_runtime_preferences(project_root: Path) -> dict[str, Any]:
         identity = {}
     identity["default_confirmed_by"] = str(identity.get("default_confirmed_by") or "").strip()
     normalized["identity"] = identity
+
+    learned_preferences = normalized.get("learned_preferences", {})
+    if not isinstance(learned_preferences, dict):
+        learned_preferences = {}
+    items = learned_preferences.get("items", [])
+    learned_preferences["items"] = [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+    normalized["learned_preferences"] = learned_preferences
 
     paper = normalized.get("paper", {})
     if not isinstance(paper, dict):
@@ -518,7 +528,7 @@ def load_runtime_preferences(project_root: Path) -> dict[str, Any]:
 def write_runtime_preferences(project_root: Path, payload: dict[str, Any]) -> Path:
     current = load_runtime_preferences(project_root)
     merged = copy.deepcopy(current)
-    for key in ("browser", "identity", "paper", "pdf", "versioning"):
+    for key in ("browser", "identity", "learned_preferences", "paper", "pdf", "versioning"):
         value = payload.get(key)
         if isinstance(value, dict):
             target = merged.setdefault(key, {})

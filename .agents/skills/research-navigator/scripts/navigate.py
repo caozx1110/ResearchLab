@@ -16,6 +16,7 @@ else:
     raise SystemExit("Could not locate .agents/lib")
 
 from research.common import add_project_root_argument, load_yaml, print_resolved_project_roots, write_text_if_changed
+from research.learnings import load_learnings, render_recall_digest
 from research.v2 import iter_records, kb_root, project_root, user_root
 
 
@@ -42,7 +43,11 @@ def load_program_states(root: Path) -> list[dict]:
     return states
 
 
-def render_current(records: list[dict], program_states: list[dict] | None = None) -> str:
+def render_current(
+    records: list[dict],
+    program_states: list[dict] | None = None,
+    recall_digest: str = "",
+) -> str:
     lines = ["# Current State", "", "## Programs", ""]
     states = sorted(program_states or [], key=lambda item: str(item.get("updated_at") or ""), reverse=True)
     for state in states[:12]:
@@ -61,6 +66,8 @@ def render_current(records: list[dict], program_states: list[dict] | None = None
         lines.append(f"- `{item['id']}` · {item['kind']} · {item['title']} · {item.get('summary', '')}")
     if len(lines) == start:
         lines.append("- 暂无已确认条目")
+    if recall_digest.strip():
+        lines.extend(["", recall_digest.strip()])
     return "\n".join(lines).strip() + "\n"
 
 
@@ -98,12 +105,13 @@ def main() -> int:
     print_resolved_project_roots(root)
     records = iter_records(root)
     program_states = load_program_states(root)
+    recall_digest = render_recall_digest(load_learnings(root), kind="all", limit=5)
     current_path = user_root(root) / "current-state.md"
     nav_path = user_root(root) / "navigation.md"
     reading_path = user_root(root) / "reading-lists" / "current-reading.md"
 
     if args.command in {"refresh", "current-state"}:
-        write_text_if_changed(current_path, render_current(records, program_states))
+        write_text_if_changed(current_path, render_current(records, program_states, recall_digest))
     if args.command == "refresh":
         write_text_if_changed(nav_path, render_navigation(records))
         write_text_if_changed(reading_path, render_reading_list(records))

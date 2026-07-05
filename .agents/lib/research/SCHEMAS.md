@@ -350,6 +350,29 @@ topics:
 
 ---
 
+## memory 文件 <a id="memory-files"></a>
+
+### learnings.yaml <a id="learnings-yaml"></a>
+
+落在 `kb/memory/learnings.yaml`，由 `skill-evolution-advisor` 追加和复审。捕获条目默认 `pending`，因为它是对用户习惯、复发问题或 skill 缺陷的 AI 推断；只有用户 `review` / `promote` 后才进入可遵守的 confirmed 状态。`skill-defect` 只记录供用户审阅，不得自动修改 skill 或 `OPTIMIZATION_PLAN.md`。
+
+```yaml
+- id: lrn-<YYYYMMDD>-NNN
+  created_at: ""                 # UTC iso
+  category: skill-defect | user-preference | recurring-issue
+  text: ""                       # 一句话自由文本
+  source: agent | user
+  skill: ""                      # 可选，涉及的 skill
+  context: ""                    # 可选
+  status: pending | confirmed | dismissed
+  occurrences: 1                 # 相似条目命中则 +1，不新增行
+  last_seen_at: ""               # UTC iso
+```
+
+确认后的 `user-preference` 可通过 `promote` 写入 `kb/config/runtime-preferences.yaml` 的 `learned_preferences.items`；确认后的 `recurring-issue` 仅出现在 recall 摘要中。
+
+---
+
 ## ownership 矩阵 <a id="ownership"></a>
 
 | artifact | 写入 skill | 读取 skill | 备注 |
@@ -362,6 +385,7 @@ topics:
 | kb/config/candidate-pools.yaml | knowledge-base-manager | source-intake, literature-synthesizer, idea-workbench | research-config-manager 提供 seed/policy 输入 |
 | kb/config/topic-taxonomy.yaml | knowledge-base-manager | analyst skills, literature-synthesizer | 同上 |
 | kb/config/runtime-preferences.yaml | research-config-manager | 全部 | 唯一直接归 config-manager 的 artifact |
+| kb/memory/learnings.yaml | skill-evolution-advisor | research-navigator, 全部（通过 recall 摘要） | 经验/习惯/skill 缺陷记忆；skill-defect record-only |
 | kb/synthesis/wiki/*.md | wiki-adapter | 全部（人面向） | 复用笔记/术语沉淀 |
 | kb/user/* | research-navigator | （只读） | 人面向入口，read-only |
 

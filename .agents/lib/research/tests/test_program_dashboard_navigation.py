@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from research.common import append_list_item, write_yaml_if_changed
+from research.learnings import log_learning, review_learning
 from research.v2 import record_path
 
 
@@ -49,6 +50,41 @@ def test_navigator_current_state_renders_program_states() -> None:
 
     assert "`p-dashboard` · stage=method-design · OQ=2 · evidence=1 · Build the dashboard" in text
     assert "暂无 program state" not in text
+
+
+def test_navigator_current_state_includes_recall_digest(tmp_path: Path, monkeypatch) -> None:
+    navigate = _load_script("research-navigator", "navigate.py", "navigator_script_for_recall")
+    root = _make_workspace(tmp_path)
+    pref, _ = log_learning(
+        root,
+        category="user-preference",
+        text="Prefer compact Chinese status pages.",
+        source="user",
+    )
+    gotcha, _ = log_learning(
+        root,
+        category="recurring-issue",
+        text="Do not skip confirmation gates.",
+        source="agent",
+    )
+    log_learning(
+        root,
+        category="skill-defect",
+        text="Navigator omitted memory recall.",
+        source="agent",
+        skill="research-navigator",
+    )
+    review_learning(root, learning_id=pref["id"], status="confirmed")
+    review_learning(root, learning_id=gotcha["id"], status="confirmed")
+    monkeypatch.setattr(sys, "argv", ["navigate.py", "--root", str(root), "current-state"])
+
+    assert navigate.main() == 0
+    text = (root / "kb" / "user" / "current-state.md").read_text(encoding="utf-8")
+
+    assert "## Recall Digest" in text
+    assert "Prefer compact Chinese status pages." in text
+    assert "Do not skip confirmation gates." in text
+    assert "Pending skill defects: 1" in text
 
 
 def test_orchestrator_dashboard_prioritizes_blocking_evidence(tmp_path: Path) -> None:
