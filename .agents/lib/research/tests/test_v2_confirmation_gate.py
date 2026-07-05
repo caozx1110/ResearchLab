@@ -48,26 +48,59 @@ def test_validate_write_requires_needs_human_confirmation(capsys: pytest.Capture
 
 
 @pytest.mark.parametrize(
-    ("confirmation_status", "expected"),
+    ("confirmation_status", "information_types", "source", "expected"),
     [
-        ("pending_user_confirmation", True),
-        ("auto_confirmed", False),
-        ("confirmed", False),
-        ("rejected", False),
+        pytest.param("pending_user_confirmation", ["inference"], {}, True, id="ai-info-pending"),
+        pytest.param("rejected", ["evaluation"], {}, True, id="ai-info-rejected"),
+        pytest.param("pending_user_confirmation", ["fact"], {"kind": "ai"}, True, id="ai-source-pending"),
+        pytest.param("auto_confirmed", ["evaluation"], {}, True, id="ai-info-auto-invalid"),
+        pytest.param("pending_user_confirmation", ["fact"], {}, False, id="non-ai-pending"),
+        pytest.param("auto_confirmed", ["fact"], {}, False, id="non-ai-auto"),
+        pytest.param("confirmed", ["evaluation"], {}, False, id="confirmed-final"),
+        pytest.param("rejected", ["fact"], {}, False, id="non-ai-rejected"),
     ],
 )
-def test_normalize_record_schema_syncs_needs_human_confirmation(confirmation_status: str, expected: bool) -> None:
+def test_normalize_record_schema_syncs_needs_human_confirmation(
+    confirmation_status: str,
+    information_types: list[str],
+    source: dict[str, str],
+    expected: bool,
+) -> None:
     normalized = normalize_record_schema(
         {
             "kind": "paper",
             "title": "Schema Sync",
             "maturity": "lightweight",
+            "source": source,
+            "information_types": information_types,
             "confirmation_status": confirmation_status,
             "needs_human_confirmation": not expected,
         }
     )
 
     assert normalized["needs_human_confirmation"] is expected
+
+
+@pytest.mark.parametrize("confirmation_status", ["pending_user_confirmation", "rejected"])
+def test_normalize_then_validate_write_accepts_ai_pending_and_rejected(
+    confirmation_status: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    normalized = normalize_record_schema(
+        {
+            "kind": "paper",
+            "title": "AI Round Trip",
+            "maturity": "lightweight",
+            "information_types": ["evaluation"],
+            "confirmation_status": confirmation_status,
+            "needs_human_confirmation": False,
+        }
+    )
+
+    assert normalized["needs_human_confirmation"] is True
+    assert validate_write(normalized, strict=False) == []
+    assert capsys.readouterr().err == ""
+    assert validate_write(normalized, strict=True) == []
 
 
 def test_validate_write_accepts_pending_ai_record(capsys: pytest.CaptureFixture[str]) -> None:

@@ -915,7 +915,6 @@ def normalize_record_schema(record: dict[str, Any]) -> dict[str, Any]:
     normalized["status"] = str(normalized.get("status") or "draft")
     normalized["maturity"] = str(normalized.get("maturity") or "lightweight")
     normalized["confirmation_status"] = str(normalized.get("confirmation_status") or "auto_confirmed")
-    normalized["needs_human_confirmation"] = normalized["confirmation_status"] == "pending_user_confirmation"
     normalized["legacy_ids"] = [
         item
         for item in _unique_text_list(normalized.get("legacy_ids"))
@@ -924,6 +923,9 @@ def normalize_record_schema(record: dict[str, Any]) -> dict[str, Any]:
     normalized["information_types"] = sorted(
         item for item in {str(value) for value in normalized.get("information_types", [])} if item in INFORMATION_TYPES
     ) or ["fact"]
+    normalized["needs_human_confirmation"] = (
+        _record_needs_gate(normalized)[0] and normalized["confirmation_status"] != "confirmed"
+    )
     normalized["tags"] = _slug_list(normalized.get("tags"))
     normalized["topics"] = _slug_list(normalized.get("topics"))
     normalized["candidate_pools"] = _slug_list(normalized.get("candidate_pools"))
