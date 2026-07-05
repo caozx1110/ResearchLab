@@ -487,3 +487,12 @@ Part B 的 Top 6 已由 Codex 逐项单独提交（6 commits），并经 **7 单
 - **N2（§18 治理测试补强）** `promote_learning` 代码正确（拒 skill-defect/recurring-issue/dismissed），但**无测试**锁这个 config-write 边界。加测试：promote 一个 skill-defect / recurring-issue / dismissed 各 raise；double-promote 幂等（同 id 只一条）；promote 保留 runtime-preferences 其它 section（如 identity.default_confirmed_by）。
 
 > 交 Codex = N1+N2（收尾，非阻塞）。约束同前：治理门控为准、import 面兼容、跑测试、逐项 commit、不 push。
+
+---
+
+## ✅ Part D 收敛结论（§18-§21 全部完成）
+
+- **§18 记忆机制**（merge `6b7ab1f`）+ **§19 DO-NOW 清理**（merge `4ae8fcf`）→ 并行 Codex worktree 施工、合并 main。
+- **终审查出 2 blocker** → **BK1/BK2 已修**（`e1f4216`/`f8e1714`，经验证：strict-mode reject 不再崩、AI-derived rejected 记录 gate 一致、config figure 模式恢复）。
+- **§21 收尾 nit** → **N1/N2 已修**（`c5ca26c`/`00a703f`：backup_warning 不再入 record.source；promote 治理边界补 5 个测试）。
+- **最终：134 测试全过、全部编译、工作树干净。** 治理红线全程守住（learning 默认 pending、promote 只接受 user-preference、skill 缺陷只记不改、确认门控自洽）。**未 push。**
