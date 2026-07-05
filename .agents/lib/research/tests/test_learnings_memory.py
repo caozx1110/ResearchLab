@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from research.learnings import (
     learnings_path,
     load_learnings,
@@ -11,7 +13,7 @@ from research.learnings import (
     render_recall_digest,
     review_learning,
 )
-from research.v2 import load_runtime_preferences
+from research.v2 import load_runtime_preferences, write_runtime_preferences
 
 
 def _workspace(tmp_path: Path) -> Path:
@@ -120,6 +122,71 @@ def test_promote_writes_runtime_preferences_and_confirms_learning(tmp_path: Path
             "context": "weekly report",
         }
     ]
+
+
+@pytest.mark.parametrize("category", ["skill-defect", "recurring-issue"])
+def test_promote_rejects_non_user_preference_learnings(tmp_path: Path, category: str) -> None:
+    root = _workspace(tmp_path)
+    entry, _ = log_learning(
+        root,
+        category=category,
+        text=f"Do not promote {category} entries.",
+        source="agent",
+        now=_now(),
+    )
+
+    with pytest.raises(ValueError):
+        promote_learning(root, learning_id=entry["id"])
+
+
+def test_promote_rejects_dismissed_user_preference(tmp_path: Path) -> None:
+    root = _workspace(tmp_path)
+    entry, _ = log_learning(
+        root,
+        category="user-preference",
+        text="Prefer brief status updates.",
+        source="user",
+        now=_now(),
+    )
+    review_learning(root, learning_id=entry["id"], status="dismissed")
+
+    with pytest.raises(ValueError):
+        promote_learning(root, learning_id=entry["id"])
+
+
+def test_promote_learning_is_idempotent_for_same_id(tmp_path: Path) -> None:
+    root = _workspace(tmp_path)
+    entry, _ = log_learning(
+        root,
+        category="user-preference",
+        text="Prefer concise commit messages.",
+        source="user",
+        now=_now(),
+    )
+
+    promote_learning(root, learning_id=entry["id"])
+    promote_learning(root, learning_id=entry["id"])
+
+    items = load_runtime_preferences(root)["learned_preferences"]["items"]
+    assert [item["id"] for item in items].count(entry["id"]) == 1
+
+
+def test_promote_preserves_existing_runtime_preferences_sections(tmp_path: Path) -> None:
+    root = _workspace(tmp_path)
+    write_runtime_preferences(root, {"identity": {"default_confirmed_by": "czx"}})
+    entry, _ = log_learning(
+        root,
+        category="user-preference",
+        text="Prefer Chinese human-facing markdown.",
+        source="user",
+        now=_now(),
+    )
+
+    promote_learning(root, learning_id=entry["id"])
+
+    preferences = load_runtime_preferences(root)
+    assert preferences["identity"]["default_confirmed_by"] == "czx"
+    assert preferences["learned_preferences"]["items"][0]["id"] == entry["id"]
 
 
 def test_review_sets_confirmed_or_dismissed(tmp_path: Path) -> None:
