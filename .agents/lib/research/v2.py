@@ -2255,23 +2255,34 @@ def backup_source(project_root: Path, kind: str, unit_id: str, source: str) -> d
     root = unit_root(project_root, kind, unit_id) / "source"
     ensure_dir(root)
     if is_url(source):
+        original_uri = normalize_remote_url(source)
         txt = root / "source-url.txt"
         write_text_if_changed(txt, source.strip() + "\n")
         backup_paths = [rel(project_root, txt)]
         file_hash = ""
+        backup_warning = ""
         try:
             content, content_type = fetch_url(source, timeout=15)
             if isinstance(content, str) and _is_html_response(content_type, content):
                 body = _truncate_snapshot_text(html_to_text(content))
                 if body:
-                    snapshot_text = f"# Source Snapshot\n\nSource: {normalize_remote_url(source)}\n\n{body.rstrip()}\n"
+                    snapshot_text = f"# Source Snapshot\n\nSource: {original_uri}\n\n{body.rstrip()}\n"
                     snapshot = root / "snapshot.md"
                     write_text_if_changed(snapshot, snapshot_text)
                     backup_paths.append(rel(project_root, snapshot))
                     file_hash = hashlib.sha256(snapshot_text.encode("utf-8")).hexdigest()
-        except Exception:  # noqa: BLE001
-            file_hash = ""
-        return {"original_uri": normalize_remote_url(source), "backup_paths": backup_paths, "backup_kind": "url", "file_hash": file_hash}
+                else:
+                    backup_warning = "URL source produced an empty text snapshot."
+            else:
+                content_label = content_type or type(content).__name__
+                backup_warning = f"URL source was not archived as a text snapshot: content_type={content_label}."
+        except Exception as exc:  # noqa: BLE001
+            backup_warning = f"URL source could not be archived as a text snapshot: {exc}"
+        payload = {"original_uri": original_uri, "backup_paths": backup_paths, "backup_kind": "url", "file_hash": file_hash}
+        if backup_warning:
+            payload["backup_warning"] = backup_warning
+            sys.stderr.write(f"[research/v2.backup_source] WARN: {backup_warning} source={original_uri}\n")
+        return payload
 
     normalized_source = normalize_storage_reference(project_root, source)
     resolved_source = resolve_local_reference(project_root, normalized_source)
