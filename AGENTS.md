@@ -16,6 +16,9 @@ Default preference order:
 - YAML keys, IDs, slugs, and folder names stay ASCII-safe.
 - Prefer `${RESEARCH_PYTHON:-python3}` for v2 scripts, but use a known YAML-capable runtime.
 - Runtime-specific configuration belongs in `kb/config/`.
+- Session start: read the `research-navigator` recall digest once.
+- When you go wrong or the user corrects you, log one learning with `skill-evolution-advisor/scripts/learnings.py log`.
+- Skill defects are record-only: never auto-modify a skill or `OPTIMIZATION_PLAN.md` from a captured defect.
 
 ## Layout
 
