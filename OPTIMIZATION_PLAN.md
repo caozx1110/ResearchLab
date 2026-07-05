@@ -476,3 +476,14 @@ Part B 的 Top 6 已由 Codex 逐项单独提交（6 commits），并经 **7 单
 - **BK2（gate 语义回归，CONFIRMED，3 个 review 单元独立命中）** §19 的 §4.4 sync 写成 `needs_human_confirmation = (confirmation_status == 'pending_user_confirmation')`，**与未改的 `validate_write` 门控矛盾**：门控要求 AI-derived 记录在 `confirmation_status ∈ {pending_user_confirmation, rejected}` 时 `needs_human_confirmation` 必须 True（v2.py:1584 + docstring）。实测：一个 AI-derived `rejected` 记录 normalize 后 `needs_human_confirmation=False` → `write_record→validate_write` **自我违约**。修：sync 规则改为与门控一致——`needs_human_confirmation = _record_needs_gate(record) and confirmation_status != 'confirmed'`（即 AI-derived 且未最终确认时为 True；非 AI-derived 且 auto/confirmed 时 False）。**同时修正 `test_v2_confirmation_gate.py` 里被写死的错误期望**（`('rejected', False)` 那条 codifies 了 bug）。加一个 `normalize→validate_write` 往返一致性测试（AI-derived 的 pending/rejected 都不产生 violation）。
 
 > 交 Codex 范围 = BK1 + BK2（都是 §19 引入的必修回归）。约束：治理门控为准（sync 服从 validate_write，不是反过来）；import 面兼容；跑测试；逐项 commit。
+
+---
+
+## 21. 终审收尾 nit（N 组，最后一批交 Codex）
+
+> BK1+BK2 已修（commit `e1f4216`/`f8e1714`，128 测试，两 blocker 经验证解除，strict-mode reject 不再崩）。终审另留 2 个非阻塞项：
+
+- **N1（B10 收尾）** `backup_source` 的 `backup_warning` 是**瞬态诊断字段**，但经 intake 存进 `record.source` 后被 `normalize_record_schema` 原样保留（实测 `record.source` 出现 `backup_warning`）→ 污染 canonical source 契约（SCHEMAS.md source 块无此字段）。修：warning 只走 stderr / 返回值旁路，**不写进 record.source**（或 normalize 时从 source 剥离）。加测试断言 normalize 后 source 无 backup_warning。
+- **N2（§18 治理测试补强）** `promote_learning` 代码正确（拒 skill-defect/recurring-issue/dismissed），但**无测试**锁这个 config-write 边界。加测试：promote 一个 skill-defect / recurring-issue / dismissed 各 raise；double-promote 幂等（同 id 只一条）；promote 保留 runtime-preferences 其它 section（如 identity.default_confirmed_by）。
+
+> 交 Codex = N1+N2（收尾，非阻塞）。约束同前：治理门控为准、import 面兼容、跑测试、逐项 commit、不 push。
