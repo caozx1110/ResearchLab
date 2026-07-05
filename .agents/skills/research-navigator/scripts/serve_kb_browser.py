@@ -142,7 +142,6 @@ def _file_kind(path: Path) -> str:
 def _is_writable_text(project_root: Path, path: Path) -> bool:
     if path.suffix.lower() not in WRITABLE_TEXT_SUFFIXES:
         return False
-    rel = path.resolve().relative_to(project_root.resolve()).as_posix()
     for blocked in BLOCKED_WRITE_ROOTS:
         blocked_root = (project_root / blocked).resolve()
         if path_is_relative_to(path, blocked_root):

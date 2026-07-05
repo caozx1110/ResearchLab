@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any
 
 from .common import (
-    KEYWORD_BLACKLIST,
     ensure_dir,
     file_sha256,
     fetch_url,
@@ -37,10 +36,6 @@ from .common import (
     yaml_duplicate_key_issues,
 )
 from .ids import (
-    COMPACT_UNIT_ID_HASH_LEN,
-    COMPACT_UNIT_ID_MAX_CHARS,
-    COMPACT_UNIT_ID_MAX_WORDS,
-    GREEK_LETTER_ALIASES,
     UNIT_KIND_PREFIXES,
     build_unit_id,
     canonical_unit_id,
@@ -392,7 +387,6 @@ def default_runtime_preferences() -> dict[str, Any]:
             "prefer_structured_source": True,
             "auto_extract_figures": False,
             "reuse_cached_parse": True,
-            "figure_extraction_mode": "caption-region",
             "figure_include_tables": True,
             "figure_render_scale": 2.5,
             "figure_crop_padding_pt": 12,
@@ -474,7 +468,6 @@ def load_runtime_preferences(project_root: Path) -> dict[str, Any]:
     pdf["prefer_structured_source"] = bool(pdf.get("prefer_structured_source"))
     pdf["auto_extract_figures"] = bool(pdf.get("auto_extract_figures"))
     pdf["reuse_cached_parse"] = bool(pdf.get("reuse_cached_parse"))
-    pdf["figure_extraction_mode"] = "caption-region"
     pdf["figure_include_tables"] = bool(pdf.get("figure_include_tables", True))
     try:
         pdf["figure_render_scale"] = max(1.0, float(pdf.get("figure_render_scale") or 2.5))
@@ -2423,7 +2416,7 @@ def compact_unit_ids(project_root: Path, *, kind: str | None = None, apply: bool
             continue
         old_hash = _extract_unit_id_hash(old_id)
         new_id = canonical_unit_id_with_hash(item_kind, title=title, source=source_uri, hash_value=old_hash)
-        if new_id != old_id and (new_id in reserved_new_ids or (new_id in occupied_ids and new_id != old_id)):
+        if new_id != old_id and (new_id in reserved_new_ids or new_id in occupied_ids):
             for hash_size in (10, 12, 16):
                 candidate = canonical_unit_id(item_kind, title=title, source=source_uri, hash_size=hash_size)
                 if candidate == old_id or (candidate not in reserved_new_ids and (candidate not in occupied_ids or candidate == old_id)):
