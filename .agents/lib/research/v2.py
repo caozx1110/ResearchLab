@@ -909,7 +909,12 @@ def normalize_record_schema(record: dict[str, Any]) -> dict[str, Any]:
     title = str(record.get("title") or "")
     maturity = str(record.get("maturity") or "lightweight")
     source = record.get("source", {})
-    template = _record_template(kind, title=title, maturity=maturity, source=source if isinstance(source, dict) else {})
+    if isinstance(source, dict):
+        source = {key: value for key, value in source.items() if key != "backup_warning"}
+        record = {**record, "source": source}
+    else:
+        source = {}
+    template = _record_template(kind, title=title, maturity=maturity, source=source)
     normalized = _deep_fill_missing(record, template)
     normalized["title"] = title or str(normalized.get("title") or normalized["id"])
     normalized["status"] = str(normalized.get("status") or "draft")

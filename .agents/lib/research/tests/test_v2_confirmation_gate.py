@@ -81,6 +81,26 @@ def test_normalize_record_schema_syncs_needs_human_confirmation(
     assert normalized["needs_human_confirmation"] is expected
 
 
+def test_normalize_record_schema_strips_backup_warning_from_source() -> None:
+    normalized = normalize_record_schema(
+        {
+            "kind": "paper",
+            "title": "Backup Warning",
+            "maturity": "lightweight",
+            "source": {
+                "original_uri": "https://example.com/source.pdf",
+                "backup_paths": ["kb/units/papers/p-backup-123456/source/source-url.txt"],
+                "backup_kind": "url",
+                "file_hash": "",
+                "backup_warning": "URL source was not archived as a text snapshot.",
+            },
+            "information_types": ["fact"],
+        }
+    )
+
+    assert "backup_warning" not in normalized["source"]
+
+
 @pytest.mark.parametrize("confirmation_status", ["pending_user_confirmation", "rejected"])
 def test_normalize_then_validate_write_accepts_ai_pending_and_rejected(
     confirmation_status: str,
