@@ -465,3 +465,14 @@ Part B 的 Top 6 已由 Codex 逐项单独提交（6 commits），并经 **7 单
 - **D3 quickstart / D5 doctor / D8 URL PDF 抓取 / B10 下载半边**：新命令或网络/磁盘副作用，留确认。
 - **§4.5 god-file 拆分（kb_browser_lib/paper/orchestrate）**：结构重构，留确认。
 - **B8 workflow 生命周期命令的"补 answer/resolve/drop"**（若上一轮只修了计数、未加命令）：功能新增，留确认核实。
+
+---
+
+## 20. 合并 review 查出的 2 个 blocker（§19 引入，必须修，交 Codex）
+
+> 并行 §18+§19 合并后终审查出 2 个**已核实的 blocker**（均来自 §19 cleanup 批，跨文件问题、单函数 review 看不到）：
+
+- **BK1（removed-live-code 回归，CONFIRMED）** §19 从 `v2.py` 删了 `figure_extraction_mode`（default_runtime_preferences + load 里的 forcing 行），断言"无 reader"——但 `research-config-manager/scripts/config.py:148` 仍 `pdf.get('figure_extraction_mode')`，现在恒印 `None`。修：要么恢复 `default_runtime_preferences` 里该键（若它本就是对外 runtime-pref 契约的一部分），要么同步删掉/改写 config.py:148 的打印行。**倾向恢复**（它是 runtime-preferences 的展示字段，不是纯死代码——§19 判「死」判错了）。加测试锁 config show 不吐 None。
+- **BK2（gate 语义回归，CONFIRMED，3 个 review 单元独立命中）** §19 的 §4.4 sync 写成 `needs_human_confirmation = (confirmation_status == 'pending_user_confirmation')`，**与未改的 `validate_write` 门控矛盾**：门控要求 AI-derived 记录在 `confirmation_status ∈ {pending_user_confirmation, rejected}` 时 `needs_human_confirmation` 必须 True（v2.py:1584 + docstring）。实测：一个 AI-derived `rejected` 记录 normalize 后 `needs_human_confirmation=False` → `write_record→validate_write` **自我违约**。修：sync 规则改为与门控一致——`needs_human_confirmation = _record_needs_gate(record) and confirmation_status != 'confirmed'`（即 AI-derived 且未最终确认时为 True；非 AI-derived 且 auto/confirmed 时 False）。**同时修正 `test_v2_confirmation_gate.py` 里被写死的错误期望**（`('rejected', False)` 那条 codifies 了 bug）。加一个 `normalize→validate_write` 往返一致性测试（AI-derived 的 pending/rejected 都不产生 violation）。
+
+> 交 Codex 范围 = BK1 + BK2（都是 §19 引入的必修回归）。约束：治理门控为准（sync 服从 validate_write，不是反过来）；import 面兼容；跑测试；逐项 commit。
