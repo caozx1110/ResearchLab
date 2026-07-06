@@ -1451,6 +1451,11 @@ def apply_record_governance(
 
 AI_INFORMATION_TYPES = {"inference", "evaluation", "user_opinion"}
 GATED_CONFIRMATION_VALUES = {"pending_user_confirmation", "rejected"}
+AI_SIGNER_NAMES = {"ai", "assistant", "codex", "chatgpt", "gpt", "openai"}
+
+
+def is_ai_signer(actor: str) -> bool:
+    return str(actor or "").strip().lower() in AI_SIGNER_NAMES
 
 
 def default_confirmed_by(project_root: Path | None = None) -> str:
