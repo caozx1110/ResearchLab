@@ -618,3 +618,19 @@ N1 `requirements-optional.txt`(pypdf/PyMuPDF/Pillow) · N2 `python_requires>=3.9
 - **阶段 1（Codex 可直接做，机械可验证）**：M4/N1/N2 依赖文件 → M7 rename → M8/M9 kb init → M10/N6/N8/M11 文档结构 → N7/N12/N9/N10 清理 → N3/N5/N4 → M5/M1 落地。
 - **阶段 2（需 M13 先行）**：M13 解耦 → M6/M12 install.sh+CLAUDE.md。
 - **阶段 3（维护者亲自）**：M2/M3 fresh-repo 发布（阶段 1/2 全 merge 进 HEAD 之后）。
+
+### ✅ §23 维护者决策（2026 已定）
+- **D1 License = MIT**（根 `LICENSE`，README 声明）。
+- **install 范围 = project + system 全做** → **M13 解耦（`RESEARCH_SKILLS_HOME`）纳入本轮**（system-scope 前提）。
+- **内部文档处理**：`OPTIMIZATION_PLAN.md`、`RESEARCH_SKILLS_UX_SIMULATION_*.md` 等**作者向工作文档 → 移到本地 `temp/` 并 gitignore**（`temp/` 已在 .gitignore）。**`docs/` 精简到 ≤3 文件，按受众重组**：
+  1. `docs/USER_GUIDE.md` —— 面向**用户/研究者**：怎么用、AI vs 你的分工、意图清单、`kb` 伪 CLI、确认收件箱、记忆机制（合并现 RESEARCH_WORKFLOW + GETTING_STARTED + FEATURES 用户部分）。
+  2. `docs/DESIGN.md` —— 面向**想懂原理的开发者**：架构、skill 系统与路由、数据模型/记录 schema、确认门控原理、如何扩展/加 skill、目录心智模型（合并 SKILLS_GUIDE + FEATURES 原理部分 + 指向 `.agents/lib/research/SCHEMAS.md`）。
+  3. （≤3 的第 3 个名额）`CONTRIBUTING.md` 放**根**（非 docs/），docs/ 实际留 2 个主文档。其余（PUBLISHING.md/llm-wiki.md/UX 模拟/GETTING_STARTED/FEATURES/RESEARCH_WORKFLOW/SKILLS_GUIDE）→ 内容并入上述 2 个或移 `temp/`。作者向的 OPTIMIZATION_PLAN → `temp/`（gitignore）。
+- **README = 中文为主 + 英文 quickstart**（顶部英文 quickstart 段 + 中文正文；`AGENTS.md` 已定中文优先）。
+- 其余技术项按推荐：**D2 rename→`core.py`**、**D4 不加 pyproject**（保 walk-up hack，仅 requirements.txt 声明依赖）、**D9 词边界替换**（禁 `s/v2//g`）、**D5 kb init 4 问**、**D6 kb init 顺带提示 git-init**（pref 写入后）。
+
+### 施工编排（Codex，注意冲突）
+- **rename（M7+N9+N12）是"毒丸"**：改 `from research.v2 import`(33) + `ensure_v2_workspace`(74) + schema ids + prose，几乎触及每个文件 → **必须先单独做、merge 进 main，其余批次再从 rename 后的 HEAD 分叉**。N12(dead research-conductor) 同在 common.py，一并做。
+- rename 落地后，**并行**：Batch B 元文件（LICENSE/requirements/CONTRIBUTING/SECURITY/CI，根，disjoint）· Batch C 文档重组（docs≤3 + README + 移 temp + gitignore）· Batch D kb init（kb-cli+config）· Batch E SKILL.md path-robust + 剩余清理。
+- **Phase 2**：M13 解耦 + M6/M12 install.sh + CLAUDE.md。
+- **Phase 3（维护者亲自）**：fresh-repo 发布。
