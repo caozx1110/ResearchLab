@@ -1,0 +1,4 @@
+# These unlock paper-analyst PDF text + figure extraction; not needed for core.
+pypdf
+PyMuPDF
+Pillow
