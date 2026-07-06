@@ -1,4 +1,4 @@
 interface:
   display_name: "Knowledge Base Manager"
-  short_description: "维护 v2 schema、index、taxonomy/topic/pool 与 links"
-  default_prompt: "使用 $knowledge-base-manager 初始化或刷新 v2 knowledge-unit schema，重建索引，并治理 topics、tags、candidate pools 与 links。"
+  short_description: "维护 core schema、index、taxonomy/topic/pool 与 links"
+  default_prompt: "使用 $knowledge-base-manager 初始化或刷新 core knowledge-unit schema，重建索引，并治理 topics、tags、candidate pools 与 links。"

@@ -16,7 +16,7 @@ else:
     raise SystemExit("Could not locate .agents/lib")
 
 from research.common import add_project_root_argument, print_resolved_project_roots, write_text_if_changed, write_yaml_if_changed
-from research.v2 import append_history, build_index, confirm_unit, locate_record, project_root, rel, write_record
+from research.core import append_history, build_index, confirm_unit, locate_record, project_root, rel, write_record
 
 
 def add_confirmation_arguments(parser: argparse.ArgumentParser) -> None:
@@ -40,7 +40,7 @@ def note_template(record: dict) -> str:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Analyze blog units in v2.")
+    parser = argparse.ArgumentParser(description="Analyze blog units in core.")
     add_project_root_argument(parser)
     subparsers = parser.add_subparsers(dest="command", required=True)
     for name in ("summarize", "complete-note", "confirm"):

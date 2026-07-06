@@ -19,7 +19,7 @@ else:
 
 from research.common import add_project_root_argument, ensure_dir, print_resolved_project_roots, simple_slug, write_text_if_changed
 from research.intake_cli import add_intake_add_arguments, intake_add_argv
-from research.v2 import build_index, lint_records, project_root, search_records, synthesis_root
+from research.core import build_index, lint_records, project_root, search_records, synthesis_root
 
 
 def research_python() -> str:
@@ -27,7 +27,7 @@ def research_python() -> str:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Thin wiki adapter for v2.")
+    parser = argparse.ArgumentParser(description="Thin wiki adapter for core.")
     add_project_root_argument(parser)
     subparsers = parser.add_subparsers(dest="command", required=True)
     query = subparsers.add_parser("query")

@@ -13,7 +13,7 @@ from research.learnings import (
     render_recall_digest,
     review_learning,
 )
-from research.v2 import load_runtime_preferences, write_runtime_preferences
+from research.core import load_runtime_preferences, write_runtime_preferences
 
 
 def _workspace(tmp_path: Path) -> Path:

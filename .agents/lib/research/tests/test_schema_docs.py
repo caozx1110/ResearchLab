@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from research.v2 import UNIT_KIND_DIRS, kind_payload_skeleton
+from research.core import UNIT_KIND_DIRS, kind_payload_skeleton
 
 
 def test_schema_payload_sections_are_backed_by_skeleton_keys() -> None:

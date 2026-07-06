@@ -76,7 +76,7 @@ DEFAULT_REUSE_FLAGS = {
     "weekly_report": False,
     "ppt": False,
 }
-DEFAULT_SETTINGS_MARKDOWN = """# Research Settings v2
+DEFAULT_SETTINGS_MARKDOWN = """# Research Settings
 
 - [x] 自动入库事实类基础信息
 - [x] 默认维护 topic / tag / candidate pool 治理目录
@@ -103,7 +103,7 @@ DEFAULT_SETTINGS_MARKDOWN = """# Research Settings v2
 - 论文完整笔记触发条件、完整笔记模式（`scaffold` / `draft`）请使用 runtime preferences 管理。
 """
 DEFAULT_TOPIC_TAXONOMY = {
-    "id": "topic-taxonomy-v2",
+    "id": "topic-taxonomy",
     "status": "active",
     "generated_by": "knowledge-base-manager",
     "policy": {
@@ -115,7 +115,7 @@ DEFAULT_TOPIC_TAXONOMY = {
     "tags": {},
 }
 DEFAULT_CANDIDATE_POOLS = {
-    "id": "candidate-pools-v2",
+    "id": "candidate-pools",
     "status": "active",
     "generated_by": "knowledge-base-manager",
     "policy": {
@@ -358,7 +358,7 @@ def _deep_fill_missing(target: Any, defaults: Any) -> Any:
 
 def default_runtime_preferences() -> dict[str, Any]:
     return {
-        **yaml_default("runtime-preferences-v2", "research-config-manager", status="active"),
+        **yaml_default("runtime-preferences", "research-config-manager", status="active"),
         "browser": {
             "default_workbench_mode": "preview",
             "default_terminal_mode": "codex",
@@ -409,7 +409,7 @@ def default_runtime_preferences() -> dict[str, Any]:
 
 
 def load_runtime_preferences(project_root: Path) -> dict[str, Any]:
-    ensure_v2_workspace(project_root)
+    ensure_workspace(project_root)
     payload = load_yaml(runtime_preferences_path(project_root), default={})
     if not isinstance(payload, dict) or not payload:
         payload = default_runtime_preferences()
@@ -957,7 +957,7 @@ def normalize_record_schema(record: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def ensure_v2_workspace(project_root: Path) -> None:
+def ensure_workspace(project_root: Path) -> None:
     ensure_dir(units_root(project_root))
     for kind in UNIT_KIND_DIRS.values():
         ensure_dir(units_root(project_root) / kind)
@@ -977,7 +977,7 @@ def ensure_v2_workspace(project_root: Path) -> None:
         write_text_if_changed(settings, DEFAULT_SETTINGS_MARKDOWN)
     navigation = user_root(project_root) / "navigation.md"
     if not navigation.exists():
-        write_text_if_changed(navigation, "# Research Navigation v2\n\n- 运行 `research-navigator` 刷新当前入口页。\n")
+        write_text_if_changed(navigation, "# Research Navigation\n\n- 运行 `research-navigator` 刷新当前入口页。\n")
     current_state = user_root(project_root) / "current-state.md"
     if not current_state.exists():
         write_text_if_changed(current_state, "# Current State\n\n尚未生成。\n")
@@ -990,7 +990,7 @@ def ensure_v2_workspace(project_root: Path) -> None:
 
 
 def load_topic_taxonomy(project_root: Path) -> dict[str, Any]:
-    ensure_v2_workspace(project_root)
+    ensure_workspace(project_root)
     payload = load_yaml(topic_taxonomy_path(project_root), default={})
     if not isinstance(payload, dict):
         payload = {}
@@ -1038,7 +1038,7 @@ def write_topic_taxonomy(project_root: Path, payload: dict[str, Any]) -> Path:
 
 
 def load_candidate_pools(project_root: Path) -> dict[str, Any]:
-    ensure_v2_workspace(project_root)
+    ensure_workspace(project_root)
     payload = load_yaml(candidate_pools_path(project_root), default={})
     if not isinstance(payload, dict):
         payload = {}
@@ -1110,7 +1110,7 @@ def _git_head_exists(project_root: Path) -> bool:
 
 
 def ensure_kb_git_repo(project_root: Path, *, create_initial_commit: bool = True, initial_message: str = "chore: initialize kb repo") -> dict[str, Any]:
-    ensure_v2_workspace(project_root)
+    ensure_workspace(project_root)
     created = False
     if not kb_repo_exists(project_root):
         subprocess.run(["git", "init", str(kb_repo_path(project_root))], check=True, capture_output=True, text=True)
@@ -1154,7 +1154,7 @@ def git_checkpoint(
     trigger: str = "manual",
     auto_init: bool = True,
 ) -> dict[str, Any]:
-    ensure_v2_workspace(project_root)
+    ensure_workspace(project_root)
     if not kb_repo_exists(project_root):
         if auto_init:
             ensure_kb_git_repo(project_root, create_initial_commit=False)
@@ -1305,7 +1305,7 @@ def _rewrite_storage_text(text: str, project_root: Path) -> str:
 
 
 def sync_storage_layout(project_root: Path) -> dict[str, Any]:
-    ensure_v2_workspace(project_root)
+    ensure_workspace(project_root)
     moved_paths: list[tuple[Path, Path]] = []
     for name, destination_root in (("raw", raw_storage_root(project_root)), ("output", output_storage_root(project_root))):
         source_root = project_root / name
@@ -1599,7 +1599,7 @@ def validate_write(record: dict[str, Any], *, strict: bool | None = None) -> lis
         msg = "validate_write contract violations:\n  - " + "\n  - ".join(violations)
         if strict:
             raise SystemExit(msg)
-        sys.stderr.write(f"[research/v2.validate_write] WARN: {msg}\n")
+        sys.stderr.write(f"[research/core.validate_write] WARN: {msg}\n")
     return violations
 
 
@@ -1776,7 +1776,7 @@ def _wikilink_target_exists(project_root: Path, target: str, ref_keys: set[str])
 
 
 def refresh_record_schemas(project_root: Path, *, unit_ids: list[str] | None = None, kind: str | None = None) -> list[Path]:
-    ensure_v2_workspace(project_root)
+    ensure_workspace(project_root)
     paths: list[Path] = []
     if unit_ids:
         for unit_id in unit_ids:
@@ -1834,7 +1834,7 @@ def _preserve_empty_governance_seeds(taxonomy: dict[str, Any], pools: dict[str, 
 
 
 def rebuild_governance_catalogs(project_root: Path, *, records: list[dict[str, Any]] | None = None) -> tuple[Path, Path]:
-    ensure_v2_workspace(project_root)
+    ensure_workspace(project_root)
     records = records if records is not None else iter_records(project_root)
     existing_taxonomy = load_topic_taxonomy(project_root)
     existing_pools = load_candidate_pools(project_root)
@@ -1914,7 +1914,7 @@ def rebuild_governance_catalogs(project_root: Path, *, records: list[dict[str, A
 
 
 def build_index(project_root: Path) -> tuple[Path, Path]:
-    ensure_v2_workspace(project_root)
+    ensure_workspace(project_root)
     records = iter_records(project_root)
     rebuild_governance_catalogs(project_root, records=records)
     items = []
@@ -1939,13 +1939,13 @@ def build_index(project_root: Path) -> tuple[Path, Path]:
     write_yaml_if_changed(
         yaml_path,
         {
-            "id": "kb-index-v2",
+            "id": "kb-index",
             "generated_at": utc_now_iso(),
             "items": items,
             "counts": {kind: len([item for item in items if item["kind"] == kind]) for kind in UNIT_KIND_DIRS},
         },
     )
-    lines = ["# Research KB Index v2", ""]
+    lines = ["# Research KB Index", ""]
     for kind in UNIT_KIND_DIRS:
         lines.extend([f"## {kind.title()}s", ""])
         kind_rows = [item for item in items if item["kind"] == kind]
@@ -2037,7 +2037,7 @@ def lint_workspace_integrity(project_root: Path) -> list[str]:
 
 
 def lint_records(project_root: Path) -> tuple[str, list[str]]:
-    ensure_v2_workspace(project_root)
+    ensure_workspace(project_root)
     issues: list[str] = []
     for raw_record in iter_records(project_root):
         try:
@@ -2104,7 +2104,7 @@ def govern_records(
     infer_missing: bool = True,
     source_label: str = "",
 ) -> list[Path]:
-    ensure_v2_workspace(project_root)
+    ensure_workspace(project_root)
     written: list[Path] = []
     if unit_ids:
         for unit_id in unit_ids:
@@ -2158,7 +2158,7 @@ def stage_search_results(
     stage_id: str = "",
     note: str = "",
 ) -> Path:
-    ensure_v2_workspace(project_root)
+    ensure_workspace(project_root)
     current_stage_id = stage_id or build_search_stage_id(kind, query)
     path = search_stage_path(project_root, current_stage_id)
     existing = load_yaml(path, default={})
@@ -2300,7 +2300,7 @@ def backup_source(project_root: Path, kind: str, unit_id: str, source: str) -> d
         payload = {"original_uri": original_uri, "backup_paths": backup_paths, "backup_kind": "url", "file_hash": file_hash}
         if backup_warning:
             payload["backup_warning"] = backup_warning
-            sys.stderr.write(f"[research/v2.backup_source] WARN: {backup_warning} source={original_uri}\n")
+            sys.stderr.write(f"[research/core.backup_source] WARN: {backup_warning} source={original_uri}\n")
         return payload
 
     normalized_source = normalize_storage_reference(project_root, source)
@@ -2431,7 +2431,7 @@ def _rename_paths_with_ids(project_root: Path, mapping: dict[str, str]) -> list[
 
 
 def compact_unit_ids(project_root: Path, *, kind: str | None = None, apply: bool = False) -> dict[str, Any]:
-    ensure_v2_workspace(project_root)
+    ensure_workspace(project_root)
     records = iter_records(project_root, kind=kind)
     occupied_ids = {str(record.get("id") or "") for record in records if str(record.get("id") or "")}
     reserved_new_ids: set[str] = set()

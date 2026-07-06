@@ -1,11 +1,11 @@
 # Workspace Agents
 
-这个目录存放 workspace-oss 的本地 skills 和共享运行库。当前系统围绕 v2 knowledge units 工作；人类可读规则以仓库根目录的 `AGENTS.md` 为准，结构化 artifact 协议以 `.agents/lib/research/SCHEMAS.md` 为准。
+这个目录存放 workspace-oss 的本地 skills 和共享运行库。当前系统围绕 knowledge units 工作；人类可读规则以仓库根目录的 `AGENTS.md` 为准，结构化 artifact 协议以 `.agents/lib/research/SCHEMAS.md` 为准。
 
 ## Layout
 
 - `.agents/skills/`: 16 个本地 skill，每个 skill 的触发与职责写在自己的 `SKILL.md`。
-- `.agents/lib/research/`: 跨 skill 共享的 v2 Python helper。
+- `.agents/lib/research/`: 跨 skill 共享的 shared Python helper。
 - `.agents/lib/research/SCHEMAS.md`: record、program、config、confirmation gate 的共享契约。
 
 ## Current Skill Groups

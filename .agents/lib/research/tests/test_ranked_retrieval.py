@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from research.common import write_text_if_changed, write_yaml_if_changed
-from research.v2 import ensure_v2_workspace, record_path, search_records, unit_root
+from research.core import ensure_workspace, record_path, search_records, unit_root
 
 
 def _write_record(root: Path, record: dict) -> None:
@@ -30,7 +30,7 @@ def _record(unit_id: str, title: str, *, summary: str = "", payload: dict | None
 
 
 def test_search_records_ranks_title_match_above_markdown_match(tmp_path: Path) -> None:
-    ensure_v2_workspace(tmp_path)
+    ensure_workspace(tmp_path)
     _write_record(tmp_path, _record("p-title-123456", "Dexterous Recovery", summary="short"))
     _write_record(tmp_path, _record("p-note-123456", "Other Paper", summary="short"))
     note_path = unit_root(tmp_path, "paper", "p-note-123456") / "paper-note.md"
@@ -45,7 +45,7 @@ def test_search_records_ranks_title_match_above_markdown_match(tmp_path: Path) -
 
 
 def test_search_records_finds_payload_leaf_text(tmp_path: Path) -> None:
-    ensure_v2_workspace(tmp_path)
+    ensure_workspace(tmp_path)
     _write_record(
         tmp_path,
         _record(
@@ -62,7 +62,7 @@ def test_search_records_finds_payload_leaf_text(tmp_path: Path) -> None:
 
 
 def test_empty_search_keeps_filter_only_behavior_for_review_queue(tmp_path: Path) -> None:
-    ensure_v2_workspace(tmp_path)
+    ensure_workspace(tmp_path)
     _write_record(tmp_path, _record("p-filter-123456", "Filter Paper"))
 
     hits = search_records(tmp_path, "", confirmation_status="auto_confirmed")

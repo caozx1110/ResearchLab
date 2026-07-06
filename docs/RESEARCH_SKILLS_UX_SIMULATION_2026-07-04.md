@@ -37,7 +37,7 @@
 
 | 阶段 | 使用 skill | 结果 |
 |---|---|---|
-| 初始化 | `knowledge-base-manager`, `research-config-manager` | 成功初始化 `/tmp` v2 `kb/`，写入 profile、runtime preferences、topic seed、candidate pools |
+| 初始化 | `knowledge-base-manager`, `research-config-manager` | 成功初始化 `/tmp` core `kb/`，写入 profile、runtime preferences、topic seed、candidate pools |
 | 个性化配置 | `research-config-manager` | 配置中文优先、advisor-ready summary、high novelty bar、humanoid VLA taxonomy seed |
 | source staging | `source-intake` | 成功创建 paper/repo search stage，支持先候选后 materialize |
 | 材料入库 | `source-intake`, `paper-analyst` | 两篇 paper materialized，并自动 quick-screen；OpenVLA 保持 staged |
@@ -138,7 +138,7 @@ idea 到方法阶段的分工清楚。`idea-workbench` 负责候选和 review，
 
 建议：
 
-- 为所有 v2 scripts 增加显式 `--root` 或 `RESEARCH_PROJECT_ROOT` 支持。
+- 为所有 research scripts 增加显式 `--root` 或 `RESEARCH_PROJECT_ROOT` 支持。
 - 启动时打印 resolved project root 与 kb root，尤其是写命令。
 - 在 `kb.py init`、`config.py init` 等高影响命令中，如果 `cwd` 与 resolved root 不一致，给出醒目提示。
 

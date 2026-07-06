@@ -1,4 +1,4 @@
 interface:
   display_name: "Research Orchestrator"
-  short_description: "Own program state, workflow logs, and skill routing in the v2 workflow"
-  default_prompt: "Use $research-orchestrator to create or update a program, manage state/open questions/evidence requests/decision logs/reporting events, and route work to the right v2 research skill."
+  short_description: "Own program state, workflow logs, and skill routing in the research workflow"
+  default_prompt: "Use $research-orchestrator to create or update a program, manage state/open questions/evidence requests/decision logs/reporting events, and route work to the right research skill."

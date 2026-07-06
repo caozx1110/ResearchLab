@@ -6,7 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from research.v2 import project_root
+from research.core import project_root
 
 
 def _project_root() -> Path:

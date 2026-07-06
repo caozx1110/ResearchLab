@@ -7,7 +7,7 @@ from pathlib import Path
 
 from research.common import append_list_item, write_yaml_if_changed
 from research.learnings import log_learning, review_learning
-from research.v2 import record_path
+from research.core import record_path
 
 
 def _project_root() -> Path:

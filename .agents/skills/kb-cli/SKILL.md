@@ -1,11 +1,11 @@
 ---
 name: kb-cli
-description: kb 快捷命令入口（伪 CLI），用于把常用 v2 research 操作统一成 kb 动词形式；当用户在终端运行 kb help/status/next/find/recall，或对 AI 说 kb 动词希望代跑对应只读查询时使用。
+description: kb 快捷命令入口（伪 CLI），用于把常用 research 操作统一成 kb 动词形式；当用户在终端运行 kb help/status/next/find/recall，或对 AI 说 kb 动词希望代跑对应只读查询时使用。
 ---
 
 # kb 快捷命令入口（伪 CLI）
 
-`kb-cli` 是 v2 research 系统的薄 dispatcher。它只做短命令解析、项目 root 解析和参数转译，底层能力继续由既有 skill 脚本负责。
+`kb-cli` 是 research 系统的薄 dispatcher。它只做短命令解析、项目 root 解析和参数转译，底层能力继续由既有 skill 脚本负责。
 
 ## 使用方式
 

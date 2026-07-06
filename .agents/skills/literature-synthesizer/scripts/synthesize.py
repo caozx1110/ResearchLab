@@ -17,7 +17,7 @@ else:
     raise SystemExit("Could not locate .agents/lib")
 
 from research.common import add_project_root_argument, ensure_dir, print_resolved_project_roots, slugify, write_text_if_changed, write_yaml_if_changed, yaml_default
-from research.v2 import iter_records, project_root, rel, synthesis_root
+from research.core import iter_records, project_root, rel, synthesis_root
 
 
 def select_records(
@@ -135,7 +135,7 @@ def render_summary(payload: dict) -> str:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Synthesize research units in v2.")
+    parser = argparse.ArgumentParser(description="Synthesize research units in core.")
     add_project_root_argument(parser)
     subparsers = parser.add_subparsers(dest="command", required=True)
 

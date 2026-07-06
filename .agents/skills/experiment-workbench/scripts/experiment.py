@@ -25,7 +25,7 @@ from research.common import (
     print_resolved_project_roots,
     write_text_if_changed,
 )
-from research.v2 import append_history, build_index, confirm_unit, default_record, ensure_v2_workspace, locate_record, project_root, rel, write_record
+from research.core import append_history, build_index, confirm_unit, default_record, ensure_workspace, locate_record, project_root, rel, write_record
 
 RUN_OUTCOME_CHOICES = ["success", "partial", "failed", "blocked", "inconclusive"]
 CLASSIFICATION_CHOICES = ["method", "implementation", "data", "evaluation", "resource", "environment", "process", "unknown"]
@@ -129,7 +129,7 @@ def sync_diagnosis_summary(unit_root: Path) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Manage experiment units in v2.")
+    parser = argparse.ArgumentParser(description="Manage experiment units in core.")
     add_project_root_argument(parser)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -179,7 +179,7 @@ def main() -> int:
     args = build_parser().parse_args()
     root = project_root(PROJECT_ROOT, explicit_root=args.root)
     print_resolved_project_roots(root)
-    ensure_v2_workspace(root)
+    ensure_workspace(root)
 
     if args.command == "plan":
         record = default_record("experiment", title=args.title, maturity="lightweight", source={"original_uri": f"program:{args.program_id}"})

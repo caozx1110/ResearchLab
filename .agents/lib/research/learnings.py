@@ -1,4 +1,4 @@
-"""Lightweight learnings memory for v2 research workflows."""
+"""Lightweight learnings memory for research workflows."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
-from .v2 import kb_root, load_runtime_preferences, runtime_preferences_path, write_runtime_preferences
+from .core import kb_root, load_runtime_preferences, runtime_preferences_path, write_runtime_preferences
 from .yaml_io import load_yaml, write_yaml_if_changed
 
 CATEGORIES = {"skill-defect", "user-preference", "recurring-issue"}

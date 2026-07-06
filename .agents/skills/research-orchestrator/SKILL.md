@@ -1,6 +1,6 @@
 ---
 name: research-orchestrator
-description: Orchestrate v2 research programs under `kb/programs/`, including program state, open questions, evidence requests, decision logs, reporting events, and skill routing.
+description: Orchestrate research programs under `kb/programs/`, including program state, open questions, evidence requests, decision logs, reporting events, and skill routing.
 ---
 
 # Research Orchestrator

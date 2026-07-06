@@ -1,6 +1,6 @@
 # AGENTS
 
-This repository is a Chinese-first research operating system built around v2 knowledge units.
+This repository is a Chinese-first research operating system built around knowledge units.
 
 Default preference order:
 
@@ -14,7 +14,7 @@ Default preference order:
 - Human-facing markdown defaults to Chinese.
 - Preserve original English paper titles, repo names, benchmark names, and technical terms on first mention.
 - YAML keys, IDs, slugs, and folder names stay ASCII-safe.
-- Prefer `${RESEARCH_PYTHON:-python3}` for v2 scripts, but use a known YAML-capable runtime.
+- Prefer `${RESEARCH_PYTHON:-python3}` for research scripts, but use a known YAML-capable runtime.
 - Runtime-specific configuration belongs in `kb/config/`.
 - Session start: read the `research-navigator` recall digest once.
 - When you go wrong or the user corrects you, log one learning with `skill-evolution-advisor/scripts/learnings.py log`.

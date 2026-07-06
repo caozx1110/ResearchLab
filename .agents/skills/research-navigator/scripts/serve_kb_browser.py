@@ -50,7 +50,7 @@ from kb_browser_lib import (
     write_text_atomic,
 )
 from kb_browser_terminal import TerminalManager, open_system_terminal, system_terminal_targets
-from research.v2 import maybe_auto_checkpoint  # type: ignore
+from research.core import maybe_auto_checkpoint  # type: ignore
 
 WATCHED_SUFFIXES = {".yaml", ".yml", ".md", ".markdown", ".txt", ".log", ".json"}
 READABLE_TEXT_SUFFIXES = {".md", ".markdown", ".yaml", ".yml", ".txt", ".log", ".json", ".py", ".sh", ".toml"}

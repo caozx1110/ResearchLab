@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from research.common import load_yaml, write_yaml_if_changed
-from research.v2 import ensure_v2_workspace, promote_record, record_path, runtime_preferences_path
+from research.core import ensure_workspace, promote_record, record_path, runtime_preferences_path
 
 
 def _project_root() -> Path:
@@ -66,7 +66,7 @@ def _record(unit_id: str = "p-confirm-123456") -> dict:
 
 
 def test_promote_to_confirmed_requires_human_provenance(tmp_path: Path) -> None:
-    ensure_v2_workspace(tmp_path)
+    ensure_workspace(tmp_path)
     write_yaml_if_changed(record_path(tmp_path, "paper", "p-confirm-123456"), _record())
 
     with pytest.raises(SystemExit, match="--confirmed-by"):
@@ -77,7 +77,7 @@ def test_promote_to_confirmed_requires_human_provenance(tmp_path: Path) -> None:
 
 
 def test_promote_to_confirmed_uses_configured_default_confirmed_by(tmp_path: Path) -> None:
-    ensure_v2_workspace(tmp_path)
+    ensure_workspace(tmp_path)
     write_yaml_if_changed(record_path(tmp_path, "paper", "p-confirm-123456"), _record())
     write_yaml_if_changed(
         runtime_preferences_path(tmp_path),
@@ -99,7 +99,7 @@ def test_promote_to_confirmed_uses_configured_default_confirmed_by(tmp_path: Pat
 
 
 def test_missing_evidence_is_rejected_even_with_default_confirmed_by(tmp_path: Path) -> None:
-    ensure_v2_workspace(tmp_path)
+    ensure_workspace(tmp_path)
     write_yaml_if_changed(record_path(tmp_path, "paper", "p-confirm-123456"), _record())
     write_yaml_if_changed(
         runtime_preferences_path(tmp_path),
@@ -115,7 +115,7 @@ def test_missing_evidence_is_rejected_even_with_default_confirmed_by(tmp_path: P
 def test_promote_non_confirmed_does_not_require_provenance(tmp_path: Path) -> None:
     """Backward-compat guard: only confirmed transitions need provenance;
     auto_confirmed / pending / rejected must still work without --confirmed-by/--evidence."""
-    ensure_v2_workspace(tmp_path)
+    ensure_workspace(tmp_path)
     for target in ("auto_confirmed", "pending_user_confirmation", "rejected"):
         write_yaml_if_changed(record_path(tmp_path, "paper", "p-confirm-123456"), _record())
         path = promote_record(tmp_path, "p-confirm-123456", confirmation_status=target)
@@ -128,7 +128,7 @@ def test_promote_non_confirmed_does_not_require_provenance(tmp_path: Path) -> No
 def test_confirmation_provenance_accepts_bare_string_evidence(tmp_path: Path) -> None:
     """require_confirmation_provenance annotates evidence as list|str; a bare string
     must be accepted (not silently rejected as empty)."""
-    from research.v2 import require_confirmation_provenance
+    from research.core import require_confirmation_provenance
 
     actor, items = require_confirmation_provenance(confirmed_by="czx", evidence="kb/x/note.md")
     assert actor == "czx"
@@ -136,11 +136,11 @@ def test_confirmation_provenance_accepts_bare_string_evidence(tmp_path: Path) ->
 
 
 def test_promote_to_confirmed_persists_confirmation_provenance(tmp_path: Path, monkeypatch) -> None:
-    import research.v2 as v2
+    import research.core as core
 
-    ensure_v2_workspace(tmp_path)
+    ensure_workspace(tmp_path)
     write_yaml_if_changed(record_path(tmp_path, "paper", "p-confirm-123456"), _record())
-    monkeypatch.setattr(v2, "utc_now_iso", lambda: "2026-07-04T00:00:00+00:00")
+    monkeypatch.setattr(core, "utc_now_iso", lambda: "2026-07-04T00:00:00+00:00")
 
     path = promote_record(
         tmp_path,

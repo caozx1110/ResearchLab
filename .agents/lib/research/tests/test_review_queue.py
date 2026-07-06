@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from research.common import load_yaml, write_yaml_if_changed
-from research.v2 import ensure_v2_workspace, record_path, runtime_preferences_path, search_records
+from research.core import ensure_workspace, record_path, runtime_preferences_path, search_records
 
 
 def _project_root() -> Path:
@@ -69,7 +69,7 @@ def _record(
 
 
 def test_search_records_filters_confirmation_status(tmp_path: Path) -> None:
-    ensure_v2_workspace(tmp_path)
+    ensure_workspace(tmp_path)
     _write_record(tmp_path, _record("p-pending-123456", "Pending Robot", "pending_user_confirmation", "2026-01-01T00:00:00+00:00"))
     _write_record(tmp_path, _record("p-confirmed-123456", "Confirmed Robot", "confirmed", "2026-01-02T00:00:00+00:00"))
 
@@ -116,7 +116,7 @@ def test_kb_confirm_command_uses_shared_helper() -> None:
 
 def test_batch_confirm_applies_one_evidence_to_multiple_units(tmp_path: Path) -> None:
     kb = _load_kb_module()
-    ensure_v2_workspace(tmp_path)
+    ensure_workspace(tmp_path)
     write_yaml_if_changed(runtime_preferences_path(tmp_path), {"identity": {"default_confirmed_by": "czx-default"}})
     _write_record(tmp_path, _record("p-one-123456", "One", "pending_user_confirmation", "2026-01-01T00:00:00+00:00"))
     _write_record(tmp_path, _record("p-two-123456", "Two", "pending_user_confirmation", "2026-01-02T00:00:00+00:00"))
@@ -140,7 +140,7 @@ def test_batch_confirm_applies_one_evidence_to_multiple_units(tmp_path: Path) ->
 
 def test_batch_confirm_without_evidence_rejects_before_write(tmp_path: Path) -> None:
     kb = _load_kb_module()
-    ensure_v2_workspace(tmp_path)
+    ensure_workspace(tmp_path)
     write_yaml_if_changed(runtime_preferences_path(tmp_path), {"identity": {"default_confirmed_by": "czx-default"}})
     pending = _record("p-no-evidence-123456", "No Evidence", "pending_user_confirmation", "2026-01-01T00:00:00+00:00")
     _write_record(tmp_path, pending)
@@ -164,7 +164,7 @@ def test_review_queue_confirm_without_evidence_rejects_before_write(tmp_path: Pa
     kb = _load_kb_module()
     (tmp_path / ".agents").mkdir()
     (tmp_path / "AGENTS.md").write_text("# test\n", encoding="utf-8")
-    ensure_v2_workspace(tmp_path)
+    ensure_workspace(tmp_path)
     write_yaml_if_changed(runtime_preferences_path(tmp_path), {"identity": {"default_confirmed_by": "czx-default"}})
     _write_record(
         tmp_path,
@@ -196,7 +196,7 @@ def test_confirm_command_blank_evidence_rejects_before_any_batch_write(tmp_path:
     kb = _load_kb_module()
     (tmp_path / ".agents").mkdir()
     (tmp_path / "AGENTS.md").write_text("# test\n", encoding="utf-8")
-    ensure_v2_workspace(tmp_path)
+    ensure_workspace(tmp_path)
     write_yaml_if_changed(runtime_preferences_path(tmp_path), {"identity": {"default_confirmed_by": "czx-default"}})
     unit_ids = ["p-cli-empty-a-123456", "p-cli-empty-b-123456"]
     for index, unit_id in enumerate(unit_ids, start=1):
@@ -235,7 +235,7 @@ def test_confirm_command_blank_evidence_rejects_before_any_batch_write(tmp_path:
 
 def test_batch_confirm_collapses_ai_information_types_and_sets_lifecycle(tmp_path: Path) -> None:
     kb = _load_kb_module()
-    ensure_v2_workspace(tmp_path)
+    ensure_workspace(tmp_path)
     write_yaml_if_changed(runtime_preferences_path(tmp_path), {"identity": {"default_confirmed_by": "czx-default"}})
     _write_record(
         tmp_path,
@@ -267,7 +267,7 @@ def test_batch_confirm_collapses_ai_information_types_and_sets_lifecycle(tmp_pat
 
 def test_batch_confirm_skips_non_pending_records(tmp_path: Path, capsys) -> None:
     kb = _load_kb_module()
-    ensure_v2_workspace(tmp_path)
+    ensure_workspace(tmp_path)
     write_yaml_if_changed(runtime_preferences_path(tmp_path), {"identity": {"default_confirmed_by": "czx-default"}})
     pending = _record("p-pending-123456", "Pending", "pending_user_confirmation", "2026-01-01T00:00:00+00:00")
     rejected = _record("p-rejected-123456", "Rejected", "rejected", "2026-01-02T00:00:00+00:00", status="rejected")
@@ -290,7 +290,7 @@ def test_batch_confirm_skips_non_pending_records(tmp_path: Path, capsys) -> None
 
 def test_review_queue_all_reviewed_empty_is_clean_noop(tmp_path: Path) -> None:
     kb = _load_kb_module()
-    ensure_v2_workspace(tmp_path)
+    ensure_workspace(tmp_path)
 
     records = kb.review_queue_records(tmp_path, confirmation_status="pending_user_confirmation")
 
@@ -302,7 +302,7 @@ def test_review_queue_lists_selected_ideas_with_pending_content(tmp_path: Path, 
     idea = _load_idea_module()
     (tmp_path / ".agents").mkdir()
     (tmp_path / "AGENTS.md").write_text("# test\n", encoding="utf-8")
-    ensure_v2_workspace(tmp_path)
+    ensure_workspace(tmp_path)
     record = _record(
         "i-select-review-123456",
         "Selectable Idea",
@@ -351,7 +351,7 @@ def test_confirm_all_reviewed_reports_remaining_when_explicit_limit_caps_batch(t
     kb = _load_kb_module()
     (tmp_path / ".agents").mkdir()
     (tmp_path / "AGENTS.md").write_text("# test\n", encoding="utf-8")
-    ensure_v2_workspace(tmp_path)
+    ensure_workspace(tmp_path)
     write_yaml_if_changed(runtime_preferences_path(tmp_path), {"identity": {"default_confirmed_by": "czx-default"}})
     for index in range(3):
         _write_record(
@@ -389,7 +389,7 @@ def test_confirm_all_reviewed_reports_remaining_when_explicit_limit_caps_batch(t
 
 def test_review_queue_confirm_uses_listed_records(tmp_path: Path) -> None:
     kb = _load_kb_module()
-    ensure_v2_workspace(tmp_path)
+    ensure_workspace(tmp_path)
     write_yaml_if_changed(runtime_preferences_path(tmp_path), {"identity": {"default_confirmed_by": "czx-default"}})
     _write_record(tmp_path, _record("p-old-123456", "Old", "pending_user_confirmation", "2026-01-01T00:00:00+00:00"))
     _write_record(tmp_path, _record("p-new-123456", "New", "pending_user_confirmation", "2026-01-02T00:00:00+00:00"))

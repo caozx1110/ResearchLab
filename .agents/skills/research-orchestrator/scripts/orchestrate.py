@@ -38,7 +38,7 @@ from research.common import (
     write_yaml_if_changed,
     yaml_default,
 )
-from research.v2 import append_history, ensure_v2_workspace, iter_records, kb_root, locate_record, checkpoint_and_report, project_root, write_record
+from research.core import append_history, ensure_workspace, iter_records, kb_root, locate_record, checkpoint_and_report, project_root, write_record
 
 OPEN_QUESTION_OPEN_STATUSES = {"open"}
 EVIDENCE_REQUEST_OPEN_STATUSES = {"open"}
@@ -305,7 +305,7 @@ def safe_unit_step(record: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def auto_plan(root: Path) -> dict[str, Any]:
-    ensure_v2_workspace(root)
+    ensure_workspace(root)
     build_index_command = {
         "kind": "kb",
         "step_type": "build-index",
@@ -423,7 +423,7 @@ def load_state(root: Path, program_id: str) -> dict:
     payload = load_yaml(state_path(root, program_id), default={})
     if not isinstance(payload, dict) or not payload:
         payload = {
-            **yaml_default(f"{program_id}-state-v2", "research-orchestrator", status="active"),
+            **yaml_default(f"{program_id}-state", "research-orchestrator", status="active"),
             "program_id": program_id,
             "question": "",
             "goal": "",
@@ -793,7 +793,7 @@ def append_decision(root: Path, program_id: str, item: dict[str, Any]) -> Path:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Manage v2 research programs.")
+    parser = argparse.ArgumentParser(description="Manage research programs.")
     add_project_root_argument(parser)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -819,7 +819,7 @@ def build_parser() -> argparse.ArgumentParser:
     auto.add_argument("--max-steps", type=int, default=1)
     auto.add_argument("--execute", action="store_true")
 
-    route = subparsers.add_parser("route", help="Suggest the right v2 skill for a task")
+    route = subparsers.add_parser("route", help="Suggest the right skill for a task")
     route.add_argument("--task", required=True)
 
     attach = subparsers.add_parser("attach-unit", help="Attach a unit id to a program")
@@ -892,7 +892,7 @@ def main() -> int:
     args = build_parser().parse_args()
     root = project_root(PROJECT_ROOT, explicit_root=args.root)
     print_resolved_project_roots(root)
-    ensure_v2_workspace(root)
+    ensure_workspace(root)
 
     if args.command == "init-program":
         with program_file_lock(root, args.program_id):

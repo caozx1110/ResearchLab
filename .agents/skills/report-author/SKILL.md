@@ -1,6 +1,6 @@
 ---
 name: report-author
-description: Generate self-contained v2 weekly reports, stage summaries, PPT materials, and writing-ready synthesis from program `reporting-events` plus linked artifacts.
+description: Generate self-contained core weekly reports, stage summaries, PPT materials, and writing-ready synthesis from program `reporting-events` plus linked artifacts.
 ---
 
 # Report Author

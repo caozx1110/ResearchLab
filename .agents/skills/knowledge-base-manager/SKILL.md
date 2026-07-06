@@ -1,6 +1,6 @@
 ---
 name: knowledge-base-manager
-description: 管理 v2 knowledge base 的统一 schema、索引、链接、taxonomy/topic/pool 治理与生命周期推进。
+description: 管理 knowledge base 的统一 schema、索引、链接、taxonomy/topic/pool 治理与生命周期推进。
 ---
 
 # Knowledge Base Manager
@@ -30,7 +30,7 @@ description: 管理 v2 knowledge base 的统一 schema、索引、链接、taxon
 
 ## 负责范围
 
-1. 初始化 v2 目录与共享治理文件。
+1. 初始化 core 目录与共享治理文件。
 2. 维护统一 `record.yaml` schema，并支持批量 schema refresh。
 3. 刷新 `kb/index.yaml` / `kb/index.md`。
 4. 治理 topic / tag / candidate pool，并回写 `kb/config/` 下的 catalog。
@@ -44,7 +44,7 @@ description: 管理 v2 knowledge base 的统一 schema、索引、链接、taxon
 - topic / tag / pool / summary 属于可覆盖治理层；history 和 link 仍保留变更痕迹。
 - 不在这里做 paper / repo 的深分析，深分析交给对应 analyst。
 - `kb.py lint` 也会检查 program/unit 双向链接，以及常见 YAML duplicate-key 风险。
-- **公开契约：所有 unit 写入必须经过 `lib/research/v2.py.validate_write(record)`。**
+- **公开契约：所有 unit 写入必须经过 `lib/research/core.py.validate_write(record)`。**
   - `write_record()` 自动调用，外部 writer 脚本如果直接 `write_yaml_if_changed` 跳过 `write_record`，必须自行调用 `validate_write`。
   - AI 推断 / 评估 / user_opinion 类字段（包含在 `information_types`），或 `source.kind == "ai"`，对应 `confirmation_status` 必须是 `pending_user_confirmation` 或 `rejected`，且 `needs_human_confirmation == True`。
   - 默认非严格模式仅 stderr 警告，便于增量改造；`RESEARCH_VALIDATE_STRICT=1` 切换为严格模式，违规时 `SystemExit`。

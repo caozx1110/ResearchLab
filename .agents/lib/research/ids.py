@@ -1,4 +1,4 @@
-"""Canonical v2 unit id helpers."""
+"""Canonical core unit id helpers."""
 
 from __future__ import annotations
 

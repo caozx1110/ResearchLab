@@ -1,6 +1,6 @@
 ---
 name: method-designer
-description: Turn a selected v2 idea unit into a method design handoff with repo choice, interfaces, and an expanded experiment matrix under `kb/programs/<program-id>/design/`.
+description: Turn a selected core idea unit into a method design handoff with repo choice, interfaces, and an expanded experiment matrix under `kb/programs/<program-id>/design/`.
 ---
 
 # Method Designer
@@ -13,7 +13,7 @@ Use this skill only after an idea has been explicitly selected.
 
 1. Read the selected idea record and its analysis artifacts.
 2. Refuse to design from an unselected idea.
-3. Choose a repo from v2 repo units or keep the choice explicitly pending.
+3. Choose a repo from repo units or keep the choice explicitly pending.
 4. Write repo choice, interfaces, and an expanded experiment matrix needed to validate the idea.
 5. Hand run-by-run evidence to `experiment-workbench`.
 

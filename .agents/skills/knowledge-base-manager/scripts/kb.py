@@ -16,13 +16,13 @@ else:
     raise SystemExit("Could not locate .agents/lib")
 
 from research.common import add_project_root_argument, confirm_command, parse_iso_datetime, print_resolved_project_roots, shell_command, warn_if_cwd_differs_from_project_root
-from research.v2 import (
+from research.core import (
     build_index,
     candidate_pools_path,
     compact_unit_ids,
     confirm_unit,
     ensure_kb_git_repo,
-    ensure_v2_workspace,
+    ensure_workspace,
     git_checkpoint,
     govern_records,
     kb_git_log,
@@ -131,11 +131,11 @@ def apply_batch_confirmation(root: Path, records: list[dict], *, confirmed_by: s
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Manage the v2 research knowledge base.")
+    parser = argparse.ArgumentParser(description="Manage the research knowledge base.")
     add_project_root_argument(parser)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    subparsers.add_parser("init", help="Initialize the v2 knowledge base layout")
+    subparsers.add_parser("init", help="Initialize the knowledge base layout")
     subparsers.add_parser("lint", help="Validate record schemas and lifecycle fields")
     subparsers.add_parser("index", help="Rebuild kb/index.yaml and kb/index.md")
     subparsers.add_parser("storage-sync", help="Move legacy raw/output into kb and rewrite old storage references")
@@ -211,9 +211,9 @@ def main() -> int:
 
     if args.command == "init":
         warn_if_cwd_differs_from_project_root(root, command="kb.py init")
-        ensure_v2_workspace(root)
+        ensure_workspace(root)
         build_index(root)
-        print("[ok] initialized kb v2 workspace")
+        print("[ok] initialized kb core workspace")
         return 0
     if args.command == "storage-sync":
         payload = sync_storage_layout(root)

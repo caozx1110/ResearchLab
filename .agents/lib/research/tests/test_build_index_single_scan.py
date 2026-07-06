@@ -3,11 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from research.common import load_yaml, write_yaml_if_changed
-import research.v2 as v2
+import research.core as core
 
 
 def _write_record(root: Path, record: dict) -> None:
-    write_yaml_if_changed(v2.record_path(root, record["kind"], record["id"]), record)
+    write_yaml_if_changed(core.record_path(root, record["kind"], record["id"]), record)
 
 
 def _sample_record(unit_id: str, kind: str, title: str) -> dict:
@@ -30,10 +30,10 @@ def _sample_record(unit_id: str, kind: str, title: str) -> dict:
 
 
 def test_build_index_scans_records_once(tmp_path: Path, monkeypatch) -> None:
-    v2.ensure_v2_workspace(tmp_path)
+    core.ensure_workspace(tmp_path)
     _write_record(tmp_path, _sample_record("p-one-123456", "paper", "One Paper"))
 
-    original_iter_records = v2.iter_records
+    original_iter_records = core.iter_records
     calls = 0
 
     def counting_iter_records(project_root: Path, *, kind: str | None = None):
@@ -41,23 +41,23 @@ def test_build_index_scans_records_once(tmp_path: Path, monkeypatch) -> None:
         calls += 1
         return original_iter_records(project_root, kind=kind)
 
-    monkeypatch.setattr(v2, "iter_records", counting_iter_records)
+    monkeypatch.setattr(core, "iter_records", counting_iter_records)
 
-    v2.build_index(tmp_path)
+    core.build_index(tmp_path)
 
     assert calls == 1
 
 
 def test_build_index_output_stays_byte_stable(tmp_path: Path, monkeypatch) -> None:
-    v2.ensure_v2_workspace(tmp_path)
+    core.ensure_workspace(tmp_path)
     _write_record(tmp_path, _sample_record("p-alpha-123456", "paper", "Alpha Paper"))
     _write_record(tmp_path, _sample_record("r-beta-123456", "repo", "Beta Repo"))
-    monkeypatch.setattr(v2, "utc_now_iso", lambda: "2026-07-04T00:00:00+00:00")
+    monkeypatch.setattr(core, "utc_now_iso", lambda: "2026-07-04T00:00:00+00:00")
 
-    yaml_path, md_path = v2.build_index(tmp_path)
+    yaml_path, md_path = core.build_index(tmp_path)
 
     assert yaml_path.read_text(encoding="utf-8") == (
-        "id: kb-index-v2\n"
+        "id: kb-index\n"
         "generated_at: '2026-07-04T00:00:00+00:00'\n"
         "items:\n"
         "- id: p-alpha-123456\n"
@@ -96,7 +96,7 @@ def test_build_index_output_stays_byte_stable(tmp_path: Path, monkeypatch) -> No
         "  experiment: 0\n"
     )
     assert md_path.read_text(encoding="utf-8") == (
-        "# Research KB Index v2\n\n"
+        "# Research KB Index\n\n"
         "## Papers\n\n"
         "- `p-alpha-123456` · Alpha Paper · status=active · maturity=lightweight · confirm=auto_confirmed · pools=current-reading\n\n"
         "## Repos\n\n"

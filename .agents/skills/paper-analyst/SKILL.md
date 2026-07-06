@@ -1,6 +1,6 @@
 ---
 name: paper-analyst
-description: 负责 v2 paper unit 的 quick-screen、full note、figure extraction、structure refresh 与确认门控。
+description: 负责 core paper unit 的 quick-screen、full note、figure extraction、structure refresh 与确认门控。
 ---
 
 # Paper Analyst

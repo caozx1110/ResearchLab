@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from research.common import write_yaml_if_changed
-from research.v2 import detect_duplicate, ensure_v2_workspace, record_path
+from research.core import detect_duplicate, ensure_workspace, record_path
 
 
 def _write_record(root: Path, record: dict) -> None:
@@ -11,7 +11,7 @@ def _write_record(root: Path, record: dict) -> None:
 
 
 def test_detect_duplicate_by_url(tmp_path: Path) -> None:
-    ensure_v2_workspace(tmp_path)
+    ensure_workspace(tmp_path)
     _write_record(
         tmp_path,
         {
@@ -29,7 +29,7 @@ def test_detect_duplicate_by_url(tmp_path: Path) -> None:
 
 
 def test_detect_duplicate_by_file_hash(tmp_path: Path) -> None:
-    ensure_v2_workspace(tmp_path)
+    ensure_workspace(tmp_path)
     source = tmp_path / "paper.pdf"
     source.write_bytes(b"same file")
     other = tmp_path / "other.pdf"
@@ -54,7 +54,7 @@ def test_detect_duplicate_by_file_hash(tmp_path: Path) -> None:
 
 
 def test_detect_duplicate_by_arxiv_id_in_title(tmp_path: Path) -> None:
-    ensure_v2_workspace(tmp_path)
+    ensure_workspace(tmp_path)
     _write_record(
         tmp_path,
         {
@@ -72,7 +72,7 @@ def test_detect_duplicate_by_arxiv_id_in_title(tmp_path: Path) -> None:
 
 
 def test_detect_duplicate_by_normalized_title(tmp_path: Path) -> None:
-    ensure_v2_workspace(tmp_path)
+    ensure_workspace(tmp_path)
     _write_record(
         tmp_path,
         {
@@ -90,7 +90,7 @@ def test_detect_duplicate_by_normalized_title(tmp_path: Path) -> None:
 
 
 def test_detect_duplicate_returns_none_for_distinct_source_and_title(tmp_path: Path) -> None:
-    ensure_v2_workspace(tmp_path)
+    ensure_workspace(tmp_path)
     _write_record(
         tmp_path,
         {

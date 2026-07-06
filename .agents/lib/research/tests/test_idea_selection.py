@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 from research.common import load_yaml, write_yaml_if_changed
-from research.v2 import default_record, ensure_v2_workspace, record_path
+from research.core import default_record, ensure_workspace, record_path
 
 
 def _project_root() -> Path:
@@ -27,7 +27,7 @@ def test_idea_select_keeps_content_confirmation_pending(tmp_path: Path, monkeypa
     idea = _load_idea_module()
     (tmp_path / ".agents").mkdir()
     (tmp_path / "AGENTS.md").write_text("# test\n", encoding="utf-8")
-    ensure_v2_workspace(tmp_path)
+    ensure_workspace(tmp_path)
     record = default_record("idea", title="Selectable Idea", maturity="lightweight", source={"original_uri": "discussion"})
     record["id"] = "i-selectable-123456"
     record["status"] = "pending"

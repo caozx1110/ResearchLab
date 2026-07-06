@@ -5,7 +5,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from research.v2 import load_runtime_preferences
+from research.core import load_runtime_preferences
 
 
 def _project_root() -> Path:

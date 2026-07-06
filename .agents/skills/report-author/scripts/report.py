@@ -17,11 +17,11 @@ else:
     raise SystemExit("Could not locate .agents/lib")
 
 from research.common import add_project_root_argument, load_program_reporting_events, print_resolved_project_roots, write_text_if_changed
-from research.v2 import ensure_v2_workspace, checkpoint_and_report, project_root, user_root
+from research.core import ensure_workspace, checkpoint_and_report, project_root, user_root
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Generate v2 reports.")
+    parser = argparse.ArgumentParser(description="Generate reports.")
     add_project_root_argument(parser)
     subparsers = parser.add_subparsers(dest="command", required=True)
     for name in ("weekly", "ppt-materials", "stage-summary", "writing-materials"):
@@ -103,7 +103,7 @@ def main() -> int:
     args = build_parser().parse_args()
     root = project_root(PROJECT_ROOT, explicit_root=args.root)
     print_resolved_project_roots(root)
-    ensure_v2_workspace(root)
+    ensure_workspace(root)
     reports_root = root / "kb" / "programs" / args.program_id / "reports"
     reports_root.mkdir(parents=True, exist_ok=True)
     events = normalize_events(load_program_reporting_events(root, args.program_id), stage=args.stage, limit=args.limit)

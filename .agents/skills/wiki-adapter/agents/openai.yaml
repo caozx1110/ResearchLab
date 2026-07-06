@@ -1,4 +1,4 @@
 interface:
   display_name: "Wiki Adapter"
-  short_description: "Provide a thin wiki-style entrypoint on top of v2 owner skills"
-  default_prompt: "Use $wiki-adapter when the user asks in generic wiki or knowledge-base terms and route the request to the right v2 owner skill."
+  short_description: "Provide a thin wiki-style entrypoint on top of owner skills"
+  default_prompt: "Use $wiki-adapter when the user asks in generic wiki or knowledge-base terms and route the request to the right core owner skill."
