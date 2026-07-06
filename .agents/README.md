@@ -4,9 +4,9 @@
 
 ## Layout
 
-- `.agents/skills/`: 16 个本地 skill，每个 skill 的触发与职责写在自己的 `SKILL.md`。
-- `.agents/lib/research/`: 跨 skill 共享的 shared Python helper。
-- `.agents/lib/research/SCHEMAS.md`: record、program、config、confirmation gate 的共享契约。
+- `.agents/skills/`: 17 个本地 skill，其中 16 个组成 core research chain，`kb-cli` 提供快捷入口。
+- `.agents/lib/research/`: 跨 skill 共享的 Python helper。
+- `.agents/lib/research/SCHEMAS.md`: record、program、config、memory、confirmation gate 的共享契约。
 
 ## Current Skill Groups
 
@@ -14,10 +14,20 @@
 - Analysis: `paper-analyst`, `repo-analyst`, `blog-analyst`, `literature-synthesizer`
 - Creation and execution: `idea-workbench`, `method-designer`, `experiment-workbench`, `report-author`
 - Navigation and meta: `research-navigator`, `discussion-archivist`, `wiki-adapter`, `skill-evolution-advisor`
+- Shortcut dispatcher: `kb-cli`
 
 ## Runtime
 
-脚本默认用 `${RESEARCH_PYTHON:-python3}` 运行，并期望该 runtime 可 import PyYAML。开发和重构时先跑：
+脚本默认用 `${RESEARCH_PYTHON:-python3}` 运行，并期望该 runtime 可 import PyYAML。新用户应先创建 venv 并安装依赖：
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -r requirements.txt
+export RESEARCH_PYTHON="$(pwd)/.venv/bin/python"
+```
+
+开发和重构时先跑：
 
 ```bash
 ${RESEARCH_PYTHON:-python3} -m pytest
