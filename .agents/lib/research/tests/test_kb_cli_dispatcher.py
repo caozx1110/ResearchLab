@@ -50,7 +50,32 @@ def test_kb_help_snapshot_contains_group_headers() -> None:
     for header in ["加材料", "检索", "idea", "实验", "报告", "确认", "状态", "记忆"]:
         assert f"## {header}" in text
     assert "kb init" in text
+    assert "kb doctor" in text
     assert "也可以直接对 AI 说" in text
+
+
+def test_kb_doctor_prints_runtime_capabilities(monkeypatch, tmp_path: Path, capsys) -> None:
+    kb = _load_kb_cli()
+    monkeypatch.setattr(
+        kb,
+        "current_runtime_capabilities",
+        lambda: {
+            "python": "/usr/bin/python3",
+            "version": "3.11.0",
+            "modules": {"yaml": True, "PyPDF2": False, "pypdf": True},
+            "yaml_support": True,
+            "pdf_support": True,
+            "pdf_backend": "pypdf",
+        },
+    )
+
+    assert kb.main(["--root", str(tmp_path), "doctor"]) == 0
+
+    captured = capsys.readouterr()
+    assert "python: /usr/bin/python3" in captured.out
+    assert "yaml: available" in captured.out
+    assert "pdf: pypdf" in captured.out
+    assert "module.PyPDF2: missing" in captured.out
 
 
 def test_kb_init_forwards_workspace_and_config_inits_in_order(monkeypatch, tmp_path: Path) -> None:

@@ -1,6 +1,6 @@
 ---
 name: kb-cli
-description: kb 快捷命令入口（伪 CLI），用于把常用 research 操作统一成 kb 动词形式；当用户在终端运行 kb help/init/status/next/find/recall，或对 AI 说 kb 动词希望代跑对应查询时使用。
+description: kb 快捷命令入口（伪 CLI），用于把常用 research 操作统一成 kb 动词形式；当用户在终端运行 kb help/init/doctor/status/next/find/recall，或对 AI 说 kb 动词希望代跑对应查询时使用。
 ---
 
 # kb 快捷命令入口（伪 CLI）
@@ -14,6 +14,7 @@ description: kb 快捷命令入口（伪 CLI），用于把常用 research 操�
 ```bash
 python3 .agents/skills/kb-cli/scripts/kb help
 python3 .agents/skills/kb-cli/scripts/kb init
+python3 .agents/skills/kb-cli/scripts/kb doctor
 python3 .agents/skills/kb-cli/scripts/kb status
 python3 .agents/skills/kb-cli/scripts/kb find policy gradient
 ```
@@ -23,6 +24,7 @@ python3 .agents/skills/kb-cli/scripts/kb find policy gradient
 ```text
 kb help
 kb init
+kb doctor
 kb status
 kb next
 kb find policy gradient
@@ -33,6 +35,7 @@ kb recall gotchas
 
 - `help`：打印分组能力菜单；固定文本，不调用任何 skill。
 - `init`：已完成；先转发 `knowledge-base-manager/scripts/kb.py init` 与 `research-config-manager/scripts/config.py init`，TTY 下询问 4 个基础偏好，非 TTY 自动降级。
+- `doctor`：已完成；只读打印当前 Python、YAML 与 PDF 后端能力。
 - `status [program]`：转发到 `research-navigator/scripts/navigate.py current-state`；带 program 时追加转发到 `research-orchestrator/scripts/orchestrate.py status --program-id <program>`。
 - `next [program]`：转发到 `research-orchestrator/scripts/orchestrate.py next`；当前底层脚本按全局 program 优先级给建议。
 - `find <keywords...>`：转发到 `knowledge-base-manager/scripts/kb.py query --query "<keywords>"`。
