@@ -1,6 +1,6 @@
 ---
 name: idea-workbench
-description: 负责 v2 idea unit 的生成、多候选管理、review、review-assist、显式选择与归档。
+description: 负责 core idea unit 的生成、多候选管理、review、review-assist、显式选择与归档。
 ---
 
 # Idea Workbench

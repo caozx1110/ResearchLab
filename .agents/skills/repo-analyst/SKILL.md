@@ -1,6 +1,6 @@
 ---
 name: repo-analyst
-description: 负责 v2 repo unit 的 structure scan、capability mapping、reuse judgement 与确认门控。
+description: 负责 repo unit 的 structure scan、capability mapping、reuse judgement 与确认门控。
 ---
 
 # Repo Analyst

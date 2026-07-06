@@ -30,7 +30,7 @@ from research.common import (  # type: ignore
     preferred_runtime_record,
     utc_now_iso,
 )
-from research.v2 import (  # type: ignore
+from research.core import (  # type: ignore
     UNIT_KIND_DIRS,
     iter_records as iter_v2_records,
     record_path as v2_record_path,
@@ -503,7 +503,7 @@ def build_workspace_profile(project_root: Path) -> dict[str, Any]:
         for kind, directory in UNIT_KIND_DIRS.items()
     }
     return {
-        "profile_name": _first_nonempty(payload.get("profile_name"), payload.get("name"), "Research Navigator v2"),
+        "profile_name": _first_nonempty(payload.get("profile_name"), payload.get("name"), "Research Navigator core"),
         "generated_at": str(payload.get("generated_at") or ""),
         "short_terms": short_terms,
         "tag_rule_count": len(rules) if isinstance(rules, list) else 0,

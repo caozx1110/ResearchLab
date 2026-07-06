@@ -1,4 +1,4 @@
 interface:
   display_name: "Method Designer"
-  short_description: "Turn a selected idea into repo choice, interfaces, and an expanded matrix in v2"
+  short_description: "Turn a selected idea into repo choice, interfaces, and an expanded matrix in core"
   default_prompt: "Use $method-designer to convert a selected idea unit into a concrete method note, repo-choice record, interface contract, and expanded experiment matrix without starting execution yet."

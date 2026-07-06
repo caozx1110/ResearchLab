@@ -17,12 +17,12 @@ else:
     raise SystemExit("Could not locate .agents/lib")
 
 from research.common import add_project_root_argument, ensure_dir, load_yaml, print_resolved_project_roots, slugify, utc_now_iso, write_text_if_changed, write_yaml_if_changed, yaml_default
-from research.v2 import (
+from research.core import (
     append_history,
     apply_record_governance,
     build_index,
     default_record,
-    ensure_v2_workspace,
+    ensure_workspace,
     iter_records,
     locate_record,
     checkpoint_and_report,
@@ -277,7 +277,7 @@ def mark_idea_selected(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Manage idea units in v2.")
+    parser = argparse.ArgumentParser(description="Manage idea units in core.")
     add_project_root_argument(parser)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -320,7 +320,7 @@ def main() -> int:
     args = build_parser().parse_args()
     root = project_root(PROJECT_ROOT, explicit_root=args.root)
     print_resolved_project_roots(root)
-    ensure_v2_workspace(root)
+    ensure_workspace(root)
 
     if args.command == "capture":
         record = default_record("idea", title=args.title, maturity="lightweight", source={"original_uri": args.source})

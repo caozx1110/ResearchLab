@@ -1,4 +1,4 @@
 interface:
   display_name: "kb CLI"
-  short_description: "统一入口转发 v2 研究系统高频快捷命令"
-  default_prompt: "使用 $kb-cli 运行 kb help/status/next/find/recall 等快捷命令，并把请求转发到对应 v2 skill 脚本。"
+  short_description: "统一入口转发 core 研究系统高频快捷命令"
+  default_prompt: "使用 $kb-cli 运行 kb help/status/next/find/recall 等快捷命令，并把请求转发到对应 skill 脚本。"

@@ -17,11 +17,11 @@ else:
     raise SystemExit("Could not locate .agents/lib")
 
 from research.common import add_project_root_argument, load_yaml, print_resolved_project_roots, slugify, warn_if_cwd_differs_from_project_root, write_text_if_changed, write_yaml_if_changed, yaml_default
-from research.v2 import (
+from research.core import (
     candidate_pools_path,
     config_root,
     default_runtime_preferences,
-    ensure_v2_workspace,
+    ensure_workspace,
     load_candidate_pools,
     load_runtime_preferences,
     load_topic_taxonomy,
@@ -52,7 +52,7 @@ TOGGLE_RUNTIME_PREFS = {
 
 def _default_profile() -> dict:
     return {
-        **yaml_default("research-user-profile-v2", "research-config-manager", status="active"),
+        **yaml_default("research-user-profile", "research-config-manager", status="active"),
         "preferences": {
             "language_preference": "zh-CN",
             "summary_style": "concise",
@@ -218,7 +218,7 @@ def upsert_pool(root: Path, *, pool: str, topics: list[str], tags: list[str], de
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Manage v2 research configuration.")
+    parser = argparse.ArgumentParser(description="Manage research configuration.")
     add_project_root_argument(parser)
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("init", help="Initialize config files")
@@ -267,7 +267,7 @@ def main() -> int:
     args = build_parser().parse_args()
     root = project_root(PROJECT_ROOT, explicit_root=args.root)
     print_resolved_project_roots(root)
-    ensure_v2_workspace(root)
+    ensure_workspace(root)
 
     if args.command == "init":
         warn_if_cwd_differs_from_project_root(root, command="config.py init")

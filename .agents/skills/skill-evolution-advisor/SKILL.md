@@ -5,14 +5,14 @@ description: 经验 + skill 演化记忆：capture lightweight learnings, recall
 
 # Skill Evolution Advisor
 
-Use this skill when a real workflow exposes friction in the v2 research system, when the user corrects the agent, or when lightweight memory should capture a confirmed habit, recurring issue, or skill defect.
+Use this skill when a real workflow exposes friction in the research system, when the user corrects the agent, or when lightweight memory should capture a confirmed habit, recurring issue, or skill defect.
 
 ## Workflow
 
 1. For lightweight memory, log one short learning and leave it `pending` until user review.
 2. Recall confirmed user preferences and recurring issues at session start.
 3. Keep `skill-defect` entries record-only; do not auto-edit skills or roadmap files from them.
-4. For deeper retrospectives, record which v2 skills were used, separate observed friction from inferred causes, and generate an AI-ready patch prompt.
+4. For deeper retrospectives, record which skills were used, separate observed friction from inferred causes, and generate an AI-ready patch prompt.
 
 ## Commands
 

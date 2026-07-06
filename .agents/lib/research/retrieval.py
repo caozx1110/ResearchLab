@@ -1,4 +1,4 @@
-"""Lightweight full-text retrieval helpers for v2 records."""
+"""Lightweight full-text retrieval helpers for records."""
 
 from __future__ import annotations
 

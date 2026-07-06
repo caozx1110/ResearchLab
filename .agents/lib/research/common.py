@@ -172,7 +172,7 @@ def domain_profile_path(project_root: Path) -> Path:
     return research_root(project_root) / "memory" / "domain-profile.yaml"
 
 
-def blank_runtime_registry(generated_by: str = "research-conductor") -> dict[str, Any]:
+def blank_runtime_registry(generated_by: str = "research-config-manager") -> dict[str, Any]:
     return {
         **yaml_default("runtime-environments", generated_by, status="active", confidence=0.9),
         "preferred_runtime_id": "",
@@ -181,7 +181,7 @@ def blank_runtime_registry(generated_by: str = "research-conductor") -> dict[str
     }
 
 
-def blank_domain_profile(generated_by: str = "research-conductor") -> dict[str, Any]:
+def blank_domain_profile(generated_by: str = "research-config-manager") -> dict[str, Any]:
     return {
         **yaml_default("domain-profile", generated_by, status="active", confidence=0.85),
         "profile_name": "",
@@ -306,7 +306,7 @@ def _load_domain_profile_cached(project_root_str: str) -> dict[str, Any]:
         payload = blank_domain_profile()
     payload.setdefault("id", "domain-profile")
     payload.setdefault("status", "active")
-    payload.setdefault("generated_by", "research-conductor")
+    payload.setdefault("generated_by", "research-config-manager")
     payload.setdefault("generated_at", utc_now_iso())
     payload.setdefault("inputs", [])
     payload.setdefault("confidence", 0.85)
@@ -515,7 +515,7 @@ def load_runtime_registry(project_root: Path) -> dict[str, Any]:
         payload = blank_runtime_registry()
     payload.setdefault("id", "runtime-environments")
     payload.setdefault("status", "active")
-    payload.setdefault("generated_by", "research-conductor")
+    payload.setdefault("generated_by", "research-config-manager")
     payload.setdefault("generated_at", utc_now_iso())
     payload["inputs"] = [str(item) for item in _coerce_list(payload.get("inputs")) if str(item).strip()]
     payload["confidence"] = float(payload.get("confidence", 0.9) or 0.9)
@@ -580,9 +580,8 @@ def ensure_research_runtime(project_root: Path, skill_name: str, *, require_pdf_
                     f"at {preferred.get('python', '')}"
                 ),
                 (
-                    "Retry with the remembered interpreter or refresh it with "
-                    "`python3 .agents/skills/research-conductor/scripts/manage_workspace.py remember-runtime "
-                    "--python <path-to-python> --label research-default`."
+                    "Retry with the remembered interpreter or update your environment to point "
+                    "at a Python runtime with the missing modules."
                 ),
             ]
         )
@@ -591,9 +590,8 @@ def ensure_research_runtime(project_root: Path, skill_name: str, *, require_pdf_
             [
                 "No remembered research runtime is stored yet.",
                 (
-                    "Register one with "
-                    "`python3 .agents/skills/research-conductor/scripts/manage_workspace.py remember-runtime "
-                    "--python <path-to-python> --label research-default`."
+                    "Set RESEARCH_PYTHON or run the command with a Python interpreter that has "
+                    "the missing modules installed."
                 ),
             ]
         )

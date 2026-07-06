@@ -1,9 +1,9 @@
-# v2 Research Schemas
+# Research Schemas
 
 跨 skill 共享的 YAML / Markdown artifact 协议。每个 skill 写入或读取这些 artifact 时遵循此处定义，避免在多个 SKILL.md 里重复定义且漂移。
 
 实现源：
-- 枚举与 record 模板：`.agents/lib/research/v2.py`
+- 枚举与 record 模板：`.agents/lib/research/core.py`
 - YAML 读写与公共字段：`.agents/lib/research/common.py`
 
 时间格式：全部使用 UTC ISO-8601，如 `'2026-05-06T05:56:11+00:00'`。脚本生成时间用 `utc_now_iso()`。
@@ -93,7 +93,7 @@ history:                             # append_history() 写入
 
 ### per-kind payload <a id="unit-payload"></a>
 
-每种 kind 的 payload 结构由 `v2.py kind_payload_skeleton(kind, title)` 给出。下面列出对外契约关键字段（AI 写入这些字段时按 [`confirmation gate`](#confirmation-gate) 设置 pending）：
+每种 kind 的 payload 结构由 `core.py kind_payload_skeleton(kind, title)` 给出。下面列出对外契约关键字段（AI 写入这些字段时按 [`confirmation gate`](#confirmation-gate) 设置 pending）：
 
 | kind | payload 关键 section | 写入 skill |
 |---|---|---|
@@ -189,7 +189,7 @@ kb/programs/<id>/
 ### state.yaml
 
 ```yaml
-id: <program-id>-state-v2
+id: <program-id>-state
 status: active|completed|failed|archived
 generated_by: research-orchestrator
 generated_at: ''
@@ -306,7 +306,7 @@ items:
 ### candidate-pools.yaml
 
 ```yaml
-id: candidate-pools-v2
+id: candidate-pools
 status: active
 generated_by: knowledge-base-manager
 policy:
@@ -324,7 +324,7 @@ pools:
 ### topic-taxonomy.yaml
 
 ```yaml
-id: topic-taxonomy-v2
+id: topic-taxonomy
 status: active
 generated_by: knowledge-base-manager
 policy:
@@ -340,7 +340,7 @@ topics:
 
 ### runtime-preferences.yaml
 
-由 `research-config-manager` 写入。schema 见 `v2.py default_runtime_preferences()`，包含资源画像、语言偏好、自动化开关、versioning_commit_mode（`manual|milestone|aggressive`）等。
+由 `research-config-manager` 写入。schema 见 `core.py default_runtime_preferences()`，包含资源画像、语言偏好、自动化开关、versioning_commit_mode（`manual|milestone|aggressive`）等。
 
 - `identity.default_confirmed_by`: 可选的人类确认身份默认值。只用于补齐 `--confirmed-by`；`--evidence` 仍必须由调用方显式提供，系统不得默认使用 AI 写出的单元笔记作为 evidence。
 
@@ -393,9 +393,9 @@ topics:
 
 ## confirmation gate <a id="confirmation-gate"></a>
 
-**契约目标**：v2 系统中所有 AI 推断/评估/用户意见，必须经过用户显式确认后才能 `confirmed`。否则保持 `pending_user_confirmation`。
+**契约目标**：core 系统中所有 AI 推断/评估/用户意见，必须经过用户显式确认后才能 `confirmed`。否则保持 `pending_user_confirmation`。
 
-**当前运行行为**：`lib/research/v2.py` 提供 `validate_write(record)` helper。默认 `strict=False`，发现违规时写 stderr warning 并返回 violations；设置 `RESEARCH_VALIDATE_STRICT=1` 或显式 `strict=True` 时才 `SystemExit` 拦截。`write_record()` 会调用该 helper，但 program state、workflow files、reporting events 等非 unit record 写入暂不经过此 gate。
+**当前运行行为**：`lib/research/core.py` 提供 `validate_write(record)` helper。默认 `strict=False`，发现违规时写 stderr warning 并返回 violations；设置 `RESEARCH_VALIDATE_STRICT=1` 或显式 `strict=True` 时才 `SystemExit` 拦截。`write_record()` 会调用该 helper，但 program state、workflow files、reporting events 等非 unit record 写入暂不经过此 gate。
 
 **检查规则**：
 

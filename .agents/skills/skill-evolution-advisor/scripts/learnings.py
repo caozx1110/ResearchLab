@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capture, recall, promote, and review lightweight v2 learnings."""
+"""Capture, recall, promote, and review lightweight learnings."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ from research.learnings import (
     render_recall_digest,
     review_learning,
 )
-from research.v2 import project_root
+from research.core import project_root
 
 
 def build_parser() -> argparse.ArgumentParser:

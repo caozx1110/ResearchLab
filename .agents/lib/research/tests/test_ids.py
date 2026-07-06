@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from research.v2 import canonical_unit_id, canonical_unit_id_with_hash, compact_unit_slug, is_canonical_unit_id
+from research.core import canonical_unit_id, canonical_unit_id_with_hash, compact_unit_slug, is_canonical_unit_id
 
 
 def test_canonical_unit_id_is_deterministic_and_canonical() -> None:

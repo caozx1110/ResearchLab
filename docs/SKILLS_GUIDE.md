@@ -1,4 +1,4 @@
-# Workspace Skills Guide (v2)
+# Workspace Skills Guide (core)
 
 这个工作区现在使用一套 **knowledge-unit-first** 的科研 skill 体系。
 
@@ -6,7 +6,7 @@
 
 > 先把对象变成统一知识单元，再围绕这些知识单元做分析、设计、实验和汇报。
 
-## 1. v2 skill 列表
+## 1. skill 列表
 
 当前主链路 skill：
 
@@ -27,7 +27,7 @@
 15. `wiki-adapter`
 16. `skill-evolution-advisor`
 
-## 2. v2 目录心智模型
+## 2. core 目录心智模型
 
 ```text
 kb/raw/              # immutable raw sources
@@ -168,5 +168,5 @@ python3 .agents/skills/research-navigator/scripts/open_kb_browser.py
 如果你不知道下一步该用哪个：
 
 ```text
-请用 research-orchestrator 判断我现在最该走哪条 v2 skill 路径。
+请用 research-orchestrator 判断我现在最该走哪条 skill 路径。
 ```

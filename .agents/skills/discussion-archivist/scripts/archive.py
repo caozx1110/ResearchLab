@@ -16,7 +16,7 @@ else:
     raise SystemExit("Could not locate .agents/lib")
 
 from research.common import add_project_root_argument, append_program_reporting_event, ensure_dir, print_resolved_project_roots, simple_slug, write_text_if_changed
-from research.v2 import project_root
+from research.core import project_root
 
 
 def next_available_path(root: Path, slug: str, suffix: str) -> Path:

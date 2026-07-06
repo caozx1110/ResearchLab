@@ -20,7 +20,7 @@ else:
     raise SystemExit("Could not locate .agents/lib")
 
 from research.common import add_project_root_argument, find_project_root
-from research.v2 import default_confirmed_by, search_records
+from research.core import default_confirmed_by, search_records
 
 
 HELP_MENU: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (

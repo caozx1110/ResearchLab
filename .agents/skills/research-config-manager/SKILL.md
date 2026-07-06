@@ -1,6 +1,6 @@
 ---
 name: research-config-manager
-description: 管理 v2 研究系统配置，包括资源画像、语言偏好、taxonomy seed、candidate pool policy 与自动化开关。
+description: 管理 core 研究系统配置，包括资源画像、语言偏好、taxonomy seed、candidate pool policy 与自动化开关。
 ---
 
 # Research Config Manager
@@ -16,7 +16,7 @@ description: 管理 v2 研究系统配置，包括资源画像、语言偏好、
 1. 初始化可读的用户 profile、taxonomy / pool seed catalog 与 runtime preferences；markdown settings 由 workspace bootstrap 保证存在，并通过 `toggle` 更新条目。
 2. 捕获资源、约束、偏好，并保持脚本可读。
 3. 显式维护 topic / tag taxonomy seed 与 candidate pool policy。
-4. 让其他 v2 skills 可以稳定读取统一配置。
+4. 让其他 skills 可以稳定读取统一配置。
 5. 管理 `kb` 独立仓库的 versioning 策略，例如 `manual | milestone | aggressive`。
 6. 给用户解释 paper intake 的默认模式，并提供可直接复制的配置修改命令。
 

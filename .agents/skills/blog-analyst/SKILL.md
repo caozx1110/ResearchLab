@@ -1,6 +1,6 @@
 ---
 name: blog-analyst
-description: Analyze blog and technical article units in the v2 research system, including content positioning, key concepts, credibility judgement, and reusable explanation material for later discussion and reporting.
+description: Analyze blog and technical article units in the research system, including content positioning, key concepts, credibility judgement, and reusable explanation material for later discussion and reporting.
 ---
 
 # Blog Analyst

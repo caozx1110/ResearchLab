@@ -17,7 +17,7 @@ else:
     raise SystemExit("Could not locate .agents/lib")
 
 from research.common import add_project_root_argument, append_program_reporting_event, ensure_dir, load_yaml, normalize_list, print_resolved_project_roots, write_text_if_changed, write_yaml_if_changed, yaml_default
-from research.v2 import iter_records, locate_record, project_root, rel
+from research.core import iter_records, locate_record, project_root, rel
 
 
 def tokenize(text: str) -> set[str]:
@@ -204,7 +204,7 @@ def main() -> int:
             "selection_reason": (
                 f"Selected `{selected_repo.get('id', '')}` with score={selected_repo.get('score', 0)} based on idea/repo token overlap."
                 if selected_repo.get("id")
-                else "No v2 repo unit matched yet; manual repo selection required."
+                else "No repo unit matched yet; manual repo selection required."
             ),
             "selection_status": "pending_user_confirmation",
             "information_types": ["fact", "inference", "evaluation", "unverified"],
@@ -221,7 +221,7 @@ def main() -> int:
             ],
             "repo_choice_policy": {
                 "prefer_user_pinned_repo": bool(normalize_list(args.repo_id)),
-                "prefer_existing_v2_repo_units": True,
+                "prefer_existing_repo_units": True,
                 "fallback": "manual-selection-required",
             },
         },
@@ -302,7 +302,7 @@ def main() -> int:
     state = load_yaml(state_path, default={})
     if not isinstance(state, dict) or not state:
         state = {
-            **yaml_default(f"{args.program_id}-state-v2", "method-designer", status="active"),
+            **yaml_default(f"{args.program_id}-state", "method-designer", status="active"),
             "program_id": args.program_id,
             "question": "",
             "goal": "",

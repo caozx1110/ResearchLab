@@ -18,7 +18,7 @@ else:
     raise SystemExit("Could not locate .agents/lib")
 
 from research.common import add_project_root_argument, clean_text, infer_repo_roles, infer_topics_and_tags, print_resolved_project_roots, read_text_excerpt, write_text_if_changed, write_yaml_if_changed
-from research.v2 import (
+from research.core import (
     append_history,
     apply_record_governance,
     build_index,
@@ -240,7 +240,7 @@ def note_template(record: dict, structure_payload: dict, capability_payload: dic
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Analyze repo units in v2.")
+    parser = argparse.ArgumentParser(description="Analyze repo units in core.")
     add_project_root_argument(parser)
     subparsers = parser.add_subparsers(dest="command", required=True)
     for name in ("scan-structure", "map-capability", "complete-note", "confirm"):

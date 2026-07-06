@@ -1,1 +1,1 @@
-"""Shared helpers for the research skills v2 workspace."""
+"""Shared helpers for the research skills core workspace."""

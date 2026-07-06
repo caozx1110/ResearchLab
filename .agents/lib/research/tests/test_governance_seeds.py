@@ -3,8 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from research.common import write_yaml_if_changed
-from research.v2 import (
-    ensure_v2_workspace,
+from research.core import (
+    ensure_workspace,
     load_candidate_pools,
     load_topic_taxonomy,
     rebuild_governance_catalogs,
@@ -58,7 +58,7 @@ def _seed_governance(root: Path) -> None:
 
 def test_rebuild_preserves_zero_member_seeds(tmp_path: Path) -> None:
     """B2: rebuild_governance_catalogs must not drop config-manager's empty seeds."""
-    ensure_v2_workspace(tmp_path)
+    ensure_workspace(tmp_path)
     _seed_governance(tmp_path)
 
     rebuild_governance_catalogs(tmp_path)
@@ -76,7 +76,7 @@ def test_rebuild_preserves_zero_member_seeds(tmp_path: Path) -> None:
 
 def test_rebuild_still_aggregates_record_backed_entries(tmp_path: Path) -> None:
     """Seed preservation must not suppress normal record-driven rebuild."""
-    ensure_v2_workspace(tmp_path)
+    ensure_workspace(tmp_path)
     _seed_governance(tmp_path)
     _write_record(
         tmp_path,

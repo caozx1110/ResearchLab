@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from research.v2 import _record_needs_gate, normalize_record_schema, validate_write
+from research.core import _record_needs_gate, normalize_record_schema, validate_write
 
 
 def test_record_needs_gate_ignores_plain_source_facts() -> None:

@@ -1,6 +1,6 @@
 ---
 name: experiment-workbench
-description: Manage v2 experiment units, including plans, classified run logs, follow-ups, diagnosis categories, and confirmation-gated experiment conclusions.
+description: Manage core experiment units, including plans, classified run logs, follow-ups, diagnosis categories, and confirmation-gated experiment conclusions.
 ---
 
 # Experiment Workbench

@@ -27,7 +27,7 @@ from research.pdf_layout import (
     WHITE_RATIO_THRESHOLD,
     extract_caption_region_assets,
 )
-from research.v2 import (
+from research.core import (
     append_history,
     apply_record_governance,
     build_index,
@@ -561,7 +561,7 @@ def _finalize_post_actions(root: Path, *, trigger: str, message: str, defer_post
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Analyze paper units in v2.")
+    parser = argparse.ArgumentParser(description="Analyze paper units in core.")
     add_project_root_argument(parser)
     subparsers = parser.add_subparsers(dest="command", required=True)
 

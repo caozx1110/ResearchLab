@@ -1,4 +1,4 @@
-# Research Skills 上手指南（v2）
+# Research Skills 上手指南（core）
 
 这份文档只回答三个问题：
 
@@ -40,13 +40,13 @@ python3 .agents/skills/research-config-manager/scripts/config.py init     # 建 
 例如：
 
 ```text
-请读取当前 v2 knowledge base，判断我现在最该做哪一步，并直接执行。
+请读取当前 knowledge base，判断我现在最该做哪一步，并直接执行。
 ```
 
 如果你有明确对象：
 
 ```text
-请把这篇论文先按 v2 流程做轻量入库，再判断是否值得细读。
+请把这篇论文先按 core 流程做轻量入库，再判断是否值得细读。
 ```
 
 如果你有明确阶段：
@@ -68,7 +68,7 @@ python3 .agents/skills/research-config-manager/scripts/config.py init     # 建 
 例如：
 
 ```text
-请用 $source-intake 把这篇论文变成 v2 paper unit。
+请用 $source-intake 把这篇论文变成 core paper unit。
 ```
 
 ```text
@@ -92,13 +92,13 @@ python3 .agents/skills/research-config-manager/scripts/config.py init     # 建 
 不知道先做什么：
 
 ```text
-请用 research-orchestrator 判断我现在最该走哪条 v2 skill 路径，并直接执行。
+请用 research-orchestrator 判断我现在最该走哪条 skill 路径，并直接执行。
 ```
 
 把新论文纳入系统：
 
 ```text
-请按 v2 流程把这篇论文轻量入库，然后判断是否值得细读。
+请按 core 流程把这篇论文轻量入库，然后判断是否值得细读。
 ```
 
 分析一个仓库：
@@ -146,5 +146,5 @@ python3 .agents/skills/research-config-manager/scripts/config.py init     # 建 
 ## 6. 一个万能起手式
 
 ```text
-请读取当前 v2 knowledge base，判断我现在最该做哪一步；默认中文，把高价值结果落到 durable artifact，并且不要自动确认 AI judgement。
+请读取当前 knowledge base，判断我现在最该做哪一步；默认中文，把高价值结果落到 durable artifact，并且不要自动确认 AI judgement。
 ```

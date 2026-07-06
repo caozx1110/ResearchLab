@@ -1,6 +1,6 @@
 ---
 name: wiki-adapter
-description: Provide a thin wiki-style entrypoint for v2, routing generic “add/query/lint wiki” requests to the correct owner skills and saving reusable query notes under `kb/synthesis/wiki/`.
+description: Provide a thin wiki-style entrypoint for core, routing generic “add/query/lint wiki” requests to the correct owner skills and saving reusable query notes under `kb/synthesis/wiki/`.
 ---
 
 # Wiki Adapter

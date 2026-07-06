@@ -17,11 +17,11 @@ else:
 
 from research.common import add_project_root_argument, load_yaml, print_resolved_project_roots, write_text_if_changed
 from research.learnings import load_learnings, render_recall_digest
-from research.v2 import iter_records, kb_root, project_root, user_root
+from research.core import iter_records, kb_root, project_root, user_root
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Refresh v2 user-facing navigation pages.")
+    parser = argparse.ArgumentParser(description="Refresh core user-facing navigation pages.")
     add_project_root_argument(parser)
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("refresh")

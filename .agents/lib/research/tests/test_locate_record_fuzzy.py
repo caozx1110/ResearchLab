@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from research.common import write_yaml_if_changed
-from research.v2 import ensure_v2_workspace, lint_records, locate_record, record_path
+from research.core import ensure_workspace, lint_records, locate_record, record_path
 
 
 def _record(
@@ -45,7 +45,7 @@ def _write_record(root: Path, record: dict) -> Path:
 
 
 def test_locate_record_keeps_exact_id_and_legacy_id_resolution(tmp_path: Path) -> None:
-    ensure_v2_workspace(tmp_path)
+    ensure_workspace(tmp_path)
     _write_record(tmp_path, _record("p-openvla-abcdef12", "OpenVLA", legacy_ids=["old-openvla-id"]))
 
     exact, exact_path = locate_record(tmp_path, "p-openvla-abcdef12")
@@ -57,7 +57,7 @@ def test_locate_record_keeps_exact_id_and_legacy_id_resolution(tmp_path: Path) -
 
 
 def test_locate_record_resolves_unique_id_prefix(tmp_path: Path) -> None:
-    ensure_v2_workspace(tmp_path)
+    ensure_workspace(tmp_path)
     _write_record(tmp_path, _record("p-openvla-abcdef12", "OpenVLA"))
 
     record, _ = locate_record(tmp_path, "p-openvla")
@@ -66,7 +66,7 @@ def test_locate_record_resolves_unique_id_prefix(tmp_path: Path) -> None:
 
 
 def test_locate_record_resolves_case_insensitive_id_prefix(tmp_path: Path) -> None:
-    ensure_v2_workspace(tmp_path)
+    ensure_workspace(tmp_path)
     _write_record(tmp_path, _record("p-openvla-abcdef12", "OpenVLA"))
 
     record, _ = locate_record(tmp_path, "P-OPENVLA")
@@ -75,7 +75,7 @@ def test_locate_record_resolves_case_insensitive_id_prefix(tmp_path: Path) -> No
 
 
 def test_locate_record_resolves_unique_hash_suffix_prefix(tmp_path: Path) -> None:
-    ensure_v2_workspace(tmp_path)
+    ensure_workspace(tmp_path)
     _write_record(tmp_path, _record("p-openvla-abcdef12", "OpenVLA"))
 
     record, _ = locate_record(tmp_path, "abcd")
@@ -84,7 +84,7 @@ def test_locate_record_resolves_unique_hash_suffix_prefix(tmp_path: Path) -> Non
 
 
 def test_locate_record_resolves_unique_case_insensitive_title_substring(tmp_path: Path) -> None:
-    ensure_v2_workspace(tmp_path)
+    ensure_workspace(tmp_path)
     _write_record(tmp_path, _record("p-openvla-abcdef12", "OpenVLA: An Open Vision-Language-Action Model"))
 
     record, _ = locate_record(tmp_path, "vision-language-action")
@@ -93,7 +93,7 @@ def test_locate_record_resolves_unique_case_insensitive_title_substring(tmp_path
 
 
 def test_lint_reports_partial_wikilink_target_as_broken(tmp_path: Path) -> None:
-    ensure_v2_workspace(tmp_path)
+    ensure_workspace(tmp_path)
     record_path_written = _write_record(
         tmp_path,
         _record("p-openvla-abcdef12", "OpenVLA: An Open Vision-Language-Action Model"),
@@ -107,7 +107,7 @@ def test_lint_reports_partial_wikilink_target_as_broken(tmp_path: Path) -> None:
 
 
 def test_locate_record_last_is_kind_scoped_most_recently_modified_record(tmp_path: Path) -> None:
-    ensure_v2_workspace(tmp_path)
+    ensure_workspace(tmp_path)
     older = _write_record(tmp_path, _record("p-older-abcdef12", "Older"))
     time.sleep(0.01)
     newer = _write_record(tmp_path, _record("p-newer-fedcba98", "Newer"))
@@ -124,7 +124,7 @@ def test_locate_record_last_is_kind_scoped_most_recently_modified_record(tmp_pat
 
 
 def test_locate_record_last_reserved_word_precedes_title_matching(tmp_path: Path) -> None:
-    ensure_v2_workspace(tmp_path)
+    ensure_workspace(tmp_path)
     titled_last = _write_record(tmp_path, _record("p-last-title-abcdef12", "Last Robot Policy"))
     newer = _write_record(tmp_path, _record("p-newer-fedcba98", "Newer"))
     now = time.time()
@@ -137,7 +137,7 @@ def test_locate_record_last_reserved_word_precedes_title_matching(tmp_path: Path
 
 
 def test_locate_record_ambiguity_lists_matching_candidate_ids(tmp_path: Path) -> None:
-    ensure_v2_workspace(tmp_path)
+    ensure_workspace(tmp_path)
     _write_record(tmp_path, _record("p-openvla-abcdef12", "OpenVLA Alpha"))
     _write_record(tmp_path, _record("p-openvla-fedcba98", "OpenVLA Beta"))
 
