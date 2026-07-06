@@ -49,7 +49,114 @@ def test_kb_help_snapshot_contains_group_headers() -> None:
     assert "# kb 快捷命令" in text
     for header in ["加材料", "检索", "idea", "实验", "报告", "确认", "状态", "记忆"]:
         assert f"## {header}" in text
+    assert "kb init" in text
     assert "也可以直接对 AI 说" in text
+
+
+def test_kb_init_forwards_workspace_and_config_inits_in_order(monkeypatch, tmp_path: Path) -> None:
+    kb = _load_kb_cli()
+    calls: list[list[tuple[str, tuple[str, ...]]]] = []
+
+    def fake_run_forwarded(root: Path, commands):
+        calls.append([(script, tuple(args)) for script, args in commands])
+        return 0
+
+    monkeypatch.setattr(kb, "run_forwarded", fake_run_forwarded)
+    monkeypatch.setattr(sys, "stdin", TTYStringIO("czx\nzh\nmilestone\ntrue\n"))
+    monkeypatch.setattr(
+        kb,
+        "runtime_pref_defaults",
+        lambda root: {"name": "", "lang": "zh", "auto_commit": "milestone", "auto_screen": "true"},
+    )
+
+    assert kb.main(["--root", str(tmp_path), "init"]) == 0
+
+    assert calls == [
+        [
+            (".agents/skills/knowledge-base-manager/scripts/kb.py", ("init",)),
+            (".agents/skills/research-config-manager/scripts/config.py", ("init",)),
+        ],
+        [
+            (
+                ".agents/skills/research-config-manager/scripts/config.py",
+                ("set-runtime-pref", "--section", "identity", "--key", "default_confirmed_by", "--value", "czx"),
+            ),
+            (
+                ".agents/skills/research-config-manager/scripts/config.py",
+                ("set", "--key", "preferences.language_preference", "--value", "zh"),
+            ),
+            (
+                ".agents/skills/research-config-manager/scripts/config.py",
+                ("set-runtime-pref", "--section", "versioning", "--key", "auto_commit_mode", "--value", "milestone"),
+            ),
+            (
+                ".agents/skills/research-config-manager/scripts/config.py",
+                ("set-runtime-pref", "--section", "paper", "--key", "auto_screen_on_intake", "--value", "true"),
+            ),
+        ],
+    ]
+
+
+def test_kb_init_non_tty_degrades_to_inits_only(monkeypatch, tmp_path: Path) -> None:
+    kb = _load_kb_cli()
+    calls: list[list[tuple[str, tuple[str, ...]]]] = []
+
+    def fake_run_forwarded(root: Path, commands):
+        calls.append([(script, tuple(args)) for script, args in commands])
+        return 0
+
+    monkeypatch.setattr(kb, "run_forwarded", fake_run_forwarded)
+    monkeypatch.setattr(kb, "runtime_pref_defaults", lambda root: (_ for _ in ()).throw(AssertionError("should not prompt")))
+    monkeypatch.setattr(sys, "stdin", io.StringIO("czx\nzh\nmilestone\ntrue\n"))
+
+    assert kb.main(["init", "--non-interactive", "--root", str(tmp_path)]) == 0
+
+    assert calls == [
+        [
+            (".agents/skills/knowledge-base-manager/scripts/kb.py", ("init",)),
+            (".agents/skills/research-config-manager/scripts/config.py", ("init",)),
+        ],
+    ]
+
+
+def test_kb_init_rejects_ai_signer_name_before_writing_prefs(monkeypatch, tmp_path: Path, capsys) -> None:
+    kb = _load_kb_cli()
+    calls: list[list[tuple[str, tuple[str, ...]]]] = []
+
+    def fake_run_forwarded(root: Path, commands):
+        calls.append([(script, tuple(args)) for script, args in commands])
+        return 0
+
+    monkeypatch.setattr(kb, "run_forwarded", fake_run_forwarded)
+    monkeypatch.setattr(sys, "stdin", TTYStringIO("codex\nczx\nen\nmanual\nfalse\n"))
+    monkeypatch.setattr(
+        kb,
+        "runtime_pref_defaults",
+        lambda root: {"name": "", "lang": "zh", "auto_commit": "milestone", "auto_screen": "true"},
+    )
+
+    assert kb.main(["--root", str(tmp_path), "init"]) == 0
+
+    captured = capsys.readouterr()
+    assert "not an AI tool name" in captured.out
+    assert calls[-1] == [
+        (
+            ".agents/skills/research-config-manager/scripts/config.py",
+            ("set-runtime-pref", "--section", "identity", "--key", "default_confirmed_by", "--value", "czx"),
+        ),
+        (
+            ".agents/skills/research-config-manager/scripts/config.py",
+            ("set", "--key", "preferences.language_preference", "--value", "en"),
+        ),
+        (
+            ".agents/skills/research-config-manager/scripts/config.py",
+            ("set-runtime-pref", "--section", "versioning", "--key", "auto_commit_mode", "--value", "manual"),
+        ),
+        (
+            ".agents/skills/research-config-manager/scripts/config.py",
+            ("set-runtime-pref", "--section", "paper", "--key", "auto_screen_on_intake", "--value", "false"),
+        ),
+    ]
 
 
 def test_kb_status_forwards_current_state_and_program(monkeypatch, tmp_path: Path) -> None:
@@ -303,3 +410,20 @@ def test_kb_forward_command_prints_stderr_and_returns_nonzero(monkeypatch, tmp_p
     assert result.returncode == 3
     assert "out\n" == captured.out
     assert "err\n" == captured.err
+
+
+def test_kb_forward_command_uses_installed_script_when_target_root_has_no_agents(monkeypatch, tmp_path: Path) -> None:
+    kb = _load_kb_cli()
+    captured_argv: list[str] = []
+
+    def fake_run(argv, **kwargs):
+        captured_argv.extend(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(kb.subprocess, "run", fake_run)
+
+    result = kb.forward_command(tmp_path, ".agents/skills/knowledge-base-manager/scripts/kb.py", ["init"])
+
+    assert result.returncode == 0
+    assert captured_argv[1] == str(kb.DEFAULT_PROJECT_ROOT / ".agents/skills/knowledge-base-manager/scripts/kb.py")
+    assert captured_argv[2:] == ["--root", str(tmp_path), "init"]

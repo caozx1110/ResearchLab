@@ -19,8 +19,8 @@ for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
 else:
     raise SystemExit("Could not locate .agents/lib")
 
-from research.common import add_project_root_argument, find_project_root
-from research.core import default_confirmed_by, search_records
+from research.common import add_project_root_argument, find_project_root, load_yaml
+from research.core import config_root, default_confirmed_by, is_ai_signer, load_runtime_preferences, search_records
 
 
 HELP_MENU: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
@@ -64,6 +64,7 @@ HELP_MENU: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         "状态",
         (
             ("刷新并查看当前 KB / program 状态摘要。", "kb status"),
+            ("初始化 KB 布局、索引和基础偏好。", "kb init"),
         ),
     ),
     (
@@ -76,6 +77,8 @@ HELP_MENU: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
 
 SCRIPT_BY_VERB = {
     "add": ".agents/skills/source-intake/scripts/intake.py",
+    "init_kb": ".agents/skills/knowledge-base-manager/scripts/kb.py",
+    "init_config": ".agents/skills/research-config-manager/scripts/config.py",
     "review": ".agents/skills/knowledge-base-manager/scripts/kb.py",
     "status_current": ".agents/skills/research-navigator/scripts/navigate.py",
     "status_program": ".agents/skills/research-orchestrator/scripts/orchestrate.py",
@@ -93,7 +96,9 @@ class CommandResult:
 
 Handler = Callable[[argparse.Namespace, Path], int]
 REVIEW_KIND_CHOICES = ("paper", "repo", "blog", "idea", "experiment")
-AI_SIGNER_NAMES = {"ai", "assistant", "codex", "chatgpt", "gpt", "openai"}
+LANG_CHOICES = ("zh", "en")
+AUTO_COMMIT_CHOICES = ("manual", "milestone", "aggressive")
+AUTO_SCREEN_CHOICES = ("true", "false")
 
 
 def research_python() -> str:
@@ -111,7 +116,10 @@ def render_help_menu() -> str:
 
 
 def script_path(root: Path, relative_path: str) -> Path:
-    return root / relative_path
+    project_script = root / relative_path
+    if project_script.exists():
+        return project_script
+    return DEFAULT_PROJECT_ROOT / relative_path
 
 
 def build_child_argv(root: Path, relative_script: str, args: Sequence[str]) -> list[str]:
@@ -189,6 +197,151 @@ def handle_add(args: argparse.Namespace, root: Path) -> int:
     return run_forwarded(root, [(SCRIPT_BY_VERB["add"], ["add", "--kind", kind, "--source", args.source])])
 
 
+def bool_text(value: object, default: str = "true") -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    text = str(value or "").strip().lower()
+    return text if text in AUTO_SCREEN_CHOICES else default
+
+
+def language_text(value: object, default: str = "zh") -> str:
+    text = str(value or "").strip().lower()
+    if text.startswith("zh"):
+        return "zh"
+    if text.startswith("en"):
+        return "en"
+    return default
+
+
+def runtime_pref_defaults(root: Path) -> dict[str, str]:
+    preferences = load_runtime_preferences(root)
+    identity = preferences.get("identity", {}) if isinstance(preferences.get("identity"), dict) else {}
+    paper = preferences.get("paper", {}) if isinstance(preferences.get("paper"), dict) else {}
+    versioning = preferences.get("versioning", {}) if isinstance(preferences.get("versioning"), dict) else {}
+    profile = load_yaml(config_root(root) / "user-profile.yaml", default={})
+    profile_preferences = profile.get("preferences", {}) if isinstance(profile, dict) and isinstance(profile.get("preferences"), dict) else {}
+    return {
+        "name": str(identity.get("default_confirmed_by") or "").strip(),
+        "lang": language_text(profile_preferences.get("language_preference", "zh")),
+        "auto_commit": str(versioning.get("auto_commit_mode") or "milestone").strip().lower(),
+        "auto_screen": bool_text(paper.get("auto_screen_on_intake", True)),
+    }
+
+
+def prompt_required_human_name(current: str) -> str:
+    while True:
+        suffix = f" [{current}]" if current else ""
+        try:
+            value = input(f"Confirmer name{suffix}: ").strip()
+        except EOFError:
+            value = ""
+        if not value and current:
+            value = current
+        if not value:
+            print("Confirmer name cannot be empty.")
+            continue
+        if is_ai_signer(value):
+            print("Confirmer name must be a human identity, not an AI tool name.")
+            continue
+        return value
+
+
+def prompt_choice(label: str, *, choices: Sequence[str], current: str) -> str:
+    allowed = {choice.lower(): choice for choice in choices}
+    current = current if current in allowed else choices[0]
+    choices_text = "/".join(choices)
+    while True:
+        try:
+            value = input(f"{label} ({choices_text}) [{current}]: ").strip().lower()
+        except EOFError:
+            value = ""
+        if not value:
+            return current
+        if value in allowed:
+            return allowed[value]
+        print(f"Please enter one of: {choices_text}.")
+
+
+def config_set_profile_command(key: str, value: str) -> tuple[str, Sequence[str]]:
+    return (SCRIPT_BY_VERB["init_config"], ["set", "--key", key, "--value", value])
+
+
+def config_set_runtime_pref_command(section: str, key: str, value: str) -> tuple[str, Sequence[str]]:
+    return (
+        SCRIPT_BY_VERB["init_config"],
+        ["set-runtime-pref", "--section", section, "--key", key, "--value", value],
+    )
+
+
+def build_init_pref_commands(*, name: str, lang: str, auto_commit: str, auto_screen: str) -> list[tuple[str, Sequence[str]]]:
+    return [
+        config_set_runtime_pref_command("identity", "default_confirmed_by", name),
+        config_set_profile_command("preferences.language_preference", lang),
+        config_set_runtime_pref_command("versioning", "auto_commit_mode", auto_commit),
+        config_set_runtime_pref_command("paper", "auto_screen_on_intake", auto_screen),
+    ]
+
+
+def build_headless_init_pref_commands(args: argparse.Namespace) -> list[tuple[str, Sequence[str]]] | None:
+    if args.name is None and args.lang is None and args.auto_commit is None and args.auto_screen is None:
+        return None
+    commands: list[tuple[str, Sequence[str]]] = []
+    if args.name is not None:
+        name = str(args.name or "").strip()
+        if not name:
+            raise SystemExit("--name cannot be empty.")
+        if is_ai_signer(name):
+            raise SystemExit("--name must be a human identity, not an AI tool name.")
+        commands.append(config_set_runtime_pref_command("identity", "default_confirmed_by", name))
+    if args.lang is not None:
+        commands.append(config_set_profile_command("preferences.language_preference", args.lang))
+    if args.auto_commit is not None:
+        commands.append(config_set_runtime_pref_command("versioning", "auto_commit_mode", args.auto_commit))
+    if args.auto_screen is not None:
+        commands.append(config_set_runtime_pref_command("paper", "auto_screen_on_intake", args.auto_screen))
+    return commands
+
+
+def run_init_prerequisites(root: Path) -> int:
+    return run_forwarded(
+        root,
+        [
+            (SCRIPT_BY_VERB["init_kb"], ["init"]),
+            (SCRIPT_BY_VERB["init_config"], ["init"]),
+        ],
+    )
+
+
+def handle_init(args: argparse.Namespace, root: Path) -> int:
+    initialized = run_init_prerequisites(root)
+    if initialized != 0:
+        return initialized
+
+    commands = build_headless_init_pref_commands(args)
+    if commands is not None:
+        written = run_forwarded(root, commands)
+        if written != 0:
+            return written
+    elif args.non_interactive or not sys.stdin.isatty():
+        if args.git_init:
+            return run_forwarded(root, [(SCRIPT_BY_VERB["init_kb"], ["git-init"])])
+        return 0
+    else:
+        defaults = runtime_pref_defaults(root)
+        name = prompt_required_human_name(defaults["name"])
+        lang = prompt_choice("Language", choices=LANG_CHOICES, current=defaults["lang"])
+        auto_commit = prompt_choice("Commit cadence", choices=AUTO_COMMIT_CHOICES, current=defaults["auto_commit"])
+        auto_screen = prompt_choice("Auto-screen on intake", choices=AUTO_SCREEN_CHOICES, current=defaults["auto_screen"])
+        written = run_forwarded(root, build_init_pref_commands(name=name, lang=lang, auto_commit=auto_commit, auto_screen=auto_screen))
+        if written != 0:
+            return written
+
+    if args.git_init:
+        return run_forwarded(root, [(SCRIPT_BY_VERB["init_kb"], ["git-init"])])
+    print("hint: run `kb.py git-init` to initialize the nested kb Git repo.")
+    return 0
+
+
 def build_review_list_args(fuzzy: str | None) -> list[str]:
     fuzzy_text = (fuzzy or "").strip()
     fuzzy_kind = fuzzy_text.lower()
@@ -249,11 +402,6 @@ def prompt_review_decisions(records: Sequence[dict]) -> tuple[list[str], list[st
                 return confirm_ids, reject_ids
             print("请输入 y / n / s / q。")
     return confirm_ids, reject_ids
-
-
-def is_ai_signer(actor: str) -> bool:
-    normalized = actor.strip().lower()
-    return normalized in AI_SIGNER_NAMES
 
 
 def build_review_apply_commands(root: Path, confirm_ids: Sequence[str], reject_ids: Sequence[str], evidence: str) -> list[tuple[str, Sequence[str]]]:
@@ -318,6 +466,18 @@ def register_review(subparsers: argparse._SubParsersAction[argparse.ArgumentPars
     parser.set_defaults(handler=handle_review)
 
 
+def register_init(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    parser = subparsers.add_parser("init", help="初始化 KB 和基础运行偏好")
+    parser.add_argument("--root", default=argparse.SUPPRESS, help="Explicit project root (overrides RESEARCH_PROJECT_ROOT and auto-discovery).")
+    parser.add_argument("--non-interactive", "--yes", dest="non_interactive", action="store_true", help="只执行幂等初始化；不进入交互提问")
+    parser.add_argument("--name", help="确认人名，写入 identity.default_confirmed_by")
+    parser.add_argument("--lang", choices=LANG_CHOICES, help="语言偏好")
+    parser.add_argument("--auto-commit", choices=AUTO_COMMIT_CHOICES, help="versioning.auto_commit_mode")
+    parser.add_argument("--auto-screen", choices=AUTO_SCREEN_CHOICES, help="paper.auto_screen_on_intake")
+    parser.add_argument("--git-init", action="store_true", help="初始化后转发执行 kb.py git-init")
+    parser.set_defaults(handler=handle_init)
+
+
 def register_status(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     parser = subparsers.add_parser("status", help="查看当前状态摘要")
     parser.add_argument("program", nargs="?", help="可选 program id / fuzzy name")
@@ -344,6 +504,7 @@ def register_recall(subparsers: argparse._SubParsersAction[argparse.ArgumentPars
 
 VERB_REGISTRARS: tuple[Callable[[argparse._SubParsersAction[argparse.ArgumentParser]], None], ...] = (
     register_help,
+    register_init,
     register_add,
     register_review,
     register_status,
