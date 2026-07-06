@@ -558,3 +558,63 @@ Part B 的 Top 6 已由 Codex 逐项单独提交（6 commits），并经 **7 单
 - **`kb help` 直接打印分组能力菜单**（不跑真实 CLI——修好了最初"kb help 吐真实命令"的问题）；`kb add` 从 URL 推断 kind（arxiv/pdf→paper，github→repo，else→blog）；`kb review` 交互式 y/n/s/q。
 - **治理红线守住且更强**：`kb review` 确认必填 evidence（空→abort 无写入）、非 TTY 退化为只列表、`is_ai_signer` 拦截 AI 身份自签、只对 pending 生效、确认全forward 到既有 `confirm_unit`（零重实现）；reject 不需 evidence（安全方向，符合设计）。
 - **151 测试全过**（含 17 个 kb-cli 测试）、编译通过、`kb help` 冒烟正常。文档 `RESEARCH_WORKFLOW.md` 已改成意图清单 + kb 伪 CLI 说明。**未 push。**
+
+---
+---
+
+# Part F —— 第 8 轮：开源发布就绪（§23，6 视角审计后）
+
+## 23. OSS readiness plan
+
+> 6 视角审计（packaging / hygiene / portability / naming / kb-init / docs）→ 48 findings。**关键校正**：HEAD 树已 OSS-clean（`git ls-files` 仅 116 文件，全在 `.agents/`+`docs/`+根，无 kb/、无 junk、无密钥、无硬编码路径，`rev-list HEAD`=76 正常）。真正阻塞在 **历史**（含私有数据 + 对象图断链）与 **缺元文件/安装路径**。
+
+### 诊断：不能按现状开源，三个硬阻塞
+1. **无 LICENSE** → 法律上"保留所有权利"，否定"开源 skill 包"。
+2. **历史含私有数据 + 损坏**（已核实）：`output/doc/代表性VLA工作对比报告-2026-03-19.docx/.md`、`.learnings/ERRORS.md`、已删的 `self-improving-agent` skill 仍可从历史检出；`git fsck` 断链、`.git` 135MB。→ **发布方式 = fresh single-commit（`git archive HEAD` → 新 repo），绝不 push 现有 76-commit 历史。**
+3. **无运行时安装路径**：唯一硬依赖 PyYAML 藏在 `requirements-dev.txt`；`GETTING_STARTED §0` 第一步就撞 PyYAML `RuntimeError`；请求的 install 脚本不存在。
+
+### MUST-FIX（阻塞发布）
+- **M1 LICENSE**（D1 定选型后落地）。
+- **M2/M3 fresh-repo 发布**（维护者亲自，最后一步）：land 全部 §23 修改进 HEAD → `git archive HEAD` 到干净目录 → `git init && commit` → `git fsck --full` 干净 → push 新 remote。**丢弃旧 .git（私有历史 + 损坏一并解决）。**
+- **M4 `requirements.txt` = `PyYAML`**；`requirements-dev.txt` 改为 `-r requirements.txt` + `pytest>=7`。
+- **M5 文档安装块**：`GETTING_STARTED §0` 加 venv + `pip install -r requirements.txt` + `RESEARCH_PYTHON`；填 `PUBLISHING.md` 空的 `## Runtime Compatibility`。
+- **M6 交互式 `install.sh`**（请求 #2，见 §设计；硬不变量：skill 目录 **symlink 不能 copy**，否则 walk-up 找不到 `.agents/lib`，17 脚本 import 期全崩）。
+- **M7 v2→core 原子重命名**（请求 #3，见 §设计；单 commit）。
+- **M8/M9 `kb init` verb**（请求 #4，见 §设计）+ 捕获/校验 `identity.default_confirmed_by`（无它每次确认 `SystemExit`，v2.py:1476；拒空、拒 `is_ai_signer`）。
+- **M10 `OPTIMIZATION_PLAN.md` 移出公开树**（内部 Codex handoff 文档，却被 `FEATURES.md:138` 当公开 roadmap 链接）。
+- **M11 指南纠偏**：`SKILLS_GUIDE.md` 数 16→17 skill + 补 kb-cli；首跑故事在 raw 脚本与 `kb` 间割裂。
+- **M12 install 生成 `CLAUDE.md`**（Claude 不读 AGENTS.md；AGENTS.md 为唯一真相源，生成/link CLAUDE.md）。
+- **M13 解耦 skills-home 与 project(kb)-root**（引 `RESEARCH_SKILLS_HOME`）—— system-scope install 真正可执行的前提；project-scope 不需要。
+
+### NEEDS-DECISION（维护者拍板；见文末 AskUser）
+D1 LICENSE 选型 · D2 重命名目标名（推荐 `core.py`）· D3 Codex system-install 语义 · D4 是否加 pyproject（推荐否，保 walk-up）· D5 kb init 问项（推荐 4 项）· D6 kb init 是否顺带 git-init · D7 README 语言定位 · D8 是否随包造 tiny `examples/` kb · D9 rename 排除 arxiv `v2`/`versioning`（词边界替换，禁 `s/v2//g`）。
+
+### NICE-TO-HAVE
+N1 `requirements-optional.txt`(pypdf/PyMuPDF/Pillow) · N2 `python_requires>=3.9` · N3 `kb doctor` verb · N4 CONTRIBUTING/SECURITY · N5 CI(.github/workflows) · N6 提取用户向 ROADMAP.md · N7 删 tmp/temp/.DS_Store(worktree) · N8 移出 UX 模拟报告 · N9 prose 层 v2 词扫(~50) · N10 SKILL.md 示例 path-robust · N11 `kb` 上 PATH · N12 修 6 处 dead `research-conductor`(common.py) · N13 god-file split 在 ROADMAP 诚实标注。
+
+### 请求 #3 设计 — v2→core 原子重命名（单 commit，护栏）
+1. `git mv v2.py core.py`；8 个 `test_v2_*.py` 去版本名。
+2. `research.v2`→`research.core`（33 sites）；rebind `import ... as v2` 别名。
+3. `ensure_v2_workspace`→`ensure_workspace`（74 处）。
+4. 6 个 schema-id 字面量（`kb-index-v2`→`kb-index` 等）+ 生成 md header + `method.py` key `prefer_existing_v2_repo_units`。
+5. 改唯一断言的测试 `test_build_index_single_scan.py:60`。
+6. **护栏**：`grep -rnE 'research\.v2|ensure_v2_workspace|-(index|pools|taxonomy|preferences|profile|state)-v2' --include=*.py .agents | grep -v /kb/` 须空；`pytest` 151 绿。
+7. **排除（D9）**：arxiv `NNNN.NNNNNv2` 数据、`versioning*` 符号——词边界替换，禁全局 `s/v2//g`。schema-id 迁移安全：字面量从不被读，`kb-index` 下次 build_index 自愈。
+
+### 请求 #4 设计 — `kb init` verb（薄转发 + 交互层，复用 handle_review 的 isatty 模式）
+- 先 `run_forwarded`：`kb.py init`（建布局+index）+ `config.py init`（写 profile/taxonomy/pools/runtime-prefs），均幂等吃 `--root`，fail-fast。
+- 后交互 **4 问**（D5，各 1:1 映射现有 config 子命令，无新持久化）：① 确认人名→`identity.default_confirmed_by`（首问、拒空、拒 is_ai_signer）② 语言 zh/en ③ commit 节奏 auto_commit_mode ④ 入库自动筛选 auto_screen_on_intake。
+- **非 TTY 降级**（install 场景必需）：`if not sys.stdin.isatty(): return 0` 只跑两个 init；加 `--non-interactive/--yes` + `--name/--lang/...` 供 headless。
+- re-run 时 prompt 预填当前值、空 Enter 保留。
+
+### 请求 #2 设计 — 交互式 install.sh
+- **硬不变量**：可执行 skill 目录 **`ln -sfn` 不能 copy**（`__file__`.resolve() 跟随 symlink 回仓库，walk-up 才找得到 `.agents/lib`）。
+- 流程：探测 agent(~/.claude,~/.codex) → 问 scope(project/system) → preflight(`import yaml`) → 按 agent×scope symlink 接线 → 生成/追加 CLAUDE.md(带标记 managed block，幂等，绝不覆盖) → 可选 `kb` 上 PATH → post-install smoke(`kb help` + `kb status --root <ws>`) → 配 `docs/INSTALL.md` 写清 copy-breaks/symlink-works。
+- Claude project：`ln -sfn ../.agents/skills .claude/skills`（正式化维护者已有的手动 workaround）+ `CLAUDE.md`=`@AGENTS.md`。
+- system scope 依赖 M13 先解耦。
+
+### 执行顺序（决策 → Codex 机械批 → 解耦 install → 维护者 fresh 发布）
+- **阶段 0（维护者拍板）**：D1/D2/D3/D5/D7（+D6/D8/D9）。
+- **阶段 1（Codex 可直接做，机械可验证）**：M4/N1/N2 依赖文件 → M7 rename → M8/M9 kb init → M10/N6/N8/M11 文档结构 → N7/N12/N9/N10 清理 → N3/N5/N4 → M5/M1 落地。
+- **阶段 2（需 M13 先行）**：M13 解耦 → M6/M12 install.sh+CLAUDE.md。
+- **阶段 3（维护者亲自）**：M2/M3 fresh-repo 发布（阶段 1/2 全 merge 进 HEAD 之后）。
