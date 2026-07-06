@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 def _project_root() -> Path:
     return Path(__file__).resolve().parents[4]
@@ -82,6 +84,62 @@ def test_kb_next_forwards_to_orchestrator(monkeypatch, tmp_path: Path) -> None:
 
     assert calls == [
         (".agents/skills/research-orchestrator/scripts/orchestrate.py", ("next",)),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("https://arxiv.org/abs/2401.12345", "paper"),
+        ("notes/My Paper.PDF", "paper"),
+        ("https://github.com/org/repo", "repo"),
+        ("git@github.com:org/repo.git", "repo"),
+        ("https://example.com/post", "blog"),
+    ],
+)
+def test_kb_add_infers_kind_table(source: str, expected: str) -> None:
+    kb = _load_kb_cli()
+
+    assert kb.infer_add_kind(source) == expected
+
+
+def test_kb_add_forwards_inferred_kind(monkeypatch, tmp_path: Path) -> None:
+    kb = _load_kb_cli()
+    calls: list[tuple[str, tuple[str, ...]]] = []
+    monkeypatch.setattr(
+        kb,
+        "forward_command",
+        lambda root, relative_script, args: calls.append((relative_script, tuple(args)))
+        or kb.CommandResult((relative_script, *args), 0),
+    )
+
+    assert kb.main(["--root", str(tmp_path), "add", "https://github.com/org/repo"]) == 0
+
+    assert calls == [
+        (
+            ".agents/skills/source-intake/scripts/intake.py",
+            ("add", "--kind", "repo", "--source", "https://github.com/org/repo"),
+        ),
+    ]
+
+
+def test_kb_add_allows_explicit_kind_override(monkeypatch, tmp_path: Path) -> None:
+    kb = _load_kb_cli()
+    calls: list[tuple[str, tuple[str, ...]]] = []
+    monkeypatch.setattr(
+        kb,
+        "forward_command",
+        lambda root, relative_script, args: calls.append((relative_script, tuple(args)))
+        or kb.CommandResult((relative_script, *args), 0),
+    )
+
+    assert kb.main(["--root", str(tmp_path), "add", "https://github.com/org/repo", "--kind", "paper"]) == 0
+
+    assert calls == [
+        (
+            ".agents/skills/source-intake/scripts/intake.py",
+            ("add", "--kind", "paper", "--source", "https://github.com/org/repo"),
+        ),
     ]
 
 

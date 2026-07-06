@@ -34,7 +34,7 @@ kb recall gotchas
 - `next [program]`：转发到 `research-orchestrator/scripts/orchestrate.py next`；当前底层脚本按全局 program 优先级给建议。
 - `find <keywords...>`：转发到 `knowledge-base-manager/scripts/kb.py query --query "<keywords>"`。
 - `recall [kind]`：转发到 `skill-evolution-advisor/scripts/learnings.py recall --kind <kind|all>`。
-- `add <src>`：见 Agent 2；将用于快速入库。
+- `add <src> [--kind paper|repo|blog]`：按 arxiv/pdf/github/git URL 推断 kind，转发到 source-intake 快速入库。
 - `review [fuzzy]`：见 Agent 2；将用于确认收件箱和交互式确认。
 
 ## 约束

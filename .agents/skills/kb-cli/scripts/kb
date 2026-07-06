@@ -74,6 +74,7 @@ HELP_MENU: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
 )
 
 SCRIPT_BY_VERB = {
+    "add": ".agents/skills/source-intake/scripts/intake.py",
     "status_current": ".agents/skills/research-navigator/scripts/navigate.py",
     "status_program": ".agents/skills/research-orchestrator/scripts/orchestrate.py",
     "next": ".agents/skills/research-orchestrator/scripts/orchestrate.py",
@@ -169,9 +170,31 @@ def handle_recall(args: argparse.Namespace, root: Path) -> int:
     return run_forwarded(root, [(SCRIPT_BY_VERB["recall"], ["recall", "--kind", kind])])
 
 
+def infer_add_kind(source: str) -> str:
+    normalized = source.strip().lower()
+    path_part = normalized.split("#", 1)[0].split("?", 1)[0]
+    if "arxiv.org" in normalized or path_part.endswith(".pdf"):
+        return "paper"
+    if "github.com" in normalized or normalized.startswith("git@"):
+        return "repo"
+    return "blog"
+
+
+def handle_add(args: argparse.Namespace, root: Path) -> int:
+    kind = args.kind or infer_add_kind(args.source)
+    return run_forwarded(root, [(SCRIPT_BY_VERB["add"], ["add", "--kind", kind, "--source", args.source])])
+
+
 def register_help(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     parser = subparsers.add_parser("help", help="打印分组能力菜单")
     parser.set_defaults(handler=handle_help)
+
+
+def register_add(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    parser = subparsers.add_parser("add", help="轻量入库 source")
+    parser.add_argument("source", help="论文、repo、博客 URL 或本地文件路径")
+    parser.add_argument("--kind", choices=["paper", "repo", "blog"], help="显式覆盖 kind 推断")
+    parser.set_defaults(handler=handle_add)
 
 
 def register_status(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -200,6 +223,7 @@ def register_recall(subparsers: argparse._SubParsersAction[argparse.ArgumentPars
 
 VERB_REGISTRARS: tuple[Callable[[argparse._SubParsersAction[argparse.ArgumentParser]], None], ...] = (
     register_help,
+    register_add,
     register_status,
     register_next,
     register_find,
