@@ -1,0 +1,374 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import os
+import subprocess
+import sys
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+
+SCRIPT_PATH = Path(__file__).resolve()
+for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
+    lib = candidate / ".agents" / "lib"
+    if lib.exists():
+        sys.path.insert(0, str(lib))
+        DEFAULT_PROJECT_ROOT = candidate
+        break
+else:
+    raise SystemExit("Could not locate .agents/lib")
+
+from research.common import add_project_root_argument, find_project_root
+from research.v2 import default_confirmed_by, search_records
+
+
+HELP_MENU: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
+    (
+        "加材料",
+        (
+            ("把论文、repo、博客或本地文件轻量入库。", "kb add <链接或路径>"),
+        ),
+    ),
+    (
+        "检索",
+        (
+            ("按关键词检索已入库知识单元。", "kb find <关键词>"),
+        ),
+    ),
+    (
+        "idea",
+        (
+            ("围绕当前知识库推进候选 idea 的生成、分析和选择。", "请基于当前知识库给我 3 个候选 idea"),
+        ),
+    ),
+    (
+        "实验",
+        (
+            ("查看下一步实验或 program 推进建议。", "kb next"),
+        ),
+    ),
+    (
+        "报告",
+        (
+            ("汇总 program 事件流，生成周报、PPT 素材或阶段总结。", "为这个 program 生成周报材料"),
+        ),
+    ),
+    (
+        "确认",
+        (
+            ("查看待确认的 AI 判断，后续可交互式确认。", "kb review"),
+        ),
+    ),
+    (
+        "状态",
+        (
+            ("刷新并查看当前 KB / program 状态摘要。", "kb status"),
+        ),
+    ),
+    (
+        "记忆",
+        (
+            ("回忆已确认习惯、已知坑和待审 skill 问题。", "kb recall"),
+        ),
+    ),
+)
+
+SCRIPT_BY_VERB = {
+    "add": ".agents/skills/source-intake/scripts/intake.py",
+    "review": ".agents/skills/knowledge-base-manager/scripts/kb.py",
+    "status_current": ".agents/skills/research-navigator/scripts/navigate.py",
+    "status_program": ".agents/skills/research-orchestrator/scripts/orchestrate.py",
+    "next": ".agents/skills/research-orchestrator/scripts/orchestrate.py",
+    "find": ".agents/skills/knowledge-base-manager/scripts/kb.py",
+    "recall": ".agents/skills/skill-evolution-advisor/scripts/learnings.py",
+}
+
+
+@dataclass(frozen=True)
+class CommandResult:
+    argv: tuple[str, ...]
+    returncode: int
+
+
+Handler = Callable[[argparse.Namespace, Path], int]
+REVIEW_KIND_CHOICES = ("paper", "repo", "blog", "idea", "experiment")
+AI_SIGNER_NAMES = {"ai", "assistant", "codex", "chatgpt", "gpt", "openai"}
+
+
+def research_python() -> str:
+    return os.environ.get("RESEARCH_PYTHON") or sys.executable or "python3"
+
+
+def render_help_menu() -> str:
+    lines = ["# kb 快捷命令", ""]
+    for group, items in HELP_MENU:
+        lines.append(f"## {group}")
+        for sentence, ai_phrase in items:
+            lines.append(f"- {sentence} 也可以直接对 AI 说：\"{ai_phrase}\"。")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def script_path(root: Path, relative_path: str) -> Path:
+    return root / relative_path
+
+
+def build_child_argv(root: Path, relative_script: str, args: Sequence[str]) -> list[str]:
+    return [research_python(), str(script_path(root, relative_script)), "--root", str(root), *args]
+
+
+def forward_command(root: Path, relative_script: str, args: Sequence[str]) -> CommandResult:
+    argv = build_child_argv(root, relative_script, args)
+    env = {**os.environ, "RESEARCH_PROJECT_ROOT": str(root)}
+    completed = subprocess.run(argv, cwd=root, env=env, text=True, capture_output=True, check=False)
+    if completed.stdout:
+        print(completed.stdout, end="" if completed.stdout.endswith("\n") else "\n")
+    if completed.stderr:
+        print(completed.stderr, file=sys.stderr, end="" if completed.stderr.endswith("\n") else "\n")
+    return CommandResult(tuple(argv), int(completed.returncode))
+
+
+def run_forwarded(root: Path, commands: Sequence[tuple[str, Sequence[str]]]) -> int:
+    for relative_script, args in commands:
+        result = forward_command(root, relative_script, args)
+        if result.returncode != 0:
+            return result.returncode
+    return 0
+
+
+def handle_help(args: argparse.Namespace, root: Path) -> int:
+    del args, root
+    print(render_help_menu(), end="")
+    return 0
+
+
+def handle_status(args: argparse.Namespace, root: Path) -> int:
+    commands: list[tuple[str, Sequence[str]]] = [
+        (SCRIPT_BY_VERB["status_current"], ["current-state"]),
+    ]
+    if args.program:
+        commands.append(
+            (
+                SCRIPT_BY_VERB["status_program"],
+                ["status", "--program-id", args.program],
+            )
+        )
+    return run_forwarded(root, commands)
+
+
+def handle_next(args: argparse.Namespace, root: Path) -> int:
+    del args
+    return run_forwarded(root, [(SCRIPT_BY_VERB["next"], ["next"])])
+
+
+def handle_find(args: argparse.Namespace, root: Path) -> int:
+    query = " ".join(args.keywords).strip()
+    if not query:
+        raise SystemExit("kb find requires at least one keyword.")
+    return run_forwarded(root, [(SCRIPT_BY_VERB["find"], ["query", "--query", query])])
+
+
+def handle_recall(args: argparse.Namespace, root: Path) -> int:
+    kind = args.kind or "all"
+    return run_forwarded(root, [(SCRIPT_BY_VERB["recall"], ["recall", "--kind", kind])])
+
+
+def infer_add_kind(source: str) -> str:
+    normalized = source.strip().lower()
+    path_part = normalized.split("#", 1)[0].split("?", 1)[0]
+    if "arxiv.org" in normalized or path_part.endswith(".pdf"):
+        return "paper"
+    if "github.com" in normalized or normalized.startswith("git@"):
+        return "repo"
+    return "blog"
+
+
+def handle_add(args: argparse.Namespace, root: Path) -> int:
+    kind = args.kind or infer_add_kind(args.source)
+    return run_forwarded(root, [(SCRIPT_BY_VERB["add"], ["add", "--kind", kind, "--source", args.source])])
+
+
+def build_review_list_args(fuzzy: str | None) -> list[str]:
+    fuzzy_text = (fuzzy or "").strip()
+    fuzzy_kind = fuzzy_text.lower()
+    if not fuzzy_text:
+        return ["review-queue"]
+    if fuzzy_kind in REVIEW_KIND_CHOICES:
+        return ["review-queue", "--kind", fuzzy_kind]
+    return ["query", "--query", fuzzy_text, "--confirmation-status", "pending_user_confirmation"]
+
+
+def load_review_records(root: Path, fuzzy: str | None) -> list[dict]:
+    fuzzy_text = (fuzzy or "").strip()
+    fuzzy_kind = fuzzy_text.lower()
+    if fuzzy_kind in REVIEW_KIND_CHOICES:
+        return search_records(root, "", kind=fuzzy_kind, confirmation_status="pending_user_confirmation")
+    return search_records(root, fuzzy_text, confirmation_status="pending_user_confirmation")
+
+
+def review_item_summary(record: dict) -> str:
+    summary = str(record.get("summary") or "").strip()
+    return summary or "-"
+
+
+def print_review_item(record: dict) -> None:
+    unit_id = str(record.get("id") or "-")
+    kind = str(record.get("kind") or "-")
+    title = str(record.get("title") or "-")
+    print(f"- {unit_id} | {kind} | {title}")
+    print(f"  AI-judgement: {review_item_summary(record)}")
+
+
+def prompt_review_decisions(records: Sequence[dict]) -> tuple[list[str], list[str]]:
+    confirm_ids: list[str] = []
+    reject_ids: list[str] = []
+    for record in records:
+        if str(record.get("confirmation_status") or "") != "pending_user_confirmation":
+            continue
+        unit_id = str(record.get("id") or "").strip()
+        if not unit_id:
+            continue
+        print_review_item(record)
+        while True:
+            try:
+                answer = input("[y]确认 / [n]拒绝 / [s]跳过 / [q]退出: ").strip().lower()
+            except EOFError:
+                print("[abort] input closed; leaving remaining items unchanged.")
+                return confirm_ids, reject_ids
+            choice = answer[:1]
+            if choice == "y":
+                confirm_ids.append(unit_id)
+                break
+            if choice == "n":
+                reject_ids.append(unit_id)
+                break
+            if choice == "s":
+                break
+            if choice == "q":
+                return confirm_ids, reject_ids
+            print("请输入 y / n / s / q。")
+    return confirm_ids, reject_ids
+
+
+def is_ai_signer(actor: str) -> bool:
+    normalized = actor.strip().lower()
+    return normalized in AI_SIGNER_NAMES
+
+
+def build_review_apply_commands(root: Path, confirm_ids: Sequence[str], reject_ids: Sequence[str], evidence: str) -> list[tuple[str, Sequence[str]]]:
+    commands: list[tuple[str, Sequence[str]]] = []
+    if confirm_ids:
+        confirm_args: list[str] = ["confirm"]
+        for unit_id in confirm_ids:
+            confirm_args.extend(["--id", unit_id])
+        actor = default_confirmed_by(root)
+        if actor:
+            confirm_args.extend(["--confirmed-by", actor])
+        confirm_args.extend(["--evidence", evidence])
+        commands.append((SCRIPT_BY_VERB["review"], confirm_args))
+    for unit_id in reject_ids:
+        commands.append((SCRIPT_BY_VERB["review"], ["promote", "--id", unit_id, "--confirmation-status", "rejected"]))
+    return commands
+
+
+def handle_review(args: argparse.Namespace, root: Path) -> int:
+    listed = run_forwarded(root, [(SCRIPT_BY_VERB["review"], build_review_list_args(args.fuzzy))])
+    if listed != 0:
+        return listed
+    if not sys.stdin.isatty():
+        return 0
+
+    records = load_review_records(root, args.fuzzy)
+    confirm_ids, reject_ids = prompt_review_decisions(records)
+    if not confirm_ids and not reject_ids:
+        return 0
+
+    try:
+        evidence = input("evidence: ").strip()
+    except EOFError:
+        evidence = ""
+    if not evidence:
+        print("[abort] evidence is required; no writes applied.")
+        return 1
+
+    actor = default_confirmed_by(root) if confirm_ids else ""
+    if actor and is_ai_signer(actor):
+        print("[abort] identity.default_confirmed_by must be a human identity; no writes applied.")
+        return 1
+
+    return run_forwarded(root, build_review_apply_commands(root, confirm_ids, reject_ids, evidence))
+
+
+def register_help(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    parser = subparsers.add_parser("help", help="打印分组能力菜单")
+    parser.set_defaults(handler=handle_help)
+
+
+def register_add(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    parser = subparsers.add_parser("add", help="轻量入库 source")
+    parser.add_argument("source", help="论文、repo、博客 URL 或本地文件路径")
+    parser.add_argument("--kind", choices=["paper", "repo", "blog"], help="显式覆盖 kind 推断")
+    parser.set_defaults(handler=handle_add)
+
+
+def register_review(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    parser = subparsers.add_parser("review", help="查看确认收件箱，TTY 下可交互处理")
+    parser.add_argument("fuzzy", nargs="?", help="可选 kind 或关键词过滤")
+    parser.set_defaults(handler=handle_review)
+
+
+def register_status(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    parser = subparsers.add_parser("status", help="查看当前状态摘要")
+    parser.add_argument("program", nargs="?", help="可选 program id / fuzzy name")
+    parser.set_defaults(handler=handle_status)
+
+
+def register_next(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    parser = subparsers.add_parser("next", help="查看下一步建议")
+    parser.add_argument("program", nargs="?", help="预留 program id / fuzzy name；当前底层按全局优先级输出")
+    parser.set_defaults(handler=handle_next)
+
+
+def register_find(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    parser = subparsers.add_parser("find", help="检索知识库")
+    parser.add_argument("keywords", nargs="+", help="检索关键词")
+    parser.set_defaults(handler=handle_find)
+
+
+def register_recall(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    parser = subparsers.add_parser("recall", help="回忆习惯 / 已知坑 / skill 问题")
+    parser.add_argument("kind", nargs="?", choices=["all", "habits", "gotchas", "defects"], default="all")
+    parser.set_defaults(handler=handle_recall)
+
+
+VERB_REGISTRARS: tuple[Callable[[argparse._SubParsersAction[argparse.ArgumentParser]], None], ...] = (
+    register_help,
+    register_add,
+    register_review,
+    register_status,
+    register_next,
+    register_find,
+    register_recall,
+)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="kb 快捷命令入口（伪 CLI）")
+    add_project_root_argument(parser)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    for register in VERB_REGISTRARS:
+        register(subparsers)
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    root = find_project_root(DEFAULT_PROJECT_ROOT, explicit_root=args.root)
+    handler: Handler = args.handler
+    return handler(args, root)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
