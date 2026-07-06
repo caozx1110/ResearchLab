@@ -548,3 +548,13 @@ Part B 的 Top 6 已由 Codex 逐项单独提交（6 commits），并经 **7 单
 
 ### 验收
 `kb help` 打印菜单不报错；其余 6 动词转发到正确 skill 且模糊 id 生效；`kb review` 交互流正确且 evidence 必填、TTY/非 TTY 都不崩；全测试绿 + 编译过；治理红线不破。
+
+---
+
+## ✅ Part E 收敛结论（§22 完成）
+
+- **`kb` 薄 dispatcher 已落地**（merge `4737012`）：新 skill `.agents/skills/kb-cli/scripts/kb`，7 个动词全部转发到现有 skill，零逻辑复制。
+- **Agent 1**（骨架 + 5 只读动词 help/status/next/find/recall）→ **Agent 2**（写入/交互 add/review），隔离 worktree 顺序施工。
+- **`kb help` 直接打印分组能力菜单**（不跑真实 CLI——修好了最初"kb help 吐真实命令"的问题）；`kb add` 从 URL 推断 kind（arxiv/pdf→paper，github→repo，else→blog）；`kb review` 交互式 y/n/s/q。
+- **治理红线守住且更强**：`kb review` 确认必填 evidence（空→abort 无写入）、非 TTY 退化为只列表、`is_ai_signer` 拦截 AI 身份自签、只对 pending 生效、确认全forward 到既有 `confirm_unit`（零重实现）；reject 不需 evidence（安全方向，符合设计）。
+- **151 测试全过**（含 17 个 kb-cli 测试）、编译通过、`kb help` 冒烟正常。文档 `RESEARCH_WORKFLOW.md` 已改成意图清单 + kb 伪 CLI 说明。**未 push。**
