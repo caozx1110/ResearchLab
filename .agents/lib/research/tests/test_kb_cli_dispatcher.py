@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
+import io
 import subprocess
 import sys
 from pathlib import Path
@@ -23,6 +24,21 @@ def _load_kb_cli():
     sys.modules[loader.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+class TTYStringIO(io.StringIO):
+    def isatty(self) -> bool:
+        return True
+
+
+def _pending_record(unit_id: str, kind: str, title: str, summary: str = "AI summary") -> dict:
+    return {
+        "id": unit_id,
+        "kind": kind,
+        "title": title,
+        "summary": summary,
+        "confirmation_status": "pending_user_confirmation",
+    }
 
 
 def test_kb_help_snapshot_contains_group_headers() -> None:
@@ -140,6 +156,100 @@ def test_kb_add_allows_explicit_kind_override(monkeypatch, tmp_path: Path) -> No
             ".agents/skills/source-intake/scripts/intake.py",
             ("add", "--kind", "paper", "--source", "https://github.com/org/repo"),
         ),
+    ]
+
+
+def test_kb_review_interactive_batches_confirm_and_reject(monkeypatch, tmp_path: Path) -> None:
+    kb = _load_kb_cli()
+    calls: list[list[tuple[str, tuple[str, ...]]]] = []
+
+    def fake_run_forwarded(root: Path, commands):
+        calls.append([(script, tuple(args)) for script, args in commands])
+        return 0
+
+    monkeypatch.setattr(kb, "run_forwarded", fake_run_forwarded)
+    monkeypatch.setattr(
+        kb,
+        "load_review_records",
+        lambda root, fuzzy: [
+            _pending_record("p-one-123456", "paper", "One"),
+            _pending_record("r-two-123456", "repo", "Two"),
+            _pending_record("b-three-123456", "blog", "Three"),
+            _pending_record("i-four-123456", "idea", "Four"),
+        ],
+    )
+    monkeypatch.setattr(kb, "default_confirmed_by", lambda root: "czx-default")
+    monkeypatch.setattr(sys, "stdin", TTYStringIO("y\nn\ns\nq\nkb/programs/p/decision-log.md\n"))
+
+    assert kb.main(["--root", str(tmp_path), "review"]) == 0
+
+    assert calls == [
+        [
+            (".agents/skills/knowledge-base-manager/scripts/kb.py", ("review-queue",)),
+        ],
+        [
+            (
+                ".agents/skills/knowledge-base-manager/scripts/kb.py",
+                (
+                    "confirm",
+                    "--id",
+                    "p-one-123456",
+                    "--confirmed-by",
+                    "czx-default",
+                    "--evidence",
+                    "kb/programs/p/decision-log.md",
+                ),
+            ),
+            (
+                ".agents/skills/knowledge-base-manager/scripts/kb.py",
+                ("promote", "--id", "r-two-123456", "--confirmation-status", "rejected"),
+            ),
+        ],
+    ]
+
+
+def test_kb_review_empty_evidence_aborts_without_writes(monkeypatch, tmp_path: Path, capsys) -> None:
+    kb = _load_kb_cli()
+    calls: list[list[tuple[str, tuple[str, ...]]]] = []
+
+    def fake_run_forwarded(root: Path, commands):
+        calls.append([(script, tuple(args)) for script, args in commands])
+        return 0
+
+    monkeypatch.setattr(kb, "run_forwarded", fake_run_forwarded)
+    monkeypatch.setattr(kb, "load_review_records", lambda root, fuzzy: [_pending_record("p-one-123456", "paper", "One")])
+    monkeypatch.setattr(kb, "default_confirmed_by", lambda root: "czx-default")
+    monkeypatch.setattr(sys, "stdin", TTYStringIO("y\n\n"))
+
+    assert kb.main(["--root", str(tmp_path), "review"]) == 1
+
+    captured = capsys.readouterr()
+    assert "[abort] evidence is required; no writes applied." in captured.out
+    assert calls == [
+        [
+            (".agents/skills/knowledge-base-manager/scripts/kb.py", ("review-queue",)),
+        ],
+    ]
+
+
+def test_kb_review_non_tty_degrades_to_list_only(monkeypatch, tmp_path: Path) -> None:
+    kb = _load_kb_cli()
+    calls: list[list[tuple[str, tuple[str, ...]]]] = []
+
+    def fake_run_forwarded(root: Path, commands):
+        calls.append([(script, tuple(args)) for script, args in commands])
+        return 0
+
+    monkeypatch.setattr(kb, "run_forwarded", fake_run_forwarded)
+    monkeypatch.setattr(kb, "load_review_records", lambda root, fuzzy: (_ for _ in ()).throw(AssertionError("should not prompt")))
+    monkeypatch.setattr(sys, "stdin", io.StringIO("y\nkb/programs/p/decision-log.md\n"))
+
+    assert kb.main(["--root", str(tmp_path), "review"]) == 0
+
+    assert calls == [
+        [
+            (".agents/skills/knowledge-base-manager/scripts/kb.py", ("review-queue",)),
+        ],
     ]
 
 

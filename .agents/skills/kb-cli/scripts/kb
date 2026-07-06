@@ -20,6 +20,7 @@ else:
     raise SystemExit("Could not locate .agents/lib")
 
 from research.common import add_project_root_argument, find_project_root
+from research.v2 import default_confirmed_by, search_records
 
 
 HELP_MENU: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
@@ -75,6 +76,7 @@ HELP_MENU: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
 
 SCRIPT_BY_VERB = {
     "add": ".agents/skills/source-intake/scripts/intake.py",
+    "review": ".agents/skills/knowledge-base-manager/scripts/kb.py",
     "status_current": ".agents/skills/research-navigator/scripts/navigate.py",
     "status_program": ".agents/skills/research-orchestrator/scripts/orchestrate.py",
     "next": ".agents/skills/research-orchestrator/scripts/orchestrate.py",
@@ -90,6 +92,8 @@ class CommandResult:
 
 
 Handler = Callable[[argparse.Namespace, Path], int]
+REVIEW_KIND_CHOICES = ("paper", "repo", "blog", "idea", "experiment")
+AI_SIGNER_NAMES = {"ai", "assistant", "codex", "chatgpt", "gpt", "openai"}
 
 
 def research_python() -> str:
@@ -185,6 +189,117 @@ def handle_add(args: argparse.Namespace, root: Path) -> int:
     return run_forwarded(root, [(SCRIPT_BY_VERB["add"], ["add", "--kind", kind, "--source", args.source])])
 
 
+def build_review_list_args(fuzzy: str | None) -> list[str]:
+    fuzzy_text = (fuzzy or "").strip()
+    fuzzy_kind = fuzzy_text.lower()
+    if not fuzzy_text:
+        return ["review-queue"]
+    if fuzzy_kind in REVIEW_KIND_CHOICES:
+        return ["review-queue", "--kind", fuzzy_kind]
+    return ["query", "--query", fuzzy_text, "--confirmation-status", "pending_user_confirmation"]
+
+
+def load_review_records(root: Path, fuzzy: str | None) -> list[dict]:
+    fuzzy_text = (fuzzy or "").strip()
+    fuzzy_kind = fuzzy_text.lower()
+    if fuzzy_kind in REVIEW_KIND_CHOICES:
+        return search_records(root, "", kind=fuzzy_kind, confirmation_status="pending_user_confirmation")
+    return search_records(root, fuzzy_text, confirmation_status="pending_user_confirmation")
+
+
+def review_item_summary(record: dict) -> str:
+    summary = str(record.get("summary") or "").strip()
+    return summary or "-"
+
+
+def print_review_item(record: dict) -> None:
+    unit_id = str(record.get("id") or "-")
+    kind = str(record.get("kind") or "-")
+    title = str(record.get("title") or "-")
+    print(f"- {unit_id} | {kind} | {title}")
+    print(f"  AI-judgement: {review_item_summary(record)}")
+
+
+def prompt_review_decisions(records: Sequence[dict]) -> tuple[list[str], list[str]]:
+    confirm_ids: list[str] = []
+    reject_ids: list[str] = []
+    for record in records:
+        if str(record.get("confirmation_status") or "") != "pending_user_confirmation":
+            continue
+        unit_id = str(record.get("id") or "").strip()
+        if not unit_id:
+            continue
+        print_review_item(record)
+        while True:
+            try:
+                answer = input("[y]确认 / [n]拒绝 / [s]跳过 / [q]退出: ").strip().lower()
+            except EOFError:
+                print("[abort] input closed; leaving remaining items unchanged.")
+                return confirm_ids, reject_ids
+            choice = answer[:1]
+            if choice == "y":
+                confirm_ids.append(unit_id)
+                break
+            if choice == "n":
+                reject_ids.append(unit_id)
+                break
+            if choice == "s":
+                break
+            if choice == "q":
+                return confirm_ids, reject_ids
+            print("请输入 y / n / s / q。")
+    return confirm_ids, reject_ids
+
+
+def is_ai_signer(actor: str) -> bool:
+    normalized = actor.strip().lower()
+    return normalized in AI_SIGNER_NAMES
+
+
+def build_review_apply_commands(root: Path, confirm_ids: Sequence[str], reject_ids: Sequence[str], evidence: str) -> list[tuple[str, Sequence[str]]]:
+    commands: list[tuple[str, Sequence[str]]] = []
+    if confirm_ids:
+        confirm_args: list[str] = ["confirm"]
+        for unit_id in confirm_ids:
+            confirm_args.extend(["--id", unit_id])
+        actor = default_confirmed_by(root)
+        if actor:
+            confirm_args.extend(["--confirmed-by", actor])
+        confirm_args.extend(["--evidence", evidence])
+        commands.append((SCRIPT_BY_VERB["review"], confirm_args))
+    for unit_id in reject_ids:
+        commands.append((SCRIPT_BY_VERB["review"], ["promote", "--id", unit_id, "--confirmation-status", "rejected"]))
+    return commands
+
+
+def handle_review(args: argparse.Namespace, root: Path) -> int:
+    listed = run_forwarded(root, [(SCRIPT_BY_VERB["review"], build_review_list_args(args.fuzzy))])
+    if listed != 0:
+        return listed
+    if not sys.stdin.isatty():
+        return 0
+
+    records = load_review_records(root, args.fuzzy)
+    confirm_ids, reject_ids = prompt_review_decisions(records)
+    if not confirm_ids and not reject_ids:
+        return 0
+
+    try:
+        evidence = input("evidence: ").strip()
+    except EOFError:
+        evidence = ""
+    if not evidence:
+        print("[abort] evidence is required; no writes applied.")
+        return 1
+
+    actor = default_confirmed_by(root) if confirm_ids else ""
+    if actor and is_ai_signer(actor):
+        print("[abort] identity.default_confirmed_by must be a human identity; no writes applied.")
+        return 1
+
+    return run_forwarded(root, build_review_apply_commands(root, confirm_ids, reject_ids, evidence))
+
+
 def register_help(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     parser = subparsers.add_parser("help", help="打印分组能力菜单")
     parser.set_defaults(handler=handle_help)
@@ -195,6 +310,12 @@ def register_add(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]
     parser.add_argument("source", help="论文、repo、博客 URL 或本地文件路径")
     parser.add_argument("--kind", choices=["paper", "repo", "blog"], help="显式覆盖 kind 推断")
     parser.set_defaults(handler=handle_add)
+
+
+def register_review(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    parser = subparsers.add_parser("review", help="查看确认收件箱，TTY 下可交互处理")
+    parser.add_argument("fuzzy", nargs="?", help="可选 kind 或关键词过滤")
+    parser.set_defaults(handler=handle_review)
 
 
 def register_status(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -224,6 +345,7 @@ def register_recall(subparsers: argparse._SubParsersAction[argparse.ArgumentPars
 VERB_REGISTRARS: tuple[Callable[[argparse._SubParsersAction[argparse.ArgumentParser]], None], ...] = (
     register_help,
     register_add,
+    register_review,
     register_status,
     register_next,
     register_find,
