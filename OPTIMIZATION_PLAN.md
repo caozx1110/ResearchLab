@@ -496,3 +496,55 @@ Part B 的 Top 6 已由 Codex 逐项单独提交（6 commits），并经 **7 单
 - **终审查出 2 blocker** → **BK1/BK2 已修**（`e1f4216`/`f8e1714`，经验证：strict-mode reject 不再崩、AI-derived rejected 记录 gate 一致、config figure 模式恢复）。
 - **§21 收尾 nit** → **N1/N2 已修**（`c5ca26c`/`00a703f`：backup_warning 不再入 record.source；promote 治理边界补 5 个测试）。
 - **最终：134 测试全过、全部编译、工作树干净。** 治理红线全程守住（learning 默认 pending、promote 只接受 user-preference、skill 缺陷只记不改、确认门控自洽）。**未 push。**
+
+---
+---
+
+# Part E —— 第 7 轮：`kb` 薄 dispatcher（伪 CLI，§22，已与用户敲定）
+
+## 22. `kb` 快捷命令（7 个高频动词的薄 dispatcher）
+
+> 需求来源：用户用自然语言跟 AI 交互，记不住 17 个 skill 的 `python xxx.py --flag <hash>`。目标是给**少数高频动作**一个统一的短入口 `kb <verb>`，用户既能**在终端直接敲**，也能**对 AI 说 "kb help"** 让 AI 代跑。**注意：不改 AGENTS.md**（那是用户自定义/init 时问偏好用的，正常 skill 不依赖它）。
+
+### 定位（关键约束，别做过头）
+- **薄 dispatcher**：只做 7 个动词，**底层全调现有 skill 脚本**（subprocess 或 import），**零业务逻辑复制**。不是给 17 个 skill 各配人类 CLI。
+- **模糊 id**：全部走 `locate_record` 的 fuzzy 解析（last / 标题子串 / id 前缀，B1 已实现），用户永不需要敲 hash。
+- **root 复用**：用 `common.find_project_root` / `add_project_root_argument`（已有），支持 `--root` / `RESEARCH_PROJECT_ROOT`。
+
+### 归属与落点
+新建 skill `.agents/skills/kb-cli/`：
+- `SKILL.md`：description 说明"kb 快捷命令入口"，列 7 动词。
+- `scripts/kb`（可执行，`#!/usr/bin/env python3`，argparse 子命令）—— dispatcher 本体。
+- 可选：在 README/GETTING_STARTED 提一句"终端可直接 `python3 .agents/skills/kb-cli/scripts/kb help`；建议 alias 成 `kb`"。
+
+### 7 个动词（每个的行为 + 底层调用）
+| `kb <verb>` | 行为 | 底层调用 |
+|---|---|---|
+| `kb help` | **直接打印**分组能力菜单（加材料/检索/idea/实验/报告/确认/状态/记忆），每项一句话 + "也可以直接对 AI 说…"。**不调任何 skill。** | 无（固定文案，从一个 data 表渲染） |
+| `kb status [program]` | 当前状态摘要（进展/待办/确认收件箱计数/下一步） | `navigate.py current-state`（有 program 时附 `orchestrate.py dashboard --program-id`） |
+| `kb review [fuzzy]` | 列确认收件箱 pending；**可选交互式**逐条 `[y]确认/[n]拒绝/[s]跳过/[q]退出`，退出前统一要**一次 evidence** | `kb.py review-queue`（+ `--confirm` 路径复用，evidence 仍必填） |
+| `kb next [program]` | 按优先级的 next-action 建议 | `orchestrate.py next` |
+| `kb add <src>` | 快速入库；**从 URL/扩展名推断 kind**（arxiv/pdf→paper，github→repo，else blog，= 路线图 B6） | `intake.py add --kind <推断> --source <src>` |
+| `kb find <kw>` | 检索知识库（排序全文，已有） | `kb.py query --query <kw>` |
+| `kb recall [kind]` | 已知习惯 / 已知坑 / 待审 skill 问题 | `learnings.py recall --kind <kind|all>` |
+
+### 交互式 `kb review`（唯一有新交互逻辑的动词）
+1. 调 review-queue 拿 pending 列表（模糊 id 过滤可选）。
+2. 逐条打印（id/kind/标题/AI 判断摘要），问 `[y/n/s/q]`。
+3. 累积 y→待确认集、n→待拒绝集；`q` 提前结束。
+4. 结束时：若有 y/n，**要一次 evidence**（复用 `--evidence` 必填规则，防盲签），批量 apply。
+5. **治理红线不变**：evidence 必填、不能自签、只对 `pending_user_confirmation` 生效。非 TTY（管道）时退化为只列表、不交互。
+
+### 硬性约束
+- **零逻辑复制**：dispatcher 只做参数转译 + subprocess/import 转发；确认/门控/写入全在底层 skill。
+- **治理红线**：`kb review` 的确认路径必须走既有 `confirm_unit`/`apply_confirmation`，evidence 必填、不自签。
+- **不改 AGENTS.md**、不改现有 skill 的行为面（只新增 kb-cli skill；如需 intake 的 kind 推断，B6 作为 intake 内部增强或在 dispatcher 侧推断均可，倾向 dispatcher 侧，避免动 intake 行为）。
+- import 面兼容；每个动词带测试（dispatcher 转发正确 + 交互式 review 的 y/n/evidence 流 + 非 TTY 退化）；`kb help` 输出快照测试；逐动词或分组 commit。
+
+### 施工拆分（可开多个 Codex agent，隔离 worktree，按动词分组避免冲突）
+- **Agent 1（骨架 + 只读动词）**：dispatcher 骨架（argparse + root 解析 + 转发框架）+ `kb help`（固定菜单）+ `kb status` + `kb next` + `kb find` + `kb recall`。这些是纯只读转发，无交互、无写入。
+- **Agent 2（写入 + 交互动词）**：`kb add`（含 URL→kind 推断）+ `kb review`（交互式确认流 + evidence 必填 + 非 TTY 退化）。这些涉及写入/确认，单独一个 agent 保证治理红线。
+- 两 agent 都新建在 `.agents/skills/kb-cli/`，Agent 1 先出骨架、Agent 2 基于骨架加动词（或分文件：help/status/next/find/recall 一组，add/review 一组，最后合）。
+
+### 验收
+`kb help` 打印菜单不报错；其余 6 动词转发到正确 skill 且模糊 id 生效；`kb review` 交互流正确且 evidence 必填、TTY/非 TTY 都不崩；全测试绿 + 编译过；治理红线不破。
