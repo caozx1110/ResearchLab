@@ -37,6 +37,7 @@ ${RESEARCH_PYTHON:-python3} .agents/skills/kb-cli/scripts/kb status
 
 ## Start Here
 
+- [安装指南](docs/INSTALL.md)：说明 `install.sh`、Claude/Codex project/system scope、`CLAUDE.md` 生成和 `kb` 上 PATH。
 - [用户指南](docs/USER_GUIDE.md)：给研究者，说明怎么安装、怎么开口、AI 和你如何分工、如何用 `kb` 快捷入口。
 - [设计说明](docs/DESIGN.md)：给开发者，说明 architecture、skill 路由、数据模型、confirmation gate 和扩展原则。
 - [贡献指南](CONTRIBUTING.md)：给贡献者，说明协作和变更流程。
