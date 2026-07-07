@@ -63,10 +63,11 @@ def confirm_command(
     unit_id = str(record.get("id") or "")
     direct_kind_set = set(CONFIRM_SCRIPT_BY_KIND) if direct_kinds is None else set(direct_kinds)
     if kind in direct_kind_set and kind in CONFIRM_SCRIPT_BY_KIND:
+        script = skill_script_for_command(CONFIRM_SCRIPT_BY_KIND[kind])
         return shell_command(
             [
                 command_prefix,
-                CONFIRM_SCRIPT_BY_KIND[kind],
+                script,
                 "confirm",
                 CONFIRM_ID_ARG_BY_KIND[kind],
                 unit_id,
@@ -80,7 +81,7 @@ def confirm_command(
     return shell_command(
         [
             command_prefix,
-            ".agents/skills/knowledge-base-manager/scripts/kb.py",
+            skill_script_for_command(".agents/skills/knowledge-base-manager/scripts/kb.py"),
             "promote",
             "--id",
             unit_id,
@@ -118,6 +119,33 @@ def find_project_root(start: Path | None = None, *, explicit_root: str | Path | 
         ):
             return candidate
     raise FileNotFoundError(f"Could not locate project root from {current}")
+
+
+def skills_root(start: Path | None = None, *, explicit_home: str | Path | None = None) -> Path:
+    explicit = str(explicit_home or os.getenv("RESEARCH_SKILLS_HOME") or "").strip()
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    current = (start or Path(__file__)).resolve()
+    search_from = current if current.is_dir() else current.parent
+    for candidate in [search_from] + list(search_from.parents):
+        if (candidate / ".agents" / "skills").exists():
+            return candidate
+    raise FileNotFoundError(f"Could not locate skills root from {current}")
+
+
+def skill_script_for_command(relative_path: str, *, cwd: Path | None = None) -> str:
+    if str(os.getenv("RESEARCH_SKILLS_HOME") or "").strip():
+        return (skills_root() / relative_path).as_posix()
+    local_script = (cwd or Path.cwd()) / relative_path
+    if local_script.exists():
+        return relative_path
+    try:
+        installed_script = skills_root() / relative_path
+    except FileNotFoundError:
+        return relative_path
+    if installed_script.exists():
+        return installed_script.as_posix()
+    return relative_path
 
 
 def add_project_root_argument(parser: Any) -> None:
