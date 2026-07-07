@@ -17,7 +17,7 @@ for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
 else:
     raise SystemExit("Could not locate .agents/lib")
 
-from research.common import add_project_root_argument, confirm_command as shared_confirm_command, extract_pdf_record, parse_arxiv_id, print_resolved_project_roots, shell_command
+from research.common import add_project_root_argument, confirm_command as shared_confirm_command, extract_pdf_record, parse_arxiv_id, print_resolved_project_roots, skill_script_for_command
 from research.intake_cli import add_intake_add_arguments
 from research.core import (
     apply_record_governance,
@@ -78,7 +78,9 @@ def canonical_paper_source_url(source: str, metadata: dict) -> str:
 def run_paper_command(root: Path, *args: str) -> list[str]:
     cmd = [
         research_python(),
-        str(root / ".agents" / "skills" / "paper-analyst" / "scripts" / "paper.py"),
+        skill_script_for_command(".agents/skills/paper-analyst/scripts/paper.py", cwd=root),
+        "--root",
+        str(root),
         *args,
     ]
     result = subprocess.run(cmd, cwd=root, text=True, capture_output=True, check=False)
@@ -111,24 +113,28 @@ def guidance_hints(preferences: dict, *, has_pdf: bool, note_created: bool) -> l
         return []
     hints = [
         "查看当前文献入库默认模式："
-        f"{research_python()} .agents/skills/research-config-manager/scripts/config.py guide --focus paper-intake",
+        f"{research_python()} "
+        f"{skill_script_for_command('.agents/skills/research-config-manager/scripts/config.py')} guide --focus paper-intake",
     ]
     if not bool(preferences.get("auto_complete_note")):
         hints.append(
             "如需让值得读的论文默认自动生成完整笔记："
-            f"{research_python()} .agents/skills/research-config-manager/scripts/config.py "
+            f"{research_python()} "
+            f"{skill_script_for_command('.agents/skills/research-config-manager/scripts/config.py')} "
             "set-runtime-pref --section paper --key auto_complete_note --value true"
         )
     if note_created and str(preferences.get("complete_note_mode") or "scaffold") != "draft":
         hints.append(
             "如需默认直接生成更饱满的 draft："
-            f"{research_python()} .agents/skills/research-config-manager/scripts/config.py "
+            f"{research_python()} "
+            f"{skill_script_for_command('.agents/skills/research-config-manager/scripts/config.py')} "
             "set-runtime-pref --section paper --key complete_note_mode --value draft"
         )
     if has_pdf and not bool(preferences.get("auto_extract_figures_after_note")):
         hints.append(
             "如需完整笔记后自动提取 Figure / Table："
-            f"{research_python()} .agents/skills/research-config-manager/scripts/config.py "
+            f"{research_python()} "
+            f"{skill_script_for_command('.agents/skills/research-config-manager/scripts/config.py')} "
             "set-runtime-pref --section paper --key auto_extract_figures_after_note --value true"
         )
     return hints[:3]

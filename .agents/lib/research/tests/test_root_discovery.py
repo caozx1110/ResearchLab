@@ -6,7 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from research.core import project_root
+from research.common import skill_script_for_command
+from research.core import project_root, skills_root
 
 
 def _project_root() -> Path:
@@ -33,6 +34,29 @@ def test_project_root_env_and_flag_overrides_do_not_require_agents_marker(tmp_pa
 
     assert project_root(tmp_path) == env_root.resolve()
     assert project_root(tmp_path, explicit_root=flag_root) == flag_root.resolve()
+
+
+def test_skills_root_ignores_decoupled_kb_workspace(tmp_path: Path, monkeypatch) -> None:
+    real_root = _project_root()
+    kb_workspace = tmp_path / "kb-workspace"
+    kb_workspace.mkdir()
+    monkeypatch.setenv("RESEARCH_PROJECT_ROOT", str(kb_workspace))
+    monkeypatch.chdir(kb_workspace)
+
+    assert skills_root() == real_root
+    assert skills_root() != project_root()
+    assert (skills_root() / ".agents" / "skills").is_dir()
+
+
+def test_skills_root_env_override(tmp_path: Path, monkeypatch) -> None:
+    skills_home = tmp_path / "skills-home"
+    (skills_home / ".agents" / "skills").mkdir(parents=True)
+    monkeypatch.setenv("RESEARCH_SKILLS_HOME", str(skills_home))
+
+    assert skills_root() == skills_home.resolve()
+    assert skill_script_for_command(".agents/skills/source-intake/scripts/intake.py") == (
+        skills_home.resolve() / ".agents" / "skills" / "source-intake" / "scripts" / "intake.py"
+    ).as_posix()
 
 
 def test_write_command_root_and_env_override_symlinked_agents_target(tmp_path: Path) -> None:

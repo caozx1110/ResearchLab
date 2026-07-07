@@ -15,7 +15,7 @@ for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
 else:
     raise SystemExit("Could not locate .agents/lib")
 
-from research.common import add_project_root_argument, confirm_command, parse_iso_datetime, print_resolved_project_roots, shell_command, warn_if_cwd_differs_from_project_root
+from research.common import add_project_root_argument, confirm_command, parse_iso_datetime, print_resolved_project_roots, shell_command, skill_script_for_command, warn_if_cwd_differs_from_project_root
 from research.core import (
     build_index,
     candidate_pools_path,
@@ -83,8 +83,10 @@ def next_unit_command(record: dict) -> str:
     id_arg = ID_ARG_BY_KIND.get(kind)
     command = NEXT_COMMAND_BY_KIND.get(kind)
     if not script or not id_arg or not command:
-        return shell_command([COMMAND_PREFIX, ".agents/skills/knowledge-base-manager/scripts/kb.py", "query", "--query", unit_id])
-    return shell_command([COMMAND_PREFIX, script, command, id_arg, unit_id])
+        return shell_command(
+            [COMMAND_PREFIX, skill_script_for_command(".agents/skills/knowledge-base-manager/scripts/kb.py"), "query", "--query", unit_id]
+        )
+    return shell_command([COMMAND_PREFIX, skill_script_for_command(script), command, id_arg, unit_id])
 
 
 def review_queue_records(

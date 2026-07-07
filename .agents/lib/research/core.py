@@ -29,6 +29,7 @@ from .common import (
     program_root as common_program_root,
     research_root,
     slugify,
+    skills_root as common_skills_root,
     utc_now_iso,
     write_text_if_changed,
     write_yaml_if_changed,
@@ -223,6 +224,10 @@ def record_path(project_root: Path, kind: str, unit_id: str) -> Path:
 
 def search_stage_path(project_root: Path, stage_id: str) -> Path:
     return source_search_root(project_root) / f"{stage_id}.yaml"
+
+
+def skills_root(start: Path | None = None, *, explicit_home: str | Path | None = None) -> Path:
+    return common_skills_root(start, explicit_home=explicit_home)
 
 
 def rel(project_root: Path, path: Path) -> str:
