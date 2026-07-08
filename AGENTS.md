@@ -17,6 +17,7 @@ Default preference order:
 - Prefer `${RESEARCH_PYTHON:-python3}` for research scripts, but use a known YAML-capable runtime.
 - Runtime-specific configuration belongs in `kb/config/`.
 - Session start: read the `research-navigator` recall digest once.
+- Session start: if `kb/config/user-profile.yaml` has a `personalization` block, read it once as optional user context (`user_opinion`, not confirmed facts; it never overrides governance rules).
 - When you go wrong or the user corrects you, log one learning with `skill-evolution-advisor/scripts/learnings.py log`.
 - Skill defects are record-only: never auto-modify a skill or `OPTIMIZATION_PLAN.md` from a captured defect.
 

@@ -109,6 +109,13 @@ REVIEW_KIND_CHOICES = ("paper", "repo", "blog", "idea", "experiment")
 LANG_CHOICES = ("zh", "en")
 AUTO_COMMIT_CHOICES = ("manual", "milestone", "aggressive")
 AUTO_SCREEN_CHOICES = ("true", "false")
+PERSONA_TERM_CHOICES = ("keep-en", "translate", "bilingual")
+PERSONA_FIELDS = (
+    ("research_focus", "研究方向 / 关注领域（逗号分隔，回车跳过）"),
+    ("resources", "可用资源：GPU / 数据集 / 常用代码库 / 框架（一句话，回车跳过）"),
+    ("reporting_style", "汇报风格：简洁度 + 周报格式（一句话，回车跳过）"),
+    ("collaboration_boundaries", "协作边界 / 红线（逗号分隔，回车跳过）"),
+)
 
 
 def research_python() -> str:
@@ -292,6 +299,29 @@ def prompt_choice(label: str, *, choices: Sequence[str], current: str) -> str:
         print(f"Please enter one of: {choices_text}.")
 
 
+def prompt_optional_text(label: str) -> str | None:
+    try:
+        value = input(f"{label}: ").strip()
+    except EOFError:
+        return None
+    return value or None
+
+
+def prompt_optional_choice(label: str, *, choices: Sequence[str]) -> str | None:
+    allowed = {c.lower(): c for c in choices}
+    prompt = f"{label} ({'/'.join(choices)}，回车跳过): "
+    while True:
+        try:
+            value = input(prompt).strip().lower()
+        except EOFError:
+            return None
+        if not value:
+            return None
+        if value in allowed:
+            return allowed[value]
+        prompt = f"请输入 {'/'.join(choices)} 之一（或回车跳过）: "
+
+
 def config_set_profile_command(key: str, value: str) -> tuple[str, Sequence[str]]:
     return (SCRIPT_BY_VERB["init_config"], ["set", "--key", key, "--value", value])
 
@@ -312,8 +342,33 @@ def build_init_pref_commands(*, name: str, lang: str, auto_commit: str, auto_scr
     ]
 
 
+def collect_persona_interactive() -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    term = prompt_optional_choice("术语呈现偏好", choices=PERSONA_TERM_CHOICES)
+    if term:
+        out.append(("personalization.term_style", term))
+    for key, label in PERSONA_FIELDS:
+        val = prompt_optional_text(label)
+        if val:
+            out.append((f"personalization.{key}", val))
+    return out
+
+
 def build_headless_init_pref_commands(args: argparse.Namespace) -> list[tuple[str, Sequence[str]]] | None:
-    if args.name is None and args.lang is None and args.auto_commit is None and args.auto_screen is None:
+    persona_values = [
+        ("personalization.research_focus", getattr(args, "persona_focus", None)),
+        ("personalization.resources", getattr(args, "persona_resources", None)),
+        ("personalization.reporting_style", getattr(args, "persona_report", None)),
+        ("personalization.collaboration_boundaries", getattr(args, "persona_boundaries", None)),
+        ("personalization.term_style", getattr(args, "persona_term", None)),
+    ]
+    if (
+        args.name is None
+        and args.lang is None
+        and args.auto_commit is None
+        and args.auto_screen is None
+        and all(value is None for _, value in persona_values)
+    ):
         return None
     commands: list[tuple[str, Sequence[str]]] = []
     if args.name is not None:
@@ -329,6 +384,9 @@ def build_headless_init_pref_commands(args: argparse.Namespace) -> list[tuple[st
         commands.append(config_set_runtime_pref_command("versioning", "auto_commit_mode", args.auto_commit))
     if args.auto_screen is not None:
         commands.append(config_set_runtime_pref_command("paper", "auto_screen_on_intake", args.auto_screen))
+    for key, value in persona_values:
+        if value is not None:
+            commands.append(config_set_profile_command(key, value))
     return commands
 
 
@@ -365,6 +423,17 @@ def handle_init(args: argparse.Namespace, root: Path) -> int:
         written = run_forwarded(root, build_init_pref_commands(name=name, lang=lang, auto_commit=auto_commit, auto_screen=auto_screen))
         if written != 0:
             return written
+        if sys.stdin.isatty():
+            try:
+                go = input("填写可选个性化画像（研究方向/资源/风格/术语/边界）？回车跳过 [y/N]: ").strip().lower()
+            except EOFError:
+                go = ""
+            if go in ("y", "yes"):
+                persona_cmds = [config_set_profile_command(k, v) for k, v in collect_persona_interactive()]
+                if persona_cmds:
+                    persona_written = run_forwarded(root, persona_cmds)
+                    if persona_written != 0:
+                        return persona_written
 
     if args.git_init:
         return run_forwarded(root, [(SCRIPT_BY_VERB["init_kb"], ["git-init"])])
@@ -509,6 +578,11 @@ def register_init(subparsers: argparse._SubParsersAction[argparse.ArgumentParser
     parser.add_argument("--lang", choices=LANG_CHOICES, help="语言偏好")
     parser.add_argument("--auto-commit", choices=AUTO_COMMIT_CHOICES, help="versioning.auto_commit_mode")
     parser.add_argument("--auto-screen", choices=AUTO_SCREEN_CHOICES, help="paper.auto_screen_on_intake")
+    parser.add_argument("--persona-focus", help="personalization.research_focus")
+    parser.add_argument("--persona-resources", help="personalization.resources")
+    parser.add_argument("--persona-report", help="personalization.reporting_style")
+    parser.add_argument("--persona-boundaries", help="personalization.collaboration_boundaries")
+    parser.add_argument("--persona-term", choices=PERSONA_TERM_CHOICES, help="personalization.term_style")
     parser.add_argument("--git-init", action="store_true", help="初始化后一并执行 git-init")
     parser.set_defaults(handler=handle_init)
 
