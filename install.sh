@@ -7,9 +7,10 @@ INSTALL_NAME="workspace-oss"
 
 usage() {
   cat <<'EOF'
-Usage: bash install.sh [options]
+Usage: bash install.sh [install|update|uninstall] [options]
 
 Configure Open Research Workspace Skills for Claude Code and/or Codex.
+Default action is install.
 
 Agent selection:
   --claude              Configure Claude Code only.
@@ -23,11 +24,15 @@ Scope selection:
 Other options:
   --kb-on-path          Symlink the kb dispatcher onto PATH.
   --dry-run             Print planned changes without writing files.
-  --uninstall           Remove managed blocks and symlinks created by this script.
+  --force               For update, overwrite managed files with local drift.
+  --source DIR          For update, sync from an alternate source tree.
+  --uninstall           Legacy alias for the uninstall action.
   -h, --help            Show this help.
 
 Examples:
   bash install.sh --claude --project .
+  bash install.sh update --project /path/to/workspace
+  bash install.sh uninstall --project /path/to/workspace
   bash install.sh --dry-run --claude --project .
   bash install.sh --all --system --kb-on-path
 EOF
@@ -115,19 +120,34 @@ same_dir() {
   [ "$(abs_dir "$1")" = "$(abs_dir "$2")" ]
 }
 
+ACTION=install
+ACTION_FROM_SUBCOMMAND=0
 DRY_RUN=0
-UNINSTALL=0
 CONFIG_CLAUDE=0
 CONFIG_CODEX=0
 AGENT_FLAG_SET=0
 SCOPE=""
 PROJECT_DIR=""
 KB_ON_PATH=0
+FORCE=0
+SYNC_SOURCE=""
 
 REPO_ROOT=$(script_dir)
 [ -d "$REPO_ROOT/.agents/lib" ] || die "could not find .agents/lib next to install.sh"
 [ -d "$REPO_ROOT/.agents/skills" ] || die "could not find .agents/skills next to install.sh"
 [ -f "$REPO_ROOT/AGENTS.md" ] || die "could not find AGENTS.md next to install.sh"
+[ -f "$REPO_ROOT/install-lib/ws_sync.py" ] || die "could not find install-lib/ws_sync.py next to install.sh"
+is_command python3 || die "python3 is required"
+
+if [ "$#" -gt 0 ]; then
+  case "$1" in
+    install|update|uninstall)
+      ACTION=$1
+      ACTION_FROM_SUBCOMMAND=1
+      shift
+      ;;
+  esac
+fi
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -140,7 +160,20 @@ while [ "$#" -gt 0 ]; do
       shift
       ;;
     --uninstall)
-      UNINSTALL=1
+      ACTION=uninstall
+      shift
+      ;;
+    --force)
+      FORCE=1
+      shift
+      ;;
+    --source)
+      [ "${2:-}" != "" ] && [[ ${2:-} != --* ]] || die "--source requires a directory"
+      SYNC_SOURCE=$2
+      shift 2
+      ;;
+    --source=*)
+      SYNC_SOURCE=${1#--source=}
       shift
       ;;
     --claude)
@@ -187,13 +220,6 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
-
-if [ -z "$PROJECT_DIR" ]; then
-  PROJECT_DIR=$(pwd)
-fi
-WORKSPACE_ROOT=$(abs_dir "$PROJECT_DIR")
-SKILLS_SRC="$REPO_ROOT/.agents/skills"
-KB_SCRIPT="$REPO_ROOT/.agents/skills/kb-cli/scripts/kb"
 
 prompt_agent_selection() {
   local default choice detected=()
@@ -244,12 +270,46 @@ prompt_scope() {
 }
 
 if [ "$AGENT_FLAG_SET" -eq 0 ]; then
-  prompt_agent_selection
+  if [ "$ACTION" = "install" ] || { [ "$ACTION" = "uninstall" ] && [ "$ACTION_FROM_SUBCOMMAND" -eq 0 ]; }; then
+    prompt_agent_selection
+  else
+    CONFIG_CLAUDE=1
+    CONFIG_CODEX=1
+  fi
 fi
-[ "$CONFIG_CLAUDE" -eq 1 ] || [ "$CONFIG_CODEX" -eq 1 ] || die "no agents selected"
+[ "$CONFIG_CLAUDE" -eq 1 ] || [ "$CONFIG_CODEX" -eq 1 ] || { [ "$ACTION" != "install" ] || die "no agents selected"; }
 
 if [ -z "$SCOPE" ]; then
   prompt_scope
+fi
+
+if [ -z "$PROJECT_DIR" ]; then
+  PROJECT_DIR=$(pwd)
+fi
+WORKSPACE_ROOT=$(abs_dir "$PROJECT_DIR")
+SKILLS_SRC="$REPO_ROOT/.agents/skills"
+KB_SCRIPT="$REPO_ROOT/.agents/skills/kb-cli/scripts/kb"
+WS_KB_SCRIPT="$KB_SCRIPT"
+MANIFEST_PATH="$WORKSPACE_ROOT/.agents/.install-manifest.json"
+SELF_CONTAINED=0
+COPY_PROJECT=0
+
+if same_dir "$WORKSPACE_ROOT" "$REPO_ROOT"; then
+  SELF_CONTAINED=1
+elif [ "$SCOPE" = "project" ]; then
+  COPY_PROJECT=1
+  SELF_CONTAINED=1
+  WS_KB_SCRIPT="$WORKSPACE_ROOT/.agents/skills/kb-cli/scripts/kb"
+fi
+
+if [ "$ACTION" = "update" ]; then
+  [ "$SCOPE" = "project" ] || die "update is only for external project copy installs; for system scope, rerun install"
+  [ "$COPY_PROJECT" -eq 1 ] || die "update is only for external project copy installs; for this repo, use git pull"
+fi
+
+if [ "$ACTION" = "uninstall" ] && [ "$ACTION_FROM_SUBCOMMAND" -eq 1 ]; then
+  [ "$SCOPE" = "project" ] || die "uninstall subcommand is only for project installs; use --uninstall with --system for system scope"
+  [ "$COPY_PROJECT" -eq 1 ] || die "uninstall subcommand is only for external project installs; this repo is managed by git"
 fi
 
 preflight_yaml() {
@@ -290,6 +350,170 @@ preflight_yaml() {
   esac
 }
 
+source_commit() {
+  git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || printf ''
+}
+
+file_sha256() {
+  if is_command shasum; then
+    shasum -a 256 "$1" | awk '{ print $1 }'
+  elif is_command sha256sum; then
+    sha256sum "$1" | awk '{ print $1 }'
+  else
+    python3 - "$1" <<'PY'
+import hashlib
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+digest = hashlib.sha256()
+with path.open("rb") as handle:
+    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+        digest.update(chunk)
+print(digest.hexdigest())
+PY
+  fi
+}
+
+manifest_is_ours() {
+  [ -f "$1" ] || return 1
+  python3 - "$1" <<'PY' >/dev/null 2>&1
+import json
+import sys
+from pathlib import Path
+
+try:
+    data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except Exception:
+    raise SystemExit(1)
+if (
+    data.get("schema") == 1
+    and data.get("install_name") == "workspace-oss"
+    and data.get("install_mode") == "copy-project"
+    and isinstance(data.get("files"), dict)
+):
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+manifest_field() {
+  local manifest=$1 field=$2
+  python3 - "$manifest" "$field" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+value = data.get(sys.argv[2], "")
+if value is None:
+    value = ""
+print(value)
+PY
+}
+
+guard_agents_md_for_copy_install() {
+  local target expected actual_link actual_abs expected_abs
+  target="$WORKSPACE_ROOT/AGENTS.md"
+  [ -e "$target" ] || [ -L "$target" ] || return 0
+  expected="$REPO_ROOT/AGENTS.md"
+  if [ -L "$target" ]; then
+    actual_link=$(readlink "$target")
+    case $actual_link in
+      /*) actual_abs=$actual_link ;;
+      *) actual_abs=$WORKSPACE_ROOT/$actual_link ;;
+    esac
+    expected_abs=$(cd -P -- "$(dirname -- "$expected")" >/dev/null 2>&1 && pwd)/$(basename -- "$expected")
+    if [ "$(cd -P -- "$(dirname -- "$actual_abs")" >/dev/null 2>&1 && pwd 2>/dev/null || true)/$(basename -- "$actual_abs")" = "$expected_abs" ]; then
+      return 0
+    fi
+    die "AGENTS.md already exists in $WORKSPACE_ROOT and is not a workspace-oss artifact; resolve the conflict before installing"
+  fi
+  die "AGENTS.md already exists in $WORKSPACE_ROOT; move or merge it before installing"
+}
+
+guard_copy_install_target() {
+  if [ -L "$WORKSPACE_ROOT/.agents" ]; then
+    die "legacy symlink install detected at $WORKSPACE_ROOT/.agents; run uninstall for the old install first, then install again"
+  fi
+  if [ -d "$WORKSPACE_ROOT/.agents" ]; then
+    if manifest_is_ours "$MANIFEST_PATH"; then
+      die "copy-project install already exists at $WORKSPACE_ROOT; use: bash install.sh update --project $(quote_path "$WORKSPACE_ROOT")"
+    fi
+    die "foreign .agents directory exists at $WORKSPACE_ROOT/.agents; not overwriting it"
+  fi
+  if [ -e "$WORKSPACE_ROOT/.agents" ]; then
+    die "foreign .agents path exists at $WORKSPACE_ROOT/.agents; not overwriting it"
+  fi
+  guard_agents_md_for_copy_install
+}
+
+ws_sync() {
+  local action=$1 commit args=()
+  shift || true
+  commit=$(source_commit)
+  args=("$action" "--repo" "$REPO_ROOT" "--dir" "$WORKSPACE_ROOT" "--source-commit" "$commit")
+  if [ -n "$SYNC_SOURCE" ]; then
+    args+=("--source" "$SYNC_SOURCE")
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    args+=("--dry-run")
+  fi
+  if [ "$FORCE" -eq 1 ]; then
+    args+=("--force")
+  fi
+  python3 "$REPO_ROOT/install-lib/ws_sync.py" "${args[@]}" "$@"
+}
+
+sync_workspace_copy() {
+  [ "$COPY_PROJECT" -eq 1 ] || return 0
+  guard_copy_install_target
+  ws_sync install
+}
+
+update_workspace_copy() {
+  [ "$COPY_PROJECT" -eq 1 ] || die "update requires an external project copy install"
+  [ -d "$WORKSPACE_ROOT/.agents" ] && [ ! -L "$WORKSPACE_ROOT/.agents" ] || die "update requires a real managed .agents directory"
+  manifest_is_ours "$MANIFEST_PATH" || die "update requires a valid workspace-oss manifest; run install for new workspaces or fix the manifest"
+  ws_sync update
+}
+
+remove_agents_md_if_managed() {
+  local mode sha actual
+  [ -f "$MANIFEST_PATH" ] || return 0
+  mode=$(manifest_field "$MANIFEST_PATH" agents_md)
+  sha=$(manifest_field "$MANIFEST_PATH" agents_md_sha)
+  [ "$mode" = "managed" ] || {
+    warn "preserving AGENTS.md because manifest marks it as user-managed"
+    return 0
+  }
+  [ -f "$WORKSPACE_ROOT/AGENTS.md" ] || return 0
+  actual=$(file_sha256 "$WORKSPACE_ROOT/AGENTS.md")
+  if [ -n "$sha" ] && [ "$actual" = "$sha" ]; then
+    if [ "$DRY_RUN" -eq 1 ]; then
+      info "[dry-run] rm $(quote_path "$WORKSPACE_ROOT/AGENTS.md")"
+    else
+      rm "$WORKSPACE_ROOT/AGENTS.md"
+    fi
+  else
+    warn "preserving modified AGENTS.md in $WORKSPACE_ROOT"
+  fi
+}
+
+uninstall_workspace_copy() {
+  local had_manifest=0
+  [ "$COPY_PROJECT" -eq 1 ] || die "copy-project uninstall requires an external project workspace"
+  [ -d "$WORKSPACE_ROOT/.agents" ] && [ ! -L "$WORKSPACE_ROOT/.agents" ] || die "copy-project uninstall requires a real managed .agents directory"
+  manifest_is_ours "$MANIFEST_PATH" || die "copy-project uninstall requires a valid workspace-oss manifest"
+  had_manifest=1
+  remove_symlink_if_matches "$WORKSPACE_ROOT/.claude/skills" "../.agents/skills" "$SKILLS_SRC"
+  remove_managed_block "$WORKSPACE_ROOT/CLAUDE.md"
+  remove_agents_md_if_managed
+  ws_sync uninstall
+  uninstall_kb_on_path
+  [ "$had_manifest" -eq 1 ] && info "Preserved $WORKSPACE_ROOT/kb and $WORKSPACE_ROOT/.venv if present; workspace is now unmanaged."
+}
+
 ensure_dir() {
   if [ "$DRY_RUN" -eq 1 ]; then
     info "[dry-run] mkdir -p $(quote_path "$1")"
@@ -302,6 +526,9 @@ link_force() {
   local target=$1 link=$2
   if [ -e "$link" ] && [ ! -L "$link" ]; then
     warn "skip non-symlink path: $link"
+    return 0
+  fi
+  if [ -L "$link" ] && [ "$(readlink "$link")" = "$target" ]; then
     return 0
   fi
   if [ "$DRY_RUN" -eq 1 ]; then
@@ -364,6 +591,8 @@ write_managed_block() {
   if [ "$DRY_RUN" -eq 1 ]; then
     info "[dry-run] write managed block in $(quote_path "$file")"
     rm -f "$tmp_file"
+  elif [ -f "$file" ] && cmp -s "$file" "$tmp_file"; then
+    rm -f "$tmp_file"
   else
     mv "$tmp_file" "$file"
   fi
@@ -417,9 +646,9 @@ install_claude_project() {
   local claude_dir link_target block_file
   claude_dir="$WORKSPACE_ROOT/.claude"
   ensure_dir "$claude_dir"
-  # Hard invariant: skill directories are symlinked, never copied. The scripts
-  # resolve __file__ through symlinks and walk back to the real .agents/lib.
-  if same_dir "$WORKSPACE_ROOT" "$REPO_ROOT"; then
+  # Self-contained workspaces keep .agents and AGENTS.md in the workspace root,
+  # so Claude can use an include block plus a relative skills symlink.
+  if [ "$SELF_CONTAINED" -eq 1 ]; then
     link_target="../.agents/skills"
     block_file=$(build_claude_block include "$WORKSPACE_ROOT")
   else
@@ -433,7 +662,7 @@ install_claude_project() {
 
 uninstall_claude_project() {
   local expected
-  if same_dir "$WORKSPACE_ROOT" "$REPO_ROOT"; then
+  if [ "$SELF_CONTAINED" -eq 1 ]; then
     expected="../.agents/skills"
   else
     expected="$SKILLS_SRC"
@@ -445,8 +674,8 @@ uninstall_claude_project() {
 install_claude_system() {
   local skill name block_file
   ensure_dir "$HOME/.claude/skills"
-  # Hard invariant: each system-scope skill is a symlink to the repo skill dir,
-  # never a copy, so __file__.resolve() can still find the sibling .agents/lib.
+  # System scope links each skill back to the repo so __file__.resolve() can
+  # still find the sibling .agents/lib in the source checkout.
   for skill in "$SKILLS_SRC"/*; do
     [ -d "$skill" ] || continue
     name=${skill##*/}
@@ -474,23 +703,20 @@ install_codex_project() {
     info "Codex project scope: AGENTS.md and .agents/ are already present in $REPO_ROOT."
     return 0
   fi
-  # External workspaces get symlinks back to this repo. Do not copy .agents:
-  # copied skill dirs break the walk-up import path for .agents/lib.
-  link_force "$REPO_ROOT/.agents" "$WORKSPACE_ROOT/.agents"
-  if [ -e "$WORKSPACE_ROOT/AGENTS.md" ] && [ ! -L "$WORKSPACE_ROOT/AGENTS.md" ]; then
-    warn "AGENTS.md already exists in $WORKSPACE_ROOT; leaving it unchanged."
-    warn "Add workspace-oss rules manually or run Codex from $REPO_ROOT."
-  else
-    link_force "$REPO_ROOT/AGENTS.md" "$WORKSPACE_ROOT/AGENTS.md"
-  fi
-  info "For external Codex workspaces, set RESEARCH_SKILLS_HOME=$REPO_ROOT."
+  # External project scope is self-contained: the shared copy step installed the
+  # full .agents tree plus AGENTS.md, preserving sibling imports under DIR.
+  info "Codex project scope: .agents/ and AGENTS.md are managed copies in $WORKSPACE_ROOT."
 }
 
 uninstall_codex_project() {
   if same_dir "$WORKSPACE_ROOT" "$REPO_ROOT"; then
     return 0
   fi
-  remove_symlink_if_matches "$WORKSPACE_ROOT/.agents" "$REPO_ROOT/.agents"
+  if [ -L "$WORKSPACE_ROOT/.agents" ]; then
+    remove_symlink_if_matches "$WORKSPACE_ROOT/.agents" "$REPO_ROOT/.agents"
+  elif [ -d "$WORKSPACE_ROOT/.agents" ] && [ ! -f "$MANIFEST_PATH" ]; then
+    warn "foreign .agents directory has no workspace-oss manifest; preserving it"
+  fi
   remove_symlink_if_matches "$WORKSPACE_ROOT/AGENTS.md" "$REPO_ROOT/AGENTS.md"
 }
 
@@ -531,12 +757,13 @@ install_kb_on_path() {
   local dir link
   if [ "$SCOPE" = "system" ]; then
     dir="$HOME/.local/bin"
+    WS_KB_SCRIPT="$KB_SCRIPT"
   else
     dir="$WORKSPACE_ROOT/bin"
   fi
   link="$dir/kb"
   ensure_dir "$dir"
-  link_force "$KB_SCRIPT" "$link"
+  link_force "$WS_KB_SCRIPT" "$link"
   if ! path_on_path "$dir"; then
     warn "$dir is not on PATH; add it before running kb by name."
   fi
@@ -549,60 +776,84 @@ uninstall_kb_on_path() {
   else
     dir="$WORKSPACE_ROOT/bin"
   fi
-  remove_symlink_if_matches "$dir/kb" "$KB_SCRIPT"
+  remove_symlink_if_matches "$dir/kb" "$WS_KB_SCRIPT" "$KB_SCRIPT"
 }
 
 run_smoke() {
-  if [ "$DRY_RUN" -eq 1 ] || [ "$UNINSTALL" -eq 1 ]; then
+  if [ "$DRY_RUN" -eq 1 ] || [ "$ACTION" != "install" ]; then
     return 0
   fi
   info "Smoke: kb help"
-  "$KB_SCRIPT" help >/dev/null
+  "$WS_KB_SCRIPT" help >/dev/null
   info "Smoke: kb --root $(quote_path "$WORKSPACE_ROOT") status"
-  RESEARCH_SKILLS_HOME="$REPO_ROOT" "$KB_SCRIPT" --root "$WORKSPACE_ROOT" status >/dev/null
+  if [ "$COPY_PROJECT" -eq 1 ]; then
+    "$WS_KB_SCRIPT" --root "$WORKSPACE_ROOT" status >/dev/null
+  else
+    RESEARCH_SKILLS_HOME="$REPO_ROOT" "$WS_KB_SCRIPT" --root "$WORKSPACE_ROOT" status >/dev/null
+  fi
 }
 
-if [ "$UNINSTALL" -eq 0 ]; then
+if [ "$ACTION" != "uninstall" ]; then
   preflight_yaml
 fi
 
-if [ "$UNINSTALL" -eq 1 ]; then
-  if [ "$CONFIG_CLAUDE" -eq 1 ]; then
-    if [ "$SCOPE" = "system" ]; then
-      uninstall_claude_system
-    else
-      uninstall_claude_project
+case "$ACTION" in
+  install)
+    if [ "$SCOPE" = "project" ] && [ "$COPY_PROJECT" -eq 1 ]; then
+      sync_workspace_copy
     fi
-  fi
-  if [ "$CONFIG_CODEX" -eq 1 ]; then
-    if [ "$SCOPE" = "system" ]; then
-      uninstall_codex_system
-    else
-      uninstall_codex_project
+    if [ "$CONFIG_CLAUDE" -eq 1 ]; then
+      if [ "$SCOPE" = "system" ]; then
+        install_claude_system
+      else
+        install_claude_project
+      fi
     fi
-  fi
-  [ "$KB_ON_PATH" -eq 1 ] && uninstall_kb_on_path
-  info "Uninstall complete."
-  exit 0
-fi
-
-if [ "$CONFIG_CLAUDE" -eq 1 ]; then
-  if [ "$SCOPE" = "system" ]; then
-    install_claude_system
-  else
+    if [ "$CONFIG_CODEX" -eq 1 ]; then
+      if [ "$SCOPE" = "system" ]; then
+        install_codex_system
+      else
+        install_codex_project
+      fi
+    fi
+    [ "$KB_ON_PATH" -eq 1 ] && install_kb_on_path
+    run_smoke
+    info "Install complete."
+    ;;
+  update)
+    update_workspace_copy
     install_claude_project
-  fi
-fi
-
-if [ "$CONFIG_CODEX" -eq 1 ]; then
-  if [ "$SCOPE" = "system" ]; then
-    install_codex_system
-  else
     install_codex_project
-  fi
-fi
-
-[ "$KB_ON_PATH" -eq 1 ] && install_kb_on_path
-run_smoke
-
-info "Install complete."
+    [ "$KB_ON_PATH" -eq 1 ] && install_kb_on_path
+    info "Update complete."
+    ;;
+  uninstall)
+    if [ "$SCOPE" = "project" ] && [ "$COPY_PROJECT" -eq 1 ] && [ -d "$WORKSPACE_ROOT/.agents" ] && [ ! -L "$WORKSPACE_ROOT/.agents" ] && manifest_is_ours "$MANIFEST_PATH"; then
+      uninstall_workspace_copy
+      info "Uninstall complete."
+      exit 0
+    fi
+    if [ "$SCOPE" = "project" ] && [ "$COPY_PROJECT" -eq 1 ] && [ -d "$WORKSPACE_ROOT/.agents" ] && [ ! -L "$WORKSPACE_ROOT/.agents" ] && [ -f "$MANIFEST_PATH" ]; then
+      die "uninstall refused because workspace-oss manifest is invalid or damaged: $MANIFEST_PATH"
+    fi
+    if [ "$CONFIG_CLAUDE" -eq 1 ]; then
+      if [ "$SCOPE" = "system" ]; then
+        uninstall_claude_system
+      else
+        uninstall_claude_project
+      fi
+    fi
+    if [ "$CONFIG_CODEX" -eq 1 ]; then
+      if [ "$SCOPE" = "system" ]; then
+        uninstall_codex_system
+      else
+        uninstall_codex_project
+      fi
+    fi
+    [ "$KB_ON_PATH" -eq 1 ] && uninstall_kb_on_path
+    info "Uninstall complete."
+    ;;
+  *)
+    die "unknown action: $ACTION"
+    ;;
+esac
