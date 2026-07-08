@@ -26,9 +26,12 @@
 在仓库根目录运行：
 
 ```bash
+bash install.sh
 bash install.sh --help
 bash install.sh --claude --project .
 ```
+
+直接 `bash install.sh` 无参数会进入交互式引导：选择 action、agent、scope、workspace 目录、是否把 `kb` 放到 PATH，并在确认页后执行。显式 flag 和非交互/CI 用法保持不变；`NO_COLOR=1` 可关闭终端颜色。
 
 先看 dry-run：
 

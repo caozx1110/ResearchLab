@@ -32,7 +32,7 @@ kb status
 - [设计说明](docs/DESIGN.md)：给开发者，说明 architecture、skill 路由、数据模型、confirmation gate 和扩展原则。
 - [贡献指南](CONTRIBUTING.md)：给贡献者，说明协作和变更流程。
 
-安装模型：system scope 和同仓 `--project .` 使用 symlink；外部 `--project DIR` 会拷贝整棵 `.agents/` 与 `AGENTS.md`，写入 manifest，并可用 `bash install.sh update --project DIR` 做 clean-sync 更新。详见 [安装指南](docs/INSTALL.md)。
+安装入口支持 `bash install.sh` 交互式引导。安装模型：system scope 和同仓 `--project .` 使用 symlink；外部 `--project DIR` 会拷贝整棵 `.agents/` 与 `AGENTS.md`，写入 manifest，并可用 `bash install.sh update --project DIR` 做 clean-sync 更新。详见 [安装指南](docs/INSTALL.md)。
 
 ## 核心想法
 

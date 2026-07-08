@@ -5,54 +5,140 @@ BEGIN_MARKER="# >>> workspace-oss managed >>>"
 END_MARKER="# <<< workspace-oss managed <<<"
 INSTALL_NAME="workspace-oss"
 
+is_command() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+C_RESET=""
+C_BOLD=""
+C_DIM=""
+C_RED=""
+C_GREEN=""
+C_YELLOW=""
+C_BLUE=""
+C_CYAN=""
+
+if [ -t 1 ] && [ "${TERM:-}" != "dumb" ] && [ -z "${NO_COLOR:-}" ] && is_command tput; then
+  COLOR_COUNT=$(tput colors 2>/dev/null || printf '0')
+  case $COLOR_COUNT in
+    ''|*[!0-9]*) COLOR_COUNT=0 ;;
+  esac
+  if [ "$COLOR_COUNT" -ge 8 ]; then
+    C_RESET=$(tput sgr0 2>/dev/null || printf '')
+    C_BOLD=$(tput bold 2>/dev/null || printf '')
+    C_DIM=$(tput dim 2>/dev/null || printf '')
+    C_RED=$(tput setaf 1 2>/dev/null || printf '')
+    C_GREEN=$(tput setaf 2 2>/dev/null || printf '')
+    C_YELLOW=$(tput setaf 3 2>/dev/null || printf '')
+    C_BLUE=$(tput setaf 4 2>/dev/null || printf '')
+    C_CYAN=$(tput setaf 6 2>/dev/null || printf '')
+  fi
+fi
+unset COLOR_COUNT
+
+OK="✓"
+ERR="✗"
+DOT="•"
+ARROW="→"
+WARN="!"
+
+hr() {
+  local cols
+  cols=60
+  if [ -t 1 ] && is_command tput; then
+    cols=$(tput cols 2>/dev/null || printf '60')
+    case $cols in
+      ''|*[!0-9]*) cols=60 ;;
+    esac
+  fi
+  [ "$cols" -lt 20 ] && cols=60
+  printf '%b' "$C_DIM"
+  printf '%*s\n' "$cols" '' | tr ' ' '-'
+  printf '%b' "$C_RESET"
+}
+
+title() {
+  hr
+  printf '%bOpen Research Workspace Skills%b\n' "$C_BOLD$C_CYAN" "$C_RESET"
+  if [ "$#" -gt 0 ]; then
+    printf '%b%s%b\n' "$C_BOLD$C_CYAN" "$*" "$C_RESET"
+  fi
+  hr
+}
+
+section() {
+  printf '\n%b%s%b\n' "$C_BOLD" "$*" "$C_RESET"
+}
+
+step() {
+  printf '\n%b[%s/%s]%b %s\n' "$C_BOLD" "$1" "$2" "$C_RESET" "$3"
+}
+
+ok() {
+  printf '%b%s%b %s\n' "$C_GREEN" "$OK" "$C_RESET" "$*"
+}
+
+fail() {
+  printf '%b%s%b %s\n' "$C_RED" "$ERR" "$C_RESET" "$*"
+}
+
+note() {
+  printf '%b%s%b %s\n' "$C_YELLOW" "$WARN" "$C_RESET" "$*"
+}
+
+bullet() {
+  printf '%b%s%b %s\n' "$C_DIM" "$DOT" "$C_RESET" "$*"
+}
+
 usage() {
-  cat <<'EOF'
-Usage: bash install.sh [install|update|uninstall] [options]
+  title "Installer"
+  printf 'Usage: bash install.sh [install|update|uninstall] [options]\n\n'
+  printf 'Configure Open Research Workspace Skills for Claude Code and/or Codex.\n'
+  printf 'Run without enough flags in a TTY to enter the guided wizard. Default action is install.\n'
 
-Configure Open Research Workspace Skills for Claude Code and/or Codex.
-Default action is install.
+  section "Agent selection"
+  bullet "--claude              Configure Claude Code only."
+  bullet "--codex               Configure Codex only."
+  bullet "--all                 Configure both Claude Code and Codex."
 
-Agent selection:
-  --claude              Configure Claude Code only.
-  --codex               Configure Codex only.
-  --all                 Configure both Claude Code and Codex.
+  section "Scope selection"
+  bullet "--project [DIR]       Project-scope install. DIR defaults to the current directory."
+  bullet "--system              System-scope install."
 
-Scope selection:
-  --project [DIR]       Project-scope install. DIR defaults to the current directory.
-  --system              System-scope install.
+  section "Other options"
+  bullet "--kb-on-path          Symlink the kb dispatcher onto PATH."
+  bullet "--dry-run             Print planned changes without writing files."
+  bullet "--force               For update, overwrite managed files with local drift."
+  bullet "--source DIR          For update, sync from an alternate source tree."
+  bullet "--yes, --assume-yes   Skip the interactive confirmation page."
+  bullet "--uninstall           Legacy alias for the uninstall action."
+  bullet "-h, --help            Show this help."
 
-Other options:
-  --kb-on-path          Symlink the kb dispatcher onto PATH.
-  --dry-run             Print planned changes without writing files.
-  --force               For update, overwrite managed files with local drift.
-  --source DIR          For update, sync from an alternate source tree.
-  --uninstall           Legacy alias for the uninstall action.
-  -h, --help            Show this help.
+  section "Interactive use"
+  bullet "No arguments starts a guided flow for action, agent, scope, workspace directory, kb-on-path, and confirmation."
+  bullet "Explicit flags skip their matching questions."
+  bullet "Non-TTY and CI runs never wait for input; pass the required flags."
+  bullet "Set NO_COLOR=1 to disable terminal colors."
 
-Examples:
-  bash install.sh --claude --project .
-  bash install.sh update --project /path/to/workspace
-  bash install.sh uninstall --project /path/to/workspace
-  bash install.sh --dry-run --claude --project .
-  bash install.sh --all --system --kb-on-path
-EOF
+  section "Examples"
+  bullet "bash install.sh --claude --project ."
+  bullet "bash install.sh update --project /path/to/workspace"
+  bullet "bash install.sh uninstall --project /path/to/workspace"
+  bullet "bash install.sh --dry-run --claude --project ."
+  bullet "bash install.sh --all --system --kb-on-path"
 }
 
 die() {
-  printf 'error: %s\n' "$*" >&2
+  printf '%b%s error:%b %s\n' "$C_RED" "$ERR" "$C_RESET" "$*" >&2
   exit 1
 }
 
 warn() {
-  printf 'warn: %s\n' "$*" >&2
+  printf '%b%s%b %s\n' "$C_YELLOW" "$WARN" "$C_RESET" "$*" >&2
 }
 
 info() {
   printf '%s\n' "$*"
-}
-
-is_command() {
-  command -v "$1" >/dev/null 2>&1
 }
 
 agent_detected() {
@@ -122,15 +208,22 @@ same_dir() {
 
 ACTION=install
 ACTION_FROM_SUBCOMMAND=0
+ACTION_EXPLICIT=0
 DRY_RUN=0
 CONFIG_CLAUDE=0
 CONFIG_CODEX=0
 AGENT_FLAG_SET=0
 SCOPE=""
 PROJECT_DIR=""
+PROJECT_FLAG_SET=0
 KB_ON_PATH=0
+KB_ON_PATH_FLAG_SET=0
 FORCE=0
 SYNC_SOURCE=""
+ASSUME_YES=0
+WIZARD_MODE=0
+WIZARD_STEP=0
+WIZARD_TOTAL=5
 
 REPO_ROOT=$(script_dir)
 [ -d "$REPO_ROOT/.agents/lib" ] || die "could not find .agents/lib next to install.sh"
@@ -144,6 +237,7 @@ if [ "$#" -gt 0 ]; then
     install|update|uninstall)
       ACTION=$1
       ACTION_FROM_SUBCOMMAND=1
+      ACTION_EXPLICIT=1
       shift
       ;;
   esac
@@ -161,6 +255,11 @@ while [ "$#" -gt 0 ]; do
       ;;
     --uninstall)
       ACTION=uninstall
+      ACTION_EXPLICIT=1
+      shift
+      ;;
+    --yes|--assume-yes)
+      ASSUME_YES=1
       shift
       ;;
     --force)
@@ -194,6 +293,7 @@ while [ "$#" -gt 0 ]; do
       ;;
     --project)
       SCOPE=project
+      PROJECT_FLAG_SET=1
       if [ "${2:-}" != "" ] && [[ ${2:-} != --* ]]; then
         PROJECT_DIR=$2
         shift 2
@@ -204,6 +304,7 @@ while [ "$#" -gt 0 ]; do
       ;;
     --project=*)
       SCOPE=project
+      PROJECT_FLAG_SET=1
       PROJECT_DIR=${1#--project=}
       shift
       ;;
@@ -213,6 +314,7 @@ while [ "$#" -gt 0 ]; do
       ;;
     --kb-on-path)
       KB_ON_PATH=1
+      KB_ON_PATH_FLAG_SET=1
       shift
       ;;
     *)
@@ -220,6 +322,58 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+
+is_interactive_input() {
+  [ -t 0 ] && [ -z "${CI:-}" ]
+}
+
+wizard_step() {
+  WIZARD_STEP=$((WIZARD_STEP + 1))
+  step "$WIZARD_STEP" "$WIZARD_TOTAL" "$1"
+}
+
+agent_label() {
+  if [ "$CONFIG_CLAUDE" -eq 1 ] && [ "$CONFIG_CODEX" -eq 1 ]; then
+    printf 'all'
+  elif [ "$CONFIG_CLAUDE" -eq 1 ]; then
+    printf 'claude'
+  elif [ "$CONFIG_CODEX" -eq 1 ]; then
+    printf 'codex'
+  else
+    printf 'none'
+  fi
+}
+
+mode_label() {
+  if [ "$SCOPE" = "system" ]; then
+    printf 'system scope'
+  elif [ "$COPY_PROJECT" -eq 1 ]; then
+    printf '解耦拷贝'
+  else
+    printf '自包含单仓'
+  fi
+}
+
+prompt_action() {
+  local choice
+  is_interactive_input || return 0
+  wizard_step "Action"
+  printf 'Choose action [install/update/uninstall] [install]: '
+  read -r choice || choice=""
+  choice=${choice:-install}
+  case "$choice" in
+    install)
+      ACTION=install
+      ;;
+    update|uninstall)
+      ACTION=$choice
+      ACTION_FROM_SUBCOMMAND=1
+      ;;
+    *)
+      die "unknown action: $choice"
+      ;;
+  esac
+}
 
 prompt_agent_selection() {
   local default choice detected=()
@@ -236,12 +390,21 @@ prompt_agent_selection() {
   else
     default=all
   fi
-  if [ ! -t 0 ]; then
+  if ! is_interactive_input; then
     die "agent selection requires --claude, --codex, or --all in non-interactive mode"
   fi
-  printf 'Detected agents: Claude=%s Codex=%s\n' \
-    "$(agent_detected claude && printf yes || printf no)" \
-    "$(agent_detected codex && printf yes || printf no)"
+  wizard_step "Agent"
+  note "Detected agents:"
+  if agent_detected claude; then
+    ok "Claude detected: yes"
+  else
+    bullet "Claude detected: no"
+  fi
+  if agent_detected codex; then
+    ok "Codex detected: yes"
+  else
+    bullet "Codex detected: no"
+  fi
   printf 'Configure which agents? [claude/codex/all/none] [%s]: ' "$default"
   read -r choice || choice=""
   choice=${choice:-$default}
@@ -256,9 +419,10 @@ prompt_agent_selection() {
 
 prompt_scope() {
   local choice
-  if [ ! -t 0 ]; then
+  if ! is_interactive_input; then
     die "scope selection requires --project [DIR] or --system in non-interactive mode"
   fi
+  wizard_step "Scope"
   printf 'Install scope? [project/system] [project]: '
   read -r choice || choice=""
   choice=${choice:-project}
@@ -268,6 +432,62 @@ prompt_scope() {
     *) die "unknown scope: $choice" ;;
   esac
 }
+
+prompt_project_dir() {
+  local choice default_dir
+  if ! is_interactive_input; then
+    return 0
+  fi
+  default_dir=$(pwd)
+  wizard_step "Workspace directory"
+  printf 'Workspace directory [%s]: ' "$default_dir"
+  read -r choice || choice=""
+  choice=${choice:-$default_dir}
+  PROJECT_DIR=$(abs_dir "$choice")
+  if same_dir "$PROJECT_DIR" "$REPO_ROOT"; then
+    note "自包含单仓模式：skills 与 kb 同处本仓库，不拷贝。"
+  else
+    note "解耦拷贝模式：将把 .agents 拷贝进该目录，该目录即你的 KB workspace（kb/、.venv 都在此）。"
+  fi
+}
+
+prompt_kb_on_path() {
+  local choice
+  if ! is_interactive_input; then
+    return 0
+  fi
+  wizard_step "kb on PATH"
+  printf '把 kb 命令放到 PATH？[y/N]: '
+  read -r choice || choice=""
+  case "$choice" in
+    y|Y|yes|YES)
+      KB_ON_PATH=1
+      ;;
+    *)
+      KB_ON_PATH=0
+      ;;
+  esac
+}
+
+if is_interactive_input; then
+  if [ "$ACTION_EXPLICIT" -eq 0 ] \
+    || { [ "$AGENT_FLAG_SET" -eq 0 ] && { [ "$ACTION" = "install" ] || { [ "$ACTION" = "uninstall" ] && [ "$ACTION_FROM_SUBCOMMAND" -eq 0 ]; }; }; } \
+    || [ -z "$SCOPE" ] \
+    || { [ "$ACTION" = "install" ] && [ "$KB_ON_PATH_FLAG_SET" -eq 0 ]; }; then
+    WIZARD_MODE=1
+  fi
+fi
+
+if [ "$WIZARD_MODE" -eq 1 ]; then
+  title "Guided setup"
+  info "按回车使用默认值；显式 flag 会跳过对应问题。"
+fi
+
+if [ "$ACTION_EXPLICIT" -eq 0 ]; then
+  prompt_action
+elif [ "$WIZARD_MODE" -eq 1 ]; then
+  note "Action: $ACTION"
+fi
 
 if [ "$AGENT_FLAG_SET" -eq 0 ]; then
   if [ "$ACTION" = "install" ] || { [ "$ACTION" = "uninstall" ] && [ "$ACTION_FROM_SUBCOMMAND" -eq 0 ]; }; then
@@ -281,6 +501,14 @@ fi
 
 if [ -z "$SCOPE" ]; then
   prompt_scope
+fi
+
+if [ "$SCOPE" = "project" ] && [ -z "$PROJECT_DIR" ] && [ "$PROJECT_FLAG_SET" -eq 0 ]; then
+  prompt_project_dir
+fi
+
+if [ "$ACTION" = "install" ] && [ "$KB_ON_PATH_FLAG_SET" -eq 0 ] && [ "$WIZARD_MODE" -eq 1 ]; then
+  prompt_kb_on_path
 fi
 
 if [ -z "$PROJECT_DIR" ]; then
@@ -312,30 +540,149 @@ if [ "$ACTION" = "uninstall" ] && [ "$ACTION_FROM_SUBCOMMAND" -eq 1 ]; then
   [ "$COPY_PROJECT" -eq 1 ] || die "uninstall subcommand is only for external project installs; this repo is managed by git"
 fi
 
+print_plan() {
+  [ "$WIZARD_MODE" -eq 1 ] || return 0
+  is_interactive_input || return 0
+
+  section "即将执行 / Plan"
+  bullet "Action: $ACTION"
+  bullet "Agent: $(agent_label)"
+  bullet "Scope: $SCOPE"
+  bullet "Workspace: $WORKSPACE_ROOT ($(mode_label))"
+
+  case "$ACTION" in
+    install)
+      if [ "$COPY_PROJECT" -eq 1 ]; then
+        bullet "将把 .agents 和 AGENTS.md 拷贝到 workspace，并写入 manifest。"
+      fi
+      if [ "$CONFIG_CLAUDE" -eq 1 ]; then
+        if [ "$SCOPE" = "system" ]; then
+          bullet "将接线 ~/.claude/skills 与 ~/.claude/CLAUDE.md managed block。"
+        else
+          bullet "将接线 .claude/skills 软链与 CLAUDE.md managed block。"
+        fi
+      fi
+      if [ "$CONFIG_CODEX" -eq 1 ]; then
+        if [ "$SCOPE" = "system" ]; then
+          bullet "将接线 ~/.codex/$INSTALL_NAME 下的 AGENTS.md 与 .agents。"
+        else
+          bullet "Codex 将使用 workspace 内的 AGENTS.md 与 .agents。"
+        fi
+      fi
+      if [ "$KB_ON_PATH" -eq 1 ]; then
+        if [ "$SCOPE" = "system" ]; then
+          bullet "将接线 ~/.local/bin/kb。"
+        else
+          bullet "将接线 $WORKSPACE_ROOT/bin/kb。"
+        fi
+      fi
+      ;;
+    update)
+      bullet "将 clean-sync 外部 project copy 的 .agents 与 manifest。"
+      bullet "将按 manifest 记录刷新 agent 接线；不触碰 kb/ 或 .venv/。"
+      ;;
+    uninstall)
+      bullet "将移除 managed symlink/block；copy 模式按 manifest 卸载 .agents。"
+      bullet "将保留 kb/ 与 .venv/。"
+      ;;
+  esac
+
+  if [ "$SCOPE" = "project" ]; then
+    bullet "KB 落点: $WORKSPACE_ROOT/kb；首次运行会自建 $WORKSPACE_ROOT/.venv。"
+  else
+    bullet "KB 落点由 RESEARCH_PROJECT_ROOT 或 kb --root 指定；首次运行会在目标 workspace 自建 .venv。"
+  fi
+}
+
+confirm_plan() {
+  local answer
+  print_plan
+  [ "$WIZARD_MODE" -eq 1 ] || return 0
+  is_interactive_input || return 0
+  [ "$DRY_RUN" -eq 0 ] || return 0
+  [ "$ASSUME_YES" -eq 0 ] || return 0
+
+  printf '继续？[Y/n]: '
+  read -r answer || answer=""
+  case "$answer" in
+    n|N|no|NO)
+      info "已取消"
+      exit 0
+      ;;
+  esac
+}
+
+print_next_steps() {
+  section "下一步 / Next"
+  if [ "$KB_ON_PATH" -eq 1 ]; then
+    bullet "运行: kb init"
+    bullet "然后: kb status"
+  else
+    bullet "运行: $WS_KB_SCRIPT init"
+    bullet "也可以重跑 install 并加 --kb-on-path。"
+  fi
+}
+
+print_done() {
+  local completed_label
+  if [ "$DRY_RUN" -eq 1 ]; then
+    completed_label="Dry-run complete; no files were written."
+  else
+    completed_label="$1 complete."
+  fi
+
+  section "完成 / Done"
+  ok "$completed_label"
+  case "$1" in
+    Install)
+      ok "Workspace: $WORKSPACE_ROOT ($(mode_label))"
+      if [ "$CONFIG_CLAUDE" -eq 1 ]; then
+        ok "Claude wiring is configured."
+      fi
+      if [ "$CONFIG_CODEX" -eq 1 ]; then
+        ok "Codex wiring is configured."
+      fi
+      [ "$KB_ON_PATH" -eq 1 ] && ok "kb PATH entry is configured."
+      print_next_steps
+      ;;
+    Update)
+      ok "External project copy sync finished; kb/ and .venv/ were not touched."
+      ;;
+    Uninstall)
+      ok "Managed wiring was removed where ownership checks allowed it."
+      ok "kb/ and .venv/ were preserved."
+      ;;
+  esac
+}
+
+confirm_plan
+
 preflight_yaml() {
   local py
   py=${RESEARCH_PYTHON:-python3}
-  info "Preflight: checking PyYAML with $(quote_path "$py")"
+  section "Preflight"
+  bullet "Checking PyYAML with $(quote_path "$py")"
   if "$py" -c 'import yaml' >/dev/null 2>&1; then
     if [ -n "${VIRTUAL_ENV:-}" ]; then
-      info "Active venv: $VIRTUAL_ENV"
+      bullet "Active venv: $VIRTUAL_ENV"
     else
-      info "No active VIRTUAL_ENV detected."
+      bullet "No active VIRTUAL_ENV detected."
     fi
     return 0
   fi
-  warn "PyYAML is not importable with $py."
+  note "PyYAML is not importable with $py."
   if [ -n "${VIRTUAL_ENV:-}" ]; then
-    warn "Active venv: $VIRTUAL_ENV"
+    note "Active venv: $VIRTUAL_ENV"
   else
-    warn "No active VIRTUAL_ENV detected."
+    note "No active VIRTUAL_ENV detected."
   fi
   if [ "$DRY_RUN" -eq 1 ] || [ ! -t 0 ]; then
     warn "Install requirements with: $py -m pip install -r $(quote_path "$REPO_ROOT/requirements.txt")"
     warn "Or set RESEARCH_PYTHON to a Python that has PyYAML installed."
     return 1
   fi
-  printf 'Run "%s -m pip install -r %s" now? [y/N]: ' "$py" "$REPO_ROOT/requirements.txt"
+  bullet "This only installs requirements for the selected Python; default is no."
+  printf '%b%s%b Run "%s -m pip install -r %s" now? [y/N]: ' "$C_YELLOW" "$ARROW" "$C_RESET" "$py" "$REPO_ROOT/requirements.txt"
   local answer
   read -r answer || answer=""
   case "$answer" in
@@ -848,7 +1195,7 @@ case "$ACTION" in
     fi
     [ "$KB_ON_PATH" -eq 1 ] && install_kb_on_path
     run_smoke
-    info "Install complete."
+    print_done Install
     ;;
   update)
     UPDATE_CONFIG_CLAUDE=0
@@ -863,13 +1210,13 @@ case "$ACTION" in
       install_codex_project
     fi
     [ "$KB_ON_PATH" -eq 1 ] && install_kb_on_path
-    info "Update complete."
+    print_done Update
     ;;
   uninstall)
     CORRUPT_MANIFEST_UNINSTALL=0
     if [ "$SCOPE" = "project" ] && [ "$COPY_PROJECT" -eq 1 ] && [ -d "$WORKSPACE_ROOT/.agents" ] && [ ! -L "$WORKSPACE_ROOT/.agents" ] && manifest_is_ours "$MANIFEST_PATH"; then
       uninstall_workspace_copy
-      info "Uninstall complete."
+      print_done Uninstall
       exit 0
     fi
     if [ "$SCOPE" = "project" ] && [ "$COPY_PROJECT" -eq 1 ] && [ -d "$WORKSPACE_ROOT/.agents" ] && [ ! -L "$WORKSPACE_ROOT/.agents" ] && [ -f "$MANIFEST_PATH" ]; then
@@ -895,7 +1242,7 @@ case "$ACTION" in
     if [ "$CORRUPT_MANIFEST_UNINSTALL" -eq 1 ]; then
       warn "manifest was invalid; .agents was retained for manual inspection, and kb/.venv were not touched"
     fi
-    info "Uninstall complete."
+    print_done Uninstall
     ;;
   *)
     die "unknown action: $ACTION"
