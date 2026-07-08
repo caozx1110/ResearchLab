@@ -412,6 +412,24 @@ print(value)
 PY
 }
 
+manifest_agent_enabled() {
+  local manifest=$1 agent=$2
+  python3 - "$manifest" "$agent" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+agent = sys.argv[2]
+agents = data.get("agents")
+if not isinstance(agents, dict):
+    enabled = agent == "claude"
+else:
+    enabled = bool(agents.get(agent, False))
+print("1" if enabled else "0")
+PY
+}
+
 guard_agents_md_for_copy_install() {
   local target expected actual_link actual_abs expected_abs
   target="$WORKSPACE_ROOT/AGENTS.md"
@@ -449,10 +467,22 @@ guard_copy_install_target() {
 }
 
 ws_sync() {
-  local action=$1 commit args=()
+  local action=$1 commit agent_csv args=()
   shift || true
   commit=$(source_commit)
   args=("$action" "--repo" "$REPO_ROOT" "--dir" "$WORKSPACE_ROOT" "--source-commit" "$commit")
+  if [ "$action" = "install" ]; then
+    agent_csv=""
+    [ "$CONFIG_CLAUDE" -eq 1 ] && agent_csv="claude"
+    if [ "$CONFIG_CODEX" -eq 1 ]; then
+      if [ -n "$agent_csv" ]; then
+        agent_csv="$agent_csv,codex"
+      else
+        agent_csv="codex"
+      fi
+    fi
+    args+=("--agents" "$agent_csv")
+  fi
   if [ -n "$SYNC_SOURCE" ]; then
     args+=("--source" "$SYNC_SOURCE")
   fi
@@ -785,11 +815,11 @@ run_smoke() {
   fi
   info "Smoke: kb help"
   "$WS_KB_SCRIPT" help >/dev/null
-  info "Smoke: kb --root $(quote_path "$WORKSPACE_ROOT") status"
+  info "Smoke: kb --root $(quote_path "$WORKSPACE_ROOT") doctor"
   if [ "$COPY_PROJECT" -eq 1 ]; then
-    "$WS_KB_SCRIPT" --root "$WORKSPACE_ROOT" status >/dev/null
+    "$WS_KB_SCRIPT" --root "$WORKSPACE_ROOT" doctor >/dev/null
   else
-    RESEARCH_SKILLS_HOME="$REPO_ROOT" "$WS_KB_SCRIPT" --root "$WORKSPACE_ROOT" status >/dev/null
+    RESEARCH_SKILLS_HOME="$REPO_ROOT" "$WS_KB_SCRIPT" --root "$WORKSPACE_ROOT" doctor >/dev/null
   fi
 }
 
@@ -821,20 +851,31 @@ case "$ACTION" in
     info "Install complete."
     ;;
   update)
+    UPDATE_CONFIG_CLAUDE=0
+    UPDATE_CONFIG_CODEX=0
     update_workspace_copy
-    install_claude_project
-    install_codex_project
+    UPDATE_CONFIG_CLAUDE=$(manifest_agent_enabled "$MANIFEST_PATH" claude 2>/dev/null || printf '1')
+    UPDATE_CONFIG_CODEX=$(manifest_agent_enabled "$MANIFEST_PATH" codex 2>/dev/null || printf '0')
+    if [ "$UPDATE_CONFIG_CLAUDE" = "1" ]; then
+      install_claude_project
+    fi
+    if [ "$UPDATE_CONFIG_CODEX" = "1" ]; then
+      install_codex_project
+    fi
     [ "$KB_ON_PATH" -eq 1 ] && install_kb_on_path
     info "Update complete."
     ;;
   uninstall)
+    CORRUPT_MANIFEST_UNINSTALL=0
     if [ "$SCOPE" = "project" ] && [ "$COPY_PROJECT" -eq 1 ] && [ -d "$WORKSPACE_ROOT/.agents" ] && [ ! -L "$WORKSPACE_ROOT/.agents" ] && manifest_is_ours "$MANIFEST_PATH"; then
       uninstall_workspace_copy
       info "Uninstall complete."
       exit 0
     fi
     if [ "$SCOPE" = "project" ] && [ "$COPY_PROJECT" -eq 1 ] && [ -d "$WORKSPACE_ROOT/.agents" ] && [ ! -L "$WORKSPACE_ROOT/.agents" ] && [ -f "$MANIFEST_PATH" ]; then
-      die "uninstall refused because workspace-oss manifest is invalid or damaged: $MANIFEST_PATH"
+      warn "uninstall found invalid or damaged workspace-oss manifest: $MANIFEST_PATH"
+      warn "preserving $WORKSPACE_ROOT/.agents because the manifest cannot be trusted"
+      CORRUPT_MANIFEST_UNINSTALL=1
     fi
     if [ "$CONFIG_CLAUDE" -eq 1 ]; then
       if [ "$SCOPE" = "system" ]; then
@@ -851,6 +892,9 @@ case "$ACTION" in
       fi
     fi
     [ "$KB_ON_PATH" -eq 1 ] && uninstall_kb_on_path
+    if [ "$CORRUPT_MANIFEST_UNINSTALL" -eq 1 ]; then
+      warn "manifest was invalid; .agents was retained for manual inspection, and kb/.venv were not touched"
+    fi
     info "Uninstall complete."
     ;;
   *)

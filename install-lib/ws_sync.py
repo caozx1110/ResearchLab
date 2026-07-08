@@ -28,6 +28,7 @@ INSTALL_MODE = "copy-project"
 MANIFEST_REL = Path(".agents/.install-manifest.json")
 MANIFEST_NAME = ".install-manifest.json"
 SCHEMA = 1
+DEFAULT_LEGACY_AGENTS = {"claude": True, "codex": False}
 EXCLUDED_DIRS = {"__pycache__", ".venv"}
 EXCLUDED_SUFFIXES = {".pyc", ".pyo"}
 EXCLUDED_NAMES = {".DS_Store", MANIFEST_NAME}
@@ -101,15 +102,24 @@ def source_items(repo: Path, source: Path | None) -> dict[str, tuple[Path, str]]
     items: dict[str, tuple[Path, str]] = {}
     for root, dirs, files in os.walk(agents_src):
         root_path = Path(root)
-        dirs[:] = sorted(name for name in dirs if not should_exclude(root_path / name))
+        dirs[:] = sorted(name for name in dirs if not should_exclude((root_path / name).relative_to(agents_src)))
         for name in sorted(files):
             path = root_path / name
-            if should_exclude(path):
+            if should_exclude(path.relative_to(agents_src)):
                 continue
             rel = Path(".agents") / path.relative_to(agents_src)
             items[rel_text(rel)] = (path, sha256_file(path))
     items["AGENTS.md"] = (agents_md_src, sha256_file(agents_md_src))
     return dict(sorted(items.items()))
+
+
+def source_agents_actual_nonempty(repo: Path, source: Path | None) -> bool:
+    source_root = (source or repo).resolve()
+    agents_src = source_root / ".agents"
+    for _root, dirs, files in os.walk(agents_src):
+        if dirs or files:
+            return True
+    return False
 
 
 def load_manifest(path: Path, *, required: bool = True) -> dict[str, Any] | None:
@@ -159,11 +169,30 @@ def is_under_agents(path: Path, dst_root: Path) -> bool:
     return candidate == agents or agents in candidate.parents
 
 
+def assert_write_target(path: Path, dst_root: Path) -> None:
+    if path == dst_root / "AGENTS.md":
+        return
+    if not is_under_agents(path, dst_root):
+        die(f"refusing to write outside .agents: {path}")
+    if not is_under_agents(path.parent, dst_root):
+        die(f"refusing to write outside .agents: {path}")
+
+
 def assert_delete_target(path: Path, dst_root: Path) -> None:
     if path.name == MANIFEST_NAME:
         die(f"refusing to delete manifest through file set: {path}")
     if not is_under_agents(path, dst_root):
         die(f"refusing to delete outside .agents: {path}")
+
+
+def assert_no_symlinked_agent_subdirs(dst_root: Path) -> None:
+    root = agents_root(dst_root)
+    for current_root, dirs, _files in os.walk(root, followlinks=False):
+        root_path = Path(current_root)
+        for name in dirs:
+            directory = root_path / name
+            if directory.is_symlink():
+                die(f"managed .agents contains a symlinked subdirectory: {directory}; refuse to sync")
 
 
 def tree_checksum(files: dict[str, str]) -> str:
@@ -180,12 +209,13 @@ def current_files_from_items(items: dict[str, tuple[Path, str]]) -> dict[str, st
     return {rel: digest for rel, (_path, digest) in sorted(items.items())}
 
 
-def write_file_if_needed(src: Path, dst: Path, *, dry_run: bool) -> bool:
+def write_file_if_needed(src: Path, dst: Path, dst_root: Path, *, dry_run: bool) -> bool:
     src_bytes = read_bytes(src)
     exists = dst.exists()
     same = exists and not dst.is_symlink() and dst.is_file() and read_bytes(dst) == src_bytes
     if same:
         return False
+    assert_write_target(dst, dst_root)
     action = "overwrite" if exists else "copy"
     if dry_run:
         info(f"[dry-run] {action} {src} -> {dst}")
@@ -267,22 +297,78 @@ def print_diff(*, old_commit: str, new_commit: str, added: list[str], changed: l
             info(f"  - {rel}")
 
 
-def detect_drift(dst_root: Path, old_files: dict[str, str]) -> list[tuple[str, str, str]]:
-    drift: list[tuple[str, str, str]] = []
+def detect_drift(dst_root: Path, old_files: dict[str, str], new_files: dict[str, str]) -> list[tuple[str, str, str, str]]:
+    drift: list[tuple[str, str, str, str]] = []
     for rel, expected_hash in sorted(old_files.items()):
         path = path_for_rel(dst_root, rel)
         if not path.exists() and not path.is_symlink():
             continue
         if path.is_symlink():
-            drift.append((rel, expected_hash, "<symlink>"))
+            drift.append((rel, expected_hash, "<symlink>", "managed-drift"))
             continue
         if not path.is_file():
-            drift.append((rel, expected_hash, "<not-a-file>"))
+            drift.append((rel, expected_hash, "<not-a-file>", "managed-drift"))
             continue
         actual_hash = sha256_file(path)
         if actual_hash != expected_hash:
-            drift.append((rel, expected_hash, actual_hash))
+            drift.append((rel, expected_hash, actual_hash, "managed-drift"))
+    for rel in sorted(set(new_files) - set(old_files)):
+        new_hash = new_files[rel]
+        path = path_for_rel(dst_root, rel)
+        if not path.exists() and not path.is_symlink():
+            continue
+        if path.is_symlink():
+            drift.append((rel, new_hash, "<symlink>", "collides-with-local"))
+            continue
+        if not path.is_file():
+            drift.append((rel, new_hash, "<not-a-file>", "collides-with-local"))
+            continue
+        actual_hash = sha256_file(path)
+        if actual_hash != new_hash:
+            drift.append((rel, new_hash, actual_hash, "collides-with-local"))
     return drift
+
+
+def source_enumeration_looks_collapsed(
+    repo: Path,
+    source: Path | None,
+    *,
+    old_files: dict[str, str],
+    new_files: dict[str, str],
+    removed: list[str],
+) -> bool:
+    if not source_agents_actual_nonempty(repo, source):
+        return False
+    old_agent_count = sum(1 for rel in old_files if rel.startswith(".agents/"))
+    new_agent_count = sum(1 for rel in new_files if rel.startswith(".agents/"))
+    if new_agent_count == 0:
+        return True
+    if old_agent_count == 0:
+        return False
+    return len(removed) / old_agent_count >= 0.9
+
+
+def parse_agents(value: str) -> dict[str, bool]:
+    if not value:
+        return dict(DEFAULT_LEGACY_AGENTS)
+    agents = {"claude": False, "codex": False}
+    for raw_name in value.split(","):
+        name = raw_name.strip()
+        if not name:
+            continue
+        if name not in agents:
+            die(f"unknown agent in --agents: {name}")
+        agents[name] = True
+    return agents
+
+
+def normalize_manifest_agents(value: Any) -> dict[str, bool]:
+    if not isinstance(value, dict):
+        return dict(DEFAULT_LEGACY_AGENTS)
+    return {
+        "claude": bool(value.get("claude", False)),
+        "codex": bool(value.get("codex", False)),
+    }
 
 
 def managed_agents_md_state(dst_root: Path, files: dict[str, str]) -> tuple[str, str]:
@@ -299,11 +385,12 @@ def install(args: argparse.Namespace) -> int:
     source = resolve_dir(args.source, "source") if args.source else None
     items = source_items(repo, source)
     files = current_files_from_items(items)
+    agents = parse_agents(args.agents)
     installed_at = utc_now()
 
     changed = False
     for rel, (src, _digest) in items.items():
-        changed = write_file_if_needed(src, path_for_rel(dst_root, rel), dry_run=args.dry_run) or changed
+        changed = write_file_if_needed(src, path_for_rel(dst_root, rel), dst_root, dry_run=args.dry_run) or changed
 
     agents_md_state, agents_md_sha = managed_agents_md_state(dst_root, files)
     manifest = {
@@ -314,6 +401,7 @@ def install(args: argparse.Namespace) -> int:
         "source_commit": args.source_commit or "",
         "installed_at": installed_at,
         "updated_at": installed_at,
+        "agents": agents,
         "agents_md": agents_md_state,
         "agents_md_sha": agents_md_sha,
         "files": files,
@@ -338,6 +426,7 @@ def update(args: argparse.Namespace) -> int:
     manifest_repo = str(manifest.get("source_repo") or "")
     if manifest_repo and Path(manifest_repo).expanduser().resolve(strict=False) != repo:
         warn(f"manifest source_repo differs from current repo: {manifest_repo} != {repo}")
+    assert_no_symlinked_agent_subdirs(dst_root)
 
     items = source_items(repo, source)
     new_files = current_files_from_items(items)
@@ -349,21 +438,26 @@ def update(args: argparse.Namespace) -> int:
     changed_names = sorted(rel for rel in set(new_files) & set(old_files) if new_files[rel] != old_files[rel])
     removed = sorted(rel for rel in set(old_files) - set(new_files) if rel != "AGENTS.md" and rel.startswith(".agents/"))
     print_diff(old_commit=old_commit, new_commit=new_commit, added=added, changed=changed_names, removed=removed)
+    collapsed = source_enumeration_looks_collapsed(repo, source, old_files=old_files, new_files=new_files, removed=removed)
+    if collapsed and not args.force:
+        die("source enumeration produced near-empty tree; refusing mass deletion; rerun with --force only if intentional")
+    if collapsed and args.force:
+        warn("source enumeration produced near-empty tree; continuing because --force was set")
 
-    drift = detect_drift(dst_root, old_files)
+    drift = detect_drift(dst_root, old_files, new_files)
     if drift and not args.force:
         warn("local modifications inside managed .agents block update")
-        for rel, expected_hash, actual_hash in drift:
-            warn(f"  MODIFIED {rel} expected={expected_hash} actual={actual_hash}")
+        for rel, expected_hash, actual_hash, reason in drift:
+            warn(f"  MODIFIED {rel} reason={reason} expected={expected_hash} actual={actual_hash}")
         die("copy-project update aborted; rerun with --force to overwrite managed drift", code=3)
     if drift and args.force:
         warn("local modifications inside managed .agents will be overwritten because --force was set")
-        for rel, _expected_hash, actual_hash in drift:
-            warn(f"  MODIFIED {rel} actual={actual_hash}")
+        for rel, _expected_hash, actual_hash, reason in drift:
+            warn(f"  MODIFIED {rel} reason={reason} actual={actual_hash}")
 
     changed = False
     for rel, (src, _digest) in items.items():
-        changed = write_file_if_needed(src, path_for_rel(dst_root, rel), dry_run=args.dry_run) or changed
+        changed = write_file_if_needed(src, path_for_rel(dst_root, rel), dst_root, dry_run=args.dry_run) or changed
     for rel in removed:
         changed = remove_file(path_for_rel(dst_root, rel), dst_root, dry_run=args.dry_run) or changed
     prune_empty_dirs(dst_root, dry_run=args.dry_run)
@@ -374,6 +468,7 @@ def update(args: argparse.Namespace) -> int:
     if changed:
         installed_at = str(manifest.get("installed_at") or utc_now())
         agents_md_state, agents_md_sha = managed_agents_md_state(dst_root, new_files)
+        agents = normalize_manifest_agents(manifest.get("agents"))
         new_manifest = {
             "schema": SCHEMA,
             "install_name": INSTALL_NAME,
@@ -382,6 +477,7 @@ def update(args: argparse.Namespace) -> int:
             "source_commit": new_commit,
             "installed_at": installed_at,
             "updated_at": utc_now(),
+            "agents": agents,
             "agents_md": agents_md_state,
             "agents_md_sha": agents_md_sha,
             "files": new_files,
@@ -437,6 +533,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dir", required=True)
     parser.add_argument("--source-commit", default="")
     parser.add_argument("--source", default="")
+    parser.add_argument("--agents", default="")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     return parser
