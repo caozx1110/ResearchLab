@@ -71,6 +71,20 @@ AI 做重复劳动，你做判断。这是整套系统最重要的边界。
 
 确认时必须留下确认人和 evidence。AI 不能自己给自己盖章。
 
+### 信息类型和确认状态怎么看
+
+`information_types` 说明“这句话是什么性质”，`confirmation_status` 说明“现在谁认可它”。常见组合可以这样理解：
+
+| information_types | auto_confirmed | pending_user_confirmation | confirmed | rejected |
+|---|---|---|---|---|
+| `fact` | AI 抄录的客观事实，已自动入库 | 客观事实但还等你核对 | 你签过字的事实 | 你否掉的事实记录 |
+| `inference` | 不常用；AI 推断通常不应自动定论 | AI 的推断，等你确认 | 你认可过的推断 | 你否掉的推断 |
+| `evaluation` | 不常用；AI 评价通常不应自动定论 | AI 的评价，等你确认 | 你认可过的评价 | 你否掉的评价 |
+| `user_opinion` | 不常用；用户意见应保留来源 | AI 代记的用户意见，等你确认 | 你签过字的个人意见或偏好 | 你否掉的意见记录 |
+| `unverified` | 未核验信息，已作为线索入库 | 未核验信息，等你确认或补证据 | 你确认可作为结论使用 | 你确认不采用 |
+
+一条 record 可以同时有多种 `information_types`。只要包含 AI 推断、评价或用户意见，就应默认进入 `pending_user_confirmation`，直到你确认或拒绝。
+
 ### 只有你能拍板
 
 1. 选择最终推进哪个 idea。
@@ -184,18 +198,27 @@ run-log 只记录事实；diagnosis 是 AI 推断，默认待确认；follow-up 
 
 | 你说或运行 | 用途 |
 |---|---|
-| `kb help` | 打印能力菜单 |
-| `kb status [program]` | 查看当前状态；带 program 时看单个 program |
-| `kb next [program]` | 给出下一步建议 |
-| `kb find <keywords>` | 检索知识库 |
-| `kb recall [kind]` | 回忆已确认习惯、已知坑、skill 问题 |
-| `kb add <url或路径> [--kind paper|repo|blog]` | 轻量入库材料 |
-| `kb review [fuzzy]` | 查看确认收件箱；TTY 下可逐条确认、拒绝、跳过 |
-| `kb init` | 统一初始化入口（已可用） |
+| `kb help` | 打印能力菜单。 |
+| `kb init` | 初始化 KB 布局、索引和基础偏好。 |
+| `kb doctor` | 检查当前 Python、YAML 与 PDF 后端可用性。 |
+| `kb status [program]` | 刷新并查看当前 KB / program 状态摘要。 |
+| `kb next [program]` | 查看下一步实验或 program 推进建议。 |
+| `kb find <关键词>` | 按关键词检索已入库知识单元。 |
+| `kb add <链接或路径>` | 把论文、repo、博客或本地文件轻量入库。 |
+| `kb review [fuzzy]` | 查看待确认的 AI 判断，后续可交互式确认。 |
+| `kb recall [kind]` | 回忆已确认习惯、已知坑和待审 skill 问题。 |
+
+idea / report 没有 `kb` 动词，默认用纯自然语言：
+
+| 意图 | 对 AI 说 |
+|---|---|
+| 推进候选 idea 的生成、分析和选择 | 请基于当前知识库给我 3 个候选 idea |
+| 生成周报、PPT 素材或阶段总结 | 为这个 program 生成周报材料 |
 
 示例：
 
 ```bash
+kb doctor
 kb find policy gradient
 kb review
 ```
@@ -262,7 +285,7 @@ kb recall gotchas
 
 ## 17 个本地 skill
 
-普通使用者不需要背 skill 名，但知道分组有助于和 AI 对齐。
+默认全用自然语言，点名 `$skill` 仅在你想强制某一步时可选。普通使用者不需要背 skill 名，但知道 owner 有助于和 AI 对齐。
 
 | 分组 | Skills |
 |---|---|
@@ -271,6 +294,28 @@ kb recall gotchas
 | 创建与执行 | `idea-workbench`, `method-designer`, `experiment-workbench`, `report-author` |
 | 导航与元能力 | `research-navigator`, `discussion-archivist`, `wiki-adapter`, `skill-evolution-advisor` |
 | 快捷入口 | `kb-cli` |
+
+### task 到 owner skill 的一句话索引
+
+| 你想做什么 | Owner skill |
+|---|---|
+| 初始化、lint、索引、schema、确认收件箱 | `knowledge-base-manager` |
+| 配置语言、确认人、运行偏好、taxonomy seed、candidate pool | `research-config-manager` |
+| 添加 paper / repo / blog / 本地文件，先做 lightweight intake | `source-intake` |
+| 看当前 program 状态、next actions、open questions、decision-log | `research-orchestrator` |
+| 论文 quick-screen、完整笔记、Figure / Table、结构刷新、确认 | `paper-analyst` |
+| Repo 结构扫描、能力映射、复用判断 | `repo-analyst` |
+| Blog / 技术文章摘要、可信度和可复用解释 | `blog-analyst` |
+| 跨 paper / repo / blog / idea 做 survey、taxonomy、趋势、gap | `literature-synthesizer` |
+| 生成、分析、review、选择候选 idea | `idea-workbench` |
+| 把已选 idea 展开成 method design、接口、baseline、实验矩阵 | `method-designer` |
+| 记录实验 run、诊断、follow-up、实验结论 | `experiment-workbench` |
+| 生成周报、阶段总结、PPT 素材、写作素材 | `report-author` |
+| 刷新 `kb/user/` 导航、current-state、reading list、打开浏览器工作台 | `research-navigator` |
+| 把重要讨论归档成 program discussion note | `discussion-archivist` |
+| 处理泛 wiki / 词条 / 知识库查询，并路由到 owner skill | `wiki-adapter` |
+| 记录、回忆、确认习惯、已知坑和 skill defect | `skill-evolution-advisor` |
+| 用 `kb help/init/doctor/status/next/find/add/review/recall` 快捷转发 | `kb-cli` |
 
 如果你明确知道要哪一步，可以点名：
 

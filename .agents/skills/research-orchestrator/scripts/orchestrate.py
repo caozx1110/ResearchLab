@@ -43,7 +43,7 @@ from research.common import (
     write_yaml_if_changed,
     yaml_default,
 )
-from research.core import append_history, ensure_workspace, iter_records, kb_root, locate_record, checkpoint_and_report, project_root, write_record
+from research.core import append_history, ensure_workspace, iter_records, kb_root, load_runtime_preferences, locate_record, checkpoint_and_report, project_root, write_record
 
 OPEN_QUESTION_OPEN_STATUSES = {"open"}
 EVIDENCE_REQUEST_OPEN_STATUSES = {"open"}
@@ -104,7 +104,9 @@ ROUTE_HINTS = {
 }
 
 COMMAND_PREFIX = "${RESEARCH_PYTHON:-python3}"
-SAFE_AUTO_STEPS = {"screen", "build-index", "refresh", "generate-note"}
+# Governance cap: runtime preferences may narrow this scope, but cannot add steps
+# beyond this set.
+GOVERNANCE_MAX_AUTO_STEPS = {"screen", "build-index", "refresh", "generate-note"}
 ROOT_AWARE_AUTO_SCRIPTS = {
     ".agents/skills/blog-analyst/scripts/blog.py",
     ".agents/skills/discussion-archivist/scripts/archive.py",
@@ -364,7 +366,14 @@ def execute_auto_plan(root: Path, plan: dict[str, Any]) -> int:
         print("[stop] human decision required; not executing")
         return 0
     step_type = str(plan.get("step_type") or "")
-    if step_type not in SAFE_AUTO_STEPS:
+    try:
+        configured_scope = load_runtime_preferences(root).get("autonomy", {}).get("auto_execute_scope", [])
+    except Exception:  # noqa: BLE001
+        configured_scope = sorted(GOVERNANCE_MAX_AUTO_STEPS)
+    if not isinstance(configured_scope, list):
+        configured_scope = sorted(GOVERNANCE_MAX_AUTO_STEPS)
+    effective_scope = {str(item).strip() for item in configured_scope if str(item).strip()} & GOVERNANCE_MAX_AUTO_STEPS
+    if step_type not in effective_scope:
         print(format_auto_plan(plan))
         print("[stop] step is not in the safe auto-execute allowlist")
         return 0

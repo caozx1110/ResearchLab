@@ -137,6 +137,13 @@ def apply_batch_confirmation(root: Path, records: list[dict], *, confirmed_by: s
     return written
 
 
+def print_non_unit_review_notice() -> None:
+    print(
+        "注意：确认收件箱当前只覆盖 knowledge unit；实验诊断子项 / decision-log 待决策 / "
+        "learnings 可能另有待确认，请分别查看。"
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Manage the research knowledge base.")
     add_project_root_argument(parser)
@@ -299,6 +306,7 @@ def main() -> int:
         hits = review_queue_records(root, kind=args.kind, confirmation_status=args.confirmation_status, limit=args.limit)
         if not hits:
             print("[ok] no pending confirmations")
+            print_non_unit_review_notice()
             return 0
         if args.confirm:
             if args.confirmation_status != "pending_user_confirmation":
@@ -325,6 +333,7 @@ def main() -> int:
             print(f"  summary: {item.get('summary') or '-'}")
             print(f"  path: {path}")
             print(f"  confirm: {confirm_command(item)}")
+        print_non_unit_review_notice()
         return 0
     if args.command == "confirm":
         if bool(args.id) == bool(args.all_reviewed):

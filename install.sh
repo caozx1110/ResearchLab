@@ -619,8 +619,11 @@ print_next_steps() {
     bullet "然后: kb status"
   else
     bullet "运行: $WS_KB_SCRIPT init"
-    bullet "也可以重跑 install 并加 --kb-on-path。"
+    bullet "然后: $WS_KB_SCRIPT status（如需直接使用 kb 命令，可重跑 install 并加 --kb-on-path）"
   fi
+  bullet "打开: docs/USER_GUIDE.md"
+  bullet "打开: kb/user/current-state.md"
+  bullet "对 AI 说：读取当前 KB，判断我下一步该做什么。"
 }
 
 print_done() {

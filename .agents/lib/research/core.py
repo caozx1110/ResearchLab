@@ -375,6 +375,9 @@ def default_runtime_preferences() -> dict[str, Any]:
         "learned_preferences": {
             "items": [],
         },
+        "autonomy": {
+            "auto_execute_scope": ["screen", "build-index", "refresh", "generate-note"],
+        },
         "paper": {
             "auto_screen_on_intake": True,
             "auto_complete_note": False,
@@ -439,6 +442,15 @@ def load_runtime_preferences(project_root: Path) -> dict[str, Any]:
     items = learned_preferences.get("items", [])
     learned_preferences["items"] = [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
     normalized["learned_preferences"] = learned_preferences
+
+    autonomy = normalized.get("autonomy", {})
+    if not isinstance(autonomy, dict):
+        autonomy = copy.deepcopy(default_runtime_preferences()["autonomy"])
+    scope = autonomy.get("auto_execute_scope", [])
+    if not isinstance(scope, list):
+        scope = copy.deepcopy(default_runtime_preferences()["autonomy"]["auto_execute_scope"])
+    autonomy["auto_execute_scope"] = [str(item).strip() for item in scope if str(item).strip()]
+    normalized["autonomy"] = autonomy
 
     paper = normalized.get("paper", {})
     if not isinstance(paper, dict):
@@ -528,7 +540,7 @@ def load_runtime_preferences(project_root: Path) -> dict[str, Any]:
 def write_runtime_preferences(project_root: Path, payload: dict[str, Any]) -> Path:
     current = load_runtime_preferences(project_root)
     merged = copy.deepcopy(current)
-    for key in ("browser", "identity", "learned_preferences", "paper", "pdf", "versioning"):
+    for key in ("browser", "identity", "learned_preferences", "autonomy", "paper", "pdf", "versioning"):
         value = payload.get(key)
         if isinstance(value, dict):
             target = merged.setdefault(key, {})

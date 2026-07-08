@@ -60,8 +60,6 @@ def _default_profile() -> dict:
         **yaml_default("research-user-profile", "research-config-manager", status="active"),
         "preferences": {
             "language_preference": "zh-CN",
-            "summary_style": "concise",
-            "novelty_bar": "balanced",
         },
         "resources": {},
         "constraints": [],
@@ -134,6 +132,19 @@ def sync_toggle_runtime_preferences(root: Path, *, key: str, on: bool) -> list[s
 
 def _onoff(value: bool) -> str:
     return "on" if value else "off"
+
+
+def print_personalization(root: Path) -> None:
+    profile = load_profile(root)
+    personalization = profile.get("personalization", {})
+    print("personalization:")
+    if not isinstance(personalization, dict) or not personalization:
+        print("  未设置，可在 kb init 时填写。")
+        return
+    for key in ("research_focus", "resources", "reporting_style", "collaboration_boundaries", "term_style"):
+        value = personalization.get(key)
+        if value not in (None, ""):
+            print(f"  {key}: {value}")
 
 
 def print_guide(root: Path, *, focus: str) -> None:
@@ -261,8 +272,8 @@ def build_parser() -> argparse.ArgumentParser:
     guide = subparsers.add_parser("guide", help="Show practical guidance for current runtime modes")
     guide.add_argument("--focus", choices=["all", "paper-intake"], default="all")
 
-    runtime = subparsers.add_parser("set-runtime-pref", help="Persist browser / identity / paper / pdf / versioning runtime preferences")
-    runtime.add_argument("--section", required=True, choices=["browser", "identity", "paper", "pdf", "versioning"])
+    runtime = subparsers.add_parser("set-runtime-pref", help="Persist browser / identity / autonomy / paper / pdf / versioning runtime preferences")
+    runtime.add_argument("--section", required=True, choices=["browser", "identity", "autonomy", "paper", "pdf", "versioning"])
     runtime.add_argument("--key", required=True)
     runtime.add_argument("--value", required=True)
     return parser
@@ -298,6 +309,8 @@ def main() -> int:
             print(f"{name}: {path.relative_to(root)}")
             if args.dump and path.exists():
                 print(path.read_text(encoding="utf-8").rstrip())
+            if name == "profile":
+                print_personalization(root)
         return 0
     if args.command == "set":
         payload = load_profile(root)

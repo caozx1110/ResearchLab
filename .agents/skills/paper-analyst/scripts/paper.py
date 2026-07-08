@@ -675,6 +675,11 @@ def main() -> int:
         )
         write_record(root, record)
         print(f"[ok] wrote {screen_path.relative_to(root)}")
+        recommended_next_action = str(payload.get("recommended_next_action") or "")
+        if str(payload.get("worth_deep_reading") or "") in {"yes", "maybe"}:
+            print("建议：确认后运行 kb next 看下一步，或让 AI 生成完整笔记。")
+        else:
+            print("建议：先放入 defer，或运行 kb review 处理待确认。")
         checkpoint = _finalize_post_actions(
             root,
             trigger="milestone",

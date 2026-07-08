@@ -25,6 +25,9 @@ from research.learnings import load_learnings, render_recall_digest
 from research.core import iter_records, kb_root, project_root, user_root
 
 
+CURRENT_STATE_STDOUT_LINES = 40
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Refresh core user-facing navigation pages.")
     add_project_root_argument(parser)
@@ -104,10 +107,21 @@ def render_reading_list(records: list[dict]) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
+def print_current_state_summary(root: Path, content: str) -> None:
+    lines = content.strip().splitlines()
+    for line in lines[:CURRENT_STATE_STDOUT_LINES]:
+        print(line)
+    if len(lines) > CURRENT_STATE_STDOUT_LINES:
+        print(f"... 完整见 {(user_root(root) / 'current-state.md').relative_to(root)}")
+    else:
+        print(f"完整见 {(user_root(root) / 'current-state.md').relative_to(root)}")
+
+
 def main() -> int:
     args = build_parser().parse_args()
     root = project_root(PROJECT_ROOT, explicit_root=args.root)
-    print_resolved_project_roots(root)
+    if args.command != "current-state":
+        print_resolved_project_roots(root)
     records = iter_records(root)
     program_states = load_program_states(root)
     recall_digest = render_recall_digest(load_learnings(root), kind="all", limit=5)
@@ -115,8 +129,10 @@ def main() -> int:
     nav_path = user_root(root) / "navigation.md"
     reading_path = user_root(root) / "reading-lists" / "current-reading.md"
 
+    current_content = ""
     if args.command in {"refresh", "current-state"}:
-        write_text_if_changed(current_path, render_current(records, program_states, recall_digest))
+        current_content = render_current(records, program_states, recall_digest)
+        write_text_if_changed(current_path, current_content)
     if args.command == "refresh":
         write_text_if_changed(nav_path, render_navigation(records))
         write_text_if_changed(reading_path, render_reading_list(records))
@@ -125,7 +141,7 @@ def main() -> int:
         print(reading_path.relative_to(root))
         return 0
     if args.command == "current-state":
-        print(current_path.relative_to(root))
+        print_current_state_summary(root, current_content)
         return 0
     write_text_if_changed(reading_path, render_reading_list(records))
     print(reading_path.relative_to(root))

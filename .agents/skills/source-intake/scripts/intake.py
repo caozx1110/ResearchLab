@@ -113,36 +113,48 @@ def should_auto_complete_note(record: dict, preferences: dict) -> bool:
     return worth in {"yes", "maybe"}
 
 
-def guidance_hints(preferences: dict, *, has_pdf: bool, note_created: bool) -> list[str]:
+def guidance_hints(kind: str, preferences: dict, *, has_pdf: bool, note_created: bool) -> list[str]:
+    if kind == "paper":
+        next_step = "已入库+筛选，下一步：运行 kb next，或让 AI 判断是否值得细读。"
+    elif kind == "repo":
+        next_step = "已入库，下一步：运行 kb next，或让 AI 扫描结构并判断复用价值。"
+    elif kind == "blog":
+        next_step = "已入库，下一步：运行 kb next，或让 AI 总结要点并标出可信度。"
+    else:
+        next_step = "已入库，下一步：运行 kb next 查看主线推进建议。"
+    hints = [next_step]
+    if kind != "paper":
+        return hints
     if not bool(preferences.get("prompt_for_preference_updates", True)):
-        return []
-    hints = [
-        "查看当前文献入库默认模式："
+        return hints
+    optional_hints = [
+        "可选：查看当前文献入库默认模式："
         f"{research_python()} "
         f"{skill_script_for_command('.agents/skills/research-config-manager/scripts/config.py')} guide --focus paper-intake",
     ]
     if not bool(preferences.get("auto_complete_note")):
-        hints.append(
-            "如需让值得读的论文默认自动生成完整笔记："
+        optional_hints.append(
+            "可选：如需让值得读的论文默认自动生成完整笔记："
             f"{research_python()} "
             f"{skill_script_for_command('.agents/skills/research-config-manager/scripts/config.py')} "
             "set-runtime-pref --section paper --key auto_complete_note --value true"
         )
     if note_created and str(preferences.get("complete_note_mode") or "scaffold") != "draft":
-        hints.append(
-            "如需默认直接生成更饱满的 draft："
+        optional_hints.append(
+            "可选：如需默认直接生成更饱满的 draft："
             f"{research_python()} "
             f"{skill_script_for_command('.agents/skills/research-config-manager/scripts/config.py')} "
             "set-runtime-pref --section paper --key complete_note_mode --value draft"
         )
     if has_pdf and not bool(preferences.get("auto_extract_figures_after_note")):
-        hints.append(
-            "如需完整笔记后自动提取 Figure / Table："
+        optional_hints.append(
+            "可选：如需完整笔记后自动提取 Figure / Table："
             f"{research_python()} "
             f"{skill_script_for_command('.agents/skills/research-config-manager/scripts/config.py')} "
             "set-runtime-pref --section paper --key auto_extract_figures_after_note --value true"
         )
-    return hints[:3]
+    hints.extend(optional_hints[:2])
+    return hints
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -308,7 +320,7 @@ def main() -> int:
     for line in auto_outputs:
         print(f"[auto] {line}")
     checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: intake {args.kind} {record['id']}")
-    for hint in guidance_hints(paper_preferences, has_pdf=has_pdf, note_created=note_created):
+    for hint in guidance_hints(args.kind, paper_preferences, has_pdf=has_pdf, note_created=note_created):
         print(f"[hint] {hint}")
     return 0
 

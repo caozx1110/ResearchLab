@@ -30,53 +30,24 @@ from research.core import config_root, default_confirmed_by, is_ai_signer, load_
 
 HELP_MENU: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
     (
-        "加材料",
+        "kb 动词（9 个）",
         (
-            ("把论文、repo、博客或本地文件轻量入库。", "kb add <链接或路径>"),
-        ),
-    ),
-    (
-        "检索",
-        (
-            ("按关键词检索已入库知识单元。", "kb find <关键词>"),
-        ),
-    ),
-    (
-        "idea",
-        (
-            ("围绕当前知识库推进候选 idea 的生成、分析和选择。", "请基于当前知识库给我 3 个候选 idea"),
-        ),
-    ),
-    (
-        "实验",
-        (
-            ("查看下一步实验或 program 推进建议。", "kb next"),
-        ),
-    ),
-    (
-        "报告",
-        (
-            ("汇总 program 事件流，生成周报、PPT 素材或阶段总结。", "为这个 program 生成周报材料"),
-        ),
-    ),
-    (
-        "确认",
-        (
-            ("查看待确认的 AI 判断，后续可交互式确认。", "kb review"),
-        ),
-    ),
-    (
-        "状态",
-        (
-            ("刷新并查看当前 KB / program 状态摘要。", "kb status"),
+            ("打印能力菜单。", "kb help"),
             ("初始化 KB 布局、索引和基础偏好。", "kb init"),
             ("检查当前 Python、YAML 与 PDF 后端可用性。", "kb doctor"),
+            ("刷新并查看当前 KB / program 状态摘要。", "kb status"),
+            ("查看下一步实验或 program 推进建议。", "kb next"),
+            ("按关键词检索已入库知识单元。", "kb find <关键词>"),
+            ("把论文、repo、博客或本地文件轻量入库。", "kb add <链接或路径>"),
+            ("查看待确认的 AI 判断，后续可交互式确认。", "kb review"),
+            ("回忆已确认习惯、已知坑和待审 skill 问题。", "kb recall"),
         ),
     ),
     (
-        "记忆",
+        "纯自然语言（无 kb 动词）",
         (
-            ("回忆已确认习惯、已知坑和待审 skill 问题。", "kb recall"),
+            ("围绕当前知识库推进候选 idea 的生成、分析和选择。", "请基于当前知识库给我 3 个候选 idea"),
+            ("汇总 program 事件流，生成周报、PPT 素材或阶段总结。", "为这个 program 生成周报材料"),
         ),
     ),
 )

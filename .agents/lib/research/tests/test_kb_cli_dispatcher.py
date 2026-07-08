@@ -47,10 +47,12 @@ def test_kb_help_snapshot_contains_group_headers() -> None:
     text = kb.render_help_menu()
 
     assert "# kb 快捷命令" in text
-    for header in ["加材料", "检索", "idea", "实验", "报告", "确认", "状态", "记忆"]:
+    for header in ["kb 动词（9 个）", "纯自然语言（无 kb 动词）"]:
         assert f"## {header}" in text
-    assert "kb init" in text
-    assert "kb doctor" in text
+    for verb in ["kb help", "kb init", "kb doctor", "kb status", "kb next", "kb find", "kb add", "kb review", "kb recall"]:
+        assert verb in text
+    assert "请基于当前知识库给我 3 个候选 idea" in text
+    assert "为这个 program 生成周报材料" in text
     assert "也可以直接对 AI 说" in text
 
 
