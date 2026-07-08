@@ -18,19 +18,12 @@
 
 ## Runtime
 
-脚本默认用 `${RESEARCH_PYTHON:-python3}` 运行，并期望该 runtime 可 import PyYAML。新用户应先创建 venv 并安装依赖：
-
-```bash
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -r requirements.txt
-export RESEARCH_PYTHON="$(pwd)/.venv/bin/python"
-```
+脚本首次运行会自动创建并使用项目内受管 `.venv`（含 PyYAML）。高级用户可用 `RESEARCH_PYTHON` 覆盖解释器，或用 `RESEARCH_NO_MANAGED_VENV=1` 关闭自动 venv。
 
 开发和重构时先跑：
 
 ```bash
-${RESEARCH_PYTHON:-python3} -m pytest
+python -m pytest
 ```
 
 新增或调整脚本时，至少验证对应脚本的 `--help`。

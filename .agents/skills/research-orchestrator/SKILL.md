@@ -5,7 +5,7 @@ description: Orchestrate research programs under `kb/programs/`, including progr
 
 # Research Orchestrator
 
-> 协议参考：`.agents/lib/research/SCHEMAS.md#program-files` · `#unit-record` · `#ownership` · `#confirmation-gate`
+> 协议参考：`.agents/lib/research/SCHEMAS.md#program-files` · `#unit-record` · `#ownership` · `#confirmation-gate` · `#runtime`
 
 Use this skill to anchor work to a concrete research program.
 

@@ -10,6 +10,18 @@
 
 ---
 
+## 运行时 <a id="runtime"></a>
+
+所有 skill 脚本在直接运行时会先检查当前 Python 是否能 `import yaml`。如果不能，会自动创建并切换到项目内受管 `.venv`（含 PyYAML），用户无需手动创建 venv、运行 pip 或导出 `RESEARCH_PYTHON`。
+
+- `RESEARCH_PYTHON`：可选覆盖解释器；若该解释器可 `import yaml`，脚本会优先 re-exec 到它。
+- `RESEARCH_VENV`：覆盖受管 venv 路径；默认是安装本仓库的目录下 `.venv`（与 `.agents` 同级）。
+- `RESEARCH_NO_MANAGED_VENV=1`：关闭自动 venv，改用当前解释器；此时当前解释器必须自备 PyYAML。
+
+受管 venv 属于本地 runtime state，不纳入版本控制。
+
+---
+
 ## 共享枚举 <a id="enums"></a>
 
 | 名称 | 取值 | 含义 |

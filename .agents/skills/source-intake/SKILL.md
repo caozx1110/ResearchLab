@@ -5,7 +5,7 @@ description: 把 paper / repo / blog source 先做 staging，再做去重与轻�
 
 # Source Intake
 
-> 协议参考：`.agents/lib/research/SCHEMAS.md#unit-record` · `#ownership`
+> 协议参考：`.agents/lib/research/SCHEMAS.md#unit-record` · `#ownership` · `#runtime`
 
 当一个 source 第一次进入系统，或者需要先做外部搜索候选收集时，使用这个 skill。
 

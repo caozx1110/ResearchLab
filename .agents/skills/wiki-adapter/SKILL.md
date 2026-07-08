@@ -5,7 +5,7 @@ description: Provide a thin wiki-style entrypoint for core, routing generic “a
 
 # Wiki Adapter
 
-> 协议参考：`.agents/lib/research/SCHEMAS.md#ownership`
+> 协议参考：`.agents/lib/research/SCHEMAS.md#ownership` · `#runtime`
 
 Use this skill when the user speaks in generic wiki or knowledge-base terms rather than naming the owner skill directly. This is a **thin router**：本 skill 自身不做深度分析，`add` 会直接委托 `source-intake` 完成入库；`query` 会把查询结果写入 `kb/synthesis/wiki/` 作为可复用笔记。
 

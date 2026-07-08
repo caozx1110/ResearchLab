@@ -5,7 +5,7 @@ description: Generate self-contained core weekly reports, stage summaries, PPT m
 
 # Report Author
 
-> 协议参考：`.agents/lib/research/SCHEMAS.md#program-files` · `#experiment-files` · `#ownership`
+> 协议参考：`.agents/lib/research/SCHEMAS.md#program-files` · `#experiment-files` · `#ownership` · `#runtime`
 
 Use this skill to turn accumulated program events into report-ready outputs.
 

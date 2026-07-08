@@ -5,7 +5,7 @@ description: 负责 repo unit 的 structure scan、capability mapping、reuse ju
 
 # Repo Analyst
 
-> 协议参考：`.agents/lib/research/SCHEMAS.md#unit-record` · `#unit-payload` · `#confirmation-gate`
+> 协议参考：`.agents/lib/research/SCHEMAS.md#unit-record` · `#unit-payload` · `#confirmation-gate` · `#runtime`
 
 当任务是在分析某个 repository knowledge unit，而不是只做 source intake 时，使用这个 skill。
 

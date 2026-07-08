@@ -30,6 +30,7 @@ from kb_browser_lib import (
     wait_until_ready,
     write_json_atomic,
 )
+from research.bootstrap import ensure_managed_runtime
 
 
 def parse_args() -> argparse.Namespace:
@@ -182,4 +183,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    ensure_managed_runtime(project_root_from_script(Path(__file__)))
     raise SystemExit(main())

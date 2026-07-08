@@ -4,21 +4,11 @@
 
 An open-source Codex workspace for research knowledge units. It gives agents skills, scripts, and schemas to keep papers, repos, blogs, ideas, experiments, and reports in a local `kb/` instead of chat history.
 
-```bash
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -r requirements.txt
-export RESEARCH_PYTHON="$(pwd)/.venv/bin/python"
-```
+首次运行会自动创建并使用项目内受管 `.venv`，无需手动创建 venv 或安装 PyYAML。
 
 ```bash
-# Coming soon as the single first-run entrypoint:
 kb init
-
-# Current first-run commands:
-${RESEARCH_PYTHON:-python3} .agents/skills/knowledge-base-manager/scripts/kb.py init
-${RESEARCH_PYTHON:-python3} .agents/skills/research-config-manager/scripts/config.py init
-${RESEARCH_PYTHON:-python3} .agents/skills/kb-cli/scripts/kb status
+kb status
 ```
 
 ## 这是什么
@@ -117,4 +107,4 @@ AI 适合做提取、去重、索引、整理、追踪和汇总。AI 写出的�
 
 ## 发布说明
 
-发布版是 workflow package，不捆绑私有 `kb/`。用户应在自己的机器上初始化 `kb/`，并用 `RESEARCH_PYTHON` 指向带依赖的 runtime。脚本和文档默认使用 `${RESEARCH_PYTHON:-python3}`。
+发布版是 workflow package，不捆绑私有 `kb/`。用户应在自己的机器上初始化 `kb/`。首次运行会自动创建受管 `.venv`；高级用户可用 `RESEARCH_PYTHON` 覆盖解释器。

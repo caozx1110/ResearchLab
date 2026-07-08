@@ -5,7 +5,7 @@ description: Turn a selected core idea unit into a method design handoff with re
 
 # Method Designer
 
-> 协议参考：`.agents/lib/research/SCHEMAS.md#unit-record` · `#program-files` · `#confirmation-gate`
+> 协议参考：`.agents/lib/research/SCHEMAS.md#unit-record` · `#program-files` · `#confirmation-gate` · `#runtime`
 
 Use this skill only after an idea has been explicitly selected.
 

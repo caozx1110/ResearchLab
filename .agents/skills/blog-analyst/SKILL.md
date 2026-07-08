@@ -5,7 +5,7 @@ description: Analyze blog and technical article units in the research system, in
 
 # Blog Analyst
 
-> 协议参考：`.agents/lib/research/SCHEMAS.md#unit-record` · `#unit-payload` · `#confirmation-gate`
+> 协议参考：`.agents/lib/research/SCHEMAS.md#unit-record` · `#unit-payload` · `#confirmation-gate` · `#runtime`
 
 当任务是在分析某个 blog 或技术文章 knowledge unit，而不是只做 source intake 时，使用这个 skill。结构与 `paper-analyst` 对齐，但 credibility 判定额外考虑作者匿名 / 平台权威 / 是否有可验证引用。
 

@@ -6,33 +6,21 @@
 
 ## 安装与首次运行
 
-先准备一个带依赖的 Python runtime，避免第一次运行脚本时遇到裸环境缺 PyYAML 一类的问题：
-
-```bash
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -r requirements.txt
-export RESEARCH_PYTHON="$(pwd)/.venv/bin/python"
-```
+首次运行会自动创建并使用项目内受管 `.venv`（含 PyYAML），无需手动创建 venv、安装依赖或设置 `RESEARCH_PYTHON`。
 
 初始化本地 `kb/`：
 
 ```bash
-# 即将提供的统一入口
 kb init
-
-# 当前可用的两步初始化
-${RESEARCH_PYTHON:-python3} .agents/skills/knowledge-base-manager/scripts/kb.py init
-${RESEARCH_PYTHON:-python3} .agents/skills/research-config-manager/scripts/config.py init
 ```
 
-第一条会创建 `kb/` 骨架和索引；第二条会创建语言、资源画像、运行偏好等配置。只跑第一条也能启动，但不建议跳过配置初始化。
+`kb init` 会创建 `kb/` 骨架、索引、语言、资源画像和运行偏好等基础配置。
 
 如果你使用 `kb` 快捷入口，可以先试：
 
 ```bash
-${RESEARCH_PYTHON:-python3} .agents/skills/kb-cli/scripts/kb help
-${RESEARCH_PYTHON:-python3} .agents/skills/kb-cli/scripts/kb status
+kb help
+kb status
 ```
 
 ## 先看哪里
@@ -48,12 +36,6 @@ ${RESEARCH_PYTHON:-python3} .agents/skills/kb-cli/scripts/kb status
 
 ```text
 请刷新 research navigator，然后告诉我当前最该看什么。
-```
-
-或直接运行：
-
-```bash
-${RESEARCH_PYTHON:-python3} .agents/skills/research-navigator/scripts/navigate.py refresh
 ```
 
 如果你已经知道 `program-id`，再看：
@@ -209,13 +191,13 @@ run-log 只记录事实；diagnosis 是 AI 推断，默认待确认；follow-up 
 | `kb recall [kind]` | 回忆已确认习惯、已知坑、skill 问题 |
 | `kb add <url或路径> [--kind paper|repo|blog]` | 轻量入库材料 |
 | `kb review [fuzzy]` | 查看确认收件箱；TTY 下可逐条确认、拒绝、跳过 |
-| `kb init` | 统一初始化入口，规划中；当前先用上文两条初始化命令 |
+| `kb init` | 统一初始化入口（已可用） |
 
 示例：
 
 ```bash
-${RESEARCH_PYTHON:-python3} .agents/skills/kb-cli/scripts/kb find policy gradient
-${RESEARCH_PYTHON:-python3} .agents/skills/kb-cli/scripts/kb review
+kb find policy gradient
+kb review
 ```
 
 对 AI 说也可以：

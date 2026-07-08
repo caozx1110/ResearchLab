@@ -19,7 +19,13 @@ for candidate in [Path(__file__).resolve()] + list(Path(__file__).resolve().pare
     lib_root = candidate / ".agents" / "lib"
     if (lib_root / "research" / "common.py").exists():
         sys.path.insert(0, str(lib_root))
+        PROJECT_ROOT = candidate
         break
+
+from research.bootstrap import ensure_managed_runtime  # type: ignore
+
+if __name__ == "__main__":
+    ensure_managed_runtime(PROJECT_ROOT)
 
 from research.common import (  # type: ignore
     ensure_dir,

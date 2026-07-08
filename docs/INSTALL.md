@@ -12,16 +12,11 @@ Skill 目录必须用符号链接安装，不能复制。
 
 ## 准备 Python
 
-脚本默认使用 `${RESEARCH_PYTHON:-python3}` 运行 research 脚本。先准备 PyYAML：
+脚本首次运行会自动创建并使用项目内受管 `.venv`（含 PyYAML）。用户无需手动创建 venv、运行 pip 或导出 `RESEARCH_PYTHON`。
 
-```bash
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -r requirements.txt
-export RESEARCH_PYTHON="$(pwd)/.venv/bin/python"
-```
+高级用户仍可用 `RESEARCH_PYTHON` 覆盖解释器；也可用 `RESEARCH_VENV` 覆盖受管 venv 路径。设置 `RESEARCH_NO_MANAGED_VENV=1` 会关闭自动 venv，改用当前解释器，此时需要自备 PyYAML。
 
-安装器会先检查 `import yaml`。如果当前 Python 缺 PyYAML，它会提示安装 `requirements.txt` 或设置 `RESEARCH_PYTHON`。
+安装器仍会做一次 `import yaml` preflight；如果当前 Python 缺 PyYAML，它会提示安装 `requirements.txt` 或设置覆盖变量。
 
 ## 快速安装
 
@@ -160,7 +155,9 @@ export RESEARCH_PROJECT_ROOT=/path/to/kb-workspace
 
 | 变量 | 用途 |
 |---|---|
-| `RESEARCH_PYTHON` | 指向带 PyYAML 等依赖的 Python；默认 `python3`。 |
+| `RESEARCH_PYTHON` | 可选覆盖解释器；默认使用自动受管 `.venv`。 |
+| `RESEARCH_NO_MANAGED_VENV` | 设为 `1` 时关闭自动 venv，改用当前解释器，需自备 PyYAML。 |
+| `RESEARCH_VENV` | 覆盖受管 venv 路径。 |
 | `RESEARCH_SKILLS_HOME` | 指向安装本仓库的目录；system scope 或外部 workspace 需要它来定位 `.agents/skills`。 |
 | `RESEARCH_PROJECT_ROOT` | 指向当前 KB workspace；等价于给脚本传 `--root <workspace>`。 |
 
@@ -169,13 +166,18 @@ export RESEARCH_PROJECT_ROOT=/path/to/kb-workspace
 安装完成后，在你的 KB workspace 初始化：
 
 ```bash
-${RESEARCH_PYTHON:-python3} .agents/skills/kb-cli/scripts/kb init
+kb init
 ```
 
-如果已经把 `kb` 放到 PATH：
+如果还没有把 `kb` 放到 PATH，可以运行 `bash install.sh --kb-on-path`，或直接调用伪 CLI 本体：
 
 ```bash
-kb init
+.agents/skills/kb-cli/scripts/kb init
+```
+
+后续常用命令：
+
+```bash
 kb status
 ```
 

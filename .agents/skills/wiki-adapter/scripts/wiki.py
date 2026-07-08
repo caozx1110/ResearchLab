@@ -17,6 +17,11 @@ for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
 else:
     raise SystemExit("Could not locate .agents/lib")
 
+from research.bootstrap import ensure_managed_runtime
+
+if __name__ == "__main__":
+    ensure_managed_runtime(PROJECT_ROOT)
+
 from research.common import add_project_root_argument, ensure_dir, print_resolved_project_roots, simple_slug, skill_script_for_command, write_text_if_changed
 from research.intake_cli import add_intake_add_arguments, intake_add_argv
 from research.core import build_index, lint_records, project_root, search_records, synthesis_root

@@ -5,7 +5,7 @@ description: Build human-facing entrypoints for the research system under `kb/us
 
 # Research Navigator
 
-> 协议参考：`.agents/lib/research/SCHEMAS.md#program-files` · `#ownership`
+> 协议参考：`.agents/lib/research/SCHEMAS.md#program-files` · `#ownership` · `#runtime`
 
 Use this skill to tell the human what to open next and to open a local browser for research assets.
 

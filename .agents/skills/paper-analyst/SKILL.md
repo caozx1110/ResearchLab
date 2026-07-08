@@ -5,7 +5,7 @@ description: 负责 core paper unit 的 quick-screen、full note、figure extrac
 
 # Paper Analyst
 
-> 协议参考：`.agents/lib/research/SCHEMAS.md#unit-record` · `#unit-payload` · `#confirmation-gate`
+> 协议参考：`.agents/lib/research/SCHEMAS.md#unit-record` · `#unit-payload` · `#confirmation-gate` · `#runtime`
 
 当任务是在分析某个 paper knowledge unit，而不是只做入库时，使用这个 skill。
 

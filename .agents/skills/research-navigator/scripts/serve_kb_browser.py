@@ -50,6 +50,7 @@ from kb_browser_lib import (
     write_text_atomic,
 )
 from kb_browser_terminal import TerminalManager, open_system_terminal, system_terminal_targets
+from research.bootstrap import ensure_managed_runtime  # type: ignore
 from research.core import maybe_auto_checkpoint  # type: ignore
 
 WATCHED_SUFFIXES = {".yaml", ".yml", ".md", ".markdown", ".txt", ".log", ".json"}
@@ -538,4 +539,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    ensure_managed_runtime(project_root_from_script(Path(__file__)))
     main()

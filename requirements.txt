@@ -1,1 +1,9 @@
 PyYAML>=6
+
+# 可选：paper-analyst 的 PDF 文本 + 图像抽取（缺失时自动降级）。取消注释启用。
+# pypdf
+# PyMuPDF
+# Pillow
+
+# 开发/测试：运行 pytest 套件。用 `pip install -r requirements.txt pytest`。
+# pytest>=7

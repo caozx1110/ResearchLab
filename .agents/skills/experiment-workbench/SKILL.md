@@ -5,7 +5,7 @@ description: Manage core experiment units, including plans, classified run logs,
 
 # Experiment Workbench
 
-> 协议参考：`.agents/lib/research/SCHEMAS.md#unit-record` · `#experiment-files` · `#program-files` · `#confirmation-gate`
+> 协议参考：`.agents/lib/research/SCHEMAS.md#unit-record` · `#experiment-files` · `#program-files` · `#confirmation-gate` · `#runtime`
 
 Use this skill for structured experiment memory rather than one-off chat summaries.
 

@@ -5,7 +5,7 @@ description: 管理 knowledge base 的统一 schema、索引、链接、taxonomy
 
 # Knowledge Base Manager
 
-> 协议参考：`.agents/lib/research/SCHEMAS.md#unit-record` · `#config-files` · `#ownership` · `#confirmation-gate`
+> 协议参考：`.agents/lib/research/SCHEMAS.md#unit-record` · `#config-files` · `#ownership` · `#confirmation-gate` · `#runtime`
 >
 > 治理权：本 skill 拥有 `kb/units/<kind>/record.yaml`、`kb/config/candidate-pools.yaml`、`kb/config/topic-taxonomy.yaml` 的最终写权。`research-config-manager` 只提供 seed / policy 输入，不直接改 taxonomy 与 pool 结构。
 

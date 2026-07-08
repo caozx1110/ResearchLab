@@ -19,6 +19,11 @@ for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
 else:
     raise SystemExit("Could not locate .agents/lib")
 
+from research.bootstrap import ensure_managed_runtime, is_current_python, managed_venv_dir, managed_venv_python
+
+if __name__ == "__main__":
+    ensure_managed_runtime(DEFAULT_PROJECT_ROOT)
+
 from research.common import add_project_root_argument, current_runtime_capabilities, find_project_root, load_yaml
 from research.core import config_root, default_confirmed_by, is_ai_signer, load_runtime_preferences, search_records
 
@@ -76,16 +81,20 @@ HELP_MENU: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
     ),
 )
 
+def owner_script(skill: str, script_name: str) -> str:
+    return "/".join((".agents", "skills", skill, "scripts", f"{script_name}.py"))
+
+
 SCRIPT_BY_VERB = {
-    "add": ".agents/skills/source-intake/scripts/intake.py",
-    "init_kb": ".agents/skills/knowledge-base-manager/scripts/kb.py",
-    "init_config": ".agents/skills/research-config-manager/scripts/config.py",
-    "review": ".agents/skills/knowledge-base-manager/scripts/kb.py",
-    "status_current": ".agents/skills/research-navigator/scripts/navigate.py",
-    "status_program": ".agents/skills/research-orchestrator/scripts/orchestrate.py",
-    "next": ".agents/skills/research-orchestrator/scripts/orchestrate.py",
-    "find": ".agents/skills/knowledge-base-manager/scripts/kb.py",
-    "recall": ".agents/skills/skill-evolution-advisor/scripts/learnings.py",
+    "add": owner_script("source-intake", "intake"),
+    "init_kb": owner_script("knowledge-base-manager", "kb"),
+    "init_config": owner_script("research-config-manager", "config"),
+    "review": owner_script("knowledge-base-manager", "kb"),
+    "status_current": owner_script("research-navigator", "navigate"),
+    "status_program": owner_script("research-orchestrator", "orchestrate"),
+    "next": owner_script("research-orchestrator", "orchestrate"),
+    "find": owner_script("knowledge-base-manager", "kb"),
+    "recall": owner_script("skill-evolution-advisor", "learnings"),
 }
 
 
@@ -156,6 +165,8 @@ def handle_doctor(args: argparse.Namespace, root: Path) -> int:
     del args, root
     capabilities = current_runtime_capabilities()
     modules = capabilities.get("modules", {})
+    venv_dir = managed_venv_dir(DEFAULT_PROJECT_ROOT)
+    venv_py = managed_venv_python(DEFAULT_PROJECT_ROOT)
     print("python:", capabilities.get("python") or "-")
     print("version:", capabilities.get("version") or "-")
     print("yaml:", "available" if capabilities.get("yaml_support") else "missing")
@@ -163,6 +174,10 @@ def handle_doctor(args: argparse.Namespace, root: Path) -> int:
     if isinstance(modules, dict):
         for name in ("yaml", "PyPDF2", "pypdf"):
             print(f"module.{name}: {'available' if modules.get(name) else 'missing'}")
+    print("managed_venv:", venv_dir)
+    print("managed_venv.exists:", "yes" if venv_dir.exists() else "no")
+    print("managed_venv.python:", venv_py)
+    print("managed_venv.current:", "yes" if is_current_python(venv_py) else "no")
     return 0
 
 
@@ -353,7 +368,7 @@ def handle_init(args: argparse.Namespace, root: Path) -> int:
 
     if args.git_init:
         return run_forwarded(root, [(SCRIPT_BY_VERB["init_kb"], ["git-init"])])
-    print("hint: run `kb.py git-init` to initialize the nested kb Git repo.")
+    print("hint: run `kb init --git-init` to initialize the nested kb Git repo.")
     return 0
 
 
@@ -494,7 +509,7 @@ def register_init(subparsers: argparse._SubParsersAction[argparse.ArgumentParser
     parser.add_argument("--lang", choices=LANG_CHOICES, help="语言偏好")
     parser.add_argument("--auto-commit", choices=AUTO_COMMIT_CHOICES, help="versioning.auto_commit_mode")
     parser.add_argument("--auto-screen", choices=AUTO_SCREEN_CHOICES, help="paper.auto_screen_on_intake")
-    parser.add_argument("--git-init", action="store_true", help="初始化后转发执行 kb.py git-init")
+    parser.add_argument("--git-init", action="store_true", help="初始化后一并执行 git-init")
     parser.set_defaults(handler=handle_init)
 
 
