@@ -25,7 +25,9 @@ from research.core import (
     build_index,
     candidate_pools_path,
     compact_unit_ids,
+    confirmation_track,
     confirm_unit,
+    has_substantive_content,
     ensure_kb_git_repo,
     ensure_workspace,
     git_checkpoint,
@@ -135,6 +137,92 @@ def apply_batch_confirmation(root: Path, records: list[dict], *, confirmed_by: s
         )
         written.append(write_record(root, updated))
     return written
+
+
+def partition_review_tracks(hits: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Split pending items into the two confirmation tracks (SSOT §3.11 decision ①).
+
+    Returns ``(fact_track, judgement_track)``. Fact = pure factual metadata eligible
+    for light/batch confirm; judgement = AI inference/evaluation needing substance +
+    evidence. Order within each track is preserved (already sorted oldest-first).
+    """
+    fact_track: list[dict] = []
+    judgement_track: list[dict] = []
+    for item in hits:
+        if confirmation_track(item) == "judgement":
+            judgement_track.append(item)
+        else:
+            fact_track.append(item)
+    return fact_track, judgement_track
+
+
+def _print_review_item(root: Path, item: dict, *, indent: str = "  ") -> None:
+    kind = str(item.get("kind") or "")
+    unit_id = str(item.get("id") or "")
+    path = rel(root, record_path(root, kind, unit_id)) if kind and unit_id else "-"
+    timestamp = str(item.get("updated_at") or item.get("created_at") or item.get("first_ingested_at") or "-")
+    print(f"- {unit_id} | {kind} | {item.get('title', '')}")
+    print(f"{indent}status: {item.get('status')} | confirm: {item.get('confirmation_status')} | updated: {timestamp}")
+    print(f"{indent}summary: {item.get('summary') or '-'}")
+    print(f"{indent}path: {path}")
+
+
+def batch_light_confirm_command(*, kind: str | None = None) -> str:
+    """Render the runnable fact-track batch light-confirm command."""
+    parts = [
+        COMMAND_PREFIX,
+        skill_script_for_command(".agents/skills/knowledge-base-manager/scripts/kb.py"),
+        "review-queue",
+        "--confirm",
+    ]
+    if kind:
+        parts += ["--kind", kind]
+    parts += [
+        "--confirmed-by",
+        "${RESEARCH_CONFIRMED_BY:?set-human-identity}",
+        "--evidence",
+        "${RESEARCH_CONFIRM_EVIDENCE:?set-human-evidence}",
+    ]
+    return shell_command(parts)
+
+
+def render_review_queue(root: Path, hits: list[dict], *, kind: str | None = None) -> None:
+    """Two-track grouped review queue (SSOT §3.11: fact metadata vs judgement).
+
+    Fact track: light/batch confirm supported. Judgement track: each item is marked
+    'needs evidence + substantive content', and its runnable per-item confirm command
+    is rendered. Judgement items whose core content is still hollow are flagged so the
+    substance gate is surfaced up front; substantive judgement items are highlighted
+    as ready for the user to sign off (the '主动询问' signal — no orchestrator change).
+    """
+    fact_track, judgement_track = partition_review_tracks(hits)
+
+    print(f"# review queue: {len(hits)} pending ({len(fact_track)} fact-track, {len(judgement_track)} judgement-track)")
+
+    print("")
+    print(f"## fact-track metadata — light/batch confirm ok, still no self-signing ({len(fact_track)})")
+    if fact_track:
+        for item in fact_track:
+            _print_review_item(root, item)
+        print(f"  batch light-confirm: {batch_light_confirm_command(kind=kind)}")
+    else:
+        print("  (none)")
+
+    print("")
+    print(f"## judgement-track — needs evidence + substantive content ({len(judgement_track)})")
+    if not judgement_track:
+        print("  (none)")
+    else:
+        print("  建议主动请用户拍板（关键决策/insight 不要被动等待翻队列）：")
+        for item in judgement_track:
+            _print_review_item(root, item)
+            if has_substantive_content(item, str(item.get("kind") or "")):
+                print("  ready: 内容已具备 — 需 evidence + 人工确认；⚑ 建议主动请用户拍板")
+                print(f"  confirm: {confirm_command(item)}")
+            else:
+                print("  ⚠ hollow: core_content 为空/仅模板 — 先补实质内容再确认；promote 到 confirmed 会被实质门控拒绝")
+                print(f"  fill first: {next_unit_command(item)}")
+                print(f"  confirm (after filling): {confirm_command(item)}")
 
 
 def print_non_unit_review_notice() -> None:
@@ -311,9 +399,13 @@ def main() -> int:
         if args.confirm:
             if args.confirmation_status != "pending_user_confirmation":
                 raise SystemExit("review-queue --confirm only supports --confirmation-status pending_user_confirmation.")
+            # Batch --confirm is the fact-track light-confirm path (SSOT §3.11): only
+            # factual metadata is eligible for blind batch confirmation. Judgement-track
+            # items need per-item substance + evidence and are never confirmed here.
+            fact_track, judgement_track = partition_review_tracks(hits)
             written = apply_batch_confirmation(
                 root,
-                hits,
+                fact_track,
                 confirmed_by=args.confirmed_by,
                 evidence=args.evidence,
                 method="kb.py review-queue --confirm",
@@ -321,18 +413,16 @@ def main() -> int:
             build_index(root)
             for path in written:
                 print(f"[ok] confirmed {path.relative_to(root)}")
+            if not fact_track:
+                print("[ok] no fact-track metadata to light-confirm")
+            if judgement_track:
+                print(
+                    f"[skip] {len(judgement_track)} judgement-track item(s) need per-item "
+                    f"substance + evidence — run 'review-queue' (no --confirm) for their confirm commands."
+                )
             checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: batch confirm review queue ({len(written)} records)")
             return 0
-        for item in hits:
-            kind = str(item.get("kind") or "")
-            unit_id = str(item.get("id") or "")
-            path = rel(root, record_path(root, kind, unit_id)) if kind and unit_id else "-"
-            timestamp = str(item.get("updated_at") or item.get("created_at") or item.get("first_ingested_at") or "-")
-            print(f"- {unit_id} | {kind} | {item.get('title', '')}")
-            print(f"  status: {item.get('status')} | confirm: {item.get('confirmation_status')} | updated: {timestamp}")
-            print(f"  summary: {item.get('summary') or '-'}")
-            print(f"  path: {path}")
-            print(f"  confirm: {confirm_command(item)}")
+        render_review_queue(root, hits, kind=args.kind)
         print_non_unit_review_notice()
         return 0
     if args.command == "confirm":

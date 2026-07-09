@@ -237,17 +237,18 @@ def test_batch_confirm_collapses_ai_information_types_and_sets_lifecycle(tmp_pat
     kb = _load_kb_module()
     ensure_workspace(tmp_path)
     write_yaml_if_changed(runtime_preferences_path(tmp_path), {"identity": {"default_confirmed_by": "czx-default"}})
-    _write_record(
-        tmp_path,
-        _record(
-            "p-ai-typed-123456",
-            "AI Typed",
-            "pending_user_confirmation",
-            "2026-01-01T00:00:00+00:00",
-            status="screened",
-            information_types=["fact", "inference", "evaluation", "unverified"],
-        ),
+    ai_typed = _record(
+        "p-ai-typed-123456",
+        "AI Typed",
+        "pending_user_confirmation",
+        "2026-01-01T00:00:00+00:00",
+        status="screened",
+        information_types=["fact", "inference", "evaluation", "unverified"],
     )
+    # Judgement-track record needs substantive core_content to clear the substance gate;
+    # this test asserts the information_types collapse + lifecycle, not hollow confirmation.
+    ai_typed["payload"] = {"core_content": {"method": "diffusion policy over action chunks"}}
+    _write_record(tmp_path, ai_typed)
     records = search_records(tmp_path, "", confirmation_status="pending_user_confirmation")
 
     [path] = kb.apply_batch_confirmation(
