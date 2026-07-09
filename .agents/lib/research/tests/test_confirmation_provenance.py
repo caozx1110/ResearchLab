@@ -136,11 +136,14 @@ def test_confirmation_provenance_accepts_bare_string_evidence(tmp_path: Path) ->
 
 
 def test_promote_to_confirmed_persists_confirmation_provenance(tmp_path: Path, monkeypatch) -> None:
-    import research.core as core
+    # apply_confirmation (which stamps the provenance timestamp) now lives in
+    # research.confirm after the god-file split; patch utc_now_iso in that module's
+    # namespace so promote_record -> apply_confirmation observes the frozen clock.
+    import research.confirm as confirm
 
     ensure_workspace(tmp_path)
     write_yaml_if_changed(record_path(tmp_path, "paper", "p-confirm-123456"), _record())
-    monkeypatch.setattr(core, "utc_now_iso", lambda: "2026-07-04T00:00:00+00:00")
+    monkeypatch.setattr(confirm, "utc_now_iso", lambda: "2026-07-04T00:00:00+00:00")
 
     path = promote_record(
         tmp_path,

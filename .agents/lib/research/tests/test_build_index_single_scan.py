@@ -5,6 +5,10 @@ from pathlib import Path
 from research.common import load_yaml, write_yaml_if_changed
 import research.core as core
 
+# build_index moved to research.index in the god-file split; its iter_records and
+# utc_now_iso lookups now resolve in that module's namespace, so patch them there.
+import research.index as index_mod
+
 
 def _write_record(root: Path, record: dict) -> None:
     write_yaml_if_changed(core.record_path(root, record["kind"], record["id"]), record)
@@ -41,7 +45,7 @@ def test_build_index_scans_records_once(tmp_path: Path, monkeypatch) -> None:
         calls += 1
         return original_iter_records(project_root, kind=kind)
 
-    monkeypatch.setattr(core, "iter_records", counting_iter_records)
+    monkeypatch.setattr(index_mod, "iter_records", counting_iter_records)
 
     core.build_index(tmp_path)
 
@@ -52,7 +56,7 @@ def test_build_index_output_stays_byte_stable(tmp_path: Path, monkeypatch) -> No
     core.ensure_workspace(tmp_path)
     _write_record(tmp_path, _sample_record("p-alpha-123456", "paper", "Alpha Paper"))
     _write_record(tmp_path, _sample_record("r-beta-123456", "repo", "Beta Repo"))
-    monkeypatch.setattr(core, "utc_now_iso", lambda: "2026-07-04T00:00:00+00:00")
+    monkeypatch.setattr(index_mod, "utc_now_iso", lambda: "2026-07-04T00:00:00+00:00")
 
     yaml_path, md_path = core.build_index(tmp_path)
 

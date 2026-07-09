@@ -6,6 +6,10 @@ import pytest
 
 import research.core as core
 
+# backup_source moved to research.sources in the god-file split; its fetch_url
+# lookup now resolves in that module's namespace, so patch it there.
+import research.sources as sources
+
 
 def test_backup_source_warns_for_non_html_url(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -13,7 +17,7 @@ def test_backup_source_warns_for_non_html_url(
     def fake_fetch_url(url: str, *, timeout: int) -> tuple[str, str]:
         return "%PDF-1.7", "application/pdf"
 
-    monkeypatch.setattr(core, "fetch_url", fake_fetch_url)
+    monkeypatch.setattr(sources, "fetch_url", fake_fetch_url)
 
     payload = core.backup_source(tmp_path, "paper", "p-binary-123456", "https://example.com/paper.pdf")
 
@@ -31,7 +35,7 @@ def test_backup_source_warns_when_fetch_fails(
     def fake_fetch_url(url: str, *, timeout: int) -> tuple[str, str]:
         raise RuntimeError("network unavailable")
 
-    monkeypatch.setattr(core, "fetch_url", fake_fetch_url)
+    monkeypatch.setattr(sources, "fetch_url", fake_fetch_url)
 
     payload = core.backup_source(tmp_path, "paper", "p-fetch-123456", "https://example.com/source")
 
