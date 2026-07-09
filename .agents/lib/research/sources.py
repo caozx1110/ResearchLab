@@ -664,6 +664,48 @@ def _backup_arxiv_html(project_root: Path, root: Path, arxiv_id: str, original_s
     return result
 
 
+def _backup_pdf_bytes(
+    project_root: Path,
+    root: Path,
+    data: bytes,
+    original_uri: str,
+    *,
+    backup_kind: str,
+    file_name: str = "source.pdf",
+    extra_backup_paths: list[str] | None = None,
+) -> dict[str, Any]:
+    """Persist PDF bytes + real sha256 and parse to page chunks (page=N locators)."""
+    raw = _store_bytes(root, file_name, data)
+    backup_paths = list(extra_backup_paths or [])
+    backup_paths.append(rel(project_root, raw))
+    result: dict[str, Any] = {
+        "original_uri": original_uri,
+        "backup_paths": backup_paths,
+        "backup_kind": backup_kind,
+        "file_hash": file_sha256(raw),
+        "backup_status": "ok",
+        "source_type": "pdf",
+        "locator_kind": "page",
+        "parse_backend": "pymupdf4llm" if _pymupdf4llm_available() else "",
+    }
+    chunks = _pdf_to_page_chunks(raw)
+    result["parse_chunks"] = chunks
+    if not _pymupdf4llm_available():
+        result["backup_status"] = "stored-unparsed"
+        result["backup_warning"] = (
+            "PDF stored with real bytes+sha256 but not parsed: PyMuPDF4LLM backend unavailable "
+            "(install pymupdf4llm to enable page-level parsing)."
+        )
+        _warn(result["backup_warning"], original_uri)
+    elif not chunks:
+        result["backup_status"] = "stored-unparsed"
+        result["backup_warning"] = "PDF stored with real bytes+sha256 but PyMuPDF4LLM extracted no text (scanned/image-only?)."
+        _warn(result["backup_warning"], original_uri)
+    else:
+        result["parse_metadata"] = _pdf_metadata(raw, chunks)
+    return result
+
+
 def backup_source(project_root: Path, kind: str, unit_id: str, source: str) -> dict[str, Any]:
     root = unit_root(project_root, kind, unit_id) / "source"
     ensure_dir(root)
