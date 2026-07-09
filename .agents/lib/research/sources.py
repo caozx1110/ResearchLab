@@ -456,6 +456,91 @@ def _pdf_metadata(pdf_path: Path, chunks: list[dict[str, Any]]) -> dict[str, Any
     return {"title": title, "abstract": _abstract_from_text(first_page), "year": year, "arxiv_id": arxiv_id}
 
 
+# --- HTML section parsing (SSOT B4: section/anchor locators, no page nums) --
+
+
+def _slug_anchor(text: str, fallback: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:60]
+    return slug or fallback
+
+
+def _clip(text: str, limit: int) -> str:
+    if limit and len(text) > limit:
+        return text[:limit].rsplit(" ", 1)[0].rstrip() + " ..."
+    return text
+
+
+def _html_to_section_chunks(
+    html: str,
+    *,
+    section_limit: int = PARSE_CACHE_SECTION_LIMIT,
+    per_section_char_limit: int = PARSE_CACHE_PER_SECTION_CHAR_LIMIT,
+) -> list[dict[str, Any]]:
+    """Split HTML into section chunks keyed by heading anchor (no page numbers).
+
+    Labels use ``section:<anchor>`` (never ``page-N``) so downstream evidence
+    verification treats them as HTML section/anchor locators per SSOT B4. Falls
+    back to a single whole-document chunk when no headings are present."""
+    heading_re = re.compile(r"(?is)<(h[1-6])\b([^>]*)>(.*?)</\1>")
+    matches = list(heading_re.finditer(html))
+    chunks: list[dict[str, Any]] = []
+
+    def _emit(anchor: str, heading_html: str, body_html: str) -> None:
+        heading_text = clean_text(html_to_text(heading_html)) if heading_html else ""
+        body = clean_text(html_to_text(body_html))
+        combined = clean_text(f"{heading_text}\n{body}") if heading_text else body
+        if not combined:
+            return
+        chunks.append(
+            {
+                "label": f"section:{anchor}",
+                "text": _clip(combined, per_section_char_limit),
+                "page": None,
+                "locator_kind": "section",
+                "anchor": anchor,
+                "heading": heading_text,
+            }
+        )
+
+    if not matches:
+        body = clean_text(html_to_text(html))
+        if body:
+            chunks.append(
+                {
+                    "label": "section:document",
+                    "text": _clip(body, per_section_char_limit),
+                    "page": None,
+                    "locator_kind": "section",
+                    "anchor": "document",
+                    "heading": "",
+                }
+            )
+        return chunks
+
+    _emit("preamble", "", html[: matches[0].start()])
+    for index, match in enumerate(matches):
+        id_match = re.search(r"""id\s*=\s*["']([^"']+)["']""", match.group(2) or "")
+        heading_html = match.group(3) or ""
+        anchor = id_match.group(1).strip() if id_match else _slug_anchor(clean_text(html_to_text(heading_html)), f"s{index + 1}")
+        body_end = matches[index + 1].start() if index + 1 < len(matches) else len(html)
+        _emit(anchor, heading_html, html[match.end():body_end])
+        if len(chunks) >= section_limit:
+            break
+    return chunks
+
+
+def _html_metadata(html: str) -> dict[str, Any]:
+    title = ""
+    title_match = re.search(r"(?is)<title\b[^>]*>(.*?)</title>", html)
+    if title_match:
+        title = clean_text(html_to_text(title_match.group(1)))
+    abstract = ""
+    abs_match = re.search(r"""(?is)<blockquote[^>]*class=["'][^"']*abstract[^"']*["'][^>]*>(.*?)</blockquote>""", html)
+    if abs_match:
+        abstract = re.sub(r"(?i)^abstract[:.\-\s]*", "", clean_text(html_to_text(abs_match.group(1))))[:2000]
+    return {"title": title, "abstract": abstract}
+
+
 def backup_source(project_root: Path, kind: str, unit_id: str, source: str) -> dict[str, Any]:
     root = unit_root(project_root, kind, unit_id) / "source"
     ensure_dir(root)
