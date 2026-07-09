@@ -204,6 +204,19 @@ def confirm_unit(
     unit_kind = str(kind or record.get("kind") or "")
     if unit_kind not in UNIT_KIND_DIRS:
         raise SystemExit(f"Unsupported unit kind: {unit_kind}")
+    # Substance gate (SSOT §3.11 / Principle 3). This is the PRIMARY user confirm path
+    # (paper.py confirm / kb.py confirm / interactive kb review), so the hollow-gate
+    # check must live here too, not only in promote_record. Evaluate track + substance
+    # on the ORIGINAL record — before information_types is collapsed to ['fact'] below,
+    # otherwise the record would already look fact-track and the gate would never fire.
+    # Fact-track basic metadata is exempt (light confirm). Runs before apply_confirmation
+    # (and thus before any write by the caller), so a rejected record stays pending.
+    if confirmation_track(record) == "judgement" and not has_substantive_content(record, unit_kind):
+        raise SystemExit(
+            f"Refusing to confirm hollow unit {str(record.get('id'))!r}: core content is empty / "
+            f"template-only — a judgement-track record cannot be confirmed as fact. "
+            f"Fill the analysis (e.g. payload.core_content) before confirming."
+        )
     record = apply_confirmation(
         record,
         confirmed_by=confirmed_by,
