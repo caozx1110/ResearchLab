@@ -8,8 +8,12 @@ from research.evidence import EVIDENCE_SCHEMA, verify_claim_evidence
 import research.core as core
 
 
-def test_verify_claim_evidence_is_noop_stub(tmp_path: Path) -> None:
-    """Wave 2 landing pad: the stub performs no verification and returns []."""
+def test_verify_claim_evidence_reports_missing_quote(tmp_path: Path) -> None:
+    """Wave 2 (implemented): a quote absent from the artifact is a violation."""
+    (tmp_path / "parse-cache.yaml").write_text(
+        "chunks:\n- label: 'x:page-3'\n  text: 'the real text on page three'\n",
+        encoding="utf-8",
+    )
     claim = {
         "id": "claim-001",
         "text": "example",
@@ -18,8 +22,10 @@ def test_verify_claim_evidence_is_noop_stub(tmp_path: Path) -> None:
             {"source_unit_id": "p-x-123456", "artifact": "parse-cache.yaml", "locator": "page=3", "quote": "absent"}
         ],
     }
-    assert verify_claim_evidence(claim, tmp_path) == []
-    # A missing quote is NOT reported yet — proves the stub is a behavioral no-op.
+    violations = verify_claim_evidence(claim, tmp_path)
+    assert len(violations) == 1
+    assert "claim-001" in violations[0] and "not verbatim" in violations[0]
+    # No evidence_refs => nothing to verify => [] (degenerate input never raises).
     assert verify_claim_evidence({"evidence_refs": []}, str(tmp_path)) == []
 
 
