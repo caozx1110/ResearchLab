@@ -40,7 +40,10 @@ from research.core import (
     project_root,
     resolve_local_reference,
     resolve_search_candidate,
+    source_record_fields,
     stage_search_results,
+    unit_root,
+    write_parse_cache,
     write_record,
 )
 
@@ -244,7 +247,33 @@ def main() -> int:
 
     record = default_record(args.kind, title=title, maturity=args.maturity, source={"original_uri": source})
     source_info = backup_source(root, args.kind, record["id"], source)
-    record["source"] = source_info
+    # Only the on-disk source contract keys go into record.source; backup_status /
+    # backup_warning / parse metadata are surfaced separately (never pollute source).
+    record["source"] = source_record_fields(source_info)
+    backup_warning = str(source_info.get("backup_warning") or "").strip()
+    # Persist a parse-cache (page=N for PDF, section/anchor for HTML per SSOT B4)
+    # so downstream screen/complete-note + evidence reuse real parsed text without
+    # a second parse and without the cold-start empty-parse gap.
+    unit_dir = unit_root(root, args.kind, record["id"])
+    parse_cache_path = write_parse_cache(unit_dir, record["id"], source_info)
+    # For URL papers (arxiv/PDF) the lightweight download path yields metadata the
+    # legacy local PyPDF path could not; fold it in when we have nothing better.
+    parse_metadata = source_info.get("parse_metadata") or {}
+    if args.kind == "paper" and not paper_metadata and parse_metadata:
+        better_title = str(parse_metadata.get("title") or "").strip()
+        paper_metadata = {
+            "title": better_title,
+            "abstract": str(parse_metadata.get("abstract") or ""),
+            "year": parse_metadata.get("year"),
+            "arxiv_id": str(parse_metadata.get("arxiv_id") or ""),
+            "authors": [],
+            "topics": [],
+            "tags": [],
+            "doi": "",
+        }
+        if better_title and not args.title and not (staged_candidate and staged_candidate.get("title")):
+            title = better_title
+            record["title"] = better_title
     record["status"] = "active"
     record["summary"] = f"Lightweight {args.kind} intake for `{title}`."
     explicit_topics = list(staged_candidate.get("topics", []) if staged_candidate else [])
@@ -287,7 +316,7 @@ def main() -> int:
     auto_outputs: list[str] = []
     paper_preferences = load_runtime_preferences(root).get("paper", {}) if args.kind == "paper" else {}
     note_created = False
-    has_pdf = bool(paper_metadata) or source.lower().endswith(".pdf")
+    has_pdf = str(source_info.get("source_type") or "") == "pdf" or source.lower().endswith(".pdf")
     if args.kind == "paper":
         if bool(paper_preferences.get("parse_cache_prewarm_on_intake", True)) and not bool(
             paper_preferences.get("auto_screen_on_intake", True)
@@ -316,6 +345,13 @@ def main() -> int:
     if args.stage_id and args.candidate_id:
         mark_search_candidate(root, args.stage_id, args.candidate_id, status="materialized", record_id=str(record["id"]))
     print(f"[ok] created {path.relative_to(root)}")
+    backup_status = str(source_info.get("backup_status") or "").strip()
+    if backup_status:
+        print(f"[source] backup_status={backup_status} source_type={source_info.get('source_type') or '-'} locator_kind={source_info.get('locator_kind') or '-'}")
+    if parse_cache_path is not None:
+        print(f"[source] parse-cache: {parse_cache_path.relative_to(root)} ({len(source_info.get('parse_chunks') or [])} chunks)")
+    if backup_warning:
+        print(f"[warn] source archive: {backup_warning}")
     print(f"confirm: {confirm_command(record)}")
     for line in auto_outputs:
         print(f"[auto] {line}")
