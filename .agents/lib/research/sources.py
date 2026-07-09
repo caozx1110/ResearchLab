@@ -1,14 +1,26 @@
-"""Source backup/archival, duplicate detection, source-search staging, and storage layout sync."""
+"""Source backup/archival, duplicate detection, source-search staging, and storage layout sync.
+
+Dual-source ingestion (SSOT 3.1 decision A, B4): arxiv sources prefer the HTML
+edition (arxiv.org/html -> ar5iv -> abs fallback) so no PDF parsing is needed and
+locators are section/anchor; non-arxiv PDFs are downloaded as real bytes and parsed
+with the always-available lightweight PyMuPDF4LLM backend with page=N locators.
+Every archived source persists real bytes + a real sha256 and reports an explicit
+backup status/warning (fixing the G7 silent-failure where PDFs stored nothing).
+"""
 from __future__ import annotations
 
 import hashlib
 import re
 import shutil
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .common import (
+    FETCH_MAX_BYTES,
+    FetchTooLarge,
+    clean_text,
     ensure_dir,
     fetch_url,
     file_sha256,
@@ -50,6 +62,16 @@ from .confirm import (
 )
 
 WEB_SNAPSHOT_MAX_CHARS = 120_000
+
+# Hard cap for downloaded PDF/source bytes (SSOT 3.1: "size cap, e.g. 50MB").
+SOURCE_DOWNLOAD_MAX_BYTES = min(FETCH_MAX_BYTES, 50 * 1024 * 1024)
+
+# Parse-cache page budget: parse enough of the document to ground evidence
+# quotes (screening only reads the front, but notes/evidence may cite anywhere).
+PARSE_CACHE_PAGE_LIMIT = 80
+PARSE_CACHE_PER_PAGE_CHAR_LIMIT = 8000
+PARSE_CACHE_SECTION_LIMIT = 200
+PARSE_CACHE_PER_SECTION_CHAR_LIMIT = 8000
 
 
 def _move_tree_item(src: Path, dst: Path) -> list[tuple[Path, Path]]:

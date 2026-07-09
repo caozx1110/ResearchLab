@@ -8,8 +8,10 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -17,6 +19,7 @@ from html import unescape
 from pathlib import Path
 from shlex import quote
 from typing import Any
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
@@ -963,14 +966,83 @@ def extract_pdf_record(pdf_path: Path) -> dict[str, Any]:
     }
 
 
-def fetch_url(url: str, *, binary: bool = False, timeout: int = 20) -> tuple[bytes | str, str]:
+# Default hard cap on any single download, in bytes. Guards against pulling a
+# multi-GB artifact into the workspace by accident. Callers may lower it, and
+# the source-intake pipeline passes an explicit ~50MB cap for PDF downloads.
+FETCH_MAX_BYTES = 50 * 1024 * 1024
+
+
+class FetchTooLarge(Exception):
+    """Raised when a download exceeds the configured size cap."""
+
+
+def _read_capped(response: Any, max_bytes: int) -> bytes:
+    """Read a response body but refuse to buffer more than ``max_bytes``.
+
+    Reading incrementally means a hostile or mislabeled URL cannot exhaust
+    memory before we notice it is oversized.
+    """
+
+    if max_bytes is None or max_bytes <= 0:
+        return response.read()
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = response.read(65536)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise FetchTooLarge(f"download exceeded size cap of {max_bytes} bytes")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def fetch_url(
+    url: str,
+    *,
+    binary: bool = False,
+    timeout: int = 20,
+    retries: int = 2,
+    retry_backoff: float = 1.5,
+    max_bytes: int | None = FETCH_MAX_BYTES,
+) -> tuple[bytes | str, str]:
+    """Fetch ``url`` with a simple bounded retry and a hard size cap.
+
+    Transient failures (timeouts, connection resets, and 5xx/429 responses)
+    are retried up to ``retries`` extra times with linear backoff; definitive
+    failures (404/403/other 4xx) are not retried so callers probing a fallback
+    chain fail fast. ``max_bytes`` bounds the buffered payload.
+    """
+
     request = Request(url, headers={"User-Agent": "Mozilla/5.0 Codex Research Skills/1.1"})
-    with urlopen(request, timeout=timeout) as response:  # noqa: S310
-        content_type = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
-        payload = response.read()
-    if binary:
-        return payload, content_type
-    return payload.decode("utf-8", errors="ignore"), content_type
+    attempts = max(1, retries + 1)
+    last_error: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            with urlopen(request, timeout=timeout) as response:  # noqa: S310
+                content_type = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
+                payload = _read_capped(response, max_bytes)
+            if binary:
+                return payload, content_type
+            return payload.decode("utf-8", errors="ignore"), content_type
+        except FetchTooLarge:
+            raise
+        except HTTPError as exc:
+            last_error = exc
+            # Only server-side/transient statuses are worth retrying.
+            if exc.code in (429, 500, 502, 503, 504) and attempt < attempts - 1:
+                time.sleep(retry_backoff * (attempt + 1))
+                continue
+            raise
+        except (URLError, socket.timeout, TimeoutError, ConnectionError) as exc:
+            last_error = exc
+            if attempt < attempts - 1:
+                time.sleep(retry_backoff * (attempt + 1))
+                continue
+            raise
+    # Unreachable in practice: the loop either returns or raises.
+    raise last_error if last_error else RuntimeError(f"fetch_url failed: {url}")
 
 
 def html_to_text(html: str) -> str:
