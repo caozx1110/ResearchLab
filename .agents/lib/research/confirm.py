@@ -153,6 +153,14 @@ def require_confirmation_provenance(
     evidence_items = _text_list([evidence] if isinstance(evidence, str) else evidence)
     if not actor:
         raise SystemExit("Human confirmation requires --confirmed-by or identity.default_confirmed_by.")
+    if is_ai_signer(actor):
+        # Governance red line: no self-signing — an AI identity cannot confirm its own
+        # pending record. Wires the pre-existing is_ai_signer/AI_SIGNER_NAMES guard into
+        # the provenance check (added rejection only; all prior checks preserved).
+        raise SystemExit(
+            f"Self-signing is forbidden: confirmed_by={actor!r} is an AI identity; "
+            f"an AI cannot confirm its own pending record — provide a human confirmer."
+        )
     if not evidence_items:
         raise SystemExit("Human confirmation requires at least one --evidence.")
     return actor, evidence_items
