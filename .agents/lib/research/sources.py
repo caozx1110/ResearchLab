@@ -343,6 +343,119 @@ def _truncate_snapshot_text(text: str) -> str:
     return (trimmed or text[:WEB_SNAPSHOT_MAX_CHARS]).rstrip() + "\n\n[truncated]\n"
 
 
+# --- arxiv source resolution (SSOT 3.1: HTML-first) -----------------------
+
+_ARXIV_HOST_RE = re.compile(r"(?:^|\.)arxiv\.org$|(?:^|\.)ar5iv\.", re.IGNORECASE)
+
+
+def _arxiv_id_from_source(source: str) -> str:
+    """Bare arxiv id (no version) for an arxiv URL or raw id, else ''."""
+    text = str(source or "").strip()
+    if not text:
+        return ""
+    if is_url(text):
+        from urllib.parse import urlparse
+
+        if not _ARXIV_HOST_RE.search(urlparse(text).netloc.lower()):
+            return ""
+    arxiv_id = parse_arxiv_id(text)
+    return arxiv_id.split("v", 1)[0] if arxiv_id else ""
+
+
+def _arxiv_html_candidates(arxiv_id: str) -> list[dict[str, str]]:
+    """Ordered HTML editions: native arxiv HTML -> ar5iv -> abs fallback."""
+    return [
+        {"url": f"https://arxiv.org/html/{arxiv_id}", "edition": "arxiv-html", "degraded": ""},
+        {"url": f"https://ar5iv.org/abs/{arxiv_id}", "edition": "ar5iv", "degraded": ""},
+        {
+            "url": f"https://arxiv.org/abs/{arxiv_id}",
+            "edition": "arxiv-abs",
+            "degraded": "arxiv HTML/ar5iv editions unavailable; archived abstract page only (no full body).",
+        },
+    ]
+
+
+# --- PDF parsing (SSOT 3.1: lightweight PyMuPDF4LLM default) ----------------
+
+
+def _pymupdf4llm_available() -> bool:
+    import importlib.util
+
+    return importlib.util.find_spec("pymupdf4llm") is not None and importlib.util.find_spec("fitz") is not None
+
+
+def _pdf_to_page_chunks(
+    pdf_path: Path,
+    *,
+    page_limit: int = PARSE_CACHE_PAGE_LIMIT,
+    per_page_char_limit: int = PARSE_CACHE_PER_PAGE_CHAR_LIMIT,
+) -> list[dict[str, Any]]:
+    """Parse a PDF into per-page chunks (label ``<name>:page-N``) via PyMuPDF4LLM.
+
+    Returns [] when the lightweight backend is unavailable so callers degrade to
+    an explicit warning rather than a silent empty parse."""
+    if not _pymupdf4llm_available():
+        return []
+    import fitz  # type: ignore
+    import pymupdf4llm  # type: ignore
+
+    chunks: list[dict[str, Any]] = []
+    with fitz.open(str(pdf_path)) as doc:
+        total = doc.page_count
+        pages = list(range(min(page_limit, total)))
+        page_data = pymupdf4llm.to_markdown(doc, pages=pages, page_chunks=True, show_progress=False)
+    for entry in page_data:
+        if not isinstance(entry, dict):
+            continue
+        page_number = (entry.get("metadata") or {}).get("page")
+        if not isinstance(page_number, int):
+            page_number = len(chunks) + 1
+        text = clean_text(str(entry.get("text") or ""))
+        if not text:
+            continue
+        if per_page_char_limit and len(text) > per_page_char_limit:
+            text = text[:per_page_char_limit].rsplit(" ", 1)[0].rstrip() + " ..."
+        chunks.append({"label": f"{pdf_path.name}:page-{page_number}", "text": text, "page": page_number})
+    return chunks
+
+
+def _abstract_from_text(text: str) -> str:
+    if not text:
+        return ""
+    match = re.search(r"(?is)\babstract\b[:.\-\s]*(.+?)(?:\n\s*\n|\b1\s+introduction\b|\bintroduction\b)", text)
+    return clean_text(match.group(1))[:2000] if match else ""
+
+
+def _pdf_metadata(pdf_path: Path, chunks: list[dict[str, Any]]) -> dict[str, Any]:
+    """Best-effort lightweight metadata from a parsed PDF (title/abstract/year)."""
+    title = ""
+    year: int | None = None
+    if _pymupdf4llm_available():
+        import fitz  # type: ignore
+
+        with fitz.open(str(pdf_path)) as doc:
+            meta = doc.metadata or {}
+        embedded = clean_text(str(meta.get("title") or ""))
+        if len(embedded.split()) >= 3:
+            title = embedded
+        for key in ("creationDate", "modDate"):
+            match = re.search(r"D:(\d{4})", str(meta.get(key) or ""))
+            if match:
+                year = int(match.group(1))
+                break
+    first_page = chunks[0]["text"] if chunks else ""
+    if not title and first_page:
+        for raw_line in first_page.splitlines():
+            line = clean_text(raw_line).lstrip("# ").strip()
+            if 3 <= len(line.split()) <= 20 and not line.lower().startswith("abstract"):
+                title = line
+                break
+    arxiv_id = _arxiv_id_from_source(pdf_path.name) or parse_arxiv_id("\n".join(c["text"] for c in chunks[:2]))
+    if arxiv_id and year is None:
+        year = 2000 + int(arxiv_id[:2])
+    return {"title": title, "abstract": _abstract_from_text(first_page), "year": year, "arxiv_id": arxiv_id}
+
+
 def backup_source(project_root: Path, kind: str, unit_id: str, source: str) -> dict[str, Any]:
     root = unit_root(project_root, kind, unit_id) / "source"
     ensure_dir(root)
