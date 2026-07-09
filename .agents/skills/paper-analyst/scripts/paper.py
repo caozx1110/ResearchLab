@@ -1,4 +1,15 @@
 #!/usr/bin/env python3
+"""Paper analyst: script prepares fillable structure + verifies evidence; a runtime
+agent fills the understanding (SSOT Principle 1 / §3.2).
+
+The script is deliberately *not* allowed to understand the paper. It (a) parses the
+source into a parse-cache, (b) emits a **fillable structure** (screening scaffold /
+5-element note skeleton) whose judgement fields are left blank for a runtime agent,
+and (c) **verifies** every judgement the agent fills carries legit verbatim evidence
+(research.evidence) before it clears the substance gate (research.confirm) and is
+persisted. There is no keyword-count → grade heuristic anywhere: any "novelty=strong"
+class judgement must come from an agent, never from Python.
+"""
 from __future__ import annotations
 
 import argparse
@@ -45,6 +56,12 @@ from research.core import (
     resolve_local_reference,
     write_record,
 )
+from research.evidence import (
+    attach_claims,
+    read_claims,
+    validate_claims,
+    verify_claim_evidence,
+)
 
 SECTION_PATTERNS = (
     "abstract",
@@ -62,10 +79,60 @@ SECTION_PATTERNS = (
     "appendix",
 )
 
+# --------------------------------------------------------------------------- #
+# The 5-element fill contract (SSOT §3.2 / B1).                                #
+#                                                                             #
+# A runtime agent fills these five elements; every element is a judgement-class #
+# claim and MUST carry >=1 evidence_ref (short verbatim quote + locator). The   #
+# script only verifies + routes them — it never authors content. Each element   #
+# lands in a canonical payload field so a filled note clears has_substantive_    #
+# content() (SSOT §3.11 substance gate) and renders a note.md section.           #
+# --------------------------------------------------------------------------- #
+NOTE_ELEMENTS: tuple[str, ...] = ("motivation", "method", "experiment", "limitation", "insight")
+
+# Every element is judgement-class so research.evidence.validate_claims enforces a
+# non-empty evidence_refs on each (SSOT Principle 2 gate interlock).
+ELEMENT_CLAIM_TYPE: dict[str, str] = {
+    "motivation": "inference",
+    "method": "inference",
+    "experiment": "evaluation",
+    "limitation": "evaluation",
+    "insight": "inference",
+}
+
+# element -> (payload section, field, shape). Filling motivation/method/experiment/
+# insight populates core_content (4 of the 8 canonical fields), so a verified note is
+# never hollow; limitation lands in critique.weak_spots. note.md renders all five.
+ELEMENT_TARGET: dict[str, tuple[str, str, str]] = {
+    "motivation": ("core_content", "motivation", "str"),
+    "method": ("core_content", "method", "str"),
+    "experiment": ("core_content", "changes_and_effects", "list"),
+    "limitation": ("critique", "weak_spots", "list"),
+    "insight": ("core_content", "why_it_might_work", "str"),
+}
+
+ELEMENT_HEADING: dict[str, str] = {
+    "motivation": "Motivation",
+    "method": "Method",
+    "experiment": "Experiment",
+    "limitation": "Limitation",
+    "insight": "Insight",
+}
+
+# Reusable, machine-readable description of the evidence_ref shape an agent must fill.
+EVIDENCE_REF_FORMAT: dict[str, str] = {
+    "source_unit_id": "p-... (this paper unit id)",
+    "artifact": "parse-cache.yaml (unit-relative artifact the quote lives in)",
+    "locator": "PDF: page=N ; HTML: section or section:<anchor> (B4)",
+    "quote": "short verbatim snippet — script checks it is a whitespace-normalized substring of the artifact",
+    "summary": "optional one-line paraphrase",
+}
+
 
 def add_confirmation_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--confirmed-by", default="")
     parser.add_argument("--evidence", action="append", required=True)
+
 
 def _source_paths(root: Path, record: dict) -> list[Path]:
     paths: list[Path] = []
@@ -162,293 +229,320 @@ def _load_or_refresh_cache(root: Path, record: dict, unit_root: Path, *, force: 
     return chunks, cache_path
 
 
-def _grade(count: int, *, strong_at: int = 3) -> str:
-    if count >= strong_at:
-        return "strong"
-    if count > 0:
-        return "moderate"
-    return "weak"
+def _cache_locator_kind(cache_path: Path) -> str:
+    """Best-effort read of the parse-cache's declared locator_kind (page|section).
+
+    Written by research.sources.write_parse_cache for dual-source intakes. Absent for
+    paper.py's own cold-parse cache, in which case we infer per chunk from the label.
+    """
+    payload = load_yaml(cache_path, default={}) if cache_path.exists() else {}
+    if isinstance(payload, dict):
+        return str(payload.get("locator_kind") or "")
+    return ""
 
 
-def _match_keywords(text: str, keywords: list[str]) -> list[str]:
-    hits: list[str] = []
-    for keyword in keywords:
-        if keyword in text and keyword not in hits:
-            hits.append(keyword)
-    return hits
+def _chunk_locator(chunk: dict, cache_locator_kind: str) -> str:
+    """Derive the evidence locator string for a parse-cache chunk (B4 two families).
+
+    PDF chunks -> ``page=N``; HTML section chunks -> ``section:<anchor>`` / ``section``.
+    This is pure transport: it copies the locator the agent should cite, it does not
+    judge anything.
+    """
+    page = chunk.get("page")
+    if isinstance(page, int):
+        return f"page={page}"
+    label = str(chunk.get("label") or "")
+    if label.startswith("section:"):
+        return label
+    match = re.search(r"page[-_ ]?(\d+)", label, flags=re.IGNORECASE)
+    if match:
+        return f"page={match.group(1)}"
+    if cache_locator_kind == "page":
+        return "page"
+    return "section"
 
 
-def _screen_excerpt(source_chunks: list[dict], *, page_limit: int, max_chars: int) -> tuple[str, list[int]]:
-    selected: list[str] = []
-    pages: list[int] = []
-    current = 0
-    for chunk in source_chunks[:page_limit]:
-        text = clean_text(chunk.get("text", ""))
+def _evidence_digest(source_chunks: list[dict], cache_locator_kind: str, *, chunk_limit: int, excerpt_chars: int) -> list[dict]:
+    """Build a locator-tagged excerpt list from parse-cache chunks for the agent.
+
+    This is the "备料" (transport) half of Principle 1: it hands the agent the raw
+    front-matter text with citable locators. It contains no judgement and no grade.
+    """
+    digest: list[dict] = []
+    for chunk in source_chunks[:chunk_limit]:
+        text = clean_text(str(chunk.get("text") or ""))
         if not text:
             continue
-        remaining = max_chars - current
-        if remaining <= 0:
-            break
-        selected.append(text[:remaining])
-        current += len(selected[-1])
-        page = chunk.get("page")
-        if isinstance(page, int) and page not in pages:
-            pages.append(page)
-        if current >= max_chars:
-            break
-    return clean_text(" ".join(selected)), pages
+        digest.append(
+            {
+                "locator": _chunk_locator(chunk, cache_locator_kind),
+                "artifact": "parse-cache.yaml",
+                "label": str(chunk.get("label") or ""),
+                "excerpt": text[:excerpt_chars],
+            }
+        )
+    return digest
 
 
-def _screening_mode(requested_mode: str) -> tuple[str, str]:
-    normalized = requested_mode.strip() or "heuristic_structured"
-    if normalized == "auto":
-        normalized = "heuristic_structured"
-    if normalized == "heuristic_structured":
-        return normalized, ""
-    return "heuristic_structured", f"requested `{requested_mode}` but no LLM screening backend is configured; fell back to heuristic_structured"
+def _keyword_mentions(text: str, terms: list[str]) -> list[str]:
+    """Return surface-form term mentions — an orientation HINT for the agent only.
+
+    Deliberately not counted, scored, or turned into a grade: it merely tells the
+    agent which surface terms appear so it knows where to look. No caller may derive a
+    judgement field from this list (SSOT Principle 1).
+    """
+    mentions: list[str] = []
+    lowered = text.lower()
+    for term in terms:
+        term = term.strip().lower()
+        if term and term in lowered and term not in mentions:
+            mentions.append(term)
+    return mentions
 
 
-def screening_payload(
+# --------------------------------------------------------------------------- #
+# screen: prepare a fillable screening structure / verify an agent-filled one   #
+# --------------------------------------------------------------------------- #
+
+
+def build_screening_scaffold(
     record: dict,
     source_chunks: list[dict],
+    cache_locator_kind: str,
     *,
-    requested_mode: str,
-    context_pages: int,
-    max_chars: int,
+    digest_chunks: int,
+    digest_chars: int,
 ) -> dict:
+    """Produce the fillable screening.yaml structure (NO keyword-driven grading).
+
+    The judgement fields (worth_deep_reading / judgement_reason / relevance /
+    claims) are left blank for a runtime agent; the script only supplies an
+    evidence digest with locators + an explicitly-non-judgemental keyword hint.
+    """
     basic_info = record.get("payload", {}).get("basic_info", {})
-    title = record.get("title", "")
+    title = str(record.get("title") or "")
     abstract = clean_text(str(basic_info.get("abstract") or ""))
     topics = [str(item) for item in record.get("topics", []) if str(item).strip()]
     tags = [str(item) for item in record.get("tags", []) if str(item).strip()]
-    topic_signal = ", ".join(topics) or "uncategorized"
-    text, evidence_pages = _screen_excerpt(source_chunks, page_limit=context_pages, max_chars=max_chars)
-    combined = clean_text(" ".join(part for part in [title, abstract, text, " ".join(tags), " ".join(topics)] if part)).lower()
+    digest = _evidence_digest(source_chunks, cache_locator_kind, chunk_limit=digest_chunks, excerpt_chars=digest_chars)
 
-    result_hits = _match_keywords(
-        combined,
-        ["state-of-the-art", "sota", "outperform", "improves", "improvement", "success rate", "better than"],
-    )
-    experiment_hits = _match_keywords(
-        combined,
-        ["ablation", "benchmark", "evaluation", "baseline", "real-world", "real robot", "simulation", "dataset"],
-    )
-    reliability_hits = _match_keywords(
-        combined,
-        ["analysis", "limitation", "failure", "open-source", "code", "appendix", "release"],
-    )
-    novelty_hits = _match_keywords(
-        combined,
-        ["novel", "first", "we propose", "introduce", "unified", "generalist", "open-world"],
-    )
-    relevance_terms = [
-        term.lower()
-        for term in [*topics, *tags]
-        if term and term.lower() not in {"uncategorized", "research"}
-    ]
-    relevance_hits = _match_keywords(combined, relevance_terms)
-    if not relevance_hits:
-        relevance_hits = _match_keywords(
-            combined,
-            ["vision-language-action", "vla", "robot", "policy", "control", "manipulation", "humanoid"],
-        )
-    authors = [str(item).strip() for item in basic_info.get("authors", []) if str(item).strip()]
-    backing_count = len(authors) + (1 if str(basic_info.get("venue") or "").strip() else 0) + (1 if str(basic_info.get("arxiv_id") or "").strip() else 0)
-    backing_strength = "strong" if backing_count >= 3 else "moderate" if backing_count > 0 else "weak"
-    result_strength = _grade(len(result_hits), strong_at=2)
-    experiment_quality = _grade(len(experiment_hits), strong_at=3)
-    reliability = _grade(len(reliability_hits), strong_at=2)
-    novelty = _grade(len(novelty_hits), strong_at=2)
-    relevance = "strong" if len(relevance_hits) >= 2 else "moderate" if relevance_hits or topics or tags else "weak"
+    hint_terms = [term for term in [*topics, *tags] if term.lower() not in {"uncategorized", "research"}]
+    hint_source = clean_text(" ".join([title, abstract, *[str(d.get("excerpt") or "") for d in digest]]))
 
-    score = 0
-    score += {"strong": 2, "moderate": 1, "weak": 0}[result_strength]
-    score += {"strong": 2, "moderate": 1, "weak": 0}[experiment_quality]
-    score += {"strong": 2, "moderate": 1, "weak": 0}[novelty]
-    score += {"strong": 2, "moderate": 1, "weak": 0}[relevance]
-    if relevance == "weak" and score <= 2:
-        worth = "no"
-    elif relevance == "strong" and score >= 4:
-        worth = "yes"
-    elif score >= 3:
-        worth = "maybe"
-    else:
-        worth = "no"
-
-    effective_mode, mode_warning = _screening_mode(requested_mode)
-    judgement_reason = [
-        f"`{title}` 的相关性信号为 {relevance}，当前 topic/tag 为：{topic_signal}。",
-        f"实验信号={experiment_quality}，创新信号={novelty}，结果信号={result_strength}。",
-    ]
-    if mode_warning:
-        judgement_reason.append(mode_warning)
-    if not source_chunks:
-        judgement_reason.append("当前没有稳定抽取到 PDF / 源文本，快速判断可信度较低。")
-    risks = [
-        "quick screen 基于局部页面与启发式信号，仍需人工确认。",
-    ]
-    if not abstract:
-        risks.append("当前缺少摘要级上下文，方法与实验判断可能偏粗。")
-    takeaways = [
-        f"建议先看摘要、方法总览与实验章节，当前 worth-deep-reading={worth}。",
-        "确认 benchmark、ablation、real-world / real-robot 证据是否真的支撑标题承诺。",
-        "如果与你当前 program 强相关，再进入完整笔记与 Figure 资产整理。",
-    ]
     return {
         "paper_id": record["id"],
-        "status": "pending_user_confirmation",
-        "information_types": ["evaluation", "inference", "unverified"],
-        "screening_mode_requested": requested_mode,
-        "screening_mode_effective": effective_mode,
-        "screening_mode_warning": mode_warning,
-        "worth_deep_reading": worth,
-        "judgement_reason": judgement_reason,
-        "evidence_snapshot": (abstract or text)[: min(max_chars, 1200)],
-        "evidence_pages": evidence_pages,
-        "backing_strength": backing_strength,
-        "result_strength": result_strength,
-        "novelty_signal": novelty,
-        "experiment_signal": experiment_quality,
-        "reliability_signal": reliability,
-        "relevance_signal": relevance,
-        "keyword_hits": {
-            "result": result_hits,
-            "experiment": experiment_hits,
-            "reliability": reliability_hits,
-            "novelty": novelty_hits,
-            "relevance": relevance_hits,
+        "kind": "paper",
+        "status": "awaiting_agent_judgement",
+        "phase": "prepare",
+        "information_types": ["inference", "evaluation", "unverified"],
+        "fill_contract": {
+            "description": (
+                "Agent fills worth_deep_reading (yes|no|maybe) + judgement_reason + "
+                "relevance_to_current_research, and attaches judgement claims to `claims` "
+                "with verbatim evidence. Then run `screen --phase verify` to validate + persist. "
+                "The script does NOT decide worth — that judgement is the agent's (SSOT §3.2)."
+            ),
+            "worth_deep_reading": "agent fills: yes|no|maybe",
+            "judgement_reason": "agent fills: list of short reasons",
+            "relevance_to_current_research": "agent fills: strong|moderate|weak + why",
+            "claims": "agent attaches judgement claims backing worth_deep_reading",
+            "evidence_ref_format": EVIDENCE_REF_FORMAT,
         },
-        "risks": risks,
-        "takeaways": takeaways[:3],
-        "recommended_next_action": "complete-note" if worth in {"yes", "maybe"} else "defer-or-confirm",
+        "agent_hints": {
+            "note": (
+                "keyword_mentions are raw surface matches for orientation ONLY — they are "
+                "NOT a score and MUST NOT be treated as a judgement."
+            ),
+            "keyword_mentions": _keyword_mentions(hint_source, hint_terms),
+        },
+        "evidence_digest": digest,
+        # --- agent fills below (left blank on purpose) ---
+        "worth_deep_reading": "",
+        "judgement_reason": [],
+        "relevance_to_current_research": "",
+        "claims": [],
     }
 
 
-def _source_preview(source_chunks: list[dict], *, max_chars: int = 900) -> str:
-    preview, _ = _screen_excerpt(source_chunks, page_limit=2, max_chars=max_chars)
-    return preview
+def verify_screening_fill(payload: dict, unit_dir: Path) -> list[str]:
+    """Return violations for an agent-filled screening payload (empty == clean).
+
+    Checks the agent actually made a judgement (worth_deep_reading), that any claims
+    are structurally valid (validate_claims) and verbatim-grounded (verify_claim_
+    evidence), and that a real judgement is backed by >=1 claim.
+    """
+    violations: list[str] = []
+    worth = str(payload.get("worth_deep_reading") or "").strip().lower()
+    if worth not in {"yes", "no", "maybe"}:
+        violations.append(
+            f"worth_deep_reading: agent must fill one of yes|no|maybe (got {worth or '<blank>'!r})"
+        )
+    claims = read_claims(payload)
+    violations.extend(validate_claims(claims))
+    for claim in claims:
+        for violation in verify_claim_evidence(claim, unit_dir):
+            violations.append(f"screening claim: {violation}")
+    # A non-trivial judgement (worth=yes|maybe) must be backed by evidence.
+    if worth in {"yes", "maybe"} and not claims:
+        violations.append(
+            "worth_deep_reading is a judgement (yes|maybe) but no evidence-backed claims were attached"
+        )
+    return violations
 
 
-def _markdown_bullets(items: list[str], fallback: str) -> str:
-    cleaned = [str(item).strip() for item in items if str(item).strip()]
-    if not cleaned:
-        return fallback
-    return "\n".join(f"- {item}" for item in cleaned)
+# --------------------------------------------------------------------------- #
+# complete-note: 5-element fillable skeleton / verify + persist an agent fill   #
+# --------------------------------------------------------------------------- #
 
 
-def note_template(record: dict, source_chunks: list[dict], *, mode: str) -> str:
-    title = record.get("title", "")
-    payload = record.get("payload", {})
-    basic_info = payload.get("basic_info", {})
-    quick = payload.get("quick_screen", {})
-    structure = payload.get("structure", {})
-    figures = payload.get("figures", {})
-    abstract = clean_text(str(basic_info.get("abstract") or ""))
-    preview = _source_preview(source_chunks)
-    outline = [str(item) for item in structure.get("paper_outline", []) if str(item).strip()]
-    figure_labels = [
-        str(item.get("id") or item.get("label") or "")
-        for item in figures.get("key_figures", [])
-        if isinstance(item, dict)
+def build_note_scaffold(
+    record: dict,
+    source_chunks: list[dict],
+    cache_locator_kind: str,
+    *,
+    digest_chunks: int,
+    digest_chars: int,
+) -> dict:
+    """Produce the 5-element fillable note skeleton (motivation/method/experiment/
+    limitation/insight). Each element is blank for the agent to fill with content +
+    >=1 evidence_ref. The script authors nothing here."""
+    digest = _evidence_digest(source_chunks, cache_locator_kind, chunk_limit=digest_chunks, excerpt_chars=digest_chars)
+    elements = [
+        {
+            "element": name,
+            "claim_type": ELEMENT_CLAIM_TYPE[name],
+            "content": "",
+            "evidence_refs": [],
+        }
+        for name in NOTE_ELEMENTS
     ]
-    if mode == "draft":
-        return f"""# {title}
-
-## 快速判断
-
-- 生成模式：draft（AI 草稿，待人工确认）
-- 是否值得细读：{quick.get("worth_deep_reading") or "unknown"}
-- 创新性：{quick.get("novelty") or "-"}
-- 实验扎实度：{quick.get("experiment_quality") or "-"}
-- 可靠性：{quick.get("reliability") or "-"}
-- 相关性：{quick.get("relevance_to_current_research") or "-"}
-- 当前 topics：{", ".join(record.get("topics", [])) or "-"}
-- 当前 tags：{", ".join(record.get("tags", [])) or "-"}
-
-## Problem / Motivation
-
-{abstract or preview or "待结合摘要和引言补全。"}
-
-## 故事线 / 论文结构
-
-{_markdown_bullets(outline, "待结合目录与 section heading 补全。")}
-
-## 核心方法与关键机制
-
-- 先抓方法主张、核心模块、信息流和关键训练 / 推理机制。
-当前 quick-screen 理由：
-{_markdown_bullets([str(item) for item in quick.get("judgement_reason", [])], "待补。")}
-
-## 关键实验与结果
-
-- 当前实验信号：{quick.get("experiment_quality") or "-"}
-- 当前结果信号：{quick.get("result_strength") or "-"}
-- 重点核对 benchmark、baseline、ablation、real-world 结果是否齐全。
-
-## Figure 级线索
-
-{_markdown_bullets(figure_labels, "待提取 Figure / Table 资产后补全。")}
-
-## 可靠性 / 薄弱点 / Failure Case
-
-- 当前可靠性信号：{quick.get("reliability") or "-"}
-风险：
-{_markdown_bullets([str(item) for item in quick.get("risks", [])], "待补。")}
-
-## 与我当前 program / idea 的关系
-
-- 结合当前 topics/tags 判断其是否能提供方法线索、实验设计线索或引用价值。
-
-## 可复用结论
-
-- 方法机制：
-- 实验套路：
-- 可引用表述：
-
-## 待确认问题
-
-- 哪个 claim 最值得二次核对？
-- 是否需要补读 appendix / project page / code repo？
-
-"""
-    return f"""# {title}
-
-## 快速判断
-
-- 生成模式：scaffold（待补正文）
-- 是否值得细读：待人工确认
-- 当前 topics：{", ".join(record.get("topics", [])) or "-"}
-- 当前 tags：{", ".join(record.get("tags", [])) or "-"}
-- 与当前研究方向的相关性：
-
-## Problem / Motivation
+    return {
+        "paper_id": record["id"],
+        "kind": "paper",
+        "status": "awaiting_agent_fill",
+        "phase": "prepare",
+        "fill_contract": {
+            "description": (
+                "Agent fills all five required_elements with its own understanding, each "
+                "backed by >=1 verbatim evidence_ref. Then run `complete-note --phase verify` "
+                "to validate + verbatim-check evidence + write note.md + core_content. Empty or "
+                "unevidenced elements are rejected; the script never authors content (SSOT §3.2)."
+            ),
+            "required_elements": list(NOTE_ELEMENTS),
+            "element_claim_types": dict(ELEMENT_CLAIM_TYPE),
+            "evidence_ref_format": EVIDENCE_REF_FORMAT,
+        },
+        "evidence_digest": digest,
+        # --- agent fills each element.content + element.evidence_refs below ---
+        "elements": elements,
+    }
 
 
-## 故事线 / 论文结构
+def _elements_by_name(fill: Any) -> dict[str, dict]:
+    elements: dict[str, dict] = {}
+    if isinstance(fill, dict):
+        raw = fill.get("elements")
+        if isinstance(raw, (list, tuple)):
+            for item in raw:
+                if isinstance(item, dict) and str(item.get("element") or "").strip():
+                    elements[str(item.get("element")).strip().lower()] = item
+    return elements
 
 
-## 核心方法与关键机制
+def _claim_from_element(name: str, element: dict) -> dict:
+    return {
+        "id": f"claim-{name}",
+        "text": clean_text(str(element.get("content") or "")),
+        "claim_type": str(element.get("claim_type") or ELEMENT_CLAIM_TYPE.get(name, "inference")),
+        "confirmation_status": "pending_user_confirmation",
+        "evidence_refs": element.get("evidence_refs") or [],
+    }
 
 
-## 关键实验与结果
+def verify_note_fill(fill: Any, unit_dir: Path) -> tuple[list[str], list[dict]]:
+    """Validate an agent-filled 5-element note. Returns (violations, claims).
+
+    Violations name the offending element. All five elements must be present, carry
+    non-empty content, be structurally valid (validate_claims), and every evidence_ref
+    quote must verify verbatim against the artifact (verify_claim_evidence).
+    """
+    violations: list[str] = []
+    elements = _elements_by_name(fill)
+    claims: list[dict] = []
+    for name in NOTE_ELEMENTS:
+        element = elements.get(name)
+        if element is None:
+            violations.append(f"element '{name}': missing (all five elements are required)")
+            continue
+        content = clean_text(str(element.get("content") or ""))
+        if not content:
+            violations.append(f"element '{name}': empty content — the agent must fill it")
+        refs = element.get("evidence_refs") or []
+        if not refs:
+            violations.append(f"element '{name}': no evidence_refs — every element must cite >=1 verbatim quote")
+        claim = _claim_from_element(name, element)
+        claims.append(claim)
+        for violation in verify_claim_evidence(claim, unit_dir):
+            violations.append(f"element '{name}': {violation}")
+    # Structural + judgement-evidence rules (research.evidence). Prefix by claim id.
+    for violation in validate_claims(claims):
+        violations.append(f"claim-structure: {violation}")
+    return violations, claims
 
 
-## Figure 级线索
+def _apply_note_fill_to_payload(record: dict, claims: list[dict]) -> None:
+    """Route verified element content into canonical payload fields (in place)."""
+    payload = record.setdefault("payload", {})
+    core = payload.setdefault("core_content", {})
+    critique = payload.setdefault("critique", {})
+    by_id = {str(claim.get("id") or ""): claim for claim in claims}
+    for name in NOTE_ELEMENTS:
+        claim = by_id.get(f"claim-{name}")
+        if claim is None:
+            continue
+        content = clean_text(str(claim.get("text") or ""))
+        section, field, shape = ELEMENT_TARGET[name]
+        target = core if section == "core_content" else critique
+        if shape == "list":
+            existing = target.get(field)
+            items = list(existing) if isinstance(existing, list) else []
+            if content and content not in items:
+                items.append(content)
+            target[field] = items
+        else:
+            target[field] = content
 
 
-## 可靠性 / 薄弱点 / Failure Case
-
-
-## 与我当前 program / idea 的关系
-
-
-## 可复用结论
-
-
-## 待确认问题
-
-
-"""
+def render_note_md(record: dict, claims: list[dict]) -> str:
+    """Render note.md from verified elements + their evidence citations."""
+    title = str(record.get("title") or record.get("id") or "")
+    by_id = {str(claim.get("id") or ""): claim for claim in claims}
+    lines = [
+        f"# {title}",
+        "",
+        "> 本笔记由 runtime agent 依据 parse-cache 填写；脚本已逐字校验每条 evidence（SSOT 原则1/原则2）。",
+        "",
+    ]
+    for name in NOTE_ELEMENTS:
+        lines.append(f"## {ELEMENT_HEADING[name]}")
+        lines.append("")
+        claim = by_id.get(f"claim-{name}")
+        content = clean_text(str(claim.get("text") or "")) if claim else ""
+        lines.append(content or "-")
+        lines.append("")
+        refs = (claim.get("evidence_refs") if claim else None) or []
+        if refs:
+            lines.append("证据：")
+            for ref in refs:
+                if not isinstance(ref, dict):
+                    continue
+                locator = str(ref.get("locator") or "?")
+                quote = clean_text(str(ref.get("quote") or ""))
+                summary = clean_text(str(ref.get("summary") or ""))
+                suffix = f" — {summary}" if summary else ""
+                lines.append(f"- [{locator}] \"{quote}\"{suffix}")
+            lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def detect_structure(source_chunks: list[dict], note_path: Path) -> dict:
@@ -536,6 +630,8 @@ def extract_figure_mentions(source_chunks: list[dict], *, extracted_assets: list
             "是否仍有极少数跨栏或无 caption 的对象需要人工补裁？",
         ],
     }
+
+
 def _extract_pdf_images(root: Path, record: dict, unit_root: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     pdf_path = next((path for path in _source_paths(root, record) if path.suffix.lower() == ".pdf"), None)
     if pdf_path is None:
@@ -565,8 +661,17 @@ def _finalize_post_actions(root: Path, *, trigger: str, message: str, defer_post
     return checkpoint_and_report(root, trigger=trigger, message=message)
 
 
+def _resolve_fill_input(unit_root: Path, default_name: str, explicit: str | None) -> Path:
+    if explicit:
+        candidate = Path(explicit).expanduser()
+        if not candidate.is_absolute():
+            candidate = unit_root / explicit
+        return candidate
+    return unit_root / default_name
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Analyze paper units in core.")
+    parser = argparse.ArgumentParser(description="Prepare fillable paper structures + verify agent-filled understanding.")
     add_project_root_argument(parser)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -577,11 +682,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     screen = subparsers.add_parser("screen")
     screen.add_argument("--paper-id", required=True)
+    screen.add_argument("--phase", choices=["prepare", "verify"], default="prepare")
+    screen.add_argument("--input", default="")
     screen.add_argument("--mode", default="auto")
     screen.add_argument("--defer-post-actions", action="store_true")
 
     note = subparsers.add_parser("complete-note")
     note.add_argument("--paper-id", required=True)
+    note.add_argument("--phase", choices=["prepare", "verify"], default="prepare")
+    note.add_argument("--input", default="")
     note.add_argument("--mode", default="auto")
     note.add_argument("--defer-post-actions", action="store_true")
 
@@ -602,6 +711,160 @@ def build_parser() -> argparse.ArgumentParser:
     reject.add_argument("--paper-id", required=True)
     reject.add_argument("--defer-post-actions", action="store_true")
     return parser
+
+
+def _run_screen(args, root, record, unit_root, cache_path, source_chunks, paper_preferences, defer_post_actions) -> int:
+    screen_path = unit_root / "screening.yaml"
+    cache_locator_kind = _cache_locator_kind(cache_path)
+
+    if args.phase == "prepare":
+        payload = build_screening_scaffold(
+            record,
+            source_chunks,
+            cache_locator_kind,
+            digest_chunks=int(paper_preferences.get("screening_context_pages") or 6),
+            digest_chars=int(paper_preferences.get("screening_digest_chars") or 1200),
+        )
+        write_yaml_if_changed(screen_path, payload)
+        record = apply_record_governance(root, record, infer_missing=True, source_label="paper-analyst")
+        record["status"] = "screened"
+        if record.get("maturity") != "complete":
+            record["maturity"] = "lightweight"
+        record["confirmation_status"] = "pending_user_confirmation"
+        record["needs_human_confirmation"] = True
+        record["information_types"] = ["fact", "inference", "unverified"]
+        record["payload"]["quick_screen"]["recommended_next_action"] = "screen --phase verify (after agent fills)"
+        append_history(
+            record,
+            action="paper-screen-prepared",
+            summary="Prepared fillable screening scaffold (no script grading).",
+            information_types=["inference", "unverified"],
+            artifacts=[rel(root, screen_path), rel(root, cache_path)],
+        )
+        write_record(root, record)
+        print(f"[ok] wrote {screen_path.relative_to(root)}")
+        print("下一步：runtime agent 填 worth_deep_reading + judgement_reason + claims(带证据)，再运行 screen --phase verify。")
+        _finalize_post_actions(root, trigger="milestone", message=f"milestone: prepare screen {args.paper_id}", defer_post_actions=defer_post_actions)
+        return 0
+
+    # verify
+    fill_path = _resolve_fill_input(unit_root, "screening.yaml", args.input)
+    if not fill_path.exists():
+        raise SystemExit(f"screen --phase verify: fill input not found: {fill_path}")
+    payload = load_yaml(fill_path, default={})
+    if not isinstance(payload, dict):
+        raise SystemExit(f"screen --phase verify: {fill_path} is not a mapping")
+    violations = verify_screening_fill(payload, unit_root)
+    if violations:
+        print("[reject] screening fill failed verification:", file=sys.stderr)
+        for violation in violations:
+            print(f"  - {violation}", file=sys.stderr)
+        raise SystemExit(1)
+
+    worth = str(payload.get("worth_deep_reading") or "").strip().lower()
+    reasons = [str(item).strip() for item in (payload.get("judgement_reason") or []) if str(item).strip()]
+    relevance = str(payload.get("relevance_to_current_research") or "").strip()
+    attach_claims(payload, read_claims(payload))
+    payload["status"] = "verified"
+    payload["phase"] = "verify"
+    write_yaml_if_changed(screen_path, payload)
+    record = apply_record_governance(root, record, infer_missing=True, source_label="paper-analyst")
+    quick = record["payload"]["quick_screen"]
+    quick["worth_deep_reading"] = worth
+    quick["judgement_reason"] = reasons
+    quick["relevance_to_current_research"] = relevance
+    quick["recommended_next_action"] = "complete-note" if worth in {"yes", "maybe"} else "defer-or-confirm"
+    record["status"] = "screened"
+    record["confirmation_status"] = "pending_user_confirmation"
+    record["needs_human_confirmation"] = True
+    record["information_types"] = ["fact", "evaluation", "inference", "unverified"]
+    if reasons:
+        record["summary"] = reasons[0]
+    append_history(
+        record,
+        action="paper-screen-verified",
+        summary="Verified agent screening judgement (evidence-grounded).",
+        information_types=["evaluation", "inference", "unverified"],
+        artifacts=[rel(root, screen_path), rel(root, cache_path)],
+    )
+    write_record(root, record)
+    print(f"[ok] verified + persisted {screen_path.relative_to(root)} (worth_deep_reading={worth})")
+    _finalize_post_actions(root, trigger="milestone", message=f"milestone: verify screen {args.paper_id}", defer_post_actions=defer_post_actions)
+    return 0
+
+
+def _run_complete_note(args, root, record, unit_root, cache_path, source_chunks, paper_preferences, defer_post_actions) -> int:
+    fill_scaffold_path = unit_root / "note-fill.yaml"
+    note_path = unit_root / "note.md"
+    cache_locator_kind = _cache_locator_kind(cache_path)
+    mode = str(args.mode or "auto")
+    if mode == "auto":
+        mode = str(paper_preferences.get("complete_note_mode") or "scaffold")
+
+    if args.phase == "prepare":
+        payload = build_note_scaffold(
+            record,
+            source_chunks,
+            cache_locator_kind,
+            digest_chunks=int(paper_preferences.get("note_context_pages") or 8),
+            digest_chars=int(paper_preferences.get("note_digest_chars") or 1600),
+        )
+        write_yaml_if_changed(fill_scaffold_path, payload)
+        record["maturity"] = "complete"
+        record["confirmation_status"] = "pending_user_confirmation"
+        record["needs_human_confirmation"] = True
+        record["information_types"] = ["fact", "inference", "evaluation", "unverified"]
+        record["payload"]["state"]["full_note_status"] = "awaiting_agent_fill"
+        record["payload"]["state"]["note_generation_mode"] = mode
+        append_history(
+            record,
+            action="paper-note-scaffolded",
+            summary="Prepared 5-element fillable note skeleton (script authored nothing).",
+            information_types=["inference", "unverified"],
+            artifacts=[rel(root, fill_scaffold_path), rel(root, cache_path)],
+        )
+        write_record(root, record)
+        print(f"[ok] wrote {fill_scaffold_path.relative_to(root)}")
+        print("下一步：runtime agent 为 5 要素(motivation/method/experiment/limitation/insight)填内容+证据，再运行 complete-note --phase verify。")
+        _finalize_post_actions(root, trigger="milestone", message=f"milestone: scaffold note {args.paper_id}", defer_post_actions=defer_post_actions)
+        return 0
+
+    # verify
+    fill_path = _resolve_fill_input(unit_root, "note-fill.yaml", args.input)
+    if not fill_path.exists():
+        raise SystemExit(f"complete-note --phase verify: fill input not found: {fill_path}")
+    fill = load_yaml(fill_path, default={})
+    if not isinstance(fill, dict):
+        raise SystemExit(f"complete-note --phase verify: {fill_path} is not a mapping")
+    violations, claims = verify_note_fill(fill, unit_root)
+    if violations:
+        print("[reject] note fill failed verification:", file=sys.stderr)
+        for violation in violations:
+            print(f"  - {violation}", file=sys.stderr)
+        raise SystemExit(1)
+
+    _apply_note_fill_to_payload(record, claims)
+    write_text_if_changed(note_path, render_note_md(record, claims))
+    note_payload = {"paper_id": record["id"], "kind": "paper"}
+    attach_claims(note_payload, claims)
+    write_yaml_if_changed(unit_root / "note-claims.yaml", note_payload)
+    record["maturity"] = "complete"
+    record["confirmation_status"] = "pending_user_confirmation"
+    record["needs_human_confirmation"] = True
+    record["information_types"] = ["fact", "inference", "evaluation", "user_opinion", "unverified"]
+    record["payload"]["state"]["full_note_status"] = "pending_user_confirmation"
+    record["payload"]["state"]["note_generation_mode"] = mode
+    append_history(
+        record,
+        action="paper-note-verified",
+        summary="Verified + persisted agent 5-element note (evidence-grounded).",
+        information_types=["inference", "evaluation", "unverified"],
+        artifacts=[rel(root, note_path), rel(root, cache_path)],
+    )
+    write_record(root, record)
+    print(f"[ok] verified + wrote {note_path.relative_to(root)} (core_content filled, {len(claims)} elements)")
+    _finalize_post_actions(root, trigger="milestone", message=f"milestone: verify note {args.paper_id}", defer_post_actions=defer_post_actions)
+    return 0
 
 
 def main() -> int:
@@ -632,90 +895,10 @@ def main() -> int:
         return 0
 
     if args.command == "screen":
-        screen_path = unit_root / "screening.yaml"
-        requested_mode = str(args.mode or "auto")
-        if requested_mode == "auto":
-            requested_mode = str(paper_preferences.get("screening_mode") or "heuristic_structured")
-        payload = screening_payload(
-            record,
-            source_chunks,
-            requested_mode=requested_mode,
-            context_pages=int(paper_preferences.get("screening_context_pages") or 6),
-            max_chars=int(paper_preferences.get("screening_max_chars") or 12000),
-        )
-        write_yaml_if_changed(screen_path, payload)
-        record = apply_record_governance(root, record, infer_missing=True, source_label="paper-analyst")
-        record["payload"]["quick_screen"]["worth_deep_reading"] = payload["worth_deep_reading"]
-        record["payload"]["quick_screen"]["judgement_reason"] = payload["judgement_reason"]
-        record["payload"]["quick_screen"]["takeaways"] = payload["takeaways"]
-        record["payload"]["quick_screen"]["backing_strength"] = payload["backing_strength"]
-        record["payload"]["quick_screen"]["result_strength"] = payload["result_strength"]
-        record["payload"]["quick_screen"]["novelty"] = payload["novelty_signal"]
-        record["payload"]["quick_screen"]["experiment_quality"] = payload["experiment_signal"]
-        record["payload"]["quick_screen"]["reliability"] = payload["reliability_signal"]
-        record["payload"]["quick_screen"]["relevance_to_current_research"] = payload["relevance_signal"]
-        record["payload"]["quick_screen"]["screening_mode"] = payload["screening_mode_effective"]
-        record["payload"]["quick_screen"]["screening_evidence_pages"] = payload["evidence_pages"]
-        record["payload"]["quick_screen"]["risks"] = payload["risks"]
-        record["payload"]["quick_screen"]["keyword_hits"] = payload["keyword_hits"]
-        record["payload"]["quick_screen"]["recommended_next_action"] = payload["recommended_next_action"]
-        record["status"] = "screened"
-        if record.get("maturity") != "complete":
-            record["maturity"] = "lightweight"
-        record["confirmation_status"] = "pending_user_confirmation"
-        record["needs_human_confirmation"] = True
-        record["information_types"] = ["fact", "evaluation", "inference", "unverified"]
-        record["summary"] = payload["judgement_reason"][0]
-        append_history(
-            record,
-            action="paper-screened",
-            summary="Generated quick screening judgement.",
-            information_types=["evaluation", "inference", "unverified"],
-            artifacts=[rel(root, screen_path), rel(root, cache_path)],
-        )
-        write_record(root, record)
-        print(f"[ok] wrote {screen_path.relative_to(root)}")
-        recommended_next_action = str(payload.get("recommended_next_action") or "")
-        if str(payload.get("worth_deep_reading") or "") in {"yes", "maybe"}:
-            print("建议：确认后运行 kb next 看下一步，或让 AI 生成完整笔记。")
-        else:
-            print("建议：先放入 defer，或运行 kb review 处理待确认。")
-        checkpoint = _finalize_post_actions(
-            root,
-            trigger="milestone",
-            message=f"milestone: quick screen {args.paper_id}",
-            defer_post_actions=defer_post_actions,
-        )
-        return 0
+        return _run_screen(args, root, record, unit_root, cache_path, source_chunks, paper_preferences, defer_post_actions)
 
     if args.command == "complete-note":
-        note_path = unit_root / "note.md"
-        mode = str(args.mode or "auto")
-        if mode == "auto":
-            mode = str(paper_preferences.get("complete_note_mode") or "scaffold")
-        write_text_if_changed(note_path, note_template(record, source_chunks, mode=mode))
-        record["maturity"] = "complete"
-        record["confirmation_status"] = "pending_user_confirmation"
-        record["needs_human_confirmation"] = True
-        record["information_types"] = ["fact", "inference", "evaluation", "user_opinion", "unverified"]
-        record["payload"]["state"]["full_note_status"] = "pending_user_confirmation"
-        record["payload"]["state"]["note_generation_mode"] = mode
-        append_history(
-            record,
-            action="paper-note-created",
-            summary=f"Created full paper note {mode} from cached parse.",
-            information_types=["inference", "evaluation", "unverified"],
-            artifacts=[rel(root, note_path), rel(root, cache_path)],
-        )
-        write_record(root, record)
-        print(f"[ok] wrote {note_path.relative_to(root)}")
-        checkpoint = _finalize_post_actions(
-            root,
-            trigger="milestone",
-            message=f"milestone: complete paper note {args.paper_id}",
-            defer_post_actions=defer_post_actions,
-        )
-        return 0
+        return _run_complete_note(args, root, record, unit_root, cache_path, source_chunks, paper_preferences, defer_post_actions)
 
     if args.command == "extract-figures":
         figures_path = unit_root / "figures.yaml"
@@ -751,7 +934,7 @@ def main() -> int:
         )
         write_record(root, record)
         print(f"[ok] wrote {figures_path.relative_to(root)}")
-        checkpoint = _finalize_post_actions(
+        _finalize_post_actions(
             root,
             trigger="milestone",
             message=f"milestone: extract paper figures {args.paper_id}",
@@ -779,7 +962,7 @@ def main() -> int:
         )
         write_record(root, record)
         print(f"[ok] wrote {structure_path.relative_to(root)}")
-        checkpoint = _finalize_post_actions(
+        _finalize_post_actions(
             root,
             trigger="milestone",
             message=f"milestone: refresh paper structure {args.paper_id}",
@@ -791,7 +974,7 @@ def main() -> int:
         record = confirm_unit(record, "paper", confirmed_by=args.confirmed_by, evidence=args.evidence, method="paper.py confirm", project_root=root)
         write_record(root, record)
         print(f"[ok] confirmed {args.paper_id}")
-        checkpoint = _finalize_post_actions(
+        _finalize_post_actions(
             root,
             trigger="milestone",
             message=f"milestone: confirm paper {args.paper_id}",
@@ -805,7 +988,7 @@ def main() -> int:
         append_history(record, action="paper-rejected", summary="Paper analysis rejected or deferred.", information_types=["evaluation"])
         write_record(root, record)
         print(f"[ok] rejected {args.paper_id}")
-        checkpoint = _finalize_post_actions(
+        _finalize_post_actions(
             root,
             trigger="milestone",
             message=f"milestone: reject paper {args.paper_id}",
