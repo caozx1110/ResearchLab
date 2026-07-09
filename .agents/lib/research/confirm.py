@@ -19,6 +19,7 @@ from .paths import (
 from .records import (
     _record_needs_gate,
     append_history,
+    kind_payload_skeleton,
     locate_record,
     normalize_record_schema,
 )
@@ -50,6 +51,84 @@ CONFIRM_UNIT_SUMMARY_BY_KIND = {
 
 def is_ai_signer(actor: str) -> bool:
     return str(actor or "").strip().lower() in AI_SIGNER_NAMES
+
+
+# Substance-check (SSOT §3.11 / Principle 3 — plug the hollow confirmation gate).
+#
+# Per kind, the payload section(s) that hold the *substantive analysis* (the region
+# that becomes hollow when an analyst confirms an empty note). Paper intentionally
+# uses `core_content` so the emptiness caliber matches the G5 research-value harness
+# (`paper_core_content_empty`): a paper whose 8 core_content fields are ALL empty is
+# hollow. Field names are read from the schema SSOT (records.kind_payload_skeleton),
+# so this stays aligned with the canonical fields the harness scans.
+SUBSTANCE_CONTENT_SECTIONS: dict[str, tuple[str, ...]] = {
+    "paper": ("core_content",),
+    "repo": ("capability",),
+    "blog": ("content",),
+    "idea": ("problem", "hypothesis"),
+    "experiment": ("results", "diagnosis"),
+}
+
+
+def _is_empty_value(value: Any) -> bool:
+    """Emptiness predicate matching the G5 research-value harness caliber.
+
+    None / whitespace-only string / empty list|dict|tuple|set all count as empty
+    (mirrors eval_research_value._is_empty_value so the two agree that an all-empty
+    core_content is hollow).
+    """
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    if isinstance(value, (list, dict, tuple, set)):
+        return len(value) == 0
+    return False
+
+
+def has_substantive_content(record: dict[str, Any], kind: str | None = None) -> bool:
+    """True when the record carries real analytical content (not a hollow template).
+
+    For a paper this is exactly ``not paper_core_content_empty(record)`` in the G5
+    harness: substantive iff at least one of the 8 canonical ``core_content`` fields
+    is non-empty. Other kinds use the analogous core-analysis section(s) declared in
+    ``SUBSTANCE_CONTENT_SECTIONS``. Unknown kinds are *not* judged (returns True) so
+    the gate only tightens the kinds it understands, never blocks an unknown one.
+    """
+    unit_kind = str(kind or record.get("kind") or "")
+    sections = SUBSTANCE_CONTENT_SECTIONS.get(unit_kind)
+    if not sections:
+        return True
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+        payload = {}
+    skeleton = kind_payload_skeleton(unit_kind)
+    for section_key in sections:
+        canonical_fields = skeleton.get(section_key) or {}
+        record_section = payload.get(section_key)
+        if not isinstance(record_section, dict):
+            record_section = {}
+        for field in canonical_fields:
+            if not _is_empty_value(record_section.get(field)):
+                return True
+    return False
+
+
+def confirmation_track(record: dict[str, Any]) -> str:
+    """Two-track classification of a pending item (SSOT §3.11 decision ①).
+
+    - ``'judgement'`` — the record carries AI inference/evaluation/user_opinion (or an
+      AI source), i.e. it already needs the confirmation gate. Confirming it as fact
+      requires substance (``has_substantive_content``) *and* evidence provenance.
+    - ``'fact'`` — pure factual metadata (title/authors/arxiv/links). Eligible for
+      light / auto confirmation (no deep substance check, but self-signing is still
+      forbidden via ``require_confirmation_provenance``).
+
+    Reuses ``_record_needs_gate`` so the track boundary is identical to the existing
+    governance gate rather than a parallel, drifting rule.
+    """
+    needs_gate, _ai_info_types, _source_is_ai = _record_needs_gate(record)
+    return "judgement" if needs_gate else "fact"
 
 
 def default_confirmed_by(project_root: Path | None = None) -> str:
@@ -224,6 +303,19 @@ def promote_record(
         record["maturity"] = maturity
     if confirmation_status:
         if confirmation_status == "confirmed":
+            # Substance gate (SSOT §3.11 / Principle 3): a judgement-track record must
+            # carry real content before it can be confirmed as fact. This ADDED check
+            # is layered on top of the existing provenance rule (never relaxes it) and
+            # runs before any mutation is written, so a rejected record stays pending
+            # on disk. Fact-track basic metadata is exempt (light/auto confirm track).
+            if confirmation_track(record) == "judgement" and not has_substantive_content(
+                record, str(record.get("kind") or "")
+            ):
+                raise SystemExit(
+                    f"Refusing to confirm hollow unit {unit_id!r}: core content is empty / "
+                    f"template-only — a judgement-track record cannot be confirmed as fact. "
+                    f"Fill the analysis (e.g. payload.core_content) before promoting to confirmed."
+                )
             apply_confirmation(
                 record,
                 confirmed_by=confirmed_by,
@@ -242,7 +334,10 @@ __all__ = [
     "AI_SIGNER_NAMES",
     "CONFIRM_UNIT_STATUS_BY_KIND",
     "CONFIRM_UNIT_SUMMARY_BY_KIND",
+    "SUBSTANCE_CONTENT_SECTIONS",
     "is_ai_signer",
+    "has_substantive_content",
+    "confirmation_track",
     "default_confirmed_by",
     "require_confirmation_provenance",
     "apply_confirmation",
