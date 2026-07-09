@@ -541,6 +541,63 @@ def _html_metadata(html: str) -> dict[str, Any]:
     return {"title": title, "abstract": abstract}
 
 
+# --- parse-cache writer + source-record projection --------------------------
+
+# Only keys in the on-disk source contract (SCHEMAS.md) belong in record.source;
+# status/warning/locator metadata travel via the return value + stderr + parse-cache.
+SOURCE_RECORD_KEYS = ("original_uri", "backup_paths", "backup_kind", "file_hash")
+
+
+def source_record_fields(source_info: dict[str, Any]) -> dict[str, Any]:
+    """Project a backup_source() result down to the on-disk source schema keys.
+
+    Keeps backup_status / backup_warning / locator metadata out of record.source
+    (historical pollution guard — see SCHEMAS source contract)."""
+    return {key: source_info[key] for key in SOURCE_RECORD_KEYS if key in source_info}
+
+
+def write_parse_cache(unit_dir: Path, unit_id: str, source_info: dict[str, Any]) -> Path | None:
+    """Write a paper-analyst-compatible parse-cache from a backup_source result.
+
+    Mirrors paper.py's ``{paper_id, generated_at, cache_policy, chunks}`` shape so
+    screen/complete-note reuse it (no PyPDF2 needed, no cold-start empty parse),
+    and adds ``source_type`` / ``locator_kind`` so downstream evidence (原则2/B4)
+    can tell PDF (page=N) from HTML (section/anchor). Returns None when nothing
+    was parsed."""
+    chunks = source_info.get("parse_chunks") or []
+    if not chunks:
+        return None
+    cache_path = unit_dir / "parse-cache.yaml"
+    write_yaml_if_changed(
+        cache_path,
+        {
+            "paper_id": unit_id,
+            "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+            "source_type": source_info.get("source_type", ""),
+            "locator_kind": source_info.get("locator_kind", ""),
+            "parse_backend": source_info.get("parse_backend", ""),
+            "cache_policy": {
+                "page_limit": PARSE_CACHE_PAGE_LIMIT,
+                "per_page_char_limit": PARSE_CACHE_PER_PAGE_CHAR_LIMIT,
+                "section_limit": PARSE_CACHE_SECTION_LIMIT,
+            },
+            "chunks": chunks,
+        },
+    )
+    return cache_path
+
+
+def _warn(message: str, source_label: str) -> None:
+    sys.stderr.write(f"[research/sources.backup_source] WARN: {message} source={source_label}\n")
+
+
+def _store_bytes(root: Path, name: str, data: bytes) -> Path:
+    dst = root / name
+    if not dst.exists():
+        dst.write_bytes(data)
+    return dst
+
+
 def backup_source(project_root: Path, kind: str, unit_id: str, source: str) -> dict[str, Any]:
     root = unit_root(project_root, kind, unit_id) / "source"
     ensure_dir(root)
