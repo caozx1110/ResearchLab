@@ -706,6 +706,110 @@ def _backup_pdf_bytes(
     return result
 
 
+def _looks_like_pdf(url: str, content_type: str, data: bytes) -> bool:
+    if content_type == "application/pdf":
+        return True
+    if url.split("?", 1)[0].lower().endswith(".pdf"):
+        return True
+    return data[:5] == b"%PDF-"
+
+
+def _backup_generic_url(project_root: Path, root: Path, source: str) -> dict[str, Any]:
+    """Non-arxiv URL: real download, PDF->page chunks, HTML->section chunks."""
+    original_uri = normalize_remote_url(source)
+    txt = root / "source-url.txt"
+    write_text_if_changed(txt, source.strip() + "\n")
+    backup_paths = [rel(project_root, txt)]
+    try:
+        content, content_type = fetch_url(source, binary=True, max_bytes=SOURCE_DOWNLOAD_MAX_BYTES)
+    except FetchTooLarge as exc:
+        warning = f"URL source exceeded the {SOURCE_DOWNLOAD_MAX_BYTES}-byte size cap and was not archived: {exc}"
+        result = {"original_uri": original_uri, "backup_paths": backup_paths, "backup_kind": "url", "file_hash": "", "backup_status": "failed", "backup_warning": warning}
+        _warn(warning, original_uri)
+        return result
+    except Exception as exc:  # noqa: BLE001
+        warning = f"URL source could not be downloaded: {exc}"
+        result = {"original_uri": original_uri, "backup_paths": backup_paths, "backup_kind": "url", "file_hash": "", "backup_status": "failed", "backup_warning": warning}
+        _warn(warning, original_uri)
+        return result
+
+    data = content if isinstance(content, bytes) else str(content).encode("utf-8")
+    if _looks_like_pdf(source, content_type, data):
+        return _backup_pdf_bytes(project_root, root, data, original_uri, backup_kind="url", extra_backup_paths=backup_paths)
+
+    html = data.decode("utf-8", errors="ignore")
+    if _is_html_response(content_type, html):
+        raw = _store_bytes(root, "source.html", data)
+        backup_paths.append(rel(project_root, raw))
+        chunks = _html_to_section_chunks(html)
+        body = _truncate_snapshot_text(html_to_text(html))
+        if body:
+            snapshot = root / "snapshot.md"
+            write_text_if_changed(snapshot, f"# Source Snapshot\n\nSource: {original_uri}\n\n{body.rstrip()}\n")
+            backup_paths.append(rel(project_root, snapshot))
+        result = {
+            "original_uri": original_uri,
+            "backup_paths": backup_paths,
+            "backup_kind": "url",
+            "file_hash": file_sha256(raw),
+            "backup_status": "ok",
+            "source_type": "html",
+            "locator_kind": "section",
+            "parse_backend": "html-sectioner",
+            "parse_chunks": chunks,
+            "parse_metadata": _html_metadata(html),
+        }
+        if not chunks:
+            result["backup_status"] = "degraded"
+            result["backup_warning"] = "URL source produced an empty HTML section parse."
+            _warn(result["backup_warning"], original_uri)
+        return result
+
+    warning = f"URL source archived by reference only (unsupported content_type={content_type or 'unknown'}); no text/bytes snapshot."
+    result = {"original_uri": original_uri, "backup_paths": backup_paths, "backup_kind": "url", "file_hash": "", "backup_status": "failed", "backup_warning": warning}
+    _warn(warning, original_uri)
+    return result
+
+
+def _backup_local(project_root: Path, root: Path, source: str) -> dict[str, Any]:
+    """Local file/dir: copy + real sha256; PDFs also get page=N parse chunks."""
+    normalized_source = normalize_storage_reference(project_root, source)
+    resolved_source = resolve_local_reference(project_root, normalized_source)
+    src = resolved_source or Path(normalized_source).expanduser().resolve()
+    if not src.exists():
+        raise SystemExit(f"Source not found: {source}")
+    dst = root / src.name
+    if src.is_dir():
+        _copy_dir(src, dst)
+        return {"original_uri": src.as_posix(), "backup_paths": [rel(project_root, dst)], "backup_kind": "directory", "file_hash": "", "backup_status": "ok", "source_type": "directory", "locator_kind": ""}
+    if not dst.exists():
+        shutil.copy2(src, dst)
+    result: dict[str, Any] = {
+        "original_uri": src.as_posix(),
+        "backup_paths": [rel(project_root, dst)],
+        "backup_kind": "file",
+        "file_hash": file_sha256(dst),
+        "backup_status": "ok",
+    }
+    if src.suffix.lower() == ".pdf":
+        chunks = _pdf_to_page_chunks(dst)
+        result["source_type"] = "pdf"
+        result["locator_kind"] = "page"
+        result["parse_backend"] = "pymupdf4llm" if _pymupdf4llm_available() else ""
+        result["parse_chunks"] = chunks
+        if not _pymupdf4llm_available():
+            result["backup_status"] = "stored-unparsed"
+            result["backup_warning"] = "Local PDF stored with real sha256 but not parsed: PyMuPDF4LLM backend unavailable."
+            _warn(result["backup_warning"], src.as_posix())
+        elif not chunks:
+            result["backup_status"] = "stored-unparsed"
+            result["backup_warning"] = "Local PDF stored with real sha256 but PyMuPDF4LLM extracted no text (scanned/image-only?)."
+            _warn(result["backup_warning"], src.as_posix())
+        else:
+            result["parse_metadata"] = _pdf_metadata(dst, chunks)
+    return result
+
+
 def backup_source(project_root: Path, kind: str, unit_id: str, source: str) -> dict[str, Any]:
     root = unit_root(project_root, kind, unit_id) / "source"
     ensure_dir(root)
