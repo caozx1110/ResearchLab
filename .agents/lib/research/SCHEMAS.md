@@ -424,9 +424,9 @@ IF record["source"].get("kind") == "ai"
 
 ## Evidence / Claims <a id="evidence-claims"></a>
 
-> **状态（Wave 2 落点）**：本节锁定 claim→evidence 绑定的规格。运行侧的逐字校验将在 evidence track 落地；当前 `lib/research/evidence.py` 只提供 schema 骨架与 `verify_claim_evidence()` 的 no-op stub（返回 `[]`），不改变任何现有行为。
+> **状态（Wave 2 · Evidence track 已落地）**：本节锁定 claim→evidence 绑定的规格，运行侧逐字校验已在 `lib/research/evidence.py` 实现为**可调用、可测试的纯函数**（`verify_claim_evidence` / `validate_claims` / `attach_claims` / `read_claims`），并经 `core.py` 门面再导出。该层仍是 **additive**：系统内暂无调用方（confirmation gate 与 analyzer 未改），judgement 空据 → 不得 confirmed 的**门控联动**由并行 Gate track 消费 `validate_claims()` 落地，本层只提供判据函数，不改 gate。
 
-**契约目标（原则 2）**：每条 AI 判断（fact / inference / evaluation / user_opinion / unverified）都挂 `evidence_refs`，让"有理有据"从口号变成**可机器校验**——脚本能查"这条据在不在"。
+**契约目标（原则 2）**：每条 AI 判断（fact / inference / evaluation / user_opinion / unverified）都挂 `evidence_refs`，让"有理有据"从口号变成**可机器校验**——脚本能查"这条据在不在"。落盘位置：note / screening 产物内的 `claims` 列表（`attach_claims(payload, claims)` 写、`read_claims(payload)` 读）+ record 关联。
 
 **canonical schema（锁定规格）**：
 
@@ -446,11 +446,29 @@ claim:
       summary: ""                 # 可选转述
 ```
 
-**验证规则（脚本，原则 1）**：对每条 claim 的每个 evidence_ref，加载 artifact，检查 `quote` 为归一化空白后的**逐字子串**；缺失 → validate 报错/警告。
+**字段语义**：
 
-**两套 locator（B4）**：**PDF 源**用 `page=N` / `section` / `para`；**HTML 源**用 `section` / `anchor`（HTML 无页码）。
+| 字段 | 层级 | 语义 |
+|---|---|---|
+| `id` | claim | 必填，claim 唯一标识（如 `claim-001`）。 |
+| `text` | claim | 必填，断言本身（非空）。 |
+| `claim_type` | claim | 必填，取 `fact` / `inference` / `evaluation` / `user_opinion` / `unverified` 之一。**judgement-class** = `{inference, evaluation}`。 |
+| `confidence` | claim | 可选，0.0–1.0。 |
+| `confirmation_status` | claim | 必填，取 `pending_user_confirmation` / `confirmed` / `rejected` / `auto_confirmed` 之一（与 record 的 `CONFIRMATION_VALUES` 同族）。 |
+| `evidence_refs` | claim | 必填列表（fact-class 可空；judgement-class 非空）。 |
+| `source_unit_id` | ref | 证据所在 unit id。 |
+| `artifact` | ref | unit 内相对路径（`parse-cache.yaml` / `note.md` / source 文件）；逐字校验对此文件文本进行。 |
+| `locator` | ref | 定位提示，两套（见下）。 |
+| `quote` | ref | **短逐字片段（B3）**——脚本校验它逐字存在于 `artifact`。 |
+| `summary` | ref | 可选转述（不参与逐字校验）。 |
 
-**门控联动（原则 3）**：judgement-class（`inference` / `evaluation`）claim 若 `evidence_refs` 为空，**不得 promote 成 `confirmed`**。
+**逐字验证规则（`verify_claim_evidence(claim, unit_dir)`，原则 1）**：对每条 claim 的每个 evidence_ref，在 `unit_dir` 下加载 `artifact`，把 artifact 文本与 `quote` 都做**空白归一化**（连续空白→单空格 + strip；**大小写敏感、标点保留**），再判 `quote` 是否为 artifact 的**逐字子串**。命中 = grounded；未命中 = 返回一条 violation（含 claim id + artifact + quote 摘要）。归一化只折叠空白，因此一条跨行换行/多空格的引用仍能命中，而改动了词、大小写或标点的编造引用不能。空 quote、缺 artifact、artifact 读不到、非 dict 输入均返回精确 violation 而非崩溃；`verify_claim_evidence({}, None)` 返回 `[]`。artifact 为 `.yaml`（parse-cache）时取 `chunks[].text`（无该结构则拼接所有字符串叶子），其它后缀按纯文本读。**返回空列表 = 全部 grounded。**
+
+**两套 locator（B4）**：**PDF 源**用 `page=N` / `section` / `para`；**HTML 源**用 `section` / `anchor`（HTML 无页码）。当 artifact 为含 per-page chunk（label 形如 `...:page-N`）的 parse-cache 且 locator 为 `page=N` 时，校验会**额外缩小到该页**：quote 逐字命中在文档但落在**别的页** → 记一条 locator-mismatch violation（页码引错也是接地缺陷）。逐字命中始终是硬性判据，页缩小是精度加成，无 per-page 结构时自动退化为全文校验。
+
+**结构校验（`validate_claims(claims)`）**：逐条校验 claim 结构合法——必填字段齐全（`id`/`text`/`claim_type`/`confirmation_status`/`evidence_refs`）、`claim_type` ∈ 枚举、`confirmation_status` ∈ 枚举、`evidence_refs` 为列表——并施加**空据规则**：judgement-class（`inference`/`evaluation`）claim 的 `evidence_refs` **必须非空**（空 → violation）。fact-class 允许空 `evidence_refs`。返回 violation 列表（空 = 全部合法）。此函数是**纯判据**，不改任何 gate/record。
+
+**门控联动（原则 3）**：judgement-class claim 若 `evidence_refs` 为空，**不得 promote 成 `confirmed`**。本层用 `validate_claims()` 提供该判据；Gate track 负责把它接进确认门（本层不动 gate）。
 
 ---
 
