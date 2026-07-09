@@ -12,6 +12,14 @@ from pathlib import Path
 
 READY_FLAG = "_RESEARCH_RUNTIME_READY"
 
+# Lightweight default PDF backend (SSOT 3.1 decision A): pure PyMuPDF, no torch,
+# always installed into the managed venv so a fresh user never silently degrades
+# to an empty PDF parse. Heavy backends (MinerU/Docling) stay opt-in.
+PDF_BACKEND_PACKAGE = "pymupdf4llm"
+PDF_BACKEND_IMPORT = "pymupdf4llm"
+# Opt out of auto-installing the PDF backend (yaml install is unaffected).
+NO_PDF_BACKEND_ENV = "RESEARCH_NO_PDF_BACKEND"
+
 
 def _absolute_path(path: Path) -> Path:
     expanded = path.expanduser()
@@ -78,6 +86,45 @@ def _python_can_import_yaml(python_exe: str | Path) -> bool:
     except (OSError, subprocess.SubprocessError):
         return False
     return completed.returncode == 0
+
+
+def _python_can_import(python_exe: str | Path, module: str) -> bool:
+    try:
+        completed = subprocess.run(
+            [str(_python_path(python_exe)), "-c", f"import {module}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return completed.returncode == 0
+
+
+def _ensure_venv_has_pdf_backend(venv_py: Path) -> None:
+    """Best-effort install of the lightweight PDF backend into the managed venv.
+
+    Unlike PyYAML (a hard requirement that gates readiness), a missing PDF backend
+    only degrades PDF parsing, so a failed/opted-out install warns to stderr and is
+    non-fatal. This closes the cold-start gap where a fresh managed venv had no PDF
+    backend and silently produced empty parses."""
+    if os.environ.get(NO_PDF_BACKEND_ENV) == "1":
+        return
+    if _python_can_import(venv_py, PDF_BACKEND_IMPORT):
+        return
+    try:
+        _run_checked(
+            [str(venv_py), "-m", "pip", "install", "--disable-pip-version-check", PDF_BACKEND_PACKAGE],
+            context=f"{PDF_BACKEND_PACKAGE} installation",
+        )
+    except RuntimeError as exc:
+        print(
+            f"[research] warning: could not install lightweight PDF backend "
+            f"({PDF_BACKEND_PACKAGE}); PDF parsing will be unavailable until installed. Reason: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def _reexec(python_exe: Path, message: str) -> None:
@@ -162,6 +209,8 @@ def _ensure_venv_has_yaml(venv_dir: Path, venv_py: Path) -> None:
         )
     if not _python_can_import_yaml(venv_py):
         raise RuntimeError("managed venv still cannot import yaml after installation")
+    # PyYAML is the hard gate above; the lightweight PDF backend is best-effort.
+    _ensure_venv_has_pdf_backend(venv_py)
 
 
 def _failure_message(venv_dir: Path, error: Exception) -> str:
