@@ -19,6 +19,7 @@ from research.common import load_yaml, write_yaml_if_changed
 from research.core import (
     apply_confirmation,
     confirmation_track,
+    confirm_unit,
     ensure_workspace,
     has_substantive_content,
     promote_record,
@@ -290,6 +291,65 @@ def test_red_line_fact_track_light_confirm_passes(tmp_path: Path) -> None:
     )
 
     assert load_yaml(path, default={})["confirmation_status"] == "confirmed"
+
+
+# --------------------------------------------------------------------------- #
+# confirm_unit — the PRIMARY user confirm path (paper.py confirm / kb.py confirm /
+# interactive kb review). The substance gate must fire here too, evaluated on the
+# original record BEFORE information_types is collapsed to ['fact'].
+# --------------------------------------------------------------------------- #
+def test_confirm_unit_rejects_hollow_judgement_paper_before_mutation() -> None:
+    """confirm_unit rejects a hollow judgement paper and leaves the record untouched
+    (not confirmed, information_types NOT yet collapsed to fact)."""
+    record = _paper_record(information_types=JUDGEMENT_INFO_TYPES, core_content={})
+    with pytest.raises(SystemExit, match="hollow"):
+        confirm_unit(record, "paper", confirmed_by="czx", evidence=["kb/x/note.md"])
+    assert record["confirmation_status"] == "pending_user_confirmation"
+    # gate ran on the ORIGINAL state — the collapse to ['fact'] never happened
+    assert "inference" in record["information_types"]
+    assert "confirmation" not in record
+
+
+def test_confirm_unit_hollow_judgement_via_batch_stays_pending_on_disk(tmp_path: Path) -> None:
+    """kb.py batch path (apply_batch_confirmation -> confirm_unit): a hollow judgement
+    paper is rejected and stays pending_user_confirmation on disk (no confirmation)."""
+    kb = _load_kb_module()
+    ensure_workspace(tmp_path)
+    unit_id = "p-hollow-confirm-unit-123456"
+    write_yaml_if_changed(
+        record_path(tmp_path, "paper", unit_id),
+        _paper_record(unit_id, information_types=JUDGEMENT_INFO_TYPES, core_content={}),
+    )
+
+    with pytest.raises(SystemExit, match="hollow"):
+        kb.apply_batch_confirmation(
+            tmp_path,
+            [load_yaml(record_path(tmp_path, "paper", unit_id), default={})],
+            confirmed_by="czx",
+            evidence=["kb/programs/p/decision-log.md"],
+            method="test hollow via confirm_unit",
+        )
+
+    on_disk = load_yaml(record_path(tmp_path, "paper", unit_id), default={})
+    assert on_disk["confirmation_status"] == "pending_user_confirmation"
+    assert "confirmation" not in on_disk
+
+
+def test_confirm_unit_confirms_substantive_judgement_paper_and_collapses_types() -> None:
+    """A substantive judgement paper still confirms through confirm_unit, and the
+    information_types collapse to ['fact'] still happens after the gate passes."""
+    record = _paper_record(information_types=JUDGEMENT_INFO_TYPES, core_content=FILLED_CORE_CONTENT)
+    out = confirm_unit(record, "paper", confirmed_by="czx", evidence=["kb/x/note.md"])
+    assert out["confirmation_status"] == "confirmed"
+    assert out["information_types"] == ["fact"]
+    assert out["confirmation"]["by"] == "czx"
+
+
+def test_confirm_unit_confirms_fact_metadata_record() -> None:
+    """Fact-track metadata is exempt from the deep substance check (light confirm)."""
+    record = _paper_record(information_types=["fact"], core_content={})
+    out = confirm_unit(record, "paper", confirmed_by="czx", evidence=["kb/x/note.md"])
+    assert out["confirmation_status"] == "confirmed"
 
 
 # --------------------------------------------------------------------------- #
