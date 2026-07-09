@@ -422,6 +422,38 @@ IF record["source"].get("kind") == "ai"
 
 ---
 
+## Evidence / Claims <a id="evidence-claims"></a>
+
+> **状态（Wave 2 落点）**：本节锁定 claim→evidence 绑定的规格。运行侧的逐字校验将在 evidence track 落地；当前 `lib/research/evidence.py` 只提供 schema 骨架与 `verify_claim_evidence()` 的 no-op stub（返回 `[]`），不改变任何现有行为。
+
+**契约目标（原则 2）**：每条 AI 判断（fact / inference / evaluation / user_opinion / unverified）都挂 `evidence_refs`，让"有理有据"从口号变成**可机器校验**——脚本能查"这条据在不在"。
+
+**canonical schema（锁定规格）**：
+
+```yaml
+# 挂在每条 AI claim 上。落盘位置：note/screening 产物内的 claims 列表 + record 关联。
+claim:
+  id: claim-001
+  text: ""                       # 断言本身
+  claim_type: fact|inference|evaluation|user_opinion|unverified
+  confidence: 0.0                # 可选
+  confirmation_status: pending_user_confirmation|confirmed|rejected|auto_confirmed
+  evidence_refs:
+    - source_unit_id: p-...       # 证据所在 unit
+      artifact: parse-cache.yaml  # unit 内相对路径，或 source(pdf/html)
+      locator: "page=3"           # PDF: page=N|section|para ; HTML: section|anchor（B4）
+      quote: ""                   # 短逐字片段（B3）——脚本校验它逐字存在于 artifact
+      summary: ""                 # 可选转述
+```
+
+**验证规则（脚本，原则 1）**：对每条 claim 的每个 evidence_ref，加载 artifact，检查 `quote` 为归一化空白后的**逐字子串**；缺失 → validate 报错/警告。
+
+**两套 locator（B4）**：**PDF 源**用 `page=N` / `section` / `para`；**HTML 源**用 `section` / `anchor`（HTML 无页码）。
+
+**门控联动（原则 3）**：judgement-class（`inference` / `evaluation`）claim 若 `evidence_refs` 为空，**不得 promote 成 `confirmed`**。
+
+---
+
 ## 给 SKILL.md 的引用规范
 
 每个消费上述 artifact 的 SKILL.md，在 frontmatter 后面紧接一行：
@@ -430,4 +462,4 @@ IF record["source"].get("kind") == "ai"
 > 协议参考：`.agents/lib/research/SCHEMAS.md#<anchor>`
 ```
 
-可用 anchor：`enums`, `unit-record`, `unit-payload`, `experiment-files`, `program-files`, `config-files`, `ownership`, `confirmation-gate`。
+可用 anchor：`enums`, `unit-record`, `unit-payload`, `experiment-files`, `program-files`, `config-files`, `ownership`, `confirmation-gate`, `evidence-claims`。
