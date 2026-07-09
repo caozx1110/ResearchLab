@@ -811,59 +811,33 @@ def _backup_local(project_root: Path, root: Path, source: str) -> dict[str, Any]
 
 
 def backup_source(project_root: Path, kind: str, unit_id: str, source: str) -> dict[str, Any]:
+    """Archive a source as real bytes + real sha256, returning an explicit status.
+
+    Dispatch (SSOT 3.1 decision A / B4):
+      * arxiv URL or id  -> HTML-first (arxiv.org/html -> ar5iv -> abs), section locators
+      * other URL, PDF   -> real download + PyMuPDF4LLM page chunks, page=N locators
+      * other URL, HTML  -> real download + section chunks, section/anchor locators
+      * local file/dir   -> copy + sha256; local PDFs also get page=N chunks
+
+    The result always carries ``backup_status`` (ok|degraded|stored-unparsed|failed)
+    and, on any non-ok path, an explicit ``backup_warning`` (also emitted to stderr).
+    Neither status nor warning belongs in record.source — callers must persist only
+    ``source_record_fields(result)`` there (G7 fix: no more silent ``file_hash=""``).
+    """
     root = unit_root(project_root, kind, unit_id) / "source"
     ensure_dir(root)
     if is_url(source):
-        original_uri = normalize_remote_url(source)
-        txt = root / "source-url.txt"
-        write_text_if_changed(txt, source.strip() + "\n")
-        backup_paths = [rel(project_root, txt)]
-        file_hash = ""
-        backup_warning = ""
-        try:
-            content, content_type = fetch_url(source, timeout=15)
-            if isinstance(content, str) and _is_html_response(content_type, content):
-                body = _truncate_snapshot_text(html_to_text(content))
-                if body:
-                    snapshot_text = f"# Source Snapshot\n\nSource: {original_uri}\n\n{body.rstrip()}\n"
-                    snapshot = root / "snapshot.md"
-                    write_text_if_changed(snapshot, snapshot_text)
-                    backup_paths.append(rel(project_root, snapshot))
-                    file_hash = hashlib.sha256(snapshot_text.encode("utf-8")).hexdigest()
-                else:
-                    backup_warning = "URL source produced an empty text snapshot."
-            else:
-                content_label = content_type or type(content).__name__
-                backup_warning = f"URL source was not archived as a text snapshot: content_type={content_label}."
-        except Exception as exc:  # noqa: BLE001
-            backup_warning = f"URL source could not be archived as a text snapshot: {exc}"
-        payload = {"original_uri": original_uri, "backup_paths": backup_paths, "backup_kind": "url", "file_hash": file_hash}
-        if backup_warning:
-            payload["backup_warning"] = backup_warning
-            sys.stderr.write(f"[research/core.backup_source] WARN: {backup_warning} source={original_uri}\n")
-        return payload
-
-    normalized_source = normalize_storage_reference(project_root, source)
-    resolved_source = resolve_local_reference(project_root, normalized_source)
-    src = resolved_source or Path(normalized_source).expanduser().resolve()
-    if not src.exists():
-        raise SystemExit(f"Source not found: {source}")
-    dst = root / src.name
-    if src.is_dir():
-        _copy_dir(src, dst)
-        file_hash = ""
-        backup_kind = "directory"
-    else:
-        if not dst.exists():
-            shutil.copy2(src, dst)
-        file_hash = file_sha256(src)
-        backup_kind = "file"
-    return {
-        "original_uri": src.as_posix(),
-        "backup_paths": [rel(project_root, dst)],
-        "backup_kind": backup_kind,
-        "file_hash": file_hash,
-    }
+        arxiv_id = _arxiv_id_from_source(source)
+        if arxiv_id:
+            return _backup_arxiv_html(project_root, root, arxiv_id, source)
+        return _backup_generic_url(project_root, root, source)
+    # A bare arxiv id (not a URL, not an existing local path) is still an arxiv source.
+    arxiv_id = _arxiv_id_from_source(source)
+    if arxiv_id and resolve_local_reference(project_root, normalize_storage_reference(project_root, source)) is None:
+        maybe_local = Path(normalize_storage_reference(project_root, source)).expanduser()
+        if not maybe_local.exists():
+            return _backup_arxiv_html(project_root, root, arxiv_id, source)
+    return _backup_local(project_root, root, source)
 
 
 def detect_duplicate(project_root: Path, kind: str, source: str, *, title: str = "") -> dict[str, Any] | None:
@@ -920,6 +894,9 @@ __all__ = [
     "_copy_dir",
     "_is_html_response",
     "_truncate_snapshot_text",
+    "SOURCE_RECORD_KEYS",
+    "source_record_fields",
+    "write_parse_cache",
     "backup_source",
     "detect_duplicate",
 ]
