@@ -46,15 +46,15 @@ from .ids import (
 )
 from .retrieval import rank_records
 
-UNIT_KIND_DIRS = {
-    "paper": "papers",
-    "repo": "repos",
-    "blog": "blogs",
-    "idea": "ideas",
-    "experiment": "experiments",
-}
+from .paths import *
+
+
 INFORMATION_TYPES = {"fact", "inference", "evaluation", "user_opinion", "unverified"}
+
+
 MATURITY_LEVELS = {"lightweight", "complete"}
+
+
 STATUS_VALUES = {
     "draft",
     "screened",
@@ -68,7 +68,11 @@ STATUS_VALUES = {
     "completed",
     "failed",
 }
+
+
 CONFIRMATION_VALUES = {"auto_confirmed", "pending_user_confirmation", "confirmed", "rejected"}
+
+
 DEFAULT_REUSE_FLAGS = {
     "review": False,
     "idea": False,
@@ -77,6 +81,8 @@ DEFAULT_REUSE_FLAGS = {
     "weekly_report": False,
     "ppt": False,
 }
+
+
 DEFAULT_SETTINGS_MARKDOWN = """# Research Settings
 
 - [x] 自动入库事实类基础信息
@@ -103,6 +109,8 @@ DEFAULT_SETTINGS_MARKDOWN = """# Research Settings
 
 - 论文完整笔记触发条件、完整笔记模式（`scaffold` / `draft`）请使用 runtime preferences 管理。
 """
+
+
 DEFAULT_TOPIC_TAXONOMY = {
     "id": "topic-taxonomy",
     "status": "active",
@@ -115,6 +123,8 @@ DEFAULT_TOPIC_TAXONOMY = {
     "topics": {},
     "tags": {},
 }
+
+
 DEFAULT_CANDIDATE_POOLS = {
     "id": "candidate-pools",
     "status": "active",
@@ -125,240 +135,22 @@ DEFAULT_CANDIDATE_POOLS = {
     },
     "pools": {},
 }
+
+
 WEB_SNAPSHOT_MAX_CHARS = 120_000
-TEXT_REWRITE_SUFFIXES = {".md", ".markdown", ".txt", ".yaml", ".yml", ".json"}
+
+
 VERSIONING_COMMIT_MODES = {"manual", "milestone", "aggressive"}
+
+
 PAPER_AUTO_COMPLETE_CONDITIONS = {
     "after_screen",
     "suggested_worth_reading",
     "strong_relevance",
 }
+
+
 PAPER_NOTE_MODES = {"scaffold", "draft"}
-KB_GITIGNORE_LINES = [
-    "# Runtime state",
-    ".runtime/",
-    "",
-    "# Raw and exported artifacts",
-    "raw/",
-    "output/",
-    "",
-    "# Generated browser workspace",
-    "user/kb/",
-    "",
-    "# Local noise",
-    ".DS_Store",
-]
-def project_root(start: Path | None = None, *, explicit_root: str | Path | None = None) -> Path:
-    return find_project_root(start, explicit_root=explicit_root)
-
-
-def kb_root(project_root: Path) -> Path:
-    return research_root(project_root)
-
-
-def units_root(project_root: Path) -> Path:
-    return kb_root(project_root) / "units"
-
-
-def user_root(project_root: Path) -> Path:
-    return kb_root(project_root) / "user"
-
-
-def config_root(project_root: Path) -> Path:
-    return kb_root(project_root) / "config"
-
-
-def raw_storage_root(project_root: Path) -> Path:
-    return kb_root(project_root) / "raw"
-
-
-def output_storage_root(project_root: Path) -> Path:
-    return kb_root(project_root) / "output"
-
-
-def kb_runtime_root(project_root: Path) -> Path:
-    return kb_root(project_root) / ".runtime"
-
-
-def synthesis_root(project_root: Path) -> Path:
-    return kb_root(project_root) / "synthesis"
-
-
-def source_search_root(project_root: Path) -> Path:
-    return synthesis_root(project_root) / "source-search"
-
-
-def topic_taxonomy_path(project_root: Path) -> Path:
-    return config_root(project_root) / "topic-taxonomy.yaml"
-
-
-def candidate_pools_path(project_root: Path) -> Path:
-    return config_root(project_root) / "candidate-pools.yaml"
-
-
-def runtime_preferences_path(project_root: Path) -> Path:
-    return config_root(project_root) / "runtime-preferences.yaml"
-
-
-def kb_gitignore_path(project_root: Path) -> Path:
-    return kb_root(project_root) / ".gitignore"
-
-
-def versioning_state_path(project_root: Path) -> Path:
-    return kb_runtime_root(project_root) / "versioning-state.yaml"
-
-
-def kind_dir(kind: str) -> str:
-    if kind not in UNIT_KIND_DIRS:
-        raise SystemExit(f"Unsupported unit kind: {kind}")
-    return UNIT_KIND_DIRS[kind]
-
-
-def unit_root(project_root: Path, kind: str, unit_id: str) -> Path:
-    return units_root(project_root) / kind_dir(kind) / unit_id
-
-
-def record_path(project_root: Path, kind: str, unit_id: str) -> Path:
-    return unit_root(project_root, kind, unit_id) / "record.yaml"
-
-
-def search_stage_path(project_root: Path, stage_id: str) -> Path:
-    return source_search_root(project_root) / f"{stage_id}.yaml"
-
-
-def skills_root(start: Path | None = None, *, explicit_home: str | Path | None = None) -> Path:
-    return common_skills_root(start, explicit_home=explicit_home)
-
-
-def rel(project_root: Path, path: Path) -> str:
-    return path.resolve().relative_to(project_root.resolve()).as_posix()
-
-
-def ensure_kb_gitignore(project_root: Path) -> Path:
-    path = kb_gitignore_path(project_root)
-    existing_lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
-    merged = list(existing_lines)
-    for line in KB_GITIGNORE_LINES:
-        if line in merged:
-            continue
-        if line == "" and merged and merged[-1] == "":
-            continue
-        merged.append(line)
-    while merged and merged[-1] == "":
-        merged.pop()
-    write_text_if_changed(path, "\n".join(merged).strip() + "\n")
-    return path
-
-
-def _legacy_storage_map(project_root: Path, value: str) -> tuple[Path | None, Path | None]:
-    text = str(value or "").strip()
-    if not text or is_url(text):
-        return None, None
-    new_roots = {
-        "raw": raw_storage_root(project_root).resolve(),
-        "output": output_storage_root(project_root).resolve(),
-    }
-    legacy_roots = {
-        "raw": (project_root / "raw").resolve(),
-        "output": (project_root / "output").resolve(),
-    }
-    path = Path(text).expanduser()
-    if path.is_absolute():
-        try:
-            resolved = path.resolve(strict=False)
-        except RuntimeError:
-            resolved = path
-        for name, legacy_root in legacy_roots.items():
-            try:
-                relative = resolved.relative_to(legacy_root)
-            except ValueError:
-                continue
-            return resolved, new_roots[name] / relative
-        for name, new_root in new_roots.items():
-            try:
-                relative = resolved.relative_to(new_root)
-            except ValueError:
-                continue
-            return resolved, new_root / relative
-        return resolved, None
-    normalized = text.replace("\\", "/").lstrip("./")
-    for name, new_root in new_roots.items():
-        if normalized == name or normalized.startswith(f"{name}/"):
-            relative = Path(normalized).relative_to(name) if normalized != name else Path()
-            return project_root / normalized, new_root / relative
-        kb_prefix = f"kb/{name}"
-        if normalized == kb_prefix or normalized.startswith(f"{kb_prefix}/"):
-            relative = Path(normalized).relative_to(kb_prefix) if normalized != kb_prefix else Path()
-            return project_root / normalized, new_root / relative
-    return project_root / normalized, None
-
-
-def resolve_local_reference(project_root: Path, value: str) -> Path | None:
-    original, remapped = _legacy_storage_map(project_root, value)
-    candidates = [remapped, original]
-    for candidate in candidates:
-        if candidate is None:
-            continue
-        try:
-            if candidate.exists():
-                return candidate.resolve()
-        except OSError:
-            continue
-    return None
-
-
-def normalize_storage_reference(project_root: Path, value: str) -> str:
-    text = str(value or "").strip()
-    if not text or is_url(text):
-        return text
-    original, remapped = _legacy_storage_map(project_root, text)
-    if remapped is not None and remapped.exists():
-        return remapped.resolve().as_posix()
-    if original is not None and original.exists():
-        return original.resolve().as_posix()
-    return text
-
-
-def _slug_list(values: Any) -> list[str]:
-    if not isinstance(values, list):
-        return []
-    cleaned = {slugify(str(item), max_words=12) for item in values if str(item).strip()}
-    return sorted(item for item in cleaned if item)
-
-
-def _text_list(values: Any) -> list[str]:
-    if not isinstance(values, list):
-        return []
-    return [str(item).strip() for item in values if str(item).strip()]
-
-
-def _artifact_list(values: Any) -> list[str]:
-    if not isinstance(values, list):
-        return []
-    return sorted({str(item).strip() for item in values if str(item).strip()})
-
-
-def _unique_text_list(values: Any) -> list[str]:
-    seen: set[str] = set()
-    items: list[str] = []
-    for item in _text_list(values):
-        if item in seen:
-            continue
-        seen.add(item)
-        items.append(item)
-    return items
-
-
-def _deep_fill_missing(target: Any, defaults: Any) -> Any:
-    if isinstance(defaults, dict):
-        base = target if isinstance(target, dict) else {}
-        for key, value in defaults.items():
-            if key not in base:
-                base[key] = copy.deepcopy(value)
-            else:
-                base[key] = _deep_fill_missing(base[key], value)
-        return base
-    return target if target is not None else copy.deepcopy(defaults)
 
 
 def default_runtime_preferences() -> dict[str, Any]:
@@ -1467,7 +1259,11 @@ def apply_record_governance(
 
 
 AI_INFORMATION_TYPES = {"inference", "evaluation", "user_opinion"}
+
+
 GATED_CONFIRMATION_VALUES = {"pending_user_confirmation", "rejected"}
+
+
 AI_SIGNER_NAMES = {"ai", "assistant", "codex", "chatgpt", "gpt", "openai"}
 
 
@@ -1533,6 +1329,8 @@ CONFIRM_UNIT_STATUS_BY_KIND = {
     "repo": "active",
     "blog": "active",
 }
+
+
 CONFIRM_UNIT_SUMMARY_BY_KIND = {
     "paper": "Paper analysis confirmed by user.",
     "repo": "Repo analysis confirmed by user.",
