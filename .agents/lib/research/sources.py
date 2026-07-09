@@ -598,6 +598,72 @@ def _store_bytes(root: Path, name: str, data: bytes) -> Path:
     return dst
 
 
+def _backup_arxiv_html(project_root: Path, root: Path, arxiv_id: str, original_source: str) -> dict[str, Any]:
+    """Download the best available HTML edition of an arxiv paper (HTML-first)."""
+    txt = root / "source-url.txt"
+    write_text_if_changed(txt, original_source.strip() + "\n")
+    backup_paths = [rel(project_root, txt)]
+    abs_uri = f"https://arxiv.org/abs/{arxiv_id}"
+    attempts: list[str] = []
+    for candidate in _arxiv_html_candidates(arxiv_id):
+        url = candidate["url"]
+        try:
+            content, content_type = fetch_url(url, binary=True, max_bytes=SOURCE_DOWNLOAD_MAX_BYTES)
+        except Exception as exc:  # noqa: BLE001
+            attempts.append(f"{candidate['edition']}({url}): {exc}")
+            continue
+        raw_bytes = content if isinstance(content, bytes) else str(content).encode("utf-8")
+        html = content.decode("utf-8", errors="ignore") if isinstance(content, bytes) else str(content)
+        if not _is_html_response(content_type, html):
+            attempts.append(f"{candidate['edition']}({url}): non-HTML content_type={content_type or 'unknown'}")
+            continue
+        raw = _store_bytes(root, "source.html", raw_bytes)
+        backup_paths.append(rel(project_root, raw))
+        chunks = _html_to_section_chunks(html)
+        body = _truncate_snapshot_text(html_to_text(html))
+        if body:
+            snapshot = root / "snapshot.md"
+            write_text_if_changed(snapshot, f"# Source Snapshot ({candidate['edition']})\n\nSource: {url}\n\n{body.rstrip()}\n")
+            backup_paths.append(rel(project_root, snapshot))
+        result: dict[str, Any] = {
+            "original_uri": abs_uri,
+            "backup_paths": backup_paths,
+            "backup_kind": "url",
+            "file_hash": file_sha256(raw),
+            "backup_status": "ok",
+            "source_type": "arxiv-abs" if candidate["edition"] == "arxiv-abs" else "arxiv-html",
+            "locator_kind": "section",
+            "parse_backend": "html-sectioner",
+            "parse_chunks": chunks,
+            "resolved_url": url,
+            "parse_metadata": {**_html_metadata(html), "arxiv_id": arxiv_id},
+        }
+        warnings: list[str] = []
+        if candidate["degraded"]:
+            result["backup_status"] = "degraded"
+            warnings.append(candidate["degraded"])
+        if not chunks:
+            warnings.append("HTML edition parsed to zero section chunks.")
+        if warnings:
+            result["backup_warning"] = " ".join(warnings)
+            _warn(result["backup_warning"], abs_uri)
+        return result
+
+    warning = "arxiv HTML resolution failed for all editions: " + "; ".join(attempts)
+    result = {
+        "original_uri": abs_uri,
+        "backup_paths": backup_paths,
+        "backup_kind": "url",
+        "file_hash": "",
+        "backup_status": "failed",
+        "source_type": "arxiv",
+        "locator_kind": "",
+        "backup_warning": warning,
+    }
+    _warn(warning, abs_uri)
+    return result
+
+
 def backup_source(project_root: Path, kind: str, unit_id: str, source: str) -> dict[str, Any]:
     root = unit_root(project_root, kind, unit_id) / "source"
     ensure_dir(root)
