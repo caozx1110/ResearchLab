@@ -47,6 +47,7 @@ from research.common import (
 from research.core import (
     append_history,
     build_index,
+    checkpoint_and_report,
     confirm_unit,
     locate_record,
     project_root,
@@ -338,6 +339,19 @@ def render_note_md(record: dict, claims: list[dict]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _finalize_post_actions(root: Path, *, trigger: str, message: str, defer_post_actions: bool) -> dict[str, Any]:
+    """Rebuild the index and (unless deferred) commit a git checkpoint.
+
+    Mirrors paper.py / repo.py so a blog write point persists its artifacts the same
+    way (F6): blog verify no longer leaves note.md + payload uncommitted. When a caller
+    defers (batch/ingest chain), the outer driver takes the single checkpoint instead.
+    """
+    if defer_post_actions:
+        return {"committed": False, "status": "deferred"}
+    build_index(root)
+    return checkpoint_and_report(root, trigger=trigger, message=message)
+
+
 def _resolve_fill_input(unit_root: Path, default_name: str, explicit: str | None) -> Path:
     if explicit:
         candidate = Path(explicit).expanduser()
@@ -378,15 +392,17 @@ def build_parser() -> argparse.ArgumentParser:
     note.add_argument("--blog-id", required=True)
     note.add_argument("--phase", choices=["prepare", "verify"], default="prepare")
     note.add_argument("--input", default="")
+    note.add_argument("--defer-post-actions", action="store_true")
 
     confirm = subparsers.add_parser("confirm")
     confirm.add_argument("--blog-id", required=True)
     add_confirmation_arguments(confirm)
+    confirm.add_argument("--defer-post-actions", action="store_true")
 
     return parser
 
 
-def _run_complete_note(args, root: Path, record: dict, unit_root: Path) -> int:
+def _run_complete_note(args, root: Path, record: dict, unit_root: Path, defer_post_actions: bool) -> int:
     fill_scaffold_path = unit_root / "blog-fill.yaml"
     note_path = unit_root / "blog-note.md"
     cache_path = _cache_path(unit_root)
@@ -413,7 +429,6 @@ def _run_complete_note(args, root: Path, record: dict, unit_root: Path) -> int:
             artifacts=[rel(root, fill_scaffold_path), rel(root, cache_path)] if cache_path.exists() else [rel(root, fill_scaffold_path)],
         )
         write_record(root, record)
-        build_index(root)
         print(f"[ok] wrote {fill_scaffold_path.relative_to(root)}")
         print(
             "下一步：agent 读 parse-cache 填四要素"
@@ -421,6 +436,12 @@ def _run_complete_note(args, root: Path, record: dict, unit_root: Path) -> int:
             "带证据，再跑 `blog.py complete-note --phase verify --blog-id <id>`。"
         )
         print(next_for_agent_note(root, record, cache_path, fill_scaffold_path))
+        _finalize_post_actions(
+            root,
+            trigger="milestone",
+            message=f"milestone: scaffold blog note {record['id']}",
+            defer_post_actions=defer_post_actions,
+        )
         return 0
 
     # verify
@@ -455,8 +476,13 @@ def _run_complete_note(args, root: Path, record: dict, unit_root: Path) -> int:
         artifacts=[rel(root, note_path), rel(root, cache_path)] if cache_path.exists() else [rel(root, note_path)],
     )
     write_record(root, record)
-    build_index(root)
     print(f"[ok] verified + wrote {note_path.relative_to(root)} (content filled, {len(claims)} elements)")
+    _finalize_post_actions(
+        root,
+        trigger="milestone",
+        message=f"milestone: blog note {record['id']}",
+        defer_post_actions=defer_post_actions,
+    )
     return 0
 
 
@@ -468,9 +494,10 @@ def main() -> int:
     if record.get("kind") != "blog":
         raise SystemExit(f"{args.blog_id} is not a blog record")
     unit_root = path.parent
+    defer_post_actions = bool(getattr(args, "defer_post_actions", False))
 
     if args.command == "complete-note":
-        return _run_complete_note(args, root, record, unit_root)
+        return _run_complete_note(args, root, record, unit_root, defer_post_actions)
 
     if args.command == "confirm":
         record = confirm_unit(
@@ -482,8 +509,13 @@ def main() -> int:
             project_root=root,
         )
         write_record(root, record)
-        build_index(root)
         print(f"[ok] confirmed {args.blog_id}")
+        _finalize_post_actions(
+            root,
+            trigger="milestone",
+            message=f"milestone: confirm blog {args.blog_id}",
+            defer_post_actions=defer_post_actions,
+        )
         return 0
 
     return 1
