@@ -47,9 +47,9 @@ def test_kb_help_snapshot_contains_group_headers() -> None:
     text = kb.render_help_menu()
 
     assert "# kb 快捷命令" in text
-    for header in ["kb 动词（9 个）", "纯自然语言（无 kb 动词）"]:
+    for header in ["kb 动词（10 个）", "纯自然语言（无 kb 动词）"]:
         assert f"## {header}" in text
-    for verb in ["kb help", "kb init", "kb doctor", "kb status", "kb next", "kb find", "kb add", "kb review", "kb recall"]:
+    for verb in ["kb help", "kb init", "kb doctor", "kb status", "kb next", "kb find", "kb add", "kb ingest", "kb review", "kb recall"]:
         assert verb in text
     assert "请基于当前知识库给我 3 个候选 idea" in text
     assert "为这个 program 生成周报材料" in text
@@ -454,3 +454,153 @@ def test_kb_forward_command_uses_installed_script_when_target_root_has_no_agents
     assert result.returncode == 0
     assert captured_argv[1] == str(kb.DEFAULT_PROJECT_ROOT / ".agents/skills/knowledge-base-manager/scripts/kb.py")
     assert captured_argv[2:] == ["--root", str(tmp_path), "init"]
+
+
+# --------------------------------------------------------------------------- #
+# kb ingest: chain intake -> prepare, STOP at prepare, never auto-verify.       #
+# --------------------------------------------------------------------------- #
+
+FULL_SCOPE = {"screen", "generate-note", "build-index", "refresh"}
+
+_PAPER_ADD_STDOUT = (
+    "[ok] created kb/units/papers/p-demo-abcd1234/record.yaml\n"
+    "[source] parse-cache: kb/units/papers/p-demo-abcd1234/parse-cache.yaml (2 chunks)\n"
+    "NEXT FOR AGENT: intake done for p-demo-abcd1234; kb ingest auto-continues to paper prepare\n"
+)
+_PAPER_PREPARE_STDOUT = (
+    "[ok] wrote kb/units/papers/p-demo-abcd1234/note-fill.yaml\n"
+    "下一步：runtime agent 为 5 要素填内容+证据。\n"
+    "NEXT FOR AGENT: read kb/units/papers/p-demo-abcd1234/parse-cache.yaml (source quotes) then fill "
+    "kb/units/papers/p-demo-abcd1234/note-fill.yaml elements [motivation,method,experiment,limitation,insight] "
+    "— each needs content + >=1 verbatim quote+locator (PDF page=N / HTML section:<anchor>), then run: "
+    "${RESEARCH_PYTHON:-python3} paper.py --root R complete-note --paper-id p-demo-abcd1234 --phase verify --input note-fill.yaml\n"
+)
+
+
+def _fake_ingest_forwarder(kb, recorder: list[dict]):
+    def fake(root, relative_script, args, *, stream=True, extra_env=None):
+        recorder.append(
+            {
+                "script": relative_script,
+                "args": tuple(args),
+                "stream": stream,
+                "extra_env": dict(extra_env or {}),
+            }
+        )
+        if relative_script.endswith("intake.py"):
+            return kb.CommandResult((relative_script, *args), 0, _PAPER_ADD_STDOUT)
+        return kb.CommandResult((relative_script, *args), 0, _PAPER_PREPARE_STDOUT)
+
+    return fake
+
+
+def test_kb_ingest_chains_intake_then_prepare_and_stops_before_verify(monkeypatch, tmp_path: Path, capsys) -> None:
+    kb = _load_kb_cli()
+    calls: list[dict] = []
+    monkeypatch.setattr(kb, "effective_ingest_scope", lambda root: set(FULL_SCOPE))
+    monkeypatch.setattr(kb, "forward_command", _fake_ingest_forwarder(kb, calls))
+
+    assert kb.main(["--root", str(tmp_path), "ingest", "notes/demo.pdf"]) == 0
+
+    # Exactly two scriptable steps ran: intake add, then analyzer prepare. No verify.
+    assert [c["script"] for c in calls] == [
+        ".agents/skills/source-intake/scripts/intake.py",
+        ".agents/skills/paper-analyst/scripts/paper.py",
+    ]
+    assert calls[0]["args"] == ("add", "--kind", "paper", "--source", "notes/demo.pdf")
+    assert calls[0]["extra_env"] == {"RESEARCH_INGEST_CHAIN": "1"}
+    assert calls[1]["args"] == ("complete-note", "--paper-id", "p-demo-abcd1234", "--phase", "prepare")
+    for call in calls:
+        assert "verify" not in call["args"]
+
+    out = capsys.readouterr().out
+    assert "stopped before verify" in out
+    # Aggregated NEXT FOR AGENT line carries parse-cache path + elements + verify command.
+    assert "NEXT FOR AGENT: read kb/units/papers/p-demo-abcd1234/parse-cache.yaml" in out
+    assert "[motivation,method,experiment,limitation,insight]" in out
+    assert "--phase verify" in out
+
+
+def test_kb_ingest_narrowed_scope_without_generate_note_runs_only_intake(monkeypatch, tmp_path: Path, capsys) -> None:
+    kb = _load_kb_cli()
+    calls: list[dict] = []
+    monkeypatch.setattr(kb, "effective_ingest_scope", lambda root: {"screen"})
+    monkeypatch.setattr(kb, "forward_command", _fake_ingest_forwarder(kb, calls))
+
+    assert kb.main(["--root", str(tmp_path), "ingest", "notes/demo.pdf"]) == 0
+
+    # intake ran; prepare did NOT (narrowed autonomy).
+    assert [c["script"] for c in calls] == [".agents/skills/source-intake/scripts/intake.py"]
+    out = capsys.readouterr().out
+    assert "prepare is outside the autonomy auto-execute scope" in out
+    assert "NEXT FOR AGENT: when ready, run prepare yourself" in out
+    assert "complete-note --paper-id p-demo-abcd1234 --phase prepare" in out
+
+
+def test_kb_ingest_narrowed_scope_without_screen_runs_nothing(monkeypatch, tmp_path: Path, capsys) -> None:
+    kb = _load_kb_cli()
+    calls: list[dict] = []
+    monkeypatch.setattr(kb, "effective_ingest_scope", lambda root: set())
+    monkeypatch.setattr(kb, "forward_command", _fake_ingest_forwarder(kb, calls))
+
+    assert kb.main(["--root", str(tmp_path), "ingest", "notes/demo.pdf"]) == 0
+
+    assert calls == []
+    out = capsys.readouterr().out
+    assert "intake is outside the autonomy auto-execute scope" in out
+    assert "run intake yourself" in out
+
+
+def test_kb_ingest_duplicate_stops_before_prepare(monkeypatch, tmp_path: Path, capsys) -> None:
+    kb = _load_kb_cli()
+    calls: list[dict] = []
+
+    def fake(root, relative_script, args, *, stream=True, extra_env=None):
+        calls.append(relative_script)
+        return kb.CommandResult((relative_script, *args), 0, "[ok] duplicate detected: p-demo-abcd1234\n")
+
+    monkeypatch.setattr(kb, "effective_ingest_scope", lambda root: set(FULL_SCOPE))
+    monkeypatch.setattr(kb, "forward_command", fake)
+
+    assert kb.main(["--root", str(tmp_path), "ingest", "notes/demo.pdf"]) == 0
+
+    assert calls == [".agents/skills/source-intake/scripts/intake.py"]
+    out = capsys.readouterr().out
+    assert "duplicate detected (p-demo-abcd1234)" in out
+    assert "stopping before prepare" in out
+
+
+def test_kb_ingest_unit_id_extraction_variants() -> None:
+    kb = _load_kb_cli()
+    assert kb._extract_ingest_unit_id("[ok] created kb/units/repos/r-x-1234/record.yaml") == ("r-x-1234", "created")
+    assert kb._extract_ingest_unit_id("[ok] duplicate detected: b-y-5678") == ("b-y-5678", "duplicate")
+    assert kb._extract_ingest_unit_id("nothing useful here") == ("", "unknown")
+
+
+def test_kb_ingest_effective_scope_is_capped_by_governance(monkeypatch, tmp_path: Path) -> None:
+    kb = _load_kb_cli()
+    # Even if a user lists a non-governed step, the intersection drops it.
+    monkeypatch.setattr(
+        kb,
+        "load_runtime_preferences",
+        lambda root: {"autonomy": {"auto_execute_scope": ["screen", "generate-note", "verify", "confirm", "deploy"]}},
+    )
+    scope = kb.effective_ingest_scope(tmp_path)
+    assert scope == {"screen", "generate-note"}
+    assert "verify" not in scope and "confirm" not in scope
+
+
+def test_kb_ingest_prepare_failure_propagates_returncode(monkeypatch, tmp_path: Path, capsys) -> None:
+    kb = _load_kb_cli()
+
+    def fake(root, relative_script, args, *, stream=True, extra_env=None):
+        if relative_script.endswith("intake.py"):
+            return kb.CommandResult((relative_script, *args), 0, _PAPER_ADD_STDOUT)
+        return kb.CommandResult((relative_script, *args), 5, "[reject] boom\n")
+
+    monkeypatch.setattr(kb, "effective_ingest_scope", lambda root: set(FULL_SCOPE))
+    monkeypatch.setattr(kb, "forward_command", fake)
+
+    assert kb.main(["--root", str(tmp_path), "ingest", "notes/demo.pdf"]) == 5
+    out = capsys.readouterr().out
+    assert "prepare failed for p-demo-abcd1234" in out
