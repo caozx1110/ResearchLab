@@ -682,7 +682,18 @@ def register_add(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]
 
 
 def register_ingest(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    parser = subparsers.add_parser("ingest", help="一条命令：入库 + 备好待填骨架（停在 prepare，不自动 verify）")
+    parser = subparsers.add_parser(
+        "ingest",
+        help="一条命令：入库 + 备好待填骨架（停在 prepare，不自动 verify）",
+        description="入库 source 并链到 analyzer prepare（停在 prepare，永不自动 verify）。",
+        epilog=(
+            "注意：--root 是顶层 flag，必须放在动词之前，例如：\n"
+            "  kb --root <PROJECT_ROOT> ingest <src>\n"
+            "放到 `ingest <src>` 之后（kb ingest <src> --root <PROJECT_ROOT>）会被 argparse 拒绝，"
+            "因为 --root 属于顶层解析器而非 ingest 子命令。"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument("source", help="论文、repo、博客 URL 或本地文件路径")
     parser.add_argument("--kind", choices=["paper", "repo", "blog"], help="显式覆盖 kind 推断")
     parser.set_defaults(handler=handle_ingest)
@@ -750,7 +761,14 @@ VERB_REGISTRARS: tuple[Callable[[argparse._SubParsersAction[argparse.ArgumentPar
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="kb 快捷命令入口（伪 CLI）")
+    parser = argparse.ArgumentParser(
+        description="kb 快捷命令入口（伪 CLI）",
+        epilog=(
+            "--root 是顶层 flag，放在动词之前：kb --root <PROJECT_ROOT> <verb> ...\n"
+            "（放到动词及其参数之后会被 argparse 拒绝。）"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     add_project_root_argument(parser)
     subparsers = parser.add_subparsers(dest="command", required=True)
     for register in VERB_REGISTRARS:
