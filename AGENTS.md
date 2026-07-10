@@ -21,6 +21,21 @@ Default preference order:
 - When you go wrong or the user corrects you, log one learning with `skill-evolution-advisor/scripts/learnings.py log`.
 - Skill defects are record-only: never auto-modify a skill or `OPTIMIZATION_PLAN.md` from a captured defect.
 
+## Ingestion auto-drive
+
+When the user asks to ingest a source (paper/repo/blog), or accepts an ingestion suggestion, **drive the whole pipeline to a grounded, complete knowledge unit in one turn** — do not stop after each script and wait for another prompt. The chain is:
+
+1. `intake add` (dual-source fetch → lightweight unit + parse-cache).
+2. Analyzer `prepare` (emits the fillable structure; read its `NEXT FOR AGENT:` line).
+3. **You (the agent) read the parse-cache and fill the required elements**, each with a short **verbatim** quote + `locator` (PDF `page=N`; HTML `section`/`anchor`; repo `file:line`). Paper = motivation/method/experiment/limitation/insight; blog = positioning/key_points/credibility/reusable_explanation; repo = capability/reuse_points/entry_map.
+4. Analyzer `verify` (script checks every quote is verbatim + clears the substance gate, then persists). If it rejects an element, fix that element's quote and re-run — never fabricate a quote to pass.
+5. Paper only: `extract-figures` + `refresh-structure` when a PDF backend is present.
+6. Present the AI judgements (worth-reading verdict, key insights) for confirmation.
+
+**Stop only at the two governance gates:** (a) confirming an AI judgement (never self-sign; leave judgement-track content `pending_user_confirmation` until the user confirms), and (b) a user decision (choose idea, approve baseline, resolve an ambiguous instruction). Everything else in the chain is a safe auto-step.
+
+This is bounded by `runtime-preferences.autonomy.auto_execute_scope` (capped by `GOVERNANCE_MAX_AUTO_STEPS`); if autonomy is narrowed, honor it. Ingestion deep-read intentionally spends tokens (durable grounded notes over token thrift); the automation saves the user's *steps and attention*, not tokens.
+
 ## Layout
 
 - `kb/raw/`: immutable external source bytes. Never rewrite in place.
