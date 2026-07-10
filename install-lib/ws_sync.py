@@ -93,7 +93,7 @@ def rel_text(path: Path) -> str:
 def source_items(repo: Path, source: Path | None) -> dict[str, tuple[Path, str]]:
     source_root = (source or repo).resolve()
     agents_src = source_root / ".agents"
-    agents_md_src = source_root / "AGENTS.md"
+    agents_md_src = source_root / ".agents" / "AGENTS.md"
     if not agents_src.is_dir():
         die(f"source .agents directory not found: {agents_src}")
     if not agents_md_src.is_file():
