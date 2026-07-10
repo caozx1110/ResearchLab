@@ -253,6 +253,35 @@ def test_kb_add_infers_kind_table(source: str, expected: str) -> None:
     assert kb.infer_add_kind(source) == expected
 
 
+def test_kb_infers_local_directory_as_repo_not_blog(tmp_path: Path) -> None:
+    """F1: a local checkout dir is a repo, never the blog fallback."""
+    kb = _load_kb_cli()
+    repo_dir = tmp_path / "langwbc-repo"
+    (repo_dir / "src").mkdir(parents=True)
+    (repo_dir / "README.md").write_text("# LangWBC\n", encoding="utf-8")
+    (repo_dir / "src" / "main.py").write_text("def main():\n    pass\n", encoding="utf-8")
+
+    # absolute path
+    assert kb.infer_add_kind(str(repo_dir)) == "repo"
+    # relative path resolved against the project root
+    assert kb.infer_add_kind("langwbc-repo", tmp_path) == "repo"
+    # a .git bare marker / git url still maps to repo
+    assert kb.infer_add_kind("git@github.com:org/repo.git") == "repo"
+    assert kb.infer_add_kind("https://gitlab.com/org/repo") == "repo"
+
+
+def test_kb_infers_local_non_pdf_file_as_blog_and_pdf_as_paper(tmp_path: Path) -> None:
+    """F1 guard: local *file* still discriminates pdf(paper) vs other(blog); dir stays repo."""
+    kb = _load_kb_cli()
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+    html = tmp_path / "post.html"
+    html.write_text("<html></html>", encoding="utf-8")
+
+    assert kb.infer_add_kind(str(pdf)) == "paper"
+    assert kb.infer_add_kind(str(html)) == "blog"
+
+
 def test_kb_add_forwards_inferred_kind(monkeypatch, tmp_path: Path) -> None:
     kb = _load_kb_cli()
     calls: list[tuple[str, tuple[str, ...]]] = []

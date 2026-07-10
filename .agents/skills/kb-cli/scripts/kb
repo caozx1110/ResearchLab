@@ -203,18 +203,56 @@ def handle_recall(args: argparse.Namespace, root: Path) -> int:
     return run_forwarded(root, [(SCRIPT_BY_VERB["recall"], ["recall", "--kind", kind])])
 
 
-def infer_add_kind(source: str) -> str:
-    normalized = source.strip().lower()
-    path_part = normalized.split("#", 1)[0].split("?", 1)[0]
-    if "arxiv.org" in normalized or path_part.endswith(".pdf"):
-        return "paper"
-    if "github.com" in normalized or normalized.startswith("git@"):
+def _looks_like_repo_dir(path: Path) -> bool:
+    """A local directory is a code checkout (repo), not a blog.
+
+    Treat any directory as a repo; strengthen the signal when it carries a `.git`
+    marker or a README alongside a source/config structure. The mere fact that a
+    local reference resolves to a directory is enough to prefer `repo` over the
+    `blog` fallback (F1: a cloned repo dir was mis-created as a blog unit).
+    """
+    try:
+        if not path.is_dir():
+            return False
+    except OSError:
+        return False
+    return True
+
+
+def infer_add_kind(source: str, root: Path | None = None) -> str:
+    normalized = source.strip()
+    lowered = normalized.lower()
+    path_part = lowered.split("#", 1)[0].split("?", 1)[0]
+    # Remote URLs / git refs: decide from the URL shape, never touch the filesystem.
+    if lowered.startswith(("http://", "https://")):
+        if "arxiv.org" in lowered or path_part.endswith(".pdf"):
+            return "paper"
+        if "github.com" in lowered or "gitlab.com" in lowered or "bitbucket.org" in lowered:
+            return "repo"
+        return "blog"
+    if lowered.startswith("git@") or lowered.endswith(".git"):
         return "repo"
+    # Local reference: a directory (git checkout / source tree) is a repo, not a blog.
+    candidate = Path(normalized).expanduser()
+    probes = [candidate]
+    if root is not None and not candidate.is_absolute():
+        probes.insert(0, root / candidate)
+    for probe in probes:
+        if _looks_like_repo_dir(probe):
+            return "repo"
+        try:
+            if probe.is_file():
+                return "paper" if probe.suffix.lower() == ".pdf" else "blog"
+        except OSError:
+            continue
+    # Unresolved local string: fall back to arxiv/pdf hints, else blog.
+    if "arxiv.org" in lowered or path_part.endswith(".pdf"):
+        return "paper"
     return "blog"
 
 
 def handle_add(args: argparse.Namespace, root: Path) -> int:
-    kind = args.kind or infer_add_kind(args.source)
+    kind = args.kind or infer_add_kind(args.source, root)
     return run_forwarded(root, [(SCRIPT_BY_VERB["add"], ["add", "--kind", kind, "--source", args.source])])
 
 
@@ -283,7 +321,7 @@ def _prepare_display_command(root: Path, kind: str, unit_id: str) -> str:
 
 
 def handle_ingest(args: argparse.Namespace, root: Path) -> int:
-    kind = args.kind or infer_add_kind(args.source)
+    kind = args.kind or infer_add_kind(args.source, root)
     if kind not in INGEST_ANALYZER:
         print(f"[ingest] cannot chain unknown kind {kind!r}; run `kb add` then the matching analyzer prepare manually.")
         return 2
