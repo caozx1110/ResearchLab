@@ -31,7 +31,7 @@ from research.core import config_root, default_confirmed_by, is_ai_signer, load_
 
 HELP_MENU: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
     (
-        "kb 动词（10 个）",
+        "kb 动词（11 个）",
         (
             ("打印能力菜单。", "kb help"),
             ("初始化 KB 布局、索引和基础偏好。", "kb init"),
@@ -42,6 +42,7 @@ HELP_MENU: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("把论文、repo、博客或本地文件轻量入库。", "kb add <链接或路径>"),
             ("一条命令把 source 拉进来并备好待填骨架，随后 agent 自动填 grounded 笔记。", "kb ingest <链接或路径>"),
             ("查看待确认的 AI 判断，后续可交互式确认。", "kb review"),
+            ("把误建 / 不采纳的知识单元标记为 rejected（清理出口）。", "kb reject <单元 id>"),
             ("回忆已确认习惯、已知坑和待审 skill 问题。", "kb recall"),
         ),
     ),
@@ -201,6 +202,20 @@ def handle_find(args: argparse.Namespace, root: Path) -> int:
 def handle_recall(args: argparse.Namespace, root: Path) -> int:
     kind = args.kind or "all"
     return run_forwarded(root, [(SCRIPT_BY_VERB["recall"], ["recall", "--kind", kind])])
+
+
+def handle_reject(args: argparse.Namespace, root: Path) -> int:
+    """Mark a mis-created / not-adopted unit as rejected (F1 cleanup exit).
+
+    Pure dispatch: forwards to knowledge-base-manager's existing
+    `promote --confirmation-status rejected` (the same reject path `kb review`
+    uses). No reject logic is reimplemented here.
+    """
+    reject_args = ["promote", "--id", args.id, "--confirmation-status", "rejected"]
+    reason = str(getattr(args, "reason", "") or "").strip()
+    if reason:
+        reject_args.extend(["--evidence", reason])
+    return run_forwarded(root, [(SCRIPT_BY_VERB["review"], reject_args)])
 
 
 def _looks_like_repo_dir(path: Path) -> bool:
@@ -784,6 +799,16 @@ def register_recall(subparsers: argparse._SubParsersAction[argparse.ArgumentPars
     parser.set_defaults(handler=handle_recall)
 
 
+def register_reject(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    parser = subparsers.add_parser(
+        "reject",
+        help="把误建 / 不采纳的知识单元标记为 rejected（复用 promote --confirmation-status rejected）",
+    )
+    parser.add_argument("id", help="要拒绝的知识单元 id（如误判成 blog 的 b-langwbc-repo-xxxx）")
+    parser.add_argument("--reason", default="", help="可选：拒绝理由，写入该次 promote 的 evidence")
+    parser.set_defaults(handler=handle_reject)
+
+
 VERB_REGISTRARS: tuple[Callable[[argparse._SubParsersAction[argparse.ArgumentParser]], None], ...] = (
     register_help,
     register_init,
@@ -795,6 +820,7 @@ VERB_REGISTRARS: tuple[Callable[[argparse._SubParsersAction[argparse.ArgumentPar
     register_next,
     register_find,
     register_recall,
+    register_reject,
 )
 
 

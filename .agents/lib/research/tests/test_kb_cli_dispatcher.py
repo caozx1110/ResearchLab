@@ -47,9 +47,9 @@ def test_kb_help_snapshot_contains_group_headers() -> None:
     text = kb.render_help_menu()
 
     assert "# kb 快捷命令" in text
-    for header in ["kb 动词（10 个）", "纯自然语言（无 kb 动词）"]:
+    for header in ["kb 动词（11 个）", "纯自然语言（无 kb 动词）"]:
         assert f"## {header}" in text
-    for verb in ["kb help", "kb init", "kb doctor", "kb status", "kb next", "kb find", "kb add", "kb ingest", "kb review", "kb recall"]:
+    for verb in ["kb help", "kb init", "kb doctor", "kb status", "kb next", "kb find", "kb add", "kb ingest", "kb review", "kb reject", "kb recall"]:
         assert verb in text
     assert "请基于当前知识库给我 3 个候选 idea" in text
     assert "为这个 program 生成周报材料" in text
@@ -298,6 +298,46 @@ def test_kb_add_forwards_inferred_kind(monkeypatch, tmp_path: Path) -> None:
         (
             ".agents/skills/source-intake/scripts/intake.py",
             ("add", "--kind", "repo", "--source", "https://github.com/org/repo"),
+        ),
+    ]
+
+
+def _capture_forward(kb, monkeypatch) -> list[tuple[str, tuple[str, ...]]]:
+    calls: list[tuple[str, tuple[str, ...]]] = []
+    monkeypatch.setattr(
+        kb,
+        "forward_command",
+        lambda root, relative_script, args: calls.append((relative_script, tuple(args)))
+        or kb.CommandResult((relative_script, *args), 0),
+    )
+    return calls
+
+
+def test_kb_reject_forwards_to_promote_rejected(monkeypatch, tmp_path: Path) -> None:
+    """F1: `kb reject <id>` reuses knowledge-base-manager promote --confirmation-status rejected."""
+    kb = _load_kb_cli()
+    calls = _capture_forward(kb, monkeypatch)
+
+    assert kb.main(["--root", str(tmp_path), "reject", "b-langwbc-repo-78d111a4", "--reason", "mis-created"]) == 0
+
+    assert calls == [
+        (
+            ".agents/skills/knowledge-base-manager/scripts/kb.py",
+            ("promote", "--id", "b-langwbc-repo-78d111a4", "--confirmation-status", "rejected", "--evidence", "mis-created"),
+        ),
+    ]
+
+
+def test_kb_reject_without_reason_omits_evidence(monkeypatch, tmp_path: Path) -> None:
+    kb = _load_kb_cli()
+    calls = _capture_forward(kb, monkeypatch)
+
+    assert kb.main(["--root", str(tmp_path), "reject", "b-x-1"]) == 0
+
+    assert calls == [
+        (
+            ".agents/skills/knowledge-base-manager/scripts/kb.py",
+            ("promote", "--id", "b-x-1", "--confirmation-status", "rejected"),
         ),
     ]
 
