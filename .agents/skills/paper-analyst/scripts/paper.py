@@ -907,11 +907,16 @@ def main() -> int:
     source_chunks: list[dict] = []
     cache_path = _cache_path(unit_root)
     if args.command in {"prewarm-cache", "screen", "complete-note", "extract-figures", "refresh-structure"}:
+        # refresh-structure re-derives structure.yaml from the EXISTING parse-cache;
+        # it must NOT force a re-parse — doing so re-runs prewarm with the truncation
+        # prefs (front_limit/back_limit) and overwrites the full intake cache, deleting
+        # later pages and breaking evidence idempotency (F-a). Only explicit --force
+        # (prewarm-cache) may re-parse.
         source_chunks, cache_path = _load_or_refresh_cache(
             root,
             record,
             unit_root,
-            force=bool(getattr(args, "force", False)) or args.command == "refresh-structure",
+            force=bool(getattr(args, "force", False)),
         )
 
     if args.command == "prewarm-cache":
