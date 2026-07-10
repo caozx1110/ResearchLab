@@ -160,6 +160,36 @@ def guidance_hints(kind: str, preferences: dict, *, has_pdf: bool, note_created:
     return hints
 
 
+# kind -> (analyzer skill script, prepare verb, id flag). Used only to build the
+# machine-readable NEXT FOR AGENT navigation line (SSOT §7); no judgement here.
+ANALYZER_PREPARE: dict[str, tuple[str, str, str]] = {
+    "paper": (".agents/skills/paper-analyst/scripts/paper.py", "complete-note", "--paper-id"),
+    "repo": (".agents/skills/repo-analyst/scripts/repo.py", "map-capability", "--repo-id"),
+    "blog": (".agents/skills/blog-analyst/scripts/blog.py", "complete-note", "--blog-id"),
+}
+
+
+def next_for_agent_intake(root: Path, kind: str, record_id: str) -> str:
+    """One machine-readable navigation line after intake add (SSOT §7).
+
+    Inside a `kb ingest` chain (RESEARCH_INGEST_CHAIN set) the chain auto-runs prepare
+    next, so we say so and point at prepare's own NEXT line. Standalone, it names the
+    exact analyzer prepare command the session agent should run to produce the fillable
+    skeleton. Pure navigation — it authors no judgement.
+    """
+    if kind not in ANALYZER_PREPARE:
+        return f"NEXT FOR AGENT: unit {record_id} landed; run the matching analyzer prepare, then fill + verify."
+    if str(os.environ.get("RESEARCH_INGEST_CHAIN") or "").strip():
+        return (
+            f"NEXT FOR AGENT: intake done for {record_id}; kb ingest auto-continues to {kind} prepare "
+            f"— read that prepare's NEXT FOR AGENT line to fill elements + verify."
+        )
+    script, verb, id_flag = ANALYZER_PREPARE[kind]
+    resolved = skill_script_for_command(script, cwd=root)
+    prepare_cmd = f"{research_python()} {resolved} --root {root} {verb} {id_flag} {record_id} --phase prepare"
+    return f"NEXT FOR AGENT: run {kind} prepare (fillable skeleton) then fill + verify: {prepare_cmd}"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Ingest a source into the knowledge base.")
     add_project_root_argument(parser)
@@ -358,6 +388,7 @@ def main() -> int:
     checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: intake {args.kind} {record['id']}")
     for hint in guidance_hints(args.kind, paper_preferences, has_pdf=has_pdf, note_created=note_created):
         print(f"[hint] {hint}")
+    print(next_for_agent_intake(root, args.kind, record["id"]))
     return 0
 
 
