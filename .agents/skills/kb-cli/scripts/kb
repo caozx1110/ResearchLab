@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import subprocess
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,7 +31,7 @@ from research.core import config_root, default_confirmed_by, is_ai_signer, load_
 
 HELP_MENU: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
     (
-        "kb 动词（9 个）",
+        "kb 动词（10 个）",
         (
             ("打印能力菜单。", "kb help"),
             ("初始化 KB 布局、索引和基础偏好。", "kb init"),
@@ -39,6 +40,7 @@ HELP_MENU: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("查看下一步实验或 program 推进建议。", "kb next"),
             ("按关键词检索已入库知识单元。", "kb find <关键词>"),
             ("把论文、repo、博客或本地文件轻量入库。", "kb add <链接或路径>"),
+            ("一条命令把 source 拉进来并备好待填骨架，随后 agent 自动填 grounded 笔记。", "kb ingest <链接或路径>"),
             ("查看待确认的 AI 判断，后续可交互式确认。", "kb review"),
             ("回忆已确认习惯、已知坑和待审 skill 问题。", "kb recall"),
         ),
@@ -73,6 +75,7 @@ SCRIPT_BY_VERB = {
 class CommandResult:
     argv: tuple[str, ...]
     returncode: int
+    stdout: str = ""
 
 
 Handler = Callable[[argparse.Namespace, Path], int]
@@ -114,15 +117,25 @@ def build_child_argv(root: Path, relative_script: str, args: Sequence[str]) -> l
     return [research_python(), str(script_path(root, relative_script)), "--root", str(root), *args]
 
 
-def forward_command(root: Path, relative_script: str, args: Sequence[str]) -> CommandResult:
+def forward_command(
+    root: Path,
+    relative_script: str,
+    args: Sequence[str],
+    *,
+    stream: bool = True,
+    extra_env: Mapping[str, str] | None = None,
+) -> CommandResult:
     argv = build_child_argv(root, relative_script, args)
     env = {**os.environ, "RESEARCH_PROJECT_ROOT": str(root)}
+    if extra_env:
+        env.update({str(key): str(value) for key, value in extra_env.items()})
     completed = subprocess.run(argv, cwd=root, env=env, text=True, capture_output=True, check=False)
-    if completed.stdout:
-        print(completed.stdout, end="" if completed.stdout.endswith("\n") else "\n")
-    if completed.stderr:
-        print(completed.stderr, file=sys.stderr, end="" if completed.stderr.endswith("\n") else "\n")
-    return CommandResult(tuple(argv), int(completed.returncode))
+    if stream:
+        if completed.stdout:
+            print(completed.stdout, end="" if completed.stdout.endswith("\n") else "\n")
+        if completed.stderr:
+            print(completed.stderr, file=sys.stderr, end="" if completed.stderr.endswith("\n") else "\n")
+    return CommandResult(tuple(argv), int(completed.returncode), completed.stdout or "")
 
 
 def run_forwarded(root: Path, commands: Sequence[tuple[str, Sequence[str]]]) -> int:
@@ -203,6 +216,139 @@ def infer_add_kind(source: str) -> str:
 def handle_add(args: argparse.Namespace, root: Path) -> int:
     kind = args.kind or infer_add_kind(args.source)
     return run_forwarded(root, [(SCRIPT_BY_VERB["add"], ["add", "--kind", kind, "--source", args.source])])
+
+
+# --------------------------------------------------------------------------- #
+# ingest: chain the scriptable prefix of the ingestion pipeline (SSOT §7).      #
+#                                                                              #
+# `kb ingest <src>` runs intake add -> analyzer prepare and STOPS at prepare.   #
+# It never auto-runs verify: a script cannot fill understanding — the session   #
+# agent reads the parse-cache, fills the elements with verbatim evidence, then  #
+# runs the verify command printed in the aggregated NEXT FOR AGENT line.        #
+# --------------------------------------------------------------------------- #
+
+# Governance ceiling for ingest safe auto-steps, mirroring research-orchestrator's
+# GOVERNANCE_MAX_AUTO_STEPS. runtime-preferences.autonomy.auto_execute_scope may
+# NARROW this but can never widen it; verify/confirm are never in the set.
+INGEST_GOVERNANCE_MAX_AUTO_STEPS = frozenset({"screen", "build-index", "refresh", "generate-note"})
+
+# Ordered ingest chain: (step, gating scope token). intake landing is a
+# "screen"-class safe step; prepare (fillable skeleton) is a "generate-note"-class
+# safe step. Walk in order; a narrowed scope stops the chain at the first gap.
+INGEST_ANALYZER: dict[str, tuple[str, str, str]] = {
+    "paper": (".agents/skills/paper-analyst/scripts/paper.py", "complete-note", "--paper-id"),
+    "repo": (".agents/skills/repo-analyst/scripts/repo.py", "map-capability", "--repo-id"),
+    "blog": (".agents/skills/blog-analyst/scripts/blog.py", "complete-note", "--blog-id"),
+}
+
+
+def effective_ingest_scope(root: Path) -> set[str]:
+    """Configured auto_execute_scope intersected with the governance ceiling."""
+    try:
+        configured = load_runtime_preferences(root).get("autonomy", {}).get("auto_execute_scope", [])
+    except Exception:  # noqa: BLE001
+        configured = sorted(INGEST_GOVERNANCE_MAX_AUTO_STEPS)
+    if not isinstance(configured, list):
+        configured = sorted(INGEST_GOVERNANCE_MAX_AUTO_STEPS)
+    return {str(item).strip() for item in configured if str(item).strip()} & set(INGEST_GOVERNANCE_MAX_AUTO_STEPS)
+
+
+def _extract_ingest_unit_id(stdout: str) -> tuple[str, str]:
+    """Parse (unit_id, status) from intake add stdout.
+
+    status is "created" | "duplicate" | "unknown". A duplicate must NOT be
+    re-prepared (re-scaffolding would blank an agent's in-progress fill), so the
+    caller stops and reports it.
+    """
+    created = re.search(r"\[ok\] created\s+.*?/([^/\s]+)/record\.yaml", stdout)
+    if created:
+        return created.group(1), "created"
+    duplicate = re.search(r"\[ok\] duplicate detected:\s*(\S+)", stdout)
+    if duplicate:
+        return duplicate.group(1), "duplicate"
+    return "", "unknown"
+
+
+def _extract_next_for_agent(stdout: str) -> str:
+    for line in stdout.splitlines():
+        if line.strip().startswith("NEXT FOR AGENT:"):
+            return line.strip()
+    return ""
+
+
+def _prepare_display_command(root: Path, kind: str, unit_id: str) -> str:
+    relative_script, verb, id_flag = INGEST_ANALYZER[kind]
+    parts = [research_python(), str(script_path(root, relative_script)), "--root", str(root), verb, id_flag, unit_id, "--phase", "prepare"]
+    return " ".join(parts)
+
+
+def handle_ingest(args: argparse.Namespace, root: Path) -> int:
+    kind = args.kind or infer_add_kind(args.source)
+    if kind not in INGEST_ANALYZER:
+        print(f"[ingest] cannot chain unknown kind {kind!r}; run `kb add` then the matching analyzer prepare manually.")
+        return 2
+    scope = effective_ingest_scope(root)
+
+    # Step 1: intake add (safe step gated by "screen") — the scriptable half before
+    # the agent fills. RESEARCH_INGEST_CHAIN tells intake the chain auto-continues.
+    if "screen" not in scope:
+        add_script = script_path(root, SCRIPT_BY_VERB["add"])
+        print("[ingest] intake is outside the autonomy auto-execute scope; not auto-running.")
+        print(
+            f"NEXT FOR AGENT: run intake yourself: {research_python()} {add_script} --root {root} "
+            f"add --kind {kind} --source {args.source}"
+        )
+        return 0
+
+    intake = forward_command(
+        root,
+        SCRIPT_BY_VERB["add"],
+        ["add", "--kind", kind, "--source", args.source],
+        extra_env={"RESEARCH_INGEST_CHAIN": "1"},
+    )
+    if intake.returncode != 0:
+        return intake.returncode
+
+    unit_id, status = _extract_ingest_unit_id(intake.stdout)
+    if status == "duplicate":
+        print(f"[ingest] duplicate detected ({unit_id}); stopping before prepare to avoid overwriting existing work.")
+        return 0
+    if not unit_id:
+        print("[ingest] could not resolve the created unit id from intake output; stopping before prepare.")
+        return 1
+
+    # Step 2: analyzer prepare (safe step gated by "generate-note") — produces the
+    # fillable skeleton. NEVER verify (a script cannot fill understanding).
+    if "generate-note" not in scope:
+        print(f"[ingest] prepare is outside the autonomy auto-execute scope; stopped after intake ({unit_id}).")
+        print(f"NEXT FOR AGENT: when ready, run prepare yourself: {_prepare_display_command(root, kind, unit_id)}")
+        return 0
+
+    relative_script, verb, id_flag = INGEST_ANALYZER[kind]
+    prepare = forward_command(
+        root,
+        relative_script,
+        [verb, id_flag, unit_id, "--phase", "prepare"],
+        stream=False,
+    )
+    if prepare.returncode != 0:
+        if prepare.stdout:
+            print(prepare.stdout, end="" if prepare.stdout.endswith("\n") else "\n")
+        print(f"[ingest] prepare failed for {unit_id}; chain stopped.")
+        return prepare.returncode
+
+    # Aggregate: surface prepare's [ok] artifacts + its own machine-readable NEXT FOR
+    # AGENT line (carries parse-cache path, element list, and the exact verify command).
+    print(f"[ingest] intake + prepare done for {unit_id} ({kind}); stopped before verify (agent must fill elements first).")
+    for line in prepare.stdout.splitlines():
+        if line.startswith("[ok] "):
+            print(line)
+    next_line = _extract_next_for_agent(prepare.stdout)
+    if next_line:
+        print(next_line)
+    else:
+        print(f"NEXT FOR AGENT: fill the {kind} skeleton for {unit_id}, then run the analyzer --phase verify.")
+    return 0
 
 
 def bool_text(value: object, default: str = "true") -> str:
@@ -535,6 +681,13 @@ def register_add(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]
     parser.set_defaults(handler=handle_add)
 
 
+def register_ingest(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    parser = subparsers.add_parser("ingest", help="一条命令：入库 + 备好待填骨架（停在 prepare，不自动 verify）")
+    parser.add_argument("source", help="论文、repo、博客 URL 或本地文件路径")
+    parser.add_argument("--kind", choices=["paper", "repo", "blog"], help="显式覆盖 kind 推断")
+    parser.set_defaults(handler=handle_ingest)
+
+
 def register_review(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     parser = subparsers.add_parser("review", help="查看确认收件箱，TTY 下可交互处理")
     parser.add_argument("fuzzy", nargs="?", help="可选 kind 或关键词过滤")
@@ -587,6 +740,7 @@ VERB_REGISTRARS: tuple[Callable[[argparse._SubParsersAction[argparse.ArgumentPar
     register_init,
     register_doctor,
     register_add,
+    register_ingest,
     register_review,
     register_status,
     register_next,
