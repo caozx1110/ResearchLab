@@ -188,15 +188,12 @@ def safe_unit_step(record: dict[str, Any]) -> dict[str, Any] | None:
             "record_id": unit_id,
             "title": str(record.get("title") or ""),
             "reason": f"{kind} `{unit_id}` 等待人工确认",
-            "command_parts": [
-                COMMAND_PREFIX,
-                ".agents/skills/knowledge-base-manager/scripts/kb.py",
-                "confirm",
-                "--id",
-                unit_id,
-                "--evidence",
-                "${RESEARCH_CONFIRM_EVIDENCE:?set-human-evidence}",
-            ],
+            # Single confirm renderer (research.common.confirm_command via the
+            # confirm_command_for_record alias): analyzer confirm for paper/repo/blog,
+            # else kb.py promote --confirmation-status confirmed. Keeps `kb next` in
+            # lockstep with `kb find` / `kb review` — no hand-copied confirm command (F5).
+            "recommended_command": confirm_command_for_record(record),
+            "command_parts": [],
             "safe_execute": False,
         }
     if kind == "paper":
@@ -350,9 +347,13 @@ def format_auto_plan(plan: dict[str, Any]) -> str:
     message = str(plan.get("message") or plan.get("reason") or "")
     if message:
         lines.append(f"- next: {message}")
-    command_parts = plan.get("command_parts") if isinstance(plan.get("command_parts"), list) else []
-    if command_parts:
-        lines.append(f"- command: {shell_command([str(part) for part in command_parts])}")
+    rendered_command = str(plan.get("recommended_command") or "")
+    if not rendered_command:
+        command_parts = plan.get("command_parts") if isinstance(plan.get("command_parts"), list) else []
+        if command_parts:
+            rendered_command = shell_command([str(part) for part in command_parts])
+    if rendered_command:
+        lines.append(f"- command: {rendered_command}")
     if not bool(plan.get("safe_execute")):
         lines.append("- execute: stop for human decision")
     else:
@@ -669,7 +670,8 @@ def program_dashboard_items(root: Path) -> list[dict[str, Any]]:
                 "score": score,
                 "reasons": ["loose unit", str(step.get("step_type") or "")],
                 "next_action": str(step.get("reason") or ""),
-                "recommended_command": shell_command([str(part) for part in step.get("command_parts") or []]),
+                "recommended_command": str(step.get("recommended_command") or "")
+                or shell_command([str(part) for part in step.get("command_parts") or []]),
             }
         )
     return sorted(items, key=lambda item: (-int(item.get("score") or 0), str(item.get("updated_at") or ""), str(item.get("program_id") or "")))
