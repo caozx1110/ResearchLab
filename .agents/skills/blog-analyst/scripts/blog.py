@@ -347,6 +347,26 @@ def _resolve_fill_input(unit_root: Path, default_name: str, explicit: str | None
     return unit_root / default_name
 
 
+def next_for_agent_note(root: Path, record: dict, cache_path: Path, fill_path: Path) -> str:
+    """One machine-readable navigation line for the ingestion auto-drive (SSOT §7).
+
+    Pure navigation: names the parse-cache artifact to read, the elements to fill
+    (each needs a verbatim quote + section/anchor locator), and the exact verify
+    command to run after. Blogs are web pages (section/anchor locators, no page numbers).
+    """
+    elements = ",".join(NOTE_ELEMENTS)
+    verify_cmd = (
+        f"${{RESEARCH_PYTHON:-python3}} {SCRIPT_PATH} --root {root} "
+        f"complete-note --blog-id {record['id']} --phase verify --input {fill_path.name}"
+    )
+    read_hint = rel(root, cache_path) if cache_path.exists() else "parse-cache.yaml"
+    return (
+        f"NEXT FOR AGENT: read {read_hint} (source quotes) then fill {rel(root, fill_path)} "
+        f"elements [{elements}] — each needs content + >=1 verbatim quote+locator "
+        f"(HTML section / section:<anchor>), then run: {verify_cmd}"
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Prepare fillable blog structures + verify agent-filled understanding."
@@ -400,6 +420,7 @@ def _run_complete_note(args, root: Path, record: dict, unit_root: Path) -> int:
             "(positioning/key_points/credibility/reusable_explanation)"
             "带证据，再跑 `blog.py complete-note --phase verify --blog-id <id>`。"
         )
+        print(next_for_agent_note(root, record, cache_path, fill_scaffold_path))
         return 0
 
     # verify
