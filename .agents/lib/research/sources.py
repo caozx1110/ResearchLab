@@ -445,11 +445,34 @@ def _pdf_metadata(pdf_path: Path, chunks: list[dict[str, Any]]) -> dict[str, Any
                 break
     first_page = chunks[0]["text"] if chunks else ""
     if not title and first_page:
+        # F8: a paper title often spans several physical lines (e.g. a short tail
+        # line like "Weighting"). Collect the leading contiguous title block instead
+        # of taking only the first qualifying line, then join. The first line must
+        # look title-shaped (3-20 words); continuation lines are accepted more
+        # loosely (short tails ok), stopping at an author list / affiliation /
+        # abstract / link / blank line.
+        title_lines: list[str] = []
         for raw_line in first_page.splitlines():
             line = clean_text(raw_line).lstrip("# ").strip()
-            if 3 <= len(line.split()) <= 20 and not line.lower().startswith("abstract"):
-                title = line
-                break
+            if not line:
+                if title_lines:
+                    break
+                continue
+            lowered = line.lower()
+            if lowered.startswith("abstract") or "http" in lowered or "arxiv:" in lowered or "@" in line:
+                if title_lines:
+                    break
+                continue
+            words = len(line.split())
+            if not title_lines:
+                if 3 <= words <= 20:
+                    title_lines.append(line)
+                # else keep scanning for the first title-shaped line
+            elif words <= 20 and line.count(",") < 2:
+                title_lines.append(line)  # continuation line (short tails allowed)
+            else:
+                break  # author list (>=2 commas) or over-long line ends the title
+        title = " ".join(title_lines)
     arxiv_id = _arxiv_id_from_source(pdf_path.name) or parse_arxiv_id("\n".join(c["text"] for c in chunks[:2]))
     if arxiv_id and year is None:
         year = 2000 + int(arxiv_id[:2])
