@@ -124,7 +124,12 @@ def _cache_path(unit_root: Path) -> Path:
 
 
 def _load_cache_chunks(unit_root: Path) -> tuple[list[dict], str]:
-    """Load chunks from parse-cache.yaml (built by source-intake). Returns (chunks, locator_kind)."""
+    """Load chunks from parse-cache.yaml (built by source-intake). Returns (chunks, locator_kind).
+
+    Read-compatible with either header id key: a blog parse-cache may carry the correct
+    ``blog_id`` (or ``unit_id``) or the legacy ``paper_id`` the shared intake writer
+    stamped on it — chunk loading does not depend on which (see ``_cache_unit_id`` /
+    ``_normalize_cache_header`` for the F9 header correction)."""
     cache_path = _cache_path(unit_root)
     if not cache_path.exists():
         return [], "section"
@@ -136,6 +141,47 @@ def _load_cache_chunks(unit_root: Path) -> tuple[list[dict], str]:
     if not isinstance(chunks, list):
         return [], locator_kind
     return [c for c in chunks if isinstance(c, dict)], locator_kind
+
+
+# Header id keys a blog parse-cache may carry, in preferred (blog-semantic first)
+# order. ``paper_id`` is the legacy key the shared dual-source intake writer
+# (research.sources.write_parse_cache) stamps on every unit's cache — wrong semantics
+# for a blog. We accept it on read and correct it on write (F9).
+_CACHE_ID_KEYS: tuple[str, ...] = ("blog_id", "unit_id", "paper_id")
+
+
+def _cache_unit_id(payload: dict) -> str:
+    """Read the unit id from a parse-cache header, accepting blog/unit/legacy keys."""
+    for key in _CACHE_ID_KEYS:
+        value = str(payload.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _normalize_cache_header(unit_root: Path) -> bool:
+    """Correct a blog parse-cache's legacy ``paper_id`` header key to ``blog_id`` (F9).
+
+    The shared intake writer labels every unit's parse-cache header ``paper_id``,
+    which is wrong for a blog unit. When blog.py consumes the cache it rewrites the
+    on-disk header key to blog semantics (value preserved, field order kept, all other
+    fields untouched). Idempotent: a cache already using ``blog_id``/``unit_id`` (or a
+    cache with no header id at all) is left alone. Returns True when it rewrote."""
+    cache_path = _cache_path(unit_root)
+    if not cache_path.exists():
+        return False
+    payload = load_yaml(cache_path, default={})
+    if not isinstance(payload, dict):
+        return False
+    if "paper_id" not in payload or "blog_id" in payload or "unit_id" in payload:
+        return False
+    unit_id = _cache_unit_id(payload)
+    normalized = {
+        ("blog_id" if key == "paper_id" else key): (unit_id if key == "paper_id" else value)
+        for key, value in payload.items()
+    }
+    write_yaml_if_changed(cache_path, normalized)
+    return True
 
 
 def _chunk_locator(chunk: dict) -> str:
@@ -406,6 +452,7 @@ def _run_complete_note(args, root: Path, record: dict, unit_root: Path, defer_po
     fill_scaffold_path = unit_root / "blog-fill.yaml"
     note_path = unit_root / "blog-note.md"
     cache_path = _cache_path(unit_root)
+    _normalize_cache_header(unit_root)  # F9: correct legacy paper_id header to blog_id
     source_chunks, _locator_kind = _load_cache_chunks(unit_root)
 
     if args.phase == "prepare":
