@@ -25,7 +25,7 @@ from research.bootstrap import ensure_managed_runtime, is_current_python, manage
 if __name__ == "__main__":
     ensure_managed_runtime(DEFAULT_PROJECT_ROOT)
 
-from research.common import add_project_root_argument, current_runtime_capabilities, find_project_root, load_yaml
+from research.common import add_project_root_argument, confirm_command, current_runtime_capabilities, find_project_root, load_yaml
 from research.core import config_root, default_confirmed_by, is_ai_signer, load_runtime_preferences, search_records
 
 
@@ -335,6 +335,73 @@ def _prepare_display_command(root: Path, kind: str, unit_id: str) -> str:
     return " ".join(parts)
 
 
+# Portable prefix for the post-prepare chain navigation (matches the analyzer's own
+# NEXT FOR AGENT verify line + research.common.confirm_command).
+INGEST_CHAIN_PREFIX = "${RESEARCH_PYTHON:-python3}"
+
+
+def _analyzer_chain_command(root: Path, kind: str, verb: str, unit_id: str, *extra: str) -> str:
+    """Render an existing analyzer verb for the chain guidance (never executed here)."""
+    relative_script, _, id_flag = INGEST_ANALYZER[kind]
+    parts = [INGEST_CHAIN_PREFIX, str(script_path(root, relative_script)), "--root", str(root), verb, id_flag, unit_id, *extra]
+    return " ".join(parts)
+
+
+def _ingest_chain_guidance(root: Path, kind: str, unit_id: str, scope: set[str]) -> list[str]:
+    """Post-prepare navigation for the FULL ingestion chain (SSOT Principle 7).
+
+    Pure navigation printed by `kb ingest`: after the agent fills + verifies the
+    analyzer note (the NEXT FOR AGENT line above), this spells out the remaining
+    safe auto-steps and — for papers — the screening *second-fill* that ingest
+    otherwise omits, then the confirm gate. It NEVER auto-runs verify/confirm, and
+    honors the autonomy valve for the safe auto-steps (extract-figures /
+    refresh-structure are gated by the effective `refresh` scope). The confirm gate
+    is rendered by the single shared helper (research.common.confirm_command).
+    """
+    confirm_cmd = confirm_command({"id": unit_id, "kind": kind})
+    if kind != "paper":
+        fill_artifact = "capability-fill.yaml" if kind == "repo" else "blog-fill.yaml"
+        verify_verb = "map-capability" if kind == "repo" else "complete-note"
+        verdict = "reuse verdict" if kind == "repo" else "worth-reading verdict + key points"
+        return [
+            f"[ingest] full chain remaining for {unit_id} (SSOT P7: you fill understanding; only the confirm gate needs the user):",
+            f"  chain: fill {'capability' if kind == 'repo' else 'note'} -> verify -> [gate] confirm {verdict}",
+            f"  step A (fill + verify): see the NEXT FOR AGENT line above — fill {fill_artifact}, then run {verify_verb} --phase verify (never auto-run: a script cannot fill understanding).",
+            f"  step B (confirm gate — AI judgement, never self-signed): present the {verdict} for the user, who confirms with:",
+            f"      {confirm_cmd}",
+        ]
+
+    refresh_on = "refresh" in scope
+    screening_on = bool(load_runtime_preferences(root).get("paper", {}).get("auto_screen_on_intake", True))
+    chain = "fill note -> verify note"
+    if refresh_on:
+        chain += " -> [safe auto] extract-figures + refresh-structure"
+    if screening_on:
+        chain += " -> fill screening -> verify screening"
+    chain += " -> [gate] confirm judgement"
+
+    lines = [
+        f"[ingest] full chain remaining for {unit_id} (SSOT P7: you fill understanding; scripts do the safe steps; only the confirm gate needs the user):",
+        f"  chain: {chain}",
+        "  step A (fill + verify note): see the NEXT FOR AGENT line above — fill note-fill.yaml, then run complete-note --phase verify (never auto-run: a script cannot fill understanding).",
+    ]
+    if refresh_on:
+        lines.append("  step B (safe auto — 'refresh' is in your auto_execute_scope): after note verify, with a PDF backend present:")
+    else:
+        lines.append("  step B (safe auto, but 'refresh' is OUTSIDE your auto_execute_scope — run only if you choose): after note verify, with a PDF backend present:")
+    lines.append(f"      {_analyzer_chain_command(root, kind, 'extract-figures', unit_id)}")
+    lines.append(f"      {_analyzer_chain_command(root, kind, 'refresh-structure', unit_id)}")
+    if screening_on:
+        lines.append(
+            f"  step C (screening SECOND-fill — scaffold already prepared at intake): fill kb/units/papers/{unit_id}/screening.yaml "
+            "(worth_deep_reading + judgement_reason + claims with evidence), then run:"
+        )
+        lines.append(f"      {_analyzer_chain_command(root, kind, 'screen', unit_id, '--phase', 'verify')}")
+    lines.append("  step D (confirm gate — AI judgement, never self-signed): present the worth-reading verdict + key insights for the user, who confirms with:")
+    lines.append(f"      {confirm_cmd}")
+    return lines
+
+
 def handle_ingest(args: argparse.Namespace, root: Path) -> int:
     kind = args.kind or infer_add_kind(args.source, root)
     if kind not in INGEST_ANALYZER:
@@ -401,6 +468,8 @@ def handle_ingest(args: argparse.Namespace, root: Path) -> int:
         print(next_line)
     else:
         print(f"NEXT FOR AGENT: fill the {kind} skeleton for {unit_id}, then run the analyzer --phase verify.")
+    for line in _ingest_chain_guidance(root, kind, unit_id, scope):
+        print(line)
     return 0
 
 

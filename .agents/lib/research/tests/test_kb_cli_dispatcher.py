@@ -342,6 +342,58 @@ def test_kb_reject_without_reason_omits_evidence(monkeypatch, tmp_path: Path) ->
     ]
 
 
+def test_ingest_chain_guidance_paper_surfaces_full_chain(tmp_path: Path) -> None:
+    """A: kb ingest guidance lists the WHOLE post-verify chain, incl. the screening second-fill."""
+    kb = _load_kb_cli()
+    text = "\n".join(
+        kb._ingest_chain_guidance(tmp_path, "paper", "p-demo-123456", {"screen", "refresh", "generate-note", "build-index"})
+    )
+    # remaining safe auto-steps after note verify
+    assert "extract-figures --paper-id p-demo-123456" in text
+    assert "refresh-structure --paper-id p-demo-123456" in text
+    # the screening SECOND-fill that ingest previously omitted (screen --phase verify)
+    assert "screening SECOND-fill" in text
+    assert "screen --paper-id p-demo-123456 --phase verify" in text
+    assert "screening.yaml" in text
+    # confirm gate, never self-signed; verify never auto-run
+    assert "confirm gate" in text and "never self-signed" in text
+    assert "never auto-run" in text
+
+
+def test_ingest_chain_guidance_honors_autonomy_valve(tmp_path: Path) -> None:
+    kb = _load_kb_cli()
+    with_refresh = "\n".join(kb._ingest_chain_guidance(tmp_path, "paper", "p-x-1", {"screen", "refresh", "generate-note"}))
+    without_refresh = "\n".join(kb._ingest_chain_guidance(tmp_path, "paper", "p-x-1", {"screen", "generate-note"}))
+
+    assert "'refresh' is in your auto_execute_scope" in with_refresh
+    assert "[safe auto] extract-figures + refresh-structure" in with_refresh
+    # gated out: relabel + drop the safe-auto segment from the chain summary,
+    # but still show the commands (labeled run-only-if-you-choose).
+    assert "OUTSIDE your auto_execute_scope" in without_refresh
+    assert "[safe auto] extract-figures + refresh-structure" not in without_refresh
+    assert "extract-figures --paper-id p-x-1" in without_refresh
+
+
+def test_ingest_chain_guidance_confirm_gate_uses_shared_helper(tmp_path: Path) -> None:
+    kb = _load_kb_cli()
+    text = "\n".join(kb._ingest_chain_guidance(tmp_path, "paper", "p-x-1", {"refresh"}))
+    assert kb.confirm_command({"id": "p-x-1", "kind": "paper"}) in text
+
+
+def test_ingest_chain_guidance_repo_and_blog_have_no_screening_or_figures(tmp_path: Path) -> None:
+    kb = _load_kb_cli()
+    repo = "\n".join(kb._ingest_chain_guidance(tmp_path, "repo", "r-x-1", {"refresh"}))
+    blog = "\n".join(kb._ingest_chain_guidance(tmp_path, "blog", "b-x-1", {"refresh"}))
+
+    assert "map-capability --phase verify" in repo
+    assert "screening" not in repo and "extract-figures" not in repo
+    assert kb.confirm_command({"id": "r-x-1", "kind": "repo"}) in repo
+
+    assert "complete-note --phase verify" in blog
+    assert "screening" not in blog and "extract-figures" not in blog
+    assert kb.confirm_command({"id": "b-x-1", "kind": "blog"}) in blog
+
+
 def test_kb_add_allows_explicit_kind_override(monkeypatch, tmp_path: Path) -> None:
     kb = _load_kb_cli()
     calls: list[tuple[str, tuple[str, ...]]] = []
