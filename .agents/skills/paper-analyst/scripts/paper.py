@@ -670,6 +670,25 @@ def _resolve_fill_input(unit_root: Path, default_name: str, explicit: str | None
     return unit_root / default_name
 
 
+def next_for_agent_note(root: Path, record: dict, cache_path: Path, fill_path: Path) -> str:
+    """One machine-readable navigation line for the ingestion auto-drive (SSOT §7).
+
+    Pure navigation: it names the parse-cache artifact to read, the elements to fill
+    (each needs a verbatim quote + locator), and the exact verify command to run after.
+    It authors no judgement — the agent still fills the understanding.
+    """
+    elements = ",".join(NOTE_ELEMENTS)
+    verify_cmd = (
+        f"${{RESEARCH_PYTHON:-python3}} {SCRIPT_PATH} --root {root} "
+        f"complete-note --paper-id {record['id']} --phase verify --input {fill_path.name}"
+    )
+    return (
+        f"NEXT FOR AGENT: read {rel(root, cache_path)} (source quotes) then fill {rel(root, fill_path)} "
+        f"elements [{elements}] — each needs content + >=1 verbatim quote+locator "
+        f"(PDF page=N / HTML section:<anchor>), then run: {verify_cmd}"
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Prepare fillable paper structures + verify agent-filled understanding.")
     add_project_root_argument(parser)
@@ -826,6 +845,7 @@ def _run_complete_note(args, root, record, unit_root, cache_path, source_chunks,
         write_record(root, record)
         print(f"[ok] wrote {fill_scaffold_path.relative_to(root)}")
         print("下一步：runtime agent 为 5 要素(motivation/method/experiment/limitation/insight)填内容+证据，再运行 complete-note --phase verify。")
+        print(next_for_agent_note(root, record, cache_path, fill_scaffold_path))
         _finalize_post_actions(root, trigger="milestone", message=f"milestone: scaffold note {args.paper_id}", defer_post_actions=defer_post_actions)
         return 0
 
