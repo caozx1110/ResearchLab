@@ -666,6 +666,109 @@ def _finalize_post_actions(root: Path, *, trigger: str, message: str, defer_post
     return checkpoint_and_report(root, trigger=trigger, message=message)
 
 
+# Governance ceiling for auto-executed safe steps (mirrors research-orchestrator's
+# GOVERNANCE_MAX_AUTO_STEPS; kept local to avoid a cross-skill import).
+_GOVERNANCE_MAX_AUTO_STEPS = {"screen", "build-index", "refresh", "generate-note"}
+
+
+def _run_refresh_structure(
+    root: Path, record: dict, unit_root: Path, source_chunks: list[dict], cache_path: Path, *, defer_post_actions: bool
+) -> int:
+    """Derive structure.yaml from the EXISTING parse-cache chunks (F-a invariant:
+    never re-parses / overwrites the cache) and persist. Shared by the CLI
+    dispatch and the auto-post-note step."""
+    structure_path = unit_root / "structure.yaml"
+    note_path = unit_root / "note.md"
+    payload = detect_structure(source_chunks, note_path)
+    write_yaml_if_changed(structure_path, payload)
+    record["payload"]["structure"]["refresh_status"] = "pending_user_confirmation"
+    record["payload"]["structure"]["detected_sections"] = payload["detected_sections"]
+    record["payload"]["structure"]["paper_outline"] = payload["paper_outline"]
+    record["payload"]["structure"]["open_questions"] = payload["open_questions"]
+    record["confirmation_status"] = "pending_user_confirmation"
+    record["needs_human_confirmation"] = True
+    append_history(
+        record,
+        action="paper-structure-refreshed",
+        summary="Refreshed paper structure hints from the existing parse cache.",
+        information_types=["fact", "inference", "unverified"],
+        artifacts=[rel(root, structure_path), rel(root, cache_path)],
+    )
+    write_record(root, record)
+    print(f"[ok] wrote {structure_path.relative_to(root)}")
+    _finalize_post_actions(
+        root, trigger="milestone", message=f"milestone: refresh paper structure {record['id']}", defer_post_actions=defer_post_actions
+    )
+    return 0
+
+
+def _run_extract_figures(
+    root: Path, record: dict, unit_root: Path, source_chunks: list[dict], *, defer_post_actions: bool
+) -> int:
+    """Extract figure assets (best-effort; empty when no PDF backend / no figures)
+    and index figure mentions. Shared by the CLI dispatch and the auto-post-note step."""
+    figures_path = unit_root / "figures.yaml"
+    extracted_assets, filtered_assets, extraction_meta = _extract_pdf_images(root, record, unit_root)
+    payload = extract_figure_mentions(source_chunks, extracted_assets=extracted_assets)
+    payload["filtered_assets"] = filtered_assets
+    payload["asset_counts"] = {"kept": len(extracted_assets), "filtered": len(filtered_assets)}
+    payload["filter_policy"] = {
+        "mode": extraction_meta.get("mode"),
+        "captions_detected": extraction_meta.get("captions_detected", 0),
+        "fallback_used": extraction_meta.get("fallback_used", False),
+        "white_ratio_threshold": WHITE_RATIO_THRESHOLD,
+        "gray_ratio_threshold": GRAY_RATIO_THRESHOLD,
+        "low_color_threshold": LOW_COLOR_THRESHOLD,
+        "discard_filtered_files": True,
+    }
+    write_yaml_if_changed(figures_path, payload)
+    record["payload"]["figures"]["extraction_status"] = "pending_user_confirmation"
+    record["payload"]["figures"]["candidate_figures"] = payload["candidate_figures"]
+    record["payload"]["figures"]["key_figures"] = payload["key_figures"]
+    record["confirmation_status"] = "pending_user_confirmation"
+    record["needs_human_confirmation"] = True
+    record["information_types"] = sorted(set(record.get("information_types", [])) | {"fact", "inference", "unverified"})
+    append_history(
+        record,
+        action="paper-figures-extracted",
+        summary="Extracted figure assets when possible and indexed figure mentions.",
+        information_types=["fact", "inference", "unverified"],
+        artifacts=[rel(root, figures_path)],
+    )
+    write_record(root, record)
+    print(f"[ok] wrote {figures_path.relative_to(root)}")
+    _finalize_post_actions(
+        root, trigger="milestone", message=f"milestone: extract paper figures {record['id']}", defer_post_actions=defer_post_actions
+    )
+    return 0
+
+
+def _auto_post_note_steps(
+    root: Path, record: dict, unit_root: Path, source_chunks: list[dict], cache_path: Path, paper_preferences: dict, defer_post_actions: bool
+) -> None:
+    """SSOT 3.2 auto-refresh: after a successful note verify, auto-run the safe
+    post-note steps the prefs enable, gated by autonomy.auto_execute_scope. Never
+    auto-verifies or auto-confirms; never re-parses the cache (F-a). When deferred,
+    do nothing (the caller's own defer handles it)."""
+    if defer_post_actions:
+        return
+    autonomy = load_runtime_preferences(root).get("autonomy", {})
+    configured = {str(s).strip() for s in autonomy.get("auto_execute_scope", []) if str(s).strip()}
+    effective = configured & _GOVERNANCE_MAX_AUTO_STEPS
+    if bool(paper_preferences.get("auto_refresh_structure_after_note", True)):
+        if "refresh" in effective:
+            _run_refresh_structure(root, record, unit_root, source_chunks, cache_path, defer_post_actions=True)
+            print("[auto] refresh-structure 已跑（结构已更新，parse-cache 不变）")
+        else:
+            print(f"[next] refresh-structure 未自动跑（不在 auto_execute_scope）：refresh-structure --paper-id {record['id']}")
+    if bool(paper_preferences.get("auto_extract_figures_after_note", False)):
+        if "generate-note" in effective:
+            _run_extract_figures(root, record, unit_root, source_chunks, defer_post_actions=True)
+            print("[auto] extract-figures 已跑（无 backend/图则为空）")
+        else:
+            print(f"[next] extract-figures 未自动跑（不在 auto_execute_scope）：extract-figures --paper-id {record['id']}")
+
+
 def _resolve_fill_input(unit_root: Path, default_name: str, explicit: str | None) -> Path:
     if explicit:
         candidate = Path(explicit).expanduser()
@@ -888,6 +991,7 @@ def _run_complete_note(args, root, record, unit_root, cache_path, source_chunks,
     )
     write_record(root, record)
     print(f"[ok] verified + wrote {note_path.relative_to(root)} (core_content filled, {len(claims)} elements)")
+    _auto_post_note_steps(root, record, unit_root, source_chunks, cache_path, paper_preferences, defer_post_actions)
     _finalize_post_actions(root, trigger="milestone", message=f"milestone: verify note {args.paper_id}", defer_post_actions=defer_post_actions)
     return 0
 
@@ -931,74 +1035,10 @@ def main() -> int:
         return _run_complete_note(args, root, record, unit_root, cache_path, source_chunks, paper_preferences, defer_post_actions)
 
     if args.command == "extract-figures":
-        figures_path = unit_root / "figures.yaml"
-        extracted_assets, filtered_assets, extraction_meta = _extract_pdf_images(root, record, unit_root)
-        payload = extract_figure_mentions(source_chunks, extracted_assets=extracted_assets)
-        payload["filtered_assets"] = filtered_assets
-        payload["asset_counts"] = {
-            "kept": len(extracted_assets),
-            "filtered": len(filtered_assets),
-        }
-        payload["filter_policy"] = {
-            "mode": extraction_meta.get("mode"),
-            "captions_detected": extraction_meta.get("captions_detected", 0),
-            "fallback_used": extraction_meta.get("fallback_used", False),
-            "white_ratio_threshold": WHITE_RATIO_THRESHOLD,
-            "gray_ratio_threshold": GRAY_RATIO_THRESHOLD,
-            "low_color_threshold": LOW_COLOR_THRESHOLD,
-            "discard_filtered_files": True,
-        }
-        write_yaml_if_changed(figures_path, payload)
-        record["payload"]["figures"]["extraction_status"] = "pending_user_confirmation"
-        record["payload"]["figures"]["candidate_figures"] = payload["candidate_figures"]
-        record["payload"]["figures"]["key_figures"] = payload["key_figures"]
-        record["confirmation_status"] = "pending_user_confirmation"
-        record["needs_human_confirmation"] = True
-        record["information_types"] = sorted(set(record.get("information_types", [])) | {"fact", "inference", "unverified"})
-        append_history(
-            record,
-            action="paper-figures-extracted",
-            summary="Extracted figure assets when possible and indexed figure mentions.",
-            information_types=["fact", "inference", "unverified"],
-            artifacts=[rel(root, figures_path)],
-        )
-        write_record(root, record)
-        print(f"[ok] wrote {figures_path.relative_to(root)}")
-        _finalize_post_actions(
-            root,
-            trigger="milestone",
-            message=f"milestone: extract paper figures {args.paper_id}",
-            defer_post_actions=defer_post_actions,
-        )
-        return 0
+        return _run_extract_figures(root, record, unit_root, source_chunks, defer_post_actions=defer_post_actions)
 
     if args.command == "refresh-structure":
-        structure_path = unit_root / "structure.yaml"
-        note_path = unit_root / "note.md"
-        payload = detect_structure(source_chunks, note_path)
-        write_yaml_if_changed(structure_path, payload)
-        record["payload"]["structure"]["refresh_status"] = "pending_user_confirmation"
-        record["payload"]["structure"]["detected_sections"] = payload["detected_sections"]
-        record["payload"]["structure"]["paper_outline"] = payload["paper_outline"]
-        record["payload"]["structure"]["open_questions"] = payload["open_questions"]
-        record["confirmation_status"] = "pending_user_confirmation"
-        record["needs_human_confirmation"] = True
-        append_history(
-            record,
-            action="paper-structure-refreshed",
-            summary="Refreshed paper structure hints and parse cache.",
-            information_types=["fact", "inference", "unverified"],
-            artifacts=[rel(root, structure_path), rel(root, cache_path)],
-        )
-        write_record(root, record)
-        print(f"[ok] wrote {structure_path.relative_to(root)}")
-        _finalize_post_actions(
-            root,
-            trigger="milestone",
-            message=f"milestone: refresh paper structure {args.paper_id}",
-            defer_post_actions=defer_post_actions,
-        )
-        return 0
+        return _run_refresh_structure(root, record, unit_root, source_chunks, cache_path, defer_post_actions=defer_post_actions)
 
     if args.command == "confirm":
         record = confirm_unit(record, "paper", confirmed_by=args.confirmed_by, evidence=args.evidence, method="paper.py confirm", project_root=root)
