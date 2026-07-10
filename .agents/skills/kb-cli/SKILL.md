@@ -41,6 +41,7 @@ kb recall gotchas
 - `find <keywords...>`：转发到 `knowledge-base-manager/scripts/kb.py query --query "<keywords>"`。
 - `recall [kind]`：转发到 `skill-evolution-advisor/scripts/learnings.py recall --kind <kind|all>`。
 - `add <src> [--kind paper|repo|blog]`：按 arxiv/pdf/github/git URL 推断 kind，转发到 source-intake 快速入库。
+- `ingest <src> [--kind paper|repo|blog]`：一条命令把 source 拉进来并备好待填骨架，agent 随后自动填 grounded 笔记。链式跑 `intake add → analyzer prepare` 并**停在 prepare**（脚本不能替 agent 填理解，绝不自动 verify），最后打印聚合的 `NEXT FOR AGENT:` 行（含 parse-cache 路径 + 待填要素 + 真实 verify 命令）。受 `runtime-preferences.autonomy.auto_execute_scope`（被 `GOVERNANCE_MAX_AUTO_STEPS` 封顶）约束：scope 收窄时相应缩减链条（去掉 `generate-note` 只跑 intake；去掉 `screen` 连 intake 都不自动跑，只给手动命令）。
 - `review [fuzzy]`：转发确认收件箱列表；TTY 下逐条确认 / 拒绝 / 跳过 / 退出，并在写入前统一要求 evidence。
 
 ## 约束
