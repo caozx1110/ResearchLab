@@ -68,7 +68,10 @@ ID_ARG_BY_KIND = {
 NEXT_COMMAND_BY_KIND = {
     "paper": "screen",
     "repo": "scan-structure",
-    "blog": "summarize",
+    # blog's old-flow `summarize` verb was renamed to the fillable `complete-note`
+    # prepare (the analyzer no longer has `summarize`); point find/review at the
+    # current mainline so the rendered next command is runnable (F7).
+    "blog": "complete-note",
     "idea": "analyze",
     "experiment": "diagnose",
 }
