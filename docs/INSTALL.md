@@ -7,7 +7,7 @@
 安装器有两种模型：
 
 - system scope 和同仓 `--project .` 使用 symlink。脚本经 `Path(__file__).resolve()` 跟随 symlink 回到源仓库，并在源仓库里找到同级 `.agents/lib`。
-- 外部 `--project DIR` 使用 copy。安装器把整棵 `.agents/` 和 `AGENTS.md` 拷到 `DIR`，脚本从 `DIR/.agents/...` 向上 walk-up，命中 `DIR/.agents/lib` 和 `DIR/AGENTS.md`。
+- 外部 `--project DIR` 使用 copy。安装器把整棵 `.agents/`（含使用规则 `.agents/AGENTS.md`）拷到 `DIR`，并把该使用规则写到 workspace 根 `DIR/AGENTS.md`；脚本从 `DIR/.agents/...` 向上 walk-up，命中 `DIR/.agents/lib` 和 `DIR/AGENTS.md`（root marker）。
 
 反向不变量：整棵 `.agents` 一起拷贝是安全的；只把孤立的单个 skill 目录拷到别处会破坏 sibling import，不支持。
 
@@ -76,7 +76,7 @@ bash install.sh --all --project /path/to/workspace
 CLAUDE.md      # managed block 内使用 @AGENTS.md
 ```
 
-Codex 直接读取仓库已有的 `AGENTS.md` 和 `.agents/`。
+Codex 直接读取仓库已有的 `AGENTS.md`（开发者工作流；`CLAUDE.md` 为其软链）和 `.agents/`（含使用规则 `.agents/AGENTS.md`）。
 
 ### 外部 project scope
 
@@ -85,7 +85,7 @@ Codex 直接读取仓库已有的 `AGENTS.md` 和 `.agents/`。
 ```text
 <workspace>/.agents/                      # 真实目录，整棵拷贝
 <workspace>/.agents/.install-manifest.json
-<workspace>/AGENTS.md                     # 源仓 AGENTS.md 的受管拷贝
+<workspace>/AGENTS.md                     # 源仓 .agents/AGENTS.md 使用规则的受管拷贝
 <workspace>/.claude/skills -> ../.agents/skills
 <workspace>/CLAUDE.md                     # managed block 内使用 @AGENTS.md
 ```
@@ -201,7 +201,7 @@ kb --root /path/to/kb-workspace status
 
 Codex 当前没有稳定的 `~/.codex/skills` system-scope 约定。安装器只做安全子集：
 
-- 创建 `~/.codex/workspace-oss/AGENTS.md` symlink。
+- 创建 `~/.codex/workspace-oss/AGENTS.md` symlink（指向源仓 `.agents/AGENTS.md` 使用规则）。
 - 创建 `~/.codex/workspace-oss/.agents` symlink。
 - 如果用户已经有 `~/.codex/skills/` 目录，则逐个 symlink skills；否则不主动创建该目录。
 

@@ -1,6 +1,6 @@
 # Contributing
 
-人类可读 Markdown 默认中文优先。编辑规则、ownership 边界、确认门控和 skill 路由以 [AGENTS.md](AGENTS.md) 为准。
+人类可读 Markdown 默认中文优先。开发/编辑规则、ownership 边界与开发工作流以仓库根的 [AGENTS.md](AGENTS.md)（`CLAUDE.md` 为其软链）为准；面向使用 kb 的 agent 的运行规则（skill 路由、确认门控、写作偏好）见 [.agents/AGENTS.md](.agents/AGENTS.md)。
 
 Python floor: `python_requires >= 3.9`。本仓库保留 `PYTHONPATH=.agents/lib` 约定，不新增 `pyproject.toml`。
 

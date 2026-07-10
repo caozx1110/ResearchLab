@@ -33,7 +33,7 @@ kb/
 └── .runtime/
 ```
 
-公开包提供 `.agents/`、`AGENTS.md`、`README.md` 和 `docs/`。用户本地运行后生成自己的 `kb/`；发布包不应捆绑私有 knowledge base。
+公开包提供 `.agents/`（含使用规则 `.agents/AGENTS.md`）、面向开发者的 `AGENTS.md`/`CLAUDE.md`（软链）、`README.md` 和 `docs/`。用户本地运行后生成自己的 `kb/`；发布包不应捆绑私有 knowledge base。
 
 `kb/` 可以是嵌套 Git repository。runtime state、browser snapshots 和本地缓存应忽略，canonical records 和 durable notes 才是知识库主体。
 

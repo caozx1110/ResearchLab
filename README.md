@@ -19,8 +19,8 @@ kb status
 
 公开内容主要有三层：
 
-- `.agents/`：17 个本地 skill、脚本和共享运行库。
-- `AGENTS.md`：工作区规则、schema 约束和写作偏好。
+- `.agents/`：17 个本地 skill、脚本、共享运行库，以及使用规则 `.agents/AGENTS.md`（工作区运行规则、schema 约束和写作偏好；随 `.agents/` 分发到用户工作区根 `AGENTS.md`，面向使用 kb 的 agent）。
+- `AGENTS.md` / `CLAUDE.md`（软链 → `AGENTS.md`）：面向开发/优化本 skill 系统的开发者工作流。
 - `docs/`：按受众组织的用户指南和设计说明。
 
 如果本地还没有 `kb/`，也没关系。这个仓库可以先只作为 workflow 和 skill 系统使用，知识库内容之后再在本地生成。
@@ -32,7 +32,7 @@ kb status
 - [设计说明](docs/DESIGN.md)：给开发者，说明 architecture、skill 路由、数据模型、confirmation gate 和扩展原则。
 - [贡献指南](CONTRIBUTING.md)：给贡献者，说明协作和变更流程。
 
-安装入口支持 `bash install.sh` 交互式引导。安装模型：system scope 和同仓 `--project .` 使用 symlink；外部 `--project DIR` 会拷贝整棵 `.agents/` 与 `AGENTS.md`，写入 manifest，并可用 `bash install.sh update --project DIR` 做 clean-sync 更新。详见 [安装指南](docs/INSTALL.md)。
+安装入口支持 `bash install.sh` 交互式引导。安装模型：system scope 和同仓 `--project .` 使用 symlink；外部 `--project DIR` 会拷贝整棵 `.agents/`（含使用规则 `.agents/AGENTS.md`），并在 workspace 根写出 `AGENTS.md`（= `.agents/AGENTS.md` 使用规则），写入 manifest，并可用 `bash install.sh update --project DIR` 做 clean-sync 更新。详见 [安装指南](docs/INSTALL.md)。
 
 ## 核心想法
 
