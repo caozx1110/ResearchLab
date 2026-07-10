@@ -437,6 +437,25 @@ def _resolve_fill_input(unit_root: Path, default_name: str, explicit: str | None
     return unit_root / default_name
 
 
+def next_for_agent_capability(root: Path, record: dict, fill_path: Path) -> str:
+    """One machine-readable navigation line for the ingestion auto-drive (SSOT §7).
+
+    Pure navigation: names the fill artifact to read (its agent_orientation digest),
+    the elements to fill, and the exact verify command to run after. Repo evidence
+    cites real repo files with file:line locators (artifact=<file>, locator=line=N).
+    """
+    elements = ",".join(CAP_ELEMENTS)
+    verify_cmd = (
+        f"${{RESEARCH_PYTHON:-python3}} {SCRIPT_PATH} --root {root} "
+        f"map-capability --repo-id {record['id']} --phase verify --input {fill_path.name}"
+    )
+    return (
+        f"NEXT FOR AGENT: read {rel(root, fill_path)} (agent_orientation) + repo files then fill it "
+        f"elements [{elements}] — each needs content + >=1 verbatim quote+locator "
+        f"(repo file:line, artifact=<file> locator=line=N), then run: {verify_cmd}"
+    )
+
+
 def add_confirmation_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--confirmed-by", default="")
     parser.add_argument("--evidence", action="append", required=True)
@@ -541,6 +560,7 @@ def _run_map_capability(args, root, record, unit_root, defer_post_actions) -> in
             "下一步：runtime agent 为三要素 (capability/reuse_points/entry_map) 填内容 + "
             "file:line 逐字证据，再运行 map-capability --phase verify。"
         )
+        print(next_for_agent_capability(root, record, fill_path))
         _finalize_post_actions(root, trigger="milestone", message=f"milestone: scaffold capability {args.repo_id}",
                                defer_post_actions=defer_post_actions)
         return 0
