@@ -228,7 +228,7 @@ WIZARD_TOTAL=5
 REPO_ROOT=$(script_dir)
 [ -d "$REPO_ROOT/.agents/lib" ] || die "could not find .agents/lib next to install.sh"
 [ -d "$REPO_ROOT/.agents/skills" ] || die "could not find .agents/skills next to install.sh"
-[ -f "$REPO_ROOT/AGENTS.md" ] || die "could not find AGENTS.md next to install.sh"
+[ -f "$REPO_ROOT/.agents/AGENTS.md" ] || die "could not find .agents/AGENTS.md next to install.sh"
 [ -f "$REPO_ROOT/install-lib/ws_sync.py" ] || die "could not find install-lib/ws_sync.py next to install.sh"
 is_command python3 || die "python3 is required"
 
@@ -784,7 +784,7 @@ guard_agents_md_for_copy_install() {
   local target expected actual_link actual_abs expected_abs
   target="$WORKSPACE_ROOT/AGENTS.md"
   [ -e "$target" ] || [ -L "$target" ] || return 0
-  expected="$REPO_ROOT/AGENTS.md"
+  expected="$REPO_ROOT/.agents/AGENTS.md"
   if [ -L "$target" ]; then
     actual_link=$(readlink "$target")
     case $actual_link in
@@ -1014,8 +1014,8 @@ build_claude_block() {
     if [ "$mode" = "include" ]; then
       printf '@AGENTS.md\n'
     else
-      printf '<!-- Generated from %s/AGENTS.md for workspace %s. -->\n\n' "$REPO_ROOT" "$ws"
-      sed -n '1,$p' "$REPO_ROOT/AGENTS.md"
+      printf '<!-- Generated from %s/.agents/AGENTS.md for workspace %s. -->\n\n' "$REPO_ROOT" "$ws"
+      sed -n '1,$p' "$REPO_ROOT/.agents/AGENTS.md"
     fi
     printf '%s\n' "$END_MARKER"
   } >"$block_file"
@@ -1097,7 +1097,7 @@ uninstall_codex_project() {
   elif [ -d "$WORKSPACE_ROOT/.agents" ] && [ ! -f "$MANIFEST_PATH" ]; then
     warn "foreign .agents directory has no workspace-oss manifest; preserving it"
   fi
-  remove_symlink_if_matches "$WORKSPACE_ROOT/AGENTS.md" "$REPO_ROOT/AGENTS.md"
+  remove_symlink_if_matches "$WORKSPACE_ROOT/AGENTS.md" "$REPO_ROOT/.agents/AGENTS.md"
 }
 
 install_codex_system() {
@@ -1105,7 +1105,7 @@ install_codex_system() {
   global_dir="$HOME/.codex/$INSTALL_NAME"
   ensure_dir "$global_dir"
   link_force "$REPO_ROOT/.agents" "$global_dir/.agents"
-  link_force "$REPO_ROOT/AGENTS.md" "$global_dir/AGENTS.md"
+  link_force "$REPO_ROOT/.agents/AGENTS.md" "$global_dir/AGENTS.md"
   if [ -d "$HOME/.codex/skills" ]; then
     for skill in "$SKILLS_SRC"/*; do
       [ -d "$skill" ] || continue
@@ -1122,7 +1122,7 @@ uninstall_codex_system() {
   local global_dir skill name
   global_dir="$HOME/.codex/$INSTALL_NAME"
   remove_symlink_if_matches "$global_dir/.agents" "$REPO_ROOT/.agents"
-  remove_symlink_if_matches "$global_dir/AGENTS.md" "$REPO_ROOT/AGENTS.md"
+  remove_symlink_if_matches "$global_dir/AGENTS.md" "$REPO_ROOT/.agents/AGENTS.md"
   rmdir "$global_dir" >/dev/null 2>&1 || true
   if [ -d "$HOME/.codex/skills" ]; then
     for skill in "$SKILLS_SRC"/*; do
