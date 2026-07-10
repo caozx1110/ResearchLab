@@ -515,7 +515,12 @@ def _apply_note_fill_to_payload(record: dict, claims: list[dict]) -> None:
 
 def render_note_md(record: dict, claims: list[dict]) -> str:
     """Render note.md from verified elements + their evidence citations."""
-    title = str(record.get("title") or record.get("id") or "")
+    # Collapse ALL whitespace (incl. newlines) so the full title renders on the single
+    # H1 line (F8). A PDF-extracted title can carry embedded newlines; `f"# {title}"`
+    # would then put only the first physical line in the heading and orphan the rest as
+    # body text — reading as a mid-sentence truncation. This keeps the whole title, no
+    # hard character cut.
+    title = " ".join(str(record.get("title") or record.get("id") or "").split())
     by_id = {str(claim.get("id") or ""): claim for claim in claims}
     lines = [
         f"# {title}",
