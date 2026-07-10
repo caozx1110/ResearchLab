@@ -40,12 +40,13 @@ kb recall gotchas
 - `next [program]`：转发到 `research-orchestrator/scripts/orchestrate.py next`；当前底层脚本按全局 program 优先级给建议。
 - `find <keywords...>`：转发到 `knowledge-base-manager/scripts/kb.py query --query "<keywords>"`。
 - `recall [kind]`：转发到 `skill-evolution-advisor/scripts/learnings.py recall --kind <kind|all>`。
-- `add <src> [--kind paper|repo|blog]`：按 arxiv/pdf/github/git URL 推断 kind，转发到 source-intake 快速入库。
-- `ingest <src> [--kind paper|repo|blog]`：一条命令把 source 拉进来并备好待填骨架，agent 随后自动填 grounded 笔记。链式跑 `intake add → analyzer prepare` 并**停在 prepare**（脚本不能替 agent 填理解，绝不自动 verify），最后打印聚合的 `NEXT FOR AGENT:` 行（含 parse-cache 路径 + 待填要素 + 真实 verify 命令）。受 `runtime-preferences.autonomy.auto_execute_scope`（被 `GOVERNANCE_MAX_AUTO_STEPS` 封顶）约束：scope 收窄时相应缩减链条（去掉 `generate-note` 只跑 intake；去掉 `screen` 连 intake 都不自动跑，只给手动命令）。
+- `add <src> [--kind paper|repo|blog]`：按 arxiv/pdf/github/git URL 推断 kind，**本地目录（git 检出 / 源码树）判为 `repo`**、本地 `.pdf` 判为 `paper`、其它本地文件判为 `blog`，转发到 source-intake 快速入库。
+- `ingest <src> [--kind paper|repo|blog]`：一条命令把 source 拉进来并备好待填骨架，agent 随后自动填 grounded 笔记。链式跑 `intake add → analyzer prepare` 并**停在 prepare**（脚本不能替 agent 填理解，绝不自动 verify），先打印聚合的 `NEXT FOR AGENT:` 行（含 parse-cache 路径 + 待填要素 + 真实 verify 命令），再打印**整条剩余链路导航**（SSOT 原则 7）：paper 为 `填 note → verify → [安全自动] extract-figures + refresh-structure → 初筛第二次填充（screen --phase verify，骨架已在 intake 备好）→ [闸口] 确认判断`；repo/blog 为 `填要素 → verify → [闸口] 确认判断`。安全自动步（figures/structure）受 `runtime-preferences.autonomy.auto_execute_scope`（被 `GOVERNANCE_MAX_AUTO_STEPS` 封顶）的 `refresh` 位约束：收窄时改标注为“超出 scope，仅按需手动”，并从链路摘要里去掉该段；verify/confirm 永不自动。确认闸口命令统一由 `research.common.confirm_command` 渲染。
 - `review [fuzzy]`：转发确认收件箱列表；TTY 下逐条确认 / 拒绝 / 跳过 / 退出，并在写入前统一要求 evidence。
+- `reject <id> [--reason <text>]`：把误建 / 不采纳的知识单元标记为 `rejected`（清理出口，例如被误判成 blog 的 repo 单元）。纯转发到 `knowledge-base-manager/scripts/kb.py promote --confirmation-status rejected`（`kb review` 拒绝走的同一路径），不重实现拒绝逻辑。
 
 ## 约束
 
 - 不复制业务逻辑；写入、确认、检索、状态汇总都留在底层脚本。
-- Root 解析复用 `research.common.find_project_root` 和 `add_project_root_argument`，支持 `--root` / `RESEARCH_PROJECT_ROOT`。
+- Root 解析复用 `research.common.find_project_root` 和 `add_project_root_argument`，支持 `--root` / `RESEARCH_PROJECT_ROOT`。**`--root` 是顶层 flag，必须放在动词之前**：`kb --root <PROJECT_ROOT> ingest <src>`（放到动词及其参数之后会被 argparse 拒绝）。`kb --help` 与 `kb ingest --help` 均有说明。
 - 子脚本失败时保留 stderr，并以非零退出码返回。

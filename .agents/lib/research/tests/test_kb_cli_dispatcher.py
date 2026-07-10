@@ -47,9 +47,9 @@ def test_kb_help_snapshot_contains_group_headers() -> None:
     text = kb.render_help_menu()
 
     assert "# kb 快捷命令" in text
-    for header in ["kb 动词（10 个）", "纯自然语言（无 kb 动词）"]:
+    for header in ["kb 动词（11 个）", "纯自然语言（无 kb 动词）"]:
         assert f"## {header}" in text
-    for verb in ["kb help", "kb init", "kb doctor", "kb status", "kb next", "kb find", "kb add", "kb ingest", "kb review", "kb recall"]:
+    for verb in ["kb help", "kb init", "kb doctor", "kb status", "kb next", "kb find", "kb add", "kb ingest", "kb review", "kb reject", "kb recall"]:
         assert verb in text
     assert "请基于当前知识库给我 3 个候选 idea" in text
     assert "为这个 program 生成周报材料" in text
@@ -253,6 +253,35 @@ def test_kb_add_infers_kind_table(source: str, expected: str) -> None:
     assert kb.infer_add_kind(source) == expected
 
 
+def test_kb_infers_local_directory_as_repo_not_blog(tmp_path: Path) -> None:
+    """F1: a local checkout dir is a repo, never the blog fallback."""
+    kb = _load_kb_cli()
+    repo_dir = tmp_path / "langwbc-repo"
+    (repo_dir / "src").mkdir(parents=True)
+    (repo_dir / "README.md").write_text("# LangWBC\n", encoding="utf-8")
+    (repo_dir / "src" / "main.py").write_text("def main():\n    pass\n", encoding="utf-8")
+
+    # absolute path
+    assert kb.infer_add_kind(str(repo_dir)) == "repo"
+    # relative path resolved against the project root
+    assert kb.infer_add_kind("langwbc-repo", tmp_path) == "repo"
+    # a .git bare marker / git url still maps to repo
+    assert kb.infer_add_kind("git@github.com:org/repo.git") == "repo"
+    assert kb.infer_add_kind("https://gitlab.com/org/repo") == "repo"
+
+
+def test_kb_infers_local_non_pdf_file_as_blog_and_pdf_as_paper(tmp_path: Path) -> None:
+    """F1 guard: local *file* still discriminates pdf(paper) vs other(blog); dir stays repo."""
+    kb = _load_kb_cli()
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+    html = tmp_path / "post.html"
+    html.write_text("<html></html>", encoding="utf-8")
+
+    assert kb.infer_add_kind(str(pdf)) == "paper"
+    assert kb.infer_add_kind(str(html)) == "blog"
+
+
 def test_kb_add_forwards_inferred_kind(monkeypatch, tmp_path: Path) -> None:
     kb = _load_kb_cli()
     calls: list[tuple[str, tuple[str, ...]]] = []
@@ -271,6 +300,98 @@ def test_kb_add_forwards_inferred_kind(monkeypatch, tmp_path: Path) -> None:
             ("add", "--kind", "repo", "--source", "https://github.com/org/repo"),
         ),
     ]
+
+
+def _capture_forward(kb, monkeypatch) -> list[tuple[str, tuple[str, ...]]]:
+    calls: list[tuple[str, tuple[str, ...]]] = []
+    monkeypatch.setattr(
+        kb,
+        "forward_command",
+        lambda root, relative_script, args: calls.append((relative_script, tuple(args)))
+        or kb.CommandResult((relative_script, *args), 0),
+    )
+    return calls
+
+
+def test_kb_reject_forwards_to_promote_rejected(monkeypatch, tmp_path: Path) -> None:
+    """F1: `kb reject <id>` reuses knowledge-base-manager promote --confirmation-status rejected."""
+    kb = _load_kb_cli()
+    calls = _capture_forward(kb, monkeypatch)
+
+    assert kb.main(["--root", str(tmp_path), "reject", "b-langwbc-repo-78d111a4", "--reason", "mis-created"]) == 0
+
+    assert calls == [
+        (
+            ".agents/skills/knowledge-base-manager/scripts/kb.py",
+            ("promote", "--id", "b-langwbc-repo-78d111a4", "--confirmation-status", "rejected", "--evidence", "mis-created"),
+        ),
+    ]
+
+
+def test_kb_reject_without_reason_omits_evidence(monkeypatch, tmp_path: Path) -> None:
+    kb = _load_kb_cli()
+    calls = _capture_forward(kb, monkeypatch)
+
+    assert kb.main(["--root", str(tmp_path), "reject", "b-x-1"]) == 0
+
+    assert calls == [
+        (
+            ".agents/skills/knowledge-base-manager/scripts/kb.py",
+            ("promote", "--id", "b-x-1", "--confirmation-status", "rejected"),
+        ),
+    ]
+
+
+def test_ingest_chain_guidance_paper_surfaces_full_chain(tmp_path: Path) -> None:
+    """A: kb ingest guidance lists the WHOLE post-verify chain, incl. the screening second-fill."""
+    kb = _load_kb_cli()
+    text = "\n".join(
+        kb._ingest_chain_guidance(tmp_path, "paper", "p-demo-123456", {"screen", "refresh", "generate-note", "build-index"})
+    )
+    # remaining safe auto-steps after note verify
+    assert "extract-figures --paper-id p-demo-123456" in text
+    assert "refresh-structure --paper-id p-demo-123456" in text
+    # the screening SECOND-fill that ingest previously omitted (screen --phase verify)
+    assert "screening SECOND-fill" in text
+    assert "screen --paper-id p-demo-123456 --phase verify" in text
+    assert "screening.yaml" in text
+    # confirm gate, never self-signed; verify never auto-run
+    assert "confirm gate" in text and "never self-signed" in text
+    assert "never auto-run" in text
+
+
+def test_ingest_chain_guidance_honors_autonomy_valve(tmp_path: Path) -> None:
+    kb = _load_kb_cli()
+    with_refresh = "\n".join(kb._ingest_chain_guidance(tmp_path, "paper", "p-x-1", {"screen", "refresh", "generate-note"}))
+    without_refresh = "\n".join(kb._ingest_chain_guidance(tmp_path, "paper", "p-x-1", {"screen", "generate-note"}))
+
+    assert "'refresh' is in your auto_execute_scope" in with_refresh
+    assert "[safe auto] extract-figures + refresh-structure" in with_refresh
+    # gated out: relabel + drop the safe-auto segment from the chain summary,
+    # but still show the commands (labeled run-only-if-you-choose).
+    assert "OUTSIDE your auto_execute_scope" in without_refresh
+    assert "[safe auto] extract-figures + refresh-structure" not in without_refresh
+    assert "extract-figures --paper-id p-x-1" in without_refresh
+
+
+def test_ingest_chain_guidance_confirm_gate_uses_shared_helper(tmp_path: Path) -> None:
+    kb = _load_kb_cli()
+    text = "\n".join(kb._ingest_chain_guidance(tmp_path, "paper", "p-x-1", {"refresh"}))
+    assert kb.confirm_command({"id": "p-x-1", "kind": "paper"}) in text
+
+
+def test_ingest_chain_guidance_repo_and_blog_have_no_screening_or_figures(tmp_path: Path) -> None:
+    kb = _load_kb_cli()
+    repo = "\n".join(kb._ingest_chain_guidance(tmp_path, "repo", "r-x-1", {"refresh"}))
+    blog = "\n".join(kb._ingest_chain_guidance(tmp_path, "blog", "b-x-1", {"refresh"}))
+
+    assert "map-capability --phase verify" in repo
+    assert "screening" not in repo and "extract-figures" not in repo
+    assert kb.confirm_command({"id": "r-x-1", "kind": "repo"}) in repo
+
+    assert "complete-note --phase verify" in blog
+    assert "screening" not in blog and "extract-figures" not in blog
+    assert kb.confirm_command({"id": "b-x-1", "kind": "blog"}) in blog
 
 
 def test_kb_add_allows_explicit_kind_override(monkeypatch, tmp_path: Path) -> None:

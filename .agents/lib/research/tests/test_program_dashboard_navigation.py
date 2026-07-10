@@ -276,7 +276,12 @@ def test_orchestrator_auto_execute_stops_at_pending_confirmation(tmp_path: Path,
     assert plan["safe_execute"] is False
     assert "stop for human decision" in output
     assert "not executing" in output
-    assert ".agents/skills/knowledge-base-manager/scripts/kb.py confirm --id p-gated-123456" in output
+    # F5: kb next renders the confirm gate via the single shared helper
+    # (research.common.confirm_command) — analyzer confirm for a paper, not a
+    # hand-copied kb.py confirm — matching kb find / kb review.
+    assert ".agents/skills/paper-analyst/scripts/paper.py confirm --paper-id p-gated-123456" in output
+    assert "--confirmed-by ${RESEARCH_CONFIRMED_BY:?set-human-identity}" in output
+    assert "--evidence ${RESEARCH_CONFIRM_EVIDENCE:?set-human-evidence}" in output
 
 
 def test_orchestrator_auto_execute_passes_root_env_and_arg_to_child(tmp_path: Path, monkeypatch) -> None:

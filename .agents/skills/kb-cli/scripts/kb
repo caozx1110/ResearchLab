@@ -25,13 +25,13 @@ from research.bootstrap import ensure_managed_runtime, is_current_python, manage
 if __name__ == "__main__":
     ensure_managed_runtime(DEFAULT_PROJECT_ROOT)
 
-from research.common import add_project_root_argument, current_runtime_capabilities, find_project_root, load_yaml
+from research.common import add_project_root_argument, confirm_command, current_runtime_capabilities, find_project_root, load_yaml
 from research.core import config_root, default_confirmed_by, is_ai_signer, load_runtime_preferences, search_records
 
 
 HELP_MENU: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
     (
-        "kb 动词（10 个）",
+        "kb 动词（11 个）",
         (
             ("打印能力菜单。", "kb help"),
             ("初始化 KB 布局、索引和基础偏好。", "kb init"),
@@ -42,6 +42,7 @@ HELP_MENU: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("把论文、repo、博客或本地文件轻量入库。", "kb add <链接或路径>"),
             ("一条命令把 source 拉进来并备好待填骨架，随后 agent 自动填 grounded 笔记。", "kb ingest <链接或路径>"),
             ("查看待确认的 AI 判断，后续可交互式确认。", "kb review"),
+            ("把误建 / 不采纳的知识单元标记为 rejected（清理出口）。", "kb reject <单元 id>"),
             ("回忆已确认习惯、已知坑和待审 skill 问题。", "kb recall"),
         ),
     ),
@@ -203,18 +204,70 @@ def handle_recall(args: argparse.Namespace, root: Path) -> int:
     return run_forwarded(root, [(SCRIPT_BY_VERB["recall"], ["recall", "--kind", kind])])
 
 
-def infer_add_kind(source: str) -> str:
-    normalized = source.strip().lower()
-    path_part = normalized.split("#", 1)[0].split("?", 1)[0]
-    if "arxiv.org" in normalized or path_part.endswith(".pdf"):
-        return "paper"
-    if "github.com" in normalized or normalized.startswith("git@"):
+def handle_reject(args: argparse.Namespace, root: Path) -> int:
+    """Mark a mis-created / not-adopted unit as rejected (F1 cleanup exit).
+
+    Pure dispatch: forwards to knowledge-base-manager's existing
+    `promote --confirmation-status rejected` (the same reject path `kb review`
+    uses). No reject logic is reimplemented here.
+    """
+    reject_args = ["promote", "--id", args.id, "--confirmation-status", "rejected"]
+    reason = str(getattr(args, "reason", "") or "").strip()
+    if reason:
+        reject_args.extend(["--evidence", reason])
+    return run_forwarded(root, [(SCRIPT_BY_VERB["review"], reject_args)])
+
+
+def _looks_like_repo_dir(path: Path) -> bool:
+    """A local directory is a code checkout (repo), not a blog.
+
+    Treat any directory as a repo; strengthen the signal when it carries a `.git`
+    marker or a README alongside a source/config structure. The mere fact that a
+    local reference resolves to a directory is enough to prefer `repo` over the
+    `blog` fallback (F1: a cloned repo dir was mis-created as a blog unit).
+    """
+    try:
+        if not path.is_dir():
+            return False
+    except OSError:
+        return False
+    return True
+
+
+def infer_add_kind(source: str, root: Path | None = None) -> str:
+    normalized = source.strip()
+    lowered = normalized.lower()
+    path_part = lowered.split("#", 1)[0].split("?", 1)[0]
+    # Remote URLs / git refs: decide from the URL shape, never touch the filesystem.
+    if lowered.startswith(("http://", "https://")):
+        if "arxiv.org" in lowered or path_part.endswith(".pdf"):
+            return "paper"
+        if "github.com" in lowered or "gitlab.com" in lowered or "bitbucket.org" in lowered:
+            return "repo"
+        return "blog"
+    if lowered.startswith("git@") or lowered.endswith(".git"):
         return "repo"
+    # Local reference: a directory (git checkout / source tree) is a repo, not a blog.
+    candidate = Path(normalized).expanduser()
+    probes = [candidate]
+    if root is not None and not candidate.is_absolute():
+        probes.insert(0, root / candidate)
+    for probe in probes:
+        if _looks_like_repo_dir(probe):
+            return "repo"
+        try:
+            if probe.is_file():
+                return "paper" if probe.suffix.lower() == ".pdf" else "blog"
+        except OSError:
+            continue
+    # Unresolved local string: fall back to arxiv/pdf hints, else blog.
+    if "arxiv.org" in lowered or path_part.endswith(".pdf"):
+        return "paper"
     return "blog"
 
 
 def handle_add(args: argparse.Namespace, root: Path) -> int:
-    kind = args.kind or infer_add_kind(args.source)
+    kind = args.kind or infer_add_kind(args.source, root)
     return run_forwarded(root, [(SCRIPT_BY_VERB["add"], ["add", "--kind", kind, "--source", args.source])])
 
 
@@ -282,8 +335,75 @@ def _prepare_display_command(root: Path, kind: str, unit_id: str) -> str:
     return " ".join(parts)
 
 
+# Portable prefix for the post-prepare chain navigation (matches the analyzer's own
+# NEXT FOR AGENT verify line + research.common.confirm_command).
+INGEST_CHAIN_PREFIX = "${RESEARCH_PYTHON:-python3}"
+
+
+def _analyzer_chain_command(root: Path, kind: str, verb: str, unit_id: str, *extra: str) -> str:
+    """Render an existing analyzer verb for the chain guidance (never executed here)."""
+    relative_script, _, id_flag = INGEST_ANALYZER[kind]
+    parts = [INGEST_CHAIN_PREFIX, str(script_path(root, relative_script)), "--root", str(root), verb, id_flag, unit_id, *extra]
+    return " ".join(parts)
+
+
+def _ingest_chain_guidance(root: Path, kind: str, unit_id: str, scope: set[str]) -> list[str]:
+    """Post-prepare navigation for the FULL ingestion chain (SSOT Principle 7).
+
+    Pure navigation printed by `kb ingest`: after the agent fills + verifies the
+    analyzer note (the NEXT FOR AGENT line above), this spells out the remaining
+    safe auto-steps and — for papers — the screening *second-fill* that ingest
+    otherwise omits, then the confirm gate. It NEVER auto-runs verify/confirm, and
+    honors the autonomy valve for the safe auto-steps (extract-figures /
+    refresh-structure are gated by the effective `refresh` scope). The confirm gate
+    is rendered by the single shared helper (research.common.confirm_command).
+    """
+    confirm_cmd = confirm_command({"id": unit_id, "kind": kind})
+    if kind != "paper":
+        fill_artifact = "capability-fill.yaml" if kind == "repo" else "blog-fill.yaml"
+        verify_verb = "map-capability" if kind == "repo" else "complete-note"
+        verdict = "reuse verdict" if kind == "repo" else "worth-reading verdict + key points"
+        return [
+            f"[ingest] full chain remaining for {unit_id} (SSOT P7: you fill understanding; only the confirm gate needs the user):",
+            f"  chain: fill {'capability' if kind == 'repo' else 'note'} -> verify -> [gate] confirm {verdict}",
+            f"  step A (fill + verify): see the NEXT FOR AGENT line above — fill {fill_artifact}, then run {verify_verb} --phase verify (never auto-run: a script cannot fill understanding).",
+            f"  step B (confirm gate — AI judgement, never self-signed): present the {verdict} for the user, who confirms with:",
+            f"      {confirm_cmd}",
+        ]
+
+    refresh_on = "refresh" in scope
+    screening_on = bool(load_runtime_preferences(root).get("paper", {}).get("auto_screen_on_intake", True))
+    chain = "fill note -> verify note"
+    if refresh_on:
+        chain += " -> [safe auto] extract-figures + refresh-structure"
+    if screening_on:
+        chain += " -> fill screening -> verify screening"
+    chain += " -> [gate] confirm judgement"
+
+    lines = [
+        f"[ingest] full chain remaining for {unit_id} (SSOT P7: you fill understanding; scripts do the safe steps; only the confirm gate needs the user):",
+        f"  chain: {chain}",
+        "  step A (fill + verify note): see the NEXT FOR AGENT line above — fill note-fill.yaml, then run complete-note --phase verify (never auto-run: a script cannot fill understanding).",
+    ]
+    if refresh_on:
+        lines.append("  step B (safe auto — 'refresh' is in your auto_execute_scope): after note verify, with a PDF backend present:")
+    else:
+        lines.append("  step B (safe auto, but 'refresh' is OUTSIDE your auto_execute_scope — run only if you choose): after note verify, with a PDF backend present:")
+    lines.append(f"      {_analyzer_chain_command(root, kind, 'extract-figures', unit_id)}")
+    lines.append(f"      {_analyzer_chain_command(root, kind, 'refresh-structure', unit_id)}")
+    if screening_on:
+        lines.append(
+            f"  step C (screening SECOND-fill — scaffold already prepared at intake): fill kb/units/papers/{unit_id}/screening.yaml "
+            "(worth_deep_reading + judgement_reason + claims with evidence), then run:"
+        )
+        lines.append(f"      {_analyzer_chain_command(root, kind, 'screen', unit_id, '--phase', 'verify')}")
+    lines.append("  step D (confirm gate — AI judgement, never self-signed): present the worth-reading verdict + key insights for the user, who confirms with:")
+    lines.append(f"      {confirm_cmd}")
+    return lines
+
+
 def handle_ingest(args: argparse.Namespace, root: Path) -> int:
-    kind = args.kind or infer_add_kind(args.source)
+    kind = args.kind or infer_add_kind(args.source, root)
     if kind not in INGEST_ANALYZER:
         print(f"[ingest] cannot chain unknown kind {kind!r}; run `kb add` then the matching analyzer prepare manually.")
         return 2
@@ -348,6 +468,8 @@ def handle_ingest(args: argparse.Namespace, root: Path) -> int:
         print(next_line)
     else:
         print(f"NEXT FOR AGENT: fill the {kind} skeleton for {unit_id}, then run the analyzer --phase verify.")
+    for line in _ingest_chain_guidance(root, kind, unit_id, scope):
+        print(line)
     return 0
 
 
@@ -682,7 +804,18 @@ def register_add(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]
 
 
 def register_ingest(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    parser = subparsers.add_parser("ingest", help="一条命令：入库 + 备好待填骨架（停在 prepare，不自动 verify）")
+    parser = subparsers.add_parser(
+        "ingest",
+        help="一条命令：入库 + 备好待填骨架（停在 prepare，不自动 verify）",
+        description="入库 source 并链到 analyzer prepare（停在 prepare，永不自动 verify）。",
+        epilog=(
+            "注意：--root 是顶层 flag，必须放在动词之前，例如：\n"
+            "  kb --root <PROJECT_ROOT> ingest <src>\n"
+            "放到 `ingest <src>` 之后（kb ingest <src> --root <PROJECT_ROOT>）会被 argparse 拒绝，"
+            "因为 --root 属于顶层解析器而非 ingest 子命令。"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument("source", help="论文、repo、博客 URL 或本地文件路径")
     parser.add_argument("--kind", choices=["paper", "repo", "blog"], help="显式覆盖 kind 推断")
     parser.set_defaults(handler=handle_ingest)
@@ -735,6 +868,16 @@ def register_recall(subparsers: argparse._SubParsersAction[argparse.ArgumentPars
     parser.set_defaults(handler=handle_recall)
 
 
+def register_reject(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    parser = subparsers.add_parser(
+        "reject",
+        help="把误建 / 不采纳的知识单元标记为 rejected（复用 promote --confirmation-status rejected）",
+    )
+    parser.add_argument("id", help="要拒绝的知识单元 id（如误判成 blog 的 b-langwbc-repo-xxxx）")
+    parser.add_argument("--reason", default="", help="可选：拒绝理由，写入该次 promote 的 evidence")
+    parser.set_defaults(handler=handle_reject)
+
+
 VERB_REGISTRARS: tuple[Callable[[argparse._SubParsersAction[argparse.ArgumentParser]], None], ...] = (
     register_help,
     register_init,
@@ -746,11 +889,19 @@ VERB_REGISTRARS: tuple[Callable[[argparse._SubParsersAction[argparse.ArgumentPar
     register_next,
     register_find,
     register_recall,
+    register_reject,
 )
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="kb 快捷命令入口（伪 CLI）")
+    parser = argparse.ArgumentParser(
+        description="kb 快捷命令入口（伪 CLI）",
+        epilog=(
+            "--root 是顶层 flag，放在动词之前：kb --root <PROJECT_ROOT> <verb> ...\n"
+            "（放到动词及其参数之后会被 argparse 拒绝。）"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     add_project_root_argument(parser)
     subparsers = parser.add_subparsers(dest="command", required=True)
     for register in VERB_REGISTRARS:
