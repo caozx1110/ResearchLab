@@ -94,7 +94,7 @@ kb review
 kb recall
 ```
 
-`kb` 动词清单以代码为准，共 9 个：`help` 打印能力菜单；`init` 初始化 KB 布局、索引和基础偏好；`doctor` 检查当前 Python、YAML 与 PDF 后端可用性；`status` 刷新并查看当前 KB / program 状态摘要；`next` 查看下一步实验或 program 推进建议；`find` 按关键词检索已入库知识单元；`add` 把论文、repo、博客或本地文件轻量入库；`review` 查看待确认的 AI 判断，后续可交互式确认；`recall` 回忆已确认习惯、已知坑和待审 skill 问题。
+`kb` 动词清单以代码为准，共 11 个：`help` 打印能力菜单；`init` 初始化 KB 布局、索引和基础偏好；`doctor` 检查当前 Python、YAML 与 PDF 后端可用性；`status` 刷新并查看当前 KB / program 状态摘要；`next` 查看下一步实验或 program 推进建议；`find` 按关键词检索已入库知识单元；`add` 把论文、repo、博客或本地文件轻量入库；`ingest` 一条命令把 source 拉进来并备好待填骨架，随后 agent 自动填 grounded 笔记；`review` 查看待确认的 AI 判断，后续可交互式确认；`reject` 把误建 / 不采纳的知识单元标记为 rejected（清理出口）；`recall` 回忆已确认习惯、已知坑和待审 skill 问题。
 
 idea / report 没有 `kb` 动词，默认用纯自然语言，例如“请基于当前知识库给我 3 个候选 idea”或“为这个 program 生成周报材料”。
 
