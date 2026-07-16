@@ -11,6 +11,7 @@ from .common import (
     utc_now_iso,
     write_yaml_if_changed,
 )
+from .journal import journaled_op
 from .paths import (
     UNIT_KIND_DIRS,
     _text_list,
@@ -287,7 +288,8 @@ def write_record(project_root: Path, record: dict[str, Any]) -> Path:
     ensure_dir(root)
     path = root / "record.yaml"
     normalized["updated_at"] = utc_now_iso()
-    write_yaml_if_changed(path, normalized)
+    with journaled_op(project_root, "write_record", [path]):
+        write_yaml_if_changed(path, normalized)
     return path
 
 

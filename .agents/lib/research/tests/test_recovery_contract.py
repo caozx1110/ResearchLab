@@ -2,6 +2,9 @@ from pathlib import Path
 
 import pytest
 
+from research.confirm import write_record
+from research.journal import abort_op, begin_op, commit_op, journal_entry_path, load_op
+from research.records import default_record
 from research import yaml_io
 
 
@@ -22,3 +25,40 @@ def test_atomic_write_failure_does_not_clobber_existing_target(
 
     assert target.read_text(encoding="utf-8") == "original\n"
     assert list(tmp_path.glob(".record.yaml.*.tmp")) == []
+
+
+def test_operation_journal_tracks_begin_commit_and_abort(tmp_path: Path) -> None:
+    target = tmp_path / "kb" / "units" / "papers" / "p-test" / "record.yaml"
+    op_id = begin_op(tmp_path, "test-write", [target])
+
+    begun = load_op(tmp_path, op_id)
+    assert begun["state"] == "begin"
+    assert begun["before_digests"] == {"units/papers/p-test/record.yaml": None}
+
+    target.parent.mkdir(parents=True)
+    target.write_text("value: one\n", encoding="utf-8")
+    commit_op(tmp_path, op_id)
+    committed = load_op(tmp_path, op_id)
+    assert committed["state"] == "commit"
+    assert committed["after_digests"]["units/papers/p-test/record.yaml"]
+
+    abort_id = begin_op(tmp_path, "test-abort", [target])
+    abort_op(tmp_path, abort_id)
+    assert load_op(tmp_path, abort_id)["state"] == "abort"
+    assert ".journal/" in (tmp_path / "kb" / ".gitignore").read_text(encoding="utf-8")
+
+
+def test_write_record_creates_committed_journal_entry(tmp_path: Path) -> None:
+    record = default_record("paper", title="Journal Test", maturity="lightweight")
+    record["id"] = "p-journal-test"
+
+    path = write_record(tmp_path, record)
+
+    entries = list((tmp_path / "kb" / ".journal").glob("*.yaml"))
+    assert len(entries) == 1
+    entry = load_op(tmp_path, entries[0].stem)
+    assert entry["state"] == "commit"
+    assert entry["target_paths"] == [path.relative_to(tmp_path / "kb").as_posix()]
+    assert entry["before_digests"] == {entry["target_paths"][0]: None}
+    assert entry["after_digests"][entry["target_paths"][0]]
+    assert journal_entry_path(tmp_path, entry["op_id"]) == entries[0]
