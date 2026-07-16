@@ -14,6 +14,11 @@ from .common import (
     write_yaml_if_changed,
 )
 from .journal import journaled_op, operation_lock_path
+from .evidence import (
+    confirmation_claim_ids,
+    confirmation_content_digest,
+    confirmation_evidence_digest,
+)
 from .paths import (
     UNIT_KIND_DIRS,
     _text_list,
@@ -183,6 +188,7 @@ def apply_confirmation(
         project_root=project_root,
     )
     now = utc_now_iso()
+    prior_information_types = _text_list(record.get("information_types"))
     record["confirmation_status"] = "confirmed"
     record["needs_human_confirmation"] = False
     record["last_human_confirmed_at"] = now
@@ -191,6 +197,15 @@ def apply_confirmation(
         "at": now,
         "evidence": evidence_items,
         "method": str(method or "cli").strip() or "cli",
+        "decision": "confirmed",
+        "subject": {
+            "kind": str(record.get("kind") or ""),
+            "id": str(record.get("id") or ""),
+        },
+        "claim_ids": confirmation_claim_ids(record),
+        "content_digest": confirmation_content_digest(record),
+        "evidence_digest": confirmation_evidence_digest(record, evidence_items),
+        "prior_information_types": prior_information_types,
     }
     return record
 

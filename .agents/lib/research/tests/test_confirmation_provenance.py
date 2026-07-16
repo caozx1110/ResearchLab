@@ -7,6 +7,7 @@ import pytest
 
 from research.common import load_yaml, write_yaml_if_changed
 from research.core import ensure_workspace, promote_record, record_path, runtime_preferences_path
+from research.evidence import confirmation_content_digest, confirmation_evidence_digest
 
 
 def _project_root() -> Path:
@@ -156,11 +157,18 @@ def test_promote_to_confirmed_persists_confirmation_provenance(tmp_path: Path, m
     record = load_yaml(path, default={})
     assert record["confirmation_status"] == "confirmed"
     assert record["needs_human_confirmation"] is False
-    assert record["confirmation"] == {
+    receipt = record["confirmation"]
+    assert receipt == {
         "by": "czx",
         "at": "2026-07-04T00:00:00+00:00",
         "evidence": ["kb/programs/p/decision-log.md"],
         "method": "kb.py promote",
+        "decision": "confirmed",
+        "subject": {"kind": "paper", "id": "p-confirm-123456"},
+        "claim_ids": [],
+        "content_digest": confirmation_content_digest(record),
+        "evidence_digest": confirmation_evidence_digest(record, receipt["evidence"]),
+        "prior_information_types": ["fact"],
     }
 
 

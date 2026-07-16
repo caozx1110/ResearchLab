@@ -5,6 +5,7 @@ from research.evidence import (
     confirmation_content_digest,
     confirmation_evidence_digest,
 )
+from research.confirm import apply_confirmation
 
 
 def _record() -> dict:
@@ -72,3 +73,27 @@ def test_confirmation_digest_helpers_bind_claims_and_evidence_set() -> None:
     assert confirmation_evidence_digest(record, ["kb/x.md"]) != confirmation_evidence_digest(
         changed, ["kb/x.md"]
     )
+
+
+def test_apply_confirmation_stamps_full_version_bound_receipt(monkeypatch) -> None:
+    import research.confirm as confirm
+
+    record = _record()
+    record["information_types"] = ["inference", "evaluation"]
+    monkeypatch.setattr(confirm, "utc_now_iso", lambda: "2026-07-16T00:00:00+00:00")
+
+    out = apply_confirmation(record, confirmed_by="czx", evidence=["kb/x.md"], method="test")
+
+    assert out["confirmation_status"] == "confirmed"
+    assert out["confirmation"] == {
+        "by": "czx",
+        "at": "2026-07-16T00:00:00+00:00",
+        "evidence": ["kb/x.md"],
+        "method": "test",
+        "decision": "confirmed",
+        "subject": {"kind": "paper", "id": "p-receipt-123456"},
+        "claim_ids": ["claim-001", "claim-002"],
+        "content_digest": confirmation_content_digest(record),
+        "evidence_digest": confirmation_evidence_digest(record, ["kb/x.md"]),
+        "prior_information_types": ["inference", "evaluation"],
+    }
