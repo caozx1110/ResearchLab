@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
@@ -20,6 +21,8 @@ def journal_root(project_root: Path) -> Path:
 
 
 def journal_entry_path(project_root: Path, op_id: str) -> Path:
+    if not op_id or Path(op_id).name != op_id:
+        raise SystemExit(f"Invalid operation id: {op_id}")
     return journal_root(project_root) / f"{op_id}.yaml"
 
 
@@ -50,7 +53,17 @@ def _target_key(project_root: Path, path: Path) -> str:
 
 
 def _target_path(project_root: Path, key: str) -> Path:
-    return kb_root(project_root) / key
+    root = kb_root(project_root).resolve()
+    target = (root / key).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError as exc:
+        raise SystemExit(f"Invalid journal target: {key}") from exc
+    return target
+
+
+def target_path(project_root: Path, key: str) -> Path:
+    return _target_path(project_root, key)
 
 
 def _ensure_journal_ignored(project_root: Path) -> None:
@@ -71,15 +84,41 @@ def load_op(project_root: Path, op_id: str) -> dict:
     return entry
 
 
+def committed_ops(project_root: Path) -> list[dict]:
+    root = journal_root(project_root)
+    if not root.exists():
+        return []
+    ordered_entries: list[tuple[int, dict]] = []
+    for path in root.glob("*.yaml"):
+        entry = load_yaml(path, default=None)
+        if not isinstance(entry, dict) or entry.get("state") != "commit":
+            continue
+        before = entry.get("before_digests", {})
+        after = entry.get("after_digests", {})
+        if isinstance(before, dict) and isinstance(after, dict) and before != after:
+            sequence = int(entry.get("sequence_ns") or path.stat().st_mtime_ns)
+            ordered_entries.append((sequence, entry))
+    return [entry for _, entry in sorted(ordered_entries, key=lambda item: item[0])]
+
+
+def latest_committed_op(project_root: Path) -> dict:
+    entries = committed_ops(project_root)
+    if not entries:
+        raise SystemExit("没有可撤销的已提交操作。")
+    return entries[-1]
+
+
 def begin_op(project_root: Path, op_type: str, target_paths: Sequence[Path]) -> str:
     _ensure_journal_ignored(project_root)
     journal_root(project_root).mkdir(parents=True, exist_ok=True)
     keys = sorted({_target_key(project_root, Path(path)) for path in target_paths})
-    op_id = f"{utc_now_iso().replace(':', '').replace('-', '')}-{uuid.uuid4().hex[:12]}"
+    sequence_ns = time.time_ns()
+    op_id = f"{sequence_ns}-{uuid.uuid4().hex[:12]}"
     entry = {
         "op_id": op_id,
         "op_type": str(op_type),
         "started_at": utc_now_iso(),
+        "sequence_ns": sequence_ns,
         "target_paths": keys,
         "before_digests": {key: file_digest(_target_path(project_root, key)) for key in keys},
         "after_digests": {},
@@ -93,12 +132,14 @@ def commit_op(project_root: Path, op_id: str) -> None:
     entry = load_op(project_root, op_id)
     keys = [str(key) for key in entry.get("target_paths", [])]
     entry["after_digests"] = {key: file_digest(_target_path(project_root, key)) for key in keys}
+    entry["completed_at"] = utc_now_iso()
     entry["state"] = "commit"
     write_yaml_if_changed(journal_entry_path(project_root, op_id), entry)
 
 
 def abort_op(project_root: Path, op_id: str) -> None:
     entry = load_op(project_root, op_id)
+    entry["completed_at"] = utc_now_iso()
     entry["state"] = "abort"
     write_yaml_if_changed(journal_entry_path(project_root, op_id), entry)
 

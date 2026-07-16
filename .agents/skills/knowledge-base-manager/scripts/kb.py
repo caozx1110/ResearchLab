@@ -43,12 +43,15 @@ from research.core import (
     record_path,
     rebuild_governance_catalogs,
     rel,
+    restore_operation,
     refresh_record_schemas,
     search_records,
     sync_storage_layout,
     topic_taxonomy_path,
+    undo_last_operation,
     write_record,
 )
+from research.journal import journaled_op
 
 COMMAND_PREFIX = "${RESEARCH_PYTHON:-python3}"
 SCRIPT_BY_KIND = {
@@ -278,6 +281,9 @@ def build_parser() -> argparse.ArgumentParser:
     git_log.add_argument("--limit", type=int, default=10)
     git_checkpoint_cmd = subparsers.add_parser("git-checkpoint", help="Create a Git checkpoint inside kb")
     git_checkpoint_cmd.add_argument("--message", required=True)
+    subparsers.add_parser("undo", help="撤销最近一次已提交的知识库操作")
+    restore = subparsers.add_parser("restore", help="恢复到指定操作之前的状态")
+    restore.add_argument("op_id")
     compact_ids = subparsers.add_parser("compact-ids", help="Shorten and regularize knowledge-unit ids")
     compact_ids.add_argument("--kind", choices=["paper", "repo", "blog", "idea", "experiment"])
     compact_ids.add_argument("--apply", action="store_true", help="Actually rename ids and unit folders")
@@ -338,7 +344,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
     root = project_root(PROJECT_ROOT, explicit_root=args.root)
-    print_resolved_project_roots(root)
+    if args.command not in {"undo", "restore"}:
+        print_resolved_project_roots(root)
 
     if args.command == "init":
         warn_if_cwd_differs_from_project_root(root, command="kb.py init")
@@ -376,6 +383,16 @@ def main() -> int:
             print(f"[ok] commit: {payload.get('commit')}")
         else:
             print(f"[ok] {payload.get('status')}")
+        return 0
+    if args.command == "undo":
+        payload = undo_last_operation(root)
+        print(f"已撤销最近一次操作 {payload['op_id']}。")
+        print("如需撤销当前恢复结果，可再次使用 kb undo。")
+        return 0
+    if args.command == "restore":
+        payload = restore_operation(root, args.op_id)
+        print(f"已恢复到操作 {payload['op_id']} 之前的状态。")
+        print("如需撤销当前恢复结果，可使用 kb undo。")
         return 0
     if args.command == "lint":
         status, issues = lint_records(root)
@@ -436,14 +453,25 @@ def main() -> int:
             # factual metadata is eligible for blind batch confirmation. Judgement-track
             # items need per-item substance + evidence and are never confirmed here.
             fact_track, judgement_track = partition_review_tracks(hits)
-            written = apply_batch_confirmation(
-                root,
-                fact_track,
-                confirmed_by=args.confirmed_by,
-                evidence=args.evidence,
-                method="kb.py review-queue --confirm",
-            )
-            build_index(root)
+            batch_paths = [
+                record_path(root, str(record["kind"]), str(record["id"]))
+                for record in fact_track
+            ] + [root / "kb" / "index.yaml", root / "kb" / "index.md"]
+            with journaled_op(root, "batch_confirm_review_queue", batch_paths):
+                written = apply_batch_confirmation(
+                    root,
+                    fact_track,
+                    confirmed_by=args.confirmed_by,
+                    evidence=args.evidence,
+                    method="kb.py review-queue --confirm",
+                )
+                build_index(root)
+                checkpoint_and_report(
+                    root,
+                    trigger="milestone",
+                    message=f"milestone: batch confirm review queue ({len(written)} records)",
+                    target_paths=batch_paths,
+                )
             for path in written:
                 print(f"[ok] confirmed {path.relative_to(root)}")
             if not fact_track:
@@ -453,7 +481,6 @@ def main() -> int:
                     f"[skip] {len(judgement_track)} judgement-track item(s) need per-item "
                     f"substance + evidence — run 'review-queue' (no --confirm) for their confirm commands."
                 )
-            checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: batch confirm review queue ({len(written)} records)")
             return 0
         render_review_queue(root, hits, kind=args.kind)
         print_non_unit_review_notice()
@@ -472,19 +499,29 @@ def main() -> int:
             for unit_id in args.id:
                 record, _ = locate_record(root, unit_id, kind=args.kind)
                 records.append(record)
-        written = apply_batch_confirmation(
-            root,
-            records,
-            confirmed_by=args.confirmed_by,
-            evidence=args.evidence,
-            method="kb.py confirm",
-        )
-        build_index(root)
+        batch_paths = [
+            record_path(root, str(record["kind"]), str(record["id"]))
+            for record in records
+        ] + [root / "kb" / "index.yaml", root / "kb" / "index.md"]
+        with journaled_op(root, "batch_confirm", batch_paths):
+            written = apply_batch_confirmation(
+                root,
+                records,
+                confirmed_by=args.confirmed_by,
+                evidence=args.evidence,
+                method="kb.py confirm",
+            )
+            build_index(root)
+            checkpoint_and_report(
+                root,
+                trigger="milestone",
+                message=f"milestone: batch confirm ({len(written)} records)",
+                target_paths=batch_paths,
+            )
         for path in written:
             print(f"[ok] confirmed {path.relative_to(root)}")
         if remaining:
             print(f"[ok] confirmed {len(written)} / {remaining} remaining, re-run")
-        checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: batch confirm ({len(written)} records)")
         return 0
     if args.command == "refresh-schema":
         paths = refresh_record_schemas(root, unit_ids=args.id or None, kind=args.kind)
@@ -516,13 +553,36 @@ def main() -> int:
             print(f"[ok] governed {path.relative_to(root)}")
         print(f"[ok] synced {topic_taxonomy_path(root).relative_to(root)}")
         print(f"[ok] synced {candidate_pools_path(root).relative_to(root)}")
-        checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: update kb governance ({len(paths)} records)")
+        checkpoint_and_report(
+            root,
+            trigger="milestone",
+            message=f"milestone: update kb governance ({len(paths)} records)",
+            target_paths=[
+                *paths,
+                topic_taxonomy_path(root),
+                candidate_pools_path(root),
+                root / "kb" / "index.yaml",
+                root / "kb" / "index.md",
+            ],
+        )
         return 0
     if args.command == "link":
         link_records(root, args.from_id, args.to_id, args.relation, note=args.note)
         build_index(root)
         print(f"[ok] linked {args.from_id} -> {args.to_id} ({args.relation})")
-        checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: link {args.from_id} to {args.to_id}")
+        from_record, _ = locate_record(root, args.from_id)
+        to_record, _ = locate_record(root, args.to_id)
+        checkpoint_and_report(
+            root,
+            trigger="milestone",
+            message=f"milestone: link {args.from_id} to {args.to_id}",
+            target_paths=[
+                record_path(root, str(from_record["kind"]), str(from_record["id"])),
+                record_path(root, str(to_record["kind"]), str(to_record["id"])),
+                root / "kb" / "index.yaml",
+                root / "kb" / "index.md",
+            ],
+        )
         return 0
     if args.command == "promote":
         path = promote_record(
@@ -536,7 +596,12 @@ def main() -> int:
         )
         build_index(root)
         print(f"[ok] updated {path.relative_to(root)}")
-        checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: promote {args.id}")
+        checkpoint_and_report(
+            root,
+            trigger="milestone",
+            message=f"milestone: promote {args.id}",
+            target_paths=[path, root / "kb" / "index.yaml", root / "kb" / "index.md"],
+        )
         return 0
     return 1
 

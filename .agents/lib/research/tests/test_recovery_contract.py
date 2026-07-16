@@ -1,9 +1,16 @@
 from pathlib import Path
+import subprocess
 
 import pytest
 
 from research.confirm import write_record
-from research.journal import abort_op, begin_op, commit_op, journal_entry_path, load_op
+from research.git_ops import (
+    ensure_kb_git_repo,
+    git_checkpoint,
+    restore_operation,
+    undo_last_operation,
+)
+from research.journal import abort_op, begin_op, commit_op, committed_ops, journal_entry_path, load_op
 from research.records import default_record
 from research import yaml_io
 from research.yaml_io import load_yaml
@@ -47,6 +54,9 @@ def test_operation_journal_tracks_begin_commit_and_abort(tmp_path: Path) -> None
     abort_op(tmp_path, abort_id)
     assert load_op(tmp_path, abort_id)["state"] == "abort"
     assert ".journal/" in (tmp_path / "kb" / ".gitignore").read_text(encoding="utf-8")
+
+    with pytest.raises(SystemExit, match="Invalid operation id"):
+        load_op(tmp_path, "../outside")
 
 
 def test_write_record_creates_committed_journal_entry(tmp_path: Path) -> None:
@@ -98,3 +108,65 @@ def test_write_record_uses_ignored_per_record_lock(tmp_path: Path) -> None:
     assert len(locks) == 1
     assert locks[0].read_text(encoding="utf-8") == ""
     assert ".journal/" in (tmp_path / "kb" / ".gitignore").read_text(encoding="utf-8")
+
+
+def _configure_kb_git(root: Path) -> None:
+    ensure_kb_git_repo(root, create_initial_commit=False)
+    subprocess.run(["git", "-C", str(root / "kb"), "config", "user.name", "Recovery Tests"], check=True)
+    subprocess.run(["git", "-C", str(root / "kb"), "config", "user.email", "recovery@example.com"], check=True)
+    git_checkpoint(root, "initial kb state", auto_init=False)
+
+
+def test_git_checkpoint_stages_only_target_paths(tmp_path: Path) -> None:
+    _configure_kb_git(tmp_path)
+    target = tmp_path / "kb" / "units" / "papers" / "p-target" / "record.yaml"
+    unrelated = tmp_path / "kb" / "notes" / "unrelated.md"
+    target.parent.mkdir(parents=True)
+    unrelated.parent.mkdir(parents=True)
+    target.write_text("target: changed\n", encoding="utf-8")
+    unrelated.write_text("unrelated\n", encoding="utf-8")
+
+    result = git_checkpoint(
+        tmp_path,
+        "scoped checkpoint",
+        auto_init=False,
+        target_paths=[target],
+    )
+
+    assert result["files"] == ["units/papers/p-target/record.yaml"]
+    status = subprocess.run(
+        ["git", "-C", str(tmp_path / "kb"), "status", "--short"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "?? notes/" in status
+    assert "record.yaml" not in status
+
+
+def test_undo_and_restore_use_journal_digests_and_kb_history(tmp_path: Path) -> None:
+    _configure_kb_git(tmp_path)
+    record = default_record("paper", title="First Title", maturity="lightweight")
+    record["id"] = "p-recovery-test"
+    path = write_record(tmp_path, record)
+    git_checkpoint(
+        tmp_path,
+        "create recovery record",
+        auto_init=False,
+        target_paths=[path, tmp_path / "kb" / ".gitignore"],
+    )
+    first_op = [entry for entry in committed_ops(tmp_path) if entry["op_type"] == "write_record"][-1]
+
+    updated = load_yaml(path)
+    updated["title"] = "Second Title"
+    write_record(tmp_path, updated, expected_revision=1)
+    git_checkpoint(tmp_path, "update recovery record", auto_init=False, target_paths=[path])
+    second_op = [entry for entry in committed_ops(tmp_path) if entry["op_type"] == "write_record"][-1]
+
+    undone = undo_last_operation(tmp_path)
+    assert undone["op_id"] == second_op["op_id"]
+    assert load_yaml(path)["title"] == "First Title"
+
+    restored = restore_operation(tmp_path, first_op["op_id"])
+    assert restored["op_id"] == first_op["op_id"]
+    assert not path.exists()
