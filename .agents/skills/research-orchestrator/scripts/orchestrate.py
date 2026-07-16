@@ -959,6 +959,12 @@ def main() -> int:
         checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: set program stage {args.program_id} -> {args.stage}")
         return 0
     if args.command == "status":
+        if not program_root(root, args.program_id).is_dir():
+            existing = ", ".join(program_ids(root)) or "(none)"
+            raise SystemExit(
+                f"program `{args.program_id}` not found; existing: {existing}. "
+                "Use init-program to create it."
+            )
         with program_file_lock(root, args.program_id):
             ensure_program_files(root, args.program_id)
             payload = load_state(root, args.program_id)
