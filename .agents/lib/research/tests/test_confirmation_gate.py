@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
-from research.core import _record_needs_gate, normalize_record_schema, validate_write
+from research.core import _record_needs_gate, normalize_record_schema, record_path, validate_write, write_record
 
 
 def test_record_needs_gate_ignores_plain_source_facts() -> None:
@@ -150,3 +152,52 @@ def test_validate_write_strict_raises_for_ai_source() -> None:
     message = str(excinfo.value)
     assert "source.kind=ai" in message
     assert "needs_human_confirmation" in message
+
+
+def test_validate_write_defaults_to_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("RESEARCH_VALIDATE_FAILOPEN", raising=False)
+    monkeypatch.setenv("RESEARCH_VALIDATE_STRICT", "0")
+    record = {
+        "id": "p-ai-default-123456",
+        "information_types": ["evaluation"],
+        "confirmation_status": "auto_confirmed",
+        "needs_human_confirmation": False,
+    }
+
+    with pytest.raises(SystemExit, match="validate_write contract violations"):
+        validate_write(record)
+
+
+def test_validate_write_failopen_requires_explicit_opt_out(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("RESEARCH_VALIDATE_FAILOPEN", "1")
+    record = {
+        "id": "p-ai-failopen-123456",
+        "information_types": ["evaluation"],
+        "confirmation_status": "auto_confirmed",
+        "needs_human_confirmation": False,
+    }
+
+    violations = validate_write(record)
+
+    assert len(violations) == 2
+    assert "WARN" in capsys.readouterr().err
+
+
+def test_write_record_blocks_judgement_violation_before_creating_record(tmp_path: Path) -> None:
+    record = {
+        "id": "p-ai-write-123456",
+        "kind": "paper",
+        "title": "Invalid AI Write",
+        "information_types": ["inference"],
+        "confirmation_status": "auto_confirmed",
+        "needs_human_confirmation": False,
+        "payload": {"core_content": {"method": "not yet confirmed"}},
+    }
+
+    with pytest.raises(SystemExit, match="validate_write contract violations"):
+        write_record(tmp_path, record)
+
+    assert not record_path(tmp_path, "paper", "p-ai-write-123456").exists()

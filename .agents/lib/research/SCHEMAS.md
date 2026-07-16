@@ -34,7 +34,7 @@
 
 **确认门控规则**（见 [`confirmation gate`](#confirmation-gate)）：
 - 任一字段 `source.kind = "ai"` 或 `information_types` 包含 `{inference, evaluation, user_opinion}` 之一 → 期望 `confirmation_status` 是 `pending_user_confirmation` 或 `rejected`，且 `needs_human_confirmation = true`
-- 运行时默认只发出 warning；设置 `RESEARCH_VALIDATE_STRICT=1` 时才拦截 unit `record.yaml` 写入。program state / reporting events 等旁路文件目前不经过该 gate。
+- judgement-track 契约违规默认 fail-closed，直接拦截 unit `record.yaml` 写入；仅显式设置 `RESEARCH_VALIDATE_FAILOPEN=1`（或内部调用显式 `strict=False`）才降级为 warning。fact-track / 非 gated record 不受影响。program state / reporting events 等旁路文件目前不经过该 gate。
 - **确认溯源**：把 `confirmation_status` 迁到 `confirmed` 必须提供确认人（`--confirmed-by` 或 `identity.default_confirmed_by` 二选一）+ 至少一条 `--evidence`，否则 `apply_confirmation`/`promote_record` 直接拒绝（`SystemExit`）；确认时写入下方完整 `ConfirmationReceipt`。其它状态（auto_confirmed/pending/rejected）无需 provenance。
 
 ---
@@ -419,7 +419,7 @@ topics:
 
 **契约目标**：core 系统中所有 AI 推断/评估/用户意见，必须经过用户显式确认后才能 `confirmed`。否则保持 `pending_user_confirmation`。
 
-**当前运行行为**：`lib/research/core.py` 提供 `validate_write(record)` helper。默认 `strict=False`，发现违规时写 stderr warning 并返回 violations；设置 `RESEARCH_VALIDATE_STRICT=1` 或显式 `strict=True` 时才 `SystemExit` 拦截。`write_record()` 会调用该 helper，但 program state、workflow files、reporting events 等非 unit record 写入暂不经过此 gate。
+**当前运行行为**：`lib/research/core.py` 提供 `validate_write(record)` helper。AI-derived / judgement-track record 违反 confirmation contract 时默认 `SystemExit` 拦截；只有显式 `RESEARCH_VALIDATE_FAILOPEN=1` 或内部调用显式 `strict=False` 才写 stderr warning 并返回 violations。`write_record()` 在 lock / CAS / journal 之前调用该 helper；program state、workflow files、reporting events 等非 unit record 写入暂不经过此 gate。
 
 **检查规则**：
 

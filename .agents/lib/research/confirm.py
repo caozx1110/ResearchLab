@@ -288,12 +288,12 @@ def validate_write(record: dict[str, Any], *, strict: bool | None = None) -> lis
     or source.kind == "ai") must carry confirmation_status ∈
     {pending_user_confirmation, rejected} and needs_human_confirmation = true.
 
-    Returns the list of contract violations (empty when clean). In strict mode
-    raises SystemExit; otherwise emits a stderr warning. Default is non-strict;
-    set RESEARCH_VALIDATE_STRICT=1 to opt into strict.
+    Returns the list of contract violations (empty when clean). Judgement-track
+    violations raise SystemExit by default; set RESEARCH_VALIDATE_FAILOPEN=1 or
+    pass strict=False explicitly to downgrade violations to stderr warnings.
     """
     if strict is None:
-        strict = os.getenv("RESEARCH_VALIDATE_STRICT") == "1"
+        strict = os.getenv("RESEARCH_VALIDATE_FAILOPEN") != "1"
     needs_gate, ai_info_types, source_is_ai = _record_needs_gate(record)
     if not needs_gate:
         return []
