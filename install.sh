@@ -682,7 +682,11 @@ preflight_yaml() {
   if [ "$DRY_RUN" -eq 1 ] || [ ! -t 0 ]; then
     warn "Install requirements with: $py -m pip install -r $(quote_path "$REPO_ROOT/requirements.txt")"
     warn "Or set RESEARCH_PYTHON to a Python that has PyYAML installed."
-    return 1
+    if [ "${RESEARCH_NO_MANAGED_VENV:-}" = "1" ]; then
+      die "RESEARCH_NO_MANAGED_VENV=1 requires the selected Python to have PyYAML"
+    fi
+    warn "Continuing; the managed runtime will install PyYAML and the PDF backend on first use."
+    return 0
   fi
   bullet "This only installs requirements for the selected Python; default is no."
   printf '%b%s%b Run "%s -m pip install -r %s" now? [y/N]: ' "$C_YELLOW" "$ARROW" "$C_RESET" "$py" "$REPO_ROOT/requirements.txt"
@@ -690,14 +694,20 @@ preflight_yaml() {
   read -r answer || answer=""
   case "$answer" in
     y|Y|yes|YES)
-      "$py" -m pip install -r "$REPO_ROOT/requirements.txt"
-      "$py" -c 'import yaml' >/dev/null 2>&1 || die "PyYAML still unavailable after install"
+      if "$py" -m pip install -r "$REPO_ROOT/requirements.txt" \
+        && "$py" -c 'import yaml' >/dev/null 2>&1; then
+        return 0
+      fi
+      warn "PyYAML is still unavailable with $py."
       ;;
     *)
-      warn "Set RESEARCH_PYTHON or install requirements before running skill scripts."
-      return 1
+      warn "Skipping installation into $py."
       ;;
   esac
+  if [ "${RESEARCH_NO_MANAGED_VENV:-}" = "1" ]; then
+    die "RESEARCH_NO_MANAGED_VENV=1 requires the selected Python to have PyYAML"
+  fi
+  warn "Continuing; the managed runtime will install PyYAML and the PDF backend on first use."
 }
 
 source_commit() {
