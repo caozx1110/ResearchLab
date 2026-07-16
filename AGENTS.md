@@ -61,3 +61,6 @@
 - 每条判断挂逐字 evidence，脚本机器校验（原则2）；`raw/`+全量 parse-cache 是**不可变派生证据**，再派生步骤只读不覆盖。
 - 确认门验实质（拒空壳）+ 禁自签 + 判断类必留 evidence（原则3）。
 - 自动驱动：入库后 agent 一回合跑完管线，只在两个治理闸口停（确认 AI 判断 / 用户抉择）（原则7）。
+- 用户契约（原则8）：skill 的**用户可见输出**只含自然语言 + `kb <verb>` 伪 CLI，绝无裸命令 / `--flag` / `${…}` / 内部路径 / `NEXT FOR AGENT:`；伪 CLI 交互绝不依赖 TTY（一律 agent 中介问答 + headless 落盘）。**改任何面向用户的输出/交互时，把"是否泄漏裸命令或依赖 TTY"当作必查评审项。**
+- 确认锚定版本（原则3 ConfirmationReceipt）：确认绑定内容/evidence digest，内容变更自动失效；判断轨写入门 fail-closed；保留原 epistemic 类型。
+- 恢复合同：原子写 + operation journal + 锁 + revision/CAS + resume/undo/restore；checkpoint 只收本 op 路径，绝不 `git add -A`。

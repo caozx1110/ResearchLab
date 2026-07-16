@@ -34,6 +34,15 @@ When the user asks to ingest a source (paper/repo/blog), or accepts an ingestion
 
 **Stop only at the two governance gates:** (a) confirming an AI judgement (never self-sign; leave judgement-track content `pending_user_confirmation` until the user confirms), and (b) a user decision (choose idea, approve baseline, resolve an ambiguous instruction). Everything else in the chain is a safe auto-step.
 
+## User-facing output: natural language + `kb <verb>` only
+
+The user interacts through exactly two surfaces: **natural language** and the **`kb <verb>` pseudo-CLI**. Everything else is internal or agent-facing.
+
+- **Never show the user a raw command.** No `python3 .agents/skills/**/*.py …`, no `--flags`, no `${RESEARCH_PYTHON:-python3}`, no internal script paths, no `NEXT FOR AGENT:` lines. Those are for you (the agent) to execute, not to print. When a script's output contains such a command (e.g. `confirm: …/paper.py confirm --id …`), translate it to natural language ("say 'confirm' to accept this judgement") or a `kb <verb>` form — do not relay it verbatim.
+- **You compute and run the commands yourself.** You know the unit/program id; build the confirm/verify/prepare command internally and run it. The user only sees the outcome and a natural-language next step.
+- **Setup and choices are conversational.** For `kb init` and any preference/persona setup, ask the user in natural language and then write headlessly (the pseudo-CLI has no TTY; it will hand you a `NEXT FOR AGENT:` instruction — follow it, don't surface it). Never tell the user to run a raw command in a terminal.
+- **Empty/edge states stay natural.** Empty KB on `kb next` → "your knowledge base is empty; send me a paper link, file, or repo to start" — not an `intake.py add …` command block.
+
 This is bounded by `runtime-preferences.autonomy.auto_execute_scope` (capped by `GOVERNANCE_MAX_AUTO_STEPS`); if autonomy is narrowed, honor it. Ingestion deep-read intentionally spends tokens (durable grounded notes over token thrift); the automation saves the user's *steps and attention*, not tokens.
 
 ## Layout
