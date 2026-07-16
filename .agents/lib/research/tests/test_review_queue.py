@@ -259,7 +259,7 @@ def test_confirm_command_blank_evidence_rejects_before_any_batch_write(tmp_path:
     assert not (tmp_path / "kb" / "index.yaml").exists()
 
 
-def test_batch_confirm_collapses_ai_information_types_and_sets_lifecycle(tmp_path: Path) -> None:
+def test_batch_confirm_preserves_ai_information_types_and_sets_lifecycle(tmp_path: Path) -> None:
     kb = _load_kb_module()
     ensure_workspace(tmp_path)
     write_yaml_if_changed(runtime_preferences_path(tmp_path), {"identity": {"default_confirmed_by": "czx-default"}})
@@ -272,7 +272,7 @@ def test_batch_confirm_collapses_ai_information_types_and_sets_lifecycle(tmp_pat
         information_types=["fact", "inference", "evaluation", "unverified"],
     )
     # Judgement-track record needs substantive core_content to clear the substance gate;
-    # this test asserts the information_types collapse + lifecycle, not hollow confirmation.
+    # this test asserts epistemic preservation + lifecycle, not hollow confirmation.
     ai_typed["payload"] = {"core_content": {"method": "diffusion policy over action chunks"}}
     _write_record(tmp_path, ai_typed)
     records = search_records(tmp_path, "", confirmation_status="pending_user_confirmation")
@@ -288,7 +288,8 @@ def test_batch_confirm_collapses_ai_information_types_and_sets_lifecycle(tmp_pat
     record = load_yaml(path, default={})
     assert record["confirmation_status"] == "confirmed"
     assert record["status"] == "active"
-    assert record["information_types"] == ["fact"]
+    assert record["information_types"] == ["evaluation", "fact", "inference", "unverified"]
+    assert record["confirmation"]["prior_information_types"] == ["evaluation", "fact", "inference", "unverified"]
     assert record["history"][-1]["action"] == "paper-confirmed"
 
 

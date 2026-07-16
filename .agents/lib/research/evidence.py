@@ -26,6 +26,8 @@ Verification model (SSOT B3/B4):
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -52,6 +54,14 @@ HTML_LOCATOR_KINDS = {"section", "anchor"}
 
 # Required top-level keys on every claim (validate_claims enforces presence).
 REQUIRED_CLAIM_FIELDS = ("id", "text", "claim_type", "confirmation_status", "evidence_refs")
+
+CONFIRMABLE_CONTENT_SECTIONS: dict[str, tuple[str, ...]] = {
+    "paper": ("core_content",),
+    "repo": ("capability",),
+    "blog": ("content",),
+    "idea": ("problem", "hypothesis"),
+    "experiment": ("results", "diagnosis"),
+}
 
 # Locked canonical schema — kept byte-identical to
 # SCHEMAS.md#evidence-claims / SSOT Part 2 Principle 2.
@@ -120,6 +130,99 @@ def _quote_digest(quote: str, limit: int = 60) -> str:
     if len(flat) > limit:
         return flat[: limit - 1] + "…"
     return flat
+
+
+def _canonical_digest_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): _canonical_digest_value(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_canonical_digest_value(item) for item in value]
+    if isinstance(value, set):
+        normalized = [_canonical_digest_value(item) for item in value]
+        return sorted(normalized, key=_canonical_json)
+    if isinstance(value, str):
+        return normalize_ws(value)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return normalize_ws(value)
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _sha256_canonical(value: Any) -> str:
+    canonical = _canonical_digest_value(value)
+    return hashlib.sha256(_canonical_json(canonical).encode("utf-8")).hexdigest()
+
+
+def _without_empty_mapping_values(value: Any) -> Any:
+    if isinstance(value, dict):
+        compact: dict[str, Any] = {}
+        for key, item in value.items():
+            normalized = _without_empty_mapping_values(item)
+            if normalized not in (None, "", [], {}):
+                compact[str(key)] = normalized
+        return compact
+    if isinstance(value, (list, tuple)):
+        return [_without_empty_mapping_values(item) for item in value]
+    return value
+
+
+def confirmation_claims(record: Any) -> list[dict[str, Any]]:
+    if not isinstance(record, dict):
+        return []
+    payload = record.get("payload")
+    claims = read_claims(payload)
+    return sorted(
+        claims,
+        key=lambda claim: (normalize_ws(claim.get("id")), _canonical_json(_canonical_digest_value(claim))),
+    )
+
+
+def confirmation_claim_ids(record: Any) -> list[str]:
+    return sorted(
+        {
+            claim_id
+            for claim in confirmation_claims(record)
+            if (claim_id := normalize_ws(claim.get("id")))
+        }
+    )
+
+
+def confirmation_content_digest(record: Any) -> str:
+    if not isinstance(record, dict):
+        record = {}
+    kind = normalize_ws(record.get("kind"))
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+        payload = {}
+    sections = {
+        section: _without_empty_mapping_values(payload.get(section, {}))
+        for section in CONFIRMABLE_CONTENT_SECTIONS.get(kind, ())
+    }
+    return _sha256_canonical({"substance": sections, "claims": confirmation_claims(record)})
+
+
+def confirmation_evidence_digest(record: Any, evidence_items: Any) -> str:
+    items = evidence_items if isinstance(evidence_items, (list, tuple, set)) else [evidence_items]
+    normalized_items = sorted({item for value in items if (item := normalize_ws(value))})
+    evidence_refs = [
+        {
+            "source_unit_id": ref.get("source_unit_id", ""),
+            "artifact": ref.get("artifact", ""),
+            "locator": ref.get("locator", ""),
+            "quote": ref.get("quote", ""),
+        }
+        for claim in confirmation_claims(record)
+        for ref in claim.get("evidence_refs", [])
+        if isinstance(ref, dict)
+    ]
+    evidence_refs.sort(key=lambda ref: _canonical_json(_canonical_digest_value(ref)))
+    return _sha256_canonical({"evidence_items": normalized_items, "evidence_refs": evidence_refs})
 
 
 def _page_of_label(label: Any) -> int | None:
@@ -413,11 +516,16 @@ __all__ = [
     "PDF_LOCATOR_KINDS",
     "HTML_LOCATOR_KINDS",
     "REQUIRED_CLAIM_FIELDS",
+    "CONFIRMABLE_CONTENT_SECTIONS",
     "EVIDENCE_SCHEMA",
     "CLAIMS_KEY",
     "EvidenceRef",
     "Claim",
     "normalize_ws",
+    "confirmation_claims",
+    "confirmation_claim_ids",
+    "confirmation_content_digest",
+    "confirmation_evidence_digest",
     "verify_claim_evidence",
     "validate_claims",
     "as_claim_dict",

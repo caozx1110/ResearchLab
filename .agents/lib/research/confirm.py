@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,14 @@ from .common import (
     write_yaml_if_changed,
 )
 from .journal import journaled_op, operation_lock_path
+from .evidence import (
+    confirmation_claims,
+    confirmation_claim_ids,
+    confirmation_content_digest,
+    confirmation_evidence_digest,
+    validate_claims,
+    verify_claim_evidence,
+)
 from .paths import (
     UNIT_KIND_DIRS,
     _text_list,
@@ -182,7 +191,28 @@ def apply_confirmation(
         evidence=evidence,
         project_root=project_root,
     )
+    claims = confirmation_claims(record)
+    claim_violations = validate_claims(claims)
+    if claim_violations:
+        raise SystemExit("Confirmation claim violations:\n  - " + "\n  - ".join(claim_violations))
+    claims_with_evidence = [claim for claim in claims if claim.get("evidence_refs")]
+    if claims_with_evidence:
+        if project_root is None:
+            raise SystemExit("Cannot verify claim evidence for confirmation without project_root.")
+        evidence_root = unit_root(
+            project_root,
+            str(record.get("kind") or ""),
+            str(record.get("id") or ""),
+        )
+        evidence_violations = [
+            violation
+            for claim in claims_with_evidence
+            for violation in verify_claim_evidence(claim, evidence_root)
+        ]
+        if evidence_violations:
+            raise SystemExit("Confirmation evidence violations:\n  - " + "\n  - ".join(evidence_violations))
     now = utc_now_iso()
+    prior_information_types = _text_list(record.get("information_types"))
     record["confirmation_status"] = "confirmed"
     record["needs_human_confirmation"] = False
     record["last_human_confirmed_at"] = now
@@ -191,8 +221,41 @@ def apply_confirmation(
         "at": now,
         "evidence": evidence_items,
         "method": str(method or "cli").strip() or "cli",
+        "decision": "confirmed",
+        "subject": {
+            "kind": str(record.get("kind") or ""),
+            "id": str(record.get("id") or ""),
+        },
+        "claim_ids": confirmation_claim_ids(record),
+        "content_digest": confirmation_content_digest(record),
+        "evidence_digest": confirmation_evidence_digest(record, evidence_items),
+        "prior_information_types": prior_information_types,
     }
     return record
+
+
+def _has_complete_confirmation_receipt(record: dict[str, Any]) -> bool:
+    receipt = record.get("confirmation")
+    if not isinstance(receipt, dict) or receipt.get("decision") != "confirmed":
+        return False
+    actor = str(receipt.get("by") or "").strip()
+    if not actor or is_ai_signer(actor) or not _text_list(receipt.get("evidence")):
+        return False
+    subject = receipt.get("subject")
+    if not isinstance(subject, dict):
+        return False
+    if str(subject.get("kind") or "") != str(record.get("kind") or ""):
+        return False
+    if str(subject.get("id") or "") != str(record.get("id") or ""):
+        return False
+    if not isinstance(receipt.get("claim_ids"), list):
+        return False
+    if not isinstance(receipt.get("prior_information_types"), list):
+        return False
+    return all(
+        re.fullmatch(r"[0-9a-f]{64}", str(receipt.get(field) or "")) is not None
+        for field in ("content_digest", "evidence_digest")
+    )
 
 
 def confirm_unit(
@@ -210,8 +273,8 @@ def confirm_unit(
     # Substance gate (SSOT §3.11 / Principle 3). This is the PRIMARY user confirm path
     # (paper.py confirm / kb.py confirm / interactive kb review), so the hollow-gate
     # check must live here too, not only in promote_record. Evaluate track + substance
-    # on the ORIGINAL record — before information_types is collapsed to ['fact'] below,
-    # otherwise the record would already look fact-track and the gate would never fire.
+    # on the ORIGINAL record before confirmation mutates gate state. Confirmation keeps
+    # the record's epistemic types; confirmation_status carries the human decision.
     # Fact-track basic metadata is exempt (light confirm). Runs before apply_confirmation
     # (and thus before any write by the caller), so a rejected record stays pending.
     if confirmation_track(record) == "judgement" and not has_substantive_content(record, unit_kind):
@@ -231,12 +294,12 @@ def confirm_unit(
         record["status"] = CONFIRM_UNIT_STATUS_BY_KIND[unit_kind]
     elif unit_kind == "experiment" and str(record.get("status") or "") == "running":
         record["status"] = "completed"
-    record["information_types"] = ["fact"]
+    confirmed_information_types = _text_list(record.get("information_types")) or ["fact"]
     append_history(
         record,
         action=f"{unit_kind}-confirmed",
         summary=CONFIRM_UNIT_SUMMARY_BY_KIND.get(unit_kind, f"{unit_kind} record confirmed by user."),
-        information_types=["fact"],
+        information_types=confirmed_information_types,
     )
     return record
 
@@ -248,18 +311,19 @@ def validate_write(record: dict[str, Any], *, strict: bool | None = None) -> lis
     or source.kind == "ai") must carry confirmation_status ∈
     {pending_user_confirmation, rejected} and needs_human_confirmation = true.
 
-    Returns the list of contract violations (empty when clean). In strict mode
-    raises SystemExit; otherwise emits a stderr warning. Default is non-strict;
-    set RESEARCH_VALIDATE_STRICT=1 to opt into strict.
+    Returns the list of contract violations (empty when clean). Judgement-track
+    violations raise SystemExit by default; set RESEARCH_VALIDATE_FAILOPEN=1 or
+    pass strict=False explicitly to downgrade violations to stderr warnings.
     """
     if strict is None:
-        strict = os.getenv("RESEARCH_VALIDATE_STRICT") == "1"
+        strict = os.getenv("RESEARCH_VALIDATE_FAILOPEN") != "1"
     needs_gate, ai_info_types, source_is_ai = _record_needs_gate(record)
     if not needs_gate:
         return []
     violations: list[str] = []
     confirmation = str(record.get("confirmation_status") or "")
-    if confirmation not in GATED_CONFIRMATION_VALUES:
+    receipt_confirmed = confirmation == "confirmed" and _has_complete_confirmation_receipt(record)
+    if confirmation not in GATED_CONFIRMATION_VALUES and not receipt_confirmed:
         reason_parts = []
         if ai_info_types:
             reason_parts.append(f"information_types={sorted(ai_info_types)}")
@@ -270,7 +334,7 @@ def validate_write(record: dict[str, Any], *, strict: bool | None = None) -> lis
             f"too strong for AI-derived record ({', '.join(reason_parts)}); "
             f"expected pending_user_confirmation or rejected."
         )
-    if not record.get("needs_human_confirmation"):
+    if not receipt_confirmed and not record.get("needs_human_confirmation"):
         violations.append(
             f"record {record.get('id')!r}: needs_human_confirmation must be true "
             f"for AI-derived record."

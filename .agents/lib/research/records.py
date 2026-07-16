@@ -10,6 +10,7 @@ from .common import (
     parse_iso_datetime,
     utc_now_iso,
 )
+from .evidence import confirmation_content_digest
 from .ids import (
     build_unit_id,
 )
@@ -440,8 +441,23 @@ def normalize_record_schema(record: dict[str, Any]) -> dict[str, Any]:
     normalized["information_types"] = sorted(
         item for item in {str(value) for value in normalized.get("information_types", [])} if item in INFORMATION_TYPES
     ) or ["fact"]
+    confirmation_invalidated = False
+    confirmation = normalized.get("confirmation")
+    if isinstance(confirmation, dict) and confirmation.get("content_digest"):
+        stored_digest = str(confirmation.get("content_digest") or "")
+        current_digest = confirmation_content_digest(normalized)
+        if current_digest != stored_digest:
+            confirmation_invalidated = True
+            normalized["confirmation_status"] = "pending_user_confirmation"
+            normalized["needs_human_confirmation"] = True
+            confirmation["invalidation"] = {
+                "reason": "confirmable_content_changed",
+                "stored_content_digest": stored_digest,
+                "current_content_digest": current_digest,
+            }
     normalized["needs_human_confirmation"] = (
-        _record_needs_gate(normalized)[0] and normalized["confirmation_status"] != "confirmed"
+        confirmation_invalidated
+        or (_record_needs_gate(normalized)[0] and normalized["confirmation_status"] != "confirmed")
     )
     normalized["tags"] = _slug_list(normalized.get("tags"))
     normalized["topics"] = _slug_list(normalized.get("topics"))
