@@ -300,12 +300,12 @@ def test_red_line_fact_track_light_confirm_passes(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 def test_confirm_unit_rejects_hollow_judgement_paper_before_mutation() -> None:
     """confirm_unit rejects a hollow judgement paper and leaves the record untouched
-    (not confirmed, information_types NOT yet collapsed to fact)."""
+    (not confirmed, information_types preserved)."""
     record = _paper_record(information_types=JUDGEMENT_INFO_TYPES, core_content={})
     with pytest.raises(SystemExit, match="hollow"):
         confirm_unit(record, "paper", confirmed_by="czx", evidence=["kb/x/note.md"])
     assert record["confirmation_status"] == "pending_user_confirmation"
-    # gate ran on the ORIGINAL state — the collapse to ['fact'] never happened
+    # gate ran on the ORIGINAL state and confirmation never changed epistemic type
     assert "inference" in record["information_types"]
     assert "confirmation" not in record
 
@@ -335,14 +335,15 @@ def test_confirm_unit_hollow_judgement_via_batch_stays_pending_on_disk(tmp_path:
     assert "confirmation" not in on_disk
 
 
-def test_confirm_unit_confirms_substantive_judgement_paper_and_collapses_types() -> None:
-    """A substantive judgement paper still confirms through confirm_unit, and the
-    information_types collapse to ['fact'] still happens after the gate passes."""
+def test_confirm_unit_confirms_substantive_judgement_paper_and_preserves_types() -> None:
+    """A substantive judgement paper confirms without erasing epistemic type."""
     record = _paper_record(information_types=JUDGEMENT_INFO_TYPES, core_content=FILLED_CORE_CONTENT)
     out = confirm_unit(record, "paper", confirmed_by="czx", evidence=["kb/x/note.md"])
     assert out["confirmation_status"] == "confirmed"
-    assert out["information_types"] == ["fact"]
+    assert out["information_types"] == JUDGEMENT_INFO_TYPES
     assert out["confirmation"]["by"] == "czx"
+    assert out["confirmation"]["prior_information_types"] == JUDGEMENT_INFO_TYPES
+    assert out["history"][-1]["information_types"] == JUDGEMENT_INFO_TYPES
 
 
 def test_confirm_unit_confirms_fact_metadata_record() -> None:
