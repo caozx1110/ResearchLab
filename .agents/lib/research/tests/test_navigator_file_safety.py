@@ -48,6 +48,26 @@ def test_kb_browser_root_alias_passes_to_project_root_resolver(tmp_path: Path) -
     assert resolved == root.resolve()
 
 
+def test_serve_kb_browser_rejects_non_loopback_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "argv", ["serve_kb_browser.py", "--host", "0.0.0.0"])
+
+    with pytest.raises(SystemExit):
+        serve_kb_browser.parse_args()
+
+
+def test_serve_kb_browser_allows_explicit_non_loopback_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["serve_kb_browser.py", "--host", "0.0.0.0", "--allow-non-loopback"],
+    )
+
+    args = serve_kb_browser.parse_args()
+
+    assert args.host == "0.0.0.0"
+    assert args.allow_non_loopback is True
+
+
 def test_build_kb_browser_root_overrides_discovery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     discovered_root = tmp_path / "discovered"
     explicit_root = tmp_path / "explicit"
@@ -79,6 +99,19 @@ def test_is_writable_text_allows_plain_markdown(tmp_path: Path) -> None:
     path = tmp_path / "kb/units/papers/p-test-123456/note.md"
 
     assert _is_writable_text(tmp_path, path)
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "kb/units/papers/p-test-123456/raw/source.md",
+        "kb/units/blogs/b-test-123456/raw/snapshot.txt",
+        "kb/units/papers/p-test-123456/source/snapshot.md",
+        "kb/units/papers/p-test-123456/parse-cache.yaml",
+    ],
+)
+def test_is_writable_text_blocks_immutable_unit_evidence(tmp_path: Path, relative_path: str) -> None:
+    assert not _is_writable_text(tmp_path, tmp_path / relative_path)
 
 
 @pytest.mark.parametrize(
