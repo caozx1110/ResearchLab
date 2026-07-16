@@ -159,6 +159,19 @@ def _sha256_canonical(value: Any) -> str:
     return hashlib.sha256(_canonical_json(canonical).encode("utf-8")).hexdigest()
 
 
+def _without_empty_mapping_values(value: Any) -> Any:
+    if isinstance(value, dict):
+        compact: dict[str, Any] = {}
+        for key, item in value.items():
+            normalized = _without_empty_mapping_values(item)
+            if normalized not in (None, "", [], {}):
+                compact[str(key)] = normalized
+        return compact
+    if isinstance(value, (list, tuple)):
+        return [_without_empty_mapping_values(item) for item in value]
+    return value
+
+
 def confirmation_claims(record: Any) -> list[dict[str, Any]]:
     if not isinstance(record, dict):
         return []
@@ -188,7 +201,7 @@ def confirmation_content_digest(record: Any) -> str:
     if not isinstance(payload, dict):
         payload = {}
     sections = {
-        section: payload.get(section, {})
+        section: _without_empty_mapping_values(payload.get(section, {}))
         for section in CONFIRMABLE_CONTENT_SECTIONS.get(kind, ())
     }
     return _sha256_canonical({"substance": sections, "claims": confirmation_claims(record)})

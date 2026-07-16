@@ -71,6 +71,10 @@ confirmation:                        # 仅在人工确认为 confirmed 时写入
   content_digest: ''                 # 确认时核心 substance + claims/evidence_refs 的 canonical sha256
   evidence_digest: ''                # evidence + claims 中 quote/locator 集合的 canonical sha256
   prior_information_types: []        # 确认前的 epistemic 类型，确认不得抹除其来源语义
+  invalidation:                      # content_digest 不再匹配时由 normalize_record_schema 写入
+    reason: confirmable_content_changed
+    stored_content_digest: ''
+    current_content_digest: ''
 tags: []                             # slug 列表，治理见 topic-taxonomy.yaml
 topics: []                           # 同上
 candidate_pools: []                  # pool id 列表，治理见 candidate-pools.yaml

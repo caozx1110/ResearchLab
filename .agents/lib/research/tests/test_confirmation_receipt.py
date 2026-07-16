@@ -6,6 +6,7 @@ from research.evidence import (
     confirmation_evidence_digest,
 )
 from research.confirm import apply_confirmation
+from research.records import normalize_record_schema
 
 
 def _record() -> dict:
@@ -97,3 +98,48 @@ def test_apply_confirmation_stamps_full_version_bound_receipt(monkeypatch) -> No
         "evidence_digest": confirmation_evidence_digest(record, ["kb/x.md"]),
         "prior_information_types": ["inference", "evaluation"],
     }
+
+
+def test_normalize_invalidates_receipt_after_confirmable_content_change() -> None:
+    record = _record()
+    record["information_types"] = ["inference"]
+    confirmed = apply_confirmation(record, confirmed_by="czx", evidence=["kb/x.md"])
+    assert normalize_record_schema(confirmed)["confirmation_status"] == "confirmed"
+
+    confirmed["payload"]["core_content"]["method"] = "mutated after confirmation"
+    normalized = normalize_record_schema(confirmed)
+
+    assert normalized["confirmation_status"] == "pending_user_confirmation"
+    assert normalized["needs_human_confirmation"] is True
+    assert normalized["confirmation"]["invalidation"] == {
+        "reason": "confirmable_content_changed",
+        "stored_content_digest": confirmed["confirmation"]["content_digest"],
+        "current_content_digest": confirmation_content_digest(normalized),
+    }
+
+
+def test_normalize_invalidates_receipt_after_claim_evidence_change() -> None:
+    confirmed = apply_confirmation(_record(), confirmed_by="czx", evidence=["kb/x.md"])
+    confirmed["payload"]["claims"][0]["evidence_refs"][0]["quote"] = "different quote"
+
+    normalized = normalize_record_schema(confirmed)
+
+    assert normalized["confirmation_status"] == "pending_user_confirmation"
+    assert normalized["confirmation"]["invalidation"]["reason"] == "confirmable_content_changed"
+
+
+def test_normalize_leaves_legacy_confirmation_without_digest_unchanged() -> None:
+    legacy = _record()
+    legacy["confirmation_status"] = "confirmed"
+    legacy["needs_human_confirmation"] = False
+    legacy["confirmation"] = {
+        "by": "czx",
+        "at": "2026-07-01T00:00:00+00:00",
+        "evidence": ["kb/x.md"],
+        "method": "legacy",
+    }
+
+    normalized = normalize_record_schema(legacy)
+
+    assert normalized["confirmation_status"] == "confirmed"
+    assert "invalidation" not in normalized["confirmation"]
