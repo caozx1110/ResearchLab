@@ -40,3 +40,24 @@ def test_intake_confirm_command_uses_shared_helper_with_runtime_python() -> None
         "${RESEARCH_CONFIRMED_BY:?set-human-identity} --evidence "
         "${RESEARCH_CONFIRM_EVIDENCE:?set-human-evidence}"
     )
+
+
+def test_intake_user_guidance_hides_internal_config_commands() -> None:
+    intake = _load_intake_module()
+
+    hints = intake.guidance_hints(
+        "paper",
+        {
+            "prompt_for_preference_updates": True,
+            "auto_complete_note": False,
+            "complete_note_mode": "scaffold",
+            "auto_extract_figures_after_note": False,
+        },
+        has_pdf=True,
+        note_created=True,
+    )
+
+    rendered = "\n".join(hints)
+    assert "kb next" in rendered
+    for leaked_fragment in ("python3", "config.py", ".py ", "--section", "${"):
+        assert leaked_fragment not in rendered
