@@ -36,6 +36,7 @@
 - 任一字段 `source.kind = "ai"` 或 `information_types` 包含 `{inference, evaluation, user_opinion}` 之一 → 期望 `confirmation_status` 是 `pending_user_confirmation` 或 `rejected`，且 `needs_human_confirmation = true`
 - judgement-track 契约违规默认 fail-closed，直接拦截 unit `record.yaml` 写入；仅显式设置 `RESEARCH_VALIDATE_FAILOPEN=1`（或内部调用显式 `strict=False`）才降级为 warning。fact-track / 非 gated record 不受影响。program state / reporting events 等旁路文件目前不经过该 gate。
 - **确认溯源**：把 `confirmation_status` 迁到 `confirmed` 必须提供确认人（`--confirmed-by` 或 `identity.default_confirmed_by` 二选一）+ 至少一条 `--evidence`，否则 `apply_confirmation`/`promote_record` 直接拒绝（`SystemExit`）；确认时写入下方完整 `ConfirmationReceipt`。其它状态（auto_confirmed/pending/rejected）无需 provenance。
+- **确认时 evidence 复验**：receipt 落盘前重新运行 claim 结构/空据校验与 `verify_claim_evidence()` 逐字 quote + locator 校验；存在 claim evidence 却没有可解析的 `project_root` 时 fail-closed，不允许只凭上游 verify 结果签 receipt。
 
 ---
 

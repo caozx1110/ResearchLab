@@ -16,9 +16,12 @@ from .common import (
 )
 from .journal import journaled_op, operation_lock_path
 from .evidence import (
+    confirmation_claims,
     confirmation_claim_ids,
     confirmation_content_digest,
     confirmation_evidence_digest,
+    validate_claims,
+    verify_claim_evidence,
 )
 from .paths import (
     UNIT_KIND_DIRS,
@@ -188,6 +191,26 @@ def apply_confirmation(
         evidence=evidence,
         project_root=project_root,
     )
+    claims = confirmation_claims(record)
+    claim_violations = validate_claims(claims)
+    if claim_violations:
+        raise SystemExit("Confirmation claim violations:\n  - " + "\n  - ".join(claim_violations))
+    claims_with_evidence = [claim for claim in claims if claim.get("evidence_refs")]
+    if claims_with_evidence:
+        if project_root is None:
+            raise SystemExit("Cannot verify claim evidence for confirmation without project_root.")
+        evidence_root = unit_root(
+            project_root,
+            str(record.get("kind") or ""),
+            str(record.get("id") or ""),
+        )
+        evidence_violations = [
+            violation
+            for claim in claims_with_evidence
+            for violation in verify_claim_evidence(claim, evidence_root)
+        ]
+        if evidence_violations:
+            raise SystemExit("Confirmation evidence violations:\n  - " + "\n  - ".join(evidence_violations))
     now = utc_now_iso()
     prior_information_types = _text_list(record.get("information_types"))
     record["confirmation_status"] = "confirmed"

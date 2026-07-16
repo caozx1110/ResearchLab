@@ -6,6 +6,7 @@ from research.evidence import (
     confirmation_evidence_digest,
 )
 from research.confirm import apply_confirmation
+from research.paths import unit_root
 from research.records import normalize_record_schema
 
 
@@ -46,6 +47,12 @@ def _record() -> dict:
     }
 
 
+def _write_verified_artifact(project_root) -> None:
+    root = unit_root(project_root, "paper", "p-receipt-123456")
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "parse-cache.yaml").write_text("source text with exact quote included", encoding="utf-8")
+
+
 def test_confirmation_content_digest_is_canonical_and_content_sensitive() -> None:
     record = _record()
     reordered = _record()
@@ -76,14 +83,21 @@ def test_confirmation_digest_helpers_bind_claims_and_evidence_set() -> None:
     )
 
 
-def test_apply_confirmation_stamps_full_version_bound_receipt(monkeypatch) -> None:
+def test_apply_confirmation_stamps_full_version_bound_receipt(tmp_path, monkeypatch) -> None:
     import research.confirm as confirm
 
     record = _record()
     record["information_types"] = ["inference", "evaluation"]
+    _write_verified_artifact(tmp_path)
     monkeypatch.setattr(confirm, "utc_now_iso", lambda: "2026-07-16T00:00:00+00:00")
 
-    out = apply_confirmation(record, confirmed_by="czx", evidence=["kb/x.md"], method="test")
+    out = apply_confirmation(
+        record,
+        confirmed_by="czx",
+        evidence=["kb/x.md"],
+        method="test",
+        project_root=tmp_path,
+    )
 
     assert out["confirmation_status"] == "confirmed"
     assert out["confirmation"] == {
@@ -100,10 +114,11 @@ def test_apply_confirmation_stamps_full_version_bound_receipt(monkeypatch) -> No
     }
 
 
-def test_normalize_invalidates_receipt_after_confirmable_content_change() -> None:
+def test_normalize_invalidates_receipt_after_confirmable_content_change(tmp_path) -> None:
     record = _record()
     record["information_types"] = ["inference"]
-    confirmed = apply_confirmation(record, confirmed_by="czx", evidence=["kb/x.md"])
+    _write_verified_artifact(tmp_path)
+    confirmed = apply_confirmation(record, confirmed_by="czx", evidence=["kb/x.md"], project_root=tmp_path)
     assert normalize_record_schema(confirmed)["confirmation_status"] == "confirmed"
 
     confirmed["payload"]["core_content"]["method"] = "mutated after confirmation"
@@ -118,14 +133,29 @@ def test_normalize_invalidates_receipt_after_confirmable_content_change() -> Non
     }
 
 
-def test_normalize_invalidates_receipt_after_claim_evidence_change() -> None:
-    confirmed = apply_confirmation(_record(), confirmed_by="czx", evidence=["kb/x.md"])
+def test_normalize_invalidates_receipt_after_claim_evidence_change(tmp_path) -> None:
+    _write_verified_artifact(tmp_path)
+    confirmed = apply_confirmation(_record(), confirmed_by="czx", evidence=["kb/x.md"], project_root=tmp_path)
     confirmed["payload"]["claims"][0]["evidence_refs"][0]["quote"] = "different quote"
 
     normalized = normalize_record_schema(confirmed)
 
     assert normalized["confirmation_status"] == "pending_user_confirmation"
     assert normalized["confirmation"]["invalidation"]["reason"] == "confirmable_content_changed"
+
+
+def test_apply_confirmation_rejects_fabricated_claim_quote(tmp_path) -> None:
+    _write_verified_artifact(tmp_path)
+    record = _record()
+    record["payload"]["claims"][0]["evidence_refs"][0]["quote"] = "fabricated quote"
+
+    import pytest
+
+    with pytest.raises(SystemExit, match="not verbatim"):
+        apply_confirmation(record, confirmed_by="czx", evidence=["kb/x.md"], project_root=tmp_path)
+
+    assert record.get("confirmation_status") != "confirmed"
+    assert "confirmation" not in record
 
 
 def test_normalize_leaves_legacy_confirmation_without_digest_unchanged() -> None:
