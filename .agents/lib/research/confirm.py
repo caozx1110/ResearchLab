@@ -42,7 +42,16 @@ from .prefs import (
 GATED_CONFIRMATION_VALUES = {"pending_user_confirmation", "rejected"}
 
 
-AI_SIGNER_NAMES = {"ai", "assistant", "codex", "chatgpt", "gpt", "openai"}
+# Self-sign red line: an AI identity may never confirm its own pending record.
+# Covers current model families; extend as new ones appear. Governance rule is
+# "only tighten" — adding names here is always safe.
+AI_SIGNER_NAMES = {
+    "ai", "assistant", "agent", "bot", "llm",
+    "codex", "chatgpt", "gpt", "openai",
+    "claude", "anthropic", "sonnet", "opus", "haiku", "fable",
+    "gemini", "bard", "google-ai",
+    "llama", "mistral", "cohere", "grok", "copilot", "qwen", "deepseek",
+}
 
 
 CONFIRM_UNIT_STATUS_BY_KIND = {
