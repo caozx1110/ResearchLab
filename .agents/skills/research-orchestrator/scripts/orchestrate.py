@@ -176,12 +176,38 @@ def command_for_dashboard_item(item: dict[str, Any]) -> str:
     return ""
 
 
+UNFILLED_NOTE_STATUSES = {"awaiting_agent_fill", "not_started"}
+
+
+def full_note_status(record: dict[str, Any]) -> str:
+    payload = record.get("payload", {})
+    state = payload.get("state", {}) if isinstance(payload, dict) else {}
+    return str(state.get("full_note_status") or "") if isinstance(state, dict) else ""
+
+
+def is_user_confirmable(record: dict[str, Any]) -> bool:
+    if str(record.get("confirmation_status") or "") != "pending_user_confirmation":
+        return False
+    return not (str(record.get("kind") or "") == "paper" and full_note_status(record) in UNFILLED_NOTE_STATUSES)
+
+
 def safe_unit_step(record: dict[str, Any]) -> dict[str, Any] | None:
     kind = str(record.get("kind") or "")
     unit_id = str(record.get("id") or "")
     status = str(record.get("status") or "")
     confirmation_status = str(record.get("confirmation_status") or "")
-    if confirmation_status == "pending_user_confirmation":
+    note_status = full_note_status(record) if kind == "paper" else ""
+    if kind == "paper" and confirmation_status == "pending_user_confirmation" and note_status == "awaiting_agent_fill":
+        return {
+            "kind": "agent-work",
+            "step_type": "agent-fill",
+            "record_id": unit_id,
+            "title": str(record.get("title") or ""),
+            "reason": f"paper `{unit_id}` awaits agent fill before user confirmation",
+            "command_parts": [],
+            "safe_execute": False,
+        }
+    if is_user_confirmable(record):
         return {
             "kind": "human-gate",
             "step_type": "human-decision",
@@ -199,7 +225,6 @@ def safe_unit_step(record: dict[str, Any]) -> dict[str, Any] | None:
     if kind == "paper":
         payload = record.get("payload", {})
         quick = payload.get("quick_screen", {}) if isinstance(payload, dict) else {}
-        full_note_status = str((payload.get("state", {}) if isinstance(payload, dict) else {}).get("full_note_status") or "")
         if not str(quick.get("screening_mode") or "").strip() and not quick.get("judgement_reason"):
             return {
                 "kind": kind,
@@ -216,7 +241,7 @@ def safe_unit_step(record: dict[str, Any]) -> dict[str, Any] | None:
                 ],
                 "safe_execute": True,
             }
-        if str(record.get("maturity") or "") != "complete" and full_note_status == "not_started":
+        if note_status == "not_started":
             return {
                 "kind": kind,
                 "step_type": "generate-note",
@@ -581,7 +606,7 @@ def program_dashboard_items(root: Path) -> list[dict[str, Any]]:
         pending_units = [
             record_by_id[unit_id]
             for unit_id in sorted(unit_ids)
-            if unit_id in record_by_id and str(record_by_id[unit_id].get("confirmation_status") or "") == "pending_user_confirmation"
+            if unit_id in record_by_id and is_user_confirmable(record_by_id[unit_id])
         ]
         score = (
             100 * len(blocking_evidence)
@@ -659,7 +684,7 @@ def program_dashboard_items(root: Path) -> list[dict[str, Any]]:
                 "open_question_count": 0,
                 "evidence_request_count": 0,
                 "blocking_evidence_count": 0,
-                "pending_confirmation_count": 1 if not bool(step.get("safe_execute")) else 0,
+                "pending_confirmation_count": 1 if str(step.get("kind") or "") == "human-gate" else 0,
                 "score": score,
                 "reasons": ["loose unit", str(step.get("step_type") or "")],
                 "next_action": str(step.get("reason") or ""),
