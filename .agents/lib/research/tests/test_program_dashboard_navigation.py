@@ -339,11 +339,14 @@ def test_orchestrator_empty_kb_outputs_onboarding_command() -> None:
     dashboard = orchestrate.format_dashboard([])
     next_text = orchestrate.format_next([])
 
-    assert "KB 为空，第一步：intake add 一篇论文" in dashboard
-    assert "KB 为空，第一步：intake add 一篇论文" in next_text
+    assert "KB 为空" in dashboard
+    assert "KB 为空" in next_text
     assert "kb ingest" in dashboard
     assert "kb ingest" in next_text
+    # empty-KB onboarding must NOT name the internal `intake add` verb (users only
+    # have kb add / kb ingest) nor leak raw commands (SSOT principle 8).
     for rendered in (dashboard, next_text):
+        assert "intake add" not in rendered
         for leaked_fragment in ("python3", ".py ", "--kind", "${"):
             assert leaked_fragment not in rendered
 

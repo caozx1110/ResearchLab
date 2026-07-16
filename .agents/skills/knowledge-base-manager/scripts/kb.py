@@ -413,8 +413,12 @@ def main() -> int:
                 f"- {item['id']} | {item['kind']} | {item['title']} | "
                 f"{item.get('status')} | {item.get('confirmation_status')} | pools={pools or '-'}{score_text}"
             )
-            print("  下一步：请让 agent 继续补全或推进该条目。")
-            if str(item.get("confirmation_status") or "") == "pending_user_confirmation":
+            # Status-aware next-step hint (SSOT 3.11/A4), natural language only:
+            # an unfilled note shell still needs the agent to fill it; a filled item
+            # pending confirmation is ready for the user to confirm.
+            if _is_unfilled_note_shell(item):
+                print("  下一步：请让 agent 补全该条目的笔记内容。")
+            elif str(item.get("confirmation_status") or "") == "pending_user_confirmation":
                 print(f"  待你确认：说“确认 {item.get('id')}”即可。")
         if not hits:
             print("[ok] no matches")

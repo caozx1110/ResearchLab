@@ -359,7 +359,7 @@ def auto_plan(root: Path) -> dict[str, Any]:
     if not records:
         return {
             "status": "empty",
-            "message": "KB 为空，第一步：intake add 一篇论文",
+            "message": "KB 为空，第一步：告诉 AI 一篇论文的来源（链接或文件），或运行 kb ingest",
             "command_parts": [
                 COMMAND_PREFIX,
                 ".agents/skills/source-intake/scripts/intake.py",
@@ -710,7 +710,7 @@ def format_dashboard(items: list[dict[str, Any]], *, limit: int = 20) -> str:
     selected = items[:limit] if limit > 0 else items
     lines = ["# Program Dashboard", ""]
     if not selected:
-        lines.append("- KB 为空，第一步：intake add 一篇论文")
+        lines.append("- KB 为空，第一步：告诉 AI 一篇论文的来源（链接或文件），或运行 kb ingest")
         lines.append("  操作：告诉 AI 论文来源，或运行 kb ingest。")
         return "\n".join(lines).strip()
     for item in selected:
@@ -728,7 +728,7 @@ def format_next(items: list[dict[str, Any]], *, limit: int = 5) -> str:
     selected = items[:limit] if limit > 0 else items
     lines = ["# Next Actions", ""]
     if not selected:
-        lines.append("- KB 为空，第一步：intake add 一篇论文")
+        lines.append("- KB 为空，第一步：告诉 AI 一篇论文的来源（链接或文件），或运行 kb ingest")
         lines.append("  操作：告诉 AI 论文来源，或运行 kb ingest。")
         return "\n".join(lines).strip()
     for item in selected:
