@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
 import signal
+import socket
 import subprocess
 import threading
 import time
@@ -475,9 +477,25 @@ def create_handler(*, project_root: Path):
     return partial(BrowserHandler, directory=str(project_root))  # type: ignore[return-value]
 
 
+def _host_is_loopback(host: str) -> bool:
+    normalized = str(host or "").strip()
+    if not normalized:
+        return False
+    try:
+        addresses = {info[4][0] for info in socket.getaddrinfo(normalized, None, type=socket.SOCK_STREAM)}
+    except socket.gaierror:
+        return False
+    return bool(addresses) and all(ipaddress.ip_address(address).is_loopback for address in addresses)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Serve the research navigator browser.")
     parser.add_argument("--host", default=DEFAULT_HOST, help="Bind host (default: 127.0.0.1)")
+    parser.add_argument(
+        "--allow-non-loopback",
+        action="store_true",
+        help="Allow remote network binding despite unauthenticated file-write and shell endpoints.",
+    )
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"Bind port (default: {DEFAULT_PORT})")
     add_browser_project_root_argument(parser)
     parser.add_argument(
@@ -486,7 +504,13 @@ def parse_args() -> argparse.Namespace:
         default=WATCH_DEBOUNCE_SECONDS,
         help="Delay after the last watched event before rebuilding (default: 1.5).",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if not args.allow_non_loopback and not _host_is_loopback(args.host):
+        parser.error(
+            f"refusing non-loopback host {args.host!r}: the workbench exposes unauthenticated file-write and shell endpoints; "
+            "pass --allow-non-loopback only when remote access is explicit and intentional"
+        )
+    return args
 
 
 def main() -> None:
