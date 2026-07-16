@@ -159,6 +159,41 @@ def test_orchestrator_status_existing_program_still_works(tmp_path: Path, monkey
     assert orchestrate.state_path(root, "p-existing").exists()
 
 
+def test_orchestrator_next_program_filter_narrows_output(tmp_path: Path, monkeypatch, capsys) -> None:
+    orchestrate = _load_script("research-orchestrator", "orchestrate.py", "orchestrator_script_for_filtered_next")
+    root = _make_workspace(tmp_path)
+    for program_id, action in (("p-one", "Advance one"), ("p-two", "Advance two")):
+        orchestrate.ensure_program_files(root, program_id)
+        payload = orchestrate.load_state(root, program_id)
+        payload["next_actions"] = [action]
+        orchestrate.write_state(root, program_id, payload)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["orchestrate.py", "--root", str(root), "next", "--program-id", "p-one"],
+    )
+
+    assert orchestrate.main() == 0
+    output = capsys.readouterr().out
+    assert "`p-one`: Advance one" in output
+    assert "p-two" not in output
+
+
+def test_orchestrator_next_unknown_program_errors(tmp_path: Path, monkeypatch) -> None:
+    orchestrate = _load_script("research-orchestrator", "orchestrate.py", "orchestrator_script_for_missing_next")
+    root = _make_workspace(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["orchestrate.py", "--root", str(root), "next", "--program-id", "missing"],
+    )
+
+    with pytest.raises(SystemExit, match=r"program `missing` not found; existing: \(none\)"):
+        orchestrate.main()
+
+    assert not orchestrate.program_root(root, "missing").exists()
+
+
 def test_orchestrator_pending_confirmation_command_uses_real_unit_id(tmp_path: Path) -> None:
     orchestrate = _load_script("research-orchestrator", "orchestrate.py", "orchestrator_script_for_b2")
     root = _make_workspace(tmp_path)
