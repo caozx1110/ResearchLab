@@ -440,3 +440,42 @@ def test_review_queue_confirm_uses_listed_records(tmp_path: Path) -> None:
     for unit_id, record in records.items():
         if unit_id != listed_id:
             assert record["confirmation_status"] == "pending_user_confirmation"
+
+
+def _paper(unit_id: str, *, full_note_status: str) -> dict:
+    return {
+        "id": unit_id,
+        "kind": "paper",
+        "title": f"Paper {unit_id}",
+        "status": "screened",
+        "maturity": "complete",
+        "confirmation_status": "pending_user_confirmation",
+        "needs_human_confirmation": True,
+        "information_types": ["inference"],
+        "summary": "s",
+        "tags": [],
+        "topics": [],
+        "candidate_pools": [],
+        "source": {"original_uri": "", "file_hash": ""},
+        "payload": {"state": {"full_note_status": full_note_status}, "core_content": {"insight": "real"}},
+    }
+
+
+def test_review_queue_excludes_unfilled_note_shell_but_keeps_filled(tmp_path: Path) -> None:
+    """SSOT 3.11 / A4: an awaiting_agent_fill paper is not a user-confirmation item.
+
+    It is pending only because complete-note prepare stamps pending_user_confirmation;
+    the review path must agree with the orchestrator dashboard and not surface the
+    empty note shell. A not_started paper (schema default, may carry a pending
+    SCREENING judgement) is NOT excluded — only awaiting_agent_fill is."""
+    kb = _load_kb_module()
+    ensure_workspace(tmp_path)
+    _write_record(tmp_path, _paper("p-shell-12345678", full_note_status="awaiting_agent_fill"))
+    _write_record(tmp_path, _paper("p-notstart-2345678", full_note_status="not_started"))
+    _write_record(tmp_path, _paper("p-filled-12345678", full_note_status="pending_user_confirmation"))
+
+    listed = {r["id"] for r in kb.review_queue_records(tmp_path, confirmation_status="pending_user_confirmation", limit=0)}
+
+    assert "p-filled-12345678" in listed  # filled + awaiting human → stays
+    assert "p-notstart-2345678" in listed  # screening-phase pending → stays (not a note shell)
+    assert "p-shell-12345678" not in listed  # prepared-but-unfilled note → excluded

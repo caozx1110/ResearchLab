@@ -176,7 +176,13 @@ def command_for_dashboard_item(item: dict[str, Any]) -> str:
     return ""
 
 
-UNFILLED_NOTE_STATUSES = {"awaiting_agent_fill", "not_started"}
+# Only a prepared-but-unfilled full-note shell is non-confirmable. NOT `not_started`:
+# that is the schema default for every paper without a full note, and a screening-phase
+# paper can carry a genuinely pending worth-reading verdict while its full note is
+# not_started — excluding not_started would silently drop real screening confirmations
+# from the program dashboard (baseline surfaced them as a human-gate). Mirrors
+# knowledge-base-manager's review_queue filter so the review path and dashboard agree.
+UNFILLED_NOTE_STATUSES = {"awaiting_agent_fill"}
 
 
 def full_note_status(record: dict[str, Any]) -> str:
@@ -207,7 +213,12 @@ def safe_unit_step(record: dict[str, Any]) -> dict[str, Any] | None:
             "command_parts": [],
             "safe_execute": False,
         }
-    if is_user_confirmable(record):
+    # For a paper whose full note is not_started, the NEXT action is to generate the
+    # note first (user decision: auto-generate before confirming), so skip the human
+    # gate here and fall through to the generate-note branch below. The paper is still
+    # is_user_confirmable() for the program dashboard's pending count — this only
+    # governs the single "next action" ordering, not whether it's confirmable at all.
+    if is_user_confirmable(record) and not (kind == "paper" and note_status == "not_started"):
         return {
             "kind": "human-gate",
             "step_type": "human-decision",

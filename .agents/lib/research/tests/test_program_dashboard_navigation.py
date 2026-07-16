@@ -548,3 +548,29 @@ def test_orchestrator_auto_execute_passes_root_to_child_under_symlinked_agents(t
     assert exit_code == 0
     assert (sandbox_root / "kb" / "child-root.txt").read_text(encoding="utf-8") == str(sandbox_root)
     assert not (symlink_target / "kb" / "child-root.txt").exists()
+
+
+def test_is_user_confirmable_keeps_not_started_screening_paper() -> None:
+    """A4 refinement: exclude only awaiting_agent_fill note shells, NOT not_started.
+
+    not_started is the schema default for any paper without a full note; a screening-
+    phase paper with a pending worth-reading verdict must stay user-confirmable so it
+    is not silently dropped from the program dashboard's pending_units."""
+    orchestrate = _load_script("research-orchestrator", "orchestrate.py", "orchestrator_script_for_confirmable_not_started")
+    not_started_screening = {
+        "id": "p-scr-not-started-1",
+        "kind": "paper",
+        "status": "screened",
+        "confirmation_status": "pending_user_confirmation",
+        "payload": {"state": {"full_note_status": "not_started"},
+                    "quick_screen": {"screening_mode": "deep", "judgement_reason": "worth reading"}},
+    }
+    unfilled_note = {
+        "id": "p-shell-1",
+        "kind": "paper",
+        "status": "screened",
+        "confirmation_status": "pending_user_confirmation",
+        "payload": {"state": {"full_note_status": "awaiting_agent_fill"}},
+    }
+    assert orchestrate.is_user_confirmable(not_started_screening) is True
+    assert orchestrate.is_user_confirmable(unfilled_note) is False
