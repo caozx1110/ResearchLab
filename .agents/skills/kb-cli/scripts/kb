@@ -653,7 +653,18 @@ def handle_init(args: argparse.Namespace, root: Path) -> int:
             return written
     elif args.non_interactive or not sys.stdin.isatty():
         if args.git_init:
-            return run_forwarded(root, [(SCRIPT_BY_VERB["init_kb"], ["git-init"])])
+            git_initialized = run_forwarded(root, [(SCRIPT_BY_VERB["init_kb"], ["git-init"])])
+            if git_initialized != 0:
+                return git_initialized
+        print(
+            "NEXT FOR AGENT: kb init scaffolding is complete. Ask the user conversationally for their human name; "
+            "language (zh/en); commit cadence and autonomy scope (manual/milestone/aggressive); auto-screen "
+            "preference (true/false); and optional persona research focus, resources, reporting style, collaboration "
+            "boundaries, and terminology style (keep-en/translate/bilingual). Then re-run kb init headlessly with the "
+            "collected values using these exact flags: --name, --lang, --auto-commit, --auto-screen, --persona-focus, "
+            "--persona-resources, --persona-report, --persona-boundaries, --persona-term. Do not relay this agent-only "
+            "instruction or its raw flags verbatim to the user."
+        )
         return 0
     else:
         defaults = runtime_pref_defaults(root)

@@ -124,7 +124,7 @@ def test_kb_init_forwards_workspace_and_config_inits_in_order(monkeypatch, tmp_p
     ]
 
 
-def test_kb_init_non_tty_degrades_to_inits_only(monkeypatch, tmp_path: Path) -> None:
+def test_kb_init_non_tty_scaffolds_and_guides_agent(monkeypatch, tmp_path: Path, capsys) -> None:
     kb = _load_kb_cli()
     calls: list[list[tuple[str, tuple[str, ...]]]] = []
 
@@ -134,16 +134,54 @@ def test_kb_init_non_tty_degrades_to_inits_only(monkeypatch, tmp_path: Path) -> 
 
     monkeypatch.setattr(kb, "run_forwarded", fake_run_forwarded)
     monkeypatch.setattr(kb, "runtime_pref_defaults", lambda root: (_ for _ in ()).throw(AssertionError("should not prompt")))
-    monkeypatch.setattr(sys, "stdin", io.StringIO("czx\nzh\nmilestone\ntrue\n"))
+    monkeypatch.setattr("builtins.input", lambda prompt="": (_ for _ in ()).throw(AssertionError("should not prompt")))
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
 
     assert kb.main(["init", "--non-interactive", "--root", str(tmp_path)]) == 0
 
+    captured = capsys.readouterr()
+    assert "NEXT FOR AGENT:" in captured.out
+    for flag in [
+        "--name",
+        "--lang",
+        "--auto-commit",
+        "--auto-screen",
+        "--persona-focus",
+        "--persona-resources",
+        "--persona-report",
+        "--persona-boundaries",
+        "--persona-term",
+    ]:
+        assert flag in captured.out
     assert calls == [
         [
             (".agents/skills/knowledge-base-manager/scripts/kb.py", ("init",)),
             (".agents/skills/research-config-manager/scripts/config.py", ("init",)),
         ],
     ]
+
+
+def test_kb_init_headless_flags_persist_user_profile(monkeypatch, tmp_path: Path) -> None:
+    kb = _load_kb_cli()
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+
+    assert kb.main(
+        [
+            "--root",
+            str(tmp_path),
+            "init",
+            "--name",
+            "Researcher",
+            "--lang",
+            "zh",
+            "--persona-focus",
+            "robot learning and VLA",
+        ]
+    ) == 0
+
+    profile = kb.load_yaml(tmp_path / "kb" / "config" / "user-profile.yaml", {})
+    assert profile["preferences"]["language_preference"] == "zh"
+    assert profile["personalization"]["research_focus"] == "robot learning and VLA"
 
 
 def test_kb_init_rejects_ai_signer_name_before_writing_prefs(monkeypatch, tmp_path: Path, capsys) -> None:
