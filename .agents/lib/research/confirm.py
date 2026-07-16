@@ -8,6 +8,7 @@ from typing import Any
 
 from .common import (
     ensure_dir,
+    load_yaml,
     utc_now_iso,
     write_yaml_if_changed,
 )
@@ -281,12 +282,32 @@ def validate_write(record: dict[str, Any], *, strict: bool | None = None) -> lis
     return violations
 
 
-def write_record(project_root: Path, record: dict[str, Any]) -> Path:
+def write_record(
+    project_root: Path,
+    record: dict[str, Any],
+    *,
+    expected_revision: int | None = None,
+) -> Path:
     normalized = normalize_record_schema(record)
     validate_write(normalized)
     root = unit_root(project_root, str(normalized["kind"]), str(normalized["id"]))
     ensure_dir(root)
     path = root / "record.yaml"
+    current_revision = 0
+    if path.exists():
+        current = load_yaml(path, default={})
+        if not isinstance(current, dict):
+            raise SystemExit(f"Invalid on-disk record payload: {path}")
+        try:
+            current_revision = max(0, int(current.get("revision", 0)))
+        except (TypeError, ValueError) as exc:
+            raise SystemExit(f"Invalid on-disk record revision: {path}") from exc
+    if expected_revision is not None and current_revision != expected_revision:
+        raise SystemExit(
+            f"Record revision conflict for {normalized['id']}: "
+            f"expected {expected_revision}, found {current_revision}"
+        )
+    normalized["revision"] = current_revision + 1
     normalized["updated_at"] = utc_now_iso()
     with journaled_op(project_root, "write_record", [path]):
         write_yaml_if_changed(path, normalized)

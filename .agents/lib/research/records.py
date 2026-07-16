@@ -428,6 +428,10 @@ def normalize_record_schema(record: dict[str, Any]) -> dict[str, Any]:
     normalized["status"] = str(normalized.get("status") or "draft")
     normalized["maturity"] = str(normalized.get("maturity") or "lightweight")
     normalized["confirmation_status"] = str(normalized.get("confirmation_status") or "auto_confirmed")
+    try:
+        normalized["revision"] = max(0, int(normalized.get("revision", 0)))
+    except (TypeError, ValueError) as exc:
+        raise SystemExit("Invalid record revision: expected a non-negative integer") from exc
     normalized["legacy_ids"] = [
         item
         for item in _unique_text_list(normalized.get("legacy_ids"))
