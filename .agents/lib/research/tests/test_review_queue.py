@@ -114,6 +114,32 @@ def test_kb_confirm_command_uses_shared_helper() -> None:
     )
 
 
+@pytest.mark.parametrize("command", [["query", "--query", "Queryable"], ["review-queue"]])
+def test_user_facing_find_and_review_output_hides_raw_commands(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+    command: list[str],
+) -> None:
+    kb = _load_kb_module()
+    (tmp_path / ".agents").mkdir()
+    (tmp_path / "AGENTS.md").write_text("# test\n", encoding="utf-8")
+    ensure_workspace(tmp_path)
+    _write_record(
+        tmp_path,
+        _record("p-query-123456", "Queryable", "pending_user_confirmation", "2026-01-01T00:00:00+00:00"),
+    )
+    monkeypatch.setattr(kb, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["kb.py", *command])
+
+    assert kb.main() == 0
+
+    output = capsys.readouterr().out
+    assert "p-query-123456" in output
+    for leaked_fragment in ("python3", ".py ", "--paper-id", "--id ", "${"):
+        assert leaked_fragment not in output
+
+
 def test_batch_confirm_applies_one_evidence_to_multiple_units(tmp_path: Path) -> None:
     kb = _load_kb_module()
     ensure_workspace(tmp_path)

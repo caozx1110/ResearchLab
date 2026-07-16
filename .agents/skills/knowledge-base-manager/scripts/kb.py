@@ -207,7 +207,7 @@ def render_review_queue(root: Path, hits: list[dict], *, kind: str | None = None
     if fact_track:
         for item in fact_track:
             _print_review_item(root, item)
-        print(f"  batch light-confirm: {batch_light_confirm_command(kind=kind)}")
+        print("  待你确认：可一次确认以上 fact-track 条目。")
     else:
         print("  (none)")
 
@@ -221,11 +221,10 @@ def render_review_queue(root: Path, hits: list[dict], *, kind: str | None = None
             _print_review_item(root, item)
             if has_substantive_content(item, str(item.get("kind") or "")):
                 print("  ready: 内容已具备 — 需 evidence + 人工确认；⚑ 建议主动请用户拍板")
-                print(f"  confirm: {confirm_command(item)}")
+                print(f"  待你确认：说“确认 {item.get('id')}”即可。")
             else:
                 print("  ⚠ hollow: core_content 为空/仅模板 — 先补实质内容再确认；promote 到 confirmed 会被实质门控拒绝")
-                print(f"  fill first: {next_unit_command(item)}")
-                print(f"  confirm (after filling): {confirm_command(item)}")
+                print("  需先补全内容，完成后再请你确认。")
 
 
 def print_non_unit_review_notice() -> None:
@@ -387,9 +386,9 @@ def main() -> int:
                 f"- {item['id']} | {item['kind']} | {item['title']} | "
                 f"{item.get('status')} | {item.get('confirmation_status')} | pools={pools or '-'}{score_text}"
             )
-            print(f"  next: {next_unit_command(item)}")
+            print("  下一步：请让 agent 继续补全或推进该条目。")
             if str(item.get("confirmation_status") or "") == "pending_user_confirmation":
-                print(f"  confirm: {confirm_command(item)}")
+                print(f"  待你确认：说“确认 {item.get('id')}”即可。")
         if not hits:
             print("[ok] no matches")
         return 0
