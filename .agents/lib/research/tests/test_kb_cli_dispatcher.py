@@ -237,6 +237,23 @@ def test_kb_next_forwards_to_orchestrator(monkeypatch, tmp_path: Path) -> None:
     ]
 
 
+def test_kb_next_forwards_program_filter(monkeypatch, tmp_path: Path) -> None:
+    kb = _load_kb_cli()
+    calls: list[tuple[str, tuple[str, ...]]] = []
+    monkeypatch.setattr(
+        kb,
+        "forward_command",
+        lambda root, relative_script, args: calls.append((relative_script, tuple(args)))
+        or kb.CommandResult((relative_script, *args), 0),
+    )
+
+    assert kb.main(["--root", str(tmp_path), "next", "p-demo"]) == 0
+
+    assert calls == [
+        (".agents/skills/research-orchestrator/scripts/orchestrate.py", ("next", "--program-id", "p-demo")),
+    ]
+
+
 @pytest.mark.parametrize(
     ("source", "expected"),
     [

@@ -188,8 +188,10 @@ def handle_status(args: argparse.Namespace, root: Path) -> int:
 
 
 def handle_next(args: argparse.Namespace, root: Path) -> int:
-    del args
-    return run_forwarded(root, [(SCRIPT_BY_VERB["next"], ["next"])])
+    forwarded_args = ["next"]
+    if args.program:
+        forwarded_args.extend(["--program-id", args.program])
+    return run_forwarded(root, [(SCRIPT_BY_VERB["next"], forwarded_args)])
 
 
 def handle_find(args: argparse.Namespace, root: Path) -> int:
@@ -852,7 +854,7 @@ def register_status(subparsers: argparse._SubParsersAction[argparse.ArgumentPars
 
 def register_next(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     parser = subparsers.add_parser("next", help="查看下一步建议")
-    parser.add_argument("program", nargs="?", help="预留 program id / fuzzy name；当前底层按全局优先级输出")
+    parser.add_argument("program", nargs="?", help="可选 program id")
     parser.set_defaults(handler=handle_next)
 
 

@@ -205,7 +205,9 @@ run-log 只记录事实；diagnosis 是 AI 推断，默认待确认；follow-up 
 | `kb next [program]` | 查看下一步实验或 program 推进建议。 |
 | `kb find <关键词>` | 按关键词检索已入库知识单元。 |
 | `kb add <链接或路径>` | 把论文、repo、博客或本地文件轻量入库。 |
+| `kb ingest <链接或路径>` | 一条命令把 source 拉进来并备好待填骨架，随后 agent 自动填 grounded 笔记。 |
 | `kb review [fuzzy]` | 查看待确认的 AI 判断，后续可交互式确认。 |
+| `kb reject <单元 id>` | 把误建 / 不采纳的知识单元标记为 rejected（清理出口）。 |
 | `kb recall [kind]` | 回忆已确认习惯、已知坑和待审 skill 问题。 |
 
 idea / report 没有 `kb` 动词，默认用纯自然语言：
@@ -315,7 +317,7 @@ kb recall gotchas
 | 把重要讨论归档成 program discussion note | `discussion-archivist` |
 | 处理泛 wiki / 词条 / 知识库查询，并路由到 owner skill | `wiki-adapter` |
 | 记录、回忆、确认习惯、已知坑和 skill defect | `skill-evolution-advisor` |
-| 用 `kb help/init/doctor/status/next/find/add/review/recall` 快捷转发 | `kb-cli` |
+| 用 `kb help/init/doctor/status/next/find/add/ingest/review/reject/recall` 快捷转发 | `kb-cli` |
 
 如果你明确知道要哪一步，可以点名：
 

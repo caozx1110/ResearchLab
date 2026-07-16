@@ -830,6 +830,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     next_cmd = subparsers.add_parser("next", help="Show prioritized next actions across programs")
     next_cmd.add_argument("--limit", type=int, default=5)
+    next_cmd.add_argument("--program-id")
 
     auto = subparsers.add_parser("auto", help="Plan or execute the next safe orchestration step")
     auto.add_argument("--max-steps", type=int, default=1)
@@ -959,6 +960,12 @@ def main() -> int:
         checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: set program stage {args.program_id} -> {args.stage}")
         return 0
     if args.command == "status":
+        if not program_root(root, args.program_id).is_dir():
+            existing = ", ".join(program_ids(root)) or "(none)"
+            raise SystemExit(
+                f"program `{args.program_id}` not found; existing: {existing}. "
+                "Use init-program to create it."
+            )
         with program_file_lock(root, args.program_id):
             ensure_program_files(root, args.program_id)
             payload = load_state(root, args.program_id)
@@ -976,7 +983,19 @@ def main() -> int:
         print(format_dashboard(program_dashboard_items(root), limit=args.limit))
         return 0
     if args.command == "next":
-        print(format_next(program_dashboard_items(root), limit=args.limit))
+        items = program_dashboard_items(root)
+        if args.program_id:
+            if not program_root(root, args.program_id).is_dir():
+                existing = ", ".join(program_ids(root)) or "(none)"
+                raise SystemExit(
+                    f"program `{args.program_id}` not found; existing: {existing}. "
+                    "Use init-program to create it."
+                )
+            items = [item for item in items if item.get("program_id") == args.program_id]
+            if not items:
+                print(f"# Next Actions\n\n- No actions for program `{args.program_id}`.")
+                return 0
+        print(format_next(items, limit=args.limit))
         return 0
     if args.command == "auto":
         exit_code = 0
