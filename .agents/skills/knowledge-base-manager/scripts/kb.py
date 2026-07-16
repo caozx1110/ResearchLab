@@ -99,6 +99,28 @@ def next_unit_command(record: dict) -> str:
     return shell_command([COMMAND_PREFIX, skill_script_for_command(script), command, id_arg, unit_id])
 
 
+def _is_unfilled_note_shell(record: dict) -> bool:
+    """A paper whose FULL NOTE was prepared (scaffold emitted) but not yet filled.
+
+    ``complete-note --phase prepare`` stamps ``full_note_status=awaiting_agent_fill``
+    together with ``confirmation_status=pending_user_confirmation`` — the note has no
+    real content to confirm yet, so it must NOT be surfaced to the user as a
+    confirmation item (SSOT 3.11 / A4). Mirrors research-orchestrator's
+    is_user_confirmable so the review path and the dashboard path agree.
+
+    Note: only ``awaiting_agent_fill`` qualifies. ``not_started`` is the schema
+    default for every paper without a full note (records.py normalizes to it), and a
+    screening-phase paper can legitimately have a pending worth-reading judgement
+    while its full note is not_started — excluding not_started would hide real
+    screening confirmations."""
+    if str(record.get("kind") or "") != "paper":
+        return False
+    payload = record.get("payload", {})
+    state = payload.get("state", {}) if isinstance(payload, dict) else {}
+    status = str(state.get("full_note_status") or "") if isinstance(state, dict) else ""
+    return status == "awaiting_agent_fill"
+
+
 def review_queue_records(
     root: Path,
     *,
@@ -107,6 +129,11 @@ def review_queue_records(
     limit: int = 50,
 ) -> list[dict]:
     hits = search_records(root, "", kind=kind, confirmation_status=confirmation_status)
+    # Exclude prepared-but-unfilled note shells: pending only because prepare stamps
+    # pending_user_confirmation, but the agent hasn't filled the note yet — not a
+    # user-confirmation item (SSOT 3.11 / A4).
+    if confirmation_status == "pending_user_confirmation":
+        hits = [record for record in hits if not _is_unfilled_note_shell(record)]
     hits = sorted(hits, key=review_sort_key)
     if limit > 0:
         hits = hits[:limit]
@@ -207,7 +234,7 @@ def render_review_queue(root: Path, hits: list[dict], *, kind: str | None = None
     if fact_track:
         for item in fact_track:
             _print_review_item(root, item)
-        print(f"  batch light-confirm: {batch_light_confirm_command(kind=kind)}")
+        print("  待你确认：可一次确认以上 fact-track 条目。")
     else:
         print("  (none)")
 
@@ -221,11 +248,10 @@ def render_review_queue(root: Path, hits: list[dict], *, kind: str | None = None
             _print_review_item(root, item)
             if has_substantive_content(item, str(item.get("kind") or "")):
                 print("  ready: 内容已具备 — 需 evidence + 人工确认；⚑ 建议主动请用户拍板")
-                print(f"  confirm: {confirm_command(item)}")
+                print(f"  待你确认：说“确认 {item.get('id')}”即可。")
             else:
                 print("  ⚠ hollow: core_content 为空/仅模板 — 先补实质内容再确认；promote 到 confirmed 会被实质门控拒绝")
-                print(f"  fill first: {next_unit_command(item)}")
-                print(f"  confirm (after filling): {confirm_command(item)}")
+                print("  需先补全内容，完成后再请你确认。")
 
 
 def print_non_unit_review_notice() -> None:
@@ -387,9 +413,13 @@ def main() -> int:
                 f"- {item['id']} | {item['kind']} | {item['title']} | "
                 f"{item.get('status')} | {item.get('confirmation_status')} | pools={pools or '-'}{score_text}"
             )
-            print(f"  next: {next_unit_command(item)}")
-            if str(item.get("confirmation_status") or "") == "pending_user_confirmation":
-                print(f"  confirm: {confirm_command(item)}")
+            # Status-aware next-step hint (SSOT 3.11/A4), natural language only:
+            # an unfilled note shell still needs the agent to fill it; a filled item
+            # pending confirmation is ready for the user to confirm.
+            if _is_unfilled_note_shell(item):
+                print("  下一步：请让 agent 补全该条目的笔记内容。")
+            elif str(item.get("confirmation_status") or "") == "pending_user_confirmation":
+                print(f"  待你确认：说“确认 {item.get('id')}”即可。")
         if not hits:
             print("[ok] no matches")
         return 0

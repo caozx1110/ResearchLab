@@ -176,12 +176,49 @@ def command_for_dashboard_item(item: dict[str, Any]) -> str:
     return ""
 
 
+# Only a prepared-but-unfilled full-note shell is non-confirmable. NOT `not_started`:
+# that is the schema default for every paper without a full note, and a screening-phase
+# paper can carry a genuinely pending worth-reading verdict while its full note is
+# not_started — excluding not_started would silently drop real screening confirmations
+# from the program dashboard (baseline surfaced them as a human-gate). Mirrors
+# knowledge-base-manager's review_queue filter so the review path and dashboard agree.
+UNFILLED_NOTE_STATUSES = {"awaiting_agent_fill"}
+
+
+def full_note_status(record: dict[str, Any]) -> str:
+    payload = record.get("payload", {})
+    state = payload.get("state", {}) if isinstance(payload, dict) else {}
+    return str(state.get("full_note_status") or "") if isinstance(state, dict) else ""
+
+
+def is_user_confirmable(record: dict[str, Any]) -> bool:
+    if str(record.get("confirmation_status") or "") != "pending_user_confirmation":
+        return False
+    return not (str(record.get("kind") or "") == "paper" and full_note_status(record) in UNFILLED_NOTE_STATUSES)
+
+
 def safe_unit_step(record: dict[str, Any]) -> dict[str, Any] | None:
     kind = str(record.get("kind") or "")
     unit_id = str(record.get("id") or "")
     status = str(record.get("status") or "")
     confirmation_status = str(record.get("confirmation_status") or "")
-    if confirmation_status == "pending_user_confirmation":
+    note_status = full_note_status(record) if kind == "paper" else ""
+    if kind == "paper" and confirmation_status == "pending_user_confirmation" and note_status == "awaiting_agent_fill":
+        return {
+            "kind": "agent-work",
+            "step_type": "agent-fill",
+            "record_id": unit_id,
+            "title": str(record.get("title") or ""),
+            "reason": f"paper `{unit_id}` awaits agent fill before user confirmation",
+            "command_parts": [],
+            "safe_execute": False,
+        }
+    # For a paper whose full note is not_started, the NEXT action is to generate the
+    # note first (user decision: auto-generate before confirming), so skip the human
+    # gate here and fall through to the generate-note branch below. The paper is still
+    # is_user_confirmable() for the program dashboard's pending count — this only
+    # governs the single "next action" ordering, not whether it's confirmable at all.
+    if is_user_confirmable(record) and not (kind == "paper" and note_status == "not_started"):
         return {
             "kind": "human-gate",
             "step_type": "human-decision",
@@ -199,7 +236,6 @@ def safe_unit_step(record: dict[str, Any]) -> dict[str, Any] | None:
     if kind == "paper":
         payload = record.get("payload", {})
         quick = payload.get("quick_screen", {}) if isinstance(payload, dict) else {}
-        full_note_status = str((payload.get("state", {}) if isinstance(payload, dict) else {}).get("full_note_status") or "")
         if not str(quick.get("screening_mode") or "").strip() and not quick.get("judgement_reason"):
             return {
                 "kind": kind,
@@ -216,7 +252,7 @@ def safe_unit_step(record: dict[str, Any]) -> dict[str, Any] | None:
                 ],
                 "safe_execute": True,
             }
-        if str(record.get("maturity") or "") != "complete" and full_note_status == "not_started":
+        if note_status == "not_started":
             return {
                 "kind": kind,
                 "step_type": "generate-note",
@@ -323,7 +359,7 @@ def auto_plan(root: Path) -> dict[str, Any]:
     if not records:
         return {
             "status": "empty",
-            "message": "KB 为空，第一步：intake add 一篇论文",
+            "message": "KB 为空，第一步：告诉 AI 一篇论文的来源（链接或文件），或运行 kb ingest",
             "command_parts": [
                 COMMAND_PREFIX,
                 ".agents/skills/source-intake/scripts/intake.py",
@@ -347,17 +383,10 @@ def format_auto_plan(plan: dict[str, Any]) -> str:
     message = str(plan.get("message") or plan.get("reason") or "")
     if message:
         lines.append(f"- next: {message}")
-    rendered_command = str(plan.get("recommended_command") or "")
-    if not rendered_command:
-        command_parts = plan.get("command_parts") if isinstance(plan.get("command_parts"), list) else []
-        if command_parts:
-            rendered_command = shell_command([str(part) for part in command_parts])
-    if rendered_command:
-        lines.append(f"- command: {rendered_command}")
     if not bool(plan.get("safe_execute")):
         lines.append("- execute: stop for human decision")
     else:
-        lines.append(f"- execute: safe {plan.get('step_type')}")
+        lines.append(f"- execute: safe {plan.get('step_type')}；让 AI 执行即可")
     return "\n".join(lines).strip()
 
 
@@ -588,7 +617,7 @@ def program_dashboard_items(root: Path) -> list[dict[str, Any]]:
         pending_units = [
             record_by_id[unit_id]
             for unit_id in sorted(unit_ids)
-            if unit_id in record_by_id and str(record_by_id[unit_id].get("confirmation_status") or "") == "pending_user_confirmation"
+            if unit_id in record_by_id and is_user_confirmable(record_by_id[unit_id])
         ]
         score = (
             100 * len(blocking_evidence)
@@ -666,7 +695,7 @@ def program_dashboard_items(root: Path) -> list[dict[str, Any]]:
                 "open_question_count": 0,
                 "evidence_request_count": 0,
                 "blocking_evidence_count": 0,
-                "pending_confirmation_count": 1 if not bool(step.get("safe_execute")) else 0,
+                "pending_confirmation_count": 1 if str(step.get("kind") or "") == "human-gate" else 0,
                 "score": score,
                 "reasons": ["loose unit", str(step.get("step_type") or "")],
                 "next_action": str(step.get("reason") or ""),
@@ -681,21 +710,8 @@ def format_dashboard(items: list[dict[str, Any]], *, limit: int = 20) -> str:
     selected = items[:limit] if limit > 0 else items
     lines = ["# Program Dashboard", ""]
     if not selected:
-        lines.append("- KB 为空，第一步：intake add 一篇论文")
-        lines.append(
-            "  command: "
-            + shell_command(
-                [
-                    COMMAND_PREFIX,
-                    ".agents/skills/source-intake/scripts/intake.py",
-                    "add",
-                    "--kind",
-                    "paper",
-                    "--source",
-                    "${RESEARCH_SOURCE:?set-paper-source}",
-                ]
-            )
-        )
+        lines.append("- KB 为空，第一步：告诉 AI 一篇论文的来源（链接或文件），或运行 kb ingest")
+        lines.append("  操作：告诉 AI 论文来源，或运行 kb ingest。")
         return "\n".join(lines).strip()
     for item in selected:
         reasons = ", ".join(item.get("reasons", [])) or "no urgent blocker"
@@ -704,9 +720,7 @@ def format_dashboard(items: list[dict[str, Any]], *, limit: int = 20) -> str:
             f"score={item.get('score', 0)} · {reasons}"
         )
         lines.append(f"  next: {item.get('next_action')}")
-        command = command_for_dashboard_item(item)
-        if command:
-            lines.append(f"  command: {command}")
+        lines.append("  操作：可运行 kb next，或直接让 AI 推进上述事项。")
     return "\n".join(lines).strip()
 
 
@@ -714,27 +728,12 @@ def format_next(items: list[dict[str, Any]], *, limit: int = 5) -> str:
     selected = items[:limit] if limit > 0 else items
     lines = ["# Next Actions", ""]
     if not selected:
-        lines.append("- KB 为空，第一步：intake add 一篇论文")
-        lines.append(
-            "  command: "
-            + shell_command(
-                [
-                    COMMAND_PREFIX,
-                    ".agents/skills/source-intake/scripts/intake.py",
-                    "add",
-                    "--kind",
-                    "paper",
-                    "--source",
-                    "${RESEARCH_SOURCE:?set-paper-source}",
-                ]
-            )
-        )
+        lines.append("- KB 为空，第一步：告诉 AI 一篇论文的来源（链接或文件），或运行 kb ingest")
+        lines.append("  操作：告诉 AI 论文来源，或运行 kb ingest。")
         return "\n".join(lines).strip()
     for item in selected:
         lines.append(f"- `{item['program_id']}`: {item.get('next_action')}")
-        command = command_for_dashboard_item(item)
-        if command:
-            lines.append(f"  command: {command}")
+        lines.append("  操作：可直接让 AI 推进，或运行 kb next。")
     return "\n".join(lines).strip()
 
 

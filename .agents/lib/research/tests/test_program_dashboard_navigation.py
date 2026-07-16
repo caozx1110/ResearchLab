@@ -126,8 +126,10 @@ def test_orchestrator_dashboard_prioritizes_blocking_evidence(tmp_path: Path) ->
     assert items[0]["blocking_evidence_count"] == 1
     assert "Resolve blocking evidence: Need baseline parity logs" in dashboard
     assert "`p-next`: Resolve blocking evidence: Need baseline parity logs" in next_text
-    assert ".agents/skills/research-orchestrator/scripts/orchestrate.py status --program-id p-next" in dashboard
-    assert ".agents/skills/research-orchestrator/scripts/orchestrate.py status --program-id p-next" in next_text
+    assert "--program-id p-next" in items[0]["recommended_command"]
+    for rendered in (dashboard, next_text):
+        for leaked_fragment in ("python3", ".py ", "--program-id", "${"):
+            assert leaked_fragment not in rendered
 
 
 def test_orchestrator_status_unknown_program_does_not_create_it(tmp_path: Path, monkeypatch) -> None:
@@ -225,7 +227,7 @@ def test_orchestrator_pending_confirmation_command_uses_real_unit_id(tmp_path: P
             "topics": [],
             "candidate_pools": [],
             "source": {"original_uri": "", "file_hash": ""},
-            "payload": {"state": {}},
+            "payload": {"state": {"full_note_status": "pending_user_confirmation"}},
         },
     )
 
@@ -233,10 +235,102 @@ def test_orchestrator_pending_confirmation_command_uses_real_unit_id(tmp_path: P
     dashboard = orchestrate.format_dashboard(items)
     next_text = orchestrate.format_next(items)
 
-    assert ".agents/skills/paper-analyst/scripts/paper.py confirm --paper-id p-pending-123456" in dashboard
-    assert ".agents/skills/paper-analyst/scripts/paper.py confirm --paper-id p-pending-123456" in next_text
+    assert "--paper-id p-pending-123456" in items[0]["recommended_command"]
     assert "<id>" not in dashboard
     assert "<id>" not in next_text
+    for rendered in (dashboard, next_text):
+        for leaked_fragment in ("python3", ".py ", "--program-id", "--paper-id", "${"):
+            assert leaked_fragment not in rendered
+
+
+def test_safe_unit_step_routes_unfilled_paper_to_agent_before_user() -> None:
+    orchestrate = _load_script("research-orchestrator", "orchestrate.py", "orchestrator_script_for_unfilled_step")
+    record = {
+        "id": "p-unfilled-123456",
+        "kind": "paper",
+        "title": "Unfilled Paper",
+        "status": "screened",
+        "maturity": "complete",
+        "confirmation_status": "pending_user_confirmation",
+        "payload": {"state": {"full_note_status": "awaiting_agent_fill"}},
+    }
+
+    step = orchestrate.safe_unit_step(record)
+
+    assert step is not None
+    assert step["kind"] == "agent-work"
+    assert step["step_type"] == "agent-fill"
+    assert "agent fill" in step["reason"]
+
+
+def test_safe_unit_step_prepares_not_started_note_before_user_confirmation() -> None:
+    orchestrate = _load_script("research-orchestrator", "orchestrate.py", "orchestrator_script_for_not_started_step")
+    record = {
+        "id": "p-not-started-123456",
+        "kind": "paper",
+        "title": "Not Started Paper",
+        "status": "screened",
+        "maturity": "complete",
+        "confirmation_status": "pending_user_confirmation",
+        "payload": {
+            "quick_screen": {"judgement_reason": ["relevant"]},
+            "state": {"full_note_status": "not_started"},
+        },
+    }
+
+    step = orchestrate.safe_unit_step(record)
+
+    assert step is not None
+    assert step["kind"] == "paper"
+    assert step["step_type"] == "generate-note"
+    assert step["safe_execute"] is True
+
+
+def test_program_dashboard_excludes_unfilled_shell_but_keeps_filled_confirmation(tmp_path: Path) -> None:
+    orchestrate = _load_script("research-orchestrator", "orchestrate.py", "orchestrator_script_for_fill_status_dashboard")
+    root = _make_workspace(tmp_path)
+    records = {
+        "p-unfilled-123456": "awaiting_agent_fill",
+        "p-filled-123456": "pending_user_confirmation",
+    }
+    for program_id, unit_id in (("program-unfilled", "p-unfilled-123456"), ("program-filled", "p-filled-123456")):
+        orchestrate.ensure_program_files(root, program_id)
+        write_yaml_if_changed(
+            orchestrate.state_path(root, program_id),
+            {
+                "program_id": program_id,
+                "stage": "literature-review",
+                "goal": "Review paper",
+                "active_unit_ids": [unit_id],
+                "counts": {},
+            },
+        )
+        write_yaml_if_changed(
+            record_path(root, "paper", unit_id),
+            {
+                "id": unit_id,
+                "kind": "paper",
+                "title": unit_id,
+                "status": "screened",
+                "maturity": "complete",
+                "confirmation_status": "pending_user_confirmation",
+                "needs_human_confirmation": True,
+                "information_types": ["fact"],
+                "summary": "summary",
+                "tags": [],
+                "topics": [],
+                "candidate_pools": [],
+                "source": {"original_uri": "", "file_hash": ""},
+                "payload": {"state": {"full_note_status": records[unit_id]}},
+            },
+        )
+
+    items = {item["program_id"]: item for item in orchestrate.program_dashboard_items(root)}
+
+    assert items["program-unfilled"]["pending_confirmation_count"] == 0
+    assert "pending confirmation" not in items["program-unfilled"]["reasons"]
+    assert items["program-filled"]["pending_confirmation_count"] == 1
+    assert items["program-filled"]["next_action"] == "Review pending confirmation: p-filled-123456"
 
 
 def test_orchestrator_empty_kb_outputs_onboarding_command() -> None:
@@ -245,9 +339,16 @@ def test_orchestrator_empty_kb_outputs_onboarding_command() -> None:
     dashboard = orchestrate.format_dashboard([])
     next_text = orchestrate.format_next([])
 
-    assert "KB 为空，第一步：intake add 一篇论文" in dashboard
-    assert ".agents/skills/source-intake/scripts/intake.py add --kind paper" in dashboard
-    assert "KB 为空，第一步：intake add 一篇论文" in next_text
+    assert "KB 为空" in dashboard
+    assert "KB 为空" in next_text
+    assert "kb ingest" in dashboard
+    assert "kb ingest" in next_text
+    # empty-KB onboarding must NOT name the internal `intake add` verb (users only
+    # have kb add / kb ingest) nor leak raw commands (SSOT principle 8).
+    for rendered in (dashboard, next_text):
+        assert "intake add" not in rendered
+        for leaked_fragment in ("python3", ".py ", "--kind", "${"):
+            assert leaked_fragment not in rendered
 
 
 def test_orchestrator_dashboard_detects_loose_unscreened_unit(tmp_path: Path) -> None:
@@ -278,7 +379,9 @@ def test_orchestrator_dashboard_detects_loose_unscreened_unit(tmp_path: Path) ->
 
     assert items[0]["program_id"] == "loose:p-loose-123456"
     assert "unscreened paper `p-loose-123456`" in dashboard
-    assert ".agents/skills/paper-analyst/scripts/paper.py screen --paper-id p-loose-123456" in dashboard
+    assert "--paper-id p-loose-123456" in items[0]["recommended_command"]
+    assert ".py " not in dashboard
+    assert "--paper-id" not in dashboard
 
 
 def test_orchestrator_auto_dry_run_plans_exact_command_for_loose_unit(tmp_path: Path) -> None:
@@ -304,10 +407,13 @@ def test_orchestrator_auto_dry_run_plans_exact_command_for_loose_unit(tmp_path: 
         },
     )
 
-    text = orchestrate.format_auto_plan(orchestrate.auto_plan(root))
+    plan = orchestrate.auto_plan(root)
+    text = orchestrate.format_auto_plan(plan)
 
     assert "idea `i-loose-123456` needs analysis" in text
-    assert ".agents/skills/idea-workbench/scripts/idea.py analyze --idea-id i-loose-123456" in text
+    assert "--idea-id i-loose-123456" in " ".join(plan["command_parts"])
+    assert ".py " not in text
+    assert "--idea-id" not in text
     assert "safe refresh" in text
 
 
@@ -330,7 +436,10 @@ def test_orchestrator_auto_execute_stops_at_pending_confirmation(tmp_path: Path,
             "topics": [],
             "candidate_pools": [],
             "source": {"original_uri": "", "file_hash": ""},
-            "payload": {"quick_screen": {"worth_deep_reading": "maybe"}},
+            "payload": {
+                "quick_screen": {"worth_deep_reading": "maybe"},
+                "state": {"full_note_status": "pending_user_confirmation"},
+            },
         },
     )
 
@@ -342,12 +451,11 @@ def test_orchestrator_auto_execute_stops_at_pending_confirmation(tmp_path: Path,
     assert plan["safe_execute"] is False
     assert "stop for human decision" in output
     assert "not executing" in output
-    # F5: kb next renders the confirm gate via the single shared helper
-    # (research.common.confirm_command) — analyzer confirm for a paper, not a
-    # hand-copied kb.py confirm — matching kb find / kb review.
-    assert ".agents/skills/paper-analyst/scripts/paper.py confirm --paper-id p-gated-123456" in output
-    assert "--confirmed-by ${RESEARCH_CONFIRMED_BY:?set-human-identity}" in output
-    assert "--evidence ${RESEARCH_CONFIRM_EVIDENCE:?set-human-evidence}" in output
+    assert ".agents/skills/paper-analyst/scripts/paper.py confirm --paper-id p-gated-123456" in plan["recommended_command"]
+    assert "--confirmed-by ${RESEARCH_CONFIRMED_BY:?set-human-identity}" in plan["recommended_command"]
+    assert "--evidence ${RESEARCH_CONFIRM_EVIDENCE:?set-human-evidence}" in plan["recommended_command"]
+    for leaked_fragment in ("python3", ".py ", "--paper-id", "${"):
+        assert leaked_fragment not in output
 
 
 def test_orchestrator_auto_execute_passes_root_env_and_arg_to_child(tmp_path: Path, monkeypatch) -> None:
@@ -443,3 +551,29 @@ def test_orchestrator_auto_execute_passes_root_to_child_under_symlinked_agents(t
     assert exit_code == 0
     assert (sandbox_root / "kb" / "child-root.txt").read_text(encoding="utf-8") == str(sandbox_root)
     assert not (symlink_target / "kb" / "child-root.txt").exists()
+
+
+def test_is_user_confirmable_keeps_not_started_screening_paper() -> None:
+    """A4 refinement: exclude only awaiting_agent_fill note shells, NOT not_started.
+
+    not_started is the schema default for any paper without a full note; a screening-
+    phase paper with a pending worth-reading verdict must stay user-confirmable so it
+    is not silently dropped from the program dashboard's pending_units."""
+    orchestrate = _load_script("research-orchestrator", "orchestrate.py", "orchestrator_script_for_confirmable_not_started")
+    not_started_screening = {
+        "id": "p-scr-not-started-1",
+        "kind": "paper",
+        "status": "screened",
+        "confirmation_status": "pending_user_confirmation",
+        "payload": {"state": {"full_note_status": "not_started"},
+                    "quick_screen": {"screening_mode": "deep", "judgement_reason": "worth reading"}},
+    }
+    unfilled_note = {
+        "id": "p-shell-1",
+        "kind": "paper",
+        "status": "screened",
+        "confirmation_status": "pending_user_confirmation",
+        "payload": {"state": {"full_note_status": "awaiting_agent_fill"}},
+    }
+    assert orchestrate.is_user_confirmable(not_started_screening) is True
+    assert orchestrate.is_user_confirmable(unfilled_note) is False

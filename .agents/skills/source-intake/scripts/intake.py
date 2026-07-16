@@ -131,30 +131,19 @@ def guidance_hints(kind: str, preferences: dict, *, has_pdf: bool, note_created:
     if not bool(preferences.get("prompt_for_preference_updates", True)):
         return hints
     optional_hints = [
-        "可选：查看当前文献入库默认模式："
-        f"{research_python()} "
-        f"{skill_script_for_command('.agents/skills/research-config-manager/scripts/config.py')} guide --focus paper-intake",
+        "可选：如需查看当前文献入库默认模式，可直接询问 AI。",
     ]
     if not bool(preferences.get("auto_complete_note")):
         optional_hints.append(
-            "可选：如需让值得读的论文默认自动生成完整笔记："
-            f"{research_python()} "
-            f"{skill_script_for_command('.agents/skills/research-config-manager/scripts/config.py')} "
-            "set-runtime-pref --section paper --key auto_complete_note --value true"
+            "可选：如需让值得读的论文默认自动生成完整笔记，可告诉 AI 调整该偏好。"
         )
     if note_created and str(preferences.get("complete_note_mode") or "scaffold") != "draft":
         optional_hints.append(
-            "可选：如需默认直接生成更饱满的 draft："
-            f"{research_python()} "
-            f"{skill_script_for_command('.agents/skills/research-config-manager/scripts/config.py')} "
-            "set-runtime-pref --section paper --key complete_note_mode --value draft"
+            "可选：如需默认直接生成更饱满的 draft，可告诉 AI 调整完整笔记模式。"
         )
     if has_pdf and not bool(preferences.get("auto_extract_figures_after_note")):
         optional_hints.append(
-            "可选：如需完整笔记后自动提取 Figure / Table："
-            f"{research_python()} "
-            f"{skill_script_for_command('.agents/skills/research-config-manager/scripts/config.py')} "
-            "set-runtime-pref --section paper --key auto_extract_figures_after_note --value true"
+            "可选：如需完整笔记后自动提取 Figure / Table，可告诉 AI 开启该偏好。"
         )
     hints.extend(optional_hints[:2])
     return hints
@@ -382,7 +371,7 @@ def main() -> int:
         print(f"[source] parse-cache: {parse_cache_path.relative_to(root)} ({len(source_info.get('parse_chunks') or [])} chunks)")
     if backup_warning:
         print(f"[warn] source archive: {backup_warning}")
-    print(f"confirm: {confirm_command(record)}")
+    print(f"待内容补全并校验后，再请你确认条目 {record['id']}。")
     for line in auto_outputs:
         print(f"[auto] {line}")
     checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: intake {args.kind} {record['id']}")
