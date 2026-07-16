@@ -102,20 +102,20 @@ def _python_can_import(python_exe: str | Path, module: str) -> bool:
     return completed.returncode == 0
 
 
-def _ensure_venv_has_pdf_backend(venv_py: Path) -> None:
-    """Best-effort install of the lightweight PDF backend into the managed venv.
+def _ensure_python_has_pdf_backend(python_exe: str | Path) -> None:
+    """Best-effort install of the lightweight PDF backend into a Python runtime.
 
     Unlike PyYAML (a hard requirement that gates readiness), a missing PDF backend
     only degrades PDF parsing, so a failed/opted-out install warns to stderr and is
-    non-fatal. This closes the cold-start gap where a fresh managed venv had no PDF
-    backend and silently produced empty parses."""
+    non-fatal."""
     if os.environ.get(NO_PDF_BACKEND_ENV) == "1":
         return
-    if _python_can_import(venv_py, PDF_BACKEND_IMPORT):
+    python_path = _python_path(python_exe)
+    if _python_can_import(python_path, PDF_BACKEND_IMPORT):
         return
     try:
         _run_checked(
-            [str(venv_py), "-m", "pip", "install", "--disable-pip-version-check", PDF_BACKEND_PACKAGE],
+            [str(python_path), "-m", "pip", "install", "--disable-pip-version-check", PDF_BACKEND_PACKAGE],
             context=f"{PDF_BACKEND_PACKAGE} installation",
         )
     except RuntimeError as exc:
@@ -210,7 +210,7 @@ def _ensure_venv_has_yaml(venv_dir: Path, venv_py: Path) -> None:
     if not _python_can_import_yaml(venv_py):
         raise RuntimeError("managed venv still cannot import yaml after installation")
     # PyYAML is the hard gate above; the lightweight PDF backend is best-effort.
-    _ensure_venv_has_pdf_backend(venv_py)
+    _ensure_python_has_pdf_backend(venv_py)
 
 
 def _failure_message(venv_dir: Path, error: Exception) -> str:
@@ -255,6 +255,7 @@ def ensure_managed_runtime(home: Path | None = None) -> None:
         )
 
     if _current_has_yaml():
+        _ensure_python_has_pdf_backend(sys.executable)
         _mark_ready()
         return
 

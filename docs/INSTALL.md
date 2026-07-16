@@ -19,7 +19,7 @@
 
 高级用户仍可用 `RESEARCH_PYTHON` 覆盖解释器；也可用 `RESEARCH_VENV` 覆盖受管 venv 路径。设置 `RESEARCH_NO_MANAGED_VENV=1` 会关闭自动 venv，改用当前解释器，此时需要自备 PyYAML。
 
-安装器仍会做一次 `import yaml` preflight；如果当前 Python 缺 PyYAML，它会提示安装 `requirements.txt` 或设置覆盖变量。
+安装器仍会做一次 `import yaml` preflight；如果当前 Python 缺 PyYAML，它会提供安装 `requirements.txt` 的便利选项。安装失败或跳过时不会中止，后续首次运行会改由受管 `.venv` 安装 PyYAML 和轻量 PDF backend；只有显式设置 `RESEARCH_NO_MANAGED_VENV=1` 时，缺少 PyYAML 才是硬错误。
 
 ## 快速安装
 
