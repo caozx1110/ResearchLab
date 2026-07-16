@@ -86,3 +86,15 @@ def test_write_record_increments_revision_and_rejects_stale_cas(tmp_path: Path) 
     unchanged = load_yaml(path)
     assert unchanged["revision"] == 2
     assert unchanged["title"] == "Revision Two"
+
+
+def test_write_record_uses_ignored_per_record_lock(tmp_path: Path) -> None:
+    record = default_record("paper", title="Lock Test", maturity="lightweight")
+    record["id"] = "p-lock-test"
+
+    write_record(tmp_path, record)
+
+    locks = list((tmp_path / "kb" / ".journal" / "locks").glob("*.lock"))
+    assert len(locks) == 1
+    assert locks[0].read_text(encoding="utf-8") == ""
+    assert ".journal/" in (tmp_path / "kb" / ".gitignore").read_text(encoding="utf-8")

@@ -23,6 +23,13 @@ def journal_entry_path(project_root: Path, op_id: str) -> Path:
     return journal_root(project_root) / f"{op_id}.yaml"
 
 
+def operation_lock_path(project_root: Path, target_path: Path) -> Path:
+    _ensure_journal_ignored(project_root)
+    key = _target_key(project_root, target_path)
+    name = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    return journal_root(project_root) / "locks" / f"{name}.lock"
+
+
 def file_digest(path: Path) -> str | None:
     if not path.exists():
         return None
