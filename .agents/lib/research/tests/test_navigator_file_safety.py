@@ -104,6 +104,19 @@ def test_is_writable_text_allows_plain_markdown(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "relative_path",
     [
+        "kb/units/papers/p-test-123456/raw/source.md",
+        "kb/units/blogs/b-test-123456/raw/snapshot.txt",
+        "kb/units/papers/p-test-123456/source/snapshot.md",
+        "kb/units/papers/p-test-123456/parse-cache.yaml",
+    ],
+)
+def test_is_writable_text_blocks_immutable_unit_evidence(tmp_path: Path, relative_path: str) -> None:
+    assert not _is_writable_text(tmp_path, tmp_path / relative_path)
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
         "kb/units/papers/p-test-123456/record.yaml",
         "kb/user/kb/index.md",
         "kb/user/navigator/state.md",

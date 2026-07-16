@@ -142,7 +142,28 @@ def _file_kind(path: Path) -> str:
     return "binary"
 
 
+def _is_immutable_unit_evidence(project_root: Path, path: Path) -> bool:
+    units_root = (project_root / "kb/units").resolve()
+    try:
+        unit_relative = path.resolve().relative_to(units_root)
+    except ValueError:
+        return False
+    parts = unit_relative.parts
+    if len(parts) < 3:
+        return False
+    artifact_path = Path(*parts[2:])
+    if artifact_path.parts[0] in {"raw", "source"}:
+        return True
+    return (
+        len(artifact_path.parts) == 1
+        and artifact_path.name.startswith("parse-cache")
+        and artifact_path.suffix.lower() in {".yaml", ".yml"}
+    )
+
+
 def _is_writable_text(project_root: Path, path: Path) -> bool:
+    if _is_immutable_unit_evidence(project_root, path):
+        return False
     if path.suffix.lower() not in WRITABLE_TEXT_SUFFIXES:
         return False
     for blocked in BLOCKED_WRITE_ROOTS:
