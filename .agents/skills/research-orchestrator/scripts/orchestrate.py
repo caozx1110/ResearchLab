@@ -347,17 +347,10 @@ def format_auto_plan(plan: dict[str, Any]) -> str:
     message = str(plan.get("message") or plan.get("reason") or "")
     if message:
         lines.append(f"- next: {message}")
-    rendered_command = str(plan.get("recommended_command") or "")
-    if not rendered_command:
-        command_parts = plan.get("command_parts") if isinstance(plan.get("command_parts"), list) else []
-        if command_parts:
-            rendered_command = shell_command([str(part) for part in command_parts])
-    if rendered_command:
-        lines.append(f"- command: {rendered_command}")
     if not bool(plan.get("safe_execute")):
         lines.append("- execute: stop for human decision")
     else:
-        lines.append(f"- execute: safe {plan.get('step_type')}")
+        lines.append(f"- execute: safe {plan.get('step_type')}；让 AI 执行即可")
     return "\n".join(lines).strip()
 
 
@@ -682,20 +675,7 @@ def format_dashboard(items: list[dict[str, Any]], *, limit: int = 20) -> str:
     lines = ["# Program Dashboard", ""]
     if not selected:
         lines.append("- KB 为空，第一步：intake add 一篇论文")
-        lines.append(
-            "  command: "
-            + shell_command(
-                [
-                    COMMAND_PREFIX,
-                    ".agents/skills/source-intake/scripts/intake.py",
-                    "add",
-                    "--kind",
-                    "paper",
-                    "--source",
-                    "${RESEARCH_SOURCE:?set-paper-source}",
-                ]
-            )
-        )
+        lines.append("  操作：告诉 AI 论文来源，或运行 kb ingest。")
         return "\n".join(lines).strip()
     for item in selected:
         reasons = ", ".join(item.get("reasons", [])) or "no urgent blocker"
@@ -704,9 +684,7 @@ def format_dashboard(items: list[dict[str, Any]], *, limit: int = 20) -> str:
             f"score={item.get('score', 0)} · {reasons}"
         )
         lines.append(f"  next: {item.get('next_action')}")
-        command = command_for_dashboard_item(item)
-        if command:
-            lines.append(f"  command: {command}")
+        lines.append("  操作：可运行 kb next，或直接让 AI 推进上述事项。")
     return "\n".join(lines).strip()
 
 
@@ -715,26 +693,11 @@ def format_next(items: list[dict[str, Any]], *, limit: int = 5) -> str:
     lines = ["# Next Actions", ""]
     if not selected:
         lines.append("- KB 为空，第一步：intake add 一篇论文")
-        lines.append(
-            "  command: "
-            + shell_command(
-                [
-                    COMMAND_PREFIX,
-                    ".agents/skills/source-intake/scripts/intake.py",
-                    "add",
-                    "--kind",
-                    "paper",
-                    "--source",
-                    "${RESEARCH_SOURCE:?set-paper-source}",
-                ]
-            )
-        )
+        lines.append("  操作：告诉 AI 论文来源，或运行 kb ingest。")
         return "\n".join(lines).strip()
     for item in selected:
         lines.append(f"- `{item['program_id']}`: {item.get('next_action')}")
-        command = command_for_dashboard_item(item)
-        if command:
-            lines.append(f"  command: {command}")
+        lines.append("  操作：可直接让 AI 推进，或运行 kb next。")
     return "\n".join(lines).strip()
 
 

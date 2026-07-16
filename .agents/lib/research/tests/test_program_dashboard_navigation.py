@@ -126,8 +126,10 @@ def test_orchestrator_dashboard_prioritizes_blocking_evidence(tmp_path: Path) ->
     assert items[0]["blocking_evidence_count"] == 1
     assert "Resolve blocking evidence: Need baseline parity logs" in dashboard
     assert "`p-next`: Resolve blocking evidence: Need baseline parity logs" in next_text
-    assert ".agents/skills/research-orchestrator/scripts/orchestrate.py status --program-id p-next" in dashboard
-    assert ".agents/skills/research-orchestrator/scripts/orchestrate.py status --program-id p-next" in next_text
+    assert "--program-id p-next" in items[0]["recommended_command"]
+    for rendered in (dashboard, next_text):
+        for leaked_fragment in ("python3", ".py ", "--program-id", "${"):
+            assert leaked_fragment not in rendered
 
 
 def test_orchestrator_status_unknown_program_does_not_create_it(tmp_path: Path, monkeypatch) -> None:
@@ -233,10 +235,12 @@ def test_orchestrator_pending_confirmation_command_uses_real_unit_id(tmp_path: P
     dashboard = orchestrate.format_dashboard(items)
     next_text = orchestrate.format_next(items)
 
-    assert ".agents/skills/paper-analyst/scripts/paper.py confirm --paper-id p-pending-123456" in dashboard
-    assert ".agents/skills/paper-analyst/scripts/paper.py confirm --paper-id p-pending-123456" in next_text
+    assert "--paper-id p-pending-123456" in items[0]["recommended_command"]
     assert "<id>" not in dashboard
     assert "<id>" not in next_text
+    for rendered in (dashboard, next_text):
+        for leaked_fragment in ("python3", ".py ", "--program-id", "--paper-id", "${"):
+            assert leaked_fragment not in rendered
 
 
 def test_orchestrator_empty_kb_outputs_onboarding_command() -> None:
@@ -246,8 +250,12 @@ def test_orchestrator_empty_kb_outputs_onboarding_command() -> None:
     next_text = orchestrate.format_next([])
 
     assert "KB 为空，第一步：intake add 一篇论文" in dashboard
-    assert ".agents/skills/source-intake/scripts/intake.py add --kind paper" in dashboard
     assert "KB 为空，第一步：intake add 一篇论文" in next_text
+    assert "kb ingest" in dashboard
+    assert "kb ingest" in next_text
+    for rendered in (dashboard, next_text):
+        for leaked_fragment in ("python3", ".py ", "--kind", "${"):
+            assert leaked_fragment not in rendered
 
 
 def test_orchestrator_dashboard_detects_loose_unscreened_unit(tmp_path: Path) -> None:
@@ -278,7 +286,9 @@ def test_orchestrator_dashboard_detects_loose_unscreened_unit(tmp_path: Path) ->
 
     assert items[0]["program_id"] == "loose:p-loose-123456"
     assert "unscreened paper `p-loose-123456`" in dashboard
-    assert ".agents/skills/paper-analyst/scripts/paper.py screen --paper-id p-loose-123456" in dashboard
+    assert "--paper-id p-loose-123456" in items[0]["recommended_command"]
+    assert ".py " not in dashboard
+    assert "--paper-id" not in dashboard
 
 
 def test_orchestrator_auto_dry_run_plans_exact_command_for_loose_unit(tmp_path: Path) -> None:
@@ -304,10 +314,13 @@ def test_orchestrator_auto_dry_run_plans_exact_command_for_loose_unit(tmp_path: 
         },
     )
 
-    text = orchestrate.format_auto_plan(orchestrate.auto_plan(root))
+    plan = orchestrate.auto_plan(root)
+    text = orchestrate.format_auto_plan(plan)
 
     assert "idea `i-loose-123456` needs analysis" in text
-    assert ".agents/skills/idea-workbench/scripts/idea.py analyze --idea-id i-loose-123456" in text
+    assert "--idea-id i-loose-123456" in " ".join(plan["command_parts"])
+    assert ".py " not in text
+    assert "--idea-id" not in text
     assert "safe refresh" in text
 
 
@@ -342,12 +355,11 @@ def test_orchestrator_auto_execute_stops_at_pending_confirmation(tmp_path: Path,
     assert plan["safe_execute"] is False
     assert "stop for human decision" in output
     assert "not executing" in output
-    # F5: kb next renders the confirm gate via the single shared helper
-    # (research.common.confirm_command) — analyzer confirm for a paper, not a
-    # hand-copied kb.py confirm — matching kb find / kb review.
-    assert ".agents/skills/paper-analyst/scripts/paper.py confirm --paper-id p-gated-123456" in output
-    assert "--confirmed-by ${RESEARCH_CONFIRMED_BY:?set-human-identity}" in output
-    assert "--evidence ${RESEARCH_CONFIRM_EVIDENCE:?set-human-evidence}" in output
+    assert ".agents/skills/paper-analyst/scripts/paper.py confirm --paper-id p-gated-123456" in plan["recommended_command"]
+    assert "--confirmed-by ${RESEARCH_CONFIRMED_BY:?set-human-identity}" in plan["recommended_command"]
+    assert "--evidence ${RESEARCH_CONFIRM_EVIDENCE:?set-human-evidence}" in plan["recommended_command"]
+    for leaked_fragment in ("python3", ".py ", "--paper-id", "${"):
+        assert leaked_fragment not in output
 
 
 def test_orchestrator_auto_execute_passes_root_env_and_arg_to_child(tmp_path: Path, monkeypatch) -> None:
