@@ -1,4 +1,5 @@
 import importlib.util
+from contextlib import contextmanager
 from pathlib import Path
 import subprocess
 import sys
@@ -201,6 +202,71 @@ def test_manual_checkpoint_clean_state_is_a_noop(
     assert kb.main() == 0
 
     assert "no kb changes to commit" in capsys.readouterr().out
+
+
+def test_checkpoint_failure_occurs_after_outer_transaction_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kb = _load_kb_module()
+    events: list[str] = []
+    record = {"id": "p-order-test", "kind": "paper"}
+    path = tmp_path / "kb" / "units" / "papers" / "p-order-test" / "record.yaml"
+
+    @contextmanager
+    def completed_transaction(root: Path, op_type: str, target_paths: list[Path]):
+        events.append("transaction_begin")
+        yield
+        events.append("transaction_commit")
+
+    monkeypatch.setattr(kb, "mutation_transaction", completed_transaction)
+    monkeypatch.setattr(kb, "ensure_workspace", lambda root: events.append("mutate"))
+    monkeypatch.setattr(kb, "locate_record", lambda root, unit_id: (record, path))
+    monkeypatch.setattr(kb, "promote_record", lambda root, unit_id, **kwargs: path)
+    monkeypatch.setattr(kb, "build_index", lambda root: events.append("index"))
+
+    def fail_checkpoint(*args, **kwargs):
+        events.append("checkpoint")
+        assert events[-2] == "transaction_commit"
+        raise RuntimeError("checkpoint failed")
+
+    monkeypatch.setattr(kb, "checkpoint_and_report", fail_checkpoint)
+    monkeypatch.setattr(sys, "argv", ["kb.py", "--root", str(tmp_path), "promote", "--id", "p-order-test", "--status", "active"])
+
+    with pytest.raises(RuntimeError, match="checkpoint failed"):
+        kb.main()
+
+    assert events == ["transaction_begin", "mutate", "index", "transaction_commit", "checkpoint"]
+
+
+def test_outer_transaction_commit_failure_skips_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kb = _load_kb_module()
+    events: list[str] = []
+    record = {"id": "p-order-test", "kind": "paper"}
+    path = tmp_path / "kb" / "units" / "papers" / "p-order-test" / "record.yaml"
+
+    @contextmanager
+    def failed_transaction(root: Path, op_type: str, target_paths: list[Path]):
+        events.append("transaction_begin")
+        yield
+        events.append("transaction_commit_failed")
+        raise OSError("outer commit failed")
+
+    monkeypatch.setattr(kb, "mutation_transaction", failed_transaction)
+    monkeypatch.setattr(kb, "ensure_workspace", lambda root: events.append("mutate"))
+    monkeypatch.setattr(kb, "locate_record", lambda root, unit_id: (record, path))
+    monkeypatch.setattr(kb, "promote_record", lambda root, unit_id, **kwargs: path)
+    monkeypatch.setattr(kb, "build_index", lambda root: events.append("index"))
+    monkeypatch.setattr(kb, "checkpoint_and_report", lambda *args, **kwargs: events.append("checkpoint"))
+    monkeypatch.setattr(sys, "argv", ["kb.py", "--root", str(tmp_path), "promote", "--id", "p-order-test", "--status", "active"])
+
+    with pytest.raises(OSError, match="outer commit failed"):
+        kb.main()
+
+    assert events == ["transaction_begin", "mutate", "index", "transaction_commit_failed"]
 
 
 def _configure_kb_git(root: Path) -> None:

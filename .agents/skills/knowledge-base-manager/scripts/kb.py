@@ -761,12 +761,12 @@ def main() -> int:
                     method="kb.py review-queue --confirm",
                 )
                 build_index(root)
-                checkpoint_and_report(
-                    root,
-                    trigger="milestone",
-                    message=f"milestone: batch confirm review queue ({len(written)} records)",
-                    target_paths=batch_paths,
-                )
+            checkpoint_and_report(
+                root,
+                trigger="milestone",
+                message=f"milestone: batch confirm review queue ({len(written)} records)",
+                target_paths=batch_paths,
+            )
             for path in written:
                 print(f"[ok] confirmed {path.relative_to(root)}")
             if not fact_track:
@@ -807,12 +807,12 @@ def main() -> int:
                 authorization_source=args.authorization_source,
             )
             build_index(root)
-            checkpoint_and_report(
-                root,
-                trigger="milestone",
-                message=f"milestone: batch confirm ({len(written)} records)",
-                target_paths=batch_paths,
-            )
+        checkpoint_and_report(
+            root,
+            trigger="milestone",
+            message=f"milestone: batch confirm ({len(written)} records)",
+            target_paths=batch_paths,
+        )
         for path in written:
             print(f"[ok] confirmed {path.relative_to(root)}")
         if remaining:
@@ -850,16 +850,15 @@ def main() -> int:
                 source_label=args.source_label,
             )
             build_index(root)
-            if paths:
-                checkpoint_and_report(
-                    root,
-                    trigger="milestone",
-                    message=f"milestone: update kb governance ({len(paths)} records)",
-                    target_paths=operation_paths,
-                )
         if not paths:
             print("[ok] no records governed")
             return 0
+        checkpoint_and_report(
+            root,
+            trigger="milestone",
+            message=f"milestone: update kb governance ({len(paths)} records)",
+            target_paths=operation_paths,
+        )
         for path in paths:
             print(f"[ok] governed {path.relative_to(root)}")
         print(f"[ok] synced {topic_taxonomy_path(root).relative_to(root)}")
@@ -873,12 +872,12 @@ def main() -> int:
             ensure_workspace(root)
             link_records(root, args.from_id, args.to_id, args.relation, note=args.note)
             build_index(root)
-            checkpoint_and_report(
-                root,
-                trigger="milestone",
-                message=f"milestone: link {args.from_id} to {args.to_id}",
-                target_paths=operation_paths,
-            )
+        checkpoint_and_report(
+            root,
+            trigger="milestone",
+            message=f"milestone: link {args.from_id} to {args.to_id}",
+            target_paths=operation_paths,
+        )
         print(f"[ok] linked {args.from_id} -> {args.to_id} ({args.relation})")
         return 0
     if args.command == "promote":
@@ -900,12 +899,12 @@ def main() -> int:
             ensure_workspace(root)
             path = promote_record(root, args.id, **promote_kwargs)
             build_index(root)
-            checkpoint_and_report(
-                root,
-                trigger="milestone",
-                message=f"milestone: promote {args.id}",
-                target_paths=operation_paths,
-            )
+        checkpoint_and_report(
+            root,
+            trigger="milestone",
+            message=f"milestone: promote {args.id}",
+            target_paths=operation_paths,
+        )
         print(f"[ok] updated {path.relative_to(root)}")
         return 0
     return 1
