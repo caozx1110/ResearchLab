@@ -25,7 +25,7 @@ if __name__ == "__main__":
     ensure_managed_runtime(PROJECT_ROOT)
 
 from research.common import add_project_root_argument, confirm_command as shared_confirm_command, exclusive_file_lock, extract_pdf_record, parse_arxiv_id, print_resolved_project_roots, skill_script_for_command, utc_now_iso, write_yaml_if_changed
-from research.journal import journaled_op, operation_lock_path
+from research.journal import journal_subprocess_env, journaled_op, mutation_transaction, operation_lock_path
 from research.intake_cli import add_intake_add_arguments
 from research.core import (
     apply_record_governance,
@@ -45,6 +45,7 @@ from research.core import (
     project_root,
     resolve_local_reference,
     resolve_search_candidate,
+    search_stage_path,
     rebase_source_backup_paths,
     source_backup_error,
     source_record_fields,
@@ -99,7 +100,14 @@ def run_paper_command(root: Path, *args: str) -> list[str]:
         str(root),
         *args,
     ]
-    result = subprocess.run(cmd, cwd=root, text=True, capture_output=True, check=False)
+    result = subprocess.run(
+        cmd,
+        cwd=root,
+        env=journal_subprocess_env(root),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
     output = [
         line.strip()
         for line in (result.stdout.splitlines() + result.stderr.splitlines())
@@ -328,6 +336,141 @@ def _build_index_transaction(root: Path) -> tuple[Path, Path]:
             return build_index(root)
 
 
+def _intake_transaction_targets(
+    root: Path,
+    *,
+    unit_dir: Path,
+    unit_id: str,
+    intake_stage_dir: Path,
+    stage_id: str = "",
+) -> list[Path]:
+    targets = [
+        unit_dir,
+        intake_stage_dir,
+        *_index_target_paths(root),
+        # A rejected legacy unit may be quarantined during materialization.  The
+        # command-level snapshot must remove/restore that KB-local move as one op.
+        kb_root(root) / ".runtime" / "intake-staging" / "legacy-failed-units" / unit_id,
+    ]
+    if stage_id:
+        targets.append(search_stage_path(root, stage_id))
+    return list(dict.fromkeys(targets))
+
+
+def _execute_intake_transaction(
+    root: Path,
+    *,
+    args: argparse.Namespace,
+    source: str,
+    title: str,
+    record: dict,
+    source_info: dict,
+    stage_dir: Path,
+    unit_dir: Path,
+    paper_preferences: dict,
+) -> tuple[Path | None, dict | None, dict, list[str], bool, Path | None]:
+    """Materialize and derive one intake as one undoable command transaction."""
+    targets = _intake_transaction_targets(
+        root,
+        unit_dir=unit_dir,
+        unit_id=str(record["id"]),
+        intake_stage_dir=stage_dir,
+        stage_id=str(args.stage_id or ""),
+    )
+    auto_outputs: list[str] = []
+    note_created = False
+    updated_stage_path: Path | None = None
+    with mutation_transaction(root, "source-intake-add", targets):
+        path, concurrent_duplicate, canonical_source_info = _materialize_staged_source(
+            root,
+            kind=args.kind,
+            source=source,
+            title=title,
+            record=record,
+            source_info=source_info,
+            stage_dir=stage_dir,
+        )
+        if concurrent_duplicate:
+            if args.stage_id and args.candidate_id:
+                updated_stage_path = mark_search_candidate(
+                    root,
+                    args.stage_id,
+                    args.candidate_id,
+                    status="duplicate",
+                    record_id=str(concurrent_duplicate["id"]),
+                )
+            return (
+                None,
+                concurrent_duplicate,
+                canonical_source_info,
+                auto_outputs,
+                note_created,
+                updated_stage_path,
+            )
+        if path is None:
+            raise RuntimeError("Source materialization completed without a canonical record path.")
+
+        if args.kind == "paper":
+            if bool(paper_preferences.get("parse_cache_prewarm_on_intake", True)) and not bool(
+                paper_preferences.get("auto_screen_on_intake", True)
+            ):
+                auto_outputs.extend(
+                    run_paper_command(root, "prewarm-cache", "--paper-id", record["id"], "--defer-post-actions")
+                )
+            should_screen = bool(paper_preferences.get("auto_screen_on_intake", True)) or args.maturity == "complete"
+            if should_screen:
+                auto_outputs.extend(
+                    run_paper_command(root, "screen", "--paper-id", record["id"], "--mode", "auto", "--defer-post-actions")
+                )
+            if args.maturity == "complete":
+                note_created = True
+                auto_outputs.extend(
+                    run_paper_command(
+                        root,
+                        "complete-note",
+                        "--paper-id",
+                        record["id"],
+                        "--mode",
+                        "auto",
+                        "--defer-post-actions",
+                    )
+                )
+            elif should_screen:
+                refreshed_record, _ = locate_record(root, record["id"])
+                if should_auto_complete_note(refreshed_record, paper_preferences):
+                    note_created = True
+                    auto_outputs.extend(
+                        run_paper_command(
+                            root,
+                            "complete-note",
+                            "--paper-id",
+                            record["id"],
+                            "--mode",
+                            "auto",
+                            "--defer-post-actions",
+                        )
+                    )
+            if note_created and bool(paper_preferences.get("auto_extract_figures_after_note")):
+                auto_outputs.extend(
+                    run_paper_command(root, "extract-figures", "--paper-id", record["id"], "--defer-post-actions")
+                )
+            if note_created and bool(paper_preferences.get("auto_refresh_structure_after_note", True)):
+                auto_outputs.extend(
+                    run_paper_command(root, "refresh-structure", "--paper-id", record["id"], "--defer-post-actions")
+                )
+
+        _build_index_transaction(root)
+        if args.stage_id and args.candidate_id:
+            updated_stage_path = mark_search_candidate(
+                root,
+                args.stage_id,
+                args.candidate_id,
+                status="materialized",
+                record_id=str(record["id"]),
+            )
+    return path, None, canonical_source_info, auto_outputs, note_created, updated_stage_path
+
+
 def main() -> int:
     args = build_parser().parse_args()
     root = project_root(PROJECT_ROOT, explicit_root=args.root)
@@ -474,66 +617,26 @@ def main() -> int:
     else:
         record["payload"]["basic_info"]["title"] = title
         record["payload"]["basic_info"]["url"] = source if source.startswith("http") else ""
-    path, concurrent_duplicate, source_info = _materialize_staged_source(
-        root,
-        kind=args.kind,
-        source=source,
-        title=title,
-        record=record,
-        source_info=source_info,
-        stage_dir=stage_dir,
+    paper_preferences = load_runtime_preferences(root).get("paper", {}) if args.kind == "paper" else {}
+    path, concurrent_duplicate, source_info, auto_outputs, note_created, updated_stage_path = (
+        _execute_intake_transaction(
+            root,
+            args=args,
+            source=source,
+            title=title,
+            record=record,
+            source_info=source_info,
+            stage_dir=stage_dir,
+            unit_dir=unit_dir,
+            paper_preferences=paper_preferences,
+        )
     )
     if concurrent_duplicate:
-        if args.stage_id and args.candidate_id:
-            mark_search_candidate(
-                root,
-                args.stage_id,
-                args.candidate_id,
-                status="duplicate",
-                record_id=str(concurrent_duplicate["id"]),
-            )
         print(f"[ok] duplicate detected: {concurrent_duplicate['id']}")
         return 0
     if path is None:
         raise RuntimeError("Source materialization completed without a canonical record path.")
-    auto_outputs: list[str] = []
-    paper_preferences = load_runtime_preferences(root).get("paper", {}) if args.kind == "paper" else {}
-    note_created = False
     has_pdf = str(source_info.get("source_type") or "") == "pdf" or source.lower().endswith(".pdf")
-    if args.kind == "paper":
-        if bool(paper_preferences.get("parse_cache_prewarm_on_intake", True)) and not bool(
-            paper_preferences.get("auto_screen_on_intake", True)
-        ):
-            auto_outputs.extend(run_paper_command(root, "prewarm-cache", "--paper-id", record["id"], "--defer-post-actions"))
-        should_screen = bool(paper_preferences.get("auto_screen_on_intake", True)) or args.maturity == "complete"
-        if should_screen:
-            auto_outputs.extend(run_paper_command(root, "screen", "--paper-id", record["id"], "--mode", "auto", "--defer-post-actions"))
-        if args.maturity == "complete":
-            note_created = True
-            auto_outputs.extend(
-                run_paper_command(root, "complete-note", "--paper-id", record["id"], "--mode", "auto", "--defer-post-actions")
-            )
-        elif should_screen:
-            refreshed_record, _ = locate_record(root, record["id"])
-            if should_auto_complete_note(refreshed_record, paper_preferences):
-                note_created = True
-                auto_outputs.extend(
-                    run_paper_command(root, "complete-note", "--paper-id", record["id"], "--mode", "auto", "--defer-post-actions")
-                )
-        if note_created and bool(paper_preferences.get("auto_extract_figures_after_note")):
-            auto_outputs.extend(run_paper_command(root, "extract-figures", "--paper-id", record["id"], "--defer-post-actions"))
-        if note_created and bool(paper_preferences.get("auto_refresh_structure_after_note", True)):
-            auto_outputs.extend(run_paper_command(root, "refresh-structure", "--paper-id", record["id"], "--defer-post-actions"))
-    _build_index_transaction(root)
-    updated_stage_path: Path | None = None
-    if args.stage_id and args.candidate_id:
-        updated_stage_path = mark_search_candidate(
-            root,
-            args.stage_id,
-            args.candidate_id,
-            status="materialized",
-            record_id=str(record["id"]),
-        )
     print(f"[ok] created {path.relative_to(root)}")
     backup_status = str(source_info.get("backup_status") or "").strip()
     if backup_status:
