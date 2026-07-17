@@ -307,15 +307,139 @@ def merge_managed_agents(existing: bytes | None, block: bytes, *, legacy_digest:
 
 
 def remove_managed_agents(existing: bytes, manifest: dict[str, Any]) -> bytes | None:
-    span = managed_block_span(existing)
+    try:
+        span = managed_block_span(existing)
+    except (SyncError, UnicodeDecodeError):
+        warn("preserving AGENTS.md during uninstall: managed block cannot be verified")
+        return existing
     if span is not None:
+        expected = str(manifest.get("agents_md_sha") or "")
+        actual = hashlib.sha256(existing[span[0] : span[1]]).hexdigest()
+        if not expected or actual != expected:
+            warn(
+                "preserving AGENTS.md during uninstall: managed block drift "
+                f"expected={expected or '<missing>'} actual={actual}"
+            )
+            return existing
         remaining = existing[: span[0]] + existing[span[1] :]
         return remaining if remaining.strip() else None
     if manifest.get("agents_md") == "managed":
         expected = str(manifest.get("agents_md_sha") or manifest.get("files", {}).get("AGENTS.md") or "")
         if expected and hashlib.sha256(existing).hexdigest() == expected:
             return None
+        warn("preserving AGENTS.md during uninstall: managed content drift")
+    elif manifest.get("agents_md") == "managed-block":
+        warn("preserving AGENTS.md during uninstall: managed block is missing")
     return existing
+
+
+def managed_uninstall_components(path: Path, dst_root: Path) -> list[Path]:
+    root = agents_root(dst_root)
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        die(f"refusing to inspect uninstall path outside .agents: {path}")
+    return [
+        root,
+        *(root / Path(*relative.parts[:index]) for index in range(1, len(relative.parts) + 1)),
+    ]
+
+
+def inspect_managed_uninstall_path(path: Path, dst_root: Path) -> tuple[str, str]:
+    """Inspect a manifest file without traversing symlinked path components."""
+
+    components = managed_uninstall_components(path, dst_root)
+    for index, component in enumerate(components):
+        try:
+            mode = component.lstat().st_mode
+        except FileNotFoundError:
+            return ("missing", "<missing>")
+        except OSError as exc:
+            return ("unreadable", f"<{type(exc).__name__}>")
+        if stat.S_ISLNK(mode):
+            return ("symlink", f"<symlink:{component.relative_to(dst_root)}>")
+        is_leaf = index == len(components) - 1
+        if not is_leaf and not stat.S_ISDIR(mode):
+            return ("type-change", f"<not-a-directory:{component.relative_to(dst_root)}>")
+        if is_leaf:
+            if not stat.S_ISREG(mode):
+                return ("type-change", "<not-a-regular-file>")
+            try:
+                return ("regular", sha256_file(component))
+            except OSError as exc:
+                return ("unreadable", f"<{type(exc).__name__}>")
+    return ("missing", "<missing>")
+
+
+def inspect_managed_uninstall_directory(path: Path, dst_root: Path) -> tuple[str, str]:
+    """Inspect a managed directory without traversing symlinked path components."""
+
+    for component in managed_uninstall_components(path, dst_root):
+        try:
+            mode = component.lstat().st_mode
+        except FileNotFoundError:
+            return ("missing", "<missing>")
+        except OSError as exc:
+            return ("unreadable", f"<{type(exc).__name__}>")
+        if stat.S_ISLNK(mode):
+            return ("symlink", f"<symlink:{component.relative_to(dst_root)}>")
+        if not stat.S_ISDIR(mode):
+            return ("type-change", f"<not-a-directory:{component.relative_to(dst_root)}>")
+    return ("directory", "<directory>")
+
+
+def remove_managed_bytecode_caches(files: dict[str, str], dst_root: Path, *, dry_run: bool) -> bool:
+    """Remove only bytecode caches attributable to manifest-owned Python modules."""
+
+    cache_modules: dict[Path, set[str]] = {}
+    for rel in files:
+        if not rel.startswith(".agents/") or not rel.endswith(".py"):
+            continue
+        source_path = path_for_rel(dst_root, rel)
+        cache_modules.setdefault(source_path.parent / "__pycache__", set()).add(source_path.stem)
+
+    removed_any = False
+    for cache_dir, module_names in sorted(cache_modules.items(), key=lambda item: str(item[0])):
+        state, detail = inspect_managed_uninstall_directory(cache_dir, dst_root)
+        if state == "missing":
+            continue
+        if state != "directory":
+            warn(
+                "preserving managed runtime cache during uninstall: "
+                f"{cache_dir.relative_to(dst_root)} reason={state} actual={detail}"
+            )
+            continue
+        try:
+            entries = list(cache_dir.iterdir())
+        except OSError as exc:
+            warn(
+                "preserving managed runtime cache during uninstall: "
+                f"{cache_dir.relative_to(dst_root)} reason=unreadable actual=<{type(exc).__name__}>"
+            )
+            continue
+        for entry in entries:
+            name_without_suffix = entry.name[:-4] if entry.name.endswith(".pyc") else ""
+            if not any(
+                name_without_suffix == module_name or name_without_suffix.startswith(f"{module_name}.")
+                for module_name in module_names
+            ):
+                continue
+            try:
+                mode = entry.lstat().st_mode
+            except OSError as exc:
+                warn(
+                    "preserving managed runtime cache during uninstall: "
+                    f"{entry.relative_to(dst_root)} reason=unreadable actual=<{type(exc).__name__}>"
+                )
+                continue
+            if not stat.S_ISREG(mode):
+                warn(
+                    "preserving managed runtime cache during uninstall: "
+                    f"{entry.relative_to(dst_root)} reason=type-change"
+                )
+                continue
+            removed_any = remove_file(entry, dst_root, dry_run=dry_run) or removed_any
+    return removed_any
 
 
 def path_mode(path: Path, default: int = 0o644) -> int:
@@ -332,6 +456,7 @@ def transactional_apply(
     manifest: dict[str, Any] | None,
     *,
     dry_run: bool,
+    preserve: set[Path] | None = None,
 ) -> bool:
     changed_writes: dict[str, tuple[bytes, int]] = {}
     for rel, (content, mode) in sorted(writes.items()):
@@ -429,7 +554,7 @@ def transactional_apply(
                     os.replace(backup, path)
             except OSError as rollback_exc:
                 warn(f"rollback could not restore {path}: {rollback_exc}")
-        prune_empty_dirs(dst_root, dry_run=False)
+        prune_empty_dirs(dst_root, dry_run=False, preserve=preserve)
         raise
     finally:
         shutil.rmtree(stage, ignore_errors=True)
@@ -438,7 +563,7 @@ def transactional_apply(
                 root.rmdir()
             except OSError:
                 pass
-    prune_empty_dirs(dst_root, dry_run=False)
+    prune_empty_dirs(dst_root, dry_run=False, preserve=preserve)
     return True
 
 
@@ -473,13 +598,16 @@ def remove_file(path: Path, dst_root: Path, *, dry_run: bool) -> bool:
     return True
 
 
-def prune_empty_dirs(dst_root: Path, *, dry_run: bool) -> None:
+def prune_empty_dirs(dst_root: Path, *, dry_run: bool, preserve: set[Path] | None = None) -> None:
     root = agents_root(dst_root)
     if not root.is_dir():
         return
+    preserved = preserve or set()
     dirs = sorted([p for p in root.rglob("*") if not p.is_symlink() and p.is_dir()], key=lambda p: len(p.parts), reverse=True)
     for directory in dirs:
         if directory == root:
+            continue
+        if any(directory == path or path in directory.parents for path in preserved):
             continue
         if not is_under_agents(directory, dst_root):
             continue
@@ -872,11 +1000,44 @@ def uninstall(args: argparse.Namespace) -> int:
     manifest = load_manifest(manifest_path(dst_root), required=True)
     assert manifest is not None
     files = dict(manifest["files"])
+    preserved_paths: set[Path] = set()
+    removable_paths: list[Path] = []
+    for rel in sorted(files, reverse=True):
+        if rel == "AGENTS.md":
+            continue
+        if not rel.startswith(".agents/"):
+            continue
+        path = path_for_rel(dst_root, rel)
+        state, actual = inspect_managed_uninstall_path(path, dst_root)
+        if state == "missing":
+            continue
+        expected = str(files[rel])
+        if state != "regular" or actual != expected:
+            reason = "content-drift" if state == "regular" else state
+            warn(
+                f"preserving managed path during uninstall: {rel} "
+                f"reason={reason} expected={expected} actual={actual}"
+            )
+            preserved_paths.add(path)
+            continue
+        removable_paths.append(path)
+
     agents_path = dst_root / "AGENTS.md"
-    if agents_path.exists() and agents_path.is_file() and not agents_path.is_symlink():
+    if agents_path.is_symlink():
+        warn("preserving AGENTS.md during uninstall: path is a symlink")
+    elif agents_path.exists() and not agents_path.is_file():
+        warn("preserving AGENTS.md during uninstall: path is not a regular file")
+    elif agents_path.exists():
         remaining = remove_managed_agents(read_bytes(agents_path), manifest)
         if remaining is None:
-            transactional_apply(dst_root, {}, ["AGENTS.md"], None, dry_run=args.dry_run)
+            transactional_apply(
+                dst_root,
+                {},
+                ["AGENTS.md"],
+                None,
+                dry_run=args.dry_run,
+                preserve=preserved_paths,
+            )
         elif remaining != read_bytes(agents_path):
             transactional_apply(
                 dst_root,
@@ -884,21 +1045,19 @@ def uninstall(args: argparse.Namespace) -> int:
                 [],
                 None,
                 dry_run=args.dry_run,
+                preserve=preserved_paths,
             )
     removed_any = False
-    for rel in sorted(files, reverse=True):
-        if rel == "AGENTS.md":
-            continue
-        if not rel.startswith(".agents/"):
-            continue
-        removed_any = remove_file(path_for_rel(dst_root, rel), dst_root, dry_run=args.dry_run) or removed_any
+    for path in removable_paths:
+        removed_any = remove_file(path, dst_root, dry_run=args.dry_run) or removed_any
+    removed_any = remove_managed_bytecode_caches(files, dst_root, dry_run=args.dry_run) or removed_any
     if manifest_path(dst_root).exists() or manifest_path(dst_root).is_symlink():
         if args.dry_run:
             info(f"[dry-run] delete {manifest_path(dst_root)}")
         else:
             manifest_path(dst_root).unlink()
         removed_any = True
-    prune_empty_dirs(dst_root, dry_run=args.dry_run)
+    prune_empty_dirs(dst_root, dry_run=args.dry_run, preserve=preserved_paths)
     root = agents_root(dst_root)
     if root.exists() and root.is_dir():
         try:
