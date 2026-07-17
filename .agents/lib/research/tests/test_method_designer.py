@@ -145,3 +145,24 @@ def test_method_falls_back_to_kb_repos_with_note(tmp_path: Path, monkeypatch, ca
     assert choice["candidate_corpus"]["scope"] == "kb-wide-fallback"
     assert choice["candidate_corpus"]["fallback_used"] is True
     assert "fell back to KB-wide repository units" in capsys.readouterr().out
+
+
+def test_method_prepares_agent_evidence_slots_instead_of_repo_judgement(tmp_path: Path, monkeypatch) -> None:
+    method = _load_method_module()
+    root, idea_id, repo_id = _make_workspace(tmp_path)
+
+    assert _run_design(method, monkeypatch, root, idea_id) == 0
+
+    design_root = root / "kb" / "programs" / "p-method" / "design"
+    choice = load_yaml(design_root / f"{idea_id}-repo-choice.yaml", default={})
+    matrix = load_yaml(design_root / f"{idea_id}-experiment-matrix.yaml", default={})
+    method_text = (design_root / f"{idea_id}-method.md").read_text(encoding="utf-8")
+    assert choice["selected_repo_id"] == repo_id
+    assert choice["selection_reason"] == ""
+    assert choice["selection_judgement"]["claim"] == ""
+    assert choice["selection_judgement"]["evidence"] == []
+    assert choice["selection_judgement"]["status"] == "pending_agent_evidence"
+    assert choice["ranking_basis"]["type"] == "deterministic-token-overlap"
+    assert all(item["claim"] == "" and item["evidence"] == [] for item in matrix["baseline_judgements"])
+    assert "Selected repo:" not in method_text
+    assert "Agent selection judgement: pending" in method_text

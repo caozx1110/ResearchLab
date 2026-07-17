@@ -406,10 +406,11 @@ def main() -> int:
             "## Core Hypothesis\n\n"
             f"{hypothesis.get('core_hypothesis', '')}\n\n"
             "## Repo Choice\n\n"
-            f"- Selected repo: `{selected_repo.get('id') or 'pending'}`\n"
+            f"- Leading candidate: `{selected_repo.get('id') or 'pending'}`\n"
             f"- Candidate corpus: {repo_corpus['note']}\n"
             f"- Repo summary: {selected_repo.get('summary', '') or '待补充'}\n"
-            f"- Overlap signals: {', '.join(selected_repo.get('overlap', [])) or 'manual selection required'}\n\n"
+            f"- Ranking signals: {', '.join(selected_repo.get('overlap', [])) or 'manual inspection required'}\n"
+            "- Agent selection judgement: pending; fill a claim and cite evidence before confirmation.\n\n"
             "## Minimal Design\n\n"
             f"- Base approach: {analysis.get('minimum_validation_path', '') or '从最小可验证实现开始'}\n"
             f"- Expected differentiator: {hypothesis.get('difference_from_prior_work', '') or '待补充'}\n"
@@ -429,11 +430,19 @@ def main() -> int:
             "idea_id": args.idea_id,
             "program_id": args.program_id,
             "selected_repo_id": selected_repo.get("id", ""),
-            "selection_reason": (
-                f"Selected `{selected_repo.get('id', '')}` with score={selected_repo.get('score', 0)} based on idea/repo token overlap."
-                if selected_repo.get("id")
-                else "No repo unit matched yet; manual repo selection required."
-            ),
+            "selection_reason": "",
+            "selection_judgement": {
+                "claim": "",
+                "evidence": [],
+                "status": "pending_agent_evidence",
+                "instructions": "Agent: explain why this candidate fits the method and cite record or file evidence.",
+            },
+            "ranking_basis": {
+                "type": "deterministic-token-overlap",
+                "leading_candidate_id": selected_repo.get("id", ""),
+                "leading_candidate_score": selected_repo.get("score", 0),
+                "signals": selected_repo.get("overlap", []),
+            },
             "selection_status": "pending_user_confirmation",
             "information_types": ["fact", "inference", "evaluation", "unverified"],
             "candidate_repos": [
@@ -481,6 +490,15 @@ def main() -> int:
             "resource_requests": resource_requests,
             "experiments": experiments,
             "baselines": baselines,
+            "baseline_judgements": [
+                {
+                    "baseline": baseline,
+                    "claim": "",
+                    "evidence": [],
+                    "status": "pending_agent_evidence",
+                }
+                for baseline in baselines
+            ],
             "risks": risks,
             "information_types": ["fact", "inference", "evaluation", "unverified"],
             "confirmation_status": "pending_user_confirmation",
@@ -505,7 +523,7 @@ def main() -> int:
             "event_type": "method-design",
             "title": record.get("title", args.idea_id),
             "summary": (
-                f"Drafted method design with repo `{selected_repo.get('id', 'pending')}`, "
+                f"Drafted method-design skeleton with leading repo candidate `{selected_repo.get('id', 'pending')}`, "
                 f"{len(interfaces)} interfaces, and {4} planned matrix rows."
             ),
             "stage": "implementation-planning",
