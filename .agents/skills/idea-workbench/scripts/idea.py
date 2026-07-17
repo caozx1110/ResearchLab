@@ -740,7 +740,7 @@ def main() -> int:
                 artifacts=[rel(root, scaffold_path)],
             )
             write_record(root, record)
-            print(f"[ok] wrote {scaffold_path.relative_to(root)}")
+            print("[ok] prepared an empty evidence-first sparring conclusion")
             checkpoint_and_report(root, trigger="milestone", message=f"milestone: prepare idea discussion {record['id']}")
             return 0
 
@@ -748,7 +748,7 @@ def main() -> int:
         if not fill_path.is_absolute():
             fill_path = unit_root / fill_path
         if not fill_path.exists():
-            raise SystemExit(f"discuss --phase verify: fill input not found: {fill_path}")
+            raise SystemExit("Discussion fill is missing; prepare or provide the agent-filled conclusion first.")
         fill = load_yaml(fill_path, default={})
         violations, claims = verify_discussion_fill(root, fill, record["id"])
         if violations:
