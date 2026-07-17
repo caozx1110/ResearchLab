@@ -28,6 +28,7 @@ from research.core import (
     config_root,
     default_runtime_preferences,
     ensure_workspace,
+    kb_root,
     load_candidate_pools,
     load_runtime_preferences,
     load_topic_taxonomy,
@@ -289,6 +290,7 @@ def main() -> int:
     if args.command == "init":
         warn_if_cwd_differs_from_project_root(root, command="config.py init")
         targets = [
+            kb_root(root) / ".gitignore",
             profile_path(root),
             topic_taxonomy_path(root),
             candidate_pools_path(root),

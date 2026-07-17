@@ -1,7 +1,6 @@
 """Crash-safe operation journal for KB mutations."""
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import os
 import shutil
@@ -14,7 +13,7 @@ from typing import Iterator, Mapping, Sequence
 
 from .common import utc_now_iso
 from .paths import kb_root
-from .yaml_io import load_yaml, write_bytes_atomic, write_text_if_changed, write_yaml_if_changed
+from .yaml_io import load_yaml, write_bytes_atomic, write_yaml_if_changed
 
 
 JOURNAL_DIRNAME = ".journal"
@@ -42,7 +41,7 @@ def journal_entry_path(project_root: Path, op_id: str) -> Path:
 
 
 def operation_lock_path(project_root: Path, target_path: Path) -> Path:
-    _ensure_journal_ignored(project_root)
+    _ensure_journal_runtime(project_root)
     key = _target_key(project_root, target_path)
     name = hashlib.sha256(key.encode("utf-8")).hexdigest()
     return journal_root(project_root) / "locks" / f"{name}.lock"
@@ -108,27 +107,11 @@ def target_path(project_root: Path, key: str) -> Path:
     return _target_path(project_root, key)
 
 
-def _ensure_journal_ignored(project_root: Path) -> None:
-    root = journal_root(project_root)
-    root.mkdir(parents=True, exist_ok=True)
-    bootstrap_lock = root / ".journal.lock"
-    with bootstrap_lock.open("a+", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
-            _write_journal_ignore_rule(project_root)
-        finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-
-
-def _write_journal_ignore_rule(project_root: Path) -> None:
-    path = kb_root(project_root) / ".gitignore"
-    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
-    if f"{JOURNAL_DIRNAME}/" in lines:
-        return
-    if lines and lines[-1]:
-        lines.append("")
-    lines.extend(["# Operation recovery journal", f"{JOURNAL_DIRNAME}/"])
-    write_text_if_changed(path, "\n".join(lines).rstrip() + "\n")
+def _ensure_journal_runtime(project_root: Path) -> None:
+    # Workspace initialization owns the canonical .gitignore.  Lock/journal
+    # bootstrap may create ignored runtime state only; it must never perform an
+    # undeclared write to a caller's versioned path set.
+    journal_root(project_root).mkdir(parents=True, exist_ok=True)
 
 
 def _snapshot_payload_path(project_root: Path, relative_path: str) -> Path:
@@ -406,7 +389,7 @@ def begin_op(
     parent_op_id: str | None = None,
     attach_to_active: bool = True,
 ) -> str:
-    _ensure_journal_ignored(project_root)
+    _ensure_journal_runtime(project_root)
     journal_root(project_root).mkdir(parents=True, exist_ok=True)
     keys = sorted({_target_key(project_root, Path(path)) for path in target_paths})
     if not keys:

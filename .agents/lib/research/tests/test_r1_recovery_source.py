@@ -42,6 +42,7 @@ from research.journal import (
     operation_lock_path,
 )
 from research.records import default_record
+from research.prefs import ensure_workspace
 from research.yaml_io import load_yaml, write_yaml_if_changed
 
 
@@ -161,7 +162,38 @@ def test_journaled_exception_restores_all_before_bytes_modes_and_removes_new_fil
     assert entry["before_snapshots"]["notes/created.md"]["kind"] == "absent"
 
 
+def test_fresh_workspace_mutation_bootstrap_never_writes_gitignore_outside_targets(tmp_path: Path) -> None:
+    bare_root = tmp_path / "bare"
+    operation_lock_path(bare_root, bare_root / "kb" / "notes" / "probe.md")
+    assert (bare_root / "kb" / ".journal").is_dir()
+    assert not (bare_root / "kb" / ".gitignore").exists()
+
+    ensure_workspace(tmp_path)
+    gitignore = tmp_path / "kb" / ".gitignore"
+    before = gitignore.read_bytes()
+    assert b".journal/" in before
+    target = tmp_path / "kb" / "notes" / "bootstrap-abort.md"
+
+    with pytest.raises(RuntimeError, match="abort fresh mutation"):
+        with mutation_transaction(tmp_path, "fresh-workspace-mutation", [target]):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("partial\n", encoding="utf-8")
+            raise RuntimeError("abort fresh mutation")
+
+    assert gitignore.read_bytes() == before
+    assert not target.exists()
+    entries = [
+        load_yaml(path)
+        for path in (tmp_path / "kb" / ".journal").glob("*.yaml")
+        if load_yaml(path).get("op_type") == "fresh-workspace-mutation"
+    ]
+    assert len(entries) == 1
+    assert entries[0]["target_paths"] == ["notes/bootstrap-abort.md"]
+    assert entries[0]["state"] == "abort"
+
+
 def test_two_hundred_concurrent_reporting_appends_are_lossless_and_parseable(tmp_path: Path) -> None:
+    ensure_workspace(tmp_path)
     program_id = "p-concurrent-reporting"
 
     def append(index: int) -> None:

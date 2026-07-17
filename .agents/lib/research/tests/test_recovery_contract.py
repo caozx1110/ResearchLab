@@ -14,6 +14,7 @@ from research.git_ops import (
     undo_last_operation,
 )
 from research.journal import abort_op, begin_op, commit_op, committed_ops, incomplete_ops, journal_entry_path, load_op
+from research.prefs import ensure_workspace
 from research.records import default_record
 from research import yaml_io
 from research.yaml_io import load_yaml
@@ -53,6 +54,9 @@ def test_atomic_write_failure_does_not_clobber_existing_target(
 
 
 def test_operation_journal_tracks_begin_commit_and_abort(tmp_path: Path) -> None:
+    ensure_workspace(tmp_path)
+    gitignore = tmp_path / "kb" / ".gitignore"
+    gitignore_before = gitignore.read_bytes()
     target = tmp_path / "kb" / "units" / "papers" / "p-test" / "record.yaml"
     op_id = begin_op(tmp_path, "test-write", [target])
 
@@ -71,6 +75,7 @@ def test_operation_journal_tracks_begin_commit_and_abort(tmp_path: Path) -> None
     abort_op(tmp_path, abort_id)
     assert load_op(tmp_path, abort_id)["state"] == "abort"
     assert ".journal/" in (tmp_path / "kb" / ".gitignore").read_text(encoding="utf-8")
+    assert gitignore.read_bytes() == gitignore_before
 
     with pytest.raises(SystemExit, match="Invalid operation id"):
         load_op(tmp_path, "../outside")
@@ -134,6 +139,7 @@ def test_write_record_increments_revision_and_rejects_stale_cas(tmp_path: Path) 
 
 
 def test_write_record_uses_ignored_per_record_lock(tmp_path: Path) -> None:
+    ensure_workspace(tmp_path)
     record = default_record("paper", title="Lock Test", maturity="lightweight")
     record["id"] = "p-lock-test"
 
