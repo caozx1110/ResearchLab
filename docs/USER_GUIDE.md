@@ -303,8 +303,8 @@ kb recall gotchas
 
 | 档位 | 含义 | 当前属于此档 |
 |---|---|---|
-| **beta** | 核心范式已落地（prepare/verify + 逐字证据 + 空心门），但"理解"那步依赖 agent 在会话里填 | 论文 / 仓库 / 博客分析、双源入库、检索（`kb find` 词级 + agent 原生答题）、自动驱动入库链 |
-| **scaffold** | 有可用骨架，但产出仍偏固定策略 / 直方图 / 事件流，尚未做到 evidence-first 的实质闭环 | 综述（`literature-synthesizer`）、idea / 方法设计 / 实验、报告（`report-author`） |
+| **beta** | 核心范式已落地（prepare/verify + 逐字证据 + 空心门），但"理解"那步依赖 agent 在会话里填 | 论文 / 仓库 / 博客分析、双源入库、检索、自动驱动入库链、**综述、idea（陪练 + 分析）、方法设计（读资源）、实验（强类型指标 + 验 artifact）、报告（自包含 + outline）** |
+| **scaffold** | 有可用骨架，但产出仍偏固定策略 / 事件流，尚未 evidence-first | （已清空——2026-07-17 上述产出/创建侧子系统升级为 beta） |
 | **dev-only** | 仅供本地实验：现已加 token 鉴权 + PTY 默认关 + 强制回环 + 写保护 raw，仍不建议共享 / 敏感环境 | 工作台（`research-navigator` browser：文件写带 token；shell/PTY 需 `--enable-terminal` 显式开） |
 
 治理内核（confirmation 词汇、逐字 evidence、禁自签、空心门、派生证据不可变、确认锚定版本）是**跨全系统的真地基**，不随单个 skill 档位浮动。

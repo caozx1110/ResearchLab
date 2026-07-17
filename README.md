@@ -104,8 +104,8 @@ idea / report 没有 `kb` 动词，默认用纯自然语言，例如“请基于
 
 | 档位 | 含义 | 当前属于此档的能力 |
 | --- | --- | --- |
-| **beta** | 核心范式已落地（prepare/verify + 逐字证据 + 空心门），但"理解"那步依赖 agent 在会话里填 | 论文分析 / 仓库分析 / 博客分析（paper/repo/blog analyst）、双源入库、检索（`kb find` 词级 + agent 原生答题）、自动驱动入库链 |
-| **scaffold** | 有可用骨架，但产出仍偏固定策略/直方图/事件流，尚未做到 evidence-first 的实质闭环 | 综述（literature-synthesizer，仍偏 tag 直方图）、idea / 方法设计 / 实验（固定矩阵、不验 artifact）、报告（report-author，偏事件 dump） |
+| **beta** | 核心范式已落地（prepare/verify + 逐字证据 + 空心门），但"理解"那步依赖 agent 在会话里填 | 论文 / 仓库 / 博客分析、双源入库、检索（`kb find` 词级 + agent 原生答题）、自动驱动入库链、**综述（evidence-first survey）、idea 陪练 + 分析、方法设计（读资源缩放矩阵）、实验（强类型指标 + 验 artifact + baseline 对比）、报告（自包含 claims+events+evidence + outline）** |
+| **scaffold** | 有可用骨架，但产出仍偏固定策略/事件流，尚未做到 evidence-first 的实质闭环 | （已清空——原综述/idea/方法/实验/报告 2026-07-17 升级为 beta，见上行） |
 | **dev-only** | 仅供开发/本地实验：现已加 token 鉴权 + PTY 默认关 + 强制回环 + 写保护 raw，但仍不建议用于共享或敏感环境 | Workbench（research-navigator browser：文件写端点带 token 鉴权，shell/PTY 需 `--enable-terminal` 显式开启） |
 
 治理内核（confirmation 词汇、逐字 evidence、禁自签、空心门、派生证据不可变）是**跨全系统的真地基**，不随单个 skill 档位浮动。详见 `temp/SYSTEM_DESIGN_SSOT.md`（设计源）与 `temp/BACKLOG.md`（实时落地状态）。
