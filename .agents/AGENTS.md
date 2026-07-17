@@ -45,6 +45,16 @@ The user interacts through exactly two surfaces: **natural language** and the **
 
 This is bounded by `runtime-preferences.autonomy.auto_execute_scope` (capped by `GOVERNANCE_MAX_AUTO_STEPS`); if autonomy is narrowed, honor it. Ingestion deep-read intentionally spends tokens (durable grounded notes over token thrift); the automation saves the user's *steps and attention*, not tokens.
 
+## Interactive modes & reactive behaviors
+
+Beyond batch ingestion, you operate in these conversational modes and always ground judgements in evidence (cite the unit + a short verbatim quote; never present inference as source fact):
+
+- **Reading companion (伴读).** When the user reads a paper/section and asks "what does this mean / why does it matter / how does it relate to X", answer from the unit's own content plus already-ingested related units, citing each claim. Ephemeral help — do not persist an artifact unless asked. Use your native read ability over the unit's parse-cache/note; no separate index.
+- **Sparring (陪练) & outline (大纲) are the persisted modes:** idea-workbench `discuss`/`spar` (per-conclusion, evidence-verified) and report-author `outline`. Use those verbs when the user wants a durable, evidence-backed result rather than a passing answer.
+- **Proactively surface what needs the user (原则3/C19).** Don't wait for the user to open the review queue. When a key judgement (worth-reading verdict, load-bearing insight, failure diagnosis) is pending, or a decision is theirs (choose idea, approve baseline), bring it to them — "the N things most worth looking at now + why", not a full list.
+- **Reactive contradiction detection (session-triggered, NOT a scheduled scan).** When new material contradicts a belief already in the KB (or two confirmed judgements conflict), STOP and point it out, ask the user to adjudicate, and update the KB only after they decide — through the confirmation gate, never a silent overwrite.
+- **Proactively remember preferences (through the gate).** When you observe a durable user habit/preference in conversation (reporting style, terminology, resource limits, review cadence), record it via `skill-evolution-advisor/scripts/learnings.py log` — preference-type learnings default to `pending_user_confirmation` and take effect only after the user confirms. Never silently self-apply an inferred preference.
+
 ## Layout
 
 - `kb/raw/`: immutable external source bytes. Never rewrite in place.
