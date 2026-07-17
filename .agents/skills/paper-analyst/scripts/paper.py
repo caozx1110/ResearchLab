@@ -82,15 +82,20 @@ SECTION_PATTERNS = (
 PAPER_TYPES: tuple[str, ...] = ("method_system", "benchmark", "survey")
 
 # --------------------------------------------------------------------------- #
-# The 5-element fill contract (SSOT §3.2 / B1).                                #
+# Per-paper-type 5-element fill contracts (SSOT §3.2).                         #
 #                                                                             #
-# A runtime agent fills these five elements; every element is a judgement-class #
-# claim and MUST carry >=1 evidence_ref (short verbatim quote + locator). The   #
-# script only verifies + routes them — it never authors content. Each element   #
-# lands in a canonical payload field so a filled note clears has_substantive_    #
-# content() (SSOT §3.11 substance gate) and renders a note.md section.           #
+# A runtime agent classifies the paper during screening and fills the selected #
+# five elements; every element is a judgement-class claim and MUST carry >=1   #
+# evidence_ref. The script only selects, verifies, and routes the structure.    #
 # --------------------------------------------------------------------------- #
-NOTE_ELEMENTS: tuple[str, ...] = ("motivation", "method", "experiment", "limitation", "insight")
+ELEMENT_SETS: dict[str, tuple[str, ...]] = {
+    "method_system": ("motivation", "method", "experiment", "limitation", "insight"),
+    "benchmark": ("motivation", "task_design", "metrics", "coverage_limitation", "insight"),
+    "survey": ("scope", "taxonomy", "trends", "gaps", "insight"),
+}
+
+# Compatibility alias for callers that explicitly refer to the historical set.
+NOTE_ELEMENTS: tuple[str, ...] = ELEMENT_SETS["method_system"]
 
 # Every element is judgement-class so research.evidence.validate_claims enforces a
 # non-empty evidence_refs on each (SSOT Principle 2 gate interlock).
@@ -100,6 +105,13 @@ ELEMENT_CLAIM_TYPE: dict[str, str] = {
     "experiment": "evaluation",
     "limitation": "evaluation",
     "insight": "inference",
+    "task_design": "inference",
+    "metrics": "evaluation",
+    "coverage_limitation": "evaluation",
+    "scope": "inference",
+    "taxonomy": "inference",
+    "trends": "evaluation",
+    "gaps": "evaluation",
 }
 
 # element -> (payload section, field, shape). Filling motivation/method/experiment/
@@ -111,6 +123,13 @@ ELEMENT_TARGET: dict[str, tuple[str, str, str]] = {
     "experiment": ("core_content", "changes_and_effects", "list"),
     "limitation": ("critique", "weak_spots", "list"),
     "insight": ("core_content", "why_it_might_work", "str"),
+    "task_design": ("core_content", "method", "str"),
+    "metrics": ("core_content", "changes_and_effects", "list"),
+    "coverage_limitation": ("core_content", "changes_and_effects", "list"),
+    "scope": ("core_content", "motivation", "str"),
+    "taxonomy": ("core_content", "method", "str"),
+    "trends": ("core_content", "changes_and_effects", "list"),
+    "gaps": ("core_content", "changes_and_effects", "list"),
 }
 
 ELEMENT_HEADING: dict[str, str] = {
@@ -119,7 +138,28 @@ ELEMENT_HEADING: dict[str, str] = {
     "experiment": "Experiment",
     "limitation": "Limitation",
     "insight": "Insight",
+    "task_design": "Task Design",
+    "metrics": "Metrics",
+    "coverage_limitation": "Coverage Limitation",
+    "scope": "Scope",
+    "taxonomy": "Taxonomy",
+    "trends": "Trends",
+    "gaps": "Gaps",
 }
+
+
+def elements_for(record_or_type: dict | str) -> tuple[str, ...]:
+    """Select the agent-authored element set; missing/unknown type is method_system."""
+    if isinstance(record_or_type, str):
+        paper_type = record_or_type
+    elif isinstance(record_or_type, dict):
+        payload = record_or_type.get("payload")
+        quick_screen = payload.get("quick_screen") if isinstance(payload, dict) else None
+        paper_type = quick_screen.get("paper_type") if isinstance(quick_screen, dict) else record_or_type.get("paper_type")
+    else:
+        paper_type = ""
+    normalized = str(paper_type or "").strip().lower()
+    return ELEMENT_SETS.get(normalized, ELEMENT_SETS["method_system"])
 
 # Reusable, machine-readable description of the evidence_ref shape an agent must fill.
 EVIDENCE_REF_FORMAT: dict[str, str] = {
