@@ -1,16 +1,24 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 from research import updater
 
 
-def test_parse_and_compare_semver_tolerates_junk() -> None:
+def test_compare_semver_honors_stable_and_prerelease_precedence() -> None:
     assert updater.compare_versions("0.1.0", "0.2.0") == -1
     assert updater.compare_versions("1.2.3", "1.2.3") == 0
     assert updater.compare_versions("2.0.0", "1.9.9") == 1
-    assert updater.parse_semver("junk.2.nope") == (0, 2, 0)
+    assert updater.compare_versions("0.1.0-rc.1", "0.1.0") == -1
+    assert updater.compare_versions("0.1.0", "0.2.0-rc.1") == -1
+    assert updater.compare_versions("0.1.0-rc.1", "0.1.0-rc.2") == -1
+    assert updater.compare_versions("0.1.0-alpha", "0.1.0-rc.1") == -1
+    assert updater.compare_versions("0.1.0-rc.1+build.7", "0.1.0-rc.1+build.9") == 0
+    assert updater.parse_semver("junk.2.nope") == (0, 0, 0, 0, ())
 
 
 def test_read_local_version_and_missing_default(tmp_path: Path) -> None:
@@ -25,19 +33,22 @@ def test_check_reports_available_equal_and_unknown(monkeypatch, tmp_path: Path) 
     version_path = tmp_path / ".agents" / "VERSION"
     version_path.parent.mkdir()
     version_path.write_text("0.1.0\n", encoding="utf-8")
-    monkeypatch.setattr(updater, "resolve_source_checkout", lambda _root: None)
+    provenance = updater.SourceProvenance("git@example.test:team/fork.git", tmp_path / "source", "release/r1")
+    monkeypatch.setattr(updater, "source_provenance", lambda _root: provenance)
 
-    monkeypatch.setattr(updater, "fetch_remote_version", lambda _checkout, _cache: "0.2.0")
+    monkeypatch.setattr(updater, "fetch_remote_version", lambda _provenance, _cache: "0.2.0")
     assert updater.check(tmp_path, tmp_path / "cache") == {
         "local": "0.1.0",
         "remote": "0.2.0",
         "status": "update_available",
+        "source_origin": "git@example.test:team/fork.git",
+        "source_branch": "release/r1",
     }
 
-    monkeypatch.setattr(updater, "fetch_remote_version", lambda _checkout, _cache: "0.1.0")
+    monkeypatch.setattr(updater, "fetch_remote_version", lambda _provenance, _cache: "0.1.0")
     assert updater.check(tmp_path, tmp_path / "cache")["status"] == "up_to_date"
 
-    def fail_fetch(_checkout, _cache):
+    def fail_fetch(_provenance, _cache):
         raise ValueError("unexpected remote response")
 
     monkeypatch.setattr(updater, "fetch_remote_version", fail_fetch)
@@ -62,18 +73,21 @@ def test_apply_checkout_uses_ff_only_pull_and_never_pushes(monkeypatch, tmp_path
     version_path.parent.mkdir()
     version_path.write_text("0.1.0\n", encoding="utf-8")
     calls: list[tuple[Path, tuple[str, ...]]] = []
+    monkeypatch.setattr(updater, "_checkout_origin", lambda _checkout: "git@example.test:team/fork.git")
+    monkeypatch.setattr(updater, "_checkout_branch", lambda _checkout: "release/r1")
 
     def fake_run_git(checkout: Path, *args: str):
         calls.append((checkout, args))
         if args[:2] == ("pull", "--ff-only"):
             version_path.write_text("0.2.0\n", encoding="utf-8")
+        return type("Completed", (), {"stdout": ""})()
 
     monkeypatch.setattr(updater, "_run_git", fake_run_git)
 
     result = updater.apply(tmp_path, tmp_path / "cache")
 
     assert result == {"before": "0.1.0", "after": "0.2.0", "status": "updated"}
-    assert calls == [(tmp_path, ("pull", "--ff-only", "origin", "main"))]
+    assert calls == [(tmp_path, ("pull", "--ff-only", "origin", "release/r1"))]
     assert all("push" not in args for _checkout, args in calls)
 
 
@@ -87,11 +101,22 @@ def test_apply_copy_install_invokes_ws_sync_update_without_force(monkeypatch, tm
     (source / ".agents" / "VERSION").write_text("0.2.0\n", encoding="utf-8")
     manifest_path = install / updater.MANIFEST_REL
     manifest_path.parent.mkdir(parents=True)
-    manifest_path.write_text(json.dumps({"source_repo": str(source)}), encoding="utf-8")
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "source_origin": "git@example.test:team/fork.git",
+                "source_checkout": str(source),
+                "source_branch": "release/r1",
+            }
+        ),
+        encoding="utf-8",
+    )
     (install / ".agents" / "VERSION").write_text("0.1.0\n", encoding="utf-8")
     process_calls: list[tuple[str, ...]] = []
 
-    monkeypatch.setattr(updater, "_pull_checkout", lambda _source: None)
+    monkeypatch.setattr(updater, "_checkout_origin", lambda _checkout: "git@example.test:team/fork.git")
+    monkeypatch.setattr(updater, "_checkout_branch", lambda _checkout: "release/r1")
+    monkeypatch.setattr(updater, "_pull_checkout", lambda _source, **_kwargs: None)
     monkeypatch.setattr(updater, "_source_commit", lambda _source: "abc123")
 
     def fake_run_process(argv, *, capture_output=True):
@@ -114,6 +139,182 @@ def test_apply_copy_install_invokes_ws_sync_update_without_force(monkeypatch, tm
         str(install),
         "--source-commit",
         "abc123",
+        "--source-origin",
+        "git@example.test:team/fork.git",
+        "--source-branch",
+        "release/r1",
+        "--source-checkout",
+        str(source),
     )
     assert "--force" not in argv
     assert "push" not in argv
+
+
+def test_old_manifest_without_provenance_requires_choice_and_never_clones(monkeypatch, tmp_path: Path) -> None:
+    install = tmp_path / "install"
+    manifest = install / updater.MANIFEST_REL
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(json.dumps({"schema": 1, "source_repo": ""}), encoding="utf-8")
+    (install / ".agents" / "VERSION").write_text("0.1.0\n", encoding="utf-8")
+    monkeypatch.setattr(
+        updater,
+        "_clone_checkout",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not clone a default upstream")),
+    )
+
+    checked = updater.check(install, tmp_path / "cache")
+    applied = updater.apply(install, tmp_path / "cache")
+
+    assert checked["status"] == "needs_source_choice"
+    assert applied["status"] == "needs_source_choice"
+
+
+def test_remote_manifest_without_branch_requires_choice(monkeypatch, tmp_path: Path) -> None:
+    install = tmp_path / "install"
+    source = tmp_path / "source"
+    (source / ".git").mkdir(parents=True)
+    (source / "install-lib").mkdir()
+    (source / "install-lib" / "ws_sync.py").write_text("", encoding="utf-8")
+    (install / ".agents").mkdir(parents=True)
+    (install / ".agents" / "VERSION").write_text("0.1.0\n", encoding="utf-8")
+    (install / updater.MANIFEST_REL).write_text(
+        json.dumps(
+            {
+                "source_origin": "git@example.test:team/fork.git",
+                "source_checkout": str(source),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        updater,
+        "_fetch_checkout",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not guess a branch")),
+    )
+
+    assert updater.check(install, tmp_path / "cache")["status"] == "needs_source_choice"
+    assert updater.apply(install, tmp_path / "cache")["status"] == "needs_source_choice"
+
+
+def test_detached_remote_checkout_requires_source_choice(monkeypatch, tmp_path: Path) -> None:
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setattr(updater, "_checkout_origin", lambda _checkout: "git@example.test:team/fork.git")
+    monkeypatch.setattr(updater, "_checkout_branch", lambda _checkout: "")
+
+    assert updater.source_provenance(tmp_path) is None
+
+
+def _git(cwd: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(cwd), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def test_non_main_fork_update_preserves_branch_and_updates_manifest_e2e(tmp_path: Path) -> None:
+    project = Path(__file__).resolve().parents[4]
+    source = tmp_path / "source"
+    shutil.copytree(
+        project / ".agents",
+        source / ".agents",
+        ignore=shutil.ignore_patterns("__pycache__", "tests", "*.pyc", "*.pyo"),
+    )
+    shutil.copytree(project / "install-lib", source / "install-lib")
+    shutil.copy2(project / "LICENSE", source / "LICENSE")
+    (source / ".agents" / "VERSION").write_text("0.1.0\n", encoding="utf-8")
+
+    subprocess.run(["git", "init", str(source)], check=True, capture_output=True, text=True)
+    _git(source, "config", "user.name", "Updater E2E")
+    _git(source, "config", "user.email", "updater@example.test")
+    _git(source, "checkout", "-b", "release/r1")
+    _git(source, "add", ".agents", "install-lib", "LICENSE")
+    _git(source, "commit", "-m", "baseline")
+
+    remote = tmp_path / "fork.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True, text=True)
+    _git(source, "remote", "add", "origin", str(remote))
+    _git(source, "push", "-u", "origin", "release/r1")
+    baseline_commit = _git(source, "rev-parse", "HEAD")
+
+    install = tmp_path / "install"
+    install.mkdir()
+    installed = subprocess.run(
+        [
+            sys.executable,
+            str(source / "install-lib" / "ws_sync.py"),
+            "install",
+            "--repo",
+            str(source),
+            "--dir",
+            str(install),
+            "--source-commit",
+            baseline_commit,
+            "--source-origin",
+            str(remote),
+            "--source-branch",
+            "release/r1",
+            "--agents",
+            "codex",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert installed.returncode == 0, installed.stdout + installed.stderr
+    initial_manifest = json.loads((install / updater.MANIFEST_REL).read_text(encoding="utf-8"))
+    assert initial_manifest["version"] == "0.1.0"
+    assert initial_manifest["source_origin"] == str(remote)
+    assert initial_manifest["source_branch"] == "release/r1"
+    assert initial_manifest["source_checkout"] == ""
+
+    (source / ".agents" / "VERSION").write_text("0.2.0-rc.1\n", encoding="utf-8")
+    _git(source, "add", ".agents/VERSION")
+    _git(source, "commit", "-m", "release candidate")
+    _git(source, "push", "origin", "release/r1")
+    release_commit = _git(source, "rev-parse", "HEAD")
+
+    checked = updater.check(install, tmp_path / "cache")
+    assert checked == {
+        "local": "0.1.0",
+        "remote": "0.2.0-rc.1",
+        "status": "update_available",
+        "source_origin": str(remote),
+        "source_branch": "release/r1",
+    }
+    applied = updater.apply(install, tmp_path / "cache")
+
+    assert applied == {"before": "0.1.0", "after": "0.2.0-rc.1", "status": "updated"}
+    updated_manifest = json.loads((install / updater.MANIFEST_REL).read_text(encoding="utf-8"))
+    assert updated_manifest["version"] == "0.2.0-rc.1"
+    assert updated_manifest["source_origin"] == str(remote)
+    assert updated_manifest["source_branch"] == "release/r1"
+    assert updated_manifest["source_checkout"] == ""
+    assert updated_manifest["source_commit"] == release_commit
+
+
+def test_local_provenance_uses_local_checkout_without_fetch_or_pull(monkeypatch, tmp_path: Path) -> None:
+    install = tmp_path / "install"
+    source = tmp_path / "local-source"
+    (source / "install-lib").mkdir(parents=True)
+    (source / "install-lib" / "ws_sync.py").write_text("", encoding="utf-8")
+    (source / ".agents").mkdir()
+    (source / ".agents" / "VERSION").write_text("0.2.0\n", encoding="utf-8")
+    (install / ".agents").mkdir(parents=True)
+    (install / ".agents" / "VERSION").write_text("0.1.0\n", encoding="utf-8")
+    (install / updater.MANIFEST_REL).write_text(
+        json.dumps({"source_origin": "local", "source_checkout": str(source)}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        updater,
+        "_run_git",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("local source must not use git network operations")),
+    )
+    monkeypatch.setattr(updater, "_invoke_ws_sync", lambda *_args, **_kwargs: None)
+
+    result = updater.check(install, tmp_path / "cache")
+
+    assert result["status"] == "update_available"
+    assert result["source_origin"] == "local"

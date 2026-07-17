@@ -1,4 +1,5 @@
 import importlib.util
+from contextlib import contextmanager
 from pathlib import Path
 import subprocess
 import sys
@@ -151,6 +152,130 @@ def test_write_record_uses_ignored_per_record_lock(tmp_path: Path) -> None:
     assert ".journal/" in (tmp_path / "kb" / ".gitignore").read_text(encoding="utf-8")
 
 
+def test_manager_mutation_transaction_rejects_empty_scope(tmp_path: Path) -> None:
+    kb = _load_kb_module()
+
+    with pytest.raises(SystemExit, match="empty operation scope"):
+        with kb.mutation_transaction(tmp_path, "unsafe-empty", []):
+            pass
+
+    assert not (tmp_path / "kb" / ".journal").exists()
+
+
+def test_manager_index_uses_one_exact_multifile_transaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kb = _load_kb_module()
+    planned = kb.mutation_targets(tmp_path, kb.index_mutation_targets(tmp_path))
+    expected = sorted(path.relative_to(tmp_path / "kb").as_posix() for path in planned)
+    monkeypatch.setattr(sys, "argv", ["kb.py", "--root", str(tmp_path), "index"])
+
+    assert kb.main() == 0
+
+    entries = [entry for entry in committed_ops(tmp_path) if entry["op_type"] == "rebuild_index"]
+    assert len(entries) == 1
+    assert entries[0]["target_paths"] == expected
+    assert entries[0]["target_paths"]
+
+
+def test_storage_sync_planner_names_kb_destinations_not_external_sources(tmp_path: Path) -> None:
+    kb = _load_kb_module()
+    legacy = tmp_path / "raw" / "paper.pdf"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_bytes(b"pdf")
+
+    planned = kb.storage_sync_operation_targets(tmp_path)
+
+    assert tmp_path / "kb" / "raw" / "paper.pdf" in planned
+    assert legacy not in planned
+    assert all(path.is_relative_to(tmp_path / "kb") for path in planned)
+
+
+def test_manual_checkpoint_clean_state_is_a_noop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    kb = _load_kb_module()
+    monkeypatch.setattr(kb, "dirty_kb_paths", lambda root: [])
+    monkeypatch.setattr(
+        kb,
+        "git_checkpoint",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not checkpoint")),
+    )
+    monkeypatch.setattr(sys, "argv", ["kb.py", "--root", str(tmp_path), "git-checkpoint", "--message", "manual"])
+
+    assert kb.main() == 0
+
+    assert "no kb changes to commit" in capsys.readouterr().out
+
+
+def test_checkpoint_failure_occurs_after_outer_transaction_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kb = _load_kb_module()
+    events: list[str] = []
+    record = {"id": "p-order-test", "kind": "paper"}
+    path = tmp_path / "kb" / "units" / "papers" / "p-order-test" / "record.yaml"
+
+    @contextmanager
+    def completed_transaction(root: Path, op_type: str, target_paths: list[Path]):
+        events.append("transaction_begin")
+        yield
+        events.append("transaction_commit")
+
+    monkeypatch.setattr(kb, "mutation_transaction", completed_transaction)
+    monkeypatch.setattr(kb, "ensure_workspace", lambda root: events.append("mutate"))
+    monkeypatch.setattr(kb, "locate_record", lambda root, unit_id: (record, path))
+    monkeypatch.setattr(kb, "promote_record", lambda root, unit_id, **kwargs: path)
+    monkeypatch.setattr(kb, "build_index", lambda root: events.append("index"))
+
+    def fail_checkpoint(*args, **kwargs):
+        events.append("checkpoint")
+        assert events[-2] == "transaction_commit"
+        raise RuntimeError("checkpoint failed")
+
+    monkeypatch.setattr(kb, "checkpoint_and_report", fail_checkpoint)
+    monkeypatch.setattr(sys, "argv", ["kb.py", "--root", str(tmp_path), "promote", "--id", "p-order-test", "--status", "active"])
+
+    with pytest.raises(RuntimeError, match="checkpoint failed"):
+        kb.main()
+
+    assert events == ["transaction_begin", "mutate", "index", "transaction_commit", "checkpoint"]
+
+
+def test_outer_transaction_commit_failure_skips_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kb = _load_kb_module()
+    events: list[str] = []
+    record = {"id": "p-order-test", "kind": "paper"}
+    path = tmp_path / "kb" / "units" / "papers" / "p-order-test" / "record.yaml"
+
+    @contextmanager
+    def failed_transaction(root: Path, op_type: str, target_paths: list[Path]):
+        events.append("transaction_begin")
+        yield
+        events.append("transaction_commit_failed")
+        raise OSError("outer commit failed")
+
+    monkeypatch.setattr(kb, "mutation_transaction", failed_transaction)
+    monkeypatch.setattr(kb, "ensure_workspace", lambda root: events.append("mutate"))
+    monkeypatch.setattr(kb, "locate_record", lambda root, unit_id: (record, path))
+    monkeypatch.setattr(kb, "promote_record", lambda root, unit_id, **kwargs: path)
+    monkeypatch.setattr(kb, "build_index", lambda root: events.append("index"))
+    monkeypatch.setattr(kb, "checkpoint_and_report", lambda *args, **kwargs: events.append("checkpoint"))
+    monkeypatch.setattr(sys, "argv", ["kb.py", "--root", str(tmp_path), "promote", "--id", "p-order-test", "--status", "active"])
+
+    with pytest.raises(OSError, match="outer commit failed"):
+        kb.main()
+
+    assert events == ["transaction_begin", "mutate", "index", "transaction_commit_failed"]
+
+
 def _configure_kb_git(root: Path) -> None:
     ensure_kb_git_repo(root, create_initial_commit=False)
     subprocess.run(["git", "-C", str(root / "kb"), "config", "user.name", "Recovery Tests"], check=True)
@@ -259,3 +384,29 @@ def test_kb_resume_clean_state_reports_nothing_to_recover(
     assert "没有未完成操作需要恢复" in output
     for forbidden in ["python3", ".py", "git ", "--"]:
         assert forbidden not in output
+
+
+def test_kb_recovery_output_does_not_promise_redo_of_recovery_operations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    kb = _load_kb_module()
+    monkeypatch.setattr(kb, "undo_last_operation", lambda root: {"op_id": "op-business-latest"})
+    monkeypatch.setattr(
+        kb,
+        "restore_operation",
+        lambda root, op_id, **kwargs: {"op_id": op_id, "restored_paths": []},
+    )
+
+    monkeypatch.setattr(sys, "argv", ["kb.py", "--root", str(tmp_path), "undo"])
+    assert kb.main() == 0
+    undo_output = capsys.readouterr().out
+    assert "继续撤销更早一次可撤销的业务操作" in undo_output
+    assert "撤销当前恢复结果" not in undo_output
+
+    monkeypatch.setattr(sys, "argv", ["kb.py", "--root", str(tmp_path), "restore", "op-target"])
+    assert kb.main() == 0
+    restore_output = capsys.readouterr().out
+    assert "不会成为新的可撤销业务操作" in restore_output
+    assert "撤销当前恢复结果" not in restore_output

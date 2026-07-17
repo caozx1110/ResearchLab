@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -54,7 +55,7 @@ def test_navigator_current_state_renders_program_states() -> None:
     assert "暂无 program state" not in text
 
 
-def test_navigator_current_state_includes_recall_digest(tmp_path: Path, monkeypatch) -> None:
+def test_navigator_current_state_includes_recall_digest_without_writing(tmp_path: Path, monkeypatch, capsys) -> None:
     navigate = _load_script("research-navigator", "navigate.py", "navigator_script_for_recall")
     root = _make_workspace(tmp_path)
     pref, _ = log_learning(
@@ -81,12 +82,49 @@ def test_navigator_current_state_includes_recall_digest(tmp_path: Path, monkeypa
     monkeypatch.setattr(sys, "argv", ["navigate.py", "--root", str(root), "current-state"])
 
     assert navigate.main() == 0
-    text = (root / "kb" / "user" / "current-state.md").read_text(encoding="utf-8")
+    text = capsys.readouterr().out
 
     assert "## Recall Digest" in text
     assert "Prefer compact Chinese status pages." in text
     assert "Do not skip confirmation gates." in text
     assert "Pending skill defects: 1" in text
+    assert not (root / "kb" / "user" / "current-state.md").exists()
+
+
+def test_navigator_refresh_transactions_exact_pages_before_checkpoint(tmp_path: Path, monkeypatch) -> None:
+    navigate = _load_script("research-navigator", "navigate.py", "navigator_script_for_refresh_transaction")
+    root = _make_workspace(tmp_path)
+    expected = [
+        root / "kb" / "user" / "current-state.md",
+        root / "kb" / "user" / "navigation.md",
+        root / "kb" / "user" / "reading-lists" / "current-reading.md",
+    ]
+    events: list[str] = []
+
+    @contextmanager
+    def transaction(project_root: Path, op_type: str, target_paths: list[Path]):
+        assert project_root == root
+        assert op_type == "refresh_user_navigation"
+        assert target_paths == expected
+        events.append("transaction_begin")
+        yield
+        events.append("transaction_commit")
+
+    def checkpoint(project_root: Path, **kwargs):
+        assert project_root == root
+        assert kwargs["target_paths"] == expected
+        assert events[-1] == "transaction_commit"
+        events.append("checkpoint")
+        return {"committed": False}
+
+    monkeypatch.setattr(navigate, "navigation_transaction", transaction)
+    monkeypatch.setattr(navigate, "checkpoint_and_report", checkpoint)
+    monkeypatch.setattr(sys, "argv", ["navigate.py", "--root", str(root), "refresh"])
+
+    assert navigate.main() == 0
+
+    assert events == ["transaction_begin", "transaction_commit", "checkpoint"]
+    assert all(path.is_file() for path in expected)
 
 
 def test_orchestrator_dashboard_prioritizes_blocking_evidence(tmp_path: Path) -> None:

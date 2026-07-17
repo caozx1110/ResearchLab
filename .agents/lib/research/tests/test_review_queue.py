@@ -480,3 +480,101 @@ def test_review_queue_excludes_unfilled_note_shell_but_keeps_filled(tmp_path: Pa
     assert "p-filled-12345678" in listed  # filled + awaiting human → stays
     assert "p-notstart-2345678" in listed  # screening-phase pending → stays (not a note shell)
     assert "p-shell-12345678" not in listed  # prepared-but-unfilled note → excluded
+
+
+@pytest.mark.parametrize(
+    ("kind", "state_key", "blocked_state"),
+    [
+        ("paper", "full_note_status", "ready_to_verify"),
+        ("blog", "full_note_status", "awaiting_agent_fill"),
+        ("blog", "full_note_status", "failed-retryable"),
+        ("repo", "capability_fill_status", "awaiting_agent_fill"),
+        ("repo", "capability_fill_status", "ready-to-verify"),
+    ],
+)
+def test_review_queue_excludes_non_review_workflow_states_for_all_source_kinds(
+    tmp_path: Path,
+    kind: str,
+    state_key: str,
+    blocked_state: str,
+) -> None:
+    kb = _load_kb_module()
+    ensure_workspace(tmp_path)
+    prefix = {"paper": "p", "blog": "b", "repo": "r"}[kind]
+    blocked = _paper(f"{prefix}-blocked-12345678", full_note_status="pending_user_confirmation")
+    blocked["kind"] = kind
+    blocked["payload"]["state"] = {state_key: blocked_state}
+    ready = _paper(f"{prefix}-ready-12345678", full_note_status="pending_user_confirmation")
+    ready["kind"] = kind
+    ready["payload"]["state"] = {state_key: "ready_for_review"}
+    _write_record(tmp_path, blocked)
+    _write_record(tmp_path, ready)
+
+    listed = {r["id"] for r in kb.review_queue_records(tmp_path, kind=kind, limit=0)}
+
+    assert ready["id"] in listed
+    assert blocked["id"] not in listed
+
+
+def test_confirmation_compat_transmits_r1_user_authorization(monkeypatch, tmp_path: Path) -> None:
+    kb = _load_kb_module()
+    captured: dict[str, object] = {}
+
+    def fake_confirm(record, kind, *, confirmed_by, evidence, method, project_root, user_authorization, authorization_source):
+        captured.update(
+            record=record,
+            kind=kind,
+            confirmed_by=confirmed_by,
+            evidence=evidence,
+            method=method,
+            project_root=project_root,
+            user_authorization=user_authorization,
+            authorization_source=authorization_source,
+        )
+        return record
+
+    monkeypatch.setattr(kb, "confirm_unit", fake_confirm)
+    record = _paper("p-auth-12345678", full_note_status="ready_for_review")
+
+    assert kb._confirm_unit_compat(
+        record,
+        "paper",
+        confirmed_by="researcher",
+        evidence=["decision-note"],
+        method="test",
+        root=tmp_path,
+        user_authorization="I confirm this judgement",
+        authorization_source="user_message",
+    ) == record
+    assert captured["user_authorization"] == "I confirm this judgement"
+    assert captured["authorization_source"] == "user_message"
+
+
+def test_manual_checkpoint_resolves_literal_dirty_paths_and_clean_is_noop(monkeypatch, tmp_path: Path, capsys) -> None:
+    kb = _load_kb_module()
+    (tmp_path / ".agents").mkdir()
+    (tmp_path / "AGENTS.md").write_text("# test\n", encoding="utf-8")
+    ensure_workspace(tmp_path)
+    monkeypatch.setattr(kb, "PROJECT_ROOT", tmp_path)
+    calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(kb, "dirty_kb_paths", lambda _root: [])
+    monkeypatch.setattr(
+        kb,
+        "git_checkpoint",
+        lambda *_args, **kwargs: calls.append(kwargs) or {"committed": False},
+    )
+    monkeypatch.setattr(sys, "argv", ["kb.py", "git-checkpoint", "--message", "manual"])
+    assert kb.main() == 0
+    assert calls == []
+    assert "no kb changes" in capsys.readouterr().out
+
+    dirty = [tmp_path / "kb" / "units" / "papers" / "p-one" / "record.yaml"]
+    monkeypatch.setattr(kb, "dirty_kb_paths", lambda _root: dirty)
+    monkeypatch.setattr(
+        kb,
+        "git_checkpoint",
+        lambda *_args, **kwargs: calls.append(kwargs) or {"committed": False, "status": "no-changes"},
+    )
+    assert kb.main() == 0
+    assert calls[-1]["target_paths"] == dirty

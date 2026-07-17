@@ -118,10 +118,9 @@ def _ensure_python_has_pdf_backend(python_exe: str | Path) -> None:
             [str(python_path), "-m", "pip", "install", "--disable-pip-version-check", PDF_BACKEND_PACKAGE],
             context=f"{PDF_BACKEND_PACKAGE} installation",
         )
-    except RuntimeError as exc:
+    except RuntimeError:
         print(
-            f"[research] warning: could not install lightweight PDF backend "
-            f"({PDF_BACKEND_PACKAGE}); PDF parsing will be unavailable until installed. Reason: {exc}",
+            "[research] PDF 解析后端尚未就绪；请让 Agent 运行 kb doctor 查看能力状态。",
             file=sys.stderr,
             flush=True,
         )
@@ -214,12 +213,11 @@ def _ensure_venv_has_yaml(venv_dir: Path, venv_py: Path) -> None:
 
 
 def _failure_message(venv_dir: Path, error: Exception) -> str:
+    del venv_dir, error
     return "\n".join(
         [
-            f"[research] could not bootstrap managed runtime at {venv_dir}.",
-            f"Reason: {error}",
-            "Install PyYAML manually with `python -m pip install pyyaml`, or set RESEARCH_PYTHON to a Python that has PyYAML.",
-            "You can also set RESEARCH_VENV to another venv path, or unset RESEARCH_NO_MANAGED_VENV to allow automatic management.",
+            "[research] 无法准备项目受管运行环境。",
+            "请让 Agent 运行 kb doctor 查看私有诊断，并选择可用的项目运行环境。",
         ]
     )
 
@@ -241,7 +239,7 @@ def ensure_managed_runtime(home: Path | None = None) -> None:
             if is_current_python(configured_path):
                 _mark_ready()
                 return
-            _reexec(configured_path, f"[research] using RESEARCH_PYTHON runtime at {configured_path} ...")
+            _reexec(configured_path, "[research] 正在使用已配置的运行环境。")
             return
 
     if os.environ.get("RESEARCH_NO_MANAGED_VENV") == "1":
@@ -249,20 +247,31 @@ def ensure_managed_runtime(home: Path | None = None) -> None:
             _mark_ready()
             return
         raise SystemExit(
-            "[research] RESEARCH_NO_MANAGED_VENV=1 is set, but the current Python cannot import PyYAML. "
-            "Install PyYAML with `python -m pip install pyyaml`, unset RESEARCH_NO_MANAGED_VENV, "
-            "or set RESEARCH_PYTHON to a Python that has PyYAML."
+            "[research] 当前运行环境缺少 YAML 支持，且项目受管运行环境已关闭；请让 Agent 运行 kb doctor 协助选择。"
         )
-
-    if _current_has_yaml():
-        _ensure_python_has_pdf_backend(sys.executable)
-        _mark_ready()
-        return
 
     venv_dir = managed_venv_dir(home)
     venv_py = managed_venv_python(home)
+    # Prefer an already-provisioned project runtime even when the launching Python
+    # happens to have YAML. This keeps dependency capability and doctor output tied
+    # to the managed project environment.
+    if venv_py.exists() and _python_can_import_yaml(venv_py):
+        if is_current_python(venv_py):
+            _ensure_python_has_pdf_backend(venv_py)
+            _mark_ready()
+            return
+        _reexec(venv_py, "[research] 正在使用项目受管运行环境。")
+        return
+
+    if _current_has_yaml():
+        # Never pip-install into an arbitrary/shared launching interpreter during a
+        # normal kb invocation. A missing optional PDF backend remains observable in
+        # doctor; dependency installation is confined to the managed venv path.
+        _mark_ready()
+        return
+
     try:
-        print(f"[research] bootstrapping managed runtime at {venv_dir} ...", file=sys.stderr, flush=True)
+        print("[research] 正在准备项目受管运行环境。", file=sys.stderr, flush=True)
         _ensure_venv_has_yaml(venv_dir, venv_py)
     except Exception as exc:  # noqa: BLE001
         if _current_has_yaml():
@@ -273,4 +282,4 @@ def ensure_managed_runtime(home: Path | None = None) -> None:
     if is_current_python(venv_py):
         _mark_ready()
         return
-    _reexec(venv_py, f"[research] using managed runtime at {venv_dir} ...")
+    _reexec(venv_py, "[research] 正在使用项目受管运行环境。")
