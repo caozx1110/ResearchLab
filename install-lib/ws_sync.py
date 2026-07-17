@@ -668,6 +668,7 @@ def build_manifest(
     source_commit: str,
     source_origin: str,
     source_checkout: str,
+    source_branch: str,
     version: str,
     installed_at: str,
     agents: dict[str, bool],
@@ -683,6 +684,7 @@ def build_manifest(
         "source_repo": source_checkout,
         "source_origin": source_origin,
         "source_checkout": source_checkout,
+        "source_branch": source_branch,
         "source_commit": source_commit,
         "version": version,
         "installed_at": installed_at,
@@ -730,6 +732,7 @@ def install(args: argparse.Namespace) -> int:
         source_commit=args.source_commit or "",
         source_origin=str(args.source_origin or "local").strip(),
         source_checkout=str(args.source_checkout or ""),
+        source_branch=str(args.source_branch or "").strip(),
         version=read_source_version(repo, source),
         installed_at=installed_at,
         agents=agents,
@@ -792,6 +795,7 @@ def update(args: argparse.Namespace) -> int:
     effective_checkout = str(
         args.source_checkout or manifest.get("source_checkout") or manifest.get("source_repo") or ""
     )
+    effective_branch = str(args.source_branch or manifest.get("source_branch") or "").strip()
 
     changed = (
         old_files != new_files
@@ -799,6 +803,7 @@ def update(args: argparse.Namespace) -> int:
         or str(manifest.get("source_origin") or "") != effective_origin
         or str(manifest.get("source_checkout") or manifest.get("source_repo") or "")
         != effective_checkout
+        or str(manifest.get("source_branch") or "") != effective_branch
         or manifest.get("agents_md") != "managed-block"
         or writes_need_change(dst_root, writes, removed)
     )
@@ -811,6 +816,7 @@ def update(args: argparse.Namespace) -> int:
             source_commit=new_commit,
             source_origin=effective_origin,
             source_checkout=effective_checkout,
+            source_branch=effective_branch,
             version=read_source_version(repo, source),
             installed_at=installed_at,
             agents=agents,
@@ -848,6 +854,7 @@ def reinstall(args: argparse.Namespace) -> int:
         source_commit=args.source_commit or "",
         source_origin=str(args.source_origin or manifest.get("source_origin") or "local").strip(),
         source_checkout=str(args.source_checkout or manifest.get("source_checkout") or manifest.get("source_repo") or ""),
+        source_branch=str(args.source_branch or manifest.get("source_branch") or "").strip(),
         version=read_source_version(repo, source),
         installed_at=utc_now(),
         agents=normalize_manifest_agents(manifest.get("agents")),
@@ -917,6 +924,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source-commit", default="")
     parser.add_argument("--source-origin", default="")
     parser.add_argument("--source-checkout", default="")
+    parser.add_argument("--source-branch", default="")
     parser.add_argument("--source", default="")
     parser.add_argument("--agents", default="")
     parser.add_argument("--force", action="store_true")

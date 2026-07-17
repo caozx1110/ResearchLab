@@ -256,6 +256,7 @@ def test_external_install_prints_completion_without_bash_variable_error(tmp_path
     manifest_path = workspace / ".agents" / ".install-manifest.json"
     installed_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert installed_manifest["source_origin"]
+    assert installed_manifest["source_branch"]
     expected_checkout = str(_project_root()) if installed_manifest["source_origin"] == "local" else ""
     assert installed_manifest["source_checkout"] == expected_checkout
 
@@ -284,6 +285,7 @@ def test_external_install_prints_completion_without_bash_variable_error(tmp_path
     updated_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert updated_manifest["source_origin"] == installed_manifest["source_origin"]
     assert updated_manifest["source_checkout"] == installed_manifest["source_checkout"]
+    assert updated_manifest["source_branch"] == installed_manifest["source_branch"]
 
 
 def test_guided_system_uninstall_can_be_cancelled(tmp_path: Path) -> None:

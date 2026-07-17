@@ -132,7 +132,7 @@ def test_kb_doctor_prints_runtime_capabilities(monkeypatch, tmp_path: Path, caps
     assert kb.main(["--root", str(tmp_path), "--agent-protocol", "doctor.json", "doctor"]) == 0
 
     captured = capsys.readouterr()
-    assert "research skill 版本为 0.1.0" in captured.out
+    assert "research skill 版本为 0.2.0-rc.1" in captured.out
     assert "YAML 支持正常" in captured.out
     assert "PDF 解析后端已就绪（pypdf）" in captured.out
     assert "/usr/bin/python3" not in captured.out

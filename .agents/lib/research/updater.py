@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -9,7 +10,6 @@ from pathlib import Path
 from typing import Any, Sequence
 
 
-DEFAULT_BRANCH = "main"
 MANIFEST_REL = Path(".agents/.install-manifest.json")
 CACHE_CHECKOUT_PREFIX = "ResearchLab"
 LOCAL_ORIGIN = "local"
@@ -18,8 +18,8 @@ LOCAL_ORIGIN = "local"
 @dataclass(frozen=True)
 class SourceProvenance:
     origin: str
-    checkout: Path | None = None
-    branch: str = DEFAULT_BRANCH
+    checkout: Path | None
+    branch: str
 
     @property
     def is_local(self) -> bool:
@@ -54,21 +54,39 @@ def _checkout_origin(checkout: Path) -> str:
         return ""
 
 
-def _pull_checkout(checkout: Path, *, branch: str = DEFAULT_BRANCH) -> None:
+def _checkout_branch(checkout: Path) -> str:
+    try:
+        return _git_output(checkout, "symbolic-ref", "--quiet", "--short", "HEAD")
+    except (AttributeError, OSError, subprocess.SubprocessError):
+        return ""
+
+
+def _valid_branch_name(branch: str) -> bool:
+    text = str(branch or "").strip()
+    return bool(
+        re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", text)
+        and ".." not in text
+        and "//" not in text
+        and "@{" not in text
+        and not text.endswith(("/", ".", ".lock"))
+    )
+
+
+def _pull_checkout(checkout: Path, *, branch: str) -> None:
     _run_git(checkout, "pull", "--ff-only", "origin", branch)
 
 
-def _fetch_checkout(checkout: Path, *, branch: str = DEFAULT_BRANCH) -> None:
+def _fetch_checkout(checkout: Path, *, branch: str) -> None:
     _run_git(checkout, "fetch", "--quiet", "origin", branch)
 
 
-def _clone_checkout(origin: str, destination: Path, *, branch: str = DEFAULT_BRANCH) -> None:
+def _clone_checkout(origin: str, destination: Path, *, branch: str) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     _run_process(("git", "clone", "--depth", "1", "--branch", branch, origin, str(destination)))
 
 
-def _cached_checkout(cache_dir: Path, origin: str) -> Path:
-    digest = hashlib.sha256(origin.encode("utf-8")).hexdigest()[:12]
+def _cached_checkout(cache_dir: Path, origin: str, branch: str) -> Path:
+    digest = hashlib.sha256(f"{origin}\0{branch}".encode("utf-8")).hexdigest()[:12]
     return cache_dir.expanduser() / f"{CACHE_CHECKOUT_PREFIX}-{digest}"
 
 
@@ -80,12 +98,23 @@ def _validate_checkout_origin(checkout: Path, origin: str) -> None:
         raise RuntimeError("the recorded source checkout no longer matches its manifest origin")
 
 
-def _prepare_cached_checkout(cache_dir: Path, origin: str, *, pull: bool, branch: str = DEFAULT_BRANCH) -> Path:
+def _validate_checkout_branch(checkout: Path, branch: str) -> None:
+    actual = _checkout_branch(checkout)
+    if not actual:
+        raise SourceChoiceRequired("记录的更新源处于 detached HEAD；需要重新选择更新分支。")
+    if actual != branch:
+        raise SourceChoiceRequired("记录的更新源已切换分支；需要重新选择更新分支。")
+
+
+def _prepare_cached_checkout(cache_dir: Path, origin: str, *, pull: bool, branch: str) -> Path:
     if not origin or origin == LOCAL_ORIGIN:
         raise SourceChoiceRequired("本地更新源不可用；需要重新选择源码位置。")
-    checkout = _cached_checkout(cache_dir, origin)
+    if not _valid_branch_name(branch):
+        raise SourceChoiceRequired("安装记录缺少有效更新分支；需要重新选择更新源。")
+    checkout = _cached_checkout(cache_dir, origin, branch)
     if is_git_checkout(checkout):
         _validate_checkout_origin(checkout, origin)
+        _validate_checkout_branch(checkout, branch)
         if pull:
             _pull_checkout(checkout, branch=branch)
         else:
@@ -124,6 +153,8 @@ def _invoke_ws_sync(
         source_commit,
         "--source-origin",
         provenance.origin,
+        "--source-branch",
+        provenance.branch,
     ]
     if provenance.checkout is not None:
         argv.extend(["--source-checkout", str(provenance.checkout)])
@@ -139,15 +170,32 @@ def read_local_version(install_root: Path) -> str:
     return version or "0.0.0"
 
 
-def parse_semver(value: str) -> tuple[int, int, int]:
-    parts = str(value).strip().split(".")
-    parsed: list[int] = []
-    for index in range(3):
-        try:
-            parsed.append(int(parts[index]))
-        except (IndexError, TypeError, ValueError):
-            parsed.append(0)
-    return tuple(parsed)  # type: ignore[return-value]
+SEMVER_PATTERN = re.compile(
+    r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
+    r"(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
+)
+
+
+def parse_semver(value: str) -> tuple[int, int, int, int, tuple[tuple[int, int | str], ...]]:
+    """Return a precedence key implementing SemVer 2.0 prerelease ordering."""
+    match = SEMVER_PATTERN.fullmatch(str(value).strip())
+    if match is None:
+        return (0, 0, 0, 0, ())
+    major, minor, patch = (int(match.group(index)) for index in range(1, 4))
+    prerelease = match.group(4)
+    if prerelease is None:
+        return (major, minor, patch, 1, ())
+    identifiers: list[tuple[int, int | str]] = []
+    for identifier in prerelease.split("."):
+        if identifier.isdigit():
+            # SemVer forbids leading zeroes in numeric prerelease identifiers.
+            if len(identifier) > 1 and identifier.startswith("0"):
+                return (0, 0, 0, 0, ())
+            identifiers.append((0, int(identifier)))
+        else:
+            identifiers.append((1, identifier))
+    return (major, minor, patch, 0, tuple(identifiers))
 
 
 def compare_versions(local: str, remote: str) -> int:
@@ -176,12 +224,17 @@ def _load_manifest(install_root: Path) -> dict[str, Any] | None:
 def source_provenance(install_root: Path) -> SourceProvenance | None:
     root = Path(install_root).expanduser().resolve(strict=False)
     if is_git_checkout(root):
-        return SourceProvenance(_checkout_origin(root) or LOCAL_ORIGIN, root)
+        origin = _checkout_origin(root) or LOCAL_ORIGIN
+        branch = _checkout_branch(root)
+        if origin != LOCAL_ORIGIN and not _valid_branch_name(branch):
+            return None
+        return SourceProvenance(origin, root, branch)
 
     manifest = _load_manifest(root)
     if manifest is None:
         return None
     origin = str(manifest.get("source_origin") or "").strip()
+    branch = str(manifest.get("source_branch") or "").strip()
     checkout_text = str(manifest.get("source_checkout") or manifest.get("source_repo") or "").strip()
     checkout = Path(checkout_text).expanduser().resolve(strict=False) if checkout_text else None
     if checkout is not None and not is_source_checkout(checkout):
@@ -193,7 +246,9 @@ def source_provenance(install_root: Path) -> SourceProvenance | None:
         origin = _checkout_origin(checkout) or LOCAL_ORIGIN
     if not origin:
         return None
-    return SourceProvenance(origin, checkout)
+    if origin != LOCAL_ORIGIN and not _valid_branch_name(branch):
+        return None
+    return SourceProvenance(origin, checkout, branch)
 
 
 def resolve_source_checkout(install_root: Path) -> Path | None:
@@ -213,7 +268,11 @@ def _resolve_checkout(provenance: SourceProvenance, cache_dir: Path, *, pull: bo
         if provenance.is_local:
             return checkout
         if is_git_checkout(checkout):
+            if not _valid_branch_name(provenance.branch):
+                raise SourceChoiceRequired("安装记录缺少有效更新分支；需要重新选择更新源。")
             _validate_checkout_origin(checkout, provenance.origin)
+            if pull:
+                _validate_checkout_branch(checkout, provenance.branch)
             if pull:
                 _pull_checkout(checkout, branch=provenance.branch)
             else:
@@ -253,7 +312,13 @@ def check(install_root: Path, cache_dir: Path) -> dict[str, str]:
     except Exception:
         return {"local": local, "remote": "unknown", "status": "unknown"}
     status = "update_available" if compare_versions(local, remote) < 0 else "up_to_date"
-    return {"local": local, "remote": remote, "status": status, "source_origin": provenance.origin}
+    return {
+        "local": local,
+        "remote": remote,
+        "status": status,
+        "source_origin": provenance.origin,
+        "source_branch": provenance.branch,
+    }
 
 
 def _error_result(before: str, message: str) -> dict[str, str]:
