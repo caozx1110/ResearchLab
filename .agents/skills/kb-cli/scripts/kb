@@ -27,15 +27,17 @@ if __name__ == "__main__":
 
 from research.common import add_project_root_argument, confirm_command, current_runtime_capabilities, find_project_root, load_yaml
 from research.core import config_root, default_confirmed_by, is_ai_signer, load_runtime_preferences, search_records
+from research import updater
 
 
 HELP_MENU: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
     (
-        "kb 动词（14 个）",
+        "kb 动词（15 个）",
         (
             ("打印能力菜单。", "kb help"),
             ("初始化 KB 布局、索引和基础偏好。", "kb init"),
             ("检查当前 Python、YAML 与 PDF 后端可用性。", "kb doctor"),
+            ("检查并在确认后更新 research skill。", "kb update"),
             ("刷新并查看当前 KB / program 状态摘要。", "kb status"),
             ("查看下一步实验或 program 推进建议。", "kb next"),
             ("按关键词检索已入库知识单元。", "kb find <关键词>"),
@@ -165,6 +167,7 @@ def handle_doctor(args: argparse.Namespace, root: Path) -> int:
     venv_py = managed_venv_python(DEFAULT_PROJECT_ROOT)
     print("python:", capabilities.get("python") or "-")
     print("version:", capabilities.get("version") or "-")
+    print("skill_version:", updater.read_local_version(DEFAULT_PROJECT_ROOT))
     print("yaml:", "available" if capabilities.get("yaml_support") else "missing")
     print("pdf:", capabilities.get("pdf_backend") or "missing")
     if isinstance(modules, dict):
@@ -174,6 +177,38 @@ def handle_doctor(args: argparse.Namespace, root: Path) -> int:
     print("managed_venv.exists:", "yes" if venv_dir.exists() else "no")
     print("managed_venv.python:", venv_py)
     print("managed_venv.current:", "yes" if is_current_python(venv_py) else "no")
+    return 0
+
+
+def update_cache_dir() -> Path:
+    return Path.home() / ".cache" / "research-skills"
+
+
+def handle_update(args: argparse.Namespace, root: Path) -> int:
+    del root
+    cache_dir = update_cache_dir()
+    if args.apply:
+        result = updater.apply(DEFAULT_PROJECT_ROOT, cache_dir)
+        if result.get("status") == "updated":
+            print(f"research skill 更新完成：{result.get('before', '0.0.0')} → {result.get('after', '0.0.0')}。")
+            return 0
+        print(str(result.get("message") or "research skill 更新未完成，请稍后重试。"))
+        return 1
+
+    result = updater.check(DEFAULT_PROJECT_ROOT, cache_dir)
+    local = result.get("local") or "0.0.0"
+    remote = result.get("remote") or "unknown"
+    print(f"当前 research skill 版本：{local}。")
+    if result.get("status") == "unknown":
+        print("远端 research skill 版本：未知。")
+        print("暂时无法连接远端检查更新；当前安装未做任何改动。")
+        return 0
+    print(f"远端 research skill 版本：{remote}。")
+    if result.get("status") == "update_available":
+        print("发现可用更新；确认前不会修改当前安装。")
+        print("NEXT FOR AGENT: ask the user to confirm the skill update; after confirmation, run kb update --apply")
+    else:
+        print("当前 research skill 已是最新版本。")
     return 0
 
 
@@ -904,6 +939,12 @@ def register_undo(subparsers: argparse._SubParsersAction[argparse.ArgumentParser
     parser.set_defaults(handler=handle_undo)
 
 
+def register_update(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    parser = subparsers.add_parser("update", help="检查并在确认后更新 research skill")
+    parser.add_argument("--apply", action="store_true", help=argparse.SUPPRESS)
+    parser.set_defaults(handler=handle_update)
+
+
 def register_resume(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     parser = subparsers.add_parser("resume", help="恢复崩溃后未完成的知识库操作")
     parser.set_defaults(handler=handle_resume)
@@ -929,6 +970,7 @@ VERB_REGISTRARS: tuple[Callable[[argparse._SubParsersAction[argparse.ArgumentPar
     register_help,
     register_init,
     register_doctor,
+    register_update,
     register_add,
     register_ingest,
     register_review,

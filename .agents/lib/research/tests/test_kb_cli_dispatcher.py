@@ -47,9 +47,9 @@ def test_kb_help_snapshot_contains_group_headers() -> None:
     text = kb.render_help_menu()
 
     assert "# kb 快捷命令" in text
-    for header in ["kb 动词（14 个）", "纯自然语言（无 kb 动词）"]:
+    for header in ["kb 动词（15 个）", "纯自然语言（无 kb 动词）"]:
         assert f"## {header}" in text
-    for verb in ["kb help", "kb init", "kb doctor", "kb status", "kb next", "kb find", "kb add", "kb ingest", "kb review", "kb reject", "kb recall", "kb resume", "kb undo", "kb restore"]:
+    for verb in ["kb help", "kb init", "kb doctor", "kb update", "kb status", "kb next", "kb find", "kb add", "kb ingest", "kb review", "kb reject", "kb recall", "kb resume", "kb undo", "kb restore"]:
         assert verb in text
     assert "请基于当前知识库给我 3 个候选 idea" in text
     assert "为这个 program 生成周报材料" in text
@@ -75,9 +75,65 @@ def test_kb_doctor_prints_runtime_capabilities(monkeypatch, tmp_path: Path, caps
 
     captured = capsys.readouterr()
     assert "python: /usr/bin/python3" in captured.out
+    assert "skill_version: 0.1.0" in captured.out
     assert "yaml: available" in captured.out
     assert "pdf: pypdf" in captured.out
     assert "module.PyPDF2: missing" in captured.out
+
+
+def test_kb_update_check_only_reports_available_without_user_facing_commands(monkeypatch, tmp_path: Path, capsys) -> None:
+    kb = _load_kb_cli()
+    monkeypatch.setattr(
+        kb.updater,
+        "check",
+        lambda _root, _cache: {"local": "0.1.0", "remote": "0.2.0", "status": "update_available"},
+    )
+
+    assert kb.main(["--root", str(tmp_path), "update"]) == 0
+
+    lines = capsys.readouterr().out.splitlines()
+    agent_lines = [line for line in lines if line.startswith("NEXT FOR AGENT:")]
+    user_lines = [line for line in lines if not line.startswith("NEXT FOR AGENT:")]
+    assert len(agent_lines) == 1
+    assert "kb update --apply" in agent_lines[0]
+    assert "当前 research skill 版本：0.1.0。" in user_lines
+    assert "远端 research skill 版本：0.2.0。" in user_lines
+    assert any("发现可用更新" in line for line in user_lines)
+    for line in user_lines:
+        assert not any(token in line for token in ("python3", ".py ", "--", "${", "git "))
+
+
+def test_kb_update_apply_uses_agent_confirmed_path(monkeypatch, tmp_path: Path, capsys) -> None:
+    kb = _load_kb_cli()
+    calls: list[tuple[Path, Path]] = []
+
+    def fake_apply(root: Path, cache_dir: Path):
+        calls.append((root, cache_dir))
+        return {"before": "0.1.0", "after": "0.2.0", "status": "updated"}
+
+    monkeypatch.setattr(kb.updater, "apply", fake_apply)
+
+    assert kb.main(["--root", str(tmp_path), "update", "--apply"]) == 0
+
+    assert calls == [(kb.DEFAULT_PROJECT_ROOT, kb.update_cache_dir())]
+    assert "research skill 更新完成：0.1.0 → 0.2.0。" in capsys.readouterr().out
+
+
+def test_kb_update_offline_reports_unknown_without_changes(monkeypatch, tmp_path: Path, capsys) -> None:
+    kb = _load_kb_cli()
+    monkeypatch.setattr(
+        kb.updater,
+        "check",
+        lambda _root, _cache: {"local": "0.1.0", "remote": "unknown", "status": "unknown"},
+    )
+
+    assert kb.main(["--root", str(tmp_path), "update"]) == 0
+
+    output = capsys.readouterr().out
+    assert "当前 research skill 版本：0.1.0。" in output
+    assert "远端 research skill 版本：未知。" in output
+    assert "当前安装未做任何改动" in output
+    assert "NEXT FOR AGENT:" not in output
 
 
 def test_kb_init_forwards_workspace_and_config_inits_in_order(monkeypatch, tmp_path: Path) -> None:
