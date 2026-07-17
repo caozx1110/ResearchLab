@@ -167,6 +167,7 @@ def handle_doctor(args: argparse.Namespace, root: Path) -> int:
     venv_py = managed_venv_python(DEFAULT_PROJECT_ROOT)
     print("python:", capabilities.get("python") or "-")
     print("version:", capabilities.get("version") or "-")
+    print("skill_version:", updater.read_local_version(DEFAULT_PROJECT_ROOT))
     print("yaml:", "available" if capabilities.get("yaml_support") else "missing")
     print("pdf:", capabilities.get("pdf_backend") or "missing")
     if isinstance(modules, dict):

@@ -75,6 +75,7 @@ def test_kb_doctor_prints_runtime_capabilities(monkeypatch, tmp_path: Path, caps
 
     captured = capsys.readouterr()
     assert "python: /usr/bin/python3" in captured.out
+    assert "skill_version: 0.1.0" in captured.out
     assert "yaml: available" in captured.out
     assert "pdf: pypdf" in captured.out
     assert "module.PyPDF2: missing" in captured.out
