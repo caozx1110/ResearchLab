@@ -379,7 +379,12 @@ def main() -> int:
         _apply_runtime_pref(payload, args.section, args.key, parse_value(args.value))
         write_runtime_preferences(root, payload)
         print(f"[ok] updated {runtime_preferences_path(root).relative_to(root)}")
-        checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: update runtime pref {args.section}.{args.key}")
+        checkpoint = checkpoint_and_report(
+            root,
+            trigger="milestone",
+            message=f"milestone: update runtime pref {args.section}.{args.key}",
+            target_paths=[runtime_preferences_path(root)],
+        )
         return 0
     return 1
 

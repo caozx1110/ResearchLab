@@ -7,6 +7,7 @@ import pytest
 
 from research.confirm import write_record
 from research.git_ops import (
+    dirty_kb_paths,
     ensure_kb_git_repo,
     git_checkpoint,
     restore_operation,
@@ -148,7 +149,12 @@ def _configure_kb_git(root: Path) -> None:
     ensure_kb_git_repo(root, create_initial_commit=False)
     subprocess.run(["git", "-C", str(root / "kb"), "config", "user.name", "Recovery Tests"], check=True)
     subprocess.run(["git", "-C", str(root / "kb"), "config", "user.email", "recovery@example.com"], check=True)
-    git_checkpoint(root, "initial kb state", auto_init=False)
+    git_checkpoint(
+        root,
+        "initial kb state",
+        auto_init=False,
+        target_paths=dirty_kb_paths(root),
+    )
 
 
 def test_git_checkpoint_stages_only_target_paths(tmp_path: Path) -> None:

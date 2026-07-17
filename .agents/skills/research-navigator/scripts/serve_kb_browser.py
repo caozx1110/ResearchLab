@@ -420,6 +420,7 @@ def create_handler(*, project_root: Path):
                     project_root,
                     trigger="browser-save",
                     message=f"save: update {path.resolve().relative_to(project_root.resolve()).as_posix()}",
+                    target_paths=[path],
                 )
                 if checkpoint.get("committed"):
                     response["git_checkpoint"] = checkpoint.get("commit")
