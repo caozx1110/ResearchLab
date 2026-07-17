@@ -22,7 +22,6 @@ from .common import (
     FetchTooLarge,
     clean_text,
     ensure_dir,
-    exclusive_file_lock,
     fetch_url,
     file_sha256,
     html_to_text,
@@ -61,7 +60,7 @@ from .prefs import (
 from .confirm import (
     write_record,
 )
-from .journal import journaled_op, mutation_transaction, operation_lock_path
+from .journal import mutation_transaction
 
 WEB_SNAPSHOT_MAX_CHARS = 120_000
 
@@ -368,17 +367,16 @@ def stage_search_results(
     ensure_workspace(project_root)
     current_stage_id = stage_id or build_search_stage_id(kind, query)
     path = search_stage_path(project_root, current_stage_id)
-    with exclusive_file_lock(operation_lock_path(project_root, path)):
-        with journaled_op(project_root, "stage_search_results", [path]):
-            return _stage_search_results_unlocked(
-                project_root,
-                path=path,
-                current_stage_id=current_stage_id,
-                kind=kind,
-                query=query,
-                candidates=candidates,
-                note=note,
-            )
+    with mutation_transaction(project_root, "stage_search_results", [path]):
+        return _stage_search_results_unlocked(
+            project_root,
+            path=path,
+            current_stage_id=current_stage_id,
+            kind=kind,
+            query=query,
+            candidates=candidates,
+            note=note,
+        )
 
 
 def _stage_search_results_unlocked(
@@ -456,28 +454,27 @@ def mark_search_candidate(
     record_id: str = "",
 ) -> Path:
     path = search_stage_path(project_root, stage_id)
-    with exclusive_file_lock(operation_lock_path(project_root, path)):
-        with journaled_op(project_root, "mark_search_candidate", [path]):
-            payload = load_search_stage(project_root, stage_id)
-            found = False
-            for candidate in payload.get("candidates", []):
-                if str(candidate.get("candidate_id") or "") != candidate_id:
-                    continue
-                candidate["status"] = status
-                if record_id:
-                    candidate["record_id"] = record_id
-                found = True
-                break
-            if not found:
-                raise SystemExit(f"Candidate `{candidate_id}` not found in stage `{stage_id}`")
-            payload.setdefault("history", []).append(
-                {
-                    "timestamp": utc_now_iso(),
-                    "action": "candidate-updated",
-                    "summary": f"{candidate_id} -> {status}",
-                }
-            )
-            write_yaml_if_changed(path, payload)
+    with mutation_transaction(project_root, "mark_search_candidate", [path]):
+        payload = load_search_stage(project_root, stage_id)
+        found = False
+        for candidate in payload.get("candidates", []):
+            if str(candidate.get("candidate_id") or "") != candidate_id:
+                continue
+            candidate["status"] = status
+            if record_id:
+                candidate["record_id"] = record_id
+            found = True
+            break
+        if not found:
+            raise SystemExit(f"Candidate `{candidate_id}` not found in stage `{stage_id}`")
+        payload.setdefault("history", []).append(
+            {
+                "timestamp": utc_now_iso(),
+                "action": "candidate-updated",
+                "summary": f"{candidate_id} -> {status}",
+            }
+        )
+        write_yaml_if_changed(path, payload)
     return path
 
 

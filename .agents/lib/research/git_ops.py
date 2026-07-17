@@ -33,6 +33,7 @@ from .journal import (
     operation_lock_path,
     restore_before_snapshots,
     target_path,
+    workspace_transaction_lock_path,
 )
 from .prefs import (
     ensure_workspace,
@@ -207,50 +208,52 @@ def maybe_auto_checkpoint(
             return {"committed": False, "status": "missing-repo", "reason": "kb git repo is not initialized"}
 
     state_path = versioning_state_path(project_root)
-    with exclusive_file_lock(operation_lock_path(project_root, state_path)):
-        if trigger == "browser-save":
-            state = load_versioning_state(project_root)
-            last_commit_at = parse_iso_datetime(state.get("last_auto_commit_at"))
-            debounce_seconds = int(versioning.get("debounce_seconds") or 0)
-            if last_commit_at is not None and debounce_seconds > 0:
-                elapsed = (datetime.now(timezone.utc) - last_commit_at.astimezone(timezone.utc)).total_seconds()
-                if elapsed < debounce_seconds:
-                    return {
-                        "committed": False,
-                        "status": "debounced",
-                        "reason": f"last browser-save commit was {elapsed:.1f}s ago",
-                    }
-
-        result = git_checkpoint(
-            project_root,
-            message,
-            trigger=trigger,
-            auto_init=False,
-            target_paths=scoped_paths,
-        )
-        if result.get("committed"):
-            with journaled_op(
-                project_root,
-                "write_versioning_state",
-                [state_path],
-                undoable=False,
-                operation_role="bookkeeping",
-            ):
+    with exclusive_file_lock(workspace_transaction_lock_path(project_root)):
+        with exclusive_file_lock(operation_lock_path(project_root, state_path)):
+            if trigger == "browser-save":
                 state = load_versioning_state(project_root)
-                state["last_auto_commit_at"] = utc_now_iso()
-                state["last_trigger"] = trigger
-                state["last_commit"] = result.get("commit", "")
-                history = [item for item in state.get("history", []) if isinstance(item, dict)]
-                history.append(
-                    {
-                        "timestamp": state["last_auto_commit_at"],
-                        "trigger": trigger,
-                        "commit": result.get("commit", ""),
-                        "message": message,
-                    }
-                )
-                state["history"] = history[-50:]
-                write_versioning_state(project_root, state)
+                last_commit_at = parse_iso_datetime(state.get("last_auto_commit_at"))
+                debounce_seconds = int(versioning.get("debounce_seconds") or 0)
+                if last_commit_at is not None and debounce_seconds > 0:
+                    elapsed = (datetime.now(timezone.utc) - last_commit_at.astimezone(timezone.utc)).total_seconds()
+                    if elapsed < debounce_seconds:
+                        return {
+                            "committed": False,
+                            "status": "debounced",
+                            "reason": f"last browser-save commit was {elapsed:.1f}s ago",
+                        }
+
+            result = git_checkpoint(
+                project_root,
+                message,
+                trigger=trigger,
+                auto_init=False,
+                target_paths=scoped_paths,
+            )
+            if result.get("committed"):
+                with journaled_op(
+                    project_root,
+                    "write_versioning_state",
+                    [state_path],
+                    undoable=False,
+                    operation_role="bookkeeping",
+                    coordination_scope="workspace-exclusive",
+                ):
+                    state = load_versioning_state(project_root)
+                    state["last_auto_commit_at"] = utc_now_iso()
+                    state["last_trigger"] = trigger
+                    state["last_commit"] = result.get("commit", "")
+                    history = [item for item in state.get("history", []) if isinstance(item, dict)]
+                    history.append(
+                        {
+                            "timestamp": state["last_auto_commit_at"],
+                            "trigger": trigger,
+                            "commit": result.get("commit", ""),
+                            "message": message,
+                        }
+                    )
+                    state["history"] = history[-50:]
+                    write_versioning_state(project_root, state)
     return result
 
 
@@ -383,33 +386,35 @@ def restore_operation(project_root: Path, op_id: str, *, recovery_type: str = "r
         raise SystemExit(f"操作 {op_id} 没有可恢复的目标。")
     target_paths = [target_path(project_root, path) for path in before_digests]
     has_snapshots = isinstance(entry.get("before_snapshots"), dict) and bool(entry.get("before_snapshots"))
-    with ExitStack() as locks:
-        for path in sorted(target_paths, key=lambda item: item.as_posix()):
-            locks.enter_context(exclusive_file_lock(operation_lock_path(project_root, path)))
-        with journaled_op(
-            project_root,
-            f"{recovery_type}:{op_id}",
-            target_paths,
-            undoable=False,
-            operation_role="recovery",
-            attach_to_active=False,
-        ) as recovery_op_id:
-            if has_snapshots:
-                restored = restore_before_snapshots(project_root, op_id)
-            else:
-                if not kb_repo_exists(project_root) or not _git_head_exists(project_root):
-                    raise SystemExit("知识库版本历史尚未初始化，且旧操作没有字节快照，无法恢复。")
-                revision = _find_revision_for_digests(project_root, before_digests)
-                restored = _restore_paths_from_revision(project_root, revision, before_digests)
-        # Journal commit must succeed before Git advances.  If commit_op fails,
-        # journaled_op restores the pre-recovery bytes and no checkpoint exists.
-        checkpoint = git_checkpoint(
-            project_root,
-            f"recovery: {recovery_type} {op_id}",
-            trigger="manual",
-            auto_init=False,
-            target_paths=restored,
-        )
+    with exclusive_file_lock(workspace_transaction_lock_path(project_root)):
+        with ExitStack() as locks:
+            for path in sorted(target_paths, key=lambda item: item.as_posix()):
+                locks.enter_context(exclusive_file_lock(operation_lock_path(project_root, path)))
+            with journaled_op(
+                project_root,
+                f"{recovery_type}:{op_id}",
+                target_paths,
+                undoable=False,
+                operation_role="recovery",
+                coordination_scope="workspace-exclusive",
+                attach_to_active=False,
+            ) as recovery_op_id:
+                if has_snapshots:
+                    restored = restore_before_snapshots(project_root, op_id)
+                else:
+                    if not kb_repo_exists(project_root) or not _git_head_exists(project_root):
+                        raise SystemExit("知识库版本历史尚未初始化，且旧操作没有字节快照，无法恢复。")
+                    revision = _find_revision_for_digests(project_root, before_digests)
+                    restored = _restore_paths_from_revision(project_root, revision, before_digests)
+            # Journal commit must succeed before Git advances.  If commit_op fails,
+            # journaled_op restores the pre-recovery bytes and no checkpoint exists.
+            checkpoint = git_checkpoint(
+                project_root,
+                f"recovery: {recovery_type} {op_id}",
+                trigger="manual",
+                auto_init=False,
+                target_paths=restored,
+            )
     if recovery_type == "undo":
         mark_op_undone(project_root, op_id, recovery_op_id)
     return {

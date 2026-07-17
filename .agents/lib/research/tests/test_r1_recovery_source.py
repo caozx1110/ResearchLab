@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import threading
+import time
 
 import pytest
 
@@ -35,6 +37,7 @@ from research.journal import (
     committed_ops,
     incomplete_ops,
     journal_entry_path,
+    journal_subprocess_env,
     journaled_op,
     latest_committed_op,
     load_op,
@@ -256,6 +259,192 @@ def test_same_thread_outer_transaction_can_reenter_write_record_lock(tmp_path: P
 
     assert written == path
     assert load_yaml(path)["revision"] == 1
+
+
+def test_independent_descendant_waits_for_ancestor_abort_then_commits_without_clobber(tmp_path: Path) -> None:
+    unit_dir = tmp_path / "kb" / "units" / "blogs" / "b-overlap"
+    record_path = unit_dir / "record.yaml"
+    record_path.parent.mkdir(parents=True)
+    record_path.write_text("value: old\n", encoding="utf-8")
+    ancestor_ready = threading.Event()
+    release_ancestor = threading.Event()
+    descendant_attempting = threading.Event()
+    descendant_entered = threading.Event()
+    errors: list[BaseException] = []
+
+    def ancestor() -> None:
+        try:
+            with mutation_transaction(tmp_path, "ancestor-abort", [unit_dir]):
+                record_path.write_text("value: ancestor-partial\n", encoding="utf-8")
+                ancestor_ready.set()
+                if not release_ancestor.wait(timeout=5):
+                    raise TimeoutError("test did not release ancestor")
+                raise RuntimeError("abort ancestor")
+        except RuntimeError as exc:
+            if str(exc) != "abort ancestor":
+                errors.append(exc)
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    def descendant() -> None:
+        try:
+            if not ancestor_ready.wait(timeout=5):
+                raise TimeoutError("ancestor did not start")
+            descendant_attempting.set()
+            with mutation_transaction(tmp_path, "descendant-commit", [record_path]):
+                descendant_entered.set()
+                record_path.write_text("value: descendant-commit\n", encoding="utf-8")
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    first = threading.Thread(target=ancestor)
+    second = threading.Thread(target=descendant)
+    first.start()
+    assert ancestor_ready.wait(timeout=5)
+    second.start()
+    assert descendant_attempting.wait(timeout=5)
+    assert not descendant_entered.wait(timeout=0.25)
+    release_ancestor.set()
+    first.join(timeout=5)
+    second.join(timeout=5)
+
+    assert not first.is_alive() and not second.is_alive()
+    assert errors == []
+    assert descendant_entered.is_set()
+    assert record_path.read_text(encoding="utf-8") == "value: descendant-commit\n"
+    states = {
+        entry["op_type"]: entry["state"]
+        for entry in [load_yaml(path) for path in (tmp_path / "kb" / ".journal").glob("*.yaml")]
+        if entry.get("op_type") in {"ancestor-abort", "descendant-commit"}
+    }
+    assert states == {"ancestor-abort": "abort", "descendant-commit": "commit"}
+
+
+def test_independent_disjoint_and_same_path_transactions_are_serialized_safely(tmp_path: Path) -> None:
+    left = tmp_path / "kb" / "notes" / "left.md"
+    right = tmp_path / "kb" / "notes" / "right.md"
+
+    def write(path: Path, content: str) -> None:
+        with mutation_transaction(tmp_path, f"write-{path.stem}", [path]):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        list(executor.map(lambda item: write(*item), [(left, "left\n"), (right, "right\n")]))
+    assert left.read_bytes() == b"left\n"
+    assert right.read_bytes() == b"right\n"
+
+    counter = tmp_path / "kb" / "notes" / "counter.txt"
+    counter.write_text("0\n", encoding="utf-8")
+
+    def increment(index: int) -> None:
+        with mutation_transaction(tmp_path, f"increment-{index}", [counter]):
+            value = int(counter.read_text(encoding="utf-8"))
+            time.sleep(0.005)
+            counter.write_text(f"{value + 1}\n", encoding="utf-8")
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        list(executor.map(increment, range(16)))
+    assert counter.read_text(encoding="utf-8") == "16\n"
+
+
+def test_same_process_nested_covered_target_inherits_root_transaction(tmp_path: Path) -> None:
+    unit_dir = tmp_path / "kb" / "units" / "blogs" / "b-covered"
+    record_path = unit_dir / "record.yaml"
+    with mutation_transaction(tmp_path, "covered-root", [unit_dir]) as root_op_id:
+        with mutation_transaction(tmp_path, "covered-child", [record_path]) as child_op_id:
+            record_path.parent.mkdir(parents=True, exist_ok=True)
+            record_path.write_text("covered: true\n", encoding="utf-8")
+
+    child = load_op(tmp_path, child_op_id)
+    assert child["parent_op_id"] == root_op_id
+    assert child["root_op_id"] == root_op_id
+    assert child["undoable"] is False
+    assert child["coordination_scope"] == "inherited"
+
+
+def test_nested_target_outside_root_coverage_fails_closed(tmp_path: Path) -> None:
+    unit_dir = tmp_path / "kb" / "units" / "blogs" / "b-covered"
+    record_path = unit_dir / "record.yaml"
+    record_path.parent.mkdir(parents=True)
+    record_path.write_text("covered: true\n", encoding="utf-8")
+    outside = tmp_path / "kb" / "notes" / "outside.md"
+    with pytest.raises(SystemExit, match="must be covered"):
+        with mutation_transaction(tmp_path, "coverage-abort-root", [unit_dir]):
+            record_path.write_text("partial\n", encoding="utf-8")
+            with mutation_transaction(tmp_path, "coverage-escape", [outside]):
+                outside.write_text("must not happen\n", encoding="utf-8")
+    assert record_path.read_text(encoding="utf-8") == "covered: true\n"
+    assert not outside.exists()
+
+
+def test_subprocess_nested_covered_target_inherits_without_deadlock_and_escape_fails(tmp_path: Path) -> None:
+    unit_dir = tmp_path / "kb" / "units" / "blogs" / "b-subprocess"
+    record_path = unit_dir / "record.yaml"
+    outside = tmp_path / "kb" / "notes" / "subprocess-escape.md"
+    lib_root = _project_root() / ".agents" / "lib"
+    child_code = """
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from research.journal import mutation_transaction
+root = Path(sys.argv[2])
+target = Path(sys.argv[3])
+with mutation_transaction(root, sys.argv[4], [target]):
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(sys.argv[5], encoding='utf-8')
+"""
+
+    with mutation_transaction(tmp_path, "subprocess-root", [unit_dir]) as root_op_id:
+        env = journal_subprocess_env(tmp_path)
+        covered = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                child_code,
+                lib_root.as_posix(),
+                tmp_path.as_posix(),
+                record_path.as_posix(),
+                "subprocess-covered-child",
+                "covered by parent\n",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
+        )
+        assert covered.returncode == 0, covered.stderr
+        escaped = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                child_code,
+                lib_root.as_posix(),
+                tmp_path.as_posix(),
+                outside.as_posix(),
+                "subprocess-escape-child",
+                "escape\n",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
+        )
+        assert escaped.returncode != 0
+        assert "must be covered" in escaped.stderr
+
+    assert record_path.read_bytes() == b"covered by parent\n"
+    assert not outside.exists()
+    child_entries = [
+        entry
+        for entry in committed_ops(tmp_path)
+        if entry.get("op_type") == "subprocess-covered-child"
+    ]
+    assert len(child_entries) == 1
+    assert child_entries[0]["root_op_id"] == root_op_id
+    assert child_entries[0]["coordination_scope"] == "inherited"
 
 
 def test_auto_checkpoint_bookkeeping_never_hides_latest_user_transaction(tmp_path: Path) -> None:

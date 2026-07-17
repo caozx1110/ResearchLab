@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import os
 import subprocess
 import sys
@@ -24,8 +23,8 @@ from research.bootstrap import ensure_managed_runtime
 if __name__ == "__main__":
     ensure_managed_runtime(PROJECT_ROOT)
 
-from research.common import add_project_root_argument, confirm_command as shared_confirm_command, exclusive_file_lock, extract_pdf_record, parse_arxiv_id, print_resolved_project_roots, skill_script_for_command, utc_now_iso, write_yaml_if_changed
-from research.journal import journal_subprocess_env, journaled_op, mutation_transaction, operation_lock_path
+from research.common import add_project_root_argument, confirm_command as shared_confirm_command, extract_pdf_record, parse_arxiv_id, print_resolved_project_roots, skill_script_for_command, utc_now_iso, write_yaml_if_changed
+from research.journal import journal_subprocess_env, mutation_transaction
 from research.intake_cli import add_intake_add_arguments
 from research.core import (
     apply_record_governance,
@@ -277,11 +276,6 @@ def _record_staging_failure(
     return path
 
 
-def _source_identity_lock_target(root: Path, kind: str, source: str) -> Path:
-    digest = hashlib.sha256(f"{kind}\0{source}".encode("utf-8")).hexdigest()
-    return kb_root(root) / ".runtime" / "intake-identities" / f"{digest}.lock-key"
-
-
 def _materialize_staged_source(
     root: Path,
     *,
@@ -301,39 +295,35 @@ def _materialize_staged_source(
         to_unit_dir=canonical_dir,
     )
     record["source"] = source_record_fields(canonical_source_info)
-    identity_target = _source_identity_lock_target(root, kind, source)
-    with exclusive_file_lock(operation_lock_path(root, identity_target)):
+    quarantine_root = (
+        kb_root(root)
+        / ".runtime"
+        / "intake-staging"
+        / "legacy-failed-units"
+        / str(record["id"])
+    )
+    rollback_targets = [canonical_dir, stage_dir, quarantine_root]
+    with mutation_transaction(root, "source-intake-materialize", rollback_targets):
         duplicate = detect_duplicate(root, kind, source, title=title)
         if duplicate:
             return None, duplicate, canonical_source_info
 
-        rollback_targets = [canonical_dir]
         quarantine_dir: Path | None = None
         if canonical_dir.exists():
-            quarantine_dir = (
-                kb_root(root)
-                / ".runtime"
-                / "intake-staging"
-                / "legacy-failed-units"
-                / str(record["id"])
-                / uuid.uuid4().hex
-            )
-            rollback_targets.append(quarantine_dir)
-        with journaled_op(root, "source-intake-materialize", rollback_targets):
-            if quarantine_dir is not None:
-                quarantine_dir.parent.mkdir(parents=True, exist_ok=True)
-                os.replace(canonical_dir, quarantine_dir)
-            canonical_dir.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(stage_dir, canonical_dir)
-            path = write_record(root, record)
+            quarantine_dir = quarantine_root / uuid.uuid4().hex
+        if quarantine_dir is not None:
+            quarantine_dir.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(canonical_dir, quarantine_dir)
+        canonical_dir.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(stage_dir, canonical_dir)
+        path = write_record(root, record)
     return path, None, canonical_source_info
 
 
 def _build_index_transaction(root: Path) -> tuple[Path, Path]:
     targets = _index_target_paths(root)
-    with exclusive_file_lock(operation_lock_path(root, kb_root(root) / "index.yaml")):
-        with journaled_op(root, "source-intake-build-index", targets):
-            return build_index(root)
+    with mutation_transaction(root, "source-intake-build-index", targets):
+        return build_index(root)
 
 
 def _intake_transaction_targets(

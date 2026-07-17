@@ -47,6 +47,11 @@ def operation_lock_path(project_root: Path, target_path: Path) -> Path:
     return journal_root(project_root) / "locks" / f"{name}.lock"
 
 
+def workspace_transaction_lock_path(project_root: Path) -> Path:
+    _ensure_journal_runtime(project_root)
+    return journal_root(project_root) / "workspace-transaction.lock"
+
+
 def file_digest(path: Path) -> str | None:
     if not path.exists() and not path.is_symlink():
         return None
@@ -286,18 +291,37 @@ def journal_subprocess_env(
     return env
 
 
-def _resolve_parent_metadata(
+def _nested_root_entry(
     project_root: Path,
     parent_op_id: str,
-) -> tuple[str, int]:
+) -> tuple[dict, dict]:
     parent = load_op(project_root, parent_op_id)
     if parent.get("state") != "begin":
         raise SystemExit(f"Parent journal operation is not active: {parent_op_id}")
     root_op_id = str(parent.get("root_op_id") or parent.get("op_id") or "").strip()
     if not root_op_id:
         raise SystemExit(f"Parent journal operation has no root id: {parent_op_id}")
-    depth = int(parent.get("transaction_depth") or 0) + 1
-    return root_op_id, depth
+    root_entry = parent if root_op_id == parent_op_id else load_op(project_root, root_op_id)
+    if root_entry.get("state") != "begin":
+        raise SystemExit(f"Root journal operation is not active: {root_op_id}")
+    return parent, root_entry
+
+
+def _path_key_is_covered(key: str, declared_key: str) -> bool:
+    key_path = Path(key)
+    declared_path = Path(declared_key)
+    return key_path == declared_path or declared_path in key_path.parents
+
+
+def _validate_nested_target_keys(root_entry: dict, keys: Sequence[str]) -> None:
+    declared = [str(item) for item in root_entry.get("target_paths", []) if str(item)]
+    uncovered = [key for key in keys if not any(_path_key_is_covered(key, target) for target in declared)]
+    if uncovered:
+        root_op_id = str(root_entry.get("op_id") or "")
+        raise SystemExit(
+            "Nested journal targets must be covered by the root transaction "
+            f"{root_op_id}: {', '.join(uncovered)}"
+        )
 
 
 def committed_ops(project_root: Path) -> list[dict]:
@@ -386,6 +410,7 @@ def begin_op(
     *,
     undoable: bool = True,
     operation_role: str = "user",
+    coordination_scope: str = "none",
     parent_op_id: str | None = None,
     attach_to_active: bool = True,
 ) -> str:
@@ -404,14 +429,24 @@ def begin_op(
     if not resolved_parent_id and attach_to_active:
         resolved_parent_id = current_operation_id(project_root)
     if resolved_parent_id:
-        root_op_id, transaction_depth = _resolve_parent_metadata(project_root, resolved_parent_id)
+        parent_entry, root_entry = _nested_root_entry(project_root, resolved_parent_id)
+        _validate_nested_target_keys(root_entry, keys)
+        root_op_id = str(root_entry.get("op_id") or "")
+        transaction_depth = int(parent_entry.get("transaction_depth") or 0) + 1
+        resolved_coordination_scope = (
+            "inherited"
+            if root_entry.get("coordination_scope") == "workspace-exclusive"
+            else str(coordination_scope or "none")
+        )
     else:
         root_op_id, transaction_depth = op_id, 0
+        resolved_coordination_scope = str(coordination_scope or "none")
     before_snapshots = {key: _snapshot_target(project_root, op_id, key) for key in keys}
     entry = {
         "op_id": op_id,
         "op_type": str(op_type),
         "operation_role": str(operation_role or "user"),
+        "coordination_scope": resolved_coordination_scope,
         "parent_op_id": resolved_parent_id,
         "root_op_id": root_op_id,
         "transaction_depth": transaction_depth,
@@ -534,6 +569,7 @@ def journaled_op(
     *,
     undoable: bool = True,
     operation_role: str = "user",
+    coordination_scope: str = "none",
     parent_op_id: str | None = None,
     attach_to_active: bool = True,
 ) -> Iterator[str]:
@@ -543,6 +579,7 @@ def journaled_op(
         target_paths,
         undoable=undoable,
         operation_role=operation_role,
+        coordination_scope=coordination_scope,
         parent_op_id=parent_op_id,
         attach_to_active=attach_to_active,
     )
@@ -567,12 +604,12 @@ def mutation_transaction(
     undoable: bool = True,
     operation_role: str = "user",
 ) -> Iterator[str]:
-    """Lock exact paths and journal one command-level mutation transaction.
+    """Coordinate and journal one command-level mutation transaction.
 
     The default is a user-visible, undoable root operation.  When nested under
     another transaction (including through ``journal_subprocess_env``), the
-    journal automatically records it as a non-undoable descendant whose recovery
-    is owned by the root before-image.
+    targets must be covered by the root's declared path set.  Valid descendants
+    inherit the root's workspace lock and are recovered by its before-image.
     """
     targets = sorted(
         {Path(path).resolve() for path in target_paths},
@@ -583,14 +620,40 @@ def mutation_transaction(
     # Lazy import avoids common -> journal -> common initialization cycles.
     from .common import exclusive_file_lock
 
-    with ExitStack() as locks:
-        for path in targets:
-            locks.enter_context(exclusive_file_lock(operation_lock_path(project_root, path)))
+    parent_op_id = current_operation_id(project_root)
+    if parent_op_id:
+        _, root_entry = _nested_root_entry(project_root, parent_op_id)
+        keys = [_target_key(project_root, path) for path in targets]
+        _validate_nested_target_keys(root_entry, keys)
+        if root_entry.get("coordination_scope") != "workspace-exclusive":
+            raise SystemExit(
+                "Nested mutation requires a root mutation_transaction with workspace coordination."
+            )
         with journaled_op(
             project_root,
             op_type,
             targets,
             undoable=undoable,
             operation_role=operation_role,
+            coordination_scope="inherited",
         ) as op_id:
             yield op_id
+        return
+
+    # The conservative workspace lease makes an independent directory target
+    # mutually exclusive with every descendant target.  Nested subprocesses do
+    # not reacquire it: their signed parent context is validated above, avoiding
+    # parent-waits-child deadlocks during analyzer execution.
+    with exclusive_file_lock(workspace_transaction_lock_path(project_root)):
+        with ExitStack() as locks:
+            for path in targets:
+                locks.enter_context(exclusive_file_lock(operation_lock_path(project_root, path)))
+            with journaled_op(
+                project_root,
+                op_type,
+                targets,
+                undoable=undoable,
+                operation_role=operation_role,
+                coordination_scope="workspace-exclusive",
+            ) as op_id:
+                yield op_id
