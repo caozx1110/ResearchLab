@@ -1,5 +1,7 @@
+import importlib.util
 from pathlib import Path
 import subprocess
+import sys
 
 import pytest
 
@@ -14,6 +16,20 @@ from research.journal import abort_op, begin_op, commit_op, committed_ops, incom
 from research.records import default_record
 from research import yaml_io
 from research.yaml_io import load_yaml
+
+
+def _project_root() -> Path:
+    return Path(__file__).resolve().parents[4]
+
+
+def _load_kb_module():
+    script = _project_root() / ".agents" / "skills" / "knowledge-base-manager" / "scripts" / "kb.py"
+    spec = importlib.util.spec_from_file_location("kb_script_for_recovery_test", script)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_atomic_write_failure_does_not_clobber_existing_target(
@@ -188,3 +204,46 @@ def test_undo_and_restore_use_journal_digests_and_kb_history(tmp_path: Path) -> 
     restored = restore_operation(tmp_path, first_op["op_id"])
     assert restored["op_id"] == first_op["op_id"]
     assert not path.exists()
+
+
+def test_kb_resume_rolls_back_incomplete_operation_and_marks_it_aborted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _configure_kb_git(tmp_path)
+    target = tmp_path / "kb" / "notes" / "resume-target.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("before crash\n", encoding="utf-8")
+    git_checkpoint(tmp_path, "seed resume target", auto_init=False, target_paths=[target])
+    op_id = begin_op(tmp_path, "stranded-write", [target])
+    target.write_text("after crash\n", encoding="utf-8")
+    kb = _load_kb_module()
+    monkeypatch.setattr(sys, "argv", ["kb.py", "--root", str(tmp_path), "resume"])
+
+    assert kb.main() == 0
+
+    output = capsys.readouterr().out
+    assert target.read_text(encoding="utf-8") == "before crash\n"
+    assert load_op(tmp_path, op_id)["state"] == "abort"
+    assert incomplete_ops(tmp_path) == []
+    assert op_id in output
+    assert "1 个目标" in output
+    for forbidden in ["python3", ".py", "git ", "--"]:
+        assert forbidden not in output
+
+
+def test_kb_resume_clean_state_reports_nothing_to_recover(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    kb = _load_kb_module()
+    monkeypatch.setattr(sys, "argv", ["kb.py", "--root", str(tmp_path), "resume"])
+
+    assert kb.main() == 0
+
+    output = capsys.readouterr().out
+    assert "没有未完成操作需要恢复" in output
+    for forbidden in ["python3", ".py", "git ", "--"]:
+        assert forbidden not in output

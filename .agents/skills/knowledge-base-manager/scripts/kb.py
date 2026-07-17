@@ -51,7 +51,7 @@ from research.core import (
     undo_last_operation,
     write_record,
 )
-from research.journal import journaled_op
+from research.journal import abort_op, incomplete_ops, journaled_op
 
 COMMAND_PREFIX = "${RESEARCH_PYTHON:-python3}"
 SCRIPT_BY_KIND = {
@@ -281,6 +281,7 @@ def build_parser() -> argparse.ArgumentParser:
     git_log.add_argument("--limit", type=int, default=10)
     git_checkpoint_cmd = subparsers.add_parser("git-checkpoint", help="Create a Git checkpoint inside kb")
     git_checkpoint_cmd.add_argument("--message", required=True)
+    subparsers.add_parser("resume", help="恢复崩溃后未完成的知识库操作")
     subparsers.add_parser("undo", help="撤销最近一次已提交的知识库操作")
     restore = subparsers.add_parser("restore", help="恢复到指定操作之前的状态")
     restore.add_argument("op_id")
@@ -344,7 +345,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
     root = project_root(PROJECT_ROOT, explicit_root=args.root)
-    if args.command not in {"undo", "restore"}:
+    if args.command not in {"resume", "undo", "restore"}:
         print_resolved_project_roots(root)
 
     if args.command == "init":
@@ -383,6 +384,17 @@ def main() -> int:
             print(f"[ok] commit: {payload.get('commit')}")
         else:
             print(f"[ok] {payload.get('status')}")
+        return 0
+    if args.command == "resume":
+        entries = incomplete_ops(root)
+        if not entries:
+            print("没有未完成操作需要恢复。")
+            return 0
+        for entry in entries:
+            op_id = str(entry["op_id"])
+            payload = restore_operation(root, op_id, recovery_type="resume")
+            abort_op(root, op_id)
+            print(f"已回滚未完成操作 {op_id} 涉及的 {len(payload['restored_paths'])} 个目标。")
         return 0
     if args.command == "undo":
         payload = undo_last_operation(root)
