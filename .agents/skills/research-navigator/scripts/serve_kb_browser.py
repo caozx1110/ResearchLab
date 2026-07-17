@@ -11,6 +11,7 @@ import secrets
 import signal
 import socket
 import subprocess
+import sys
 import threading
 import time
 from functools import partial
@@ -281,13 +282,15 @@ class BrowserHTTPServer(ThreadingHTTPServer):
         *,
         project_root: Path,
         coordinator: BrowserBuildCoordinator,
-        terminal_manager: TerminalManager,
+        terminal_manager: TerminalManager | None,
+        terminal_enabled: bool,
         auth_token: str,
     ) -> None:
         super().__init__(server_address, handler_class)
         self.project_root = project_root
         self.coordinator = coordinator
         self.terminal_manager = terminal_manager
+        self.terminal_enabled = terminal_enabled
         self.auth_token = auth_token
 
 def create_handler(*, project_root: Path):
@@ -377,6 +380,12 @@ def create_handler(*, project_root: Path):
 
         def _handle_system_terminal_targets(self) -> None:
             self._send_json({"ok": True, "targets": system_terminal_targets()})
+
+        def _terminal_available(self) -> bool:
+            if self.server.terminal_enabled:  # type: ignore[attr-defined]
+                return True
+            self._send_error_json("终端功能未启用", status=HTTPStatus.FORBIDDEN)
+            return False
 
         def _handle_file_get(self, parsed) -> None:
             query = parse_qs(parsed.query or "")
@@ -503,6 +512,8 @@ def create_handler(*, project_root: Path):
                 self._handle_file_get(parsed)
                 return
             if parsed.path == "/api/terminal/poll":
+                if not self._terminal_available():
+                    return
                 self._handle_terminal_poll(parsed)
                 return
             return super().do_GET()
@@ -513,15 +524,23 @@ def create_handler(*, project_root: Path):
                 self._send_error_json("unauthorized", status=HTTPStatus.UNAUTHORIZED)
                 return
             if parsed.path == "/api/terminal/open":
+                if not self._terminal_available():
+                    return
                 self._handle_terminal_open()
                 return
             if parsed.path == "/api/terminal/input":
+                if not self._terminal_available():
+                    return
                 self._handle_terminal_input()
                 return
             if parsed.path == "/api/terminal/resize":
+                if not self._terminal_available():
+                    return
                 self._handle_terminal_resize()
                 return
             if parsed.path == "/api/system-terminal/open":
+                if not self._terminal_available():
+                    return
                 self._handle_system_terminal_open()
                 return
             if parsed.path == "/api/rebuild":
@@ -553,6 +572,13 @@ def _host_is_loopback(host: str) -> bool:
     return bool(addresses) and all(ipaddress.ip_address(address).is_loopback for address in addresses)
 
 
+def _print_browser_url(url: str) -> None:
+    if sys.stdout.isatty():
+        print(f"[ok] browser url: {url}", flush=True)
+        return
+    print("[ok] browser URL is available only in the interactive starting terminal.", flush=True)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Serve the research navigator browser.")
     parser.add_argument("--host", default=DEFAULT_HOST, help="Bind host (default: 127.0.0.1)")
@@ -562,6 +588,11 @@ def parse_args() -> argparse.Namespace:
         help="Allow remote network binding despite unauthenticated file-write and shell endpoints.",
     )
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"Bind port (default: {DEFAULT_PORT})")
+    parser.add_argument(
+        "--enable-terminal",
+        action="store_true",
+        help="Enable the optional browser and system terminal integrations.",
+    )
     add_browser_project_root_argument(parser)
     parser.add_argument(
         "--debounce-seconds",
@@ -587,7 +618,7 @@ def main() -> None:
             "Use the remembered research runtime or install watchdog in the active interpreter."
         )
     coordinator = BrowserBuildCoordinator(project_root, debounce_seconds=args.debounce_seconds)
-    terminal_manager = TerminalManager(project_root)
+    terminal_manager = TerminalManager(project_root) if args.enable_terminal else None
     auth_token = secrets.token_urlsafe(32)
     initial_status = safe_rebuild(project_root, script_path=Path(__file__))
     print(f"[ok] initial build: {initial_status.get('build_status')}", flush=True)
@@ -599,6 +630,7 @@ def main() -> None:
         project_root=project_root,
         coordinator=coordinator,
         terminal_manager=terminal_manager,
+        terminal_enabled=args.enable_terminal,
         auth_token=auth_token,
     )
     observer = Observer()
@@ -609,14 +641,15 @@ def main() -> None:
     def shutdown(*_: object) -> None:
         observer.stop()
         coordinator.stop()
-        terminal_manager.close()
+        if terminal_manager is not None:
+            terminal_manager.close()
         threading.Thread(target=server.shutdown, name="research-navigator-shutdown", daemon=True).start()
 
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
 
     print(f"[ok] serving project root: {project_root}", flush=True)
-    print(f"[ok] browser url: {browser_url(args.host, args.port, project_root, token=auth_token)}", flush=True)
+    _print_browser_url(browser_url(args.host, args.port, project_root, token=auth_token))
     print(f"[ok] version url: {version_url(args.host, args.port)}", flush=True)
     print(f"[ok] runtime log: {server_log_path(project_root)}", flush=True)
     try:
@@ -625,7 +658,8 @@ def main() -> None:
         observer.stop()
         observer.join(timeout=3.0)
         coordinator.stop()
-        terminal_manager.close()
+        if terminal_manager is not None:
+            terminal_manager.close()
         server.server_close()
 
 
