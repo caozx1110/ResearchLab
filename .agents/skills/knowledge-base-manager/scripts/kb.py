@@ -4,6 +4,8 @@ from __future__ import annotations
 import argparse
 import inspect
 import sys
+from contextlib import contextmanager
+from collections.abc import Iterator
 from pathlib import Path
 
 SCRIPT_PATH = Path(__file__).resolve()
@@ -38,6 +40,7 @@ from research.core import (
     link_records,
     lint_records,
     locate_record,
+    iter_records,
     checkpoint_and_report,
     project_root,
     promote_record,
@@ -53,6 +56,7 @@ from research.core import (
     write_record,
 )
 from research.journal import abort_op, incomplete_ops, journaled_op
+from research.paths import KB_GITIGNORE_LINES, TEXT_REWRITE_SUFFIXES, kb_gitignore_path, kb_root, runtime_preferences_path, user_root
 
 try:
     from research.git_ops import dirty_kb_paths
@@ -93,6 +97,154 @@ NEXT_COMMAND_BY_KIND = {
     "idea": "analyze",
     "experiment": "diagnose",
 }
+
+
+def _unique_paths(paths: list[Path]) -> list[Path]:
+    return sorted({Path(path).resolve(strict=False) for path in paths}, key=lambda path: path.as_posix())
+
+
+@contextmanager
+def mutation_transaction(root: Path, op_type: str, target_paths: list[Path]) -> Iterator[None]:
+    """Single integration point for R1 multi-file transaction + lock semantics.
+
+    The R-track makes operation locks same-thread reentrant; root integration wraps
+    these exact paths with those locks here, while the U branch already enforces a
+    non-empty literal path set and one journal scope per multi-file mutation.
+    """
+    paths = _unique_paths(target_paths)
+    if not paths:
+        raise SystemExit(f"Refusing mutation with empty operation scope: {op_type}")
+    with journaled_op(root, op_type, paths):
+        yield
+
+
+def mutation_targets(root: Path, *groups: list[Path]) -> list[Path]:
+    """Combine a caller's literal targets with files created by workspace setup."""
+    return _unique_paths([*workspace_creation_targets(root), *(path for group in groups for path in group)])
+
+
+def _gitignore_needs_update(root: Path) -> bool:
+    path = kb_gitignore_path(root)
+    try:
+        existing = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return True
+    return any(line not in existing for line in KB_GITIGNORE_LINES if line)
+
+
+def workspace_creation_targets(root: Path) -> list[Path]:
+    """Exact files that ensure_workspace would create or amend right now."""
+    candidates = [
+        root / "kb" / "config" / "research-settings.md",
+        user_root(root) / "navigation.md",
+        user_root(root) / "current-state.md",
+        topic_taxonomy_path(root),
+        candidate_pools_path(root),
+        runtime_preferences_path(root),
+    ]
+    targets = [path for path in candidates if not path.exists()]
+    if _gitignore_needs_update(root):
+        targets.append(kb_gitignore_path(root))
+    return _unique_paths(targets)
+
+
+def ensure_workspace_transaction(root: Path) -> None:
+    targets = workspace_creation_targets(root)
+    if not targets:
+        # Directory-only repair is idempotent and does not enter a checkpoint.
+        ensure_workspace(root)
+        return
+    with mutation_transaction(root, "ensure_workspace", targets):
+        ensure_workspace(root)
+
+
+def index_mutation_targets(root: Path) -> list[Path]:
+    return _unique_paths(
+        [
+            topic_taxonomy_path(root),
+            candidate_pools_path(root),
+            root / "kb" / "index.yaml",
+            root / "kb" / "index.md",
+        ]
+    )
+
+
+def records_for_scope(root: Path, *, unit_ids: list[str] | None = None, kind: str | None = None) -> list[dict]:
+    if unit_ids:
+        return [locate_record(root, unit_id, kind=kind)[0] for unit_id in unit_ids]
+    return list(iter_records(root, kind=kind))
+
+
+def record_targets(records: list[dict], root: Path) -> list[Path]:
+    return _unique_paths(
+        [record_path(root, str(record["kind"]), str(record["id"])) for record in records]
+    )
+
+
+def compact_operation_targets(root: Path, plan: dict) -> list[Path]:
+    mapping = {str(key): str(value) for key, value in dict(plan.get("mapping") or {}).items()}
+    if not mapping:
+        return []
+    targets = record_targets(list(iter_records(root)), root) + index_mutation_targets(root)
+    research = kb_root(root)
+    for path in research.rglob("*"):
+        if not path.is_file() or ".git" in path.parts or ".journal" in path.parts or ".runtime" in path.parts:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8") if path.suffix.lower() in TEXT_REWRITE_SUFFIXES else ""
+        except (OSError, UnicodeDecodeError):
+            text = ""
+        if any(old_id in text or old_id in path.name for old_id in mapping):
+            targets.append(path)
+            renamed_name = path.name
+            for old_id, new_id in mapping.items():
+                renamed_name = renamed_name.replace(old_id, new_id)
+            if renamed_name != path.name:
+                targets.append(path.with_name(renamed_name))
+    for item in plan.get("items", []):
+        if not isinstance(item, dict):
+            continue
+        old_root = root / "kb" / "units" / f"{item.get('kind')}s" / str(item.get("old_id") or "")
+        new_root = old_root.with_name(str(item.get("new_id") or ""))
+        if old_root.exists():
+            for old_path in old_root.rglob("*"):
+                if old_path.is_file():
+                    targets.extend([old_path, new_root / old_path.relative_to(old_root)])
+    return _unique_paths(targets)
+
+
+def storage_sync_operation_targets(root: Path) -> list[Path]:
+    """Plan KB-local storage-sync targets before opening the transaction.
+
+    R-track narrows sync_storage_layout to KB-local writes. Keep the planning here
+    so that implementation and checkpoint receive one literal path set.
+    """
+    targets = index_mutation_targets(root)
+    research = kb_root(root)
+    legacy_markers = (str((root / "raw").resolve()), str((root / "output").resolve()), "raw/", "output/")
+    for path in research.rglob("*"):
+        if not path.is_file() or ".git" in path.parts or ".journal" in path.parts or ".runtime" in path.parts:
+            continue
+        if path.name == "record.yaml" or path.suffix.lower() in TEXT_REWRITE_SUFFIXES:
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            if any(marker in text for marker in legacy_markers):
+                targets.append(path)
+    for name in ("raw", "output"):
+        source_root = root / name
+        if not source_root.exists():
+            continue
+        destination_root = research / name
+        for source in source_root.rglob("*"):
+            if source.is_file():
+                targets.append(destination_root / source.relative_to(source_root))
+    for nested_git in research.glob("**/.git"):
+        if nested_git == research / ".git" or not nested_git.is_dir():
+            continue
+        targets.extend(path for path in nested_git.rglob("*") if path.is_file())
+    return _unique_paths(targets)
 
 def review_sort_key(record: dict) -> tuple:
     timestamp = str(record.get("updated_at") or record.get("created_at") or record.get("first_ingested_at") or "")
@@ -442,13 +594,18 @@ def main() -> int:
 
     if args.command == "init":
         warn_if_cwd_differs_from_project_root(root, command="kb.py init")
-        ensure_workspace(root)
-        build_index(root)
+        init_paths = mutation_targets(root, index_mutation_targets(root))
+        with mutation_transaction(root, "initialize_workspace", init_paths):
+            ensure_workspace(root)
+            build_index(root)
         print("[ok] initialized kb core workspace")
         return 0
     if args.command == "storage-sync":
-        payload = sync_storage_layout(root)
-        build_index(root)
+        storage_paths = mutation_targets(root, storage_sync_operation_targets(root))
+        with mutation_transaction(root, "storage_sync", storage_paths):
+            ensure_workspace(root)
+            payload = sync_storage_layout(root)
+            build_index(root)
         print(f"[ok] moved paths: {len(payload['moved_paths'])}")
         print(f"[ok] updated records: {len(payload['updated_records'])}")
         print(f"[ok] hydrated raw paths: {len(payload['hydrated_paths'])}")
@@ -456,7 +613,20 @@ def main() -> int:
         print(f"[ok] removed nested repo metadata: {len(payload['removed_nested_git'])}")
         return 0
     if args.command == "git-init":
-        payload = ensure_kb_git_repo(root, create_initial_commit=not args.no_initial_commit, initial_message=args.message)
+        ensure_workspace_transaction(root)
+        payload = ensure_kb_git_repo(root, create_initial_commit=False, initial_message=args.message)
+        if not args.no_initial_commit and not payload.get("head_exists"):
+            initial_paths = dirty_kb_paths(root)
+            if initial_paths:
+                checkpoint = git_checkpoint(
+                    root,
+                    args.message,
+                    trigger="manual",
+                    auto_init=False,
+                    target_paths=initial_paths,
+                )
+                payload["initial_commit"] = bool(checkpoint.get("committed"))
+                payload["checkpoint"] = checkpoint
         print(f"repo_path: {payload['repo_path']}")
         print(f"created: {payload['created']}")
         print(f"initial_commit: {payload['initial_commit']}")
@@ -509,11 +679,22 @@ def main() -> int:
             print(f"- {issue}")
         return 0 if status == "PASS" else 1
     if args.command == "index":
-        yaml_path, md_path = build_index(root)
+        index_paths = mutation_targets(root, index_mutation_targets(root))
+        with mutation_transaction(root, "rebuild_index", index_paths):
+            ensure_workspace(root)
+            yaml_path, md_path = build_index(root)
         print(f"[ok] rebuilt index: {yaml_path.relative_to(root)} and {md_path.relative_to(root)}")
         return 0
     if args.command == "compact-ids":
-        payload = compact_unit_ids(root, kind=args.kind, apply=args.apply)
+        ensure_workspace_transaction(root)
+        plan = compact_unit_ids(root, kind=args.kind, apply=False)
+        if args.apply and plan.get("changed"):
+            compact_paths = mutation_targets(root, compact_operation_targets(root, plan))
+            with mutation_transaction(root, "compact_unit_ids", compact_paths):
+                payload = compact_unit_ids(root, kind=args.kind, apply=True)
+        else:
+            compact_paths = []
+            payload = plan
         mode = "applied" if args.apply else "dry-run"
         print(f"mode: {mode}")
         print(f"changed: {payload['changed']}")
@@ -521,10 +702,18 @@ def main() -> int:
             print(f"- {item['old_id']} -> {item['new_id']} | {item['title']}")
         if args.apply and payload["changed"]:
             print("[ok] rebuilt governance and index")
-            checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: compact knowledge-unit ids ({payload['changed']})")
+            checkpoint_and_report(
+                root,
+                trigger="milestone",
+                message=f"milestone: compact knowledge-unit ids ({payload['changed']})",
+                target_paths=compact_paths,
+            )
         return 0
     if args.command == "rebuild-governance":
-        taxonomy_path, pools_path = rebuild_governance_catalogs(root)
+        governance_paths = mutation_targets(root, [topic_taxonomy_path(root), candidate_pools_path(root)])
+        with mutation_transaction(root, "rebuild_governance", governance_paths):
+            ensure_workspace(root)
+            taxonomy_path, pools_path = rebuild_governance_catalogs(root)
         print(f"[ok] rebuilt {taxonomy_path.relative_to(root)}")
         print(f"[ok] rebuilt {pools_path.relative_to(root)}")
         return 0
@@ -561,11 +750,9 @@ def main() -> int:
             # factual metadata is eligible for blind batch confirmation. Judgement-track
             # items need per-item substance + evidence and are never confirmed here.
             fact_track, judgement_track = partition_review_tracks(hits)
-            batch_paths = [
-                record_path(root, str(record["kind"]), str(record["id"]))
-                for record in fact_track
-            ] + [root / "kb" / "index.yaml", root / "kb" / "index.md"]
-            with journaled_op(root, "batch_confirm_review_queue", batch_paths):
+            batch_paths = mutation_targets(root, record_targets(fact_track, root), index_mutation_targets(root))
+            with mutation_transaction(root, "batch_confirm_review_queue", batch_paths):
+                ensure_workspace(root)
                 written = apply_batch_confirmation(
                     root,
                     fact_track,
@@ -607,11 +794,9 @@ def main() -> int:
             for unit_id in args.id:
                 record, _ = locate_record(root, unit_id, kind=args.kind)
                 records.append(record)
-        batch_paths = [
-            record_path(root, str(record["kind"]), str(record["id"]))
-            for record in records
-        ] + [root / "kb" / "index.yaml", root / "kb" / "index.md"]
-        with journaled_op(root, "batch_confirm", batch_paths):
+        batch_paths = mutation_targets(root, record_targets(records, root), index_mutation_targets(root))
+        with mutation_transaction(root, "batch_confirm", batch_paths):
+            ensure_workspace(root)
             written = apply_batch_confirmation(
                 root,
                 records,
@@ -634,8 +819,12 @@ def main() -> int:
             print(f"[ok] confirmed {len(written)} / {remaining} remaining, re-run")
         return 0
     if args.command == "refresh-schema":
-        paths = refresh_record_schemas(root, unit_ids=args.id or None, kind=args.kind)
-        build_index(root)
+        scoped_records = records_for_scope(root, unit_ids=args.id or None, kind=args.kind)
+        operation_paths = mutation_targets(root, record_targets(scoped_records, root), index_mutation_targets(root))
+        with mutation_transaction(root, "refresh_record_schemas", operation_paths):
+            ensure_workspace(root)
+            paths = refresh_record_schemas(root, unit_ids=args.id or None, kind=args.kind)
+            build_index(root)
         if not paths:
             print("[ok] no records refreshed")
             return 0
@@ -645,17 +834,29 @@ def main() -> int:
     if args.command == "govern":
         if not args.all and not args.id and not args.kind:
             raise SystemExit("Use --all, --kind, or --id to scope governance.")
-        paths = govern_records(
-            root,
-            unit_ids=args.id or None,
-            kind=None if args.all or args.id else args.kind,
-            explicit_topics=args.topic,
-            explicit_tags=args.tag,
-            explicit_pools=args.pool,
-            infer_missing=not args.no_infer,
-            source_label=args.source_label,
-        )
-        build_index(root)
+        scoped_kind = None if args.all or args.id else args.kind
+        scoped_records = records_for_scope(root, unit_ids=args.id or None, kind=scoped_kind)
+        operation_paths = mutation_targets(root, record_targets(scoped_records, root), index_mutation_targets(root))
+        with mutation_transaction(root, "govern_records", operation_paths):
+            ensure_workspace(root)
+            paths = govern_records(
+                root,
+                unit_ids=args.id or None,
+                kind=scoped_kind,
+                explicit_topics=args.topic,
+                explicit_tags=args.tag,
+                explicit_pools=args.pool,
+                infer_missing=not args.no_infer,
+                source_label=args.source_label,
+            )
+            build_index(root)
+            if paths:
+                checkpoint_and_report(
+                    root,
+                    trigger="milestone",
+                    message=f"milestone: update kb governance ({len(paths)} records)",
+                    target_paths=operation_paths,
+                )
         if not paths:
             print("[ok] no records governed")
             return 0
@@ -663,36 +864,22 @@ def main() -> int:
             print(f"[ok] governed {path.relative_to(root)}")
         print(f"[ok] synced {topic_taxonomy_path(root).relative_to(root)}")
         print(f"[ok] synced {candidate_pools_path(root).relative_to(root)}")
-        checkpoint_and_report(
-            root,
-            trigger="milestone",
-            message=f"milestone: update kb governance ({len(paths)} records)",
-            target_paths=[
-                *paths,
-                topic_taxonomy_path(root),
-                candidate_pools_path(root),
-                root / "kb" / "index.yaml",
-                root / "kb" / "index.md",
-            ],
-        )
         return 0
     if args.command == "link":
-        link_records(root, args.from_id, args.to_id, args.relation, note=args.note)
-        build_index(root)
-        print(f"[ok] linked {args.from_id} -> {args.to_id} ({args.relation})")
         from_record, _ = locate_record(root, args.from_id)
         to_record, _ = locate_record(root, args.to_id)
-        checkpoint_and_report(
-            root,
-            trigger="milestone",
-            message=f"milestone: link {args.from_id} to {args.to_id}",
-            target_paths=[
-                record_path(root, str(from_record["kind"]), str(from_record["id"])),
-                record_path(root, str(to_record["kind"]), str(to_record["id"])),
-                root / "kb" / "index.yaml",
-                root / "kb" / "index.md",
-            ],
-        )
+        operation_paths = mutation_targets(root, record_targets([from_record, to_record], root), index_mutation_targets(root))
+        with mutation_transaction(root, "link_records", operation_paths):
+            ensure_workspace(root)
+            link_records(root, args.from_id, args.to_id, args.relation, note=args.note)
+            build_index(root)
+            checkpoint_and_report(
+                root,
+                trigger="milestone",
+                message=f"milestone: link {args.from_id} to {args.to_id}",
+                target_paths=operation_paths,
+            )
+        print(f"[ok] linked {args.from_id} -> {args.to_id} ({args.relation})")
         return 0
     if args.command == "promote":
         promote_kwargs = {
@@ -707,15 +894,19 @@ def main() -> int:
             promote_kwargs["user_authorization"] = args.user_authorization
         if "authorization_source" in promote_parameters:
             promote_kwargs["authorization_source"] = args.authorization_source
-        path = promote_record(root, args.id, **promote_kwargs)
-        build_index(root)
+        record, _ = locate_record(root, args.id)
+        operation_paths = mutation_targets(root, record_targets([record], root), index_mutation_targets(root))
+        with mutation_transaction(root, "promote_record", operation_paths):
+            ensure_workspace(root)
+            path = promote_record(root, args.id, **promote_kwargs)
+            build_index(root)
+            checkpoint_and_report(
+                root,
+                trigger="milestone",
+                message=f"milestone: promote {args.id}",
+                target_paths=operation_paths,
+            )
         print(f"[ok] updated {path.relative_to(root)}")
-        checkpoint_and_report(
-            root,
-            trigger="milestone",
-            message=f"milestone: promote {args.id}",
-            target_paths=[path, root / "kb" / "index.yaml", root / "kb" / "index.md"],
-        )
         return 0
     return 1
 
