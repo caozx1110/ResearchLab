@@ -21,7 +21,8 @@ from research.bootstrap import ensure_managed_runtime
 if __name__ == "__main__":
     ensure_managed_runtime(PROJECT_ROOT)
 
-from research.common import add_project_root_argument, load_yaml, print_resolved_project_roots, slugify, warn_if_cwd_differs_from_project_root, write_text_if_changed, write_yaml_if_changed, yaml_default
+from research.common import add_project_root_argument, exclusive_file_lock, load_yaml, print_resolved_project_roots, slugify, warn_if_cwd_differs_from_project_root, write_text_if_changed, write_yaml_if_changed, yaml_default
+from research.journal import journaled_op, operation_lock_path
 from research.core import (
     candidate_pools_path,
     config_root,
@@ -375,15 +376,18 @@ def main() -> int:
         print_guide(root, focus=args.focus)
         return 0
     if args.command == "set-runtime-pref":
-        payload = load_runtime_preferences(root)
-        _apply_runtime_pref(payload, args.section, args.key, parse_value(args.value))
-        write_runtime_preferences(root, payload)
-        print(f"[ok] updated {runtime_preferences_path(root).relative_to(root)}")
+        path = runtime_preferences_path(root)
+        with exclusive_file_lock(operation_lock_path(root, path)):
+            with journaled_op(root, "set-runtime-pref", [path]):
+                payload = load_runtime_preferences(root)
+                _apply_runtime_pref(payload, args.section, args.key, parse_value(args.value))
+                write_runtime_preferences(root, payload)
+        print(f"[ok] updated {path.relative_to(root)}")
         checkpoint = checkpoint_and_report(
             root,
             trigger="milestone",
             message=f"milestone: update runtime pref {args.section}.{args.key}",
-            target_paths=[runtime_preferences_path(root)],
+            target_paths=[path],
         )
         return 0
     return 1
