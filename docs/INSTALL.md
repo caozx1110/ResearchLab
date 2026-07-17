@@ -1,8 +1,32 @@
 # 安装指南
 
-这份指南说明如何把本仓库的 `.agents/` skills 接到 Claude Code、Codex 和可选的 `kb` 命令上。安装入口是仓库根目录的 `install.sh`。
+这份指南说明如何把这套研究工作流接入 Claude Code、Codex 和可选的 `kb` 命令。安装入口是仓库根目录的 `install.sh`。
 
-## 路径模型
+## 新用户快速安装
+
+在仓库根目录运行：
+
+```bash
+bash install.sh
+```
+
+安装向导会依次询问五件事，按回车即可接受推荐选项：
+
+1. 选择“安装或重新配置”。
+2. 选择你使用的 AI 工具：Claude Code、Codex，或两者都用。
+3. 选择“仅当前或指定工作区”。工作区就是你准备存放项目和研究资料的文件夹。
+4. 确认工作区目录。
+5. 选择是否创建终端 `kb` 快捷命令。它只是额外便利，不影响在 AI 对话中使用 `kb`。
+
+确认页会列出安装目标和将发生的改动。安装完成后，打开刚才选择的 AI 工具，在对话中输入：
+
+```text
+kb init
+```
+
+初始化完成后可用 `kb status` 查看当前状态。更新和卸载都会保留已有研究资料。
+
+## 安装模型（进阶）
 
 安装器有两种模型：
 
@@ -19,9 +43,9 @@
 
 高级用户仍可用 `RESEARCH_PYTHON` 覆盖解释器；也可用 `RESEARCH_VENV` 覆盖受管 venv 路径。设置 `RESEARCH_NO_MANAGED_VENV=1` 会关闭自动 venv，改用当前解释器，此时需要自备 PyYAML。
 
-安装器仍会做一次 `import yaml` preflight；如果当前 Python 缺 PyYAML，它会提供安装 `requirements.txt` 的便利选项。安装失败或跳过时不会中止，后续首次运行会改由受管 `.venv` 安装 PyYAML 和轻量 PDF backend；只有显式设置 `RESEARCH_NO_MANAGED_VENV=1` 时，缺少 PyYAML 才是硬错误。
+安装器仍会做一次 `import yaml` preflight；如果当前 Python 缺 PyYAML，只会提示首次使用时自动准备受管运行环境，不需要手动运行 pip。只有显式设置 `RESEARCH_NO_MANAGED_VENV=1` 时，缺少 PyYAML 才是硬错误。
 
-## 快速安装
+## 命令行与自动化
 
 在仓库根目录运行：
 
@@ -31,7 +55,7 @@ bash install.sh --help
 bash install.sh --claude --project .
 ```
 
-直接 `bash install.sh` 无参数会进入交互式引导：选择 action、agent、scope、workspace 目录、是否把 `kb` 放到 PATH，并在确认页后执行。显式 flag 和非交互/CI 用法保持不变；`NO_COLOR=1` 可关闭终端颜色。
+直接 `bash install.sh` 无参数会进入中文交互向导；支持数字选择，输入无效时会原地重问。显式 flag 和非交互/CI 用法保持不变；`NO_COLOR=1` 可关闭终端颜色。
 
 先看 dry-run：
 
@@ -57,7 +81,7 @@ bash install.sh --claude --system
 bash install.sh --claude --project . --kb-on-path
 ```
 
-project scope 会写 `./bin/kb`，system scope 会写 `~/.local/bin/kb`。如果目标目录不在 `PATH`，安装器会提示。
+选择创建终端快捷命令时，project scope 会写 `./bin/kb`，system scope 会写 `~/.local/bin/kb`。如果目标目录不在 `PATH`，安装器会提示。
 
 ## Project Scope
 
@@ -224,32 +248,16 @@ export RESEARCH_PROJECT_ROOT=/path/to/kb-workspace
 
 ## 首次运行 KB
 
-安装完成后，在你的 KB workspace 初始化：
+安装完成后，打开已配置的 Claude Code 或 Codex，在对话中输入：
 
-```bash
+```text
 kb init
 ```
 
-如果还没有把 `kb` 放到 PATH，可以运行 `bash install.sh --kb-on-path`，或直接调用伪 CLI 本体：
+初始化完成后，可以继续输入：
 
-```bash
-.agents/skills/kb-cli/scripts/kb init
-```
-
-后续常用命令：
-
-```bash
+```text
 kb status
 ```
 
-`kb init` 会创建 `kb/` 布局和基础配置。非交互环境可以用：
-
-```bash
-kb init --non-interactive
-```
-
-外部 copy workspace 可以不设 `RESEARCH_SKILLS_HOME`：
-
-```bash
-/path/to/workspace/.agents/skills/kb-cli/scripts/kb --root /path/to/workspace status
-```
+`kb init` 会创建 `kb/` 布局并由 AI 用自然语言收集基础偏好。是否创建终端快捷命令不影响这条对话式主路径。
