@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,121 @@ if __name__ == "__main__":
 
 from research.common import add_project_root_argument, append_program_reporting_event, ensure_dir, load_yaml, normalize_list, print_resolved_project_roots, write_text_if_changed, write_yaml_if_changed, yaml_default
 from research.core import iter_records, locate_record, project_root, rel
+
+
+DEFAULT_EXPERIMENT_SCALE = {
+    "baseline": {"seed_count": 3, "model_size_tier": "repo-default", "parallelism": 1, "required_gpus": 1},
+    "main": {"seed_count": 3, "model_size_tier": "repo-default", "parallelism": 1, "required_gpus": 1},
+    "ablation": {"seed_count": 1, "model_size_tier": "repo-default", "parallelism": 1, "required_gpus": 1},
+    "diagnostic": {"seed_count": 1, "model_size_tier": "repo-default", "parallelism": 1, "required_gpus": 1},
+}
+
+
+def profile_resources(root: Path) -> dict[str, Any]:
+    profile = load_yaml(root / "kb" / "config" / "user-profile.yaml", default={})
+    if not isinstance(profile, dict):
+        return {}
+    resources = profile.get("resources", {})
+    return resources if isinstance(resources, dict) else {}
+
+
+def _resource_text(resources: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for key, value in resources.items():
+        parts.append(str(key))
+        if isinstance(value, dict):
+            parts.extend(f"{nested_key} {nested_value}" for nested_key, nested_value in value.items())
+        else:
+            parts.append(str(value))
+    return " ".join(parts).lower()
+
+
+def resource_capacity(resources: dict[str, Any]) -> dict[str, Any]:
+    if not resources:
+        return {"declared": False, "gpu_count": None, "gpu_memory_gb": None, "source": "default"}
+    text = _resource_text(resources)
+    gpu_count: int | None = None
+    gpu_memory_gb: int | None = None
+    for key in ("gpu_count", "gpus", "num_gpus"):
+        value = resources.get(key)
+        if isinstance(value, int):
+            gpu_count = max(0, value)
+            break
+        if isinstance(value, str) and value.strip().isdigit():
+            gpu_count = max(0, int(value.strip()))
+            break
+    if gpu_count is None:
+        count_patterns = [
+            r"\b(\d+)\s*[x×]\s*(?:nvidia\s+|amd\s+)?(?:a\d{2,3}|h\d{2,3}|v\d{2,3}|l\d{1,2}|rtx\s*\d{4}|gpu)s?\b",
+            r"\b(\d+)\s*(?:gpu|gpus)\b",
+        ]
+        for pattern in count_patterns:
+            match = re.search(pattern, text)
+            if match:
+                gpu_count = int(match.group(1))
+                break
+    if gpu_count is None and re.search(r"\b(?:cpu[- ]?only|no gpus?|without gpus?)\b", text):
+        gpu_count = 0
+    memory_match = re.search(r"\b(\d+)\s*gb\b", text)
+    if memory_match:
+        gpu_memory_gb = int(memory_match.group(1))
+    return {
+        "declared": True,
+        "gpu_count": gpu_count,
+        "gpu_memory_gb": gpu_memory_gb,
+        "source": "profile.resources",
+    }
+
+
+def experiment_scale(resources: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    capacity = resource_capacity(resources)
+    gpu_count = capacity.get("gpu_count")
+    if gpu_count is None:
+        return {kind: dict(scale) for kind, scale in DEFAULT_EXPERIMENT_SCALE.items()}
+    if gpu_count <= 1:
+        seed_counts = {"baseline": 1, "main": 1, "ablation": 1, "diagnostic": 1}
+        model_size_tier = "small"
+        parallelism = 1
+    elif gpu_count <= 3:
+        seed_counts = {"baseline": 2, "main": 3, "ablation": 2, "diagnostic": 2}
+        model_size_tier = "medium"
+        parallelism = min(2, gpu_count)
+    else:
+        seed_counts = {"baseline": 3, "main": 5, "ablation": 3, "diagnostic": 5}
+        model_size_tier = "large" if gpu_count >= 8 or (capacity.get("gpu_memory_gb") or 0) >= 40 else "medium"
+        parallelism = min(4, gpu_count)
+    required_gpus = {"baseline": 1, "main": 1, "ablation": 1, "diagnostic": 2}
+    return {
+        kind: {
+            "seed_count": seed_counts[kind],
+            "model_size_tier": model_size_tier,
+            "parallelism": parallelism,
+            "required_gpus": required_gpus[kind],
+        }
+        for kind in DEFAULT_EXPERIMENT_SCALE
+    }
+
+
+def apply_resource_feasibility(experiment: dict[str, Any], resources: dict[str, Any], scale: dict[str, Any]) -> dict[str, Any]:
+    capacity = resource_capacity(resources)
+    gpu_count = capacity.get("gpu_count")
+    required_gpus = int(scale.get("required_gpus") or 0)
+    experiment["scale"] = scale
+    experiment["feasibility"] = "unknown" if gpu_count is None else "feasible"
+    experiment["feasibility_reason"] = "No parseable GPU count was declared; verify capacity before launch." if gpu_count is None else "Fits declared GPU capacity."
+    experiment["resource_request"] = ""
+    if gpu_count is not None and required_gpus > gpu_count:
+        deficit = required_gpus - gpu_count
+        experiment["feasibility"] = "unrealistic"
+        experiment["status_color"] = "red"
+        experiment["feasibility_reason"] = f"Requires {required_gpus} GPUs but profile declares {gpu_count}."
+        if deficit <= 4:
+            experiment["resource_request"] = (
+                f"This row needs {required_gpus} GPUs ({deficit} more than declared); worth requesting for the targeted diagnostic run."
+            )
+    else:
+        experiment["status_color"] = "green" if gpu_count is not None else "gray"
+    return experiment
 
 
 def tokenize(text: str) -> set[str]:
@@ -174,6 +290,71 @@ def main() -> int:
     problem = record.get("payload", {}).get("problem", {})
     hypothesis = record.get("payload", {}).get("hypothesis", {})
     analysis = record.get("payload", {}).get("analysis", {})
+    resources = profile_resources(root)
+    scale_by_kind = experiment_scale(resources)
+    experiments = [
+        apply_resource_feasibility(
+            {
+                "name": "baseline-parity",
+                "goal": "Verify the chosen repo baseline still runs and reaches parity.",
+                "kind": "baseline",
+                "repo_dependency": selected_repo.get("id", ""),
+                "interface_under_test": [],
+                "metrics": metrics,
+                "evidence_to_collect": ["baseline metrics", "runtime cost", "failure cases"],
+                "decision_gate": "Must pass before deeper method changes.",
+                "status": "planned",
+            },
+            resources,
+            scale_by_kind["baseline"],
+        ),
+        apply_resource_feasibility(
+            {
+                "name": "minimal-idea-variant",
+                "goal": "Validate the core hypothesis with the smallest interface change.",
+                "kind": "main",
+                "repo_dependency": selected_repo.get("id", ""),
+                "interface_under_test": [item["name"] for item in interfaces[:2]],
+                "metrics": metrics,
+                "evidence_to_collect": ["delta vs baseline", "qualitative failures", "ablation-ready checkpoints"],
+                "decision_gate": "Proceed only if at least one target metric improves without breaking baseline parity.",
+                "status": "planned",
+            },
+            resources,
+            scale_by_kind["main"],
+        ),
+        apply_resource_feasibility(
+            {
+                "name": "interface-ablation",
+                "goal": "Turn off the new interface seams one by one.",
+                "kind": "ablation",
+                "repo_dependency": selected_repo.get("id", ""),
+                "interface_under_test": [item["name"] for item in interfaces],
+                "metrics": metrics,
+                "evidence_to_collect": ["ablation table", "regression cases"],
+                "decision_gate": "Keep only interfaces that show isolated value.",
+                "status": "planned",
+            },
+            resources,
+            scale_by_kind["ablation"],
+        ),
+        apply_resource_feasibility(
+            {
+                "name": "stress-and-failure-slice",
+                "goal": "Collect targeted failure evidence for the most fragile slice.",
+                "kind": "diagnostic",
+                "repo_dependency": selected_repo.get("id", ""),
+                "interface_under_test": [item["name"] for item in interfaces[:1]],
+                "metrics": metrics,
+                "evidence_to_collect": ["failure taxonomy", "resource bottlenecks", "follow-up requests"],
+                "decision_gate": "Convert repeated failures into experiment-workbench diagnosis items.",
+                "status": "planned",
+            },
+            resources,
+            scale_by_kind["diagnostic"],
+        ),
+    ]
+    resource_requests = [item["resource_request"] for item in experiments if item.get("resource_request")]
 
     write_text_if_changed(
         method_path,
@@ -252,52 +433,9 @@ def main() -> int:
             "idea_id": args.idea_id,
             "program_id": args.program_id,
             "selected_repo_id": selected_repo.get("id", ""),
-            "experiments": [
-                {
-                    "name": "baseline-parity",
-                    "goal": "Verify the chosen repo baseline still runs and reaches parity.",
-                    "kind": "baseline",
-                    "repo_dependency": selected_repo.get("id", ""),
-                    "interface_under_test": [],
-                    "metrics": metrics,
-                    "evidence_to_collect": ["baseline metrics", "runtime cost", "failure cases"],
-                    "decision_gate": "Must pass before deeper method changes.",
-                    "status": "planned",
-                },
-                {
-                    "name": "minimal-idea-variant",
-                    "goal": "Validate the core hypothesis with the smallest interface change.",
-                    "kind": "main",
-                    "repo_dependency": selected_repo.get("id", ""),
-                    "interface_under_test": [item["name"] for item in interfaces[:2]],
-                    "metrics": metrics,
-                    "evidence_to_collect": ["delta vs baseline", "qualitative failures", "ablation-ready checkpoints"],
-                    "decision_gate": "Proceed only if at least one target metric improves without breaking baseline parity.",
-                    "status": "planned",
-                },
-                {
-                    "name": "interface-ablation",
-                    "goal": "Turn off the new interface seams one by one.",
-                    "kind": "ablation",
-                    "repo_dependency": selected_repo.get("id", ""),
-                    "interface_under_test": [item["name"] for item in interfaces],
-                    "metrics": metrics,
-                    "evidence_to_collect": ["ablation table", "regression cases"],
-                    "decision_gate": "Keep only interfaces that show isolated value.",
-                    "status": "planned",
-                },
-                {
-                    "name": "stress-and-failure-slice",
-                    "goal": "Collect targeted failure evidence for the most fragile slice.",
-                    "kind": "diagnostic",
-                    "repo_dependency": selected_repo.get("id", ""),
-                    "interface_under_test": [item["name"] for item in interfaces[:1]],
-                    "metrics": metrics,
-                    "evidence_to_collect": ["failure taxonomy", "resource bottlenecks", "follow-up requests"],
-                    "decision_gate": "Convert repeated failures into experiment-workbench diagnosis items.",
-                    "status": "planned",
-                },
-            ],
+            "resource_profile": resource_capacity(resources),
+            "resource_requests": resource_requests,
+            "experiments": experiments,
             "baselines": baselines,
             "risks": risks,
             "information_types": ["fact", "inference", "evaluation", "unverified"],
@@ -319,9 +457,13 @@ def main() -> int:
         }
     state["selected_idea_id"] = args.idea_id
     state["selected_repo_id"] = selected_repo.get("id", "")
+    if resources:
+        state["resource_constraints"] = resources
     if str(state.get("stage") or "").strip() in {"", "init", "idea-review"}:
         state["stage"] = "implementation-planning"
     write_yaml_if_changed(state_path, state)
+    for request in resource_requests:
+        print(f"Resource request: {request}")
     append_program_reporting_event(
         root,
         args.program_id,
