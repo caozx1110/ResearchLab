@@ -414,7 +414,23 @@ def test_screen_fill_validates_paper_type_enum(tmp_path: Path) -> None:
         "paper_type": "benchmark",
         "worth_deep_reading": "no",
         "judgement_reason": ["not relevant"],
-        "claims": [],
+        "claims": [
+            {
+                "id": "claim-paper-type",
+                "text": "This paper defines a real-robot benchmark.",
+                "claim_type": "inference",
+                "confirmation_status": "pending_user_confirmation",
+                "evidence_refs": [
+                    {
+                        "source_unit_id": "p-x",
+                        "artifact": "parse-cache.yaml",
+                        "locator": "page=2",
+                        "quote": "real robot benchmark",
+                        "summary": "paper type",
+                    }
+                ],
+            }
+        ],
     }
     assert paper.verify_screening_fill(payload, unit_dir) == []
 
@@ -424,6 +440,10 @@ def test_screen_fill_validates_paper_type_enum(tmp_path: Path) -> None:
 
     payload["paper_type"] = ""
     assert paper.verify_screening_fill(payload, unit_dir) == []
+
+    payload["paper_type"] = "survey"
+    payload["claims"] = []
+    assert any("paper_type is an agent judgement" in violation for violation in paper.verify_screening_fill(payload, unit_dir))
 
 
 # --------------------------------------------------------------------------- #
@@ -450,8 +470,25 @@ def test_cli_end_to_end_prepare_fill_verify_persist(tmp_path: Path, monkeypatch:
     assert screening["worth_deep_reading"] == "" and screening["evidence_digest"]
 
     screening["paper_type"] = "method_system"
-    screening["worth_deep_reading"] = "no"
-    screening["judgement_reason"] = ["benchmark coverage is out of scope"]
+    screening["worth_deep_reading"] = "yes"
+    screening["judgement_reason"] = ["method/system paper is in scope"]
+    screening["claims"] = [
+        {
+            "id": "claim-screen-type",
+            "text": "The paper proposes an action prediction method.",
+            "claim_type": "inference",
+            "confirmation_status": "pending_user_confirmation",
+            "evidence_refs": [
+                {
+                    "source_unit_id": paper_id,
+                    "artifact": "parse-cache.yaml",
+                    "locator": "page=2",
+                    "quote": "Our method predicts short action chunks",
+                    "summary": "method/system classification",
+                }
+            ],
+        }
+    ]
     write_yaml_if_changed(unit_dir / "screening.yaml", screening)
     assert _run_cli(paper, monkeypatch, tmp_path, "screen", "--phase", "verify",
                     "--paper-id", paper_id, "--defer-post-actions") == 0

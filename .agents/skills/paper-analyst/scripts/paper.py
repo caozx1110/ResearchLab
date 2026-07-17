@@ -390,7 +390,7 @@ def build_screening_scaffold(
             "paper_type": "agent fills: method_system|benchmark|survey",
             "judgement_reason": "agent fills: list of short reasons",
             "relevance_to_current_research": "agent fills: strong|moderate|weak + why",
-            "claims": "agent attaches judgement claims backing worth_deep_reading",
+            "claims": "agent attaches judgement claims backing paper_type and worth_deep_reading",
             "evidence_ref_format": EVIDENCE_REF_FORMAT,
         },
         "agent_hints": {
@@ -438,6 +438,10 @@ def verify_screening_fill(payload: dict, unit_dir: Path) -> list[str]:
     if worth in {"yes", "maybe"} and not claims:
         violations.append(
             "worth_deep_reading is a judgement (yes|maybe) but no evidence-backed claims were attached"
+        )
+    if paper_type and not claims:
+        violations.append(
+            "paper_type is an agent judgement but no evidence-backed claims were attached"
         )
     return violations
 
