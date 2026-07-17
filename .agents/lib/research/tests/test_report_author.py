@@ -98,12 +98,14 @@ def test_weekly_and_stage_reports_include_claims_evidence_events_and_decisions(t
     inputs = report.load_report_inputs(root, program_id)
     weekly = report.render_report(f"Weekly Report: {program_id}", inputs, report_kind="weekly")
     stage = report.render_report(f"Stage Summary: {program_id}", inputs, report_kind="stage-summary")
+    writing = report.render_report(f"Writing Materials: {program_id}", inputs, report_kind="writing-materials")
 
-    for text in (weekly, stage):
+    for text in (weekly, stage, writing):
         assert "The method improves benchmark success rate." in text
         assert "Success rate improves by 8 points." in text
         assert "Grounded review completed" in text
         assert "Use the grounded baseline" in text
+    assert "## Writing Claims & Evidence" in writing
 
 
 def test_outline_produces_evidence_backed_section_skeleton(tmp_path: Path) -> None:
@@ -154,3 +156,22 @@ def test_generated_documents_do_not_leak_raw_commands(tmp_path: Path) -> None:
     forbidden = ("python3 ", ".agents/skills/", "--program-id", "${", "NEXT FOR AGENT:", "kb/units/")
     for document in documents:
         assert not any(token in document for token in forbidden)
+
+
+def test_outline_cli_writes_report_without_raw_command_stdout(tmp_path: Path, monkeypatch, capsys) -> None:
+    report = _load_report_module()
+    root, program_id, _ = _make_workspace(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["report.py", "--root", str(root), "outline", "--program-id", program_id],
+    )
+
+    assert report.main() == 0
+    text = (root / "kb" / "programs" / program_id / "reports" / "paper-outline.md").read_text(encoding="utf-8")
+    stdout = capsys.readouterr().out
+
+    assert "## Related Work: Confirmed Claims & Evidence" in text
+    assert "Success rate improves by 8 points." in text
+    for token in ("python3 ", ".agents/skills/", "--program-id", "${", "NEXT FOR AGENT:"):
+        assert token not in stdout
