@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 from research.common import write_yaml_if_changed
@@ -7,7 +8,18 @@ from research.core import detect_duplicate, ensure_workspace, record_path
 
 
 def _write_record(root: Path, record: dict) -> None:
-    write_yaml_if_changed(record_path(root, record["kind"], record["id"]), record)
+    path = record_path(root, record["kind"], record["id"])
+    artifact = path.parent / "source" / "archived-source.bin"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    original = Path(str(record.get("source", {}).get("original_uri") or ""))
+    data = original.read_bytes() if original.is_file() else b"archived canonical source"
+    artifact.write_bytes(data)
+    source = record.setdefault("source", {})
+    source["backup_kind"] = "file"
+    source["backup_paths"] = [artifact.relative_to(root).as_posix()]
+    source["file_hash"] = hashlib.sha256(data).hexdigest()
+    record.setdefault("status", "active")
+    write_yaml_if_changed(path, record)
 
 
 def test_detect_duplicate_by_url(tmp_path: Path) -> None:

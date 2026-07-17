@@ -11,6 +11,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -28,7 +29,7 @@ from .slugs import KEYWORD_BLACKLIST, STOPWORDS, normalize_list, normalize_perso
 from .yaml_io import dump_yaml, load_yaml, write_text_if_changed, write_yaml_if_changed, yaml_duplicate_key_issues
 
 
-RUNTIME_MODULES = ("yaml", "PyPDF2", "pypdf")
+RUNTIME_MODULES = ("yaml", "pymupdf4llm", "fitz", "PyPDF2", "pypdf")
 COMMAND_PREFIX = "${RESEARCH_PYTHON:-python3}"
 CONFIRM_SCRIPT_BY_KIND = {
     "paper": ".agents/skills/paper-analyst/scripts/paper.py",
@@ -245,19 +246,50 @@ def parse_iso_datetime(value: Any) -> datetime | None:
         return None
 
 
+_FILE_LOCK_GUARD = threading.Lock()
+_FILE_THREAD_LOCKS: dict[str, threading.RLock] = {}
+_FILE_LOCK_LOCAL = threading.local()
+
+
+def _in_process_file_lock(key: str) -> threading.RLock:
+    with _FILE_LOCK_GUARD:
+        return _FILE_THREAD_LOCKS.setdefault(key, threading.RLock())
+
+
 @contextmanager
 def exclusive_file_lock(path: Path):
+    """Cross-process file lock that is reentrant within the current thread."""
     ensure_dir(path.parent)
-    with path.open("a+", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
-            yield handle
-        finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    key = path.resolve().as_posix()
+    thread_lock = _in_process_file_lock(key)
+    with thread_lock:
+        held = getattr(_FILE_LOCK_LOCAL, "held", None)
+        if held is None:
+            held = {}
+            _FILE_LOCK_LOCAL.held = held
+        current = held.get(key)
+        if current is not None:
+            current["depth"] += 1
+            try:
+                yield current["handle"]
+            finally:
+                current["depth"] -= 1
+            return
+
+        with path.open("a+", encoding="utf-8") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            held[key] = {"handle": handle, "depth": 1}
+            try:
+                yield handle
+            finally:
+                held.pop(key, None)
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def program_lock_path(project_root: Path, program_id: str) -> Path:
-    return program_root(project_root, program_id) / ".program.lock"
+    from .journal import operation_lock_path
+
+    return operation_lock_path(project_root, program_root(project_root, program_id) / "state.yaml")
 
 
 @contextmanager
@@ -456,7 +488,46 @@ def infer_topics_and_tags(text: str, *, project_root: Path | None = None) -> tup
     return sorted(topics), sorted(tags)
 
 
+class _FitzPageAdapter:
+    def __init__(self, page: Any):
+        self._page = page
+
+    def extract_text(self) -> str:
+        return str(self._page.get_text("text") or "")
+
+
+class _FitzReaderAdapter:
+    """Expose the small PdfReader interface used by legacy metadata helpers."""
+
+    def __init__(self, path: str):
+        import fitz  # type: ignore
+
+        self._document = fitz.open(path)
+        raw_metadata = dict(self._document.metadata or {})
+        aliases = {
+            "title": "Title",
+            "author": "Author",
+            "subject": "Subject",
+            "keywords": "Keywords",
+            "creator": "Creator",
+            "producer": "Producer",
+            "creationDate": "CreationDate",
+            "modDate": "ModDate",
+        }
+        self.metadata = dict(raw_metadata)
+        for source_key, target_key in aliases.items():
+            if raw_metadata.get(source_key):
+                self.metadata[target_key] = raw_metadata[source_key]
+        self.pages = [_FitzPageAdapter(self._document[index]) for index in range(len(self._document))]
+
+
 def pdf_backend() -> Any:
+    try:
+        import fitz  # type: ignore  # noqa: F401
+
+        return _FitzReaderAdapter
+    except ModuleNotFoundError:
+        pass
     try:
         from PyPDF2 import PdfReader  # type: ignore
 
@@ -468,13 +539,21 @@ def pdf_backend() -> Any:
             return PdfReader
         except ModuleNotFoundError as exc:
             raise ModuleNotFoundError(
-                "PDF parsing requires PyPDF2 or pypdf in the active research runtime."
+                "PDF parsing requires pymupdf4llm/fitz, PyPDF2, or pypdf in the active research runtime."
             ) from exc
 
 
 def current_runtime_capabilities() -> dict[str, Any]:
     module_status = {name: importlib.util.find_spec(name) is not None for name in RUNTIME_MODULES}
-    pdf_backend_name = "PyPDF2" if module_status["PyPDF2"] else ("pypdf" if module_status["pypdf"] else "")
+    pdf_backend_name = (
+        "pymupdf4llm"
+        if module_status["pymupdf4llm"] and module_status["fitz"]
+        else (
+            "fitz"
+            if module_status["fitz"]
+            else ("PyPDF2" if module_status["PyPDF2"] else ("pypdf" if module_status["pypdf"] else ""))
+        )
+    )
     return {
         "python": sys.executable,
         "version": sys.version.split()[0],
@@ -488,8 +567,9 @@ def current_runtime_capabilities() -> dict[str, Any]:
 def inspect_python_runtime(python_executable: str) -> dict[str, Any]:
     script = (
         "import importlib.util, json, sys\n"
-        "mods = {name: bool(importlib.util.find_spec(name)) for name in ('yaml', 'PyPDF2', 'pypdf')}\n"
-        "backend = 'PyPDF2' if mods['PyPDF2'] else ('pypdf' if mods['pypdf'] else '')\n"
+        "mods = {name: bool(importlib.util.find_spec(name)) for name in ('yaml', 'pymupdf4llm', 'fitz', 'PyPDF2', 'pypdf')}\n"
+        "backend = ('pymupdf4llm' if mods['pymupdf4llm'] and mods['fitz'] else "
+        "('fitz' if mods['fitz'] else ('PyPDF2' if mods['PyPDF2'] else ('pypdf' if mods['pypdf'] else ''))))\n"
         "print(json.dumps({\n"
         "    'python': sys.executable,\n"
         "    'version': sys.version.split()[0],\n"
@@ -1101,7 +1181,22 @@ def load_list_document(path: Path, doc_id: str, generated_by: str) -> dict[str, 
     return payload
 
 
-def append_list_item(path: Path, doc_id: str, generated_by: str, item: dict[str, Any], *, default_status: str = "") -> Path:
+def _kb_project_root_for_path(path: Path) -> Path | None:
+    resolved = path.resolve(strict=False)
+    for candidate in [resolved.parent, *resolved.parents]:
+        if candidate.name == "kb":
+            return candidate.parent
+    return None
+
+
+def _append_list_item_unlocked(
+    path: Path,
+    doc_id: str,
+    generated_by: str,
+    item: dict[str, Any],
+    *,
+    default_status: str = "",
+) -> Path:
     payload = load_list_document(path, doc_id, generated_by)
     items = [entry for entry in payload.get("items", []) if isinstance(entry, dict)]
     normalized = dict(item)
@@ -1115,6 +1210,30 @@ def append_list_item(path: Path, doc_id: str, generated_by: str, item: dict[str,
     payload["generated_at"] = utc_now_iso()
     write_yaml_if_changed(path, payload)
     return path
+
+
+def append_list_item(path: Path, doc_id: str, generated_by: str, item: dict[str, Any], *, default_status: str = "") -> Path:
+    project_root = _kb_project_root_for_path(path)
+    if project_root is None:
+        return _append_list_item_unlocked(
+            path,
+            doc_id,
+            generated_by,
+            item,
+            default_status=default_status,
+        )
+
+    from .journal import journaled_op, operation_lock_path
+
+    with exclusive_file_lock(operation_lock_path(project_root, path)):
+        with journaled_op(project_root, "append_list_item", [path]):
+            return _append_list_item_unlocked(
+                path,
+                doc_id,
+                generated_by,
+                item,
+                default_status=default_status,
+            )
 
 
 def program_reporting_events_path(project_root: Path, program_id: str) -> Path:
@@ -1145,29 +1264,35 @@ def append_program_reporting_event(
     *,
     generated_by: str,
 ) -> Path:
+    # Local import avoids the common <-> journal module cycle while keeping the
+    # shared load-modify-write transaction guarded by the stable on-disk lock.
+    from .journal import journaled_op, operation_lock_path
+
     path = program_reporting_events_path(project_root, program_id)
-    payload = load_list_document(path, f"{program_id}-reporting-events", generated_by)
-    payload["program_id"] = program_id
-    payload["generated_by"] = generated_by
-    payload["generated_at"] = utc_now_iso()
-    items = [item for item in payload.get("items", []) if isinstance(item, dict)]
-    normalized = dict(event)
-    normalized.setdefault("timestamp", utc_now_iso())
-    normalized["source_skill"] = str(normalized.get("source_skill") or generated_by).strip() or generated_by
-    normalized["event_type"] = str(normalized.get("event_type") or "update").strip() or "update"
-    normalized["title"] = str(normalized.get("title") or "").strip()
-    normalized["summary"] = str(normalized.get("summary") or "").strip()
-    for key in ("artifacts", "idea_ids", "paper_ids", "repo_ids", "tags"):
-        values = normalized.get(key, [])
-        if isinstance(values, list):
-            normalized[key] = [str(item) for item in values if str(item).strip()]
-        else:
-            normalized[key] = []
-    if "stage" in normalized:
-        normalized["stage"] = str(normalized.get("stage") or "").strip()
-    items.append(normalized)
-    payload["items"] = items
-    write_yaml_if_changed(path, payload)
+    with exclusive_file_lock(operation_lock_path(project_root, path)):
+        with journaled_op(project_root, "append_program_reporting_event", [path]):
+            payload = load_list_document(path, f"{program_id}-reporting-events", generated_by)
+            payload["program_id"] = program_id
+            payload["generated_by"] = generated_by
+            payload["generated_at"] = utc_now_iso()
+            items = [item for item in payload.get("items", []) if isinstance(item, dict)]
+            normalized = dict(event)
+            normalized.setdefault("timestamp", utc_now_iso())
+            normalized["source_skill"] = str(normalized.get("source_skill") or generated_by).strip() or generated_by
+            normalized["event_type"] = str(normalized.get("event_type") or "update").strip() or "update"
+            normalized["title"] = str(normalized.get("title") or "").strip()
+            normalized["summary"] = str(normalized.get("summary") or "").strip()
+            for key in ("artifacts", "idea_ids", "paper_ids", "repo_ids", "tags"):
+                values = normalized.get(key, [])
+                if isinstance(values, list):
+                    normalized[key] = [str(item) for item in values if str(item).strip()]
+                else:
+                    normalized[key] = []
+            if "stage" in normalized:
+                normalized["stage"] = str(normalized.get("stage") or "").strip()
+            items.append(normalized)
+            payload["items"] = items
+            write_yaml_if_changed(path, payload)
     return path
 
 

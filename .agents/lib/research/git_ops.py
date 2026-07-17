@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import hashlib
 import subprocess
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
 from .common import (
     ensure_dir,
+    exclusive_file_lock,
     load_yaml,
     parse_iso_datetime,
     utc_now_iso,
@@ -21,7 +23,17 @@ from .paths import (
     kb_runtime_root,
     versioning_state_path,
 )
-from .journal import journaled_op, latest_committed_op, load_op, target_path
+from .journal import (
+    JOURNAL_DIRNAME,
+    journal_root,
+    journaled_op,
+    latest_committed_op,
+    load_op,
+    mark_op_undone,
+    operation_lock_path,
+    restore_before_snapshots,
+    target_path,
+)
 from .prefs import (
     ensure_workspace,
     load_runtime_preferences,
@@ -83,7 +95,13 @@ def ensure_kb_git_repo(project_root: Path, *, create_initial_commit: bool = True
         "head_exists": _git_head_exists(project_root),
     }
     if create_initial_commit and not result["head_exists"]:
-        checkpoint = git_checkpoint(project_root, initial_message, trigger="manual", auto_init=False)
+        checkpoint = git_checkpoint(
+            project_root,
+            initial_message,
+            trigger="manual",
+            auto_init=False,
+            target_paths=dirty_kb_paths(project_root),
+        )
         result["initial_commit"] = checkpoint.get("committed", False)
         result["head_exists"] = _git_head_exists(project_root)
         result["checkpoint"] = checkpoint
@@ -114,6 +132,7 @@ def git_checkpoint(
     auto_init: bool = True,
     target_paths: Sequence[Path | str] | None = None,
 ) -> dict[str, Any]:
+    scoped_paths = _normalize_git_paths(project_root, target_paths)
     ensure_workspace(project_root)
     if not kb_repo_exists(project_root):
         if auto_init:
@@ -121,26 +140,27 @@ def git_checkpoint(
         else:
             return {"committed": False, "status": "missing-repo", "message": "kb git repo is not initialized"}
     ensure_kb_gitignore(project_root)
-    scoped_paths = _normalize_git_paths(project_root, target_paths)
-    if scoped_paths:
-        pathspecs = [f":(top,literal){path}" for path in scoped_paths]
-        addable_pathspecs = [
-            pathspec
-            for path, pathspec in zip(scoped_paths, pathspecs)
-            if (kb_repo_path(project_root) / path).exists() or _git_path_is_tracked(project_root, path)
-        ]
-        if addable_pathspecs:
-            _run_git(project_root, "add", "-A", "--", *addable_pathspecs, check=True)
-        staged = _run_git(project_root, "diff", "--cached", "--name-only", "--", *pathspecs, check=False)
-    else:
-        _run_git(project_root, "add", "-A", ".", check=True)
-        staged = _run_git(project_root, "diff", "--cached", "--name-only", check=False)
+    checkpointable_paths = [
+        path
+        for path in scoped_paths
+        if _git_path_is_tracked(project_root, path) or not _git_path_is_ignored(project_root, path)
+    ]
+    if not checkpointable_paths:
+        return {"committed": False, "status": "no-changes", "message": "no checkpointable kb changes to commit"}
+    pathspecs = [f":(top,literal){path}" for path in checkpointable_paths]
+    addable_pathspecs = [
+        pathspec
+        for path, pathspec in zip(checkpointable_paths, pathspecs)
+        if (kb_repo_path(project_root) / path).exists() or _git_path_is_tracked(project_root, path)
+    ]
+    if addable_pathspecs:
+        _run_git(project_root, "add", "--all", "--", *addable_pathspecs, check=True)
+    staged = _run_git(project_root, "diff", "--cached", "--name-only", "--", *pathspecs, check=False)
     staged_files = [line.strip() for line in staged.stdout.splitlines() if line.strip()]
     if not staged_files:
         return {"committed": False, "status": "no-changes", "message": "no kb changes to commit"}
     commit_args = ["commit", "-m", message]
-    if scoped_paths:
-        commit_args.extend(["--only", "--", *pathspecs])
+    commit_args.extend(["--only", "--", *pathspecs])
     commit = _run_git(project_root, *commit_args, check=False)
     if commit.returncode != 0:
         stderr = commit.stderr.strip() or commit.stdout.strip() or "git commit failed"
@@ -163,6 +183,7 @@ def maybe_auto_checkpoint(
     message: str,
     target_paths: Sequence[Path | str] | None = None,
 ) -> dict[str, Any]:
+    scoped_paths = _normalize_git_paths(project_root, target_paths)
     prefs = load_runtime_preferences(project_root)
     versioning = prefs.get("versioning", {})
     if not isinstance(versioning, dict) or not versioning.get("enabled", True):
@@ -185,42 +206,51 @@ def maybe_auto_checkpoint(
         else:
             return {"committed": False, "status": "missing-repo", "reason": "kb git repo is not initialized"}
 
-    if trigger == "browser-save":
-        state = load_versioning_state(project_root)
-        last_commit_at = parse_iso_datetime(state.get("last_auto_commit_at"))
-        debounce_seconds = int(versioning.get("debounce_seconds") or 0)
-        if last_commit_at is not None and debounce_seconds > 0:
-            elapsed = (datetime.now(timezone.utc) - last_commit_at.astimezone(timezone.utc)).total_seconds()
-            if elapsed < debounce_seconds:
-                return {
-                    "committed": False,
-                    "status": "debounced",
-                    "reason": f"last browser-save commit was {elapsed:.1f}s ago",
-                }
+    state_path = versioning_state_path(project_root)
+    with exclusive_file_lock(operation_lock_path(project_root, state_path)):
+        if trigger == "browser-save":
+            state = load_versioning_state(project_root)
+            last_commit_at = parse_iso_datetime(state.get("last_auto_commit_at"))
+            debounce_seconds = int(versioning.get("debounce_seconds") or 0)
+            if last_commit_at is not None and debounce_seconds > 0:
+                elapsed = (datetime.now(timezone.utc) - last_commit_at.astimezone(timezone.utc)).total_seconds()
+                if elapsed < debounce_seconds:
+                    return {
+                        "committed": False,
+                        "status": "debounced",
+                        "reason": f"last browser-save commit was {elapsed:.1f}s ago",
+                    }
 
-    result = git_checkpoint(
-        project_root,
-        message,
-        trigger=trigger,
-        auto_init=False,
-        target_paths=target_paths,
-    )
-    if result.get("committed"):
-        state = load_versioning_state(project_root)
-        state["last_auto_commit_at"] = utc_now_iso()
-        state["last_trigger"] = trigger
-        state["last_commit"] = result.get("commit", "")
-        history = [item for item in state.get("history", []) if isinstance(item, dict)]
-        history.append(
-            {
-                "timestamp": state["last_auto_commit_at"],
-                "trigger": trigger,
-                "commit": result.get("commit", ""),
-                "message": message,
-            }
+        result = git_checkpoint(
+            project_root,
+            message,
+            trigger=trigger,
+            auto_init=False,
+            target_paths=scoped_paths,
         )
-        state["history"] = history[-50:]
-        write_versioning_state(project_root, state)
+        if result.get("committed"):
+            with journaled_op(
+                project_root,
+                "write_versioning_state",
+                [state_path],
+                undoable=False,
+                operation_role="bookkeeping",
+            ):
+                state = load_versioning_state(project_root)
+                state["last_auto_commit_at"] = utc_now_iso()
+                state["last_trigger"] = trigger
+                state["last_commit"] = result.get("commit", "")
+                history = [item for item in state.get("history", []) if isinstance(item, dict)]
+                history.append(
+                    {
+                        "timestamp": state["last_auto_commit_at"],
+                        "trigger": trigger,
+                        "commit": result.get("commit", ""),
+                        "message": message,
+                    }
+                )
+                state["history"] = history[-50:]
+                write_versioning_state(project_root, state)
     return result
 
 
@@ -231,11 +261,12 @@ def checkpoint_and_report(
     message: str,
     target_paths: Sequence[Path | str] | None = None,
 ) -> dict[str, Any]:
+    scoped_paths = _normalize_git_paths(project_root, target_paths)
     checkpoint = maybe_auto_checkpoint(
         project_root,
         trigger=trigger,
         message=message,
-        target_paths=target_paths,
+        target_paths=scoped_paths,
     )
     if checkpoint.get("committed"):
         print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
@@ -247,10 +278,12 @@ def _normalize_git_paths(
     target_paths: Sequence[Path | str] | None,
 ) -> list[str]:
     if not target_paths:
-        return []
+        raise SystemExit("Checkpoint requires a non-empty explicit target_paths scope.")
     repo = kb_repo_path(project_root).resolve()
     normalized: set[str] = set()
     for raw_path in target_paths:
+        if not str(raw_path).strip():
+            raise SystemExit("Checkpoint target paths cannot contain empty values.")
         path = Path(raw_path)
         if not path.is_absolute():
             project_candidate = (project_root / path).resolve()
@@ -259,14 +292,54 @@ def _normalize_git_paths(
         else:
             path = path.resolve()
         try:
-            normalized.add(path.relative_to(repo).as_posix())
+            relative_path = path.relative_to(repo).as_posix()
         except ValueError as exc:
             raise SystemExit(f"Checkpoint target must be inside kb/: {raw_path}") from exc
+        if relative_path in {"", "."}:
+            raise SystemExit("Checkpoint target cannot be the whole kb/ repository.")
+        if relative_path == JOURNAL_DIRNAME or relative_path.startswith(f"{JOURNAL_DIRNAME}/"):
+            raise SystemExit("Checkpoint targets cannot include the ignored operation journal.")
+        if relative_path == ".git" or relative_path.startswith(".git/"):
+            raise SystemExit("Checkpoint targets cannot include kb/.git metadata.")
+        normalized.add(relative_path)
+    if not normalized:
+        raise SystemExit("Checkpoint requires a non-empty explicit target_paths scope.")
     return sorted(normalized)
+
+
+def dirty_kb_paths(project_root: Path) -> list[Path]:
+    """Return every dirty KB file as an explicit literal checkpoint target.
+
+    This is intentionally separate from :func:`git_checkpoint`: callers such as
+    the user-requested manual checkpoint verb may choose to checkpoint the whole
+    dirty worktree, but the checkpoint primitive itself never broadens an absent
+    scope into a repository-wide add.
+    """
+    if not kb_repo_exists(project_root):
+        return []
+    relative_paths: set[str] = set()
+    commands = [
+        ("diff", "--name-only", "-z"),
+        ("diff", "--cached", "--name-only", "-z"),
+        ("ls-files", "--others", "--exclude-standard", "-z"),
+    ]
+    for args in commands:
+        result = _run_git(project_root, *args, check=False)
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip() or "git status query failed"
+            raise SystemExit(detail)
+        relative_paths.update(item for item in result.stdout.split("\0") if item)
+    repo = kb_repo_path(project_root)
+    return [repo / relative_path for relative_path in sorted(relative_paths)]
 
 
 def _git_path_is_tracked(project_root: Path, relative_path: str) -> bool:
     result = _run_git(project_root, "ls-files", "--error-unmatch", "--", relative_path, check=False)
+    return result.returncode == 0
+
+
+def _git_path_is_ignored(project_root: Path, relative_path: str) -> bool:
+    result = _run_git(project_root, "check-ignore", "-q", "--", relative_path, check=False)
     return result.returncode == 0
 
 
@@ -304,16 +377,32 @@ def _restore_paths_from_revision(
 
 
 def restore_operation(project_root: Path, op_id: str, *, recovery_type: str = "restore") -> dict[str, Any]:
-    if not kb_repo_exists(project_root) or not _git_head_exists(project_root):
-        raise SystemExit("知识库版本历史尚未初始化，无法恢复。")
     entry = load_op(project_root, op_id)
     before_digests = entry.get("before_digests", {})
     if not isinstance(before_digests, dict) or not before_digests:
         raise SystemExit(f"操作 {op_id} 没有可恢复的目标。")
-    revision = _find_revision_for_digests(project_root, before_digests)
     target_paths = [target_path(project_root, path) for path in before_digests]
-    with journaled_op(project_root, f"{recovery_type}:{op_id}", target_paths) as recovery_op_id:
-        restored = _restore_paths_from_revision(project_root, revision, before_digests)
+    has_snapshots = isinstance(entry.get("before_snapshots"), dict) and bool(entry.get("before_snapshots"))
+    with ExitStack() as locks:
+        for path in sorted(target_paths, key=lambda item: item.as_posix()):
+            locks.enter_context(exclusive_file_lock(operation_lock_path(project_root, path)))
+        with journaled_op(
+            project_root,
+            f"{recovery_type}:{op_id}",
+            target_paths,
+            undoable=False,
+            operation_role="recovery",
+            attach_to_active=False,
+        ) as recovery_op_id:
+            if has_snapshots:
+                restored = restore_before_snapshots(project_root, op_id)
+            else:
+                if not kb_repo_exists(project_root) or not _git_head_exists(project_root):
+                    raise SystemExit("知识库版本历史尚未初始化，且旧操作没有字节快照，无法恢复。")
+                revision = _find_revision_for_digests(project_root, before_digests)
+                restored = _restore_paths_from_revision(project_root, revision, before_digests)
+        # Journal commit must succeed before Git advances.  If commit_op fails,
+        # journaled_op restores the pre-recovery bytes and no checkpoint exists.
         checkpoint = git_checkpoint(
             project_root,
             f"recovery: {recovery_type} {op_id}",
@@ -321,6 +410,8 @@ def restore_operation(project_root: Path, op_id: str, *, recovery_type: str = "r
             auto_init=False,
             target_paths=restored,
         )
+    if recovery_type == "undo":
+        mark_op_undone(project_root, op_id, recovery_op_id)
     return {
         "op_id": op_id,
         "recovery_op_id": recovery_op_id,
@@ -330,8 +421,9 @@ def restore_operation(project_root: Path, op_id: str, *, recovery_type: str = "r
 
 
 def undo_last_operation(project_root: Path) -> dict[str, Any]:
-    entry = latest_committed_op(project_root)
-    return restore_operation(project_root, str(entry["op_id"]), recovery_type="undo")
+    with exclusive_file_lock(journal_root(project_root) / ".undo.lock"):
+        entry = latest_committed_op(project_root)
+        return restore_operation(project_root, str(entry["op_id"]), recovery_type="undo")
 
 
 __all__ = [
@@ -344,6 +436,7 @@ __all__ = [
     "ensure_kb_git_repo",
     "kb_git_status",
     "kb_git_log",
+    "dirty_kb_paths",
     "git_checkpoint",
     "maybe_auto_checkpoint",
     "checkpoint_and_report",
