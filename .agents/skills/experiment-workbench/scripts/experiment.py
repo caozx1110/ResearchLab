@@ -27,11 +27,13 @@ from research.common import (
     append_list_item,
     append_program_reporting_event,
     load_list_document,
+    load_yaml,
     normalize_list,
     print_resolved_project_roots,
     write_text_if_changed,
 )
 from research.core import append_history, build_index, confirm_unit, default_record, ensure_workspace, locate_record, project_root, rel, write_record
+from research.evidence import validate_claims, verify_claim_evidence
 
 RUN_OUTCOME_CHOICES = ["success", "partial", "failed", "blocked", "inconclusive"]
 CLASSIFICATION_CHOICES = ["method", "implementation", "data", "evaluation", "resource", "environment", "process", "unknown"]
@@ -40,6 +42,7 @@ FOLLOW_UP_PRIORITY_CHOICES = ["low", "normal", "high", "critical"]
 METRIC_DIRECTION_CHOICES = ["higher-better", "lower-better", "neutral", "unknown"]
 RUN_TAG_CHOICES = ["baseline", "milestone"]
 DEFAULT_RECENT_RUNS = 5
+RUN_EVIDENCE_ARTIFACT_RE = re.compile(r"^(?:run-log\.yaml|runs/run-\d{3}\.md)$")
 
 
 def add_confirmation_arguments(parser: argparse.ArgumentParser) -> None:
@@ -225,6 +228,42 @@ def build_diagnosis_context(runs: list[dict[str, Any]], recent_n: int) -> dict[s
     }
 
 
+def load_diagnosis_claims(root: Path, unit_root: Path, experiment_id: str, claims_file: str) -> list[dict[str, Any]]:
+    if not claims_file:
+        return []
+    claims_path = Path(claims_file).expanduser()
+    if not claims_path.is_absolute():
+        claims_path = root / claims_path
+    payload = load_yaml(claims_path, default=[])
+    claims = payload.get("claims", []) if isinstance(payload, dict) else payload
+    violations = validate_claims(claims)
+    if isinstance(claims, list):
+        for claim_index, claim in enumerate(claims):
+            if not isinstance(claim, dict):
+                continue
+            if str(claim.get("confirmation_status") or "") != "pending_user_confirmation":
+                violations.append(f"claims[{claim_index}]: diagnosis claim must remain pending_user_confirmation")
+            refs = claim.get("evidence_refs") or []
+            if isinstance(refs, (list, tuple)):
+                for ref_index, evidence_ref in enumerate(refs):
+                    if not isinstance(evidence_ref, dict):
+                        continue
+                    source_unit_id = str(evidence_ref.get("source_unit_id") or "")
+                    artifact = str(evidence_ref.get("artifact") or "")
+                    if source_unit_id != experiment_id:
+                        violations.append(
+                            f"claims[{claim_index}].evidence_refs[{ref_index}]: source_unit_id must be {experiment_id}"
+                        )
+                    if not RUN_EVIDENCE_ARTIFACT_RE.fullmatch(artifact):
+                        violations.append(
+                            f"claims[{claim_index}].evidence_refs[{ref_index}]: artifact must be run-log.yaml or runs/run-NNN.md"
+                        )
+            violations.extend(verify_claim_evidence(claim, unit_root))
+    if violations:
+        raise SystemExit("Diagnosis claims failed evidence verification:\n- " + "\n- ".join(violations))
+    return claims
+
+
 def list_document_path(unit_root: Path, name: str) -> Path:
     return unit_root / f"{name}.yaml"
 
@@ -347,6 +386,7 @@ def build_parser() -> argparse.ArgumentParser:
     diagnose.add_argument("--unknown", action="append", default=[])
     diagnose.add_argument("--next-action", action="append", default=[])
     diagnose.add_argument("--recent-runs", type=int, default=DEFAULT_RECENT_RUNS)
+    diagnose.add_argument("--claims-file", default="")
 
     confirm = subparsers.add_parser("confirm")
     confirm.add_argument("--experiment-id", required=True)
@@ -542,6 +582,7 @@ def main() -> int:
         run_log = load_list_document(list_document_path(unit_root, "run-log"), f"{args.experiment_id}-run-log", "experiment-workbench")
         runs = [item for item in run_log.get("items", []) if isinstance(item, dict)]
         comparison_context = build_diagnosis_context(runs, max(args.recent_runs, 0))
+        claims = load_diagnosis_claims(root, unit_root, args.experiment_id, args.claims_file)
         diagnosis_path = append_list_item(
             list_document_path(unit_root, "diagnoses"),
             f"{args.experiment_id}-diagnoses",
@@ -554,6 +595,7 @@ def main() -> int:
                 "unknowns": normalize_list(args.unknown),
                 "next_actions": normalize_list(args.next_action),
                 "comparison_context": comparison_context,
+                "claims": claims,
                 "confirmation_status": "pending_user_confirmation",
                 "information_types": ["inference", "evaluation", "unverified"],
             },
@@ -568,6 +610,7 @@ def main() -> int:
         record["payload"]["diagnosis"]["unknowns"] = normalize_list(args.unknown)
         record["payload"]["diagnosis"]["next_actions"] = normalize_list(args.next_action)
         record["payload"]["diagnosis"]["comparison_context"] = comparison_context
+        record["payload"]["diagnosis"]["claims"] = claims
         append_history(record, action="experiment-diagnosed", summary=args.summary, information_types=["inference", "evaluation", "unverified"], artifacts=[rel(root, diagnosis_path), rel(root, unit_root / "diagnosis.md")])
         write_record(root, record)
         build_index(root)
