@@ -109,9 +109,9 @@ usage_option() {
 }
 
 usage() {
-  title "安装、更新或卸载 Claude Code / Codex 研究技能"
+  title "安装、更新、重装或卸载 Claude Code / Codex 研究技能"
   printf '%b第一次使用：%b直接运行 %bbash install.sh%b，按提示选择即可。\n' "$C_BOLD" "$C_RESET" "$C_CYAN" "$C_RESET"
-  printf '用法：bash install.sh [install|update|uninstall] [选项]\n'
+  printf '用法：bash install.sh [install|update|reinstall|uninstall] [选项]\n'
 
   section "选择 AI 工具"
   usage_option "--claude" "仅配置 Claude Code"
@@ -135,6 +135,7 @@ usage() {
   bullet "首次安装：bash install.sh"
   bullet "预览安装：bash install.sh --dry-run --claude --project ."
   bullet "更新外部工作区：bash install.sh update --project /path/to/workspace"
+  bullet "重装外部工作区：bash install.sh reinstall --project /path/to/workspace"
   bullet "卸载外部工作区：bash install.sh uninstall --project /path/to/workspace"
 
   printf '\n%b说明：%bCI 或非交互环境不会等待输入，请传入 AI 工具和安装范围。\n' "$C_BOLD" "$C_RESET"
@@ -258,7 +259,7 @@ is_command python3 || die "需要 Python 3，请安装后重试"
 
 if [ "$#" -gt 0 ]; then
   case "$1" in
-    install|update|uninstall)
+    install|update|reinstall|uninstall)
       ACTION=$1
       ACTION_FROM_SUBCOMMAND=1
       ACTION_EXPLICIT=1
@@ -372,6 +373,7 @@ action_label() {
   case "$ACTION" in
     install) printf '安装' ;;
     update) printf '更新' ;;
+    reinstall) printf '重装' ;;
     uninstall) printf '卸载' ;;
   esac
 }
@@ -490,7 +492,7 @@ prompt_agent_selection() {
 
 prompt_scope() {
   local choice
-  if [ "$ACTION" = "update" ] || { [ "$ACTION" = "uninstall" ] && [ "$ACTION_FROM_SUBCOMMAND" -eq 1 ]; }; then
+  if [ "$ACTION" = "update" ] || [ "$ACTION" = "reinstall" ] || { [ "$ACTION" = "uninstall" ] && [ "$ACTION_FROM_SUBCOMMAND" -eq 1 ]; }; then
     SCOPE=project
     return 0
   fi
@@ -617,7 +619,19 @@ if [ "$ACTION" = "install" ] && [ "$KB_ON_PATH_FLAG_SET" -eq 0 ] && [ "$WIZARD_M
 fi
 
 if [ -z "$PROJECT_DIR" ]; then
-  PROJECT_DIR=$(pwd)
+  if [ "$SCOPE" = "project" ]; then
+    case "$ACTION" in
+      update|reinstall|uninstall)
+        [ -f "$(pwd)/.agents/.install-manifest.json" ] || die "未指定 --project，且当前目录不是可识别的已安装工作区；为避免写入错误位置已停止"
+        PROJECT_DIR=$(pwd)
+        ;;
+      *)
+        die "未明确安装目标；请指定 --project [目录]，或在交互向导中选择工作区"
+        ;;
+    esac
+  else
+    PROJECT_DIR=$(pwd)
+  fi
 fi
 WORKSPACE_ROOT=$(abs_dir "$PROJECT_DIR")
 SKILLS_SRC="$REPO_ROOT/.agents/skills"
@@ -635,7 +649,7 @@ elif [ "$SCOPE" = "project" ]; then
   WS_KB_SCRIPT="$WORKSPACE_ROOT/.agents/skills/kb-cli/scripts/kb"
 fi
 
-if [ "$ACTION" = "update" ]; then
+if [ "$ACTION" = "update" ] || [ "$ACTION" = "reinstall" ]; then
   [ "$SCOPE" = "project" ] || die "update 只适用于外部工作区；系统级配置请重新运行 install"
   [ "$COPY_PROJECT" -eq 1 ] || die "当前就是源码仓库，请用 git pull 更新"
 fi
@@ -678,6 +692,9 @@ print_plan() {
       ;;
     update)
       bullet "将更新安装器管理的 skills 和 AI 工具配置。"
+      ;;
+    reinstall)
+      bullet "将原子替换安装器管理的文件，并保留用户文件和研究资料。"
       ;;
     uninstall)
       bullet "将移除安装器创建的 skills 接入。"
@@ -772,6 +789,11 @@ print_done() {
         ok "skills 和 AI 工具配置已更新。"
       fi
       ok "研究资料和本地运行环境未被改动。"
+      ;;
+    Reinstall)
+      section "重装完成"
+      ok "安装器管理的 skills 和 AI 工具配置已重新安装。"
+      ok "研究资料、本地运行环境和用户文件未被改动。"
       ;;
     Uninstall)
       section "卸载完成"
@@ -903,14 +925,13 @@ guard_copy_install_target() {
   fi
   if [ -d "$WORKSPACE_ROOT/.agents" ]; then
     if manifest_is_ours "$MANIFEST_PATH"; then
-      die "这个工作区已经安装过；请选择“更新”而不是重复安装"
+      die "这个工作区已经安装过；请选择“更新”或“重装”，不要重复安装"
     fi
-    die "$WORKSPACE_ROOT/.agents 已存在且不属于本安装器，为避免覆盖已停止安装"
+    return 0
   fi
   if [ -e "$WORKSPACE_ROOT/.agents" ]; then
     die "$WORKSPACE_ROOT/.agents 已存在，为避免覆盖已停止安装"
   fi
-  guard_agents_md_for_copy_install
 }
 
 ws_sync() {
@@ -952,6 +973,7 @@ ws_sync() {
       else
         case "$action" in
           install) info "工作区文件已准备。" ;;
+          reinstall) info "工作区文件已重新安装。" ;;
           uninstall) info "安装器管理的工作区文件已移除。" ;;
         esac
       fi
@@ -977,6 +999,13 @@ update_workspace_copy() {
   [ -d "$WORKSPACE_ROOT/.agents" ] && [ ! -L "$WORKSPACE_ROOT/.agents" ] || die "这个工作区没有可更新的安装"
   manifest_is_ours "$MANIFEST_PATH" || die "无法确认安装记录；新工作区请选择安装，已有工作区请先修复安装记录"
   ws_sync update
+}
+
+reinstall_workspace_copy() {
+  [ "$COPY_PROJECT" -eq 1 ] || die "重装只适用于外部工作区"
+  [ -d "$WORKSPACE_ROOT/.agents" ] && [ ! -L "$WORKSPACE_ROOT/.agents" ] || die "这个工作区没有可重装的安装"
+  manifest_is_ours "$MANIFEST_PATH" || die "无法确认安装记录；为避免覆盖用户文件已停止重装"
+  ws_sync reinstall
 }
 
 remove_agents_md_if_managed() {
@@ -1011,7 +1040,6 @@ uninstall_workspace_copy() {
   had_manifest=1
   remove_symlink_if_matches "$WORKSPACE_ROOT/.claude/skills" "../.agents/skills" "$SKILLS_SRC"
   remove_managed_block "$WORKSPACE_ROOT/CLAUDE.md"
-  remove_agents_md_if_managed
   ws_sync uninstall
   uninstall_kb_on_path
   [ "$had_manifest" -eq 1 ] && info "研究资料和本地运行环境已保留；这个工作区现在不再由安装器管理。"
@@ -1297,7 +1325,7 @@ uninstall_kb_on_path() {
 
 run_smoke() {
   local smoke_output
-  if [ "$DRY_RUN" -eq 1 ] || [ "$ACTION" != "install" ]; then
+  if [ "$DRY_RUN" -eq 1 ] || { [ "$ACTION" != "install" ] && [ "$ACTION" != "reinstall" ]; }; then
     return 0
   fi
   section "安装检查"
@@ -1372,6 +1400,22 @@ case "$ACTION" in
     fi
     [ "$KB_ON_PATH" -eq 1 ] && install_kb_on_path
     print_done Update
+    ;;
+  reinstall)
+    UPDATE_CONFIG_CLAUDE=0
+    UPDATE_CONFIG_CODEX=0
+    reinstall_workspace_copy
+    UPDATE_CONFIG_CLAUDE=$(manifest_agent_enabled "$MANIFEST_PATH" claude 2>/dev/null || printf '1')
+    UPDATE_CONFIG_CODEX=$(manifest_agent_enabled "$MANIFEST_PATH" codex 2>/dev/null || printf '0')
+    if [ "$UPDATE_CONFIG_CLAUDE" = "1" ]; then
+      install_claude_project
+    fi
+    if [ "$UPDATE_CONFIG_CODEX" = "1" ]; then
+      install_codex_project
+    fi
+    [ "$KB_ON_PATH" -eq 1 ] && install_kb_on_path
+    run_smoke
+    print_done Reinstall
     ;;
   uninstall)
     CORRUPT_MANIFEST_UNINSTALL=0

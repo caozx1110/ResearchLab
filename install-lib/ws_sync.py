@@ -8,6 +8,11 @@ The helper intentionally manages only two reachable areas:
 
 It never enumerates or mutates sibling runtime/data directories such as
 ``DIR/kb`` or ``DIR/.venv``.
+
+Release contents come only from the tracked allowlist below. The repository
+``LICENSE`` is installed as ``DIR/.agents/LICENSE``. Install, update, and
+reinstall stage and validate the complete managed set before committing it;
+an exception during commit restores every touched managed path and manifest.
 """
 
 from __future__ import annotations
@@ -17,7 +22,10 @@ import hashlib
 import json
 import os
 import shutil
+import stat
+import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -29,9 +37,20 @@ MANIFEST_REL = Path(".agents/.install-manifest.json")
 MANIFEST_NAME = ".install-manifest.json"
 SCHEMA = 1
 DEFAULT_LEGACY_AGENTS = {"claude": True, "codex": False}
-EXCLUDED_DIRS = {"__pycache__", ".venv"}
+BEGIN_MARKER = "# >>> workspace-oss managed >>>"
+END_MARKER = "# <<< workspace-oss managed <<<"
+RELEASE_FILE_MAP = {
+    ".agents/AGENTS.md": ".agents/AGENTS.md",
+    ".agents/VERSION": ".agents/VERSION",
+    "LICENSE": ".agents/LICENSE",
+}
+RELEASE_PREFIXES = (
+    ".agents/skills/",
+    ".agents/lib/research/",
+)
+EXCLUDED_DIRS = {"__pycache__", ".venv", "tests"}
 EXCLUDED_SUFFIXES = {".pyc", ".pyo"}
-EXCLUDED_NAMES = {".DS_Store", MANIFEST_NAME}
+EXCLUDED_NAMES = {".DS_Store", MANIFEST_NAME, "eval_research_value.py"}
 
 
 class SyncError(RuntimeError):
@@ -83,11 +102,46 @@ def should_exclude(path: Path) -> bool:
         return True
     if any(part in EXCLUDED_DIRS for part in path.parts):
         return True
+    if any(part.upper().startswith("RESEARCH_VALUE") for part in path.parts):
+        return True
     return False
 
 
 def rel_text(path: Path) -> str:
     return path.as_posix()
+
+
+def tracked_release_files(source_root: Path) -> list[str]:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(source_root), "ls-files", "-z", "--", ".agents", "LICENSE"],
+            check=True,
+            capture_output=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        die(f"source must be a git worktree so untracked files cannot be packaged: {source_root}: {exc}")
+    return sorted(path.decode("utf-8") for path in result.stdout.split(b"\0") if path)
+
+
+def release_destination(rel: str) -> str | None:
+    mapped = RELEASE_FILE_MAP.get(rel)
+    if mapped is not None:
+        return mapped
+    if not rel.startswith(RELEASE_PREFIXES):
+        return None
+    path = Path(rel)
+    if should_exclude(path):
+        return None
+    return rel
+
+
+def assert_no_symlinked_source_subdirs(source_root: Path, rel: str) -> None:
+    path = source_root / rel
+    for parent in path.parents:
+        if parent == source_root:
+            break
+        if parent.is_symlink():
+            die(f"source release path contains a symlinked subdirectory: {parent}; refuse to package")
 
 
 def source_items(repo: Path, source: Path | None) -> dict[str, tuple[Path, str]]:
@@ -98,17 +152,16 @@ def source_items(repo: Path, source: Path | None) -> dict[str, tuple[Path, str]]
         die(f"source .agents directory not found: {agents_src}")
     if not agents_md_src.is_file():
         die(f"source AGENTS.md not found: {agents_md_src}")
-
     items: dict[str, tuple[Path, str]] = {}
-    for root, dirs, files in os.walk(agents_src):
-        root_path = Path(root)
-        dirs[:] = sorted(name for name in dirs if not should_exclude((root_path / name).relative_to(agents_src)))
-        for name in sorted(files):
-            path = root_path / name
-            if should_exclude(path.relative_to(agents_src)):
-                continue
-            rel = Path(".agents") / path.relative_to(agents_src)
-            items[rel_text(rel)] = (path, sha256_file(path))
+    for rel in tracked_release_files(source_root):
+        destination = release_destination(rel)
+        if destination is None:
+            continue
+        assert_no_symlinked_source_subdirs(source_root, rel)
+        path = source_root / rel
+        if path.is_symlink() or not path.is_file():
+            die(f"allowlisted release file is not a regular file: {path}")
+        items[destination] = (path, sha256_file(path))
     items["AGENTS.md"] = (agents_md_src, sha256_file(agents_md_src))
     return dict(sorted(items.items()))
 
@@ -209,6 +262,186 @@ def current_files_from_items(items: dict[str, tuple[Path, str]]) -> dict[str, st
     return {rel: digest for rel, (_path, digest) in sorted(items.items())}
 
 
+def managed_agents_block(source: Path) -> bytes:
+    body = source.read_text(encoding="utf-8").rstrip("\n")
+    rendered = (
+        f"{BEGIN_MARKER}\n"
+        "<!-- Managed by workspace-oss. Content outside this block is user-owned. -->\n"
+        f"{body}\n"
+        f"{END_MARKER}\n"
+    )
+    return rendered.encode("utf-8")
+
+
+def managed_block_span(content: bytes) -> tuple[int, int] | None:
+    text = content.decode("utf-8")
+    lines = text.splitlines(keepends=True)
+    begin_indexes = [index for index, line in enumerate(lines) if line.rstrip("\r\n") == BEGIN_MARKER]
+    end_indexes = [index for index, line in enumerate(lines) if line.rstrip("\r\n") == END_MARKER]
+    if not begin_indexes and not end_indexes:
+        return None
+    if len(begin_indexes) != 1 or len(end_indexes) != 1 or begin_indexes[0] >= end_indexes[0]:
+        die("AGENTS.md has malformed workspace-oss managed block markers")
+    start = sum(len(line.encode("utf-8")) for line in lines[: begin_indexes[0]])
+    end = sum(len(line.encode("utf-8")) for line in lines[: end_indexes[0] + 1])
+    return start, end
+
+
+def extract_managed_block(content: bytes) -> bytes | None:
+    span = managed_block_span(content)
+    if span is None:
+        return None
+    return content[span[0] : span[1]]
+
+
+def merge_managed_agents(existing: bytes | None, block: bytes, *, legacy_digest: str = "") -> bytes:
+    if existing is None:
+        return block
+    if legacy_digest and hashlib.sha256(existing).hexdigest() == legacy_digest:
+        return block
+    span = managed_block_span(existing)
+    if span is not None:
+        return existing[: span[0]] + block + existing[span[1] :]
+    separator = b"" if not existing else (b"\n" if existing.endswith(b"\n") else b"\n\n")
+    return existing + separator + block
+
+
+def remove_managed_agents(existing: bytes, manifest: dict[str, Any]) -> bytes | None:
+    span = managed_block_span(existing)
+    if span is not None:
+        remaining = existing[: span[0]] + existing[span[1] :]
+        return remaining if remaining.strip() else None
+    if manifest.get("agents_md") == "managed":
+        expected = str(manifest.get("agents_md_sha") or manifest.get("files", {}).get("AGENTS.md") or "")
+        if expected and hashlib.sha256(existing).hexdigest() == expected:
+            return None
+    return existing
+
+
+def path_mode(path: Path, default: int = 0o644) -> int:
+    try:
+        return stat.S_IMODE(path.stat().st_mode)
+    except OSError:
+        return default
+
+
+def transactional_apply(
+    dst_root: Path,
+    writes: dict[str, tuple[bytes, int]],
+    removals: list[str],
+    manifest: dict[str, Any] | None,
+    *,
+    dry_run: bool,
+) -> bool:
+    changed_writes: dict[str, tuple[bytes, int]] = {}
+    for rel, (content, mode) in sorted(writes.items()):
+        path = path_for_rel(dst_root, rel)
+        assert_write_target(path, dst_root)
+        if path.exists() and (path.is_symlink() or not path.is_file()):
+            die(f"managed file target is not a regular file: {path}")
+        if not path.exists() or read_bytes(path) != content or path_mode(path) != mode:
+            changed_writes[rel] = (content, mode)
+
+    changed_removals = []
+    for rel in sorted(set(removals)):
+        path = path_for_rel(dst_root, rel)
+        if rel == "AGENTS.md":
+            assert_write_target(path, dst_root)
+        else:
+            assert_delete_target(path, dst_root)
+        if path.exists() or path.is_symlink():
+            if path.is_symlink() or not path.is_file():
+                die(f"managed removal target is not a regular file: {path}")
+            changed_removals.append(rel)
+
+    manifest_changed = False
+    manifest_bytes = b""
+    if manifest is not None:
+        manifest_bytes = (json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        target_manifest = manifest_path(dst_root)
+        if target_manifest.exists() and (target_manifest.is_symlink() or not target_manifest.is_file()):
+            die(f"manifest target is not a regular file: {target_manifest}")
+        manifest_changed = not target_manifest.exists() or read_bytes(target_manifest) != manifest_bytes
+
+    if dry_run:
+        for rel in changed_writes:
+            info(f"[dry-run] write {path_for_rel(dst_root, rel)}")
+        for rel in changed_removals:
+            info(f"[dry-run] delete {path_for_rel(dst_root, rel)}")
+        if manifest_changed:
+            info(f"[dry-run] write manifest {manifest_path(dst_root)}")
+        return bool(changed_writes or changed_removals or manifest_changed)
+    if not changed_writes and not changed_removals and not manifest_changed:
+        return False
+
+    root = agents_root(dst_root)
+    root_preexisting = root.exists()
+    root.mkdir(parents=True, exist_ok=True)
+    stage = Path(tempfile.mkdtemp(prefix=".workspace-oss-stage-", dir=root))
+    staged_files = stage / "files"
+    backups = stage / "backups"
+    touched: list[tuple[Path, Path | None]] = []
+    failed = False
+    try:
+        for rel, (content, mode) in changed_writes.items():
+            staged = staged_files / rel
+            staged.parent.mkdir(parents=True, exist_ok=True)
+            staged.write_bytes(content)
+            staged.chmod(mode)
+            if hashlib.sha256(staged.read_bytes()).digest() != hashlib.sha256(content).digest():
+                die(f"staged file validation failed: {rel}")
+        if manifest_changed:
+            staged_manifest = staged_files / MANIFEST_REL
+            staged_manifest.parent.mkdir(parents=True, exist_ok=True)
+            staged_manifest.write_bytes(manifest_bytes)
+
+        ordered_paths = [path_for_rel(dst_root, rel) for rel in changed_writes]
+        ordered_paths.extend(path_for_rel(dst_root, rel) for rel in changed_removals)
+        if manifest_changed:
+            ordered_paths.append(manifest_path(dst_root))
+        for index, path in enumerate(ordered_paths):
+            backup = None
+            if path.exists():
+                backup = backups / str(index)
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path, backup)
+            touched.append((path, backup))
+
+        for rel in changed_writes:
+            destination = path_for_rel(dst_root, rel)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(staged_files / rel, destination)
+        for rel in changed_removals:
+            path_for_rel(dst_root, rel).unlink()
+        if manifest_changed:
+            target_manifest = manifest_path(dst_root)
+            target_manifest.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(staged_files / MANIFEST_REL, target_manifest)
+    except BaseException:
+        failed = True
+        for path, backup in reversed(touched):
+            try:
+                if backup is None:
+                    if path.exists() or path.is_symlink():
+                        path.unlink()
+                else:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(backup, path)
+            except OSError as rollback_exc:
+                warn(f"rollback could not restore {path}: {rollback_exc}")
+        prune_empty_dirs(dst_root, dry_run=False)
+        raise
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+        if failed and not root_preexisting and root.is_dir():
+            try:
+                root.rmdir()
+            except OSError:
+                pass
+    prune_empty_dirs(dst_root, dry_run=False)
+    return True
+
+
 def write_file_if_needed(src: Path, dst: Path, dst_root: Path, *, dry_run: bool) -> bool:
     src_bytes = read_bytes(src)
     exists = dst.exists()
@@ -300,6 +533,8 @@ def print_diff(*, old_commit: str, new_commit: str, added: list[str], changed: l
 def detect_drift(dst_root: Path, old_files: dict[str, str], new_files: dict[str, str]) -> list[tuple[str, str, str, str]]:
     drift: list[tuple[str, str, str, str]] = []
     for rel, expected_hash in sorted(old_files.items()):
+        if rel == "AGENTS.md":
+            continue
         path = path_for_rel(dst_root, rel)
         if not path.exists() and not path.is_symlink():
             continue
@@ -313,6 +548,8 @@ def detect_drift(dst_root: Path, old_files: dict[str, str], new_files: dict[str,
         if actual_hash != expected_hash:
             drift.append((rel, expected_hash, actual_hash, "managed-drift"))
     for rel in sorted(set(new_files) - set(old_files)):
+        if rel == "AGENTS.md":
+            continue
         new_hash = new_files[rel]
         path = path_for_rel(dst_root, rel)
         if not path.exists() and not path.is_symlink():
@@ -371,12 +608,84 @@ def normalize_manifest_agents(value: Any) -> dict[str, bool]:
     }
 
 
-def managed_agents_md_state(dst_root: Path, files: dict[str, str]) -> tuple[str, str]:
-    digest = files.get("AGENTS.md", "")
+def agents_md_drift(dst_root: Path, manifest: dict[str, Any]) -> tuple[str, str, str, str] | None:
     path = dst_root / "AGENTS.md"
-    if digest and path.exists() and path.is_file() and sha256_file(path) == digest:
-        return "managed", digest
-    return "user", digest
+    if not path.exists():
+        return None
+    if path.is_symlink() or not path.is_file():
+        return ("AGENTS.md", str(manifest.get("agents_md_sha") or ""), "<not-a-file>", "managed-drift")
+    existing = read_bytes(path)
+    if manifest.get("agents_md") == "managed-block":
+        block = extract_managed_block(existing)
+        expected = str(manifest.get("agents_md_sha") or "")
+        if block is None:
+            return ("AGENTS.md", expected, "<missing-block>", "managed-drift")
+        actual = hashlib.sha256(block).hexdigest()
+        if expected and actual != expected:
+            return ("AGENTS.md", expected, actual, "managed-drift")
+        return None
+    expected = str(manifest.get("agents_md_sha") or manifest.get("files", {}).get("AGENTS.md") or "")
+    actual = hashlib.sha256(existing).hexdigest()
+    if expected and actual != expected:
+        return ("AGENTS.md", expected, actual, "managed-drift")
+    return None
+
+
+def build_writes(
+    dst_root: Path,
+    items: dict[str, tuple[Path, str]],
+    *,
+    legacy_agents_digest: str = "",
+) -> tuple[dict[str, tuple[bytes, int]], str]:
+    writes: dict[str, tuple[bytes, int]] = {}
+    for rel, (source, _digest) in items.items():
+        if rel == "AGENTS.md":
+            continue
+        writes[rel] = (read_bytes(source), path_mode(source))
+    agents_source = items["AGENTS.md"][0]
+    block = managed_agents_block(agents_source)
+    agents_path = dst_root / "AGENTS.md"
+    existing = read_bytes(agents_path) if agents_path.exists() and agents_path.is_file() and not agents_path.is_symlink() else None
+    writes["AGENTS.md"] = (
+        merge_managed_agents(existing, block, legacy_digest=legacy_agents_digest),
+        path_mode(agents_path),
+    )
+    return writes, hashlib.sha256(block).hexdigest()
+
+
+def build_manifest(
+    *,
+    repo: Path,
+    source_commit: str,
+    installed_at: str,
+    agents: dict[str, bool],
+    files: dict[str, str],
+    agents_md_sha: str,
+) -> dict[str, Any]:
+    return {
+        "schema": SCHEMA,
+        "install_name": INSTALL_NAME,
+        "install_mode": INSTALL_MODE,
+        "source_repo": "",
+        "source_commit": source_commit,
+        "installed_at": installed_at,
+        "updated_at": utc_now(),
+        "agents": agents,
+        "agents_md": "managed-block",
+        "agents_md_sha": agents_md_sha,
+        "files": files,
+        "tree_checksum": tree_checksum(files),
+    }
+
+
+def writes_need_change(dst_root: Path, writes: dict[str, tuple[bytes, int]], removals: list[str]) -> bool:
+    for rel, (content, mode) in writes.items():
+        path = path_for_rel(dst_root, rel)
+        if not path.exists() or path.is_symlink() or not path.is_file():
+            return True
+        if read_bytes(path) != content or path_mode(path) != mode:
+            return True
+    return any(path_for_rel(dst_root, rel).exists() or path_for_rel(dst_root, rel).is_symlink() for rel in removals)
 
 
 def install(args: argparse.Namespace) -> int:
@@ -387,27 +696,27 @@ def install(args: argparse.Namespace) -> int:
     files = current_files_from_items(items)
     agents = parse_agents(args.agents)
     installed_at = utc_now()
-
-    changed = False
-    for rel, (src, _digest) in items.items():
-        changed = write_file_if_needed(src, path_for_rel(dst_root, rel), dst_root, dry_run=args.dry_run) or changed
-
-    agents_md_state, agents_md_sha = managed_agents_md_state(dst_root, files)
-    manifest = {
-        "schema": SCHEMA,
-        "install_name": INSTALL_NAME,
-        "install_mode": INSTALL_MODE,
-        "source_repo": str(repo),
-        "source_commit": args.source_commit or "",
-        "installed_at": installed_at,
-        "updated_at": installed_at,
-        "agents": agents,
-        "agents_md": agents_md_state,
-        "agents_md_sha": agents_md_sha,
-        "files": files,
-        "tree_checksum": tree_checksum(files),
-    }
-    write_manifest(dst_root, manifest, dry_run=args.dry_run)
+    existing_manifest = load_manifest(manifest_path(dst_root), required=False)
+    if existing_manifest is not None:
+        die("copy-project install already exists; use update or reinstall")
+    if manifest_path(dst_root).exists():
+        die(f"refusing to overwrite an unrecognized manifest: {manifest_path(dst_root)}")
+    assert_no_symlinked_agent_subdirs(dst_root)
+    drift = detect_drift(dst_root, {}, files)
+    if drift and not args.force:
+        for rel, expected_hash, actual_hash, reason in drift:
+            warn(f"  MODIFIED {rel} reason={reason} expected={expected_hash} actual={actual_hash}")
+        die("copy-project install collides with local files; rerun with --force only if they may be replaced", code=3)
+    writes, agents_md_sha = build_writes(dst_root, items)
+    manifest = build_manifest(
+        repo=repo,
+        source_commit=args.source_commit or "",
+        installed_at=installed_at,
+        agents=agents,
+        files=files,
+        agents_md_sha=agents_md_sha,
+    )
+    changed = transactional_apply(dst_root, writes, [], manifest, dry_run=args.dry_run)
     if changed:
         info(f"copy-project install complete: {dst_root}")
     else:
@@ -445,6 +754,9 @@ def update(args: argparse.Namespace) -> int:
         warn("source enumeration produced near-empty tree; continuing because --force was set")
 
     drift = detect_drift(dst_root, old_files, new_files)
+    agents_drift = agents_md_drift(dst_root, manifest)
+    if agents_drift is not None:
+        drift.append(agents_drift)
     if drift and not args.force:
         warn("local modifications inside managed .agents block update")
         for rel, expected_hash, actual_hash, reason in drift:
@@ -455,37 +767,65 @@ def update(args: argparse.Namespace) -> int:
         for rel, _expected_hash, actual_hash, reason in drift:
             warn(f"  MODIFIED {rel} reason={reason} actual={actual_hash}")
 
-    changed = False
-    for rel, (src, _digest) in items.items():
-        changed = write_file_if_needed(src, path_for_rel(dst_root, rel), dst_root, dry_run=args.dry_run) or changed
-    for rel in removed:
-        changed = remove_file(path_for_rel(dst_root, rel), dst_root, dry_run=args.dry_run) or changed
-    prune_empty_dirs(dst_root, dry_run=args.dry_run)
+    legacy_agents_digest = ""
+    if manifest.get("agents_md") != "managed-block":
+        legacy_agents_digest = str(manifest.get("agents_md_sha") or old_files.get("AGENTS.md") or "")
+    writes, agents_md_sha = build_writes(dst_root, items, legacy_agents_digest=legacy_agents_digest)
 
-    if old_files != new_files or old_commit != new_commit:
-        changed = True
+    changed = (
+        old_files != new_files
+        or old_commit != new_commit
+        or manifest.get("agents_md") != "managed-block"
+        or writes_need_change(dst_root, writes, removed)
+    )
 
     if changed:
         installed_at = str(manifest.get("installed_at") or utc_now())
-        agents_md_state, agents_md_sha = managed_agents_md_state(dst_root, new_files)
         agents = normalize_manifest_agents(manifest.get("agents"))
-        new_manifest = {
-            "schema": SCHEMA,
-            "install_name": INSTALL_NAME,
-            "install_mode": INSTALL_MODE,
-            "source_repo": str(repo),
-            "source_commit": new_commit,
-            "installed_at": installed_at,
-            "updated_at": utc_now(),
-            "agents": agents,
-            "agents_md": agents_md_state,
-            "agents_md_sha": agents_md_sha,
-            "files": new_files,
-            "tree_checksum": tree_checksum(new_files),
-        }
-        write_manifest(dst_root, new_manifest, dry_run=args.dry_run)
+        new_manifest = build_manifest(
+            repo=repo,
+            source_commit=new_commit,
+            installed_at=installed_at,
+            agents=agents,
+            files=new_files,
+            agents_md_sha=agents_md_sha,
+        )
+        transactional_apply(dst_root, writes, removed, new_manifest, dry_run=args.dry_run)
     else:
         info("clean-sync: no changes; manifest unchanged")
+    return 0
+
+
+def reinstall(args: argparse.Namespace) -> int:
+    repo = resolve_dir(args.repo, "repo")
+    dst_root = resolve_dir(args.dir, "dir")
+    source = resolve_dir(args.source, "source") if args.source else None
+    manifest = load_manifest(manifest_path(dst_root), required=True)
+    assert manifest is not None
+    assert_no_symlinked_agent_subdirs(dst_root)
+    items = source_items(repo, source)
+    old_files = dict(manifest["files"])
+    new_files = current_files_from_items(items)
+    collisions = [entry for entry in detect_drift(dst_root, old_files, new_files) if entry[3] == "collides-with-local"]
+    if collisions and not args.force:
+        for rel, expected_hash, actual_hash, reason in collisions:
+            warn(f"  MODIFIED {rel} reason={reason} expected={expected_hash} actual={actual_hash}")
+        die("copy-project reinstall collides with local files; rerun with --force only if they may be replaced", code=3)
+    legacy_agents_digest = ""
+    if manifest.get("agents_md") != "managed-block":
+        legacy_agents_digest = str(manifest.get("agents_md_sha") or old_files.get("AGENTS.md") or "")
+    writes, agents_md_sha = build_writes(dst_root, items, legacy_agents_digest=legacy_agents_digest)
+    removed = sorted(rel for rel in set(old_files) - set(new_files) if rel != "AGENTS.md" and rel.startswith(".agents/"))
+    new_manifest = build_manifest(
+        repo=repo,
+        source_commit=args.source_commit or "",
+        installed_at=utc_now(),
+        agents=normalize_manifest_agents(manifest.get("agents")),
+        files=new_files,
+        agents_md_sha=agents_md_sha,
+    )
+    transactional_apply(dst_root, writes, removed, new_manifest, dry_run=args.dry_run)
+    info(f"copy-project reinstall complete: {dst_root}")
     return 0
 
 
@@ -495,6 +835,19 @@ def uninstall(args: argparse.Namespace) -> int:
     manifest = load_manifest(manifest_path(dst_root), required=True)
     assert manifest is not None
     files = dict(manifest["files"])
+    agents_path = dst_root / "AGENTS.md"
+    if agents_path.exists() and agents_path.is_file() and not agents_path.is_symlink():
+        remaining = remove_managed_agents(read_bytes(agents_path), manifest)
+        if remaining is None:
+            transactional_apply(dst_root, {}, ["AGENTS.md"], None, dry_run=args.dry_run)
+        elif remaining != read_bytes(agents_path):
+            transactional_apply(
+                dst_root,
+                {"AGENTS.md": (remaining, path_mode(agents_path))},
+                [],
+                None,
+                dry_run=args.dry_run,
+            )
     removed_any = False
     for rel in sorted(files, reverse=True):
         if rel == "AGENTS.md":
@@ -528,7 +881,7 @@ def uninstall(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="workspace-oss copy-project sync helper")
-    parser.add_argument("action", choices=("install", "update", "uninstall"))
+    parser.add_argument("action", choices=("install", "update", "reinstall", "uninstall"))
     parser.add_argument("--repo", required=True)
     parser.add_argument("--dir", required=True)
     parser.add_argument("--source-commit", default="")
@@ -547,6 +900,8 @@ def main(argv: list[str] | None = None) -> int:
             return install(args)
         if args.action == "update":
             return update(args)
+        if args.action == "reinstall":
+            return reinstall(args)
         if args.action == "uninstall":
             return uninstall(args)
     except SyncError as exc:
