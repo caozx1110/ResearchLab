@@ -80,7 +80,12 @@ def _paper_record(
     }
 
 
-def _with_verified_judgement(project_root: Path, record: dict) -> dict:
+def _with_verified_judgement(
+    project_root: Path,
+    record: dict,
+    *,
+    claim_type: str = "evaluation",
+) -> dict:
     evidence_root = record_path(project_root, "paper", record["id"]).parent
     evidence_root.mkdir(parents=True, exist_ok=True)
     (evidence_root / "parse-cache.yaml").write_text("grounded analysis evidence", encoding="utf-8")
@@ -88,7 +93,7 @@ def _with_verified_judgement(project_root: Path, record: dict) -> dict:
         {
             "id": "claim-substance",
             "text": "The filled analysis is substantive.",
-            "claim_type": "evaluation",
+            "claim_type": claim_type,
             "confirmation_status": "pending_user_confirmation",
             "evidence_refs": [
                 {
@@ -248,6 +253,16 @@ def test_confirmation_track_ai_source_is_judgement() -> None:
     assert confirmation_track(record) == "judgement"
 
 
+def test_canonical_user_opinion_claim_sets_non_downgradable_judgement_floor(tmp_path: Path) -> None:
+    record = _with_verified_judgement(
+        tmp_path,
+        _paper_record(information_types=["fact"], core_content=FILLED_CORE_CONTENT),
+        claim_type="user_opinion",
+    )
+
+    assert confirmation_track(record) == "judgement"
+
+
 # --------------------------------------------------------------------------- #
 # Governance red lines (regression).
 # --------------------------------------------------------------------------- #
@@ -393,6 +408,119 @@ def test_confirm_unit_confirms_fact_metadata_record() -> None:
     record = _paper_record(information_types=["fact"], core_content={})
     out = confirm_unit(record, "paper", confirmed_by="czx", evidence=["kb/x/note.md"])
     assert out["confirmation_status"] == "confirmed"
+
+
+def test_confirm_unit_cannot_bypass_user_opinion_claim_with_record_fact(tmp_path: Path) -> None:
+    record = _with_verified_judgement(
+        tmp_path,
+        _paper_record(information_types=["fact"], core_content=FILLED_CORE_CONTENT),
+        claim_type="user_opinion",
+    )
+
+    with pytest.raises(SystemExit, match="user_authorization"):
+        confirm_unit(
+            record,
+            "paper",
+            confirmed_by="czx",
+            evidence=["kb/x/note.md"],
+            project_root=tmp_path,
+        )
+
+    assert record["confirmation_status"] == "pending_user_confirmation"
+    assert "confirmation" not in record
+
+
+def test_apply_confirmation_cannot_bypass_user_opinion_claim_with_record_fact(tmp_path: Path) -> None:
+    record = _with_verified_judgement(
+        tmp_path,
+        _paper_record(information_types=["fact"], core_content=FILLED_CORE_CONTENT),
+        claim_type="user_opinion",
+    )
+
+    with pytest.raises(SystemExit, match="user_authorization"):
+        apply_confirmation(
+            record,
+            confirmed_by="czx",
+            evidence=["kb/x/note.md"],
+            project_root=tmp_path,
+        )
+
+    assert record["confirmation_status"] == "pending_user_confirmation"
+
+
+def test_promote_cannot_bypass_user_opinion_claim_with_record_fact(tmp_path: Path) -> None:
+    ensure_workspace(tmp_path)
+    unit_id = "p-user-opinion-floor-123456"
+    record = _with_verified_judgement(
+        tmp_path,
+        _paper_record(
+            unit_id,
+            information_types=["fact"],
+            core_content=FILLED_CORE_CONTENT,
+        ),
+        claim_type="user_opinion",
+    )
+    write_yaml_if_changed(record_path(tmp_path, "paper", unit_id), record)
+
+    with pytest.raises(SystemExit, match="user_authorization"):
+        promote_record(
+            tmp_path,
+            unit_id,
+            confirmation_status="confirmed",
+            confirmed_by="czx",
+            evidence=["kb/x/note.md"],
+        )
+
+    on_disk = load_yaml(record_path(tmp_path, "paper", unit_id), default={})
+    assert on_disk["confirmation_status"] == "pending_user_confirmation"
+    assert "confirmation" not in on_disk
+
+
+def test_apply_confirmation_rejects_unverified_claim_even_on_fact_record() -> None:
+    record = _paper_record(information_types=["fact"], core_content=FILLED_CORE_CONTENT)
+    record.setdefault("payload", {})["claims"] = [
+        {
+            "id": "claim-unverified",
+            "text": "This claim still needs verification.",
+            "claim_type": "unverified",
+            "confirmation_status": "pending_user_confirmation",
+            "evidence_refs": [],
+        }
+    ]
+
+    with pytest.raises(SystemExit, match="unverified claims"):
+        apply_confirmation(record, confirmed_by="czx", evidence=["kb/x/note.md"])
+
+    assert record["confirmation_status"] == "pending_user_confirmation"
+
+
+def test_promote_rejects_unverified_claim_and_preserves_disk_state(tmp_path: Path) -> None:
+    ensure_workspace(tmp_path)
+    unit_id = "p-unverified-floor-123456"
+    record = _paper_record(unit_id, information_types=["fact"], core_content=FILLED_CORE_CONTENT)
+    record.setdefault("payload", {})["claims"] = [
+        {
+            "id": "claim-unverified",
+            "text": "This claim still needs verification.",
+            "claim_type": "unverified",
+            "confirmation_status": "pending_user_confirmation",
+            "evidence_refs": [],
+        }
+    ]
+    write_yaml_if_changed(record_path(tmp_path, "paper", unit_id), record)
+
+    with pytest.raises(SystemExit, match="unverified claims"):
+        promote_record(
+            tmp_path,
+            unit_id,
+            confirmation_status="confirmed",
+            confirmed_by="czx",
+            evidence=["kb/x/note.md"],
+        )
+
+    on_disk = load_yaml(record_path(tmp_path, "paper", unit_id), default={})
+    assert on_disk["confirmation_status"] == "pending_user_confirmation"
+    assert "confirmation" not in on_disk
 
 
 # --------------------------------------------------------------------------- #
