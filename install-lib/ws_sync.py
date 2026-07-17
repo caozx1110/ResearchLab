@@ -653,10 +653,20 @@ def build_writes(
     return writes, hashlib.sha256(block).hexdigest()
 
 
+def read_source_version(repo: Path, source: Path | None) -> str:
+    """Read the bundle semver from the source's .agents/VERSION (empty if absent)."""
+    version_file = (source or repo).resolve() / ".agents" / "VERSION"
+    try:
+        return version_file.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
 def build_manifest(
     *,
     repo: Path,
     source_commit: str,
+    version: str,
     installed_at: str,
     agents: dict[str, bool],
     files: dict[str, str],
@@ -668,6 +678,7 @@ def build_manifest(
         "install_mode": INSTALL_MODE,
         "source_repo": "",
         "source_commit": source_commit,
+        "version": version,
         "installed_at": installed_at,
         "updated_at": utc_now(),
         "agents": agents,
@@ -711,6 +722,7 @@ def install(args: argparse.Namespace) -> int:
     manifest = build_manifest(
         repo=repo,
         source_commit=args.source_commit or "",
+        version=read_source_version(repo, source),
         installed_at=installed_at,
         agents=agents,
         files=files,
@@ -785,6 +797,7 @@ def update(args: argparse.Namespace) -> int:
         new_manifest = build_manifest(
             repo=repo,
             source_commit=new_commit,
+            version=read_source_version(repo, source),
             installed_at=installed_at,
             agents=agents,
             files=new_files,
@@ -819,6 +832,7 @@ def reinstall(args: argparse.Namespace) -> int:
     new_manifest = build_manifest(
         repo=repo,
         source_commit=args.source_commit or "",
+        version=read_source_version(repo, source),
         installed_at=utc_now(),
         agents=normalize_manifest_agents(manifest.get("agents")),
         files=new_files,
