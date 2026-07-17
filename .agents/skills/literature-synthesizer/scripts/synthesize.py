@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import sys
 from collections import Counter
 from pathlib import Path
@@ -21,8 +22,9 @@ from research.bootstrap import ensure_managed_runtime
 if __name__ == "__main__":
     ensure_managed_runtime(PROJECT_ROOT)
 
-from research.common import add_project_root_argument, ensure_dir, print_resolved_project_roots, slugify, write_text_if_changed, write_yaml_if_changed, yaml_default
-from research.core import iter_records, project_root, rel, synthesis_root
+from research.common import add_project_root_argument, ensure_dir, load_yaml, print_resolved_project_roots, slugify, write_text_if_changed, write_yaml_if_changed, yaml_default
+from research.core import iter_records, project_root, rel, synthesis_root, unit_root
+from research.evidence import validate_claims, verify_claim_evidence
 
 
 SECTION_SPECS = (
@@ -139,6 +141,187 @@ def build_survey_scaffold(
             ],
         },
     }
+
+
+def survey_claim_entries(payload: dict) -> tuple[list[str], list[tuple[str, dict, bool]]]:
+    violations: list[str] = []
+    entries: list[tuple[str, dict, bool]] = []
+    raw_sections = payload.get("sections")
+    if not isinstance(raw_sections, list):
+        return ["sections: must be a list"], entries
+    sections = {
+        str(section.get("id") or ""): section
+        for section in raw_sections
+        if isinstance(section, dict) and str(section.get("id") or "")
+    }
+    required_ids = [section_id for section_id, _, _ in SECTION_SPECS]
+    for section_id in required_ids:
+        section = sections.get(section_id)
+        if section is None:
+            violations.append(f"section '{section_id}': missing")
+            continue
+        key = "cells" if section_id == "taxonomy" else "items" if section_id in {"trends", "gaps_challenges"} else "claims"
+        items = section.get(key)
+        if not isinstance(items, list) or not items:
+            violations.append(f"section '{section_id}': {key} must contain at least one fillable claim")
+            continue
+        for index, item in enumerate(items):
+            label = f"section '{section_id}' {key}[{index}]"
+            if not isinstance(item, dict):
+                violations.append(f"{label}: must be a mapping")
+                continue
+            entries.append((label, item, section_id in {"taxonomy", "trends", "gaps_challenges"}))
+
+    matrix = payload.get("comparison_matrix")
+    if not isinstance(matrix, dict):
+        violations.append("comparison_matrix: missing or not a mapping")
+        return violations, entries
+    dimensions = matrix.get("dimensions")
+    methods = matrix.get("methods")
+    cells = matrix.get("cells")
+    if not isinstance(dimensions, list) or not dimensions:
+        violations.append("comparison_matrix.dimensions: must contain at least one dimension")
+    if not isinstance(methods, list) or not methods:
+        violations.append("comparison_matrix.methods: must contain at least one method")
+    if not isinstance(cells, list) or not cells:
+        violations.append("comparison_matrix.cells: must contain at least one cell")
+    else:
+        for index, cell in enumerate(cells):
+            label = f"comparison_matrix.cells[{index}]"
+            if not isinstance(cell, dict):
+                violations.append(f"{label}: must be a mapping")
+                continue
+            entries.append((label, cell, True))
+    return violations, entries
+
+
+def claim_from_cell(cell: dict) -> dict:
+    return {
+        "id": str(cell.get("id") or "").strip(),
+        "text": " ".join(str(cell.get("content") or "").split()),
+        "claim_type": str(cell.get("claim_type") or "").strip(),
+        "confirmation_status": "pending_user_confirmation",
+        "evidence_refs": cell.get("evidence_refs") or [],
+    }
+
+
+def verify_survey_fill(payload: dict, root: Path) -> tuple[list[str], dict]:
+    """Verify every agent-authored claim and each ref against its cited unit."""
+    violations, entries = survey_claim_entries(payload)
+    anchor = payload.get("kb_anchor")
+    if not isinstance(anchor, dict):
+        violations.append("kb_anchor: missing or not a mapping")
+        anchor = {}
+    as_of = str(anchor.get("as_of") or "").strip()
+    if not as_of:
+        violations.append("kb_anchor.as_of: missing")
+    unit_items = anchor.get("units")
+    if not isinstance(unit_items, list):
+        violations.append("kb_anchor.units: must be a list")
+        unit_items = []
+    anchored_units: dict[str, str] = {}
+    for index, item in enumerate(unit_items):
+        if not isinstance(item, dict):
+            violations.append(f"kb_anchor.units[{index}]: must be a mapping")
+            continue
+        unit_id = str(item.get("id") or "").strip()
+        unit_kind = str(item.get("kind") or "").strip()
+        if not unit_id or not unit_kind:
+            violations.append(f"kb_anchor.units[{index}]: id and kind are required")
+            continue
+        anchored_units[unit_id] = unit_kind
+
+    claims: list[tuple[str, dict, bool]] = []
+    for label, cell, evidence_required in entries:
+        claim = claim_from_cell(cell)
+        claims.append((label, claim, evidence_required))
+        if not claim["text"]:
+            violations.append(f"{label}: empty content — the runtime agent must fill it")
+        refs = claim.get("evidence_refs") or []
+        if evidence_required and not refs:
+            violations.append(f"{label}: evidence_refs must contain at least one verbatim citation")
+        if label.startswith("section 'trends'") or label.startswith("section 'gaps_challenges'"):
+            if str(cell.get("as_of") or "").strip() != as_of:
+                violations.append(f"{label}: as_of must match kb_anchor.as_of")
+
+    structural_claims = [claim for _, claim, _ in claims]
+    for violation in validate_claims(structural_claims):
+        violations.append(f"claim-structure: {violation}")
+
+    for label, claim, _ in claims:
+        refs = claim.get("evidence_refs") or []
+        if not isinstance(refs, list):
+            continue
+        for index, ref_item in enumerate(refs):
+            if not isinstance(ref_item, dict):
+                violations.append(f"{label} evidence_refs[{index}]: must be a mapping")
+                continue
+            source_unit_id = str(ref_item.get("source_unit_id") or "").strip()
+            if not source_unit_id:
+                violations.append(f"{label} evidence_refs[{index}]: source_unit_id is required")
+                continue
+            source_kind = anchored_units.get(source_unit_id)
+            if not source_kind:
+                violations.append(
+                    f"{label} evidence_refs[{index}]: source_unit_id '{source_unit_id}' is not in kb_anchor.units"
+                )
+                continue
+            single_ref_claim = {**claim, "evidence_refs": [ref_item]}
+            try:
+                source_unit_dir = unit_root(root, source_kind, source_unit_id)
+            except SystemExit:
+                violations.append(
+                    f"{label} evidence_refs[{index}]: source unit '{source_unit_id}' has unsupported kind '{source_kind}'"
+                )
+                continue
+            for violation in verify_claim_evidence(single_ref_claim, source_unit_dir):
+                violations.append(f"{label}: {violation}")
+
+    verified = copy.deepcopy(payload)
+    if not violations:
+        verified["status"] = "verified"
+        for _, cell, _ in survey_claim_entries(verified)[1]:
+            cell["epistemic_status"] = "inferred" if cell.get("claim_type") == "inference" else "observed"
+    return violations, verified
+
+
+def _escape_table_cell(value: object) -> str:
+    return " ".join(str(value or "").split()).replace("|", "\\|") or "-"
+
+
+def render_verified_summary(payload: dict) -> str:
+    filters = payload.get("filters") or {}
+    subject = filters.get("query") or filters.get("topic") or filters.get("tag") or filters.get("pool") or filters.get("kind") or "survey"
+    lines = [f"# Survey: {subject}", "", f"KB anchor: `{payload.get('kb_anchor', {}).get('as_of', '')}`", ""]
+    for section in payload.get("sections") or []:
+        if not isinstance(section, dict):
+            continue
+        lines.extend([f"## {section.get('title') or section.get('id')}", ""])
+        key = "cells" if section.get("id") == "taxonomy" else "items" if section.get("id") in {"trends", "gaps_challenges"} else "claims"
+        for cell in section.get(key) or []:
+            if not isinstance(cell, dict):
+                continue
+            status = cell.get("epistemic_status") or ""
+            prefix = f"**{status.title()}**" if status else ""
+            lines.append(f"- {prefix}: {cell.get('content', '')}")
+        lines.append("")
+
+    matrix = payload.get("comparison_matrix") or {}
+    dimensions = [item for item in matrix.get("dimensions") or [] if isinstance(item, dict)]
+    methods = [item for item in matrix.get("methods") or [] if isinstance(item, dict)]
+    cells = [item for item in matrix.get("cells") or [] if isinstance(item, dict)]
+    cell_map = {(str(item.get("method_id") or ""), str(item.get("dimension_id") or "")): item for item in cells}
+    lines.extend(["## Comparison Matrix", ""])
+    lines.append("| Method | " + " | ".join(_escape_table_cell(item.get("label")) for item in dimensions) + " |")
+    lines.append("| --- | " + " | ".join("---" for _ in dimensions) + " |")
+    for method in methods:
+        method_id = str(method.get("id") or "")
+        values = [
+            _escape_table_cell((cell_map.get((method_id, str(dimension.get("id") or ""))) or {}).get("content"))
+            for dimension in dimensions
+        ]
+        lines.append(f"| {_escape_table_cell(method.get('label'))} | " + " | ".join(values) + " |")
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def select_records(
@@ -290,6 +473,37 @@ def main() -> int:
     print_resolved_project_roots(root)
     mode = args.command
     query = getattr(args, "field", "") or getattr(args, "query", "")
+    if mode == "survey" and args.action == "verify":
+        if args.input:
+            fill_path = Path(args.input)
+            if not fill_path.is_absolute():
+                fill_path = root / fill_path
+        else:
+            if not query:
+                raise SystemExit("survey verify requires --input or --field/--query")
+            input_slug = slugify(query or args.topic or args.tag or args.pool or args.kind or mode, max_words=8) or mode
+            fill_path = synthesis_root(root) / input_slug / "survey-fill.yaml"
+        if not fill_path.exists():
+            raise SystemExit(f"survey verify input not found: {fill_path}")
+        fill = load_yaml(fill_path, default={})
+        if not isinstance(fill, dict):
+            raise SystemExit(f"survey verify input is not a mapping: {fill_path}")
+        violations, payload = verify_survey_fill(fill, root)
+        if violations:
+            print("[reject] survey fill failed verification:", file=sys.stderr)
+            for violation in violations:
+                print(f"  - {violation}", file=sys.stderr)
+            return 1
+        output_slug = slugify(str(payload.get("slug") or "survey"), max_words=8) or "survey"
+        verified_root = synthesis_root(root) / output_slug
+        ensure_dir(verified_root)
+        yaml_path = verified_root / "survey.yaml"
+        md_path = verified_root / "summary.md"
+        write_yaml_if_changed(yaml_path, payload)
+        write_text_if_changed(md_path, render_verified_summary(payload))
+        print(rel(root, yaml_path))
+        print(rel(root, md_path))
+        return 0
     slug = slugify(query or args.topic or args.tag or args.pool or args.kind or mode, max_words=8) or mode
     out_root = synthesis_root(root) / slug
     ensure_dir(out_root)
