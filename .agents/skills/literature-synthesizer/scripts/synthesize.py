@@ -25,6 +25,122 @@ from research.common import add_project_root_argument, ensure_dir, print_resolve
 from research.core import iter_records, project_root, rel, synthesis_root
 
 
+SECTION_SPECS = (
+    ("scope_positioning", "Scope & Positioning", "fact"),
+    ("background_terms", "Background & Terms", "fact"),
+    ("taxonomy", "Taxonomy", "fact"),
+    ("cross_cutting", "Datasets, Benchmarks & Metrics", "evaluation"),
+    ("trends", "Trends", "inference"),
+    ("gaps_challenges", "Gaps, Controversies & Open Challenges", "inference"),
+    ("conclusion", "Conclusion", "inference"),
+)
+
+
+def fillable_claim(claim_id: str, claim_type: str, **extra: object) -> dict:
+    return {
+        "id": claim_id,
+        "content": "",
+        "claim_type": claim_type,
+        "evidence_refs": [],
+        **extra,
+    }
+
+
+def build_survey_scaffold(
+    records: list[dict],
+    *,
+    query: str,
+    kind: str,
+    topic: str,
+    tag: str,
+    pool: str,
+    mode: str,
+    as_of: str,
+) -> dict:
+    """Build a fillable survey structure; the script authors no conclusions."""
+    subject = query or topic or tag or pool or kind or mode
+    slug = slugify(subject, max_words=8) or mode
+    units = [
+        {
+            "id": str(record.get("id") or ""),
+            "kind": str(record.get("kind") or ""),
+            "title": str(record.get("title") or ""),
+        }
+        for record in records
+        if str(record.get("id") or "")
+    ]
+    sections = []
+    for section_id, title, claim_type in SECTION_SPECS:
+        section = {"id": section_id, "title": title}
+        if section_id == "taxonomy":
+            section["dimensions"] = [{"id": "taxonomy-dimension-1", "label": ""}]
+            section["cells"] = [
+                fillable_claim(
+                    "taxonomy-cell-1",
+                    claim_type,
+                    row_label="",
+                    column_label="",
+                )
+            ]
+        elif section_id == "trends":
+            section["items"] = [
+                fillable_claim(
+                    "trend-1",
+                    claim_type,
+                    trajectory="",
+                    as_of=as_of,
+                )
+            ]
+        elif section_id == "gaps_challenges":
+            section["items"] = [
+                fillable_claim(
+                    "gap-1",
+                    claim_type,
+                    gap_type="",
+                    as_of=as_of,
+                )
+            ]
+        else:
+            section["claims"] = [fillable_claim(f"{section_id}-1", claim_type)]
+        sections.append(section)
+    return {
+        "schema_version": 1,
+        "mode": mode,
+        "slug": slug,
+        "status": "awaiting_agent_fill",
+        "filters": {"query": query, "kind": kind, "topic": topic, "tag": tag, "pool": pool},
+        "kb_anchor": {
+            "as_of": as_of,
+            "unit_ids": [unit["id"] for unit in units],
+            "units": units,
+        },
+        "fill_contract": {
+            "required_section_ids": [section_id for section_id, _, _ in SECTION_SPECS],
+            "required_claim_fields": ["id", "content", "claim_type", "evidence_refs"],
+            "evidence_rule": (
+                "The runtime agent fills every required claim cell. Taxonomy cells, comparison-matrix "
+                "cells, trends, and gaps require one or more verbatim evidence_refs. The script only "
+                "validates structure and evidence; it never authors survey conclusions."
+            ),
+            "evidence_ref_fields": ["source_unit_id", "artifact", "locator", "quote"],
+            "epistemic_rule": "claim_type=inference is inferred; fact/evaluation are observed.",
+        },
+        "sections": sections,
+        "comparison_matrix": {
+            "dimensions": [{"id": "dimension-1", "label": ""}],
+            "methods": [{"id": "method-1", "label": "", "source_unit_ids": []}],
+            "cells": [
+                fillable_claim(
+                    "matrix-cell-1",
+                    "evaluation",
+                    method_id="method-1",
+                    dimension_id="dimension-1",
+                )
+            ],
+        },
+    }
+
+
 def select_records(
     records: list[dict],
     *,
@@ -146,7 +262,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     for name, label in (("survey", "field"), ("review", "query")):
         cmd = subparsers.add_parser(name)
-        cmd.add_argument(f"--{label}", required=True)
+        if name == "survey":
+            cmd.add_argument("action", nargs="?", choices=("prepare", "verify"), default="legacy")
+            cmd.add_argument("--field", default="")
+            cmd.add_argument("--query", default="")
+            cmd.add_argument("--as-of", default="")
+            cmd.add_argument("--input", default="")
+        else:
+            cmd.add_argument(f"--{label}", required=True)
         cmd.add_argument("--kind", default="")
         cmd.add_argument("--topic", default="")
         cmd.add_argument("--tag", default="")
@@ -178,6 +301,25 @@ def main() -> int:
         tag=args.tag,
         pool=args.pool,
     )
+    if mode == "survey" and args.action == "prepare":
+        if not query:
+            raise SystemExit("survey prepare requires --field or --query")
+        if not args.as_of:
+            raise SystemExit("survey prepare requires --as-of to anchor the selected KB snapshot")
+        payload = build_survey_scaffold(
+            selected,
+            query=query,
+            kind=args.kind,
+            topic=args.topic,
+            tag=args.tag,
+            pool=args.pool,
+            mode=mode,
+            as_of=args.as_of,
+        )
+        fill_path = out_root / "survey-fill.yaml"
+        write_yaml_if_changed(fill_path, payload)
+        print(rel(root, fill_path))
+        return 0
     payload = build_survey_payload(
         selected,
         query=query,
