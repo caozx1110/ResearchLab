@@ -86,6 +86,26 @@ def parse_metrics(items: list[str]) -> dict[str, dict[str, Any]]:
     return payload
 
 
+def verify_artifacts(root: Path, items: list[str]) -> list[dict[str, Any]]:
+    artifacts = []
+    for item in normalize_list(items):
+        candidate = Path(item).expanduser()
+        resolved = candidate if candidate.is_absolute() else root / candidate
+        present = resolved.exists()
+        status = "present" if present else "missing"
+        artifact = {"path": item, "status": status, "generated": False}
+        if present:
+            artifact["kind"] = "directory" if resolved.is_dir() else "file"
+        else:
+            sys.stderr.write(f"[experiment.verify_artifacts] WARN: artifact does not exist: {item}\n")
+        artifacts.append(artifact)
+    return artifacts
+
+
+def generated_artifact(root: Path, path: Path) -> dict[str, Any]:
+    return {"path": rel(root, path), "status": "present", "generated": True, "kind": "file"}
+
+
 def list_document_path(unit_root: Path, name: str) -> Path:
     return unit_root / f"{name}.yaml"
 
@@ -257,6 +277,14 @@ def main() -> int:
         runs_dir = unit_root / "runs"
         runs_dir.mkdir(parents=True, exist_ok=True)
         run_path = next_numbered_path(runs_dir, "run", ".md")
+        run_log_document_path = list_document_path(unit_root, "run-log")
+        metrics = parse_metrics(args.metric)
+        claimed_artifacts = verify_artifacts(root, args.artifact)
+        logged_artifacts = [
+            generated_artifact(root, run_path),
+            generated_artifact(root, run_log_document_path),
+            *claimed_artifacts,
+        ]
         write_text_if_changed(
             run_path,
             "\n".join(
@@ -274,10 +302,14 @@ def main() -> int:
                     *[f"- {item}" for item in normalize_list(args.classification)],
                     "",
                     "## Metrics",
-                    *[f"- {item}" for item in args.metric],
+                    *[
+                        f"- {metric['name']}={metric['value']} [{metric['unit'] or 'unitless'}] "
+                        f"direction={metric['direction']}"
+                        for metric in metrics.values()
+                    ],
                     "",
                     "## Artifacts",
-                    *[f"- {item}" for item in normalize_list(args.artifact)],
+                    *[f"- {item['path']} · {item['status']}" for item in logged_artifacts],
                     "",
                     "## Next Actions",
                     *[f"- {item}" for item in args.next_action],
@@ -287,7 +319,7 @@ def main() -> int:
             + "\n",
         )
         run_log_path = append_list_item(
-            list_document_path(unit_root, "run-log"),
+            run_log_document_path,
             f"{args.experiment_id}-run-log",
             "experiment-workbench",
             {
@@ -295,10 +327,10 @@ def main() -> int:
                 "outcome": args.outcome,
                 "classifications": normalize_list(args.classification) or ["unknown"],
                 "changes": normalize_list(args.change),
-                "metrics": parse_metrics(args.metric),
+                "metrics": metrics,
                 "why_this_run": args.why_this_run,
                 "tested_hypothesis": args.tested_hypothesis,
-                "artifacts": [rel(root, run_path), *normalize_list(args.artifact)],
+                "artifacts": logged_artifacts,
                 "next_actions": normalize_list(args.next_action),
                 "information_types": ["fact"],
             },
@@ -308,8 +340,8 @@ def main() -> int:
         record["payload"]["process"]["change_summary"] = args.change
         record["payload"]["process"]["why_this_run"] = args.why_this_run
         record["payload"]["process"]["tested_hypothesis"] = args.tested_hypothesis
-        record["payload"]["results"]["metrics"] = parse_metrics(args.metric)
-        record["payload"]["results"]["artifacts"] = normalize_list(args.artifact)
+        record["payload"]["results"]["metrics"] = metrics
+        record["payload"]["results"]["artifacts"] = logged_artifacts
         record["payload"]["results"]["met_expectation"] = "yes" if args.outcome == "success" else ("no" if args.outcome in {"failed", "blocked"} else "unknown")
         record["payload"]["results"]["abnormalities"] = normalize_list(args.classification)
         record["payload"]["diagnosis"]["next_actions"] = args.next_action

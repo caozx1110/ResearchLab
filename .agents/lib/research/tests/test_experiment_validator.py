@@ -39,3 +39,17 @@ def test_bare_metric_remains_backward_compatible(capsys) -> None:
     assert metrics["loss"]["direction"] == "unknown"
     assert metrics["status"]["value"] == "converged"
     assert "preserving it as a string" in capsys.readouterr().err
+
+
+def test_artifact_existence_is_recorded(tmp_path: Path, capsys) -> None:
+    module = _experiment_module()
+    existing = tmp_path / "checkpoint.pt"
+    existing.write_text("weights", encoding="utf-8")
+
+    artifacts = module.verify_artifacts(tmp_path, ["checkpoint.pt", "missing.log"])
+
+    assert artifacts == [
+        {"path": "checkpoint.pt", "status": "present", "generated": False, "kind": "file"},
+        {"path": "missing.log", "status": "missing", "generated": False},
+    ]
+    assert "artifact does not exist: missing.log" in capsys.readouterr().err
