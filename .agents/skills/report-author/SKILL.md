@@ -23,6 +23,7 @@ description: Generate self-contained weekly reports, stage summaries, PPT or wri
 4. 将 claim 文本与 evidence ref 的 `source_unit_id`、`locator`、逐字 `quote`、可选 `summary` 一起写入材料；不把 essential evidence 留给读者自行打开。
 5. 聚合固定 H2 decision blocks 与筛选后的 events。最终叙事由 agent 基于这些输入填写，不允许脚本生成判断。
 6. 任一输入缺失时保留明确的 `missing: X`；禁止静默省略、补写或推测。
+7. 只读加载 `kb/config/user-profile.yaml` 的自由文本 `reporting_style`：包含“简洁”/`concise`/`brief` 时压缩 decisions、claims 与 events 的展示量；包含“详细”/`detailed`/`full` 时保留完整输入；缺失、不可解析或无匹配信号时维持原默认行为。精简模式仍保留 decisions、claims + evidence、events 三部分及全部适用的 `missing:` 标记。
 
 ## Internal Verbs
 
@@ -37,6 +38,7 @@ description: Generate self-contained weekly reports, stage summaries, PPT or wri
 ## Output Contract
 
 - 报告正文按 decisions、claims + evidence、events 组成 self-contained triple，不再以 event log 充当报告。
+- `reporting_style` 只控制展示量，不改变 claim confirmation status、不删除适用的缺失标记，也不生成补全文本。
 - confirmed claim 的最小结构为 `id`、`text`、`claim_type`、`confirmation_status`、`evidence_refs`。
 - evidence ref 展示来源 unit、locator、逐字 quote 与可选 context；空 evidence 显式写 `missing: evidence for claim ...`。
 - 无 events、decisions、confirmed claims、关联 record 或 outline section inputs 时分别写 `missing: ...`。

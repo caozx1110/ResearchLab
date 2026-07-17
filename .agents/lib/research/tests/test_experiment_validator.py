@@ -5,7 +5,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from research.common import load_yaml
+from research.common import load_yaml, write_yaml_if_changed
 
 
 def _experiment_module():
@@ -18,12 +18,12 @@ def _experiment_module():
     return module
 
 
-def _run_experiment(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+def _run_experiment(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     project_root = Path(__file__).resolve().parents[4]
     script = project_root / ".agents" / "skills" / "experiment-workbench" / "scripts" / "experiment.py"
     return subprocess.run(
         [sys.executable, str(script), "--root", str(root), *args],
-        check=True,
+        check=check,
         capture_output=True,
         text=True,
     )
@@ -114,6 +114,80 @@ def test_diagnosis_context_contains_recent_runs_and_persistent_anchors() -> None
     assert context["anchors"][0]["metrics"]["loss"]["value"] == 2.0
 
 
+def test_diagnosis_claim_verifies_verbatim_run_evidence_and_rejects_fabrication(tmp_path: Path) -> None:
+    _run_experiment(tmp_path, "plan", "--title", "grounded diagnosis", "--program-id", "program-test")
+    record_path = next((tmp_path / "kb" / "units" / "experiments").glob("*/record.yaml"))
+    experiment_id = load_yaml(record_path)["id"]
+    _run_experiment(
+        tmp_path,
+        "log-run",
+        "--experiment-id",
+        experiment_id,
+        "--result-summary",
+        "Observed validation loss spike after the data refresh.",
+        "--outcome",
+        "failed",
+        "--classification",
+        "data",
+    )
+    claims_path = tmp_path / "diagnosis-claims.yaml"
+    claim = {
+        "id": "diagnosis-data-refresh",
+        "text": "The data refresh likely caused the validation regression.",
+        "claim_type": "inference",
+        "confirmation_status": "pending_user_confirmation",
+        "evidence_refs": [
+            {
+                "source_unit_id": experiment_id,
+                "artifact": "runs/run-001.md",
+                "locator": "Result Summary",
+                "quote": "Observed validation loss spike after the data refresh.",
+                "summary": "The run records the regression immediately after the refresh.",
+            }
+        ],
+    }
+    write_yaml_if_changed(claims_path, {"claims": [claim]})
+
+    _run_experiment(
+        tmp_path,
+        "diagnose",
+        "--experiment-id",
+        experiment_id,
+        "--summary",
+        "Data refresh regression diagnosis",
+        "--category",
+        "data",
+        "--claims-file",
+        str(claims_path),
+    )
+
+    diagnoses = load_yaml(record_path.parent / "diagnoses.yaml")
+    assert diagnoses["items"][-1]["claims"] == [claim]
+    assert diagnoses["items"][-1]["confirmation_status"] == "pending_user_confirmation"
+
+    fabricated_claim = dict(claim)
+    fabricated_claim["id"] = "diagnosis-fabricated"
+    fabricated_claim["evidence_refs"] = [dict(claim["evidence_refs"][0], quote="Fabricated loss explanation.")]
+    write_yaml_if_changed(claims_path, {"claims": [fabricated_claim]})
+    rejected = _run_experiment(
+        tmp_path,
+        "diagnose",
+        "--experiment-id",
+        experiment_id,
+        "--summary",
+        "Fabricated diagnosis",
+        "--category",
+        "data",
+        "--claims-file",
+        str(claims_path),
+        check=False,
+    )
+
+    assert rejected.returncode != 0
+    assert "not verbatim in artifact 'runs/run-001.md'" in rejected.stderr
+    assert len(load_yaml(record_path.parent / "diagnoses.yaml")["items"]) == 1
+
+
 def test_experiment_validator_lifecycle(tmp_path: Path) -> None:
     _run_experiment(tmp_path, "plan", "--title", "validator lifecycle", "--program-id", "program-test")
     record_path = next((tmp_path / "kb" / "units" / "experiments").glob("*/record.yaml"))
@@ -171,6 +245,7 @@ def test_experiment_validator_lifecycle(tmp_path: Path) -> None:
     assert run_log["items"][0]["artifacts"][-2]["status"] == "present"
     assert run_log["items"][0]["artifacts"][-1]["status"] == "missing"
     context = diagnoses["items"][-1]["comparison_context"]
+    assert diagnoses["items"][-1]["claims"] == []
     assert [item["run_id"] for item in context["recent_runs"]] == [run_log["items"][-1]["id"]]
     assert [item["run_id"] for item in context["anchors"]] == [run_log["items"][0]["id"]]
     assert context["anchors"][0]["artifacts"][-1]["status"] == "missing"
