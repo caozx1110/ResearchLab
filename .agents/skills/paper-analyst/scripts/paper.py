@@ -79,6 +79,8 @@ SECTION_PATTERNS = (
     "appendix",
 )
 
+PAPER_TYPES: tuple[str, ...] = ("method_system", "benchmark", "survey")
+
 # --------------------------------------------------------------------------- #
 # The 5-element fill contract (SSOT §3.2 / B1).                                #
 #                                                                             #
@@ -315,9 +317,10 @@ def build_screening_scaffold(
 ) -> dict:
     """Produce the fillable screening.yaml structure (NO keyword-driven grading).
 
-    The judgement fields (worth_deep_reading / judgement_reason / relevance /
-    claims) are left blank for a runtime agent; the script only supplies an
-    evidence digest with locators + an explicitly-non-judgemental keyword hint.
+    The judgement fields (paper_type / worth_deep_reading / judgement_reason /
+    relevance / claims) are left blank for a runtime agent; the script only
+    supplies an evidence digest with locators + an explicitly-non-judgemental
+    keyword hint.
     """
     basic_info = record.get("payload", {}).get("basic_info", {})
     title = str(record.get("title") or "")
@@ -338,11 +341,13 @@ def build_screening_scaffold(
         "fill_contract": {
             "description": (
                 "Agent fills worth_deep_reading (yes|no|maybe) + judgement_reason + "
-                "relevance_to_current_research, and attaches judgement claims to `claims` "
+                "paper_type (method_system|benchmark|survey) + relevance_to_current_research, "
+                "and attaches judgement claims to `claims` "
                 "with verbatim evidence. Then run `screen --phase verify` to validate + persist. "
                 "The script does NOT decide worth — that judgement is the agent's (SSOT §3.2)."
             ),
             "worth_deep_reading": "agent fills: yes|no|maybe",
+            "paper_type": "agent fills: method_system|benchmark|survey",
             "judgement_reason": "agent fills: list of short reasons",
             "relevance_to_current_research": "agent fills: strong|moderate|weak + why",
             "claims": "agent attaches judgement claims backing worth_deep_reading",
@@ -357,6 +362,7 @@ def build_screening_scaffold(
         },
         "evidence_digest": digest,
         # --- agent fills below (left blank on purpose) ---
+        "paper_type": "",
         "worth_deep_reading": "",
         "judgement_reason": [],
         "relevance_to_current_research": "",
@@ -372,6 +378,12 @@ def verify_screening_fill(payload: dict, unit_dir: Path) -> list[str]:
     evidence), and that a real judgement is backed by >=1 claim.
     """
     violations: list[str] = []
+    paper_type = str(payload.get("paper_type") or "").strip().lower()
+    if paper_type and paper_type not in PAPER_TYPES:
+        violations.append(
+            f"paper_type: agent must fill one of {'|'.join(PAPER_TYPES)} or leave blank "
+            f"(got {paper_type!r})"
+        )
     worth = str(payload.get("worth_deep_reading") or "").strip().lower()
     if worth not in {"yes", "no", "maybe"}:
         violations.append(
@@ -889,6 +901,7 @@ def _run_screen(args, root, record, unit_root, cache_path, source_chunks, paper_
         raise SystemExit(1)
 
     worth = str(payload.get("worth_deep_reading") or "").strip().lower()
+    paper_type = str(payload.get("paper_type") or "").strip().lower()
     reasons = [str(item).strip() for item in (payload.get("judgement_reason") or []) if str(item).strip()]
     relevance = str(payload.get("relevance_to_current_research") or "").strip()
     attach_claims(payload, read_claims(payload))
@@ -897,6 +910,7 @@ def _run_screen(args, root, record, unit_root, cache_path, source_chunks, paper_
     write_yaml_if_changed(screen_path, payload)
     record = apply_record_governance(root, record, infer_missing=True, source_label="paper-analyst")
     quick = record["payload"]["quick_screen"]
+    quick["paper_type"] = paper_type
     quick["worth_deep_reading"] = worth
     quick["judgement_reason"] = reasons
     quick["relevance_to_current_research"] = relevance

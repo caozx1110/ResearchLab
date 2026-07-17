@@ -157,6 +157,7 @@ def test_screen_scaffold_has_no_count_driven_grading(tmp_path: Path) -> None:
 
     # Judgement fields exist but are left BLANK for the agent — the script does not grade.
     assert scaffold["worth_deep_reading"] == ""
+    assert scaffold["paper_type"] == ""
     assert scaffold["judgement_reason"] == []
     assert scaffold["relevance_to_current_research"] == ""
     assert scaffold["claims"] == []
@@ -325,6 +326,28 @@ def test_screen_fill_requires_evidence_backed_judgement(tmp_path: Path) -> None:
     assert paper.verify_screening_fill({"worth_deep_reading": "", "claims": []}, unit_dir)
 
 
+def test_screen_fill_validates_paper_type_enum(tmp_path: Path) -> None:
+    paper = _load_paper_module()
+    unit_dir = tmp_path / "unit"
+    unit_dir.mkdir()
+    _write_parse_cache(unit_dir, "p-x")
+
+    payload = {
+        "paper_type": "benchmark",
+        "worth_deep_reading": "no",
+        "judgement_reason": ["not relevant"],
+        "claims": [],
+    }
+    assert paper.verify_screening_fill(payload, unit_dir) == []
+
+    payload["paper_type"] = "position_paper"
+    violations = paper.verify_screening_fill(payload, unit_dir)
+    assert any("paper_type" in violation and "position_paper" in violation for violation in violations)
+
+    payload["paper_type"] = ""
+    assert paper.verify_screening_fill(payload, unit_dir) == []
+
+
 # --------------------------------------------------------------------------- #
 # 6. End-to-end through the real CLI (main): prepare -> fill -> verify -> confirm.
 # --------------------------------------------------------------------------- #
@@ -347,6 +370,15 @@ def test_cli_end_to_end_prepare_fill_verify_persist(tmp_path: Path, monkeypatch:
                     "--paper-id", paper_id, "--defer-post-actions") == 0
     screening = load_yaml(unit_dir / "screening.yaml")
     assert screening["worth_deep_reading"] == "" and screening["evidence_digest"]
+
+    screening["paper_type"] = "benchmark"
+    screening["worth_deep_reading"] = "no"
+    screening["judgement_reason"] = ["benchmark coverage is out of scope"]
+    write_yaml_if_changed(unit_dir / "screening.yaml", screening)
+    assert _run_cli(paper, monkeypatch, tmp_path, "screen", "--phase", "verify",
+                    "--paper-id", paper_id, "--defer-post-actions") == 0
+    screened = load_yaml(record_path(tmp_path, "paper", paper_id))
+    assert screened["payload"]["quick_screen"]["paper_type"] == "benchmark"
 
     # prepare note -> 5-element skeleton; record marked complete but still hollow.
     assert _run_cli(paper, monkeypatch, tmp_path, "complete-note", "--phase", "prepare",
