@@ -567,6 +567,7 @@ prompt_kb_on_path() {
         ;;
       2|y|Y|yes|YES)
         KB_ON_PATH=1
+        info "如果安装成功，终端中先运行 kb help，再运行 kb init。"
         return 0
         ;;
       *)
@@ -767,10 +768,17 @@ print_done() {
       else
         bullet "使用范围：当前用户的所有工作区"
       fi
-      if [ "$KB_SHORTCUT_AVAILABLE" -eq 1 ]; then
-        ok "终端可直接使用 kb。"
-      elif [ "$KB_SHORTCUT_CREATED" -eq 1 ]; then
-        note "已创建 kb 快捷入口，但它所在的目录还不在 PATH 中。"
+      if [ "$INSTALL_INCOMPLETE" -eq 0 ]; then
+        if [ "$KB_SHORTCUT_AVAILABLE" -eq 1 ]; then
+          ok "终端可直接运行："
+          printf '  %bkb help%b\n' "$C_BOLD$C_CYAN" "$C_RESET"
+          printf '  %bkb init%b\n' "$C_BOLD$C_CYAN" "$C_RESET"
+        elif [ "$KB_SHORTCUT_CREATED" -eq 1 ]; then
+          note "已创建 kb 快捷入口，但它所在的目录还不在 PATH 中。"
+          info "请把上方提示的目录加入 PATH，重新打开终端后运行："
+          printf '  %bkb help%b\n' "$C_BOLD$C_CYAN" "$C_RESET"
+          info "安装器不会自动修改 shell 配置。"
+        fi
       fi
       if [ "$INSTALL_INCOMPLETE" -eq 1 ]; then
         section "需要处理"

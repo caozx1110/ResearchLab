@@ -56,6 +56,10 @@ def _run_pty_dialog(
         "RESEARCH_PYTHON": shutil.which("true") or "/usr/bin/true",
         "TERM": "dumb",
     }
+    # A prior in-process bootstrap test may leave this readiness marker behind.
+    # Each installer subprocess must prove its own configured runtime instead of
+    # inheriting readiness from the pytest interpreter.
+    env.pop("_RESEARCH_RUNTIME_READY", None)
     if env_overrides:
         env.update(env_overrides)
     command = ["bash", str(_project_root() / "install.sh"), *args]
@@ -124,6 +128,37 @@ def _run_pty_dialog(
         output.decode("utf-8", errors="replace"),
         "",
     )
+
+
+def _run_shortcut_install(
+    tmp_path: Path,
+    *,
+    shortcut_on_path: bool,
+) -> tuple[Path, subprocess.CompletedProcess[str]]:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    path_entries = ["/usr/bin", "/bin"]
+    if shortcut_on_path:
+        path_entries.insert(0, str(workspace / "bin"))
+    result = _run_pty_dialog(
+        tmp_path,
+        args=[
+            "install",
+            "--codex",
+            "--project",
+            str(workspace),
+            "--kb-on-path",
+            "--yes",
+        ],
+        exchanges=[],
+        env_overrides={
+            "PATH": ":".join(path_entries),
+            "RESEARCH_NO_MANAGED_VENV": "1",
+            "RESEARCH_NO_PDF_BACKEND": "1",
+            "RESEARCH_PYTHON": sys.executable,
+        },
+    )
+    return workspace, result
 
 
 def test_missing_system_yaml_continues_to_managed_runtime_fallback(tmp_path: Path) -> None:
@@ -230,6 +265,59 @@ def test_guided_cancel_writes_nothing(tmp_path: Path) -> None:
     assert not any(workspace.iterdir())
 
 
+def test_guided_shortcut_choice_immediately_explains_terminal_usage(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    result = _run_pty_dialog(
+        tmp_path,
+        args=["install", "--dry-run", "--codex", "--project", str(workspace)],
+        exchanges=[("请选择 [1]：", "2\n")],
+    )
+
+    output = result.stdout
+    assert result.returncode == 0, output
+    prompt_position = output.index("请选择 [1]：")
+    help_position = output.index("kb help")
+    init_position = output.index("kb init")
+    preview_position = output.index("安装预览")
+    assert prompt_position < help_position < init_position < preview_position
+    assert not any(workspace.iterdir())
+
+
+def test_shortcut_completion_reports_direct_terminal_usage_when_on_path(tmp_path: Path) -> None:
+    workspace, result = _run_shortcut_install(tmp_path, shortcut_on_path=True)
+
+    output = result.stdout
+    assert result.returncode == 0, output
+    completion = output.split("安装完成", 1)[1]
+    terminal_guidance = completion.split("开始使用", 1)[0]
+    assert "终端可直接运行" in terminal_guidance
+    assert "kb help" in terminal_guidance
+    assert "kb init" in terminal_guidance
+    assert "不在 PATH" not in terminal_guidance
+    assert (workspace / "bin" / "kb").is_symlink()
+    for shell_config in (".zshrc", ".bashrc", ".profile"):
+        assert not (tmp_path / "home" / shell_config).exists()
+
+
+def test_shortcut_completion_explains_path_setup_when_not_on_path(tmp_path: Path) -> None:
+    workspace, result = _run_shortcut_install(tmp_path, shortcut_on_path=False)
+
+    output = result.stdout
+    assert result.returncode == 0, output
+    completion = output.split("安装完成", 1)[1]
+    terminal_guidance = completion.split("开始使用", 1)[0]
+    assert "不在 PATH" in terminal_guidance
+    assert "加入 PATH" in terminal_guidance
+    assert "重新打开终端" in terminal_guidance
+    assert "kb help" in terminal_guidance
+    assert "终端可直接运行" not in terminal_guidance
+    assert str(workspace / "bin") in output
+    assert (workspace / "bin" / "kb").is_symlink()
+    for shell_config in (".zshrc", ".bashrc", ".profile"):
+        assert not (tmp_path / "home" / shell_config).exists()
+
+
 def test_external_install_prints_completion_without_bash_variable_error(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -238,7 +326,6 @@ def test_external_install_prints_completion_without_bash_variable_error(tmp_path
         args=["install", "--codex", "--project", str(workspace), "--yes"],
         exchanges=[("请选择 [1]：", "1\n")],
         env_overrides={
-            "HOME": os.environ.get("HOME", str(tmp_path)),
             "NO_COLOR": "1",
             "RESEARCH_NO_MANAGED_VENV": "1",
             "RESEARCH_NO_PDF_BACKEND": "1",
@@ -252,6 +339,9 @@ def test_external_install_prints_completion_without_bash_variable_error(tmp_path
     assert "unbound variable" not in result.stdout
     assert "copy-project" not in result.stdout
     assert "工作区文件已准备" in result.stdout
+    terminal_guidance = result.stdout.split("安装完成", 1)[1].split("开始使用", 1)[0]
+    assert "终端可直接运行" not in terminal_guidance
+    assert "kb help" not in terminal_guidance
 
     cancel = _run_pty_dialog(
         tmp_path,
@@ -306,7 +396,6 @@ def test_single_agent_conflict_stops_before_next_steps(tmp_path: Path) -> None:
         args=["install", "--claude", "--project", str(workspace), "--yes"],
         exchanges=[("请选择 [1]：", "1\n")],
         env_overrides={
-            "HOME": os.environ.get("HOME", str(tmp_path)),
             "NO_COLOR": "1",
             "RESEARCH_NO_MANAGED_VENV": "1",
             "RESEARCH_NO_PDF_BACKEND": "1",

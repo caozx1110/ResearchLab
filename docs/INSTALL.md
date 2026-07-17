@@ -16,7 +16,7 @@ bash install.sh
 2. 选择你使用的 AI 工具：Claude Code、Codex，或两者都用。
 3. 选择“仅当前或指定工作区”。推荐 project scope，不推荐 system scope。
 4. 确认 workspace 根目录；不要选择其中的 `kb/` 子目录。
-5. 选择是否创建终端 `kb` 快捷命令。它只是额外便利，不影响在 AI 对话中使用 `kb`。
+5. 选择是否创建终端 `kb` 快捷命令。选择创建后，向导会提示安装完成后先在终端运行 `kb help`，再运行 `kb init`。它只是额外便利，不影响在 AI 对话中使用 `kb`。
 
 确认页会列出安装目标和将发生的改动。安装完成后，打开刚才选择的 AI 工具，在对话中输入：
 
@@ -76,7 +76,7 @@ bash install.sh --all --project /path/to/workspace
 bash install.sh --claude --project /path/to/workspace --kb-on-path
 ```
 
-选择创建终端快捷命令时，project scope 会写 `<workspace>/bin/kb`。如果目标目录不在 `PATH`，安装器会提示。
+选择创建终端快捷命令时，project scope 会写 `<workspace>/bin/kb`。安装完成时，如果快捷入口已经在当前 `PATH` 中，完成页会提示可直接运行 `kb help` 和 `kb init`；如果不在，完成页会提示把上方显示的目录加入 `PATH`，重新打开终端后运行 `kb help`。安装器只创建快捷入口，不会修改任何 shell 配置。AI 对话中的 `kb <verb>` 不受终端 `PATH` 影响。
 
 ## Project Scope Copy
 
