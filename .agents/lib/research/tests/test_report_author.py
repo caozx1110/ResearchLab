@@ -116,3 +116,24 @@ def test_outline_produces_evidence_backed_section_skeleton(tmp_path: Path) -> No
         assert heading in outline
     assert "The method improves benchmark success rate." in outline
     assert "Success rate improves by 8 points." in outline
+
+
+def test_missing_inputs_are_explicit_and_never_fabricated(tmp_path: Path) -> None:
+    report = _load_report_module()
+    root, program_id, _ = _make_workspace(tmp_path, with_claim=False)
+    workflow = root / "kb" / "programs" / program_id / "workflow"
+    write_yaml_if_changed(
+        workflow / "reporting-events.yaml",
+        {"id": f"{program_id}-reporting-events", "items": []},
+    )
+    (workflow / "decision-log.md").write_text("# Decision Log\n", encoding="utf-8")
+
+    inputs = report.load_report_inputs(root, program_id)
+    weekly = report.render_report(f"Weekly Report: {program_id}", inputs, report_kind="weekly")
+    outline = report.render_outline(program_id, inputs)
+
+    assert "missing: confirmed claims" in weekly
+    assert "missing: reporting events" in weekly
+    assert "missing: decisions" in weekly
+    assert "missing: related-work claims and evidence" in outline
+    assert "improves benchmark success rate" not in weekly

@@ -306,6 +306,13 @@ def render_outline_event_inputs(events: list[dict[str, Any]], *, section: str, t
 
 
 def render_outline(program_id: str, inputs: ReportInputs) -> str:
+    related_work = render_claims(
+        inputs.claim_sources,
+        inputs.missing_units,
+        heading="Related Work: Confirmed Claims & Evidence",
+    )
+    if not any(source.claims for source in inputs.claim_sources):
+        related_work.append("- missing: related-work claims and evidence")
     sections = [
         [f"# Paper Outline: {program_id}", ""],
         [
@@ -314,11 +321,7 @@ def render_outline(program_id: str, inputs: ReportInputs) -> str:
             "- Fill in: research problem, motivation, gap, contribution thesis, and paper roadmap.",
             "- missing: introduction narrative",
         ],
-        render_claims(
-            inputs.claim_sources,
-            inputs.missing_units,
-            heading="Related Work: Confirmed Claims & Evidence",
-        ),
+        related_work,
         [
             "## Method",
             "",
