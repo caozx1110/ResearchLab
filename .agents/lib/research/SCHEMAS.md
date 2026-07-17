@@ -122,11 +122,31 @@ history:                             # append_history() 写入
 
 | kind | payload 关键 section | 写入 skill |
 |---|---|---|
-| paper | `basic_info`, `source_search`, `quick_screen{judgement_reason, takeaways}`, `core_content`, `structure`, `figures`, `critique`, `state` | paper-analyst |
+| paper | `basic_info`, `source_search`, `quick_screen{paper_type, judgement_reason, takeaways}`, `core_content`, `structure`, `figures`, `critique`, `state` | paper-analyst |
 | repo | `basic_info`, `source_search`, `capability{boundary, core_capabilities}`, `structure`, `reuse`, `risk` | repo-analyst |
 | blog | `basic_info`, `source_search`, `positioning`, `content`, `credibility` | blog-analyst |
 | idea | `problem{problem_definition}`, `hypothesis{core_hypothesis}`, `review` | idea-workbench |
 | experiment | `basic_info{goal}`, `setup`, `process`, `results`, `diagnosis`（另见 run-log/diagnoses/follow-ups 旁路文件） | experiment-workbench |
+
+### paper 类型与 note element set <a id="paper-element-sets"></a>
+
+`payload.quick_screen.paper_type` 由 runtime agent 在 screening 阶段依据证据填写，脚本只校验枚举并持久化，**不得用关键词或启发式自动分类**。
+
+```yaml
+payload:
+  quick_screen:
+    paper_type: ""  # ""|method_system|benchmark|survey；空/未知下游回退 method_system
+```
+
+`complete-note` 的 `required_elements` 按类型选择；每个 element 都是 judgement-class claim，必须有逐字可验证的 `evidence_refs`：
+
+| paper_type | required_elements | payload target |
+|---|---|---|
+| `method_system` | `motivation`, `method`, `experiment`, `limitation`, `insight` | motivation→`core_content.motivation`; method→`core_content.method`; experiment→`core_content.changes_and_effects`; limitation→`critique.weak_spots`; insight→`core_content.why_it_might_work` |
+| `benchmark` | `motivation`, `task_design`, `metrics`, `coverage_limitation`, `insight` | motivation→`core_content.motivation`; task_design→`core_content.method`; metrics / coverage_limitation→`core_content.changes_and_effects`; insight→`core_content.why_it_might_work` |
+| `survey` | `scope`, `taxonomy`, `trends`, `gaps`, `insight` | scope→`core_content.motivation`; taxonomy→`core_content.method`; trends / gaps→`core_content.changes_and_effects`; insight→`core_content.why_it_might_work` |
+
+缺少 `paper_type` 的旧 paper 必须保持 `method_system` 的原五要素行为。三种集合都至少写入一个 `core_content` 字段，不改变 confirmation substance gate。
 
 ---
 

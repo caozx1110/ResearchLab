@@ -79,16 +79,23 @@ SECTION_PATTERNS = (
     "appendix",
 )
 
+PAPER_TYPES: tuple[str, ...] = ("method_system", "benchmark", "survey")
+
 # --------------------------------------------------------------------------- #
-# The 5-element fill contract (SSOT §3.2 / B1).                                #
+# Per-paper-type 5-element fill contracts (SSOT §3.2).                         #
 #                                                                             #
-# A runtime agent fills these five elements; every element is a judgement-class #
-# claim and MUST carry >=1 evidence_ref (short verbatim quote + locator). The   #
-# script only verifies + routes them — it never authors content. Each element   #
-# lands in a canonical payload field so a filled note clears has_substantive_    #
-# content() (SSOT §3.11 substance gate) and renders a note.md section.           #
+# A runtime agent classifies the paper during screening and fills the selected #
+# five elements; every element is a judgement-class claim and MUST carry >=1   #
+# evidence_ref. The script only selects, verifies, and routes the structure.    #
 # --------------------------------------------------------------------------- #
-NOTE_ELEMENTS: tuple[str, ...] = ("motivation", "method", "experiment", "limitation", "insight")
+ELEMENT_SETS: dict[str, tuple[str, ...]] = {
+    "method_system": ("motivation", "method", "experiment", "limitation", "insight"),
+    "benchmark": ("motivation", "task_design", "metrics", "coverage_limitation", "insight"),
+    "survey": ("scope", "taxonomy", "trends", "gaps", "insight"),
+}
+
+# Compatibility alias for callers that explicitly refer to the historical set.
+NOTE_ELEMENTS: tuple[str, ...] = ELEMENT_SETS["method_system"]
 
 # Every element is judgement-class so research.evidence.validate_claims enforces a
 # non-empty evidence_refs on each (SSOT Principle 2 gate interlock).
@@ -98,6 +105,13 @@ ELEMENT_CLAIM_TYPE: dict[str, str] = {
     "experiment": "evaluation",
     "limitation": "evaluation",
     "insight": "inference",
+    "task_design": "inference",
+    "metrics": "evaluation",
+    "coverage_limitation": "evaluation",
+    "scope": "inference",
+    "taxonomy": "inference",
+    "trends": "evaluation",
+    "gaps": "evaluation",
 }
 
 # element -> (payload section, field, shape). Filling motivation/method/experiment/
@@ -109,6 +123,13 @@ ELEMENT_TARGET: dict[str, tuple[str, str, str]] = {
     "experiment": ("core_content", "changes_and_effects", "list"),
     "limitation": ("critique", "weak_spots", "list"),
     "insight": ("core_content", "why_it_might_work", "str"),
+    "task_design": ("core_content", "method", "str"),
+    "metrics": ("core_content", "changes_and_effects", "list"),
+    "coverage_limitation": ("core_content", "changes_and_effects", "list"),
+    "scope": ("core_content", "motivation", "str"),
+    "taxonomy": ("core_content", "method", "str"),
+    "trends": ("core_content", "changes_and_effects", "list"),
+    "gaps": ("core_content", "changes_and_effects", "list"),
 }
 
 ELEMENT_HEADING: dict[str, str] = {
@@ -117,7 +138,28 @@ ELEMENT_HEADING: dict[str, str] = {
     "experiment": "Experiment",
     "limitation": "Limitation",
     "insight": "Insight",
+    "task_design": "Task Design",
+    "metrics": "Metrics",
+    "coverage_limitation": "Coverage Limitation",
+    "scope": "Scope",
+    "taxonomy": "Taxonomy",
+    "trends": "Trends",
+    "gaps": "Gaps",
 }
+
+
+def elements_for(record_or_type: dict | str) -> tuple[str, ...]:
+    """Select the agent-authored element set; missing/unknown type is method_system."""
+    if isinstance(record_or_type, str):
+        paper_type = record_or_type
+    elif isinstance(record_or_type, dict):
+        payload = record_or_type.get("payload")
+        quick_screen = payload.get("quick_screen") if isinstance(payload, dict) else None
+        paper_type = quick_screen.get("paper_type") if isinstance(quick_screen, dict) else record_or_type.get("paper_type")
+    else:
+        paper_type = ""
+    normalized = str(paper_type or "").strip().lower()
+    return ELEMENT_SETS.get(normalized, ELEMENT_SETS["method_system"])
 
 # Reusable, machine-readable description of the evidence_ref shape an agent must fill.
 EVIDENCE_REF_FORMAT: dict[str, str] = {
@@ -315,9 +357,10 @@ def build_screening_scaffold(
 ) -> dict:
     """Produce the fillable screening.yaml structure (NO keyword-driven grading).
 
-    The judgement fields (worth_deep_reading / judgement_reason / relevance /
-    claims) are left blank for a runtime agent; the script only supplies an
-    evidence digest with locators + an explicitly-non-judgemental keyword hint.
+    The judgement fields (paper_type / worth_deep_reading / judgement_reason /
+    relevance / claims) are left blank for a runtime agent; the script only
+    supplies an evidence digest with locators + an explicitly-non-judgemental
+    keyword hint.
     """
     basic_info = record.get("payload", {}).get("basic_info", {})
     title = str(record.get("title") or "")
@@ -338,14 +381,16 @@ def build_screening_scaffold(
         "fill_contract": {
             "description": (
                 "Agent fills worth_deep_reading (yes|no|maybe) + judgement_reason + "
-                "relevance_to_current_research, and attaches judgement claims to `claims` "
+                "paper_type (method_system|benchmark|survey) + relevance_to_current_research, "
+                "and attaches judgement claims to `claims` "
                 "with verbatim evidence. Then run `screen --phase verify` to validate + persist. "
                 "The script does NOT decide worth — that judgement is the agent's (SSOT §3.2)."
             ),
             "worth_deep_reading": "agent fills: yes|no|maybe",
+            "paper_type": "agent fills: method_system|benchmark|survey",
             "judgement_reason": "agent fills: list of short reasons",
             "relevance_to_current_research": "agent fills: strong|moderate|weak + why",
-            "claims": "agent attaches judgement claims backing worth_deep_reading",
+            "claims": "agent attaches judgement claims backing paper_type and worth_deep_reading",
             "evidence_ref_format": EVIDENCE_REF_FORMAT,
         },
         "agent_hints": {
@@ -357,6 +402,7 @@ def build_screening_scaffold(
         },
         "evidence_digest": digest,
         # --- agent fills below (left blank on purpose) ---
+        "paper_type": "",
         "worth_deep_reading": "",
         "judgement_reason": [],
         "relevance_to_current_research": "",
@@ -372,6 +418,12 @@ def verify_screening_fill(payload: dict, unit_dir: Path) -> list[str]:
     evidence), and that a real judgement is backed by >=1 claim.
     """
     violations: list[str] = []
+    paper_type = str(payload.get("paper_type") or "").strip().lower()
+    if paper_type and paper_type not in PAPER_TYPES:
+        violations.append(
+            f"paper_type: agent must fill one of {'|'.join(PAPER_TYPES)} or leave blank "
+            f"(got {paper_type!r})"
+        )
     worth = str(payload.get("worth_deep_reading") or "").strip().lower()
     if worth not in {"yes", "no", "maybe"}:
         violations.append(
@@ -387,11 +439,15 @@ def verify_screening_fill(payload: dict, unit_dir: Path) -> list[str]:
         violations.append(
             "worth_deep_reading is a judgement (yes|maybe) but no evidence-backed claims were attached"
         )
+    if paper_type and not claims:
+        violations.append(
+            "paper_type is an agent judgement but no evidence-backed claims were attached"
+        )
     return violations
 
 
 # --------------------------------------------------------------------------- #
-# complete-note: 5-element fillable skeleton / verify + persist an agent fill   #
+# complete-note: type-specific fillable skeleton / verify + persist agent fill #
 # --------------------------------------------------------------------------- #
 
 
@@ -403,10 +459,12 @@ def build_note_scaffold(
     digest_chunks: int,
     digest_chars: int,
 ) -> dict:
-    """Produce the 5-element fillable note skeleton (motivation/method/experiment/
-    limitation/insight). Each element is blank for the agent to fill with content +
-    >=1 evidence_ref. The script authors nothing here."""
+    """Produce the selected type's fillable note skeleton; script authors nothing."""
     digest = _evidence_digest(source_chunks, cache_locator_kind, chunk_limit=digest_chunks, excerpt_chars=digest_chars)
+    required_elements = elements_for(record)
+    paper_type = str(record.get("payload", {}).get("quick_screen", {}).get("paper_type") or "method_system")
+    if paper_type not in ELEMENT_SETS:
+        paper_type = "method_system"
     elements = [
         {
             "element": name,
@@ -414,22 +472,23 @@ def build_note_scaffold(
             "content": "",
             "evidence_refs": [],
         }
-        for name in NOTE_ELEMENTS
+        for name in required_elements
     ]
     return {
         "paper_id": record["id"],
         "kind": "paper",
+        "paper_type": paper_type,
         "status": "awaiting_agent_fill",
         "phase": "prepare",
         "fill_contract": {
             "description": (
-                "Agent fills all five required_elements with its own understanding, each "
+                "Agent fills all required_elements for the selected paper_type with its own understanding, each "
                 "backed by >=1 verbatim evidence_ref. Then run `complete-note --phase verify` "
                 "to validate + verbatim-check evidence + write note.md + core_content. Empty or "
                 "unevidenced elements are rejected; the script never authors content (SSOT §3.2)."
             ),
-            "required_elements": list(NOTE_ELEMENTS),
-            "element_claim_types": dict(ELEMENT_CLAIM_TYPE),
+            "required_elements": list(required_elements),
+            "element_claim_types": {name: ELEMENT_CLAIM_TYPE[name] for name in required_elements},
             "evidence_ref_format": EVIDENCE_REF_FORMAT,
         },
         "evidence_digest": digest,
@@ -459,20 +518,24 @@ def _claim_from_element(name: str, element: dict) -> dict:
     }
 
 
-def verify_note_fill(fill: Any, unit_dir: Path) -> tuple[list[str], list[dict]]:
-    """Validate an agent-filled 5-element note. Returns (violations, claims).
+def verify_note_fill(fill: Any, unit_dir: Path, record: dict | None = None) -> tuple[list[str], list[dict]]:
+    """Validate an agent-filled type-specific note. Returns (violations, claims).
 
-    Violations name the offending element. All five elements must be present, carry
+    Violations name the offending element. All selected elements must be present, carry
     non-empty content, be structurally valid (validate_claims), and every evidence_ref
     quote must verify verbatim against the artifact (verify_claim_evidence).
     """
     violations: list[str] = []
     elements = _elements_by_name(fill)
+    required_elements = elements_for(record or "method_system")
+    unexpected = sorted(set(elements) - set(required_elements))
+    for name in unexpected:
+        violations.append(f"element '{name}': unexpected for selected paper type")
     claims: list[dict] = []
-    for name in NOTE_ELEMENTS:
+    for name in required_elements:
         element = elements.get(name)
         if element is None:
-            violations.append(f"element '{name}': missing (all five elements are required)")
+            violations.append(f"element '{name}': missing (all selected elements are required)")
             continue
         content = clean_text(str(element.get("content") or ""))
         if not content:
@@ -496,7 +559,7 @@ def _apply_note_fill_to_payload(record: dict, claims: list[dict]) -> None:
     core = payload.setdefault("core_content", {})
     critique = payload.setdefault("critique", {})
     by_id = {str(claim.get("id") or ""): claim for claim in claims}
-    for name in NOTE_ELEMENTS:
+    for name in elements_for(record):
         claim = by_id.get(f"claim-{name}")
         if claim is None:
             continue
@@ -528,7 +591,7 @@ def render_note_md(record: dict, claims: list[dict]) -> str:
         "> 本笔记由 runtime agent 依据 parse-cache 填写；脚本已逐字校验每条 evidence（SSOT 原则1/原则2）。",
         "",
     ]
-    for name in NOTE_ELEMENTS:
+    for name in elements_for(record):
         lines.append(f"## {ELEMENT_HEADING[name]}")
         lines.append("")
         claim = by_id.get(f"claim-{name}")
@@ -785,7 +848,7 @@ def next_for_agent_note(root: Path, record: dict, cache_path: Path, fill_path: P
     (each needs a verbatim quote + locator), and the exact verify command to run after.
     It authors no judgement — the agent still fills the understanding.
     """
-    elements = ",".join(NOTE_ELEMENTS)
+    elements = ",".join(elements_for(record))
     verify_cmd = (
         f"${{RESEARCH_PYTHON:-python3}} {SCRIPT_PATH} --root {root} "
         f"complete-note --paper-id {record['id']} --phase verify --input {fill_path.name}"
@@ -889,6 +952,7 @@ def _run_screen(args, root, record, unit_root, cache_path, source_chunks, paper_
         raise SystemExit(1)
 
     worth = str(payload.get("worth_deep_reading") or "").strip().lower()
+    paper_type = str(payload.get("paper_type") or "").strip().lower()
     reasons = [str(item).strip() for item in (payload.get("judgement_reason") or []) if str(item).strip()]
     relevance = str(payload.get("relevance_to_current_research") or "").strip()
     attach_claims(payload, read_claims(payload))
@@ -897,6 +961,7 @@ def _run_screen(args, root, record, unit_root, cache_path, source_chunks, paper_
     write_yaml_if_changed(screen_path, payload)
     record = apply_record_governance(root, record, infer_missing=True, source_label="paper-analyst")
     quick = record["payload"]["quick_screen"]
+    quick["paper_type"] = paper_type
     quick["worth_deep_reading"] = worth
     quick["judgement_reason"] = reasons
     quick["relevance_to_current_research"] = relevance
@@ -946,13 +1011,14 @@ def _run_complete_note(args, root, record, unit_root, cache_path, source_chunks,
         append_history(
             record,
             action="paper-note-scaffolded",
-            summary="Prepared 5-element fillable note skeleton (script authored nothing).",
+        summary="Prepared type-specific fillable note skeleton (script authored nothing).",
             information_types=["inference", "unverified"],
             artifacts=[rel(root, fill_scaffold_path), rel(root, cache_path)],
         )
         write_record(root, record)
         print(f"[ok] wrote {fill_scaffold_path.relative_to(root)}")
-        print("下一步：runtime agent 为 5 要素(motivation/method/experiment/limitation/insight)填内容+证据，再运行 complete-note --phase verify。")
+        required = "/".join(elements_for(record))
+        print(f"下一步：runtime agent 为 5 要素({required})填内容+证据，再运行 complete-note --phase verify。")
         print(next_for_agent_note(root, record, cache_path, fill_scaffold_path))
         _finalize_post_actions(root, trigger="milestone", message=f"milestone: scaffold note {args.paper_id}", defer_post_actions=defer_post_actions)
         return 0
@@ -964,7 +1030,7 @@ def _run_complete_note(args, root, record, unit_root, cache_path, source_chunks,
     fill = load_yaml(fill_path, default={})
     if not isinstance(fill, dict):
         raise SystemExit(f"complete-note --phase verify: {fill_path} is not a mapping")
-    violations, claims = verify_note_fill(fill, unit_root)
+    violations, claims = verify_note_fill(fill, unit_root, record)
     if violations:
         print("[reject] note fill failed verification:", file=sys.stderr)
         for violation in violations:

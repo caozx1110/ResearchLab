@@ -67,6 +67,7 @@ def kind_payload_skeleton(kind: str, title: str = "") -> dict[str, Any]:
                 "queries": [],
             },
             "quick_screen": {
+                "paper_type": "",
                 "worth_deep_reading": "unknown",
                 "judgement_reason": [],
                 "backing_strength": "",
