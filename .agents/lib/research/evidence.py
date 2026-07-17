@@ -42,7 +42,8 @@ CLAIM_TYPES = {"fact", "inference", "evaluation", "user_opinion", "unverified"}
 # Judgement-class claims must carry evidence before they may be promoted to
 # confirmed (SSOT Principle 2 / gate interlock). This module supplies the
 # criterion function; the parallel Gate track wires it into the gate.
-JUDGEMENT_CLAIM_TYPES = {"inference", "evaluation"}
+JUDGEMENT_CLAIM_TYPES = {"inference", "evaluation", "user_opinion"}
+UNCONFIRMABLE_CLAIM_TYPES = {"unverified"}
 CLAIM_CONFIRMATION_VALUES = {
     "pending_user_confirmation",
     "confirmed",
@@ -57,6 +58,7 @@ EXTERNAL_SOURCE_KINDS = {"repo"}
 
 # Required top-level keys on every claim (validate_claims enforces presence).
 REQUIRED_CLAIM_FIELDS = ("id", "text", "claim_type", "confirmation_status", "evidence_refs")
+REQUIRED_EVIDENCE_REF_FIELDS = ("source_unit_id", "artifact", "locator", "quote")
 
 CONFIRMABLE_CONTENT_SECTIONS: dict[str, tuple[str, ...]] = {
     "paper": ("core_content",),
@@ -708,15 +710,17 @@ def verification_receipt_violations(
 
 
 def validate_claims(claims: Any) -> list[str]:
-    """Validate claim *structure* and the judgement-class empty-evidence rule.
+    """Validate claim structure and the judgement/evidence completeness rules.
 
     Returns a list of violation strings (empty == all claims well-formed). Checks
     per claim: required fields present (id/text/claim_type/confirmation_status/
     evidence_refs), `claim_type` in the enum, `confirmation_status` in the enum,
     `evidence_refs` is a list, and — the gate interlock criterion (SSOT
-    Principle 2/3) — a judgement-class claim (`inference`/`evaluation`) must have
-    a **non-empty** `evidence_refs` (empty => violation). Fact-class claims may
-    carry an empty `evidence_refs`.
+    Principle 2/3) — a judgement-class claim
+    (`inference`/`evaluation`/`user_opinion`) must have a **non-empty**
+    `evidence_refs` (empty => violation). Fact and unverified claims may carry an
+    empty list, but every ref that is present must be a mapping with non-empty
+    `source_unit_id`, `artifact`, `locator`, and `quote` text.
 
     This is a pure criterion function: it does NOT mutate any gate or record. The
     Gate track consumes it to enforce "judgement claims with no evidence must not
@@ -766,6 +770,17 @@ def validate_claims(claims: Any) -> list[str]:
                 f"{ident}: judgement-class claim ('{claim_type}') has empty evidence_refs "
                 f"— cannot be confirmed without evidence"
             )
+        if refs:
+            for ref_index, ref in enumerate(refs):
+                ref_label = f"{ident}.evidence_refs[{ref_index}]"
+                if not isinstance(ref, dict):
+                    violations.append(f"{ref_label}: not a mapping")
+                    continue
+                for field_name in REQUIRED_EVIDENCE_REF_FIELDS:
+                    if field_name not in ref:
+                        violations.append(f"{ref_label}: missing required field '{field_name}'")
+                    elif not isinstance(ref.get(field_name), str) or not ref[field_name].strip():
+                        violations.append(f"{ref_label}: missing/empty '{field_name}'")
     return violations
 
 
@@ -831,11 +846,13 @@ def read_claims(payload: Any) -> list[dict[str, Any]]:
 __all__ = [
     "CLAIM_TYPES",
     "JUDGEMENT_CLAIM_TYPES",
+    "UNCONFIRMABLE_CLAIM_TYPES",
     "CLAIM_CONFIRMATION_VALUES",
     "PDF_LOCATOR_KINDS",
     "HTML_LOCATOR_KINDS",
     "EXTERNAL_SOURCE_KINDS",
     "REQUIRED_CLAIM_FIELDS",
+    "REQUIRED_EVIDENCE_REF_FIELDS",
     "CONFIRMABLE_CONTENT_SECTIONS",
     "EVIDENCE_SCHEMA",
     "CLAIMS_KEY",

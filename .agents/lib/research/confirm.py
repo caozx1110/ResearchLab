@@ -17,6 +17,7 @@ from .common import (
 from .journal import journaled_op, operation_lock_path
 from .evidence import (
     JUDGEMENT_CLAIM_TYPES,
+    UNCONFIRMABLE_CLAIM_TYPES,
     confirmation_claims,
     confirmation_claim_ids,
     confirmation_content_digest,
@@ -167,12 +168,27 @@ def confirmation_track(record: dict[str, Any]) -> str:
     governance gate rather than a parallel, drifting rule.
     """
     needs_gate, _ai_info_types, _source_is_ai = _record_needs_gate(record)
-    claim_types = {
+    claim_types = _canonical_claim_types(record)
+    claim_floor = JUDGEMENT_CLAIM_TYPES | UNCONFIRMABLE_CLAIM_TYPES
+    return "judgement" if needs_gate or bool(claim_types & claim_floor) else "fact"
+
+
+def _canonical_claim_types(record: dict[str, Any]) -> set[str]:
+    return {
         str(claim.get("claim_type") or "")
         for claim in confirmation_claims(record)
         if isinstance(claim, dict)
     }
-    return "judgement" if needs_gate or bool(claim_types & JUDGEMENT_CLAIM_TYPES) else "fact"
+
+
+def _require_confirmable_claim_types(record: dict[str, Any]) -> None:
+    blocked = sorted(_canonical_claim_types(record) & UNCONFIRMABLE_CLAIM_TYPES)
+    if blocked:
+        raise SystemExit(
+            "Cannot confirm canonical claims with unconfirmable claim_type(s): "
+            + ", ".join(blocked)
+            + ". Resolve or replace unverified claims before confirmation."
+        )
 
 
 def default_confirmed_by(project_root: Path | None = None) -> str:
@@ -262,6 +278,7 @@ def apply_confirmation(
     verification_root: Path | None = None,
     trusted_source_roots: dict[str, Path] | None = None,
 ) -> dict[str, Any]:
+    _require_confirmable_claim_types(record)
     actor, evidence_items = require_confirmation_provenance(
         confirmed_by=confirmed_by,
         evidence=evidence,
@@ -356,6 +373,9 @@ def apply_confirmation(
 
 
 def _has_complete_confirmation_receipt(record: dict[str, Any]) -> bool:
+    claims = confirmation_claims(record)
+    if validate_claims(claims) or (_canonical_claim_types(record) & UNCONFIRMABLE_CLAIM_TYPES):
+        return False
     receipt = record.get("confirmation")
     if not isinstance(receipt, dict) or receipt.get("decision") != "confirmed":
         return False
@@ -423,6 +443,7 @@ def confirm_unit(
     unit_kind = str(kind or record.get("kind") or "")
     if unit_kind not in UNIT_KIND_DIRS:
         raise SystemExit(f"Unsupported unit kind: {unit_kind}")
+    _require_confirmable_claim_types(record)
     # Substance gate (SSOT §3.11 / Principle 3). This is the PRIMARY user confirm path
     # (paper.py confirm / kb.py confirm / interactive kb review), so the hollow-gate
     # check must live here too, not only in promote_record. Evaluate track + substance
@@ -472,7 +493,11 @@ def validate_write(record: dict[str, Any], *, strict: bool | None = None) -> lis
     """
     if strict is None:
         strict = os.getenv("RESEARCH_VALIDATE_FAILOPEN") != "1"
-    needs_gate, ai_info_types, source_is_ai = _record_needs_gate(record)
+    record_needs_gate, ai_info_types, source_is_ai = _record_needs_gate(record)
+    claim_floor_types = _canonical_claim_types(record) & (
+        JUDGEMENT_CLAIM_TYPES | UNCONFIRMABLE_CLAIM_TYPES
+    )
+    needs_gate = record_needs_gate or bool(claim_floor_types)
     if not needs_gate:
         return []
     violations: list[str] = []
@@ -484,6 +509,8 @@ def validate_write(record: dict[str, Any], *, strict: bool | None = None) -> lis
             reason_parts.append(f"information_types={sorted(ai_info_types)}")
         if source_is_ai:
             reason_parts.append("source.kind=ai")
+        if claim_floor_types:
+            reason_parts.append(f"canonical claim_types={sorted(claim_floor_types)}")
         violations.append(
             f"record {record.get('id')!r}: confirmation_status={confirmation!r} "
             f"too strong for AI-derived record ({', '.join(reason_parts)}); "
@@ -593,6 +620,7 @@ def promote_record(
         record["maturity"] = maturity
     if confirmation_status:
         if confirmation_status == "confirmed":
+            _require_confirmable_claim_types(record)
             # Substance gate (SSOT §3.11 / Principle 3): a judgement-track record must
             # carry real content before it can be confirmed as fact. This ADDED check
             # is layered on top of the existing provenance rule (never relaxes it) and

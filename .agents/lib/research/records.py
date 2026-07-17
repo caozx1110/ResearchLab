@@ -14,6 +14,8 @@ from .common import (
     utc_now_iso,
 )
 from .evidence import (
+    JUDGEMENT_CLAIM_TYPES,
+    UNCONFIRMABLE_CLAIM_TYPES,
     confirmation_claims,
     confirmation_content_digest,
     record_external_source_contract,
@@ -621,7 +623,20 @@ def normalize_record_schema(record: dict[str, Any], *, project_root: Path | None
             }
     normalized["needs_human_confirmation"] = (
         confirmation_invalidated
-        or (_record_needs_gate(normalized)[0] and normalized["confirmation_status"] != "confirmed")
+        or (
+            (
+                _record_needs_gate(normalized)[0]
+                or bool(
+                    {
+                        str(claim.get("claim_type") or "")
+                        for claim in confirmation_claims(normalized)
+                        if isinstance(claim, dict)
+                    }
+                    & (JUDGEMENT_CLAIM_TYPES | UNCONFIRMABLE_CLAIM_TYPES)
+                )
+            )
+            and normalized["confirmation_status"] != "confirmed"
+        )
     )
     normalized["tags"] = _slug_list(normalized.get("tags"))
     normalized["topics"] = _slug_list(normalized.get("topics"))

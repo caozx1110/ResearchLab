@@ -40,6 +40,7 @@
 - **确认时 evidence 复验**：receipt 落盘前重新运行 claim 结构/空据校验与 `verify_claim_evidence()` 逐字 quote + locator 校验；存在 claim evidence 却没有可解析的 `project_root` 时 fail-closed，不允许只凭上游 verify 结果签 receipt。
 - **judgement 授权**：judgement track 还必须保存用户原话 `user_authorization`，且 `authorization_source=user_message`。这是本地 attestation 完整性与审计留痕，不宣称密码学身份认证。
 - **verify→confirm 绑定**：judgement 必须先有非空 canonical `payload.claims` 与当前 `payload.verification`；receipt 的 `claim_ids` 非空并覆盖 canonical claims。claims/content/artifact bytes 改变均使确认失效并降回 pending。
+- **claim 语义下限**：canonical claim 的类型不能被 record 级 `information_types` / `source` 降级；`inference` / `evaluation` / `user_opinion` 都强制 judgement track，`unverified` claim 在解决或替换前不得 `confirmed`。纯事实元数据且无 canonical claims 仍允许轻确认。
 
 ---
 
@@ -526,10 +527,10 @@ Repo workspace 源码是唯一外部扩展，evidence ref 额外声明 `external
 |---|---|---|
 | `id` | claim | 必填，claim 唯一标识（如 `claim-001`）。 |
 | `text` | claim | 必填，断言本身（非空）。 |
-| `claim_type` | claim | 必填，取 `fact` / `inference` / `evaluation` / `user_opinion` / `unverified` 之一。**judgement-class** = `{inference, evaluation}`。 |
+| `claim_type` | claim | 必填，取 `fact` / `inference` / `evaluation` / `user_opinion` / `unverified` 之一。**judgement-class** = `{inference, evaluation, user_opinion}`；`unverified` 不可 confirmed。 |
 | `confidence` | claim | 可选，0.0–1.0。 |
 | `confirmation_status` | claim | 必填，取 `pending_user_confirmation` / `confirmed` / `rejected` / `auto_confirmed` 之一（与 record 的 `CONFIRMATION_VALUES` 同族）。 |
-| `evidence_refs` | claim | 必填列表（fact-class 可空；judgement-class 非空）。 |
+| `evidence_refs` | claim | 必填列表（fact / unverified 可空；judgement-class 非空）；一旦有 ref，每条的 `source_unit_id` / `artifact` / `locator` / `quote` 都必须是非空文本。 |
 | `source_unit_id` | ref | 证据所在 unit id。 |
 | `artifact` | ref | unit 内相对路径（`parse-cache.yaml` / `note.md` / source 文件）；逐字校验对此文件文本进行。 |
 | `locator` | ref | 定位提示，两套（见下）。 |
@@ -540,9 +541,9 @@ Repo workspace 源码是唯一外部扩展，evidence ref 额外声明 `external
 
 **两套 locator（B4）**：**PDF 源**用 `page=N` / `section` / `para`；**HTML 源**用 `section` / `anchor`（HTML 无页码）。当 artifact 为含 per-page chunk（label 形如 `...:page-N`）的 parse-cache 且 locator 为 `page=N` 时，校验会**额外缩小到该页**：quote 逐字命中在文档但落在**别的页** → 记一条 locator-mismatch violation（页码引错也是接地缺陷）。逐字命中始终是硬性判据，页缩小是精度加成，无 per-page 结构时自动退化为全文校验。
 
-**结构校验（`validate_claims(claims)`）**：逐条校验 claim 结构合法——必填字段齐全（`id`/`text`/`claim_type`/`confirmation_status`/`evidence_refs`）、`claim_type` ∈ 枚举、`confirmation_status` ∈ 枚举、`evidence_refs` 为列表——并施加**空据规则**：judgement-class（`inference`/`evaluation`）claim 的 `evidence_refs` **必须非空**（空 → violation）。fact-class 允许空 `evidence_refs`。返回 violation 列表（空 = 全部合法）。此函数是**纯判据**，不改任何 gate/record。
+**结构校验（`validate_claims(claims)`）**：逐条校验 claim 结构合法——必填字段齐全（`id`/`text`/`claim_type`/`confirmation_status`/`evidence_refs`）、`claim_type` ∈ 枚举、`confirmation_status` ∈ 枚举、`evidence_refs` 为列表——并施加**空据规则**：judgement-class（`inference`/`evaluation`/`user_opinion`）claim 的 `evidence_refs` **必须非空**（空 → violation）。fact / unverified claim 允许空列表，但凡存在的 ref 都必须完整填写 `source_unit_id` / `artifact` / `locator` / `quote`；`[{}]` 必须拒绝。返回 violation 列表（空 = 全部合法）。此函数是**纯判据**，不改任何 gate/record。
 
-**门控联动（原则 3）**：judgement-class claim 若 `evidence_refs` 为空，**不得 promote 成 `confirmed`**。本层用 `validate_claims()` 提供该判据；Gate track 负责把它接进确认门（本层不动 gate）。
+**门控联动（原则 3）**：judgement-class claim 若 `evidence_refs` 为空，**不得 promote 成 `confirmed`**；`unverified` claim 无论 record 级标注如何都不可 confirmed。claim 语义只能加严 record 分轨，不得被 record 级 fact 标注降级。
 
 ---
 
