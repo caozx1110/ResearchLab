@@ -37,6 +37,7 @@ from research.core import (
     synthesis_root,
     write_record,
 )
+from research.evidence import validate_claims, verify_claim_evidence
 
 STRATEGIES = [
     ("narrow-scope", "把问题边界收窄到一个最小可证伪切口。"),
@@ -44,6 +45,21 @@ STRATEGIES = [
     ("evaluation-first", "先围绕评测与 failure probe 定义 idea。"),
     ("mechanism-first", "优先提出清晰机制假设与 kill test。"),
 ]
+
+DISCUSSION_CLAIMS = (
+    ("challenge", "evaluation"),
+    ("probe", "inference"),
+    ("counter-example", "evaluation"),
+    ("constructive-suggestion", "inference"),
+)
+
+EVIDENCE_REF_FORMAT = {
+    "source_unit_id": "canonical KB unit id, for example p-... or r-...",
+    "artifact": "artifact path relative to that unit directory, for example parse-cache.yaml",
+    "locator": "page=N, section, anchor, or file:line",
+    "quote": "short verbatim span; verify checks it against the cited unit artifact",
+    "summary": "optional one-line explanation of relevance",
+}
 
 
 def add_confirmation_arguments(parser: argparse.ArgumentParser) -> None:
@@ -281,6 +297,109 @@ def mark_idea_selected(
     return record
 
 
+def discussion_scaffold(record: dict) -> dict:
+    return {
+        "idea_id": record["id"],
+        "mode": "sparring",
+        "idea_context": {
+            "title": record.get("title", ""),
+            "problem": record["payload"]["problem"].get("problem_definition", ""),
+            "hypothesis": record["payload"]["hypothesis"].get("core_hypothesis", ""),
+            "difference_from_prior_work": record["payload"]["hypothesis"].get("difference_from_prior_work", ""),
+            "minimum_validation_path": record["payload"]["analysis"].get("minimum_validation_path", ""),
+        },
+        "agent_instructions": {
+            "role": "Act as a domain expert/reviewer: challenge, probe, retrieve counter-examples from KB units, trace the argument chain, and offer a constructive suggestion.",
+            "evidence_rule": "Fill every judgement claim and attach at least one verbatim evidence_ref. The script authors no argument and only verifies evidence.",
+            "evidence_ref_format": EVIDENCE_REF_FORMAT,
+        },
+        "reviewer": "",
+        "conclusion": "",
+        "claims": [
+            {
+                "id": role,
+                "role": role,
+                "text": "",
+                "claim_type": claim_type,
+                "confirmation_status": "pending_user_confirmation",
+                "evidence_refs": [],
+            }
+            for role, claim_type in DISCUSSION_CLAIMS
+        ],
+    }
+
+
+def _verify_cross_unit_claims(root: Path, claims: object) -> list[str]:
+    violations = validate_claims(claims)
+    if not isinstance(claims, list):
+        return violations
+    for claim_index, claim in enumerate(claims):
+        if not isinstance(claim, dict):
+            continue
+        refs = claim.get("evidence_refs")
+        if not isinstance(refs, list):
+            continue
+        for ref_index, evidence_ref in enumerate(refs):
+            where = f"claims[{claim_index}].evidence_refs[{ref_index}]"
+            if not isinstance(evidence_ref, dict):
+                continue
+            source_unit_id = str(evidence_ref.get("source_unit_id") or "").strip()
+            if not source_unit_id:
+                violations.append(f"{where}: missing source_unit_id")
+                continue
+            try:
+                source_record, source_path = locate_record(root, source_unit_id, fuzzy=False)
+            except SystemExit:
+                violations.append(f"{where}: source unit not found: {source_unit_id}")
+                continue
+            if str(source_record.get("id") or "") != source_unit_id:
+                violations.append(f"{where}: source_unit_id must be canonical: {source_unit_id}")
+                continue
+            single_ref_claim = {**claim, "evidence_refs": [evidence_ref]}
+            for violation in verify_claim_evidence(single_ref_claim, source_path.parent):
+                violations.append(f"{where}: {violation}")
+    return violations
+
+
+def verify_discussion_fill(root: Path, fill: object, idea_id: str) -> tuple[list[str], list[dict]]:
+    if not isinstance(fill, dict):
+        return ["discussion fill must be a mapping"], []
+    violations: list[str] = []
+    if str(fill.get("idea_id") or "") != idea_id:
+        violations.append(f"idea_id must match {idea_id}")
+    if not str(fill.get("reviewer") or "").strip():
+        violations.append("reviewer must be filled")
+    if not str(fill.get("conclusion") or "").strip():
+        violations.append("conclusion must be filled")
+    claims = fill.get("claims")
+    expected_roles = {role for role, _ in DISCUSSION_CLAIMS}
+    actual_roles = {
+        str(claim.get("role") or claim.get("id") or "")
+        for claim in claims or []
+        if isinstance(claim, dict)
+    }
+    if actual_roles != expected_roles:
+        violations.append(f"claims must contain exactly these roles: {sorted(expected_roles)}")
+    violations.extend(_verify_cross_unit_claims(root, claims))
+    return violations, [dict(claim) for claim in claims or [] if isinstance(claim, dict)]
+
+
+def persist_discussion_conclusion(record: dict, fill: dict, claims: list[dict]) -> dict:
+    verified_at = utc_now_iso()
+    digest_source = f"{record['id']}\n{fill['reviewer']}\n{fill['conclusion']}\n{verified_at}"
+    conclusion = {
+        "id": f"discussion-{hashlib.sha1(digest_source.encode('utf-8')).hexdigest()[:10]}",
+        "conclusion": str(fill["conclusion"]).strip(),
+        "reviewer": str(fill["reviewer"]).strip(),
+        "verified_at": verified_at,
+        "verification": "evidence_verified",
+        "claims": claims,
+    }
+    discussion = record.setdefault("payload", {}).setdefault("discussion", {})
+    discussion.setdefault("conclusions", []).append(conclusion)
+    return conclusion
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Manage idea units in core.")
     add_project_root_argument(parser)
@@ -307,6 +426,11 @@ def build_parser() -> argparse.ArgumentParser:
         cmd.add_argument("--idea-id", required=True)
         if name == "select":
             add_confirmation_arguments(cmd)
+
+    discuss = subparsers.add_parser("discuss", aliases=["spar"])
+    discuss.add_argument("--idea-id", "--id", dest="idea_id", required=True)
+    discuss.add_argument("--phase", choices=["prepare", "verify"], default="prepare")
+    discuss.add_argument("--input", default="")
 
     assist = subparsers.add_parser("review-assist")
     assist.add_argument("--idea-id", action="append", default=[])
@@ -451,6 +575,51 @@ def main() -> int:
         raise SystemExit(f"{args.idea_id} is not an idea record")
     print_idea_resolution(root, args.idea_id, record, path)
     unit_root = path.parent
+
+    if args.command in {"discuss", "spar"}:
+        scaffold_path = unit_root / "discussion-fill.yaml"
+        if args.phase == "prepare":
+            write_yaml_if_changed(scaffold_path, discussion_scaffold(record))
+            append_history(
+                record,
+                action="idea-discussion-scaffolded",
+                summary="Prepared an empty evidence-first sparring conclusion scaffold.",
+                information_types=["inference", "evaluation", "unverified"],
+                artifacts=[rel(root, scaffold_path)],
+            )
+            write_record(root, record)
+            print(f"[ok] wrote {scaffold_path.relative_to(root)}")
+            checkpoint_and_report(root, trigger="milestone", message=f"milestone: prepare idea discussion {record['id']}")
+            return 0
+
+        fill_path = Path(args.input) if args.input else scaffold_path
+        if not fill_path.is_absolute():
+            fill_path = unit_root / fill_path
+        if not fill_path.exists():
+            raise SystemExit(f"discuss --phase verify: fill input not found: {fill_path}")
+        fill = load_yaml(fill_path, default={})
+        violations, claims = verify_discussion_fill(root, fill, record["id"])
+        if violations:
+            print("[reject] discussion conclusion failed verification:", file=sys.stderr)
+            for violation in violations:
+                print(f"  - {violation}", file=sys.stderr)
+            raise SystemExit(1)
+        conclusion = persist_discussion_conclusion(record, fill, claims)
+        record["confirmation_status"] = "pending_user_confirmation"
+        record["needs_human_confirmation"] = True
+        record["information_types"] = sorted(set(record.get("information_types", [])) | {"inference", "evaluation", "unverified"})
+        append_history(
+            record,
+            action="idea-discussion-verified",
+            summary="Verified and persisted one evidence-grounded sparring conclusion.",
+            information_types=["inference", "evaluation", "unverified"],
+            artifacts=[rel(root, fill_path)],
+        )
+        write_record(root, record)
+        build_index(root)
+        print(f"[ok] verified + persisted discussion conclusion {conclusion['id']}")
+        checkpoint_and_report(root, trigger="milestone", message=f"milestone: verify idea discussion {record['id']}")
+        return 0
 
     if args.command == "analyze":
         analysis_path = unit_root / "analysis.yaml"
