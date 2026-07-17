@@ -661,7 +661,7 @@ def build_manifest(
         "schema": SCHEMA,
         "install_name": INSTALL_NAME,
         "install_mode": INSTALL_MODE,
-        "source_repo": str(repo),
+        "source_repo": "",
         "source_commit": source_commit,
         "installed_at": installed_at,
         "updated_at": utc_now(),

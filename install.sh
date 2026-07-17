@@ -403,7 +403,6 @@ prompt_action() {
   menu_option 1 "安装或重新配置" "（推荐）"
   menu_option 2 "更新外部工作区中的 skills"
   menu_option 3 "卸载 skills 接入" "（保留研究资料）"
-  menu_option 4 "重新安装外部工作区" "（保留研究资料）"
   while true; do
     ask "请选择 [1]："
     read -r choice || choice=""
@@ -422,13 +421,8 @@ prompt_action() {
         ACTION=uninstall
         return 0
         ;;
-      4|reinstall)
-        ACTION=reinstall
-        ACTION_FROM_SUBCOMMAND=1
-        return 0
-        ;;
       *)
-        note "请输入 1、2、3 或 4。"
+        note "请输入 1、2 或 3。"
         ;;
     esac
   done
