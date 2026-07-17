@@ -37,7 +37,6 @@ from research.common import (
     load_list_document,
     load_yaml,
     normalize_list,
-    program_file_lock,
     print_resolved_project_roots,
     shell_command,
     simple_slug,
@@ -48,7 +47,7 @@ from research.common import (
 )
 from research.core import apply_confirmation, append_history, ensure_workspace, is_ready_for_human_review, iter_records, kb_root, load_runtime_preferences, locate_record, checkpoint_and_report, project_root, record_workflow_state, write_record
 from research.evidence import attach_claims, build_verification_receipt, validate_claims, verify_claim_evidence
-from research.journal import journaled_op
+from research.journal import mutation_transaction
 
 OPEN_QUESTION_OPEN_STATUSES = {"open"}
 EVIDENCE_REQUEST_OPEN_STATUSES = {"open"}
@@ -179,15 +178,6 @@ def command_for_dashboard_item(item: dict[str, Any]) -> str:
     if program_id:
         return shell_command([COMMAND_PREFIX, ".agents/skills/research-orchestrator/scripts/orchestrate.py", "status", "--program-id", program_id])
     return ""
-
-
-# Only a prepared-but-unfilled full-note shell is non-confirmable. NOT `not_started`:
-# that is the schema default for every paper without a full note, and a screening-phase
-# paper can carry a genuinely pending worth-reading verdict while its full note is
-# not_started — excluding not_started would silently drop real screening confirmations
-# from the program dashboard (baseline surfaced them as a human-gate). Mirrors
-# knowledge-base-manager's review_queue filter so the review path and dashboard agree.
-UNFILLED_NOTE_STATUSES = {"awaiting_agent_fill"}
 
 
 def full_note_status(record: dict[str, Any]) -> str:
@@ -558,46 +548,10 @@ def program_checkpoint_paths(root: Path, program_id: str, *extra: Path) -> list[
 
 @contextmanager
 def program_mutation(root: Path, program_id: str, operation: str, *extra_targets: Path):
-    """Serialize, journal, and synchronously roll back a program mutation."""
+    """Run one program mutation through the canonical exact-path transaction."""
     targets = program_checkpoint_paths(root, program_id, *extra_targets)
-    before = {
-        path: path.read_text(encoding="utf-8") if path.is_file() else None
-        for path in targets
-    }
-    program_dir = program_root(root, program_id)
-    candidate_dirs = [
-        program_dir,
-        workflow_root(root, program_id),
-        program_dir / "design",
-        program_dir / "experiments",
-        program_dir / "reports",
-        *sorted({path.parent for path in extra_targets}, key=lambda path: len(path.parts)),
-    ]
-    preexisting_dirs = {path: path.exists() for path in candidate_dirs}
-    lock_path = program_dir / ".program.lock"
-    lock_existed = lock_path.exists()
-    try:
-        with program_file_lock(root, program_id):
-            try:
-                with journaled_op(root, f"research-orchestrator:{operation}", targets):
-                    yield
-            except BaseException:
-                for path, content in before.items():
-                    if content is None:
-                        if path.is_file() or path.is_symlink():
-                            path.unlink()
-                    else:
-                        write_text_if_changed(path, content)
-                raise
-    finally:
-        if not lock_existed and lock_path.is_file():
-            lock_path.unlink()
-        for path in sorted(candidate_dirs, key=lambda item: len(item.parts), reverse=True):
-            if not preexisting_dirs[path] and path.is_dir():
-                try:
-                    path.rmdir()
-                except OSError:
-                    pass
+    with mutation_transaction(root, f"research-orchestrator:{operation}", targets):
+        yield
 
 
 def program_ids(root: Path) -> list[str]:

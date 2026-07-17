@@ -3,8 +3,6 @@ from __future__ import annotations
 
 import argparse
 import sys
-from contextlib import contextmanager
-from collections.abc import Iterator
 from pathlib import Path
 
 SCRIPT_PATH = Path(__file__).resolve()
@@ -23,20 +21,12 @@ if __name__ == "__main__":
     ensure_managed_runtime(PROJECT_ROOT)
 
 from research.common import add_project_root_argument, load_yaml, print_resolved_project_roots, write_text_if_changed
-from research import journal as research_journal
+from research.journal import mutation_transaction
 from research.learnings import load_learnings, render_recall_digest
 from research.core import checkpoint_and_report, iter_records, kb_root, project_root, user_root
 
 
 CURRENT_STATE_STDOUT_LINES = 40
-
-
-@contextmanager
-def navigation_transaction(root: Path, op_type: str, target_paths: list[Path]) -> Iterator[None]:
-    """Use the shared exact-path transaction once the recovery track is merged."""
-    transaction = getattr(research_journal, "mutation_transaction", research_journal.journaled_op)
-    with transaction(root, op_type, target_paths):
-        yield
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -144,7 +134,7 @@ def main() -> int:
     current_content = render_current(records, program_states, recall_digest)
     if args.command == "refresh":
         targets = [current_path, nav_path, reading_path]
-        with navigation_transaction(root, "refresh_user_navigation", targets):
+        with mutation_transaction(root, "refresh_user_navigation", targets):
             write_text_if_changed(current_path, current_content)
             write_text_if_changed(nav_path, render_navigation(records))
             write_text_if_changed(reading_path, render_reading_list(records))
@@ -161,7 +151,7 @@ def main() -> int:
     if args.command == "current-state":
         print_current_state_summary(root, current_content)
         return 0
-    with navigation_transaction(root, "refresh_reading_list", [reading_path]):
+    with mutation_transaction(root, "refresh_reading_list", [reading_path]):
         write_text_if_changed(reading_path, render_reading_list(records))
     checkpoint_and_report(
         root,
