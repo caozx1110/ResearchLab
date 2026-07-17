@@ -21,8 +21,8 @@ from research.bootstrap import ensure_managed_runtime
 if __name__ == "__main__":
     ensure_managed_runtime(PROJECT_ROOT)
 
-from research.common import add_project_root_argument, exclusive_file_lock, load_yaml, print_resolved_project_roots, slugify, warn_if_cwd_differs_from_project_root, write_text_if_changed, write_yaml_if_changed, yaml_default
-from research.journal import journaled_op, operation_lock_path
+from research.common import add_project_root_argument, load_yaml, print_resolved_project_roots, slugify, warn_if_cwd_differs_from_project_root, write_text_if_changed, write_yaml_if_changed, yaml_default
+from research.journal import mutation_transaction
 from research.core import (
     candidate_pools_path,
     config_root,
@@ -288,10 +288,23 @@ def main() -> int:
 
     if args.command == "init":
         warn_if_cwd_differs_from_project_root(root, command="config.py init")
-        write_yaml_if_changed(profile_path(root), load_profile(root))
-        load_topic_taxonomy(root)
-        load_candidate_pools(root)
-        write_yaml_if_changed(runtime_preferences_path(root), default_runtime_preferences())
+        targets = [
+            profile_path(root),
+            topic_taxonomy_path(root),
+            candidate_pools_path(root),
+            runtime_preferences_path(root),
+        ]
+        with mutation_transaction(root, "config-init", targets):
+            write_yaml_if_changed(profile_path(root), load_profile(root))
+            load_topic_taxonomy(root)
+            load_candidate_pools(root)
+            write_yaml_if_changed(runtime_preferences_path(root), default_runtime_preferences())
+        checkpoint_and_report(
+            root,
+            trigger="milestone",
+            message="milestone: initialize research configuration",
+            target_paths=targets,
+        )
         print(f"[ok] initialized {profile_path(root).relative_to(root)}")
         print(f"[ok] initialized {topic_taxonomy_path(root).relative_to(root)}")
         print(f"[ok] initialized {candidate_pools_path(root).relative_to(root)}")
@@ -314,61 +327,103 @@ def main() -> int:
                 print_personalization(root)
         return 0
     if args.command == "set":
-        payload = load_profile(root)
-        set_nested(payload, args.key, parse_value(args.value))
-        payload.setdefault("history", []).append({"action": "set", "key": args.key, "value": args.value})
-        write_yaml_if_changed(profile_path(root), payload)
+        path = profile_path(root)
+        with mutation_transaction(root, "config-set", [path]):
+            payload = load_profile(root)
+            set_nested(payload, args.key, parse_value(args.value))
+            payload.setdefault("history", []).append({"action": "set", "key": args.key, "value": args.value})
+            write_yaml_if_changed(path, payload)
+        checkpoint_and_report(
+            root,
+            trigger="milestone",
+            message=f"milestone: update profile {args.key}",
+            target_paths=[path],
+        )
         print(f"[ok] set {args.key}")
         return 0
     if args.command == "toggle":
         path = settings_path(root)
-        text = path.read_text(encoding="utf-8") if path.exists() else ""
+        targets = [path]
+        if TOGGLE_RUNTIME_PREFS.get(args.key):
+            targets.append(runtime_preferences_path(root))
         on = args.state == "on"
-        marker = "[x]" if on else "[ ]"
-        lines = []
-        found = False
-        for line in text.splitlines():
-            if args.key in line:
-                suffix = line.split("]", 1)[-1].strip()
-                lines.append(f"- {marker} {suffix}")
-                found = True
-            else:
-                lines.append(line)
-        if not found:
-            lines.append(f"- {marker} {args.key}")
-        write_text_if_changed(path, "\n".join(lines).strip() + "\n")
-        touched = sync_toggle_runtime_preferences(root, key=args.key, on=on)
+        with mutation_transaction(root, "config-toggle", targets):
+            text = path.read_text(encoding="utf-8") if path.exists() else ""
+            marker = "[x]" if on else "[ ]"
+            lines = []
+            found = False
+            for line in text.splitlines():
+                if args.key in line:
+                    suffix = line.split("]", 1)[-1].strip()
+                    lines.append(f"- {marker} {suffix}")
+                    found = True
+                else:
+                    lines.append(line)
+            if not found:
+                lines.append(f"- {marker} {args.key}")
+            write_text_if_changed(path, "\n".join(lines).strip() + "\n")
+            touched = sync_toggle_runtime_preferences(root, key=args.key, on=on)
+        checkpoint_and_report(
+            root,
+            trigger="milestone",
+            message=f"milestone: toggle config {args.key}",
+            target_paths=targets,
+        )
         print(f"[ok] toggled {args.key} -> {args.state}")
         if touched:
             print(f"[ok] synced runtime prefs: {', '.join(touched)}")
         return 0
     if args.command == "capture-resources":
-        payload = load_profile(root)
-        label = args.label or f"captured_{len(payload['resources']) + 1}"
-        payload["resources"][label] = args.statement
-        payload.setdefault("history", []).append({"action": "capture-resources", "label": label, "statement": args.statement})
-        write_yaml_if_changed(profile_path(root), payload)
+        path = profile_path(root)
+        with mutation_transaction(root, "config-capture-resources", [path]):
+            payload = load_profile(root)
+            label = args.label or f"captured_{len(payload['resources']) + 1}"
+            payload["resources"][label] = args.statement
+            payload.setdefault("history", []).append({"action": "capture-resources", "label": label, "statement": args.statement})
+            write_yaml_if_changed(path, payload)
+        checkpoint_and_report(
+            root,
+            trigger="milestone",
+            message=f"milestone: capture resource profile {label}",
+            target_paths=[path],
+        )
         print(f"[ok] stored resource statement as {label}")
         return 0
     if args.command == "set-taxonomy-seed":
-        path = upsert_taxonomy_seed(
+        path = topic_taxonomy_path(root)
+        with mutation_transaction(root, "config-set-taxonomy-seed", [path]):
+            path = upsert_taxonomy_seed(
+                root,
+                topic=args.topic,
+                aliases=args.alias,
+                tags=args.tag,
+                note=args.note,
+                status=args.status,
+            )
+        checkpoint_and_report(
             root,
-            topic=args.topic,
-            aliases=args.alias,
-            tags=args.tag,
-            note=args.note,
-            status=args.status,
+            trigger="milestone",
+            message=f"milestone: update taxonomy seed {args.topic}",
+            target_paths=[path],
         )
         print(f"[ok] updated {path.relative_to(root)}")
         return 0
     if args.command == "set-pool":
-        path = upsert_pool(
+        path = candidate_pools_path(root)
+        with mutation_transaction(root, "config-set-pool", [path]):
+            path = upsert_pool(
+                root,
+                pool=args.pool,
+                topics=args.topic,
+                tags=args.tag,
+                description=args.description,
+                status=args.status,
+            )
+        checkpoint_and_report(
             root,
-            pool=args.pool,
-            topics=args.topic,
-            tags=args.tag,
-            description=args.description,
-            status=args.status,
+            trigger="milestone",
+            message=f"milestone: update candidate pool {args.pool}",
+            target_paths=[path],
         )
         print(f"[ok] updated {path.relative_to(root)}")
         return 0
@@ -377,11 +432,10 @@ def main() -> int:
         return 0
     if args.command == "set-runtime-pref":
         path = runtime_preferences_path(root)
-        with exclusive_file_lock(operation_lock_path(root, path)):
-            with journaled_op(root, "set-runtime-pref", [path]):
-                payload = load_runtime_preferences(root)
-                _apply_runtime_pref(payload, args.section, args.key, parse_value(args.value))
-                write_runtime_preferences(root, payload)
+        with mutation_transaction(root, "set-runtime-pref", [path]):
+            payload = load_runtime_preferences(root)
+            _apply_runtime_pref(payload, args.section, args.key, parse_value(args.value))
+            write_runtime_preferences(root, payload)
         print(f"[ok] updated {path.relative_to(root)}")
         checkpoint = checkpoint_and_report(
             root,

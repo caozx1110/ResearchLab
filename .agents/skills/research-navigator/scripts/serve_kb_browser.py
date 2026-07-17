@@ -56,9 +56,8 @@ from kb_browser_lib import (
 )
 from kb_browser_terminal import TerminalManager, open_system_terminal, system_terminal_targets
 from research.bootstrap import ensure_managed_runtime  # type: ignore
-from research.common import exclusive_file_lock  # type: ignore
 from research.core import maybe_auto_checkpoint  # type: ignore
-from research.journal import journaled_op, operation_lock_path  # type: ignore
+from research.journal import mutation_transaction  # type: ignore
 
 WATCHED_SUFFIXES = {".yaml", ".yml", ".md", ".markdown", ".txt", ".log", ".json"}
 READABLE_TEXT_SUFFIXES = {".md", ".markdown", ".yaml", ".yml", ".txt", ".log", ".json", ".py", ".sh", ".toml"}
@@ -417,9 +416,8 @@ def create_handler(*, project_root: Path):
                 if not _is_writable_text(project_root, path):
                     raise ValueError("当前只允许在工作台内保存 Markdown / 文本文件，且不能写入生成目录")
                 content = str(payload.get("content") or "")
-                with exclusive_file_lock(operation_lock_path(project_root, path)):
-                    with journaled_op(project_root, "browser-save", [path]):
-                        write_text_atomic(path, content)
+                with mutation_transaction(project_root, "browser-save", [path]):
+                    write_text_atomic(path, content)
                 self.server.coordinator.build_now(f"editor-save:{path.name}")  # type: ignore[attr-defined]
                 response = _file_payload(project_root, path)
                 checkpoint = maybe_auto_checkpoint(
