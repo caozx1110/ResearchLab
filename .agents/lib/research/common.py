@@ -29,7 +29,7 @@ from .slugs import KEYWORD_BLACKLIST, STOPWORDS, normalize_list, normalize_perso
 from .yaml_io import dump_yaml, load_yaml, write_text_if_changed, write_yaml_if_changed, yaml_duplicate_key_issues
 
 
-RUNTIME_MODULES = ("yaml", "PyPDF2", "pypdf")
+RUNTIME_MODULES = ("yaml", "pymupdf4llm", "fitz", "PyPDF2", "pypdf")
 COMMAND_PREFIX = "${RESEARCH_PYTHON:-python3}"
 CONFIRM_SCRIPT_BY_KIND = {
     "paper": ".agents/skills/paper-analyst/scripts/paper.py",
@@ -488,7 +488,46 @@ def infer_topics_and_tags(text: str, *, project_root: Path | None = None) -> tup
     return sorted(topics), sorted(tags)
 
 
+class _FitzPageAdapter:
+    def __init__(self, page: Any):
+        self._page = page
+
+    def extract_text(self) -> str:
+        return str(self._page.get_text("text") or "")
+
+
+class _FitzReaderAdapter:
+    """Expose the small PdfReader interface used by legacy metadata helpers."""
+
+    def __init__(self, path: str):
+        import fitz  # type: ignore
+
+        self._document = fitz.open(path)
+        raw_metadata = dict(self._document.metadata or {})
+        aliases = {
+            "title": "Title",
+            "author": "Author",
+            "subject": "Subject",
+            "keywords": "Keywords",
+            "creator": "Creator",
+            "producer": "Producer",
+            "creationDate": "CreationDate",
+            "modDate": "ModDate",
+        }
+        self.metadata = dict(raw_metadata)
+        for source_key, target_key in aliases.items():
+            if raw_metadata.get(source_key):
+                self.metadata[target_key] = raw_metadata[source_key]
+        self.pages = [_FitzPageAdapter(self._document[index]) for index in range(len(self._document))]
+
+
 def pdf_backend() -> Any:
+    try:
+        import fitz  # type: ignore  # noqa: F401
+
+        return _FitzReaderAdapter
+    except ModuleNotFoundError:
+        pass
     try:
         from PyPDF2 import PdfReader  # type: ignore
 
@@ -500,13 +539,21 @@ def pdf_backend() -> Any:
             return PdfReader
         except ModuleNotFoundError as exc:
             raise ModuleNotFoundError(
-                "PDF parsing requires PyPDF2 or pypdf in the active research runtime."
+                "PDF parsing requires pymupdf4llm/fitz, PyPDF2, or pypdf in the active research runtime."
             ) from exc
 
 
 def current_runtime_capabilities() -> dict[str, Any]:
     module_status = {name: importlib.util.find_spec(name) is not None for name in RUNTIME_MODULES}
-    pdf_backend_name = "PyPDF2" if module_status["PyPDF2"] else ("pypdf" if module_status["pypdf"] else "")
+    pdf_backend_name = (
+        "pymupdf4llm"
+        if module_status["pymupdf4llm"] and module_status["fitz"]
+        else (
+            "fitz"
+            if module_status["fitz"]
+            else ("PyPDF2" if module_status["PyPDF2"] else ("pypdf" if module_status["pypdf"] else ""))
+        )
+    )
     return {
         "python": sys.executable,
         "version": sys.version.split()[0],
@@ -520,8 +567,9 @@ def current_runtime_capabilities() -> dict[str, Any]:
 def inspect_python_runtime(python_executable: str) -> dict[str, Any]:
     script = (
         "import importlib.util, json, sys\n"
-        "mods = {name: bool(importlib.util.find_spec(name)) for name in ('yaml', 'PyPDF2', 'pypdf')}\n"
-        "backend = 'PyPDF2' if mods['PyPDF2'] else ('pypdf' if mods['pypdf'] else '')\n"
+        "mods = {name: bool(importlib.util.find_spec(name)) for name in ('yaml', 'pymupdf4llm', 'fitz', 'PyPDF2', 'pypdf')}\n"
+        "backend = ('pymupdf4llm' if mods['pymupdf4llm'] and mods['fitz'] else "
+        "('fitz' if mods['fitz'] else ('PyPDF2' if mods['PyPDF2'] else ('pypdf' if mods['pypdf'] else ''))))\n"
         "print(json.dumps({\n"
         "    'python': sys.executable,\n"
         "    'version': sys.version.split()[0],\n"

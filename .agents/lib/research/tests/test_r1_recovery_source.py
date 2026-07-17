@@ -17,7 +17,13 @@ from research.git_ops import (
     ensure_kb_git_repo,
     git_checkpoint,
 )
-from research.common import append_program_reporting_event, exclusive_file_lock, program_reporting_events_path
+from research.common import (
+    append_program_reporting_event,
+    current_runtime_capabilities,
+    exclusive_file_lock,
+    inspect_python_runtime,
+    program_reporting_events_path,
+)
 from research.confirm import write_record
 from research.journal import abort_op, begin_op, journaled_op, load_op, operation_lock_path
 from research.records import default_record
@@ -361,3 +367,14 @@ def test_storage_sync_never_rewrites_agent_rules_or_immutable_source_bytes(tmp_p
     assert "kb/raw/example" in mutable_note.read_text(encoding="utf-8")
     assert "kb/notes/migration.md" in result["rewritten_files"]
     assert all(item.startswith("kb/") for item in result["rewritten_files"])
+
+
+def test_runtime_capabilities_recognize_default_pymupdf_stack() -> None:
+    current = current_runtime_capabilities()
+    inspected = inspect_python_runtime(sys.executable)
+
+    for payload in (current, inspected):
+        modules = payload["modules"]
+        if modules["pymupdf4llm"] or modules["fitz"]:
+            assert payload["pdf_support"] is True
+            assert payload["pdf_backend"] in {"pymupdf4llm", "fitz"}
