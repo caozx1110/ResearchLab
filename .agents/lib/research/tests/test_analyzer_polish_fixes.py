@@ -198,9 +198,9 @@ def test_f6_blog_verify_defer_does_not_checkpoint(tmp_path: Path, monkeypatch: p
 
 
 # --------------------------------------------------------------------------- #
-# F9 — blog parse-cache header key paper_id -> blog_id (read-compat both).      #
+# F9 — blog parse-cache legacy header is read-compatible and byte-immutable.   #
 # --------------------------------------------------------------------------- #
-def test_f9_blog_cache_header_normalized_to_blog_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_f9_blog_cache_header_is_read_compatible_without_rewrite(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     blog = _load_blog()
     ensure_workspace(tmp_path)
     blog_id = "b-f9-000001"
@@ -209,22 +209,20 @@ def test_f9_blog_cache_header_normalized_to_blog_id(tmp_path: Path, monkeypatch:
     unit_dir = record_path(tmp_path, "blog", blog_id).parent
     cache = _write_blog_cache_with_legacy_header(unit_dir, blog_id)
 
-    assert "paper_id" in load_yaml(cache)  # precondition: the bug header is present
+    before = cache.read_bytes()
+    assert "paper_id" in load_yaml(cache)  # precondition: the legacy header is present
 
     _run_blog_cli(blog, monkeypatch, tmp_path, "complete-note", "--phase", "prepare",
                   "--blog-id", blog_id, "--defer-post-actions")
 
+    assert cache.read_bytes() == before
     data = load_yaml(cache)
-    assert data.get("blog_id") == blog_id      # corrected to blog semantics
-    assert "paper_id" not in data              # wrong key gone
-    # Value + chunks + locator_kind untouched; only the header key changed.
-    assert data.get("locator_kind") == "section"
-    assert len(data.get("chunks") or []) == 2
-    # Idempotent: a second consume leaves the already-correct header alone.
+    assert data.get("paper_id") == blog_id
+    assert "blog_id" not in data
+    # A second consume is byte-identical too.
     _run_blog_cli(blog, monkeypatch, tmp_path, "complete-note", "--phase", "prepare",
                   "--blog-id", blog_id, "--defer-post-actions")
-    again = load_yaml(cache)
-    assert "paper_id" not in again and again.get("blog_id") == blog_id
+    assert cache.read_bytes() == before
 
 
 def test_f9_load_cache_chunks_read_compatible_with_both_keys(tmp_path: Path) -> None:

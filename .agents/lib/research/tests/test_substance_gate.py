@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from research.common import load_yaml, write_yaml_if_changed
+from research.evidence import build_verification_receipt
 from research.core import (
     apply_confirmation,
     confirmation_track,
@@ -25,6 +26,7 @@ from research.core import (
     promote_record,
     record_path,
     require_confirmation_provenance,
+    write_record,
 )
 
 
@@ -78,6 +80,30 @@ def _paper_record(
     }
 
 
+def _with_verified_judgement(project_root: Path, record: dict) -> dict:
+    evidence_root = record_path(project_root, "paper", record["id"]).parent
+    evidence_root.mkdir(parents=True, exist_ok=True)
+    (evidence_root / "parse-cache.yaml").write_text("grounded analysis evidence", encoding="utf-8")
+    record.setdefault("payload", {})["claims"] = [
+        {
+            "id": "claim-substance",
+            "text": "The filled analysis is substantive.",
+            "claim_type": "evaluation",
+            "confirmation_status": "pending_user_confirmation",
+            "evidence_refs": [
+                {
+                    "source_unit_id": record["id"],
+                    "artifact": "parse-cache.yaml",
+                    "locator": "section=analysis",
+                    "quote": "grounded analysis evidence",
+                }
+            ],
+        }
+    ]
+    build_verification_receipt(record, evidence_root)
+    return record
+
+
 # --------------------------------------------------------------------------- #
 # Core acceptance: the hollow gate is plugged.
 # --------------------------------------------------------------------------- #
@@ -112,7 +138,10 @@ def test_promote_substantive_judgement_paper_confirms_normally(tmp_path: Path) -
     unit_id = "p-substantive-judgement-123456"
     write_yaml_if_changed(
         record_path(tmp_path, "paper", unit_id),
-        _paper_record(unit_id, information_types=JUDGEMENT_INFO_TYPES, core_content=FILLED_CORE_CONTENT),
+        _with_verified_judgement(
+            tmp_path,
+            _paper_record(unit_id, information_types=JUDGEMENT_INFO_TYPES, core_content=FILLED_CORE_CONTENT),
+        ),
     )
 
     path = promote_record(
@@ -121,6 +150,8 @@ def test_promote_substantive_judgement_paper_confirms_normally(tmp_path: Path) -
         confirmation_status="confirmed",
         confirmed_by="czx",
         evidence=["kb/programs/p/decision-log.md"],
+        user_authorization="I confirm this paper analysis.",
+        authorization_source="user_message",
     )
 
     record = load_yaml(path, default={})
@@ -277,8 +308,8 @@ def test_red_line_fact_track_light_confirm_passes(tmp_path: Path) -> None:
     kb = _load_kb_module()
     ensure_workspace(tmp_path)
     unit_id = "p-fact-light-123456"
-    write_yaml_if_changed(
-        record_path(tmp_path, "paper", unit_id),
+    write_record(
+        tmp_path,
         _paper_record(unit_id, information_types=["fact"], core_content={}, status="draft"),
     )
 
@@ -335,10 +366,21 @@ def test_confirm_unit_hollow_judgement_via_batch_stays_pending_on_disk(tmp_path:
     assert "confirmation" not in on_disk
 
 
-def test_confirm_unit_confirms_substantive_judgement_paper_and_preserves_types() -> None:
+def test_confirm_unit_confirms_substantive_judgement_paper_and_preserves_types(tmp_path: Path) -> None:
     """A substantive judgement paper confirms without erasing epistemic type."""
-    record = _paper_record(information_types=JUDGEMENT_INFO_TYPES, core_content=FILLED_CORE_CONTENT)
-    out = confirm_unit(record, "paper", confirmed_by="czx", evidence=["kb/x/note.md"])
+    record = _with_verified_judgement(
+        tmp_path,
+        _paper_record(information_types=JUDGEMENT_INFO_TYPES, core_content=FILLED_CORE_CONTENT),
+    )
+    out = confirm_unit(
+        record,
+        "paper",
+        confirmed_by="czx",
+        evidence=["kb/x/note.md"],
+        user_authorization="I confirm this paper analysis.",
+        authorization_source="user_message",
+        project_root=tmp_path,
+    )
     assert out["confirmation_status"] == "confirmed"
     assert out["information_types"] == JUDGEMENT_INFO_TYPES
     assert out["confirmation"]["by"] == "czx"

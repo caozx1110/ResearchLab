@@ -17,7 +17,7 @@ if str(LIB) not in sys.path:
 
 import yaml  # noqa: E402
 
-from research.core import write_runtime_preferences, load_runtime_preferences  # noqa: E402
+from research.core import write_record, write_runtime_preferences, load_runtime_preferences  # noqa: E402
 
 SKILL = LIB.parents[1] / "skills" / "paper-analyst" / "scripts"
 
@@ -39,12 +39,12 @@ def _make_unit(tmp: Path, pages: int) -> tuple[Path, str, list[dict], Path]:
     ]
     cache = ud / "parse-cache.yaml"
     cache.write_text(yaml.safe_dump({"paper_id": pid, "source_type": "pdf", "locator_kind": "page", "chunks": chunks}))
-    (ud / "record.yaml").write_text(yaml.safe_dump({
+    write_record(tmp, {
         "id": pid, "kind": "paper", "status": "screened", "maturity": "complete",
         "confirmation_status": "pending_user_confirmation", "information_types": ["fact"],
         "payload": {"basic_info": {"title": "T"}, "core_content": {}, "structure": {}},
         "source": {"original_uri": "src.pdf"}, "history": [],
-    }))
+    })
     record = yaml.safe_load((ud / "record.yaml").read_text())
     return ud, pid, chunks, cache
 

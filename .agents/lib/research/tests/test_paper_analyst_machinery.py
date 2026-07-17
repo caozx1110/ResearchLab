@@ -24,6 +24,7 @@ import pytest
 from research.common import load_yaml, write_yaml_if_changed
 from research.confirm import confirm_unit, has_substantive_content
 from research.core import ensure_workspace, record_path, write_record
+from research.evidence import attach_claims, build_verification_receipt
 from research.records import kind_payload_skeleton
 
 
@@ -285,17 +286,22 @@ def test_missing_paper_type_keeps_method_system_contract(tmp_path: Path) -> None
 # --------------------------------------------------------------------------- #
 def test_note_fill_legit_evidence_validates_and_clears_substance_gate(tmp_path: Path) -> None:
     paper = _load_paper_module()
-    unit_dir = tmp_path / "unit"
-    unit_dir.mkdir()
+    record = _paper_record("p-fill-legit-1")
+    unit_dir = record_path(tmp_path, "paper", record["id"]).parent
+    unit_dir.mkdir(parents=True)
     _write_parse_cache(unit_dir, "p-x")
 
     violations, claims = paper.verify_note_fill(_legit_note_fill(), unit_dir)
     assert violations == [], violations
     assert len(claims) == 5
+    for claim in claims:
+        for ref in claim["evidence_refs"]:
+            ref["source_unit_id"] = record["id"]
 
-    record = _paper_record("p-fill-legit-1")
     assert has_substantive_content(record, "paper") is False  # empty before fill
     paper._apply_note_fill_to_payload(record, claims)
+    attach_claims(record["payload"], claims)
+    build_verification_receipt(record, unit_dir)
 
     cc = record["payload"]["core_content"]
     assert cc["motivation"] and cc["method"] and cc["why_it_might_work"]
@@ -309,7 +315,11 @@ def test_note_fill_legit_evidence_validates_and_clears_substance_gate(tmp_path: 
     assert "higher success rate than the baseline" in note_md
 
     # Substance gate now passes: a real human can confirm the judgement-track paper.
-    confirmed = confirm_unit(record, "paper", confirmed_by="czx", evidence=["kb/programs/p/decision-log.md"])
+    confirmed = confirm_unit(
+        record, "paper", confirmed_by="czx", evidence=["kb/programs/p/decision-log.md"],
+        user_authorization="I confirm this paper analysis.", authorization_source="user_message",
+        project_root=tmp_path,
+    )
     assert confirmed["confirmation_status"] == "confirmed"
 
 
@@ -510,6 +520,9 @@ def test_cli_end_to_end_prepare_fill_verify_persist(tmp_path: Path, monkeypatch:
     assert (unit_dir / "note.md").exists()
     filled = load_yaml(record_path(tmp_path, "paper", paper_id))
     assert has_substantive_content(filled, "paper") is True
+    assert filled["payload"]["claims"] == load_yaml(unit_dir / "note-claims.yaml")["claims"]
+    assert filled["payload"]["verification"]["artifacts"]
+    assert len(filled["payload"]["verification"]["claims_digest"]) == 64
 
     # Fabricated fill through the CLI is rejected (non-zero exit).
     bad = _legit_note_fill()
