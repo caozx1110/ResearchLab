@@ -10,7 +10,7 @@ which will call `validate_claims()` / `verify_claim_evidence()` from here).
 
 The canonical schema is documented verbatim in
 `lib/research/SCHEMAS.md#evidence-claims` and locked in
-`temp/SYSTEM_DESIGN_SSOT.md` Part 2 / Principle 2.
+`.agents/lib/research/SCHEMAS.md`.
 
 Verification model (SSOT B3/B4):
   * Every evidence_ref carries a **short verbatim `quote`**. The script loads the

@@ -2,11 +2,11 @@
 
 这份文档面向使用者和研究者，回答一个问题：怎么把论文、仓库、博客、想法、实验和汇报，从聊天里变成可复用、可检索、可确认的本地知识库。
 
-这个系统不是一个预装好的知识库。它是一套给 Codex 使用的 research workspace：AI 负责提取、整理、追踪和汇总，你负责判断、确认和拍板。默认人类可读内容用中文；英文论文标题、repo 名、benchmark 名和技术术语保留原文。
+这个系统不是一个预装好的知识库。它是一套安装到项目 workspace 根目录的 research skill bundle：`.agents/` 提供能力，`kb/` 保存研究数据，两者同级。AI 负责提取、整理、追踪和汇总，你负责判断、确认和拍板。默认人类可读内容用中文；英文论文标题、repo 名、benchmark 名和技术术语保留原文。
 
 ## 安装与首次运行
 
-首次运行会自动创建并使用项目内受管 `.venv`（含 PyYAML），无需手动创建 venv、安装依赖或设置 `RESEARCH_PYTHON`。
+先按安装指南把 bundle 以 project-scope copy 方式安装到 workspace 根，不要安装进 `kb/`。首次运行会自动创建并使用项目内受管 `.venv`（含 PyYAML），无需手动创建 venv、安装依赖或设置 `RESEARCH_PYTHON`。
 
 初始化本地 `kb/`：
 
@@ -131,7 +131,7 @@ AI 会先做 lightweight ingestion，再按对象类型路由到 `paper-analyst`
 ```
 
 ```text
-在知识库里找和 humanoid VLA recovery 相关的 paper、repo 和 idea。
+在知识库里找和 retrieval-augmented generation 相关的 paper、repo 和 idea。
 ```
 
 ### 从想法到方法
@@ -163,7 +163,7 @@ AI 会先做 lightweight ingestion，再按对象类型路由到 `paper-analyst`
 ```
 
 ```text
-确认这条诊断，我是 czx，evidence 是复现三次后确认检索召回率低。
+确认这条诊断，我是研究负责人，evidence 是复现三次后确认检索召回率低。
 ```
 
 run-log 只记录事实；diagnosis 是 AI 推断，默认待确认；follow-up 是下一步行动。
@@ -229,7 +229,7 @@ kb review
 
 ```text
 kb status
-kb next survey-rag
+kb next example-program
 kb find transformer calibration
 kb recall gotchas
 ```
@@ -243,7 +243,7 @@ kb recall gotchas
 ```
 
 ```text
-确认这条论文筛选，我是 czx，evidence 是 kb/programs/survey-rag/workflow/decision-log.md。
+确认这条论文筛选，我是研究负责人，evidence 是 kb/programs/example-program/workflow/decision-log.md。
 ```
 
 ```text
