@@ -305,7 +305,7 @@ kb recall gotchas
 |---|---|---|
 | **beta** | 核心范式已落地（prepare/verify + 逐字证据 + 空心门），但"理解"那步依赖 agent 在会话里填 | 论文 / 仓库 / 博客分析、双源入库、检索（`kb find` 词级 + agent 原生答题）、自动驱动入库链 |
 | **scaffold** | 有可用骨架，但产出仍偏固定策略 / 直方图 / 事件流，尚未做到 evidence-first 的实质闭环 | 综述（`literature-synthesizer`）、idea / 方法设计 / 实验、报告（`report-author`） |
-| **dev-only** | 仅供本地实验，未做鉴权（token）与写保护 raw 之外的加固，勿用于共享 / 敏感环境 | 工作台（`research-navigator` browser：带文件写 + shell/PTY，强制回环运行） |
+| **dev-only** | 仅供本地实验：现已加 token 鉴权 + PTY 默认关 + 强制回环 + 写保护 raw，仍不建议共享 / 敏感环境 | 工作台（`research-navigator` browser：文件写带 token；shell/PTY 需 `--enable-terminal` 显式开） |
 
 治理内核（confirmation 词汇、逐字 evidence、禁自签、空心门、派生证据不可变、确认锚定版本）是**跨全系统的真地基**，不随单个 skill 档位浮动。
 
