@@ -12,7 +12,7 @@ description: 负责跨 paper / repo / blog / idea 的 evidence-first survey、re
 - 理解来自 runtime agent；脚本只选择 metadata 候选、建立可填结构、验证 claim 与逐字 evidence、落盘已验证结果。
 - 不从 topic、tag、pool 或 kind 计数自动生成结论，不写固定 Observed / Inferred / Suggested / OpenQuestions 文案，也不写固定 confidence。
 - 不建立 semantic index。runtime agent 使用原生检索阅读单位产物并填写 scaffold。
-- taxonomy cell、comparison-matrix cell、trend、gap 必须有 evidence_refs；每个 ref 都按自己的 source_unit_id 解析到对应 unit_dir，再做逐字核验。
+- 每个正式 claim cell 都必须有 evidence_refs；taxonomy cell、comparison-matrix cell、trend、gap 还会检查其结构字段。每个 ref 都按自己的 source_unit_id 解析到对应 unit_dir，再做逐字核验。
 - prepare 不产出正式 survey；只有 verify 全部通过后才写正式 YAML 与 summary.md。
 
 ## 两阶段流程
@@ -78,6 +78,7 @@ fill_contract:
   required_section_ids: [scope_positioning, background_terms, taxonomy, cross_cutting, trends, gaps_challenges, conclusion]
   required_claim_fields: [id, content, claim_type, evidence_refs]
   evidence_ref_fields: [source_unit_id, artifact, locator, quote]
+  evidence_rule: every required claim cell needs one or more verbatim evidence_refs
 sections:
   - id: taxonomy
     title: Taxonomy

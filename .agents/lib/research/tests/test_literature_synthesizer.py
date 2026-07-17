@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
-from pathlib import Path
 import sys
+from pathlib import Path
 
 import yaml
 
@@ -35,11 +35,14 @@ def build_filled_survey(tmp_path: Path):
         mode="survey",
         as_of="2026-07-17T00:00:00Z",
     )
-    quote = "Alpha uses a hierarchical controller for long-horizon tasks."
+    quotes = {
+        "p-alpha": "Alpha uses a hierarchical controller for long-horizon tasks.",
+        "r-beta": "Beta reports benchmark metrics for recovery tasks.",
+    }
     for record in records:
         unit_dir = module.unit_root(tmp_path, record["kind"], record["id"])
         unit_dir.mkdir(parents=True)
-        (unit_dir / "note.md").write_text(f"# Evidence\n\n{quote}\n", encoding="utf-8")
+        (unit_dir / "note.md").write_text(f"# Evidence\n\n{quotes[record['id']]}\n", encoding="utf-8")
     _, entries = module.survey_claim_entries(scaffold)
     for _, cell, _ in entries:
         cell["content"] = f"Agent-authored content for {cell['id']}."
@@ -48,9 +51,24 @@ def build_filled_survey(tmp_path: Path):
                 "source_unit_id": "p-alpha",
                 "artifact": "note.md",
                 "locator": "section=evidence",
-                "quote": quote,
+                "quote": quotes["p-alpha"],
             }
         ]
+    taxonomy = next(section for section in scaffold["sections"] if section["id"] == "taxonomy")
+    taxonomy["cells"][0]["row_label"] = "Alpha Method"
+    taxonomy["cells"][0]["column_label"] = "Hierarchical control"
+    taxonomy["cells"][0]["evidence_refs"].append(
+        {
+            "source_unit_id": "r-beta",
+            "artifact": "note.md",
+            "locator": "section=evidence",
+            "quote": quotes["r-beta"],
+        }
+    )
+    trends = next(section for section in scaffold["sections"] if section["id"] == "trends")
+    trends["items"][0]["trajectory"] = "flat control -> hierarchical control -> recovery-aware control"
+    gaps = next(section for section in scaffold["sections"] if section["id"] == "gaps_challenges")
+    gaps["items"][0]["gap_type"] = "benchmark coverage"
     scaffold["comparison_matrix"]["dimensions"][0]["label"] = "Control hierarchy"
     scaffold["comparison_matrix"]["methods"][0]["label"] = "Alpha Method"
     scaffold["comparison_matrix"]["methods"][0]["source_unit_ids"] = ["p-alpha"]

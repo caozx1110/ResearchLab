@@ -119,9 +119,8 @@ def build_survey_scaffold(
             "required_section_ids": [section_id for section_id, _, _ in SECTION_SPECS],
             "required_claim_fields": ["id", "content", "claim_type", "evidence_refs"],
             "evidence_rule": (
-                "The runtime agent fills every required claim cell. Taxonomy cells, comparison-matrix "
-                "cells, trends, and gaps require one or more verbatim evidence_refs. The script only "
-                "validates structure and evidence; it never authors survey conclusions."
+                "The runtime agent fills every required claim cell with one or more verbatim evidence_refs. "
+                "The script only validates structure and evidence; it never authors survey conclusions."
             ),
             "evidence_ref_fields": ["source_unit_id", "artifact", "locator", "quote"],
             "epistemic_rule": "claim_type=inference is inferred; fact/evaluation are observed.",
@@ -169,7 +168,16 @@ def survey_claim_entries(payload: dict) -> tuple[list[str], list[tuple[str, dict
             if not isinstance(item, dict):
                 violations.append(f"{label}: must be a mapping")
                 continue
-            entries.append((label, item, section_id in {"taxonomy", "trends", "gaps_challenges"}))
+            if section_id == "taxonomy":
+                if not str(item.get("row_label") or "").strip():
+                    violations.append(f"{label}: row_label is required")
+                if not str(item.get("column_label") or "").strip():
+                    violations.append(f"{label}: column_label is required")
+            elif section_id == "trends" and not str(item.get("trajectory") or "").strip():
+                violations.append(f"{label}: trajectory is required")
+            elif section_id == "gaps_challenges" and not str(item.get("gap_type") or "").strip():
+                violations.append(f"{label}: gap_type is required")
+            entries.append((label, item, True))
 
     matrix = payload.get("comparison_matrix")
     if not isinstance(matrix, dict):
@@ -182,6 +190,26 @@ def survey_claim_entries(payload: dict) -> tuple[list[str], list[tuple[str, dict
         violations.append("comparison_matrix.dimensions: must contain at least one dimension")
     if not isinstance(methods, list) or not methods:
         violations.append("comparison_matrix.methods: must contain at least one method")
+    dimension_ids: set[str] = set()
+    for index, dimension in enumerate(dimensions if isinstance(dimensions, list) else []):
+        if not isinstance(dimension, dict):
+            violations.append(f"comparison_matrix.dimensions[{index}]: must be a mapping")
+            continue
+        dimension_id = str(dimension.get("id") or "").strip()
+        if not dimension_id or not str(dimension.get("label") or "").strip():
+            violations.append(f"comparison_matrix.dimensions[{index}]: id and label are required")
+        else:
+            dimension_ids.add(dimension_id)
+    method_ids: set[str] = set()
+    for index, method in enumerate(methods if isinstance(methods, list) else []):
+        if not isinstance(method, dict):
+            violations.append(f"comparison_matrix.methods[{index}]: must be a mapping")
+            continue
+        method_id = str(method.get("id") or "").strip()
+        if not method_id or not str(method.get("label") or "").strip():
+            violations.append(f"comparison_matrix.methods[{index}]: id and label are required")
+        else:
+            method_ids.add(method_id)
     if not isinstance(cells, list) or not cells:
         violations.append("comparison_matrix.cells: must contain at least one cell")
     else:
@@ -190,6 +218,10 @@ def survey_claim_entries(payload: dict) -> tuple[list[str], list[tuple[str, dict
             if not isinstance(cell, dict):
                 violations.append(f"{label}: must be a mapping")
                 continue
+            if str(cell.get("method_id") or "").strip() not in method_ids:
+                violations.append(f"{label}: method_id must reference comparison_matrix.methods")
+            if str(cell.get("dimension_id") or "").strip() not in dimension_ids:
+                violations.append(f"{label}: dimension_id must reference comparison_matrix.dimensions")
             entries.append((label, cell, True))
     return violations, entries
 
@@ -228,7 +260,15 @@ def verify_survey_fill(payload: dict, root: Path) -> tuple[list[str], dict]:
         if not unit_id or not unit_kind:
             violations.append(f"kb_anchor.units[{index}]: id and kind are required")
             continue
+        if unit_id in anchored_units:
+            violations.append(f"kb_anchor.units[{index}]: duplicate unit id '{unit_id}'")
+            continue
         anchored_units[unit_id] = unit_kind
+    unit_ids = anchor.get("unit_ids")
+    if not isinstance(unit_ids, list):
+        violations.append("kb_anchor.unit_ids: must be a list")
+    elif set(str(unit_id) for unit_id in unit_ids) != set(anchored_units):
+        violations.append("kb_anchor.unit_ids: must match kb_anchor.units exactly")
 
     claims: list[tuple[str, dict, bool]] = []
     for label, cell, evidence_required in entries:
