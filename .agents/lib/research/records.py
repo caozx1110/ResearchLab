@@ -304,6 +304,7 @@ def kind_payload_skeleton(kind: str, title: str = "") -> dict[str, Any]:
                 "ruled_out_causes": [],
                 "unknowns": [],
                 "next_actions": [],
+                "comparison_context": {},
             },
         }
     raise SystemExit(f"Unsupported unit kind: {kind}")

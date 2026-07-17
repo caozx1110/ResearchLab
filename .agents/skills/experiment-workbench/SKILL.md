@@ -25,6 +25,8 @@ Use this skill for structured experiment memory rather than one-off chat summari
 - Metrics are keyed by name and stored as `{name, value, unit, direction}`. The typed form is `name=value[unit]:direction`, for example `success_rate=0.82[ratio]:higher-better`. Directions are `higher-better`, `lower-better`, `neutral`, or `unknown`.
 - A legacy bare `name=value` remains accepted. Numeric values become floats; non-numeric values remain strings with a warning.
 - Every claimed artifact is checked when the run is logged. Artifact entries contain `path`, `status` (`present` or `missing`), `generated`, and `kind` when present; missing claims remain visible and emit a warning.
+- Runs may be tagged `baseline` or `milestone`. Every later run stores per-metric comparisons against the last run, the configured recent-run window, and all persistent anchors, including numeric delta and direction-aware `better` / `worse` results.
+- Diagnosis remains agent judgement. The script only attaches factual `comparison_context` containing recent runs plus all baseline/milestone anchors; it never generates a diagnosis from those facts.
 
 ## Commands
 
