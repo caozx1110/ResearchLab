@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import sys
 
 import yaml
 
@@ -111,3 +112,24 @@ def test_verify_rejects_fabricated_quote(tmp_path: Path) -> None:
 
     assert verified["status"] == "awaiting_agent_fill"
     assert any("not verbatim" in violation for violation in violations)
+
+
+def test_verify_cli_persists_only_verified_survey(tmp_path: Path, monkeypatch) -> None:
+    module, scaffold = build_filled_survey(tmp_path)
+    fill_path = tmp_path / "agent-filled.yaml"
+    fill_path.write_text(yaml.safe_dump(scaffold, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [str(SCRIPT), "--root", str(tmp_path), "survey", "verify", "--input", str(fill_path)],
+    )
+
+    assert module.main() == 0
+
+    survey_path = tmp_path / "kb" / "synthesis" / "robot-learning" / "survey.yaml"
+    summary_path = tmp_path / "kb" / "synthesis" / "robot-learning" / "summary.md"
+    assert survey_path.exists()
+    assert summary_path.exists()
+    persisted = yaml.safe_load(survey_path.read_text(encoding="utf-8"))
+    assert persisted["status"] == "verified"
+    assert "## Comparison Matrix" in summary_path.read_text(encoding="utf-8")
