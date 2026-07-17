@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,7 @@ RUN_OUTCOME_CHOICES = ["success", "partial", "failed", "blocked", "inconclusive"
 CLASSIFICATION_CHOICES = ["method", "implementation", "data", "evaluation", "resource", "environment", "process", "unknown"]
 FOLLOW_UP_STATUS_CHOICES = ["open", "blocked", "done"]
 FOLLOW_UP_PRIORITY_CHOICES = ["low", "normal", "high", "critical"]
+METRIC_DIRECTION_CHOICES = ["higher-better", "lower-better", "neutral", "unknown"]
 
 
 def add_confirmation_arguments(parser: argparse.ArgumentParser) -> None:
@@ -43,14 +45,44 @@ def add_confirmation_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--evidence", action="append", required=True)
 
 
-def parse_metrics(items: list[str]) -> dict[str, str]:
-    payload = {}
+def parse_metrics(items: list[str]) -> dict[str, dict[str, Any]]:
+    payload: dict[str, dict[str, Any]] = {}
     for item in items:
-        if "=" in item:
-            key, value = item.split("=", 1)
-            payload[key] = value
-        else:
+        if "=" not in item:
             sys.stderr.write(f"[experiment.parse_metrics] WARN: ignoring --metric without '=': {item}\n")
+            continue
+        name, raw_value = item.split("=", 1)
+        name = name.strip()
+        if not name:
+            sys.stderr.write(f"[experiment.parse_metrics] WARN: ignoring --metric without a name: {item}\n")
+            continue
+        value_text = raw_value.strip()
+        direction = "unknown"
+        direction_match = re.search(r"\s*:\s*([a-zA-Z_-]+)\s*$", value_text)
+        if direction_match:
+            candidate = direction_match.group(1).lower().replace("_", "-")
+            if candidate in METRIC_DIRECTION_CHOICES:
+                direction = candidate
+                value_text = value_text[: direction_match.start()].strip()
+            else:
+                sys.stderr.write(
+                    f"[experiment.parse_metrics] WARN: unknown direction '{direction_match.group(1)}' "
+                    f"for metric '{name}'; keeping direction=unknown\n"
+                )
+        unit = ""
+        unit_match = re.search(r"\[([^\[\]]+)\]\s*$", value_text)
+        if unit_match:
+            unit = unit_match.group(1).strip()
+            value_text = value_text[: unit_match.start()].strip()
+        try:
+            value: float | str = float(value_text)
+        except ValueError:
+            value = value_text
+            sys.stderr.write(
+                f"[experiment.parse_metrics] WARN: metric '{name}' value '{value_text}' is not numeric; "
+                "preserving it as a string for backward compatibility\n"
+            )
+        payload[name] = {"name": name, "value": value, "unit": unit, "direction": direction}
     return payload
 
 

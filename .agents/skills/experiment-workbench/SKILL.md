@@ -22,6 +22,8 @@ Use this skill for structured experiment memory rather than one-off chat summari
 - `run-log.yaml` stores factual execution memory; `diagnoses.yaml` stores inference/evaluation and should remain confirmation-gated.
 - Follow-ups are actionable work items, not conclusions.
 - Diagnosis categories should distinguish at least method / implementation / data / evaluation / resource / environment / process / unknown.
+- Metrics are keyed by name and stored as `{name, value, unit, direction}`. The typed form is `name=value[unit]:direction`, for example `success_rate=0.82[ratio]:higher-better`. Directions are `higher-better`, `lower-better`, `neutral`, or `unknown`.
+- A legacy bare `name=value` remains accepted. Numeric values become floats; non-numeric values remain strings with a warning.
 
 ## Commands
 

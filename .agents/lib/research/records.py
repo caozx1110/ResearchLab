@@ -289,6 +289,10 @@ def kind_payload_skeleton(kind: str, title: str = "") -> dict[str, Any]:
             },
             "results": {
                 "metrics": {},
+                "metric_contract": {
+                    "shape": "name -> {name, value, unit, direction}",
+                    "directions": ["higher-better", "lower-better", "neutral", "unknown"],
+                },
                 "comparison": [],
                 "met_expectation": "unknown",
                 "abnormalities": [],
