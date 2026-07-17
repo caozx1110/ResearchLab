@@ -137,3 +137,20 @@ def test_missing_inputs_are_explicit_and_never_fabricated(tmp_path: Path) -> Non
     assert "missing: decisions" in weekly
     assert "missing: related-work claims and evidence" in outline
     assert "improves benchmark success rate" not in weekly
+
+
+def test_generated_documents_do_not_leak_raw_commands(tmp_path: Path) -> None:
+    report = _load_report_module()
+    root, program_id, _ = _make_workspace(tmp_path)
+    inputs = report.load_report_inputs(root, program_id)
+    documents = [
+        report.render_report(f"Weekly Report: {program_id}", inputs, report_kind="weekly"),
+        report.render_report(f"Stage Summary: {program_id}", inputs, report_kind="stage-summary"),
+        report.render_report(f"PPT Materials: {program_id}", inputs, report_kind="ppt-materials"),
+        report.render_report(f"Writing Materials: {program_id}", inputs, report_kind="writing-materials"),
+        report.render_outline(program_id, inputs),
+    ]
+
+    forbidden = ("python3 ", ".agents/skills/", "--program-id", "${", "NEXT FOR AGENT:", "kb/units/")
+    for document in documents:
+        assert not any(token in document for token in forbidden)
