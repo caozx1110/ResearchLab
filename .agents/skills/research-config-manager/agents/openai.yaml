@@ -1,4 +1,4 @@
 interface:
   display_name: "Research Config Manager"
-  short_description: "维护 v2 配置、资源画像、taxonomy seed 与 pool policy"
+  short_description: "维护 core 配置、资源画像、taxonomy seed 与 pool policy"
   default_prompt: "使用 $research-config-manager 初始化或更新 kb/config 下的研究设置、用户 profile、taxonomy seed、candidate pool policy 与资源约束。"

@@ -15,17 +15,19 @@ from kb_browser_lib import (
     DEFAULT_PORT,
     PORT_SCAN_LIMIT,
     SERVICE_NAME,
+    add_browser_project_root_argument,
     fetch_json,
     health_url,
     launcher_state_path,
     project_root_from_script,
     read_json,
 )
+from research.bootstrap import ensure_managed_runtime
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Stop the research navigator browser daemon.")
-    parser.add_argument("--project-root", default="", help="Project root path. Auto-detected when omitted.")
+    add_browser_project_root_argument(parser)
     return parser.parse_args()
 
 
@@ -115,4 +117,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    ensure_managed_runtime(project_root_from_script(Path(__file__)))
     raise SystemExit(main())

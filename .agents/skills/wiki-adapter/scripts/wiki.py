@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -15,25 +17,47 @@ for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
 else:
     raise SystemExit("Could not locate .agents/lib")
 
-from research.common import ensure_dir, write_text_if_changed
-from research.v2 import build_index, lint_records, project_root, search_records, synthesis_root
+from research.bootstrap import ensure_managed_runtime
+
+if __name__ == "__main__":
+    ensure_managed_runtime(PROJECT_ROOT)
+
+from research.common import add_project_root_argument, ensure_dir, print_resolved_project_roots, simple_slug, skill_script_for_command, write_text_if_changed
+from research.intake_cli import add_intake_add_arguments, intake_add_argv
+from research.core import build_index, lint_records, project_root, search_records, synthesis_root
+
+
+def research_python() -> str:
+    return os.environ.get("RESEARCH_PYTHON") or sys.executable or "python3"
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Thin wiki adapter for v2.")
+    parser = argparse.ArgumentParser(description="Thin wiki adapter for core.")
+    add_project_root_argument(parser)
     subparsers = parser.add_subparsers(dest="command", required=True)
     query = subparsers.add_parser("query")
     query.add_argument("--question", required=True)
     add = subparsers.add_parser("add")
-    add.add_argument("--kind", required=True, choices=["paper", "repo", "blog"])
-    add.add_argument("--source", required=True)
+    add_intake_add_arguments(add, source_required=True)
     subparsers.add_parser("lint")
     return parser
 
 
+def run_intake_add(root: Path, args: argparse.Namespace) -> int:
+    cmd = [
+        research_python(),
+        skill_script_for_command(".agents/skills/source-intake/scripts/intake.py", cwd=root),
+        "--root",
+        str(root),
+        *intake_add_argv(args),
+    ]
+    return subprocess.run(cmd, cwd=root, check=False).returncode
+
+
 def main() -> int:
     args = build_parser().parse_args()
-    root = project_root(PROJECT_ROOT)
+    root = project_root(PROJECT_ROOT, explicit_root=args.root)
+    print_resolved_project_roots(root)
     if args.command == "lint":
         status, issues = lint_records(root)
         print(f"status: {status}")
@@ -41,18 +65,11 @@ def main() -> int:
             print(f"- {issue}")
         return 0 if status == "PASS" else 1
     if args.command == "add":
-        if args.kind == "paper":
-            print("route: source-intake -> paper-analyst")
-        elif args.kind == "repo":
-            print("route: source-intake -> repo-analyst")
-        else:
-            print("route: source-intake -> blog-analyst")
-        print(f"source: {args.source}")
-        return 0
+        return run_intake_add(root, args)
     results = search_records(root, args.question)
     out_root = synthesis_root(root) / "wiki"
     ensure_dir(out_root)
-    slug = "".join(ch.lower() if ch.isalnum() else "-" for ch in args.question).strip("-")[:64] or "query"
+    slug = simple_slug(args.question, "query")
     path = out_root / f"{slug}.md"
     lines = [f"# Wiki Query: {args.question}", "", "## Results", ""]
     for item in results[:20]:

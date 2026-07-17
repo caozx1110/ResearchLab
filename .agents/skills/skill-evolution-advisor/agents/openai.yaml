@@ -1,6 +1,6 @@
 interface:
   display_name: "Skill Evolution Advisor"
-  short_description: "Capture v2 workflow friction and turn it into concrete skill improvements"
-  default_prompt: "Use $skill-evolution-advisor after a v2 workflow to capture routing gaps, schema friction, missing scripts, or weak handoffs and turn them into a small improvement prompt."
+  short_description: "Capture learnings and skill-evolution memory"
+  default_prompt: "Use $skill-evolution-advisor after a research workflow to log lightweight habits/gotchas/skill defects or to turn deeper routing, schema, script, or handoff friction into a small improvement prompt."
 policy:
   allow_implicit_invocation: true

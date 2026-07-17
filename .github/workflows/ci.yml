@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt pytest
+      - name: Compile Python files
+        run: python -m compileall .agents/skills .agents/lib
+      - name: Validate installer scripts
+        run: |
+          bash -n install.sh
+          python -m py_compile install-lib/ws_sync.py
+      - name: Validate skill metadata
+        run: python .agents/lib/research/skill_validator.py .agents/skills
+      - name: Configure git identity for checkpoint tests
+        run: |
+          git config --global user.name "ci"
+          git config --global user.email "ci@example.com"
+      - name: Run tests
+        # Unset CI for this step only: the installer PTY tests drive a simulated
+        # interactive terminal, and install.sh's is_interactive_input() correctly
+        # refuses to prompt when $CI is set (a real-CI safety guard we keep intact).
+        run: env -u CI python -m pytest .agents/lib/research/tests -q

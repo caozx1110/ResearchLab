@@ -1,11 +1,23 @@
 #!/usr/bin/env python3
+"""Repo analyst: script prepares fillable structure + verifies evidence; a runtime
+agent fills the understanding (SSOT Principle 1 / §3.3).
+
+The script is deliberately *not* allowed to understand the repo. It (a) scans the
+directory tree for mechanical facts (files, entrypoints, languages), (b) emits a
+**fillable structure** (3-element capability skeleton) whose judgement fields are left
+blank for a runtime agent, and (c) **verifies** every judgement the agent fills carries
+legit verbatim evidence (research.evidence) before it clears the substance gate
+(research.confirm) and is persisted. There is no README-heuristic -> capability
+judgement anywhere: any "this repo supports X" claim must come from an agent, backed
+by a real file:line quote.
+"""
 from __future__ import annotations
 
 import argparse
 import os
 import sys
-from collections import Counter
 from pathlib import Path
+from typing import Any
 
 SCRIPT_PATH = Path(__file__).resolve()
 for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
@@ -17,32 +29,97 @@ for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
 else:
     raise SystemExit("Could not locate .agents/lib")
 
-from research.common import clean_text, infer_repo_roles, infer_topics_and_tags, read_text_excerpt, write_text_if_changed, write_yaml_if_changed
-from research.v2 import (
+from research.bootstrap import ensure_managed_runtime
+
+if __name__ == "__main__":
+    ensure_managed_runtime(PROJECT_ROOT)
+
+from research.common import (
+    add_project_root_argument,
+    clean_text,
+    load_yaml,
+    print_resolved_project_roots,
+    read_text_excerpt,
+    write_text_if_changed,
+    write_yaml_if_changed,
+)
+from research.core import (
     append_history,
     apply_record_governance,
     build_index,
+    checkpoint_and_report,
+    confirm_unit,
+    load_runtime_preferences,
     locate_record,
-    maybe_auto_checkpoint,
     project_root,
     rel,
     resolve_local_reference,
     write_record,
 )
+from research.evidence import (
+    attach_claims,
+    read_claims,
+    validate_claims,
+    verify_claim_evidence,
+)
 
-IGNORE_DIRS = {".git", "__pycache__", ".venv", "node_modules", "build", "dist", "outputs", "logs", ".mypy_cache"}
+IGNORE_DIRS = {
+    ".git", "__pycache__", ".venv", "node_modules", "build", "dist",
+    "outputs", "logs", ".mypy_cache",
+}
 ENTRYPOINT_HINTS = {
-    "train.py",
-    "main.py",
-    "run.py",
-    "eval.py",
-    "evaluate.py",
-    "infer.py",
-    "inference.py",
-    "demo.py",
-    "app.py",
+    "train.py", "main.py", "run.py", "eval.py", "evaluate.py",
+    "infer.py", "inference.py", "demo.py", "app.py",
 }
 
+# --------------------------------------------------------------------------- #
+# 3-element fill contract (SSOT §3.3 / repo paradigm shift).                   #
+#                                                                             #
+# A runtime agent fills these three elements; every element is a judgement-    #
+# class claim and MUST carry >=1 evidence_ref (short verbatim quote from a     #
+# real repo file + file:line locator). The script verifies + routes them — it #
+# never authors capability judgements. Filling 'capability' clears             #
+# has_substantive_content() for a repo (SUBSTANCE_CONTENT_SECTIONS["repo"] =   #
+# ("capability",)).                                                            #
+# --------------------------------------------------------------------------- #
+CAP_ELEMENTS: tuple[str, ...] = ("capability", "reuse_points", "entry_map")
+
+ELEMENT_CLAIM_TYPE: dict[str, str] = {
+    "capability": "evaluation",
+    "reuse_points": "evaluation",
+    "entry_map": "inference",
+}
+
+# element -> (payload_section, field, shape)
+# capability   -> payload.capability.core_capabilities  (list; clears substance gate)
+# reuse_points -> payload.reuse.directly_reusable       (list)
+# entry_map    -> payload.structure.entrypoints         (list)
+ELEMENT_TARGET: dict[str, tuple[str, str, str]] = {
+    "capability": ("capability", "core_capabilities", "list"),
+    "reuse_points": ("reuse", "directly_reusable", "list"),
+    "entry_map": ("structure", "entrypoints", "list"),
+}
+
+ELEMENT_HEADING: dict[str, str] = {
+    "capability": "Capability",
+    "reuse_points": "Reuse Points",
+    "entry_map": "Entry Map",
+}
+
+# Reusable, machine-readable description of the evidence_ref shape for repo artifacts.
+# Locator family: file:line (repo files use line=N, not page=N).
+EVIDENCE_REF_FORMAT_REPO: dict[str, str] = {
+    "source_unit_id": "r-... (this repo unit id)",
+    "artifact": "path/to/file relative to repo_root (e.g. README.md, src/train.py)",
+    "locator": "line=N  (line number within the repo file where the quote appears)",
+    "quote": "short verbatim snippet — script checks it is a whitespace-normalized substring of the artifact file",
+    "summary": "optional one-line paraphrase",
+}
+
+
+# --------------------------------------------------------------------------- #
+# Mechanical structure scan (no capability heuristic).                         #
+# --------------------------------------------------------------------------- #
 
 def _candidate_repo_roots(root: Path, record: dict) -> list[Path]:
     paths: list[Path] = []
@@ -74,44 +151,33 @@ def _pick_repo_root(root: Path, record: dict) -> Path | None:
     return None
 
 
-def _readme_excerpt(repo_root: Path | None) -> str:
-    if repo_root is None:
-        return ""
-    for name in ("README.md", "README.rst", "README.txt", "README"):
-        path = repo_root / name
-        if path.exists():
-            return clean_text(read_text_excerpt(path, limit=5000))
-    return ""
-
-
 def scan_structure_payload(root: Path, record: dict) -> dict:
+    """Mechanical directory scan — no heuristic capability inference."""
+    from collections import Counter
+
     repo_root = _pick_repo_root(root, record)
     if repo_root is None:
         return {
             "status": "pending_user_confirmation",
-            "information_types": ["fact", "inference", "unverified"],
+            "information_types": ["fact", "unverified"],
             "repo_root": "",
             "top_level_dirs": [],
             "top_level_files": [],
             "languages": [],
             "core_modules": [],
             "entrypoints": [],
-            "training_flow": ["未检测到本地源码快照，待人工补充。"],
-            "inference_flow": [],
-            "config_system": [],
-            "data_flow": [],
-            "critical_modules": [],
+            "config_files": [],
+            "readme_excerpt": "",
         }
 
-    top_level_dirs = sorted(item.name for item in repo_root.iterdir() if item.is_dir() and item.name not in IGNORE_DIRS)
+    top_level_dirs = sorted(
+        item.name for item in repo_root.iterdir()
+        if item.is_dir() and item.name not in IGNORE_DIRS
+    )
     top_level_files = sorted(item.name for item in repo_root.iterdir() if item.is_file())[:40]
     entrypoints: list[str] = []
     core_modules: set[str] = set()
-    config_system: set[str] = set()
-    data_flow: set[str] = set()
-    critical_modules: set[str] = set()
-    training_flow: list[str] = []
-    inference_flow: list[str] = []
+    config_files: set[str] = set()
     language_counter: Counter[str] = Counter()
 
     for dirpath, dirnames, filenames in os.walk(repo_root):
@@ -130,254 +196,472 @@ def scan_structure_payload(root: Path, record: dict) -> dict:
             lowered = filename.lower()
             if lowered in ENTRYPOINT_HINTS or (lowered.endswith(".sh") and "train" in lowered):
                 entrypoints.append(relative)
-            if any(token in relative.lower() for token in ("config", "configs", "hydra", "yaml", "toml")):
-                config_system.add(relative)
-            if any(token in relative.lower() for token in ("data", "dataset", "loader", "dataloader")):
-                data_flow.add(relative)
-            if any(token in relative.lower() for token in ("model", "policy", "agent", "trainer", "engine")):
-                critical_modules.add(relative)
+            if any(tok in relative.lower() for tok in ("config", "configs", "hydra", ".yaml", ".toml", ".json")):
+                config_files.add(relative)
             if relative_dir.parts:
                 head = relative_dir.parts[0]
                 if head not in {"tests", "docs"}:
                     core_modules.add(head)
-            if any(token in lowered for token in ("train", "trainer", "fit")):
-                training_flow.append(f"可能训练入口：`{relative}`")
-            if any(token in lowered for token in ("eval", "infer", "demo", "serve")):
-                inference_flow.append(f"可能推理/评测入口：`{relative}`")
+
+    # README excerpt for agent orientation (transport only — NOT a capability judgement).
+    readme_excerpt = ""
+    for name in ("README.md", "README.rst", "README.txt", "README"):
+        p = repo_root / name
+        if p.exists():
+            readme_excerpt = clean_text(read_text_excerpt(p, limit=3000))
+            break
 
     languages = [f"{suffix}:{count}" for suffix, count in language_counter.most_common(8)]
     return {
         "status": "pending_user_confirmation",
-        "information_types": ["fact", "inference", "unverified"],
+        "information_types": ["fact", "unverified"],
         "repo_root": repo_root.as_posix(),
         "top_level_dirs": top_level_dirs,
         "top_level_files": top_level_files,
         "languages": languages,
         "core_modules": sorted(core_modules)[:20],
         "entrypoints": sorted(set(entrypoints))[:20],
-        "training_flow": sorted(set(training_flow))[:10],
-        "inference_flow": sorted(set(inference_flow))[:10],
-        "config_system": sorted(config_system)[:20],
-        "data_flow": sorted(data_flow)[:20],
-        "critical_modules": sorted(critical_modules)[:20],
+        "config_files": sorted(config_files)[:20],
+        "readme_excerpt": readme_excerpt[:2000],
     }
 
 
-def capability_map(record: dict, structure_payload: dict, readme_excerpt: str, root: Path) -> dict:
-    title = str(record.get("title") or "")
-    roles = infer_repo_roles(f"{title}\n{readme_excerpt}", project_root=root)
-    inferred_topics, inferred_tags = infer_topics_and_tags(f"{title}\n{readme_excerpt}", project_root=root)
-    boundary = "待人工确认该仓库最适合承担的数据/训练/推理/部署角色，以及不适合的使用场景。"
-    if roles:
-        boundary = f"当前自动推测该仓库偏向承担：{', '.join(roles)}。仍需人工确认真正边界。"
-    capabilities = [
-        f"根据结构扫描，核心模块包括：{', '.join(structure_payload.get('core_modules', [])[:4]) or '待确认'}。",
-        f"主要入口包括：{', '.join(structure_payload.get('entrypoints', [])[:4]) or '待确认'}。",
+# --------------------------------------------------------------------------- #
+# map-capability: prepare a fillable 3-element structure / verify a fill.      #
+# --------------------------------------------------------------------------- #
+
+def build_capability_scaffold(record: dict, structure_payload: dict, repo_root: Path | None) -> dict:
+    """Produce the fillable capability skeleton (NO heuristic capability judgement).
+
+    The three elements (capability / reuse_points / entry_map) are blank for a
+    runtime agent to fill with its own understanding + verbatim file:line evidence.
+    The script supplies a mechanical structure digest for the agent's orientation;
+    it never judges what the repo can do.
+    """
+    repo_id = str(record.get("id") or "")
+
+    # Orientation hints: purely mechanical facts for the agent to navigate.
+    orientation = {
+        "top_level_dirs": structure_payload.get("top_level_dirs", []),
+        "entrypoints": structure_payload.get("entrypoints", []),
+        "languages": structure_payload.get("languages", []),
+        "config_files": structure_payload.get("config_files", [])[:10],
+        "readme_excerpt_chars": len(structure_payload.get("readme_excerpt", "")),
+        "repo_root": structure_payload.get("repo_root", ""),
+    }
+
+    elements = [
+        {
+            "element": name,
+            "claim_type": ELEMENT_CLAIM_TYPE[name],
+            "content": "",
+            "evidence_refs": [],
+        }
+        for name in CAP_ELEMENTS
     ]
-    if readme_excerpt:
-        capabilities.append(f"README 摘录信号：{clean_text(readme_excerpt)[:180]}")
+
     return {
-        "repo_id": record["id"],
-        "status": "pending_user_confirmation",
-        "information_types": ["inference", "evaluation", "unverified"],
-        "candidate_roles": roles,
-        "inferred_topics": inferred_topics,
-        "inferred_tags": inferred_tags,
-        "problem": "待人工确认该仓库主要解决的问题定义与指标对象。",
-        "core_capabilities": capabilities,
-        "boundary": boundary,
-        "supported_tasks": [f"候选角色：{role}" for role in roles] or ["待确认支持的核心任务"],
-        "unsupported_tasks": ["待确认不适合承担的任务和边界条件"],
-        "reuse_candidates": ["直接复用训练/评测脚本", "借鉴配置系统与关键模块拆分"],
-        "modification_risks": ["依赖重量、复现门槛、入口耦合度待人工确认"],
+        "repo_id": repo_id,
+        "kind": "repo",
+        "status": "awaiting_agent_fill",
+        "phase": "prepare",
+        "fill_contract": {
+            "description": (
+                "Agent fills all three required_elements with its own understanding of the "
+                "repo, each backed by >=1 verbatim evidence_ref (a real repo file + line). "
+                "Then run `map-capability --phase verify` to validate + verbatim-check "
+                "evidence + persist. Empty or unevidenced elements are rejected; the script "
+                "never judges capability (SSOT §3.3)."
+            ),
+            "required_elements": list(CAP_ELEMENTS),
+            "element_descriptions": {
+                "capability": "What problem this repo solves, its core capabilities, and what it is NOT suitable for",
+                "reuse_points": "Which modules / scripts / patterns are reusable, worth borrowing, or worth modifying",
+                "entry_map": "Key entry-points (train/eval/inference commands), critical config keys, and core module locations",
+            },
+            "element_claim_types": dict(ELEMENT_CLAIM_TYPE),
+            "evidence_ref_format": EVIDENCE_REF_FORMAT_REPO,
+        },
+        "agent_orientation": orientation,
+        # --- agent fills each element.content + element.evidence_refs below ---
+        "elements": elements,
     }
 
 
-def note_template(record: dict, structure_payload: dict, capability_payload: dict, readme_excerpt: str) -> str:
-    return f"""# {record.get('title', '')}
-
-## 能力概览
-
-- 解决的问题：
-- 候选角色：{", ".join(capability_payload.get("candidate_roles", [])) or "-"}
-- 功能边界：{capability_payload.get("boundary", "")}
-- 当前 topics：{", ".join(record.get("topics", [])) or "-"}
-- 当前 tags：{", ".join(record.get("tags", [])) or "-"}
-
-## README / Context 摘录
-
-{readme_excerpt or "待人工补充 README / 文档上下文。"}
-
-## 结构扫描摘要
-
-- 顶层目录：{", ".join(structure_payload.get("top_level_dirs", [])) or "-"}
-- 入口文件：{", ".join(structure_payload.get("entrypoints", [])) or "-"}
-- 配置系统：{", ".join(structure_payload.get("config_system", [])) or "-"}
-- 数据流线索：{", ".join(structure_payload.get("data_flow", [])) or "-"}
-
-## 核心模块
+def _elements_by_name(fill: Any) -> dict[str, dict]:
+    elements: dict[str, dict] = {}
+    if isinstance(fill, dict):
+        raw = fill.get("elements")
+        if isinstance(raw, (list, tuple)):
+            for item in raw:
+                if isinstance(item, dict) and str(item.get("element") or "").strip():
+                    elements[str(item.get("element")).strip().lower()] = item
+    return elements
 
 
-## 训练流程 / 推理流程
+def _claim_from_element(name: str, element: dict) -> dict:
+    return {
+        "id": f"claim-{name}",
+        "text": clean_text(str(element.get("content") or "")),
+        "claim_type": str(element.get("claim_type") or ELEMENT_CLAIM_TYPE.get(name, "evaluation")),
+        "confirmation_status": "pending_user_confirmation",
+        "evidence_refs": element.get("evidence_refs") or [],
+    }
 
 
-## 可复用 / 可借鉴 / 可改造点
+def verify_capability_fill(fill: Any, repo_root: Path) -> tuple[list[str], list[dict]]:
+    """Validate an agent-filled 3-element capability fill. Returns (violations, claims).
+
+    Violations name the offending element. All three elements must be present, carry
+    non-empty content, be structurally valid (validate_claims), and every evidence_ref
+    quote must verify verbatim against the artifact file under repo_root
+    (verify_claim_evidence). Unreachable files yield an explicit error.
+    """
+    violations: list[str] = []
+    elements = _elements_by_name(fill)
+    claims: list[dict] = []
+    for name in CAP_ELEMENTS:
+        element = elements.get(name)
+        if element is None:
+            violations.append(f"element '{name}': missing (all three elements are required)")
+            continue
+        content = clean_text(str(element.get("content") or ""))
+        if not content:
+            violations.append(f"element '{name}': empty content — the agent must fill it")
+        refs = element.get("evidence_refs") or []
+        if not refs:
+            violations.append(
+                f"element '{name}': no evidence_refs — every element must cite >=1 verbatim "
+                f"quote from a real repo file (artifact=<file-relative-to-repo-root>, locator=line=N)"
+            )
+        claim = _claim_from_element(name, element)
+        claims.append(claim)
+        # verify_claim_evidence loads the artifact relative to repo_root; an unreachable
+        # file yields an explicit "not found/readable" violation (never a silent pass).
+        for violation in verify_claim_evidence(claim, repo_root):
+            violations.append(f"element '{name}': {violation}")
+    # Structural + judgement-evidence rules (research.evidence).
+    for violation in validate_claims(claims):
+        violations.append(f"claim-structure: {violation}")
+    return violations, claims
 
 
-## 风险与限制
+def _apply_capability_fill_to_payload(record: dict, claims: list[dict]) -> None:
+    """Route verified element content into canonical payload fields (in place).
+
+    capability   -> payload.capability.core_capabilities  (list; clears substance gate)
+    reuse_points -> payload.reuse.directly_reusable       (list)
+    entry_map    -> payload.structure.entrypoints         (list)
+    """
+    payload = record.setdefault("payload", {})
+    targets = {
+        "capability": payload.setdefault("capability", {}),
+        "reuse_points": payload.setdefault("reuse", {}),
+        "entry_map": payload.setdefault("structure", {}),
+    }
+    field_map = {
+        "capability": "core_capabilities",
+        "reuse_points": "directly_reusable",
+        "entry_map": "entrypoints",
+    }
+    by_id = {str(claim.get("id") or ""): claim for claim in claims}
+    for name in CAP_ELEMENTS:
+        claim = by_id.get(f"claim-{name}")
+        if claim is None:
+            continue
+        content = clean_text(str(claim.get("text") or ""))
+        if not content:
+            continue
+        field = field_map[name]
+        target = targets[name]
+        existing = target.get(field)
+        items = list(existing) if isinstance(existing, list) else []
+        if content not in items:
+            items.append(content)
+        target[field] = items
 
 
-## Pipeline 适配性
+def render_capability_md(record: dict, claims: list[dict]) -> str:
+    """Render repo-note.md from verified elements + their evidence citations."""
+    title = str(record.get("title") or record.get("id") or "")
+    repo_root = record.get("payload", {}).get("structure", {}).get("repo_root", "")
+    by_id = {str(claim.get("id") or ""): claim for claim in claims}
+    lines = [
+        f"# {title}",
+        "",
+        "> 本笔记由 runtime agent 依据仓库文件填写；脚本已逐字校验每条 evidence（SSOT 原则1/原则2）。",
+    ]
+    if repo_root:
+        lines.extend(["", f"> repo_root: `{repo_root}`"])
+    lines.append("")
+    for name in CAP_ELEMENTS:
+        lines.append(f"## {ELEMENT_HEADING[name]}")
+        lines.append("")
+        claim = by_id.get(f"claim-{name}")
+        content = clean_text(str(claim.get("text") or "")) if claim else ""
+        lines.append(content or "-")
+        lines.append("")
+        refs = (claim.get("evidence_refs") if claim else None) or []
+        if refs:
+            lines.append("证据：")
+            for ref in refs:
+                if not isinstance(ref, dict):
+                    continue
+                artifact = str(ref.get("artifact") or "?")
+                locator = str(ref.get("locator") or "?")
+                quote = clean_text(str(ref.get("quote") or ""))
+                summary = clean_text(str(ref.get("summary") or ""))
+                suffix = f" — {summary}" if summary else ""
+                lines.append(f"- [{artifact}:{locator}] \"{quote}\"{suffix}")
+            lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
 
 
-"""
+# --------------------------------------------------------------------------- #
+# Helpers                                                                      #
+# --------------------------------------------------------------------------- #
 
+def _finalize_post_actions(root: Path, *, trigger: str, message: str, defer_post_actions: bool) -> dict[str, Any]:
+    if defer_post_actions:
+        return {"committed": False, "status": "deferred"}
+    build_index(root)
+    return checkpoint_and_report(root, trigger=trigger, message=message)
+
+
+def _resolve_fill_input(unit_root: Path, default_name: str, explicit: str | None) -> Path:
+    if explicit:
+        candidate = Path(explicit).expanduser()
+        if not candidate.is_absolute():
+            candidate = unit_root / explicit
+        return candidate
+    return unit_root / default_name
+
+
+def next_for_agent_capability(root: Path, record: dict, fill_path: Path) -> str:
+    """One machine-readable navigation line for the ingestion auto-drive (SSOT §7).
+
+    Pure navigation: names the fill artifact to read (its agent_orientation digest),
+    the elements to fill, and the exact verify command to run after. Repo evidence
+    cites real repo files with file:line locators (artifact=<file>, locator=line=N).
+    """
+    elements = ",".join(CAP_ELEMENTS)
+    verify_cmd = (
+        f"${{RESEARCH_PYTHON:-python3}} {SCRIPT_PATH} --root {root} "
+        f"map-capability --repo-id {record['id']} --phase verify --input {fill_path.name}"
+    )
+    return (
+        f"NEXT FOR AGENT: read {rel(root, fill_path)} (agent_orientation) + repo files then fill it "
+        f"elements [{elements}] — each needs content + >=1 verbatim quote+locator "
+        f"(repo file:line, artifact=<file> locator=line=N), then run: {verify_cmd}"
+    )
+
+
+def add_confirmation_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--confirmed-by", default="")
+    parser.add_argument("--evidence", action="append", required=True)
+
+
+# --------------------------------------------------------------------------- #
+# CLI                                                                          #
+# --------------------------------------------------------------------------- #
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Analyze repo units in v2.")
+    parser = argparse.ArgumentParser(
+        description="Prepare fillable repo structures + verify agent-filled understanding."
+    )
+    add_project_root_argument(parser)
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for name in ("scan-structure", "map-capability", "complete-note", "confirm"):
-        cmd = subparsers.add_parser(name)
-        cmd.add_argument("--repo-id", required=True)
+
+    scan = subparsers.add_parser("scan-structure")
+    scan.add_argument("--repo-id", required=True)
+    scan.add_argument("--defer-post-actions", action="store_true")
+
+    cap = subparsers.add_parser("map-capability")
+    cap.add_argument("--repo-id", required=True)
+    cap.add_argument("--phase", choices=["prepare", "verify"], default="prepare")
+    cap.add_argument("--input", default="")
+    cap.add_argument("--defer-post-actions", action="store_true")
+
+    confirm = subparsers.add_parser("confirm")
+    confirm.add_argument("--repo-id", required=True)
+    add_confirmation_arguments(confirm)
+    confirm.add_argument("--defer-post-actions", action="store_true")
+
+    reject = subparsers.add_parser("reject")
+    reject.add_argument("--repo-id", required=True)
+    reject.add_argument("--defer-post-actions", action="store_true")
+
     return parser
+
+
+def _run_scan_structure(args, root, record, unit_root, defer_post_actions) -> int:
+    scan_path = unit_root / "structure-scan.yaml"
+    payload = scan_structure_payload(root, record)
+    write_yaml_if_changed(scan_path, payload)
+    record = apply_record_governance(root, record, infer_missing=True, source_label="repo-analyst")
+    structure = record["payload"]["structure"]
+    structure["scan_status"] = "pending_user_confirmation"
+    structure["repo_root"] = payload["repo_root"]
+    structure["top_level_dirs"] = payload["top_level_dirs"]
+    structure["top_level_files"] = payload["top_level_files"]
+    structure["languages"] = payload["languages"]
+    structure["core_modules"] = payload["core_modules"]
+    structure["entrypoints"] = payload["entrypoints"]
+    record["status"] = "screened"
+    record["confirmation_status"] = "pending_user_confirmation"
+    record["needs_human_confirmation"] = True
+    record["information_types"] = ["fact", "unverified"]
+    append_history(
+        record,
+        action="repo-structure-scanned",
+        summary="Generated mechanical repo structure scan (no capability inference).",
+        information_types=["fact", "unverified"],
+        artifacts=[rel(root, scan_path)],
+    )
+    write_record(root, record)
+    print(f"[ok] wrote {scan_path.relative_to(root)}")
+    print("下一步：运行 map-capability --phase prepare 产出三要素待填骨架。")
+    _finalize_post_actions(root, trigger="milestone", message=f"milestone: scan repo structure {args.repo_id}",
+                           defer_post_actions=defer_post_actions)
+    return 0
+
+
+def _run_map_capability(args, root, record, unit_root, defer_post_actions) -> int:
+    fill_path = unit_root / "capability-fill.yaml"
+    note_path = unit_root / "repo-note.md"
+
+    if args.phase == "prepare":
+        structure_payload = scan_structure_payload(root, record)
+        repo_root_str = structure_payload.get("repo_root", "")
+        repo_root_path: Path | None = None
+        if repo_root_str:
+            candidate = Path(repo_root_str)
+            if candidate.is_dir():
+                repo_root_path = candidate
+
+        payload = build_capability_scaffold(record, structure_payload, repo_root_path)
+        write_yaml_if_changed(fill_path, payload)
+        record = apply_record_governance(root, record, infer_missing=True, source_label="repo-analyst")
+        record["status"] = "screened"
+        record["confirmation_status"] = "pending_user_confirmation"
+        record["needs_human_confirmation"] = True
+        record["information_types"] = ["fact", "inference", "unverified"]
+        record["payload"].setdefault("state", {})["capability_fill_status"] = "awaiting_agent_fill"
+        append_history(
+            record,
+            action="repo-capability-scaffolded",
+            summary="Prepared 3-element fillable capability skeleton (script authored nothing).",
+            information_types=["inference", "unverified"],
+            artifacts=[rel(root, fill_path)],
+        )
+        write_record(root, record)
+        print(f"[ok] wrote {fill_path.relative_to(root)}")
+        print(
+            "下一步：runtime agent 为三要素 (capability/reuse_points/entry_map) 填内容 + "
+            "file:line 逐字证据，再运行 map-capability --phase verify。"
+        )
+        print(next_for_agent_capability(root, record, fill_path))
+        _finalize_post_actions(root, trigger="milestone", message=f"milestone: scaffold capability {args.repo_id}",
+                               defer_post_actions=defer_post_actions)
+        return 0
+
+    # verify phase
+    input_path = _resolve_fill_input(unit_root, "capability-fill.yaml", args.input)
+    if not input_path.exists():
+        raise SystemExit(f"map-capability --phase verify: fill input not found: {input_path}")
+    fill = load_yaml(input_path, default={})
+    if not isinstance(fill, dict):
+        raise SystemExit(f"map-capability --phase verify: {input_path} is not a mapping")
+
+    # Resolve repo_root for evidence reachability (cited artifacts must exist under it).
+    structure_payload = scan_structure_payload(root, record)
+    repo_root_str = structure_payload.get("repo_root", "")
+    if not repo_root_str:
+        raise SystemExit(
+            "map-capability --phase verify: cannot resolve repo_root — run scan-structure first "
+            "or ensure the record has a local source path."
+        )
+    repo_root_path = Path(repo_root_str)
+    if not repo_root_path.is_dir():
+        raise SystemExit(f"map-capability --phase verify: repo_root '{repo_root_str}' is not a directory")
+
+    violations, claims = verify_capability_fill(fill, repo_root_path)
+    if violations:
+        print("[reject] capability fill failed verification:", file=sys.stderr)
+        for violation in violations:
+            print(f"  - {violation}", file=sys.stderr)
+        raise SystemExit(1)
+
+    _apply_capability_fill_to_payload(record, claims)
+    write_text_if_changed(note_path, render_capability_md(record, claims))
+    claims_payload = {"repo_id": record["id"], "kind": "repo"}
+    attach_claims(claims_payload, claims)
+    write_yaml_if_changed(unit_root / "capability-claims.yaml", claims_payload)
+
+    fill["status"] = "verified"
+    fill["phase"] = "verify"
+    write_yaml_if_changed(fill_path, fill)
+
+    record["maturity"] = "complete"
+    record["confirmation_status"] = "pending_user_confirmation"
+    record["needs_human_confirmation"] = True
+    record["information_types"] = ["fact", "inference", "evaluation", "unverified"]
+    record["payload"].setdefault("state", {})["capability_fill_status"] = "pending_user_confirmation"
+    append_history(
+        record,
+        action="repo-capability-verified",
+        summary="Verified + persisted agent 3-element capability fill (evidence-grounded).",
+        information_types=["inference", "evaluation", "unverified"],
+        artifacts=[rel(root, note_path), rel(root, fill_path)],
+    )
+    write_record(root, record)
+    print(f"[ok] verified + wrote {note_path.relative_to(root)} (capability filled, {len(claims)} elements)")
+    _finalize_post_actions(root, trigger="milestone", message=f"milestone: verify capability {args.repo_id}",
+                           defer_post_actions=defer_post_actions)
+    return 0
 
 
 def main() -> int:
     args = build_parser().parse_args()
-    root = project_root(PROJECT_ROOT)
-    record, path = locate_record(root, args.repo_id)
+    root = project_root(PROJECT_ROOT, explicit_root=args.root)
+    print_resolved_project_roots(root)
+    record, path = locate_record(root, args.repo_id, kind="repo")
     if record.get("kind") != "repo":
         raise SystemExit(f"{args.repo_id} is not a repo record")
     unit_root = path.parent
-    repo_root = _pick_repo_root(root, record)
-    readme_excerpt = _readme_excerpt(repo_root)
+    defer_post_actions = bool(getattr(args, "defer_post_actions", False))
 
     if args.command == "scan-structure":
-        scan_path = unit_root / "structure-scan.yaml"
-        payload = scan_structure_payload(root, record)
-        write_yaml_if_changed(scan_path, payload)
-        record = apply_record_governance(root, record, infer_missing=True, source_label="repo-analyst")
-        record["payload"]["structure"]["scan_status"] = "pending_user_confirmation"
-        record["payload"]["structure"]["repo_root"] = payload["repo_root"]
-        record["payload"]["structure"]["top_level_dirs"] = payload["top_level_dirs"]
-        record["payload"]["structure"]["top_level_files"] = payload["top_level_files"]
-        record["payload"]["structure"]["languages"] = payload["languages"]
-        record["payload"]["structure"]["core_modules"] = payload["core_modules"]
-        record["payload"]["structure"]["entrypoints"] = payload["entrypoints"]
-        record["payload"]["structure"]["training_flow"] = payload["training_flow"]
-        record["payload"]["structure"]["inference_flow"] = payload["inference_flow"]
-        record["payload"]["structure"]["config_system"] = payload["config_system"]
-        record["payload"]["structure"]["data_flow"] = payload["data_flow"]
-        record["payload"]["structure"]["critical_modules"] = payload["critical_modules"]
-        record["status"] = "screened"
-        record["confirmation_status"] = "pending_user_confirmation"
-        record["needs_human_confirmation"] = True
-        record["information_types"] = ["fact", "inference", "evaluation", "unverified"]
-        append_history(
-            record,
-            action="repo-structure-scanned",
-            summary="Generated repo structure scan.",
-            information_types=["fact", "inference", "unverified"],
-            artifacts=[rel(root, scan_path)],
-        )
-        write_record(root, record)
-        build_index(root)
-        print(f"[ok] wrote {scan_path.relative_to(root)}")
-        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: scan repo structure {args.repo_id}")
-        if checkpoint.get("committed"):
-            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
-        return 0
+        return _run_scan_structure(args, root, record, unit_root, defer_post_actions)
 
     if args.command == "map-capability":
-        scan_payload = scan_structure_payload(root, record)
-        scan_path = unit_root / "structure-scan.yaml"
-        write_yaml_if_changed(scan_path, scan_payload)
-        map_path = unit_root / "capability-map.yaml"
-        payload = capability_map(record, scan_payload, readme_excerpt, root)
-        write_yaml_if_changed(map_path, payload)
-        record = apply_record_governance(
-            root,
-            record,
-            explicit_topics=payload["inferred_topics"],
-            explicit_tags=payload["inferred_tags"],
-            infer_missing=True,
-            source_label="repo-analyst",
-        )
-        record["payload"]["capability"]["problem"] = payload["problem"]
-        record["payload"]["capability"]["core_capabilities"] = payload["core_capabilities"]
-        record["payload"]["capability"]["boundary"] = payload["boundary"]
-        record["payload"]["capability"]["supported_tasks"] = payload["supported_tasks"]
-        record["payload"]["capability"]["unsupported_tasks"] = payload["unsupported_tasks"]
-        record["payload"]["capability"]["candidate_roles"] = payload["candidate_roles"]
-        record["payload"]["reuse"]["directly_reusable"] = payload["reuse_candidates"]
-        record["payload"]["risk"]["constraints"] = payload["modification_risks"]
-        record["status"] = "screened"
-        record["confirmation_status"] = "pending_user_confirmation"
-        record["needs_human_confirmation"] = True
-        record["information_types"] = ["fact", "inference", "evaluation", "unverified"]
-        record["summary"] = payload["boundary"]
-        append_history(
-            record,
-            action="repo-capability-mapped",
-            summary="Generated repo capability map.",
-            information_types=["inference", "evaluation", "unverified"],
-            artifacts=[rel(root, scan_path), rel(root, map_path)],
-        )
-        write_record(root, record)
-        build_index(root)
-        print(f"[ok] wrote {map_path.relative_to(root)}")
-        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: map repo capability {args.repo_id}")
-        if checkpoint.get("committed"):
-            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
-        return 0
-
-    if args.command == "complete-note":
-        structure_payload = scan_structure_payload(root, record)
-        capability_payload = capability_map(record, structure_payload, readme_excerpt, root)
-        note_path = unit_root / "repo-note.md"
-        context_path = unit_root / "repo-context.md"
-        write_text_if_changed(note_path, note_template(record, structure_payload, capability_payload, readme_excerpt))
-        write_text_if_changed(
-            context_path,
-            (
-                f"# Repo Context: {record.get('title', '')}\n\n"
-                f"- repo_id: `{record.get('id')}`\n"
-                f"- repo_root: `{structure_payload.get('repo_root') or '-'}`\n"
-                f"- entrypoints: {', '.join(structure_payload.get('entrypoints', [])) or '-'}\n\n"
-                f"{readme_excerpt or '待人工补充 README / docs 摘录。'}\n"
-            ),
-        )
-        record["maturity"] = "complete"
-        record["confirmation_status"] = "pending_user_confirmation"
-        record["needs_human_confirmation"] = True
-        append_history(
-            record,
-            action="repo-note-created",
-            summary="Created full repo note scaffold.",
-            information_types=["inference", "evaluation", "unverified"],
-            artifacts=[rel(root, note_path), rel(root, context_path)],
-        )
-        write_record(root, record)
-        build_index(root)
-        print(f"[ok] wrote {note_path.relative_to(root)}")
-        print(f"[ok] wrote {context_path.relative_to(root)}")
-        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: complete repo note {args.repo_id}")
-        if checkpoint.get("committed"):
-            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
-        return 0
+        return _run_map_capability(args, root, record, unit_root, defer_post_actions)
 
     if args.command == "confirm":
-        record["confirmation_status"] = "confirmed"
-        record["needs_human_confirmation"] = False
-        record["status"] = "active"
-        append_history(record, action="repo-confirmed", summary="Repo analysis confirmed by user.", information_types=["fact"])
+        record = confirm_unit(
+            record,
+            "repo",
+            confirmed_by=args.confirmed_by,
+            evidence=args.evidence,
+            project_root=root,
+        )
         write_record(root, record)
-        build_index(root)
         print(f"[ok] confirmed {args.repo_id}")
-        checkpoint = maybe_auto_checkpoint(root, trigger="milestone", message=f"milestone: confirm repo {args.repo_id}")
-        if checkpoint.get("committed"):
-            print(f"[ok] git checkpoint: {checkpoint.get('commit')}")
+        _finalize_post_actions(root, trigger="milestone", message=f"milestone: confirm repo {args.repo_id}",
+                               defer_post_actions=defer_post_actions)
         return 0
+
+    if args.command == "reject":
+        record["confirmation_status"] = "rejected"
+        record["status"] = "rejected"
+        append_history(record, action="repo-rejected", summary="Repo analysis rejected or deferred.",
+                       information_types=["evaluation"])
+        write_record(root, record)
+        print(f"[ok] rejected {args.repo_id}")
+        _finalize_post_actions(root, trigger="milestone", message=f"milestone: reject repo {args.repo_id}",
+                               defer_post_actions=defer_post_actions)
+        return 0
+
     return 1
 
 

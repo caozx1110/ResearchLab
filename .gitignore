@@ -7,6 +7,7 @@ output/
 .learnings/
 
 # Python/cache noise
+.venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -17,3 +18,6 @@ __pycache__/
 .DS_Store
 
 temp/
+tmp/
+
+.claude/

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import subprocess
 import sys
 from pathlib import Path
 
@@ -16,30 +15,67 @@ for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
 else:
     raise SystemExit("Could not locate .agents/lib")
 
-from research.common import write_text_if_changed
-from research.v2 import iter_records, project_root, user_root
+from research.bootstrap import ensure_managed_runtime
+
+if __name__ == "__main__":
+    ensure_managed_runtime(PROJECT_ROOT)
+
+from research.common import add_project_root_argument, load_yaml, print_resolved_project_roots, write_text_if_changed
+from research.learnings import load_learnings, render_recall_digest
+from research.core import iter_records, kb_root, project_root, user_root
+
+
+CURRENT_STATE_STDOUT_LINES = 40
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Refresh v2 user-facing navigation pages.")
+    parser = argparse.ArgumentParser(description="Refresh core user-facing navigation pages.")
+    add_project_root_argument(parser)
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("refresh")
     subparsers.add_parser("current-state")
     subparsers.add_parser("reading-list")
-    subparsers.add_parser("build-browser")
-    subparsers.add_parser("open-browser")
-    subparsers.add_parser("browser-status")
-    subparsers.add_parser("stop-browser")
     return parser
 
 
-def render_current(records: list[dict]) -> str:
-    lines = ["# Current State", "", "## Confirmed Highlights", ""]
+def load_program_states(root: Path) -> list[dict]:
+    programs_root = kb_root(root) / "programs"
+    if not programs_root.exists():
+        return []
+    states = []
+    for path in sorted(programs_root.glob("*/state.yaml")):
+        payload = load_yaml(path, default={})
+        if isinstance(payload, dict):
+            payload.setdefault("program_id", path.parent.name)
+            states.append(payload)
+    return states
+
+
+def render_current(
+    records: list[dict],
+    program_states: list[dict] | None = None,
+    recall_digest: str = "",
+) -> str:
+    lines = ["# Current State", "", "## Programs", ""]
+    states = sorted(program_states or [], key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+    for state in states[:12]:
+        counts = state.get("counts") if isinstance(state.get("counts"), dict) else {}
+        lines.append(
+            f"- `{state.get('program_id')}` · stage={state.get('stage', 'init')} · "
+            f"OQ={counts.get('open_questions', 0)} · evidence={counts.get('evidence_requests', 0)} · "
+            f"{state.get('goal') or state.get('question') or ''}"
+        )
+    if len(lines) == 4:
+        lines.append("- 暂无 program state")
+    lines.extend(["", "## Confirmed Highlights", ""])
     confirmed = [item for item in records if item.get("confirmation_status") == "confirmed"]
+    start = len(lines)
     for item in confirmed[:12]:
         lines.append(f"- `{item['id']}` · {item['kind']} · {item['title']} · {item.get('summary', '')}")
-    if len(lines) == 4:
+    if len(lines) == start:
         lines.append("- 暂无已确认条目")
+    if recall_digest.strip():
+        lines.extend(["", recall_digest.strip()])
     return "\n".join(lines).strip() + "\n"
 
 
@@ -71,26 +107,32 @@ def render_reading_list(records: list[dict]) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
+def print_current_state_summary(root: Path, content: str) -> None:
+    lines = content.strip().splitlines()
+    for line in lines[:CURRENT_STATE_STDOUT_LINES]:
+        print(line)
+    if len(lines) > CURRENT_STATE_STDOUT_LINES:
+        print(f"... 完整见 {(user_root(root) / 'current-state.md').relative_to(root)}")
+    else:
+        print(f"完整见 {(user_root(root) / 'current-state.md').relative_to(root)}")
+
+
 def main() -> int:
     args = build_parser().parse_args()
-    root = project_root(PROJECT_ROOT)
-    scripts_root = Path(__file__).resolve().parent
-    python = sys.executable
-    if args.command == "build-browser":
-        raise SystemExit(subprocess.run([python, str(scripts_root / "build_kb_browser.py"), "--project-root", str(root)], check=False).returncode)
-    if args.command == "open-browser":
-        raise SystemExit(subprocess.run([python, str(scripts_root / "open_kb_browser.py"), "--project-root", str(root)], check=False).returncode)
-    if args.command == "browser-status":
-        raise SystemExit(subprocess.run([python, str(scripts_root / "status_kb_browser.py"), "--project-root", str(root)], check=False).returncode)
-    if args.command == "stop-browser":
-        raise SystemExit(subprocess.run([python, str(scripts_root / "stop_kb_browser.py"), "--project-root", str(root)], check=False).returncode)
+    root = project_root(PROJECT_ROOT, explicit_root=args.root)
+    if args.command != "current-state":
+        print_resolved_project_roots(root)
     records = iter_records(root)
+    program_states = load_program_states(root)
+    recall_digest = render_recall_digest(load_learnings(root), kind="all", limit=5)
     current_path = user_root(root) / "current-state.md"
     nav_path = user_root(root) / "navigation.md"
     reading_path = user_root(root) / "reading-lists" / "current-reading.md"
 
+    current_content = ""
     if args.command in {"refresh", "current-state"}:
-        write_text_if_changed(current_path, render_current(records))
+        current_content = render_current(records, program_states, recall_digest)
+        write_text_if_changed(current_path, current_content)
     if args.command == "refresh":
         write_text_if_changed(nav_path, render_navigation(records))
         write_text_if_changed(reading_path, render_reading_list(records))
@@ -99,7 +141,7 @@ def main() -> int:
         print(reading_path.relative_to(root))
         return 0
     if args.command == "current-state":
-        print(current_path.relative_to(root))
+        print_current_state_summary(root, current_content)
         return 0
     write_text_if_changed(reading_path, render_reading_list(records))
     print(reading_path.relative_to(root))

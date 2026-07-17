@@ -8,100 +8,95 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
-import unicodedata
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from functools import lru_cache
 from html import unescape
 from pathlib import Path
+from shlex import quote
 from typing import Any
-from urllib.parse import parse_qs, unquote, urljoin, urlparse, urlunparse
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
-try:
-    import yaml as _yaml
-except ModuleNotFoundError:
-    _yaml = None
+from .dedup import canonicalize_url, normalize_remote_url, parse_arxiv_id
+from .slugs import KEYWORD_BLACKLIST, STOPWORDS, normalize_list, normalize_person_name, normalize_ref_key, normalize_title, parse_wikilinks, simple_slug, slugify, slugify_tag
+from .yaml_io import dump_yaml, load_yaml, write_text_if_changed, write_yaml_if_changed, yaml_duplicate_key_issues
 
 
-SOURCE_KINDS = {"paper", "blog", "project-page", "survey", "note"}
-PDF_MIME_TYPES = {"application/pdf", "application/x-pdf"}
 RUNTIME_MODULES = ("yaml", "PyPDF2", "pypdf")
-STOPWORDS = {
-    "a",
-    "an",
-    "and",
-    "as",
-    "at",
-    "for",
-    "from",
-    "in",
-    "into",
-    "of",
-    "on",
-    "or",
-    "the",
-    "to",
-    "with",
+COMMAND_PREFIX = "${RESEARCH_PYTHON:-python3}"
+CONFIRM_SCRIPT_BY_KIND = {
+    "paper": ".agents/skills/paper-analyst/scripts/paper.py",
+    "repo": ".agents/skills/repo-analyst/scripts/repo.py",
+    "blog": ".agents/skills/blog-analyst/scripts/blog.py",
+    "experiment": ".agents/skills/experiment-workbench/scripts/experiment.py",
 }
-KEYWORD_BLACKLIST = {
-    "analysis",
-    "approach",
-    "approaches",
-    "architecture",
-    "architectures",
-    "benchmark",
-    "benchmarks",
-    "data",
-    "dataset",
-    "datasets",
-    "efficient",
-    "evaluation",
-    "framework",
-    "frameworks",
-    "general",
-    "improve",
-    "improved",
-    "improving",
-    "large",
-    "learning",
-    "method",
-    "methods",
-    "model",
-    "models",
-    "new",
-    "novel",
-    "paper",
-    "pipeline",
-    "pipelines",
-    "research",
-    "result",
-    "results",
-    "robot",
-    "robots",
-    "robotic",
-    "robotics",
-    "robust",
-    "scale",
-    "scalable",
-    "scaling",
-    "simple",
-    "study",
-    "system",
-    "systems",
-    "task",
-    "tasks",
-    "train",
-    "training",
-    "work",
+CONFIRM_ID_ARG_BY_KIND = {
+    "paper": "--paper-id",
+    "repo": "--repo-id",
+    "blog": "--blog-id",
+    "experiment": "--experiment-id",
 }
-GENERIC_KEYWORD_PHRASES = {
-    "end-to-end",
-    "real-world",
-    "state-of-the-art",
-}
+
+
+def shell_command(parts: list[str], *, command_prefix: str = COMMAND_PREFIX) -> str:
+    rendered: list[str] = []
+    preserve_command_prefix = command_prefix if command_prefix.startswith("${") and command_prefix.endswith("}") else ""
+    for index, part in enumerate(parts):
+        text = str(part)
+        if (index == 0 and preserve_command_prefix and text == preserve_command_prefix) or (text.startswith("${") and text.endswith("}")):
+            rendered.append(text)
+        else:
+            rendered.append(quote(text))
+    return " ".join(rendered)
+
+
+def confirm_command(
+    record: dict[str, Any],
+    *,
+    command_prefix: str = COMMAND_PREFIX,
+    direct_kinds: tuple[str, ...] | None = None,
+) -> str:
+    kind = str(record.get("kind") or "")
+    unit_id = str(record.get("id") or "")
+    direct_kind_set = set(CONFIRM_SCRIPT_BY_KIND) if direct_kinds is None else set(direct_kinds)
+    if kind in direct_kind_set and kind in CONFIRM_SCRIPT_BY_KIND:
+        script = skill_script_for_command(CONFIRM_SCRIPT_BY_KIND[kind])
+        return shell_command(
+            [
+                command_prefix,
+                script,
+                "confirm",
+                CONFIRM_ID_ARG_BY_KIND[kind],
+                unit_id,
+                "--confirmed-by",
+                "${RESEARCH_CONFIRMED_BY:?set-human-identity}",
+                "--evidence",
+                "${RESEARCH_CONFIRM_EVIDENCE:?set-human-evidence}",
+            ],
+            command_prefix=command_prefix,
+        )
+    return shell_command(
+        [
+            command_prefix,
+            skill_script_for_command(".agents/skills/knowledge-base-manager/scripts/kb.py"),
+            "promote",
+            "--id",
+            unit_id,
+            "--confirmation-status",
+            "confirmed",
+            "--confirmed-by",
+            "${RESEARCH_CONFIRMED_BY:?set-human-identity}",
+            "--evidence",
+            "${RESEARCH_CONFIRM_EVIDENCE:?set-human-evidence}",
+        ],
+        command_prefix=command_prefix,
+    )
 
 
 def utc_now_iso() -> str:
@@ -112,7 +107,10 @@ def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
-def find_project_root(start: Path | None = None) -> Path:
+def find_project_root(start: Path | None = None, *, explicit_root: str | Path | None = None) -> Path:
+    explicit = str(explicit_root or os.getenv("RESEARCH_PROJECT_ROOT") or "").strip()
+    if explicit:
+        return Path(explicit).expanduser().resolve()
     current = (start or Path.cwd()).resolve()
     for candidate in [current] + list(current.parents):
         if (candidate / ".agents").exists() and (
@@ -124,6 +122,55 @@ def find_project_root(start: Path | None = None) -> Path:
         ):
             return candidate
     raise FileNotFoundError(f"Could not locate project root from {current}")
+
+
+def skills_root(start: Path | None = None, *, explicit_home: str | Path | None = None) -> Path:
+    explicit = str(explicit_home or os.getenv("RESEARCH_SKILLS_HOME") or "").strip()
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    current = (start or Path(__file__)).resolve()
+    search_from = current if current.is_dir() else current.parent
+    for candidate in [search_from] + list(search_from.parents):
+        if (candidate / ".agents" / "skills").exists():
+            return candidate
+    raise FileNotFoundError(f"Could not locate skills root from {current}")
+
+
+def skill_script_for_command(relative_path: str, *, cwd: Path | None = None) -> str:
+    if str(os.getenv("RESEARCH_SKILLS_HOME") or "").strip():
+        return (skills_root() / relative_path).as_posix()
+    local_script = (cwd or Path.cwd()) / relative_path
+    if local_script.exists():
+        return relative_path
+    try:
+        installed_script = skills_root() / relative_path
+    except FileNotFoundError:
+        return relative_path
+    if installed_script.exists():
+        return installed_script.as_posix()
+    return relative_path
+
+
+def add_project_root_argument(parser: Any) -> None:
+    parser.add_argument(
+        "--root",
+        default="",
+        help="Explicit project root (overrides RESEARCH_PROJECT_ROOT and auto-discovery).",
+    )
+
+
+def print_resolved_project_roots(project_root: Path) -> None:
+    print(f"[root] project: {project_root.resolve()}")
+    print(f"[root] kb: {research_root(project_root).resolve()}")
+
+
+def warn_if_cwd_differs_from_project_root(project_root: Path, *, command: str) -> None:
+    cwd = Path.cwd().resolve()
+    root = project_root.resolve()
+    if cwd != root:
+        print(f"[warn] {command}: cwd differs from resolved project root")
+        print(f"[warn] cwd: {cwd}")
+        print(f"[warn] project root: {root}")
 
 
 def research_root(project_root: Path) -> Path:
@@ -156,7 +203,7 @@ def domain_profile_path(project_root: Path) -> Path:
     return research_root(project_root) / "memory" / "domain-profile.yaml"
 
 
-def blank_runtime_registry(generated_by: str = "research-conductor") -> dict[str, Any]:
+def blank_runtime_registry(generated_by: str = "research-config-manager") -> dict[str, Any]:
     return {
         **yaml_default("runtime-environments", generated_by, status="active", confidence=0.9),
         "preferred_runtime_id": "",
@@ -165,7 +212,7 @@ def blank_runtime_registry(generated_by: str = "research-conductor") -> dict[str
     }
 
 
-def blank_domain_profile(generated_by: str = "research-conductor") -> dict[str, Any]:
+def blank_domain_profile(generated_by: str = "research-config-manager") -> dict[str, Any]:
     return {
         **yaml_default("domain-profile", generated_by, status="active", confidence=0.85),
         "profile_name": "",
@@ -198,247 +245,6 @@ def parse_iso_datetime(value: Any) -> datetime | None:
         return None
 
 
-def yaml_scalar(value: Any) -> str:
-    if value is None:
-        return "null"
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, (int, float)):
-        return str(value)
-    return json.dumps(str(value), ensure_ascii=False)
-
-
-def yaml_lines(value: Any, indent: int = 0) -> list[str]:
-    prefix = " " * indent
-    if isinstance(value, dict):
-        if not value:
-            return [prefix + "{}"]
-        lines: list[str] = []
-        for key, item in value.items():
-            if isinstance(item, (dict, list)):
-                if not item:
-                    empty = "{}" if isinstance(item, dict) else "[]"
-                    lines.append(f"{prefix}{key}: {empty}")
-                else:
-                    lines.append(f"{prefix}{key}:")
-                    lines.extend(yaml_lines(item, indent + 2))
-            else:
-                lines.append(f"{prefix}{key}: {yaml_scalar(item)}")
-        return lines
-    if isinstance(value, list):
-        if not value:
-            return [prefix + "[]"]
-        lines = []
-        for item in value:
-            if isinstance(item, (dict, list)):
-                if isinstance(item, dict) and item:
-                    first_key = next(iter(item))
-                    first_value = item[first_key]
-                    if isinstance(first_value, (dict, list)):
-                        lines.append(f"{prefix}- {first_key}:")
-                        lines.extend(yaml_lines(first_value, indent + 4))
-                        for key in list(item.keys())[1:]:
-                            nested = item[key]
-                            if isinstance(nested, (dict, list)):
-                                if not nested:
-                                    empty = "{}" if isinstance(nested, dict) else "[]"
-                                    lines.append(f"{' ' * (indent + 2)}{key}: {empty}")
-                                else:
-                                    lines.append(f"{' ' * (indent + 2)}{key}:")
-                                    lines.extend(yaml_lines(nested, indent + 4))
-                            else:
-                                lines.append(f"{' ' * (indent + 2)}{key}: {yaml_scalar(nested)}")
-                    else:
-                        lines.append(f"{prefix}- {first_key}: {yaml_scalar(first_value)}")
-                        for key in list(item.keys())[1:]:
-                            nested = item[key]
-                            if isinstance(nested, (dict, list)):
-                                if not nested:
-                                    empty = "{}" if isinstance(nested, dict) else "[]"
-                                    lines.append(f"{' ' * (indent + 2)}{key}: {empty}")
-                                else:
-                                    lines.append(f"{' ' * (indent + 2)}{key}:")
-                                    lines.extend(yaml_lines(nested, indent + 4))
-                            else:
-                                lines.append(f"{' ' * (indent + 2)}{key}: {yaml_scalar(nested)}")
-                else:
-                    lines.append(prefix + "-")
-                    lines.extend(yaml_lines(item, indent + 2))
-            else:
-                lines.append(f"{prefix}- {yaml_scalar(item)}")
-        return lines
-    return [prefix + yaml_scalar(value)]
-
-
-def _parse_scalar(text: str) -> Any:
-    stripped = text.strip()
-    if stripped == "":
-        return ""
-    if stripped == "null":
-        return None
-    if stripped == "true":
-        return True
-    if stripped == "false":
-        return False
-    if stripped == "[]":
-        return []
-    if stripped == "{}":
-        return {}
-    if stripped.startswith('"') and stripped.endswith('"'):
-        try:
-            return json.loads(stripped)
-        except json.JSONDecodeError:
-            return stripped[1:-1]
-    if stripped.startswith("'") and stripped.endswith("'"):
-        return stripped[1:-1]
-    if re.fullmatch(r"-?\d+", stripped):
-        return int(stripped)
-    if re.fullmatch(r"-?\d+\.\d+", stripped):
-        return float(stripped)
-    return stripped
-
-
-def _next_significant_line(lines: list[str], start: int) -> int:
-    index = start
-    while index < len(lines):
-        stripped = lines[index].strip()
-        if stripped and not stripped.startswith("#"):
-            return index
-        index += 1
-    return index
-
-
-def _parse_mapping_entries(lines: list[str], index: int, indent: int, current: dict[str, Any] | None = None) -> tuple[dict[str, Any], int]:
-    data = current or {}
-    index = _next_significant_line(lines, index)
-    while index < len(lines):
-        raw = lines[index]
-        stripped = raw.strip()
-        current_indent = len(raw) - len(raw.lstrip(" "))
-        if not stripped or stripped.startswith("#"):
-            index += 1
-            continue
-        if current_indent < indent or stripped.startswith("-"):
-            break
-        key, sep, remainder = stripped.partition(":")
-        if not sep:
-            raise ValueError(f"Invalid YAML mapping line: {raw}")
-        key = key.strip()
-        remainder = remainder.strip()
-        if remainder == "":
-            index += 1
-            next_index = _next_significant_line(lines, index)
-            if next_index >= len(lines):
-                data[key] = {}
-                index = next_index
-                break
-            next_raw = lines[next_index]
-            next_indent = len(next_raw) - len(next_raw.lstrip(" "))
-            if next_indent <= current_indent:
-                data[key] = {}
-                index = next_index
-                continue
-            nested, index = _parse_block(lines, next_index, next_indent)
-            data[key] = nested
-        else:
-            data[key] = _parse_scalar(remainder)
-            index += 1
-    return data, index
-
-
-def _parse_list(lines: list[str], index: int, indent: int) -> tuple[list[Any], int]:
-    items: list[Any] = []
-    index = _next_significant_line(lines, index)
-    while index < len(lines):
-        raw = lines[index]
-        stripped = raw.strip()
-        current_indent = len(raw) - len(raw.lstrip(" "))
-        if not stripped or stripped.startswith("#"):
-            index += 1
-            continue
-        if current_indent < indent or not stripped.startswith("-"):
-            break
-        remainder = stripped[1:].lstrip()
-        if remainder == "":
-            nested, index = _parse_block(lines, index + 1, indent + 2)
-            items.append(nested)
-            continue
-        if ":" in remainder and not remainder.startswith(('"', "'")):
-            key, sep, value = remainder.partition(":")
-            seed: dict[str, Any] = {}
-            key = key.strip()
-            value = value.strip()
-            if value == "":
-                nested, next_index = _parse_block(lines, index + 1, indent + 4)
-                seed[key] = nested
-                index = next_index
-            else:
-                seed[key] = _parse_scalar(value)
-                index += 1
-            seed, index = _parse_mapping_entries(lines, index, indent + 2, seed)
-            items.append(seed)
-            continue
-        items.append(_parse_scalar(remainder))
-        index += 1
-    return items, index
-
-
-def _parse_block(lines: list[str], index: int, indent: int) -> tuple[Any, int]:
-    index = _next_significant_line(lines, index)
-    if index >= len(lines):
-        return {}, index
-    raw = lines[index]
-    stripped = raw.strip()
-    current_indent = len(raw) - len(raw.lstrip(" "))
-    if current_indent < indent:
-        return {}, index
-    if stripped.startswith("-"):
-        return _parse_list(lines, index, current_indent)
-    return _parse_mapping_entries(lines, index, current_indent, {})
-
-
-def _simple_yaml_load(text: str) -> Any:
-    lines = text.splitlines()
-    start = _next_significant_line(lines, 0)
-    if start >= len(lines):
-        return None
-    value, _ = _parse_block(lines, start, len(lines[start]) - len(lines[start].lstrip(" ")))
-    return value
-
-
-def load_yaml(path: Path, default: Any | None = None, *, allow_simple_fallback: bool = False) -> Any:
-    if not path.exists():
-        return default
-    text = path.read_text(encoding="utf-8")
-    if not text.strip():
-        return default
-    if _yaml is not None:
-        return _yaml.safe_load(text)
-    if allow_simple_fallback:
-        return _simple_yaml_load(text)
-    raise RuntimeError(
-        "PyYAML is required to read research workspace YAML safely. "
-        f"Current runtime cannot parse {path} without risking corrupted metadata."
-    )
-
-
-def dump_yaml(value: Any) -> str:
-    if _yaml is not None:
-        return _yaml.safe_dump(value, allow_unicode=True, sort_keys=False)
-    return "\n".join(yaml_lines(value)) + "\n"
-
-
-def write_text_if_changed(path: Path, text: str) -> None:
-    ensure_dir(path.parent)
-    if path.exists() and path.read_text(encoding="utf-8") == text:
-        return
-    path.write_text(text, encoding="utf-8")
-
-
-def write_yaml_if_changed(path: Path, value: Any) -> None:
-    write_text_if_changed(path, dump_yaml(value))
-
-
 @contextmanager
 def exclusive_file_lock(path: Path):
     ensure_dir(path.parent)
@@ -460,75 +266,6 @@ def program_file_lock(project_root: Path, program_id: str):
         yield handle
 
 
-def yaml_duplicate_key_issues(path: Path) -> list[str]:
-    if not path.exists():
-        return []
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        return [f"{path.as_posix()}: read error: {exc}"]
-    if not text.strip() or _yaml is None:
-        return []
-    try:
-        node = _yaml.compose(text)
-    except Exception as exc:  # noqa: BLE001
-        return [f"{path.as_posix()}: YAML parse error: {exc}"]
-    if node is None:
-        return []
-    issues: list[str] = []
-
-    def walk(current: Any, prefix: str) -> None:
-        node_id = getattr(current, "id", "")
-        if node_id == "mapping":
-            seen: set[str] = set()
-            for key_node, value_node in getattr(current, "value", []):
-                key = str(getattr(key_node, "value", "<complex-key>"))
-                dotted = f"{prefix}.{key}" if prefix else key
-                if key in seen:
-                    issues.append(f"{path.as_posix()}: duplicate key `{dotted}`")
-                else:
-                    seen.add(key)
-                walk(value_node, dotted)
-            return
-        if node_id == "sequence":
-            for index, item in enumerate(getattr(current, "value", [])):
-                child_prefix = f"{prefix}[{index}]" if prefix else f"[{index}]"
-                walk(item, child_prefix)
-
-    walk(node, "")
-    return issues
-
-
-def slugify(text: str, *, max_words: int = 8) -> str:
-    normalized = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
-    normalized = normalized.lower()
-    normalized = re.sub(r"[^a-z0-9]+", " ", normalized)
-    words = [word for word in normalized.split() if word]
-    if not words:
-        return "item"
-    filtered = [word for word in words if word not in STOPWORDS]
-    chosen = filtered if filtered else words
-    return "-".join(chosen[:max_words])
-
-
-def normalize_title(text: str) -> str:
-    lowered = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii").lower()
-    lowered = re.sub(r"[^a-z0-9]+", " ", lowered)
-    return " ".join(lowered.split())
-
-
-def slugify_tag(text: str) -> str:
-    normalized = normalize_title(text).replace(" ", "-")
-    normalized = re.sub(r"-{2,}", "-", normalized)
-    return normalized.strip("-")
-
-
-def normalize_person_name(text: str) -> str:
-    lowered = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii").lower()
-    lowered = re.sub(r"[^a-z0-9]+", " ", lowered)
-    return " ".join(lowered.split())
-
-
 def first_author_key(authors: list[str]) -> str:
     if not authors:
         return ""
@@ -547,48 +284,6 @@ def file_sha256(path: Path) -> str:
 def is_url(value: str) -> bool:
     parsed = urlparse(value)
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
-
-
-def canonicalize_url(url: str) -> str:
-    parsed = urlparse(url.strip())
-    scheme = parsed.scheme.lower()
-    netloc = parsed.netloc.lower()
-    path = re.sub(r"/+", "/", parsed.path or "/")
-    query_pairs = parse_qs(parsed.query, keep_blank_values=False)
-    keep_keys = []
-    if "openreview.net" in netloc:
-        keep_keys = ["id"]
-    elif "doi.org" in netloc:
-        keep_keys = []
-    query = "&".join(f"{key}={query_pairs[key][0]}" for key in keep_keys if key in query_pairs)
-    return urlunparse((scheme, netloc, path.rstrip("/") or "/", "", query, ""))
-
-
-def parse_arxiv_id(value: str) -> str:
-    match = re.search(r"(\d{4}\.\d{4,5}(?:v\d+)?)", value)
-    return match.group(1) if match else ""
-
-
-def parse_openreview_id(url: str) -> str:
-    parsed = urlparse(url)
-    if "openreview.net" not in parsed.netloc.lower():
-        return ""
-    query = parse_qs(parsed.query)
-    return query.get("id", [""])[0]
-
-
-def canonical_literature_source(external_ids: dict[str, str] | None = None) -> tuple[str, str]:
-    external_ids = external_ids or {}
-    arxiv_id = str(external_ids.get("arxiv_id") or "").strip()
-    if arxiv_id:
-        return canonicalize_url(f"https://arxiv.org/abs/{arxiv_id}"), "arxiv.org"
-    doi = str(external_ids.get("doi") or "").strip()
-    if doi:
-        return canonicalize_url(f"https://doi.org/{doi}"), "doi.org"
-    openreview_id = str(external_ids.get("openreview_id") or "").strip()
-    if openreview_id:
-        return canonicalize_url(f"https://openreview.net/forum?id={openreview_id}"), "openreview.net"
-    return "", ""
 
 
 def _resolved_project_root(project_root: Path | None = None) -> Path | None:
@@ -637,12 +332,12 @@ def _normalize_domain_taxonomy_seed(canonical_tag: str, item: dict[str, Any]) ->
 @lru_cache(maxsize=16)
 def _load_domain_profile_cached(project_root_str: str) -> dict[str, Any]:
     project_root = Path(project_root_str)
-    payload = load_yaml(domain_profile_path(project_root), default={}, allow_simple_fallback=True)
+    payload = load_yaml(domain_profile_path(project_root), default={})
     if not isinstance(payload, dict):
         payload = blank_domain_profile()
     payload.setdefault("id", "domain-profile")
     payload.setdefault("status", "active")
-    payload.setdefault("generated_by", "research-conductor")
+    payload.setdefault("generated_by", "research-config-manager")
     payload.setdefault("generated_at", utc_now_iso())
     payload.setdefault("inputs", [])
     payload.setdefault("confidence", 0.85)
@@ -731,21 +426,6 @@ def domain_repo_roles(project_root: Path | None = None) -> dict[str, list[str]]:
     return repo_roles if isinstance(repo_roles, dict) else {}
 
 
-def query_keyword_terms(text: str, *, stopwords: set[str] | None = None, project_root: Path | None = None) -> list[str]:
-    tokens = normalize_title(text).split()
-    active_stopwords = stopwords or set()
-    short_terms = domain_short_terms(project_root)
-    return sorted(
-        {
-            token
-            for token in tokens
-            if token
-            and token not in active_stopwords
-            and (len(token) >= 4 or token in short_terms or any(char.isdigit() for char in token))
-        }
-    )
-
-
 def infer_repo_roles(text: str, *, project_root: Path | None = None) -> list[str]:
     normalized_text = normalize_title(text)
     roles = [
@@ -774,230 +454,6 @@ def infer_topics_and_tags(text: str, *, project_root: Path | None = None) -> tup
     if not tags:
         tags.add("research")
     return sorted(topics), sorted(tags)
-
-
-def _known_tag_slugs(project_root: Path | None = None) -> set[str]:
-    known: set[str] = set()
-    for rule in domain_tagging_rules(project_root):
-        tag = slugify_tag(str(rule.get("tag") or ""))
-        if tag:
-            known.add(tag)
-    for canonical, item in domain_taxonomy_seeds(project_root).items():
-        canonical_slug = slugify_tag(canonical)
-        if canonical_slug:
-            known.add(canonical_slug)
-        if isinstance(item, dict):
-            for alias in item.get("aliases", []):
-                alias_slug = slugify_tag(str(alias))
-                if alias_slug:
-                    known.add(alias_slug)
-    return known
-
-
-def _valid_keyword_phrase(tokens: list[str], slug: str) -> bool:
-    if not tokens or not slug or len(tokens) > 4:
-        return False
-    if tokens[0] in STOPWORDS or tokens[-1] in STOPWORDS:
-        return False
-    if slug in GENERIC_KEYWORD_PHRASES:
-        return False
-    if any(len(token) == 1 and not token.isdigit() for token in tokens):
-        return False
-    content_tokens = [token for token in tokens if token not in STOPWORDS]
-    if not content_tokens:
-        return False
-    if len(tokens) == 1:
-        token = content_tokens[0]
-        if token in KEYWORD_BLACKLIST:
-            return False
-        if len(token) < 5 and not any(char.isdigit() for char in token):
-            return False
-        return True
-    strong_tokens = [
-        token
-        for token in content_tokens
-        if token not in KEYWORD_BLACKLIST and (len(token) >= 4 or any(char.isdigit() for char in token))
-    ]
-    return bool(strong_tokens)
-
-
-def _keyword_phrase_candidates(tokens: list[str], *, max_ngram: int) -> list[list[str]]:
-    chunks: list[list[str]] = []
-    current: list[str] = []
-    for token in tokens:
-        if token in STOPWORDS:
-            if current:
-                chunks.append(current)
-                current = []
-            continue
-        current.append(token)
-    if current:
-        chunks.append(current)
-
-    phrases: list[list[str]] = []
-    seen: set[tuple[str, ...]] = set()
-    for chunk in chunks:
-        trimmed = list(chunk)
-        while len(trimmed) > 1 and trimmed[0] in KEYWORD_BLACKLIST:
-            trimmed = trimmed[1:]
-        while len(trimmed) > 1 and trimmed[-1] in KEYWORD_BLACKLIST:
-            trimmed = trimmed[:-1]
-        if not trimmed:
-            continue
-
-        candidates: list[list[str]] = []
-        if len(trimmed) <= max_ngram:
-            candidates.append(trimmed)
-        else:
-            candidates.append(trimmed[:max_ngram])
-            candidates.append(trimmed[-max_ngram:])
-        if len(trimmed) >= 2:
-            candidates.append(trimmed[:2])
-            candidates.append(trimmed[-2:])
-        if len(trimmed) >= 3:
-            candidates.append(trimmed[:3])
-            candidates.append(trimmed[-3:])
-        if len(trimmed) == 1:
-            candidates.append(trimmed)
-
-        for candidate in candidates:
-            key = tuple(candidate)
-            if key in seen:
-                continue
-            seen.add(key)
-            phrases.append(candidate)
-    return phrases
-
-
-def discover_keyword_tags(
-    title: str,
-    abstract: str,
-    *,
-    project_root: Path | None = None,
-    existing_tags: list[str] | None = None,
-    limit: int = 4,
-) -> list[dict[str, Any]]:
-    known_slugs = _known_tag_slugs(project_root)
-    existing_slugs = {slugify_tag(tag) for tag in (existing_tags or []) if slugify_tag(tag)}
-    existing_token_union = {
-        token
-        for slug in existing_slugs
-        for token in slug.split("-")
-        if token
-    }
-    title_text = normalize_title(title)
-    abstract_text = normalize_title(abstract)
-    scores: dict[str, float] = {}
-    phrases: dict[str, str] = {}
-    sources: dict[str, set[str]] = {}
-
-    def register_phrase(source_name: str, normalized_text: str, *, base_weight: float, max_ngram: int) -> None:
-        tokens = normalized_text.split()
-        if not tokens:
-            return
-        local_counts: dict[str, int] = {}
-        local_phrase: dict[str, str] = {}
-        for phrase_tokens in _keyword_phrase_candidates(tokens, max_ngram=max_ngram):
-            phrase = " ".join(phrase_tokens)
-            slug = slugify_tag(phrase)
-            if not slug or slug in known_slugs or slug in existing_slugs:
-                continue
-            if not _valid_keyword_phrase(phrase_tokens, slug):
-                continue
-            local_counts[slug] = local_counts.get(slug, 0) + 1
-            local_phrase.setdefault(slug, phrase)
-        for slug, count in local_counts.items():
-            phrase = local_phrase.get(slug, slug.replace("-", " "))
-            phrase_tokens = phrase.split()
-            score = base_weight + max(len(phrase_tokens) - 1, 0) * 0.6 + min(count - 1, 2) * 0.7
-            scores[slug] = scores.get(slug, 0.0) + score
-            phrases.setdefault(slug, phrase)
-            sources.setdefault(slug, set()).add(source_name)
-
-    register_phrase("title", title_text, base_weight=3.4, max_ngram=4)
-    register_phrase("abstract", abstract_text, base_weight=1.6, max_ngram=3)
-
-    for acronym in sorted(set(re.findall(r"\b[A-Z][A-Z0-9]{1,9}\b", title))):
-        slug = slugify_tag(acronym)
-        if not slug or slug in known_slugs or slug in existing_slugs:
-            continue
-        if len(slug) < 2:
-            continue
-        scores[slug] = max(scores.get(slug, 0.0), 3.0)
-        phrases.setdefault(slug, acronym)
-        sources.setdefault(slug, set()).add("title-acronym")
-
-    ranked = sorted(
-        scores.items(),
-        key=lambda item: (-item[1], -len(item[0].split("-")), item[0]),
-    )
-    selected: list[dict[str, Any]] = []
-    selected_slugs: list[str] = []
-    for slug, score in ranked:
-        if score < 3.0:
-            continue
-        if existing_token_union and set(slug.split("-")) <= existing_token_union:
-            continue
-        if any(
-            slug == chosen
-            or slug.startswith(f"{chosen}-")
-            or chosen.startswith(f"{slug}-")
-            for chosen in selected_slugs
-        ):
-            continue
-        selected.append(
-            {
-                "tag": slug,
-                "phrase": phrases.get(slug, slug.replace("-", " ")),
-                "score": round(score, 2),
-                "sources": sorted(sources.get(slug, set())),
-            }
-        )
-        selected_slugs.append(slug)
-        if len(selected) >= limit:
-            break
-    return selected
-
-
-def merge_keyword_tags(base_tags: list[str], keyword_candidates: list[dict[str, Any]], *, limit: int = 2) -> list[str]:
-    merged: list[str] = []
-    seen: set[str] = set()
-    generic_placeholder = {"research"}
-    base_values = list(base_tags)
-    if keyword_candidates:
-        base_values = [tag for tag in base_values if slugify_tag(tag) not in generic_placeholder]
-    for tag in base_values:
-        slug = slugify_tag(tag)
-        if not slug or slug in seen:
-            continue
-        seen.add(slug)
-        merged.append(slug)
-    added = 0
-    for candidate in keyword_candidates:
-        slug = slugify_tag(str(candidate.get("tag") or ""))
-        if not slug or slug in seen:
-            continue
-        merged.append(slug)
-        seen.add(slug)
-        added += 1
-        if added >= limit:
-            break
-    return merged
-
-
-def guess_source_kind(url: str, title: str = "", content_type: str = "") -> str:
-    lowered_url = url.lower()
-    lowered_title = title.lower()
-    lowered_type = content_type.lower()
-    if any(token in lowered_url for token in ("arxiv.org", "openreview.net", "/doi/")):
-        return "paper"
-    if lowered_url.endswith(".pdf") or lowered_type in PDF_MIME_TYPES:
-        return "paper"
-    if "blog" in lowered_url or "blog" in lowered_title:
-        return "blog"
-    if "project" in lowered_url or "homepage" in lowered_title:
-        return "project-page"
-    return "note"
 
 
 def pdf_backend() -> Any:
@@ -1085,12 +541,12 @@ def _coerce_list(value: Any) -> list[Any]:
 
 
 def load_runtime_registry(project_root: Path) -> dict[str, Any]:
-    payload = load_yaml(runtime_memory_path(project_root), default={}, allow_simple_fallback=True)
+    payload = load_yaml(runtime_memory_path(project_root), default={})
     if not isinstance(payload, dict):
         payload = blank_runtime_registry()
     payload.setdefault("id", "runtime-environments")
     payload.setdefault("status", "active")
-    payload.setdefault("generated_by", "research-conductor")
+    payload.setdefault("generated_by", "research-config-manager")
     payload.setdefault("generated_at", utc_now_iso())
     payload["inputs"] = [str(item) for item in _coerce_list(payload.get("inputs")) if str(item).strip()]
     payload["confidence"] = float(payload.get("confidence", 0.9) or 0.9)
@@ -1124,84 +580,6 @@ def preferred_runtime_record(project_root: Path) -> dict[str, Any] | None:
     return None
 
 
-def _runtime_record_id(items: dict[str, Any], label: str, python_executable: str) -> str:
-    existing = next(
-        (
-            runtime_id
-            for runtime_id, record in items.items()
-            if isinstance(record, dict) and str(record.get("python") or "") == python_executable
-        ),
-        "",
-    )
-    if existing:
-        return existing
-    base = slugify(label or Path(python_executable).name, max_words=6)
-    runtime_id = f"runtime-{base}"
-    suffix = 2
-    while runtime_id in items:
-        runtime_id = f"runtime-{base}-{suffix}"
-        suffix += 1
-    return runtime_id
-
-
-def remember_runtime(
-    project_root: Path,
-    python_executable: str,
-    *,
-    label: str = "",
-    notes: str = "",
-    set_default: bool = True,
-    recorded_by: str = "research-conductor",
-) -> dict[str, Any]:
-    registry = load_runtime_registry(project_root)
-    probe = inspect_python_runtime(python_executable)
-    runtime_label = label or Path(str(probe.get("python") or python_executable)).name
-    runtime_id = _runtime_record_id(registry["items"], runtime_label, str(probe.get("python") or python_executable))
-    record = {
-        "runtime_id": runtime_id,
-        "label": runtime_label,
-        "python": str(probe.get("python") or python_executable),
-        "version": str(probe.get("version") or ""),
-        "modules": probe.get("modules", {}),
-        "yaml_support": bool(probe.get("yaml_support")),
-        "pdf_support": bool(probe.get("pdf_support")),
-        "pdf_backend": str(probe.get("pdf_backend") or ""),
-        "probe_error": str(probe.get("probe_error") or ""),
-        "captured_at": utc_now_iso(),
-        "notes": notes,
-        "recorded_by": recorded_by,
-    }
-    registry["generated_at"] = utc_now_iso()
-    registry["items"][runtime_id] = record
-    if set_default or not registry.get("preferred_runtime_id"):
-        registry["preferred_runtime_id"] = runtime_id
-    registry["history"].append(
-        {
-            "timestamp": utc_now_iso(),
-            "type": "runtime-remembered",
-            "runtime_id": runtime_id,
-            "python": record["python"],
-            "set_default": set_default,
-        }
-    )
-    write_yaml_if_changed(runtime_memory_path(project_root), registry)
-    return record
-
-
-def format_runtime_report(runtime: dict[str, Any]) -> str:
-    modules = runtime.get("modules", {})
-    return (
-        f"runtime_id: {runtime.get('runtime_id', '')}\n"
-        f"label: {runtime.get('label', '')}\n"
-        f"python: {runtime.get('python', '')}\n"
-        f"version: {runtime.get('version', '')}\n"
-        f"yaml_support: {bool(runtime.get('yaml_support'))}\n"
-        f"pdf_support: {bool(runtime.get('pdf_support'))}\n"
-        f"pdf_backend: {runtime.get('pdf_backend', '') or 'missing'}\n"
-        f"modules: yaml={bool(modules.get('yaml'))}, PyPDF2={bool(modules.get('PyPDF2'))}, pypdf={bool(modules.get('pypdf'))}"
-    )
-
-
 def ensure_research_runtime(project_root: Path, skill_name: str, *, require_pdf_backend: bool = False) -> None:
     capabilities = current_runtime_capabilities()
     missing: list[str] = []
@@ -1233,9 +611,8 @@ def ensure_research_runtime(project_root: Path, skill_name: str, *, require_pdf_
                     f"at {preferred.get('python', '')}"
                 ),
                 (
-                    "Retry with the remembered interpreter or refresh it with "
-                    "`python3 .agents/skills/research-conductor/scripts/manage_workspace.py remember-runtime "
-                    "--python <path-to-python> --label research-default`."
+                    "Retry with the remembered interpreter or update your environment to point "
+                    "at a Python runtime with the missing modules."
                 ),
             ]
         )
@@ -1244,9 +621,8 @@ def ensure_research_runtime(project_root: Path, skill_name: str, *, require_pdf_
             [
                 "No remembered research runtime is stored yet.",
                 (
-                    "Register one with "
-                    "`python3 .agents/skills/research-conductor/scripts/manage_workspace.py remember-runtime "
-                    "--python <path-to-python> --label research-default`."
+                    "Set RESEARCH_PYTHON or run the command with a Python interpreter that has "
+                    "the missing modules installed."
                 ),
             ]
         )
@@ -1406,10 +782,6 @@ def _title_lines_from_pdf(metadata: dict[str, str], pages: list[str], fallback: 
     if title_lines:
         return title_lines
     return [fallback.replace("_", " ").replace("-", " ")]
-
-
-def _guess_pdf_title(metadata: dict[str, str], pages: list[str], fallback: str) -> str:
-    return clean_text(" ".join(_title_lines_from_pdf(metadata, pages, fallback)))
 
 
 def _guess_pdf_year(metadata: dict[str, str], pages: list[str], file_name: str) -> int | None:
@@ -1594,14 +966,83 @@ def extract_pdf_record(pdf_path: Path) -> dict[str, Any]:
     }
 
 
-def fetch_url(url: str, *, binary: bool = False, timeout: int = 20) -> tuple[bytes | str, str]:
+# Default hard cap on any single download, in bytes. Guards against pulling a
+# multi-GB artifact into the workspace by accident. Callers may lower it, and
+# the source-intake pipeline passes an explicit ~50MB cap for PDF downloads.
+FETCH_MAX_BYTES = 50 * 1024 * 1024
+
+
+class FetchTooLarge(Exception):
+    """Raised when a download exceeds the configured size cap."""
+
+
+def _read_capped(response: Any, max_bytes: int) -> bytes:
+    """Read a response body but refuse to buffer more than ``max_bytes``.
+
+    Reading incrementally means a hostile or mislabeled URL cannot exhaust
+    memory before we notice it is oversized.
+    """
+
+    if max_bytes is None or max_bytes <= 0:
+        return response.read()
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = response.read(65536)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise FetchTooLarge(f"download exceeded size cap of {max_bytes} bytes")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def fetch_url(
+    url: str,
+    *,
+    binary: bool = False,
+    timeout: int = 20,
+    retries: int = 2,
+    retry_backoff: float = 1.5,
+    max_bytes: int | None = FETCH_MAX_BYTES,
+) -> tuple[bytes | str, str]:
+    """Fetch ``url`` with a simple bounded retry and a hard size cap.
+
+    Transient failures (timeouts, connection resets, and 5xx/429 responses)
+    are retried up to ``retries`` extra times with linear backoff; definitive
+    failures (404/403/other 4xx) are not retried so callers probing a fallback
+    chain fail fast. ``max_bytes`` bounds the buffered payload.
+    """
+
     request = Request(url, headers={"User-Agent": "Mozilla/5.0 Codex Research Skills/1.1"})
-    with urlopen(request, timeout=timeout) as response:  # noqa: S310
-        content_type = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
-        payload = response.read()
-    if binary:
-        return payload, content_type
-    return payload.decode("utf-8", errors="ignore"), content_type
+    attempts = max(1, retries + 1)
+    last_error: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            with urlopen(request, timeout=timeout) as response:  # noqa: S310
+                content_type = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
+                payload = _read_capped(response, max_bytes)
+            if binary:
+                return payload, content_type
+            return payload.decode("utf-8", errors="ignore"), content_type
+        except FetchTooLarge:
+            raise
+        except HTTPError as exc:
+            last_error = exc
+            # Only server-side/transient statuses are worth retrying.
+            if exc.code in (429, 500, 502, 503, 504) and attempt < attempts - 1:
+                time.sleep(retry_backoff * (attempt + 1))
+                continue
+            raise
+        except (URLError, socket.timeout, TimeoutError, ConnectionError) as exc:
+            last_error = exc
+            if attempt < attempts - 1:
+                time.sleep(retry_backoff * (attempt + 1))
+                continue
+            raise
+    # Unreachable in practice: the loop either returns or raises.
+    raise last_error if last_error else RuntimeError(f"fetch_url failed: {url}")
 
 
 def html_to_text(html: str) -> str:
@@ -1611,73 +1052,6 @@ def html_to_text(html: str) -> str:
     text = unescape(text)
     text = re.sub(r"\s+", " ", text)
     return text.strip()
-
-
-def find_first_pdf_link(html: str, base_url: str) -> str:
-    for match in re.finditer(r'href=["\']([^"\']+\.pdf(?:\?[^"\']*)?)["\']', html, flags=re.IGNORECASE):
-        href = unescape(match.group(1))
-        return urljoin(base_url, href)
-    return ""
-
-
-def literature_index_path(project_root: Path) -> Path:
-    return research_root(project_root) / "library" / "literature" / "index.yaml"
-
-
-def literature_graph_path(project_root: Path) -> Path:
-    return research_root(project_root) / "library" / "literature" / "graph.yaml"
-
-
-def literature_tags_path(project_root: Path) -> Path:
-    return research_root(project_root) / "library" / "literature" / "tags.yaml"
-
-
-def literature_tag_taxonomy_path(project_root: Path) -> Path:
-    return research_root(project_root) / "library" / "literature" / "tag-taxonomy.yaml"
-
-
-def repo_index_path(project_root: Path) -> Path:
-    return research_root(project_root) / "library" / "repos" / "index.yaml"
-
-
-def wiki_root(project_root: Path) -> Path:
-    return research_root(project_root) / "wiki"
-
-
-def wiki_index_path(project_root: Path) -> Path:
-    return wiki_root(project_root) / "index.md"
-
-
-def wiki_log_path(project_root: Path) -> Path:
-    return wiki_root(project_root) / "log.md"
-
-
-def wiki_queries_root(project_root: Path) -> Path:
-    return wiki_root(project_root) / "queries"
-
-
-def wiki_lint_root(project_root: Path) -> Path:
-    return wiki_root(project_root) / "lint"
-
-
-def wiki_lint_latest_path(project_root: Path) -> Path:
-    return wiki_lint_root(project_root) / "latest.md"
-
-
-def pending_paper_reviews_path(project_root: Path) -> Path:
-    return research_root(project_root) / "intake" / "papers" / "review" / "pending.yaml"
-
-
-def resolved_paper_reviews_path(project_root: Path) -> Path:
-    return research_root(project_root) / "intake" / "papers" / "review" / "resolved.yaml"
-
-
-def pending_repo_reviews_path(project_root: Path) -> Path:
-    return research_root(project_root) / "intake" / "repos" / "review" / "pending.yaml"
-
-
-def resolved_repo_reviews_path(project_root: Path) -> Path:
-    return research_root(project_root) / "intake" / "repos" / "review" / "resolved.yaml"
 
 
 def blank_index(doc_id: str, generated_by: str) -> dict[str, Any]:
@@ -1725,6 +1099,22 @@ def load_list_document(path: Path, doc_id: str, generated_by: str) -> dict[str, 
     payload.setdefault("confidence", 1.0)
     payload["items"] = _coerce_list(payload.get("items"))
     return payload
+
+
+def append_list_item(path: Path, doc_id: str, generated_by: str, item: dict[str, Any], *, default_status: str = "") -> Path:
+    payload = load_list_document(path, doc_id, generated_by)
+    items = [entry for entry in payload.get("items", []) if isinstance(entry, dict)]
+    normalized = dict(item)
+    normalized.setdefault("id", f"{doc_id}-{len(items) + 1:03d}")
+    normalized.setdefault("created_at", utc_now_iso())
+    if default_status:
+        normalized.setdefault("status", default_status)
+    items.append(normalized)
+    payload["items"] = items
+    payload["generated_by"] = generated_by
+    payload["generated_at"] = utc_now_iso()
+    write_yaml_if_changed(path, payload)
+    return path
 
 
 def program_reporting_events_path(project_root: Path, program_id: str) -> Path:
@@ -1781,1137 +1171,7 @@ def append_program_reporting_event(
     return path
 
 
-def build_literature_graph(records: list[dict[str, Any]], generated_by: str = "literature-corpus-builder") -> dict[str, Any]:
-    graph = yaml_default("literature-graph", generated_by)
-    graph["inputs"] = [f"lit:{record['id']}" for record in records if record.get("id")]
-    graph["nodes"] = []
-    graph["edges"] = []
-    for record in records:
-        graph["nodes"].append(
-            {
-                "id": record["id"],
-                "title": record.get("canonical_title", ""),
-                "topics": record.get("topics", []),
-                "tags": record.get("tags", []),
-            }
-        )
-    for idx, left in enumerate(records):
-        for right in records[idx + 1 :]:
-            shared_topics = sorted(set(left.get("topics", [])) & set(right.get("topics", [])))
-            shared_tags = sorted(set(left.get("tags", [])) & set(right.get("tags", [])))
-            if not shared_topics and not shared_tags:
-                continue
-            score = (len(shared_topics) * 2) + len(shared_tags)
-            graph["edges"].append(
-                {
-                    "source": left["id"],
-                    "target": right["id"],
-                    "shared_topics": shared_topics,
-                    "shared_tags": shared_tags,
-                    "score": score,
-                }
-            )
-    graph["edges"].sort(key=lambda item: (-item["score"], item["source"], item["target"]))
-    return graph
-
-
-def literature_record_from_metadata(metadata_path: Path) -> dict[str, Any]:
-    payload = load_yaml(metadata_path, default={})
-    if not isinstance(payload, dict):
-        return {}
-    return payload
-
-
-def load_literature_records(project_root: Path) -> list[dict[str, Any]]:
-    literature_root = research_root(project_root) / "library" / "literature"
-    records: list[dict[str, Any]] = []
-    for metadata_path in sorted(literature_root.glob("*/metadata.yaml")):
-        payload = literature_record_from_metadata(metadata_path)
-        if payload.get("id"):
-            records.append(payload)
-    return records
-
-
-def build_literature_tag_index(
-    records: list[dict[str, Any]],
-    generated_by: str = "literature-tagger",
-    taxonomy_items: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    payload = blank_index("literature-tags", generated_by)
-    taxonomy_items = taxonomy_items or {}
-    payload["inputs"] = [f"lit:{record['id']}" for record in records if record.get("id")]
-    for record in records:
-        source_id = str(record.get("id") or "")
-        if not source_id:
-            continue
-        for tag in record.get("tags", []):
-            item = payload["items"].setdefault(
-                tag,
-                {
-                    "id": tag,
-                    "tag": tag,
-                    "count": 0,
-                    "source_ids": [],
-                    "topics": [],
-                },
-            )
-            item["count"] += 1
-            item["source_ids"].append(source_id)
-            item["source_ids"] = sorted(set(item["source_ids"]))
-            item["topics"] = sorted(set(item.get("topics", [])) | set(record.get("topics", [])))
-    for tag, item in payload["items"].items():
-        taxonomy_item = taxonomy_items.get(tag)
-        if not isinstance(taxonomy_item, dict):
-            continue
-        item["aliases"] = sorted(set(str(alias).strip() for alias in taxonomy_item.get("aliases", []) if str(alias).strip()))
-        item["topic_hints"] = sorted(set(str(topic).strip() for topic in taxonomy_item.get("topic_hints", []) if str(topic).strip()))
-        item["description"] = str(taxonomy_item.get("description") or "").strip()
-        item["status"] = str(taxonomy_item.get("status") or "active").strip() or "active"
-    payload["generated_at"] = utc_now_iso()
-    return payload
-
-
-def rebuild_literature_tag_index(project_root: Path, *, generated_by: str = "literature-tagger") -> dict[str, Any]:
-    records = load_literature_records(project_root)
-    taxonomy_payload = load_yaml(literature_tag_taxonomy_path(project_root), default={})
-    taxonomy_items = taxonomy_payload.get("items", {}) if isinstance(taxonomy_payload, dict) else {}
-    payload = build_literature_tag_index(records, generated_by=generated_by, taxonomy_items=taxonomy_items if isinstance(taxonomy_items, dict) else {})
-    write_yaml_if_changed(literature_tags_path(project_root), payload)
-    return payload
-
-
-def score_fuzzy_literature_match(existing: dict[str, Any], candidate: dict[str, Any]) -> tuple[float, list[str]]:
-    reasons: list[str] = []
-    score = 0.0
-    if normalize_title(existing.get("canonical_title", "")) == normalize_title(candidate.get("title", "")):
-        score += 0.65
-        reasons.append("normalized-title-match")
-    if existing.get("year") and candidate.get("year") and existing["year"] == candidate["year"]:
-        score += 0.1
-        reasons.append("year-match")
-    if first_author_key(existing.get("authors", [])) and first_author_key(existing.get("authors", [])) == first_author_key(candidate.get("authors", [])):
-        score += 0.15
-        reasons.append("author-prefix-match")
-    if existing.get("site_fingerprint") and existing.get("site_fingerprint") == candidate.get("site_fingerprint"):
-        score += 0.1
-        reasons.append("site-fingerprint-match")
-    return score, reasons
-
-
-def score_fuzzy_repo_match(existing: dict[str, Any], candidate: dict[str, Any]) -> tuple[float, list[str]]:
-    reasons: list[str] = []
-    score = 0.0
-    if slugify(existing.get("repo_name", ""), max_words=4) == slugify(candidate.get("repo_name", ""), max_words=4):
-        score += 0.6
-        reasons.append("repo-name-match")
-    if existing.get("owner_name") and existing.get("owner_name") == candidate.get("owner_name"):
-        score += 0.3
-        reasons.append("owner-name-match")
-    if set(existing.get("frameworks", [])) & set(candidate.get("frameworks", [])):
-        score += 0.1
-        reasons.append("framework-overlap")
-    return score, reasons
-
-
-def make_source_id(candidate: dict[str, Any]) -> str:
-    if candidate.get("external_ids", {}).get("arxiv_id"):
-        return f"lit-arxiv-{slugify(candidate['external_ids']['arxiv_id'], max_words=4)}"
-    title = candidate.get("title", "literature")
-    year = candidate.get("year") or "unknown"
-    return f"lit-{year}-{slugify(title, max_words=6)}"
-
-
-def make_repo_id(candidate: dict[str, Any]) -> str:
-    owner_name = candidate.get("owner_name") or slugify(candidate.get("repo_name", "repo"), max_words=4)
-    return f"repo-{slugify(owner_name, max_words=4)}"
-
-
-def normalize_remote_url(url: str) -> str:
-    if not url:
-        return ""
-    normalized = url.strip()
-    normalized = normalized.replace("git@github.com:", "https://github.com/")
-    normalized = re.sub(r"\.git$", "", normalized)
-    if normalized.startswith("git://"):
-        normalized = normalized.replace("git://", "https://", 1)
-    if normalized.startswith("ssh://git@github.com/"):
-        normalized = normalized.replace("ssh://git@github.com/", "https://github.com/", 1)
-    return canonicalize_url(normalized)
-
-
-def owner_name_from_remote(url: str) -> str:
-    normalized = normalize_remote_url(url)
-    parsed = urlparse(normalized)
-    parts = [part for part in parsed.path.split("/") if part]
-    if len(parts) >= 2:
-        return f"{parts[-2]}-{parts[-1]}"
-    return ""
-
-
-def copytree_filtered(src: Path, dst: Path) -> None:
-    def ignore(path: str, names: list[str]) -> set[str]:
-        ignored = {
-            ".git",
-            ".hg",
-            ".svn",
-            "__pycache__",
-            ".mypy_cache",
-            ".pytest_cache",
-            ".ruff_cache",
-            "node_modules",
-            "checkpoints",
-            "weights",
-            "logs",
-            "dist",
-            "build",
-        }
-        return {name for name in names if name in ignored}
-
-    if dst.exists():
-        shutil.rmtree(dst)
-    shutil.copytree(src, dst, ignore=ignore)
-
-
-def git_remote_url(repo_path: Path) -> str:
-    config = repo_path / ".git" / "config"
-    if not config.exists():
-        return ""
-    text = config.read_text(encoding="utf-8", errors="ignore")
-    match = re.search(r'url\s*=\s*(.+)', text)
-    return normalize_remote_url(match.group(1).strip()) if match else ""
-
-
-def git_head_commit(repo_path: Path) -> str:
-    head = repo_path / ".git" / "HEAD"
-    if not head.exists():
-        return ""
-    head_text = head.read_text(encoding="utf-8", errors="ignore").strip()
-    if head_text.startswith("ref:"):
-        ref_path = repo_path / ".git" / head_text.split(" ", 1)[1]
-        if ref_path.exists():
-            return ref_path.read_text(encoding="utf-8", errors="ignore").strip()
-    return head_text
-
-
-def _fallback_repo_files(repo_path: Path, *, max_depth: int = 6) -> list[Path]:
-    ignored_dirs = {
-        ".git",
-        ".hg",
-        ".svn",
-        "__pycache__",
-        ".mypy_cache",
-        ".pytest_cache",
-        ".ruff_cache",
-        ".venv",
-        "venv",
-        "node_modules",
-        "dist",
-        "build",
-        "checkpoints",
-        "weights",
-        "logs",
-    }
-    files: list[Path] = []
-    repo_path = repo_path.resolve()
-    for root, dirs, filenames in os.walk(repo_path):
-        root_path = Path(root)
-        try:
-            rel_parts = root_path.relative_to(repo_path).parts
-        except ValueError:
-            rel_parts = ()
-        if len(rel_parts) >= max_depth:
-            dirs[:] = []
-        else:
-            dirs[:] = [name for name in dirs if name not in ignored_dirs]
-        for filename in filenames:
-            path = root_path / filename
-            try:
-                path.relative_to(repo_path)
-            except ValueError:
-                continue
-            files.append(path)
-    return files
-
-
-def _fallback_repo_facts(repo_path: Path, *, max_depth: int = 6, entrypoint_limit: int = 24) -> dict[str, Any]:
-    files = _fallback_repo_files(repo_path, max_depth=max_depth)
-    ext_to_language = {
-        ".py": "Python",
-        ".ipynb": "Jupyter",
-        ".rs": "Rust",
-        ".cpp": "C++",
-        ".cc": "C++",
-        ".cxx": "C++",
-        ".c": "C",
-        ".hpp": "C++",
-        ".h": "C/C++",
-        ".cu": "CUDA",
-        ".go": "Go",
-        ".java": "Java",
-        ".scala": "Scala",
-        ".js": "JavaScript",
-        ".jsx": "JavaScript",
-        ".ts": "TypeScript",
-        ".tsx": "TypeScript",
-        ".sh": "Shell",
-        ".bash": "Shell",
-        ".zsh": "Shell",
-        ".nix": "Nix",
-        ".md": "Markdown",
-        ".toml": "TOML",
-        ".yaml": "YAML",
-        ".yml": "YAML",
-        ".json": "JSON",
-    }
-    language_counts: dict[str, int] = {}
-    key_dirs: list[str] = []
-    first_level_dirs: dict[str, int] = {}
-    config_roots: set[str] = set()
-    docs_dirs: set[str] = set()
-    test_dirs: set[str] = set()
-    frameworks: list[str] = []
-    entrypoint_candidates: list[tuple[int, str, str]] = []
-    repo_text_paths: list[Path] = []
-
-    framework_markers = [
-        ("PyTorch", ("torch", "pytorch")),
-        ("Transformers", ("transformers", "huggingface", "hf download")),
-        ("Diffusers", ("diffusers", "stable diffusion")),
-        ("DeepSpeed", ("deepspeed",)),
-        ("Accelerate", ("accelerate",)),
-        ("LeRobot", ("lerobot",)),
-        ("MuJoCo", ("mujoco",)),
-        ("Isaac Lab", ("isaac lab", "isaaclab", "omni.isaac.lab")),
-        ("Isaac Sim", ("isaac sim", "isaacsim", "omni.isaac")),
-        ("ROS", ("ros2", "rclpy", "roslaunch", "catkin")),
-        ("OpenCV", ("opencv", "cv2")),
-        ("Gradio", ("gradio",)),
-        ("Streamlit", ("streamlit",)),
-        ("JAX", ("jax", "flax")),
-        ("TensorFlow", ("tensorflow",)),
-        ("Tyro", ("tyro",)),
-        ("WandB", ("wandb",)),
-        ("Pinocchio", ("pinocchio",)),
-        ("ZeroMQ", ("zeromq", "zmq")),
-        ("Nix", ("flake.nix", "nix/", "pkgs.", "mkShell")),
-        ("Unitree SDK2", ("unitree", "sdk2")),
-        ("uv", ("uv sync", "uv.lock", "[tool.uv")),
-    ]
-
-    def add_framework(name: str) -> None:
-        if name not in frameworks:
-            frameworks.append(name)
-
-    for path in files:
-        rel_path = path.relative_to(repo_path).as_posix()
-        parts = rel_path.split("/")
-        if len(parts) > 1 and parts[0]:
-            first_level_dirs[parts[0]] = first_level_dirs.get(parts[0], 0) + 1
-        suffix = path.suffix.lower()
-        language = ext_to_language.get(suffix)
-        if language:
-            language_counts[language] = language_counts.get(language, 0) + 1
-        elif path.name == "Dockerfile":
-            language_counts["Docker"] = language_counts.get("Docker", 0) + 1
-
-        lowered_path = rel_path.lower()
-        if any(token in lowered_path for token in ("config", "configs", "conf/", "cfg", ".yaml", ".yml", ".toml", ".json")):
-            config_roots.add(parts[0] if parts else rel_path)
-        if any(token in lowered_path for token in ("docs/", "doc/", "readme", "examples/", "example/")):
-            docs_dirs.add(parts[0] if parts else rel_path)
-        if any(token in lowered_path for token in ("tests/", "test/", "_test.", "test_")):
-            test_dirs.add(parts[0] if parts else rel_path)
-
-        is_shell = suffix in {".sh", ".bash", ".zsh"}
-        is_python = suffix == ".py"
-        executable_name = path.stem.lower()
-        in_scripts = "scripts/" in lowered_path or lowered_path.startswith("scripts/")
-        priority = None
-        kind = ""
-        if is_shell:
-            priority = 0 if any(token in executable_name for token in ("train", "eval", "deploy", "serve", "run")) else 2
-            kind = "shell-script"
-        elif is_python and in_scripts:
-            priority = 1
-            kind = "python-script"
-        elif is_python and executable_name in {"main", "app", "train", "eval", "deploy", "serve"}:
-            priority = 2
-            kind = "python-entrypoint"
-        elif path.name == "pyproject.toml":
-            priority = 4
-            kind = "package-config"
-        if priority is not None:
-            entrypoint_candidates.append((priority, rel_path, kind))
-
-        if path.name.lower().startswith("readme") or path.suffix.lower() in {".md", ".toml", ".txt", ".yaml", ".yml", ".py", ".sh", ".nix"}:
-            repo_text_paths.append(path)
-
-    for name, _count in sorted(first_level_dirs.items(), key=lambda item: (-item[1], item[0])):
-        if name.startswith("."):
-            continue
-        if name not in key_dirs:
-            key_dirs.append(name)
-        if len(key_dirs) >= 8:
-            break
-
-    for path in repo_text_paths[:40]:
-        try:
-            text = path.read_text(encoding="utf-8", errors="ignore")[:12000].lower()
-        except OSError:
-            continue
-        text = clean_text(text)
-        for framework_name, markers in framework_markers:
-            if any(marker in text for marker in markers):
-                add_framework(framework_name)
-
-    primary_language = ""
-    filtered_language_counts = {
-        name: count
-        for name, count in language_counts.items()
-        if name not in {"Markdown", "YAML", "JSON", "TOML"}
-    }
-    if filtered_language_counts:
-        primary_language = max(filtered_language_counts.items(), key=lambda item: (item[1], item[0]))[0]
-    elif language_counts:
-        primary_language = max(language_counts.items(), key=lambda item: (item[1], item[0]))[0]
-
-    repo_type_hint = "Research software repository"
-    if {"src", "scripts", "baselines"} & set(first_level_dirs):
-        repo_type_hint = "Mixed-language robotics or systems monorepo"
-    elif {"src", "scripts", "real"} & set(first_level_dirs):
-        repo_type_hint = "Robotics training and deployment repository"
-    elif "notebooks" in first_level_dirs or "examples" in first_level_dirs:
-        repo_type_hint = "Research codebase with runnable examples"
-    elif primary_language == "Python":
-        repo_type_hint = "Python research repository"
-
-    entrypoints: list[dict[str, Any]] = []
-    seen_entrypoints: set[str] = set()
-    for _priority, rel_path, kind in sorted(entrypoint_candidates, key=lambda item: (item[0], item[1])):
-        if rel_path in seen_entrypoints:
-            continue
-        seen_entrypoints.add(rel_path)
-        entrypoints.append({"path": rel_path, "kind": kind})
-        if len(entrypoints) >= entrypoint_limit:
-            break
-
-    subsystems: list[dict[str, Any]] = []
-    for dir_name in key_dirs[:6]:
-        if dir_name in {"assets", "docs", "examples"}:
-            continue
-        child_names = sorted(
-            {
-                child.name
-                for child in (repo_path / dir_name).iterdir()
-                if child.is_dir() and not child.name.startswith(".")
-            }
-        )[:8] if (repo_path / dir_name).exists() else []
-        subsystems.append({"path": dir_name, "children": child_names})
-
-    return {
-        "repo_name": repo_path.name,
-        "repo_type_hint": repo_type_hint,
-        "primary_language": primary_language or "unknown",
-        "framework_hints": frameworks,
-        "entrypoints": entrypoints,
-        "key_dirs": key_dirs,
-        "config_roots": sorted(config_roots),
-        "docs_dirs": sorted(docs_dirs),
-        "test_dirs": sorted(test_dirs),
-        "subsystems": subsystems,
-    }
-
-
-def load_legacy_repo_facts(project_root: Path, repo_path: Path, *, max_depth: int = 6, entrypoint_limit: int = 24) -> dict[str, Any]:
-    scanner_path = project_root / ".agents" / "skills" / "research-repo-architect" / "scripts" / "scan_repo.py"
-    if not scanner_path.exists():
-        return _fallback_repo_facts(repo_path, max_depth=max_depth, entrypoint_limit=entrypoint_limit)
-    scan_dir = scanner_path.parent
-    sys.path.insert(0, str(scan_dir))
-    try:
-        spec = importlib.util.spec_from_file_location("legacy_scan_repo", scanner_path)
-        if spec is None or spec.loader is None:
-            raise RuntimeError(f"Could not load legacy repo scanner from {scanner_path}")
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        files = module.iter_files(repo_path, max_depth=max_depth)
-        return module.build_facts(repo_path, files, entrypoint_limit=entrypoint_limit)
-    except FileNotFoundError:
-        return _fallback_repo_facts(repo_path, max_depth=max_depth, entrypoint_limit=entrypoint_limit)
-    finally:
-        if str(scan_dir) in sys.path:
-            sys.path.remove(str(scan_dir))
-
-
 def read_text_excerpt(path: Path, limit: int = 4000) -> str:
     if not path.exists():
         return ""
     return path.read_text(encoding="utf-8", errors="ignore")[:limit]
-
-
-def _default_wiki_index_markdown() -> str:
-    return (
-        "# Research Wiki Index\n\n"
-        "This index is generated from `kb/library` and `kb/programs`.\n"
-    )
-
-
-def _default_wiki_log_markdown() -> str:
-    return (
-        "# Research Wiki Log\n\n"
-        "Append-only operational log for wiki/query/lint events.\n"
-    )
-
-
-def ensure_wiki_workspace(project_root: Path) -> None:
-    ensure_dir(wiki_root(project_root))
-    ensure_dir(wiki_queries_root(project_root))
-    ensure_dir(wiki_lint_root(project_root))
-    if not wiki_index_path(project_root).exists():
-        write_text_if_changed(wiki_index_path(project_root), _default_wiki_index_markdown())
-    if not wiki_log_path(project_root).exists():
-        write_text_if_changed(wiki_log_path(project_root), _default_wiki_log_markdown())
-
-
-def _markdown_single_line(value: Any, *, fallback: str = "") -> str:
-    text = clean_text(str(value or ""))
-    text = text.replace("\n", " ").replace("|", "/")
-    return text if text else fallback
-
-
-def _coerce_event_timestamp(value: str | datetime | None = None) -> datetime:
-    if isinstance(value, datetime):
-        if value.tzinfo is None:
-            return value.replace(tzinfo=timezone.utc).replace(microsecond=0)
-        return value.astimezone(timezone.utc).replace(microsecond=0)
-    parsed = parse_iso_datetime(value) if value is not None else None
-    if parsed is not None:
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed.astimezone(timezone.utc).replace(microsecond=0)
-    return datetime.now(timezone.utc).replace(microsecond=0)
-
-
-def _serialize_log_value(value: Any) -> str:
-    if isinstance(value, (list, tuple, dict)):
-        return _markdown_single_line(json.dumps(value, ensure_ascii=False, sort_keys=True))
-    return _markdown_single_line(value)
-
-
-def _relative_display_path(path: Path, project_root: Path) -> str:
-    try:
-        return path.relative_to(project_root).as_posix()
-    except ValueError:
-        return path.as_posix()
-
-
-def _compact_summary_line(text: str, *, limit: int = 180, fallback: str = "No summary available.") -> str:
-    cleaned = _markdown_single_line(text)
-    if not cleaned:
-        return fallback
-    if len(cleaned) <= limit:
-        return cleaned
-    trimmed = cleaned[:limit].rsplit(" ", 1)[0].rstrip(" ,;:-")
-    return f"{trimmed or cleaned[:limit]}..."
-
-
-def append_wiki_log_event(
-    project_root: Path,
-    event_type: str,
-    title: str,
-    *,
-    summary: str = "",
-    metadata: dict[str, Any] | None = None,
-    occurred_at: str | datetime | None = None,
-    generated_by: str = "llm-wiki",
-) -> Path:
-    ensure_wiki_workspace(project_root)
-    timestamp = _coerce_event_timestamp(occurred_at)
-    event_type_norm = re.sub(r"[^a-z0-9._-]+", "-", _markdown_single_line(event_type, fallback="event").lower()).strip("-") or "event"
-    title_norm = _markdown_single_line(title, fallback="untitled")
-    summary_norm = _compact_summary_line(summary, limit=220, fallback="")
-    heading = f"## [{timestamp.strftime('%Y-%m-%d')}] {event_type_norm} | {title_norm}"
-
-    entry_lines = [
-        heading,
-        f"- timestamp: {timestamp.isoformat()}",
-        f"- type: {event_type_norm}",
-        f"- title: {title_norm}",
-        f"- generated_by: {_markdown_single_line(generated_by, fallback='unknown')}",
-    ]
-    if summary_norm:
-        entry_lines.append(f"- summary: {summary_norm}")
-    for raw_key, raw_value in sorted((metadata or {}).items(), key=lambda item: str(item[0])):
-        key = re.sub(r"[^a-z0-9._-]+", "-", str(raw_key).strip().lower()).strip("-") or "meta"
-        value = _serialize_log_value(raw_value)
-        if value:
-            entry_lines.append(f"- {key}: {value}")
-    entry_lines.append("")
-
-    path = wiki_log_path(project_root)
-    existing = path.read_text(encoding="utf-8") if path.exists() else _default_wiki_log_markdown()
-    if not existing.endswith("\n"):
-        existing += "\n"
-    existing += "\n".join(entry_lines)
-    write_text_if_changed(path, existing)
-    return path
-
-
-def _load_query_artifact_summary(path: Path) -> tuple[str, str]:
-    title = path.stem
-    summary = ""
-    try:
-        text = path.read_text(encoding="utf-8", errors="ignore")
-    except OSError:
-        return title, "Unreadable query artifact."
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("# "):
-            title = stripped[2:].strip() or title
-            break
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("- query:"):
-            summary = stripped.split(":", 1)[1].strip()
-            break
-    if not summary:
-        for line in text.splitlines():
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#") or stripped.startswith("- "):
-                continue
-            summary = stripped
-            break
-    return _markdown_single_line(title, fallback=path.stem), _compact_summary_line(summary)
-
-
-def rebuild_wiki_index_markdown(project_root: Path) -> Path:
-    ensure_wiki_workspace(project_root)
-    generated_at = utc_now_iso()
-
-    literature_root = research_root(project_root) / "library" / "literature"
-    repo_root_dir = research_root(project_root) / "library" / "repos"
-    programs_dir = research_root(project_root) / "programs"
-
-    literature_payload = load_index(literature_index_path(project_root), "literature-index", "literature-corpus-builder")
-    repo_payload = load_index(repo_index_path(project_root), "repo-index", "repo-cataloger")
-
-    literature_items = literature_payload.get("items", {}) if isinstance(literature_payload, dict) else {}
-    repo_items = repo_payload.get("items", {}) if isinstance(repo_payload, dict) else {}
-    if not isinstance(literature_items, dict):
-        literature_items = {}
-    if not isinstance(repo_items, dict):
-        repo_items = {}
-
-    literature_dirs = (
-        sorted(path for path in literature_root.iterdir() if path.is_dir() and (path / "metadata.yaml").exists())
-        if literature_root.exists()
-        else []
-    )
-    repo_dirs = (
-        sorted(path for path in repo_root_dir.iterdir() if path.is_dir() and (path / "summary.yaml").exists())
-        if repo_root_dir.exists()
-        else []
-    )
-    program_dirs = (
-        sorted(path for path in programs_dir.iterdir() if path.is_dir() and not path.name.startswith("."))
-        if programs_dir.exists()
-        else []
-    )
-
-    lines: list[str] = [
-        "# Research Wiki Index",
-        "",
-        f"_Generated at: {generated_at}_",
-        "",
-        "## Snapshot",
-        f"- literature: index={len(literature_items)}, canonical_dirs={len(literature_dirs)}",
-        f"- repos: index={len(repo_items)}, canonical_dirs={len(repo_dirs)}",
-        f"- programs: {len(program_dirs)}",
-        "",
-        "## Literature",
-    ]
-
-    if literature_items:
-        for lit_id in sorted(literature_items):
-            item = literature_items.get(lit_id)
-            if not isinstance(item, dict):
-                continue
-            title = _markdown_single_line(item.get("canonical_title"), fallback=lit_id)
-            year = str(item.get("year") or "").strip()
-            summary = _compact_summary_line(str(item.get("short_summary") or ""), fallback="No literature summary yet.")
-            prefix = f"{year} · " if year else ""
-            lines.append(f"- `{lit_id}`: {prefix}{title} - {summary}")
-    else:
-        lines.append("- No literature entries indexed yet.")
-
-    lines.extend(["", "## Repositories"])
-    if repo_items:
-        for repo_id in sorted(repo_items):
-            item = repo_items.get(repo_id)
-            if not isinstance(item, dict):
-                continue
-            repo_name = _markdown_single_line(item.get("repo_name"), fallback=repo_id)
-            summary = _compact_summary_line(str(item.get("short_summary") or ""), fallback="No repository summary yet.")
-            lines.append(f"- `{repo_id}`: {repo_name} - {summary}")
-    else:
-        lines.append("- No repository entries indexed yet.")
-
-    lines.extend(["", "## Programs"])
-    if program_dirs:
-        for program_dir in program_dirs:
-            charter = load_yaml(program_dir / "charter.yaml", default={}, allow_simple_fallback=True)
-            state = load_yaml(program_dir / "workflow" / "state.yaml", default={}, allow_simple_fallback=True)
-            charter = charter if isinstance(charter, dict) else {}
-            state = state if isinstance(state, dict) else {}
-            program_id = _markdown_single_line(charter.get("program_id"), fallback=program_dir.name)
-            stage = _markdown_single_line(state.get("stage"), fallback="unknown")
-            question = _compact_summary_line(str(charter.get("question") or ""), fallback="")
-            goal = _compact_summary_line(str(charter.get("goal") or ""), fallback="")
-            one_line = question or goal or "No charter summary yet."
-            lines.append(f"- `{program_id}`: stage={stage} - {one_line}")
-    else:
-        lines.append("- No programs found.")
-
-    query_files = (
-        sorted(wiki_queries_root(project_root).glob("*.md"), key=lambda item: item.name, reverse=True)
-        if wiki_queries_root(project_root).exists()
-        else []
-    )
-    lines.extend(["", "## Queries"])
-    if query_files:
-        for query_path in query_files[:20]:
-            title, summary = _load_query_artifact_summary(query_path)
-            lines.append(f"- `{query_path.name}`: {title} - {summary}")
-    else:
-        lines.append("- No query artifacts yet.")
-
-    lint_path = wiki_lint_latest_path(project_root)
-    lines.extend(["", "## Lint"])
-    if lint_path.exists():
-        lint_text = lint_path.read_text(encoding="utf-8", errors="ignore")
-        status_match = re.search(r"^- status:\s*(.+)$", lint_text, flags=re.MULTILINE)
-        issues_match = re.search(r"^- total_issues:\s*(\d+)$", lint_text, flags=re.MULTILINE)
-        status = _markdown_single_line(status_match.group(1) if status_match else "UNKNOWN")
-        total_issues = _markdown_single_line(issues_match.group(1) if issues_match else "unknown")
-        lines.append(f"- latest: `{_relative_display_path(lint_path, project_root)}` (status={status}, issues={total_issues})")
-    else:
-        lines.append("- No lint report yet.")
-
-    lines.append("")
-    write_text_if_changed(wiki_index_path(project_root), "\n".join(lines))
-    return wiki_index_path(project_root)
-
-
-def write_query_artifact(
-    project_root: Path,
-    query_text: str,
-    result_markdown: str,
-    *,
-    title: str = "",
-    query_type: str = "query",
-    metadata: dict[str, Any] | None = None,
-    occurred_at: str | datetime | None = None,
-    generated_by: str = "llm-wiki",
-) -> Path:
-    ensure_wiki_workspace(project_root)
-    timestamp = _coerce_event_timestamp(occurred_at)
-    query_line = _markdown_single_line(query_text, fallback="(empty-query)")
-    title_line = _markdown_single_line(title, fallback="")
-    if not title_line:
-        title_line = _compact_summary_line(query_line, limit=80, fallback="untitled-query")
-    query_type_norm = re.sub(r"[^a-z0-9._-]+", "-", _markdown_single_line(query_type, fallback="query").lower()).strip("-") or "query"
-    artifact_slug = slugify(title_line, max_words=8)
-    artifact_name = f"{timestamp.strftime('%Y%m%d-%H%M%S')}-{artifact_slug}.md"
-    artifact_path = wiki_queries_root(project_root) / artifact_name
-    suffix = 2
-    while artifact_path.exists():
-        artifact_path = wiki_queries_root(project_root) / f"{timestamp.strftime('%Y%m%d-%H%M%S')}-{artifact_slug}-{suffix}.md"
-        suffix += 1
-
-    artifact_lines = [
-        f"# {title_line}",
-        "",
-        f"- timestamp: {timestamp.isoformat()}",
-        f"- type: {query_type_norm}",
-        f"- query: {query_line}",
-        f"- generated_by: {_markdown_single_line(generated_by, fallback='llm-wiki')}",
-    ]
-    for raw_key, raw_value in sorted((metadata or {}).items(), key=lambda item: str(item[0])):
-        key = re.sub(r"[^a-z0-9._-]+", "-", str(raw_key).strip().lower()).strip("-") or "meta"
-        value = _serialize_log_value(raw_value)
-        if value:
-            artifact_lines.append(f"- {key}: {value}")
-    artifact_lines.extend(
-        [
-            "",
-            "## Result",
-            "",
-            result_markdown.strip() or "_No result content provided._",
-            "",
-        ]
-    )
-    write_text_if_changed(artifact_path, "\n".join(artifact_lines))
-
-    log_metadata = dict(metadata or {})
-    log_metadata.update(
-        {
-            "query": query_line,
-            "artifact_path": _relative_display_path(artifact_path, project_root),
-        }
-    )
-    append_wiki_log_event(
-        project_root,
-        query_type_norm,
-        title_line,
-        summary=query_line,
-        metadata=log_metadata,
-        occurred_at=timestamp,
-        generated_by=generated_by,
-    )
-    rebuild_wiki_index_markdown(project_root)
-    return artifact_path
-
-
-def lint_wiki_workspace(project_root: Path, *, generated_by: str = "llm-wiki") -> Path:
-    ensure_wiki_workspace(project_root)
-    generated_at = utc_now_iso()
-
-    programs_dir = research_root(project_root) / "programs"
-    literature_root = research_root(project_root) / "library" / "literature"
-    repos_root = research_root(project_root) / "library" / "repos"
-
-    missing_reporting_events: list[str] = []
-    if programs_dir.exists():
-        for program_dir in sorted(path for path in programs_dir.iterdir() if path.is_dir() and not path.name.startswith(".")):
-            if not (program_dir / "workflow" / "reporting-events.yaml").exists():
-                missing_reporting_events.append(program_dir.name)
-
-    literature_dirs = (
-        sorted(path for path in literature_root.iterdir() if path.is_dir() and (path / "metadata.yaml").exists())
-        if literature_root.exists()
-        else []
-    )
-    repo_dirs = (
-        sorted(path for path in repos_root.iterdir() if path.is_dir() and (path / "summary.yaml").exists())
-        if repos_root.exists()
-        else []
-    )
-
-    literature_index_payload = load_index(literature_index_path(project_root), "literature-index", "literature-corpus-builder")
-    repo_index_payload = load_index(repo_index_path(project_root), "repo-index", "repo-cataloger")
-
-    literature_items = literature_index_payload.get("items", {}) if isinstance(literature_index_payload, dict) else {}
-    repo_items = repo_index_payload.get("items", {}) if isinstance(repo_index_payload, dict) else {}
-    literature_index_count = len(literature_items) if isinstance(literature_items, dict) else 0
-    repo_index_count = len(repo_items) if isinstance(repo_items, dict) else 0
-
-    literature_count_mismatch = literature_index_count != len(literature_dirs)
-    repo_count_mismatch = repo_index_count != len(repo_dirs)
-
-    missing_literature_notes = [path.name for path in literature_dirs if not (path / "note.md").exists()]
-    missing_repo_notes = [path.name for path in repo_dirs if not (path / "repo-notes.md").exists()]
-
-    total_issues = (
-        len(missing_reporting_events)
-        + (1 if literature_count_mismatch else 0)
-        + (1 if repo_count_mismatch else 0)
-        + len(missing_literature_notes)
-        + len(missing_repo_notes)
-    )
-    status = "PASS" if total_issues == 0 else "FAIL"
-
-    lines: list[str] = [
-        "# Wiki Lint Report",
-        "",
-        f"_Generated at: {generated_at}_",
-        "",
-        "## Summary",
-        f"- status: {status}",
-        f"- generated_by: {_markdown_single_line(generated_by, fallback='llm-wiki')}",
-        f"- total_issues: {total_issues}",
-        "",
-        "## Missing Program Reporting Events",
-    ]
-    if missing_reporting_events:
-        for program_id in missing_reporting_events:
-            lines.append(f"- `{program_id}` is missing `workflow/reporting-events.yaml`.")
-    else:
-        lines.append("- No missing `reporting-events.yaml` files.")
-
-    lines.extend(
-        [
-            "",
-            "## Library Index Count Mismatch",
-            f"- literature: index={literature_index_count}, canonical_dirs={len(literature_dirs)}, mismatch={str(literature_count_mismatch).lower()}",
-            f"- repos: index={repo_index_count}, canonical_dirs={len(repo_dirs)}, mismatch={str(repo_count_mismatch).lower()}",
-            "",
-            "## Missing Canonical Notes",
-        ]
-    )
-    if missing_literature_notes:
-        for entry_id in missing_literature_notes:
-            lines.append(f"- literature `{entry_id}` is missing `note.md`.")
-    else:
-        lines.append("- All canonical literature entries include `note.md`.")
-    if missing_repo_notes:
-        for entry_id in missing_repo_notes:
-            lines.append(f"- repo `{entry_id}` is missing `repo-notes.md`.")
-    else:
-        lines.append("- All canonical repo entries include `repo-notes.md`.")
-    lines.append("")
-
-    report_path = wiki_lint_latest_path(project_root)
-    write_text_if_changed(report_path, "\n".join(lines))
-    rebuild_wiki_index_markdown(project_root)
-    return report_path
-
-
-def bootstrap_workspace(project_root: Path) -> None:
-    ensure_dir(raw_root(project_root))
-    for directory in (
-        research_root(project_root) / "intake" / "papers" / "downloads",
-        research_root(project_root) / "intake" / "repos" / "downloads",
-        research_root(project_root) / "library" / "literature",
-        research_root(project_root) / "library" / "repos",
-        research_root(project_root) / "library" / "search" / "results",
-        research_root(project_root) / "library" / "benchmarks",
-        research_root(project_root) / "memory" / "history",
-        research_root(project_root) / "programs",
-        wiki_queries_root(project_root),
-        wiki_lint_root(project_root),
-    ):
-        ensure_dir(directory)
-    paths_with_defaults: list[tuple[Path, dict[str, Any]]] = [
-        (pending_paper_reviews_path(project_root), blank_list_document("pending-paper-reviews", "research-conductor")),
-        (resolved_paper_reviews_path(project_root), blank_list_document("resolved-paper-reviews", "research-conductor")),
-        (pending_repo_reviews_path(project_root), blank_list_document("pending-repo-reviews", "research-conductor")),
-        (resolved_repo_reviews_path(project_root), blank_list_document("resolved-repo-reviews", "research-conductor")),
-        (literature_index_path(project_root), blank_index("literature-index", "literature-corpus-builder")),
-        (
-            literature_graph_path(project_root),
-            {
-                **yaml_default("literature-graph", "literature-corpus-builder"),
-                "nodes": [],
-                "edges": [],
-            },
-        ),
-        (literature_tags_path(project_root), blank_index("literature-tags", "literature-tagger")),
-        (
-            literature_tag_taxonomy_path(project_root),
-            {
-                **yaml_default("literature-tag-taxonomy", "literature-tagger", status="active", confidence=0.8),
-                "policy": {
-                    "canonical_style": "lowercase-hyphen-slug",
-                    "unknown_tag_policy": "allow-with-lint",
-                    "notes": "Canonical tags should be short, reusable, and stable across papers.",
-                },
-                "items": {},
-            },
-        ),
-        (repo_index_path(project_root), blank_index("repo-index", "repo-cataloger")),
-        (
-            research_root(project_root) / "library" / "benchmarks" / "index.yaml",
-            blank_index("benchmark-index", "research-conductor"),
-        ),
-        (
-            research_root(project_root) / "memory" / "user-profile.yaml",
-            {
-                **yaml_default("user-profile", "research-conductor", status="active"),
-                "research_interests": [],
-                "constraints": {"compute": "", "data": "", "hardware": ""},
-                "available_resources": [],
-                "language_preference": "zh-CN",
-                "risk_preference": "balanced",
-                "long_term_topics": [],
-            },
-        ),
-        (
-            research_root(project_root) / "memory" / "skill-preferences.yaml",
-            {
-                **yaml_default("skill-preferences", "research-conductor", status="active"),
-                "preferences": {
-                    "literature-corpus-builder": {"confirm_fuzzy_duplicates": True},
-                    "idea-review-board": {"novelty_bar": "high"},
-                    "method-designer": {"prefer_existing_repo": True},
-                },
-            },
-        ),
-        (domain_profile_path(project_root), blank_domain_profile()),
-        (runtime_memory_path(project_root), blank_runtime_registry()),
-    ]
-    for path, payload in paths_with_defaults:
-        if not path.exists():
-            write_yaml_if_changed(path, payload)
-    ensure_wiki_workspace(project_root)
-
-
-def bootstrap_program(project_root: Path, program_id: str, *, question: str, goal: str, constraints: dict[str, str] | None = None) -> Path:
-    program_root = research_root(project_root) / "programs" / program_id
-    ensure_dir(program_root)
-    ensure_dir(program_root / "workflow")
-    ensure_dir(program_root / "evidence")
-    ensure_dir(program_root / "ideas")
-    ensure_dir(program_root / "design")
-    ensure_dir(program_root / "experiments")
-    ensure_dir(program_root / "weekly")
-    defaults = {
-        program_root / "charter.yaml": {
-            **yaml_default(program_id, "research-conductor", status="active"),
-            "program_id": program_id,
-            "question": question,
-            "goal": goal,
-            "constraints": constraints or {"compute": "", "data": "", "hardware": ""},
-            "success_metrics": [],
-            "non_goals": [],
-        },
-        program_root / "workflow" / "state.yaml": {
-            **yaml_default(f"{program_id}-state", "research-conductor", status="active"),
-            "program_id": program_id,
-            "stage": "problem-framing",
-            "active_idea_id": "",
-            "selected_idea_id": "",
-            "selected_repo_id": "",
-        },
-        program_root / "workflow" / "reporting-events.yaml": blank_reporting_events(program_id),
-        program_root / "workflow" / "open-questions.yaml": blank_list_document(f"{program_id}-open-questions", "research-conductor"),
-        program_root / "workflow" / "evidence-requests.yaml": blank_list_document(f"{program_id}-evidence-requests", "research-conductor"),
-        program_root / "workflow" / "preferences.yaml": {
-            **yaml_default(f"{program_id}-preferences", "research-conductor"),
-            "preferences": {},
-        },
-        program_root / "evidence" / "literature-map.yaml": {
-            **yaml_default(f"{program_id}-literature-map", "literature-analyst", status="draft", confidence=0.0),
-            "program_id": program_id,
-            "retrieval": {"query_text": "", "query_terms": [], "query_tags": [], "selected_sources": []},
-            "problem_frame": "",
-            "clusters": [],
-            "agreements": [],
-            "conflicts": [],
-            "gaps": [],
-            "candidate_directions": [],
-            "paper_refs": [],
-        },
-        program_root / "ideas" / "index.yaml": blank_index(f"{program_id}-ideas", "idea-forge"),
-        program_root / "design" / "selected-idea.yaml": {
-            **yaml_default(f"{program_id}-selected-idea", "method-designer", status="draft", confidence=0.0),
-            "idea_id": "",
-        },
-        program_root / "design" / "repo-choice.yaml": {
-            **yaml_default(f"{program_id}-repo-choice", "method-designer", status="draft", confidence=0.0),
-            "selected_repo": "",
-            "alternatives": [],
-            "selection_reason": "",
-            "edit_surfaces": [],
-            "risks": [],
-        },
-        program_root / "design" / "interfaces.yaml": {
-            **yaml_default(f"{program_id}-interfaces", "method-designer", status="draft", confidence=0.0),
-            "new_modules": [],
-            "modified_modules": [],
-            "config_keys": [],
-            "metrics": [],
-            "artifacts": [],
-        },
-        program_root / "experiments" / "matrix.yaml": {
-            **yaml_default(f"{program_id}-matrix", "method-designer", status="draft", confidence=0.0),
-            "baseline": [],
-            "main_experiment": [],
-            "ablations": [],
-            "success_criteria": [],
-            "stop_conditions": [],
-        },
-    }
-    for path, payload in defaults.items():
-        if not path.exists():
-            write_yaml_if_changed(path, payload)
-    decision_log = program_root / "workflow" / "decision-log.md"
-    if not decision_log.exists():
-        write_text_if_changed(
-            decision_log,
-            "# Decision Log\n\n"
-            f"- {utc_now_iso()}: program `{program_id}` created.\n",
-        )
-    system_design = program_root / "design" / "system-design.md"
-    if not system_design.exists():
-        write_text_if_changed(
-            system_design,
-            "# System Design\n\n"
-            "## Goal\n\n"
-            f"- Program: `{program_id}`\n\n"
-            "## Architecture\n\n"
-            "- Pending selection.\n",
-        )
-    runbook = program_root / "experiments" / "runbook.md"
-    if not runbook.exists():
-        write_text_if_changed(
-            runbook,
-            "# Experiment Runbook\n\n"
-            "- Pending method design.\n",
-        )
-    return program_root
-
-
-def rebuild_literature_index(project_root: Path, *, generated_by: str = "literature-corpus-builder") -> dict[str, Any]:
-    records = load_literature_records(project_root)
-    payload = blank_index("literature-index", generated_by)
-    payload["inputs"] = [f"lit:{record['id']}" for record in records if record.get("id")]
-    for record in records:
-        source_id = str(record.get("id") or "")
-        if not source_id:
-            continue
-        payload["items"][source_id] = {
-            "id": source_id,
-            "source_kind": record.get("source_kind", "paper"),
-            "canonical_title": record.get("canonical_title", ""),
-            "short_summary": record.get("short_summary", ""),
-            "authors": record.get("authors", []),
-            "year": record.get("year"),
-            "canonical_url": record.get("canonical_url", ""),
-            "site_fingerprint": record.get("site_fingerprint", ""),
-            "external_ids": record.get("external_ids", {}),
-            "aliases": record.get("aliases", []),
-            "topics": record.get("topics", []),
-            "tags": record.get("tags", []),
-            "source_paths": record.get("source_paths", {}),
-            "file_hashes": record.get("file_hashes", []),
-        }
-    payload["generated_at"] = utc_now_iso()
-    write_yaml_if_changed(literature_index_path(project_root), payload)
-    write_yaml_if_changed(literature_graph_path(project_root), build_literature_graph(records, generated_by=generated_by))
-    return payload
-
-
-def load_repo_summaries(project_root: Path) -> list[dict[str, Any]]:
-    repo_root = research_root(project_root) / "library" / "repos"
-    records: list[dict[str, Any]] = []
-    for summary_path in sorted(repo_root.glob("*/summary.yaml")):
-        payload = load_yaml(summary_path, default={})
-        if isinstance(payload, dict) and payload.get("repo_id"):
-            records.append(payload)
-    return records
-
-
-def rebuild_repo_index(project_root: Path) -> dict[str, Any]:
-    records = load_repo_summaries(project_root)
-    payload = blank_index("repo-index", "repo-cataloger")
-    payload["inputs"] = [f"repo:{record.get('repo_id') or record.get('id')}" for record in records if record.get("repo_id") or record.get("id")]
-    for record in records:
-        repo_id = str(record.get("repo_id") or record.get("id") or "")
-        if not repo_id:
-            continue
-        payload["items"][repo_id] = {
-            "id": repo_id,
-            "repo_name": record.get("repo_name", ""),
-            "short_summary": record.get("short_summary", ""),
-            "canonical_remote": record.get("canonical_remote", ""),
-            "owner_name": record.get("owner_name", ""),
-            "aliases": record.get("aliases", []),
-            "import_type": record.get("import_type", ""),
-            "frameworks": record.get("frameworks", []),
-            "entrypoints": record.get("entrypoints", []),
-            "topics": record.get("topics", []),
-            "tags": record.get("tags", []),
-        }
-    payload["generated_at"] = utc_now_iso()
-    write_yaml_if_changed(repo_index_path(project_root), payload)
-    return payload

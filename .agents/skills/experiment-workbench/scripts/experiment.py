@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -16,50 +17,264 @@ for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
 else:
     raise SystemExit("Could not locate .agents/lib")
 
+from research.bootstrap import ensure_managed_runtime
+
+if __name__ == "__main__":
+    ensure_managed_runtime(PROJECT_ROOT)
+
 from research.common import (
+    add_project_root_argument,
+    append_list_item,
     append_program_reporting_event,
     load_list_document,
-    utc_now_iso,
+    load_yaml,
+    normalize_list,
+    print_resolved_project_roots,
     write_text_if_changed,
-    write_yaml_if_changed,
 )
-from research.v2 import append_history, build_index, default_record, ensure_v2_workspace, locate_record, project_root, rel, write_record
+from research.core import append_history, build_index, confirm_unit, default_record, ensure_workspace, locate_record, project_root, rel, write_record
+from research.evidence import validate_claims, verify_claim_evidence
 
 RUN_OUTCOME_CHOICES = ["success", "partial", "failed", "blocked", "inconclusive"]
 CLASSIFICATION_CHOICES = ["method", "implementation", "data", "evaluation", "resource", "environment", "process", "unknown"]
 FOLLOW_UP_STATUS_CHOICES = ["open", "blocked", "done"]
 FOLLOW_UP_PRIORITY_CHOICES = ["low", "normal", "high", "critical"]
+METRIC_DIRECTION_CHOICES = ["higher-better", "lower-better", "neutral", "unknown"]
+RUN_TAG_CHOICES = ["baseline", "milestone"]
+DEFAULT_RECENT_RUNS = 5
+RUN_EVIDENCE_ARTIFACT_RE = re.compile(r"^(?:run-log\.yaml|runs/run-\d{3}\.md)$")
 
 
-def parse_metrics(items: list[str]) -> dict[str, str]:
-    payload = {}
+def add_confirmation_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--confirmed-by", default="")
+    parser.add_argument("--evidence", action="append", required=True)
+
+
+def parse_metrics(items: list[str]) -> dict[str, dict[str, Any]]:
+    payload: dict[str, dict[str, Any]] = {}
     for item in items:
-        if "=" in item:
-            key, value = item.split("=", 1)
-            payload[key] = value
+        if "=" not in item:
+            sys.stderr.write(f"[experiment.parse_metrics] WARN: ignoring --metric without '=': {item}\n")
+            continue
+        name, raw_value = item.split("=", 1)
+        name = name.strip()
+        if not name:
+            sys.stderr.write(f"[experiment.parse_metrics] WARN: ignoring --metric without a name: {item}\n")
+            continue
+        value_text = raw_value.strip()
+        direction = "unknown"
+        direction_match = re.search(r"\s*:\s*([a-zA-Z_-]+)\s*$", value_text)
+        if direction_match:
+            candidate = direction_match.group(1).lower().replace("_", "-")
+            if candidate in METRIC_DIRECTION_CHOICES:
+                direction = candidate
+                value_text = value_text[: direction_match.start()].strip()
+            else:
+                sys.stderr.write(
+                    f"[experiment.parse_metrics] WARN: unknown direction '{direction_match.group(1)}' "
+                    f"for metric '{name}'; keeping direction=unknown\n"
+                )
+        unit = ""
+        unit_match = re.search(r"\[([^\[\]]+)\]\s*$", value_text)
+        if unit_match:
+            unit = unit_match.group(1).strip()
+            value_text = value_text[: unit_match.start()].strip()
+        try:
+            value: float | str = float(value_text)
+        except ValueError:
+            value = value_text
+            sys.stderr.write(
+                f"[experiment.parse_metrics] WARN: metric '{name}' value '{value_text}' is not numeric; "
+                "preserving it as a string for backward compatibility\n"
+            )
+        payload[name] = {"name": name, "value": value, "unit": unit, "direction": direction}
     return payload
 
 
-def normalize_list(values: list[str] | None) -> list[str]:
-    return [str(item).strip() for item in values or [] if str(item).strip()]
+def verify_artifacts(root: Path, items: list[str]) -> list[dict[str, Any]]:
+    artifacts = []
+    for item in normalize_list(items):
+        candidate = Path(item).expanduser()
+        resolved = candidate if candidate.is_absolute() else root / candidate
+        present = resolved.exists()
+        status = "present" if present else "missing"
+        artifact = {"path": item, "status": status, "generated": False}
+        if present:
+            artifact["kind"] = "directory" if resolved.is_dir() else "file"
+        else:
+            sys.stderr.write(f"[experiment.verify_artifacts] WARN: artifact does not exist: {item}\n")
+        artifacts.append(artifact)
+    return artifacts
+
+
+def generated_artifact(root: Path, path: Path) -> dict[str, Any]:
+    return {"path": rel(root, path), "status": "present", "generated": True, "kind": "file"}
+
+
+def typed_metric_map(raw_metrics: Any) -> dict[str, dict[str, Any]]:
+    if isinstance(raw_metrics, list):
+        candidates = {str(item.get("name") or ""): item for item in raw_metrics if isinstance(item, dict)}
+    elif isinstance(raw_metrics, dict):
+        candidates = raw_metrics
+    else:
+        return {}
+    metrics = {}
+    for raw_name, raw_metric in candidates.items():
+        name = str(raw_name or "").strip()
+        if not name:
+            continue
+        if isinstance(raw_metric, dict):
+            metric = dict(raw_metric)
+            metric["name"] = str(metric.get("name") or name)
+            metric.setdefault("unit", "")
+            metric.setdefault("direction", "unknown")
+            metrics[name] = metric
+            continue
+        value: float | str = raw_metric
+        if isinstance(raw_metric, str):
+            try:
+                value = float(raw_metric)
+            except ValueError:
+                pass
+        metrics[name] = {"name": name, "value": value, "unit": "", "direction": "unknown"}
+    return metrics
+
+
+def compare_metric(current: dict[str, Any], prior: dict[str, Any], run: dict[str, Any]) -> dict[str, Any]:
+    result = {
+        "run_id": str(run.get("id") or ""),
+        "tags": normalize_list(run.get("tags")),
+        "prior_value": prior.get("value"),
+        "prior_unit": str(prior.get("unit") or ""),
+        "delta": None,
+        "directional_result": "not-comparable",
+    }
+    current_value = current.get("value")
+    prior_value = prior.get("value")
+    current_unit = str(current.get("unit") or "")
+    prior_unit = str(prior.get("unit") or "")
+    if current_unit and prior_unit and current_unit != prior_unit:
+        result["reason"] = "unit-mismatch"
+        return result
+    if not isinstance(current_value, (int, float)) or isinstance(current_value, bool):
+        result["reason"] = "current-value-not-numeric"
+        return result
+    if not isinstance(prior_value, (int, float)) or isinstance(prior_value, bool):
+        result["reason"] = "prior-value-not-numeric"
+        return result
+    delta = float(current_value) - float(prior_value)
+    result["delta"] = delta
+    if delta == 0:
+        result["directional_result"] = "unchanged"
+        return result
+    direction = str(current.get("direction") or "unknown")
+    if direction == "unknown":
+        direction = str(prior.get("direction") or "unknown")
+    if direction == "higher-better":
+        result["directional_result"] = "better" if delta > 0 else "worse"
+    elif direction == "lower-better":
+        result["directional_result"] = "better" if delta < 0 else "worse"
+    else:
+        result["directional_result"] = "increased" if delta > 0 else "decreased"
+    return result
+
+
+def build_run_comparison(metrics: dict[str, dict[str, Any]], prior_runs: list[dict[str, Any]], recent_n: int) -> list[dict[str, Any]]:
+    recent_runs = prior_runs[-recent_n:] if recent_n > 0 else []
+    anchor_runs = [run for run in prior_runs if set(normalize_list(run.get("tags"))) & set(RUN_TAG_CHOICES)]
+    comparison = []
+    for name, current in metrics.items():
+        def against(run: dict[str, Any]) -> dict[str, Any] | None:
+            prior = typed_metric_map(run.get("metrics")).get(name)
+            return compare_metric(current, prior, run) if prior else None
+
+        recent = [item for run in recent_runs if (item := against(run)) is not None]
+        anchors = [item for run in anchor_runs if (item := against(run)) is not None]
+        comparison.append(
+            {
+                "name": name,
+                "current_value": current.get("value"),
+                "unit": str(current.get("unit") or ""),
+                "direction": str(current.get("direction") or "unknown"),
+                "last_run": recent[-1] if recent else None,
+                "recent_runs": recent,
+                "anchors": anchors,
+            }
+        )
+    return comparison
+
+
+def summarize_run_for_diagnosis(run: dict[str, Any]) -> dict[str, Any]:
+    raw_artifacts = run.get("artifacts", [])
+    artifacts = [dict(item) if isinstance(item, dict) else str(item) for item in raw_artifacts] if isinstance(raw_artifacts, list) else []
+    return {
+        "run_id": str(run.get("id") or ""),
+        "created_at": str(run.get("created_at") or ""),
+        "result_summary": str(run.get("result_summary") or ""),
+        "outcome": str(run.get("outcome") or "inconclusive"),
+        "tags": normalize_list(run.get("tags")),
+        "metrics": typed_metric_map(run.get("metrics")),
+        "artifacts": artifacts,
+    }
+
+
+def build_diagnosis_context(runs: list[dict[str, Any]], recent_n: int) -> dict[str, Any]:
+    recent_runs = runs[-recent_n:] if recent_n > 0 else []
+    anchor_runs = [run for run in runs if set(normalize_list(run.get("tags"))) & set(RUN_TAG_CHOICES)]
+    return {
+        "recent_n": recent_n,
+        "recent_runs": [summarize_run_for_diagnosis(run) for run in recent_runs],
+        "anchors": [summarize_run_for_diagnosis(run) for run in anchor_runs],
+    }
+
+
+def load_diagnosis_claims(root: Path, unit_root: Path, experiment_id: str, claims_file: str) -> list[dict[str, Any]]:
+    if not claims_file:
+        return []
+    claims_path = Path(claims_file).expanduser()
+    if not claims_path.is_absolute():
+        claims_path = root / claims_path
+    payload = load_yaml(claims_path, default=[])
+    claims = payload.get("claims", []) if isinstance(payload, dict) else payload
+    violations = validate_claims(claims)
+    if isinstance(claims, list):
+        for claim_index, claim in enumerate(claims):
+            if not isinstance(claim, dict):
+                continue
+            if str(claim.get("confirmation_status") or "") != "pending_user_confirmation":
+                violations.append(f"claims[{claim_index}]: diagnosis claim must remain pending_user_confirmation")
+            refs = claim.get("evidence_refs") or []
+            if isinstance(refs, (list, tuple)):
+                for ref_index, evidence_ref in enumerate(refs):
+                    if not isinstance(evidence_ref, dict):
+                        continue
+                    source_unit_id = str(evidence_ref.get("source_unit_id") or "")
+                    artifact = str(evidence_ref.get("artifact") or "")
+                    if source_unit_id != experiment_id:
+                        violations.append(
+                            f"claims[{claim_index}].evidence_refs[{ref_index}]: source_unit_id must be {experiment_id}"
+                        )
+                    if not RUN_EVIDENCE_ARTIFACT_RE.fullmatch(artifact):
+                        violations.append(
+                            f"claims[{claim_index}].evidence_refs[{ref_index}]: artifact must be run-log.yaml or runs/run-NNN.md"
+                        )
+            violations.extend(verify_claim_evidence(claim, unit_root))
+    if violations:
+        raise SystemExit("Diagnosis claims failed evidence verification:\n- " + "\n- ".join(violations))
+    return claims
 
 
 def list_document_path(unit_root: Path, name: str) -> Path:
     return unit_root / f"{name}.yaml"
 
 
-def append_list_item(path: Path, doc_id: str, generated_by: str, item: dict[str, Any]) -> Path:
-    payload = load_list_document(path, doc_id, generated_by)
-    items = [entry for entry in payload.get("items", []) if isinstance(entry, dict)]
-    normalized = dict(item)
-    normalized.setdefault("id", f"{doc_id}-{len(items) + 1:03d}")
-    normalized.setdefault("created_at", utc_now_iso())
-    items.append(normalized)
-    payload["items"] = items
-    payload["generated_by"] = generated_by
-    payload["generated_at"] = utc_now_iso()
-    write_yaml_if_changed(path, payload)
-    return path
+def next_numbered_path(root: Path, prefix: str, suffix: str) -> Path:
+    index = 1
+    while True:
+        path = root / f"{prefix}-{index:03d}{suffix}"
+        if not path.exists():
+            return path
+        index += 1
 
 
 def summarize_yaml_list(path: Path, *, title: str, rows: list[str]) -> None:
@@ -129,7 +344,8 @@ def sync_diagnosis_summary(unit_root: Path) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Manage experiment units in v2.")
+    parser = argparse.ArgumentParser(description="Manage experiment units in core.")
+    add_project_root_argument(parser)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     plan = subparsers.add_parser("plan")
@@ -150,6 +366,8 @@ def build_parser() -> argparse.ArgumentParser:
     log_run.add_argument("--classification", action="append", default=[], choices=CLASSIFICATION_CHOICES)
     log_run.add_argument("--why-this-run", default="")
     log_run.add_argument("--tested-hypothesis", default="")
+    log_run.add_argument("--tag", action="append", default=[], choices=RUN_TAG_CHOICES)
+    log_run.add_argument("--recent-runs", type=int, default=DEFAULT_RECENT_RUNS)
 
     follow_up = subparsers.add_parser("follow-up")
     follow_up.add_argument("--experiment-id", required=True)
@@ -167,16 +385,20 @@ def build_parser() -> argparse.ArgumentParser:
     diagnose.add_argument("--ruled-out", action="append", default=[])
     diagnose.add_argument("--unknown", action="append", default=[])
     diagnose.add_argument("--next-action", action="append", default=[])
+    diagnose.add_argument("--recent-runs", type=int, default=DEFAULT_RECENT_RUNS)
+    diagnose.add_argument("--claims-file", default="")
 
     confirm = subparsers.add_parser("confirm")
     confirm.add_argument("--experiment-id", required=True)
+    add_confirmation_arguments(confirm)
     return parser
 
 
 def main() -> int:
     args = build_parser().parse_args()
-    root = project_root(PROJECT_ROOT)
-    ensure_v2_workspace(root)
+    root = project_root(PROJECT_ROOT, explicit_root=args.root)
+    print_resolved_project_roots(root)
+    ensure_workspace(root)
 
     if args.command == "plan":
         record = default_record("experiment", title=args.title, maturity="lightweight", source={"original_uri": f"program:{args.program_id}"})
@@ -208,7 +430,7 @@ def main() -> int:
         print(path.relative_to(root))
         return 0
 
-    record, path = locate_record(root, args.experiment_id)
+    record, path = locate_record(root, args.experiment_id, kind="experiment")
     if record.get("kind") != "experiment":
         raise SystemExit(f"{args.experiment_id} is not an experiment record")
     unit_root = path.parent
@@ -216,7 +438,18 @@ def main() -> int:
     if args.command == "log-run":
         runs_dir = unit_root / "runs"
         runs_dir.mkdir(parents=True, exist_ok=True)
-        run_path = runs_dir / f"run-{len(list(runs_dir.glob('run-*.md'))) + 1:03d}.md"
+        run_path = next_numbered_path(runs_dir, "run", ".md")
+        run_log_document_path = list_document_path(unit_root, "run-log")
+        prior_run_log = load_list_document(run_log_document_path, f"{args.experiment_id}-run-log", "experiment-workbench")
+        prior_runs = [item for item in prior_run_log.get("items", []) if isinstance(item, dict)]
+        metrics = parse_metrics(args.metric)
+        comparison = build_run_comparison(metrics, prior_runs, max(args.recent_runs, 0))
+        claimed_artifacts = verify_artifacts(root, args.artifact)
+        logged_artifacts = [
+            generated_artifact(root, run_path),
+            generated_artifact(root, run_log_document_path),
+            *claimed_artifacts,
+        ]
         write_text_if_changed(
             run_path,
             "\n".join(
@@ -234,10 +467,14 @@ def main() -> int:
                     *[f"- {item}" for item in normalize_list(args.classification)],
                     "",
                     "## Metrics",
-                    *[f"- {item}" for item in args.metric],
+                    *[
+                        f"- {metric['name']}={metric['value']} [{metric['unit'] or 'unitless'}] "
+                        f"direction={metric['direction']}"
+                        for metric in metrics.values()
+                    ],
                     "",
                     "## Artifacts",
-                    *[f"- {item}" for item in normalize_list(args.artifact)],
+                    *[f"- {item['path']} · {item['status']}" for item in logged_artifacts],
                     "",
                     "## Next Actions",
                     *[f"- {item}" for item in args.next_action],
@@ -247,7 +484,7 @@ def main() -> int:
             + "\n",
         )
         run_log_path = append_list_item(
-            list_document_path(unit_root, "run-log"),
+            run_log_document_path,
             f"{args.experiment_id}-run-log",
             "experiment-workbench",
             {
@@ -255,10 +492,12 @@ def main() -> int:
                 "outcome": args.outcome,
                 "classifications": normalize_list(args.classification) or ["unknown"],
                 "changes": normalize_list(args.change),
-                "metrics": parse_metrics(args.metric),
+                "metrics": metrics,
                 "why_this_run": args.why_this_run,
                 "tested_hypothesis": args.tested_hypothesis,
-                "artifacts": [rel(root, run_path), *normalize_list(args.artifact)],
+                "tags": normalize_list(args.tag),
+                "artifacts": logged_artifacts,
+                "comparison": comparison,
                 "next_actions": normalize_list(args.next_action),
                 "information_types": ["fact"],
             },
@@ -268,8 +507,9 @@ def main() -> int:
         record["payload"]["process"]["change_summary"] = args.change
         record["payload"]["process"]["why_this_run"] = args.why_this_run
         record["payload"]["process"]["tested_hypothesis"] = args.tested_hypothesis
-        record["payload"]["results"]["metrics"] = parse_metrics(args.metric)
-        record["payload"]["results"]["artifacts"] = normalize_list(args.artifact)
+        record["payload"]["results"]["metrics"] = metrics
+        record["payload"]["results"]["comparison"] = comparison
+        record["payload"]["results"]["artifacts"] = logged_artifacts
         record["payload"]["results"]["met_expectation"] = "yes" if args.outcome == "success" else ("no" if args.outcome in {"failed", "blocked"} else "unknown")
         record["payload"]["results"]["abnormalities"] = normalize_list(args.classification)
         record["payload"]["diagnosis"]["next_actions"] = args.next_action
@@ -339,6 +579,10 @@ def main() -> int:
         return 0
 
     if args.command == "diagnose":
+        run_log = load_list_document(list_document_path(unit_root, "run-log"), f"{args.experiment_id}-run-log", "experiment-workbench")
+        runs = [item for item in run_log.get("items", []) if isinstance(item, dict)]
+        comparison_context = build_diagnosis_context(runs, max(args.recent_runs, 0))
+        claims = load_diagnosis_claims(root, unit_root, args.experiment_id, args.claims_file)
         diagnosis_path = append_list_item(
             list_document_path(unit_root, "diagnoses"),
             f"{args.experiment_id}-diagnoses",
@@ -350,6 +594,8 @@ def main() -> int:
                 "ruled_out_causes": normalize_list(args.ruled_out),
                 "unknowns": normalize_list(args.unknown),
                 "next_actions": normalize_list(args.next_action),
+                "comparison_context": comparison_context,
+                "claims": claims,
                 "confirmation_status": "pending_user_confirmation",
                 "information_types": ["inference", "evaluation", "unverified"],
             },
@@ -363,6 +609,8 @@ def main() -> int:
         record["payload"]["diagnosis"]["ruled_out_causes"] = normalize_list(args.ruled_out)
         record["payload"]["diagnosis"]["unknowns"] = normalize_list(args.unknown)
         record["payload"]["diagnosis"]["next_actions"] = normalize_list(args.next_action)
+        record["payload"]["diagnosis"]["comparison_context"] = comparison_context
+        record["payload"]["diagnosis"]["claims"] = claims
         append_history(record, action="experiment-diagnosed", summary=args.summary, information_types=["inference", "evaluation", "unverified"], artifacts=[rel(root, diagnosis_path), rel(root, unit_root / "diagnosis.md")])
         write_record(root, record)
         build_index(root)
@@ -386,11 +634,7 @@ def main() -> int:
         return 0
 
     if args.command == "confirm":
-        record["confirmation_status"] = "confirmed"
-        record["needs_human_confirmation"] = False
-        if record.get("status") == "running":
-            record["status"] = "completed"
-        append_history(record, action="experiment-confirmed", summary="Experiment findings confirmed by user.", information_types=["fact"])
+        record = confirm_unit(record, "experiment", confirmed_by=args.confirmed_by, evidence=args.evidence, method="experiment.py confirm", project_root=root)
         write_record(root, record)
         build_index(root)
         program_id = str(record.get("payload", {}).get("basic_info", {}).get("program_id") or "").strip()

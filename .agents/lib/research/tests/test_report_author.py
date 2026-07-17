@@ -1,0 +1,259 @@
+from __future__ import annotations
+
+import importlib.util
+import sys
+from pathlib import Path
+
+from research.common import write_yaml_if_changed
+
+
+def _project_root() -> Path:
+    return Path(__file__).resolve().parents[4]
+
+
+def _load_report_module():
+    script = _project_root() / ".agents" / "skills" / "report-author" / "scripts" / "report.py"
+    spec = importlib.util.spec_from_file_location("report_author_script_under_test", script)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _make_workspace(tmp_path: Path, *, with_claim: bool = True) -> tuple[Path, str, str]:
+    root = tmp_path / "workspace"
+    (root / ".agents" / "lib").mkdir(parents=True)
+    (root / "AGENTS.md").write_text("# Test\n", encoding="utf-8")
+    program_id = "grounded-report"
+    unit_id = "p-grounded-123456"
+    workflow = root / "kb" / "programs" / program_id / "workflow"
+    workflow.mkdir(parents=True)
+    write_yaml_if_changed(
+        root / "kb" / "programs" / program_id / "state.yaml",
+        {"program_id": program_id, "active_unit_ids": [unit_id]},
+    )
+    write_yaml_if_changed(
+        workflow / "reporting-events.yaml",
+        {
+            "id": f"{program_id}-reporting-events",
+            "items": [
+                {
+                    "source_skill": "paper-analyst",
+                    "event_type": "phase-completed",
+                    "title": "Grounded review completed",
+                    "summary": "The paper analysis is ready for reporting.",
+                    "stage": "literature-review",
+                    "paper_ids": [unit_id],
+                    "timestamp": "2026-07-17T00:00:00+00:00",
+                }
+            ],
+        },
+    )
+    (workflow / "decision-log.md").write_text(
+        "# Decision Log\n\n"
+        "## 2026-07-17T01:00:00+00:00 · Use the grounded baseline\n\n"
+        "- Stage: `literature-review`\n"
+        "- Rationale: It has direct benchmark evidence.\n"
+        "- Alternatives: Delay baseline selection\n"
+        "- Confirmation: `confirmed`\n",
+        encoding="utf-8",
+    )
+    unit_dir = root / "kb" / "units" / "papers" / unit_id
+    unit_dir.mkdir(parents=True)
+    claims = []
+    if with_claim:
+        claims.append(
+            {
+                "id": "claim-baseline",
+                "text": "The method improves benchmark success rate.",
+                "claim_type": "fact",
+                "confirmation_status": "confirmed",
+                "evidence_refs": [
+                    {
+                        "source_unit_id": unit_id,
+                        "artifact": "parse-cache.yaml",
+                        "locator": "page=3",
+                        "quote": "Success rate improves by 8 points.",
+                        "summary": "Reported benchmark comparison.",
+                    }
+                ],
+            }
+        )
+    write_yaml_if_changed(
+        unit_dir / "record.yaml",
+        {"id": unit_id, "kind": "paper", "title": "Grounded Paper", "payload": {"claims": claims}},
+    )
+    write_yaml_if_changed(
+        unit_dir / "parse-cache.yaml",
+        {"chunks": [{"label": "page-3", "text": "Success rate improves by 8 points."}]},
+    )
+    return root, program_id, unit_id
+
+
+def test_weekly_and_stage_reports_include_claims_evidence_events_and_decisions(tmp_path: Path) -> None:
+    report = _load_report_module()
+    root, program_id, _ = _make_workspace(tmp_path)
+
+    inputs = report.load_report_inputs(root, program_id)
+    weekly = report.render_report(f"Weekly Report: {program_id}", inputs, report_kind="weekly")
+    stage = report.render_report(f"Stage Summary: {program_id}", inputs, report_kind="stage-summary")
+    writing = report.render_report(f"Writing Materials: {program_id}", inputs, report_kind="writing-materials")
+
+    for text in (weekly, stage, writing):
+        assert "The method improves benchmark success rate." in text
+        assert "Success rate improves by 8 points." in text
+        assert "Grounded review completed" in text
+        assert "Use the grounded baseline" in text
+    assert "## Writing Claims & Evidence" in writing
+
+
+def test_outline_produces_evidence_backed_section_skeleton(tmp_path: Path) -> None:
+    report = _load_report_module()
+    root, program_id, _ = _make_workspace(tmp_path)
+
+    outline = report.render_outline(program_id, report.load_report_inputs(root, program_id))
+
+    for heading in ("## Introduction", "## Related Work", "## Method", "## Experiments", "## Results", "## Discussion", "## Conclusion"):
+        assert heading in outline
+    assert "The method improves benchmark success rate." in outline
+    assert "Success rate improves by 8 points." in outline
+
+
+def test_missing_inputs_are_explicit_and_never_fabricated(tmp_path: Path) -> None:
+    report = _load_report_module()
+    root, program_id, _ = _make_workspace(tmp_path, with_claim=False)
+    workflow = root / "kb" / "programs" / program_id / "workflow"
+    write_yaml_if_changed(
+        workflow / "reporting-events.yaml",
+        {"id": f"{program_id}-reporting-events", "items": []},
+    )
+    (workflow / "decision-log.md").write_text("# Decision Log\n", encoding="utf-8")
+
+    inputs = report.load_report_inputs(root, program_id)
+    weekly = report.render_report(f"Weekly Report: {program_id}", inputs, report_kind="weekly")
+    outline = report.render_outline(program_id, inputs)
+
+    assert "missing: confirmed claims" in weekly
+    assert "missing: reporting events" in weekly
+    assert "missing: decisions" in weekly
+    assert "missing: related-work claims and evidence" in outline
+    assert "improves benchmark success rate" not in weekly
+
+
+def test_reporting_style_controls_verbosity_and_preserves_missing_markers(tmp_path: Path) -> None:
+    report = _load_report_module()
+    root, program_id, unit_id = _make_workspace(tmp_path, with_claim=False)
+    unit_dir = root / "kb" / "units" / "papers" / unit_id
+    claims = [
+        {
+            "id": f"claim-{index}",
+            "text": f"Confirmed claim {index}.",
+            "claim_type": "fact",
+            "confirmation_status": "confirmed",
+            "evidence_refs": [],
+        }
+        for index in range(6)
+    ]
+    write_yaml_if_changed(
+        unit_dir / "record.yaml",
+        {"id": unit_id, "kind": "paper", "title": "Grounded Paper", "payload": {"claims": claims}},
+    )
+    events_path = root / "kb" / "programs" / program_id / "workflow" / "reporting-events.yaml"
+    write_yaml_if_changed(
+        events_path,
+        {
+            "id": f"{program_id}-reporting-events",
+            "items": [
+                {
+                    "source_skill": "paper-analyst",
+                    "event_type": "phase-completed",
+                    "title": f"Reporting event {index}",
+                    "summary": "Grounded event summary.",
+                    "timestamp": f"2026-07-17T00:{index:02d}:00+00:00",
+                    "paper_ids": [unit_id],
+                }
+                for index in range(8)
+            ],
+        },
+    )
+    profile_path = root / "kb" / "config" / "user-profile.yaml"
+
+    write_yaml_if_changed(profile_path, {"reporting_style": "详细 / detailed"})
+    detailed_inputs = report.load_report_inputs(root, program_id)
+    detailed = report.render_report(f"Weekly Report: {program_id}", detailed_inputs, report_kind="weekly")
+
+    write_yaml_if_changed(profile_path, {"reporting_style": "简洁 concise"})
+    concise_inputs = report.load_report_inputs(root, program_id)
+    concise = report.render_report(f"Weekly Report: {program_id}", concise_inputs, report_kind="weekly")
+
+    profile_path.unlink()
+    default_inputs = report.load_report_inputs(root, program_id)
+    default = report.render_report(f"Weekly Report: {program_id}", default_inputs, report_kind="weekly")
+
+    assert concise_inputs.reporting_style == "concise"
+    assert detailed_inputs.reporting_style == "detailed"
+    assert default_inputs.reporting_style == "default"
+    assert len(concise) < len(detailed)
+    assert detailed == default
+    assert "Reporting event 0" in detailed
+    assert "Reporting event 0" not in concise
+    assert "Confirmed claim 5." in detailed
+    assert "Confirmed claim 5." not in concise
+    assert "missing: evidence for claim claim-0" in concise
+    assert "missing: evidence for claim claim-0" in detailed
+
+
+def test_unparseable_reporting_style_uses_default_behavior(tmp_path: Path) -> None:
+    report = _load_report_module()
+    root, program_id, _ = _make_workspace(tmp_path)
+    expected = report.render_report(
+        f"Weekly Report: {program_id}",
+        report.load_report_inputs(root, program_id),
+        report_kind="weekly",
+    )
+    profile_path = root / "kb" / "config" / "user-profile.yaml"
+    profile_path.parent.mkdir(parents=True, exist_ok=True)
+    profile_path.write_text("reporting_style: [broken\n", encoding="utf-8")
+
+    inputs = report.load_report_inputs(root, program_id)
+    actual = report.render_report(f"Weekly Report: {program_id}", inputs, report_kind="weekly")
+
+    assert inputs.reporting_style == "default"
+    assert actual == expected
+
+
+def test_generated_documents_do_not_leak_raw_commands(tmp_path: Path) -> None:
+    report = _load_report_module()
+    root, program_id, _ = _make_workspace(tmp_path)
+    inputs = report.load_report_inputs(root, program_id)
+    documents = [
+        report.render_report(f"Weekly Report: {program_id}", inputs, report_kind="weekly"),
+        report.render_report(f"Stage Summary: {program_id}", inputs, report_kind="stage-summary"),
+        report.render_report(f"PPT Materials: {program_id}", inputs, report_kind="ppt-materials"),
+        report.render_report(f"Writing Materials: {program_id}", inputs, report_kind="writing-materials"),
+        report.render_outline(program_id, inputs),
+    ]
+
+    forbidden = ("python3 ", ".agents/skills/", "--program-id", "${", "NEXT FOR AGENT:", "kb/units/")
+    for document in documents:
+        assert not any(token in document for token in forbidden)
+
+
+def test_outline_cli_writes_report_without_raw_command_stdout(tmp_path: Path, monkeypatch, capsys) -> None:
+    report = _load_report_module()
+    root, program_id, _ = _make_workspace(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["report.py", "--root", str(root), "outline", "--program-id", program_id],
+    )
+
+    assert report.main() == 0
+    text = (root / "kb" / "programs" / program_id / "reports" / "paper-outline.md").read_text(encoding="utf-8")
+    stdout = capsys.readouterr().out
+
+    assert "## Related Work: Confirmed Claims & Evidence" in text
+    assert "Success rate improves by 8 points." in text
+    for token in ("python3 ", ".agents/skills/", "--program-id", "${", "NEXT FOR AGENT:"):
+        assert token not in stdout

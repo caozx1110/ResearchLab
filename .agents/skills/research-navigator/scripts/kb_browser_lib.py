@@ -3,17 +3,14 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
-import os
-import re
-import shutil
 import subprocess
 import sys
 import tempfile
 import time
 import urllib.error
 import urllib.request
+from argparse import ArgumentParser
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlparse
@@ -22,18 +19,24 @@ for candidate in [Path(__file__).resolve()] + list(Path(__file__).resolve().pare
     lib_root = candidate / ".agents" / "lib"
     if (lib_root / "research" / "common.py").exists():
         sys.path.insert(0, str(lib_root))
+        PROJECT_ROOT = candidate
         break
+
+from research.bootstrap import ensure_managed_runtime  # type: ignore
+
+if __name__ == "__main__":
+    ensure_managed_runtime(PROJECT_ROOT)
 
 from research.common import (  # type: ignore
     ensure_dir,
     ensure_research_runtime,
     find_project_root,
-    load_index,
     load_yaml,
+    normalize_list,
     preferred_runtime_record,
     utc_now_iso,
 )
-from research.v2 import (  # type: ignore
+from research.core import (  # type: ignore
     UNIT_KIND_DIRS,
     iter_records as iter_v2_records,
     record_path as v2_record_path,
@@ -57,9 +60,17 @@ def skill_root_from_script(script_path: Path) -> Path:
 
 
 def project_root_from_script(script_path: Path, explicit_root: str = "") -> Path:
-    if explicit_root:
-        return Path(explicit_root).resolve()
-    return find_project_root(script_path.resolve())
+    return find_project_root(script_path.resolve(), explicit_root=explicit_root)
+
+
+def add_browser_project_root_argument(parser: ArgumentParser) -> None:
+    parser.add_argument(
+        "--root",
+        "--project-root",
+        dest="project_root",
+        default="",
+        help="Explicit project root (overrides RESEARCH_PROJECT_ROOT and auto-discovery).",
+    )
 
 
 def research_root(project_root: Path) -> Path:
@@ -108,9 +119,12 @@ def base_url(host: str, port: int) -> str:
     return f"http://{host}:{port}"
 
 
-def browser_url(host: str, port: int, project_root: Path) -> str:
+def browser_url(host: str, port: int, project_root: Path, *, token: str = "") -> str:
     rel = relative_path(project_root, index_html_path(project_root))
-    return f"{base_url(host, port)}{web_path(rel)}"
+    url = f"{base_url(host, port)}{web_path(rel)}"
+    if token:
+        return f"{url}?token={token}"
+    return url
 
 
 def health_url(host: str, port: int) -> str:
@@ -126,15 +140,6 @@ def compact_text(text: Any, limit: int = 180) -> str:
     if len(normalized) <= limit:
         return normalized
     return normalized[: max(0, limit - 3)].rstrip() + "..."
-
-
-def normalize_list(value: Any) -> list[str]:
-    if isinstance(value, list):
-        return [str(item).strip() for item in value if str(item).strip()]
-    if value is None:
-        return []
-    text = str(value).strip()
-    return [text] if text else []
 
 
 def relative_path(project_root: Path, path: Path) -> str:
@@ -496,9 +501,7 @@ def _idea_sort_key(item: dict[str, Any]) -> tuple[int, str, str]:
 
 def build_workspace_profile(project_root: Path) -> dict[str, Any]:
     research = research_root(project_root)
-    profile_path = research / "memory" / "domain-profile.yaml"
-    if not profile_path.exists():
-        profile_path = research / "config" / "user-profile.yaml"
+    profile_path = research / "config" / "user-profile.yaml"
     payload = _safe_dict(_load_if_exists(profile_path, {}))
     tagging = _safe_dict(payload.get("tagging"))
     repo_roles = _safe_dict(payload.get("repo_roles"))
@@ -509,7 +512,7 @@ def build_workspace_profile(project_root: Path) -> dict[str, Any]:
         for kind, directory in UNIT_KIND_DIRS.items()
     }
     return {
-        "profile_name": _first_nonempty(payload.get("profile_name"), payload.get("name"), "Research Navigator v2"),
+        "profile_name": _first_nonempty(payload.get("profile_name"), payload.get("name"), "Research Navigator core"),
         "generated_at": str(payload.get("generated_at") or ""),
         "short_terms": short_terms,
         "tag_rule_count": len(rules) if isinstance(rules, list) else 0,
@@ -574,49 +577,6 @@ def build_literature_items(project_root: Path) -> list[dict[str, Any]]:
             }
         )
 
-    index_path = research_root(project_root) / "library" / "literature" / "index.yaml"
-    index = load_index(index_path, "literature-index", SERVICE_NAME)
-    for source_id, row in index.get("items", {}).items():
-        if not isinstance(row, dict):
-            continue
-        source_id = str(source_id)
-        if any(item.get("source_id") == source_id for item in items):
-            continue
-        lit_root = research_root(project_root) / "library" / "literature" / source_id
-        metadata_path = lit_root / "metadata.yaml"
-        note_path = lit_root / "note.md"
-        claims_path = lit_root / "claims.yaml"
-        metadata = _safe_dict(_load_if_exists(metadata_path, {}))
-        claims = _safe_dict(_load_if_exists(claims_path, {}))
-        source_paths = _safe_dict(row.get("source_paths"))
-        primary_pdf = str(source_paths.get("primary_pdf") or "")
-        landing_html = str(source_paths.get("landing_html") or "")
-        items.append(
-            {
-                "source_id": source_id,
-                "title": str(row.get("canonical_title") or metadata.get("canonical_title") or source_id),
-                "year": _numeric_year(row.get("year") or metadata.get("year")),
-                "authors": normalize_list(row.get("authors") or metadata.get("authors")),
-                "short_summary": str(row.get("short_summary") or metadata.get("short_summary") or ""),
-                "source_kind": str(row.get("source_kind") or metadata.get("source_kind") or ""),
-                "canonical_url": str(row.get("canonical_url") or metadata.get("canonical_url") or ""),
-                "site_fingerprint": str(row.get("site_fingerprint") or metadata.get("site_fingerprint") or ""),
-                "tags": normalize_list(row.get("tags") or metadata.get("tags")),
-                "topics": normalize_list(row.get("topics") or metadata.get("topics")),
-                "external_ids": _safe_dict(row.get("external_ids") or metadata.get("external_ids")),
-                "claims_status": str(claims.get("claim_status") or claims.get("status") or ""),
-                "claims_usage_guidance": compact_text(claims.get("usage_guidance", ""), limit=220),
-                "note_preview": markdown_preview(note_path),
-                "links": {
-                    "metadata": relative_link_payload(project_root, relative_path(project_root, metadata_path)),
-                    "note": relative_link_payload(project_root, relative_path(project_root, note_path)) if note_path.exists() else {"path": "", "href": ""},
-                    "claims": relative_link_payload(project_root, relative_path(project_root, claims_path)) if claims_path.exists() else {"path": "", "href": ""},
-                    "primary_pdf": relative_link_payload(project_root, primary_pdf) if primary_pdf else {"path": "", "href": ""},
-                    "landing_html": relative_link_payload(project_root, landing_html) if landing_html else {"path": "", "href": ""},
-                },
-                "generated_at": _max_timestamp(str(metadata.get("generated_at") or ""), str(row.get("generated_at") or "")),
-            }
-        )
     items.sort(key=lambda item: (-int(item.get("year") or 0), str(item.get("title") or "").lower(), str(item.get("source_id") or "")))
     return items
 
@@ -656,46 +616,13 @@ def build_repo_items(project_root: Path) -> list[dict[str, Any]]:
             }
         )
 
-    index_path = research_root(project_root) / "library" / "repos" / "index.yaml"
-    index = load_index(index_path, "repo-index", SERVICE_NAME)
-    for repo_id, row in index.get("items", {}).items():
-        if not isinstance(row, dict):
-            continue
-        repo_id = str(repo_id)
-        if any(item.get("repo_id") == repo_id for item in items):
-            continue
-        repo_root = research_root(project_root) / "library" / "repos" / repo_id
-        summary_path = repo_root / "summary.yaml"
-        notes_path = repo_root / "repo-notes.md"
-        summary = _safe_dict(_load_if_exists(summary_path, {}))
-        items.append(
-            {
-                "repo_id": repo_id,
-                "repo_name": str(row.get("repo_name") or summary.get("repo_name") or repo_id),
-                "short_summary": str(row.get("short_summary") or summary.get("short_summary") or ""),
-                "canonical_remote": str(row.get("canonical_remote") or summary.get("canonical_remote") or ""),
-                "owner_name": str(row.get("owner_name") or summary.get("owner_name") or ""),
-                "import_type": str(row.get("import_type") or summary.get("import_type") or ""),
-                "frameworks": normalize_list(row.get("frameworks") or summary.get("frameworks")),
-                "entrypoints": normalize_list(row.get("entrypoints") or summary.get("entrypoints")),
-                "tags": normalize_list(row.get("tags") or summary.get("tags")),
-                "topics": normalize_list(row.get("topics") or summary.get("topics")),
-                "links": {
-                    "summary": relative_link_payload(project_root, relative_path(project_root, summary_path)) if summary_path.exists() else {"path": "", "href": ""},
-                    "notes": relative_link_payload(project_root, relative_path(project_root, notes_path)) if notes_path.exists() else {"path": "", "href": ""},
-                    "source": relative_link_payload(project_root, relative_path(project_root, repo_root / "source")) if (repo_root / "source").exists() else {"path": "", "href": ""},
-                },
-                "generated_at": _max_timestamp(str(summary.get("generated_at") or ""), str(row.get("generated_at") or "")),
-            }
-        )
     items.sort(key=lambda item: (str(item.get("repo_name") or "").lower(), str(item.get("repo_id") or "")))
     return items
 
 
 def build_tag_items(project_root: Path, literature_items: list[dict[str, Any]], repo_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    taxonomy_path = research_root(project_root) / "library" / "literature" / "tag-taxonomy.yaml"
-    taxonomy = _safe_dict(_load_if_exists(taxonomy_path, {}))
-    taxonomy_items = _safe_dict(taxonomy.get("items"))
+    taxonomy: dict[str, Any] = {}
+    taxonomy_items: dict[str, Any] = {}
     all_tags = set(taxonomy_items.keys())
     for item in literature_items:
         all_tags.update(normalize_list(item.get("tags")))
@@ -725,7 +652,7 @@ def build_tag_items(project_root: Path, literature_items: list[dict[str, Any]], 
                     for item in related_repos[:5]
                 ],
                 "links": {
-                    "taxonomy": relative_link_payload(project_root, relative_path(project_root, taxonomy_path)) if taxonomy_path.exists() else {"path": "", "href": ""},
+                    "taxonomy": {"path": "", "href": ""},
                 },
                 "generated_at": str(taxonomy.get("generated_at") or ""),
             }
@@ -762,78 +689,39 @@ def build_landscape_items(project_root: Path) -> list[dict[str, Any]]:
                 }
             )
 
-    landscapes_root = research_root(project_root) / "library" / "landscapes"
-    if not landscapes_root.exists():
-        return items
-    for directory in sorted(path for path in landscapes_root.iterdir() if path.is_dir()):
-        report_path = directory / "landscape-report.yaml"
-        summary_path = directory / "summary.md"
-        report = _safe_dict(_load_if_exists(report_path, {}))
-        if not report and not summary_path.exists():
-            continue
-        snapshot = _safe_dict(report.get("snapshot"))
-        retrieval = _safe_dict(report.get("retrieval"))
-        candidates = []
-        for program in report.get("candidate_programs", []) or []:
-            if not isinstance(program, dict):
-                continue
-            candidates.append(
-                {
-                    "program_seed_id": str(program.get("program_seed_id") or ""),
-                    "suggested_program_id": str(program.get("suggested_program_id") or ""),
-                    "title": str(program.get("title") or ""),
-                    "question": compact_text(program.get("question", ""), limit=180),
-                    "goal": compact_text(program.get("goal", ""), limit=180),
-                    "why_now": compact_text(program.get("why_now", ""), limit=180),
-                    "bootstrap_prompt": str(program.get("bootstrap_prompt") or ""),
-                    "conductor_prompt": str(program.get("conductor_prompt") or ""),
-                }
-            )
-        items.append(
-            {
-                "survey_id": str(report.get("id") or directory.name),
-                "field": str(report.get("field") or directory.name),
-                "scope": str(report.get("scope") or ""),
-                "matched_literature_count": int(snapshot.get("matched_literature_count") or 0),
-                "matched_repo_count": int(snapshot.get("matched_repo_count") or 0),
-                "query_tags": normalize_list(retrieval.get("query_tags")),
-                "summary_preview": markdown_preview(summary_path),
-                "candidate_programs": candidates,
-                "links": {
-                    "report": relative_link_payload(project_root, relative_path(project_root, report_path)) if report_path.exists() else {"path": "", "href": ""},
-                    "summary": relative_link_payload(project_root, relative_path(project_root, summary_path)) if summary_path.exists() else {"path": "", "href": ""},
-                },
-                "generated_at": str(report.get("generated_at") or ""),
-            }
-        )
-    items.sort(key=lambda item: (str(item.get("generated_at") or ""), str(item.get("survey_id") or "")), reverse=True)
     return items
 
 
-def _idea_entry(project_root: Path, program_root: Path, idea_id: str, row: dict[str, Any]) -> dict[str, Any]:
-    proposal_path = program_root / "ideas" / idea_id / "proposal.yaml"
-    review_path = program_root / "ideas" / idea_id / "review.yaml"
-    decision_path = program_root / "ideas" / idea_id / "decision.yaml"
-    proposal = _safe_dict(_load_if_exists(proposal_path, {}))
-    review = _safe_dict(_load_if_exists(review_path, {}))
-    decision = _safe_dict(_load_if_exists(decision_path, {}))
-    repo_context = proposal.get("repo_context", []) if isinstance(proposal.get("repo_context"), list) else []
-    repo_ids = [str(item.get("repo_id") or "") for item in repo_context[:3] if isinstance(item, dict) and str(item.get("repo_id") or "").strip()]
+def _v2_idea_entry(project_root: Path, record: dict[str, Any]) -> dict[str, Any]:
+    idea_id = str(record.get("id") or "")
+    payload = _safe_dict(record.get("payload"))
+    hypothesis = _safe_dict(payload.get("hypothesis"))
+    review = _safe_dict(payload.get("review"))
+    unit_path = v2_record_path(project_root, "idea", idea_id).parent if idea_id else Path()
+    idea_card_path = unit_path / "idea-card.md" if unit_path else Path()
+    review_path = unit_path / "review.yaml" if unit_path else Path()
+    repo_ids = []
+    for link in record.get("links", []) or []:
+        if not isinstance(link, dict):
+            continue
+        target_id = str(link.get("target_id") or "")
+        if target_id.startswith("r-"):
+            repo_ids.append(target_id)
     return {
         "idea_id": idea_id,
-        "title": str(proposal.get("title") or row.get("title") or idea_id),
-        "status": str(decision.get("decision") or decision.get("status") or row.get("status") or ""),
-        "recommended_bucket": str(decision.get("recommended_bucket") or row.get("recommended_bucket") or ""),
-        "hypothesis": compact_text(proposal.get("core_hypothesis", ""), limit=180),
-        "novelty_claim": compact_text(proposal.get("novelty_claim", ""), limit=180),
-        "repo_ids": repo_ids,
+        "title": str(record.get("title") or idea_id),
+        "status": str(record.get("status") or ""),
+        "recommended_bucket": str(review.get("recommendation") or ""),
+        "hypothesis": compact_text(hypothesis.get("core_hypothesis") or record.get("summary") or "", limit=180),
+        "novelty_claim": compact_text(hypothesis.get("difference_from_prior_work") or "", limit=180),
+        "repo_ids": repo_ids[:3],
         "review_recommendation": str(review.get("recommendation") or ""),
-        "reason": compact_text(decision.get("reason", "") or review.get("failure_modes", {}), limit=180) if decision.get("reason") else "",
-        "updated_at": str(row.get("updated_at") or decision.get("generated_at") or review.get("generated_at") or proposal.get("generated_at") or ""),
+        "reason": compact_text(record.get("summary") or "", limit=180),
+        "updated_at": str(record.get("updated_at") or ""),
         "links": {
-            "proposal": relative_link_payload(project_root, relative_path(project_root, proposal_path)) if proposal_path.exists() else {"path": "", "href": ""},
+            "proposal": relative_link_payload(project_root, relative_path(project_root, idea_card_path)) if idea_card_path.exists() else {"path": "", "href": ""},
             "review": relative_link_payload(project_root, relative_path(project_root, review_path)) if review_path.exists() else {"path": "", "href": ""},
-            "decision": relative_link_payload(project_root, relative_path(project_root, decision_path)) if decision_path.exists() else {"path": "", "href": ""},
+            "decision": {"path": "", "href": ""},
         },
     }
 
@@ -855,36 +743,41 @@ def build_program_items(project_root: Path) -> list[dict[str, Any]]:
         return items
     for program_root in sorted(path for path in programs_root.iterdir() if path.is_dir()):
         program_id = program_root.name
-        charter_path = program_root / "charter.yaml"
-        state_path = program_root / "workflow" / "state.yaml"
+        readme_path = program_root / "README.md"
+        state_path = program_root / "state.yaml"
         literature_map_path = program_root / "evidence" / "literature-map.yaml"
-        ideas_index_path = program_root / "ideas" / "index.yaml"
         repo_choice_path = program_root / "design" / "repo-choice.yaml"
-        design_doc_path = program_root / "design" / "system-design.md"
+        design_doc_path = readme_path
         interfaces_path = program_root / "design" / "interfaces.yaml"
         selected_idea_path = program_root / "design" / "selected-idea.yaml"
-        runbook_path = program_root / "experiments" / "runbook.md"
-        matrix_path = program_root / "experiments" / "matrix.yaml"
+        runbook_path = program_root / "experiments" / "minimum-validation-matrix.md"
+        matrix_link_path = runbook_path
         decision_log_path = program_root / "workflow" / "decision-log.md"
         open_questions_path = program_root / "workflow" / "open-questions.yaml"
         evidence_requests_path = program_root / "workflow" / "evidence-requests.yaml"
         preferences_path = program_root / "workflow" / "preferences.yaml"
-        charter = _safe_dict(_load_if_exists(charter_path, {}))
         state = _safe_dict(_load_if_exists(state_path, {}))
         literature_map = _safe_dict(_load_if_exists(literature_map_path, {}))
-        ideas_index = load_index(ideas_index_path, f"{program_id}-ideas", SERVICE_NAME)
         repo_choice = _safe_dict(_load_if_exists(repo_choice_path, {}))
-        matrix = _safe_dict(_load_if_exists(matrix_path, {}))
         open_questions = _safe_dict(_load_if_exists(open_questions_path, {}))
         evidence_requests = _safe_dict(_load_if_exists(evidence_requests_path, {}))
         ideas: list[dict[str, Any]] = []
-        for idea_id, row in ideas_index.get("items", {}).items():
-            if not isinstance(row, dict):
+        active_unit_ids = set(normalize_list(state.get("active_unit_ids")))
+        selected_idea_from_state = str(state.get("selected_idea_id") or "").strip()
+        seen_idea_ids: set[str] = set()
+        for record in iter_v2_records(project_root, kind="idea"):
+            idea_id = str(record.get("id") or "")
+            if not idea_id or idea_id in seen_idea_ids:
                 continue
-            ideas.append(_idea_entry(project_root, program_root, str(idea_id), row))
+            record_program_ids = set(normalize_list(record.get("program_ids")))
+            if idea_id in active_unit_ids or idea_id == selected_idea_from_state or program_id in record_program_ids:
+                ideas.append(_v2_idea_entry(project_root, record))
+                seen_idea_ids.add(idea_id)
         ideas.sort(key=_idea_sort_key)
         selected_id = _selected_idea_id(state, ideas)
         selected_idea = next((item for item in ideas if item.get("idea_id") == selected_id), {})
+        selected_idea_links = _safe_dict(selected_idea.get("links")) if selected_idea else {}
+        selected_idea_fallback_link = _safe_dict(selected_idea_links.get("proposal"))
         retrieval = _safe_dict(literature_map.get("retrieval"))
         top_sources = []
         for source in retrieval.get("selected_sources", []) or []:
@@ -901,11 +794,18 @@ def build_program_items(project_root: Path) -> list[dict[str, Any]]:
                 }
             )
         current_selected_repo = str(state.get("selected_repo_id") or repo_choice.get("selected_repo") or "")
+        active_experiment_count = sum(1 for unit_id in active_unit_ids if unit_id.startswith("x-"))
+        if not active_experiment_count:
+            active_experiment_count = sum(
+                1
+                for record in iter_v2_records(project_root, kind="experiment")
+                if program_id in set(normalize_list(record.get("program_ids")))
+            )
         items.append(
             {
                 "program_id": program_id,
-                "question": str(charter.get("question") or ""),
-                "goal": str(charter.get("goal") or ""),
+                "question": str(state.get("question") or ""),
+                "goal": str(state.get("goal") or ""),
                 "stage": str(state.get("stage") or ""),
                 "active_idea_id": str(state.get("active_idea_id") or ""),
                 "selected_idea_id": selected_id,
@@ -920,32 +820,32 @@ def build_program_items(project_root: Path) -> list[dict[str, Any]]:
                 "decision_log_preview": markdown_preview(decision_log_path),
                 "open_question_count": _collection_count(open_questions, ["items", "questions", "open_questions"]),
                 "evidence_request_count": _collection_count(evidence_requests, ["items", "requests", "evidence_requests"]),
-                "experiment_count": _collection_count(matrix, ["items", "experiments", "rows", "entries", "matrix"]),
+                "experiment_count": active_experiment_count,
                 "links": {
-                    "charter": relative_link_payload(project_root, relative_path(project_root, charter_path)) if charter_path.exists() else {"path": "", "href": ""},
+                    "charter": relative_link_payload(project_root, relative_path(project_root, readme_path)) if readme_path.exists() else {"path": "", "href": ""},
                     "state": relative_link_payload(project_root, relative_path(project_root, state_path)) if state_path.exists() else {"path": "", "href": ""},
                     "literature_map": relative_link_payload(project_root, relative_path(project_root, literature_map_path)) if literature_map_path.exists() else {"path": "", "href": ""},
-                    "ideas_index": relative_link_payload(project_root, relative_path(project_root, ideas_index_path)) if ideas_index_path.exists() else {"path": "", "href": ""},
+                    "ideas_index": {"path": "", "href": ""},
                     "repo_choice": relative_link_payload(project_root, relative_path(project_root, repo_choice_path)) if repo_choice_path.exists() else {"path": "", "href": ""},
                     "design_doc": relative_link_payload(project_root, relative_path(project_root, design_doc_path)) if design_doc_path.exists() else {"path": "", "href": ""},
                     "interfaces": relative_link_payload(project_root, relative_path(project_root, interfaces_path)) if interfaces_path.exists() else {"path": "", "href": ""},
-                    "selected_idea": relative_link_payload(project_root, relative_path(project_root, selected_idea_path)) if selected_idea_path.exists() else {"path": "", "href": ""},
+                    "selected_idea": relative_link_payload(project_root, relative_path(project_root, selected_idea_path)) if selected_idea_path.exists() else selected_idea_fallback_link,
                     "runbook": relative_link_payload(project_root, relative_path(project_root, runbook_path)) if runbook_path.exists() else {"path": "", "href": ""},
-                    "matrix": relative_link_payload(project_root, relative_path(project_root, matrix_path)) if matrix_path.exists() else {"path": "", "href": ""},
+                    "matrix": relative_link_payload(project_root, relative_path(project_root, matrix_link_path)) if matrix_link_path.exists() else {"path": "", "href": ""},
                     "decision_log": relative_link_payload(project_root, relative_path(project_root, decision_log_path)) if decision_log_path.exists() else {"path": "", "href": ""},
                     "open_questions": relative_link_payload(project_root, relative_path(project_root, open_questions_path)) if open_questions_path.exists() else {"path": "", "href": ""},
                     "evidence_requests": relative_link_payload(project_root, relative_path(project_root, evidence_requests_path)) if evidence_requests_path.exists() else {"path": "", "href": ""},
                     "preferences": relative_link_payload(project_root, relative_path(project_root, preferences_path)) if preferences_path.exists() else {"path": "", "href": ""},
                 },
                 "generated_at": _max_timestamp(
-                    str(charter.get("generated_at") or ""),
                     str(state.get("generated_at") or ""),
+                    str(state.get("updated_at") or ""),
                     str(literature_map.get("generated_at") or ""),
-                    str(ideas_index.get("generated_at") or ""),
                     str(repo_choice.get("generated_at") or ""),
-                    str(matrix.get("generated_at") or ""),
                     str(open_questions.get("generated_at") or ""),
                     str(evidence_requests.get("generated_at") or ""),
+                    _path_mtime_iso(readme_path),
+                    _path_mtime_iso(state_path),
                 ),
             }
         )
@@ -1017,15 +917,38 @@ def build_user_entry_items(project_root: Path, program_items: list[dict[str, Any
         for path in report_material_files[:6]:
             add(path, path.stem.replace("-", " "), "report")
 
-    for program in program_items[:4]:
+    def add_program_link(program_id: str, rel_path: str, label: str, *, preview_limit: int = 220) -> None:
+        rel = str(rel_path or "").strip()
+        if not rel:
+            return
+        add(project_root / rel, f"{program_id} · {label}", "program", preview_limit=preview_limit)
+
+    featured_programs = program_items[:1]
+    for program in featured_programs:
         links = _safe_dict(program.get("links"))
         program_id = str(program.get("program_id") or "").strip() or "program"
-        if links.get("state", {}).get("path"):
-            add(project_root / str(links["state"]["path"]), f"{program_id} · workflow/state.yaml", "program")
-        if links.get("design_doc", {}).get("path"):
-            add(project_root / str(links["design_doc"]["path"]), f"{program_id} · system-design.md", "program")
-        if links.get("runbook", {}).get("path"):
-            add(project_root / str(links["runbook"]["path"]), f"{program_id} · experiments/runbook.md", "program")
+        state_link = _safe_dict(links.get("state"))
+        charter_link = _safe_dict(links.get("charter"))
+        matrix_link = _safe_dict(links.get("matrix"))
+
+        add_program_link(program_id, str(state_link.get("path") or ""), "状态")
+
+        reports_root = research / "programs" / program_id / "reports"
+        report_files = []
+        if reports_root.exists():
+            report_files = sorted(
+                (path for path in reports_root.glob("*.md") if path.is_file()),
+                key=lambda path: (_path_mtime_iso(path), path.name),
+                reverse=True,
+            )
+        if report_files:
+            add(report_files[0], f"{program_id} · 最新进展", "program", preview_limit=260)
+
+        add_program_link(program_id, str(charter_link.get("path") or ""), "概览", preview_limit=260)
+
+        matrix_path = str(matrix_link.get("path") or "")
+        if matrix_path:
+            add_program_link(program_id, matrix_path, "验证矩阵", preview_limit=240)
 
         weekly_root = research / "programs" / program_id / "weekly"
         if weekly_root.exists():
@@ -1036,8 +959,6 @@ def build_user_entry_items(project_root: Path, program_items: list[dict[str, Any
             )
             if weekly_files:
                 add(weekly_files[0], f"{program_id} · 最新周报", "program", preview_limit=260)
-
-    entries.sort(key=lambda item: (str(item.get("group") or ""), str(item.get("updated_at") or ""), str(item.get("title") or "")), reverse=True)
     return entries
 
 

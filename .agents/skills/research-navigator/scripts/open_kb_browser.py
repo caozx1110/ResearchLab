@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import subprocess
-import sys
 import time
 import webbrowser
 from pathlib import Path
@@ -15,6 +14,7 @@ from kb_browser_lib import (
     DEFAULT_PORT,
     READY_TIMEOUT_SECONDS,
     SERVICE_NAME,
+    add_browser_project_root_argument,
     browser_url,
     choose_browser_runtime,
     choose_port,
@@ -30,13 +30,14 @@ from kb_browser_lib import (
     wait_until_ready,
     write_json_atomic,
 )
+from research.bootstrap import ensure_managed_runtime
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Start or reuse the research navigator browser daemon.")
     parser.add_argument("--host", default=DEFAULT_HOST, help="Bind host (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"Preferred port (default: {DEFAULT_PORT})")
-    parser.add_argument("--project-root", default="", help="Project root path. Auto-detected when omitted.")
+    add_browser_project_root_argument(parser)
     parser.add_argument("--no-browser", action="store_true", help="Do not open a browser window.")
     parser.add_argument("--print-url", action="store_true", help="Print the final browser URL.")
     parser.add_argument(
@@ -182,4 +183,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    ensure_managed_runtime(project_root_from_script(Path(__file__)))
     raise SystemExit(main())

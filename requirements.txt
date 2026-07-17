@@ -1,0 +1,23 @@
+# --- Core runtime (always installed) ---------------------------------------
+PyYAML>=6
+
+# Lightweight default PDF backend (SSOT 3.1 decision A): pure PyMuPDF, no torch,
+# no GPU, no multi-GB model download. Always installed so the dual-source
+# pipeline can parse non-arxiv PDFs into page=N chunks out of the box — this is
+# what kills the cold-start "silent empty parse" degradation. It transitively
+# pulls PyMuPDF (fitz).
+pymupdf4llm>=0.0.17
+
+# --- Optional heavy PDF backends (NOT installed by default) -----------------
+# For tables/formulas/complex layouts a heavier backend can be worth it, but
+# they require torch (+ effectively a GPU) and download several GB of models on
+# first use, so they are deliberately opt-in — install manually when needed:
+#   pip install mineru        # MinerU: strong layout/table/formula extraction
+#   pip install docling       # Docling: structured document conversion
+# Marker is intentionally excluded: its license restricts commercial use
+# (organizations with >$2M revenue must pay), so it is not a recommended
+# default/optional backend here.
+
+# --- Dev / test -------------------------------------------------------------
+# Run the test suite with: pip install -r requirements.txt pytest
+# pytest>=7

@@ -1,83 +1,131 @@
 # Open Research Workspace Skills
 
-![snapshot](./docs/figs/snapshot.png)
+## English Quickstart
 
-这是一个开源的 research workspace 骨架。
+An open-source workspace skill bundle for research knowledge units. Install it into a workspace root so `.agents/` and the generated `kb/` live side by side, giving agents skills, scripts, and schemas to keep durable research artifacts out of chat history.
 
-它不是现成知识库，而是一套让 Codex 持续维护科研工作区的规则、技能和文档。目标很简单：把论文、网页、仓库、idea、设计、实验记录和周报，尽量从聊天里搬到可复用的工作区文件里。
+首次运行会自动创建并使用项目内受管 `.venv`，无需手动创建 venv 或安装 PyYAML。
 
-这个仓库主要公开三层：
+```bash
+kb init
+kb status
+```
 
-- `.agents/`：skills、脚本、共享运行库
-- `AGENTS.md`：工作区 schema 和写作规则
-- `docs/`：上手说明、skill 说明、发布说明
+## 这是什么
 
-如果本地还没有 `kb/`，也没关系。这个仓库可以先只作为 workflow 和技能系统使用，知识库内容之后再在本地生成。
+这是一个中文优先的 research workspace skill bundle。
+
+它不是现成知识库，而是一套让 Codex 持续维护科研工作区的规则、skills、脚本和文档。目标很简单：把论文、网页、仓库、idea、设计、实验记录和周报，尽量从聊天里搬到可复用、可检索、可确认、可版本化的工作区文件里。
+
+公开内容主要有三层：
+
+- `.agents/`：17 个本地 skill、脚本、共享运行库，以及使用规则 `.agents/AGENTS.md`（工作区运行规则、schema 约束和写作偏好；随 `.agents/` 分发到用户工作区根 `AGENTS.md`，面向使用 kb 的 agent）。
+- `AGENTS.md` / `CLAUDE.md`（软链 → `AGENTS.md`）：面向开发/优化本 skill 系统的开发者工作流。
+- `docs/`：按受众组织的用户指南和设计说明。
+
+安装目标是 **workspace 根目录**，不是 `kb/` 目录本身。安装后 `.agents/` 与之后生成的 `kb/` 同级；如果本地还没有 `kb/`，初始化时会创建。
 
 ## Start Here
 
-- [Getting Started](docs/GETTING_STARTED.md)
-- [Skills Guide](docs/SKILLS_GUIDE.md)
-- [Publishing Notes](docs/PUBLISHING.md)
-- [LLM Wiki Pattern](docs/llm-wiki.md)
+- [安装指南](docs/INSTALL.md)：说明如何把 bundle 复制安装到 workspace 根、生成 Claude/Codex 接入文件，并可选把 `kb` 放上 PATH。
+- [用户指南](docs/USER_GUIDE.md)：给研究者，说明怎么安装、怎么开口、AI 和你如何分工、如何用 `kb` 快捷入口。
+- [设计说明](docs/DESIGN.md)：给开发者，说明 architecture、skill 路由、数据模型、confirmation gate 和扩展原则。
+- [贡献指南](CONTRIBUTING.md)：给贡献者，说明协作和变更流程。
 
-## The Idea
+第一次使用直接运行 `bash install.sh`：中文向导会解释每个选项，并推荐把 project-scope copy 安装到目标 workspace 根；安装完成后在 Claude Code 或 Codex 对话中输入 `kb init` 即可开始。更新和卸载见 [安装指南](docs/INSTALL.md)。
+
+## 核心想法
 
 这套 workspace 的默认目录是：
 
 ```text
 kb/
-├── intake/
-├── library/
+├── raw/
+├── units/
+│   ├── papers/
+│   ├── repos/
+│   ├── blogs/
+│   ├── ideas/
+│   └── experiments/
 ├── programs/
-├── wiki/
+├── synthesis/
+├── config/
+├── output/
 ├── user/
-└── memory/
+└── .runtime/
 ```
 
 可以把它粗略理解成：
 
-- `library/`：资料入库
-- `programs/`：具体研究方向
-- `wiki/`：全局查询、索引、日志
-- `user/`：人类入口页
+- `raw/`：不可变外部 source bytes。
+- `units/`：paper / repo / blog / idea / experiment 的 canonical record。
+- `programs/`：具体研究方向、workflow、决策日志和 reporting events。
+- `synthesis/`：跨 unit 的 survey、taxonomy、trend、gap。
+- `config/`：运行时偏好、taxonomy seed、candidate pool。
+- `output/`：导出产物，不是唯一真相。
+- `user/`：人类入口页和复开页面。
 
-## Minimal Usage
+核心原则：
+
+1. Durable artifacts 优先于 chat-only answers。
+2. 新材料先 lightweight ingestion，再决定是否深分析。
+3. AI inference、evaluation、novelty judgement 和 failure diagnosis 默认需要人确认。
+4. 高价值结果沉淀成可复用 knowledge units。
+
+## 最小使用方式
 
 多数时候你不需要复杂 prompt。
 
-下面这种一句话通常就够了：
-
 ```text
-请先读取当前状态，判断我现在最该做哪一步，并直接执行。
+请读取当前 knowledge base，判断我现在最该做哪一步，并直接执行安全步骤；遇到需要我确认或拍板的地方停下来。
 ```
 
-如果你已经知道对象，也可以再补一行：
+高频动作可以用 `kb` 快捷入口：
 
 ```text
-program_id=<your-program-id>
+kb help
+kb init
+kb doctor
+kb status
+kb next
+kb find retrieval augmented generation
+kb add https://example.com/paper.pdf
+kb review
+kb recall
 ```
 
-如果你知道自己想显式调用哪个 skill，也可以直接点名：
+`kb` 动词清单以代码为准，共 11 个：`help` 打印能力菜单；`init` 初始化 KB 布局、索引和基础偏好；`doctor` 检查当前 Python、YAML 与 PDF 后端可用性；`status` 刷新并查看当前 KB / program 状态摘要；`next` 查看下一步实验或 program 推进建议；`find` 按关键词检索已入库知识单元；`add` 把论文、repo、博客或本地文件轻量入库；`ingest` 一条命令把 source 拉进来并备好待填骨架，随后 agent 自动填 grounded 笔记；`review` 查看待确认的 AI 判断，后续可交互式确认；`reject` 把误建 / 不采纳的知识单元标记为 rejected（清理出口）；`recall` 回忆已确认习惯、已知坑和待审 skill 问题。
+
+idea / report 没有 `kb` 动词，默认用纯自然语言，例如“请基于当前知识库给我 3 个候选 idea”或“为这个 program 生成周报材料”。
+
+## 能力成熟度（诚实标注，随实现推进更新）
+
+不同能力成熟度差别很大——请按下表判断可依赖程度，**不要用某一项的表现外推整个系统**。
+
+| 档位 | 含义 | 当前属于此档的能力 |
+| --- | --- | --- |
+| **beta** | 核心范式已落地（prepare/verify + 逐字证据 + 空心门），但"理解"那步依赖 agent 在会话里填 | 论文 / 仓库 / 博客分析、双源入库、检索（`kb find` 词级 + agent 原生答题）、自动驱动入库链、**综述（evidence-first survey）、idea 陪练 + 分析、方法设计（读资源缩放矩阵）、实验（强类型指标 + 验 artifact + baseline 对比）、报告（自包含 claims+events+evidence + outline）** |
+| **scaffold** | 有可用骨架，但产出仍偏固定策略/事件流，尚未做到 evidence-first 的实质闭环 | （已清空——原综述/idea/方法/实验/报告 2026-07-17 升级为 beta，见上行） |
+| **dev-only** | 仅供开发/本地实验：现已加 token 鉴权 + PTY 默认关 + 强制回环 + 写保护 raw，但仍不建议用于共享或敏感环境 | Workbench（research-navigator browser：文件写端点带 token 鉴权，shell/PTY 需 `--enable-terminal` 显式开启） |
+
+治理内核（confirmation 词汇、逐字 evidence、禁自签、空心门、派生证据不可变）是**跨全系统的真地基**，不随单个 skill 档位浮动。落盘字段与枚举见 `.agents/lib/research/SCHEMAS.md`。
+
+如果你知道对象，也可以直接说：
 
 ```text
-请用 $literature-analyst 为 <program-id> 刷新 literature map。
+请把这篇论文先按 core 流程做轻量入库，再判断是否值得细读。
 ```
-
-文献/repo入库：
 
 ```text
-<论文链接>/<仓库链接>入库。
+请用 $literature-synthesizer 为 <program-id> 刷新 literature survey。
 ```
 
-打开工作台：
+## 分工边界
 
-```text
-打开工作台。
-```
+AI 适合做提取、去重、索引、整理、追踪和汇总。AI 写出的事实 metadata 可以自动入库；AI 写出的判断、评价、诊断、idea review 和趋势归纳默认进入确认收件箱。
 
-## Notes
+你负责确认和拍板：选 idea、选 baseline、确认实验诊断、决定研究阶段推进。确认时要留下 evidence，让后续报告知道哪些内容是人认可的定论，哪些仍是 pending。
 
-- 发布版文档默认使用 `kb/` 路径。
-- 工作区鼓励中文优先的人类可读产物。
-- 高价值结果尽量落到文件里，而不是只留在聊天里。
+## 发布说明
+
+发布版是 workflow package，不捆绑私有 `kb/`。用户应在自己的机器上初始化 `kb/`。首次运行会自动创建受管 `.venv`；高级用户可用 `RESEARCH_PYTHON` 覆盖解释器。
