@@ -1,131 +1,123 @@
 # Open Research Workspace Skills
 
-## English Quickstart
+An experimental, Chinese-first research workspace for turning papers, repositories, technical articles, ideas, experiments, and reports into durable local knowledge.
 
-An open-source workspace skill bundle for research knowledge units. Install it into a workspace root so `.agents/` and the generated `kb/` live side by side, giving agents skills, scripts, and schemas to keep durable research artifacts out of chat history.
+The bundle installs beside your project data:
 
-首次运行会自动创建并使用项目内受管 `.venv`，无需手动创建 venv 或安装 PyYAML。
-
-```bash
-kb init
-kb status
+```text
+workspace/
+├── .agents/   # skills, runtime library, and agent rules
+└── kb/        # your local research data
 ```
 
-## 这是什么
+This repository is currently an **internal alpha / pre-release**. The evidence and confirmation invariants are intentional, but interfaces may still change before the first stable release. See [CHANGELOG.md](CHANGELOG.md) for the current release state.
 
-这是一个中文优先的 research workspace skill bundle。
+## Start with a conversation
 
-它不是现成知识库，而是一套让 Codex 持续维护科研工作区的规则、skills、脚本和文档。目标很简单：把论文、网页、仓库、idea、设计、实验记录和周报，尽量从聊天里搬到可复用、可检索、可确认、可版本化的工作区文件里。
+Install the bundle into a workspace root, open that workspace in Codex or Claude Code, and say:
 
-公开内容主要有三层：
+```text
+kb init
+```
 
-- `.agents/`：17 个本地 skill、脚本、共享运行库，以及使用规则 `.agents/AGENTS.md`（工作区运行规则、schema 约束和写作偏好；随 `.agents/` 分发到用户工作区根 `AGENTS.md`，面向使用 kb 的 agent）。
-- `AGENTS.md` / `CLAUDE.md`（软链 → `AGENTS.md`）：面向开发/优化本 skill 系统的开发者工作流。
-- `docs/`：按受众组织的用户指南和设计说明。
+Then you can simply ask:
 
-安装目标是 **workspace 根目录**，不是 `kb/` 目录本身。安装后 `.agents/` 与之后生成的 `kb/` 同级；如果本地还没有 `kb/`，初始化时会创建。
+```text
+请读取当前知识库，判断我现在最该做哪一步，并直接执行安全步骤；遇到需要我确认或拍板的地方停下来。
+```
 
-## Start Here
+The agent does the mechanical work. You review judgements and make research decisions.
 
-- [安装指南](docs/INSTALL.md)：说明如何把 bundle 复制安装到 workspace 根、生成 Claude/Codex 接入文件，并可选把 `kb` 放上 PATH。
-- [用户指南](docs/USER_GUIDE.md)：给研究者，说明怎么安装、怎么开口、AI 和你如何分工、如何用 `kb` 快捷入口。
-- [设计说明](docs/DESIGN.md)：给开发者，说明 architecture、skill 路由、数据模型、confirmation gate 和扩展原则。
-- [贡献指南](CONTRIBUTING.md)：给贡献者，说明协作和变更流程。
+## Install
 
-第一次使用直接运行 `bash install.sh`：中文向导会解释每个选项，并推荐把 project-scope copy 安装到目标 workspace 根；安装完成后在 Claude Code 或 Codex 对话中输入 `kb init` 即可开始。更新和卸载见 [安装指南](docs/INSTALL.md)。
+From this repository:
 
-## 核心想法
+```bash
+bash install.sh
+```
 
-这套 workspace 的默认目录是：
+The guided installer recommends a project-scoped copy into a workspace root. It does not install into `kb/`, and updates or uninstalls preserve existing research data. A compatible Python runtime is reused when available; otherwise the workspace prepares an isolated managed runtime when first needed. Normal `kb` calls do not install packages into a shared interpreter.
+
+Read [docs/INSTALL.md](docs/INSTALL.md) for copy, update, uninstall, and automation details.
+
+## The fifteen `kb` verbs
+
+These are the complete public shortcut surface. Internal script arguments are intentionally not part of the user contract.
+
+| Verb | Purpose |
+|---|---|
+| `kb help` | Show the conversational capability menu. |
+| `kb init` | Initialize the knowledge-base layout and collect missing preferences in chat. |
+| `kb doctor` | Check whether the local runtime can support the workspace. |
+| `kb update` | Check for an update and apply it only after explicit authorization. |
+| `kb add <链接或路径>` | Add a paper, repository, article, or local file as a lightweight source. |
+| `kb ingest <链接或路径>` | Add a source and prepare its evidence-backed analysis workflow. |
+| `kb review` | Show human-review-ready judgements and accept a natural-language decision. |
+| `kb status` | Refresh and summarize the current workspace or research program. |
+| `kb next` | Suggest the next useful research action. |
+| `kb find <关键词>` | Search the local knowledge units. |
+| `kb recall` | Recall confirmed preferences, known pitfalls, and reviewed skill issues. |
+| `kb resume` | Recover an interrupted knowledge-base operation. |
+| `kb undo` | Undo the most recent committed knowledge-base operation. |
+| `kb restore <操作编号>` | Restore state from before a named operation. |
+| `kb reject <单元编号>` | Reject a mistakenly created or unwanted knowledge unit. |
+
+Idea generation and report writing remain natural-language tasks rather than extra CLI verbs. For example:
+
+```text
+请基于当前知识库给我 3 个有证据支撑的候选 idea。
+```
+
+```text
+为这个研究计划生成本周周报材料。
+```
+
+The same `kb init` and `kb review` semantics apply in a terminal, a pipe, or an agent-mediated call. They never depend on an interactive prompt inside the script.
+
+## What the system preserves
 
 ```text
 kb/
-├── raw/
-├── units/
-│   ├── papers/
-│   ├── repos/
-│   ├── blogs/
-│   ├── ideas/
-│   └── experiments/
-├── programs/
-├── synthesis/
-├── config/
-├── output/
-├── user/
-└── .runtime/
+├── raw/          # immutable external source bytes
+├── units/        # papers, repos, blogs, ideas, experiments
+├── programs/     # research state, decisions, designs, runs, reports
+├── synthesis/    # surveys, taxonomy, trends, gaps
+├── config/       # user and runtime policy
+├── user/         # generated navigation and reopen pages
+├── output/       # exports, never the only source of truth
+└── .runtime/     # private local runtime state
 ```
 
-可以把它粗略理解成：
+The core rules are:
 
-- `raw/`：不可变外部 source bytes。
-- `units/`：paper / repo / blog / idea / experiment 的 canonical record。
-- `programs/`：具体研究方向、workflow、决策日志和 reporting events。
-- `synthesis/`：跨 unit 的 survey、taxonomy、trend、gap。
-- `config/`：运行时偏好、taxonomy seed、candidate pool。
-- `output/`：导出产物，不是唯一真相。
-- `user/`：人类入口页和复开页面。
+1. durable artifacts beat chat-only answers;
+2. new material starts lightweight, then deepens when useful;
+3. scripts scaffold and verify, while understanding comes from the runtime agent;
+4. every substantive claim carries source evidence;
+5. AI inference, evaluation, novelty judgement, and diagnosis require human confirmation;
+6. confirmation binds to current content and evidence, and cannot be self-signed;
+7. recovery and checkpoints operate on exact declared paths rather than the whole KB.
 
-核心原则：
+## Human and agent responsibilities
 
-1. Durable artifacts 优先于 chat-only answers。
-2. 新材料先 lightweight ingestion，再决定是否深分析。
-3. AI inference、evaluation、novelty judgement 和 failure diagnosis 默认需要人确认。
-4. 高价值结果沉淀成可复用 knowledge units。
+The agent can safely extract metadata, deduplicate sources, build evidence-backed notes, maintain indexes, track open questions, and assemble reports. It should continue safe work without asking you to operate internal scripts step by step.
 
-## 最小使用方式
+You decide whether a judgement is accepted, which idea or baseline to pursue, whether an experiment conclusion is sound, and when a research program changes stage. A confirmation must come from the current user interaction and retain evidence; remembered authorization is not enough.
 
-多数时候你不需要复杂 prompt。
+`kb review` includes only material whose agent fill and verification are complete. Items still awaiting analysis, verification, or retry remain out of the human decision queue.
 
-```text
-请读取当前 knowledge base，判断我现在最该做哪一步，并直接执行安全步骤；遇到需要我确认或拍板的地方停下来。
-```
+## Update provenance and local data
 
-高频动作可以用 `kb` 快捷入口：
+Installed copies record where their source came from and, for remote sources, which branch was selected. An installation from a local checkout stays attached to that checkout; an installation from a fork branch stays attached to that fork and branch. A legacy manifest with no trustworthy origin or branch asks you to choose rather than silently switching to a canonical remote. A detached checkout is pinned to its recorded commit and requires a branch choice before later updates.
 
-```text
-kb help
-kb init
-kb doctor
-kb status
-kb next
-kb find retrieval augmented generation
-kb add https://example.com/paper.pdf
-kb review
-kb recall
-```
+The release bundle contains no private `kb/`. Storage migration and updates are scoped so they do not rewrite the installed skill tree or root workspace rules, and uninstall leaves the knowledge base in place.
 
-`kb` 动词清单以代码为准，共 11 个：`help` 打印能力菜单；`init` 初始化 KB 布局、索引和基础偏好；`doctor` 检查当前 Python、YAML 与 PDF 后端可用性；`status` 刷新并查看当前 KB / program 状态摘要；`next` 查看下一步实验或 program 推进建议；`find` 按关键词检索已入库知识单元；`add` 把论文、repo、博客或本地文件轻量入库；`ingest` 一条命令把 source 拉进来并备好待填骨架，随后 agent 自动填 grounded 笔记；`review` 查看待确认的 AI 判断，后续可交互式确认；`reject` 把误建 / 不采纳的知识单元标记为 rejected（清理出口）；`recall` 回忆已确认习惯、已知坑和待审 skill 问题。
+## Documentation
 
-idea / report 没有 `kb` 动词，默认用纯自然语言，例如“请基于当前知识库给我 3 个候选 idea”或“为这个 program 生成周报材料”。
+- [Installation](docs/INSTALL.md)
+- [User guide](docs/USER_GUIDE.md)
+- [Design](docs/DESIGN.md)
+- [Contributing](CONTRIBUTING.md)
+- [Security policy](SECURITY.md)
 
-## 能力成熟度（诚实标注，随实现推进更新）
-
-不同能力成熟度差别很大——请按下表判断可依赖程度，**不要用某一项的表现外推整个系统**。
-
-| 档位 | 含义 | 当前属于此档的能力 |
-| --- | --- | --- |
-| **beta** | 核心范式已落地（prepare/verify + 逐字证据 + 空心门），但"理解"那步依赖 agent 在会话里填 | 论文 / 仓库 / 博客分析、双源入库、检索（`kb find` 词级 + agent 原生答题）、自动驱动入库链、**综述（evidence-first survey）、idea 陪练 + 分析、方法设计（读资源缩放矩阵）、实验（强类型指标 + 验 artifact + baseline 对比）、报告（自包含 claims+events+evidence + outline）** |
-| **scaffold** | 有可用骨架，但产出仍偏固定策略/事件流，尚未做到 evidence-first 的实质闭环 | （已清空——原综述/idea/方法/实验/报告 2026-07-17 升级为 beta，见上行） |
-| **dev-only** | 仅供开发/本地实验：现已加 token 鉴权 + PTY 默认关 + 强制回环 + 写保护 raw，但仍不建议用于共享或敏感环境 | Workbench（research-navigator browser：文件写端点带 token 鉴权，shell/PTY 需 `--enable-terminal` 显式开启） |
-
-治理内核（confirmation 词汇、逐字 evidence、禁自签、空心门、派生证据不可变）是**跨全系统的真地基**，不随单个 skill 档位浮动。落盘字段与枚举见 `.agents/lib/research/SCHEMAS.md`。
-
-如果你知道对象，也可以直接说：
-
-```text
-请把这篇论文先按 core 流程做轻量入库，再判断是否值得细读。
-```
-
-```text
-请用 $literature-synthesizer 为 <program-id> 刷新 literature survey。
-```
-
-## 分工边界
-
-AI 适合做提取、去重、索引、整理、追踪和汇总。AI 写出的事实 metadata 可以自动入库；AI 写出的判断、评价、诊断、idea review 和趋势归纳默认进入确认收件箱。
-
-你负责确认和拍板：选 idea、选 baseline、确认实验诊断、决定研究阶段推进。确认时要留下 evidence，让后续报告知道哪些内容是人认可的定论，哪些仍是 pending。
-
-## 发布说明
-
-发布版是 workflow package，不捆绑私有 `kb/`。用户应在自己的机器上初始化 `kb/`。首次运行会自动创建受管 `.venv`；高级用户可用 `RESEARCH_PYTHON` 覆盖解释器。
+The on-disk schema is documented in [`.agents/lib/research/SCHEMAS.md`](.agents/lib/research/SCHEMAS.md). The root [AGENTS.md](AGENTS.md) is for contributors developing this skill system; the distributed [`.agents/AGENTS.md`](.agents/AGENTS.md) governs agents using an installed workspace.
