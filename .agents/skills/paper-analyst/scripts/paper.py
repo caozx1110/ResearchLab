@@ -15,9 +15,11 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+from contextvars import ContextVar
 from datetime import datetime
+from functools import wraps
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 SCRIPT_PATH = Path(__file__).resolve()
 for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
@@ -47,17 +49,21 @@ from research.core import (
     append_history,
     apply_record_governance,
     build_index,
+    command_mutation,
     confirm_unit,
     load_runtime_preferences,
     locate_record,
     checkpoint_and_report,
+    candidate_pools_path,
     project_root,
     rel,
     resolve_local_reference,
+    topic_taxonomy_path,
     write_record,
 )
 from research.evidence import (
     attach_claims,
+    build_verification_receipt,
     read_claims,
     validate_claims,
     verify_claim_evidence,
@@ -78,6 +84,45 @@ SECTION_PATTERNS = (
     "conclusion",
     "appendix",
 )
+
+_ACTIVE_MUTATION: ContextVar[bool] = ContextVar("paper_active_mutation", default=False)
+_PENDING_CHECKPOINT: ContextVar[tuple[Path, str, str, list[Path]] | None] = ContextVar(
+    "paper_pending_checkpoint", default=None
+)
+
+
+def _index_targets(root: Path) -> list[Path]:
+    return [
+        root / "kb" / "index.yaml",
+        root / "kb" / "index.md",
+        topic_taxonomy_path(root),
+        candidate_pools_path(root),
+    ]
+
+
+def _transactional(op_name: str, target_builder):
+    def decorate(function):
+        @wraps(function)
+        def wrapped(*args, **kwargs):
+            root, targets = target_builder(*args, **kwargs)
+            active_token = _ACTIVE_MUTATION.set(True)
+            checkpoint_token = _PENDING_CHECKPOINT.set(None)
+            try:
+                with command_mutation(root, f"paper-analyst:{op_name}", targets):
+                    result = function(*args, **kwargs)
+                pending = _PENDING_CHECKPOINT.get()
+            finally:
+                _PENDING_CHECKPOINT.reset(checkpoint_token)
+                _ACTIVE_MUTATION.reset(active_token)
+            if pending is not None:
+                checkpoint_and_report(
+                    pending[0], trigger=pending[1], message=pending[2], target_paths=pending[3]
+                )
+            return result
+
+        return wrapped
+
+    return decorate
 
 PAPER_TYPES: tuple[str, ...] = ("method_system", "benchmark", "survey")
 
@@ -174,6 +219,8 @@ EVIDENCE_REF_FORMAT: dict[str, str] = {
 def add_confirmation_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--confirmed-by", default="")
     parser.add_argument("--evidence", action="append", required=True)
+    parser.add_argument("--user-authorization", default="")
+    parser.add_argument("--authorization-source", default="")
 
 
 def _source_paths(root: Path, record: dict) -> list[Path]:
@@ -241,7 +288,11 @@ def _paper_preferences(root: Path) -> dict[str, Any]:
 def _load_or_refresh_cache(root: Path, record: dict, unit_root: Path, *, force: bool = False) -> tuple[list[dict], Path]:
     preferences = _paper_preferences(root)
     cache_path = _cache_path(unit_root)
-    if not force and cache_path.exists():
+    if cache_path.exists():
+        if force:
+            raise SystemExit(
+                "parse-cache.yaml is immutable derived evidence; --force cannot overwrite it in place."
+            )
         payload = load_yaml(cache_path, default={})
         if isinstance(payload, dict) and isinstance(payload.get("chunks"), list):
             return payload["chunks"], cache_path
@@ -434,10 +485,10 @@ def verify_screening_fill(payload: dict, unit_dir: Path) -> list[str]:
     for claim in claims:
         for violation in verify_claim_evidence(claim, unit_dir):
             violations.append(f"screening claim: {violation}")
-    # A non-trivial judgement (worth=yes|maybe) must be backed by evidence.
-    if worth in {"yes", "maybe"} and not claims:
+    # Every verified screening judgement becomes a canonical, receipt-bound claim.
+    if not claims:
         violations.append(
-            "worth_deep_reading is a judgement (yes|maybe) but no evidence-backed claims were attached"
+            "screening verification has no evidence-backed claims; at least one canonical claim is required"
         )
     if paper_type and not claims:
         violations.append(
@@ -722,11 +773,27 @@ def _extract_pdf_images(root: Path, record: dict, unit_root: Path) -> tuple[list
     )
 
 
-def _finalize_post_actions(root: Path, *, trigger: str, message: str, defer_post_actions: bool) -> dict[str, Any]:
+def _finalize_post_actions(
+    root: Path,
+    *,
+    trigger: str,
+    message: str,
+    defer_post_actions: bool,
+    target_paths: Sequence[Path],
+) -> dict[str, Any]:
     if defer_post_actions:
         return {"committed": False, "status": "deferred"}
-    build_index(root)
-    return checkpoint_and_report(root, trigger=trigger, message=message)
+    index_paths = build_index(root)
+    all_targets = [*target_paths, *index_paths, topic_taxonomy_path(root), candidate_pools_path(root)]
+    if _ACTIVE_MUTATION.get():
+        _PENDING_CHECKPOINT.set((root, trigger, message, all_targets))
+        return {"committed": False, "status": "pending-transaction-commit"}
+    return checkpoint_and_report(
+        root,
+        trigger=trigger,
+        message=message,
+        target_paths=all_targets,
+    )
 
 
 # Governance ceiling for auto-executed safe steps (mirrors research-orchestrator's
@@ -734,6 +801,13 @@ def _finalize_post_actions(root: Path, *, trigger: str, message: str, defer_post
 _GOVERNANCE_MAX_AUTO_STEPS = {"screen", "build-index", "refresh", "generate-note"}
 
 
+@_transactional(
+    "refresh-structure",
+    lambda root, record, unit_root, source_chunks, cache_path, *, defer_post_actions: (
+        root,
+        [unit_root / "record.yaml", unit_root / "structure.yaml", *([] if defer_post_actions else _index_targets(root))],
+    ),
+)
 def _run_refresh_structure(
     root: Path, record: dict, unit_root: Path, source_chunks: list[dict], cache_path: Path, *, defer_post_actions: bool
 ) -> int:
@@ -760,11 +834,19 @@ def _run_refresh_structure(
     write_record(root, record)
     print(f"[ok] wrote {structure_path.relative_to(root)}")
     _finalize_post_actions(
-        root, trigger="milestone", message=f"milestone: refresh paper structure {record['id']}", defer_post_actions=defer_post_actions
+        root, trigger="milestone", message=f"milestone: refresh paper structure {record['id']}", defer_post_actions=defer_post_actions,
+        target_paths=[unit_root / "record.yaml", structure_path],
     )
     return 0
 
 
+@_transactional(
+    "extract-figures",
+    lambda root, record, unit_root, source_chunks, *, defer_post_actions: (
+        root,
+        [unit_root / "record.yaml", unit_root / "figures.yaml", unit_root / "figures", *([] if defer_post_actions else _index_targets(root))],
+    ),
+)
 def _run_extract_figures(
     root: Path, record: dict, unit_root: Path, source_chunks: list[dict], *, defer_post_actions: bool
 ) -> int:
@@ -801,7 +883,8 @@ def _run_extract_figures(
     write_record(root, record)
     print(f"[ok] wrote {figures_path.relative_to(root)}")
     _finalize_post_actions(
-        root, trigger="milestone", message=f"milestone: extract paper figures {record['id']}", defer_post_actions=defer_post_actions
+        root, trigger="milestone", message=f"milestone: extract paper figures {record['id']}", defer_post_actions=defer_post_actions,
+        target_paths=[unit_root / "record.yaml", figures_path, unit_root / "figures"],
     )
     return 0
 
@@ -903,6 +986,13 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+@_transactional(
+    "screen",
+    lambda args, root, record, unit_root, cache_path, source_chunks, paper_preferences, defer_post_actions: (
+        root,
+        [unit_root / "record.yaml", unit_root / "screening.yaml", *([] if defer_post_actions else _index_targets(root))],
+    ),
+)
 def _run_screen(args, root, record, unit_root, cache_path, source_chunks, paper_preferences, defer_post_actions) -> int:
     screen_path = unit_root / "screening.yaml"
     cache_locator_kind = _cache_locator_kind(cache_path)
@@ -934,7 +1024,8 @@ def _run_screen(args, root, record, unit_root, cache_path, source_chunks, paper_
         write_record(root, record)
         print(f"[ok] wrote {screen_path.relative_to(root)}")
         print("下一步：runtime agent 填 worth_deep_reading + judgement_reason + claims(带证据)，再运行 screen --phase verify。")
-        _finalize_post_actions(root, trigger="milestone", message=f"milestone: prepare screen {args.paper_id}", defer_post_actions=defer_post_actions)
+        _finalize_post_actions(root, trigger="milestone", message=f"milestone: prepare screen {args.paper_id}", defer_post_actions=defer_post_actions,
+                               target_paths=[unit_root / "record.yaml", screen_path])
         return 0
 
     # verify
@@ -966,6 +1057,8 @@ def _run_screen(args, root, record, unit_root, cache_path, source_chunks, paper_
     quick["judgement_reason"] = reasons
     quick["relevance_to_current_research"] = relevance
     quick["recommended_next_action"] = "complete-note" if worth in {"yes", "maybe"} else "defer-or-confirm"
+    attach_claims(record.setdefault("payload", {}), read_claims(payload))
+    build_verification_receipt(record, unit_root)
     record["status"] = "screened"
     record["confirmation_status"] = "pending_user_confirmation"
     record["needs_human_confirmation"] = True
@@ -981,10 +1074,27 @@ def _run_screen(args, root, record, unit_root, cache_path, source_chunks, paper_
     )
     write_record(root, record)
     print(f"[ok] verified + persisted {screen_path.relative_to(root)} (worth_deep_reading={worth})")
-    _finalize_post_actions(root, trigger="milestone", message=f"milestone: verify screen {args.paper_id}", defer_post_actions=defer_post_actions)
+    _finalize_post_actions(root, trigger="milestone", message=f"milestone: verify screen {args.paper_id}", defer_post_actions=defer_post_actions,
+                           target_paths=[unit_root / "record.yaml", screen_path])
     return 0
 
 
+@_transactional(
+    "complete-note",
+    lambda args, root, record, unit_root, cache_path, source_chunks, paper_preferences, defer_post_actions: (
+        root,
+        [
+            unit_root / "record.yaml",
+            unit_root / "note-fill.yaml",
+            unit_root / "note.md",
+            unit_root / "note-claims.yaml",
+            unit_root / "structure.yaml",
+            unit_root / "figures.yaml",
+            unit_root / "figures",
+            *([] if defer_post_actions else _index_targets(root)),
+        ],
+    ),
+)
 def _run_complete_note(args, root, record, unit_root, cache_path, source_chunks, paper_preferences, defer_post_actions) -> int:
     fill_scaffold_path = unit_root / "note-fill.yaml"
     note_path = unit_root / "note.md"
@@ -1020,7 +1130,8 @@ def _run_complete_note(args, root, record, unit_root, cache_path, source_chunks,
         required = "/".join(elements_for(record))
         print(f"下一步：runtime agent 为 5 要素({required})填内容+证据，再运行 complete-note --phase verify。")
         print(next_for_agent_note(root, record, cache_path, fill_scaffold_path))
-        _finalize_post_actions(root, trigger="milestone", message=f"milestone: scaffold note {args.paper_id}", defer_post_actions=defer_post_actions)
+        _finalize_post_actions(root, trigger="milestone", message=f"milestone: scaffold note {args.paper_id}", defer_post_actions=defer_post_actions,
+                               target_paths=[unit_root / "record.yaml", fill_scaffold_path])
         return 0
 
     # verify
@@ -1038,6 +1149,8 @@ def _run_complete_note(args, root, record, unit_root, cache_path, source_chunks,
         raise SystemExit(1)
 
     _apply_note_fill_to_payload(record, claims)
+    attach_claims(record.setdefault("payload", {}), claims)
+    build_verification_receipt(record, unit_root)
     write_text_if_changed(note_path, render_note_md(record, claims))
     note_payload = {"paper_id": record["id"], "kind": "paper"}
     attach_claims(note_payload, claims)
@@ -1058,7 +1171,61 @@ def _run_complete_note(args, root, record, unit_root, cache_path, source_chunks,
     write_record(root, record)
     print(f"[ok] verified + wrote {note_path.relative_to(root)} (core_content filled, {len(claims)} elements)")
     _auto_post_note_steps(root, record, unit_root, source_chunks, cache_path, paper_preferences, defer_post_actions)
-    _finalize_post_actions(root, trigger="milestone", message=f"milestone: verify note {args.paper_id}", defer_post_actions=defer_post_actions)
+    _finalize_post_actions(root, trigger="milestone", message=f"milestone: verify note {args.paper_id}", defer_post_actions=defer_post_actions,
+                           target_paths=[unit_root / "record.yaml", note_path, unit_root / "note-claims.yaml", unit_root / "structure.yaml", unit_root / "figures.yaml", unit_root / "figures"])
+    return 0
+
+
+@_transactional(
+    "confirm",
+    lambda args, root, record, unit_root, defer_post_actions: (
+        root,
+        [unit_root / "record.yaml", *([] if defer_post_actions else _index_targets(root))],
+    ),
+)
+def _run_confirm(args, root: Path, record: dict, unit_root: Path, defer_post_actions: bool) -> int:
+    record = confirm_unit(
+        record,
+        "paper",
+        confirmed_by=args.confirmed_by,
+        evidence=args.evidence,
+        user_authorization=args.user_authorization,
+        authorization_source=args.authorization_source,
+        method="paper.py confirm",
+        project_root=root,
+    )
+    write_record(root, record)
+    print(f"[ok] confirmed {args.paper_id}")
+    _finalize_post_actions(
+        root,
+        trigger="milestone",
+        message=f"milestone: confirm paper {args.paper_id}",
+        defer_post_actions=defer_post_actions,
+        target_paths=[unit_root / "record.yaml"],
+    )
+    return 0
+
+
+@_transactional(
+    "reject",
+    lambda args, root, record, unit_root, defer_post_actions: (
+        root,
+        [unit_root / "record.yaml", *([] if defer_post_actions else _index_targets(root))],
+    ),
+)
+def _run_reject(args, root: Path, record: dict, unit_root: Path, defer_post_actions: bool) -> int:
+    record["confirmation_status"] = "rejected"
+    record["status"] = "rejected"
+    append_history(record, action="paper-rejected", summary="Paper analysis rejected or deferred.", information_types=["evaluation"])
+    write_record(root, record)
+    print(f"[ok] rejected {args.paper_id}")
+    _finalize_post_actions(
+        root,
+        trigger="milestone",
+        message=f"milestone: reject paper {args.paper_id}",
+        defer_post_actions=defer_post_actions,
+        target_paths=[unit_root / "record.yaml"],
+    )
     return 0
 
 
@@ -1082,12 +1249,22 @@ def main() -> int:
         # prefs (front_limit/back_limit) and overwrites the full intake cache, deleting
         # later pages and breaking evidence idempotency (F-a). Only explicit --force
         # (prewarm-cache) may re-parse.
-        source_chunks, cache_path = _load_or_refresh_cache(
-            root,
-            record,
-            unit_root,
-            force=bool(getattr(args, "force", False)),
-        )
+        force_cache = bool(getattr(args, "force", False))
+        if force_cache or not cache_path.exists():
+            with command_mutation(root, "paper-analyst:prewarm-cache", [cache_path]):
+                source_chunks, cache_path = _load_or_refresh_cache(
+                    root,
+                    record,
+                    unit_root,
+                    force=force_cache,
+                )
+        else:
+            source_chunks, cache_path = _load_or_refresh_cache(
+                root,
+                record,
+                unit_root,
+                force=False,
+            )
 
     if args.command == "prewarm-cache":
         print(f"[ok] wrote {cache_path.relative_to(root)}")
@@ -1107,30 +1284,10 @@ def main() -> int:
         return _run_refresh_structure(root, record, unit_root, source_chunks, cache_path, defer_post_actions=defer_post_actions)
 
     if args.command == "confirm":
-        record = confirm_unit(record, "paper", confirmed_by=args.confirmed_by, evidence=args.evidence, method="paper.py confirm", project_root=root)
-        write_record(root, record)
-        print(f"[ok] confirmed {args.paper_id}")
-        _finalize_post_actions(
-            root,
-            trigger="milestone",
-            message=f"milestone: confirm paper {args.paper_id}",
-            defer_post_actions=defer_post_actions,
-        )
-        return 0
+        return _run_confirm(args, root, record, unit_root, defer_post_actions)
 
     if args.command == "reject":
-        record["confirmation_status"] = "rejected"
-        record["status"] = "rejected"
-        append_history(record, action="paper-rejected", summary="Paper analysis rejected or deferred.", information_types=["evaluation"])
-        write_record(root, record)
-        print(f"[ok] rejected {args.paper_id}")
-        _finalize_post_actions(
-            root,
-            trigger="milestone",
-            message=f"milestone: reject paper {args.paper_id}",
-            defer_post_actions=defer_post_actions,
-        )
-        return 0
+        return _run_reject(args, root, record, unit_root, defer_post_actions)
 
     return 1
 

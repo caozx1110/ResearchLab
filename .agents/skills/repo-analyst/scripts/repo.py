@@ -16,8 +16,10 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from contextvars import ContextVar
+from functools import wraps
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 SCRIPT_PATH = Path(__file__).resolve()
 for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
@@ -47,6 +49,8 @@ from research.core import (
     append_history,
     apply_record_governance,
     build_index,
+    candidate_pools_path,
+    command_mutation,
     checkpoint_and_report,
     confirm_unit,
     load_runtime_preferences,
@@ -54,10 +58,12 @@ from research.core import (
     project_root,
     rel,
     resolve_local_reference,
+    topic_taxonomy_path,
     write_record,
 )
 from research.evidence import (
     attach_claims,
+    build_verification_receipt,
     read_claims,
     validate_claims,
     verify_claim_evidence,
@@ -83,6 +89,45 @@ ENTRYPOINT_HINTS = {
 # ("capability",)).                                                            #
 # --------------------------------------------------------------------------- #
 CAP_ELEMENTS: tuple[str, ...] = ("capability", "reuse_points", "entry_map")
+
+_ACTIVE_MUTATION: ContextVar[bool] = ContextVar("repo_active_mutation", default=False)
+_PENDING_CHECKPOINT: ContextVar[tuple[Path, str, str, list[Path]] | None] = ContextVar(
+    "repo_pending_checkpoint", default=None
+)
+
+
+def _index_targets(root: Path) -> list[Path]:
+    return [
+        root / "kb" / "index.yaml",
+        root / "kb" / "index.md",
+        topic_taxonomy_path(root),
+        candidate_pools_path(root),
+    ]
+
+
+def _transactional(op_name: str, target_builder):
+    def decorate(function):
+        @wraps(function)
+        def wrapped(*args, **kwargs):
+            root, targets = target_builder(*args, **kwargs)
+            active_token = _ACTIVE_MUTATION.set(True)
+            checkpoint_token = _PENDING_CHECKPOINT.set(None)
+            try:
+                with command_mutation(root, f"repo-analyst:{op_name}", targets):
+                    result = function(*args, **kwargs)
+                pending = _PENDING_CHECKPOINT.get()
+            finally:
+                _PENDING_CHECKPOINT.reset(checkpoint_token)
+                _ACTIVE_MUTATION.reset(active_token)
+            if pending is not None:
+                checkpoint_and_report(
+                    pending[0], trigger=pending[1], message=pending[2], target_paths=pending[3]
+                )
+            return result
+
+        return wrapped
+
+    return decorate
 
 ELEMENT_CLAIM_TYPE: dict[str, str] = {
     "capability": "evaluation",
@@ -114,6 +159,7 @@ EVIDENCE_REF_FORMAT_REPO: dict[str, str] = {
     "locator": "line=N  (line number within the repo file where the quote appears)",
     "quote": "short verbatim snippet — script checks it is a whitespace-normalized substring of the artifact file",
     "summary": "optional one-line paraphrase",
+    "external_source": "{kind: repo} (base_root comes from the trusted analyzer contract, never from the claim)",
 }
 
 
@@ -300,12 +346,20 @@ def _elements_by_name(fill: Any) -> dict[str, dict]:
 
 
 def _claim_from_element(name: str, element: dict) -> dict:
+    refs: list[Any] = []
+    for raw_ref in element.get("evidence_refs") or []:
+        if not isinstance(raw_ref, dict):
+            refs.append(raw_ref)
+            continue
+        ref = dict(raw_ref)
+        ref.setdefault("external_source", {"kind": "repo"})
+        refs.append(ref)
     return {
         "id": f"claim-{name}",
         "text": clean_text(str(element.get("content") or "")),
         "claim_type": str(element.get("claim_type") or ELEMENT_CLAIM_TYPE.get(name, "evaluation")),
         "confirmation_status": "pending_user_confirmation",
-        "evidence_refs": element.get("evidence_refs") or [],
+        "evidence_refs": refs,
     }
 
 
@@ -338,7 +392,11 @@ def verify_capability_fill(fill: Any, repo_root: Path) -> tuple[list[str], list[
         claims.append(claim)
         # verify_claim_evidence loads the artifact relative to repo_root; an unreachable
         # file yields an explicit "not found/readable" violation (never a silent pass).
-        for violation in verify_claim_evidence(claim, repo_root):
+        for violation in verify_claim_evidence(
+            claim,
+            repo_root,
+            external_source={"kind": "repo", "base_root": repo_root.as_posix()},
+        ):
             violations.append(f"element '{name}': {violation}")
     # Structural + judgement-evidence rules (research.evidence).
     for violation in validate_claims(claims):
@@ -421,11 +479,22 @@ def render_capability_md(record: dict, claims: list[dict]) -> str:
 # Helpers                                                                      #
 # --------------------------------------------------------------------------- #
 
-def _finalize_post_actions(root: Path, *, trigger: str, message: str, defer_post_actions: bool) -> dict[str, Any]:
+def _finalize_post_actions(
+    root: Path, *, trigger: str, message: str, defer_post_actions: bool, target_paths: Sequence[Path]
+) -> dict[str, Any]:
     if defer_post_actions:
         return {"committed": False, "status": "deferred"}
-    build_index(root)
-    return checkpoint_and_report(root, trigger=trigger, message=message)
+    index_paths = build_index(root)
+    all_targets = [*target_paths, *index_paths, topic_taxonomy_path(root), candidate_pools_path(root)]
+    if _ACTIVE_MUTATION.get():
+        _PENDING_CHECKPOINT.set((root, trigger, message, all_targets))
+        return {"committed": False, "status": "pending-transaction-commit"}
+    return checkpoint_and_report(
+        root,
+        trigger=trigger,
+        message=message,
+        target_paths=all_targets,
+    )
 
 
 def _resolve_fill_input(unit_root: Path, default_name: str, explicit: str | None) -> Path:
@@ -459,6 +528,8 @@ def next_for_agent_capability(root: Path, record: dict, fill_path: Path) -> str:
 def add_confirmation_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--confirmed-by", default="")
     parser.add_argument("--evidence", action="append", required=True)
+    parser.add_argument("--user-authorization", default="")
+    parser.add_argument("--authorization-source", default="")
 
 
 # --------------------------------------------------------------------------- #
@@ -494,6 +565,13 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+@_transactional(
+    "scan-structure",
+    lambda args, root, record, unit_root, defer_post_actions: (
+        root,
+        [unit_root / "record.yaml", unit_root / "structure-scan.yaml", *([] if defer_post_actions else _index_targets(root))],
+    ),
+)
 def _run_scan_structure(args, root, record, unit_root, defer_post_actions) -> int:
     scan_path = unit_root / "structure-scan.yaml"
     payload = scan_structure_payload(root, record)
@@ -522,10 +600,24 @@ def _run_scan_structure(args, root, record, unit_root, defer_post_actions) -> in
     print(f"[ok] wrote {scan_path.relative_to(root)}")
     print("下一步：运行 map-capability --phase prepare 产出三要素待填骨架。")
     _finalize_post_actions(root, trigger="milestone", message=f"milestone: scan repo structure {args.repo_id}",
-                           defer_post_actions=defer_post_actions)
+                           defer_post_actions=defer_post_actions,
+                           target_paths=[unit_root / "record.yaml", scan_path])
     return 0
 
 
+@_transactional(
+    "map-capability",
+    lambda args, root, record, unit_root, defer_post_actions: (
+        root,
+        [
+            unit_root / "record.yaml",
+            unit_root / "capability-fill.yaml",
+            unit_root / "repo-note.md",
+            unit_root / "capability-claims.yaml",
+            *([] if defer_post_actions else _index_targets(root)),
+        ],
+    ),
+)
 def _run_map_capability(args, root, record, unit_root, defer_post_actions) -> int:
     fill_path = unit_root / "capability-fill.yaml"
     note_path = unit_root / "repo-note.md"
@@ -562,7 +654,8 @@ def _run_map_capability(args, root, record, unit_root, defer_post_actions) -> in
         )
         print(next_for_agent_capability(root, record, fill_path))
         _finalize_post_actions(root, trigger="milestone", message=f"milestone: scaffold capability {args.repo_id}",
-                               defer_post_actions=defer_post_actions)
+                               defer_post_actions=defer_post_actions,
+                               target_paths=[unit_root / "record.yaml", fill_path])
         return 0
 
     # verify phase
@@ -593,6 +686,13 @@ def _run_map_capability(args, root, record, unit_root, defer_post_actions) -> in
         raise SystemExit(1)
 
     _apply_capability_fill_to_payload(record, claims)
+    record["payload"].setdefault("structure", {})["repo_root"] = repo_root_path.resolve().as_posix()
+    attach_claims(record.setdefault("payload", {}), claims)
+    build_verification_receipt(
+        record,
+        unit_root,
+        external_source={"kind": "repo", "base_root": repo_root_path.resolve().as_posix()},
+    )
     write_text_if_changed(note_path, render_capability_md(record, claims))
     claims_payload = {"repo_id": record["id"], "kind": "repo"}
     attach_claims(claims_payload, claims)
@@ -617,7 +717,53 @@ def _run_map_capability(args, root, record, unit_root, defer_post_actions) -> in
     write_record(root, record)
     print(f"[ok] verified + wrote {note_path.relative_to(root)} (capability filled, {len(claims)} elements)")
     _finalize_post_actions(root, trigger="milestone", message=f"milestone: verify capability {args.repo_id}",
-                           defer_post_actions=defer_post_actions)
+                           defer_post_actions=defer_post_actions,
+                           target_paths=[unit_root / "record.yaml", fill_path, note_path, unit_root / "capability-claims.yaml"])
+    return 0
+
+
+@_transactional(
+    "confirm",
+    lambda args, root, record, unit_root, defer_post_actions: (
+        root,
+        [unit_root / "record.yaml", *([] if defer_post_actions else _index_targets(root))],
+    ),
+)
+def _run_confirm(args, root: Path, record: dict, unit_root: Path, defer_post_actions: bool) -> int:
+    record = confirm_unit(
+        record,
+        "repo",
+        confirmed_by=args.confirmed_by,
+        evidence=args.evidence,
+        user_authorization=args.user_authorization,
+        authorization_source=args.authorization_source,
+        project_root=root,
+    )
+    write_record(root, record)
+    print(f"[ok] confirmed {args.repo_id}")
+    _finalize_post_actions(root, trigger="milestone", message=f"milestone: confirm repo {args.repo_id}",
+                           defer_post_actions=defer_post_actions,
+                           target_paths=[unit_root / "record.yaml"])
+    return 0
+
+
+@_transactional(
+    "reject",
+    lambda args, root, record, unit_root, defer_post_actions: (
+        root,
+        [unit_root / "record.yaml", *([] if defer_post_actions else _index_targets(root))],
+    ),
+)
+def _run_reject(args, root: Path, record: dict, unit_root: Path, defer_post_actions: bool) -> int:
+    record["confirmation_status"] = "rejected"
+    record["status"] = "rejected"
+    append_history(record, action="repo-rejected", summary="Repo analysis rejected or deferred.",
+                   information_types=["evaluation"])
+    write_record(root, record)
+    print(f"[ok] rejected {args.repo_id}")
+    _finalize_post_actions(root, trigger="milestone", message=f"milestone: reject repo {args.repo_id}",
+                           defer_post_actions=defer_post_actions,
+                           target_paths=[unit_root / "record.yaml"])
     return 0
 
 
@@ -638,29 +784,10 @@ def main() -> int:
         return _run_map_capability(args, root, record, unit_root, defer_post_actions)
 
     if args.command == "confirm":
-        record = confirm_unit(
-            record,
-            "repo",
-            confirmed_by=args.confirmed_by,
-            evidence=args.evidence,
-            project_root=root,
-        )
-        write_record(root, record)
-        print(f"[ok] confirmed {args.repo_id}")
-        _finalize_post_actions(root, trigger="milestone", message=f"milestone: confirm repo {args.repo_id}",
-                               defer_post_actions=defer_post_actions)
-        return 0
+        return _run_confirm(args, root, record, unit_root, defer_post_actions)
 
     if args.command == "reject":
-        record["confirmation_status"] = "rejected"
-        record["status"] = "rejected"
-        append_history(record, action="repo-rejected", summary="Repo analysis rejected or deferred.",
-                       information_types=["evaluation"])
-        write_record(root, record)
-        print(f"[ok] rejected {args.repo_id}")
-        _finalize_post_actions(root, trigger="milestone", message=f"milestone: reject repo {args.repo_id}",
-                               defer_post_actions=defer_post_actions)
-        return 0
+        return _run_reject(args, root, record, unit_root, defer_post_actions)
 
     return 1
 
