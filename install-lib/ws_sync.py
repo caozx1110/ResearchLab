@@ -50,7 +50,7 @@ RELEASE_PREFIXES = (
 )
 EXCLUDED_DIRS = {"__pycache__", ".venv", "tests"}
 EXCLUDED_SUFFIXES = {".pyc", ".pyo"}
-EXCLUDED_NAMES = {".DS_Store", MANIFEST_NAME, "eval_research_value.py"}
+EXCLUDED_NAMES = {".DS_Store", MANIFEST_NAME, "eval_research_value.py", "skill_validator.py"}
 
 
 class SyncError(RuntimeError):
