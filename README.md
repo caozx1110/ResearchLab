@@ -2,7 +2,7 @@
 
 ## English Quickstart
 
-An open-source Codex workspace for research knowledge units. It gives agents skills, scripts, and schemas to keep papers, repos, blogs, ideas, experiments, and reports in a local `kb/` instead of chat history.
+An open-source workspace skill bundle for research knowledge units. Install it into a workspace root so `.agents/` and the generated `kb/` live side by side, giving agents skills, scripts, and schemas to keep durable research artifacts out of chat history.
 
 首次运行会自动创建并使用项目内受管 `.venv`，无需手动创建 venv 或安装 PyYAML。
 
@@ -13,7 +13,7 @@ kb status
 
 ## 这是什么
 
-这是一个中文优先的 research workspace 骨架。
+这是一个中文优先的 research workspace skill bundle。
 
 它不是现成知识库，而是一套让 Codex 持续维护科研工作区的规则、skills、脚本和文档。目标很简单：把论文、网页、仓库、idea、设计、实验记录和周报，尽量从聊天里搬到可复用、可检索、可确认、可版本化的工作区文件里。
 
@@ -23,16 +23,16 @@ kb status
 - `AGENTS.md` / `CLAUDE.md`（软链 → `AGENTS.md`）：面向开发/优化本 skill 系统的开发者工作流。
 - `docs/`：按受众组织的用户指南和设计说明。
 
-如果本地还没有 `kb/`，也没关系。这个仓库可以先只作为 workflow 和 skill 系统使用，知识库内容之后再在本地生成。
+安装目标是 **workspace 根目录**，不是 `kb/` 目录本身。安装后 `.agents/` 与之后生成的 `kb/` 同级；如果本地还没有 `kb/`，初始化时会创建。
 
 ## Start Here
 
-- [安装指南](docs/INSTALL.md)：说明 `install.sh`、Claude/Codex project/system scope、`CLAUDE.md` 生成和 `kb` 上 PATH。
+- [安装指南](docs/INSTALL.md)：说明如何把 bundle 复制安装到 workspace 根、生成 Claude/Codex 接入文件，并可选把 `kb` 放上 PATH。
 - [用户指南](docs/USER_GUIDE.md)：给研究者，说明怎么安装、怎么开口、AI 和你如何分工、如何用 `kb` 快捷入口。
 - [设计说明](docs/DESIGN.md)：给开发者，说明 architecture、skill 路由、数据模型、confirmation gate 和扩展原则。
 - [贡献指南](CONTRIBUTING.md)：给贡献者，说明协作和变更流程。
 
-第一次使用直接运行 `bash install.sh`：中文向导会解释每个选项，并推荐只配置当前工作区；安装完成后在 Claude Code 或 Codex 对话中输入 `kb init` 即可开始。更新、卸载和进阶安装模型见 [安装指南](docs/INSTALL.md)。
+第一次使用直接运行 `bash install.sh`：中文向导会解释每个选项，并推荐把 project-scope copy 安装到目标 workspace 根；安装完成后在 Claude Code 或 Codex 对话中输入 `kb init` 即可开始。更新和卸载见 [安装指南](docs/INSTALL.md)。
 
 ## 核心想法
 
@@ -88,7 +88,7 @@ kb init
 kb doctor
 kb status
 kb next
-kb find humanoid vla recovery
+kb find retrieval augmented generation
 kb add https://example.com/paper.pdf
 kb review
 kb recall
@@ -108,7 +108,7 @@ idea / report 没有 `kb` 动词，默认用纯自然语言，例如“请基于
 | **scaffold** | 有可用骨架，但产出仍偏固定策略/事件流，尚未做到 evidence-first 的实质闭环 | （已清空——原综述/idea/方法/实验/报告 2026-07-17 升级为 beta，见上行） |
 | **dev-only** | 仅供开发/本地实验：现已加 token 鉴权 + PTY 默认关 + 强制回环 + 写保护 raw，但仍不建议用于共享或敏感环境 | Workbench（research-navigator browser：文件写端点带 token 鉴权，shell/PTY 需 `--enable-terminal` 显式开启） |
 
-治理内核（confirmation 词汇、逐字 evidence、禁自签、空心门、派生证据不可变）是**跨全系统的真地基**，不随单个 skill 档位浮动。详见 `temp/SYSTEM_DESIGN_SSOT.md`（设计源）与 `temp/BACKLOG.md`（实时落地状态）。
+治理内核（confirmation 词汇、逐字 evidence、禁自签、空心门、派生证据不可变）是**跨全系统的真地基**，不随单个 skill 档位浮动。落盘字段与枚举见 `.agents/lib/research/SCHEMAS.md`。
 
 如果你知道对象，也可以直接说：
 

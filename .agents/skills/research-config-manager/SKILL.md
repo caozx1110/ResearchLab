@@ -28,8 +28,8 @@ ${RESEARCH_PYTHON:-python3} .agents/skills/research-config-manager/scripts/confi
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-config-manager/scripts/config.py set --key preferences.language_preference --value zh-CN
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-config-manager/scripts/config.py toggle --key 自动生成详细论文笔记 --state off
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-config-manager/scripts/config.py capture-resources --statement "我现在有 8 卡训练资源和人形平台"
-${RESEARCH_PYTHON:-python3} .agents/skills/research-config-manager/scripts/config.py set-taxonomy-seed --topic humanoid-robotics --tag vla --tag whole-body-control --alias humanoid
-${RESEARCH_PYTHON:-python3} .agents/skills/research-config-manager/scripts/config.py set-pool --pool current-reading --topic humanoid-robotics --tag vla --description "当前优先阅读池"
+${RESEARCH_PYTHON:-python3} .agents/skills/research-config-manager/scripts/config.py set-taxonomy-seed --topic retrieval --tag rag --tag grounding --alias retrieval-augmentation
+${RESEARCH_PYTHON:-python3} .agents/skills/research-config-manager/scripts/config.py set-pool --pool current-reading --topic retrieval --tag rag --description "当前优先阅读池"
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-config-manager/scripts/config.py guide --focus paper-intake
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-config-manager/scripts/config.py set-runtime-pref --section browser --key default_terminal_mode --value codex
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-config-manager/scripts/config.py set-runtime-pref --section paper --key auto_complete_note --value true

@@ -28,19 +28,19 @@ Use this skill to anchor work to a concrete research program.
 ## Commands
 
 ```bash
-${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py init-program --program-id open-world-vla --question "..." --goal "..."
-${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py set-stage --program-id open-world-vla --stage literature-review
-${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py add-open-question --program-id open-world-vla --question "What evidence is still missing?"
-${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py answer-question --program-id open-world-vla --question-id open-world-vla-open-questions-001 --answer "Evidence now exists in run logs"
-${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py request-evidence --program-id open-world-vla --question "Can repo-X reproduce baseline?" --needed "Need baseline parity logs"
-${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py resolve-evidence --program-id open-world-vla --evidence-id open-world-vla-evidence-requests-001 --result "Baseline parity log attached"
-${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py drop-question --program-id open-world-vla --question-id open-world-vla-open-questions-002 --reason "Superseded"
-${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py drop-evidence --program-id open-world-vla --evidence-id open-world-vla-evidence-requests-002 --reason "No longer blocking"
-${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py log-decision --program-id open-world-vla --decision "Choose repo-X as baseline host" --rationale "Best overlap with current validation path"
-${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py add-reporting-event --program-id open-world-vla --title "Baseline host chosen" --summary "Repo-X becomes the default baseline host"
-${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py attach-unit --program-id open-world-vla --unit-id p-openvla-bf86ee46
-${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py query-program --program-id open-world-vla --question "当前还缺哪些 evidence?"
-${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py status --program-id open-world-vla
+${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py init-program --program-id example-program --question "..." --goal "..."
+${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py set-stage --program-id example-program --stage literature-review
+${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py add-open-question --program-id example-program --question "What evidence is still missing?"
+${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py answer-question --program-id example-program --question-id example-program-open-questions-001 --answer "Evidence now exists in run logs"
+${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py request-evidence --program-id example-program --question "Can repo-X reproduce baseline?" --needed "Need baseline parity logs"
+${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py resolve-evidence --program-id example-program --evidence-id example-program-evidence-requests-001 --result "Baseline parity log attached"
+${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py drop-question --program-id example-program --question-id example-program-open-questions-002 --reason "Superseded"
+${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py drop-evidence --program-id example-program --evidence-id example-program-evidence-requests-002 --reason "No longer blocking"
+${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py log-decision --program-id example-program --decision "Choose repo-X as baseline host" --rationale "Best overlap with current validation path"
+${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py add-reporting-event --program-id example-program --title "Baseline host chosen" --summary "Repo-X becomes the default baseline host"
+${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py attach-unit --program-id example-program --unit-id p-example-bf86ee46
+${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py query-program --program-id example-program --question "当前还缺哪些 evidence?"
+${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py status --program-id example-program
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py dashboard --limit 10
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py next --limit 5
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py route --task "分析新论文是否值得细读"

@@ -29,7 +29,7 @@ CLI 只强制 `title` 与 `summary`；`--tradeoff`、`--open-question`、`--next
 
 ```bash
 ${RESEARCH_PYTHON:-python3} .agents/skills/discussion-archivist/scripts/archive.py archive \
-  --program-id physics-aware-fb-z-space \
+  --program-id example-program \
   --title "是否在 Phase 2 保留 latent interface" \
   --summary "Phase 1 已收敛 motion token；下一步是直接接 controller 还是先暴露 latent interface。" \
   --tradeoff "保留 latent interface 增加 VLA 接入面，但延后 controller 实验" \

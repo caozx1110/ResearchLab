@@ -61,10 +61,10 @@ elements:
 ## 常用命令
 
 ```bash
-${RESEARCH_PYTHON:-python3} .agents/skills/repo-analyst/scripts/repo.py scan-structure --repo-id r-openvla-dadda683
-${RESEARCH_PYTHON:-python3} .agents/skills/repo-analyst/scripts/repo.py map-capability --repo-id r-openvla-dadda683 --phase prepare
-# agent 填 kb/units/repos/r-openvla-dadda683/capability-fill.yaml 后：
-${RESEARCH_PYTHON:-python3} .agents/skills/repo-analyst/scripts/repo.py map-capability --repo-id r-openvla-dadda683 --phase verify
-${RESEARCH_PYTHON:-python3} .agents/skills/repo-analyst/scripts/repo.py confirm --repo-id r-openvla-dadda683 --confirmed-by czx --evidence kb/units/repos/r-openvla-dadda683/repo-note.md
-${RESEARCH_PYTHON:-python3} .agents/skills/repo-analyst/scripts/repo.py reject --repo-id r-openvla-dadda683
+${RESEARCH_PYTHON:-python3} .agents/skills/repo-analyst/scripts/repo.py scan-structure --repo-id r-example-dadda683
+${RESEARCH_PYTHON:-python3} .agents/skills/repo-analyst/scripts/repo.py map-capability --repo-id r-example-dadda683 --phase prepare
+# agent 填 kb/units/repos/r-example-dadda683/capability-fill.yaml 后：
+${RESEARCH_PYTHON:-python3} .agents/skills/repo-analyst/scripts/repo.py map-capability --repo-id r-example-dadda683 --phase verify
+${RESEARCH_PYTHON:-python3} .agents/skills/repo-analyst/scripts/repo.py confirm --repo-id r-example-dadda683 --confirmed-by research-lead --evidence kb/units/repos/r-example-dadda683/repo-note.md
+${RESEARCH_PYTHON:-python3} .agents/skills/repo-analyst/scripts/repo.py reject --repo-id r-example-dadda683
 ```

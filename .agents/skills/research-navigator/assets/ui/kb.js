@@ -1080,7 +1080,7 @@
       if (/idea-card\.md$/i.test(path)) return "Idea";
       if (/progress-update|weekly-report|weekly\.md$/i.test(path)) return "进展";
       if (/minimum-validation-matrix\.md$/i.test(path)) return "矩阵";
-      return title.replace(/humanoid[-_ ]vla[-_ ]wholebody[-_ ]control/gi, "").trim() || basename(path);
+      return title.trim() || basename(path);
     };
     elements.quickOpenBar.innerHTML = items
       .map((item) => {

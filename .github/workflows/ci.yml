@@ -25,5 +25,7 @@ jobs:
         run: |
           bash -n install.sh
           python -m py_compile install-lib/ws_sync.py
+      - name: Validate skill metadata
+        run: python .agents/lib/research/skill_validator.py .agents/skills
       - name: Run tests
         run: python -m pytest .agents/lib/research/tests -q

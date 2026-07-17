@@ -76,16 +76,16 @@ payload:
 以下命令只供 agent 内部执行，不直接展示给 end user；面向用户只输出自然语言或 `kb <verb>`。
 
 ```bash
-${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py capture --title "latent world model for whole-body control"
-${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py generate --title "humanoid recovery policy" --count 4 --pool current-ideas
-${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py analyze --idea-id i-physics-aware-fb-compatible-f7e91d86 --phase prepare
-${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py analyze --idea-id i-physics-aware-fb-compatible-f7e91d86 --phase verify
-${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py review --idea-id i-physics-aware-fb-compatible-f7e91d86 --phase prepare
-${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py review --idea-id i-physics-aware-fb-compatible-f7e91d86 --phase verify
-${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py discuss --id i-physics-aware-fb-compatible-f7e91d86 --phase prepare
-${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py discuss --id i-physics-aware-fb-compatible-f7e91d86 --phase verify
+${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py capture --title "retrieval-aware code assistant"
+${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py generate --title "adaptive retrieval policy" --count 4 --pool current-ideas
+${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py analyze --idea-id i-example-f7e91d86 --phase prepare
+${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py analyze --idea-id i-example-f7e91d86 --phase verify
+${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py review --idea-id i-example-f7e91d86 --phase prepare
+${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py review --idea-id i-example-f7e91d86 --phase verify
+${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py discuss --id i-example-f7e91d86 --phase prepare
+${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py discuss --id i-example-f7e91d86 --phase verify
 ${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py review-assist --pool current-ideas
-${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py select --idea-id i-physics-aware-fb-compatible-f7e91d86 --confirmed-by czx --evidence kb/programs/open-world-vla/decision-log.md
-${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py select-best --pool current-ideas --confirmed-by czx --evidence kb/programs/open-world-vla/decision-log.md
-${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py archive --idea-id i-physics-aware-fb-compatible-f7e91d86
+${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py select --idea-id i-example-f7e91d86 --confirmed-by research-lead --evidence kb/programs/example-program/decision-log.md
+${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py select-best --pool current-ideas --confirmed-by research-lead --evidence kb/programs/example-program/decision-log.md
+${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py archive --idea-id i-example-f7e91d86
 ```
