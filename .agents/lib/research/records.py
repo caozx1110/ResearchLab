@@ -1,9 +1,12 @@
 """Record schema: templates, payload skeletons, normalization, history, and store access (iter/locate)."""
 from __future__ import annotations
 
+import os
 import re
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator, Sequence
 
 from .common import (
     load_yaml,
@@ -11,6 +14,7 @@ from .common import (
     utc_now_iso,
 )
 from .evidence import (
+    confirmation_claims,
     confirmation_content_digest,
     record_external_source_contract,
     verification_receipt_violations,
@@ -18,6 +22,7 @@ from .evidence import (
 from .ids import (
     build_unit_id,
 )
+from .journal import journaled_op
 from .paths import (
     UNIT_KIND_DIRS,
     _artifact_list,
@@ -48,6 +53,129 @@ DEFAULT_REUSE_FLAGS = {
 
 
 AI_INFORMATION_TYPES = {"inference", "evaluation", "user_opinion"}
+WORKFLOW_STATES = {
+    "source_ready",
+    "awaiting_agent_fill",
+    "ready_to_verify",
+    "ready_for_review",
+    "done",
+    "failed_retryable",
+}
+
+
+def _atomic_restore_bytes(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".restore",
+            delete=False,
+        ) as handle:
+            temp_path = Path(handle.name)
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+    finally:
+        if temp_path is not None and temp_path.exists():
+            temp_path.unlink()
+
+
+@contextmanager
+def command_mutation(
+    project_root: Path,
+    op_type: str,
+    target_paths: Sequence[Path],
+) -> Iterator[None]:
+    """Journal one command and restore every exact file target on failure.
+
+    Lock acquisition is intentionally delegated to the shared recovery layer's
+    upcoming re-entrant ``mutation_transaction`` integration; nested write_record
+    calls already lock/CAS their record target on this baseline.
+    """
+    targets = sorted({Path(path).resolve() for path in target_paths}, key=lambda path: path.as_posix())
+    directory_targets = {
+        path for path in targets if path.is_dir() or (not path.exists() and not path.suffix)
+    }
+    file_targets = [path for path in targets if path not in directory_targets]
+    before = {path: path.read_bytes() if path.is_file() else None for path in file_targets}
+    tree_before: dict[Path, tuple[bool, dict[str, bytes], set[str]]] = {}
+    for directory in directory_targets:
+        existed = directory.is_dir()
+        files = {
+            path.relative_to(directory).as_posix(): path.read_bytes()
+            for path in directory.rglob("*")
+            if path.is_file()
+        } if existed else {}
+        directories = {
+            path.relative_to(directory).as_posix()
+            for path in directory.rglob("*")
+            if path.is_dir()
+        } if existed else set()
+        tree_before[directory] = (existed, files, directories)
+    try:
+        # Baseline journal digests files only. Directory targets are still one
+        # rollback/checkpoint scope here and become native journal targets at the
+        # shared mutation_transaction integration point.
+        with journaled_op(project_root, op_type, file_targets):
+            yield
+    except BaseException:
+        for path, content in before.items():
+            if content is None:
+                if path.is_file() or path.is_symlink():
+                    path.unlink()
+            else:
+                _atomic_restore_bytes(path, content)
+        for directory, (existed, files, directories) in tree_before.items():
+            if directory.exists():
+                for path in sorted(directory.rglob("*"), key=lambda item: len(item.parts), reverse=True):
+                    relative = path.relative_to(directory).as_posix()
+                    if (path.is_file() or path.is_symlink()) and relative not in files:
+                        path.unlink()
+                for path in sorted(directory.rglob("*"), key=lambda item: len(item.parts), reverse=True):
+                    relative = path.relative_to(directory).as_posix()
+                    if path.is_dir() and relative not in directories:
+                        try:
+                            path.rmdir()
+                        except OSError:
+                            pass
+            if existed:
+                directory.mkdir(parents=True, exist_ok=True)
+                for relative in sorted(directories):
+                    (directory / relative).mkdir(parents=True, exist_ok=True)
+                for relative, payload in files.items():
+                    _atomic_restore_bytes(directory / relative, payload)
+            elif directory.is_dir():
+                try:
+                    directory.rmdir()
+                except OSError:
+                    pass
+        raise
+
+
+def _trusted_claim_source_roots(project_root: Path, record: dict[str, Any]) -> dict[str, Path]:
+    roots: dict[str, Path] = {}
+    record_id = str(record.get("id") or "").strip()
+    record_kind = str(record.get("kind") or "").strip()
+    for claim in confirmation_claims(record):
+        for ref in claim.get("evidence_refs") or []:
+            if not isinstance(ref, dict):
+                continue
+            source_unit_id = str(ref.get("source_unit_id") or "").strip()
+            if not source_unit_id or source_unit_id in roots:
+                continue
+            if source_unit_id == record_id:
+                roots[source_unit_id] = unit_root(project_root, record_kind, record_id)
+                continue
+            for source_kind in UNIT_KIND_DIRS:
+                candidate = record_path(project_root, source_kind, source_unit_id)
+                if candidate.exists():
+                    roots[source_unit_id] = candidate.parent
+                    break
+    return roots
 
 
 def kind_payload_skeleton(kind: str, title: str = "") -> dict[str, Any]:
@@ -466,6 +594,7 @@ def normalize_record_schema(record: dict[str, Any], *, project_root: Path | None
             normalized,
             evidence_root,
             external_source=record_external_source_contract(normalized),
+            source_roots=_trusted_claim_source_roots(project_root, normalized) if project_root is not None else None,
             check_artifacts=project_root is not None,
         )
         if verification_violations:
@@ -526,6 +655,76 @@ def _record_needs_gate(record: dict[str, Any]) -> tuple[bool, set[str], bool]:
     source = record.get("source") or {}
     source_is_ai = isinstance(source, dict) and str(source.get("kind") or "").lower() == "ai"
     return bool(ai_info_types) or source_is_ai, ai_info_types, source_is_ai
+
+
+def _workflow_marker(record: dict[str, Any]) -> str:
+    kind = str(record.get("kind") or "")
+    payload = record.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    state = payload.get("state")
+    state = state if isinstance(state, dict) else {}
+    if kind in {"paper", "blog"}:
+        return str(state.get("full_note_status") or "")
+    if kind == "repo":
+        return str(state.get("capability_fill_status") or "")
+    if kind == "idea":
+        review = payload.get("review")
+        analysis = payload.get("analysis")
+        review = review if isinstance(review, dict) else {}
+        analysis = analysis if isinstance(analysis, dict) else {}
+        return str(review.get("review_status") or analysis.get("analysis_status") or "")
+    if kind == "experiment":
+        diagnosis = payload.get("diagnosis")
+        diagnosis = diagnosis if isinstance(diagnosis, dict) else {}
+        return str(diagnosis.get("verification_status") or state.get("diagnosis_status") or "")
+    return ""
+
+
+def record_workflow_state(record: dict[str, Any]) -> str:
+    """Single pure classifier shared by next/review/status/auto callers."""
+    status = str(record.get("status") or "").strip().lower()
+    confirmation_status = str(record.get("confirmation_status") or "")
+    payload = record.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    source = record.get("source")
+    source = source if isinstance(source, dict) else {}
+    marker = _workflow_marker(record).strip().lower()
+    failure_markers = {
+        status,
+        marker,
+        str(source.get("status") or "").strip().lower(),
+        str(payload.get("workflow_status") or "").strip().lower(),
+    }
+    if failure_markers & {"failed_retryable", "retryable_failure", "failed-retryable"}:
+        return "failed_retryable"
+    if confirmation_status in {"confirmed", "rejected"} or status in {"archived", "completed"}:
+        return "done"
+    if marker in {"awaiting_agent_fill", "agent_fill_required"}:
+        return "awaiting_agent_fill"
+    if marker in {"ready_to_verify", "agent_fill_complete"}:
+        return "ready_to_verify"
+
+    claims = confirmation_claims(record)
+    verification_current = bool(claims) and not verification_receipt_violations(
+        record,
+        None,
+        check_artifacts=False,
+    )
+    if confirmation_status == "pending_user_confirmation":
+        if verification_current:
+            return "ready_for_review"
+        if marker in {"pending_user_confirmation", "ready_for_review"}:
+            return "awaiting_agent_fill" if _record_needs_gate(record)[0] else "ready_for_review"
+        if marker == "not_started" or (not marker and str(record.get("kind") or "") in {"paper", "blog", "repo", "idea"}):
+            return "source_ready"
+        if _record_needs_gate(record)[0] or marker:
+            return "awaiting_agent_fill"
+        return "ready_for_review"
+    return "source_ready"
+
+
+def is_ready_for_human_review(record: dict[str, Any]) -> bool:
+    return record_workflow_state(record) == "ready_for_review"
 
 
 def iter_records(project_root: Path, *, kind: str | None = None) -> list[dict[str, Any]]:
@@ -645,6 +844,8 @@ __all__ = [
     "MATURITY_LEVELS",
     "DEFAULT_REUSE_FLAGS",
     "AI_INFORMATION_TYPES",
+    "WORKFLOW_STATES",
+    "command_mutation",
     "kind_payload_skeleton",
     "_extract_unit_id_hash",
     "_record_template",
@@ -653,6 +854,8 @@ __all__ = [
     "default_record",
     "normalize_record_schema",
     "_record_needs_gate",
+    "record_workflow_state",
+    "is_ready_for_human_review",
     "iter_records",
     "_record_lookup_path",
     "_record_hash_suffix",

@@ -82,7 +82,10 @@ CONFIRM_UNIT_SUMMARY_BY_KIND = {
 
 
 def is_ai_signer(actor: str) -> bool:
-    tokens = re.findall(r"[a-z0-9]+", str(actor or "").casefold())
+    normalized = str(actor or "").strip().casefold()
+    if normalized in AI_SIGNER_NAMES:
+        return True
+    tokens = re.findall(r"[a-z0-9]+", normalized)
     token_set = set(tokens)
     if token_set & AI_SIGNER_TOKENS:
         return True
@@ -227,6 +230,26 @@ def require_user_authorization(
     return authorization, source
 
 
+def _trusted_claim_source_roots(project_root: Path, record: dict[str, Any]) -> dict[str, Path]:
+    """Resolve cross-unit evidence roots from canonical KB records, never claim paths."""
+    roots: dict[str, Path] = {}
+    record_id = str(record.get("id") or "").strip()
+    record_kind = str(record.get("kind") or "").strip()
+    for claim in confirmation_claims(record):
+        for ref in claim.get("evidence_refs") or []:
+            if not isinstance(ref, dict):
+                continue
+            source_unit_id = str(ref.get("source_unit_id") or "").strip()
+            if not source_unit_id or source_unit_id in roots:
+                continue
+            if source_unit_id == record_id:
+                roots[source_unit_id] = unit_root(project_root, record_kind, record_id)
+                continue
+            _source_record, source_path = locate_record(project_root, source_unit_id)
+            roots[source_unit_id] = source_path.parent
+    return roots
+
+
 def apply_confirmation(
     record: dict[str, Any],
     *,
@@ -236,6 +259,8 @@ def apply_confirmation(
     authorization_source: str = "",
     method: str = "cli",
     project_root: Path | None = None,
+    verification_root: Path | None = None,
+    trusted_source_roots: dict[str, Path] | None = None,
 ) -> dict[str, Any]:
     actor, evidence_items = require_confirmation_provenance(
         confirmed_by=confirmed_by,
@@ -256,27 +281,17 @@ def apply_confirmation(
     claim_violations = validate_claims(claims)
     if claim_violations:
         raise SystemExit("Confirmation claim violations:\n  - " + "\n  - ".join(claim_violations))
-    evidence_root: Path | None = None
+    evidence_root: Path | None = verification_root
     external_source = record_external_source_contract(record)
-    if project_root is not None:
+    source_roots: dict[str, Path] | None = trusted_source_roots
+    if project_root is not None and evidence_root is None:
         evidence_root = unit_root(
             project_root,
             str(record.get("kind") or ""),
             str(record.get("id") or ""),
         )
-    if track == "judgement":
-        if evidence_root is None:
-            raise SystemExit("Cannot validate judgement verification without project_root.")
-        verification_violations = verification_receipt_violations(
-            record,
-            evidence_root,
-            external_source=external_source,
-        )
-        if verification_violations:
-            raise SystemExit(
-                "Judgement verification receipt is missing or stale:\n  - "
-                + "\n  - ".join(verification_violations)
-            )
+    if project_root is not None and source_roots is None:
+        source_roots = _trusted_claim_source_roots(project_root, record)
     claims_with_evidence = [claim for claim in claims if claim.get("evidence_refs")]
     if claims_with_evidence:
         if evidence_root is None:
@@ -288,10 +303,25 @@ def apply_confirmation(
                 claim,
                 evidence_root,
                 external_source=external_source,
+                source_roots=source_roots,
             )
         ]
         if evidence_violations:
             raise SystemExit("Confirmation evidence violations:\n  - " + "\n  - ".join(evidence_violations))
+    if track == "judgement":
+        if evidence_root is None:
+            raise SystemExit("Cannot validate judgement verification without project_root.")
+        verification_violations = verification_receipt_violations(
+            record,
+            evidence_root,
+            external_source=external_source,
+            source_roots=source_roots,
+        )
+        if verification_violations:
+            raise SystemExit(
+                "Judgement verification receipt is missing or stale:\n  - "
+                + "\n  - ".join(verification_violations)
+            )
     now = utc_now_iso()
     prior_information_types = _text_list(record.get("information_types"))
     record["confirmation_status"] = "confirmed"
@@ -372,6 +402,11 @@ def _has_complete_confirmation_receipt(record: dict[str, Any]) -> bool:
         if verification_receipt_violations(record, None, check_artifacts=False):
             return False
     return True
+
+
+def has_complete_confirmation_receipt(record: dict[str, Any]) -> bool:
+    """Public structural/current-content validator for downstream consumers."""
+    return _has_complete_confirmation_receipt(record)
 
 
 def confirm_unit(
@@ -473,6 +508,8 @@ def write_record(
     *,
     expected_revision: int | None = None,
 ) -> Path:
+    supplied_revision = record.get("revision") if "revision" in record else None
+    supplied_has_revision = "revision" in record
     normalized = normalize_record_schema(record, project_root=project_root)
     validate_write(normalized)
     root = unit_root(project_root, str(normalized["kind"]), str(normalized["id"]))
@@ -488,15 +525,36 @@ def write_record(
                 current_revision = max(0, int(current.get("revision", 0)))
             except (TypeError, ValueError) as exc:
                 raise SystemExit(f"Invalid on-disk record revision: {path}") from exc
-        if expected_revision is not None and current_revision != expected_revision:
+        if expected_revision is None:
+            if path.exists() and not supplied_has_revision:
+                raise SystemExit(
+                    f"Record revision missing for existing {normalized['id']}; "
+                    "reload the record before writing or pass an explicit expected_revision."
+                )
+            try:
+                effective_expected_revision = int(supplied_revision) if path.exists() else 0
+            except (TypeError, ValueError) as exc:
+                raise SystemExit(
+                    f"Invalid expected record revision for {normalized['id']}: {supplied_revision!r}"
+                ) from exc
+        else:
+            try:
+                effective_expected_revision = max(0, int(expected_revision))
+            except (TypeError, ValueError) as exc:
+                raise SystemExit(
+                    f"Invalid explicit expected_revision for {normalized['id']}: {expected_revision!r}"
+                ) from exc
+        if current_revision != effective_expected_revision:
             raise SystemExit(
                 f"Record revision conflict for {normalized['id']}: "
-                f"expected {expected_revision}, found {current_revision}"
+                f"expected {effective_expected_revision}, found {current_revision}"
             )
         normalized["revision"] = current_revision + 1
         normalized["updated_at"] = utc_now_iso()
         with journaled_op(project_root, "write_record", [path]):
             write_yaml_if_changed(path, normalized)
+        record["revision"] = normalized["revision"]
+        record["updated_at"] = normalized["updated_at"]
     return path
 
 
@@ -577,6 +635,7 @@ __all__ = [
     "require_confirmation_provenance",
     "require_user_authorization",
     "apply_confirmation",
+    "has_complete_confirmation_receipt",
     "confirm_unit",
     "validate_write",
     "write_record",

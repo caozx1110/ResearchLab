@@ -64,6 +64,7 @@ CONFIRMABLE_CONTENT_SECTIONS: dict[str, tuple[str, ...]] = {
     "blog": ("content",),
     "idea": ("problem", "hypothesis"),
     "experiment": ("results", "diagnosis"),
+    "program_decision": ("decision",),
 }
 
 # Locked canonical schema — kept byte-identical to
@@ -334,12 +335,13 @@ class ResolvedEvidenceArtifact:
     base_root: Path
     artifact: str
     source_kind: str
+    source_unit_id: str = ""
     external_kind: str = ""
 
     @property
     def identity(self) -> str:
         if self.source_kind == "unit":
-            return f"unit:{self.artifact}"
+            return f"unit:{self.source_unit_id or '<unspecified>'}:{self.artifact}"
         return f"external:{self.external_kind}:{self.base_root.as_posix()}:{self.artifact}"
 
     def receipt_entry(self) -> dict[str, Any]:
@@ -347,6 +349,7 @@ class ResolvedEvidenceArtifact:
             "identity": self.identity,
             "source_kind": self.source_kind,
             "artifact": self.artifact,
+            "source_unit_id": self.source_unit_id,
             "byte_sha256": hashlib.sha256(self.path.read_bytes()).hexdigest(),
         }
         if self.source_kind == "external_source":
@@ -441,6 +444,7 @@ def resolve_evidence_artifact(
         base_root=base,
         artifact=canonical_artifact,
         source_kind=source_kind,
+        source_unit_id=str(ref.get("source_unit_id") or "").strip(),
         external_kind=external_kind,
     )
 
@@ -463,11 +467,25 @@ def _load_artifact_path(path: Path) -> _LoadedArtifact | None:
     return _LoadedArtifact(full_text=raw)
 
 
+def _ref_unit_dir(
+    ref: dict[str, Any],
+    unit_dir: str | Path | None,
+    source_roots: dict[str, str | Path] | None,
+) -> str | Path | None:
+    if source_roots is None:
+        return unit_dir
+    source_unit_id = str(ref.get("source_unit_id") or "").strip()
+    if not source_unit_id or source_unit_id not in source_roots:
+        raise ValueError(f"no trusted unit root for source_unit_id {source_unit_id or '<missing>'!r}")
+    return source_roots[source_unit_id]
+
+
 def verify_claim_evidence(
     claim: Any,
     unit_dir: str | Path | None,
     *,
     external_source: dict[str, Any] | None = None,
+    source_roots: dict[str, str | Path] | None = None,
 ) -> list[str]:
     """Return a list of evidence violations for `claim` (empty == fully grounded).
 
@@ -504,7 +522,8 @@ def verify_claim_evidence(
             violations.append(f"{where}: missing artifact for quote '{_quote_digest(quote)}'")
             continue
         try:
-            resolved = resolve_evidence_artifact(ref, base, external_source=external_source)
+            ref_base = _ref_unit_dir(ref, base, source_roots)
+            resolved = resolve_evidence_artifact(ref, ref_base, external_source=external_source)
         except ValueError as exc:
             violations.append(f"{where}: {exc} for quote '{_quote_digest(quote)}'")
             continue
@@ -542,6 +561,7 @@ def evidence_artifact_entries(
     unit_dir: str | Path | None,
     *,
     external_source: dict[str, Any] | None = None,
+    source_roots: dict[str, str | Path] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Collect byte-bound canonical artifact identities for verified claims."""
     entries: dict[str, dict[str, Any]] = {}
@@ -557,7 +577,8 @@ def evidence_artifact_entries(
         for ref_index, ref in enumerate(refs):
             where = f"claims[{claim_index}].evidence_refs[{ref_index}]"
             try:
-                resolved = resolve_evidence_artifact(ref, unit_dir, external_source=external_source)
+                ref_base = _ref_unit_dir(ref, unit_dir, source_roots)
+                resolved = resolve_evidence_artifact(ref, ref_base, external_source=external_source)
                 if not resolved.path.is_file():
                     raise ValueError(
                         f"artifact {str(ref.get('artifact') or '')!r} not found/readable under {resolved.base_root}"
@@ -595,6 +616,7 @@ def build_verification_receipt(
     unit_dir: str | Path,
     *,
     external_source: dict[str, Any] | None = None,
+    source_roots: dict[str, str | Path] | None = None,
     verified_at: str = "",
 ) -> dict[str, Any]:
     """Validate canonical claims and persist their byte-bound verification receipt."""
@@ -605,12 +627,18 @@ def build_verification_receipt(
     violations.extend(
         violation
         for claim in claims
-        for violation in verify_claim_evidence(claim, unit_dir, external_source=external_source)
+        for violation in verify_claim_evidence(
+            claim,
+            unit_dir,
+            external_source=external_source,
+            source_roots=source_roots,
+        )
     )
     artifacts, artifact_violations = evidence_artifact_entries(
         claims,
         unit_dir,
         external_source=external_source,
+        source_roots=source_roots,
     )
     violations.extend(artifact_violations)
     if violations:
@@ -633,6 +661,7 @@ def verification_receipt_violations(
     unit_dir: str | Path | None,
     *,
     external_source: dict[str, Any] | None = None,
+    source_roots: dict[str, str | Path] | None = None,
     check_artifacts: bool = True,
 ) -> list[str]:
     """Return why the stored analyzer verification is not current."""
@@ -667,6 +696,7 @@ def verification_receipt_violations(
                 claims,
                 unit_dir,
                 external_source=external_source,
+                source_roots=source_roots,
             )
             violations.extend(artifact_violations)
             if _canonical_digest_value(stored_artifacts) != _canonical_digest_value(current_artifacts):

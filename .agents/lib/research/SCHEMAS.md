@@ -31,12 +31,15 @@
 | `INFORMATION_TYPES` | `fact, inference, evaluation, user_opinion, unverified` | 信息性质 |
 | `MATURITY_LEVELS` | `lightweight, complete` | unit 完备度 |
 | `UNIT_KIND_DIRS` | `paper→kb/units/papers, repo→kb/units/repos, blog→kb/units/blogs, idea→kb/units/ideas, experiment→kb/units/experiments` | unit 落盘目录 |
+| `WORKFLOW_STATES` | `source_ready, awaiting_agent_fill, ready_to_verify, ready_for_review, done, failed_retryable` | `record_workflow_state()` 的唯一纯分类，供 next/review/status/auto 共用 |
 
 **确认门控规则**（见 [`confirmation gate`](#confirmation-gate)）：
 - 任一字段 `source.kind = "ai"` 或 `information_types` 包含 `{inference, evaluation, user_opinion}` 之一 → 期望 `confirmation_status` 是 `pending_user_confirmation` 或 `rejected`，且 `needs_human_confirmation = true`
 - judgement-track 契约违规默认 fail-closed，直接拦截 unit `record.yaml` 写入；仅显式设置 `RESEARCH_VALIDATE_FAILOPEN=1`（或内部调用显式 `strict=False`）才降级为 warning。fact-track / 非 gated record 不受影响。program state / reporting events 等旁路文件目前不经过该 gate。
 - **确认溯源**：把 `confirmation_status` 迁到 `confirmed` 必须提供确认人（`--confirmed-by` 或 `identity.default_confirmed_by` 二选一）+ 至少一条 `--evidence`，否则 `apply_confirmation`/`promote_record` 直接拒绝（`SystemExit`）；确认时写入下方完整 `ConfirmationReceipt`。其它状态（auto_confirmed/pending/rejected）无需 provenance。
 - **确认时 evidence 复验**：receipt 落盘前重新运行 claim 结构/空据校验与 `verify_claim_evidence()` 逐字 quote + locator 校验；存在 claim evidence 却没有可解析的 `project_root` 时 fail-closed，不允许只凭上游 verify 结果签 receipt。
+- **judgement 授权**：judgement track 还必须保存用户原话 `user_authorization`，且 `authorization_source=user_message`。这是本地 attestation 完整性与审计留痕，不宣称密码学身份认证。
+- **verify→confirm 绑定**：judgement 必须先有非空 canonical `payload.claims` 与当前 `payload.verification`；receipt 的 `claim_ids` 非空并覆盖 canonical claims。claims/content/artifact bytes 改变均使确认失效并降回 pending。
 
 ---
 
@@ -58,6 +61,7 @@ confidence: 0.9                      # 0.0-1.0
 created_at: ''                       # UTC iso
 first_ingested_at: ''
 updated_at: ''
+revision: 0                         # CAS 版本；新建期望 0，成功写后 +1
 last_human_confirmed_at: ''
 confirmation:                        # 仅在人工确认为 confirmed 时写入（apply_confirmation）
   by: ''                             # 确认人（--confirmed-by 或 identity.default_confirmed_by，非空）
@@ -68,10 +72,13 @@ confirmation:                        # 仅在人工确认为 confirmed 时写入
   subject:                           # 确认对象身份
     kind: paper
     id: p-...
-  claim_ids: []                      # 本次确认覆盖的 payload.claims id；无 claims 时为空
+  claim_ids: []                      # 本次覆盖的 canonical claim ids；judgement 必须非空且完整
   content_digest: ''                 # 确认时核心 substance + claims/evidence_refs 的 canonical sha256
   evidence_digest: ''                # evidence + claims 中 quote/locator 集合的 canonical sha256
   prior_information_types: []        # 确认前的 epistemic 类型，确认不得抹除其来源语义
+  verified_at: ''                    # judgement：复用 payload.verification.verified_at
+  user_authorization: ''             # judgement：用户确认原话，必填
+  authorization_source: user_message # judgement：固定 user_message
   invalidation:                      # content_digest 不再匹配时由 normalize_record_schema 写入
     reason: confirmable_content_changed
     stored_content_digest: ''
@@ -107,6 +114,20 @@ source:
   backup_kind: file|dir
   file_hash: ""                      # sha256（如有）
 payload:                             # 见下方 per-kind payload
+  claims: []                         # canonical claims SSOT；sidecar 只允许是投影
+  verification:                      # analyzer verify 的 byte-bound receipt
+    verified_at: ''
+    claims_digest: ''                # canonical payload.claims sha256
+    evidence_digest: ''              # 含 artifact identity + bytes 的 sha256
+    artifacts:
+    - identity: unit:<id>:parse-cache.yaml
+      source_kind: unit
+      source_unit_id: <id>
+      artifact: parse-cache.yaml
+      byte_sha256: ''
+    invalidation:                    # claims / identity / artifact bytes 漂移时写入
+      reason: verification_stale
+      violations: []
   ...
 history:                             # append_history() 写入
 - timestamp: ''
@@ -115,6 +136,8 @@ history:                             # append_history() 写入
   information_types: [fact]
   artifacts: []
 ```
+
+`write_record()` 默认以调用方 record 携带的 `revision` 作为 expected revision：已有记录缺 revision 时 fail-closed；新记录期望 0。两个并发读者中先写者成功并递增 revision，后写者的 stale revision 必须冲突拒绝，不能静默覆盖。显式 `expected_revision` 仅用于调用方有意覆盖默认期望值。
 
 ### per-kind payload <a id="unit-payload"></a>
 
@@ -226,6 +249,7 @@ kb/programs/<id>/
 └── workflow/
     ├── open-questions.yaml
     ├── evidence-requests.yaml
+    ├── decisions.yaml          # canonical program decision records
     ├── decision-log.md
     └── reporting-events.yaml
 ```
@@ -258,6 +282,7 @@ time_policy:
 workflow_files:               # 反向索引，便于 navigator
   open_questions: ...
   evidence_requests: ...
+  decisions: ...
   decision_log: ...
   reporting_events: ...
 counts:                       # 由 orchestrator 自动维护
@@ -299,7 +324,11 @@ items:
   information_types: [fact, unverified]
 ```
 
-### decision-log.md
+### decisions.yaml / decision-log.md
+
+`decisions.yaml` 是 canonical SSOT；`decision-log.md` 只是人读投影。旧版仅有 Markdown 的条目迁移时一律标为 `pending_user_confirmation` + `legacy_import.trust=pending_unverified`，旧文本中的 `confirmed/auto_confirmed` 只能保留作审计元数据，绝不能自动获得信任。
+
+Program decision 是 judgement：`log-decision` 只能创建 pending/rejected，不能直接 confirmed；独立 `confirm-decision` 必须经过 canonical claims、verification receipt、human actor/evidence、用户原话授权，且确认后仍保留 inference/evaluation 类型。
 
 Markdown，每条决策一段，固定 H2：`## <iso-timestamp> · <一句话决策>`，正文要含：
 
@@ -427,7 +456,7 @@ topics:
 | experiment run-log/diagnoses/follow-ups | experiment-workbench | report-author, research-orchestrator | 三文件职责严格分离 |
 | program state.yaml + workflow/* | research-orchestrator | report-author, navigator | 其它 skill emit reporting-event 让 orchestrator 写 |
 | program reporting-events.yaml | research-orchestrator（主要）、experiment-workbench / paper-analyst / method-designer / idea-workbench（事件附加） | report-author | 各 emit skill 必须填 `source_skill` |
-| program decision-log.md | research-orchestrator | navigator, report-author | AI 决策必须 `Confirmation: pending_user_confirmation` |
+| program decisions.yaml + decision-log.md projection | research-orchestrator | navigator, report-author | judgement 两阶段；legacy Markdown 仅 pending/unverified 迁移 |
 | kb/config/candidate-pools.yaml | knowledge-base-manager | source-intake, literature-synthesizer, idea-workbench | research-config-manager 提供 seed/policy 输入 |
 | kb/config/topic-taxonomy.yaml | knowledge-base-manager | analyst skills, literature-synthesizer | 同上 |
 | kb/config/runtime-preferences.yaml | research-config-manager | 全部 | 唯一直接归 config-manager 的 artifact |
@@ -441,7 +470,7 @@ topics:
 
 **契约目标**：core 系统中所有 AI 推断/评估/用户意见，必须经过用户显式确认后才能 `confirmed`。否则保持 `pending_user_confirmation`。
 
-**当前运行行为**：`lib/research/core.py` 提供 `validate_write(record)` helper。AI-derived / judgement-track record 违反 confirmation contract 时默认 `SystemExit` 拦截；只有显式 `RESEARCH_VALIDATE_FAILOPEN=1` 或内部调用显式 `strict=False` 才写 stderr warning 并返回 violations。`write_record()` 在 lock / CAS / journal 之前调用该 helper；program state、workflow files、reporting events 等非 unit record 写入暂不经过此 gate。
+**当前运行行为**：`lib/research/core.py` 提供 `validate_write(record)` helper。AI-derived / judgement-track record 违反 confirmation contract 时默认 `SystemExit` 拦截；只有显式 `RESEARCH_VALIDATE_FAILOPEN=1` 或内部调用显式 `strict=False` 才写 stderr warning 并返回 violations。`write_record()` 在 lock / revision-CAS / journal 之前调用该 helper；program decision 由 orchestrator 的同等级两阶段 gate 管理。
 
 **检查规则**：
 
@@ -458,7 +487,7 @@ IF record["source"].get("kind") == "ai"
 
 ## Evidence / Claims <a id="evidence-claims"></a>
 
-> **状态（Wave 2 · Evidence track 已落地）**：本节锁定 claim→evidence 绑定的规格，运行侧逐字校验已在 `lib/research/evidence.py` 实现为**可调用、可测试的纯函数**（`verify_claim_evidence` / `validate_claims` / `attach_claims` / `read_claims`），并经 `core.py` 门面再导出。该层仍是 **additive**：系统内暂无调用方（confirmation gate 与 analyzer 未改），judgement 空据 → 不得 confirmed 的**门控联动**由并行 Gate track 消费 `validate_claims()` 落地，本层只提供判据函数，不改 gate。
+> **状态（R1 trust chain 已落地）**：analyzer verify 将同一份 claims 写入 canonical `record.payload.claims` 并生成 byte-bound verification receipt；confirmation gate 复验 receipt 与逐字 evidence；report 只消费 current ConfirmationReceipt 覆盖的 canonical claims。Sidecar 可保留，但不是 SSOT。
 
 **契约目标（原则 2）**：每条 AI 判断（fact / inference / evaluation / user_opinion / unverified）都挂 `evidence_refs`，让"有理有据"从口号变成**可机器校验**——脚本能查"这条据在不在"。落盘位置：note / screening 产物内的 `claims` 列表（`attach_claims(payload, claims)` 写、`read_claims(payload)` 读）+ record 关联。
 
@@ -473,11 +502,17 @@ claim:
   confidence: 0.0                # 可选
   confirmation_status: pending_user_confirmation|confirmed|rejected|auto_confirmed
   evidence_refs:
-    - source_unit_id: p-...       # 证据所在 unit
-      artifact: parse-cache.yaml  # unit 内相对路径，或 source(pdf/html)
-      locator: "page=3"           # PDF: page=N|section|para ; HTML: section|anchor（B4）
-      quote: ""                   # 短逐字片段（B3）——脚本校验它逐字存在于 artifact
-      summary: ""                 # 可选转述
+  - source_unit_id: p-...         # 普通 unit 证据
+    artifact: parse-cache.yaml    # unit 内相对路径
+    locator: "page=3"
+    quote: ""
+    summary: ""
+  - source_unit_id: r-...         # repo workspace 外部证据
+    artifact: README.md
+    locator: line=12
+    quote: verbatim source span
+    external_source:              # 仅 repo workspace 源码允许
+      kind: repo                  # base_root 不得由 claim 提供
 ```
 
 **字段语义**：
@@ -496,7 +531,7 @@ claim:
 | `quote` | ref | **短逐字片段（B3）**——脚本校验它逐字存在于 `artifact`。 |
 | `summary` | ref | 可选转述（不参与逐字校验）。 |
 
-**逐字验证规则（`verify_claim_evidence(claim, unit_dir)`，原则 1）**：对每条 claim 的每个 evidence_ref，在 `unit_dir` 下加载 `artifact`，把 artifact 文本与 `quote` 都做**空白归一化**（连续空白→单空格 + strip；**大小写敏感、标点保留**），再判 `quote` 是否为 artifact 的**逐字子串**。命中 = grounded；未命中 = 返回一条 violation（含 claim id + artifact + quote 摘要）。归一化只折叠空白，因此一条跨行换行/多空格的引用仍能命中，而改动了词、大小写或标点的编造引用不能。空 quote、缺 artifact、artifact 读不到、非 dict 输入均返回精确 violation 而非崩溃；`verify_claim_evidence({}, None)` 返回 `[]`。artifact 为 `.yaml`（parse-cache）时取 `chunks[].text`（无该结构则拼接所有字符串叶子），其它后缀按纯文本读。**返回空列表 = 全部 grounded。**
+**逐字验证规则（`verify_claim_evidence(claim, unit_dir)`，原则 1）**：普通 artifact 必须是 unit-root 内相对路径；absolute、`..`、resolve 后 symlink escape 均拒绝。对 artifact 文本与 `quote` 做空白归一化后仍要求大小写/标点敏感的逐字子串。Repo 源码是唯一显式外部契约：ref 声明 `external_source: {kind: repo}`，但可信 `base_root` 必须由 repo record/caller 提供，claim 不能自报 base root；resolve 后仍须在该 root 内。Verification receipt 保存 canonical identity 与 artifact byte sha256，parse-cache 等不可变派生证据消费端只读不覆盖。
 
 **两套 locator（B4）**：**PDF 源**用 `page=N` / `section` / `para`；**HTML 源**用 `section` / `anchor`（HTML 无页码）。当 artifact 为含 per-page chunk（label 形如 `...:page-N`）的 parse-cache 且 locator 为 `page=N` 时，校验会**额外缩小到该页**：quote 逐字命中在文档但落在**别的页** → 记一条 locator-mismatch violation（页码引错也是接地缺陷）。逐字命中始终是硬性判据，页缩小是精度加成，无 per-page 结构时自动退化为全文校验。
 
