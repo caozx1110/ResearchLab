@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import sys
 from pathlib import Path
 
@@ -53,6 +54,20 @@ from research.core import (
 )
 from research.journal import abort_op, incomplete_ops, journaled_op
 
+try:
+    from research.git_ops import dirty_kb_paths
+except ImportError:  # R-track compatibility until the strict helper is merged.
+    def dirty_kb_paths(root: Path) -> list[Path]:
+        status = str(kb_git_status(root).get("text") or "")
+        paths: list[Path] = []
+        for line in status.splitlines():
+            if not line or line.startswith("##") or len(line) < 4:
+                continue
+            raw = line[3:].split(" -> ")[-1].strip()
+            if raw:
+                paths.append(root / "kb" / raw)
+        return paths
+
 COMMAND_PREFIX = "${RESEARCH_PYTHON:-python3}"
 SCRIPT_BY_KIND = {
     "paper": ".agents/skills/paper-analyst/scripts/paper.py",
@@ -102,26 +117,66 @@ def next_unit_command(record: dict) -> str:
     return shell_command([COMMAND_PREFIX, skill_script_for_command(script), command, id_arg, unit_id])
 
 
-def _is_unfilled_note_shell(record: dict) -> bool:
-    """A paper whose FULL NOTE was prepared (scaffold emitted) but not yet filled.
+REVIEW_BLOCKED_STATES = {
+    "source_ready",
+    "awaiting_agent_fill",
+    "ready_to_verify",
+    "failed_retryable",
+}
+REVIEW_READY_STATES = {
+    "ready_for_review",
+    "pending_user_confirmation",
+}
 
-    ``complete-note --phase prepare`` stamps ``full_note_status=awaiting_agent_fill``
-    together with ``confirmation_status=pending_user_confirmation`` — the note has no
-    real content to confirm yet, so it must NOT be surfaced to the user as a
-    confirmation item (SSOT 3.11 / A4). Mirrors research-orchestrator's
-    is_user_confirmable so the review path and the dashboard path agree.
 
-    Note: only ``awaiting_agent_fill`` qualifies. ``not_started`` is the schema
-    default for every paper without a full note (records.py normalizes to it), and a
-    screening-phase paper can legitimately have a pending worth-reading judgement
-    while its full note is not_started — excluding not_started would hide real
-    screening confirmations."""
-    if str(record.get("kind") or "") != "paper":
-        return False
+def _normalized_workflow_state(value: object) -> str:
+    return str(value or "").strip().lower().replace("-", "_")
+
+
+def review_workflow_states(record: dict) -> list[str]:
+    """Return lifecycle signals used by the public review inbox.
+
+    R1 keeps backwards compatibility with pre-classifier records while excluding
+    prepared shells and retryable failures for paper, blog, and repo alike.
+    """
     payload = record.get("payload", {})
     state = payload.get("state", {}) if isinstance(payload, dict) else {}
-    status = str(state.get("full_note_status") or "") if isinstance(state, dict) else ""
-    return status == "awaiting_agent_fill"
+    values: list[object] = [record.get("workflow_state"), record.get("status")]
+    if isinstance(payload, dict):
+        values.append(payload.get("workflow_state"))
+    if isinstance(state, dict):
+        values.extend(
+            state.get(key)
+            for key in (
+                "workflow_state",
+                "source_status",
+                "full_note_status",
+                "capability_fill_status",
+                "verification_status",
+            )
+        )
+    return [normalized for value in values if (normalized := _normalized_workflow_state(value))]
+
+
+def is_ready_for_human_review(record: dict) -> bool:
+    if str(record.get("confirmation_status") or "") != "pending_user_confirmation":
+        return False
+    states = review_workflow_states(record)
+    if any(state in REVIEW_BLOCKED_STATES for state in states):
+        return False
+    if any(state in REVIEW_READY_STATES for state in states):
+        return True
+    # Legacy pending records did not carry the R1 classifier field. Preserve real
+    # screening judgements (including paper full_note_status=not_started).
+    return True
+
+
+def _is_unfilled_note_shell(record: dict) -> bool:
+    """Compatibility name retained for callers; now covers all R1 blocked states."""
+    return (
+        str(record.get("confirmation_status") or "") == "pending_user_confirmation"
+        and any(state in REVIEW_BLOCKED_STATES for state in review_workflow_states(record))
+    )
 
 
 def review_queue_records(
@@ -132,11 +187,8 @@ def review_queue_records(
     limit: int = 50,
 ) -> list[dict]:
     hits = search_records(root, "", kind=kind, confirmation_status=confirmation_status)
-    # Exclude prepared-but-unfilled note shells: pending only because prepare stamps
-    # pending_user_confirmation, but the agent hasn't filled the note yet — not a
-    # user-confirmation item (SSOT 3.11 / A4).
     if confirmation_status == "pending_user_confirmation":
-        hits = [record for record in hits if not _is_unfilled_note_shell(record)]
+        hits = [record for record in hits if is_ready_for_human_review(record)]
     hits = sorted(hits, key=review_sort_key)
     if limit > 0:
         hits = hits[:limit]
@@ -151,7 +203,41 @@ def all_reviewed_confirmation_records(root: Path, *, kind: str | None = None, li
     return pending, 0
 
 
-def apply_batch_confirmation(root: Path, records: list[dict], *, confirmed_by: str, evidence: list[str], method: str) -> list[Path]:
+def _confirm_unit_compat(
+    record: dict,
+    kind: str,
+    *,
+    confirmed_by: str,
+    evidence: list[str],
+    method: str,
+    root: Path,
+    user_authorization: str = "",
+    authorization_source: str = "",
+) -> dict:
+    kwargs: dict[str, object] = {
+        "confirmed_by": confirmed_by,
+        "evidence": evidence,
+        "method": method,
+        "project_root": root,
+    }
+    parameters = inspect.signature(confirm_unit).parameters
+    if "user_authorization" in parameters:
+        kwargs["user_authorization"] = user_authorization
+    if "authorization_source" in parameters:
+        kwargs["authorization_source"] = authorization_source
+    return confirm_unit(record, kind, **kwargs)
+
+
+def apply_batch_confirmation(
+    root: Path,
+    records: list[dict],
+    *,
+    confirmed_by: str,
+    evidence: list[str],
+    method: str,
+    user_authorization: str = "",
+    authorization_source: str = "",
+) -> list[Path]:
     written: list[Path] = []
     for record in records:
         unit_id = str(record.get("id") or "")
@@ -160,13 +246,15 @@ def apply_batch_confirmation(root: Path, records: list[dict], *, confirmed_by: s
             print(f"[skip] {unit_id}: confirmation_status={confirmation_status or '-'}")
             continue
         kind = str(record.get("kind") or "")
-        updated = confirm_unit(
+        updated = _confirm_unit_compat(
             record,
             kind,
             confirmed_by=confirmed_by,
             evidence=evidence,
             method=method,
-            project_root=root,
+            root=root,
+            user_authorization=user_authorization,
+            authorization_source=authorization_source,
         )
         written.append(write_record(root, updated))
     return written
@@ -311,6 +399,8 @@ def build_parser() -> argparse.ArgumentParser:
     confirm.add_argument("--limit", type=int, default=0)
     confirm.add_argument("--confirmed-by", default="")
     confirm.add_argument("--evidence", action="append", required=True)
+    confirm.add_argument("--user-authorization", default="")
+    confirm.add_argument("--authorization-source", default="")
 
     refresh = subparsers.add_parser("refresh-schema", help="Backfill the latest record schema")
     refresh.add_argument("--id", action="append", default=[])
@@ -339,6 +429,8 @@ def build_parser() -> argparse.ArgumentParser:
     promote.add_argument("--confirmation-status", choices=["auto_confirmed", "pending_user_confirmation", "confirmed", "rejected"])
     promote.add_argument("--confirmed-by", default="")
     promote.add_argument("--evidence", action="append", default=[])
+    promote.add_argument("--user-authorization", default="")
+    promote.add_argument("--authorization-source", default="")
     return parser
 
 
@@ -378,7 +470,11 @@ def main() -> int:
         print(payload["text"] or "[ok] no commits yet")
         return 0 if payload.get("repo_exists") else 1
     if args.command == "git-checkpoint":
-        payload = git_checkpoint(root, args.message, trigger="manual")
+        checkpoint_paths = dirty_kb_paths(root)
+        if not checkpoint_paths:
+            print("[ok] no kb changes to commit")
+            return 0
+        payload = git_checkpoint(root, args.message, trigger="manual", target_paths=checkpoint_paths)
         print(payload.get("message") or args.message)
         if payload.get("committed"):
             print(f"[ok] commit: {payload.get('commit')}")
@@ -522,6 +618,8 @@ def main() -> int:
                 confirmed_by=args.confirmed_by,
                 evidence=args.evidence,
                 method="kb.py confirm",
+                user_authorization=args.user_authorization,
+                authorization_source=args.authorization_source,
             )
             build_index(root)
             checkpoint_and_report(
@@ -597,15 +695,19 @@ def main() -> int:
         )
         return 0
     if args.command == "promote":
-        path = promote_record(
-            root,
-            args.id,
-            status=args.status,
-            maturity=args.maturity,
-            confirmation_status=args.confirmation_status,
-            confirmed_by=args.confirmed_by,
-            evidence=args.evidence,
-        )
+        promote_kwargs = {
+            "status": args.status,
+            "maturity": args.maturity,
+            "confirmation_status": args.confirmation_status,
+            "confirmed_by": args.confirmed_by,
+            "evidence": args.evidence,
+        }
+        promote_parameters = inspect.signature(promote_record).parameters
+        if "user_authorization" in promote_parameters:
+            promote_kwargs["user_authorization"] = args.user_authorization
+        if "authorization_source" in promote_parameters:
+            promote_kwargs["authorization_source"] = args.authorization_source
+        path = promote_record(root, args.id, **promote_kwargs)
         build_index(root)
         print(f"[ok] updated {path.relative_to(root)}")
         checkpoint_and_report(
