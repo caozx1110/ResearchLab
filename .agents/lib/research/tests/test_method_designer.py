@@ -105,3 +105,43 @@ def test_method_scales_up_for_generous_resources(tmp_path: Path, monkeypatch) ->
     assert rows["diagnostic"]["scale"]["seed_count"] == 5
     assert all(row["feasibility"] == "feasible" for row in matrix["experiments"])
     assert matrix["resource_requests"] == []
+
+
+def test_method_prefers_program_active_repo_corpus(tmp_path: Path, monkeypatch) -> None:
+    method = _load_method_module()
+    root, idea_id, kb_repo_id = _make_workspace(tmp_path)
+    active_repo_id = "r-program-654321"
+    active_repo = default_record("repo", title="Program attached repo", maturity="lightweight", source={"original_uri": "https://example.com/active"})
+    active_repo["id"] = active_repo_id
+    active_repo["summary"] = "The program-selected implementation corpus."
+    write_yaml_if_changed(record_path(root, "repo", active_repo_id), active_repo)
+    write_yaml_if_changed(
+        root / "kb" / "programs" / "p-method" / "state.yaml",
+        {"program_id": "p-method", "stage": "idea-review", "active_unit_ids": [idea_id, active_repo_id]},
+    )
+
+    assert _run_design(method, monkeypatch, root, idea_id) == 0
+
+    choice = load_yaml(root / "kb" / "programs" / "p-method" / "design" / f"{idea_id}-repo-choice.yaml", default={})
+    assert choice["selected_repo_id"] == active_repo_id
+    assert [item["repo_id"] for item in choice["candidate_repos"]] == [active_repo_id]
+    assert kb_repo_id not in choice["candidate_corpus"]["repo_ids"]
+    assert choice["candidate_corpus"]["scope"] == "program-active-units"
+    assert choice["candidate_corpus"]["fallback_used"] is False
+
+
+def test_method_falls_back_to_kb_repos_with_note(tmp_path: Path, monkeypatch, capsys) -> None:
+    method = _load_method_module()
+    root, idea_id, repo_id = _make_workspace(tmp_path)
+    write_yaml_if_changed(
+        root / "kb" / "programs" / "p-method" / "state.yaml",
+        {"program_id": "p-method", "stage": "idea-review", "active_unit_ids": [idea_id]},
+    )
+
+    assert _run_design(method, monkeypatch, root, idea_id) == 0
+
+    choice = load_yaml(root / "kb" / "programs" / "p-method" / "design" / f"{idea_id}-repo-choice.yaml", default={})
+    assert choice["selected_repo_id"] == repo_id
+    assert choice["candidate_corpus"]["scope"] == "kb-wide-fallback"
+    assert choice["candidate_corpus"]["fallback_used"] is True
+    assert "fell back to KB-wide repository units" in capsys.readouterr().out

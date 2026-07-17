@@ -161,8 +161,31 @@ def parse_name_detail(values: list[str], default_name: str) -> list[dict[str, st
     return items
 
 
-def repo_candidates(root: Path, record: dict[str, Any], pinned_repo_ids: list[str]) -> list[dict[str, Any]]:
-    repo_records = iter_records(root, kind="repo")
+def repo_candidates(
+    root: Path,
+    record: dict[str, Any],
+    pinned_repo_ids: list[str],
+    active_unit_ids: list[str],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    all_repo_records = iter_records(root, kind="repo")
+    repo_by_id = {str(repo.get("id") or ""): repo for repo in all_repo_records}
+    active_repo_ids = [unit_id for unit_id in active_unit_ids if unit_id in repo_by_id]
+    if active_repo_ids:
+        repo_records = [repo_by_id[repo_id] for repo_id in active_repo_ids]
+        corpus = {
+            "scope": "program-active-units",
+            "repo_ids": active_repo_ids,
+            "fallback_used": False,
+            "note": "Candidate ranking uses repository units attached to the program.",
+        }
+    else:
+        repo_records = all_repo_records
+        corpus = {
+            "scope": "kb-wide-fallback",
+            "repo_ids": [str(repo.get("id") or "") for repo in all_repo_records],
+            "fallback_used": True,
+            "note": "No repository units are attached to the program; candidate ranking fell back to KB-wide repository units.",
+        }
     pinned_rank = {repo_id: index for index, repo_id in enumerate(pinned_repo_ids)}
 
     hypothesis = record.get("payload", {}).get("hypothesis", {})
@@ -232,7 +255,7 @@ def repo_candidates(root: Path, record: dict[str, Any], pinned_repo_ids: list[st
         scored.sort(key=lambda item: (pinned_rank.get(str(item.get("id") or ""), len(pinned_rank)), -item["score"], item["id"]))
     else:
         scored.sort(key=lambda item: (-item["score"], item["id"]))
-    return scored[:5]
+    return scored[:5], corpus
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -266,7 +289,25 @@ def main() -> int:
     interfaces_path = design_root / f"{args.idea_id}-interfaces.yaml"
     matrix_path = design_root / f"{args.idea_id}-experiment-matrix.yaml"
     state_path = root / "kb" / "programs" / args.program_id / "state.yaml"
-    repo_rankings = repo_candidates(root, record, normalize_list(args.repo_id))
+    state = load_yaml(state_path, default={})
+    if not isinstance(state, dict) or not state:
+        state = {
+            **yaml_default(f"{args.program_id}-state", "method-designer", status="active"),
+            "program_id": args.program_id,
+            "question": "",
+            "goal": "",
+            "stage": "implementation-planning",
+            "active_unit_ids": [],
+            "blockers": [],
+            "next_actions": [],
+            "resource_constraints": [],
+        }
+    repo_rankings, repo_corpus = repo_candidates(
+        root,
+        record,
+        normalize_list(args.repo_id),
+        normalize_list(state.get("active_unit_ids", [])),
+    )
     selected_repo = repo_rankings[0] if repo_rankings else {
         "id": normalize_list(args.repo_id)[0] if normalize_list(args.repo_id) else "",
         "title": "",
@@ -366,6 +407,7 @@ def main() -> int:
             f"{hypothesis.get('core_hypothesis', '')}\n\n"
             "## Repo Choice\n\n"
             f"- Selected repo: `{selected_repo.get('id') or 'pending'}`\n"
+            f"- Candidate corpus: {repo_corpus['note']}\n"
             f"- Repo summary: {selected_repo.get('summary', '') or '待补充'}\n"
             f"- Overlap signals: {', '.join(selected_repo.get('overlap', [])) or 'manual selection required'}\n\n"
             "## Minimal Design\n\n"
@@ -407,9 +449,11 @@ def main() -> int:
             ],
             "repo_choice_policy": {
                 "prefer_user_pinned_repo": bool(normalize_list(args.repo_id)),
+                "prefer_program_active_unit_ids": True,
                 "prefer_existing_repo_units": True,
                 "fallback": "manual-selection-required",
             },
+            "candidate_corpus": repo_corpus,
         },
     )
     write_yaml_if_changed(
@@ -442,19 +486,6 @@ def main() -> int:
             "confirmation_status": "pending_user_confirmation",
         },
     )
-    state = load_yaml(state_path, default={})
-    if not isinstance(state, dict) or not state:
-        state = {
-            **yaml_default(f"{args.program_id}-state", "method-designer", status="active"),
-            "program_id": args.program_id,
-            "question": "",
-            "goal": "",
-            "stage": "implementation-planning",
-            "active_unit_ids": [],
-            "blockers": [],
-            "next_actions": [],
-            "resource_constraints": [],
-        }
     state["selected_idea_id"] = args.idea_id
     state["selected_repo_id"] = selected_repo.get("id", "")
     if resources:
@@ -462,6 +493,8 @@ def main() -> int:
     if str(state.get("stage") or "").strip() in {"", "init", "idea-review"}:
         state["stage"] = "implementation-planning"
     write_yaml_if_changed(state_path, state)
+    if repo_corpus["fallback_used"]:
+        print(repo_corpus["note"])
     for request in resource_requests:
         print(f"Resource request: {request}")
     append_program_reporting_event(
