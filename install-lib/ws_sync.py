@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,9 +30,18 @@ MANIFEST_REL = Path(".agents/.install-manifest.json")
 MANIFEST_NAME = ".install-manifest.json"
 SCHEMA = 1
 DEFAULT_LEGACY_AGENTS = {"claude": True, "codex": False}
-EXCLUDED_DIRS = {"__pycache__", ".venv"}
+RELEASE_FILE_MAP = {
+    ".agents/AGENTS.md": ".agents/AGENTS.md",
+    ".agents/VERSION": ".agents/VERSION",
+    "LICENSE": ".agents/LICENSE",
+}
+RELEASE_PREFIXES = (
+    ".agents/skills/",
+    ".agents/lib/research/",
+)
+EXCLUDED_DIRS = {"__pycache__", ".venv", "tests"}
 EXCLUDED_SUFFIXES = {".pyc", ".pyo"}
-EXCLUDED_NAMES = {".DS_Store", MANIFEST_NAME}
+EXCLUDED_NAMES = {".DS_Store", MANIFEST_NAME, "eval_research_value.py"}
 
 
 class SyncError(RuntimeError):
@@ -83,11 +93,46 @@ def should_exclude(path: Path) -> bool:
         return True
     if any(part in EXCLUDED_DIRS for part in path.parts):
         return True
+    if any(part.upper().startswith("RESEARCH_VALUE") for part in path.parts):
+        return True
     return False
 
 
 def rel_text(path: Path) -> str:
     return path.as_posix()
+
+
+def tracked_release_files(source_root: Path) -> list[str]:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(source_root), "ls-files", "-z", "--", ".agents", "LICENSE"],
+            check=True,
+            capture_output=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        die(f"source must be a git worktree so untracked files cannot be packaged: {source_root}: {exc}")
+    return sorted(path.decode("utf-8") for path in result.stdout.split(b"\0") if path)
+
+
+def release_destination(rel: str) -> str | None:
+    mapped = RELEASE_FILE_MAP.get(rel)
+    if mapped is not None:
+        return mapped
+    if not rel.startswith(RELEASE_PREFIXES):
+        return None
+    path = Path(rel)
+    if should_exclude(path):
+        return None
+    return rel
+
+
+def assert_no_symlinked_source_subdirs(source_root: Path, rel: str) -> None:
+    path = source_root / rel
+    for parent in path.parents:
+        if parent == source_root:
+            break
+        if parent.is_symlink():
+            die(f"source release path contains a symlinked subdirectory: {parent}; refuse to package")
 
 
 def source_items(repo: Path, source: Path | None) -> dict[str, tuple[Path, str]]:
@@ -98,17 +143,16 @@ def source_items(repo: Path, source: Path | None) -> dict[str, tuple[Path, str]]
         die(f"source .agents directory not found: {agents_src}")
     if not agents_md_src.is_file():
         die(f"source AGENTS.md not found: {agents_md_src}")
-
     items: dict[str, tuple[Path, str]] = {}
-    for root, dirs, files in os.walk(agents_src):
-        root_path = Path(root)
-        dirs[:] = sorted(name for name in dirs if not should_exclude((root_path / name).relative_to(agents_src)))
-        for name in sorted(files):
-            path = root_path / name
-            if should_exclude(path.relative_to(agents_src)):
-                continue
-            rel = Path(".agents") / path.relative_to(agents_src)
-            items[rel_text(rel)] = (path, sha256_file(path))
+    for rel in tracked_release_files(source_root):
+        destination = release_destination(rel)
+        if destination is None:
+            continue
+        assert_no_symlinked_source_subdirs(source_root, rel)
+        path = source_root / rel
+        if path.is_symlink() or not path.is_file():
+            die(f"allowlisted release file is not a regular file: {path}")
+        items[destination] = (path, sha256_file(path))
     items["AGENTS.md"] = (agents_md_src, sha256_file(agents_md_src))
     return dict(sorted(items.items()))
 
