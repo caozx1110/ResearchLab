@@ -145,6 +145,39 @@ def _legit_note_fill() -> dict:
     }
 
 
+def _typed_note_fill(paper, paper_type: str) -> dict:
+    quote_by_element = {
+        "motivation": "fail to generalize to unseen objects",
+        "task_design": "real robot benchmark",
+        "metrics": "higher success rate than the baseline",
+        "coverage_limitation": "brittle behaviour under heavy occlusion",
+        "scope": "vision language action policies for robot manipulation",
+        "taxonomy": "predicts short action chunks with a flow matching head",
+        "trends": "higher success rate than the baseline",
+        "gaps": "brittle behaviour under heavy occlusion",
+        "insight": "flow matching head",
+    }
+    return {
+        "elements": [
+            {
+                "element": name,
+                "claim_type": paper.ELEMENT_CLAIM_TYPE[name],
+                "content": f"Agent-authored {name.replace('_', ' ')} synthesis.",
+                "evidence_refs": [
+                    {
+                        "source_unit_id": "p-x",
+                        "artifact": "parse-cache.yaml",
+                        "locator": "page=1" if name in {"motivation", "scope"} else "page=2",
+                        "quote": quote_by_element[name],
+                        "summary": name,
+                    }
+                ],
+            }
+            for name in paper.ELEMENT_SETS[paper_type]
+        ]
+    }
+
+
 # --------------------------------------------------------------------------- #
 # 1. screen --phase prepare produces a fillable structure with NO grading.
 # --------------------------------------------------------------------------- #
@@ -200,6 +233,51 @@ def test_note_scaffold_has_five_blank_elements(tmp_path: Path) -> None:
         assert el["evidence_refs"] == []     # agent must attach evidence
     assert scaffold["fill_contract"]["required_elements"] == names
     assert "evidence_ref_format" in scaffold["fill_contract"]
+
+
+@pytest.mark.parametrize(
+    ("paper_type", "expected"),
+    [
+        ("benchmark", ["motivation", "task_design", "metrics", "coverage_limitation", "insight"]),
+        ("survey", ["scope", "taxonomy", "trends", "gaps", "insight"]),
+    ],
+)
+def test_note_scaffold_and_verify_follow_paper_type(
+    tmp_path: Path, paper_type: str, expected: list[str]
+) -> None:
+    paper = _load_paper_module()
+    unit_dir = tmp_path / paper_type
+    unit_dir.mkdir()
+    _write_parse_cache(unit_dir, "p-x")
+    record = _paper_record(f"p-{paper_type}")
+    record["payload"]["quick_screen"]["paper_type"] = paper_type
+
+    scaffold = paper.build_note_scaffold(record, [], "page", digest_chunks=1, digest_chars=10)
+    assert scaffold["paper_type"] == paper_type
+    assert scaffold["fill_contract"]["required_elements"] == expected
+    assert [element["element"] for element in scaffold["elements"]] == expected
+
+    violations, claims = paper.verify_note_fill(_typed_note_fill(paper, paper_type), unit_dir, record)
+    assert violations == [], violations
+    paper._apply_note_fill_to_payload(record, claims)
+    assert has_substantive_content(record, "paper") is True
+    note_md = paper.render_note_md(record, claims)
+    for name in expected:
+        assert f"## {paper.ELEMENT_HEADING[name]}" in note_md
+
+    method_fill = _legit_note_fill()
+    violations, _ = paper.verify_note_fill(method_fill, unit_dir, record)
+    assert violations
+    assert any("unexpected for selected paper type" in violation for violation in violations)
+    assert any("missing" in violation for violation in violations)
+
+
+def test_missing_paper_type_keeps_method_system_contract(tmp_path: Path) -> None:
+    paper = _load_paper_module()
+    record = _paper_record("p-default")
+    assert paper.elements_for(record) == paper.NOTE_ELEMENTS
+    scaffold = paper.build_note_scaffold(record, [], "page", digest_chunks=1, digest_chars=10)
+    assert [element["element"] for element in scaffold["elements"]] == list(paper.NOTE_ELEMENTS)
 
 
 # --------------------------------------------------------------------------- #
@@ -371,14 +449,14 @@ def test_cli_end_to_end_prepare_fill_verify_persist(tmp_path: Path, monkeypatch:
     screening = load_yaml(unit_dir / "screening.yaml")
     assert screening["worth_deep_reading"] == "" and screening["evidence_digest"]
 
-    screening["paper_type"] = "benchmark"
+    screening["paper_type"] = "method_system"
     screening["worth_deep_reading"] = "no"
     screening["judgement_reason"] = ["benchmark coverage is out of scope"]
     write_yaml_if_changed(unit_dir / "screening.yaml", screening)
     assert _run_cli(paper, monkeypatch, tmp_path, "screen", "--phase", "verify",
                     "--paper-id", paper_id, "--defer-post-actions") == 0
     screened = load_yaml(record_path(tmp_path, "paper", paper_id))
-    assert screened["payload"]["quick_screen"]["paper_type"] == "benchmark"
+    assert screened["payload"]["quick_screen"]["paper_type"] == "method_system"
 
     # prepare note -> 5-element skeleton; record marked complete but still hollow.
     assert _run_cli(paper, monkeypatch, tmp_path, "complete-note", "--phase", "prepare",

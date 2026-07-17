@@ -443,7 +443,7 @@ def verify_screening_fill(payload: dict, unit_dir: Path) -> list[str]:
 
 
 # --------------------------------------------------------------------------- #
-# complete-note: 5-element fillable skeleton / verify + persist an agent fill   #
+# complete-note: type-specific fillable skeleton / verify + persist agent fill #
 # --------------------------------------------------------------------------- #
 
 
@@ -455,10 +455,12 @@ def build_note_scaffold(
     digest_chunks: int,
     digest_chars: int,
 ) -> dict:
-    """Produce the 5-element fillable note skeleton (motivation/method/experiment/
-    limitation/insight). Each element is blank for the agent to fill with content +
-    >=1 evidence_ref. The script authors nothing here."""
+    """Produce the selected type's fillable note skeleton; script authors nothing."""
     digest = _evidence_digest(source_chunks, cache_locator_kind, chunk_limit=digest_chunks, excerpt_chars=digest_chars)
+    required_elements = elements_for(record)
+    paper_type = str(record.get("payload", {}).get("quick_screen", {}).get("paper_type") or "method_system")
+    if paper_type not in ELEMENT_SETS:
+        paper_type = "method_system"
     elements = [
         {
             "element": name,
@@ -466,22 +468,23 @@ def build_note_scaffold(
             "content": "",
             "evidence_refs": [],
         }
-        for name in NOTE_ELEMENTS
+        for name in required_elements
     ]
     return {
         "paper_id": record["id"],
         "kind": "paper",
+        "paper_type": paper_type,
         "status": "awaiting_agent_fill",
         "phase": "prepare",
         "fill_contract": {
             "description": (
-                "Agent fills all five required_elements with its own understanding, each "
+                "Agent fills all required_elements for the selected paper_type with its own understanding, each "
                 "backed by >=1 verbatim evidence_ref. Then run `complete-note --phase verify` "
                 "to validate + verbatim-check evidence + write note.md + core_content. Empty or "
                 "unevidenced elements are rejected; the script never authors content (SSOT §3.2)."
             ),
-            "required_elements": list(NOTE_ELEMENTS),
-            "element_claim_types": dict(ELEMENT_CLAIM_TYPE),
+            "required_elements": list(required_elements),
+            "element_claim_types": {name: ELEMENT_CLAIM_TYPE[name] for name in required_elements},
             "evidence_ref_format": EVIDENCE_REF_FORMAT,
         },
         "evidence_digest": digest,
@@ -511,20 +514,24 @@ def _claim_from_element(name: str, element: dict) -> dict:
     }
 
 
-def verify_note_fill(fill: Any, unit_dir: Path) -> tuple[list[str], list[dict]]:
-    """Validate an agent-filled 5-element note. Returns (violations, claims).
+def verify_note_fill(fill: Any, unit_dir: Path, record: dict | None = None) -> tuple[list[str], list[dict]]:
+    """Validate an agent-filled type-specific note. Returns (violations, claims).
 
-    Violations name the offending element. All five elements must be present, carry
+    Violations name the offending element. All selected elements must be present, carry
     non-empty content, be structurally valid (validate_claims), and every evidence_ref
     quote must verify verbatim against the artifact (verify_claim_evidence).
     """
     violations: list[str] = []
     elements = _elements_by_name(fill)
+    required_elements = elements_for(record or "method_system")
+    unexpected = sorted(set(elements) - set(required_elements))
+    for name in unexpected:
+        violations.append(f"element '{name}': unexpected for selected paper type")
     claims: list[dict] = []
-    for name in NOTE_ELEMENTS:
+    for name in required_elements:
         element = elements.get(name)
         if element is None:
-            violations.append(f"element '{name}': missing (all five elements are required)")
+            violations.append(f"element '{name}': missing (all selected elements are required)")
             continue
         content = clean_text(str(element.get("content") or ""))
         if not content:
@@ -548,7 +555,7 @@ def _apply_note_fill_to_payload(record: dict, claims: list[dict]) -> None:
     core = payload.setdefault("core_content", {})
     critique = payload.setdefault("critique", {})
     by_id = {str(claim.get("id") or ""): claim for claim in claims}
-    for name in NOTE_ELEMENTS:
+    for name in elements_for(record):
         claim = by_id.get(f"claim-{name}")
         if claim is None:
             continue
@@ -580,7 +587,7 @@ def render_note_md(record: dict, claims: list[dict]) -> str:
         "> 本笔记由 runtime agent 依据 parse-cache 填写；脚本已逐字校验每条 evidence（SSOT 原则1/原则2）。",
         "",
     ]
-    for name in NOTE_ELEMENTS:
+    for name in elements_for(record):
         lines.append(f"## {ELEMENT_HEADING[name]}")
         lines.append("")
         claim = by_id.get(f"claim-{name}")
@@ -837,7 +844,7 @@ def next_for_agent_note(root: Path, record: dict, cache_path: Path, fill_path: P
     (each needs a verbatim quote + locator), and the exact verify command to run after.
     It authors no judgement — the agent still fills the understanding.
     """
-    elements = ",".join(NOTE_ELEMENTS)
+    elements = ",".join(elements_for(record))
     verify_cmd = (
         f"${{RESEARCH_PYTHON:-python3}} {SCRIPT_PATH} --root {root} "
         f"complete-note --paper-id {record['id']} --phase verify --input {fill_path.name}"
@@ -1000,13 +1007,14 @@ def _run_complete_note(args, root, record, unit_root, cache_path, source_chunks,
         append_history(
             record,
             action="paper-note-scaffolded",
-            summary="Prepared 5-element fillable note skeleton (script authored nothing).",
+        summary="Prepared type-specific fillable note skeleton (script authored nothing).",
             information_types=["inference", "unverified"],
             artifacts=[rel(root, fill_scaffold_path), rel(root, cache_path)],
         )
         write_record(root, record)
         print(f"[ok] wrote {fill_scaffold_path.relative_to(root)}")
-        print("下一步：runtime agent 为 5 要素(motivation/method/experiment/limitation/insight)填内容+证据，再运行 complete-note --phase verify。")
+        required = "/".join(elements_for(record))
+        print(f"下一步：runtime agent 为 5 要素({required})填内容+证据，再运行 complete-note --phase verify。")
         print(next_for_agent_note(root, record, cache_path, fill_scaffold_path))
         _finalize_post_actions(root, trigger="milestone", message=f"milestone: scaffold note {args.paper_id}", defer_post_actions=defer_post_actions)
         return 0
@@ -1018,7 +1026,7 @@ def _run_complete_note(args, root, record, unit_root, cache_path, source_chunks,
     fill = load_yaml(fill_path, default={})
     if not isinstance(fill, dict):
         raise SystemExit(f"complete-note --phase verify: {fill_path} is not a mapping")
-    violations, claims = verify_note_fill(fill, unit_root)
+    violations, claims = verify_note_fill(fill, unit_root, record)
     if violations:
         print("[reject] note fill failed verification:", file=sys.stderr)
         for violation in violations:
