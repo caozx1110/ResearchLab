@@ -31,7 +31,7 @@ from research.core import config_root, default_confirmed_by, is_ai_signer, load_
 
 HELP_MENU: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
     (
-        "kb 动词（13 个）",
+        "kb 动词（14 个）",
         (
             ("打印能力菜单。", "kb help"),
             ("初始化 KB 布局、索引和基础偏好。", "kb init"),
@@ -44,6 +44,7 @@ HELP_MENU: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("查看待确认的 AI 判断，后续可交互式确认。", "kb review"),
             ("把误建 / 不采纳的知识单元标记为 rejected（清理出口）。", "kb reject <单元 id>"),
             ("回忆已确认习惯、已知坑和待审 skill 问题。", "kb recall"),
+            ("恢复崩溃后未完成的知识库操作。", "kb resume"),
             ("撤销最近一次已提交的知识库操作。", "kb undo"),
             ("恢复到指定操作之前的状态。", "kb restore <操作 id>"),
         ),
@@ -212,6 +213,11 @@ def handle_recall(args: argparse.Namespace, root: Path) -> int:
 def handle_undo(args: argparse.Namespace, root: Path) -> int:
     del args
     return run_forwarded(root, [(SCRIPT_BY_VERB["recovery"], ["undo"])])
+
+
+def handle_resume(args: argparse.Namespace, root: Path) -> int:
+    del args
+    return run_forwarded(root, [(SCRIPT_BY_VERB["recovery"], ["resume"])])
 
 
 def handle_restore(args: argparse.Namespace, root: Path) -> int:
@@ -898,6 +904,11 @@ def register_undo(subparsers: argparse._SubParsersAction[argparse.ArgumentParser
     parser.set_defaults(handler=handle_undo)
 
 
+def register_resume(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    parser = subparsers.add_parser("resume", help="恢复崩溃后未完成的知识库操作")
+    parser.set_defaults(handler=handle_resume)
+
+
 def register_restore(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     parser = subparsers.add_parser("restore", help="恢复到指定操作之前的状态")
     parser.add_argument("op_id")
@@ -925,6 +936,7 @@ VERB_REGISTRARS: tuple[Callable[[argparse._SubParsersAction[argparse.ArgumentPar
     register_next,
     register_find,
     register_recall,
+    register_resume,
     register_undo,
     register_restore,
     register_reject,
