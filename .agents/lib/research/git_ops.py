@@ -25,9 +25,11 @@ from .paths import (
 )
 from .journal import (
     JOURNAL_DIRNAME,
+    journal_root,
     journaled_op,
     latest_committed_op,
     load_op,
+    mark_op_undone,
     operation_lock_path,
     restore_before_snapshots,
     target_path,
@@ -138,10 +140,17 @@ def git_checkpoint(
         else:
             return {"committed": False, "status": "missing-repo", "message": "kb git repo is not initialized"}
     ensure_kb_gitignore(project_root)
-    pathspecs = [f":(top,literal){path}" for path in scoped_paths]
+    checkpointable_paths = [
+        path
+        for path in scoped_paths
+        if _git_path_is_tracked(project_root, path) or not _git_path_is_ignored(project_root, path)
+    ]
+    if not checkpointable_paths:
+        return {"committed": False, "status": "no-changes", "message": "no checkpointable kb changes to commit"}
+    pathspecs = [f":(top,literal){path}" for path in checkpointable_paths]
     addable_pathspecs = [
         pathspec
-        for path, pathspec in zip(scoped_paths, pathspecs)
+        for path, pathspec in zip(checkpointable_paths, pathspecs)
         if (kb_repo_path(project_root) / path).exists() or _git_path_is_tracked(project_root, path)
     ]
     if addable_pathspecs:
@@ -220,7 +229,13 @@ def maybe_auto_checkpoint(
             target_paths=scoped_paths,
         )
         if result.get("committed"):
-            with journaled_op(project_root, "write_versioning_state", [state_path]):
+            with journaled_op(
+                project_root,
+                "write_versioning_state",
+                [state_path],
+                undoable=False,
+                operation_role="bookkeeping",
+            ):
                 state = load_versioning_state(project_root)
                 state["last_auto_commit_at"] = utc_now_iso()
                 state["last_trigger"] = trigger
@@ -323,6 +338,11 @@ def _git_path_is_tracked(project_root: Path, relative_path: str) -> bool:
     return result.returncode == 0
 
 
+def _git_path_is_ignored(project_root: Path, relative_path: str) -> bool:
+    result = _run_git(project_root, "check-ignore", "-q", "--", relative_path, check=False)
+    return result.returncode == 0
+
+
 def _git_digest_at_revision(project_root: Path, revision: str, relative_path: str) -> str | None:
     result = _run_git(project_root, "show", f"{revision}:{relative_path}", check=False)
     if result.returncode != 0:
@@ -366,7 +386,14 @@ def restore_operation(project_root: Path, op_id: str, *, recovery_type: str = "r
     with ExitStack() as locks:
         for path in sorted(target_paths, key=lambda item: item.as_posix()):
             locks.enter_context(exclusive_file_lock(operation_lock_path(project_root, path)))
-        with journaled_op(project_root, f"{recovery_type}:{op_id}", target_paths) as recovery_op_id:
+        with journaled_op(
+            project_root,
+            f"{recovery_type}:{op_id}",
+            target_paths,
+            undoable=False,
+            operation_role="recovery",
+            attach_to_active=False,
+        ) as recovery_op_id:
             if has_snapshots:
                 restored = restore_before_snapshots(project_root, op_id)
             else:
@@ -374,13 +401,17 @@ def restore_operation(project_root: Path, op_id: str, *, recovery_type: str = "r
                     raise SystemExit("知识库版本历史尚未初始化，且旧操作没有字节快照，无法恢复。")
                 revision = _find_revision_for_digests(project_root, before_digests)
                 restored = _restore_paths_from_revision(project_root, revision, before_digests)
-            checkpoint = git_checkpoint(
-                project_root,
-                f"recovery: {recovery_type} {op_id}",
-                trigger="manual",
-                auto_init=False,
-                target_paths=restored,
-            )
+        # Journal commit must succeed before Git advances.  If commit_op fails,
+        # journaled_op restores the pre-recovery bytes and no checkpoint exists.
+        checkpoint = git_checkpoint(
+            project_root,
+            f"recovery: {recovery_type} {op_id}",
+            trigger="manual",
+            auto_init=False,
+            target_paths=restored,
+        )
+    if recovery_type == "undo":
+        mark_op_undone(project_root, op_id, recovery_op_id)
     return {
         "op_id": op_id,
         "recovery_op_id": recovery_op_id,
@@ -390,8 +421,9 @@ def restore_operation(project_root: Path, op_id: str, *, recovery_type: str = "r
 
 
 def undo_last_operation(project_root: Path) -> dict[str, Any]:
-    entry = latest_committed_op(project_root)
-    return restore_operation(project_root, str(entry["op_id"]), recovery_type="undo")
+    with exclusive_file_lock(journal_root(project_root) / ".undo.lock"):
+        entry = latest_committed_op(project_root)
+        return restore_operation(project_root, str(entry["op_id"]), recovery_type="undo")
 
 
 __all__ = [
