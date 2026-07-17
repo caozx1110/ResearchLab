@@ -27,5 +27,12 @@ jobs:
           python -m py_compile install-lib/ws_sync.py
       - name: Validate skill metadata
         run: python .agents/lib/research/skill_validator.py .agents/skills
+      - name: Configure git identity for checkpoint tests
+        run: |
+          git config --global user.name "ci"
+          git config --global user.email "ci@example.com"
       - name: Run tests
-        run: python -m pytest .agents/lib/research/tests -q
+        # Unset CI for this step only: the installer PTY tests drive a simulated
+        # interactive terminal, and install.sh's is_interactive_input() correctly
+        # refuses to prompt when $CI is set (a real-CI safety guard we keep intact).
+        run: env -u CI python -m pytest .agents/lib/research/tests -q
