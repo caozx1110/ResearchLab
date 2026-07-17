@@ -376,6 +376,7 @@ def transactional_apply(
     staged_files = stage / "files"
     backups = stage / "backups"
     touched: list[tuple[Path, Path | None]] = []
+    failed = False
     try:
         for rel, (content, mode) in changed_writes.items():
             staged = staged_files / rel
@@ -412,6 +413,7 @@ def transactional_apply(
             target_manifest.parent.mkdir(parents=True, exist_ok=True)
             os.replace(staged_files / MANIFEST_REL, target_manifest)
     except BaseException:
+        failed = True
         for path, backup in reversed(touched):
             try:
                 if backup is None:
@@ -423,14 +425,14 @@ def transactional_apply(
             except OSError as rollback_exc:
                 warn(f"rollback could not restore {path}: {rollback_exc}")
         prune_empty_dirs(dst_root, dry_run=False)
-        if not root_preexisting and root.is_dir():
+        raise
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+        if failed and not root_preexisting and root.is_dir():
             try:
                 root.rmdir()
             except OSError:
                 pass
-        raise
-    finally:
-        shutil.rmtree(stage, ignore_errors=True)
     prune_empty_dirs(dst_root, dry_run=False)
     return True
 
