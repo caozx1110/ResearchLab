@@ -180,6 +180,21 @@ def test_kb_update_apply_uses_agent_confirmed_path(monkeypatch, tmp_path: Path, 
     assert "research skill 更新完成：0.1.0 → 0.2.0。" in capsys.readouterr().out
 
 
+def test_kb_update_apply_reports_up_to_date_conversationally(monkeypatch, tmp_path: Path, capsys) -> None:
+    kb = _load_kb_cli()
+    monkeypatch.setattr(
+        kb.updater,
+        "apply",
+        lambda _root, _cache: {"before": "0.2.0", "after": "0.2.0", "status": "up_to_date"},
+    )
+
+    assert kb.main(["--root", str(tmp_path), "update", "--apply"]) == 0
+
+    output = capsys.readouterr().out
+    assert output == "当前 research skill 已是最新版本，无需更新。\n"
+    assert not any(token in output for token in ("python3", ".py ", "--", "${", "git ", ".agents/"))
+
+
 def test_kb_update_offline_reports_unknown_without_changes(monkeypatch, tmp_path: Path, capsys) -> None:
     kb = _load_kb_cli()
     monkeypatch.setattr(
