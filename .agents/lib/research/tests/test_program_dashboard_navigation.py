@@ -117,7 +117,7 @@ def test_navigator_refresh_transactions_exact_pages_before_checkpoint(tmp_path: 
         events.append("checkpoint")
         return {"committed": False}
 
-    monkeypatch.setattr(navigate, "navigation_transaction", transaction)
+    monkeypatch.setattr(navigate, "mutation_transaction", transaction)
     monkeypatch.setattr(navigate, "checkpoint_and_report", checkpoint)
     monkeypatch.setattr(sys, "argv", ["navigate.py", "--root", str(root), "refresh"])
 
@@ -458,7 +458,7 @@ def test_orchestrator_auto_dry_run_plans_exact_command_for_loose_unit(tmp_path: 
     assert "safe refresh" in text
 
 
-def test_orchestrator_auto_execute_stops_at_pending_confirmation(tmp_path: Path, capsys) -> None:
+def test_orchestrator_auto_stops_before_hollow_pending_confirmation(tmp_path: Path, capsys) -> None:
     orchestrate = _load_script("research-orchestrator", "orchestrate.py", "orchestrator_script_for_auto_gate")
     root = _make_workspace(tmp_path)
     write_yaml_if_changed(
@@ -492,9 +492,9 @@ def test_orchestrator_auto_execute_stops_at_pending_confirmation(tmp_path: Path,
     assert plan["safe_execute"] is False
     assert "stop for human decision" in output
     assert "not executing" in output
-    assert ".agents/skills/paper-analyst/scripts/paper.py confirm --paper-id p-gated-123456" in plan["recommended_command"]
-    assert "--confirmed-by ${RESEARCH_CONFIRMED_BY:?set-human-identity}" in plan["recommended_command"]
-    assert "--evidence ${RESEARCH_CONFIRM_EVIDENCE:?set-human-evidence}" in plan["recommended_command"]
+    assert plan["step_type"] == "agent-fill"
+    assert plan["kind"] == "agent-work"
+    assert "recommended_command" not in plan
     for leaked_fragment in ("python3", ".py ", "--paper-id", "${"):
         assert leaked_fragment not in output
 
