@@ -8,6 +8,11 @@ The helper intentionally manages only two reachable areas:
 
 It never enumerates or mutates sibling runtime/data directories such as
 ``DIR/kb`` or ``DIR/.venv``.
+
+Release contents come only from the tracked allowlist below. The repository
+``LICENSE`` is installed as ``DIR/.agents/LICENSE``. Install, update, and
+reinstall stage and validate the complete managed set before committing it;
+an exception during commit restores every touched managed path and manifest.
 """
 
 from __future__ import annotations
