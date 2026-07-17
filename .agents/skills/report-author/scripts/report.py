@@ -56,7 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Generate evidence-backed reports.")
     add_project_root_argument(parser)
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for name in ("weekly", "ppt-materials", "stage-summary", "writing-materials"):
+    for name in ("weekly", "ppt-materials", "stage-summary", "writing-materials", "outline"):
         cmd = subparsers.add_parser(name)
         cmd.add_argument("--program-id", required=True)
         cmd.add_argument("--stage", default="")
@@ -284,6 +284,94 @@ def render_report(title: str, inputs: ReportInputs, *, report_kind: str) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
+def _event_matches(event: dict[str, Any], terms: set[str]) -> bool:
+    searchable = " ".join(
+        [
+            str(event.get("event_type") or ""),
+            str(event.get("title") or ""),
+            str(event.get("summary") or ""),
+            " ".join(_text_items(event.get("tags"))),
+        ]
+    ).casefold()
+    return any(term in searchable for term in terms)
+
+
+def render_outline_event_inputs(events: list[dict[str, Any]], *, section: str, terms: set[str]) -> list[str]:
+    matched = [event for event in events if _event_matches(event, terms)]
+    lines = [f"### {section} Inputs", ""]
+    if not matched:
+        return [*lines, f"- missing: {section.casefold()} events or evidence"]
+    lines.extend(render_event_line(event) for event in matched)
+    return lines
+
+
+def render_outline(program_id: str, inputs: ReportInputs) -> str:
+    sections = [
+        [f"# Paper Outline: {program_id}", ""],
+        [
+            "## Introduction",
+            "",
+            "- Fill in: research problem, motivation, gap, contribution thesis, and paper roadmap.",
+            "- missing: introduction narrative",
+        ],
+        render_claims(
+            inputs.claim_sources,
+            inputs.missing_units,
+            heading="Related Work: Confirmed Claims & Evidence",
+        ),
+        [
+            "## Method",
+            "",
+            "- Fill in: method overview, components, interfaces, assumptions, and implementation choices.",
+            *render_outline_event_inputs(
+                inputs.events,
+                section="Method",
+                terms={"method", "design", "implementation", "baseline", "architecture"},
+            ),
+        ],
+        [
+            "## Experiments",
+            "",
+            "- Fill in: research questions, datasets, baselines, metrics, ablations, and reproducibility details.",
+            *render_outline_event_inputs(
+                inputs.events,
+                section="Experiment",
+                terms={"experiment", "evaluation", "benchmark", "ablation", "metric"},
+            ),
+        ],
+        [
+            "## Results",
+            "",
+            "- Fill in: confirmed results, comparisons, uncertainty, and negative findings.",
+            *render_outline_event_inputs(
+                inputs.events,
+                section="Result",
+                terms={"result", "finding", "completed", "failure", "comparison"},
+            ),
+        ],
+        [
+            "## Discussion",
+            "",
+            "- Fill in: interpretation, limitations, threats to validity, and broader implications.",
+            "- missing: discussion narrative",
+        ],
+        [
+            "## Conclusion",
+            "",
+            "- Fill in: concise answer to the research question and evidence-backed takeaways.",
+            "- missing: conclusion narrative",
+        ],
+        render_decisions(inputs.decisions),
+        render_events(inputs.events, heading="Program Events"),
+    ]
+    lines: list[str] = []
+    for section in sections:
+        if lines and lines[-1] != "":
+            lines.append("")
+        lines.extend(section)
+    return "\n".join(lines).strip() + "\n"
+
+
 def main() -> int:
     args = build_parser().parse_args()
     root = project_root(PROJECT_ROOT, explicit_root=args.root)
@@ -301,10 +389,14 @@ def main() -> int:
     elif args.command == "writing-materials":
         path = user_root(root) / "report-materials" / f"{args.program_id}-writing-materials.md"
         title = f"Writing Materials: {args.program_id}"
+    elif args.command == "outline":
+        path = reports_root / "paper-outline.md"
+        title = ""
     else:
         path = reports_root / "stage-summary.md"
         title = f"Stage Summary: {args.program_id}"
-    write_text_if_changed(path, render_report(title, inputs, report_kind=args.command))
+    text = render_outline(args.program_id, inputs) if args.command == "outline" else render_report(title, inputs, report_kind=args.command)
+    write_text_if_changed(path, text)
     print(path.relative_to(root))
     checkpoint_and_report(root, trigger="milestone", message=f"milestone: generate {args.command} for {args.program_id}")
     return 0

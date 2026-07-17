@@ -104,3 +104,15 @@ def test_weekly_and_stage_reports_include_claims_evidence_events_and_decisions(t
         assert "Success rate improves by 8 points." in text
         assert "Grounded review completed" in text
         assert "Use the grounded baseline" in text
+
+
+def test_outline_produces_evidence_backed_section_skeleton(tmp_path: Path) -> None:
+    report = _load_report_module()
+    root, program_id, _ = _make_workspace(tmp_path)
+
+    outline = report.render_outline(program_id, report.load_report_inputs(root, program_id))
+
+    for heading in ("## Introduction", "## Related Work", "## Method", "## Experiments", "## Results", "## Discussion", "## Conclusion"):
+        assert heading in outline
+    assert "The method improves benchmark success rate." in outline
+    assert "Success rate improves by 8 points." in outline
