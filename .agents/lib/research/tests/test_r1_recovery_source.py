@@ -16,6 +16,9 @@ from research.git_ops import (
     dirty_kb_paths,
     ensure_kb_git_repo,
     git_checkpoint,
+    maybe_auto_checkpoint,
+    restore_operation,
+    undo_last_operation,
 )
 from research.common import (
     append_program_reporting_event,
@@ -25,7 +28,19 @@ from research.common import (
     program_reporting_events_path,
 )
 from research.confirm import write_record
-from research.journal import abort_op, begin_op, journaled_op, load_op, operation_lock_path
+from research.journal import (
+    abort_op,
+    begin_op,
+    commit_op,
+    committed_ops,
+    incomplete_ops,
+    journal_entry_path,
+    journaled_op,
+    latest_committed_op,
+    load_op,
+    mutation_transaction,
+    operation_lock_path,
+)
 from research.records import default_record
 from research.yaml_io import load_yaml, write_yaml_if_changed
 
@@ -37,6 +52,16 @@ def _project_root() -> Path:
 def _load_intake_module():
     script = _project_root() / ".agents" / "skills" / "source-intake" / "scripts" / "intake.py"
     spec = importlib.util.spec_from_file_location("r1_source_intake_script", script)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_config_module():
+    script = _project_root() / ".agents" / "skills" / "research-config-manager" / "scripts" / "config.py"
+    spec = importlib.util.spec_from_file_location("r1_research_config_script", script)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -201,6 +226,159 @@ def test_same_thread_outer_transaction_can_reenter_write_record_lock(tmp_path: P
     assert load_yaml(path)["revision"] == 1
 
 
+def test_auto_checkpoint_bookkeeping_never_hides_latest_user_transaction(tmp_path: Path) -> None:
+    _configure_kb_git(tmp_path)
+    path = tmp_path / "kb" / "notes" / "undoable.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("before\n", encoding="utf-8")
+    git_checkpoint(tmp_path, "seed undo target", auto_init=False, target_paths=[path])
+
+    with mutation_transaction(tmp_path, "edit-note", [path]) as business_op_id:
+        path.write_text("after\n", encoding="utf-8")
+    checkpoint = maybe_auto_checkpoint(
+        tmp_path,
+        trigger="milestone",
+        message="milestone: edit note",
+        target_paths=[path],
+    )
+
+    assert checkpoint["committed"] is True
+    entries = committed_ops(tmp_path)
+    version_entries = [entry for entry in entries if entry["op_type"] == "write_versioning_state"]
+    assert version_entries and all(entry["undoable"] is False for entry in version_entries)
+    assert latest_committed_op(tmp_path)["op_id"] == business_op_id
+
+    undone = undo_last_operation(tmp_path)
+
+    assert undone["op_id"] == business_op_id
+    assert path.read_bytes() == b"before\n"
+    assert load_op(tmp_path, business_op_id)["undone_by"] == undone["recovery_op_id"]
+
+
+def test_config_runtime_command_is_one_scoped_undoable_transaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _load_config_module()
+    config.ensure_workspace(tmp_path)
+    path = config.runtime_preferences_path(tmp_path)
+    before = path.read_bytes()
+    _configure_kb_git(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "config.py",
+            "--root",
+            str(tmp_path),
+            "set-runtime-pref",
+            "--section",
+            "paper",
+            "--key",
+            "auto_complete_note",
+            "--value",
+            "true",
+        ],
+    )
+
+    assert config.main() == 0
+    operation = latest_committed_op(tmp_path)
+    assert operation["op_type"] == "set-runtime-pref"
+    assert operation["target_paths"] == ["config/runtime-preferences.yaml"]
+    assert operation["undoable"] is True
+
+    undo_last_operation(tmp_path)
+
+    assert path.read_bytes() == before
+
+
+def test_nested_crash_resume_restores_only_root_before_image_and_aborts_descendants(tmp_path: Path) -> None:
+    _configure_kb_git(tmp_path)
+    path = tmp_path / "kb" / "notes" / "nested-crash.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("outer before\n", encoding="utf-8")
+    git_checkpoint(tmp_path, "seed nested crash target", auto_init=False, target_paths=[path])
+
+    outer_op_id = begin_op(tmp_path, "outer-command", [path])
+    path.write_text("outer partial\n", encoding="utf-8")
+    inner_op_id = begin_op(tmp_path, "inner-write", [path], parent_op_id=outer_op_id)
+    path.write_text("inner partial\n", encoding="utf-8")
+
+    assert [entry["op_id"] for entry in incomplete_ops(tmp_path)] == [outer_op_id]
+    restored = restore_operation(tmp_path, outer_op_id, recovery_type="resume")
+    abort_op(tmp_path, outer_op_id)
+
+    assert restored["op_id"] == outer_op_id
+    assert path.read_bytes() == b"outer before\n"
+    assert load_op(tmp_path, outer_op_id)["state"] == "abort"
+    assert load_op(tmp_path, inner_op_id)["state"] == "abort"
+    assert load_op(tmp_path, inner_op_id)["aborted_with_ancestor"] == outer_op_id
+    assert incomplete_ops(tmp_path) == []
+
+
+def test_legacy_root_business_entry_is_undoable_but_legacy_internal_entries_are_not(tmp_path: Path) -> None:
+    def make_legacy(op_type: str, path: Path, content: str) -> str:
+        op_id = begin_op(tmp_path, op_type, [path])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        commit_op(tmp_path, op_id)
+        entry = load_op(tmp_path, op_id)
+        for key in ("undoable", "operation_role", "parent_op_id", "root_op_id", "transaction_depth"):
+            entry.pop(key, None)
+        write_yaml_if_changed(journal_entry_path(tmp_path, op_id), entry)
+        return op_id
+
+    business_op_id = make_legacy("legacy-edit", tmp_path / "kb" / "notes" / "legacy.md", "business\n")
+    make_legacy(
+        "write_versioning_state",
+        tmp_path / "kb" / ".runtime" / "versioning-state.yaml",
+        "last_commit: legacy\n",
+    )
+    make_legacy("undo:legacy-edit", tmp_path / "kb" / "notes" / "legacy-recovery.md", "recovery\n")
+
+    assert latest_committed_op(tmp_path)["op_id"] == business_op_id
+
+
+def test_recovery_journal_commit_failure_never_advances_git_or_marks_business_undone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_kb_git(tmp_path)
+    path = tmp_path / "kb" / "notes" / "recovery-fault.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("before\n", encoding="utf-8")
+    git_checkpoint(tmp_path, "seed recovery fault", auto_init=False, target_paths=[path])
+    with mutation_transaction(tmp_path, "faulted-undo-source", [path]) as business_op_id:
+        path.write_text("after\n", encoding="utf-8")
+    git_checkpoint(tmp_path, "business change", auto_init=False, target_paths=[path])
+    head_before = subprocess.run(
+        ["git", "-C", str(tmp_path / "kb"), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    real_commit_op = journal.commit_op
+
+    def fail_recovery_commit(project_root: Path, op_id: str) -> None:
+        if load_op(project_root, op_id).get("operation_role") == "recovery":
+            raise OSError("simulated recovery journal commit failure")
+        real_commit_op(project_root, op_id)
+
+    monkeypatch.setattr(journal, "commit_op", fail_recovery_commit)
+    with pytest.raises(OSError, match="simulated recovery journal commit failure"):
+        undo_last_operation(tmp_path)
+
+    head_after = subprocess.run(
+        ["git", "-C", str(tmp_path / "kb"), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert head_after == head_before
+    assert path.read_bytes() == b"after\n"
+    assert not load_op(tmp_path, business_op_id).get("undone_by")
+
+
 @pytest.mark.parametrize(
     ("suffix", "content"),
     [
@@ -286,6 +464,85 @@ def test_failed_url_creates_only_retryable_staging_then_same_url_succeeds(
     assert cache["chunks"]
 
 
+def test_intake_checkpoint_then_undo_restores_unit_index_governance_and_search_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    intake = _load_intake_module()
+    source = tmp_path / "transactional-source.md"
+    source.write_text("# Transactional source\n\nGrounded body.\n", encoding="utf-8")
+    stage_id = "blog-search-transactional"
+    candidate_id = f"{stage_id}-candidate"
+    stage_path = sources.stage_search_results(
+        tmp_path,
+        kind="blog",
+        query="transactional source",
+        stage_id=stage_id,
+        candidates=[
+            {
+                "candidate_id": candidate_id,
+                "title": "Transactional source",
+                "url": source.as_posix(),
+            }
+        ],
+    )
+    tracked_paths = [
+        tmp_path / "kb" / "taxonomy" / "topics.yaml",
+        tmp_path / "kb" / "candidate-pools" / "pools.yaml",
+        tmp_path / "kb" / "index.yaml",
+        tmp_path / "kb" / "index.md",
+        stage_path,
+    ]
+    before = {path: path.read_bytes() if path.exists() else None for path in tracked_paths}
+    _configure_kb_git(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "intake.py",
+            "--root",
+            str(tmp_path),
+            "add",
+            "--kind",
+            "blog",
+            "--source",
+            source.as_posix(),
+            "--title",
+            "Transactional source",
+            "--stage-id",
+            stage_id,
+            "--candidate-id",
+            candidate_id,
+        ],
+    )
+
+    assert intake.main() == 0
+    units = list((tmp_path / "kb" / "units" / "blogs").glob("*/record.yaml"))
+    assert len(units) == 1
+    stage_after = load_yaml(stage_path)
+    candidate_after = next(item for item in stage_after["candidates"] if item["candidate_id"] == candidate_id)
+    assert candidate_after["status"] == "materialized"
+    intake_op = latest_committed_op(tmp_path)
+    assert intake_op["op_type"] == "source-intake-add"
+    assert intake_op["undoable"] is True
+    descendants = [
+        entry
+        for entry in committed_ops(tmp_path)
+        if entry.get("root_op_id") == intake_op["op_id"] and entry["op_id"] != intake_op["op_id"]
+    ]
+    assert descendants and all(entry["undoable"] is False for entry in descendants)
+
+    undone = undo_last_operation(tmp_path)
+
+    assert undone["op_id"] == intake_op["op_id"]
+    assert not units[0].parent.exists()
+    for path, payload in before.items():
+        if payload is None:
+            assert not path.exists()
+        else:
+            assert path.read_bytes() == payload
+
+
 def test_unsupported_local_binary_exits_nonzero_without_canonical_unit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -314,6 +571,26 @@ def test_unsupported_local_binary_exits_nonzero_without_canonical_unit(
     with pytest.raises(SystemExit, match="Unsupported local file type"):
         intake.main()
     assert list((tmp_path / "kb" / "units" / "blogs").glob("*/record.yaml")) == []
+
+
+def test_repo_backup_excludes_vcs_metadata_before_canonical_materialization(tmp_path: Path) -> None:
+    source_repo = tmp_path / "source-repo"
+    (source_repo / ".git").mkdir(parents=True)
+    (source_repo / ".git" / "config").write_text("[core]\n", encoding="utf-8")
+    (source_repo / "README.md").write_text("# Repository\n", encoding="utf-8")
+    unit_dir = tmp_path / "kb" / ".runtime" / "intake-staging" / "r-staged" / "attempt"
+
+    payload = sources.backup_source(
+        tmp_path,
+        "repo",
+        "r-staged",
+        source_repo.as_posix(),
+        unit_dir=unit_dir,
+    )
+
+    archived_repo = tmp_path / payload["backup_paths"][0]
+    assert (archived_repo / "README.md").read_bytes() == b"# Repository\n"
+    assert not (archived_repo / ".git").exists()
 
 
 def test_rejected_legacy_record_does_not_poison_source_retry(tmp_path: Path) -> None:
@@ -358,15 +635,79 @@ def test_storage_sync_never_rewrites_agent_rules_or_immutable_source_bytes(tmp_p
         path.write_text("Reference raw/example and output/example.\n", encoding="utf-8")
     source_before = immutable_source.read_bytes()
     cache_before = immutable_cache.read_bytes()
+    canonical_repo_source = tmp_path / "kb" / "units" / "repos" / "r-demo" / "source" / "repo"
+    nested_git_config = canonical_repo_source / ".git" / "config"
+    nested_git_config.parent.mkdir(parents=True)
+    nested_git_config.write_text("[core]\n\trepositoryformatversion = 0\n", encoding="utf-8")
+    (canonical_repo_source / "README.md").write_text("Reference raw/repo without rewriting.\n", encoding="utf-8")
+    canonical_repo_digest = journal.file_digest(canonical_repo_source)
+    legacy_raw = tmp_path / "raw" / "legacy.bin"
+    legacy_output = tmp_path / "output" / "legacy-report.md"
+    legacy_raw.parent.mkdir(parents=True)
+    legacy_output.parent.mkdir(parents=True)
+    legacy_raw.write_bytes(b"legacy raw bytes\x00\xff")
+    legacy_output.write_bytes(b"legacy output bytes\n")
+    legacy_before = {legacy_raw: legacy_raw.read_bytes(), legacy_output: legacy_output.read_bytes()}
 
     result = sources.sync_storage_layout(tmp_path)
 
     assert all(path.read_bytes() == payload for path, payload in before.items())
     assert immutable_source.read_bytes() == source_before
     assert immutable_cache.read_bytes() == cache_before
+    assert journal.file_digest(canonical_repo_source) == canonical_repo_digest
+    assert nested_git_config.exists()
     assert "kb/raw/example" in mutable_note.read_text(encoding="utf-8")
     assert "kb/notes/migration.md" in result["rewritten_files"]
     assert all(item.startswith("kb/") for item in result["rewritten_files"])
+    assert legacy_raw.read_bytes() == legacy_before[legacy_raw]
+    assert legacy_output.read_bytes() == legacy_before[legacy_output]
+    assert (tmp_path / "kb" / "raw" / "legacy.bin").read_bytes() == legacy_before[legacy_raw]
+    assert (tmp_path / "kb" / "output" / "legacy-report.md").read_bytes() == legacy_before[legacy_output]
+    assert set(result["preserved_legacy_roots"]) == {
+        (tmp_path / "raw").as_posix(),
+        (tmp_path / "output").as_posix(),
+    }
+
+    undone = undo_last_operation(tmp_path)
+
+    assert undone["op_id"]
+    assert mutable_note.read_text(encoding="utf-8") == "Reference raw/example and output/example.\n"
+    assert not (tmp_path / "kb" / "raw" / "legacy.bin").exists()
+    assert not (tmp_path / "kb" / "output" / "legacy-report.md").exists()
+    assert legacy_raw.read_bytes() == legacy_before[legacy_raw]
+    assert legacy_output.read_bytes() == legacy_before[legacy_output]
+    assert journal.file_digest(canonical_repo_source) == canonical_repo_digest
+
+
+def test_storage_sync_preserves_legacy_uri_when_destination_bytes_conflict(tmp_path: Path) -> None:
+    legacy = tmp_path / "raw" / "collision.txt"
+    destination = tmp_path / "kb" / "raw" / "collision.txt"
+    legacy.parent.mkdir(parents=True)
+    destination.parent.mkdir(parents=True)
+    legacy.write_bytes(b"legacy truth\n")
+    destination.write_bytes(b"different canonical bytes\n")
+    record = default_record("blog", title="Storage collision", maturity="lightweight")
+    record["id"] = "b-storage-collision"
+    record["source"] = {
+        "original_uri": legacy.as_posix(),
+        "backup_kind": "local-file",
+        "backup_paths": [],
+        "file_hash": "",
+    }
+    record_path = write_record(tmp_path, record)
+
+    result = sources.sync_storage_layout(tmp_path)
+
+    assert legacy.read_bytes() == b"legacy truth\n"
+    assert destination.read_bytes() == b"different canonical bytes\n"
+    assert load_yaml(record_path)["source"]["original_uri"] == legacy.as_posix()
+    assert result["conflicts"]
+    assert any(
+        item["source"] == legacy.as_posix()
+        and item["destination"] == destination.as_posix()
+        and item["source_digest"] != item["destination_digest"]
+        for item in result["conflicts"]
+    )
 
 
 def test_runtime_capabilities_recognize_default_pymupdf_stack() -> None:
