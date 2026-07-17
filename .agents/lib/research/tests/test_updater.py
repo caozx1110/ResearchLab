@@ -38,7 +38,7 @@ def test_check_reports_available_equal_and_unknown(monkeypatch, tmp_path: Path) 
     assert updater.check(tmp_path, tmp_path / "cache")["status"] == "up_to_date"
 
     def fail_fetch(_checkout, _cache):
-        raise OSError("offline")
+        raise ValueError("unexpected remote response")
 
     monkeypatch.setattr(updater, "fetch_remote_version", fail_fetch)
     result = updater.check(tmp_path, tmp_path / "cache")

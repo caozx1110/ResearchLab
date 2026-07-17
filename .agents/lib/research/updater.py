@@ -159,7 +159,7 @@ def check(install_root: Path, cache_dir: Path) -> dict[str, str]:
     try:
         checkout = resolve_source_checkout(install_root)
         remote = fetch_remote_version(checkout, cache_dir)
-    except (OSError, RuntimeError, subprocess.SubprocessError):
+    except Exception:
         return {"local": local, "remote": "unknown", "status": "unknown"}
     status = "update_available" if compare_versions(local, remote) < 0 else "up_to_date"
     return {"local": local, "remote": remote, "status": status}
@@ -187,5 +187,5 @@ def apply(install_root: Path, cache_dir: Path) -> dict[str, Any]:
         return {"before": before, "after": read_local_version(root), "status": "updated"}
     except subprocess.CalledProcessError:
         return _error_result(before, "更新未完成：本地修改、分支分叉或安装内容漂移需要先手动处理。")
-    except (OSError, RuntimeError, subprocess.SubprocessError):
+    except Exception:
         return _error_result(before, "更新未完成：暂时无法访问更新源或同步安装内容。")

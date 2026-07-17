@@ -200,6 +200,7 @@ def handle_update(args: argparse.Namespace, root: Path) -> int:
     remote = result.get("remote") or "unknown"
     print(f"当前 research skill 版本：{local}。")
     if result.get("status") == "unknown":
+        print("远端 research skill 版本：未知。")
         print("暂时无法连接远端检查更新；当前安装未做任何改动。")
         return 0
     print(f"远端 research skill 版本：{remote}。")

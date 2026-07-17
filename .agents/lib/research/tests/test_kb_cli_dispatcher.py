@@ -119,6 +119,23 @@ def test_kb_update_apply_uses_agent_confirmed_path(monkeypatch, tmp_path: Path, 
     assert "research skill 更新完成：0.1.0 → 0.2.0。" in capsys.readouterr().out
 
 
+def test_kb_update_offline_reports_unknown_without_changes(monkeypatch, tmp_path: Path, capsys) -> None:
+    kb = _load_kb_cli()
+    monkeypatch.setattr(
+        kb.updater,
+        "check",
+        lambda _root, _cache: {"local": "0.1.0", "remote": "unknown", "status": "unknown"},
+    )
+
+    assert kb.main(["--root", str(tmp_path), "update"]) == 0
+
+    output = capsys.readouterr().out
+    assert "当前 research skill 版本：0.1.0。" in output
+    assert "远端 research skill 版本：未知。" in output
+    assert "当前安装未做任何改动" in output
+    assert "NEXT FOR AGENT:" not in output
+
+
 def test_kb_init_forwards_workspace_and_config_inits_in_order(monkeypatch, tmp_path: Path) -> None:
     kb = _load_kb_cli()
     calls: list[list[tuple[str, tuple[str, ...]]]] = []
