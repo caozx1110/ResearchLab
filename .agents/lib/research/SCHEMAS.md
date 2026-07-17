@@ -173,7 +173,8 @@ items:
   why_this_run: ""              # 触发动机
   tested_hypothesis: ""         # 这一跑想验证的具体假设
   changes: []                   # 相对上一跑的变更
-  metrics: {}                   # 量化结果（dict，键为指标名）
+  metrics: {}                   # 量化结果。轻度强类型（2026-07-17）：值为 {name,value:float,unit,direction} 的对象；裸 key=value 仍兼容（value 尽量转 float，否则留字符串+warn）。方向 higher-better/lower-better，用于跨轮次自动比较
+  artifacts: []                 # 每项 {path,status:present|missing,generated:bool}；claimed artifact 落盘前 stat 校验存在性（2026-07-17）
   outcome: success|partial|failure
   classifications: [method|data|resource|evaluation|...]
   result_summary: ""
@@ -505,6 +506,31 @@ claim:
 
 ---
 
+## evidence-first 产出子系统（survey / report / idea 讨论）<a id="evidence-first-outputs"></a>
+
+Wave3（2026-07-17）把 3.6/3.10/3.7 三个产出侧子系统从"一次性算完写盘"改成 **prepare/verify + 逐字证据**（同 paper-analyst 范式）：脚本搭可填结构 + 校验证据，理解与判断来自 agent（原则1/2）。
+
+### literature-synthesizer（survey）— `kb/synthesis/<slug>/survey-fill.yaml` → `survey.yaml` + `summary.md`
+
+- `prepare` 产 7 节骨架：`scope_positioning / background_terms / taxonomy(核心) / cross_cutting / trends / gaps_challenges / conclusion` + `comparison_matrix`（方法×维度）；每个 cell/item/matrix-cell 带空 `evidence_refs` + `claim_type`。
+- `kb_anchor: {as_of, unit_ids[], units[]}` 记录生成锚点（stale 判据，接 3.13）。
+- `epistemic_status`：`claim_type=inference` → **inferred**；`fact/evaluation` → **observed**。
+- `verify`：`validate_claims` + 逐 evidence_ref `verify_claim_evidence`（对各自 `source_unit_id` 的 unit 目录逐字校验）；每个承重 cell 必须 ≥1 verbatim citation，全过才落 `survey.yaml`。无硬编码结论/confidence。
+
+### report-author — `kb/programs/<id>/reports/*.md`、`kb/user/report-materials/*`、`paper-outline.md`
+
+- 报告**自包含**：聚合 `reporting-events.yaml` + program 关联 unit 的 **confirmed claims + evidence**（`read_claims`/`validate_claims`），不再只 dump 事件。
+- 新增 `outline` verb（论文大纲 owner，非新 skill）：Introduction/Related Work/Method/Experiments/Results/Discussion/Conclusion 骨架，Related Work 挂 confirmed claims+evidence。
+- **缺输入显式标 `missing: X`**（缺 decisions/events/confirmed claims/evidence 都如实标），绝不脑补。用户可见输出无裸命令（原则8）。
+
+### idea-workbench — 陪练 discussion + evidence-first analysis
+
+- `discuss`（别名 `spar`）prepare/verify：陪练身份=领域专家/审稿人，四类空白 judgement claim（challenge/probe/counter-example/constructive-suggestion）；verify 对 counter-example 引用的 KB unit 逐字校验，**按 conclusion 持久化**到 `payload.discussion.conclusions[]`（每条含 evidence + who/when）。
+- `analyze`/`review` 改 prepare/verify：novelty/feasibility/recommendation/killer-question 由 agent 填 + 挂证据；字段计数仅 descriptive hint，不再是 score/verdict 来源。
+- `select` 仍写 `pending_user_confirmation`（工作流态，不自签 confirmed）。
+
+---
+
 ## 给 SKILL.md 的引用规范
 
 每个消费上述 artifact 的 SKILL.md，在 frontmatter 后面紧接一行：
@@ -513,4 +539,4 @@ claim:
 > 协议参考：`.agents/lib/research/SCHEMAS.md#<anchor>`
 ```
 
-可用 anchor：`enums`, `unit-record`, `unit-payload`, `experiment-files`, `program-files`, `config-files`, `ownership`, `confirmation-gate`, `evidence-claims`。
+可用 anchor：`enums`, `unit-record`, `unit-payload`, `experiment-files`, `program-files`, `config-files`, `ownership`, `confirmation-gate`, `evidence-claims`, `evidence-first-outputs`。
