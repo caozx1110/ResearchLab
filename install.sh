@@ -823,6 +823,10 @@ source_commit() {
   git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || printf ''
 }
 
+source_origin() {
+  git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || printf 'local'
+}
+
 file_sha256() {
   if is_command shasum; then
     shasum -a 256 "$1" | awk '{ print $1 }'
@@ -935,10 +939,20 @@ guard_copy_install_target() {
 }
 
 ws_sync() {
-  local action=$1 commit agent_csv output status change_count args=()
+  local action=$1 commit origin agent_csv output status change_count args=()
   shift || true
   commit=$(source_commit)
-  args=("$action" "--repo" "$REPO_ROOT" "--dir" "$WORKSPACE_ROOT" "--source-commit" "$commit")
+  origin=$(source_origin)
+  args=(
+    "$action"
+    "--repo" "$REPO_ROOT"
+    "--dir" "$WORKSPACE_ROOT"
+    "--source-commit" "$commit"
+    "--source-origin" "$origin"
+  )
+  if [ "$origin" = "local" ]; then
+    args+=("--source-checkout" "$REPO_ROOT")
+  fi
   if [ "$action" = "install" ]; then
     agent_csv=""
     [ "$CONFIG_CLAUDE" -eq 1 ] && agent_csv="claude"

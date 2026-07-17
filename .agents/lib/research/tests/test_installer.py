@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import json
 import os
 import pty
 import select
@@ -252,6 +253,11 @@ def test_external_install_prints_completion_without_bash_variable_error(tmp_path
     assert "unbound variable" not in result.stdout
     assert "copy-project" not in result.stdout
     assert "工作区文件已准备" in result.stdout
+    manifest_path = workspace / ".agents" / ".install-manifest.json"
+    installed_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert installed_manifest["source_origin"]
+    expected_checkout = str(_project_root()) if installed_manifest["source_origin"] == "local" else ""
+    assert installed_manifest["source_checkout"] == expected_checkout
 
     cancel = _run_pty_dialog(
         tmp_path,
@@ -275,6 +281,9 @@ def test_external_install_prints_completion_without_bash_variable_error(tmp_path
     assert "skills 已是最新版本，AI 工具配置已检查" in update.stdout
     assert "skills 和 AI 工具配置已更新" not in update.stdout
     assert "clean-sync" not in update.stdout
+    updated_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert updated_manifest["source_origin"] == installed_manifest["source_origin"]
+    assert updated_manifest["source_checkout"] == installed_manifest["source_checkout"]
 
 
 def test_guided_system_uninstall_can_be_cancelled(tmp_path: Path) -> None:

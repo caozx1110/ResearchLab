@@ -666,6 +666,8 @@ def build_manifest(
     *,
     repo: Path,
     source_commit: str,
+    source_origin: str,
+    source_checkout: str,
     version: str,
     installed_at: str,
     agents: dict[str, bool],
@@ -676,7 +678,11 @@ def build_manifest(
         "schema": SCHEMA,
         "install_name": INSTALL_NAME,
         "install_mode": INSTALL_MODE,
-        "source_repo": "",
+        # source_repo remains as a compatibility alias for older updater builds;
+        # source_origin/source_checkout are the R1 provenance contract.
+        "source_repo": source_checkout,
+        "source_origin": source_origin,
+        "source_checkout": source_checkout,
         "source_commit": source_commit,
         "version": version,
         "installed_at": installed_at,
@@ -722,6 +728,8 @@ def install(args: argparse.Namespace) -> int:
     manifest = build_manifest(
         repo=repo,
         source_commit=args.source_commit or "",
+        source_origin=str(args.source_origin or "local").strip(),
+        source_checkout=str(args.source_checkout or ""),
         version=read_source_version(repo, source),
         installed_at=installed_at,
         agents=agents,
@@ -744,9 +752,6 @@ def update(args: argparse.Namespace) -> int:
         die(f"copy-project update requires a real .agents directory: {agents_root(dst_root)}")
     manifest = load_manifest(manifest_path(dst_root), required=True)
     assert manifest is not None
-    manifest_repo = str(manifest.get("source_repo") or "")
-    if manifest_repo and Path(manifest_repo).expanduser().resolve(strict=False) != repo:
-        warn(f"manifest source_repo differs from current repo: {manifest_repo} != {repo}")
     assert_no_symlinked_agent_subdirs(dst_root)
 
     items = source_items(repo, source)
@@ -783,10 +788,17 @@ def update(args: argparse.Namespace) -> int:
     if manifest.get("agents_md") != "managed-block":
         legacy_agents_digest = str(manifest.get("agents_md_sha") or old_files.get("AGENTS.md") or "")
     writes, agents_md_sha = build_writes(dst_root, items, legacy_agents_digest=legacy_agents_digest)
+    effective_origin = str(args.source_origin or manifest.get("source_origin") or "local").strip()
+    effective_checkout = str(
+        args.source_checkout or manifest.get("source_checkout") or manifest.get("source_repo") or ""
+    )
 
     changed = (
         old_files != new_files
         or old_commit != new_commit
+        or str(manifest.get("source_origin") or "") != effective_origin
+        or str(manifest.get("source_checkout") or manifest.get("source_repo") or "")
+        != effective_checkout
         or manifest.get("agents_md") != "managed-block"
         or writes_need_change(dst_root, writes, removed)
     )
@@ -797,6 +809,8 @@ def update(args: argparse.Namespace) -> int:
         new_manifest = build_manifest(
             repo=repo,
             source_commit=new_commit,
+            source_origin=effective_origin,
+            source_checkout=effective_checkout,
             version=read_source_version(repo, source),
             installed_at=installed_at,
             agents=agents,
@@ -832,6 +846,8 @@ def reinstall(args: argparse.Namespace) -> int:
     new_manifest = build_manifest(
         repo=repo,
         source_commit=args.source_commit or "",
+        source_origin=str(args.source_origin or manifest.get("source_origin") or "local").strip(),
+        source_checkout=str(args.source_checkout or manifest.get("source_checkout") or manifest.get("source_repo") or ""),
         version=read_source_version(repo, source),
         installed_at=utc_now(),
         agents=normalize_manifest_agents(manifest.get("agents")),
@@ -899,6 +915,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--repo", required=True)
     parser.add_argument("--dir", required=True)
     parser.add_argument("--source-commit", default="")
+    parser.add_argument("--source-origin", default="")
+    parser.add_argument("--source-checkout", default="")
     parser.add_argument("--source", default="")
     parser.add_argument("--agents", default="")
     parser.add_argument("--force", action="store_true")
