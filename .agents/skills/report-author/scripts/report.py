@@ -33,6 +33,12 @@ CONFIRMED_CLAIM_STATUSES = {"confirmed", "auto_confirmed"}
 UNIT_ID_FIELDS = {"unit_id", "unit_ids", "related_unit_ids", "active_unit_ids"}
 UNIT_PATH_RE = re.compile(r"(?:^|/)kb/units/(?:papers|repos|blogs|ideas|experiments)/([^/]+)(?:/|$)")
 DECISION_HEADING_RE = re.compile(r"^##\s+(.+)$", flags=re.MULTILINE)
+CONCISE_STYLE_SIGNALS = ("简洁", "concise", "brief")
+DETAILED_STYLE_SIGNALS = ("详细", "detailed", "full")
+CONCISE_DECISION_LIMIT = 3
+CONCISE_SOURCE_LIMIT = 3
+CONCISE_CLAIM_LIMIT = 3
+CONCISE_EVENT_LIMIT = 5
 
 
 @dataclass
@@ -50,6 +56,7 @@ class ReportInputs:
     claim_sources: list[ClaimSource] = field(default_factory=list)
     decisions: list[dict[str, str]] = field(default_factory=list)
     missing_units: list[str] = field(default_factory=list)
+    reporting_style: str = "default"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -73,6 +80,21 @@ def normalize_events(events: list[dict[str, Any]], *, stage: str = "", limit: in
     if limit > 0:
         filtered = filtered[-limit:]
     return filtered
+
+
+def load_reporting_style(root: Path) -> str:
+    try:
+        profile = load_yaml(root / "kb" / "config" / "user-profile.yaml", default={})
+    except Exception:
+        return "default"
+    if not isinstance(profile, dict):
+        return "default"
+    style = str(profile.get("reporting_style") or "").casefold()
+    if any(signal in style for signal in CONCISE_STYLE_SIGNALS):
+        return "concise"
+    if any(signal in style for signal in DETAILED_STYLE_SIGNALS):
+        return "detailed"
+    return "default"
 
 
 def _text_items(value: Any) -> list[str]:
@@ -181,6 +203,29 @@ def load_report_inputs(root: Path, program_id: str, *, stage: str = "", limit: i
         claim_sources=claim_sources,
         decisions=load_decisions(root, program_id),
         missing_units=missing_units,
+        reporting_style=load_reporting_style(root),
+    )
+
+
+def concise_report_inputs(inputs: ReportInputs) -> ReportInputs:
+    if inputs.reporting_style != "concise":
+        return inputs
+    claim_sources = [
+        ClaimSource(
+            unit_id=source.unit_id,
+            title=source.title,
+            kind=source.kind,
+            claims=source.claims[:CONCISE_CLAIM_LIMIT],
+            issues=source.issues,
+        )
+        for source in inputs.claim_sources[:CONCISE_SOURCE_LIMIT]
+    ]
+    return ReportInputs(
+        events=inputs.events[-CONCISE_EVENT_LIMIT:],
+        claim_sources=claim_sources,
+        decisions=inputs.decisions[-CONCISE_DECISION_LIMIT:],
+        missing_units=inputs.missing_units,
+        reporting_style=inputs.reporting_style,
     )
 
 
@@ -269,6 +314,7 @@ def report_headings(report_kind: str) -> tuple[str, str]:
 
 
 def render_report(title: str, inputs: ReportInputs, *, report_kind: str) -> str:
+    inputs = concise_report_inputs(inputs)
     claims_heading, events_heading = report_headings(report_kind)
     sections = [
         [f"# {title}", ""],
@@ -306,6 +352,7 @@ def render_outline_event_inputs(events: list[dict[str, Any]], *, section: str, t
 
 
 def render_outline(program_id: str, inputs: ReportInputs) -> str:
+    inputs = concise_report_inputs(inputs)
     related_work = render_claims(
         inputs.claim_sources,
         inputs.missing_units,

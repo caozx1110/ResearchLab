@@ -141,6 +141,88 @@ def test_missing_inputs_are_explicit_and_never_fabricated(tmp_path: Path) -> Non
     assert "improves benchmark success rate" not in weekly
 
 
+def test_reporting_style_controls_verbosity_and_preserves_missing_markers(tmp_path: Path) -> None:
+    report = _load_report_module()
+    root, program_id, unit_id = _make_workspace(tmp_path, with_claim=False)
+    unit_dir = root / "kb" / "units" / "papers" / unit_id
+    claims = [
+        {
+            "id": f"claim-{index}",
+            "text": f"Confirmed claim {index}.",
+            "claim_type": "fact",
+            "confirmation_status": "confirmed",
+            "evidence_refs": [],
+        }
+        for index in range(6)
+    ]
+    write_yaml_if_changed(
+        unit_dir / "record.yaml",
+        {"id": unit_id, "kind": "paper", "title": "Grounded Paper", "payload": {"claims": claims}},
+    )
+    events_path = root / "kb" / "programs" / program_id / "workflow" / "reporting-events.yaml"
+    write_yaml_if_changed(
+        events_path,
+        {
+            "id": f"{program_id}-reporting-events",
+            "items": [
+                {
+                    "source_skill": "paper-analyst",
+                    "event_type": "phase-completed",
+                    "title": f"Reporting event {index}",
+                    "summary": "Grounded event summary.",
+                    "timestamp": f"2026-07-17T00:{index:02d}:00+00:00",
+                    "paper_ids": [unit_id],
+                }
+                for index in range(8)
+            ],
+        },
+    )
+    profile_path = root / "kb" / "config" / "user-profile.yaml"
+
+    write_yaml_if_changed(profile_path, {"reporting_style": "详细 / detailed"})
+    detailed_inputs = report.load_report_inputs(root, program_id)
+    detailed = report.render_report(f"Weekly Report: {program_id}", detailed_inputs, report_kind="weekly")
+
+    write_yaml_if_changed(profile_path, {"reporting_style": "简洁 concise"})
+    concise_inputs = report.load_report_inputs(root, program_id)
+    concise = report.render_report(f"Weekly Report: {program_id}", concise_inputs, report_kind="weekly")
+
+    profile_path.unlink()
+    default_inputs = report.load_report_inputs(root, program_id)
+    default = report.render_report(f"Weekly Report: {program_id}", default_inputs, report_kind="weekly")
+
+    assert concise_inputs.reporting_style == "concise"
+    assert detailed_inputs.reporting_style == "detailed"
+    assert default_inputs.reporting_style == "default"
+    assert len(concise) < len(detailed)
+    assert detailed == default
+    assert "Reporting event 0" in detailed
+    assert "Reporting event 0" not in concise
+    assert "Confirmed claim 5." in detailed
+    assert "Confirmed claim 5." not in concise
+    assert "missing: evidence for claim claim-0" in concise
+    assert "missing: evidence for claim claim-0" in detailed
+
+
+def test_unparseable_reporting_style_uses_default_behavior(tmp_path: Path) -> None:
+    report = _load_report_module()
+    root, program_id, _ = _make_workspace(tmp_path)
+    expected = report.render_report(
+        f"Weekly Report: {program_id}",
+        report.load_report_inputs(root, program_id),
+        report_kind="weekly",
+    )
+    profile_path = root / "kb" / "config" / "user-profile.yaml"
+    profile_path.parent.mkdir(parents=True, exist_ok=True)
+    profile_path.write_text("reporting_style: [broken\n", encoding="utf-8")
+
+    inputs = report.load_report_inputs(root, program_id)
+    actual = report.render_report(f"Weekly Report: {program_id}", inputs, report_kind="weekly")
+
+    assert inputs.reporting_style == "default"
+    assert actual == expected
+
+
 def test_generated_documents_do_not_leak_raw_commands(tmp_path: Path) -> None:
     report = _load_report_module()
     root, program_id, _ = _make_workspace(tmp_path)
