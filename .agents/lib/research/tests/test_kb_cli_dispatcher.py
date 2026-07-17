@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.machinery
 import importlib.util
 import io
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -71,14 +72,16 @@ def test_kb_doctor_prints_runtime_capabilities(monkeypatch, tmp_path: Path, caps
         },
     )
 
-    assert kb.main(["--root", str(tmp_path), "doctor"]) == 0
+    assert kb.main(["--root", str(tmp_path), "--agent-protocol", "doctor.json", "doctor"]) == 0
 
     captured = capsys.readouterr()
-    assert "python: /usr/bin/python3" in captured.out
-    assert "skill_version: 0.1.0" in captured.out
-    assert "yaml: available" in captured.out
-    assert "pdf: pypdf" in captured.out
-    assert "module.PyPDF2: missing" in captured.out
+    assert "research skill 版本为 0.1.0" in captured.out
+    assert "YAML 支持正常" in captured.out
+    assert "PDF 解析后端已就绪（pypdf）" in captured.out
+    assert "/usr/bin/python3" not in captured.out
+    protocol = json.loads((tmp_path / "kb" / ".runtime" / "doctor.json").read_text(encoding="utf-8"))
+    assert protocol["details"]["runtime"]["python"] == "/usr/bin/python3"
+    assert protocol["details"]["runtime"]["modules"]["PyPDF2"] is False
 
 
 def test_kb_update_check_only_reports_available_without_user_facing_commands(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -89,18 +92,19 @@ def test_kb_update_check_only_reports_available_without_user_facing_commands(mon
         lambda _root, _cache: {"local": "0.1.0", "remote": "0.2.0", "status": "update_available"},
     )
 
-    assert kb.main(["--root", str(tmp_path), "update"]) == 0
+    assert kb.main(["--root", str(tmp_path), "--agent-protocol", "update.json", "update"]) == 0
 
     lines = capsys.readouterr().out.splitlines()
-    agent_lines = [line for line in lines if line.startswith("NEXT FOR AGENT:")]
-    user_lines = [line for line in lines if not line.startswith("NEXT FOR AGENT:")]
-    assert len(agent_lines) == 1
-    assert "kb update --apply" in agent_lines[0]
-    assert "当前 research skill 版本：0.1.0。" in user_lines
-    assert "远端 research skill 版本：0.2.0。" in user_lines
-    assert any("发现可用更新" in line for line in user_lines)
-    for line in user_lines:
+    assert "当前 research skill 版本：0.1.0。" in lines
+    assert "远端 research skill 版本：0.2.0。" in lines
+    assert any("发现可用更新" in line for line in lines)
+    for line in lines:
         assert not any(token in line for token in ("python3", ".py ", "--", "${", "git "))
+    protocol = json.loads((tmp_path / "kb" / ".runtime" / "update.json").read_text(encoding="utf-8"))
+    assert protocol["status"] == "needs_user_authorization"
+    assert protocol["next_actions"] == [
+        {"action": "request_update_authorization", "then": {"apply": True, "verb": "update"}}
+    ]
 
 
 def test_kb_update_apply_uses_agent_confirmed_path(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -115,7 +119,7 @@ def test_kb_update_apply_uses_agent_confirmed_path(monkeypatch, tmp_path: Path, 
 
     assert kb.main(["--root", str(tmp_path), "update", "--apply"]) == 0
 
-    assert calls == [(kb.DEFAULT_PROJECT_ROOT, kb.update_cache_dir())]
+    assert calls == [(tmp_path, kb.update_cache_dir())]
     assert "research skill 更新完成：0.1.0 → 0.2.0。" in capsys.readouterr().out
 
 
@@ -136,7 +140,7 @@ def test_kb_update_offline_reports_unknown_without_changes(monkeypatch, tmp_path
     assert "NEXT FOR AGENT:" not in output
 
 
-def test_kb_init_forwards_workspace_and_config_inits_in_order(monkeypatch, tmp_path: Path) -> None:
+def test_kb_init_has_identical_no_tty_semantics_and_never_reads_input(monkeypatch, tmp_path: Path, capsys) -> None:
     kb = _load_kb_cli()
     calls: list[list[tuple[str, tuple[str, ...]]]] = []
 
@@ -145,39 +149,33 @@ def test_kb_init_forwards_workspace_and_config_inits_in_order(monkeypatch, tmp_p
         return 0
 
     monkeypatch.setattr(kb, "run_forwarded", fake_run_forwarded)
-    monkeypatch.setattr(sys, "stdin", TTYStringIO("czx\nzh\nmilestone\ntrue\n"))
+    monkeypatch.setattr("builtins.input", lambda prompt="": (_ for _ in ()).throw(AssertionError("must not prompt")))
     monkeypatch.setattr(
         kb,
         "runtime_pref_defaults",
         lambda root: {"name": "", "lang": "zh", "auto_commit": "milestone", "auto_screen": "true"},
     )
 
+    monkeypatch.setattr(sys, "stdin", TTYStringIO("ignored\n"))
     assert kb.main(["--root", str(tmp_path), "init"]) == 0
+    tty_output = capsys.readouterr().out
+    calls_after_tty = list(calls)
+    calls.clear()
+    monkeypatch.setattr(sys, "stdin", io.StringIO("ignored\n"))
+    assert kb.main(["--root", str(tmp_path), "init"]) == 0
+    pipe_output = capsys.readouterr().out
 
-    assert calls == [
+    expected = [
         [
             (".agents/skills/knowledge-base-manager/scripts/kb.py", ("init",)),
             (".agents/skills/research-config-manager/scripts/config.py", ("init",)),
         ],
-        [
-            (
-                ".agents/skills/research-config-manager/scripts/config.py",
-                ("set-runtime-pref", "--section", "identity", "--key", "default_confirmed_by", "--value", "czx"),
-            ),
-            (
-                ".agents/skills/research-config-manager/scripts/config.py",
-                ("set", "--key", "preferences.language_preference", "--value", "zh"),
-            ),
-            (
-                ".agents/skills/research-config-manager/scripts/config.py",
-                ("set-runtime-pref", "--section", "versioning", "--key", "auto_commit_mode", "--value", "milestone"),
-            ),
-            (
-                ".agents/skills/research-config-manager/scripts/config.py",
-                ("set-runtime-pref", "--section", "paper", "--key", "auto_screen_on_intake", "--value", "true"),
-            ),
-        ],
     ]
+    assert calls_after_tty == expected
+    assert calls == expected
+    assert tty_output == pipe_output
+    assert "还需要你告诉我确认人姓名" in tty_output
+    assert "NEXT FOR AGENT:" not in tty_output
 
 
 def test_kb_init_non_tty_scaffolds_and_guides_agent(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -189,26 +187,23 @@ def test_kb_init_non_tty_scaffolds_and_guides_agent(monkeypatch, tmp_path: Path,
         return 0
 
     monkeypatch.setattr(kb, "run_forwarded", fake_run_forwarded)
-    monkeypatch.setattr(kb, "runtime_pref_defaults", lambda root: (_ for _ in ()).throw(AssertionError("should not prompt")))
+    monkeypatch.setattr(
+        kb,
+        "runtime_pref_defaults",
+        lambda root: {"name": "", "lang": "zh", "auto_commit": "milestone", "auto_screen": "true"},
+    )
     monkeypatch.setattr("builtins.input", lambda prompt="": (_ for _ in ()).throw(AssertionError("should not prompt")))
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
 
-    assert kb.main(["init", "--non-interactive", "--root", str(tmp_path)]) == 0
+    assert kb.main(["--agent-protocol", "init.json", "init", "--non-interactive", "--root", str(tmp_path)]) == 0
 
     captured = capsys.readouterr()
-    assert "NEXT FOR AGENT:" in captured.out
-    for flag in [
-        "--name",
-        "--lang",
-        "--auto-commit",
-        "--auto-screen",
-        "--persona-focus",
-        "--persona-resources",
-        "--persona-report",
-        "--persona-boundaries",
-        "--persona-term",
-    ]:
-        assert flag in captured.out
+    assert "还需要你告诉我确认人姓名" in captured.out
+    assert "NEXT FOR AGENT:" not in captured.out
+    assert "--" not in captured.out
+    protocol = json.loads((tmp_path / "kb" / ".runtime" / "init.json").read_text(encoding="utf-8"))
+    assert protocol["status"] == "needs_user_input"
+    assert protocol["next_actions"][0]["required_fields"] == ["human_name"]
     assert calls == [
         [
             (".agents/skills/knowledge-base-manager/scripts/kb.py", ("init",)),
@@ -240,7 +235,7 @@ def test_kb_init_headless_flags_persist_user_profile(monkeypatch, tmp_path: Path
     assert profile["personalization"]["research_focus"] == "robot learning and VLA"
 
 
-def test_kb_init_rejects_ai_signer_name_before_writing_prefs(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_kb_init_rejects_ai_signer_name_before_writing_prefs(monkeypatch, tmp_path: Path) -> None:
     kb = _load_kb_cli()
     calls: list[list[tuple[str, tuple[str, ...]]]] = []
 
@@ -249,35 +244,9 @@ def test_kb_init_rejects_ai_signer_name_before_writing_prefs(monkeypatch, tmp_pa
         return 0
 
     monkeypatch.setattr(kb, "run_forwarded", fake_run_forwarded)
-    monkeypatch.setattr(sys, "stdin", TTYStringIO("codex\nczx\nen\nmanual\nfalse\n"))
-    monkeypatch.setattr(
-        kb,
-        "runtime_pref_defaults",
-        lambda root: {"name": "", "lang": "zh", "auto_commit": "milestone", "auto_screen": "true"},
-    )
-
-    assert kb.main(["--root", str(tmp_path), "init"]) == 0
-
-    captured = capsys.readouterr()
-    assert "not an AI tool name" in captured.out
-    assert calls[-1] == [
-        (
-            ".agents/skills/research-config-manager/scripts/config.py",
-            ("set-runtime-pref", "--section", "identity", "--key", "default_confirmed_by", "--value", "czx"),
-        ),
-        (
-            ".agents/skills/research-config-manager/scripts/config.py",
-            ("set", "--key", "preferences.language_preference", "--value", "en"),
-        ),
-        (
-            ".agents/skills/research-config-manager/scripts/config.py",
-            ("set-runtime-pref", "--section", "versioning", "--key", "auto_commit_mode", "--value", "manual"),
-        ),
-        (
-            ".agents/skills/research-config-manager/scripts/config.py",
-            ("set-runtime-pref", "--section", "paper", "--key", "auto_screen_on_intake", "--value", "false"),
-        ),
-    ]
+    with pytest.raises(SystemExit, match="不能使用 AI 工具名称"):
+        kb.main(["--root", str(tmp_path), "init", "--name", "codex"])
+    assert calls == []
 
 
 def test_kb_status_forwards_current_state_and_program(monkeypatch, tmp_path: Path) -> None:
@@ -545,15 +514,15 @@ def test_kb_add_allows_explicit_kind_override(monkeypatch, tmp_path: Path) -> No
     ]
 
 
-def test_kb_review_interactive_batches_confirm_and_reject(monkeypatch, tmp_path: Path) -> None:
+def test_kb_review_tty_and_pipe_are_identical_and_emit_private_protocol(monkeypatch, tmp_path: Path, capsys) -> None:
     kb = _load_kb_cli()
-    calls: list[list[tuple[str, tuple[str, ...]]]] = []
+    calls: list[tuple[str, tuple[str, ...]]] = []
 
-    def fake_run_forwarded(root: Path, commands):
-        calls.append([(script, tuple(args)) for script, args in commands])
-        return 0
+    def fake_forward(root: Path, script: str, args, **_kwargs):
+        calls.append((script, tuple(args)))
+        return kb.CommandResult((script, *args), 0, "# review queue\n")
 
-    monkeypatch.setattr(kb, "run_forwarded", fake_run_forwarded)
+    monkeypatch.setattr(kb, "forward_command", fake_forward)
     monkeypatch.setattr(
         kb,
         "load_review_records",
@@ -564,78 +533,59 @@ def test_kb_review_interactive_batches_confirm_and_reject(monkeypatch, tmp_path:
             _pending_record("i-four-123456", "idea", "Four"),
         ],
     )
-    monkeypatch.setattr(kb, "default_confirmed_by", lambda root: "czx-default")
-    monkeypatch.setattr(sys, "stdin", TTYStringIO("y\nn\ns\nq\nkb/programs/p/decision-log.md\n"))
+    monkeypatch.setattr("builtins.input", lambda prompt="": (_ for _ in ()).throw(AssertionError("must not prompt")))
+    monkeypatch.setattr(sys, "stdin", TTYStringIO("ignored\n"))
 
-    assert kb.main(["--root", str(tmp_path), "review"]) == 0
+    assert kb.main(["--root", str(tmp_path), "--agent-protocol", "tty-review.json", "review"]) == 0
+    tty_output = capsys.readouterr().out
+    monkeypatch.setattr(sys, "stdin", io.StringIO("ignored\n"))
+    assert kb.main(["--root", str(tmp_path), "--agent-protocol", "pipe-review.json", "review"]) == 0
+    pipe_output = capsys.readouterr().out
 
     assert calls == [
-        [
-            (".agents/skills/knowledge-base-manager/scripts/kb.py", ("review-queue",)),
-        ],
-        [
-            (
-                ".agents/skills/knowledge-base-manager/scripts/kb.py",
-                (
-                    "confirm",
-                    "--id",
-                    "p-one-123456",
-                    "--confirmed-by",
-                    "czx-default",
-                    "--evidence",
-                    "kb/programs/p/decision-log.md",
-                ),
-            ),
-            (
-                ".agents/skills/knowledge-base-manager/scripts/kb.py",
-                ("promote", "--id", "r-two-123456", "--confirmation-status", "rejected"),
-            ),
-        ],
+        (".agents/skills/knowledge-base-manager/scripts/kb.py", ("review-queue",)),
+        (".agents/skills/knowledge-base-manager/scripts/kb.py", ("review-queue",)),
     ]
+    assert tty_output == pipe_output
+    assert "需要你用自然语言确认或拒绝" in tty_output
+    for name in ("tty-review.json", "pipe-review.json"):
+        protocol = json.loads((tmp_path / "kb" / ".runtime" / name).read_text(encoding="utf-8"))
+        assert protocol["status"] == "needs_user_authorization"
+        assert protocol["next_actions"][0]["decision_fields"] == [
+            "decision",
+            "user_authorization",
+            "authorization_source",
+            "evidence",
+        ]
 
 
-def test_kb_review_empty_evidence_aborts_without_writes(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_kb_review_apply_builder_transmits_user_authorization(monkeypatch, tmp_path: Path) -> None:
     kb = _load_kb_cli()
-    calls: list[list[tuple[str, tuple[str, ...]]]] = []
-
-    def fake_run_forwarded(root: Path, commands):
-        calls.append([(script, tuple(args)) for script, args in commands])
-        return 0
-
-    monkeypatch.setattr(kb, "run_forwarded", fake_run_forwarded)
-    monkeypatch.setattr(kb, "load_review_records", lambda root, fuzzy: [_pending_record("p-one-123456", "paper", "One")])
     monkeypatch.setattr(kb, "default_confirmed_by", lambda root: "czx-default")
-    monkeypatch.setattr(sys, "stdin", TTYStringIO("y\n\n"))
-
-    assert kb.main(["--root", str(tmp_path), "review"]) == 1
-
-    captured = capsys.readouterr()
-    assert "[abort] evidence is required; no writes applied." in captured.out
-    assert calls == [
-        [
-            (".agents/skills/knowledge-base-manager/scripts/kb.py", ("review-queue",)),
-        ],
-    ]
-
-
-def test_kb_review_non_tty_degrades_to_list_only(monkeypatch, tmp_path: Path) -> None:
-    kb = _load_kb_cli()
-    calls: list[list[tuple[str, tuple[str, ...]]]] = []
-
-    def fake_run_forwarded(root: Path, commands):
-        calls.append([(script, tuple(args)) for script, args in commands])
-        return 0
-
-    monkeypatch.setattr(kb, "run_forwarded", fake_run_forwarded)
-    monkeypatch.setattr(kb, "load_review_records", lambda root, fuzzy: (_ for _ in ()).throw(AssertionError("should not prompt")))
-    monkeypatch.setattr(sys, "stdin", io.StringIO("y\nkb/programs/p/decision-log.md\n"))
-
-    assert kb.main(["--root", str(tmp_path), "review"]) == 0
-
-    assert calls == [
-        [
-            (".agents/skills/knowledge-base-manager/scripts/kb.py", ("review-queue",)),
-        ],
+    commands = kb.build_review_apply_commands(
+        tmp_path,
+        ["p-one-123456"],
+        [],
+        "evidence-note",
+        user_authorization="I confirm p-one-123456",
+    )
+    assert commands == [
+        (
+            ".agents/skills/knowledge-base-manager/scripts/kb.py",
+            [
+                "confirm",
+                "--id",
+                "p-one-123456",
+                "--confirmed-by",
+                "czx-default",
+                "--evidence",
+                "evidence-note",
+                "--user-authorization",
+                "I confirm p-one-123456",
+                "--authorization-source",
+                "user_message",
+            ],
+        )
     ]
 
 
@@ -752,7 +702,7 @@ def test_kb_ingest_chains_intake_then_prepare_and_stops_before_verify(monkeypatc
     monkeypatch.setattr(kb, "effective_ingest_scope", lambda root: set(FULL_SCOPE))
     monkeypatch.setattr(kb, "forward_command", _fake_ingest_forwarder(kb, calls))
 
-    assert kb.main(["--root", str(tmp_path), "ingest", "notes/demo.pdf"]) == 0
+    assert kb.main(["--root", str(tmp_path), "--agent-protocol", "ingest.json", "ingest", "notes/demo.pdf"]) == 0
 
     # Exactly two scriptable steps ran: intake add, then analyzer prepare. No verify.
     assert [c["script"] for c in calls] == [
@@ -766,11 +716,15 @@ def test_kb_ingest_chains_intake_then_prepare_and_stops_before_verify(monkeypatc
         assert "verify" not in call["args"]
 
     out = capsys.readouterr().out
-    assert "stopped before verify" in out
-    # Aggregated NEXT FOR AGENT line carries parse-cache path + elements + verify command.
-    assert "NEXT FOR AGENT: read kb/units/papers/p-demo-abcd1234/parse-cache.yaml" in out
-    assert "[motivation,method,experiment,limitation,insight]" in out
-    assert "--phase verify" in out
+    assert "已入库并备好深读骨架" in out
+    for forbidden in ("NEXT FOR AGENT:", "parse-cache.yaml", "--phase", ".py", "${"):
+        assert forbidden not in out
+    protocol = json.loads((tmp_path / "kb" / ".runtime" / "ingest.json").read_text(encoding="utf-8"))
+    assert protocol["status"] == "agent_action_required"
+    action = protocol["next_actions"][0]
+    assert action["unit_id"] == "p-demo-abcd1234"
+    assert action["steps"][1]["arguments"][-2:] == ["--phase", "verify"]
+    assert "parse-cache.yaml" in action["prepare_output"]
 
 
 def test_kb_ingest_narrowed_scope_without_generate_note_runs_only_intake(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -779,14 +733,16 @@ def test_kb_ingest_narrowed_scope_without_generate_note_runs_only_intake(monkeyp
     monkeypatch.setattr(kb, "effective_ingest_scope", lambda root: {"screen"})
     monkeypatch.setattr(kb, "forward_command", _fake_ingest_forwarder(kb, calls))
 
-    assert kb.main(["--root", str(tmp_path), "ingest", "notes/demo.pdf"]) == 0
+    assert kb.main(["--root", str(tmp_path), "--agent-protocol", "paused.json", "ingest", "notes/demo.pdf"]) == 0
 
     # intake ran; prepare did NOT (narrowed autonomy).
     assert [c["script"] for c in calls] == [".agents/skills/source-intake/scripts/intake.py"]
     out = capsys.readouterr().out
-    assert "prepare is outside the autonomy auto-execute scope" in out
-    assert "NEXT FOR AGENT: when ready, run prepare yourself" in out
-    assert "complete-note --paper-id p-demo-abcd1234 --phase prepare" in out
+    assert "自动化偏好暂停了深读准备" in out
+    assert "--" not in out and "NEXT FOR AGENT:" not in out
+    protocol = json.loads((tmp_path / "kb" / ".runtime" / "paused.json").read_text(encoding="utf-8"))
+    assert protocol["status"] == "paused_by_autonomy"
+    assert protocol["next_actions"][0]["arguments"][-2:] == ["--phase", "prepare"]
 
 
 def test_kb_ingest_narrowed_scope_without_screen_runs_nothing(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -795,12 +751,14 @@ def test_kb_ingest_narrowed_scope_without_screen_runs_nothing(monkeypatch, tmp_p
     monkeypatch.setattr(kb, "effective_ingest_scope", lambda root: set())
     monkeypatch.setattr(kb, "forward_command", _fake_ingest_forwarder(kb, calls))
 
-    assert kb.main(["--root", str(tmp_path), "ingest", "notes/demo.pdf"]) == 0
+    assert kb.main(["--root", str(tmp_path), "--agent-protocol", "paused.json", "ingest", "notes/demo.pdf"]) == 0
 
     assert calls == []
     out = capsys.readouterr().out
-    assert "intake is outside the autonomy auto-execute scope" in out
-    assert "run intake yourself" in out
+    assert "自动化偏好暂停了这次入库" in out
+    assert "--" not in out and "NEXT FOR AGENT:" not in out
+    protocol = json.loads((tmp_path / "kb" / ".runtime" / "paused.json").read_text(encoding="utf-8"))
+    assert protocol["status"] == "paused_by_autonomy"
 
 
 def test_kb_ingest_duplicate_stops_before_prepare(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -818,8 +776,8 @@ def test_kb_ingest_duplicate_stops_before_prepare(monkeypatch, tmp_path: Path, c
 
     assert calls == [".agents/skills/source-intake/scripts/intake.py"]
     out = capsys.readouterr().out
-    assert "duplicate detected (p-demo-abcd1234)" in out
-    assert "stopping before prepare" in out
+    assert "知识条目 p-demo-abcd1234 已存在" in out
+    assert "没有重新生成骨架" in out
 
 
 def test_kb_ingest_unit_id_extraction_variants() -> None:
@@ -855,4 +813,5 @@ def test_kb_ingest_prepare_failure_propagates_returncode(monkeypatch, tmp_path: 
 
     assert kb.main(["--root", str(tmp_path), "ingest", "notes/demo.pdf"]) == 5
     out = capsys.readouterr().out
-    assert "prepare failed for p-demo-abcd1234" in out
+    assert "[reject] boom" in out
+    assert "NEXT FOR AGENT:" not in out

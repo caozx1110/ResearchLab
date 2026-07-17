@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import subprocess
@@ -83,6 +84,38 @@ class CommandResult:
     argv: tuple[str, ...]
     returncode: int
     stdout: str = ""
+    stderr: str = ""
+
+
+@dataclass
+class AgentProtocol:
+    """Private, structured hand-off from the pseudo CLI to the runtime agent.
+
+    Human stdout is deliberately not a transport for commands.  The protocol is
+    written below ``kb/.runtime`` so owner-script diagnostics and exact next-step
+    arguments remain available to the agent without leaking into the user surface.
+    """
+
+    verb: str
+    status: str = "completed"
+    exit_code: int = 0
+    child_results: list[dict[str, object]] | None = None
+    next_actions: list[dict[str, object]] | None = None
+    details: dict[str, object] | None = None
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "schema": "kb-agent-protocol/v1",
+            "verb": self.verb,
+            "status": self.status,
+            "exit_code": self.exit_code,
+            "child_results": list(self.child_results or []),
+            "next_actions": list(self.next_actions or []),
+            "details": dict(self.details or {}),
+        }
+
+
+_ACTIVE_PROTOCOL: AgentProtocol | None = None
 
 
 Handler = Callable[[argparse.Namespace, Path], int]
@@ -101,6 +134,127 @@ PERSONA_FIELDS = (
 
 def research_python() -> str:
     return os.environ.get("RESEARCH_PYTHON") or sys.executable or "python3"
+
+
+def agent_protocol_path(root: Path, requested: str) -> Path:
+    runtime_root = (root / "kb" / ".runtime").resolve()
+    candidate = Path(requested).expanduser()
+    if not candidate.is_absolute():
+        candidate = runtime_root / candidate
+    candidate = candidate.resolve()
+    try:
+        candidate.relative_to(runtime_root)
+    except ValueError as exc:
+        raise SystemExit("Agent protocol destination must stay inside the KB runtime area.") from exc
+    return candidate
+
+
+def _record_protocol_child(result: CommandResult, relative_script: str, args: Sequence[str]) -> None:
+    protocol = _ACTIVE_PROTOCOL
+    if protocol is None:
+        return
+    if protocol.child_results is None:
+        protocol.child_results = []
+    protocol.child_results.append(
+        {
+            "owner": relative_script,
+            "arguments": list(args),
+            "returncode": result.returncode,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+        }
+    )
+
+
+def add_agent_action(action: str, **payload: object) -> None:
+    protocol = _ACTIVE_PROTOCOL
+    if protocol is None:
+        return
+    if protocol.next_actions is None:
+        protocol.next_actions = []
+    protocol.next_actions.append({"action": action, **payload})
+
+
+def set_protocol_status(status: str, **details: object) -> None:
+    protocol = _ACTIVE_PROTOCOL
+    if protocol is None:
+        return
+    protocol.status = status
+    if details:
+        if protocol.details is None:
+            protocol.details = {}
+        protocol.details.update(details)
+
+
+def write_agent_protocol(root: Path, requested: str, protocol: AgentProtocol) -> None:
+    path = agent_protocol_path(root, requested)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(protocol.as_dict(), ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+
+
+_PUBLIC_FORBIDDEN = (
+    "NEXT FOR AGENT:",
+    ".agents/",
+    "${",
+)
+
+
+def _public_line_is_safe(line: str, root: Path) -> bool:
+    """Fail closed for owner output that belongs on the private protocol channel."""
+    stripped = line.strip()
+    if not stripped:
+        return True
+    if any(token in line for token in _PUBLIC_FORBIDDEN):
+        return False
+    if re.search(r"(^|\s)--[A-Za-z][\w-]*", line):
+        return False
+    if re.search(r"(^|\s)(?:python3?|[^\s]+\.py)(?:\s|$)", line):
+        return False
+    if stripped.lower().startswith(("confirm:", "path:", "repo_path:", "project_root:", "skills_home:")):
+        return False
+    if " | confirm:" in line:
+        return False
+    for private_root in {str(root.resolve()), str(DEFAULT_PROJECT_ROOT.resolve())}:
+        if private_root and private_root in line:
+            return False
+    if re.search(r"(?:^|\s)/(?:Users|home|private|tmp|var|opt|usr)(?:/|\s|$)", line):
+        return False
+    if re.search(r"(?:^|\s)(?:kb|raw|output)/[^\s]+", line):
+        return False
+    return True
+
+
+def _humanize_owner_line(line: str) -> str | None:
+    stripped = line.strip()
+    if not stripped:
+        return ""
+    if stripped.startswith("[ok] created "):
+        return "资料已加入知识库。"
+    if stripped.startswith("[ok] duplicate detected:"):
+        return "该资料已在知识库中，因此没有重复创建。"
+    if stripped.startswith("[ok] initialized "):
+        return "知识库基础结构已准备好。"
+    if stripped.startswith("[ok] no matches"):
+        return "没有找到匹配的知识条目。"
+    if stripped.startswith("[ok] no pending confirmations"):
+        return "目前没有需要你确认的判断。"
+    return line.rstrip()
+
+
+def emit_public_output(text: str, root: Path, *, error: bool = False) -> bool:
+    emitted = False
+    destination = sys.stderr if error else sys.stdout
+    for line in text.splitlines():
+        if not _public_line_is_safe(line, root):
+            continue
+        human = _humanize_owner_line(line)
+        if human is None:
+            continue
+        print(human, file=destination)
+        emitted = emitted or bool(human.strip())
+    return emitted
 
 
 def render_help_menu() -> str:
@@ -137,12 +291,19 @@ def forward_command(
     if extra_env:
         env.update({str(key): str(value) for key, value in extra_env.items()})
     completed = subprocess.run(argv, cwd=root, env=env, text=True, capture_output=True, check=False)
+    result = CommandResult(
+        tuple(argv),
+        int(completed.returncode),
+        completed.stdout or "",
+        completed.stderr or "",
+    )
+    _record_protocol_child(result, relative_script, args)
     if stream:
-        if completed.stdout:
-            print(completed.stdout, end="" if completed.stdout.endswith("\n") else "\n")
-        if completed.stderr:
-            print(completed.stderr, file=sys.stderr, end="" if completed.stderr.endswith("\n") else "\n")
-    return CommandResult(tuple(argv), int(completed.returncode), completed.stdout or "")
+        stdout_emitted = emit_public_output(result.stdout, root)
+        stderr_emitted = emit_public_output(result.stderr, root, error=True)
+        if result.returncode != 0 and not stdout_emitted and not stderr_emitted:
+            print("操作未完成；详细诊断已保留给 Agent。", file=sys.stderr)
+    return result
 
 
 def run_forwarded(root: Path, commands: Sequence[tuple[str, Sequence[str]]]) -> int:
@@ -160,23 +321,36 @@ def handle_help(args: argparse.Namespace, root: Path) -> int:
 
 
 def handle_doctor(args: argparse.Namespace, root: Path) -> int:
-    del args, root
+    del args
     capabilities = current_runtime_capabilities()
     modules = capabilities.get("modules", {})
     venv_dir = managed_venv_dir(DEFAULT_PROJECT_ROOT)
     venv_py = managed_venv_python(DEFAULT_PROJECT_ROOT)
-    print("python:", capabilities.get("python") or "-")
-    print("version:", capabilities.get("version") or "-")
-    print("skill_version:", updater.read_local_version(DEFAULT_PROJECT_ROOT))
-    print("yaml:", "available" if capabilities.get("yaml_support") else "missing")
-    print("pdf:", capabilities.get("pdf_backend") or "missing")
-    if isinstance(modules, dict):
-        for name in ("yaml", "PyPDF2", "pypdf"):
-            print(f"module.{name}: {'available' if modules.get(name) else 'missing'}")
-    print("managed_venv:", venv_dir)
-    print("managed_venv.exists:", "yes" if venv_dir.exists() else "no")
-    print("managed_venv.python:", venv_py)
-    print("managed_venv.current:", "yes" if is_current_python(venv_py) else "no")
+    yaml_ready = bool(capabilities.get("yaml_support"))
+    pdf_backend = str(capabilities.get("pdf_backend") or "").strip()
+    runtime_kind = "受管项目运行环境" if is_current_python(venv_py) else "当前已配置运行环境"
+    print(f"research skill 版本为 {updater.read_local_version(DEFAULT_PROJECT_ROOT)}。")
+    print(f"{runtime_kind}可用；YAML 支持{'正常' if yaml_ready else '缺失'}。")
+    if pdf_backend:
+        print(f"PDF 解析后端已就绪（{pdf_backend}）。")
+    else:
+        print("PDF 解析后端尚未就绪；文本和网页资料仍可正常使用。")
+    set_protocol_status(
+        "completed" if yaml_ready else "runtime_incomplete",
+        runtime={
+            "python": capabilities.get("python") or "",
+            "version": capabilities.get("version") or "",
+            "modules": modules if isinstance(modules, dict) else {},
+            "yaml_support": yaml_ready,
+            "pdf_backend": pdf_backend,
+            "managed_runtime": {
+                "directory": str(venv_dir),
+                "python": str(venv_py),
+                "exists": venv_py.exists(),
+                "current": is_current_python(venv_py),
+            },
+        },
+    )
     return 0
 
 
@@ -185,20 +359,37 @@ def update_cache_dir() -> Path:
 
 
 def handle_update(args: argparse.Namespace, root: Path) -> int:
-    del root
     cache_dir = update_cache_dir()
     if args.apply:
-        result = updater.apply(DEFAULT_PROJECT_ROOT, cache_dir)
+        result = updater.apply(root, cache_dir)
         if result.get("status") == "updated":
             print(f"research skill 更新完成：{result.get('before', '0.0.0')} → {result.get('after', '0.0.0')}。")
             return 0
+        if result.get("status") == "needs_source_choice":
+            print("更新源尚未确认；请告诉我应继续使用哪个源码仓或本地检出。")
+            set_protocol_status("needs_user_input", update=result)
+            add_agent_action(
+                "choose_update_source",
+                fields=["source_origin", "source_checkout"],
+                reason=str(result.get("message") or "missing update provenance"),
+            )
+            return 2
         print(str(result.get("message") or "research skill 更新未完成，请稍后重试。"))
         return 1
 
-    result = updater.check(DEFAULT_PROJECT_ROOT, cache_dir)
+    result = updater.check(root, cache_dir)
     local = result.get("local") or "0.0.0"
     remote = result.get("remote") or "unknown"
     print(f"当前 research skill 版本：{local}。")
+    if result.get("status") == "needs_source_choice":
+        print("更新源尚未确认；请告诉我应继续使用哪个源码仓或本地检出。")
+        set_protocol_status("needs_user_input", update=result)
+        add_agent_action(
+            "choose_update_source",
+            fields=["source_origin", "source_checkout"],
+            reason=str(result.get("message") or "missing update provenance"),
+        )
+        return 0
     if result.get("status") == "unknown":
         print("远端 research skill 版本：未知。")
         print("暂时无法连接远端检查更新；当前安装未做任何改动。")
@@ -206,7 +397,9 @@ def handle_update(args: argparse.Namespace, root: Path) -> int:
     print(f"远端 research skill 版本：{remote}。")
     if result.get("status") == "update_available":
         print("发现可用更新；确认前不会修改当前安装。")
-        print("NEXT FOR AGENT: ask the user to confirm the skill update; after confirmation, run kb update --apply")
+        print("如果你同意，我可以继续完成更新。")
+        set_protocol_status("needs_user_authorization", update=result)
+        add_agent_action("request_update_authorization", then={"verb": "update", "apply": True})
     else:
         print("当前 research skill 已是最新版本。")
     return 0
@@ -460,18 +653,21 @@ def _ingest_chain_guidance(root: Path, kind: str, unit_id: str, scope: set[str])
 def handle_ingest(args: argparse.Namespace, root: Path) -> int:
     kind = args.kind or infer_add_kind(args.source, root)
     if kind not in INGEST_ANALYZER:
-        print(f"[ingest] cannot chain unknown kind {kind!r}; run `kb add` then the matching analyzer prepare manually.")
+        print("暂时无法判断资料类型；请告诉我是论文、代码仓还是技术文章。")
+        set_protocol_status("needs_user_input", inferred_kind=kind)
+        add_agent_action("choose_source_kind", choices=list(INGEST_ANALYZER))
         return 2
     scope = effective_ingest_scope(root)
 
     # Step 1: intake add (safe step gated by "screen") — the scriptable half before
     # the agent fills. RESEARCH_INGEST_CHAIN tells intake the chain auto-continues.
     if "screen" not in scope:
-        add_script = script_path(root, SCRIPT_BY_VERB["add"])
-        print("[ingest] intake is outside the autonomy auto-execute scope; not auto-running.")
-        print(
-            f"NEXT FOR AGENT: run intake yourself: {research_python()} {add_script} --root {root} "
-            f"add --kind {kind} --source {args.source}"
+        print("当前自动化偏好暂停了这次入库；如果你愿意，我可以继续。")
+        set_protocol_status("paused_by_autonomy", source_kind=kind)
+        add_agent_action(
+            "run_owner_step_after_authorization",
+            owner=SCRIPT_BY_VERB["add"],
+            arguments=["add", "--kind", kind, "--source", args.source],
         )
         return 0
 
@@ -486,17 +682,25 @@ def handle_ingest(args: argparse.Namespace, root: Path) -> int:
 
     unit_id, status = _extract_ingest_unit_id(intake.stdout)
     if status == "duplicate":
-        print(f"[ingest] duplicate detected ({unit_id}); stopping before prepare to avoid overwriting existing work.")
+        print(f"知识条目 {unit_id} 已存在；为保护已有工作，本次没有重新生成骨架。")
+        set_protocol_status("duplicate", unit_id=unit_id, source_kind=kind)
         return 0
     if not unit_id:
-        print("[ingest] could not resolve the created unit id from intake output; stopping before prepare.")
+        print("资料已交给入库流程，但暂时无法确认新条目编号；Agent 会检查详细结果。")
+        set_protocol_status("error", source_kind=kind, reason="created unit id was not returned")
         return 1
 
     # Step 2: analyzer prepare (safe step gated by "generate-note") — produces the
     # fillable skeleton. NEVER verify (a script cannot fill understanding).
     if "generate-note" not in scope:
-        print(f"[ingest] prepare is outside the autonomy auto-execute scope; stopped after intake ({unit_id}).")
-        print(f"NEXT FOR AGENT: when ready, run prepare yourself: {_prepare_display_command(root, kind, unit_id)}")
+        print(f"资料已入库为 {unit_id}；当前自动化偏好暂停了深读准备。")
+        relative_script, verb, id_flag = INGEST_ANALYZER[kind]
+        set_protocol_status("paused_by_autonomy", unit_id=unit_id, source_kind=kind)
+        add_agent_action(
+            "prepare_unit_after_authorization",
+            owner=relative_script,
+            arguments=[verb, id_flag, unit_id, "--phase", "prepare"],
+        )
         return 0
 
     relative_script, verb, id_flag = INGEST_ANALYZER[kind]
@@ -507,24 +711,45 @@ def handle_ingest(args: argparse.Namespace, root: Path) -> int:
         stream=False,
     )
     if prepare.returncode != 0:
-        if prepare.stdout:
-            print(prepare.stdout, end="" if prepare.stdout.endswith("\n") else "\n")
-        print(f"[ingest] prepare failed for {unit_id}; chain stopped.")
+        emitted = emit_public_output(prepare.stdout, root)
+        emitted = emit_public_output(prepare.stderr, root, error=True) or emitted
+        if not emitted:
+            print("资料已入库，但深读准备未完成；详细诊断已保留给 Agent。")
+        set_protocol_status("error", unit_id=unit_id, source_kind=kind, stage="prepare")
         return prepare.returncode
 
-    # Aggregate: surface prepare's [ok] artifacts + its own machine-readable NEXT FOR
-    # AGENT line (carries parse-cache path, element list, and the exact verify command).
-    print(f"[ingest] intake + prepare done for {unit_id} ({kind}); stopped before verify (agent must fill elements first).")
-    for line in prepare.stdout.splitlines():
-        if line.startswith("[ok] "):
-            print(line)
-    next_line = _extract_next_for_agent(prepare.stdout)
-    if next_line:
-        print(next_line)
-    else:
-        print(f"NEXT FOR AGENT: fill the {kind} skeleton for {unit_id}, then run the analyzer --phase verify.")
-    for line in _ingest_chain_guidance(root, kind, unit_id, scope):
-        print(line)
+    print(f"资料已入库并备好深读骨架，条目编号是 {unit_id}。Agent 接下来会补全逐字证据并校验；需要判断时再请你拍板。")
+    verify_arguments = [verb, id_flag, unit_id, "--phase", "verify"]
+    remaining_steps: list[dict[str, object]] = [
+        {
+            "step": "fill_grounded_elements",
+            "source": "parse_cache",
+            "requirements": ["verbatim_quote", "locator"],
+        },
+        {"step": "verify", "owner": relative_script, "arguments": verify_arguments},
+    ]
+    if kind == "paper" and "refresh" in scope:
+        remaining_steps.extend(
+            [
+                {"step": "extract_figures", "owner": relative_script, "arguments": ["extract-figures", id_flag, unit_id]},
+                {"step": "refresh_structure", "owner": relative_script, "arguments": ["refresh-structure", id_flag, unit_id]},
+            ]
+        )
+    remaining_steps.append(
+        {
+            "step": "request_user_confirmation",
+            "fields": ["user_authorization", "authorization_source", "evidence"],
+            "authorization_source": "user_message",
+        }
+    )
+    set_protocol_status("agent_action_required", unit_id=unit_id, source_kind=kind)
+    add_agent_action(
+        "complete_grounded_ingest",
+        unit_id=unit_id,
+        source_kind=kind,
+        prepare_output=prepare.stdout,
+        steps=remaining_steps,
+    )
     return 0
 
 
@@ -559,63 +784,6 @@ def runtime_pref_defaults(root: Path) -> dict[str, str]:
     }
 
 
-def prompt_required_human_name(current: str) -> str:
-    while True:
-        suffix = f" [{current}]" if current else ""
-        try:
-            value = input(f"Confirmer name{suffix}: ").strip()
-        except EOFError:
-            value = ""
-        if not value and current:
-            value = current
-        if not value:
-            print("Confirmer name cannot be empty.")
-            continue
-        if is_ai_signer(value):
-            print("Confirmer name must be a human identity, not an AI tool name.")
-            continue
-        return value
-
-
-def prompt_choice(label: str, *, choices: Sequence[str], current: str) -> str:
-    allowed = {choice.lower(): choice for choice in choices}
-    current = current if current in allowed else choices[0]
-    choices_text = "/".join(choices)
-    while True:
-        try:
-            value = input(f"{label} ({choices_text}) [{current}]: ").strip().lower()
-        except EOFError:
-            value = ""
-        if not value:
-            return current
-        if value in allowed:
-            return allowed[value]
-        print(f"Please enter one of: {choices_text}.")
-
-
-def prompt_optional_text(label: str) -> str | None:
-    try:
-        value = input(f"{label}: ").strip()
-    except EOFError:
-        return None
-    return value or None
-
-
-def prompt_optional_choice(label: str, *, choices: Sequence[str]) -> str | None:
-    allowed = {c.lower(): c for c in choices}
-    prompt = f"{label} ({'/'.join(choices)}，回车跳过): "
-    while True:
-        try:
-            value = input(prompt).strip().lower()
-        except EOFError:
-            return None
-        if not value:
-            return None
-        if value in allowed:
-            return allowed[value]
-        prompt = f"请输入 {'/'.join(choices)} 之一（或回车跳过）: "
-
-
 def config_set_profile_command(key: str, value: str) -> tuple[str, Sequence[str]]:
     return (SCRIPT_BY_VERB["init_config"], ["set", "--key", key, "--value", value])
 
@@ -634,18 +802,6 @@ def build_init_pref_commands(*, name: str, lang: str, auto_commit: str, auto_scr
         config_set_runtime_pref_command("versioning", "auto_commit_mode", auto_commit),
         config_set_runtime_pref_command("paper", "auto_screen_on_intake", auto_screen),
     ]
-
-
-def collect_persona_interactive() -> list[tuple[str, str]]:
-    out: list[tuple[str, str]] = []
-    term = prompt_optional_choice("术语呈现偏好", choices=PERSONA_TERM_CHOICES)
-    if term:
-        out.append(("personalization.term_style", term))
-    for key, label in PERSONA_FIELDS:
-        val = prompt_optional_text(label)
-        if val:
-            out.append((f"personalization.{key}", val))
-    return out
 
 
 def build_headless_init_pref_commands(args: argparse.Namespace) -> list[tuple[str, Sequence[str]]] | None:
@@ -668,9 +824,9 @@ def build_headless_init_pref_commands(args: argparse.Namespace) -> list[tuple[st
     if args.name is not None:
         name = str(args.name or "").strip()
         if not name:
-            raise SystemExit("--name cannot be empty.")
+            raise SystemExit("确认人姓名不能为空。")
         if is_ai_signer(name):
-            raise SystemExit("--name must be a human identity, not an AI tool name.")
+            raise SystemExit("确认人必须是真实用户，不能使用 AI 工具名称。")
         commands.append(config_set_runtime_pref_command("identity", "default_confirmed_by", name))
     if args.lang is not None:
         commands.append(config_set_profile_command("preferences.language_preference", args.lang))
@@ -695,54 +851,46 @@ def run_init_prerequisites(root: Path) -> int:
 
 
 def handle_init(args: argparse.Namespace, root: Path) -> int:
+    commands = build_headless_init_pref_commands(args)
     initialized = run_init_prerequisites(root)
     if initialized != 0:
         return initialized
 
-    commands = build_headless_init_pref_commands(args)
     if commands is not None:
         written = run_forwarded(root, commands)
         if written != 0:
             return written
-    elif args.non_interactive or not sys.stdin.isatty():
-        if args.git_init:
-            git_initialized = run_forwarded(root, [(SCRIPT_BY_VERB["init_kb"], ["git-init"])])
-            if git_initialized != 0:
-                return git_initialized
-        print(
-            "NEXT FOR AGENT: kb init scaffolding is complete. Ask the user conversationally for their human name; "
-            "language (zh/en); commit cadence and autonomy scope (manual/milestone/aggressive); auto-screen "
-            "preference (true/false); and optional persona research focus, resources, reporting style, collaboration "
-            "boundaries, and terminology style (keep-en/translate/bilingual). Then re-run kb init headlessly with the "
-            "collected values using these exact flags: --name, --lang, --auto-commit, --auto-screen, --persona-focus, "
-            "--persona-resources, --persona-report, --persona-boundaries, --persona-term. Do not relay this agent-only "
-            "instruction or its raw flags verbatim to the user."
-        )
-        return 0
-    else:
-        defaults = runtime_pref_defaults(root)
-        name = prompt_required_human_name(defaults["name"])
-        lang = prompt_choice("Language", choices=LANG_CHOICES, current=defaults["lang"])
-        auto_commit = prompt_choice("Commit cadence", choices=AUTO_COMMIT_CHOICES, current=defaults["auto_commit"])
-        auto_screen = prompt_choice("Auto-screen on intake", choices=AUTO_SCREEN_CHOICES, current=defaults["auto_screen"])
-        written = run_forwarded(root, build_init_pref_commands(name=name, lang=lang, auto_commit=auto_commit, auto_screen=auto_screen))
-        if written != 0:
-            return written
-        if sys.stdin.isatty():
-            try:
-                go = input("填写可选个性化画像（研究方向/资源/风格/术语/边界）？回车跳过 [y/N]: ").strip().lower()
-            except EOFError:
-                go = ""
-            if go in ("y", "yes"):
-                persona_cmds = [config_set_profile_command(k, v) for k, v in collect_persona_interactive()]
-                if persona_cmds:
-                    persona_written = run_forwarded(root, persona_cmds)
-                    if persona_written != 0:
-                        return persona_written
 
     if args.git_init:
-        return run_forwarded(root, [(SCRIPT_BY_VERB["init_kb"], ["git-init"])])
-    print("hint: run `kb init --git-init` to initialize the nested kb Git repo.")
+        git_initialized = run_forwarded(root, [(SCRIPT_BY_VERB["init_kb"], ["git-init"])])
+        if git_initialized != 0:
+            return git_initialized
+
+    defaults = runtime_pref_defaults(root)
+    if not defaults["name"]:
+        print("知识库基础结构已准备好。还需要你告诉我确认人姓名；语言、版本记录节奏、自动初筛和研究偏好都可以一并设置。")
+        set_protocol_status("needs_user_input", initialized=True)
+        add_agent_action(
+            "collect_init_preferences",
+            required_fields=["human_name"],
+            optional_fields=[
+                "language",
+                "commit_cadence",
+                "auto_screen",
+                "research_focus",
+                "resources",
+                "reporting_style",
+                "collaboration_boundaries",
+                "terminology_style",
+            ],
+            current=defaults,
+            apply={"verb": "init", "mode": "headless"},
+        )
+    else:
+        print("知识库和基础偏好已准备好。")
+        set_protocol_status("completed", initialized=True, preferences=defaults)
+    if not args.git_init:
+        add_agent_action("offer_version_history", apply={"verb": "init", "git_init": True})
     return 0
 
 
@@ -777,38 +925,15 @@ def print_review_item(record: dict) -> None:
     print(f"  AI-judgement: {review_item_summary(record)}")
 
 
-def prompt_review_decisions(records: Sequence[dict]) -> tuple[list[str], list[str]]:
-    confirm_ids: list[str] = []
-    reject_ids: list[str] = []
-    for record in records:
-        if str(record.get("confirmation_status") or "") != "pending_user_confirmation":
-            continue
-        unit_id = str(record.get("id") or "").strip()
-        if not unit_id:
-            continue
-        print_review_item(record)
-        while True:
-            try:
-                answer = input("[y]确认 / [n]拒绝 / [s]跳过 / [q]退出: ").strip().lower()
-            except EOFError:
-                print("[abort] input closed; leaving remaining items unchanged.")
-                return confirm_ids, reject_ids
-            choice = answer[:1]
-            if choice == "y":
-                confirm_ids.append(unit_id)
-                break
-            if choice == "n":
-                reject_ids.append(unit_id)
-                break
-            if choice == "s":
-                break
-            if choice == "q":
-                return confirm_ids, reject_ids
-            print("请输入 y / n / s / q。")
-    return confirm_ids, reject_ids
-
-
-def build_review_apply_commands(root: Path, confirm_ids: Sequence[str], reject_ids: Sequence[str], evidence: str) -> list[tuple[str, Sequence[str]]]:
+def build_review_apply_commands(
+    root: Path,
+    confirm_ids: Sequence[str],
+    reject_ids: Sequence[str],
+    evidence: str,
+    *,
+    user_authorization: str = "",
+    authorization_source: str = "user_message",
+) -> list[tuple[str, Sequence[str]]]:
     commands: list[tuple[str, Sequence[str]]] = []
     if confirm_ids:
         confirm_args: list[str] = ["confirm"]
@@ -818,6 +943,9 @@ def build_review_apply_commands(root: Path, confirm_ids: Sequence[str], reject_i
         if actor:
             confirm_args.extend(["--confirmed-by", actor])
         confirm_args.extend(["--evidence", evidence])
+        if user_authorization:
+            confirm_args.extend(["--user-authorization", user_authorization])
+            confirm_args.extend(["--authorization-source", authorization_source])
         commands.append((SCRIPT_BY_VERB["review"], confirm_args))
     for unit_id in reject_ids:
         commands.append((SCRIPT_BY_VERB["review"], ["promote", "--id", unit_id, "--confirmation-status", "rejected"]))
@@ -825,31 +953,23 @@ def build_review_apply_commands(root: Path, confirm_ids: Sequence[str], reject_i
 
 
 def handle_review(args: argparse.Namespace, root: Path) -> int:
-    listed = run_forwarded(root, [(SCRIPT_BY_VERB["review"], build_review_list_args(args.fuzzy))])
-    if listed != 0:
-        return listed
-    if not sys.stdin.isatty():
-        return 0
-
+    result = forward_command(root, SCRIPT_BY_VERB["review"], build_review_list_args(args.fuzzy))
+    if result.returncode != 0:
+        return result.returncode
     records = load_review_records(root, args.fuzzy)
-    confirm_ids, reject_ids = prompt_review_decisions(records)
-    if not confirm_ids and not reject_ids:
-        return 0
-
-    try:
-        evidence = input("evidence: ").strip()
-    except EOFError:
-        evidence = ""
-    if not evidence:
-        print("[abort] evidence is required; no writes applied.")
-        return 1
-
-    actor = default_confirmed_by(root) if confirm_ids else ""
-    if actor and is_ai_signer(actor):
-        print("[abort] identity.default_confirmed_by must be a human identity; no writes applied.")
-        return 1
-
-    return run_forwarded(root, build_review_apply_commands(root, confirm_ids, reject_ids, evidence))
+    pending = [record for record in records if str(record.get("confirmation_status") or "") == "pending_user_confirmation"]
+    if pending:
+        set_protocol_status("needs_user_authorization", review_count=len(pending))
+        add_agent_action(
+            "present_review_items",
+            records=pending,
+            decision_fields=["decision", "user_authorization", "authorization_source", "evidence"],
+            authorization_source="user_message",
+        )
+        print("这些判断需要你用自然语言确认或拒绝；在你拍板前不会写成已确认结论。")
+    else:
+        set_protocol_status("completed", review_count=0)
+    return 0
 
 
 def register_help(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -995,6 +1115,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     add_project_root_argument(parser)
+    parser.add_argument("--agent-protocol", default="", help=argparse.SUPPRESS)
     subparsers = parser.add_subparsers(dest="command", required=True)
     for register in VERB_REGISTRARS:
         register(subparsers)
@@ -1002,11 +1123,23 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    global _ACTIVE_PROTOCOL
     parser = build_parser()
     args = parser.parse_args(argv)
     root = find_project_root(DEFAULT_PROJECT_ROOT, explicit_root=args.root)
     handler: Handler = args.handler
-    return handler(args, root)
+    protocol = AgentProtocol(args.command) if str(args.agent_protocol or "").strip() else None
+    _ACTIVE_PROTOCOL = protocol
+    try:
+        exit_code = handler(args, root)
+    finally:
+        _ACTIVE_PROTOCOL = None
+    if protocol is not None:
+        protocol.exit_code = int(exit_code)
+        if exit_code != 0 and protocol.status == "completed":
+            protocol.status = "error"
+        write_agent_protocol(root, str(args.agent_protocol), protocol)
+    return exit_code
 
 
 if __name__ == "__main__":

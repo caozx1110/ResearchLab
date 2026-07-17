@@ -1,54 +1,58 @@
 ---
 name: kb-cli
-description: kb 快捷命令入口（伪 CLI），用于把常用 research 操作统一成 kb 动词形式；当用户在终端运行 kb help/init/doctor/update/status/next/find/recall，或对 AI 说 kb 动词希望代跑对应查询时使用。
+description: kb 快捷命令入口（伪 CLI），用于把常用 research 操作统一成 kb 动词形式；当用户运行或对 AI 说 kb help/init/doctor/update/status/next/find/add/ingest/review/reject/recall/resume/undo/restore 时使用。
 ---
 
 # kb 快捷命令入口（伪 CLI）
 
-`kb-cli` 是 research 系统的薄 dispatcher。它只做短命令解析、项目 root 解析和参数转译，底层能力继续由既有 skill 脚本负责。
+`kb-cli` 是 research 系统的薄 dispatcher。用户只接触自然语言和 `kb <verb>`；底层 owner、真实参数、绝对路径和 Agent 下一步都不得出现在公开 stdout。
 
-## 使用方式
+## 用户交互
 
-在终端运行：
+用户可以直接说“帮我初始化研究知识库”“把这个 repo 入库”“有哪些判断需要我确认”，也可以使用以下 15 个快捷动词：
 
-```bash
-python3 .agents/skills/kb-cli/scripts/kb help
-python3 .agents/skills/kb-cli/scripts/kb init
-python3 .agents/skills/kb-cli/scripts/kb doctor
-python3 .agents/skills/kb-cli/scripts/kb status
-python3 .agents/skills/kb-cli/scripts/kb find policy gradient
-```
+- `kb help`
+- `kb init`
+- `kb doctor`
+- `kb update`
+- `kb status`
+- `kb next`
+- `kb find <关键词>`
+- `kb add <链接或路径>`
+- `kb ingest <链接或路径>`
+- `kb review`
+- `kb reject <单元 id>`
+- `kb recall`
+- `kb resume`
+- `kb undo`
+- `kb restore <操作 id>`
 
-也可以直接对 AI 说：
+自然语言是第一入口；伪 CLI 只是可预测的快捷入口。
 
-```text
-kb help
-kb init
-kb doctor
-kb update
-kb status
-kb next
-kb find policy gradient
-kb recall gotchas
-```
+## Agent protocol
 
-## 动词
+- 普通调用只打印 human stdout，并保持只读 verb 真正只读。
+- Runtime Agent 调用 dispatcher 时，应显式请求一个位于 `kb/.runtime/` 的私有 JSON protocol 目标；读取 `kb-agent-protocol/v1` 后继续 owner 步骤。该文件是 gitignored runtime state，不进入 checkpoint。
+- Protocol 的 `child_results` 保存 owner 的原始 stdout/stderr 与结构化 arguments；`next_actions` 保存待填字段、后续 owner step 和治理闸口。不得把其中的 raw 内容转述给用户。
+- `init` 与 `review` 永远不读 TTY、不调用交互式输入。缺信息时，由 human stdout 简述需求，protocol 列出字段；Agent 用自然语言询问，再以 headless 参数落盘。
+- judgement 确认必须忠实透传用户原话、`authorization_source=user_message` 和 evidence；不得自签。
 
-- `help`：打印分组能力菜单；固定文本，不调用任何 skill。
-- `init`：已完成；先转发 `knowledge-base-manager/scripts/kb.py init` 与 `research-config-manager/scripts/config.py init`，TTY 下询问 4 个基础偏好，非 TTY 自动降级。
-- `doctor`：已完成；只读打印当前 Python、YAML 与 PDF 后端能力。
-- `update`：默认只检查当前与远端 skill 版本；发现更新时先由 agent 请求用户确认，确认后才执行更新。下载缓存位于用户目录下的 `.cache/research-skills/`，离线时只报告暂时无法检查，不修改安装。
-- `status [program]`：转发到 `research-navigator/scripts/navigate.py current-state`；带 program 时追加转发到 `research-orchestrator/scripts/orchestrate.py status --program-id <program>`。
-- `next [program]`：转发到 `research-orchestrator/scripts/orchestrate.py next`；当前底层脚本按全局 program 优先级给建议。
-- `find <keywords...>`：转发到 `knowledge-base-manager/scripts/kb.py query --query "<keywords>"`。
-- `recall [kind]`：转发到 `skill-evolution-advisor/scripts/learnings.py recall --kind <kind|all>`。
-- `add <src> [--kind paper|repo|blog]`：按 arxiv/pdf/github/git URL 推断 kind，**本地目录（git 检出 / 源码树）判为 `repo`**、本地 `.pdf` 判为 `paper`、其它本地文件判为 `blog`，转发到 source-intake 快速入库。
-- `ingest <src> [--kind paper|repo|blog]`：一条命令把 source 拉进来并备好待填骨架，agent 随后自动填 grounded 笔记。链式跑 `intake add → analyzer prepare` 并**停在 prepare**（脚本不能替 agent 填理解，绝不自动 verify），先打印聚合的 `NEXT FOR AGENT:` 行（含 parse-cache 路径 + 待填要素 + 真实 verify 命令），再打印**整条剩余链路导航**（SSOT 原则 7）：paper 为 `填 note → verify → [安全自动] extract-figures + refresh-structure → 初筛第二次填充（screen --phase verify，骨架已在 intake 备好）→ [闸口] 确认判断`；repo/blog 为 `填要素 → verify → [闸口] 确认判断`。安全自动步（figures/structure）受 `runtime-preferences.autonomy.auto_execute_scope`（被 `GOVERNANCE_MAX_AUTO_STEPS` 封顶）的 `refresh` 位约束：收窄时改标注为“超出 scope，仅按需手动”，并从链路摘要里去掉该段；verify/confirm 永不自动。确认闸口命令统一由 `research.common.confirm_command` 渲染。
-- `review [fuzzy]`：转发确认收件箱列表；TTY 下逐条确认 / 拒绝 / 跳过 / 退出，并在写入前统一要求 evidence。
-- `reject <id> [--reason <text>]`：把误建 / 不采纳的知识单元标记为 `rejected`（清理出口，例如被误判成 blog 的 repo 单元）。纯转发到 `knowledge-base-manager/scripts/kb.py promote --confirmation-status rejected`（`kb review` 拒绝走的同一路径），不重实现拒绝逻辑。
+## 动词语义
+
+- `help`：打印分组能力菜单；固定文本，不调用 owner。
+- `init`：幂等准备知识库和配置；缺少确认人或可选偏好时进入 Agent 问答，不因 TTY 改变语义。
+- `doctor`：只读说明 runtime、YAML 与 PDF 能力；详细解释只进私有 protocol。
+- `update`：只读检查版本；发现更新后先请求用户授权。更新只使用 manifest 记录的来源，不把 fork/local 安装切回默认上游。
+- `status` / `next` / `find` / `recall`：转发 owner 后过滤内部命令、路径与 flags。
+- `add`：轻量入库；本地目录推断为 repo，本地 PDF 推断为 paper，其余本地文件推断为 blog。
+- `ingest`：只自动执行 intake 与 prepare；Agent 从私有 protocol 读取 parse-cache 与待填要求，补逐字 evidence 后再 verify。判断确认始终停在用户闸口。
+- `review`：只列真正 ready-for-review 的 knowledge-unit 判断；prepared shell、ready-to-verify 与 failed-retryable 不进人工 inbox。TTY 与 pipe 语义相同。
+- `reject`：复用 knowledge-base-manager 的拒绝路径，不重实现治理逻辑。
+- `resume` / `undo` / `restore`：转发恢复合同并保持公开输出为自然语言。
 
 ## 约束
 
-- 不复制业务逻辑；写入、确认、检索、状态汇总都留在底层脚本。
-- Root 解析复用 `research.common.find_project_root` 和 `add_project_root_argument`，支持 `--root` / `RESEARCH_PROJECT_ROOT`。**`--root` 是顶层 flag，必须放在动词之前**：`kb --root <PROJECT_ROOT> ingest <src>`（放到动词及其参数之后会被 argparse 拒绝）。`kb --help` 与 `kb ingest --help` 均有说明。
-- 子脚本失败时保留 stderr，并以非零退出码返回。
+- 不复制业务判断；写入、确认、检索和状态汇总仍由 owner skill 负责。
+- 公开 stdout 禁止出现 Python 命令、owner script、内部 flag、环境变量、绝对项目路径、`NEXT FOR AGENT:` 或 `confirm:`。
+- 子脚本的完整诊断保存在私有 protocol；公开失败信息简短、可行动，并保留原非零退出码。
+- Machine protocol 只能显式 opt-in；`kb help/doctor/update/status` 的普通调用不得创建或修改 KB。
