@@ -26,7 +26,7 @@ from research.bootstrap import ensure_managed_runtime, is_current_python, manage
 if __name__ == "__main__":
     ensure_managed_runtime(DEFAULT_PROJECT_ROOT)
 
-from research.common import add_project_root_argument, confirm_command, current_runtime_capabilities, find_project_root, load_yaml
+from research.common import current_runtime_capabilities, find_project_root, load_yaml
 from research.core import config_root, default_confirmed_by, is_ai_signer, load_runtime_preferences, search_records
 from research import updater
 
@@ -44,7 +44,7 @@ HELP_MENU: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("按关键词检索已入库知识单元。", "kb find <关键词>"),
             ("把论文、repo、博客或本地文件轻量入库。", "kb add <链接或路径>"),
             ("一条命令把 source 拉进来并备好待填骨架，随后 agent 自动填 grounded 笔记。", "kb ingest <链接或路径>"),
-            ("查看待确认的 AI 判断，后续可交互式确认。", "kb review"),
+            ("查看待确认的 AI 判断，并用自然语言确认或拒绝。", "kb review"),
             ("把误建 / 不采纳的知识单元标记为 rejected（清理出口）。", "kb reject <单元 id>"),
             ("回忆已确认习惯、已知坑和待审 skill 问题。", "kb recall"),
             ("恢复崩溃后未完成的知识库操作。", "kb resume"),
@@ -570,86 +570,6 @@ def _extract_ingest_unit_id(stdout: str) -> tuple[str, str]:
     return "", "unknown"
 
 
-def _extract_next_for_agent(stdout: str) -> str:
-    for line in stdout.splitlines():
-        if line.strip().startswith("NEXT FOR AGENT:"):
-            return line.strip()
-    return ""
-
-
-def _prepare_display_command(root: Path, kind: str, unit_id: str) -> str:
-    relative_script, verb, id_flag = INGEST_ANALYZER[kind]
-    parts = [research_python(), str(script_path(root, relative_script)), "--root", str(root), verb, id_flag, unit_id, "--phase", "prepare"]
-    return " ".join(parts)
-
-
-# Portable prefix for the post-prepare chain navigation (matches the analyzer's own
-# NEXT FOR AGENT verify line + research.common.confirm_command).
-INGEST_CHAIN_PREFIX = "${RESEARCH_PYTHON:-python3}"
-
-
-def _analyzer_chain_command(root: Path, kind: str, verb: str, unit_id: str, *extra: str) -> str:
-    """Render an existing analyzer verb for the chain guidance (never executed here)."""
-    relative_script, _, id_flag = INGEST_ANALYZER[kind]
-    parts = [INGEST_CHAIN_PREFIX, str(script_path(root, relative_script)), "--root", str(root), verb, id_flag, unit_id, *extra]
-    return " ".join(parts)
-
-
-def _ingest_chain_guidance(root: Path, kind: str, unit_id: str, scope: set[str]) -> list[str]:
-    """Post-prepare navigation for the FULL ingestion chain (SSOT Principle 7).
-
-    Pure navigation printed by `kb ingest`: after the agent fills + verifies the
-    analyzer note (the NEXT FOR AGENT line above), this spells out the remaining
-    safe auto-steps and — for papers — the screening *second-fill* that ingest
-    otherwise omits, then the confirm gate. It NEVER auto-runs verify/confirm, and
-    honors the autonomy valve for the safe auto-steps (extract-figures /
-    refresh-structure are gated by the effective `refresh` scope). The confirm gate
-    is rendered by the single shared helper (research.common.confirm_command).
-    """
-    confirm_cmd = confirm_command({"id": unit_id, "kind": kind})
-    if kind != "paper":
-        fill_artifact = "capability-fill.yaml" if kind == "repo" else "blog-fill.yaml"
-        verify_verb = "map-capability" if kind == "repo" else "complete-note"
-        verdict = "reuse verdict" if kind == "repo" else "worth-reading verdict + key points"
-        return [
-            f"[ingest] full chain remaining for {unit_id} (SSOT P7: you fill understanding; only the confirm gate needs the user):",
-            f"  chain: fill {'capability' if kind == 'repo' else 'note'} -> verify -> [gate] confirm {verdict}",
-            f"  step A (fill + verify): see the NEXT FOR AGENT line above — fill {fill_artifact}, then run {verify_verb} --phase verify (never auto-run: a script cannot fill understanding).",
-            f"  step B (confirm gate — AI judgement, never self-signed): present the {verdict} for the user, who confirms with:",
-            f"      {confirm_cmd}",
-        ]
-
-    refresh_on = "refresh" in scope
-    screening_on = bool(load_runtime_preferences(root).get("paper", {}).get("auto_screen_on_intake", True))
-    chain = "fill note -> verify note"
-    if refresh_on:
-        chain += " -> [safe auto] extract-figures + refresh-structure"
-    if screening_on:
-        chain += " -> fill screening -> verify screening"
-    chain += " -> [gate] confirm judgement"
-
-    lines = [
-        f"[ingest] full chain remaining for {unit_id} (SSOT P7: you fill understanding; scripts do the safe steps; only the confirm gate needs the user):",
-        f"  chain: {chain}",
-        "  step A (fill + verify note): see the NEXT FOR AGENT line above — fill note-fill.yaml, then run complete-note --phase verify (never auto-run: a script cannot fill understanding).",
-    ]
-    if refresh_on:
-        lines.append("  step B (safe auto — 'refresh' is in your auto_execute_scope): after note verify, with a PDF backend present:")
-    else:
-        lines.append("  step B (safe auto, but 'refresh' is OUTSIDE your auto_execute_scope — run only if you choose): after note verify, with a PDF backend present:")
-    lines.append(f"      {_analyzer_chain_command(root, kind, 'extract-figures', unit_id)}")
-    lines.append(f"      {_analyzer_chain_command(root, kind, 'refresh-structure', unit_id)}")
-    if screening_on:
-        lines.append(
-            f"  step C (screening SECOND-fill — scaffold already prepared at intake): fill kb/units/papers/{unit_id}/screening.yaml "
-            "(worth_deep_reading + judgement_reason + claims with evidence), then run:"
-        )
-        lines.append(f"      {_analyzer_chain_command(root, kind, 'screen', unit_id, '--phase', 'verify')}")
-    lines.append("  step D (confirm gate — AI judgement, never self-signed): present the worth-reading verdict + key insights for the user, who confirms with:")
-    lines.append(f"      {confirm_cmd}")
-    return lines
-
-
 def handle_ingest(args: argparse.Namespace, root: Path) -> int:
     kind = args.kind or infer_add_kind(args.source, root)
     if kind not in INGEST_ANALYZER:
@@ -972,6 +892,21 @@ def handle_review(args: argparse.Namespace, root: Path) -> int:
     return 0
 
 
+class ConversationalArgumentParser(argparse.ArgumentParser):
+    """Keep parser mechanics private while preserving discoverable ``kb`` verbs."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        include_help = bool(kwargs.pop("add_help", True))
+        kwargs.setdefault("usage", argparse.SUPPRESS)
+        super().__init__(*args, add_help=False, **kwargs)
+        if include_help:
+            self.add_argument("-h", "--help", action="help", help=argparse.SUPPRESS)
+
+    def error(self, message: str) -> None:
+        del message
+        self.exit(2, "我没能理解这条 kb 请求。请使用 kb help 查看可用动词和示例。\n")
+
+
 def register_help(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     parser = subparsers.add_parser("help", help="打印分组能力菜单")
     parser.set_defaults(handler=handle_help)
@@ -984,73 +919,73 @@ def register_doctor(subparsers: argparse._SubParsersAction[argparse.ArgumentPars
 
 def register_add(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     parser = subparsers.add_parser("add", help="轻量入库 source")
-    parser.add_argument("source", help="论文、repo、博客 URL 或本地文件路径")
-    parser.add_argument("--kind", choices=["paper", "repo", "blog"], help="显式覆盖 kind 推断")
+    parser.add_argument("source", metavar="<链接或路径>", help="论文、代码仓、博客链接或本地文件路径")
+    parser.add_argument("--kind", choices=["paper", "repo", "blog"], help=argparse.SUPPRESS)
     parser.set_defaults(handler=handle_add)
 
 
 def register_ingest(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     parser = subparsers.add_parser(
         "ingest",
-        help="一条命令：入库 + 备好待填骨架（停在 prepare，不自动 verify）",
-        description="入库 source 并链到 analyzer prepare（停在 prepare，永不自动 verify）。",
-        epilog=(
-            "注意：--root 是顶层 flag，必须放在动词之前，例如：\n"
-            "  kb --root <PROJECT_ROOT> ingest <src>\n"
-            "放到 `ingest <src>` 之后（kb ingest <src> --root <PROJECT_ROOT>）会被 argparse 拒绝，"
-            "因为 --root 属于顶层解析器而非 ingest 子命令。"
-        ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        help="入库资料并备好待补全的分析骨架",
+        description="资料会先安全入库，再交给 Agent 补全有证据的理解。",
     )
-    parser.add_argument("source", help="论文、repo、博客 URL 或本地文件路径")
-    parser.add_argument("--kind", choices=["paper", "repo", "blog"], help="显式覆盖 kind 推断")
+    parser.add_argument("source", metavar="<链接或路径>", help="论文、代码仓、博客链接或本地文件路径")
+    parser.add_argument("--kind", choices=["paper", "repo", "blog"], help=argparse.SUPPRESS)
     parser.set_defaults(handler=handle_ingest)
 
 
 def register_review(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    parser = subparsers.add_parser("review", help="查看确认收件箱，TTY 下可交互处理")
-    parser.add_argument("fuzzy", nargs="?", help="可选 kind 或关键词过滤")
+    parser = subparsers.add_parser("review", help="查看确认收件箱并用自然语言拍板")
+    parser.add_argument("fuzzy", nargs="?", metavar="<筛选词>", help="可选的资料类型或关键词")
     parser.set_defaults(handler=handle_review)
 
 
 def register_init(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     parser = subparsers.add_parser("init", help="初始化 KB 和基础运行偏好")
-    parser.add_argument("--root", default=argparse.SUPPRESS, help="Explicit project root (overrides RESEARCH_PROJECT_ROOT and auto-discovery).")
-    parser.add_argument("--non-interactive", "--yes", dest="non_interactive", action="store_true", help="只执行幂等初始化；不进入交互提问")
-    parser.add_argument("--name", help="确认人名，写入 identity.default_confirmed_by")
-    parser.add_argument("--lang", choices=LANG_CHOICES, help="语言偏好")
-    parser.add_argument("--auto-commit", choices=AUTO_COMMIT_CHOICES, help="versioning.auto_commit_mode")
-    parser.add_argument("--auto-screen", choices=AUTO_SCREEN_CHOICES, help="paper.auto_screen_on_intake")
-    parser.add_argument("--persona-focus", help="personalization.research_focus")
-    parser.add_argument("--persona-resources", help="personalization.resources")
-    parser.add_argument("--persona-report", help="personalization.reporting_style")
-    parser.add_argument("--persona-boundaries", help="personalization.collaboration_boundaries")
-    parser.add_argument("--persona-term", choices=PERSONA_TERM_CHOICES, help="personalization.term_style")
-    parser.add_argument("--git-init", action="store_true", help="初始化后一并执行 git-init")
+    parser.add_argument("--root", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    parser.add_argument("--non-interactive", "--yes", dest="non_interactive", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--name", help=argparse.SUPPRESS)
+    parser.add_argument("--lang", choices=LANG_CHOICES, help=argparse.SUPPRESS)
+    parser.add_argument("--auto-commit", choices=AUTO_COMMIT_CHOICES, help=argparse.SUPPRESS)
+    parser.add_argument("--auto-screen", choices=AUTO_SCREEN_CHOICES, help=argparse.SUPPRESS)
+    parser.add_argument("--persona-focus", help=argparse.SUPPRESS)
+    parser.add_argument("--persona-resources", help=argparse.SUPPRESS)
+    parser.add_argument("--persona-report", help=argparse.SUPPRESS)
+    parser.add_argument("--persona-boundaries", help=argparse.SUPPRESS)
+    parser.add_argument("--persona-term", choices=PERSONA_TERM_CHOICES, help=argparse.SUPPRESS)
+    parser.add_argument("--git-init", action="store_true", help=argparse.SUPPRESS)
     parser.set_defaults(handler=handle_init)
 
 
 def register_status(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     parser = subparsers.add_parser("status", help="查看当前状态摘要")
-    parser.add_argument("program", nargs="?", help="可选 program id / fuzzy name")
+    parser.add_argument("program", nargs="?", metavar="<研究计划>", help="可选的研究计划名称或编号")
     parser.set_defaults(handler=handle_status)
 
 
 def register_next(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     parser = subparsers.add_parser("next", help="查看下一步建议")
-    parser.add_argument("program", nargs="?", help="可选 program id")
+    parser.add_argument("program", nargs="?", metavar="<研究计划>", help="可选的研究计划名称或编号")
     parser.set_defaults(handler=handle_next)
 
 
 def register_find(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     parser = subparsers.add_parser("find", help="检索知识库")
-    parser.add_argument("keywords", nargs="+", help="检索关键词")
+    parser.add_argument("keywords", nargs="+", metavar="<关键词>", help="一个或多个检索关键词")
     parser.set_defaults(handler=handle_find)
 
 
 def register_recall(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     parser = subparsers.add_parser("recall", help="回忆习惯 / 已知坑 / skill 问题")
-    parser.add_argument("kind", nargs="?", choices=["all", "habits", "gotchas", "defects"], default="all")
+    parser.add_argument(
+        "kind",
+        nargs="?",
+        choices=["all", "habits", "gotchas", "defects"],
+        default="all",
+        metavar="<回忆范围>",
+        help="可选：全部、习惯、已知坑或待审问题",
+    )
     parser.set_defaults(handler=handle_recall)
 
 
@@ -1072,17 +1007,17 @@ def register_resume(subparsers: argparse._SubParsersAction[argparse.ArgumentPars
 
 def register_restore(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     parser = subparsers.add_parser("restore", help="恢复到指定操作之前的状态")
-    parser.add_argument("op_id")
+    parser.add_argument("op_id", metavar="<操作编号>", help="希望回到其之前状态的操作编号")
     parser.set_defaults(handler=handle_restore)
 
 
 def register_reject(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     parser = subparsers.add_parser(
         "reject",
-        help="把误建 / 不采纳的知识单元标记为 rejected（复用 promote --confirmation-status rejected）",
+        help="把误建或不采纳的知识单元标记为已拒绝",
     )
-    parser.add_argument("id", help="要拒绝的知识单元 id（如误判成 blog 的 b-langwbc-repo-xxxx）")
-    parser.add_argument("--reason", default="", help="可选：拒绝理由，写入该次 promote 的 evidence")
+    parser.add_argument("id", metavar="<单元编号>", help="要拒绝的知识单元编号")
+    parser.add_argument("--reason", default="", help=argparse.SUPPRESS)
     parser.set_defaults(handler=handle_reject)
 
 
@@ -1106,17 +1041,13 @@ VERB_REGISTRARS: tuple[Callable[[argparse._SubParsersAction[argparse.ArgumentPar
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="kb 快捷命令入口（伪 CLI）",
-        epilog=(
-            "--root 是顶层 flag，放在动词之前：kb --root <PROJECT_ROOT> <verb> ...\n"
-            "（放到动词及其参数之后会被 argparse 拒绝。）"
-        ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+    parser = ConversationalArgumentParser(
+        prog="kb",
+        description="使用 kb 动词管理研究知识库；查看示例可使用 kb help。",
     )
-    add_project_root_argument(parser)
+    parser.add_argument("--root", default="", help=argparse.SUPPRESS)
     parser.add_argument("--agent-protocol", default="", help=argparse.SUPPRESS)
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers = parser.add_subparsers(dest="command", required=True, metavar="<动词>")
     for register in VERB_REGISTRARS:
         register(subparsers)
     return parser
