@@ -10,7 +10,11 @@ from .common import (
     parse_iso_datetime,
     utc_now_iso,
 )
-from .evidence import confirmation_content_digest
+from .evidence import (
+    confirmation_content_digest,
+    record_external_source_contract,
+    verification_receipt_violations,
+)
 from .ids import (
     build_unit_id,
 )
@@ -23,6 +27,7 @@ from .paths import (
     _unique_text_list,
     kind_dir,
     record_path,
+    unit_root,
     units_root,
 )
 
@@ -415,7 +420,7 @@ def default_record(kind: str, *, title: str, maturity: str, source: dict[str, An
     return record
 
 
-def normalize_record_schema(record: dict[str, Any]) -> dict[str, Any]:
+def normalize_record_schema(record: dict[str, Any], *, project_root: Path | None = None) -> dict[str, Any]:
     if not isinstance(record, dict):
         raise SystemExit("Invalid record payload")
     kind = str(record.get("kind") or "")
@@ -448,6 +453,30 @@ def normalize_record_schema(record: dict[str, Any]) -> dict[str, Any]:
         item for item in {str(value) for value in normalized.get("information_types", [])} if item in INFORMATION_TYPES
     ) or ["fact"]
     confirmation_invalidated = False
+    verification = normalized.get("payload", {}).get("verification") if isinstance(normalized.get("payload"), dict) else None
+    if isinstance(verification, dict):
+        evidence_root = None
+        if project_root is not None:
+            evidence_root = unit_root(
+                project_root,
+                str(normalized.get("kind") or ""),
+                str(normalized.get("id") or ""),
+            )
+        verification_violations = verification_receipt_violations(
+            normalized,
+            evidence_root,
+            external_source=record_external_source_contract(normalized),
+            check_artifacts=project_root is not None,
+        )
+        if verification_violations:
+            verification["invalidation"] = {
+                "reason": "verification_stale",
+                "violations": verification_violations,
+            }
+            if normalized.get("confirmation_status") == "confirmed":
+                confirmation_invalidated = True
+                normalized["confirmation_status"] = "pending_user_confirmation"
+                normalized["needs_human_confirmation"] = True
     confirmation = normalized.get("confirmation")
     if isinstance(confirmation, dict) and confirmation.get("content_digest"):
         stored_digest = str(confirmation.get("content_digest") or "")
@@ -510,7 +539,7 @@ def iter_records(project_root: Path, *, kind: str | None = None) -> list[dict[st
             payload = load_yaml(path, default={})
             if isinstance(payload, dict):
                 try:
-                    items.append(normalize_record_schema(payload))
+                    items.append(normalize_record_schema(payload, project_root=project_root))
                 except SystemExit:
                     items.append(payload)
     return items
@@ -567,7 +596,7 @@ def locate_record(project_root: Path, unit_id: str, *, kind: str | None = None, 
         if path.exists():
             payload = load_yaml(path, default={})
             if isinstance(payload, dict):
-                return normalize_record_schema(payload), path
+                return normalize_record_schema(payload, project_root=project_root), path
     records = iter_records(project_root, kind=kind) if kind else iter_records(project_root)
     for record in records:
         if exact_reference in _unique_text_list(record.get("legacy_ids")):

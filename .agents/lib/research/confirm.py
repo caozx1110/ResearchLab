@@ -16,11 +16,14 @@ from .common import (
 )
 from .journal import journaled_op, operation_lock_path
 from .evidence import (
+    JUDGEMENT_CLAIM_TYPES,
     confirmation_claims,
     confirmation_claim_ids,
     confirmation_content_digest,
     confirmation_evidence_digest,
+    record_external_source_contract,
     validate_claims,
+    verification_receipt_violations,
     verify_claim_evidence,
 )
 from .paths import (
@@ -43,8 +46,8 @@ GATED_CONFIRMATION_VALUES = {"pending_user_confirmation", "rejected"}
 
 
 # Self-sign red line: an AI identity may never confirm its own pending record.
-# Covers current model families; extend as new ones appear. Governance rule is
-# "only tighten" — adding names here is always safe.
+# The public set remains for compatibility/documentation; detection below uses
+# token boundaries so compound identities cannot evade an exact-string denylist.
 AI_SIGNER_NAMES = {
     "ai", "assistant", "agent", "bot", "llm",
     "codex", "chatgpt", "gpt", "openai",
@@ -52,6 +55,14 @@ AI_SIGNER_NAMES = {
     "gemini", "bard", "google-ai",
     "llama", "mistral", "cohere", "grok", "copilot", "qwen", "deepseek",
 }
+
+AI_SIGNER_TOKENS = {
+    "ai", "assistant", "agent", "bot", "llm", "codex", "chatgpt", "gpt",
+    "openai", "anthropic", "gemini", "bard", "llama", "mistral", "cohere",
+    "grok", "copilot", "qwen", "deepseek",
+}
+AI_MODEL_NAME_TOKENS = {"claude", "sonnet", "opus", "haiku", "fable"}
+AI_MODEL_CONTEXT_TOKENS = {"code", "assistant", "agent", "ai", "model", "anthropic"}
 
 
 CONFIRM_UNIT_STATUS_BY_KIND = {
@@ -71,7 +82,11 @@ CONFIRM_UNIT_SUMMARY_BY_KIND = {
 
 
 def is_ai_signer(actor: str) -> bool:
-    return str(actor or "").strip().lower() in AI_SIGNER_NAMES
+    tokens = re.findall(r"[a-z0-9]+", str(actor or "").casefold())
+    token_set = set(tokens)
+    if token_set & AI_SIGNER_TOKENS:
+        return True
+    return bool(token_set & AI_MODEL_NAME_TOKENS and token_set & AI_MODEL_CONTEXT_TOKENS)
 
 
 # Substance-check (SSOT §3.11 / Principle 3 — plug the hollow confirmation gate).
@@ -149,7 +164,12 @@ def confirmation_track(record: dict[str, Any]) -> str:
     governance gate rather than a parallel, drifting rule.
     """
     needs_gate, _ai_info_types, _source_is_ai = _record_needs_gate(record)
-    return "judgement" if needs_gate else "fact"
+    claim_types = {
+        str(claim.get("claim_type") or "")
+        for claim in confirmation_claims(record)
+        if isinstance(claim, dict)
+    }
+    return "judgement" if needs_gate or bool(claim_types & JUDGEMENT_CLAIM_TYPES) else "fact"
 
 
 def default_confirmed_by(project_root: Path | None = None) -> str:
@@ -187,11 +207,33 @@ def require_confirmation_provenance(
     return actor, evidence_items
 
 
+def require_user_authorization(
+    *,
+    user_authorization: str,
+    authorization_source: str,
+) -> tuple[str, str]:
+    """Validate the human-origin attestation carried by the host/agent.
+
+    This is deliberately an audit/attestation check, not a claim of cryptographic
+    identity authentication. The host/agent remains responsible for faithfully
+    transcribing the user's message.
+    """
+    authorization = str(user_authorization or "").strip()
+    source = str(authorization_source or "").strip()
+    if not authorization:
+        raise SystemExit("Judgement confirmation requires user_authorization with the user's exact words.")
+    if source != "user_message":
+        raise SystemExit("Judgement confirmation requires authorization_source=user_message.")
+    return authorization, source
+
+
 def apply_confirmation(
     record: dict[str, Any],
     *,
     confirmed_by: str,
     evidence: list[str] | str,
+    user_authorization: str = "",
+    authorization_source: str = "",
     method: str = "cli",
     project_root: Path | None = None,
 ) -> dict[str, Any]:
@@ -200,23 +242,53 @@ def apply_confirmation(
         evidence=evidence,
         project_root=project_root,
     )
+    track = confirmation_track(record)
     claims = confirmation_claims(record)
+    authorization = ""
+    source = ""
+    if track == "judgement":
+        if not claims:
+            raise SystemExit("Judgement confirmation requires non-empty canonical payload.claims.")
+        authorization, source = require_user_authorization(
+            user_authorization=user_authorization,
+            authorization_source=authorization_source,
+        )
     claim_violations = validate_claims(claims)
     if claim_violations:
         raise SystemExit("Confirmation claim violations:\n  - " + "\n  - ".join(claim_violations))
-    claims_with_evidence = [claim for claim in claims if claim.get("evidence_refs")]
-    if claims_with_evidence:
-        if project_root is None:
-            raise SystemExit("Cannot verify claim evidence for confirmation without project_root.")
+    evidence_root: Path | None = None
+    external_source = record_external_source_contract(record)
+    if project_root is not None:
         evidence_root = unit_root(
             project_root,
             str(record.get("kind") or ""),
             str(record.get("id") or ""),
         )
+    if track == "judgement":
+        if evidence_root is None:
+            raise SystemExit("Cannot validate judgement verification without project_root.")
+        verification_violations = verification_receipt_violations(
+            record,
+            evidence_root,
+            external_source=external_source,
+        )
+        if verification_violations:
+            raise SystemExit(
+                "Judgement verification receipt is missing or stale:\n  - "
+                + "\n  - ".join(verification_violations)
+            )
+    claims_with_evidence = [claim for claim in claims if claim.get("evidence_refs")]
+    if claims_with_evidence:
+        if evidence_root is None:
+            raise SystemExit("Cannot verify claim evidence for confirmation without project_root.")
         evidence_violations = [
             violation
             for claim in claims_with_evidence
-            for violation in verify_claim_evidence(claim, evidence_root)
+            for violation in verify_claim_evidence(
+                claim,
+                evidence_root,
+                external_source=external_source,
+            )
         ]
         if evidence_violations:
             raise SystemExit("Confirmation evidence violations:\n  - " + "\n  - ".join(evidence_violations))
@@ -225,7 +297,7 @@ def apply_confirmation(
     record["confirmation_status"] = "confirmed"
     record["needs_human_confirmation"] = False
     record["last_human_confirmed_at"] = now
-    record["confirmation"] = {
+    receipt = {
         "by": actor,
         "at": now,
         "evidence": evidence_items,
@@ -240,6 +312,16 @@ def apply_confirmation(
         "evidence_digest": confirmation_evidence_digest(record, evidence_items),
         "prior_information_types": prior_information_types,
     }
+    if track == "judgement":
+        verification = record.get("payload", {}).get("verification", {})
+        receipt.update(
+            {
+                "verified_at": str(verification.get("verified_at") or ""),
+                "user_authorization": authorization,
+                "authorization_source": source,
+            }
+        )
+    record["confirmation"] = receipt
     return record
 
 
@@ -257,14 +339,39 @@ def _has_complete_confirmation_receipt(record: dict[str, Any]) -> bool:
         return False
     if str(subject.get("id") or "") != str(record.get("id") or ""):
         return False
-    if not isinstance(receipt.get("claim_ids"), list):
+    claim_ids = receipt.get("claim_ids")
+    if not isinstance(claim_ids, list):
         return False
     if not isinstance(receipt.get("prior_information_types"), list):
         return False
-    return all(
+    if not all(
         re.fullmatch(r"[0-9a-f]{64}", str(receipt.get(field) or "")) is not None
         for field in ("content_digest", "evidence_digest")
-    )
+    ):
+        return False
+    if str(receipt.get("content_digest") or "") != confirmation_content_digest(record):
+        return False
+    if str(receipt.get("evidence_digest") or "") != confirmation_evidence_digest(record, receipt.get("evidence")):
+        return False
+    current_claim_ids = confirmation_claim_ids(record)
+    if sorted(str(item) for item in claim_ids) != current_claim_ids:
+        return False
+    if confirmation_track(record) == "judgement":
+        if not current_claim_ids:
+            return False
+        if not str(receipt.get("user_authorization") or "").strip():
+            return False
+        if str(receipt.get("authorization_source") or "") != "user_message":
+            return False
+        payload = record.get("payload")
+        verification = payload.get("verification") if isinstance(payload, dict) else None
+        if not isinstance(verification, dict):
+            return False
+        if str(receipt.get("verified_at") or "") != str(verification.get("verified_at") or ""):
+            return False
+        if verification_receipt_violations(record, None, check_artifacts=False):
+            return False
+    return True
 
 
 def confirm_unit(
@@ -273,6 +380,8 @@ def confirm_unit(
     *,
     confirmed_by: str,
     evidence: list[str] | str,
+    user_authorization: str = "",
+    authorization_source: str = "",
     method: str = "cli",
     project_root: Path | None = None,
 ) -> dict[str, Any]:
@@ -296,6 +405,8 @@ def confirm_unit(
         record,
         confirmed_by=confirmed_by,
         evidence=evidence,
+        user_authorization=user_authorization,
+        authorization_source=authorization_source,
         method=method,
         project_root=project_root,
     )
@@ -362,7 +473,7 @@ def write_record(
     *,
     expected_revision: int | None = None,
 ) -> Path:
-    normalized = normalize_record_schema(record)
+    normalized = normalize_record_schema(record, project_root=project_root)
     validate_write(normalized)
     root = unit_root(project_root, str(normalized["kind"]), str(normalized["id"]))
     ensure_dir(root)
@@ -413,6 +524,8 @@ def promote_record(
     confirmation_status: str | None = None,
     confirmed_by: str = "",
     evidence: list[str] | None = None,
+    user_authorization: str = "",
+    authorization_source: str = "",
     confirmation_method: str = "kb.py promote",
 ) -> Path:
     record, _ = locate_record(project_root, unit_id)
@@ -439,6 +552,8 @@ def promote_record(
                 record,
                 confirmed_by=confirmed_by,
                 evidence=evidence or [],
+                user_authorization=user_authorization,
+                authorization_source=authorization_source,
                 method=confirmation_method,
                 project_root=project_root,
             )
@@ -451,6 +566,7 @@ def promote_record(
 __all__ = [
     "GATED_CONFIRMATION_VALUES",
     "AI_SIGNER_NAMES",
+    "AI_SIGNER_TOKENS",
     "CONFIRM_UNIT_STATUS_BY_KIND",
     "CONFIRM_UNIT_SUMMARY_BY_KIND",
     "SUBSTANCE_CONTENT_SECTIONS",
@@ -459,6 +575,7 @@ __all__ = [
     "confirmation_track",
     "default_confirmed_by",
     "require_confirmation_provenance",
+    "require_user_authorization",
     "apply_confirmation",
     "confirm_unit",
     "validate_write",
