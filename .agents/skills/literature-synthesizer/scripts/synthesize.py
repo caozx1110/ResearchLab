@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import copy
 import sys
-from collections import Counter
 from pathlib import Path
 
 SCRIPT_PATH = Path(__file__).resolve()
@@ -22,7 +21,7 @@ from research.bootstrap import ensure_managed_runtime
 if __name__ == "__main__":
     ensure_managed_runtime(PROJECT_ROOT)
 
-from research.common import add_project_root_argument, ensure_dir, load_yaml, print_resolved_project_roots, slugify, write_text_if_changed, write_yaml_if_changed, yaml_default
+from research.common import add_project_root_argument, ensure_dir, load_yaml, print_resolved_project_roots, slugify, write_text_if_changed, write_yaml_if_changed
 from research.core import iter_records, project_root, rel, synthesis_root, unit_root
 from research.evidence import validate_claims, verify_claim_evidence
 
@@ -359,111 +358,22 @@ def select_records(
     return selected
 
 
-def top_counts(records: list[dict], field: str, limit: int = 10) -> list[dict]:
-    counter: Counter[str] = Counter()
-    for record in records:
-        for item in record.get(field, []):
-            counter[str(item)] += 1
-    return [{"name": name, "count": count} for name, count in counter.most_common(limit)]
-
-
-def build_survey_payload(records: list[dict], *, query: str, kind: str, topic: str, tag: str, pool: str, mode: str) -> dict:
-    observed = [
-        f"共选中 {len(records)} 条知识单元。",
-        f"kind 过滤：{kind or '全部'}；topic：{topic or '全部'}；tag：{tag or '全部'}；pool：{pool or '全部'}。",
-    ]
-    inferred = [
-        "当前结果仍偏索引级综合，适合作为后续深读、选题或 pool 清理的起点。",
-        "如需更强结论，应优先补人工确认过的高价值 paper / repo / idea。",
-    ]
-    suggested = [
-        "围绕 top topics / top tags 继续收窄范围。",
-        "把高频但未确认的条目转给对应 analyst skill。",
-    ]
-    return {
-        **yaml_default(f"{mode}-{slugify(query or topic or tag or pool or kind or 'survey', max_words=8)}", "literature-synthesizer", status="ready", confidence=0.68),
-        "mode": mode,
-        "filters": {"query": query, "kind": kind, "topic": topic, "tag": tag, "pool": pool},
-        "items": [
-            {
-                "id": item.get("id"),
-                "kind": item.get("kind"),
-                "title": item.get("title"),
-                "status": item.get("status"),
-                "confirmation_status": item.get("confirmation_status"),
-                "topics": item.get("topics", []),
-                "tags": item.get("tags", []),
-                "candidate_pools": item.get("candidate_pools", []),
-                "summary": item.get("summary"),
-            }
-            for item in records
-        ],
-        "clusters": {
-            "topics": top_counts(records, "topics"),
-            "tags": top_counts(records, "tags"),
-            "candidate_pools": top_counts(records, "candidate_pools"),
-            "kinds": [{"name": name, "count": count} for name, count in Counter(str(record.get("kind") or "") for record in records).most_common()],
-        },
-        "Observed": observed,
-        "Inferred": inferred,
-        "Suggested": suggested,
-        "OpenQuestions": [
-            "是否需要基于当前池子继续分出 narrower topic？",
-            "是否需要把其中某个 cluster 提升成长期可复用的 synthesis 页面？",
-        ],
-    }
-
-
-def render_summary(payload: dict) -> str:
-    lines = [f"# {payload['mode'].title()}: {payload['filters'].get('query') or payload['filters'].get('topic') or payload['filters'].get('tag') or payload['filters'].get('pool') or payload['filters'].get('kind') or 'all'}", ""]
-    lines.extend(["## Snapshot", ""])
-    for item in payload.get("Observed", []):
-        lines.append(f"- {item}")
-    lines.extend(["", "## Clusters", ""])
-    for cluster_name, values in payload.get("clusters", {}).items():
-        names = ", ".join(f"{item['name']}({item['count']})" for item in values[:8]) or "-"
-        lines.append(f"- {cluster_name}: {names}")
-    lines.extend(["", "## Items", ""])
-    for item in payload.get("items", []):
-        lines.append(
-            f"- `{item['id']}` · {item['title']} · {item.get('kind')} · "
-            f"confirm={item.get('confirmation_status')} · topics={','.join(item.get('topics', [])) or '-'}"
-        )
-    lines.extend(["", "## Inferred", ""])
-    for item in payload.get("Inferred", []):
-        lines.append(f"- {item}")
-    lines.extend(["", "## Suggested", ""])
-    for item in payload.get("Suggested", []):
-        lines.append(f"- {item}")
-    return "\n".join(lines).rstrip() + "\n"
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Synthesize research units in core.")
     add_project_root_argument(parser)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    for name, label in (("survey", "field"), ("review", "query")):
+    for name in ("survey", "review", "taxonomy"):
         cmd = subparsers.add_parser(name)
-        if name == "survey":
-            cmd.add_argument("action", nargs="?", choices=("prepare", "verify"), default="legacy")
-            cmd.add_argument("--field", default="")
-            cmd.add_argument("--query", default="")
-            cmd.add_argument("--as-of", default="")
-            cmd.add_argument("--input", default="")
-        else:
-            cmd.add_argument(f"--{label}", required=True)
+        cmd.add_argument("action", choices=("prepare", "verify"))
+        cmd.add_argument("--field", default="")
+        cmd.add_argument("--query", default="")
+        cmd.add_argument("--as-of", default="")
+        cmd.add_argument("--input", default="")
         cmd.add_argument("--kind", default="")
         cmd.add_argument("--topic", default="")
         cmd.add_argument("--tag", default="")
         cmd.add_argument("--pool", default="")
-
-    taxonomy = subparsers.add_parser("taxonomy")
-    taxonomy.add_argument("--query", default="")
-    taxonomy.add_argument("--kind", default="")
-    taxonomy.add_argument("--topic", default="")
-    taxonomy.add_argument("--tag", default="")
-    taxonomy.add_argument("--pool", default="")
     return parser
 
 
@@ -473,31 +383,33 @@ def main() -> int:
     print_resolved_project_roots(root)
     mode = args.command
     query = getattr(args, "field", "") or getattr(args, "query", "")
-    if mode == "survey" and args.action == "verify":
+    if args.action == "verify":
         if args.input:
             fill_path = Path(args.input)
             if not fill_path.is_absolute():
                 fill_path = root / fill_path
         else:
-            if not query:
-                raise SystemExit("survey verify requires --input or --field/--query")
+            if not any((query, args.topic, args.tag, args.pool, args.kind)):
+                raise SystemExit(f"{mode} verify requires --input or selection filters")
             input_slug = slugify(query or args.topic or args.tag or args.pool or args.kind or mode, max_words=8) or mode
-            fill_path = synthesis_root(root) / input_slug / "survey-fill.yaml"
+            fill_path = synthesis_root(root) / input_slug / f"{mode}-fill.yaml"
         if not fill_path.exists():
-            raise SystemExit(f"survey verify input not found: {fill_path}")
+            raise SystemExit(f"{mode} verify input not found: {fill_path}")
         fill = load_yaml(fill_path, default={})
         if not isinstance(fill, dict):
-            raise SystemExit(f"survey verify input is not a mapping: {fill_path}")
+            raise SystemExit(f"{mode} verify input is not a mapping: {fill_path}")
         violations, payload = verify_survey_fill(fill, root)
+        if str(fill.get("mode") or "") != mode:
+            violations.append(f"mode mismatch: command is '{mode}' but scaffold mode is '{fill.get('mode')}'")
         if violations:
-            print("[reject] survey fill failed verification:", file=sys.stderr)
+            print(f"[reject] {mode} fill failed verification:", file=sys.stderr)
             for violation in violations:
                 print(f"  - {violation}", file=sys.stderr)
             return 1
         output_slug = slugify(str(payload.get("slug") or "survey"), max_words=8) or "survey"
         verified_root = synthesis_root(root) / output_slug
         ensure_dir(verified_root)
-        yaml_path = verified_root / "survey.yaml"
+        yaml_path = verified_root / f"{mode}.yaml"
         md_path = verified_root / "summary.md"
         write_yaml_if_changed(yaml_path, payload)
         write_text_if_changed(md_path, render_verified_summary(payload))
@@ -515,11 +427,11 @@ def main() -> int:
         tag=args.tag,
         pool=args.pool,
     )
-    if mode == "survey" and args.action == "prepare":
-        if not query:
-            raise SystemExit("survey prepare requires --field or --query")
+    if args.action == "prepare":
+        if not any((query, args.topic, args.tag, args.pool, args.kind)):
+            raise SystemExit(f"{mode} prepare requires --field/--query or another selection filter")
         if not args.as_of:
-            raise SystemExit("survey prepare requires --as-of to anchor the selected KB snapshot")
+            raise SystemExit(f"{mode} prepare requires --as-of to anchor the selected KB snapshot")
         payload = build_survey_scaffold(
             selected,
             query=query,
@@ -530,28 +442,11 @@ def main() -> int:
             mode=mode,
             as_of=args.as_of,
         )
-        fill_path = out_root / "survey-fill.yaml"
+        fill_path = out_root / f"{mode}-fill.yaml"
         write_yaml_if_changed(fill_path, payload)
         print(rel(root, fill_path))
         return 0
-    payload = build_survey_payload(
-        selected,
-        query=query,
-        kind=args.kind,
-        topic=args.topic,
-        tag=args.tag,
-        pool=args.pool,
-        mode=mode,
-    )
-    yaml_name = "taxonomy.yaml" if mode == "taxonomy" else f"{mode}.yaml"
-    md_name = "taxonomy.md" if mode == "taxonomy" else "summary.md"
-    yaml_path = out_root / yaml_name
-    md_path = out_root / md_name
-    write_yaml_if_changed(yaml_path, payload)
-    write_text_if_changed(md_path, render_summary(payload))
-    print(rel(root, yaml_path))
-    print(rel(root, md_path))
-    return 0
+    raise SystemExit(f"unsupported action: {args.action}")
 
 
 if __name__ == "__main__":
