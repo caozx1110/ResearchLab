@@ -46,11 +46,11 @@ from .paths import (
     normalize_storage_reference,
     output_storage_root,
     raw_storage_root,
+    record_path,
     rel,
     resolve_local_reference,
     search_stage_path,
     unit_root,
-    units_root,
 )
 from .records import (
     iter_records,
@@ -61,7 +61,7 @@ from .prefs import (
 from .confirm import (
     write_record,
 )
-from .journal import journaled_op, operation_lock_path
+from .journal import journaled_op, mutation_transaction, operation_lock_path
 
 WEB_SNAPSHOT_MAX_CHARS = 120_000
 
@@ -76,26 +76,82 @@ PARSE_CACHE_SECTION_LIMIT = 200
 PARSE_CACHE_PER_SECTION_CHAR_LIMIT = 8000
 
 
-def _move_tree_item(src: Path, dst: Path) -> list[tuple[Path, Path]]:
-    moved: list[tuple[Path, Path]] = []
+def _storage_content_digest(path: Path) -> str | None:
+    """Digest file/tree content and relative names, independent of permissions."""
+    if not path.exists() and not path.is_symlink():
+        return None
+    digest = hashlib.sha256()
+    if path.is_symlink():
+        digest.update(f"L\0{path.readlink()}".encode("utf-8"))
+        return digest.hexdigest()
+    if path.is_file():
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    for child in sorted(path.rglob("*"), key=lambda item: item.relative_to(path).as_posix()):
+        relative = child.relative_to(path).as_posix()
+        if child.is_symlink():
+            digest.update(f"L\0{relative}\0{child.readlink()}\0".encode("utf-8"))
+        elif child.is_dir():
+            digest.update(f"D\0{relative}\0".encode("utf-8"))
+        else:
+            digest.update(f"F\0{relative}\0".encode("utf-8"))
+            with child.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _record_storage_conflict(conflicts: list[dict[str, str]], src: Path, dst: Path, *, reason: str) -> None:
+    item = {
+        "source": src.as_posix(),
+        "destination": dst.as_posix(),
+        "source_digest": str(_storage_content_digest(src) or ""),
+        "destination_digest": str(_storage_content_digest(dst) or ""),
+        "reason": reason,
+    }
+    if item not in conflicts:
+        conflicts.append(item)
+
+
+def _copy_legacy_tree_item(
+    src: Path,
+    dst: Path,
+    *,
+    conflicts: list[dict[str, str]] | None = None,
+) -> list[tuple[Path, Path]]:
+    """Copy legacy workspace data into kb/ without mutating its source."""
+    conflicts = conflicts if conflicts is not None else []
+    copied: list[tuple[Path, Path]] = []
     if not src.exists():
-        return moved
+        return copied
+    if src.is_symlink():
+        # A workspace-level legacy symlink can escape the workspace.  Preserve it
+        # in place and require an explicit user migration instead of dereferencing.
+        _record_storage_conflict(conflicts, src, dst, reason="legacy-symlink-not-copied")
+        return copied
+    if dst.is_symlink():
+        _record_storage_conflict(conflicts, src, dst, reason="destination-symlink-conflict")
+        return copied
     if src.is_dir():
+        if dst.exists() and (not dst.is_dir() or dst.is_symlink()):
+            _record_storage_conflict(conflicts, src, dst, reason="destination-kind-conflict")
+            return copied
         ensure_dir(dst)
         for child in sorted(src.iterdir()):
-            moved.extend(_move_tree_item(child, dst / child.name))
-        if src.exists():
-            try:
-                src.rmdir()
-            except OSError:
-                pass
-        return moved
+            copied.extend(_copy_legacy_tree_item(child, dst / child.name, conflicts=conflicts))
+        if _storage_content_digest(src) != _storage_content_digest(dst):
+            _record_storage_conflict(conflicts, src, dst, reason="destination-tree-conflict")
+        return copied
     if dst.exists():
-        return moved
+        if _storage_content_digest(src) != _storage_content_digest(dst):
+            _record_storage_conflict(conflicts, src, dst, reason="destination-byte-conflict")
+        return copied
     ensure_dir(dst.parent)
-    shutil.move(str(src), str(dst))
-    moved.append((src, dst))
-    return moved
+    shutil.copy2(src, dst)
+    copied.append((src, dst))
+    return copied
 
 
 def _copy_into_raw(backup: Path, target: Path) -> bool:
@@ -107,22 +163,6 @@ def _copy_into_raw(backup: Path, target: Path) -> bool:
         return True
     shutil.copy2(backup, target)
     return True
-
-
-def prune_nested_repo_metadata(project_root: Path) -> list[str]:
-    removed: list[str] = []
-    repo_sources_root = units_root(project_root) / "repos"
-    if not repo_sources_root.exists():
-        return removed
-    for path in repo_sources_root.glob("*/source/*/.git"):
-        if not path.exists():
-            continue
-        if path.is_dir():
-            shutil.rmtree(path)
-        else:
-            path.unlink()
-        removed.append(rel(project_root, path))
-    return removed
 
 
 def _rewrite_storage_text(text: str, project_root: Path) -> str:
@@ -153,6 +193,10 @@ def _storage_rewrite_paths(project_root: Path) -> list[Path]:
             continue
         if "source" in relative.parts:
             continue
+        if path.name == "record.yaml":
+            # Record source URIs require byte-equivalence checks; never rewrite
+            # them with a blind text substitution.
+            continue
         if path.name.startswith("parse-cache") and path.suffix.lower() in {".yaml", ".yml"}:
             continue
         if path.suffix.lower() not in TEXT_REWRITE_SUFFIXES:
@@ -161,20 +205,61 @@ def _storage_rewrite_paths(project_root: Path) -> list[Path]:
     return paths
 
 
-def sync_storage_layout(project_root: Path) -> dict[str, Any]:
-    ensure_workspace(project_root)
-    moved_paths: list[tuple[Path, Path]] = []
+def storage_sync_target_paths(project_root: Path) -> list[Path]:
+    """Plan every KB-local path that storage sync may mutate."""
+    targets: set[Path] = set()
+    for name, destination_root in (("raw", raw_storage_root(project_root)), ("output", output_storage_root(project_root))):
+        source_root = project_root / name
+        if source_root.is_dir() and not source_root.is_symlink():
+            targets.update(destination_root / child.name for child in source_root.iterdir())
+
+    for record in iter_records(project_root):
+        source = record.get("source", {})
+        if not isinstance(source, dict):
+            continue
+        original_uri = str(source.get("original_uri") or "").strip()
+        if not original_uri or is_url(original_uri):
+            continue
+        _, remapped_path = _legacy_storage_map(project_root, original_uri)
+        if remapped_path is None:
+            continue
+        normalized_uri = remapped_path.resolve().as_posix() if remapped_path.exists() else remapped_path.as_posix()
+        if normalized_uri != original_uri:
+            kind = str(record.get("kind") or "")
+            unit_id = str(record.get("id") or "")
+            if kind and unit_id:
+                targets.add(record_path(project_root, kind, unit_id))
+        if not remapped_path.exists():
+            for rel_backup in source.get("backup_paths", []):
+                if (project_root / str(rel_backup)).exists():
+                    targets.add(remapped_path)
+                    break
+
+    for path in _storage_rewrite_paths(project_root):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        if _rewrite_storage_text(text, project_root) != text:
+            targets.add(path)
+
+    return sorted(targets, key=lambda path: path.as_posix())
+
+
+def _sync_storage_layout_unlocked(project_root: Path) -> dict[str, Any]:
+    copied_paths: list[tuple[Path, Path]] = []
+    conflicts: list[dict[str, str]] = []
+    preserved_legacy_roots: list[str] = []
     for name, destination_root in (("raw", raw_storage_root(project_root)), ("output", output_storage_root(project_root))):
         source_root = project_root / name
         if not source_root.exists():
             continue
+        preserved_legacy_roots.append(source_root.as_posix())
         ensure_dir(destination_root)
         for child in sorted(source_root.iterdir()):
-            moved_paths.extend(_move_tree_item(child, destination_root / child.name))
-        try:
-            source_root.rmdir()
-        except OSError:
-            pass
+            copied_paths.extend(
+                _copy_legacy_tree_item(child, destination_root / child.name, conflicts=conflicts)
+            )
 
     updated_records: list[str] = []
     hydrated_paths: list[str] = []
@@ -196,7 +281,26 @@ def sync_storage_layout(project_root: Path) -> dict[str, Any]:
         if not remapped_path.exists() and backup_candidates:
             _copy_into_raw(backup_candidates[0], remapped_path)
             hydrated_paths.append(rel(project_root, remapped_path))
-        normalized_uri = remapped_path.resolve().as_posix() if remapped_path.exists() else remapped_path.as_posix()
+        reference_sources = [path for path in [old_path, *backup_candidates] if path is not None and path.exists()]
+        equivalent_source = next(
+            (
+                path
+                for path in reference_sources
+                if remapped_path.exists()
+                and _storage_content_digest(path) == _storage_content_digest(remapped_path)
+            ),
+            None,
+        )
+        if not remapped_path.exists() or equivalent_source is None:
+            conflict_source = reference_sources[0] if reference_sources else (old_path or Path(original_uri))
+            _record_storage_conflict(
+                conflicts,
+                conflict_source,
+                remapped_path,
+                reason="record-reference-not-byte-equivalent",
+            )
+            continue
+        normalized_uri = remapped_path.resolve().as_posix()
         if normalized_uri != original_uri:
             source["original_uri"] = normalized_uri
             record["source"] = source
@@ -214,15 +318,29 @@ def sync_storage_layout(project_root: Path) -> dict[str, Any]:
             write_text_if_changed(path, updated)
             rewritten_files.append(rel(project_root, path))
 
-    removed_nested_git = prune_nested_repo_metadata(project_root)
-
     return {
-        "moved_paths": [(src.as_posix(), dst.as_posix()) for src, dst in moved_paths],
+        # Compatibility key: these are logical migrations, now implemented as
+        # non-destructive copies so every mutation remains journalable in kb/**.
+        "moved_paths": [(src.as_posix(), dst.as_posix()) for src, dst in copied_paths],
+        "copied_paths": [(src.as_posix(), dst.as_posix()) for src, dst in copied_paths],
+        "preserved_legacy_roots": preserved_legacy_roots,
+        "conflicts": conflicts,
         "updated_records": updated_records,
         "hydrated_paths": hydrated_paths,
         "rewritten_files": rewritten_files,
-        "removed_nested_git": removed_nested_git,
+        # Canonical source evidence is immutable.  New directory intake excludes
+        # VCS metadata while still in staging; storage sync never prunes it later.
+        "removed_nested_git": [],
     }
+
+
+def sync_storage_layout(project_root: Path) -> dict[str, Any]:
+    ensure_workspace(project_root)
+    targets = storage_sync_target_paths(project_root)
+    if not targets:
+        return _sync_storage_layout_unlocked(project_root)
+    with mutation_transaction(project_root, "storage-sync", targets):
+        return _sync_storage_layout_unlocked(project_root)
 
 
 def build_search_stage_id(kind: str, query: str) -> str:
@@ -1133,10 +1251,10 @@ def detect_duplicate(project_root: Path, kind: str, source: str, *, title: str =
 
 __all__ = [
     "WEB_SNAPSHOT_MAX_CHARS",
-    "_move_tree_item",
+    "_copy_legacy_tree_item",
     "_copy_into_raw",
-    "prune_nested_repo_metadata",
     "_rewrite_storage_text",
+    "storage_sync_target_paths",
     "sync_storage_layout",
     "build_search_stage_id",
     "load_search_stage",
