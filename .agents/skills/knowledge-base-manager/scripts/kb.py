@@ -665,12 +665,12 @@ def main() -> int:
     if args.command == "undo":
         payload = undo_last_operation(root)
         print(f"已撤销最近一次操作 {payload['op_id']}。")
-        print("如需撤销当前恢复结果，可再次使用 kb undo。")
+        print("再次使用 kb undo 会继续撤销更早一次可撤销的业务操作。")
         return 0
     if args.command == "restore":
         payload = restore_operation(root, args.op_id)
         print(f"已恢复到操作 {payload['op_id']} 之前的状态。")
-        print("如需撤销当前恢复结果，可使用 kb undo。")
+        print("这次恢复不会成为新的可撤销业务操作；kb undo 仍会从最近的业务操作继续。")
         return 0
     if args.command == "lint":
         status, issues = lint_records(root)

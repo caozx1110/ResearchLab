@@ -372,3 +372,29 @@ def test_kb_resume_clean_state_reports_nothing_to_recover(
     assert "没有未完成操作需要恢复" in output
     for forbidden in ["python3", ".py", "git ", "--"]:
         assert forbidden not in output
+
+
+def test_kb_recovery_output_does_not_promise_redo_of_recovery_operations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    kb = _load_kb_module()
+    monkeypatch.setattr(kb, "undo_last_operation", lambda root: {"op_id": "op-business-latest"})
+    monkeypatch.setattr(
+        kb,
+        "restore_operation",
+        lambda root, op_id, **kwargs: {"op_id": op_id, "restored_paths": []},
+    )
+
+    monkeypatch.setattr(sys, "argv", ["kb.py", "--root", str(tmp_path), "undo"])
+    assert kb.main() == 0
+    undo_output = capsys.readouterr().out
+    assert "继续撤销更早一次可撤销的业务操作" in undo_output
+    assert "撤销当前恢复结果" not in undo_output
+
+    monkeypatch.setattr(sys, "argv", ["kb.py", "--root", str(tmp_path), "restore", "op-target"])
+    assert kb.main() == 0
+    restore_output = capsys.readouterr().out
+    assert "不会成为新的可撤销业务操作" in restore_output
+    assert "撤销当前恢复结果" not in restore_output
