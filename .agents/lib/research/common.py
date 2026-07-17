@@ -1223,17 +1223,16 @@ def append_list_item(path: Path, doc_id: str, generated_by: str, item: dict[str,
             default_status=default_status,
         )
 
-    from .journal import journaled_op, operation_lock_path
+    from .journal import mutation_transaction
 
-    with exclusive_file_lock(operation_lock_path(project_root, path)):
-        with journaled_op(project_root, "append_list_item", [path]):
-            return _append_list_item_unlocked(
-                path,
-                doc_id,
-                generated_by,
-                item,
-                default_status=default_status,
-            )
+    with mutation_transaction(project_root, "append_list_item", [path]):
+        return _append_list_item_unlocked(
+            path,
+            doc_id,
+            generated_by,
+            item,
+            default_status=default_status,
+        )
 
 
 def program_reporting_events_path(project_root: Path, program_id: str) -> Path:
@@ -1266,33 +1265,32 @@ def append_program_reporting_event(
 ) -> Path:
     # Local import avoids the common <-> journal module cycle while keeping the
     # shared load-modify-write transaction guarded by the stable on-disk lock.
-    from .journal import journaled_op, operation_lock_path
+    from .journal import mutation_transaction
 
     path = program_reporting_events_path(project_root, program_id)
-    with exclusive_file_lock(operation_lock_path(project_root, path)):
-        with journaled_op(project_root, "append_program_reporting_event", [path]):
-            payload = load_list_document(path, f"{program_id}-reporting-events", generated_by)
-            payload["program_id"] = program_id
-            payload["generated_by"] = generated_by
-            payload["generated_at"] = utc_now_iso()
-            items = [item for item in payload.get("items", []) if isinstance(item, dict)]
-            normalized = dict(event)
-            normalized.setdefault("timestamp", utc_now_iso())
-            normalized["source_skill"] = str(normalized.get("source_skill") or generated_by).strip() or generated_by
-            normalized["event_type"] = str(normalized.get("event_type") or "update").strip() or "update"
-            normalized["title"] = str(normalized.get("title") or "").strip()
-            normalized["summary"] = str(normalized.get("summary") or "").strip()
-            for key in ("artifacts", "idea_ids", "paper_ids", "repo_ids", "tags"):
-                values = normalized.get(key, [])
-                if isinstance(values, list):
-                    normalized[key] = [str(item) for item in values if str(item).strip()]
-                else:
-                    normalized[key] = []
-            if "stage" in normalized:
-                normalized["stage"] = str(normalized.get("stage") or "").strip()
-            items.append(normalized)
-            payload["items"] = items
-            write_yaml_if_changed(path, payload)
+    with mutation_transaction(project_root, "append_program_reporting_event", [path]):
+        payload = load_list_document(path, f"{program_id}-reporting-events", generated_by)
+        payload["program_id"] = program_id
+        payload["generated_by"] = generated_by
+        payload["generated_at"] = utc_now_iso()
+        items = [item for item in payload.get("items", []) if isinstance(item, dict)]
+        normalized = dict(event)
+        normalized.setdefault("timestamp", utc_now_iso())
+        normalized["source_skill"] = str(normalized.get("source_skill") or generated_by).strip() or generated_by
+        normalized["event_type"] = str(normalized.get("event_type") or "update").strip() or "update"
+        normalized["title"] = str(normalized.get("title") or "").strip()
+        normalized["summary"] = str(normalized.get("summary") or "").strip()
+        for key in ("artifacts", "idea_ids", "paper_ids", "repo_ids", "tags"):
+            values = normalized.get(key, [])
+            if isinstance(values, list):
+                normalized[key] = [str(item) for item in values if str(item).strip()]
+            else:
+                normalized[key] = []
+        if "stage" in normalized:
+            normalized["stage"] = str(normalized.get("stage") or "").strip()
+        items.append(normalized)
+        payload["items"] = items
+        write_yaml_if_changed(path, payload)
     return path
 
 
