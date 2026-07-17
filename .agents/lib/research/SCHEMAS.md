@@ -502,17 +502,22 @@ claim:
   confidence: 0.0                # 可选
   confirmation_status: pending_user_confirmation|confirmed|rejected|auto_confirmed
   evidence_refs:
-  - source_unit_id: p-...         # 普通 unit 证据
-    artifact: parse-cache.yaml    # unit 内相对路径
-    locator: "page=3"
-    quote: ""
-    summary: ""
-  - source_unit_id: r-...         # repo workspace 外部证据
-    artifact: README.md
-    locator: line=12
-    quote: verbatim source span
-    external_source:              # 仅 repo workspace 源码允许
-      kind: repo                  # base_root 不得由 claim 提供
+    - source_unit_id: p-...       # 证据所在 unit
+      artifact: parse-cache.yaml  # unit 内相对路径，或 source(pdf/html)
+      locator: "page=3"           # PDF: page=N|section|para ; HTML: section|anchor（B4）
+      quote: ""                   # 短逐字片段（B3）——脚本校验它逐字存在于 artifact
+      summary: ""                 # 可选转述
+```
+
+Repo workspace 源码是唯一外部扩展，evidence ref 额外声明 `external_source: {kind: repo}`；可信 `base_root` 只能由 repo record / caller 提供，不是 claim 字段。例：
+
+```yaml
+- source_unit_id: r-...
+  artifact: README.md
+  locator: line=12
+  quote: verbatim source span
+  external_source:
+    kind: repo
 ```
 
 **字段语义**：

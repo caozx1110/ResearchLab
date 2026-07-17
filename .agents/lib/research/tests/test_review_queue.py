@@ -259,7 +259,7 @@ def test_confirm_command_blank_evidence_rejects_before_any_batch_write(tmp_path:
     assert not (tmp_path / "kb" / "index.yaml").exists()
 
 
-def test_batch_confirm_preserves_ai_information_types_and_sets_lifecycle(tmp_path: Path) -> None:
+def test_batch_confirm_rejects_judgement_without_canonical_verification(tmp_path: Path) -> None:
     kb = _load_kb_module()
     ensure_workspace(tmp_path)
     write_yaml_if_changed(runtime_preferences_path(tmp_path), {"identity": {"default_confirmed_by": "czx-default"}})
@@ -271,26 +271,26 @@ def test_batch_confirm_preserves_ai_information_types_and_sets_lifecycle(tmp_pat
         status="screened",
         information_types=["fact", "inference", "evaluation", "unverified"],
     )
-    # Judgement-track record needs substantive core_content to clear the substance gate;
-    # this test asserts epistemic preservation + lifecycle, not hollow confirmation.
+    # Substance alone no longer permits a judgement confirmation: the record must
+    # first carry canonical claims + a current byte-bound verification receipt.
     ai_typed["payload"] = {"core_content": {"method": "diffusion policy over action chunks"}}
     _write_record(tmp_path, ai_typed)
     records = search_records(tmp_path, "", confirmation_status="pending_user_confirmation")
 
-    [path] = kb.apply_batch_confirmation(
-        tmp_path,
-        records,
-        confirmed_by="",
-        evidence=["kb/programs/p/decision-log.md"],
-        method="test batch",
-    )
+    with pytest.raises(SystemExit, match="non-empty canonical payload.claims"):
+        kb.apply_batch_confirmation(
+            tmp_path,
+            records,
+            confirmed_by="",
+            evidence=["kb/programs/p/decision-log.md"],
+            method="test batch",
+        )
 
-    record = load_yaml(path, default={})
-    assert record["confirmation_status"] == "confirmed"
-    assert record["status"] == "active"
-    assert record["information_types"] == ["evaluation", "fact", "inference", "unverified"]
-    assert record["confirmation"]["prior_information_types"] == ["evaluation", "fact", "inference", "unverified"]
-    assert record["history"][-1]["action"] == "paper-confirmed"
+    record = load_yaml(record_path(tmp_path, "paper", ai_typed["id"]), default={})
+    assert record["confirmation_status"] == "pending_user_confirmation"
+    assert record["status"] == "screened"
+    assert record["information_types"] == ["fact", "inference", "evaluation", "unverified"]
+    assert "confirmation" not in record
 
 
 def test_batch_confirm_skips_non_pending_records(tmp_path: Path, capsys) -> None:
@@ -301,10 +301,11 @@ def test_batch_confirm_skips_non_pending_records(tmp_path: Path, capsys) -> None
     rejected = _record("p-rejected-123456", "Rejected", "rejected", "2026-01-02T00:00:00+00:00", status="rejected")
     _write_record(tmp_path, pending)
     _write_record(tmp_path, rejected)
+    records = search_records(tmp_path, "")
 
     paths = kb.apply_batch_confirmation(
         tmp_path,
-        [pending, rejected],
+        records,
         confirmed_by="",
         evidence=["kb/programs/p/decision-log.md"],
         method="test batch",
@@ -355,6 +356,10 @@ def test_review_queue_lists_selected_ideas_with_pending_content(tmp_path: Path, 
             "czx",
             "--evidence",
             "kb/programs/p/decision-log.md",
+            "--user-authorization",
+            "I select this idea for the program.",
+            "--authorization-source",
+            "user_message",
         ],
     )
 
