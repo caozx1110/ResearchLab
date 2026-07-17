@@ -10,7 +10,7 @@ from research.git_ops import (
     restore_operation,
     undo_last_operation,
 )
-from research.journal import abort_op, begin_op, commit_op, committed_ops, journal_entry_path, load_op
+from research.journal import abort_op, begin_op, commit_op, committed_ops, incomplete_ops, journal_entry_path, load_op
 from research.records import default_record
 from research import yaml_io
 from research.yaml_io import load_yaml
@@ -57,6 +57,24 @@ def test_operation_journal_tracks_begin_commit_and_abort(tmp_path: Path) -> None
 
     with pytest.raises(SystemExit, match="Invalid operation id"):
         load_op(tmp_path, "../outside")
+
+
+def test_incomplete_ops_lists_only_begin_state_entries(tmp_path: Path) -> None:
+    first_target = tmp_path / "kb" / "notes" / "first.md"
+    second_target = tmp_path / "kb" / "notes" / "second.md"
+    first_op = begin_op(tmp_path, "first-write", [first_target])
+    second_op = begin_op(tmp_path, "second-write", [second_target])
+    second_target.parent.mkdir(parents=True, exist_ok=True)
+    second_target.write_text("changed\n", encoding="utf-8")
+    commit_op(tmp_path, second_op)
+
+    entries = incomplete_ops(tmp_path)
+
+    assert [entry["op_id"] for entry in entries] == [first_op]
+    assert entries[0]["target_paths"] == ["notes/first.md"]
+    assert entries[0]["before_digests"] == {"notes/first.md": None}
+    assert entries[0]["started_at"]
+    assert first_op not in {entry["op_id"] for entry in committed_ops(tmp_path)}
 
 
 def test_write_record_creates_committed_journal_entry(tmp_path: Path) -> None:

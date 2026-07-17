@@ -101,6 +101,20 @@ def committed_ops(project_root: Path) -> list[dict]:
     return [entry for _, entry in sorted(ordered_entries, key=lambda item: item[0])]
 
 
+def incomplete_ops(project_root: Path) -> list[dict]:
+    root = journal_root(project_root)
+    if not root.exists():
+        return []
+    ordered_entries: list[tuple[int, dict]] = []
+    for path in root.glob("*.yaml"):
+        entry = load_yaml(path, default=None)
+        if not isinstance(entry, dict) or entry.get("state") != "begin":
+            continue
+        sequence = int(entry.get("sequence_ns") or path.stat().st_mtime_ns)
+        ordered_entries.append((sequence, entry))
+    return [entry for _, entry in sorted(ordered_entries, key=lambda item: item[0])]
+
+
 def latest_committed_op(project_root: Path) -> dict:
     entries = committed_ops(project_root)
     if not entries:
