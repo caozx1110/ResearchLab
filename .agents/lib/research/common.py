@@ -11,6 +11,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -245,15 +246,44 @@ def parse_iso_datetime(value: Any) -> datetime | None:
         return None
 
 
+_FILE_LOCK_GUARD = threading.Lock()
+_FILE_THREAD_LOCKS: dict[str, threading.RLock] = {}
+_FILE_LOCK_LOCAL = threading.local()
+
+
+def _in_process_file_lock(key: str) -> threading.RLock:
+    with _FILE_LOCK_GUARD:
+        return _FILE_THREAD_LOCKS.setdefault(key, threading.RLock())
+
+
 @contextmanager
 def exclusive_file_lock(path: Path):
+    """Cross-process file lock that is reentrant within the current thread."""
     ensure_dir(path.parent)
-    with path.open("a+", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
-            yield handle
-        finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    key = path.resolve().as_posix()
+    thread_lock = _in_process_file_lock(key)
+    with thread_lock:
+        held = getattr(_FILE_LOCK_LOCAL, "held", None)
+        if held is None:
+            held = {}
+            _FILE_LOCK_LOCAL.held = held
+        current = held.get(key)
+        if current is not None:
+            current["depth"] += 1
+            try:
+                yield current["handle"]
+            finally:
+                current["depth"] -= 1
+            return
+
+        with path.open("a+", encoding="utf-8") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            held[key] = {"handle": handle, "depth": 1}
+            try:
+                yield handle
+            finally:
+                held.pop(key, None)
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def program_lock_path(project_root: Path, program_id: str) -> Path:

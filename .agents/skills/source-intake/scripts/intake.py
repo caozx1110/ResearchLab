@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 
 SCRIPT_PATH = Path(__file__).resolve()
@@ -22,12 +24,14 @@ from research.bootstrap import ensure_managed_runtime
 if __name__ == "__main__":
     ensure_managed_runtime(PROJECT_ROOT)
 
-from research.common import add_project_root_argument, confirm_command as shared_confirm_command, extract_pdf_record, parse_arxiv_id, print_resolved_project_roots, skill_script_for_command
+from research.common import add_project_root_argument, confirm_command as shared_confirm_command, exclusive_file_lock, extract_pdf_record, parse_arxiv_id, print_resolved_project_roots, skill_script_for_command, utc_now_iso, write_yaml_if_changed
+from research.journal import journaled_op, operation_lock_path
 from research.intake_cli import add_intake_add_arguments
 from research.core import (
     apply_record_governance,
     backup_source,
     build_index,
+    candidate_pools_path,
     default_record,
     detect_duplicate,
     ensure_workspace,
@@ -36,13 +40,17 @@ from research.core import (
     locate_record,
     mark_search_candidate,
     checkpoint_and_report,
+    kb_root,
     normalize_storage_reference,
     project_root,
     resolve_local_reference,
     resolve_search_candidate,
+    rebase_source_backup_paths,
+    source_backup_error,
     source_record_fields,
     stage_search_results,
     unit_root,
+    topic_taxonomy_path,
     write_parse_cache,
     write_record,
 )
@@ -210,11 +218,123 @@ def stage_candidates(args: argparse.Namespace) -> list[dict]:
     return candidates
 
 
+def _workspace_seed_paths(root: Path) -> list[Path]:
+    return [
+        kb_root(root) / ".gitignore",
+        kb_root(root) / "config" / "research-settings.md",
+        kb_root(root) / "config" / "runtime-preferences.yaml",
+        kb_root(root) / "user" / "navigation.md",
+        kb_root(root) / "user" / "current-state.md",
+        topic_taxonomy_path(root),
+        candidate_pools_path(root),
+    ]
+
+
+def _index_target_paths(root: Path) -> list[Path]:
+    return [
+        topic_taxonomy_path(root),
+        candidate_pools_path(root),
+        kb_root(root) / "index.yaml",
+        kb_root(root) / "index.md",
+    ]
+
+
+def _new_intake_stage_dir(root: Path, unit_id: str) -> Path:
+    return kb_root(root) / ".runtime" / "intake-staging" / unit_id / uuid.uuid4().hex
+
+
+def _record_staging_failure(
+    stage_dir: Path,
+    *,
+    kind: str,
+    unit_id: str,
+    source: str,
+    error: str,
+    source_info: dict | None = None,
+) -> Path:
+    path = stage_dir / "failure.yaml"
+    write_yaml_if_changed(
+        path,
+        {
+            "status": "failed_retryable",
+            "kind": kind,
+            "unit_id": unit_id,
+            "source": source,
+            "error": error,
+            "failed_at": utc_now_iso(),
+            "backup_status": str((source_info or {}).get("backup_status") or ""),
+            "backup_warning": str((source_info or {}).get("backup_warning") or ""),
+        },
+    )
+    return path
+
+
+def _source_identity_lock_target(root: Path, kind: str, source: str) -> Path:
+    digest = hashlib.sha256(f"{kind}\0{source}".encode("utf-8")).hexdigest()
+    return kb_root(root) / ".runtime" / "intake-identities" / f"{digest}.lock-key"
+
+
+def _materialize_staged_source(
+    root: Path,
+    *,
+    kind: str,
+    source: str,
+    title: str,
+    record: dict,
+    source_info: dict,
+    stage_dir: Path,
+) -> tuple[Path | None, dict | None, dict]:
+    """Atomically move staged evidence into a canonical unit and write its record."""
+    canonical_dir = unit_root(root, kind, str(record["id"]))
+    canonical_source_info = rebase_source_backup_paths(
+        root,
+        source_info,
+        from_unit_dir=stage_dir,
+        to_unit_dir=canonical_dir,
+    )
+    record["source"] = source_record_fields(canonical_source_info)
+    identity_target = _source_identity_lock_target(root, kind, source)
+    with exclusive_file_lock(operation_lock_path(root, identity_target)):
+        duplicate = detect_duplicate(root, kind, source, title=title)
+        if duplicate:
+            return None, duplicate, canonical_source_info
+
+        rollback_targets = [canonical_dir]
+        quarantine_dir: Path | None = None
+        if canonical_dir.exists():
+            quarantine_dir = (
+                kb_root(root)
+                / ".runtime"
+                / "intake-staging"
+                / "legacy-failed-units"
+                / str(record["id"])
+                / uuid.uuid4().hex
+            )
+            rollback_targets.append(quarantine_dir)
+        with journaled_op(root, "source-intake-materialize", rollback_targets):
+            if quarantine_dir is not None:
+                quarantine_dir.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(canonical_dir, quarantine_dir)
+            canonical_dir.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(stage_dir, canonical_dir)
+            path = write_record(root, record)
+    return path, None, canonical_source_info
+
+
+def _build_index_transaction(root: Path) -> tuple[Path, Path]:
+    targets = _index_target_paths(root)
+    with exclusive_file_lock(operation_lock_path(root, kb_root(root) / "index.yaml")):
+        with journaled_op(root, "source-intake-build-index", targets):
+            return build_index(root)
+
+
 def main() -> int:
     args = build_parser().parse_args()
     root = project_root(PROJECT_ROOT, explicit_root=args.root)
     print_resolved_project_roots(root)
+    missing_seed_paths = [path for path in _workspace_seed_paths(root) if not path.exists()]
     ensure_workspace(root)
+    created_seed_paths = [path for path in missing_seed_paths if path.exists()]
 
     if args.command in {"search", "stage-search"}:
         candidates = stage_candidates(args)
@@ -265,16 +385,39 @@ def main() -> int:
         return 0
 
     record = default_record(args.kind, title=title, maturity=args.maturity, source={"original_uri": source})
-    source_info = backup_source(root, args.kind, record["id"], source)
-    # Only the on-disk source contract keys go into record.source; backup_status /
-    # backup_warning / parse metadata are surfaced separately (never pollute source).
-    record["source"] = source_record_fields(source_info)
-    backup_warning = str(source_info.get("backup_warning") or "").strip()
-    # Persist a parse-cache (page=N for PDF, section/anchor for HTML per SSOT B4)
-    # so downstream screen/complete-note + evidence reuse real parsed text without
-    # a second parse and without the cold-start empty-parse gap.
     unit_dir = unit_root(root, args.kind, record["id"])
-    parse_cache_path = write_parse_cache(unit_dir, record["id"], source_info)
+    stage_dir = _new_intake_stage_dir(root, record["id"])
+    source_info: dict = {}
+    staged_parse_cache: Path | None = None
+    try:
+        source_info = backup_source(root, args.kind, record["id"], source, unit_dir=stage_dir)
+        staged_parse_cache = write_parse_cache(stage_dir, record["id"], source_info)
+        readiness_error = source_backup_error(root, args.kind, source_info)
+        if readiness_error:
+            raise RuntimeError(readiness_error)
+    except (Exception, SystemExit) as exc:
+        error = str(exc).strip() or exc.__class__.__name__
+        _record_staging_failure(
+            stage_dir,
+            kind=args.kind,
+            unit_id=str(record["id"]),
+            source=source,
+            error=error,
+            source_info=source_info,
+        )
+        raise SystemExit(f"Source intake failed; retry is safe: {error}") from exc
+
+    canonical_source_info = rebase_source_backup_paths(
+        root,
+        source_info,
+        from_unit_dir=stage_dir,
+        to_unit_dir=unit_dir,
+    )
+    # Only the on-disk source contract keys go into record.source; backup status /
+    # warnings stay in retryable staging and public diagnostics.
+    record["source"] = source_record_fields(canonical_source_info)
+    backup_warning = str(source_info.get("backup_warning") or "").strip()
+    parse_cache_path = unit_dir / "parse-cache.yaml" if staged_parse_cache is not None else None
     # For URL papers (arxiv/PDF) the lightweight download path yields metadata the
     # legacy local PyPDF path could not; fold it in when we have nothing better.
     parse_metadata = source_info.get("parse_metadata") or {}
@@ -331,7 +474,28 @@ def main() -> int:
     else:
         record["payload"]["basic_info"]["title"] = title
         record["payload"]["basic_info"]["url"] = source if source.startswith("http") else ""
-    path = write_record(root, record)
+    path, concurrent_duplicate, source_info = _materialize_staged_source(
+        root,
+        kind=args.kind,
+        source=source,
+        title=title,
+        record=record,
+        source_info=source_info,
+        stage_dir=stage_dir,
+    )
+    if concurrent_duplicate:
+        if args.stage_id and args.candidate_id:
+            mark_search_candidate(
+                root,
+                args.stage_id,
+                args.candidate_id,
+                status="duplicate",
+                record_id=str(concurrent_duplicate["id"]),
+            )
+        print(f"[ok] duplicate detected: {concurrent_duplicate['id']}")
+        return 0
+    if path is None:
+        raise RuntimeError("Source materialization completed without a canonical record path.")
     auto_outputs: list[str] = []
     paper_preferences = load_runtime_preferences(root).get("paper", {}) if args.kind == "paper" else {}
     note_created = False
@@ -360,9 +524,16 @@ def main() -> int:
             auto_outputs.extend(run_paper_command(root, "extract-figures", "--paper-id", record["id"], "--defer-post-actions"))
         if note_created and bool(paper_preferences.get("auto_refresh_structure_after_note", True)):
             auto_outputs.extend(run_paper_command(root, "refresh-structure", "--paper-id", record["id"], "--defer-post-actions"))
-    build_index(root)
+    _build_index_transaction(root)
+    updated_stage_path: Path | None = None
     if args.stage_id and args.candidate_id:
-        mark_search_candidate(root, args.stage_id, args.candidate_id, status="materialized", record_id=str(record["id"]))
+        updated_stage_path = mark_search_candidate(
+            root,
+            args.stage_id,
+            args.candidate_id,
+            status="materialized",
+            record_id=str(record["id"]),
+        )
     print(f"[ok] created {path.relative_to(root)}")
     backup_status = str(source_info.get("backup_status") or "").strip()
     if backup_status:
@@ -374,7 +545,15 @@ def main() -> int:
     print(f"待内容补全并校验后，再请你确认条目 {record['id']}。")
     for line in auto_outputs:
         print(f"[auto] {line}")
-    checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: intake {args.kind} {record['id']}")
+    checkpoint_targets = [unit_dir, *_index_target_paths(root), *created_seed_paths]
+    if updated_stage_path is not None:
+        checkpoint_targets.append(updated_stage_path)
+    checkpoint = checkpoint_and_report(
+        root,
+        trigger="milestone",
+        message=f"milestone: intake {args.kind} {record['id']}",
+        target_paths=list(dict.fromkeys(checkpoint_targets)),
+    )
     for hint in guidance_hints(args.kind, paper_preferences, has_pdf=has_pdf, note_created=note_created):
         print(f"[hint] {hint}")
     print(next_for_agent_intake(root, args.kind, record["id"]))

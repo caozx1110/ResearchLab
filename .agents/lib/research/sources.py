@@ -22,6 +22,7 @@ from .common import (
     FetchTooLarge,
     clean_text,
     ensure_dir,
+    exclusive_file_lock,
     fetch_url,
     file_sha256,
     html_to_text,
@@ -60,6 +61,7 @@ from .prefs import (
 from .confirm import (
     write_record,
 )
+from .journal import journaled_op, operation_lock_path
 
 WEB_SNAPSHOT_MAX_CHARS = 120_000
 
@@ -134,6 +136,31 @@ def _rewrite_storage_text(text: str, project_root: Path) -> str:
     return updated
 
 
+def _storage_rewrite_paths(project_root: Path) -> list[Path]:
+    """Return mutable KB text only; runtime code/rules and evidence stay untouched."""
+    root = kb_root(project_root).resolve()
+    paths: list[Path] = []
+    for path in (root.rglob("*") if root.exists() else []):
+        if not path.is_file() or path.is_symlink():
+            continue
+        try:
+            relative = path.resolve().relative_to(root)
+        except ValueError:
+            continue
+        if any(part in {".git", ".journal", ".runtime"} for part in relative.parts):
+            continue
+        if relative.parts and relative.parts[0] == "raw":
+            continue
+        if "source" in relative.parts:
+            continue
+        if path.name.startswith("parse-cache") and path.suffix.lower() in {".yaml", ".yml"}:
+            continue
+        if path.suffix.lower() not in TEXT_REWRITE_SUFFIXES:
+            continue
+        paths.append(path)
+    return paths
+
+
 def sync_storage_layout(project_root: Path) -> dict[str, Any]:
     ensure_workspace(project_root)
     moved_paths: list[tuple[Path, Path]] = []
@@ -177,26 +204,15 @@ def sync_storage_layout(project_root: Path) -> dict[str, Any]:
             updated_records.append(str(record.get("id") or ""))
 
     rewritten_files: list[str] = []
-    for root in [kb_root(project_root), project_root / ".agents", project_root / "AGENTS.md"]:
-        if isinstance(root, Path) and root.is_file():
-            paths = [root]
-        else:
-            paths = list(root.rglob("*")) if isinstance(root, Path) and root.exists() else []
-        for path in paths:
-            if not path.is_file():
-                continue
-            if path.suffix.lower() not in TEXT_REWRITE_SUFFIXES and path.name not in {"AGENTS.md", "SKILL.md"}:
-                continue
-            if ".git" in path.parts or ("source" in path.parts and path.suffix.lower() not in {".md", ".markdown", ".txt"}):
-                continue
-            try:
-                text = path.read_text(encoding="utf-8")
-            except (UnicodeDecodeError, OSError):
-                continue
-            updated = _rewrite_storage_text(text, project_root)
-            if updated != text:
-                write_text_if_changed(path, updated)
-                rewritten_files.append(rel(project_root, path))
+    for path in _storage_rewrite_paths(project_root):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        updated = _rewrite_storage_text(text, project_root)
+        if updated != text:
+            write_text_if_changed(path, updated)
+            rewritten_files.append(rel(project_root, path))
 
     removed_nested_git = prune_nested_repo_metadata(project_root)
 
@@ -234,6 +250,29 @@ def stage_search_results(
     ensure_workspace(project_root)
     current_stage_id = stage_id or build_search_stage_id(kind, query)
     path = search_stage_path(project_root, current_stage_id)
+    with exclusive_file_lock(operation_lock_path(project_root, path)):
+        with journaled_op(project_root, "stage_search_results", [path]):
+            return _stage_search_results_unlocked(
+                project_root,
+                path=path,
+                current_stage_id=current_stage_id,
+                kind=kind,
+                query=query,
+                candidates=candidates,
+                note=note,
+            )
+
+
+def _stage_search_results_unlocked(
+    project_root: Path,
+    *,
+    path: Path,
+    current_stage_id: str,
+    kind: str,
+    query: str,
+    candidates: list[dict[str, Any]],
+    note: str,
+) -> Path:
     existing = load_yaml(path, default={})
     if not isinstance(existing, dict):
         existing = {}
@@ -298,27 +337,29 @@ def mark_search_candidate(
     status: str,
     record_id: str = "",
 ) -> Path:
-    payload = load_search_stage(project_root, stage_id)
-    found = False
-    for candidate in payload.get("candidates", []):
-        if str(candidate.get("candidate_id") or "") != candidate_id:
-            continue
-        candidate["status"] = status
-        if record_id:
-            candidate["record_id"] = record_id
-        found = True
-        break
-    if not found:
-        raise SystemExit(f"Candidate `{candidate_id}` not found in stage `{stage_id}`")
-    payload.setdefault("history", []).append(
-        {
-            "timestamp": utc_now_iso(),
-            "action": "candidate-updated",
-            "summary": f"{candidate_id} -> {status}",
-        }
-    )
     path = search_stage_path(project_root, stage_id)
-    write_yaml_if_changed(path, payload)
+    with exclusive_file_lock(operation_lock_path(project_root, path)):
+        with journaled_op(project_root, "mark_search_candidate", [path]):
+            payload = load_search_stage(project_root, stage_id)
+            found = False
+            for candidate in payload.get("candidates", []):
+                if str(candidate.get("candidate_id") or "") != candidate_id:
+                    continue
+                candidate["status"] = status
+                if record_id:
+                    candidate["record_id"] = record_id
+                found = True
+                break
+            if not found:
+                raise SystemExit(f"Candidate `{candidate_id}` not found in stage `{stage_id}`")
+            payload.setdefault("history", []).append(
+                {
+                    "timestamp": utc_now_iso(),
+                    "action": "candidate-updated",
+                    "summary": f"{candidate_id} -> {status}",
+                }
+            )
+            write_yaml_if_changed(path, payload)
     return path
 
 
@@ -552,6 +593,59 @@ def _html_to_section_chunks(
     return chunks
 
 
+def _text_to_section_chunks(
+    text: str,
+    *,
+    markdown: bool,
+    section_limit: int = PARSE_CACHE_SECTION_LIMIT,
+    per_section_char_limit: int = PARSE_CACHE_PER_SECTION_CHAR_LIMIT,
+) -> list[dict[str, Any]]:
+    """Split Markdown or plain text into stable section-located chunks."""
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    chunks: list[dict[str, Any]] = []
+
+    def emit(anchor: str, heading: str, body: str) -> None:
+        cleaned_heading = clean_text(heading)
+        cleaned_body = clean_text(body)
+        combined = clean_text(f"{cleaned_heading}\n{cleaned_body}") if cleaned_heading else cleaned_body
+        if not combined or len(chunks) >= section_limit:
+            return
+        chunks.append(
+            {
+                "label": f"section:{anchor}",
+                "text": _clip(combined, per_section_char_limit),
+                "page": None,
+                "locator_kind": "section",
+                "anchor": anchor,
+                "heading": cleaned_heading,
+            }
+        )
+
+    if markdown:
+        heading_re = re.compile(r"(?m)^(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$")
+        matches = list(heading_re.finditer(normalized))
+        if matches:
+            emit("preamble", "", normalized[: matches[0].start()])
+            used_anchors: set[str] = set()
+            for index, match in enumerate(matches):
+                heading = match.group(2).strip()
+                base_anchor = _slug_anchor(heading, f"s{index + 1}")
+                anchor = base_anchor
+                suffix = 2
+                while anchor in used_anchors:
+                    anchor = f"{base_anchor}-{suffix}"
+                    suffix += 1
+                used_anchors.add(anchor)
+                body_end = matches[index + 1].start() if index + 1 < len(matches) else len(normalized)
+                emit(anchor, heading, normalized[match.end() : body_end])
+            return chunks
+
+    paragraphs = [clean_text(item) for item in re.split(r"\n\s*\n+", normalized) if clean_text(item)]
+    for index, paragraph in enumerate(paragraphs[:section_limit], start=1):
+        emit(f"paragraph-{index}", "", paragraph)
+    return chunks
+
+
 def _html_metadata(html: str) -> dict[str, Any]:
     title = ""
     title_match = re.search(r"(?is)<title\b[^>]*>(.*?)</title>", html)
@@ -580,10 +674,10 @@ def source_record_fields(source_info: dict[str, Any]) -> dict[str, Any]:
 
 
 def write_parse_cache(unit_dir: Path, unit_id: str, source_info: dict[str, Any]) -> Path | None:
-    """Write a paper-analyst-compatible parse-cache from a backup_source result.
+    """Write a unit-generic parse-cache from a backup_source result.
 
-    Mirrors paper.py's ``{paper_id, generated_at, cache_policy, chunks}`` shape so
-    screen/complete-note reuse it (no PyPDF2 needed, no cold-start empty parse),
+    Uses the canonical ``unit_id`` header while preserving the chunk shape that
+    analyzer compatibility readers consume (no cold-start empty parse),
     and adds ``source_type`` / ``locator_kind`` so downstream evidence (原则2/B4)
     can tell PDF (page=N) from HTML (section/anchor). Returns None when nothing
     was parsed."""
@@ -594,7 +688,7 @@ def write_parse_cache(unit_dir: Path, unit_id: str, source_info: dict[str, Any])
     write_yaml_if_changed(
         cache_path,
         {
-            "paper_id": unit_id,
+            "unit_id": unit_id,
             "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
             "source_type": source_info.get("source_type", ""),
             "locator_kind": source_info.get("locator_kind", ""),
@@ -795,7 +889,7 @@ def _backup_generic_url(project_root: Path, root: Path, source: str) -> dict[str
 
 
 def _backup_local(project_root: Path, root: Path, source: str) -> dict[str, Any]:
-    """Local file/dir: copy + real sha256; PDFs also get page=N parse chunks."""
+    """Local file/dir: copy bytes, then parse every supported text/PDF type."""
     normalized_source = normalize_storage_reference(project_root, source)
     resolved_source = resolve_local_reference(project_root, normalized_source)
     src = resolved_source or Path(normalized_source).expanduser().resolve()
@@ -830,10 +924,113 @@ def _backup_local(project_root: Path, root: Path, source: str) -> dict[str, Any]
             _warn(result["backup_warning"], src.as_posix())
         else:
             result["parse_metadata"] = _pdf_metadata(dst, chunks)
+        return result
+
+    suffix = src.suffix.lower()
+    if suffix in {".html", ".htm", ".md", ".markdown", ".txt"}:
+        try:
+            text = dst.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            result.update(
+                {
+                    "backup_status": "failed",
+                    "source_type": "unsupported-text-encoding",
+                    "locator_kind": "",
+                    "backup_warning": f"Local text source is not valid UTF-8: {exc}",
+                }
+            )
+            _warn(result["backup_warning"], src.as_posix())
+            return result
+        if suffix in {".html", ".htm"}:
+            chunks = _html_to_section_chunks(text)
+            source_type = "html"
+            parse_backend = "html-sectioner"
+            metadata = _html_metadata(text)
+        else:
+            chunks = _text_to_section_chunks(text, markdown=suffix in {".md", ".markdown"})
+            source_type = "markdown" if suffix in {".md", ".markdown"} else "text"
+            parse_backend = "markdown-sectioner" if source_type == "markdown" else "text-sectioner"
+            metadata = {}
+        result.update(
+            {
+                "source_type": source_type,
+                "locator_kind": "section",
+                "parse_backend": parse_backend,
+                "parse_chunks": chunks,
+            }
+        )
+        if metadata:
+            result["parse_metadata"] = metadata
+        if not chunks:
+            result["backup_status"] = "failed"
+            result["backup_warning"] = f"Local {source_type} source parsed to zero non-empty sections."
+            _warn(result["backup_warning"], src.as_posix())
+        return result
+
+    result.update(
+        {
+            "backup_status": "failed",
+            "source_type": "unsupported",
+            "locator_kind": "",
+            "backup_warning": f"Unsupported local file type: {suffix or '<no extension>'}",
+        }
+    )
+    _warn(result["backup_warning"], src.as_posix())
     return result
 
 
-def backup_source(project_root: Path, kind: str, unit_id: str, source: str) -> dict[str, Any]:
+def source_backup_error(project_root: Path, kind: str, source_info: dict[str, Any]) -> str:
+    """Return why a staged source is not ready for canonical materialization."""
+    status = str(source_info.get("backup_status") or "").strip()
+    if status not in {"ok", "degraded"}:
+        return str(source_info.get("backup_warning") or f"source backup status is {status or 'missing'}")
+    backup_paths = [str(item).strip() for item in source_info.get("backup_paths", []) if str(item).strip()]
+    if not backup_paths:
+        return "source backup produced no archived paths"
+    missing_paths = [item for item in backup_paths if not (project_root / item).exists()]
+    if missing_paths:
+        return f"source backup paths are missing: {', '.join(missing_paths)}"
+    source_type = str(source_info.get("source_type") or "").strip()
+    if source_type == "directory":
+        return "" if kind == "repo" else "local directories are supported only for repo intake"
+    if not str(source_info.get("file_hash") or "").strip():
+        return "source backup has no byte hash"
+    chunks = [item for item in source_info.get("parse_chunks", []) if isinstance(item, dict)]
+    if not chunks or not any(str(item.get("text") or "").strip() for item in chunks):
+        return "source parse produced no non-empty chunks"
+    return ""
+
+
+def rebase_source_backup_paths(
+    project_root: Path,
+    source_info: dict[str, Any],
+    *,
+    from_unit_dir: Path,
+    to_unit_dir: Path,
+) -> dict[str, Any]:
+    """Project staged backup paths onto their post-materialization unit paths."""
+    rebased = dict(source_info)
+    paths: list[str] = []
+    staging_root = from_unit_dir.resolve()
+    for item in source_info.get("backup_paths", []):
+        archived = (project_root / str(item)).resolve()
+        try:
+            relative = archived.relative_to(staging_root)
+        except ValueError as exc:
+            raise SystemExit(f"Staged source path escaped its transaction root: {item}") from exc
+        paths.append(rel(project_root, to_unit_dir / relative))
+    rebased["backup_paths"] = paths
+    return rebased
+
+
+def backup_source(
+    project_root: Path,
+    kind: str,
+    unit_id: str,
+    source: str,
+    *,
+    unit_dir: Path | None = None,
+) -> dict[str, Any]:
     """Archive a source as real bytes + real sha256, returning an explicit status.
 
     Dispatch (SSOT 3.1 decision A / B4):
@@ -847,7 +1044,12 @@ def backup_source(project_root: Path, kind: str, unit_id: str, source: str) -> d
     Neither status nor warning belongs in record.source — callers must persist only
     ``source_record_fields(result)`` there (G7 fix: no more silent ``file_hash=""``).
     """
-    root = unit_root(project_root, kind, unit_id) / "source"
+    destination_unit = (unit_dir or unit_root(project_root, kind, unit_id)).resolve()
+    try:
+        destination_unit.relative_to(kb_root(project_root).resolve())
+    except ValueError as exc:
+        raise SystemExit(f"Source transaction destination must stay inside kb/: {destination_unit}") from exc
+    root = destination_unit / "source"
     ensure_dir(root)
     if is_url(source):
         arxiv_id = _arxiv_id_from_source(source)
@@ -861,6 +1063,31 @@ def backup_source(project_root: Path, kind: str, unit_id: str, source: str) -> d
         if not maybe_local.exists():
             return _backup_arxiv_html(project_root, root, arxiv_id, source)
     return _backup_local(project_root, root, source)
+
+
+def _record_blocks_source_retry(project_root: Path, record: dict[str, Any]) -> bool:
+    status = str(record.get("status") or "").strip().lower()
+    confirmation_status = str(record.get("confirmation_status") or "").strip().lower()
+    if status in {"failed", "failed_retryable", "rejected"} or confirmation_status == "rejected":
+        return False
+    payload = record.get("payload", {})
+    if isinstance(payload, dict):
+        workflow_state = str(payload.get("workflow_state") or "").strip().lower()
+        nested_workflow = payload.get("workflow", {})
+        if isinstance(nested_workflow, dict):
+            workflow_state = workflow_state or str(nested_workflow.get("state") or "").strip().lower()
+        if workflow_state in {"failed", "failed_retryable", "rejected"}:
+            return False
+
+    source = record.get("source", {})
+    if not isinstance(source, dict):
+        return False
+    backup_kind = str(source.get("backup_kind") or "").strip()
+    backup_paths = [str(item).strip() for item in source.get("backup_paths", []) if str(item).strip()]
+    existing = [(project_root / item) for item in backup_paths if (project_root / item).exists()]
+    if backup_kind == "directory":
+        return any(path.is_dir() for path in existing)
+    return bool(str(source.get("file_hash") or "").strip()) and bool(existing)
 
 
 def detect_duplicate(project_root: Path, kind: str, source: str, *, title: str = "") -> dict[str, Any] | None:
@@ -878,6 +1105,8 @@ def detect_duplicate(project_root: Path, kind: str, source: str, *, title: str =
         elif path.exists():
             normalized = path.as_posix()
     for record in iter_records(project_root, kind=kind):
+        if not _record_blocks_source_retry(project_root, record):
+            continue
         record_source = record.get("source", {})
         record_original_uri = str(record_source.get("original_uri") or "")
         record_normalized = normalize_remote_url(record_original_uri) if is_url(record_original_uri) else record_original_uri
@@ -919,6 +1148,8 @@ __all__ = [
     "_truncate_snapshot_text",
     "SOURCE_RECORD_KEYS",
     "source_record_fields",
+    "source_backup_error",
+    "rebase_source_backup_paths",
     "write_parse_cache",
     "backup_source",
     "detect_duplicate",
