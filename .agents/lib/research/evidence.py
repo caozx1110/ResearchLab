@@ -35,12 +35,15 @@ from typing import Any
 
 import yaml
 
+from .common import utc_now_iso
+
 # Vocabulary (mirrors research-record information_types + confirmation values).
 CLAIM_TYPES = {"fact", "inference", "evaluation", "user_opinion", "unverified"}
 # Judgement-class claims must carry evidence before they may be promoted to
 # confirmed (SSOT Principle 2 / gate interlock). This module supplies the
 # criterion function; the parallel Gate track wires it into the gate.
-JUDGEMENT_CLAIM_TYPES = {"inference", "evaluation"}
+JUDGEMENT_CLAIM_TYPES = {"inference", "evaluation", "user_opinion"}
+UNCONFIRMABLE_CLAIM_TYPES = {"unverified"}
 CLAIM_CONFIRMATION_VALUES = {
     "pending_user_confirmation",
     "confirmed",
@@ -51,9 +54,11 @@ CLAIM_CONFIRMATION_VALUES = {
 # sources use section/anchor (no page numbers).
 PDF_LOCATOR_KINDS = {"page", "section", "para"}
 HTML_LOCATOR_KINDS = {"section", "anchor"}
+EXTERNAL_SOURCE_KINDS = {"repo"}
 
 # Required top-level keys on every claim (validate_claims enforces presence).
 REQUIRED_CLAIM_FIELDS = ("id", "text", "claim_type", "confirmation_status", "evidence_refs")
+REQUIRED_EVIDENCE_REF_FIELDS = ("source_unit_id", "artifact", "locator", "quote")
 
 CONFIRMABLE_CONTENT_SECTIONS: dict[str, tuple[str, ...]] = {
     "paper": ("core_content",),
@@ -61,6 +66,7 @@ CONFIRMABLE_CONTENT_SECTIONS: dict[str, tuple[str, ...]] = {
     "blog": ("content",),
     "idea": ("problem", "hypothesis"),
     "experiment": ("results", "diagnosis"),
+    "program_decision": ("decision",),
 }
 
 # Locked canonical schema — kept byte-identical to
@@ -193,6 +199,15 @@ def confirmation_claim_ids(record: Any) -> list[str]:
     )
 
 
+def claims_digest(claims: Any) -> str:
+    """Canonical digest for the claims that passed analyzer verification."""
+    normalized = [claim for claim in claims if isinstance(claim, dict)] if isinstance(claims, (list, tuple)) else []
+    normalized.sort(
+        key=lambda claim: (normalize_ws(claim.get("id")), _canonical_json(_canonical_digest_value(claim)))
+    )
+    return _sha256_canonical(normalized)
+
+
 def confirmation_content_digest(record: Any) -> str:
     if not isinstance(record, dict):
         record = {}
@@ -222,7 +237,22 @@ def confirmation_evidence_digest(record: Any, evidence_items: Any) -> str:
         if isinstance(ref, dict)
     ]
     evidence_refs.sort(key=lambda ref: _canonical_json(_canonical_digest_value(ref)))
-    return _sha256_canonical({"evidence_items": normalized_items, "evidence_refs": evidence_refs})
+    payload = record.get("payload") if isinstance(record, dict) else {}
+    verification = payload.get("verification") if isinstance(payload, dict) else {}
+    verification_binding: dict[str, Any] = {}
+    if isinstance(verification, dict):
+        verification_binding = {
+            "claims_digest": verification.get("claims_digest", ""),
+            "evidence_digest": verification.get("evidence_digest", ""),
+            "artifacts": verification.get("artifacts", []),
+        }
+    return _sha256_canonical(
+        {
+            "evidence_items": normalized_items,
+            "evidence_refs": evidence_refs,
+            "verification": verification_binding,
+        }
+    )
 
 
 def _page_of_label(label: Any) -> int | None:
@@ -299,11 +329,130 @@ class _LoadedArtifact:
     pages: dict[int, str] = field(default_factory=dict)
 
 
-def _load_artifact(base: Path, artifact: str) -> _LoadedArtifact | None:
-    """Load an artifact's searchable text. Returns None if it cannot be read."""
-    if not artifact:
+@dataclass(frozen=True)
+class ResolvedEvidenceArtifact:
+    """A containment-checked artifact plus its receipt identity."""
+
+    path: Path
+    base_root: Path
+    artifact: str
+    source_kind: str
+    source_unit_id: str = ""
+    external_kind: str = ""
+
+    @property
+    def identity(self) -> str:
+        if self.source_kind == "unit":
+            return f"unit:{self.source_unit_id or '<unspecified>'}:{self.artifact}"
+        return f"external:{self.external_kind}:{self.base_root.as_posix()}:{self.artifact}"
+
+    def receipt_entry(self) -> dict[str, Any]:
+        entry: dict[str, Any] = {
+            "identity": self.identity,
+            "source_kind": self.source_kind,
+            "artifact": self.artifact,
+            "source_unit_id": self.source_unit_id,
+            "byte_sha256": hashlib.sha256(self.path.read_bytes()).hexdigest(),
+        }
+        if self.source_kind == "external_source":
+            entry["external_source"] = {
+                "kind": self.external_kind,
+                "base_root": self.base_root.as_posix(),
+            }
+        return entry
+
+
+def record_external_source_contract(record: Any) -> dict[str, str] | None:
+    """Return the trusted repo-root contract persisted by the repo analyzer."""
+    if not isinstance(record, dict) or str(record.get("kind") or "") != "repo":
         return None
-    path = base / artifact
+    payload = record.get("payload")
+    structure = payload.get("structure") if isinstance(payload, dict) else None
+    base_root = str(structure.get("repo_root") or "").strip() if isinstance(structure, dict) else ""
+    if not base_root:
+        return None
+    return {"kind": "repo", "base_root": base_root}
+
+
+def _has_absolute_syntax(artifact: str) -> bool:
+    return (
+        Path(artifact).is_absolute()
+        or artifact.startswith(("/", "\\"))
+        or re.match(r"^[A-Za-z]:[\\/]", artifact) is not None
+    )
+
+
+def resolve_evidence_artifact(
+    ref: Any,
+    unit_dir: str | Path | None,
+    *,
+    external_source: dict[str, Any] | None = None,
+) -> ResolvedEvidenceArtifact:
+    """Resolve one evidence ref without permitting path or symlink escape.
+
+    Normal evidence is always unit-relative. Repo workspace evidence must opt in
+    with ``external_source: {kind: repo}`` and the caller must separately supply
+    the trusted ``{kind: repo, base_root: ...}`` contract. A claim may never name
+    its own base root.
+    """
+    if not isinstance(ref, dict):
+        raise ValueError("evidence ref is not a mapping")
+    artifact = str(ref.get("artifact") or "").strip()
+    if not artifact:
+        raise ValueError("missing artifact")
+    if "\x00" in artifact:
+        raise ValueError("artifact contains a NUL byte")
+    if _has_absolute_syntax(artifact):
+        raise ValueError(f"artifact must be relative, got absolute path {artifact!r}")
+    raw_path = Path(artifact)
+    if ".." in raw_path.parts:
+        raise ValueError(f"artifact must not contain '..': {artifact!r}")
+
+    declared_external = ref.get("external_source")
+    if declared_external not in (None, "", {}):
+        if not isinstance(declared_external, dict):
+            raise ValueError("external_source must be a mapping")
+        external_kind = str(declared_external.get("kind") or "").strip()
+        if external_kind not in EXTERNAL_SOURCE_KINDS:
+            raise ValueError(f"unsupported external_source kind {external_kind!r}")
+        if declared_external.get("base_root"):
+            raise ValueError("evidence ref may not supply external_source.base_root")
+        if not isinstance(external_source, dict):
+            raise ValueError("external_source evidence requires a trusted base-root contract")
+        contract_kind = str(external_source.get("kind") or "").strip()
+        if contract_kind != external_kind:
+            raise ValueError(
+                f"external_source kind {external_kind!r} does not match trusted contract {contract_kind!r}"
+            )
+        base_text = str(external_source.get("base_root") or "").strip()
+        if not base_text:
+            raise ValueError("external_source contract is missing base_root")
+        base = Path(base_text).expanduser().resolve()
+        source_kind = "external_source"
+    else:
+        if unit_dir is None:
+            raise ValueError("cannot resolve unit artifact (no unit_dir)")
+        base = Path(unit_dir).resolve()
+        external_kind = ""
+        source_kind = "unit"
+
+    candidate = (base / raw_path).resolve()
+    try:
+        canonical_artifact = candidate.relative_to(base).as_posix()
+    except ValueError as exc:
+        raise ValueError(f"artifact escapes allowed {source_kind} root: {artifact!r}") from exc
+    return ResolvedEvidenceArtifact(
+        path=candidate,
+        base_root=base,
+        artifact=canonical_artifact,
+        source_kind=source_kind,
+        source_unit_id=str(ref.get("source_unit_id") or "").strip(),
+        external_kind=external_kind,
+    )
+
+
+def _load_artifact_path(path: Path) -> _LoadedArtifact | None:
+    """Load a containment-checked artifact's searchable text."""
     if not path.is_file():
         return None
     try:
@@ -320,7 +469,26 @@ def _load_artifact(base: Path, artifact: str) -> _LoadedArtifact | None:
     return _LoadedArtifact(full_text=raw)
 
 
-def verify_claim_evidence(claim: Any, unit_dir: str | Path | None) -> list[str]:
+def _ref_unit_dir(
+    ref: dict[str, Any],
+    unit_dir: str | Path | None,
+    source_roots: dict[str, str | Path] | None,
+) -> str | Path | None:
+    if source_roots is None:
+        return unit_dir
+    source_unit_id = str(ref.get("source_unit_id") or "").strip()
+    if not source_unit_id or source_unit_id not in source_roots:
+        raise ValueError(f"no trusted unit root for source_unit_id {source_unit_id or '<missing>'!r}")
+    return source_roots[source_unit_id]
+
+
+def verify_claim_evidence(
+    claim: Any,
+    unit_dir: str | Path | None,
+    *,
+    external_source: dict[str, Any] | None = None,
+    source_roots: dict[str, str | Path] | None = None,
+) -> list[str]:
     """Return a list of evidence violations for `claim` (empty == fully grounded).
 
     For each `evidence_ref` the referenced `artifact` is loaded under `unit_dir`
@@ -355,15 +523,17 @@ def verify_claim_evidence(claim: Any, unit_dir: str | Path | None) -> list[str]:
         if not artifact:
             violations.append(f"{where}: missing artifact for quote '{_quote_digest(quote)}'")
             continue
-        if base is None:
-            violations.append(
-                f"{where}: cannot resolve artifact '{artifact}' (no unit_dir) for quote '{_quote_digest(quote)}'"
-            )
+        try:
+            ref_base = _ref_unit_dir(ref, base, source_roots)
+            resolved = resolve_evidence_artifact(ref, ref_base, external_source=external_source)
+        except ValueError as exc:
+            violations.append(f"{where}: {exc} for quote '{_quote_digest(quote)}'")
             continue
-        loaded = _load_artifact(base, artifact)
+        loaded = _load_artifact_path(resolved.path)
         if loaded is None:
             violations.append(
-                f"{where}: artifact '{artifact}' not found/readable under {base} for quote '{_quote_digest(quote)}'"
+                f"{where}: artifact '{artifact}' not found/readable under {resolved.base_root} "
+                f"for quote '{_quote_digest(quote)}'"
             )
             continue
         norm_full = normalize_ws(loaded.full_text)
@@ -388,16 +558,169 @@ def verify_claim_evidence(claim: Any, unit_dir: str | Path | None) -> list[str]:
     return violations
 
 
+def evidence_artifact_entries(
+    claims: Any,
+    unit_dir: str | Path | None,
+    *,
+    external_source: dict[str, Any] | None = None,
+    source_roots: dict[str, str | Path] | None = None,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Collect byte-bound canonical artifact identities for verified claims."""
+    entries: dict[str, dict[str, Any]] = {}
+    violations: list[str] = []
+    if not isinstance(claims, (list, tuple)):
+        return [], ["claims payload must be a list"]
+    for claim_index, claim in enumerate(claims):
+        if not isinstance(claim, dict):
+            continue
+        refs = claim.get("evidence_refs") or []
+        if not isinstance(refs, (list, tuple)):
+            continue
+        for ref_index, ref in enumerate(refs):
+            where = f"claims[{claim_index}].evidence_refs[{ref_index}]"
+            try:
+                ref_base = _ref_unit_dir(ref, unit_dir, source_roots)
+                resolved = resolve_evidence_artifact(ref, ref_base, external_source=external_source)
+                if not resolved.path.is_file():
+                    raise ValueError(
+                        f"artifact {str(ref.get('artifact') or '')!r} not found/readable under {resolved.base_root}"
+                    )
+                entry = resolved.receipt_entry()
+            except (OSError, ValueError) as exc:
+                violations.append(f"{where}: {exc}")
+                continue
+            entries[resolved.identity] = entry
+    return [entries[key] for key in sorted(entries)], violations
+
+
+def verification_evidence_digest(claims: Any, artifacts: Any) -> str:
+    refs = [
+        {
+            "source_unit_id": ref.get("source_unit_id", ""),
+            "artifact": ref.get("artifact", ""),
+            "external_source": ref.get("external_source", {}),
+            "locator": ref.get("locator", ""),
+            "quote": ref.get("quote", ""),
+        }
+        for claim in claims
+        if isinstance(claim, dict)
+        for ref in (claim.get("evidence_refs") or [])
+        if isinstance(ref, dict)
+    ] if isinstance(claims, (list, tuple)) else []
+    refs.sort(key=lambda ref: _canonical_json(_canonical_digest_value(ref)))
+    artifact_items = [item for item in artifacts if isinstance(item, dict)] if isinstance(artifacts, (list, tuple)) else []
+    artifact_items.sort(key=lambda item: str(item.get("identity") or ""))
+    return _sha256_canonical({"evidence_refs": refs, "artifacts": artifact_items})
+
+
+def build_verification_receipt(
+    record: dict[str, Any],
+    unit_dir: str | Path,
+    *,
+    external_source: dict[str, Any] | None = None,
+    source_roots: dict[str, str | Path] | None = None,
+    verified_at: str = "",
+) -> dict[str, Any]:
+    """Validate canonical claims and persist their byte-bound verification receipt."""
+    claims = confirmation_claims(record)
+    if not claims:
+        raise SystemExit("Verification requires non-empty canonical payload.claims.")
+    violations = validate_claims(claims)
+    violations.extend(
+        violation
+        for claim in claims
+        for violation in verify_claim_evidence(
+            claim,
+            unit_dir,
+            external_source=external_source,
+            source_roots=source_roots,
+        )
+    )
+    artifacts, artifact_violations = evidence_artifact_entries(
+        claims,
+        unit_dir,
+        external_source=external_source,
+        source_roots=source_roots,
+    )
+    violations.extend(artifact_violations)
+    if violations:
+        raise SystemExit("Verification claim/evidence violations:\n  - " + "\n  - ".join(violations))
+    receipt = {
+        "verified_at": str(verified_at or utc_now_iso()),
+        "claims_digest": claims_digest(claims),
+        "evidence_digest": verification_evidence_digest(claims, artifacts),
+        "artifacts": artifacts,
+    }
+    payload = record.setdefault("payload", {})
+    if not isinstance(payload, dict):
+        raise SystemExit("Verification requires a mapping record.payload.")
+    payload["verification"] = receipt
+    return receipt
+
+
+def verification_receipt_violations(
+    record: Any,
+    unit_dir: str | Path | None,
+    *,
+    external_source: dict[str, Any] | None = None,
+    source_roots: dict[str, str | Path] | None = None,
+    check_artifacts: bool = True,
+) -> list[str]:
+    """Return why the stored analyzer verification is not current."""
+    if not isinstance(record, dict):
+        return ["record must be a mapping"]
+    payload = record.get("payload")
+    receipt = payload.get("verification") if isinstance(payload, dict) else None
+    if not isinstance(receipt, dict):
+        return ["missing payload.verification receipt"]
+    claims = confirmation_claims(record)
+    if not claims:
+        return ["canonical payload.claims must be non-empty"]
+    violations: list[str] = []
+    verified_at = str(receipt.get("verified_at") or "").strip()
+    if not verified_at:
+        violations.append("verification receipt missing verified_at")
+    for field_name in ("claims_digest", "evidence_digest"):
+        if re.fullmatch(r"[0-9a-f]{64}", str(receipt.get(field_name) or "")) is None:
+            violations.append(f"verification receipt has invalid {field_name}")
+    current_claims_digest = claims_digest(claims)
+    if str(receipt.get("claims_digest") or "") != current_claims_digest:
+        violations.append("verification claims_digest does not match canonical payload.claims")
+    stored_artifacts = receipt.get("artifacts")
+    if not isinstance(stored_artifacts, list) or not stored_artifacts:
+        violations.append("verification receipt artifacts must be a non-empty list")
+        stored_artifacts = []
+    if check_artifacts:
+        if unit_dir is None:
+            violations.append("cannot validate verification artifacts without unit_dir")
+        else:
+            current_artifacts, artifact_violations = evidence_artifact_entries(
+                claims,
+                unit_dir,
+                external_source=external_source,
+                source_roots=source_roots,
+            )
+            violations.extend(artifact_violations)
+            if _canonical_digest_value(stored_artifacts) != _canonical_digest_value(current_artifacts):
+                violations.append("verification artifact identity or byte sha256 changed")
+            current_evidence_digest = verification_evidence_digest(claims, current_artifacts)
+            if str(receipt.get("evidence_digest") or "") != current_evidence_digest:
+                violations.append("verification evidence_digest does not match current evidence bytes")
+    return violations
+
+
 def validate_claims(claims: Any) -> list[str]:
-    """Validate claim *structure* and the judgement-class empty-evidence rule.
+    """Validate claim structure and the judgement/evidence completeness rules.
 
     Returns a list of violation strings (empty == all claims well-formed). Checks
     per claim: required fields present (id/text/claim_type/confirmation_status/
     evidence_refs), `claim_type` in the enum, `confirmation_status` in the enum,
     `evidence_refs` is a list, and — the gate interlock criterion (SSOT
-    Principle 2/3) — a judgement-class claim (`inference`/`evaluation`) must have
-    a **non-empty** `evidence_refs` (empty => violation). Fact-class claims may
-    carry an empty `evidence_refs`.
+    Principle 2/3) — a judgement-class claim
+    (`inference`/`evaluation`/`user_opinion`) must have a **non-empty**
+    `evidence_refs` (empty => violation). Fact and unverified claims may carry an
+    empty list, but every ref that is present must be a mapping with non-empty
+    `source_unit_id`, `artifact`, `locator`, and `quote` text.
 
     This is a pure criterion function: it does NOT mutate any gate or record. The
     Gate track consumes it to enforce "judgement claims with no evidence must not
@@ -447,6 +770,17 @@ def validate_claims(claims: Any) -> list[str]:
                 f"{ident}: judgement-class claim ('{claim_type}') has empty evidence_refs "
                 f"— cannot be confirmed without evidence"
             )
+        if refs:
+            for ref_index, ref in enumerate(refs):
+                ref_label = f"{ident}.evidence_refs[{ref_index}]"
+                if not isinstance(ref, dict):
+                    violations.append(f"{ref_label}: not a mapping")
+                    continue
+                for field_name in REQUIRED_EVIDENCE_REF_FIELDS:
+                    if field_name not in ref:
+                        violations.append(f"{ref_label}: missing required field '{field_name}'")
+                    elif not isinstance(ref.get(field_name), str) or not ref[field_name].strip():
+                        violations.append(f"{ref_label}: missing/empty '{field_name}'")
     return violations
 
 
@@ -512,21 +846,32 @@ def read_claims(payload: Any) -> list[dict[str, Any]]:
 __all__ = [
     "CLAIM_TYPES",
     "JUDGEMENT_CLAIM_TYPES",
+    "UNCONFIRMABLE_CLAIM_TYPES",
     "CLAIM_CONFIRMATION_VALUES",
     "PDF_LOCATOR_KINDS",
     "HTML_LOCATOR_KINDS",
+    "EXTERNAL_SOURCE_KINDS",
     "REQUIRED_CLAIM_FIELDS",
+    "REQUIRED_EVIDENCE_REF_FIELDS",
     "CONFIRMABLE_CONTENT_SECTIONS",
     "EVIDENCE_SCHEMA",
     "CLAIMS_KEY",
     "EvidenceRef",
     "Claim",
+    "ResolvedEvidenceArtifact",
     "normalize_ws",
     "confirmation_claims",
     "confirmation_claim_ids",
+    "claims_digest",
     "confirmation_content_digest",
     "confirmation_evidence_digest",
+    "record_external_source_contract",
+    "resolve_evidence_artifact",
     "verify_claim_evidence",
+    "evidence_artifact_entries",
+    "verification_evidence_digest",
+    "build_verification_receipt",
+    "verification_receipt_violations",
     "validate_claims",
     "as_claim_dict",
     "attach_claims",

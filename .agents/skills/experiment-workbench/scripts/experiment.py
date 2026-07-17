@@ -32,8 +32,8 @@ from research.common import (
     print_resolved_project_roots,
     write_text_if_changed,
 )
-from research.core import append_history, build_index, confirm_unit, default_record, ensure_workspace, locate_record, project_root, rel, write_record
-from research.evidence import validate_claims, verify_claim_evidence
+from research.core import append_history, build_index, build_unit_id, candidate_pools_path, command_mutation, confirm_unit, default_record, ensure_workspace, kb_root, locate_record, project_root, record_path, rel, topic_taxonomy_path, write_record
+from research.evidence import attach_claims, build_verification_receipt, validate_claims, verify_claim_evidence
 
 RUN_OUTCOME_CHOICES = ["success", "partial", "failed", "blocked", "inconclusive"]
 CLASSIFICATION_CHOICES = ["method", "implementation", "data", "evaluation", "resource", "environment", "process", "unknown"]
@@ -45,9 +45,53 @@ DEFAULT_RECENT_RUNS = 5
 RUN_EVIDENCE_ARTIFACT_RE = re.compile(r"^(?:run-log\.yaml|runs/run-\d{3}\.md)$")
 
 
+def _index_targets(root: Path) -> list[Path]:
+    return [
+        kb_root(root) / "index.yaml",
+        kb_root(root) / "index.md",
+        topic_taxonomy_path(root),
+        candidate_pools_path(root),
+    ]
+
+
+def _program_event_path(root: Path, program_id: str) -> Path:
+    return kb_root(root) / "programs" / program_id / "workflow" / "reporting-events.yaml"
+
+
+def _experiment_command_targets(args, root: Path) -> list[Path]:
+    if args.command == "plan":
+        experiment_id = build_unit_id("experiment", args.title, f"program:{args.program_id}")
+        return [
+            record_path(root, "experiment", experiment_id),
+            _program_event_path(root, args.program_id),
+            *_index_targets(root),
+        ]
+    record, path = locate_record(root, args.experiment_id, kind="experiment")
+    unit = path.parent
+    program_id = str(record.get("payload", {}).get("basic_info", {}).get("program_id") or "").strip()
+    targets = [path, *_index_targets(root)]
+    if program_id:
+        targets.append(_program_event_path(root, program_id))
+    if args.command == "log-run":
+        targets.extend(
+            [
+                next_numbered_path(unit / "runs", "run", ".md"),
+                list_document_path(unit, "run-log"),
+                unit / "run-log.md",
+            ]
+        )
+    elif args.command == "follow-up":
+        targets.extend([list_document_path(unit, "follow-ups"), unit / "follow-ups.md"])
+    elif args.command == "diagnose":
+        targets.extend([list_document_path(unit, "diagnoses"), unit / "diagnosis.md"])
+    return targets
+
+
 def add_confirmation_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--confirmed-by", default="")
     parser.add_argument("--evidence", action="append", required=True)
+    parser.add_argument("--user-authorization", default="")
+    parser.add_argument("--authorization-source", default="")
 
 
 def parse_metrics(items: list[str]) -> dict[str, dict[str, Any]]:
@@ -394,12 +438,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main() -> int:
-    args = build_parser().parse_args()
-    root = project_root(PROJECT_ROOT, explicit_root=args.root)
-    print_resolved_project_roots(root)
-    ensure_workspace(root)
-
+def _dispatch(args, root: Path) -> int:
     if args.command == "plan":
         record = default_record("experiment", title=args.title, maturity="lightweight", source={"original_uri": f"program:{args.program_id}"})
         record["status"] = "planned"
@@ -611,6 +650,11 @@ def main() -> int:
         record["payload"]["diagnosis"]["next_actions"] = normalize_list(args.next_action)
         record["payload"]["diagnosis"]["comparison_context"] = comparison_context
         record["payload"]["diagnosis"]["claims"] = claims
+        record["payload"].pop("claims", None)
+        record["payload"].pop("verification", None)
+        if claims:
+            attach_claims(record["payload"], claims)
+            build_verification_receipt(record, unit_root)
         append_history(record, action="experiment-diagnosed", summary=args.summary, information_types=["inference", "evaluation", "unverified"], artifacts=[rel(root, diagnosis_path), rel(root, unit_root / "diagnosis.md")])
         write_record(root, record)
         build_index(root)
@@ -634,7 +678,16 @@ def main() -> int:
         return 0
 
     if args.command == "confirm":
-        record = confirm_unit(record, "experiment", confirmed_by=args.confirmed_by, evidence=args.evidence, method="experiment.py confirm", project_root=root)
+        record = confirm_unit(
+            record,
+            "experiment",
+            confirmed_by=args.confirmed_by,
+            evidence=args.evidence,
+            user_authorization=args.user_authorization,
+            authorization_source=args.authorization_source,
+            method="experiment.py confirm",
+            project_root=root,
+        )
         write_record(root, record)
         build_index(root)
         program_id = str(record.get("payload", {}).get("basic_info", {}).get("program_id") or "").strip()
@@ -656,6 +709,19 @@ def main() -> int:
         print(f"[ok] confirmed {args.experiment_id}")
         return 0
     return 1
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    root = project_root(PROJECT_ROOT, explicit_root=args.root)
+    print_resolved_project_roots(root)
+    ensure_workspace(root)
+    with command_mutation(
+        root,
+        f"experiment-workbench:{args.command}",
+        _experiment_command_targets(args, root),
+    ):
+        return _dispatch(args, root)
 
 
 if __name__ == "__main__":

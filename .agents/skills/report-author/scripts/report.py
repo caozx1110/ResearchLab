@@ -24,12 +24,11 @@ if __name__ == "__main__":
     ensure_managed_runtime(PROJECT_ROOT)
 
 from research.common import add_project_root_argument, load_program_reporting_events, load_yaml, print_resolved_project_roots, write_text_if_changed
-from research.core import ensure_workspace, checkpoint_and_report, project_root, user_root
-from research.evidence import read_claims, validate_claims
+from research.core import command_mutation, ensure_workspace, checkpoint_and_report, has_complete_confirmation_receipt, project_root, user_root
+from research.evidence import read_claims, validate_claims, verification_receipt_violations
 from research.records import locate_record
 
 
-CONFIRMED_CLAIM_STATUSES = {"confirmed", "auto_confirmed"}
 UNIT_ID_FIELDS = {"unit_id", "unit_ids", "related_unit_ids", "active_unit_ids"}
 UNIT_PATH_RE = re.compile(r"(?:^|/)kb/units/(?:papers|repos|blogs|ideas|experiments)/([^/]+)(?:/|$)")
 DECISION_HEADING_RE = re.compile(r"^##\s+(.+)$", flags=re.MULTILINE)
@@ -139,19 +138,32 @@ def load_confirmed_claim_sources(root: Path, unit_ids: list[str]) -> tuple[list[
         except SystemExit:
             missing_units.append(unit_id)
             continue
+        canonical_claims = read_claims(record.get("payload"))
+        receipt = record.get("confirmation") if isinstance(record.get("confirmation"), dict) else {}
+        receipt_claim_ids = {
+            str(claim_id)
+            for claim_id in receipt.get("claim_ids", [])
+            if str(claim_id).strip()
+        }
+        receipt_current = (
+            str(record.get("confirmation_status") or "") == "confirmed"
+            and has_complete_confirmation_receipt(record)
+        )
         confirmed_claims = [
             claim
-            for claim in read_claims(record.get("payload"))
-            if str(claim.get("confirmation_status") or "") in CONFIRMED_CLAIM_STATUSES
+            for claim in canonical_claims
+            if receipt_current and str(claim.get("id") or "") in receipt_claim_ids
         ]
         valid_claims: list[dict[str, Any]] = []
         issues: list[str] = []
+        if canonical_claims and not receipt_current:
+            issues.append("canonical claims are not bound to a current ConfirmationReceipt")
         for claim in confirmed_claims:
             violations = validate_claims([claim])
             if violations:
                 issues.extend(violations)
             else:
-                valid_claims.append(claim)
+                valid_claims.append({**claim, "confirmation_status": "confirmed"})
         sources.append(
             ClaimSource(
                 unit_id=str(record.get("id") or unit_id),
@@ -172,25 +184,94 @@ def _decision_value(lines: list[str], label: str) -> str:
     return ""
 
 
+def _decision_source_roots(root: Path, program_id: str, claims: list[dict[str, Any]]) -> dict[str, Path]:
+    roots: dict[str, Path] = {}
+    program_source_id = f"program:{program_id}"
+    for claim in claims:
+        for ref in claim.get("evidence_refs") or []:
+            if not isinstance(ref, dict):
+                continue
+            source_unit_id = str(ref.get("source_unit_id") or "").strip()
+            if not source_unit_id or source_unit_id in roots:
+                continue
+            if source_unit_id == program_source_id:
+                roots[source_unit_id] = root / "kb" / "programs" / program_id
+                continue
+            _record, path = locate_record(root, source_unit_id, fuzzy=False)
+            roots[source_unit_id] = path.parent
+    return roots
+
+
 def load_decisions(root: Path, program_id: str) -> list[dict[str, str]]:
-    path = root / "kb" / "programs" / program_id / "workflow" / "decision-log.md"
-    if not path.exists():
-        return []
-    text = path.read_text(encoding="utf-8")
-    matches = list(DECISION_HEADING_RE.finditer(text))
+    path = root / "kb" / "programs" / program_id / "workflow" / "decisions.yaml"
+    payload = load_yaml(path, default={})
+    items = payload.get("items") if isinstance(payload, dict) else None
+    items = items if isinstance(items, list) else []
     decisions: list[dict[str, str]] = []
-    for index, match in enumerate(matches):
-        body_end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-        lines = [line.strip() for line in text[match.end() : body_end].splitlines() if line.strip()]
+    known_ids = {str(item.get("id") or "") for item in items if isinstance(item, dict)}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        decision = item.get("payload", {}).get("decision", {})
+        decision = decision if isinstance(decision, dict) else {}
+        if isinstance(item.get("legacy_import"), dict) and str(item.get("confirmation_status") or "") != "confirmed":
+            decisions.append(
+                {
+                    "title": str(decision.get("text") or item.get("id") or "legacy decision"),
+                    "stage": str(decision.get("stage") or ""),
+                    "rationale": str(decision.get("rationale") or ""),
+                    "alternatives": "",
+                    "confirmation": "pending_user_confirmation",
+                    "legacy_pending": "true",
+                }
+            )
+            continue
+        if str(item.get("confirmation_status") or "") != "confirmed":
+            continue
+        claims = read_claims(item.get("payload"))
+        try:
+            source_roots = _decision_source_roots(root, program_id, claims)
+        except SystemExit:
+            continue
+        if verification_receipt_violations(
+            item,
+            root / "kb" / "programs" / program_id,
+            source_roots=source_roots,
+        ):
+            continue
+        if not has_complete_confirmation_receipt(item):
+            continue
+        if not decision:
+            continue
         decisions.append(
             {
-                "title": match.group(1).strip(),
-                "stage": _decision_value(lines, "Stage"),
-                "rationale": _decision_value(lines, "Rationale"),
-                "alternatives": _decision_value(lines, "Alternatives"),
-                "confirmation": _decision_value(lines, "Confirmation"),
+                "title": str(decision.get("text") or ""),
+                "stage": str(decision.get("stage") or ""),
+                "rationale": str(decision.get("rationale") or ""),
+                "alternatives": ", ".join(str(value) for value in decision.get("alternatives", [])),
+                "confirmation": "confirmed",
             }
         )
+    legacy_path = root / "kb" / "programs" / program_id / "workflow" / "decision-log.md"
+    if legacy_path.is_file():
+        text = legacy_path.read_text(encoding="utf-8")
+        headings = list(re.finditer(r"(?m)^##\s+(.+?)\s+·\s+(.+?)\s*$", text))
+        for index, heading in enumerate(headings):
+            block_end = headings[index + 1].start() if index + 1 < len(headings) else len(text)
+            lines = [line.strip() for line in text[heading.end() : block_end].splitlines()]
+            decision_id = _decision_value(lines, "Decision ID")
+            if decision_id and decision_id in known_ids:
+                continue
+            decisions.append(
+                {
+                    "title": heading.group(2).strip(),
+                    "stage": _decision_value(lines, "Stage"),
+                    "rationale": _decision_value(lines, "Rationale"),
+                    "alternatives": _decision_value(lines, "Alternatives"),
+                    "confirmation": "pending_user_confirmation",
+                    "legacy_pending": "true",
+                }
+            )
     return decisions
 
 
@@ -248,6 +329,11 @@ def render_decisions(decisions: list[dict[str, str]]) -> list[str]:
     if not decisions:
         return [*lines, "- missing: decisions"]
     for decision in decisions:
+        if decision.get("legacy_pending") == "true":
+            lines.append(
+                f"- pending/unverified legacy decision requires two-stage confirmation: {decision['title']}"
+            )
+            continue
         lines.append(f"### {decision['title']}")
         lines.append("")
         lines.append(f"- Stage: {decision['stage'] or 'missing: decision stage'}")
@@ -446,9 +532,15 @@ def main() -> int:
         path = reports_root / "stage-summary.md"
         title = f"Stage Summary: {args.program_id}"
     text = render_outline(args.program_id, inputs) if args.command == "outline" else render_report(title, inputs, report_kind=args.command)
-    write_text_if_changed(path, text)
+    with command_mutation(root, f"report-author:{args.command}", [path]):
+        write_text_if_changed(path, text)
     print(path.relative_to(root))
-    checkpoint_and_report(root, trigger="milestone", message=f"milestone: generate {args.command} for {args.program_id}")
+    checkpoint_and_report(
+        root,
+        trigger="milestone",
+        message=f"milestone: generate {args.command} for {args.program_id}",
+        target_paths=[path],
+    )
     return 0
 
 

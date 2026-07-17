@@ -225,7 +225,7 @@ def test_validate_claims_accepts_well_formed() -> None:
 
 
 def test_judgement_class_empty_evidence_is_rejected() -> None:
-    for ct in ("inference", "evaluation"):
+    for ct in ("inference", "evaluation", "user_opinion"):
         violations = validate_claims([_good_claim(claim_type=ct, evidence_refs=[])])
         assert any("empty evidence_refs" in v for v in violations), ct
 
@@ -235,9 +235,28 @@ def test_fact_class_empty_evidence_is_allowed() -> None:
     assert validate_claims([claim]) == []
 
 
-def test_unverified_and_user_opinion_empty_evidence_allowed() -> None:
-    for ct in ("unverified", "user_opinion"):
-        assert validate_claims([_good_claim(claim_type=ct, evidence_refs=[])]) == []
+def test_unverified_empty_evidence_is_structurally_allowed() -> None:
+    assert validate_claims([_good_claim(claim_type="unverified", evidence_refs=[])]) == []
+
+
+@pytest.mark.parametrize("field", ["source_unit_id", "artifact", "locator", "quote"])
+@pytest.mark.parametrize("mode", ["missing", "empty"])
+def test_validate_claims_requires_every_evidence_ref_field(field: str, mode: str) -> None:
+    ref = _ref(quote="grounded quote")
+    if mode == "missing":
+        ref.pop(field)
+    else:
+        ref[field] = "   "
+    violations = validate_claims([_good_claim(evidence_refs=[ref])])
+
+    assert any(field in violation for violation in violations)
+
+
+def test_validate_claims_rejects_placeholder_empty_evidence_ref() -> None:
+    violations = validate_claims([_good_claim(evidence_refs=[{}])])
+
+    for field in ("source_unit_id", "artifact", "locator", "quote"):
+        assert any(f"missing required field '{field}'" in violation for violation in violations)
 
 
 def test_validate_claims_flags_missing_and_bad_fields() -> None:

@@ -223,6 +223,28 @@ def test_experiment_validator_lifecycle(tmp_path: Path) -> None:
         "--metric",
         "success_rate=0.82[ratio]:higher-better",
     )
+    claims_path = record_path.parent / "diagnosis-claims.yaml"
+    write_yaml_if_changed(
+        claims_path,
+        {
+            "claims": [
+                {
+                    "id": "claim-diagnosis-improved",
+                    "text": "The latest run improved success rate.",
+                    "claim_type": "evaluation",
+                    "confirmation_status": "pending_user_confirmation",
+                    "evidence_refs": [
+                        {
+                            "source_unit_id": experiment_id,
+                            "artifact": "run-log.yaml",
+                            "locator": "run=latest",
+                            "quote": "improved",
+                        }
+                    ],
+                }
+            ]
+        },
+    )
     _run_experiment(
         tmp_path,
         "diagnose",
@@ -234,6 +256,8 @@ def test_experiment_validator_lifecycle(tmp_path: Path) -> None:
         "evaluation",
         "--recent-runs",
         "1",
+        "--claims-file",
+        str(claims_path),
     )
 
     record = load_yaml(record_path)
@@ -245,7 +269,7 @@ def test_experiment_validator_lifecycle(tmp_path: Path) -> None:
     assert run_log["items"][0]["artifacts"][-2]["status"] == "present"
     assert run_log["items"][0]["artifacts"][-1]["status"] == "missing"
     context = diagnoses["items"][-1]["comparison_context"]
-    assert diagnoses["items"][-1]["claims"] == []
+    assert diagnoses["items"][-1]["claims"][0]["id"] == "claim-diagnosis-improved"
     assert [item["run_id"] for item in context["recent_runs"]] == [run_log["items"][-1]["id"]]
     assert [item["run_id"] for item in context["anchors"]] == [run_log["items"][0]["id"]]
     assert context["anchors"][0]["artifacts"][-1]["status"] == "missing"
@@ -260,5 +284,9 @@ def test_experiment_validator_lifecycle(tmp_path: Path) -> None:
         "human-reviewer",
         "--evidence",
         evidence,
+        "--user-authorization",
+        "I confirm this experiment diagnosis.",
+        "--authorization-source",
+        "user_message",
     )
     assert load_yaml(record_path)["confirmation_status"] == "confirmed"

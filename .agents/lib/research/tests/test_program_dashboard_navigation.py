@@ -189,6 +189,8 @@ def test_orchestrator_status_existing_program_still_works(tmp_path: Path, monkey
     orchestrate = _load_script("research-orchestrator", "orchestrate.py", "orchestrator_script_for_existing_status")
     root = _make_workspace(tmp_path)
     orchestrate.ensure_program_files(root, "p-existing")
+    write_yaml_if_changed(orchestrate.state_path(root, "p-existing"), {"program_id": "p-existing", "stage": "init"})
+    before = orchestrate.state_path(root, "p-existing").read_bytes()
     monkeypatch.setattr(
         sys,
         "argv",
@@ -197,6 +199,7 @@ def test_orchestrator_status_existing_program_still_works(tmp_path: Path, monkey
 
     assert orchestrate.main() == 0
     assert orchestrate.state_path(root, "p-existing").exists()
+    assert orchestrate.state_path(root, "p-existing").read_bytes() == before
 
 
 def test_orchestrator_next_program_filter_narrows_output(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -591,12 +594,8 @@ def test_orchestrator_auto_execute_passes_root_to_child_under_symlinked_agents(t
     assert not (symlink_target / "kb" / "child-root.txt").exists()
 
 
-def test_is_user_confirmable_keeps_not_started_screening_paper() -> None:
-    """A4 refinement: exclude only awaiting_agent_fill note shells, NOT not_started.
-
-    not_started is the schema default for any paper without a full note; a screening-
-    phase paper with a pending worth-reading verdict must stay user-confirmable so it
-    is not silently dropped from the program dashboard's pending_units."""
+def test_is_user_confirmable_rejects_unverified_not_started_screening_paper() -> None:
+    """R1: a screening judgement without canonical claims/verification is hollow."""
     orchestrate = _load_script("research-orchestrator", "orchestrate.py", "orchestrator_script_for_confirmable_not_started")
     not_started_screening = {
         "id": "p-scr-not-started-1",
@@ -613,5 +612,5 @@ def test_is_user_confirmable_keeps_not_started_screening_paper() -> None:
         "confirmation_status": "pending_user_confirmation",
         "payload": {"state": {"full_note_status": "awaiting_agent_fill"}},
     }
-    assert orchestrate.is_user_confirmable(not_started_screening) is True
+    assert orchestrate.is_user_confirmable(not_started_screening) is False
     assert orchestrate.is_user_confirmable(unfilled_note) is False

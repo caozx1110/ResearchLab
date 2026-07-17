@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from research.evidence import (
+    build_verification_receipt,
     confirmation_claim_ids,
     confirmation_content_digest,
     confirmation_evidence_digest,
@@ -53,6 +54,25 @@ def _write_verified_artifact(project_root) -> None:
     (root / "parse-cache.yaml").write_text("source text with exact quote included", encoding="utf-8")
 
 
+def _verified_record(project_root) -> dict:
+    record = _record()
+    _write_verified_artifact(project_root)
+    build_verification_receipt(record, unit_root(project_root, "paper", record["id"]))
+    return record
+
+
+def _confirm(record: dict, project_root, **kwargs):
+    return apply_confirmation(
+        record,
+        confirmed_by="czx",
+        evidence=["kb/x.md"],
+        user_authorization="I confirm this analysis.",
+        authorization_source="user_message",
+        project_root=project_root,
+        **kwargs,
+    )
+
+
 def test_confirmation_content_digest_is_canonical_and_content_sensitive() -> None:
     record = _record()
     reordered = _record()
@@ -86,18 +106,11 @@ def test_confirmation_digest_helpers_bind_claims_and_evidence_set() -> None:
 def test_apply_confirmation_stamps_full_version_bound_receipt(tmp_path, monkeypatch) -> None:
     import research.confirm as confirm
 
-    record = _record()
+    record = _verified_record(tmp_path)
     record["information_types"] = ["inference", "evaluation"]
-    _write_verified_artifact(tmp_path)
     monkeypatch.setattr(confirm, "utc_now_iso", lambda: "2026-07-16T00:00:00+00:00")
 
-    out = apply_confirmation(
-        record,
-        confirmed_by="czx",
-        evidence=["kb/x.md"],
-        method="test",
-        project_root=tmp_path,
-    )
+    out = _confirm(record, tmp_path, method="test")
 
     assert out["confirmation_status"] == "confirmed"
     assert out["confirmation"] == {
@@ -111,14 +124,16 @@ def test_apply_confirmation_stamps_full_version_bound_receipt(tmp_path, monkeypa
         "content_digest": confirmation_content_digest(record),
         "evidence_digest": confirmation_evidence_digest(record, ["kb/x.md"]),
         "prior_information_types": ["inference", "evaluation"],
+        "verified_at": record["payload"]["verification"]["verified_at"],
+        "user_authorization": "I confirm this analysis.",
+        "authorization_source": "user_message",
     }
 
 
 def test_normalize_invalidates_receipt_after_confirmable_content_change(tmp_path) -> None:
-    record = _record()
+    record = _verified_record(tmp_path)
     record["information_types"] = ["inference"]
-    _write_verified_artifact(tmp_path)
-    confirmed = apply_confirmation(record, confirmed_by="czx", evidence=["kb/x.md"], project_root=tmp_path)
+    confirmed = _confirm(record, tmp_path)
     assert normalize_record_schema(confirmed)["confirmation_status"] == "confirmed"
 
     confirmed["payload"]["core_content"]["method"] = "mutated after confirmation"
@@ -134,8 +149,7 @@ def test_normalize_invalidates_receipt_after_confirmable_content_change(tmp_path
 
 
 def test_normalize_invalidates_receipt_after_claim_evidence_change(tmp_path) -> None:
-    _write_verified_artifact(tmp_path)
-    confirmed = apply_confirmation(_record(), confirmed_by="czx", evidence=["kb/x.md"], project_root=tmp_path)
+    confirmed = _confirm(_verified_record(tmp_path), tmp_path)
     confirmed["payload"]["claims"][0]["evidence_refs"][0]["quote"] = "different quote"
 
     normalized = normalize_record_schema(confirmed)
@@ -145,14 +159,13 @@ def test_normalize_invalidates_receipt_after_claim_evidence_change(tmp_path) -> 
 
 
 def test_apply_confirmation_rejects_fabricated_claim_quote(tmp_path) -> None:
-    _write_verified_artifact(tmp_path)
-    record = _record()
+    record = _verified_record(tmp_path)
     record["payload"]["claims"][0]["evidence_refs"][0]["quote"] = "fabricated quote"
 
     import pytest
 
     with pytest.raises(SystemExit, match="not verbatim"):
-        apply_confirmation(record, confirmed_by="czx", evidence=["kb/x.md"], project_root=tmp_path)
+        _confirm(record, tmp_path)
 
     assert record.get("confirmation_status") != "confirmed"
     assert "confirmation" not in record
