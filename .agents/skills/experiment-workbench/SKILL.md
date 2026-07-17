@@ -36,7 +36,7 @@ ${RESEARCH_PYTHON:-python3} .agents/skills/experiment-workbench/scripts/experime
 ${RESEARCH_PYTHON:-python3} .agents/skills/experiment-workbench/scripts/experiment.py log-run --experiment-id experiment-foo --result-summary "baseline failed on eval slice" --outcome failed --classification implementation
 ${RESEARCH_PYTHON:-python3} .agents/skills/experiment-workbench/scripts/experiment.py follow-up --experiment-id experiment-foo --action "check dataset path rewrite" --category implementation --priority high
 ${RESEARCH_PYTHON:-python3} .agents/skills/experiment-workbench/scripts/experiment.py diagnose --experiment-id experiment-foo --summary "Likely data / implementation mix-up" --category data --category implementation
-${RESEARCH_PYTHON:-python3} .agents/skills/experiment-workbench/scripts/experiment.py confirm --experiment-id experiment-foo --confirmed-by czx --evidence kb/programs/my-program/experiments/phase-feedback.md
+${RESEARCH_PYTHON:-python3} .agents/skills/experiment-workbench/scripts/experiment.py confirm --experiment-id experiment-foo --confirmed-by research-lead --evidence kb/programs/example-program/experiments/phase-feedback.md
 ```
 
 ## Phase Plan / Feedback Integration (added 2026-05-13)

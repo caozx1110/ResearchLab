@@ -1,6 +1,6 @@
 ---
 name: blog-analyst
-description: Analyze blog and technical article units using a prepare/verify paradigm — the script prepares a fillable structure and verifies evidence; a runtime agent fills the understanding (SSOT Principle 1 / §3.4). Web-page sources only (HTML section/anchor locators, no multimedia).
+description: Analyze blog and technical article units with prepare/verify scaffolds, grounded HTML evidence, and runtime-agent-authored understanding.
 ---
 
 # Blog Analyst
@@ -73,6 +73,6 @@ ${RESEARCH_PYTHON:-python3} .agents/skills/blog-analyst/scripts/blog.py \
 # Step 4: 人工确认
 ${RESEARCH_PYTHON:-python3} .agents/skills/blog-analyst/scripts/blog.py \
   confirm --blog-id b-example-12345678 \
-  --confirmed-by czx \
+  --confirmed-by research-lead \
   --evidence kb/units/blogs/b-example-12345678/blog-note.md
 ```
