@@ -119,9 +119,12 @@ def base_url(host: str, port: int) -> str:
     return f"http://{host}:{port}"
 
 
-def browser_url(host: str, port: int, project_root: Path) -> str:
+def browser_url(host: str, port: int, project_root: Path, *, token: str = "") -> str:
     rel = relative_path(project_root, index_html_path(project_root))
-    return f"{base_url(host, port)}{web_path(rel)}"
+    url = f"{base_url(host, port)}{web_path(rel)}"
+    if token:
+        return f"{url}?token={token}"
+    return url
 
 
 def health_url(host: str, port: int) -> str:

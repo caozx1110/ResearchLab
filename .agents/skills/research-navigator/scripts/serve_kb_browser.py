@@ -7,12 +7,14 @@ import argparse
 import ipaddress
 import json
 import os
+import secrets
 import signal
 import socket
 import subprocess
 import threading
 import time
 from functools import partial
+from http.cookies import SimpleCookie
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -280,11 +282,13 @@ class BrowserHTTPServer(ThreadingHTTPServer):
         project_root: Path,
         coordinator: BrowserBuildCoordinator,
         terminal_manager: TerminalManager,
+        auth_token: str,
     ) -> None:
         super().__init__(server_address, handler_class)
         self.project_root = project_root
         self.coordinator = coordinator
         self.terminal_manager = terminal_manager
+        self.auth_token = auth_token
 
 def create_handler(*, project_root: Path):
     class BrowserHandler(SimpleHTTPRequestHandler):
@@ -312,8 +316,39 @@ def create_handler(*, project_root: Path):
             self.end_headers()
             self.wfile.write(body)
 
+        def end_headers(self) -> None:
+            cookie_token = getattr(self, "_auth_cookie_token", "")
+            if cookie_token:
+                self.send_header("Set-Cookie", f"kb_token={cookie_token}; Path=/; HttpOnly; SameSite=Strict")
+                self._auth_cookie_token = ""
+            super().end_headers()
+
+        def log_message(self, format: str, *args: object) -> None:
+            message = format % args
+            token = self.server.auth_token  # type: ignore[attr-defined]
+            super().log_message("%s", message.replace(token, "[redacted]"))
+
         def _send_error_json(self, message: str, *, status: int = HTTPStatus.BAD_REQUEST) -> None:
             self._send_json({"ok": False, "error": message}, status=status)
+
+        def _authorized(self, parsed) -> bool:
+            if parsed.path == "/api/healthz":
+                return True
+            query = parse_qs(parsed.query or "")
+            query_token = (query.get("token") or [""])[0]
+            header_token = self.headers.get("X-KB-Token", "")
+            authorization = self.headers.get("Authorization", "")
+            bearer_token = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
+            cookies = SimpleCookie(self.headers.get("Cookie", ""))
+            cookie_token = cookies.get("kb_token").value if cookies.get("kb_token") else ""
+            expected = self.server.auth_token  # type: ignore[attr-defined]
+            authorized = any(
+                candidate and secrets.compare_digest(candidate, expected)
+                for candidate in (query_token, header_token, bearer_token, cookie_token)
+            )
+            if authorized and query_token:
+                self._auth_cookie_token = expected
+            return authorized
 
         def _handle_health(self) -> None:
             self._send_json(
@@ -452,6 +487,9 @@ def create_handler(*, project_root: Path):
 
         def do_GET(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
+            if not self._authorized(parsed):
+                self._send_error_json("unauthorized", status=HTTPStatus.UNAUTHORIZED)
+                return
             if parsed.path == "/api/healthz":
                 self._handle_health()
                 return
@@ -471,6 +509,9 @@ def create_handler(*, project_root: Path):
 
         def do_POST(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
+            if not self._authorized(parsed):
+                self._send_error_json("unauthorized", status=HTTPStatus.UNAUTHORIZED)
+                return
             if parsed.path == "/api/terminal/open":
                 self._handle_terminal_open()
                 return
@@ -490,6 +531,9 @@ def create_handler(*, project_root: Path):
 
         def do_PUT(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
+            if not self._authorized(parsed):
+                self._send_error_json("unauthorized", status=HTTPStatus.UNAUTHORIZED)
+                return
             if parsed.path == "/api/file":
                 self._handle_file_put()
                 return
@@ -544,6 +588,7 @@ def main() -> None:
         )
     coordinator = BrowserBuildCoordinator(project_root, debounce_seconds=args.debounce_seconds)
     terminal_manager = TerminalManager(project_root)
+    auth_token = secrets.token_urlsafe(32)
     initial_status = safe_rebuild(project_root, script_path=Path(__file__))
     print(f"[ok] initial build: {initial_status.get('build_status')}", flush=True)
 
@@ -554,6 +599,7 @@ def main() -> None:
         project_root=project_root,
         coordinator=coordinator,
         terminal_manager=terminal_manager,
+        auth_token=auth_token,
     )
     observer = Observer()
     observer.schedule(ResearchNavigatorEventHandler(project_root, coordinator), str(kb_root(project_root).parents[1]), recursive=True)
@@ -570,7 +616,7 @@ def main() -> None:
     signal.signal(signal.SIGINT, shutdown)
 
     print(f"[ok] serving project root: {project_root}", flush=True)
-    print(f"[ok] browser url: {browser_url(args.host, args.port, project_root)}", flush=True)
+    print(f"[ok] browser url: {browser_url(args.host, args.port, project_root, token=auth_token)}", flush=True)
     print(f"[ok] version url: {version_url(args.host, args.port)}", flush=True)
     print(f"[ok] runtime log: {server_log_path(project_root)}", flush=True)
     try:
