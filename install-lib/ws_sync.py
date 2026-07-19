@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import shutil
@@ -388,18 +389,54 @@ def inspect_managed_uninstall_directory(path: Path, dst_root: Path) -> tuple[str
     return ("directory", "<directory>")
 
 
+def assert_uninstall_manifest_boundary(dst_root: Path) -> None:
+    """Fail closed before reading an uninstall manifest through changed path types."""
+
+    root = agents_root(dst_root)
+    manifest = manifest_path(dst_root)
+    try:
+        root_mode = root.lstat().st_mode
+    except FileNotFoundError:
+        die(f"managed .agents root not found during uninstall: {root}")
+    except OSError as exc:
+        die(f"managed .agents root cannot be verified during uninstall: {root}: {exc}")
+    if stat.S_ISLNK(root_mode) or not stat.S_ISDIR(root_mode):
+        die(f"managed .agents root is not a real directory; refusing uninstall: {root}")
+
+    try:
+        manifest_mode = manifest.lstat().st_mode
+    except FileNotFoundError:
+        die(f"manifest not found: {manifest}")
+    except OSError as exc:
+        die(f"manifest cannot be verified during uninstall: {manifest}: {exc}")
+    if stat.S_ISLNK(manifest_mode) or not stat.S_ISREG(manifest_mode):
+        die(f"manifest is not a regular file; refusing uninstall: {manifest}")
+
+
+def standard_bytecode_cache_names(source_path: Path) -> set[str]:
+    """Return exact cache names generated for a source by this interpreter."""
+
+    names: set[str] = set()
+    for optimization in ("", 1, 2):
+        cached = Path(importlib.util.cache_from_source(str(source_path), optimization=optimization))
+        names.add(cached.name)
+    return names
+
+
 def remove_managed_bytecode_caches(files: dict[str, str], dst_root: Path, *, dry_run: bool) -> bool:
     """Remove only bytecode caches attributable to manifest-owned Python modules."""
 
-    cache_modules: dict[Path, set[str]] = {}
+    cache_names: dict[Path, set[str]] = {}
     for rel in files:
         if not rel.startswith(".agents/") or not rel.endswith(".py"):
             continue
         source_path = path_for_rel(dst_root, rel)
-        cache_modules.setdefault(source_path.parent / "__pycache__", set()).add(source_path.stem)
+        cache_names.setdefault(source_path.parent / "__pycache__", set()).update(
+            standard_bytecode_cache_names(source_path)
+        )
 
     removed_any = False
-    for cache_dir, module_names in sorted(cache_modules.items(), key=lambda item: str(item[0])):
+    for cache_dir, allowed_names in sorted(cache_names.items(), key=lambda item: str(item[0])):
         state, detail = inspect_managed_uninstall_directory(cache_dir, dst_root)
         if state == "missing":
             continue
@@ -418,11 +455,7 @@ def remove_managed_bytecode_caches(files: dict[str, str], dst_root: Path, *, dry
             )
             continue
         for entry in entries:
-            name_without_suffix = entry.name[:-4] if entry.name.endswith(".pyc") else ""
-            if not any(
-                name_without_suffix == module_name or name_without_suffix.startswith(f"{module_name}.")
-                for module_name in module_names
-            ):
+            if entry.name not in allowed_names:
                 continue
             try:
                 mode = entry.lstat().st_mode
@@ -997,6 +1030,7 @@ def reinstall(args: argparse.Namespace) -> int:
 def uninstall(args: argparse.Namespace) -> int:
     _repo = resolve_dir(args.repo, "repo")
     dst_root = resolve_dir(args.dir, "dir")
+    assert_uninstall_manifest_boundary(dst_root)
     manifest = load_manifest(manifest_path(dst_root), required=True)
     assert manifest is not None
     files = dict(manifest["files"])
