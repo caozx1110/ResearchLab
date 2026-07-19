@@ -162,11 +162,13 @@ def _run_shortcut_install(
     return workspace, result
 
 
-def _install_copy(
+def _run_copy_action(
     tmp_path: Path,
     workspace: Path,
     *,
+    action: str,
     source: Path | None = None,
+    extra: tuple[str, ...] = (),
 ) -> subprocess.CompletedProcess[str]:
     workspace.mkdir(exist_ok=True)
     source_root = source or _project_root()
@@ -184,16 +186,12 @@ def _install_copy(
     # Bootstrap tests can set this marker directly in the pytest process.
     # A fresh installer subprocess must prove its own configured runtime.
     env.pop("_RESEARCH_RUNTIME_READY", None)
+    command = ["bash", str(source_root / "install.sh"), action]
+    if action == "install":
+        command.append("--codex")
+    command.extend(["--project", str(workspace), "--yes", *extra])
     return subprocess.run(
-        [
-            "bash",
-            str(source_root / "install.sh"),
-            "install",
-            "--codex",
-            "--project",
-            str(workspace),
-            "--yes",
-        ],
+        command,
         cwd=source_root,
         env=env,
         stdin=subprocess.DEVNULL,
@@ -201,6 +199,37 @@ def _install_copy(
         capture_output=True,
         check=False,
     )
+
+
+def _install_copy(
+    tmp_path: Path,
+    workspace: Path,
+    *,
+    source: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
+    return _run_copy_action(tmp_path, workspace, action="install", source=source)
+
+
+def _assert_private_sync_output_hidden(
+    result: subprocess.CompletedProcess[str],
+    *private_paths: Path,
+) -> None:
+    output = result.stdout + result.stderr
+    for token in (
+        "copy-project",
+        "clean-sync",
+        "[dry-run]",
+        "warn:",
+        "error:",
+        "MODIFIED",
+        "expected=",
+        "actual=",
+        "reason=",
+        ".agents/",
+    ):
+        assert token not in output
+    for path in private_paths:
+        assert str(path) not in output
 
 
 def _git_output(checkout: Path, *args: str) -> str:
@@ -453,6 +482,92 @@ def test_external_install_prints_completion_without_bash_variable_error(tmp_path
     assert updated_manifest["source_origin"] == installed_manifest["source_origin"]
     assert updated_manifest["source_checkout"] == installed_manifest["source_checkout"]
     assert updated_manifest["source_branch"] == installed_manifest["source_branch"]
+
+
+def test_noninteractive_copy_lifecycle_hides_sync_engine_output_and_preserves_semantics(tmp_path: Path) -> None:
+    dry_workspace = tmp_path / "dry-workspace"
+    # Claude setup and the shortcut force this dry-run through ensure_dir,
+    # link_force, and write_managed_block after ws_sync returns.
+    dry_run = _run_copy_action(
+        tmp_path,
+        dry_workspace,
+        action="install",
+        extra=("--claude", "--kb-on-path", "--dry-run"),
+    )
+
+    assert dry_run.returncode == 0, dry_run.stdout + dry_run.stderr
+    assert "底层文件操作：" in dry_run.stdout
+    assert "预览完成" in dry_run.stdout
+    _assert_private_sync_output_hidden(dry_run, _project_root(), dry_workspace / ".agents")
+    assert not any(dry_workspace.iterdir())
+
+    workspace = tmp_path / "workspace"
+    install = _run_copy_action(tmp_path, workspace, action="install")
+
+    assert install.returncode == 0, install.stdout + install.stderr
+    assert "工作区文件已准备" in install.stdout
+    assert "安装完成" in install.stdout
+    _assert_private_sync_output_hidden(install, _project_root(), workspace / ".agents")
+    manifest_path = workspace / ".agents" / ".install-manifest.json"
+    version_path = workspace / ".agents" / "VERSION"
+    assert manifest_path.is_file()
+    original_version = version_path.read_bytes()
+
+    update = _run_copy_action(tmp_path, workspace, action="update")
+
+    assert update.returncode == 0, update.stdout + update.stderr
+    assert "skills 已是最新版本，AI 工具配置已检查" in update.stdout
+    _assert_private_sync_output_hidden(update, _project_root(), workspace / ".agents")
+
+    manifest_before_failure = manifest_path.read_bytes()
+    version_path.write_text("locally drifted\n", encoding="utf-8")
+    failed_update = _run_copy_action(tmp_path, workspace, action="update")
+
+    assert failed_update.returncode == 3
+    assert "工作区文件操作失败，请让 Agent 检查后重试" in failed_update.stderr
+    _assert_private_sync_output_hidden(failed_update, _project_root(), workspace / ".agents")
+    assert version_path.read_text(encoding="utf-8") == "locally drifted\n"
+    assert manifest_path.read_bytes() == manifest_before_failure
+
+    reinstall = _run_copy_action(tmp_path, workspace, action="reinstall")
+
+    assert reinstall.returncode == 0, reinstall.stdout + reinstall.stderr
+    assert "工作区文件已重新安装" in reinstall.stdout
+    assert "重装完成" in reinstall.stdout
+    _assert_private_sync_output_hidden(reinstall, _project_root(), workspace / ".agents")
+    assert version_path.read_bytes() == original_version
+
+    uninstall = _run_copy_action(tmp_path, workspace, action="uninstall")
+
+    assert uninstall.returncode == 0, uninstall.stdout + uninstall.stderr
+    assert "安装器管理的工作区文件已移除" in uninstall.stdout
+    assert "卸载完成" in uninstall.stdout
+    _assert_private_sync_output_hidden(uninstall, _project_root(), workspace / ".agents")
+    assert not manifest_path.exists()
+    assert not version_path.exists()
+
+
+def test_noninteractive_smoke_failure_hides_child_diagnostics(tmp_path: Path) -> None:
+    source = _make_linked_source(tmp_path)
+    private_detail = tmp_path / "internal" / "smoke-traceback.log"
+    smoke_script = source / ".agents" / "skills" / "kb-cli" / "scripts" / "kb"
+    smoke_script.write_text(
+        "#!/usr/bin/env bash\n"
+        f"printf '%s\\n' 'Traceback: smoke child secret at {private_detail}' >&2\n"
+        "exit 23\n",
+        encoding="utf-8",
+    )
+    workspace = tmp_path / "workspace"
+
+    result = _run_copy_action(tmp_path, workspace, action="install", source=source)
+
+    assert result.returncode != 0
+    assert "kb 安装检查未通过，请让 Agent 检查后重试" in result.stderr
+    assert "Traceback" not in result.stdout + result.stderr
+    assert "smoke child secret" not in result.stdout + result.stderr
+    assert str(private_detail) not in result.stdout + result.stderr
+    _assert_private_sync_output_hidden(result, source, workspace / ".agents")
+    assert (workspace / ".agents" / ".install-manifest.json").is_file()
 
 
 def test_project_install_from_linked_worktree_preserves_linked_checkout(tmp_path: Path) -> None:

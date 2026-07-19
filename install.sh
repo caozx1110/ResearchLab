@@ -212,10 +212,6 @@ path_on_path() {
   return 1
 }
 
-quote_path() {
-  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
-}
-
 same_dir() {
   [ "$(abs_dir "$1")" = "$(abs_dir "$2")" ]
 }
@@ -241,6 +237,7 @@ INSTALL_INCOMPLETE=0
 KB_SHORTCUT_CREATED=0
 KB_SHORTCUT_AVAILABLE=0
 UPDATE_NO_CHANGES=0
+DRY_RUN_CHANGE_COUNT=0
 
 REPO_ROOT=$(script_dir)
 for arg in "$@"; do
@@ -865,6 +862,7 @@ print_next_steps() {
 print_done() {
   if [ "$DRY_RUN" -eq 1 ]; then
     section "预览完成"
+    bullet "底层文件操作：$DRY_RUN_CHANGE_COUNT 项（详细路径已折叠）"
     ok "没有写入任何文件。"
     info "以上是计划内容；确认无误后再执行正式安装。"
     return 0
@@ -1050,30 +1048,32 @@ ws_sync() {
   if [ "$FORCE" -eq 1 ]; then
     args+=("--force")
   fi
-  if output=$(python3 "$REPO_ROOT/install-lib/ws_sync.py" "${args[@]}" "$@"); then
+  if output=$(python3 "$REPO_ROOT/install-lib/ws_sync.py" "${args[@]}" "$@" 2>&1); then
     if [ "$action" = "update" ]; then
       case "$output" in
         *"clean-sync: no changes; manifest unchanged"*) UPDATE_NO_CHANGES=1 ;;
       esac
     fi
-    if [ "$WIZARD_MODE" -eq 1 ] || { is_interactive_input && [ "$DRY_RUN" -eq 0 ] && [ "$action" != "update" ]; }; then
-      if [ "$DRY_RUN" -eq 1 ]; then
-        change_count=$(printf '%s\n' "$output" | awk '/^\[dry-run\]/ { count += 1 } END { print count + 0 }')
-        bullet "底层文件操作：$change_count 项（详细路径已折叠）"
-      else
-        case "$action" in
-          install) info "工作区文件已准备。" ;;
-          reinstall) info "工作区文件已重新安装。" ;;
-          uninstall) info "安装器管理的工作区文件已移除。" ;;
-        esac
-      fi
-      return 0
+    case "$output" in
+      *"warn:"*)
+        warn "检测到用户修改并按安全策略保留，请让 Agent 检查。"
+        INSTALL_INCOMPLETE=1
+        ;;
+    esac
+    if [ "$DRY_RUN" -eq 1 ]; then
+      change_count=$(printf '%s\n' "$output" | awk '/^\[dry-run\]/ { count += 1 } END { print count + 0 }')
+      DRY_RUN_CHANGE_COUNT=$((DRY_RUN_CHANGE_COUNT + change_count))
+    else
+      case "$action" in
+        install) info "工作区文件已准备。" ;;
+        reinstall) info "工作区文件已重新安装。" ;;
+        uninstall) info "安装器管理的工作区文件已移除。" ;;
+      esac
     fi
-    [ -z "$output" ] || printf '%s\n' "$output"
     return 0
   else
     status=$?
-    [ -z "$output" ] || printf '%s\n' "$output"
+    fail "工作区文件操作失败，请让 Agent 检查后重试。" >&2
     return "$status"
   fi
 }
@@ -1112,7 +1112,7 @@ remove_agents_md_if_managed() {
   actual=$(file_sha256 "$WORKSPACE_ROOT/AGENTS.md")
   if [ -n "$sha" ] && [ "$actual" = "$sha" ]; then
     if [ "$DRY_RUN" -eq 1 ]; then
-      [ "$WIZARD_MODE" -eq 1 ] || info "[dry-run] rm $(quote_path "$WORKSPACE_ROOT/AGENTS.md")"
+      DRY_RUN_CHANGE_COUNT=$((DRY_RUN_CHANGE_COUNT + 1))
     else
       rm "$WORKSPACE_ROOT/AGENTS.md"
     fi
@@ -1137,7 +1137,7 @@ uninstall_workspace_copy() {
 
 ensure_dir() {
   if [ "$DRY_RUN" -eq 1 ]; then
-    [ "$WIZARD_MODE" -eq 1 ] || info "[dry-run] mkdir -p $(quote_path "$1")"
+    DRY_RUN_CHANGE_COUNT=$((DRY_RUN_CHANGE_COUNT + 1))
   else
     mkdir -p "$1"
   fi
@@ -1160,7 +1160,7 @@ link_force() {
     return 0
   fi
   if [ "$DRY_RUN" -eq 1 ]; then
-    [ "$WIZARD_MODE" -eq 1 ] || info "[dry-run] ln -sfn $(quote_path "$target") $(quote_path "$link")"
+    DRY_RUN_CHANGE_COUNT=$((DRY_RUN_CHANGE_COUNT + 1))
   else
     ln -sfn "$target" "$link"
   fi
@@ -1173,7 +1173,7 @@ remove_symlink_if_matches() {
   actual=$(readlink "$link")
   if [ "$actual" = "$expected" ] || { [ -n "$expected_alt" ] && [ "$actual" = "$expected_alt" ]; }; then
     if [ "$DRY_RUN" -eq 1 ]; then
-      [ "$WIZARD_MODE" -eq 1 ] || info "[dry-run] rm $(quote_path "$link")"
+      DRY_RUN_CHANGE_COUNT=$((DRY_RUN_CHANGE_COUNT + 1))
     else
       rm "$link"
     fi
@@ -1218,7 +1218,7 @@ write_managed_block() {
     awk '{ print }' "$block_file" >"$tmp_file"
   fi
   if [ "$DRY_RUN" -eq 1 ]; then
-    [ "$WIZARD_MODE" -eq 1 ] || info "[dry-run] write managed block in $(quote_path "$file")"
+    DRY_RUN_CHANGE_COUNT=$((DRY_RUN_CHANGE_COUNT + 1))
     rm -f "$tmp_file"
   elif [ -f "$file" ] && cmp -s "$file" "$tmp_file"; then
     rm -f "$tmp_file"
@@ -1247,7 +1247,7 @@ remove_managed_block() {
     return "$status"
   }
   if [ "$DRY_RUN" -eq 1 ]; then
-    [ "$WIZARD_MODE" -eq 1 ] || info "[dry-run] remove managed block from $(quote_path "$file")"
+    DRY_RUN_CHANGE_COUNT=$((DRY_RUN_CHANGE_COUNT + 1))
     rm -f "$tmp_file"
   else
     mv "$tmp_file" "$file"
@@ -1426,21 +1426,19 @@ run_smoke() {
   fi
   section "安装检查"
   info "正在检查 kb 基础功能..."
+  # Child diagnostics can contain tracebacks and internal paths; keep them private.
   if ! smoke_output=$("$WS_KB_SCRIPT" help 2>&1); then
-    warn "kb 基础检查未通过，详细信息如下："
-    printf '%s\n' "$smoke_output" >&2
+    warn "kb 安装检查未通过，请让 Agent 检查后重试。"
     return 1
   fi
   if [ "$COPY_PROJECT" -eq 1 ]; then
     if ! smoke_output=$("$WS_KB_SCRIPT" --root "$WORKSPACE_ROOT" doctor 2>&1); then
-      warn "kb 工作区检查未通过，详细信息如下："
-      printf '%s\n' "$smoke_output" >&2
+      warn "kb 安装检查未通过，请让 Agent 检查后重试。"
       return 1
     fi
   else
     if ! smoke_output=$(RESEARCH_SKILLS_HOME="$REPO_ROOT" "$WS_KB_SCRIPT" --root "$WORKSPACE_ROOT" doctor 2>&1); then
-      warn "kb 工作区检查未通过，详细信息如下："
-      printf '%s\n' "$smoke_output" >&2
+      warn "kb 安装检查未通过，请让 Agent 检查后重试。"
       return 1
     fi
   fi
