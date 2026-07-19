@@ -740,6 +740,9 @@ def program_dashboard_items(root: Path) -> list[dict[str, Any]]:
             reasons.append("stage review")
             score += 1
 
+        step_type = "program-work"
+        action_kind = "program-work"
+        decision_record: dict[str, Any] = {}
         if blocking_evidence:
             next_action = f"Resolve blocking evidence: {blocking_evidence[0].get('needed') or blocking_evidence[0].get('question')}"
         elif high_questions:
@@ -747,6 +750,9 @@ def program_dashboard_items(root: Path) -> list[dict[str, Any]]:
         elif pending_units:
             next_action = f"Review pending confirmation: {pending_units[0].get('id')}"
             recommended_command = confirm_command_for_record(pending_units[0])
+            step_type = "human-decision"
+            action_kind = "human-gate"
+            decision_record = pending_units[0]
         elif normalize_list(state.get("next_actions")):
             next_action = normalize_list(state.get("next_actions"))[0]
             recommended_command = shell_command(
@@ -762,16 +768,13 @@ def program_dashboard_items(root: Path) -> list[dict[str, Any]]:
                 [COMMAND_PREFIX, ".agents/skills/research-orchestrator/scripts/orchestrate.py", "status", "--program-id", program_id]
             )
 
-        step_type = "human-decision" if pending_units else "program-work"
-        decision_record = pending_units[0] if pending_units else {}
-
         items.append(
             {
                 "program_id": program_id,
                 "record_id": str(decision_record.get("id") or ""),
                 "title": str(decision_record.get("title") or ""),
                 "step_type": step_type,
-                "action_kind": "human-gate" if pending_units else "program-work",
+                "action_kind": action_kind,
                 "safe_execute": False,
                 "stage": str(state.get("stage") or ""),
                 "goal": str(state.get("goal") or ""),
@@ -864,7 +867,7 @@ def format_next(
         else:
             subject = f"研究计划「{program_id}」"
         lines.append(f"- {subject}：{item.get('next_action')}")
-        if int(item.get("pending_confirmation_count") or 0) > 0:
+        if str(item.get("step_type") or "") == "human-decision":
             lines.append("  请直接用自然语言告诉我你的决定。")
         else:
             lines.append("  可以直接告诉 Agent 继续推进。")

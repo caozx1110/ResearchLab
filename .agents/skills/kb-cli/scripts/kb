@@ -51,13 +51,13 @@ HELP_MENU: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("初始化 KB 布局、索引和基础偏好。", "kb init"),
             ("检查当前 Python、YAML 与 PDF 后端可用性。", "kb doctor"),
             ("检查并在确认后更新 research skill。", "kb update"),
-            ("刷新并查看当前 KB / program 状态摘要。", "kb status"),
-            ("查看下一步实验或 program 推进建议。", "kb next"),
+            ("刷新并查看当前知识库和研究计划的状态摘要。", "kb status"),
+            ("查看下一步实验或研究计划推进建议。", "kb next"),
             ("按关键词检索已入库知识单元。", "kb find <关键词>"),
-            ("把论文、repo、博客或本地文件轻量入库。", "kb add <链接或路径>"),
-            ("一条命令把 source 拉进来并备好待填骨架，随后 Agent 自动填写有逐字证据支持的笔记。", "kb ingest <链接或路径>"),
+            ("把论文、代码仓、博客或本地文件轻量入库。", "kb add <链接或路径>"),
+            ("一条命令把资料来源加入知识库并备好待填骨架，随后 Agent 自动填写有逐字证据支持的笔记。", "kb ingest <链接或路径>"),
             ("查看待确认的 AI 判断，并用自然语言确认或拒绝。", "kb review"),
-            ("把误建 / 不采纳的知识单元标记为 rejected（清理出口）。", "kb reject <单元 id>"),
+            ("把误建或不采纳的知识单元标记为已拒绝。", "kb reject <单元 id>"),
             ("回忆已确认习惯、已知坑和待审 skill 问题。", "kb recall"),
             ("恢复崩溃后未完成的知识库操作。", "kb resume"),
             ("撤销最近一次已提交的知识库操作。", "kb undo"),
@@ -68,7 +68,7 @@ HELP_MENU: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         "纯自然语言（无 kb 动词）",
         (
             ("围绕当前知识库推进候选 idea 的生成、分析和选择。", "请基于当前知识库给我 3 个候选 idea"),
-            ("汇总 program 事件流，生成周报、PPT 素材或阶段总结。", "为这个 program 生成周报材料"),
+            ("汇总研究计划事件，生成周报、PPT 素材或阶段总结。", "为这个研究计划生成周报材料"),
         ),
     ),
 )
@@ -551,9 +551,7 @@ def handle_status(args: argparse.Namespace, root: Path) -> int:
 
 
 def _next_item_needs_human(item: dict[str, object]) -> bool:
-    return str(item.get("step_type") or "") == "human-decision" or _natural_count(
-        item.get("pending_confirmation_count")
-    ) > 0
+    return str(item.get("step_type") or "") == "human-decision"
 
 
 def _next_public_reason(item: dict[str, object], root: Path) -> str:
@@ -580,7 +578,12 @@ def _next_public_reason(item: dict[str, object], root: Path) -> str:
     }
     for prefix, replacement in known_prefixes.items():
         if next_action.startswith(prefix):
-            return replacement + next_action[len(prefix) :]
+            translated = replacement + next_action[len(prefix) :]
+            if _public_line_is_safe(translated, root) and not any(
+                marker in translated for marker in _NEXT_INTERNAL_MARKERS
+            ):
+                return translated
+            return "Agent 可以继续推进当前研究事项。"
     if (
         not next_action
         or not _public_line_is_safe(next_action, root)

@@ -170,6 +170,71 @@ def test_orchestrator_dashboard_prioritizes_blocking_evidence(tmp_path: Path) ->
             assert leaked_fragment not in rendered
 
 
+def test_orchestrator_blocker_wins_over_pending_confirmation_governance(tmp_path: Path) -> None:
+    orchestrate = _load_script(
+        "research-orchestrator",
+        "orchestrate.py",
+        "orchestrator_script_for_blocker_pending_priority",
+    )
+    root = _make_workspace(tmp_path)
+    program_id = "p-blocker-pending"
+    unit_id = "p-pending-123456"
+    orchestrate.ensure_program_files(root, program_id)
+    write_yaml_if_changed(
+        orchestrate.state_path(root, program_id),
+        {
+            "program_id": program_id,
+            "stage": "literature-review",
+            "goal": "Resolve blocker before review",
+            "active_unit_ids": [unit_id],
+            "counts": {},
+        },
+    )
+    write_yaml_if_changed(
+        record_path(root, "paper", unit_id),
+        {
+            "id": unit_id,
+            "kind": "paper",
+            "title": "Pending Paper",
+            "status": "screened",
+            "maturity": "lightweight",
+            "confirmation_status": "pending_user_confirmation",
+            "needs_human_confirmation": True,
+            "information_types": ["fact"],
+            "summary": "Pending summary",
+            "tags": [],
+            "topics": [],
+            "candidate_pools": [],
+            "source": {"original_uri": "", "file_hash": ""},
+            "payload": {"state": {"full_note_status": "pending_user_confirmation"}},
+        },
+    )
+    append_list_item(
+        orchestrate.evidence_requests_path(root, program_id),
+        f"{program_id}-evidence-requests",
+        "research-orchestrator",
+        {
+            "question": "Can the baseline be reproduced?",
+            "needed": "Baseline parity logs",
+            "priority": "high",
+            "blocking": True,
+        },
+        default_status="open",
+    )
+
+    item = orchestrate.program_dashboard_items(root)[0]
+    rendered = orchestrate.format_next([item])
+
+    assert item["pending_confirmation_count"] == 1
+    assert item["blocking_evidence_count"] == 1
+    assert item["next_action"] == "Resolve blocking evidence: Baseline parity logs"
+    assert item["step_type"] == "program-work"
+    assert item["action_kind"] == "program-work"
+    assert item["record_id"] == ""
+    assert "可以直接告诉 Agent 继续推进" in rendered
+    assert "告诉我你的决定" not in rendered
+
+
 def test_orchestrator_status_unknown_program_does_not_create_it(tmp_path: Path, monkeypatch) -> None:
     orchestrate = _load_script("research-orchestrator", "orchestrate.py", "orchestrator_script_for_missing_status")
     root = _make_workspace(tmp_path)

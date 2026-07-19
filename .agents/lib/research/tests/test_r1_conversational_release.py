@@ -42,6 +42,7 @@ FORBIDDEN_PUBLIC_TOKENS = (
     "confirm:",
     "TTY",
     "isatty",
+    "rejected",
 )
 
 EXPECTED_RUNTIME_PINS = {

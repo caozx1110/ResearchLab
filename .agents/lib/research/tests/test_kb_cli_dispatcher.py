@@ -32,6 +32,7 @@ PUBLIC_GOVERNANCE_FORBIDDEN = (
     "pending_user_confirmation",
     "candidate_pools",
     "grounded",
+    "rejected",
 )
 
 
@@ -103,9 +104,12 @@ def test_kb_help_snapshot_contains_group_headers() -> None:
     for verb in ["kb help", "kb init", "kb doctor", "kb update", "kb status", "kb next", "kb find", "kb add", "kb ingest", "kb review", "kb reject", "kb recall", "kb resume", "kb undo", "kb restore"]:
         assert verb in text
     assert "请基于当前知识库给我 3 个候选 idea" in text
-    assert "为这个 program 生成周报材料" in text
+    assert "为这个研究计划生成周报材料" in text
     assert "也可以直接对 AI 说" in text
     assert "grounded" not in text
+    assert "rejected" not in text
+    assert " program " not in text
+    assert " source " not in text
     assert "有逐字证据支持的笔记" in text
 
 
@@ -708,7 +712,7 @@ def test_kb_next_public_output_and_protocol_preserve_human_gate_semantics(
         "items": [
             {
                 "program_id": "p-review",
-                "step_type": "program-work",
+                "step_type": "human-decision",
                 "pending_confirmation_count": 1,
                 "next_action": "init-program | status=pending_user_confirmation | score=90",
                 "recommended_command": "python3 .agents/owner.py --program-id p-review",
@@ -746,6 +750,49 @@ def test_kb_next_public_output_and_protocol_preserve_human_gate_semantics(
         "request_user_decision",
         "continue_research_work",
     ]
+
+
+def test_kb_next_blocker_with_pending_count_stays_agent_work_and_sanitizes_suffix(
+    monkeypatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    kb = _load_kb_cli()
+    payload = {
+        "has_records": True,
+        "items": [
+            {
+                "program_id": "p-blocked",
+                "step_type": "program-work",
+                "action_kind": "program-work",
+                "pending_confirmation_count": 1,
+                "blocking_evidence_count": 1,
+                "next_action": "Resolve blocking evidence: --secret .agents/private/path",
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        kb,
+        "forward_command",
+        lambda root, relative_script, args, *, stream=True: kb.CommandResult(
+            (relative_script, *args), 0, json.dumps(payload)
+        ),
+    )
+
+    assert kb.main(
+        ["--root", str(tmp_path), "--agent-protocol", "blocked-next.json", "next"]
+    ) == 0
+
+    output = capsys.readouterr().out
+    assert "研究计划「p-blocked」：Agent 可以继续推进当前研究事项" in output
+    assert "请直接用自然语言告诉我你的决定" not in output
+    _assert_public_governance_safe(output)
+    assert "--secret" not in output
+    protocol = json.loads(
+        (tmp_path / "kb" / ".runtime" / "blocked-next.json").read_text(encoding="utf-8")
+    )
+    assert protocol["status"] == "agent_action_required"
+    assert protocol["next_actions"][0]["action"] == "continue_research_work"
 
 
 def test_kb_next_invalid_owner_response_is_natural_and_fail_closed(
