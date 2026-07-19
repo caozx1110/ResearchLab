@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import unicodedata
@@ -218,27 +219,46 @@ _PUBLIC_FORBIDDEN = (
 )
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
-_SHELL_COMMAND_RE = re.compile(
-    r"""(?ix)
-    (?<![\w.-])
-    (?:
-        sudo\s+(?:--?[A-Za-z][\w-]*\s+)*[A-Za-z][\w.-]*(?=\s|$)
-        |
-        git\s+(?:
-            --?[A-Za-z][\w-]*
-            |add|apply|bisect|branch|checkout|cherry-pick|clean|clone|commit|config
-            |diff|fetch|init|log|merge|mv|pull|push|rebase|reset|restore|revert|rm
-            |show|stash|status|switch|tag|worktree
-        )(?=\s|$)
-        |
-        (?:
-            bash|cat|chmod|chown|cp|curl|docker|find|fish|grep|kill|killall
-            |kubectl|launchctl|mkdir|mv|reboot|rm|rmdir|rsync|scp|sed|sh|shutdown
-            |ssh|systemctl|touch|wget|xargs|zsh
-        )\s+(?=--?[A-Za-z0-9]|https?://|/|~|\.\.?/|[A-Za-z0-9_.])
-    )
-    """
+_PUBLIC_GIT_SUBCOMMANDS = frozenset(
+    {
+        "add", "apply", "bisect", "branch", "checkout", "cherry-pick", "clean", "clone",
+        "commit", "config", "diff", "fetch", "init", "log", "merge", "mv", "pull", "push",
+        "rebase", "reset", "restore", "revert", "rm", "show", "stash", "status", "switch",
+        "tag", "worktree",
+    }
 )
+_PUBLIC_DOCKER_SUBCOMMANDS = frozenset(
+    {
+        "build", "compose", "container", "cp", "create", "events", "exec", "export", "history",
+        "image", "images", "import", "info", "inspect", "kill", "load", "login", "logout",
+        "logs", "network", "node", "pause", "plugin", "port", "ps", "pull", "push", "rename",
+        "restart", "rm", "rmi", "run", "save", "search", "secret", "service", "stack", "start",
+        "stats", "stop", "swarm", "system", "tag", "top", "trust", "unpause", "update",
+        "version", "volume", "wait",
+    }
+)
+_PUBLIC_COMMANDS_WITH_ARGUMENTS = frozenset(
+    {
+        "cat", "chmod", "chown", "cp", "grep", "kill", "killall", "mkdir", "mv", "rm", "rmdir",
+        "rsync", "scp", "sed", "ssh", "touch", "xargs",
+    }
+)
+_PUBLIC_SHELL_NAMES = frozenset({"bash", "fish", "sh", "zsh"})
+_PUBLIC_COMMAND_HEADS = frozenset(
+    {
+        *_PUBLIC_COMMANDS_WITH_ARGUMENTS,
+        *_PUBLIC_SHELL_NAMES,
+        "curl", "docker", "find", "git", "kubectl", "launchctl", "node", "npm", "open",
+        "pip", "pip3", "pnpm", "printf", "python", "python2", "python3", "reboot", "shutdown",
+        "sudo", "systemctl", "wget", "yarn",
+    }
+)
+_PUBLIC_COMMAND_LINE_PREFIX_RE = re.compile(r"^(?:[-*+>]\s+|\$\s+)")
+_PUBLIC_SHELL_PIPE_RE = re.compile(
+    r"\|\s*[\"']?(?:(?:/usr)?/bin/)?(?:bash|fish|sh|zsh)[\"']?(?:\s|$)",
+    flags=re.IGNORECASE,
+)
+_PUBLIC_CLAIM_TEXT_HARD_CAP = 2000
 _BIDI_CONTROL_CODEPOINTS = {
     *range(0x202A, 0x202F),
     *range(0x2066, 0x206A),
@@ -293,6 +313,95 @@ _NEXT_INTERNAL_MARKERS = (
 )
 
 
+def _public_command_name(token: str) -> str:
+    return token.replace("\\", "/").rsplit("/", 1)[-1].casefold()
+
+
+def _public_argument_looks_executable(argument: str) -> bool:
+    folded = argument.casefold()
+    return (
+        argument.startswith(("-", "/", "~", "./", "../"))
+        or folded.startswith(("http://", "https://", "ssh://", "git@"))
+        or folded.endswith((".js", ".mjs", ".cjs", ".py", ".sh", ".bash", ".zsh"))
+    )
+
+
+def _public_tokens_have_command_shape(tokens: Sequence[str], logical_line: str) -> bool:
+    if not tokens:
+        return False
+    command = _public_command_name(tokens[0])
+    arguments = list(tokens[1:])
+    if command == "kb":
+        return False
+    if command in {"reboot", "shutdown"}:
+        return not arguments or all(argument.startswith("-") or argument.isdigit() for argument in arguments)
+    if command == "git":
+        return bool(arguments) and (
+            arguments[0].startswith("-") or arguments[0].casefold() in _PUBLIC_GIT_SUBCOMMANDS
+        )
+    if command == "docker":
+        return bool(arguments) and (
+            arguments[0].startswith("-") or arguments[0].casefold() in _PUBLIC_DOCKER_SUBCOMMANDS
+        )
+    if command in _PUBLIC_SHELL_NAMES:
+        return not arguments or _public_argument_looks_executable(arguments[0])
+    if command == "sudo":
+        remaining = list(arguments)
+        while remaining and remaining[0].startswith("-"):
+            option = remaining.pop(0)
+            if option in {"-C", "-D", "-g", "-h", "-p", "-R", "-T", "-u"} and remaining:
+                remaining.pop(0)
+        return _public_tokens_have_command_shape(remaining, " ".join(remaining))
+    if command in _PUBLIC_COMMANDS_WITH_ARGUMENTS:
+        return bool(arguments)
+    if command in {"curl", "wget"}:
+        return bool(arguments) and any(_public_argument_looks_executable(argument) for argument in arguments)
+    if command == "find":
+        return bool(arguments) and (
+            _public_argument_looks_executable(arguments[0])
+            or arguments[0] in {".", ".."}
+            or any(argument.startswith("-") for argument in arguments)
+        )
+    if command in {"kubectl", "launchctl", "systemctl"}:
+        return bool(arguments) and (arguments[0].startswith("-") or arguments[0].isidentifier())
+    if command in {"pip", "pip3"}:
+        return bool(arguments) and arguments[0].casefold() in {
+            "download", "install", "uninstall", "wheel",
+        }
+    if command in {"npm", "pnpm", "yarn"}:
+        return bool(arguments) and arguments[0].casefold() in {"add", "exec", "install", "remove", "run"}
+    if command in {"node", "python", "python2", "python3"}:
+        return bool(arguments) and _public_argument_looks_executable(arguments[0])
+    if command == "open":
+        return bool(arguments) and any(_public_argument_looks_executable(argument) for argument in arguments)
+    if command == "printf":
+        return bool(arguments) and bool(_PUBLIC_SHELL_PIPE_RE.search(logical_line))
+    return False
+
+
+def _public_text_has_command_shape(text: str) -> bool:
+    """Classify commands only at the start of each original logical line."""
+    if "$(" in text:
+        return True
+    for logical_line in text.splitlines() or [text]:
+        candidate = logical_line.lstrip()
+        candidate = _PUBLIC_COMMAND_LINE_PREFIX_RE.sub("", candidate, count=1)
+        if not candidate:
+            continue
+        raw_head = candidate.split(maxsplit=1)[0].strip("\"'")
+        if raw_head.startswith(("/", "./", "../", "~")):
+            return True
+        if _public_command_name(raw_head) not in _PUBLIC_COMMAND_HEADS:
+            continue
+        try:
+            tokens = shlex.split(candidate, comments=False, posix=True)
+        except ValueError:
+            return True
+        if _public_tokens_have_command_shape(tokens, candidate):
+            return True
+    return False
+
+
 def _public_line_is_safe(line: str, root: Path) -> bool:
     """Fail closed for owner output that belongs on the private protocol channel."""
     stripped = line.strip()
@@ -301,11 +410,9 @@ def _public_line_is_safe(line: str, root: Path) -> bool:
     folded = line.casefold()
     if "next for agent:" in folded or any(token.casefold() in folded for token in _PUBLIC_FORBIDDEN[1:]):
         return False
-    if "$(" in line or _SHELL_COMMAND_RE.search(line):
+    if _public_text_has_command_shape(line):
         return False
     if re.search(r"(^|\s)--[A-Za-z][\w-]*", line, flags=re.IGNORECASE):
-        return False
-    if re.search(r"(^|\s)(?:python3?|[^\s]+\.py)(?:\s|$)", line, flags=re.IGNORECASE):
         return False
     if stripped.lower().startswith(("confirm:", "path:", "repo_path:", "project_root:", "skills_home:")):
         return False
@@ -327,27 +434,42 @@ def _public_line_is_safe(line: str, root: Path) -> bool:
     return True
 
 
-def _public_display_text(value: object, root: Path, fallback: str, limit: int) -> str:
-    """Return one bounded, inert public line while keeping the original private."""
+def _sanitize_public_text(value: object, root: Path) -> str | None:
+    """Return one inert line, classifying original logical lines before folding."""
     text = _ANSI_ESCAPE_RE.sub("", str(value or ""))
     characters: list[str] = []
     for character in text:
         codepoint = ord(character)
         category = unicodedata.category(character)
-        if character.isspace():
+        if character in "\r\n\v\f\x1c\x1d\x1e\x85\u2028\u2029":
+            characters.append("\n")
+        elif character.isspace():
             characters.append(" ")
         elif codepoint in _BIDI_CONTROL_CODEPOINTS or category in {"Cc", "Cf", "Cs"}:
             continue
         else:
             characters.append(character)
-    text = re.sub(r"\s+", " ", "".join(characters)).strip()
+    text = "".join(characters)
+    if not text.strip() or not _public_line_is_safe(text, root):
+        return None
+    text = re.sub(r"\s+", " ", text).strip()
     text = text.translate(_MARKDOWN_NEUTRAL_TRANSLATION)
-    if not text or not _public_line_is_safe(text, root):
-        return fallback
+    return text or None
+
+
+def _bounded_public_text(text: str, limit: int) -> str:
     bounded_limit = max(1, int(limit))
     if len(text) > bounded_limit:
-        text = text[: bounded_limit - 1].rstrip() + "…"
+        return text[: bounded_limit - 1].rstrip() + "…"
     return text
+
+
+def _public_display_text(value: object, root: Path, fallback: str, limit: int) -> str:
+    """Return one bounded, inert public line while keeping the original private."""
+    text = _sanitize_public_text(value, root)
+    if text is None:
+        return fallback
+    return _bounded_public_text(text, limit)
 
 
 def _record_is_rejected(record: Mapping[str, object]) -> bool:
@@ -1535,11 +1657,16 @@ def public_review_projection(record: dict, root: Path) -> dict[str, object]:
         if (judgement_track and not quotes) or any(not quote for quote in quotes):
             structurally_invalid = True
             continue
-        text = _public_display_text(raw_text, root, unsafe_placeholder, 220)
-        evidence = _public_display_text(quotes[0], root, unsafe_placeholder, 160) if quotes else ""
-        if text == unsafe_placeholder or evidence == unsafe_placeholder:
+        text = _sanitize_public_text(raw_text, root)
+        evidence_text = _sanitize_public_text(quotes[0], root) if quotes else ""
+        if (
+            text is None
+            or len(text) > _PUBLIC_CLAIM_TEXT_HARD_CAP
+            or (quotes and evidence_text is None)
+        ):
             unsafe = True
             continue
+        evidence = _bounded_public_text(evidence_text, 160) if evidence_text else ""
         projected.append(
             {
                 "type_label": _PUBLIC_CLAIM_TYPE_LABELS[claim_type],

