@@ -1,8 +1,10 @@
 import importlib.util
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 import subprocess
 import sys
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -18,7 +20,7 @@ from research.git_ops import (
 from research.journal import abort_op, begin_op, commit_op, committed_ops, incomplete_ops, journal_entry_path, load_op
 from research.prefs import ensure_workspace
 from research.records import default_record
-from research import yaml_io
+from research import git_ops, yaml_io
 from research.yaml_io import load_yaml
 
 
@@ -658,6 +660,74 @@ def test_undo_and_restore_use_journal_digests_and_kb_history(tmp_path: Path) -> 
 
     restored = restore_operation(tmp_path, first_op["op_id"])
     assert restored["op_id"] == first_op["op_id"]
+    assert not path.exists()
+
+
+@pytest.mark.parametrize("journal_state", ["absent", "empty"])
+def test_undo_without_candidate_does_not_materialize_or_change_runtime_tree(
+    tmp_path: Path,
+    journal_state: str,
+) -> None:
+    if journal_state == "empty":
+        (tmp_path / "kb" / ".journal").mkdir(parents=True)
+
+    def runtime_tree_snapshot():
+        paths = [tmp_path, *sorted(tmp_path.rglob("*"))]
+        return {
+            path.relative_to(tmp_path).as_posix() or ".": (
+                path.lstat().st_mode,
+                path.lstat().st_mtime_ns,
+                path.read_bytes() if path.is_file() else None,
+            )
+            for path in paths
+        }
+
+    before = runtime_tree_snapshot()
+
+    with pytest.raises(SystemExit, match="没有可撤销的已提交操作"):
+        undo_last_operation(tmp_path)
+
+    assert runtime_tree_snapshot() == before
+    if journal_state == "absent":
+        assert not (tmp_path / "kb").exists()
+    else:
+        assert list((tmp_path / "kb" / ".journal").iterdir()) == []
+
+
+def test_concurrent_undo_reselects_latest_candidate_inside_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_kb_git(tmp_path)
+    record = default_record("paper", title="First Title", maturity="lightweight")
+    record["id"] = "p-concurrent-undo"
+    path = write_record(tmp_path, record)
+    git_checkpoint(tmp_path, "create concurrent undo record", auto_init=False, target_paths=[path])
+    first_op = [entry for entry in committed_ops(tmp_path) if entry["op_type"] == "write_record"][-1]
+
+    updated = load_yaml(path)
+    updated["title"] = "Second Title"
+    write_record(tmp_path, updated, expected_revision=1)
+    git_checkpoint(tmp_path, "update concurrent undo record", auto_init=False, target_paths=[path])
+    second_op = [entry for entry in committed_ops(tmp_path) if entry["op_type"] == "write_record"][-1]
+
+    real_latest_committed_op = git_ops.latest_committed_op
+    preflight_reads_complete = threading.Barrier(2)
+    thread_state = threading.local()
+
+    def synchronized_latest_committed_op(project_root: Path):
+        call_count = getattr(thread_state, "call_count", 0) + 1
+        thread_state.call_count = call_count
+        entry = real_latest_committed_op(project_root)
+        if call_count == 1:
+            preflight_reads_complete.wait(timeout=5)
+        return entry
+
+    monkeypatch.setattr(git_ops, "latest_committed_op", synchronized_latest_committed_op)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _: undo_last_operation(tmp_path), range(2)))
+
+    assert {result["op_id"] for result in results} == {first_op["op_id"], second_op["op_id"]}
     assert not path.exists()
 
 
