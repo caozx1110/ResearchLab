@@ -340,6 +340,9 @@ def apply(install_root: Path, cache_dir: Path) -> dict[str, Any]:
         source_checkout = _resolve_checkout(provenance, Path(cache_dir), pull=True)
         if source_checkout.resolve(strict=False) == root and is_git_checkout(root):
             return {"before": before, "after": read_local_version(root), "status": "updated"}
+        source_version = read_local_version(source_checkout)
+        if compare_versions(before, source_version) >= 0:
+            return {"before": before, "after": before, "status": "up_to_date"}
         source_commit = _source_commit(source_checkout)
         effective_checkout = provenance.checkout
         if provenance.is_local and effective_checkout is None:

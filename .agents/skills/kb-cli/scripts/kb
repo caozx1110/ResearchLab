@@ -365,6 +365,9 @@ def handle_update(args: argparse.Namespace, root: Path) -> int:
         if result.get("status") == "updated":
             print(f"research skill 更新完成：{result.get('before', '0.0.0')} → {result.get('after', '0.0.0')}。")
             return 0
+        if result.get("status") == "up_to_date":
+            print("当前 research skill 已是最新版本，无需更新。")
+            return 0
         if result.get("status") == "needs_source_choice":
             print("更新源尚未确认；请告诉我应继续使用哪个源码仓或本地检出。")
             set_protocol_status("needs_user_input", update=result)

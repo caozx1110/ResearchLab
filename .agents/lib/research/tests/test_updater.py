@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from research import updater
 
 
@@ -148,6 +150,60 @@ def test_apply_copy_install_invokes_ws_sync_update_without_force(monkeypatch, tm
     )
     assert "--force" not in argv
     assert "push" not in argv
+
+
+@pytest.mark.parametrize(
+    ("installed_version", "source_version"),
+    [
+        pytest.param("0.2.0", "0.2.0", id="equal"),
+        pytest.param("0.2.0", "0.1.9", id="lower-stable"),
+        pytest.param("0.2.0", "0.2.0-rc.1", id="lower-prerelease"),
+    ],
+)
+def test_apply_copy_install_skips_sync_when_source_is_not_newer(
+    monkeypatch,
+    tmp_path: Path,
+    installed_version: str,
+    source_version: str,
+) -> None:
+    install = tmp_path / "install"
+    source = tmp_path / "source"
+    (source / ".git").mkdir(parents=True)
+    (source / "install-lib").mkdir()
+    (source / "install-lib" / "ws_sync.py").write_text("", encoding="utf-8")
+    (source / ".agents").mkdir()
+    source_version_path = source / ".agents" / "VERSION"
+    source_version_path.write_text("9.9.9\n", encoding="utf-8")
+    (install / ".agents").mkdir(parents=True)
+    (install / ".agents" / "VERSION").write_text(f"{installed_version}\n", encoding="utf-8")
+    (install / updater.MANIFEST_REL).write_text(
+        json.dumps(
+            {
+                "source_origin": "git@example.test:team/fork.git",
+                "source_checkout": str(source),
+                "source_branch": "release/r1",
+            }
+        ),
+        encoding="utf-8",
+    )
+    pull_calls: list[Path] = []
+    sync_calls: list[tuple[object, ...]] = []
+
+    monkeypatch.setattr(updater, "_checkout_origin", lambda _checkout: "git@example.test:team/fork.git")
+    monkeypatch.setattr(updater, "_checkout_branch", lambda _checkout: "release/r1")
+
+    def fake_pull(checkout: Path, **_kwargs: object) -> None:
+        pull_calls.append(checkout)
+        source_version_path.write_text(f"{source_version}\n", encoding="utf-8")
+
+    monkeypatch.setattr(updater, "_pull_checkout", fake_pull)
+    monkeypatch.setattr(updater, "_invoke_ws_sync", lambda *args: sync_calls.append(args))
+
+    result = updater.apply(install, tmp_path / "cache")
+
+    assert result == {"before": installed_version, "after": installed_version, "status": "up_to_date"}
+    assert pull_calls == [source]
+    assert sync_calls == []
 
 
 def test_old_manifest_without_provenance_requires_choice_and_never_clones(monkeypatch, tmp_path: Path) -> None:
