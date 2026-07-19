@@ -338,7 +338,7 @@ def test_guided_dry_run_retries_invalid_choice_without_claiming_success(tmp_path
     assert "已为 Claude Code 和 Codex 完成配置" not in output
     assert "开始使用" not in output
     assert "[1/5]" not in output
-    assert "底层文件操作：" in output
+    assert "预计文件变更：" in output
     assert ".agents/skills/kb-cli/scripts/kb" not in output
     assert "[dry-run]" not in output
     assert ".claude/skills" not in output
@@ -496,8 +496,10 @@ def test_noninteractive_copy_lifecycle_hides_sync_engine_output_and_preserves_se
     )
 
     assert dry_run.returncode == 0, dry_run.stdout + dry_run.stderr
-    assert "底层文件操作：" in dry_run.stdout
+    assert "预计文件变更：" in dry_run.stdout
     assert "预览完成" in dry_run.stdout
+    assert "确认无误后再执行正式操作" in dry_run.stdout
+    assert "再执行正式安装" not in dry_run.stdout
     _assert_private_sync_output_hidden(dry_run, _project_root(), dry_workspace / ".agents")
     assert not any(dry_workspace.iterdir())
 
