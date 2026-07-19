@@ -111,6 +111,10 @@ def test_kb_help_snapshot_contains_group_headers() -> None:
     assert " program " not in text
     assert " source " not in text
     assert "有逐字证据支持的笔记" in text
+    assert "kb reject <单元编号>" in text
+    assert "kb restore <操作编号>" in text
+    assert "<单元 id>" not in text
+    assert "<操作 id>" not in text
 
 
 @pytest.mark.parametrize(
@@ -144,6 +148,7 @@ def test_every_argparse_help_surface_is_conversational(argv: list[str], capsys) 
 
     assert stopped.value.code == 0
     output = capsys.readouterr().out
+    assert "kb 动词（15 个）" in output
     for forbidden in (
         "--",
         "<PROJECT_ROOT>",
@@ -154,6 +159,8 @@ def test_every_argparse_help_surface_is_conversational(argv: list[str], capsys) 
         "confirm:",
         "TTY",
         "isatty",
+        "positional arguments",
+        "options:",
     ):
         assert forbidden not in output
 
@@ -641,13 +648,25 @@ def test_kb_status_public_output_hides_owner_machine_lines(
     assert protocol["details"]["kind_counts"]["paper"] == 1
 
 
-def test_kb_recovery_verbs_forward_without_raw_git_commands(monkeypatch, tmp_path: Path) -> None:
+def test_kb_recovery_verbs_forward_without_raw_git_commands(monkeypatch, tmp_path: Path, capsys) -> None:
     kb = _load_kb_cli()
     calls: list[tuple[str, tuple[str, ...]]] = []
 
-    def fake_forward(root: Path, relative_script: str, args: list[str]) -> kb.CommandResult:
+    def fake_forward(
+        root: Path,
+        relative_script: str,
+        args: list[str],
+        *,
+        stream: bool = True,
+    ) -> kb.CommandResult:
         calls.append((relative_script, tuple(args)))
-        return kb.CommandResult((relative_script, *args), 0)
+        assert stream is False
+        outputs = {
+            "resume": "没有未完成操作需要恢复。\n",
+            "undo": "已撤销最近一次操作 op-private。\n",
+            "restore": "已恢复到操作 op-123 之前的状态。\n",
+        }
+        return kb.CommandResult((relative_script, *args), 0, outputs[args[0]])
 
     monkeypatch.setattr(kb, "forward_command", fake_forward)
 
@@ -659,6 +678,11 @@ def test_kb_recovery_verbs_forward_without_raw_git_commands(monkeypatch, tmp_pat
         (".agents/skills/knowledge-base-manager/scripts/kb.py", ("undo",)),
         (".agents/skills/knowledge-base-manager/scripts/kb.py", ("restore", "op-123")),
     ]
+    assert capsys.readouterr().out == (
+        "目前没有未完成操作需要恢复。\n"
+        "最近一次知识库操作已撤销。若还需要，可再次使用 kb undo 撤销更早的操作。\n"
+        "知识库已恢复到指定操作之前的状态。\n"
+    )
 
 
 def test_kb_next_forwards_to_orchestrator(monkeypatch, tmp_path: Path) -> None:
@@ -1331,23 +1355,175 @@ def test_kb_find_public_output_is_natural_and_protocol_remains_structured(
     ]
 
 
-def test_kb_recall_forwards_default_and_explicit_kind(monkeypatch, tmp_path: Path) -> None:
+def test_kb_recall_empty_digest_is_concise_chinese(monkeypatch, tmp_path: Path, capsys) -> None:
     kb = _load_kb_cli()
     calls: list[tuple[str, tuple[str, ...]]] = []
+
+    digest = """## Recall Digest
+
+Known habits
+
+- none
+
+Known gotchas
+
+- none
+
+Pending skill defects: 0
+"""
+
+    def fake_forward(root, relative_script, args, *, stream=True):
+        calls.append((relative_script, tuple(args)))
+        assert stream is False
+        return kb.CommandResult((relative_script, *args), 0, digest)
+
+    monkeypatch.setattr(kb, "forward_command", fake_forward)
+
+    assert kb.main(["--root", str(tmp_path), "recall"]) == 0
+
+    output = capsys.readouterr().out
+    assert output == "已确认的习惯：暂无。\n已确认的已知坑：暂无。\n待审能力问题：暂无。\n"
+    assert calls == [
+        (".agents/skills/skill-evolution-advisor/scripts/learnings.py", ("recall", "--kind", "all")),
+    ]
+    for forbidden in ("Recall Digest", "Known habits", "Known gotchas", "Pending skill defects", "none"):
+        assert forbidden not in output
+
+
+@pytest.mark.parametrize(
+    ("public_kind", "owner_kind", "owner_heading", "expected_heading"),
+    [
+        ("habits", "prefs", "Known habits", "已确认的习惯"),
+        ("gotchas", "gotchas", "Known gotchas", "已确认的已知坑"),
+        ("defects", "defects", "Pending skill defects", "待审能力问题"),
+    ],
+)
+def test_kb_recall_projects_each_nonempty_kind_without_owner_markup(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+    public_kind: str,
+    owner_kind: str,
+    owner_heading: str,
+    expected_heading: str,
+) -> None:
+    kb = _load_kb_cli()
+    calls: list[tuple[str, tuple[str, ...]]] = []
+    digest = f"""## Recall Digest
+
+{owner_heading}
+
+- `learn-private-id` 保留逐字证据。 (x3) [skill: private-owner]
+"""
+
+    def fake_forward(root, relative_script, args, *, stream=True):
+        calls.append((relative_script, tuple(args)))
+        assert stream is False
+        return kb.CommandResult((relative_script, *args), 0, digest)
+
+    monkeypatch.setattr(kb, "forward_command", fake_forward)
+
+    assert kb.main(["--root", str(tmp_path), "recall", public_kind]) == 0
+
+    output = capsys.readouterr().out
+    assert output == f"{expected_heading}：\n- 保留逐字证据。（出现 3 次）\n"
+    assert calls == [
+        (".agents/skills/skill-evolution-advisor/scripts/learnings.py", ("recall", "--kind", owner_kind)),
+    ]
+    for forbidden in ("Recall Digest", owner_heading, "learn-private-id", "skill:", "private-owner"):
+        assert forbidden not in output
+
+
+def test_kb_recall_tty_and_pipe_outputs_are_identical(monkeypatch, tmp_path: Path) -> None:
+    kb = _load_kb_cli()
+    digest = "## Recall Digest\n\nKnown habits\n\n- none\n"
     monkeypatch.setattr(
         kb,
         "forward_command",
-        lambda root, relative_script, args: calls.append((relative_script, tuple(args)))
-        or kb.CommandResult((relative_script, *args), 0),
+        lambda root, relative_script, args, *, stream=True: kb.CommandResult(
+            (relative_script, *args), 0, digest
+        ),
     )
 
-    assert kb.main(["--root", str(tmp_path), "recall"]) == 0
-    assert kb.main(["--root", str(tmp_path), "recall", "gotchas"]) == 0
+    pipe = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", pipe)
+    assert kb.main(["--root", str(tmp_path), "recall", "habits"]) == 0
 
-    assert calls == [
-        (".agents/skills/skill-evolution-advisor/scripts/learnings.py", ("recall", "--kind", "all")),
-        (".agents/skills/skill-evolution-advisor/scripts/learnings.py", ("recall", "--kind", "gotchas")),
-    ]
+    tty = TTYStringIO()
+    monkeypatch.setattr(sys, "stdout", tty)
+    assert kb.main(["--root", str(tmp_path), "recall", "habits"]) == 0
+
+    assert pipe.getvalue() == tty.getvalue() == "已确认的习惯：暂无。\n"
+
+
+@pytest.mark.parametrize(
+    ("verb", "owner_stderr", "expected_public"),
+    [
+        ("undo", "Operation is not undoable: op-private\n", "知识库撤销未完成；详细诊断已保留给 Agent。\n"),
+        ("resume", "Journal restore verification failed for private/path\n", "知识库恢复未完成；详细诊断已保留给 Agent。\n"),
+    ],
+)
+def test_kb_recovery_errors_are_chinese_and_preserve_nonzero_exit(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+    verb: str,
+    owner_stderr: str,
+    expected_public: str,
+) -> None:
+    kb = _load_kb_cli()
+
+    def fake_forward(root, relative_script, args, *, stream=True):
+        assert stream is False
+        return kb.CommandResult((relative_script, *args), 9, "", owner_stderr)
+
+    monkeypatch.setattr(kb, "forward_command", fake_forward)
+
+    assert kb.main(["--root", str(tmp_path), verb]) == 9
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == expected_public
+    assert owner_stderr.strip() not in captured.err
+
+
+def test_kb_restore_unknown_keeps_owner_diagnostic_private_in_agent_protocol(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    kb = _load_kb_cli()
+
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            argv,
+            7,
+            stdout="",
+            stderr="Unknown operation: nonexistent-op\n",
+        )
+
+    monkeypatch.setattr(kb.subprocess, "run", fake_run)
+
+    assert kb.main(
+        [
+            "--root",
+            str(tmp_path),
+            "--agent-protocol",
+            "restore.json",
+            "restore",
+            "nonexistent-op",
+        ]
+    ) == 7
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "没有找到对应的知识库操作；请检查编号后重试。\n"
+    protocol = json.loads((tmp_path / "kb" / ".runtime" / "restore.json").read_text(encoding="utf-8"))
+    assert protocol["status"] == "error"
+    assert protocol["exit_code"] == 7
+    assert protocol["child_results"][0]["returncode"] == 7
+    assert protocol["child_results"][0]["stderr"] == "Unknown operation: nonexistent-op\n"
+    assert "Unknown operation" not in captured.err
 
 
 def test_kb_forward_command_prints_stderr_and_returns_nonzero(monkeypatch, tmp_path: Path, capsys) -> None:

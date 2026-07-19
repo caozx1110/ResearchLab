@@ -57,11 +57,11 @@ HELP_MENU: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("把论文、代码仓、博客或本地文件轻量入库。", "kb add <链接或路径>"),
             ("一条命令把资料来源加入知识库并备好待填骨架，随后 Agent 自动填写有逐字证据支持的笔记。", "kb ingest <链接或路径>"),
             ("查看待确认的 AI 判断，并用自然语言确认或拒绝。", "kb review"),
-            ("把误建或不采纳的知识单元标记为已拒绝。", "kb reject <单元 id>"),
+            ("把误建或不采纳的知识单元标记为已拒绝。", "kb reject <单元编号>"),
             ("回忆已确认习惯、已知坑和待审 skill 问题。", "kb recall"),
             ("恢复崩溃后未完成的知识库操作。", "kb resume"),
             ("撤销最近一次已提交的知识库操作。", "kb undo"),
-            ("恢复到指定操作之前的状态。", "kb restore <操作 id>"),
+            ("恢复到指定操作之前的状态。", "kb restore <操作编号>"),
         ),
     ),
     (
@@ -700,21 +700,128 @@ def handle_find(args: argparse.Namespace, root: Path) -> int:
 
 def handle_recall(args: argparse.Namespace, root: Path) -> int:
     kind = args.kind or "all"
-    return run_forwarded(root, [(SCRIPT_BY_VERB["recall"], ["recall", "--kind", kind])])
+    owner_kind = "prefs" if kind == "habits" else kind
+    result = forward_command(
+        root,
+        SCRIPT_BY_VERB["recall"],
+        ["recall", "--kind", owner_kind],
+        stream=False,
+    )
+    if result.returncode != 0:
+        print("回忆信息暂时无法读取；详细诊断已保留给 Agent。", file=sys.stderr)
+        return result.returncode
+    print(render_public_recall(result.stdout, kind), end="")
+    return 0
+
+
+_RECALL_OWNER_SECTIONS = {
+    "Known habits": "habits",
+    "Known gotchas": "gotchas",
+    "Pending skill defects": "defects",
+}
+
+_RECALL_PUBLIC_LABELS = {
+    "habits": "已确认的习惯",
+    "gotchas": "已确认的已知坑",
+    "defects": "待审能力问题",
+}
+
+
+def _public_recall_entry(line: str) -> str:
+    payload = re.sub(r"^-\s*`[^`]+`\s*", "", line.strip())
+    payload = re.sub(r"\s*\[skill:\s*[^\]]*\]\s*$", "", payload)
+    occurrence = re.search(r"\s*\(x(\d+)\)\s*$", payload)
+    if occurrence:
+        payload = payload[: occurrence.start()].rstrip()
+        return f"{payload}（出现 {occurrence.group(1)} 次）"
+    return payload.strip()
+
+
+def _recall_sections(owner_text: str) -> tuple[dict[str, list[str]], int]:
+    sections = {key: [] for key in _RECALL_PUBLIC_LABELS}
+    current = ""
+    pending_defect_count = 0
+    for raw_line in owner_text.splitlines():
+        line = raw_line.strip()
+        if line in _RECALL_OWNER_SECTIONS:
+            current = _RECALL_OWNER_SECTIONS[line]
+            continue
+        pending_match = re.fullmatch(r"Pending skill defects:\s*(\d+)", line)
+        if pending_match:
+            pending_defect_count = int(pending_match.group(1))
+            current = ""
+            continue
+        if not current or not line.startswith("-") or line == "- none":
+            continue
+        entry = _public_recall_entry(line)
+        if entry:
+            sections[current].append(entry)
+    if sections["defects"]:
+        pending_defect_count = len(sections["defects"])
+    return sections, pending_defect_count
+
+
+def render_public_recall(owner_text: str, kind: str) -> str:
+    sections, pending_defect_count = _recall_sections(owner_text)
+    selected = ("habits", "gotchas", "defects") if kind == "all" else (kind,)
+    lines: list[str] = []
+    for section in selected:
+        label = _RECALL_PUBLIC_LABELS[section]
+        entries = sections[section]
+        if entries:
+            lines.append(f"{label}：")
+            lines.extend(f"- {entry}" for entry in entries)
+        elif section == "defects" and pending_defect_count:
+            lines.append(f"{label}：{pending_defect_count} 条。")
+        else:
+            lines.append(f"{label}：暂无。")
+    return "\n".join(lines) + "\n"
+
+
+def _run_public_recovery(root: Path, action: str, action_args: Sequence[str]) -> int:
+    result = forward_command(
+        root,
+        SCRIPT_BY_VERB["recovery"],
+        [action, *action_args],
+        stream=False,
+    )
+    if result.returncode != 0:
+        private_diagnostic = f"{result.stdout}\n{result.stderr}"
+        if action == "restore" and "Unknown operation:" in private_diagnostic:
+            message = "没有找到对应的知识库操作；请检查编号后重试。"
+        elif action == "undo" and "没有可撤销的已提交操作" in private_diagnostic:
+            message = "目前没有可撤销的知识库操作。"
+        elif action == "undo":
+            message = "知识库撤销未完成；详细诊断已保留给 Agent。"
+        else:
+            message = "知识库恢复未完成；详细诊断已保留给 Agent。"
+        print(message, file=sys.stderr)
+        return result.returncode
+
+    if action == "resume":
+        if "没有未完成操作需要恢复" in result.stdout:
+            print("目前没有未完成操作需要恢复。")
+        else:
+            print("未完成的知识库操作已安全恢复。")
+    elif action == "undo":
+        print("最近一次知识库操作已撤销。若还需要，可再次使用 kb undo 撤销更早的操作。")
+    else:
+        print("知识库已恢复到指定操作之前的状态。")
+    return 0
 
 
 def handle_undo(args: argparse.Namespace, root: Path) -> int:
     del args
-    return run_forwarded(root, [(SCRIPT_BY_VERB["recovery"], ["undo"])])
+    return _run_public_recovery(root, "undo", [])
 
 
 def handle_resume(args: argparse.Namespace, root: Path) -> int:
     del args
-    return run_forwarded(root, [(SCRIPT_BY_VERB["recovery"], ["resume"])])
+    return _run_public_recovery(root, "resume", [])
 
 
 def handle_restore(args: argparse.Namespace, root: Path) -> int:
-    return run_forwarded(root, [(SCRIPT_BY_VERB["recovery"], ["restore", args.op_id])])
+    return _run_public_recovery(root, "restore", [args.op_id])
 
 
 def handle_reject(args: argparse.Namespace, root: Path) -> int:
@@ -1307,6 +1414,9 @@ class ConversationalArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> None:
         del message
         self.exit(2, "我没能理解这条 kb 请求。请使用 kb help 查看可用动词和示例。\n")
+
+    def format_help(self) -> str:
+        return render_help_menu()
 
 
 def register_help(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:

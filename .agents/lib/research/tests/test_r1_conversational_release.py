@@ -296,17 +296,26 @@ def test_installed_copy_runs_help_without_creating_runtime_data(tmp_path: Path) 
     )
     assert install.returncode == 0, install.stdout + install.stderr
 
-    help_result = subprocess.run(
-        [sys.executable, "-B", str(_kb_script(workspace)), "help"],
-        cwd=workspace,
-        env=_safe_runtime_env(),
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    help_results = [
+        subprocess.run(
+            [sys.executable, "-B", str(_kb_script(workspace)), *argv],
+            cwd=workspace,
+            env=_safe_runtime_env(),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        for argv in (["help"], ["--help"], ["init", "--help"], ["review", "--help"])
+    ]
 
-    assert help_result.returncode == 0, help_result.stderr
-    assert "kb 动词（15 个）" in help_result.stdout
+    for help_result in help_results:
+        assert help_result.returncode == 0, help_result.stderr
+        assert "kb 动词（15 个）" in help_result.stdout
+        assert "positional arguments" not in help_result.stdout
+        assert "options:" not in help_result.stdout
+        assert help_result.stderr == ""
+        for token in FORBIDDEN_PUBLIC_TOKENS:
+            assert token not in help_result.stdout
     assert not (workspace / "kb").exists()
     installed_rules = (workspace / "AGENTS.md").read_text(encoding="utf-8")
     assert "## Conversational contract" in installed_rules
