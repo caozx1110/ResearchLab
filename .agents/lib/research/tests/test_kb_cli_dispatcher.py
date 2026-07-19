@@ -928,6 +928,50 @@ def test_kb_next_public_output_and_protocol_preserve_human_gate_semantics(
     ]
 
 
+def test_kb_next_projects_attached_stale_verification_as_natural_agent_work(
+    monkeypatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    kb = _load_kb_cli()
+    payload = {
+        "has_records": True,
+        "items": [
+            {
+                "program_id": "program-stale",
+                "record_id": "p-stale-12345678",
+                "title": "Stale Paper",
+                "step_type": "agent-verify",
+                "action_kind": "agent-work",
+                "stage": "literature-review",
+                "next_action": "ready_to_verify --internal .agents/private",
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        kb,
+        "forward_command",
+        lambda root, relative_script, args, *, stream=True: kb.CommandResult(
+            (relative_script, *args), 0, json.dumps(payload)
+        ),
+    )
+
+    assert kb.main(
+        ["--root", str(tmp_path), "--agent-protocol", "stale-next.json", "next"]
+    ) == 0
+
+    output = capsys.readouterr().out
+    assert "研究计划「program-stale」：Agent 需要核验分析与逐字证据" in output
+    assert "可以直接告诉 Agent 继续推进" in output
+    _assert_public_governance_safe(output)
+    protocol = json.loads(
+        (tmp_path / "kb" / ".runtime" / "stale-next.json").read_text(encoding="utf-8")
+    )
+    assert protocol["status"] == "agent_action_required"
+    assert protocol["next_actions"][0]["action"] == "continue_research_work"
+    assert protocol["next_actions"][0]["item"]["record_id"] == "p-stale-12345678"
+
+
 def test_kb_next_blocker_with_pending_count_stays_agent_work_and_sanitizes_suffix(
     monkeypatch,
     tmp_path: Path,

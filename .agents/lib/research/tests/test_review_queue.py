@@ -7,7 +7,14 @@ from pathlib import Path
 import pytest
 
 from research.common import load_yaml, write_yaml_if_changed
-from research.core import ensure_workspace, record_path, runtime_preferences_path, search_records
+from research.core import (
+    ensure_workspace,
+    iter_records,
+    record_path,
+    record_workflow_state,
+    runtime_preferences_path,
+    search_records,
+)
 from research.evidence import build_verification_receipt
 
 
@@ -598,6 +605,38 @@ def test_review_queue_uses_current_verified_judgement_readiness_for_all_source_k
     assert ready_ids <= listed
     assert hollow_id not in listed
     assert stale_id not in listed
+
+
+@pytest.mark.parametrize("kind", ["paper", "blog", "repo"])
+def test_stale_verified_judgement_returns_to_agent_verification(
+    tmp_path: Path,
+    kind: str,
+) -> None:
+    ensure_workspace(tmp_path)
+    unit_id = _write_verified_judgement(tmp_path, kind, suffix=f"stale-{kind}")
+    evidence_path = record_path(tmp_path, kind, unit_id).parent / "raw" / "source.txt"
+    evidence_path.write_text("changed source bytes\n", encoding="utf-8")
+
+    record = next(item for item in iter_records(tmp_path, kind=kind) if item["id"] == unit_id)
+
+    assert record["confirmation_status"] == "pending_user_confirmation"
+    assert record["payload"]["verification"]["invalidation"]["reason"] == "verification_stale"
+    assert record_workflow_state(record) == "ready_to_verify"
+
+
+@pytest.mark.parametrize("kind", ["paper", "blog", "repo"])
+def test_stale_hollow_judgement_returns_to_agent_fill(
+    tmp_path: Path,
+    kind: str,
+) -> None:
+    ensure_workspace(tmp_path)
+    unit_id = _write_verified_judgement(tmp_path, kind, suffix=f"stale-hollow-{kind}", hollow=True)
+    evidence_path = record_path(tmp_path, kind, unit_id).parent / "raw" / "source.txt"
+    evidence_path.write_text("changed source bytes\n", encoding="utf-8")
+
+    record = next(item for item in iter_records(tmp_path, kind=kind) if item["id"] == unit_id)
+
+    assert record_workflow_state(record) == "awaiting_agent_fill"
 
 
 def test_batch_confirmation_transmits_final_user_authorization_signature(monkeypatch, tmp_path: Path) -> None:
