@@ -49,7 +49,7 @@ from research.bootstrap import ensure_managed_runtime
 if __name__ == "__main__":
     ensure_managed_runtime(PROJECT_ROOT)
 
-from research.common import add_project_root_argument, load_yaml, print_resolved_project_roots
+from research.common import add_project_root_argument, load_yaml, print_resolved_project_roots, write_text_if_changed
 from research.core import (
     UNIT_KIND_DIRS,
     iter_records,
@@ -60,6 +60,7 @@ from research.core import (
     units_root,
 )
 from research.retrieval import tokenize_query
+from research.journal import mutation_transaction
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -668,9 +669,9 @@ def main() -> int:
     if not args.no_write:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         report_dir = root / REPORT_DIRNAME
-        report_dir.mkdir(parents=True, exist_ok=True)
         report_path = report_dir / f"{stamp}-tier1.md"
-        report_path.write_text(report, encoding="utf-8")
+        with mutation_transaction(root, "write-research-value-report", [report_path]):
+            write_text_if_changed(report_path, report)
         print(f"[ok] wrote report: {report_path.relative_to(root)}",
               file=sys.stderr if args.json else sys.stdout)
 

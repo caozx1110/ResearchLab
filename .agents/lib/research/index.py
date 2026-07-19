@@ -538,7 +538,6 @@ def lint_workspace_integrity(project_root: Path) -> list[str]:
 
 
 def lint_records(project_root: Path) -> tuple[str, list[str]]:
-    ensure_workspace(project_root)
     issues: list[str] = []
     for raw_record in iter_records(project_root):
         try:

@@ -22,8 +22,9 @@ from research.bootstrap import ensure_managed_runtime
 if __name__ == "__main__":
     ensure_managed_runtime(PROJECT_ROOT)
 
-from research.common import add_project_root_argument, append_program_reporting_event, ensure_dir, load_yaml, normalize_list, print_resolved_project_roots, write_text_if_changed, write_yaml_if_changed, yaml_default
+from research.common import add_project_root_argument, append_program_reporting_event, ensure_dir, load_yaml, normalize_list, print_resolved_project_roots, program_reporting_events_path, write_text_if_changed, write_yaml_if_changed, yaml_default
 from research.core import iter_records, locate_record, project_root, rel
+from research.journal import mutation_transaction
 
 
 DEFAULT_EXPERIMENT_SCALE = {
@@ -397,149 +398,152 @@ def main() -> int:
     ]
     resource_requests = [item["resource_request"] for item in experiments if item.get("resource_request")]
 
-    write_text_if_changed(
-        method_path,
-        (
-            f"# Method Design: {record.get('title', '')}\n\n"
-            "## Problem\n\n"
-            f"{problem.get('problem_definition', '')}\n\n"
-            "## Core Hypothesis\n\n"
-            f"{hypothesis.get('core_hypothesis', '')}\n\n"
-            "## Repo Choice\n\n"
-            f"- Leading candidate: `{selected_repo.get('id') or 'pending'}`\n"
-            f"- Candidate corpus: {repo_corpus['note']}\n"
-            f"- Repo summary: {selected_repo.get('summary', '') or '待补充'}\n"
-            f"- Ranking signals: {', '.join(selected_repo.get('overlap', [])) or 'manual inspection required'}\n"
-            "- Agent selection judgement: pending; fill a claim and cite evidence before confirmation.\n\n"
-            "## Minimal Design\n\n"
-            f"- Base approach: {analysis.get('minimum_validation_path', '') or '从最小可验证实现开始'}\n"
-            f"- Expected differentiator: {hypothesis.get('difference_from_prior_work', '') or '待补充'}\n"
-            f"- Key mechanism: {hypothesis.get('key_mechanism', '') or '待补充'}\n\n"
-            "## Interfaces\n\n"
-            + "".join(f"- `{item['name']}`: {item['detail']}\n" for item in interfaces)
-            + "\n## Validation Plan\n\n"
-            + "".join(f"- Baseline: {item}\n" for item in baselines)
-            + "".join(f"- Metric: {item}\n" for item in metrics)
-            + "".join(f"- Risk: {item}\n" for item in (risks or ['待补充']))
-            + "- Stop condition: Stop if baseline parity is not reached or the interface seam stays unstable.\n"
-        ),
-    )
-    write_yaml_if_changed(
-        repo_choice_path,
-        {
-            "idea_id": args.idea_id,
-            "program_id": args.program_id,
-            "selected_repo_id": selected_repo.get("id", ""),
-            "selection_reason": "",
-            "selection_judgement": {
-                "claim": "",
-                "evidence": [],
-                "status": "pending_agent_evidence",
-                "instructions": "Agent: explain why this candidate fits the method and cite record or file evidence.",
-            },
-            "ranking_basis": {
-                "type": "deterministic-token-overlap",
-                "leading_candidate_id": selected_repo.get("id", ""),
-                "leading_candidate_score": selected_repo.get("score", 0),
-                "signals": selected_repo.get("overlap", []),
-            },
-            "selection_status": "pending_user_confirmation",
-            "information_types": ["fact", "inference", "evaluation", "unverified"],
-            "candidate_repos": [
-                {
-                    "repo_id": item.get("id", ""),
-                    "title": item.get("title", ""),
-                    "summary": item.get("summary", ""),
-                    "score": item.get("score", 0),
-                    "entrypoints": item.get("entrypoints", []),
-                    "overlap": item.get("overlap", []),
-                }
-                for item in candidate_repos
-            ],
-            "repo_choice_policy": {
-                "prefer_user_pinned_repo": bool(normalize_list(args.repo_id)),
-                "prefer_program_active_unit_ids": True,
-                "prefer_existing_repo_units": True,
-                "fallback": "manual-selection-required",
-            },
-            "candidate_corpus": repo_corpus,
-        },
-    )
-    write_yaml_if_changed(
-        interfaces_path,
-        {
-            "idea_id": args.idea_id,
-            "program_id": args.program_id,
-            "selected_repo_id": selected_repo.get("id", ""),
-            "interfaces": interfaces,
-            "config_keys": ["experiment.variant", "adapter.mode", "eval.slice"],
-            "metrics": metrics,
-            "artifacts": ["logs/", "checkpoints/", "tables/", "failure-cases/"],
-            "edit_surfaces": normalize_list(selected_repo.get("entrypoints", []))[:5],
-            "information_types": ["fact", "inference", "unverified"],
-            "confirmation_status": "pending_user_confirmation",
-        },
-    )
-    write_yaml_if_changed(
-        matrix_path,
-        {
-            "idea_id": args.idea_id,
-            "program_id": args.program_id,
-            "selected_repo_id": selected_repo.get("id", ""),
-            "resource_profile": resource_capacity(resources),
-            "resource_requests": resource_requests,
-            "experiments": experiments,
-            "baselines": baselines,
-            "baseline_judgements": [
-                {
-                    "baseline": baseline,
+    event_path = program_reporting_events_path(root, args.program_id)
+    targets = [method_path, repo_choice_path, interfaces_path, matrix_path, state_path, event_path]
+    with mutation_transaction(root, "design-method", targets):
+        write_text_if_changed(
+            method_path,
+            (
+                f"# Method Design: {record.get('title', '')}\n\n"
+                "## Problem\n\n"
+                f"{problem.get('problem_definition', '')}\n\n"
+                "## Core Hypothesis\n\n"
+                f"{hypothesis.get('core_hypothesis', '')}\n\n"
+                "## Repo Choice\n\n"
+                f"- Leading candidate: `{selected_repo.get('id') or 'pending'}`\n"
+                f"- Candidate corpus: {repo_corpus['note']}\n"
+                f"- Repo summary: {selected_repo.get('summary', '') or '待补充'}\n"
+                f"- Ranking signals: {', '.join(selected_repo.get('overlap', [])) or 'manual inspection required'}\n"
+                "- Agent selection judgement: pending; fill a claim and cite evidence before confirmation.\n\n"
+                "## Minimal Design\n\n"
+                f"- Base approach: {analysis.get('minimum_validation_path', '') or '从最小可验证实现开始'}\n"
+                f"- Expected differentiator: {hypothesis.get('difference_from_prior_work', '') or '待补充'}\n"
+                f"- Key mechanism: {hypothesis.get('key_mechanism', '') or '待补充'}\n\n"
+                "## Interfaces\n\n"
+                + "".join(f"- `{item['name']}`: {item['detail']}\n" for item in interfaces)
+                + "\n## Validation Plan\n\n"
+                + "".join(f"- Baseline: {item}\n" for item in baselines)
+                + "".join(f"- Metric: {item}\n" for item in metrics)
+                + "".join(f"- Risk: {item}\n" for item in (risks or ['待补充']))
+                + "- Stop condition: Stop if baseline parity is not reached or the interface seam stays unstable.\n"
+            ),
+        )
+        write_yaml_if_changed(
+            repo_choice_path,
+            {
+                "idea_id": args.idea_id,
+                "program_id": args.program_id,
+                "selected_repo_id": selected_repo.get("id", ""),
+                "selection_reason": "",
+                "selection_judgement": {
                     "claim": "",
                     "evidence": [],
                     "status": "pending_agent_evidence",
-                }
-                for baseline in baselines
-            ],
-            "risks": risks,
-            "information_types": ["fact", "inference", "evaluation", "unverified"],
-            "confirmation_status": "pending_user_confirmation",
-        },
-    )
-    state["selected_idea_id"] = args.idea_id
-    state["selected_repo_id"] = selected_repo.get("id", "")
-    if resources:
-        state["resource_constraints"] = resources
-    if str(state.get("stage") or "").strip() in {"", "init", "idea-review"}:
-        state["stage"] = "implementation-planning"
-    write_yaml_if_changed(state_path, state)
+                    "instructions": "Agent: explain why this candidate fits the method and cite record or file evidence.",
+                },
+                "ranking_basis": {
+                    "type": "deterministic-token-overlap",
+                    "leading_candidate_id": selected_repo.get("id", ""),
+                    "leading_candidate_score": selected_repo.get("score", 0),
+                    "signals": selected_repo.get("overlap", []),
+                },
+                "selection_status": "pending_user_confirmation",
+                "information_types": ["fact", "inference", "evaluation", "unverified"],
+                "candidate_repos": [
+                    {
+                        "repo_id": item.get("id", ""),
+                        "title": item.get("title", ""),
+                        "summary": item.get("summary", ""),
+                        "score": item.get("score", 0),
+                        "entrypoints": item.get("entrypoints", []),
+                        "overlap": item.get("overlap", []),
+                    }
+                    for item in candidate_repos
+                ],
+                "repo_choice_policy": {
+                    "prefer_user_pinned_repo": bool(normalize_list(args.repo_id)),
+                    "prefer_program_active_unit_ids": True,
+                    "prefer_existing_repo_units": True,
+                    "fallback": "manual-selection-required",
+                },
+                "candidate_corpus": repo_corpus,
+            },
+        )
+        write_yaml_if_changed(
+            interfaces_path,
+            {
+                "idea_id": args.idea_id,
+                "program_id": args.program_id,
+                "selected_repo_id": selected_repo.get("id", ""),
+                "interfaces": interfaces,
+                "config_keys": ["experiment.variant", "adapter.mode", "eval.slice"],
+                "metrics": metrics,
+                "artifacts": ["logs/", "checkpoints/", "tables/", "failure-cases/"],
+                "edit_surfaces": normalize_list(selected_repo.get("entrypoints", []))[:5],
+                "information_types": ["fact", "inference", "unverified"],
+                "confirmation_status": "pending_user_confirmation",
+            },
+        )
+        write_yaml_if_changed(
+            matrix_path,
+            {
+                "idea_id": args.idea_id,
+                "program_id": args.program_id,
+                "selected_repo_id": selected_repo.get("id", ""),
+                "resource_profile": resource_capacity(resources),
+                "resource_requests": resource_requests,
+                "experiments": experiments,
+                "baselines": baselines,
+                "baseline_judgements": [
+                    {
+                        "baseline": baseline,
+                        "claim": "",
+                        "evidence": [],
+                        "status": "pending_agent_evidence",
+                    }
+                    for baseline in baselines
+                ],
+                "risks": risks,
+                "information_types": ["fact", "inference", "evaluation", "unverified"],
+                "confirmation_status": "pending_user_confirmation",
+            },
+        )
+        state["selected_idea_id"] = args.idea_id
+        state["selected_repo_id"] = selected_repo.get("id", "")
+        if resources:
+            state["resource_constraints"] = resources
+        if str(state.get("stage") or "").strip() in {"", "init", "idea-review"}:
+            state["stage"] = "implementation-planning"
+        write_yaml_if_changed(state_path, state)
+        append_program_reporting_event(
+            root,
+            args.program_id,
+            {
+                "source_skill": "method-designer",
+                "event_type": "method-design",
+                "title": record.get("title", args.idea_id),
+                "summary": (
+                    f"Drafted method-design skeleton with leading repo candidate `{selected_repo.get('id', 'pending')}`, "
+                    f"{len(interfaces)} interfaces, and {4} planned matrix rows."
+                ),
+                "stage": "implementation-planning",
+                "idea_ids": [args.idea_id],
+                "repo_ids": normalize_list([selected_repo.get("id", "")]),
+                "artifacts": [
+                    rel(root, method_path),
+                    rel(root, repo_choice_path),
+                    rel(root, interfaces_path),
+                    rel(root, matrix_path),
+                    rel(root, state_path),
+                ],
+                "tags": ["method-design", "repo-choice", "interfaces", "experiment-matrix"],
+            },
+            generated_by="method-designer",
+        )
     if repo_corpus["fallback_used"]:
         print(repo_corpus["note"])
     for request in resource_requests:
         print(f"Resource request: {request}")
-    append_program_reporting_event(
-        root,
-        args.program_id,
-        {
-            "source_skill": "method-designer",
-            "event_type": "method-design",
-            "title": record.get("title", args.idea_id),
-            "summary": (
-                f"Drafted method-design skeleton with leading repo candidate `{selected_repo.get('id', 'pending')}`, "
-                f"{len(interfaces)} interfaces, and {4} planned matrix rows."
-            ),
-            "stage": "implementation-planning",
-            "idea_ids": [args.idea_id],
-            "repo_ids": normalize_list([selected_repo.get("id", "")]),
-            "artifacts": [
-                rel(root, method_path),
-                rel(root, repo_choice_path),
-                rel(root, interfaces_path),
-                rel(root, matrix_path),
-                rel(root, state_path),
-            ],
-            "tags": ["method-design", "repo-choice", "interfaces", "experiment-matrix"],
-        },
-        generated_by="method-designer",
-    )
     print(method_path.relative_to(root))
     print(repo_choice_path.relative_to(root))
     print(interfaces_path.relative_to(root))

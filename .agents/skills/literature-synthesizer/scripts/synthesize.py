@@ -24,6 +24,7 @@ if __name__ == "__main__":
 from research.common import add_project_root_argument, ensure_dir, load_yaml, print_resolved_project_roots, slugify, write_text_if_changed, write_yaml_if_changed
 from research.core import iter_records, project_root, rel, synthesis_root, unit_root
 from research.evidence import validate_claims, verify_claim_evidence
+from research.journal import mutation_transaction
 
 
 SECTION_SPECS = (
@@ -448,17 +449,17 @@ def main() -> int:
             return 1
         output_slug = slugify(str(payload.get("slug") or "survey"), max_words=8) or "survey"
         verified_root = synthesis_root(root) / output_slug
-        ensure_dir(verified_root)
         yaml_path = verified_root / f"{mode}.yaml"
         md_path = verified_root / "summary.md"
-        write_yaml_if_changed(yaml_path, payload)
-        write_text_if_changed(md_path, render_verified_summary(payload))
+        with mutation_transaction(root, f"verify-{mode}", [yaml_path, md_path]):
+            ensure_dir(verified_root)
+            write_yaml_if_changed(yaml_path, payload)
+            write_text_if_changed(md_path, render_verified_summary(payload))
         print(rel(root, yaml_path))
         print(rel(root, md_path))
         return 0
     slug = slugify(query or args.topic or args.tag or args.pool or args.kind or mode, max_words=8) or mode
     out_root = synthesis_root(root) / slug
-    ensure_dir(out_root)
     selected = select_records(
         iter_records(root),
         query=query,
@@ -483,7 +484,9 @@ def main() -> int:
             as_of=args.as_of,
         )
         fill_path = out_root / f"{mode}-fill.yaml"
-        write_yaml_if_changed(fill_path, payload)
+        with mutation_transaction(root, f"prepare-{mode}", [fill_path]):
+            ensure_dir(out_root)
+            write_yaml_if_changed(fill_path, payload)
         print(rel(root, fill_path))
         return 0
     raise SystemExit(f"unsupported action: {args.action}")
