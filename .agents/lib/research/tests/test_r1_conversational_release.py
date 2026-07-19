@@ -50,6 +50,25 @@ EXPECTED_RUNTIME_PINS = {
     "pymupdf": "1.26.5",
 }
 EXPECTED_DEV_PINS = {"pytest": "8.4.2"}
+CAPABILITY_MATURITY = {
+    "kb-cli": "stable",
+    "knowledge-base-manager": "stable",
+    "source-intake": "beta",
+    "paper-analyst": "beta",
+    "repo-analyst": "beta",
+    "blog-analyst": "beta",
+    "research-config-manager": "beta",
+    "discussion-archivist": "beta",
+    "research-orchestrator": "scaffold",
+    "literature-synthesizer": "scaffold",
+    "idea-workbench": "scaffold",
+    "method-designer": "scaffold",
+    "experiment-workbench": "scaffold",
+    "report-author": "scaffold",
+    "skill-evolution-advisor": "scaffold",
+    "wiki-adapter": "scaffold",
+    "research-navigator": "dev-only",
+}
 
 
 def _project_root() -> Path:
@@ -132,6 +151,25 @@ def test_public_verb_registry_and_docs_match_exactly() -> None:
         text = (_project_root() / relative).read_text(encoding="utf-8")
         for verb in PUBLIC_VERBS:
             assert f"`kb {verb}" in text, f"{relative} does not document kb {verb}"
+
+
+def test_docs_disclose_every_skill_maturity_without_bundle_overclaim() -> None:
+    for relative in ("README.md", "docs/USER_GUIDE.md"):
+        text = (_project_root() / relative).read_text(encoding="utf-8")
+        for label in ("stable", "beta", "scaffold", "dev-only"):
+            assert label in text, f"{relative} does not define {label}"
+        for skill, maturity in CAPABILITY_MATURITY.items():
+            row = rf"\|\s*`{re.escape(skill)}`\s*\|\s*{maturity}\s*\|"
+            assert re.search(row, text), f"{relative} does not mark {skill} as {maturity}"
+        assert "whole bundle" in text or "整个 bundle" in text
+        assert "paper" in text and "repo" in text and "blog" in text
+
+
+def test_user_guide_does_not_expose_raw_execution_or_internal_paths() -> None:
+    guide = (_project_root() / "docs" / "USER_GUIDE.md").read_text(encoding="utf-8")
+    for token in ("python3 ", ".agents/", "kb/", ".py ", "${", "NEXT FOR AGENT"):
+        assert token not in guide
+    assert not re.search(r"(^|\s)--[A-Za-z]", guide)
 
 
 def test_static_human_print_literals_and_input_model_are_safe() -> None:

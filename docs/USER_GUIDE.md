@@ -2,9 +2,40 @@
 
 这套 workspace 帮你把论文、代码仓、技术文章、想法、实验和汇报，从聊天里的临时内容变成可复用、可检索、可确认的本地知识。
 
-它不是预装好的知识库。安装后，`.agents/` 提供能力，`kb/` 保存你的研究数据，两者位于 workspace 根目录下。AI 负责提取、整理、追踪和汇总；你负责判断、确认和拍板。
+它不是预装好的知识库。安装后，能力包与研究数据分开保存。AI 负责提取、整理、追踪和汇总；你负责判断、确认和拍板。
 
 当前版本是 **internal alpha / pre-release**。治理规则已经比较严格，但公开接口在首个稳定版前仍可能调整。
+
+## 能力成熟度（按组件）
+
+这里的等级只描述某个组件的当前边界，不代表整个 bundle 已稳定：
+
+- **stable**：所列基础设施合同已有确定性的发布测试；
+- **beta**：主流程真实可用，但仍依赖 Agent 判断或来源材料质量；
+- **scaffold**：持久化和治理骨架已存在，研究内容质量仍在加固；
+- **dev-only**：只作为本地开发能力，不承诺为正式用户入口。
+
+| Skill | 成熟度 | 当前边界 |
+|---|---|---|
+| `kb-cli` | stable | 十五个动词的路由、自然语言输出过滤和恢复入口。 |
+| `knowledge-base-manager` | stable | 数据规范、证据、确认、精确恢复和索引治理；不负责理解研究材料。 |
+| `source-intake` | beta | 异构来源的暂存、去重、原始材料留存和可重试失败。 |
+| `paper-analyst` | beta | 带证据的准备与验证是真实流程；实质阅读由 Agent 完成。 |
+| `repo-analyst` | beta | 能力地图准备与代码证据验证是真实流程；代码理解由 Agent 完成。 |
+| `blog-analyst` | beta | 文章准备与观点证据验证是真实流程；解释和可信度判断由 Agent 完成。 |
+| `research-config-manager` | beta | 偏好与策略可以持久化，但尚非所有偏好都被所有下游能力消费。 |
+| `discussion-archivist` | beta | 按结论保存讨论、证据和开放问题。 |
+| `research-orchestrator` | scaffold | 研究计划主线、路由、看板和事件流已存在，优先级仍以固定策略为主。 |
+| `literature-synthesizer` | scaffold | 有证据优先的综述结构，分类、趋势与空白仍高度依赖 Agent。 |
+| `idea-workbench` | scaffold | 候选、评审、讨论和选择结构已存在，创新性质量尚未达到稳定基准。 |
+| `method-designer` | scaffold | 方法交接和实验矩阵结构已存在，生成设计仍需专家复核。 |
+| `experiment-workbench` | scaffold | 强类型实验记录和诊断治理已存在，诊断质量仍依赖 Agent。 |
+| `report-author` | scaffold | 报告与大纲会消费持久证据，但成文质量和覆盖度仍在加固。 |
+| `skill-evolution-advisor` | scaffold | 学习记录与复核流程已存在，不承诺自动修改 skill。 |
+| `wiki-adapter` | scaffold | 仅提供轻量兼容与路由，不是独立分析引擎。 |
+| `research-navigator` | dev-only | 本地浏览工作台仍是开发能力；自然语言导航摘要属于 beta。 |
+
+某一次 paper、repo 或 blog 分析的分数，只能说明对应 analyzer 的表现，不能外推到综述、idea、方法、实验、报告、导航或整个 bundle。上面两个范围受限的 **stable** 组件，也不代表当前 pre-release 已成为稳定发布。
 
 ## 第一次使用
 
@@ -34,7 +65,7 @@ AI 适合自动完成：
 
 1. 提取论文、仓库和文章的事实 metadata；
 2. 去重、建立索引和搜索本地知识单元；
-3. 从不可变 source 或 parse cache 填写带逐字证据的分析；
+3. 从受保护的原始材料与派生证据填写带逐字证据的分析；
 4. 跟踪 program open question、实验 follow-up 和待确认判断；
 5. 生成导航、周报素材和可复开的 durable artifacts；
 6. 在中断后按 operation journal 恢复，或按精确路径建立 KB checkpoint。
@@ -153,29 +184,17 @@ Run log 是事实；diagnosis 是推断，默认待确认。报告系统从 prog
 
 ## 恢复、撤销与版本
 
-知识库写入采用原子写、revision/CAS、operation journal 和精确路径锁。多文件操作在开始前声明目标集合；恢复与 checkpoint 使用同一集合，不会把整个 `kb/` 一股脑加入版本历史。
+知识库写入采用原子写、revision/CAS、operation journal 和精确范围锁。多文件操作在开始前声明目标集合；恢复与 checkpoint 使用同一集合，不会把无关研究资料一股脑加入版本历史。
 
 如果操作中断，可使用 `kb resume`。如果想回到最近一次操作之前，可使用 `kb undo`；指定历史操作则使用 `kb restore <操作编号>`。当 KB 没有变化时，手动 checkpoint 是成功的 no-op。
 
 `kb update` 会保留安装来源与分支：本地 checkout 仍使用本地 checkout，fork 的非 main 分支仍使用原 fork branch。旧安装如果没有可信来源或 branch，会先请你选择，不会悄悄切换到某个默认远端。Detached checkout 绑定当前 commit，后续更新前需要选择 branch。正常调用不会往共享 Python 解释器里安装包。
 
-## 目录心智模型
+## 数据心智模型
 
-```text
-kb/
-├── raw/          # 不可变外部 source bytes
-├── units/        # papers / repos / blogs / ideas / experiments
-├── programs/     # 状态、决策、设计、实验、报告
-├── synthesis/    # survey / taxonomy / trends / gaps
-├── config/       # 用户与运行策略
-├── user/         # 生成的人类入口页
-├── output/       # 导出产物
-└── .runtime/     # 本地私有运行状态
-```
+只需记住五层：受保护的原始证据、可复用的知识单元、研究计划与决策、跨材料综合，以及可重新生成的导出物。原始材料和完整派生证据只读不覆盖；知识单元与研究计划是主要真相；导航和导出都可以从它们重建。
 
-`raw/` 和完整 parse cache 是不可变派生证据；后续步骤只读不覆盖。`units/` 与 `programs/` 是主要真相；`user/` 是生成入口；`output/` 不是唯一 source of truth。
-
-更新、迁移和卸载不会把私有 `kb/` 打进发布包。Storage sync 也不会重写已安装的 `.agents/` 或 workspace 根规则。
+更新、迁移和卸载不会把私有研究数据带进发布包，也不会重写无关的 workspace 文件。
 
 ## 记忆与偏好
 
