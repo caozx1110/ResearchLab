@@ -636,6 +636,13 @@ def _has_unverified_judgement_signal(record: dict[str, Any]) -> bool:
     return False
 
 
+def _has_substantive_judgement_content(record: dict[str, Any]) -> bool:
+    """Reuse the confirmation gate's substance criterion without import cycling."""
+    from .confirm import has_substantive_content
+
+    return has_substantive_content(record, str(record.get("kind") or ""))
+
+
 def record_workflow_state(record: dict[str, Any]) -> str:
     """Single pure classifier shared by next/review/status/auto callers."""
     status = str(record.get("status") or "").strip().lower()
@@ -648,9 +655,13 @@ def record_workflow_state(record: dict[str, Any]) -> str:
     claims = confirmation_claims(record)
     information_types = {str(value) for value in record.get("information_types") or []}
     claim_types = {str(claim.get("claim_type") or "") for claim in claims}
-    never_review_ready = bool(
-        information_types & {"user_opinion", "unverified"}
-        or claim_types & {"user_opinion", "unverified"}
+    unconfirmable_claims = bool(claim_types & UNCONFIRMABLE_CLAIM_TYPES)
+    judgement_claims_present = bool(claim_types & JUDGEMENT_CLAIM_TYPES)
+    judgement_record = bool(
+        _record_needs_gate(record)[0]
+        or "unverified" in information_types
+        or judgement_claims_present
+        or _has_unverified_judgement_signal(record)
     )
     needs_gate = (
         _record_needs_gate(record)[0]
@@ -673,10 +684,24 @@ def record_workflow_state(record: dict[str, Any]) -> str:
     if marker in {"ready_to_verify", "agent_fill_complete"}:
         return "ready_to_verify"
 
-    verification_current = bool(claims) and not never_review_ready and not verification_receipt_violations(
-        record,
-        None,
-        check_artifacts=False,
+    verification = payload.get("verification")
+    verification = verification if isinstance(verification, dict) else {}
+    verification_current = (
+        bool(claims)
+        and not unconfirmable_claims
+        and not verification.get("invalidation")
+        and not verification_receipt_violations(
+            record,
+            None,
+            check_artifacts=False,
+        )
+        and (
+            not judgement_record
+            or (
+                judgement_claims_present
+                and _has_substantive_judgement_content(record)
+            )
+        )
     )
     if confirmation_status == "pending_user_confirmation":
         if verification_current:

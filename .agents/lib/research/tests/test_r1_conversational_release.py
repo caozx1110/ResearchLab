@@ -42,6 +42,7 @@ FORBIDDEN_PUBLIC_TOKENS = (
     "confirm:",
     "TTY",
     "isatty",
+    "rejected",
 )
 
 EXPECTED_RUNTIME_PINS = {
@@ -270,7 +271,7 @@ def test_kb_status_is_byte_identical_for_every_workspace_file(tmp_path: Path) ->
         if path.is_file()
     }
     assert completed.returncode == 0, completed.stderr
-    assert "# Current State" in completed.stdout
+    assert completed.stdout == "知识库尚未收录资料。\n"
     assert before == after
 
 
@@ -312,6 +313,91 @@ def test_installed_copy_runs_help_without_creating_runtime_data(tmp_path: Path) 
     assert "## Editing Rules" not in installed_rules
 
 
+def test_installed_copy_repeated_init_preserves_preferences_and_tree(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    install = subprocess.run(
+        [
+            "bash",
+            str(_project_root() / "install.sh"),
+            "install",
+            "--project",
+            str(workspace),
+            "--yes",
+            "--codex",
+        ],
+        cwd=_project_root(),
+        env=_safe_runtime_env(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert install.returncode == 0, install.stdout + install.stderr
+
+    first = subprocess.run(
+        [
+            sys.executable,
+            "-B",
+            str(_kb_script(workspace)),
+            "init",
+            "--name",
+            "Installed Researcher",
+            "--lang",
+            "en",
+            "--auto-commit",
+            "manual",
+            "--auto-screen",
+            "false",
+            "--persona-focus",
+            "VLA",
+            "--persona-term",
+            "bilingual",
+        ],
+        cwd=workspace,
+        env=_safe_runtime_env(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert first.stdout == "知识库和基础偏好已准备好。\n"
+
+    runtime_path = workspace / "kb" / "config" / "runtime-preferences.yaml"
+    runtime = yaml.safe_load(runtime_path.read_text(encoding="utf-8"))
+    runtime["autonomy"]["auto_execute_scope"] = ["screen"]
+    runtime_path.write_text(
+        yaml.safe_dump(runtime, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    before = _tree_snapshot(workspace)
+
+    second = subprocess.run(
+        [sys.executable, "-B", str(_kb_script(workspace)), "init"],
+        cwd=workspace,
+        env=_safe_runtime_env(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert second.stdout == "知识库和基础偏好已准备好。\n"
+    for token in ("[ok]", "created", "initial_commit", "kb/", "grounded"):
+        assert token not in first.stdout + second.stdout
+    assert _tree_snapshot(workspace) == before
+    runtime_after = yaml.safe_load(runtime_path.read_text(encoding="utf-8"))
+    profile_after = yaml.safe_load(
+        (workspace / "kb" / "config" / "user-profile.yaml").read_text(encoding="utf-8")
+    )
+    assert runtime_after["identity"]["default_confirmed_by"] == "Installed Researcher"
+    assert runtime_after["paper"]["auto_screen_on_intake"] is False
+    assert runtime_after["versioning"]["auto_commit_mode"] == "manual"
+    assert runtime_after["autonomy"]["auto_execute_scope"] == ["screen"]
+    assert profile_after["preferences"]["language_preference"] == "en"
+    assert profile_after["personalization"]["research_focus"] == "VLA"
+    assert profile_after["personalization"]["term_style"] == "bilingual"
+
+
 def test_installed_copy_next_is_byte_identical_on_fresh_workspace(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -344,7 +430,7 @@ def test_installed_copy_next_is_byte_identical_on_fresh_workspace(tmp_path: Path
     )
 
     assert next_result.returncode == 0, next_result.stdout + next_result.stderr
-    assert "KB 为空" in next_result.stdout
+    assert "知识库还是空的" in next_result.stdout
     for token in FORBIDDEN_PUBLIC_TOKENS:
         assert token not in next_result.stdout
     assert _tree_snapshot(workspace) == before

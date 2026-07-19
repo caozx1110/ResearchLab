@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import sys
 from pathlib import Path
@@ -26,7 +27,6 @@ from research.journal import mutation_transaction
 from research.core import (
     candidate_pools_path,
     config_root,
-    default_runtime_preferences,
     ensure_workspace,
     kb_root,
     load_candidate_pools,
@@ -74,16 +74,24 @@ def _default_profile() -> dict:
     }
 
 
+def _deep_fill_missing(current: object, defaults: object) -> object:
+    """Fill absent config keys without replacing any user-owned value."""
+    if not isinstance(current, dict) or not isinstance(defaults, dict):
+        return copy.deepcopy(current)
+    merged = copy.deepcopy(current)
+    for key, default_value in defaults.items():
+        if key not in merged:
+            merged[key] = copy.deepcopy(default_value)
+        elif isinstance(merged[key], dict) and isinstance(default_value, dict):
+            merged[key] = _deep_fill_missing(merged[key], default_value)
+    return merged
+
+
 def load_profile(root: Path) -> dict:
     payload = load_yaml(profile_path(root), default={})
     if not isinstance(payload, dict) or not payload:
         payload = _default_profile()
-    payload.setdefault("preferences", {})
-    payload.setdefault("resources", {})
-    payload.setdefault("constraints", [])
-    payload.setdefault("governance", {})
-    payload.setdefault("history", [])
-    return payload
+    return _deep_fill_missing(payload, _default_profile())
 
 
 def set_nested(payload: dict, dotted_key: str, value: str) -> None:
@@ -300,7 +308,7 @@ def main() -> int:
             write_yaml_if_changed(profile_path(root), load_profile(root))
             load_topic_taxonomy(root)
             load_candidate_pools(root)
-            write_yaml_if_changed(runtime_preferences_path(root), default_runtime_preferences())
+            write_yaml_if_changed(runtime_preferences_path(root), load_runtime_preferences(root))
         checkpoint_and_report(
             root,
             trigger="milestone",

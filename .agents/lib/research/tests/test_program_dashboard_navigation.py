@@ -163,11 +163,76 @@ def test_orchestrator_dashboard_prioritizes_blocking_evidence(tmp_path: Path) ->
     assert items[0]["program_id"] == program_id
     assert items[0]["blocking_evidence_count"] == 1
     assert "Resolve blocking evidence: Need baseline parity logs" in dashboard
-    assert "`p-next`: Resolve blocking evidence: Need baseline parity logs" in next_text
+    assert "研究计划「p-next」：Resolve blocking evidence: Need baseline parity logs" in next_text
     assert "--program-id p-next" in items[0]["recommended_command"]
     for rendered in (dashboard, next_text):
         for leaked_fragment in ("python3", ".py ", "--program-id", "${"):
             assert leaked_fragment not in rendered
+
+
+def test_orchestrator_blocker_wins_over_pending_confirmation_governance(tmp_path: Path) -> None:
+    orchestrate = _load_script(
+        "research-orchestrator",
+        "orchestrate.py",
+        "orchestrator_script_for_blocker_pending_priority",
+    )
+    root = _make_workspace(tmp_path)
+    program_id = "p-blocker-pending"
+    unit_id = "p-pending-123456"
+    orchestrate.ensure_program_files(root, program_id)
+    write_yaml_if_changed(
+        orchestrate.state_path(root, program_id),
+        {
+            "program_id": program_id,
+            "stage": "literature-review",
+            "goal": "Resolve blocker before review",
+            "active_unit_ids": [unit_id],
+            "counts": {},
+        },
+    )
+    write_yaml_if_changed(
+        record_path(root, "paper", unit_id),
+        {
+            "id": unit_id,
+            "kind": "paper",
+            "title": "Pending Paper",
+            "status": "screened",
+            "maturity": "lightweight",
+            "confirmation_status": "pending_user_confirmation",
+            "needs_human_confirmation": True,
+            "information_types": ["fact"],
+            "summary": "Pending summary",
+            "tags": [],
+            "topics": [],
+            "candidate_pools": [],
+            "source": {"original_uri": "", "file_hash": ""},
+            "payload": {"state": {"full_note_status": "pending_user_confirmation"}},
+        },
+    )
+    append_list_item(
+        orchestrate.evidence_requests_path(root, program_id),
+        f"{program_id}-evidence-requests",
+        "research-orchestrator",
+        {
+            "question": "Can the baseline be reproduced?",
+            "needed": "Baseline parity logs",
+            "priority": "high",
+            "blocking": True,
+        },
+        default_status="open",
+    )
+
+    item = orchestrate.program_dashboard_items(root)[0]
+    rendered = orchestrate.format_next([item])
+
+    assert item["pending_confirmation_count"] == 1
+    assert item["blocking_evidence_count"] == 1
+    assert item["next_action"] == "Resolve blocking evidence: Baseline parity logs"
+    assert item["step_type"] == "program-work"
+    assert item["action_kind"] == "program-work"
+    assert item["record_id"] == ""
+    assert "可以直接告诉 Agent 继续推进" in rendered
+    assert "告诉我你的决定" not in rendered
 
 
 def test_orchestrator_status_unknown_program_does_not_create_it(tmp_path: Path, monkeypatch) -> None:
@@ -218,7 +283,7 @@ def test_orchestrator_next_program_filter_narrows_output(tmp_path: Path, monkeyp
 
     assert orchestrate.main() == 0
     output = capsys.readouterr().out
-    assert "`p-one`: Advance one" in output
+    assert "研究计划「p-one」：Advance one" in output
     assert "p-two" not in output
 
 
@@ -301,7 +366,7 @@ def test_safe_unit_step_routes_unfilled_paper_to_agent_before_user() -> None:
     assert step is not None
     assert step["kind"] == "agent-work"
     assert step["step_type"] == "agent-fill"
-    assert "agent fill" in step["reason"]
+    assert "Agent 补全分析" in step["reason"]
 
 
 def test_safe_unit_step_prepares_not_started_note_before_user_confirmation() -> None:
@@ -325,6 +390,30 @@ def test_safe_unit_step_prepares_not_started_note_before_user_confirmation() -> 
     assert step["kind"] == "paper"
     assert step["step_type"] == "generate-note"
     assert step["safe_execute"] is True
+
+
+def test_safe_unit_step_routes_source_ready_blog_but_not_completed_blog() -> None:
+    orchestrate = _load_script("research-orchestrator", "orchestrate.py", "orchestrator_script_for_blog_step")
+    source_ready = {
+        "id": "b-source-ready-123456",
+        "kind": "blog",
+        "title": "Source Ready Blog",
+        "status": "active",
+        "confirmation_status": "auto_confirmed",
+        "payload": {},
+    }
+
+    step = orchestrate.safe_unit_step(source_ready)
+
+    assert step is not None
+    assert step["kind"] == "blog"
+    assert step["step_type"] == "generate-note"
+    assert step["safe_execute"] is True
+    assert "有逐字证据支持的摘要" in step["reason"]
+    assert "grounded" not in step["reason"]
+
+    completed = {**source_ready, "status": "completed"}
+    assert orchestrate.safe_unit_step(completed) is None
 
 
 def test_program_dashboard_excludes_unfilled_shell_but_keeps_filled_confirmation(tmp_path: Path) -> None:
@@ -371,6 +460,8 @@ def test_program_dashboard_excludes_unfilled_shell_but_keeps_filled_confirmation
     assert items["program-unfilled"]["pending_confirmation_count"] == 0
     assert "pending confirmation" not in items["program-unfilled"]["reasons"]
     assert items["program-filled"]["pending_confirmation_count"] == 1
+    assert items["program-filled"]["step_type"] == "human-decision"
+    assert items["program-filled"]["action_kind"] == "human-gate"
     assert items["program-filled"]["next_action"] == "Review pending confirmation: p-filled-123456"
 
 
@@ -390,6 +481,58 @@ def test_orchestrator_empty_kb_outputs_onboarding_command() -> None:
         assert "intake add" not in rendered
         for leaked_fragment in ("python3", ".py ", "--kind", "${"):
             assert leaked_fragment not in rendered
+
+
+def test_orchestrator_next_distinguishes_existing_records_without_pending_work() -> None:
+    orchestrate = _load_script(
+        "research-orchestrator",
+        "orchestrate.py",
+        "orchestrator_script_for_existing_records_no_work",
+    )
+
+    text = orchestrate.format_next([], has_records=True)
+
+    assert "知识库已有资料" in text
+    assert "KB 为空" not in text
+    assert "kb next" not in text
+
+
+def test_orchestrator_blog_only_source_ready_is_a_real_next_item(tmp_path: Path) -> None:
+    orchestrate = _load_script(
+        "research-orchestrator",
+        "orchestrate.py",
+        "orchestrator_script_for_blog_only_next",
+    )
+    root = _make_workspace(tmp_path)
+    write_yaml_if_changed(
+        record_path(root, "blog", "b-blog-only-123456"),
+        {
+            "id": "b-blog-only-123456",
+            "kind": "blog",
+            "title": "Blog Only",
+            "status": "active",
+            "confirmation_status": "auto_confirmed",
+            "information_types": ["fact"],
+            "summary": "",
+            "tags": [],
+            "topics": [],
+            "candidate_pools": [],
+            "source": {"original_uri": "https://example.com/blog", "file_hash": ""},
+            "payload": {},
+        },
+    )
+
+    items = orchestrate.program_dashboard_items(root)
+    text = orchestrate.format_next(items, has_records=True)
+
+    assert len(items) == 1
+    assert items[0]["record_id"] == "b-blog-only-123456"
+    assert items[0]["step_type"] == "generate-note"
+    assert "资料「Blog Only」（b-blog-only-123456）" in text
+    assert "有逐字证据支持的摘要" in text
+    assert "KB 为空" not in text
+    assert "loose:" not in text
+    assert "kb next" not in text
 
 
 def test_orchestrator_dashboard_detects_loose_unscreened_unit(tmp_path: Path) -> None:

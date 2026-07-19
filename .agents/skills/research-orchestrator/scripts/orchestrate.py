@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -203,7 +204,11 @@ def safe_unit_step(record: dict[str, Any]) -> dict[str, Any] | None:
             "step_type": "agent-fill" if workflow_state == "awaiting_agent_fill" else "agent-verify",
             "record_id": unit_id,
             "title": str(record.get("title") or ""),
-            "reason": f"{kind} `{unit_id}` is {workflow_state.replace('_', ' ')} before user confirmation",
+            "reason": (
+                f"资料「{record.get('title') or unit_id}」（{unit_id}）需要 Agent 补全分析。"
+                if workflow_state == "awaiting_agent_fill"
+                else f"资料「{record.get('title') or unit_id}」（{unit_id}）需要 Agent 核验逐字证据。"
+            ),
             "command_parts": [],
             "safe_execute": False,
         }
@@ -213,7 +218,7 @@ def safe_unit_step(record: dict[str, Any]) -> dict[str, Any] | None:
             "step_type": "human-decision",
             "record_id": unit_id,
             "title": str(record.get("title") or ""),
-            "reason": f"{kind} `{unit_id}` 等待人工确认",
+            "reason": f"资料「{record.get('title') or unit_id}」（{unit_id}）已有经过核验的判断，等待你确认。",
             # Single confirm renderer (research.common.confirm_command via the
             # confirm_command_for_record alias): analyzer confirm for paper/repo/blog,
             # else kb.py promote --confirmation-status confirmed. Keeps `kb next` in
@@ -297,13 +302,13 @@ def safe_unit_step(record: dict[str, Any]) -> dict[str, Any] | None:
                 ],
                 "safe_execute": True,
             }
-    if kind == "blog" and status == "draft":
+    if kind == "blog" and (workflow_state == "source_ready" or status == "draft"):
         return {
             "kind": kind,
             "step_type": "generate-note",
             "record_id": unit_id,
             "title": str(record.get("title") or ""),
-            "reason": f"blog `{unit_id}` needs summary",
+            "reason": f"博客「{record.get('title') or unit_id}」（{unit_id}）已有原始资料，等待 Agent 整理有逐字证据支持的摘要。",
             "command_parts": [
                 COMMAND_PREFIX,
                 ".agents/skills/blog-analyst/scripts/blog.py",
@@ -735,6 +740,9 @@ def program_dashboard_items(root: Path) -> list[dict[str, Any]]:
             reasons.append("stage review")
             score += 1
 
+        step_type = "program-work"
+        action_kind = "program-work"
+        decision_record: dict[str, Any] = {}
         if blocking_evidence:
             next_action = f"Resolve blocking evidence: {blocking_evidence[0].get('needed') or blocking_evidence[0].get('question')}"
         elif high_questions:
@@ -742,6 +750,9 @@ def program_dashboard_items(root: Path) -> list[dict[str, Any]]:
         elif pending_units:
             next_action = f"Review pending confirmation: {pending_units[0].get('id')}"
             recommended_command = confirm_command_for_record(pending_units[0])
+            step_type = "human-decision"
+            action_kind = "human-gate"
+            decision_record = pending_units[0]
         elif normalize_list(state.get("next_actions")):
             next_action = normalize_list(state.get("next_actions"))[0]
             recommended_command = shell_command(
@@ -760,6 +771,11 @@ def program_dashboard_items(root: Path) -> list[dict[str, Any]]:
         items.append(
             {
                 "program_id": program_id,
+                "record_id": str(decision_record.get("id") or ""),
+                "title": str(decision_record.get("title") or ""),
+                "step_type": step_type,
+                "action_kind": action_kind,
+                "safe_execute": False,
                 "stage": str(state.get("stage") or ""),
                 "goal": str(state.get("goal") or ""),
                 "question": str(state.get("question") or ""),
@@ -786,6 +802,11 @@ def program_dashboard_items(root: Path) -> list[dict[str, Any]]:
         items.append(
             {
                 "program_id": f"loose:{unit_id}",
+                "record_id": unit_id,
+                "title": str(record.get("title") or ""),
+                "step_type": str(step.get("step_type") or ""),
+                "action_kind": str(step.get("kind") or ""),
+                "safe_execute": bool(step.get("safe_execute")),
                 "stage": "loose-unit",
                 "goal": str(record.get("title") or ""),
                 "question": "",
@@ -823,16 +844,33 @@ def format_dashboard(items: list[dict[str, Any]], *, limit: int = 20) -> str:
     return "\n".join(lines).strip()
 
 
-def format_next(items: list[dict[str, Any]], *, limit: int = 5) -> str:
+def format_next(
+    items: list[dict[str, Any]],
+    *,
+    limit: int = 5,
+    has_records: bool = False,
+) -> str:
     selected = items[:limit] if limit > 0 else items
     lines = ["# Next Actions", ""]
     if not selected:
-        lines.append("- KB 为空，第一步：告诉 AI 一篇论文的来源（链接或文件），或运行 kb ingest")
-        lines.append("  操作：告诉 AI 论文来源，或运行 kb ingest。")
+        if has_records:
+            lines.append("- 知识库已有资料，但目前没有待处理事项。")
+        else:
+            lines.append("- KB 为空。请告诉 AI 一篇论文、一个代码仓或一篇博客的来源，或使用 kb ingest 添加资料。")
         return "\n".join(lines).strip()
     for item in selected:
-        lines.append(f"- `{item['program_id']}`: {item.get('next_action')}")
-        lines.append("  操作：可直接让 AI 推进，或运行 kb next。")
+        program_id = str(item.get("program_id") or "")
+        if program_id.startswith("loose:"):
+            record_id = str(item.get("record_id") or program_id.split(":", 1)[-1])
+            title = str(item.get("title") or item.get("goal") or record_id)
+            subject = f"资料「{title}」（{record_id}）"
+        else:
+            subject = f"研究计划「{program_id}」"
+        lines.append(f"- {subject}：{item.get('next_action')}")
+        if str(item.get("step_type") or "") == "human-decision":
+            lines.append("  请直接用自然语言告诉我你的决定。")
+        else:
+            lines.append("  可以直接告诉 Agent 继续推进。")
     return "\n".join(lines).strip()
 
 
@@ -1018,6 +1056,7 @@ def build_parser() -> argparse.ArgumentParser:
     next_cmd = subparsers.add_parser("next", help="Show prioritized next actions across programs")
     next_cmd.add_argument("--limit", type=int, default=5)
     next_cmd.add_argument("--program-id")
+    next_cmd.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
 
     auto = subparsers.add_parser("auto", help="Plan or execute the next safe orchestration step")
     auto.add_argument("--max-steps", type=int, default=1)
@@ -1104,7 +1143,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
     root = project_root(PROJECT_ROOT, explicit_root=args.root)
-    print_resolved_project_roots(root)
+    if not (args.command == "next" and args.json):
+        print_resolved_project_roots(root)
     semantic_read = args.command in SEMANTIC_READ_COMMANDS or (
         args.command == "auto" and not args.execute
     )
@@ -1192,6 +1232,7 @@ def main() -> int:
         print(format_dashboard(program_dashboard_items(root), limit=args.limit))
         return 0
     if args.command == "next":
+        has_records = bool(iter_records(root))
         items = program_dashboard_items(root)
         if args.program_id:
             if not program_root(root, args.program_id).is_dir():
@@ -1201,10 +1242,19 @@ def main() -> int:
                     "Use init-program to create it."
                 )
             items = [item for item in items if item.get("program_id") == args.program_id]
-            if not items:
+            if not items and not args.json:
                 print(f"# Next Actions\n\n- No actions for program `{args.program_id}`.")
                 return 0
-        print(format_next(items, limit=args.limit))
+        if args.json:
+            print(
+                json.dumps(
+                    {"has_records": has_records, "items": items[: args.limit] if args.limit > 0 else items},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(format_next(items, limit=args.limit, has_records=has_records))
         return 0
     if args.command == "auto":
         exit_code = 0
