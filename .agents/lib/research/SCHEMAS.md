@@ -477,7 +477,7 @@ issues:
     last_seen_at: ""                   # UTC ISO-8601
     bundle_version: ""                 # 本地可用时从 .agents/VERSION 读取
     source_commit: ""                  # 本地 manifest 有合法 commit 时读取
-    context: ""                        # 仅脱敏技术上下文
+    context: context-sha256:<prefix>    # 仅不可逆关联摘要，不持久化自由文本
     error_class: owner-nonzero-exit     # 稳定安全类名，不含 traceback/path
     privacy_classification: local-redacted
 ```

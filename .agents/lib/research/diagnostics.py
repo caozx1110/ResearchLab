@@ -63,6 +63,26 @@ def _safe_identifier(value: str, *, default: str = "", limit: int = 80) -> str:
     return (normalized or default)[:limit]
 
 
+def _safe_error_class(value: str) -> str:
+    """Keep only a stable class token, never free-form exception text."""
+
+    text = str(value or "").strip()
+    if re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,79}", text):
+        return text.lower()
+    match = re.match(r"[A-Za-z][A-Za-z0-9_.-]{0,79}", text)
+    return match.group(0).lower() if match else "unspecified"
+
+
+def _redacted_context_reference(value: str) -> str:
+    """Retain correlation without persisting free-form/user/evidence text."""
+
+    text = str(value or "")
+    if not text.strip():
+        return ""
+    digest = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+    return f"context-sha256:{digest[:16]}"
+
+
 def diagnostics_policy(project_root: Path, skill: str = "") -> dict[str, Any]:
     """Return a pure-read, normalized effective diagnostics policy."""
 
@@ -144,7 +164,7 @@ def _fingerprint(*, category: str, skill: str, summary: str, trigger: str, error
             skill,
             _dedup_text(summary),
             _dedup_text(trigger),
-            _safe_identifier(error_class),
+            _safe_error_class(error_class),
         )
     )
     return hashlib.sha256(signature.encode("utf-8")).hexdigest()
@@ -243,7 +263,7 @@ def record_diagnostic_issue(
     if not safe_summary:
         raise ValueError("summary must not be empty after redaction")
     safe_trigger = redact_diagnostic_text(trigger, limit=160)
-    safe_error_class = _safe_identifier(error_class, default="unspecified", limit=80)
+    safe_error_class = _safe_error_class(error_class)
     fingerprint = _fingerprint(
         category=normalized_category,
         skill=normalized_skill,
@@ -294,7 +314,7 @@ def record_diagnostic_issue(
             "last_seen_at": timestamp,
             "bundle_version": bundle_version,
             "source_commit": source_commit,
-            "context": redact_diagnostic_text(context, limit=300),
+            "context": _redacted_context_reference(context),
             "error_class": safe_error_class,
             "privacy_classification": PRIVACY_CLASSIFICATION,
         }

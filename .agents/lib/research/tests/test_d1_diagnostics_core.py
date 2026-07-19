@@ -178,7 +178,16 @@ def test_redaction_removes_paths_secrets_env_tracebacks_and_control_text(tmp_pat
     )
     serialized = diagnostics_path(root).read_text(encoding="utf-8")
     lowered = serialized.lower()
-    for forbidden in ("/users/alice", "c:\\users", "sk-live-secret", "hunter2", "top-secret", "traceback (most"):
+    for forbidden in (
+        "/users/alice",
+        "c:\\users",
+        "sk-live-secret",
+        "hunter2",
+        "top-secret",
+        "traceback (most",
+        "alice",
+        "evidence.txt",
+    ):
         assert forbidden not in lowered
     assert "<path>" in serialized
     assert "<secret-redacted>" in serialized
@@ -186,7 +195,8 @@ def test_redaction_removes_paths_secrets_env_tracebacks_and_control_text(tmp_pat
     assert "\x1b" not in serialized
     assert "\u202e" not in serialized
     assert issue["privacy_classification"] == "local-redacted"
-    assert issue["error_class"] == "runtimeerror-at-users-alice-private-paper.py"
+    assert issue["context"].startswith("context-sha256:")
+    assert issue["error_class"] == "runtimeerror"
     assert redact_diagnostic_text(unsafe) == redact_diagnostic_text(unsafe)
 
 
