@@ -31,6 +31,8 @@ release bundle                 installed workspace
 
 Release bundle 不包含任何私有 `kb/`。安装、更新、storage sync 和卸载必须保持数据边界：workspace 的 `kb/` 永不成为发布内容，storage sync 不改 `.agents/**` 或根 `AGENTS.md`。
 
+安装与管理员自动化是产品唯一的技术 bootstrap 面。安装完成后，普通用户的 runtime 合同只有自然语言与 15 个 `kb <verb>` 伪 CLI；内部 flags、scripts、环境变量和 paths 只属于 Agent 私有协议或管理员参考，不得变成日常使用前置。
+
 ## Skill 路由
 
 系统包含 17 个本地 skill：
@@ -117,11 +119,11 @@ confirmed or rejected
 6. receipt 绑定当前 content digest 与 evidence digest；
 7. 写入瞬间重新验证授权和版本，失败时 fail closed。
 
-Receipt 不改变原 epistemic type。内容或 evidence 改变时，旧 receipt 失效。事实批量确认与判断逐项确认可以有不同 UX，但都不得自签。
+Receipt 不改变原 epistemic type。内容或 evidence 改变时，旧 receipt 失效；公开层引导 Agent 基于当前材料重新核验，只有核验通过的新版判断才重新进入人类确认，不向用户暴露内部状态名。事实批量确认与判断逐项确认可以有不同 UX，但都不得自签。
 
 ## 对话层与 Agent 协议
 
-公开表面只有自然语言与 15 个 `kb <verb>`。内部 owner 参数、解释器、环境变量、脚本路径和 next-step markers 不能进入 human stdout。
+公开表面只有自然语言与 15 个 `kb <verb>` 伪 CLI。内部 owner 参数、解释器、环境变量、脚本路径和 next-step markers 不能进入 human stdout。
 
 当 runtime agent 需要精确参数或 owner diagnostics 时，`kb-cli` 在显式 opt-in 后写私有结构化协议到 `kb/.runtime/`：
 
@@ -185,4 +187,4 @@ Install manifest 记录 `source_origin` 与 `source_branch`，本地安装还可
 9. 在 Linux 与 macOS 支持的 Python 版本上验证；
 10. 发布前由冷 acceptance agent 端到端复现关键路径。
 
-当前仍是 pre-release；不要在文档、tag 或 changelog 中宣称稳定兼容，直到完整 acceptance gate 通过。
+当前标识为 `0.2.0-rc.1`，已通过完整本地套件与冷启动安装副本验收，达到本地 release-candidate gate。它仍不是 stable/GA，也尚未 tag 或 publish；hosted Linux/macOS CI matrix 全绿仍是 release tag 的前置。文档、tag 与 changelog 不得把本地 RC 验收外推为稳定兼容或 SLA 承诺。

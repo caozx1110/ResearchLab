@@ -4,7 +4,7 @@
 
 它不是预装好的知识库。安装后，能力包与研究数据分开保存。AI 负责提取、整理、追踪和汇总；你负责判断、确认和拍板。
 
-当前版本是 **internal alpha / pre-release**。治理规则已经比较严格，但公开接口在首个稳定版前仍可能调整。
+当前候选版本是 **`0.2.0-rc.1`**。它已通过完整本地测试套件和冷启动安装副本验收，达到项目定义的本地 release-candidate 质量；但它不是 stable 或 GA，也尚未 tag/publish。正式打发布 tag 前，仍须让 hosted Linux/macOS CI matrix 全绿；当前不承诺兼容性或响应时限 SLA。
 
 ## 能力成熟度（按组件）
 
@@ -26,26 +26,28 @@
 | `research-config-manager` | beta | 偏好与策略可以持久化，但尚非所有偏好都被所有下游能力消费。 |
 | `discussion-archivist` | beta | 按结论保存讨论、证据和开放问题。 |
 | `research-orchestrator` | scaffold | 研究计划主线、路由、看板和事件流已存在，优先级仍以固定策略为主。 |
-| `literature-synthesizer` | scaffold | 有证据优先的综述结构，分类、趋势与空白仍高度依赖 Agent。 |
-| `idea-workbench` | scaffold | 候选、评审、讨论和选择结构已存在，创新性质量尚未达到稳定基准。 |
-| `method-designer` | scaffold | 方法交接和实验矩阵结构已存在，生成设计仍需专家复核。 |
-| `experiment-workbench` | scaffold | 强类型实验记录和诊断治理已存在，诊断质量仍依赖 Agent。 |
-| `report-author` | scaffold | 报告与大纲会消费持久证据，但成文质量和覆盖度仍在加固。 |
+| `literature-synthesizer` | beta | 综述、分类、趋势、矛盾与空白会形成有证据的持久产物；综合质量仍依赖 Agent 与来源覆盖。 |
+| `idea-workbench` | beta | 候选、evidence-first 评审、讨论和显式选择已实现；创新性判断仍需用户或专家拍板。 |
+| `method-designer` | beta | 基于仓库证据的方法交接和实验矩阵已实现；生成设计仍需专家复核。 |
+| `experiment-workbench` | beta | 强类型计划、运行记录、follow-up 和确认门控诊断已实现；诊断质量仍依赖 Agent。 |
+| `report-author` | beta | 报告与大纲会消费持久 claim、event、evidence 和 decision；成文质量与覆盖仍需复核。 |
 | `skill-evolution-advisor` | scaffold | 学习记录与复核流程已存在，不承诺自动修改 skill。 |
 | `wiki-adapter` | scaffold | 仅提供轻量兼容与路由，不是独立分析引擎。 |
 | `research-navigator` | dev-only | 本地浏览工作台仍是开发能力；自然语言导航摘要属于 beta。 |
 
-某一次 paper、repo 或 blog 分析的分数，只能说明对应 analyzer 的表现，不能外推到综述、idea、方法、实验、报告、导航或整个 bundle。上面两个范围受限的 **stable** 组件，也不代表当前 pre-release 已成为稳定发布。
+某个组件的一次成功运行，只能说明对应流程的表现，不能外推到其他流程或整个 bundle。上面范围受限的 **stable** 组件，也不代表当前 release candidate 已成为稳定发布。
 
 ## 第一次使用
 
-先按[安装指南](INSTALL.md)把 bundle 安装到 workspace 根目录，然后在 Codex 或 Claude Code 的对话中输入：
+先按[安装指南](INSTALL.md)完成一次性安装，然后在 Codex 或 Claude Code 的对话中输入：
 
 ```text
 kb init
 ```
 
 初始化会创建本地知识库骨架，并由 Agent 在对话中询问缺少的姓名、语言或研究偏好。它不会要求你进入脚本内的交互界面，也不依赖终端是不是 TTY。
+
+一次性安装是普通用户唯一需要接触的技术 bootstrap；管理员也可以用自动化完成同一 bootstrap。安装完成后，日常使用只需要自然语言和下文十五个 `kb <verb>` 伪 CLI 快捷入口；内部 flags、scripts、环境变量和 paths 都由 Agent 私下处理，不是用户操作步骤。
 
 之后可以输入：
 
@@ -78,7 +80,7 @@ AI 适合自动完成：
 4. 研究阶段何时推进；
 5. 出现矛盾证据时采用哪种解释。
 
-确认不是一句可永久复用的授权。Agent 必须在真正写入时验证当前用户消息中的授权，并把它与当前内容和 evidence 绑定。内容改变后，旧确认自动失效。AI 不能给自己签字。
+确认不是一句可永久复用的授权。Agent 必须在真正写入时验证当前用户消息中的授权，并把它与当前内容和 evidence 绑定。内容或 evidence 改变后，旧确认自动失效；Agent 会先按最新材料重新核验，再把更新后的判断交给你确认，不会要求你处理内部状态或命令。AI 不能给自己签字。
 
 ## 加入和理解资料
 
@@ -100,7 +102,7 @@ Agent 会连续完成安全步骤：轻量入库、准备填充结构、阅读�
 
 当资料仍在等待 Agent 填写、等待验证，或处于可重试失败时，它不会进入你的确认收件箱。只有实质内容和 evidence 已过门的判断才会由 `kb review` 提请你决定。
 
-## 十五个 `kb` 动词
+## 十五个 `kb` 伪 CLI 动词
 
 这是完整的公开快捷入口。你可以在对话里说，也可以在已安装快捷入口的终端里运行。两种方式的语义一致。
 
