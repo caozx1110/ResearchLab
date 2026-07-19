@@ -192,6 +192,49 @@ def test_static_human_print_literals_and_input_model_are_safe() -> None:
         assert not re.search(r"(^|\s)--[A-Za-z]", literal)
 
 
+def test_dynamic_public_prints_do_not_read_raw_external_fields_directly() -> None:
+    source = _kb_script().read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    violations: list[str] = []
+
+    def expression_root(node: ast.AST) -> str:
+        while isinstance(node, ast.Attribute):
+            node = node.value
+        return node.id if isinstance(node, ast.Name) else ""
+
+    for call in (node for node in ast.walk(tree) if isinstance(node, ast.Call)):
+        if not isinstance(call.func, ast.Name) or call.func.id != "print":
+            continue
+        for argument in call.args:
+            if not isinstance(argument, ast.JoinedStr):
+                continue
+            for formatted in (node for node in ast.walk(argument) if isinstance(node, ast.FormattedValue)):
+                expression = formatted.value
+                for descendant in ast.walk(expression):
+                    if isinstance(descendant, ast.Attribute) and expression_root(descendant) in {
+                        "args",
+                        "record",
+                        "program_state",
+                        "item",
+                    }:
+                        violations.append(ast.unparse(expression))
+                    if isinstance(descendant, ast.Name) and descendant.id.startswith("raw_"):
+                        violations.append(ast.unparse(expression))
+                    if (
+                        isinstance(descendant, ast.Call)
+                        and isinstance(descendant.func, ast.Attribute)
+                        and isinstance(descendant.func.value, ast.Name)
+                        and descendant.func.value.id == "result"
+                        and descendant.func.attr == "get"
+                        and descendant.args
+                        and isinstance(descendant.args[0], ast.Constant)
+                        and descendant.args[0].value == "message"
+                    ):
+                        violations.append(ast.unparse(expression))
+
+    assert violations == []
+
+
 @pytest.mark.parametrize("argv", [["--help"], *[[verb, "--help"] for verb in PUBLIC_VERBS]])
 def test_all_blackbox_help_surfaces_hide_internal_syntax(argv: list[str]) -> None:
     completed = subprocess.run(
