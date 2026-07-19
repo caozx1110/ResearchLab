@@ -740,7 +740,7 @@ def _humanize_owner_line(line: str) -> str | None:
     if not stripped:
         return ""
     if stripped.startswith("[ok] created "):
-        return "资料已加入知识库。"
+        return None
     if stripped.startswith("[ok] duplicate detected:"):
         return "该资料已在知识库中，因此没有重复创建。"
     if stripped.startswith("[ok] initialized "):

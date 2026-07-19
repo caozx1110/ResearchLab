@@ -1344,9 +1344,7 @@ def test_kb_add_keeps_owner_protocol_private_and_humanizes_public_output(
     ) == 0
 
     output = capsys.readouterr().out
-    assert "资料已加入知识库" in output
-    assert "待内容补全并校验后" not in output
-    assert "kb next" in output
+    assert output == "资料已加入知识库。接下来可运行 kb next，Agent 会继续整理并判断下一步。\n"
     for forbidden in (
         "backup_status",
         "source_type",
