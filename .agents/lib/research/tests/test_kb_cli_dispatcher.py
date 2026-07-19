@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.machinery
 import importlib.util
 import io
@@ -27,6 +28,27 @@ def _load_kb_cli():
     sys.modules[loader.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def _tree_metadata_digest(root: Path) -> str:
+    digest = hashlib.sha256()
+    for path in [root, *sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix())]:
+        relative = "." if path == root else path.relative_to(root).as_posix()
+        metadata = path.lstat()
+        digest.update(
+            f"{relative}\0{metadata.st_mode}\0{metadata.st_size}\0{metadata.st_mtime_ns}\0".encode("utf-8")
+        )
+        if path.is_file():
+            digest.update(path.read_bytes())
+        elif path.is_symlink():
+            digest.update(path.readlink().as_posix().encode("utf-8"))
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _journal_operation_count(root: Path) -> int:
+    journal = root / "kb" / ".journal"
+    return len(list(journal.glob("*.yaml"))) if journal.is_dir() else 0
 
 
 class TTYStringIO(io.StringIO):
@@ -365,6 +387,9 @@ def test_kb_init_is_idempotent_and_emits_one_public_summary(tmp_path: Path, caps
     runtime = kb.load_runtime_preferences(tmp_path)
     runtime["autonomy"]["auto_execute_scope"] = ["screen"]
     write_yaml_if_changed(runtime_path, runtime)
+    assert kb.workspace_init_complete(tmp_path) is True
+    before_digest = _tree_metadata_digest(tmp_path)
+    before_journal_count = _journal_operation_count(tmp_path)
 
     assert kb.main(["--root", str(tmp_path), "init"]) == 0
     second_output = capsys.readouterr().out
@@ -386,6 +411,100 @@ def test_kb_init_is_idempotent_and_emits_one_public_summary(tmp_path: Path, caps
         "collaboration_boundaries": "no-cloud",
         "term_style": "bilingual",
     }
+    assert _tree_metadata_digest(tmp_path) == before_digest
+    assert _journal_operation_count(tmp_path) == before_journal_count
+
+
+@pytest.mark.parametrize("damage", ["missing", "malformed"])
+def test_kb_init_repairs_partial_or_malformed_workspace(
+    damage: str,
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    kb = _load_kb_cli()
+    assert kb.main(["--root", str(tmp_path), "init", "--name", "Researcher"]) == 0
+    capsys.readouterr()
+
+    if damage == "missing":
+        (tmp_path / "kb" / "index.md").unlink()
+    else:
+        (tmp_path / "kb" / "config" / "runtime-preferences.yaml").write_text(
+            "autonomy: [unterminated\n",
+            encoding="utf-8",
+        )
+    assert kb.workspace_init_complete(tmp_path) is False
+
+    repairs: list[Path] = []
+    monkeypatch.setattr(kb, "run_init_prerequisites", lambda root: repairs.append(root) or 0)
+    monkeypatch.setattr(
+        kb,
+        "runtime_pref_defaults",
+        lambda root: {"name": "Researcher", "lang": "en", "auto_commit": "manual", "auto_screen": "false"},
+    )
+
+    assert kb.main(["--root", str(tmp_path), "init"]) == 0
+    assert repairs == [tmp_path]
+
+
+def test_complete_kb_init_only_applies_explicit_preferences_and_git_request(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    kb = _load_kb_cli()
+    calls: list[tuple[list[tuple[str, tuple[str, ...]]], bool]] = []
+
+    def fake_run_forwarded(root: Path, commands, *, stream: bool = True):
+        calls.append(([(script, tuple(args)) for script, args in commands], stream))
+        return 0
+
+    monkeypatch.setattr(kb, "workspace_init_complete", lambda root: True)
+    monkeypatch.setattr(kb, "run_forwarded", fake_run_forwarded)
+    monkeypatch.setattr(
+        kb,
+        "runtime_pref_defaults",
+        lambda root: {"name": "Researcher", "lang": "en", "auto_commit": "manual", "auto_screen": "false"},
+    )
+
+    assert kb.main(["--root", str(tmp_path), "init", "--lang", "en", "--git-init"]) == 0
+    assert calls == [
+        (
+            [
+                (
+                    ".agents/skills/research-config-manager/scripts/config.py",
+                    ("set", "--key", "preferences.language_preference", "--value", "en"),
+                )
+            ],
+            False,
+        ),
+        (
+            [(".agents/skills/knowledge-base-manager/scripts/kb.py", ("git-init",))],
+            False,
+        ),
+    ]
+
+
+def test_kb_init_repairs_missing_nested_default_without_resetting_custom_values(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    kb = _load_kb_cli()
+    assert kb.main(["--root", str(tmp_path), "init", "--name", "Researcher", "--auto-screen", "false"]) == 0
+    capsys.readouterr()
+
+    runtime_path = tmp_path / "kb" / "config" / "runtime-preferences.yaml"
+    runtime = kb.load_runtime_preferences(tmp_path)
+    runtime["autonomy"]["auto_execute_scope"] = ["screen"]
+    runtime["paper"].pop("screening_max_chars")
+    write_yaml_if_changed(runtime_path, runtime)
+    assert kb.workspace_init_complete(tmp_path) is False
+
+    assert kb.main(["--root", str(tmp_path), "init"]) == 0
+    repaired = kb.load_runtime_preferences(tmp_path)
+    assert repaired["paper"]["screening_max_chars"] == 12000
+    assert repaired["paper"]["auto_screen_on_intake"] is False
+    assert repaired["autonomy"]["auto_execute_scope"] == ["screen"]
+    assert repaired["identity"]["default_confirmed_by"] == "Researcher"
 
 
 def test_kb_status_forwards_current_state_and_program(monkeypatch, tmp_path: Path) -> None:

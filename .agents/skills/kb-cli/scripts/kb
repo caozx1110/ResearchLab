@@ -27,7 +27,15 @@ if __name__ == "__main__":
     ensure_managed_runtime(DEFAULT_PROJECT_ROOT)
 
 from research.common import current_runtime_capabilities, find_project_root, load_yaml
-from research.core import config_root, default_confirmed_by, is_ai_signer, load_runtime_preferences, search_records
+from research.core import (
+    config_root,
+    default_confirmed_by,
+    default_runtime_preferences,
+    is_ai_signer,
+    kb_root,
+    load_runtime_preferences,
+    search_records,
+)
 from research.sources import UnsafeLocalSourceError, validate_local_source
 from research import updater
 
@@ -803,6 +811,92 @@ def build_headless_init_pref_commands(args: argparse.Namespace) -> list[tuple[st
     return commands
 
 
+def _mapping_has_shape(payload: object, required: object) -> bool:
+    if not isinstance(payload, dict) or not isinstance(required, dict):
+        return False
+    return all(
+        key in payload
+        and (
+            not isinstance(required_value, dict)
+            or _mapping_has_shape(payload[key], required_value)
+        )
+        for key, required_value in required.items()
+    )
+
+
+def _readable_mapping(path: Path) -> dict[str, object] | None:
+    try:
+        payload = load_yaml(path, default=None)
+    except Exception:  # noqa: BLE001 - malformed config means init must repair
+        return None
+    return payload if isinstance(payload, dict) and payload else None
+
+
+def _readable_text(path: Path) -> bool:
+    try:
+        return path.is_file() and bool(path.read_text(encoding="utf-8").strip())
+    except (OSError, UnicodeError):
+        return False
+
+
+def workspace_init_complete(root: Path) -> bool:
+    """Return whether plain ``kb init`` can be a strict no-churn no-op."""
+    kb = kb_root(root)
+    required_directories = [
+        kb / "units" / unit_dir
+        for unit_dir in ("papers", "repos", "blogs", "ideas", "experiments")
+    ] + [
+        kb / "programs",
+        kb / "user" / "reading-lists",
+        kb / "user" / "report-materials",
+        kb / "config",
+        kb / "synthesis" / "source-search",
+        kb / "raw",
+        kb / "output",
+        kb / ".runtime",
+    ]
+    if not all(path.is_dir() for path in required_directories):
+        return False
+
+    required_text_files = [
+        kb / ".gitignore",
+        kb / "index.md",
+        kb / "config" / "research-settings.md",
+        kb / "user" / "navigation.md",
+        kb / "user" / "current-state.md",
+    ]
+    if not all(_readable_text(path) for path in required_text_files):
+        return False
+
+    index_payload = _readable_mapping(kb / "index.yaml")
+    taxonomy = _readable_mapping(kb / "config" / "topic-taxonomy.yaml")
+    pools = _readable_mapping(kb / "config" / "candidate-pools.yaml")
+    runtime = _readable_mapping(kb / "config" / "runtime-preferences.yaml")
+    profile = _readable_mapping(kb / "config" / "user-profile.yaml")
+    if None in (index_payload, taxonomy, pools, runtime, profile):
+        return False
+    if not _mapping_has_shape(runtime, default_runtime_preferences()):
+        return False
+    required_profile_shape = {
+        "id": None,
+        "status": None,
+        "generated_by": None,
+        "generated_at": None,
+        "inputs": None,
+        "confidence": None,
+        "preferences": {"language_preference": None},
+        "resources": None,
+        "constraints": None,
+        "governance": {
+            "default_candidate_pools": None,
+            "topic_overrides": None,
+            "tag_overrides": None,
+        },
+        "history": None,
+    }
+    return _mapping_has_shape(profile, required_profile_shape)
+
+
 def run_init_prerequisites(root: Path) -> int:
     return run_forwarded(
         root,
@@ -816,7 +910,7 @@ def run_init_prerequisites(root: Path) -> int:
 
 def handle_init(args: argparse.Namespace, root: Path) -> int:
     commands = build_headless_init_pref_commands(args)
-    initialized = run_init_prerequisites(root)
+    initialized = 0 if workspace_init_complete(root) else run_init_prerequisites(root)
     if initialized != 0:
         print("知识库初始化未完成；详细诊断已保留给 Agent。", file=sys.stderr)
         return initialized
