@@ -173,7 +173,19 @@ def test_promote_fault_restores_both_files_byte_for_byte(tmp_path: Path, monkeyp
         "config/runtime-preferences.yaml",
         "memory/learnings.yaml",
     ]
-    assert load_op(root, operations[0]["op_id"])["state"] == "abort"
+    root_operation = load_op(root, operations[0]["op_id"])
+    assert root_operation["state"] == "abort"
+    descendants = [
+        entry
+        for op_type in ("write-learnings", "write-runtime-preferences")
+        for entry in _journal_entries(root, op_type)
+        if entry.get("root_op_id") == root_operation["op_id"]
+    ]
+    assert {entry["op_type"] for entry in descendants} == {
+        "write-learnings",
+        "write-runtime-preferences",
+    }
+    assert all(entry["parent_op_id"] == root_operation["op_id"] for entry in descendants)
 
 
 def test_standalone_preference_write_rolls_back_after_fault(tmp_path: Path, monkeypatch) -> None:
