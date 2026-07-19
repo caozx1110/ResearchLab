@@ -777,6 +777,28 @@ def test_kb_status_sanitizes_program_name_and_focus(monkeypatch, tmp_path: Path,
     assert "NEXT FOR AGENT" not in output
 
 
+def test_kb_status_hides_loose_prefixed_live_program_id(monkeypatch, tmp_path: Path, capsys) -> None:
+    kb = _load_kb_cli()
+    program = "loose:active-study"
+    write_yaml_if_changed(
+        tmp_path / "kb" / "programs" / program / "state.yaml",
+        {"goal": "验证确认流程是否清晰"},
+    )
+    monkeypatch.setattr(
+        kb,
+        "forward_command",
+        lambda root, relative_script, args, *, stream=True: kb.CommandResult((relative_script, *args), 0),
+    )
+    monkeypatch.setattr(kb, "iter_records", lambda root: [])
+
+    assert kb.main(["--root", str(tmp_path), "status", program]) == 0
+
+    output = capsys.readouterr().out
+    assert "研究计划「名称需由 Agent 安全解释」当前围绕“验证确认流程是否清晰”推进" in output
+    assert "loose:" not in output
+    _assert_public_governance_safe(output)
+
+
 def test_kb_recovery_verbs_forward_without_raw_git_commands(monkeypatch, tmp_path: Path, capsys) -> None:
     kb = _load_kb_cli()
     calls: list[tuple[str, tuple[str, ...]]] = []

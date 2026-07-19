@@ -946,8 +946,17 @@ def handle_update(args: argparse.Namespace, root: Path) -> int:
     return 0
 
 
+def _public_program_label(program_id: object, root: Path) -> str:
+    raw_program_id = str(program_id or "").strip()
+    if not raw_program_id:
+        return ""
+    if "loose:" in raw_program_id.casefold():
+        return "名称需由 Agent 安全解释"
+    return _public_display_text(raw_program_id, root, "名称需由 Agent 安全解释", 100)
+
+
 def handle_status(args: argparse.Namespace, root: Path) -> int:
-    public_program = _public_display_text(args.program, root, "名称需由 Agent 安全解释", 100) if args.program else ""
+    public_program = _public_program_label(args.program, root)
     current = forward_command(
         root,
         SCRIPT_BY_VERB["status_current"],
@@ -1105,11 +1114,7 @@ def _print_next_items(items: list[dict[str, object]], *, has_records: bool, root
             public_title = _public_display_text(title, root, "标题需由 Agent 安全解释", 160)
             subject = f"资料「{public_title}」（{public_record_id}）"
         else:
-            public_program = (
-                "名称需由 Agent 安全解释"
-                if "loose:" in program_id.casefold()
-                else _public_display_text(program_id, root, "名称需由 Agent 安全解释", 100)
-            )
+            public_program = _public_program_label(program_id, root)
             subject = f"研究计划「{public_program}」"
         print(f"- {subject}：{_next_public_reason(item, root)}")
     if any(_next_item_needs_human(item) for item in items):
@@ -1125,7 +1130,7 @@ def handle_next(args: argparse.Namespace, root: Path) -> int:
     result = forward_command(root, SCRIPT_BY_VERB["next"], forwarded_args, stream=False)
     if result.returncode != 0:
         if args.program:
-            public_program = _public_display_text(args.program, root, "名称需由 Agent 安全解释", 100)
+            public_program = _public_program_label(args.program, root)
             print(f"没有找到研究计划「{public_program}」；请检查名称后重试。", file=sys.stderr)
         else:
             print("暂时无法判断下一步；详细诊断已保留给 Agent。", file=sys.stderr)
