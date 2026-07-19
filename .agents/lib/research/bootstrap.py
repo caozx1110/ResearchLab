@@ -120,15 +120,14 @@ def _ensure_python_has_pdf_backend(python_exe: str | Path) -> None:
         )
     except RuntimeError:
         print(
-            "[research] PDF 解析后端尚未就绪；请让 Agent 运行 kb doctor 查看能力状态。",
+            "PDF 解析能力尚未就绪；请让 Agent 运行 kb doctor 查看状态。",
             file=sys.stderr,
             flush=True,
         )
 
 
-def _reexec(python_exe: Path, message: str) -> None:
+def _reexec(python_exe: Path) -> None:
     resolved = _python_path(python_exe)
-    print(message, file=sys.stderr, flush=True)
     os.execve(str(resolved), [str(resolved), *sys.argv], {**os.environ, READY_FLAG: "1"})
 
 
@@ -216,8 +215,8 @@ def _failure_message(venv_dir: Path, error: Exception) -> str:
     del venv_dir, error
     return "\n".join(
         [
-            "[research] 无法准备项目受管运行环境。",
-            "请让 Agent 运行 kb doctor 查看私有诊断，并选择可用的项目运行环境。",
+            "无法准备运行所需的环境。",
+            "请让 Agent 运行 kb doctor 查看私有诊断，并协助选择可用环境。",
         ]
     )
 
@@ -239,7 +238,7 @@ def ensure_managed_runtime(home: Path | None = None) -> None:
             if is_current_python(configured_path):
                 _mark_ready()
                 return
-            _reexec(configured_path, "[research] 正在使用已配置的运行环境。")
+            _reexec(configured_path)
             return
 
     if os.environ.get("RESEARCH_NO_MANAGED_VENV") == "1":
@@ -247,7 +246,7 @@ def ensure_managed_runtime(home: Path | None = None) -> None:
             _mark_ready()
             return
         raise SystemExit(
-            "[research] 当前运行环境缺少 YAML 支持，且项目受管运行环境已关闭；请让 Agent 运行 kb doctor 协助选择。"
+            "当前环境缺少 YAML 支持，且自动准备运行环境已关闭；请让 Agent 运行 kb doctor 协助处理。"
         )
 
     venv_dir = managed_venv_dir(home)
@@ -260,7 +259,7 @@ def ensure_managed_runtime(home: Path | None = None) -> None:
             _ensure_python_has_pdf_backend(venv_py)
             _mark_ready()
             return
-        _reexec(venv_py, "[research] 正在使用项目受管运行环境。")
+        _reexec(venv_py)
         return
 
     if _current_has_yaml():
@@ -271,7 +270,7 @@ def ensure_managed_runtime(home: Path | None = None) -> None:
         return
 
     try:
-        print("[research] 正在准备项目受管运行环境。", file=sys.stderr, flush=True)
+        print("首次使用需要准备运行环境，请稍候。", file=sys.stderr, flush=True)
         _ensure_venv_has_yaml(venv_dir, venv_py)
     except Exception as exc:  # noqa: BLE001
         if _current_has_yaml():
@@ -282,4 +281,4 @@ def ensure_managed_runtime(home: Path | None = None) -> None:
     if is_current_python(venv_py):
         _mark_ready()
         return
-    _reexec(venv_py, "[research] 正在使用项目受管运行环境。")
+    _reexec(venv_py)
