@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .core import kb_root, load_runtime_preferences, runtime_preferences_path, write_runtime_preferences
+from .journal import mutation_transaction
 from .yaml_io import load_yaml, write_yaml_if_changed
 
 CATEGORIES = {"skill-defect", "user-preference", "recurring-issue"}
@@ -31,7 +32,8 @@ def load_learnings(project_root: Path) -> list[dict[str, Any]]:
 
 def write_learnings(project_root: Path, entries: list[dict[str, Any]]) -> Path:
     path = learnings_path(project_root)
-    write_yaml_if_changed(path, entries)
+    with mutation_transaction(project_root, "write-learnings", [path]):
+        write_yaml_if_changed(path, entries)
     return path
 
 
@@ -104,38 +106,40 @@ def log_learning(
 
     timestamp = _now(now)
     timestamp_text = timestamp.isoformat()
-    entries = load_learnings(project_root)
-    best_match: dict[str, Any] | None = None
-    best_score = 0.0
-    for entry in entries:
-        if str(entry.get("category") or "") != category:
-            continue
-        score = _text_similarity(text, str(entry.get("text") or ""))
-        if score > best_score and score >= 0.86:
-            best_match = entry
-            best_score = score
+    path = learnings_path(project_root)
+    with mutation_transaction(project_root, "log-learning", [path]):
+        entries = load_learnings(project_root)
+        best_match: dict[str, Any] | None = None
+        best_score = 0.0
+        for entry in entries:
+            if str(entry.get("category") or "") != category:
+                continue
+            score = _text_similarity(text, str(entry.get("text") or ""))
+            if score > best_score and score >= 0.86:
+                best_match = entry
+                best_score = score
 
-    if best_match is not None:
-        best_match["occurrences"] = _entry_occurrences(best_match) + 1
-        best_match["last_seen_at"] = timestamp_text
+        if best_match is not None:
+            best_match["occurrences"] = _entry_occurrences(best_match) + 1
+            best_match["last_seen_at"] = timestamp_text
+            write_learnings(project_root, entries)
+            return best_match, False
+
+        entry = {
+            "id": _next_learning_id(entries, timestamp),
+            "created_at": timestamp_text,
+            "category": category,
+            "text": text,
+            "source": source,
+            "skill": str(skill or "").strip(),
+            "context": str(context or "").strip(),
+            "status": "pending",
+            "occurrences": 1,
+            "last_seen_at": timestamp_text,
+        }
+        entries.append(entry)
         write_learnings(project_root, entries)
-        return best_match, False
-
-    entry = {
-        "id": _next_learning_id(entries, timestamp),
-        "created_at": timestamp_text,
-        "category": category,
-        "text": text,
-        "source": source,
-        "skill": str(skill or "").strip(),
-        "context": str(context or "").strip(),
-        "status": "pending",
-        "occurrences": 1,
-        "last_seen_at": timestamp_text,
-    }
-    entries.append(entry)
-    write_learnings(project_root, entries)
-    return entry, True
+        return entry, True
 
 
 def find_learning(project_root: Path, learning_id: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -148,10 +152,12 @@ def find_learning(project_root: Path, learning_id: str) -> tuple[list[dict[str, 
 
 def review_learning(project_root: Path, *, learning_id: str, status: str) -> dict[str, Any]:
     status = _validate_enum(status, REVIEW_STATUSES, "status")
-    entries, entry = find_learning(project_root, learning_id)
-    entry["status"] = status
-    write_learnings(project_root, entries)
-    return entry
+    path = learnings_path(project_root)
+    with mutation_transaction(project_root, "review-learning", [path]):
+        entries, entry = find_learning(project_root, learning_id)
+        entry["status"] = status
+        write_learnings(project_root, entries)
+        return entry
 
 
 def _learned_preference_item(entry: dict[str, Any]) -> dict[str, str]:
@@ -165,34 +171,41 @@ def _learned_preference_item(entry: dict[str, Any]) -> dict[str, str]:
 
 
 def promote_learning(project_root: Path, *, learning_id: str) -> tuple[dict[str, Any], Path]:
-    entries, entry = find_learning(project_root, learning_id)
-    if str(entry.get("category") or "") != "user-preference":
-        raise ValueError("only user-preference learnings can be promoted")
-    if str(entry.get("status") or "") == "dismissed":
-        raise ValueError("dismissed learnings cannot be promoted")
+    memory_path = learnings_path(project_root)
+    preferences_path = runtime_preferences_path(project_root)
+    with mutation_transaction(
+        project_root,
+        "promote-learning",
+        [memory_path, preferences_path],
+    ):
+        entries, entry = find_learning(project_root, learning_id)
+        if str(entry.get("category") or "") != "user-preference":
+            raise ValueError("only user-preference learnings can be promoted")
+        if str(entry.get("status") or "") == "dismissed":
+            raise ValueError("dismissed learnings cannot be promoted")
 
-    preferences = load_runtime_preferences(project_root)
-    learned_preferences = preferences.get("learned_preferences", {})
-    if not isinstance(learned_preferences, dict):
-        learned_preferences = {}
-    items = learned_preferences.get("items", [])
-    if not isinstance(items, list):
-        items = []
-    item = _learned_preference_item(entry)
-    replaced = False
-    for index, existing in enumerate(items):
-        if isinstance(existing, dict) and str(existing.get("id") or "") == item["id"]:
-            items[index] = item
-            replaced = True
-            break
-    if not replaced:
-        items.append(item)
-    learned_preferences["items"] = items
-    write_runtime_preferences(project_root, {"learned_preferences": learned_preferences})
+        preferences = load_runtime_preferences(project_root)
+        learned_preferences = preferences.get("learned_preferences", {})
+        if not isinstance(learned_preferences, dict):
+            learned_preferences = {}
+        items = learned_preferences.get("items", [])
+        if not isinstance(items, list):
+            items = []
+        item = _learned_preference_item(entry)
+        replaced = False
+        for index, existing in enumerate(items):
+            if isinstance(existing, dict) and str(existing.get("id") or "") == item["id"]:
+                items[index] = item
+                replaced = True
+                break
+        if not replaced:
+            items.append(item)
+        learned_preferences["items"] = items
 
-    entry["status"] = "confirmed"
-    write_learnings(project_root, entries)
-    return entry, runtime_preferences_path(project_root)
+        entry["status"] = "confirmed"
+        write_learnings(project_root, entries)
+        write_runtime_preferences(project_root, {"learned_preferences": learned_preferences})
+        return entry, preferences_path
 
 
 def _confirmed_entries(entries: list[dict[str, Any]], category: str, limit: int) -> list[dict[str, Any]]:
