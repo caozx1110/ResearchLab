@@ -16,7 +16,7 @@ Default preference order:
 - YAML keys, IDs, slugs, and folder names stay ASCII-safe.
 - Runtime configuration belongs in `kb/config/`; private runtime hand-offs belong in `kb/.runtime/`.
 - At session start, read the research-navigator recall digest and the optional personalization block in `kb/config/user-profile.yaml` once. Personalization is user context, never confirmed fact, and never overrides governance.
-- When the user corrects you or a reusable friction recurs, record a learning through `skill-evolution-advisor`. Skill defects are record-only: never rewrite a skill from a captured defect.
+- When the user explicitly asks you to record a correction or friction, do so through `skill-evolution-advisor`. Otherwise capture it only when the effective diagnostics policy enables capture. Skill defects are record-only: never rewrite a skill from a captured defect.
 
 ## Conversational contract
 
@@ -62,6 +62,18 @@ Stop only at the two governance gates: confirmation of an AI judgement and a gen
 - A manual checkpoint with no dirty KB paths is a successful no-op.
 - Recovery operations act only on the recorded operation paths. Runtime state and generated browser views remain ignored.
 - Update provenance is explicit. A local checkout remains local; a fork branch remains on that fork and branch; a detached checkout is commit-pinned until the user chooses a branch. An old installation with unknown origin or branch requires a user choice and never falls back to a canonical remote or `main`.
+
+## Optional developer diagnostics
+
+Diagnostics are an optional local quality loop, not a governance bypass. Schema, evidence, confirmation, containment, journal, lock, revision, and recovery checks remain mandatory in every mode.
+
+- Obey the effective workspace and per-skill policy: `off` records nothing automatically; `errors-only` permits deterministic failure capture without an Agent retrospective; `developer` may add a short triggered retrospective within the configured task token and issue budgets. A per-skill `off` overrides the workspace mode.
+- An explicit current user request to record a problem always records it, even when automatic diagnostics are off. Corrections, recurring friction, and sanitizer fallbacks are captured automatically only when the effective policy enables them.
+- Use natural-language setup and inspection. Examples include “开启开发者诊断”, “仅在出错时记录”, “关闭 paper-analyst 诊断”, “对刚才失败做脱敏复盘”, and “检查知识库健康”. Do not invent another public `kb` verb.
+- “检查知识库健康” routes to the mechanical read-only workspace audit. Report its Chinese summary and actionable categories; do not expose internal paths, raw findings, or owner arguments.
+- Runtime failure capture receives only a stable skill, operation, return code, and fixed public-safe summary. Never pass raw stdout, stderr, traceback, arguments, user text, source/evidence content, secrets, environment values, or absolute paths into diagnostics.
+- Diagnostics stay local-only. Never run background telemetry, auto-upload an issue, or export it without explicit authorization from the current user message. A captured issue never auto-edits a skill, roadmap, or confirmed research conclusion.
+- Deep retrospective is permitted only in `developer` mode and only while budget remains. If diagnostic capture itself fails, preserve the original operation result and keep the diagnostic failure private.
 
 ## Interactive research modes
 

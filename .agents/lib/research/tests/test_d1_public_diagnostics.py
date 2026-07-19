@@ -297,3 +297,33 @@ def test_d1_keeps_exactly_fifteen_public_verbs() -> None:
     assert "diagnostics" not in subparsers.choices
     assert "lint" not in subparsers.choices
 
+
+def test_d1_agent_rules_and_docs_keep_optional_diagnostics_honest() -> None:
+    root = _project_root()
+    agent_rules = (root / ".agents" / "AGENTS.md").read_text(encoding="utf-8")
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    guide = (root / "docs" / "USER_GUIDE.md").read_text(encoding="utf-8")
+    design = (root / "docs" / "DESIGN.md").read_text(encoding="utf-8")
+    changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+
+    for mode in ("off", "errors-only", "developer"):
+        assert mode in agent_rules
+        assert mode in guide
+        assert mode in design
+    for phrase in (
+        "开启开发者诊断",
+        "仅在出错时记录",
+        "关闭 paper-analyst 诊断",
+        "检查知识库健康",
+    ):
+        assert phrase in agent_rules
+        assert phrase in guide
+    assert "local-only" in agent_rules
+    assert "local-only" in readme
+    assert "后台 telemetry" in guide
+    assert "不增加 `lint` 或 `diagnostics` 入口" in guide
+    assert "不存在新的 `kb lint` 或 `kb diagnostics`" in design
+    assert "beta/scaffold" in readme
+    assert "beta/scaffold" in changelog
+    assert "never auto-edits a skill" in agent_rules
+    assert "不能关闭 schema、evidence、confirmation" in guide
