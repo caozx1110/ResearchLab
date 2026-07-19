@@ -9,6 +9,7 @@ import sys
 import pytest
 
 import research.confirm as confirm
+import research.evidence as evidence
 import research.git_ops as git_ops
 import research.journal as journal
 import research.records as records
@@ -126,6 +127,82 @@ def test_canonical_classifier_keeps_only_fact_metadata_review_ready() -> None:
     for record in hollow_records:
         assert records.record_workflow_state(record) != "ready_for_review"
         assert records.is_ready_for_human_review(record) is False
+
+
+def _verified_judgement_record(kind: str, claim_type: str = "evaluation") -> dict:
+    prefix = {"paper": "p", "blog": "b", "repo": "r"}[kind]
+    unit_id = f"{prefix}-verified-{kind}-12345678"
+    claim = {
+        "id": f"claim-{kind}",
+        "text": f"Verified {kind} judgement",
+        "claim_type": claim_type,
+        "confirmation_status": "pending_user_confirmation",
+        "evidence_refs": [
+            {
+                "source_unit_id": unit_id,
+                "artifact": "raw/source.txt",
+                "locator": "line:1",
+                "quote": "verbatim source quote",
+            }
+        ],
+    }
+    state_key = "capability_fill_status" if kind == "repo" else "full_note_status"
+    substance = {
+        "paper": {"core_content": {"method": "A real method explanation."}},
+        "blog": {"content": {"key_points": ["A grounded key point."]}},
+        "repo": {"capability": {"core_capabilities": ["training"]}},
+    }[kind]
+    return {
+        "id": unit_id,
+        "kind": kind,
+        "title": f"Verified {kind}",
+        "status": "active",
+        "confirmation_status": "pending_user_confirmation",
+        "information_types": ["inference", "evaluation", "unverified"],
+        "payload": {
+            **substance,
+            "claims": [claim],
+            "verification": {
+                "verified_at": "2026-07-19T00:00:00+00:00",
+                "claims_digest": evidence.claims_digest([claim]),
+                "evidence_digest": "a" * 64,
+                "artifacts": [{"artifact": "raw/source.txt", "sha256": "b" * 64}],
+            },
+            "state": {state_key: "pending_user_confirmation"},
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("kind", "claim_type"),
+    [("paper", "evaluation"), ("blog", "user_opinion"), ("repo", "inference")],
+)
+def test_verified_judgements_with_record_unverified_are_review_ready(
+    kind: str,
+    claim_type: str,
+) -> None:
+    verified = _verified_judgement_record(kind, claim_type)
+    assert records.record_workflow_state(verified) == "ready_for_review"
+    assert records.is_ready_for_human_review(verified) is True
+
+    hollow = deepcopy(verified)
+    hollow["payload"].pop({"paper": "core_content", "blog": "content", "repo": "capability"}[kind])
+    assert records.record_workflow_state(hollow) != "ready_for_review"
+
+    missing_receipt = deepcopy(verified)
+    missing_receipt["payload"].pop("verification")
+    assert records.record_workflow_state(missing_receipt) != "ready_for_review"
+
+    stale_receipt = deepcopy(verified)
+    stale_receipt["payload"]["verification"]["invalidation"] = {"reason": "verification_stale"}
+    assert records.record_workflow_state(stale_receipt) != "ready_for_review"
+
+    unverified_claim = deepcopy(verified)
+    unverified_claim["payload"]["claims"][0]["claim_type"] = "unverified"
+    unverified_claim["payload"]["verification"]["claims_digest"] = evidence.claims_digest(
+        unverified_claim["payload"]["claims"]
+    )
+    assert records.record_workflow_state(unverified_claim) != "ready_for_review"
 
 
 def test_orchestrator_transaction_uses_complete_checkpoint_scope(

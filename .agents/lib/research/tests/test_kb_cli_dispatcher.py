@@ -845,10 +845,19 @@ def test_kb_add_allows_explicit_kind_override(monkeypatch, tmp_path: Path) -> No
 def test_kb_review_tty_and_pipe_are_identical_and_emit_private_protocol(monkeypatch, tmp_path: Path, capsys) -> None:
     kb = _load_kb_cli()
     calls: list[tuple[str, tuple[str, ...]]] = []
+    stream_values: list[bool] = []
 
-    def fake_forward(root: Path, script: str, args, **_kwargs):
+    def fake_forward(root: Path, script: str, args, *, stream: bool = True, **_kwargs):
         calls.append((script, tuple(args)))
+        stream_values.append(stream)
         return kb.CommandResult((script, *args), 0, "# review queue\n")
+
+    hollow = _pending_record("p-hollow-123456", "paper", "Hollow")
+    hollow.update(
+        information_types=["inference", "unverified"],
+        status="screened",
+        payload={"state": {"full_note_status": "awaiting_agent_fill"}},
+    )
 
     monkeypatch.setattr(kb, "forward_command", fake_forward)
     monkeypatch.setattr(
@@ -859,6 +868,7 @@ def test_kb_review_tty_and_pipe_are_identical_and_emit_private_protocol(monkeypa
             _pending_record("r-two-123456", "repo", "Two"),
             _pending_record("b-three-123456", "blog", "Three"),
             _pending_record("i-four-123456", "idea", "Four"),
+            hollow,
         ],
     )
     monkeypatch.setattr("builtins.input", lambda prompt="": (_ for _ in ()).throw(AssertionError("must not prompt")))
@@ -874,11 +884,23 @@ def test_kb_review_tty_and_pipe_are_identical_and_emit_private_protocol(monkeypa
         (".agents/skills/knowledge-base-manager/scripts/kb.py", ("review-queue",)),
         (".agents/skills/knowledge-base-manager/scripts/kb.py", ("review-queue",)),
     ]
+    assert stream_values == [False, False]
     assert tty_output == pipe_output
     assert "需要你用自然语言确认或拒绝" in tty_output
+    assert "# review queue" not in tty_output
+    assert "p-hollow-123456" not in tty_output
     for name in ("tty-review.json", "pipe-review.json"):
         protocol = json.loads((tmp_path / "kb" / ".runtime" / name).read_text(encoding="utf-8"))
         assert protocol["status"] == "needs_user_authorization"
+        expected_ids = {
+            "p-one-123456",
+            "r-two-123456",
+            "b-three-123456",
+            "i-four-123456",
+        }
+        assert protocol["details"]["review_count"] == len(expected_ids)
+        assert set(protocol["details"]["record_ids"]) == expected_ids
+        assert {item["id"] for item in protocol["next_actions"][0]["records"]} == expected_ids
         assert protocol["next_actions"][0]["decision_fields"] == [
             "decision",
             "user_authorization",

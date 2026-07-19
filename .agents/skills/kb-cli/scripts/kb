@@ -32,6 +32,7 @@ from research.core import (
     default_confirmed_by,
     default_runtime_preferences,
     is_ai_signer,
+    is_ready_for_human_review,
     kb_root,
     load_runtime_preferences,
     search_records,
@@ -984,10 +985,16 @@ def review_item_summary(record: dict) -> str:
 
 def print_review_item(record: dict) -> None:
     unit_id = str(record.get("id") or "-")
-    kind = str(record.get("kind") or "-")
+    kind = {
+        "paper": "论文",
+        "repo": "代码仓",
+        "blog": "博客",
+        "idea": "研究想法",
+        "experiment": "实验",
+    }.get(str(record.get("kind") or ""), "知识条目")
     title = str(record.get("title") or "-")
-    print(f"- {unit_id} | {kind} | {title}")
-    print(f"  AI-judgement: {review_item_summary(record)}")
+    print(f"- {kind}「{title}」（{unit_id}）")
+    print(f"  判断摘要：{review_item_summary(record)}")
 
 
 def build_review_apply_commands(
@@ -1018,22 +1025,33 @@ def build_review_apply_commands(
 
 
 def handle_review(args: argparse.Namespace, root: Path) -> int:
-    result = forward_command(root, SCRIPT_BY_VERB["review"], build_review_list_args(args.fuzzy))
+    result = forward_command(
+        root,
+        SCRIPT_BY_VERB["review"],
+        build_review_list_args(args.fuzzy),
+        stream=False,
+    )
     if result.returncode != 0:
+        print("确认收件箱暂时无法读取；详细诊断已保留给 Agent。", file=sys.stderr)
         return result.returncode
     records = load_review_records(root, args.fuzzy)
-    pending = [record for record in records if str(record.get("confirmation_status") or "") == "pending_user_confirmation"]
+    pending = [record for record in records if is_ready_for_human_review(record)]
     if pending:
-        set_protocol_status("needs_user_authorization", review_count=len(pending))
+        pending_ids = [str(record.get("id") or "") for record in pending]
+        set_protocol_status("needs_user_authorization", review_count=len(pending), record_ids=pending_ids)
         add_agent_action(
             "present_review_items",
             records=pending,
             decision_fields=["decision", "user_authorization", "authorization_source", "evidence"],
             authorization_source="user_message",
         )
+        print(f"有 {len(pending)} 条判断已经准备好，等待你确认：")
+        for record in pending:
+            print_review_item(record)
         print("这些判断需要你用自然语言确认或拒绝；在你拍板前不会写成已确认结论。")
     else:
         set_protocol_status("completed", review_count=0)
+        print("目前没有需要你确认的判断。")
     return 0
 
 

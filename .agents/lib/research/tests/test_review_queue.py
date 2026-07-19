@@ -8,6 +8,7 @@ import pytest
 
 from research.common import load_yaml, write_yaml_if_changed
 from research.core import ensure_workspace, record_path, runtime_preferences_path, search_records
+from research.evidence import build_verification_receipt
 
 
 def _project_root() -> Path:
@@ -523,6 +524,80 @@ def test_review_queue_excludes_non_review_workflow_states_for_all_source_kinds(
 
     assert ready["id"] in listed
     assert blocked["id"] not in listed
+
+
+def _write_verified_judgement(root: Path, kind: str, *, suffix: str, hollow: bool = False) -> str:
+    prefix = {"paper": "p", "blog": "b", "repo": "r"}[kind]
+    unit_id = f"{prefix}-{suffix}-12345678"
+    unit_dir = record_path(root, kind, unit_id).parent
+    evidence_path = unit_dir / "raw" / "source.txt"
+    evidence_path.parent.mkdir(parents=True, exist_ok=True)
+    evidence_path.write_text("verbatim source quote\n", encoding="utf-8")
+    state_key = "capability_fill_status" if kind == "repo" else "full_note_status"
+    substance = {} if hollow else {
+        "paper": {"core_content": {"method": "Grounded method explanation."}},
+        "blog": {"content": {"key_points": ["Grounded key point."]}},
+        "repo": {"capability": {"core_capabilities": ["training"]}},
+    }[kind]
+    record = {
+        "id": unit_id,
+        "kind": kind,
+        "title": f"Verified {kind}",
+        "status": "active",
+        "maturity": "complete",
+        "confirmation_status": "pending_user_confirmation",
+        "needs_human_confirmation": True,
+        "information_types": ["inference", "evaluation", "unverified"],
+        "summary": "Grounded judgement",
+        "tags": [],
+        "topics": [],
+        "candidate_pools": [],
+        "source": {"original_uri": "", "file_hash": ""},
+        "payload": {
+            **substance,
+            "state": {state_key: "pending_user_confirmation"},
+            "claims": [
+                {
+                    "id": f"claim-{unit_id}",
+                    "text": "This source is useful.",
+                    "claim_type": "evaluation",
+                    "confirmation_status": "pending_user_confirmation",
+                    "evidence_refs": [
+                        {
+                            "source_unit_id": unit_id,
+                            "artifact": "raw/source.txt",
+                            "locator": "line:1",
+                            "quote": "verbatim source quote",
+                        }
+                    ],
+                }
+            ],
+        },
+    }
+    build_verification_receipt(record, unit_dir)
+    _write_record(root, record)
+    return unit_id
+
+
+def test_review_queue_uses_current_verified_judgement_readiness_for_all_source_kinds(tmp_path: Path) -> None:
+    kb = _load_kb_module()
+    ensure_workspace(tmp_path)
+    ready_ids = {
+        _write_verified_judgement(tmp_path, kind, suffix=f"ready-{kind}")
+        for kind in ("paper", "blog", "repo")
+    }
+    hollow_id = _write_verified_judgement(tmp_path, "paper", suffix="hollow", hollow=True)
+    stale_id = _write_verified_judgement(tmp_path, "blog", suffix="stale")
+    (record_path(tmp_path, "blog", stale_id).parent / "raw" / "source.txt").write_text(
+        "changed source bytes\n",
+        encoding="utf-8",
+    )
+
+    listed = {record["id"] for record in kb.review_queue_records(tmp_path, limit=0)}
+
+    assert ready_ids <= listed
+    assert hollow_id not in listed
+    assert stale_id not in listed
 
 
 def test_batch_confirmation_transmits_final_user_authorization_signature(monkeypatch, tmp_path: Path) -> None:
