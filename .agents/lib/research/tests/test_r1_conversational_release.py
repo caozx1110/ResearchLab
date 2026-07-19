@@ -50,6 +50,25 @@ EXPECTED_RUNTIME_PINS = {
     "pymupdf": "1.26.5",
 }
 EXPECTED_DEV_PINS = {"pytest": "8.4.2"}
+CAPABILITY_MATURITY = {
+    "kb-cli": "stable",
+    "knowledge-base-manager": "stable",
+    "source-intake": "beta",
+    "paper-analyst": "beta",
+    "repo-analyst": "beta",
+    "blog-analyst": "beta",
+    "research-config-manager": "beta",
+    "discussion-archivist": "beta",
+    "research-orchestrator": "scaffold",
+    "literature-synthesizer": "scaffold",
+    "idea-workbench": "scaffold",
+    "method-designer": "scaffold",
+    "experiment-workbench": "scaffold",
+    "report-author": "scaffold",
+    "skill-evolution-advisor": "scaffold",
+    "wiki-adapter": "scaffold",
+    "research-navigator": "dev-only",
+}
 
 
 def _project_root() -> Path:
@@ -79,6 +98,23 @@ def _safe_runtime_env() -> dict[str, str]:
         "RESEARCH_NO_PDF_BACKEND": "1",
         "RESEARCH_PYTHON": sys.executable,
     }
+
+
+def _tree_snapshot(root: Path) -> tuple[tuple[str, str, bytes], ...]:
+    if not root.exists() and not root.is_symlink():
+        return ()
+    entries: list[tuple[str, str, bytes]] = []
+    for path in [root, *sorted(root.rglob("*"))]:
+        relative = "." if path == root else path.relative_to(root).as_posix()
+        if path.is_symlink():
+            entries.append((relative, "symlink", os.readlink(path).encode()))
+        elif path.is_dir():
+            entries.append((relative, "directory", b""))
+        elif path.is_file():
+            entries.append((relative, "file", path.read_bytes()))
+        else:
+            entries.append((relative, "other", b""))
+    return tuple(entries)
 
 
 def _active_requirement_lines(path: Path) -> tuple[str, ...]:
@@ -115,6 +151,25 @@ def test_public_verb_registry_and_docs_match_exactly() -> None:
         text = (_project_root() / relative).read_text(encoding="utf-8")
         for verb in PUBLIC_VERBS:
             assert f"`kb {verb}" in text, f"{relative} does not document kb {verb}"
+
+
+def test_docs_disclose_every_skill_maturity_without_bundle_overclaim() -> None:
+    for relative in ("README.md", "docs/USER_GUIDE.md"):
+        text = (_project_root() / relative).read_text(encoding="utf-8")
+        for label in ("stable", "beta", "scaffold", "dev-only"):
+            assert label in text, f"{relative} does not define {label}"
+        for skill, maturity in CAPABILITY_MATURITY.items():
+            row = rf"\|\s*`{re.escape(skill)}`\s*\|\s*{maturity}\s*\|"
+            assert re.search(row, text), f"{relative} does not mark {skill} as {maturity}"
+        assert "whole bundle" in text or "整个 bundle" in text
+        assert "paper" in text and "repo" in text and "blog" in text
+
+
+def test_user_guide_does_not_expose_raw_execution_or_internal_paths() -> None:
+    guide = (_project_root() / "docs" / "USER_GUIDE.md").read_text(encoding="utf-8")
+    for token in ("python3 ", ".agents/", "kb/", ".py ", "${", "NEXT FOR AGENT"):
+        assert token not in guide
+    assert not re.search(r"(^|\s)--[A-Za-z]", guide)
 
 
 def test_static_human_print_literals_and_input_model_are_safe() -> None:
@@ -256,6 +311,44 @@ def test_installed_copy_runs_help_without_creating_runtime_data(tmp_path: Path) 
     installed_rules = (workspace / "AGENTS.md").read_text(encoding="utf-8")
     assert "## Conversational contract" in installed_rules
     assert "## Editing Rules" not in installed_rules
+
+
+def test_installed_copy_next_is_byte_identical_on_fresh_workspace(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    install = subprocess.run(
+        [
+            "bash",
+            str(_project_root() / "install.sh"),
+            "install",
+            "--project",
+            str(workspace),
+            "--yes",
+            "--codex",
+        ],
+        cwd=_project_root(),
+        env=_safe_runtime_env(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert install.returncode == 0, install.stdout + install.stderr
+    before = _tree_snapshot(workspace)
+
+    next_result = subprocess.run(
+        [sys.executable, "-B", str(_kb_script(workspace)), "next"],
+        cwd=workspace,
+        env=_safe_runtime_env(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert next_result.returncode == 0, next_result.stdout + next_result.stderr
+    assert "KB 为空" in next_result.stdout
+    for token in FORBIDDEN_PUBLIC_TOKENS:
+        assert token not in next_result.stdout
+    assert _tree_snapshot(workspace) == before
 
 
 def test_release_metadata_is_honest_rc_and_ci_is_cross_platform() -> None:

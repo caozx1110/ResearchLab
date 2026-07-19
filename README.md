@@ -12,6 +12,37 @@ workspace/
 
 This repository is currently an **internal alpha / pre-release**. The evidence and confirmation invariants are intentional, but interfaces may still change before the first stable release. See [CHANGELOG.md](CHANGELOG.md) for the current release state.
 
+## Capability maturity
+
+These labels describe the current scope of each component, not the release status of the whole bundle:
+
+- **stable**: the named infrastructure contract has deterministic release coverage;
+- **beta**: the main workflow is real, but still depends on agent judgement or variable source material;
+- **scaffold**: durable storage and governance exist, while research-quality generation is still being hardened;
+- **dev-only**: useful for local development, but not presented as a supported end-user surface.
+
+| Skill | Maturity | Current scope |
+|---|---|---|
+| `kb-cli` | stable | Fifteen-verb routing, conversational output filtering, and recovery entrypoints only. |
+| `knowledge-base-manager` | stable | Schema, evidence, confirmation, exact-path recovery, and index governance; it does not interpret research material. |
+| `source-intake` | beta | Staging, deduplication, immutable source capture, and retryable failures across heterogeneous sources. |
+| `paper-analyst` | beta | Evidence-backed prepare and verify gates; the runtime agent supplies the substantive reading. |
+| `repo-analyst` | beta | File-oriented capability-map preparation and evidence verification; the runtime agent supplies code understanding. |
+| `blog-analyst` | beta | Article preparation and claim verification; the runtime agent supplies interpretation and credibility judgement. |
+| `research-config-manager` | beta | Preference and policy persistence is real, but not every preference is consumed by every downstream skill. |
+| `discussion-archivist` | beta | Durable conclusion-level discussion archives with explicit evidence and open questions. |
+| `research-orchestrator` | scaffold | Program spine, routing, dashboards, and event flow; prioritization remains policy-driven. |
+| `literature-synthesizer` | scaffold | Evidence-first survey structures exist; taxonomy, trend, and gap synthesis still depends heavily on the agent. |
+| `idea-workbench` | scaffold | Candidate, review, discussion, and selection structures exist; novelty quality is not benchmarked as stable. |
+| `method-designer` | scaffold | Design handoff and experiment-matrix structures exist; generated methods require expert review. |
+| `experiment-workbench` | scaffold | Typed run logs and diagnosis governance exist; diagnosis quality remains agent-dependent. |
+| `report-author` | scaffold | Reports and outlines consume durable evidence, but composition quality and coverage remain under hardening. |
+| `skill-evolution-advisor` | scaffold | Learning capture and review exist; automatic skill evolution is intentionally not a supported promise. |
+| `wiki-adapter` | scaffold | A thin compatibility and routing layer, not an independent analysis engine. |
+| `research-navigator` | dev-only | The local browser workbench remains a development surface; generated Markdown navigation is beta. |
+
+A score or successful run for one paper, repository, or article analyzer is evidence only for that analyzer. It must not be extrapolated to survey, idea, method, experiment, report, navigation, or the bundle as a whole. In particular, the two scoped **stable** rows above do not make this pre-release a stable release.
+
 ## Start with a conversation
 
 Install the bundle into a workspace root, open that workspace in Codex or Claude Code, and say:
