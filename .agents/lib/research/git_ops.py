@@ -473,6 +473,12 @@ def restore_operation(project_root: Path, op_id: str, *, recovery_type: str = "r
 
 
 def undo_last_operation(project_root: Path) -> dict[str, Any]:
+    # Keep the no-candidate path strictly read-only: acquiring the lock creates
+    # its parent journal directory and the lock file itself.  This optimistic
+    # read is only a zero-write preflight; the authoritative candidate must be
+    # selected again while holding the lock so concurrent undo calls serialize
+    # against the latest remaining business operation.
+    latest_committed_op(project_root)
     with exclusive_file_lock(journal_root(project_root) / ".undo.lock"):
         entry = latest_committed_op(project_root)
         return restore_operation(project_root, str(entry["op_id"]), recovery_type="undo")
