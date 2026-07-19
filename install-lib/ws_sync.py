@@ -19,9 +19,9 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib.util
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -416,30 +416,58 @@ def assert_uninstall_manifest_boundary(dst_root: Path) -> None:
         die(f"manifest is not a regular file; refusing uninstall: {manifest}")
 
 
-def standard_bytecode_cache_names(source_path: Path) -> set[str]:
-    """Return exact cache names generated for a source by this interpreter."""
+def is_standard_cpython_cache(source_path: Path, cache_name: str) -> bool:
+    """Match standard CPython cache names for this source across interpreter ABIs."""
 
-    names: set[str] = set()
-    for optimization in ("", 1, 2):
-        cached = Path(importlib.util.cache_from_source(str(source_path), optimization=optimization))
-        names.add(cached.name)
-    return names
+    pattern = rf"{re.escape(source_path.stem)}\.cpython-[0-9]+(?:\.opt-[12])?\.pyc"
+    return re.fullmatch(pattern, cache_name) is not None
 
 
-def remove_managed_bytecode_caches(files: dict[str, str], dst_root: Path, *, dry_run: bool) -> bool:
-    """Remove only bytecode caches attributable to manifest-owned Python modules."""
-
-    cache_names: dict[Path, set[str]] = {}
+def managed_bytecode_cache_sources(files: dict[str, str], dst_root: Path) -> dict[Path, list[Path]]:
+    cache_sources: dict[Path, list[Path]] = {}
     for rel in files:
         if not rel.startswith(".agents/") or not rel.endswith(".py"):
             continue
         source_path = path_for_rel(dst_root, rel)
-        cache_names.setdefault(source_path.parent / "__pycache__", set()).update(
-            standard_bytecode_cache_names(source_path)
-        )
+        cache_sources.setdefault(source_path.parent / "__pycache__", []).append(source_path)
+    return cache_sources
+
+
+def preserve_changed_bytecode_cache_types(files: dict[str, str], dst_root: Path, preserve: set[Path]) -> None:
+    """Protect matching cache paths whose type changed before any directory pruning."""
+
+    for cache_dir, sources in managed_bytecode_cache_sources(files, dst_root).items():
+        state, _detail = inspect_managed_uninstall_directory(cache_dir, dst_root)
+        if state != "directory":
+            continue
+        try:
+            entries = list(cache_dir.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            if not any(is_standard_cpython_cache(source, entry.name) for source in sources):
+                continue
+            try:
+                mode = entry.lstat().st_mode
+            except OSError:
+                continue
+            if not stat.S_ISREG(mode):
+                preserve.add(entry)
+
+
+def remove_managed_bytecode_caches(
+    files: dict[str, str],
+    dst_root: Path,
+    *,
+    dry_run: bool,
+    preserve: set[Path] | None = None,
+) -> bool:
+    """Remove only bytecode caches attributable to manifest-owned Python modules."""
+
+    cache_sources = managed_bytecode_cache_sources(files, dst_root)
 
     removed_any = False
-    for cache_dir, allowed_names in sorted(cache_names.items(), key=lambda item: str(item[0])):
+    for cache_dir, sources in sorted(cache_sources.items(), key=lambda item: str(item[0])):
         state, detail = inspect_managed_uninstall_directory(cache_dir, dst_root)
         if state == "missing":
             continue
@@ -458,7 +486,7 @@ def remove_managed_bytecode_caches(files: dict[str, str], dst_root: Path, *, dry
             )
             continue
         for entry in entries:
-            if entry.name not in allowed_names:
+            if not any(is_standard_cpython_cache(source, entry.name) for source in sources):
                 continue
             try:
                 mode = entry.lstat().st_mode
@@ -473,6 +501,8 @@ def remove_managed_bytecode_caches(files: dict[str, str], dst_root: Path, *, dry
                     "preserving managed runtime cache during uninstall: "
                     f"{entry.relative_to(dst_root)} reason=type-change"
                 )
+                if preserve is not None:
+                    preserve.add(entry)
                 continue
             removed_any = remove_file(entry, dst_root, dry_run=dry_run) or removed_any
     return removed_any
@@ -1103,6 +1133,8 @@ def uninstall(args: argparse.Namespace) -> int:
             continue
         removable_paths.append(path)
 
+    preserve_changed_bytecode_cache_types(files, dst_root, preserved_paths)
+
     agents_path = dst_root / "AGENTS.md"
     if agents_path.is_symlink():
         warn("preserving AGENTS.md during uninstall: path is a symlink")
@@ -1131,7 +1163,12 @@ def uninstall(args: argparse.Namespace) -> int:
     removed_any = False
     for path in removable_paths:
         removed_any = remove_file(path, dst_root, dry_run=args.dry_run) or removed_any
-    removed_any = remove_managed_bytecode_caches(files, dst_root, dry_run=args.dry_run) or removed_any
+    removed_any = remove_managed_bytecode_caches(
+        files,
+        dst_root,
+        dry_run=args.dry_run,
+        preserve=preserved_paths,
+    ) or removed_any
     if manifest_path(dst_root).exists() or manifest_path(dst_root).is_symlink():
         if args.dry_run:
             info(f"[dry-run] delete {manifest_path(dst_root)}")
