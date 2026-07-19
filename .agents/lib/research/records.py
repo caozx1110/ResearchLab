@@ -1,9 +1,7 @@
 """Record schema: templates, payload skeletons, normalization, history, and store access (iter/locate)."""
 from __future__ import annotations
 
-import os
 import re
-import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Sequence
@@ -24,7 +22,7 @@ from .evidence import (
 from .ids import (
     build_unit_id,
 )
-from .journal import journaled_op
+from .journal import mutation_transaction
 from .paths import (
     UNIT_KIND_DIRS,
     _artifact_list,
@@ -65,97 +63,15 @@ WORKFLOW_STATES = {
 }
 
 
-def _atomic_restore_bytes(path: Path, payload: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="wb",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            suffix=".restore",
-            delete=False,
-        ) as handle:
-            temp_path = Path(handle.name)
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp_path, path)
-    finally:
-        if temp_path is not None and temp_path.exists():
-            temp_path.unlink()
-
-
 @contextmanager
 def command_mutation(
     project_root: Path,
     op_type: str,
     target_paths: Sequence[Path],
 ) -> Iterator[None]:
-    """Journal one command and restore every exact file target on failure.
-
-    Lock acquisition is intentionally delegated to the shared recovery layer's
-    upcoming re-entrant ``mutation_transaction`` integration; nested write_record
-    calls already lock/CAS their record target on this baseline.
-    """
-    targets = sorted({Path(path).resolve() for path in target_paths}, key=lambda path: path.as_posix())
-    directory_targets = {
-        path for path in targets if path.is_dir() or (not path.exists() and not path.suffix)
-    }
-    file_targets = [path for path in targets if path not in directory_targets]
-    before = {path: path.read_bytes() if path.is_file() else None for path in file_targets}
-    tree_before: dict[Path, tuple[bool, dict[str, bytes], set[str]]] = {}
-    for directory in directory_targets:
-        existed = directory.is_dir()
-        files = {
-            path.relative_to(directory).as_posix(): path.read_bytes()
-            for path in directory.rglob("*")
-            if path.is_file()
-        } if existed else {}
-        directories = {
-            path.relative_to(directory).as_posix()
-            for path in directory.rglob("*")
-            if path.is_dir()
-        } if existed else set()
-        tree_before[directory] = (existed, files, directories)
-    try:
-        # Baseline journal digests files only. Directory targets are still one
-        # rollback/checkpoint scope here and become native journal targets at the
-        # shared mutation_transaction integration point.
-        with journaled_op(project_root, op_type, file_targets):
-            yield
-    except BaseException:
-        for path, content in before.items():
-            if content is None:
-                if path.is_file() or path.is_symlink():
-                    path.unlink()
-            else:
-                _atomic_restore_bytes(path, content)
-        for directory, (existed, files, directories) in tree_before.items():
-            if directory.exists():
-                for path in sorted(directory.rglob("*"), key=lambda item: len(item.parts), reverse=True):
-                    relative = path.relative_to(directory).as_posix()
-                    if (path.is_file() or path.is_symlink()) and relative not in files:
-                        path.unlink()
-                for path in sorted(directory.rglob("*"), key=lambda item: len(item.parts), reverse=True):
-                    relative = path.relative_to(directory).as_posix()
-                    if path.is_dir() and relative not in directories:
-                        try:
-                            path.rmdir()
-                        except OSError:
-                            pass
-            if existed:
-                directory.mkdir(parents=True, exist_ok=True)
-                for relative in sorted(directories):
-                    (directory / relative).mkdir(parents=True, exist_ok=True)
-                for relative, payload in files.items():
-                    _atomic_restore_bytes(directory / relative, payload)
-            elif directory.is_dir():
-                try:
-                    directory.rmdir()
-                except OSError:
-                    pass
-        raise
+    """Delegate command-scoped recovery and locking to the canonical transaction."""
+    with mutation_transaction(project_root, op_type, target_paths):
+        yield
 
 
 def _trusted_claim_source_roots(project_root: Path, record: dict[str, Any]) -> dict[str, Path]:
@@ -695,6 +611,31 @@ def _workflow_marker(record: dict[str, Any]) -> str:
     return ""
 
 
+def _has_unverified_judgement_signal(record: dict[str, Any]) -> bool:
+    payload = record.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    quick_screen = payload.get("quick_screen")
+    quick_screen = quick_screen if isinstance(quick_screen, dict) else {}
+    for key in (
+        "worth_deep_reading",
+        "judgement_reason",
+        "backing_strength",
+        "result_strength",
+        "experiment_quality",
+        "reliability",
+        "novelty",
+        "relevance_to_current_research",
+        "screening_mode",
+        "risks",
+        "takeaways",
+        "recommended_next_action",
+    ):
+        value = quick_screen.get(key)
+        if value not in (None, "", "unknown", False, [], {}):
+            return True
+    return False
+
+
 def record_workflow_state(record: dict[str, Any]) -> str:
     """Single pure classifier shared by next/review/status/auto callers."""
     status = str(record.get("status") or "").strip().lower()
@@ -704,6 +645,19 @@ def record_workflow_state(record: dict[str, Any]) -> str:
     source = record.get("source")
     source = source if isinstance(source, dict) else {}
     marker = _workflow_marker(record).strip().lower()
+    claims = confirmation_claims(record)
+    information_types = {str(value) for value in record.get("information_types") or []}
+    claim_types = {str(claim.get("claim_type") or "") for claim in claims}
+    never_review_ready = bool(
+        information_types & {"user_opinion", "unverified"}
+        or claim_types & {"user_opinion", "unverified"}
+    )
+    needs_gate = (
+        _record_needs_gate(record)[0]
+        or "unverified" in information_types
+        or bool(claim_types & (JUDGEMENT_CLAIM_TYPES | UNCONFIRMABLE_CLAIM_TYPES))
+        or _has_unverified_judgement_signal(record)
+    )
     failure_markers = {
         status,
         marker,
@@ -719,8 +673,7 @@ def record_workflow_state(record: dict[str, Any]) -> str:
     if marker in {"ready_to_verify", "agent_fill_complete"}:
         return "ready_to_verify"
 
-    claims = confirmation_claims(record)
-    verification_current = bool(claims) and not verification_receipt_violations(
+    verification_current = bool(claims) and not never_review_ready and not verification_receipt_violations(
         record,
         None,
         check_artifacts=False,
@@ -729,10 +682,12 @@ def record_workflow_state(record: dict[str, Any]) -> str:
         if verification_current:
             return "ready_for_review"
         if marker in {"pending_user_confirmation", "ready_for_review"}:
-            return "awaiting_agent_fill" if _record_needs_gate(record)[0] else "ready_for_review"
-        if marker == "not_started" or (not marker and str(record.get("kind") or "") in {"paper", "blog", "repo", "idea"}):
-            return "source_ready"
-        if _record_needs_gate(record)[0] or marker:
+            return "awaiting_agent_fill" if needs_gate else "ready_for_review"
+        if marker == "not_started":
+            return "source_ready" if needs_gate else "ready_for_review"
+        if not marker and str(record.get("kind") or "") in {"paper", "blog", "repo", "idea"}:
+            return "source_ready" if needs_gate else "ready_for_review"
+        if needs_gate or marker:
             return "awaiting_agent_fill"
         return "ready_for_review"
     return "source_ready"

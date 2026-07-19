@@ -155,7 +155,7 @@ def test_write_record_uses_ignored_per_record_lock(tmp_path: Path) -> None:
 def test_manager_mutation_transaction_rejects_empty_scope(tmp_path: Path) -> None:
     kb = _load_kb_module()
 
-    with pytest.raises(SystemExit, match="empty operation scope"):
+    with pytest.raises(SystemExit, match="at least one explicit target path"):
         with kb.mutation_transaction(tmp_path, "unsafe-empty", []):
             pass
 

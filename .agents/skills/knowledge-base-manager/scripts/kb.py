@@ -2,10 +2,7 @@
 from __future__ import annotations
 
 import argparse
-import inspect
 import sys
-from contextlib import contextmanager
-from collections.abc import Iterator
 from pathlib import Path
 
 SCRIPT_PATH = Path(__file__).resolve()
@@ -41,9 +38,11 @@ from research.core import (
     lint_records,
     locate_record,
     iter_records,
+    is_ready_for_human_review,
     checkpoint_and_report,
     project_root,
     promote_record,
+    record_workflow_state,
     record_path,
     rebuild_governance_catalogs,
     rel,
@@ -55,22 +54,9 @@ from research.core import (
     undo_last_operation,
     write_record,
 )
-from research.journal import abort_op, incomplete_ops, journaled_op
+from research.git_ops import dirty_kb_paths
+from research.journal import abort_op, incomplete_ops, mutation_transaction
 from research.paths import KB_GITIGNORE_LINES, TEXT_REWRITE_SUFFIXES, kb_gitignore_path, kb_root, runtime_preferences_path, user_root
-
-try:
-    from research.git_ops import dirty_kb_paths
-except ImportError:  # R-track compatibility until the strict helper is merged.
-    def dirty_kb_paths(root: Path) -> list[Path]:
-        status = str(kb_git_status(root).get("text") or "")
-        paths: list[Path] = []
-        for line in status.splitlines():
-            if not line or line.startswith("##") or len(line) < 4:
-                continue
-            raw = line[3:].split(" -> ")[-1].strip()
-            if raw:
-                paths.append(root / "kb" / raw)
-        return paths
 
 COMMAND_PREFIX = "${RESEARCH_PYTHON:-python3}"
 SCRIPT_BY_KIND = {
@@ -101,21 +87,6 @@ NEXT_COMMAND_BY_KIND = {
 
 def _unique_paths(paths: list[Path]) -> list[Path]:
     return sorted({Path(path).resolve(strict=False) for path in paths}, key=lambda path: path.as_posix())
-
-
-@contextmanager
-def mutation_transaction(root: Path, op_type: str, target_paths: list[Path]) -> Iterator[None]:
-    """Single integration point for R1 multi-file transaction + lock semantics.
-
-    The R-track makes operation locks same-thread reentrant; root integration wraps
-    these exact paths with those locks here, while the U branch already enforces a
-    non-empty literal path set and one journal scope per multi-file mutation.
-    """
-    paths = _unique_paths(target_paths)
-    if not paths:
-        raise SystemExit(f"Refusing mutation with empty operation scope: {op_type}")
-    with journaled_op(root, op_type, paths):
-        yield
 
 
 def mutation_targets(root: Path, *groups: list[Path]) -> list[Path]:
@@ -269,65 +240,11 @@ def next_unit_command(record: dict) -> str:
     return shell_command([COMMAND_PREFIX, skill_script_for_command(script), command, id_arg, unit_id])
 
 
-REVIEW_BLOCKED_STATES = {
-    "source_ready",
-    "awaiting_agent_fill",
-    "ready_to_verify",
-    "failed_retryable",
-}
-REVIEW_READY_STATES = {
-    "ready_for_review",
-    "pending_user_confirmation",
-}
-
-
-def _normalized_workflow_state(value: object) -> str:
-    return str(value or "").strip().lower().replace("-", "_")
-
-
-def review_workflow_states(record: dict) -> list[str]:
-    """Return lifecycle signals used by the public review inbox.
-
-    R1 keeps backwards compatibility with pre-classifier records while excluding
-    prepared shells and retryable failures for paper, blog, and repo alike.
-    """
-    payload = record.get("payload", {})
-    state = payload.get("state", {}) if isinstance(payload, dict) else {}
-    values: list[object] = [record.get("workflow_state"), record.get("status")]
-    if isinstance(payload, dict):
-        values.append(payload.get("workflow_state"))
-    if isinstance(state, dict):
-        values.extend(
-            state.get(key)
-            for key in (
-                "workflow_state",
-                "source_status",
-                "full_note_status",
-                "capability_fill_status",
-                "verification_status",
-            )
-        )
-    return [normalized for value in values if (normalized := _normalized_workflow_state(value))]
-
-
-def is_ready_for_human_review(record: dict) -> bool:
-    if str(record.get("confirmation_status") or "") != "pending_user_confirmation":
-        return False
-    states = review_workflow_states(record)
-    if any(state in REVIEW_BLOCKED_STATES for state in states):
-        return False
-    if any(state in REVIEW_READY_STATES for state in states):
-        return True
-    # Legacy pending records did not carry the R1 classifier field. Preserve real
-    # screening judgements (including paper full_note_status=not_started).
-    return True
-
-
 def _is_unfilled_note_shell(record: dict) -> bool:
-    """Compatibility name retained for callers; now covers all R1 blocked states."""
+    """Return whether a pending record still needs work before human review."""
     return (
         str(record.get("confirmation_status") or "") == "pending_user_confirmation"
-        and any(state in REVIEW_BLOCKED_STATES for state in review_workflow_states(record))
+        and record_workflow_state(record) != "ready_for_review"
     )
 
 
@@ -355,31 +272,6 @@ def all_reviewed_confirmation_records(root: Path, *, kind: str | None = None, li
     return pending, 0
 
 
-def _confirm_unit_compat(
-    record: dict,
-    kind: str,
-    *,
-    confirmed_by: str,
-    evidence: list[str],
-    method: str,
-    root: Path,
-    user_authorization: str = "",
-    authorization_source: str = "",
-) -> dict:
-    kwargs: dict[str, object] = {
-        "confirmed_by": confirmed_by,
-        "evidence": evidence,
-        "method": method,
-        "project_root": root,
-    }
-    parameters = inspect.signature(confirm_unit).parameters
-    if "user_authorization" in parameters:
-        kwargs["user_authorization"] = user_authorization
-    if "authorization_source" in parameters:
-        kwargs["authorization_source"] = authorization_source
-    return confirm_unit(record, kind, **kwargs)
-
-
 def apply_batch_confirmation(
     root: Path,
     records: list[dict],
@@ -398,13 +290,13 @@ def apply_batch_confirmation(
             print(f"[skip] {unit_id}: confirmation_status={confirmation_status or '-'}")
             continue
         kind = str(record.get("kind") or "")
-        updated = _confirm_unit_compat(
+        updated = confirm_unit(
             record,
             kind,
             confirmed_by=confirmed_by,
             evidence=evidence,
             method=method,
-            root=root,
+            project_root=root,
             user_authorization=user_authorization,
             authorization_source=authorization_source,
         )
@@ -881,23 +773,21 @@ def main() -> int:
         print(f"[ok] linked {args.from_id} -> {args.to_id} ({args.relation})")
         return 0
     if args.command == "promote":
-        promote_kwargs = {
-            "status": args.status,
-            "maturity": args.maturity,
-            "confirmation_status": args.confirmation_status,
-            "confirmed_by": args.confirmed_by,
-            "evidence": args.evidence,
-        }
-        promote_parameters = inspect.signature(promote_record).parameters
-        if "user_authorization" in promote_parameters:
-            promote_kwargs["user_authorization"] = args.user_authorization
-        if "authorization_source" in promote_parameters:
-            promote_kwargs["authorization_source"] = args.authorization_source
         record, _ = locate_record(root, args.id)
         operation_paths = mutation_targets(root, record_targets([record], root), index_mutation_targets(root))
         with mutation_transaction(root, "promote_record", operation_paths):
             ensure_workspace(root)
-            path = promote_record(root, args.id, **promote_kwargs)
+            path = promote_record(
+                root,
+                args.id,
+                status=args.status,
+                maturity=args.maturity,
+                confirmation_status=args.confirmation_status,
+                confirmed_by=args.confirmed_by,
+                evidence=args.evidence,
+                user_authorization=args.user_authorization,
+                authorization_source=args.authorization_source,
+            )
             build_index(root)
         checkpoint_and_report(
             root,

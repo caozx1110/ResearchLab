@@ -9,12 +9,11 @@ from typing import Any
 
 from .common import (
     ensure_dir,
-    exclusive_file_lock,
     load_yaml,
     utc_now_iso,
     write_yaml_if_changed,
 )
-from .journal import journaled_op, operation_lock_path
+from .journal import mutation_transaction
 from .evidence import (
     JUDGEMENT_CLAIM_TYPES,
     UNCONFIRMABLE_CLAIM_TYPES,
@@ -540,9 +539,9 @@ def write_record(
     normalized = normalize_record_schema(record, project_root=project_root)
     validate_write(normalized)
     root = unit_root(project_root, str(normalized["kind"]), str(normalized["id"]))
-    ensure_dir(root)
     path = root / "record.yaml"
-    with exclusive_file_lock(operation_lock_path(project_root, path)):
+    with mutation_transaction(project_root, "write_record", [path]):
+        ensure_dir(root)
         current_revision = 0
         if path.exists():
             current = load_yaml(path, default={})
@@ -578,8 +577,7 @@ def write_record(
             )
         normalized["revision"] = current_revision + 1
         normalized["updated_at"] = utc_now_iso()
-        with journaled_op(project_root, "write_record", [path]):
-            write_yaml_if_changed(path, normalized)
+        write_yaml_if_changed(path, normalized)
         record["revision"] = normalized["revision"]
         record["updated_at"] = normalized["updated_at"]
     return path

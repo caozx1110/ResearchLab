@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import importlib.util
 import sys
-from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,6 +9,7 @@ import pytest
 
 from research.confirm import apply_confirmation, is_ai_signer
 from research.evidence import build_verification_receipt, verify_claim_evidence
+from research import journal
 from research.paths import record_path, unit_root
 from research.records import normalize_record_schema
 from research.core import default_record, locate_record, write_record
@@ -525,12 +525,10 @@ def test_r1_program_commit_failure_rolls_back_and_skips_checkpoint(tmp_path: Pat
     (tmp_path / "AGENTS.md").write_text("# test\n", encoding="utf-8")
     checkpoint_calls: list[object] = []
 
-    @contextmanager
     def fail_commit(*_args, **_kwargs):
-        yield "fault-op"
         raise RuntimeError("commit failure")
 
-    monkeypatch.setattr(orchestrate, "journaled_op", fail_commit)
+    monkeypatch.setattr(journal, "commit_op", fail_commit)
     monkeypatch.setattr(orchestrate, "checkpoint_and_report", lambda *args, **kwargs: checkpoint_calls.append(kwargs))
     monkeypatch.setattr(orchestrate, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(
