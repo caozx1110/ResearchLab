@@ -37,6 +37,9 @@ INSTALL_MODE = "copy-project"
 MANIFEST_REL = Path(".agents/.install-manifest.json")
 MANIFEST_NAME = ".install-manifest.json"
 SCHEMA = 1
+LOCAL_CHECKOUT_STRATEGY = "local-checkout"
+REMOTE_BRANCH_STRATEGY = "remote-branch"
+SOURCE_STRATEGIES = (LOCAL_CHECKOUT_STRATEGY, REMOTE_BRANCH_STRATEGY)
 DEFAULT_LEGACY_AGENTS = {"claude": True, "codex": False}
 BEGIN_MARKER = "# >>> workspace-oss managed >>>"
 END_MARKER = "# <<< workspace-oss managed <<<"
@@ -830,12 +833,15 @@ def build_manifest(
     source_origin: str,
     source_checkout: str,
     source_branch: str,
+    source_strategy: str,
     version: str,
     installed_at: str,
     agents: dict[str, bool],
     files: dict[str, str],
     agents_md_sha: str,
 ) -> dict[str, Any]:
+    if source_strategy not in SOURCE_STRATEGIES:
+        die(f"invalid source strategy: {source_strategy}")
     return {
         "schema": SCHEMA,
         "install_name": INSTALL_NAME,
@@ -846,6 +852,7 @@ def build_manifest(
         "source_origin": source_origin,
         "source_checkout": source_checkout,
         "source_branch": source_branch,
+        "source_strategy": source_strategy,
         "source_commit": source_commit,
         "version": version,
         "installed_at": installed_at,
@@ -856,6 +863,24 @@ def build_manifest(
         "files": files,
         "tree_checksum": tree_checksum(files),
     }
+
+
+def preserved_source_strategy(
+    manifest: dict[str, Any],
+    *,
+    requested: str | None,
+    source_origin: str,
+) -> str:
+    if requested:
+        return requested
+    recorded = str(manifest.get("source_strategy") or "").strip()
+    if recorded:
+        if recorded not in SOURCE_STRATEGIES:
+            die(f"manifest contains invalid source strategy: {recorded}")
+        return recorded
+    if source_origin and source_origin != "local":
+        return REMOTE_BRANCH_STRATEGY
+    return LOCAL_CHECKOUT_STRATEGY
 
 
 def writes_need_change(dst_root: Path, writes: dict[str, tuple[bytes, int]], removals: list[str]) -> bool:
@@ -888,12 +913,20 @@ def install(args: argparse.Namespace) -> int:
             warn(f"  MODIFIED {rel} reason={reason} expected={expected_hash} actual={actual_hash}")
         die("copy-project install collides with local files; rerun with --force only if they may be replaced", code=3)
     writes, agents_md_sha = build_writes(dst_root, items)
+    install_origin = str(args.source_origin or "local").strip()
+    install_checkout = str(args.source_checkout or "")
+    install_strategy = preserved_source_strategy(
+        {},
+        requested=args.source_strategy,
+        source_origin=install_origin,
+    )
     manifest = build_manifest(
         repo=repo,
         source_commit=args.source_commit or "",
-        source_origin=str(args.source_origin or "local").strip(),
-        source_checkout=str(args.source_checkout or ""),
+        source_origin=install_origin,
+        source_checkout=install_checkout,
         source_branch=str(args.source_branch or "").strip(),
+        source_strategy=install_strategy,
         version=read_source_version(repo, source),
         installed_at=installed_at,
         agents=agents,
@@ -957,6 +990,11 @@ def update(args: argparse.Namespace) -> int:
         args.source_checkout or manifest.get("source_checkout") or manifest.get("source_repo") or ""
     )
     effective_branch = str(args.source_branch or manifest.get("source_branch") or "").strip()
+    effective_strategy = preserved_source_strategy(
+        manifest,
+        requested=args.source_strategy,
+        source_origin=effective_origin,
+    )
 
     changed = (
         old_files != new_files
@@ -965,6 +1003,7 @@ def update(args: argparse.Namespace) -> int:
         or str(manifest.get("source_checkout") or manifest.get("source_repo") or "")
         != effective_checkout
         or str(manifest.get("source_branch") or "") != effective_branch
+        or str(manifest.get("source_strategy") or "") != effective_strategy
         or manifest.get("agents_md") != "managed-block"
         or writes_need_change(dst_root, writes, removed)
     )
@@ -978,6 +1017,7 @@ def update(args: argparse.Namespace) -> int:
             source_origin=effective_origin,
             source_checkout=effective_checkout,
             source_branch=effective_branch,
+            source_strategy=effective_strategy,
             version=read_source_version(repo, source),
             installed_at=installed_at,
             agents=agents,
@@ -1010,12 +1050,19 @@ def reinstall(args: argparse.Namespace) -> int:
         legacy_agents_digest = str(manifest.get("agents_md_sha") or old_files.get("AGENTS.md") or "")
     writes, agents_md_sha = build_writes(dst_root, items, legacy_agents_digest=legacy_agents_digest)
     removed = sorted(rel for rel in set(old_files) - set(new_files) if rel != "AGENTS.md" and rel.startswith(".agents/"))
+    effective_origin = str(args.source_origin or manifest.get("source_origin") or "local").strip()
+    effective_strategy = preserved_source_strategy(
+        manifest,
+        requested=args.source_strategy,
+        source_origin=effective_origin,
+    )
     new_manifest = build_manifest(
         repo=repo,
         source_commit=args.source_commit or "",
-        source_origin=str(args.source_origin or manifest.get("source_origin") or "local").strip(),
+        source_origin=effective_origin,
         source_checkout=str(args.source_checkout or manifest.get("source_checkout") or manifest.get("source_repo") or ""),
         source_branch=str(args.source_branch or manifest.get("source_branch") or "").strip(),
+        source_strategy=effective_strategy,
         version=read_source_version(repo, source),
         installed_at=utc_now(),
         agents=normalize_manifest_agents(manifest.get("agents")),
@@ -1118,6 +1165,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source-origin", default="")
     parser.add_argument("--source-checkout", default="")
     parser.add_argument("--source-branch", default="")
+    parser.add_argument("--source-strategy", choices=SOURCE_STRATEGIES, default=None)
     parser.add_argument("--source", default="")
     parser.add_argument("--agents", default="")
     parser.add_argument("--force", action="store_true")

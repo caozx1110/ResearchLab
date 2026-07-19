@@ -162,8 +162,14 @@ def _run_shortcut_install(
     return workspace, result
 
 
-def _install_copy(tmp_path: Path, workspace: Path) -> subprocess.CompletedProcess[str]:
+def _install_copy(
+    tmp_path: Path,
+    workspace: Path,
+    *,
+    source: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
     workspace.mkdir(exist_ok=True)
+    source_root = source or _project_root()
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
     env = {
@@ -181,20 +187,48 @@ def _install_copy(tmp_path: Path, workspace: Path) -> subprocess.CompletedProces
     return subprocess.run(
         [
             "bash",
-            str(_project_root() / "install.sh"),
+            str(source_root / "install.sh"),
             "install",
             "--codex",
             "--project",
             str(workspace),
             "--yes",
         ],
-        cwd=_project_root(),
+        cwd=source_root,
         env=env,
         stdin=subprocess.DEVNULL,
         text=True,
         capture_output=True,
         check=False,
     )
+
+
+def _git_output(checkout: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(checkout), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _make_linked_source(tmp_path: Path) -> Path:
+    primary = tmp_path / "source-primary"
+    shutil.copytree(
+        _project_root(),
+        primary,
+        ignore=shutil.ignore_patterns(".git", ".pytest_cache", "__pycache__", "*.pyc", "temp"),
+    )
+    subprocess.run(["git", "init", str(primary)], check=True, capture_output=True, text=True)
+    _git_output(primary, "config", "user.name", "Installer Test")
+    _git_output(primary, "config", "user.email", "installer@example.test")
+    _git_output(primary, "checkout", "-b", "source-main")
+    _git_output(primary, "add", ".")
+    _git_output(primary, "commit", "-m", "source fixture")
+    _git_output(primary, "remote", "add", "origin", "ssh://example.test/team/workspace-oss.git")
+    linked = tmp_path / "source-linked"
+    _git_output(primary, "worktree", "add", "-b", "linked-dev", str(linked), "source-main")
+    return linked
 
 
 def test_missing_system_yaml_continues_to_managed_runtime_fallback(tmp_path: Path) -> None:
@@ -384,10 +418,13 @@ def test_external_install_prints_completion_without_bash_variable_error(tmp_path
     assert "kb help" not in terminal_guidance
     manifest_path = workspace / ".agents" / ".install-manifest.json"
     installed_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert installed_manifest["source_origin"]
-    assert installed_manifest["source_branch"]
-    expected_checkout = str(_project_root()) if installed_manifest["source_origin"] == "local" else ""
-    assert installed_manifest["source_checkout"] == expected_checkout
+    assert installed_manifest["source_strategy"] == "local-checkout"
+    assert installed_manifest["source_checkout"] == str(_project_root())
+    assert installed_manifest["source_origin"] == _git_output(_project_root(), "remote", "get-url", "origin")
+    assert installed_manifest["source_branch"] == _git_output(
+        _project_root(), "symbolic-ref", "--quiet", "--short", "HEAD"
+    )
+    assert installed_manifest["source_commit"] == _git_output(_project_root(), "rev-parse", "HEAD")
 
     cancel = _run_pty_dialog(
         tmp_path,
@@ -412,9 +449,52 @@ def test_external_install_prints_completion_without_bash_variable_error(tmp_path
     assert "skills 和 AI 工具配置已更新" not in update.stdout
     assert "clean-sync" not in update.stdout
     updated_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert updated_manifest["source_strategy"] == installed_manifest["source_strategy"]
     assert updated_manifest["source_origin"] == installed_manifest["source_origin"]
     assert updated_manifest["source_checkout"] == installed_manifest["source_checkout"]
     assert updated_manifest["source_branch"] == installed_manifest["source_branch"]
+
+
+def test_project_install_from_linked_worktree_preserves_linked_checkout(tmp_path: Path) -> None:
+    source = _make_linked_source(tmp_path)
+    assert (source / ".git").is_file()
+    workspace = tmp_path / "linked-workspace"
+
+    installed = _install_copy(tmp_path, workspace, source=source)
+
+    assert installed.returncode == 0, installed.stdout + installed.stderr
+    manifest = json.loads((workspace / ".agents" / ".install-manifest.json").read_text(encoding="utf-8"))
+    assert manifest["source_strategy"] == "local-checkout"
+    assert manifest["source_checkout"] == str(source)
+    assert manifest["source_origin"] == "ssh://example.test/team/workspace-oss.git"
+    assert manifest["source_branch"] == "linked-dev"
+    assert manifest["source_commit"] == _git_output(source, "rev-parse", "HEAD")
+
+
+def test_ws_sync_rejects_unknown_source_strategy_before_writing(tmp_path: Path) -> None:
+    workspace = tmp_path / "invalid-strategy-workspace"
+    workspace.mkdir()
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(_project_root() / "install-lib" / "ws_sync.py"),
+            "install",
+            "--repo",
+            str(_project_root()),
+            "--dir",
+            str(workspace),
+            "--source-strategy",
+            "guess-from-origin",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "invalid choice" in result.stderr
+    assert not (workspace / ".agents").exists()
 
 
 def test_guided_reinstall_menu_runs_the_reinstall_action(tmp_path: Path) -> None:

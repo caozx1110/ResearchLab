@@ -69,7 +69,8 @@ def test_clean_install_ships_only_runtime_allowlist(tmp_path: Path) -> None:
     assert not any("/tests/" in rel for rel in installed)
     assert not any("eval_research_value.py" in rel for rel in installed)
     assert not any(Path(rel).is_absolute() for rel in installed)
-    assert str(_project_root()) not in manifest_path.read_text(encoding="utf-8")
+    assert manifest["source_strategy"] == "local-checkout"
+    assert manifest["source_checkout"] == str(_project_root())
 
     duplicate = _run_installer(workspace, "install", "--codex")
     assert duplicate.returncode == 1

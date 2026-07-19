@@ -324,6 +324,7 @@ def test_non_main_fork_update_preserves_branch_and_updates_manifest_e2e(tmp_path
     assert initial_manifest["source_origin"] == str(remote)
     assert initial_manifest["source_branch"] == "release/r1"
     assert initial_manifest["source_checkout"] == ""
+    assert initial_manifest["source_strategy"] == "remote-branch"
 
     (source / ".agents" / "VERSION").write_text("0.2.0-rc.1\n", encoding="utf-8")
     _git(source, "add", ".agents/VERSION")
@@ -347,6 +348,7 @@ def test_non_main_fork_update_preserves_branch_and_updates_manifest_e2e(tmp_path
     assert updated_manifest["source_origin"] == str(remote)
     assert updated_manifest["source_branch"] == "release/r1"
     assert updated_manifest["source_checkout"] == ""
+    assert updated_manifest["source_strategy"] == "remote-branch"
     assert updated_manifest["source_commit"] == release_commit
 
 
