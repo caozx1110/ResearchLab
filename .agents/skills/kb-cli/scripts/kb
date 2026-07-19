@@ -48,6 +48,18 @@ from research.core import (
 from research.sources import UnsafeLocalSourceError, validate_local_source
 from research import updater
 
+try:
+    from research.diagnostics import capture_runtime_failure as _capture_runtime_failure
+    from research.diagnostics import diagnostics_policy as _diagnostics_policy
+except (ImportError, AttributeError):  # Parallel D1 dependency may not be merged yet.
+    _capture_runtime_failure = None
+    _diagnostics_policy = None
+
+try:
+    from research.index import audit_workspace as _audit_workspace
+except (ImportError, AttributeError):  # Parallel D1 dependency may not be merged yet.
+    _audit_workspace = None
+
 
 HELP_MENU: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
     (
@@ -134,6 +146,24 @@ class AgentProtocol:
 
 
 _ACTIVE_PROTOCOL: AgentProtocol | None = None
+_ACTIVE_PUBLIC_VERB = ""
+
+_DIAGNOSTIC_MODES = frozenset({"off", "errors-only", "developer"})
+_AUDIT_STATUSES = frozenset({"PASS", "WARN", "FAIL"})
+_AUDIT_COUNT_KEYS = frozenset(
+    {
+        "total",
+        "error",
+        "warning",
+        "info",
+        "schema",
+        "integrity",
+        "recovery",
+        "security",
+        "quality",
+    }
+)
+_RUNTIME_FAILURE_PUBLIC_SUMMARY = "知识库操作未完成。"
 
 
 Handler = Callable[[argparse.Namespace, Path], int]
@@ -182,6 +212,60 @@ def _record_protocol_child(result: CommandResult, relative_script: str, args: Se
             "stderr": result.stderr,
         }
     )
+
+
+def _record_private_diagnostic_event(code: str, *, skill: str = "", operation: str = "") -> None:
+    protocol = _ACTIVE_PROTOCOL
+    if protocol is None:
+        return
+    if protocol.details is None:
+        protocol.details = {}
+    existing = protocol.details.get("diagnostic_events")
+    events = existing if isinstance(existing, list) else []
+    event: dict[str, str] = {"code": code}
+    if skill:
+        event["skill"] = skill
+    if operation:
+        event["operation"] = operation
+    events.append(event)
+    protocol.details["diagnostic_events"] = events
+
+
+def _owner_skill(relative_script: str) -> str:
+    parts = tuple(part for part in relative_script.replace("\\", "/").split("/") if part)
+    if len(parts) >= 3 and parts[0:2] == (".agents", "skills"):
+        candidate = parts[2]
+        if re.fullmatch(r"[a-z0-9][a-z0-9-]*", candidate):
+            return candidate
+    return "unknown-owner"
+
+
+def _capture_owner_failure(root: Path, relative_script: str, returncode: int) -> None:
+    """Best-effort D1 capture with a deliberately narrow, redacted payload."""
+    skill = _owner_skill(relative_script)
+    operation = _ACTIVE_PUBLIC_VERB if _ACTIVE_PUBLIC_VERB in _PUBLIC_KB_VERB_ARITY else "owner-operation"
+    capture = _capture_runtime_failure
+    if capture is None:
+        _record_private_diagnostic_event(
+            "runtime-failure-capture-unavailable",
+            skill=skill,
+            operation=operation,
+        )
+        return
+    try:
+        capture(
+            root,
+            skill=skill,
+            operation=operation,
+            returncode=int(returncode),
+            public_summary=_RUNTIME_FAILURE_PUBLIC_SUMMARY,
+        )
+    except Exception:  # noqa: BLE001 - diagnostics must never mask the owner result
+        _record_private_diagnostic_event(
+            "runtime-failure-capture-failed",
+            skill=skill,
+            operation=operation,
+        )
 
 
 def add_agent_action(action: str, **payload: object) -> None:
@@ -814,6 +898,8 @@ def forward_command(
         completed.stderr or "",
     )
     _record_protocol_child(result, relative_script, args)
+    if result.returncode != 0:
+        _capture_owner_failure(root, relative_script, result.returncode)
     if stream:
         stdout_emitted = emit_public_output(result.stdout, root)
         stderr_emitted = emit_public_output(result.stderr, root, error=True)
@@ -844,6 +930,51 @@ def handle_help(args: argparse.Namespace, root: Path) -> int:
     return 0
 
 
+def _doctor_diagnostic_summary(root: Path) -> dict[str, object]:
+    summary: dict[str, object] = {}
+    policy_reader = _diagnostics_policy
+    if policy_reader is None:
+        summary["mode"] = "unavailable"
+    else:
+        try:
+            raw_policy = policy_reader(root)
+            policy = raw_policy if isinstance(raw_policy, Mapping) else {}
+            raw_mode = str(policy.get("effective_mode") or policy.get("mode") or "").strip()
+            summary["mode"] = raw_mode if raw_mode in _DIAGNOSTIC_MODES else "unknown"
+            summary["local_only"] = bool(policy.get("local_only", True))
+        except Exception:  # noqa: BLE001 - doctor remains useful if optional diagnostics fail
+            summary["mode"] = "unavailable"
+            _record_private_diagnostic_event("diagnostics-policy-read-failed", operation="doctor")
+
+    audit_reader = _audit_workspace
+    if audit_reader is None:
+        summary["audit"] = {"available": False}
+    else:
+        try:
+            raw_report = audit_reader(root)
+            report = raw_report if isinstance(raw_report, Mapping) else {}
+            raw_status = str(report.get("status") or "").upper()
+            raw_counts = report.get("counts")
+            counts = raw_counts if isinstance(raw_counts, Mapping) else {}
+            safe_counts = {
+                str(key): int(value)
+                for key, value in counts.items()
+                if str(key) in _AUDIT_COUNT_KEYS
+                and isinstance(value, int)
+                and not isinstance(value, bool)
+                and value >= 0
+            }
+            summary["audit"] = {
+                "available": True,
+                "status": raw_status if raw_status in _AUDIT_STATUSES else "UNKNOWN",
+                "counts": safe_counts,
+            }
+        except Exception:  # noqa: BLE001 - optional audit cannot break public doctor
+            summary["audit"] = {"available": False}
+            _record_private_diagnostic_event("workspace-audit-failed", operation="doctor")
+    return summary
+
+
 def handle_doctor(args: argparse.Namespace, root: Path) -> int:
     del args
     capabilities = current_runtime_capabilities()
@@ -866,9 +997,8 @@ def handle_doctor(args: argparse.Namespace, root: Path) -> int:
         print("论文解析能力已就绪。")
     else:
         print("论文解析能力尚未就绪；文本和网页资料仍可正常使用。")
-    set_protocol_status(
-        "completed" if yaml_ready else "runtime_incomplete",
-        runtime={
+    protocol_details: dict[str, object] = {
+        "runtime": {
             "python": capabilities.get("python") or "",
             "version": capabilities.get("version") or "",
             "modules": modules if isinstance(modules, dict) else {},
@@ -881,8 +1011,11 @@ def handle_doctor(args: argparse.Namespace, root: Path) -> int:
                 "exists": venv_py.exists(),
                 "current": is_current_python(venv_py),
             },
-        },
-    )
+        }
+    }
+    if _ACTIVE_PROTOCOL is not None:
+        protocol_details["diagnostics"] = _doctor_diagnostic_summary(root)
+    set_protocol_status("completed" if yaml_ready else "runtime_incomplete", **protocol_details)
     return 0
 
 
@@ -2277,13 +2410,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    global _ACTIVE_PROTOCOL
+    global _ACTIVE_PROTOCOL, _ACTIVE_PUBLIC_VERB
     parser = build_parser()
     args = parser.parse_args(argv)
     root = find_project_root(DEFAULT_PROJECT_ROOT, explicit_root=args.root)
     handler: Handler = args.handler
     protocol = AgentProtocol(args.command) if str(args.agent_protocol or "").strip() else None
     _ACTIVE_PROTOCOL = protocol
+    _ACTIVE_PUBLIC_VERB = str(args.command or "")
     stopped: SystemExit | None = None
     exit_code = 0
     try:
@@ -2300,6 +2434,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     protocol.details["error"] = str(exc.code)
     finally:
         _ACTIVE_PROTOCOL = None
+        _ACTIVE_PUBLIC_VERB = ""
         if protocol is not None:
             protocol.exit_code = int(exit_code)
             if exit_code != 0 and protocol.status == "completed":
