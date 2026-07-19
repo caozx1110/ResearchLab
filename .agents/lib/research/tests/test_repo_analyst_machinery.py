@@ -69,7 +69,7 @@ POLICY_PY = (
     "    def act(self, obs):\n"
     "        return self.head(obs)\n"
 )
-CONFIG_YAML = "lr: 0.0003\nbatch_size: 64\n"
+CONFIG_YAML = "lr: 0.0003\nbatch_size: 64\nevidence_required: true\n"
 
 
 def _make_mini_repo(base: Path) -> Path:
@@ -235,6 +235,26 @@ def test_capability_fill_legit_evidence_validates_and_clears_substance_gate(tmp_
                              user_authorization="I confirm this repo analysis.",
                              authorization_source="user_message", project_root=tmp_path)
     assert confirmed["confirmation_status"] == "confirmed"
+
+
+def test_capability_fill_accepts_raw_yaml_line_via_external_source_contract(tmp_path: Path) -> None:
+    repo = _load_repo_module()
+    mini = _make_mini_repo(tmp_path)
+    fill = _legit_capability_fill()
+    fill["elements"][2]["evidence_refs"] = [
+        {
+            "source_unit_id": "r-x",
+            "artifact": "configs/default.yaml",
+            "locator": "line=3",
+            "quote": "evidence_required: true",
+            "summary": "configuration gate",
+        },
+    ]
+
+    violations, claims = repo.verify_capability_fill(fill, mini)
+
+    assert violations == [], violations
+    assert claims[2]["evidence_refs"][0]["external_source"] == {"kind": "repo"}
 
 
 # --------------------------------------------------------------------------- #
