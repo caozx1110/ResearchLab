@@ -245,7 +245,7 @@ def test_reports_isolate_pending_diagnoses_and_require_current_receipt_for_judge
     assert pending_summary not in ordinary_section
     assert "PENDING / UNVERIFIED JUDGEMENT" in pending_section
     assert pending_summary in pending_section
-    assert "missing: canonical claim binding" in pending_section
+    assert "missing: canonical claim/evidence binding" in pending_section
 
     events_path = tmp_path / "kb" / "programs" / program_id / "workflow" / "reporting-events.yaml"
     diagnosis_events = [

@@ -112,9 +112,12 @@ def _confirmed_judgement_event(root: Path, event: dict[str, Any]) -> tuple[bool,
     bound_verification = bound_verification if isinstance(bound_verification, dict) else {}
     recorded_status = str(event.get("confirmation_status") or "").strip() or "missing"
     if not subject_id or not subject_kind:
-        return False, f"confirmation_status={recorded_status}; missing: canonical confirmation subject binding"
+        return False, (
+            f"confirmation_status={recorded_status}; "
+            "missing: canonical confirmation subject and claim/evidence binding"
+        )
     if not bound_claim_ids:
-        return False, f"confirmation_status={recorded_status}; missing: canonical claim binding"
+        return False, f"confirmation_status={recorded_status}; missing: canonical claim/evidence binding"
     try:
         record, _path = locate_record(root, subject_id, kind=subject_kind, fuzzy=False)
     except SystemExit:
@@ -481,7 +484,11 @@ def render_pending_judgement_events(events: list[dict[str, Any]]) -> list[str]:
     lines = ["## Pending / Unverified judgements", ""]
     for event in events:
         reason = str(event.get("_epistemic_reason") or "missing: current ConfirmationReceipt")
-        lines.append(f"- PENDING / UNVERIFIED JUDGEMENT — {render_event_line(event)[2:]}")
+        summary = str(event.get("summary") or "").strip()
+        title = str(event.get("title") or "Untitled event").strip()
+        lines.append(f"- PENDING / UNVERIFIED JUDGEMENT — {summary or title}")
+        metadata_event = {**event, "summary": ""}
+        lines.append(f"  - Event: {render_event_line(metadata_event)[2:]}")
         lines.append(f"  - {reason}")
     return lines
 

@@ -223,7 +223,7 @@ def test_legacy_judgement_event_with_confirmed_string_fails_safe_without_canonic
     assert "A stale legacy diagnosis asserted a likely cause." not in ordinary_section
     assert "A stale legacy diagnosis asserted a likely cause." in pending_section
     assert "confirmation_status=confirmed" in pending_section
-    assert "missing: canonical confirmation subject binding" in pending_section
+    assert "missing: canonical confirmation subject and claim/evidence binding" in pending_section
 
 
 def test_outline_produces_evidence_backed_section_skeleton(tmp_path: Path) -> None:
