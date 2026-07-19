@@ -192,6 +192,49 @@ def test_static_human_print_literals_and_input_model_are_safe() -> None:
         assert not re.search(r"(^|\s)--[A-Za-z]", literal)
 
 
+def test_dynamic_public_prints_do_not_read_raw_external_fields_directly() -> None:
+    source = _kb_script().read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    violations: list[str] = []
+
+    def expression_root(node: ast.AST) -> str:
+        while isinstance(node, ast.Attribute):
+            node = node.value
+        return node.id if isinstance(node, ast.Name) else ""
+
+    for call in (node for node in ast.walk(tree) if isinstance(node, ast.Call)):
+        if not isinstance(call.func, ast.Name) or call.func.id != "print":
+            continue
+        for argument in call.args:
+            if not isinstance(argument, ast.JoinedStr):
+                continue
+            for formatted in (node for node in ast.walk(argument) if isinstance(node, ast.FormattedValue)):
+                expression = formatted.value
+                for descendant in ast.walk(expression):
+                    if isinstance(descendant, ast.Attribute) and expression_root(descendant) in {
+                        "args",
+                        "record",
+                        "program_state",
+                        "item",
+                    }:
+                        violations.append(ast.unparse(expression))
+                    if isinstance(descendant, ast.Name) and descendant.id.startswith("raw_"):
+                        violations.append(ast.unparse(expression))
+                    if (
+                        isinstance(descendant, ast.Call)
+                        and isinstance(descendant.func, ast.Attribute)
+                        and isinstance(descendant.func.value, ast.Name)
+                        and descendant.func.value.id == "result"
+                        and descendant.func.attr == "get"
+                        and descendant.args
+                        and isinstance(descendant.args[0], ast.Constant)
+                        and descendant.args[0].value == "message"
+                    ):
+                        violations.append(ast.unparse(expression))
+
+    assert violations == []
+
+
 @pytest.mark.parametrize("argv", [["--help"], *[[verb, "--help"] for verb in PUBLIC_VERBS]])
 def test_all_blackbox_help_surfaces_hide_internal_syntax(argv: list[str]) -> None:
     completed = subprocess.run(
@@ -296,17 +339,26 @@ def test_installed_copy_runs_help_without_creating_runtime_data(tmp_path: Path) 
     )
     assert install.returncode == 0, install.stdout + install.stderr
 
-    help_result = subprocess.run(
-        [sys.executable, "-B", str(_kb_script(workspace)), "help"],
-        cwd=workspace,
-        env=_safe_runtime_env(),
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    help_results = [
+        subprocess.run(
+            [sys.executable, "-B", str(_kb_script(workspace)), *argv],
+            cwd=workspace,
+            env=_safe_runtime_env(),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        for argv in (["help"], ["--help"], ["init", "--help"], ["review", "--help"])
+    ]
 
-    assert help_result.returncode == 0, help_result.stderr
-    assert "kb 动词（15 个）" in help_result.stdout
+    for help_result in help_results:
+        assert help_result.returncode == 0, help_result.stderr
+        assert "kb 动词（15 个）" in help_result.stdout
+        assert "positional arguments" not in help_result.stdout
+        assert "options:" not in help_result.stdout
+        assert help_result.stderr == ""
+        for token in FORBIDDEN_PUBLIC_TOKENS:
+            assert token not in help_result.stdout
     assert not (workspace / "kb").exists()
     installed_rules = (workspace / "AGENTS.md").read_text(encoding="utf-8")
     assert "## Conversational contract" in installed_rules

@@ -7,6 +7,7 @@ import os
 import re
 import subprocess
 import sys
+import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +29,9 @@ if __name__ == "__main__":
 
 from research.common import current_runtime_capabilities, find_project_root, load_yaml
 from research.core import (
+    CLAIM_CONFIRMATION_VALUES,
+    confirmation_track,
+    confirmation_claims,
     config_root,
     default_confirmed_by,
     default_runtime_preferences,
@@ -38,6 +42,7 @@ from research.core import (
     load_runtime_preferences,
     record_workflow_state,
     search_records,
+    validate_claims,
 )
 from research.sources import UnsafeLocalSourceError, validate_local_source
 from research import updater
@@ -48,20 +53,20 @@ HELP_MENU: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         "kb 动词（15 个）",
         (
             ("打印能力菜单。", "kb help"),
-            ("初始化 KB 布局、索引和基础偏好。", "kb init"),
-            ("检查当前 Python、YAML 与 PDF 后端可用性。", "kb doctor"),
-            ("检查并在确认后更新 research skill。", "kb update"),
+            ("初始化知识库布局、索引和基础偏好。", "kb init"),
+            ("检查运行环境、配置读写与论文解析能力。", "kb doctor"),
+            ("检查并在确认后更新研究能力包。", "kb update"),
             ("刷新并查看当前知识库和研究计划的状态摘要。", "kb status"),
             ("查看下一步实验或研究计划推进建议。", "kb next"),
             ("按关键词检索已入库知识单元。", "kb find <关键词>"),
             ("把论文、代码仓、博客或本地文件轻量入库。", "kb add <链接或路径>"),
             ("一条命令把资料来源加入知识库并备好待填骨架，随后 Agent 自动填写有逐字证据支持的笔记。", "kb ingest <链接或路径>"),
             ("查看待确认的 AI 判断，并用自然语言确认或拒绝。", "kb review"),
-            ("把误建或不采纳的知识单元标记为已拒绝。", "kb reject <单元 id>"),
-            ("回忆已确认习惯、已知坑和待审 skill 问题。", "kb recall"),
+            ("把误建或不采纳的知识单元标记为已拒绝。", "kb reject <单元编号>"),
+            ("回忆已确认习惯、已知坑和待审能力问题。", "kb recall"),
             ("恢复崩溃后未完成的知识库操作。", "kb resume"),
             ("撤销最近一次已提交的知识库操作。", "kb undo"),
-            ("恢复到指定操作之前的状态。", "kb restore <操作 id>"),
+            ("恢复到指定操作之前的状态。", "kb restore <操作编号>"),
         ),
     ),
     (
@@ -212,6 +217,45 @@ _PUBLIC_FORBIDDEN = (
     "${",
 )
 
+_ANSI_ESCAPE_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
+_SHELL_COMMAND_RE = re.compile(
+    r"""(?ix)
+    (?<![\w.-])
+    (?:
+        sudo\s+(?:--?[A-Za-z][\w-]*\s+)*[A-Za-z][\w.-]*(?=\s|$)
+        |
+        git\s+(?:
+            --?[A-Za-z][\w-]*
+            |add|apply|bisect|branch|checkout|cherry-pick|clean|clone|commit|config
+            |diff|fetch|init|log|merge|mv|pull|push|rebase|reset|restore|revert|rm
+            |show|stash|status|switch|tag|worktree
+        )(?=\s|$)
+        |
+        (?:
+            bash|cat|chmod|chown|cp|curl|docker|find|fish|grep|kill|killall
+            |kubectl|launchctl|mkdir|mv|reboot|rm|rmdir|rsync|scp|sed|sh|shutdown
+            |ssh|systemctl|touch|wget|xargs|zsh
+        )\s+(?=--?[A-Za-z0-9]|https?://|/|~|\.\.?/|[A-Za-z0-9_.])
+    )
+    """
+)
+_BIDI_CONTROL_CODEPOINTS = {
+    *range(0x202A, 0x202F),
+    *range(0x2066, 0x206A),
+    0x061C,
+    0x200E,
+    0x200F,
+}
+_MARKDOWN_NEUTRAL_TRANSLATION = str.maketrans(
+    {
+        "`": "｀",
+        "[": "［",
+        "]": "］",
+        "<": "＜",
+        ">": "＞",
+    }
+)
+
 PUBLIC_KIND_LABELS = {
     "paper": "论文",
     "repo": "代码仓",
@@ -254,11 +298,14 @@ def _public_line_is_safe(line: str, root: Path) -> bool:
     stripped = line.strip()
     if not stripped:
         return True
-    if any(token in line for token in _PUBLIC_FORBIDDEN):
+    folded = line.casefold()
+    if "next for agent:" in folded or any(token.casefold() in folded for token in _PUBLIC_FORBIDDEN[1:]):
         return False
-    if re.search(r"(^|\s)--[A-Za-z][\w-]*", line):
+    if "$(" in line or _SHELL_COMMAND_RE.search(line):
         return False
-    if re.search(r"(^|\s)(?:python3?|[^\s]+\.py)(?:\s|$)", line):
+    if re.search(r"(^|\s)--[A-Za-z][\w-]*", line, flags=re.IGNORECASE):
+        return False
+    if re.search(r"(^|\s)(?:python3?|[^\s]+\.py)(?:\s|$)", line, flags=re.IGNORECASE):
         return False
     if stripped.lower().startswith(("confirm:", "path:", "repo_path:", "project_root:", "skills_home:")):
         return False
@@ -273,11 +320,38 @@ def _public_line_is_safe(line: str, root: Path) -> bool:
     for private_root in {str(root.resolve()), str(DEFAULT_PROJECT_ROOT.resolve())}:
         if private_root and private_root in line:
             return False
-    if re.search(r"(?:^|\s)/(?:Users|home|private|tmp|var|opt|usr)(?:/|\s|$)", line):
+    if re.search(r"(?:^|\s)/(?:Users|home|private|tmp|var|opt|usr)(?:/|\s|$)", line, flags=re.IGNORECASE):
         return False
-    if re.search(r"(?:^|\s)(?:kb|raw|output)/[^\s]+", line):
+    if re.search(r"(?:^|\s)(?:kb|raw|output)/[^\s]+", line, flags=re.IGNORECASE):
         return False
     return True
+
+
+def _public_display_text(value: object, root: Path, fallback: str, limit: int) -> str:
+    """Return one bounded, inert public line while keeping the original private."""
+    text = _ANSI_ESCAPE_RE.sub("", str(value or ""))
+    characters: list[str] = []
+    for character in text:
+        codepoint = ord(character)
+        category = unicodedata.category(character)
+        if character.isspace():
+            characters.append(" ")
+        elif codepoint in _BIDI_CONTROL_CODEPOINTS or category in {"Cc", "Cf", "Cs"}:
+            continue
+        else:
+            characters.append(character)
+    text = re.sub(r"\s+", " ", "".join(characters)).strip()
+    text = text.translate(_MARKDOWN_NEUTRAL_TRANSLATION)
+    if not text or not _public_line_is_safe(text, root):
+        return fallback
+    bounded_limit = max(1, int(limit))
+    if len(text) > bounded_limit:
+        text = text[: bounded_limit - 1].rstrip() + "…"
+    return text
+
+
+def _record_is_rejected(record: Mapping[str, object]) -> bool:
+    return str(record.get("confirmation_status") or "").strip().lower() == "rejected"
 
 
 def _natural_count(value: object) -> int:
@@ -317,7 +391,8 @@ def emit_public_output(text: str, root: Path, *, error: bool = False) -> bool:
         human = _humanize_owner_line(line)
         if human is None:
             continue
-        if not _public_line_is_safe(human, root):
+        human = _public_display_text(human, root, "", 500)
+        if not human:
             continue
         print(human, file=destination)
         emitted = emitted or bool(human.strip())
@@ -404,12 +479,19 @@ def handle_doctor(args: argparse.Namespace, root: Path) -> int:
     yaml_ready = bool(capabilities.get("yaml_support"))
     pdf_backend = str(capabilities.get("pdf_backend") or "").strip()
     runtime_kind = "受管项目运行环境" if is_current_python(venv_py) else "当前已配置运行环境"
-    print(f"research skill 版本为 {updater.read_local_version(DEFAULT_PROJECT_ROOT)}。")
-    print(f"{runtime_kind}可用；YAML 支持{'正常' if yaml_ready else '缺失'}。")
+    raw_package_version = updater.read_local_version(DEFAULT_PROJECT_ROOT)
+    public_version = _public_display_text(
+        raw_package_version,
+        root,
+        "版本信息需由 Agent 安全解释",
+        64,
+    )
+    print(f"研究能力包版本为 {public_version}。")
+    print(f"{runtime_kind}可用；配置读写能力{'正常' if yaml_ready else '缺失'}。")
     if pdf_backend:
-        print(f"PDF 解析后端已就绪（{pdf_backend}）。")
+        print("论文解析能力已就绪。")
     else:
-        print("PDF 解析后端尚未就绪；文本和网页资料仍可正常使用。")
+        print("论文解析能力尚未就绪；文本和网页资料仍可正常使用。")
     set_protocol_status(
         "completed" if yaml_ready else "runtime_incomplete",
         runtime={
@@ -418,6 +500,7 @@ def handle_doctor(args: argparse.Namespace, root: Path) -> int:
             "modules": modules if isinstance(modules, dict) else {},
             "yaml_support": yaml_ready,
             "pdf_backend": pdf_backend,
+            "package_version": raw_package_version,
             "managed_runtime": {
                 "directory": str(venv_dir),
                 "python": str(venv_py),
@@ -438,10 +521,14 @@ def handle_update(args: argparse.Namespace, root: Path) -> int:
     if args.apply:
         result = updater.apply(root, cache_dir)
         if result.get("status") == "updated":
-            print(f"research skill 更新完成：{result.get('before', '0.0.0')} → {result.get('after', '0.0.0')}。")
+            before = _public_display_text(result.get("before", "0.0.0"), root, "未知", 64)
+            after = _public_display_text(result.get("after", "0.0.0"), root, "未知", 64)
+            print(f"研究能力包更新完成：{before} → {after}。")
+            set_protocol_status("completed", update=result)
             return 0
         if result.get("status") == "up_to_date":
-            print("当前 research skill 已是最新版本，无需更新。")
+            print("当前研究能力包已是最新版本，无需更新。")
+            set_protocol_status("completed", update=result)
             return 0
         if result.get("status") == "needs_source_choice":
             print("更新源尚未确认；请告诉我应继续使用哪个源码仓或本地检出。")
@@ -452,13 +539,15 @@ def handle_update(args: argparse.Namespace, root: Path) -> int:
                 reason=str(result.get("message") or "missing update provenance"),
             )
             return 2
-        print(str(result.get("message") or "research skill 更新未完成，请稍后重试。"))
+        print("研究能力包更新未完成；详细诊断已保留给 Agent。")
+        set_protocol_status("error", update=result)
         return 1
 
     result = updater.check(root, cache_dir)
-    local = result.get("local") or "0.0.0"
-    remote = result.get("remote") or "unknown"
-    print(f"当前 research skill 版本：{local}。")
+    set_protocol_status("completed", update=result)
+    local = _public_display_text(result.get("local") or "0.0.0", root, "未知", 64)
+    remote = _public_display_text(result.get("remote") or "unknown", root, "未知", 64)
+    print(f"当前研究能力包版本：{local}。")
     if result.get("status") == "needs_source_choice":
         print("更新源尚未确认；请告诉我应继续使用哪个源码仓或本地检出。")
         set_protocol_status("needs_user_input", update=result)
@@ -469,21 +558,22 @@ def handle_update(args: argparse.Namespace, root: Path) -> int:
         )
         return 0
     if result.get("status") == "unknown":
-        print("更新源中的 research skill 版本：未知。")
+        print("更新源中的研究能力包版本：未知。")
         print("暂时无法从更新源检查更新；当前安装未做任何改动。")
         return 0
-    print(f"更新源中的 research skill 版本：{remote}。")
+    print(f"更新源中的研究能力包版本：{remote}。")
     if result.get("status") == "update_available":
         print("发现可用更新；确认前不会修改当前安装。")
         print("如果你同意，我可以继续完成更新。")
         set_protocol_status("needs_user_authorization", update=result)
         add_agent_action("request_update_authorization", then={"verb": "update", "apply": True})
     else:
-        print("当前 research skill 已是最新版本。")
+        print("当前研究能力包已是最新版本。")
     return 0
 
 
 def handle_status(args: argparse.Namespace, root: Path) -> int:
+    public_program = _public_display_text(args.program, root, "名称需由 Agent 安全解释", 100) if args.program else ""
     current = forward_command(
         root,
         SCRIPT_BY_VERB["status_current"],
@@ -503,12 +593,14 @@ def handle_status(args: argparse.Namespace, root: Path) -> int:
             stream=False,
         )
         if program_result.returncode != 0:
-            print(f"没有找到研究计划「{args.program}」；请检查名称后重试。", file=sys.stderr)
+            print(f"没有找到研究计划「{public_program}」；请检查名称后重试。", file=sys.stderr)
             return program_result.returncode
         loaded_state = load_yaml(kb_root(root) / "programs" / args.program / "state.yaml", default={})
         program_state = loaded_state if isinstance(loaded_state, dict) else {}
 
-    records = iter_records(root)
+    all_records = iter_records(root)
+    rejected_records = [record for record in all_records if _record_is_rejected(record)]
+    records = [record for record in all_records if not _record_is_rejected(record)]
     kind_counts = {
         kind: len([record for record in records if str(record.get("kind") or "") == kind])
         for kind in PUBLIC_KIND_LABELS
@@ -527,11 +619,12 @@ def handle_status(args: argparse.Namespace, root: Path) -> int:
         print(f"其中有 {ready_count} 条经过核验的判断等待你确认，可使用 kb review 查看。")
 
     if args.program:
-        focus = str(program_state.get("goal") or program_state.get("question") or "").strip()
+        raw_focus = str(program_state.get("goal") or program_state.get("question") or "").strip()
+        focus = _public_display_text(raw_focus, root, "研究重点需由 Agent 安全解释", 180) if raw_focus else ""
         if focus:
-            print(f"研究计划「{args.program}」当前围绕“{focus}”推进。")
+            print(f"研究计划「{public_program}」当前围绕“{focus}”推进。")
         else:
-            print(f"研究计划「{args.program}」的状态已读取。")
+            print(f"研究计划「{public_program}」的状态已读取。")
         counts = program_state.get("counts") if isinstance(program_state.get("counts"), dict) else {}
         open_questions = _natural_count(counts.get("open_questions"))
         evidence_requests = _natural_count(counts.get("evidence_requests"))
@@ -542,6 +635,8 @@ def handle_status(args: argparse.Namespace, root: Path) -> int:
     set_protocol_status(
         "completed",
         record_count=len(records),
+        rejected_count=len(rejected_records),
+        total_record_count=len(all_records),
         ready_review_count=ready_count,
         kind_counts=kind_counts,
         program_ids=program_ids,
@@ -552,6 +647,14 @@ def handle_status(args: argparse.Namespace, root: Path) -> int:
 
 def _next_item_needs_human(item: dict[str, object]) -> bool:
     return str(item.get("step_type") or "") == "human-decision"
+
+
+def _next_item_record_id(item: Mapping[str, object]) -> str:
+    record_id = str(item.get("record_id") or "")
+    if record_id:
+        return record_id
+    program_id = str(item.get("program_id") or "")
+    return program_id.split(":", 1)[-1] if program_id.startswith("loose:") else ""
 
 
 def _next_public_reason(item: dict[str, object], root: Path) -> str:
@@ -579,18 +682,23 @@ def _next_public_reason(item: dict[str, object], root: Path) -> str:
     for prefix, replacement in known_prefixes.items():
         if next_action.startswith(prefix):
             translated = replacement + next_action[len(prefix) :]
-            if _public_line_is_safe(translated, root) and not any(
-                marker in translated for marker in _NEXT_INTERNAL_MARKERS
+            if not any(
+                marker.casefold() in translated.casefold() for marker in _NEXT_INTERNAL_MARKERS
             ):
-                return translated
+                return _public_display_text(
+                    translated,
+                    root,
+                    "Agent 可以继续推进当前研究事项。",
+                    180,
+                )
             return "Agent 可以继续推进当前研究事项。"
     if (
         not next_action
         or not _public_line_is_safe(next_action, root)
-        or any(marker in next_action for marker in _NEXT_INTERNAL_MARKERS)
+        or any(marker.casefold() in next_action.casefold() for marker in _NEXT_INTERNAL_MARKERS)
     ):
         return "Agent 可以继续推进当前研究事项。"
-    return next_action
+    return _public_display_text(next_action, root, "Agent 可以继续推进当前研究事项。", 180)
 
 
 def _print_next_items(items: list[dict[str, object]], *, has_records: bool, root: Path) -> None:
@@ -606,9 +714,12 @@ def _print_next_items(items: list[dict[str, object]], *, has_records: bool, root
         if program_id.startswith("loose:"):
             record_id = str(item.get("record_id") or program_id.split(":", 1)[-1])
             title = str(item.get("title") or item.get("goal") or record_id)
-            subject = f"资料「{title}」（{record_id}）"
+            public_record_id = _public_display_text(record_id, root, "编号已隐藏", 100)
+            public_title = _public_display_text(title, root, "标题需由 Agent 安全解释", 160)
+            subject = f"资料「{public_title}」（{public_record_id}）"
         else:
-            subject = f"研究计划「{program_id}」"
+            public_program = _public_display_text(program_id, root, "名称需由 Agent 安全解释", 100)
+            subject = f"研究计划「{public_program}」"
         print(f"- {subject}：{_next_public_reason(item, root)}")
     if any(_next_item_needs_human(item) for item in items):
         print("请直接用自然语言告诉我你的决定；其他事项可以交给 Agent 继续推进。")
@@ -623,7 +734,8 @@ def handle_next(args: argparse.Namespace, root: Path) -> int:
     result = forward_command(root, SCRIPT_BY_VERB["next"], forwarded_args, stream=False)
     if result.returncode != 0:
         if args.program:
-            print(f"没有找到研究计划「{args.program}」；请检查名称后重试。", file=sys.stderr)
+            public_program = _public_display_text(args.program, root, "名称需由 Agent 安全解释", 100)
+            print(f"没有找到研究计划「{public_program}」；请检查名称后重试。", file=sys.stderr)
         else:
             print("暂时无法判断下一步；详细诊断已保留给 Agent。", file=sys.stderr)
         return result.returncode
@@ -636,12 +748,20 @@ def handle_next(args: argparse.Namespace, root: Path) -> int:
     raw_items = payload.get("items") if isinstance(payload, dict) else []
     items = [dict(item) for item in raw_items if isinstance(item, dict)] if isinstance(raw_items, list) else []
     has_records = bool(payload.get("has_records")) if isinstance(payload, dict) else False
+    workspace_records = iter_records(root)
+    rejected_records = [record for record in workspace_records if _record_is_rejected(record)]
+    rejected_ids = {str(record.get("id") or "") for record in rejected_records}
+    if rejected_records:
+        active_records = [record for record in workspace_records if not _record_is_rejected(record)]
+        has_records = bool(active_records)
+        items = [item for item in items if _next_item_record_id(item) not in rejected_ids]
     human_gate = any(_next_item_needs_human(item) for item in items)
     set_protocol_status(
         "needs_user_authorization" if human_gate else ("agent_action_required" if items else "completed"),
         has_records=has_records,
         item_count=len(items),
         items=items,
+        rejected_count=len(rejected_records),
     )
     for item in items:
         add_agent_action(
@@ -675,20 +795,36 @@ def handle_find(args: argparse.Namespace, root: Path) -> int:
     if result.returncode != 0:
         print("检索暂时未完成；详细诊断已保留给 Agent。", file=sys.stderr)
         return result.returncode
-    records = search_records(root, query)
+    matched_records = search_records(root, query)
+    rejected_records = [record for record in matched_records if _record_is_rejected(record)]
+    records = [record for record in matched_records if not _record_is_rejected(record)]
     summaries = [_protocol_record_summary(record) for record in records]
-    set_protocol_status("completed", query=query, result_count=len(summaries), records=summaries)
+    set_protocol_status(
+        "completed",
+        query=query,
+        result_count=len(summaries),
+        rejected_count=len(rejected_records),
+        records=summaries,
+    )
     if not records:
         print("没有找到匹配的知识条目。")
         return 0
     print(f"找到 {len(records)} 条相关资料：")
     for record in records:
-        unit_id = str(record.get("id") or "")
-        title = str(record.get("title") or unit_id)
+        raw_unit_id = str(record.get("id") or "")
+        raw_title = str(record.get("title") or raw_unit_id)
+        unit_id = _public_display_text(raw_unit_id, root, "编号已隐藏", 100)
+        title = _public_display_text(raw_title, root, "标题需由 Agent 安全解释", 160)
         kind = PUBLIC_KIND_LABELS.get(str(record.get("kind") or ""), "知识")
         print(f"- {kind}「{title}」（{unit_id}）")
-        summary = str(record.get("summary") or "").strip()
-        if summary:
+        raw_summary = str(record.get("summary") or "").strip()
+        if raw_summary:
+            summary = _public_display_text(
+                raw_summary,
+                root,
+                "摘要包含不适合直接展示的内容，请让 Agent 安全解释。",
+                240,
+            )
             print(f"  摘要：{summary}")
         workflow_state = record_workflow_state(record)
         if workflow_state == "ready_for_review":
@@ -700,21 +836,131 @@ def handle_find(args: argparse.Namespace, root: Path) -> int:
 
 def handle_recall(args: argparse.Namespace, root: Path) -> int:
     kind = args.kind or "all"
-    return run_forwarded(root, [(SCRIPT_BY_VERB["recall"], ["recall", "--kind", kind])])
+    owner_kind = "prefs" if kind == "habits" else kind
+    result = forward_command(
+        root,
+        SCRIPT_BY_VERB["recall"],
+        ["recall", "--kind", owner_kind],
+        stream=False,
+    )
+    if result.returncode != 0:
+        print("回忆信息暂时无法读取；详细诊断已保留给 Agent。", file=sys.stderr)
+        return result.returncode
+    print(render_public_recall(result.stdout, kind, root), end="")
+    return 0
+
+
+_RECALL_OWNER_SECTIONS = {
+    "Known habits": "habits",
+    "Known gotchas": "gotchas",
+    "Pending skill defects": "defects",
+}
+
+_RECALL_PUBLIC_LABELS = {
+    "habits": "已确认的习惯",
+    "gotchas": "已确认的已知坑",
+    "defects": "待审能力问题",
+}
+
+
+def _public_recall_entry(line: str) -> str:
+    payload = re.sub(r"^-\s*`[^`]+`\s*", "", line.strip())
+    payload = re.sub(r"\s*\[skill:\s*[^\]]*\]\s*$", "", payload)
+    occurrence = re.search(r"\s*\(x(\d+)\)\s*$", payload)
+    if occurrence:
+        payload = payload[: occurrence.start()].rstrip()
+        return f"{payload}（出现 {occurrence.group(1)} 次）"
+    return payload.strip()
+
+
+def _recall_sections(owner_text: str) -> tuple[dict[str, list[str]], int]:
+    sections = {key: [] for key in _RECALL_PUBLIC_LABELS}
+    current = ""
+    pending_defect_count = 0
+    for raw_line in owner_text.splitlines():
+        line = raw_line.strip()
+        if line in _RECALL_OWNER_SECTIONS:
+            current = _RECALL_OWNER_SECTIONS[line]
+            continue
+        pending_match = re.fullmatch(r"Pending skill defects:\s*(\d+)", line)
+        if pending_match:
+            pending_defect_count = int(pending_match.group(1))
+            current = ""
+            continue
+        if not current or not line.startswith("-") or line == "- none":
+            continue
+        entry = _public_recall_entry(line)
+        if entry:
+            sections[current].append(entry)
+    if sections["defects"]:
+        pending_defect_count = len(sections["defects"])
+    return sections, pending_defect_count
+
+
+def render_public_recall(owner_text: str, kind: str, root: Path) -> str:
+    sections, pending_defect_count = _recall_sections(owner_text)
+    selected = ("habits", "gotchas", "defects") if kind == "all" else (kind,)
+    lines: list[str] = []
+    for section in selected:
+        label = _RECALL_PUBLIC_LABELS[section]
+        entries = sections[section]
+        if entries:
+            lines.append(f"{label}：")
+            lines.extend(
+                f"- {_public_display_text(entry, root, '该条回忆需由 Agent 安全解释', 200)}"
+                for entry in entries
+            )
+        elif section == "defects" and pending_defect_count:
+            lines.append(f"{label}：{pending_defect_count} 条。")
+        else:
+            lines.append(f"{label}：暂无。")
+    return "\n".join(lines) + "\n"
+
+
+def _run_public_recovery(root: Path, action: str, action_args: Sequence[str]) -> int:
+    result = forward_command(
+        root,
+        SCRIPT_BY_VERB["recovery"],
+        [action, *action_args],
+        stream=False,
+    )
+    if result.returncode != 0:
+        private_diagnostic = f"{result.stdout}\n{result.stderr}"
+        if action == "restore" and "Unknown operation:" in private_diagnostic:
+            message = "没有找到对应的知识库操作；请检查编号后重试。"
+        elif action == "undo" and "没有可撤销的已提交操作" in private_diagnostic:
+            message = "目前没有可撤销的知识库操作。"
+        elif action == "undo":
+            message = "知识库撤销未完成；详细诊断已保留给 Agent。"
+        else:
+            message = "知识库恢复未完成；详细诊断已保留给 Agent。"
+        print(message, file=sys.stderr)
+        return result.returncode
+
+    if action == "resume":
+        if "没有未完成操作需要恢复" in result.stdout:
+            print("目前没有未完成操作需要恢复。")
+        else:
+            print("未完成的知识库操作已安全恢复。")
+    elif action == "undo":
+        print("最近一次知识库操作已撤销。若还需要，可再次使用 kb undo 撤销更早的操作。")
+    else:
+        print("知识库已恢复到指定操作之前的状态。")
+    return 0
 
 
 def handle_undo(args: argparse.Namespace, root: Path) -> int:
     del args
-    return run_forwarded(root, [(SCRIPT_BY_VERB["recovery"], ["undo"])])
+    return _run_public_recovery(root, "undo", [])
 
 
 def handle_resume(args: argparse.Namespace, root: Path) -> int:
     del args
-    return run_forwarded(root, [(SCRIPT_BY_VERB["recovery"], ["resume"])])
+    return _run_public_recovery(root, "resume", [])
 
 
 def handle_restore(args: argparse.Namespace, root: Path) -> int:
-    return run_forwarded(root, [(SCRIPT_BY_VERB["recovery"], ["restore", args.op_id])])
+    return _run_public_recovery(root, "restore", [args.op_id])
 
 
 def handle_reject(args: argparse.Namespace, root: Path) -> int:
@@ -729,12 +975,13 @@ def handle_reject(args: argparse.Namespace, root: Path) -> int:
     if reason:
         reject_args.extend(["--evidence", reason])
     result = forward_command(root, SCRIPT_BY_VERB["review"], reject_args, stream=False)
+    public_id = _public_display_text(args.id, root, "编号已隐藏", 100)
     if result.returncode != 0:
-        print(f"未能拒绝知识条目「{args.id}」；请检查编号后重试。", file=sys.stderr)
+        print(f"未能拒绝知识条目「{public_id}」；请检查编号后重试。", file=sys.stderr)
         return result.returncode
     set_protocol_status("completed", rejected_id=args.id)
     add_agent_action("undo_rejection", apply={"verb": "undo"})
-    print(f"知识条目「{args.id}」已拒绝。若这是误操作，可使用 kb undo 撤销。")
+    print(f"知识条目「{public_id}」已拒绝。若这是误操作，可使用 kb undo 撤销。")
     return 0
 
 
@@ -892,8 +1139,9 @@ def handle_ingest(args: argparse.Namespace, root: Path) -> int:
         return intake.returncode
 
     unit_id, status = _extract_ingest_unit_id(intake.stdout)
+    public_unit_id = _public_display_text(unit_id, root, "编号已隐藏", 100) if unit_id else ""
     if status == "duplicate":
-        print(f"知识条目 {unit_id} 已存在；为保护已有工作，本次没有重新生成骨架。")
+        print(f"知识条目 {public_unit_id} 已存在；为保护已有工作，本次没有重新生成骨架。")
         set_protocol_status("duplicate", unit_id=unit_id, source_kind=kind)
         return 0
     if not unit_id:
@@ -904,7 +1152,7 @@ def handle_ingest(args: argparse.Namespace, root: Path) -> int:
     # Step 2: analyzer prepare (safe step gated by "generate-note") — produces the
     # fillable skeleton. NEVER verify (a script cannot fill understanding).
     if "generate-note" not in scope:
-        print(f"资料已入库为 {unit_id}；当前自动化偏好暂停了深读准备。")
+        print(f"资料已入库为 {public_unit_id}；当前自动化偏好暂停了深读准备。")
         relative_script, verb, id_flag = INGEST_ANALYZER[kind]
         set_protocol_status("paused_by_autonomy", unit_id=unit_id, source_kind=kind)
         add_agent_action(
@@ -929,7 +1177,7 @@ def handle_ingest(args: argparse.Namespace, root: Path) -> int:
         set_protocol_status("error", unit_id=unit_id, source_kind=kind, stage="prepare")
         return prepare.returncode
 
-    print(f"资料已入库并备好深读骨架，条目编号是 {unit_id}。Agent 接下来会补全逐字证据并校验；需要判断时再请你拍板。")
+    print(f"资料已入库并备好深读骨架，条目编号是 {public_unit_id}。Agent 接下来会补全逐字证据并校验；需要判断时再请你拍板。")
     verify_arguments = [verb, id_flag, unit_id, "--phase", "verify"]
     remaining_steps: list[dict[str, object]] = [
         {
@@ -1217,13 +1465,101 @@ def load_review_records(root: Path, fuzzy: str | None) -> list[dict]:
     return search_records(root, fuzzy_text, confirmation_status="pending_user_confirmation")
 
 
-def review_item_summary(record: dict) -> str:
-    summary = str(record.get("summary") or "").strip()
-    return summary or "-"
+_PUBLIC_CLAIM_TYPE_LABELS = {
+    "fact": "事实",
+    "inference": "推断",
+    "evaluation": "评价",
+    "user_opinion": "用户观点",
+}
 
 
-def print_review_item(record: dict) -> None:
-    unit_id = str(record.get("id") or "-")
+def public_review_projection(record: dict, root: Path) -> dict[str, object]:
+    """Project the full confirmation receipt scope, classifying any block."""
+    payload = record.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    raw_claims = payload.get("claims")
+    track = confirmation_track(record)
+    fact_track = track == "fact"
+    if raw_claims in (None, []):
+        if not fact_track:
+            return {"status": "invalid", "track": track, "claims": []}
+        kind = PUBLIC_KIND_LABELS.get(str(record.get("kind") or ""), "知识资料")
+        raw_summary = str(record.get("summary") or "").strip()
+        if raw_summary:
+            fallback = "该事实信息需由 Agent 安全解释"
+            fact_summary = _public_display_text(raw_summary, root, fallback, 240)
+            if fact_summary == fallback:
+                return {"status": "unsafe", "track": "fact", "claims": []}
+        else:
+            fallback = "该事实信息需由 Agent 安全解释"
+            title = _public_display_text(record.get("title") or "", root, fallback, 160)
+            if title == fallback:
+                return {"status": "unsafe", "track": "fact", "claims": []}
+            fact_summary = f"资料标题为「{title}」，类型为{kind}。"
+        return {
+            "status": "ready",
+            "track": "fact",
+            "claims": [],
+            "fact_summary": fact_summary,
+        }
+    if not isinstance(raw_claims, list) or any(not isinstance(item, dict) for item in raw_claims):
+        return {"status": "invalid", "track": "judgement", "claims": []}
+
+    canonical_claims = confirmation_claims(record)
+    if len(canonical_claims) != len(raw_claims):
+        return {"status": "invalid", "track": track, "claims": []}
+    if validate_claims(canonical_claims):
+        return {"status": "invalid", "track": track, "claims": []}
+    judgement_track = track == "judgement"
+    projected: list[dict[str, object]] = []
+    unsafe_placeholder = "该内容需由 Agent 安全解释"
+    structurally_invalid = False
+    unsafe = False
+    for claim in canonical_claims:
+        status = str(claim.get("confirmation_status") or "").strip().lower()
+        claim_id = str(claim.get("id") or "").strip()
+        claim_type = str(claim.get("claim_type") or "").strip()
+        raw_text = str(claim.get("text") or "").strip()
+        refs = claim.get("evidence_refs")
+        if (
+            status not in CLAIM_CONFIRMATION_VALUES
+            or not claim_id
+            or claim_type not in _PUBLIC_CLAIM_TYPE_LABELS
+            or not raw_text
+            or not isinstance(refs, list)
+            or any(not isinstance(ref, dict) for ref in refs)
+        ):
+            structurally_invalid = True
+            continue
+        quotes = [str(ref.get("quote") or "").strip() for ref in refs]
+        if (judgement_track and not quotes) or any(not quote for quote in quotes):
+            structurally_invalid = True
+            continue
+        text = _public_display_text(raw_text, root, unsafe_placeholder, 220)
+        evidence = _public_display_text(quotes[0], root, unsafe_placeholder, 160) if quotes else ""
+        if text == unsafe_placeholder or evidence == unsafe_placeholder:
+            unsafe = True
+            continue
+        projected.append(
+            {
+                "type_label": _PUBLIC_CLAIM_TYPE_LABELS[claim_type],
+                "text": text,
+                "evidence": evidence,
+                "extra_evidence_count": len(quotes) - 1,
+            }
+        )
+    if structurally_invalid:
+        return {"status": "invalid", "track": track, "claims": []}
+    if unsafe:
+        return {"status": "unsafe", "track": track, "claims": []}
+    if len(projected) != len(canonical_claims):
+        return {"status": "invalid", "track": track, "claims": []}
+    return {"status": "ready", "track": track, "claims": projected, "fact_summary": ""}
+
+
+def print_review_item(record: dict, projection: Mapping[str, object], root: Path) -> None:
+    raw_unit_id = str(record.get("id") or "-")
+    unit_id = _public_display_text(raw_unit_id, root, "编号已隐藏", 100)
     kind = {
         "paper": "论文",
         "repo": "代码仓",
@@ -1231,9 +1567,22 @@ def print_review_item(record: dict) -> None:
         "idea": "研究想法",
         "experiment": "实验",
     }.get(str(record.get("kind") or ""), "知识条目")
-    title = str(record.get("title") or "-")
+    title = _public_display_text(record.get("title") or "-", root, "标题需由 Agent 安全解释", 160)
     print(f"- {kind}「{title}」（{unit_id}）")
-    print(f"  判断摘要：{review_item_summary(record)}")
+    fact_summary = str(projection.get("fact_summary") or "")
+    if fact_summary:
+        print(f"  待确认的事实信息：{fact_summary}")
+    claims = projection.get("claims")
+    claims = claims if isinstance(claims, list) else []
+    if claims:
+        print("  待确认内容：")
+    for claim in claims:
+        print(f"  - {claim['type_label']}：{claim['text']}")
+        if claim.get("evidence"):
+            print(f"    证据摘录（安全显示）：“{claim['evidence']}”")
+        extra_count = _natural_count(claim.get("extra_evidence_count"))
+        if extra_count:
+            print(f"    另有 {extra_count} 条已核验证据。")
 
 
 def build_review_apply_commands(
@@ -1273,23 +1622,78 @@ def handle_review(args: argparse.Namespace, root: Path) -> int:
     if result.returncode != 0:
         print("确认收件箱暂时无法读取；详细诊断已保留给 Agent。", file=sys.stderr)
         return result.returncode
-    records = load_review_records(root, args.fuzzy)
-    pending = [record for record in records if is_ready_for_human_review(record)]
+    records = [record for record in load_review_records(root, args.fuzzy) if not _record_is_rejected(record)]
+    ready_candidates = [record for record in records if is_ready_for_human_review(record)]
+    pending: list[dict] = []
+    projection_by_id: dict[str, dict[str, object]] = {}
+    structurally_blocked: list[dict] = []
+    unsafe_blocked: list[dict] = []
+    for record in ready_candidates:
+        projection = public_review_projection(record, root)
+        if projection.get("status") == "invalid":
+            structurally_blocked.append(record)
+            continue
+        if projection.get("status") == "unsafe":
+            unsafe_blocked.append(record)
+            continue
+        pending.append(record)
+        projection_by_id[str(record.get("id") or "")] = projection
+    blocked = [*structurally_blocked, *unsafe_blocked]
     if pending:
         pending_ids = [str(record.get("id") or "") for record in pending]
-        set_protocol_status("needs_user_authorization", review_count=len(pending), record_ids=pending_ids)
+        set_protocol_status(
+            "needs_user_authorization",
+            review_count=len(pending),
+            record_ids=pending_ids,
+            blocked_review_count=len(blocked),
+            blocked_review_records=blocked,
+            invalid_review_count=len(structurally_blocked),
+            unsafe_review_count=len(unsafe_blocked),
+        )
         add_agent_action(
             "present_review_items",
             records=pending,
             decision_fields=["decision", "user_authorization", "authorization_source", "evidence"],
             authorization_source="user_message",
         )
-        print(f"有 {len(pending)} 条判断已经准备好，等待你确认：")
+        print(f"有 {len(pending)} 条待确认内容已经准备好：")
         for record in pending:
-            print_review_item(record)
-        print("这些判断需要你用自然语言确认或拒绝；在你拍板前不会写成已确认结论。")
+            print_review_item(record, projection_by_id[str(record.get("id") or "")], root)
+        print("以上待确认内容已经过当前流程核验；以上内容需要你用自然语言确认或拒绝，在你拍板前不会写成已确认结论。")
+        if structurally_blocked:
+            add_agent_action("repair_review_claims", records=structurally_blocked)
+            print("另有判断缺少可确认的文本或证据，Agent 会先补全。")
+        if unsafe_blocked:
+            add_agent_action("explain_review_items_safely", records=unsafe_blocked)
+            print("另有已核验内容不适合直接显示，请先让 Agent 安全解释。")
+    elif blocked:
+        set_protocol_status(
+            "agent_action_required",
+            review_count=0,
+            blocked_review_count=len(blocked),
+            blocked_review_records=blocked,
+            invalid_review_count=len(structurally_blocked),
+            unsafe_review_count=len(unsafe_blocked),
+        )
+        if structurally_blocked:
+            add_agent_action("repair_review_claims", records=structurally_blocked)
+        if unsafe_blocked:
+            add_agent_action("explain_review_items_safely", records=unsafe_blocked)
+        if structurally_blocked and unsafe_blocked:
+            print("目前没有可供你安全确认的判断；请先让 Agent 安全解释相关内容，并补全缺失的判断文本或证据。")
+        elif unsafe_blocked:
+            print("目前没有可供你安全确认的判断；请先让 Agent 安全解释这些已核验内容。")
+        else:
+            print("目前没有可供你安全确认的判断；Agent 需要先补全判断文本或证据。")
     else:
-        set_protocol_status("completed", review_count=0)
+        set_protocol_status(
+            "completed",
+            review_count=0,
+            blocked_review_count=0,
+            blocked_review_records=[],
+            invalid_review_count=0,
+            unsafe_review_count=0,
+        )
         print("目前没有需要你确认的判断。")
     return 0
 
@@ -1307,6 +1711,9 @@ class ConversationalArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> None:
         del message
         self.exit(2, "我没能理解这条 kb 请求。请使用 kb help 查看可用动词和示例。\n")
+
+    def format_help(self) -> str:
+        return render_help_menu()
 
 
 def register_help(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -1397,7 +1804,7 @@ def register_undo(subparsers: argparse._SubParsersAction[argparse.ArgumentParser
 
 
 def register_update(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    parser = subparsers.add_parser("update", help="检查并在确认后更新 research skill")
+    parser = subparsers.add_parser("update", help="检查并在确认后更新研究能力包")
     parser.add_argument("--apply", action="store_true", help=argparse.SUPPRESS)
     parser.set_defaults(handler=handle_update)
 
