@@ -411,6 +411,55 @@ def test_local_checkout_strategy_with_remote_origin_never_uses_network(monkeypat
     assert synced[0].checkout == source
 
 
+def test_local_checkout_skips_sync_when_worktree_version_is_not_newer(monkeypatch, tmp_path: Path) -> None:
+    install = tmp_path / "install"
+    source = tmp_path / "local-source"
+    (source / ".git").mkdir(parents=True)
+    (source / "install-lib").mkdir(parents=True)
+    (source / "install-lib" / "ws_sync.py").write_text("", encoding="utf-8")
+    (source / ".agents").mkdir()
+    (source / ".agents" / "VERSION").write_text("0.2.0\n", encoding="utf-8")
+    (install / ".agents").mkdir(parents=True)
+    (install / ".agents" / "VERSION").write_text("0.2.0\n", encoding="utf-8")
+    (install / updater.MANIFEST_REL).write_text(
+        json.dumps(
+            {
+                "source_origin": "ssh://example.test/team/workspace-oss.git",
+                "source_checkout": str(source),
+                "source_branch": "feature/unpushed",
+                "source_strategy": "local-checkout",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        updater,
+        "_checkout_origin",
+        lambda _checkout: "ssh://example.test/team/workspace-oss.git",
+    )
+    monkeypatch.setattr(updater, "_checkout_branch", lambda _checkout: "feature/unpushed")
+    for name in ("_fetch_checkout", "_pull_checkout", "_clone_checkout"):
+        monkeypatch.setattr(
+            updater,
+            name,
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("local-checkout strategy must not use the network")
+            ),
+        )
+    monkeypatch.setattr(
+        updater,
+        "_invoke_ws_sync",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("equal version must not sync")),
+    )
+
+    assert updater.check(install, tmp_path / "cache")["status"] == "up_to_date"
+    assert updater.apply(install, tmp_path / "cache") == {
+        "before": "0.2.0",
+        "after": "0.2.0",
+        "status": "up_to_date",
+    }
+
+
 @pytest.mark.parametrize(
     ("recorded_branch", "current_branch"),
     [
