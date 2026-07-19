@@ -1,6 +1,6 @@
 # Open Research Workspace Skills
 
-An experimental, Chinese-first research workspace for turning papers, repositories, technical articles, ideas, experiments, and reports into durable local knowledge.
+A Chinese-first research workspace for turning papers, repositories, technical articles, ideas, experiments, and reports into durable local knowledge.
 
 The bundle installs beside your project data:
 
@@ -10,7 +10,7 @@ workspace/
 └── kb/        # your local research data
 ```
 
-This repository is currently an **internal alpha / pre-release**. The evidence and confirmation invariants are intentional, but interfaces may still change before the first stable release. See [CHANGELOG.md](CHANGELOG.md) for the current release state.
+The current candidate is **`0.2.0-rc.1`**. It has passed the complete local test suite and cold installed-copy acceptance, so it meets the project's local release-candidate gate. It is not a stable or GA release, has not been tagged or published, and makes no compatibility or support-time SLA promise. A green hosted Linux/macOS CI matrix remains required before a release tag. See [CHANGELOG.md](CHANGELOG.md) for the current release state.
 
 ## Capability maturity
 
@@ -32,16 +32,16 @@ These labels describe the current scope of each component, not the release statu
 | `research-config-manager` | beta | Preference and policy persistence is real, but not every preference is consumed by every downstream skill. |
 | `discussion-archivist` | beta | Durable conclusion-level discussion archives with explicit evidence and open questions. |
 | `research-orchestrator` | scaffold | Program spine, routing, dashboards, and event flow; prioritization remains policy-driven. |
-| `literature-synthesizer` | scaffold | Evidence-first survey structures exist; taxonomy, trend, and gap synthesis still depends heavily on the agent. |
-| `idea-workbench` | scaffold | Candidate, review, discussion, and selection structures exist; novelty quality is not benchmarked as stable. |
-| `method-designer` | scaffold | Design handoff and experiment-matrix structures exist; generated methods require expert review. |
-| `experiment-workbench` | scaffold | Typed run logs and diagnosis governance exist; diagnosis quality remains agent-dependent. |
-| `report-author` | scaffold | Reports and outlines consume durable evidence, but composition quality and coverage remain under hardening. |
+| `literature-synthesizer` | beta | Evidence-first survey, taxonomy, trend, contradiction, and gap artifacts are durable; synthesis quality still depends on the agent and source coverage. |
+| `idea-workbench` | beta | Candidate, evidence-first review, discussion, and explicit selection are implemented; novelty claims still require human or expert judgement. |
+| `method-designer` | beta | Repo-grounded design handoff and experiment matrices are implemented; generated methods still require expert review. |
+| `experiment-workbench` | beta | Typed plans, run logs, follow-ups, and confirmation-gated diagnoses are implemented; diagnosis quality remains agent-dependent. |
+| `report-author` | beta | Reports and outlines consume durable claims, events, evidence, and decisions; composition quality and coverage still require review. |
 | `skill-evolution-advisor` | scaffold | Learning capture and review exist; automatic skill evolution is intentionally not a supported promise. |
 | `wiki-adapter` | scaffold | A thin compatibility and routing layer, not an independent analysis engine. |
 | `research-navigator` | dev-only | The local browser workbench remains a development surface; generated Markdown navigation is beta. |
 
-A score or successful run for one paper, repository, or article analyzer is evidence only for that analyzer. It must not be extrapolated to survey, idea, method, experiment, report, navigation, or the bundle as a whole. In particular, the two scoped **stable** rows above do not make this pre-release a stable release.
+A score or successful run for one component is evidence only for that component. It must not be extrapolated to a different workflow or the bundle as a whole. In particular, the scoped **stable** rows above do not make this release candidate a stable release.
 
 ## Start with a conversation
 
@@ -59,9 +59,11 @@ Then you can simply ask:
 
 The agent does the mechanical work. You review judgements and make research decisions.
 
+Installation is the one-time technical bootstrap. After it succeeds, ordinary users interact only through natural language and the fifteen `kb <verb>` shortcuts below. Internal scripts, flags, environment variables, and paths are private implementation details handled by the agent; only maintainers and installation automation need the advanced commands in the installation guide.
+
 ## Install
 
-From this repository:
+For the one-time guided setup, from this repository:
 
 ```bash
 bash install.sh
@@ -69,7 +71,7 @@ bash install.sh
 
 The guided installer recommends a project-scoped copy into a workspace root. It does not install into `kb/`, and updates or uninstalls preserve existing research data. A compatible Python runtime is reused when available; otherwise the workspace prepares an isolated managed runtime when first needed. Normal `kb` calls do not install packages into a shared interpreter.
 
-Read [docs/INSTALL.md](docs/INSTALL.md) for copy, update, uninstall, and automation details.
+Read [docs/INSTALL.md](docs/INSTALL.md) for guided setup. Its flags, explicit paths, update, uninstall, and automation sections are administrator reference, not steps for everyday research use.
 
 ## The fifteen `kb` verbs
 
