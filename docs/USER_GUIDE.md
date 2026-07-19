@@ -31,7 +31,7 @@
 | `method-designer` | beta | 基于仓库证据的方法交接和实验矩阵已实现；生成设计仍需专家复核。 |
 | `experiment-workbench` | beta | 强类型计划、运行记录、follow-up 和确认门控诊断已实现；诊断质量仍依赖 Agent。 |
 | `report-author` | beta | 报告与大纲会消费持久 claim、event、evidence 和 decision；成文质量与覆盖仍需复核。 |
-| `skill-evolution-advisor` | scaffold | 学习记录与复核流程已存在，不承诺自动修改 skill。 |
+| `skill-evolution-advisor` | scaffold | 本地学习与诊断问题的记录、复核已存在，不承诺自动修改 skill。 |
 | `wiki-adapter` | scaffold | 仅提供轻量兼容与路由，不是独立分析引擎。 |
 | `research-navigator` | dev-only | 本地浏览工作台仍是开发能力；自然语言导航摘要属于 beta。 |
 
@@ -207,6 +207,34 @@ Run log 是事实；diagnosis 是推断，默认待确认。报告系统从 prog
 ```
 
 偏好确认后才能影响后续行为。Skill defect 只记录和复盘，不能触发自动改 skill。
+
+## 可选的本地开发者诊断
+
+开发者诊断用于记录可复现的能力问题，不是遥测，也不能关闭 schema、evidence、confirmation、containment、事务或恢复等强制安全门。它属于 beta/scaffold 能力，默认关闭自动记录，不应被理解为 stable 承诺。
+
+你仍然只需使用自然语言，例如：
+
+```text
+开启开发者诊断。
+```
+
+```text
+仅在出错时记录；关闭 paper-analyst 诊断。
+```
+
+```text
+把刚才的失败做脱敏记录和短复盘，不要上传。
+```
+
+```text
+检查知识库健康，只做只读机械检查，不要修改资料。
+```
+
+三种模式的含义是：`off` 不自动记录；`errors-only` 只做确定性失败捕获，不调用 Agent 复盘；`developer` 允许在每任务 token 与问题数量预算内做触发式短复盘。单个能力可以设置得比 workspace 更严格。即使自动诊断关闭，你当前消息中明确要求“记下这个问题”时，Agent 仍会记录；没有明确要求时，纠正和可复用摩擦只在策略允许时自动捕获。
+
+诊断资料只保存在本地，没有后台 telemetry 或自动上传。生成脱敏导出预览需要你在当前消息中明确授权；D1 不负责上传第三方 issue tracker。默认不会包含论文原文、逐字 evidence、用户消息、绝对路径、环境变量、secret 或完整 traceback，记录也不会自动修改 skill、roadmap 或研究结论。
+
+普通 `kb doctor` 仍只显示简短的运行能力结果。由 Agent 执行健康检查时，它可以私下读取当前诊断模式和机械 audit 计数，再用中文解释；公开面仍保持十五个动词，不增加 `lint` 或 `diagnostics` 入口。
 
 ## 进一步阅读
 

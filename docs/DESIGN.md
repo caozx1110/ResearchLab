@@ -64,6 +64,7 @@ Release bundle 不包含任何私有 `kb/`。安装、更新、storage sync 和�
 - `confirm.py`：write gate、confirmation receipt、link 与 lifecycle mutation；
 - `sources.py`：source intake 与 KB-local storage migration；
 - `index.py`：index、governance、search 和 ID compaction；
+- `diagnostics.py`：可选诊断策略、脱敏 issue、确定性去重和本地导出预览；
 - `evidence.py`：逐字 evidence 和派生证据验证；
 - `journal.py` / `git_ops.py`：恢复与精确 checkpoint；
 - `bootstrap.py` / `updater.py`：运行环境与来源感知更新；
@@ -135,6 +136,20 @@ Receipt 不改变原 epistemic type。内容或 evidence 改变时，旧 receipt
 
 这个分层让人类界面稳定，同时保留 Agent 自动驱动所需的精确信息。
 
+## 可选开发者诊断与机械 audit
+
+D1 把强制正确性门和可选质量诊断分开。Schema、evidence、confirmation、containment、journal、lock、CAS 与 recovery 在所有配置下都必须执行；配置只能关闭额外记录和 Agent 复盘。
+
+诊断模式为 `off`、`errors-only`、`developer`，默认 `off`，并允许单个 skill 用更严格的有效模式覆盖 workspace。`errors-only` 只运行确定性捕获，不消费 LLM token；`developer` 才允许在每任务 token/issue budget 内做触发式短复盘。用户当前消息明确要求记录时不受自动模式关闭影响。
+
+Dispatcher 只在 owner 已返回非零结果之后尝试捕获，并且只交付稳定 skill、公开 operation、return code 和固定中文安全摘要。Raw stdout/stderr、traceback、arguments、用户原文、source/evidence、secret、环境变量和绝对路径都禁止进入 capture API。捕获异常只能写入私有 Agent protocol，不能改变原 exit code 或 public message；成功与 no-op 不产生 issue。
+
+结构化问题保存在本地 skill-evolution 记忆中，近重复确定性合并 occurrence。Issue 永不自动改 skill、roadmap 或已确认研究结论。D1 没有后台 telemetry 或第三方上传；脱敏导出预览也必须由当前用户消息授权。
+
+机械 workspace audit 是字节级只读操作，按 `schema`、`integrity`、`recovery`、`security`、`quality` 分层报告稳定 finding。它检查可确定判断的结构、绑定、journal、产品拥有文件、基础 metadata、figure 候选和 symlink containment，不判断语义矛盾或研究结论质量。`kb doctor` 的普通输出仍只有简洁中文；显式 Agent protocol 可以包含有效模式与 audit status/counts，但不投影 raw finding。
+
+公开动词仍精确为 15 个。用户以“开启开发者诊断”“仅在出错时记录”“关闭 paper-analyst 诊断”“对刚才失败做脱敏复盘”“检查知识库健康”等自然语言触发 Agent owner；不存在新的 `kb lint` 或 `kb diagnostics`。D1 的自动捕获、audit 和复盘目前分别按 beta/scaffold 对待，不并入 stable 能力外推。
+
 ## 原子写、事务与恢复
 
 单文件写使用临时文件 + replace，并通过 revision/CAS 防止 stale overwrite。Record 写入使用 per-path lock 和 operation journal。
@@ -184,7 +199,8 @@ Install manifest 记录 `source_origin` 与 `source_branch`，本地安装还可
 6. human output 只含自然语言与 `kb <verb>`；
 7. structured Agent hand-off 保持私有；
 8. 同步 skill metadata、用户文档和测试；
-9. 在 Linux 与 macOS 支持的 Python 版本上验证；
-10. 发布前由冷 acceptance agent 端到端复现关键路径。
+9. 可选诊断只传脱敏稳定字段，audit 保持字节级只读，且不新增公开动词；
+10. 在 Linux 与 macOS 支持的 Python 版本上验证；
+11. 发布前由冷 acceptance agent 端到端复现关键路径。
 
 当前标识为 `0.2.0-rc.1`，已通过完整本地套件与冷启动安装副本验收，达到本地 release-candidate gate。它仍不是 stable/GA，也尚未 tag 或 publish；hosted Linux/macOS CI matrix 全绿仍是 release tag 的前置。文档、tag 与 changelog 不得把本地 RC 验收外推为稳定兼容或 SLA 承诺。

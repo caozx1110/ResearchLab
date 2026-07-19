@@ -37,7 +37,7 @@ These labels describe the current scope of each component, not the release statu
 | `method-designer` | beta | Repo-grounded design handoff and experiment matrices are implemented; generated methods still require expert review. |
 | `experiment-workbench` | beta | Typed plans, run logs, follow-ups, and confirmation-gated diagnoses are implemented; diagnosis quality remains agent-dependent. |
 | `report-author` | beta | Reports and outlines consume durable claims, events, evidence, and decisions; composition quality and coverage still require review. |
-| `skill-evolution-advisor` | scaffold | Learning capture and review exist; automatic skill evolution is intentionally not a supported promise. |
+| `skill-evolution-advisor` | scaffold | Local learning and diagnostic-issue capture/review exist; automatic skill evolution is intentionally not a supported promise. |
 | `wiki-adapter` | scaffold | A thin compatibility and routing layer, not an independent analysis engine. |
 | `research-navigator` | dev-only | The local browser workbench remains a development surface; generated Markdown navigation is beta. |
 
@@ -138,6 +138,16 @@ The agent can safely extract metadata, deduplicate sources, build evidence-backe
 You decide whether a judgement is accepted, which idea or baseline to pursue, whether an experiment conclusion is sound, and when a research program changes stage. A confirmation must come from the current user interaction and retain evidence; remembered authorization is not enough.
 
 `kb review` includes only material whose agent fill and verification are complete. Items still awaiting analysis, verification, or retry remain out of the human decision queue.
+
+## Optional local developer diagnostics
+
+D1 adds an optional, local-only quality loop without adding a sixteenth `kb` verb. Its automatic mode is off by default. You can ask the Agent in natural language to “开启开发者诊断”, “仅在出错时记录”, “关闭 paper-analyst 诊断”, “对刚才失败做脱敏复盘”, or “检查知识库健康”.
+
+`errors-only` records deterministic operation failures without asking a model to diagnose them. `developer` may also run a short, triggered retrospective, bounded by per-task token and issue budgets; per-skill settings can narrow either mode. An explicit request to record a problem is honored even when automatic capture is off.
+
+Diagnostics never disable schema, evidence, confirmation, containment, transaction, or recovery gates. Records stay on the local workspace, there is no background telemetry or automatic upload, and a captured issue cannot edit a skill or roadmap. Any export requires current-message authorization and is redacted by default. Mechanical workspace health checks are read-only and do not judge research conclusions.
+
+This D1 slice is beta/scaffold, not part of the scoped stable promises above. Ordinary `kb doctor` output remains a concise runtime check; an Agent-mediated diagnostic check may privately consume the effective mode and mechanical audit counts before explaining the result in natural language.
 
 ## Update provenance and local data
 
