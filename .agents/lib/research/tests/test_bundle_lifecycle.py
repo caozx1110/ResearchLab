@@ -14,6 +14,7 @@ import pytest
 
 BEGIN_MARKER = "# >>> workspace-oss managed >>>"
 END_MARKER = "# <<< workspace-oss managed <<<"
+PUBLIC_PRESERVATION_WARNING = "检测到用户修改并按安全策略保留，请让 Agent 检查。"
 
 
 def _project_root() -> Path:
@@ -39,6 +40,13 @@ def _run_installer(workspace: Path, action: str, *extra: str) -> subprocess.Comp
         capture_output=True,
         check=False,
     )
+
+
+def _assert_public_preservation_warning(result: subprocess.CompletedProcess[str]) -> None:
+    assert PUBLIC_PRESERVATION_WARNING in result.stderr
+    assert result.stderr.count(PUBLIC_PRESERVATION_WARNING) == 1
+    for token in ("preserving ", "reason=", "warn:", ".agents/", "expected=", "actual="):
+        assert token not in result.stdout + result.stderr
 
 
 def _load_ws_sync() -> ModuleType:
@@ -187,9 +195,7 @@ def test_uninstall_preserves_drifted_and_retyped_managed_paths(tmp_path: Path) -
     assert user_cache.read_bytes() == b"user-owned cache\n"
     assert not (workspace / ".agents" / ".install-manifest.json").exists()
     assert not (workspace / ".agents" / "skills" / "kb-cli" / "SKILL.md").exists()
-    assert "preserving managed path during uninstall: .agents/VERSION reason=content-drift" in uninstall.stderr
-    assert "preserving managed path during uninstall: .agents/LICENSE reason=type-change" in uninstall.stderr
-    assert "preserving managed path during uninstall: .agents/AGENTS.md reason=symlink" in uninstall.stderr
+    _assert_public_preservation_warning(uninstall)
 
 
 def test_direct_uninstall_rejects_linked_agents_root_without_touching_target(tmp_path: Path) -> None:
@@ -320,8 +326,7 @@ def test_uninstall_removes_cross_abi_cpython_caches_but_preserves_changed_types(
     assert linked_cache.readlink() == external
     assert external.read_bytes() == b"external\n"
     assert retyped_cache.is_dir()
-    assert "core.cpython-998.pyc reason=type-change" in uninstall.stderr
-    assert "core.cpython-997.opt-2.pyc reason=type-change" in uninstall.stderr
+    _assert_public_preservation_warning(uninstall)
 
 
 def test_uninstall_preserves_whole_agents_file_when_managed_block_drifts(tmp_path: Path) -> None:
@@ -348,7 +353,7 @@ def test_uninstall_preserves_whole_agents_file_when_managed_block_drifts(tmp_pat
     assert agents_path.read_text(encoding="utf-8") == drifted
     assert BEGIN_MARKER in drifted
     assert END_MARKER in drifted
-    assert "preserving AGENTS.md during uninstall: managed block drift" in uninstall.stderr
+    _assert_public_preservation_warning(uninstall)
     assert not (workspace / ".agents" / ".install-manifest.json").exists()
     assert all(not (workspace / rel).exists() for rel in manifest["files"] if rel != "AGENTS.md")
 
@@ -370,7 +375,7 @@ def test_uninstall_preserves_whole_agents_file_when_managed_marker_changes(tmp_p
 
     assert uninstall.returncode == 0, uninstall.stdout + uninstall.stderr
     assert agents_path.read_text(encoding="utf-8") == drifted
-    assert "preserving AGENTS.md during uninstall: managed block cannot be verified" in uninstall.stderr
+    _assert_public_preservation_warning(uninstall)
     assert not (workspace / ".agents" / ".install-manifest.json").exists()
 
 
@@ -390,7 +395,7 @@ def test_uninstall_preserves_whole_agents_file_when_it_is_not_utf8(tmp_path: Pat
 
     assert uninstall.returncode == 0, uninstall.stdout + uninstall.stderr
     assert agents_path.read_bytes() == drifted
-    assert "preserving AGENTS.md during uninstall: managed block cannot be verified" in uninstall.stderr
+    _assert_public_preservation_warning(uninstall)
     assert not (workspace / ".agents" / ".install-manifest.json").exists()
 
 
