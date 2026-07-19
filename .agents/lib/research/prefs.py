@@ -173,35 +173,8 @@ def default_runtime_preferences() -> dict[str, Any]:
     }
 
 
-def load_runtime_preferences(project_root: Path) -> dict[str, Any]:
-    payload = load_yaml(runtime_preferences_path(project_root), default={})
-    if not isinstance(payload, dict) or not payload:
-        payload = default_runtime_preferences()
-    normalized = _deep_fill_missing(payload, default_runtime_preferences())
-    browser = normalized.get("browser", {})
-    if not isinstance(browser, dict):
-        browser = {}
-    browser["default_workbench_mode"] = str(browser.get("default_workbench_mode") or "preview")
-    browser["default_terminal_mode"] = str(browser.get("default_terminal_mode") or "codex")
-    browser["auto_open_recent_file"] = bool(browser.get("auto_open_recent_file"))
-    normalized["browser"] = browser
-
-    identity = normalized.get("identity", {})
-    if not isinstance(identity, dict):
-        identity = {}
-    identity["default_confirmed_by"] = str(identity.get("default_confirmed_by") or "").strip()
-    normalized["identity"] = identity
-
-    learned_preferences = normalized.get("learned_preferences", {})
-    if not isinstance(learned_preferences, dict):
-        learned_preferences = {}
-    items = learned_preferences.get("items", [])
-    learned_preferences["items"] = [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
-    normalized["learned_preferences"] = learned_preferences
-
-    diagnostics = normalized.get("diagnostics", {})
-    if not isinstance(diagnostics, dict):
-        diagnostics = {}
+def _normalize_diagnostics_preferences(value: object) -> dict[str, Any]:
+    diagnostics = copy.deepcopy(value) if isinstance(value, dict) else {}
     mode = str(diagnostics.get("mode") or "off").strip().lower()
     diagnostics["mode"] = mode if mode in DIAGNOSTIC_MODES else "off"
     raw_per_skill = diagnostics.get("per_skill", {})
@@ -232,7 +205,36 @@ def load_runtime_preferences(project_root: Path) -> dict[str, Any]:
         diagnostics["cooldown_seconds"] = max(0, int(diagnostics.get("cooldown_seconds") or 0))
     except (TypeError, ValueError):
         diagnostics["cooldown_seconds"] = 0
-    normalized["diagnostics"] = diagnostics
+    return diagnostics
+
+
+def load_runtime_preferences(project_root: Path) -> dict[str, Any]:
+    payload = load_yaml(runtime_preferences_path(project_root), default={})
+    if not isinstance(payload, dict) or not payload:
+        payload = default_runtime_preferences()
+    normalized = _deep_fill_missing(payload, default_runtime_preferences())
+    browser = normalized.get("browser", {})
+    if not isinstance(browser, dict):
+        browser = {}
+    browser["default_workbench_mode"] = str(browser.get("default_workbench_mode") or "preview")
+    browser["default_terminal_mode"] = str(browser.get("default_terminal_mode") or "codex")
+    browser["auto_open_recent_file"] = bool(browser.get("auto_open_recent_file"))
+    normalized["browser"] = browser
+
+    identity = normalized.get("identity", {})
+    if not isinstance(identity, dict):
+        identity = {}
+    identity["default_confirmed_by"] = str(identity.get("default_confirmed_by") or "").strip()
+    normalized["identity"] = identity
+
+    learned_preferences = normalized.get("learned_preferences", {})
+    if not isinstance(learned_preferences, dict):
+        learned_preferences = {}
+    items = learned_preferences.get("items", [])
+    learned_preferences["items"] = [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+    normalized["learned_preferences"] = learned_preferences
+
+    normalized["diagnostics"] = _normalize_diagnostics_preferences(normalized.get("diagnostics"))
 
     autonomy = normalized.get("autonomy", {})
     if not isinstance(autonomy, dict):
@@ -342,6 +344,7 @@ def write_runtime_preferences(project_root: Path, payload: dict[str, Any]) -> Pa
                     merged[key] = target
                 target.update(value)
         normalized = _deep_fill_missing(merged, default_runtime_preferences())
+        normalized["diagnostics"] = _normalize_diagnostics_preferences(normalized.get("diagnostics"))
         write_yaml_if_changed(path, normalized)
     return path
 

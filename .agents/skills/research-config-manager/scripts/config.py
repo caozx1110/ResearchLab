@@ -38,6 +38,7 @@ from research.core import (
     topic_taxonomy_path,
     write_runtime_preferences,
 )
+from research.prefs import DIAGNOSTIC_MODES, DIAGNOSTIC_SKILL_MODES
 
 
 def profile_path(root: Path) -> Path:
@@ -283,9 +284,18 @@ def build_parser() -> argparse.ArgumentParser:
     guide.add_argument("--focus", choices=["all", "paper-intake"], default="all")
 
     runtime = subparsers.add_parser("set-runtime-pref", help="Persist browser / identity / autonomy / paper / pdf / versioning runtime preferences")
-    runtime.add_argument("--section", required=True, choices=["browser", "identity", "autonomy", "paper", "pdf", "versioning"])
+    runtime.add_argument("--section", required=True, choices=["browser", "identity", "autonomy", "paper", "pdf", "versioning", "diagnostics"])
     runtime.add_argument("--key", required=True)
     runtime.add_argument("--value", required=True)
+
+    diagnostics = subparsers.add_parser("set-diagnostics", help="Configure optional local-only diagnostics")
+    diagnostics.add_argument("--mode", choices=sorted(DIAGNOSTIC_MODES))
+    diagnostics.add_argument("--skill", default="")
+    diagnostics.add_argument("--skill-mode", choices=sorted(DIAGNOSTIC_SKILL_MODES))
+    diagnostics.add_argument("--token-budget-per-task", type=int)
+    diagnostics.add_argument("--max-issues-per-task", type=int)
+    diagnostics.add_argument("--dedup-window-seconds", type=int)
+    diagnostics.add_argument("--cooldown-seconds", type=int)
     return parser
 
 
@@ -453,6 +463,54 @@ def main() -> int:
             message=f"milestone: update runtime pref {args.section}.{args.key}",
             target_paths=[path],
         )
+        return 0
+    if args.command == "set-diagnostics":
+        if bool(args.skill) != bool(args.skill_mode):
+            raise SystemExit("--skill and --skill-mode must be provided together")
+        if all(
+            value is None
+            for value in (
+                args.mode,
+                args.skill_mode,
+                args.token_budget_per_task,
+                args.max_issues_per_task,
+                args.dedup_window_seconds,
+                args.cooldown_seconds,
+            )
+        ):
+            raise SystemExit("set-diagnostics requires at least one policy change")
+        path = runtime_preferences_path(root)
+        with mutation_transaction(root, "set-diagnostics", [path]):
+            payload = load_runtime_preferences(root)
+            diagnostics = payload.get("diagnostics", {})
+            if not isinstance(diagnostics, dict):
+                diagnostics = {}
+            if args.mode is not None:
+                diagnostics["mode"] = args.mode
+            if args.skill_mode is not None:
+                overrides = diagnostics.get("per_skill", {})
+                if not isinstance(overrides, dict):
+                    overrides = {}
+                overrides[str(args.skill).strip().lower()] = args.skill_mode
+                diagnostics["per_skill"] = overrides
+            for argument, key in (
+                (args.token_budget_per_task, "token_budget_per_task"),
+                (args.max_issues_per_task, "max_issues_per_task"),
+                (args.dedup_window_seconds, "dedup_window_seconds"),
+                (args.cooldown_seconds, "cooldown_seconds"),
+            ):
+                if argument is not None:
+                    diagnostics[key] = argument
+            # write_runtime_preferences normalizes numeric bounds and forces
+            # local_only=true before bytes reach disk.
+            write_runtime_preferences(root, {"diagnostics": diagnostics})
+        checkpoint_and_report(
+            root,
+            trigger="milestone",
+            message="milestone: update local diagnostics policy",
+            target_paths=[path],
+        )
+        print("[ok] updated local diagnostics policy")
         return 0
     return 1
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import importlib.util
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -59,6 +61,16 @@ def _record(root: Path, summary: str, **overrides: object) -> tuple[dict, bool]:
     }
     payload.update(overrides)
     return record_diagnostic_issue(root, **payload)  # type: ignore[arg-type]
+
+
+def _load_owner_script(relative_path: str, module_name: str):
+    script = Path(__file__).resolve().parents[4] / relative_path
+    spec = importlib.util.spec_from_file_location(module_name, script)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_absent_root_policy_and_issue_reads_are_byte_identical(tmp_path: Path) -> None:
@@ -272,3 +284,67 @@ def test_failed_write_rolls_back_without_half_record(tmp_path: Path, monkeypatch
     assert len(operations) == 1
     assert operations[0]["state"] == "abort"
     assert operations[0]["target_paths"] == ["memory/skill-evolution/issues.yaml"]
+
+
+def test_config_owner_sets_normalized_diagnostics_in_one_root_transaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _workspace(tmp_path)
+    config = _load_owner_script(
+        ".agents/skills/research-config-manager/scripts/config.py",
+        "d1_config_owner_script",
+    )
+    monkeypatch.setattr(config, "checkpoint_and_report", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "config.py",
+            "--root",
+            str(root),
+            "set-diagnostics",
+            "--mode",
+            "developer",
+            "--skill",
+            "paper-analyst",
+            "--skill-mode",
+            "errors-only",
+            "--token-budget-per-task",
+            "1200",
+            "--max-issues-per-task",
+            "12",
+        ],
+    )
+
+    assert config.main() == 0
+    policy = diagnostics_policy(root, "paper-analyst")
+    raw = load_yaml(root / "kb" / "config" / "runtime-preferences.yaml", default={})
+    assert policy["workspace_mode"] == "developer"
+    assert policy["mode"] == "errors-only"
+    assert policy["token_budget_per_task"] == 1200
+    assert policy["max_issues_per_task"] == 12
+    assert raw["diagnostics"]["local_only"] is True
+    operations = [
+        load_yaml(item, default={})
+        for item in (root / "kb" / ".journal").glob("*.yaml")
+        if load_yaml(item, default={}).get("op_type") == "set-diagnostics"
+    ]
+    assert len(operations) == 1
+    assert operations[0]["state"] == "commit"
+    assert operations[0]["parent_op_id"] == ""
+    assert operations[0]["target_paths"] == ["config/runtime-preferences.yaml"]
+
+
+def test_diagnostics_owner_script_exposes_locked_operations(tmp_path: Path) -> None:
+    root = _workspace(tmp_path)
+    owner = _load_owner_script(
+        ".agents/skills/skill-evolution-advisor/scripts/diagnostics.py",
+        "d1_diagnostics_owner_script",
+    )
+    parser = owner.build_parser()
+
+    assert parser.parse_args(["record", "--category", "skill-defect", "--severity", "low", "--skill", "paper-analyst", "--summary", "safe"]).command == "record"
+    assert parser.parse_args(["capture-runtime-failure", "--skill", "repo-analyst", "--operation", "verify", "--returncode", "2"]).returncode == 2
+    assert parser.parse_args(["review", "--id", "diag-123", "--status", "resolved"]).status == "resolved"
+    assert parser.parse_args(["export-preview", "--authorized"]).authorized is True
