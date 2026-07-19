@@ -44,11 +44,12 @@ def _file_snapshot(root: Path) -> dict[str, bytes]:
 
 def _journal_entries(root: Path, op_type: str) -> list[dict]:
     journal_root = root / "kb" / ".journal"
-    return [
+    entries = [
         entry
         for entry in (load_yaml(path, default={}) for path in journal_root.glob("*.yaml"))
         if entry.get("op_type") == op_type
     ]
+    return sorted(entries, key=lambda entry: int(entry.get("sequence_ns") or 0))
 
 
 def test_concurrent_distinct_logs_keep_ten_unique_ids(tmp_path: Path) -> None:
