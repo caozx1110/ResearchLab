@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -52,12 +53,21 @@ from .records import (
     normalize_record_schema,
     record_summary,
 )
+from .evidence import (
+    confirmation_claims,
+    record_external_source_contract,
+    verification_receipt_violations,
+)
+from .journal import incomplete_ops
+from .git_ops import dirty_kb_paths, kb_repo_exists
 from .prefs import (
     DEFAULT_CANDIDATE_POOLS,
     DEFAULT_TOPIC_TAXONOMY,
     ensure_workspace,
 )
 from .confirm import (
+    confirmation_track,
+    has_complete_confirmation_receipt,
     validate_write,
     write_record,
 )
@@ -78,6 +88,11 @@ STATUS_VALUES = {
 
 
 CONFIRMATION_VALUES = {"auto_confirmed", "pending_user_confirmation", "confirmed", "rejected"}
+
+AUDIT_CATEGORIES = ("schema", "integrity", "recovery", "security", "quality")
+AUDIT_SEVERITIES = ("error", "warning", "info")
+_AUDIT_INTERNAL_DIRS = {".git", ".journal", ".runtime"}
+_AUDIT_GIT_EXCLUDED_PREFIXES = (".journal/", ".runtime/", "raw/", "output/", "user/kb/")
 
 
 def load_topic_taxonomy(project_root: Path) -> dict[str, Any]:
@@ -257,9 +272,9 @@ def _unit_markdown_paths(project_root: Path, record: dict[str, Any]) -> list[Pat
     if kind not in UNIT_KIND_DIRS or not unit_id:
         return []
     root = unit_root(project_root, kind, unit_id)
-    if not root.exists():
+    if not root.is_dir() or root.is_symlink():
         return []
-    paths = sorted({*root.rglob("*.md"), *root.rglob("*.markdown")})
+    paths = _safe_files_below(root, suffixes={".md", ".markdown"})
     return [path for path in paths if "source" not in path.relative_to(root).parts]
 
 
@@ -462,19 +477,73 @@ def build_index(project_root: Path) -> tuple[Path, Path]:
     return yaml_path, md_path
 
 
-def lint_workspace_integrity(project_root: Path) -> list[str]:
+def _safe_files_below(base: Path, *, suffixes: set[str] | None = None) -> list[Path]:
+    """List regular files without ever traversing a symlinked directory."""
+    if not base.is_dir() or base.is_symlink():
+        return []
+    paths: list[Path] = []
+    for current, dirnames, filenames in os.walk(base, topdown=True, followlinks=False):
+        current_path = Path(current)
+        dirnames[:] = sorted(
+            name
+            for name in dirnames
+            if name not in _AUDIT_INTERNAL_DIRS and not (current_path / name).is_symlink()
+        )
+        for name in sorted(filenames):
+            path = current_path / name
+            if path.is_symlink() or not path.is_file():
+                continue
+            if suffixes is None or path.suffix.lower() in suffixes:
+                paths.append(path)
+    return sorted(paths, key=lambda path: path.as_posix())
+
+
+def _safe_record_files(project_root: Path) -> list[Path]:
+    """Return canonical record files without following unit/file symlinks."""
+    paths: list[Path] = []
+    units = kb_root(project_root) / "units"
+    for dirname in UNIT_KIND_DIRS.values():
+        kind_root = units / dirname
+        if not kind_root.is_dir() or kind_root.is_symlink():
+            continue
+        try:
+            entries = sorted(os.scandir(kind_root), key=lambda entry: entry.name)
+        except OSError:
+            continue
+        for entry in entries:
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+            path = Path(entry.path) / "record.yaml"
+            if path.is_symlink() or not path.is_file():
+                continue
+            paths.append(path)
+    return sorted(paths, key=lambda path: path.as_posix())
+
+
+def _safe_lint_records(project_root: Path) -> list[dict[str, Any]]:
+    """Read canonical records while refusing symlinked unit directories/files."""
+    items: list[dict[str, Any]] = []
+    for path in _safe_record_files(project_root):
+        payload = load_yaml(path, default={})
+        if not isinstance(payload, dict):
+            continue
+        try:
+            items.append(normalize_record_schema(payload, project_root=project_root))
+        except SystemExit:
+            items.append(payload)
+    return items
+
+
+def lint_workspace_integrity(project_root: Path, *, records: list[dict[str, Any]] | None = None) -> list[str]:
     issues: list[str] = []
     yaml_paths: list[Path] = []
-    records = iter_records(project_root)
+    records = list(records) if records is not None else _safe_lint_records(project_root)
 
     for record in records:
         yaml_paths.append(record_path(project_root, str(record.get("kind") or ""), str(record.get("id") or "")))
 
     for base in [kb_root(project_root) / "programs", config_root(project_root), synthesis_root(project_root)]:
-        if not base.exists():
-            continue
-        yaml_paths.extend(sorted(base.rglob("*.yaml")))
-        yaml_paths.extend(sorted(base.rglob("*.yml")))
+        yaml_paths.extend(_safe_files_below(base, suffixes={".yaml", ".yml"}))
 
     seen_paths: set[Path] = set()
     for path in yaml_paths:
@@ -497,14 +566,24 @@ def lint_workspace_integrity(project_root: Path) -> list[str]:
             except UnicodeDecodeError:
                 continue
             for target in parse_wikilinks(markdown):
-                if not _wikilink_target_exists(project_root, target, wikilink_ref_keys):
+                if normalize_ref_key(target) not in wikilink_ref_keys:
                     issues.append(f"{rel(project_root, path)}: broken wikilink `{target}`")
 
     programs_root = kb_root(project_root) / "programs"
-    if not programs_root.exists():
+    if not programs_root.is_dir() or programs_root.is_symlink():
         return issues
 
-    for state_file in sorted(programs_root.glob("*/state.yaml")):
+    records_by_id = {
+        str(record.get("id") or ""): record
+        for record in records
+        if str(record.get("id") or "")
+    }
+    state_files = [
+        path
+        for path in _safe_files_below(programs_root, suffixes={".yaml"})
+        if path.name == "state.yaml" and path.parent.parent == programs_root
+    ]
+    for state_file in state_files:
         program_id = state_file.parent.name
         state_payload = load_yaml(state_file, default={})
         if not isinstance(state_payload, dict):
@@ -512,9 +591,8 @@ def lint_workspace_integrity(project_root: Path) -> list[str]:
             continue
         active_unit_ids = _text_list(state_payload.get("active_unit_ids"))
         for unit_id in active_unit_ids:
-            try:
-                record, _ = locate_record(project_root, unit_id, fuzzy=False)
-            except SystemExit:
+            record = records_by_id.get(unit_id)
+            if record is None:
                 issues.append(f"{rel(project_root, state_file)}: active_unit_id `{unit_id}` not found")
                 continue
             if program_id not in _slug_list(record.get("program_ids")):
@@ -539,7 +617,8 @@ def lint_workspace_integrity(project_root: Path) -> list[str]:
 
 def lint_records(project_root: Path) -> tuple[str, list[str]]:
     issues: list[str] = []
-    for raw_record in iter_records(project_root):
+    records = _safe_lint_records(project_root)
+    for raw_record in records:
         try:
             record = normalize_record_schema(raw_record)
         except SystemExit as exc:
@@ -570,8 +649,334 @@ def lint_records(project_root: Path) -> tuple[str, list[str]]:
             issues.append(f"{unit_id}: invalid candidate_pools")
         for violation in validate_write(record):
             issues.append(violation)
-    issues.extend(lint_workspace_integrity(project_root))
+    issues.extend(lint_workspace_integrity(project_root, records=records))
     return ("PASS" if not issues else "FAIL"), issues
+
+
+def _audit_subject(project_root: Path, path: Path) -> str:
+    """Return a lexical, project-relative subject without resolving symlinks."""
+    project = Path(os.path.abspath(project_root))
+    candidate = Path(os.path.abspath(path))
+    try:
+        relative = candidate.relative_to(project)
+    except ValueError:
+        return "kb"
+    if not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+        return "kb"
+    return relative.as_posix()
+
+
+def _audit_finding(
+    code: str,
+    category: str,
+    severity: str,
+    subject: str,
+    message: str,
+) -> dict[str, str]:
+    safe_subject = str(subject or "kb").replace("\\", "/").strip("/") or "kb"
+    if Path(safe_subject).is_absolute() or ".." in Path(safe_subject).parts:
+        safe_subject = "kb"
+    return {
+        "code": str(code),
+        "category": category if category in AUDIT_CATEGORIES else "integrity",
+        "severity": severity if severity in AUDIT_SEVERITIES else "error",
+        "subject": safe_subject,
+        "message": " ".join(str(message).split()),
+    }
+
+
+def _lint_finding(issue: str) -> dict[str, str]:
+    text = str(issue or "")
+    lowered = text.lower()
+    subject = "kb"
+    match = re.match(r"(kb/[A-Za-z0-9._/-]+):", text)
+    if match and ".." not in Path(match.group(1)).parts:
+        subject = match.group(1)
+    if "broken wikilink" in lowered:
+        return _audit_finding(
+            "INTEGRITY_BROKEN_WIKILINK", "integrity", "error", subject,
+            "A Markdown wikilink target is missing.",
+        )
+    if "program" in lowered or "active_unit_id" in lowered or "reverse" in lowered:
+        return _audit_finding(
+            "INTEGRITY_PROGRAM_LINK", "integrity", "error", subject,
+            "Program and unit links are inconsistent.",
+        )
+    if "duplicate" in lowered and "key" in lowered:
+        return _audit_finding(
+            "SCHEMA_DUPLICATE_YAML_KEY", "schema", "error", subject,
+            "A YAML document contains a duplicate key.",
+        )
+    return _audit_finding(
+        "SCHEMA_RECORD_INVALID", "schema", "error", subject,
+        "A record violates the existing schema or lifecycle contract.",
+    )
+
+
+def _symlink_findings(project_root: Path) -> tuple[list[dict[str, str]], bool]:
+    root = kb_root(project_root)
+    findings: list[dict[str, str]] = []
+    if root.is_symlink():
+        raw_target = os.readlink(root)
+        target = Path(raw_target) if Path(raw_target).is_absolute() else root.parent / raw_target
+        lexical_target = Path(os.path.abspath(target))
+        lexical_project = Path(os.path.abspath(project_root))
+        try:
+            lexical_target.relative_to(lexical_project)
+            escapes = False
+        except ValueError:
+            escapes = True
+        if escapes:
+            findings.append(_audit_finding(
+                "SECURITY_SYMLINK_ESCAPE", "security", "error", "kb",
+                "A KB symlink resolves outside the workspace boundary.",
+            ))
+        return findings, True
+    if not root.is_dir():
+        return findings, False
+
+    lexical_root = Path(os.path.abspath(root))
+    for current, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
+        current_path = Path(current)
+        candidates = sorted(set(dirnames + filenames))
+        for name in candidates:
+            path = current_path / name
+            if not path.is_symlink():
+                continue
+            raw_target = os.readlink(path)
+            target = Path(raw_target) if Path(raw_target).is_absolute() else path.parent / raw_target
+            lexical_target = Path(os.path.abspath(target))
+            try:
+                lexical_target.relative_to(lexical_root)
+            except ValueError:
+                findings.append(_audit_finding(
+                    "SECURITY_SYMLINK_ESCAPE", "security", "error",
+                    _audit_subject(project_root, path),
+                    "A KB symlink resolves outside the KB boundary.",
+                ))
+        dirnames[:] = sorted(
+            name
+            for name in dirnames
+            if name not in _AUDIT_INTERNAL_DIRS and not (current_path / name).is_symlink()
+        )
+    return findings, False
+
+
+def _record_audit_entries(project_root: Path) -> list[tuple[Path, dict[str, Any]]]:
+    entries: list[tuple[Path, dict[str, Any]]] = []
+    for path in _safe_record_files(project_root):
+        payload = load_yaml(path, default={})
+        if isinstance(payload, dict):
+            entries.append((path, payload))
+    return entries
+
+
+def _binding_findings(
+    project_root: Path,
+    entries: list[tuple[Path, dict[str, Any]]],
+) -> list[dict[str, str]]:
+    findings: list[dict[str, str]] = []
+    roots_by_id = {
+        str(record.get("id") or ""): path.parent
+        for path, record in entries
+        if str(record.get("id") or "")
+    }
+    for path, record in entries:
+        payload = record.get("payload")
+        payload = payload if isinstance(payload, dict) else {}
+        verification = payload.get("verification")
+        has_verification = isinstance(verification, dict)
+        violations: list[str] = []
+        if has_verification:
+            violations = verification_receipt_violations(
+                record,
+                path.parent,
+                external_source=record_external_source_contract(record),
+                source_roots=roots_by_id,
+                check_artifacts=True,
+            )
+            if verification.get("invalidation") and not violations:
+                violations = ["verification receipt is marked invalid"]
+            if violations:
+                findings.append(_audit_finding(
+                    "INTEGRITY_VERIFICATION_BINDING_STALE", "integrity", "error",
+                    _audit_subject(project_root, path),
+                    "The stored verification receipt is missing, invalid, or stale.",
+                ))
+        if str(record.get("confirmation_status") or "") == "confirmed":
+            confirmation_invalid = not has_complete_confirmation_receipt(record)
+            if confirmation_track(record) == "judgement" and violations:
+                confirmation_invalid = True
+            if confirmation_invalid:
+                findings.append(_audit_finding(
+                    "INTEGRITY_CONFIRMATION_BINDING_INVALID", "integrity", "error",
+                    _audit_subject(project_root, path),
+                    "The current confirmation is not bound to current verified content.",
+                ))
+    return findings
+
+
+def _recovery_findings(project_root: Path) -> list[dict[str, str]]:
+    findings: list[dict[str, str]] = []
+    for entry in incomplete_ops(project_root):
+        op_id = str(entry.get("op_id") or "")
+        safe_op_id = op_id if re.fullmatch(r"[A-Za-z0-9._-]+", op_id) else "incomplete-operation"
+        findings.append(_audit_finding(
+            "RECOVERY_INCOMPLETE_OPERATION", "recovery", "error",
+            f"kb/.journal/{safe_op_id}.yaml",
+            "An operation journal entry is incomplete and requires recovery.",
+        ))
+
+    if kb_repo_exists(project_root):
+        try:
+            dirty_paths = dirty_kb_paths(project_root)
+        except SystemExit:
+            findings.append(_audit_finding(
+                "RECOVERY_GIT_INSPECTION_FAILED", "recovery", "error", "kb",
+                "The nested KB Git state could not be inspected safely.",
+            ))
+        else:
+            kb = kb_root(project_root)
+            for path in dirty_paths:
+                try:
+                    relative = path.relative_to(kb).as_posix()
+                except ValueError:
+                    continue
+                if relative == ".DS_Store" or any(
+                    relative == prefix.rstrip("/") or relative.startswith(prefix)
+                    for prefix in _AUDIT_GIT_EXCLUDED_PREFIXES
+                ):
+                    continue
+                findings.append(_audit_finding(
+                    "RECOVERY_DIRTY_PRODUCT_FILE", "recovery", "warning",
+                    _audit_subject(project_root, path),
+                    "A product-owned KB file has uncheckpointed Git changes.",
+                ))
+    return findings
+
+
+def _paper_quality_findings(
+    project_root: Path,
+    entries: list[tuple[Path, dict[str, Any]]],
+) -> list[dict[str, str]]:
+    findings: list[dict[str, str]] = []
+    for path, record in entries:
+        if str(record.get("kind") or "") != "paper" or str(record.get("maturity") or "") != "complete":
+            continue
+        payload = record.get("payload")
+        payload = payload if isinstance(payload, dict) else {}
+        basic = payload.get("basic_info")
+        basic = basic if isinstance(basic, dict) else {}
+        missing = [
+            field
+            for field in ("authors", "year", "abstract")
+            if basic.get(field) in (None, "", [], {})
+        ]
+        if missing:
+            findings.append(_audit_finding(
+                "QUALITY_PAPER_METADATA_MISSING", "quality", "warning",
+                _audit_subject(project_root, path),
+                "Complete paper analysis is missing metadata fields: " + ", ".join(missing) + ".",
+            ))
+
+        taxonomy = record.get("taxonomy")
+        taxonomy = taxonomy if isinstance(taxonomy, dict) else {}
+        topics = set(_slug_list(record.get("topics")))
+        topics.update(_slug_list(taxonomy.get("secondary_topics")))
+        primary = str(taxonomy.get("primary_topic") or "").strip()
+        if primary:
+            topics.add(primary)
+        tags = set(_slug_list(record.get("tags")))
+        tags.update(_slug_list(taxonomy.get("canonical_tags")))
+        if topics.issubset({"uncategorized"}) and tags.issubset({"research"}):
+            findings.append(_audit_finding(
+                "QUALITY_PAPER_TAXONOMY_DEFAULT", "quality", "warning",
+                _audit_subject(project_root, path),
+                "Complete paper analysis still has only default or empty taxonomy metadata.",
+            ))
+    return findings
+
+
+def _figure_quality_findings(project_root: Path) -> list[dict[str, str]]:
+    findings: list[dict[str, str]] = []
+    paper_root = kb_root(project_root) / "units" / UNIT_KIND_DIRS["paper"]
+    for path in _safe_files_below(paper_root, suffixes={".yaml", ".yml"}):
+        if path.name != "figures.yaml":
+            continue
+        payload = load_yaml(path, default={})
+        if not isinstance(payload, dict):
+            continue
+        candidates = payload.get("candidate_figures")
+        if not isinstance(candidates, list):
+            continue
+        identities: list[str] = []
+        suspicious = False
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("label") or "").strip().lower()
+            identity = str(item.get("figure") or item.get("id") or "").strip().lower()
+            if not identity and label:
+                identity = f"{str(item.get('kind') or 'figure').strip().lower()}:{label}"
+            if identity:
+                identities.append(identity)
+            if re.fullmatch(r"[a-z]{2,}", label):
+                suspicious = True
+        if len(identities) != len(set(identities)):
+            findings.append(_audit_finding(
+                "QUALITY_FIGURE_DUPLICATE_IDENTITY", "quality", "warning",
+                _audit_subject(project_root, path),
+                "Figure candidates contain duplicate identities.",
+            ))
+        if suspicious:
+            findings.append(_audit_finding(
+                "QUALITY_FIGURE_SUSPICIOUS_LABEL", "quality", "warning",
+                _audit_subject(project_root, path),
+                "Figure candidates contain a suspicious multi-letter nonnumeric label.",
+            ))
+    return findings
+
+
+def _audit_counts(findings: list[dict[str, str]]) -> dict[str, int]:
+    counts = {"total": len(findings)}
+    counts.update({severity: 0 for severity in AUDIT_SEVERITIES})
+    counts.update({category: 0 for category in AUDIT_CATEGORIES})
+    for finding in findings:
+        counts[finding["severity"]] += 1
+        counts[finding["category"]] += 1
+    return counts
+
+
+def audit_workspace(project_root: Path) -> dict[str, Any]:
+    """Run deterministic, layered, byte-read-only mechanical KB health checks."""
+    root = Path(project_root)
+    findings, unsafe_root = _symlink_findings(root)
+    if not unsafe_root:
+        _, lint_issues = lint_records(root)
+        findings.extend(_lint_finding(issue) for issue in lint_issues)
+        entries = _record_audit_entries(root)
+        findings.extend(_binding_findings(root, entries))
+        findings.extend(_recovery_findings(root))
+        findings.extend(_paper_quality_findings(root, entries))
+        findings.extend(_figure_quality_findings(root))
+
+    unique = {
+        (item["code"], item["category"], item["severity"], item["subject"], item["message"]): item
+        for item in findings
+    }
+    stable = sorted(
+        unique.values(),
+        key=lambda item: (
+            AUDIT_CATEGORIES.index(item["category"]),
+            AUDIT_SEVERITIES.index(item["severity"]),
+            item["code"],
+            item["subject"],
+            item["message"],
+        ),
+    )
+    counts = _audit_counts(stable)
+    status = "FAIL" if counts["error"] else ("WARN" if stable else "PASS")
+    return {"status": status, "counts": counts, "findings": stable}
 
 
 def search_records(
@@ -811,6 +1216,7 @@ __all__ = [
     "build_index",
     "lint_workspace_integrity",
     "lint_records",
+    "audit_workspace",
     "search_records",
     "govern_records",
     "_sorted_id_pairs",
