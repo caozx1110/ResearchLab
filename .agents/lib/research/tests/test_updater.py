@@ -61,6 +61,8 @@ def test_check_reports_available_equal_and_unknown(monkeypatch, tmp_path: Path) 
 def test_resolve_source_checkout_uses_manifest_checkout(tmp_path: Path) -> None:
     source = tmp_path / "source"
     (source / ".git").mkdir(parents=True)
+    (source / "install-lib").mkdir()
+    (source / "install-lib" / "ws_sync.py").write_text("", encoding="utf-8")
     install = tmp_path / "install"
     manifest = install / updater.MANIFEST_REL
     manifest.parent.mkdir(parents=True)
@@ -145,6 +147,8 @@ def test_apply_copy_install_invokes_ws_sync_update_without_force(monkeypatch, tm
         "git@example.test:team/fork.git",
         "--source-branch",
         "release/r1",
+        "--source-strategy",
+        "remote-branch",
         "--source-checkout",
         str(source),
     )
@@ -352,9 +356,10 @@ def test_non_main_fork_update_preserves_branch_and_updates_manifest_e2e(tmp_path
     assert updated_manifest["source_commit"] == release_commit
 
 
-def test_local_provenance_uses_local_checkout_without_fetch_or_pull(monkeypatch, tmp_path: Path) -> None:
+def test_local_checkout_strategy_with_remote_origin_never_uses_network(monkeypatch, tmp_path: Path) -> None:
     install = tmp_path / "install"
     source = tmp_path / "local-source"
+    (source / ".git").mkdir(parents=True)
     (source / "install-lib").mkdir(parents=True)
     (source / "install-lib" / "ws_sync.py").write_text("", encoding="utf-8")
     (source / ".agents").mkdir()
@@ -362,17 +367,221 @@ def test_local_provenance_uses_local_checkout_without_fetch_or_pull(monkeypatch,
     (install / ".agents").mkdir(parents=True)
     (install / ".agents" / "VERSION").write_text("0.1.0\n", encoding="utf-8")
     (install / updater.MANIFEST_REL).write_text(
-        json.dumps({"source_origin": "local", "source_checkout": str(source)}),
+        json.dumps(
+            {
+                "source_origin": "ssh://example.test/team/workspace-oss.git",
+                "source_checkout": str(source),
+                "source_branch": "feature/unpushed",
+                "source_strategy": "local-checkout",
+            }
+        ),
+        encoding="utf-8",
+    )
+    for name in ("_fetch_checkout", "_pull_checkout", "_clone_checkout"):
+        monkeypatch.setattr(
+            updater,
+            name,
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("local-checkout strategy must not use the network")
+            ),
+        )
+    monkeypatch.setattr(updater, "_checkout_branch", lambda _checkout: "feature/unpushed")
+    monkeypatch.setattr(
+        updater,
+        "_checkout_origin",
+        lambda _checkout: "ssh://example.test/team/workspace-oss.git",
+    )
+    monkeypatch.setattr(updater, "_source_commit", lambda _checkout: "local-only-commit")
+    synced: list[updater.SourceProvenance] = []
+
+    def fake_sync(_source: Path, _install: Path, _commit: str, provenance: updater.SourceProvenance) -> None:
+        synced.append(provenance)
+        (install / ".agents" / "VERSION").write_text("0.2.0\n", encoding="utf-8")
+
+    monkeypatch.setattr(updater, "_invoke_ws_sync", fake_sync)
+
+    checked = updater.check(install, tmp_path / "cache")
+    applied = updater.apply(install, tmp_path / "cache")
+
+    assert checked["status"] == "update_available"
+    assert checked["source_origin"] == "ssh://example.test/team/workspace-oss.git"
+    assert applied == {"before": "0.1.0", "after": "0.2.0", "status": "updated"}
+    assert len(synced) == 1
+    assert synced[0].strategy == "local-checkout"
+    assert synced[0].checkout == source
+
+
+@pytest.mark.parametrize(
+    ("recorded_branch", "current_branch"),
+    [
+        pytest.param("feature/local", "", id="detached"),
+        pytest.param("feature/local", "feature/other", id="switched"),
+        pytest.param("", "", id="missing-recorded-branch"),
+    ],
+)
+def test_remote_origin_local_checkout_requires_matching_symbolic_branch(
+    monkeypatch,
+    tmp_path: Path,
+    recorded_branch: str,
+    current_branch: str,
+) -> None:
+    install = tmp_path / "install"
+    source = tmp_path / "source"
+    (source / ".git").mkdir(parents=True)
+    (source / "install-lib").mkdir()
+    (source / "install-lib" / "ws_sync.py").write_text("", encoding="utf-8")
+    (source / ".agents").mkdir()
+    (source / ".agents" / "VERSION").write_text("0.2.0\n", encoding="utf-8")
+    (install / ".agents").mkdir(parents=True)
+    (install / ".agents" / "VERSION").write_text("0.1.0\n", encoding="utf-8")
+    (install / updater.MANIFEST_REL).write_text(
+        json.dumps(
+            {
+                "source_origin": "ssh://example.test/team/workspace-oss.git",
+                "source_checkout": str(source),
+                "source_branch": recorded_branch,
+                "source_strategy": "local-checkout",
+            }
+        ),
         encoding="utf-8",
     )
     monkeypatch.setattr(
         updater,
-        "_run_git",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("local source must not use git network operations")),
+        "_checkout_origin",
+        lambda _checkout: "ssh://example.test/team/workspace-oss.git",
     )
-    monkeypatch.setattr(updater, "_invoke_ws_sync", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(updater, "_checkout_branch", lambda _checkout: current_branch)
+    for name in ("_fetch_checkout", "_pull_checkout", "_clone_checkout"):
+        monkeypatch.setattr(
+            updater,
+            name,
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("branch gate must not use network")),
+        )
 
-    result = updater.check(install, tmp_path / "cache")
+    assert updater.check(install, tmp_path / "cache")["status"] == "needs_source_choice"
+    assert updater.apply(install, tmp_path / "cache")["status"] == "needs_source_choice"
 
-    assert result["status"] == "update_available"
-    assert result["source_origin"] == "local"
+
+def test_remote_origin_local_checkout_rejects_origin_change_without_network(monkeypatch, tmp_path: Path) -> None:
+    install = tmp_path / "install"
+    source = tmp_path / "source"
+    (source / ".git").mkdir(parents=True)
+    (source / "install-lib").mkdir()
+    (source / "install-lib" / "ws_sync.py").write_text("", encoding="utf-8")
+    (source / ".agents").mkdir()
+    (source / ".agents" / "VERSION").write_text("0.2.0\n", encoding="utf-8")
+    (install / ".agents").mkdir(parents=True)
+    (install / ".agents" / "VERSION").write_text("0.1.0\n", encoding="utf-8")
+    (install / updater.MANIFEST_REL).write_text(
+        json.dumps(
+            {
+                "source_origin": "ssh://example.test/team/workspace-oss.git",
+                "source_checkout": str(source),
+                "source_branch": "feature/local",
+                "source_strategy": "local-checkout",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(updater, "_checkout_origin", lambda _checkout: "ssh://example.test/team/other.git")
+    monkeypatch.setattr(updater, "_checkout_branch", lambda _checkout: "feature/local")
+    for name in ("_fetch_checkout", "_pull_checkout", "_clone_checkout"):
+        monkeypatch.setattr(
+            updater,
+            name,
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("origin gate must not use network")),
+        )
+
+    assert updater.check(install, tmp_path / "cache")["status"] == "needs_source_choice"
+    assert updater.apply(install, tmp_path / "cache")["status"] == "needs_source_choice"
+
+
+@pytest.mark.parametrize("checkout_state", ["missing", "invalid"])
+def test_invalid_local_checkout_requires_choice_without_remote_fallback(
+    monkeypatch,
+    tmp_path: Path,
+    checkout_state: str,
+) -> None:
+    install = tmp_path / "install"
+    source = tmp_path / "recorded-source"
+    if checkout_state == "invalid":
+        source.mkdir()
+    (install / ".agents").mkdir(parents=True)
+    (install / ".agents" / "VERSION").write_text("0.1.0\n", encoding="utf-8")
+    (install / updater.MANIFEST_REL).write_text(
+        json.dumps(
+            {
+                "source_origin": "ssh://example.test/team/workspace-oss.git",
+                "source_checkout": str(source),
+                "source_branch": "release/r1",
+                "source_strategy": "local-checkout",
+            }
+        ),
+        encoding="utf-8",
+    )
+    for name in ("_fetch_checkout", "_pull_checkout", "_clone_checkout"):
+        monkeypatch.setattr(
+            updater,
+            name,
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not fall back to remote")),
+        )
+
+    assert updater.check(install, tmp_path / "cache")["status"] == "needs_source_choice"
+    assert updater.apply(install, tmp_path / "cache")["status"] == "needs_source_choice"
+
+
+def test_unknown_source_strategy_fails_closed(monkeypatch, tmp_path: Path) -> None:
+    install = tmp_path / "install"
+    source = tmp_path / "source"
+    (source / "install-lib").mkdir(parents=True)
+    (source / "install-lib" / "ws_sync.py").write_text("", encoding="utf-8")
+    (install / ".agents").mkdir(parents=True)
+    (install / ".agents" / "VERSION").write_text("0.1.0\n", encoding="utf-8")
+    (install / updater.MANIFEST_REL).write_text(
+        json.dumps(
+            {
+                "source_origin": "ssh://example.test/team/workspace-oss.git",
+                "source_checkout": str(source),
+                "source_branch": "release/r1",
+                "source_strategy": "guess-from-origin",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        updater,
+        "_clone_checkout",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unknown strategy must not clone")),
+    )
+
+    assert updater.check(install, tmp_path / "cache")["status"] == "needs_source_choice"
+    assert updater.apply(install, tmp_path / "cache")["status"] == "needs_source_choice"
+
+
+def test_linked_worktree_marker_is_accepted_for_local_checkout(tmp_path: Path) -> None:
+    install = tmp_path / "install"
+    source = tmp_path / "linked-source"
+    source.mkdir()
+    (source / ".git").write_text("gitdir: /tmp/example-worktree-metadata\n", encoding="utf-8")
+    (source / "install-lib").mkdir()
+    (source / "install-lib" / "ws_sync.py").write_text("", encoding="utf-8")
+    manifest = install / updater.MANIFEST_REL
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(
+        json.dumps(
+            {
+                "source_origin": "ssh://example.test/team/workspace-oss.git",
+                "source_checkout": str(source),
+                "source_branch": "feature/linked",
+                "source_strategy": "local-checkout",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    provenance = updater.source_provenance(install)
+
+    assert updater.is_git_checkout(source)
+    assert provenance is not None
+    assert provenance.checkout == source
+    assert provenance.strategy == "local-checkout"
