@@ -214,6 +214,44 @@ def test_evaluator_no_write_is_byte_identical_on_fresh_root(tmp_path: Path, monk
     assert not root.exists()
 
 
+def test_evaluator_same_timestamp_preserves_both_reports_and_undoes_only_last(tmp_path: Path, monkeypatch) -> None:
+    module = _load(".agents/skills/skill-evolution-advisor/scripts/eval_research_value.py", "r1_eval_collision")
+    root = tmp_path / "workspace"
+    _workspace(root)
+
+    class FixedDateTime:
+        @classmethod
+        def now(cls, tz=None):
+            value = RealDateTime.fromisoformat("2026-07-19T12:00:00+00:00")
+            return value if tz is None else value.astimezone(tz)
+
+    monkeypatch.setattr(module, "datetime", FixedDateTime)
+    monkeypatch.setattr(
+        module,
+        "evaluate",
+        lambda _root, program: {"questions": [{"program_id": program or "all"}]},
+    )
+    monkeypatch.setattr(module, "render_report", lambda _root, _result, meta: f"report for {meta['programs'][0]}\n")
+    monkeypatch.setattr(module, "probe_pdf_backends", lambda: {})
+    monkeypatch.setattr(module, "git_short_head", lambda path: "test")
+
+    _argv(monkeypatch, "eval.py", "--root", str(root), "--program", "alpha")
+    assert module.main() == 0
+    _argv(monkeypatch, "eval.py", "--root", str(root), "--program", "beta")
+    assert module.main() == 0
+
+    report_dir = root / "kb/eval/research-value/reports"
+    first = report_dir / "20260719T120000Z-tier1.md"
+    second = report_dir / "20260719T120000Z-tier1-2.md"
+    assert first.read_text(encoding="utf-8") == "report for alpha\n"
+    assert second.read_text(encoding="utf-8") == "report for beta\n"
+
+    undo_last_operation(root)
+
+    assert first.read_text(encoding="utf-8") == "report for alpha\n"
+    assert not second.exists()
+
+
 def test_single_file_prepare_is_undoable(tmp_path: Path, monkeypatch) -> None:
     module = _load(".agents/skills/literature-synthesizer/scripts/synthesize.py", "r1_synth_undo")
     root = tmp_path / "workspace"

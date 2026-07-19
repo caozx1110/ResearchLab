@@ -267,6 +267,18 @@ def git_short_head(repo: Path) -> str:
         return "n/a"
 
 
+def next_available_report_path(report_dir: Path, stamp: str) -> Path:
+    path = report_dir / f"{stamp}-tier1.md"
+    if not path.exists():
+        return path
+    index = 2
+    while True:
+        candidate = report_dir / f"{stamp}-tier1-{index}.md"
+        if not candidate.exists():
+            return candidate
+        index += 1
+
+
 # ---------------------------------------------------------------------------
 # Evaluation
 # ---------------------------------------------------------------------------
@@ -669,8 +681,8 @@ def main() -> int:
     if not args.no_write:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         report_dir = root / REPORT_DIRNAME
-        report_path = report_dir / f"{stamp}-tier1.md"
-        with mutation_transaction(root, "write-research-value-report", [report_path]):
+        with mutation_transaction(root, "write-research-value-report", [report_dir]):
+            report_path = next_available_report_path(report_dir, stamp)
             write_text_if_changed(report_path, report)
         print(f"[ok] wrote report: {report_path.relative_to(root)}",
               file=sys.stderr if args.json else sys.stdout)
