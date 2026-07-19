@@ -454,7 +454,7 @@ topics:
 
 ### skill-evolution/issues.yaml <a id="diagnostic-issues-yaml"></a>
 
-落在 `kb/memory/skill-evolution/issues.yaml`，由 `skill-evolution-advisor` 独占写入。它是本地、脱敏、结构化的运行问题真源，不是 telemetry，也不自动修改 skill、roadmap 或知识内容。显式用户记录不受自动模式 `off` 限制；自动 runtime 捕获必须先通过 effective policy。
+落在 `kb/memory/skill-evolution/issues.yaml`，由 `skill-evolution-advisor` 独占写入。它是本地、脱敏、结构化的运行问题真源，不是 telemetry，也不自动修改 skill、roadmap 或知识内容。显式用户记录不受自动模式 `off` 限制；自动 runtime 捕获必须先通过 effective policy。自由文本字段必须确定性移除绝对路径、邮箱、键值型 secret、常见独立 credential 形状、环境变量值与 traceback；`context` 只保留不可逆摘要。
 
 ```yaml
 schema_version: 1

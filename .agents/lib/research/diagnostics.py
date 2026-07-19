@@ -42,6 +42,16 @@ _SECRET_RE = re.compile(
     r"(?i)\b(api[-_ ]?key|access[-_ ]?token|token|auth(?:orization)?|password|passwd|secret|bearer)"
     r"\s*[:= ]\s*[^\s,;]+"
 )
+_EMAIL_RE = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
+_STANDALONE_CREDENTIAL_RE = re.compile(
+    r"(?i)(?<![A-Za-z0-9])(?:"
+    r"sk-[A-Za-z0-9][A-Za-z0-9_-]{9,}|"
+    r"github_pat_[A-Za-z0-9_]{15,}|"
+    r"gh[pousr]_[A-Za-z0-9]{15,}|"
+    r"xox[baprs]-[A-Za-z0-9-]{10,}|"
+    r"AKIA[0-9A-Z]{16}"
+    r")(?![A-Za-z0-9])"
+)
 _ENV_ASSIGNMENT_RE = re.compile(r"\b[A-Z_][A-Z0-9_]{1,63}=\S+")
 _URL_CREDENTIAL_RE = re.compile(r"(?i)(https?://)[^/@\s:]+:[^/@\s]+@")
 _SAFE_IDENTIFIER_RE = re.compile(r"[^a-z0-9_.-]+")
@@ -134,7 +144,9 @@ def redact_diagnostic_text(value: str, *, limit: int = 500) -> str:
     text = _TRACEBACK_RE.sub("<traceback-redacted>", text)
     text = _FILE_FRAME_RE.sub("file <path>", text)
     text = _URL_CREDENTIAL_RE.sub(r"\1<credentials-redacted>@", text)
+    text = _EMAIL_RE.sub("<email-redacted>", text)
     text = _SECRET_RE.sub(lambda match: f"{match.group(1).lower().replace(' ', '-')}:<secret-redacted>", text)
+    text = _STANDALONE_CREDENTIAL_RE.sub("<credential-redacted>", text)
     text = _ENV_ASSIGNMENT_RE.sub("<env-redacted>", text)
     text = _WINDOWS_PATH_RE.sub("<path>", text)
     text = _POSIX_PATH_RE.sub("<path>", text)

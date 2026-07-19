@@ -165,7 +165,10 @@ def test_redaction_removes_paths_secrets_env_tracebacks_and_control_text(tmp_pat
         "Traceback (most recent call last):\n"
         '  File "/Users/alice/private/paper.py", line 9\n'
         "RuntimeError: failed /Users/alice/private/data.pdf "
-        "API_KEY=sk-live-secret password=hunter2 HOME=/Users/alice \x1b[31mred\x1b[0m\u202e"
+        "API_KEY=sk-live-secret password=hunter2 HOME=/Users/alice "
+        "contact=alice@example.com standalone=sk-test-ABCD1234567890 "
+        "github_pat_ABCDEF1234567890 xoxb-1234567890-abcdefghij "
+        "AKIAABCDEFGHIJKLMNOP \x1b[31mred\x1b[0m\u202e"
     )
 
     issue, _ = _record(
@@ -184,6 +187,11 @@ def test_redaction_removes_paths_secrets_env_tracebacks_and_control_text(tmp_pat
         "sk-live-secret",
         "hunter2",
         "top-secret",
+        "alice@example.com",
+        "sk-test-abcd1234567890",
+        "github_pat_abcdef1234567890",
+        "xoxb-1234567890-abcdefghij",
+        "akiaabcdefghijklmnop",
         "traceback (most",
         "alice",
         "evidence.txt",
@@ -191,6 +199,8 @@ def test_redaction_removes_paths_secrets_env_tracebacks_and_control_text(tmp_pat
         assert forbidden not in lowered
     assert "<path>" in serialized
     assert "<secret-redacted>" in serialized
+    assert "<email-redacted>" in serialized
+    assert "<credential-redacted>" in serialized
     assert "<env-redacted>" in serialized
     assert "\x1b" not in serialized
     assert "\u202e" not in serialized
