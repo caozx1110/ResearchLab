@@ -25,7 +25,6 @@ from research.git_ops import (
 from research.common import (
     append_program_reporting_event,
     current_runtime_capabilities,
-    exclusive_file_lock,
     inspect_python_runtime,
     program_reporting_events_path,
 )
@@ -251,11 +250,9 @@ def test_same_thread_outer_transaction_can_reenter_write_record_lock(tmp_path: P
     record = default_record("blog", title="Nested Transaction", maturity="lightweight")
     record["id"] = "b-nested-transaction"
     path = tmp_path / "kb" / "units" / "blogs" / record["id"] / "record.yaml"
-    lock_path = operation_lock_path(tmp_path, path)
 
-    with exclusive_file_lock(lock_path):
-        with journaled_op(tmp_path, "outer-governance-mutation", [path]):
-            written = write_record(tmp_path, record)
+    with mutation_transaction(tmp_path, "outer-governance-mutation", [path]):
+        written = write_record(tmp_path, record)
 
     assert written == path
     assert load_yaml(path)["revision"] == 1
