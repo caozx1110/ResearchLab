@@ -1050,30 +1050,32 @@ ws_sync() {
   if [ "$FORCE" -eq 1 ]; then
     args+=("--force")
   fi
-  if output=$(python3 "$REPO_ROOT/install-lib/ws_sync.py" "${args[@]}" "$@"); then
+  if output=$(python3 "$REPO_ROOT/install-lib/ws_sync.py" "${args[@]}" "$@" 2>&1); then
     if [ "$action" = "update" ]; then
       case "$output" in
         *"clean-sync: no changes; manifest unchanged"*) UPDATE_NO_CHANGES=1 ;;
       esac
     fi
-    if [ "$WIZARD_MODE" -eq 1 ] || { is_interactive_input && [ "$DRY_RUN" -eq 0 ] && [ "$action" != "update" ]; }; then
-      if [ "$DRY_RUN" -eq 1 ]; then
-        change_count=$(printf '%s\n' "$output" | awk '/^\[dry-run\]/ { count += 1 } END { print count + 0 }')
-        bullet "底层文件操作：$change_count 项（详细路径已折叠）"
-      else
-        case "$action" in
-          install) info "工作区文件已准备。" ;;
-          reinstall) info "工作区文件已重新安装。" ;;
-          uninstall) info "安装器管理的工作区文件已移除。" ;;
-        esac
-      fi
-      return 0
+    case "$output" in
+      *"warn:"*)
+        warn "检测到用户修改并按安全策略保留，请让 Agent 检查。"
+        INSTALL_INCOMPLETE=1
+        ;;
+    esac
+    if [ "$DRY_RUN" -eq 1 ]; then
+      change_count=$(printf '%s\n' "$output" | awk '/^\[dry-run\]/ { count += 1 } END { print count + 0 }')
+      bullet "底层文件操作：$change_count 项（详细路径已折叠）"
+    else
+      case "$action" in
+        install) info "工作区文件已准备。" ;;
+        reinstall) info "工作区文件已重新安装。" ;;
+        uninstall) info "安装器管理的工作区文件已移除。" ;;
+      esac
     fi
-    [ -z "$output" ] || printf '%s\n' "$output"
     return 0
   else
     status=$?
-    [ -z "$output" ] || printf '%s\n' "$output"
+    fail "工作区文件操作失败，请让 Agent 检查后重试。" >&2
     return "$status"
   fi
 }
