@@ -1122,6 +1122,52 @@ def test_kb_next_keeps_program_work_when_all_units_are_rejected(
     assert "知识库还是空的" not in output
 
 
+def test_kb_next_keeps_live_program_with_loose_prefix_that_collides_with_rejected_id(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    kb = _load_kb_cli()
+    rejected_id = "b-rejected-123456"
+    live_item = {
+        "program_id": f"loose:{rejected_id}",
+        "record_id": "",
+        "step_type": "program-work",
+        "next_action": "Review program stage and next actions.",
+    }
+    monkeypatch.setattr(
+        kb,
+        "iter_records",
+        lambda root: [
+            {
+                "id": rejected_id,
+                "kind": "blog",
+                "title": "Rejected Blog",
+                "confirmation_status": "rejected",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        kb,
+        "forward_command",
+        lambda root, relative_script, args, *, stream=True: kb.CommandResult(
+            (relative_script, *args), 0, json.dumps({"has_records": True, "items": [live_item]})
+        ),
+    )
+
+    assert kb.main(["--root", str(tmp_path), "--agent-protocol", "next-collision.json", "next"]) == 0
+
+    output = capsys.readouterr().out
+    assert "研究计划「名称需由 Agent 安全解释」" in output
+    assert "需要检查当前研究阶段并确定下一步" in output
+    assert "loose:" not in output
+    protocol = json.loads((tmp_path / "kb" / ".runtime" / "next-collision.json").read_text(encoding="utf-8"))
+    assert protocol["status"] == "agent_action_required"
+    assert protocol["details"]["items"] == [live_item]
+    assert protocol["details"]["item_count"] == 1
+    assert protocol["details"]["has_records"] is False
+
+
 def test_kb_next_sanitizes_dynamic_subject_and_reason(monkeypatch, tmp_path: Path, capsys) -> None:
     kb = _load_kb_cli()
     payload = {

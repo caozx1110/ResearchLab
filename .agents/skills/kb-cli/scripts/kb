@@ -771,12 +771,19 @@ def _next_item_needs_human(item: dict[str, object]) -> bool:
     return str(item.get("step_type") or "") == "human-decision"
 
 
+_NEXT_LOOSE_UNIT_STEP_TYPES = frozenset(
+    {"agent-fill", "agent-verify", "generate-note", "human-decision", "refresh", "screen"}
+)
+
+
 def _next_item_record_id(item: Mapping[str, object]) -> str:
-    record_id = str(item.get("record_id") or "")
-    if record_id:
-        return record_id
+    """Return identity only for an explicit synthetic loose-unit item."""
+    record_id = str(item.get("record_id") or "").strip()
     program_id = str(item.get("program_id") or "")
-    return program_id.split(":", 1)[-1] if program_id.startswith("loose:") else ""
+    step_type = str(item.get("step_type") or "")
+    if record_id and program_id.startswith("loose:") and step_type in _NEXT_LOOSE_UNIT_STEP_TYPES:
+        return record_id
+    return ""
 
 
 def _next_public_reason(item: dict[str, object], root: Path) -> str:
@@ -833,14 +840,18 @@ def _print_next_items(items: list[dict[str, object]], *, has_records: bool, root
     print("接下来最值得推进的是：")
     for item in items:
         program_id = str(item.get("program_id") or "")
-        if program_id.startswith("loose:"):
-            record_id = str(item.get("record_id") or program_id.split(":", 1)[-1])
+        record_id = _next_item_record_id(item)
+        if record_id:
             title = str(item.get("title") or item.get("goal") or record_id)
             public_record_id = _public_display_text(record_id, root, "编号已隐藏", 100)
             public_title = _public_display_text(title, root, "标题需由 Agent 安全解释", 160)
             subject = f"资料「{public_title}」（{public_record_id}）"
         else:
-            public_program = _public_display_text(program_id, root, "名称需由 Agent 安全解释", 100)
+            public_program = (
+                "名称需由 Agent 安全解释"
+                if "loose:" in program_id.casefold()
+                else _public_display_text(program_id, root, "名称需由 Agent 安全解释", 100)
+            )
             subject = f"研究计划「{public_program}」"
         print(f"- {subject}：{_next_public_reason(item, root)}")
     if any(_next_item_needs_human(item) for item in items):
@@ -872,7 +883,8 @@ def handle_next(args: argparse.Namespace, root: Path) -> int:
     has_records = bool(payload.get("has_records")) if isinstance(payload, dict) else False
     workspace_records = iter_records(root)
     rejected_records = [record for record in workspace_records if _record_is_rejected(record)]
-    rejected_ids = {str(record.get("id") or "") for record in rejected_records}
+    rejected_ids = {str(record.get("id") or "").strip() for record in rejected_records}
+    rejected_ids.discard("")
     if rejected_records:
         active_records = [record for record in workspace_records if not _record_is_rejected(record)]
         has_records = bool(active_records)
