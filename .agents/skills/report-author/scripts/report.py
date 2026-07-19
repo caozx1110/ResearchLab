@@ -38,6 +38,8 @@ CONCISE_DECISION_LIMIT = 3
 CONCISE_SOURCE_LIMIT = 3
 CONCISE_CLAIM_LIMIT = 3
 CONCISE_EVENT_LIMIT = 5
+JUDGEMENT_INFORMATION_TYPES = {"inference", "evaluation", "user_opinion", "unverified"}
+LEGACY_JUDGEMENT_EVENT_TYPES = {"diagnosis", "evaluation", "inference"}
 
 
 @dataclass
@@ -52,6 +54,7 @@ class ClaimSource:
 @dataclass
 class ReportInputs:
     events: list[dict[str, Any]] = field(default_factory=list)
+    pending_judgement_events: list[dict[str, Any]] = field(default_factory=list)
     claim_sources: list[ClaimSource] = field(default_factory=list)
     decisions: list[dict[str, str]] = field(default_factory=list)
     missing_units: list[str] = field(default_factory=list)
@@ -79,6 +82,87 @@ def normalize_events(events: list[dict[str, Any]], *, stage: str = "", limit: in
     if limit > 0:
         filtered = filtered[-limit:]
     return filtered
+
+
+def _event_is_judgement(event: dict[str, Any]) -> bool:
+    epistemic_type = str(event.get("epistemic_type") or "").strip().casefold()
+    information_types = {item.casefold() for item in _text_items(event.get("information_types"))}
+    event_type_tokens = {
+        token
+        for token in re.split(r"[^a-z0-9]+", str(event.get("event_type") or "").casefold())
+        if token
+    }
+    return (
+        epistemic_type == "judgement"
+        or bool(information_types & JUDGEMENT_INFORMATION_TYPES)
+        or bool(event_type_tokens & LEGACY_JUDGEMENT_EVENT_TYPES)
+    )
+
+
+def _confirmed_judgement_event(root: Path, event: dict[str, Any]) -> tuple[bool, str]:
+    binding = event.get("confirmation_binding")
+    binding = binding if isinstance(binding, dict) else {}
+    subject = binding.get("subject")
+    subject = subject if isinstance(subject, dict) else {}
+    subject_id = str(subject.get("id") or "").strip()
+    subject_kind = str(subject.get("kind") or "").strip()
+    bound_claim_ids = sorted(_text_items(binding.get("claim_ids")))
+    bound_content_digest = str(binding.get("content_digest") or "").strip()
+    bound_verification = binding.get("verification")
+    bound_verification = bound_verification if isinstance(bound_verification, dict) else {}
+    recorded_status = str(event.get("confirmation_status") or "").strip() or "missing"
+    if not subject_id or not subject_kind:
+        return False, (
+            f"confirmation_status={recorded_status}; "
+            "missing: canonical confirmation subject and claim/evidence binding"
+        )
+    if not bound_claim_ids:
+        return False, f"confirmation_status={recorded_status}; missing: canonical claim/evidence binding"
+    try:
+        record, _path = locate_record(root, subject_id, kind=subject_kind, fuzzy=False)
+    except SystemExit:
+        return False, f"confirmation_status={recorded_status}; missing: bound record {subject_id}"
+    if str(record.get("id") or "") != subject_id or str(record.get("kind") or "") != subject_kind:
+        return False, f"confirmation_status={recorded_status}; missing: matching canonical subject"
+    if str(record.get("confirmation_status") or "") != "confirmed" or not has_complete_confirmation_receipt(record):
+        return False, f"confirmation_status={recorded_status}; missing: current ConfirmationReceipt"
+    receipt = record.get("confirmation")
+    receipt = receipt if isinstance(receipt, dict) else {}
+    receipt_claim_ids = sorted(_text_items(receipt.get("claim_ids")))
+    if bound_claim_ids != receipt_claim_ids:
+        return False, "confirmation_status=stale; missing: current receipt for the event claim binding"
+    if not bound_content_digest or bound_content_digest != str(receipt.get("content_digest") or ""):
+        return False, "confirmation_status=stale; missing: current receipt for the event content binding"
+    payload = record.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    current_verification = payload.get("verification")
+    current_verification = current_verification if isinstance(current_verification, dict) else {}
+    for field_name in ("verified_at", "claims_digest", "evidence_digest"):
+        bound_value = str(bound_verification.get(field_name) or "")
+        if not bound_value or bound_value != str(current_verification.get(field_name) or ""):
+            return False, f"confirmation_status=stale; missing: current {field_name} event binding"
+    return True, "confirmation_status=confirmed; current ConfirmationReceipt"
+
+
+def partition_reporting_events(
+    root: Path,
+    events: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    ordinary: list[dict[str, Any]] = []
+    pending: list[dict[str, Any]] = []
+    for event in events:
+        normalized = dict(event)
+        if not _event_is_judgement(normalized):
+            ordinary.append(normalized)
+            continue
+        confirmed, reason = _confirmed_judgement_event(root, normalized)
+        normalized["_epistemic_reason"] = reason
+        if confirmed:
+            normalized["_effective_confirmation_status"] = "confirmed"
+            ordinary.append(normalized)
+        else:
+            pending.append(normalized)
+    return ordinary, pending
 
 
 def load_reporting_style(root: Path) -> str:
@@ -276,11 +360,13 @@ def load_decisions(root: Path, program_id: str) -> list[dict[str, str]]:
 
 
 def load_report_inputs(root: Path, program_id: str, *, stage: str = "", limit: int = 20) -> ReportInputs:
-    events = normalize_events(load_program_reporting_events(root, program_id), stage=stage, limit=limit)
-    unit_ids = program_unit_ids(root, program_id, events)
+    loaded_events = normalize_events(load_program_reporting_events(root, program_id), stage=stage, limit=limit)
+    events, pending_judgement_events = partition_reporting_events(root, loaded_events)
+    unit_ids = program_unit_ids(root, program_id, loaded_events)
     claim_sources, missing_units = load_confirmed_claim_sources(root, unit_ids)
     return ReportInputs(
         events=events,
+        pending_judgement_events=pending_judgement_events,
         claim_sources=claim_sources,
         decisions=load_decisions(root, program_id),
         missing_units=missing_units,
@@ -303,6 +389,7 @@ def concise_report_inputs(inputs: ReportInputs) -> ReportInputs:
     ]
     return ReportInputs(
         events=inputs.events[-CONCISE_EVENT_LIMIT:],
+        pending_judgement_events=inputs.pending_judgement_events[-CONCISE_EVENT_LIMIT:],
         claim_sources=claim_sources,
         decisions=inputs.decisions[-CONCISE_DECISION_LIMIT:],
         missing_units=inputs.missing_units,
@@ -320,6 +407,8 @@ def render_event_line(event: dict[str, Any]) -> str:
     details = [f"type: {event_type}", f"source: {source_skill}"]
     if stage:
         details.append(f"stage: {stage}")
+    if str(event.get("_effective_confirmation_status") or "") == "confirmed":
+        details.extend(["epistemic: judgement", "confirmation: current receipt"])
     suffix = f" — {summary}" if summary else ""
     return f"- {timestamp} · {title} ({'; '.join(details)}){suffix}"
 
@@ -389,6 +478,21 @@ def render_events(events: list[dict[str, Any]], *, heading: str) -> list[str]:
     return lines
 
 
+def render_pending_judgement_events(events: list[dict[str, Any]]) -> list[str]:
+    if not events:
+        return []
+    lines = ["## Pending / Unverified judgements", ""]
+    for event in events:
+        reason = str(event.get("_epistemic_reason") or "missing: current ConfirmationReceipt")
+        summary = str(event.get("summary") or "").strip()
+        title = str(event.get("title") or "Untitled event").strip()
+        lines.append(f"- PENDING / UNVERIFIED JUDGEMENT — {summary or title}")
+        metadata_event = {**event, "summary": ""}
+        lines.append(f"  - Event: {render_event_line(metadata_event)[2:]}")
+        lines.append(f"  - {reason}")
+    return lines
+
+
 def report_headings(report_kind: str) -> tuple[str, str]:
     if report_kind == "ppt-materials":
         return "Evidence-backed Slide Inputs", "Program Events"
@@ -407,6 +511,7 @@ def render_report(title: str, inputs: ReportInputs, *, report_kind: str) -> str:
         render_decisions(inputs.decisions),
         render_claims(inputs.claim_sources, inputs.missing_units, heading=claims_heading),
         render_events(inputs.events, heading=events_heading),
+        render_pending_judgement_events(inputs.pending_judgement_events),
     ]
     lines: list[str] = []
     for section in sections:
@@ -499,6 +604,7 @@ def render_outline(program_id: str, inputs: ReportInputs) -> str:
         ],
         render_decisions(inputs.decisions),
         render_events(inputs.events, heading="Program Events"),
+        render_pending_judgement_events(inputs.pending_judgement_events),
     ]
     lines: list[str] = []
     for section in sections:
