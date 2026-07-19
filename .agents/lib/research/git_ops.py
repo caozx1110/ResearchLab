@@ -141,20 +141,12 @@ def git_checkpoint(
         else:
             return {"committed": False, "status": "missing-repo", "message": "kb git repo is not initialized"}
     ensure_kb_gitignore(project_root)
-    checkpointable_paths = [
-        path
-        for path in scoped_paths
-        if _git_path_is_tracked(project_root, path) or not _git_path_is_ignored(project_root, path)
-    ]
+    checkpointable_paths, addable_paths = _checkpointable_git_paths(project_root, scoped_paths)
     if not checkpointable_paths:
         return {"committed": False, "status": "no-changes", "message": "no checkpointable kb changes to commit"}
-    pathspecs = [f":(top,literal){path}" for path in checkpointable_paths]
-    addable_pathspecs = [
-        pathspec
-        for path, pathspec in zip(checkpointable_paths, pathspecs)
-        if (kb_repo_path(project_root) / path).exists() or _git_path_is_tracked(project_root, path)
-    ]
-    if addable_pathspecs:
+    pathspecs = [_literal_git_pathspec(path) for path in checkpointable_paths]
+    if addable_paths:
+        addable_pathspecs = [_literal_git_pathspec(path) for path in addable_paths]
         _run_git(project_root, "add", "--all", "--", *addable_pathspecs, check=True)
     staged = _run_git(project_root, "diff", "--cached", "--name-only", "--", *pathspecs, check=False)
     staged_files = [line.strip() for line in staged.stdout.splitlines() if line.strip()]
@@ -336,14 +328,69 @@ def dirty_kb_paths(project_root: Path) -> list[Path]:
     return [repo / relative_path for relative_path in sorted(relative_paths)]
 
 
-def _git_path_is_tracked(project_root: Path, relative_path: str) -> bool:
-    result = _run_git(project_root, "ls-files", "--error-unmatch", "--", relative_path, check=False)
-    return result.returncode == 0
+def _literal_git_pathspec(relative_path: str) -> str:
+    return f":(top,literal){relative_path}"
 
 
-def _git_path_is_ignored(project_root: Path, relative_path: str) -> bool:
-    result = _run_git(project_root, "check-ignore", "-q", "--", relative_path, check=False)
-    return result.returncode == 0
+def _git_query_has_paths(project_root: Path, *args: str) -> bool:
+    result = _run_git(project_root, *args, check=False)
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "git path query failed"
+        raise SystemExit(detail)
+    return bool(result.stdout)
+
+
+def _git_path_has_index_or_untracked_entry(project_root: Path, relative_path: str) -> bool:
+    """Whether a literal scope currently contains an index or unignored file."""
+    return _git_query_has_paths(
+        project_root,
+        "ls-files",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+        "--",
+        _literal_git_pathspec(relative_path),
+    )
+
+
+def _git_path_has_staged_change(project_root: Path, relative_path: str) -> bool:
+    """Include a deletion already removed from the index but tracked by HEAD."""
+    return _git_query_has_paths(
+        project_root,
+        "diff",
+        "--cached",
+        "--name-only",
+        "--",
+        _literal_git_pathspec(relative_path),
+    )
+
+
+def _checkpointable_git_paths(
+    project_root: Path,
+    scoped_paths: Sequence[str],
+) -> tuple[list[str], list[str]]:
+    """Return the declared scope that Git can act on without broadening it.
+
+    A transaction may conservatively declare outputs that it does not generate in
+    every run. Git pathspec commands receive only scopes for which Git can enumerate
+    an index entry, an unignored untracked entry, or a staged change. This keeps
+    tracked deletions checkpointable while empty directories, ignored-only
+    directories, and missing never-tracked outputs remain silent no-ops.
+
+    The second result contains scopes that can safely be passed to ``git add``.
+    A deletion already staged out of the index is checkpointable but not addable.
+    """
+    checkpointable: list[str] = []
+    addable: list[str] = []
+    for relative_path in scoped_paths:
+        has_entry = _git_path_has_index_or_untracked_entry(project_root, relative_path)
+        has_staged_change = _git_path_has_staged_change(project_root, relative_path)
+        if not has_entry and not has_staged_change:
+            continue
+        checkpointable.append(relative_path)
+        if has_entry:
+            addable.append(relative_path)
+    return checkpointable, addable
 
 
 def _git_digest_at_revision(project_root: Path, revision: str, relative_path: str) -> str | None:

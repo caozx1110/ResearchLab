@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -28,6 +29,16 @@ def _project_root() -> Path:
 def _load_kb_module():
     script = _project_root() / ".agents" / "skills" / "knowledge-base-manager" / "scripts" / "kb.py"
     spec = importlib.util.spec_from_file_location("kb_script_for_recovery_test", script)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_paper_module():
+    script = _project_root() / ".agents" / "skills" / "paper-analyst" / "scripts" / "paper.py"
+    spec = importlib.util.spec_from_file_location("paper_script_for_checkpoint_recovery_test", script)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -313,6 +324,313 @@ def test_git_checkpoint_stages_only_target_paths(tmp_path: Path) -> None:
     ).stdout
     assert "?? notes/" in status
     assert "record.yaml" not in status
+
+
+def test_paper_checkpoint_skips_absent_optional_artifacts_and_preserves_dirty_drafts(
+    tmp_path: Path,
+) -> None:
+    """Paper verify declares optional figure outputs even when it creates none."""
+    _configure_kb_git(tmp_path)
+    unit = tmp_path / "kb" / "units" / "papers" / "p-optional-figures"
+    record = unit / "record.yaml"
+    note = unit / "note.md"
+    claims = unit / "note-claims.yaml"
+    structure = unit / "structure.yaml"
+    figures_yaml = unit / "figures.yaml"
+    figures = unit / "figures"
+    tracked_draft = tmp_path / "kb" / "notes" / "tracked-draft.md"
+    untracked_draft = tmp_path / "kb" / "notes" / "untracked-draft.md"
+
+    tracked_draft.parent.mkdir(parents=True)
+    tracked_draft.write_text("original draft\n", encoding="utf-8")
+    git_checkpoint(
+        tmp_path,
+        "seed tracked draft",
+        auto_init=False,
+        target_paths=[tracked_draft],
+    )
+
+    unit.mkdir(parents=True)
+    record.write_text("id: p-optional-figures\n", encoding="utf-8")
+    note.write_text("# Verified note\n", encoding="utf-8")
+    claims.write_text("claims: []\n", encoding="utf-8")
+    structure.write_text("sections: []\n", encoding="utf-8")
+    tracked_draft.write_text("user staged draft\n", encoding="utf-8")
+    untracked_draft.write_text("user untracked draft\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(tmp_path / "kb"), "add", "--", "notes/tracked-draft.md"],
+        check=True,
+    )
+
+    result = git_checkpoint(
+        tmp_path,
+        "verify paper note",
+        auto_init=False,
+        target_paths=[record, note, claims, structure, figures_yaml, figures],
+    )
+
+    expected = {
+        "units/papers/p-optional-figures/note-claims.yaml",
+        "units/papers/p-optional-figures/note.md",
+        "units/papers/p-optional-figures/record.yaml",
+        "units/papers/p-optional-figures/structure.yaml",
+    }
+    assert result["committed"] is True
+    assert set(result["files"]) == expected
+    committed = subprocess.run(
+        ["git", "-C", str(tmp_path / "kb"), "show", "--format=", "--name-only", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    assert {line for line in committed if line} == expected
+    status = subprocess.run(
+        ["git", "-C", str(tmp_path / "kb"), "status", "--short"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "M  notes/tracked-draft.md" in status
+    assert "?? notes/untracked-draft.md" in status
+    assert not figures_yaml.exists()
+    assert not figures.exists()
+
+
+def test_paper_complete_note_verify_checkpoints_without_optional_figures(tmp_path: Path) -> None:
+    """Exercise the real paper command wrapper that exposed the optional-path bug."""
+    paper = _load_paper_module()
+    _configure_kb_git(tmp_path)
+    paper_id = "p-checkpoint-optional"
+    record = default_record("paper", title="Optional figure regression", maturity="lightweight")
+    record["id"] = paper_id
+    record["status"] = "screened"
+    record["payload"]["quick_screen"]["paper_type"] = "method_system"
+    record_path = write_record(tmp_path, record)
+    unit = record_path.parent
+    source_text = (
+        "Motivation evidence describes the research gap. "
+        "Method evidence describes the proposed mechanism. "
+        "Experiment evidence compares the measured outcome. "
+        "Limitation evidence identifies the failure case. "
+        "Insight evidence explains why the mechanism works."
+    )
+    chunks = [
+        {
+            "label": "source.pdf:page-1",
+            "text": source_text,
+            "page": 1,
+            "locator": "page=1",
+            "locator_kind": "page",
+        }
+    ]
+    cache = unit / "parse-cache.yaml"
+    yaml_io.write_yaml_if_changed(
+        cache,
+        {
+            "unit_id": paper_id,
+            "paper_id": paper_id,
+            "source_type": "pdf",
+            "locator_kind": "page",
+            "chunks": chunks,
+        },
+    )
+    quotes = {
+        "motivation": "Motivation evidence describes the research gap",
+        "method": "Method evidence describes the proposed mechanism",
+        "experiment": "Experiment evidence compares the measured outcome",
+        "limitation": "Limitation evidence identifies the failure case",
+        "insight": "Insight evidence explains why the mechanism works",
+    }
+    fill_path = unit / "note-fill.yaml"
+    yaml_io.write_yaml_if_changed(
+        fill_path,
+        {
+            "elements": [
+                {
+                    "element": element,
+                    "claim_type": paper.ELEMENT_CLAIM_TYPE[element],
+                    "content": f"Agent-authored {element} synthesis.",
+                    "evidence_refs": [
+                        {
+                            "source_unit_id": paper_id,
+                            "artifact": "parse-cache.yaml",
+                            "locator": "page=1",
+                            "quote": quote,
+                            "summary": f"Evidence for {element}.",
+                        }
+                    ],
+                }
+                for element, quote in quotes.items()
+            ]
+        },
+    )
+    git_checkpoint(
+        tmp_path,
+        "seed paper inputs",
+        auto_init=False,
+        target_paths=[record_path, cache, fill_path],
+    )
+    loaded = load_yaml(record_path)
+    args = SimpleNamespace(
+        phase="verify",
+        mode="scaffold",
+        input="",
+        paper_id=paper_id,
+    )
+
+    assert paper._run_complete_note(
+        args,
+        tmp_path,
+        loaded,
+        unit,
+        cache,
+        chunks,
+        {
+            "auto_refresh_structure_after_note": True,
+            "auto_extract_figures_after_note": False,
+        },
+        False,
+    ) == 0
+
+    assert (unit / "note.md").exists()
+    assert (unit / "note-claims.yaml").exists()
+    assert (unit / "structure.yaml").exists()
+    assert not (unit / "figures.yaml").exists()
+    assert not (unit / "figures").exists()
+
+
+def test_git_checkpoint_commits_tracked_deletion_with_absent_optional_target(
+    tmp_path: Path,
+) -> None:
+    _configure_kb_git(tmp_path)
+    target = tmp_path / "kb" / "units" / "papers" / "p-deleted" / "figures.yaml"
+    optional = target.parent / "figures"
+    target.parent.mkdir(parents=True)
+    target.write_text("figures: []\n", encoding="utf-8")
+    git_checkpoint(tmp_path, "seed tracked artifact", auto_init=False, target_paths=[target])
+    target.unlink()
+    subprocess.run(
+        ["git", "-C", str(tmp_path / "kb"), "add", "--all", "--", "units/papers/p-deleted/figures.yaml"],
+        check=True,
+    )
+
+    result = git_checkpoint(
+        tmp_path,
+        "remove tracked artifact",
+        auto_init=False,
+        target_paths=[target, optional],
+    )
+
+    assert result["committed"] is True
+    assert result["files"] == ["units/papers/p-deleted/figures.yaml"]
+    change = subprocess.run(
+        ["git", "-C", str(tmp_path / "kb"), "show", "--format=", "--name-status", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert change == "D\tunits/papers/p-deleted/figures.yaml"
+
+
+def test_git_checkpoint_all_absent_optional_targets_is_noop(tmp_path: Path) -> None:
+    _configure_kb_git(tmp_path)
+    unit = tmp_path / "kb" / "units" / "papers" / "p-no-artifacts"
+
+    before = subprocess.run(
+        ["git", "-C", str(tmp_path / "kb"), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    result = git_checkpoint(
+        tmp_path,
+        "optional artifacts absent",
+        auto_init=False,
+        target_paths=[unit / "figures.yaml", unit / "figures"],
+    )
+    after = subprocess.run(
+        ["git", "-C", str(tmp_path / "kb"), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    assert result == {
+        "committed": False,
+        "status": "no-changes",
+        "message": "no checkpointable kb changes to commit",
+    }
+    assert after == before
+
+
+def test_git_checkpoint_existing_empty_optional_directory_is_noop(tmp_path: Path) -> None:
+    _configure_kb_git(tmp_path)
+    optional = tmp_path / "kb" / "units" / "papers" / "p-empty" / "figures"
+    optional.mkdir(parents=True)
+
+    result = git_checkpoint(
+        tmp_path,
+        "empty optional directory",
+        auto_init=False,
+        target_paths=[optional],
+    )
+
+    assert result["committed"] is False
+    assert result["status"] == "no-changes"
+
+
+def test_git_checkpoint_ignored_only_optional_directory_is_noop(tmp_path: Path) -> None:
+    _configure_kb_git(tmp_path)
+    gitignore = tmp_path / "kb" / ".gitignore"
+    gitignore.write_text(gitignore.read_text(encoding="utf-8") + "optional-cache/\n", encoding="utf-8")
+    git_checkpoint(tmp_path, "ignore optional cache", auto_init=False, target_paths=[gitignore])
+    optional = tmp_path / "kb" / "optional-cache"
+    optional.mkdir()
+    (optional / "artifact.txt").write_text("ignored\n", encoding="utf-8")
+
+    result = git_checkpoint(
+        tmp_path,
+        "ignored optional directory",
+        auto_init=False,
+        target_paths=[optional],
+    )
+
+    assert result["committed"] is False
+    assert result["status"] == "no-changes"
+    status = subprocess.run(
+        ["git", "-C", str(tmp_path / "kb"), "status", "--short"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert status == ""
+
+
+def test_git_checkpoint_treats_optional_pathspec_metacharacters_as_literal(
+    tmp_path: Path,
+) -> None:
+    _configure_kb_git(tmp_path)
+    tracked = tmp_path / "kb" / "notes" / "actual.md"
+    tracked.parent.mkdir(parents=True)
+    tracked.write_text("original\n", encoding="utf-8")
+    git_checkpoint(tmp_path, "seed actual note", auto_init=False, target_paths=[tracked])
+    tracked.write_text("user draft\n", encoding="utf-8")
+
+    result = git_checkpoint(
+        tmp_path,
+        "literal optional target",
+        auto_init=False,
+        target_paths=[tmp_path / "kb" / "notes" / "*.md"],
+    )
+
+    assert result["committed"] is False
+    status = subprocess.run(
+        ["git", "-C", str(tmp_path / "kb"), "status", "--short"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert " M notes/actual.md" in status
 
 
 def test_undo_and_restore_use_journal_digests_and_kb_history(tmp_path: Path) -> None:
