@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from copy import deepcopy
 import importlib.util
+import json
 from pathlib import Path
 import sys
 
@@ -13,7 +14,7 @@ import research.evidence as evidence
 import research.git_ops as git_ops
 import research.journal as journal
 import research.records as records
-from research.yaml_io import load_yaml
+from research.yaml_io import load_yaml, write_yaml_if_changed
 
 
 def _project_root() -> Path:
@@ -203,6 +204,150 @@ def test_verified_judgements_with_record_unverified_are_review_ready(
         unverified_claim["payload"]["claims"]
     )
     assert records.record_workflow_state(unverified_claim) != "ready_for_review"
+
+
+def test_raw_confirmed_judgement_cannot_hide_stale_claim_digest() -> None:
+    current = _verified_judgement_record("paper")
+    current["confirmation_status"] = "confirmed"
+    assert records.record_workflow_state(current) == "done"
+
+    stale = deepcopy(current)
+    stale["payload"]["claims"][0]["text"] = "Changed after verification"
+    assert records.record_workflow_state(stale) == "ready_to_verify"
+
+    hollow_stale = deepcopy(stale)
+    hollow_stale["payload"].pop("core_content")
+    assert records.record_workflow_state(hollow_stale) == "awaiting_agent_fill"
+
+    fact = {
+        "id": "p-confirmed-fact-12345678",
+        "kind": "paper",
+        "status": "active",
+        "confirmation_status": "confirmed",
+        "information_types": ["fact"],
+        "payload": {},
+    }
+    assert records.record_workflow_state(fact) == "done"
+
+    rejected_stale = {**stale, "confirmation_status": "rejected"}
+    archived_stale = {**stale, "status": "archived"}
+    assert records.record_workflow_state(rejected_stale) == "done"
+    assert records.record_workflow_state(archived_stale) == "done"
+
+    archived_failure = deepcopy(archived_stale)
+    archived_failure["payload"]["workflow_status"] = "failed_retryable"
+    assert records.record_workflow_state(archived_failure) == "failed_retryable"
+    archived_failure["confirmation_status"] = "rejected"
+    assert records.record_workflow_state(archived_failure) == "done"
+
+
+def test_attached_stale_unit_is_visible_and_prioritized_between_blocker_and_review(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    orchestrator = _load_script(
+        "research-orchestrator",
+        "orchestrate.py",
+        "r1_stale_attached_orchestrator",
+    )
+    (tmp_path / ".agents").mkdir()
+    (tmp_path / "AGENTS.md").write_text("# Test workspace\n", encoding="utf-8")
+
+    stale = _verified_judgement_record("paper")
+    stale["program_ids"] = ["program-stale"]
+    stale["payload"]["claims"][0]["text"] = "Changed after verification"
+    write_yaml_if_changed(records.record_path(tmp_path, "paper", stale["id"]), stale)
+
+    pending = {
+        "id": "p-pending-fact-12345678",
+        "kind": "paper",
+        "title": "Pending factual metadata",
+        "status": "active",
+        "confirmation_status": "pending_user_confirmation",
+        "information_types": ["fact"],
+        "program_ids": ["program-pending"],
+        "payload": {},
+    }
+    write_yaml_if_changed(records.record_path(tmp_path, "paper", pending["id"]), pending)
+
+    for program_id, unit_ids in (
+        ("program-blocked", []),
+        ("program-stale", [stale["id"]]),
+        ("program-question", []),
+        ("program-pending", [pending["id"]]),
+    ):
+        orchestrator.ensure_program_files(tmp_path, program_id)
+        write_yaml_if_changed(
+            orchestrator.state_path(tmp_path, program_id),
+            {
+                "program_id": program_id,
+                "stage": "literature-review",
+                "active_unit_ids": unit_ids,
+            },
+        )
+    orchestrator.append_list_item(
+        orchestrator.evidence_requests_path(tmp_path, "program-blocked"),
+        "program-blocked-evidence-requests",
+        "research-orchestrator",
+        {
+            "question": "Is the baseline reproducible?",
+            "needed": "Baseline parity logs",
+            "priority": "high",
+            "blocking": True,
+        },
+        default_status="open",
+    )
+    for program_id in ("program-stale", "program-question"):
+        orchestrator.append_list_item(
+            orchestrator.open_questions_path(tmp_path, program_id),
+            f"{program_id}-open-questions",
+            "research-orchestrator",
+            {
+                "question": "Which hypothesis should be tested first?",
+                "priority": "high",
+            },
+            default_status="open",
+        )
+
+    items = orchestrator.program_dashboard_items(tmp_path)
+    by_program = {item["program_id"]: item for item in items}
+    stale_item = by_program["program-stale"]
+
+    assert [item["program_id"] for item in items[:4]] == [
+        "program-blocked",
+        "program-stale",
+        "program-question",
+        "program-pending",
+    ]
+    assert stale_item["record_id"] == stale["id"]
+    assert stale_item["step_type"] == "agent-verify"
+    assert stale_item["action_kind"] == "agent-work"
+    assert stale_item["recommended_command"] == ""
+    assert stale_item["pending_confirmation_count"] == 0
+    rendered = orchestrator.format_next([stale_item])
+    assert "需要 Agent 核验逐字证据" in rendered
+    for internal in ("ready_to_verify", "stage=", ".agents/", "--", "${"):
+        assert internal not in rendered
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "orchestrate.py",
+            "--root",
+            str(tmp_path),
+            "next",
+            "--program-id",
+            "program-stale",
+            "--json",
+        ],
+    )
+    assert orchestrator.main() == 0
+    owner_payload = json.loads(capsys.readouterr().out)
+    assert owner_payload["items"][0]["record_id"] == stale["id"]
+    assert owner_payload["items"][0]["step_type"] == "agent-verify"
+    assert owner_payload["items"][0]["recommended_command"] == ""
 
 
 def test_orchestrator_transaction_uses_complete_checkpoint_scope(

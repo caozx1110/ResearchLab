@@ -17,6 +17,7 @@ from .evidence import (
     confirmation_claims,
     confirmation_content_digest,
     record_external_source_contract,
+    validate_claims,
     verification_receipt_violations,
 )
 from .ids import (
@@ -675,34 +676,54 @@ def record_workflow_state(record: dict[str, Any]) -> str:
         str(source.get("status") or "").strip().lower(),
         str(payload.get("workflow_status") or "").strip().lower(),
     }
+    if confirmation_status == "rejected":
+        return "done"
     if failure_markers & {"failed_retryable", "retryable_failure", "failed-retryable"}:
         return "failed_retryable"
-    if confirmation_status in {"confirmed", "rejected"} or status in {"archived", "completed"}:
+    if status in {"archived", "completed"}:
+        return "done"
+
+    verification = payload.get("verification")
+    verification = verification if isinstance(verification, dict) else {}
+    claims_structurally_complete = (
+        bool(claims)
+        and not unconfirmable_claims
+        and not validate_claims(claims)
+    )
+    judgement_material_complete = (
+        claims_structurally_complete
+        and judgement_claims_present
+        and _has_substantive_judgement_content(record)
+    )
+    receipt_violations = verification_receipt_violations(
+        record,
+        None,
+        check_artifacts=False,
+    )
+    verification_current = (
+        claims_structurally_complete
+        and not verification.get("invalidation")
+        and not receipt_violations
+        and (not judgement_record or judgement_material_complete)
+    )
+    requires_reverification = (
+        judgement_record
+        and not verification_current
+        and (
+            confirmation_status == "confirmed"
+            or bool(verification)
+        )
+    )
+    if requires_reverification:
+        return "ready_to_verify" if judgement_material_complete else "awaiting_agent_fill"
+    if confirmation_status == "confirmed":
         return "done"
     if marker in {"awaiting_agent_fill", "agent_fill_required"}:
         return "awaiting_agent_fill"
     if marker in {"ready_to_verify", "agent_fill_complete"}:
+        if judgement_record and not judgement_material_complete:
+            return "awaiting_agent_fill"
         return "ready_to_verify"
-
-    verification = payload.get("verification")
-    verification = verification if isinstance(verification, dict) else {}
-    verification_current = (
-        bool(claims)
-        and not unconfirmable_claims
-        and not verification.get("invalidation")
-        and not verification_receipt_violations(
-            record,
-            None,
-            check_artifacts=False,
-        )
-        and (
-            not judgement_record
-            or (
-                judgement_claims_present
-                and _has_substantive_judgement_content(record)
-            )
-        )
-    )
     if confirmation_status == "pending_user_confirmation":
         if verification_current:
             return "ready_for_review"

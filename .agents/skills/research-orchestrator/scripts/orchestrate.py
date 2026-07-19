@@ -718,22 +718,47 @@ def program_dashboard_items(root: Path) -> list[dict[str, Any]]:
         high_questions = [item for item in open_questions if str(item.get("priority") or "") in {"critical", "high"}]
         unit_ids = _program_unit_ids(program_id, state, records)
         attached_unit_ids.update(unit_ids)
+        agent_units: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        for unit_id in sorted(unit_ids):
+            record = record_by_id.get(unit_id)
+            if record is None:
+                continue
+            step = safe_unit_step(record)
+            if step and str(step.get("kind") or "") == "agent-work":
+                agent_units.append((record, step))
         pending_units = [
             record_by_id[unit_id]
             for unit_id in sorted(unit_ids)
             if unit_id in record_by_id and is_user_confirmable(record_by_id[unit_id])
         ]
-        score = (
-            100 * len(blocking_evidence)
-            + sum(_priority_value(item) for item in evidence_requests)
+        detail_score = (
+            sum(_priority_value(item) for item in evidence_requests)
             + sum(_priority_value(item) for item in open_questions)
-            + 10 * len(pending_units)
         )
+        if blocking_evidence:
+            score = 400 + min(detail_score, 99)
+        elif agent_units:
+            score = 300 + min(detail_score, 99)
+        elif high_questions:
+            score = 200 + min(detail_score, 99)
+        elif pending_units:
+            score = 100 + min(detail_score + 10 * len(pending_units), 99)
+        else:
+            score = detail_score
         reasons: list[str] = []
         if blocking_evidence:
             reasons.append(f"{len(blocking_evidence)} blocking evidence")
         if high_questions:
             reasons.append(f"{len(high_questions)} high-priority open question")
+        if agent_units:
+            verification_count = sum(
+                1 for _record, step in agent_units if str(step.get("step_type") or "") == "agent-verify"
+            )
+            fill_count = len(agent_units) - verification_count
+            if verification_count:
+                reasons.append(f"{verification_count} 项待 Agent 重核验")
+            if fill_count:
+                reasons.append(f"{fill_count} 项待 Agent 补全")
         if pending_units:
             reasons.append(f"{len(pending_units)} pending confirmation")
         if not reasons and str(state.get("stage") or "") not in TERMINAL_PROGRAM_STAGES:
@@ -745,8 +770,20 @@ def program_dashboard_items(root: Path) -> list[dict[str, Any]]:
         decision_record: dict[str, Any] = {}
         if blocking_evidence:
             next_action = f"Resolve blocking evidence: {blocking_evidence[0].get('needed') or blocking_evidence[0].get('question')}"
+            recommended_command = shell_command(
+                [COMMAND_PREFIX, ".agents/skills/research-orchestrator/scripts/orchestrate.py", "status", "--program-id", program_id]
+            )
+        elif agent_units:
+            decision_record, agent_step = agent_units[0]
+            next_action = str(agent_step.get("reason") or "Agent 需要继续核验这项资料。")
+            recommended_command = ""
+            step_type = str(agent_step.get("step_type") or "agent-fill")
+            action_kind = "agent-work"
         elif high_questions:
             next_action = f"Answer high-priority question: {high_questions[0].get('question')}"
+            recommended_command = shell_command(
+                [COMMAND_PREFIX, ".agents/skills/research-orchestrator/scripts/orchestrate.py", "status", "--program-id", program_id]
+            )
         elif pending_units:
             next_action = f"Review pending confirmation: {pending_units[0].get('id')}"
             recommended_command = confirm_command_for_record(pending_units[0])
@@ -763,11 +800,6 @@ def program_dashboard_items(root: Path) -> list[dict[str, Any]]:
             recommended_command = shell_command(
                 [COMMAND_PREFIX, ".agents/skills/research-orchestrator/scripts/orchestrate.py", "status", "--program-id", program_id]
             )
-        if blocking_evidence or high_questions:
-            recommended_command = shell_command(
-                [COMMAND_PREFIX, ".agents/skills/research-orchestrator/scripts/orchestrate.py", "status", "--program-id", program_id]
-            )
-
         items.append(
             {
                 "program_id": program_id,
