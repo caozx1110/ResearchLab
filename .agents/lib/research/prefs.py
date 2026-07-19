@@ -93,6 +93,12 @@ DEFAULT_CANDIDATE_POOLS = {
 VERSIONING_COMMIT_MODES = {"manual", "milestone", "aggressive"}
 
 
+DIAGNOSTIC_MODES = {"off", "errors-only", "developer"}
+
+
+DIAGNOSTIC_SKILL_MODES = {"inherit", *DIAGNOSTIC_MODES}
+
+
 PAPER_AUTO_COMPLETE_CONDITIONS = {
     "after_screen",
     "suggested_worth_reading",
@@ -116,6 +122,15 @@ def default_runtime_preferences() -> dict[str, Any]:
         },
         "learned_preferences": {
             "items": [],
+        },
+        "diagnostics": {
+            "mode": "off",
+            "per_skill": {},
+            "local_only": True,
+            "token_budget_per_task": 0,
+            "max_issues_per_task": 20,
+            "dedup_window_seconds": 604800,
+            "cooldown_seconds": 0,
         },
         "autonomy": {
             "auto_execute_scope": ["screen", "build-index", "refresh", "generate-note"],
@@ -183,6 +198,41 @@ def load_runtime_preferences(project_root: Path) -> dict[str, Any]:
     items = learned_preferences.get("items", [])
     learned_preferences["items"] = [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
     normalized["learned_preferences"] = learned_preferences
+
+    diagnostics = normalized.get("diagnostics", {})
+    if not isinstance(diagnostics, dict):
+        diagnostics = {}
+    mode = str(diagnostics.get("mode") or "off").strip().lower()
+    diagnostics["mode"] = mode if mode in DIAGNOSTIC_MODES else "off"
+    raw_per_skill = diagnostics.get("per_skill", {})
+    per_skill: dict[str, str] = {}
+    if isinstance(raw_per_skill, dict):
+        for raw_skill, raw_mode in raw_per_skill.items():
+            skill = str(raw_skill or "").strip().lower()
+            skill_mode = str(raw_mode or "inherit").strip().lower()
+            if skill and skill_mode in DIAGNOSTIC_SKILL_MODES:
+                per_skill[skill] = skill_mode
+    diagnostics["per_skill"] = per_skill
+    # D1 is deliberately local-only.  Persisted attempts to disable this are
+    # ignored so a malformed or older preference file cannot enable telemetry.
+    diagnostics["local_only"] = True
+    try:
+        diagnostics["token_budget_per_task"] = max(0, int(diagnostics.get("token_budget_per_task") or 0))
+    except (TypeError, ValueError):
+        diagnostics["token_budget_per_task"] = 0
+    try:
+        diagnostics["max_issues_per_task"] = max(1, int(diagnostics.get("max_issues_per_task") or 20))
+    except (TypeError, ValueError):
+        diagnostics["max_issues_per_task"] = 20
+    try:
+        diagnostics["dedup_window_seconds"] = max(0, int(diagnostics.get("dedup_window_seconds") or 0))
+    except (TypeError, ValueError):
+        diagnostics["dedup_window_seconds"] = 604800
+    try:
+        diagnostics["cooldown_seconds"] = max(0, int(diagnostics.get("cooldown_seconds") or 0))
+    except (TypeError, ValueError):
+        diagnostics["cooldown_seconds"] = 0
+    normalized["diagnostics"] = diagnostics
 
     autonomy = normalized.get("autonomy", {})
     if not isinstance(autonomy, dict):
@@ -283,7 +333,7 @@ def write_runtime_preferences(project_root: Path, payload: dict[str, Any]) -> Pa
     with mutation_transaction(project_root, "write-runtime-preferences", [path]):
         current = load_runtime_preferences(project_root)
         merged = copy.deepcopy(current)
-        for key in ("browser", "identity", "learned_preferences", "autonomy", "paper", "pdf", "versioning"):
+        for key in ("browser", "identity", "learned_preferences", "diagnostics", "autonomy", "paper", "pdf", "versioning"):
             value = payload.get(key)
             if isinstance(value, dict):
                 target = merged.setdefault(key, {})
@@ -333,6 +383,8 @@ __all__ = [
     "DEFAULT_TOPIC_TAXONOMY",
     "DEFAULT_CANDIDATE_POOLS",
     "VERSIONING_COMMIT_MODES",
+    "DIAGNOSTIC_MODES",
+    "DIAGNOSTIC_SKILL_MODES",
     "PAPER_AUTO_COMPLETE_CONDITIONS",
     "PAPER_NOTE_MODES",
     "default_runtime_preferences",
