@@ -53,6 +53,7 @@ OPEN_QUESTION_OPEN_STATUSES = {"open"}
 EVIDENCE_REQUEST_OPEN_STATUSES = {"open"}
 PRIORITY_SCORE = {"critical": 40, "high": 30, "normal": 10, "low": 5}
 TERMINAL_PROGRAM_STAGES = {"done", "completed", "archived", "published"}
+SEMANTIC_READ_COMMANDS = {"status", "dashboard", "next", "route"}
 
 ROUTE_HINTS = {
     "source": "source-intake",
@@ -352,7 +353,6 @@ def safe_unit_step(record: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def auto_plan(root: Path) -> dict[str, Any]:
-    ensure_workspace(root)
     build_index_command = {
         "kind": "kb",
         "step_type": "build-index",
@@ -1105,7 +1105,10 @@ def main() -> int:
     args = build_parser().parse_args()
     root = project_root(PROJECT_ROOT, explicit_root=args.root)
     print_resolved_project_roots(root)
-    if args.command != "status":
+    semantic_read = args.command in SEMANTIC_READ_COMMANDS or (
+        args.command == "auto" and not args.execute
+    )
+    if not semantic_read:
         ensure_workspace(root)
 
     if args.command == "init-program":

@@ -81,6 +81,23 @@ def _safe_runtime_env() -> dict[str, str]:
     }
 
 
+def _tree_snapshot(root: Path) -> tuple[tuple[str, str, bytes], ...]:
+    if not root.exists() and not root.is_symlink():
+        return ()
+    entries: list[tuple[str, str, bytes]] = []
+    for path in [root, *sorted(root.rglob("*"))]:
+        relative = "." if path == root else path.relative_to(root).as_posix()
+        if path.is_symlink():
+            entries.append((relative, "symlink", os.readlink(path).encode()))
+        elif path.is_dir():
+            entries.append((relative, "directory", b""))
+        elif path.is_file():
+            entries.append((relative, "file", path.read_bytes()))
+        else:
+            entries.append((relative, "other", b""))
+    return tuple(entries)
+
+
 def _active_requirement_lines(path: Path) -> tuple[str, ...]:
     return tuple(
         stripped
@@ -256,6 +273,44 @@ def test_installed_copy_runs_help_without_creating_runtime_data(tmp_path: Path) 
     installed_rules = (workspace / "AGENTS.md").read_text(encoding="utf-8")
     assert "## Conversational contract" in installed_rules
     assert "## Editing Rules" not in installed_rules
+
+
+def test_installed_copy_next_is_byte_identical_on_fresh_workspace(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    install = subprocess.run(
+        [
+            "bash",
+            str(_project_root() / "install.sh"),
+            "install",
+            "--project",
+            str(workspace),
+            "--yes",
+            "--codex",
+        ],
+        cwd=_project_root(),
+        env=_safe_runtime_env(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert install.returncode == 0, install.stdout + install.stderr
+    before = _tree_snapshot(workspace)
+
+    next_result = subprocess.run(
+        [sys.executable, "-B", str(_kb_script(workspace)), "next"],
+        cwd=workspace,
+        env=_safe_runtime_env(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert next_result.returncode == 0, next_result.stdout + next_result.stderr
+    assert "KB 为空" in next_result.stdout
+    for token in FORBIDDEN_PUBLIC_TOKENS:
+        assert token not in next_result.stdout
+    assert _tree_snapshot(workspace) == before
 
 
 def test_release_metadata_is_honest_rc_and_ci_is_cross_platform() -> None:
