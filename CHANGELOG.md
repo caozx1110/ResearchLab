@@ -4,7 +4,7 @@ All notable changes to this project will be documented here. The format follows 
 
 ## [Unreleased]
 
-This line is an **internal alpha release candidate**, not a stable release. No compatibility guarantee or release tag is implied until the full acceptance gate is complete.
+The bundle currently declares **`0.2.0-rc.1`**. It has passed the complete local suite and cold installed-copy acceptance, so it meets the local release-candidate gate. It is not stable or GA, has not been tagged or published, and carries no compatibility or response-time SLA. A green hosted Linux/macOS CI matrix remains a prerequisite for a release tag.
 
 ### Added
 
@@ -13,7 +13,7 @@ This line is an **internal alpha release candidate**, not a stable release. No c
 - Current-message authorization fields for confirmation hand-off and version-bound confirmation receipts.
 - Exact-path multi-file operation scopes, recovery ordering tests, and clean manual-checkpoint no-op behavior.
 - Source-and-branch-aware installation manifests and update behavior for local checkouts, non-main fork branches, detached checkouts, and legacy unknown-provenance installs.
-- Linux and macOS release-gate coverage, including public-output and installed-copy smoke tests.
+- Linux and macOS release-gate workflow definitions, including public-output and installed-copy smoke tests; hosted matrix execution remains pending.
 
 ### Changed
 
@@ -32,4 +32,4 @@ This line is an **internal alpha release candidate**, not a stable release. No c
 
 ## [0.2.0-rc.1] - Unreleased
 
-Reserved as the first internal release-candidate identifier. It must not be tagged or described as stable before acceptance is complete.
+The candidate identifier recorded by the bundle. Local release-candidate acceptance is complete, but no release tag or publication exists yet; hosted Linux/macOS CI must pass before tagging, and this candidate must not be described as stable or GA.
