@@ -323,10 +323,20 @@ def _yaml_text_blob(data: Any) -> str:
 
 @dataclass
 class _LoadedArtifact:
-    """Loaded artifact text: full blob plus optional per-page index."""
+    """Loaded artifact text: independent full-document views plus page index.
+
+    YAML needs two views: its original UTF-8 text preserves configuration keys,
+    scalar spelling, and quoting, while its parsed structure exposes chunk text
+    after YAML escape/block-scalar decoding.  The views remain separate so a
+    quote cannot become a false hit by spanning their concatenation boundary.
+    """
 
     full_text: str = ""
+    structured_text: str = ""
     pages: dict[int, str] = field(default_factory=dict)
+
+    def searchable_texts(self) -> tuple[str, ...]:
+        return tuple(text for text in (self.full_text, self.structured_text) if text)
 
 
 @dataclass(frozen=True)
@@ -465,7 +475,11 @@ def _load_artifact_path(path: Path) -> _LoadedArtifact | None:
         except yaml.YAMLError:
             # Fall back to raw text so a quote can still be matched.
             return _LoadedArtifact(full_text=raw)
-        return _LoadedArtifact(full_text=_yaml_text_blob(data), pages=_artifact_pages(data))
+        return _LoadedArtifact(
+            full_text=raw,
+            structured_text=_yaml_text_blob(data),
+            pages=_artifact_pages(data),
+        )
     return _LoadedArtifact(full_text=raw)
 
 
@@ -536,8 +550,8 @@ def verify_claim_evidence(
                 f"for quote '{_quote_digest(quote)}'"
             )
             continue
-        norm_full = normalize_ws(loaded.full_text)
-        if norm_quote not in norm_full:
+        norm_full_views = [normalize_ws(text) for text in loaded.searchable_texts()]
+        if not any(norm_quote in text for text in norm_full_views):
             violations.append(
                 f"{where}: quote '{_quote_digest(quote)}' not verbatim in artifact '{artifact}'"
             )
