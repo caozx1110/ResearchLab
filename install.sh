@@ -862,9 +862,9 @@ print_next_steps() {
 print_done() {
   if [ "$DRY_RUN" -eq 1 ]; then
     section "预览完成"
-    bullet "底层文件操作：$DRY_RUN_CHANGE_COUNT 项（详细路径已折叠）"
+    bullet "预计文件变更：$DRY_RUN_CHANGE_COUNT 项（详细路径已折叠）"
     ok "没有写入任何文件。"
-    info "以上是计划内容；确认无误后再执行正式安装。"
+    info "以上是计划内容；确认无误后再执行正式操作。"
     return 0
   fi
 
