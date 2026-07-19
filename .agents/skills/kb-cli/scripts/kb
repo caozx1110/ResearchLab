@@ -319,9 +319,17 @@ def forward_command(
     return result
 
 
-def run_forwarded(root: Path, commands: Sequence[tuple[str, Sequence[str]]]) -> int:
+def run_forwarded(
+    root: Path,
+    commands: Sequence[tuple[str, Sequence[str]]],
+    *,
+    stream: bool = True,
+) -> int:
     for relative_script, args in commands:
-        result = forward_command(root, relative_script, args)
+        if stream:
+            result = forward_command(root, relative_script, args)
+        else:
+            result = forward_command(root, relative_script, args, stream=False)
         if result.returncode != 0:
             return result.returncode
     return 0
@@ -802,6 +810,7 @@ def run_init_prerequisites(root: Path) -> int:
             (SCRIPT_BY_VERB["init_kb"], ["init"]),
             (SCRIPT_BY_VERB["init_config"], ["init"]),
         ],
+        stream=False,
     )
 
 
@@ -809,16 +818,23 @@ def handle_init(args: argparse.Namespace, root: Path) -> int:
     commands = build_headless_init_pref_commands(args)
     initialized = run_init_prerequisites(root)
     if initialized != 0:
+        print("知识库初始化未完成；详细诊断已保留给 Agent。", file=sys.stderr)
         return initialized
 
     if commands is not None:
-        written = run_forwarded(root, commands)
+        written = run_forwarded(root, commands, stream=False)
         if written != 0:
+            print("基础偏好未能保存；详细诊断已保留给 Agent。", file=sys.stderr)
             return written
 
     if args.git_init:
-        git_initialized = run_forwarded(root, [(SCRIPT_BY_VERB["init_kb"], ["git-init"])])
+        git_initialized = run_forwarded(
+            root,
+            [(SCRIPT_BY_VERB["init_kb"], ["git-init"])],
+            stream=False,
+        )
         if git_initialized != 0:
+            print("版本记录未能启用；详细诊断已保留给 Agent。", file=sys.stderr)
             return git_initialized
 
     defaults = runtime_pref_defaults(root)

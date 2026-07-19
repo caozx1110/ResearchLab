@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from research.common import write_yaml_if_changed
+
 
 def _project_root() -> Path:
     return Path(__file__).resolve().parents[4]
@@ -215,9 +217,11 @@ def test_kb_update_offline_reports_unknown_without_changes(monkeypatch, tmp_path
 def test_kb_init_has_identical_no_tty_semantics_and_never_reads_input(monkeypatch, tmp_path: Path, capsys) -> None:
     kb = _load_kb_cli()
     calls: list[list[tuple[str, tuple[str, ...]]]] = []
+    stream_values: list[bool] = []
 
-    def fake_run_forwarded(root: Path, commands):
+    def fake_run_forwarded(root: Path, commands, *, stream: bool = True):
         calls.append([(script, tuple(args)) for script, args in commands])
+        stream_values.append(stream)
         return 0
 
     monkeypatch.setattr(kb, "run_forwarded", fake_run_forwarded)
@@ -245,6 +249,7 @@ def test_kb_init_has_identical_no_tty_semantics_and_never_reads_input(monkeypatc
     ]
     assert calls_after_tty == expected
     assert calls == expected
+    assert stream_values == [False, False]
     assert tty_output == pipe_output
     assert "还需要你告诉我确认人姓名" in tty_output
     assert "NEXT FOR AGENT:" not in tty_output
@@ -253,9 +258,11 @@ def test_kb_init_has_identical_no_tty_semantics_and_never_reads_input(monkeypatc
 def test_kb_init_non_tty_scaffolds_and_guides_agent(monkeypatch, tmp_path: Path, capsys) -> None:
     kb = _load_kb_cli()
     calls: list[list[tuple[str, tuple[str, ...]]]] = []
+    stream_values: list[bool] = []
 
-    def fake_run_forwarded(root: Path, commands):
+    def fake_run_forwarded(root: Path, commands, *, stream: bool = True):
         calls.append([(script, tuple(args)) for script, args in commands])
+        stream_values.append(stream)
         return 0
 
     monkeypatch.setattr(kb, "run_forwarded", fake_run_forwarded)
@@ -282,6 +289,7 @@ def test_kb_init_non_tty_scaffolds_and_guides_agent(monkeypatch, tmp_path: Path,
             (".agents/skills/research-config-manager/scripts/config.py", ("init",)),
         ],
     ]
+    assert stream_values == [False]
 
 
 def test_kb_init_headless_flags_persist_user_profile(monkeypatch, tmp_path: Path) -> None:
@@ -311,7 +319,8 @@ def test_kb_init_rejects_ai_signer_name_before_writing_prefs(monkeypatch, tmp_pa
     kb = _load_kb_cli()
     calls: list[list[tuple[str, tuple[str, ...]]]] = []
 
-    def fake_run_forwarded(root: Path, commands):
+    def fake_run_forwarded(root: Path, commands, *, stream: bool = True):
+        del stream
         calls.append([(script, tuple(args)) for script, args in commands])
         return 0
 
@@ -319,6 +328,64 @@ def test_kb_init_rejects_ai_signer_name_before_writing_prefs(monkeypatch, tmp_pa
     with pytest.raises(SystemExit, match="不能使用 AI 工具名称"):
         kb.main(["--root", str(tmp_path), "init", "--name", "codex"])
     assert calls == []
+
+
+def test_kb_init_is_idempotent_and_emits_one_public_summary(tmp_path: Path, capsys) -> None:
+    kb = _load_kb_cli()
+
+    assert kb.main(
+        [
+            "--root",
+            str(tmp_path),
+            "init",
+            "--name",
+            "Researcher",
+            "--lang",
+            "en",
+            "--auto-commit",
+            "manual",
+            "--auto-screen",
+            "false",
+            "--persona-focus",
+            "VLA",
+            "--persona-resources",
+            "8xGPU",
+            "--persona-report",
+            "concise",
+            "--persona-boundaries",
+            "no-cloud",
+            "--persona-term",
+            "bilingual",
+        ]
+    ) == 0
+    first_output = capsys.readouterr().out
+    assert first_output == "知识库和基础偏好已准备好。\n"
+
+    runtime_path = tmp_path / "kb" / "config" / "runtime-preferences.yaml"
+    runtime = kb.load_runtime_preferences(tmp_path)
+    runtime["autonomy"]["auto_execute_scope"] = ["screen"]
+    write_yaml_if_changed(runtime_path, runtime)
+
+    assert kb.main(["--root", str(tmp_path), "init"]) == 0
+    second_output = capsys.readouterr().out
+    assert second_output == "知识库和基础偏好已准备好。\n"
+    for forbidden in ("[ok]", "created", "initial_commit", "kb/", "--"):
+        assert forbidden not in first_output + second_output
+
+    runtime_after = kb.load_runtime_preferences(tmp_path)
+    profile_after = kb.load_yaml(tmp_path / "kb" / "config" / "user-profile.yaml", default={})
+    assert runtime_after["identity"]["default_confirmed_by"] == "Researcher"
+    assert runtime_after["paper"]["auto_screen_on_intake"] is False
+    assert runtime_after["versioning"]["auto_commit_mode"] == "manual"
+    assert runtime_after["autonomy"]["auto_execute_scope"] == ["screen"]
+    assert profile_after["preferences"]["language_preference"] == "en"
+    assert profile_after["personalization"] == {
+        "research_focus": "VLA",
+        "resources": "8xGPU",
+        "reporting_style": "concise",
+        "collaboration_boundaries": "no-cloud",
+        "term_style": "bilingual",
+    }
 
 
 def test_kb_status_forwards_current_state_and_program(monkeypatch, tmp_path: Path) -> None:
