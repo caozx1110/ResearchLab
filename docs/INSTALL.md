@@ -10,13 +10,22 @@
 bash install.sh
 ```
 
-安装向导会依次询问五件事，按回车即可接受推荐选项：
+安装向导第一屏会明确列出四个动作：
 
-1. 选择“安装或重新配置”。
+1. **首次安装**：给新的 workspace 接入 skills。
+2. **更新**：同步已有安装中的版本变化。
+3. **重装或修复**：重新铺设全部受管文件，用于修复缺失或损坏。
+4. **卸载**：移除 skills 接入，同时保留研究资料和本地运行环境。
+
+首次安装时，向导会继续询问以下事项，按回车即可接受推荐选项：
+
+1. 选择“首次安装”。
 2. 选择你使用的 AI 工具：Claude Code、Codex，或两者都用。
 3. 选择“仅当前或指定工作区”。推荐 project scope，不推荐 system scope。
 4. 确认 workspace 根目录；不要选择其中的 `kb/` 子目录。
 5. 选择是否创建终端 `kb` 快捷命令。选择创建后，向导会提示安装完成后先在终端运行 `kb help`，再运行 `kb init`。它只是额外便利，不影响在 AI 对话中使用 `kb`。
+
+如果选择“首次安装”后，目标 workspace 已有本安装器的有效安装记录，向导不会直接报错，也不会静默重装，而会在询问终端快捷命令之前改为询问：更新（推荐）、重装或修复，或取消。非交互或 CI 中重复执行 `install`（即使显式传入其他 flags）仍会非零退出，避免自动化任务在没有确认时改变动作。
 
 确认页会列出安装目标和将发生的改动。安装完成后，打开刚才选择的 AI 工具，在对话中输入：
 
@@ -24,7 +33,7 @@ bash install.sh
 kb init
 ```
 
-初始化完成后可用 `kb status` 查看当前状态。更新和卸载都会保留已有研究资料。
+初始化完成后可用 `kb status` 查看当前状态。更新、重装和卸载都会保留已有研究资料。
 
 ## 推荐安装模型
 
@@ -68,6 +77,14 @@ bash install.sh --dry-run --claude --project /path/to/workspace
 
 ```bash
 bash install.sh --all --project /path/to/workspace
+```
+
+已有外部 project copy 安装可以显式选择更新、重装或卸载：
+
+```bash
+bash install.sh update --project /path/to/workspace
+bash install.sh reinstall --project /path/to/workspace
+bash install.sh uninstall --project /path/to/workspace
 ```
 
 可选把 `kb` 放到 PATH：
@@ -163,6 +180,21 @@ bash install.sh update --project /path/to/workspace --dry-run
 
 dry-run 打印真实差异、漂移和计划动作，但零写入。
 
+## 重装或修复：reinstall
+
+外部 copy workspace 的受管文件缺失、损坏，或需要完整重新铺设时使用：
+
+```bash
+bash install.sh reinstall --project /path/to/workspace
+```
+
+`update` 与 `reinstall` 的区别是：
+
+- `update` 只同步源版本带来的 added/changed/removed 差异；若受管文件存在本地漂移，会默认阻断，适合日常升级。
+- `reinstall` 根据当前源重新铺设完整的受管文件集，并重新运行安装检查，适合恢复缺失、损坏或已漂移的受管文件；它不会删除 `kb/`、`.venv/` 或受管范围外的用户文件。
+
+两者都不会由重复 `install` 静默触发。若源中新出现的受管路径与用户本地文件冲突，重装会停止；只有明确接受覆盖该冲突时才使用 `--force`。
+
 ## 卸载：uninstall
 
 外部 copy workspace 用显式 uninstall 子命令：
@@ -171,9 +203,16 @@ dry-run 打印真实差异、漂移和计划动作，但零写入。
 bash install.sh uninstall --project /path/to/workspace
 ```
 
-copy 安装会按 manifest 精确删除 `.agents` 下的受管文件，移除 `.claude/skills`、`CLAUDE.md` managed block 和可选 `bin/kb`。`AGENTS.md` 只有在 manifest 标记为 managed 且 sha 仍匹配时才会删除；如果用户改过，会保留并告警。
+copy 安装的卸载会执行以下操作：
 
-`DIR/kb` 和 `DIR/.venv` 永远保留。卸载后 workspace 只是变为 unmanaged，研究数据不受影响。
+- 对 manifest 记录的 `.agents/**` 受管文件，只有目标仍是普通文件且 sha256 与安装记录一致时才删除。内容已修改、类型已变化或已被替换成 symlink 的目标会保留并告警；安装器不会跟随 symlink。
+- 清理由这些受管 Python 模块运行生成的标准 `__pycache__/*.pyc`；只按 manifest 中的模块名匹配，无关 cache 和异常类型仍保留。
+- 对 workspace 根 `AGENTS.md`，受管区块 digest 未变化时只移除该区块，区块外的用户文本保留；digest 已变化时整份文件保留并告警。
+- 移除属于本安装器的 `.claude/skills` symlink 和 `CLAUDE.md` managed block。
+- 删除安装 manifest。因漂移而保留的文件从此成为用户自管文件；如果 `.agents/` 仍非空，目录也会保留。
+- 尝试清理终端 `kb` 快捷 symlink：project scope 对应 `<workspace>/bin/kb`，system scope 对应 `~/.local/bin/kb`。project、system 和旧版兼容卸载都会执行这一步；只有链接目标仍指向本安装时才删除，普通文件或指向其他目标的链接会保留并告警。
+
+`DIR/kb`、`DIR/.venv` 和未写入 manifest 的用户文件永远保留。卸载后 workspace 只是变为 unmanaged，研究数据不受影响。
 
 旧版外部 symlink 安装仍可用兼容卸载：
 
@@ -183,7 +222,7 @@ bash install.sh --all --project /path/to/workspace --uninstall
 
 如果目标有真实 `.agents` 但没有本安装器 manifest，安装器会拒绝删除 `.agents`，但仍会清理明确属于 workspace-oss 的 Claude managed block 和匹配的 symlink。
 
-旧版 system/symlink 安装只保留兼容卸载能力。新 workspace 请使用 project-scope copy 安装，避免跨 workspace 共享路径和源仓依赖。
+旧版 system/symlink 安装只保留兼容卸载能力。卸载时不需要额外记得安装时是否选择过快捷命令，安装器都会安全尝试清理目标匹配的快捷 symlink。新 workspace 请使用 project-scope copy 安装，避免跨 workspace 共享路径和源仓依赖。
 
 ## 环境变量
 

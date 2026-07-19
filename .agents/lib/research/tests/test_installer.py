@@ -162,6 +162,41 @@ def _run_shortcut_install(
     return workspace, result
 
 
+def _install_copy(tmp_path: Path, workspace: Path) -> subprocess.CompletedProcess[str]:
+    workspace.mkdir(exist_ok=True)
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "NO_COLOR": "1",
+        "PATH": "/usr/bin:/bin",
+        "RESEARCH_NO_MANAGED_VENV": "1",
+        "RESEARCH_NO_PDF_BACKEND": "1",
+        "RESEARCH_PYTHON": sys.executable,
+    }
+    # Bootstrap tests can set this marker directly in the pytest process.
+    # A fresh installer subprocess must prove its own configured runtime.
+    env.pop("_RESEARCH_RUNTIME_READY", None)
+    return subprocess.run(
+        [
+            "bash",
+            str(_project_root() / "install.sh"),
+            "install",
+            "--codex",
+            "--project",
+            str(workspace),
+            "--yes",
+        ],
+        cwd=_project_root(),
+        env=env,
+        stdin=subprocess.DEVNULL,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
 def test_missing_system_yaml_continues_to_managed_runtime_fallback(tmp_path: Path) -> None:
     result = _run_dry_install(tmp_path)
 
@@ -229,7 +264,11 @@ def test_guided_dry_run_retries_invalid_choice_without_claiming_success(tmp_path
 
     output = result.stdout
     assert result.returncode == 0, output
-    assert "请输入 1、2 或 3" in output
+    assert "1) 首次安装" in output
+    assert "2) 更新已安装的外部工作区" in output
+    assert "3) 重装或修复已安装的外部工作区" in output
+    assert "4) 卸载 skills 接入" in output
+    assert "请输入 1、2、3 或 4" in output
     assert "预览完成" in output
     assert "没有写入任何文件" in output
     assert "安装完成" not in output
@@ -378,12 +417,214 @@ def test_external_install_prints_completion_without_bash_variable_error(tmp_path
     assert updated_manifest["source_branch"] == installed_manifest["source_branch"]
 
 
-def test_guided_system_uninstall_can_be_cancelled(tmp_path: Path) -> None:
+def test_guided_reinstall_menu_runs_the_reinstall_action(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    installed = _install_copy(tmp_path, workspace)
+    assert installed.returncode == 0, installed.stdout + installed.stderr
+
     result = _run_pty_dialog(
         tmp_path,
         args=[],
         exchanges=[
             ("请选择 [1]：", "3\n"),
+            ("目录 [", f"{workspace}\n"),
+            ("确认执行？[Y/n]：", "\n"),
+        ],
+        env_overrides={
+            "RESEARCH_NO_MANAGED_VENV": "1",
+            "RESEARCH_NO_PDF_BACKEND": "1",
+            "RESEARCH_PYTHON": sys.executable,
+        },
+    )
+
+    assert result.returncode == 0, result.stdout
+    assert "操作：重装或修复" in result.stdout
+    assert "AI 工具：Codex" in result.stdout
+    assert "重装完成" in result.stdout
+
+
+def test_interactive_duplicate_install_can_route_to_update_before_shortcut_prompt(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    installed = _install_copy(tmp_path, workspace)
+    assert installed.returncode == 0, installed.stdout + installed.stderr
+
+    result = _run_pty_dialog(
+        tmp_path,
+        args=["install", "--claude", "--project", str(workspace), "--yes"],
+        exchanges=[("请选择 [1]：", "1\n")],
+    )
+
+    assert result.returncode == 0, result.stdout
+    assert "这个工作区已经安装过" in result.stdout
+    assert "操作：更新" in result.stdout
+    assert "AI 工具：Codex" in result.stdout
+    assert "更新完成" in result.stdout
+    assert "是否创建终端快捷命令" not in result.stdout
+    assert "终端快捷命令：" not in result.stdout
+
+
+def test_interactive_duplicate_install_can_route_to_reinstall(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    installed = _install_copy(tmp_path, workspace)
+    assert installed.returncode == 0, installed.stdout + installed.stderr
+
+    result = _run_pty_dialog(
+        tmp_path,
+        args=["install", "--claude", "--project", str(workspace), "--yes"],
+        exchanges=[("请选择 [1]：", "2\n")],
+        env_overrides={
+            "RESEARCH_NO_MANAGED_VENV": "1",
+            "RESEARCH_NO_PDF_BACKEND": "1",
+            "RESEARCH_PYTHON": sys.executable,
+        },
+    )
+
+    assert result.returncode == 0, result.stdout
+    assert "操作：重装或修复" in result.stdout
+    assert "AI 工具：Codex" in result.stdout
+    assert "重装完成" in result.stdout
+    assert "是否创建终端快捷命令" not in result.stdout
+
+
+def test_interactive_duplicate_install_can_be_cancelled_without_writes(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    installed = _install_copy(tmp_path, workspace)
+    assert installed.returncode == 0, installed.stdout + installed.stderr
+    manifest = workspace / ".agents" / ".install-manifest.json"
+    manifest_before = manifest.read_bytes()
+
+    result = _run_pty_dialog(
+        tmp_path,
+        args=["install", "--claude", "--project", str(workspace)],
+        exchanges=[("请选择 [1]：", "3\n")],
+    )
+
+    assert result.returncode == 0, result.stdout
+    assert "已取消，没有写入任何文件" in result.stdout
+    assert "确认执行" not in result.stdout
+    assert "是否创建终端快捷命令" not in result.stdout
+    assert manifest.read_bytes() == manifest_before
+
+
+def test_non_interactive_duplicate_install_still_fails_closed(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    installed = _install_copy(tmp_path, workspace)
+    assert installed.returncode == 0, installed.stdout + installed.stderr
+
+    result = _install_copy(tmp_path, workspace)
+
+    assert result.returncode != 0
+    assert "这个工作区已经安装过" in result.stderr
+    assert "更新" in result.stderr
+    assert "重装" in result.stderr
+
+
+def test_system_uninstall_removes_matching_shortcut_without_kb_flag_and_preserves_foreign_link(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    shortcut = home / ".local" / "bin" / "kb"
+    shortcut.parent.mkdir(parents=True)
+    kb_script = _project_root() / ".agents" / "skills" / "kb-cli" / "scripts" / "kb"
+    shortcut.symlink_to(kb_script)
+    env = {**os.environ, "HOME": str(home), "NO_COLOR": "1", "PATH": "/usr/bin:/bin"}
+    command = [
+        "bash",
+        str(_project_root() / "install.sh"),
+        "--uninstall",
+        "--system",
+        "--codex",
+        "--yes",
+    ]
+
+    removed = subprocess.run(
+        command,
+        cwd=_project_root(),
+        env=env,
+        stdin=subprocess.DEVNULL,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert removed.returncode == 0, removed.stdout + removed.stderr
+    assert not shortcut.is_symlink()
+
+    shortcut.symlink_to("/usr/bin/true")
+    preserved = subprocess.run(
+        command,
+        cwd=_project_root(),
+        env=env,
+        stdin=subprocess.DEVNULL,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert preserved.returncode == 0, preserved.stdout + preserved.stderr
+    assert shortcut.is_symlink()
+    assert os.readlink(shortcut) == "/usr/bin/true"
+    assert "链接目标与安装记录不一致，已保留" in preserved.stderr
+
+    shortcut.unlink()
+    shortcut.write_text("user-owned\n", encoding="utf-8")
+    ordinary_file = subprocess.run(
+        command,
+        cwd=_project_root(),
+        env=env,
+        stdin=subprocess.DEVNULL,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert ordinary_file.returncode == 0, ordinary_file.stdout + ordinary_file.stderr
+    assert shortcut.read_text(encoding="utf-8") == "user-owned\n"
+    assert "kb 快捷入口不是安装器创建的链接，已保留" in ordinary_file.stderr
+
+
+def test_legacy_project_uninstall_removes_matching_shortcut_without_kb_flag(tmp_path: Path) -> None:
+    workspace = tmp_path / "legacy-workspace"
+    workspace.mkdir()
+    (workspace / ".agents").symlink_to(_project_root() / ".agents", target_is_directory=True)
+    shortcut = workspace / "bin" / "kb"
+    shortcut.parent.mkdir()
+    shortcut.symlink_to(_project_root() / ".agents" / "skills" / "kb-cli" / "scripts" / "kb")
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(_project_root() / "install.sh"),
+            "--uninstall",
+            "--project",
+            str(workspace),
+            "--codex",
+            "--yes",
+        ],
+        cwd=_project_root(),
+        env={
+            **os.environ,
+            "HOME": str(tmp_path / "home"),
+            "NO_COLOR": "1",
+            "PATH": "/usr/bin:/bin",
+        },
+        stdin=subprocess.DEVNULL,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not shortcut.is_symlink()
+    assert not (workspace / ".agents").exists()
+
+
+def test_guided_system_uninstall_can_be_cancelled(tmp_path: Path) -> None:
+    result = _run_pty_dialog(
+        tmp_path,
+        args=[],
+        exchanges=[
+            ("请选择 [1]：", "4\n"),
             ("请选择 [3]：", "2\n"),
             ("请选择 [1]：", "2\n"),
             ("确认执行？[Y/n]：", "n\n"),

@@ -373,7 +373,7 @@ action_label() {
   case "$ACTION" in
     install) printf '安装' ;;
     update) printf '更新' ;;
-    reinstall) printf '重装' ;;
+    reinstall) printf '重装或修复' ;;
     uninstall) printf '卸载' ;;
   esac
 }
@@ -396,13 +396,75 @@ mode_label() {
   fi
 }
 
+manifest_is_ours() {
+  [ -f "$1" ] || return 1
+  python3 - "$1" <<'PY' >/dev/null 2>&1
+import json
+import sys
+from pathlib import Path
+
+try:
+    data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except Exception:
+    raise SystemExit(1)
+if (
+    data.get("schema") == 1
+    and data.get("install_name") == "workspace-oss"
+    and data.get("install_mode") == "copy-project"
+    and isinstance(data.get("files"), dict)
+):
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+manifest_field() {
+  local manifest=$1 field=$2
+  python3 - "$manifest" "$field" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+value = data.get(sys.argv[2], "")
+if value is None:
+    value = ""
+print(value)
+PY
+}
+
+manifest_agent_enabled() {
+  local manifest=$1 agent=$2
+  python3 - "$manifest" "$agent" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+agent = sys.argv[2]
+agents = data.get("agents")
+if not isinstance(agents, dict):
+    enabled = agent == "claude"
+else:
+    enabled = bool(agents.get(agent, False))
+print("1" if enabled else "0")
+PY
+}
+
+restore_manifest_agent_selection() {
+  local manifest=$1
+  CONFIG_CLAUDE=$(manifest_agent_enabled "$manifest" claude 2>/dev/null || printf '1')
+  CONFIG_CODEX=$(manifest_agent_enabled "$manifest" codex 2>/dev/null || printf '0')
+}
+
 prompt_action() {
   local choice
   is_interactive_input || return 0
   wizard_step "你想做什么？"
-  menu_option 1 "安装或重新配置" "（推荐）"
-  menu_option 2 "更新外部工作区中的 skills"
-  menu_option 3 "卸载 skills 接入" "（保留研究资料）"
+  menu_option 1 "首次安装" "（推荐）"
+  menu_option 2 "更新已安装的外部工作区"
+  menu_option 3 "重装或修复已安装的外部工作区"
+  menu_option 4 "卸载 skills 接入" "（保留研究资料）"
   while true; do
     ask "请选择 [1]："
     read -r choice || choice=""
@@ -417,12 +479,17 @@ prompt_action() {
         ACTION_FROM_SUBCOMMAND=1
         return 0
         ;;
-      3|uninstall)
+      3|reinstall)
+        ACTION=reinstall
+        ACTION_FROM_SUBCOMMAND=1
+        return 0
+        ;;
+      4|uninstall)
         ACTION=uninstall
         return 0
         ;;
       *)
-        note "请输入 1、2 或 3。"
+        note "请输入 1、2、3 或 4。"
         ;;
     esac
   done
@@ -547,6 +614,51 @@ prompt_project_dir() {
   fi
 }
 
+prompt_existing_copy_install() {
+  local choice project_root manifest
+  [ "$ACTION" = "install" ] || return 0
+  [ "$SCOPE" = "project" ] || return 0
+  [ -n "$PROJECT_DIR" ] || return 0
+  is_interactive_input || return 0
+
+  project_root=$(abs_dir "$PROJECT_DIR")
+  same_dir "$project_root" "$REPO_ROOT" && return 0
+  [ -d "$project_root/.agents" ] && [ ! -L "$project_root/.agents" ] || return 0
+  manifest="$project_root/.agents/.install-manifest.json"
+  manifest_is_ours "$manifest" || return 0
+
+  wizard_step "这个工作区已经安装过"
+  info "请选择如何继续："
+  menu_option 1 "更新" "（推荐，只同步版本变化）"
+  menu_option 2 "重装或修复" "（重新铺设受管文件）"
+  menu_option 3 "取消"
+  while true; do
+    ask "请选择 [1]："
+    read -r choice || choice=""
+    choice=${choice:-1}
+    case "$choice" in
+      1|update)
+        ACTION=update
+        ACTION_FROM_SUBCOMMAND=1
+        break
+        ;;
+      2|reinstall)
+        ACTION=reinstall
+        ACTION_FROM_SUBCOMMAND=1
+        break
+        ;;
+      3|cancel)
+        note "已取消，没有写入任何文件。"
+        exit 0
+        ;;
+      *)
+        note "请输入 1、2 或 3。"
+        ;;
+    esac
+  done
+  restore_manifest_agent_selection "$manifest"
+}
+
 prompt_kb_on_path() {
   local choice
   if ! is_interactive_input; then
@@ -615,6 +727,8 @@ if [ "$SCOPE" = "project" ] && [ -z "$PROJECT_DIR" ] && [ "$PROJECT_FLAG_SET" -e
   prompt_project_dir
 fi
 
+prompt_existing_copy_install
+
 if [ "$ACTION" = "install" ] && [ "$KB_ON_PATH_FLAG_SET" -eq 0 ] && [ "$WIZARD_MODE" -eq 1 ]; then
   prompt_kb_on_path
 fi
@@ -653,6 +767,9 @@ fi
 if [ "$ACTION" = "update" ] || [ "$ACTION" = "reinstall" ]; then
   [ "$SCOPE" = "project" ] || die "update 只适用于外部工作区；系统级配置请重新运行 install"
   [ "$COPY_PROJECT" -eq 1 ] || die "当前就是源码仓库，请用 git pull 更新"
+  if manifest_is_ours "$MANIFEST_PATH"; then
+    restore_manifest_agent_selection "$MANIFEST_PATH"
+  fi
 fi
 
 if [ "$ACTION" = "uninstall" ] && [ "$ACTION_FROM_SUBCOMMAND" -eq 1 ]; then
@@ -669,9 +786,7 @@ print_plan() {
     section "请确认"
   fi
   bullet "操作：$(action_label)"
-  if [ "$ACTION" = "install" ] || [ "$ACTION" = "uninstall" ]; then
-    bullet "AI 工具：$(agent_label)"
-  fi
+  bullet "AI 工具：$(agent_label)"
   bullet "使用范围：$(scope_label)"
   if [ "$SCOPE" = "project" ]; then
     bullet "工作区：$WORKSPACE_ROOT"
@@ -858,61 +973,6 @@ with path.open("rb") as handle:
 print(digest.hexdigest())
 PY
   fi
-}
-
-manifest_is_ours() {
-  [ -f "$1" ] || return 1
-  python3 - "$1" <<'PY' >/dev/null 2>&1
-import json
-import sys
-from pathlib import Path
-
-try:
-    data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-except Exception:
-    raise SystemExit(1)
-if (
-    data.get("schema") == 1
-    and data.get("install_name") == "workspace-oss"
-    and data.get("install_mode") == "copy-project"
-    and isinstance(data.get("files"), dict)
-):
-    raise SystemExit(0)
-raise SystemExit(1)
-PY
-}
-
-manifest_field() {
-  local manifest=$1 field=$2
-  python3 - "$manifest" "$field" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-value = data.get(sys.argv[2], "")
-if value is None:
-    value = ""
-print(value)
-PY
-}
-
-manifest_agent_enabled() {
-  local manifest=$1 agent=$2
-  python3 - "$manifest" "$agent" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-agent = sys.argv[2]
-agents = data.get("agents")
-if not isinstance(agents, dict):
-    enabled = agent == "claude"
-else:
-    enabled = bool(agents.get(agent, False))
-print("1" if enabled else "0")
-PY
 }
 
 guard_agents_md_for_copy_install() {
@@ -1345,13 +1405,19 @@ install_kb_on_path() {
 }
 
 uninstall_kb_on_path() {
-  local dir
+  local dir link
   if [ "$SCOPE" = "system" ]; then
     dir="$HOME/.local/bin"
   else
     dir="$WORKSPACE_ROOT/bin"
   fi
-  remove_symlink_if_matches "$dir/kb" "$WS_KB_SCRIPT" "$KB_SCRIPT"
+  link="$dir/kb"
+  if [ -e "$link" ] && [ ! -L "$link" ]; then
+    warn "kb 快捷入口不是安装器创建的链接，已保留：$link"
+    INSTALL_INCOMPLETE=1
+    return 0
+  fi
+  remove_symlink_if_matches "$link" "$WS_KB_SCRIPT" "$KB_SCRIPT"
 }
 
 run_smoke() {
@@ -1475,7 +1541,7 @@ case "$ACTION" in
         uninstall_codex_project
       fi
     fi
-    [ "$KB_ON_PATH" -eq 1 ] && uninstall_kb_on_path
+    uninstall_kb_on_path
     if [ "$CORRUPT_MANIFEST_UNINSTALL" -eq 1 ]; then
       warn "研究资料和本地运行环境未被改动"
     fi
