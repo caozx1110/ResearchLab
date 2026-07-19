@@ -548,8 +548,8 @@ def test_partition_review_tracks_splits_fact_and_judgement() -> None:
 
 
 def test_review_queue_confirm_only_touches_fact_track(tmp_path: Path, monkeypatch, capsys) -> None:
-    """review-queue --confirm batch-confirms only fact-track metadata; a judgement
-    item is skipped (and left pending) with a notice."""
+    """Batch confirmation touches fact metadata while an unfilled judgement shell
+    remains pending outside the human review queue."""
     kb = _load_kb_module()
     (tmp_path / ".agents").mkdir()
     (tmp_path / "AGENTS.md").write_text("# test\n", encoding="utf-8")
@@ -573,12 +573,12 @@ def test_review_queue_confirm_only_touches_fact_track(tmp_path: Path, monkeypatc
     assert kb.main() == 0
 
     out = capsys.readouterr().out
-    assert "judgement-track item(s) need per-item" in out
+    assert "judgement-track item(s) need per-item" not in out
     assert load_yaml(record_path(tmp_path, "paper", "p-fact-000001"), default={})["confirmation_status"] == "confirmed"
     assert load_yaml(record_path(tmp_path, "paper", "p-judge-000002"), default={})["confirmation_status"] == "pending_user_confirmation"
 
 
-def test_review_queue_display_groups_two_tracks(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_review_queue_display_excludes_unfilled_judgement_shell(tmp_path: Path, monkeypatch, capsys) -> None:
     kb = _load_kb_module()
     (tmp_path / ".agents").mkdir()
     (tmp_path / "AGENTS.md").write_text("# test\n", encoding="utf-8")
@@ -597,7 +597,8 @@ def test_review_queue_display_groups_two_tracks(tmp_path: Path, monkeypatch, cap
     assert kb.main() == 0
 
     out = capsys.readouterr().out
+    assert "1 pending (1 fact-track, 0 judgement-track)" in out
     assert "fact-track metadata" in out
     assert "judgement-track" in out
-    assert "hollow" in out  # the empty judgement paper is flagged
-    assert "建议主动请用户拍板" in out
+    assert "p-judge-000002" not in out
+    assert "hollow" not in out
