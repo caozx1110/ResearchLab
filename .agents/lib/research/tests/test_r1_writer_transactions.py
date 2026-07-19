@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+from datetime import datetime as RealDateTime
 from pathlib import Path
 
 import pytest
 
-from research.common import write_text_if_changed, write_yaml_if_changed
+from research.common import load_yaml, write_text_if_changed, write_yaml_if_changed
 from research.core import default_record, ensure_workspace, record_path
 from research.git_ops import undo_last_operation
 
@@ -152,6 +153,36 @@ def test_retrospective_fault_restores_note(tmp_path: Path, monkeypatch) -> None:
     with pytest.raises(RuntimeError, match="injected"):
         module.main()
     assert not list((note_root / "retrospectives").glob("*.md"))
+
+
+def test_retrospective_collision_aborts_instead_of_committing_noop(tmp_path: Path, monkeypatch) -> None:
+    module = _load(".agents/skills/skill-evolution-advisor/scripts/create_retrospective.py", "r1_retro_collision")
+    root = tmp_path / "workspace"
+    _workspace(root)
+    note_root = root / "kb/memory/skill-evolution"
+
+    class FixedDateTime:
+        @classmethod
+        def now(cls):
+            return RealDateTime.fromisoformat("2026-07-19T12:00:00+08:00")
+
+    monkeypatch.setattr(module, "datetime", FixedDateTime)
+    args = ("create_retrospective.py", "--slug", "routing-gap", "--task-summary", "test", "--root", str(note_root))
+    _argv(monkeypatch, *args)
+    assert module.main() == 0
+    _argv(monkeypatch, *args)
+    assert module.main() == 1
+
+    entries = [
+        load_yaml(path, default={})
+        for path in (root / "kb/.journal").glob("*.yaml")
+    ]
+    states = sorted(
+        entry.get("state")
+        for entry in entries
+        if entry.get("op_type") == "create-skill-retrospective"
+    )
+    assert states == ["abort", "commit"]
 
 
 def test_evaluator_fault_restores_report(tmp_path: Path, monkeypatch) -> None:

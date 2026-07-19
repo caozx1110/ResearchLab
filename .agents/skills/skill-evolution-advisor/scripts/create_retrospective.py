@@ -22,6 +22,10 @@ from research.common import write_text_if_changed
 from research.journal import mutation_transaction
 
 
+class RetrospectiveAlreadyExists(RuntimeError):
+    """Abort a colliding create without committing a no-op operation."""
+
+
 def normalize_slug(value: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-")
     if not slug:
@@ -205,11 +209,14 @@ def main() -> int:
         args.observed_issue,
         args.suggestion,
     ).strip() + "\n"
-    with mutation_transaction(project_root, "create-skill-retrospective", [note_path]):
-        if note_path.exists():
-            print("这次复盘已经记录过了，未覆盖已有内容。", file=sys.stderr)
-            return 1
-        write_text_if_changed(note_path, note)
+    try:
+        with mutation_transaction(project_root, "create-skill-retrospective", [note_path]):
+            if note_path.exists():
+                raise RetrospectiveAlreadyExists
+            write_text_if_changed(note_path, note)
+    except RetrospectiveAlreadyExists:
+        print("这次复盘已经记录过了，未覆盖已有内容。", file=sys.stderr)
+        return 1
     print(note_path)
 
     if args.stdout_prompt:
