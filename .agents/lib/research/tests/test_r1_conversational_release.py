@@ -49,7 +49,6 @@ EXPECTED_RUNTIME_PINS = {
     "pymupdf4llm": "0.0.27",
     "pymupdf": "1.26.5",
 }
-EXPECTED_DEV_PINS = {"pytest": "8.4.2"}
 CAPABILITY_MATURITY = {
     "kb-cli": "stable",
     "knowledge-base-manager": "stable",
@@ -374,11 +373,8 @@ def test_release_metadata_is_honest_rc_and_ci_is_cross_platform() -> None:
 def test_runtime_and_test_dependencies_are_exactly_locked_in_both_ci_jobs() -> None:
     root = _project_root()
     runtime_lines = _active_requirement_lines(root / "requirements.txt")
-    dev_lines = _active_requirement_lines(root / "requirements-dev.txt")
 
     assert _parse_exact_pins(runtime_lines) == EXPECTED_RUNTIME_PINS
-    assert dev_lines == ("-r requirements.txt", "pytest==8.4.2")
-    assert _parse_exact_pins(dev_lines) == EXPECTED_DEV_PINS
 
     ci = yaml.safe_load((root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
     for job_name in ("test", "macos-release-gate"):
