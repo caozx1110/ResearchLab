@@ -218,6 +218,27 @@ _PUBLIC_FORBIDDEN = (
 )
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
+_SHELL_COMMAND_RE = re.compile(
+    r"""(?ix)
+    (?<![\w.-])
+    (?:
+        sudo\s+(?:--?[A-Za-z][\w-]*\s+)*[A-Za-z][\w.-]*(?=\s|$)
+        |
+        git\s+(?:
+            --?[A-Za-z][\w-]*
+            |add|apply|bisect|branch|checkout|cherry-pick|clean|clone|commit|config
+            |diff|fetch|init|log|merge|mv|pull|push|rebase|reset|restore|revert|rm
+            |show|stash|status|switch|tag|worktree
+        )(?=\s|$)
+        |
+        (?:
+            bash|cat|chmod|chown|cp|curl|docker|find|fish|grep|kill|killall
+            |kubectl|launchctl|mkdir|mv|reboot|rm|rmdir|rsync|scp|sed|sh|shutdown
+            |ssh|systemctl|touch|wget|xargs|zsh
+        )\s+(?=--?[A-Za-z0-9]|https?://|/|~|\.\.?/|[A-Za-z0-9_.])
+    )
+    """
+)
 _BIDI_CONTROL_CODEPOINTS = {
     *range(0x202A, 0x202F),
     *range(0x2066, 0x206A),
@@ -279,6 +300,8 @@ def _public_line_is_safe(line: str, root: Path) -> bool:
         return True
     folded = line.casefold()
     if "next for agent:" in folded or any(token.casefold() in folded for token in _PUBLIC_FORBIDDEN[1:]):
+        return False
+    if "$(" in line or _SHELL_COMMAND_RE.search(line):
         return False
     if re.search(r"(^|\s)--[A-Za-z][\w-]*", line, flags=re.IGNORECASE):
         return False
