@@ -486,7 +486,14 @@ def test_external_install_prints_completion_without_bash_variable_error(tmp_path
 
 def test_noninteractive_copy_lifecycle_hides_sync_engine_output_and_preserves_semantics(tmp_path: Path) -> None:
     dry_workspace = tmp_path / "dry-workspace"
-    dry_run = _run_copy_action(tmp_path, dry_workspace, action="install", extra=("--dry-run",))
+    # Claude setup and the shortcut force this dry-run through ensure_dir,
+    # link_force, and write_managed_block after ws_sync returns.
+    dry_run = _run_copy_action(
+        tmp_path,
+        dry_workspace,
+        action="install",
+        extra=("--claude", "--kb-on-path", "--dry-run"),
+    )
 
     assert dry_run.returncode == 0, dry_run.stdout + dry_run.stderr
     assert "底层文件操作：" in dry_run.stdout
@@ -538,6 +545,29 @@ def test_noninteractive_copy_lifecycle_hides_sync_engine_output_and_preserves_se
     _assert_private_sync_output_hidden(uninstall, _project_root(), workspace / ".agents")
     assert not manifest_path.exists()
     assert not version_path.exists()
+
+
+def test_noninteractive_smoke_failure_hides_child_diagnostics(tmp_path: Path) -> None:
+    source = _make_linked_source(tmp_path)
+    private_detail = tmp_path / "internal" / "smoke-traceback.log"
+    smoke_script = source / ".agents" / "skills" / "kb-cli" / "scripts" / "kb"
+    smoke_script.write_text(
+        "#!/usr/bin/env bash\n"
+        f"printf '%s\\n' 'Traceback: smoke child secret at {private_detail}' >&2\n"
+        "exit 23\n",
+        encoding="utf-8",
+    )
+    workspace = tmp_path / "workspace"
+
+    result = _run_copy_action(tmp_path, workspace, action="install", source=source)
+
+    assert result.returncode != 0
+    assert "kb 安装检查未通过，请让 Agent 检查后重试" in result.stderr
+    assert "Traceback" not in result.stdout + result.stderr
+    assert "smoke child secret" not in result.stdout + result.stderr
+    assert str(private_detail) not in result.stdout + result.stderr
+    _assert_private_sync_output_hidden(result, source, workspace / ".agents")
+    assert (workspace / ".agents" / ".install-manifest.json").is_file()
 
 
 def test_project_install_from_linked_worktree_preserves_linked_checkout(tmp_path: Path) -> None:
