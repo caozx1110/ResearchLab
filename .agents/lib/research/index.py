@@ -272,7 +272,7 @@ def _unit_markdown_paths(project_root: Path, record: dict[str, Any]) -> list[Pat
     if kind not in UNIT_KIND_DIRS or not unit_id:
         return []
     root = unit_root(project_root, kind, unit_id)
-    if not root.is_dir() or root.is_symlink():
+    if root.is_symlink() or not root.is_dir():
         return []
     paths = _safe_files_below(root, suffixes={".md", ".markdown"})
     return [path for path in paths if "source" not in path.relative_to(root).parts]
@@ -479,7 +479,7 @@ def build_index(project_root: Path) -> tuple[Path, Path]:
 
 def _safe_files_below(base: Path, *, suffixes: set[str] | None = None) -> list[Path]:
     """List regular files without ever traversing a symlinked directory."""
-    if not base.is_dir() or base.is_symlink():
+    if base.is_symlink() or not base.is_dir():
         return []
     paths: list[Path] = []
     for current, dirnames, filenames in os.walk(base, topdown=True, followlinks=False):
@@ -504,7 +504,7 @@ def _safe_record_files(project_root: Path) -> list[Path]:
     units = kb_root(project_root) / "units"
     for dirname in UNIT_KIND_DIRS.values():
         kind_root = units / dirname
-        if not kind_root.is_dir() or kind_root.is_symlink():
+        if kind_root.is_symlink() or not kind_root.is_dir():
             continue
         try:
             entries = sorted(os.scandir(kind_root), key=lambda entry: entry.name)
@@ -540,7 +540,10 @@ def lint_workspace_integrity(project_root: Path, *, records: list[dict[str, Any]
     records = list(records) if records is not None else _safe_lint_records(project_root)
 
     for record in records:
-        yaml_paths.append(record_path(project_root, str(record.get("kind") or ""), str(record.get("id") or "")))
+        kind = str(record.get("kind") or "")
+        unit_id = str(record.get("id") or "")
+        if kind in UNIT_KIND_DIRS and unit_id:
+            yaml_paths.append(record_path(project_root, kind, unit_id))
 
     for base in [kb_root(project_root) / "programs", config_root(project_root), synthesis_root(project_root)]:
         yaml_paths.extend(_safe_files_below(base, suffixes={".yaml", ".yml"}))
@@ -570,7 +573,7 @@ def lint_workspace_integrity(project_root: Path, *, records: list[dict[str, Any]
                     issues.append(f"{rel(project_root, path)}: broken wikilink `{target}`")
 
     programs_root = kb_root(project_root) / "programs"
-    if not programs_root.is_dir() or programs_root.is_symlink():
+    if programs_root.is_symlink() or not programs_root.is_dir():
         return issues
 
     records_by_id = {
@@ -717,20 +720,10 @@ def _symlink_findings(project_root: Path) -> tuple[list[dict[str, str]], bool]:
     root = kb_root(project_root)
     findings: list[dict[str, str]] = []
     if root.is_symlink():
-        raw_target = os.readlink(root)
-        target = Path(raw_target) if Path(raw_target).is_absolute() else root.parent / raw_target
-        lexical_target = Path(os.path.abspath(target))
-        lexical_project = Path(os.path.abspath(project_root))
-        try:
-            lexical_target.relative_to(lexical_project)
-            escapes = False
-        except ValueError:
-            escapes = True
-        if escapes:
-            findings.append(_audit_finding(
-                "SECURITY_SYMLINK_ESCAPE", "security", "error", "kb",
-                "A KB symlink resolves outside the workspace boundary.",
-            ))
+        findings.append(_audit_finding(
+            "SECURITY_SYMLINK_ESCAPE", "security", "error", "kb",
+            "The KB root is a symlink and does not define a contained KB boundary.",
+        ))
         return findings, True
     if not root.is_dir():
         return findings, False

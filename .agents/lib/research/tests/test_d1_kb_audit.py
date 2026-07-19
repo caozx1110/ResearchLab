@@ -237,6 +237,20 @@ def test_audit_detects_incomplete_journal_and_symlink_escape_without_following(t
     assert _snapshot(root) == before
 
 
+def test_audit_rejects_symlinked_kb_root_even_when_target_is_in_workspace(tmp_path: Path) -> None:
+    root = tmp_path / "linked-root"
+    target = root / "alternate-kb"
+    target.mkdir(parents=True)
+    os.symlink(target.name, root / "kb")
+    before = _snapshot(root)
+
+    report = audit_workspace(root)
+
+    assert report["status"] == "FAIL"
+    assert _codes(report) == {"SECURITY_SYMLINK_ESCAPE"}
+    assert _snapshot(root) == before
+
+
 def test_audit_includes_existing_lint_findings_without_changing_lint_api(tmp_path: Path) -> None:
     root = tmp_path / "schema"
     record, _ = _paper(root)
