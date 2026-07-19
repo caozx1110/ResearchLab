@@ -12,6 +12,32 @@ from pathlib import Path
 import pytest
 
 from research.common import write_yaml_if_changed
+from research.core import record_path
+
+
+PUBLIC_GOVERNANCE_FORBIDDEN = (
+    "|",
+    "score=",
+    "pools=",
+    "loose:",
+    "init-program",
+    ".agents/",
+    ".py",
+    "${",
+    "--program-id",
+    "--paper-id",
+    "source_ready",
+    "awaiting_agent_fill",
+    "ready_to_verify",
+    "pending_user_confirmation",
+    "candidate_pools",
+    "grounded",
+)
+
+
+def _assert_public_governance_safe(text: str) -> None:
+    for token in PUBLIC_GOVERNANCE_FORBIDDEN:
+        assert token not in text
 
 
 def _project_root() -> Path:
@@ -79,6 +105,8 @@ def test_kb_help_snapshot_contains_group_headers() -> None:
     assert "请基于当前知识库给我 3 个候选 idea" in text
     assert "为这个 program 生成周报材料" in text
     assert "也可以直接对 AI 说" in text
+    assert "grounded" not in text
+    assert "有逐字证据支持的笔记" in text
 
 
 @pytest.mark.parametrize(
@@ -177,7 +205,8 @@ def test_kb_update_check_only_reports_available_without_user_facing_commands(mon
 
     lines = capsys.readouterr().out.splitlines()
     assert "当前 research skill 版本：0.1.0。" in lines
-    assert "远端 research skill 版本：0.2.0。" in lines
+    assert "更新源中的 research skill 版本：0.2.0。" in lines
+    assert all("远端" not in line for line in lines)
     assert any("发现可用更新" in line for line in lines)
     for line in lines:
         assert not any(token in line for token in ("python3", ".py ", "--", "${", "git "))
@@ -231,7 +260,8 @@ def test_kb_update_offline_reports_unknown_without_changes(monkeypatch, tmp_path
 
     output = capsys.readouterr().out
     assert "当前 research skill 版本：0.1.0。" in output
-    assert "远端 research skill 版本：未知。" in output
+    assert "更新源中的 research skill 版本：未知。" in output
+    assert "远端" not in output
     assert "当前安装未做任何改动" in output
     assert "NEXT FOR AGENT:" not in output
 
@@ -350,6 +380,31 @@ def test_kb_init_rejects_ai_signer_name_before_writing_prefs(monkeypatch, tmp_pa
     with pytest.raises(SystemExit, match="不能使用 AI 工具名称"):
         kb.main(["--root", str(tmp_path), "init", "--name", "codex"])
     assert calls == []
+
+
+def test_kb_writes_agent_protocol_when_handler_raises_system_exit(tmp_path: Path) -> None:
+    kb = _load_kb_cli()
+
+    with pytest.raises(SystemExit, match="不能使用 AI 工具名称"):
+        kb.main(
+            [
+                "--root",
+                str(tmp_path),
+                "--agent-protocol",
+                "init-error.json",
+                "init",
+                "--name",
+                "codex",
+            ]
+        )
+
+    protocol = json.loads(
+        (tmp_path / "kb" / ".runtime" / "init-error.json").read_text(encoding="utf-8")
+    )
+    assert protocol["verb"] == "init"
+    assert protocol["status"] == "error"
+    assert protocol["exit_code"] == 1
+    assert "不能使用 AI 工具名称" in protocol["details"]["error"]
 
 
 def test_kb_init_is_idempotent_and_emits_one_public_summary(tmp_path: Path, capsys) -> None:
@@ -510,9 +565,11 @@ def test_kb_init_repairs_missing_nested_default_without_resetting_custom_values(
 def test_kb_status_forwards_current_state_and_program(monkeypatch, tmp_path: Path) -> None:
     kb = _load_kb_cli()
     calls: list[tuple[str, tuple[str, ...]]] = []
+    stream_values: list[bool] = []
 
-    def fake_forward(root: Path, relative_script: str, args: list[str]) -> kb.CommandResult:
+    def fake_forward(root: Path, relative_script: str, args: list[str], *, stream: bool = True) -> kb.CommandResult:
         calls.append((relative_script, tuple(args)))
+        stream_values.append(stream)
         return kb.CommandResult((relative_script, *args), 0)
 
     monkeypatch.setattr(kb, "forward_command", fake_forward)
@@ -523,14 +580,17 @@ def test_kb_status_forwards_current_state_and_program(monkeypatch, tmp_path: Pat
         (".agents/skills/research-navigator/scripts/navigate.py", ("current-state",)),
         (".agents/skills/research-orchestrator/scripts/orchestrate.py", ("status", "--program-id", "p-demo")),
     ]
+    assert stream_values == [False, False]
 
 
 def test_kb_status_stops_when_first_forward_fails(monkeypatch, tmp_path: Path) -> None:
     kb = _load_kb_cli()
     calls: list[tuple[str, tuple[str, ...]]] = []
+    stream_values: list[bool] = []
 
-    def fake_forward(root: Path, relative_script: str, args: list[str]) -> kb.CommandResult:
+    def fake_forward(root: Path, relative_script: str, args: list[str], *, stream: bool = True) -> kb.CommandResult:
         calls.append((relative_script, tuple(args)))
+        stream_values.append(stream)
         return kb.CommandResult((relative_script, *args), 17)
 
     monkeypatch.setattr(kb, "forward_command", fake_forward)
@@ -539,6 +599,42 @@ def test_kb_status_stops_when_first_forward_fails(monkeypatch, tmp_path: Path) -
     assert calls == [
         (".agents/skills/research-navigator/scripts/navigate.py", ("current-state",)),
     ]
+    assert stream_values == [False]
+
+
+def test_kb_status_public_output_hides_owner_machine_lines(
+    monkeypatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    kb = _load_kb_cli()
+
+    monkeypatch.setattr(
+        kb,
+        "forward_command",
+        lambda root, relative_script, args, *, stream=True: kb.CommandResult(
+            (relative_script, *args),
+            0,
+            "p-demo | status=source_ready | score=40 | pools=reading\n",
+        ),
+    )
+    monkeypatch.setattr(
+        kb,
+        "iter_records",
+        lambda root: [{"id": "p-demo", "kind": "paper", "title": "Demo"}],
+    )
+    monkeypatch.setattr(kb, "is_ready_for_human_review", lambda record: False)
+
+    assert kb.main(
+        ["--root", str(tmp_path), "--agent-protocol", "status.json", "status"]
+    ) == 0
+
+    output = capsys.readouterr().out
+    assert output == "知识库目前收录 1 条资料：1 篇论文。\n"
+    _assert_public_governance_safe(output)
+    protocol = json.loads((tmp_path / "kb" / ".runtime" / "status.json").read_text(encoding="utf-8"))
+    assert protocol["details"]["record_count"] == 1
+    assert protocol["details"]["kind_counts"]["paper"] == 1
 
 
 def test_kb_recovery_verbs_forward_without_raw_git_commands(monkeypatch, tmp_path: Path) -> None:
@@ -564,35 +660,178 @@ def test_kb_recovery_verbs_forward_without_raw_git_commands(monkeypatch, tmp_pat
 def test_kb_next_forwards_to_orchestrator(monkeypatch, tmp_path: Path) -> None:
     kb = _load_kb_cli()
     calls: list[tuple[str, tuple[str, ...]]] = []
-    monkeypatch.setattr(
-        kb,
-        "forward_command",
-        lambda root, relative_script, args: calls.append((relative_script, tuple(args)))
-        or kb.CommandResult((relative_script, *args), 0),
-    )
+    stream_values: list[bool] = []
+
+    def fake_forward(root: Path, relative_script: str, args: list[str], *, stream: bool = True) -> kb.CommandResult:
+        calls.append((relative_script, tuple(args)))
+        stream_values.append(stream)
+        return kb.CommandResult((relative_script, *args), 0, '{"has_records": false, "items": []}\n')
+
+    monkeypatch.setattr(kb, "forward_command", fake_forward)
 
     assert kb.main(["--root", str(tmp_path), "next"]) == 0
 
     assert calls == [
-        (".agents/skills/research-orchestrator/scripts/orchestrate.py", ("next",)),
+        (".agents/skills/research-orchestrator/scripts/orchestrate.py", ("next", "--json")),
     ]
+    assert stream_values == [False]
 
 
 def test_kb_next_forwards_program_filter(monkeypatch, tmp_path: Path) -> None:
     kb = _load_kb_cli()
     calls: list[tuple[str, tuple[str, ...]]] = []
-    monkeypatch.setattr(
-        kb,
-        "forward_command",
-        lambda root, relative_script, args: calls.append((relative_script, tuple(args)))
-        or kb.CommandResult((relative_script, *args), 0),
-    )
+    stream_values: list[bool] = []
+
+    def fake_forward(root: Path, relative_script: str, args: list[str], *, stream: bool = True) -> kb.CommandResult:
+        calls.append((relative_script, tuple(args)))
+        stream_values.append(stream)
+        return kb.CommandResult((relative_script, *args), 0, '{"has_records": true, "items": []}\n')
+
+    monkeypatch.setattr(kb, "forward_command", fake_forward)
 
     assert kb.main(["--root", str(tmp_path), "next", "p-demo"]) == 0
 
     assert calls == [
-        (".agents/skills/research-orchestrator/scripts/orchestrate.py", ("next", "--program-id", "p-demo")),
+        (".agents/skills/research-orchestrator/scripts/orchestrate.py", ("next", "--json", "--program-id", "p-demo")),
     ]
+    assert stream_values == [False]
+
+
+def test_kb_next_public_output_and_protocol_preserve_human_gate_semantics(
+    monkeypatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    kb = _load_kb_cli()
+    payload = {
+        "has_records": True,
+        "items": [
+            {
+                "program_id": "p-review",
+                "step_type": "program-work",
+                "pending_confirmation_count": 1,
+                "next_action": "init-program | status=pending_user_confirmation | score=90",
+                "recommended_command": "python3 .agents/owner.py --program-id p-review",
+            },
+            {
+                "program_id": "loose:b-demo",
+                "record_id": "b-demo",
+                "title": "Demo Blog",
+                "step_type": "agent-fill",
+                "next_action": "awaiting_agent_fill",
+            },
+        ],
+    }
+    monkeypatch.setattr(
+        kb,
+        "forward_command",
+        lambda root, relative_script, args, *, stream=True: kb.CommandResult(
+            (relative_script, *args), 0, json.dumps(payload)
+        ),
+    )
+
+    assert kb.main(
+        ["--root", str(tmp_path), "--agent-protocol", "next.json", "next"]
+    ) == 0
+
+    output = capsys.readouterr().out
+    assert "研究计划「p-review」：已有经过核验的判断，等待你确认" in output
+    assert "资料「Demo Blog」（b-demo）：Agent 需要补全有逐字证据的分析" in output
+    assert "请直接用自然语言告诉我你的决定" in output
+    _assert_public_governance_safe(output)
+    protocol = json.loads((tmp_path / "kb" / ".runtime" / "next.json").read_text(encoding="utf-8"))
+    assert protocol["status"] == "needs_user_authorization"
+    assert protocol["details"]["item_count"] == 2
+    assert [action["action"] for action in protocol["next_actions"]] == [
+        "request_user_decision",
+        "continue_research_work",
+    ]
+
+
+def test_kb_next_invalid_owner_response_is_natural_and_fail_closed(
+    monkeypatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    kb = _load_kb_cli()
+    monkeypatch.setattr(
+        kb,
+        "forward_command",
+        lambda root, relative_script, args, *, stream=True: kb.CommandResult(
+            (relative_script, *args),
+            2,
+            "init-program --program-id hidden | score=99\n",
+        ),
+    )
+
+    assert kb.main(["--root", str(tmp_path), "next"]) == 2
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "暂时无法判断下一步；详细诊断已保留给 Agent。\n"
+    _assert_public_governance_safe(captured.err)
+
+
+def test_kb_next_blog_only_source_ready_is_not_reported_as_empty(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    kb = _load_kb_cli()
+    write_yaml_if_changed(
+        record_path(tmp_path, "blog", "b-blog-only-123456"),
+        {
+            "id": "b-blog-only-123456",
+            "kind": "blog",
+            "title": "Blog Only",
+            "status": "active",
+            "confirmation_status": "auto_confirmed",
+            "information_types": ["fact"],
+            "summary": "",
+            "tags": [],
+            "topics": [],
+            "candidate_pools": [],
+            "source": {"original_uri": "https://example.com/blog", "file_hash": ""},
+            "payload": {},
+        },
+    )
+
+    assert kb.main(["--root", str(tmp_path), "next"]) == 0
+
+    output = capsys.readouterr().out
+    assert "资料「Blog Only」（b-blog-only-123456）" in output
+    assert "有逐字证据支持的摘要" in output
+    assert "知识库还是空的" not in output
+    _assert_public_governance_safe(output)
+
+
+def test_kb_next_existing_completed_record_reports_no_pending_work(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    kb = _load_kb_cli()
+    write_yaml_if_changed(
+        record_path(tmp_path, "blog", "b-done-123456"),
+        {
+            "id": "b-done-123456",
+            "kind": "blog",
+            "title": "Done Blog",
+            "status": "completed",
+            "confirmation_status": "confirmed",
+            "information_types": ["fact"],
+            "summary": "Complete.",
+            "tags": [],
+            "topics": [],
+            "candidate_pools": [],
+            "source": {"original_uri": "https://example.com/done", "file_hash": ""},
+            "payload": {},
+        },
+    )
+
+    assert kb.main(["--root", str(tmp_path), "next"]) == 0
+
+    output = capsys.readouterr().out
+    assert output == "知识库已有资料，但目前没有待处理事项。\n"
+    _assert_public_governance_safe(output)
 
 
 @pytest.mark.parametrize(
@@ -782,21 +1021,23 @@ def test_kb_ingest_keeps_both_owner_outputs_private(
     assert [item["stdout"] for item in protocol["child_results"]] == [intake_stdout, prepare_stdout]
 
 
-def _capture_forward(kb, monkeypatch) -> list[tuple[str, tuple[str, ...]]]:
+def _capture_forward(kb, monkeypatch) -> tuple[list[tuple[str, tuple[str, ...]]], list[bool]]:
     calls: list[tuple[str, tuple[str, ...]]] = []
-    monkeypatch.setattr(
-        kb,
-        "forward_command",
-        lambda root, relative_script, args: calls.append((relative_script, tuple(args)))
-        or kb.CommandResult((relative_script, *args), 0),
-    )
-    return calls
+    stream_values: list[bool] = []
+
+    def fake_forward(root: Path, relative_script: str, args: list[str], *, stream: bool = True) -> kb.CommandResult:
+        calls.append((relative_script, tuple(args)))
+        stream_values.append(stream)
+        return kb.CommandResult((relative_script, *args), 0)
+
+    monkeypatch.setattr(kb, "forward_command", fake_forward)
+    return calls, stream_values
 
 
 def test_kb_reject_forwards_to_promote_rejected(monkeypatch, tmp_path: Path) -> None:
     """F1: `kb reject <id>` reuses knowledge-base-manager promote --confirmation-status rejected."""
     kb = _load_kb_cli()
-    calls = _capture_forward(kb, monkeypatch)
+    calls, stream_values = _capture_forward(kb, monkeypatch)
 
     assert kb.main(["--root", str(tmp_path), "reject", "b-langwbc-repo-78d111a4", "--reason", "mis-created"]) == 0
 
@@ -806,11 +1047,12 @@ def test_kb_reject_forwards_to_promote_rejected(monkeypatch, tmp_path: Path) -> 
             ("promote", "--id", "b-langwbc-repo-78d111a4", "--confirmation-status", "rejected", "--evidence", "mis-created"),
         ),
     ]
+    assert stream_values == [False]
 
 
 def test_kb_reject_without_reason_omits_evidence(monkeypatch, tmp_path: Path) -> None:
     kb = _load_kb_cli()
-    calls = _capture_forward(kb, monkeypatch)
+    calls, stream_values = _capture_forward(kb, monkeypatch)
 
     assert kb.main(["--root", str(tmp_path), "reject", "b-x-1"]) == 0
 
@@ -820,6 +1062,38 @@ def test_kb_reject_without_reason_omits_evidence(monkeypatch, tmp_path: Path) ->
             ("promote", "--id", "b-x-1", "--confirmation-status", "rejected"),
         ),
     ]
+    assert stream_values == [False]
+
+
+@pytest.mark.parametrize("returncode", [0, 4])
+def test_kb_reject_public_feedback_is_natural_and_hides_owner_output(
+    returncode: int,
+    monkeypatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    kb = _load_kb_cli()
+    monkeypatch.setattr(
+        kb,
+        "forward_command",
+        lambda root, relative_script, args, *, stream=True: kb.CommandResult(
+            (relative_script, *args),
+            returncode,
+            "record | status=rejected | score=0 | kb/units/papers/demo/record.yaml\n",
+        ),
+    )
+
+    assert kb.main(["--root", str(tmp_path), "reject", "p-demo"]) == returncode
+
+    captured = capsys.readouterr()
+    public = captured.out + captured.err
+    if returncode == 0:
+        assert captured.out == "知识条目「p-demo」已拒绝。若这是误操作，可使用 kb undo 撤销。\n"
+        assert captured.err == ""
+    else:
+        assert captured.out == ""
+        assert captured.err == "未能拒绝知识条目「p-demo」；请检查编号后重试。\n"
+    _assert_public_governance_safe(public)
 
 
 def test_kb_add_allows_explicit_kind_override(monkeypatch, tmp_path: Path) -> None:
@@ -942,17 +1216,71 @@ def test_kb_review_apply_builder_transmits_user_authorization(monkeypatch, tmp_p
 def test_kb_find_forwards_joined_keywords(monkeypatch, tmp_path: Path) -> None:
     kb = _load_kb_cli()
     calls: list[tuple[str, tuple[str, ...]]] = []
-    monkeypatch.setattr(
-        kb,
-        "forward_command",
-        lambda root, relative_script, args: calls.append((relative_script, tuple(args)))
-        or kb.CommandResult((relative_script, *args), 0),
-    )
+    stream_values: list[bool] = []
+
+    def fake_forward(root: Path, relative_script: str, args: list[str], *, stream: bool = True) -> kb.CommandResult:
+        calls.append((relative_script, tuple(args)))
+        stream_values.append(stream)
+        return kb.CommandResult((relative_script, *args), 0)
+
+    monkeypatch.setattr(kb, "forward_command", fake_forward)
 
     assert kb.main(["--root", str(tmp_path), "find", "policy", "gradient"]) == 0
 
     assert calls == [
         (".agents/skills/knowledge-base-manager/scripts/kb.py", ("query", "--query", "policy gradient")),
+    ]
+    assert stream_values == [False]
+
+
+def test_kb_find_public_output_is_natural_and_protocol_remains_structured(
+    monkeypatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    kb = _load_kb_cli()
+    monkeypatch.setattr(
+        kb,
+        "forward_command",
+        lambda root, relative_script, args, *, stream=True: kb.CommandResult(
+            (relative_script, *args),
+            0,
+            "p-demo | status=source_ready | score=9 | pools=reading\n",
+        ),
+    )
+    monkeypatch.setattr(
+        kb,
+        "search_records",
+        lambda root, query: [
+            {
+                "id": "p-demo",
+                "kind": "paper",
+                "title": "Policy Gradient",
+                "summary": "A concise summary.",
+            }
+        ],
+    )
+    monkeypatch.setattr(kb, "record_workflow_state", lambda record: "source_ready")
+
+    assert kb.main(
+        ["--root", str(tmp_path), "--agent-protocol", "find.json", "find", "policy", "gradient"]
+    ) == 0
+
+    output = capsys.readouterr().out
+    assert "找到 1 条相关资料" in output
+    assert "论文「Policy Gradient」（p-demo）" in output
+    assert "Agent 还需要继续整理或核验这条资料" in output
+    _assert_public_governance_safe(output)
+    protocol = json.loads((tmp_path / "kb" / ".runtime" / "find.json").read_text(encoding="utf-8"))
+    assert protocol["details"]["query"] == "policy gradient"
+    assert protocol["details"]["records"] == [
+        {
+            "id": "p-demo",
+            "kind": "paper",
+            "summary": "A concise summary.",
+            "title": "Policy Gradient",
+            "workflow_state": "source_ready",
+        }
     ]
 
 
