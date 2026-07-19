@@ -29,6 +29,23 @@ def _run_experiment(root: Path, *args: str, check: bool = True) -> subprocess.Co
     )
 
 
+def _run_report(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    project_root = Path(__file__).resolve().parents[4]
+    script = project_root / ".agents" / "skills" / "report-author" / "scripts" / "report.py"
+    return subprocess.run(
+        [sys.executable, str(script), "--root", str(root), *args],
+        check=check,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _markdown_section(text: str, heading: str) -> str:
+    start = text.index(heading)
+    next_heading = text.find("\n## ", start + len(heading))
+    return text[start : next_heading if next_heading >= 0 else len(text)]
+
+
 def test_typed_metric_parses_value_unit_and_direction() -> None:
     module = _experiment_module()
 
@@ -186,6 +203,135 @@ def test_diagnosis_claim_verifies_verbatim_run_evidence_and_rejects_fabrication(
     assert rejected.returncode != 0
     assert "not verbatim in artifact 'runs/run-001.md'" in rejected.stderr
     assert len(load_yaml(record_path.parent / "diagnoses.yaml")["items"]) == 1
+
+
+def test_reports_isolate_pending_diagnoses_and_require_current_receipt_for_judgement_progress(tmp_path: Path) -> None:
+    program_id = "program-report-epistemics"
+    run_summary = "Observed validation loss spike after the data refresh."
+    pending_summary = "The failure was caused by dataset corruption."
+    confirmed_summary = "The data refresh likely caused the validation regression."
+    _run_experiment(tmp_path, "plan", "--title", "report epistemics", "--program-id", program_id)
+    record_path = next((tmp_path / "kb" / "units" / "experiments").glob("*/record.yaml"))
+    experiment_id = load_yaml(record_path)["id"]
+    _run_experiment(
+        tmp_path,
+        "log-run",
+        "--experiment-id",
+        experiment_id,
+        "--result-summary",
+        run_summary,
+        "--outcome",
+        "failed",
+        "--classification",
+        "data",
+    )
+    _run_experiment(
+        tmp_path,
+        "diagnose",
+        "--experiment-id",
+        experiment_id,
+        "--summary",
+        pending_summary,
+        "--category",
+        "data",
+    )
+
+    _run_report(tmp_path, "weekly", "--program-id", program_id)
+    report_path = tmp_path / "kb" / "programs" / program_id / "reports" / "weekly.md"
+    pending_report = report_path.read_text(encoding="utf-8")
+    ordinary_section = _markdown_section(pending_report, "## Reporting Events")
+    pending_section = _markdown_section(pending_report, "## Pending / Unverified judgements")
+    assert run_summary in ordinary_section
+    assert pending_summary not in ordinary_section
+    assert "PENDING / UNVERIFIED JUDGEMENT" in pending_section
+    assert pending_summary in pending_section
+    assert "missing: canonical claim binding" in pending_section
+
+    events_path = tmp_path / "kb" / "programs" / program_id / "workflow" / "reporting-events.yaml"
+    diagnosis_events = [
+        item
+        for item in load_yaml(events_path)["items"]
+        if item.get("event_type") == "experiment-diagnosis"
+    ]
+    pending_event = diagnosis_events[-1]
+    assert pending_event["epistemic_type"] == "judgement"
+    assert pending_event["information_types"] == ["inference", "evaluation", "unverified"]
+    assert pending_event["confirmation_status"] == "pending_user_confirmation"
+    pending_binding = pending_event["confirmation_binding"]
+    assert pending_binding["subject"] == {"kind": "experiment", "id": experiment_id}
+    assert pending_binding["claim_ids"] == []
+    assert len(pending_binding["content_digest"]) == 64
+    assert pending_binding["verification"] == {
+        "verified_at": "",
+        "claims_digest": "",
+        "evidence_digest": "",
+    }
+
+    claims_path = record_path.parent / "diagnosis-claims.yaml"
+    claim = {
+        "id": "claim-current-diagnosis",
+        "text": confirmed_summary,
+        "claim_type": "inference",
+        "confirmation_status": "pending_user_confirmation",
+        "evidence_refs": [
+            {
+                "source_unit_id": experiment_id,
+                "artifact": "runs/run-001.md",
+                "locator": "Result Summary",
+                "quote": run_summary,
+            }
+        ],
+    }
+    write_yaml_if_changed(claims_path, {"claims": [claim]})
+    _run_experiment(
+        tmp_path,
+        "diagnose",
+        "--experiment-id",
+        experiment_id,
+        "--summary",
+        confirmed_summary,
+        "--category",
+        "data",
+        "--claims-file",
+        str(claims_path),
+    )
+    _run_experiment(
+        tmp_path,
+        "confirm",
+        "--experiment-id",
+        experiment_id,
+        "--confirmed-by",
+        "human-reviewer",
+        "--evidence",
+        str((record_path.parent / "run-log.yaml").relative_to(tmp_path)),
+        "--user-authorization",
+        "I confirm this experiment diagnosis.",
+        "--authorization-source",
+        "user_message",
+    )
+    _run_report(tmp_path, "weekly", "--program-id", program_id)
+    confirmed_report = report_path.read_text(encoding="utf-8")
+    ordinary_section = _markdown_section(confirmed_report, "## Reporting Events")
+    pending_section = _markdown_section(confirmed_report, "## Pending / Unverified judgements")
+    assert run_summary in ordinary_section
+    assert confirmed_summary in ordinary_section
+    assert "confirmation: current receipt" in ordinary_section
+    assert confirmed_summary not in pending_section
+    assert pending_summary in pending_section
+
+    diagnosis_events = [
+        item
+        for item in load_yaml(events_path)["items"]
+        if item.get("event_type") == "experiment-diagnosis"
+    ]
+    binding = diagnosis_events[-1]["confirmation_binding"]
+    confirmed_record = load_yaml(record_path)
+    assert binding["claim_ids"] == [claim["id"]]
+    assert binding["content_digest"] == confirmed_record["confirmation"]["content_digest"]
+    assert binding["verification"] == {
+        key: confirmed_record["payload"]["verification"][key]
+        for key in ("verified_at", "claims_digest", "evidence_digest")
+    }
 
 
 def test_experiment_validator_lifecycle(tmp_path: Path) -> None:

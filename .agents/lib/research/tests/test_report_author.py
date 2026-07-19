@@ -185,6 +185,47 @@ def test_weekly_and_stage_reports_include_claims_evidence_events_and_decisions(t
     assert "## Writing Claims & Evidence" in writing
 
 
+def test_legacy_judgement_event_with_confirmed_string_fails_safe_without_canonical_binding(tmp_path: Path) -> None:
+    report = _load_report_module()
+    root, program_id, unit_id = _make_workspace(tmp_path)
+    events_path = root / "kb" / "programs" / program_id / "workflow" / "reporting-events.yaml"
+    write_yaml_if_changed(
+        events_path,
+        {
+            "id": f"{program_id}-reporting-events",
+            "items": [
+                {
+                    "source_skill": "paper-analyst",
+                    "event_type": "phase-completed",
+                    "title": "Grounded review completed",
+                    "summary": "The paper analysis is ready for reporting.",
+                    "paper_ids": [unit_id],
+                    "timestamp": "2026-07-17T00:00:00+00:00",
+                },
+                {
+                    "source_skill": "experiment-workbench",
+                    "event_type": "experiment-diagnosis",
+                    "title": "Legacy diagnosis",
+                    "summary": "A stale legacy diagnosis asserted a likely cause.",
+                    "confirmation_status": "confirmed",
+                    "timestamp": "2026-07-17T00:01:00+00:00",
+                },
+            ],
+        },
+    )
+
+    inputs = report.load_report_inputs(root, program_id)
+    weekly = report.render_report(f"Weekly Report: {program_id}", inputs, report_kind="weekly")
+    ordinary_section = weekly[weekly.index("## Reporting Events") : weekly.index("## Pending / Unverified judgements")]
+    pending_section = weekly[weekly.index("## Pending / Unverified judgements") :]
+
+    assert "The paper analysis is ready for reporting." in ordinary_section
+    assert "A stale legacy diagnosis asserted a likely cause." not in ordinary_section
+    assert "A stale legacy diagnosis asserted a likely cause." in pending_section
+    assert "confirmation_status=confirmed" in pending_section
+    assert "missing: canonical confirmation subject binding" in pending_section
+
+
 def test_outline_produces_evidence_backed_section_skeleton(tmp_path: Path) -> None:
     report = _load_report_module()
     root, program_id, _ = _make_workspace(tmp_path)
