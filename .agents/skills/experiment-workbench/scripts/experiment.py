@@ -33,7 +33,7 @@ from research.common import (
     write_text_if_changed,
 )
 from research.core import append_history, build_index, build_unit_id, candidate_pools_path, command_mutation, confirm_unit, default_record, ensure_workspace, kb_root, locate_record, project_root, record_path, rel, topic_taxonomy_path, write_record
-from research.evidence import attach_claims, build_verification_receipt, validate_claims, verify_claim_evidence
+from research.evidence import attach_claims, build_verification_receipt, confirmation_content_digest, validate_claims, verify_claim_evidence
 
 RUN_OUTCOME_CHOICES = ["success", "partial", "failed", "blocked", "inconclusive"]
 CLASSIFICATION_CHOICES = ["method", "implementation", "data", "evaluation", "resource", "environment", "process", "unknown"]
@@ -668,9 +668,22 @@ def _dispatch(args, root: Path) -> int:
                     "event_type": "experiment-diagnosis",
                     "title": record.get("title", args.experiment_id),
                     "summary": args.summary,
+                    "unit_id": args.experiment_id,
                     "stage": "experiment-diagnosis",
                     "artifacts": [rel(root, diagnosis_path), rel(root, unit_root / "diagnosis.md")],
                     "tags": ["experiment", "diagnosis", *(normalize_list(args.category) or ["unknown"])],
+                    "epistemic_type": "judgement",
+                    "information_types": ["inference", "evaluation", "unverified"],
+                    "confirmation_status": "pending_user_confirmation",
+                    "confirmation_binding": {
+                        "subject": {"kind": "experiment", "id": args.experiment_id},
+                        "claim_ids": [str(claim.get("id") or "") for claim in claims if str(claim.get("id") or "").strip()],
+                        "content_digest": confirmation_content_digest(record),
+                        "verification": {
+                            key: str(record.get("payload", {}).get("verification", {}).get(key) or "")
+                            for key in ("verified_at", "claims_digest", "evidence_digest")
+                        },
+                    },
                 },
                 generated_by="experiment-workbench",
             )
