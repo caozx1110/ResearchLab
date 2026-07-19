@@ -51,6 +51,8 @@ from research.core import (
     stage_search_results,
     unit_root,
     topic_taxonomy_path,
+    UnsafeLocalSourceError,
+    validate_local_source,
     write_parse_cache,
     write_record,
 )
@@ -501,6 +503,11 @@ def main() -> int:
         source = source or str(staged_candidate.get("url") or "")
     if not source:
         raise SystemExit("Provide --source or use --stage-id + --candidate-id.")
+    if not source.startswith("http"):
+        try:
+            validate_local_source(root, source)
+        except UnsafeLocalSourceError as exc:
+            raise SystemExit(str(exc)) from exc
     source = normalize_storage_reference(root, source) if not source.startswith("http") else source
     paper_metadata = infer_paper_metadata(root, source) if args.kind == "paper" else {}
     title = (

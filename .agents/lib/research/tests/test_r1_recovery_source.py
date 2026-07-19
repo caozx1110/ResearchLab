@@ -791,6 +791,92 @@ def test_unsupported_local_binary_exits_nonzero_without_canonical_unit(
     assert list((tmp_path / "kb" / "units" / "blogs").glob("*/record.yaml")) == []
 
 
+@pytest.mark.parametrize("source_shape", ["absolute-file-link", "nested-directory-link"])
+def test_owner_intake_rejects_symlinks_before_identity_or_journal_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source_shape: str,
+) -> None:
+    intake = _load_intake_module()
+    secret = b"owner-intake-outside-secret\n"
+    if source_shape == "absolute-file-link":
+        outside = tmp_path / "outside-secret.md"
+        outside.write_bytes(secret)
+        selected = tmp_path / "selected-link.md"
+        selected.symlink_to(outside)
+        kind = "blog"
+    else:
+        outside = tmp_path / "outside-tree"
+        outside.mkdir()
+        (outside / "secret.txt").write_bytes(secret)
+        selected = tmp_path / "selected-repo"
+        selected.mkdir()
+        (selected / "README.md").write_text("# Safe before nested link\n", encoding="utf-8")
+        (selected / "nested-link").symlink_to(outside, target_is_directory=True)
+        kind = "repo"
+    monkeypatch.setattr(intake, "checkpoint_and_report", lambda *args, **kwargs: {"status": "disabled"})
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "intake.py",
+            "--root",
+            str(tmp_path),
+            "add",
+            "--kind",
+            kind,
+            "--source",
+            selected.as_posix(),
+        ],
+    )
+
+    with pytest.raises(SystemExit, match="符号链接"):
+        intake.main()
+
+    assert list((tmp_path / "kb" / "units").glob("**/record.yaml")) == []
+    assert list((tmp_path / "kb" / ".runtime" / "intake-staging").glob("**/failure.yaml")) == []
+    assert list((tmp_path / "kb" / ".journal" / "snapshots").glob("*")) == []
+    copied = [
+        path
+        for path in (tmp_path / "kb").rglob("*")
+        if path.is_file() and not path.is_symlink() and secret in path.read_bytes()
+    ]
+    assert copied == []
+
+
+def test_owner_intake_preserves_relative_legacy_raw_remap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    intake = _load_intake_module()
+    legacy_target = tmp_path / "kb" / "raw" / "legacy-note.md"
+    legacy_target.parent.mkdir(parents=True)
+    legacy_target.write_text("# Legacy note\n\nGrounded body.\n", encoding="utf-8")
+    monkeypatch.setattr(intake, "checkpoint_and_report", lambda *args, **kwargs: {"status": "disabled"})
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "intake.py",
+            "--root",
+            str(tmp_path),
+            "add",
+            "--kind",
+            "blog",
+            "--source",
+            "raw/legacy-note.md",
+        ],
+    )
+
+    assert intake.main() == 0
+
+    records = list((tmp_path / "kb" / "units" / "blogs").glob("*/record.yaml"))
+    assert len(records) == 1
+    record = load_yaml(records[0])
+    assert record["source"]["original_uri"] == legacy_target.resolve().as_posix()
+    assert legacy_target.read_text(encoding="utf-8") == "# Legacy note\n\nGrounded body.\n"
+
+
 def test_repo_backup_excludes_vcs_metadata_before_canonical_materialization(tmp_path: Path) -> None:
     source_repo = tmp_path / "source-repo"
     (source_repo / ".git").mkdir(parents=True)

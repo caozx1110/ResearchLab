@@ -474,6 +474,128 @@ def test_kb_add_forwards_inferred_kind(monkeypatch, tmp_path: Path) -> None:
     ]
 
 
+def test_kb_add_keeps_owner_protocol_private_and_humanizes_public_output(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    kb = _load_kb_cli()
+    raw_stdout = (
+        "[source] backup_status=ok source_type=directory locator_kind=-\n"
+        "[ok] created kb/units/repos/r-demo/record.yaml\n"
+        "待内容补全并校验后，再请你确认条目 r-demo。\n"
+        "[ok] git checkpoint: deadbeef\n"
+        "[auto] indexed kb/units/repos/r-demo\n"
+        "[hint] 已入库，下一步：运行 kb next，或让 AI 扫描结构。\n"
+    )
+
+    monkeypatch.setattr(
+        kb.subprocess,
+        "run",
+        lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, stdout=raw_stdout, stderr=""),
+    )
+
+    assert kb.main(
+        ["--root", str(tmp_path), "--agent-protocol", "add.json", "add", "https://github.com/org/demo"]
+    ) == 0
+
+    output = capsys.readouterr().out
+    assert "资料已加入知识库" in output
+    assert "待内容补全并校验后" in output
+    assert "kb next" in output
+    for forbidden in (
+        "backup_status",
+        "source_type",
+        "locator_kind",
+        "checkpoint",
+        "deadbeef",
+        "[auto]",
+        "kb/units/",
+    ):
+        assert forbidden not in output
+    protocol = json.loads((tmp_path / "kb" / ".runtime" / "add.json").read_text(encoding="utf-8"))
+    assert protocol["child_results"][0]["stdout"] == raw_stdout
+
+
+@pytest.mark.parametrize("verb", ["add", "ingest"])
+def test_kb_public_intake_rejects_symlink_before_forwarding(
+    verb: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    kb = _load_kb_cli()
+    outside = tmp_path / "outside.md"
+    outside.write_text("private bytes\n", encoding="utf-8")
+    selected = tmp_path / "selected.md"
+    selected.symlink_to(outside)
+    calls: list[object] = []
+    monkeypatch.setattr(kb.subprocess, "run", lambda *args, **kwargs: calls.append(args) or None)
+
+    assert kb.main(["--root", str(tmp_path), verb, selected.as_posix()]) == 2
+
+    captured = capsys.readouterr()
+    assert calls == []
+    assert captured.out == ""
+    assert "已停止入库" in captured.err
+    assert selected.as_posix() not in captured.err
+    assert not (tmp_path / "kb").exists()
+
+
+def test_kb_ingest_keeps_both_owner_outputs_private(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    kb = _load_kb_cli()
+    intake_stdout = (
+        "[source] backup_status=ok source_type=pdf locator_kind=page\n"
+        "[ok] created kb/units/papers/p-demo/record.yaml\n"
+        "[ok] git checkpoint: cafe1234\n"
+        "[auto] prepared internal details\n"
+    )
+    prepare_stdout = (
+        "[ok] wrote kb/units/papers/p-demo/note-fill.yaml\n"
+        "NEXT FOR AGENT: read kb/units/papers/p-demo/parse-cache.yaml\n"
+    )
+
+    def fake_run(argv, **kwargs):
+        stdout = intake_stdout if str(argv[1]).endswith("intake.py") else prepare_stdout
+        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(kb.subprocess, "run", fake_run)
+    monkeypatch.setattr(kb, "effective_ingest_scope", lambda root: set(FULL_SCOPE))
+
+    assert kb.main(
+        [
+            "--root",
+            str(tmp_path),
+            "--agent-protocol",
+            "ingest-private.json",
+            "ingest",
+            "https://example.com/demo.pdf",
+        ]
+    ) == 0
+
+    output = capsys.readouterr().out
+    assert "已入库并备好深读骨架" in output
+    for forbidden in (
+        "backup_status",
+        "source_type",
+        "locator_kind",
+        "checkpoint",
+        "cafe1234",
+        "[auto]",
+        "NEXT FOR AGENT",
+        "kb/units/",
+    ):
+        assert forbidden not in output
+    protocol = json.loads(
+        (tmp_path / "kb" / ".runtime" / "ingest-private.json").read_text(encoding="utf-8")
+    )
+    assert [item["stdout"] for item in protocol["child_results"]] == [intake_stdout, prepare_stdout]
+
+
 def _capture_forward(kb, monkeypatch) -> list[tuple[str, tuple[str, ...]]]:
     calls: list[tuple[str, tuple[str, ...]]] = []
     monkeypatch.setattr(

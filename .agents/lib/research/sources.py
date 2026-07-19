@@ -10,8 +10,10 @@ backup status/warning (fixing the G7 silent-failure where PDFs stored nothing).
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import shutil
+import stat
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -478,10 +480,191 @@ def mark_search_candidate(
     return path
 
 
+class UnsafeLocalSourceError(RuntimeError):
+    """A selected local source cannot be archived without following links."""
+
+
+def _path_exists_without_following(path: Path) -> bool:
+    try:
+        path.lstat()
+    except (FileNotFoundError, OSError):
+        return False
+    return True
+
+
+def _local_source_candidates(project_root: Path, source: str) -> list[Path]:
+    """Return lexical local candidates without resolving a symlink leaf."""
+    text = str(source or "").strip()
+    candidate = Path(text).expanduser()
+    if candidate.is_absolute():
+        return [candidate]
+    original, remapped = _legacy_storage_map(project_root, text)
+    return [path for path in (remapped, original) if path is not None]
+
+
+def _validate_open_directory_no_links(source_fd: int) -> None:
+    try:
+        entries = sorted(os.scandir(source_fd), key=lambda entry: entry.name)
+    except OSError as exc:
+        raise UnsafeLocalSourceError("无法安全遍历这份本地资料。") from exc
+    for entry in entries:
+        try:
+            child_stat = os.stat(entry.name, dir_fd=source_fd, follow_symlinks=False)
+        except OSError as exc:
+            raise UnsafeLocalSourceError("无法安全检查这份本地资料。") from exc
+        if stat.S_ISLNK(child_stat.st_mode):
+            raise UnsafeLocalSourceError("这份本地资料包含符号链接；为避免读取范围外的内容，已停止入库。")
+        if stat.S_ISDIR(child_stat.st_mode):
+            flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+            try:
+                child_fd = os.open(entry.name, flags, dir_fd=source_fd)
+            except OSError as exc:
+                raise UnsafeLocalSourceError("本地资料在检查时发生了变化，已停止入库。") from exc
+            try:
+                if not stat.S_ISDIR(os.fstat(child_fd).st_mode):
+                    raise UnsafeLocalSourceError("本地资料在检查时发生了类型变化，已停止入库。")
+                _validate_open_directory_no_links(child_fd)
+            finally:
+                os.close(child_fd)
+        elif not stat.S_ISREG(child_stat.st_mode):
+            raise UnsafeLocalSourceError("这份本地资料包含不支持的文件类型，已停止入库。")
+
+
+def _assert_contained_local_tree(path: Path) -> None:
+    """Validate a local source with lstat/openat traversal, rejecting every link."""
+    try:
+        root_stat = path.lstat()
+    except OSError as exc:
+        raise UnsafeLocalSourceError("无法安全读取这份本地资料。") from exc
+    if stat.S_ISLNK(root_stat.st_mode):
+        raise UnsafeLocalSourceError("这份本地资料包含符号链接；为避免读取范围外的内容，已停止入库。")
+    if stat.S_ISREG(root_stat.st_mode):
+        return
+    if not stat.S_ISDIR(root_stat.st_mode):
+        raise UnsafeLocalSourceError("这份本地资料不是普通文件或目录，已停止入库。")
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        source_fd = os.open(path, flags)
+    except OSError as exc:
+        raise UnsafeLocalSourceError("本地资料在检查时发生了变化，已停止入库。") from exc
+    try:
+        if not stat.S_ISDIR(os.fstat(source_fd).st_mode):
+            raise UnsafeLocalSourceError("本地资料在检查时发生了类型变化，已停止入库。")
+        _validate_open_directory_no_links(source_fd)
+    finally:
+        os.close(source_fd)
+
+
+def validate_local_source(project_root: Path, source: str) -> Path | None:
+    """Return a safe lexical source path, or None when the reference is absent."""
+    for candidate in _local_source_candidates(project_root, source):
+        if not _path_exists_without_following(candidate):
+            continue
+        _assert_contained_local_tree(candidate)
+        return candidate
+    return None
+
+
+def _copy_regular_file_no_links(src: Path, dst: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(src, flags)
+    except OSError as exc:
+        raise UnsafeLocalSourceError("本地资料在复制前发生了变化，已停止入库。") from exc
+    try:
+        source_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(source_stat.st_mode):
+            raise UnsafeLocalSourceError("本地资料在复制前发生了类型变化，已停止入库。")
+        ensure_dir(dst.parent)
+        with os.fdopen(descriptor, "rb", closefd=False) as source_handle, dst.open("xb") as destination_handle:
+            shutil.copyfileobj(source_handle, destination_handle, length=1024 * 1024)
+    finally:
+        os.close(descriptor)
+
+
+def _file_sha256_no_links(path: Path) -> str:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise UnsafeLocalSourceError("本地资料在读取前发生了变化，已停止入库。") from exc
+    digest = hashlib.sha256()
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise UnsafeLocalSourceError("本地资料在读取前发生了类型变化，已停止入库。")
+        with os.fdopen(descriptor, "rb", closefd=False) as source_handle:
+            for chunk in iter(lambda: source_handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    finally:
+        os.close(descriptor)
+    return digest.hexdigest()
+
+
+def _copy_open_directory_no_links(source_fd: int, dst: Path) -> None:
+    """Copy a directory through openat-style descriptors; never follow links."""
+    dst.mkdir()
+    try:
+        entries = sorted(os.scandir(source_fd), key=lambda item: item.name)
+    except OSError as exc:
+        raise UnsafeLocalSourceError("本地资料在复制前发生了变化，已停止入库。") from exc
+    for entry in entries:
+        if entry.name in {".git", ".gitmodules"}:
+            continue
+        try:
+            child_stat = os.stat(entry.name, dir_fd=source_fd, follow_symlinks=False)
+        except OSError as exc:
+            raise UnsafeLocalSourceError("本地资料在复制前发生了变化，已停止入库。") from exc
+        if stat.S_ISLNK(child_stat.st_mode):
+            raise UnsafeLocalSourceError("这份本地资料包含符号链接；为避免读取范围外的内容，已停止入库。")
+        destination = dst / entry.name
+        if stat.S_ISDIR(child_stat.st_mode):
+            flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+            try:
+                child_fd = os.open(entry.name, flags, dir_fd=source_fd)
+            except OSError as exc:
+                raise UnsafeLocalSourceError("本地资料在复制前发生了变化，已停止入库。") from exc
+            try:
+                if not stat.S_ISDIR(os.fstat(child_fd).st_mode):
+                    raise UnsafeLocalSourceError("本地资料在复制前发生了类型变化，已停止入库。")
+                _copy_open_directory_no_links(child_fd, destination)
+            finally:
+                os.close(child_fd)
+        elif stat.S_ISREG(child_stat.st_mode):
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            try:
+                child_fd = os.open(entry.name, flags, dir_fd=source_fd)
+            except OSError as exc:
+                raise UnsafeLocalSourceError("本地资料在复制前发生了变化，已停止入库。") from exc
+            try:
+                if not stat.S_ISREG(os.fstat(child_fd).st_mode):
+                    raise UnsafeLocalSourceError("本地资料在复制前发生了类型变化，已停止入库。")
+                with os.fdopen(child_fd, "rb", closefd=False) as source_handle, destination.open("xb") as destination_handle:
+                    shutil.copyfileobj(source_handle, destination_handle, length=1024 * 1024)
+            finally:
+                os.close(child_fd)
+        else:
+            raise UnsafeLocalSourceError("这份本地资料包含不支持的文件类型，已停止入库。")
+
+
 def _copy_dir(src: Path, dst: Path) -> None:
+    _assert_contained_local_tree(src)
     if dst.exists():
         return
-    shutil.copytree(src, dst, ignore=shutil.ignore_patterns(".git", ".gitmodules"))
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        source_fd = os.open(src, flags)
+    except OSError as exc:
+        raise UnsafeLocalSourceError("本地资料在复制前发生了变化，已停止入库。") from exc
+    try:
+        if not stat.S_ISDIR(os.fstat(source_fd).st_mode):
+            raise UnsafeLocalSourceError("本地资料在复制前发生了类型变化，已停止入库。")
+        _copy_open_directory_no_links(source_fd, dst)
+    except Exception:
+        if dst.exists() and not dst.is_symlink():
+            shutil.rmtree(dst)
+        raise
+    finally:
+        os.close(source_fd)
 
 
 def _is_html_response(content_type: str, text: str) -> bool:
@@ -1005,17 +1188,16 @@ def _backup_generic_url(project_root: Path, root: Path, source: str) -> dict[str
 
 def _backup_local(project_root: Path, root: Path, source: str) -> dict[str, Any]:
     """Local file/dir: copy bytes, then parse every supported text/PDF type."""
-    normalized_source = normalize_storage_reference(project_root, source)
-    resolved_source = resolve_local_reference(project_root, normalized_source)
-    src = resolved_source or Path(normalized_source).expanduser().resolve()
-    if not src.exists():
+    src = validate_local_source(project_root, source)
+    if src is None:
         raise SystemExit(f"Source not found: {source}")
     dst = root / src.name
-    if src.is_dir():
+    source_stat = src.lstat()
+    if stat.S_ISDIR(source_stat.st_mode):
         _copy_dir(src, dst)
         return {"original_uri": src.as_posix(), "backup_paths": [rel(project_root, dst)], "backup_kind": "directory", "file_hash": "", "backup_status": "ok", "source_type": "directory", "locator_kind": ""}
     if not dst.exists():
-        shutil.copy2(src, dst)
+        _copy_regular_file_no_links(src, dst)
     result: dict[str, Any] = {
         "original_uri": src.as_posix(),
         "backup_paths": [rel(project_root, dst)],
@@ -1164,6 +1346,11 @@ def backup_source(
         destination_unit.relative_to(kb_root(project_root).resolve())
     except ValueError as exc:
         raise SystemExit(f"Source transaction destination must stay inside kb/: {destination_unit}") from exc
+    # Validate a selected local tree before creating even a staging/canonical
+    # destination.  Missing references may still be bare arxiv ids and are
+    # resolved below; existing links or special files fail closed here.
+    if not is_url(source):
+        validate_local_source(project_root, source)
     root = destination_unit / "source"
     ensure_dir(root)
     if is_url(source):
@@ -1206,14 +1393,15 @@ def _record_blocks_source_retry(project_root: Path, record: dict[str, Any]) -> b
 
 
 def detect_duplicate(project_root: Path, kind: str, source: str, *, title: str = "") -> dict[str, Any] | None:
+    local_path = None if is_url(source) else validate_local_source(project_root, source)
     normalized = normalize_remote_url(source) if is_url(source) else normalize_storage_reference(project_root, source)
     file_hash = ""
     candidate_arxiv_id = parse_arxiv_id(source)
     candidate_title = normalize_title(title) if title else ""
     if not is_url(source):
-        path = resolve_local_reference(project_root, normalized) or Path(normalized).expanduser().resolve()
-        if path.exists() and path.is_file():
-            file_hash = file_sha256(path)
+        path = local_path or resolve_local_reference(project_root, normalized) or Path(normalized).expanduser().resolve()
+        if path.exists() and path.is_file() and not path.is_symlink():
+            file_hash = _file_sha256_no_links(path)
             normalized = path.as_posix()
             if not candidate_arxiv_id:
                 candidate_arxiv_id = parse_arxiv_id(path.name)
@@ -1248,6 +1436,8 @@ def detect_duplicate(project_root: Path, kind: str, source: str, *, title: str =
 
 __all__ = [
     "WEB_SNAPSHOT_MAX_CHARS",
+    "UnsafeLocalSourceError",
+    "validate_local_source",
     "_copy_legacy_tree_item",
     "_copy_into_raw",
     "_rewrite_storage_text",

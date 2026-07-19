@@ -28,6 +28,7 @@ if __name__ == "__main__":
 
 from research.common import current_runtime_capabilities, find_project_root, load_yaml
 from research.core import config_root, default_confirmed_by, is_ai_signer, load_runtime_preferences, search_records
+from research.sources import UnsafeLocalSourceError, validate_local_source
 from research import updater
 
 
@@ -214,6 +215,12 @@ def _public_line_is_safe(line: str, root: Path) -> bool:
         return False
     if stripped.lower().startswith(("confirm:", "path:", "repo_path:", "project_root:", "skills_home:")):
         return False
+    if stripped.startswith(("[source]", "[auto]", "[checkpoint]")):
+        return False
+    if stripped.startswith("[ok] git checkpoint:"):
+        return False
+    if any(field in stripped for field in ("backup_status=", "source_type=", "locator_kind=")):
+        return False
     if " | confirm:" in line:
         return False
     for private_root in {str(root.resolve()), str(DEFAULT_PROJECT_ROOT.resolve())}:
@@ -240,6 +247,12 @@ def _humanize_owner_line(line: str) -> str | None:
         return "没有找到匹配的知识条目。"
     if stripped.startswith("[ok] no pending confirmations"):
         return "目前没有需要你确认的判断。"
+    if stripped.startswith(("[source]", "[auto]", "[checkpoint]", "[ok] git checkpoint:")):
+        return None
+    if any(field in stripped for field in ("backup_status=", "source_type=", "locator_kind=")):
+        return None
+    if stripped.startswith("[hint]") and "kb next" in stripped:
+        return "资料已加入知识库。接下来可运行 kb next，Agent 会继续整理并判断下一步。"
     return line.rstrip()
 
 
@@ -247,10 +260,10 @@ def emit_public_output(text: str, root: Path, *, error: bool = False) -> bool:
     emitted = False
     destination = sys.stderr if error else sys.stdout
     for line in text.splitlines():
-        if not _public_line_is_safe(line, root):
-            continue
         human = _humanize_owner_line(line)
         if human is None:
+            continue
+        if not _public_line_is_safe(human, root):
             continue
         print(human, file=destination)
         emitted = emitted or bool(human.strip())
@@ -517,7 +530,23 @@ def infer_add_kind(source: str, root: Path | None = None) -> str:
     return "blog"
 
 
+def _unsafe_local_source_result(source: str, root: Path) -> int | None:
+    """Fail closed before an owner process can create identities or snapshots."""
+    if source.strip().lower().startswith(("http://", "https://", "git@")):
+        return None
+    try:
+        validate_local_source(root, source)
+    except UnsafeLocalSourceError as exc:
+        print("这份本地资料包含不安全的链接或文件类型，已停止入库；请改用不含符号链接的普通文件或目录。", file=sys.stderr)
+        set_protocol_status("rejected_unsafe_source", reason=str(exc), source=source)
+        return 2
+    return None
+
+
 def handle_add(args: argparse.Namespace, root: Path) -> int:
+    unsafe_result = _unsafe_local_source_result(args.source, root)
+    if unsafe_result is not None:
+        return unsafe_result
     kind = args.kind or infer_add_kind(args.source, root)
     return run_forwarded(root, [(SCRIPT_BY_VERB["add"], ["add", "--kind", kind, "--source", args.source])])
 
@@ -574,6 +603,9 @@ def _extract_ingest_unit_id(stdout: str) -> tuple[str, str]:
 
 
 def handle_ingest(args: argparse.Namespace, root: Path) -> int:
+    unsafe_result = _unsafe_local_source_result(args.source, root)
+    if unsafe_result is not None:
+        return unsafe_result
     kind = args.kind or infer_add_kind(args.source, root)
     if kind not in INGEST_ANALYZER:
         print("暂时无法判断资料类型；请告诉我是论文、代码仓还是技术文章。")
