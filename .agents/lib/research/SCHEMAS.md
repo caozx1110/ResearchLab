@@ -419,6 +419,11 @@ topics:
 由 `research-config-manager` 写入。schema 见 `core.py default_runtime_preferences()`，包含资源画像、语言偏好、自动化开关、versioning_commit_mode（`manual|milestone|aggressive`）等。
 
 - `identity.default_confirmed_by`: 可选的人类确认身份默认值。只用于补齐 `--confirmed-by`；`--evidence` 仍必须由调用方显式提供，系统不得默认使用 AI 写出的单元笔记作为 evidence。
+- `diagnostics.mode`: `off | errors-only | developer`，默认 `off`。只控制额外诊断，不控制 schema/evidence/confirmation/recovery 等强制门。
+- `diagnostics.per_skill.<skill>`: `inherit | off | errors-only | developer`。逐 skill 覆盖 workspace 总模式。
+- `diagnostics.local_only`: D1 永远归一为 `true`，磁盘上的 `false` 也不能启用上传或遥测。
+- `diagnostics.token_budget_per_task`: 非负整数；只有 effective mode 为 `developer` 且预算大于 0 时，Agent 才可做触发式短复盘。
+- `diagnostics.max_issues_per_task`: 正整数；以及非负的 `dedup_window_seconds` / `cooldown_seconds`，供 runtime/Agent 限流。机械记录本身不调用 LLM。
 
 ### research-settings.md / user-profile.yaml
 
@@ -447,6 +452,38 @@ topics:
 
 确认后的 `user-preference` 可通过 `promote` 写入 `kb/config/runtime-preferences.yaml` 的 `learned_preferences.items`；确认后的 `recurring-issue` 仅出现在 recall 摘要中。
 
+### skill-evolution/issues.yaml <a id="diagnostic-issues-yaml"></a>
+
+落在 `kb/memory/skill-evolution/issues.yaml`，由 `skill-evolution-advisor` 独占写入。它是本地、脱敏、结构化的运行问题真源，不是 telemetry，也不自动修改 skill、roadmap 或知识内容。显式用户记录不受自动模式 `off` 限制；自动 runtime 捕获必须先通过 effective policy。
+
+```yaml
+schema_version: 1
+generated_by: skill-evolution-advisor
+issues:
+  - id: diag-<fingerprint-prefix>       # 稳定 ID
+    fingerprint: ""                    # category/skill/summary/trigger/error-class 的确定性摘要
+    category: runtime-failure           # 安全 slug；不由脚本推断根因
+    severity: info | low | medium | high | critical
+    status: pending | confirmed | dismissed | resolved
+    skill: paper-analyst
+    summary: ""                        # 单行、定长、已脱敏
+    expected: ""                       # 已脱敏的预期行为摘要
+    actual: ""                         # 已脱敏的实际行为摘要；绝非 raw stdout/stderr
+    trigger: ""                        # 稳定操作名/触发类别
+    source: user | agent | runtime
+    reproducible: unknown | yes | no | intermittent
+    occurrences: 1                     # 相同 fingerprint 命中则原子 +1
+    first_seen_at: ""                  # UTC ISO-8601
+    last_seen_at: ""                   # UTC ISO-8601
+    bundle_version: ""                 # 本地可用时从 .agents/VERSION 读取
+    source_commit: ""                  # 本地 manifest 有合法 commit 时读取
+    context: context-sha256:<prefix>    # 仅不可逆关联摘要，不持久化自由文本
+    error_class: owner-nonzero-exit     # 稳定安全类名，不含 traceback/path
+    privacy_classification: local-redacted
+```
+
+禁止写入 raw stdout/stderr、完整 traceback、用户原消息、secret、环境变量值、绝对路径、论文原文、raw/evidence 内容。导出只提供显式授权的本地 preview，并进一步省略 fingerprint/context；D1 不提供网络上传。每次 record/review 只以本文件为精确 transaction target，失败按 before-image 回滚，不留下半条 issue。
+
 ---
 
 ## ownership 矩阵 <a id="ownership"></a>
@@ -462,6 +499,7 @@ topics:
 | kb/config/topic-taxonomy.yaml | knowledge-base-manager | analyst skills, literature-synthesizer | 同上 |
 | kb/config/runtime-preferences.yaml | research-config-manager | 全部 | 唯一直接归 config-manager 的 artifact |
 | kb/memory/learnings.yaml | skill-evolution-advisor | research-navigator, 全部（通过 recall 摘要） | 经验/习惯/skill 缺陷记忆；skill-defect record-only |
+| kb/memory/skill-evolution/issues.yaml | skill-evolution-advisor | dispatcher、research-config-manager、全部（通过私有摘要） | 本地脱敏诊断 issue；无 telemetry、无自动修 skill |
 | kb/synthesis/wiki/*.md | wiki-adapter | 全部（人面向） | 复用笔记/术语沉淀 |
 | kb/user/* | research-navigator | （只读） | 人面向入口，read-only |
 
