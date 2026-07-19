@@ -119,7 +119,7 @@ confirmed or rejected
 6. receipt 绑定当前 content digest 与 evidence digest；
 7. 写入瞬间重新验证授权和版本，失败时 fail closed。
 
-Receipt 不改变原 epistemic type。内容或 evidence 改变时，旧 receipt 失效。事实批量确认与判断逐项确认可以有不同 UX，但都不得自签。
+Receipt 不改变原 epistemic type。内容或 evidence 改变时，旧 receipt 失效；公开层引导 Agent 基于当前材料重新核验，只有核验通过的新版判断才重新进入人类确认，不向用户暴露内部状态名。事实批量确认与判断逐项确认可以有不同 UX，但都不得自签。
 
 ## 对话层与 Agent 协议
 
