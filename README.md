@@ -59,7 +59,7 @@ Then you can simply ask:
 
 The agent does the mechanical work. You review judgements and make research decisions.
 
-Installation is the one-time technical bootstrap. After it succeeds, ordinary users interact only through natural language and the fifteen `kb <verb>` shortcuts below. Internal scripts, flags, environment variables, and paths are private implementation details handled by the agent; only maintainers and installation automation need the advanced commands in the installation guide.
+Installation is the one-time technical bootstrap. After it succeeds, ordinary users interact only through natural language and the fifteen `kb <verb>` pseudo-CLI shortcuts below. Internal scripts, flags, environment variables, and paths are private implementation details handled by the agent; only maintainers and installation automation need the advanced commands in the installation guide.
 
 ## Install
 
@@ -73,7 +73,7 @@ The guided installer recommends a project-scoped copy into a workspace root. It 
 
 Read [docs/INSTALL.md](docs/INSTALL.md) for guided setup. Its flags, explicit paths, update, uninstall, and automation sections are administrator reference, not steps for everyday research use.
 
-## The fifteen `kb` verbs
+## The fifteen `kb` pseudo-CLI verbs
 
 These are the complete public shortcut surface. Internal script arguments are intentionally not part of the user contract.
 

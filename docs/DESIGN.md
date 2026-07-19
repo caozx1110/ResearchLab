@@ -31,7 +31,7 @@ release bundle                 installed workspace
 
 Release bundle 不包含任何私有 `kb/`。安装、更新、storage sync 和卸载必须保持数据边界：workspace 的 `kb/` 永不成为发布内容，storage sync 不改 `.agents/**` 或根 `AGENTS.md`。
 
-安装与管理员自动化是产品唯一的技术 bootstrap 面。安装完成后，普通用户的 runtime 合同只有自然语言与 15 个 `kb <verb>`；内部 flags、scripts、环境变量和 paths 只属于 Agent 私有协议或管理员参考，不得变成日常使用前置。
+安装与管理员自动化是产品唯一的技术 bootstrap 面。安装完成后，普通用户的 runtime 合同只有自然语言与 15 个 `kb <verb>` 伪 CLI；内部 flags、scripts、环境变量和 paths 只属于 Agent 私有协议或管理员参考，不得变成日常使用前置。
 
 ## Skill 路由
 
@@ -123,7 +123,7 @@ Receipt 不改变原 epistemic type。内容或 evidence 改变时，旧 receipt
 
 ## 对话层与 Agent 协议
 
-公开表面只有自然语言与 15 个 `kb <verb>`。内部 owner 参数、解释器、环境变量、脚本路径和 next-step markers 不能进入 human stdout。
+公开表面只有自然语言与 15 个 `kb <verb>` 伪 CLI。内部 owner 参数、解释器、环境变量、脚本路径和 next-step markers 不能进入 human stdout。
 
 当 runtime agent 需要精确参数或 owner diagnostics 时，`kb-cli` 在显式 opt-in 后写私有结构化协议到 `kb/.runtime/`：
 
