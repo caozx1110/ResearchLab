@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 
 PUBLIC_VERBS = (
@@ -43,6 +44,13 @@ FORBIDDEN_PUBLIC_TOKENS = (
     "isatty",
 )
 
+EXPECTED_RUNTIME_PINS = {
+    "pyyaml": "6.0.3",
+    "pymupdf4llm": "0.0.27",
+    "pymupdf": "1.26.5",
+}
+EXPECTED_DEV_PINS = {"pytest": "8.4.2"}
+
 
 def _project_root() -> Path:
     return Path(__file__).resolve().parents[4]
@@ -71,6 +79,27 @@ def _safe_runtime_env() -> dict[str, str]:
         "RESEARCH_NO_PDF_BACKEND": "1",
         "RESEARCH_PYTHON": sys.executable,
     }
+
+
+def _active_requirement_lines(path: Path) -> tuple[str, ...]:
+    return tuple(
+        stripped
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if (stripped := line.strip()) and not stripped.startswith("#")
+    )
+
+
+def _parse_exact_pins(lines: tuple[str, ...]) -> dict[str, str]:
+    pins: dict[str, str] = {}
+    for line in lines:
+        if line.startswith(("-r ", "--requirement ")):
+            continue
+        match = re.fullmatch(r"([A-Za-z0-9_.-]+)==([A-Za-z0-9][A-Za-z0-9_.+-]*)", line)
+        assert match, f"requirement is not an exact pin: {line}"
+        name = re.sub(r"[-_.]+", "-", match.group(1)).lower()
+        assert name not in pins, f"duplicate requirement pin: {name}"
+        pins[name] = match.group(2)
+    return pins
 
 
 def test_public_verb_registry_and_docs_match_exactly() -> None:
@@ -247,3 +276,27 @@ def test_release_metadata_is_honest_rc_and_ci_is_cross_platform() -> None:
     assert "ubuntu-latest" in ci
     assert "macos-latest" in ci
     assert "test_r1_conversational_release.py" in ci
+
+
+def test_runtime_and_test_dependencies_are_exactly_locked_in_both_ci_jobs() -> None:
+    root = _project_root()
+    runtime_lines = _active_requirement_lines(root / "requirements.txt")
+    dev_lines = _active_requirement_lines(root / "requirements-dev.txt")
+
+    assert _parse_exact_pins(runtime_lines) == EXPECTED_RUNTIME_PINS
+    assert dev_lines == ("-r requirements.txt", "pytest==8.4.2")
+    assert _parse_exact_pins(dev_lines) == EXPECTED_DEV_PINS
+
+    ci = yaml.safe_load((root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
+    for job_name in ("test", "macos-release-gate"):
+        install_steps = [
+            step
+            for step in ci["jobs"][job_name]["steps"]
+            if step.get("name") == "Install dependencies"
+        ]
+        assert install_steps == [
+            {
+                "name": "Install dependencies",
+                "run": "python -m pip install -r requirements-dev.txt",
+            }
+        ]

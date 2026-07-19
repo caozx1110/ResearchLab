@@ -17,6 +17,7 @@ This line is an **internal alpha release candidate**, not a stable release. No c
 
 ### Changed
 
+- Runtime and test dependencies are exactly pinned and shared by Linux and macOS CI.
 - `kb init` and `kb review` no longer depend on TTY state or read from standard input.
 - Public help, errors, and runtime messages expose only natural language and supported `kb <verb>` forms.
 - Runtime bootstrap avoids installing packages into arbitrary shared interpreters during normal calls.
