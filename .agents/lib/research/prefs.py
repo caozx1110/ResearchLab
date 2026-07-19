@@ -1,8 +1,8 @@
-"""Runtime preferences (incl. autonomy) and workspace bootstrap.
+"""Runtime preferences (incl. autonomy) and explicit workspace bootstrap.
 
-ensure_workspace lives here with default_runtime_preferences because the two are
-mutually dependent (load_runtime_preferences -> ensure_workspace ->
-default_runtime_preferences); co-locating them keeps the layering acyclic."""
+Semantic loaders are pure reads.  Workspace creation remains the responsibility
+of explicit initialization and mutation commands.
+"""
 from __future__ import annotations
 
 import copy
@@ -158,7 +158,6 @@ def default_runtime_preferences() -> dict[str, Any]:
 
 
 def load_runtime_preferences(project_root: Path) -> dict[str, Any]:
-    ensure_workspace(project_root)
     payload = load_yaml(runtime_preferences_path(project_root), default={})
     if not isinstance(payload, dict) or not payload:
         payload = default_runtime_preferences()
