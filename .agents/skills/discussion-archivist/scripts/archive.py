@@ -20,8 +20,9 @@ from research.bootstrap import ensure_managed_runtime
 if __name__ == "__main__":
     ensure_managed_runtime(PROJECT_ROOT)
 
-from research.common import add_project_root_argument, append_program_reporting_event, ensure_dir, print_resolved_project_roots, simple_slug, write_text_if_changed
+from research.common import add_project_root_argument, append_program_reporting_event, ensure_dir, print_resolved_project_roots, program_reporting_events_path, simple_slug, write_text_if_changed
 from research.core import project_root
+from research.journal import mutation_transaction
 
 
 def next_available_path(root: Path, slug: str, suffix: str) -> Path:
@@ -56,9 +57,7 @@ def main() -> int:
     root = project_root(PROJECT_ROOT, explicit_root=args.root)
     print_resolved_project_roots(root)
     out_root = root / "kb" / "programs" / args.program_id / "discussions"
-    ensure_dir(out_root)
     slug = simple_slug(args.title, "discussion")
-    path = next_available_path(out_root, slug, ".md")
     lines = [
         f"# {args.title}",
         "",
@@ -83,21 +82,25 @@ def main() -> int:
         *[f"- {item}" for item in (args.next_action or ["暂无"])],
         "",
     ]
-    write_text_if_changed(path, "\n".join(lines))
-    append_program_reporting_event(
-        root,
-        args.program_id,
-        {
-            "source_skill": "discussion-archivist",
-            "event_type": "discussion-archived",
-            "title": args.title,
-            "summary": args.summary,
-            "stage": "discussion",
-            "artifacts": [path.relative_to(root).as_posix()],
-            "tags": ["discussion"],
-        },
-        generated_by="discussion-archivist",
-    )
+    event_path = program_reporting_events_path(root, args.program_id)
+    with mutation_transaction(root, "archive-discussion", [out_root, event_path]):
+        ensure_dir(out_root)
+        path = next_available_path(out_root, slug, ".md")
+        write_text_if_changed(path, "\n".join(lines))
+        append_program_reporting_event(
+            root,
+            args.program_id,
+            {
+                "source_skill": "discussion-archivist",
+                "event_type": "discussion-archived",
+                "title": args.title,
+                "summary": args.summary,
+                "stage": "discussion",
+                "artifacts": [path.relative_to(root).as_posix()],
+                "tags": ["discussion"],
+            },
+            generated_by="discussion-archivist",
+        )
     print(path.relative_to(root))
     return 0
 

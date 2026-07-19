@@ -9,6 +9,22 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+SCRIPT_PATH = Path(__file__).resolve()
+for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
+    lib = candidate / ".agents" / "lib"
+    if lib.exists():
+        sys.path.insert(0, str(lib))
+        break
+else:
+    raise SystemExit("Could not locate .agents/lib")
+
+from research.common import write_text_if_changed
+from research.journal import mutation_transaction
+
+
+class RetrospectiveAlreadyExists(RuntimeError):
+    """Abort a colliding create without committing a no-op operation."""
+
 
 def normalize_slug(value: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-")
@@ -172,32 +188,35 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    root = Path(args.root)
+    root = Path(args.root).expanduser().resolve()
+    kb_dir = next((path for path in [root, *root.parents] if path.name == "kb"), None)
+    if kb_dir is None:
+        raise SystemExit("Retrospective notes must be stored inside the workspace knowledge base.")
+    project_root = kb_dir.parent
     notes_dir = root / "retrospectives"
-    notes_dir.mkdir(parents=True, exist_ok=True)
 
     now = datetime.now().astimezone()
     timestamp = now.isoformat(timespec="seconds")
     filename_timestamp = now.strftime("%Y%m%d-%H%M%S")
     note_path = notes_dir / f"{filename_timestamp}-{args.slug}.md"
 
-    if note_path.exists():
-        print(f"refusing to overwrite existing note: {note_path}", file=sys.stderr)
+    note = build_note(
+        timestamp,
+        args.slug,
+        args.skill,
+        args.target_skill,
+        args.task_summary,
+        args.observed_issue,
+        args.suggestion,
+    ).strip() + "\n"
+    try:
+        with mutation_transaction(project_root, "create-skill-retrospective", [note_path]):
+            if note_path.exists():
+                raise RetrospectiveAlreadyExists
+            write_text_if_changed(note_path, note)
+    except RetrospectiveAlreadyExists:
+        print("这次复盘已经记录过了，未覆盖已有内容。", file=sys.stderr)
         return 1
-
-    note_path.write_text(
-        build_note(
-            timestamp,
-            args.slug,
-            args.skill,
-            args.target_skill,
-            args.task_summary,
-            args.observed_issue,
-            args.suggestion,
-        ).strip()
-        + "\n",
-        encoding="utf-8",
-    )
     print(note_path)
 
     if args.stdout_prompt:

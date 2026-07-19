@@ -81,7 +81,6 @@ CONFIRMATION_VALUES = {"auto_confirmed", "pending_user_confirmation", "confirmed
 
 
 def load_topic_taxonomy(project_root: Path) -> dict[str, Any]:
-    ensure_workspace(project_root)
     payload = load_yaml(topic_taxonomy_path(project_root), default={})
     if not isinstance(payload, dict):
         payload = {}
@@ -129,7 +128,6 @@ def write_topic_taxonomy(project_root: Path, payload: dict[str, Any]) -> Path:
 
 
 def load_candidate_pools(project_root: Path) -> dict[str, Any]:
-    ensure_workspace(project_root)
     payload = load_yaml(candidate_pools_path(project_root), default={})
     if not isinstance(payload, dict):
         payload = {}
@@ -540,7 +538,6 @@ def lint_workspace_integrity(project_root: Path) -> list[str]:
 
 
 def lint_records(project_root: Path) -> tuple[str, list[str]]:
-    ensure_workspace(project_root)
     issues: list[str] = []
     for raw_record in iter_records(project_root):
         try:

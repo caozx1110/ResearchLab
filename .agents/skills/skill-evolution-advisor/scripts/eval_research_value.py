@@ -49,7 +49,7 @@ from research.bootstrap import ensure_managed_runtime
 if __name__ == "__main__":
     ensure_managed_runtime(PROJECT_ROOT)
 
-from research.common import add_project_root_argument, load_yaml, print_resolved_project_roots
+from research.common import add_project_root_argument, load_yaml, print_resolved_project_roots, write_text_if_changed
 from research.core import (
     UNIT_KIND_DIRS,
     iter_records,
@@ -60,6 +60,7 @@ from research.core import (
     units_root,
 )
 from research.retrieval import tokenize_query
+from research.journal import mutation_transaction
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -264,6 +265,18 @@ def git_short_head(repo: Path) -> str:
         return out.stdout.strip() or "n/a"
     except (OSError, subprocess.SubprocessError):
         return "n/a"
+
+
+def next_available_report_path(report_dir: Path, stamp: str) -> Path:
+    path = report_dir / f"{stamp}-tier1.md"
+    if not path.exists():
+        return path
+    index = 2
+    while True:
+        candidate = report_dir / f"{stamp}-tier1-{index}.md"
+        if not candidate.exists():
+            return candidate
+        index += 1
 
 
 # ---------------------------------------------------------------------------
@@ -668,9 +681,9 @@ def main() -> int:
     if not args.no_write:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         report_dir = root / REPORT_DIRNAME
-        report_dir.mkdir(parents=True, exist_ok=True)
-        report_path = report_dir / f"{stamp}-tier1.md"
-        report_path.write_text(report, encoding="utf-8")
+        with mutation_transaction(root, "write-research-value-report", [report_dir]):
+            report_path = next_available_report_path(report_dir, stamp)
+            write_text_if_changed(report_path, report)
         print(f"[ok] wrote report: {report_path.relative_to(root)}",
               file=sys.stderr if args.json else sys.stdout)
 
