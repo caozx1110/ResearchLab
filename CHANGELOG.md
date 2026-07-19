@@ -4,7 +4,7 @@ All notable changes to this project will be documented here. The format follows 
 
 ## [Unreleased]
 
-The bundle currently declares **`0.2.0-rc.1`**. It has passed the complete local suite and cold installed-copy acceptance, so it meets the local release-candidate gate. It is not stable or GA, has not been tagged or published, and carries no compatibility or response-time SLA. A green hosted Linux/macOS CI matrix remains a prerequisite for a release tag.
+The bundle currently declares **`0.2.0-rc.1`**. It has passed the complete local suite and cold installed-copy acceptance, so it meets the local release-candidate gate. It is not a stable release, is not GA, has not been tagged or published, and carries no compatibility or response-time SLA. A green hosted Linux/macOS CI matrix remains a prerequisite for a release tag.
 
 ### Added
 
