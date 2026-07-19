@@ -1022,15 +1022,14 @@ ws_sync() {
     "--dir" "$WORKSPACE_ROOT"
     "--source-commit" "$commit"
     "--source-origin" "$origin"
+    "--source-checkout" "$REPO_ROOT"
     "--source-branch" "$branch"
   )
   if [ "$origin" != "local" ] && [ -z "$branch" ]; then
     note "当前源码处于 detached 状态；本次安装绑定当前 commit，之后更新前需要选择分支。" >&2
   fi
-  if [ "$origin" = "local" ]; then
-    args+=("--source-checkout" "$REPO_ROOT")
-  fi
   if [ "$action" = "install" ]; then
+    args+=("--source-strategy" "local-checkout")
     agent_csv=""
     [ "$CONFIG_CLAUDE" -eq 1 ] && agent_csv="claude"
     if [ "$CONFIG_CODEX" -eq 1 ]; then

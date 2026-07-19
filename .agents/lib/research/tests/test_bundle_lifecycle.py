@@ -69,7 +69,8 @@ def test_clean_install_ships_only_runtime_allowlist(tmp_path: Path) -> None:
     assert not any("/tests/" in rel for rel in installed)
     assert not any("eval_research_value.py" in rel for rel in installed)
     assert not any(Path(rel).is_absolute() for rel in installed)
-    assert str(_project_root()) not in manifest_path.read_text(encoding="utf-8")
+    assert manifest["source_strategy"] == "local-checkout"
+    assert manifest["source_checkout"] == str(_project_root())
 
     duplicate = _run_installer(workspace, "install", "--codex")
     assert duplicate.returncode == 1
@@ -285,6 +286,42 @@ def test_uninstall_preserves_nonstandard_same_prefix_bytecode_name(tmp_path: Pat
     assert not standard_cache.exists()
     assert user_cache.read_bytes() == b"user-owned cache-shaped file\n"
     assert not (workspace / ".agents" / ".install-manifest.json").exists()
+
+
+def test_uninstall_removes_cross_abi_cpython_caches_but_preserves_changed_types(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    install = _run_installer(workspace, "install", "--codex")
+    assert install.returncode == 0, install.stdout + install.stderr
+
+    core_source = workspace / ".agents" / "lib" / "research" / "core.py"
+    cache_dir = core_source.parent / "__pycache__"
+    cache_dir.mkdir(exist_ok=True)
+    other_abi = cache_dir / "core.cpython-999.pyc"
+    other_abi.write_bytes(b"other abi\n")
+    other_abi_optimized = cache_dir / "core.cpython-999.opt-1.pyc"
+    other_abi_optimized.write_bytes(b"other abi optimized\n")
+    user_cache = cache_dir / "core.user-owned.pyc"
+    user_cache.write_bytes(b"user cache\n")
+    external = tmp_path / "external-cache"
+    external.write_bytes(b"external\n")
+    linked_cache = cache_dir / "core.cpython-998.pyc"
+    linked_cache.symlink_to(external)
+    retyped_cache = cache_dir / "core.cpython-997.opt-2.pyc"
+    retyped_cache.mkdir()
+
+    uninstall = _run_installer(workspace, "uninstall")
+
+    assert uninstall.returncode == 0, uninstall.stdout + uninstall.stderr
+    assert not other_abi.exists()
+    assert not other_abi_optimized.exists()
+    assert user_cache.read_bytes() == b"user cache\n"
+    assert linked_cache.is_symlink()
+    assert linked_cache.readlink() == external
+    assert external.read_bytes() == b"external\n"
+    assert retyped_cache.is_dir()
+    assert "core.cpython-998.pyc reason=type-change" in uninstall.stderr
+    assert "core.cpython-997.opt-2.pyc reason=type-change" in uninstall.stderr
 
 
 def test_uninstall_preserves_whole_agents_file_when_managed_block_drifts(tmp_path: Path) -> None:

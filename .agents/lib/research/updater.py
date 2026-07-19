@@ -13,6 +13,9 @@ from typing import Any, Sequence
 MANIFEST_REL = Path(".agents/.install-manifest.json")
 CACHE_CHECKOUT_PREFIX = "ResearchLab"
 LOCAL_ORIGIN = "local"
+LOCAL_CHECKOUT_STRATEGY = "local-checkout"
+REMOTE_BRANCH_STRATEGY = "remote-branch"
+SOURCE_STRATEGIES = {LOCAL_CHECKOUT_STRATEGY, REMOTE_BRANCH_STRATEGY}
 
 
 @dataclass(frozen=True)
@@ -20,10 +23,17 @@ class SourceProvenance:
     origin: str
     checkout: Path | None
     branch: str
+    strategy: str = ""
+
+    @property
+    def effective_strategy(self) -> str:
+        if self.strategy:
+            return self.strategy
+        return LOCAL_CHECKOUT_STRATEGY if self.origin == LOCAL_ORIGIN else REMOTE_BRANCH_STRATEGY
 
     @property
     def is_local(self) -> bool:
-        return self.origin == LOCAL_ORIGIN
+        return self.effective_strategy == LOCAL_CHECKOUT_STRATEGY
 
 
 class SourceChoiceRequired(RuntimeError):
@@ -155,6 +165,8 @@ def _invoke_ws_sync(
         provenance.origin,
         "--source-branch",
         provenance.branch,
+        "--source-strategy",
+        provenance.effective_strategy,
     ]
     if provenance.checkout is not None:
         argv.extend(["--source-checkout", str(provenance.checkout)])
@@ -210,7 +222,7 @@ def is_git_checkout(path: Path) -> bool:
 
 def is_source_checkout(path: Path) -> bool:
     candidate = Path(path)
-    return is_git_checkout(candidate) or (candidate / "install-lib" / "ws_sync.py").is_file()
+    return candidate.is_dir() and (candidate / "install-lib" / "ws_sync.py").is_file()
 
 
 def _load_manifest(install_root: Path) -> dict[str, Any] | None:
@@ -228,17 +240,38 @@ def source_provenance(install_root: Path) -> SourceProvenance | None:
         branch = _checkout_branch(root)
         if origin != LOCAL_ORIGIN and not _valid_branch_name(branch):
             return None
-        return SourceProvenance(origin, root, branch)
+        strategy = LOCAL_CHECKOUT_STRATEGY if origin == LOCAL_ORIGIN else REMOTE_BRANCH_STRATEGY
+        return SourceProvenance(origin, root, branch, strategy)
 
     manifest = _load_manifest(root)
     if manifest is None:
         return None
     origin = str(manifest.get("source_origin") or "").strip()
     branch = str(manifest.get("source_branch") or "").strip()
+    strategy = str(manifest.get("source_strategy") or "").strip()
+    if strategy and strategy not in SOURCE_STRATEGIES:
+        return None
+
+    if strategy == LOCAL_CHECKOUT_STRATEGY:
+        checkout_text = str(manifest.get("source_checkout") or "").strip()
+        if not checkout_text:
+            return None
+        checkout = Path(checkout_text).expanduser().resolve(strict=False)
+        if not is_source_checkout(checkout):
+            return None
+        if not origin:
+            origin = _checkout_origin(checkout) or LOCAL_ORIGIN
+        return SourceProvenance(origin, checkout, branch, LOCAL_CHECKOUT_STRATEGY)
+
     checkout_text = str(manifest.get("source_checkout") or manifest.get("source_repo") or "").strip()
     checkout = Path(checkout_text).expanduser().resolve(strict=False) if checkout_text else None
     if checkout is not None and not is_source_checkout(checkout):
         checkout = None
+
+    if strategy == REMOTE_BRANCH_STRATEGY:
+        if not origin or origin == LOCAL_ORIGIN or not _valid_branch_name(branch):
+            return None
+        return SourceProvenance(origin, checkout, branch, REMOTE_BRANCH_STRATEGY)
 
     # Legacy manifests occasionally carried a useful source_repo. Preserve that
     # explicit source, but never infer the canonical upstream when no source exists.
@@ -246,9 +279,13 @@ def source_provenance(install_root: Path) -> SourceProvenance | None:
         origin = _checkout_origin(checkout) or LOCAL_ORIGIN
     if not origin:
         return None
-    if origin != LOCAL_ORIGIN and not _valid_branch_name(branch):
+    if origin == LOCAL_ORIGIN:
+        if checkout is None:
+            return None
+        return SourceProvenance(origin, checkout, branch, LOCAL_CHECKOUT_STRATEGY)
+    if not _valid_branch_name(branch):
         return None
-    return SourceProvenance(origin, checkout, branch)
+    return SourceProvenance(origin, checkout, branch, REMOTE_BRANCH_STRATEGY)
 
 
 def resolve_source_checkout(install_root: Path) -> Path | None:
@@ -264,9 +301,20 @@ def resolve_origin_url(checkout: Path | None) -> str:
 
 def _resolve_checkout(provenance: SourceProvenance, cache_dir: Path, *, pull: bool) -> Path:
     checkout = provenance.checkout
+    if provenance.is_local:
+        if checkout is None or not is_source_checkout(checkout):
+            raise SourceChoiceRequired("记录的本地更新源已不可用；需要重新选择源码位置。")
+        if provenance.origin != LOCAL_ORIGIN:
+            actual_origin = _checkout_origin(checkout)
+            if not actual_origin or actual_origin != provenance.origin:
+                raise SourceChoiceRequired("记录的本地更新源已更换远端；需要重新选择更新源。")
+            if not _valid_branch_name(provenance.branch):
+                raise SourceChoiceRequired("记录的本地更新源缺少有效分支；需要重新选择更新源。")
+            _validate_checkout_branch(checkout, provenance.branch)
+        return checkout
+    if provenance.effective_strategy != REMOTE_BRANCH_STRATEGY:
+        raise SourceChoiceRequired("安装记录包含无法识别的更新策略；需要重新选择更新源。")
     if checkout is not None:
-        if provenance.is_local:
-            return checkout
         if is_git_checkout(checkout):
             if not _valid_branch_name(provenance.branch):
                 raise SourceChoiceRequired("安装记录缺少有效更新分支；需要重新选择更新源。")
@@ -278,8 +326,6 @@ def _resolve_checkout(provenance: SourceProvenance, cache_dir: Path, *, pull: bo
             else:
                 _fetch_checkout(checkout, branch=provenance.branch)
             return checkout
-    if provenance.is_local:
-        raise SourceChoiceRequired("记录的本地更新源已不可用；需要重新选择源码位置。")
     return _prepare_cached_checkout(cache_dir, provenance.origin, pull=pull, branch=provenance.branch)
 
 
@@ -345,9 +391,12 @@ def apply(install_root: Path, cache_dir: Path) -> dict[str, Any]:
             return {"before": before, "after": before, "status": "up_to_date"}
         source_commit = _source_commit(source_checkout)
         effective_checkout = provenance.checkout
-        if provenance.is_local and effective_checkout is None:
-            effective_checkout = source_checkout
-        effective = SourceProvenance(provenance.origin, effective_checkout, provenance.branch)
+        effective = SourceProvenance(
+            provenance.origin,
+            effective_checkout,
+            provenance.branch,
+            provenance.effective_strategy,
+        )
         _invoke_ws_sync(source_checkout, root, source_commit, effective)
         return {"before": before, "after": read_local_version(root), "status": "updated"}
     except SourceChoiceRequired as exc:

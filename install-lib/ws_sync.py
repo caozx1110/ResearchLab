@@ -19,9 +19,9 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib.util
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -37,6 +37,9 @@ INSTALL_MODE = "copy-project"
 MANIFEST_REL = Path(".agents/.install-manifest.json")
 MANIFEST_NAME = ".install-manifest.json"
 SCHEMA = 1
+LOCAL_CHECKOUT_STRATEGY = "local-checkout"
+REMOTE_BRANCH_STRATEGY = "remote-branch"
+SOURCE_STRATEGIES = (LOCAL_CHECKOUT_STRATEGY, REMOTE_BRANCH_STRATEGY)
 DEFAULT_LEGACY_AGENTS = {"claude": True, "codex": False}
 BEGIN_MARKER = "# >>> workspace-oss managed >>>"
 END_MARKER = "# <<< workspace-oss managed <<<"
@@ -413,30 +416,58 @@ def assert_uninstall_manifest_boundary(dst_root: Path) -> None:
         die(f"manifest is not a regular file; refusing uninstall: {manifest}")
 
 
-def standard_bytecode_cache_names(source_path: Path) -> set[str]:
-    """Return exact cache names generated for a source by this interpreter."""
+def is_standard_cpython_cache(source_path: Path, cache_name: str) -> bool:
+    """Match standard CPython cache names for this source across interpreter ABIs."""
 
-    names: set[str] = set()
-    for optimization in ("", 1, 2):
-        cached = Path(importlib.util.cache_from_source(str(source_path), optimization=optimization))
-        names.add(cached.name)
-    return names
+    pattern = rf"{re.escape(source_path.stem)}\.cpython-[0-9]+(?:\.opt-[12])?\.pyc"
+    return re.fullmatch(pattern, cache_name) is not None
 
 
-def remove_managed_bytecode_caches(files: dict[str, str], dst_root: Path, *, dry_run: bool) -> bool:
-    """Remove only bytecode caches attributable to manifest-owned Python modules."""
-
-    cache_names: dict[Path, set[str]] = {}
+def managed_bytecode_cache_sources(files: dict[str, str], dst_root: Path) -> dict[Path, list[Path]]:
+    cache_sources: dict[Path, list[Path]] = {}
     for rel in files:
         if not rel.startswith(".agents/") or not rel.endswith(".py"):
             continue
         source_path = path_for_rel(dst_root, rel)
-        cache_names.setdefault(source_path.parent / "__pycache__", set()).update(
-            standard_bytecode_cache_names(source_path)
-        )
+        cache_sources.setdefault(source_path.parent / "__pycache__", []).append(source_path)
+    return cache_sources
+
+
+def preserve_changed_bytecode_cache_types(files: dict[str, str], dst_root: Path, preserve: set[Path]) -> None:
+    """Protect matching cache paths whose type changed before any directory pruning."""
+
+    for cache_dir, sources in managed_bytecode_cache_sources(files, dst_root).items():
+        state, _detail = inspect_managed_uninstall_directory(cache_dir, dst_root)
+        if state != "directory":
+            continue
+        try:
+            entries = list(cache_dir.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            if not any(is_standard_cpython_cache(source, entry.name) for source in sources):
+                continue
+            try:
+                mode = entry.lstat().st_mode
+            except OSError:
+                continue
+            if not stat.S_ISREG(mode):
+                preserve.add(entry)
+
+
+def remove_managed_bytecode_caches(
+    files: dict[str, str],
+    dst_root: Path,
+    *,
+    dry_run: bool,
+    preserve: set[Path] | None = None,
+) -> bool:
+    """Remove only bytecode caches attributable to manifest-owned Python modules."""
+
+    cache_sources = managed_bytecode_cache_sources(files, dst_root)
 
     removed_any = False
-    for cache_dir, allowed_names in sorted(cache_names.items(), key=lambda item: str(item[0])):
+    for cache_dir, sources in sorted(cache_sources.items(), key=lambda item: str(item[0])):
         state, detail = inspect_managed_uninstall_directory(cache_dir, dst_root)
         if state == "missing":
             continue
@@ -455,7 +486,7 @@ def remove_managed_bytecode_caches(files: dict[str, str], dst_root: Path, *, dry
             )
             continue
         for entry in entries:
-            if entry.name not in allowed_names:
+            if not any(is_standard_cpython_cache(source, entry.name) for source in sources):
                 continue
             try:
                 mode = entry.lstat().st_mode
@@ -470,6 +501,8 @@ def remove_managed_bytecode_caches(files: dict[str, str], dst_root: Path, *, dry
                     "preserving managed runtime cache during uninstall: "
                     f"{entry.relative_to(dst_root)} reason=type-change"
                 )
+                if preserve is not None:
+                    preserve.add(entry)
                 continue
             removed_any = remove_file(entry, dst_root, dry_run=dry_run) or removed_any
     return removed_any
@@ -830,12 +863,15 @@ def build_manifest(
     source_origin: str,
     source_checkout: str,
     source_branch: str,
+    source_strategy: str,
     version: str,
     installed_at: str,
     agents: dict[str, bool],
     files: dict[str, str],
     agents_md_sha: str,
 ) -> dict[str, Any]:
+    if source_strategy not in SOURCE_STRATEGIES:
+        die(f"invalid source strategy: {source_strategy}")
     return {
         "schema": SCHEMA,
         "install_name": INSTALL_NAME,
@@ -846,6 +882,7 @@ def build_manifest(
         "source_origin": source_origin,
         "source_checkout": source_checkout,
         "source_branch": source_branch,
+        "source_strategy": source_strategy,
         "source_commit": source_commit,
         "version": version,
         "installed_at": installed_at,
@@ -856,6 +893,24 @@ def build_manifest(
         "files": files,
         "tree_checksum": tree_checksum(files),
     }
+
+
+def preserved_source_strategy(
+    manifest: dict[str, Any],
+    *,
+    requested: str | None,
+    source_origin: str,
+) -> str:
+    if requested:
+        return requested
+    recorded = str(manifest.get("source_strategy") or "").strip()
+    if recorded:
+        if recorded not in SOURCE_STRATEGIES:
+            die(f"manifest contains invalid source strategy: {recorded}")
+        return recorded
+    if source_origin and source_origin != "local":
+        return REMOTE_BRANCH_STRATEGY
+    return LOCAL_CHECKOUT_STRATEGY
 
 
 def writes_need_change(dst_root: Path, writes: dict[str, tuple[bytes, int]], removals: list[str]) -> bool:
@@ -888,12 +943,20 @@ def install(args: argparse.Namespace) -> int:
             warn(f"  MODIFIED {rel} reason={reason} expected={expected_hash} actual={actual_hash}")
         die("copy-project install collides with local files; rerun with --force only if they may be replaced", code=3)
     writes, agents_md_sha = build_writes(dst_root, items)
+    install_origin = str(args.source_origin or "local").strip()
+    install_checkout = str(args.source_checkout or "")
+    install_strategy = preserved_source_strategy(
+        {},
+        requested=args.source_strategy,
+        source_origin=install_origin,
+    )
     manifest = build_manifest(
         repo=repo,
         source_commit=args.source_commit or "",
-        source_origin=str(args.source_origin or "local").strip(),
-        source_checkout=str(args.source_checkout or ""),
+        source_origin=install_origin,
+        source_checkout=install_checkout,
         source_branch=str(args.source_branch or "").strip(),
+        source_strategy=install_strategy,
         version=read_source_version(repo, source),
         installed_at=installed_at,
         agents=agents,
@@ -957,6 +1020,11 @@ def update(args: argparse.Namespace) -> int:
         args.source_checkout or manifest.get("source_checkout") or manifest.get("source_repo") or ""
     )
     effective_branch = str(args.source_branch or manifest.get("source_branch") or "").strip()
+    effective_strategy = preserved_source_strategy(
+        manifest,
+        requested=args.source_strategy,
+        source_origin=effective_origin,
+    )
 
     changed = (
         old_files != new_files
@@ -965,6 +1033,7 @@ def update(args: argparse.Namespace) -> int:
         or str(manifest.get("source_checkout") or manifest.get("source_repo") or "")
         != effective_checkout
         or str(manifest.get("source_branch") or "") != effective_branch
+        or str(manifest.get("source_strategy") or "") != effective_strategy
         or manifest.get("agents_md") != "managed-block"
         or writes_need_change(dst_root, writes, removed)
     )
@@ -978,6 +1047,7 @@ def update(args: argparse.Namespace) -> int:
             source_origin=effective_origin,
             source_checkout=effective_checkout,
             source_branch=effective_branch,
+            source_strategy=effective_strategy,
             version=read_source_version(repo, source),
             installed_at=installed_at,
             agents=agents,
@@ -1010,12 +1080,19 @@ def reinstall(args: argparse.Namespace) -> int:
         legacy_agents_digest = str(manifest.get("agents_md_sha") or old_files.get("AGENTS.md") or "")
     writes, agents_md_sha = build_writes(dst_root, items, legacy_agents_digest=legacy_agents_digest)
     removed = sorted(rel for rel in set(old_files) - set(new_files) if rel != "AGENTS.md" and rel.startswith(".agents/"))
+    effective_origin = str(args.source_origin or manifest.get("source_origin") or "local").strip()
+    effective_strategy = preserved_source_strategy(
+        manifest,
+        requested=args.source_strategy,
+        source_origin=effective_origin,
+    )
     new_manifest = build_manifest(
         repo=repo,
         source_commit=args.source_commit or "",
-        source_origin=str(args.source_origin or manifest.get("source_origin") or "local").strip(),
+        source_origin=effective_origin,
         source_checkout=str(args.source_checkout or manifest.get("source_checkout") or manifest.get("source_repo") or ""),
         source_branch=str(args.source_branch or manifest.get("source_branch") or "").strip(),
+        source_strategy=effective_strategy,
         version=read_source_version(repo, source),
         installed_at=utc_now(),
         agents=normalize_manifest_agents(manifest.get("agents")),
@@ -1056,6 +1133,8 @@ def uninstall(args: argparse.Namespace) -> int:
             continue
         removable_paths.append(path)
 
+    preserve_changed_bytecode_cache_types(files, dst_root, preserved_paths)
+
     agents_path = dst_root / "AGENTS.md"
     if agents_path.is_symlink():
         warn("preserving AGENTS.md during uninstall: path is a symlink")
@@ -1084,7 +1163,12 @@ def uninstall(args: argparse.Namespace) -> int:
     removed_any = False
     for path in removable_paths:
         removed_any = remove_file(path, dst_root, dry_run=args.dry_run) or removed_any
-    removed_any = remove_managed_bytecode_caches(files, dst_root, dry_run=args.dry_run) or removed_any
+    removed_any = remove_managed_bytecode_caches(
+        files,
+        dst_root,
+        dry_run=args.dry_run,
+        preserve=preserved_paths,
+    ) or removed_any
     if manifest_path(dst_root).exists() or manifest_path(dst_root).is_symlink():
         if args.dry_run:
             info(f"[dry-run] delete {manifest_path(dst_root)}")
@@ -1118,6 +1202,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source-origin", default="")
     parser.add_argument("--source-checkout", default="")
     parser.add_argument("--source-branch", default="")
+    parser.add_argument("--source-strategy", choices=SOURCE_STRATEGIES, default=None)
     parser.add_argument("--source", default="")
     parser.add_argument("--agents", default="")
     parser.add_argument("--force", action="store_true")
