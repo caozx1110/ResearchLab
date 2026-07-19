@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -24,7 +25,7 @@ if __name__ == "__main__":
 
 from research.common import add_project_root_argument, ensure_dir, print_resolved_project_roots, simple_slug, skill_script_for_command, write_text_if_changed
 from research.intake_cli import add_intake_add_arguments, intake_add_argv
-from research.core import lint_records, project_root, search_records, synthesis_root
+from research.core import audit_workspace, lint_records, project_root, search_records, synthesis_root
 from research.journal import mutation_transaction
 
 
@@ -41,6 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
     add = subparsers.add_parser("add")
     add_intake_add_arguments(add, source_required=True)
     subparsers.add_parser("lint")
+    subparsers.add_parser("audit")
     return parser
 
 
@@ -58,7 +60,12 @@ def run_intake_add(root: Path, args: argparse.Namespace) -> int:
 def main() -> int:
     args = build_parser().parse_args()
     root = project_root(PROJECT_ROOT, explicit_root=args.root)
-    print_resolved_project_roots(root)
+    if args.command != "audit":
+        print_resolved_project_roots(root)
+    if args.command == "audit":
+        report = audit_workspace(root)
+        print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+        return 1 if report["status"] == "FAIL" else 0
     if args.command == "lint":
         status, issues = lint_records(root)
         print(f"status: {status}")

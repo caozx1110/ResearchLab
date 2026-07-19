@@ -25,6 +25,7 @@ Use this skill when the user speaks in generic wiki or knowledge-base terms rath
 | query / 查询 · 综述 · taxonomy · 多 source 综合 | `literature-synthesizer` | `synthesize.py survey/review/taxonomy` |
 | query / 单条索引 · 找 unit · "X 是哪篇" | `knowledge-base-manager` | `kb.py query --query "..."` |
 | lint · schema 检查 · 索引刷新 | `knowledge-base-manager` | `kb.py lint` / `kb.py refresh-schema` |
+| 检查知识库健康 · 恢复/安全/质量机械审计 | `knowledge-base-manager` | Agent 私下调用 owner `audit`，自然语言概述结果；不增加公开 `kb` 动词 |
 | topic / tag / pool 治理 | `knowledge-base-manager`（结构）+ `research-config-manager`（seed） | `kb.py govern` / `config.py set-taxonomy-seed` |
 | 我是新用户 / 不知道从哪看起 | `research-navigator` | `navigate.py refresh` 后看 `kb/index.md` |
 | 当前 program 状态 / next actions | `research-orchestrator` | `orchestrate.py status` |
@@ -37,3 +38,5 @@ ${RESEARCH_PYTHON:-python3} .agents/skills/wiki-adapter/scripts/wiki.py query --
 ${RESEARCH_PYTHON:-python3} .agents/skills/wiki-adapter/scripts/wiki.py add --kind paper --source kb/raw/paper.pdf
 ${RESEARCH_PYTHON:-python3} .agents/skills/wiki-adapter/scripts/wiki.py lint
 ```
+
+`audit` 是 Agent-only 的只读路由：wiki-adapter 只转发同一份分层机械报告，不理解研究材料，不刷新索引，也不做网络/依赖或 LLM 语义扫描。不得把 owner JSON、绝对路径或内部命令直接展示给普通用户。
