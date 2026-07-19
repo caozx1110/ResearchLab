@@ -9,6 +9,7 @@ import copy
 from pathlib import Path
 from typing import Any
 
+from .journal import mutation_transaction
 from .common import (
     ensure_dir,
     load_yaml,
@@ -278,19 +279,21 @@ def load_runtime_preferences(project_root: Path) -> dict[str, Any]:
 
 
 def write_runtime_preferences(project_root: Path, payload: dict[str, Any]) -> Path:
-    current = load_runtime_preferences(project_root)
-    merged = copy.deepcopy(current)
-    for key in ("browser", "identity", "learned_preferences", "autonomy", "paper", "pdf", "versioning"):
-        value = payload.get(key)
-        if isinstance(value, dict):
-            target = merged.setdefault(key, {})
-            if not isinstance(target, dict):
-                target = {}
-                merged[key] = target
-            target.update(value)
-    normalized = _deep_fill_missing(merged, default_runtime_preferences())
-    write_yaml_if_changed(runtime_preferences_path(project_root), normalized)
-    return runtime_preferences_path(project_root)
+    path = runtime_preferences_path(project_root)
+    with mutation_transaction(project_root, "write-runtime-preferences", [path]):
+        current = load_runtime_preferences(project_root)
+        merged = copy.deepcopy(current)
+        for key in ("browser", "identity", "learned_preferences", "autonomy", "paper", "pdf", "versioning"):
+            value = payload.get(key)
+            if isinstance(value, dict):
+                target = merged.setdefault(key, {})
+                if not isinstance(target, dict):
+                    target = {}
+                    merged[key] = target
+                target.update(value)
+        normalized = _deep_fill_missing(merged, default_runtime_preferences())
+        write_yaml_if_changed(path, normalized)
+    return path
 
 
 def ensure_workspace(project_root: Path) -> None:
