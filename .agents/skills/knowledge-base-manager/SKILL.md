@@ -25,6 +25,16 @@ Public review inbox 只包含真正 `ready_for_review` 且仍待用户确认的 
 - `find`、public `kb review` 与 batch confirm 必须消费同一筛选结果。
 - 当前 inbox 只覆盖 knowledge units；experiment diagnosis、program decision 与 learning 的待确认项由各自 owner 管理，公开说明必须诚实。
 
+## 分层机械审计
+
+当用户用自然语言要求“检查知识库健康”“看看有没有结构或恢复问题”时，Agent 私下调用本 owner 的 `audit` 操作。它是确定性、只读、零 LLM 的检查，不是新的公开 `kb` 动词：
+
+- 报告层固定为 `schema / integrity / recovery / security / quality`，状态为 `PASS / WARN / FAIL`；只有 `FAIL` 返回非零。
+- 它复用原有 lint，并检查 current verification/confirmation binding、未完成 journal、KB Git 中产品拥有的 dirty 文件、完整 paper 的空 metadata/default taxonomy、重复或可疑 figure label、symlink 越界。
+- 审计不得 bootstrap workspace、刷新 index、创建 lock/journal 或更改 Git/mtime；空库、干净库和坏库都必须字节级只读。
+- 输出只含相对 subject 与脱敏机械摘要，不含绝对路径、原始 source/evidence、用户消息或 traceback；网络、依赖漏洞与语义结论质量不在 D1 范围，必须如实说明不支持。
+- Agent 向用户用自然语言概述数量与建议，不直接倾倒 owner JSON；普通公开命令面仍只有既有 15 个 `kb <verb>`。
+
 ## Confirmation
 
 - Fact-track 可以在有明确 evidence 与真实人类 actor 时批量确认。

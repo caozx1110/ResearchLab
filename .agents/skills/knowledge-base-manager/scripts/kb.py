@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -23,6 +24,7 @@ if __name__ == "__main__":
 from research.common import add_project_root_argument, confirm_command, parse_iso_datetime, print_resolved_project_roots, shell_command, skill_script_for_command, warn_if_cwd_differs_from_project_root
 from research.core import (
     build_index,
+    audit_workspace,
     candidate_pools_path,
     compact_unit_ids,
     confirmation_track,
@@ -403,6 +405,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("init", help="Initialize the knowledge base layout")
     subparsers.add_parser("lint", help="Validate record schemas and lifecycle fields")
+    subparsers.add_parser("audit", help="Run layered, read-only KB health checks for the Agent")
     subparsers.add_parser("index", help="Rebuild kb/index.yaml and kb/index.md")
     subparsers.add_parser("storage-sync", help="Move legacy raw/output into kb and rewrite old storage references")
     git_init = subparsers.add_parser("git-init", help="Initialize kb as a nested Git repository")
@@ -481,7 +484,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
     root = project_root(PROJECT_ROOT, explicit_root=args.root)
-    if args.command not in {"resume", "undo", "restore"}:
+    if args.command not in {"audit", "resume", "undo", "restore"}:
         print_resolved_project_roots(root)
 
     if args.command == "init":
@@ -570,6 +573,10 @@ def main() -> int:
         for issue in issues:
             print(f"- {issue}")
         return 0 if status == "PASS" else 1
+    if args.command == "audit":
+        report = audit_workspace(root)
+        print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+        return 1 if report["status"] == "FAIL" else 0
     if args.command == "index":
         index_paths = mutation_targets(root, index_mutation_targets(root))
         with mutation_transaction(root, "rebuild_index", index_paths):

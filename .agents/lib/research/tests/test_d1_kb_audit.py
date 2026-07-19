@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
+import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 from research.common import write_yaml_if_changed
@@ -78,6 +81,15 @@ def _git_commit_kb(root: Path) -> None:
 
 def _codes(report: dict) -> set[str]:
     return {str(item["code"]) for item in report["findings"]}
+
+
+def _load_script(relative_path: str, name: str):
+    path = Path(__file__).resolve().parents[4] / relative_path
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_audit_empty_workspace_is_pass_and_zero_write(tmp_path: Path) -> None:
@@ -243,3 +255,49 @@ def test_audit_includes_existing_lint_findings_without_changing_lint_api(tmp_pat
         set(finding) == {"code", "category", "severity", "subject", "message"}
         for finding in report["findings"]
     )
+
+
+def test_owner_audit_commands_are_agent_only_json_and_warn_is_success(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    root = tmp_path / "owner-warn"
+    record, _ = _paper(root, complete=True)
+    _write_record(root, record)
+
+    kb_owner = _load_script(
+        ".agents/skills/knowledge-base-manager/scripts/kb.py",
+        "d1_kb_owner",
+    )
+    monkeypatch.setattr(sys, "argv", ["kb.py", "--root", str(root), "audit"])
+    assert kb_owner.main() == 0
+    kb_output = capsys.readouterr().out.strip()
+    kb_report = json.loads(kb_output)
+    assert kb_report["status"] == "WARN"
+    assert str(root) not in kb_output
+
+    wiki_owner = _load_script(
+        ".agents/skills/wiki-adapter/scripts/wiki.py",
+        "d1_wiki_owner",
+    )
+    monkeypatch.setattr(sys, "argv", ["wiki.py", "--root", str(root), "audit"])
+    assert wiki_owner.main() == 0
+    wiki_output = capsys.readouterr().out.strip()
+    assert json.loads(wiki_output) == kb_report
+    assert str(root) not in wiki_output
+
+
+def test_owner_audit_command_returns_nonzero_only_for_fail(tmp_path: Path, monkeypatch, capsys) -> None:
+    root = tmp_path / "owner-fail"
+    record, _ = _paper(root)
+    record["status"] = "invalid-status"
+    _write_record(root, record)
+    kb_owner = _load_script(
+        ".agents/skills/knowledge-base-manager/scripts/kb.py",
+        "d1_kb_owner_fail",
+    )
+
+    monkeypatch.setattr(sys, "argv", ["kb.py", "--root", str(root), "audit"])
+    assert kb_owner.main() == 1
+    output = capsys.readouterr().out.strip()
+    assert json.loads(output)["status"] == "FAIL"
+    assert str(root) not in output
