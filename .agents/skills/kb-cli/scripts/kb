@@ -255,8 +255,7 @@ _PUBLIC_COMMAND_HEADS = frozenset(
 )
 _PUBLIC_COMMAND_LINE_PREFIX_RE = re.compile(r"^(?:[-*+>]\s+|\$\s+)")
 _PUBLIC_SHELL_PIPE_RE = re.compile(
-    r"\|\s*[\"']?(?:(?:/usr)?/bin/)?(?:bash|fish|sh|zsh)[\"']?(?:\s|$)",
-    flags=re.IGNORECASE,
+    r"\|\s*[\"']?(?:(?:/usr)?/bin/)?(?:bash|fish|sh|zsh)[\"']?(?:\s|$)"
 )
 _PUBLIC_CLAIM_TEXT_HARD_CAP = 2000
 _BIDI_CONTROL_CODEPOINTS = {
@@ -314,7 +313,7 @@ _NEXT_INTERNAL_MARKERS = (
 
 
 def _public_command_name(token: str) -> str:
-    return token.replace("\\", "/").rsplit("/", 1)[-1].casefold()
+    return token.replace("\\", "/").rsplit("/", 1)[-1]
 
 
 def _public_argument_looks_executable(argument: str) -> bool:
@@ -454,6 +453,31 @@ def _sanitize_public_text(value: object, root: Path) -> str | None:
         return None
     text = re.sub(r"\s+", " ", text).strip()
     text = text.translate(_MARKDOWN_NEUTRAL_TRANSLATION)
+    return text or None
+
+
+def _render_public_claim_text(value: object, root: Path) -> str | None:
+    """Render canonical claim text injectively or fail closed.
+
+    Whitespace folding matches confirmation digests.  Every other control or
+    format character is unsafe, and Markdown syntax is escaped reversibly so
+    distinct canonical claims cannot collapse to the same public projection.
+    """
+    text = str(value or "")
+    if _ANSI_ESCAPE_RE.search(text):
+        return None
+    for character in text:
+        category = unicodedata.category(character)
+        if character.isspace():
+            continue
+        if ord(character) in _BIDI_CONTROL_CODEPOINTS or category in {"Cc", "Cf", "Cs"}:
+            return None
+    if not text.strip() or not _public_line_is_safe(text, root):
+        return None
+    text = re.sub(r"\s+", " ", text).strip()
+    text = text.replace("\\", "\\\\")
+    for marker in ("[", "]", "<", ">", "`"):
+        text = text.replace(marker, f"\\{marker}")
     return text or None
 
 
@@ -1669,7 +1693,7 @@ def public_review_projection(record: dict, root: Path) -> dict[str, object]:
         if (judgement_track and not quotes) or any(not quote for quote in quotes):
             structurally_invalid = True
             continue
-        text = _sanitize_public_text(raw_text, root)
+        text = _render_public_claim_text(raw_text, root)
         evidence_text = _sanitize_public_text(quotes[0], root) if quotes else ""
         if (
             text is None
