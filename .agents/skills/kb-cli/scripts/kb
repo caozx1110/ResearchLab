@@ -237,26 +237,109 @@ _PUBLIC_DOCKER_SUBCOMMANDS = frozenset(
         "version", "volume", "wait",
     }
 )
-_PUBLIC_COMMANDS_WITH_ARGUMENTS = frozenset(
+_PUBLIC_SHELL_COMMAND_HEADS = frozenset(
     {
-        "cat", "chmod", "chown", "cp", "grep", "kill", "killall", "mkdir", "mv", "rm", "rmdir",
-        "rsync", "scp", "sed", "ssh", "touch", "xargs",
+        ".", ":", "[", "alias", "bash", "bg", "bind", "break", "builtin", "busybox", "caller", "cd",
+        "command", "compgen", "complete", "continue", "dash", "declare", "dirs", "disown",
+        "doas", "echo", "enable", "env", "eval", "exec", "exit", "export", "false", "fc",
+        "fg", "fish", "getopts", "hash", "help", "history", "jobs", "ksh", "let", "local",
+        "logout", "mapfile", "nice", "nohup", "popd", "powershell", "printf", "pushd", "pwd", "pwsh", "read",
+        "readarray", "readonly", "return", "set", "sh", "shift", "shopt", "source", "sudo",
+        "suspend", "tcsh", "test", "time", "times", "trap", "true", "type", "typeset",
+        "ulimit", "umask", "unalias", "unset", "wait", "zsh",
     }
 )
-_PUBLIC_SHELL_NAMES = frozenset({"bash", "fish", "sh", "zsh"})
-_PUBLIC_COMMAND_HEADS = frozenset(
+_PUBLIC_INTERPRETER_BUILD_COMMAND_HEADS = frozenset(
     {
-        *_PUBLIC_COMMANDS_WITH_ARGUMENTS,
-        *_PUBLIC_SHELL_NAMES,
-        "curl", "docker", "find", "git", "kubectl", "launchctl", "node", "npm", "open",
-        "pip", "pip3", "pnpm", "printf", "python", "python2", "python3", "reboot", "shutdown",
-        "sudo", "systemctl", "wget", "yarn",
+        "Rscript", "ant", "awk", "bazel", "buck", "bun", "cargo", "clang", "clang++", "cmake", "cmd.exe",
+        "deno", "dotnet", "g++", "gawk", "gcc", "go", "gradle", "gradlew", "groovy", "java",
+        "javac", "kotlin", "lua", "make", "mono", "mvn", "mvnw", "ninja", "node", "osascript",
+        "perl", "php", "python", "python2", "python3", "ruby", "rustc", "scala", "swift", "tclsh",
+        "wish", "xcodebuild",
+    }
+)
+_PUBLIC_PACKAGE_COMMAND_HEADS = frozenset(
+    {
+        "apk", "apt", "apt-get", "aptitude", "brew", "bundle", "composer", "conda", "dnf",
+        "flatpak", "gem", "mamba", "npm", "pacman", "pip", "pip3", "pnpm", "snap", "yum",
+        "yarn", "zypper",
+    }
+)
+_PUBLIC_DEVOPS_CLOUD_DATA_COMMAND_HEADS = frozenset(
+    {
+        "ansible", "ansible-playbook", "aws", "az", "gcloud", "gh", "helm", "jq", "mongosh",
+        "mysql", "podman", "psql", "redis-cli", "sqlite3", "terraform", "tofu", "yq",
+    }
+)
+_PUBLIC_NETWORK_ARCHIVE_COMMAND_HEADS = frozenset(
+    {
+        "7z", "bzip2", "bunzip2", "curl", "dig", "ftp", "gunzip", "gzip", "host", "ifconfig",
+        "ip", "nc", "ncat", "netcat", "nslookup", "ping", "route", "rsync", "scp", "sftp",
+        "socat", "ssh", "ssh-keygen", "tar", "telnet", "traceroute", "unrar", "unzip", "wget",
+        "xz", "zip",
+    }
+)
+_PUBLIC_SYSTEM_COMMAND_HEADS = frozenset(
+    {
+        "cat", "chmod", "chown", "cp", "cut", "dd", "defaults", "df", "diskutil", "du", "grep",
+        "head", "kill", "killall", "kubectl", "launchctl", "less", "ln", "ls", "lsof", "mkdir",
+        "more", "mount", "mv", "pkill", "plutil", "ps", "reboot", "rm", "rmdir", "sed",
+        "service", "shutdown", "sort", "stat", "systemctl", "tail", "tee", "top", "touch", "tr",
+        "umount", "uname", "uniq", "wc", "which", "whoami", "xargs", "xdg-open",
+    }
+)
+_PUBLIC_ALWAYS_COMMAND_HEADS = frozenset(
+    {
+        *_PUBLIC_SHELL_COMMAND_HEADS,
+        *_PUBLIC_INTERPRETER_BUILD_COMMAND_HEADS,
+        *_PUBLIC_PACKAGE_COMMAND_HEADS,
+        *_PUBLIC_DEVOPS_CLOUD_DATA_COMMAND_HEADS,
+        *_PUBLIC_NETWORK_ARCHIVE_COMMAND_HEADS,
+        *_PUBLIC_SYSTEM_COMMAND_HEADS,
     }
 )
 _PUBLIC_COMMAND_LINE_PREFIX_RE = re.compile(r"^(?:[-*+>]\s+|\$\s+)")
-_PUBLIC_SHELL_PIPE_RE = re.compile(
-    r"\|\s*[\"']?(?:(?:/usr)?/bin/)?(?:bash|fish|sh|zsh)[\"']?(?:\s|$)"
+_PUBLIC_SHELL_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\+?=)")
+_PUBLIC_EMBEDDED_APOSTROPHE_RE = re.compile(r"(?<=\w)'(?=\w)")
+_PUBLIC_SHELL_HEAD_ALWAYS_META_RE = re.compile(r"\$")
+_PUBLIC_SHELL_HEAD_CONTEXT_META_RE = re.compile(r"[<>]")
+_PUBLIC_SHELL_HEAD_OBFUSCATION_RE = re.compile(r"[*?\[\]{}\\]")
+_PUBLIC_FILEISH_ARGUMENT_RE = re.compile(r"\.[A-Za-z0-9][A-Za-z0-9_-]{0,15}$")
+_PUBLIC_PROSE_AMBIGUOUS_COMMAND_HEADS = frozenset(
+    {
+        "alias", "bind", "break", "brew", "bundle", "caller", "cat", "complete", "composer",
+        "continue", "cut", "echo", "enable", "export", "false", "gem", "go", "hash", "head",
+        "help", "history", "host", "ip", "jobs", "less", "local", "make", "more", "mount", "node",
+        "ping", "python", "python2", "python3", "read", "readonly", "return", "route", "service", "set",
+        "snap", "sort", "source", "stat", "tail", "tar", "test", "time", "times", "top", "touch",
+        "tr", "trap", "true", "type", "unset", "wait", "which", "zip",
+    }
 )
+_PUBLIC_GO_SUBCOMMANDS = frozenset(
+    {"build", "clean", "doc", "env", "fix", "fmt", "generate", "get", "install", "list", "mod", "run", "test", "tool", "version", "vet", "work"}
+)
+_PUBLIC_MAKE_TARGETS = frozenset(
+    {"all", "build", "check", "clean", "dist", "install", "package", "test", "uninstall"}
+)
+_PUBLIC_SHELL_RESERVED_HEADS = frozenset({"case", "for", "function", "if", "select", "until", "while"})
+_PUBLIC_KB_VERB_ARITY: dict[str, tuple[int, int | None]] = {
+    "add": (1, 1),
+    "doctor": (0, 0),
+    "find": (1, None),
+    "help": (0, 0),
+    "ingest": (1, 1),
+    "init": (0, 0),
+    "next": (0, 1),
+    "recall": (0, 1),
+    "reject": (1, 1),
+    "restore": (1, 1),
+    "resume": (0, 0),
+    "review": (0, 1),
+    "status": (0, 1),
+    "undo": (0, 0),
+    "update": (0, 0),
+}
+_PUBLIC_KB_ARGUMENT_META_RE = re.compile(r"[$`;&|]")
 _PUBLIC_CLAIM_TEXT_HARD_CAP = 2000
 _BIDI_CONTROL_CODEPOINTS = {
     *range(0x202A, 0x202F),
@@ -316,24 +399,97 @@ def _public_command_name(token: str) -> str:
     return token.replace("\\", "/").rsplit("/", 1)[-1]
 
 
+def _public_normalized_command_name(token: str) -> str:
+    return unicodedata.normalize("NFKC", _public_command_name(token))
+
+
 def _public_argument_looks_executable(argument: str) -> bool:
-    folded = argument.casefold()
+    normalized = unicodedata.normalize("NFKC", argument)
+    folded = normalized.casefold()
     return (
-        argument.startswith(("-", "/", "~", "./", "../"))
+        normalized.startswith(("-", "/", "~", "./", "../"))
         or folded.startswith(("http://", "https://", "ssh://", "git@"))
-        or folded.endswith((".js", ".mjs", ".cjs", ".py", ".sh", ".bash", ".zsh"))
+        or folded.endswith(
+            (
+                ".app", ".bash", ".class", ".cjs", ".exe", ".jar", ".js", ".lua", ".mjs",
+                ".php", ".pl", ".ps1", ".py", ".rb", ".sh", ".zsh",
+            )
+        )
     )
 
 
-def _public_tokens_have_command_shape(tokens: Sequence[str], logical_line: str) -> bool:
+def _public_tokens_look_like_prose(command: str, arguments: Sequence[str]) -> bool:
+    if command not in _PUBLIC_PROSE_AMBIGUOUS_COMMAND_HEADS or len(arguments) < 2:
+        return False
+    if not arguments[-1].endswith((".", "!", "?", "。", "！", "？")):
+        return False
+    if any(
+        _public_argument_looks_executable(argument)
+        or _PUBLIC_SHELL_ASSIGNMENT_RE.match(unicodedata.normalize("NFKC", argument))
+        for argument in arguments
+    ):
+        return False
+    predicate_words = {"are", "can", "could", "has", "have", "is", "may", "might", "should", "was", "were", "will", "would"}
+    return any(
+        (word := re.sub(r"[^A-Za-z]+$", "", argument).casefold()) in predicate_words
+        or word.endswith(("ed", "ing", "s"))
+        for argument in arguments
+    )
+
+
+def _public_ambiguous_tokens_have_command_shape(command: str, arguments: Sequence[str]) -> bool:
+    if command == "go":
+        return bool(arguments) and arguments[0] in _PUBLIC_GO_SUBCOMMANDS
+    if command == "make":
+        return bool(arguments) and (
+            arguments[0].startswith("-")
+            or arguments[0] in _PUBLIC_MAKE_TARGETS
+            or bool(_PUBLIC_SHELL_ASSIGNMENT_RE.match(arguments[0]))
+        )
+    if command in {"python", "python2", "python3"}:
+        return bool(arguments) and _public_argument_looks_executable(arguments[0])
+    if command == "source":
+        return bool(arguments) and (
+            _public_argument_looks_executable(arguments[0])
+            or bool(_PUBLIC_FILEISH_ARGUMENT_RE.search(arguments[0]))
+        )
+    if command == "set":
+        return bool(arguments) and (
+            arguments[0].startswith(("-", "+"))
+            or any(_PUBLIC_SHELL_ASSIGNMENT_RE.match(argument) for argument in arguments)
+        )
+    if command == "test":
+        return bool(arguments) and (
+            arguments[0].startswith("-")
+            or _public_argument_looks_executable(arguments[0])
+            or any(argument in {"!=", "=", "-a", "-o"} for argument in arguments)
+        )
+    if command == "time":
+        return bool(arguments) and (
+            _public_argument_looks_executable(arguments[0])
+            or _public_normalized_command_name(arguments[0]) in _PUBLIC_ALWAYS_COMMAND_HEADS
+        )
+    return False
+
+
+def _public_tokens_have_command_shape(tokens: Sequence[str]) -> bool:
     if not tokens:
         return False
-    command = _public_command_name(tokens[0])
+    command = _public_normalized_command_name(tokens[0])
     arguments = list(tokens[1:])
-    if command == "kb":
+    if _public_ambiguous_tokens_have_command_shape(command, arguments):
+        return True
+    if command in _PUBLIC_ALWAYS_COMMAND_HEADS and any(
+        _public_argument_looks_executable(argument)
+        or _PUBLIC_FILEISH_ARGUMENT_RE.search(argument)
+        or _PUBLIC_SHELL_ASSIGNMENT_RE.match(unicodedata.normalize("NFKC", argument))
+        for argument in arguments
+    ):
+        return True
+    if _public_tokens_look_like_prose(command, arguments):
         return False
-    if command in {"reboot", "shutdown"}:
-        return not arguments or all(argument.startswith("-") or argument.isdigit() for argument in arguments)
+    if command in _PUBLIC_ALWAYS_COMMAND_HEADS:
+        return True
     if command == "git":
         return bool(arguments) and (
             arguments[0].startswith("-") or arguments[0].casefold() in _PUBLIC_GIT_SUBCOMMANDS
@@ -342,39 +498,85 @@ def _public_tokens_have_command_shape(tokens: Sequence[str], logical_line: str) 
         return bool(arguments) and (
             arguments[0].startswith("-") or arguments[0].casefold() in _PUBLIC_DOCKER_SUBCOMMANDS
         )
-    if command in _PUBLIC_SHELL_NAMES:
-        return not arguments or _public_argument_looks_executable(arguments[0])
-    if command == "sudo":
-        remaining = list(arguments)
-        while remaining and remaining[0].startswith("-"):
-            option = remaining.pop(0)
-            if option in {"-C", "-D", "-g", "-h", "-p", "-R", "-T", "-u"} and remaining:
-                remaining.pop(0)
-        return _public_tokens_have_command_shape(remaining, " ".join(remaining))
-    if command in _PUBLIC_COMMANDS_WITH_ARGUMENTS:
-        return bool(arguments)
-    if command in {"curl", "wget"}:
-        return bool(arguments) and any(_public_argument_looks_executable(argument) for argument in arguments)
     if command == "find":
         return bool(arguments) and (
             _public_argument_looks_executable(arguments[0])
             or arguments[0] in {".", ".."}
             or any(argument.startswith("-") for argument in arguments)
         )
-    if command in {"kubectl", "launchctl", "systemctl"}:
-        return bool(arguments) and (arguments[0].startswith("-") or arguments[0].isidentifier())
-    if command in {"pip", "pip3"}:
-        return bool(arguments) and arguments[0].casefold() in {
-            "download", "install", "uninstall", "wheel",
-        }
-    if command in {"npm", "pnpm", "yarn"}:
-        return bool(arguments) and arguments[0].casefold() in {"add", "exec", "install", "remove", "run"}
-    if command in {"node", "python", "python2", "python3"}:
-        return bool(arguments) and _public_argument_looks_executable(arguments[0])
     if command == "open":
-        return bool(arguments) and any(_public_argument_looks_executable(argument) for argument in arguments)
-    if command == "printf":
-        return bool(arguments) and bool(_PUBLIC_SHELL_PIPE_RE.search(logical_line))
+        return bool(arguments) and any(
+            _public_argument_looks_executable(argument) or _PUBLIC_FILEISH_ARGUMENT_RE.search(argument)
+            for argument in arguments
+        )
+    return False
+
+
+def _public_kb_pseudo_cli_is_safe(candidate: str, raw_head: str, tokens: Sequence[str]) -> bool:
+    if raw_head != "kb" or not tokens or tokens[0] != "kb" or len(tokens) < 2:
+        return False
+    verb = tokens[1]
+    raw_parts = candidate.split(maxsplit=2)
+    if len(raw_parts) < 2 or raw_parts[1] != verb:
+        return False
+    arity = _PUBLIC_KB_VERB_ARITY.get(verb)
+    if arity is None:
+        return False
+    arguments = list(tokens[2:])
+    minimum, maximum = arity
+    if len(arguments) < minimum or (maximum is not None and len(arguments) > maximum):
+        return False
+    return not any(_PUBLIC_KB_ARGUMENT_META_RE.search(argument) for argument in arguments)
+
+
+def _public_shell_tokens(candidate: str, *, punctuation: bool = False) -> list[str] | None:
+    """Parse shell quoting while preserving ordinary embedded apostrophes."""
+    def parse(source: str) -> list[str]:
+        if not punctuation:
+            return shlex.split(source, comments=False, posix=True)
+        lexer = shlex.shlex(source, posix=True, punctuation_chars=";&|")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        return list(lexer)
+
+    try:
+        return parse(candidate)
+    except ValueError:
+        prose_candidate = _PUBLIC_EMBEDDED_APOSTROPHE_RE.sub(r"\\'", candidate)
+        if prose_candidate == candidate:
+            return None
+        try:
+            return parse(prose_candidate)
+        except ValueError:
+            return None
+
+
+def _public_line_has_shell_control_command(candidate: str) -> bool:
+    tokens = _public_shell_tokens(candidate, punctuation=True)
+    if tokens is None:
+        return True
+    operators = {";", "&", "&&", "|", "||"}
+    command = _public_normalized_command_name(tokens[0]) if tokens else ""
+    if command in _PUBLIC_SHELL_RESERVED_HEADS and (
+        any(token in operators for token in tokens)
+        or (command == "function" and "{" in tokens)
+    ):
+        return True
+    for index, token in enumerate(tokens):
+        if token not in operators:
+            continue
+        remaining = list(tokens[index + 1 :])
+        while remaining and remaining[0] in {"do", "elif", "else", "then"}:
+            remaining.pop(0)
+        if not remaining or remaining[0] in {"done", "esac", "fi"}:
+            continue
+        head = _public_normalized_command_name(remaining[0])
+        if (
+            remaining[0].startswith(("/", "./", "../", "~"))
+            or _PUBLIC_SHELL_ASSIGNMENT_RE.match(head)
+            or _public_tokens_have_command_shape(remaining)
+        ):
+            return True
     return False
 
 
@@ -387,16 +589,42 @@ def _public_text_has_command_shape(text: str) -> bool:
         candidate = _PUBLIC_COMMAND_LINE_PREFIX_RE.sub("", candidate, count=1)
         if not candidate:
             continue
-        raw_head = candidate.split(maxsplit=1)[0].strip("\"'")
-        if raw_head.startswith(("/", "./", "../", "~")):
+        tokens = _public_shell_tokens(candidate)
+        if tokens is None:
             return True
-        if _public_command_name(raw_head) not in _PUBLIC_COMMAND_HEADS:
+        if not tokens:
             continue
-        try:
-            tokens = shlex.split(candidate, comments=False, posix=True)
-        except ValueError:
+        raw_head = candidate.split(maxsplit=1)[0]
+        parsed_head = tokens[0]
+        normalized_raw_head = unicodedata.normalize("NFKC", raw_head)
+        normalized_head = unicodedata.normalize("NFKC", parsed_head)
+        if _public_normalized_command_name(parsed_head) == "kb":
+            if _public_kb_pseudo_cli_is_safe(candidate, raw_head, tokens):
+                continue
             return True
-        if _public_tokens_have_command_shape(tokens, candidate):
+        if normalized_head.startswith(("/", "./", "../", "~")):
+            return True
+        if _PUBLIC_SHELL_ASSIGNMENT_RE.match(normalized_head):
+            return True
+        if candidate.startswith(("(", "{", "!", "<", ">", "|", "&", ";")):
+            return True
+        if (
+            _PUBLIC_SHELL_HEAD_ALWAYS_META_RE.search(normalized_raw_head)
+            or _PUBLIC_SHELL_HEAD_ALWAYS_META_RE.search(normalized_head)
+        ):
+            return True
+        if len(tokens) > 1 and (
+            _PUBLIC_SHELL_HEAD_CONTEXT_META_RE.search(normalized_raw_head)
+            or _PUBLIC_SHELL_HEAD_CONTEXT_META_RE.search(normalized_head)
+            or _PUBLIC_SHELL_HEAD_OBFUSCATION_RE.search(normalized_raw_head)
+            or _PUBLIC_SHELL_HEAD_OBFUSCATION_RE.search(normalized_head)
+        ):
+            return True
+        if normalized_raw_head.count("`") >= 2 or normalized_head.count("`") >= 2:
+            return True
+        if _public_line_has_shell_control_command(candidate):
+            return True
+        if _public_tokens_have_command_shape(tokens):
             return True
     return False
 
@@ -426,7 +654,7 @@ def _public_line_is_safe(line: str, root: Path) -> bool:
     for private_root in {str(root.resolve()), str(DEFAULT_PROJECT_ROOT.resolve())}:
         if private_root and private_root in line:
             return False
-    if re.search(r"(?:^|\s)/(?:Users|home|private|tmp|var|opt|usr)(?:/|\s|$)", line, flags=re.IGNORECASE):
+    if re.search(r"(?:^|\s)/(?:[^\s]|$)", line):
         return False
     if re.search(r"(?:^|\s)(?:kb|raw|output)/[^\s]+", line, flags=re.IGNORECASE):
         return False
@@ -527,7 +755,7 @@ def _humanize_owner_line(line: str) -> str | None:
         return None
     if stripped.startswith("[hint]") and "kb next" in stripped:
         return "资料已加入知识库。接下来可运行 kb next，Agent 会继续整理并判断下一步。"
-    return line.rstrip()
+    return None
 
 
 def emit_public_output(text: str, root: Path, *, error: bool = False) -> bool:
@@ -805,7 +1033,13 @@ def _next_item_record_id(item: Mapping[str, object]) -> str:
     record_id = str(item.get("record_id") or "").strip()
     program_id = str(item.get("program_id") or "")
     step_type = str(item.get("step_type") or "")
-    if record_id and program_id.startswith("loose:") and step_type in _NEXT_LOOSE_UNIT_STEP_TYPES:
+    stage = str(item.get("stage") or "")
+    if (
+        record_id
+        and program_id.startswith("loose:")
+        and stage == "loose-unit"
+        and step_type in _NEXT_LOOSE_UNIT_STEP_TYPES
+    ):
         return record_id
     return ""
 
@@ -1209,7 +1443,20 @@ def handle_add(args: argparse.Namespace, root: Path) -> int:
     if unsafe_result is not None:
         return unsafe_result
     kind = args.kind or infer_add_kind(args.source, root)
-    return run_forwarded(root, [(SCRIPT_BY_VERB["add"], ["add", "--kind", kind, "--source", args.source])])
+    result = forward_command(
+        root,
+        SCRIPT_BY_VERB["add"],
+        ["add", "--kind", kind, "--source", args.source],
+        stream=False,
+    )
+    if result.returncode != 0:
+        print("资料未能加入知识库；详细诊断已保留给 Agent。", file=sys.stderr)
+        return result.returncode
+    emitted = emit_public_output(result.stdout, root)
+    emitted = emit_public_output(result.stderr, root, error=True) or emitted
+    if not emitted:
+        print("资料已加入知识库。")
+    return 0
 
 
 # --------------------------------------------------------------------------- #
@@ -1291,9 +1538,11 @@ def handle_ingest(args: argparse.Namespace, root: Path) -> int:
         root,
         SCRIPT_BY_VERB["add"],
         ["add", "--kind", kind, "--source", args.source],
+        stream=False,
         extra_env={"RESEARCH_INGEST_CHAIN": "1"},
     )
     if intake.returncode != 0:
+        print("资料未能加入知识库；详细诊断已保留给 Agent。", file=sys.stderr)
         return intake.returncode
 
     unit_id, status = _extract_ingest_unit_id(intake.stdout)
@@ -1328,10 +1577,7 @@ def handle_ingest(args: argparse.Namespace, root: Path) -> int:
         stream=False,
     )
     if prepare.returncode != 0:
-        emitted = emit_public_output(prepare.stdout, root)
-        emitted = emit_public_output(prepare.stderr, root, error=True) or emitted
-        if not emitted:
-            print("资料已入库，但深读准备未完成；详细诊断已保留给 Agent。")
+        print("资料已入库，但深读准备未完成；详细诊断已保留给 Agent。")
         set_protocol_status("error", unit_id=unit_id, source_kind=kind, stage="prepare")
         return prepare.returncode
 
