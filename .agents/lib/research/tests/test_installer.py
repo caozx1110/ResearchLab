@@ -241,6 +241,19 @@ def _git_output(checkout: Path, *args: str) -> str:
     ).stdout.strip()
 
 
+def _git_branch_or_empty(checkout: Path) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(checkout), "symbolic-ref", "--quiet", "--short", "HEAD"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 1:
+        return ""
+    result.check_returncode()
+    return result.stdout.strip()
+
+
 def _make_linked_source(tmp_path: Path) -> Path:
     primary = tmp_path / "source-primary"
     shutil.copytree(
@@ -450,9 +463,7 @@ def test_external_install_prints_completion_without_bash_variable_error(tmp_path
     assert installed_manifest["source_strategy"] == "local-checkout"
     assert installed_manifest["source_checkout"] == str(_project_root())
     assert installed_manifest["source_origin"] == _git_output(_project_root(), "remote", "get-url", "origin")
-    assert installed_manifest["source_branch"] == _git_output(
-        _project_root(), "symbolic-ref", "--quiet", "--short", "HEAD"
-    )
+    assert installed_manifest["source_branch"] == _git_branch_or_empty(_project_root())
     assert installed_manifest["source_commit"] == _git_output(_project_root(), "rev-parse", "HEAD")
 
     cancel = _run_pty_dialog(
@@ -586,6 +597,24 @@ def test_project_install_from_linked_worktree_preserves_linked_checkout(tmp_path
     assert manifest["source_origin"] == "ssh://example.test/team/workspace-oss.git"
     assert manifest["source_branch"] == "linked-dev"
     assert manifest["source_commit"] == _git_output(source, "rev-parse", "HEAD")
+
+
+def test_project_install_from_detached_worktree_pins_commit_without_guessing_branch(tmp_path: Path) -> None:
+    source = _make_linked_source(tmp_path)
+    source_commit = _git_output(source, "rev-parse", "HEAD")
+    _git_output(source, "checkout", "--detach", source_commit)
+    workspace = tmp_path / "detached-workspace"
+
+    installed = _install_copy(tmp_path, workspace, source=source)
+
+    assert installed.returncode == 0, installed.stdout + installed.stderr
+    assert "当前源码处于 detached 状态" in installed.stderr
+    manifest = json.loads((workspace / ".agents" / ".install-manifest.json").read_text(encoding="utf-8"))
+    assert manifest["source_strategy"] == "local-checkout"
+    assert manifest["source_checkout"] == str(source)
+    assert manifest["source_origin"] == "ssh://example.test/team/workspace-oss.git"
+    assert manifest["source_branch"] == ""
+    assert manifest["source_commit"] == source_commit
 
 
 def test_ws_sync_rejects_unknown_source_strategy_before_writing(tmp_path: Path) -> None:
