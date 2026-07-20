@@ -140,3 +140,87 @@ def test_backup_source_arxiv_falls_back_when_html_missing(
     assert payload["backup_status"] == "ok"
     assert payload["resolved_url"] == "https://ar5iv.org/abs/1301.3781"
     assert payload["locator_kind"] == "section"
+
+
+def test_backup_source_rejects_a_file_symlink_without_copying_target_bytes(tmp_path: Path) -> None:
+    secret = b"outside-file-secret\n"
+    target = tmp_path / "outside-secret.md"
+    target.write_bytes(secret)
+    selected = tmp_path / "selected.md"
+    selected.symlink_to(target)
+
+    with pytest.raises(sources.UnsafeLocalSourceError, match="符号链接"):
+        sources.backup_source(tmp_path, "blog", "b-link-file", selected.as_posix())
+
+    assert not core.unit_root(tmp_path, "blog", "b-link-file").exists()
+    copied = [path for path in (tmp_path / "kb").rglob("*") if path.is_file() and secret in path.read_bytes()]
+    assert copied == []
+
+
+@pytest.mark.parametrize("link_target", ["outside", "inside"])
+def test_backup_source_rejects_nested_directory_symlinks_without_copying_target_bytes(
+    tmp_path: Path,
+    link_target: str,
+) -> None:
+    secret = b"nested-link-secret\n"
+    selected = tmp_path / "selected-repo"
+    selected.mkdir()
+    (selected / "README.md").write_text("# Safe repository\n", encoding="utf-8")
+    if link_target == "outside":
+        target = tmp_path / "outside-tree"
+    else:
+        target = selected / "real-tree"
+    target.mkdir()
+    (target / "secret.txt").write_bytes(secret)
+    (selected / "nested-link").symlink_to(target, target_is_directory=True)
+
+    with pytest.raises(sources.UnsafeLocalSourceError, match="符号链接"):
+        sources.backup_source(tmp_path, "repo", f"r-link-{link_target}", selected.as_posix())
+
+    assert not core.unit_root(tmp_path, "repo", f"r-link-{link_target}").exists()
+    copied = [path for path in (tmp_path / "kb").rglob("*") if path.is_file() and secret in path.read_bytes()]
+    assert copied == []
+
+
+def test_backup_source_copies_an_ordinary_directory_without_vcs_metadata(tmp_path: Path) -> None:
+    selected = tmp_path / "ordinary-repo"
+    (selected / "src").mkdir(parents=True)
+    (selected / "src" / "main.py").write_text("print('safe')\n", encoding="utf-8")
+    (selected / ".git").mkdir()
+    (selected / ".git" / "config").write_text("[core]\n", encoding="utf-8")
+
+    payload = sources.backup_source(tmp_path, "repo", "r-ordinary", selected.as_posix())
+
+    archived = tmp_path / payload["backup_paths"][0]
+    assert payload["backup_status"] == "ok"
+    assert (archived / "src" / "main.py").read_text(encoding="utf-8") == "print('safe')\n"
+    assert not (archived / ".git").exists()
+
+
+def test_directory_copy_rechecks_root_after_preflight_and_cleans_failed_destination(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected = tmp_path / "selected-repo"
+    selected.mkdir()
+    (selected / "README.md").write_text("# Initially safe\n", encoding="utf-8")
+    outside = tmp_path / "outside-tree"
+    outside.mkdir()
+    secret = b"race-secret-must-not-copy\n"
+    (outside / "secret.txt").write_bytes(secret)
+    displaced = tmp_path / "displaced-tree"
+    destination = tmp_path / "archive"
+    real_assert = sources._assert_contained_local_tree
+
+    def replace_after_preflight(path: Path) -> None:
+        real_assert(path)
+        path.rename(displaced)
+        path.symlink_to(outside, target_is_directory=True)
+
+    monkeypatch.setattr(sources, "_assert_contained_local_tree", replace_after_preflight)
+
+    with pytest.raises(sources.UnsafeLocalSourceError, match="发生了变化"):
+        sources._copy_dir(selected, destination)
+
+    assert not destination.exists()
+    assert all(secret not in path.read_bytes() for path in tmp_path.rglob("*") if path.is_file() and path != outside / "secret.txt")

@@ -47,8 +47,12 @@ def test_idea_select_keeps_content_confirmation_pending(tmp_path: Path, monkeypa
             record["id"],
             "--confirmed-by",
             "czx",
-            "--evidence",
-            "kb/programs/p/decision-log.md",
+                "--evidence",
+                "kb/programs/p/decision-log.md",
+                "--user-authorization",
+                "I choose this idea for the next stage.",
+                "--authorization-source",
+                "user_message",
         ],
     )
 

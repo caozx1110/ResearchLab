@@ -1,22 +1,33 @@
 # 安装指南
 
-这份指南说明如何把这套 workspace skill bundle 接入 Claude Code、Codex 和可选的 `kb` 命令。安装目标是你的 **workspace 根目录**：安装后的 `.agents/` 与之后生成的 `kb/` 同级，而不是把 bundle 安装进 `kb/`。安装入口是仓库根目录的 `install.sh`。
+这份指南说明如何把这套 workspace skill bundle 接入 Claude Code、Codex 和可选的 `kb` 快捷入口。安装目标是你的 **workspace 根目录**：安装后的 `.agents/` 与之后生成的 `kb/` 同级，而不是把 bundle 安装进 `kb/`。安装入口是仓库根目录的 `install.sh`。
+
+> **普通用户只需完成一次安装。** 安装是日常使用之前唯一的技术 bootstrap；成功后请回到 Agent 对话，只用自然语言或 15 个 `kb <verb>` 伪 CLI 快捷入口。除“新用户快速安装”和“首次运行 KB”外，本页的 flags、scripts、环境变量与显式 paths 都是管理员、维护者或 CI 自动化参考，普通用户不需要复制或理解，Agent 也不应把它们作为日常操作步骤暴露给用户。
 
 ## 新用户快速安装
 
-在仓库根目录运行：
+在仓库根目录运行下面这条一次性引导命令：
 
 ```bash
 bash install.sh
 ```
 
-安装向导会依次询问五件事，按回车即可接受推荐选项：
+安装向导第一屏会明确列出四个动作：
 
-1. 选择“安装或重新配置”。
+1. **首次安装**：给新的 workspace 接入 skills。
+2. **更新**：同步已有安装中的版本变化。
+3. **重装或修复**：重新铺设全部受管文件，用于修复缺失或损坏。
+4. **卸载**：移除 skills 接入，同时保留研究资料和本地运行环境。
+
+首次安装时，向导会继续询问以下事项，按回车即可接受推荐选项：
+
+1. 选择“首次安装”。
 2. 选择你使用的 AI 工具：Claude Code、Codex，或两者都用。
 3. 选择“仅当前或指定工作区”。推荐 project scope，不推荐 system scope。
 4. 确认 workspace 根目录；不要选择其中的 `kb/` 子目录。
-5. 选择是否创建终端 `kb` 快捷命令。它只是额外便利，不影响在 AI 对话中使用 `kb`。
+5. 选择是否创建终端 `kb` 快捷命令。选择创建后，向导会提示安装完成后先在终端运行 `kb help`，再运行 `kb init`。它只是额外便利，不影响在 AI 对话中使用 `kb`。
+
+如果选择“首次安装”后，目标 workspace 已有本安装器的有效安装记录，向导不会直接报错，也不会静默重装，而会在询问终端快捷命令之前改为询问：更新（推荐）、重装或修复，或取消。非交互或 CI 中重复执行首次安装仍会非零退出，避免自动化任务在没有确认时改变动作。
 
 确认页会列出安装目标和将发生的改动。安装完成后，打开刚才选择的 AI 工具，在对话中输入：
 
@@ -24,9 +35,9 @@ bash install.sh
 kb init
 ```
 
-初始化完成后可用 `kb status` 查看当前状态。更新和卸载都会保留已有研究资料。
+初始化完成后可用 `kb status` 查看当前状态。此后不需要继续操作安装脚本；更新、重装和卸载由 Agent 或管理员按需处理，并保留已有研究资料。
 
-## 推荐安装模型
+## 管理员参考：推荐安装模型
 
 推荐把 bundle 以 project-scope copy 方式安装到外部 workspace 根：
 
@@ -38,7 +49,7 @@ kb init
 
 project copy workspace 不需要 `RESEARCH_SKILLS_HOME`。首次运行脚本时，受管 venv 会建在 `DIR/.venv`，安装器本身不会创建 venv。
 
-## 准备 Python
+## 管理员参考：运行环境
 
 `python3` 是安装器硬依赖。脚本首次运行会自动创建并使用项目内受管 `.venv`（含 PyYAML）。用户无需手动创建 venv、运行 pip 或导出 `RESEARCH_PYTHON`。
 
@@ -46,7 +57,9 @@ project copy workspace 不需要 `RESEARCH_SKILLS_HOME`。首次运行脚本时�
 
 安装器仍会做一次 `import yaml` preflight；如果当前 Python 缺 PyYAML，只会提示首次使用时自动准备受管运行环境，不需要手动运行 pip。只有显式设置 `RESEARCH_NO_MANAGED_VENV=1` 时，缺少 PyYAML 才是硬错误。
 
-## 命令行与自动化
+## 管理员参考：命令行与自动化
+
+以下命令供管理员、维护者和 CI 使用。普通用户完成上面的引导安装后不需要运行它们，也不需要把任何 flag 或内部 path 交给 Agent。
 
 在 bundle 仓库根目录运行，并把 `--project` 指向目标 workspace 根：
 
@@ -70,15 +83,23 @@ bash install.sh --dry-run --claude --project /path/to/workspace
 bash install.sh --all --project /path/to/workspace
 ```
 
+已有外部 project copy 安装可以显式选择更新、重装或卸载：
+
+```bash
+bash install.sh update --project /path/to/workspace
+bash install.sh reinstall --project /path/to/workspace
+bash install.sh uninstall --project /path/to/workspace
+```
+
 可选把 `kb` 放到 PATH：
 
 ```bash
 bash install.sh --claude --project /path/to/workspace --kb-on-path
 ```
 
-选择创建终端快捷命令时，project scope 会写 `<workspace>/bin/kb`。如果目标目录不在 `PATH`，安装器会提示。
+选择创建终端快捷命令时，project scope 会写 `<workspace>/bin/kb`。安装完成时，如果快捷入口已经在当前 `PATH` 中，完成页会提示可直接运行 `kb help` 和 `kb init`；如果不在，完成页会提示把上方显示的目录加入 `PATH`，重新打开终端后运行 `kb help`。安装器只创建快捷入口，不会修改任何 shell 配置。AI 对话中的 `kb <verb>` 不受终端 `PATH` 影响。
 
-## Project Scope Copy
+## 管理员参考：Project Scope Copy
 
 Project scope 面向单个 workspace。推荐始终显式传入 workspace 根目录：
 
@@ -129,7 +150,7 @@ AGENTS.md
 bin/kb
 ```
 
-## 更新：update
+## 管理员参考：更新（update）
 
 外部 copy workspace 用显式 update 子命令：
 
@@ -163,7 +184,22 @@ bash install.sh update --project /path/to/workspace --dry-run
 
 dry-run 打印真实差异、漂移和计划动作，但零写入。
 
-## 卸载：uninstall
+## 管理员参考：重装或修复（reinstall）
+
+外部 copy workspace 的受管文件缺失、损坏，或需要完整重新铺设时使用：
+
+```bash
+bash install.sh reinstall --project /path/to/workspace
+```
+
+`update` 与 `reinstall` 的区别是：
+
+- `update` 只同步源版本带来的 added/changed/removed 差异；若受管文件存在本地漂移，会默认阻断，适合日常升级。
+- `reinstall` 根据当前源重新铺设完整的受管文件集，并重新运行安装检查，适合恢复缺失、损坏或已漂移的受管文件；它不会删除 `kb/`、`.venv/` 或受管范围外的用户文件。
+
+两者都不会由重复 `install` 静默触发。若源中新出现的受管路径与用户本地文件冲突，重装会停止；只有明确接受覆盖该冲突时才使用 `--force`。
+
+## 管理员参考：卸载（uninstall）
 
 外部 copy workspace 用显式 uninstall 子命令：
 
@@ -171,9 +207,16 @@ dry-run 打印真实差异、漂移和计划动作，但零写入。
 bash install.sh uninstall --project /path/to/workspace
 ```
 
-copy 安装会按 manifest 精确删除 `.agents` 下的受管文件，移除 `.claude/skills`、`CLAUDE.md` managed block 和可选 `bin/kb`。`AGENTS.md` 只有在 manifest 标记为 managed 且 sha 仍匹配时才会删除；如果用户改过，会保留并告警。
+copy 安装的卸载会执行以下操作：
 
-`DIR/kb` 和 `DIR/.venv` 永远保留。卸载后 workspace 只是变为 unmanaged，研究数据不受影响。
+- 对 manifest 记录的 `.agents/**` 受管文件，只有目标仍是普通文件且 sha256 与安装记录一致时才删除。内容已修改、类型已变化或已被替换成 symlink 的目标会保留并告警；安装器不会跟随 symlink。
+- 清理由这些受管 Python 模块运行生成的标准 `__pycache__/*.pyc`；只按 manifest 中的模块名匹配，无关 cache 和异常类型仍保留。
+- 对 workspace 根 `AGENTS.md`，受管区块 digest 未变化时只移除该区块，区块外的用户文本保留；digest 已变化时整份文件保留并告警。
+- 移除属于本安装器的 `.claude/skills` symlink 和 `CLAUDE.md` managed block。
+- 删除安装 manifest。因漂移而保留的文件从此成为用户自管文件；如果 `.agents/` 仍非空，目录也会保留。
+- 尝试清理终端 `kb` 快捷 symlink：project scope 对应 `<workspace>/bin/kb`，system scope 对应 `~/.local/bin/kb`。project、system 和旧版兼容卸载都会执行这一步；只有链接目标仍指向本安装时才删除，普通文件或指向其他目标的链接会保留并告警。
+
+`DIR/kb`、`DIR/.venv` 和未写入 manifest 的用户文件永远保留。卸载后 workspace 只是变为 unmanaged，研究数据不受影响。
 
 旧版外部 symlink 安装仍可用兼容卸载：
 
@@ -183,9 +226,9 @@ bash install.sh --all --project /path/to/workspace --uninstall
 
 如果目标有真实 `.agents` 但没有本安装器 manifest，安装器会拒绝删除 `.agents`，但仍会清理明确属于 workspace-oss 的 Claude managed block 和匹配的 symlink。
 
-旧版 system/symlink 安装只保留兼容卸载能力。新 workspace 请使用 project-scope copy 安装，避免跨 workspace 共享路径和源仓依赖。
+旧版 system/symlink 安装只保留兼容卸载能力。卸载时不需要额外记得安装时是否选择过快捷命令，安装器都会安全尝试清理目标匹配的快捷 symlink。新 workspace 请使用 project-scope copy 安装，避免跨 workspace 共享路径和源仓依赖。
 
-## 环境变量
+## 管理员参考：环境变量
 
 | 变量 | 用途 |
 |---|---|
@@ -195,7 +238,7 @@ bash install.sh --all --project /path/to/workspace --uninstall
 | `RESEARCH_SKILLS_HOME` | 仅 legacy system/symlink 模式需要；推荐的 project copy workspace 不需要。 |
 | `RESEARCH_PROJECT_ROOT` | 指向当前 KB workspace；等价于给脚本传 `--root <workspace>`。 |
 
-## 首次运行 KB
+## 普通用户：首次运行 KB
 
 安装完成后，打开已配置的 Claude Code 或 Codex，在对话中输入：
 
@@ -210,3 +253,5 @@ kb status
 ```
 
 `kb init` 会创建 `kb/` 布局并由 AI 用自然语言收集基础偏好。是否创建终端快捷命令不影响这条对话式主路径。
+
+从这里开始，普通用户的完整产品表面就是自然语言和 15 个 `kb <verb>` 伪 CLI。Agent 负责私下选择 owner、参数、解释器与内部路径；用户不需要回到本页复制管理员命令。

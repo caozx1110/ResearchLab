@@ -2,18 +2,28 @@
 from __future__ import annotations
 
 import re
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator, Sequence
 
 from .common import (
     load_yaml,
     parse_iso_datetime,
     utc_now_iso,
 )
-from .evidence import confirmation_content_digest
+from .evidence import (
+    JUDGEMENT_CLAIM_TYPES,
+    UNCONFIRMABLE_CLAIM_TYPES,
+    confirmation_claims,
+    confirmation_content_digest,
+    record_external_source_contract,
+    validate_claims,
+    verification_receipt_violations,
+)
 from .ids import (
     build_unit_id,
 )
+from .journal import mutation_transaction
 from .paths import (
     UNIT_KIND_DIRS,
     _artifact_list,
@@ -23,6 +33,7 @@ from .paths import (
     _unique_text_list,
     kind_dir,
     record_path,
+    unit_root,
     units_root,
 )
 
@@ -43,6 +54,47 @@ DEFAULT_REUSE_FLAGS = {
 
 
 AI_INFORMATION_TYPES = {"inference", "evaluation", "user_opinion"}
+WORKFLOW_STATES = {
+    "source_ready",
+    "awaiting_agent_fill",
+    "ready_to_verify",
+    "ready_for_review",
+    "done",
+    "failed_retryable",
+}
+
+
+@contextmanager
+def command_mutation(
+    project_root: Path,
+    op_type: str,
+    target_paths: Sequence[Path],
+) -> Iterator[None]:
+    """Delegate command-scoped recovery and locking to the canonical transaction."""
+    with mutation_transaction(project_root, op_type, target_paths):
+        yield
+
+
+def _trusted_claim_source_roots(project_root: Path, record: dict[str, Any]) -> dict[str, Path]:
+    roots: dict[str, Path] = {}
+    record_id = str(record.get("id") or "").strip()
+    record_kind = str(record.get("kind") or "").strip()
+    for claim in confirmation_claims(record):
+        for ref in claim.get("evidence_refs") or []:
+            if not isinstance(ref, dict):
+                continue
+            source_unit_id = str(ref.get("source_unit_id") or "").strip()
+            if not source_unit_id or source_unit_id in roots:
+                continue
+            if source_unit_id == record_id:
+                roots[source_unit_id] = unit_root(project_root, record_kind, record_id)
+                continue
+            for source_kind in UNIT_KIND_DIRS:
+                candidate = record_path(project_root, source_kind, source_unit_id)
+                if candidate.exists():
+                    roots[source_unit_id] = candidate.parent
+                    break
+    return roots
 
 
 def kind_payload_skeleton(kind: str, title: str = "") -> dict[str, Any]:
@@ -415,7 +467,7 @@ def default_record(kind: str, *, title: str, maturity: str, source: dict[str, An
     return record
 
 
-def normalize_record_schema(record: dict[str, Any]) -> dict[str, Any]:
+def normalize_record_schema(record: dict[str, Any], *, project_root: Path | None = None) -> dict[str, Any]:
     if not isinstance(record, dict):
         raise SystemExit("Invalid record payload")
     kind = str(record.get("kind") or "")
@@ -448,6 +500,31 @@ def normalize_record_schema(record: dict[str, Any]) -> dict[str, Any]:
         item for item in {str(value) for value in normalized.get("information_types", [])} if item in INFORMATION_TYPES
     ) or ["fact"]
     confirmation_invalidated = False
+    verification = normalized.get("payload", {}).get("verification") if isinstance(normalized.get("payload"), dict) else None
+    if isinstance(verification, dict):
+        evidence_root = None
+        if project_root is not None:
+            evidence_root = unit_root(
+                project_root,
+                str(normalized.get("kind") or ""),
+                str(normalized.get("id") or ""),
+            )
+        verification_violations = verification_receipt_violations(
+            normalized,
+            evidence_root,
+            external_source=record_external_source_contract(normalized),
+            source_roots=_trusted_claim_source_roots(project_root, normalized) if project_root is not None else None,
+            check_artifacts=project_root is not None,
+        )
+        if verification_violations:
+            verification["invalidation"] = {
+                "reason": "verification_stale",
+                "violations": verification_violations,
+            }
+            if normalized.get("confirmation_status") == "confirmed":
+                confirmation_invalidated = True
+                normalized["confirmation_status"] = "pending_user_confirmation"
+                normalized["needs_human_confirmation"] = True
     confirmation = normalized.get("confirmation")
     if isinstance(confirmation, dict) and confirmation.get("content_digest"):
         stored_digest = str(confirmation.get("content_digest") or "")
@@ -463,7 +540,20 @@ def normalize_record_schema(record: dict[str, Any]) -> dict[str, Any]:
             }
     normalized["needs_human_confirmation"] = (
         confirmation_invalidated
-        or (_record_needs_gate(normalized)[0] and normalized["confirmation_status"] != "confirmed")
+        or (
+            (
+                _record_needs_gate(normalized)[0]
+                or bool(
+                    {
+                        str(claim.get("claim_type") or "")
+                        for claim in confirmation_claims(normalized)
+                        if isinstance(claim, dict)
+                    }
+                    & (JUDGEMENT_CLAIM_TYPES | UNCONFIRMABLE_CLAIM_TYPES)
+                )
+            )
+            and normalized["confirmation_status"] != "confirmed"
+        )
     )
     normalized["tags"] = _slug_list(normalized.get("tags"))
     normalized["topics"] = _slug_list(normalized.get("topics"))
@@ -499,6 +589,160 @@ def _record_needs_gate(record: dict[str, Any]) -> tuple[bool, set[str], bool]:
     return bool(ai_info_types) or source_is_ai, ai_info_types, source_is_ai
 
 
+def _workflow_marker(record: dict[str, Any]) -> str:
+    kind = str(record.get("kind") or "")
+    payload = record.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    state = payload.get("state")
+    state = state if isinstance(state, dict) else {}
+    if kind in {"paper", "blog"}:
+        return str(state.get("full_note_status") or "")
+    if kind == "repo":
+        return str(state.get("capability_fill_status") or "")
+    if kind == "idea":
+        review = payload.get("review")
+        analysis = payload.get("analysis")
+        review = review if isinstance(review, dict) else {}
+        analysis = analysis if isinstance(analysis, dict) else {}
+        return str(review.get("review_status") or analysis.get("analysis_status") or "")
+    if kind == "experiment":
+        diagnosis = payload.get("diagnosis")
+        diagnosis = diagnosis if isinstance(diagnosis, dict) else {}
+        return str(diagnosis.get("verification_status") or state.get("diagnosis_status") or "")
+    return ""
+
+
+def _has_unverified_judgement_signal(record: dict[str, Any]) -> bool:
+    payload = record.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    quick_screen = payload.get("quick_screen")
+    quick_screen = quick_screen if isinstance(quick_screen, dict) else {}
+    for key in (
+        "worth_deep_reading",
+        "judgement_reason",
+        "backing_strength",
+        "result_strength",
+        "experiment_quality",
+        "reliability",
+        "novelty",
+        "relevance_to_current_research",
+        "screening_mode",
+        "risks",
+        "takeaways",
+        "recommended_next_action",
+    ):
+        value = quick_screen.get(key)
+        if value not in (None, "", "unknown", False, [], {}):
+            return True
+    return False
+
+
+def _has_substantive_judgement_content(record: dict[str, Any]) -> bool:
+    """Reuse the confirmation gate's substance criterion without import cycling."""
+    from .confirm import has_substantive_content
+
+    return has_substantive_content(record, str(record.get("kind") or ""))
+
+
+def record_workflow_state(record: dict[str, Any]) -> str:
+    """Single pure classifier shared by next/review/status/auto callers."""
+    status = str(record.get("status") or "").strip().lower()
+    confirmation_status = str(record.get("confirmation_status") or "")
+    payload = record.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    source = record.get("source")
+    source = source if isinstance(source, dict) else {}
+    marker = _workflow_marker(record).strip().lower()
+    claims = confirmation_claims(record)
+    information_types = {str(value) for value in record.get("information_types") or []}
+    claim_types = {str(claim.get("claim_type") or "") for claim in claims}
+    unconfirmable_claims = bool(claim_types & UNCONFIRMABLE_CLAIM_TYPES)
+    judgement_claims_present = bool(claim_types & JUDGEMENT_CLAIM_TYPES)
+    judgement_record = bool(
+        _record_needs_gate(record)[0]
+        or "unverified" in information_types
+        or judgement_claims_present
+        or _has_unverified_judgement_signal(record)
+    )
+    needs_gate = (
+        _record_needs_gate(record)[0]
+        or "unverified" in information_types
+        or bool(claim_types & (JUDGEMENT_CLAIM_TYPES | UNCONFIRMABLE_CLAIM_TYPES))
+        or _has_unverified_judgement_signal(record)
+    )
+    failure_markers = {
+        status,
+        marker,
+        str(source.get("status") or "").strip().lower(),
+        str(payload.get("workflow_status") or "").strip().lower(),
+    }
+    if confirmation_status == "rejected":
+        return "done"
+    if failure_markers & {"failed_retryable", "retryable_failure", "failed-retryable"}:
+        return "failed_retryable"
+    if status in {"archived", "completed"}:
+        return "done"
+
+    verification = payload.get("verification")
+    verification = verification if isinstance(verification, dict) else {}
+    claims_structurally_complete = (
+        bool(claims)
+        and not unconfirmable_claims
+        and not validate_claims(claims)
+    )
+    judgement_material_complete = (
+        claims_structurally_complete
+        and judgement_claims_present
+        and _has_substantive_judgement_content(record)
+    )
+    receipt_violations = verification_receipt_violations(
+        record,
+        None,
+        check_artifacts=False,
+    )
+    verification_current = (
+        claims_structurally_complete
+        and not verification.get("invalidation")
+        and not receipt_violations
+        and (not judgement_record or judgement_material_complete)
+    )
+    requires_reverification = (
+        judgement_record
+        and not verification_current
+        and (
+            confirmation_status == "confirmed"
+            or bool(verification)
+        )
+    )
+    if requires_reverification:
+        return "ready_to_verify" if judgement_material_complete else "awaiting_agent_fill"
+    if confirmation_status == "confirmed":
+        return "done"
+    if marker in {"awaiting_agent_fill", "agent_fill_required"}:
+        return "awaiting_agent_fill"
+    if marker in {"ready_to_verify", "agent_fill_complete"}:
+        if judgement_record and not judgement_material_complete:
+            return "awaiting_agent_fill"
+        return "ready_to_verify"
+    if confirmation_status == "pending_user_confirmation":
+        if verification_current:
+            return "ready_for_review"
+        if marker in {"pending_user_confirmation", "ready_for_review"}:
+            return "awaiting_agent_fill" if needs_gate else "ready_for_review"
+        if marker == "not_started":
+            return "source_ready" if needs_gate else "ready_for_review"
+        if not marker and str(record.get("kind") or "") in {"paper", "blog", "repo", "idea"}:
+            return "source_ready" if needs_gate else "ready_for_review"
+        if needs_gate or marker:
+            return "awaiting_agent_fill"
+        return "ready_for_review"
+    return "source_ready"
+
+
+def is_ready_for_human_review(record: dict[str, Any]) -> bool:
+    return record_workflow_state(record) == "ready_for_review"
+
+
 def iter_records(project_root: Path, *, kind: str | None = None) -> list[dict[str, Any]]:
     kinds = [kind] if kind else list(UNIT_KIND_DIRS)
     items: list[dict[str, Any]] = []
@@ -510,7 +754,7 @@ def iter_records(project_root: Path, *, kind: str | None = None) -> list[dict[st
             payload = load_yaml(path, default={})
             if isinstance(payload, dict):
                 try:
-                    items.append(normalize_record_schema(payload))
+                    items.append(normalize_record_schema(payload, project_root=project_root))
                 except SystemExit:
                     items.append(payload)
     return items
@@ -567,7 +811,7 @@ def locate_record(project_root: Path, unit_id: str, *, kind: str | None = None, 
         if path.exists():
             payload = load_yaml(path, default={})
             if isinstance(payload, dict):
-                return normalize_record_schema(payload), path
+                return normalize_record_schema(payload, project_root=project_root), path
     records = iter_records(project_root, kind=kind) if kind else iter_records(project_root)
     for record in records:
         if exact_reference in _unique_text_list(record.get("legacy_ids")):
@@ -616,6 +860,8 @@ __all__ = [
     "MATURITY_LEVELS",
     "DEFAULT_REUSE_FLAGS",
     "AI_INFORMATION_TYPES",
+    "WORKFLOW_STATES",
+    "command_mutation",
     "kind_payload_skeleton",
     "_extract_unit_id_hash",
     "_record_template",
@@ -624,6 +870,8 @@ __all__ = [
     "default_record",
     "normalize_record_schema",
     "_record_needs_gate",
+    "record_workflow_state",
+    "is_ready_for_human_review",
     "iter_records",
     "_record_lookup_path",
     "_record_hash_suffix",

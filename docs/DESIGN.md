@@ -1,45 +1,41 @@
 # 设计说明
 
-这份文档面向想理解或扩展系统的开发者。它解释 architecture、skill 路由、数据模型、确认门控和扩展方式。具体 on-disk schema 以 [`.agents/lib/research/SCHEMAS.md`](../.agents/lib/research/SCHEMAS.md) 为准；本文只保留心智模型和原则。
+本文面向想理解或扩展系统的开发者。具体 on-disk 字段和枚举以 [SCHEMAS.md](../.agents/lib/research/SCHEMAS.md) 为准；本文说明边界、数据流和不变量。
 
-## 设计目标
+## 目标与非目标
 
-Open Research Workspace Skills 是一个 knowledge-unit-first 的 research operating system。它不把聊天记录当工作区，而是让 AI 把研究过程持续写入 `kb/`：
+Open Research Workspace Skills 是 knowledge-unit-first 的 research operating system。聊天是交互界面，不是状态存储：
 
-1. 外部材料先进入 `kb/raw/`，保持不可变。
-2. 论文、仓库、博客、想法和实验都成为 `kb/units/<kind>s/<id>/record.yaml`。
-3. 具体研究方向挂在 `kb/programs/<program-id>/`。
-4. 综述、taxonomy、趋势和 gap 放在 `kb/synthesis/`。
-5. 人类入口页从 canonical 数据生成到 `kb/user/`。
+1. 外部材料进入不可变 source 与完整 parse cache；
+2. paper、repo、blog、idea 和 experiment 成为 typed knowledge unit；
+3. program 保存问题、证据请求、决策、设计、实验和报告事件；
+4. synthesis 保存跨 unit 的 survey、taxonomy、trend 和 gap；
+5. `kb/user/` 从 canonical 数据生成，供人复开。
 
-这个设计吸收了 LLM-maintained wiki 的核心思路：让 AI 持续维护可链接、可复开的中间知识层，而不是每次查询都从 raw documents 重新做 RAG。区别是本系统把 wiki 思路收敛成 typed knowledge units、program workflow 和 confirmation gate。
+系统不把脚本当作理解模型。脚本只负责搬运、建填充结构、机器验证和过门；材料理解由 runtime agent 完成。任何“给材料、没有 Agent 就直接吐出判断”的实现都不属于 analyzer 层。
 
-## 架构层次
+## 分发边界
 
 ```text
-.agents/
-├── skills/             # 17 个本地 skill：16 个 core-chain skill + kb-cli
-├── lib/research/       # 跨 skill 共享 Python helper
-└── README.md
-
-kb/
-├── raw/
-├── units/
-├── programs/
-├── synthesis/
-├── config/
-├── user/
-├── output/
-└── .runtime/
+release bundle                 installed workspace
+├── .agents/                   ├── .agents/
+│   ├── AGENTS.md              │   ├── AGENTS.md
+│   ├── lib/research/          │   ├── lib/research/
+│   └── skills/                │   └── skills/
+├── AGENTS.md                  ├── AGENTS.md
+├── README.md                  └── kb/
+└── docs/
 ```
 
-公开包提供 `.agents/`（含使用规则 `.agents/AGENTS.md`）、面向开发者的 `AGENTS.md`/`CLAUDE.md`（软链）、`README.md` 和 `docs/`。用户本地运行后生成自己的 `kb/`；发布包不应捆绑私有 knowledge base。
+仓库根 `AGENTS.md` 是开发这套 skill 系统的工作流；分发树 `.agents/AGENTS.md` 是安装后 Agent 使用 KB 的 runtime 规则。两者不可混写。
 
-`kb/` 可以是嵌套 Git repository。runtime state、browser snapshots 和本地缓存应忽略，canonical records 和 durable notes 才是知识库主体。
+Release bundle 不包含任何私有 `kb/`。安装、更新、storage sync 和卸载必须保持数据边界：workspace 的 `kb/` 永不成为发布内容，storage sync 不改 `.agents/**` 或根 `AGENTS.md`。
 
-## Skill 系统和路由
+安装与管理员自动化是产品唯一的技术 bootstrap 面。安装完成后，普通用户的 runtime 合同只有自然语言与 15 个 `kb <verb>` 伪 CLI；内部 flags、scripts、环境变量和 paths 只属于 Agent 私有协议或管理员参考，不得变成日常使用前置。
 
-系统当前有 17 个本地 skill：
+## Skill 路由
+
+系统包含 17 个本地 skill：
 
 | 分组 | Skills |
 |---|---|
@@ -47,134 +43,164 @@ kb/
 | Analysis | `paper-analyst`, `repo-analyst`, `blog-analyst`, `literature-synthesizer` |
 | Creation and execution | `idea-workbench`, `method-designer`, `experiment-workbench`, `report-author` |
 | Navigation and meta | `research-navigator`, `discussion-archivist`, `wiki-adapter`, `skill-evolution-advisor` |
-| Shortcut dispatcher | `kb-cli` |
+| Conversational shortcut | `kb-cli` |
 
 路由原则：
 
-1. 用户可以自然语言描述任务，不必点名 skill。
-2. 明确 owner 的任务应交给 owner skill，不复制业务逻辑。
-3. `research-orchestrator` 负责跨 program 的状态、next action、open question、evidence request、decision-log 和 reporting event。
-4. `kb-cli` 只做薄 dispatcher，把 `help/status/next/find/recall/add/review` 转译到底层 owner 脚本。
-5. `wiki-adapter` 是薄入口，处理“加到 wiki/查 wiki/lint wiki”这类泛化表达，再转给真正 owner。
+1. 用户自然语言优先，不需要记住 skill 名；
+2. canonical artifact 只有一个 owner，薄入口不复制业务逻辑；
+3. `research-orchestrator` 管 program state、open question、evidence request、decision 和 reporting event；
+4. `kb-cli` 只把 15 个公开动词转给 owner；
+5. `wiki-adapter` 只路由泛化 wiki 意图；
+6. 确定性的共同行为下沉到共享库，Agent 理解留在 runtime。
 
-Skill 的 `SKILL.md` 负责触发语义和职责边界；`agents/openai.yaml` 应与它保持一致。重复、确定性的行为应该沉到 `scripts/`，避免让提示词承担流程控制。
+## 共享运行库
+
+`.agents/lib/research/core.py` 是兼容导出 facade，不再是业务 god-file。实现按职责拆分：
+
+- `paths.py`：KB 路径与存储约束；
+- `records.py`：record schema、迭代与 workflow state；
+- `prefs.py`：runtime preferences 与 workspace scaffold；
+- `confirm.py`：write gate、confirmation receipt、link 与 lifecycle mutation；
+- `sources.py`：source intake 与 KB-local storage migration；
+- `index.py`：index、governance、search 和 ID compaction；
+- `diagnostics.py`：可选诊断策略、脱敏 issue、确定性去重和本地导出预览；
+- `evidence.py`：逐字 evidence 和派生证据验证；
+- `journal.py` / `git_ops.py`：恢复与精确 checkpoint；
+- `bootstrap.py` / `updater.py`：运行环境与来源感知更新；
+- `yaml_io.py`：原子序列化。
+
+新增代码应依赖最窄 owner module；旧调用可以继续通过 `core.py` facade 兼容。不要重新把实现堆回 facade。
 
 ## 数据模型
 
-每个 unit 至少有一个 `record.yaml`，它是 canonical record。详细笔记、payload、figure、diagnosis、report material 都是附属产物，不能替代 record。
+每个 unit 至少有一个 canonical `record.yaml`：
 
-最小 record 需要表达：
+- identity：`id`, `kind`, `title`；
+- lifecycle：`status`, `maturity`, `confirmation_status`, `revision`；
+- epistemics：`information_types`, `needs_human_confirmation`, confirmation receipt；
+- organization：`tags`, `topics`, `candidate_pools`, `links`, `reuse_flags`；
+- trace：`source`, `evidence`, `history`。
 
-- `id`
-- `kind`
-- `status`
-- `maturity`
-- `confirmation_status`
-- `needs_human_confirmation`
-- `information_types`
-- `tags`
-- `topics`
-- `links`
-- `reuse_flags`
-- `history`
+Unit 类型为 `paper`, `repo`, `blog`, `idea`, `experiment`。Program 位于 `kb/programs/<program-id>/`，包含 state、open questions、evidence requests、decision log、reporting events、design、experiments、reports 和 discussions。
 
-Unit 类型包括：
+`kb/raw/` 与完整 parse cache 是不可变派生证据。后续分析只读，不覆盖。`kb/user/` 是生成视图，`kb/output/` 是导出，不得成为唯一 source of truth。
 
-- `paper`
-- `repo`
-- `blog`
-- `idea`
-- `experiment`
+## Prepare / fill / verify
 
-Program 文件落在 `kb/programs/<program-id>/`，核心包括：
-
-- `state.yaml`
-- `workflow/open-questions.yaml`
-- `workflow/evidence-requests.yaml`
-- `workflow/decision-log.md`
-- `workflow/reporting-events.yaml`
-- `design/`
-- `experiments/`
-- `reports/`
-- `discussions/`
-
-`report-author` 主要从 reporting events 和 confirmed artifacts 汇总周报、阶段总结、PPT 素材和写作素材。`research-navigator` 主要从 canonical 数据生成 `kb/user/` 下的人类入口页。
-
-Config 文件落在 `kb/config/`，包括 candidate pools、topic taxonomy、runtime preferences、user profile 等。`research-config-manager` 写入偏好和 seed；`knowledge-base-manager` 负责更广义的 schema、索引、治理和 lifecycle。
-
-完整字段和约束见 [SCHEMAS.md](../.agents/lib/research/SCHEMAS.md)。
-
-## Confirmation Gate
-
-确认门控是系统质量边界。
-
-事实信息可以 `auto_confirmed`。凡是 AI 推断、评价、用户意见归纳或未验证信息，默认应是 `pending_user_confirmation`。例如：
-
-- `information_types` 包含 `inference`
-- `information_types` 包含 `evaluation`
-- `information_types` 包含 `user_opinion`
-- `source.kind` 是 `ai`
-
-把内容提升到 `confirmed` 时必须提供确认人和 evidence。底层 helper 会写入 confirmation provenance，记录谁确认、何时确认、凭什么确认。
-
-当前实现要诚实看待两个边界：
-
-1. Unit `record.yaml` 写入会走 `validate_write()`；默认违规是 warning，设置 `RESEARCH_VALIDATE_STRICT=1` 或显式 strict 时才拦截。
-2. Program state、workflow files、reporting events 等旁路文件目前不全部经过同等强度的 gate，因此写文档和 report 时必须继续区分 fact、inference、evaluation 和 unverified。
-
-开发者扩展系统时，不要把 AI judgement 静默提升成事实。
-
-## `kb/` 目录心智模型
+Analyzer 的共同状态流：
 
 ```text
-kb/raw/              # immutable external source bytes
-kb/units/            # canonical knowledge units
-kb/programs/         # concrete research programs and workflow state
-kb/synthesis/        # cross-unit surveys, taxonomy, trends, gaps
-kb/config/           # runtime preferences, taxonomy seeds, candidate pool policy
-kb/user/             # generated human-facing navigation and reopen pages
-kb/output/           # exports only
-kb/.runtime/         # local runtime/cache state
+source ready
+    ↓ prepare
+awaiting agent fill
+    ↓ runtime agent writes grounded understanding
+ready to verify
+    ↓ machine verification
+human-review-ready judgement
+    ↓ current user authorization
+confirmed or rejected
 ```
 
-`raw/` 不重写；`units/` 和 `programs/` 是主要真相；`user/` 是生成入口；`output/` 只是导出，不是唯一 source of truth。
+可重试失败会回到 Agent 修复，不进入 human review。Paper、repo 和 blog 必须复用 `records.py` 的 canonical workflow state 与 `is_ready_for_human_review` classifier；不得在 CLI 或各 analyzer 中各写一份近似判断。
 
-## 如何扩展或新增 skill
+每条 load-bearing judgement 挂逐字 evidence 和 locator。Verifier 只判断 quote 是否来自不可变证据、字段是否实质、workflow 是否可推进；不替 Agent 生成理解。
 
-新增 skill 时，先明确 owner 边界，再写脚本。
+## Confirmation gate
 
-推荐步骤：
+事实 metadata 可 `auto_confirmed`。AI inference、evaluation、novelty judgement、diagnosis 和归纳的 user opinion 默认 `pending_user_confirmation`。
 
-1. 在 `.agents/skills/<skill-name>/SKILL.md` 写清触发条件、职责、输入输出和禁止事项。
-2. 同步更新 `.agents/skills/<skill-name>/agents/openai.yaml`，保持触发语义一致。
-3. 能确定执行的流程放进 `scripts/`，并提供 `--help`。
-4. 读写 unit record 时复用 `.agents/lib/research/` helper，尤其是 ID、YAML、root discovery、confirmation 和 write helpers。
-5. AI 推断和评价默认写成 `pending_user_confirmation`。
-6. 如果写 program workflow，尽量 emit reporting event，让 `report-author` 和 `research-navigator` 能复用。
-7. 给共享行为补测试；至少运行新脚本的 `--help`。
-8. 更新 `docs/DESIGN.md` 或 `docs/USER_GUIDE.md` 中面向用户或开发者的对应说明。
+提升为 `confirmed` 必须同时满足：
 
-不要让两个 skill 长期拥有同一类 canonical artifact。出现重叠时，优先收敛 owner，而不是靠提示词约定谁先谁后。
+1. 内容通过实质门，不是空壳或模板；
+2. judgement evidence 完整且可机器校验；
+3. signer 不是 AI；
+4. `user_authorization` 来自当前用户消息；
+5. `authorization_source` 可追溯；
+6. receipt 绑定当前 content digest 与 evidence digest；
+7. 写入瞬间重新验证授权和版本，失败时 fail closed。
 
-## Runtime 和已知结构
+Receipt 不改变原 epistemic type。内容或 evidence 改变时，旧 receipt 失效；公开层引导 Agent 基于当前材料重新核验，只有核验通过的新版判断才重新进入人类确认，不向用户暴露内部状态名。事实批量确认与判断逐项确认可以有不同 UX，但都不得自签。
 
-脚本默认使用 `${RESEARCH_PYTHON:-python3}`。文档和 generated command 应保持这个形式，让用户可以通过 `RESEARCH_PYTHON` 指向自己的 venv。
+## 对话层与 Agent 协议
 
-多数 skill 脚本会从 `Path(__file__).resolve()` 开始向上查找 `.agents/lib`，并临时插入 `sys.path`。这让脚本在源码树里直接运行很方便，也支持 `--root` / `RESEARCH_PROJECT_ROOT` 做显式项目根；但它也意味着符号链接 sandbox 可能解析回真实仓库。需要隔离演练时，复制 `.agents/` 或显式传 root。
+公开表面只有自然语言与 15 个 `kb <verb>` 伪 CLI。内部 owner 参数、解释器、环境变量、脚本路径和 next-step markers 不能进入 human stdout。
 
-当前 `.agents/lib/research/core.py` 是一个较大的 god-file，集中了承载 record、schema、confirmation、runtime preference、program helper 等职责；`.agents/lib/research/common.py` 承担 root discovery、路径和通用工具。这是当前结构现实，不应在 docs 里假装已经完全模块化。后续拆分应以测试覆盖和 owner 边界为前提。
+当 runtime agent 需要精确参数或 owner diagnostics 时，`kb-cli` 在显式 opt-in 后写私有结构化协议到 `kb/.runtime/`：
 
-## 发布和兼容性
+- ordinary invocation 不创建协议文件；
+- 协议 destination 必须位于 runtime area；
+- human stdout fail closed，只保留安全自然语言；
+- protocol 可保存 child stdout/stderr 和 exact action arguments；
+- init/review 在 TTY、pipe 与 Agent call 下语义一致，脚本不读 stdin。
 
-发布面向的是 workflow package，不是私有知识库。新用户应创建自己的 `kb/`：
+这个分层让人类界面稳定，同时保留 Agent 自动驱动所需的精确信息。
 
-```bash
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -r requirements.txt
-export RESEARCH_PYTHON="$(pwd)/.venv/bin/python"
-${RESEARCH_PYTHON:-python3} .agents/skills/knowledge-base-manager/scripts/kb.py init
-${RESEARCH_PYTHON:-python3} .agents/skills/research-config-manager/scripts/config.py init
-```
+## 可选开发者诊断与机械 audit
 
-文档里的路径应优先使用相对路径和可配置 runtime，避免写入维护者本机路径。
+D1 把强制正确性门和可选质量诊断分开。Schema、evidence、confirmation、containment、journal、lock、CAS 与 recovery 在所有配置下都必须执行；配置只能关闭额外记录和 Agent 复盘。
+
+诊断模式为 `off`、`errors-only`、`developer`，默认 `off`，并允许单个 skill 用更严格的有效模式覆盖 workspace。`errors-only` 只运行确定性捕获，不消费 LLM token；`developer` 才允许在每任务 token/issue budget 内做触发式短复盘。用户当前消息明确要求记录时不受自动模式关闭影响。
+
+Dispatcher 只在 owner 已返回非零结果之后尝试捕获，并且只交付稳定 skill、公开 operation、return code 和固定中文安全摘要。Raw stdout/stderr、traceback、arguments、用户原文、source/evidence、secret、环境变量和绝对路径都禁止进入 capture API。捕获异常只能写入私有 Agent protocol，不能改变原 exit code 或 public message；成功与 no-op 不产生 issue。
+
+结构化问题保存在本地 skill-evolution 记忆中，近重复确定性合并 occurrence。Issue 永不自动改 skill、roadmap 或已确认研究结论。D1 没有后台 telemetry 或第三方上传；脱敏导出预览也必须由当前用户消息授权。
+
+机械 workspace audit 是字节级只读操作，按 `schema`、`integrity`、`recovery`、`security`、`quality` 分层报告稳定 finding。它检查可确定判断的结构、绑定、journal、产品拥有文件、基础 metadata、figure 候选和 symlink containment，不判断语义矛盾或研究结论质量。`kb doctor` 的普通输出仍只有简洁中文；显式 Agent protocol 可以包含有效模式与 audit status/counts，但不投影 raw finding。
+
+公开动词仍精确为 15 个。用户以“开启开发者诊断”“仅在出错时记录”“关闭 paper-analyst 诊断”“对刚才失败做脱敏复盘”“检查知识库健康”等自然语言触发 Agent owner；不存在新的 `kb lint` 或 `kb diagnostics`。D1 的自动捕获、audit 和复盘目前分别按 beta/scaffold 对待，不并入 stable 能力外推。
+
+## 原子写、事务与恢复
+
+单文件写使用临时文件 + replace，并通过 revision/CAS 防止 stale overwrite。Record 写入使用 per-path lock 和 operation journal。
+
+多文件 mutation 在开始前计算非空 literal target set，然后：
+
+1. 按稳定顺序取得 exact-path locks；
+2. 用同一 target set 开 operation journal；
+3. 执行 nested writes；同线程同路径 lock 必须 reentrant；
+4. 成功后提交 journal；失败留下可恢复状态；
+5. checkpoint 只接收本次 operation targets。
+
+禁止空 scope fallback，也禁止 `git add -A`。Manual checkpoint 先查询 dirty KB paths；clean state 是成功 no-op。Resume、undo、restore 只处理 journal 中记录的路径。
+
+## Runtime bootstrap
+
+Bootstrap 的优先级是：
+
+1. 已激活并兼容的 managed workspace runtime；
+2. 当前兼容解释器；
+3. 需要时创建或修复 workspace-local managed environment。
+
+普通调用不得向任意 shared interpreter 执行 package install。只有明确归属 workspace 的 managed environment 才能由 bootstrap 补齐依赖。Human-facing bootstrap error 仍遵守对话契约，不泄漏内部命令或绝对路径。
+
+## 来源感知更新
+
+Install manifest 记录 `source_origin` 与 `source_branch`，本地安装还可记录 `source_checkout`：
+
+- local checkout：直接使用该 checkout，不 fetch/pull；
+- remote/fork：缓存按 origin + branch 隔离，并验证 remote identity，只 fetch/pull 记录的 branch；
+- detached checkout：manifest 绑定 commit，但后续更新必须先选择 branch；
+- legacy manifest：来源或 branch 不足时返回 `needs_source_choice`，不猜 canonical remote 或 main；
+- update/reinstall：保留 provenance；
+- updater 永不 push。
+
+这保证 fork 不被“更新”到上游，本地开发副本也不会意外触发网络操作。
+
+## 扩展检查单
+
+新增或修改能力时：
+
+1. 先确认 canonical owner 与设计 SSOT；
+2. 复用 canonical schema、workflow state、review classifier 和 confirmation helper；
+3. analyzer 只 prepare/verify，不生成理解；
+4. judgement 逐条挂 evidence；
+5. mutation 预声明 exact targets，使用 journal/lock/CAS；
+6. human output 只含自然语言与 `kb <verb>`；
+7. structured Agent hand-off 保持私有；
+8. 同步 skill metadata、用户文档和测试；
+9. 可选诊断只传脱敏稳定字段，audit 保持字节级只读，且不新增公开动词；
+10. 在 Linux 与 macOS 支持的 Python 版本上验证；
+11. 发布前由冷 acceptance agent 端到端复现关键路径。
+
+当前标识为 `0.2.0-rc.1`，已通过完整本地套件与冷启动安装副本验收，达到本地 release-candidate gate。它仍不是 stable/GA，也尚未 tag 或 publish；hosted Linux/macOS CI matrix 全绿仍是 release tag 的前置。文档、tag 与 changelog 不得把本地 RC 验收外推为稳定兼容或 SLA 承诺。

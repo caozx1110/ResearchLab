@@ -7,7 +7,15 @@ from pathlib import Path
 import pytest
 
 from research.common import load_yaml, write_yaml_if_changed
-from research.core import ensure_workspace, record_path, runtime_preferences_path, search_records
+from research.core import (
+    ensure_workspace,
+    iter_records,
+    record_path,
+    record_workflow_state,
+    runtime_preferences_path,
+    search_records,
+)
+from research.evidence import build_verification_receipt
 
 
 def _project_root() -> Path:
@@ -259,7 +267,7 @@ def test_confirm_command_blank_evidence_rejects_before_any_batch_write(tmp_path:
     assert not (tmp_path / "kb" / "index.yaml").exists()
 
 
-def test_batch_confirm_preserves_ai_information_types_and_sets_lifecycle(tmp_path: Path) -> None:
+def test_batch_confirm_rejects_judgement_without_canonical_verification(tmp_path: Path) -> None:
     kb = _load_kb_module()
     ensure_workspace(tmp_path)
     write_yaml_if_changed(runtime_preferences_path(tmp_path), {"identity": {"default_confirmed_by": "czx-default"}})
@@ -271,26 +279,26 @@ def test_batch_confirm_preserves_ai_information_types_and_sets_lifecycle(tmp_pat
         status="screened",
         information_types=["fact", "inference", "evaluation", "unverified"],
     )
-    # Judgement-track record needs substantive core_content to clear the substance gate;
-    # this test asserts epistemic preservation + lifecycle, not hollow confirmation.
+    # Substance alone no longer permits a judgement confirmation: the record must
+    # first carry canonical claims + a current byte-bound verification receipt.
     ai_typed["payload"] = {"core_content": {"method": "diffusion policy over action chunks"}}
     _write_record(tmp_path, ai_typed)
     records = search_records(tmp_path, "", confirmation_status="pending_user_confirmation")
 
-    [path] = kb.apply_batch_confirmation(
-        tmp_path,
-        records,
-        confirmed_by="",
-        evidence=["kb/programs/p/decision-log.md"],
-        method="test batch",
-    )
+    with pytest.raises(SystemExit, match="non-empty canonical payload.claims"):
+        kb.apply_batch_confirmation(
+            tmp_path,
+            records,
+            confirmed_by="",
+            evidence=["kb/programs/p/decision-log.md"],
+            method="test batch",
+        )
 
-    record = load_yaml(path, default={})
-    assert record["confirmation_status"] == "confirmed"
-    assert record["status"] == "active"
-    assert record["information_types"] == ["evaluation", "fact", "inference", "unverified"]
-    assert record["confirmation"]["prior_information_types"] == ["evaluation", "fact", "inference", "unverified"]
-    assert record["history"][-1]["action"] == "paper-confirmed"
+    record = load_yaml(record_path(tmp_path, "paper", ai_typed["id"]), default={})
+    assert record["confirmation_status"] == "pending_user_confirmation"
+    assert record["status"] == "screened"
+    assert record["information_types"] == ["fact", "inference", "evaluation", "unverified"]
+    assert "confirmation" not in record
 
 
 def test_batch_confirm_skips_non_pending_records(tmp_path: Path, capsys) -> None:
@@ -301,10 +309,11 @@ def test_batch_confirm_skips_non_pending_records(tmp_path: Path, capsys) -> None
     rejected = _record("p-rejected-123456", "Rejected", "rejected", "2026-01-02T00:00:00+00:00", status="rejected")
     _write_record(tmp_path, pending)
     _write_record(tmp_path, rejected)
+    records = search_records(tmp_path, "")
 
     paths = kb.apply_batch_confirmation(
         tmp_path,
-        [pending, rejected],
+        records,
         confirmed_by="",
         evidence=["kb/programs/p/decision-log.md"],
         method="test batch",
@@ -325,7 +334,7 @@ def test_review_queue_all_reviewed_empty_is_clean_noop(tmp_path: Path) -> None:
     assert records == []
 
 
-def test_review_queue_lists_selected_ideas_with_pending_content(tmp_path: Path, monkeypatch) -> None:
+def test_review_queue_excludes_selected_idea_without_verified_content(tmp_path: Path, monkeypatch) -> None:
     kb = _load_kb_module()
     idea = _load_idea_module()
     (tmp_path / ".agents").mkdir()
@@ -355,16 +364,22 @@ def test_review_queue_lists_selected_ideas_with_pending_content(tmp_path: Path, 
             "czx",
             "--evidence",
             "kb/programs/p/decision-log.md",
+            "--user-authorization",
+            "I select this idea for the program.",
+            "--authorization-source",
+            "user_message",
         ],
     )
 
     assert idea.main() == 0
 
     records = kb.review_queue_records(tmp_path, kind="idea", confirmation_status="pending_user_confirmation")
+    selected = load_yaml(record_path(tmp_path, "idea", "i-select-review-123456"), default={})
 
-    assert [record["id"] for record in records] == ["i-select-review-123456"]
-    assert records[0]["status"] == "selected"
-    assert records[0]["confirmation_status"] == "pending_user_confirmation"
+    assert records == []
+    assert selected["status"] == "selected"
+    assert selected["confirmation_status"] == "pending_user_confirmation"
+    assert kb.record_workflow_state(selected) != "ready_for_review"
 
 
 def test_confirm_all_reviewed_default_limit_is_unbounded() -> None:
@@ -462,21 +477,228 @@ def _paper(unit_id: str, *, full_note_status: str) -> dict:
     }
 
 
-def test_review_queue_excludes_unfilled_note_shell_but_keeps_filled(tmp_path: Path) -> None:
-    """SSOT 3.11 / A4: an awaiting_agent_fill paper is not a user-confirmation item.
-
-    It is pending only because complete-note prepare stamps pending_user_confirmation;
-    the review path must agree with the orchestrator dashboard and not surface the
-    empty note shell. A not_started paper (schema default, may carry a pending
-    SCREENING judgement) is NOT excluded — only awaiting_agent_fill is."""
+def test_review_queue_excludes_hollow_judgements_but_keeps_ready_fact_metadata(tmp_path: Path) -> None:
+    """Canonical workflow state excludes unverified judgement shells from review."""
     kb = _load_kb_module()
     ensure_workspace(tmp_path)
-    _write_record(tmp_path, _paper("p-shell-12345678", full_note_status="awaiting_agent_fill"))
-    _write_record(tmp_path, _paper("p-notstart-2345678", full_note_status="not_started"))
-    _write_record(tmp_path, _paper("p-filled-12345678", full_note_status="pending_user_confirmation"))
+    shell = _paper("p-shell-12345678", full_note_status="awaiting_agent_fill")
+    not_started = _paper("p-notstart-2345678", full_note_status="not_started")
+    ready_fact = _paper("p-ready-fact-12345678", full_note_status="ready_for_review")
+    ready_fact["status"] = "active"
+    ready_fact["information_types"] = ["fact"]
+    _write_record(tmp_path, shell)
+    _write_record(tmp_path, not_started)
+    _write_record(tmp_path, ready_fact)
 
     listed = {r["id"] for r in kb.review_queue_records(tmp_path, confirmation_status="pending_user_confirmation", limit=0)}
 
-    assert "p-filled-12345678" in listed  # filled + awaiting human → stays
-    assert "p-notstart-2345678" in listed  # screening-phase pending → stays (not a note shell)
-    assert "p-shell-12345678" not in listed  # prepared-but-unfilled note → excluded
+    assert ready_fact["id"] in listed
+    assert not_started["id"] not in listed
+    assert shell["id"] not in listed
+
+
+@pytest.mark.parametrize(
+    ("kind", "state_key", "blocked_state"),
+    [
+        ("paper", "full_note_status", "ready_to_verify"),
+        ("blog", "full_note_status", "awaiting_agent_fill"),
+        ("blog", "full_note_status", "failed-retryable"),
+        ("repo", "capability_fill_status", "awaiting_agent_fill"),
+        ("repo", "capability_fill_status", "ready-to-verify"),
+    ],
+)
+def test_review_queue_excludes_non_review_workflow_states_for_all_source_kinds(
+    tmp_path: Path,
+    kind: str,
+    state_key: str,
+    blocked_state: str,
+) -> None:
+    kb = _load_kb_module()
+    ensure_workspace(tmp_path)
+    prefix = {"paper": "p", "blog": "b", "repo": "r"}[kind]
+    blocked = _paper(f"{prefix}-blocked-12345678", full_note_status="pending_user_confirmation")
+    blocked["kind"] = kind
+    blocked["payload"]["state"] = {state_key: blocked_state}
+    ready = _paper(f"{prefix}-ready-12345678", full_note_status="pending_user_confirmation")
+    ready["kind"] = kind
+    ready["status"] = "active"
+    ready["information_types"] = ["fact"]
+    ready["payload"]["state"] = {state_key: "ready_for_review"}
+    _write_record(tmp_path, blocked)
+    _write_record(tmp_path, ready)
+
+    listed = {r["id"] for r in kb.review_queue_records(tmp_path, kind=kind, limit=0)}
+
+    assert ready["id"] in listed
+    assert blocked["id"] not in listed
+
+
+def _write_verified_judgement(root: Path, kind: str, *, suffix: str, hollow: bool = False) -> str:
+    prefix = {"paper": "p", "blog": "b", "repo": "r"}[kind]
+    unit_id = f"{prefix}-{suffix}-12345678"
+    unit_dir = record_path(root, kind, unit_id).parent
+    evidence_path = unit_dir / "raw" / "source.txt"
+    evidence_path.parent.mkdir(parents=True, exist_ok=True)
+    evidence_path.write_text("verbatim source quote\n", encoding="utf-8")
+    state_key = "capability_fill_status" if kind == "repo" else "full_note_status"
+    substance = {} if hollow else {
+        "paper": {"core_content": {"method": "Grounded method explanation."}},
+        "blog": {"content": {"key_points": ["Grounded key point."]}},
+        "repo": {"capability": {"core_capabilities": ["training"]}},
+    }[kind]
+    record = {
+        "id": unit_id,
+        "kind": kind,
+        "title": f"Verified {kind}",
+        "status": "active",
+        "maturity": "complete",
+        "confirmation_status": "pending_user_confirmation",
+        "needs_human_confirmation": True,
+        "information_types": ["inference", "evaluation", "unverified"],
+        "summary": "Grounded judgement",
+        "tags": [],
+        "topics": [],
+        "candidate_pools": [],
+        "source": {"original_uri": "", "file_hash": ""},
+        "payload": {
+            **substance,
+            "state": {state_key: "pending_user_confirmation"},
+            "claims": [
+                {
+                    "id": f"claim-{unit_id}",
+                    "text": "This source is useful.",
+                    "claim_type": "evaluation",
+                    "confirmation_status": "pending_user_confirmation",
+                    "evidence_refs": [
+                        {
+                            "source_unit_id": unit_id,
+                            "artifact": "raw/source.txt",
+                            "locator": "line:1",
+                            "quote": "verbatim source quote",
+                        }
+                    ],
+                }
+            ],
+        },
+    }
+    build_verification_receipt(record, unit_dir)
+    _write_record(root, record)
+    return unit_id
+
+
+def test_review_queue_uses_current_verified_judgement_readiness_for_all_source_kinds(tmp_path: Path) -> None:
+    kb = _load_kb_module()
+    ensure_workspace(tmp_path)
+    ready_ids = {
+        _write_verified_judgement(tmp_path, kind, suffix=f"ready-{kind}")
+        for kind in ("paper", "blog", "repo")
+    }
+    hollow_id = _write_verified_judgement(tmp_path, "paper", suffix="hollow", hollow=True)
+    stale_id = _write_verified_judgement(tmp_path, "blog", suffix="stale")
+    (record_path(tmp_path, "blog", stale_id).parent / "raw" / "source.txt").write_text(
+        "changed source bytes\n",
+        encoding="utf-8",
+    )
+
+    listed = {record["id"] for record in kb.review_queue_records(tmp_path, limit=0)}
+
+    assert ready_ids <= listed
+    assert hollow_id not in listed
+    assert stale_id not in listed
+
+
+@pytest.mark.parametrize("kind", ["paper", "blog", "repo"])
+def test_stale_verified_judgement_returns_to_agent_verification(
+    tmp_path: Path,
+    kind: str,
+) -> None:
+    ensure_workspace(tmp_path)
+    unit_id = _write_verified_judgement(tmp_path, kind, suffix=f"stale-{kind}")
+    evidence_path = record_path(tmp_path, kind, unit_id).parent / "raw" / "source.txt"
+    evidence_path.write_text("changed source bytes\n", encoding="utf-8")
+
+    record = next(item for item in iter_records(tmp_path, kind=kind) if item["id"] == unit_id)
+
+    assert record["confirmation_status"] == "pending_user_confirmation"
+    assert record["payload"]["verification"]["invalidation"]["reason"] == "verification_stale"
+    assert record_workflow_state(record) == "ready_to_verify"
+
+
+@pytest.mark.parametrize("kind", ["paper", "blog", "repo"])
+def test_stale_hollow_judgement_returns_to_agent_fill(
+    tmp_path: Path,
+    kind: str,
+) -> None:
+    ensure_workspace(tmp_path)
+    unit_id = _write_verified_judgement(tmp_path, kind, suffix=f"stale-hollow-{kind}", hollow=True)
+    evidence_path = record_path(tmp_path, kind, unit_id).parent / "raw" / "source.txt"
+    evidence_path.write_text("changed source bytes\n", encoding="utf-8")
+
+    record = next(item for item in iter_records(tmp_path, kind=kind) if item["id"] == unit_id)
+
+    assert record_workflow_state(record) == "awaiting_agent_fill"
+
+
+def test_batch_confirmation_transmits_final_user_authorization_signature(monkeypatch, tmp_path: Path) -> None:
+    kb = _load_kb_module()
+    captured: dict[str, object] = {}
+
+    def fake_confirm(record, kind, *, confirmed_by, evidence, method, project_root, user_authorization, authorization_source):
+        captured.update(
+            record=record,
+            kind=kind,
+            confirmed_by=confirmed_by,
+            evidence=evidence,
+            method=method,
+            project_root=project_root,
+            user_authorization=user_authorization,
+            authorization_source=authorization_source,
+        )
+        return record
+
+    monkeypatch.setattr(kb, "confirm_unit", fake_confirm)
+    written_path = tmp_path / "kb" / "units" / "papers" / "p-auth-12345678" / "record.yaml"
+    monkeypatch.setattr(kb, "write_record", lambda _root, _record: written_path)
+    record = _paper("p-auth-12345678", full_note_status="ready_for_review")
+
+    assert kb.apply_batch_confirmation(
+        tmp_path,
+        [record],
+        confirmed_by="researcher",
+        evidence=["decision-note"],
+        method="test",
+        user_authorization="I confirm this judgement",
+        authorization_source="user_message",
+    ) == [written_path]
+    assert captured["user_authorization"] == "I confirm this judgement"
+    assert captured["authorization_source"] == "user_message"
+
+
+def test_manual_checkpoint_resolves_literal_dirty_paths_and_clean_is_noop(monkeypatch, tmp_path: Path, capsys) -> None:
+    kb = _load_kb_module()
+    (tmp_path / ".agents").mkdir()
+    (tmp_path / "AGENTS.md").write_text("# test\n", encoding="utf-8")
+    ensure_workspace(tmp_path)
+    monkeypatch.setattr(kb, "PROJECT_ROOT", tmp_path)
+    calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(kb, "dirty_kb_paths", lambda _root: [])
+    monkeypatch.setattr(
+        kb,
+        "git_checkpoint",
+        lambda *_args, **kwargs: calls.append(kwargs) or {"committed": False},
+    )
+    monkeypatch.setattr(sys, "argv", ["kb.py", "git-checkpoint", "--message", "manual"])
+    assert kb.main() == 0
+    assert calls == []
+    assert "no kb changes" in capsys.readouterr().out
+
+    dirty = [tmp_path / "kb" / "units" / "papers" / "p-one" / "record.yaml"]
+    monkeypatch.setattr(kb, "dirty_kb_paths", lambda _root: dirty)
+    monkeypatch.setattr(
+        kb,
+        "git_checkpoint",
+        lambda *_args, **kwargs: calls.append(kwargs) or {"committed": False, "status": "no-changes"},
+    )
+    assert kb.main() == 0
+    assert calls[-1]["target_paths"] == dirty

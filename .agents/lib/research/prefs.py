@@ -1,14 +1,15 @@
-"""Runtime preferences (incl. autonomy) and workspace bootstrap.
+"""Runtime preferences (incl. autonomy) and explicit workspace bootstrap.
 
-ensure_workspace lives here with default_runtime_preferences because the two are
-mutually dependent (load_runtime_preferences -> ensure_workspace ->
-default_runtime_preferences); co-locating them keeps the layering acyclic."""
+Semantic loaders are pure reads.  Workspace creation remains the responsibility
+of explicit initialization and mutation commands.
+"""
 from __future__ import annotations
 
 import copy
 from pathlib import Path
 from typing import Any
 
+from .journal import mutation_transaction
 from .common import (
     ensure_dir,
     load_yaml,
@@ -92,6 +93,12 @@ DEFAULT_CANDIDATE_POOLS = {
 VERSIONING_COMMIT_MODES = {"manual", "milestone", "aggressive"}
 
 
+DIAGNOSTIC_MODES = {"off", "errors-only", "developer"}
+
+
+DIAGNOSTIC_SKILL_MODES = {"inherit", *DIAGNOSTIC_MODES}
+
+
 PAPER_AUTO_COMPLETE_CONDITIONS = {
     "after_screen",
     "suggested_worth_reading",
@@ -115,6 +122,15 @@ def default_runtime_preferences() -> dict[str, Any]:
         },
         "learned_preferences": {
             "items": [],
+        },
+        "diagnostics": {
+            "mode": "off",
+            "per_skill": {},
+            "local_only": True,
+            "token_budget_per_task": 0,
+            "max_issues_per_task": 20,
+            "dedup_window_seconds": 604800,
+            "cooldown_seconds": 0,
         },
         "autonomy": {
             "auto_execute_scope": ["screen", "build-index", "refresh", "generate-note"],
@@ -157,8 +173,42 @@ def default_runtime_preferences() -> dict[str, Any]:
     }
 
 
+def _normalize_diagnostics_preferences(value: object) -> dict[str, Any]:
+    diagnostics = copy.deepcopy(value) if isinstance(value, dict) else {}
+    mode = str(diagnostics.get("mode") or "off").strip().lower()
+    diagnostics["mode"] = mode if mode in DIAGNOSTIC_MODES else "off"
+    raw_per_skill = diagnostics.get("per_skill", {})
+    per_skill: dict[str, str] = {}
+    if isinstance(raw_per_skill, dict):
+        for raw_skill, raw_mode in raw_per_skill.items():
+            skill = str(raw_skill or "").strip().lower()
+            skill_mode = str(raw_mode or "inherit").strip().lower()
+            if skill and skill_mode in DIAGNOSTIC_SKILL_MODES:
+                per_skill[skill] = skill_mode
+    diagnostics["per_skill"] = per_skill
+    # D1 is deliberately local-only.  Persisted attempts to disable this are
+    # ignored so a malformed or older preference file cannot enable telemetry.
+    diagnostics["local_only"] = True
+    try:
+        diagnostics["token_budget_per_task"] = max(0, int(diagnostics.get("token_budget_per_task") or 0))
+    except (TypeError, ValueError):
+        diagnostics["token_budget_per_task"] = 0
+    try:
+        diagnostics["max_issues_per_task"] = max(1, int(diagnostics.get("max_issues_per_task") or 20))
+    except (TypeError, ValueError):
+        diagnostics["max_issues_per_task"] = 20
+    try:
+        diagnostics["dedup_window_seconds"] = max(0, int(diagnostics.get("dedup_window_seconds") or 0))
+    except (TypeError, ValueError):
+        diagnostics["dedup_window_seconds"] = 604800
+    try:
+        diagnostics["cooldown_seconds"] = max(0, int(diagnostics.get("cooldown_seconds") or 0))
+    except (TypeError, ValueError):
+        diagnostics["cooldown_seconds"] = 0
+    return diagnostics
+
+
 def load_runtime_preferences(project_root: Path) -> dict[str, Any]:
-    ensure_workspace(project_root)
     payload = load_yaml(runtime_preferences_path(project_root), default={})
     if not isinstance(payload, dict) or not payload:
         payload = default_runtime_preferences()
@@ -183,6 +233,8 @@ def load_runtime_preferences(project_root: Path) -> dict[str, Any]:
     items = learned_preferences.get("items", [])
     learned_preferences["items"] = [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
     normalized["learned_preferences"] = learned_preferences
+
+    normalized["diagnostics"] = _normalize_diagnostics_preferences(normalized.get("diagnostics"))
 
     autonomy = normalized.get("autonomy", {})
     if not isinstance(autonomy, dict):
@@ -279,19 +331,22 @@ def load_runtime_preferences(project_root: Path) -> dict[str, Any]:
 
 
 def write_runtime_preferences(project_root: Path, payload: dict[str, Any]) -> Path:
-    current = load_runtime_preferences(project_root)
-    merged = copy.deepcopy(current)
-    for key in ("browser", "identity", "learned_preferences", "autonomy", "paper", "pdf", "versioning"):
-        value = payload.get(key)
-        if isinstance(value, dict):
-            target = merged.setdefault(key, {})
-            if not isinstance(target, dict):
-                target = {}
-                merged[key] = target
-            target.update(value)
-    normalized = _deep_fill_missing(merged, default_runtime_preferences())
-    write_yaml_if_changed(runtime_preferences_path(project_root), normalized)
-    return runtime_preferences_path(project_root)
+    path = runtime_preferences_path(project_root)
+    with mutation_transaction(project_root, "write-runtime-preferences", [path]):
+        current = load_runtime_preferences(project_root)
+        merged = copy.deepcopy(current)
+        for key in ("browser", "identity", "learned_preferences", "diagnostics", "autonomy", "paper", "pdf", "versioning"):
+            value = payload.get(key)
+            if isinstance(value, dict):
+                target = merged.setdefault(key, {})
+                if not isinstance(target, dict):
+                    target = {}
+                    merged[key] = target
+                target.update(value)
+        normalized = _deep_fill_missing(merged, default_runtime_preferences())
+        normalized["diagnostics"] = _normalize_diagnostics_preferences(normalized.get("diagnostics"))
+        write_yaml_if_changed(path, normalized)
+    return path
 
 
 def ensure_workspace(project_root: Path) -> None:
@@ -331,6 +386,8 @@ __all__ = [
     "DEFAULT_TOPIC_TAXONOMY",
     "DEFAULT_CANDIDATE_POOLS",
     "VERSIONING_COMMIT_MODES",
+    "DIAGNOSTIC_MODES",
+    "DIAGNOSTIC_SKILL_MODES",
     "PAPER_AUTO_COMPLETE_CONDITIONS",
     "PAPER_NOTE_MODES",
     "default_runtime_preferences",

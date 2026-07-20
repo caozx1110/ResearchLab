@@ -1,12 +1,13 @@
 # --- Core runtime (always installed) ---------------------------------------
-PyYAML>=6
+PyYAML==6.0.3
 
 # Lightweight default PDF backend (SSOT 3.1 decision A): pure PyMuPDF, no torch,
 # no GPU, no multi-GB model download. Always installed so the dual-source
 # pipeline can parse non-arxiv PDFs into page=N chunks out of the box — this is
-# what kills the cold-start "silent empty parse" degradation. It transitively
-# pulls PyMuPDF (fitz).
-pymupdf4llm>=0.0.17
+# what kills the cold-start "silent empty parse" degradation. PyMuPDF (fitz) is
+# pinned explicitly alongside it for reproducible installs.
+pymupdf4llm==0.0.27
+PyMuPDF==1.26.5
 
 # --- Optional heavy PDF backends (NOT installed by default) -----------------
 # For tables/formulas/complex layouts a heavier backend can be worth it, but
@@ -19,5 +20,4 @@ pymupdf4llm>=0.0.17
 # default/optional backend here.
 
 # --- Dev / test -------------------------------------------------------------
-# Run the test suite with: pip install -r requirements.txt pytest
-# pytest>=7
+# Run the test suite with: pip install -r requirements-dev.txt

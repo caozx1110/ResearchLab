@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import argparse
 import sys
+from contextvars import ContextVar
+from functools import wraps
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 SCRIPT_PATH = Path(__file__).resolve()
 for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
@@ -47,15 +49,19 @@ from research.common import (
 from research.core import (
     append_history,
     build_index,
+    candidate_pools_path,
+    command_mutation,
     checkpoint_and_report,
     confirm_unit,
     locate_record,
     project_root,
     rel,
+    topic_taxonomy_path,
     write_record,
 )
 from research.evidence import (
     attach_claims,
+    build_verification_receipt,
     read_claims,
     validate_claims,
     verify_claim_evidence,
@@ -77,6 +83,45 @@ NOTE_ELEMENTS: tuple[str, ...] = (
     "credibility",
     "reusable_explanation",
 )
+
+_ACTIVE_MUTATION: ContextVar[bool] = ContextVar("blog_active_mutation", default=False)
+_PENDING_CHECKPOINT: ContextVar[tuple[Path, str, str, list[Path]] | None] = ContextVar(
+    "blog_pending_checkpoint", default=None
+)
+
+
+def _index_targets(root: Path) -> list[Path]:
+    return [
+        root / "kb" / "index.yaml",
+        root / "kb" / "index.md",
+        topic_taxonomy_path(root),
+        candidate_pools_path(root),
+    ]
+
+
+def _transactional(op_name: str, target_builder):
+    def decorate(function):
+        @wraps(function)
+        def wrapped(*args, **kwargs):
+            root, targets = target_builder(*args, **kwargs)
+            active_token = _ACTIVE_MUTATION.set(True)
+            checkpoint_token = _PENDING_CHECKPOINT.set(None)
+            try:
+                with command_mutation(root, f"blog-analyst:{op_name}", targets):
+                    result = function(*args, **kwargs)
+                pending = _PENDING_CHECKPOINT.get()
+            finally:
+                _PENDING_CHECKPOINT.reset(checkpoint_token)
+                _ACTIVE_MUTATION.reset(active_token)
+            if pending is not None:
+                checkpoint_and_report(
+                    pending[0], trigger=pending[1], message=pending[2], target_paths=pending[3]
+                )
+            return result
+
+        return wrapped
+
+    return decorate
 
 ELEMENT_CLAIM_TYPE: dict[str, str] = {
     "positioning": "inference",
@@ -117,6 +162,8 @@ EVIDENCE_REF_FORMAT: dict[str, str] = {
 def add_confirmation_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--confirmed-by", default="")
     parser.add_argument("--evidence", action="append", required=True)
+    parser.add_argument("--user-authorization", default="")
+    parser.add_argument("--authorization-source", default="")
 
 
 def _cache_path(unit_root: Path) -> Path:
@@ -128,14 +175,15 @@ def _load_cache_chunks(unit_root: Path) -> tuple[list[dict], str]:
 
     Read-compatible with either header id key: a blog parse-cache may carry the correct
     ``blog_id`` (or ``unit_id``) or the legacy ``paper_id`` the shared intake writer
-    stamped on it — chunk loading does not depend on which (see ``_cache_unit_id`` /
-    ``_normalize_cache_header`` for the F9 header correction)."""
+    stamped on it. The header is normalized in memory only; parse-cache bytes are
+    immutable derived evidence."""
     cache_path = _cache_path(unit_root)
     if not cache_path.exists():
         return [], "section"
     payload = load_yaml(cache_path, default={})
     if not isinstance(payload, dict):
         return [], "section"
+    payload = _normalized_cache_payload(payload)
     chunks = payload.get("chunks") or []
     locator_kind = str(payload.get("locator_kind") or "section")
     if not isinstance(chunks, list):
@@ -146,7 +194,7 @@ def _load_cache_chunks(unit_root: Path) -> tuple[list[dict], str]:
 # Header id keys a blog parse-cache may carry, in preferred (blog-semantic first)
 # order. ``paper_id`` is the legacy key the shared dual-source intake writer
 # (research.sources.write_parse_cache) stamps on every unit's cache — wrong semantics
-# for a blog. We accept it on read and correct it on write (F9).
+# for a blog. We accept it and normalize only the in-memory view (F9).
 _CACHE_ID_KEYS: tuple[str, ...] = ("blog_id", "unit_id", "paper_id")
 
 
@@ -159,29 +207,13 @@ def _cache_unit_id(payload: dict) -> str:
     return ""
 
 
-def _normalize_cache_header(unit_root: Path) -> bool:
-    """Correct a blog parse-cache's legacy ``paper_id`` header key to ``blog_id`` (F9).
-
-    The shared intake writer labels every unit's parse-cache header ``paper_id``,
-    which is wrong for a blog unit. When blog.py consumes the cache it rewrites the
-    on-disk header key to blog semantics (value preserved, field order kept, all other
-    fields untouched). Idempotent: a cache already using ``blog_id``/``unit_id`` (or a
-    cache with no header id at all) is left alone. Returns True when it rewrote."""
-    cache_path = _cache_path(unit_root)
-    if not cache_path.exists():
-        return False
-    payload = load_yaml(cache_path, default={})
-    if not isinstance(payload, dict):
-        return False
+def _normalized_cache_payload(payload: dict) -> dict:
+    """Return a blog-semantic view without mutating immutable parse-cache bytes."""
     if "paper_id" not in payload or "blog_id" in payload or "unit_id" in payload:
-        return False
-    unit_id = _cache_unit_id(payload)
-    normalized = {
-        ("blog_id" if key == "paper_id" else key): (unit_id if key == "paper_id" else value)
-        for key, value in payload.items()
-    }
-    write_yaml_if_changed(cache_path, normalized)
-    return True
+        return payload
+    normalized = dict(payload)
+    normalized["blog_id"] = normalized.pop("paper_id")
+    return normalized
 
 
 def _chunk_locator(chunk: dict) -> str:
@@ -385,7 +417,9 @@ def render_note_md(record: dict, claims: list[dict]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _finalize_post_actions(root: Path, *, trigger: str, message: str, defer_post_actions: bool) -> dict[str, Any]:
+def _finalize_post_actions(
+    root: Path, *, trigger: str, message: str, defer_post_actions: bool, target_paths: Sequence[Path]
+) -> dict[str, Any]:
     """Rebuild the index and (unless deferred) commit a git checkpoint.
 
     Mirrors paper.py / repo.py so a blog write point persists its artifacts the same
@@ -394,8 +428,17 @@ def _finalize_post_actions(root: Path, *, trigger: str, message: str, defer_post
     """
     if defer_post_actions:
         return {"committed": False, "status": "deferred"}
-    build_index(root)
-    return checkpoint_and_report(root, trigger=trigger, message=message)
+    index_paths = build_index(root)
+    all_targets = [*target_paths, *index_paths, topic_taxonomy_path(root), candidate_pools_path(root)]
+    if _ACTIVE_MUTATION.get():
+        _PENDING_CHECKPOINT.set((root, trigger, message, all_targets))
+        return {"committed": False, "status": "pending-transaction-commit"}
+    return checkpoint_and_report(
+        root,
+        trigger=trigger,
+        message=message,
+        target_paths=all_targets,
+    )
 
 
 def _resolve_fill_input(unit_root: Path, default_name: str, explicit: str | None) -> Path:
@@ -448,11 +491,23 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+@_transactional(
+    "complete-note",
+    lambda args, root, record, unit_root, defer_post_actions: (
+        root,
+        [
+            unit_root / "record.yaml",
+            unit_root / "blog-fill.yaml",
+            unit_root / "blog-note.md",
+            unit_root / "blog-claims.yaml",
+            *([] if defer_post_actions else _index_targets(root)),
+        ],
+    ),
+)
 def _run_complete_note(args, root: Path, record: dict, unit_root: Path, defer_post_actions: bool) -> int:
     fill_scaffold_path = unit_root / "blog-fill.yaml"
     note_path = unit_root / "blog-note.md"
     cache_path = _cache_path(unit_root)
-    _normalize_cache_header(unit_root)  # F9: correct legacy paper_id header to blog_id
     source_chunks, _locator_kind = _load_cache_chunks(unit_root)
 
     if args.phase == "prepare":
@@ -488,6 +543,7 @@ def _run_complete_note(args, root: Path, record: dict, unit_root: Path, defer_po
             trigger="milestone",
             message=f"milestone: scaffold blog note {record['id']}",
             defer_post_actions=defer_post_actions,
+            target_paths=[unit_root / "record.yaml", fill_scaffold_path],
         )
         return 0
 
@@ -506,6 +562,8 @@ def _run_complete_note(args, root: Path, record: dict, unit_root: Path, defer_po
         raise SystemExit(1)
 
     _apply_note_fill_to_payload(record, claims)
+    attach_claims(record.setdefault("payload", {}), claims)
+    build_verification_receipt(record, unit_root)
     write_text_if_changed(note_path, render_note_md(record, claims))
     note_payload = {"blog_id": record["id"], "kind": "blog"}
     attach_claims(note_payload, claims)
@@ -529,6 +587,37 @@ def _run_complete_note(args, root: Path, record: dict, unit_root: Path, defer_po
         trigger="milestone",
         message=f"milestone: blog note {record['id']}",
         defer_post_actions=defer_post_actions,
+        target_paths=[unit_root / "record.yaml", note_path, unit_root / "blog-claims.yaml"],
+    )
+    return 0
+
+
+@_transactional(
+    "confirm",
+    lambda args, root, record, unit_root, defer_post_actions: (
+        root,
+        [unit_root / "record.yaml", *([] if defer_post_actions else _index_targets(root))],
+    ),
+)
+def _run_confirm(args, root: Path, record: dict, unit_root: Path, defer_post_actions: bool) -> int:
+    record = confirm_unit(
+        record,
+        "blog",
+        confirmed_by=args.confirmed_by,
+        evidence=args.evidence,
+        user_authorization=args.user_authorization,
+        authorization_source=args.authorization_source,
+        method="blog.py confirm",
+        project_root=root,
+    )
+    write_record(root, record)
+    print(f"[ok] confirmed {args.blog_id}")
+    _finalize_post_actions(
+        root,
+        trigger="milestone",
+        message=f"milestone: confirm blog {args.blog_id}",
+        defer_post_actions=defer_post_actions,
+        target_paths=[unit_root / "record.yaml"],
     )
     return 0
 
@@ -547,23 +636,7 @@ def main() -> int:
         return _run_complete_note(args, root, record, unit_root, defer_post_actions)
 
     if args.command == "confirm":
-        record = confirm_unit(
-            record,
-            "blog",
-            confirmed_by=args.confirmed_by,
-            evidence=args.evidence,
-            method="blog.py confirm",
-            project_root=root,
-        )
-        write_record(root, record)
-        print(f"[ok] confirmed {args.blog_id}")
-        _finalize_post_actions(
-            root,
-            trigger="milestone",
-            message=f"milestone: confirm blog {args.blog_id}",
-            defer_post_actions=defer_post_actions,
-        )
-        return 0
+        return _run_confirm(args, root, record, unit_root, defer_post_actions)
 
     return 1
 

@@ -5,6 +5,88 @@ import sys
 from pathlib import Path
 
 from research.common import write_yaml_if_changed
+from research.confirm import apply_confirmation
+from research.evidence import build_verification_receipt
+
+
+def _write_confirmed_record(root: Path, unit_id: str, claims: list[dict]) -> None:
+    record = {
+        "id": unit_id,
+        "kind": "paper",
+        "title": "Grounded Paper",
+        "confirmation_status": "pending_user_confirmation",
+        "needs_human_confirmation": True,
+        "information_types": ["fact"],
+        "payload": {"claims": claims},
+    }
+    apply_confirmation(
+        record,
+        confirmed_by="Human Reviewer",
+        evidence=["kb/programs/grounded-report/workflow/decision-log.md"],
+        project_root=root,
+    )
+    write_yaml_if_changed(root / "kb" / "units" / "papers" / unit_id / "record.yaml", record)
+
+
+def _write_confirmed_decision(root: Path, program_id: str) -> None:
+    program_root = root / "kb" / "programs" / program_id
+    evidence_path = program_root / "workflow" / "decision-evidence.md"
+    evidence_path.write_text("direct benchmark evidence", encoding="utf-8")
+    decision = {
+        "id": "decision-grounded-baseline",
+        "kind": "program_decision",
+        "program_id": program_id,
+        "confirmation_status": "pending_user_confirmation",
+        "needs_human_confirmation": True,
+        "information_types": ["inference", "evaluation", "unverified"],
+        "payload": {
+            "decision": {
+                "text": "Use the grounded baseline",
+                "stage": "literature-review",
+                "rationale": "It has direct benchmark evidence.",
+                "alternatives": ["Delay baseline selection"],
+            },
+            "claims": [
+                {
+                    "id": "claim-grounded-decision",
+                    "text": "Use the grounded baseline.",
+                    "claim_type": "evaluation",
+                    "confirmation_status": "pending_user_confirmation",
+                    "evidence_refs": [
+                        {
+                            "source_unit_id": f"program:{program_id}",
+                            "artifact": "workflow/decision-evidence.md",
+                            "locator": "decision-evidence",
+                            "quote": "direct benchmark evidence",
+                        }
+                    ],
+                }
+            ],
+        },
+    }
+    roots = {f"program:{program_id}": program_root}
+    build_verification_receipt(decision, program_root, source_roots=roots)
+    apply_confirmation(
+        decision,
+        confirmed_by="Human Reviewer",
+        evidence=["kb/programs/grounded-report/workflow/decision-evidence.md"],
+        user_authorization="I confirm this program decision.",
+        authorization_source="user_message",
+        project_root=root,
+        verification_root=program_root,
+        trusted_source_roots=roots,
+    )
+    write_yaml_if_changed(
+        program_root / "workflow" / "decisions.yaml",
+        {"id": f"{program_id}-decisions", "items": [decision]},
+    )
+    (program_root / "workflow" / "decision-log.md").write_text(
+        "# Decision Log\n\n"
+        "## 2026-07-17T01:00:00+00:00 · Use the grounded baseline\n\n"
+        "- Decision ID: `decision-grounded-baseline`\n"
+        "- Confirmation: `confirmed`\n",
+        encoding="utf-8",
+    )
 
 
 def _project_root() -> Path:
@@ -50,15 +132,7 @@ def _make_workspace(tmp_path: Path, *, with_claim: bool = True) -> tuple[Path, s
             ],
         },
     )
-    (workflow / "decision-log.md").write_text(
-        "# Decision Log\n\n"
-        "## 2026-07-17T01:00:00+00:00 · Use the grounded baseline\n\n"
-        "- Stage: `literature-review`\n"
-        "- Rationale: It has direct benchmark evidence.\n"
-        "- Alternatives: Delay baseline selection\n"
-        "- Confirmation: `confirmed`\n",
-        encoding="utf-8",
-    )
+    _write_confirmed_decision(root, program_id)
     unit_dir = root / "kb" / "units" / "papers" / unit_id
     unit_dir.mkdir(parents=True)
     claims = []
@@ -81,13 +155,16 @@ def _make_workspace(tmp_path: Path, *, with_claim: bool = True) -> tuple[Path, s
             }
         )
     write_yaml_if_changed(
-        unit_dir / "record.yaml",
-        {"id": unit_id, "kind": "paper", "title": "Grounded Paper", "payload": {"claims": claims}},
-    )
-    write_yaml_if_changed(
         unit_dir / "parse-cache.yaml",
         {"chunks": [{"label": "page-3", "text": "Success rate improves by 8 points."}]},
     )
+    if with_claim:
+        _write_confirmed_record(root, unit_id, claims)
+    else:
+        write_yaml_if_changed(
+            unit_dir / "record.yaml",
+            {"id": unit_id, "kind": "paper", "title": "Grounded Paper", "payload": {"claims": []}},
+        )
     return root, program_id, unit_id
 
 
@@ -106,6 +183,47 @@ def test_weekly_and_stage_reports_include_claims_evidence_events_and_decisions(t
         assert "Grounded review completed" in text
         assert "Use the grounded baseline" in text
     assert "## Writing Claims & Evidence" in writing
+
+
+def test_legacy_judgement_event_with_confirmed_string_fails_safe_without_canonical_binding(tmp_path: Path) -> None:
+    report = _load_report_module()
+    root, program_id, unit_id = _make_workspace(tmp_path)
+    events_path = root / "kb" / "programs" / program_id / "workflow" / "reporting-events.yaml"
+    write_yaml_if_changed(
+        events_path,
+        {
+            "id": f"{program_id}-reporting-events",
+            "items": [
+                {
+                    "source_skill": "paper-analyst",
+                    "event_type": "phase-completed",
+                    "title": "Grounded review completed",
+                    "summary": "The paper analysis is ready for reporting.",
+                    "paper_ids": [unit_id],
+                    "timestamp": "2026-07-17T00:00:00+00:00",
+                },
+                {
+                    "source_skill": "experiment-workbench",
+                    "event_type": "experiment-diagnosis",
+                    "title": "Legacy diagnosis",
+                    "summary": "A stale legacy diagnosis asserted a likely cause.",
+                    "confirmation_status": "confirmed",
+                    "timestamp": "2026-07-17T00:01:00+00:00",
+                },
+            ],
+        },
+    )
+
+    inputs = report.load_report_inputs(root, program_id)
+    weekly = report.render_report(f"Weekly Report: {program_id}", inputs, report_kind="weekly")
+    ordinary_section = weekly[weekly.index("## Reporting Events") : weekly.index("## Pending / Unverified judgements")]
+    pending_section = weekly[weekly.index("## Pending / Unverified judgements") :]
+
+    assert "The paper analysis is ready for reporting." in ordinary_section
+    assert "A stale legacy diagnosis asserted a likely cause." not in ordinary_section
+    assert "A stale legacy diagnosis asserted a likely cause." in pending_section
+    assert "confirmation_status=confirmed" in pending_section
+    assert "missing: canonical confirmation subject and claim/evidence binding" in pending_section
 
 
 def test_outline_produces_evidence_backed_section_skeleton(tmp_path: Path) -> None:
@@ -129,6 +247,7 @@ def test_missing_inputs_are_explicit_and_never_fabricated(tmp_path: Path) -> Non
         {"id": f"{program_id}-reporting-events", "items": []},
     )
     (workflow / "decision-log.md").write_text("# Decision Log\n", encoding="utf-8")
+    write_yaml_if_changed(workflow / "decisions.yaml", {"id": f"{program_id}-decisions", "items": []})
 
     inputs = report.load_report_inputs(root, program_id)
     weekly = report.render_report(f"Weekly Report: {program_id}", inputs, report_kind="weekly")
@@ -155,10 +274,7 @@ def test_reporting_style_controls_verbosity_and_preserves_missing_markers(tmp_pa
         }
         for index in range(6)
     ]
-    write_yaml_if_changed(
-        unit_dir / "record.yaml",
-        {"id": unit_id, "kind": "paper", "title": "Grounded Paper", "payload": {"claims": claims}},
-    )
+    _write_confirmed_record(root, unit_id, claims)
     events_path = root / "kb" / "programs" / program_id / "workflow" / "reporting-events.yaml"
     write_yaml_if_changed(
         events_path,

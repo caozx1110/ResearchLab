@@ -2,9 +2,13 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
+import re
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -34,7 +38,6 @@ from research.common import (
     load_list_document,
     load_yaml,
     normalize_list,
-    program_file_lock,
     print_resolved_project_roots,
     shell_command,
     simple_slug,
@@ -43,12 +46,15 @@ from research.common import (
     write_yaml_if_changed,
     yaml_default,
 )
-from research.core import append_history, ensure_workspace, iter_records, kb_root, load_runtime_preferences, locate_record, checkpoint_and_report, project_root, write_record
+from research.core import apply_confirmation, append_history, ensure_workspace, is_ready_for_human_review, iter_records, kb_root, load_runtime_preferences, locate_record, checkpoint_and_report, project_root, record_workflow_state, write_record
+from research.evidence import attach_claims, build_verification_receipt, validate_claims, verify_claim_evidence
+from research.journal import mutation_transaction
 
 OPEN_QUESTION_OPEN_STATUSES = {"open"}
 EVIDENCE_REQUEST_OPEN_STATUSES = {"open"}
 PRIORITY_SCORE = {"critical": 40, "high": 30, "normal": 10, "low": 5}
 TERMINAL_PROGRAM_STAGES = {"done", "completed", "archived", "published"}
+SEMANTIC_READ_COMMANDS = {"status", "dashboard", "next", "route"}
 
 ROUTE_HINTS = {
     "source": "source-intake",
@@ -176,15 +182,6 @@ def command_for_dashboard_item(item: dict[str, Any]) -> str:
     return ""
 
 
-# Only a prepared-but-unfilled full-note shell is non-confirmable. NOT `not_started`:
-# that is the schema default for every paper without a full note, and a screening-phase
-# paper can carry a genuinely pending worth-reading verdict while its full note is
-# not_started — excluding not_started would silently drop real screening confirmations
-# from the program dashboard (baseline surfaced them as a human-gate). Mirrors
-# knowledge-base-manager's review_queue filter so the review path and dashboard agree.
-UNFILLED_NOTE_STATUSES = {"awaiting_agent_fill"}
-
-
 def full_note_status(record: dict[str, Any]) -> str:
     payload = record.get("payload", {})
     state = payload.get("state", {}) if isinstance(payload, dict) else {}
@@ -192,39 +189,36 @@ def full_note_status(record: dict[str, Any]) -> str:
 
 
 def is_user_confirmable(record: dict[str, Any]) -> bool:
-    if str(record.get("confirmation_status") or "") != "pending_user_confirmation":
-        return False
-    return not (str(record.get("kind") or "") == "paper" and full_note_status(record) in UNFILLED_NOTE_STATUSES)
+    return is_ready_for_human_review(record)
 
 
 def safe_unit_step(record: dict[str, Any]) -> dict[str, Any] | None:
     kind = str(record.get("kind") or "")
     unit_id = str(record.get("id") or "")
     status = str(record.get("status") or "")
-    confirmation_status = str(record.get("confirmation_status") or "")
     note_status = full_note_status(record) if kind == "paper" else ""
-    if kind == "paper" and confirmation_status == "pending_user_confirmation" and note_status == "awaiting_agent_fill":
+    workflow_state = record_workflow_state(record)
+    if workflow_state in {"awaiting_agent_fill", "ready_to_verify"}:
         return {
             "kind": "agent-work",
-            "step_type": "agent-fill",
+            "step_type": "agent-fill" if workflow_state == "awaiting_agent_fill" else "agent-verify",
             "record_id": unit_id,
             "title": str(record.get("title") or ""),
-            "reason": f"paper `{unit_id}` awaits agent fill before user confirmation",
+            "reason": (
+                f"资料「{record.get('title') or unit_id}」（{unit_id}）需要 Agent 补全分析。"
+                if workflow_state == "awaiting_agent_fill"
+                else f"资料「{record.get('title') or unit_id}」（{unit_id}）需要 Agent 核验逐字证据。"
+            ),
             "command_parts": [],
             "safe_execute": False,
         }
-    # For a paper whose full note is not_started, the NEXT action is to generate the
-    # note first (user decision: auto-generate before confirming), so skip the human
-    # gate here and fall through to the generate-note branch below. The paper is still
-    # is_user_confirmable() for the program dashboard's pending count — this only
-    # governs the single "next action" ordering, not whether it's confirmable at all.
-    if is_user_confirmable(record) and not (kind == "paper" and note_status == "not_started"):
+    if workflow_state == "ready_for_review":
         return {
             "kind": "human-gate",
             "step_type": "human-decision",
             "record_id": unit_id,
             "title": str(record.get("title") or ""),
-            "reason": f"{kind} `{unit_id}` 等待人工确认",
+            "reason": f"资料「{record.get('title') or unit_id}」（{unit_id}）已有经过核验的判断，等待你确认。",
             # Single confirm renderer (research.common.confirm_command via the
             # confirm_command_for_record alias): analyzer confirm for paper/repo/blog,
             # else kb.py promote --confirmation-status confirmed. Keeps `kb next` in
@@ -289,17 +283,36 @@ def safe_unit_step(record: dict[str, Any]) -> dict[str, Any] | None:
                 ],
                 "safe_execute": True,
             }
-    if kind == "blog" and status == "draft":
+        state = payload.get("state", {}) if isinstance(payload, dict) else {}
+        if str(state.get("capability_fill_status") or "not_started") == "not_started":
+            return {
+                "kind": kind,
+                "step_type": "generate-note",
+                "record_id": unit_id,
+                "title": str(record.get("title") or ""),
+                "reason": f"repo `{unit_id}` needs an agent-filled capability map",
+                "command_parts": [
+                    COMMAND_PREFIX,
+                    ".agents/skills/repo-analyst/scripts/repo.py",
+                    "map-capability",
+                    "--repo-id",
+                    unit_id,
+                    "--phase",
+                    "prepare",
+                ],
+                "safe_execute": True,
+            }
+    if kind == "blog" and (workflow_state == "source_ready" or status == "draft"):
         return {
             "kind": kind,
             "step_type": "generate-note",
             "record_id": unit_id,
             "title": str(record.get("title") or ""),
-            "reason": f"blog `{unit_id}` needs summary",
+            "reason": f"博客「{record.get('title') or unit_id}」（{unit_id}）已有原始资料，等待 Agent 整理有逐字证据支持的摘要。",
             "command_parts": [
                 COMMAND_PREFIX,
                 ".agents/skills/blog-analyst/scripts/blog.py",
-                "summarize",
+                "complete-note",
                 "--blog-id",
                 unit_id,
             ],
@@ -345,7 +358,6 @@ def safe_unit_step(record: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def auto_plan(root: Path) -> dict[str, Any]:
-    ensure_workspace(root)
     build_index_command = {
         "kind": "kb",
         "step_type": "build-index",
@@ -456,6 +468,97 @@ def decision_log_path(root: Path, program_id: str) -> Path:
     return workflow_root(root, program_id) / "decision-log.md"
 
 
+def decisions_path(root: Path, program_id: str) -> Path:
+    return workflow_root(root, program_id) / "decisions.yaml"
+
+
+def legacy_decision_items(root: Path, program_id: str) -> list[dict[str, Any]]:
+    """Read old markdown decisions as pending/unverified migration records.
+
+    A legacy ``confirmed`` label is preserved only as audit metadata and never
+    trusted as confirmation.
+    """
+    path = decision_log_path(root, program_id)
+    if not path.is_file():
+        return []
+    text = path.read_text(encoding="utf-8")
+    matches = list(re.finditer(r"(?m)^##\s+(.+?)\s+·\s+(.+?)\s*$", text))
+    items: list[dict[str, Any]] = []
+    for index, match in enumerate(matches):
+        timestamp, decision_text = match.group(1).strip(), match.group(2).strip()
+        block_end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        block = text[match.end() : block_end]
+
+        def field(label: str) -> str:
+            found = re.search(rf"(?m)^-\s+{re.escape(label)}:\s*(.*?)\s*$", block)
+            return found.group(1).strip().strip("`") if found else ""
+
+        explicit_id = field("Decision ID")
+        decision_id = explicit_id or "decision-legacy-" + hashlib.sha256(
+            f"{program_id}\n{timestamp}\n{decision_text}".encode("utf-8")
+        ).hexdigest()[:12]
+        original_confirmation = field("Confirmation")
+        items.append(
+            {
+                "id": decision_id,
+                "kind": "program_decision",
+                "timestamp": timestamp,
+                "program_id": program_id,
+                "evidence": normalize_list(field("Evidence")),
+                "confirmation_status": "pending_user_confirmation",
+                "needs_human_confirmation": True,
+                "information_types": ["inference", "evaluation", "unverified"],
+                "payload": {
+                    "decision": {
+                        "text": decision_text,
+                        "rationale": field("Rationale"),
+                        "stage": field("Stage"),
+                        "alternatives": normalize_list(field("Alternatives")),
+                    }
+                },
+                "legacy_import": {
+                    "source": path.relative_to(root).as_posix(),
+                    "original_confirmation_status": original_confirmation,
+                    "trust": "pending_unverified",
+                },
+            }
+        )
+    return items
+
+
+def decision_items_with_legacy(root: Path, program_id: str) -> list[dict[str, Any]]:
+    canonical = list_items(
+        decisions_path(root, program_id),
+        f"{program_id}-decisions",
+        "research-orchestrator",
+    )
+    by_id = {str(item.get("id") or ""): item for item in canonical}
+    for legacy in legacy_decision_items(root, program_id):
+        by_id.setdefault(str(legacy["id"]), legacy)
+    return list(by_id.values())
+
+
+def program_checkpoint_paths(root: Path, program_id: str, *extra: Path) -> list[Path]:
+    """Complete, explicit path set for one program-scoped mutation."""
+    return [
+        state_path(root, program_id),
+        open_questions_path(root, program_id),
+        evidence_requests_path(root, program_id),
+        reporting_events_path(root, program_id),
+        decisions_path(root, program_id),
+        decision_log_path(root, program_id),
+        *extra,
+    ]
+
+
+@contextmanager
+def program_mutation(root: Path, program_id: str, operation: str, *extra_targets: Path):
+    """Run one program mutation through the canonical exact-path transaction."""
+    targets = program_checkpoint_paths(root, program_id, *extra_targets)
+    with mutation_transaction(root, f"research-orchestrator:{operation}", targets):
+        yield
+
+
 def program_ids(root: Path) -> list[str]:
     programs_root = kb_root(root) / "programs"
     if not programs_root.exists():
@@ -485,6 +588,7 @@ def load_state(root: Path, program_id: str) -> dict:
             "workflow_files": {
                 "open_questions": f"kb/programs/{program_id}/workflow/open-questions.yaml",
                 "evidence_requests": f"kb/programs/{program_id}/workflow/evidence-requests.yaml",
+                "decisions": f"kb/programs/{program_id}/workflow/decisions.yaml",
                 "decision_log": f"kb/programs/{program_id}/workflow/decision-log.md",
                 "reporting_events": f"kb/programs/{program_id}/workflow/reporting-events.yaml",
             },
@@ -614,35 +718,78 @@ def program_dashboard_items(root: Path) -> list[dict[str, Any]]:
         high_questions = [item for item in open_questions if str(item.get("priority") or "") in {"critical", "high"}]
         unit_ids = _program_unit_ids(program_id, state, records)
         attached_unit_ids.update(unit_ids)
+        agent_units: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        for unit_id in sorted(unit_ids):
+            record = record_by_id.get(unit_id)
+            if record is None:
+                continue
+            step = safe_unit_step(record)
+            if step and str(step.get("kind") or "") == "agent-work":
+                agent_units.append((record, step))
         pending_units = [
             record_by_id[unit_id]
             for unit_id in sorted(unit_ids)
             if unit_id in record_by_id and is_user_confirmable(record_by_id[unit_id])
         ]
-        score = (
-            100 * len(blocking_evidence)
-            + sum(_priority_value(item) for item in evidence_requests)
+        detail_score = (
+            sum(_priority_value(item) for item in evidence_requests)
             + sum(_priority_value(item) for item in open_questions)
-            + 10 * len(pending_units)
         )
+        if blocking_evidence:
+            score = 400 + min(detail_score, 99)
+        elif agent_units:
+            score = 300 + min(detail_score, 99)
+        elif high_questions:
+            score = 200 + min(detail_score, 99)
+        elif pending_units:
+            score = 100 + min(detail_score + 10 * len(pending_units), 99)
+        else:
+            score = detail_score
         reasons: list[str] = []
         if blocking_evidence:
             reasons.append(f"{len(blocking_evidence)} blocking evidence")
         if high_questions:
             reasons.append(f"{len(high_questions)} high-priority open question")
+        if agent_units:
+            verification_count = sum(
+                1 for _record, step in agent_units if str(step.get("step_type") or "") == "agent-verify"
+            )
+            fill_count = len(agent_units) - verification_count
+            if verification_count:
+                reasons.append(f"{verification_count} 项待 Agent 重核验")
+            if fill_count:
+                reasons.append(f"{fill_count} 项待 Agent 补全")
         if pending_units:
             reasons.append(f"{len(pending_units)} pending confirmation")
         if not reasons and str(state.get("stage") or "") not in TERMINAL_PROGRAM_STAGES:
             reasons.append("stage review")
             score += 1
 
+        step_type = "program-work"
+        action_kind = "program-work"
+        decision_record: dict[str, Any] = {}
         if blocking_evidence:
             next_action = f"Resolve blocking evidence: {blocking_evidence[0].get('needed') or blocking_evidence[0].get('question')}"
+            recommended_command = shell_command(
+                [COMMAND_PREFIX, ".agents/skills/research-orchestrator/scripts/orchestrate.py", "status", "--program-id", program_id]
+            )
+        elif agent_units:
+            decision_record, agent_step = agent_units[0]
+            next_action = str(agent_step.get("reason") or "Agent 需要继续核验这项资料。")
+            recommended_command = ""
+            step_type = str(agent_step.get("step_type") or "agent-fill")
+            action_kind = "agent-work"
         elif high_questions:
             next_action = f"Answer high-priority question: {high_questions[0].get('question')}"
+            recommended_command = shell_command(
+                [COMMAND_PREFIX, ".agents/skills/research-orchestrator/scripts/orchestrate.py", "status", "--program-id", program_id]
+            )
         elif pending_units:
             next_action = f"Review pending confirmation: {pending_units[0].get('id')}"
             recommended_command = confirm_command_for_record(pending_units[0])
+            step_type = "human-decision"
+            action_kind = "human-gate"
+            decision_record = pending_units[0]
         elif normalize_list(state.get("next_actions")):
             next_action = normalize_list(state.get("next_actions"))[0]
             recommended_command = shell_command(
@@ -653,14 +800,14 @@ def program_dashboard_items(root: Path) -> list[dict[str, Any]]:
             recommended_command = shell_command(
                 [COMMAND_PREFIX, ".agents/skills/research-orchestrator/scripts/orchestrate.py", "status", "--program-id", program_id]
             )
-        if blocking_evidence or high_questions:
-            recommended_command = shell_command(
-                [COMMAND_PREFIX, ".agents/skills/research-orchestrator/scripts/orchestrate.py", "status", "--program-id", program_id]
-            )
-
         items.append(
             {
                 "program_id": program_id,
+                "record_id": str(decision_record.get("id") or ""),
+                "title": str(decision_record.get("title") or ""),
+                "step_type": step_type,
+                "action_kind": action_kind,
+                "safe_execute": False,
                 "stage": str(state.get("stage") or ""),
                 "goal": str(state.get("goal") or ""),
                 "question": str(state.get("question") or ""),
@@ -687,6 +834,11 @@ def program_dashboard_items(root: Path) -> list[dict[str, Any]]:
         items.append(
             {
                 "program_id": f"loose:{unit_id}",
+                "record_id": unit_id,
+                "title": str(record.get("title") or ""),
+                "step_type": str(step.get("step_type") or ""),
+                "action_kind": str(step.get("kind") or ""),
+                "safe_execute": bool(step.get("safe_execute")),
                 "stage": "loose-unit",
                 "goal": str(record.get("title") or ""),
                 "question": "",
@@ -724,16 +876,33 @@ def format_dashboard(items: list[dict[str, Any]], *, limit: int = 20) -> str:
     return "\n".join(lines).strip()
 
 
-def format_next(items: list[dict[str, Any]], *, limit: int = 5) -> str:
+def format_next(
+    items: list[dict[str, Any]],
+    *,
+    limit: int = 5,
+    has_records: bool = False,
+) -> str:
     selected = items[:limit] if limit > 0 else items
     lines = ["# Next Actions", ""]
     if not selected:
-        lines.append("- KB 为空，第一步：告诉 AI 一篇论文的来源（链接或文件），或运行 kb ingest")
-        lines.append("  操作：告诉 AI 论文来源，或运行 kb ingest。")
+        if has_records:
+            lines.append("- 知识库已有资料，但目前没有待处理事项。")
+        else:
+            lines.append("- KB 为空。请告诉 AI 一篇论文、一个代码仓或一篇博客的来源，或使用 kb ingest 添加资料。")
         return "\n".join(lines).strip()
     for item in selected:
-        lines.append(f"- `{item['program_id']}`: {item.get('next_action')}")
-        lines.append("  操作：可直接让 AI 推进，或运行 kb next。")
+        program_id = str(item.get("program_id") or "")
+        if program_id.startswith("loose:"):
+            record_id = str(item.get("record_id") or program_id.split(":", 1)[-1])
+            title = str(item.get("title") or item.get("goal") or record_id)
+            subject = f"资料「{title}」（{record_id}）"
+        else:
+            subject = f"研究计划「{program_id}」"
+        lines.append(f"- {subject}：{item.get('next_action')}")
+        if str(item.get("step_type") or "") == "human-decision":
+            lines.append("  请直接用自然语言告诉我你的决定。")
+        else:
+            lines.append("  可以直接告诉 Agent 继续推进。")
     return "\n".join(lines).strip()
 
 
@@ -758,19 +927,36 @@ def ensure_program_files(root: Path, program_id: str) -> None:
             "AI 推断、评估和取舍理由如果不是用户明确确认，默认保持待确认语义。\n\n"
             "All script-generated timestamps are stored in UTC.\n",
         )
+    canonical_decisions = list_items(
+        decisions_path(root, program_id),
+        f"{program_id}-decisions",
+        "research-orchestrator",
+    )
+    by_id = {str(item.get("id") or ""): item for item in canonical_decisions}
+    for legacy in legacy_decision_items(root, program_id):
+        by_id.setdefault(str(legacy["id"]), legacy)
+    if not decisions_path(root, program_id).exists() or len(by_id) != len(canonical_decisions):
+        write_list_items(
+            decisions_path(root, program_id),
+            f"{program_id}-decisions",
+            "research-orchestrator",
+            list(by_id.values()),
+        )
 
 
-def refresh_state_counts(root: Path, program_id: str, payload: dict) -> dict:
-    ensure_program_files(root, program_id)
+def refresh_state_counts(root: Path, program_id: str, payload: dict, *, materialize: bool = True) -> dict:
+    if materialize:
+        ensure_program_files(root, program_id)
     open_questions = list_items(open_questions_path(root, program_id), f"{program_id}-open-questions", "research-orchestrator")
     evidence_requests = list_items(evidence_requests_path(root, program_id), f"{program_id}-evidence-requests", "research-orchestrator")
     reporting_events = list_items(reporting_events_path(root, program_id), f"{program_id}-reporting-events", "research-orchestrator")
-    decision_log = decision_log_path(root, program_id).read_text(encoding="utf-8") if decision_log_path(root, program_id).exists() else ""
+    decisions = decision_items_with_legacy(root, program_id)
     payload.setdefault("workflow_files", {})
     payload["workflow_files"].update(
         {
             "open_questions": open_questions_path(root, program_id).relative_to(root).as_posix(),
             "evidence_requests": evidence_requests_path(root, program_id).relative_to(root).as_posix(),
+            "decisions": decisions_path(root, program_id).relative_to(root).as_posix(),
             "decision_log": decision_log_path(root, program_id).relative_to(root).as_posix(),
             "reporting_events": reporting_events_path(root, program_id).relative_to(root).as_posix(),
         }
@@ -779,32 +965,104 @@ def refresh_state_counts(root: Path, program_id: str, payload: dict) -> dict:
         "open_questions": len([item for item in open_questions if str(item.get("status") or "open") in OPEN_QUESTION_OPEN_STATUSES]),
         "evidence_requests": len([item for item in evidence_requests if str(item.get("status") or "open") in EVIDENCE_REQUEST_OPEN_STATUSES]),
         "reporting_events": len(reporting_events),
-        "decisions": decision_log.count("\n## "),
+        "decisions": len(decisions),
     }
     payload["updated_at"] = utc_now_iso()
     return payload
 
 
-def append_decision(root: Path, program_id: str, item: dict[str, Any]) -> Path:
-    path = decision_log_path(root, program_id)
-    existing = path.read_text(encoding="utf-8") if path.exists() else "# Decision Log\n\n"
+def _decision_source_roots(root: Path, program_id: str, claims: list[dict[str, Any]]) -> dict[str, Path]:
+    roots: dict[str, Path] = {}
+    program_source_id = f"program:{program_id}"
+    for claim in claims:
+        for evidence_ref in claim.get("evidence_refs") or []:
+            if not isinstance(evidence_ref, dict):
+                continue
+            source_unit_id = str(evidence_ref.get("source_unit_id") or "").strip()
+            if not source_unit_id or source_unit_id in roots:
+                continue
+            if source_unit_id == program_source_id:
+                roots[source_unit_id] = program_root(root, program_id)
+                continue
+            _source_record, source_path = locate_record(root, source_unit_id, fuzzy=False)
+            roots[source_unit_id] = source_path.parent
+    return roots
+
+
+def load_decision_claims(root: Path, program_id: str, claims_file: str) -> list[dict[str, Any]]:
+    if not claims_file:
+        return []
+    path = Path(claims_file).expanduser()
+    if not path.is_absolute():
+        path = root / path
+    payload = load_yaml(path, default=[])
+    claims = payload.get("claims") if isinstance(payload, dict) else payload
+    violations = validate_claims(claims)
+    normalized = [dict(claim) for claim in claims if isinstance(claim, dict)] if isinstance(claims, list) else []
+    source_roots: dict[str, Path] = {}
+    if normalized:
+        try:
+            source_roots = _decision_source_roots(root, program_id, normalized)
+        except SystemExit as exc:
+            violations.append(str(exc))
+    for claim in normalized:
+        if str(claim.get("confirmation_status") or "") != "pending_user_confirmation":
+            violations.append(f"decision claim {claim.get('id')!r} must remain pending_user_confirmation")
+        violations.extend(verify_claim_evidence(claim, program_root(root, program_id), source_roots=source_roots))
+    if violations:
+        raise SystemExit("Program decision claims failed verification:\n  - " + "\n  - ".join(violations))
+    return normalized
+
+
+def _write_decision_projection(root: Path, program_id: str, items: list[dict[str, Any]]) -> Path:
     lines = [
-        existing.rstrip(),
+        "# Decision Log",
         "",
-        f"## {item['timestamp']} · {item['decision']}",
+        "AI 推断、评估和取舍理由如果不是用户明确确认，默认保持待确认语义。",
         "",
-        f"- Stage: `{item.get('stage', '') or 'unknown'}`",
-        f"- Rationale: {item.get('rationale', '') or '待补充'}",
-        f"- Information types: {', '.join(item.get('information_types', []))}",
+        "All script-generated timestamps are stored in UTC.",
     ]
-    if item.get("evidence"):
-        lines.append(f"- Evidence: {', '.join(item['evidence'])}")
-    if item.get("alternatives"):
-        lines.append(f"- Alternatives: {', '.join(item['alternatives'])}")
-    if item.get("confirmation_status"):
-        lines.append(f"- Confirmation: `{item['confirmation_status']}`")
+    for item in items:
+        payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+        decision = payload.get("decision") if isinstance(payload, dict) else {}
+        decision = decision if isinstance(decision, dict) else {}
+        receipt = item.get("confirmation") if isinstance(item.get("confirmation"), dict) else {}
+        lines.extend(
+            [
+                "",
+                f"## {item.get('timestamp', '')} · {decision.get('text', '')}",
+                "",
+                f"- Decision ID: `{item.get('id', '')}`",
+                f"- Stage: `{decision.get('stage', '') or 'unknown'}`",
+                f"- Rationale: {decision.get('rationale', '') or '待补充'}",
+                f"- Information types: {', '.join(item.get('information_types', []))}",
+                f"- Confirmation: `{item.get('confirmation_status', 'pending_user_confirmation')}`",
+            ]
+        )
+        if decision.get("alternatives"):
+            lines.append(f"- Alternatives: {', '.join(decision['alternatives'])}")
+        if receipt:
+            lines.append(f"- Confirmed by: {receipt.get('by', '')}")
+            lines.append(f"- User authorization: {receipt.get('user_authorization', '')}")
+    path = decision_log_path(root, program_id)
     write_text_if_changed(path, "\n".join(lines).strip() + "\n")
     return path
+
+
+def write_decisions(root: Path, program_id: str, items: list[dict[str, Any]]) -> tuple[Path, Path]:
+    yaml_path = write_list_items(
+        decisions_path(root, program_id),
+        f"{program_id}-decisions",
+        "research-orchestrator",
+        items,
+    )
+    return yaml_path, _write_decision_projection(root, program_id, items)
+
+
+def append_decision(root: Path, program_id: str, item: dict[str, Any]) -> tuple[Path, Path]:
+    items = list_items(decisions_path(root, program_id), f"{program_id}-decisions", "research-orchestrator")
+    items.append(item)
+    return write_decisions(root, program_id, items)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -830,6 +1088,7 @@ def build_parser() -> argparse.ArgumentParser:
     next_cmd = subparsers.add_parser("next", help="Show prioritized next actions across programs")
     next_cmd.add_argument("--limit", type=int, default=5)
     next_cmd.add_argument("--program-id")
+    next_cmd.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
 
     auto = subparsers.add_parser("auto", help="Plan or execute the next safe orchestration step")
     auto.add_argument("--max-steps", type=int, default=1)
@@ -890,8 +1149,17 @@ def build_parser() -> argparse.ArgumentParser:
     decision.add_argument("--rationale", default="")
     decision.add_argument("--stage", default="")
     decision.add_argument("--evidence", action="append", default=[])
+    decision.add_argument("--claims-file", default="")
     decision.add_argument("--alternative", action="append", default=[])
     decision.add_argument("--confirmation-status", default="pending_user_confirmation", choices=["auto_confirmed", "pending_user_confirmation", "confirmed", "rejected"])
+
+    confirm_decision = subparsers.add_parser("confirm-decision", help="Confirm a pending program decision")
+    confirm_decision.add_argument("--program-id", required=True)
+    confirm_decision.add_argument("--decision-id", required=True)
+    confirm_decision.add_argument("--confirmed-by", default="")
+    confirm_decision.add_argument("--evidence", action="append", required=True)
+    confirm_decision.add_argument("--user-authorization", required=True)
+    confirm_decision.add_argument("--authorization-source", default="user_message")
 
     event = subparsers.add_parser("add-reporting-event", help="Append a reportable program event")
     event.add_argument("--program-id", required=True)
@@ -907,11 +1175,16 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
     root = project_root(PROJECT_ROOT, explicit_root=args.root)
-    print_resolved_project_roots(root)
-    ensure_workspace(root)
+    if not (args.command == "next" and args.json):
+        print_resolved_project_roots(root)
+    semantic_read = args.command in SEMANTIC_READ_COMMANDS or (
+        args.command == "auto" and not args.execute
+    )
+    if not semantic_read:
+        ensure_workspace(root)
 
     if args.command == "init-program":
-        with program_file_lock(root, args.program_id):
+        with program_mutation(root, args.program_id, args.command):
             ensure_program_files(root, args.program_id)
             payload = load_state(root, args.program_id)
             payload["question"] = args.question
@@ -934,10 +1207,13 @@ def main() -> int:
             )
             write_state(root, args.program_id, load_state(root, args.program_id))
         print(f"[ok] created program {args.program_id}")
-        checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: init program {args.program_id}")
+        checkpoint = checkpoint_and_report(
+            root, trigger="milestone", message=f"milestone: init program {args.program_id}",
+            target_paths=program_checkpoint_paths(root, args.program_id),
+        )
         return 0
     if args.command == "set-stage":
-        with program_file_lock(root, args.program_id):
+        with program_mutation(root, args.program_id, args.command):
             ensure_program_files(root, args.program_id)
             payload = load_state(root, args.program_id)
             payload["stage"] = args.stage
@@ -956,7 +1232,10 @@ def main() -> int:
             )
             write_state(root, args.program_id, payload)
         print(f"[ok] updated stage to {args.stage}")
-        checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: set program stage {args.program_id} -> {args.stage}")
+        checkpoint = checkpoint_and_report(
+            root, trigger="milestone", message=f"milestone: set program stage {args.program_id} -> {args.stage}",
+            target_paths=program_checkpoint_paths(root, args.program_id),
+        )
         return 0
     if args.command == "status":
         if not program_root(root, args.program_id).is_dir():
@@ -965,11 +1244,14 @@ def main() -> int:
                 f"program `{args.program_id}` not found; existing: {existing}. "
                 "Use init-program to create it."
             )
-        with program_file_lock(root, args.program_id):
-            ensure_program_files(root, args.program_id)
-            payload = load_state(root, args.program_id)
-            write_state(root, args.program_id, payload)
-            payload = load_state(root, args.program_id)
+        # Status is a strict read: no ensure/write, no lock-file creation, and no
+        # refreshed timestamp. Mutating commands own materialization/migration.
+        payload = refresh_state_counts(
+            root,
+            args.program_id,
+            load_state(root, args.program_id),
+            materialize=False,
+        )
         print(f"program_id: {payload.get('program_id') or args.program_id}")
         print(f"stage: {payload.get('stage') or 'init'}")
         print(f"question: {payload.get('question') or ''}")
@@ -982,6 +1264,7 @@ def main() -> int:
         print(format_dashboard(program_dashboard_items(root), limit=args.limit))
         return 0
     if args.command == "next":
+        has_records = bool(iter_records(root))
         items = program_dashboard_items(root)
         if args.program_id:
             if not program_root(root, args.program_id).is_dir():
@@ -991,10 +1274,19 @@ def main() -> int:
                     "Use init-program to create it."
                 )
             items = [item for item in items if item.get("program_id") == args.program_id]
-            if not items:
+            if not items and not args.json:
                 print(f"# Next Actions\n\n- No actions for program `{args.program_id}`.")
                 return 0
-        print(format_next(items, limit=args.limit))
+        if args.json:
+            print(
+                json.dumps(
+                    {"has_records": has_records, "items": items[: args.limit] if args.limit > 0 else items},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(format_next(items, limit=args.limit, has_records=has_records))
         return 0
     if args.command == "auto":
         exit_code = 0
@@ -1023,8 +1315,13 @@ def main() -> int:
         return 0
     if args.command == "attach-unit":
         warning = ""
-        canonical_id = args.unit_id
-        with program_file_lock(root, args.program_id):
+        try:
+            attached_record, attached_record_path = locate_record(root, args.unit_id)
+        except SystemExit as exc:
+            print(f"[warn] attach-unit could not resolve `{args.unit_id}`: {exc}")
+            return 1
+        canonical_id = str(attached_record.get("id") or args.unit_id)
+        with program_mutation(root, args.program_id, args.command, attached_record_path):
             ensure_program_files(root, args.program_id)
             payload = load_state(root, args.program_id)
             canonical_id, warning = ensure_unit_program_link(root, args.program_id, args.unit_id)
@@ -1045,14 +1342,17 @@ def main() -> int:
         if warning:
             print(warning)
         print(f"[ok] attached {canonical_id} to {args.program_id}")
-        checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: attach {canonical_id} to {args.program_id}")
+        checkpoint = checkpoint_and_report(
+            root, trigger="milestone", message=f"milestone: attach {canonical_id} to {args.program_id}",
+            target_paths=program_checkpoint_paths(root, args.program_id, attached_record_path),
+        )
         return 0
     if args.command == "query-program":
-        with program_file_lock(root, args.program_id):
-            query_root = program_root(root, args.program_id) / "queries"
+        query_root = program_root(root, args.program_id) / "queries"
+        slug = simple_slug(args.question, "query")
+        query_path = query_root / f"{slug}.md"
+        with program_mutation(root, args.program_id, args.command, query_path):
             ensure_dir(query_root)
-            slug = simple_slug(args.question, "query")
-            query_path = query_root / f"{slug}.md"
             state = load_state(root, args.program_id)
             lines = [
                 f"# Program Query: {args.question}",
@@ -1084,10 +1384,13 @@ def main() -> int:
             )
             write_state(root, args.program_id, load_state(root, args.program_id))
         print(query_path.relative_to(root))
-        checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: query program {args.program_id}")
+        checkpoint = checkpoint_and_report(
+            root, trigger="milestone", message=f"milestone: query program {args.program_id}",
+            target_paths=program_checkpoint_paths(root, args.program_id, query_path),
+        )
         return 0
     if args.command == "add-open-question":
-        with program_file_lock(root, args.program_id):
+        with program_mutation(root, args.program_id, args.command):
             ensure_program_files(root, args.program_id)
             path = append_list_item(
                 open_questions_path(root, args.program_id),
@@ -1105,10 +1408,13 @@ def main() -> int:
             )
             write_state(root, args.program_id, load_state(root, args.program_id))
         print(path.relative_to(root))
-        checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: add open question {args.program_id}")
+        checkpoint = checkpoint_and_report(
+            root, trigger="milestone", message=f"milestone: add open question {args.program_id}",
+            target_paths=program_checkpoint_paths(root, args.program_id),
+        )
         return 0
     if args.command == "answer-question":
-        with program_file_lock(root, args.program_id):
+        with program_mutation(root, args.program_id, args.command):
             ensure_program_files(root, args.program_id)
             path, item = update_list_item_status(
                 open_questions_path(root, args.program_id),
@@ -1122,10 +1428,13 @@ def main() -> int:
             write_state(root, args.program_id, load_state(root, args.program_id))
         print(f"[ok] answered {item.get('id')}")
         print(path.relative_to(root))
-        checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: answer open question {args.program_id}")
+        checkpoint = checkpoint_and_report(
+            root, trigger="milestone", message=f"milestone: answer open question {args.program_id}",
+            target_paths=program_checkpoint_paths(root, args.program_id),
+        )
         return 0
     if args.command == "drop-question":
-        with program_file_lock(root, args.program_id):
+        with program_mutation(root, args.program_id, args.command):
             ensure_program_files(root, args.program_id)
             path, item = update_list_item_status(
                 open_questions_path(root, args.program_id),
@@ -1139,10 +1448,13 @@ def main() -> int:
             write_state(root, args.program_id, load_state(root, args.program_id))
         print(f"[ok] dropped {item.get('id')}")
         print(path.relative_to(root))
-        checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: drop open question {args.program_id}")
+        checkpoint = checkpoint_and_report(
+            root, trigger="milestone", message=f"milestone: drop open question {args.program_id}",
+            target_paths=program_checkpoint_paths(root, args.program_id),
+        )
         return 0
     if args.command == "request-evidence":
-        with program_file_lock(root, args.program_id):
+        with program_mutation(root, args.program_id, args.command):
             ensure_program_files(root, args.program_id)
             current_state = load_state(root, args.program_id)
             path = append_list_item(
@@ -1176,10 +1488,13 @@ def main() -> int:
             )
             write_state(root, args.program_id, load_state(root, args.program_id))
         print(path.relative_to(root))
-        checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: request evidence {args.program_id}")
+        checkpoint = checkpoint_and_report(
+            root, trigger="milestone", message=f"milestone: request evidence {args.program_id}",
+            target_paths=program_checkpoint_paths(root, args.program_id),
+        )
         return 0
     if args.command == "resolve-evidence":
-        with program_file_lock(root, args.program_id):
+        with program_mutation(root, args.program_id, args.command):
             ensure_program_files(root, args.program_id)
             current_state = load_state(root, args.program_id)
             path, item = update_list_item_status(
@@ -1217,10 +1532,13 @@ def main() -> int:
             write_state(root, args.program_id, load_state(root, args.program_id))
         print(f"[ok] fulfilled {item.get('id')}")
         print(path.relative_to(root))
-        checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: resolve evidence {args.program_id}")
+        checkpoint = checkpoint_and_report(
+            root, trigger="milestone", message=f"milestone: resolve evidence {args.program_id}",
+            target_paths=program_checkpoint_paths(root, args.program_id),
+        )
         return 0
     if args.command == "drop-evidence":
-        with program_file_lock(root, args.program_id):
+        with program_mutation(root, args.program_id, args.command):
             ensure_program_files(root, args.program_id)
             path, item = update_list_item_status(
                 evidence_requests_path(root, args.program_id),
@@ -1234,23 +1552,51 @@ def main() -> int:
             write_state(root, args.program_id, load_state(root, args.program_id))
         print(f"[ok] dropped {item.get('id')}")
         print(path.relative_to(root))
-        checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: drop evidence {args.program_id}")
+        checkpoint = checkpoint_and_report(
+            root, trigger="milestone", message=f"milestone: drop evidence {args.program_id}",
+            target_paths=program_checkpoint_paths(root, args.program_id),
+        )
         return 0
     if args.command == "log-decision":
-        with program_file_lock(root, args.program_id):
+        if args.confirmation_status in {"confirmed", "auto_confirmed"}:
+            raise SystemExit(
+                "Program decisions cannot be created confirmed/auto_confirmed; "
+                "log a pending decision, then use confirm-decision."
+            )
+        with program_mutation(root, args.program_id, args.command):
             ensure_program_files(root, args.program_id)
             state = load_state(root, args.program_id)
+            timestamp = utc_now_iso()
+            decision_id = "decision-" + hashlib.sha256(
+                f"{args.program_id}\n{timestamp}\n{args.decision}".encode("utf-8")
+            ).hexdigest()[:12]
+            claims = load_decision_claims(root, args.program_id, args.claims_file)
             item = {
-                "timestamp": utc_now_iso(),
-                "decision": args.decision,
-                "rationale": args.rationale,
-                "stage": args.stage or state.get("stage", ""),
+                "id": decision_id,
+                "kind": "program_decision",
+                "timestamp": timestamp,
+                "program_id": args.program_id,
                 "evidence": normalize_list(args.evidence),
-                "alternatives": normalize_list(args.alternative),
                 "confirmation_status": args.confirmation_status,
-                "information_types": ["fact"] if args.confirmation_status in {"auto_confirmed", "confirmed"} else ["fact", "inference", "evaluation", "unverified"],
+                "needs_human_confirmation": args.confirmation_status != "rejected",
+                "information_types": ["inference", "evaluation", "unverified"],
+                "payload": {
+                    "decision": {
+                        "text": args.decision,
+                        "rationale": args.rationale,
+                        "stage": args.stage or state.get("stage", ""),
+                        "alternatives": normalize_list(args.alternative),
+                    },
+                },
             }
-            path = append_decision(root, args.program_id, item)
+            if claims:
+                attach_claims(item["payload"], claims)
+                build_verification_receipt(
+                    item,
+                    program_root(root, args.program_id),
+                    source_roots=_decision_source_roots(root, args.program_id, claims),
+                )
+            decisions_yaml, path = append_decision(root, args.program_id, item)
             append_program_reporting_event(
                 root,
                 args.program_id,
@@ -1259,20 +1605,95 @@ def main() -> int:
                     "event_type": "decision",
                     "title": args.decision,
                     "summary": args.rationale,
-                    "stage": item["stage"],
-                    "tags": ["decision"],
-                    "artifacts": [path.relative_to(root).as_posix(), *item["evidence"]],
+                    "stage": item["payload"]["decision"]["stage"],
+                    "tags": ["decision", "pending"],
+                    "artifacts": [
+                        decisions_yaml.relative_to(root).as_posix(),
+                        path.relative_to(root).as_posix(),
+                        *item["evidence"],
+                    ],
                 },
                 generated_by="research-orchestrator",
             )
             state = load_state(root, args.program_id)
-            state["last_decision"] = {"decision": args.decision, "timestamp": item["timestamp"], "confirmation_status": args.confirmation_status}
+            state["last_decision"] = {
+                "id": decision_id,
+                "decision": args.decision,
+                "timestamp": item["timestamp"],
+                "confirmation_status": args.confirmation_status,
+            }
             write_state(root, args.program_id, state)
         print(path.relative_to(root))
-        checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: log decision {args.program_id}")
+        checkpoint = checkpoint_and_report(
+            root, trigger="milestone", message=f"milestone: log decision {args.program_id}",
+            target_paths=program_checkpoint_paths(root, args.program_id),
+        )
+        return 0
+    if args.command == "confirm-decision":
+        with program_mutation(root, args.program_id, args.command):
+            ensure_program_files(root, args.program_id)
+            items = list_items(
+                decisions_path(root, args.program_id),
+                f"{args.program_id}-decisions",
+                "research-orchestrator",
+            )
+            selected: dict[str, Any] | None = None
+            for item in items:
+                if str(item.get("id") or "") == args.decision_id:
+                    selected = item
+                    break
+            if selected is None:
+                raise SystemExit(f"Program decision not found: {args.decision_id}")
+            claims = selected.get("payload", {}).get("claims", [])
+            source_roots = _decision_source_roots(root, args.program_id, claims)
+            apply_confirmation(
+                selected,
+                confirmed_by=args.confirmed_by,
+                evidence=args.evidence,
+                user_authorization=args.user_authorization,
+                authorization_source=args.authorization_source,
+                method="orchestrate.py confirm-decision",
+                project_root=root,
+                verification_root=program_root(root, args.program_id),
+                trusted_source_roots=source_roots,
+            )
+            decisions_yaml, path = write_decisions(root, args.program_id, items)
+            decision_payload = selected.get("payload", {}).get("decision", {})
+            append_program_reporting_event(
+                root,
+                args.program_id,
+                {
+                    "source_skill": "research-orchestrator",
+                    "event_type": "decision-confirmed",
+                    "title": str(decision_payload.get("text") or args.decision_id),
+                    "summary": str(decision_payload.get("rationale") or ""),
+                    "stage": str(decision_payload.get("stage") or ""),
+                    "tags": ["decision", "confirmed"],
+                    "artifacts": [
+                        decisions_yaml.relative_to(root).as_posix(),
+                        path.relative_to(root).as_posix(),
+                    ],
+                },
+                generated_by="research-orchestrator",
+            )
+            state = load_state(root, args.program_id)
+            state["last_decision"] = {
+                "id": args.decision_id,
+                "decision": str(decision_payload.get("text") or ""),
+                "timestamp": str(selected.get("timestamp") or ""),
+                "confirmation_status": "confirmed",
+            }
+            write_state(root, args.program_id, state)
+        print(path.relative_to(root))
+        checkpoint_and_report(
+            root,
+            trigger="milestone",
+            message=f"milestone: confirm decision {args.program_id} {args.decision_id}",
+            target_paths=program_checkpoint_paths(root, args.program_id),
+        )
         return 0
     if args.command == "add-reporting-event":
-        with program_file_lock(root, args.program_id):
+        with program_mutation(root, args.program_id, args.command):
             ensure_program_files(root, args.program_id)
             current_state = load_state(root, args.program_id)
             path = append_program_reporting_event(
@@ -1291,7 +1712,10 @@ def main() -> int:
             )
             write_state(root, args.program_id, load_state(root, args.program_id))
         print(path.relative_to(root))
-        checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: add reporting event {args.program_id}")
+        checkpoint = checkpoint_and_report(
+            root, trigger="milestone", message=f"milestone: add reporting event {args.program_id}",
+            target_paths=program_checkpoint_paths(root, args.program_id),
+        )
         return 0
     return 1
 

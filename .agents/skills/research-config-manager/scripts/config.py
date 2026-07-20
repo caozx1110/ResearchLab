@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import sys
 from pathlib import Path
@@ -22,11 +23,12 @@ if __name__ == "__main__":
     ensure_managed_runtime(PROJECT_ROOT)
 
 from research.common import add_project_root_argument, load_yaml, print_resolved_project_roots, slugify, warn_if_cwd_differs_from_project_root, write_text_if_changed, write_yaml_if_changed, yaml_default
+from research.journal import mutation_transaction
 from research.core import (
     candidate_pools_path,
     config_root,
-    default_runtime_preferences,
     ensure_workspace,
+    kb_root,
     load_candidate_pools,
     load_runtime_preferences,
     load_topic_taxonomy,
@@ -36,6 +38,7 @@ from research.core import (
     topic_taxonomy_path,
     write_runtime_preferences,
 )
+from research.prefs import DIAGNOSTIC_MODES, DIAGNOSTIC_SKILL_MODES
 
 
 def profile_path(root: Path) -> Path:
@@ -72,16 +75,24 @@ def _default_profile() -> dict:
     }
 
 
+def _deep_fill_missing(current: object, defaults: object) -> object:
+    """Fill absent config keys without replacing any user-owned value."""
+    if not isinstance(current, dict) or not isinstance(defaults, dict):
+        return copy.deepcopy(current)
+    merged = copy.deepcopy(current)
+    for key, default_value in defaults.items():
+        if key not in merged:
+            merged[key] = copy.deepcopy(default_value)
+        elif isinstance(merged[key], dict) and isinstance(default_value, dict):
+            merged[key] = _deep_fill_missing(merged[key], default_value)
+    return merged
+
+
 def load_profile(root: Path) -> dict:
     payload = load_yaml(profile_path(root), default={})
     if not isinstance(payload, dict) or not payload:
         payload = _default_profile()
-    payload.setdefault("preferences", {})
-    payload.setdefault("resources", {})
-    payload.setdefault("constraints", [])
-    payload.setdefault("governance", {})
-    payload.setdefault("history", [])
-    return payload
+    return _deep_fill_missing(payload, _default_profile())
 
 
 def set_nested(payload: dict, dotted_key: str, value: str) -> None:
@@ -273,9 +284,18 @@ def build_parser() -> argparse.ArgumentParser:
     guide.add_argument("--focus", choices=["all", "paper-intake"], default="all")
 
     runtime = subparsers.add_parser("set-runtime-pref", help="Persist browser / identity / autonomy / paper / pdf / versioning runtime preferences")
-    runtime.add_argument("--section", required=True, choices=["browser", "identity", "autonomy", "paper", "pdf", "versioning"])
+    runtime.add_argument("--section", required=True, choices=["browser", "identity", "autonomy", "paper", "pdf", "versioning", "diagnostics"])
     runtime.add_argument("--key", required=True)
     runtime.add_argument("--value", required=True)
+
+    diagnostics = subparsers.add_parser("set-diagnostics", help="Configure optional local-only diagnostics")
+    diagnostics.add_argument("--mode", choices=sorted(DIAGNOSTIC_MODES))
+    diagnostics.add_argument("--skill", default="")
+    diagnostics.add_argument("--skill-mode", choices=sorted(DIAGNOSTIC_SKILL_MODES))
+    diagnostics.add_argument("--token-budget-per-task", type=int)
+    diagnostics.add_argument("--max-issues-per-task", type=int)
+    diagnostics.add_argument("--dedup-window-seconds", type=int)
+    diagnostics.add_argument("--cooldown-seconds", type=int)
     return parser
 
 
@@ -287,10 +307,24 @@ def main() -> int:
 
     if args.command == "init":
         warn_if_cwd_differs_from_project_root(root, command="config.py init")
-        write_yaml_if_changed(profile_path(root), load_profile(root))
-        load_topic_taxonomy(root)
-        load_candidate_pools(root)
-        write_yaml_if_changed(runtime_preferences_path(root), default_runtime_preferences())
+        targets = [
+            kb_root(root) / ".gitignore",
+            profile_path(root),
+            topic_taxonomy_path(root),
+            candidate_pools_path(root),
+            runtime_preferences_path(root),
+        ]
+        with mutation_transaction(root, "config-init", targets):
+            write_yaml_if_changed(profile_path(root), load_profile(root))
+            load_topic_taxonomy(root)
+            load_candidate_pools(root)
+            write_yaml_if_changed(runtime_preferences_path(root), load_runtime_preferences(root))
+        checkpoint_and_report(
+            root,
+            trigger="milestone",
+            message="milestone: initialize research configuration",
+            target_paths=targets,
+        )
         print(f"[ok] initialized {profile_path(root).relative_to(root)}")
         print(f"[ok] initialized {topic_taxonomy_path(root).relative_to(root)}")
         print(f"[ok] initialized {candidate_pools_path(root).relative_to(root)}")
@@ -313,61 +347,103 @@ def main() -> int:
                 print_personalization(root)
         return 0
     if args.command == "set":
-        payload = load_profile(root)
-        set_nested(payload, args.key, parse_value(args.value))
-        payload.setdefault("history", []).append({"action": "set", "key": args.key, "value": args.value})
-        write_yaml_if_changed(profile_path(root), payload)
+        path = profile_path(root)
+        with mutation_transaction(root, "config-set", [path]):
+            payload = load_profile(root)
+            set_nested(payload, args.key, parse_value(args.value))
+            payload.setdefault("history", []).append({"action": "set", "key": args.key, "value": args.value})
+            write_yaml_if_changed(path, payload)
+        checkpoint_and_report(
+            root,
+            trigger="milestone",
+            message=f"milestone: update profile {args.key}",
+            target_paths=[path],
+        )
         print(f"[ok] set {args.key}")
         return 0
     if args.command == "toggle":
         path = settings_path(root)
-        text = path.read_text(encoding="utf-8") if path.exists() else ""
+        targets = [path]
+        if TOGGLE_RUNTIME_PREFS.get(args.key):
+            targets.append(runtime_preferences_path(root))
         on = args.state == "on"
-        marker = "[x]" if on else "[ ]"
-        lines = []
-        found = False
-        for line in text.splitlines():
-            if args.key in line:
-                suffix = line.split("]", 1)[-1].strip()
-                lines.append(f"- {marker} {suffix}")
-                found = True
-            else:
-                lines.append(line)
-        if not found:
-            lines.append(f"- {marker} {args.key}")
-        write_text_if_changed(path, "\n".join(lines).strip() + "\n")
-        touched = sync_toggle_runtime_preferences(root, key=args.key, on=on)
+        with mutation_transaction(root, "config-toggle", targets):
+            text = path.read_text(encoding="utf-8") if path.exists() else ""
+            marker = "[x]" if on else "[ ]"
+            lines = []
+            found = False
+            for line in text.splitlines():
+                if args.key in line:
+                    suffix = line.split("]", 1)[-1].strip()
+                    lines.append(f"- {marker} {suffix}")
+                    found = True
+                else:
+                    lines.append(line)
+            if not found:
+                lines.append(f"- {marker} {args.key}")
+            write_text_if_changed(path, "\n".join(lines).strip() + "\n")
+            touched = sync_toggle_runtime_preferences(root, key=args.key, on=on)
+        checkpoint_and_report(
+            root,
+            trigger="milestone",
+            message=f"milestone: toggle config {args.key}",
+            target_paths=targets,
+        )
         print(f"[ok] toggled {args.key} -> {args.state}")
         if touched:
             print(f"[ok] synced runtime prefs: {', '.join(touched)}")
         return 0
     if args.command == "capture-resources":
-        payload = load_profile(root)
-        label = args.label or f"captured_{len(payload['resources']) + 1}"
-        payload["resources"][label] = args.statement
-        payload.setdefault("history", []).append({"action": "capture-resources", "label": label, "statement": args.statement})
-        write_yaml_if_changed(profile_path(root), payload)
+        path = profile_path(root)
+        with mutation_transaction(root, "config-capture-resources", [path]):
+            payload = load_profile(root)
+            label = args.label or f"captured_{len(payload['resources']) + 1}"
+            payload["resources"][label] = args.statement
+            payload.setdefault("history", []).append({"action": "capture-resources", "label": label, "statement": args.statement})
+            write_yaml_if_changed(path, payload)
+        checkpoint_and_report(
+            root,
+            trigger="milestone",
+            message=f"milestone: capture resource profile {label}",
+            target_paths=[path],
+        )
         print(f"[ok] stored resource statement as {label}")
         return 0
     if args.command == "set-taxonomy-seed":
-        path = upsert_taxonomy_seed(
+        path = topic_taxonomy_path(root)
+        with mutation_transaction(root, "config-set-taxonomy-seed", [path]):
+            path = upsert_taxonomy_seed(
+                root,
+                topic=args.topic,
+                aliases=args.alias,
+                tags=args.tag,
+                note=args.note,
+                status=args.status,
+            )
+        checkpoint_and_report(
             root,
-            topic=args.topic,
-            aliases=args.alias,
-            tags=args.tag,
-            note=args.note,
-            status=args.status,
+            trigger="milestone",
+            message=f"milestone: update taxonomy seed {args.topic}",
+            target_paths=[path],
         )
         print(f"[ok] updated {path.relative_to(root)}")
         return 0
     if args.command == "set-pool":
-        path = upsert_pool(
+        path = candidate_pools_path(root)
+        with mutation_transaction(root, "config-set-pool", [path]):
+            path = upsert_pool(
+                root,
+                pool=args.pool,
+                topics=args.topic,
+                tags=args.tag,
+                description=args.description,
+                status=args.status,
+            )
+        checkpoint_and_report(
             root,
-            pool=args.pool,
-            topics=args.topic,
-            tags=args.tag,
-            description=args.description,
-            status=args.status,
+            trigger="milestone",
+            message=f"milestone: update candidate pool {args.pool}",
+            target_paths=[path],
         )
         print(f"[ok] updated {path.relative_to(root)}")
         return 0
@@ -375,11 +451,66 @@ def main() -> int:
         print_guide(root, focus=args.focus)
         return 0
     if args.command == "set-runtime-pref":
-        payload = load_runtime_preferences(root)
-        _apply_runtime_pref(payload, args.section, args.key, parse_value(args.value))
-        write_runtime_preferences(root, payload)
-        print(f"[ok] updated {runtime_preferences_path(root).relative_to(root)}")
-        checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: update runtime pref {args.section}.{args.key}")
+        path = runtime_preferences_path(root)
+        with mutation_transaction(root, "set-runtime-pref", [path]):
+            payload = load_runtime_preferences(root)
+            _apply_runtime_pref(payload, args.section, args.key, parse_value(args.value))
+            write_runtime_preferences(root, payload)
+        print(f"[ok] updated {path.relative_to(root)}")
+        checkpoint = checkpoint_and_report(
+            root,
+            trigger="milestone",
+            message=f"milestone: update runtime pref {args.section}.{args.key}",
+            target_paths=[path],
+        )
+        return 0
+    if args.command == "set-diagnostics":
+        if bool(args.skill) != bool(args.skill_mode):
+            raise SystemExit("--skill and --skill-mode must be provided together")
+        if all(
+            value is None
+            for value in (
+                args.mode,
+                args.skill_mode,
+                args.token_budget_per_task,
+                args.max_issues_per_task,
+                args.dedup_window_seconds,
+                args.cooldown_seconds,
+            )
+        ):
+            raise SystemExit("set-diagnostics requires at least one policy change")
+        path = runtime_preferences_path(root)
+        with mutation_transaction(root, "set-diagnostics", [path]):
+            payload = load_runtime_preferences(root)
+            diagnostics = payload.get("diagnostics", {})
+            if not isinstance(diagnostics, dict):
+                diagnostics = {}
+            if args.mode is not None:
+                diagnostics["mode"] = args.mode
+            if args.skill_mode is not None:
+                overrides = diagnostics.get("per_skill", {})
+                if not isinstance(overrides, dict):
+                    overrides = {}
+                overrides[str(args.skill).strip().lower()] = args.skill_mode
+                diagnostics["per_skill"] = overrides
+            for argument, key in (
+                (args.token_budget_per_task, "token_budget_per_task"),
+                (args.max_issues_per_task, "max_issues_per_task"),
+                (args.dedup_window_seconds, "dedup_window_seconds"),
+                (args.cooldown_seconds, "cooldown_seconds"),
+            ):
+                if argument is not None:
+                    diagnostics[key] = argument
+            # write_runtime_preferences normalizes numeric bounds and forces
+            # local_only=true before bytes reach disk.
+            write_runtime_preferences(root, {"diagnostics": diagnostics})
+        checkpoint_and_report(
+            root,
+            trigger="milestone",
+            message="milestone: update local diagnostics policy",
+            target_paths=[path],
+        )
+        print("[ok] updated local diagnostics policy")
         return 0
     return 1
 

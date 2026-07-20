@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -54,7 +55,7 @@ def test_navigator_current_state_renders_program_states() -> None:
     assert "暂无 program state" not in text
 
 
-def test_navigator_current_state_includes_recall_digest(tmp_path: Path, monkeypatch) -> None:
+def test_navigator_current_state_includes_recall_digest_without_writing(tmp_path: Path, monkeypatch, capsys) -> None:
     navigate = _load_script("research-navigator", "navigate.py", "navigator_script_for_recall")
     root = _make_workspace(tmp_path)
     pref, _ = log_learning(
@@ -81,12 +82,49 @@ def test_navigator_current_state_includes_recall_digest(tmp_path: Path, monkeypa
     monkeypatch.setattr(sys, "argv", ["navigate.py", "--root", str(root), "current-state"])
 
     assert navigate.main() == 0
-    text = (root / "kb" / "user" / "current-state.md").read_text(encoding="utf-8")
+    text = capsys.readouterr().out
 
     assert "## Recall Digest" in text
     assert "Prefer compact Chinese status pages." in text
     assert "Do not skip confirmation gates." in text
     assert "Pending skill defects: 1" in text
+    assert not (root / "kb" / "user" / "current-state.md").exists()
+
+
+def test_navigator_refresh_transactions_exact_pages_before_checkpoint(tmp_path: Path, monkeypatch) -> None:
+    navigate = _load_script("research-navigator", "navigate.py", "navigator_script_for_refresh_transaction")
+    root = _make_workspace(tmp_path)
+    expected = [
+        root / "kb" / "user" / "current-state.md",
+        root / "kb" / "user" / "navigation.md",
+        root / "kb" / "user" / "reading-lists" / "current-reading.md",
+    ]
+    events: list[str] = []
+
+    @contextmanager
+    def transaction(project_root: Path, op_type: str, target_paths: list[Path]):
+        assert project_root == root
+        assert op_type == "refresh_user_navigation"
+        assert target_paths == expected
+        events.append("transaction_begin")
+        yield
+        events.append("transaction_commit")
+
+    def checkpoint(project_root: Path, **kwargs):
+        assert project_root == root
+        assert kwargs["target_paths"] == expected
+        assert events[-1] == "transaction_commit"
+        events.append("checkpoint")
+        return {"committed": False}
+
+    monkeypatch.setattr(navigate, "mutation_transaction", transaction)
+    monkeypatch.setattr(navigate, "checkpoint_and_report", checkpoint)
+    monkeypatch.setattr(sys, "argv", ["navigate.py", "--root", str(root), "refresh"])
+
+    assert navigate.main() == 0
+
+    assert events == ["transaction_begin", "transaction_commit", "checkpoint"]
+    assert all(path.is_file() for path in expected)
 
 
 def test_orchestrator_dashboard_prioritizes_blocking_evidence(tmp_path: Path) -> None:
@@ -125,11 +163,76 @@ def test_orchestrator_dashboard_prioritizes_blocking_evidence(tmp_path: Path) ->
     assert items[0]["program_id"] == program_id
     assert items[0]["blocking_evidence_count"] == 1
     assert "Resolve blocking evidence: Need baseline parity logs" in dashboard
-    assert "`p-next`: Resolve blocking evidence: Need baseline parity logs" in next_text
+    assert "研究计划「p-next」：Resolve blocking evidence: Need baseline parity logs" in next_text
     assert "--program-id p-next" in items[0]["recommended_command"]
     for rendered in (dashboard, next_text):
         for leaked_fragment in ("python3", ".py ", "--program-id", "${"):
             assert leaked_fragment not in rendered
+
+
+def test_orchestrator_blocker_wins_over_pending_confirmation_governance(tmp_path: Path) -> None:
+    orchestrate = _load_script(
+        "research-orchestrator",
+        "orchestrate.py",
+        "orchestrator_script_for_blocker_pending_priority",
+    )
+    root = _make_workspace(tmp_path)
+    program_id = "p-blocker-pending"
+    unit_id = "p-pending-123456"
+    orchestrate.ensure_program_files(root, program_id)
+    write_yaml_if_changed(
+        orchestrate.state_path(root, program_id),
+        {
+            "program_id": program_id,
+            "stage": "literature-review",
+            "goal": "Resolve blocker before review",
+            "active_unit_ids": [unit_id],
+            "counts": {},
+        },
+    )
+    write_yaml_if_changed(
+        record_path(root, "paper", unit_id),
+        {
+            "id": unit_id,
+            "kind": "paper",
+            "title": "Pending Paper",
+            "status": "screened",
+            "maturity": "lightweight",
+            "confirmation_status": "pending_user_confirmation",
+            "needs_human_confirmation": True,
+            "information_types": ["fact"],
+            "summary": "Pending summary",
+            "tags": [],
+            "topics": [],
+            "candidate_pools": [],
+            "source": {"original_uri": "", "file_hash": ""},
+            "payload": {"state": {"full_note_status": "pending_user_confirmation"}},
+        },
+    )
+    append_list_item(
+        orchestrate.evidence_requests_path(root, program_id),
+        f"{program_id}-evidence-requests",
+        "research-orchestrator",
+        {
+            "question": "Can the baseline be reproduced?",
+            "needed": "Baseline parity logs",
+            "priority": "high",
+            "blocking": True,
+        },
+        default_status="open",
+    )
+
+    item = orchestrate.program_dashboard_items(root)[0]
+    rendered = orchestrate.format_next([item])
+
+    assert item["pending_confirmation_count"] == 1
+    assert item["blocking_evidence_count"] == 1
+    assert item["next_action"] == "Resolve blocking evidence: Baseline parity logs"
+    assert item["step_type"] == "program-work"
+    assert item["action_kind"] == "program-work"
+    assert item["record_id"] == ""
+    assert "可以直接告诉 Agent 继续推进" in rendered
+    assert "告诉我你的决定" not in rendered
 
 
 def test_orchestrator_status_unknown_program_does_not_create_it(tmp_path: Path, monkeypatch) -> None:
@@ -151,6 +254,8 @@ def test_orchestrator_status_existing_program_still_works(tmp_path: Path, monkey
     orchestrate = _load_script("research-orchestrator", "orchestrate.py", "orchestrator_script_for_existing_status")
     root = _make_workspace(tmp_path)
     orchestrate.ensure_program_files(root, "p-existing")
+    write_yaml_if_changed(orchestrate.state_path(root, "p-existing"), {"program_id": "p-existing", "stage": "init"})
+    before = orchestrate.state_path(root, "p-existing").read_bytes()
     monkeypatch.setattr(
         sys,
         "argv",
@@ -159,6 +264,7 @@ def test_orchestrator_status_existing_program_still_works(tmp_path: Path, monkey
 
     assert orchestrate.main() == 0
     assert orchestrate.state_path(root, "p-existing").exists()
+    assert orchestrate.state_path(root, "p-existing").read_bytes() == before
 
 
 def test_orchestrator_next_program_filter_narrows_output(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -177,7 +283,7 @@ def test_orchestrator_next_program_filter_narrows_output(tmp_path: Path, monkeyp
 
     assert orchestrate.main() == 0
     output = capsys.readouterr().out
-    assert "`p-one`: Advance one" in output
+    assert "研究计划「p-one」：Advance one" in output
     assert "p-two" not in output
 
 
@@ -260,7 +366,7 @@ def test_safe_unit_step_routes_unfilled_paper_to_agent_before_user() -> None:
     assert step is not None
     assert step["kind"] == "agent-work"
     assert step["step_type"] == "agent-fill"
-    assert "agent fill" in step["reason"]
+    assert "Agent 补全分析" in step["reason"]
 
 
 def test_safe_unit_step_prepares_not_started_note_before_user_confirmation() -> None:
@@ -284,6 +390,30 @@ def test_safe_unit_step_prepares_not_started_note_before_user_confirmation() -> 
     assert step["kind"] == "paper"
     assert step["step_type"] == "generate-note"
     assert step["safe_execute"] is True
+
+
+def test_safe_unit_step_routes_source_ready_blog_but_not_completed_blog() -> None:
+    orchestrate = _load_script("research-orchestrator", "orchestrate.py", "orchestrator_script_for_blog_step")
+    source_ready = {
+        "id": "b-source-ready-123456",
+        "kind": "blog",
+        "title": "Source Ready Blog",
+        "status": "active",
+        "confirmation_status": "auto_confirmed",
+        "payload": {},
+    }
+
+    step = orchestrate.safe_unit_step(source_ready)
+
+    assert step is not None
+    assert step["kind"] == "blog"
+    assert step["step_type"] == "generate-note"
+    assert step["safe_execute"] is True
+    assert "有逐字证据支持的摘要" in step["reason"]
+    assert "grounded" not in step["reason"]
+
+    completed = {**source_ready, "status": "completed"}
+    assert orchestrate.safe_unit_step(completed) is None
 
 
 def test_program_dashboard_excludes_unfilled_shell_but_keeps_filled_confirmation(tmp_path: Path) -> None:
@@ -330,6 +460,8 @@ def test_program_dashboard_excludes_unfilled_shell_but_keeps_filled_confirmation
     assert items["program-unfilled"]["pending_confirmation_count"] == 0
     assert "pending confirmation" not in items["program-unfilled"]["reasons"]
     assert items["program-filled"]["pending_confirmation_count"] == 1
+    assert items["program-filled"]["step_type"] == "human-decision"
+    assert items["program-filled"]["action_kind"] == "human-gate"
     assert items["program-filled"]["next_action"] == "Review pending confirmation: p-filled-123456"
 
 
@@ -349,6 +481,58 @@ def test_orchestrator_empty_kb_outputs_onboarding_command() -> None:
         assert "intake add" not in rendered
         for leaked_fragment in ("python3", ".py ", "--kind", "${"):
             assert leaked_fragment not in rendered
+
+
+def test_orchestrator_next_distinguishes_existing_records_without_pending_work() -> None:
+    orchestrate = _load_script(
+        "research-orchestrator",
+        "orchestrate.py",
+        "orchestrator_script_for_existing_records_no_work",
+    )
+
+    text = orchestrate.format_next([], has_records=True)
+
+    assert "知识库已有资料" in text
+    assert "KB 为空" not in text
+    assert "kb next" not in text
+
+
+def test_orchestrator_blog_only_source_ready_is_a_real_next_item(tmp_path: Path) -> None:
+    orchestrate = _load_script(
+        "research-orchestrator",
+        "orchestrate.py",
+        "orchestrator_script_for_blog_only_next",
+    )
+    root = _make_workspace(tmp_path)
+    write_yaml_if_changed(
+        record_path(root, "blog", "b-blog-only-123456"),
+        {
+            "id": "b-blog-only-123456",
+            "kind": "blog",
+            "title": "Blog Only",
+            "status": "active",
+            "confirmation_status": "auto_confirmed",
+            "information_types": ["fact"],
+            "summary": "",
+            "tags": [],
+            "topics": [],
+            "candidate_pools": [],
+            "source": {"original_uri": "https://example.com/blog", "file_hash": ""},
+            "payload": {},
+        },
+    )
+
+    items = orchestrate.program_dashboard_items(root)
+    text = orchestrate.format_next(items, has_records=True)
+
+    assert len(items) == 1
+    assert items[0]["record_id"] == "b-blog-only-123456"
+    assert items[0]["step_type"] == "generate-note"
+    assert "资料「Blog Only」（b-blog-only-123456）" in text
+    assert "有逐字证据支持的摘要" in text
+    assert "KB 为空" not in text
+    assert "loose:" not in text
+    assert "kb next" not in text
 
 
 def test_orchestrator_dashboard_detects_loose_unscreened_unit(tmp_path: Path) -> None:
@@ -417,7 +601,7 @@ def test_orchestrator_auto_dry_run_plans_exact_command_for_loose_unit(tmp_path: 
     assert "safe refresh" in text
 
 
-def test_orchestrator_auto_execute_stops_at_pending_confirmation(tmp_path: Path, capsys) -> None:
+def test_orchestrator_auto_stops_before_hollow_pending_confirmation(tmp_path: Path, capsys) -> None:
     orchestrate = _load_script("research-orchestrator", "orchestrate.py", "orchestrator_script_for_auto_gate")
     root = _make_workspace(tmp_path)
     write_yaml_if_changed(
@@ -451,9 +635,9 @@ def test_orchestrator_auto_execute_stops_at_pending_confirmation(tmp_path: Path,
     assert plan["safe_execute"] is False
     assert "stop for human decision" in output
     assert "not executing" in output
-    assert ".agents/skills/paper-analyst/scripts/paper.py confirm --paper-id p-gated-123456" in plan["recommended_command"]
-    assert "--confirmed-by ${RESEARCH_CONFIRMED_BY:?set-human-identity}" in plan["recommended_command"]
-    assert "--evidence ${RESEARCH_CONFIRM_EVIDENCE:?set-human-evidence}" in plan["recommended_command"]
+    assert plan["step_type"] == "agent-fill"
+    assert plan["kind"] == "agent-work"
+    assert "recommended_command" not in plan
     for leaked_fragment in ("python3", ".py ", "--paper-id", "${"):
         assert leaked_fragment not in output
 
@@ -553,12 +737,8 @@ def test_orchestrator_auto_execute_passes_root_to_child_under_symlinked_agents(t
     assert not (symlink_target / "kb" / "child-root.txt").exists()
 
 
-def test_is_user_confirmable_keeps_not_started_screening_paper() -> None:
-    """A4 refinement: exclude only awaiting_agent_fill note shells, NOT not_started.
-
-    not_started is the schema default for any paper without a full note; a screening-
-    phase paper with a pending worth-reading verdict must stay user-confirmable so it
-    is not silently dropped from the program dashboard's pending_units."""
+def test_is_user_confirmable_rejects_unverified_not_started_screening_paper() -> None:
+    """R1: a screening judgement without canonical claims/verification is hollow."""
     orchestrate = _load_script("research-orchestrator", "orchestrate.py", "orchestrator_script_for_confirmable_not_started")
     not_started_screening = {
         "id": "p-scr-not-started-1",
@@ -575,5 +755,5 @@ def test_is_user_confirmable_keeps_not_started_screening_paper() -> None:
         "confirmation_status": "pending_user_confirmation",
         "payload": {"state": {"full_note_status": "awaiting_agent_fill"}},
     }
-    assert orchestrate.is_user_confirmable(not_started_screening) is True
+    assert orchestrate.is_user_confirmable(not_started_screening) is False
     assert orchestrate.is_user_confirmable(unfilled_note) is False

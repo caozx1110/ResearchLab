@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import sys
+from contextvars import ContextVar
 from pathlib import Path
 
 SCRIPT_PATH = Path(__file__).resolve()
@@ -26,18 +27,25 @@ from research.core import (
     append_history,
     apply_record_governance,
     build_index,
+    build_unit_id,
+    candidate_pools_path,
+    command_mutation,
     default_record,
     ensure_workspace,
     iter_records,
+    kb_root,
     locate_record,
     checkpoint_and_report,
     project_root,
+    record_path,
     rel,
     require_confirmation_provenance,
+    require_user_authorization,
     synthesis_root,
+    topic_taxonomy_path,
     write_record,
 )
-from research.evidence import validate_claims, verify_claim_evidence
+from research.evidence import attach_claims, build_verification_receipt, validate_claims, verify_claim_evidence
 
 STRATEGIES = [
     ("narrow-scope", "把问题边界收窄到一个最小可证伪切口。"),
@@ -68,10 +76,72 @@ EVIDENCE_REF_FORMAT = {
     "summary": "optional one-line explanation of relevance",
 }
 
+_PENDING_CHECKPOINT: ContextVar[tuple[Path, str, str, list[Path]] | None] = ContextVar(
+    "idea_pending_checkpoint", default=None
+)
+_ACTIVE_MUTATION: ContextVar[bool] = ContextVar("idea_active_mutation", default=False)
+
+
+def _index_checkpoint_paths(root: Path) -> list[Path]:
+    return [
+        kb_root(root) / "index.yaml",
+        kb_root(root) / "index.md",
+        topic_taxonomy_path(root),
+        candidate_pools_path(root),
+    ]
+
+
+def _queue_checkpoint(root: Path, *, trigger: str, message: str, target_paths: list[Path]) -> dict:
+    if _ACTIVE_MUTATION.get():
+        _PENDING_CHECKPOINT.set((root, trigger, message, target_paths))
+        return {"committed": False, "status": "pending-transaction-commit"}
+    return checkpoint_and_report(root, trigger=trigger, message=message, target_paths=target_paths)
+
+
+def _idea_command_targets(args, root: Path) -> list[Path]:
+    targets = list(_index_checkpoint_paths(root))
+    if args.command == "capture":
+        idea_id = build_unit_id("idea", args.title, args.source)
+        return [record_path(root, "idea", idea_id), *targets]
+    if args.command == "generate":
+        bundle_id = args.bundle_id or f"idea-bundle-{slugify(args.title, max_words=6) or 'ideas'}-{hashlib.sha1(args.title.encode('utf-8')).hexdigest()[:6]}"
+        idea_paths = [
+            record_path(root, "idea", build_unit_id("idea", variant["title"], args.source))
+            for variant in generated_variants(args.title, args.problem, args.hypothesis, max(1, args.count))
+        ]
+        return [bundle_index_path(root, bundle_id), *idea_paths, *targets]
+    if args.command in {"review-assist", "select-best"}:
+        idea_ids = list(args.idea_id)
+        bundle_id = args.bundle_id
+        if bundle_id:
+            payload = load_yaml(bundle_index_path(root, bundle_id), default={})
+            idea_ids = list(payload.get("idea_ids", [])) if isinstance(payload, dict) else []
+        elif args.pool:
+            normalized_pool = slugify(args.pool, max_words=12)
+            idea_ids = [
+                record["id"] for record in iter_records(root, kind="idea")
+                if normalized_pool in record.get("candidate_pools", [])
+            ]
+            bundle_id = normalized_pool or "idea-pool"
+        else:
+            bundle_id = f"idea-review-{hashlib.sha1(' '.join(idea_ids).encode('utf-8')).hexdigest()[:8]}"
+        bundle = bundle_root(root, bundle_id)
+        extra = [bundle / "review-assist.md"] if args.command == "review-assist" else [bundle / "selection.yaml"]
+        return [bundle_index_path(root, bundle_id), *extra, *[record_path(root, "idea", idea_id) for idea_id in idea_ids], *targets]
+    record, path = locate_record(root, args.idea_id, kind="idea")
+    unit = path.parent
+    if args.command in {"analyze", "review"}:
+        return [path, unit / f"{args.command}-fill.yaml", unit / f"{args.command}.yaml", unit / "idea-card.md", *targets]
+    if args.command in {"discuss", "spar"}:
+        return [path, unit / "discussion-fill.yaml", *targets]
+    return [path, *targets]
+
 
 def add_confirmation_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--confirmed-by", default="")
     parser.add_argument("--evidence", action="append", required=True)
+    parser.add_argument("--user-authorization", default="")
+    parser.add_argument("--authorization-source", default="")
 
 
 def descriptive_counts(record: dict) -> dict:
@@ -257,6 +327,8 @@ def mark_idea_selected(
     *,
     confirmed_by: str,
     evidence: list[str],
+    user_authorization: str,
+    authorization_source: str,
     method: str,
     selected_rank: str = "",
     selected_reason: str = "",
@@ -265,6 +337,10 @@ def mark_idea_selected(
         confirmed_by=confirmed_by,
         evidence=evidence,
         project_root=root,
+    )
+    authorization, source = require_user_authorization(
+        user_authorization=user_authorization,
+        authorization_source=authorization_source,
     )
     selection = record.setdefault("payload", {}).setdefault("selection", {})
     record["status"] = "selected"
@@ -278,6 +354,8 @@ def mark_idea_selected(
     selection["selected_at"] = utc_now_iso()
     selection["selection_evidence"] = evidence_items
     selection["selection_method"] = method
+    selection["user_authorization"] = authorization
+    selection["authorization_source"] = source
     return record
 
 
@@ -382,6 +460,19 @@ def _verify_cross_unit_claims(root: Path, claims: object) -> list[str]:
     return violations
 
 
+def _trusted_claim_source_roots(root: Path, claims: list[dict]) -> dict[str, Path]:
+    source_roots: dict[str, Path] = {}
+    for claim in claims:
+        for evidence_ref in claim.get("evidence_refs") or []:
+            if not isinstance(evidence_ref, dict):
+                continue
+            source_unit_id = str(evidence_ref.get("source_unit_id") or "").strip()
+            if source_unit_id and source_unit_id not in source_roots:
+                _source_record, source_path = locate_record(root, source_unit_id, fuzzy=False)
+                source_roots[source_unit_id] = source_path.parent
+    return source_roots
+
+
 def verify_discussion_fill(root: Path, fill: object, idea_id: str) -> tuple[list[str], list[dict]]:
     if not isinstance(fill, dict):
         return ["discussion fill must be a mapping"], []
@@ -479,7 +570,10 @@ def run_analysis_phase(args, root: Path, record: dict, unit_root: Path, *, mode:
         )
         write_record(root, record)
         print(f"[ok] prepared evidence-first {mode} scaffold")
-        checkpoint_and_report(root, trigger="milestone", message=f"milestone: prepare idea {mode} {record['id']}")
+        _queue_checkpoint(
+            root, trigger="milestone", message=f"milestone: prepare idea {mode} {record['id']}",
+            target_paths=[unit_root / "record.yaml", fill_path],
+        )
         return 0
 
     candidate_path = Path(args.input) if args.input else fill_path
@@ -496,6 +590,12 @@ def run_analysis_phase(args, root: Path, record: dict, unit_root: Path, *, mode:
         raise SystemExit(1)
 
     persist_analysis(record, fill, claims, mode=mode)
+    attach_claims(record.setdefault("payload", {}), claims)
+    build_verification_receipt(
+        record,
+        unit_root,
+        source_roots=_trusted_claim_source_roots(root, claims),
+    )
     record["status"] = "pending"
     record["confirmation_status"] = "pending_user_confirmation"
     record["needs_human_confirmation"] = True
@@ -531,7 +631,10 @@ def run_analysis_phase(args, root: Path, record: dict, unit_root: Path, *, mode:
     write_record(root, record)
     build_index(root)
     print(f"[ok] verified evidence and persisted {mode} judgements")
-    checkpoint_and_report(root, trigger="milestone", message=f"milestone: verify idea {mode} {record['id']}")
+    _queue_checkpoint(
+        root, trigger="milestone", message=f"milestone: verify idea {mode} {record['id']}",
+        target_paths=[unit_root / "record.yaml", result_path, *([unit_root / "idea-card.md"] if mode == "review" else []), *_index_checkpoint_paths(root)],
+    )
     return 0
 
 
@@ -599,12 +702,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main() -> int:
-    args = build_parser().parse_args()
-    root = project_root(PROJECT_ROOT, explicit_root=args.root)
-    print_resolved_project_roots(root)
-    ensure_workspace(root)
-
+def _dispatch(args, root: Path) -> int:
     if args.command == "capture":
         record = default_record("idea", title=args.title, maturity="lightweight", source={"original_uri": args.source})
         record["status"] = "draft"
@@ -625,7 +723,10 @@ def main() -> int:
         path = write_record(root, record)
         build_index(root)
         print_created_idea(root, record, path)
-        checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: capture idea {record['id']}")
+        checkpoint = _queue_checkpoint(
+            root, trigger="milestone", message=f"milestone: capture idea {record['id']}",
+            target_paths=[path, *_index_checkpoint_paths(root)],
+        )
         return 0
 
     if args.command == "generate":
@@ -659,7 +760,10 @@ def main() -> int:
         index_path = update_bundle(root, bundle_id, idea_ids=created)
         build_index(root)
         print(f"[ok] wrote {index_path.relative_to(root)}")
-        checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: generate idea bundle {bundle_id}")
+        checkpoint = _queue_checkpoint(
+            root, trigger="milestone", message=f"milestone: generate idea bundle {bundle_id}",
+            target_paths=[index_path, *[record_path(root, "idea", idea_id) for idea_id in created], *_index_checkpoint_paths(root)],
+        )
         return 0
 
     if args.command in {"review-assist", "select-best"}:
@@ -671,7 +775,10 @@ def main() -> int:
             update_bundle(root, bundle_id, idea_ids=[record["id"] for record in records])
             build_index(root)
             print(f"[ok] wrote {assist_path.relative_to(root)}")
-            checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: review assist bundle {bundle_id}")
+            checkpoint = _queue_checkpoint(
+                root, trigger="milestone", message=f"milestone: review assist bundle {bundle_id}",
+                target_paths=[assist_path, bundle_index_path(root, bundle_id), *_index_checkpoint_paths(root)],
+            )
             return 0
         scored_records = []
         for record in records:
@@ -694,6 +801,8 @@ def main() -> int:
                     record,
                     confirmed_by=args.confirmed_by,
                     evidence=args.evidence,
+                    user_authorization=args.user_authorization,
+                    authorization_source=args.authorization_source,
                     method="idea.py select-best",
                     selected_rank="1",
                     selected_reason="Highest reviewed total score in explicit select-best command.",
@@ -702,7 +811,7 @@ def main() -> int:
                 record,
                 action="idea-selected" if record["id"] == selected["id"] else "idea-reviewed-for-selection",
                 summary="Explicit multi-candidate selection executed.",
-                information_types=["fact"],
+                information_types=["user_opinion", "evaluation"] if record["id"] == selected["id"] else ["evaluation"],
             )
             write_record(root, record)
         selection_path = bundle_root(root, bundle_id) / "selection.yaml"
@@ -719,7 +828,10 @@ def main() -> int:
         build_index(root)
         print(f"[ok] selected {selected['id']}")
         print(f"[ok] wrote {selection_path.relative_to(root)}")
-        checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: select best idea in {bundle_id}")
+        checkpoint = _queue_checkpoint(
+            root, trigger="milestone", message=f"milestone: select best idea in {bundle_id}",
+            target_paths=[selection_path, bundle_index_path(root, bundle_id), *[record_path(root, "idea", record["id"]) for _, record in scored_records], *_index_checkpoint_paths(root)],
+        )
         return 0
 
     record, path = locate_record(root, args.idea_id, kind="idea")
@@ -741,7 +853,10 @@ def main() -> int:
             )
             write_record(root, record)
             print("[ok] prepared an empty evidence-first sparring conclusion")
-            checkpoint_and_report(root, trigger="milestone", message=f"milestone: prepare idea discussion {record['id']}")
+            _queue_checkpoint(
+                root, trigger="milestone", message=f"milestone: prepare idea discussion {record['id']}",
+                target_paths=[unit_root / "record.yaml", scaffold_path],
+            )
             return 0
 
         fill_path = Path(args.input) if args.input else scaffold_path
@@ -770,7 +885,10 @@ def main() -> int:
         write_record(root, record)
         build_index(root)
         print(f"[ok] verified + persisted discussion conclusion {conclusion['id']}")
-        checkpoint_and_report(root, trigger="milestone", message=f"milestone: verify idea discussion {record['id']}")
+        _queue_checkpoint(
+            root, trigger="milestone", message=f"milestone: verify idea discussion {record['id']}",
+            target_paths=[unit_root / "record.yaml", *_index_checkpoint_paths(root)],
+        )
         return 0
 
     if args.command == "analyze":
@@ -785,14 +903,24 @@ def main() -> int:
             record,
             confirmed_by=args.confirmed_by,
             evidence=args.evidence,
+            user_authorization=args.user_authorization,
+            authorization_source=args.authorization_source,
             method="idea.py select",
             selected_reason="Idea explicitly selected for method design.",
         )
-        append_history(record, action="idea-selected", summary="Idea explicitly selected for method design.", information_types=["fact"])
+        append_history(
+            record,
+            action="idea-selected",
+            summary="Idea explicitly selected for method design.",
+            information_types=["user_opinion", "evaluation"],
+        )
         write_record(root, record)
         build_index(root)
         print(f"[ok] selected {record['id']}")
-        checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: select idea {record['id']}")
+        checkpoint = _queue_checkpoint(
+            root, trigger="milestone", message=f"milestone: select idea {record['id']}",
+            target_paths=[unit_root / "record.yaml", *_index_checkpoint_paths(root)],
+        )
         return 0
 
     if args.command == "archive":
@@ -801,9 +929,34 @@ def main() -> int:
         write_record(root, record)
         build_index(root)
         print(f"[ok] archived {record['id']}")
-        checkpoint = checkpoint_and_report(root, trigger="milestone", message=f"milestone: archive idea {record['id']}")
+        checkpoint = _queue_checkpoint(
+            root, trigger="milestone", message=f"milestone: archive idea {record['id']}",
+            target_paths=[unit_root / "record.yaml", *_index_checkpoint_paths(root)],
+        )
         return 0
     return 1
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    root = project_root(PROJECT_ROOT, explicit_root=args.root)
+    print_resolved_project_roots(root)
+    ensure_workspace(root)
+    targets = _idea_command_targets(args, root)
+    active_token = _ACTIVE_MUTATION.set(True)
+    checkpoint_token = _PENDING_CHECKPOINT.set(None)
+    try:
+        with command_mutation(root, f"idea-workbench:{args.command}", targets):
+            result = _dispatch(args, root)
+        pending = _PENDING_CHECKPOINT.get()
+    finally:
+        _PENDING_CHECKPOINT.reset(checkpoint_token)
+        _ACTIVE_MUTATION.reset(active_token)
+    if pending is not None:
+        checkpoint_and_report(
+            pending[0], trigger=pending[1], message=pending[2], target_paths=pending[3]
+        )
+    return result
 
 
 if __name__ == "__main__":

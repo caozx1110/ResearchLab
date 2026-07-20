@@ -153,6 +153,83 @@ def test_yaml_without_chunks_falls_back_to_string_leaves(tmp_path: Path) -> None
     assert verify_claim_evidence(claim, tmp_path) == []
 
 
+@pytest.mark.parametrize(
+    ("line", "quote"),
+    [
+        (1, "evidence_required: true"),
+        (2, "threshold: 0.75"),
+        (3, 'mode: "strict"'),
+    ],
+)
+def test_yaml_raw_key_scalar_lines_are_searchable(tmp_path: Path, line: int, quote: str) -> None:
+    (tmp_path / "config.yaml").write_text(
+        "evidence_required: true\n"
+        "threshold: 0.75\n"
+        'mode: "strict"\n',
+        encoding="utf-8",
+    )
+    claim = {
+        "id": "c-yaml-raw",
+        "claim_type": "fact",
+        "evidence_refs": [
+            {"artifact": "config.yaml", "locator": f"line={line}", "quote": quote},
+        ],
+    }
+
+    assert verify_claim_evidence(claim, tmp_path) == []
+
+
+def test_yaml_fabricated_key_value_line_is_rejected(tmp_path: Path) -> None:
+    (tmp_path / "config.yaml").write_text(
+        "evidence_required: true\nthreshold: 0.75\n",
+        encoding="utf-8",
+    )
+    claim = {
+        "id": "c-yaml-fabricated",
+        "claim_type": "fact",
+        "evidence_refs": [
+            {
+                "artifact": "config.yaml",
+                "locator": "line=1",
+                "quote": "evidence_required: false",
+            },
+        ],
+    }
+
+    violations = verify_claim_evidence(claim, tmp_path)
+
+    assert len(violations) == 1
+    assert "not verbatim" in violations[0]
+
+
+def test_yaml_parse_cache_keeps_structured_chunk_and_page_narrowing(tmp_path: Path) -> None:
+    # The raw YAML contains the two-character escape ``\\n``. Only the parsed
+    # chunk view contains an actual line break, so this locks in the structured
+    # search view while the raw YAML view is added for config-key evidence.
+    (tmp_path / "parse-cache.yaml").write_text(
+        "unit_id: p-structured\n"
+        "chunks:\n"
+        "- label: structured:page-4\n"
+        '  text: "First chunk line\\nSecond chunk line"\n',
+        encoding="utf-8",
+    )
+    ref = {
+        "source_unit_id": "p-structured",
+        "artifact": "parse-cache.yaml",
+        "locator": "page=4",
+        "quote": "First chunk line Second chunk line",
+    }
+    claim = {"id": "c-structured", "claim_type": "fact", "evidence_refs": [ref]}
+
+    assert verify_claim_evidence(claim, tmp_path) == []
+
+    ref["locator"] = "page=3"
+    violations = verify_claim_evidence(claim, tmp_path)
+    assert len(violations) == 1
+    assert "locator page=3 is wrong" in violations[0]
+    assert "page(s) [4]" in violations[0]
+
+
 def test_missing_artifact_file_is_violation(tmp_path: Path) -> None:
     claim = {"id": "c1", "claim_type": "fact",
              "evidence_refs": [_ref(quote="anything")]}
@@ -225,7 +302,7 @@ def test_validate_claims_accepts_well_formed() -> None:
 
 
 def test_judgement_class_empty_evidence_is_rejected() -> None:
-    for ct in ("inference", "evaluation"):
+    for ct in ("inference", "evaluation", "user_opinion"):
         violations = validate_claims([_good_claim(claim_type=ct, evidence_refs=[])])
         assert any("empty evidence_refs" in v for v in violations), ct
 
@@ -235,9 +312,28 @@ def test_fact_class_empty_evidence_is_allowed() -> None:
     assert validate_claims([claim]) == []
 
 
-def test_unverified_and_user_opinion_empty_evidence_allowed() -> None:
-    for ct in ("unverified", "user_opinion"):
-        assert validate_claims([_good_claim(claim_type=ct, evidence_refs=[])]) == []
+def test_unverified_empty_evidence_is_structurally_allowed() -> None:
+    assert validate_claims([_good_claim(claim_type="unverified", evidence_refs=[])]) == []
+
+
+@pytest.mark.parametrize("field", ["source_unit_id", "artifact", "locator", "quote"])
+@pytest.mark.parametrize("mode", ["missing", "empty"])
+def test_validate_claims_requires_every_evidence_ref_field(field: str, mode: str) -> None:
+    ref = _ref(quote="grounded quote")
+    if mode == "missing":
+        ref.pop(field)
+    else:
+        ref[field] = "   "
+    violations = validate_claims([_good_claim(evidence_refs=[ref])])
+
+    assert any(field in violation for violation in violations)
+
+
+def test_validate_claims_rejects_placeholder_empty_evidence_ref() -> None:
+    violations = validate_claims([_good_claim(evidence_refs=[{}])])
+
+    for field in ("source_unit_id", "artifact", "locator", "quote"):
+        assert any(f"missing required field '{field}'" in violation for violation in violations)
 
 
 def test_validate_claims_flags_missing_and_bad_fields() -> None:

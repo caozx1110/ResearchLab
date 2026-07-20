@@ -212,10 +212,6 @@ path_on_path() {
   return 1
 }
 
-quote_path() {
-  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
-}
-
 same_dir() {
   [ "$(abs_dir "$1")" = "$(abs_dir "$2")" ]
 }
@@ -241,6 +237,7 @@ INSTALL_INCOMPLETE=0
 KB_SHORTCUT_CREATED=0
 KB_SHORTCUT_AVAILABLE=0
 UPDATE_NO_CHANGES=0
+DRY_RUN_CHANGE_COUNT=0
 
 REPO_ROOT=$(script_dir)
 for arg in "$@"; do
@@ -373,7 +370,7 @@ action_label() {
   case "$ACTION" in
     install) printf '安装' ;;
     update) printf '更新' ;;
-    reinstall) printf '重装' ;;
+    reinstall) printf '重装或修复' ;;
     uninstall) printf '卸载' ;;
   esac
 }
@@ -396,13 +393,75 @@ mode_label() {
   fi
 }
 
+manifest_is_ours() {
+  [ -f "$1" ] || return 1
+  python3 - "$1" <<'PY' >/dev/null 2>&1
+import json
+import sys
+from pathlib import Path
+
+try:
+    data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except Exception:
+    raise SystemExit(1)
+if (
+    data.get("schema") == 1
+    and data.get("install_name") == "workspace-oss"
+    and data.get("install_mode") == "copy-project"
+    and isinstance(data.get("files"), dict)
+):
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+manifest_field() {
+  local manifest=$1 field=$2
+  python3 - "$manifest" "$field" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+value = data.get(sys.argv[2], "")
+if value is None:
+    value = ""
+print(value)
+PY
+}
+
+manifest_agent_enabled() {
+  local manifest=$1 agent=$2
+  python3 - "$manifest" "$agent" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+agent = sys.argv[2]
+agents = data.get("agents")
+if not isinstance(agents, dict):
+    enabled = agent == "claude"
+else:
+    enabled = bool(agents.get(agent, False))
+print("1" if enabled else "0")
+PY
+}
+
+restore_manifest_agent_selection() {
+  local manifest=$1
+  CONFIG_CLAUDE=$(manifest_agent_enabled "$manifest" claude 2>/dev/null || printf '1')
+  CONFIG_CODEX=$(manifest_agent_enabled "$manifest" codex 2>/dev/null || printf '0')
+}
+
 prompt_action() {
   local choice
   is_interactive_input || return 0
   wizard_step "你想做什么？"
-  menu_option 1 "安装或重新配置" "（推荐）"
-  menu_option 2 "更新外部工作区中的 skills"
-  menu_option 3 "卸载 skills 接入" "（保留研究资料）"
+  menu_option 1 "首次安装" "（推荐）"
+  menu_option 2 "更新已安装的外部工作区"
+  menu_option 3 "重装或修复已安装的外部工作区"
+  menu_option 4 "卸载 skills 接入" "（保留研究资料）"
   while true; do
     ask "请选择 [1]："
     read -r choice || choice=""
@@ -417,12 +476,17 @@ prompt_action() {
         ACTION_FROM_SUBCOMMAND=1
         return 0
         ;;
-      3|uninstall)
+      3|reinstall)
+        ACTION=reinstall
+        ACTION_FROM_SUBCOMMAND=1
+        return 0
+        ;;
+      4|uninstall)
         ACTION=uninstall
         return 0
         ;;
       *)
-        note "请输入 1、2 或 3。"
+        note "请输入 1、2、3 或 4。"
         ;;
     esac
   done
@@ -547,6 +611,51 @@ prompt_project_dir() {
   fi
 }
 
+prompt_existing_copy_install() {
+  local choice project_root manifest
+  [ "$ACTION" = "install" ] || return 0
+  [ "$SCOPE" = "project" ] || return 0
+  [ -n "$PROJECT_DIR" ] || return 0
+  is_interactive_input || return 0
+
+  project_root=$(abs_dir "$PROJECT_DIR")
+  same_dir "$project_root" "$REPO_ROOT" && return 0
+  [ -d "$project_root/.agents" ] && [ ! -L "$project_root/.agents" ] || return 0
+  manifest="$project_root/.agents/.install-manifest.json"
+  manifest_is_ours "$manifest" || return 0
+
+  wizard_step "这个工作区已经安装过"
+  info "请选择如何继续："
+  menu_option 1 "更新" "（推荐，只同步版本变化）"
+  menu_option 2 "重装或修复" "（重新铺设受管文件）"
+  menu_option 3 "取消"
+  while true; do
+    ask "请选择 [1]："
+    read -r choice || choice=""
+    choice=${choice:-1}
+    case "$choice" in
+      1|update)
+        ACTION=update
+        ACTION_FROM_SUBCOMMAND=1
+        break
+        ;;
+      2|reinstall)
+        ACTION=reinstall
+        ACTION_FROM_SUBCOMMAND=1
+        break
+        ;;
+      3|cancel)
+        note "已取消，没有写入任何文件。"
+        exit 0
+        ;;
+      *)
+        note "请输入 1、2 或 3。"
+        ;;
+    esac
+  done
+  restore_manifest_agent_selection "$manifest"
+}
+
 prompt_kb_on_path() {
   local choice
   if ! is_interactive_input; then
@@ -567,6 +676,7 @@ prompt_kb_on_path() {
         ;;
       2|y|Y|yes|YES)
         KB_ON_PATH=1
+        info "如果安装成功，终端中先运行 kb help，再运行 kb init。"
         return 0
         ;;
       *)
@@ -614,6 +724,8 @@ if [ "$SCOPE" = "project" ] && [ -z "$PROJECT_DIR" ] && [ "$PROJECT_FLAG_SET" -e
   prompt_project_dir
 fi
 
+prompt_existing_copy_install
+
 if [ "$ACTION" = "install" ] && [ "$KB_ON_PATH_FLAG_SET" -eq 0 ] && [ "$WIZARD_MODE" -eq 1 ]; then
   prompt_kb_on_path
 fi
@@ -652,6 +764,9 @@ fi
 if [ "$ACTION" = "update" ] || [ "$ACTION" = "reinstall" ]; then
   [ "$SCOPE" = "project" ] || die "update 只适用于外部工作区；系统级配置请重新运行 install"
   [ "$COPY_PROJECT" -eq 1 ] || die "当前就是源码仓库，请用 git pull 更新"
+  if manifest_is_ours "$MANIFEST_PATH"; then
+    restore_manifest_agent_selection "$MANIFEST_PATH"
+  fi
 fi
 
 if [ "$ACTION" = "uninstall" ] && [ "$ACTION_FROM_SUBCOMMAND" -eq 1 ]; then
@@ -668,9 +783,7 @@ print_plan() {
     section "请确认"
   fi
   bullet "操作：$(action_label)"
-  if [ "$ACTION" = "install" ] || [ "$ACTION" = "uninstall" ]; then
-    bullet "AI 工具：$(agent_label)"
-  fi
+  bullet "AI 工具：$(agent_label)"
   bullet "使用范围：$(scope_label)"
   if [ "$SCOPE" = "project" ]; then
     bullet "工作区：$WORKSPACE_ROOT"
@@ -749,8 +862,9 @@ print_next_steps() {
 print_done() {
   if [ "$DRY_RUN" -eq 1 ]; then
     section "预览完成"
+    bullet "预计文件变更：$DRY_RUN_CHANGE_COUNT 项（详细路径已折叠）"
     ok "没有写入任何文件。"
-    info "以上是计划内容；确认无误后再执行正式安装。"
+    info "以上是计划内容；确认无误后再执行正式操作。"
     return 0
   fi
 
@@ -767,10 +881,17 @@ print_done() {
       else
         bullet "使用范围：当前用户的所有工作区"
       fi
-      if [ "$KB_SHORTCUT_AVAILABLE" -eq 1 ]; then
-        ok "终端可直接使用 kb。"
-      elif [ "$KB_SHORTCUT_CREATED" -eq 1 ]; then
-        note "已创建 kb 快捷入口，但它所在的目录还不在 PATH 中。"
+      if [ "$INSTALL_INCOMPLETE" -eq 0 ]; then
+        if [ "$KB_SHORTCUT_AVAILABLE" -eq 1 ]; then
+          ok "终端可直接运行："
+          printf '  %bkb help%b\n' "$C_BOLD$C_CYAN" "$C_RESET"
+          printf '  %bkb init%b\n' "$C_BOLD$C_CYAN" "$C_RESET"
+        elif [ "$KB_SHORTCUT_CREATED" -eq 1 ]; then
+          note "已创建 kb 快捷入口，但它所在的目录还不在 PATH 中。"
+          info "请把上方提示的目录加入 PATH，重新打开终端后运行："
+          printf '  %bkb help%b\n' "$C_BOLD$C_CYAN" "$C_RESET"
+          info "安装器不会自动修改 shell 配置。"
+        fi
       fi
       if [ "$INSTALL_INCOMPLETE" -eq 1 ]; then
         section "需要处理"
@@ -823,6 +944,14 @@ source_commit() {
   git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || printf ''
 }
 
+source_origin() {
+  git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || printf 'local'
+}
+
+source_branch() {
+  git -C "$REPO_ROOT" symbolic-ref --quiet --short HEAD 2>/dev/null || printf ''
+}
+
 file_sha256() {
   if is_command shasum; then
     shasum -a 256 "$1" | awk '{ print $1 }'
@@ -842,61 +971,6 @@ with path.open("rb") as handle:
 print(digest.hexdigest())
 PY
   fi
-}
-
-manifest_is_ours() {
-  [ -f "$1" ] || return 1
-  python3 - "$1" <<'PY' >/dev/null 2>&1
-import json
-import sys
-from pathlib import Path
-
-try:
-    data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-except Exception:
-    raise SystemExit(1)
-if (
-    data.get("schema") == 1
-    and data.get("install_name") == "workspace-oss"
-    and data.get("install_mode") == "copy-project"
-    and isinstance(data.get("files"), dict)
-):
-    raise SystemExit(0)
-raise SystemExit(1)
-PY
-}
-
-manifest_field() {
-  local manifest=$1 field=$2
-  python3 - "$manifest" "$field" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-value = data.get(sys.argv[2], "")
-if value is None:
-    value = ""
-print(value)
-PY
-}
-
-manifest_agent_enabled() {
-  local manifest=$1 agent=$2
-  python3 - "$manifest" "$agent" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-agent = sys.argv[2]
-agents = data.get("agents")
-if not isinstance(agents, dict):
-    enabled = agent == "claude"
-else:
-    enabled = bool(agents.get(agent, False))
-print("1" if enabled else "0")
-PY
 }
 
 guard_agents_md_for_copy_install() {
@@ -935,11 +1009,25 @@ guard_copy_install_target() {
 }
 
 ws_sync() {
-  local action=$1 commit agent_csv output status change_count args=()
+  local action=$1 commit origin branch agent_csv output status change_count args=()
   shift || true
   commit=$(source_commit)
-  args=("$action" "--repo" "$REPO_ROOT" "--dir" "$WORKSPACE_ROOT" "--source-commit" "$commit")
+  origin=$(source_origin)
+  branch=$(source_branch)
+  args=(
+    "$action"
+    "--repo" "$REPO_ROOT"
+    "--dir" "$WORKSPACE_ROOT"
+    "--source-commit" "$commit"
+    "--source-origin" "$origin"
+    "--source-checkout" "$REPO_ROOT"
+    "--source-branch" "$branch"
+  )
+  if [ "$origin" != "local" ] && [ -z "$branch" ]; then
+    note "当前源码处于 detached 状态；本次安装绑定当前 commit，之后更新前需要选择分支。" >&2
+  fi
   if [ "$action" = "install" ]; then
+    args+=("--source-strategy" "local-checkout")
     agent_csv=""
     [ "$CONFIG_CLAUDE" -eq 1 ] && agent_csv="claude"
     if [ "$CONFIG_CODEX" -eq 1 ]; then
@@ -960,30 +1048,32 @@ ws_sync() {
   if [ "$FORCE" -eq 1 ]; then
     args+=("--force")
   fi
-  if output=$(python3 "$REPO_ROOT/install-lib/ws_sync.py" "${args[@]}" "$@"); then
+  if output=$(python3 "$REPO_ROOT/install-lib/ws_sync.py" "${args[@]}" "$@" 2>&1); then
     if [ "$action" = "update" ]; then
       case "$output" in
         *"clean-sync: no changes; manifest unchanged"*) UPDATE_NO_CHANGES=1 ;;
       esac
     fi
-    if [ "$WIZARD_MODE" -eq 1 ] || { is_interactive_input && [ "$DRY_RUN" -eq 0 ] && [ "$action" != "update" ]; }; then
-      if [ "$DRY_RUN" -eq 1 ]; then
-        change_count=$(printf '%s\n' "$output" | awk '/^\[dry-run\]/ { count += 1 } END { print count + 0 }')
-        bullet "底层文件操作：$change_count 项（详细路径已折叠）"
-      else
-        case "$action" in
-          install) info "工作区文件已准备。" ;;
-          reinstall) info "工作区文件已重新安装。" ;;
-          uninstall) info "安装器管理的工作区文件已移除。" ;;
-        esac
-      fi
-      return 0
+    case "$output" in
+      *"warn:"*)
+        warn "检测到用户修改并按安全策略保留，请让 Agent 检查。"
+        INSTALL_INCOMPLETE=1
+        ;;
+    esac
+    if [ "$DRY_RUN" -eq 1 ]; then
+      change_count=$(printf '%s\n' "$output" | awk '/^\[dry-run\]/ { count += 1 } END { print count + 0 }')
+      DRY_RUN_CHANGE_COUNT=$((DRY_RUN_CHANGE_COUNT + change_count))
+    else
+      case "$action" in
+        install) info "工作区文件已准备。" ;;
+        reinstall) info "工作区文件已重新安装。" ;;
+        uninstall) info "安装器管理的工作区文件已移除。" ;;
+      esac
     fi
-    [ -z "$output" ] || printf '%s\n' "$output"
     return 0
   else
     status=$?
-    [ -z "$output" ] || printf '%s\n' "$output"
+    fail "工作区文件操作失败，请让 Agent 检查后重试。" >&2
     return "$status"
   fi
 }
@@ -1022,7 +1112,7 @@ remove_agents_md_if_managed() {
   actual=$(file_sha256 "$WORKSPACE_ROOT/AGENTS.md")
   if [ -n "$sha" ] && [ "$actual" = "$sha" ]; then
     if [ "$DRY_RUN" -eq 1 ]; then
-      [ "$WIZARD_MODE" -eq 1 ] || info "[dry-run] rm $(quote_path "$WORKSPACE_ROOT/AGENTS.md")"
+      DRY_RUN_CHANGE_COUNT=$((DRY_RUN_CHANGE_COUNT + 1))
     else
       rm "$WORKSPACE_ROOT/AGENTS.md"
     fi
@@ -1047,7 +1137,7 @@ uninstall_workspace_copy() {
 
 ensure_dir() {
   if [ "$DRY_RUN" -eq 1 ]; then
-    [ "$WIZARD_MODE" -eq 1 ] || info "[dry-run] mkdir -p $(quote_path "$1")"
+    DRY_RUN_CHANGE_COUNT=$((DRY_RUN_CHANGE_COUNT + 1))
   else
     mkdir -p "$1"
   fi
@@ -1070,7 +1160,7 @@ link_force() {
     return 0
   fi
   if [ "$DRY_RUN" -eq 1 ]; then
-    [ "$WIZARD_MODE" -eq 1 ] || info "[dry-run] ln -sfn $(quote_path "$target") $(quote_path "$link")"
+    DRY_RUN_CHANGE_COUNT=$((DRY_RUN_CHANGE_COUNT + 1))
   else
     ln -sfn "$target" "$link"
   fi
@@ -1083,7 +1173,7 @@ remove_symlink_if_matches() {
   actual=$(readlink "$link")
   if [ "$actual" = "$expected" ] || { [ -n "$expected_alt" ] && [ "$actual" = "$expected_alt" ]; }; then
     if [ "$DRY_RUN" -eq 1 ]; then
-      [ "$WIZARD_MODE" -eq 1 ] || info "[dry-run] rm $(quote_path "$link")"
+      DRY_RUN_CHANGE_COUNT=$((DRY_RUN_CHANGE_COUNT + 1))
     else
       rm "$link"
     fi
@@ -1128,7 +1218,7 @@ write_managed_block() {
     awk '{ print }' "$block_file" >"$tmp_file"
   fi
   if [ "$DRY_RUN" -eq 1 ]; then
-    [ "$WIZARD_MODE" -eq 1 ] || info "[dry-run] write managed block in $(quote_path "$file")"
+    DRY_RUN_CHANGE_COUNT=$((DRY_RUN_CHANGE_COUNT + 1))
     rm -f "$tmp_file"
   elif [ -f "$file" ] && cmp -s "$file" "$tmp_file"; then
     rm -f "$tmp_file"
@@ -1157,7 +1247,7 @@ remove_managed_block() {
     return "$status"
   }
   if [ "$DRY_RUN" -eq 1 ]; then
-    [ "$WIZARD_MODE" -eq 1 ] || info "[dry-run] remove managed block from $(quote_path "$file")"
+    DRY_RUN_CHANGE_COUNT=$((DRY_RUN_CHANGE_COUNT + 1))
     rm -f "$tmp_file"
   else
     mv "$tmp_file" "$file"
@@ -1314,13 +1404,19 @@ install_kb_on_path() {
 }
 
 uninstall_kb_on_path() {
-  local dir
+  local dir link
   if [ "$SCOPE" = "system" ]; then
     dir="$HOME/.local/bin"
   else
     dir="$WORKSPACE_ROOT/bin"
   fi
-  remove_symlink_if_matches "$dir/kb" "$WS_KB_SCRIPT" "$KB_SCRIPT"
+  link="$dir/kb"
+  if [ -e "$link" ] && [ ! -L "$link" ]; then
+    warn "kb 快捷入口不是安装器创建的链接，已保留：$link"
+    INSTALL_INCOMPLETE=1
+    return 0
+  fi
+  remove_symlink_if_matches "$link" "$WS_KB_SCRIPT" "$KB_SCRIPT"
 }
 
 run_smoke() {
@@ -1330,21 +1426,19 @@ run_smoke() {
   fi
   section "安装检查"
   info "正在检查 kb 基础功能..."
+  # Child diagnostics can contain tracebacks and internal paths; keep them private.
   if ! smoke_output=$("$WS_KB_SCRIPT" help 2>&1); then
-    warn "kb 基础检查未通过，详细信息如下："
-    printf '%s\n' "$smoke_output" >&2
+    warn "kb 安装检查未通过，请让 Agent 检查后重试。"
     return 1
   fi
   if [ "$COPY_PROJECT" -eq 1 ]; then
     if ! smoke_output=$("$WS_KB_SCRIPT" --root "$WORKSPACE_ROOT" doctor 2>&1); then
-      warn "kb 工作区检查未通过，详细信息如下："
-      printf '%s\n' "$smoke_output" >&2
+      warn "kb 安装检查未通过，请让 Agent 检查后重试。"
       return 1
     fi
   else
     if ! smoke_output=$(RESEARCH_SKILLS_HOME="$REPO_ROOT" "$WS_KB_SCRIPT" --root "$WORKSPACE_ROOT" doctor 2>&1); then
-      warn "kb 工作区检查未通过，详细信息如下："
-      printf '%s\n' "$smoke_output" >&2
+      warn "kb 安装检查未通过，请让 Agent 检查后重试。"
       return 1
     fi
   fi
@@ -1444,7 +1538,7 @@ case "$ACTION" in
         uninstall_codex_project
       fi
     fi
-    [ "$KB_ON_PATH" -eq 1 ] && uninstall_kb_on_path
+    uninstall_kb_on_path
     if [ "$CORRUPT_MANIFEST_UNINSTALL" -eq 1 ]; then
       warn "研究资料和本地运行环境未被改动"
     fi

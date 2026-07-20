@@ -137,6 +137,72 @@ def test_validate_write_accepts_pending_ai_record(capsys: pytest.CaptureFixture[
     assert capsys.readouterr().err == ""
 
 
+def test_normalize_uses_canonical_claim_type_as_non_downgradable_gate_floor() -> None:
+    normalized = normalize_record_schema(
+        {
+            "kind": "paper",
+            "title": "Claim Floor",
+            "maturity": "lightweight",
+            "information_types": ["fact"],
+            "source": {"kind": "paper"},
+            "confirmation_status": "pending_user_confirmation",
+            "needs_human_confirmation": False,
+            "payload": {
+                "claims": [
+                    {
+                        "id": "claim-user-opinion",
+                        "text": "A user judgement.",
+                        "claim_type": "user_opinion",
+                        "confirmation_status": "pending_user_confirmation",
+                        "evidence_refs": [
+                            {
+                                "source_unit_id": "p-claim-floor-123456",
+                                "artifact": "parse-cache.yaml",
+                                "locator": "section=analysis",
+                                "quote": "grounded words",
+                            }
+                        ],
+                    }
+                ]
+            },
+        }
+    )
+
+    assert normalized["information_types"] == ["fact"]
+    assert normalized["needs_human_confirmation"] is True
+    assert validate_write(normalized, strict=True) == []
+
+
+@pytest.mark.parametrize("claim_type", ["user_opinion", "unverified"])
+def test_write_record_rejects_strong_status_hidden_behind_record_fact(
+    tmp_path: Path,
+    claim_type: str,
+) -> None:
+    record = {
+        "id": f"p-claim-floor-{claim_type}-123456",
+        "kind": "paper",
+        "title": "Invalid Claim Floor",
+        "information_types": ["fact"],
+        "source": {"kind": "paper"},
+        "confirmation_status": "auto_confirmed",
+        "needs_human_confirmation": False,
+        "payload": {
+            "claims": [
+                {
+                    "id": "claim-floor",
+                    "text": "A governed claim.",
+                    "claim_type": claim_type,
+                    "confirmation_status": "pending_user_confirmation",
+                    "evidence_refs": [],
+                }
+            ]
+        },
+    }
+
+    with pytest.raises(SystemExit, match="canonical claim_types"):
+        write_record(tmp_path, record)
+
+
 def test_validate_write_strict_raises_for_ai_source() -> None:
     record = {
         "id": "p-ai-source-123456",

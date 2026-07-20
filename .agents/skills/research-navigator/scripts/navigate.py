@@ -21,8 +21,9 @@ if __name__ == "__main__":
     ensure_managed_runtime(PROJECT_ROOT)
 
 from research.common import add_project_root_argument, load_yaml, print_resolved_project_roots, write_text_if_changed
+from research.journal import mutation_transaction
 from research.learnings import load_learnings, render_recall_digest
-from research.core import iter_records, kb_root, project_root, user_root
+from research.core import checkpoint_and_report, iter_records, kb_root, project_root, user_root
 
 
 CURRENT_STATE_STDOUT_LINES = 40
@@ -108,13 +109,14 @@ def render_reading_list(records: list[dict]) -> str:
 
 
 def print_current_state_summary(root: Path, content: str) -> None:
+    del root
     lines = content.strip().splitlines()
     for line in lines[:CURRENT_STATE_STDOUT_LINES]:
         print(line)
     if len(lines) > CURRENT_STATE_STDOUT_LINES:
-        print(f"... 完整见 {(user_root(root) / 'current-state.md').relative_to(root)}")
+        print("... 以上为当前实时状态的摘要。")
     else:
-        print(f"完整见 {(user_root(root) / 'current-state.md').relative_to(root)}")
+        print("以上为当前实时状态。")
 
 
 def main() -> int:
@@ -129,13 +131,19 @@ def main() -> int:
     nav_path = user_root(root) / "navigation.md"
     reading_path = user_root(root) / "reading-lists" / "current-reading.md"
 
-    current_content = ""
-    if args.command in {"refresh", "current-state"}:
-        current_content = render_current(records, program_states, recall_digest)
-        write_text_if_changed(current_path, current_content)
+    current_content = render_current(records, program_states, recall_digest)
     if args.command == "refresh":
-        write_text_if_changed(nav_path, render_navigation(records))
-        write_text_if_changed(reading_path, render_reading_list(records))
+        targets = [current_path, nav_path, reading_path]
+        with mutation_transaction(root, "refresh_user_navigation", targets):
+            write_text_if_changed(current_path, current_content)
+            write_text_if_changed(nav_path, render_navigation(records))
+            write_text_if_changed(reading_path, render_reading_list(records))
+        checkpoint_and_report(
+            root,
+            trigger="milestone",
+            message="milestone: refresh user navigation",
+            target_paths=targets,
+        )
         print(current_path.relative_to(root))
         print(nav_path.relative_to(root))
         print(reading_path.relative_to(root))
@@ -143,7 +151,14 @@ def main() -> int:
     if args.command == "current-state":
         print_current_state_summary(root, current_content)
         return 0
-    write_text_if_changed(reading_path, render_reading_list(records))
+    with mutation_transaction(root, "refresh_reading_list", [reading_path]):
+        write_text_if_changed(reading_path, render_reading_list(records))
+    checkpoint_and_report(
+        root,
+        trigger="milestone",
+        message="milestone: refresh reading list",
+        target_paths=[reading_path],
+    )
     print(reading_path.relative_to(root))
     return 0
 
