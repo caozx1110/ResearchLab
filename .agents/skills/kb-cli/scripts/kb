@@ -1777,12 +1777,34 @@ def runtime_pref_defaults(root: Path) -> dict[str, str]:
     versioning = preferences.get("versioning", {}) if isinstance(preferences.get("versioning"), dict) else {}
     profile = load_yaml(config_root(root) / "user-profile.yaml", default={})
     profile_preferences = profile.get("preferences", {}) if isinstance(profile, dict) and isinstance(profile.get("preferences"), dict) else {}
+    personalization = profile.get("personalization", {}) if isinstance(profile, dict) and isinstance(profile.get("personalization"), dict) else {}
     return {
         "name": str(identity.get("default_confirmed_by") or "").strip(),
         "lang": language_text(profile_preferences.get("language_preference", "zh")),
+        "terminology_style": str(personalization.get("term_style") or "keep-en").strip(),
+        "research_focus": str(personalization.get("research_focus") or "").strip(),
+        "resources_and_constraints": str(personalization.get("resources") or "").strip(),
         "auto_commit": str(versioning.get("auto_commit_mode") or "milestone").strip().lower(),
         "auto_screen": bool_text(paper.get("auto_screen_on_intake", True)),
     }
+
+
+def public_init_defaults_summary(defaults: Mapping[str, object]) -> str:
+    """Describe only allowlisted init defaults; never echo configuration text."""
+    language_label = {
+        "zh": "中文",
+        "en": "英文",
+    }.get(str(defaults.get("lang") or "").strip().lower(), "保留现有语言设置")
+    commit_label = {
+        "manual": "手动版本记录",
+        "milestone": "里程碑版本记录",
+        "aggressive": "高频版本记录",
+    }.get(str(defaults.get("auto_commit") or "").strip().lower(), "保留现有版本记录设置")
+    screening_label = {
+        "true": "论文自动初筛开启",
+        "false": "论文自动初筛关闭",
+    }.get(str(defaults.get("auto_screen") or "").strip().lower(), "保留现有论文初筛设置")
+    return f"选择“默认即可”会保留当前设置：{language_label}、{commit_label}、{screening_label}。"
 
 
 def config_set_profile_command(key: str, value: str) -> tuple[str, Sequence[str]]:
@@ -1962,24 +1984,34 @@ def handle_init(args: argparse.Namespace, root: Path) -> int:
             return git_initialized
 
     defaults = runtime_pref_defaults(root)
-    if not defaults["name"]:
-        print("知识库基础结构已准备好。还需要你告诉我确认人姓名；语言、版本记录节奏、自动初筛和研究偏好都可以一并设置。")
-        set_protocol_status("needs_user_input", initialized=True)
+    if not defaults["name"] or is_ai_signer(defaults["name"]):
+        print(
+            "知识库基础结构已准备好，现在可以开始使用。是否花约 1 分钟完成快速设置？"
+            "请回复“现在设置”（推荐）或“先跳过”；以后也可以直接说“补充我的研究偏好”。"
+            f"{public_init_defaults_summary(defaults)}"
+            "第一次确认研究判断前仍会询问真实署名。"
+        )
+        set_protocol_status("ready_with_optional_setup", initialized=True)
         add_agent_action(
-            "collect_init_preferences",
-            required_fields=["human_name"],
-            optional_fields=[
-                "language",
-                "commit_cadence",
-                "auto_screen",
-                "research_focus",
-                "resources",
-                "reporting_style",
-                "collaboration_boundaries",
-                "terminology_style",
+            "offer_init_preferences",
+            choices=[
+                {"id": "configure_now", "label": "现在设置", "recommended": True},
+                {"id": "defer", "label": "先跳过", "writes_preferences": False},
             ],
-            current=defaults,
+            quick_fields=[
+                "human_name",
+                "language_and_terminology",
+                "research_focus",
+                "resources_and_constraints",
+            ],
+            defaults=defaults,
+            required_before={"judgement_confirmation": ["human_name"]},
             apply={"verb": "init", "mode": "headless"},
+            defer={
+                "continue_with_defaults": True,
+                "writes_preferences": False,
+                "resume_phrases": ["补充我的研究偏好", "kb init"],
+            },
         )
     else:
         print("知识库和基础偏好已准备好。")
@@ -2188,6 +2220,8 @@ def handle_review(args: argparse.Namespace, root: Path) -> int:
     blocked = [*structurally_blocked, *unsafe_blocked]
     if pending:
         pending_ids = [str(record.get("id") or "") for record in pending]
+        configured_actor = default_confirmed_by(root)
+        confirmation_identity_required = not configured_actor or is_ai_signer(configured_actor)
         set_protocol_status(
             "needs_user_authorization",
             review_count=len(pending),
@@ -2196,6 +2230,7 @@ def handle_review(args: argparse.Namespace, root: Path) -> int:
             blocked_review_records=blocked,
             invalid_review_count=len(structurally_blocked),
             unsafe_review_count=len(unsafe_blocked),
+            confirmation_identity_required=confirmation_identity_required,
         )
         add_agent_action(
             "present_review_items",
@@ -2203,10 +2238,21 @@ def handle_review(args: argparse.Namespace, root: Path) -> int:
             decision_fields=["decision", "user_authorization", "authorization_source", "evidence"],
             authorization_source="user_message",
         )
+        if confirmation_identity_required:
+            add_agent_action(
+                "collect_confirmation_identity",
+                when="user_confirms",
+                required_fields=["human_name"],
+                required_before="apply_confirmation",
+                apply={"verb": "init", "mode": "headless", "fields": ["human_name"]},
+                then="apply_review_decision",
+            )
         print(f"有 {len(pending)} 条待确认内容已经准备好：")
         for record in pending:
             print_review_item(record, projection_by_id[str(record.get("id") or "")], root)
         print("以上待确认内容已经过当前流程核验；以上内容需要你用自然语言确认或拒绝，在你拍板前不会写成已确认结论。")
+        if confirmation_identity_required:
+            print("如果你选择确认，确认前还需要你的真实署名。")
         if structurally_blocked:
             add_agent_action("repair_review_claims", records=structurally_blocked)
             print("另有判断缺少可确认的文本或证据，Agent 会先补全。")

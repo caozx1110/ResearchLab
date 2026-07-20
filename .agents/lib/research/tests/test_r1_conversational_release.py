@@ -386,6 +386,39 @@ def test_installed_copy_repeated_init_preserves_preferences_and_tree(tmp_path: P
     )
     assert install.returncode == 0, install.stdout + install.stderr
 
+    optional_setup = subprocess.run(
+        [sys.executable, "-B", str(_kb_script(workspace)), "init"],
+        cwd=workspace,
+        env=_safe_runtime_env(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert optional_setup.returncode == 0, optional_setup.stdout + optional_setup.stderr
+    for expected_text in (
+        "现在可以开始使用",
+        "现在设置",
+        "先跳过",
+        "补充我的研究偏好",
+        "第一次确认研究判断前仍会询问真实署名",
+    ):
+        assert expected_text in optional_setup.stdout
+    for forbidden in ("还需要", "必填", "--", ".agents/", "NEXT FOR AGENT"):
+        assert forbidden not in optional_setup.stdout
+    before_defer = _tree_snapshot(workspace)
+
+    deferred = subprocess.run(
+        [sys.executable, "-B", str(_kb_script(workspace)), "init"],
+        cwd=workspace,
+        env=_safe_runtime_env(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert deferred.returncode == 0, deferred.stdout + deferred.stderr
+    assert deferred.stdout == optional_setup.stdout
+    assert _tree_snapshot(workspace) == before_defer
+
     first = subprocess.run(
         [
             sys.executable,
