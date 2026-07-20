@@ -21,6 +21,14 @@ description: 管理 core 研究系统配置，包括资源画像、语言偏好�
 6. 给用户解释 paper intake 的默认模式，并提供可直接复制的配置修改命令。
 7. 管理本地可选诊断策略：workspace `off|errors-only|developer`、逐 skill override、任务 token/issue 上限与 dedup/cooldown；`local_only=true` 不可关闭。
 
+## 渐进式首次配置
+
+`kb init` 先完成可立即使用的 KB 结构，再由 Agent 提供“现在设置”（推荐）或“先跳过”。选择先跳过后不追加或覆盖任何偏好（不产生额外偏好写入），不写 sentinel，不把 Agent 名称当署名，也不制造确认记录；后续用户说“补充我的研究偏好”或再次使用 `kb init` 时继续即可。
+
+用户选择现在设置时，只在一个紧凑回合收集四类高价值信息：真实署名、语言与术语风格、研究方向、资源与重要约束。显示当前版本记录节奏与论文自动初筛值，并允许用户回答“默认即可”。报告风格、协作边界、开发者诊断等低频项按需渐进补充，不塞进首次问卷。
+
+真实署名只在应用第一次 judgement confirmation 前强制。若此前跳过，Agent 在用户选择确认后先自然语言询问，再只更新署名字段并保留所有其他配置；AI 名称和伪确认仍必须拒绝。所有写入由 Agent 私下复用现有 headless 能力，不向用户展示内部参数或路径。
+
 ## 诊断配置交互
 
 普通用户无需记命令。Agent 接到“开启开发者诊断”“只在出错时记录”“关闭 paper-analyst 诊断”等自然语言请求后，私下写 runtime preference，再用自然语言确认 effective mode。诊断只控制额外记录与复盘，绝不能关闭 evidence、confirmation、schema、containment 或 recovery 门。

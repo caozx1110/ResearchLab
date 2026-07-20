@@ -59,6 +59,8 @@ Then you can simply ask:
 
 The agent does the mechanical work. You review judgements and make research decisions.
 
+`kb init` creates a usable knowledge-base structure before asking for preferences. If no real human signature is configured, it offers a roughly one-minute quick setup or a clear “skip for now” path. Skipping writes no placeholder preference and does not block adding, searching, or analysing material; you can later say “补充我的研究偏好”. A real signature is requested again only before the first research judgement is confirmed.
+
 Installation is the one-time technical bootstrap. After it succeeds, ordinary users interact only through natural language and the fifteen `kb <verb>` pseudo-CLI shortcuts below. Internal scripts, flags, environment variables, and paths are private implementation details handled by the agent; only maintainers and installation automation need the advanced commands in the installation guide.
 
 ## Install
@@ -80,7 +82,7 @@ These are the complete public shortcut surface. Internal script arguments are in
 | Verb | Purpose |
 |---|---|
 | `kb help` | Show the conversational capability menu. |
-| `kb init` | Initialize the knowledge-base layout and collect missing preferences in chat. |
+| `kb init` | Initialize a usable knowledge-base layout, then optionally collect high-value preferences in chat. |
 | `kb doctor` | Check whether the local runtime can support the workspace. |
 | `kb update` | Check for an update and apply it only after explicit authorization. |
 | `kb add <链接或路径>` | Add a paper, repository, article, or local file as a lightweight source. |

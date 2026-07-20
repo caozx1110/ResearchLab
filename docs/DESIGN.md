@@ -134,6 +134,10 @@ Receipt 不改变原 epistemic type。内容或 evidence 改变时，旧 receipt
 - protocol 可保存 child stdout/stderr 和 exact action arguments；
 - init/review 在 TTY、pipe 与 Agent call 下语义一致，脚本不读 stdin。
 
+`kb init` 先幂等准备可用结构，再在缺真实署名时返回 `ready_with_optional_setup`：private action 同时表达 configure/defer、四类快速字段、当前默认值、defer 无额外偏好写入，以及 `human_name` 只在 judgement confirmation 前必需。Runtime Agent 必须先呈现选择；configure 用一个紧凑自然语言问题并复用既有 headless 写入，defer 不制造 sentinel 或伪确认。已有署名时 plain init 保持 no-churn。
+
+`kb review` 的列表浏览不依赖署名。若用户此前跳过设置，公开层仍展示已过门判断，private action 把 `human_name` 标为确认应用前置条件；Agent 先只保存真实署名，再把当前消息的授权与 evidence 交给确认 owner。底层确认门仍 fail closed，拒绝路径不要求署名。
+
 这个分层让人类界面稳定，同时保留 Agent 自动驱动所需的精确信息。
 
 ## 可选开发者诊断与机械 audit

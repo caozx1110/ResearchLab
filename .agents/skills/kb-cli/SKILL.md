@@ -34,19 +34,20 @@ description: kb 快捷命令入口（伪 CLI），用于把常用 research 操�
 - 普通调用只打印 human stdout，并保持只读 verb 真正只读。
 - Runtime Agent 调用 dispatcher 时，应显式请求一个位于 `kb/.runtime/` 的私有 JSON protocol 目标；读取 `kb-agent-protocol/v1` 后继续 owner 步骤。该文件是 gitignored runtime state，不进入 checkpoint。
 - Protocol 的 `child_results` 保存 owner 的原始 stdout/stderr 与结构化 arguments；`next_actions` 保存待填字段、后续 owner step 和治理闸口。不得把其中的 raw 内容转述给用户。
-- `init` 与 `review` 永远不读 TTY、不调用交互式输入。缺信息时，由 human stdout 简述需求，protocol 列出字段；Agent 用自然语言询问，再以 headless 参数落盘。
+- `init` 与 `review` 永远不读 TTY、不调用交互式输入。`init` protocol 为 `ready_with_optional_setup` 时，先向用户呈现“现在设置”（推荐）/“先跳过”，不得越过选择直接追问姓名；defer 不产生额外偏好写入并允许立即工作。configure 时在一个紧凑问题里收集真实署名、语言与术语风格、研究方向、资源与重要约束，展示当前版本记录与论文初筛默认值并允许“默认即可”，再以既有 headless 写入落盘。
+- 缺真实署名不阻塞查看 `review` 列表。用户选择确认时，按 protocol 先自然语言询问署名、只 headless 保存该字段且保留其余偏好，再应用确认；拒绝不要求署名。
 - judgement 确认必须忠实透传用户原话、`authorization_source=user_message` 和 evidence；不得自签。
 
 ## 动词语义
 
 - `help`：打印分组能力菜单；固定文本，不调用 owner。
-- `init`：幂等准备知识库和配置；缺少确认人或可选偏好时进入 Agent 问答，不因 TTY 改变语义。
+- `init`：幂等准备知识库和配置；缺真实署名时 KB 仍已可用，并由 Agent 提供可延后的快速设置。重复 init 零 churn，显式补一个字段只改该字段。
 - `doctor`：只读说明 runtime、YAML 与 PDF 能力；详细解释只进私有 protocol。
 - `update`：只读检查版本；发现更新后先请求用户授权。更新只使用 manifest 记录的来源，不把 fork/local 安装切回默认上游。
 - `status` / `next` / `find` / `recall`：转发 owner 后过滤内部命令、路径与 flags。
 - `add`：轻量入库；本地目录推断为 repo，本地 PDF 推断为 paper，其余本地文件推断为 blog。
 - `ingest`：只自动执行 intake 与 prepare；Agent 从私有 protocol 读取 parse-cache 与待填要求，补逐字 evidence 后再 verify。判断确认始终停在用户闸口。
-- `review`：只列真正 ready-for-review 的 knowledge-unit 判断；prepared shell、ready-to-verify 与 failed-retryable 不进人工 inbox。TTY 与 pipe 语义相同。
+- `review`：只列真正 ready-for-review 的 knowledge-unit 判断；prepared shell、ready-to-verify 与 failed-retryable 不进人工 inbox。TTY 与 pipe 语义相同；缺真实署名时仍展示列表，只在确认应用前补署名。
 - `reject`：复用 knowledge-base-manager 的拒绝路径，不重实现治理逻辑。
 - `resume` / `undo` / `restore`：转发恢复合同并保持公开输出为自然语言。
 
