@@ -57,6 +57,18 @@ def _load_kb_cli():
     return module
 
 
+def _load_method_designer():
+    root = _project_root()
+    script = root / ".agents" / "skills" / "method-designer" / "scripts" / "method.py"
+    loader = importlib.machinery.SourceFileLoader("method_designer_for_init_tests", str(script))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[loader.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def _tree_metadata_digest(root: Path) -> str:
     digest = hashlib.sha256()
     for path in [root, *sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix())]:
@@ -373,7 +385,22 @@ def test_kb_init_has_identical_no_tty_semantics_and_never_reads_input(monkeypatc
     monkeypatch.setattr(
         kb,
         "runtime_pref_defaults",
-        lambda root: {"name": "", "lang": "zh", "auto_commit": "milestone", "auto_screen": "true"},
+        lambda root: {
+            "name": "",
+            "lang": "zh",
+            "terminology_style": "keep-en",
+            "research_focus": "",
+            "resource_statement": "",
+            "resources": {},
+            "constraints": [],
+            "resources_and_constraints": {
+                "resource_statement": "",
+                "resources": {},
+                "constraints": [],
+            },
+            "auto_commit": "milestone",
+            "auto_screen": "true",
+        },
     )
 
     monkeypatch.setattr(sys, "stdin", TTYStringIO("ignored\n"))
@@ -421,7 +448,22 @@ def test_kb_init_non_tty_scaffolds_and_guides_agent(monkeypatch, tmp_path: Path,
     monkeypatch.setattr(
         kb,
         "runtime_pref_defaults",
-        lambda root: {"name": "", "lang": "zh", "auto_commit": "milestone", "auto_screen": "true"},
+        lambda root: {
+            "name": "",
+            "lang": "zh",
+            "terminology_style": "keep-en",
+            "research_focus": "",
+            "resource_statement": "",
+            "resources": {},
+            "constraints": [],
+            "resources_and_constraints": {
+                "resource_statement": "",
+                "resources": {},
+                "constraints": [],
+            },
+            "auto_commit": "milestone",
+            "auto_screen": "true",
+        },
     )
     monkeypatch.setattr("builtins.input", lambda prompt="": (_ for _ in ()).throw(AssertionError("should not prompt")))
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
@@ -453,7 +495,25 @@ def test_kb_init_non_tty_scaffolds_and_guides_agent(monkeypatch, tmp_path: Path,
         "resources_and_constraints",
     ]
     assert action["required_before"] == {"judgement_confirmation": ["human_name"]}
-    assert action["apply"] == {"verb": "init", "mode": "headless"}
+    assert action["apply"] == {
+        "verb": "init",
+        "mode": "headless",
+        "field_inputs": {
+            "human_name": {"input": "--name"},
+            "language": {"input": "--lang", "choices": ["zh", "en"]},
+            "terminology_style": {
+                "input": "--persona-term",
+                "choices": ["keep-en", "translate", "bilingual"],
+            },
+            "research_focus": {"input": "--persona-focus"},
+            "resource_statement": {"input": "--quick-resource"},
+            "constraints": {
+                "input": "--quick-constraint",
+                "repeatable": True,
+                "merge": "append_deduplicate",
+            },
+        },
+    }
     assert action["defer"] == {
         "continue_with_defaults": True,
         "writes_preferences": False,
@@ -462,6 +522,16 @@ def test_kb_init_non_tty_scaffolds_and_guides_agent(monkeypatch, tmp_path: Path,
     assert action["defaults"] == {
         "name": "",
         "lang": "zh",
+        "terminology_style": "keep-en",
+        "research_focus": "",
+        "resource_statement": "",
+        "resources": {},
+        "constraints": [],
+        "resources_and_constraints": {
+            "resource_statement": "",
+            "resources": {},
+            "constraints": [],
+        },
         "auto_commit": "milestone",
         "auto_screen": "true",
     }
@@ -561,6 +631,105 @@ def test_kb_init_headless_flags_persist_user_profile(monkeypatch, tmp_path: Path
     profile = kb.load_yaml(tmp_path / "kb" / "config" / "user-profile.yaml", {})
     assert profile["preferences"]["language_preference"] == "zh"
     assert profile["personalization"]["research_focus"] == "robot learning and VLA"
+
+
+def test_kb_init_quick_resource_and_constraints_use_canonical_consumer_paths(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    kb = _load_kb_cli()
+    method = _load_method_designer()
+
+    assert kb.main(["--root", str(tmp_path), "init"]) == 0
+    capsys.readouterr()
+    profile_path = tmp_path / "kb" / "config" / "user-profile.yaml"
+    profile = kb.load_yaml(profile_path, default={})
+    profile["resources"] = {"gpu_count": 4, "cluster": "local"}
+    profile["constraints"] = ["数据不得离开本地"]
+    write_yaml_if_changed(profile_path, profile)
+
+    assert kb.main(
+        [
+            "--root",
+            str(tmp_path),
+            "init",
+            "--persona-focus",
+            "VLA alignment",
+            "--persona-term",
+            "bilingual",
+            "--quick-resource",
+            "8xA100 and one robot arm",
+            "--quick-constraint",
+            "数据不得离开本地",
+            "--quick-constraint",
+            "单次实验不超过 24 小时",
+            "--quick-constraint",
+            "单次实验不超过 24 小时",
+        ]
+    ) == 0
+    capsys.readouterr()
+
+    profile_after = kb.load_yaml(profile_path, default={})
+    assert profile_after["resources"] == {
+        "gpu_count": 4,
+        "cluster": "local",
+        "quick_setup": "8xA100 and one robot arm",
+    }
+    assert profile_after["constraints"] == ["数据不得离开本地", "单次实验不超过 24 小时"]
+    assert method.profile_resources(tmp_path) == profile_after["resources"]
+
+    assert kb.main(
+        ["--root", str(tmp_path), "--agent-protocol", "snapshot.json", "init"]
+    ) == 0
+    protocol = json.loads(
+        (tmp_path / "kb" / ".runtime" / "snapshot.json").read_text(encoding="utf-8")
+    )
+    defaults = protocol["next_actions"][0]["defaults"]
+    assert defaults["research_focus"] == "VLA alignment"
+    assert defaults["terminology_style"] == "bilingual"
+    assert defaults["resource_statement"] == "8xA100 and one robot arm"
+    assert defaults["resources"] == profile_after["resources"]
+    assert defaults["constraints"] == ["数据不得离开本地", "单次实验不超过 24 小时"]
+    assert defaults["resources_and_constraints"] == {
+        "resource_statement": "8xA100 and one robot arm",
+        "resources": profile_after["resources"],
+        "constraints": ["数据不得离开本地", "单次实验不超过 24 小时"],
+    }
+
+
+def test_runtime_pref_defaults_reads_compatible_alternate_quick_setup_paths(tmp_path: Path) -> None:
+    kb = _load_kb_cli()
+    assert kb.main(["--root", str(tmp_path), "init"]) == 0
+    profile_path = tmp_path / "kb" / "config" / "user-profile.yaml"
+    profile = kb.load_yaml(profile_path, default={})
+    profile["preferences"]["research_focus"] = "alternate focus"
+    profile["preferences"]["terminology_style"] = "translate"
+    profile["personalization"] = {"resources": "legacy 2xGPU"}
+    profile["resources"] = {"gpu_count": 2}
+    profile["constraints"] = ["legacy constraint"]
+    write_yaml_if_changed(profile_path, profile)
+
+    compatible = kb.runtime_pref_defaults(tmp_path)
+    assert compatible["research_focus"] == "alternate focus"
+    assert compatible["terminology_style"] == "translate"
+    assert compatible["resource_statement"] == "legacy 2xGPU"
+    assert compatible["resources"] == {"gpu_count": 2}
+    assert compatible["constraints"] == ["legacy constraint"]
+    assert compatible["resources_and_constraints"] == {
+        "resource_statement": "legacy 2xGPU",
+        "resources": {"gpu_count": 2},
+        "constraints": ["legacy constraint"],
+    }
+
+    profile["personalization"].update(
+        {"research_focus": "canonical focus", "term_style": "bilingual"}
+    )
+    profile["resources"]["quick_setup"] = "canonical 8xGPU"
+    write_yaml_if_changed(profile_path, profile)
+    canonical = kb.runtime_pref_defaults(tmp_path)
+    assert canonical["research_focus"] == "canonical focus"
+    assert canonical["terminology_style"] == "bilingual"
+    assert canonical["resource_statement"] == "canonical 8xGPU"
 
 
 def test_kb_init_rejects_ai_signer_name_before_writing_prefs(monkeypatch, tmp_path: Path) -> None:
@@ -1832,7 +2001,12 @@ def test_kb_review_tty_and_pipe_are_identical_and_emit_private_protocol(monkeypa
             "when": "user_confirms",
             "required_fields": ["human_name"],
             "required_before": "apply_confirmation",
-            "apply": {"verb": "init", "mode": "headless", "fields": ["human_name"]},
+            "apply": {
+                "verb": "init",
+                "mode": "headless",
+                "fields": ["human_name"],
+                "field_inputs": {"human_name": {"input": "--name"}},
+            },
             "then": "apply_review_decision",
         }
 

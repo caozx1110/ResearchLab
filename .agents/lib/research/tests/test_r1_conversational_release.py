@@ -419,6 +419,15 @@ def test_installed_copy_repeated_init_preserves_preferences_and_tree(tmp_path: P
     assert deferred.stdout == optional_setup.stdout
     assert _tree_snapshot(workspace) == before_defer
 
+    profile_path = workspace / "kb" / "config" / "user-profile.yaml"
+    profile = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
+    profile["resources"] = {"gpu_count": 2, "machine": "local"}
+    profile["constraints"] = ["保留已有数据约束"]
+    profile_path.write_text(
+        yaml.safe_dump(profile, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
     first = subprocess.run(
         [
             sys.executable,
@@ -437,6 +446,12 @@ def test_installed_copy_repeated_init_preserves_preferences_and_tree(tmp_path: P
             "VLA",
             "--persona-term",
             "bilingual",
+            "--quick-resource",
+            "4xH100 and a local robot",
+            "--quick-constraint",
+            "保留已有数据约束",
+            "--quick-constraint",
+            "不使用云服务",
         ],
         cwd=workspace,
         env=_safe_runtime_env(),
@@ -446,6 +461,35 @@ def test_installed_copy_repeated_init_preserves_preferences_and_tree(tmp_path: P
     )
     assert first.returncode == 0, first.stdout + first.stderr
     assert first.stdout == "知识库和基础偏好已准备好。\n"
+
+    snapshot = subprocess.run(
+        [
+            sys.executable,
+            "-B",
+            str(_kb_script(workspace)),
+            "--agent-protocol",
+            "installed-init-snapshot.json",
+            "init",
+        ],
+        cwd=workspace,
+        env=_safe_runtime_env(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert snapshot.returncode == 0, snapshot.stdout + snapshot.stderr
+    installed_protocol = yaml.safe_load(
+        (workspace / "kb" / ".runtime" / "installed-init-snapshot.json").read_text(encoding="utf-8")
+    )
+    installed_defaults = installed_protocol["details"]["preferences"]
+    assert installed_defaults["research_focus"] == "VLA"
+    assert installed_defaults["resource_statement"] == "4xH100 and a local robot"
+    assert installed_defaults["resources"] == {
+        "gpu_count": 2,
+        "machine": "local",
+        "quick_setup": "4xH100 and a local robot",
+    }
+    assert installed_defaults["constraints"] == ["保留已有数据约束", "不使用云服务"]
 
     runtime_path = workspace / "kb" / "config" / "runtime-preferences.yaml"
     runtime = yaml.safe_load(runtime_path.read_text(encoding="utf-8"))
@@ -481,6 +525,12 @@ def test_installed_copy_repeated_init_preserves_preferences_and_tree(tmp_path: P
     assert profile_after["preferences"]["language_preference"] == "en"
     assert profile_after["personalization"]["research_focus"] == "VLA"
     assert profile_after["personalization"]["term_style"] == "bilingual"
+    assert profile_after["resources"] == {
+        "gpu_count": 2,
+        "machine": "local",
+        "quick_setup": "4xH100 and a local robot",
+    }
+    assert profile_after["constraints"] == ["保留已有数据约束", "不使用云服务"]
 
 
 def test_installed_copy_next_is_byte_identical_on_fresh_workspace(tmp_path: Path) -> None:

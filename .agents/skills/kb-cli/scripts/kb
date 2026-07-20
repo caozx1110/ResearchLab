@@ -1770,7 +1770,7 @@ def language_text(value: object, default: str = "zh") -> str:
     return default
 
 
-def runtime_pref_defaults(root: Path) -> dict[str, str]:
+def runtime_pref_defaults(root: Path) -> dict[str, object]:
     preferences = load_runtime_preferences(root)
     identity = preferences.get("identity", {}) if isinstance(preferences.get("identity"), dict) else {}
     paper = preferences.get("paper", {}) if isinstance(preferences.get("paper"), dict) else {}
@@ -1778,12 +1778,38 @@ def runtime_pref_defaults(root: Path) -> dict[str, str]:
     profile = load_yaml(config_root(root) / "user-profile.yaml", default={})
     profile_preferences = profile.get("preferences", {}) if isinstance(profile, dict) and isinstance(profile.get("preferences"), dict) else {}
     personalization = profile.get("personalization", {}) if isinstance(profile, dict) and isinstance(profile.get("personalization"), dict) else {}
+    profile_resources = profile.get("resources", {}) if isinstance(profile, dict) else {}
+    resources = dict(profile_resources) if isinstance(profile_resources, dict) else {}
+    raw_constraints = profile.get("constraints", []) if isinstance(profile, dict) else []
+    constraints = list(raw_constraints) if isinstance(raw_constraints, list) else []
+    terminology_style = str(
+        personalization.get("term_style")
+        or profile_preferences.get("terminology_style")
+        or "keep-en"
+    ).strip()
+    research_focus = str(
+        personalization.get("research_focus")
+        or profile_preferences.get("research_focus")
+        or ""
+    ).strip()
+    resource_statement = str(
+        resources.get("quick_setup")
+        or personalization.get("resources")
+        or ""
+    ).strip()
     return {
         "name": str(identity.get("default_confirmed_by") or "").strip(),
         "lang": language_text(profile_preferences.get("language_preference", "zh")),
-        "terminology_style": str(personalization.get("term_style") or "keep-en").strip(),
-        "research_focus": str(personalization.get("research_focus") or "").strip(),
-        "resources_and_constraints": str(personalization.get("resources") or "").strip(),
+        "terminology_style": terminology_style,
+        "research_focus": research_focus,
+        "resource_statement": resource_statement,
+        "resources": resources,
+        "constraints": constraints,
+        "resources_and_constraints": {
+            "resource_statement": resource_statement,
+            "resources": resources,
+            "constraints": constraints,
+        },
         "auto_commit": str(versioning.get("auto_commit_mode") or "milestone").strip().lower(),
         "auto_screen": bool_text(paper.get("auto_screen_on_intake", True)),
     }
@@ -1827,7 +1853,10 @@ def build_init_pref_commands(*, name: str, lang: str, auto_commit: str, auto_scr
     ]
 
 
-def build_headless_init_pref_commands(args: argparse.Namespace) -> list[tuple[str, Sequence[str]]] | None:
+def build_headless_init_pref_commands(
+    args: argparse.Namespace,
+    root: Path,
+) -> list[tuple[str, Sequence[str]]] | None:
     persona_values = [
         ("personalization.research_focus", getattr(args, "persona_focus", None)),
         ("personalization.resources", getattr(args, "persona_resources", None)),
@@ -1840,6 +1869,8 @@ def build_headless_init_pref_commands(args: argparse.Namespace) -> list[tuple[st
         and args.lang is None
         and args.auto_commit is None
         and args.auto_screen is None
+        and getattr(args, "quick_resource", None) is None
+        and getattr(args, "quick_constraints", None) is None
         and all(value is None for _, value in persona_values)
     ):
         return None
@@ -1857,6 +1888,36 @@ def build_headless_init_pref_commands(args: argparse.Namespace) -> list[tuple[st
         commands.append(config_set_runtime_pref_command("versioning", "auto_commit_mode", args.auto_commit))
     if args.auto_screen is not None:
         commands.append(config_set_runtime_pref_command("paper", "auto_screen_on_intake", args.auto_screen))
+    if getattr(args, "quick_resource", None) is not None:
+        resource_statement = str(args.quick_resource or "").strip()
+        if not resource_statement:
+            raise SystemExit("资源说明不能为空。")
+        commands.append(config_set_profile_command("resources.quick_setup", resource_statement))
+    quick_constraints = getattr(args, "quick_constraints", None)
+    if quick_constraints is not None:
+        profile = load_yaml(config_root(root) / "user-profile.yaml", default={})
+        raw_existing = profile.get("constraints", []) if isinstance(profile, dict) else []
+        existing = list(raw_existing) if isinstance(raw_existing, list) else []
+        merged = list(existing)
+        seen = {
+            str(value).strip()
+            for value in existing
+            if isinstance(value, str) and str(value).strip()
+        }
+        for raw_constraint in quick_constraints:
+            constraint = str(raw_constraint or "").strip()
+            if not constraint:
+                raise SystemExit("重要约束不能为空。")
+            if constraint not in seen:
+                merged.append(constraint)
+                seen.add(constraint)
+        if merged != existing:
+            commands.append(
+                config_set_profile_command(
+                    "constraints",
+                    json.dumps(merged, ensure_ascii=False),
+                )
+            )
     for key, value in persona_values:
         if value is not None:
             commands.append(config_set_profile_command(key, value))
@@ -1961,7 +2022,7 @@ def run_init_prerequisites(root: Path) -> int:
 
 
 def handle_init(args: argparse.Namespace, root: Path) -> int:
-    commands = build_headless_init_pref_commands(args)
+    commands = build_headless_init_pref_commands(args, root)
     initialized = 0 if workspace_init_complete(root) else run_init_prerequisites(root)
     if initialized != 0:
         print("知识库初始化未完成；详细诊断已保留给 Agent。", file=sys.stderr)
@@ -2006,7 +2067,25 @@ def handle_init(args: argparse.Namespace, root: Path) -> int:
             ],
             defaults=defaults,
             required_before={"judgement_confirmation": ["human_name"]},
-            apply={"verb": "init", "mode": "headless"},
+            apply={
+                "verb": "init",
+                "mode": "headless",
+                "field_inputs": {
+                    "human_name": {"input": "--name"},
+                    "language": {"input": "--lang", "choices": list(LANG_CHOICES)},
+                    "terminology_style": {
+                        "input": "--persona-term",
+                        "choices": list(PERSONA_TERM_CHOICES),
+                    },
+                    "research_focus": {"input": "--persona-focus"},
+                    "resource_statement": {"input": "--quick-resource"},
+                    "constraints": {
+                        "input": "--quick-constraint",
+                        "repeatable": True,
+                        "merge": "append_deduplicate",
+                    },
+                },
+            },
             defer={
                 "continue_with_defaults": True,
                 "writes_preferences": False,
@@ -2244,7 +2323,12 @@ def handle_review(args: argparse.Namespace, root: Path) -> int:
                 when="user_confirms",
                 required_fields=["human_name"],
                 required_before="apply_confirmation",
-                apply={"verb": "init", "mode": "headless", "fields": ["human_name"]},
+                apply={
+                    "verb": "init",
+                    "mode": "headless",
+                    "fields": ["human_name"],
+                    "field_inputs": {"human_name": {"input": "--name"}},
+                },
                 then="apply_review_decision",
             )
         print(f"有 {len(pending)} 条待确认内容已经准备好：")
@@ -2356,6 +2440,8 @@ def register_init(subparsers: argparse._SubParsersAction[argparse.ArgumentParser
     parser.add_argument("--persona-report", help=argparse.SUPPRESS)
     parser.add_argument("--persona-boundaries", help=argparse.SUPPRESS)
     parser.add_argument("--persona-term", choices=PERSONA_TERM_CHOICES, help=argparse.SUPPRESS)
+    parser.add_argument("--quick-resource", help=argparse.SUPPRESS)
+    parser.add_argument("--quick-constraint", dest="quick_constraints", action="append", help=argparse.SUPPRESS)
     parser.add_argument("--git-init", action="store_true", help=argparse.SUPPRESS)
     parser.set_defaults(handler=handle_init)
 

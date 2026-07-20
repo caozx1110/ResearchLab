@@ -35,6 +35,7 @@ description: kb 快捷命令入口（伪 CLI），用于把常用 research 操�
 - Runtime Agent 调用 dispatcher 时，应显式请求一个位于 `kb/.runtime/` 的私有 JSON protocol 目标；读取 `kb-agent-protocol/v1` 后继续 owner 步骤。该文件是 gitignored runtime state，不进入 checkpoint。
 - Protocol 的 `child_results` 保存 owner 的原始 stdout/stderr 与结构化 arguments；`next_actions` 保存待填字段、后续 owner step 和治理闸口。不得把其中的 raw 内容转述给用户。
 - `init` 与 `review` 永远不读 TTY、不调用交互式输入。`init` protocol 为 `ready_with_optional_setup` 时，先向用户呈现“现在设置”（推荐）/“先跳过”，不得越过选择直接追问姓名；defer 不产生额外偏好写入并允许立即工作。configure 时在一个紧凑问题里收集真实署名、语言与术语风格、研究方向、资源与重要约束，展示当前版本记录与论文初筛默认值并允许“默认即可”，再以既有 headless 写入落盘。
+- 快速设置必须逐项执行 `apply.field_inputs`，不得自行猜 dotted key。资源使用 protocol 指定的 canonical input，保留已有 resource keys；约束 input 可重复，按 append + deduplicate 合并，不覆盖旧约束。旧 persona resource input 仅为兼容，不是 I1 canonical 路径。
 - 缺真实署名不阻塞查看 `review` 列表。用户选择确认时，按 protocol 先自然语言询问署名、只 headless 保存该字段且保留其余偏好，再应用确认；拒绝不要求署名。
 - judgement 确认必须忠实透传用户原话、`authorization_source=user_message` 和 evidence；不得自签。
 
