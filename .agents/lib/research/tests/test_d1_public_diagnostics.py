@@ -13,6 +13,7 @@ PUBLIC_VERBS = (
     "init",
     "doctor",
     "update",
+    "obsidian",
     "add",
     "ingest",
     "review",
@@ -285,7 +286,7 @@ def test_doctor_agent_protocol_contains_only_policy_and_mechanical_audit_summary
     assert "/private/path" not in protocol_text
 
 
-def test_d1_keeps_exactly_fifteen_public_verbs() -> None:
+def test_d1_keeps_exactly_sixteen_public_verbs() -> None:
     kb = _load_kb_cli()
     parser = kb.build_parser()
     subparsers = next(
@@ -293,7 +294,7 @@ def test_d1_keeps_exactly_fifteen_public_verbs() -> None:
     )
 
     assert tuple(subparsers.choices) == PUBLIC_VERBS
-    assert len(kb.VERB_REGISTRARS) == 15
+    assert len(kb.VERB_REGISTRARS) == 16
     assert "diagnostics" not in subparsers.choices
     assert "lint" not in subparsers.choices
 

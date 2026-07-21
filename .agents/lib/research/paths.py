@@ -45,6 +45,9 @@ KB_GITIGNORE_LINES = [
     "# Generated browser workspace",
     "user/kb/",
     "",
+    "# Generated Obsidian projection",
+    "obsidian/managed/",
+    "",
     "# Local noise",
     ".DS_Store",
 ]

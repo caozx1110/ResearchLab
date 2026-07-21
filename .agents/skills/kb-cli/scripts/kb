@@ -47,6 +47,7 @@ from research.core import (
 )
 from research.sources import UnsafeLocalSourceError, validate_local_source
 from research import updater
+from research.obsidian import obsidian_projection_status, update_obsidian_projection
 
 try:
     from research.diagnostics import capture_runtime_failure as _capture_runtime_failure
@@ -63,12 +64,13 @@ except (ImportError, AttributeError):  # Parallel D1 dependency may not be merge
 
 HELP_MENU: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
     (
-        "kb 动词（15 个）",
+        "kb 动词（16 个）",
         (
             ("打印能力菜单。", "kb help"),
             ("初始化知识库布局、索引和基础偏好。", "kb init"),
             ("检查运行环境、配置读写与论文解析能力。", "kb doctor"),
             ("检查并在确认后更新研究能力包。", "kb update"),
+            ("生成或检查可由 Obsidian 直接浏览的知识网络视图。", "kb obsidian update"),
             ("刷新并查看当前知识库和研究计划的状态摘要。", "kb status"),
             ("查看下一步实验或研究计划推进建议。", "kb next"),
             ("按关键词检索已入库知识单元。", "kb find <关键词>"),
@@ -422,6 +424,7 @@ _PUBLIC_KB_VERB_ARITY: dict[str, tuple[int, int | None]] = {
     "status": (0, 1),
     "undo": (0, 0),
     "update": (0, 0),
+    "obsidian": (1, 1),
 }
 _PUBLIC_KB_ARGUMENT_META_RE = re.compile(r"[$`;&|]")
 _PUBLIC_CLAIM_TEXT_HARD_CAP = 2000
@@ -1078,6 +1081,47 @@ def handle_update(args: argparse.Namespace, root: Path) -> int:
         add_agent_action("request_update_authorization", then={"verb": "update", "apply": True})
     else:
         print("当前研究能力包已是最新版本。")
+    return 0
+
+
+def handle_obsidian(args: argparse.Namespace, root: Path) -> int:
+    action = str(args.action or "")
+    if action == "status":
+        report = obsidian_projection_status(root)
+        set_protocol_status("completed" if report["status"] != "FAIL" else "attention_required", obsidian=report)
+        codes = {str(item.get("code") or "") for item in report.get("findings", [])}
+        if report["status"] == "PASS":
+            if int(report["counts"].get("records") or 0) == 0 and not report.get("generated_at"):
+                print("知识库目前为空；Obsidian 视图无需生成。")
+            else:
+                print("Obsidian 知识网络视图已是最新状态。")
+            return 0
+        if report["status"] == "WARN" and codes <= {
+            "OBSIDIAN_PROJECTION_NOT_GENERATED",
+            "OBSIDIAN_PROJECTION_STALE",
+            "OBSIDIAN_LEGACY_REVERSE_LINK",
+        }:
+            print("Obsidian 知识网络视图需要刷新；可运行 kb obsidian update。")
+            return 0
+        print("Obsidian 知识网络视图存在需要处理的链接或文件问题；详细诊断已保留给 Agent。")
+        return 1 if report["status"] == "FAIL" else 0
+
+    try:
+        result = update_obsidian_projection(root)
+    except SystemExit as exc:
+        set_protocol_status("error", obsidian={"error": str(exc)})
+        print("Obsidian 知识网络视图未更新；检测到可能覆盖人工内容或不安全路径，详细诊断已保留给 Agent。")
+        return 1
+    report = result["status"]
+    set_protocol_status("completed" if report["status"] != "FAIL" else "attention_required", obsidian=result)
+    if result["changed"]:
+        print("Obsidian 知识网络视图已更新，可直接在 Obsidian 中查看。")
+    else:
+        print("Obsidian 知识网络视图已是最新状态，无需更新。")
+    if report["status"] == "FAIL":
+        print("视图已保留，但其中有无法解析的知识链接；详细诊断已保留给 Agent。")
+    elif report["status"] == "WARN":
+        print("视图已生成；部分旧式关系仍以兼容方式展示，详细诊断已保留给 Agent。")
     return 0
 
 
@@ -2447,6 +2491,12 @@ def register_doctor(subparsers: argparse._SubParsersAction[argparse.ArgumentPars
     parser.set_defaults(handler=handle_doctor)
 
 
+def register_obsidian(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    parser = subparsers.add_parser("obsidian", help="生成或检查 Obsidian 知识网络视图")
+    parser.add_argument("action", choices=["update", "status"], metavar="<update|status>", help=argparse.SUPPRESS)
+    parser.set_defaults(handler=handle_obsidian)
+
+
 def register_add(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     parser = subparsers.add_parser("add", help="轻量入库 source")
     parser.add_argument("source", metavar="<链接或路径>", help="论文、代码仓、数据集、博客链接或本地文件路径")
@@ -2558,6 +2608,7 @@ VERB_REGISTRARS: tuple[Callable[[argparse._SubParsersAction[argparse.ArgumentPar
     register_init,
     register_doctor,
     register_update,
+    register_obsidian,
     register_add,
     register_ingest,
     register_review,

@@ -20,7 +20,7 @@ Default preference order:
 
 ## Conversational contract
 
-The user interacts through exactly two surfaces: natural language and the fifteen `kb <verb>` forms shown by `kb help`.
+The user interacts through exactly two surfaces: natural language and the sixteen `kb <verb>` forms shown by `kb help`.
 
 - Never show raw interpreter commands, internal flags, environment substitutions, internal script paths, absolute workspace paths, or agent-only next-step markers.
 - Run internal owner steps yourself. Translate their result into a concise outcome and a natural-language next step.
@@ -29,6 +29,15 @@ The user interacts through exactly two surfaces: natural language and the fiftee
 - `kb review` behaves identically from a terminal, pipe, or agent call. Ask the user to confirm or reject in natural language; never solicit input from a script.
 - Empty and edge states stay natural. When there is no material yet, invite the user to send a paper, repository, dataset, article, or local file.
 - Structured owner output is an agent-only protocol. Request it explicitly, keep it under `kb/.runtime/`, and never relay its command arguments or diagnostics to the user.
+
+## Obsidian projection
+
+- Treat canonical records, program state, taxonomy, and evidence as the only source of truth. Obsidian consumes a rebuildable view; it never becomes a second confirmation or revision store.
+- `kb obsidian status` is read-only. `kb obsidian update` may write only `kb/obsidian/managed/`, create missing `kb/obsidian/inbox/` and `annotations/` directories, and update the generated-view gitignore rule. It must never create or edit `.obsidian/`.
+- Files below `kb/obsidian/managed/` are generated. Never place human edits there. Human notes belong in `inbox/` or `annotations/`, and projection updates must not traverse or overwrite them.
+- Generated pages are designed for Obsidian Reading view (the book icon). Editor or Live Preview mode intentionally exposes wikilink, inline-code, and block-ID syntax; explain this distinction instead of editing `.obsidian/` settings.
+- After a successful canonical mutation, refresh the Obsidian projection when autonomy permits and no confirmation or user-decision gate is pending. A failed or pending canonical operation must not be disguised by a projection refresh.
+- Canonical relations store only explicit forward edges. Derive backlinks and named inverse relations at read time. Use stable unit IDs for files and stable claim/evidence block IDs for precise links; never confirm an AI-suggested similarity merely because it appears in a graph.
 
 ## Ingestion auto-drive
 
@@ -93,6 +102,8 @@ Diagnostics are an optional local quality loop, not a governance bypass. Schema,
 - `kb/synthesis/`: cross-unit surveys, taxonomy, trends, and gaps.
 - `kb/config/`: user preferences, taxonomy seeds, and runtime policy.
 - `kb/user/`: generated human-facing navigation, never canonical source.
+- `kb/obsidian/managed/`: generated no-plugin Obsidian projection; safe to rebuild and ignored by KB Git.
+- `kb/obsidian/{inbox,annotations}/`: human-authored Obsidian notes; never managed or deleted by projection refresh.
 - `kb/output/`: exports only, never the sole source of truth.
 
 `kb/` may be a nested Git repository. The skill bundle and root workspace rules are installed beside it and are never rewritten by storage migration.

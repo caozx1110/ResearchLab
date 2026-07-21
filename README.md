@@ -62,7 +62,7 @@ The agent does the mechanical work. You review judgements and make research deci
 
 `kb init` creates a usable knowledge-base structure before asking for preferences. If no real human signature is configured, it offers a roughly one-minute quick setup or a clear “skip for now” path. Skipping writes no placeholder preference and does not block adding, searching, or analysing material; you can later say “补充我的研究偏好”. A real signature is requested again only before the first research judgement is confirmed.
 
-Installation is the one-time technical bootstrap. After it succeeds, ordinary users interact only through natural language and the fifteen `kb <verb>` pseudo-CLI shortcuts below. Internal scripts, flags, environment variables, and paths are private implementation details handled by the agent; only maintainers and installation automation need the advanced commands in the installation guide.
+Installation is the one-time technical bootstrap. After it succeeds, ordinary users interact only through natural language and the sixteen `kb <verb>` pseudo-CLI shortcuts below. Internal scripts, flags, environment variables, and paths are private implementation details handled by the agent; only maintainers and installation automation need the advanced commands in the installation guide.
 
 ## Install
 
@@ -76,7 +76,7 @@ The guided installer recommends a project-scoped copy into a workspace root. It 
 
 Read [docs/INSTALL.md](docs/INSTALL.md) for guided setup. Its flags, explicit paths, update, uninstall, and automation sections are administrator reference, not steps for everyday research use.
 
-## The fifteen `kb` pseudo-CLI verbs
+## The sixteen `kb` pseudo-CLI verbs
 
 These are the complete public shortcut surface. Internal script arguments are intentionally not part of the user contract.
 
@@ -86,6 +86,7 @@ These are the complete public shortcut surface. Internal script arguments are in
 | `kb init` | Initialize a usable knowledge-base layout, then optionally collect high-value preferences in chat. |
 | `kb doctor` | Check whether the local runtime can support the workspace. |
 | `kb update` | Check for an update and apply it only after explicit authorization. |
+| `kb obsidian update` / `kb obsidian status` | Rebuild or audit the no-plugin Obsidian knowledge-network projection. |
 | `kb add <链接或路径>` | Add a paper, repository, article, or local file as a lightweight source. |
 | `kb ingest <链接或路径>` | Add a source and prepare its evidence-backed analysis workflow. |
 | `kb review` | Show human-review-ready judgements and accept a natural-language decision. |
@@ -144,7 +145,7 @@ You decide whether a judgement is accepted, which idea or baseline to pursue, wh
 
 ## Optional local developer diagnostics
 
-D1 adds an optional, local-only quality loop without adding a sixteenth `kb` verb. Its automatic mode is off by default. You can ask the Agent in natural language to “开启开发者诊断”, “仅在出错时记录”, “关闭 paper-analyst 诊断”, “对刚才失败做脱敏复盘”, or “检查知识库健康”.
+D1 adds an optional, local-only quality loop without adding a diagnostics verb. Its automatic mode is off by default. The later sixteenth verb is the unrelated no-plugin Obsidian projection entrypoint. You can ask the Agent in natural language to “开启开发者诊断”, “仅在出错时记录”, “关闭 paper-analyst 诊断”, “对刚才失败做脱敏复盘”, or “检查知识库健康”.
 
 `errors-only` records deterministic operation failures without asking a model to diagnose them. `developer` may also run a short, triggered retrospective, bounded by per-task token and issue budgets; per-skill settings can narrow either mode. An explicit request to record a problem is honored even when automatic capture is off.
 

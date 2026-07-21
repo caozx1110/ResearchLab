@@ -92,7 +92,13 @@ priority: normal                     # high|normal|low
 summary: ""                          # 1-2 句，AI 写入时必须 pending
 links:                               # 关联其它 unit
 - target_id: <unit-id>
-  relation: builds_on|cites|implements|...
+  relation: builds_on|cites|implements|uses_dataset|supports|contradicts|part_of|related_to|similar_to|...
+  source_locator:                    # 可选；边从当前 unit 的具体位置发出
+    kind: unit|heading|block
+    value: <heading-or-stable-block-id>
+  target_locator:                    # 可选；精确指向目标 unit 的标题或块
+    kind: unit|heading|block
+    value: <heading-or-stable-block-id>
   note: ""
 reuse_flags:                         # 是否已被下游 skill 复用
   review: false
@@ -138,7 +144,45 @@ history:                             # append_history() 写入
   artifacts: []
 ```
 
+`links` 只保存显式声明的**正向有向边**。反向关系由共享 relation registry 在读取/投影时推导，禁止再向目标 record 复制 `reverse:<relation>`。内置 inverse 为：`cites↔cited_by`、`builds_on↔extended_by`、`implements↔implemented_by`、`uses_dataset↔used_by`、`supports↔supported_by`、`contradicts↔contradicted_by`、`part_of↔contains`；`related_to`、`similar_to` 对称。旧 `reverse:*` 可读但不再写：匹配正向边时折叠，孤立旧边保留为 legacy-derived 视图并由 Obsidian audit 提示迁移。
+
+locator 省略等价于 unit 级。`heading.value` 是生成页中精确标题文本；`block.value` 必须是 Obsidian 可识别的稳定块 ID（仅拉丁字母、数字、连字符），写入时做确定性规范化。canonical claim ID 投影为 claim block；evidence block ID 由 claim ID 与 evidence 序号确定，允许 `[[unit#^block-id]]` 精确引用。locator 只改变导航精度，不改变 relation 的确认状态或 evidence 门控。
+
 `write_record()` 默认以调用方 record 携带的 `revision` 作为 expected revision：已有记录缺 revision 时 fail-closed；新记录期望 0。两个并发读者中先写者成功并递增 revision，后写者的 stale revision 必须冲突拒绝，不能静默覆盖。显式 `expected_revision` 仅用于调用方有意覆盖默认期望值。
+
+### Obsidian 派生投影 <a id="obsidian-projection"></a>
+
+`kb/` 可直接作为 Obsidian Vault。系统只管理下列派生区，不生成 `.obsidian/`：
+
+```text
+kb/obsidian/
+├── managed/
+│   ├── Home.md
+│   ├── units/<unit-id>.md
+│   ├── programs/<program-id>.md
+│   ├── topics/<topic-id>.md
+│   ├── dashboards/{All Units,Pending Review,By Topic}.base
+│   └── manifest.yaml
+├── inbox/          # 人工区，投影器不遍历/覆盖
+└── annotations/    # 人工区，投影器不遍历/覆盖
+```
+
+unit 页 frontmatter 是扁平 Obsidian Properties：`id/kind/title/aliases/status/maturity/confirmation_status/topics/programs/tags/managed_by/source_path`，并按实际关系增加 `rel_<relation>` 列表。所有 Properties 中的内部链接都是带引号的 wikilink。正文固定提供 `Overview/Metadata/Relationships/Claims` 标题；canonical claim 与 evidence quote 带稳定 block ID。
+
+`manifest.yaml`：
+
+```yaml
+schema: research-kb-obsidian/v1
+generated_at: <UTC ISO-8601>
+input_digest: <sha256 of canonical records + programs + taxonomy>
+record_count: 0
+program_count: 0
+files:
+  Home.md: <sha256>
+  units/<unit-id>.md: <sha256>
+```
+
+`files` 的 key 只能是 `managed/` 内相对路径且不得包含 absolute/`.`/`..`，manifest 不拥有自身。更新只覆盖 digest 仍匹配上一 manifest 的文件；过期清理只删除上一 manifest 明确拥有且 bytes 未漂移的普通文件。symlink、特殊类型、未登记文件与人工改动一律保留并报告。整个 managed 更新走 operation journal；manifest 最后写，意外中断后可重跑或通过恢复合同撤销。
 
 ### per-kind payload <a id="unit-payload"></a>
 

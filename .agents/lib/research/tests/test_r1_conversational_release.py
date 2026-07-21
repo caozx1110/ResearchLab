@@ -18,6 +18,7 @@ PUBLIC_VERBS = (
     "init",
     "doctor",
     "update",
+    "obsidian",
     "add",
     "ingest",
     "review",
@@ -279,7 +280,7 @@ def test_read_only_help_creates_no_kb_or_agent_protocol(tmp_path: Path) -> None:
     )
 
     assert completed.returncode == 0, completed.stderr
-    assert "kb 动词（15 个）" in completed.stdout
+    assert "kb 动词（16 个）" in completed.stdout
     assert not (tmp_path / "kb").exists()
     for token in FORBIDDEN_PUBLIC_TOKENS:
         assert token not in completed.stdout
@@ -354,7 +355,7 @@ def test_installed_copy_runs_help_without_creating_runtime_data(tmp_path: Path) 
 
     for help_result in help_results:
         assert help_result.returncode == 0, help_result.stderr
-        assert "kb 动词（15 个）" in help_result.stdout
+        assert "kb 动词（16 个）" in help_result.stdout
         assert "positional arguments" not in help_result.stdout
         assert "options:" not in help_result.stdout
         assert help_result.stderr == ""

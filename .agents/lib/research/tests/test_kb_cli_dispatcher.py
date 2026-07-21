@@ -129,9 +129,9 @@ def test_kb_help_snapshot_contains_group_headers() -> None:
     text = kb.render_help_menu()
 
     assert "# kb 快捷命令" in text
-    for header in ["kb 动词（15 个）", "纯自然语言（无 kb 动词）"]:
+    for header in ["kb 动词（16 个）", "纯自然语言（无 kb 动词）"]:
         assert f"## {header}" in text
-    for verb in ["kb help", "kb init", "kb doctor", "kb update", "kb status", "kb next", "kb find", "kb add", "kb ingest", "kb review", "kb reject", "kb recall", "kb resume", "kb undo", "kb restore"]:
+    for verb in ["kb help", "kb init", "kb doctor", "kb update", "kb obsidian update", "kb status", "kb next", "kb find", "kb add", "kb ingest", "kb review", "kb reject", "kb recall", "kb resume", "kb undo", "kb restore"]:
         assert verb in text
     assert "请基于当前知识库给我 3 个候选 idea" in text
     assert "为这个研究计划生成周报材料" in text
@@ -160,6 +160,7 @@ def test_kb_help_snapshot_contains_group_headers() -> None:
             "init",
             "doctor",
             "update",
+            "obsidian",
             "add",
             "ingest",
             "review",
@@ -182,7 +183,7 @@ def test_every_argparse_help_surface_is_conversational(argv: list[str], capsys) 
 
     assert stopped.value.code == 0
     output = capsys.readouterr().out
-    assert "kb 动词（15 个）" in output
+    assert "kb 动词（16 个）" in output
     for forbidden in (
         "--",
         "<PROJECT_ROOT>",

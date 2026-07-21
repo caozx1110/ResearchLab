@@ -24,6 +24,7 @@ from .ids import (
     build_unit_id,
 )
 from .journal import mutation_transaction
+from .relations import normalize_links
 from .paths import (
     UNIT_KIND_DIRS,
     _artifact_list,
@@ -620,7 +621,7 @@ def normalize_record_schema(record: dict[str, Any], *, project_root: Path | None
     normalized["candidate_pools"] = _slug_list(normalized.get("candidate_pools"))
     normalized["program_ids"] = _slug_list(normalized.get("program_ids"))
     normalized["artifacts"] = _artifact_list(normalized.get("artifacts"))
-    normalized["links"] = [dict(item) for item in normalized.get("links", []) if isinstance(item, dict) and item.get("target_id")]
+    normalized["links"] = normalize_links(normalized.get("links", []))
     normalized["history"] = [dict(item) for item in normalized.get("history", []) if isinstance(item, dict)]
     if not normalized["history"]:
         append_history(normalized, action="created", summary=f"Backfilled history for {kind} record.")
