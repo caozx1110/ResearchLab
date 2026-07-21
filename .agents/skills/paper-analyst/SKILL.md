@@ -18,7 +18,7 @@ description: 为 core paper unit 备料（解析源、产出待填结构）并�
 1. 从 `source-intake` 创建的 paper unit（已带 parse-cache）出发。
 2. `screen --phase prepare`：从 parse-cache 抽初筛证据摘要（带 page/section locator），产出 `screening.yaml` 待填结构（`paper_type` / `worth_deep_reading` / `judgement_reason` / `relevance_to_current_research` / `claims` 留空待 agent 填）。`paper_type` 是 agent 判断，脚本不做关键词推断；`keyword_mentions` 仅作定位线索，**不是评分**。
 3. `screen --phase verify`：校验 agent 填入的判断（含 `paper_type ∈ {method_system, benchmark, survey}`、`validate_claims` 结构 + `verify_claim_evidence` 逐字证据）后落盘；不合法则拒绝并指出问题。
-4. `complete-note --phase prepare`：按 `quick_screen.paper_type` 产出对应的**五要素待填骨架**；缺失或未知类型默认 `method_system`，每要素留空、需 agent 填内容 + ≥1 条 `evidence_refs`。
+4. `complete-note --phase prepare`：新 intake 必须先有 evidence-verified screening，再按 `quick_screen.paper_type` 产出对应的**五要素待填骨架**；prepared/unverified screening 一律 fail-closed。已验证初筛仍无法分类，或旧单元已有 note 产物但没有类型时，才按 `method_system` 兼容；每要素留空、需 agent 填内容 + ≥1 条 `evidence_refs`。
 5. `complete-note --phase verify`：逐要素校验（结构 + 逐字证据），全过才写 `note.md` + `core_content`（过 `has_substantive_content`，可被确认）；任一要素空/无据/造据则拒绝并点名。
 6. `prewarm-cache` / `extract-figures` / `refresh-structure`：纯机械搬运（解析、裁图、结构提示）。
 7. AI judgement 默认保持 `pending_user_confirmation`；确认走已有空心门（`confirm`）。
@@ -29,7 +29,7 @@ description: 为 core paper unit 备料（解析源、产出待填结构）并�
 - `benchmark`：motivation / task_design / metrics / coverage_limitation / insight
 - `survey`：scope / taxonomy / trends / gaps / insight
 
-若旧 record 没有 `quick_screen.paper_type`，按 `method_system` 处理，保持原五要素行为。类型分类来自 runtime agent 的初筛判断；脚本只提供槽位、校验枚举并选择结构。
+若初筛已验证但无法归入三类，或旧 record 已有 note 产物但没有 `quick_screen.paper_type`，按 `method_system` 处理，保持原五要素行为；新单元不得借此兜底绕过初筛验证。类型分类来自 runtime agent 的初筛判断；脚本只提供槽位、校验枚举并选择结构。
 
 每个 required element = 一条 judgement-class claim，**必须**带 ≥1 条 `evidence_refs`：
 

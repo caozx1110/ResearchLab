@@ -1,7 +1,7 @@
 """Source backup/archival, duplicate detection, source-search staging, and storage layout sync.
 
 Dual-source ingestion (SSOT 3.1 decision A, B4): arxiv sources prefer the HTML
-edition (arxiv.org/html -> ar5iv -> abs fallback) so no PDF parsing is needed and
+edition (arxiv.org/html -> ar5iv Labs -> abs fallback) so no PDF parsing is needed and
 locators are section/anchor; non-arxiv PDFs are downloaded as real bytes and parsed
 with the always-available lightweight PyMuPDF4LLM backend with page=N locators.
 Every archived source persists real bytes + a real sha256 and reports an explicit
@@ -702,10 +702,14 @@ def _arxiv_id_from_source(source: str) -> str:
 
 
 def _arxiv_html_candidates(arxiv_id: str) -> list[dict[str, str]]:
-    """Ordered HTML editions: native arxiv HTML -> ar5iv -> abs fallback."""
+    """Ordered HTML editions: native arxiv HTML -> ar5iv Labs -> abs fallback."""
     return [
         {"url": f"https://arxiv.org/html/{arxiv_id}", "edition": "arxiv-html", "degraded": ""},
-        {"url": f"https://ar5iv.org/abs/{arxiv_id}", "edition": "ar5iv", "degraded": ""},
+        {
+            "url": f"https://ar5iv.labs.arxiv.org/html/{arxiv_id}",
+            "edition": "ar5iv-labs",
+            "degraded": "",
+        },
         {
             "url": f"https://arxiv.org/abs/{arxiv_id}",
             "edition": "arxiv-abs",
@@ -1331,7 +1335,7 @@ def backup_source(
     """Archive a source as real bytes + real sha256, returning an explicit status.
 
     Dispatch (SSOT 3.1 decision A / B4):
-      * arxiv URL or id  -> HTML-first (arxiv.org/html -> ar5iv -> abs), section locators
+      * arxiv URL or id  -> HTML-first (arxiv.org/html -> ar5iv Labs -> abs), section locators
       * other URL, PDF   -> real download + PyMuPDF4LLM page chunks, page=N locators
       * other URL, HTML  -> real download + section chunks, section/anchor locators
       * local file/dir   -> copy + sha256; local PDFs also get page=N chunks

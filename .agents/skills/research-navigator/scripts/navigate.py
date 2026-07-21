@@ -93,11 +93,18 @@ def render_navigation(records: list[dict]) -> str:
 
 def render_reading_list(records: list[dict]) -> str:
     papers = [item for item in records if item.get("kind") == "paper"]
+    datasets = [item for item in records if item.get("kind") == "dataset"]
     blogs = [item for item in records if item.get("kind") == "blog"]
     lines = ["# Current Reading", "", "## Papers", ""]
     for item in papers[:12]:
         lines.append(f"- `{item['id']}` · {item['title']} · confirm={item.get('confirmation_status')}")
     if len(lines) == 4:
+        lines.append("- 暂无")
+    lines.extend(["", "## Datasets", ""])
+    start = len(lines)
+    for item in datasets[:12]:
+        lines.append(f"- `{item['id']}` · {item['title']} · confirm={item.get('confirmation_status')}")
+    if len(lines) == start:
         lines.append("- 暂无")
     lines.extend(["", "## Blogs", ""])
     start = len(lines)

@@ -167,7 +167,7 @@ _RUNTIME_FAILURE_PUBLIC_SUMMARY = "知识库操作未完成。"
 
 
 Handler = Callable[[argparse.Namespace, Path], int]
-REVIEW_KIND_CHOICES = ("paper", "repo", "blog", "idea", "experiment")
+REVIEW_KIND_CHOICES = ("paper", "repo", "dataset", "blog", "idea", "experiment")
 LANG_CHOICES = ("zh", "en")
 AUTO_COMMIT_CHOICES = ("manual", "milestone", "aggressive")
 AUTO_SCREEN_CHOICES = ("true", "false")
@@ -445,6 +445,7 @@ _MARKDOWN_NEUTRAL_TRANSLATION = str.maketrans(
 PUBLIC_KIND_LABELS = {
     "paper": "论文",
     "repo": "代码仓",
+    "dataset": "数据集",
     "blog": "博客",
     "idea": "研究想法",
     "experiment": "实验",
@@ -453,6 +454,7 @@ PUBLIC_KIND_LABELS = {
 PUBLIC_KIND_COUNT_PHRASES = {
     "paper": "篇论文",
     "repo": "个代码仓",
+    "dataset": "个数据集",
     "blog": "篇博客",
     "idea": "个研究想法",
     "experiment": "个实验",
@@ -1539,6 +1541,8 @@ def infer_add_kind(source: str, root: Path | None = None) -> str:
     if lowered.startswith(("http://", "https://")):
         if "arxiv.org" in lowered or path_part.endswith(".pdf"):
             return "paper"
+        if "huggingface.co/datasets/" in lowered:
+            return "dataset"
         if "github.com" in lowered or "gitlab.com" in lowered or "bitbucket.org" in lowered:
             return "repo"
         return "blog"
@@ -1600,10 +1604,10 @@ def handle_add(args: argparse.Namespace, root: Path) -> int:
 # --------------------------------------------------------------------------- #
 # ingest: chain the scriptable prefix of the ingestion pipeline (SSOT §7).      #
 #                                                                              #
-# `kb ingest <src>` runs intake add -> analyzer prepare and STOPS at prepare.   #
-# It never auto-runs verify: a script cannot fill understanding — the session   #
-# agent reads the parse-cache, fills the elements with verbatim evidence, then  #
-# runs the verify command printed in the aggregated NEXT FOR AGENT line.        #
+# `kb ingest <src>` runs intake add -> first analyzer prepare and STOPS there.  #
+# For papers that first prepare is screening: the session agent must verify the #
+# agent-authored paper_type before preparing the type-specific note. Scripts     #
+# never auto-run verify because they cannot fill understanding.                  #
 # --------------------------------------------------------------------------- #
 
 # Governance ceiling for ingest safe auto-steps, mirroring research-orchestrator's
@@ -1615,8 +1619,9 @@ INGEST_GOVERNANCE_MAX_AUTO_STEPS = frozenset({"screen", "build-index", "refresh"
 # "screen"-class safe step; prepare (fillable skeleton) is a "generate-note"-class
 # safe step. Walk in order; a narrowed scope stops the chain at the first gap.
 INGEST_ANALYZER: dict[str, tuple[str, str, str]] = {
-    "paper": (".agents/skills/paper-analyst/scripts/paper.py", "complete-note", "--paper-id"),
+    "paper": (".agents/skills/paper-analyst/scripts/paper.py", "screen", "--paper-id"),
     "repo": (".agents/skills/repo-analyst/scripts/repo.py", "map-capability", "--repo-id"),
+    "dataset": (".agents/skills/dataset-analyst/scripts/dataset.py", "profile", "--dataset-id"),
     "blog": (".agents/skills/blog-analyst/scripts/blog.py", "complete-note", "--blog-id"),
 }
 
@@ -1697,7 +1702,8 @@ def handle_ingest(args: argparse.Namespace, root: Path) -> int:
     # Step 2: analyzer prepare (safe step gated by "generate-note") — produces the
     # fillable skeleton. NEVER verify (a script cannot fill understanding).
     if "generate-note" not in scope:
-        print(f"资料已入库为 {public_unit_id}；当前自动化偏好暂停了深读准备。")
+        paused_stage = "初筛准备" if kind == "paper" else "深读准备"
+        print(f"资料已入库为 {public_unit_id}；当前自动化偏好暂停了{paused_stage}。")
         relative_script, verb, id_flag = INGEST_ANALYZER[kind]
         set_protocol_status("paused_by_autonomy", unit_id=unit_id, source_kind=kind)
         add_agent_action(
@@ -1715,27 +1721,64 @@ def handle_ingest(args: argparse.Namespace, root: Path) -> int:
         stream=False,
     )
     if prepare.returncode != 0:
-        print("资料已入库，但深读准备未完成；详细诊断已保留给 Agent。")
+        failed_stage = "初筛准备" if kind == "paper" else "深读准备"
+        print(f"资料已入库，但{failed_stage}未完成；详细诊断已保留给 Agent。")
         set_protocol_status("error", unit_id=unit_id, source_kind=kind, stage="prepare")
         return prepare.returncode
 
-    print(f"资料已入库并备好深读骨架，条目编号是 {public_unit_id}。Agent 接下来会补全逐字证据并校验；需要判断时再请你拍板。")
-    verify_arguments = [verb, id_flag, unit_id, "--phase", "verify"]
-    remaining_steps: list[dict[str, object]] = [
-        {
-            "step": "fill_grounded_elements",
-            "source": "parse_cache",
-            "requirements": ["verbatim_quote", "locator"],
-        },
-        {"step": "verify", "owner": relative_script, "arguments": verify_arguments},
-    ]
-    if kind == "paper" and "refresh" in scope:
-        remaining_steps.extend(
-            [
-                {"step": "extract_figures", "owner": relative_script, "arguments": ["extract-figures", id_flag, unit_id]},
-                {"step": "refresh_structure", "owner": relative_script, "arguments": ["refresh-structure", id_flag, unit_id]},
-            ]
+    if kind == "paper":
+        print(
+            f"资料已入库并备好初筛骨架，条目编号是 {public_unit_id}。"
+            "Agent 接下来会先用逐字证据确定论文类型，再生成对应的深读笔记；需要判断时再请你拍板。"
         )
+    else:
+        print(f"资料已入库并备好深读骨架，条目编号是 {public_unit_id}。Agent 接下来会补全逐字证据并校验；需要判断时再请你拍板。")
+    verify_arguments = [verb, id_flag, unit_id, "--phase", "verify"]
+    if kind == "paper":
+        note_prepare_arguments = ["complete-note", id_flag, unit_id, "--phase", "prepare"]
+        note_verify_arguments = ["complete-note", id_flag, unit_id, "--phase", "verify"]
+        remaining_steps: list[dict[str, object]] = [
+            {
+                "step": "fill_grounded_screening",
+                "source": "parse_cache",
+                "requirements": [
+                    "paper_type",
+                    "worth_deep_reading",
+                    "judgement_reason",
+                    "relevance_to_current_research",
+                    "verbatim_quote",
+                    "locator",
+                ],
+            },
+            {"step": "verify_screening", "owner": relative_script, "arguments": verify_arguments},
+            {
+                "step": "prepare_type_specific_note",
+                "owner": relative_script,
+                "arguments": note_prepare_arguments,
+                "requires": "verified_screening",
+            },
+            {
+                "step": "fill_grounded_elements",
+                "source": "parse_cache",
+                "element_set_source": "verified_screening.paper_type_or_method_system_fallback",
+                "requirements": ["verbatim_quote", "locator"],
+            },
+            {
+                "step": "verify_note",
+                "owner": relative_script,
+                "arguments": note_verify_arguments,
+                "includes_configured_post_note_actions": True,
+            },
+        ]
+    else:
+        remaining_steps = [
+            {
+                "step": "fill_grounded_elements",
+                "source": "parse_cache",
+                "requirements": ["verbatim_quote", "locator"],
+            },
+            {"step": "verify", "owner": relative_script, "arguments": verify_arguments},
+        ]
     remaining_steps.append(
         {
             "step": "request_user_confirmation",
@@ -1957,7 +2000,7 @@ def workspace_init_complete(root: Path) -> bool:
     kb = kb_root(root)
     required_directories = [
         kb / "units" / unit_dir
-        for unit_dir in ("papers", "repos", "blogs", "ideas", "experiments")
+        for unit_dir in ("papers", "repos", "datasets", "blogs", "ideas", "experiments")
     ] + [
         kb / "programs",
         kb / "user" / "reading-lists",
@@ -2221,6 +2264,7 @@ def print_review_item(record: dict, projection: Mapping[str, object], root: Path
     kind = {
         "paper": "论文",
         "repo": "代码仓",
+        "dataset": "数据集",
         "blog": "博客",
         "idea": "研究想法",
         "experiment": "实验",
@@ -2405,8 +2449,8 @@ def register_doctor(subparsers: argparse._SubParsersAction[argparse.ArgumentPars
 
 def register_add(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     parser = subparsers.add_parser("add", help="轻量入库 source")
-    parser.add_argument("source", metavar="<链接或路径>", help="论文、代码仓、博客链接或本地文件路径")
-    parser.add_argument("--kind", choices=["paper", "repo", "blog"], help=argparse.SUPPRESS)
+    parser.add_argument("source", metavar="<链接或路径>", help="论文、代码仓、数据集、博客链接或本地文件路径")
+    parser.add_argument("--kind", choices=["paper", "repo", "dataset", "blog"], help=argparse.SUPPRESS)
     parser.set_defaults(handler=handle_add)
 
 
@@ -2416,8 +2460,8 @@ def register_ingest(subparsers: argparse._SubParsersAction[argparse.ArgumentPars
         help="入库资料并备好待补全的分析骨架",
         description="资料会先安全入库，再交给 Agent 补全有证据的理解。",
     )
-    parser.add_argument("source", metavar="<链接或路径>", help="论文、代码仓、博客链接或本地文件路径")
-    parser.add_argument("--kind", choices=["paper", "repo", "blog"], help=argparse.SUPPRESS)
+    parser.add_argument("source", metavar="<链接或路径>", help="论文、代码仓、数据集、博客链接或本地文件路径")
+    parser.add_argument("--kind", choices=["paper", "repo", "dataset", "blog"], help=argparse.SUPPRESS)
     parser.set_defaults(handler=handle_ingest)
 
 

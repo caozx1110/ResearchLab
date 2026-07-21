@@ -21,6 +21,7 @@ from .common import (
 UNIT_KIND_DIRS = {
     "paper": "papers",
     "repo": "repos",
+    "dataset": "datasets",
     "blog": "blogs",
     "idea": "ideas",
     "experiment": "experiments",

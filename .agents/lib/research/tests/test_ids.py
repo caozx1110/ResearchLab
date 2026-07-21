@@ -22,7 +22,14 @@ def test_canonical_unit_id_uses_at_least_six_hash_chars() -> None:
 
 def test_is_canonical_unit_id_rejects_invalid_ids() -> None:
     assert not is_canonical_unit_id("paper", "r-openvla-123456")
-    assert not is_canonical_unit_id("dataset", "d-example-123456")
+    assert not is_canonical_unit_id("dataset", "r-example-123456")
+
+
+def test_dataset_unit_id_is_first_class() -> None:
+    unit_id = canonical_unit_id("dataset", title="HIW-500")
+
+    assert unit_id.startswith("d-hiw-500-")
+    assert is_canonical_unit_id("dataset", unit_id)
 
 
 def test_canonical_unit_id_with_short_hash_falls_back_to_title_hash() -> None:

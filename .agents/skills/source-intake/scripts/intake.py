@@ -36,7 +36,6 @@ from research.core import (
     ensure_workspace,
     load_runtime_preferences,
     load_search_stage,
-    locate_record,
     mark_search_candidate,
     checkpoint_and_report,
     kb_root,
@@ -70,7 +69,7 @@ def research_python() -> str:
 
 def confirm_command(record: dict) -> str:
     python = research_python()
-    return shared_confirm_command(record, command_prefix=python, direct_kinds=("paper", "repo", "blog"))
+    return shared_confirm_command(record, command_prefix=python, direct_kinds=("paper", "repo", "dataset", "blog"))
 
 
 def infer_paper_metadata(root: Path, source: str) -> dict:
@@ -119,23 +118,9 @@ def run_paper_command(root: Path, *args: str) -> list[str]:
     return output
 
 
-def should_auto_complete_note(record: dict, preferences: dict) -> bool:
-    if not bool(preferences.get("auto_complete_note")):
-        return False
-    condition = str(preferences.get("auto_complete_note_condition") or "suggested_worth_reading")
-    quick = record.get("payload", {}).get("quick_screen", {})
-    worth = str(quick.get("worth_deep_reading") or "")
-    relevance = str(quick.get("relevance_to_current_research") or "")
-    if condition == "after_screen":
-        return True
-    if condition == "strong_relevance":
-        return relevance in {"strong", "moderate"}
-    return worth in {"yes", "maybe"}
-
-
 def guidance_hints(kind: str, preferences: dict, *, has_pdf: bool, note_created: bool) -> list[str]:
     if kind == "paper":
-        next_step = "已入库+筛选，下一步：运行 kb next，或让 AI 判断是否值得细读。"
+        next_step = "已入库并备好初筛，下一步：运行 kb next，或让 AI 用逐字证据完成类型与深读判断。"
     elif kind == "repo":
         next_step = "已入库，下一步：运行 kb next，或让 AI 扫描结构并判断复用价值。"
     elif kind == "blog":
@@ -169,10 +154,16 @@ def guidance_hints(kind: str, preferences: dict, *, has_pdf: bool, note_created:
 # kind -> (analyzer skill script, prepare verb, id flag). Used only to build the
 # machine-readable NEXT FOR AGENT navigation line (SSOT §7); no judgement here.
 ANALYZER_PREPARE: dict[str, tuple[str, str, str]] = {
-    "paper": (".agents/skills/paper-analyst/scripts/paper.py", "complete-note", "--paper-id"),
+    "paper": (".agents/skills/paper-analyst/scripts/paper.py", "screen", "--paper-id"),
     "repo": (".agents/skills/repo-analyst/scripts/repo.py", "map-capability", "--repo-id"),
+    "dataset": (".agents/skills/dataset-analyst/scripts/dataset.py", "profile", "--dataset-id"),
     "blog": (".agents/skills/blog-analyst/scripts/blog.py", "complete-note", "--blog-id"),
 }
+
+
+def ingest_chain_active() -> bool:
+    """Whether kb ingest owns the analyzer ordering for this intake."""
+    return bool(str(os.environ.get("RESEARCH_INGEST_CHAIN") or "").strip())
 
 
 def next_for_agent_intake(root: Path, kind: str, record_id: str) -> str:
@@ -185,7 +176,7 @@ def next_for_agent_intake(root: Path, kind: str, record_id: str) -> str:
     """
     if kind not in ANALYZER_PREPARE:
         return f"NEXT FOR AGENT: unit {record_id} landed; run the matching analyzer prepare, then fill + verify."
-    if str(os.environ.get("RESEARCH_INGEST_CHAIN") or "").strip():
+    if ingest_chain_active():
         return (
             f"NEXT FOR AGENT: intake done for {record_id}; kb ingest auto-continues to {kind} prepare "
             f"— read that prepare's NEXT FOR AGENT line to fill elements + verify."
@@ -201,12 +192,12 @@ def build_parser() -> argparse.ArgumentParser:
     add_project_root_argument(parser)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    add = subparsers.add_parser("add", help="Add a paper, repo, or blog source")
+    add = subparsers.add_parser("add", help="Add a paper, repo, dataset, or blog source")
     add_intake_add_arguments(add, include_stage_options=True)
 
     for search_name in ("search", "stage-search"):
         stage = subparsers.add_parser(search_name, help="Record search candidates before canonical intake")
-        stage.add_argument("--kind", required=True, choices=["paper", "repo", "blog"])
+        stage.add_argument("--kind", required=True, choices=["paper", "repo", "dataset", "blog"])
         stage.add_argument("--query", required=True)
         stage.add_argument("--stage-id", default="")
         stage.add_argument("--candidate-url", action="append", default=[])
@@ -402,7 +393,10 @@ def _execute_intake_transaction(
         if path is None:
             raise RuntimeError("Source materialization completed without a canonical record path.")
 
-        if args.kind == "paper":
+        # Standalone add keeps its preference-driven preparation.  kb ingest owns
+        # the stricter paper order (screen verify before type-specific note prepare),
+        # so intake must not create competing analyzer scaffolds inside that chain.
+        if args.kind == "paper" and not ingest_chain_active():
             if bool(paper_preferences.get("parse_cache_prewarm_on_intake", True)) and not bool(
                 paper_preferences.get("auto_screen_on_intake", True)
             ):
@@ -414,42 +408,9 @@ def _execute_intake_transaction(
                 auto_outputs.extend(
                     run_paper_command(root, "screen", "--paper-id", record["id"], "--mode", "auto", "--defer-post-actions")
                 )
-            if args.maturity == "complete":
-                note_created = True
-                auto_outputs.extend(
-                    run_paper_command(
-                        root,
-                        "complete-note",
-                        "--paper-id",
-                        record["id"],
-                        "--mode",
-                        "auto",
-                        "--defer-post-actions",
-                    )
-                )
-            elif should_screen:
-                refreshed_record, _ = locate_record(root, record["id"])
-                if should_auto_complete_note(refreshed_record, paper_preferences):
-                    note_created = True
-                    auto_outputs.extend(
-                        run_paper_command(
-                            root,
-                            "complete-note",
-                            "--paper-id",
-                            record["id"],
-                            "--mode",
-                            "auto",
-                            "--defer-post-actions",
-                        )
-                    )
-            if note_created and bool(paper_preferences.get("auto_extract_figures_after_note")):
-                auto_outputs.extend(
-                    run_paper_command(root, "extract-figures", "--paper-id", record["id"], "--defer-post-actions")
-                )
-            if note_created and bool(paper_preferences.get("auto_refresh_structure_after_note", True)):
-                auto_outputs.extend(
-                    run_paper_command(root, "refresh-structure", "--paper-id", record["id"], "--defer-post-actions")
-                )
+            # Complete-note preparation is deliberately deferred until the runtime
+            # agent fills and verifies screening.paper_type.  No preference or
+            # maturity shortcut may create a method-shaped scaffold before that.
 
         _build_index_transaction(root)
         if args.stage_id and args.candidate_id:
@@ -611,6 +572,18 @@ def main() -> int:
     elif args.kind == "repo":
         record["payload"]["basic_info"]["name"] = title
         record["payload"]["basic_info"]["url"] = source if source.startswith("http") else ""
+        structure = record["payload"].setdefault("structure", {})
+        if str(canonical_source_info.get("backup_kind") or "") == "directory":
+            structure["scan_applicability"] = "applicable"
+            structure["scan_reason"] = "local_source_tree"
+        else:
+            structure["scan_applicability"] = "unavailable"
+            structure["scan_reason"] = "source_tree_not_archived"
+    elif args.kind == "dataset":
+        record["payload"]["basic_info"]["name"] = title
+        record["payload"]["basic_info"]["url"] = source if source.startswith("http") else ""
+        if "huggingface.co/datasets/" in source.lower():
+            record["payload"]["basic_info"]["platform"] = "huggingface"
     else:
         record["payload"]["basic_info"]["title"] = title
         record["payload"]["basic_info"]["url"] = source if source.startswith("http") else ""

@@ -8,9 +8,9 @@ from pathlib import Path
 
 import pytest
 
-from research.common import append_list_item, write_yaml_if_changed
+from research.common import append_list_item, load_yaml, write_yaml_if_changed
 from research.learnings import log_learning, review_learning
-from research.core import record_path
+from research.core import iter_records, record_path, record_workflow_state
 
 
 def _project_root() -> Path:
@@ -533,6 +533,163 @@ def test_orchestrator_blog_only_source_ready_is_a_real_next_item(tmp_path: Path)
     assert "KB 为空" not in text
     assert "loose:" not in text
     assert "kb next" not in text
+
+
+def test_confirmed_repo_does_not_reenter_next_for_optional_structure_scan(tmp_path: Path) -> None:
+    orchestrate = _load_script("research-orchestrator", "orchestrate.py", "orchestrator_done_repo_step")
+    root = _make_workspace(tmp_path)
+    write_yaml_if_changed(
+        record_path(root, "repo", "r-confirmed-123456"),
+        {
+            "id": "r-confirmed-123456",
+            "kind": "repo",
+            "title": "Confirmed Repo",
+            "status": "active",
+            "maturity": "complete",
+            "confirmation_status": "confirmed",
+            "needs_human_confirmation": False,
+            "information_types": ["fact"],
+            "summary": "Confirmed metadata.",
+            "tags": [],
+            "topics": [],
+            "candidate_pools": [],
+            "source": {"original_uri": "https://example.com/repo", "file_hash": ""},
+            "payload": {
+                "structure": {"scan_status": "not_started", "scan_applicability": "applicable"},
+                "state": {"capability_fill_status": "pending_user_confirmation"},
+            },
+        },
+    )
+
+    record = iter_records(root, kind="repo")[0]
+
+    assert record_workflow_state(record) == "done"
+    assert orchestrate.safe_unit_step(record) is None
+    assert orchestrate.program_dashboard_items(root) == []
+
+
+def test_persisted_program_next_action_outranks_loose_maintenance(tmp_path: Path) -> None:
+    orchestrate = _load_script("research-orchestrator", "orchestrate.py", "orchestrator_program_continuation")
+    root = _make_workspace(tmp_path)
+    orchestrate.ensure_program_files(root, "humanoid-survey")
+    state = orchestrate.load_state(root, "humanoid-survey")
+    state.update(
+        {
+            "program_id": "humanoid-survey",
+            "stage": "literature-synthesis",
+            "goal": "形成横向综述与技术路线图",
+            "next_actions": ["生成横向综述与技术路线图"],
+        }
+    )
+    write_yaml_if_changed(orchestrate.state_path(root, "humanoid-survey"), state)
+    write_yaml_if_changed(
+        record_path(root, "paper", "p-loose-654321"),
+        {
+            "id": "p-loose-654321",
+            "kind": "paper",
+            "title": "Loose Paper",
+            "status": "active",
+            "maturity": "lightweight",
+            "confirmation_status": "auto_confirmed",
+            "needs_human_confirmation": False,
+            "information_types": ["fact"],
+            "summary": "",
+            "tags": [],
+            "topics": [],
+            "candidate_pools": [],
+            "source": {"original_uri": "", "file_hash": ""},
+            "payload": {"quick_screen": {}, "state": {"full_note_status": "not_started"}},
+        },
+    )
+
+    items = orchestrate.program_dashboard_items(root)
+
+    assert items[0]["program_id"] == "humanoid-survey"
+    assert items[0]["next_action"] == "生成横向综述与技术路线图"
+    assert items[0]["score"] >= 50
+    assert any(item["stage"] == "loose-unit" for item in items[1:])
+
+
+def test_next_action_owner_command_persists_and_resolves_durable_work(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    orchestrate = _load_script("research-orchestrator", "orchestrate.py", "orchestrator_next_action_owner")
+    root = _make_workspace(tmp_path)
+    action = "生成横向综述与技术路线图"
+    checkpoints: list[dict] = []
+
+    def checkpoint(*args, **kwargs):
+        checkpoints.append(kwargs)
+        return {"committed": False}
+
+    monkeypatch.setattr(orchestrate, "checkpoint_and_report", checkpoint)
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "orchestrate.py",
+            "--root",
+            str(root),
+            "init-program",
+            "--program-id",
+            "humanoid-survey",
+            "--question",
+            "这批工作有哪些技术路线？",
+            "--goal",
+            "形成横向综述与技术路线图",
+        ],
+    )
+    assert orchestrate.main() == 0
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "orchestrate.py",
+            "--root",
+            str(root),
+            "add-next-action",
+            "--program-id",
+            "humanoid-survey",
+            "--action",
+            action,
+        ],
+    )
+    assert orchestrate.main() == 0
+
+    state = load_yaml(orchestrate.state_path(root, "humanoid-survey"))
+    assert state["next_actions"] == [action]
+    assert orchestrate.program_dashboard_items(root)[0]["next_action"] == action
+    state_bytes = orchestrate.state_path(root, "humanoid-survey").read_bytes()
+    event_bytes = orchestrate.reporting_events_path(root, "humanoid-survey").read_bytes()
+    assert orchestrate.main() == 0
+    assert orchestrate.state_path(root, "humanoid-survey").read_bytes() == state_bytes
+    assert orchestrate.reporting_events_path(root, "humanoid-survey").read_bytes() == event_bytes
+    assert len(checkpoints) == 2
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "orchestrate.py",
+            "--root",
+            str(root),
+            "resolve-next-action",
+            "--program-id",
+            "humanoid-survey",
+            "--action",
+            action,
+        ],
+    )
+    assert orchestrate.main() == 0
+    assert load_yaml(orchestrate.state_path(root, "humanoid-survey"))["next_actions"] == []
+    state_bytes = orchestrate.state_path(root, "humanoid-survey").read_bytes()
+    event_bytes = orchestrate.reporting_events_path(root, "humanoid-survey").read_bytes()
+    assert orchestrate.main() == 0
+    assert orchestrate.state_path(root, "humanoid-survey").read_bytes() == state_bytes
+    assert orchestrate.reporting_events_path(root, "humanoid-survey").read_bytes() == event_bytes
+    assert len(checkpoints) == 3
 
 
 def test_orchestrator_dashboard_detects_loose_unscreened_unit(tmp_path: Path) -> None:

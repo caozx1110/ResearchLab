@@ -136,9 +136,9 @@ def test_backup_source_arxiv_falls_back_when_html_missing(
 
     payload = core.backup_source(tmp_path, "paper", "p-arxiv-old-1234", "https://arxiv.org/abs/1301.3781")
 
-    # Native HTML 404 -> ar5iv fallback still yields a section-located HTML source.
+    # Native HTML 404 -> direct ar5iv Labs fallback still yields section-located HTML.
     assert payload["backup_status"] == "ok"
-    assert payload["resolved_url"] == "https://ar5iv.org/abs/1301.3781"
+    assert payload["resolved_url"] == "https://ar5iv.labs.arxiv.org/html/1301.3781"
     assert payload["locator_kind"] == "section"
 
 

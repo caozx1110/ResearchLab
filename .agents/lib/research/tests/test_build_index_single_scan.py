@@ -93,9 +93,10 @@ def test_build_index_output_stays_byte_stable(tmp_path: Path, monkeypatch) -> No
         "  summary: Beta Repo\n"
         "  path: kb/units/repos/r-beta-123456/record.yaml\n"
         "counts:\n"
-        "  paper: 1\n"
-        "  repo: 1\n"
-        "  blog: 0\n"
+            "  paper: 1\n"
+            "  repo: 1\n"
+            "  dataset: 0\n"
+            "  blog: 0\n"
         "  idea: 0\n"
         "  experiment: 0\n"
     )
@@ -103,9 +104,11 @@ def test_build_index_output_stays_byte_stable(tmp_path: Path, monkeypatch) -> No
         "# Research KB Index\n\n"
         "## Papers\n\n"
         "- `p-alpha-123456` · Alpha Paper · status=active · maturity=lightweight · confirm=auto_confirmed · pools=current-reading\n\n"
-        "## Repos\n\n"
-        "- `r-beta-123456` · Beta Repo · status=active · maturity=lightweight · confirm=auto_confirmed · pools=current-reading\n\n"
-        "## Blogs\n\n"
+            "## Repos\n\n"
+            "- `r-beta-123456` · Beta Repo · status=active · maturity=lightweight · confirm=auto_confirmed · pools=current-reading\n\n"
+            "## Datasets\n\n"
+            "- 暂无条目\n\n"
+            "## Blogs\n\n"
         "- 暂无条目\n\n"
         "## Ideas\n\n"
         "- 暂无条目\n\n"
@@ -114,4 +117,4 @@ def test_build_index_output_stays_byte_stable(tmp_path: Path, monkeypatch) -> No
     )
 
     index = load_yaml(yaml_path, default={})
-    assert index["counts"] == {"paper": 1, "repo": 1, "blog": 0, "idea": 0, "experiment": 0}
+    assert index["counts"] == {"paper": 1, "repo": 1, "dataset": 0, "blog": 0, "idea": 0, "experiment": 0}

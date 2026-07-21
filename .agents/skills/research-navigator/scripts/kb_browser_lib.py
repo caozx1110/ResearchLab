@@ -526,7 +526,7 @@ def build_workspace_profile(project_root: Path) -> dict[str, Any]:
 
 def build_literature_items(project_root: Path) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
-    for record in _v2_records(project_root, "paper", "blog"):
+    for record in _v2_records(project_root, "paper", "dataset", "blog"):
         unit_id = str(record.get("id") or "")
         kind = str(record.get("kind") or "")
         payload = _safe_dict(record.get("payload"))
@@ -535,7 +535,7 @@ def build_literature_items(project_root: Path) -> list[dict[str, Any]]:
         note_path = _first_existing_unit_file(
             project_root,
             record,
-            ["note.md", "notes.md", "screening.md", "analysis.md", "detailed-notes.md"],
+            ["note.md", "dataset-note.md", "notes.md", "screening.md", "analysis.md", "detailed-notes.md"],
         )
         record_file = _record_yaml_path(project_root, record)
         authors = normalize_list(basic.get("authors"))
@@ -548,7 +548,7 @@ def build_literature_items(project_root: Path) -> list[dict[str, Any]]:
                 "year": _numeric_year(_first_nonempty(basic.get("year"), record.get("year"))),
                 "authors": authors,
                 "short_summary": record_summary(record),
-                "source_kind": "paper-unit" if kind == "paper" else "blog-unit",
+                "source_kind": f"{kind}-unit",
                 "canonical_url": _first_nonempty(
                     basic.get("source_url"),
                     basic.get("url"),

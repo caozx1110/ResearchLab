@@ -5,7 +5,7 @@ description: 管理 knowledge base 的统一 schema、索引、链接、taxonomy
 
 # Knowledge Base Manager
 
-当任务是在维护知识单元协议、索引、治理目录、链接或 lifecycle，而不是深读某一篇 paper / repo / blog 时，使用这个 skill。
+当任务是在维护知识单元协议、索引、治理目录、链接或 lifecycle，而不是深读某一篇 paper / repo / dataset / blog 时，使用这个 skill。
 
 ## 所有权
 
@@ -16,11 +16,13 @@ description: 管理 knowledge base 的统一 schema、索引、链接、taxonomy
 
 任何判断必须保留原 epistemic type。脚本只搬运、验证和过门，不替 Agent 生成结论。
 
+历史上误存为 repo 的 Hugging Face dataset 只能走本 owner 的显式 dataset migration：默认先给 dry-run 计划，确认 apply 后在一个 journaled transaction 内改 ID、目录与引用，并支持 undo。旧 confirmation 只保留为审计记录；因为 subject kind/id 已改变，dataset canonical judgement 必须重新填证据、verify 并由用户确认。更新安装包不得静默迁移真实 KB。
+
 ## Review classifier
 
 Public review inbox 只包含真正 `ready_for_review` 且仍待用户确认的 knowledge-unit 判断：
 
-- paper/blog/repo 的 `source_ready`、`awaiting_agent_fill`、`ready_to_verify`、`failed_retryable` 一律不进入人工 inbox。
+- paper/repo/dataset/blog 的 `source_ready`、`awaiting_agent_fill`、`ready_to_verify`、`failed_retryable` 一律不进入人工 inbox。
 - 旧记录没有 classifier 字段时保持兼容，但 prepared shell 仍排除；paper 的 `not_started` 可能承载有效 screening 判断，不能误删。
 - `find`、public `kb review` 与 batch confirm 必须消费同一筛选结果。
 - 当前 inbox 只覆盖 knowledge units；experiment diagnosis、program decision 与 learning 的待确认项由各自 owner 管理，公开说明必须诚实。

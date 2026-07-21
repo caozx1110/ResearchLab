@@ -63,6 +63,7 @@ REQUIRED_EVIDENCE_REF_FIELDS = ("source_unit_id", "artifact", "locator", "quote"
 CONFIRMABLE_CONTENT_SECTIONS: dict[str, tuple[str, ...]] = {
     "paper": ("core_content",),
     "repo": ("capability",),
+    "dataset": ("profile", "composition", "access", "quality"),
     "blog": ("content",),
     "idea": ("problem", "hypothesis"),
     "experiment": ("results", "diagnosis"),

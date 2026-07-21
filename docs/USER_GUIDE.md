@@ -4,7 +4,7 @@
 
 它不是预装好的知识库。安装后，能力包与研究数据分开保存。AI 负责提取、整理、追踪和汇总；你负责判断、确认和拍板。
 
-当前候选版本是 **`0.2.0-rc.1`**。它已通过完整本地测试套件和冷启动安装副本验收，达到项目定义的本地 release-candidate 质量；但它不是 stable 或 GA，也尚未 tag/publish。正式打发布 tag 前，仍须让 hosted Linux/macOS CI matrix 全绿；当前不承诺兼容性或响应时限 SLA。
+当前候选版本是 **`0.2.0-rc.2`**。它已通过完整本地测试套件和真实 copy-project 升级冒烟，达到项目定义的本地 release-candidate 质量；但它不是 stable 或 GA，也尚未 tag/publish。正式打发布 tag 前，仍须让 hosted Linux/macOS CI matrix 全绿；当前不承诺兼容性或响应时限 SLA。
 
 ## 能力成熟度（按组件）
 
@@ -22,6 +22,7 @@
 | `source-intake` | beta | 异构来源的暂存、去重、原始材料留存和可重试失败。 |
 | `paper-analyst` | beta | 带证据的准备与验证是真实流程；实质阅读由 Agent 完成。 |
 | `repo-analyst` | beta | 能力地图准备与代码证据验证是真实流程；代码理解由 Agent 完成。 |
+| `dataset-analyst` | beta | 数据画像骨架与数据卡逐字证据校验是真实流程；适用性判断由 Agent 完成并等待确认。 |
 | `blog-analyst` | beta | 文章准备与观点证据验证是真实流程；解释和可信度判断由 Agent 完成。 |
 | `research-config-manager` | beta | 偏好与策略可以持久化，但尚非所有偏好都被所有下游能力消费。 |
 | `discussion-archivist` | beta | 按结论保存讨论、证据和开放问题。 |

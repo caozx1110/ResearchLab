@@ -4,14 +4,14 @@
 
 ## Layout
 
-- `.agents/skills/`: 17 个本地 skill，其中 16 个组成 core research chain，`kb-cli` 提供快捷入口。
+- `.agents/skills/`: 18 个本地 skill，其中 17 个组成 core research chain，`kb-cli` 提供快捷入口。
 - `.agents/lib/research/`: 跨 skill 共享的 Python helper。
 - `.agents/lib/research/SCHEMAS.md`: record、program、config、memory、confirmation gate 的共享契约。
 
 ## Current Skill Groups
 
 - Governance and routing: `knowledge-base-manager`, `research-config-manager`, `source-intake`, `research-orchestrator`
-- Analysis: `paper-analyst`, `repo-analyst`, `blog-analyst`, `literature-synthesizer`
+- Analysis: `paper-analyst`, `repo-analyst`, `dataset-analyst`, `blog-analyst`, `literature-synthesizer`
 - Creation and execution: `idea-workbench`, `method-designer`, `experiment-workbench`, `report-author`
 - Navigation and meta: `research-navigator`, `discussion-archivist`, `wiki-adapter`, `skill-evolution-advisor`
 - Shortcut dispatcher: `kb-cli`

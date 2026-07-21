@@ -10,7 +10,7 @@ workspace/
 └── kb/        # your local research data
 ```
 
-The current candidate is **`0.2.0-rc.1`**. It has passed the complete local test suite and cold installed-copy acceptance, so it meets the project's local release-candidate gate. It is not a stable or GA release, has not been tagged or published, and makes no compatibility or support-time SLA promise. A green hosted Linux/macOS CI matrix remains required before a release tag. See [CHANGELOG.md](CHANGELOG.md) for the current release state.
+The current candidate is **`0.2.0-rc.2`**. It has passed the complete local test suite and a live copy-project upgrade smoke test, so it meets the project's local release-candidate gate. It is not a stable or GA release, has not been tagged or published, and makes no compatibility or support-time SLA promise. A green hosted Linux/macOS CI matrix remains required before a release tag. See [CHANGELOG.md](CHANGELOG.md) for the current release state.
 
 ## Capability maturity
 
@@ -28,6 +28,7 @@ These labels describe the current scope of each component, not the release statu
 | `source-intake` | beta | Staging, deduplication, immutable source capture, and retryable failures across heterogeneous sources. |
 | `paper-analyst` | beta | Evidence-backed prepare and verify gates; the runtime agent supplies the substantive reading. |
 | `repo-analyst` | beta | File-oriented capability-map preparation and evidence verification; the runtime agent supplies code understanding. |
+| `dataset-analyst` | beta | Dataset-card profile preparation and verbatim evidence verification; suitability judgements remain agent-authored and confirmation-gated. |
 | `blog-analyst` | beta | Article preparation and claim verification; the runtime agent supplies interpretation and credibility judgement. |
 | `research-config-manager` | beta | Preference and policy persistence is real, but not every preference is consumed by every downstream skill. |
 | `discussion-archivist` | beta | Durable conclusion-level discussion archives with explicit evidence and open questions. |
@@ -114,7 +115,7 @@ The same `kb init` and `kb review` semantics apply in a terminal, a pipe, or an 
 ```text
 kb/
 ├── raw/          # immutable external source bytes
-├── units/        # papers, repos, blogs, ideas, experiments
+├── units/        # papers, repos, datasets, blogs, ideas, experiments
 ├── programs/     # research state, decisions, designs, runs, reports
 ├── synthesis/    # surveys, taxonomy, trends, gaps
 ├── config/       # user and runtime policy

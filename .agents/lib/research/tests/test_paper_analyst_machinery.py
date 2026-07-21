@@ -464,6 +464,33 @@ def _run_cli(paper, monkeypatch, root: Path, *argv: str) -> int:
     return paper.main()
 
 
+def test_verified_unclassified_screen_uses_method_system_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paper = _load_paper_module()
+    ensure_workspace(tmp_path)
+    paper_id = "p-unclassified-0001"
+    write_record(tmp_path, _paper_record(paper_id))
+    unit_dir = record_path(tmp_path, "paper", paper_id).parent
+    _write_parse_cache(unit_dir, paper_id)
+    write_yaml_if_changed(unit_dir / "screening.yaml", {"status": "verified", "paper_type": ""})
+
+    assert _run_cli(
+        paper,
+        monkeypatch,
+        tmp_path,
+        "complete-note",
+        "--phase",
+        "prepare",
+        "--paper-id",
+        paper_id,
+        "--defer-post-actions",
+    ) == 0
+    scaffold = load_yaml(unit_dir / "note-fill.yaml")
+    assert scaffold["paper_type"] == "method_system"
+    assert [element["element"] for element in scaffold["elements"]] == list(paper.NOTE_ELEMENTS)
+
+
 def test_cli_end_to_end_prepare_fill_verify_persist(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     paper = _load_paper_module()
     ensure_workspace(tmp_path)
@@ -478,6 +505,13 @@ def test_cli_end_to_end_prepare_fill_verify_persist(tmp_path: Path, monkeypatch:
                     "--paper-id", paper_id, "--defer-post-actions") == 0
     screening = load_yaml(unit_dir / "screening.yaml")
     assert screening["worth_deep_reading"] == "" and screening["evidence_digest"]
+
+    # A prepared-but-unverified screen must never yield a method-shaped note by
+    # fallback; paper_type has to be agent-filled and evidence-verified first.
+    with pytest.raises(SystemExit, match="evidence-verified screening"):
+        _run_cli(paper, monkeypatch, tmp_path, "complete-note", "--phase", "prepare",
+                 "--paper-id", paper_id, "--defer-post-actions")
+    assert not (unit_dir / "note-fill.yaml").exists()
 
     screening["paper_type"] = "method_system"
     screening["worth_deep_reading"] = "yes"

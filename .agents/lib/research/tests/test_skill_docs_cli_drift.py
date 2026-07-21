@@ -7,6 +7,7 @@ from pathlib import Path
 
 SKILL_SCRIPTS = {
     "discussion-archivist": "archive.py",
+    "dataset-analyst": "dataset.py",
     "experiment-workbench": "experiment.py",
     "idea-workbench": "idea.py",
     "knowledge-base-manager": "kb.py",

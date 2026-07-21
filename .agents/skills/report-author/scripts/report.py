@@ -30,7 +30,7 @@ from research.records import locate_record
 
 
 UNIT_ID_FIELDS = {"unit_id", "unit_ids", "related_unit_ids", "active_unit_ids"}
-UNIT_PATH_RE = re.compile(r"(?:^|/)kb/units/(?:papers|repos|blogs|ideas|experiments)/([^/]+)(?:/|$)")
+UNIT_PATH_RE = re.compile(r"(?:^|/)kb/units/(?:papers|repos|datasets|blogs|ideas|experiments)/([^/]+)(?:/|$)")
 DECISION_HEADING_RE = re.compile(r"^##\s+(.+)$", flags=re.MULTILINE)
 CONCISE_STYLE_SIGNALS = ("简洁", "concise", "brief")
 DETAILED_STYLE_SIGNALS = ("详细", "detailed", "full")

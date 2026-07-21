@@ -21,6 +21,7 @@ Use this skill to anchor work to a concrete research program.
 ## Shared Contract
 
 - Program coordination artifacts are durable inputs for later reopen, not chat-only summaries.
+- Any promised resumable deliverable, such as a batch survey or technical roadmap, must be written into a program `next_actions` entry before the conversation says `kb next` can resume it. Persisted program actions outrank loose maintenance suggestions; completed units do not generate work merely because a refresh ran.
 - Decision records may cite evidence, but if rationale contains AI judgement it should stay `pending_user_confirmation` unless the user explicitly confirms it.
 - `report-author` should read from `workflow/reporting-events.yaml`, so important state changes must emit reporting events.
 - Script-generated timestamps are stored in UTC.
@@ -30,6 +31,8 @@ Use this skill to anchor work to a concrete research program.
 ```bash
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py init-program --program-id example-program --question "..." --goal "..."
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py set-stage --program-id example-program --stage literature-review
+${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py add-next-action --program-id example-program --action "生成横向综述与技术路线图"
+${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py resolve-next-action --program-id example-program --action "生成横向综述与技术路线图"
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py add-open-question --program-id example-program --question "What evidence is still missing?"
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py answer-question --program-id example-program --question-id example-program-open-questions-001 --answer "Evidence now exists in run logs"
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py request-evidence --program-id example-program --question "Can repo-X reproduce baseline?" --needed "Need baseline parity logs"
