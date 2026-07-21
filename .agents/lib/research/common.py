@@ -34,12 +34,14 @@ COMMAND_PREFIX = "${RESEARCH_PYTHON:-python3}"
 CONFIRM_SCRIPT_BY_KIND = {
     "paper": ".agents/skills/paper-analyst/scripts/paper.py",
     "repo": ".agents/skills/repo-analyst/scripts/repo.py",
+    "dataset": ".agents/skills/dataset-analyst/scripts/dataset.py",
     "blog": ".agents/skills/blog-analyst/scripts/blog.py",
     "experiment": ".agents/skills/experiment-workbench/scripts/experiment.py",
 }
 CONFIRM_ID_ARG_BY_KIND = {
     "paper": "--paper-id",
     "repo": "--repo-id",
+    "dataset": "--dataset-id",
     "blog": "--blog-id",
     "experiment": "--experiment-id",
 }

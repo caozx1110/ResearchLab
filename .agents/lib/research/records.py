@@ -203,11 +203,14 @@ def kind_payload_skeleton(kind: str, title: str = "") -> dict[str, Any]:
             },
             "structure": {
                 "scan_status": "not_started",
+                "scan_applicability": "unknown",
+                "scan_reason": "",
                 "repo_root": "",
                 "top_level_dirs": [],
                 "top_level_files": [],
                 "languages": [],
                 "core_modules": [],
+                "entrypoint_candidates": [],
                 "entrypoints": [],
                 "training_flow": [],
                 "inference_flow": [],
@@ -229,6 +232,56 @@ def kind_payload_skeleton(kind: str, title: str = "") -> dict[str, Any]:
                 "performance_boundary": "",
                 "constraints": [],
                 "not_suitable_for": [],
+            },
+        }
+    if kind == "dataset":
+        return {
+            "basic_info": {
+                "name": title,
+                "owner": "",
+                "url": "",
+                "platform": "",
+                "license": "",
+                "version": "",
+                "last_updated": "",
+            },
+            "source_search": {
+                "stage_ids": [],
+                "candidate_ids": [],
+                "queries": [],
+            },
+            "profile": {
+                "positioning": "",
+                "scale": "",
+                "platform": "",
+                "license": "",
+            },
+            "composition": {
+                "summary": "",
+                "modalities": [],
+                "tasks": [],
+                "embodiment": [],
+                "scenes": [],
+            },
+            "access": {
+                "schema_access": "",
+                "formats": [],
+                "splits": [],
+                "schema": [],
+                "entrypoints": [],
+            },
+            "quality": {
+                "suitability_risks": "",
+                "known_issues": [],
+                "constraints": [],
+                "risks": [],
+            },
+            "reuse": {
+                "supported_uses": [],
+                "unsupported_uses": [],
+            },
+            "state": {
+                "profile_status": "not_started",
             },
         }
     if kind == "blog":
@@ -427,6 +480,13 @@ def record_summary(record: dict[str, Any]) -> str:
         capabilities = payload.get("capability", {}).get("core_capabilities", [])
         if capabilities:
             return str(capabilities[0])
+    if record.get("kind") == "dataset":
+        positioning = payload.get("profile", {}).get("positioning")
+        if positioning:
+            return str(positioning)
+        composition = payload.get("composition", {}).get("summary")
+        if composition:
+            return str(composition)
     if record.get("kind") == "idea":
         problem = payload.get("problem", {}).get("problem_definition")
         if problem:
@@ -599,6 +659,8 @@ def _workflow_marker(record: dict[str, Any]) -> str:
         return str(state.get("full_note_status") or "")
     if kind == "repo":
         return str(state.get("capability_fill_status") or "")
+    if kind == "dataset":
+        return str(state.get("profile_status") or "")
     if kind == "idea":
         review = payload.get("review")
         analysis = payload.get("analysis")
@@ -731,7 +793,7 @@ def record_workflow_state(record: dict[str, Any]) -> str:
             return "awaiting_agent_fill" if needs_gate else "ready_for_review"
         if marker == "not_started":
             return "source_ready" if needs_gate else "ready_for_review"
-        if not marker and str(record.get("kind") or "") in {"paper", "blog", "repo", "idea"}:
+        if not marker and str(record.get("kind") or "") in {"paper", "blog", "repo", "dataset", "idea"}:
             return "source_ready" if needs_gate else "ready_for_review"
         if needs_gate or marker:
             return "awaiting_agent_fill"

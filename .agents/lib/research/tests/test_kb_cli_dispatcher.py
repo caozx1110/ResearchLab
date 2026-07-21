@@ -229,7 +229,7 @@ def test_kb_doctor_prints_runtime_capabilities(monkeypatch, tmp_path: Path, caps
     assert kb.main(["--root", str(tmp_path), "--agent-protocol", "doctor.json", "doctor"]) == 0
 
     captured = capsys.readouterr()
-    assert "研究能力包版本为 0.2.0-rc.1" in captured.out
+    assert "研究能力包版本为 0.2.0-rc.2" in captured.out
     assert "配置读写能力正常" in captured.out
     assert "论文解析能力已就绪" in captured.out
     assert "/usr/bin/python3" not in captured.out
@@ -1769,8 +1769,8 @@ def test_kb_ingest_keeps_both_owner_outputs_private(
         "[auto] prepared internal details\n"
     )
     prepare_stdout = (
-        "[ok] wrote kb/units/papers/p-demo/note-fill.yaml\n"
-        "NEXT FOR AGENT: read kb/units/papers/p-demo/parse-cache.yaml\n"
+        "[ok] wrote kb/units/papers/p-demo/screening.yaml\n"
+        "NEXT FOR AGENT: read kb/units/papers/p-demo/parse-cache.yaml and fill screening.yaml\n"
     )
 
     def fake_run(argv, **kwargs):
@@ -1792,7 +1792,7 @@ def test_kb_ingest_keeps_both_owner_outputs_private(
     ) == 0
 
     output = capsys.readouterr().out
-    assert "已入库并备好深读骨架" in output
+    assert "已入库并备好初筛骨架" in output
     for forbidden in (
         "backup_status",
         "source_type",
@@ -2930,12 +2930,10 @@ _PAPER_ADD_STDOUT = (
     "NEXT FOR AGENT: intake done for p-demo-abcd1234; kb ingest auto-continues to paper prepare\n"
 )
 _PAPER_PREPARE_STDOUT = (
-    "[ok] wrote kb/units/papers/p-demo-abcd1234/note-fill.yaml\n"
-    "下一步：runtime agent 为 5 要素填内容+证据。\n"
-    "NEXT FOR AGENT: read kb/units/papers/p-demo-abcd1234/parse-cache.yaml (source quotes) then fill "
-    "kb/units/papers/p-demo-abcd1234/note-fill.yaml elements [motivation,method,experiment,limitation,insight] "
-    "— each needs content + >=1 verbatim quote+locator (PDF page=N / HTML section:<anchor>), then run: "
-    "${RESEARCH_PYTHON:-python3} paper.py --root R complete-note --paper-id p-demo-abcd1234 --phase verify --input note-fill.yaml\n"
+    "[ok] wrote kb/units/papers/p-demo-abcd1234/screening.yaml\n"
+    "下一步：runtime agent 填 paper_type + worth_deep_reading + claims(带证据)。\n"
+    "NEXT FOR AGENT: read kb/units/papers/p-demo-abcd1234/parse-cache.yaml, fill screening.yaml, "
+    "then run screen --phase verify.\n"
 )
 
 
@@ -2971,19 +2969,38 @@ def test_kb_ingest_chains_intake_then_prepare_and_stops_before_verify(monkeypatc
     ]
     assert calls[0]["args"] == ("add", "--kind", "paper", "--source", "notes/demo.pdf")
     assert calls[0]["extra_env"] == {"RESEARCH_INGEST_CHAIN": "1"}
-    assert calls[1]["args"] == ("complete-note", "--paper-id", "p-demo-abcd1234", "--phase", "prepare")
+    assert calls[1]["args"] == ("screen", "--paper-id", "p-demo-abcd1234", "--phase", "prepare")
     for call in calls:
         assert "verify" not in call["args"]
 
     out = capsys.readouterr().out
-    assert "已入库并备好深读骨架" in out
+    assert "已入库并备好初筛骨架" in out
+    assert "先用逐字证据确定论文类型" in out
     for forbidden in ("NEXT FOR AGENT:", "parse-cache.yaml", "--phase", ".py", "${"):
         assert forbidden not in out
     protocol = json.loads((tmp_path / "kb" / ".runtime" / "ingest.json").read_text(encoding="utf-8"))
     assert protocol["status"] == "agent_action_required"
     action = protocol["next_actions"][0]
     assert action["unit_id"] == "p-demo-abcd1234"
-    assert action["steps"][1]["arguments"][-2:] == ["--phase", "verify"]
+    assert [step["step"] for step in action["steps"]] == [
+        "fill_grounded_screening",
+        "verify_screening",
+        "prepare_type_specific_note",
+        "fill_grounded_elements",
+        "verify_note",
+        "request_user_confirmation",
+    ]
+    assert action["steps"][1]["arguments"] == [
+        "screen", "--paper-id", "p-demo-abcd1234", "--phase", "verify"
+    ]
+    assert action["steps"][2]["arguments"] == [
+        "complete-note", "--paper-id", "p-demo-abcd1234", "--phase", "prepare"
+    ]
+    assert action["steps"][4]["arguments"] == [
+        "complete-note", "--paper-id", "p-demo-abcd1234", "--phase", "verify"
+    ]
+    assert action["steps"][4]["includes_configured_post_note_actions"] is True
+    assert not any(step["step"] in {"extract_figures", "refresh_structure"} for step in action["steps"])
     assert "parse-cache.yaml" in action["prepare_output"]
 
 
@@ -2998,7 +3015,7 @@ def test_kb_ingest_narrowed_scope_without_generate_note_runs_only_intake(monkeyp
     # intake ran; prepare did NOT (narrowed autonomy).
     assert [c["script"] for c in calls] == [".agents/skills/source-intake/scripts/intake.py"]
     out = capsys.readouterr().out
-    assert "自动化偏好暂停了深读准备" in out
+    assert "自动化偏好暂停了初筛准备" in out
     assert "--" not in out and "NEXT FOR AGENT:" not in out
     protocol = json.loads((tmp_path / "kb" / ".runtime" / "paused.json").read_text(encoding="utf-8"))
     assert protocol["status"] == "paused_by_autonomy"
@@ -3073,6 +3090,6 @@ def test_kb_ingest_prepare_failure_propagates_returncode(monkeypatch, tmp_path: 
 
     assert kb.main(["--root", str(tmp_path), "ingest", "notes/demo.pdf"]) == 5
     out = capsys.readouterr().out
-    assert out == "资料已入库，但深读准备未完成；详细诊断已保留给 Agent。\n"
+    assert out == "资料已入库，但初筛准备未完成；详细诊断已保留给 Agent。\n"
     assert "boom" not in out
     assert "NEXT FOR AGENT:" not in out

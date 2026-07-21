@@ -14,7 +14,7 @@ Use this skill to tell the human what to open next and to open a local browser f
 新用户或新接手的协作者第一次进入 kb 时，按以下顺序起步（每步都是一句命令或一个文件）：
 
 1. `python3 .agents/skills/research-navigator/scripts/navigate.py refresh` — 刷新 `kb/user/` 下的所有人面向页面。
-2. 打开 `kb/index.md` — 全局 unit 索引（papers / repos / ideas / experiments），按 status / pool 概览整个知识库当前规模。
+2. 打开 `kb/index.md` — 全局 unit 索引（papers / repos / datasets / blogs / ideas / experiments），按 status / pool 概览整个知识库当前规模。
 3. 打开 `kb/user/current-state.md` — 当前所有 active program 的状态、stage、next-actions。
 4. （可选）`python3 .agents/skills/research-navigator/scripts/open_kb_browser.py` — 在本地浏览器中打开 Workbench / 预览 / 编辑视图，适合需要一边读 paper 一边记录的工作流。
 5. 若想看具体某个 program 的来龙去脉：进 `kb/programs/<program-id>/README.md` → `state.yaml` → `workflow/decision-log.md`。

@@ -915,6 +915,81 @@ def _auto_post_note_steps(
             print(f"[next] extract-figures 未自动跑（不在 auto_execute_scope）：extract-figures --paper-id {record['id']}")
 
 
+def _should_auto_prepare_note_after_screen(record: dict, paper_preferences: dict) -> bool:
+    """Apply full-note policy only from the post-screen-verify call site."""
+    if str(record.get("maturity") or "").strip() == "complete":
+        return True
+    if not bool(paper_preferences.get("auto_complete_note")):
+        return False
+    condition = str(paper_preferences.get("auto_complete_note_condition") or "suggested_worth_reading")
+    quick = record.get("payload", {}).get("quick_screen", {})
+    worth = str(quick.get("worth_deep_reading") or "").strip().lower()
+    relevance = str(quick.get("relevance_to_current_research") or "").strip().lower()
+    if condition == "after_screen":
+        return True
+    if condition == "strong_relevance":
+        return relevance in {"strong", "moderate"}
+    return worth in {"yes", "maybe"}
+
+
+def _prepare_note_scaffold(
+    root: Path,
+    record: dict,
+    unit_root: Path,
+    cache_path: Path,
+    source_chunks: list[dict],
+    paper_preferences: dict,
+    *,
+    mode: str,
+) -> Path:
+    """Create the type-specific fillable note after paper_type is verified."""
+    fill_scaffold_path = unit_root / "note-fill.yaml"
+    raw_selected_type = str(record.get("payload", {}).get("quick_screen", {}).get("paper_type") or "").strip()
+    selected_type = raw_selected_type if raw_selected_type in ELEMENT_SETS else "method_system"
+    if fill_scaffold_path.exists():
+        existing = load_yaml(fill_scaffold_path, default={})
+        existing_elements = existing.get("elements", []) if isinstance(existing, dict) else []
+        has_agent_fill = any(
+            isinstance(element, dict)
+            and (
+                str(element.get("content") or "").strip()
+                or bool(element.get("evidence_refs"))
+            )
+            for element in existing_elements
+        )
+        if has_agent_fill:
+            existing_type = str(existing.get("paper_type") or "").strip() if isinstance(existing, dict) else ""
+            if existing_type and existing_type != selected_type:
+                raise SystemExit(
+                    "Existing in-progress note fill targets a different paper_type; "
+                    "preserved it unchanged and stopped for user resolution."
+                )
+            return fill_scaffold_path
+    payload = build_note_scaffold(
+        record,
+        source_chunks,
+        _cache_locator_kind(cache_path),
+        digest_chunks=int(paper_preferences.get("note_context_pages") or 8),
+        digest_chars=int(paper_preferences.get("note_digest_chars") or 1600),
+    )
+    write_yaml_if_changed(fill_scaffold_path, payload)
+    record["maturity"] = "complete"
+    record["confirmation_status"] = "pending_user_confirmation"
+    record["needs_human_confirmation"] = True
+    record["information_types"] = ["fact", "inference", "evaluation", "unverified"]
+    record["payload"]["state"]["full_note_status"] = "awaiting_agent_fill"
+    record["payload"]["state"]["note_generation_mode"] = mode
+    append_history(
+        record,
+        action="paper-note-scaffolded",
+        summary="Prepared type-specific fillable note skeleton (script authored nothing).",
+        information_types=["inference", "unverified"],
+        artifacts=[rel(root, fill_scaffold_path), rel(root, cache_path)],
+    )
+    write_record(root, record)
+    return fill_scaffold_path
+
+
 def _resolve_fill_input(unit_root: Path, default_name: str, explicit: str | None) -> Path:
     if explicit:
         candidate = Path(explicit).expanduser()
@@ -990,7 +1065,12 @@ def build_parser() -> argparse.ArgumentParser:
     "screen",
     lambda args, root, record, unit_root, cache_path, source_chunks, paper_preferences, defer_post_actions: (
         root,
-        [unit_root / "record.yaml", unit_root / "screening.yaml", *([] if defer_post_actions else _index_targets(root))],
+        [
+            unit_root / "record.yaml",
+            unit_root / "screening.yaml",
+            unit_root / "note-fill.yaml",
+            *([] if defer_post_actions else _index_targets(root)),
+        ],
     ),
 )
 def _run_screen(args, root, record, unit_root, cache_path, source_chunks, paper_preferences, defer_post_actions) -> int:
@@ -1074,8 +1154,29 @@ def _run_screen(args, root, record, unit_root, cache_path, source_chunks, paper_
     )
     write_record(root, record)
     print(f"[ok] verified + persisted {screen_path.relative_to(root)} (worth_deep_reading={worth})")
+    note_scaffold_path: Path | None = None
+    if _should_auto_prepare_note_after_screen(record, paper_preferences):
+        autonomy = load_runtime_preferences(root).get("autonomy", {})
+        configured = {str(item).strip() for item in autonomy.get("auto_execute_scope", []) if str(item).strip()}
+        if "generate-note" in (configured & _GOVERNANCE_MAX_AUTO_STEPS):
+            mode = str(paper_preferences.get("complete_note_mode") or "scaffold")
+            note_scaffold_path = _prepare_note_scaffold(
+                root,
+                record,
+                unit_root,
+                cache_path,
+                source_chunks,
+                paper_preferences,
+                mode=mode,
+            )
+            print(f"[auto] 已按已验证 paper_type 准备 {note_scaffold_path.relative_to(root)}")
+        else:
+            print("[next] 完整笔记未自动准备（不在 auto_execute_scope）；paper_type 已验证，可继续准备类型专属笔记。")
+    screen_targets = [unit_root / "record.yaml", screen_path]
+    if note_scaffold_path is not None:
+        screen_targets.append(note_scaffold_path)
     _finalize_post_actions(root, trigger="milestone", message=f"milestone: verify screen {args.paper_id}", defer_post_actions=defer_post_actions,
-                           target_paths=[unit_root / "record.yaml", screen_path])
+                           target_paths=screen_targets)
     return 0
 
 
@@ -1098,34 +1199,36 @@ def _run_screen(args, root, record, unit_root, cache_path, source_chunks, paper_
 def _run_complete_note(args, root, record, unit_root, cache_path, source_chunks, paper_preferences, defer_post_actions) -> int:
     fill_scaffold_path = unit_root / "note-fill.yaml"
     note_path = unit_root / "note.md"
-    cache_locator_kind = _cache_locator_kind(cache_path)
     mode = str(args.mode or "auto")
     if mode == "auto":
         mode = str(paper_preferences.get("complete_note_mode") or "scaffold")
 
     if args.phase == "prepare":
-        payload = build_note_scaffold(
+        screening_path = unit_root / "screening.yaml"
+        screening = load_yaml(screening_path, default={}) if screening_path.exists() else {}
+        screening_status = str(screening.get("status") or "").strip() if isinstance(screening, dict) else ""
+        verified_type = str(record.get("payload", {}).get("quick_screen", {}).get("paper_type") or "").strip()
+        if screening_path.exists() and screening_status != "verified":
+            raise SystemExit(
+                "complete-note --phase prepare requires evidence-verified screening; "
+                "fill and verify screening first."
+            )
+        legacy_note_exists = fill_scaffold_path.exists() or note_path.exists()
+        screening_is_verified = screening_path.exists() and screening_status == "verified"
+        if not verified_type and not legacy_note_exists and not screening_is_verified:
+            raise SystemExit(
+                "complete-note --phase prepare requires evidence-verified paper_type; "
+                "prepare, fill, and verify screening first."
+            )
+        fill_scaffold_path = _prepare_note_scaffold(
+            root,
             record,
+            unit_root,
+            cache_path,
             source_chunks,
-            cache_locator_kind,
-            digest_chunks=int(paper_preferences.get("note_context_pages") or 8),
-            digest_chars=int(paper_preferences.get("note_digest_chars") or 1600),
+            paper_preferences,
+            mode=mode,
         )
-        write_yaml_if_changed(fill_scaffold_path, payload)
-        record["maturity"] = "complete"
-        record["confirmation_status"] = "pending_user_confirmation"
-        record["needs_human_confirmation"] = True
-        record["information_types"] = ["fact", "inference", "evaluation", "unverified"]
-        record["payload"]["state"]["full_note_status"] = "awaiting_agent_fill"
-        record["payload"]["state"]["note_generation_mode"] = mode
-        append_history(
-            record,
-            action="paper-note-scaffolded",
-        summary="Prepared type-specific fillable note skeleton (script authored nothing).",
-            information_types=["inference", "unverified"],
-            artifacts=[rel(root, fill_scaffold_path), rel(root, cache_path)],
-        )
-        write_record(root, record)
         print(f"[ok] wrote {fill_scaffold_path.relative_to(root)}")
         required = "/".join(elements_for(record))
         print(f"下一步：runtime agent 为 5 要素({required})填内容+证据，再运行 complete-note --phase verify。")

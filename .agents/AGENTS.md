@@ -27,19 +27,20 @@ The user interacts through exactly two surfaces: natural language and the fiftee
 - Setup and choices are conversational. `kb init` first makes the KB usable, then offers “现在设置”（推荐）or “先跳过” when a real human signature is missing; never jump straight to asking for a name. Deferring adds or overwrites no preference or sentinel and does not block ingestion, search, or analysis. If the user configures now, ask once for human signature, language and terminology style, research focus, and resources or important constraints; show the current versioning and paper-screening defaults, accept “默认即可”, then persist headlessly. Low-frequency preferences remain progressive, and a missing signature is requested again only before the first confirmation is applied.
 - For quick setup, execute the private protocol's `apply.field_inputs` mapping exactly; never invent a dotted profile key. The canonical resource input preserves existing resource keys, and the repeatable constraint input appends and deduplicates rather than replacing prior constraints. Keep legacy inputs compatible, but do not use them in place of the canonical quick-setup mapping.
 - `kb review` behaves identically from a terminal, pipe, or agent call. Ask the user to confirm or reject in natural language; never solicit input from a script.
-- Empty and edge states stay natural. When there is no material yet, invite the user to send a paper, repository, article, or local file.
+- Empty and edge states stay natural. When there is no material yet, invite the user to send a paper, repository, dataset, article, or local file.
 - Structured owner output is an agent-only protocol. Request it explicitly, keep it under `kb/.runtime/`, and never relay its command arguments or diagnostics to the user.
 
 ## Ingestion auto-drive
 
-When the user asks to ingest a paper, repository, or article—or accepts an ingestion suggestion—drive the safe pipeline to a grounded knowledge unit in the same turn:
+When the user asks to ingest a paper, repository, dataset, or article—or accepts an ingestion suggestion—drive the safe pipeline to a grounded knowledge unit in the same turn:
 
 1. create the lightweight unit and immutable source cache;
-2. prepare a fillable analysis structure;
-3. read the derived evidence and fill each required element with a short verbatim quote plus locator;
-4. verify every quote and substantive field, correcting only from source evidence;
-5. run safe paper refresh steps when the configured runtime supports them;
-6. present the resulting judgements for human confirmation.
+2. for a paper, prepare and fill the screening structure, then verify the agent-authored `paper_type` before any full-note scaffold is created;
+3. prepare the analysis structure selected by that verified type;
+4. read the derived evidence and fill each required element with a short verbatim quote plus locator;
+5. verify every quote and substantive field, correcting only from source evidence;
+6. run safe paper refresh steps when the configured runtime supports them;
+7. present the resulting judgements for human confirmation.
 
 Scripts move material, create fillable structures, and verify evidence. Understanding comes from the runtime agent. Never invent a judgement from an unfilled scaffold, and never fabricate a quote to pass verification.
 
@@ -50,7 +51,7 @@ Stop only at the two governance gates: confirmation of an AI judgement and a gen
 - Straight factual metadata and process logs may be `auto_confirmed`.
 - AI inference, evaluation, novelty judgement, detailed analysis, diagnosis, and inferred user preference default to `pending_user_confirmation`.
 - A judgement becomes reviewable only after agent fill and verification. States equivalent to awaiting fill, ready to verify, or retryable failure are not human-review-ready.
-- Paper, repository, and article units share the same review-readiness classifier. Do not maintain object-specific approximations.
+- Paper, repository, dataset, and article units share the same review-readiness classifier. Do not maintain object-specific approximations.
 - A confirmation must preserve the original epistemic type and include substantive evidence, a non-AI signer, explicit authorization from the current user message, and its authorization source.
 - Authorization is not durable permission. Re-check it at the moment of mutation and bind the receipt to current content and evidence digests; later content changes invalidate the receipt.
 - Proactively surface the few most important pending judgements and why they matter. Do not wait for the user to discover a long queue.
@@ -78,6 +79,8 @@ Diagnostics are an optional local quality loop, not a governance bypass. Schema,
 
 ## Interactive research modes
 
+- **Durable continuation:** when promising work that should later be resumed by `kb next`—for example a batch survey or technical roadmap—create or reuse a program and persist that work in its `next_actions` before making the promise. `kb next` reads durable program and unit state; it never reconstructs a chat-only promise. A completed unit stays completed unless its canonical content or evidence actually changes.
+
 - **Reading companion:** answer a question from the unit and related ingested units, with evidence. Do not persist an artifact unless asked.
 - **Sparring and outline:** use the owning skills when the user wants a durable, evidence-backed discussion or outline.
 - **Preference memory:** record a durable observed preference as pending, then apply it only after confirmation.
@@ -85,7 +88,7 @@ Diagnostics are an optional local quality loop, not a governance bypass. Schema,
 ## Layout
 
 - `kb/raw/`: immutable external source bytes; never rewrite them in place.
-- `kb/units/{papers,repos,blogs,ideas,experiments}/<unit-id>/`: canonical knowledge units.
+- `kb/units/{papers,repos,datasets,blogs,ideas,experiments}/<unit-id>/`: canonical knowledge units.
 - `kb/programs/<program-id>/`: program state, design, experiments, decisions, and reports.
 - `kb/synthesis/`: cross-unit surveys, taxonomy, trends, and gaps.
 - `kb/config/`: user preferences, taxonomy seeds, and runtime policy.
@@ -106,7 +109,7 @@ Diagnostics are an optional local quality loop, not a governance bypass. Schema,
 ## Routing
 
 - Governance and routing: `knowledge-base-manager`, `research-config-manager`, `source-intake`, `research-orchestrator`
-- Analysis: `paper-analyst`, `repo-analyst`, `blog-analyst`, `literature-synthesizer`
+- Analysis: `paper-analyst`, `repo-analyst`, `dataset-analyst`, `blog-analyst`, `literature-synthesizer`
 - Creation and execution: `idea-workbench`, `method-designer`, `experiment-workbench`, `report-author`
 - Navigation and meta: `research-navigator`, `discussion-archivist`, `wiki-adapter`, `skill-evolution-advisor`
 - Conversational shortcut: `kb-cli`

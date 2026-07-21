@@ -85,7 +85,8 @@ def test_intake_next_line_points_at_analyzer_prepare_when_standalone(monkeypatch
     line = intake.next_for_agent_intake(tmp_path, "paper", "p-demo-1234")
 
     assert line.startswith("NEXT FOR AGENT:")
-    assert "complete-note --paper-id p-demo-1234 --phase prepare" in line
+    assert "screen --paper-id p-demo-1234 --phase prepare" in line
+    assert "complete-note" not in line
 
 
 def test_intake_next_line_defers_to_chain_when_ingesting(monkeypatch, tmp_path: Path) -> None:
@@ -108,6 +109,6 @@ def test_intake_next_line_maps_each_kind_to_correct_prepare_verb(monkeypatch, tm
     repo_line = intake.next_for_agent_intake(tmp_path, "repo", "r-x-1")
     blog_line = intake.next_for_agent_intake(tmp_path, "blog", "b-x-1")
 
-    assert "complete-note --paper-id p-x-1 --phase prepare" in paper_line
+    assert "screen --paper-id p-x-1 --phase prepare" in paper_line
     assert "map-capability --repo-id r-x-1 --phase prepare" in repo_line
     assert "complete-note --blog-id b-x-1 --phase prepare" in blog_line

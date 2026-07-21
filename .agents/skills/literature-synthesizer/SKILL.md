@@ -1,6 +1,6 @@
 ---
 name: literature-synthesizer
-description: 负责跨 paper / repo / blog / idea 的 evidence-first survey、review 与 taxonomy 综合。
+description: 负责跨 paper / repo / dataset / blog / idea 的 evidence-first survey、review 与 taxonomy 综合。
 ---
 
 # Literature Synthesizer

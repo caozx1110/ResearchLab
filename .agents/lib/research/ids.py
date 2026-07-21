@@ -10,6 +10,7 @@ from .slugs import KEYWORD_BLACKLIST, STOPWORDS, slugify
 UNIT_KIND_PREFIXES = {
     "paper": "p",
     "repo": "r",
+    "dataset": "d",
     "blog": "b",
     "idea": "i",
     "experiment": "x",

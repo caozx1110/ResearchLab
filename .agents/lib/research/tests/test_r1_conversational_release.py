@@ -56,6 +56,7 @@ CAPABILITY_MATURITY = {
     "source-intake": "beta",
     "paper-analyst": "beta",
     "repo-analyst": "beta",
+    "dataset-analyst": "beta",
     "blog-analyst": "beta",
     "research-config-manager": "beta",
     "discussion-archivist": "beta",
@@ -162,7 +163,7 @@ def test_docs_disclose_every_skill_maturity_without_bundle_overclaim() -> None:
             row = rf"\|\s*`{re.escape(skill)}`\s*\|\s*{maturity}\s*\|"
             assert re.search(row, text), f"{relative} does not mark {skill} as {maturity}"
         assert "whole bundle" in text or "整个 bundle" in text
-        assert "paper" in text and "repo" in text and "blog" in text
+        assert "paper" in text and "repo" in text and "dataset" in text and "blog" in text
 
 
 def test_user_guide_does_not_expose_raw_execution_or_internal_paths() -> None:

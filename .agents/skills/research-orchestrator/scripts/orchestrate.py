@@ -68,6 +68,9 @@ ROUTE_HINTS = {
     "新仓库": "source-intake",
     "新 repo": "source-intake",
     "new repo": "source-intake",
+    "新数据集": "source-intake",
+    "新 dataset": "source-intake",
+    "new dataset": "source-intake",
     "新博客": "source-intake",
     "新 blog": "source-intake",
     "new blog": "source-intake",
@@ -75,6 +78,8 @@ ROUTE_HINTS = {
     "paper": "paper-analyst",
     "仓库": "repo-analyst",
     "repo": "repo-analyst",
+    "数据集": "dataset-analyst",
+    "dataset": "dataset-analyst",
     "博客": "blog-analyst",
     "blog": "blog-analyst",
     "综述": "literature-synthesizer",
@@ -115,6 +120,7 @@ COMMAND_PREFIX = "${RESEARCH_PYTHON:-python3}"
 GOVERNANCE_MAX_AUTO_STEPS = {"screen", "build-index", "refresh", "generate-note"}
 ROOT_AWARE_AUTO_SCRIPTS = {
     ".agents/skills/blog-analyst/scripts/blog.py",
+    ".agents/skills/dataset-analyst/scripts/dataset.py",
     ".agents/skills/discussion-archivist/scripts/archive.py",
     ".agents/skills/experiment-workbench/scripts/experiment.py",
     ".agents/skills/idea-workbench/scripts/idea.py",
@@ -198,6 +204,8 @@ def safe_unit_step(record: dict[str, Any]) -> dict[str, Any] | None:
     status = str(record.get("status") or "")
     note_status = full_note_status(record) if kind == "paper" else ""
     workflow_state = record_workflow_state(record)
+    if workflow_state == "done":
+        return None
     if workflow_state in {"awaiting_agent_fill", "ready_to_verify"}:
         return {
             "kind": "agent-work",
@@ -220,7 +228,7 @@ def safe_unit_step(record: dict[str, Any]) -> dict[str, Any] | None:
             "title": str(record.get("title") or ""),
             "reason": f"资料「{record.get('title') or unit_id}」（{unit_id}）已有经过核验的判断，等待你确认。",
             # Single confirm renderer (research.common.confirm_command via the
-            # confirm_command_for_record alias): analyzer confirm for paper/repo/blog,
+            # confirm_command_for_record alias): analyzer confirm for paper/repo/dataset/blog,
             # else kb.py promote --confirmation-status confirmed. Keeps `kb next` in
             # lockstep with `kb find` / `kb review` — no hand-copied confirm command (F5).
             "recommended_command": confirm_command_for_record(record),
@@ -267,7 +275,10 @@ def safe_unit_step(record: dict[str, Any]) -> dict[str, Any] | None:
     if kind == "repo":
         payload = record.get("payload", {})
         structure = payload.get("structure", {}) if isinstance(payload, dict) else {}
-        if str(structure.get("scan_status") or "not_started") == "not_started":
+        if (
+            str(structure.get("scan_status") or "not_started") == "not_started"
+            and str(structure.get("scan_applicability") or "unknown") == "applicable"
+        ):
             return {
                 "kind": kind,
                 "step_type": "refresh",
@@ -302,6 +313,24 @@ def safe_unit_step(record: dict[str, Any]) -> dict[str, Any] | None:
                 ],
                 "safe_execute": True,
             }
+    if kind == "dataset" and workflow_state == "source_ready":
+        return {
+            "kind": kind,
+            "step_type": "generate-note",
+            "record_id": unit_id,
+            "title": str(record.get("title") or ""),
+            "reason": f"数据集「{record.get('title') or unit_id}」（{unit_id}）已有数据卡，等待 Agent 整理有逐字证据支持的数据画像。",
+            "command_parts": [
+                COMMAND_PREFIX,
+                ".agents/skills/dataset-analyst/scripts/dataset.py",
+                "profile",
+                "--dataset-id",
+                unit_id,
+                "--phase",
+                "prepare",
+            ],
+            "safe_execute": True,
+        }
     if kind == "blog" and (workflow_state == "source_ready" or status == "draft"):
         return {
             "kind": kind,
@@ -743,6 +772,8 @@ def program_dashboard_items(root: Path) -> list[dict[str, Any]]:
             score = 200 + min(detail_score, 99)
         elif pending_units:
             score = 100 + min(detail_score + 10 * len(pending_units), 99)
+        elif normalize_list(state.get("next_actions")):
+            score = 50 + min(detail_score, 49)
         else:
             score = detail_score
         reasons: list[str] = []
@@ -761,6 +792,8 @@ def program_dashboard_items(root: Path) -> list[dict[str, Any]]:
                 reasons.append(f"{fill_count} 项待 Agent 补全")
         if pending_units:
             reasons.append(f"{len(pending_units)} pending confirmation")
+        if normalize_list(state.get("next_actions")):
+            reasons.append("persisted next action")
         if not reasons and str(state.get("stage") or "") not in TERMINAL_PROGRAM_STAGES:
             reasons.append("stage review")
             score += 1
@@ -1079,6 +1112,14 @@ def build_parser() -> argparse.ArgumentParser:
     stage.add_argument("--program-id", required=True)
     stage.add_argument("--stage", required=True)
 
+    add_next_action = subparsers.add_parser("add-next-action", help="Persist one resumable program action")
+    add_next_action.add_argument("--program-id", required=True)
+    add_next_action.add_argument("--action", required=True)
+
+    resolve_next_action = subparsers.add_parser("resolve-next-action", help="Remove one completed program action")
+    resolve_next_action.add_argument("--program-id", required=True)
+    resolve_next_action.add_argument("--action", required=True)
+
     status = subparsers.add_parser("status", help="Show program status")
     status.add_argument("--program-id", required=True)
 
@@ -1127,7 +1168,7 @@ def build_parser() -> argparse.ArgumentParser:
     evidence.add_argument("--program-id", required=True)
     evidence.add_argument("--question", required=True)
     evidence.add_argument("--needed", required=True)
-    evidence.add_argument("--source-type", default="unknown", choices=["paper", "repo", "blog", "experiment", "benchmark", "user", "unknown"])
+    evidence.add_argument("--source-type", default="unknown", choices=["paper", "repo", "dataset", "blog", "experiment", "benchmark", "user", "unknown"])
     evidence.add_argument("--priority", default="normal", choices=["low", "normal", "high", "critical"])
     evidence.add_argument("--blocking", action="store_true")
     evidence.add_argument("--related-unit", action="append", default=[])
@@ -1234,6 +1275,52 @@ def main() -> int:
         print(f"[ok] updated stage to {args.stage}")
         checkpoint = checkpoint_and_report(
             root, trigger="milestone", message=f"milestone: set program stage {args.program_id} -> {args.stage}",
+            target_paths=program_checkpoint_paths(root, args.program_id),
+        )
+        return 0
+    if args.command in {"add-next-action", "resolve-next-action"}:
+        changed = False
+        with program_mutation(root, args.program_id, args.command):
+            ensure_program_files(root, args.program_id)
+            payload = load_state(root, args.program_id)
+            actions = normalize_list(payload.get("next_actions"))
+            if args.command == "add-next-action":
+                if args.action not in actions:
+                    actions.append(args.action)
+                    changed = True
+                event_type = "next-action-added"
+                event_title = "Next action persisted"
+            else:
+                if args.action in actions:
+                    actions = [item for item in actions if item != args.action]
+                    changed = True
+                event_type = "next-action-resolved"
+                event_title = "Next action resolved"
+            if changed:
+                payload["next_actions"] = actions
+                append_program_reporting_event(
+                    root,
+                    args.program_id,
+                    {
+                        "source_skill": "research-orchestrator",
+                        "event_type": event_type,
+                        "title": event_title,
+                        "summary": args.action,
+                        "stage": str(payload.get("stage") or "init"),
+                        "tags": ["program-state"],
+                    },
+                    generated_by="research-orchestrator",
+                )
+                write_state(root, args.program_id, payload)
+        if not changed:
+            status = "already persisted" if args.command == "add-next-action" else "already resolved"
+            print(f"[ok] next action {status}; no changes")
+            return 0
+        print(f"[ok] {'persisted' if args.command == 'add-next-action' else 'resolved'} next action")
+        checkpoint_and_report(
+            root,
+            trigger="milestone",
+            message=f"milestone: {args.command} {args.program_id}",
             target_paths=program_checkpoint_paths(root, args.program_id),
         )
         return 0

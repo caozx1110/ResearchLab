@@ -48,6 +48,7 @@ from .records import (
     MATURITY_LEVELS,
     _extract_unit_id_hash,
     append_history,
+    default_record,
     iter_records,
     locate_record,
     normalize_record_schema,
@@ -1190,6 +1191,172 @@ def compact_unit_ids(project_root: Path, *, kind: str | None = None, apply: bool
     return summary
 
 
+def dataset_migration_plan(project_root: Path, repo_id: str) -> dict[str, Any]:
+    """Build a byte-read-only plan for rehoming a known dataset misfiled as repo."""
+    record, old_record_path = locate_record(project_root, repo_id, kind="repo", fuzzy=False)
+    source_uri = str(record.get("source", {}).get("original_uri") or "").strip()
+    if "huggingface.co/datasets/" not in source_uri.lower():
+        raise SystemExit("Repo-to-dataset migration only accepts recognized dataset sources.")
+    new_id = canonical_unit_id("dataset", title=str(record.get("title") or ""), source=source_uri)
+    old_root = old_record_path.parent
+    new_root = unit_root(project_root, "dataset", new_id)
+    if new_root.exists() and new_root != old_root:
+        raise SystemExit(f"Target dataset unit already exists: {rel(project_root, new_root)}")
+    reference_paths: list[Path] = []
+    root = kb_root(project_root)
+    if root.exists():
+        for path in root.rglob("*"):
+            if not path.is_file() or path.is_symlink():
+                continue
+            relative_parts = path.relative_to(root).parts
+            if (
+                not relative_parts
+                or relative_parts[0] in _AUDIT_INTERNAL_DIRS
+                or "source" in relative_parts
+                or "raw" in relative_parts
+                or path.name == "parse-cache.yaml"
+                or path.suffix.lower() not in TEXT_REWRITE_SUFFIXES
+            ):
+                continue
+            try:
+                if repo_id in path.read_text(encoding="utf-8"):
+                    reference_paths.append(path)
+            except (OSError, UnicodeDecodeError):
+                continue
+    return {
+        "changed": True,
+        "old_id": repo_id,
+        "new_id": new_id,
+        "title": str(record.get("title") or ""),
+        "source_uri": source_uri,
+        "old_root": old_root,
+        "new_root": new_root,
+        "reference_paths": sorted(set(reference_paths), key=lambda path: path.as_posix()),
+    }
+
+
+def dataset_migration_targets(project_root: Path, plan: dict[str, Any]) -> list[Path]:
+    """Return the exact path set a repo-to-dataset migration may mutate."""
+    old_root = Path(plan["old_root"])
+    new_root = Path(plan["new_root"])
+    external_references = [
+        Path(path)
+        for path in plan.get("reference_paths", [])
+        if old_root not in Path(path).parents and new_root not in Path(path).parents
+    ]
+    return sorted(
+        {
+            old_root,
+            new_root,
+            *external_references,
+            kb_root(project_root) / "index.yaml",
+            kb_root(project_root) / "index.md",
+            topic_taxonomy_path(project_root),
+            candidate_pools_path(project_root),
+        },
+        key=lambda path: path.as_posix(),
+    )
+
+
+def migrate_repo_to_dataset(project_root: Path, repo_id: str) -> dict[str, Any]:
+    """Apply one already-journaled repo-to-dataset migration.
+
+    The old judgement text and confirmation receipt remain as audit metadata, but
+    canonical claims/verification are cleared because the confirmation subject and
+    evidence contract changed. A runtime agent must fill and verify the dataset
+    profile before the user confirms it again.
+    """
+    plan = dataset_migration_plan(project_root, repo_id)
+    record, _old_path = locate_record(project_root, repo_id, kind="repo", fuzzy=False)
+    old_root = Path(plan["old_root"])
+    new_root = Path(plan["new_root"])
+    ensure_dir(new_root.parent)
+    old_root.rename(new_root)
+
+    migrated = default_record(
+        "dataset",
+        title=str(record.get("title") or ""),
+        maturity=str(record.get("maturity") or "complete"),
+        source=copy.deepcopy(record.get("source") or {}),
+    )
+    for key in (
+        "created_at",
+        "first_ingested_at",
+        "confidence",
+        "tags",
+        "topics",
+        "candidate_pools",
+        "program_ids",
+        "priority",
+        "links",
+        "reuse_flags",
+        "taxonomy",
+        "artifacts",
+    ):
+        if key in record:
+            migrated[key] = copy.deepcopy(record[key])
+    migrated["id"] = str(plan["new_id"])
+    migrated["legacy_ids"] = _unique_text_list([*record.get("legacy_ids", []), repo_id])
+    migrated["status"] = "active"
+    migrated["maturity"] = "complete"
+    migrated["confirmation_status"] = "pending_user_confirmation"
+    migrated["needs_human_confirmation"] = True
+    migrated["information_types"] = sorted(
+        {str(item) for item in record.get("information_types", [])} | {"fact", "inference", "evaluation", "unverified"}
+    )
+    migrated["revision"] = int(record.get("revision", 0) or 0)
+    old_payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+    capabilities = old_payload.get("capability", {}).get("core_capabilities", [])
+    entrypoints = old_payload.get("structure", {}).get("entrypoints", [])
+    reuse_points = old_payload.get("reuse", {}).get("directly_reusable", [])
+    migrated["payload"]["profile"]["positioning"] = str(capabilities[0]) if capabilities else ""
+    migrated["payload"]["access"]["schema_access"] = str(entrypoints[0]) if entrypoints else ""
+    migrated["payload"]["reuse"]["supported_uses"] = [str(item) for item in reuse_points if str(item).strip()]
+    migrated["payload"]["state"]["profile_status"] = "awaiting_agent_fill"
+    migrated["history"] = copy.deepcopy(record.get("history") or [])
+    migrated["migration"] = {
+        "from_kind": "repo",
+        "from_id": repo_id,
+        "reason": "recognized_dataset_source",
+        "previous_confirmation": copy.deepcopy(record.get("confirmation") or {}),
+    }
+    append_history(
+        migrated,
+        action="repo-migrated-to-dataset",
+        summary="Reclassified a recognized dataset source; prior confirmation retained for audit only.",
+        information_types=["fact", "unverified"],
+    )
+    migrated = _replace_ids_in_object(migrated, {repo_id: str(plan["new_id"])})
+    migrated["legacy_ids"] = _unique_text_list([*record.get("legacy_ids", []), repo_id])
+    migrated["migration"]["from_id"] = repo_id
+    migrated["migration"]["previous_confirmation"] = copy.deepcopy(record.get("confirmation") or {})
+    write_record(project_root, migrated)
+
+    mapping = {repo_id: str(plan["new_id"])}
+    for path in plan.get("reference_paths", []):
+        original_path = Path(path)
+        path = new_root / original_path.relative_to(old_root) if old_root in original_path.parents else original_path
+        if not path.exists() or path == new_root / "record.yaml":
+            continue
+        if path.name == "record.yaml":
+            payload = load_yaml(path, default={})
+            if isinstance(payload, dict):
+                write_record(project_root, _replace_ids_in_object(payload, mapping))
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        write_text_if_changed(path, _replace_ids_in_text(text, mapping))
+
+    rebuild_governance_catalogs(project_root)
+    build_index(project_root)
+    return {
+        **plan,
+        "renamed_paths": [{"old": rel(project_root, old_root), "new": rel(project_root, new_root)}],
+    }
+
+
 __all__ = [
     "STATUS_VALUES",
     "CONFIRMATION_VALUES",
@@ -1218,4 +1385,7 @@ __all__ = [
     "_text_rewrite_allowed",
     "_rename_paths_with_ids",
     "compact_unit_ids",
+    "dataset_migration_plan",
+    "dataset_migration_targets",
+    "migrate_repo_to_dataset",
 ]

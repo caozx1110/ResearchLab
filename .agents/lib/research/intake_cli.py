@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from typing import Any
 
-SOURCE_KIND_CHOICES = ("paper", "repo", "blog")
+SOURCE_KIND_CHOICES = ("paper", "repo", "dataset", "blog")
 MATURITY_CHOICES = ("lightweight", "complete")
 
 

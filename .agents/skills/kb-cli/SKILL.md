@@ -45,9 +45,10 @@ description: kb 快捷命令入口（伪 CLI），用于把常用 research 操�
 - `init`：幂等准备知识库和配置；缺真实署名时 KB 仍已可用，并由 Agent 提供可延后的快速设置。重复 init 零 churn，显式补一个字段只改该字段。
 - `doctor`：只读说明 runtime、YAML 与 PDF 能力；详细解释只进私有 protocol。
 - `update`：只读检查版本；发现更新后先请求用户授权。更新只使用 manifest 记录的来源，不把 fork/local 安装切回默认上游。
-- `status` / `next` / `find` / `recall`：转发 owner 后过滤内部命令、路径与 flags。
-- `add`：轻量入库；本地目录推断为 repo，本地 PDF 推断为 paper，其余本地文件推断为 blog。
-- `ingest`：只自动执行 intake 与 prepare；Agent 从私有 protocol 读取 parse-cache 与待填要求，补逐字 evidence 后再 verify。判断确认始终停在用户闸口。
+- `status` / `find` / `recall`：转发 owner 后过滤内部命令、路径与 flags。
+- `next`：读取 durable program 与 canonical unit 状态；完成态不因机械刷新重新打开，program 中持久化的明确 `next_actions` 优先于泛化维护建议。不得从聊天承诺猜下一步。
+- `add`：轻量入库；Hugging Face `/datasets/` 链接推断为 dataset，本地目录推断为 repo，本地 PDF 推断为 paper，其余本地文件推断为 blog。
+- `ingest`：只自动执行 intake 与第一个 prepare；paper 的第一个 prepare 必须是 quick-screen。Agent 从私有 protocol 依次完成 `screen 填充/verify → 按已验证 paper_type 准备完整笔记 → 笔记填充/verify`；repo/dataset/blog 仍按各自单个分析骨架续跑。判断确认始终停在用户闸口。
 - `review`：只列真正 ready-for-review 的 knowledge-unit 判断；prepared shell、ready-to-verify 与 failed-retryable 不进人工 inbox。TTY 与 pipe 语义相同；缺真实署名时仍展示列表，只在确认应用前补署名。
 - `reject`：复用 knowledge-base-manager 的拒绝路径，不重实现治理逻辑。
 - `resume` / `undo` / `restore`：转发恢复合同并保持公开输出为自然语言。

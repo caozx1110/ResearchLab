@@ -4,10 +4,11 @@ All notable changes to this project will be documented here. The format follows 
 
 ## [Unreleased]
 
-The bundle currently declares **`0.2.0-rc.1`**. It has passed the complete local suite and cold installed-copy acceptance, so it meets the local release-candidate gate. It is not a stable release, is not GA, has not been tagged or published, and carries no compatibility or response-time SLA. A green hosted Linux/macOS CI matrix remains a prerequisite for a release tag.
+The bundle currently declares **`0.2.0-rc.2`**. It has passed the complete local suite and a live copy-project upgrade smoke test, so it meets the local release-candidate gate. It is not a stable release, is not GA, has not been tagged or published, and carries no compatibility or response-time SLA. A green hosted Linux/macOS CI matrix remains a prerequisite for a release tag.
 
 ### Added
 
+- First-class dataset knowledge units, a dataset analyst with evidence-backed four-part profiles, and explicit journaled repo-to-dataset migration.
 - A fifteen-verb conversational `kb` surface with private, opt-in structured hand-off for runtime agents.
 - Unified human-review readiness across paper, repository, and article workflows.
 - Current-message authorization fields for confirmation hand-off and version-bound confirmation receipts.
@@ -18,6 +19,9 @@ The bundle currently declares **`0.2.0-rc.1`**. It has passed the complete local
 
 ### Changed
 
+- `kb next` now short-circuits completed units and prioritizes durable program actions over loose maintenance suggestions; resumable promises must be persisted.
+- Repository structure scans now require a real local source tree, preserve confirmed judgement content, and store mechanical entrypoint candidates separately.
+- arXiv ingestion uses native arXiv HTML first, direct ar5iv Labs HTML as fallback, and screening-first analysis before a type-specific full note.
 - Runtime and test dependencies are exactly pinned and shared by Linux and macOS CI.
 - `kb init` and `kb review` no longer depend on TTY state or read from standard input.
 - Public help, errors, and runtime messages expose only natural language and supported `kb <verb>` forms.
@@ -32,6 +36,10 @@ The bundle currently declares **`0.2.0-rc.1`**. It has passed the complete local
 - Update provenance no longer falls back from a fork, local checkout, or unknown legacy source to a canonical remote.
 - Storage migration is constrained to KB data and does not rewrite installed skills or root workspace rules.
 - Optional diagnostics cannot disable mandatory evidence, confirmation, containment, transaction, or recovery gates; capture failures preserve the original operation result and diagnostic exports require explicit authorization.
+
+## [0.2.0-rc.2] - Unreleased
+
+The current candidate adds screening-first arXiv/ar5iv ingestion, first-class datasets, durable `kb next` continuation, and repository scan applicability hardening. Local release gates are complete; no tag or publication exists yet.
 
 ## [0.2.0-rc.1] - Unreleased
 

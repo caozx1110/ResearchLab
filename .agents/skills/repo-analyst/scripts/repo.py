@@ -170,10 +170,11 @@ EVIDENCE_REF_FORMAT_REPO: dict[str, str] = {
 def _candidate_repo_roots(root: Path, record: dict) -> list[Path]:
     paths: list[Path] = []
     source = record.get("source", {})
-    for backup in source.get("backup_paths", []):
-        path = root / str(backup)
-        if path.exists():
-            paths.append(path if path.is_dir() else path.parent)
+    if str(source.get("backup_kind") or "") in {"directory", "dir"}:
+        for backup in source.get("backup_paths", []):
+            path = root / str(backup)
+            if path.exists():
+                paths.append(path if path.is_dir() else path.parent)
     original_uri = str(source.get("original_uri") or "")
     if original_uri and not original_uri.startswith("http"):
         path = resolve_local_reference(root, original_uri) or Path(original_uri).expanduser()
@@ -190,6 +191,23 @@ def _candidate_repo_roots(root: Path, record: dict) -> list[Path]:
     return deduped
 
 
+def structure_scan_applicability(root: Path, record: dict) -> tuple[bool, str]:
+    """Return whether the record resolves to a real local source tree.
+
+    Archived URL pages are deliberately ineligible even though their backup files
+    share a directory. Scanning that directory would describe source.html and
+    snapshot.md, not a code repository.
+    """
+    source = record.get("source", {})
+    source = source if isinstance(source, dict) else {}
+    original_uri = str(source.get("original_uri") or "").strip()
+    if original_uri.lower().startswith(("http://", "https://")):
+        return False, "remote_page_without_source_tree"
+    if _pick_repo_root(root, record) is None:
+        return False, "source_tree_unavailable"
+    return True, "local_source_tree"
+
+
 def _pick_repo_root(root: Path, record: dict) -> Path | None:
     for candidate in _candidate_repo_roots(root, record):
         if candidate.is_dir():
@@ -204,8 +222,8 @@ def scan_structure_payload(root: Path, record: dict) -> dict:
     repo_root = _pick_repo_root(root, record)
     if repo_root is None:
         return {
-            "status": "pending_user_confirmation",
-            "information_types": ["fact", "unverified"],
+            "status": "unavailable",
+            "information_types": ["fact"],
             "repo_root": "",
             "top_level_dirs": [],
             "top_level_files": [],
@@ -259,8 +277,8 @@ def scan_structure_payload(root: Path, record: dict) -> dict:
 
     languages = [f"{suffix}:{count}" for suffix, count in language_counter.most_common(8)]
     return {
-        "status": "pending_user_confirmation",
-        "information_types": ["fact", "unverified"],
+        "status": "complete",
+        "information_types": ["fact"],
         "repo_root": repo_root.as_posix(),
         "top_level_dirs": top_level_dirs,
         "top_level_files": top_level_files,
@@ -578,22 +596,20 @@ def _run_scan_structure(args, root, record, unit_root, defer_post_actions) -> in
     write_yaml_if_changed(scan_path, payload)
     record = apply_record_governance(root, record, infer_missing=True, source_label="repo-analyst")
     structure = record["payload"]["structure"]
-    structure["scan_status"] = "pending_user_confirmation"
+    structure["scan_status"] = "complete"
+    structure["scan_applicability"] = "applicable"
+    structure["scan_reason"] = "local_source_tree"
     structure["repo_root"] = payload["repo_root"]
     structure["top_level_dirs"] = payload["top_level_dirs"]
     structure["top_level_files"] = payload["top_level_files"]
     structure["languages"] = payload["languages"]
     structure["core_modules"] = payload["core_modules"]
-    structure["entrypoints"] = payload["entrypoints"]
-    record["status"] = "screened"
-    record["confirmation_status"] = "pending_user_confirmation"
-    record["needs_human_confirmation"] = True
-    record["information_types"] = ["fact", "unverified"]
+    structure["entrypoint_candidates"] = payload["entrypoints"]
     append_history(
         record,
         action="repo-structure-scanned",
         summary="Generated mechanical repo structure scan (no capability inference).",
-        information_types=["fact", "unverified"],
+        information_types=["fact"],
         artifacts=[rel(root, scan_path)],
     )
     write_record(root, record)
@@ -778,6 +794,12 @@ def main() -> int:
     defer_post_actions = bool(getattr(args, "defer_post_actions", False))
 
     if args.command == "scan-structure":
+        applicable, reason = structure_scan_applicability(root, record)
+        if not applicable:
+            raise SystemExit(
+                "Repo structure scan requires a real local source tree; "
+                f"this source is not applicable ({reason})."
+            )
         return _run_scan_structure(args, root, record, unit_root, defer_post_actions)
 
     if args.command == "map-capability":

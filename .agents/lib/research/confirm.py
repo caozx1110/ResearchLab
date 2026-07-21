@@ -68,6 +68,7 @@ AI_MODEL_CONTEXT_TOKENS = {"code", "assistant", "agent", "ai", "model", "anthrop
 CONFIRM_UNIT_STATUS_BY_KIND = {
     "paper": "active",
     "repo": "active",
+    "dataset": "active",
     "blog": "active",
 }
 
@@ -75,6 +76,7 @@ CONFIRM_UNIT_STATUS_BY_KIND = {
 CONFIRM_UNIT_SUMMARY_BY_KIND = {
     "paper": "Paper analysis confirmed by user.",
     "repo": "Repo analysis confirmed by user.",
+    "dataset": "Dataset analysis confirmed by user.",
     "blog": "Blog analysis confirmed by user.",
     "idea": "Idea content confirmed by user.",
     "experiment": "Experiment findings confirmed by user.",
@@ -103,6 +105,7 @@ def is_ai_signer(actor: str) -> bool:
 SUBSTANCE_CONTENT_SECTIONS: dict[str, tuple[str, ...]] = {
     "paper": ("core_content",),
     "repo": ("capability",),
+    "dataset": ("profile", "composition", "access", "quality"),
     "blog": ("content",),
     "idea": ("problem", "hypothesis"),
     "experiment": ("results", "diagnosis"),

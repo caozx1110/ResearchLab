@@ -17,8 +17,8 @@ description: 为 repo unit 备料（扫描结构、产出三要素待填结构�
 
 ## 负责范围
 
-1. 从 `source-intake` 创建的 repo unit（已带本地源码快照或可解析的 repo root）出发。
-2. `scan-structure`：纯机械扫描——列顶层目录/文件、入口候选、语言分布、配置文件、README 摘录。只搬运事实，不推断能力。
+1. 从 `source-intake` 创建且确认拥有本地真实源码树的 repo unit 出发；HTML/data-card 快照不冒充 repo root。
+2. `scan-structure`：仅当 `scan_applicability=applicable` 时做纯机械扫描——列顶层目录/文件、入口候选、语言分布、配置文件、README 摘录。远程 URL 或非目录快照记为 unavailable，不改写既有分析内容、确认状态或证据。
 3. `map-capability --phase prepare`：产出**三要素待填骨架** capability / reuse_points / entry_map，每要素留空、需 agent 填内容 + ≥1 条 `evidence_refs`（file:line）。附 `agent_orientation`（机械结构摘要）供 agent 导航。
 4. `map-capability --phase verify`：逐要素校验（`validate_claims` 结构 + `verify_claim_evidence` 逐字据），全过才写 `repo-note.md` + `payload.capability`（过 `has_substantive_content`，可被确认）；任一要素空/无据/造据/引用文件不可达则拒绝并点名。
 5. AI judgement 默认保持 `pending_user_confirmation`；确认走已有空心门（`confirm`）。
@@ -53,6 +53,8 @@ elements:
 ### 证据可达性（repo 太大不宜整个塞进 unit）
 
 脚本不复制整个仓库进 unit。`verify` 阶段从 record 的 source（`backup_paths` / 本地 `original_uri`）解析出 **repo_root**，`evidence_refs.artifact` 是相对该 root 的路径。校验时脚本加载 `repo_root/artifact` 并做逐字子串匹配；文件不可达时报明确 `not found/readable` 错误而非静默过。因此：**只需 record 能定位到本地 repo 快照/checkout 根目录即可**，证据文件按需按路径加载，无需把源码搬进 kb/。`line=N` 只作为人读定位（渲染进 note），硬判据是 quote 逐字存在于所引文件。
+
+`scan-structure` 的机械入口候选写入 `payload.structure.entrypoint_candidates`。`payload.structure.entrypoints` 是 runtime agent 经证据验证后的 judgement 字段，机械刷新不得覆盖，更不得使已有 confirmation 失效。
 
 ## 符号级 = 按需
 

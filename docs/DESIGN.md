@@ -7,7 +7,7 @@
 Open Research Workspace Skills 是 knowledge-unit-first 的 research operating system。聊天是交互界面，不是状态存储：
 
 1. 外部材料进入不可变 source 与完整 parse cache；
-2. paper、repo、blog、idea 和 experiment 成为 typed knowledge unit；
+2. paper、repo、dataset、blog、idea 和 experiment 成为 typed knowledge unit；
 3. program 保存问题、证据请求、决策、设计、实验和报告事件；
 4. synthesis 保存跨 unit 的 survey、taxonomy、trend 和 gap；
 5. `kb/user/` 从 canonical 数据生成，供人复开。
@@ -35,12 +35,12 @@ Release bundle 不包含任何私有 `kb/`。安装、更新、storage sync 和�
 
 ## Skill 路由
 
-系统包含 17 个本地 skill：
+系统包含 18 个本地 skill：
 
 | 分组 | Skills |
 |---|---|
 | Governance and routing | `knowledge-base-manager`, `research-config-manager`, `source-intake`, `research-orchestrator` |
-| Analysis | `paper-analyst`, `repo-analyst`, `blog-analyst`, `literature-synthesizer` |
+| Analysis | `paper-analyst`, `repo-analyst`, `dataset-analyst`, `blog-analyst`, `literature-synthesizer` |
 | Creation and execution | `idea-workbench`, `method-designer`, `experiment-workbench`, `report-author` |
 | Navigation and meta | `research-navigator`, `discussion-archivist`, `wiki-adapter`, `skill-evolution-advisor` |
 | Conversational shortcut | `kb-cli` |
@@ -82,7 +82,7 @@ Release bundle 不包含任何私有 `kb/`。安装、更新、storage sync 和�
 - organization：`tags`, `topics`, `candidate_pools`, `links`, `reuse_flags`；
 - trace：`source`, `evidence`, `history`。
 
-Unit 类型为 `paper`, `repo`, `blog`, `idea`, `experiment`。Program 位于 `kb/programs/<program-id>/`，包含 state、open questions、evidence requests、decision log、reporting events、design、experiments、reports 和 discussions。
+Unit 类型为 `paper`, `repo`, `dataset`, `blog`, `idea`, `experiment`。Program 位于 `kb/programs/<program-id>/`，包含 state、open questions、evidence requests、decision log、reporting events、design、experiments、reports 和 discussions。
 
 `kb/raw/` 与完整 parse cache 是不可变派生证据。后续分析只读，不覆盖。`kb/user/` 是生成视图，`kb/output/` 是导出，不得成为唯一 source of truth。
 
@@ -102,7 +102,7 @@ human-review-ready judgement
 confirmed or rejected
 ```
 
-可重试失败会回到 Agent 修复，不进入 human review。Paper、repo 和 blog 必须复用 `records.py` 的 canonical workflow state 与 `is_ready_for_human_review` classifier；不得在 CLI 或各 analyzer 中各写一份近似判断。
+可重试失败会回到 Agent 修复，不进入 human review。Paper、repo、dataset 和 blog 必须复用 `records.py` 的 canonical workflow state 与 `is_ready_for_human_review` classifier；不得在 CLI 或各 analyzer 中各写一份近似判断。
 
 每条 load-bearing judgement 挂逐字 evidence 和 locator。Verifier 只判断 quote 是否来自不可变证据、字段是否实质、workflow 是否可推进；不替 Agent 生成理解。
 
@@ -207,4 +207,4 @@ Install manifest 记录 `source_origin` 与 `source_branch`，本地安装还可
 10. 在 Linux 与 macOS 支持的 Python 版本上验证；
 11. 发布前由冷 acceptance agent 端到端复现关键路径。
 
-当前标识为 `0.2.0-rc.1`，已通过完整本地套件与冷启动安装副本验收，达到本地 release-candidate gate。它仍不是 stable/GA，也尚未 tag 或 publish；hosted Linux/macOS CI matrix 全绿仍是 release tag 的前置。文档、tag 与 changelog 不得把本地 RC 验收外推为稳定兼容或 SLA 承诺。
+当前标识为 `0.2.0-rc.2`，已通过完整本地套件与真实 copy-project 升级冒烟，达到本地 release-candidate gate。它仍不是 stable/GA，也尚未 tag 或 publish；hosted Linux/macOS CI matrix 全绿仍是 release tag 的前置。文档、tag 与 changelog 不得把本地 RC 验收外推为稳定兼容或 SLA 承诺。

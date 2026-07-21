@@ -31,7 +31,7 @@ description: 负责 core idea unit 的生成、evidence-first analysis、陪练�
 `analyze` 与 `review` 都采用 `prepare|verify` 两阶段合同：
 
 1. `prepare` 生成四条空白 judgement claims：`novelty`、`feasibility`、`recommendation`、`killer-question`。
-2. runtime agent 从 KB 检索相关 paper / repo / blog / idea，填入 claim 文本与逐字 `evidence_refs`。
+2. runtime agent 从 KB 检索相关 paper / repo / dataset / blog / idea，填入 claim 文本与逐字 `evidence_refs`。
 3. `verify` 拒绝空证据、找不到的 source unit、不可读 artifact、伪造 quote 或错误 PDF page locator；全部通过才持久化。
 4. `review` 可由 agent 填正整数 `selection_rank`，供 `select-best` 消费。新 review 不生成 heuristic `score_breakdown`；旧记录中已持久化的 score 仅作兼容读取。
 

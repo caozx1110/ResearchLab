@@ -27,6 +27,8 @@ from research.core import (
     audit_workspace,
     candidate_pools_path,
     compact_unit_ids,
+    dataset_migration_plan,
+    dataset_migration_targets,
     confirmation_track,
     confirm_unit,
     has_substantive_content,
@@ -49,6 +51,7 @@ from research.core import (
     rebuild_governance_catalogs,
     rel,
     restore_operation,
+    migrate_repo_to_dataset,
     refresh_record_schemas,
     search_records,
     sync_storage_layout,
@@ -64,6 +67,7 @@ COMMAND_PREFIX = "${RESEARCH_PYTHON:-python3}"
 SCRIPT_BY_KIND = {
     "paper": ".agents/skills/paper-analyst/scripts/paper.py",
     "repo": ".agents/skills/repo-analyst/scripts/repo.py",
+    "dataset": ".agents/skills/dataset-analyst/scripts/dataset.py",
     "blog": ".agents/skills/blog-analyst/scripts/blog.py",
     "idea": ".agents/skills/idea-workbench/scripts/idea.py",
     "experiment": ".agents/skills/experiment-workbench/scripts/experiment.py",
@@ -71,6 +75,7 @@ SCRIPT_BY_KIND = {
 ID_ARG_BY_KIND = {
     "paper": "--paper-id",
     "repo": "--repo-id",
+    "dataset": "--dataset-id",
     "blog": "--blog-id",
     "idea": "--idea-id",
     "experiment": "--experiment-id",
@@ -78,6 +83,7 @@ ID_ARG_BY_KIND = {
 NEXT_COMMAND_BY_KIND = {
     "paper": "screen",
     "repo": "scan-structure",
+    "dataset": "profile",
     # blog's old-flow `summarize` verb was renamed to the fillable `complete-note`
     # prepare (the analyzer no longer has `summarize`); point find/review at the
     # current mainline so the rendered next command is runnable (F7).
@@ -421,18 +427,21 @@ def build_parser() -> argparse.ArgumentParser:
     restore = subparsers.add_parser("restore", help="恢复到指定操作之前的状态")
     restore.add_argument("op_id")
     compact_ids = subparsers.add_parser("compact-ids", help="Shorten and regularize knowledge-unit ids")
-    compact_ids.add_argument("--kind", choices=["paper", "repo", "blog", "idea", "experiment"])
+    compact_ids.add_argument("--kind", choices=["paper", "repo", "dataset", "blog", "idea", "experiment"])
     compact_ids.add_argument("--apply", action="store_true", help="Actually rename ids and unit folders")
+    migrate_dataset = subparsers.add_parser("migrate-dataset", help="Reclassify a recognized dataset stored as repo")
+    migrate_dataset.add_argument("--repo-id", required=True)
+    migrate_dataset.add_argument("--apply", action="store_true")
     subparsers.add_parser("rebuild-governance", help="Rebuild topic taxonomy and candidate pool catalogs")
 
     query = subparsers.add_parser("query", help="Search records by title, summary, tags, topics, or pools")
     query.add_argument("--query", required=True)
-    query.add_argument("--kind", choices=["paper", "repo", "blog", "idea", "experiment"])
+    query.add_argument("--kind", choices=["paper", "repo", "dataset", "blog", "idea", "experiment"])
     query.add_argument("--pool", default="")
     query.add_argument("--confirmation-status", choices=["auto_confirmed", "pending_user_confirmation", "confirmed", "rejected"])
 
     review = subparsers.add_parser("review-queue", help="List records waiting for confirmation")
-    review.add_argument("--kind", choices=["paper", "repo", "blog", "idea", "experiment"])
+    review.add_argument("--kind", choices=["paper", "repo", "dataset", "blog", "idea", "experiment"])
     review.add_argument("--confirmation-status", default="pending_user_confirmation", choices=["auto_confirmed", "pending_user_confirmation", "confirmed", "rejected"])
     review.add_argument("--limit", type=int, default=50)
     review.add_argument("--confirm", action="store_true", help="Confirm the listed records in place")
@@ -442,7 +451,7 @@ def build_parser() -> argparse.ArgumentParser:
     confirm = subparsers.add_parser("confirm", help="Confirm multiple records with one explicit evidence authorization")
     confirm.add_argument("--id", action="append", default=[])
     confirm.add_argument("--all-reviewed", action="store_true", help="Confirm the current review queue")
-    confirm.add_argument("--kind", choices=["paper", "repo", "blog", "idea", "experiment"])
+    confirm.add_argument("--kind", choices=["paper", "repo", "dataset", "blog", "idea", "experiment"])
     confirm.add_argument("--limit", type=int, default=0)
     confirm.add_argument("--confirmed-by", default="")
     confirm.add_argument("--evidence", action="append", required=True)
@@ -451,11 +460,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     refresh = subparsers.add_parser("refresh-schema", help="Backfill the latest record schema")
     refresh.add_argument("--id", action="append", default=[])
-    refresh.add_argument("--kind", choices=["paper", "repo", "blog", "idea", "experiment"])
+    refresh.add_argument("--kind", choices=["paper", "repo", "dataset", "blog", "idea", "experiment"])
 
     govern = subparsers.add_parser("govern", help="Apply topic / tag / candidate-pool governance")
     govern.add_argument("--id", action="append", default=[])
-    govern.add_argument("--kind", choices=["paper", "repo", "blog", "idea", "experiment"])
+    govern.add_argument("--kind", choices=["paper", "repo", "dataset", "blog", "idea", "experiment"])
     govern.add_argument("--topic", action="append", default=[])
     govern.add_argument("--tag", action="append", default=[])
     govern.add_argument("--pool", action="append", default=[])
@@ -607,6 +616,23 @@ def main() -> int:
                 message=f"milestone: compact knowledge-unit ids ({payload['changed']})",
                 target_paths=compact_paths,
             )
+        return 0
+    if args.command == "migrate-dataset":
+        plan = dataset_migration_plan(root, args.repo_id)
+        print(f"mode: {'apply' if args.apply else 'dry-run'}")
+        print(f"- {plan['old_id']} -> {plan['new_id']} | {plan['title']}")
+        if not args.apply:
+            return 0
+        migration_paths = dataset_migration_targets(root, plan)
+        with mutation_transaction(root, "migrate_repo_to_dataset", migration_paths):
+            payload = migrate_repo_to_dataset(root, args.repo_id)
+        checkpoint_and_report(
+            root,
+            trigger="milestone",
+            message=f"milestone: migrate dataset {payload['new_id']}",
+            target_paths=migration_paths,
+        )
+        print(f"[ok] migrated {payload['old_id']} -> {payload['new_id']}")
         return 0
     if args.command == "rebuild-governance":
         governance_paths = mutation_targets(root, [topic_taxonomy_path(root), candidate_pools_path(root)])

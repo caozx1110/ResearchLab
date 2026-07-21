@@ -30,7 +30,7 @@
 | `CONFIRMATION_VALUES` | `auto_confirmed, pending_user_confirmation, confirmed, rejected` | 用户确认门控 |
 | `INFORMATION_TYPES` | `fact, inference, evaluation, user_opinion, unverified` | 信息性质 |
 | `MATURITY_LEVELS` | `lightweight, complete` | unit 完备度 |
-| `UNIT_KIND_DIRS` | `paper→kb/units/papers, repo→kb/units/repos, blog→kb/units/blogs, idea→kb/units/ideas, experiment→kb/units/experiments` | unit 落盘目录 |
+| `UNIT_KIND_DIRS` | `paper→kb/units/papers, repo→kb/units/repos, dataset→kb/units/datasets, blog→kb/units/blogs, idea→kb/units/ideas, experiment→kb/units/experiments` | unit 落盘目录 |
 | `WORKFLOW_STATES` | `source_ready, awaiting_agent_fill, ready_to_verify, ready_for_review, done, failed_retryable` | `record_workflow_state()` 的唯一纯分类，供 next/review/status/auto 共用 |
 
 **确认门控规则**（见 [`confirmation gate`](#confirmation-gate)）：
@@ -46,12 +46,12 @@
 
 ## unit/record.yaml <a id="unit-record"></a>
 
-适用：paper / repo / blog / idea / experiment 五种 unit 共享的 record 顶层结构。
+适用：paper / repo / dataset / blog / idea / experiment 六种 unit 共享的 record 顶层结构。
 
 ```yaml
 id: <kind-prefix>-<slug>-<8hex>      # 必填；canonical_unit_id() 生成
 legacy_ids: []                       # 旧版 id，不再使用
-kind: paper|repo|blog|idea|experiment
+kind: paper|repo|dataset|blog|idea|experiment
 title: ""
 status: draft                        # STATUS_VALUES 之一
 maturity: lightweight                # MATURITY_LEVELS 之一
@@ -148,9 +148,14 @@ history:                             # append_history() 写入
 |---|---|---|
 | paper | `basic_info`, `source_search`, `quick_screen{paper_type, judgement_reason, takeaways}`, `core_content`, `structure`, `figures`, `critique`, `state` | paper-analyst |
 | repo | `basic_info`, `source_search`, `capability{boundary, core_capabilities}`, `structure`, `reuse`, `risk` | repo-analyst |
+| dataset | `basic_info`, `source_search`, `profile`, `composition`, `access`, `quality`, `reuse`, `state{profile_status}` | dataset-analyst |
 | blog | `basic_info`, `source_search`, `positioning`, `content`, `credibility` | blog-analyst |
 | idea | `problem{problem_definition}`, `hypothesis{core_hypothesis}`, `review` | idea-workbench |
 | experiment | `basic_info{goal}`, `setup`, `process`, `results`, `diagnosis`（另见 run-log/diagnoses/follow-ups 旁路文件） | experiment-workbench |
+
+`dataset` 的 confirmable 四要素固定映射为：`positioning → profile.positioning`、`composition → composition.summary`、`schema_access → access.schema_access`、`suitability_risks → quality.suitability_risks`。四者均由 runtime agent 填写并带 `parse-cache.yaml` / dataset card 的逐字 evidence；脚本不得依据 URL、字段名或规模自动生成判断。`state.profile_status` 使用 analyzer marker（`not_started|awaiting_agent_fill|ready_to_verify|pending_user_confirmation`）。
+
+repo 的 `structure.scan_applicability` 取 `unknown|applicable|not_applicable|unavailable`；只有 `applicable` 可运行结构扫描。URL HTML 快照、dataset/model card 和普通项目页不得因本地归档目录存在而变成“源码树”。`scan-structure` 的机械事实不直接改写 canonical claims 或顶层 confirmation；确认是否失效只由统一 verification/confirmation digest validator 决定。
 
 ### paper 类型与 note element set <a id="paper-element-sets"></a>
 
@@ -317,7 +322,7 @@ items:
   created_at: ''
   question: ""                # 待获取的证据
   needed: ""                  # 期望证据形态
-  source_type: paper|repo|blog|experiment|user
+  source_type: paper|repo|dataset|blog|experiment|user
   priority: high|normal|low
   blocking: true|false        # 是否阻塞 stage 推进
   related_unit_ids: []

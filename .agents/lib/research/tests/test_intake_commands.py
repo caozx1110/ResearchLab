@@ -61,3 +61,13 @@ def test_intake_user_guidance_hides_internal_config_commands() -> None:
     assert "kb next" in rendered
     for leaked_fragment in ("python3", "config.py", ".py ", "--section", "${"):
         assert leaked_fragment not in rendered
+
+
+def test_kb_ingest_chain_owns_paper_analyzer_order(monkeypatch) -> None:
+    intake = _load_intake_module()
+
+    monkeypatch.delenv("RESEARCH_INGEST_CHAIN", raising=False)
+    assert intake.ingest_chain_active() is False
+
+    monkeypatch.setenv("RESEARCH_INGEST_CHAIN", "1")
+    assert intake.ingest_chain_active() is True

@@ -505,6 +505,8 @@ def test_review_queue_excludes_hollow_judgements_but_keeps_ready_fact_metadata(t
         ("blog", "full_note_status", "failed-retryable"),
         ("repo", "capability_fill_status", "awaiting_agent_fill"),
         ("repo", "capability_fill_status", "ready-to-verify"),
+        ("dataset", "profile_status", "awaiting_agent_fill"),
+        ("dataset", "profile_status", "ready_to_verify"),
     ],
 )
 def test_review_queue_excludes_non_review_workflow_states_for_all_source_kinds(
@@ -515,7 +517,7 @@ def test_review_queue_excludes_non_review_workflow_states_for_all_source_kinds(
 ) -> None:
     kb = _load_kb_module()
     ensure_workspace(tmp_path)
-    prefix = {"paper": "p", "blog": "b", "repo": "r"}[kind]
+    prefix = {"paper": "p", "blog": "b", "repo": "r", "dataset": "d"}[kind]
     blocked = _paper(f"{prefix}-blocked-12345678", full_note_status="pending_user_confirmation")
     blocked["kind"] = kind
     blocked["payload"]["state"] = {state_key: blocked_state}
@@ -534,17 +536,26 @@ def test_review_queue_excludes_non_review_workflow_states_for_all_source_kinds(
 
 
 def _write_verified_judgement(root: Path, kind: str, *, suffix: str, hollow: bool = False) -> str:
-    prefix = {"paper": "p", "blog": "b", "repo": "r"}[kind]
+    prefix = {"paper": "p", "blog": "b", "repo": "r", "dataset": "d"}[kind]
     unit_id = f"{prefix}-{suffix}-12345678"
     unit_dir = record_path(root, kind, unit_id).parent
     evidence_path = unit_dir / "raw" / "source.txt"
     evidence_path.parent.mkdir(parents=True, exist_ok=True)
     evidence_path.write_text("verbatim source quote\n", encoding="utf-8")
-    state_key = "capability_fill_status" if kind == "repo" else "full_note_status"
+    state_key = {
+        "repo": "capability_fill_status",
+        "dataset": "profile_status",
+    }.get(kind, "full_note_status")
     substance = {} if hollow else {
         "paper": {"core_content": {"method": "Grounded method explanation."}},
         "blog": {"content": {"key_points": ["Grounded key point."]}},
         "repo": {"capability": {"core_capabilities": ["training"]}},
+        "dataset": {
+            "profile": {"positioning": "Grounded dataset positioning."},
+            "composition": {"summary": "Grounded composition."},
+            "access": {"schema_access": "Grounded schema and access."},
+            "quality": {"suitability_risks": "Grounded suitability and risks."},
+        },
     }[kind]
     record = {
         "id": unit_id,
@@ -591,7 +602,7 @@ def test_review_queue_uses_current_verified_judgement_readiness_for_all_source_k
     ensure_workspace(tmp_path)
     ready_ids = {
         _write_verified_judgement(tmp_path, kind, suffix=f"ready-{kind}")
-        for kind in ("paper", "blog", "repo")
+        for kind in ("paper", "blog", "repo", "dataset")
     }
     hollow_id = _write_verified_judgement(tmp_path, "paper", suffix="hollow", hollow=True)
     stale_id = _write_verified_judgement(tmp_path, "blog", suffix="stale")
@@ -607,7 +618,7 @@ def test_review_queue_uses_current_verified_judgement_readiness_for_all_source_k
     assert stale_id not in listed
 
 
-@pytest.mark.parametrize("kind", ["paper", "blog", "repo"])
+@pytest.mark.parametrize("kind", ["paper", "blog", "repo", "dataset"])
 def test_stale_verified_judgement_returns_to_agent_verification(
     tmp_path: Path,
     kind: str,
@@ -624,7 +635,7 @@ def test_stale_verified_judgement_returns_to_agent_verification(
     assert record_workflow_state(record) == "ready_to_verify"
 
 
-@pytest.mark.parametrize("kind", ["paper", "blog", "repo"])
+@pytest.mark.parametrize("kind", ["paper", "blog", "repo", "dataset"])
 def test_stale_hollow_judgement_returns_to_agent_fill(
     tmp_path: Path,
     kind: str,
