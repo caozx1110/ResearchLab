@@ -605,11 +605,13 @@ claim:
   confirmation_status: pending_user_confirmation|confirmed|rejected|auto_confirmed
   evidence_refs:
     - source_unit_id: p-...       # 证据所在 unit
-      artifact: parse-cache.yaml  # 兼容机器证据；agent 阅读优先 source/document.md
+      artifact: parse-cache.yaml  # unit 内相对路径，或 source(pdf/html)
       locator: "page=3"           # PDF: page=N|section|para ; HTML: section|anchor（B4）
       quote: ""                   # 短逐字片段（B3）——脚本校验它逐字存在于 artifact
       summary: ""                 # 可选转述
 ```
+
+Agent 阅读可优先使用 `source/document.md`；`artifact` 仍保持上述锁定证据协议，由机器按原始 artifact 与逐字 quote 复验。
 
 Repo workspace 源码是唯一外部扩展，evidence ref 额外声明 `external_source: {kind: repo}`；可信 `base_root` 只能由 repo record / caller 提供，不是 claim 字段。例：
 

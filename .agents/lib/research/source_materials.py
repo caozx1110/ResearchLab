@@ -20,8 +20,8 @@ from urllib.parse import unquote_to_bytes, urljoin, urlparse
 from bs4 import BeautifulSoup, Tag
 from markdownify import markdownify
 
-from .common import clean_text, ensure_dir, file_sha256, write_text_if_changed, write_yaml_if_changed
-from .yaml_io import write_bytes_atomic
+from .common import clean_text, ensure_dir, file_sha256, write_text_if_changed
+from .yaml_io import dump_yaml, write_bytes_atomic
 
 
 MATERIALIZATION_SCHEMA = "research-source-markdown/v1"
@@ -47,6 +47,18 @@ SAFE_IMAGE_SUFFIXES = {".avif", ".gif", ".jpeg", ".jpg", ".png", ".svg", ".webp"
 
 
 ImageFetcher = Callable[..., tuple[bytes | str, str]]
+
+
+def _write_immutable_text(path: Path, text: str) -> None:
+    if path.exists() or path.is_symlink():
+        if path.is_symlink() or not path.is_file() or path.read_text(encoding="utf-8") != text:
+            raise ValueError(f"immutable source bundle collision: {path.name}")
+        return
+    write_text_if_changed(path, text)
+
+
+def _write_immutable_yaml(path: Path, payload: dict[str, Any]) -> None:
+    _write_immutable_text(path, dump_yaml(payload))
 
 
 def _package_version(name: str) -> str:
@@ -119,11 +131,11 @@ def _write_bundle(
     source_map_path = source_root / SOURCE_MAP_NAME
     conversion_path = source_root / CONVERSION_NAME
     normalized = document_text.replace("\r\n", "\n").replace("\r", "\n").rstrip() + "\n"
-    write_text_if_changed(document_path, normalized)
+    _write_immutable_text(document_path, normalized)
     document_hash = file_sha256(document_path)
     raw_hash = file_sha256(raw_path)
     asset_entries = sorted(assets, key=lambda item: (str(item.get("path") or ""), str(item.get("block_id") or "")))
-    write_yaml_if_changed(
+    _write_immutable_yaml(
         source_map_path,
         {
             "schema": SOURCE_MAP_SCHEMA,
@@ -135,7 +147,7 @@ def _write_bundle(
         },
     )
     status = "degraded" if warnings else "complete"
-    write_yaml_if_changed(
+    _write_immutable_yaml(
         conversion_path,
         {
             "schema": MATERIALIZATION_SCHEMA,

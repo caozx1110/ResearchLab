@@ -579,6 +579,10 @@ def validate_local_source(project_root: Path, source: str) -> Path | None:
 
 
 def _copy_regular_file_no_links(src: Path, dst: Path) -> None:
+    if _path_exists_without_following(dst):
+        if _file_sha256_no_links(src) != _file_sha256_no_links(dst):
+            raise ValueError(f"immutable source byte collision: {dst.name}")
+        return
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(src, flags)
@@ -1089,8 +1093,11 @@ def _warn(message: str, source_label: str) -> None:
 
 def _store_bytes(root: Path, name: str, data: bytes) -> Path:
     dst = root / name
-    if not dst.exists():
-        write_bytes_atomic(dst, data)
+    if dst.exists() or dst.is_symlink():
+        if dst.is_symlink() or not dst.is_file() or file_sha256(dst) != hashlib.sha256(data).hexdigest():
+            raise ValueError(f"immutable source byte collision: {name}")
+        return dst
+    write_bytes_atomic(dst, data)
     return dst
 
 
@@ -1313,8 +1320,7 @@ def _backup_local(project_root: Path, root: Path, source: str) -> dict[str, Any]
     if stat.S_ISDIR(source_stat.st_mode):
         _copy_dir(src, dst)
         return {"original_uri": src.as_posix(), "backup_paths": [rel(project_root, dst)], "backup_kind": "directory", "file_hash": "", "backup_status": "ok", "source_type": "directory", "locator_kind": ""}
-    if not dst.exists():
-        _copy_regular_file_no_links(src, dst)
+    _copy_regular_file_no_links(src, dst)
     result: dict[str, Any] = {
         "original_uri": src.as_posix(),
         "backup_paths": [rel(project_root, dst)],

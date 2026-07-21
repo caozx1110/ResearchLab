@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import hashlib
 from pathlib import Path
 
@@ -25,6 +24,14 @@ def _minimal_pdf_bytes(text: str = "Dual Source Test\nBody paragraph on page one
     return data
 
 
+def _valid_png_bytes() -> bytes:
+    import fitz  # type: ignore
+
+    pixmap = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 80, 60), False)
+    pixmap.clear_with(0x336699)
+    return pixmap.tobytes("png")
+
+
 def _pdf_with_image_bytes() -> bytes:
     import fitz  # type: ignore
 
@@ -32,7 +39,7 @@ def _pdf_with_image_bytes() -> bytes:
     page = doc.new_page()
     page.insert_text((72, 72), "Visual Source Paper")
     page.insert_text((72, 92), "This page contains a result figure and readable source text.")
-    page.insert_image(fitz.Rect(72, 140, 232, 260), stream=_PNG_BYTES)
+    page.insert_image(fitz.Rect(72, 140, 232, 260), stream=_valid_png_bytes())
     data = doc.tobytes()
     doc.close()
     return data
@@ -46,9 +53,7 @@ _ARXIV_HTML = (
     "</body></html>"
 )
 
-_PNG_BYTES = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAFAAAAA8CAIAAAB+RarbAAAAeUlEQVR4nOXOMQEAIAzAsFI1868HMbhgR6Mg585QIjESIzESIzESIzESIzESIzESIzESIzESIzESIzESIzESIzESIzESIzESIzESIzESIzESIzESIzESIzESIzESIzESIzESIzESIzESIzESIzESIzESIzES43bgtwep2QGkUHr23QAAAABJRU5ErkJggg=="
-)
+_PNG_BYTES = _valid_png_bytes()
 
 
 def test_backup_source_non_html_non_pdf_url_fails_explicitly(
@@ -279,6 +284,47 @@ def test_local_markdown_localizes_linked_images(tmp_path: Path) -> None:
     assert "![Success chart](assets/image-" in document
     assert "figure.png" not in document
     assert len(assets) == 1 and assets[0].read_bytes() == _PNG_BYTES
+
+
+@pytest.mark.parametrize("bundle_name", ["document.md", "source-map.yaml", "conversion.yaml"])
+def test_source_bundle_is_idempotent_and_refuses_overwrite(tmp_path: Path, bundle_name: str) -> None:
+    selected = tmp_path / "immutable.md"
+    selected.write_text("# Immutable source\n\nGrounded text.\n", encoding="utf-8")
+    unit_id = "b-immutable-123456"
+
+    sources.backup_source(tmp_path, "blog", unit_id, selected.as_posix())
+    source_root = core.unit_root(tmp_path, "blog", unit_id) / "source"
+    before = {path.relative_to(source_root).as_posix(): path.read_bytes() for path in source_root.rglob("*") if path.is_file()}
+
+    sources.backup_source(tmp_path, "blog", unit_id, selected.as_posix())
+    after = {path.relative_to(source_root).as_posix(): path.read_bytes() for path in source_root.rglob("*") if path.is_file()}
+    assert after == before
+
+    protected = source_root / bundle_name
+    protected.write_text("human drift must be preserved\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="immutable source bundle collision"):
+        sources.backup_source(tmp_path, "blog", unit_id, selected.as_posix())
+    assert protected.read_text(encoding="utf-8") == "human drift must be preserved\n"
+
+
+def test_raw_source_bytes_are_idempotent_and_refuse_overwrite(tmp_path: Path) -> None:
+    selected = tmp_path / "immutable-raw.md"
+    original = b"# Immutable raw source\n\nOriginal bytes.\n"
+    selected.write_bytes(original)
+    unit_id = "b-immutable-raw-123456"
+
+    sources.backup_source(tmp_path, "blog", unit_id, selected.as_posix())
+    source_root = core.unit_root(tmp_path, "blog", unit_id) / "source"
+    raw = source_root / selected.name
+    document_before = (source_root / "document.md").read_bytes()
+
+    sources.backup_source(tmp_path, "blog", unit_id, selected.as_posix())
+    selected.write_text("# Changed upstream bytes\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="immutable source byte collision"):
+        sources.backup_source(tmp_path, "blog", unit_id, selected.as_posix())
+
+    assert raw.read_bytes() == original
+    assert (source_root / "document.md").read_bytes() == document_before
 
 
 def test_html_conversion_failure_preserves_raw_fallback_bundle(

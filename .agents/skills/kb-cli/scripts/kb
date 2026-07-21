@@ -68,7 +68,7 @@ HELP_MENU: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         (
             ("打印能力菜单。", "kb help"),
             ("初始化知识库布局、索引和基础偏好。", "kb init"),
-            ("检查运行环境、配置读写、材料转换与论文解析能力。", "kb doctor"),
+            ("检查运行环境、配置读写与论文解析能力，并检查材料 Markdown 转换能力。", "kb doctor"),
             ("检查并在确认后更新研究能力包。", "kb update"),
             ("生成或检查可由 Obsidian 直接浏览的知识网络视图。", "kb obsidian update"),
             ("刷新并查看当前知识库和研究计划的状态摘要。", "kb status"),
