@@ -25,7 +25,7 @@ These labels describe the current scope of each component, not the release statu
 |---|---|---|
 | `kb-cli` | stable | Fifteen-verb routing, conversational output filtering, and recovery entrypoints only. |
 | `knowledge-base-manager` | stable | Schema, evidence, confirmation, exact-path recovery, and index governance; it does not interpret research material. |
-| `source-intake` | beta | Staging, deduplication, immutable source capture, and retryable failures across heterogeneous sources. |
+| `source-intake` | beta | Staging, deduplication, immutable source capture, full Markdown reading views with local assets, and retryable failures across heterogeneous sources. |
 | `paper-analyst` | beta | Evidence-backed prepare and verify gates; the runtime agent supplies the substantive reading. |
 | `repo-analyst` | beta | File-oriented capability-map preparation and evidence verification; the runtime agent supplies code understanding. |
 | `dataset-analyst` | beta | Dataset-card profile preparation and verbatim evidence verification; suitability judgements remain agent-authored and confirmation-gated. |
@@ -124,6 +124,8 @@ kb/
 ├── output/       # exports, never the only source of truth
 └── .runtime/     # private local runtime state
 ```
+
+Convertible paper, HTML, Markdown, and text units preserve the original material and add a complete `source/document.md` reading view, a source map, a conversion manifest, and locally stored image assets. Human readers and agents use that Markdown first, while the original format remains the fallback. Repository source stays in its native files; generated Obsidian pages can link to verified local code files without making machine-local URIs canonical evidence.
 
 The core rules are:
 

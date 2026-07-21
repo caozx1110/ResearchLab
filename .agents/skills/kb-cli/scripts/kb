@@ -68,7 +68,7 @@ HELP_MENU: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         (
             ("打印能力菜单。", "kb help"),
             ("初始化知识库布局、索引和基础偏好。", "kb init"),
-            ("检查运行环境、配置读写与论文解析能力。", "kb doctor"),
+            ("检查运行环境、配置读写、材料转换与论文解析能力。", "kb doctor"),
             ("检查并在确认后更新研究能力包。", "kb update"),
             ("生成或检查可由 Obsidian 直接浏览的知识网络视图。", "kb obsidian update"),
             ("刷新并查看当前知识库和研究计划的状态摘要。", "kb status"),
@@ -987,6 +987,7 @@ def handle_doctor(args: argparse.Namespace, root: Path) -> int:
     venv_dir = managed_venv_dir(DEFAULT_PROJECT_ROOT)
     venv_py = managed_venv_python(DEFAULT_PROJECT_ROOT)
     yaml_ready = bool(capabilities.get("yaml_support"))
+    markdown_ready = bool(capabilities.get("markdown_support"))
     pdf_backend = str(capabilities.get("pdf_backend") or "").strip()
     runtime_kind = "受管项目运行环境" if is_current_python(venv_py) else "当前已配置运行环境"
     raw_package_version = updater.read_local_version(DEFAULT_PROJECT_ROOT)
@@ -998,6 +999,7 @@ def handle_doctor(args: argparse.Namespace, root: Path) -> int:
     )
     print(f"研究能力包版本为 {public_version}。")
     print(f"{runtime_kind}可用；配置读写能力{'正常' if yaml_ready else '缺失'}。")
+    print(f"材料 Markdown 阅读层转换能力{'已就绪' if markdown_ready else '尚未就绪'}。")
     if pdf_backend:
         print("论文解析能力已就绪。")
     else:
@@ -1008,6 +1010,7 @@ def handle_doctor(args: argparse.Namespace, root: Path) -> int:
             "version": capabilities.get("version") or "",
             "modules": modules if isinstance(modules, dict) else {},
             "yaml_support": yaml_ready,
+            "markdown_support": markdown_ready,
             "pdf_backend": pdf_backend,
             "package_version": raw_package_version,
             "managed_runtime": {
@@ -1020,7 +1023,7 @@ def handle_doctor(args: argparse.Namespace, root: Path) -> int:
     }
     if _ACTIVE_PROTOCOL is not None:
         protocol_details["diagnostics"] = _doctor_diagnostic_summary(root)
-    set_protocol_status("completed" if yaml_ready else "runtime_incomplete", **protocol_details)
+    set_protocol_status("completed" if yaml_ready and markdown_ready else "runtime_incomplete", **protocol_details)
     return 0
 
 

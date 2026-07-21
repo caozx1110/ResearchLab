@@ -120,6 +120,16 @@ source:
   backup_paths: []                   # 仓内备份相对路径
   backup_kind: file|dir
   file_hash: ""                      # sha256（如有）
+  markdown_path: ""                  # kb-relative 完整阅读层：.../source/document.md
+  markdown_hash: ""                  # document.md sha256
+  materialization:                   # 可解析非 repo source 的确定性 Markdown 投影
+    schema: research-source-markdown/v1
+    status: complete|degraded
+    converter: pymupdf4llm|markdownify|identity|plain-text|fallback
+    converter_version: ""
+    source_map_path: ""               # kb-relative .../source/source-map.yaml
+    conversion_path: ""               # kb-relative .../source/conversion.yaml
+    asset_paths: []                   # kb-relative source/assets/*，按内容 hash 命名
 payload:                             # 见下方 per-kind payload
   claims: []                         # canonical claims SSOT；sidecar 只允许是投影
   verification:                      # analyzer verify 的 byte-bound receipt
@@ -143,6 +153,10 @@ history:                             # append_history() 写入
   information_types: [fact]
   artifacts: []
 ```
+
+`source.markdown_path` 是人类、runtime agent 与 Obsidian 共用的首选阅读面，但不是对原件的替代。它必须完整、不使用 intake 的 page/section 字符截断预算，并与 `source-map.yaml`、`conversion.yaml`、`assets/` 一起位于 unit 的 `source/` containment 内。`document.md` 及其映射一经 canonical materialization 即只读；转换器/配置升级不能原地覆盖已被 verification receipt 消费的 bytes。旧 record 可以没有这些 additive 字段，读侧必须兼容。
+
+图片统一写本地相对引用，不允许 Base64 内联。PDF 图片记录 page/bbox，HTML/Markdown 图片记录原 URL 或路径及 anchor；抓取失败时 `materialization.status=degraded` 并在 conversion warnings 中留痕，原文件仍可 fallback。若正文转换器整体失败，必须生成只指向原件的 degraded reading stub 与完整失败清单，不能丢失原始 bytes 或伪装成完整 Markdown。repo 不建立 `document.md` 镜像，源码身份继续使用可信 `repo_root` 下的 `repo_id + relative_path`。
 
 `links` 只保存显式声明的**正向有向边**。反向关系由共享 relation registry 在读取/投影时推导，禁止再向目标 record 复制 `reverse:<relation>`。内置 inverse 为：`cites↔cited_by`、`builds_on↔extended_by`、`implements↔implemented_by`、`uses_dataset↔used_by`、`supports↔supported_by`、`contradicts↔contradicted_by`、`part_of↔contains`；`related_to`、`similar_to` 对称。旧 `reverse:*` 可读但不再写：匹配正向边时折叠，孤立旧边保留为 legacy-derived 视图并由 Obsidian audit 提示迁移。
 
@@ -591,7 +605,7 @@ claim:
   confirmation_status: pending_user_confirmation|confirmed|rejected|auto_confirmed
   evidence_refs:
     - source_unit_id: p-...       # 证据所在 unit
-      artifact: parse-cache.yaml  # unit 内相对路径，或 source(pdf/html)
+      artifact: parse-cache.yaml  # 兼容机器证据；agent 阅读优先 source/document.md
       locator: "page=3"           # PDF: page=N|section|para ; HTML: section|anchor（B4）
       quote: ""                   # 短逐字片段（B3）——脚本校验它逐字存在于 artifact
       summary: ""                 # 可选转述
@@ -619,7 +633,7 @@ Repo workspace 源码是唯一外部扩展，evidence ref 额外声明 `external
 | `confirmation_status` | claim | 必填，取 `pending_user_confirmation` / `confirmed` / `rejected` / `auto_confirmed` 之一（与 record 的 `CONFIRMATION_VALUES` 同族）。 |
 | `evidence_refs` | claim | 必填列表（fact / unverified 可空；judgement-class 非空）；一旦有 ref，每条的 `source_unit_id` / `artifact` / `locator` / `quote` 都必须是非空文本。 |
 | `source_unit_id` | ref | 证据所在 unit id。 |
-| `artifact` | ref | unit 内相对路径（`parse-cache.yaml` / `note.md` / source 文件）；逐字校验对此文件文本进行。 |
+| `artifact` | ref | unit 内相对路径（`parse-cache.yaml` / `source/document.md` / `note.md` / source 文件）；逐字校验对此文件文本进行。 |
 | `locator` | ref | 定位提示，两套（见下）。 |
 | `quote` | ref | **短逐字片段（B3）**——脚本校验它逐字存在于 `artifact`。 |
 | `summary` | ref | 可选转述（不参与逐字校验）。 |

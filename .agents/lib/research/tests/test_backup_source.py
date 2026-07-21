@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 from pathlib import Path
 
@@ -24,12 +25,29 @@ def _minimal_pdf_bytes(text: str = "Dual Source Test\nBody paragraph on page one
     return data
 
 
+def _pdf_with_image_bytes() -> bytes:
+    import fitz  # type: ignore
+
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), "Visual Source Paper")
+    page.insert_text((72, 92), "This page contains a result figure and readable source text.")
+    page.insert_image(fitz.Rect(72, 140, 232, 260), stream=_PNG_BYTES)
+    data = doc.tobytes()
+    doc.close()
+    return data
+
+
 _ARXIV_HTML = (
     "<!doctype html><html><head><title>Attention Test Paper</title></head><body>"
     "<blockquote class='abstract'>Abstract: we test dual-source ingestion.</blockquote>"
     "<h2 id='intro'>Introduction</h2><p>Section one body about transformers.</p>"
     "<h2 id='method'>Method</h2><p>Section two body about attention.</p>"
     "</body></html>"
+)
+
+_PNG_BYTES = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAFAAAAA8CAIAAAB+RarbAAAAeUlEQVR4nOXOMQEAIAzAsFI1868HMbhgR6Mg585QIjESIzESIzESIzESIzESIzESIzESIzESIzESIzESIzESIzESIzESIzESIzESIzESIzESIzESIzESIzESIzESIzESIzESIzESIzESIzESIzESIzESIzES43bgtwep2QGkUHr23QAAAABJRU5ErkJggg=="
 )
 
 
@@ -93,9 +111,38 @@ def test_backup_source_pdf_url_persists_bytes_and_page_locator(
     assert payload["file_hash"] == hashlib.sha256(data).hexdigest()
     raw = core.unit_root(tmp_path, "paper", "p-pdf-123456") / "source" / "source.pdf"
     assert raw.exists() and raw.read_bytes() == data
+    document = raw.parent / "document.md"
+    assert document.is_file()
+    assert "[原始 PDF](source.pdf)" in document.read_text(encoding="utf-8")
+    assert "^source-page-1" in document.read_text(encoding="utf-8")
+    assert payload["markdown_hash"] == hashlib.sha256(document.read_bytes()).hexdigest()
+    assert payload["materialization"]["status"] == "complete"
+    assert (raw.parent / "source-map.yaml").is_file()
+    assert (raw.parent / "conversion.yaml").is_file()
     chunks = payload["parse_chunks"]
     assert chunks and chunks[0]["label"].endswith(":page-1")
     assert chunks[0]["page"] == 1
+
+
+def test_backup_source_pdf_extracts_local_hash_addressed_images(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data = _pdf_with_image_bytes()
+
+    monkeypatch.setattr(sources, "fetch_url", lambda url, **kwargs: (data, "application/pdf"))
+    payload = sources.backup_source(tmp_path, "paper", "p-pdf-image-123456", "https://example.com/visual.pdf")
+
+    assert payload["backup_status"] == "ok"
+    source_root = core.unit_root(tmp_path, "paper", "p-pdf-image-123456") / "source"
+    document = (source_root / "document.md").read_text(encoding="utf-8")
+    assert "^source-page-1" in document
+    assert "![PDF page 1 image](assets/image-" in document
+    assets = list((source_root / "assets").glob("image-*.png"))
+    assert len(assets) == 1
+    source_map = core.load_yaml(source_root / "source-map.yaml", default={})
+    assert source_map["assets"][0]["page"] == 1
+    assert source_map["assets"][0]["locator_kind"] == "page"
+    assert source_map["assets"][0]["path"] == f"assets/{assets[0].name}"
 
 
 def test_backup_source_arxiv_prefers_html_with_section_locator(
@@ -120,6 +167,11 @@ def test_backup_source_arxiv_prefers_html_with_section_locator(
     labels = [c["label"] for c in payload["parse_chunks"]]
     assert any(label.startswith("section:") for label in labels)
     assert all(not label.endswith("page-1") for label in labels)  # HTML has no page numbers
+    source_root = core.unit_root(tmp_path, "paper", "p-arxiv-123456") / "source"
+    document = (source_root / "document.md").read_text(encoding="utf-8")
+    assert "## Introduction" in document
+    assert "^source-section-intro" in document
+    assert not (source_root / "snapshot.md").exists()
 
 
 def test_backup_source_arxiv_falls_back_when_html_missing(
@@ -140,6 +192,114 @@ def test_backup_source_arxiv_falls_back_when_html_missing(
     assert payload["backup_status"] == "ok"
     assert payload["resolved_url"] == "https://ar5iv.labs.arxiv.org/html/1301.3781"
     assert payload["locator_kind"] == "section"
+
+
+def test_backup_source_html_localizes_images_and_preserves_structured_markdown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    html = b"""<!doctype html><html><head><title>Visual Paper</title></head><body>
+    <article><h1 id="overview">Overview</h1><p>Readable paragraph.</p>
+    <figure><img src="/figures/result.png" alt="Result chart"><figcaption>Figure 1. Success rate.</figcaption></figure>
+    <table><tr><th>Method</th><th>Score</th></tr><tr><td>Ours</td><td>91</td></tr></table>
+    <math alttext="x^2+y^2" display="block"></math></article></body></html>"""
+
+    def fake_fetch_url(url: str, **kwargs) -> tuple[bytes, str]:
+        if url.endswith("result.png"):
+            return _PNG_BYTES, "image/png"
+        return html, "text/html"
+
+    monkeypatch.setattr(sources, "fetch_url", fake_fetch_url)
+    payload = sources.backup_source(tmp_path, "blog", "b-visual-123456", "https://example.com/post")
+
+    assert payload["backup_status"] == "ok"
+    source_root = core.unit_root(tmp_path, "blog", "b-visual-123456") / "source"
+    document = (source_root / "document.md").read_text(encoding="utf-8")
+    assert "# Overview" in document
+    assert "Readable paragraph." in document
+    assert "Figure 1. Success rate." in document
+    assert "| Method | Score |" in document
+    assert "x^2+y^2" in document
+    assert "https://example.com/figures/result.png" not in document
+    assert "assets/image-" in document
+    assets = list((source_root / "assets").glob("image-*.png"))
+    assert len(assets) == 1
+    assert assets[0].read_bytes() == _PNG_BYTES
+    assert payload["materialization"]["asset_paths"] == [assets[0].relative_to(tmp_path).as_posix()]
+    assert payload["markdown_path"] == (source_root / "document.md").relative_to(tmp_path).as_posix()
+
+
+def test_backup_source_html_keeps_remote_image_fallback_and_marks_degraded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    html = b"<html><body><article><h1>Post</h1><img src='/missing.png' alt='Missing'></article></body></html>"
+
+    def fake_fetch_url(url: str, **kwargs) -> tuple[bytes, str]:
+        if url.endswith("missing.png"):
+            raise RuntimeError("image unavailable")
+        return html, "text/html"
+
+    monkeypatch.setattr(sources, "fetch_url", fake_fetch_url)
+    payload = sources.backup_source(tmp_path, "blog", "b-degraded-123456", "https://example.com/post")
+
+    assert payload["backup_status"] == "degraded"
+    assert payload["materialization"]["status"] == "degraded"
+    document = (core.unit_root(tmp_path, "blog", "b-degraded-123456") / "source/document.md").read_text(encoding="utf-8")
+    assert "https://example.com/missing.png" in document
+    conversion = core.load_yaml(core.unit_root(tmp_path, "blog", "b-degraded-123456") / "source/conversion.yaml", default={})
+    assert any("image unavailable" in warning for warning in conversion["warnings"])
+
+
+def test_local_markdown_named_document_is_archived_without_overwriting_reading_view(tmp_path: Path) -> None:
+    selected = tmp_path / "document.md"
+    selected.write_text("# Original heading\n\nFull local content.\n", encoding="utf-8")
+
+    payload = sources.backup_source(tmp_path, "blog", "b-local-md-123456", selected.as_posix())
+
+    source_root = core.unit_root(tmp_path, "blog", "b-local-md-123456") / "source"
+    assert (source_root / "original-document.md").read_text(encoding="utf-8").startswith("# Original heading")
+    generated = (source_root / "document.md").read_text(encoding="utf-8")
+    assert "[原始 Markdown](original-document.md)" in generated
+    assert "Full local content." in generated
+    assert "^source-section-original-heading" in generated
+    assert payload["file_hash"] == hashlib.sha256((source_root / "original-document.md").read_bytes()).hexdigest()
+
+
+def test_local_markdown_localizes_linked_images(tmp_path: Path) -> None:
+    selected = tmp_path / "article.md"
+    image = tmp_path / "figure.png"
+    image.write_bytes(_PNG_BYTES)
+    selected.write_text("# Results\n\n![Success chart](figure.png)\n", encoding="utf-8")
+
+    payload = sources.backup_source(tmp_path, "blog", "b-local-assets-123456", selected.as_posix())
+
+    source_root = core.unit_root(tmp_path, "blog", "b-local-assets-123456") / "source"
+    document = (source_root / "document.md").read_text(encoding="utf-8")
+    assets = list((source_root / "assets").glob("image-*.png"))
+    assert payload["backup_status"] == "ok"
+    assert "![Success chart](assets/image-" in document
+    assert "figure.png" not in document
+    assert len(assets) == 1 and assets[0].read_bytes() == _PNG_BYTES
+
+
+def test_html_conversion_failure_preserves_raw_fallback_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    html = b"<html><body><h1>Grounded</h1><p>Readable source survives.</p></body></html>"
+    monkeypatch.setattr(sources, "fetch_url", lambda url, **kwargs: (html, "text/html"))
+    monkeypatch.setattr(sources, "materialize_html", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("converter broke")))
+
+    payload = sources.backup_source(tmp_path, "blog", "b-fallback-123456", "https://example.com/fallback")
+
+    source_root = core.unit_root(tmp_path, "blog", "b-fallback-123456") / "source"
+    document = (source_root / "document.md").read_text(encoding="utf-8")
+    conversion = core.load_yaml(source_root / "conversion.yaml", default={})
+    assert payload["backup_status"] == "degraded"
+    assert payload["parse_chunks"]
+    assert payload["materialization"]["converter"] == "fallback"
+    assert "[原始 HTML](source.html)" in document
+    assert "Markdown conversion unavailable" in document
+    assert conversion["status"] == "degraded"
+    assert any("converter broke" in warning for warning in conversion["warnings"])
 
 
 def test_backup_source_rejects_a_file_symlink_without_copying_target_bytes(tmp_path: Path) -> None:

@@ -19,7 +19,7 @@
 |---|---|---|
 | `kb-cli` | stable | 十六个动词的路由、自然语言输出过滤和恢复入口；Obsidian 投影为 beta。 |
 | `knowledge-base-manager` | stable | 数据规范、证据、确认、精确恢复和索引治理；不负责理解研究材料。 |
-| `source-intake` | beta | 异构来源的暂存、去重、原始材料留存和可重试失败。 |
+| `source-intake` | beta | 异构来源的暂存、去重、原始材料留存、完整 Markdown 阅读层和可重试失败。 |
 | `paper-analyst` | beta | 带证据的准备与验证是真实流程；实质阅读由 Agent 完成。 |
 | `repo-analyst` | beta | 能力地图准备与代码证据验证是真实流程；代码理解由 Agent 完成。 |
 | `dataset-analyst` | beta | 数据画像骨架与数据卡逐字证据校验是真实流程；适用性判断由 Agent 完成并等待确认。 |
@@ -101,7 +101,9 @@ AI 适合自动完成：
 入库这篇技术文章，总结关键观点，并把可信度判断单独标出来让我确认。
 ```
 
-Agent 会连续完成安全步骤：轻量入库、准备填充结构、阅读派生证据、填写带 locator 的逐字引用、验证内容，以及可用时的安全刷新。脚本只搬运、建结构和验证；对材料的理解由 Agent 完成。
+Agent 会连续完成安全步骤：轻量入库、保留原格式、生成完整 Markdown 阅读层与本地图片资产、准备填充结构、阅读派生证据、填写带 locator 的逐字引用、验证内容，以及可用时的安全刷新。脚本只搬运、转换、建结构和验证；对材料的理解由 Agent 完成。
+
+论文 PDF、网页 HTML、已有 Markdown 与纯文本会在各自知识单元中获得 `source/document.md`。这是人和 AI 默认先读的完整版本，不受轻量 parse cache 的长度上限影响；转换不完整时仍可回退到保存的 PDF、HTML 或其他原格式。网页与 PDF 中成功提取的图片会保存到同一 source bundle 的本地 assets 并用相对链接引用，因此离线阅读和 Obsidian 引用不会依赖远程热链。代码仓保持原始源码结构，不把每个代码文件改造成 Markdown。
 
 当资料仍在等待 Agent 填写、等待验证，或处于可重试失败时，它不会进入你的确认收件箱。只有实质内容和 evidence 已过门的判断才会由 `kb review` 提请你决定。
 
@@ -134,7 +136,7 @@ Agent 会连续完成安全步骤：轻量入库、准备填充结构、阅读�
 
 把工作区的 `kb` 目录作为 Obsidian Vault 打开即可，无需社区插件。首次查看或 canonical 内容变化后使用 `kb obsidian update`；需要检查是否过期、断链或被人工改动时使用 `kb obsidian status`。
 
-系统生成的页面位于 `obsidian/managed/`，包含 unit、program、topic、claim/evidence 块链接和三个原生 Bases 面板。这个目录是可重建视图，不要直接编辑；你自己的阅读笔记分别放在 `obsidian/inbox/` 或 `obsidian/annotations/`。系统不会生成或修改 `.obsidian/` 配置。
+系统生成的页面位于 `obsidian/managed/`，包含 unit、program、topic、claim/evidence 块链接和三个原生 Bases 面板。Paper、文章和本地文档页还提供完整 Markdown 原文入口；已有 page/section locator 的 evidence 会尽量直接跳到该 Markdown 页或小节。Repo 证据在本地源码仍可达时可以直接打开对应代码文件，当前不保证精确跳到行号。这个目录是可重建视图，不要直接编辑；你自己的阅读笔记分别放在 `obsidian/inbox/` 或 `obsidian/annotations/`。系统不会生成或修改 `.obsidian/` 配置。
 
 生成页应使用 Obsidian 的**阅读视图**查看：点击页面右上角的书本图标即可。编辑或 Live Preview 视图会按 Obsidian 原生行为显示 `[[双链]]`、反引号和 `^block-id` 等 Markdown 源码，这不代表链接损坏。
 
@@ -208,7 +210,7 @@ Run log 是事实；diagnosis 是推断，默认待确认。报告系统从 prog
 
 ## 数据心智模型
 
-只需记住五层：受保护的原始证据、可复用的知识单元、研究计划与决策、跨材料综合，以及可重新生成的导出物。原始材料和完整派生证据只读不覆盖；知识单元与研究计划是主要真相；导航和导出都可以从它们重建。
+只需记住五层：受保护的原始证据、可复用的知识单元、研究计划与决策、跨材料综合，以及可重新生成的导出物。原格式、完整 Markdown 阅读层、本地图片、source map 与 parse cache 都只读不覆盖；知识单元与研究计划是主要真相；导航和导出都可以从它们重建。
 
 更新、迁移和卸载不会把私有研究数据带进发布包，也不会重写无关的 workspace 文件。
 

@@ -677,6 +677,13 @@ def test_failed_url_creates_only_retryable_staging_then_same_url_succeeds(
     assert len(records) == 1
     record = load_yaml(records[0])
     assert all(".runtime/intake-staging" not in item for item in record["source"]["backup_paths"])
+    assert ".runtime/intake-staging" not in record["source"]["markdown_path"]
+    assert (tmp_path / record["source"]["markdown_path"]).is_file()
+    materialization = record["source"]["materialization"]
+    assert ".runtime/intake-staging" not in materialization["source_map_path"]
+    assert ".runtime/intake-staging" not in materialization["conversion_path"]
+    assert (tmp_path / materialization["source_map_path"]).is_file()
+    assert (tmp_path / materialization["conversion_path"]).is_file()
     cache = load_yaml(records[0].parent / "parse-cache.yaml")
     assert cache["unit_id"] == record["id"]
     assert cache["chunks"]
@@ -1020,6 +1027,7 @@ def test_runtime_capabilities_recognize_default_pymupdf_stack() -> None:
 
     for payload in (current, inspected):
         modules = payload["modules"]
+        assert payload["markdown_support"] is True
         if modules["pymupdf4llm"] or modules["fitz"]:
             assert payload["pdf_support"] is True
             assert payload["pdf_backend"] in {"pymupdf4llm", "fitz"}

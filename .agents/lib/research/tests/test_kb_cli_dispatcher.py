@@ -222,6 +222,7 @@ def test_kb_doctor_prints_runtime_capabilities(monkeypatch, tmp_path: Path, caps
             "version": "3.11.0",
             "modules": {"yaml": True, "PyPDF2": False, "pypdf": True},
             "yaml_support": True,
+            "markdown_support": True,
             "pdf_support": True,
             "pdf_backend": "pypdf",
         },
@@ -232,6 +233,7 @@ def test_kb_doctor_prints_runtime_capabilities(monkeypatch, tmp_path: Path, caps
     captured = capsys.readouterr()
     assert "研究能力包版本为 0.2.0-rc.2" in captured.out
     assert "配置读写能力正常" in captured.out
+    assert "材料 Markdown 阅读层转换能力已就绪" in captured.out
     assert "论文解析能力已就绪" in captured.out
     assert "/usr/bin/python3" not in captured.out
     for implementation_term in ("Python", "YAML", "PDF", "pypdf", "research skill"):

@@ -28,7 +28,7 @@ from .yaml_io import dump_yaml, load_yaml, write_text_if_changed, write_yaml_if_
 
 
 OBSIDIAN_PROJECTION_SCHEMA = "research-kb-obsidian/v1"
-OBSIDIAN_RENDERER_REVISION = 2
+OBSIDIAN_RENDERER_REVISION = 3
 MANIFEST_NAME = "manifest.yaml"
 HUMAN_DIRS = ("inbox", "annotations")
 UNIT_HEADINGS = frozenset({"Overview", "Metadata", "Relationships", "Claims"})
@@ -134,6 +134,128 @@ def _source_markdown(value: Any) -> str:
         encoded = url_quote(uri, safe=":/?#[]@!$&'()*+,;=%")
         return f"[Open source](<{encoded}>)"
     return "Local source"
+
+
+def _canonical_source_path(project_root: Path, raw: Any, *, suffix: str | None) -> Path | None:
+    text = _single_line(raw)
+    if not text:
+        return None
+    lexical = PurePosixPath(text)
+    if lexical.is_absolute() or not lexical.parts or lexical.parts[0] != "kb":
+        return None
+    if any(part in {"", ".", ".."} for part in lexical.parts):
+        return None
+    if suffix is not None and lexical.suffix.lower() != suffix:
+        return None
+    candidate = project_root.joinpath(*lexical.parts)
+    try:
+        resolved = candidate.resolve(strict=True)
+        resolved.relative_to(kb_root(project_root).resolve())
+    except (OSError, ValueError):
+        return None
+    if candidate.is_symlink() or not candidate.is_file():
+        return None
+    return resolved
+
+
+def _source_document_vault_path(project_root: Path, source: dict[str, Any]) -> str:
+    raw = _single_line(source.get("markdown_path"))
+    resolved = _canonical_source_path(project_root, raw, suffix=".md")
+    if resolved is None:
+        return ""
+    try:
+        relative = resolved.relative_to(kb_root(project_root).resolve())
+    except ValueError:
+        return ""
+    return PurePosixPath(relative.as_posix()).with_suffix("").as_posix()
+
+
+def _source_document_link(project_root: Path, source: dict[str, Any]) -> str:
+    vault_path = _source_document_vault_path(project_root, source)
+    return _wikilink(vault_path, display="Read material") if vault_path else ""
+
+
+def _source_evidence_link(
+    project_root: Path,
+    record: dict[str, Any],
+    ref: dict[str, Any],
+    artifact: str,
+) -> str:
+    source = record.get("source") if isinstance(record.get("source"), dict) else {}
+    vault_path = _source_document_vault_path(project_root, source)
+    if not vault_path:
+        return ""
+    materialization = source.get("materialization") if isinstance(source.get("materialization"), dict) else {}
+    source_map = _canonical_source_path(project_root, materialization.get("source_map_path"), suffix=".yaml")
+    block_id = ""
+    if source_map is not None:
+        try:
+            payload = load_yaml(source_map, default={})
+        except (OSError, RuntimeError):
+            payload = {}
+        blocks = payload.get("blocks", []) if isinstance(payload, dict) else []
+        locator = _single_line(ref.get("locator"))
+        page_match = re.fullmatch(r"page\s*=\s*(\d+)", locator, flags=re.IGNORECASE)
+        section_match = re.fullmatch(r"(?:section|anchor)\s*:\s*(.+)", locator, flags=re.IGNORECASE)
+        for item in (blocks if isinstance(blocks, list) else []):
+            if not isinstance(item, dict):
+                continue
+            matches = False
+            if page_match:
+                try:
+                    matches = int(item.get("page")) == int(page_match.group(1))
+                except (TypeError, ValueError):
+                    matches = False
+            elif section_match:
+                target = section_match.group(1).strip()
+                matches = target in {_single_line(item.get("anchor")), _single_line(item.get("heading"))}
+            elif locator.lower() in {"section", "document"}:
+                matches = _single_line(item.get("anchor")) == "document"
+            if matches and BLOCK_ID_RE.fullmatch(_single_line(item.get("block_id"))):
+                block_id = _single_line(item.get("block_id"))
+                break
+    target = f"{vault_path}#^{block_id}" if block_id else vault_path
+    return _wikilink(target, display=artifact)
+
+
+def _local_repo_artifact_uri(record: dict[str, Any], ref: dict[str, Any]) -> str:
+    external = ref.get("external_source") if isinstance(ref.get("external_source"), dict) else {}
+    if str(record.get("kind") or "") != "repo" or str(external.get("kind") or "") != "repo":
+        return ""
+    payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+    structure = payload.get("structure") if isinstance(payload.get("structure"), dict) else {}
+    root_text = str(structure.get("repo_root") or "").strip()
+    artifact = str(ref.get("artifact") or "").strip()
+    relative = PurePosixPath(artifact)
+    if not root_text or relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
+        return ""
+    root = Path(root_text).expanduser()
+    if root.is_symlink() or not root.is_dir():
+        return ""
+    try:
+        root_resolved = root.resolve(strict=True)
+        lexical = root.joinpath(*relative.parts)
+        if lexical.is_symlink() or not lexical.is_file():
+            return ""
+        resolved = lexical.resolve(strict=True)
+        resolved.relative_to(root_resolved)
+    except (OSError, ValueError):
+        return ""
+    return resolved.as_uri()
+
+
+def _artifact_markdown(
+    project_root: Path,
+    record: dict[str, Any],
+    ref: dict[str, Any],
+    artifact: str,
+) -> str:
+    uri = _local_repo_artifact_uri(record, ref)
+    if uri:
+        encoded = url_quote(uri, safe=":/?#[]@!$&'()*+,;=%")
+        return f"[{_inline_code(artifact)}](<{encoded}>)"
+    source_link = _source_evidence_link(project_root, record, ref, artifact)
+    return source_link or _inline_code(artifact)
 
 
 def _unit_page_path(unit_id: str) -> str:
@@ -245,7 +367,11 @@ def _render_relations(
     return lines[:-1]
 
 
-def _render_claims(record: dict[str, Any], records_by_id: dict[str, dict[str, Any]]) -> list[str]:
+def _render_claims(
+    project_root: Path,
+    record: dict[str, Any],
+    records_by_id: dict[str, dict[str, Any]],
+) -> list[str]:
     claims = _claims(record)
     if not claims:
         return ["No canonical claims yet."]
@@ -276,11 +402,12 @@ def _render_claims(record: dict[str, Any], records_by_id: dict[str, dict[str, An
             evidence_id = _evidence_block_id(block_id, evidence_index)
             source_id = str(ref.get("source_unit_id") or current_id)
             source_link = _unit_link(source_id, records_by_id)
+            source_record = records_by_id.get(source_id, {})
             locator = _single_line(ref.get("locator")) or "unspecified locator"
             artifact = _single_line(ref.get("artifact")) or "unspecified artifact"
             quote = str(ref.get("quote") or "").strip()
             lines.append(
-                f"- {source_link} · {_inline_code(artifact)} · {_inline_code(locator)}"
+                f"- {source_link} · {_artifact_markdown(project_root, source_record, ref, artifact)} · {_inline_code(locator)}"
             )
             if quote:
                 for quote_line in quote.splitlines():
@@ -292,6 +419,7 @@ def _render_claims(record: dict[str, Any], records_by_id: dict[str, dict[str, An
 
 
 def _render_unit_page(
+    project_root: Path,
     record: dict[str, Any],
     outgoing: dict[str, list[dict[str, Any]]],
     incoming: dict[str, list[dict[str, Any]]],
@@ -319,6 +447,7 @@ def _render_unit_page(
     summary = _markdown_text(record.get("summary")) or "No summary yet."
     source = record.get("source") if isinstance(record.get("source"), dict) else {}
     source_uri = _single_line(source.get("original_uri"))
+    source_document = _source_document_link(project_root, source)
     lines = [
         _frontmatter(properties).rstrip(),
         "",
@@ -338,6 +467,8 @@ def _render_unit_page(
     ]
     if source_uri:
         lines.append(f"- Source: {_source_markdown(source_uri)}")
+    if source_document:
+        lines.append(f"- Reading: {source_document}")
     if topics:
         lines.append("- Topics: " + ", ".join(_wikilink(_topic_page_path(topic), display=topic) for topic in topics))
     if programs:
@@ -351,7 +482,7 @@ def _render_unit_page(
             "",
             "## Claims",
             "",
-            *_render_claims(record, records_by_id),
+            *_render_claims(project_root, record, records_by_id),
             "",
         ]
     )
@@ -667,7 +798,7 @@ def _render_home(generated_at: str, records: list[dict[str, Any]], programs: lis
     )
 
 
-def _projection_files(inputs: dict[str, Any], *, generated_at: str) -> dict[str, str]:
+def _projection_files(project_root: Path, inputs: dict[str, Any], *, generated_at: str) -> dict[str, str]:
     records = inputs["records"]
     programs = inputs["programs"]
     taxonomy = inputs["taxonomy"]
@@ -685,7 +816,7 @@ def _projection_files(inputs: dict[str, Any], *, generated_at: str) -> dict[str,
         if not unit_id:
             continue
         files[f"units/{_safe_component(unit_id, fallback='unit')}.md"] = _render_unit_page(
-            record, outgoing, incoming, records_by_id
+            project_root, record, outgoing, incoming, records_by_id
         )
     for state in programs:
         program_id = str(state.get("program_id") or "")
@@ -923,7 +1054,7 @@ def update_obsidian_projection(project_root: Path) -> dict[str, Any]:
             }
 
     generated_at = utc_now_iso()
-    desired = _projection_files(inputs, generated_at=generated_at)
+    desired = _projection_files(project_root, inputs, generated_at=generated_at)
     conflicts = _preflight_update(managed, previous, desired)
     for name in HUMAN_DIRS:
         human_path = root / name
@@ -1059,6 +1190,7 @@ def _relation_findings(records: list[dict[str, Any]]) -> list[dict[str, str]]:
 
 
 def _projection_link_findings(
+    project_root: Path,
     records: list[dict[str, Any]],
     programs: list[dict[str, Any]],
 ) -> list[dict[str, str]]:
@@ -1069,6 +1201,53 @@ def _projection_link_findings(
     }
     for record in records:
         unit_id = str(record.get("id") or "")
+        source = record.get("source") if isinstance(record.get("source"), dict) else {}
+        markdown_path = str(source.get("markdown_path") or "").strip()
+        if markdown_path:
+            document = _canonical_source_path(project_root, markdown_path, suffix=".md")
+            if document is None:
+                findings.append(
+                    _finding(
+                        "OBSIDIAN_SOURCE_DOCUMENT_MISSING",
+                        "error",
+                        f"{unit_id}:source-document",
+                        "The canonical Markdown reading view is missing or unsafe.",
+                    )
+                )
+            elif str(source.get("markdown_hash") or "").strip() and _file_sha256(document) != str(
+                source.get("markdown_hash")
+            ).strip():
+                findings.append(
+                    _finding(
+                        "OBSIDIAN_SOURCE_DOCUMENT_DRIFT",
+                        "error",
+                        f"{unit_id}:source-document",
+                        "The canonical Markdown reading view no longer matches its recorded digest.",
+                    )
+                )
+        materialization = source.get("materialization") if isinstance(source.get("materialization"), dict) else {}
+        if materialization:
+            for field, suffix in (("source_map_path", ".yaml"), ("conversion_path", ".yaml")):
+                if _canonical_source_path(project_root, materialization.get(field), suffix=suffix) is None:
+                    findings.append(
+                        _finding(
+                            "OBSIDIAN_SOURCE_BUNDLE_INCOMPLETE",
+                            "error",
+                            f"{unit_id}:{field}",
+                            "A declared canonical source-bundle file is missing or unsafe.",
+                        )
+                    )
+            asset_paths = materialization.get("asset_paths", [])
+            for asset_index, asset in enumerate(asset_paths if isinstance(asset_paths, list) else [], start=1):
+                if _canonical_source_path(project_root, asset, suffix=None) is None:
+                    findings.append(
+                        _finding(
+                            "OBSIDIAN_SOURCE_ASSET_MISSING",
+                            "error",
+                            f"{unit_id}:asset:{asset_index}",
+                            "A declared local source asset is missing or unsafe.",
+                        )
+                    )
         for program_id in record.get("program_ids", []):
             target_id = str(program_id).strip()
             if target_id and target_id not in program_ids:
@@ -1094,6 +1273,17 @@ def _projection_link_findings(
                             "error",
                             f"{unit_id}:claim:{claim_index}:evidence:{evidence_index}:{source_id}",
                             "A canonical evidence reference links to a missing source unit.",
+                        )
+                    )
+                source_record = next((item for item in records if str(item.get("id") or "") == source_id), {})
+                external = ref.get("external_source") if isinstance(ref.get("external_source"), dict) else {}
+                if str(external.get("kind") or "") == "repo" and not _local_repo_artifact_uri(source_record, ref):
+                    findings.append(
+                        _finding(
+                            "OBSIDIAN_LOCAL_CODE_UNAVAILABLE",
+                            "warning",
+                            f"{unit_id}:claim:{claim_index}:evidence:{evidence_index}",
+                            "A repository evidence file cannot currently be opened from its trusted local root.",
                         )
                     )
     for state in programs:
@@ -1135,7 +1325,7 @@ def obsidian_projection_status(project_root: Path) -> dict[str, Any]:
     inputs = _projection_inputs(project_root)
     records = inputs["records"]
     findings = _relation_findings(records)
-    findings.extend(_projection_link_findings(records, inputs["programs"]))
+    findings.extend(_projection_link_findings(project_root, records, inputs["programs"]))
     findings.extend(
         _finding(
             "OBSIDIAN_CANONICAL_INPUT_UNSAFE",

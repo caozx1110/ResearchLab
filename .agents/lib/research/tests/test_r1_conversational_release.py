@@ -50,6 +50,11 @@ EXPECTED_RUNTIME_PINS = {
     "pyyaml": "6.0.3",
     "pymupdf4llm": "0.0.27",
     "pymupdf": "1.26.5",
+    "markdownify": "1.2.3",
+    "beautifulsoup4": "4.15.0",
+    "soupsieve": "2.8.4",
+    "six": "1.17.0",
+    "typing-extensions": "4.16.0",
 }
 CAPABILITY_MATURITY = {
     "kb-cli": "stable",

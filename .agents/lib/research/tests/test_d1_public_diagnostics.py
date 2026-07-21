@@ -218,7 +218,7 @@ def test_plain_doctor_is_read_only_and_does_not_run_private_diagnostics(
     monkeypatch.setattr(
         kb,
         "current_runtime_capabilities",
-        lambda: {"yaml_support": True, "pdf_backend": "pypdf", "modules": {}},
+        lambda: {"yaml_support": True, "markdown_support": True, "pdf_backend": "pypdf", "modules": {}},
     )
 
     def must_not_run(*args, **kwargs):
@@ -232,6 +232,7 @@ def test_plain_doctor_is_read_only_and_does_not_run_private_diagnostics(
     output = capsys.readouterr().out
     assert "研究能力包版本" in output
     assert "配置读写能力正常" in output
+    assert "材料 Markdown 阅读层转换能力已就绪" in output
     assert "论文解析能力已就绪" in output
     for forbidden in ("developer", "diagnostics", "audit", "/private/"):
         assert forbidden not in output

@@ -17,7 +17,7 @@ import stat
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .common import (
     FETCH_MAX_BYTES,
@@ -63,6 +63,19 @@ from .confirm import (
     write_record,
 )
 from .journal import mutation_transaction
+from .source_materials import (
+    ASSETS_DIR_NAME,
+    CONVERSION_NAME,
+    DOCUMENT_NAME,
+    SOURCE_MAP_NAME,
+    materialization_paths,
+    materialize_fallback,
+    materialize_html,
+    materialize_pdf,
+    materialize_text,
+    source_fields as materialization_source_fields,
+)
+from .yaml_io import write_bytes_atomic
 
 WEB_SNAPSHOT_MAX_CHARS = 120_000
 
@@ -742,15 +755,33 @@ def _pdf_to_page_chunks(
     import fitz  # type: ignore
     import pymupdf4llm  # type: ignore
 
-    chunks: list[dict[str, Any]] = []
     with fitz.open(str(pdf_path)) as doc:
         total = doc.page_count
         pages = list(range(min(page_limit, total)))
         page_data = pymupdf4llm.to_markdown(doc, pages=pages, page_chunks=True, show_progress=False)
-    for entry in page_data:
+    return _pdf_page_data_to_chunks(
+        pdf_path,
+        page_data,
+        page_limit=page_limit,
+        per_page_char_limit=per_page_char_limit,
+    )
+
+
+def _pdf_page_data_to_chunks(
+    pdf_path: Path,
+    page_data: Any,
+    *,
+    page_limit: int = PARSE_CACHE_PAGE_LIMIT,
+    per_page_char_limit: int = PARSE_CACHE_PER_PAGE_CHAR_LIMIT,
+) -> list[dict[str, Any]]:
+    """Project full PyMuPDF4LLM page dictionaries into the bounded cache view."""
+    chunks: list[dict[str, Any]] = []
+    entries = page_data if isinstance(page_data, list) else []
+    for entry in entries[:page_limit]:
         if not isinstance(entry, dict):
             continue
-        page_number = (entry.get("metadata") or {}).get("page")
+        metadata = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
+        page_number = metadata.get("page_number") or metadata.get("page")
         if not isinstance(page_number, int):
             page_number = len(chunks) + 1
         text = clean_text(str(entry.get("text") or ""))
@@ -964,7 +995,15 @@ def _html_metadata(html: str) -> dict[str, Any]:
 
 # Only keys in the on-disk source contract (SCHEMAS.md) belong in record.source;
 # status/warning/locator metadata travel via the return value + stderr + parse-cache.
-SOURCE_RECORD_KEYS = ("original_uri", "backup_paths", "backup_kind", "file_hash")
+SOURCE_RECORD_KEYS = (
+    "original_uri",
+    "backup_paths",
+    "backup_kind",
+    "file_hash",
+    "markdown_path",
+    "markdown_hash",
+    "materialization",
+)
 
 
 def source_record_fields(source_info: dict[str, Any]) -> dict[str, Any]:
@@ -973,6 +1012,44 @@ def source_record_fields(source_info: dict[str, Any]) -> dict[str, Any]:
     Keeps backup_status / backup_warning / locator metadata out of record.source
     (historical pollution guard — see SCHEMAS source contract)."""
     return {key: source_info[key] for key in SOURCE_RECORD_KEYS if key in source_info}
+
+
+def _attach_materialization(project_root: Path, source_info: dict[str, Any], result: dict[str, Any]) -> None:
+    """Attach additive source fields and archived paths without hiding degradation."""
+    source_info.update(materialization_source_fields(project_root, result))
+    existing = [str(item) for item in source_info.get("backup_paths", [])]
+    for path in materialization_paths(result):
+        relative = rel(project_root, path)
+        if relative not in existing:
+            existing.append(relative)
+    source_info["backup_paths"] = existing
+    warnings = [str(item).strip() for item in result.get("warnings", []) if str(item).strip()]
+    if warnings:
+        prior = str(source_info.get("backup_warning") or "").strip()
+        source_info["backup_warning"] = " ".join([item for item in [prior, *warnings] if item])
+        if source_info.get("backup_status") == "ok":
+            source_info["backup_status"] = "degraded"
+
+
+def _materialize_safely(
+    factory: Callable[[], dict[str, Any]],
+    *,
+    source_root: Path,
+    raw_path: Path,
+    source_type: str,
+    source_uri: str,
+) -> dict[str, Any]:
+    """Keep preserved source bytes usable when a converter rejects the input."""
+    try:
+        return factory()
+    except Exception as exc:  # noqa: BLE001
+        return materialize_fallback(
+            source_root,
+            raw_path,
+            source_type=source_type,
+            source_uri=source_uri,
+            error=exc,
+        )
 
 
 def write_parse_cache(unit_dir: Path, unit_id: str, source_info: dict[str, Any]) -> Path | None:
@@ -1013,7 +1090,7 @@ def _warn(message: str, source_label: str) -> None:
 def _store_bytes(root: Path, name: str, data: bytes) -> Path:
     dst = root / name
     if not dst.exists():
-        dst.write_bytes(data)
+        write_bytes_atomic(dst, data)
     return dst
 
 
@@ -1039,11 +1116,6 @@ def _backup_arxiv_html(project_root: Path, root: Path, arxiv_id: str, original_s
         raw = _store_bytes(root, "source.html", raw_bytes)
         backup_paths.append(rel(project_root, raw))
         chunks = _html_to_section_chunks(html)
-        body = _truncate_snapshot_text(html_to_text(html))
-        if body:
-            snapshot = root / "snapshot.md"
-            write_text_if_changed(snapshot, f"# Source Snapshot ({candidate['edition']})\n\nSource: {url}\n\n{body.rstrip()}\n")
-            backup_paths.append(rel(project_root, snapshot))
         result: dict[str, Any] = {
             "original_uri": abs_uri,
             "backup_paths": backup_paths,
@@ -1057,14 +1129,30 @@ def _backup_arxiv_html(project_root: Path, root: Path, arxiv_id: str, original_s
             "resolved_url": url,
             "parse_metadata": {**_html_metadata(html), "arxiv_id": arxiv_id},
         }
-        warnings: list[str] = []
+        materialized = _materialize_safely(
+            lambda: materialize_html(
+                root,
+                raw,
+                html,
+                source_uri=abs_uri,
+                resolved_url=url,
+                fetch_image=fetch_url,
+            ),
+            source_root=root,
+            raw_path=raw,
+            source_type="html",
+            source_uri=abs_uri,
+        )
+        _attach_materialization(project_root, result, materialized)
+        prior_warning = str(result.get("backup_warning") or "").strip()
+        warnings: list[str] = [prior_warning] if prior_warning else []
         if candidate["degraded"]:
             result["backup_status"] = "degraded"
             warnings.append(candidate["degraded"])
         if not chunks:
             warnings.append("HTML edition parsed to zero section chunks.")
         if warnings:
-            result["backup_warning"] = " ".join(warnings)
+            result["backup_warning"] = " ".join(item for item in warnings if item)
             _warn(result["backup_warning"], abs_uri)
         return result
 
@@ -1107,7 +1195,17 @@ def _backup_pdf_bytes(
         "locator_kind": "page",
         "parse_backend": "pymupdf4llm" if _pymupdf4llm_available() else "",
     }
-    chunks = _pdf_to_page_chunks(raw)
+    materialized: dict[str, Any] | None = None
+    chunks: list[dict[str, Any]] = []
+    if _pymupdf4llm_available():
+        materialized = _materialize_safely(
+            lambda: materialize_pdf(root, raw, source_uri=original_uri),
+            source_root=root,
+            raw_path=raw,
+            source_type="pdf",
+            source_uri=original_uri,
+        )
+        chunks = _pdf_page_data_to_chunks(raw, materialized.get("page_data"))
     result["parse_chunks"] = chunks
     if not _pymupdf4llm_available():
         result["backup_status"] = "stored-unparsed"
@@ -1122,6 +1220,8 @@ def _backup_pdf_bytes(
         _warn(result["backup_warning"], original_uri)
     else:
         result["parse_metadata"] = _pdf_metadata(raw, chunks)
+    if materialized is not None:
+        _attach_materialization(project_root, result, materialized)
     return result
 
 
@@ -1161,11 +1261,6 @@ def _backup_generic_url(project_root: Path, root: Path, source: str) -> dict[str
         raw = _store_bytes(root, "source.html", data)
         backup_paths.append(rel(project_root, raw))
         chunks = _html_to_section_chunks(html)
-        body = _truncate_snapshot_text(html_to_text(html))
-        if body:
-            snapshot = root / "snapshot.md"
-            write_text_if_changed(snapshot, f"# Source Snapshot\n\nSource: {original_uri}\n\n{body.rstrip()}\n")
-            backup_paths.append(rel(project_root, snapshot))
         result = {
             "original_uri": original_uri,
             "backup_paths": backup_paths,
@@ -1178,9 +1273,25 @@ def _backup_generic_url(project_root: Path, root: Path, source: str) -> dict[str
             "parse_chunks": chunks,
             "parse_metadata": _html_metadata(html),
         }
+        materialized = _materialize_safely(
+            lambda: materialize_html(
+                root,
+                raw,
+                html,
+                source_uri=original_uri,
+                resolved_url=original_uri,
+                fetch_image=fetch_url,
+            ),
+            source_root=root,
+            raw_path=raw,
+            source_type="html",
+            source_uri=original_uri,
+        )
+        _attach_materialization(project_root, result, materialized)
         if not chunks:
             result["backup_status"] = "degraded"
-            result["backup_warning"] = "URL source produced an empty HTML section parse."
+            prior = str(result.get("backup_warning") or "").strip()
+            result["backup_warning"] = " ".join(item for item in [prior, "URL source produced an empty HTML section parse."] if item)
             _warn(result["backup_warning"], original_uri)
         return result
 
@@ -1195,7 +1306,9 @@ def _backup_local(project_root: Path, root: Path, source: str) -> dict[str, Any]
     src = validate_local_source(project_root, source)
     if src is None:
         raise SystemExit(f"Source not found: {source}")
-    dst = root / src.name
+    reserved_names = {DOCUMENT_NAME, SOURCE_MAP_NAME, CONVERSION_NAME, ASSETS_DIR_NAME}
+    archived_name = f"original-{src.name}" if src.name in reserved_names else src.name
+    dst = root / archived_name
     source_stat = src.lstat()
     if stat.S_ISDIR(source_stat.st_mode):
         _copy_dir(src, dst)
@@ -1210,7 +1323,17 @@ def _backup_local(project_root: Path, root: Path, source: str) -> dict[str, Any]
         "backup_status": "ok",
     }
     if src.suffix.lower() == ".pdf":
-        chunks = _pdf_to_page_chunks(dst)
+        materialized: dict[str, Any] | None = None
+        chunks: list[dict[str, Any]] = []
+        if _pymupdf4llm_available():
+            materialized = _materialize_safely(
+                lambda: materialize_pdf(root, dst, source_uri=src.as_posix()),
+                source_root=root,
+                raw_path=dst,
+                source_type="pdf",
+                source_uri=src.as_posix(),
+            )
+            chunks = _pdf_page_data_to_chunks(dst, materialized.get("page_data"))
         result["source_type"] = "pdf"
         result["locator_kind"] = "page"
         result["parse_backend"] = "pymupdf4llm" if _pymupdf4llm_available() else ""
@@ -1225,6 +1348,8 @@ def _backup_local(project_root: Path, root: Path, source: str) -> dict[str, Any]
             _warn(result["backup_warning"], src.as_posix())
         else:
             result["parse_metadata"] = _pdf_metadata(dst, chunks)
+        if materialized is not None:
+            _attach_materialization(project_root, result, materialized)
         return result
 
     suffix = src.suffix.lower()
@@ -1247,11 +1372,41 @@ def _backup_local(project_root: Path, root: Path, source: str) -> dict[str, Any]
             source_type = "html"
             parse_backend = "html-sectioner"
             metadata = _html_metadata(text)
+            materialized = _materialize_safely(
+                lambda: materialize_html(
+                    root,
+                    dst,
+                    text,
+                    source_uri=src.as_posix(),
+                    resolved_url=src.as_uri(),
+                    fetch_image=None,
+                    local_asset_root=src.parent,
+                ),
+                source_root=root,
+                raw_path=dst,
+                source_type="html",
+                source_uri=src.as_posix(),
+            )
         else:
             chunks = _text_to_section_chunks(text, markdown=suffix in {".md", ".markdown"})
             source_type = "markdown" if suffix in {".md", ".markdown"} else "text"
             parse_backend = "markdown-sectioner" if source_type == "markdown" else "text-sectioner"
             metadata = {}
+            materialized = _materialize_safely(
+                lambda: materialize_text(
+                    root,
+                    dst,
+                    text,
+                    source_uri=src.as_posix(),
+                    markdown=source_type == "markdown",
+                    fetch_image=fetch_url,
+                    local_asset_root=src.parent,
+                ),
+                source_root=root,
+                raw_path=dst,
+                source_type=source_type,
+                source_uri=src.as_posix(),
+            )
         result.update(
             {
                 "source_type": source_type,
@@ -1262,6 +1417,7 @@ def _backup_local(project_root: Path, root: Path, source: str) -> dict[str, Any]
         )
         if metadata:
             result["parse_metadata"] = metadata
+        _attach_materialization(project_root, result, materialized)
         if not chunks:
             result["backup_status"] = "failed"
             result["backup_warning"] = f"Local {source_type} source parsed to zero non-empty sections."
@@ -1311,16 +1467,29 @@ def rebase_source_backup_paths(
 ) -> dict[str, Any]:
     """Project staged backup paths onto their post-materialization unit paths."""
     rebased = dict(source_info)
-    paths: list[str] = []
     staging_root = from_unit_dir.resolve()
-    for item in source_info.get("backup_paths", []):
+
+    def rebase_path(item: Any) -> str:
         archived = (project_root / str(item)).resolve()
         try:
             relative = archived.relative_to(staging_root)
         except ValueError as exc:
             raise SystemExit(f"Staged source path escaped its transaction root: {item}") from exc
-        paths.append(rel(project_root, to_unit_dir / relative))
-    rebased["backup_paths"] = paths
+        return rel(project_root, to_unit_dir / relative)
+
+    rebased["backup_paths"] = [rebase_path(item) for item in source_info.get("backup_paths", [])]
+    if str(source_info.get("markdown_path") or "").strip():
+        rebased["markdown_path"] = rebase_path(source_info["markdown_path"])
+    materialization = source_info.get("materialization")
+    if isinstance(materialization, dict):
+        rebased_materialization = dict(materialization)
+        for key in ("source_map_path", "conversion_path"):
+            if str(materialization.get(key) or "").strip():
+                rebased_materialization[key] = rebase_path(materialization[key])
+        rebased_materialization["asset_paths"] = [
+            rebase_path(item) for item in materialization.get("asset_paths", [])
+        ]
+        rebased["materialization"] = rebased_materialization
     return rebased
 
 

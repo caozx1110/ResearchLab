@@ -63,6 +63,7 @@ Release bundle 不包含任何私有 `kb/`。安装、更新、storage sync 和�
 - `prefs.py`：runtime preferences 与 workspace scaffold；
 - `confirm.py`：write gate、confirmation receipt、link 与 lifecycle mutation；
 - `sources.py`：source intake 与 KB-local storage migration；
+- `source_materials.py`：PDF / HTML / Markdown / text 的完整 Markdown 阅读层、图片本地化、source map 与转换清单；
 - `index.py`：index、governance、search 和 ID compaction；
 - `diagnostics.py`：可选诊断策略、脱敏 issue、确定性去重和本地导出预览；
 - `evidence.py`：逐字 evidence 和派生证据验证；
@@ -75,7 +76,7 @@ Release bundle 不包含任何私有 `kb/`。安装、更新、storage sync 和�
 
 ### Obsidian 派生视图
 
-`kb/` 可直接作为无需社区插件的 Obsidian Vault；canonical record、program state、taxonomy 与 evidence 仍是唯一事实源。系统只管理 `kb/obsidian/managed/`，人工内容放在 `inbox/` 与 `annotations/`，不得生成或改写 `.obsidian/`。生成页以 Reading view 为消费合同；编辑/Live Preview 显示 wikilink、code span 与 block ID 源码是 Obsidian 原生行为。动态 canonical 文本必须经 Markdown-safe 字面渲染，frontmatter wikilink 必须保持物理单行；manifest 的 renderer revision 变化会令旧投影 stale 并触发可恢复重建。
+`kb/` 可直接作为无需社区插件的 Obsidian Vault；canonical record、program state、taxonomy 与 evidence 仍是唯一事实源。系统只管理 `kb/obsidian/managed/`，人工内容放在 `inbox/` 与 `annotations/`，不得生成或改写 `.obsidian/`。生成页以 Reading view 为消费合同；编辑/Live Preview 显示 wikilink、code span 与 block ID 源码是 Obsidian 原生行为。Paper、文章与本地文档页回链 canonical `source/document.md`，source map 能把 page/section evidence locator 投影到稳定 source block；repo evidence 可以渲染为经过路径 containment 和文件存在性检查的本地文件链接，但 canonical 身份始终是 unit id 与仓库相对路径，机器本地 URI 不写回证据。动态 canonical 文本必须经 Markdown-safe 字面渲染，frontmatter wikilink 必须保持物理单行；manifest 的 renderer revision 变化会令旧投影 stale 并触发可恢复重建。
 
 ## 数据模型
 
@@ -89,7 +90,7 @@ Release bundle 不包含任何私有 `kb/`。安装、更新、storage sync 和�
 
 Unit 类型为 `paper`, `repo`, `dataset`, `blog`, `idea`, `experiment`。Program 位于 `kb/programs/<program-id>/`，包含 state、open questions、evidence requests、decision log、reporting events、design、experiments、reports 和 discussions。
 
-`kb/raw/` 与完整 parse cache 是不可变派生证据。后续分析只读，不覆盖。`kb/user/` 是生成视图，`kb/output/` 是导出，不得成为唯一 source of truth。
+`kb/raw/` 保存原始材料。可转换材料在 unit 的 `source/` 下拥有完整 `document.md`、`source-map.yaml`、`conversion.yaml`、原格式文件与可选的 hash-addressed `assets/`；这些文件连同完整 parse cache 都是不可变证据，后续分析只读、不覆盖。`document.md` 是人和 Agent 的首选完整阅读层，parse cache 继续承担兼容的逐字 quote/locator 协议，转换降级或细节缺失时回退原格式。Repository 源码保持原格式与目录身份，不批量 Markdown 化。`kb/user/` 是生成视图，`kb/output/` 是导出，不得成为唯一 source of truth。
 
 ## Prepare / fill / verify
 

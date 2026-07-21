@@ -36,14 +36,15 @@ The user interacts through exactly two surfaces: natural language and the sixtee
 - `kb obsidian status` is read-only. `kb obsidian update` may write only `kb/obsidian/managed/`, create missing `kb/obsidian/inbox/` and `annotations/` directories, and update the generated-view gitignore rule. It must never create or edit `.obsidian/`.
 - Files below `kb/obsidian/managed/` are generated. Never place human edits there. Human notes belong in `inbox/` or `annotations/`, and projection updates must not traverse or overwrite them.
 - Generated pages are designed for Obsidian Reading view (the book icon). Editor or Live Preview mode intentionally exposes wikilink, inline-code, and block-ID syntax; explain this distinction instead of editing `.obsidian/` settings.
+- Paper, article, and local-document unit pages link to the canonical `source/document.md` reading view. Repository evidence links may open a verified local source file through a `file://` URI, but the durable identity remains `repo unit id + repo-relative path`; a machine-local URI is never canonical evidence.
 - After a successful canonical mutation, refresh the Obsidian projection when autonomy permits and no confirmation or user-decision gate is pending. A failed or pending canonical operation must not be disguised by a projection refresh.
-- Canonical relations store only explicit forward edges. Derive backlinks and named inverse relations at read time. Use stable unit IDs for files and stable claim/evidence block IDs for precise links; never confirm an AI-suggested similarity merely because it appears in a graph.
+- Canonical relations store only explicit forward edges. Derive backlinks and named inverse relations at read time. Use stable unit IDs for files and stable claim/evidence/source block IDs for precise links; when a source map resolves an evidence locator, link the Obsidian evidence entry directly to that Markdown page or section block. Never confirm an AI-suggested similarity merely because it appears in a graph.
 
 ## Ingestion auto-drive
 
 When the user asks to ingest a paper, repository, dataset, or article—or accepts an ingestion suggestion—drive the safe pipeline to a grounded knowledge unit in the same turn:
 
-1. create the lightweight unit and immutable source cache;
+1. create the lightweight unit, preserve the original bytes, and materialize the full Markdown reading view plus its source map and local assets;
 2. for a paper, prepare and fill the screening structure, then verify the agent-authored `paper_type` before any full-note scaffold is created;
 3. prepare the analysis structure selected by that verified type;
 4. read the derived evidence and fill each required element with a short verbatim quote plus locator;
@@ -98,6 +99,7 @@ Diagnostics are an optional local quality loop, not a governance bypass. Schema,
 
 - `kb/raw/`: immutable external source bytes; never rewrite them in place.
 - `kb/units/{papers,repos,datasets,blogs,ideas,experiments}/<unit-id>/`: canonical knowledge units.
+- `kb/units/<kind>/<unit-id>/source/`: immutable source bundle. For paper, HTML, Markdown, and text material it contains `document.md`, `source-map.yaml`, `conversion.yaml`, original material, and optional hash-addressed `assets/`.
 - `kb/programs/<program-id>/`: program state, design, experiments, decisions, and reports.
 - `kb/synthesis/`: cross-unit surveys, taxonomy, trends, and gaps.
 - `kb/config/`: user preferences, taxonomy seeds, and runtime policy.
@@ -115,7 +117,9 @@ Diagnostics are an optional local quality loop, not a governance bypass. Schema,
 - Script-generated timestamps use UTC.
 - Tags, short summaries, and candidate-pool flags may be refreshed. Idea evolution, experiment history, design changes, and reports preserve history.
 - Information types distinguish `fact`, `inference`, `evaluation`, `user_opinion`, and `unverified`. Never present inference or evaluation as source fact.
-- Raw source and full parse caches are immutable derived evidence. Later steps read them; they do not overwrite them.
+- Original material, full Markdown reading views, source maps, local source assets, and full parse caches are immutable evidence. Later steps read them; they do not overwrite them.
+- Read `source/document.md` first when it exists because it is complete, linkable, and human-readable. Use `parse-cache.yaml` for the existing evidence locator/quote protocol, and fall back to the original PDF/HTML/other source when conversion is degraded or a detail cannot be recovered from Markdown.
+- Images in a materialized reading view live under `source/assets/` and are referenced relatively from `document.md`. Their presence is source evidence, not an automatically interpreted claim; image understanding still belongs to the runtime agent and must be grounded explicitly.
 
 ## Routing
 

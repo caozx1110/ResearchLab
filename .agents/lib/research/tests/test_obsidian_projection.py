@@ -192,6 +192,103 @@ def test_projector_builds_native_pages_bases_and_precise_backlinks(tmp_path: Pat
     assert _journal_entries(tmp_path) == journals_before
 
 
+def test_projection_links_markdown_reading_view_and_local_repo_file(tmp_path: Path) -> None:
+    paper = _record(tmp_path, "p-paper-12345678", "Readable Paper")
+    document = tmp_path / "kb/units/papers/p-paper-12345678/source/document.md"
+    document.parent.mkdir(parents=True, exist_ok=True)
+    document.write_text("# Full paper\n\n^source-page-1\n\nReadable source.\n", encoding="utf-8")
+    source_map = document.parent / "source-map.yaml"
+    conversion = document.parent / "conversion.yaml"
+    write_yaml_if_changed(
+        source_map,
+        {
+            "schema": "research-source-map/v1",
+            "blocks": [{"block_id": "source-page-1", "locator_kind": "page", "page": 1}],
+        },
+    )
+    write_yaml_if_changed(conversion, {"schema": "research-source-markdown/v1", "status": "complete"})
+    paper["source"].update(
+        {
+            "markdown_path": "kb/units/papers/p-paper-12345678/source/document.md",
+            "markdown_hash": hashlib.sha256(document.read_bytes()).hexdigest(),
+            "materialization": {
+                "schema": "research-source-markdown/v1",
+                "status": "complete",
+                "converter": "test",
+                "converter_version": "1",
+                "source_map_path": "kb/units/papers/p-paper-12345678/source/source-map.yaml",
+                "conversion_path": "kb/units/papers/p-paper-12345678/source/conversion.yaml",
+                "asset_paths": [],
+            },
+        }
+    )
+    paper["payload"]["claims"] = [
+        {
+            "id": "claim-paper",
+            "text": "The paper has readable evidence.",
+            "claim_type": "fact",
+            "confirmation_status": "auto_confirmed",
+            "evidence_refs": [
+                {
+                    "source_unit_id": paper["id"],
+                    "artifact": "parse-cache.yaml",
+                    "locator": "page=1",
+                    "quote": "Readable source.",
+                }
+            ],
+        }
+    ]
+    write_yaml_if_changed(record_path(tmp_path, "paper", paper["id"]), paper)
+
+    repo_root = tmp_path / "local-repo"
+    source_file = repo_root / "src/train.py"
+    source_file.parent.mkdir(parents=True)
+    source_file.write_text("def train():\n    return True\n", encoding="utf-8")
+    repo = default_record("repo", title="Local Repo", maturity="complete")
+    repo["id"] = "r-local-12345678"
+    repo["status"] = "active"
+    repo["payload"]["structure"]["repo_root"] = repo_root.as_posix()
+    repo["payload"]["claims"] = [
+        {
+            "id": "claim-entry",
+            "text": "The training entry is local.",
+            "claim_type": "fact",
+            "confirmation_status": "auto_confirmed",
+            "evidence_refs": [
+                {
+                    "source_unit_id": repo["id"],
+                    "artifact": "src/train.py",
+                    "locator": "line=1",
+                    "quote": "def train():",
+                    "external_source": {"kind": "repo"},
+                }
+            ],
+        }
+    ]
+    write_yaml_if_changed(record_path(tmp_path, "repo", repo["id"]), repo)
+
+    result = update_obsidian_projection(tmp_path)
+
+    assert result["status"]["status"] == "PASS"
+    paper_page = (obsidian_managed_root(tmp_path) / "units/p-paper-12345678.md").read_text(encoding="utf-8")
+    repo_page = (obsidian_managed_root(tmp_path) / "units/r-local-12345678.md").read_text(encoding="utf-8")
+    assert "[[units/papers/p-paper-12345678/source/document|Read material]]" in paper_page
+    assert "[[units/papers/p-paper-12345678/source/document#^source-page-1|parse-cache.yaml]]" in paper_page
+    assert source_file.resolve().as_uri() in repo_page
+    assert "#L1" not in repo_page
+
+
+def test_obsidian_status_rejects_missing_declared_source_document(tmp_path: Path) -> None:
+    record = _record(tmp_path, "p-paper-12345678", "Missing Reading View")
+    record["source"]["markdown_path"] = "kb/units/papers/p-paper-12345678/source/document.md"
+    write_yaml_if_changed(record_path(tmp_path, "paper", record["id"]), record)
+
+    report = obsidian_projection_status(tmp_path)
+
+    assert report["status"] == "FAIL"
+    assert "OBSIDIAN_SOURCE_DOCUMENT_MISSING" in {item["code"] for item in report["findings"]}
+
+
 def test_projection_collapses_untrusted_heading_whitespace_to_one_line(tmp_path: Path) -> None:
     record = _record(tmp_path, "p-alpha-12345678", "Alpha\n## Injected")
     record["links"] = [

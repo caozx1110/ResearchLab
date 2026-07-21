@@ -54,6 +54,8 @@ elements:
 
 脚本不复制整个仓库进 unit。`verify` 阶段从 record 的 source（`backup_paths` / 本地 `original_uri`）解析出 **repo_root**，`evidence_refs.artifact` 是相对该 root 的路径。校验时脚本加载 `repo_root/artifact` 并做逐字子串匹配；文件不可达时报明确 `not found/readable` 错误而非静默过。因此：**只需 record 能定位到本地 repo 快照/checkout 根目录即可**，证据文件按需按路径加载，无需把源码搬进 kb/。`line=N` 只作为人读定位（渲染进 note），硬判据是 quote 逐字存在于所引文件。
 
+源码保持原格式，不批量转换成 Markdown。持久证据身份是 `repo unit id + repo-relative artifact path`；Obsidian 派生页可把它渲染为经过 containment 与存在性检查的本地文件链接，便于打开对应源码文件。该机器本地 URI 只是消费层便利信息，不写回 canonical evidence；当前不承诺由 Obsidian 精确跳到行号。
+
 `scan-structure` 的机械入口候选写入 `payload.structure.entrypoint_candidates`。`payload.structure.entrypoints` 是 runtime agent 经证据验证后的 judgement 字段，机械刷新不得覆盖，更不得使已有 confirmation 失效。
 
 ## 符号级 = 按需
