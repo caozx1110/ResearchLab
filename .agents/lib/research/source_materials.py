@@ -498,6 +498,8 @@ def materialize_html(
     root = soup.select_one("article.ltx_document") or soup.find("article") or soup.find("main") or soup.body or soup
     assert isinstance(root, Tag)
     warnings = [str(item) for item in quality.get("warnings", []) if str(item)]
+    for error_node in root.select(".ltx_ERROR, .ltx_error"):
+        error_node.decompose()
     assets: list[dict[str, Any]] = []
     assets_root = source_root / ASSETS_DIR_NAME
     total_asset_bytes = 0
@@ -666,6 +668,7 @@ def materialize_html(
     converted, blocks = _inject_heading_blocks(converted, heading_specs)
     for token, replacement in {**math_tokens, **figure_tokens, **anchor_tokens}.items():
         converted = converted.replace(token, replacement)
+    converted = re.sub(r"\n{3,}", "\n\n", converted).strip()
     blocks.extend(extra_blocks)
     if title and not re.search(r"(?m)^#\s+", converted):
         converted = f"# {title}\n\n{converted}"

@@ -339,6 +339,9 @@ def test_latexml_error_marker_is_a_degraded_quality_signal(
     assert payload["backup_status"] == "degraded"
     assert conversion["quality"]["latexml_error_count"] == 1
     assert any("LaTeXML error marker" in item for item in conversion["warnings"])
+    assert r"\badmacro" not in (
+        core.unit_root(tmp_path, "blog", "b-residue-123456") / "source/document.md"
+    ).read_text(encoding="utf-8")
 
 
 def test_backup_source_html_keeps_remote_image_fallback_and_marks_degraded(
