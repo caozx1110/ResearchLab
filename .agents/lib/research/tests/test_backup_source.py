@@ -48,8 +48,14 @@ def _pdf_with_image_bytes() -> bytes:
 _ARXIV_HTML = (
     "<!doctype html><html><head><title>Attention Test Paper</title></head><body>"
     "<blockquote class='abstract'>Abstract: we test dual-source ingestion.</blockquote>"
-    "<h2 id='intro'>Introduction</h2><p>Section one body about transformers.</p>"
-    "<h2 id='method'>Method</h2><p>Section two body about attention.</p>"
+    "<article class='ltx_document'><h2 id='intro'>Introduction</h2>"
+    "<p>Section one gives a complete account of transformer motivation, prior sequence models, "
+    "the limits of recurrence, and the need for efficient long-range interaction.</p>"
+    "<p>It also defines the evaluation setting and the evidence used by the paper.</p>"
+    "<h2 id='method'>Method</h2><p>Section two explains attention, encoder and decoder blocks, "
+    "optimization, regularization, and the exact interfaces between model components.</p>"
+    "<p>The experiments compare controlled baselines and report reproducible measurements.</p>"
+    "</article>"
     "</body></html>"
 )
 
@@ -231,6 +237,108 @@ def test_backup_source_html_localizes_images_and_preserves_structured_markdown(
     assert assets[0].read_bytes() == _PNG_BYTES
     assert payload["materialization"]["asset_paths"] == [assets[0].relative_to(tmp_path).as_posix()]
     assert payload["markdown_path"] == (source_root / "document.md").relative_to(tmp_path).as_posix()
+
+
+def test_html_materialization_v2_resolves_base_and_preserves_math_fragments_and_gallery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    html = b"""<!doctype html><html><head><title>Structured Paper</title>
+    <base href="/html/2600.00001v2/"></head><body><article class="ltx_document">
+    <h1 id="title">Structured Paper</h1>
+    <p>We define <math alttext="\\Psi_{0}"></math> and cite <a href="#bib.bib1">Prior work</a>.</p>
+    <figure><img src="x1.png" alt="[Uncaptioned image]"><img src="x2.png" alt="Panel [B]">
+    <figcaption>Figure 1. Two evaluation panels.</figcaption></figure>
+    <h2 id="results">Results</h2><p>Results remain grounded in the archived source.</p>
+    <ol><li id="bib.bib1">Reference entry.</li></ol>
+    </article></body></html>"""
+    requested: list[str] = []
+
+    def fake_fetch_url(url: str, **kwargs) -> tuple[bytes, str]:
+        requested.append(url)
+        if url.endswith(("x1.png", "x2.png")):
+            return _PNG_BYTES, "image/png"
+        return html, "text/html"
+
+    monkeypatch.setattr(sources, "fetch_url", fake_fetch_url)
+    payload = sources.backup_source(tmp_path, "blog", "b-structured-123456", "https://example.com/paper")
+
+    source_root = core.unit_root(tmp_path, "blog", "b-structured-123456") / "source"
+    document = (source_root / "document.md").read_text(encoding="utf-8")
+    archive = (source_root / "archive.html").read_text(encoding="utf-8")
+    conversion = core.load_yaml(source_root / "conversion.yaml", default={})
+    source_map = core.load_yaml(source_root / "source-map.yaml", default={})
+
+    assert "https://example.com/html/2600.00001v2/x1.png" in requested
+    assert "https://example.com/html/2600.00001v2/x2.png" in requested
+    assert r"$\Psi_{0}$" in document
+    assert r"\Psi\_{0}" not in document
+    assert "![[" not in document
+    assert "Uncaptioned image" in document and "Panel (B)" in document
+    assert '<figure class="kb-source-gallery">' in document
+    assert "](#^source-anchor-bib-bib1)" in document
+    assert "^source-anchor-bib-bib1" in document
+    assert "assets/image-" in archive and "Figure 1. Two evaluation panels." in archive
+    assert conversion["schema"] == "research-source-markdown/v2"
+    assert conversion["archive"] == "archive.html"
+    assert conversion["archive_sha256"] == hashlib.sha256((source_root / "archive.html").read_bytes()).hexdigest()
+    assert payload["materialization"]["archive_path"] == (source_root / "archive.html").relative_to(tmp_path).as_posix()
+    assert any(item["anchor"] == "bib.bib1" for item in source_map["blocks"])
+
+    archive_before = (source_root / "archive.html").read_bytes()
+    sources.backup_source(tmp_path, "blog", "b-structured-123456", "https://example.com/paper")
+    assert (source_root / "archive.html").read_bytes() == archive_before
+    (source_root / "archive.html").write_text("human drift must be preserved\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="immutable source bundle collision: archive.html"):
+        sources.backup_source(tmp_path, "blog", "b-structured-123456", "https://example.com/paper")
+
+
+def test_arxiv_fatal_html_is_rejected_before_write_and_falls_back_to_pdf(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from urllib.error import HTTPError
+
+    fatal = b"""<!doctype html><html><head><title>Untitled Document</title></head><body>
+    <article class="ltx_document"><span class="ltx_ERROR">\\seq</span>
+    <p>Conversion to HTML had a Fatal error and exited abruptly.</p></article>
+    <a class="ar5iv-severity-fatal">fatal</a></body></html>"""
+    pdf = _minimal_pdf_bytes("Quality gate PDF fallback with grounded body text.")
+
+    def fake_fetch_url(url: str, **kwargs) -> tuple[bytes, str]:
+        if url.startswith("https://arxiv.org/html/"):
+            raise HTTPError(url, 404, "Not Found", {}, None)  # type: ignore[arg-type]
+        if url.startswith("https://ar5iv.labs.arxiv.org/html/"):
+            return fatal, "text/html"
+        if url.startswith("https://arxiv.org/pdf/"):
+            return pdf, "application/pdf"
+        raise AssertionError(url)
+
+    monkeypatch.setattr(sources, "fetch_url", fake_fetch_url)
+    payload = sources.backup_source(tmp_path, "paper", "p-fatal-fallback-123456", "2605.12090")
+
+    source_root = core.unit_root(tmp_path, "paper", "p-fatal-fallback-123456") / "source"
+    assert payload["source_type"] == "pdf"
+    assert payload["resolved_url"] == "https://arxiv.org/pdf/2605.12090"
+    assert any("quality gate rejected" in item for item in payload["source_selection_attempts"])
+    assert (source_root / "source.pdf").read_bytes() == pdf
+    assert not (source_root / "source.html").exists()
+    assert "Quality gate PDF fallback" in (source_root / "document.md").read_text(encoding="utf-8")
+
+
+def test_latexml_error_marker_is_a_degraded_quality_signal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    html = b"""<html><head><title>Readable with residue</title></head><body><article>
+    <h1>Paper</h1><p>A readable paragraph contains <span class="ltx_ERROR">\\badmacro</span>.</p>
+    </article></body></html>"""
+    monkeypatch.setattr(sources, "fetch_url", lambda url, **kwargs: (html, "text/html"))
+
+    payload = sources.backup_source(tmp_path, "blog", "b-residue-123456", "https://example.com/residue")
+    conversion = core.load_yaml(
+        core.unit_root(tmp_path, "blog", "b-residue-123456") / "source/conversion.yaml", default={}
+    )
+    assert payload["backup_status"] == "degraded"
+    assert conversion["quality"]["latexml_error_count"] == 1
+    assert any("LaTeXML error marker" in item for item in conversion["warnings"])
 
 
 def test_backup_source_html_keeps_remote_image_fallback_and_marks_degraded(

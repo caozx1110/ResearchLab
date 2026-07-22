@@ -1237,6 +1237,29 @@ def _projection_link_findings(
                             "A declared canonical source-bundle file is missing or unsafe.",
                         )
                     )
+            archive_value = _single_line(materialization.get("archive_path"))
+            if archive_value:
+                archive = _canonical_source_path(project_root, archive_value, suffix=".html")
+                if archive is None:
+                    findings.append(
+                        _finding(
+                            "OBSIDIAN_SOURCE_BUNDLE_INCOMPLETE",
+                            "error",
+                            f"{unit_id}:archive_path",
+                            "The declared offline HTML reading page is missing or unsafe.",
+                        )
+                    )
+                elif _single_line(materialization.get("archive_hash")) and _file_sha256(archive) != _single_line(
+                    materialization.get("archive_hash")
+                ):
+                    findings.append(
+                        _finding(
+                            "OBSIDIAN_SOURCE_ARCHIVE_DRIFT",
+                            "error",
+                            f"{unit_id}:archive",
+                            "The offline HTML reading page no longer matches its recorded digest.",
+                        )
+                    )
             asset_paths = materialization.get("asset_paths", [])
             for asset_index, asset in enumerate(asset_paths if isinstance(asset_paths, list) else [], start=1):
                 if _canonical_source_path(project_root, asset, suffix=None) is None:

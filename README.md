@@ -125,7 +125,7 @@ kb/
 └── .runtime/     # private local runtime state
 ```
 
-Convertible paper, HTML, Markdown, and text units preserve the original material and add a complete `source/document.md` reading view, a source map, a conversion manifest, and locally stored image assets. Human readers and agents use that Markdown first, while the original format remains the fallback. Repository source stays in its native files; generated Obsidian pages can link to verified local code files without making machine-local URIs canonical evidence.
+Convertible paper, HTML, Markdown, and text units preserve the original material and add a complete `source/document.md` reading view, a source map, a conversion manifest, and locally stored image assets. HTML units also add a normalized offline `source/archive.html`; the raw server response remains untouched. arXiv/ar5iv HTML must pass a structural quality gate before it is selected, otherwise intake falls back to PDF and finally an explicitly degraded abstract page. Human readers and agents use Markdown first, while the offline page and original format remain fallbacks. Repository source stays in its native files; generated Obsidian pages can link to verified local code files without making machine-local URIs canonical evidence.
 
 The core rules are:
 

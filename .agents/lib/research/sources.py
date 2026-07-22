@@ -1,8 +1,8 @@
 """Source backup/archival, duplicate detection, source-search staging, and storage layout sync.
 
-Dual-source ingestion (SSOT 3.1 decision A, B4): arxiv sources prefer the HTML
-edition (arxiv.org/html -> ar5iv Labs -> abs fallback) so no PDF parsing is needed and
-locators are section/anchor; non-arxiv PDFs are downloaded as real bytes and parsed
+Dual-source ingestion (SSOT 3.1 decision A, B4): arxiv sources prefer quality-gated
+HTML (arxiv.org/html -> ar5iv Labs), then PDF, then an abstract-only fallback;
+non-arxiv PDFs are downloaded as real bytes and parsed
 with the always-available lightweight PyMuPDF4LLM backend with page=N locators.
 Every archived source persists real bytes + a real sha256 and reports an explicit
 backup status/warning (fixing the G7 silent-failure where PDFs stored nothing).
@@ -68,6 +68,7 @@ from .source_materials import (
     CONVERSION_NAME,
     DOCUMENT_NAME,
     SOURCE_MAP_NAME,
+    inspect_html_quality,
     materialization_paths,
     materialize_fallback,
     materialize_html,
@@ -719,18 +720,13 @@ def _arxiv_id_from_source(source: str) -> str:
 
 
 def _arxiv_html_candidates(arxiv_id: str) -> list[dict[str, str]]:
-    """Ordered HTML editions: native arxiv HTML -> ar5iv Labs -> abs fallback."""
+    """Ordered full-text HTML editions; PDF/abstract fallback is handled separately."""
     return [
         {"url": f"https://arxiv.org/html/{arxiv_id}", "edition": "arxiv-html", "degraded": ""},
         {
             "url": f"https://ar5iv.labs.arxiv.org/html/{arxiv_id}",
             "edition": "ar5iv-labs",
             "degraded": "",
-        },
-        {
-            "url": f"https://arxiv.org/abs/{arxiv_id}",
-            "edition": "arxiv-abs",
-            "degraded": "arxiv HTML/ar5iv editions unavailable; archived abstract page only (no full body).",
         },
     ]
 
@@ -1046,6 +1042,16 @@ def _materialize_safely(
     """Keep preserved source bytes usable when a converter rejects the input."""
     try:
         return factory()
+    except ValueError as exc:
+        if str(exc).startswith("immutable source bundle collision:"):
+            raise
+        return materialize_fallback(
+            source_root,
+            raw_path,
+            source_type=source_type,
+            source_uri=source_uri,
+            error=exc,
+        )
     except Exception as exc:  # noqa: BLE001
         return materialize_fallback(
             source_root,
@@ -1102,7 +1108,7 @@ def _store_bytes(root: Path, name: str, data: bytes) -> Path:
 
 
 def _backup_arxiv_html(project_root: Path, root: Path, arxiv_id: str, original_source: str) -> dict[str, Any]:
-    """Download the best available HTML edition of an arxiv paper (HTML-first)."""
+    """Download quality-gated HTML, then PDF, then an abstract-only page."""
     txt = root / "source-url.txt"
     write_text_if_changed(txt, original_source.strip() + "\n")
     backup_paths = [rel(project_root, txt)]
@@ -1120,16 +1126,24 @@ def _backup_arxiv_html(project_root: Path, root: Path, arxiv_id: str, original_s
         if not _is_html_response(content_type, html):
             attempts.append(f"{candidate['edition']}({url}): non-HTML content_type={content_type or 'unknown'}")
             continue
+        quality = inspect_html_quality(html, require_full_text=True)
+        if not quality["accepted"]:
+            reason = "; ".join(str(item) for item in quality["rejection_reasons"])
+            attempts.append(f"{candidate['edition']}({url}): quality gate rejected: {reason}")
+            continue
+        chunks = _html_to_section_chunks(html)
+        if not chunks:
+            attempts.append(f"{candidate['edition']}({url}): parsed to zero section chunks")
+            continue
         raw = _store_bytes(root, "source.html", raw_bytes)
         backup_paths.append(rel(project_root, raw))
-        chunks = _html_to_section_chunks(html)
         result: dict[str, Any] = {
             "original_uri": abs_uri,
             "backup_paths": backup_paths,
             "backup_kind": "url",
             "file_hash": file_sha256(raw),
             "backup_status": "ok",
-            "source_type": "arxiv-abs" if candidate["edition"] == "arxiv-abs" else "arxiv-html",
+            "source_type": "arxiv-html",
             "locator_kind": "section",
             "parse_backend": "html-sectioner",
             "parse_chunks": chunks,
@@ -1144,6 +1158,7 @@ def _backup_arxiv_html(project_root: Path, root: Path, arxiv_id: str, original_s
                 source_uri=abs_uri,
                 resolved_url=url,
                 fetch_image=fetch_url,
+                initial_quality=quality,
             ),
             source_root=root,
             raw_path=raw,
@@ -1151,19 +1166,89 @@ def _backup_arxiv_html(project_root: Path, root: Path, arxiv_id: str, original_s
             source_uri=abs_uri,
         )
         _attach_materialization(project_root, result, materialized)
-        prior_warning = str(result.get("backup_warning") or "").strip()
-        warnings: list[str] = [prior_warning] if prior_warning else []
-        if candidate["degraded"]:
-            result["backup_status"] = "degraded"
-            warnings.append(candidate["degraded"])
-        if not chunks:
-            warnings.append("HTML edition parsed to zero section chunks.")
-        if warnings:
-            result["backup_warning"] = " ".join(item for item in warnings if item)
+        if result.get("backup_warning"):
             _warn(result["backup_warning"], abs_uri)
+        result["source_selection_attempts"] = attempts
         return result
 
-    warning = "arxiv HTML resolution failed for all editions: " + "; ".join(attempts)
+    pdf_url = f"https://arxiv.org/pdf/{arxiv_id}"
+    try:
+        pdf_content, pdf_content_type = fetch_url(pdf_url, binary=True, max_bytes=SOURCE_DOWNLOAD_MAX_BYTES)
+        pdf_bytes = pdf_content if isinstance(pdf_content, bytes) else str(pdf_content).encode("utf-8")
+        if not _looks_like_pdf(pdf_url, pdf_content_type, pdf_bytes):
+            attempts.append(f"arxiv-pdf({pdf_url}): non-PDF content_type={pdf_content_type or 'unknown'}")
+        else:
+            result = _backup_pdf_bytes(
+                project_root,
+                root,
+                pdf_bytes,
+                abs_uri,
+                backup_kind="url",
+                extra_backup_paths=backup_paths,
+            )
+            result["resolved_url"] = pdf_url
+            result["source_selection_attempts"] = attempts
+            return result
+    except Exception as exc:  # noqa: BLE001
+        attempts.append(f"arxiv-pdf({pdf_url}): {exc}")
+
+    abstract_url = abs_uri
+    try:
+        content, content_type = fetch_url(abstract_url, binary=True, max_bytes=SOURCE_DOWNLOAD_MAX_BYTES)
+        raw_bytes = content if isinstance(content, bytes) else str(content).encode("utf-8")
+        html = content.decode("utf-8", errors="ignore") if isinstance(content, bytes) else str(content)
+        if not _is_html_response(content_type, html):
+            attempts.append(f"arxiv-abs({abstract_url}): non-HTML content_type={content_type or 'unknown'}")
+        else:
+            quality = inspect_html_quality(html)
+            if quality["accepted"]:
+                quality["warnings"] = [
+                    *[str(item) for item in quality.get("warnings", [])],
+                    "Full-text HTML and PDF were unavailable; archived abstract page only",
+                ]
+                raw = _store_bytes(root, "source.html", raw_bytes)
+                fallback_paths = [*backup_paths, rel(project_root, raw)]
+                chunks = _html_to_section_chunks(html)
+                result = {
+                    "original_uri": abs_uri,
+                    "backup_paths": fallback_paths,
+                    "backup_kind": "url",
+                    "file_hash": file_sha256(raw),
+                    "backup_status": "degraded",
+                    "source_type": "arxiv-abs",
+                    "locator_kind": "section",
+                    "parse_backend": "html-sectioner",
+                    "parse_chunks": chunks,
+                    "resolved_url": abstract_url,
+                    "parse_metadata": {**_html_metadata(html), "arxiv_id": arxiv_id},
+                    "source_selection_attempts": attempts,
+                }
+                materialized = _materialize_safely(
+                    lambda: materialize_html(
+                        root,
+                        raw,
+                        html,
+                        source_uri=abs_uri,
+                        resolved_url=abstract_url,
+                        fetch_image=fetch_url,
+                        initial_quality=quality,
+                    ),
+                    source_root=root,
+                    raw_path=raw,
+                    source_type="html",
+                    source_uri=abs_uri,
+                )
+                _attach_materialization(project_root, result, materialized)
+                _warn(result["backup_warning"], abs_uri)
+                return result
+            attempts.append(
+                f"arxiv-abs({abstract_url}): quality gate rejected: "
+                + "; ".join(str(item) for item in quality["rejection_reasons"])
+            )
+    except Exception as exc:  # noqa: BLE001
+        attempts.append(f"arxiv-abs({abstract_url}): {exc}")
+
+    warning = "arxiv source resolution failed for HTML, PDF, and abstract editions: " + "; ".join(attempts)
     result = {
         "original_uri": abs_uri,
         "backup_paths": backup_paths,
@@ -1489,7 +1574,7 @@ def rebase_source_backup_paths(
     materialization = source_info.get("materialization")
     if isinstance(materialization, dict):
         rebased_materialization = dict(materialization)
-        for key in ("source_map_path", "conversion_path"):
+        for key in ("source_map_path", "conversion_path", "archive_path"):
             if str(materialization.get(key) or "").strip():
                 rebased_materialization[key] = rebase_path(materialization[key])
         rebased_materialization["asset_paths"] = [
@@ -1510,7 +1595,7 @@ def backup_source(
     """Archive a source as real bytes + real sha256, returning an explicit status.
 
     Dispatch (SSOT 3.1 decision A / B4):
-      * arxiv URL or id  -> HTML-first (arxiv.org/html -> ar5iv Labs -> abs), section locators
+      * arxiv URL or id  -> quality-gated HTML (arxiv.org/html -> ar5iv Labs), PDF, then abstract
       * other URL, PDF   -> real download + PyMuPDF4LLM page chunks, page=N locators
       * other URL, HTML  -> real download + section chunks, section/anchor locators
       * local file/dir   -> copy + sha256; local PDFs also get page=N chunks

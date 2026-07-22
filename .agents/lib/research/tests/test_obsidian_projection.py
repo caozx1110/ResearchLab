@@ -199,6 +199,8 @@ def test_projection_links_markdown_reading_view_and_local_repo_file(tmp_path: Pa
     document.write_text("# Full paper\n\n^source-page-1\n\nReadable source.\n", encoding="utf-8")
     source_map = document.parent / "source-map.yaml"
     conversion = document.parent / "conversion.yaml"
+    archive = document.parent / "archive.html"
+    archive.write_text("<!doctype html><title>Full paper</title><p>Readable source.</p>\n", encoding="utf-8")
     write_yaml_if_changed(
         source_map,
         {
@@ -206,18 +208,20 @@ def test_projection_links_markdown_reading_view_and_local_repo_file(tmp_path: Pa
             "blocks": [{"block_id": "source-page-1", "locator_kind": "page", "page": 1}],
         },
     )
-    write_yaml_if_changed(conversion, {"schema": "research-source-markdown/v1", "status": "complete"})
+    write_yaml_if_changed(conversion, {"schema": "research-source-markdown/v2", "status": "complete"})
     paper["source"].update(
         {
             "markdown_path": "kb/units/papers/p-paper-12345678/source/document.md",
             "markdown_hash": hashlib.sha256(document.read_bytes()).hexdigest(),
             "materialization": {
-                "schema": "research-source-markdown/v1",
+                "schema": "research-source-markdown/v2",
                 "status": "complete",
                 "converter": "test",
                 "converter_version": "1",
                 "source_map_path": "kb/units/papers/p-paper-12345678/source/source-map.yaml",
                 "conversion_path": "kb/units/papers/p-paper-12345678/source/conversion.yaml",
+                "archive_path": "kb/units/papers/p-paper-12345678/source/archive.html",
+                "archive_hash": hashlib.sha256(archive.read_bytes()).hexdigest(),
                 "asset_paths": [],
             },
         }
@@ -276,6 +280,10 @@ def test_projection_links_markdown_reading_view_and_local_repo_file(tmp_path: Pa
     assert "[[units/papers/p-paper-12345678/source/document#^source-page-1|parse-cache.yaml]]" in paper_page
     assert source_file.resolve().as_uri() in repo_page
     assert "#L1" not in repo_page
+
+    archive.write_text("drifted offline page\n", encoding="utf-8")
+    drift_report = obsidian_projection_status(tmp_path)
+    assert "OBSIDIAN_SOURCE_ARCHIVE_DRIFT" in {item["code"] for item in drift_report["findings"]}
 
 
 def test_obsidian_status_rejects_missing_declared_source_document(tmp_path: Path) -> None:

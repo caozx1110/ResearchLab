@@ -682,8 +682,10 @@ def test_failed_url_creates_only_retryable_staging_then_same_url_succeeds(
     materialization = record["source"]["materialization"]
     assert ".runtime/intake-staging" not in materialization["source_map_path"]
     assert ".runtime/intake-staging" not in materialization["conversion_path"]
+    assert ".runtime/intake-staging" not in materialization["archive_path"]
     assert (tmp_path / materialization["source_map_path"]).is_file()
     assert (tmp_path / materialization["conversion_path"]).is_file()
+    assert (tmp_path / materialization["archive_path"]).is_file()
     cache = load_yaml(records[0].parent / "parse-cache.yaml")
     assert cache["unit_id"] == record["id"]
     assert cache["chunks"]

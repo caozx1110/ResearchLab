@@ -123,12 +123,14 @@ source:
   markdown_path: ""                  # kb-relative 完整阅读层：.../source/document.md
   markdown_hash: ""                  # document.md sha256
   materialization:                   # 可解析非 repo source 的确定性 Markdown 投影
-    schema: research-source-markdown/v1
+    schema: research-source-markdown/v2
     status: complete|degraded
     converter: pymupdf4llm|markdownify|identity|plain-text|fallback
     converter_version: ""
     source_map_path: ""               # kb-relative .../source/source-map.yaml
     conversion_path: ""               # kb-relative .../source/conversion.yaml
+    archive_path: ""                  # HTML only：kb-relative .../source/archive.html 离线阅读页
+    archive_hash: ""                  # archive.html sha256
     asset_paths: []                   # kb-relative source/assets/*，按内容 hash 命名
 payload:                             # 见下方 per-kind payload
   claims: []                         # canonical claims SSOT；sidecar 只允许是投影
@@ -154,7 +156,7 @@ history:                             # append_history() 写入
   artifacts: []
 ```
 
-`source.markdown_path` 是人类、runtime agent 与 Obsidian 共用的首选阅读面，但不是对原件的替代。它必须完整、不使用 intake 的 page/section 字符截断预算，并与 `source-map.yaml`、`conversion.yaml`、`assets/` 一起位于 unit 的 `source/` containment 内。`document.md` 及其映射一经 canonical materialization 即只读；转换器/配置升级不能原地覆盖已被 verification receipt 消费的 bytes。旧 record 可以没有这些 additive 字段，读侧必须兼容。
+`source.markdown_path` 是人类、runtime agent 与 Obsidian 共用的首选阅读面，但不是对原件的替代。它必须完整、不使用 intake 的 page/section 字符截断预算，并与 `source-map.yaml`、`conversion.yaml`、`assets/` 一起位于 unit 的 `source/` containment 内。HTML source 额外生成 `archive.html`：它是带内联阅读样式、引用本地 hash asset 的离线阅读页；服务器响应 `source.html` 仍保持原始字节。`document.md`、`archive.html` 及其映射一经 canonical materialization 即只读；转换器/配置升级不能原地覆盖已被 verification receipt 消费的 bytes。旧 record 可以没有这些 additive 字段，读侧必须兼容 v1。
 
 图片统一写本地相对引用，不允许 Base64 内联。PDF 图片记录 page/bbox，HTML/Markdown 图片记录原 URL 或路径及 anchor；抓取失败时 `materialization.status=degraded` 并在 conversion warnings 中留痕，原文件仍可 fallback。若正文转换器整体失败，必须生成只指向原件的 degraded reading stub 与完整失败清单，不能丢失原始 bytes 或伪装成完整 Markdown。repo 不建立 `document.md` 镜像，源码身份继续使用可信 `repo_root` 下的 `repo_id + relative_path`。
 

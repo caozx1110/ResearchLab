@@ -99,7 +99,7 @@ Diagnostics are an optional local quality loop, not a governance bypass. Schema,
 
 - `kb/raw/`: immutable external source bytes; never rewrite them in place.
 - `kb/units/{papers,repos,datasets,blogs,ideas,experiments}/<unit-id>/`: canonical knowledge units.
-- `kb/units/<kind>/<unit-id>/source/`: immutable source bundle. For paper, HTML, Markdown, and text material it contains `document.md`, `source-map.yaml`, `conversion.yaml`, original material, and optional hash-addressed `assets/`.
+- `kb/units/<kind>/<unit-id>/source/`: immutable source bundle. For paper, HTML, Markdown, and text material it contains `document.md`, `source-map.yaml`, `conversion.yaml`, original material, and optional hash-addressed `assets/`; HTML also contains a normalized offline `archive.html` while raw `source.html` stays byte-preserved.
 - `kb/programs/<program-id>/`: program state, design, experiments, decisions, and reports.
 - `kb/synthesis/`: cross-unit surveys, taxonomy, trends, and gaps.
 - `kb/config/`: user preferences, taxonomy seeds, and runtime policy.
@@ -118,7 +118,7 @@ Diagnostics are an optional local quality loop, not a governance bypass. Schema,
 - Tags, short summaries, and candidate-pool flags may be refreshed. Idea evolution, experiment history, design changes, and reports preserve history.
 - Information types distinguish `fact`, `inference`, `evaluation`, `user_opinion`, and `unverified`. Never present inference or evaluation as source fact.
 - Original material, full Markdown reading views, source maps, local source assets, and full parse caches are immutable evidence. Later steps read them; they do not overwrite them.
-- Read `source/document.md` first when it exists because it is complete, linkable, and human-readable. Use `parse-cache.yaml` for the existing evidence locator/quote protocol, and fall back to the original PDF/HTML/other source when conversion is degraded or a detail cannot be recovered from Markdown.
+- Read `source/document.md` first when it exists because it is complete, linkable, and human-readable. For HTML, use its `archive.html` link when browser layout, grouped figures, MathML, or tables need visual inspection. Use `parse-cache.yaml` for the existing evidence locator/quote protocol, and fall back to the original PDF/HTML/other source when conversion is degraded or a detail cannot be recovered from Markdown.
 - Images in a materialized reading view live under `source/assets/` and are referenced relatively from `document.md`. Their presence is source evidence, not an automatically interpreted claim; image understanding still belongs to the runtime agent and must be grounded explicitly.
 
 ## Routing
