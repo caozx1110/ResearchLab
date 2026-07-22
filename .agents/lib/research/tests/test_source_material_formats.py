@@ -121,7 +121,8 @@ Inline sample: `![Not an image](missing-inline.png)`.
 def test_plain_text_markdown_like_content_is_literal(tmp_path: Path) -> None:
     selected = tmp_path / "notes.txt"
     selected.write_text(
-        "# not a heading\n> not a quote\n---\n![not an image](missing.png)\n<script>alert(1)</script>\n",
+        "# not a heading\n> not a quote\n---\n![not an image](missing.png)\n"
+        "```unclosed literal fence\n<script>alert(1)</script>\n",
         encoding="utf-8",
     )
 
@@ -134,6 +135,10 @@ def test_plain_text_markdown_like_content_is_literal(tmp_path: Path) -> None:
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in document
     assert "^source-section-not-a-heading" not in document
     assert "![not an image](missing.png)" in document
+    conversion = core.load_yaml(source_root / "conversion.yaml", default={})
+    assert conversion["quality"]["output"]["unclosed_fence"] is False
+    assert conversion["quality"]["output"]["fenced_code_block_count"] == 0
+    assert conversion["quality"]["output"]["image_count"] == 0
 
 
 def test_unbalanced_markdown_fence_is_degraded_with_format_warning(tmp_path: Path) -> None:

@@ -1655,7 +1655,24 @@ def materialize_text(
             'style="white-space:pre-wrap;overflow-wrap:anywhere">'
             f"{rendered}</pre>"
         )
-    format_quality, format_warnings = _markdown_format_quality(body, source_root)
+    if markdown:
+        format_quality, format_warnings = _markdown_format_quality(body, source_root)
+    else:
+        # Markdown-like characters inside the escaped <pre> are literal source
+        # text, not headings, images, math, tables, or fences to lint.
+        format_quality = {
+            "document_characters": len(body),
+            "heading_count": 0,
+            "fenced_code_block_count": 0,
+            "unclosed_fence": False,
+            "pipe_table_count": 0,
+            "raw_html_table_count": 0,
+            "malformed_pipe_table_count": 0,
+            "image_count": 0,
+            "local_asset_reference_count": 0,
+            "display_math_delimiter_count": 0,
+        }
+        format_warnings = []
     warnings.extend(format_warnings)
     warnings = list(dict.fromkeys(warnings))
     document = _source_header(raw_path.name, source_type, source_uri) + body
