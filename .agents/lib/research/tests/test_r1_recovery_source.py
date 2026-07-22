@@ -727,6 +727,63 @@ def test_intake_uses_parsed_html_title_when_user_did_not_supply_one(
     assert record["summary"] == ""
 
 
+def test_remote_intake_deduplicates_staged_bytes_against_existing_local_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    intake = _load_intake_module()
+    html = (
+        b"<!doctype html><html><head><title>Query Planning</title></head>"
+        b"<body><main><h1>Query Planning</h1><p>Same source bytes.</p></main></body></html>"
+    )
+    local_source = tmp_path / "fallback.html"
+    local_source.write_bytes(html)
+    monkeypatch.setattr(intake, "checkpoint_and_report", lambda *args, **kwargs: {"status": "disabled"})
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "intake.py",
+            "--root",
+            str(tmp_path),
+            "add",
+            "--kind",
+            "blog",
+            "--source",
+            local_source.as_posix(),
+        ],
+    )
+
+    assert intake.main() == 0
+    records = list((tmp_path / "kb" / "units" / "blogs").glob("*/record.yaml"))
+    assert len(records) == 1
+    existing_id = str(load_yaml(records[0])["id"])
+    capsys.readouterr()
+
+    monkeypatch.setattr(sources, "fetch_url", lambda requested, **kwargs: (html, "text/html"))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "intake.py",
+            "--root",
+            str(tmp_path),
+            "add",
+            "--kind",
+            "blog",
+            "--source",
+            "https://example.com/query-planning.html",
+        ],
+    )
+
+    assert intake.main() == 0
+    assert f"duplicate detected: {existing_id}" in capsys.readouterr().out
+    assert len(list((tmp_path / "kb" / "units" / "blogs").glob("*/record.yaml"))) == 1
+    staging_root = tmp_path / "kb" / ".runtime" / "intake-staging"
+    assert not [path for path in staging_root.rglob("*") if path.is_file()]
+
+
 def test_intake_checkpoint_then_undo_restores_unit_index_governance_and_search_stage(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -1979,10 +1979,17 @@ def _record_blocks_source_retry(project_root: Path, record: dict[str, Any]) -> b
     return bool(str(source.get("file_hash") or "").strip()) and bool(existing)
 
 
-def detect_duplicate(project_root: Path, kind: str, source: str, *, title: str = "") -> dict[str, Any] | None:
+def detect_duplicate(
+    project_root: Path,
+    kind: str,
+    source: str,
+    *,
+    title: str = "",
+    candidate_file_hash: str = "",
+) -> dict[str, Any] | None:
     local_path = None if is_url(source) else validate_local_source(project_root, source)
     normalized = normalize_remote_url(source) if is_url(source) else normalize_storage_reference(project_root, source)
-    file_hash = ""
+    file_hash = str(candidate_file_hash or "").strip().lower()
     candidate_arxiv_id = parse_arxiv_id(source)
     candidate_title = normalize_title(title) if title else ""
     if not is_url(source):
@@ -2002,7 +2009,7 @@ def detect_duplicate(project_root: Path, kind: str, source: str, *, title: str =
         record_normalized = normalize_remote_url(record_original_uri) if is_url(record_original_uri) else record_original_uri
         if normalized and normalized == record_normalized:
             return record
-        if file_hash and file_hash == str(record_source.get("file_hash") or ""):
+        if file_hash and file_hash == str(record_source.get("file_hash") or "").strip().lower():
             return record
         if kind == "paper":
             record_arxiv_id = parse_arxiv_id(

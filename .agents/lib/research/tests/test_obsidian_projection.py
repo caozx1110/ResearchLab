@@ -437,9 +437,13 @@ def test_pending_record_without_claims_is_awaiting_analysis_not_human_confirmati
     managed = obsidian_managed_root(tmp_path)
     page = (managed / "units/p-paper-12345678.md").read_text(encoding="utf-8")
     home = (managed / "Home.md").read_text(encoding="utf-8")
+    pending_base = load_yaml(managed / "dashboards/Pending Review.base", default={})
     assert "Analysis · Awaiting AI analysis" in page
     assert "Analysis · Awaiting human confirmation" not in page
     assert "**0** awaiting confirmation" in home
+    assert pending_base["views"][0]["filters"] == {
+        "and": ['analysis_stage == "awaiting_confirmation"']
+    }
 
 
 def test_chinese_profile_localizes_projection_and_repo_quick_access(tmp_path: Path) -> None:

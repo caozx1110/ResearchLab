@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 import uuid
@@ -297,8 +298,15 @@ def _materialize_staged_source(
     )
     rollback_targets = [canonical_dir, stage_dir, quarantine_root]
     with mutation_transaction(root, "source-intake-materialize", rollback_targets):
-        duplicate = detect_duplicate(root, kind, source, title=title)
+        duplicate = detect_duplicate(
+            root,
+            kind,
+            source,
+            title=title,
+            candidate_file_hash=str(canonical_source_info.get("file_hash") or ""),
+        )
         if duplicate:
+            shutil.rmtree(stage_dir)
             return None, duplicate, canonical_source_info
 
         quarantine_dir: Path | None = None

@@ -28,7 +28,7 @@ from .yaml_io import dump_yaml, load_yaml, write_text_if_changed, write_yaml_if_
 
 
 OBSIDIAN_PROJECTION_SCHEMA = "research-kb-obsidian/v1"
-OBSIDIAN_RENDERER_REVISION = 5
+OBSIDIAN_RENDERER_REVISION = 6
 MANIFEST_NAME = "manifest.yaml"
 HUMAN_DIRS = ("inbox", "annotations")
 UNIT_HEADINGS = frozenset(
@@ -1163,7 +1163,7 @@ def _projection_files(project_root: Path, inputs: dict[str, Any], *, generated_a
         )
     files["dashboards/All Units.base"] = _base_file(name=_t(zh, "All units", "全部单元"), zh=zh)
     files["dashboards/Pending Review.base"] = _base_file(
-        name=_t(zh, "Pending review", "待确认"), view_filter='confirmation_status == "pending_user_confirmation"', zh=zh
+        name=_t(zh, "Pending review", "待确认"), view_filter='analysis_stage == "awaiting_confirmation"', zh=zh
     )
     files["dashboards/By Topic.base"] = _base_file(name=_t(zh, "By topic", "按主题"), group_by="topics", zh=zh)
     return dict(sorted(files.items()))
