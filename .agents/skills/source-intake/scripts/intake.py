@@ -537,6 +537,11 @@ def main() -> int:
         if better_title and not args.title and not (staged_candidate and staged_candidate.get("title")):
             title = better_title
             record["title"] = better_title
+    elif parse_metadata:
+        better_title = str(parse_metadata.get("title") or "").strip()
+        if better_title and not args.title and not (staged_candidate and staged_candidate.get("title")):
+            title = better_title
+            record["title"] = better_title
     record["status"] = "active"
     # Intake archives and indexes the source; it does not understand the
     # material.  Leave the summary empty until a runtime agent writes grounded

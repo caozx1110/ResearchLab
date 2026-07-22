@@ -691,6 +691,42 @@ def test_failed_url_creates_only_retryable_staging_then_same_url_succeeds(
     assert cache["chunks"]
 
 
+def test_intake_uses_parsed_html_title_when_user_did_not_supply_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    intake = _load_intake_module()
+    html = (
+        b"<!doctype html><html><head><title>Readable Query Planning Guide</title></head>"
+        b"<body><main><h1>Query Planning</h1><p>Grounded technical documentation.</p>"
+        b"</main></body></html>"
+    )
+    monkeypatch.setattr(sources, "fetch_url", lambda requested, **kwargs: (html, "text/html"))
+    monkeypatch.setattr(intake, "checkpoint_and_report", lambda *args, **kwargs: {"status": "disabled"})
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "intake.py",
+            "--root",
+            str(tmp_path),
+            "add",
+            "--kind",
+            "blog",
+            "--source",
+            "https://example.com/queryplanner.html",
+        ],
+    )
+
+    assert intake.main() == 0
+
+    records = list((tmp_path / "kb" / "units" / "blogs").glob("*/record.yaml"))
+    assert len(records) == 1
+    record = load_yaml(records[0])
+    assert record["title"] == "Readable Query Planning Guide"
+    assert record["summary"] == ""
+
+
 def test_intake_checkpoint_then_undo_restores_unit_index_governance_and_search_stage(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

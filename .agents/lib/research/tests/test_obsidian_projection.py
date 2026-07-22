@@ -425,6 +425,23 @@ def test_unit_and_home_put_reading_health_and_next_action_before_technical_metad
     assert "Readable Paper" in home
 
 
+def test_pending_record_without_claims_is_awaiting_analysis_not_human_confirmation(tmp_path: Path) -> None:
+    record = _record(tmp_path, "p-paper-12345678", "Prepared but Unfilled")
+    record["confirmation_status"] = "pending_user_confirmation"
+    record["needs_human_confirmation"] = True
+    record["payload"]["claims"] = []
+    write_yaml_if_changed(record_path(tmp_path, "paper", record["id"]), record)
+
+    update_obsidian_projection(tmp_path)
+
+    managed = obsidian_managed_root(tmp_path)
+    page = (managed / "units/p-paper-12345678.md").read_text(encoding="utf-8")
+    home = (managed / "Home.md").read_text(encoding="utf-8")
+    assert "Analysis · Awaiting AI analysis" in page
+    assert "Analysis · Awaiting human confirmation" not in page
+    assert "**0** awaiting confirmation" in home
+
+
 def test_renderer_revision_marks_old_projection_stale_and_forces_rebuild(tmp_path: Path) -> None:
     _record(tmp_path, "p-alpha-12345678", "Alpha")
     update_obsidian_projection(tmp_path)

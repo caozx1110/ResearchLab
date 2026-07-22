@@ -368,6 +368,7 @@ def test_remote_markdown_and_plain_text_are_archived_and_materialized(
     markdown_root = _source_root(tmp_path, "blog", "b-remote-md-123456")
     text_root = _source_root(tmp_path, "blog", "b-remote-text-123456")
     assert markdown_payload["backup_status"] == "ok"
+    assert markdown_payload["parse_metadata"]["title"] == "Remote Markdown"
     assert (markdown_root / "source.md").read_bytes() == markdown_bytes
     assert "^source-section-remote-markdown" in (markdown_root / "document.md").read_text(encoding="utf-8")
     assert text_payload["backup_status"] == "ok"

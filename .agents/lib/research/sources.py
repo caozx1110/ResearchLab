@@ -1634,6 +1634,10 @@ def _backup_generic_url(project_root: Path, root: Path, source: str, *, kind: st
         raw = _store_bytes(root, raw_name, data)
         backup_paths.append(rel(project_root, raw))
         chunks = _text_to_section_chunks(html, markdown=is_markdown)
+        parsed_title = next(
+            (str(chunk.get("heading") or "").strip() for chunk in chunks if str(chunk.get("heading") or "").strip()),
+            "",
+        )
         source_type = "markdown" if is_markdown else "text"
         result = {
             "original_uri": original_uri,
@@ -1645,7 +1649,11 @@ def _backup_generic_url(project_root: Path, root: Path, source: str, *, kind: st
             "locator_kind": "section",
             "parse_backend": "markdown-sectioner" if is_markdown else "text-sectioner",
             "parse_chunks": chunks,
-            "parse_metadata": {"source_encoding": source_encoding, "content_type": normalized_type},
+            "parse_metadata": {
+                "title": parsed_title,
+                "source_encoding": source_encoding,
+                "content_type": normalized_type,
+            },
         }
         if decode_warning:
             result["backup_warning"] = decode_warning
@@ -1776,7 +1784,16 @@ def _backup_local(project_root: Path, root: Path, source: str) -> dict[str, Any]
             chunks = _text_to_section_chunks(text, markdown=suffix in {".md", ".markdown"})
             source_type = "markdown" if suffix in {".md", ".markdown"} else "text"
             parse_backend = "markdown-sectioner" if source_type == "markdown" else "text-sectioner"
-            metadata = {}
+            metadata = {
+                "title": next(
+                    (
+                        str(chunk.get("heading") or "").strip()
+                        for chunk in chunks
+                        if str(chunk.get("heading") or "").strip()
+                    ),
+                    "",
+                )
+            }
             materialized = _materialize_safely(
                 lambda: materialize_text(
                     root,

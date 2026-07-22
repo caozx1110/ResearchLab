@@ -215,7 +215,11 @@ def _record_claims(record: dict[str, Any]) -> list[dict[str, Any]]:
 def _analysis_stage(record: dict[str, Any]) -> str:
     claims = _record_claims(record)
     confirmation = _single_line(record.get("confirmation_status"))
-    if confirmation == "pending_user_confirmation":
+    claim_pending = any(
+        _single_line(claim.get("confirmation_status")) == "pending_user_confirmation"
+        for claim in claims
+    )
+    if claims and (confirmation == "pending_user_confirmation" or claim_pending):
         return "awaiting_confirmation"
     if claims:
         return "evidence_recorded"
