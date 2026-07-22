@@ -538,7 +538,10 @@ def main() -> int:
             title = better_title
             record["title"] = better_title
     record["status"] = "active"
-    record["summary"] = f"Lightweight {args.kind} intake for `{title}`."
+    # Intake archives and indexes the source; it does not understand the
+    # material.  Leave the summary empty until a runtime agent writes grounded
+    # analysis instead of persisting a generic scaffold sentence as knowledge.
+    record["summary"] = ""
     explicit_topics = list(staged_candidate.get("topics", []) if staged_candidate else [])
     explicit_tags = list(staged_candidate.get("tags", []) if staged_candidate else [])
     if args.kind == "paper":
