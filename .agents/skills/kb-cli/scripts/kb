@@ -1627,11 +1627,32 @@ def _unsafe_local_source_result(source: str, root: Path) -> int | None:
     return None
 
 
+def _remote_repo_snapshot_result(source: str, kind: str, *, verb: str) -> int | None:
+    lowered = source.strip().lower()
+    if kind != "repo" or not lowered.startswith(("http://", "https://", "git@")):
+        return None
+    print(
+        "远程代码仓需要先建立安全的本地只读快照才能入库；当前没有创建知识条目。"
+        "请让 AI 继续，它会获取快照后重试。",
+        file=sys.stderr,
+    )
+    set_protocol_status("needs_local_repo_snapshot", source_kind="repo", source=source)
+    add_agent_action(
+        "localize_repo_source",
+        source=source,
+        retry_verb=verb,
+    )
+    return 1
+
+
 def handle_add(args: argparse.Namespace, root: Path) -> int:
     unsafe_result = _unsafe_local_source_result(args.source, root)
     if unsafe_result is not None:
         return unsafe_result
     kind = args.kind or infer_add_kind(args.source, root)
+    snapshot_result = _remote_repo_snapshot_result(args.source, kind, verb="add")
+    if snapshot_result is not None:
+        return snapshot_result
     result = forward_command(
         root,
         SCRIPT_BY_VERB["add"],
@@ -1705,6 +1726,9 @@ def handle_ingest(args: argparse.Namespace, root: Path) -> int:
     if unsafe_result is not None:
         return unsafe_result
     kind = args.kind or infer_add_kind(args.source, root)
+    snapshot_result = _remote_repo_snapshot_result(args.source, kind, verb="ingest")
+    if snapshot_result is not None:
+        return snapshot_result
     if kind not in INGEST_ANALYZER:
         print("暂时无法判断资料类型；请告诉我是论文、代码仓还是技术文章。")
         set_protocol_status("needs_user_input", inferred_kind=kind)
