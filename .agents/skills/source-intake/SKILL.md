@@ -20,6 +20,8 @@ description: 把 paper / repo / dataset / blog source 先做 staging，再做去
 
 `document.md` 是人和 agent 的首选完整阅读材料，图片使用相对链接指向 hash-addressed `source/assets/`。已有 Markdown 的 front matter、跨行/块代码、标题与图片按语法上下文保留或本地化，非代码 raw HTML 被动化，纯文本按字面显示；HTML 的公式、复杂表格和多图结构不得为追求统一语法而静默丢失。整套 document/map/conversion/archive/assets 先完成冲突与格式检查再发布。`parse-cache.yaml` 继续承担兼容的逐字证据与 locator 协议；Markdown 转换降级或细节缺失时回退到保存的原格式。转换只搬运和保真，不解释文字、公式或图片，也不产生研究判断。Repository 源码保持为可验证的本地源码树，不批量转写成 Markdown。
 
+收到远程代码仓库 URL 时，不要直接把 URL 交给 repo intake。Agent 先在安全临时目录建立范围明确的只读本地 checkout/snapshot，确认它是可遍历的普通文件树，再以该本地根目录入库；对用户只说明正在本地化代码来源，不泄漏内部命令。底层若拒绝未本地化的远程 repo，agent 应继续完成本地化和重试，不得留下只有网页快照、无法扫描源码的 repo unit。
+
 ## 常用命令
 
 ```bash

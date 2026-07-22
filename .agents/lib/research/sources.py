@@ -1906,6 +1906,11 @@ def backup_source(
         destination_unit.relative_to(kb_root(project_root).resolve())
     except ValueError as exc:
         raise SystemExit(f"Source transaction destination must stay inside kb/: {destination_unit}") from exc
+    if kind == "repo" and is_url(source):
+        raise SystemExit(
+            "远程代码仓库尚未本地化；请让 AI 先建立安全的本地只读快照，再重新入库。"
+            "系统没有创建不可扫描的代码仓库单元。"
+        )
     # Validate a selected local tree before creating even a staging/canonical
     # destination.  Missing references may still be bare arxiv ids and are
     # resolved below; existing links or special files fail closed here.

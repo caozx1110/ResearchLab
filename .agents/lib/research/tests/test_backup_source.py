@@ -105,6 +105,26 @@ def test_backup_source_warns_when_fetch_fails(
     assert (core.unit_root(tmp_path, "blog", "b-fetch-123456") / "source" / "source-url.txt").exists()
 
 
+def test_remote_repo_url_fails_before_creating_a_fake_html_repo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        sources,
+        "fetch_url",
+        lambda url, **kwargs: (_ for _ in ()).throw(AssertionError("remote page must not be fetched")),
+    )
+
+    with pytest.raises(SystemExit, match="本地只读快照"):
+        core.backup_source(
+            tmp_path,
+            "repo",
+            "r-click-123456",
+            "https://github.com/pallets/click.git",
+        )
+
+    assert not core.unit_root(tmp_path, "repo", "r-click-123456").exists()
+
+
 def test_huggingface_dataset_uses_resolved_markdown_card_instead_of_dynamic_page(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
