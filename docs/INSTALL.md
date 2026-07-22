@@ -51,7 +51,7 @@ project copy workspace 不需要 `RESEARCH_SKILLS_HOME`。首次运行脚本时�
 
 ## 管理员参考：运行环境
 
-`python3` 是安装器硬依赖。脚本首次运行会自动创建并使用项目内受管 `.venv`（含 PyYAML）。用户无需手动创建 venv、运行 pip 或导出 `RESEARCH_PYTHON`。
+Python 3.9 或更高版本是安装器硬依赖。脚本首次运行会自动创建并使用项目内受管 `.venv`（含 PyYAML）。用户无需手动创建 venv、运行 pip 或导出 `RESEARCH_PYTHON`；安全更新会保留已有受管 venv，因此 shipping runtime 同样保持 Python 3.9 兼容。
 
 高级用户仍可用 `RESEARCH_PYTHON` 覆盖解释器；也可用 `RESEARCH_VENV` 覆盖受管 venv 路径。设置 `RESEARCH_NO_MANAGED_VENV=1` 会关闭自动 venv，改用当前解释器，此时需要自备 PyYAML。
 

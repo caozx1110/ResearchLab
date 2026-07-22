@@ -16,7 +16,7 @@ import re
 import tempfile
 from html import escape
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable
+from typing import Any, Callable, Union
 from urllib.parse import unquote, unquote_to_bytes, urljoin, urlparse
 
 from bs4 import BeautifulSoup, Tag
@@ -49,7 +49,7 @@ IMAGE_EXTENSIONS = {
 SAFE_IMAGE_SUFFIXES = {".avif", ".gif", ".jpeg", ".jpg", ".png", ".svg", ".webp"}
 
 
-ImageFetcher = Callable[..., tuple[bytes | str, str]]
+ImageFetcher = Callable[..., tuple[Union[bytes, str], str]]
 
 
 def _write_immutable_text(path: Path, text: str) -> None:

@@ -12,7 +12,7 @@
 
 ## 运行时 <a id="runtime"></a>
 
-所有 skill 脚本在直接运行时会先检查当前 Python 是否能 `import yaml`。如果不能，会自动创建并切换到项目内受管 `.venv`（含 PyYAML），用户无需手动创建 venv、运行 pip 或导出 `RESEARCH_PYTHON`。
+所有 skill 脚本支持 Python 3.9+；直接运行时会先检查当前 Python 是否能导入核心 runtime。如果不能，会自动创建并切换到项目内受管 `.venv`（含 PyYAML），用户无需手动创建 venv、运行 pip 或导出 `RESEARCH_PYTHON`。安全更新保留已有受管 venv，因此 shipping module 的 import-time 类型别名也必须保持 Python 3.9 可求值。
 
 - `RESEARCH_PYTHON`：可选覆盖解释器；若该解释器可 `import yaml`，脚本会优先 re-exec 到它。
 - `RESEARCH_VENV`：覆盖受管 venv 路径；默认是安装本仓库的目录下 `.venv`（与 `.agents` 同级）。
