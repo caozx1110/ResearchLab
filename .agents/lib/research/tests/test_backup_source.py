@@ -136,6 +136,7 @@ dataset_info:
     dtype: string
   - name: messages
     dtype: string
+  dataset_size: 3047427114
 ---
 # UltraChat 200k
 
@@ -172,6 +173,7 @@ Select the documented configuration and preserve the train and test split bounda
     document = (source_root / "document.md").read_text(encoding="utf-8")
     assert payload["backup_status"] == "ok"
     assert payload["source_type"] == "markdown"
+    assert payload["parse_metadata"]["title"] == "UltraChat 200k"
     assert payload["resolved_url"].endswith("/resolve/main/README.md")
     assert calls == [payload["resolved_url"]]
     assert (source_root / "source.md").read_bytes() == card
@@ -180,6 +182,41 @@ Select the documented configuration and preserve the train and test split bounda
     assert "Dataset structure" in document
     assert "TinyLlama" not in document
     assert "[在线原文](https://huggingface.co/datasets/HuggingFaceH4/ultrachat_200k)" in document
+
+
+def test_huggingface_dataset_title_prefers_frontmatter_pretty_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    card = b"""---
+license: mit
+pretty_name: Friendly Dataset
+dataset_info:
+  dataset_size: 123456
+---
+# Dataset Card for Internal Slug
+
+This dataset contains a documented collection of examples for reproducible research.
+The card explains the dataset schema, intended usage, limitations, license, and source.
+
+## Dataset Structure
+
+Each dataset row contains text, identifiers, and provenance metadata for analysis.
+"""
+    monkeypatch.setattr(
+        sources,
+        "fetch_url",
+        lambda url, **kwargs: (card, "text/markdown; charset=utf-8"),
+    )
+
+    payload = core.backup_source(
+        tmp_path,
+        "dataset",
+        "d-friendly-123456",
+        "https://huggingface.co/datasets/example/internal-slug",
+    )
+
+    assert payload["backup_status"] == "ok"
+    assert payload["parse_metadata"]["title"] == "Friendly Dataset"
 
 
 def test_huggingface_dynamic_html_fallback_is_explicitly_degraded_when_card_is_unavailable(

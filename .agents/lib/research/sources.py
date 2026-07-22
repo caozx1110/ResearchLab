@@ -1468,7 +1468,8 @@ def _backup_huggingface_dataset_card(
         return None, f"Hugging Face dataset card endpoint was unavailable: {exc}"
     data = content if isinstance(content, bytes) else str(content).encode("utf-8")
     markdown, source_encoding, decode_warning = _decode_source_text(data, content_type)
-    headings = _markdown_heading_positions(markdown)
+    frontmatter, card_body = _extract_source_frontmatter(markdown)
+    headings = _markdown_heading_positions(card_body)
     normalized = clean_text(markdown)
     card_markers = re.search(r"(?im)^(?:dataset_info|configs|license|task_categories):", markdown)
     dataset_identity = bool(card_markers or re.search(r"\bdataset\b", normalized, flags=re.IGNORECASE))
@@ -1483,6 +1484,10 @@ def _backup_huggingface_dataset_card(
     raw = _store_bytes(root, "source.md", data)
     archived_paths = [*backup_paths, rel(project_root, resolved_receipt), rel(project_root, raw)]
     chunks = _text_to_section_chunks(markdown, markdown=True)
+    pretty_name_match = re.search(r"(?m)^pretty_name\s*:\s*(.+?)\s*$", frontmatter)
+    pretty_name = ""
+    if pretty_name_match:
+        pretty_name = clean_text(pretty_name_match.group(1).strip().strip("'\""))
     result: dict[str, Any] = {
         "original_uri": original_uri,
         "resolved_url": readme_url,
@@ -1495,7 +1500,7 @@ def _backup_huggingface_dataset_card(
         "parse_backend": "markdown-sectioner",
         "parse_chunks": chunks,
         "parse_metadata": {
-            "title": headings[0][1],
+            "title": pretty_name or headings[0][1],
             "source_encoding": source_encoding,
             "content_type": content_type.split(";", 1)[0].strip().lower(),
             "resolved_url": readme_url,
