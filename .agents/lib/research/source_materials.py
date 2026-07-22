@@ -268,15 +268,22 @@ def _srcset_choice(value: str) -> str:
 
 def _safe_local_image(base_root: Path, source: str) -> tuple[bytes, str] | None:
     parsed = urlparse(source)
-    if parsed.scheme or parsed.netloc or source.startswith(("/", "~")):
+    if parsed.scheme not in {"", "file"} or parsed.netloc or source.startswith("~"):
         return None
     from urllib.parse import unquote
 
-    lexical = PurePosixPath(unquote(parsed.path))
-    if not lexical.parts or any(part in {"", ".", ".."} for part in lexical.parts):
-        return None
     root = base_root.resolve()
-    candidate = root.joinpath(*lexical.parts)
+    if parsed.scheme == "file":
+        candidate = Path(unquote(parsed.path))
+        if not candidate.is_absolute():
+            return None
+    else:
+        if source.startswith("/"):
+            return None
+        lexical = PurePosixPath(unquote(parsed.path))
+        if not lexical.parts or any(part in {"", ".", ".."} for part in lexical.parts):
+            return None
+        candidate = root.joinpath(*lexical.parts)
     if candidate.is_symlink() or not candidate.is_file():
         return None
     resolved = candidate.resolve()
@@ -1032,7 +1039,14 @@ def materialize_html(
             if loaded is None and local_asset_root is not None:
                 loaded = _safe_local_image(local_asset_root, source)
             if loaded is None:
-                absolute_source = urljoin(document_base, source)
+                resolved_source = urljoin(document_base, source)
+                if local_asset_root is not None:
+                    loaded = _safe_local_image(local_asset_root, resolved_source)
+                if loaded is not None:
+                    absolute_source = source
+                else:
+                    absolute_source = resolved_source
+            if loaded is None:
                 if fetch_image is None or not absolute_source.lower().startswith(("http://", "https://")):
                     raise ValueError("image is not locally reachable")
                 payload, content_type = fetch_image(absolute_source, binary=True, max_bytes=MAX_IMAGE_BYTES)

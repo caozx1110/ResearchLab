@@ -379,6 +379,30 @@ def test_local_legacy_charset_html_is_decoded_from_meta(tmp_path: Path) -> None:
     assert "Résumé" in document and "naïve" in document
 
 
+def test_local_html_base_href_resolves_assets_within_source_root(tmp_path: Path) -> None:
+    assets = tmp_path / "media"
+    assets.mkdir()
+    (assets / "figure.png").write_bytes(_PNG_BYTES)
+    selected = tmp_path / "base.html"
+    selected.write_text(
+        """<!doctype html><html><head><base href="./media/"><title>Local base</title></head>
+        <body><main><h1>Local base asset</h1><img src="figure.png" alt="base image"></main></body></html>""",
+        encoding="utf-8",
+    )
+
+    payload = sources.backup_source(
+        tmp_path, "blog", "b-local-base-123456", selected.as_posix()
+    )
+
+    source_root = _source_root(tmp_path, "blog", "b-local-base-123456")
+    document = (source_root / "document.md").read_text(encoding="utf-8")
+    archive = (source_root / "archive.html").read_text(encoding="utf-8")
+    assert payload["backup_status"] == "ok"
+    assert "![base image](assets/image-" in document
+    assert 'src="assets/image-' in archive
+    assert len(list((source_root / "assets").glob("image-*.png"))) == 1
+
+
 def test_materialization_collision_does_not_publish_partial_bundle(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
