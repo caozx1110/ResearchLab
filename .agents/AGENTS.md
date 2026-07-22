@@ -117,7 +117,7 @@ Diagnostics are an optional local quality loop, not a governance bypass. Schema,
 - Script-generated timestamps use UTC.
 - Tags, short summaries, and candidate-pool flags may be refreshed. Idea evolution, experiment history, design changes, and reports preserve history.
 - Information types distinguish `fact`, `inference`, `evaluation`, `user_opinion`, and `unverified`. Never present inference or evaluation as source fact.
-- Original material, full Markdown reading views, source maps, local source assets, and full parse caches are immutable evidence. Later steps read them; they do not overwrite them.
+- Original material, full Markdown reading views, source maps, local source assets, and full parse caches are immutable evidence. Later steps read them; they do not overwrite them. A source materialization is complete only when its `conversion.yaml` commit marker exists; document/map/archive/assets are staged and collision-checked as one bundle, so never treat a partial set as canonical.
 - Read `source/document.md` first when it exists because it is complete, linkable, and human-readable. For HTML, use its `archive.html` link when browser layout, grouped figures, MathML, or tables need visual inspection. Use `parse-cache.yaml` for the existing evidence locator/quote protocol, and fall back to the original PDF/HTML/other source when conversion is degraded or a detail cannot be recovered from Markdown.
 - Images in a materialized reading view live under `source/assets/` and are referenced relatively from `document.md`. Their presence is source evidence, not an automatically interpreted claim; image understanding still belongs to the runtime agent and must be grounded explicitly.
 

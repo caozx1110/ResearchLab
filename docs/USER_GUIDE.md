@@ -103,7 +103,7 @@ AI 适合自动完成：
 
 Agent 会连续完成安全步骤：轻量入库、保留原格式、生成完整 Markdown 阅读层与本地图片资产、准备填充结构、阅读派生证据、填写带 locator 的逐字引用、验证内容，以及可用时的安全刷新。脚本只搬运、转换、建结构和验证；对材料的理解由 Agent 完成。
 
-论文 PDF、网页 HTML、已有 Markdown 与纯文本会在各自知识单元中获得 `source/document.md`。这是人和 AI 默认先读的完整版本，不受轻量 parse cache 的长度上限影响。HTML 还会生成 `source/archive.html` 离线阅读页；`document.md` 顶部可打开离线页或未经改写的原始响应。arXiv/ar5iv 页面若存在 fatal、空壳或严重结构异常会自动换用 PDF，不能再以“能返回 HTML”为由伪装成功。网页与 PDF 中成功提取的图片会保存到同一 source bundle 的本地 assets 并用相对链接引用，因此离线阅读和 Obsidian 引用不会依赖远程热链。转换不完整时仍可回退到离线页、PDF、原始 HTML 或其他原格式。代码仓保持原始源码结构，不把每个代码文件改造成 Markdown。
+论文 PDF、网页 HTML、已有 Markdown 与纯文本会在各自知识单元中获得 `source/document.md`。这是人和 AI 默认先读的完整版本，不受轻量 parse cache 的长度上限影响。HTML 还会生成安全的 `source/archive.html` 离线阅读页；`document.md` 顶部可打开离线页或未经改写的原始响应。arXiv/ar5iv 页面若存在 fatal、空壳或严重结构异常会自动换用 PDF，不能再以“能返回 HTML”为由伪装成功；你指定的 arXiv 版本号会原样保留。网页与 PDF 中成功提取的图片会保存到同一 source bundle 的本地 assets 并用相对链接引用，因此离线阅读和 Obsidian 引用不会依赖远程热链。已有 Markdown 的 front matter、跨行/块代码、标题和本地/Obsidian 图片引用会按语法上下文保留或本地化；其中非代码 raw HTML 会被转成被动内容，复杂 HTML 表格不会被强行压成失真的 pipe table，纯文本中的 Markdown 符号按字面显示。整套派生文件通过完整性检查后才发布；转换不完整时仍可回退到离线页、PDF、原始 HTML 或其他原格式。代码仓保持原始源码结构，不把每个代码文件改造成 Markdown。
 
 当资料仍在等待 Agent 填写、等待验证，或处于可重试失败时，它不会进入你的确认收件箱。只有实质内容和 evidence 已过门的判断才会由 `kb review` 提请你决定。
 
