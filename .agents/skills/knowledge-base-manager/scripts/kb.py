@@ -506,6 +506,12 @@ def main() -> int:
         with mutation_transaction(root, "initialize_workspace", init_paths):
             ensure_workspace(root)
             build_index(root)
+        checkpoint_and_report(
+            root,
+            trigger="milestone",
+            message="milestone: initialize knowledge workspace",
+            target_paths=init_paths,
+        )
         print("[ok] initialized kb core workspace")
         return 0
     if args.command == "storage-sync":
