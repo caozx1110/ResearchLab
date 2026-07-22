@@ -105,6 +105,95 @@ def test_backup_source_warns_when_fetch_fails(
     assert (core.unit_root(tmp_path, "blog", "b-fetch-123456") / "source" / "source-url.txt").exists()
 
 
+def test_huggingface_dataset_uses_resolved_markdown_card_instead_of_dynamic_page(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    card = b"""---
+license: mit
+dataset_info:
+  features:
+  - name: prompt
+    dtype: string
+  - name: messages
+    dtype: string
+---
+# UltraChat 200k
+
+This dataset card documents a large collection of multi-turn conversations for supervised
+fine-tuning and preference learning. It describes the source, preprocessing, configurations,
+split sizes, fields, limitations, and license so researchers can use the dataset responsibly.
+
+## Dataset structure
+
+Each row contains a prompt, a list of messages, an identifier, and source metadata.
+
+## Usage
+
+Select the documented configuration and preserve the train and test split boundaries.
+"""
+    calls: list[str] = []
+
+    def fake_fetch_url(url: str, **kwargs):
+        calls.append(url)
+        if url.endswith("/resolve/main/README.md"):
+            return card, "text/markdown; charset=utf-8"
+        raise AssertionError(f"dynamic dataset page should not be fetched: {url}")
+
+    monkeypatch.setattr(sources, "fetch_url", fake_fetch_url)
+
+    payload = core.backup_source(
+        tmp_path,
+        "dataset",
+        "d-ultrachat-123456",
+        "https://huggingface.co/datasets/HuggingFaceH4/ultrachat_200k",
+    )
+
+    source_root = core.unit_root(tmp_path, "dataset", "d-ultrachat-123456") / "source"
+    document = (source_root / "document.md").read_text(encoding="utf-8")
+    assert payload["backup_status"] == "ok"
+    assert payload["source_type"] == "markdown"
+    assert payload["resolved_url"].endswith("/resolve/main/README.md")
+    assert calls == [payload["resolved_url"]]
+    assert (source_root / "source.md").read_bytes() == card
+    assert (source_root / "source-resolved-url.txt").read_text(encoding="utf-8").strip() == payload["resolved_url"]
+    assert "# UltraChat 200k" in document
+    assert "Dataset structure" in document
+    assert "TinyLlama" not in document
+    assert "[在线原文](https://huggingface.co/datasets/HuggingFaceH4/ultrachat_200k)" in document
+
+
+def test_huggingface_dynamic_html_fallback_is_explicitly_degraded_when_card_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    page = b"""<!doctype html><html><head><title>Dataset page</title></head><body>
+    <article><h2>Tiny recommendation</h2><p>model card</p></article>
+    <main><h1>Dataset page fallback</h1><p>The server-rendered fallback remains readable,
+    but it must not be mistaken for the authoritative dataset card.</p></main></body></html>"""
+
+    def fake_fetch_url(url: str, **kwargs):
+        if url.endswith("/resolve/main/README.md"):
+            raise RuntimeError("card unavailable")
+        return page, "text/html"
+
+    monkeypatch.setattr(sources, "fetch_url", fake_fetch_url)
+
+    payload = core.backup_source(
+        tmp_path,
+        "dataset",
+        "d-fallback-123456",
+        "https://huggingface.co/datasets/example/fallback",
+    )
+
+    source_root = core.unit_root(tmp_path, "dataset", "d-fallback-123456") / "source"
+    conversion = core.load_yaml(source_root / "conversion.yaml", default={})
+    document = (source_root / "document.md").read_text(encoding="utf-8")
+    assert payload["backup_status"] == "degraded"
+    assert conversion["status"] == "degraded"
+    assert any("dataset card endpoint was unavailable" in item for item in conversion["warnings"])
+    assert "Dataset page fallback" in document
+    assert "Tiny recommendation" not in document
+
+
 def test_backup_source_pdf_url_persists_bytes_and_page_locator(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -73,6 +73,7 @@ from .source_materials import (
     SOURCE_MAP_NAME,
     _extract_source_frontmatter,
     _markdown_heading_positions,
+    html_reading_fragment,
     inspect_html_quality,
     materialization_paths,
     materialize_fallback,
@@ -962,8 +963,10 @@ def _html_to_section_chunks(
     Labels use ``section:<anchor>`` (never ``page-N``) so downstream evidence
     verification treats them as HTML section/anchor locators per SSOT B4. Falls
     back to a single whole-document chunk when no headings are present."""
+    reading_html, _root_info = html_reading_fragment(html)
+    selected_html = reading_html or html
     heading_re = re.compile(r"(?is)<(h[1-6])\b([^>]*)>(.*?)</\1>")
-    matches = list(heading_re.finditer(html))
+    matches = list(heading_re.finditer(selected_html))
     chunks: list[dict[str, Any]] = []
 
     def _emit(anchor: str, heading_html: str, body_html: str) -> None:
@@ -984,7 +987,7 @@ def _html_to_section_chunks(
         )
 
     if not matches:
-        body = clean_text(html_to_text(html))
+        body = clean_text(html_to_text(selected_html))
         if body:
             chunks.append(
                 {
@@ -998,13 +1001,13 @@ def _html_to_section_chunks(
             )
         return chunks
 
-    _emit("preamble", "", html[: matches[0].start()])
+    _emit("preamble", "", selected_html[: matches[0].start()])
     for index, match in enumerate(matches):
         id_match = re.search(r"""id\s*=\s*["']([^"']+)["']""", match.group(2) or "")
         heading_html = match.group(3) or ""
         anchor = id_match.group(1).strip() if id_match else _slug_anchor(clean_text(html_to_text(heading_html)), f"s{index + 1}")
-        body_end = matches[index + 1].start() if index + 1 < len(matches) else len(html)
-        _emit(anchor, heading_html, html[match.end():body_end])
+        body_end = matches[index + 1].start() if index + 1 < len(matches) else len(selected_html)
+        _emit(anchor, heading_html, selected_html[match.end():body_end])
         if len(chunks) >= section_limit:
             break
     return chunks
@@ -1432,21 +1435,125 @@ def _looks_like_pdf(url: str, content_type: str, data: bytes) -> bool:
     return data[:5] == b"%PDF-"
 
 
-def _backup_generic_url(project_root: Path, root: Path, source: str) -> dict[str, Any]:
+def _huggingface_dataset_readme_url(source: str) -> str:
+    parsed = urlparse(source)
+    if (parsed.hostname or "").lower() not in {"huggingface.co", "www.huggingface.co"}:
+        return ""
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) < 3 or parts[0] != "datasets":
+        return ""
+    owner, repository = parts[1], parts[2]
+    if not all(re.fullmatch(r"[A-Za-z0-9._-]+", value) for value in (owner, repository)):
+        return ""
+    return f"https://huggingface.co/datasets/{owner}/{repository}/resolve/main/README.md"
+
+
+def _backup_huggingface_dataset_card(
+    project_root: Path,
+    root: Path,
+    source: str,
+    original_uri: str,
+    backup_paths: list[str],
+) -> tuple[dict[str, Any] | None, str]:
+    readme_url = _huggingface_dataset_readme_url(source)
+    if not readme_url:
+        return None, ""
+    try:
+        content, content_type = fetch_url(
+            readme_url,
+            binary=True,
+            max_bytes=SOURCE_DOWNLOAD_MAX_BYTES,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return None, f"Hugging Face dataset card endpoint was unavailable: {exc}"
+    data = content if isinstance(content, bytes) else str(content).encode("utf-8")
+    markdown, source_encoding, decode_warning = _decode_source_text(data, content_type)
+    headings = _markdown_heading_positions(markdown)
+    normalized = clean_text(markdown)
+    card_markers = re.search(r"(?im)^(?:dataset_info|configs|license|task_categories):", markdown)
+    dataset_identity = bool(card_markers or re.search(r"\bdataset\b", normalized, flags=re.IGNORECASE))
+    if _is_html_response(content_type, markdown) or len(normalized) < 200 or not headings or not dataset_identity:
+        return None, "Hugging Face README endpoint did not return a substantive dataset card."
+
+    resolved_receipt = _store_bytes(
+        root,
+        "source-resolved-url.txt",
+        (readme_url + "\n").encode("utf-8"),
+    )
+    raw = _store_bytes(root, "source.md", data)
+    archived_paths = [*backup_paths, rel(project_root, resolved_receipt), rel(project_root, raw)]
+    chunks = _text_to_section_chunks(markdown, markdown=True)
+    result: dict[str, Any] = {
+        "original_uri": original_uri,
+        "resolved_url": readme_url,
+        "backup_paths": archived_paths,
+        "backup_kind": "url",
+        "file_hash": file_sha256(raw),
+        "backup_status": "degraded" if decode_warning else "ok",
+        "source_type": "markdown",
+        "locator_kind": "section",
+        "parse_backend": "markdown-sectioner",
+        "parse_chunks": chunks,
+        "parse_metadata": {
+            "title": headings[0][1],
+            "source_encoding": source_encoding,
+            "content_type": content_type.split(";", 1)[0].strip().lower(),
+            "resolved_url": readme_url,
+        },
+    }
+    if decode_warning:
+        result["backup_warning"] = decode_warning
+    materialized = _materialize_safely(
+        lambda: materialize_text(
+            root,
+            raw,
+            markdown,
+            source_uri=original_uri,
+            markdown=True,
+            fetch_image=fetch_url,
+            asset_base_uri=readme_url,
+        ),
+        source_root=root,
+        raw_path=raw,
+        source_type="markdown",
+        source_uri=original_uri,
+    )
+    _attach_materialization(project_root, result, materialized)
+    if result.get("backup_warning"):
+        _warn(str(result["backup_warning"]), original_uri)
+    return result, ""
+
+
+def _backup_generic_url(project_root: Path, root: Path, source: str, *, kind: str) -> dict[str, Any]:
     """Non-arxiv URL: real download, PDF->page chunks, HTML->section chunks."""
     original_uri = normalize_remote_url(source)
     txt = root / "source-url.txt"
     write_text_if_changed(txt, source.strip() + "\n")
     backup_paths = [rel(project_root, txt)]
+    dataset_adapter_warning = ""
+    if kind == "dataset":
+        adapted, dataset_adapter_warning = _backup_huggingface_dataset_card(
+            project_root,
+            root,
+            source,
+            original_uri,
+            backup_paths,
+        )
+        if adapted is not None:
+            return adapted
     try:
         content, content_type = fetch_url(source, binary=True, max_bytes=SOURCE_DOWNLOAD_MAX_BYTES)
     except FetchTooLarge as exc:
         warning = f"URL source exceeded the {SOURCE_DOWNLOAD_MAX_BYTES}-byte size cap and was not archived: {exc}"
+        if dataset_adapter_warning:
+            warning = f"{dataset_adapter_warning} {warning}"
         result = {"original_uri": original_uri, "backup_paths": backup_paths, "backup_kind": "url", "file_hash": "", "backup_status": "failed", "backup_warning": warning}
         _warn(warning, original_uri)
         return result
     except Exception as exc:  # noqa: BLE001
         warning = f"URL source could not be downloaded: {exc}"
+        if dataset_adapter_warning:
+            warning = f"{dataset_adapter_warning} {warning}"
         result = {"original_uri": original_uri, "backup_paths": backup_paths, "backup_kind": "url", "file_hash": "", "backup_status": "failed", "backup_warning": warning}
         _warn(warning, original_uri)
         return result
@@ -1460,6 +1567,11 @@ def _backup_generic_url(project_root: Path, root: Path, source: str) -> dict[str
         raw = _store_bytes(root, "source.html", data)
         backup_paths.append(rel(project_root, raw))
         chunks = _html_to_section_chunks(html)
+        quality = inspect_html_quality(html)
+        if dataset_adapter_warning:
+            quality["warnings"] = list(
+                dict.fromkeys([*quality.get("warnings", []), dataset_adapter_warning])
+            )
         result = {
             "original_uri": original_uri,
             "backup_paths": backup_paths,
@@ -1475,6 +1587,12 @@ def _backup_generic_url(project_root: Path, root: Path, source: str) -> dict[str
         if decode_warning:
             result["backup_warning"] = decode_warning
             result["backup_status"] = "degraded"
+        if dataset_adapter_warning:
+            prior = str(result.get("backup_warning") or "").strip()
+            result["backup_warning"] = " ".join(
+                item for item in [prior, dataset_adapter_warning] if item
+            )
+            result["backup_status"] = "degraded"
         materialized = _materialize_safely(
             lambda: materialize_html(
                 root,
@@ -1483,6 +1601,7 @@ def _backup_generic_url(project_root: Path, root: Path, source: str) -> dict[str
                 source_uri=original_uri,
                 resolved_url=original_uri,
                 fetch_image=fetch_url,
+                initial_quality=quality,
             ),
             source_root=root,
             raw_path=raw,
@@ -1492,6 +1611,8 @@ def _backup_generic_url(project_root: Path, root: Path, source: str) -> dict[str
         _attach_materialization(project_root, result, materialized)
         if decode_warning:
             _warn(decode_warning, original_uri)
+        if dataset_adapter_warning:
+            _warn(dataset_adapter_warning, original_uri)
         if not chunks:
             result["backup_status"] = "degraded"
             prior = str(result.get("backup_warning") or "").strip()
@@ -1796,7 +1917,7 @@ def backup_source(
         arxiv_id = _arxiv_id_from_source(source)
         if arxiv_id:
             return _backup_arxiv_html(project_root, root, arxiv_id, source)
-        return _backup_generic_url(project_root, root, source)
+        return _backup_generic_url(project_root, root, source, kind=kind)
     # A bare arxiv id (not a URL, not an existing local path) is still an arxiv source.
     arxiv_id = _arxiv_id_from_source(source)
     if arxiv_id and resolve_local_reference(project_root, normalize_storage_reference(project_root, source)) is None:

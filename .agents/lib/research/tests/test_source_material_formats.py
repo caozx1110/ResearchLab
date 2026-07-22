@@ -67,6 +67,61 @@ def test_html_complex_table_stays_lossless_and_passive(
     assert "| Training |" not in document
 
 
+def test_html_layout_table_around_code_is_unwrapped_without_orphan_pipes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    html = b"""<!doctype html><html><head><title>Query planner</title></head><body><article>
+    <h1>Query planner</h1><p>The following command inspects the execution plan.</p>
+    <table class="codeblock"><tr><td><pre><code class="language-sql">EXPLAIN QUERY PLAN
+SELECT * FROM t WHERE id = 1;</code></pre></td></tr></table>
+    <p>The output identifies the selected index.</p></article></body></html>"""
+    monkeypatch.setattr(sources, "fetch_url", lambda url, **kwargs: (html, "text/html"))
+
+    payload = sources.backup_source(
+        tmp_path, "blog", "b-layout-code-123456", "https://example.com/query-planner"
+    )
+
+    source_root = _source_root(tmp_path, "blog", "b-layout-code-123456")
+    document = (source_root / "document.md").read_text(encoding="utf-8")
+    conversion = core.load_yaml(source_root / "conversion.yaml", default={})
+    assert payload["backup_status"] == "ok"
+    assert "```sql" in document
+    assert "EXPLAIN QUERY PLAN" in document
+    assert not any(line.strip() == "|" for line in document.splitlines())
+    assert "| |" not in document and "|---|" not in document
+    assert conversion["quality"]["output"]["layout_table_count"] == 1
+    assert conversion["quality"]["output"]["orphan_pipe_cell_count"] == 0
+    assert conversion["quality"]["output"]["malformed_pipe_table_count"] == 0
+
+
+def test_html_reading_root_prefers_substantial_main_over_earlier_article_card(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    html = b"""<!doctype html><html><head><title>Dataset documentation</title></head><body>
+    <article><h2>Recommended model</h2><p>Tiny unrelated card.</p></article>
+    <main role="main"><h1>Actual dataset documentation</h1>
+    <p>This dataset contains carefully documented conversational records and train, validation,
+    and test splits for reproducible language-model research.</p>
+    <h2>Schema</h2><p>Each row has an identifier, a message sequence, metadata, and provenance.</p>
+    <h2>Usage</h2><p>Load the named configuration and preserve the documented license.</p></main>
+    </body></html>"""
+    monkeypatch.setattr(sources, "fetch_url", lambda url, **kwargs: (html, "text/html"))
+
+    payload = sources.backup_source(
+        tmp_path, "blog", "b-reading-root-123456", "https://example.com/dataset"
+    )
+
+    source_root = _source_root(tmp_path, "blog", "b-reading-root-123456")
+    document = (source_root / "document.md").read_text(encoding="utf-8")
+    conversion = core.load_yaml(source_root / "conversion.yaml", default={})
+    assert payload["backup_status"] == "ok"
+    assert "Actual dataset documentation" in document
+    assert "carefully documented conversational records" in document
+    assert "Recommended model" not in document
+    assert all("Recommended model" not in chunk["text"] for chunk in payload["parse_chunks"])
+    assert conversion["quality"]["reading_root"] == "[role=main]"
+
+
 def test_markdown_frontmatter_code_setext_and_real_images_are_structural(
     tmp_path: Path,
 ) -> None:

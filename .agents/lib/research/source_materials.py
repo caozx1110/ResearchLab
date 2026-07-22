@@ -296,11 +296,93 @@ def _safe_local_image(base_root: Path, source: str) -> tuple[bytes, str] | None:
     return resolved.read_bytes(), mimetypes.guess_type(resolved.name)[0] or ""
 
 
+def select_html_reading_root(soup: BeautifulSoup) -> tuple[Tag | None, dict[str, Any]]:
+    """Select the most substantial semantic reading root, never the first article.
+
+    Many application pages contain small recommendation/card ``article`` nodes
+    before their actual ``main`` content.  Candidate scoring combines readable
+    text, section structure, link density, and semantic-root priority so source
+    identity follows the page's substantial content instead of DOM order.
+    """
+    latexml = soup.select_one("article.ltx_document")
+    if isinstance(latexml, Tag):
+        text = clean_text(latexml.get_text(" ", strip=True))
+        return latexml, {
+            "selector": "article.ltx_document",
+            "score": len(text),
+            "link_density": 0.0,
+        }
+
+    candidates: list[tuple[Tag, str, int]] = []
+    seen: set[int] = set()
+    selectors = (
+        ("[role=main]", "[role=main]", 2600),
+        ("main", "main", 2300),
+        ("article", "article", 1400),
+        (".document .body", ".document .body", 1200),
+        (".bd-article", ".bd-article", 1200),
+        ("#content", "#content", 900),
+        (".content", ".content", 700),
+        ("body", "body", 0),
+    )
+    for selector, label, bonus in selectors:
+        for node in soup.select(selector):
+            if not isinstance(node, Tag) or id(node) in seen:
+                continue
+            seen.add(id(node))
+            candidates.append((node, label, bonus))
+    if not candidates:
+        return None, {"selector": "", "score": 0, "link_density": 0.0}
+
+    ranked: list[tuple[float, int, Tag, str, float]] = []
+    for ordinal, (node, label, bonus) in enumerate(candidates):
+        text = clean_text(node.get_text(" ", strip=True))
+        text_length = len(text)
+        link_length = sum(len(clean_text(link.get_text(" ", strip=True))) for link in node.find_all("a"))
+        link_density = min(1.0, link_length / max(1, text_length))
+        headings = len(node.find_all(re.compile(r"^h[1-6]$")))
+        paragraphs = len(node.find_all("p"))
+        score = text_length * (1.0 - 0.75 * link_density) + headings * 100 + paragraphs * 25 + bonus
+        ranked.append((score, -ordinal, node, label, link_density))
+    score, _ordinal, root, label, link_density = max(ranked, key=lambda item: (item[0], item[1]))
+    return root, {
+        "selector": label,
+        "score": round(score, 2),
+        "link_density": round(link_density, 4),
+    }
+
+
+def _prune_reading_chrome(root: Tag, selector: str) -> None:
+    """Remove obvious application chrome only from broad page-level roots."""
+    if selector in {"article", "article.ltx_document"}:
+        return
+    for node in list(
+        root.select(
+            "nav, header, footer, aside, form, button, dialog, "
+            "[role=navigation], [role=search], [role=dialog]"
+        )
+    ):
+        if node is not root:
+            node.decompose()
+
+
+def html_reading_fragment(html: str) -> tuple[str, dict[str, Any]]:
+    """Return the same pruned semantic fragment used by conversion and quality checks."""
+    soup = BeautifulSoup(html, "html.parser")
+    root, root_info = select_html_reading_root(soup)
+    if not isinstance(root, Tag):
+        return "", root_info
+    _prune_reading_chrome(root, str(root_info.get("selector") or ""))
+    return str(root), root_info
+
+
 def inspect_html_quality(html: str, *, require_full_text: bool = False) -> dict[str, Any]:
     """Return deterministic source-integrity signals without interpreting content."""
     soup = BeautifulSoup(html, "html.parser")
     title = clean_text(soup.title.get_text(" ", strip=True)) if soup.title else ""
-    root = soup.select_one("article.ltx_document") or soup.find("article") or soup.find("main") or soup.body
+    root, root_info = select_html_reading_root(soup)
+    if isinstance(root, Tag):
+        _prune_reading_chrome(root, str(root_info.get("selector") or ""))
     text = clean_text(root.get_text(" ", strip=True)) if isinstance(root, Tag) else ""
     lowered = html.lower()
     fatal_markers = [
@@ -329,12 +411,18 @@ def inspect_html_quality(html: str, *, require_full_text: bool = False) -> dict[
         rejection_reasons.append("HTML full-text body has no section structure")
     if error_count:
         warnings.append(f"HTML source contains {error_count} LaTeXML error marker(s)")
+    link_density = float(root_info.get("link_density") or 0.0)
+    if link_density > 0.7:
+        warnings.append(f"HTML reading root is link-heavy ({link_density:.0%} link text)")
     return {
         "accepted": not rejection_reasons,
         "title": title,
         "text_characters": len(text),
         "heading_count": heading_count,
         "paragraph_count": paragraph_count,
+        "reading_root": str(root_info.get("selector") or ""),
+        "reading_root_score": root_info.get("score", 0),
+        "link_density": link_density,
         "latexml_error_count": error_count,
         "fatal_markers": fatal_markers,
         "rejection_reasons": rejection_reasons,
@@ -777,6 +865,31 @@ def _is_complex_html_table(table: Tag) -> bool:
     return False
 
 
+def _is_layout_html_table(table: Tag) -> bool:
+    """Identify one-column wrappers used to position code or media, not data."""
+    if table.find("table") is not None or table.find("th") is not None:
+        return False
+    rows = table.find_all("tr")
+    if not rows:
+        return False
+    cell_counts = [len(row.find_all(["td", "th"], recursive=False)) for row in rows]
+    if not cell_counts or any(count > 1 for count in cell_counts):
+        return False
+    return table.find(["pre", "figure", "img", "picture", "video", "audio", "svg"]) is not None
+
+
+def _unwrap_layout_html_table(soup: BeautifulSoup, table: Tag) -> None:
+    container = soup.new_tag("div")
+    for row in table.find_all("tr"):
+        cells = row.find_all(["td", "th"], recursive=False)
+        for cell in cells:
+            for child in list(cell.contents):
+                container.append(child.extract())
+            container.append(soup.new_string("\n"))
+    table.replace_with(container)
+    container.unwrap()
+
+
 def _complex_table_html(table: Tag) -> str:
     return (
         '\n\n<div class="kb-source-table" style="max-width:100%;overflow-x:auto">\n'
@@ -859,6 +972,9 @@ def _markdown_format_quality(markdown: str, source_root: Path) -> tuple[dict[str
 
     pipe_table_count = 0
     malformed_pipe_table_count = 0
+    orphan_pipe_cell_count = sum(
+        1 for index, line in enumerate(lines) if not protected[index] and line.strip() == "|"
+    )
     index = 0
     while index < len(lines):
         if protected[index] or not (lines[index].strip().startswith("|") and lines[index].strip().endswith("|")):
@@ -883,8 +999,12 @@ def _markdown_format_quality(markdown: str, source_root: Path) -> tuple[dict[str
         expected = len(re.split(r"(?<!\\)\|", run[0].strip("|")))
         if any(len(re.split(r"(?<!\\)\|", row.strip("|"))) != expected for row in run[1:]):
             malformed_pipe_table_count += 1
+        if any(row == "|" for row in run):
+            malformed_pipe_table_count += 1
     if malformed_pipe_table_count:
         warnings.append(f"Markdown contains {malformed_pipe_table_count} malformed pipe table(s)")
+    if orphan_pipe_cell_count:
+        warnings.append(f"Markdown contains {orphan_pipe_cell_count} orphan pipe cell marker(s)")
 
     metrics = {
         "document_characters": len(markdown),
@@ -894,6 +1014,7 @@ def _markdown_format_quality(markdown: str, source_root: Path) -> tuple[dict[str
         "pipe_table_count": pipe_table_count,
         "raw_html_table_count": len(re.findall(r"<table\b", visible, flags=re.IGNORECASE)),
         "malformed_pipe_table_count": malformed_pipe_table_count,
+        "orphan_pipe_cell_count": orphan_pipe_cell_count,
         "image_count": image_count,
         "local_asset_reference_count": len(local_asset_refs),
         "display_math_delimiter_count": display_math_count,
@@ -975,8 +1096,10 @@ def materialize_html(
             script.decompose()
     for node in soup.find_all(["style", "noscript", "template"]):
         node.decompose()
-    root = soup.select_one("article.ltx_document") or soup.find("article") or soup.find("main") or soup.body or soup
-    assert isinstance(root, Tag)
+    root, root_info = select_html_reading_root(soup)
+    if not isinstance(root, Tag):
+        raise ValueError("HTML source has no readable root")
+    _prune_reading_chrome(root, str(root_info.get("selector") or ""))
     warnings = [str(item) for item in quality.get("warnings", []) if str(item)]
     for error_node in root.select(".ltx_ERROR, .ltx_error"):
         error_node.decompose()
@@ -1131,11 +1254,17 @@ def materialize_html(
             entry["block_id"] = "source-document"
             entry["anchor"] = "document"
 
+    layout_tables = [table for table in root.find_all("table") if _is_layout_html_table(table)]
+
     code_tokens: dict[str, str] = {}
     for index, pre in enumerate(list(root.find_all("pre")), start=1):
         token = _unique_placeholder("CODE", index, root, used_placeholders)
         code_tokens[token] = _code_block_markdown(pre)
         pre.replace_with(token)
+
+    for table in layout_tables:
+        if table.parent is not None:
+            _unwrap_layout_html_table(soup, table)
 
     equation_tokens: dict[str, str] = {}
     for index, equation in enumerate(
@@ -1212,6 +1341,7 @@ def materialize_html(
         "code_block_count": len(code_tokens),
         "equation_count": len(equation_tokens),
         "complex_table_count": len(table_tokens),
+        "layout_table_count": len(layout_tables),
         "multi_image_figure_count": len(figure_tokens),
     }
     quality["output"] = output_quality
@@ -1457,6 +1587,7 @@ def materialize_text(
     markdown: bool,
     fetch_image: ImageFetcher | None = None,
     local_asset_root: Path | None = None,
+    asset_base_uri: str | None = None,
 ) -> dict[str, Any]:
     """Create a complete reading view for Markdown or UTF-8 plain text."""
     source_type = "markdown" if markdown else "text"
@@ -1475,9 +1606,10 @@ def materialize_text(
             if loaded is None and local_asset_root is not None:
                 loaded = _safe_local_image(local_asset_root, target_text)
             if loaded is None:
+                remote_base = asset_base_uri or source_uri
                 absolute_source = (
-                    urljoin(source_uri, target_text)
-                    if source_uri.lower().startswith(("http://", "https://"))
+                    urljoin(remote_base, target_text)
+                    if remote_base.lower().startswith(("http://", "https://"))
                     else target_text
                 )
                 if fetch_image is None or not absolute_source.lower().startswith(("http://", "https://")):
@@ -1682,6 +1814,7 @@ def materialize_text(
             "pipe_table_count": 0,
             "raw_html_table_count": 0,
             "malformed_pipe_table_count": 0,
+            "orphan_pipe_cell_count": 0,
             "image_count": 0,
             "local_asset_reference_count": 0,
             "display_math_delimiter_count": 0,
@@ -1954,6 +2087,7 @@ def materialize_text(
     markdown: bool,
     fetch_image: ImageFetcher | None = None,
     local_asset_root: Path | None = None,
+    asset_base_uri: str | None = None,
 ) -> dict[str, Any]:
     return _materialize_transactionally(
         source_root,
@@ -1966,6 +2100,7 @@ def materialize_text(
             markdown=markdown,
             fetch_image=fetch_image,
             local_asset_root=local_asset_root,
+            asset_base_uri=asset_base_uri,
         ),
     )
 
@@ -2034,7 +2169,9 @@ __all__ = [
     "DOCUMENT_NAME",
     "MATERIALIZATION_SCHEMA",
     "SOURCE_MAP_NAME",
+    "html_reading_fragment",
     "inspect_html_quality",
+    "select_html_reading_root",
     "materialization_paths",
     "materialize_fallback",
     "materialize_html",
