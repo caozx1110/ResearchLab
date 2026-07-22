@@ -175,6 +175,8 @@ def test_projector_builds_native_pages_bases_and_precise_backlinks(tmp_path: Pat
         payload = load_yaml(managed / "dashboards" / base_name, default={})
         assert payload["filters"]["and"][0] == 'file.inFolder("obsidian/managed/units")'
         assert payload["views"][0]["type"] == "table"
+        assert "title" in payload["views"][0]["order"]
+        assert all(not item.startswith("note.") for item in payload["views"][0]["order"])
     manifest = load_yaml(managed / "manifest.yaml", default={})
     assert manifest["schema"] == "research-kb-obsidian/v1"
     assert manifest["renderer_revision"] == OBSIDIAN_RENDERER_REVISION
@@ -371,6 +373,58 @@ def test_projection_preserves_markdown_literals_and_keeps_property_links_on_one_
     assert "book icon" in home
 
 
+def test_unit_and_home_put_reading_health_and_next_action_before_technical_metadata(tmp_path: Path) -> None:
+    record = _record(tmp_path, "p-paper-12345678", "Readable Paper")
+    record["summary"] = "Lightweight paper intake for `Readable Paper`."
+    document = tmp_path / "kb/units/papers/p-paper-12345678/source/document.md"
+    document.parent.mkdir(parents=True, exist_ok=True)
+    document.write_text("# Paper\n\nReadable.\n", encoding="utf-8")
+    conversion = document.parent / "conversion.yaml"
+    write_yaml_if_changed(
+        conversion,
+        {
+            "schema": "research-source-markdown/v2",
+            "status": "degraded",
+            "warnings": ["one image could not be localized"],
+            "quality": {
+                "output": {
+                    "document_characters": 20,
+                    "image_count": 2,
+                    "local_asset_reference_count": 1,
+                }
+            },
+        },
+    )
+    record["source"].update(
+        {
+            "original_uri": "https://example.com/paper",
+            "markdown_path": "kb/units/papers/p-paper-12345678/source/document.md",
+            "materialization": {
+                "status": "degraded",
+                "conversion_path": "kb/units/papers/p-paper-12345678/source/conversion.yaml",
+            },
+        }
+    )
+    write_yaml_if_changed(record_path(tmp_path, "paper", record["id"]), record)
+
+    update_obsidian_projection(tmp_path)
+
+    managed = obsidian_managed_root(tmp_path)
+    page = (managed / "units/p-paper-12345678.md").read_text(encoding="utf-8")
+    assert "The material is safely archived and readable" in page
+    assert "Quick access" in page
+    assert "Source health · Degraded" in page
+    assert "Analysis · Awaiting AI analysis" in page
+    assert "one image could not be localized" in page
+    assert "Images: ` 1 ` local / ` 2 ` referenced" in page
+    assert page.index("Quick access") < page.index("## Metadata")
+    assert page.index("## Claims") < page.index("## Metadata")
+    home = (managed / "Home.md").read_text(encoding="utf-8")
+    assert "**1** sources need attention" in home
+    assert "Recently updated" in home
+    assert "Readable Paper" in home
+
+
 def test_renderer_revision_marks_old_projection_stale_and_forces_rebuild(tmp_path: Path) -> None:
     _record(tmp_path, "p-alpha-12345678", "Alpha")
     update_obsidian_projection(tmp_path)
@@ -387,6 +441,47 @@ def test_renderer_revision_marks_old_projection_stale_and_forces_rebuild(tmp_pat
     assert rebuilt["changed"] is True
     assert rebuilt["status"]["status"] == "PASS"
     assert load_yaml(manifest_path, default={})["renderer_revision"] == OBSIDIAN_RENDERER_REVISION
+
+
+def test_revision_three_bases_normalized_by_obsidian_converge_without_weakening_drift_guard(
+    tmp_path: Path,
+) -> None:
+    _record(tmp_path, "p-alpha-12345678", "Alpha")
+    update_obsidian_projection(tmp_path)
+    managed = obsidian_managed_root(tmp_path)
+    manifest_path = managed / "manifest.yaml"
+    manifest = load_yaml(manifest_path, default={})
+    manifest["renderer_revision"] = 3
+    write_yaml_if_changed(manifest_path, manifest)
+    for relative in (
+        "dashboards/All Units.base",
+        "dashboards/Pending Review.base",
+        "dashboards/By Topic.base",
+    ):
+        write_yaml_if_changed(managed / relative, obsidian_module._legacy_obsidian_normalized_base(relative))
+
+    rebuilt = update_obsidian_projection(tmp_path)
+
+    assert rebuilt["changed"] is True
+    assert rebuilt["status"]["status"] == "PASS"
+    assert load_yaml(manifest_path, default={})["renderer_revision"] == OBSIDIAN_RENDERER_REVISION
+    for relative in (
+        "dashboards/All Units.base",
+        "dashboards/Pending Review.base",
+        "dashboards/By Topic.base",
+    ):
+        payload = load_yaml(managed / relative, default={})
+        assert "analysis_stage" in payload["views"][0]["order"]
+
+    all_units = managed / "dashboards/All Units.base"
+    payload = load_yaml(all_units, default={})
+    payload["views"][0]["name"] = "Human rename"
+    write_yaml_if_changed(all_units, payload)
+    record = load_yaml(record_path(tmp_path, "paper", "p-alpha-12345678"), default={})
+    record["summary"] = "Canonical input changed."
+    write_yaml_if_changed(record_path(tmp_path, "paper", record["id"]), record)
+    with pytest.raises(SystemExit, match="human-edited"):
+        update_obsidian_projection(tmp_path)
 
 
 def test_status_is_zero_write_for_an_empty_missing_workspace(tmp_path: Path) -> None:

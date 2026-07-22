@@ -28,7 +28,7 @@ from .yaml_io import dump_yaml, load_yaml, write_text_if_changed, write_yaml_if_
 
 
 OBSIDIAN_PROJECTION_SCHEMA = "research-kb-obsidian/v1"
-OBSIDIAN_RENDERER_REVISION = 3
+OBSIDIAN_RENDERER_REVISION = 4
 MANIFEST_NAME = "manifest.yaml"
 HUMAN_DIRS = ("inbox", "annotations")
 UNIT_HEADINGS = frozenset({"Overview", "Metadata", "Relationships", "Claims"})
@@ -173,6 +173,68 @@ def _source_document_vault_path(project_root: Path, source: dict[str, Any]) -> s
 def _source_document_link(project_root: Path, source: dict[str, Any]) -> str:
     vault_path = _source_document_vault_path(project_root, source)
     return _wikilink(vault_path, display="Read material") if vault_path else ""
+
+
+def _source_materialization_summary(project_root: Path, source: dict[str, Any]) -> dict[str, Any]:
+    """Return bounded, presentation-safe source health from the immutable receipt."""
+    materialization = source.get("materialization")
+    materialization = materialization if isinstance(materialization, dict) else {}
+    status = _single_line(materialization.get("status")) or "not_materialized"
+    summary: dict[str, Any] = {"status": status, "warnings": [], "output": {}}
+    conversion_path = _canonical_source_path(
+        project_root,
+        materialization.get("conversion_path"),
+        suffix=".yaml",
+    )
+    if conversion_path is None:
+        return summary
+    try:
+        conversion = load_yaml(conversion_path, default={})
+    except (OSError, RuntimeError):
+        return summary
+    if not isinstance(conversion, dict):
+        return summary
+    summary["status"] = _single_line(conversion.get("status")) or status
+    raw_warnings = conversion.get("warnings", [])
+    if isinstance(raw_warnings, list):
+        summary["warnings"] = [_single_line(item) for item in raw_warnings if _single_line(item)][:3]
+    quality = conversion.get("quality")
+    quality = quality if isinstance(quality, dict) else {}
+    output = quality.get("output")
+    summary["output"] = output if isinstance(output, dict) else {}
+    return summary
+
+
+def _record_claims(record: dict[str, Any]) -> list[dict[str, Any]]:
+    payload = record.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    claims = payload.get("claims")
+    return [item for item in claims if isinstance(item, dict)] if isinstance(claims, list) else []
+
+
+def _analysis_stage(record: dict[str, Any]) -> str:
+    claims = _record_claims(record)
+    confirmation = _single_line(record.get("confirmation_status"))
+    if confirmation == "pending_user_confirmation":
+        return "awaiting_confirmation"
+    if claims:
+        return "evidence_recorded"
+    return "awaiting_analysis"
+
+
+def _analysis_stage_label(stage: str) -> str:
+    return {
+        "awaiting_analysis": "Awaiting AI analysis",
+        "evidence_recorded": "Evidence-backed analysis available",
+        "awaiting_confirmation": "Awaiting human confirmation",
+    }.get(stage, stage.replace("_", " ").capitalize())
+
+
+def _display_summary(record: dict[str, Any]) -> str:
+    summary = _single_line(record.get("summary"))
+    if not summary or re.fullmatch(r"Lightweight \w+ intake for `?.+?`?\.", summary):
+        return "The material is safely archived and readable. AI analysis has not been completed yet."
+    return _markdown_text(summary)
 
 
 def _source_evidence_link(
@@ -429,6 +491,10 @@ def _render_unit_page(
     title = _single_line(record.get("title")) or unit_id
     topics = [str(item) for item in record.get("topics", []) if str(item).strip()]
     programs = [str(item) for item in record.get("program_ids", []) if str(item).strip()]
+    source = record.get("source") if isinstance(record.get("source"), dict) else {}
+    source_health = _source_materialization_summary(project_root, source)
+    materialization_status = _single_line(source_health.get("status")) or "not_materialized"
+    analysis_stage = _analysis_stage(record)
     properties: dict[str, Any] = {
         "id": unit_id,
         "kind": str(record.get("kind") or ""),
@@ -437,6 +503,9 @@ def _render_unit_page(
         "status": str(record.get("status") or ""),
         "maturity": str(record.get("maturity") or ""),
         "confirmation_status": str(record.get("confirmation_status") or ""),
+        "analysis_stage": analysis_stage,
+        "materialization_status": materialization_status,
+        "updated": str(record.get("updated_at") or record.get("created_at") or ""),
         "topics": [_wikilink(_topic_page_path(topic), display=topic) for topic in topics],
         "programs": [_wikilink(_program_page_path(program), display=program) for program in programs],
         "tags": sorted({str(item) for item in record.get("tags", []) if str(item).strip()}),
@@ -444,8 +513,7 @@ def _render_unit_page(
         "source_path": f"units/{UNIT_KIND_DIRS.get(str(record.get('kind') or ''), '')}/{unit_id}/record.yaml",
     }
     properties.update(_flat_relation_properties(unit_id, outgoing, incoming, records_by_id))
-    summary = _markdown_text(record.get("summary")) or "No summary yet."
-    source = record.get("source") if isinstance(record.get("source"), dict) else {}
+    summary = _display_summary(record)
     source_uri = _single_line(source.get("original_uri"))
     source_document = _source_document_link(project_root, source)
     lines = [
@@ -456,6 +524,36 @@ def _render_unit_page(
         "## Overview",
         "",
         summary,
+        "",
+        "> [!info] Quick access",
+        "> " + (source_document if source_document else "No Markdown reading view is available yet."),
+        "> " + (_source_markdown(source_uri) if source_uri else "No original source link is available."),
+        "",
+        f"> [!{'success' if materialization_status == 'complete' else 'warning'}] Source health · {_human_label(materialization_status, {}, fallback='Not materialized')}",
+        "> " + (
+            "The source has a complete Markdown reading view."
+            if materialization_status == "complete"
+            else "The source is readable with limitations; see the notes below."
+            if materialization_status == "degraded"
+            else "The source has not been converted to a Markdown reading view."
+        ),
+        "",
+        f"> [!{'warning' if analysis_stage == 'awaiting_confirmation' else 'todo' if analysis_stage == 'awaiting_analysis' else 'success'}] Analysis · {_analysis_stage_label(analysis_stage)}",
+        "> " + (
+            "Review the pending evidence-backed claims and confirm or reject them."
+            if analysis_stage == "awaiting_confirmation"
+            else "Ask AI to analyze this material with verbatim evidence, or run `kb next`."
+            if analysis_stage == "awaiting_analysis"
+            else "Claims and evidence are available below."
+        ),
+        "",
+        "## Relationships",
+        "",
+        *_render_relations(unit_id, outgoing, incoming, records_by_id),
+        "",
+        "## Claims",
+        "",
+        *_render_claims(project_root, record, records_by_id),
         "",
         "## Metadata",
         "",
@@ -469,23 +567,23 @@ def _render_unit_page(
         lines.append(f"- Source: {_source_markdown(source_uri)}")
     if source_document:
         lines.append(f"- Reading: {source_document}")
+    output = source_health.get("output")
+    output = output if isinstance(output, dict) else {}
+    if output.get("document_characters") is not None:
+        lines.append(f"- Reading size: {_inline_code(output.get('document_characters'))} characters")
+    if output.get("image_count") is not None:
+        lines.append(
+            f"- Images: {_inline_code(output.get('local_asset_reference_count', 0))} local / "
+            f"{_inline_code(output.get('image_count', 0))} referenced"
+        )
+    warnings = source_health.get("warnings")
+    if isinstance(warnings, list) and warnings:
+        lines.append("- Source notes: " + "; ".join(_markdown_text(item) for item in warnings))
     if topics:
         lines.append("- Topics: " + ", ".join(_wikilink(_topic_page_path(topic), display=topic) for topic in topics))
     if programs:
         lines.append("- Programs: " + ", ".join(_wikilink(_program_page_path(program), display=program) for program in programs))
-    lines.extend(
-        [
-            "",
-            "## Relationships",
-            "",
-            *_render_relations(unit_id, outgoing, incoming, records_by_id),
-            "",
-            "## Claims",
-            "",
-            *_render_claims(project_root, record, records_by_id),
-            "",
-        ]
-    )
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -724,13 +822,13 @@ def _base_file(*, name: str, view_filter: str = "", group_by: str = "") -> str:
         "name": name,
         "order": [
             "file.name",
-            "note.title",
-            "note.kind",
-            "note.status",
-            "note.maturity",
-            "note.confirmation_status",
-            "note.topics",
-            "note.programs",
+            "title",
+            "kind",
+            "analysis_stage",
+            "materialization_status",
+            "confirmation_status",
+            "topics",
+            "updated",
         ],
     }
     if view_filter:
@@ -750,17 +848,93 @@ def _base_file(*, name: str, view_filter: str = "", group_by: str = "") -> str:
             "status": {"displayName": "Status"},
             "maturity": {"displayName": "Maturity"},
             "confirmation_status": {"displayName": "Confirmation"},
+            "analysis_stage": {"displayName": "Analysis"},
+            "materialization_status": {"displayName": "Source health"},
             "topics": {"displayName": "Topics"},
             "programs": {"displayName": "Programs"},
+            "updated": {"displayName": "Updated"},
         },
         "views": [view],
     }
     return dump_yaml(payload, width=1_000_000)
 
 
-def _render_home(generated_at: str, records: list[dict[str, Any]], programs: list[dict[str, Any]]) -> str:
-    return "\n".join(
-        [
+def _legacy_obsidian_normalized_base(relative: str) -> dict[str, Any] | None:
+    """Known Obsidian 1.12 normalization of renderer revision 3 Base files.
+
+    This narrow migration exception lets a generated v3 projection converge to
+    v4 without treating Obsidian's own ``note.foo`` -> ``foo`` rewrite as a
+    human edit.  Any other semantic or structural change remains a conflict.
+    """
+    definitions = {
+        "dashboards/All Units.base": ("All units", "", ""),
+        "dashboards/Pending Review.base": (
+            "Pending review",
+            'confirmation_status == "pending_user_confirmation"',
+            "",
+        ),
+        "dashboards/By Topic.base": ("By topic", "", "topics"),
+    }
+    definition = definitions.get(relative)
+    if definition is None:
+        return None
+    name, view_filter, group_by = definition
+    view: dict[str, Any] = {
+        "type": "table",
+        "name": name,
+        "order": [
+            "file.name",
+            "title",
+            "kind",
+            "status",
+            "maturity",
+            "confirmation_status",
+            "topics",
+            "programs",
+        ],
+    }
+    if view_filter:
+        view["filters"] = {"and": [view_filter]}
+    if group_by:
+        view["groupBy"] = {"property": group_by, "direction": "ASC"}
+    return {
+        "filters": {"and": ['file.inFolder("obsidian/managed/units")', 'file.ext == "md"']},
+        "properties": {
+            "title": {"displayName": "Title"},
+            "kind": {"displayName": "Kind"},
+            "status": {"displayName": "Status"},
+            "maturity": {"displayName": "Maturity"},
+            "confirmation_status": {"displayName": "Confirmation"},
+            "topics": {"displayName": "Topics"},
+            "programs": {"displayName": "Programs"},
+        },
+        "views": [view],
+    }
+
+
+def _render_home(
+    project_root: Path,
+    generated_at: str,
+    records: list[dict[str, Any]],
+    programs: list[dict[str, Any]],
+) -> str:
+    records_by_id = {str(record.get("id") or ""): record for record in records}
+    kind_counts: dict[str, int] = defaultdict(int)
+    pending = 0
+    degraded = 0
+    for record in records:
+        kind_counts[str(record.get("kind") or "unknown")] += 1
+        if _analysis_stage(record) == "awaiting_confirmation":
+            pending += 1
+        source = record.get("source") if isinstance(record.get("source"), dict) else {}
+        if _source_materialization_summary(project_root, source).get("status") == "degraded":
+            degraded += 1
+    recent = sorted(
+        records,
+        key=lambda record: str(record.get("updated_at") or record.get("created_at") or ""),
+        reverse=True,
+    )[:8]
+    lines = [
             _frontmatter(
                 {
                     "id": "research-kb-home",
@@ -772,19 +946,38 @@ def _render_home(generated_at: str, records: list[dict[str, Any]], programs: lis
             "",
             "# Research KB",
             "",
-            f"Generated from the canonical knowledge base at {generated_at}.",
+            "Your human-readable entry point to the canonical research knowledge base.",
             "",
-            f"- Units: {len(records)}",
-            f"- Programs: {len(programs)}",
+            "> [!summary] Current state",
+            f"> **{len(records)}** units · **{len(programs)}** programs · **{pending}** awaiting confirmation · **{degraded}** sources need attention",
+            "",
+            "## Start here",
+            "",
+            "- [[obsidian/managed/dashboards/All Units.base|Browse all units]]",
+            "- [[obsidian/managed/dashboards/Pending Review.base|Review pending conclusions]]",
+            "- [[obsidian/managed/dashboards/By Topic.base|Explore by topic]]",
+            "",
+            "## Library overview",
+            "",
+        ]
+    lines.extend(
+        [f"- {_human_label(kind, {}, fallback='Unknown')}: **{count}**" for kind, count in sorted(kind_counts.items())]
+        or ["No material has been added yet."]
+    )
+    lines.extend(["", "## Recently updated", ""])
+    lines.extend(
+        [
+            f"- {_unit_link(str(record.get('id') or ''), records_by_id)} · "
+            f"{_analysis_stage_label(_analysis_stage(record))}"
+            for record in recent
+        ]
+        or ["No recent units."]
+    )
+    lines.extend(
+        [
             "",
             "> [!tip] Reading view",
             "> Generated pages are designed for Obsidian Reading view. Use the book icon in the upper-right; editor mode intentionally shows wikilinks and block IDs.",
-            "",
-            "## Database views",
-            "",
-            "- [[obsidian/managed/dashboards/All Units.base|All units]]",
-            "- [[obsidian/managed/dashboards/Pending Review.base|Pending review]]",
-            "- [[obsidian/managed/dashboards/By Topic.base|By topic]]",
             "",
             "## Human notes",
             "",
@@ -794,8 +987,11 @@ def _render_home(generated_at: str, records: list[dict[str, Any]], programs: lis
             "> [!warning] Managed projection",
             "> Files below `obsidian/managed` are generated. Put human-authored notes in inbox or annotations.",
             "",
+            f"<small>Projection refreshed {generated_at}.</small>",
+            "",
         ]
     )
+    return "\n".join(lines)
 
 
 def _projection_files(project_root: Path, inputs: dict[str, Any], *, generated_at: str) -> dict[str, str]:
@@ -810,7 +1006,7 @@ def _projection_files(project_root: Path, inputs: dict[str, Any], *, generated_a
         outgoing[str(edge["source_id"])].append(edge)
         incoming[str(edge["target_id"])].append(edge)
 
-    files: dict[str, str] = {"Home.md": _render_home(generated_at, records, programs)}
+    files: dict[str, str] = {"Home.md": _render_home(project_root, generated_at, records, programs)}
     for record in records:
         unit_id = str(record.get("id") or "")
         if not unit_id:
@@ -837,7 +1033,7 @@ def _projection_files(project_root: Path, inputs: dict[str, Any], *, generated_a
     files["dashboards/Pending Review.base"] = _base_file(
         name="Pending review", view_filter='confirmation_status == "pending_user_confirmation"'
     )
-    files["dashboards/By Topic.base"] = _base_file(name="By topic", group_by="note.topics")
+    files["dashboards/By Topic.base"] = _base_file(name="By topic", group_by="topics")
     return dict(sorted(files.items()))
 
 
@@ -968,8 +1164,21 @@ def _preflight_update(
         if current_digest == desired_digest:
             continue
         previous_digest = previous_files.get(relative)
-        if previous_digest is None or current_digest != previous_digest:
-            conflicts.append(relative)
+        if previous_digest is not None and current_digest == previous_digest:
+            continue
+        legacy_expected = (
+            _legacy_obsidian_normalized_base(relative)
+            if _manifest_renderer_revision(previous) == 3
+            else None
+        )
+        if legacy_expected is not None:
+            try:
+                current_payload = load_yaml(path, default={})
+            except (OSError, RuntimeError):
+                current_payload = None
+            if current_payload == legacy_expected:
+                continue
+        conflicts.append(relative)
 
     for relative, previous_digest in previous_files.items():
         if relative in desired:
