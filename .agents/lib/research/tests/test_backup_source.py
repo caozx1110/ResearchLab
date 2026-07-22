@@ -62,10 +62,10 @@ _ARXIV_HTML = (
 _PNG_BYTES = _valid_png_bytes()
 
 
-def test_backup_source_non_html_non_pdf_url_fails_explicitly(
+def test_backup_source_non_html_non_pdf_url_archives_bytes_as_stored_unparsed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # A URL that is neither HTML nor PDF must fail EXPLICITLY (not silently).
+    # Unsupported binary bytes remain auditable even when no parser exists.
     def fake_fetch_url(url: str, **kwargs) -> tuple[bytes, str]:
         return b"\x00\x01\x02binary-blob", "application/octet-stream"
 
@@ -73,11 +73,13 @@ def test_backup_source_non_html_non_pdf_url_fails_explicitly(
 
     payload = core.backup_source(tmp_path, "blog", "b-binary-123456", "https://example.com/thing.bin")
 
-    assert payload["file_hash"] == ""
-    assert payload["backup_status"] == "failed"
+    assert payload["file_hash"] == hashlib.sha256(b"\x00\x01\x02binary-blob").hexdigest()
+    assert payload["backup_status"] == "stored-unparsed"
     assert "backup_warning" in payload
     assert "application/octet-stream" in payload["backup_warning"]
     assert "WARN" in capsys.readouterr().err
+    raw = core.unit_root(tmp_path, "blog", "b-binary-123456") / "source/source.bin"
+    assert raw.read_bytes() == b"\x00\x01\x02binary-blob"
     # The warning/status must NOT leak into the on-disk source record contract.
     projected = core.source_record_fields(payload)
     assert "backup_warning" not in projected
