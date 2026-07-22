@@ -1,6 +1,6 @@
 ---
 name: discussion-archivist
-description: Archive important technical route discussions into durable program notes under `kb/programs/<program-id>/discussions/`, including conclusions, tradeoffs, open questions, and next validation actions.
+description: Archive important technical route discussions into durable per-program notes, including conclusions, tradeoffs, open questions, and next validation actions.
 ---
 
 # Discussion Archivist

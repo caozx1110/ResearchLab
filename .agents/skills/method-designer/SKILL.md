@@ -1,6 +1,6 @@
 ---
 name: method-designer
-description: Turn a selected core idea unit into a method design handoff with repo choice, interfaces, and an expanded experiment matrix under `kb/programs/<program-id>/design/`.
+description: Turn a selected core idea unit into a per-program method design handoff with repo choice, interfaces, and an expanded experiment matrix.
 ---
 
 # Method Designer
