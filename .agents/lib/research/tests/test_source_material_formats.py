@@ -122,6 +122,31 @@ def test_html_reading_root_prefers_substantial_main_over_earlier_article_card(
     assert conversion["quality"]["reading_root"] == "[role=main]"
 
 
+def test_missing_remote_fragment_is_externalized_without_degrading_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    html = b"""<!doctype html><html><head><title>External fragment</title></head><body><main>
+    <h1>Readable documentation</h1>
+    <p>This paragraph contains the main documentation and remains fully readable offline.</p>
+    <p>See <a href="#missing-figure">the original figure</a> for a supplementary detail.</p>
+    <p>A final paragraph keeps the page substantial and structured for the quality gate.</p>
+    </main></body></html>"""
+    monkeypatch.setattr(sources, "fetch_url", lambda url, **kwargs: (html, "text/html"))
+
+    payload = sources.backup_source(
+        tmp_path, "blog", "b-external-fragment-123456", "https://example.com/docs"
+    )
+
+    source_root = _source_root(tmp_path, "blog", "b-external-fragment-123456")
+    document = (source_root / "document.md").read_text(encoding="utf-8")
+    conversion = core.load_yaml(source_root / "conversion.yaml", default={})
+    assert payload["backup_status"] == "ok"
+    assert conversion["status"] == "complete"
+    assert conversion["quality"]["output"]["externalized_fragment_count"] == 1
+    assert "https://example.com/docs#missing-figure" in document
+    assert not any("internal fragment" in item for item in conversion["warnings"])
+
+
 def test_markdown_frontmatter_code_setext_and_real_images_are_structural(
     tmp_path: Path,
 ) -> None:

@@ -28,10 +28,12 @@ from .yaml_io import dump_yaml, load_yaml, write_text_if_changed, write_yaml_if_
 
 
 OBSIDIAN_PROJECTION_SCHEMA = "research-kb-obsidian/v1"
-OBSIDIAN_RENDERER_REVISION = 4
+OBSIDIAN_RENDERER_REVISION = 5
 MANIFEST_NAME = "manifest.yaml"
 HUMAN_DIRS = ("inbox", "annotations")
-UNIT_HEADINGS = frozenset({"Overview", "Metadata", "Relationships", "Claims"})
+UNIT_HEADINGS = frozenset(
+    {"Overview", "Metadata", "Relationships", "Claims", "概览", "元数据", "关系", "判断"}
+)
 _MARKDOWN_INLINE_RE = re.compile(r"([\\`*_{}\[\]()<>~$|^&=#!])")
 _LEADING_MARKDOWN_RE = re.compile(r"^(?P<prefix>(?:[+-])|(?:\d+[.)]))(?=\s)")
 _CLAIM_TYPE_LABELS = {
@@ -48,6 +50,24 @@ _CONFIRMATION_LABELS = {
     "auto_confirmed": "Automatically confirmed",
     "unverified": "Unverified",
 }
+_CLAIM_TYPE_LABELS_ZH = {
+    "fact": "事实",
+    "inference": "推断",
+    "evaluation": "评价",
+    "user_opinion": "用户观点",
+    "unverified": "未验证",
+}
+_CONFIRMATION_LABELS_ZH = {
+    "pending_user_confirmation": "等待人工确认",
+    "confirmed": "已确认",
+    "rejected": "已拒绝",
+    "auto_confirmed": "已自动确认",
+    "unverified": "未验证",
+}
+
+
+def _t(zh: bool, english: str, chinese: str) -> str:
+    return chinese if zh else english
 
 
 def obsidian_root(project_root: Path) -> Path:
@@ -128,12 +148,12 @@ def _human_label(value: Any, labels: dict[str, str], *, fallback: str = "Unverif
     return labels.get(raw, raw.replace("_", " ").capitalize())
 
 
-def _source_markdown(value: Any) -> str:
+def _source_markdown(value: Any, *, zh: bool = False) -> str:
     uri = _single_line(value)
     if re.match(r"^https?://", uri, flags=re.IGNORECASE):
         encoded = url_quote(uri, safe=":/?#[]@!$&'()*+,;=%")
-        return f"[Open source](<{encoded}>)"
-    return "Local source"
+        return f"[{_t(zh, 'Open source', '打开在线原文')}](<{encoded}>)"
+    return _t(zh, "Local source archived", "本地原始材料已归档")
 
 
 def _canonical_source_path(project_root: Path, raw: Any, *, suffix: str | None) -> Path | None:
@@ -158,6 +178,31 @@ def _canonical_source_path(project_root: Path, raw: Any, *, suffix: str | None) 
     return resolved
 
 
+def _canonical_kb_entry(project_root: Path, raw: Any, *, directory: bool) -> Path | None:
+    """Resolve a canonical KB file/directory without exposing paths in page text."""
+    text = _single_line(raw)
+    if not text:
+        return None
+    lexical = PurePosixPath(text)
+    if lexical.is_absolute() or not lexical.parts or lexical.parts[0] != "kb":
+        return None
+    if any(part in {"", ".", ".."} for part in lexical.parts):
+        return None
+    candidate = project_root.joinpath(*lexical.parts)
+    try:
+        resolved = candidate.resolve(strict=True)
+        resolved.relative_to(kb_root(project_root).resolve())
+    except (OSError, ValueError):
+        return None
+    if candidate.is_symlink():
+        return None
+    if directory and not candidate.is_dir():
+        return None
+    if not directory and not candidate.is_file():
+        return None
+    return resolved
+
+
 def _source_document_vault_path(project_root: Path, source: dict[str, Any]) -> str:
     raw = _single_line(source.get("markdown_path"))
     resolved = _canonical_source_path(project_root, raw, suffix=".md")
@@ -170,9 +215,51 @@ def _source_document_vault_path(project_root: Path, source: dict[str, Any]) -> s
     return PurePosixPath(relative.as_posix()).with_suffix("").as_posix()
 
 
-def _source_document_link(project_root: Path, source: dict[str, Any]) -> str:
+def _source_document_link(project_root: Path, source: dict[str, Any], *, zh: bool = False) -> str:
     vault_path = _source_document_vault_path(project_root, source)
-    return _wikilink(vault_path, display="Read material") if vault_path else ""
+    return _wikilink(vault_path, display=_t(zh, "Read material", "阅读 Markdown 全文")) if vault_path else ""
+
+
+def _local_repo_quick_links(project_root: Path, record: dict[str, Any], *, zh: bool) -> list[str]:
+    """Expose a bounded set of useful entry files for an archived local repo."""
+    if str(record.get("kind") or "") != "repo":
+        return []
+    source = record.get("source") if isinstance(record.get("source"), dict) else {}
+    backup_paths = source.get("backup_paths") if isinstance(source.get("backup_paths"), list) else []
+    roots = [
+        resolved
+        for raw in backup_paths
+        if (resolved := _canonical_kb_entry(project_root, raw, directory=True)) is not None
+    ]
+    if not roots:
+        return []
+    root = roots[0]
+    candidates = (
+        "README.md",
+        "README.rst",
+        "README.txt",
+        "README",
+        "pyproject.toml",
+        "package.json",
+        "setup.py",
+        "Cargo.toml",
+    )
+    links: list[str] = []
+    for name in candidates:
+        candidate = root / name
+        if candidate.is_symlink() or not candidate.is_file():
+            continue
+        if candidate.suffix.lower() == ".md":
+            relative = candidate.resolve().relative_to(kb_root(project_root).resolve())
+            links.append(_wikilink(PurePosixPath(relative.as_posix()).with_suffix("").as_posix(), display=name))
+        else:
+            encoded = url_quote(candidate.resolve().as_uri(), safe=":/?#[]@!$&'()*+,;=%")
+            links.append(f"[{name}](<{encoded}>)")
+        if len(links) >= 3:
+            break
+    folder_uri = url_quote(root.as_uri(), safe=":/?#[]@!$&'()*+,;=%")
+    links.append(f"[{_t(zh, 'Open source folder', '打开本地源码目录')}](<{folder_uri}>)")
+    return links
 
 
 def _source_materialization_summary(project_root: Path, source: dict[str, Any]) -> dict[str, Any]:
@@ -226,18 +313,23 @@ def _analysis_stage(record: dict[str, Any]) -> str:
     return "awaiting_analysis"
 
 
-def _analysis_stage_label(stage: str) -> str:
-    return {
-        "awaiting_analysis": "Awaiting AI analysis",
-        "evidence_recorded": "Evidence-backed analysis available",
-        "awaiting_confirmation": "Awaiting human confirmation",
-    }.get(stage, stage.replace("_", " ").capitalize())
+def _analysis_stage_label(stage: str, *, zh: bool = False) -> str:
+    labels = {
+        "awaiting_analysis": _t(zh, "Awaiting AI analysis", "等待 AI 分析"),
+        "evidence_recorded": _t(zh, "Evidence-backed analysis available", "已有证据支持的分析"),
+        "awaiting_confirmation": _t(zh, "Awaiting human confirmation", "等待人工确认"),
+    }
+    return labels.get(stage, stage.replace("_", " ").capitalize())
 
 
-def _display_summary(record: dict[str, Any]) -> str:
+def _display_summary(record: dict[str, Any], *, zh: bool = False) -> str:
     summary = _single_line(record.get("summary"))
     if not summary or re.fullmatch(r"Lightweight \w+ intake for `?.+?`?\.", summary):
-        return "The material is safely archived and readable. AI analysis has not been completed yet."
+        return _t(
+            zh,
+            "The material is safely archived and readable. AI analysis has not been completed yet.",
+            "原始材料已安全归档并可直接阅读，AI 尚未完成内容分析。",
+        )
     return _markdown_text(summary)
 
 
@@ -414,6 +506,8 @@ def _render_relations(
     outgoing: dict[str, list[dict[str, Any]]],
     incoming: dict[str, list[dict[str, Any]]],
     records_by_id: dict[str, dict[str, Any]],
+    *,
+    zh: bool = False,
 ) -> list[str]:
     grouped: dict[str, list[str]] = defaultdict(list)
     for edge in outgoing.get(unit_id, []):
@@ -426,7 +520,7 @@ def _render_relations(
         note = f" — {_markdown_text(edge.get('note'))}" if _single_line(edge.get("note")) else ""
         grouped[relation].append(f"- {link}{note}")
     if not grouped:
-        return ["No typed relationships yet."]
+        return [_t(zh, "No typed relationships yet.", "暂时没有已建立的类型化关系。")]
     lines: list[str] = []
     for relation in sorted(grouped):
         lines.extend([f"### {relation}", "", *sorted(set(grouped[relation])), ""])
@@ -437,10 +531,12 @@ def _render_claims(
     project_root: Path,
     record: dict[str, Any],
     records_by_id: dict[str, dict[str, Any]],
+    *,
+    zh: bool = False,
 ) -> list[str]:
     claims = _claims(record)
     if not claims:
-        return ["No canonical claims yet."]
+        return [_t(zh, "No canonical claims yet.", "尚未形成可确认的知识判断。")]
     lines: list[str] = []
     current_id = str(record.get("id") or "")
     for claim_index, claim in enumerate(claims, start=1):
@@ -448,20 +544,20 @@ def _render_claims(
         text = _markdown_text(claim.get("text"))
         lines.extend(
             [
-                f"### Claim {block_id}",
+                f"### {_t(zh, 'Claim', '判断')} {block_id}",
                 "",
                 f"{text} ^{block_id}",
                 "",
-                f"- Type: {_human_label(claim.get('claim_type'), _CLAIM_TYPE_LABELS)}",
-                f"- Confirmation: {_human_label(claim.get('confirmation_status'), _CONFIRMATION_LABELS)}",
+                f"- {_t(zh, 'Type', '类型')}: {_human_label(claim.get('claim_type'), _CLAIM_TYPE_LABELS_ZH if zh else _CLAIM_TYPE_LABELS)}",
+                f"- {_t(zh, 'Confirmation', '确认状态')}: {_human_label(claim.get('confirmation_status'), _CONFIRMATION_LABELS_ZH if zh else _CONFIRMATION_LABELS)}",
             ]
         )
         refs = claim.get("evidence_refs", [])
         refs = refs if isinstance(refs, list) else []
         if not refs:
-            lines.extend(["- Evidence: none", ""])
+            lines.extend([f"- {_t(zh, 'Evidence: none', '证据：暂无')}", ""])
             continue
-        lines.extend(["", "#### Evidence", ""])
+        lines.extend(["", f"#### {_t(zh, 'Evidence', '证据')}", ""])
         for evidence_index, ref in enumerate(refs, start=1):
             if not isinstance(ref, dict):
                 continue
@@ -469,8 +565,8 @@ def _render_claims(
             source_id = str(ref.get("source_unit_id") or current_id)
             source_link = _unit_link(source_id, records_by_id)
             source_record = records_by_id.get(source_id, {})
-            locator = _single_line(ref.get("locator")) or "unspecified locator"
-            artifact = _single_line(ref.get("artifact")) or "unspecified artifact"
+            locator = _single_line(ref.get("locator")) or _t(zh, "unspecified locator", "未指定定位")
+            artifact = _single_line(ref.get("artifact")) or _t(zh, "unspecified artifact", "未指定材料")
             quote = str(ref.get("quote") or "").strip()
             lines.append(
                 f"- {source_link} · {_artifact_markdown(project_root, source_record, ref, artifact)} · {_inline_code(locator)}"
@@ -479,7 +575,7 @@ def _render_claims(
                 for quote_line in quote.splitlines():
                     lines.append(f"> {_markdown_text(quote_line)}")
             else:
-                lines.append("> No verbatim quote recorded.")
+                lines.append("> " + _t(zh, "No verbatim quote recorded.", "尚未记录逐字证据。"))
             lines.extend(["", f"^{evidence_id}", ""])
     return lines[:-1]
 
@@ -490,6 +586,8 @@ def _render_unit_page(
     outgoing: dict[str, list[dict[str, Any]]],
     incoming: dict[str, list[dict[str, Any]]],
     records_by_id: dict[str, dict[str, Any]],
+    *,
+    zh: bool = False,
 ) -> str:
     unit_id = str(record.get("id") or "")
     title = _single_line(record.get("title")) or unit_id
@@ -517,76 +615,78 @@ def _render_unit_page(
         "source_path": f"units/{UNIT_KIND_DIRS.get(str(record.get('kind') or ''), '')}/{unit_id}/record.yaml",
     }
     properties.update(_flat_relation_properties(unit_id, outgoing, incoming, records_by_id))
-    summary = _display_summary(record)
+    summary = _display_summary(record, zh=zh)
     source_uri = _single_line(source.get("original_uri"))
-    source_document = _source_document_link(project_root, source)
+    source_document = _source_document_link(project_root, source, zh=zh)
+    repo_links = _local_repo_quick_links(project_root, record, zh=zh)
+    primary_access = source_document or (" · ".join(repo_links) if repo_links else "")
     lines = [
         _frontmatter(properties).rstrip(),
         "",
         f"# {_markdown_text(title)}",
         "",
-        "## Overview",
+        f"## {_t(zh, 'Overview', '概览')}",
         "",
         summary,
         "",
-        "> [!info] Quick access",
-        "> " + (source_document if source_document else "No Markdown reading view is available yet."),
-        "> " + (_source_markdown(source_uri) if source_uri else "No original source link is available."),
+        f"> [!info] {_t(zh, 'Quick access', '快速入口')}",
+        "> " + (primary_access if primary_access else _t(zh, "No reading entry is available yet.", "暂时没有可用的阅读入口。")),
+        "> " + (_source_markdown(source_uri, zh=zh) if source_uri else _t(zh, "No original source link is available.", "没有可用的原始来源链接。")),
         "",
-        f"> [!{'success' if materialization_status == 'complete' else 'warning'}] Source health · {_human_label(materialization_status, {}, fallback='Not materialized')}",
+        f"> [!{'success' if materialization_status == 'complete' else 'warning'}] {_t(zh, 'Source health', '来源健康')} · {_human_label(materialization_status, {'complete': '完整', 'degraded': '有局部限制', 'not_materialized': '未转换'} if zh else {}, fallback=_t(zh, 'Not materialized', '未转换'))}",
         "> " + (
-            "The source has a complete Markdown reading view."
+            _t(zh, "The source has a complete Markdown reading view.", "原始材料已有完整的 Markdown 阅读页。")
             if materialization_status == "complete"
-            else "The source is readable with limitations; see the notes below."
+            else _t(zh, "The source is readable with limitations; see the notes below.", "材料可以阅读，但存在局部限制；详情见下方说明。")
             if materialization_status == "degraded"
-            else "The source has not been converted to a Markdown reading view."
+            else _t(zh, "The source has not been converted to a Markdown reading view.", "该材料没有生成 Markdown 阅读页。")
         ),
         "",
-        f"> [!{'warning' if analysis_stage == 'awaiting_confirmation' else 'todo' if analysis_stage == 'awaiting_analysis' else 'success'}] Analysis · {_analysis_stage_label(analysis_stage)}",
+        f"> [!{'warning' if analysis_stage == 'awaiting_confirmation' else 'todo' if analysis_stage == 'awaiting_analysis' else 'success'}] {_t(zh, 'Analysis', '分析状态')} · {_analysis_stage_label(analysis_stage, zh=zh)}",
         "> " + (
-            "Review the pending evidence-backed claims and confirm or reject them."
+            _t(zh, "Review the pending evidence-backed claims and confirm or reject them.", "请检查下方有证据支持的待定判断，并决定确认或拒绝。")
             if analysis_stage == "awaiting_confirmation"
-            else "Ask AI to analyze this material with verbatim evidence, or run `kb next`."
+            else _t(zh, "Ask AI to analyze this material with verbatim evidence, or run `kb next`.", "可以让 AI 基于逐字证据分析这份材料，或运行 `kb next`。")
             if analysis_stage == "awaiting_analysis"
-            else "Claims and evidence are available below."
+            else _t(zh, "Claims and evidence are available below.", "下方已列出判断及其证据。")
         ),
         "",
-        "## Relationships",
+        f"## {_t(zh, 'Relationships', '关系')}",
         "",
-        *_render_relations(unit_id, outgoing, incoming, records_by_id),
+        *_render_relations(unit_id, outgoing, incoming, records_by_id, zh=zh),
         "",
-        "## Claims",
+        f"## {_t(zh, 'Claims', '判断')}",
         "",
-        *_render_claims(project_root, record, records_by_id),
+        *_render_claims(project_root, record, records_by_id, zh=zh),
         "",
-        "## Metadata",
+        f"## {_t(zh, 'Metadata', '元数据')}",
         "",
-        f"- Unit: {_inline_code(unit_id)}",
-        f"- Kind: {_inline_code(properties['kind'])}",
-        f"- Status: {_inline_code(properties['status'])}",
-        f"- Maturity: {_inline_code(properties['maturity'])}",
-        f"- Confirmation: {_inline_code(properties['confirmation_status'])}",
+        f"- {_t(zh, 'Unit', '单元')}: {_inline_code(unit_id)}",
+        f"- {_t(zh, 'Kind', '类型')}: {_inline_code(properties['kind'])}",
+        f"- {_t(zh, 'Status', '状态')}: {_inline_code(properties['status'])}",
+        f"- {_t(zh, 'Maturity', '成熟度')}: {_inline_code(properties['maturity'])}",
+        f"- {_t(zh, 'Confirmation', '确认状态')}: {_inline_code(properties['confirmation_status'])}",
     ]
     if source_uri:
-        lines.append(f"- Source: {_source_markdown(source_uri)}")
+        lines.append(f"- {_t(zh, 'Source', '来源')}: {_source_markdown(source_uri, zh=zh)}")
     if source_document:
-        lines.append(f"- Reading: {source_document}")
+        lines.append(f"- {_t(zh, 'Reading', '阅读页')}: {source_document}")
     output = source_health.get("output")
     output = output if isinstance(output, dict) else {}
     if output.get("document_characters") is not None:
-        lines.append(f"- Reading size: {_inline_code(output.get('document_characters'))} characters")
+        lines.append(f"- {_t(zh, 'Reading size', '正文长度')}: {_inline_code(output.get('document_characters'))} {_t(zh, 'characters', '字符')}")
     if output.get("image_count") is not None:
         lines.append(
-            f"- Images: {_inline_code(output.get('local_asset_reference_count', 0))} local / "
-            f"{_inline_code(output.get('image_count', 0))} referenced"
+            f"- {_t(zh, 'Images', '图片')}: {_inline_code(output.get('local_asset_reference_count', 0))} {_t(zh, 'local', '已本地化')} / "
+            f"{_inline_code(output.get('image_count', 0))} {_t(zh, 'referenced', '处引用')}"
         )
     warnings = source_health.get("warnings")
     if isinstance(warnings, list) and warnings:
-        lines.append("- Source notes: " + "; ".join(_markdown_text(item) for item in warnings))
+        lines.append(f"- {_t(zh, 'Source notes', '来源说明')}: " + "; ".join(_markdown_text(item) for item in warnings))
     if topics:
-        lines.append("- Topics: " + ", ".join(_wikilink(_topic_page_path(topic), display=topic) for topic in topics))
+        lines.append(f"- {_t(zh, 'Topics', '主题')}: " + ", ".join(_wikilink(_topic_page_path(topic), display=topic) for topic in topics))
     if programs:
-        lines.append("- Programs: " + ", ".join(_wikilink(_program_page_path(program), display=program) for program in programs))
+        lines.append(f"- {_t(zh, 'Programs', '研究项目')}: " + ", ".join(_wikilink(_program_page_path(program), display=program) for program in programs))
     lines.append("")
     return "\n".join(lines)
 
@@ -704,28 +804,51 @@ def _safe_taxonomy(project_root: Path) -> tuple[dict[str, Any], list[str]]:
     return (payload, []) if isinstance(payload, dict) else ({}, ["taxonomy-invalid"])
 
 
+def _safe_projection_locale(project_root: Path) -> tuple[str, list[str]]:
+    path = kb_root(project_root) / "config/user-profile.yaml"
+    if path.parent.is_symlink() or path.is_symlink():
+        return "en", ["user-profile-path-symlink"]
+    if not path.exists():
+        return "en", []
+    if not path.is_file():
+        return "en", ["user-profile-not-file"]
+    try:
+        payload = load_yaml(path, default={})
+    except (OSError, RuntimeError):
+        return "en", ["user-profile-unreadable"]
+    preferences = payload.get("preferences") if isinstance(payload, dict) else {}
+    preferences = preferences if isinstance(preferences, dict) else {}
+    language = _single_line(preferences.get("language_preference")).lower()
+    return ("zh" if language.startswith("zh") else "en"), []
+
+
 def _projection_inputs(project_root: Path) -> dict[str, Any]:
     records, record_issues = _safe_records(project_root)
     programs, program_issues = _safe_program_states(project_root)
     programs = sorted(programs, key=lambda state: str(state.get("program_id") or ""))
     taxonomy, taxonomy_issues = _safe_taxonomy(project_root)
+    locale, locale_issues = _safe_projection_locale(project_root)
     digest_payload = {
         "schema": OBSIDIAN_PROJECTION_SCHEMA,
         "renderer_revision": OBSIDIAN_RENDERER_REVISION,
         "records": records,
         "programs": programs,
         "taxonomy": taxonomy,
+        "locale": locale,
     }
     return {
         "records": records,
         "programs": programs,
         "taxonomy": taxonomy,
-        "input_issues": [*record_issues, *program_issues, *taxonomy_issues],
+        "locale": locale,
+        "input_issues": [*record_issues, *program_issues, *taxonomy_issues, *locale_issues],
         "input_digest": _sha256_text(_canonical_json(digest_payload)),
     }
 
 
-def _render_program_page(state: dict[str, Any], records_by_id: dict[str, dict[str, Any]]) -> str:
+def _render_program_page(
+    state: dict[str, Any], records_by_id: dict[str, dict[str, Any]], *, zh: bool = False
+) -> str:
     program_id = str(state.get("program_id") or "")
     title = _single_line(state.get("title")) or program_id
     raw_unit_ids = state.get("active_unit_ids", [])
@@ -747,19 +870,19 @@ def _render_program_page(state: dict[str, Any], records_by_id: dict[str, dict[st
         "",
         f"# {_markdown_text(title)}",
         "",
-        "## Goal",
+        f"## {_t(zh, 'Goal', '目标')}",
         "",
-        _markdown_text(state.get("goal")) or "No goal recorded.",
+        _markdown_text(state.get("goal")) or _t(zh, "No goal recorded.", "尚未记录目标。"),
         "",
-        "## Research question",
+        f"## {_t(zh, 'Research question', '研究问题')}",
         "",
-        _markdown_text(state.get("question")) or "No research question recorded.",
+        _markdown_text(state.get("question")) or _t(zh, "No research question recorded.", "尚未记录研究问题。"),
         "",
-        "## Active units",
+        f"## {_t(zh, 'Active units', '当前单元')}",
         "",
     ]
-    lines.extend([f"- {_unit_link(unit_id, records_by_id)}" for unit_id in unit_ids] or ["No active units."])
-    lines.extend(["", "## Next actions", ""])
+    lines.extend([f"- {_unit_link(unit_id, records_by_id)}" for unit_id in unit_ids] or [_t(zh, "No active units.", "暂无当前单元。")])
+    lines.extend(["", f"## {_t(zh, 'Next actions', '下一步')}", ""])
     actions = state.get("next_actions", [])
     if isinstance(actions, list) and actions:
         for action in actions:
@@ -772,7 +895,7 @@ def _render_program_page(state: dict[str, Any], records_by_id: dict[str, dict[st
             else:
                 lines.append(f"- {_markdown_text(action)}")
     else:
-        lines.append("No next actions.")
+        lines.append(_t(zh, "No next actions.", "暂无下一步行动。"))
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -792,6 +915,8 @@ def _render_topic_page(
     item: dict[str, Any],
     unit_ids: list[str],
     records_by_id: dict[str, dict[str, Any]],
+    *,
+    zh: bool = False,
 ) -> str:
     raw_aliases = item.get("aliases", [])
     raw_aliases = raw_aliases if isinstance(raw_aliases, list) else []
@@ -811,16 +936,16 @@ def _render_topic_page(
         "",
         f"# {_markdown_text(title)}",
         "",
-        _markdown_text(item.get("note")) or "Canonical research topic.",
+        _markdown_text(item.get("note")) or _t(zh, "Canonical research topic.", "知识库中的规范研究主题。"),
         "",
-        "## Units",
+        f"## {_t(zh, 'Units', '相关单元')}",
         "",
     ]
-    lines.extend([f"- {_unit_link(unit_id, records_by_id)}" for unit_id in unit_ids] or ["No linked units."])
+    lines.extend([f"- {_unit_link(unit_id, records_by_id)}" for unit_id in unit_ids] or [_t(zh, "No linked units.", "暂无关联单元。")])
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _base_file(*, name: str, view_filter: str = "", group_by: str = "") -> str:
+def _base_file(*, name: str, view_filter: str = "", group_by: str = "", zh: bool = False) -> str:
     view: dict[str, Any] = {
         "type": "table",
         "name": name,
@@ -847,16 +972,16 @@ def _base_file(*, name: str, view_filter: str = "", group_by: str = "") -> str:
             ]
         },
         "properties": {
-            "title": {"displayName": "Title"},
-            "kind": {"displayName": "Kind"},
-            "status": {"displayName": "Status"},
-            "maturity": {"displayName": "Maturity"},
-            "confirmation_status": {"displayName": "Confirmation"},
-            "analysis_stage": {"displayName": "Analysis"},
-            "materialization_status": {"displayName": "Source health"},
-            "topics": {"displayName": "Topics"},
-            "programs": {"displayName": "Programs"},
-            "updated": {"displayName": "Updated"},
+            "title": {"displayName": _t(zh, "Title", "标题")},
+            "kind": {"displayName": _t(zh, "Kind", "类型")},
+            "status": {"displayName": _t(zh, "Status", "状态")},
+            "maturity": {"displayName": _t(zh, "Maturity", "成熟度")},
+            "confirmation_status": {"displayName": _t(zh, "Confirmation", "确认状态")},
+            "analysis_stage": {"displayName": _t(zh, "Analysis", "分析状态")},
+            "materialization_status": {"displayName": _t(zh, "Source health", "来源健康")},
+            "topics": {"displayName": _t(zh, "Topics", "主题")},
+            "programs": {"displayName": _t(zh, "Programs", "研究项目")},
+            "updated": {"displayName": _t(zh, "Updated", "更新时间")},
         },
         "views": [view],
     }
@@ -921,6 +1046,8 @@ def _render_home(
     generated_at: str,
     records: list[dict[str, Any]],
     programs: list[dict[str, Any]],
+    *,
+    zh: bool = False,
 ) -> str:
     records_by_id = {str(record.get("id") or ""): record for record in records}
     kind_counts: dict[str, int] = defaultdict(int)
@@ -943,55 +1070,55 @@ def _render_home(
                 {
                     "id": "research-kb-home",
                     "kind": "dashboard",
-                    "title": "Research KB",
+                    "title": _t(zh, "Research KB", "研究知识库"),
                     "managed_by": "research-kb",
                 }
             ).rstrip(),
             "",
-            "# Research KB",
+            f"# {_t(zh, 'Research KB', '研究知识库')}",
             "",
-            "Your human-readable entry point to the canonical research knowledge base.",
+            _t(zh, "Your human-readable entry point to the canonical research knowledge base.", "这里是知识库的主要阅读与导航入口。"),
             "",
-            "> [!summary] Current state",
-            f"> **{len(records)}** units · **{len(programs)}** programs · **{pending}** awaiting confirmation · **{degraded}** sources need attention",
+            f"> [!summary] {_t(zh, 'Current state', '当前状态')}",
+            f"> **{len(records)}** {_t(zh, 'units', '个单元')} · **{len(programs)}** {_t(zh, 'programs', '个研究项目')} · **{pending}** {_t(zh, 'awaiting confirmation', '项等待确认')} · **{degraded}** {_t(zh, 'sources need attention', '份来源需留意')}",
             "",
-            "## Start here",
+            f"## {_t(zh, 'Start here', '从这里开始')}",
             "",
-            "- [[obsidian/managed/dashboards/All Units.base|Browse all units]]",
-            "- [[obsidian/managed/dashboards/Pending Review.base|Review pending conclusions]]",
-            "- [[obsidian/managed/dashboards/By Topic.base|Explore by topic]]",
+            f"- [[obsidian/managed/dashboards/All Units.base|{_t(zh, 'Browse all units', '浏览全部单元')}]]",
+            f"- [[obsidian/managed/dashboards/Pending Review.base|{_t(zh, 'Review pending conclusions', '查看待确认判断')}]]",
+            f"- [[obsidian/managed/dashboards/By Topic.base|{_t(zh, 'Explore by topic', '按主题浏览')}]]",
             "",
-            "## Library overview",
+            f"## {_t(zh, 'Library overview', '资料概览')}",
             "",
         ]
     lines.extend(
-        [f"- {_human_label(kind, {}, fallback='Unknown')}: **{count}**" for kind, count in sorted(kind_counts.items())]
-        or ["No material has been added yet."]
+        [f"- {_human_label(kind, {}, fallback=_t(zh, 'Unknown', '未知'))}: **{count}**" for kind, count in sorted(kind_counts.items())]
+        or [_t(zh, "No material has been added yet.", "尚未添加任何资料。")]
     )
-    lines.extend(["", "## Recently updated", ""])
+    lines.extend(["", f"## {_t(zh, 'Recently updated', '最近更新')}", ""])
     lines.extend(
         [
             f"- {_unit_link(str(record.get('id') or ''), records_by_id)} · "
-            f"{_analysis_stage_label(_analysis_stage(record))}"
+            f"{_analysis_stage_label(_analysis_stage(record), zh=zh)}"
             for record in recent
         ]
-        or ["No recent units."]
+        or [_t(zh, "No recent units.", "暂无最近更新的单元。")]
     )
     lines.extend(
         [
             "",
-            "> [!tip] Reading view",
-            "> Generated pages are designed for Obsidian Reading view. Use the book icon in the upper-right; editor mode intentionally shows wikilinks and block IDs.",
+            f"> [!tip] {_t(zh, 'Reading view', '阅读视图')}",
+            "> " + _t(zh, "Generated pages are designed for Obsidian Reading view. Use the book icon in the upper-right; editor mode intentionally shows wikilinks and block IDs.", "生成页面针对 Obsidian 阅读视图优化。请使用右上角书本图标；编辑模式会按设计显示双向链接和块 ID 源码。"),
             "",
-            "## Human notes",
+            f"## {_t(zh, 'Human notes', '人工笔记')}",
             "",
-            "- Put unprocessed notes in `obsidian/inbox/`.",
-            "- Put durable human commentary in `obsidian/annotations/`.",
+            _t(zh, "- Put unprocessed notes in `obsidian/inbox/`.", "- 未整理笔记请放在 `obsidian/inbox/`。"),
+            _t(zh, "- Put durable human commentary in `obsidian/annotations/`.", "- 需要长期保留的人工批注请放在 `obsidian/annotations/`。"),
             "",
-            "> [!warning] Managed projection",
-            "> Files below `obsidian/managed` are generated. Put human-authored notes in inbox or annotations.",
+            f"> [!warning] {_t(zh, 'Managed projection', '受管投影')}",
+            "> " + _t(zh, "Files below `obsidian/managed` are generated. Put human-authored notes in inbox or annotations.", "`obsidian/managed` 下的文件会自动生成；人工内容请写入 inbox 或 annotations。"),
             "",
-            f"<small>Projection refreshed {generated_at}.</small>",
+            f"<small>{_t(zh, 'Projection refreshed', '投影更新时间')} {generated_at}.</small>",
             "",
         ]
     )
@@ -1002,6 +1129,7 @@ def _projection_files(project_root: Path, inputs: dict[str, Any], *, generated_a
     records = inputs["records"]
     programs = inputs["programs"]
     taxonomy = inputs["taxonomy"]
+    zh = str(inputs.get("locale") or "en") == "zh"
     records_by_id = {str(record.get("id") or ""): record for record in records if str(record.get("id") or "")}
     edges = project_relation_edges(records)
     outgoing: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -1010,19 +1138,19 @@ def _projection_files(project_root: Path, inputs: dict[str, Any], *, generated_a
         outgoing[str(edge["source_id"])].append(edge)
         incoming[str(edge["target_id"])].append(edge)
 
-    files: dict[str, str] = {"Home.md": _render_home(project_root, generated_at, records, programs)}
+    files: dict[str, str] = {"Home.md": _render_home(project_root, generated_at, records, programs, zh=zh)}
     for record in records:
         unit_id = str(record.get("id") or "")
         if not unit_id:
             continue
         files[f"units/{_safe_component(unit_id, fallback='unit')}.md"] = _render_unit_page(
-            project_root, record, outgoing, incoming, records_by_id
+            project_root, record, outgoing, incoming, records_by_id, zh=zh
         )
     for state in programs:
         program_id = str(state.get("program_id") or "")
         if program_id:
             files[f"programs/{_safe_component(program_id, fallback='program')}.md"] = _render_program_page(
-                state, records_by_id
+                state, records_by_id, zh=zh
             )
     topic_items = taxonomy.get("topics", {}) if isinstance(taxonomy, dict) else {}
     topic_items = topic_items if isinstance(topic_items, dict) else {}
@@ -1031,13 +1159,13 @@ def _projection_files(project_root: Path, inputs: dict[str, Any], *, generated_a
         item = topic_items.get(topic_id, {})
         item = item if isinstance(item, dict) else {}
         files[f"topics/{_safe_component(topic_id, fallback='topic')}.md"] = _render_topic_page(
-            topic_id, item, members.get(topic_id, []), records_by_id
+            topic_id, item, members.get(topic_id, []), records_by_id, zh=zh
         )
-    files["dashboards/All Units.base"] = _base_file(name="All units")
+    files["dashboards/All Units.base"] = _base_file(name=_t(zh, "All units", "全部单元"), zh=zh)
     files["dashboards/Pending Review.base"] = _base_file(
-        name="Pending review", view_filter='confirmation_status == "pending_user_confirmation"'
+        name=_t(zh, "Pending review", "待确认"), view_filter='confirmation_status == "pending_user_confirmation"', zh=zh
     )
-    files["dashboards/By Topic.base"] = _base_file(name="By topic", group_by="topics")
+    files["dashboards/By Topic.base"] = _base_file(name=_t(zh, "By topic", "按主题"), group_by="topics", zh=zh)
     return dict(sorted(files.items()))
 
 

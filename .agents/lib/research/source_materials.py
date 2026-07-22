@@ -1206,6 +1206,7 @@ def materialize_html(
     used_placeholders: set[str] = set()
     extra_blocks: list[dict[str, Any]] = []
     anchor_tokens: dict[str, str] = {}
+    externalized_fragments: set[str] = set()
     referenced_anchors = {
         unquote(str(link.get("href") or "")[1:])
         for link in root.find_all("a")
@@ -1216,7 +1217,19 @@ def materialize_html(
         if not block_id:
             target = root.find(attrs={"id": anchor})
             if not isinstance(target, Tag):
-                warnings.append(f"internal fragment has no target: #{anchor}")
+                matching_links = [
+                    link
+                    for link in root.find_all("a")
+                    if unquote(str(link.get("href") or "")[1:]) == anchor
+                    and str(link.get("href") or "").startswith("#")
+                ]
+                if document_base.lower().startswith(("http://", "https://")):
+                    for link in matching_links:
+                        link["href"] = urljoin(document_base, str(link.get("href") or ""))
+                    externalized_fragments.add(anchor)
+                else:
+                    for link in matching_links:
+                        link.attrs.pop("href", None)
                 continue
             block_id = _safe_block_id("anchor", anchor, index, used_blocks)
             anchor_to_block[anchor] = block_id
@@ -1337,6 +1350,7 @@ def materialize_html(
         "block_count": len(blocks),
         "asset_count": len(assets),
         "internal_fragment_count": len(referenced_anchors),
+        "externalized_fragment_count": len(externalized_fragments),
         "math_count": len(math_tokens) + len(equation_tokens),
         "code_block_count": len(code_tokens),
         "equation_count": len(equation_tokens),

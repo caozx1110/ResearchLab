@@ -442,6 +442,47 @@ def test_pending_record_without_claims_is_awaiting_analysis_not_human_confirmati
     assert "**0** awaiting confirmation" in home
 
 
+def test_chinese_profile_localizes_projection_and_repo_quick_access(tmp_path: Path) -> None:
+    write_yaml_if_changed(
+        tmp_path / "kb/config/user-profile.yaml",
+        {"preferences": {"language_preference": "zh-CN"}},
+    )
+    record = default_record("repo", title="Click", maturity="lightweight")
+    record["id"] = "r-click-12345678"
+    record["status"] = "active"
+    record["confirmation_status"] = "auto_confirmed"
+    record["needs_human_confirmation"] = False
+    snapshot = tmp_path / "kb/units/repos/r-click-12345678/source/click"
+    snapshot.mkdir(parents=True)
+    (snapshot / "README.md").write_text("# Click\n", encoding="utf-8")
+    (snapshot / "pyproject.toml").write_text("[project]\nname='click'\n", encoding="utf-8")
+    record["source"].update(
+        {
+            "original_uri": "/private/tmp/click",
+            "backup_paths": ["kb/units/repos/r-click-12345678/source/click"],
+            "backup_kind": "directory",
+        }
+    )
+    write_yaml_if_changed(record_path(tmp_path, "repo", record["id"]), record)
+
+    update_obsidian_projection(tmp_path)
+
+    managed = obsidian_managed_root(tmp_path)
+    page = (managed / "units/r-click-12345678.md").read_text(encoding="utf-8")
+    home = (managed / "Home.md").read_text(encoding="utf-8")
+    all_units = load_yaml(managed / "dashboards/All Units.base", default={})
+    assert "## 概览" in page
+    assert "> [!info] 快速入口" in page
+    assert "[[units/repos/r-click-12345678/source/click/README|README.md]]" in page
+    assert "pyproject.toml" in page and "打开本地源码目录" in page
+    assert "/private/tmp/click" not in page
+    assert "分析状态 · 等待 AI 分析" in page
+    assert "# 研究知识库" in home
+    assert "从这里开始" in home and "阅读视图" in home
+    assert all_units["properties"]["title"]["displayName"] == "标题"
+    assert all_units["views"][0]["name"] == "全部单元"
+
+
 def test_renderer_revision_marks_old_projection_stale_and_forces_rebuild(tmp_path: Path) -> None:
     _record(tmp_path, "p-alpha-12345678", "Alpha")
     update_obsidian_projection(tmp_path)
