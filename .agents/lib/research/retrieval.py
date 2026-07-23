@@ -32,8 +32,6 @@ FIELD_WEIGHTS = {
 }
 
 PASSAGE_FIELD_WEIGHTS = {
-    "title": 8,
-    "summary": 5,
     "heading": 4,
     "text": 1,
 }

@@ -621,6 +621,8 @@ passage:
   source_digest: sha256
 ```
 
+`title` / record summary 是展示 metadata；只有各自独立的 `record.yaml#title` / `#summary` passage 把这些 bytes 放进可检索正文。不得因为 unit title 命中就把同一 unit 的无关正文 passage 全部提升为结果。
+
 Extractor 只遍历 canonical unit containment 内允许的 record、Markdown 与 parse-cache 文本，跳过 raw/output/runtime/Obsidian/journal，拒绝 symlink escape。Markdown 以 heading + paragraph 切分，长段用固定窗口与 overlap。显式 build 在同目录完成全新数据库后原子 replace，任何失败保留旧 cache；不得用 external-content/trigger 双表。
 
 Read path 对 cache metadata 与当前 canonical digest 做 byte-level 检查。cache missing/corrupt/stale 时，使用同一 extractor 做纯内存 lexical fallback，查询绝不写盘。结果至多五条，返回 unit、短原文与 project-relative locator；public projection 不显示 BM25/internal score 或绝对路径。`unicode61` 与共享 CJK/ASCII tokenizer 只承诺 lexical matching，不承诺翻译或 embedding。

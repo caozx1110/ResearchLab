@@ -105,7 +105,7 @@ STATUS_VALUES = {
 
 CONFIRMATION_VALUES = {"auto_confirmed", "pending_user_confirmation", "confirmed", "rejected"}
 
-PASSAGE_INDEX_REVISION = "passages-v1"
+PASSAGE_INDEX_REVISION = "passages-v2"
 PASSAGE_SEARCH_LIMIT = 5
 
 
@@ -780,7 +780,7 @@ def rebuild_passage_cache(
         connection.execute(
             "CREATE VIRTUAL TABLE passages USING fts5("
             "passage_id UNINDEXED, unit_id UNINDEXED, kind UNINDEXED, "
-            "title, summary, heading, body, artifact UNINDEXED, locator UNINDEXED, "
+            "title UNINDEXED, summary UNINDEXED, heading, body, artifact UNINDEXED, locator UNINDEXED, "
             "line_start UNINDEXED, line_end UNINDEXED, source_digest UNINDEXED, "
             "tokenize='unicode61')"
         )
@@ -946,7 +946,7 @@ def _query_passage_cache(
         rows = connection.execute(
             "SELECT passage_id, unit_id, kind, title, summary, heading, body, artifact, locator, "
             "line_start, line_end, source_digest, "
-            "bm25(passages, 0.0, 0.0, 0.0, 8.0, 5.0, 4.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0) AS score "
+            "bm25(passages, 0.0, 0.0, 0.0, 0.0, 0.0, 4.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0) AS score "
             "FROM passages WHERE passages MATCH ? ORDER BY score, unit_id, artifact, locator",
             (_fts_query_text(query),),
         )

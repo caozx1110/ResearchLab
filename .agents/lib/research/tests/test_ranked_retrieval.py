@@ -186,6 +186,32 @@ def test_title_and_summary_are_indexed_as_first_class_passages(tmp_path: Path) -
     assert summary["results"][0]["locator"].endswith("record.yaml#summary")
 
 
+def test_title_match_does_not_promote_unrelated_body_passages(tmp_path: Path) -> None:
+    ensure_workspace(tmp_path)
+    _write_record(
+        tmp_path,
+        _record("p-title-scope-123456", "Rare Query Planning", summary="A database article."),
+    )
+    note = unit_root(tmp_path, "paper", "p-title-scope-123456") / "paper-note.md"
+    write_text_if_changed(
+        note,
+        "# Introduction\n\nTable of contents.\n\n## Searching\n\nA sequential scan description.\n",
+    )
+
+    missing = search_passages(tmp_path, "Rare Query Planning")
+    assert missing["health"] == "missing"
+    assert [item["locator"] for item in missing["results"]] == [
+        "kb/units/papers/p-title-scope-123456/record.yaml#title"
+    ]
+
+    build_index(tmp_path)
+    current = search_passages(tmp_path, "Rare Query Planning")
+    assert current["health"] == "current"
+    assert [item["locator"] for item in current["results"]] == [
+        "kb/units/papers/p-title-scope-123456/record.yaml#title"
+    ]
+
+
 def test_missing_stale_and_corrupt_cache_fall_back_without_writes(tmp_path: Path) -> None:
     ensure_workspace(tmp_path)
     _write_record(tmp_path, _record("p-fallback-123456", "Fallback Paper"))
