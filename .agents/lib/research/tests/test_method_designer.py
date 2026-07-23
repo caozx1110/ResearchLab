@@ -123,7 +123,8 @@ def test_method_prefers_program_active_repo_corpus(tmp_path: Path, monkeypatch) 
     assert _run_design(method, monkeypatch, root, idea_id) == 0
 
     choice = load_yaml(root / "kb" / "programs" / "p-method" / "design" / f"{idea_id}-repo-choice.yaml", default={})
-    assert choice["selected_repo_id"] == active_repo_id
+    assert choice["proposed_repo_id"] == active_repo_id
+    assert "selected_repo_id" not in choice
     assert [item["repo_id"] for item in choice["candidate_repos"]] == [active_repo_id]
     assert kb_repo_id not in choice["candidate_corpus"]["repo_ids"]
     assert choice["candidate_corpus"]["scope"] == "program-active-units"
@@ -141,7 +142,8 @@ def test_method_falls_back_to_kb_repos_with_note(tmp_path: Path, monkeypatch, ca
     assert _run_design(method, monkeypatch, root, idea_id) == 0
 
     choice = load_yaml(root / "kb" / "programs" / "p-method" / "design" / f"{idea_id}-repo-choice.yaml", default={})
-    assert choice["selected_repo_id"] == repo_id
+    assert choice["proposed_repo_id"] == repo_id
+    assert "selected_repo_id" not in choice
     assert choice["candidate_corpus"]["scope"] == "kb-wide-fallback"
     assert choice["candidate_corpus"]["fallback_used"] is True
     assert "fell back to KB-wide repository units" in capsys.readouterr().out
@@ -157,12 +159,20 @@ def test_method_prepares_agent_evidence_slots_instead_of_repo_judgement(tmp_path
     choice = load_yaml(design_root / f"{idea_id}-repo-choice.yaml", default={})
     matrix = load_yaml(design_root / f"{idea_id}-experiment-matrix.yaml", default={})
     method_text = (design_root / f"{idea_id}-method.md").read_text(encoding="utf-8")
-    assert choice["selected_repo_id"] == repo_id
-    assert choice["selection_reason"] == ""
-    assert choice["selection_judgement"]["claim"] == ""
-    assert choice["selection_judgement"]["evidence"] == []
-    assert choice["selection_judgement"]["status"] == "pending_agent_evidence"
+    assert choice["proposed_repo_id"] == repo_id
+    assert "selected_repo_id" not in choice
+    assert choice["payload"]["method_selection"]["selection_reason"] == ""
+    assert choice["payload"]["claims"] == []
+    assert choice["status"] == "needs_agent_fill"
+    assert choice["needs_human_confirmation"] is False
     assert choice["ranking_basis"]["type"] == "deterministic-token-overlap"
-    assert all(item["claim"] == "" and item["evidence"] == [] for item in matrix["baseline_judgements"])
+    assert matrix["baseline_judgement_claim_id"] == "method-baselines"
+    assert matrix["proposal_status"] == "pending_agent_evidence"
+    assert all(item["status"] == "proposal" for item in matrix["experiments"])
+    assert all("repo_dependency" not in item for item in matrix["experiments"])
     assert "Selected repo:" not in method_text
-    assert "Agent selection judgement: pending" in method_text
+    assert "Status: proposal only" in method_text
+    state = load_yaml(root / "kb" / "programs" / "p-method" / "state.yaml", default={})
+    assert state["stage"] == "idea-review"
+    assert "selected_repo_id" not in state
+    assert not (root / "kb" / "programs" / "p-method" / "workflow" / "reporting-events.yaml").exists()

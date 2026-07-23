@@ -22,7 +22,7 @@ from research.bootstrap import ensure_managed_runtime
 if __name__ == "__main__":
     ensure_managed_runtime(PROJECT_ROOT)
 
-from research.common import add_project_root_argument, append_program_reporting_event, load_yaml, normalize_list, print_resolved_project_roots, program_reporting_events_path, utc_now_iso, write_text_if_changed, write_yaml_if_changed, yaml_default
+from research.common import add_project_root_argument, append_program_reporting_event, load_yaml, normalize_list, program_reporting_events_path, utc_now_iso, write_text_if_changed, write_yaml_if_changed, yaml_default
 from research.confirm import apply_confirmation
 from research.core import iter_records, locate_record, project_root, rel
 from research.evidence import JUDGEMENT_CLAIM_TYPES, build_verification_receipt, validate_claims
@@ -605,9 +605,15 @@ def prepare_method(root: Path, record: dict[str, Any], args: argparse.Namespace)
     if resources:
         state["resource_constraints"] = resources
 
-    # The directory itself is a target so an aborted first prepare cannot leak an
-    # empty design directory after its child files are restored as absent.
-    with mutation_transaction(root, "method:prepare", [paths["design_root"], paths["state"]]):
+    # A first prepare targets the absent directory so abort removes it entirely.
+    # Once the directory exists, keep the target set exact and avoid checkpointing
+    # unrelated method artifacts that may belong to another idea.
+    prepare_targets = [paths["state"]]
+    if paths["design_root"].exists():
+        prepare_targets.extend([paths["method"], paths["choice"], paths["interfaces"], paths["matrix"]])
+    else:
+        prepare_targets.append(paths["design_root"])
+    with mutation_transaction(root, "method:prepare", prepare_targets):
         write_text_if_changed(
             paths["method"],
             (
@@ -814,7 +820,6 @@ def confirm_method(root: Path, args: argparse.Namespace) -> int:
 def main() -> int:
     args = build_parser().parse_args()
     root = project_root(PROJECT_ROOT, explicit_root=args.root)
-    print_resolved_project_roots(root)
     record, _ = locate_record(root, args.idea_id, kind="idea")
     if record.get("kind") != "idea":
         raise SystemExit(f"{args.idea_id} is not an idea record")
