@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
+import json
 import sys
 from pathlib import Path
 
@@ -21,8 +23,8 @@ from research.bootstrap import ensure_managed_runtime
 if __name__ == "__main__":
     ensure_managed_runtime(PROJECT_ROOT)
 
-from research.common import add_project_root_argument, ensure_dir, load_yaml, print_resolved_project_roots, slugify, write_text_if_changed, write_yaml_if_changed
-from research.core import iter_records, project_root, rel, synthesis_root, unit_root
+from research.common import add_project_root_argument, ensure_dir, file_sha256, load_yaml, print_resolved_project_roots, slugify, utc_now_iso, write_text_if_changed, write_yaml_if_changed
+from research.core import iter_records, locate_record, project_root, rel, synthesis_root, unit_root
 from research.evidence import validate_claims, verify_claim_evidence
 from research.journal import mutation_transaction
 
@@ -38,6 +40,72 @@ SECTION_SPECS = (
 )
 
 
+def _canonical_digest_value(value: object) -> object:
+    if isinstance(value, dict):
+        return {
+            str(key): _canonical_digest_value(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_canonical_digest_value(item) for item in value]
+    if isinstance(value, str):
+        return " ".join(value.split())
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return " ".join(str(value).split())
+
+
+def _canonical_digest(value: object) -> str:
+    encoded = json.dumps(
+        _canonical_digest_value(value),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _record_content_digest(record: dict) -> str:
+    content = copy.deepcopy(record)
+    for volatile in ("created_at", "updated_at", "history", "confirmation"):
+        content.pop(volatile, None)
+    return _canonical_digest(content)
+
+
+def _evidence_artifact_bindings(unit_dir: Path) -> list[dict[str, str]]:
+    bindings: list[dict[str, str]] = []
+    if not unit_dir.is_dir() or unit_dir.is_symlink():
+        raise SystemExit(f"Survey source unit is not a safe directory: {unit_dir.name}")
+    for path in sorted(unit_dir.rglob("*"), key=lambda item: item.relative_to(unit_dir).as_posix()):
+        artifact = path.relative_to(unit_dir).as_posix()
+        if path.is_symlink():
+            raise SystemExit(f"Survey source unit contains a symlinked artifact: {unit_dir.name}/{artifact}")
+        if not path.is_file() or artifact == "record.yaml":
+            continue
+        bindings.append({"artifact": artifact, "byte_sha256": file_sha256(path)})
+    return bindings
+
+
+def build_unit_binding(root: Path, record: dict) -> dict:
+    unit_id = str(record.get("id") or "").strip()
+    unit_kind = str(record.get("kind") or "").strip()
+    if not unit_id or not unit_kind:
+        raise SystemExit("Survey source unit requires canonical id and kind.")
+    current, record_file = locate_record(root, unit_id, kind=unit_kind, fuzzy=False)
+    if str(current.get("id") or "") != unit_id or str(current.get("kind") or "") != unit_kind:
+        raise SystemExit(f"Survey source identity changed while anchoring: {unit_kind}/{unit_id}")
+    confirmation = current.get("confirmation")
+    receipt_digest = _canonical_digest(confirmation) if isinstance(confirmation, dict) and confirmation else ""
+    return {
+        "id": unit_id,
+        "kind": unit_kind,
+        "title": str(current.get("title") or ""),
+        "record_content_digest": _record_content_digest(current),
+        "confirmation_receipt_digest": receipt_digest,
+        "evidence_artifacts": _evidence_artifact_bindings(record_file.parent),
+    }
+
+
 def fillable_claim(claim_id: str, claim_type: str, **extra: object) -> dict:
     return {
         "id": claim_id,
@@ -51,6 +119,7 @@ def fillable_claim(claim_id: str, claim_type: str, **extra: object) -> dict:
 def build_survey_scaffold(
     records: list[dict],
     *,
+    root: Path,
     query: str,
     kind: str,
     topic: str,
@@ -62,15 +131,7 @@ def build_survey_scaffold(
     """Build a fillable survey structure; the script authors no conclusions."""
     subject = query or topic or tag or pool or kind or mode
     slug = slugify(subject, max_words=8) or mode
-    units = [
-        {
-            "id": str(record.get("id") or ""),
-            "kind": str(record.get("kind") or ""),
-            "title": str(record.get("title") or ""),
-        }
-        for record in records
-        if str(record.get("id") or "")
-    ]
+    units = [build_unit_binding(root, record) for record in records if str(record.get("id") or "")]
     sections = []
     for section_id, title, claim_type in SECTION_SPECS:
         section = {"id": section_id, "title": title}
@@ -252,6 +313,7 @@ def verify_survey_fill(payload: dict, root: Path) -> tuple[list[str], dict]:
         violations.append("kb_anchor.units: must be a list")
         unit_items = []
     anchored_units: dict[str, str] = {}
+    anchored_bindings: dict[str, dict] = {}
     for index, item in enumerate(unit_items):
         if not isinstance(item, dict):
             violations.append(f"kb_anchor.units[{index}]: must be a mapping")
@@ -265,6 +327,19 @@ def verify_survey_fill(payload: dict, root: Path) -> tuple[list[str], dict]:
             violations.append(f"kb_anchor.units[{index}]: duplicate unit id '{unit_id}'")
             continue
         anchored_units[unit_id] = unit_kind
+        anchored_bindings[unit_id] = item
+        for field in ("title", "record_content_digest", "confirmation_receipt_digest", "evidence_artifacts"):
+            if field not in item:
+                violations.append(f"kb_anchor.units[{index}]: missing {field}")
+        try:
+            current_binding = build_unit_binding(root, item)
+        except (OSError, SystemExit) as exc:
+            violations.append(f"kb_anchor.units[{index}]: cannot reload canonical unit: {exc}")
+        else:
+            if _canonical_digest_value(current_binding) != _canonical_digest_value(item):
+                violations.append(
+                    f"kb_anchor.units[{index}]: canonical unit content, confirmation, or evidence changed; prepare again"
+                )
     unit_ids = anchor.get("unit_ids")
     if not isinstance(unit_ids, list):
         violations.append("kb_anchor.unit_ids: must be a list")
@@ -306,6 +381,17 @@ def verify_survey_fill(payload: dict, root: Path) -> tuple[list[str], dict]:
                     f"{label} evidence_refs[{index}]: source_unit_id '{source_unit_id}' is not in kb_anchor.units"
                 )
                 continue
+            anchored_artifacts = {
+                str(item.get("artifact") or "")
+                for item in anchored_bindings[source_unit_id].get("evidence_artifacts", [])
+                if isinstance(item, dict)
+            }
+            artifact = str(ref_item.get("artifact") or "").strip()
+            if artifact not in anchored_artifacts:
+                violations.append(
+                    f"{label} evidence_refs[{index}]: artifact '{artifact}' was not present in the prepared unit binding"
+                )
+                continue
             single_ref_claim = {**claim, "evidence_refs": [ref_item]}
             try:
                 source_unit_dir = unit_root(root, source_kind, source_unit_id)
@@ -327,9 +413,53 @@ def verify_survey_fill(payload: dict, root: Path) -> tuple[list[str], dict]:
         verified["confirmation_status"] = "pending_user_confirmation"
         verified["needs_human_confirmation"] = True
         verified["governance_status"] = "needs_agent_repair"
+        verified["consumer_binding"] = {
+            "selection_filters": copy.deepcopy(verified.get("filters") or {}),
+            "units": copy.deepcopy(unit_items),
+            "verified_at": utc_now_iso(),
+        }
         for _, cell, _ in survey_claim_entries(verified)[1]:
             cell["epistemic_status"] = "verified_pending_confirmation"
     return violations, verified
+
+
+def survey_staleness(payload: dict, root: Path) -> dict:
+    """Pure read: compare a verified survey consumer binding with the current KB."""
+    binding = payload.get("consumer_binding") if isinstance(payload, dict) else None
+    if not isinstance(binding, dict):
+        return {"stale": True, "reasons": ["missing consumer_binding"], "new_unit_ids": []}
+    stored_units = binding.get("units")
+    filters = binding.get("selection_filters")
+    if not isinstance(stored_units, list) or not isinstance(filters, dict):
+        return {"stale": True, "reasons": ["consumer_binding is incomplete"], "new_unit_ids": []}
+
+    reasons: list[str] = []
+    stored_by_id = {
+        str(item.get("id") or ""): item
+        for item in stored_units
+        if isinstance(item, dict) and str(item.get("id") or "")
+    }
+    for unit_id, stored in sorted(stored_by_id.items()):
+        try:
+            current = build_unit_binding(root, stored)
+        except (OSError, SystemExit):
+            reasons.append(f"deleted or unreadable unit: {unit_id}")
+            continue
+        if _canonical_digest_value(current) != _canonical_digest_value(stored):
+            reasons.append(f"changed unit: {unit_id}")
+
+    selected = select_records(
+        iter_records(root),
+        query=str(filters.get("query") or ""),
+        kind=str(filters.get("kind") or ""),
+        topic=str(filters.get("topic") or ""),
+        tag=str(filters.get("tag") or ""),
+        pool=str(filters.get("pool") or ""),
+    )
+    current_ids = {str(record.get("id") or "") for record in selected if str(record.get("id") or "")}
+    new_unit_ids = sorted(current_ids - set(stored_by_id))
+    reasons.extend(f"new matching unit: {unit_id}" for unit_id in new_unit_ids)
+    return {"stale": bool(reasons), "reasons": reasons, "new_unit_ids": new_unit_ids}
 
 
 def _escape_table_cell(value: object) -> str:
@@ -453,19 +583,19 @@ def main() -> int:
         fill = load_yaml(fill_path, default={})
         if not isinstance(fill, dict):
             raise SystemExit(f"{mode} verify input is not a mapping: {fill_path}")
-        violations, payload = verify_survey_fill(fill, root)
-        if str(fill.get("mode") or "") != mode:
-            violations.append(f"mode mismatch: command is '{mode}' but scaffold mode is '{fill.get('mode')}'")
-        if violations:
-            print(f"[reject] {mode} fill failed verification:", file=sys.stderr)
-            for violation in violations:
-                print(f"  - {violation}", file=sys.stderr)
-            return 1
-        output_slug = slugify(str(payload.get("slug") or "survey"), max_words=8) or "survey"
+        output_slug = slugify(str(fill.get("slug") or "survey"), max_words=8) or "survey"
         verified_root = synthesis_root(root) / output_slug
         yaml_path = verified_root / f"{mode}.yaml"
         md_path = verified_root / "summary.md"
         with mutation_transaction(root, f"verify-{mode}", [yaml_path, md_path]):
+            violations, payload = verify_survey_fill(fill, root)
+            if str(fill.get("mode") or "") != mode:
+                violations.append(f"mode mismatch: command is '{mode}' but scaffold mode is '{fill.get('mode')}'")
+            if violations:
+                print(f"[reject] {mode} fill failed verification:", file=sys.stderr)
+                for violation in violations:
+                    print(f"  - {violation}", file=sys.stderr)
+                return 1
             ensure_dir(verified_root)
             write_yaml_if_changed(yaml_path, payload)
             write_text_if_changed(md_path, render_verified_summary(payload))
@@ -474,31 +604,32 @@ def main() -> int:
         return 0
     slug = slugify(query or args.topic or args.tag or args.pool or args.kind or mode, max_words=8) or mode
     out_root = synthesis_root(root) / slug
-    selected = select_records(
-        iter_records(root),
-        query=query,
-        kind=args.kind,
-        topic=args.topic,
-        tag=args.tag,
-        pool=args.pool,
-    )
     if args.action == "prepare":
         if not any((query, args.topic, args.tag, args.pool, args.kind)):
             raise SystemExit(f"{mode} prepare requires --field/--query or another selection filter")
         if not args.as_of:
             raise SystemExit(f"{mode} prepare requires --as-of to anchor the selected KB snapshot")
-        payload = build_survey_scaffold(
-            selected,
-            query=query,
-            kind=args.kind,
-            topic=args.topic,
-            tag=args.tag,
-            pool=args.pool,
-            mode=mode,
-            as_of=args.as_of,
-        )
         fill_path = out_root / f"{mode}-fill.yaml"
         with mutation_transaction(root, f"prepare-{mode}", [fill_path]):
+            selected = select_records(
+                iter_records(root),
+                query=query,
+                kind=args.kind,
+                topic=args.topic,
+                tag=args.tag,
+                pool=args.pool,
+            )
+            payload = build_survey_scaffold(
+                selected,
+                root=root,
+                query=query,
+                kind=args.kind,
+                topic=args.topic,
+                tag=args.tag,
+                pool=args.pool,
+                mode=mode,
+                as_of=args.as_of,
+            )
             ensure_dir(out_root)
             write_yaml_if_changed(fill_path, payload)
         print(rel(root, fill_path))

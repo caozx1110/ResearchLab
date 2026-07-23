@@ -24,7 +24,7 @@ description: 负责跨 paper / repo / dataset / blog / idea 的 evidence-first s
 prepare 会：
 
 1. 用 metadata 过滤选择候选 unit。
-2. 把 unit id、kind、title 与 as_of 写入 kb_anchor。
+2. 把 unit id、kind、title、规范化 record content digest、确认回执 digest 与 unit 内可引用 evidence artifact byte digests 写入 kb_anchor。
 3. 生成七段式 fillable scaffold、taxonomy grid frame 与 method × dimension comparison matrix frame。
 4. 发布 required-cell、claim field 与 evidence_ref field 合同。
 5. 保持所有 content 与 evidence_refs 为空，不替 runtime agent 写任何理解。
@@ -37,12 +37,15 @@ runtime agent 随后阅读 kb_anchor 中的 unit 产物，填写所有 required 
 
 verify 会：
 
-1. 检查七个 section 与 comparison matrix 的 required cells 是否存在且 content 非空。
-2. 把 cell 转成 research.evidence claim，并运行 validate_claims。
-3. 对每个 evidence_ref 读取其 source_unit_id，在 kb_anchor.units 中取得 kind，并只在该 unit_dir 内运行 verify_claim_evidence。
-4. 对 trend 与 gap 检查其 as_of 与 kb_anchor.as_of 一致。
-5. 任一结构、anchor、artifact、locator 或逐字 quote 校验失败即拒绝，且不写正式结果。
-6. 全部通过后标记 observed / inferred，写入 `kb/synthesis/<slug>/<mode>.yaml` 与 `kb/synthesis/<slug>/summary.md`，并渲染 comparison matrix。
+1. 在 workspace transaction 内重新定位每个 canonical unit，并逐项核对 identity、record content、确认回执和 evidence bytes；任一变化或删除都要求重新 prepare。
+2. 检查七个 section 与 comparison matrix 的 required cells 是否存在且 content 非空。
+3. 把 cell 转成 research.evidence claim，并运行 validate_claims。
+4. 对每个 evidence_ref 读取其 source_unit_id，在 kb_anchor.units 中取得 kind，并只在该 unit_dir 内运行 verify_claim_evidence；引用文件必须已存在于 prepare binding。
+5. 对 trend 与 gap 检查其 as_of 与 kb_anchor.as_of 一致。
+6. 任一结构、anchor、artifact、locator 或逐字 quote 校验失败即拒绝，且不写正式结果。
+7. 全部通过后标记 observed / inferred，保存含 selection filters、exact unit bindings 与 verified_at 的 consumer_binding，并渲染 comparison matrix。
+
+读侧调用纯读 staleness helper 复算同一 binding：已有 unit 变化/删除、确认失效、evidence bytes 变化或出现新的 matching unit 都标 stale。它只返回原因，不改写 survey；runtime agent 重新 prepare、fill、verify 才能刷新绑定。
 
 ## 标准七段式骨架
 
@@ -74,6 +77,11 @@ kb_anchor:
     - id: p-...
       kind: paper
       title: "..."
+      record_content_digest: <sha256>
+      confirmation_receipt_digest: <sha256-or-empty>
+      evidence_artifacts:
+        - artifact: note.md
+          byte_sha256: <sha256>
 fill_contract:
   required_section_ids: [scope_positioning, background_terms, taxonomy, cross_cutting, trends, gaps_challenges, conclusion]
   required_claim_fields: [id, content, claim_type, evidence_refs]

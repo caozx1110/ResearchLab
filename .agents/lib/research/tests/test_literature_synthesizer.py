@@ -25,8 +25,21 @@ def build_filled_survey(tmp_path: Path):
         {"id": "p-alpha", "kind": "paper", "title": "Alpha Method"},
         {"id": "r-beta", "kind": "repo", "title": "Beta System"},
     ]
+    quotes = {
+        "p-alpha": "Alpha uses a hierarchical controller for long-horizon tasks.",
+        "r-beta": "Beta reports benchmark metrics for recovery tasks.",
+    }
+    for record in records:
+        unit_dir = module.unit_root(tmp_path, record["kind"], record["id"])
+        unit_dir.mkdir(parents=True)
+        (unit_dir / "record.yaml").write_text(
+            yaml.safe_dump({**record, "summary": "robot learning", "payload": {}}, allow_unicode=True),
+            encoding="utf-8",
+        )
+        (unit_dir / "note.md").write_text(f"# Evidence\n\n{quotes[record['id']]}\n", encoding="utf-8")
     scaffold = module.build_survey_scaffold(
         records,
+        root=tmp_path,
         query="robot learning",
         kind="",
         topic="",
@@ -35,14 +48,6 @@ def build_filled_survey(tmp_path: Path):
         mode="survey",
         as_of="2026-07-17T00:00:00Z",
     )
-    quotes = {
-        "p-alpha": "Alpha uses a hierarchical controller for long-horizon tasks.",
-        "r-beta": "Beta reports benchmark metrics for recovery tasks.",
-    }
-    for record in records:
-        unit_dir = module.unit_root(tmp_path, record["kind"], record["id"])
-        unit_dir.mkdir(parents=True)
-        (unit_dir / "note.md").write_text(f"# Evidence\n\n{quotes[record['id']]}\n", encoding="utf-8")
     _, entries = module.survey_claim_entries(scaffold)
     for _, cell, _ in entries:
         cell["content"] = f"Agent-authored content for {cell['id']}."
@@ -75,10 +80,18 @@ def build_filled_survey(tmp_path: Path):
     return module, scaffold
 
 
-def test_prepare_emits_seven_section_evidence_first_scaffold() -> None:
+def test_prepare_emits_seven_section_evidence_first_scaffold(tmp_path: Path) -> None:
     module = load_synthesizer()
+    unit_dir = module.unit_root(tmp_path, "paper", "p-alpha")
+    unit_dir.mkdir(parents=True)
+    (unit_dir / "record.yaml").write_text(
+        yaml.safe_dump({"id": "p-alpha", "kind": "paper", "title": "Alpha", "payload": {}}),
+        encoding="utf-8",
+    )
+    (unit_dir / "note.md").write_text("# Alpha\n\nGrounded evidence.\n", encoding="utf-8")
     scaffold = module.build_survey_scaffold(
         [{"id": "p-alpha", "kind": "paper", "title": "Alpha"}],
+        root=tmp_path,
         query="robot learning",
         kind="",
         topic="",
@@ -98,6 +111,11 @@ def test_prepare_emits_seven_section_evidence_first_scaffold() -> None:
         "conclusion",
     ]
     assert scaffold["kb_anchor"]["unit_ids"] == ["p-alpha"]
+    binding = scaffold["kb_anchor"]["units"][0]
+    assert len(binding["record_content_digest"]) == 64
+    assert binding["evidence_artifacts"] == [
+        {"artifact": "note.md", "byte_sha256": module.file_sha256(unit_dir / "note.md")}
+    ]
     assert scaffold["comparison_matrix"]["cells"]
     _, entries = module.survey_claim_entries(scaffold)
     assert entries
@@ -153,5 +171,48 @@ def test_verify_cli_persists_only_verified_survey(tmp_path: Path, monkeypatch) -
     persisted = yaml.safe_load(survey_path.read_text(encoding="utf-8"))
     assert persisted["status"] == "pending_user_confirmation"
     assert persisted["evidence_verification_status"] == "verified"
+    assert persisted["consumer_binding"]["selection_filters"]["query"] == "robot learning"
     assert "Pending / Unverified judgement" in (survey_path.parent / "summary.md").read_text(encoding="utf-8")
     assert "## Comparison Matrix" in summary_path.read_text(encoding="utf-8")
+
+
+def test_verify_rejects_changed_bound_record_or_evidence(tmp_path: Path) -> None:
+    module, scaffold = build_filled_survey(tmp_path)
+    paper_dir = module.unit_root(tmp_path, "paper", "p-alpha")
+    (paper_dir / "note.md").write_text("# Evidence\n\nChanged bytes.\n", encoding="utf-8")
+
+    violations, _ = module.verify_survey_fill(scaffold, tmp_path)
+
+    assert any("canonical unit content, confirmation, or evidence changed" in item for item in violations)
+
+
+def test_survey_staleness_detects_changed_deleted_and_new_matching_units(tmp_path: Path) -> None:
+    module, scaffold = build_filled_survey(tmp_path)
+    violations, verified = module.verify_survey_fill(scaffold, tmp_path)
+    assert violations == []
+    assert module.survey_staleness(verified, tmp_path) == {
+        "stale": False,
+        "reasons": [],
+        "new_unit_ids": [],
+    }
+
+    paper_dir = module.unit_root(tmp_path, "paper", "p-alpha")
+    (paper_dir / "note.md").write_text("# Evidence\n\nChanged bytes.\n", encoding="utf-8")
+    repo_dir = module.unit_root(tmp_path, "repo", "r-beta")
+    (repo_dir / "record.yaml").unlink()
+    new_dir = module.unit_root(tmp_path, "paper", "p-gamma")
+    new_dir.mkdir(parents=True)
+    (new_dir / "record.yaml").write_text(
+        yaml.safe_dump(
+            {"id": "p-gamma", "kind": "paper", "title": "Gamma", "summary": "robot learning", "payload": {}}
+        ),
+        encoding="utf-8",
+    )
+
+    stale = module.survey_staleness(verified, tmp_path)
+
+    assert stale["stale"] is True
+    assert stale["new_unit_ids"] == ["p-gamma"]
+    assert "changed unit: p-alpha" in stale["reasons"]
+    assert "deleted or unreadable unit: r-beta" in stale["reasons"]
+    assert "new matching unit: p-gamma" in stale["reasons"]
