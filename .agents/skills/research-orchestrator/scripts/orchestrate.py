@@ -48,6 +48,7 @@ from research.common import (
 )
 from research.core import apply_confirmation, append_history, ensure_workspace, is_ready_for_human_review, iter_records, kb_root, load_runtime_preferences, locate_record, checkpoint_and_report, project_root, record_workflow_state, write_record
 from research.evidence import attach_claims, build_verification_receipt, validate_claims, verify_claim_evidence
+from research.judgements import confirmation_binding
 from research.journal import mutation_transaction
 
 OPEN_QUESTION_OPEN_STATUSES = {"open"}
@@ -1047,6 +1048,45 @@ def load_decision_claims(root: Path, program_id: str, claims_file: str) -> list[
     return normalized
 
 
+def write_decision_fill_scaffold(
+    root: Path,
+    program_id: str,
+    *,
+    decision: str,
+    rationale: str,
+    stage: str,
+    alternatives: list[str],
+    evidence: list[str],
+) -> Path:
+    """Persist a recoverable Agent fill request, never a hollow decision item."""
+    path = program_root(root, program_id) / "workflow" / "decision-fill.yaml"
+    write_yaml_if_changed(
+        path,
+        {
+            "kind": "program_decision_fill",
+            "program_id": program_id,
+            "status": "awaiting_agent_fill",
+            "decision": {
+                "text": decision,
+                "rationale": rationale,
+                "stage": stage,
+                "alternatives": alternatives,
+            },
+            "evidence_hints": evidence,
+            "claims": [
+                {
+                    "id": "decision-claim-001",
+                    "text": "",
+                    "claim_type": "evaluation",
+                    "confirmation_status": "pending_user_confirmation",
+                    "evidence_refs": [],
+                }
+            ],
+        },
+    )
+    return path
+
+
 def _write_decision_projection(root: Path, program_id: str, items: list[dict[str, Any]]) -> Path:
     lines = [
         "# Decision Log",
@@ -1658,6 +1698,18 @@ def main() -> int:
                 f"{args.program_id}\n{timestamp}\n{args.decision}".encode("utf-8")
             ).hexdigest()[:12]
             claims = load_decision_claims(root, args.program_id, args.claims_file)
+            if not claims:
+                fill_path = write_decision_fill_scaffold(
+                    root,
+                    args.program_id,
+                    decision=args.decision,
+                    rationale=args.rationale,
+                    stage=args.stage or state.get("stage", ""),
+                    alternatives=normalize_list(args.alternative),
+                    evidence=normalize_list(args.evidence),
+                )
+                print(fill_path.relative_to(root))
+                return 0
             item = {
                 "id": decision_id,
                 "kind": "program_decision",
@@ -1699,6 +1751,14 @@ def main() -> int:
                         path.relative_to(root).as_posix(),
                         *item["evidence"],
                     ],
+                    "epistemic_type": "judgement",
+                    "information_types": ["inference", "evaluation", "unverified"],
+                    "confirmation_status": "pending_user_confirmation",
+                    "confirmation_binding": confirmation_binding(
+                        item,
+                        owner="research-orchestrator",
+                        path=decisions_yaml.relative_to(root).as_posix(),
+                    ),
                 },
                 generated_by="research-orchestrator",
             )
@@ -1746,6 +1806,11 @@ def main() -> int:
             )
             decisions_yaml, path = write_decisions(root, args.program_id, items)
             decision_payload = selected.get("payload", {}).get("decision", {})
+            binding = confirmation_binding(
+                selected,
+                owner="research-orchestrator",
+                path=decisions_yaml.relative_to(root).as_posix(),
+            )
             append_program_reporting_event(
                 root,
                 args.program_id,
@@ -1760,6 +1825,10 @@ def main() -> int:
                         decisions_yaml.relative_to(root).as_posix(),
                         path.relative_to(root).as_posix(),
                     ],
+                    "epistemic_type": "judgement",
+                    "information_types": ["inference", "evaluation"],
+                    "confirmation_status": "confirmed",
+                    "confirmation_binding": binding,
                 },
                 generated_by="research-orchestrator",
             )

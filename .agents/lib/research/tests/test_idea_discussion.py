@@ -60,7 +60,7 @@ def _filled_scaffold(path: Path, source_id: str, quote: str) -> dict:
     fill["reviewer"] = "runtime-agent"
     fill["conclusion"] = "The hypothesis needs a domain-shift boundary and a targeted ablation."
     for claim in fill["claims"]:
-        claim["text"] = f"Filled {claim['role']} claim."
+        claim["text"] = fill["conclusion"] if claim["role"] == "conclusion" else f"Filled {claim['role']} claim."
         claim["evidence_refs"] = [
             {
                 "source_unit_id": source_id,
@@ -87,6 +87,7 @@ def test_discuss_prepare_emits_empty_agent_fill_scaffold(tmp_path: Path, monkeyp
         "probe",
         "counter-example",
         "constructive-suggestion",
+        "conclusion",
     }
     assert all(claim["text"] == "" and claim["evidence_refs"] == [] for claim in scaffold["claims"])
 
@@ -107,6 +108,12 @@ def test_discuss_verify_accepts_verbatim_evidence_and_persists_one_conclusion(tm
     assert conclusions[0]["reviewer"] == "runtime-agent"
     assert conclusions[0]["verification"] == "evidence_verified"
     assert conclusions[0]["claims"][2]["evidence_refs"][0]["source_unit_id"] == source_id
+    assert conclusions[0]["judgement_id"].startswith("discussion-")
+    sidecar = load_yaml(record_path(tmp_path, "idea", idea_id).parent / "discussion-judgements.yaml")
+    judgement = sidecar["items"][0]
+    assert judgement["payload"]["claims"][-1]["text"] == fill["conclusion"]
+    assert judgement["payload"]["verification"]["verified_at"]
+    assert judgement["confirmation_status"] == "pending_user_confirmation"
 
 
 def test_discuss_verify_rejects_fabricated_counter_example(tmp_path: Path, monkeypatch) -> None:

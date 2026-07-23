@@ -25,6 +25,7 @@ if __name__ == "__main__":
 from research.common import add_project_root_argument, ensure_dir, load_yaml, print_resolved_project_roots, slugify, utc_now_iso, write_text_if_changed, write_yaml_if_changed, yaml_default
 from research.core import (
     append_history,
+    apply_confirmation,
     apply_record_governance,
     build_index,
     build_unit_id,
@@ -59,6 +60,7 @@ DISCUSSION_CLAIMS = (
     ("probe", "inference"),
     ("counter-example", "evaluation"),
     ("constructive-suggestion", "inference"),
+    ("conclusion", "evaluation"),
 )
 
 ANALYSIS_CLAIMS = (
@@ -133,7 +135,7 @@ def _idea_command_targets(args, root: Path) -> list[Path]:
     if args.command in {"analyze", "review"}:
         return [path, unit / f"{args.command}-fill.yaml", unit / f"{args.command}.yaml", unit / "idea-card.md", *targets]
     if args.command in {"discuss", "spar"}:
-        return [path, unit / "discussion-fill.yaml", *targets]
+        return [path, unit / "discussion-fill.yaml", unit / "discussion-judgements.yaml", *targets]
     return [path, *targets]
 
 
@@ -492,6 +494,12 @@ def verify_discussion_fill(root: Path, fill: object, idea_id: str) -> tuple[list
     }
     if actual_roles != expected_roles or not isinstance(claims, list) or len(claims) != len(expected_roles):
         violations.append(f"claims must contain exactly these roles: {sorted(expected_roles)}")
+    conclusion_claims = [
+        claim for claim in claims or []
+        if isinstance(claim, dict) and str(claim.get("role") or claim.get("id") or "") == "conclusion"
+    ]
+    if conclusion_claims and str(conclusion_claims[0].get("text") or "").strip() != str(fill.get("conclusion") or "").strip():
+        violations.append("the canonical conclusion claim text must exactly match conclusion")
     violations.extend(_verify_cross_unit_claims(root, claims))
     return violations, [dict(claim) for claim in claims or [] if isinstance(claim, dict)]
 
@@ -638,7 +646,38 @@ def run_analysis_phase(args, root: Path, record: dict, unit_root: Path, *, mode:
     return 0
 
 
-def persist_discussion_conclusion(record: dict, fill: dict, claims: list[dict]) -> dict:
+def discussion_judgements_path(unit_root: Path) -> Path:
+    return unit_root / "discussion-judgements.yaml"
+
+
+def load_discussion_judgements(unit_root: Path, idea_id: str) -> list[dict]:
+    payload = load_yaml(discussion_judgements_path(unit_root), default={})
+    if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
+        return []
+    return [item for item in payload["items"] if isinstance(item, dict)]
+
+
+def write_discussion_judgements(unit_root: Path, idea_id: str, items: list[dict]) -> Path:
+    path = discussion_judgements_path(unit_root)
+    write_yaml_if_changed(
+        path,
+        {
+            "id": f"{idea_id}-discussion-judgements",
+            "kind": "judgement_collection",
+            "owner": "idea-workbench",
+            "items": items,
+        },
+    )
+    return path
+
+
+def persist_discussion_conclusion(
+    root: Path,
+    unit_root: Path,
+    record: dict,
+    fill: dict,
+    claims: list[dict],
+) -> tuple[dict, dict]:
     verified_at = utc_now_iso()
     digest_source = f"{record['id']}\n{fill['reviewer']}\n{fill['conclusion']}\n{verified_at}"
     conclusion = {
@@ -649,9 +688,45 @@ def persist_discussion_conclusion(record: dict, fill: dict, claims: list[dict]) 
         "verification": "evidence_verified",
         "claims": claims,
     }
+    judgement = {
+        "id": conclusion["id"],
+        "kind": "idea_discussion_conclusion",
+        "owner": "idea-workbench",
+        "idea_id": record["id"],
+        "timestamp": verified_at,
+        "updated_at": verified_at,
+        "priority": "normal",
+        "confirmation_status": "pending_user_confirmation",
+        "needs_human_confirmation": True,
+        "information_types": ["inference", "evaluation", "unverified"],
+        "payload": {
+            "discussion_conclusion": {
+                "text": conclusion["conclusion"],
+                "reviewer": conclusion["reviewer"],
+            },
+        },
+        "review_route": {
+            "owner": "idea-workbench",
+            "action": "confirm-discussion",
+            "idea_id": record["id"],
+            "subject_id": conclusion["id"],
+        },
+    }
+    attach_claims(judgement["payload"], claims)
+    build_verification_receipt(
+        judgement,
+        unit_root,
+        source_roots=_trusted_claim_source_roots(root, claims),
+        verified_at=verified_at,
+    )
+    items = load_discussion_judgements(unit_root, record["id"])
+    items.append(judgement)
+    write_discussion_judgements(unit_root, record["id"], items)
+    conclusion["judgement_id"] = judgement["id"]
+    conclusion["confirmation_status"] = "pending_user_confirmation"
     discussion = record.setdefault("payload", {}).setdefault("discussion", {})
     discussion.setdefault("conclusions", []).append(conclusion)
-    return conclusion
+    return conclusion, judgement
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -686,8 +761,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     discuss = subparsers.add_parser("discuss", aliases=["spar"])
     discuss.add_argument("--idea-id", "--id", dest="idea_id", required=True)
-    discuss.add_argument("--phase", choices=["prepare", "verify"], default="prepare")
+    discuss.add_argument("--phase", choices=["prepare", "verify", "confirm"], default="prepare")
     discuss.add_argument("--input", default="")
+    discuss.add_argument("--conclusion-id", default="")
+    discuss.add_argument("--confirmed-by", default="")
+    discuss.add_argument("--evidence", action="append", default=[])
+    discuss.add_argument("--user-authorization", default="")
+    discuss.add_argument("--authorization-source", default="")
 
     assist = subparsers.add_parser("review-assist")
     assist.add_argument("--idea-id", action="append", default=[])
@@ -859,6 +939,54 @@ def _dispatch(args, root: Path) -> int:
             )
             return 0
 
+        if args.phase == "confirm":
+            if not str(args.conclusion_id or "").strip():
+                raise SystemExit("Discussion confirmation requires a conclusion id.")
+            judgements = load_discussion_judgements(unit_root, record["id"])
+            selected = next(
+                (item for item in judgements if str(item.get("id") or "") == str(args.conclusion_id)),
+                None,
+            )
+            if selected is None:
+                raise SystemExit("Discussion conclusion is not available for confirmation.")
+            claims = selected.get("payload", {}).get("claims", [])
+            apply_confirmation(
+                selected,
+                confirmed_by=args.confirmed_by,
+                evidence=args.evidence,
+                user_authorization=args.user_authorization,
+                authorization_source=args.authorization_source,
+                method="idea.py discuss confirm",
+                project_root=root,
+                verification_root=unit_root,
+                trusted_source_roots=_trusted_claim_source_roots(root, claims),
+            )
+            selected["updated_at"] = utc_now_iso()
+            write_discussion_judgements(unit_root, record["id"], judgements)
+            for projection in record.setdefault("payload", {}).setdefault("discussion", {}).setdefault("conclusions", []):
+                if isinstance(projection, dict) and str(projection.get("judgement_id") or "") == str(args.conclusion_id):
+                    projection["confirmation_status"] = "confirmed"
+                    projection["confirmation"] = {
+                        "by": selected.get("confirmation", {}).get("by", ""),
+                        "at": selected.get("confirmation", {}).get("at", ""),
+                    }
+            append_history(
+                record,
+                action="idea-discussion-confirmed",
+                summary="Confirmed one evidence-grounded discussion conclusion.",
+                information_types=["inference", "evaluation"],
+                artifacts=[rel(root, discussion_judgements_path(unit_root))],
+            )
+            write_record(root, record)
+            print(f"[ok] confirmed discussion conclusion {args.conclusion_id}")
+            _queue_checkpoint(
+                root,
+                trigger="milestone",
+                message=f"milestone: confirm idea discussion {record['id']}",
+                target_paths=[unit_root / "record.yaml", discussion_judgements_path(unit_root)],
+            )
+            return 0
+
         fill_path = Path(args.input) if args.input else scaffold_path
         if not fill_path.is_absolute():
             fill_path = unit_root / fill_path
@@ -871,10 +999,7 @@ def _dispatch(args, root: Path) -> int:
             for violation in violations:
                 print(f"  - {violation}", file=sys.stderr)
             raise SystemExit(1)
-        conclusion = persist_discussion_conclusion(record, fill, claims)
-        record["confirmation_status"] = "pending_user_confirmation"
-        record["needs_human_confirmation"] = True
-        record["information_types"] = sorted(set(record.get("information_types", [])) | {"inference", "evaluation", "unverified"})
+        conclusion, _judgement = persist_discussion_conclusion(root, unit_root, record, fill, claims)
         append_history(
             record,
             action="idea-discussion-verified",
@@ -887,7 +1012,7 @@ def _dispatch(args, root: Path) -> int:
         print(f"[ok] verified + persisted discussion conclusion {conclusion['id']}")
         _queue_checkpoint(
             root, trigger="milestone", message=f"milestone: verify idea discussion {record['id']}",
-            target_paths=[unit_root / "record.yaml", *_index_checkpoint_paths(root)],
+            target_paths=[unit_root / "record.yaml", discussion_judgements_path(unit_root), *_index_checkpoint_paths(root)],
         )
         return 0
 

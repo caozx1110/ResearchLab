@@ -225,6 +225,22 @@ def test_reports_isolate_pending_diagnoses_and_require_current_receipt_for_judge
         "--classification",
         "data",
     )
+    claims_path = record_path.parent / "diagnosis-claims.yaml"
+    pending_claim = {
+        "id": "claim-pending-diagnosis",
+        "text": pending_summary,
+        "claim_type": "inference",
+        "confirmation_status": "pending_user_confirmation",
+        "evidence_refs": [
+            {
+                "source_unit_id": experiment_id,
+                "artifact": "runs/run-001.md",
+                "locator": "Result Summary",
+                "quote": run_summary,
+            }
+        ],
+    }
+    write_yaml_if_changed(claims_path, {"claims": [pending_claim]})
     _run_experiment(
         tmp_path,
         "diagnose",
@@ -234,6 +250,8 @@ def test_reports_isolate_pending_diagnoses_and_require_current_receipt_for_judge
         pending_summary,
         "--category",
         "data",
+        "--claims-file",
+        str(claims_path),
     )
 
     _run_report(tmp_path, "weekly", "--program-id", program_id)
@@ -245,7 +263,7 @@ def test_reports_isolate_pending_diagnoses_and_require_current_receipt_for_judge
     assert pending_summary not in ordinary_section
     assert "PENDING / UNVERIFIED JUDGEMENT" in pending_section
     assert pending_summary in pending_section
-    assert "missing: canonical claim/evidence binding" in pending_section
+    assert "missing: current ConfirmationReceipt" in pending_section
 
     events_path = tmp_path / "kb" / "programs" / program_id / "workflow" / "reporting-events.yaml"
     diagnosis_events = [
@@ -258,16 +276,13 @@ def test_reports_isolate_pending_diagnoses_and_require_current_receipt_for_judge
     assert pending_event["information_types"] == ["inference", "evaluation", "unverified"]
     assert pending_event["confirmation_status"] == "pending_user_confirmation"
     pending_binding = pending_event["confirmation_binding"]
-    assert pending_binding["subject"] == {"kind": "experiment", "id": experiment_id}
-    assert pending_binding["claim_ids"] == []
+    assert pending_binding["subject"]["kind"] == "experiment"
+    assert pending_binding["subject"]["id"] == experiment_id
+    assert pending_binding["subject"]["owner"] == "experiment-workbench"
+    assert pending_binding["claim_ids"] == [pending_claim["id"]]
     assert len(pending_binding["content_digest"]) == 64
-    assert pending_binding["verification"] == {
-        "verified_at": "",
-        "claims_digest": "",
-        "evidence_digest": "",
-    }
+    assert all(pending_binding["verification"].values())
 
-    claims_path = record_path.parent / "diagnosis-claims.yaml"
     claim = {
         "id": "claim-current-diagnosis",
         "text": confirmed_summary,

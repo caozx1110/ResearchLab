@@ -31,9 +31,11 @@ from research.common import (
     normalize_list,
     print_resolved_project_roots,
     write_text_if_changed,
+    write_yaml_if_changed,
 )
 from research.core import append_history, build_index, build_unit_id, candidate_pools_path, command_mutation, confirm_unit, default_record, ensure_workspace, kb_root, locate_record, project_root, record_path, rel, topic_taxonomy_path, write_record
-from research.evidence import attach_claims, build_verification_receipt, confirmation_content_digest, validate_claims, verify_claim_evidence
+from research.evidence import attach_claims, build_verification_receipt, validate_claims, verify_claim_evidence
+from research.judgements import confirmation_binding
 
 RUN_OUTCOME_CHOICES = ["success", "partial", "failed", "blocked", "inconclusive"]
 CLASSIFICATION_CHOICES = ["method", "implementation", "data", "evaluation", "resource", "environment", "process", "unknown"]
@@ -83,7 +85,7 @@ def _experiment_command_targets(args, root: Path) -> list[Path]:
     elif args.command == "follow-up":
         targets.extend([list_document_path(unit, "follow-ups"), unit / "follow-ups.md"])
     elif args.command == "diagnose":
-        targets.extend([list_document_path(unit, "diagnoses"), unit / "diagnosis.md"])
+        targets.extend([list_document_path(unit, "diagnoses"), unit / "diagnosis.md", unit / "diagnosis-fill.yaml"])
     return targets
 
 
@@ -306,6 +308,47 @@ def load_diagnosis_claims(root: Path, unit_root: Path, experiment_id: str, claim
     if violations:
         raise SystemExit("Diagnosis claims failed evidence verification:\n- " + "\n- ".join(violations))
     return claims
+
+
+def write_diagnosis_fill_scaffold(
+    unit_root: Path,
+    experiment_id: str,
+    *,
+    summary: str,
+    categories: list[str],
+    likely_causes: list[str],
+    ruled_out_causes: list[str],
+    unknowns: list[str],
+    next_actions: list[str],
+    comparison_context: dict[str, Any],
+) -> Path:
+    """Prepare an agent-fill request without creating a hollow judgement."""
+    path = unit_root / "diagnosis-fill.yaml"
+    write_yaml_if_changed(
+        path,
+        {
+            "kind": "experiment_diagnosis_fill",
+            "experiment_id": experiment_id,
+            "status": "awaiting_agent_fill",
+            "summary": summary,
+            "categories": categories or ["unknown"],
+            "likely_causes": likely_causes,
+            "ruled_out_causes": ruled_out_causes,
+            "unknowns": unknowns,
+            "next_actions": next_actions,
+            "comparison_context": comparison_context,
+            "claims": [
+                {
+                    "id": "diagnosis-claim-001",
+                    "text": "",
+                    "claim_type": "inference",
+                    "confirmation_status": "pending_user_confirmation",
+                    "evidence_refs": [],
+                }
+            ],
+        },
+    )
+    return path
 
 
 def list_document_path(unit_root: Path, name: str) -> Path:
@@ -622,6 +665,20 @@ def _dispatch(args, root: Path) -> int:
         runs = [item for item in run_log.get("items", []) if isinstance(item, dict)]
         comparison_context = build_diagnosis_context(runs, max(args.recent_runs, 0))
         claims = load_diagnosis_claims(root, unit_root, args.experiment_id, args.claims_file)
+        if not claims:
+            fill_path = write_diagnosis_fill_scaffold(
+                unit_root,
+                args.experiment_id,
+                summary=args.summary,
+                categories=normalize_list(args.category),
+                likely_causes=normalize_list(args.likely_cause),
+                ruled_out_causes=normalize_list(args.ruled_out),
+                unknowns=normalize_list(args.unknown),
+                next_actions=normalize_list(args.next_action),
+                comparison_context=comparison_context,
+            )
+            print(fill_path.relative_to(root))
+            return 0
         diagnosis_path = append_list_item(
             list_document_path(unit_root, "diagnoses"),
             f"{args.experiment_id}-diagnoses",
@@ -675,15 +732,11 @@ def _dispatch(args, root: Path) -> int:
                     "epistemic_type": "judgement",
                     "information_types": ["inference", "evaluation", "unverified"],
                     "confirmation_status": "pending_user_confirmation",
-                    "confirmation_binding": {
-                        "subject": {"kind": "experiment", "id": args.experiment_id},
-                        "claim_ids": [str(claim.get("id") or "") for claim in claims if str(claim.get("id") or "").strip()],
-                        "content_digest": confirmation_content_digest(record),
-                        "verification": {
-                            key: str(record.get("payload", {}).get("verification", {}).get(key) or "")
-                            for key in ("verified_at", "claims_digest", "evidence_digest")
-                        },
-                    },
+                    "confirmation_binding": confirmation_binding(
+                        record,
+                        owner="experiment-workbench",
+                        path=rel(root, path),
+                    ),
                 },
                 generated_by="experiment-workbench",
             )
@@ -705,6 +758,11 @@ def _dispatch(args, root: Path) -> int:
         build_index(root)
         program_id = str(record.get("payload", {}).get("basic_info", {}).get("program_id") or "").strip()
         if program_id:
+            binding = confirmation_binding(
+                record,
+                owner="experiment-workbench",
+                path=rel(root, path),
+            )
             append_program_reporting_event(
                 root,
                 program_id,
@@ -716,6 +774,10 @@ def _dispatch(args, root: Path) -> int:
                     "stage": "experiment-confirmed",
                     "artifacts": [rel(root, path)],
                     "tags": ["experiment", "confirmed"],
+                    "epistemic_type": "judgement",
+                    "information_types": ["inference", "evaluation"],
+                    "confirmation_status": "confirmed",
+                    "confirmation_binding": binding,
                 },
                 generated_by="experiment-workbench",
             )
