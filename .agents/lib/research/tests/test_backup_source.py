@@ -393,11 +393,11 @@ def test_html_materialization_v2_resolves_base_and_preserves_math_fragments_and_
     html = b"""<!doctype html><html><head><title>Structured Paper</title>
     <base href="/html/2600.00001v2/"></head><body><article class="ltx_document">
     <h1 id="title">Structured Paper</h1>
-    <p>We define <math alttext="\\Psi_{0}"></math> and cite <a href="#bib.bib1">Prior work</a>.</p>
+    <p>We define <math alttext="\\Psi_{0}"></math> and cite <cite>[<a href="#bib.bib1" title="Long first citation tooltip">12</a>, <a href="#bib.bib2" title="Long second citation tooltip">28</a>]</cite>.</p>
     <figure><img src="x1.png" alt="[Uncaptioned image]"><img src="x2.png" alt="Panel [B]">
     <figcaption>Figure 1. Two evaluation panels.</figcaption></figure>
     <h2 id="results">Results</h2><p>Results remain grounded in the archived source.</p>
-    <ol><li id="bib.bib1">Reference entry.</li></ol>
+    <ol><li id="bib.bib1">First reference entry.</li><li id="bib.bib2">Second reference entry.</li></ol>
     </article></body></html>"""
     requested: list[str] = []
 
@@ -425,12 +425,19 @@ def test_html_materialization_v2_resolves_base_and_preserves_math_fragments_and_
     assert '<figure class="kb-source-gallery">' in document
     assert "](#^source-anchor-bib-bib1)" in document
     assert "^source-anchor-bib-bib1" in document
+    assert r"\[[12](#^source-anchor-bib-bib1), [28](#^source-anchor-bib-bib2)]" in document
+    assert "cite [[12](#^source-anchor" not in document
+    assert "Long first citation tooltip" not in document
+    assert "Long second citation tooltip" not in document
+    assert "Long first citation tooltip" in archive
+    assert "Long second citation tooltip" in archive
     assert "assets/image-" in archive and "Figure 1. Two evaluation panels." in archive
     assert conversion["schema"] == "research-source-markdown/v2"
     assert conversion["archive"] == "archive.html"
     assert conversion["archive_sha256"] == hashlib.sha256((source_root / "archive.html").read_bytes()).hexdigest()
     assert payload["materialization"]["archive_path"] == (source_root / "archive.html").relative_to(tmp_path).as_posix()
     assert any(item["anchor"] == "bib.bib1" for item in source_map["blocks"])
+    assert any(item["anchor"] == "bib.bib2" for item in source_map["blocks"])
 
     archive_before = (source_root / "archive.html").read_bytes()
     sources.backup_source(tmp_path, "blog", "b-structured-123456", "https://example.com/paper")

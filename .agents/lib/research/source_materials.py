@@ -1066,6 +1066,16 @@ def _inject_heading_blocks(markdown: str, specs: list[dict[str, str]]) -> tuple[
     return text, blocks
 
 
+_INTERNAL_CITATION_GROUP_OPEN_RE = re.compile(
+    r"(?<!\\)\[\[(?=[^\]\n]{1,64}\]\(#\^source-anchor-bib-)"
+)
+
+
+def _escape_internal_citation_group_open(markdown: str) -> str:
+    """Prevent ``[`` + ``[citation](...)`` from looking like an Obsidian wikilink."""
+    return _INTERNAL_CITATION_GROUP_OPEN_RE.sub(lambda _match: "\\[[", markdown)
+
+
 def materialize_html(
     source_root: Path,
     raw_path: Path,
@@ -1251,6 +1261,7 @@ def materialize_html(
         decoded_anchor = unquote(href[1:]) if href.startswith("#") else ""
         if decoded_anchor in anchor_to_block:
             link["href"] = f"#^{anchor_to_block[decoded_anchor]}"
+            link.attrs.pop("title", None)
 
     heading_tags = list(root.find_all(re.compile(r"^h[1-6]$")))
     for image in root.find_all("img"):
@@ -1337,6 +1348,7 @@ def materialize_html(
         **anchor_tokens,
     }.items():
         converted = converted.replace(token, replacement)
+    converted = _escape_internal_citation_group_open(converted)
     converted = re.sub(r"\n{3,}", "\n\n", converted).strip()
     blocks.extend(extra_blocks)
     if title and not re.search(r"(?m)^#\s+", converted):
