@@ -8,7 +8,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Callable
 from urllib.error import HTTPError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
 
@@ -53,16 +53,72 @@ def _text(value: Any) -> str:
     return " ".join(str(value or "").split())
 
 
+def _bounded_string(value: Any, limit: int) -> str:
+    if not isinstance(value, str):
+        return ""
+    return " ".join(value.split())[:limit]
+
+
+def _safe_http_url(value: Any, *, host: str = "") -> str:
+    url = _bounded_string(value, 4096)
+    if not url:
+        return ""
+    parsed = urlparse(url)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc or parsed.username or parsed.password:
+        return ""
+    if host and (parsed.hostname or "").lower() != host:
+        return ""
+    return url
+
+
 def _canonical_doi(value: Any) -> str:
-    doi = _text(value)
+    doi = _bounded_string(value, 512)
     if not doi:
         return ""
     doi = re.sub(r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", "", doi, flags=re.IGNORECASE).strip()
-    return f"https://doi.org/{doi.lower()}" if doi else ""
+    if re.fullmatch(r"10\.\d{4,9}/\S+", doi) is None:
+        return ""
+    return f"https://doi.org/{doi.lower()}"
 
 
-def _location_url(value: Any, field: str) -> str:
-    return _text(value.get(field)) if isinstance(value, dict) else ""
+def _safe_nonnegative_int(value: Any, *, maximum: int) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= maximum:
+        return None
+    return value
+
+
+def _safe_date(value: Any) -> str:
+    date = _bounded_string(value, 10)
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", date) is None:
+        return ""
+    try:
+        datetime.fromisoformat(date)
+    except ValueError:
+        return ""
+    return date
+
+
+def sanitize_openalex_provenance(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    work_id = _safe_http_url(raw.get("work_id"), host="openalex.org")
+    if work_id and re.fullmatch(r"/W\d+/?", urlparse(work_id).path, flags=re.IGNORECASE) is None:
+        work_id = ""
+    facts: dict[str, Any] = {
+        "work_id": work_id,
+        "doi": _canonical_doi(raw.get("doi")),
+        "publication_date": _safe_date(raw.get("publication_date")),
+        "publication_year": _safe_nonnegative_int(raw.get("publication_year"), maximum=9999),
+        "type": _bounded_string(raw.get("type"), 128),
+        "language": _bounded_string(raw.get("language"), 32),
+        "cited_by_count": _safe_nonnegative_int(raw.get("cited_by_count"), maximum=2**63 - 1),
+        "open_access_landing_url": _safe_http_url(raw.get("open_access_landing_url")),
+        "open_access_pdf_url": _safe_http_url(raw.get("open_access_pdf_url")),
+        "queried_at": _bounded_string(raw.get("queried_at"), 64),
+    }
+    if isinstance(raw.get("is_retracted"), bool):
+        facts["is_retracted"] = raw["is_retracted"]
+    return {key: value for key, value in facts.items() if value not in (None, "", [], {})}
 
 
 def _candidate_id(work_id: str, doi: str) -> str:
@@ -87,36 +143,39 @@ def map_openalex_works(
     for raw in results:
         if not isinstance(raw, dict):
             continue
-        is_retracted = bool(raw.get("is_retracted"))
+        is_retracted = raw.get("is_retracted") is True
         if is_retracted and not include_retracted:
             continue
-        work_id = _text(raw.get("id"))
+        work_id = _safe_http_url(raw.get("id"), host="openalex.org")
+        if work_id and re.fullmatch(r"/W\d+/?", urlparse(work_id).path, flags=re.IGNORECASE) is None:
+            work_id = ""
         doi = _canonical_doi(raw.get("doi"))
         stable_identities = {identity for identity in (work_id, doi) if identity}
         if not stable_identities or stable_identities & seen:
             continue
         seen.update(stable_identities)
-        title = _text(raw.get("display_name"))
+        title = _bounded_string(raw.get("display_name"), 1000)
         primary = raw.get("primary_location")
         best_oa = raw.get("best_oa_location")
-        landing_url = _location_url(primary, "landing_page_url") or doi or work_id
+        primary_landing = _safe_http_url(primary.get("landing_page_url")) if isinstance(primary, dict) else ""
+        landing_url = primary_landing or doi or work_id
         if not title or not landing_url:
             continue
-        oa_landing = _location_url(best_oa, "landing_page_url")
-        oa_pdf = _location_url(best_oa, "pdf_url")
-        facts = {
+        oa_landing = _safe_http_url(best_oa.get("landing_page_url")) if isinstance(best_oa, dict) else ""
+        oa_pdf = _safe_http_url(best_oa.get("pdf_url")) if isinstance(best_oa, dict) else ""
+        facts = sanitize_openalex_provenance({
             "work_id": work_id,
             "doi": doi,
-            "publication_date": _text(raw.get("publication_date")),
+            "publication_date": raw.get("publication_date"),
             "publication_year": raw.get("publication_year"),
-            "type": _text(raw.get("type")),
-            "language": _text(raw.get("language")),
+            "type": raw.get("type"),
+            "language": raw.get("language"),
             "cited_by_count": raw.get("cited_by_count"),
             "is_retracted": is_retracted,
             "open_access_landing_url": oa_landing,
             "open_access_pdf_url": oa_pdf,
             "queried_at": queried_at,
-        }
+        })
         candidates.append(
             {
                 "candidate_id": _candidate_id(work_id, doi),
@@ -192,4 +251,5 @@ __all__ = [
     "OpenAlexClient",
     "OpenAlexError",
     "map_openalex_works",
+    "sanitize_openalex_provenance",
 ]

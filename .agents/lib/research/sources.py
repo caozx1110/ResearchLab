@@ -65,6 +65,7 @@ from .confirm import (
     write_record,
 )
 from .journal import mutation_transaction
+from .openalex import sanitize_openalex_provenance
 from .source_materials import (
     ARCHIVE_NAME,
     ASSETS_DIR_NAME,
@@ -445,25 +446,9 @@ def _stage_search_results_unlocked(
         provenance: dict[str, Any] = {}
         raw_provenance = candidate.get("provenance")
         raw_openalex = raw_provenance.get("openalex") if isinstance(raw_provenance, dict) else None
-        if isinstance(raw_openalex, dict):
-            allowed_openalex = {
-                "work_id",
-                "doi",
-                "publication_date",
-                "publication_year",
-                "type",
-                "language",
-                "cited_by_count",
-                "is_retracted",
-                "open_access_landing_url",
-                "open_access_pdf_url",
-                "queried_at",
-            }
-            provenance["openalex"] = {
-                key: raw_openalex.get(key)
-                for key in sorted(allowed_openalex)
-                if raw_openalex.get(key) not in (None, "", [], {})
-            }
+        sanitized_openalex = sanitize_openalex_provenance(raw_openalex)
+        if sanitized_openalex:
+            provenance["openalex"] = sanitized_openalex
         existing_candidate = known_candidate_ids.get(candidate_id)
         if existing_candidate is None and url in known_urls:
             continue

@@ -187,6 +187,48 @@ def test_source_stage_drops_unapproved_openalex_provenance(tmp_path: Path) -> No
     }
 
 
+def test_malicious_openalex_values_and_unsafe_urls_never_reach_stage(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("OPENALEX_API_KEY", "secret")
+    scout = _scout_module()
+    malicious = _work()
+    malicious.update(
+        {
+            "publication_year": {"raw-secret": True},
+            "cited_by_count": ["raw-secret"],
+            "type": {"raw-secret": "type"},
+            "language": ["raw-secret"],
+            "primary_location": {"landing_page_url": "javascript:alert('raw-secret')"},
+            "best_oa_location": {
+                "landing_page_url": "file:///private/raw-secret",
+                "pdf_url": "javascript:raw-secret",
+            },
+            "raw_response": {"token": "raw-secret"},
+        }
+    )
+    unsafe_only = {
+        "id": "javascript:raw-secret",
+        "doi": "not-a-doi",
+        "display_name": "Unsafe",
+        "primary_location": {"landing_page_url": "file:///private/raw-secret"},
+    }
+    client = OpenAlexClient(transport=_transport({"results": [malicious, unsafe_only]}))
+
+    stage_path, candidates = scout.pull_and_stage(tmp_path, query="adversarial", client=client)
+
+    assert len(candidates) == 1
+    persisted = stage_path.read_text(encoding="utf-8")
+    assert "raw-secret" not in persisted
+    assert "javascript:" not in persisted
+    assert "file:///" not in persisted
+    facts = load_yaml(stage_path)["candidates"][0]["provenance"]["openalex"]
+    assert "publication_year" not in facts
+    assert "cited_by_count" not in facts
+    assert "type" not in facts
+    assert "language" not in facts
+    assert "open_access_landing_url" not in facts
+    assert "open_access_pdf_url" not in facts
+
+
 def test_public_success_message_is_natural_language_only(tmp_path: Path, monkeypatch, capsys) -> None:
     scout = _scout_module()
     fake = OpenAlexClient(transport=_transport({"results": [_work()]}))
