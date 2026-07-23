@@ -628,9 +628,11 @@ def passage_corpus(
             digest = hashlib.sha256(markdown_bytes).hexdigest()
             manifest_by_artifact[artifact] = digest
             documents.append({"artifact": artifact, "text": markdown_text, "source_digest": digest})
+        passage_record = copy.deepcopy(record)
+        passage_record["summary"] = record_summary(record)
         passages.extend(
             extract_record_passages(
-                record,
+                passage_record,
                 record_artifact=record_artifact,
                 record_digest=record_digest,
                 markdown_documents=documents,
@@ -658,7 +660,7 @@ def passage_corpus(
             manifest_by_artifact[artifact] = digest
             passages.extend(
                 extract_parse_cache_passages(
-                    record,
+                    passage_record,
                     artifact=artifact,
                     chunks=chunks,
                     source_digest=digest,
@@ -684,6 +686,47 @@ def passage_corpus(
         )
     )
     return passages, manifest, corpus_digest
+
+
+_PASSAGE_DIGEST_FIELDS = (
+    "passage_id",
+    "unit_id",
+    "kind",
+    "title",
+    "summary",
+    "heading",
+    "text",
+    "artifact",
+    "locator",
+    "line_start",
+    "line_end",
+    "source_digest",
+)
+
+
+def _passages_digest(passages: list[dict[str, Any]]) -> str:
+    normalized = [
+        {
+            field: (
+                int(item.get(field) or 0)
+                if field in {"line_start", "line_end"}
+                else str(item.get(field) or "")
+            )
+            for field in _PASSAGE_DIGEST_FIELDS
+        }
+        for item in passages
+    ]
+    normalized.sort(
+        key=lambda item: (
+            item["unit_id"],
+            item["artifact"],
+            item["locator"],
+            item["passage_id"],
+        )
+    )
+    return hashlib.sha256(
+        json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 def _ensure_cache_parent(cache_path: Path) -> None:
@@ -716,6 +759,7 @@ def rebuild_passage_cache(
 ) -> dict[str, Any]:
     """Atomically replace the derived FTS5 database, preserving any prior cache on failure."""
     passages, manifest, corpus_digest = passage_corpus(project_root, records=records)
+    passages_digest = _passages_digest(passages)
     cache_path = passage_search_cache_path(project_root)
     if _path_has_symlink_component(project_root, cache_path.parent):
         raise PassageCacheError("passage cache parent contains a symlink")
@@ -730,7 +774,7 @@ def rebuild_passage_cache(
         connection.execute("PRAGMA synchronous=FULL")
         connection.execute(
             "CREATE TABLE metadata (revision TEXT NOT NULL, corpus_digest TEXT NOT NULL, "
-            "passage_count INTEGER NOT NULL, source_count INTEGER NOT NULL)"
+            "passages_digest TEXT NOT NULL, passage_count INTEGER NOT NULL, source_count INTEGER NOT NULL)"
         )
         connection.execute("CREATE TABLE sources (artifact TEXT PRIMARY KEY, digest TEXT NOT NULL)")
         connection.execute(
@@ -741,8 +785,8 @@ def rebuild_passage_cache(
             "tokenize='unicode61')"
         )
         connection.execute(
-            "INSERT INTO metadata VALUES (?, ?, ?, ?)",
-            (PASSAGE_INDEX_REVISION, corpus_digest, len(passages), len(manifest)),
+            "INSERT INTO metadata VALUES (?, ?, ?, ?, ?)",
+            (PASSAGE_INDEX_REVISION, corpus_digest, passages_digest, len(passages), len(manifest)),
         )
         connection.executemany(
             "INSERT INTO sources (artifact, digest) VALUES (?, ?)",
@@ -790,6 +834,7 @@ def rebuild_passage_cache(
         "health": "current",
         "revision": PASSAGE_INDEX_REVISION,
         "corpus_digest": corpus_digest,
+        "passages_digest": passages_digest,
         "passage_count": len(passages),
         "source_count": len(manifest),
     }
@@ -815,6 +860,7 @@ def passage_cache_health(
     *,
     manifest: list[dict[str, str]],
     corpus_digest: str,
+    passages_digest: str,
     passage_count: int,
 ) -> str:
     cache_path = passage_search_cache_path(project_root)
@@ -828,7 +874,7 @@ def passage_cache_health(
         connection = _read_only_cache_connection(cache_path)
         try:
             metadata = connection.execute(
-                "SELECT revision, corpus_digest, passage_count, source_count FROM metadata"
+                "SELECT revision, corpus_digest, passages_digest, passage_count, source_count FROM metadata"
             ).fetchall()
             if len(metadata) != 1:
                 return "corrupt"
@@ -838,7 +884,26 @@ def passage_cache_health(
                 for item in connection.execute("SELECT artifact, digest FROM sources ORDER BY artifact")
             ]
             integrity = connection.execute("PRAGMA quick_check").fetchone()
-            actual_passage_count = int(connection.execute("SELECT count(*) FROM passages").fetchone()[0])
+            cached_passages = [
+                {
+                    "passage_id": item["passage_id"],
+                    "unit_id": item["unit_id"],
+                    "kind": item["kind"],
+                    "title": item["title"],
+                    "summary": item["summary"],
+                    "heading": item["heading"],
+                    "text": item["body"],
+                    "artifact": item["artifact"],
+                    "locator": item["locator"],
+                    "line_start": item["line_start"],
+                    "line_end": item["line_end"],
+                    "source_digest": item["source_digest"],
+                }
+                for item in connection.execute(
+                    "SELECT passage_id, unit_id, kind, title, summary, heading, body, artifact, locator, "
+                    "line_start, line_end, source_digest FROM passages ORDER BY passage_id"
+                )
+            ]
         finally:
             connection.close()
     except sqlite3.Error as exc:
@@ -846,13 +911,18 @@ def passage_cache_health(
     if (
         str(row["revision"]) != PASSAGE_INDEX_REVISION
         or str(row["corpus_digest"]) != corpus_digest
-        or int(row["passage_count"]) != passage_count
-        or actual_passage_count != passage_count
         or int(row["source_count"]) != len(manifest)
         or cached_manifest != manifest
     ):
         return "stale"
     if not integrity or str(integrity[0]).lower() != "ok":
+        return "corrupt"
+    if (
+        str(row["passages_digest"]) != passages_digest
+        or int(row["passage_count"]) != passage_count
+        or len(cached_passages) != passage_count
+        or _passages_digest(cached_passages) != passages_digest
+    ):
         return "corrupt"
     return "current"
 
@@ -1421,10 +1491,12 @@ def search_passages(
             continue
         filtered.append(record)
     passages, manifest, corpus_digest = passage_corpus(project_root, records=all_records)
+    passages_digest = _passages_digest(passages)
     health = passage_cache_health(
         project_root,
         manifest=manifest,
         corpus_digest=corpus_digest,
+        passages_digest=passages_digest,
         passage_count=len(passages),
     )
     if not tokenize_query(query) or limit <= 0:

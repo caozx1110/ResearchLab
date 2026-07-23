@@ -67,6 +67,9 @@ def test_search_records_finds_payload_leaf_text(tmp_path: Path) -> None:
     assert [item["id"] for item in hits] == ["p-payload-123456"]
     assert any(reason.startswith("payload:") for reason in hits[0]["_search_reasons"])
 
+    passage_payload = search_passages(tmp_path, "latent interface")
+    assert passage_payload["results"][0]["locator"].endswith("record.yaml#summary")
+
 
 def test_cjk_search_filters_and_scores_matching_records(tmp_path: Path) -> None:
     ensure_workspace(tmp_path)
@@ -208,6 +211,28 @@ def test_missing_stale_and_corrupt_cache_fall_back_without_writes(tmp_path: Path
     corrupt = search_passages(tmp_path, "revised impedance")
     assert corrupt["health"] == "corrupt"
     assert corrupt["results"] and _tree_bytes(tmp_path) == before_corrupt
+
+
+def test_valid_sqlite_with_tampered_passage_rows_is_corrupt_and_cannot_hide_results(tmp_path: Path) -> None:
+    ensure_workspace(tmp_path)
+    _write_record(
+        tmp_path,
+        _record("p-row-tamper-123456", "Tamper Paper", summary="canonical force-feedback result"),
+    )
+    build_index(tmp_path)
+    cache = passage_search_cache_path(tmp_path)
+    connection = sqlite3.connect(cache)
+    try:
+        connection.execute("UPDATE passages SET body = 'scrubbed cache row'")
+        connection.commit()
+    finally:
+        connection.close()
+
+    payload = search_passages(tmp_path, "force-feedback")
+
+    assert payload["health"] == "corrupt"
+    assert payload["results"][0]["unit_id"] == "p-row-tamper-123456"
+    assert "force-feedback" in payload["results"][0]["excerpt"]
 
 
 def test_fts_unavailable_falls_back_and_reports_health(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

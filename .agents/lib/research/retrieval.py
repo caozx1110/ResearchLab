@@ -15,6 +15,7 @@ from typing import Any, Callable
 
 TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9_+-]*|[^\W\x00-\x7f]+", re.IGNORECASE)
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
+FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
 
 PASSAGE_MAX_CHARS = 900
 PASSAGE_OVERLAP_CHARS = 160
@@ -186,7 +187,7 @@ def markdown_passages(
     heading = ""
     block: list[str] = []
     block_start = 0
-    in_fence = False
+    fence_marker = ""
     lines = text.splitlines()
 
     def flush(line_end: int) -> None:
@@ -214,18 +215,30 @@ def markdown_passages(
 
     for number, line in enumerate(lines, start=1):
         stripped = line.strip()
-        if stripped.startswith("```") or stripped.startswith("~~~"):
+        fence_match = FENCE_RE.match(line)
+        if fence_match and not fence_marker:
             if not block:
                 block_start = number
             block.append(line)
-            in_fence = not in_fence
+            fence_marker = fence_match.group(1)
             continue
-        match = HEADING_RE.match(line) if not in_fence else None
+        if fence_match and fence_marker:
+            candidate = fence_match.group(1)
+            is_close = (
+                candidate[0] == fence_marker[0]
+                and len(candidate) >= len(fence_marker)
+                and not fence_match.group(2).strip()
+            )
+            if is_close:
+                block.append(line)
+                fence_marker = ""
+                continue
+        match = HEADING_RE.match(line) if not fence_marker else None
         if match:
             flush(number - 1)
             heading = match.group(2).strip()
             continue
-        if not stripped and not in_fence:
+        if not stripped and not fence_marker:
             flush(number - 1)
             continue
         if not block:
