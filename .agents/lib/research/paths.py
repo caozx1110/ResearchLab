@@ -85,6 +85,10 @@ def kb_runtime_root(project_root: Path) -> Path:
     return kb_root(project_root) / ".runtime"
 
 
+def passage_search_cache_path(project_root: Path) -> Path:
+    return kb_runtime_root(project_root) / "search" / "passages.sqlite3"
+
+
 def synthesis_root(project_root: Path) -> Path:
     return kb_root(project_root) / "synthesis"
 
@@ -278,6 +282,7 @@ __all__ = [
     "raw_storage_root",
     "output_storage_root",
     "kb_runtime_root",
+    "passage_search_cache_path",
     "synthesis_root",
     "source_search_root",
     "topic_taxonomy_path",

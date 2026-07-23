@@ -2,10 +2,17 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import os
 import re
+import sqlite3
+import stat
+import tempfile
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 from .common import (
     ensure_dir,
@@ -26,7 +33,14 @@ from .ids import (
     canonical_unit_id_with_hash,
     is_canonical_unit_id,
 )
-from .retrieval import rank_records
+from .retrieval import (
+    extract_parse_cache_passages,
+    extract_record_passages,
+    passage_result,
+    rank_passages,
+    rank_records,
+    tokenize_query,
+)
 from .paths import (
     TEXT_REWRITE_SUFFIXES,
     UNIT_KIND_DIRS,
@@ -37,6 +51,7 @@ from .paths import (
     candidate_pools_path,
     config_root,
     kb_root,
+    passage_search_cache_path,
     record_path,
     rel,
     synthesis_root,
@@ -89,6 +104,13 @@ STATUS_VALUES = {
 
 
 CONFIRMATION_VALUES = {"auto_confirmed", "pending_user_confirmation", "confirmed", "rejected"}
+
+PASSAGE_INDEX_REVISION = "passages-v1"
+PASSAGE_SEARCH_LIMIT = 5
+
+
+class PassageCacheError(RuntimeError):
+    """A derived passage cache could not be rebuilt safely."""
 
 AUDIT_CATEGORIES = ("schema", "integrity", "recovery", "security", "quality")
 AUDIT_SEVERITIES = ("error", "warning", "info")
@@ -273,10 +295,20 @@ def _unit_markdown_paths(project_root: Path, record: dict[str, Any]) -> list[Pat
     if kind not in UNIT_KIND_DIRS or not unit_id:
         return []
     root = unit_root(project_root, kind, unit_id)
-    if root.is_symlink() or not root.is_dir():
+    if _path_has_symlink_component(project_root, root) or not root.is_dir():
         return []
     paths = _safe_files_below(root, suffixes={".md", ".markdown"})
-    return [path for path in paths if "source" not in path.relative_to(root).parts]
+    excluded_parts = {"source", "raw", "output", "obsidian", ".runtime", ".journal", ".git"}
+    readable: list[Path] = []
+    for path in paths:
+        relative_parts = path.relative_to(root).parts
+        if relative_parts == ("source", "document.md"):
+            readable.append(path)
+            continue
+        if excluded_parts.intersection(relative_parts):
+            continue
+        readable.append(path)
+    return readable
 
 
 def _wikilink_target_exists(project_root: Path, target: str, ref_keys: set[str]) -> bool:
@@ -475,6 +507,12 @@ def build_index(project_root: Path) -> tuple[Path, Path]:
             )
         lines.append("")
     write_text_if_changed(md_path, "\n".join(lines).strip() + "\n")
+    try:
+        rebuild_passage_cache(project_root, records=records)
+    except (OSError, sqlite3.Error, PassageCacheError):
+        # The passage database is a derived acceleration cache.  A cache
+        # failure must never roll back or otherwise alter the canonical index.
+        pass
     return yaml_path, md_path
 
 
@@ -497,6 +535,375 @@ def _safe_files_below(base: Path, *, suffixes: set[str] | None = None) -> list[P
             if suffixes is None or path.suffix.lower() in suffixes:
                 paths.append(path)
     return sorted(paths, key=lambda path: path.as_posix())
+
+
+def _read_regular_bytes(path: Path) -> bytes | None:
+    """Read one regular file without following a final-component symlink."""
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            return None
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return b"".join(chunks)
+    except OSError:
+        return None
+    finally:
+        os.close(descriptor)
+
+
+def _path_has_symlink_component(project_root: Path, path: Path) -> bool:
+    root = Path(os.path.abspath(project_root))
+    candidate = Path(os.path.abspath(path))
+    try:
+        relative = candidate.relative_to(root)
+    except ValueError:
+        return True
+    current = root
+    if current.is_symlink():
+        return True
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            return True
+    return False
+
+
+def _project_relative_artifact(project_root: Path, path: Path) -> str:
+    root = Path(os.path.abspath(project_root))
+    candidate = Path(os.path.abspath(path))
+    try:
+        return candidate.relative_to(root).as_posix()
+    except ValueError as exc:
+        raise PassageCacheError("passage artifact escapes the project root") from exc
+
+
+def passage_corpus(
+    project_root: Path,
+    *,
+    records: list[dict[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, str]], str]:
+    """Extract passages plus the exact source manifest they were derived from."""
+    record_list = list(records) if records is not None else list(iter_records(project_root))
+    passages: list[dict[str, Any]] = []
+    manifest_by_artifact: dict[str, str] = {}
+    for record in sorted(
+        record_list,
+        key=lambda item: (str(item.get("kind") or ""), str(item.get("id") or "")),
+    ):
+        kind = str(record.get("kind") or "")
+        unit_id = str(record.get("id") or "")
+        if kind not in UNIT_KIND_DIRS or not unit_id:
+            continue
+        canonical_record_path = record_path(project_root, kind, unit_id)
+        if _path_has_symlink_component(project_root, canonical_record_path):
+            continue
+        record_bytes = _read_regular_bytes(canonical_record_path)
+        if record_bytes is None:
+            continue
+        record_artifact = _project_relative_artifact(project_root, canonical_record_path)
+        record_digest = hashlib.sha256(record_bytes).hexdigest()
+        manifest_by_artifact[record_artifact] = record_digest
+        documents: list[dict[str, str]] = []
+        for markdown_path in _unit_markdown_paths(project_root, record):
+            markdown_bytes = _read_regular_bytes(markdown_path)
+            if markdown_bytes is None:
+                continue
+            try:
+                markdown_text = markdown_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            artifact = _project_relative_artifact(project_root, markdown_path)
+            digest = hashlib.sha256(markdown_bytes).hexdigest()
+            manifest_by_artifact[artifact] = digest
+            documents.append({"artifact": artifact, "text": markdown_text, "source_digest": digest})
+        passages.extend(
+            extract_record_passages(
+                record,
+                record_artifact=record_artifact,
+                record_digest=record_digest,
+                markdown_documents=documents,
+            )
+        )
+        unit_directory = unit_root(project_root, kind, unit_id)
+        for cache_name in ("parse-cache.yaml", "parse-cache.yml"):
+            parse_cache_path = unit_directory / cache_name
+            if _path_has_symlink_component(project_root, parse_cache_path):
+                continue
+            parse_cache_bytes = _read_regular_bytes(parse_cache_path)
+            if parse_cache_bytes is None:
+                continue
+            try:
+                parse_cache = yaml.safe_load(parse_cache_bytes.decode("utf-8"))
+            except (UnicodeDecodeError, yaml.YAMLError):
+                continue
+            if not isinstance(parse_cache, dict) or not isinstance(parse_cache.get("chunks"), list):
+                continue
+            chunks = [item for item in parse_cache["chunks"] if isinstance(item, dict)]
+            if not any(str(item.get("text") or "").strip() for item in chunks):
+                continue
+            artifact = _project_relative_artifact(project_root, parse_cache_path)
+            digest = hashlib.sha256(parse_cache_bytes).hexdigest()
+            manifest_by_artifact[artifact] = digest
+            passages.extend(
+                extract_parse_cache_passages(
+                    record,
+                    artifact=artifact,
+                    chunks=chunks,
+                    source_digest=digest,
+                )
+            )
+    manifest = [
+        {"artifact": artifact, "digest": manifest_by_artifact[artifact]}
+        for artifact in sorted(manifest_by_artifact)
+    ]
+    digest_payload = {
+        "revision": PASSAGE_INDEX_REVISION,
+        "sources": manifest,
+    }
+    corpus_digest = hashlib.sha256(
+        json.dumps(digest_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    passages.sort(
+        key=lambda item: (
+            str(item.get("unit_id") or ""),
+            str(item.get("artifact") or ""),
+            str(item.get("locator") or ""),
+            str(item.get("passage_id") or ""),
+        )
+    )
+    return passages, manifest, corpus_digest
+
+
+def _ensure_cache_parent(cache_path: Path) -> None:
+    for directory in [cache_path.parent.parent, cache_path.parent]:
+        if directory.is_symlink():
+            raise PassageCacheError("passage cache parent is a symlink")
+        if directory.exists() and not directory.is_dir():
+            raise PassageCacheError("passage cache parent is not a directory")
+        directory.mkdir(parents=False, exist_ok=True)
+    if cache_path.is_symlink():
+        raise PassageCacheError("passage cache path is a symlink")
+    if cache_path.exists() and not cache_path.is_file():
+        raise PassageCacheError("passage cache path is not a regular file")
+
+
+def _fsync_directory(path: Path) -> None:
+    if not hasattr(os, "O_DIRECTORY"):
+        return
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def rebuild_passage_cache(
+    project_root: Path,
+    *,
+    records: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Atomically replace the derived FTS5 database, preserving any prior cache on failure."""
+    passages, manifest, corpus_digest = passage_corpus(project_root, records=records)
+    cache_path = passage_search_cache_path(project_root)
+    if _path_has_symlink_component(project_root, cache_path.parent):
+        raise PassageCacheError("passage cache parent contains a symlink")
+    _ensure_cache_parent(cache_path)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".passages-", suffix=".sqlite3", dir=cache_path.parent)
+    os.close(descriptor)
+    temporary_path = Path(temporary_name)
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = sqlite3.connect(temporary_path)
+        connection.execute("PRAGMA journal_mode=DELETE")
+        connection.execute("PRAGMA synchronous=FULL")
+        connection.execute(
+            "CREATE TABLE metadata (revision TEXT NOT NULL, corpus_digest TEXT NOT NULL, "
+            "passage_count INTEGER NOT NULL, source_count INTEGER NOT NULL)"
+        )
+        connection.execute("CREATE TABLE sources (artifact TEXT PRIMARY KEY, digest TEXT NOT NULL)")
+        connection.execute(
+            "CREATE VIRTUAL TABLE passages USING fts5("
+            "passage_id UNINDEXED, unit_id UNINDEXED, kind UNINDEXED, "
+            "title, summary, heading, body, artifact UNINDEXED, locator UNINDEXED, "
+            "line_start UNINDEXED, line_end UNINDEXED, source_digest UNINDEXED, "
+            "tokenize='unicode61')"
+        )
+        connection.execute(
+            "INSERT INTO metadata VALUES (?, ?, ?, ?)",
+            (PASSAGE_INDEX_REVISION, corpus_digest, len(passages), len(manifest)),
+        )
+        connection.executemany(
+            "INSERT INTO sources (artifact, digest) VALUES (?, ?)",
+            [(item["artifact"], item["digest"]) for item in manifest],
+        )
+        connection.executemany(
+            "INSERT INTO passages VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    item["passage_id"],
+                    item["unit_id"],
+                    item["kind"],
+                    item["title"],
+                    item["summary"],
+                    item["heading"],
+                    item["text"],
+                    item["artifact"],
+                    item["locator"],
+                    item["line_start"],
+                    item["line_end"],
+                    item["source_digest"],
+                )
+                for item in passages
+            ],
+        )
+        connection.commit()
+        connection.close()
+        connection = None
+        file_descriptor = os.open(temporary_path, os.O_RDONLY)
+        try:
+            os.fsync(file_descriptor)
+        finally:
+            os.close(file_descriptor)
+        os.replace(temporary_path, cache_path)
+        _fsync_directory(cache_path.parent)
+    except Exception:
+        if connection is not None:
+            connection.close()
+        try:
+            temporary_path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+    return {
+        "health": "current",
+        "revision": PASSAGE_INDEX_REVISION,
+        "corpus_digest": corpus_digest,
+        "passage_count": len(passages),
+        "source_count": len(manifest),
+    }
+
+
+def _read_only_cache_connection(cache_path: Path) -> sqlite3.Connection:
+    absolute_cache = Path(os.path.abspath(cache_path))
+    connection = sqlite3.connect(f"{absolute_cache.as_uri()}?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA query_only=ON")
+    return connection
+
+
+def _sqlite_health_for_error(exc: sqlite3.Error) -> str:
+    message = str(exc).lower()
+    if "fts5" in message or "no such module" in message:
+        return "unavailable"
+    return "corrupt"
+
+
+def passage_cache_health(
+    project_root: Path,
+    *,
+    manifest: list[dict[str, str]],
+    corpus_digest: str,
+    passage_count: int,
+) -> str:
+    cache_path = passage_search_cache_path(project_root)
+    if _path_has_symlink_component(project_root, cache_path):
+        return "corrupt"
+    if not cache_path.exists():
+        return "missing"
+    if not cache_path.is_file():
+        return "corrupt"
+    try:
+        connection = _read_only_cache_connection(cache_path)
+        try:
+            metadata = connection.execute(
+                "SELECT revision, corpus_digest, passage_count, source_count FROM metadata"
+            ).fetchall()
+            if len(metadata) != 1:
+                return "corrupt"
+            row = metadata[0]
+            cached_manifest = [
+                {"artifact": item["artifact"], "digest": item["digest"]}
+                for item in connection.execute("SELECT artifact, digest FROM sources ORDER BY artifact")
+            ]
+            integrity = connection.execute("PRAGMA quick_check").fetchone()
+            actual_passage_count = int(connection.execute("SELECT count(*) FROM passages").fetchone()[0])
+        finally:
+            connection.close()
+    except sqlite3.Error as exc:
+        return _sqlite_health_for_error(exc)
+    if (
+        str(row["revision"]) != PASSAGE_INDEX_REVISION
+        or str(row["corpus_digest"]) != corpus_digest
+        or int(row["passage_count"]) != passage_count
+        or actual_passage_count != passage_count
+        or int(row["source_count"]) != len(manifest)
+        or cached_manifest != manifest
+    ):
+        return "stale"
+    if not integrity or str(integrity[0]).lower() != "ok":
+        return "corrupt"
+    return "current"
+
+
+def _fts_query_text(query: str) -> str:
+    tokens = tokenize_query(query)
+    return " OR ".join(f'"{token.replace(chr(34), chr(34) * 2)}"' for token in tokens)
+
+
+def _query_passage_cache(
+    project_root: Path,
+    query: str,
+    *,
+    allowed_unit_ids: set[str],
+    limit: int,
+) -> list[dict[str, Any]]:
+    if not allowed_unit_ids or limit <= 0:
+        return []
+    connection = _read_only_cache_connection(passage_search_cache_path(project_root))
+    try:
+        rows = connection.execute(
+            "SELECT passage_id, unit_id, kind, title, summary, heading, body, artifact, locator, "
+            "line_start, line_end, source_digest, "
+            "bm25(passages, 0.0, 0.0, 0.0, 8.0, 5.0, 4.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0) AS score "
+            "FROM passages WHERE passages MATCH ? ORDER BY score, unit_id, artifact, locator",
+            (_fts_query_text(query),),
+        )
+        query_tokens = tokenize_query(query)
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            if str(row["unit_id"]) not in allowed_unit_ids:
+                continue
+            passage = {
+                "unit_id": row["unit_id"],
+                "kind": row["kind"],
+                "title": row["title"],
+                "summary": row["summary"],
+                "heading": row["heading"],
+                "text": row["body"],
+                "artifact": row["artifact"],
+                "locator": row["locator"],
+                "line_start": row["line_start"],
+                "line_end": row["line_end"],
+                "source_digest": row["source_digest"],
+            }
+            results.append(passage_result(passage, query_tokens, score=-float(row["score"])))
+            if len(results) >= limit:
+                break
+        return results
+    finally:
+        connection.close()
 
 
 def _safe_record_files(project_root: Path) -> list[Path]:
@@ -992,6 +1399,66 @@ def search_records(
     return rank_records(filtered, query, markdown_paths_for=lambda record: _unit_markdown_paths(project_root, record))
 
 
+def search_passages(
+    project_root: Path,
+    query: str,
+    *,
+    kind: str | None = None,
+    pool: str | None = None,
+    confirmation_status: str | None = None,
+    limit: int = PASSAGE_SEARCH_LIMIT,
+) -> dict[str, Any]:
+    """Return passage hits and derived-index health without mutating the workspace."""
+    all_records = list(iter_records(project_root))
+    normalized_pool = slugify(str(pool), max_words=12) if pool else ""
+    filtered: list[dict[str, Any]] = []
+    for record in all_records:
+        if kind and str(record.get("kind") or "") != kind:
+            continue
+        if normalized_pool and normalized_pool not in record.get("candidate_pools", []):
+            continue
+        if confirmation_status and str(record.get("confirmation_status") or "") != confirmation_status:
+            continue
+        filtered.append(record)
+    passages, manifest, corpus_digest = passage_corpus(project_root, records=all_records)
+    health = passage_cache_health(
+        project_root,
+        manifest=manifest,
+        corpus_digest=corpus_digest,
+        passage_count=len(passages),
+    )
+    if not tokenize_query(query) or limit <= 0:
+        return {"health": health, "results": []}
+    allowed_unit_ids = {str(record.get("id") or "") for record in filtered}
+    eligible_passages = [item for item in passages if str(item.get("unit_id") or "") in allowed_unit_ids]
+    if health != "current":
+        return {"health": health, "results": rank_passages(eligible_passages, query, limit=limit)}
+    try:
+        results = _query_passage_cache(
+            project_root,
+            query,
+            allowed_unit_ids=allowed_unit_ids,
+            limit=limit,
+        )
+    except sqlite3.Error as exc:
+        health = _sqlite_health_for_error(exc)
+        return {"health": health, "results": rank_passages(eligible_passages, query, limit=limit)}
+
+    # unicode61 and substring tokenization differ at some CJK/ASCII boundaries.
+    # Keep FTS/BM25 as the primary order, then deterministically fill any missed
+    # lexical passages so mixed queries cannot lose correct results.
+    seen = {(str(item["unit_id"]), str(item["locator"])) for item in results}
+    for fallback in rank_passages(eligible_passages, query, limit=limit):
+        key = (str(fallback["unit_id"]), str(fallback["locator"]))
+        if key in seen:
+            continue
+        results.append(fallback)
+        seen.add(key)
+        if len(results) >= limit:
+            break
+    return {"health": health, "results": results[:limit]}
+
+
 def govern_records(
     project_root: Path,
     *,
@@ -1360,6 +1827,9 @@ def migrate_repo_to_dataset(project_root: Path, repo_id: str) -> dict[str, Any]:
 __all__ = [
     "STATUS_VALUES",
     "CONFIRMATION_VALUES",
+    "PASSAGE_INDEX_REVISION",
+    "PASSAGE_SEARCH_LIMIT",
+    "PassageCacheError",
     "load_topic_taxonomy",
     "write_topic_taxonomy",
     "load_candidate_pools",
@@ -1374,10 +1844,14 @@ __all__ = [
     "_preserve_empty_governance_seeds",
     "rebuild_governance_catalogs",
     "build_index",
+    "passage_corpus",
+    "rebuild_passage_cache",
+    "passage_cache_health",
     "lint_workspace_integrity",
     "lint_records",
     "audit_workspace",
     "search_records",
+    "search_passages",
     "govern_records",
     "_sorted_id_pairs",
     "_replace_ids_in_text",
