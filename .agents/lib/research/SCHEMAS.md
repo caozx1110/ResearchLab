@@ -597,7 +597,7 @@ kind: program_decision|idea_discussion_conclusion|method_selection|...
 owner: research-orchestrator|idea-workbench|method-designer|...
 program_id: optional-program-id
 updated_at: ISO-8601
-priority: low|normal|high|critical
+priority: low|normal|high|critical  # canonical impact class; same class sorts older first
 confirmation_status: pending_user_confirmation|confirmed|rejected
 needs_human_confirmation: true
 information_types: [inference, evaluation, unverified]
@@ -612,24 +612,38 @@ payload:
 confirmation: {}                 # only after explicit human confirmation
 review_route:                    # internal execution plane, never public stdout
   owner: owner-skill
-  action: owner-confirm-action
+  action: real-owner-action
+  # remaining keys are the exact owner subject arguments; public review also
+  # derives a real owner reject route for the same displayed snapshot
 ```
 
 Lifecycle is `awaiting_agent_fill → ready_for_review → confirmed|rejected`. A missing claims invocation may persist an explicit `*-fill.yaml` request, but **must not** append a canonical judgement item, reporting event, or program state that pretends the judgement exists. Historical hollow items are `needs_agent_repair`, never review-ready.
+
+For side judgements, `confirmation_content_digest` binds owner substance as well as canonical claims: program decision 的 `text/rationale/stage/alternatives`、discussion conclusion 的 `text/reviewer`、method selection 的 `proposed_repo_id/selected_repo_id/selection_reason`。Workflow bookkeeping（例如 fill status 或 required claim ids）不属于用户拍板正文。Changing a selected repo, conclusion text, or decision content invalidates the current confirmation binding even if claim ids stay unchanged. Rejection is owner-owned, transaction/checkpoint protected, changes every canonical claim to `rejected`, and never fabricates a ConfirmationReceipt.
+
+进入 review 的 owner substance 还有逐 kind 必填下限：program decision 必须有 `text`，discussion conclusion 必须有 `text`，method selection 必须同时有 `proposed_repo_id` 与 `selection_reason`；其它辅助字段非空不能替代核心正文。
 
 `research.judgements.discover_pending_judgements(root)` is the shared internal discovery API. A returned card contains:
 
 ```yaml
 subject: {kind: ..., id: ..., owner: ..., path: project-relative-path}
 claims: []
+substance: {}                   # exact owner fields inside confirmation scope
 verification: {}
+snapshot_binding:
+  subject: {kind: ..., id: ..., owner: ..., path: project-relative-path}
+  confirmation_status: pending_user_confirmation
+  content_digest: sha256
+  verification: {verified_at: ..., claims_digest: ..., evidence_digest: ...}
 confirmation_status: pending_user_confirmation
 priority: normal
 updated_at: ISO-8601
 confirm_route: {}                # internal owner route
 ```
 
-Discovery is fail-closed: empty/invalid claims, any canonical `unverified` claim, missing or byte-stale verification, rejected items, and already confirmed items are excluded. The public review layer may consume only this ready set.
+`priority` 是当前 schema 唯一的 impact 等级，不另行推断一个不可验证的 `impact_score`。公共 Top-3 先按 `critical → high → normal → low`，同级再按最旧 `updated_at` 排序，最后用 subject id 保证确定性。
+
+Discovery is fail-closed: empty/invalid claims, any canonical `unverified` claim, missing or byte-stale verification, rejected items, already confirmed items, non-canonical owner/path/id relationships, escaping symlinks, and duplicate raw subjects are excluded. Artifact-provided routes are never trusted; kind + canonical identity derive the route. The public review layer may consume only this ready set, safely display the full bound side substance, and apply only through the snapshot-bound adapter. Displayed Top-3 items are copied into a one-time runtime snapshot token; apply must match that stored set exactly, consumes the token once, and currently accepts exactly one decision per invocation so cross-owner partial batches cannot occur. Owner confirm/reject rechecks global uniqueness/canonical identity and compares subject/status/content/verification inside its mutation before any write; stale, tampered, or replayed snapshots fail closed.
 
 Reporting judgement events carry `confirmation_binding.subject` plus `claim_ids`、`content_digest` and the current verification digests. Side subjects must include `owner` and project-relative `path`; consumers resolve that path with project-root containment. `decision` / `diagnosis` / discussion conclusion / survey inference / novelty / evaluation and unknown untyped events default to judgement. Only explicit factual/operational events or a judgement whose bound subject still has a current ConfirmationReceipt may enter ordinary report sections.
 

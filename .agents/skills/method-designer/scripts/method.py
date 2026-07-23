@@ -24,9 +24,10 @@ if __name__ == "__main__":
 
 from research.common import add_project_root_argument, append_program_reporting_event, load_yaml, normalize_list, program_reporting_events_path, utc_now_iso, write_text_if_changed, write_yaml_if_changed, yaml_default
 from research.confirm import apply_confirmation
-from research.core import iter_records, locate_record, project_root, rel
+from research.core import checkpoint_and_report, iter_records, locate_record, project_root, rel
 from research.evidence import JUDGEMENT_CLAIM_TYPES, build_verification_receipt, validate_claims
 from research.journal import mutation_transaction
+from research.judgements import apply_judgement_rejection, readiness_violations, require_judgement_snapshot
 
 
 DEFAULT_EXPERIMENT_SCALE = {
@@ -289,6 +290,12 @@ def build_parser() -> argparse.ArgumentParser:
         confirm.add_argument("--evidence", action="append", default=[])
         confirm.add_argument("--user-authorization", default="")
         confirm.add_argument("--authorization-source", default="")
+        confirm.add_argument("--expected-snapshot", required=True)
+    reject = subparsers.add_parser("reject-selection")
+    reject.add_argument("--idea-id", required=True)
+    reject.add_argument("--program-id", required=True)
+    reject.add_argument("--reason", default="")
+    reject.add_argument("--expected-snapshot", required=True)
     return parser
 
 
@@ -346,6 +353,12 @@ def require_current_method_subject(choice: dict[str, Any], program_id: str, idea
         raise SystemExit("Method selection artifact has an unsupported or mismatched subject identity.")
     if str(choice.get("program_id") or "") != program_id or str(choice.get("idea_id") or "") != idea_id:
         raise SystemExit("Method selection artifact does not match the requested program and idea.")
+    payload = choice.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    selection = payload.get("method_selection")
+    selection = selection if isinstance(selection, dict) else {}
+    if str(choice.get("proposed_repo_id") or "").strip() != str(selection.get("proposed_repo_id") or "").strip():
+        raise SystemExit("Method selection artifact has divergent operative and confirmable repository fields.")
 
 
 def method_source_roots(
@@ -410,6 +423,7 @@ def prepare_method(root: Path, record: dict[str, Any], args: argparse.Namespace)
         existing = load_method_artifact(paths["choice"], label="selection artifact")
         require_current_method_subject(existing, args.program_id, args.idea_id)
         raise SystemExit("A method proposal already exists; preserve it and continue with evidence verification.")
+    state_before = load_yaml(paths["state"], default=None)
     state = load_program_state(paths["state"], args.program_id)
     existing_idea_id = str(state.get("selected_idea_id") or "").strip()
     if existing_idea_id and existing_idea_id != args.idea_id:
@@ -614,6 +628,21 @@ def prepare_method(root: Path, record: dict[str, Any], args: argparse.Namespace)
     else:
         prepare_targets.append(paths["design_root"])
     with mutation_transaction(root, "method:prepare", prepare_targets):
+        if paths["choice"].exists():
+            raise SystemExit("A method proposal was created concurrently; reload it instead of overwriting it.")
+        if load_yaml(paths["state"], default=None) != state_before:
+            raise SystemExit("Program state changed while preparing the method; reload before retrying.")
+        current_record, _ = locate_record(root, args.idea_id, kind="idea", fuzzy=False)
+        if current_record != record or str(current_record.get("status") or "") != "selected":
+            raise SystemExit("Selected idea changed while preparing the method; reload before retrying.")
+        current_rankings, current_corpus = repo_candidates(
+            root,
+            current_record,
+            normalize_list(args.repo_id),
+            normalize_list(state_before.get("active_unit_ids", [])) if isinstance(state_before, dict) else [],
+        )
+        if current_rankings != repo_rankings or current_corpus != repo_corpus or profile_resources(root) != resources:
+            raise SystemExit("Method inputs changed while preparing the proposal; reload before retrying.")
         write_text_if_changed(
             paths["method"],
             (
@@ -644,6 +673,12 @@ def prepare_method(root: Path, record: dict[str, Any], args: argparse.Namespace)
         write_yaml_if_changed(paths["interfaces"], interfaces_payload)
         write_yaml_if_changed(paths["matrix"], matrix_payload)
         write_yaml_if_changed(paths["state"], state)
+    checkpoint_and_report(
+        root,
+        trigger="milestone",
+        message=f"milestone: prepare method {args.program_id} {args.idea_id}",
+        target_paths=[paths["method"], paths["choice"], paths["interfaces"], paths["matrix"], paths["state"]],
+    )
     if repo_corpus["fallback_used"]:
         print(repo_corpus["note"])
     for request in resource_requests:
@@ -688,6 +723,12 @@ def verify_method(root: Path, args: argparse.Namespace) -> int:
         write_yaml_if_changed(paths["choice"], choice)
         write_yaml_if_changed(paths["interfaces"], interfaces)
         write_yaml_if_changed(paths["matrix"], matrix)
+    checkpoint_and_report(
+        root,
+        trigger="milestone",
+        message=f"milestone: verify method {args.program_id} {args.idea_id}",
+        target_paths=targets,
+    )
     print("方法判断与逐字证据已通过校验，等待你的确认。")
     return 0
 
@@ -696,12 +737,28 @@ def confirm_method(root: Path, args: argparse.Namespace) -> int:
     paths = method_paths(root, args.program_id, args.idea_id)
     targets = [paths["method"], paths["choice"], paths["interfaces"], paths["matrix"], paths["state"], paths["events"]]
     with mutation_transaction(root, "method:confirm", targets):
+        current_idea, _ = locate_record(root, args.idea_id, kind="idea", fuzzy=False)
+        if str(current_idea.get("status") or "") != "selected":
+            raise SystemExit("The idea is no longer selected; refusing to confirm this method proposal.")
         choice = load_method_artifact(paths["choice"], label="selection artifact")
         require_current_method_subject(choice, args.program_id, args.idea_id)
         if str(choice.get("status") or "") != "ready_for_review":
             raise SystemExit("Method selection is not ready for review; complete evidence verification first.")
         if "selected_repo_id" in choice:
             raise SystemExit("Method selection is already finalized or requires repair.")
+        readiness = readiness_violations(root, choice, paths["choice"])
+        if readiness:
+            raise SystemExit("Method selection is not ready for confirmation:\n  - " + "\n  - ".join(readiness))
+        try:
+            require_judgement_snapshot(
+                choice,
+                expected_snapshot=args.expected_snapshot,
+                owner="method-designer",
+                path=rel(root, paths["choice"]),
+                root=root,
+            )
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
         proposed_repo_id = str(choice.get("proposed_repo_id") or "").strip()
         claims, violations = validate_method_claims(choice, proposed_repo_id)
         if violations:
@@ -744,6 +801,9 @@ def confirm_method(root: Path, args: argparse.Namespace) -> int:
                 row["status"] = "planned"
 
         state = load_program_state(paths["state"], args.program_id)
+        existing_idea_id = str(state.get("selected_idea_id") or "").strip()
+        if existing_idea_id and existing_idea_id != args.idea_id:
+            raise SystemExit("The program now points to a different selected idea; refusing to overwrite it.")
         existing_repo_id = str(state.get("selected_repo_id") or "").strip()
         if existing_repo_id and existing_repo_id != proposed_repo_id:
             raise SystemExit("The program already selected a different repository; refusing to overwrite it.")
@@ -813,7 +873,84 @@ def confirm_method(root: Path, args: argparse.Namespace) -> int:
             },
             generated_by="method-designer",
         )
+    checkpoint_and_report(
+        root,
+        trigger="milestone",
+        message=f"milestone: confirm method {args.program_id} {args.idea_id}",
+        target_paths=targets,
+    )
     print("方法选择已确认，实验规划阶段已经同步推进。下一步可运行 kb next。")
+    return 0
+
+
+def reject_method(root: Path, args: argparse.Namespace) -> int:
+    paths = method_paths(root, args.program_id, args.idea_id)
+    targets = [paths["method"], paths["choice"], paths["interfaces"], paths["matrix"], paths["state"]]
+    with mutation_transaction(root, "method:reject", targets):
+        current_idea, _ = locate_record(root, args.idea_id, kind="idea", fuzzy=False)
+        if str(current_idea.get("status") or "") != "selected":
+            raise SystemExit("The idea is no longer selected; refusing to reject this method proposal.")
+        choice = load_method_artifact(paths["choice"], label="selection artifact")
+        require_current_method_subject(choice, args.program_id, args.idea_id)
+        violations = readiness_violations(root, choice, paths["choice"])
+        if violations:
+            raise SystemExit("Method selection is not ready for rejection:\n  - " + "\n  - ".join(violations))
+        try:
+            require_judgement_snapshot(
+                choice,
+                expected_snapshot=args.expected_snapshot,
+                owner="method-designer",
+                path=rel(root, paths["choice"]),
+                root=root,
+            )
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        apply_judgement_rejection(choice, reason=args.reason)
+        choice["status"] = "rejected"
+        choice["selection_status"] = "rejected"
+        choice["updated_at"] = utc_now_iso()
+        choice["payload"]["method_selection"]["agent_fill_status"] = "rejected"
+
+        interfaces = load_method_artifact(paths["interfaces"], label="interface artifact")
+        matrix = load_method_artifact(paths["matrix"], label="experiment matrix")
+        for artifact in (interfaces, matrix):
+            artifact["proposal_status"] = "rejected"
+            artifact["confirmation_status"] = "rejected"
+
+        state = load_program_state(paths["state"], args.program_id)
+        existing_idea_id = str(state.get("selected_idea_id") or "").strip()
+        if existing_idea_id and existing_idea_id != args.idea_id:
+            raise SystemExit("The program now points to a different selected idea; refusing to overwrite it.")
+        proposal = state.get("method_proposal")
+        if not isinstance(proposal, dict):
+            proposal = {}
+        proposal.update(
+            {
+                "subject_id": str(choice.get("id") or ""),
+                "proposed_repo_id": str(choice.get("proposed_repo_id") or ""),
+                "status": "rejected",
+            }
+        )
+        proposal.pop("selected_repo_id", None)
+        state["method_proposal"] = proposal
+
+        method_text = paths["method"].read_text(encoding="utf-8") if paths["method"].exists() else ""
+        method_text = method_text.replace(
+            "- Status: proposal only; runtime-agent evidence and human confirmation are still required.",
+            "- Status: rejected by the user; no repository was selected and program stage did not advance.",
+        )
+        write_text_if_changed(paths["method"], method_text)
+        write_yaml_if_changed(paths["choice"], choice)
+        write_yaml_if_changed(paths["interfaces"], interfaces)
+        write_yaml_if_changed(paths["matrix"], matrix)
+        write_yaml_if_changed(paths["state"], state)
+    checkpoint_and_report(
+        root,
+        trigger="milestone",
+        message=f"milestone: reject method {args.program_id} {args.idea_id}",
+        target_paths=targets,
+    )
+    print("方法选择已拒绝；没有选择仓库，也没有推进实验规划阶段。")
     return 0
 
 
@@ -831,6 +968,8 @@ def main() -> int:
         return verify_method(root, args)
     if args.command in {"confirm-selection", "confirm"}:
         return confirm_method(root, args)
+    if args.command == "reject-selection":
+        return reject_method(root, args)
     return 1
 
 

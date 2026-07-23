@@ -68,6 +68,23 @@ CONFIRMABLE_CONTENT_SECTIONS: dict[str, tuple[str, ...]] = {
     "idea": ("problem", "hypothesis"),
     "experiment": ("results", "diagnosis"),
     "program_decision": ("decision",),
+    "idea_discussion_conclusion": ("discussion_conclusion",),
+    "method_selection": ("method_selection",),
+}
+
+# Side judgements often keep workflow bookkeeping beside the decision
+# substance.  Only the fields below are part of the user's confirmation scope;
+# unit sections without an entry remain fully bound as before.
+CONFIRMABLE_CONTENT_FIELDS: dict[str, dict[str, tuple[str, ...]]] = {
+    "program_decision": {
+        "decision": ("text", "rationale", "stage", "alternatives"),
+    },
+    "idea_discussion_conclusion": {
+        "discussion_conclusion": ("text", "reviewer"),
+    },
+    "method_selection": {
+        "method_selection": ("proposed_repo_id", "selected_repo_id", "selection_reason"),
+    },
 }
 
 # Locked canonical schema — kept byte-identical to
@@ -216,10 +233,14 @@ def confirmation_content_digest(record: Any) -> str:
     payload = record.get("payload")
     if not isinstance(payload, dict):
         payload = {}
-    sections = {
-        section: _without_empty_mapping_values(payload.get(section, {}))
-        for section in CONFIRMABLE_CONTENT_SECTIONS.get(kind, ())
-    }
+    sections: dict[str, Any] = {}
+    selected_fields = CONFIRMABLE_CONTENT_FIELDS.get(kind, {})
+    for section in CONFIRMABLE_CONTENT_SECTIONS.get(kind, ()):
+        value = payload.get(section, {})
+        fields = selected_fields.get(section)
+        if fields is not None and isinstance(value, dict):
+            value = {field: value.get(field) for field in fields}
+        sections[section] = _without_empty_mapping_values(value)
     return _sha256_canonical({"substance": sections, "claims": confirmation_claims(record)})
 
 
@@ -869,6 +890,7 @@ __all__ = [
     "REQUIRED_CLAIM_FIELDS",
     "REQUIRED_EVIDENCE_REF_FIELDS",
     "CONFIRMABLE_CONTENT_SECTIONS",
+    "CONFIRMABLE_CONTENT_FIELDS",
     "EVIDENCE_SCHEMA",
     "CLAIMS_KEY",
     "EvidenceRef",

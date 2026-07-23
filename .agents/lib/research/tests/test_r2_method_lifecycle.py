@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from research.common import load_yaml, write_yaml_if_changed
 from research.confirm import has_complete_confirmation_receipt
 from research.core import default_record, ensure_workspace, record_path
 from research.journal import committed_ops
+from research.judgements import discover_pending_judgements, judgement_snapshot_binding
 
 
 IDEA_ID = "i-r2-method-123456"
@@ -144,7 +146,13 @@ def _verify(method, monkeypatch, root: Path) -> int:
     )
 
 
-def _confirm(method, monkeypatch, root: Path) -> int:
+def _confirm(method, monkeypatch, root: Path, *, expected: dict | None = None) -> int:
+    choice_path = _paths(root)["choice"]
+    expected = expected or judgement_snapshot_binding(
+            load_yaml(choice_path),
+            owner="method-designer",
+            path=choice_path.relative_to(root).as_posix(),
+        )
     return _run(
         method,
         monkeypatch,
@@ -162,6 +170,31 @@ def _confirm(method, monkeypatch, root: Path) -> int:
         "I confirm this repository selection and method evidence.",
         "--authorization-source",
         "user_message",
+        "--expected-snapshot",
+        json.dumps(expected),
+    )
+
+
+def _reject(method, monkeypatch, root: Path) -> int:
+    choice_path = _paths(root)["choice"]
+    expected = judgement_snapshot_binding(
+        load_yaml(choice_path),
+        owner="method-designer",
+        path=choice_path.relative_to(root).as_posix(),
+    )
+    return _run(
+        method,
+        monkeypatch,
+        root,
+        "reject-selection",
+        "--idea-id",
+        IDEA_ID,
+        "--program-id",
+        PROGRAM_ID,
+        "--reason",
+        "Use a different implementation base.",
+        "--expected-snapshot",
+        json.dumps(expected),
     )
 
 
@@ -219,6 +252,12 @@ def test_prepare_verify_confirm_promotes_state_and_event_only_at_confirmation(tm
     op_types = {str(item.get("op_type") or "") for item in committed_ops(root)}
     assert {"method:prepare", "method:verify", "method:confirm"} <= op_types
 
+    with pytest.raises(SystemExit, match="not ready for review|already finalized"):
+        _confirm(method, monkeypatch, root)
+    with pytest.raises(SystemExit, match="not ready for rejection"):
+        _reject(method, monkeypatch, root)
+    assert len(load_yaml(paths["events"], default={})["items"]) == 1
+
     choice["payload"]["claims"][0]["text"] += " Changed after confirmation."
     write_yaml_if_changed(paths["choice"], choice)
     assert not has_complete_confirmation_receipt(load_yaml(paths["choice"], default={}))
@@ -235,7 +274,7 @@ def test_confirm_rejects_claim_changes_after_verification_without_side_effects(t
     choice["payload"]["claims"][0]["text"] += " Stale edit."
     write_yaml_if_changed(paths["choice"], choice)
 
-    with pytest.raises(SystemExit, match="verification receipt is missing or stale"):
+    with pytest.raises(SystemExit, match="not ready for confirmation"):
         _confirm(method, monkeypatch, root)
 
     state = load_yaml(paths["state"], default={})
@@ -243,6 +282,78 @@ def test_confirm_rejects_claim_changes_after_verification_without_side_effects(t
     assert "selected_repo_id" not in state
     assert "selected_repo_id" not in choice
     assert state["stage"] == "idea-review"
+    assert not paths["events"].exists()
+
+
+def test_reject_selection_closes_review_without_advancing_program(tmp_path: Path, monkeypatch) -> None:
+    method = _load_method_module()
+    root = _workspace(tmp_path)
+    paths = _paths(root)
+    assert _prepare(method, monkeypatch, root) == 0
+    _fill_method_claims(root)
+    assert _verify(method, monkeypatch, root) == 0
+
+    assert _reject(method, monkeypatch, root) == 0
+
+    choice = load_yaml(paths["choice"], default={})
+    state = load_yaml(paths["state"], default={})
+    interfaces = load_yaml(paths["interfaces"], default={})
+    matrix = load_yaml(paths["matrix"], default={})
+    assert choice["confirmation_status"] == "rejected"
+    assert choice["needs_human_confirmation"] is True
+    assert choice["rejection"]["reason"] == "Use a different implementation base."
+    assert {claim["confirmation_status"] for claim in choice["payload"]["claims"]} == {"rejected"}
+    assert "selected_repo_id" not in choice
+    assert "selected_repo_id" not in state
+    assert state["stage"] == "idea-review"
+    assert state["method_proposal"]["status"] == "rejected"
+    assert interfaces["proposal_status"] == "rejected"
+    assert matrix["proposal_status"] == "rejected"
+    assert not paths["events"].exists()
+    assert "method:reject" in {str(item.get("op_type") or "") for item in committed_ops(root)}
+
+
+def test_method_old_review_snapshot_cannot_confirm_changed_selection_reason(tmp_path: Path, monkeypatch) -> None:
+    method = _load_method_module()
+    root = _workspace(tmp_path)
+    paths = _paths(root)
+    assert _prepare(method, monkeypatch, root) == 0
+    _fill_method_claims(root)
+    assert _verify(method, monkeypatch, root) == 0
+    choice = load_yaml(paths["choice"], default={})
+    expected = judgement_snapshot_binding(
+        choice,
+        owner="method-designer",
+        path=paths["choice"].relative_to(root).as_posix(),
+    )
+    choice["payload"]["method_selection"]["selection_reason"] = "Changed after the user saw the review card."
+    write_yaml_if_changed(paths["choice"], choice)
+
+    with pytest.raises(SystemExit, match="review snapshot is stale"):
+        _confirm(method, monkeypatch, root, expected=expected)
+
+    assert "selected_repo_id" not in load_yaml(paths["choice"], default={})
+    assert "selected_repo_id" not in load_yaml(paths["state"], default={})
+    assert not paths["events"].exists()
+
+
+def test_method_review_blocks_mismatched_operative_repo_field(tmp_path: Path, monkeypatch) -> None:
+    method = _load_method_module()
+    root = _workspace(tmp_path)
+    paths = _paths(root)
+    assert _prepare(method, monkeypatch, root) == 0
+    _fill_method_claims(root)
+    assert _verify(method, monkeypatch, root) == 0
+    choice = load_yaml(paths["choice"], default={})
+    choice["proposed_repo_id"] = "r-different-operative-value"
+    write_yaml_if_changed(paths["choice"], choice)
+
+    assert discover_pending_judgements(root) == []
+    with pytest.raises(SystemExit, match="divergent operative"):
+        _confirm(method, monkeypatch, root)
+
+    assert "selected_repo_id" not in load_yaml(paths["choice"], default={})
+    assert "selected_repo_id" not in load_yaml(paths["state"], default={})
     assert not paths["events"].exists()
 
 

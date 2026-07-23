@@ -8,6 +8,8 @@ The bundle currently declares **`0.2.0-rc.2`**. It has passed the complete local
 
 ### Added
 
+- Cross-owner judgement discovery and a one-time, snapshot-bound public review token that routes confirmations and rejections to the canonical owner.
+- A staged method lifecycle (`prepare` → Agent fill → verify → confirm/reject) with evidence-backed proposal fields and transaction-time input revalidation.
 - First-class dataset knowledge units, a dataset analyst with evidence-backed four-part profiles, and explicit journaled repo-to-dataset migration.
 - A sixteen-verb conversational `kb` surface with private, opt-in structured hand-off for runtime agents.
 - Unified human-review readiness across paper, repository, and article workflows.
@@ -19,6 +21,8 @@ The bundle currently declares **`0.2.0-rc.2`**. It has passed the complete local
 
 ### Changed
 
+- Public review now shows complete claim/evidence context, orders the highest-impact pending items deterministically, and applies at most one decision per snapshot.
+- Rejection and repeated terminal actions now converge across unit, program-decision, idea-discussion, and method-selection records without leaving active canonical claims.
 - `kb next` now short-circuits completed units and prioritizes durable program actions over loose maintenance suggestions; resumable promises must be persisted.
 - Repository structure scans now require a real local source tree, preserve confirmed judgement content, and store mechanical entrypoint candidates separately.
 - arXiv ingestion uses native arXiv HTML first, direct ar5iv Labs HTML as fallback, and screening-first analysis before a type-specific full note.
@@ -32,6 +36,7 @@ The bundle currently declares **`0.2.0-rc.2`**. It has passed the complete local
 
 ### Security
 
+- Judgement confirmation now binds canonical subject identity, owner route, pending status, content digest, and verification digests; duplicate identities, stale snapshots, replayed tokens, and symlink escapes fail closed.
 - Confirmation remains fail-closed for AI signers, hollow judgement content, missing evidence, stale content digests, and absent current-user authorization.
 - Update provenance no longer falls back from a fork, local checkout, or unknown legacy source to a canonical remote.
 - Storage migration is constrained to KB data and does not rewrite installed skills or root workspace rules.

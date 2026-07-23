@@ -292,6 +292,9 @@ def apply_confirmation(
     authorization = ""
     source = ""
     if track == "judgement":
+        current_status = str(record.get("confirmation_status") or "").strip()
+        if current_status and current_status != "pending_user_confirmation":
+            raise SystemExit("Judgement confirmation requires a currently pending subject.")
         if not claims:
             raise SystemExit("Judgement confirmation requires non-empty canonical payload.claims.")
         authorization, source = require_user_authorization(

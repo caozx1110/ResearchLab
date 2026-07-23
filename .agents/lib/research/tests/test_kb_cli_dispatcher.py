@@ -13,6 +13,7 @@ import pytest
 
 from research.common import write_yaml_if_changed
 from research.core import record_path
+from research.evidence import build_verification_receipt
 
 
 PUBLIC_GOVERNANCE_FORBIDDEN = (
@@ -2085,8 +2086,17 @@ def test_kb_review_tty_and_pipe_are_identical_and_emit_private_protocol(monkeypa
             "i-four-123456",
         }
         assert protocol["details"]["review_count"] == len(expected_ids)
-        assert set(protocol["details"]["record_ids"]) == expected_ids
-        assert {item["id"] for item in protocol["next_actions"][0]["records"]} == expected_ids
+        displayed_ids = {item["id"] for item in protocol["next_actions"][0]["records"]}
+        assert displayed_ids == {"b-three-123456", "i-four-123456", "p-one-123456"}
+        assert set(protocol["details"]["record_ids"]) == displayed_ids
+        assert protocol["details"]["displayed_review_count"] == 3
+        assert set(protocol["details"]["displayed_record_ids"]) == displayed_ids
+        assert protocol["details"]["remaining_review_count"] == 1
+        assert len(protocol["next_actions"][0]["review_items"]) == 3
+        assert protocol["next_actions"][0]["apply"]["max_decisions_per_apply"] == 1
+        assert len(protocol["next_actions"][0]["apply"]["snapshot_token"]) == 32
+        assert all(item["confirm_route"]["owner"] == "knowledge-base-manager" for item in protocol["next_actions"][0]["review_items"])
+        assert all(item["reject_route"]["action"] == "promote" for item in protocol["next_actions"][0]["review_items"])
         assert protocol["next_actions"][0]["decision_fields"] == [
             "decision",
             "user_authorization",
@@ -2105,8 +2115,241 @@ def test_kb_review_tty_and_pipe_are_identical_and_emit_private_protocol(monkeypa
                 "fields": ["human_name"],
                 "field_inputs": {"human_name": {"input": "--name"}},
             },
-            "then": "apply_review_decision",
+            "then": "apply_review_snapshot_decision",
         }
+
+
+def test_review_top_three_sort_uses_priority_as_impact_then_oldest_first() -> None:
+    kb = _load_kb_cli()
+    records = [
+        {"id": "normal-old", "priority": "normal", "updated_at": "2026-01-01T00:00:00Z"},
+        {"id": "high-new", "priority": "high", "updated_at": "2026-07-01T00:00:00Z"},
+        {"id": "high-old", "priority": "high", "updated_at": "2026-02-01T00:00:00Z"},
+        {"id": "critical-new", "priority": "critical", "updated_at": "2026-07-22T00:00:00Z"},
+    ]
+
+    ordered = sorted(records, key=kb._review_sort_key)
+
+    assert [record["id"] for record in ordered[:3]] == ["critical-new", "high-old", "high-new"]
+
+
+def test_kb_review_rejects_protocol_tampering_that_injects_an_unshown_subject(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    kb = _load_kb_cli()
+    calls: list[tuple[str, tuple[str, ...]]] = []
+
+    def fake_forward(root: Path, script: str, args, *, stream: bool = True, **_kwargs):
+        calls.append((script, tuple(args)))
+        return kb.CommandResult((script, *args), 0, "# review queue\n")
+
+    monkeypatch.setattr(kb, "forward_command", fake_forward)
+    monkeypatch.setattr(
+        kb,
+        "load_review_records",
+        lambda root, fuzzy: [
+            _pending_record("p-one-123456", "paper", "One"),
+            _pending_record("r-two-123456", "repo", "Two"),
+            _pending_record("b-three-123456", "blog", "Three"),
+            _pending_record("i-four-123456", "idea", "Four"),
+        ],
+    )
+
+    assert kb.main(["--root", str(tmp_path), "--agent-protocol", "tampered-review.json", "review"]) == 0
+    protocol_path = tmp_path / "kb/.runtime/tampered-review.json"
+    protocol = json.loads(protocol_path.read_text(encoding="utf-8"))
+    protocol["next_actions"][0]["review_items"][0] = {
+        "subject": {"kind": "idea", "id": "i-four-123456", "owner": "knowledge-base-manager"},
+        "reject_route": {
+            "owner": "knowledge-base-manager",
+            "action": "promote",
+            "id": "i-four-123456",
+        },
+        "snapshot_binding": {"content_digest": "forged"},
+    }
+    protocol_path.write_text(json.dumps(protocol), encoding="utf-8")
+
+    assert kb.main(
+        [
+            "--root",
+            str(tmp_path),
+            "review",
+            "--apply-snapshot",
+            "tampered-review.json",
+            "--reject-ref",
+            "idea:i-four-123456",
+        ]
+    ) == 2
+    assert len(calls) == 1
+    assert "请重新运行 kb review" in capsys.readouterr().err
+
+
+def test_kb_review_apply_rejects_non_atomic_multi_owner_batch(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    kb = _load_kb_cli()
+    calls: list[tuple[str, tuple[str, ...]]] = []
+
+    def fake_forward(root: Path, script: str, args, *, stream: bool = True, **_kwargs):
+        calls.append((script, tuple(args)))
+        return kb.CommandResult((script, *args), 0, "# review queue\n")
+
+    monkeypatch.setattr(kb, "forward_command", fake_forward)
+    monkeypatch.setattr(
+        kb,
+        "load_review_records",
+        lambda root, fuzzy: [
+            _pending_record("p-one-123456", "paper", "One"),
+            _pending_record("r-two-123456", "repo", "Two"),
+        ],
+    )
+    assert kb.main(["--root", str(tmp_path), "--agent-protocol", "batch-review.json", "review"]) == 0
+    protocol = json.loads((tmp_path / "kb/.runtime/batch-review.json").read_text(encoding="utf-8"))
+    refs = [
+        f"{item['subject']['kind']}:{item['subject']['id']}"
+        for item in protocol["next_actions"][0]["review_items"]
+    ]
+
+    assert kb.main(
+        [
+            "--root",
+            str(tmp_path),
+            "review",
+            "--apply-snapshot",
+            "batch-review.json",
+            "--reject-ref",
+            refs[0],
+            "--reject-ref",
+            refs[1],
+        ]
+    ) == 2
+    assert len(calls) == 1
+    assert "请重新运行 kb review" in capsys.readouterr().err
+
+
+def test_kb_review_discovers_verified_side_judgement_and_keeps_owner_routes_private(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    kb = _load_kb_cli()
+    program_root = tmp_path / "kb/programs/p-review"
+    design_root = program_root / "design"
+    design_root.mkdir(parents=True)
+    evidence_path = program_root / "evidence.md"
+    evidence_path.write_text("repo A has the required adapter seam", encoding="utf-8")
+    choice_path = design_root / "i-review-repo-choice.yaml"
+    choice = {
+        "id": "method-selection:p-review:i-review",
+        "kind": "method_selection",
+        "owner": "method-designer",
+        "program_id": "p-review",
+        "idea_id": "i-review",
+        "updated_at": "2026-07-23T00:00:00+00:00",
+        "priority": "high",
+        "proposed_repo_id": "r-review",
+        "confirmation_status": "pending_user_confirmation",
+        "needs_human_confirmation": True,
+        "information_types": ["evaluation", "unverified"],
+        "payload": {
+            "method_selection": {
+                "proposed_repo_id": "r-review",
+                "selection_reason": "Repo A exposes the required adapter seam.",
+            },
+            "claims": [
+                {
+                    "id": "method-repo-selection",
+                    "text": "Repo A is the best current implementation base.",
+                    "claim_type": "evaluation",
+                    "confirmation_status": "pending_user_confirmation",
+                    "evidence_refs": [
+                        {
+                            "source_unit_id": "program:p-review",
+                            "artifact": "evidence.md",
+                            "locator": "adapter seam",
+                            "quote": "repo A has the required adapter seam",
+                        }
+                    ],
+                }
+            ]
+        },
+        "review_route": {
+            "owner": "method-designer",
+            "action": "confirm-selection",
+            "program_id": "p-review",
+            "idea_id": "i-review",
+            "subject_id": "method-selection:p-review:i-review",
+        },
+    }
+    build_verification_receipt(
+        choice,
+        design_root,
+        source_roots={"program:p-review": program_root},
+    )
+    write_yaml_if_changed(choice_path, choice)
+    monkeypatch.setattr(
+        kb,
+        "forward_command",
+        lambda root, relative_script, args, *, stream=True: kb.CommandResult((relative_script, *args), 0),
+    )
+    monkeypatch.setattr(kb, "load_review_records", lambda root, fuzzy: [])
+
+    assert kb.main(["--root", str(tmp_path), "--agent-protocol", "side-review.json", "review"]) == 0
+
+    output = capsys.readouterr().out
+    assert "方法仓库选择" in output
+    assert "Repo A is the best current implementation base." in output
+    assert "method-designer" not in output
+    assert "confirm-selection" not in output
+    protocol = json.loads((tmp_path / "kb/.runtime/side-review.json").read_text(encoding="utf-8"))
+    assert protocol["details"]["record_ids"] == ["method-selection:p-review:i-review"]
+    item = protocol["next_actions"][0]["review_items"][0]
+    assert item["confirm_route"]["action"] == "confirm-selection"
+    assert item["reject_route"]["action"] == "reject-selection"
+    assert item["subject"]["path"] == "kb/programs/p-review/design/i-review-repo-choice.yaml"
+
+
+@pytest.mark.parametrize(
+    ("record", "card", "confirm", "reject"),
+    [
+        (
+            {"id": "decision-1", "kind": "program_decision"},
+            {
+                "subject": {"id": "decision-1", "kind": "program_decision", "owner": "research-orchestrator"},
+                "confirm_route": {"owner": "research-orchestrator", "program_id": "p-one"},
+            },
+            {"owner": "research-orchestrator", "action": "confirm-decision", "program_id": "p-one", "decision_id": "decision-1"},
+            {"owner": "research-orchestrator", "action": "reject-decision", "program_id": "p-one", "decision_id": "decision-1"},
+        ),
+        (
+            {"id": "discussion-1", "kind": "idea_discussion_conclusion"},
+            {
+                "subject": {"id": "discussion-1", "kind": "idea_discussion_conclusion", "owner": "idea-workbench"},
+                "confirm_route": {"owner": "idea-workbench", "idea_id": "i-one"},
+            },
+            {"owner": "idea-workbench", "action": "discuss", "phase": "confirm", "idea_id": "i-one", "conclusion_id": "discussion-1"},
+            {"owner": "idea-workbench", "action": "discuss", "phase": "reject", "idea_id": "i-one", "conclusion_id": "discussion-1"},
+        ),
+        (
+            {"id": "method-selection:p-one:i-one", "kind": "method_selection"},
+            {
+                "subject": {"id": "method-selection:p-one:i-one", "kind": "method_selection", "owner": "method-designer"},
+                "confirm_route": {"owner": "method-designer", "program_id": "p-one", "idea_id": "i-one"},
+            },
+            {"owner": "method-designer", "action": "confirm-selection", "program_id": "p-one", "idea_id": "i-one"},
+            {"owner": "method-designer", "action": "reject-selection", "program_id": "p-one", "idea_id": "i-one"},
+        ),
+    ],
+)
+def test_side_review_routes_match_real_owner_command_shapes(record, card, confirm, reject) -> None:
+    kb = _load_kb_cli()
+    routes = kb._review_decision_routes(record, card)
+    assert routes["confirm_route"] == confirm
+    assert routes["reject_route"] == reject
 
 
 def test_kb_review_shows_each_verified_claim_and_verbatim_evidence_not_scaffold_summary(
@@ -2450,6 +2693,35 @@ def test_kb_review_excludes_rejected_records_even_if_owner_returns_them(
     assert "Rejected" not in output
 
 
+def test_kb_review_blocks_duplicate_unit_subjects_before_display(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    kb = _load_kb_cli()
+    first = _pending_record("p-duplicate-123456", "paper", "First copy")
+    second = _pending_record("p-duplicate-123456", "paper", "Second copy")
+    monkeypatch.setattr(
+        kb,
+        "forward_command",
+        lambda root, relative_script, args, *, stream=True: kb.CommandResult((relative_script, *args), 0),
+    )
+    monkeypatch.setattr(kb, "load_review_records", lambda root, fuzzy: [first, second])
+    monkeypatch.setattr(kb, "is_ready_for_human_review", lambda candidate: True)
+
+    assert kb.main(
+        ["--root", str(tmp_path), "--agent-protocol", "duplicate-review.json", "review"]
+    ) == 0
+
+    output = capsys.readouterr().out
+    assert "First copy" not in output
+    assert "Second copy" not in output
+    assert "Agent 需要先补全判断文本或证据" in output
+    protocol = json.loads((tmp_path / "kb/.runtime/duplicate-review.json").read_text(encoding="utf-8"))
+    assert protocol["details"]["review_count"] == 0
+    assert protocol["details"]["blocked_review_count"] == 2
+
+
 def test_kb_review_apply_builder_transmits_user_authorization(monkeypatch, tmp_path: Path) -> None:
     kb = _load_kb_cli()
     monkeypatch.setattr(kb, "default_confirmed_by", lambda root: "czx-default")
@@ -2458,6 +2730,7 @@ def test_kb_review_apply_builder_transmits_user_authorization(monkeypatch, tmp_p
         ["p-one-123456"],
         [],
         "evidence-note",
+        allowed_ids=["p-one-123456"],
         user_authorization="I confirm p-one-123456",
     )
     assert commands == [
@@ -2478,6 +2751,72 @@ def test_kb_review_apply_builder_transmits_user_authorization(monkeypatch, tmp_p
             ],
         )
     ]
+
+
+def test_kb_review_apply_builder_rejects_subject_outside_displayed_snapshot(tmp_path: Path) -> None:
+    kb = _load_kb_cli()
+    with pytest.raises(ValueError, match="outside the displayed review snapshot"):
+        kb.build_review_apply_commands(
+            tmp_path,
+            ["p-hidden-123456"],
+            [],
+            "evidence-note",
+            allowed_ids=["p-visible-123456"],
+            user_authorization="I confirm the visible item.",
+        )
+
+
+def test_kb_review_apply_runtime_rejects_hidden_subject_before_owner_dispatch(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    kb = _load_kb_cli()
+    runtime = tmp_path / "kb/.runtime"
+    runtime.mkdir(parents=True)
+    (runtime / "review.json").write_text(
+        json.dumps(
+            {
+                "schema": "kb-agent-protocol/v1",
+                "verb": "review",
+                "status": "needs_user_authorization",
+                "next_actions": [
+                    {
+                        "action": "present_review_items",
+                        "review_items": [
+                            {
+                                "subject": {"kind": "paper", "id": "p-visible", "owner": "knowledge-base-manager"},
+                                "snapshot_binding": {"content_digest": "visible"},
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        kb,
+        "forward_command",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("owner must not run")),
+    )
+
+    assert kb.main(
+        [
+            "--root",
+            str(tmp_path),
+            "review",
+            "--apply-snapshot",
+            "review.json",
+            "--confirm-ref",
+            "paper:p-hidden",
+            "--decision-evidence",
+            "reviewed",
+            "--user-authorization",
+            "I confirm the visible item.",
+        ]
+    ) == 2
+    assert "请重新运行 kb review" in capsys.readouterr().err
 
 
 def test_kb_find_forwards_joined_keywords(monkeypatch, tmp_path: Path) -> None:

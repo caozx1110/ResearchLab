@@ -48,7 +48,7 @@ from research.common import (
 )
 from research.core import apply_confirmation, append_history, ensure_workspace, is_ready_for_human_review, iter_records, kb_root, load_runtime_preferences, locate_record, checkpoint_and_report, project_root, record_workflow_state, write_record
 from research.evidence import attach_claims, build_verification_receipt, validate_claims, verify_claim_evidence
-from research.judgements import confirmation_binding
+from research.judgements import apply_judgement_rejection, confirmation_binding, readiness_violations, require_judgement_snapshot
 from research.journal import mutation_transaction
 
 OPEN_QUESTION_OPEN_STATUSES = {"open"}
@@ -1241,6 +1241,13 @@ def build_parser() -> argparse.ArgumentParser:
     confirm_decision.add_argument("--evidence", action="append", required=True)
     confirm_decision.add_argument("--user-authorization", required=True)
     confirm_decision.add_argument("--authorization-source", default="user_message")
+    confirm_decision.add_argument("--expected-snapshot", required=True)
+
+    reject_decision = subparsers.add_parser("reject-decision", help="Reject a verified pending program decision")
+    reject_decision.add_argument("--program-id", required=True)
+    reject_decision.add_argument("--decision-id", required=True)
+    reject_decision.add_argument("--reason", default="")
+    reject_decision.add_argument("--expected-snapshot", required=True)
 
     event = subparsers.add_parser("add-reporting-event", help="Append a reportable program event")
     event.add_argument("--program-id", required=True)
@@ -1722,6 +1729,7 @@ def main() -> int:
             item = {
                 "id": decision_id,
                 "kind": "program_decision",
+                "owner": "research-orchestrator",
                 "timestamp": timestamp,
                 "program_id": args.program_id,
                 "evidence": normalize_list(args.evidence),
@@ -1786,20 +1794,37 @@ def main() -> int:
         )
         return 0
     if args.command == "confirm-decision":
-        with program_mutation(root, args.program_id, args.command):
-            ensure_program_files(root, args.program_id)
+        decision_targets = [
+            decisions_path(root, args.program_id),
+            decision_log_path(root, args.program_id),
+            reporting_events_path(root, args.program_id),
+            state_path(root, args.program_id),
+        ]
+        with mutation_transaction(root, f"research-orchestrator:{args.command}", decision_targets):
             items = list_items(
                 decisions_path(root, args.program_id),
                 f"{args.program_id}-decisions",
                 "research-orchestrator",
             )
-            selected: dict[str, Any] | None = None
-            for item in items:
-                if str(item.get("id") or "") == args.decision_id:
-                    selected = item
-                    break
-            if selected is None:
+            matches = [item for item in items if str(item.get("id") or "") == args.decision_id]
+            if not matches:
                 raise SystemExit(f"Program decision not found: {args.decision_id}")
+            if len(matches) != 1:
+                raise SystemExit(f"Program decision id is duplicated and requires repair: {args.decision_id}")
+            selected = matches[0]
+            violations = readiness_violations(root, selected, decisions_path(root, args.program_id))
+            if violations:
+                raise SystemExit("Program decision is not ready for confirmation:\n  - " + "\n  - ".join(violations))
+            try:
+                require_judgement_snapshot(
+                    selected,
+                    expected_snapshot=args.expected_snapshot,
+                    owner="research-orchestrator",
+                    path=decisions_path(root, args.program_id).relative_to(root).as_posix(),
+                    root=root,
+                )
+            except ValueError as exc:
+                raise SystemExit(str(exc)) from exc
             claims = selected.get("payload", {}).get("claims", [])
             source_roots = _decision_source_roots(root, args.program_id, claims)
             apply_confirmation(
@@ -1854,7 +1879,59 @@ def main() -> int:
             root,
             trigger="milestone",
             message=f"milestone: confirm decision {args.program_id} {args.decision_id}",
-            target_paths=program_checkpoint_paths(root, args.program_id),
+            target_paths=decision_targets,
+        )
+        return 0
+    if args.command == "reject-decision":
+        decision_targets = [
+            decisions_path(root, args.program_id),
+            decision_log_path(root, args.program_id),
+            state_path(root, args.program_id),
+        ]
+        with mutation_transaction(root, f"research-orchestrator:{args.command}", decision_targets):
+            decisions_yaml = decisions_path(root, args.program_id)
+            items = list_items(
+                decisions_yaml,
+                f"{args.program_id}-decisions",
+                "research-orchestrator",
+            )
+            matches = [item for item in items if str(item.get("id") or "") == args.decision_id]
+            if not matches:
+                raise SystemExit(f"Program decision not found: {args.decision_id}")
+            if len(matches) != 1:
+                raise SystemExit(f"Program decision id is duplicated and requires repair: {args.decision_id}")
+            selected = matches[0]
+            violations = readiness_violations(root, selected, decisions_yaml)
+            if violations:
+                raise SystemExit("Program decision is not ready for rejection:\n  - " + "\n  - ".join(violations))
+            try:
+                require_judgement_snapshot(
+                    selected,
+                    expected_snapshot=args.expected_snapshot,
+                    owner="research-orchestrator",
+                    path=decisions_yaml.relative_to(root).as_posix(),
+                    root=root,
+                )
+            except ValueError as exc:
+                raise SystemExit(str(exc)) from exc
+            apply_judgement_rejection(selected, reason=args.reason)
+            selected["updated_at"] = utc_now_iso()
+            _yaml_path, path = write_decisions(root, args.program_id, items)
+            state = load_state(root, args.program_id)
+            decision_payload = selected.get("payload", {}).get("decision", {})
+            state["last_decision"] = {
+                "id": args.decision_id,
+                "decision": str(decision_payload.get("text") or ""),
+                "timestamp": str(selected.get("timestamp") or ""),
+                "confirmation_status": "rejected",
+            }
+            write_state(root, args.program_id, state)
+        print(path.relative_to(root))
+        checkpoint_and_report(
+            root,
+            trigger="milestone",
+            message=f"milestone: reject decision {args.program_id} {args.decision_id}",
+            target_paths=decision_targets,
         )
         return 0
     if args.command == "add-reporting-event":

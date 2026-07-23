@@ -292,6 +292,8 @@ def test_multi_file_method_design_is_undoable(tmp_path: Path, monkeypatch) -> No
     design = root / "kb/programs/p-method/design"
     assert len(list(design.iterdir())) == 4
     undo_last_operation(root)
-    assert not any(design.iterdir())
+    # The first method proposal owns the newly-created design directory as one
+    # recovery target, so undo restores the exact pre-operation state: absent.
+    assert not design.exists()
     assert not (root / "kb/programs/p-method/state.yaml").exists()
     assert not (root / "kb/programs/p-method/workflow/reporting-events.yaml").exists()

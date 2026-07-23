@@ -37,13 +37,13 @@ description: 负责 core idea unit 的生成、evidence-first analysis、陪练�
 
 ## 陪练模式
 
-`discuss`（别名 `spar`）采用 `prepare|verify|confirm` 三阶段合同，并按 conclusion 粒度持久化：
+`discuss`（别名 `spar`）采用 `prepare|verify|confirm|reject` 合同，并按 conclusion 粒度持久化：
 
 1. `prepare` 生成一份空白 conclusion，包含 `challenge`、`probe`、`counter-example`、`constructive-suggestion` 与 `conclusion` 五条 judgement claims。
 2. runtime agent 填 reviewer、总结性 conclusion、五条 claim，以及每条 claim 的 KB 逐字证据；canonical conclusion claim 的 text 必须与总结性 conclusion 完全一致。
 3. `verify` 对每个 evidence ref 到其 `source_unit_id` 的 canonical unit 中核验；例如 counter-example 引用 paper 时，quote 必须逐字存在于该 paper unit 的 artifact。
 4. 每次 verify 向 `discussion-judgements.yaml` 追加独立 `idea_discussion_conclusion` subject，包含 canonical `payload.claims + payload.verification`；nested conclusion 只是人类可读 projection。
-5. `confirm` 只确认指定 conclusion subject 的当前 receipt；多轮 spar 互不覆盖既有讨论历史或已确认 analysis/review claims。
+5. `confirm` 只确认指定 conclusion subject 的当前 receipt；`reject` 只关闭同一个已核验 subject，不要求确认署名，也不覆盖其它轮次。多轮 spar 互不覆盖既有讨论历史或已确认 analysis/review claims。
 
 ### `payload.discussion.conclusions[]` schema
 
@@ -57,7 +57,7 @@ payload:
         verified_at: ISO-8601 timestamp
         verification: evidence_verified
         judgement_id: discussion-<digest>
-        confirmation_status: pending_user_confirmation|confirmed
+        confirmation_status: pending_user_confirmation|confirmed|rejected
         claims:
           - id: challenge|probe|counter-example|constructive-suggestion|conclusion
             role: challenge|probe|counter-example|constructive-suggestion|conclusion

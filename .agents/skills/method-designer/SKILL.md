@@ -19,8 +19,8 @@ Use this skill only after an idea has been explicitly selected.
 6. Do not write `selected_repo_id`, advance the program stage, or emit a method-selection event during prepare.
 7. Have the runtime agent fill four canonical claims in the repo-choice artifact: `method-repo-selection`, `method-interfaces`, `method-baselines`, and `method-risks`. Each is a judgement-class claim with verbatim evidence; the repo-selection claim must name and cite the proposed repo unit.
 8. Verify the four claims and their evidence. A successful verify creates a current byte-bound verification receipt and makes the side judgement discoverable by public review, but still does not select the repo or advance the program.
-9. Only after the user's explicit current-message authorization, run the private `confirm-selection` route. Confirmation atomically writes `selected_repo_id`, advances to `implementation-planning`, updates dependent artifacts, and emits one `method-selected` event with the current ConfirmationReceipt binding.
-10. Hand the confirmed run grid to `experiment-workbench`.
+9. Only after the user's explicit current-message authorization, run the private `confirm-selection` route. Confirmation atomically writes `selected_repo_id`, advances to `implementation-planning`, updates dependent artifacts, and emits one `method-selected` event with the current ConfirmationReceipt binding. If the user rejects the displayed proposal, use the private `reject-selection` route; it closes that review subject without selecting a repo, advancing the stage, or emitting a method-selected event.
+10. Hand only a confirmed run grid to `experiment-workbench`.
 
 ## Shared Contract
 
@@ -31,7 +31,7 @@ Use this skill only after an idea has been explicitly selected.
 - The experiment matrix should cover baseline parity, minimal variant, ablation, and stress/failure slices.
 - Resource scaling is structural arithmetic, not material understanding: the script may set seed count, model-size tier, parallelism, GPU requirement, and feasibility from declared resources; the runtime agent supplies method rationale and evidence.
 - With no declared or parseable resources, preserve the legacy four-row matrix scale and mark feasibility unknown rather than inventing capacity.
-- Prepare/verify/confirm are independent mutation transactions. First-time prepare targets the new design directory so an abort cannot leak an empty directory; an existing directory uses only exact artifact paths.
+- Prepare/verify/confirm/reject are independent mutation transactions followed by exact-path checkpoints. First-time prepare targets the new design directory so an abort cannot leak an empty directory; an existing directory uses only exact artifact paths.
 - Only confirmed method selection emits a reporting event. Its binding includes the side subject kind/id/owner/path, claim ids, content digest, and verification digests.
 
 ## Resource Profile Shape

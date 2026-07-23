@@ -47,6 +47,7 @@ from research.core import (
     write_record,
 )
 from research.evidence import attach_claims, build_verification_receipt, validate_claims, verify_claim_evidence
+from research.judgements import apply_judgement_rejection, readiness_violations, require_judgement_snapshot
 
 STRATEGIES = [
     ("narrow-scope", "把问题边界收窄到一个最小可证伪切口。"),
@@ -707,9 +708,10 @@ def persist_discussion_conclusion(
         },
         "review_route": {
             "owner": "idea-workbench",
-            "action": "confirm-discussion",
+            "action": "discuss",
+            "phase": "confirm",
             "idea_id": record["id"],
-            "subject_id": conclusion["id"],
+            "conclusion_id": conclusion["id"],
         },
     }
     attach_claims(judgement["payload"], claims)
@@ -761,13 +763,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     discuss = subparsers.add_parser("discuss", aliases=["spar"])
     discuss.add_argument("--idea-id", "--id", dest="idea_id", required=True)
-    discuss.add_argument("--phase", choices=["prepare", "verify", "confirm"], default="prepare")
+    discuss.add_argument("--phase", choices=["prepare", "verify", "confirm", "reject"], default="prepare")
     discuss.add_argument("--input", default="")
     discuss.add_argument("--conclusion-id", default="")
     discuss.add_argument("--confirmed-by", default="")
     discuss.add_argument("--evidence", action="append", default=[])
     discuss.add_argument("--user-authorization", default="")
     discuss.add_argument("--authorization-source", default="")
+    discuss.add_argument("--reason", default="")
+    discuss.add_argument("--expected-snapshot", default="")
 
     assist = subparsers.add_parser("review-assist")
     assist.add_argument("--idea-id", action="append", default=[])
@@ -939,16 +943,58 @@ def _dispatch(args, root: Path) -> int:
             )
             return 0
 
-        if args.phase == "confirm":
+        if args.phase in {"confirm", "reject"}:
             if not str(args.conclusion_id or "").strip():
-                raise SystemExit("Discussion confirmation requires a conclusion id.")
+                raise SystemExit("Discussion decision requires a conclusion id.")
             judgements = load_discussion_judgements(unit_root, record["id"])
-            selected = next(
-                (item for item in judgements if str(item.get("id") or "") == str(args.conclusion_id)),
-                None,
-            )
-            if selected is None:
-                raise SystemExit("Discussion conclusion is not available for confirmation.")
+            matches = [
+                item
+                for item in judgements
+                if str(item.get("id") or "") == str(args.conclusion_id)
+            ]
+            if not matches:
+                raise SystemExit("Discussion conclusion is not available for this decision.")
+            if len(matches) != 1:
+                raise SystemExit("Discussion conclusion id is duplicated and requires repair.")
+            selected = matches[0]
+            sidecar_path = discussion_judgements_path(unit_root)
+            violations = readiness_violations(root, selected, sidecar_path)
+            if violations:
+                raise SystemExit("Discussion conclusion is not ready for this decision:\n  - " + "\n  - ".join(violations))
+            try:
+                require_judgement_snapshot(
+                    selected,
+                    expected_snapshot=args.expected_snapshot,
+                    owner="idea-workbench",
+                    path=rel(root, sidecar_path),
+                    root=root,
+                )
+            except ValueError as exc:
+                raise SystemExit(str(exc)) from exc
+            if args.phase == "reject":
+                apply_judgement_rejection(selected, reason=args.reason)
+                selected["updated_at"] = utc_now_iso()
+                write_discussion_judgements(unit_root, record["id"], judgements)
+                for projection in record.setdefault("payload", {}).setdefault("discussion", {}).setdefault("conclusions", []):
+                    if isinstance(projection, dict) and str(projection.get("judgement_id") or "") == str(args.conclusion_id):
+                        projection["confirmation_status"] = "rejected"
+                        projection["rejection"] = dict(selected.get("rejection") or {})
+                append_history(
+                    record,
+                    action="idea-discussion-rejected",
+                    summary="Rejected one evidence-grounded discussion conclusion.",
+                    information_types=["user_opinion", "evaluation"],
+                    artifacts=[rel(root, sidecar_path)],
+                )
+                write_record(root, record)
+                print(f"[ok] rejected discussion conclusion {args.conclusion_id}")
+                _queue_checkpoint(
+                    root,
+                    trigger="milestone",
+                    message=f"milestone: reject idea discussion {record['id']}",
+                    target_paths=[unit_root / "record.yaml", sidecar_path],
+                )
+                return 0
             claims = selected.get("payload", {}).get("claims", [])
             apply_confirmation(
                 selected,

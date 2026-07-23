@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +15,7 @@ from research.paths import record_path, unit_root
 from research.records import normalize_record_schema
 from research.core import default_record, locate_record, write_record
 from research.common import load_yaml, write_yaml_if_changed
+from research.judgements import judgement_snapshot_binding
 
 
 def _load_skill_script(skill: str, script_name: str):
@@ -337,6 +339,11 @@ def test_r1_program_decision_requires_two_stage_confirmation(tmp_path: Path, mon
     decision_id = decisions[0]["id"]
     assert decisions[0]["confirmation_status"] == "pending_user_confirmation"
     assert decisions[0]["payload"]["verification"]["artifacts"]
+    expected = judgement_snapshot_binding(
+        decisions[0],
+        owner="research-orchestrator",
+        path=orchestrate.decisions_path(tmp_path, program_id).relative_to(tmp_path).as_posix(),
+    )
 
     monkeypatch.setattr(
         sys,
@@ -346,6 +353,7 @@ def test_r1_program_decision_requires_two_stage_confirmation(tmp_path: Path, mon
             "--decision-id", decision_id, "--confirmed-by", "Human Reviewer", "--evidence",
             evidence_path.relative_to(tmp_path).as_posix(), "--user-authorization",
             "I confirm baseline A.", "--authorization-source", "user_message",
+            "--expected-snapshot", json.dumps(expected),
         ],
     )
     assert orchestrate.main() == 0
@@ -354,6 +362,8 @@ def test_r1_program_decision_requires_two_stage_confirmation(tmp_path: Path, mon
     assert confirmed["information_types"] == ["inference", "evaluation", "unverified"]
     assert confirmed["confirmation"]["claim_ids"] == ["claim-program-choice"]
     assert confirmed["confirmation"]["user_authorization"] == "I confirm baseline A."
+    with pytest.raises(SystemExit, match="not ready for confirmation"):
+        orchestrate.main()
 
 
 @pytest.mark.parametrize("skill", ["paper", "blog", "repo"])

@@ -21,7 +21,7 @@ from research.bootstrap import ensure_managed_runtime
 if __name__ == "__main__":
     ensure_managed_runtime(PROJECT_ROOT)
 
-from research.common import add_project_root_argument, confirm_command, parse_iso_datetime, print_resolved_project_roots, shell_command, skill_script_for_command, warn_if_cwd_differs_from_project_root
+from research.common import add_project_root_argument, confirm_command, parse_iso_datetime, print_resolved_project_roots, shell_command, skill_script_for_command, utc_now_iso, warn_if_cwd_differs_from_project_root
 from research.core import (
     build_index,
     audit_workspace,
@@ -61,6 +61,7 @@ from research.core import (
 )
 from research.git_ops import dirty_kb_paths
 from research.journal import abort_op, incomplete_ops, mutation_transaction
+from research.judgements import apply_judgement_rejection, require_judgement_snapshot
 from research.paths import KB_GITIGNORE_LINES, TEXT_REWRITE_SUFFIXES, kb_gitignore_path, kb_root, runtime_preferences_path, user_root
 
 COMMAND_PREFIX = "${RESEARCH_PYTHON:-python3}"
@@ -399,8 +400,8 @@ def render_review_queue(root: Path, hits: list[dict], *, kind: str | None = None
 
 def print_non_unit_review_notice() -> None:
     print(
-        "注意：确认收件箱当前只覆盖 knowledge unit；实验诊断子项 / decision-log 待决策 / "
-        "learnings 可能另有待确认，请分别查看。"
+        "注意：这个 owner 队列只列 knowledge unit；统一的公共 kb review 会另行聚合"
+        "实验诊断、program decision、idea discussion 与 method selection。"
     )
 
 
@@ -457,6 +458,7 @@ def build_parser() -> argparse.ArgumentParser:
     confirm.add_argument("--evidence", action="append", required=True)
     confirm.add_argument("--user-authorization", default="")
     confirm.add_argument("--authorization-source", default="")
+    confirm.add_argument("--expected-snapshot", default="")
 
     refresh = subparsers.add_parser("refresh-schema", help="Backfill the latest record schema")
     refresh.add_argument("--id", action="append", default=[])
@@ -491,6 +493,7 @@ def build_parser() -> argparse.ArgumentParser:
     promote.add_argument("--evidence", action="append", default=[])
     promote.add_argument("--user-authorization", default="")
     promote.add_argument("--authorization-source", default="")
+    promote.add_argument("--expected-snapshot", default="")
     return parser
 
 
@@ -732,6 +735,21 @@ def main() -> int:
         batch_paths = mutation_targets(root, record_targets(records, root), index_mutation_targets(root))
         with mutation_transaction(root, "batch_confirm", batch_paths):
             ensure_workspace(root)
+            if args.expected_snapshot:
+                if len(records) != 1:
+                    raise SystemExit("A review snapshot can apply to exactly one knowledge judgement.")
+                current, current_path = locate_record(root, str(records[0].get("id") or ""), kind=args.kind)
+                try:
+                    require_judgement_snapshot(
+                        current,
+                        expected_snapshot=args.expected_snapshot,
+                        owner="knowledge-base-manager",
+                        path=current_path.relative_to(root).as_posix(),
+                        root=root,
+                    )
+                except ValueError as exc:
+                    raise SystemExit(str(exc)) from exc
+                records = [current]
             written = apply_batch_confirmation(
                 root,
                 records,
@@ -838,17 +856,44 @@ def main() -> int:
         operation_paths = mutation_targets(root, record_targets([record], root), index_mutation_targets(root))
         with mutation_transaction(root, "promote_record", operation_paths):
             ensure_workspace(root)
-            path = promote_record(
-                root,
-                args.id,
-                status=args.status,
-                maturity=args.maturity,
-                confirmation_status=args.confirmation_status,
-                confirmed_by=args.confirmed_by,
-                evidence=args.evidence,
-                user_authorization=args.user_authorization,
-                authorization_source=args.authorization_source,
-            )
+            if args.expected_snapshot:
+                current, current_path = locate_record(root, args.id)
+                try:
+                    require_judgement_snapshot(
+                        current,
+                        expected_snapshot=args.expected_snapshot,
+                        owner="knowledge-base-manager",
+                        path=current_path.relative_to(root).as_posix(),
+                        root=root,
+                    )
+                except ValueError as exc:
+                    raise SystemExit(str(exc)) from exc
+            if args.expected_snapshot and args.confirmation_status == "rejected":
+                # Public review rejection is a judgement decision, not a loose
+                # lifecycle label: keep record and canonical claim state aligned.
+                reason = "; ".join(str(item).strip() for item in args.evidence if str(item).strip())
+                if confirmation_track(current) == "judgement":
+                    apply_judgement_rejection(current, reason=reason)
+                else:
+                    if str(current.get("confirmation_status") or "") != "pending_user_confirmation":
+                        raise SystemExit("Only a currently pending fact can be rejected from review.")
+                    current["confirmation_status"] = "rejected"
+                    current["needs_human_confirmation"] = False
+                    current.pop("confirmation", None)
+                    current["rejection"] = {"at": utc_now_iso(), "reason": reason}
+                path = write_record(root, current)
+            else:
+                path = promote_record(
+                    root,
+                    args.id,
+                    status=args.status,
+                    maturity=args.maturity,
+                    confirmation_status=args.confirmation_status,
+                    confirmed_by=args.confirmed_by,
+                    evidence=args.evidence,
+                    user_authorization=args.user_authorization,
+                    authorization_source=args.authorization_source,
+                )
             build_index(root)
         checkpoint_and_report(
             root,

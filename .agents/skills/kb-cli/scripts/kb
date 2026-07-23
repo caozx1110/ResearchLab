@@ -9,6 +9,7 @@ import shlex
 import subprocess
 import sys
 import unicodedata
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,6 +48,7 @@ from research.core import (
     validate_claims,
 )
 from research.sources import UnsafeLocalSourceError, validate_local_source
+from research.judgements import discover_pending_judgements, judgement_snapshot_binding
 from research import updater
 from research.obsidian import obsidian_projection_status, update_obsidian_projection
 
@@ -109,6 +111,12 @@ SCRIPT_BY_VERB = {
     "find": owner_script("knowledge-base-manager", "kb"),
     "recovery": owner_script("knowledge-base-manager", "kb"),
     "recall": owner_script("skill-evolution-advisor", "learnings"),
+}
+REVIEW_OWNER_SCRIPTS = {
+    "knowledge-base-manager": owner_script("knowledge-base-manager", "kb"),
+    "research-orchestrator": owner_script("research-orchestrator", "orchestrate"),
+    "idea-workbench": owner_script("idea-workbench", "idea"),
+    "method-designer": owner_script("method-designer", "method"),
 }
 
 
@@ -2376,6 +2384,213 @@ _PUBLIC_CLAIM_TYPE_LABELS = {
     "user_opinion": "用户观点",
 }
 
+_PUBLIC_REVIEW_LIMIT = 3
+_SIDE_JUDGEMENT_KIND_LABELS = {
+    "program_decision": "研究决策",
+    "idea_discussion_conclusion": "想法讨论结论",
+    "method_selection": "方法仓库选择",
+}
+_REVIEW_PRIORITY = {"critical": 4, "high": 3, "normal": 2, "low": 1}
+
+
+def _review_card_record(card: Mapping[str, object]) -> dict[str, object]:
+    """Project an internal side-artifact card into the existing review renderer."""
+    subject = card.get("subject")
+    subject = subject if isinstance(subject, Mapping) else {}
+    kind = str(subject.get("kind") or "")
+    claims = card.get("claims")
+    claims = claims if isinstance(claims, list) else []
+    information_types = sorted(
+        {
+            str(claim.get("claim_type") or "")
+            for claim in claims
+            if isinstance(claim, Mapping) and str(claim.get("claim_type") or "")
+        }
+    )
+    substance = card.get("substance")
+    substance = dict(substance) if isinstance(substance, Mapping) else {}
+    return {
+        "id": str(subject.get("id") or ""),
+        "kind": kind,
+        "title": _SIDE_JUDGEMENT_KIND_LABELS.get(kind, "跨流程判断"),
+        "priority": str(card.get("priority") or "normal"),
+        "updated_at": str(card.get("updated_at") or ""),
+        "confirmation_status": "pending_user_confirmation",
+        "needs_human_confirmation": True,
+        "information_types": [*information_types, "unverified"],
+        "source": {"kind": "ai"},
+        "payload": {**substance, "claims": claims, "verification": dict(card.get("verification") or {})},
+    }
+
+
+def _review_card_matches(card: Mapping[str, object], fuzzy: str | None) -> bool:
+    query = str(fuzzy or "").strip().casefold()
+    if not query:
+        return True
+    subject = card.get("subject")
+    subject = subject if isinstance(subject, Mapping) else {}
+    kind = str(subject.get("kind") or "").casefold()
+    if query in REVIEW_KIND_CHOICES:
+        return kind == query
+    claims = card.get("claims")
+    claims = claims if isinstance(claims, list) else []
+    searchable = [kind, str(subject.get("id") or "").casefold()]
+    searchable.extend(
+        str(claim.get("text") or "").casefold()
+        for claim in claims
+        if isinstance(claim, Mapping)
+    )
+    return any(query in value for value in searchable)
+
+
+def _review_sort_key(record: Mapping[str, object]) -> tuple[object, ...]:
+    priority = str(record.get("priority") or "normal").strip().casefold()
+    updated_at = str(record.get("updated_at") or record.get("timestamp") or "").strip()
+    return (
+        -_REVIEW_PRIORITY.get(priority, _REVIEW_PRIORITY["normal"]),
+        updated_at or "9999-12-31T23:59:59Z",
+        str(record.get("id") or ""),
+    )
+
+
+def _review_decision_routes(
+    record: Mapping[str, object],
+    card: Mapping[str, object] | None,
+) -> dict[str, object]:
+    kind = str(record.get("kind") or "")
+    subject_id = str(record.get("id") or "")
+    if kind in PUBLIC_KIND_LABELS:
+        routes = {
+            "subject": {"kind": kind, "id": subject_id, "owner": "knowledge-base-manager"},
+            "confirm_route": {
+                "owner": "knowledge-base-manager",
+                "action": "confirm",
+                "id": subject_id,
+            },
+            "reject_route": {
+                "owner": "knowledge-base-manager",
+                "action": "promote",
+                "id": subject_id,
+                "confirmation_status": "rejected",
+            },
+        }
+        routes["snapshot_binding"] = judgement_snapshot_binding(
+            dict(record),
+            owner="knowledge-base-manager",
+            path=record_path(Path("."), kind, subject_id).as_posix(),
+        )
+        return routes
+    raw_subject = card.get("subject") if isinstance(card, Mapping) else {}
+    subject = dict(raw_subject) if isinstance(raw_subject, Mapping) else {"kind": kind, "id": subject_id}
+    raw_confirm = card.get("confirm_route") if isinstance(card, Mapping) else {}
+    raw_confirm = raw_confirm if isinstance(raw_confirm, Mapping) else {}
+    owner = str(raw_confirm.get("owner") or subject.get("owner") or "")
+    if kind == "program_decision":
+        program_id = str(raw_confirm.get("program_id") or "")
+        confirm_route = {
+            "owner": owner or "research-orchestrator",
+            "action": "confirm-decision",
+            "program_id": program_id,
+            "decision_id": subject_id,
+        }
+        reject_route = {
+            "owner": owner or "research-orchestrator",
+            "action": "reject-decision",
+            "program_id": program_id,
+            "decision_id": subject_id,
+        }
+    elif kind == "idea_discussion_conclusion":
+        idea_id = str(raw_confirm.get("idea_id") or "")
+        confirm_route = {
+            "owner": owner or "idea-workbench",
+            "action": "discuss",
+            "phase": "confirm",
+            "idea_id": idea_id,
+            "conclusion_id": subject_id,
+        }
+        reject_route = {
+            "owner": owner or "idea-workbench",
+            "action": "discuss",
+            "phase": "reject",
+            "idea_id": idea_id,
+            "conclusion_id": subject_id,
+        }
+    elif kind == "method_selection":
+        program_id = str(raw_confirm.get("program_id") or "")
+        idea_id = str(raw_confirm.get("idea_id") or "")
+        confirm_route = {
+            "owner": owner or "method-designer",
+            "action": "confirm-selection",
+            "program_id": program_id,
+            "idea_id": idea_id,
+        }
+        reject_route = {
+            "owner": owner or "method-designer",
+            "action": "reject-selection",
+            "program_id": program_id,
+            "idea_id": idea_id,
+        }
+    else:
+        confirm_route = dict(raw_confirm)
+        reject_route = {**confirm_route, "action": "reject"}
+    snapshot_binding = card.get("snapshot_binding") if isinstance(card, Mapping) else {}
+    snapshot_binding = dict(snapshot_binding) if isinstance(snapshot_binding, Mapping) else {}
+    return {
+        "subject": subject,
+        "confirm_route": confirm_route,
+        "reject_route": reject_route,
+        "snapshot_binding": snapshot_binding,
+    }
+
+
+_SIDE_SUBSTANCE_FIELDS = {
+    "program_decision": (
+        ("decision", "text", "决策内容"),
+        ("decision", "rationale", "决策理由"),
+        ("decision", "stage", "适用阶段"),
+        ("decision", "alternatives", "备选方案"),
+    ),
+    "idea_discussion_conclusion": (
+        ("discussion_conclusion", "text", "讨论结论"),
+        ("discussion_conclusion", "reviewer", "结论撰写者"),
+    ),
+    "method_selection": (
+        ("method_selection", "proposed_repo_id", "拟选代码仓"),
+        ("method_selection", "selected_repo_id", "确认后代码仓"),
+        ("method_selection", "selection_reason", "选择理由"),
+    ),
+}
+
+
+def _public_side_substance(record: Mapping[str, object], root: Path) -> tuple[str, list[dict[str, str]]]:
+    kind = str(record.get("kind") or "")
+    fields = _SIDE_SUBSTANCE_FIELDS.get(kind)
+    if fields is None:
+        return "ready", []
+    payload = record.get("payload")
+    payload = payload if isinstance(payload, Mapping) else {}
+    rows: list[dict[str, str]] = []
+    for section, field, label in fields:
+        section_value = payload.get(section)
+        if not isinstance(section_value, Mapping):
+            continue
+        value = section_value.get(field)
+        if value in (None, "", [], {}):
+            continue
+        if isinstance(value, list) and all(not isinstance(item, (dict, list, tuple, set)) for item in value):
+            raw_text = "；".join(str(item) for item in value)
+        elif isinstance(value, (str, int, float, bool)):
+            raw_text = str(value)
+        else:
+            return "unsafe", []
+        text = _render_public_claim_text(raw_text, root)
+        if text is None or len(text) > _PUBLIC_CLAIM_TEXT_HARD_CAP:
+            return "unsafe", []
+        rows.append({"label": label, "text": text})
+    if not rows:
+        return "invalid", []
+    return "ready", rows
+
 
 def public_review_projection(record: dict, root: Path) -> dict[str, object]:
     """Project the full confirmation receipt scope, classifying any block."""
@@ -2463,25 +2678,34 @@ def public_review_projection(record: dict, root: Path) -> dict[str, object]:
         return {"status": "unsafe", "track": track, "claims": []}
     if len(projected) != len(canonical_claims):
         return {"status": "invalid", "track": track, "claims": []}
-    return {"status": "ready", "track": track, "claims": projected, "fact_summary": ""}
+    substance_status, substance = _public_side_substance(record, root)
+    if substance_status != "ready":
+        return {"status": substance_status, "track": track, "claims": []}
+    return {
+        "status": "ready",
+        "track": track,
+        "claims": projected,
+        "fact_summary": "",
+        "substance": substance,
+    }
 
 
 def print_review_item(record: dict, projection: Mapping[str, object], root: Path) -> None:
     raw_unit_id = str(record.get("id") or "-")
     unit_id = _public_display_text(raw_unit_id, root, "编号已隐藏", 100)
-    kind = {
-        "paper": "论文",
-        "repo": "代码仓",
-        "dataset": "数据集",
-        "blog": "博客",
-        "idea": "研究想法",
-        "experiment": "实验",
-    }.get(str(record.get("kind") or ""), "知识条目")
+    raw_kind = str(record.get("kind") or "")
+    kind = PUBLIC_KIND_LABELS.get(raw_kind, _SIDE_JUDGEMENT_KIND_LABELS.get(raw_kind, "知识条目"))
     title = _public_display_text(record.get("title") or "-", root, "标题需由 Agent 安全解释", 160)
     print(f"- {kind}「{title}」（{unit_id}）")
     fact_summary = str(projection.get("fact_summary") or "")
     if fact_summary:
         print(f"  待确认的事实信息：{fact_summary}")
+    substance = projection.get("substance")
+    substance = substance if isinstance(substance, list) else []
+    if substance:
+        print("  本次拍板同时绑定：")
+        for item in substance:
+            print(f"  - {item['label']}：{item['text']}")
     claims = projection.get("claims")
     claims = claims if isinstance(claims, list) else []
     if claims:
@@ -2501,9 +2725,18 @@ def build_review_apply_commands(
     reject_ids: Sequence[str],
     evidence: str,
     *,
+    allowed_ids: Sequence[str],
     user_authorization: str = "",
     authorization_source: str = "user_message",
 ) -> list[tuple[str, Sequence[str]]]:
+    allowed = {str(item) for item in allowed_ids}
+    requested = {str(item) for item in [*confirm_ids, *reject_ids]}
+    outside_snapshot = sorted(requested - allowed)
+    if outside_snapshot:
+        raise ValueError(
+            "review decision includes subjects outside the displayed review snapshot: "
+            + ", ".join(outside_snapshot)
+        )
     commands: list[tuple[str, Sequence[str]]] = []
     if confirm_ids:
         confirm_args: list[str] = ["confirm"]
@@ -2522,7 +2755,263 @@ def build_review_apply_commands(
     return commands
 
 
+def _review_subject_ref(subject: Mapping[str, object]) -> str:
+    return f"{str(subject.get('kind') or '')}:{str(subject.get('id') or '')}"
+
+
+def _store_review_snapshot(
+    root: Path,
+    protocol_name: str,
+    items: Sequence[Mapping[str, object]],
+) -> str:
+    protocol_path = agent_protocol_path(root, protocol_name)
+    runtime_root = (root / "kb/.runtime").resolve()
+    token = uuid.uuid4().hex
+    snapshot_root = runtime_root / "review-snapshots"
+    snapshot_root.mkdir(parents=True, exist_ok=True)
+    path = snapshot_root / f"{token}.json"
+    temporary = snapshot_root / f".{token}.{os.getpid()}.tmp"
+    payload = {
+        "schema": "kb-review-snapshot/v1",
+        "protocol_path": protocol_path.relative_to(runtime_root).as_posix(),
+        "review_items": [dict(item) for item in items],
+    }
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary, path)
+    return token
+
+
+def _load_review_snapshot(root: Path, requested: str) -> list[dict[str, object]]:
+    path = agent_protocol_path(root, requested)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("review snapshot is missing or invalid") from exc
+    if payload.get("schema") != "kb-agent-protocol/v1" or payload.get("verb") != "review":
+        raise ValueError("review snapshot has the wrong protocol type")
+    actions = payload.get("next_actions")
+    actions = actions if isinstance(actions, list) else []
+    present = next(
+        (item for item in actions if isinstance(item, dict) and item.get("action") == "present_review_items"),
+        None,
+    )
+    items = present.get("review_items") if isinstance(present, dict) else None
+    apply_contract = present.get("apply") if isinstance(present, dict) else None
+    apply_contract = apply_contract if isinstance(apply_contract, dict) else {}
+    token = str(apply_contract.get("snapshot_token") or "")
+    if not isinstance(items, list) or not items or len(items) > _PUBLIC_REVIEW_LIMIT:
+        raise ValueError("review snapshot has no displayed decision items")
+    normalized = [dict(item) for item in items if isinstance(item, dict)]
+    refs = [_review_subject_ref(item.get("subject", {})) for item in normalized]
+    if len(normalized) != len(items) or len(set(refs)) != len(refs) or any(ref == ":" for ref in refs):
+        raise ValueError("review snapshot contains ambiguous subjects")
+    if re.fullmatch(r"[0-9a-f]{32}", token) is None:
+        raise ValueError("review snapshot has no valid one-time token")
+    runtime_root = (root / "kb/.runtime").resolve()
+    stored_path = runtime_root / "review-snapshots" / f"{token}.json"
+    claimed_path = runtime_root / "review-snapshots" / f".{token}.claimed-{os.getpid()}"
+    try:
+        os.replace(stored_path, claimed_path)
+        stored = json.loads(claimed_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("review snapshot is missing, already used, or invalid") from exc
+    finally:
+        if claimed_path.exists():
+            claimed_path.unlink()
+    if (
+        not isinstance(stored, dict)
+        or stored.get("schema") != "kb-review-snapshot/v1"
+        or stored.get("protocol_path") != path.relative_to(runtime_root).as_posix()
+        or stored.get("review_items") != normalized
+    ):
+        raise ValueError("review snapshot does not match the displayed one-time decision set")
+    return normalized
+
+
+def _current_review_item(root: Path, subject: Mapping[str, object]) -> dict[str, object]:
+    kind = str(subject.get("kind") or "")
+    subject_id = str(subject.get("id") or "")
+    if kind in PUBLIC_KIND_LABELS:
+        matches = [
+            record
+            for record in load_review_records(root, kind)
+            if str(record.get("kind") or "") == kind
+            and str(record.get("id") or "") == subject_id
+            and not _record_is_rejected(record)
+        ]
+        if len(matches) != 1 or not is_ready_for_human_review(matches[0]):
+            raise ValueError("displayed knowledge judgement is no longer uniquely ready")
+        if public_review_projection(matches[0], root).get("status") != "ready":
+            raise ValueError("displayed knowledge judgement is no longer safe to confirm")
+        return _review_decision_routes(matches[0], None)
+    matches = [
+        card
+        for card in discover_pending_judgements(root)
+        if str(card.get("subject", {}).get("kind") or "") == kind
+        and str(card.get("subject", {}).get("id") or "") == subject_id
+    ]
+    if len(matches) != 1:
+        raise ValueError("displayed side judgement is no longer uniquely ready")
+    record = _review_card_record(matches[0])
+    if public_review_projection(record, root).get("status") != "ready":
+        raise ValueError("displayed side judgement is no longer safe to confirm")
+    return _review_decision_routes(record, matches[0])
+
+
+def _review_owner_command(
+    item: Mapping[str, object],
+    decision: str,
+    *,
+    actor: str,
+    evidence: Sequence[str],
+    user_authorization: str,
+    rejection_reason: str,
+) -> tuple[str, list[str]]:
+    route_key = "confirm_route" if decision == "confirm" else "reject_route"
+    route = item.get(route_key)
+    route = route if isinstance(route, Mapping) else {}
+    owner = str(route.get("owner") or "")
+    action = str(route.get("action") or "")
+    script = REVIEW_OWNER_SCRIPTS.get(owner)
+    if script is None:
+        raise ValueError("review route owner is unsupported")
+    snapshot = item.get("snapshot_binding")
+    if not isinstance(snapshot, Mapping):
+        raise ValueError("review route has no snapshot binding")
+    expected_snapshot = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+    if owner == "knowledge-base-manager":
+        if decision == "confirm" and action == "confirm":
+            arguments = ["confirm", "--id", str(route.get("id") or "")]
+        elif decision == "reject" and action == "promote":
+            arguments = ["promote", "--id", str(route.get("id") or ""), "--confirmation-status", "rejected"]
+        else:
+            raise ValueError("knowledge review route is invalid")
+    elif owner == "research-orchestrator" and action in {"confirm-decision", "reject-decision"}:
+        arguments = [
+            action,
+            "--program-id",
+            str(route.get("program_id") or ""),
+            "--decision-id",
+            str(route.get("decision_id") or ""),
+        ]
+    elif owner == "idea-workbench" and action == "discuss":
+        arguments = [
+            "discuss",
+            "--idea-id",
+            str(route.get("idea_id") or ""),
+            "--phase",
+            str(route.get("phase") or ""),
+            "--conclusion-id",
+            str(route.get("conclusion_id") or ""),
+        ]
+    elif owner == "method-designer" and action in {"confirm-selection", "reject-selection"}:
+        arguments = [
+            action,
+            "--program-id",
+            str(route.get("program_id") or ""),
+            "--idea-id",
+            str(route.get("idea_id") or ""),
+        ]
+    else:
+        raise ValueError("review route action is invalid")
+
+    arguments.extend(["--expected-snapshot", expected_snapshot])
+    if decision == "confirm":
+        arguments.extend(["--confirmed-by", actor])
+        for item_evidence in evidence:
+            arguments.extend(["--evidence", str(item_evidence)])
+        arguments.extend(
+            [
+                "--user-authorization",
+                user_authorization,
+                "--authorization-source",
+                "user_message",
+            ]
+        )
+    elif rejection_reason:
+        if owner == "knowledge-base-manager":
+            arguments.extend(["--evidence", rejection_reason])
+        else:
+            arguments.extend(["--reason", rejection_reason])
+    return script, arguments
+
+
+def handle_review_apply(args: argparse.Namespace, root: Path) -> int:
+    try:
+        snapshot_items = _load_review_snapshot(root, args.apply_snapshot)
+        snapshot_by_ref = {
+            _review_subject_ref(item.get("subject", {})): item
+            for item in snapshot_items
+        }
+        confirm_refs = [str(item) for item in args.confirm_ref]
+        reject_refs = [str(item) for item in args.reject_ref]
+        requested = [*confirm_refs, *reject_refs]
+        if not requested or len(set(requested)) != len(requested):
+            raise ValueError("review decisions are empty or duplicated")
+        if len(requested) != 1:
+            raise ValueError("apply exactly one displayed review decision at a time")
+        outside = sorted(set(requested) - set(snapshot_by_ref))
+        if outside:
+            raise ValueError("review decision is outside the displayed Top 3 snapshot")
+        actor = default_confirmed_by(root)
+        if confirm_refs and (not actor or is_ai_signer(actor)):
+            raise ValueError("a real human confirmation identity is required")
+        user_authorization = str(args.user_authorization or "").strip()
+        evidence = [str(item).strip() for item in args.decision_evidence if str(item).strip()]
+        if confirm_refs and (not user_authorization or not evidence):
+            raise ValueError("confirmation requires the user's current authorization and evidence")
+
+        current_items: dict[str, dict[str, object]] = {}
+        for ref in requested:
+            snapshot_item = snapshot_by_ref[ref]
+            current = _current_review_item(root, snapshot_item.get("subject", {}))
+            if current.get("snapshot_binding") != snapshot_item.get("snapshot_binding"):
+                raise ValueError("review snapshot is stale; show the current judgement again")
+            current_items[ref] = current
+        commands = [
+            _review_owner_command(
+                current_items[ref],
+                "confirm",
+                actor=actor,
+                evidence=evidence,
+                user_authorization=user_authorization,
+                rejection_reason="",
+            )
+            for ref in confirm_refs
+        ] + [
+            _review_owner_command(
+                current_items[ref],
+                "reject",
+                actor="",
+                evidence=[],
+                user_authorization="",
+                rejection_reason=str(args.rejection_reason or "").strip(),
+            )
+            for ref in reject_refs
+        ]
+    except ValueError as exc:
+        set_protocol_status("agent_action_required", review_apply_error=str(exc))
+        print("这次拍板没有应用；待确认内容已经变化或不在刚才展示的范围内，请重新运行 kb review。", file=sys.stderr)
+        return 2
+
+    for script, arguments in commands:
+        result = forward_command(root, script, arguments, stream=False)
+        if result.returncode != 0:
+            set_protocol_status("agent_action_required", review_apply_error="owner rejected the current review decision")
+            print("这次拍板没有完整应用；请重新运行 kb review 查看当前状态。", file=sys.stderr)
+            return result.returncode
+    set_protocol_status("completed", applied_review_count=len(commands))
+    print(f"已应用 {len(commands)} 条拍板结果；可再次运行 kb review 查看剩余内容。")
+    return 0
+
+
 def handle_review(args: argparse.Namespace, root: Path) -> int:
+    if str(getattr(args, "apply_snapshot", "") or "").strip():
+        return handle_review_apply(args, root)
     result = forward_command(
         root,
         SCRIPT_BY_VERB["review"],
@@ -2532,11 +3021,49 @@ def handle_review(args: argparse.Namespace, root: Path) -> int:
     if result.returncode != 0:
         print("确认收件箱暂时无法读取；详细诊断已保留给 Agent。", file=sys.stderr)
         return result.returncode
-    records = [record for record in load_review_records(root, args.fuzzy) if not _record_is_rejected(record)]
-    ready_candidates = [record for record in records if is_ready_for_human_review(record)]
+    raw_records = [record for record in load_review_records(root, args.fuzzy) if not _record_is_rejected(record)]
+    unit_subject_counts: dict[tuple[str, str], int] = {}
+    for record in raw_records:
+        key = (str(record.get("kind") or ""), str(record.get("id") or ""))
+        unit_subject_counts[key] = unit_subject_counts.get(key, 0) + 1
+    duplicate_unit_subjects = {key for key, count in unit_subject_counts.items() if count != 1}
+    duplicate_records = [
+        record
+        for record in raw_records
+        if (str(record.get("kind") or ""), str(record.get("id") or "")) in duplicate_unit_subjects
+    ]
+    records = [
+        record
+        for record in raw_records
+        if (str(record.get("kind") or ""), str(record.get("id") or "")) not in duplicate_unit_subjects
+    ]
+    cards = [card for card in discover_pending_judgements(root) if _review_card_matches(card, args.fuzzy)]
+    card_by_subject: dict[tuple[str, str], dict[str, object]] = {}
+    for card in cards:
+        subject = card.get("subject")
+        subject = subject if isinstance(subject, Mapping) else {}
+        card_by_subject[(str(subject.get("kind") or ""), str(subject.get("id") or ""))] = card
+    existing_subjects = {
+        (str(record.get("kind") or ""), str(record.get("id") or ""))
+        for record in records
+    }
+    discovered_only_subjects = {key for key in card_by_subject if key not in existing_subjects}
+    records.extend(
+        _review_card_record(card)
+        for key, card in card_by_subject.items()
+        if key in discovered_only_subjects
+    )
+    ready_candidates = [
+        record
+        for record in records
+        if (
+            (str(record.get("kind") or ""), str(record.get("id") or "")) in discovered_only_subjects
+            or is_ready_for_human_review(record)
+        )
+    ]
     pending: list[dict] = []
-    projection_by_id: dict[str, dict[str, object]] = {}
-    structurally_blocked: list[dict] = []
+    projection_by_subject: dict[tuple[str, str], dict[str, object]] = {}
+    structurally_blocked: list[dict] = list(duplicate_records)
     unsafe_blocked: list[dict] = []
     for record in ready_candidates:
         projection = public_review_projection(record, root)
@@ -2547,27 +3074,54 @@ def handle_review(args: argparse.Namespace, root: Path) -> int:
             unsafe_blocked.append(record)
             continue
         pending.append(record)
-        projection_by_id[str(record.get("id") or "")] = projection
+        projection_by_subject[(str(record.get("kind") or ""), str(record.get("id") or ""))] = projection
     blocked = [*structurally_blocked, *unsafe_blocked]
     if pending:
-        pending_ids = [str(record.get("id") or "") for record in pending]
+        pending.sort(key=_review_sort_key)
+        displayed = pending[:_PUBLIC_REVIEW_LIMIT]
+        remaining_count = len(pending) - len(displayed)
+        displayed_ids = [str(record.get("id") or "") for record in displayed]
         configured_actor = default_confirmed_by(root)
         confirmation_identity_required = not configured_actor or is_ai_signer(configured_actor)
         set_protocol_status(
             "needs_user_authorization",
             review_count=len(pending),
-            record_ids=pending_ids,
+            record_ids=displayed_ids,
+            displayed_review_count=len(displayed),
+            displayed_record_ids=displayed_ids,
+            remaining_review_count=remaining_count,
             blocked_review_count=len(blocked),
             blocked_review_records=blocked,
             invalid_review_count=len(structurally_blocked),
             unsafe_review_count=len(unsafe_blocked),
             confirmation_identity_required=confirmation_identity_required,
         )
+        review_items = [
+            _review_decision_routes(
+                record,
+                card_by_subject.get((str(record.get("kind") or ""), str(record.get("id") or ""))),
+            )
+            for record in displayed
+        ]
+        snapshot_token = _store_review_snapshot(
+            root,
+            str(getattr(args, "agent_protocol", "") or ""),
+            review_items,
+        ) if _ACTIVE_PROTOCOL is not None else ""
         add_agent_action(
             "present_review_items",
-            records=pending,
+            records=displayed,
+            review_items=review_items,
             decision_fields=["decision", "user_authorization", "authorization_source", "evidence"],
             authorization_source="user_message",
+            apply={
+                "verb": "review",
+                "mode": "snapshot-bound",
+                "snapshot_protocol": str(getattr(args, "agent_protocol", "") or ""),
+                "scope": "displayed_review_items_only",
+                "max_decisions_per_apply": 1,
+                "snapshot_token": snapshot_token,
+            },
         )
         if confirmation_identity_required:
             add_agent_action(
@@ -2581,11 +3135,20 @@ def handle_review(args: argparse.Namespace, root: Path) -> int:
                     "fields": ["human_name"],
                     "field_inputs": {"human_name": {"input": "--name"}},
                 },
-                then="apply_review_decision",
+                then="apply_review_snapshot_decision",
             )
-        print(f"有 {len(pending)} 条待确认内容已经准备好：")
-        for record in pending:
-            print_review_item(record, projection_by_id[str(record.get("id") or "")], root)
+        if remaining_count:
+            print(f"有 {len(pending)} 条待确认内容已经准备好；本次先显示最需要你拍板的 {len(displayed)} 条：")
+        else:
+            print(f"有 {len(pending)} 条待确认内容已经准备好：")
+        for record in displayed:
+            print_review_item(
+                record,
+                projection_by_subject[(str(record.get("kind") or ""), str(record.get("id") or ""))],
+                root,
+            )
+        if remaining_count:
+            print(f"另有 {remaining_count} 条已准备好的内容暂未展开；处理这批后可继续查看。")
         print("以上待确认内容已经过当前流程核验；以上内容需要你用自然语言确认或拒绝，在你拍板前不会写成已确认结论。")
         if confirmation_identity_required:
             print("如果你选择确认，确认前还需要你的真实署名。")
@@ -2682,6 +3245,12 @@ def register_ingest(subparsers: argparse._SubParsersAction[argparse.ArgumentPars
 def register_review(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     parser = subparsers.add_parser("review", help="查看确认收件箱并用自然语言拍板")
     parser.add_argument("fuzzy", nargs="?", metavar="<筛选词>", help="可选的资料类型或关键词")
+    parser.add_argument("--apply-snapshot", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--confirm-ref", action="append", default=[], help=argparse.SUPPRESS)
+    parser.add_argument("--reject-ref", action="append", default=[], help=argparse.SUPPRESS)
+    parser.add_argument("--decision-evidence", action="append", default=[], help=argparse.SUPPRESS)
+    parser.add_argument("--user-authorization", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--rejection-reason", default="", help=argparse.SUPPRESS)
     parser.set_defaults(handler=handle_review)
 
 
