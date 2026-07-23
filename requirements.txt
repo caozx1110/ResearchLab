@@ -9,6 +9,14 @@ PyYAML==6.0.3
 pymupdf4llm==0.0.27
 PyMuPDF==1.26.5
 
+# Complete HTML -> Markdown reading views for people, agents, and Obsidian.
+# Keep the full lightweight transitive closure pinned for reproducible installs.
+markdownify==1.2.3
+beautifulsoup4==4.15.0
+soupsieve==2.8.4
+six==1.17.0
+typing_extensions==4.16.0
+
 # --- Optional heavy PDF backends (NOT installed by default) -----------------
 # For tables/formulas/complex layouts a heavier backend can be worth it, but
 # they require torch (+ effectively a GPU) and download several GB of models on

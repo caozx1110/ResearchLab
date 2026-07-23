@@ -12,7 +12,7 @@
 
 ## 运行时 <a id="runtime"></a>
 
-所有 skill 脚本在直接运行时会先检查当前 Python 是否能 `import yaml`。如果不能，会自动创建并切换到项目内受管 `.venv`（含 PyYAML），用户无需手动创建 venv、运行 pip 或导出 `RESEARCH_PYTHON`。
+所有 skill 脚本支持 Python 3.9+；直接运行时会先检查当前 Python 是否能导入核心 runtime。如果不能，会自动创建并切换到项目内受管 `.venv`（含 PyYAML），用户无需手动创建 venv、运行 pip 或导出 `RESEARCH_PYTHON`。安全更新保留已有受管 venv，因此 shipping module 的 import-time 类型别名也必须保持 Python 3.9 可求值。
 
 - `RESEARCH_PYTHON`：可选覆盖解释器；若该解释器可 `import yaml`，脚本会优先 re-exec 到它。
 - `RESEARCH_VENV`：覆盖受管 venv 路径；默认是安装本仓库的目录下 `.venv`（与 `.agents` 同级）。
@@ -92,7 +92,13 @@ priority: normal                     # high|normal|low
 summary: ""                          # 1-2 句，AI 写入时必须 pending
 links:                               # 关联其它 unit
 - target_id: <unit-id>
-  relation: builds_on|cites|implements|...
+  relation: builds_on|cites|implements|uses_dataset|supports|contradicts|part_of|related_to|similar_to|...
+  source_locator:                    # 可选；边从当前 unit 的具体位置发出
+    kind: unit|heading|block
+    value: <heading-or-stable-block-id>
+  target_locator:                    # 可选；精确指向目标 unit 的标题或块
+    kind: unit|heading|block
+    value: <heading-or-stable-block-id>
   note: ""
 reuse_flags:                         # 是否已被下游 skill 复用
   review: false
@@ -114,6 +120,18 @@ source:
   backup_paths: []                   # 仓内备份相对路径
   backup_kind: file|dir
   file_hash: ""                      # sha256（如有）
+  markdown_path: ""                  # kb-relative 完整阅读层：.../source/document.md
+  markdown_hash: ""                  # document.md sha256
+  materialization:                   # 可解析非 repo source 的确定性 Markdown 投影
+    schema: research-source-markdown/v2
+    status: complete|degraded
+    converter: pymupdf4llm|markdownify|identity|plain-text|fallback
+    converter_version: ""
+    source_map_path: ""               # kb-relative .../source/source-map.yaml
+    conversion_path: ""               # kb-relative .../source/conversion.yaml
+    archive_path: ""                  # HTML only：kb-relative .../source/archive.html 离线阅读页
+    archive_hash: ""                  # archive.html sha256
+    asset_paths: []                   # kb-relative source/assets/*，按内容 hash 命名
 payload:                             # 见下方 per-kind payload
   claims: []                         # canonical claims SSOT；sidecar 只允许是投影
   verification:                      # analyzer verify 的 byte-bound receipt
@@ -138,7 +156,49 @@ history:                             # append_history() 写入
   artifacts: []
 ```
 
+`source.markdown_path` 是人类、runtime agent 与 Obsidian 共用的首选阅读面，但不是对原件的替代。它必须完整、不使用 intake 的 page/section 字符截断预算，并与 `source-map.yaml`、`conversion.yaml`、`assets/` 一起位于 unit 的 `source/` containment 内。HTML source 额外生成 `archive.html`：它是带内联阅读样式、引用本地 hash asset 的离线阅读页；服务器响应 `source.html` 仍保持原始字节。`document.md`、`archive.html` 及其映射一经 canonical materialization 即只读；转换器/配置升级不能原地覆盖已被 verification receipt 消费的 bytes。派生文件必须先在同盘 staging 完整生成并统一做 immutable-collision 预检，发布时 `conversion.yaml` 最后写入作为完整 bundle 的 commit marker；失败只能保留原件和此前已存在的不可变文件，不能留下新的半套 document/map/archive/assets。旧 record 可以没有这些 additive 字段，读侧必须兼容 v1。
+
+图片统一写本地相对引用，不允许 Base64 内联。PDF 图片记录 page/bbox，HTML/Markdown 图片记录原 URL 或路径及 anchor；抓取失败时 `materialization.status=degraded` 并在 conversion warnings 中留痕，原文件仍可 fallback。HTML/Markdown 的 fenced/inline code（包括跨行 code span）、front matter、Setext/ATX heading、reference/Obsidian/raw-HTML image 必须按语法上下文处理；非代码 raw HTML 必须移除 executable element、事件属性、表单 action 与控制字符混淆的危险 URL。复杂合并单元格表格保留为被动 raw HTML，纯文本按 literal 显示。四条 materializer 共用输出质量指标，无法确定性修复的结构问题必须告警降级。若正文转换器整体失败，必须生成只指向原件的 degraded reading stub 与完整失败清单，不能丢失原始 bytes 或伪装成完整 Markdown。repo 不建立 `document.md` 镜像，源码身份继续使用可信 `repo_root` 下的 `repo_id + relative_path`。
+
+`links` 只保存显式声明的**正向有向边**。反向关系由共享 relation registry 在读取/投影时推导，禁止再向目标 record 复制 `reverse:<relation>`。内置 inverse 为：`cites↔cited_by`、`builds_on↔extended_by`、`implements↔implemented_by`、`uses_dataset↔used_by`、`supports↔supported_by`、`contradicts↔contradicted_by`、`part_of↔contains`；`related_to`、`similar_to` 对称。旧 `reverse:*` 可读但不再写：匹配正向边时折叠，孤立旧边保留为 legacy-derived 视图并由 Obsidian audit 提示迁移。
+
+locator 省略等价于 unit 级。`heading.value` 是生成页中精确标题文本；`block.value` 必须是 Obsidian 可识别的稳定块 ID（仅拉丁字母、数字、连字符），写入时做确定性规范化。canonical claim ID 投影为 claim block；evidence block ID 由 claim ID 与 evidence 序号确定，允许 `[[unit#^block-id]]` 精确引用。locator 只改变导航精度，不改变 relation 的确认状态或 evidence 门控。
+
 `write_record()` 默认以调用方 record 携带的 `revision` 作为 expected revision：已有记录缺 revision 时 fail-closed；新记录期望 0。两个并发读者中先写者成功并递增 revision，后写者的 stale revision 必须冲突拒绝，不能静默覆盖。显式 `expected_revision` 仅用于调用方有意覆盖默认期望值。
+
+### Obsidian 派生投影 <a id="obsidian-projection"></a>
+
+`kb/` 可直接作为 Obsidian Vault。系统只管理下列派生区，不生成 `.obsidian/`：
+
+```text
+kb/obsidian/
+├── managed/
+│   ├── Home.md
+│   ├── units/<unit-id>.md
+│   ├── programs/<program-id>.md
+│   ├── topics/<topic-id>.md
+│   ├── dashboards/{All Units,Pending Review,By Topic}.base
+│   └── manifest.yaml
+├── inbox/          # 人工区，投影器不遍历/覆盖
+└── annotations/    # 人工区，投影器不遍历/覆盖
+```
+
+unit 页 frontmatter 是扁平 Obsidian Properties：`id/kind/title/aliases/status/maturity/confirmation_status/topics/programs/tags/managed_by/source_path`，并按实际关系增加 `rel_<relation>` 列表。所有 Properties 中的内部链接都是带引号的 wikilink。正文固定提供 `Overview/Metadata/Relationships/Claims` 标题；canonical claim 与 evidence quote 带稳定 block ID。
+
+`manifest.yaml`：
+
+```yaml
+schema: research-kb-obsidian/v1
+generated_at: <UTC ISO-8601>
+input_digest: <sha256 of canonical records + programs + taxonomy>
+record_count: 0
+program_count: 0
+files:
+  Home.md: <sha256>
+  units/<unit-id>.md: <sha256>
+```
+
+`files` 的 key 只能是 `managed/` 内相对路径且不得包含 absolute/`.`/`..`，manifest 不拥有自身。更新只覆盖 digest 仍匹配上一 manifest 的文件；过期清理只删除上一 manifest 明确拥有且 bytes 未漂移的普通文件。symlink、特殊类型、未登记文件与人工改动一律保留并报告。整个 managed 更新走 operation journal；manifest 最后写，意外中断后可重跑或通过恢复合同撤销。
 
 ### per-kind payload <a id="unit-payload"></a>
 
@@ -553,6 +613,8 @@ claim:
       summary: ""                 # 可选转述
 ```
 
+Agent 阅读可优先使用 `source/document.md`；`artifact` 仍保持上述锁定证据协议，由机器按原始 artifact 与逐字 quote 复验。
+
 Repo workspace 源码是唯一外部扩展，evidence ref 额外声明 `external_source: {kind: repo}`；可信 `base_root` 只能由 repo record / caller 提供，不是 claim 字段。例：
 
 ```yaml
@@ -575,7 +637,7 @@ Repo workspace 源码是唯一外部扩展，evidence ref 额外声明 `external
 | `confirmation_status` | claim | 必填，取 `pending_user_confirmation` / `confirmed` / `rejected` / `auto_confirmed` 之一（与 record 的 `CONFIRMATION_VALUES` 同族）。 |
 | `evidence_refs` | claim | 必填列表（fact / unverified 可空；judgement-class 非空）；一旦有 ref，每条的 `source_unit_id` / `artifact` / `locator` / `quote` 都必须是非空文本。 |
 | `source_unit_id` | ref | 证据所在 unit id。 |
-| `artifact` | ref | unit 内相对路径（`parse-cache.yaml` / `note.md` / source 文件）；逐字校验对此文件文本进行。 |
+| `artifact` | ref | unit 内相对路径（`parse-cache.yaml` / `source/document.md` / `note.md` / source 文件）；逐字校验对此文件文本进行。 |
 | `locator` | ref | 定位提示，两套（见下）。 |
 | `quote` | ref | **短逐字片段（B3）**——脚本校验它逐字存在于 `artifact`。 |
 | `summary` | ref | 可选转述（不参与逐字校验）。 |

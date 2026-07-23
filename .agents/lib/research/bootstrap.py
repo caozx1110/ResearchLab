@@ -11,13 +11,22 @@ import sys
 from pathlib import Path
 
 READY_FLAG = "_RESEARCH_RUNTIME_READY"
+CORE_RUNTIME_MODULES = ("yaml", "markdownify", "bs4")
+CORE_RUNTIME_PACKAGES = (
+    "pyyaml==6.0.3",
+    "markdownify==1.2.3",
+    "beautifulsoup4==4.15.0",
+    "soupsieve==2.8.4",
+    "six==1.17.0",
+    "typing_extensions==4.16.0",
+)
 
 # Lightweight default PDF backend (SSOT 3.1 decision A): pure PyMuPDF, no torch,
 # always installed into the managed venv so a fresh user never silently degrades
 # to an empty PDF parse. Heavy backends (MinerU/Docling) stay opt-in.
 PDF_BACKEND_PACKAGE = "pymupdf4llm"
 PDF_BACKEND_IMPORT = "pymupdf4llm"
-# Opt out of auto-installing the PDF backend (yaml install is unaffected).
+# Opt out of auto-installing the PDF backend (the hard core runtime is unaffected).
 NO_PDF_BACKEND_ENV = "RESEARCH_NO_PDF_BACKEND"
 
 
@@ -68,16 +77,18 @@ def _mark_ready() -> None:
 
 
 def _current_has_yaml() -> bool:
+    """Compatibility name: gate every hard source-material runtime import."""
     importlib.invalidate_caches()
-    return importlib.util.find_spec("yaml") is not None
+    return all(importlib.util.find_spec(module) is not None for module in CORE_RUNTIME_MODULES)
 
 
 def _python_can_import_yaml(python_exe: str | Path) -> bool:
+    """Compatibility name: probe the complete hard runtime, not only PyYAML."""
     if is_current_python(python_exe):
         return _current_has_yaml()
     try:
         completed = subprocess.run(
-            [str(_python_path(python_exe)), "-c", "import yaml"],
+            [str(_python_path(python_exe)), "-c", "import yaml, markdownify, bs4"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
@@ -105,7 +116,7 @@ def _python_can_import(python_exe: str | Path, module: str) -> bool:
 def _ensure_python_has_pdf_backend(python_exe: str | Path) -> None:
     """Best-effort install of the lightweight PDF backend into a Python runtime.
 
-    Unlike PyYAML (a hard requirement that gates readiness), a missing PDF backend
+    Unlike the core YAML/Markdown runtime (which gates readiness), a missing PDF backend
     only degrades PDF parsing, so a failed/opted-out install warns to stderr and is
     non-fatal."""
     if os.environ.get(NO_PDF_BACKEND_ENV) == "1":
@@ -201,13 +212,13 @@ def _ensure_venv_has_yaml(venv_dir: Path, venv_py: Path) -> None:
                 "pip",
                 "install",
                 "--disable-pip-version-check",
-                "pyyaml>=6",
+                *CORE_RUNTIME_PACKAGES,
             ],
-            context="PyYAML installation",
+            context="core research runtime installation",
         )
     if not _python_can_import_yaml(venv_py):
-        raise RuntimeError("managed venv still cannot import yaml after installation")
-    # PyYAML is the hard gate above; the lightweight PDF backend is best-effort.
+        raise RuntimeError("managed venv still cannot import the core runtime after installation")
+    # YAML + HTML-to-Markdown are the hard gate above; PDF remains best-effort.
     _ensure_python_has_pdf_backend(venv_py)
 
 
@@ -222,7 +233,7 @@ def _failure_message(venv_dir: Path, error: Exception) -> str:
 
 
 def ensure_managed_runtime(home: Path | None = None) -> None:
-    """Ensure the current skill entrypoint can import PyYAML.
+    """Ensure the current skill entrypoint can import the core source runtime.
 
     This function is intentionally side-effectful and must only be called from
     script entrypoint paths, never during shared-library import.
@@ -246,7 +257,7 @@ def ensure_managed_runtime(home: Path | None = None) -> None:
             _mark_ready()
             return
         raise SystemExit(
-            "当前环境缺少 YAML 支持，且自动准备运行环境已关闭；请让 Agent 运行 kb doctor 协助处理。"
+            "当前环境缺少知识库运行或材料转换支持，且自动准备运行环境已关闭；请让 Agent 运行 kb doctor 协助处理。"
         )
 
     venv_dir = managed_venv_dir(home)

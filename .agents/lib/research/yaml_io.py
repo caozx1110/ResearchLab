@@ -27,10 +27,10 @@ def load_yaml(path: Path, default: Any | None = None) -> Any:
     )
 
 
-def dump_yaml(value: Any) -> str:
+def dump_yaml(value: Any, *, width: int = 80) -> str:
     if _yaml is None:
         raise RuntimeError("PyYAML is required to write research workspace YAML safely.")
-    return _yaml.safe_dump(value, allow_unicode=True, sort_keys=False)
+    return _yaml.safe_dump(value, allow_unicode=True, sort_keys=False, width=width)
 
 
 def write_bytes_atomic(path: Path, data: bytes, *, mode: int | None = None) -> None:

@@ -477,6 +477,10 @@ def build_parser() -> argparse.ArgumentParser:
     link.add_argument("--to-id", required=True)
     link.add_argument("--relation", required=True)
     link.add_argument("--note", default="")
+    link.add_argument("--source-locator-kind", choices=["unit", "heading", "block"], default="")
+    link.add_argument("--source-locator-value", default="")
+    link.add_argument("--target-locator-kind", choices=["unit", "heading", "block"], default="")
+    link.add_argument("--target-locator-value", default="")
 
     promote = subparsers.add_parser("promote", help="Promote or confirm a record")
     promote.add_argument("--id", required=True)
@@ -502,6 +506,12 @@ def main() -> int:
         with mutation_transaction(root, "initialize_workspace", init_paths):
             ensure_workspace(root)
             build_index(root)
+        checkpoint_and_report(
+            root,
+            trigger="milestone",
+            message="milestone: initialize knowledge workspace",
+            target_paths=init_paths,
+        )
         print("[ok] initialized kb core workspace")
         return 0
     if args.command == "storage-sync":
@@ -791,11 +801,29 @@ def main() -> int:
         return 0
     if args.command == "link":
         from_record, _ = locate_record(root, args.from_id)
-        to_record, _ = locate_record(root, args.to_id)
-        operation_paths = mutation_targets(root, record_targets([from_record, to_record], root), index_mutation_targets(root))
+        locate_record(root, args.to_id)
+        operation_paths = mutation_targets(root, record_targets([from_record], root), index_mutation_targets(root))
         with mutation_transaction(root, "link_records", operation_paths):
             ensure_workspace(root)
-            link_records(root, args.from_id, args.to_id, args.relation, note=args.note)
+            source_locator = (
+                {"kind": args.source_locator_kind, "value": args.source_locator_value}
+                if args.source_locator_kind
+                else None
+            )
+            target_locator = (
+                {"kind": args.target_locator_kind, "value": args.target_locator_value}
+                if args.target_locator_kind
+                else None
+            )
+            link_records(
+                root,
+                args.from_id,
+                args.to_id,
+                args.relation,
+                note=args.note,
+                source_locator=source_locator,
+                target_locator=target_locator,
+            )
             build_index(root)
         checkpoint_and_report(
             root,

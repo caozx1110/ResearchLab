@@ -31,7 +31,7 @@ release bundle                 installed workspace
 
 Release bundle 不包含任何私有 `kb/`。安装、更新、storage sync 和卸载必须保持数据边界：workspace 的 `kb/` 永不成为发布内容，storage sync 不改 `.agents/**` 或根 `AGENTS.md`。
 
-安装与管理员自动化是产品唯一的技术 bootstrap 面。安装完成后，普通用户的 runtime 合同只有自然语言与 15 个 `kb <verb>` 伪 CLI；内部 flags、scripts、环境变量和 paths 只属于 Agent 私有协议或管理员参考，不得变成日常使用前置。
+安装与管理员自动化是产品唯一的技术 bootstrap 面。安装完成后，普通用户的 runtime 合同只有自然语言与 16 个 `kb <verb>` 伪 CLI；内部 flags、scripts、环境变量和 paths 只属于 Agent 私有协议或管理员参考，不得变成日常使用前置。
 
 ## Skill 路由
 
@@ -50,7 +50,7 @@ Release bundle 不包含任何私有 `kb/`。安装、更新、storage sync 和�
 1. 用户自然语言优先，不需要记住 skill 名；
 2. canonical artifact 只有一个 owner，薄入口不复制业务逻辑；
 3. `research-orchestrator` 管 program state、open question、evidence request、decision 和 reporting event；
-4. `kb-cli` 只把 15 个公开动词转给 owner；
+4. `kb-cli` 只暴露 16 个公开动词；业务 owner 继续拥有 canonical 写入，`obsidian` 只调用可重建的派生投影；
 5. `wiki-adapter` 只路由泛化 wiki 意图；
 6. 确定性的共同行为下沉到共享库，Agent 理解留在 runtime。
 
@@ -63,14 +63,20 @@ Release bundle 不包含任何私有 `kb/`。安装、更新、storage sync 和�
 - `prefs.py`：runtime preferences 与 workspace scaffold；
 - `confirm.py`：write gate、confirmation receipt、link 与 lifecycle mutation；
 - `sources.py`：source intake 与 KB-local storage migration；
+- `source_materials.py`：PDF / HTML / Markdown / text 的完整 Markdown 阅读层、图片本地化、source map 与转换清单；
 - `index.py`：index、governance、search 和 ID compaction；
 - `diagnostics.py`：可选诊断策略、脱敏 issue、确定性去重和本地导出预览；
 - `evidence.py`：逐字 evidence 和派生证据验证；
+- `relations.py` / `obsidian.py`：有向关系注册表、细粒度 locator、无插件 Obsidian 派生投影与只读审计；
 - `journal.py` / `git_ops.py`：恢复与精确 checkpoint；
 - `bootstrap.py` / `updater.py`：运行环境与来源感知更新；
 - `yaml_io.py`：原子序列化。
 
 新增代码应依赖最窄 owner module；旧调用可以继续通过 `core.py` facade 兼容。不要重新把实现堆回 facade。
+
+### Obsidian 派生视图
+
+`kb/` 可直接作为无需社区插件的 Obsidian Vault；canonical record、program state、taxonomy 与 evidence 仍是唯一事实源。系统只管理 `kb/obsidian/managed/`，人工内容放在 `inbox/` 与 `annotations/`，不得生成或改写 `.obsidian/`。生成页以 Reading view 为消费合同；编辑/Live Preview 显示 wikilink、code span 与 block ID 源码是 Obsidian 原生行为。Paper、文章与本地文档页回链 canonical `source/document.md`，source map 能把 page/section evidence locator 投影到稳定 source block；repo evidence 可以渲染为经过路径 containment 和文件存在性检查的本地文件链接，但 canonical 身份始终是 unit id 与仓库相对路径，机器本地 URI 不写回证据。动态 canonical 文本必须经 Markdown-safe 字面渲染，frontmatter wikilink 必须保持物理单行；manifest 的 renderer revision 变化会令旧投影 stale 并触发可恢复重建。
 
 ## 数据模型
 
@@ -84,7 +90,7 @@ Release bundle 不包含任何私有 `kb/`。安装、更新、storage sync 和�
 
 Unit 类型为 `paper`, `repo`, `dataset`, `blog`, `idea`, `experiment`。Program 位于 `kb/programs/<program-id>/`，包含 state、open questions、evidence requests、decision log、reporting events、design、experiments、reports 和 discussions。
 
-`kb/raw/` 与完整 parse cache 是不可变派生证据。后续分析只读，不覆盖。`kb/user/` 是生成视图，`kb/output/` 是导出，不得成为唯一 source of truth。
+`kb/raw/` 保存原始材料。可转换材料在 unit 的 `source/` 下拥有完整 `document.md`、`source-map.yaml`、`conversion.yaml`、原格式文件与可选的 hash-addressed `assets/`；HTML 另有带内联阅读样式、只引用本地 asset 的被动 `archive.html`。原始 HTML 响应、离线阅读页和 Markdown 分别承担证据、浏览器阅读与 Obsidian/AI 阅读职责，均不可原地覆盖。arXiv/ar5iv 全文 HTML 在写盘前检查 fatal/Untitled/LaTeXML error 与正文结构，不合格则先回退 PDF、再回退显式 degraded 的 abstract；显式 `vN` 不得被候选解析静默丢弃。HTML 规范化服从最终 URL 与 `<base href>`，公式通过占位保护避免 Markdown 转义，内部 fragment 映射到稳定 source block，图片 alt 与多图 figure 生成 Obsidian-safe 结构；复杂表格保留为安全 raw HTML。已有 Markdown 只在非代码语境转换图片和标题，保留 front matter、fenced/跨行 inline code 与 Setext 标题；所有非代码 raw HTML 与离线页服从相同被动化边界。纯文本按 literal 显示，HTML meta、HTTP charset 与 XML declaration 共同参与无损解码。四类输出共用结构 lint，完整派生 bundle 先在同盘 staging 生成和预检，`conversion.yaml` 最后发布，冲突或失败不得留下半套文件。`document.md` 是人和 Agent 的首选完整阅读层，parse cache 继续承担兼容的逐字 quote/locator 协议，转换降级或细节缺失时回退 `archive.html` 或原格式。Repository 源码保持原格式与目录身份，不批量 Markdown 化；目录重试按归档合同一致忽略 VCS metadata。`kb/user/` 是生成视图，`kb/output/` 是导出，不得成为唯一 source of truth。
 
 ## Prepare / fill / verify
 
@@ -124,7 +130,7 @@ Receipt 不改变原 epistemic type。内容或 evidence 改变时，旧 receipt
 
 ## 对话层与 Agent 协议
 
-公开表面只有自然语言与 15 个 `kb <verb>` 伪 CLI。内部 owner 参数、解释器、环境变量、脚本路径和 next-step markers 不能进入 human stdout。
+公开表面只有自然语言与 16 个 `kb <verb>` 伪 CLI。内部 owner 参数、解释器、环境变量、脚本路径和 next-step markers 不能进入 human stdout。
 
 当 runtime agent 需要精确参数或 owner diagnostics 时，`kb-cli` 在显式 opt-in 后写私有结构化协议到 `kb/.runtime/`：
 
@@ -152,7 +158,7 @@ Dispatcher 只在 owner 已返回非零结果之后尝试捕获，并且只交�
 
 机械 workspace audit 是字节级只读操作，按 `schema`、`integrity`、`recovery`、`security`、`quality` 分层报告稳定 finding。它检查可确定判断的结构、绑定、journal、产品拥有文件、基础 metadata、figure 候选和 symlink containment，不判断语义矛盾或研究结论质量。`kb doctor` 的普通输出仍只有简洁中文；显式 Agent protocol 可以包含有效模式与 audit status/counts，但不投影 raw finding。
 
-公开动词仍精确为 15 个。用户以“开启开发者诊断”“仅在出错时记录”“关闭 paper-analyst 诊断”“对刚才失败做脱敏复盘”“检查知识库健康”等自然语言触发 Agent owner；不存在新的 `kb lint` 或 `kb diagnostics`。D1 的自动捕获、audit 和复盘目前分别按 beta/scaffold 对待，不并入 stable 能力外推。
+公开动词当前精确为 16 个；新增的是无插件派生视图入口 `kb obsidian update|status`，没有扩大诊断命令面。用户仍以“开启开发者诊断”“仅在出错时记录”“关闭 paper-analyst 诊断”“对刚才失败做脱敏复盘”“检查知识库健康”等自然语言触发 Agent owner；不存在新的 `kb lint` 或 `kb diagnostics`。D1 的自动捕获、audit 和复盘目前分别按 beta/scaffold 对待，不并入 stable 能力外推。
 
 ## 原子写、事务与恢复
 

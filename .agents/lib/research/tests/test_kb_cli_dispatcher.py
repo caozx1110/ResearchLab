@@ -129,9 +129,9 @@ def test_kb_help_snapshot_contains_group_headers() -> None:
     text = kb.render_help_menu()
 
     assert "# kb 快捷命令" in text
-    for header in ["kb 动词（15 个）", "纯自然语言（无 kb 动词）"]:
+    for header in ["kb 动词（16 个）", "纯自然语言（无 kb 动词）"]:
         assert f"## {header}" in text
-    for verb in ["kb help", "kb init", "kb doctor", "kb update", "kb status", "kb next", "kb find", "kb add", "kb ingest", "kb review", "kb reject", "kb recall", "kb resume", "kb undo", "kb restore"]:
+    for verb in ["kb help", "kb init", "kb doctor", "kb update", "kb obsidian update", "kb status", "kb next", "kb find", "kb add", "kb ingest", "kb review", "kb reject", "kb recall", "kb resume", "kb undo", "kb restore"]:
         assert verb in text
     assert "请基于当前知识库给我 3 个候选 idea" in text
     assert "为这个研究计划生成周报材料" in text
@@ -160,6 +160,7 @@ def test_kb_help_snapshot_contains_group_headers() -> None:
             "init",
             "doctor",
             "update",
+            "obsidian",
             "add",
             "ingest",
             "review",
@@ -182,7 +183,7 @@ def test_every_argparse_help_surface_is_conversational(argv: list[str], capsys) 
 
     assert stopped.value.code == 0
     output = capsys.readouterr().out
-    assert "kb 动词（15 个）" in output
+    assert "kb 动词（16 个）" in output
     for forbidden in (
         "--",
         "<PROJECT_ROOT>",
@@ -221,6 +222,7 @@ def test_kb_doctor_prints_runtime_capabilities(monkeypatch, tmp_path: Path, caps
             "version": "3.11.0",
             "modules": {"yaml": True, "PyPDF2": False, "pypdf": True},
             "yaml_support": True,
+            "markdown_support": True,
             "pdf_support": True,
             "pdf_backend": "pypdf",
         },
@@ -231,6 +233,7 @@ def test_kb_doctor_prints_runtime_capabilities(monkeypatch, tmp_path: Path, caps
     captured = capsys.readouterr()
     assert "研究能力包版本为 0.2.0-rc.2" in captured.out
     assert "配置读写能力正常" in captured.out
+    assert "材料 Markdown 阅读层转换能力已就绪" in captured.out
     assert "论文解析能力已就绪" in captured.out
     assert "/usr/bin/python3" not in captured.out
     for implementation_term in ("Python", "YAML", "PDF", "pypdf", "research skill"):
@@ -1639,6 +1642,9 @@ def test_kb_infers_local_non_pdf_file_as_blog_and_pdf_as_paper(tmp_path: Path) -
 
 def test_kb_add_forwards_inferred_kind(monkeypatch, tmp_path: Path) -> None:
     kb = _load_kb_cli()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "README.md").write_text("# Repo\n", encoding="utf-8")
     calls: list[tuple[str, tuple[str, ...]]] = []
     monkeypatch.setattr(
         kb,
@@ -1647,14 +1653,49 @@ def test_kb_add_forwards_inferred_kind(monkeypatch, tmp_path: Path) -> None:
         or kb.CommandResult((relative_script, *args), 0),
     )
 
-    assert kb.main(["--root", str(tmp_path), "add", "https://github.com/org/repo"]) == 0
+    assert kb.main(["--root", str(tmp_path), "add", str(repo)]) == 0
 
     assert calls == [
         (
             ".agents/skills/source-intake/scripts/intake.py",
-            ("add", "--kind", "repo", "--source", "https://github.com/org/repo"),
+            ("add", "--kind", "repo", "--source", str(repo)),
         ),
     ]
+
+
+@pytest.mark.parametrize("verb", ["add", "ingest"])
+def test_kb_remote_repo_requests_local_snapshot_before_owner(
+    verb: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    kb = _load_kb_cli()
+    calls: list[object] = []
+    monkeypatch.setattr(kb, "forward_command", lambda *args, **kwargs: calls.append(args))
+    protocol_name = f"{verb}-remote-repo.json"
+
+    assert kb.main(
+        [
+            "--root",
+            str(tmp_path),
+            "--agent-protocol",
+            protocol_name,
+            verb,
+            "https://github.com/pallets/click.git",
+        ]
+    ) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == (
+        "远程代码仓需要先建立安全的本地只读快照才能入库；当前没有创建知识条目。"
+        "请让 AI 继续，它会获取快照后重试。\n"
+    )
+    assert calls == []
+    protocol = json.loads((tmp_path / "kb/.runtime" / protocol_name).read_text(encoding="utf-8"))
+    assert protocol["status"] == "needs_local_repo_snapshot"
+    assert "localize_repo_source" in json.dumps(protocol["next_actions"], ensure_ascii=False)
 
 
 def test_kb_add_keeps_owner_protocol_private_and_humanizes_public_output(
@@ -1663,6 +1704,9 @@ def test_kb_add_keeps_owner_protocol_private_and_humanizes_public_output(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     kb = _load_kb_cli()
+    repo = tmp_path / "demo-repo"
+    repo.mkdir()
+    (repo / "README.md").write_text("# Demo\n", encoding="utf-8")
     raw_stdout = (
         "[source] backup_status=ok source_type=directory locator_kind=-\n"
         "[ok] created kb/units/repos/r-demo/record.yaml\n"
@@ -1679,7 +1723,7 @@ def test_kb_add_keeps_owner_protocol_private_and_humanizes_public_output(
     )
 
     assert kb.main(
-        ["--root", str(tmp_path), "--agent-protocol", "add.json", "add", "https://github.com/org/demo"]
+        ["--root", str(tmp_path), "--agent-protocol", "add.json", "add", str(repo)]
     ) == 0
 
     output = capsys.readouterr().out

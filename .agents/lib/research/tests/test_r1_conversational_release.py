@@ -18,6 +18,7 @@ PUBLIC_VERBS = (
     "init",
     "doctor",
     "update",
+    "obsidian",
     "add",
     "ingest",
     "review",
@@ -49,6 +50,11 @@ EXPECTED_RUNTIME_PINS = {
     "pyyaml": "6.0.3",
     "pymupdf4llm": "0.0.27",
     "pymupdf": "1.26.5",
+    "markdownify": "1.2.3",
+    "beautifulsoup4": "4.15.0",
+    "soupsieve": "2.8.4",
+    "six": "1.17.0",
+    "typing-extensions": "4.16.0",
 }
 CAPABILITY_MATURITY = {
     "kb-cli": "stable",
@@ -279,7 +285,7 @@ def test_read_only_help_creates_no_kb_or_agent_protocol(tmp_path: Path) -> None:
     )
 
     assert completed.returncode == 0, completed.stderr
-    assert "kb 动词（15 个）" in completed.stdout
+    assert "kb 动词（16 个）" in completed.stdout
     assert not (tmp_path / "kb").exists()
     for token in FORBIDDEN_PUBLIC_TOKENS:
         assert token not in completed.stdout
@@ -354,7 +360,7 @@ def test_installed_copy_runs_help_without_creating_runtime_data(tmp_path: Path) 
 
     for help_result in help_results:
         assert help_result.returncode == 0, help_result.stderr
-        assert "kb 动词（15 个）" in help_result.stdout
+        assert "kb 动词（16 个）" in help_result.stdout
         assert "positional arguments" not in help_result.stdout
         assert "options:" not in help_result.stdout
         assert help_result.stderr == ""

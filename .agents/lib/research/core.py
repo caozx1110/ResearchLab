@@ -45,6 +45,7 @@ from .ids import (
     is_canonical_unit_id,
 )
 from .retrieval import rank_records
+from .relations import *
 
 from .paths import *
 from .records import *
@@ -54,3 +55,4 @@ from .sources import *
 from .index import *
 from .git_ops import *
 from .evidence import *
+from .obsidian import *

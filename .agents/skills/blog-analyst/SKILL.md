@@ -14,7 +14,8 @@ description: Analyze blog and technical article units with prepare/verify scaffo
 **脚本绝不理解博客。** 它 (a) 读取 source-intake 生成的 parse-cache，(b) 产出四要素**待填结构**（留白，等 runtime agent 填），(c) 校验 agent 填的每条判断有逐字 evidence 后才落盘。
 
 - Script 做：备料（parse-cache 摘要 + section/anchor 定位）、结构校验、证据核验、落盘。
-- Agent 做：读 parse-cache，理解博客，填四要素（每条带 >=1 逐字 evidence_ref）。
+- Agent 做：先读完整 `source/document.md` 理解博客，再用 parse-cache 定位和校验逐字引用；转换降级或细节缺失时回退保存的 HTML。填四要素时每条带 >=1 逐字 evidence_ref。
+- `source/document.md` 中的图片是本地源材料，不因图片文件名、alt text 或 OCR 片段自动成为博客判断。
 - 博客来源为网页内容（HTML），locator 为 section/anchor，无页码。
 
 ## 四要素填充契约
@@ -44,7 +45,7 @@ summary: "..."                  # 可选转述
 
 ## 负责范围
 
-1. 从 `source-intake` 创建的 blog unit 出发（`intake.py add --kind blog --source ...`），不在此 skill 内做 intake。
+1. 从 `source-intake` 创建且带完整 Markdown 阅读层与 parse-cache 的 blog unit 出发（`intake.py add --kind blog --source ...`），不在此 skill 内做 intake。
 2. `complete-note --phase prepare`：读 parse-cache，产四要素待填结构（`blog-fill.yaml`）。
 3. Agent 读 parse-cache，填 `blog-fill.yaml` 四要素，每条带逐字 evidence_ref。
 4. `complete-note --phase verify`：校验 evidence 逐字存在 + validate_claims + 落盘 `blog-note.md` + 填 payload content section。
@@ -54,7 +55,7 @@ summary: "..."                  # 可选转述
 
 ## 上下游
 
-- 上游：`source-intake`（创建 blog unit + parse-cache）
+- 上游：`source-intake`（创建 blog unit + 完整 Markdown 阅读层 + parse-cache）
 - 下游：`literature-synthesizer`（综述）、`report-author`（周报引用 reusable_explanation）
 
 ## 常用命令

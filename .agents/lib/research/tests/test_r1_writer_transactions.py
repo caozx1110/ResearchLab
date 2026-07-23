@@ -9,7 +9,7 @@ import pytest
 
 from research.common import load_yaml, write_text_if_changed, write_yaml_if_changed
 from research.core import default_record, ensure_workspace, record_path
-from research.git_ops import undo_last_operation
+from research.git_ops import dirty_kb_paths, undo_last_operation
 
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -53,6 +53,24 @@ def _tree_snapshot(root: Path) -> list[tuple[str, str, bytes]]:
         else:
             snapshot.append((relative, "file", path.read_bytes()))
     return snapshot
+
+
+def test_core_init_checkpoints_every_created_product_file(tmp_path: Path, monkeypatch) -> None:
+    module = _load(
+        ".agents/skills/knowledge-base-manager/scripts/kb.py",
+        "r1_core_init_checkpoint",
+    )
+    root = tmp_path / "workspace"
+    (root / ".agents").mkdir(parents=True)
+    (root / "AGENTS.md").write_text("# test\n", encoding="utf-8")
+    _argv(monkeypatch, "kb.py", "--root", str(root), "init")
+
+    assert module.main() == 0
+    assert (root / "kb/.git").is_dir()
+    assert dirty_kb_paths(root) == []
+    assert (root / "kb/config/research-settings.md").is_file()
+    assert (root / "kb/user/current-state.md").is_file()
+    assert (root / "kb/user/navigation.md").is_file()
 
 
 def test_archive_fault_restores_note_and_reporting_event(tmp_path: Path, monkeypatch) -> None:

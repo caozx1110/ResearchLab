@@ -29,7 +29,7 @@ from .slugs import KEYWORD_BLACKLIST, STOPWORDS, normalize_list, normalize_perso
 from .yaml_io import dump_yaml, load_yaml, write_text_if_changed, write_yaml_if_changed, yaml_duplicate_key_issues
 
 
-RUNTIME_MODULES = ("yaml", "pymupdf4llm", "fitz", "PyPDF2", "pypdf")
+RUNTIME_MODULES = ("yaml", "markdownify", "bs4", "pymupdf4llm", "fitz", "PyPDF2", "pypdf")
 COMMAND_PREFIX = "${RESEARCH_PYTHON:-python3}"
 CONFIRM_SCRIPT_BY_KIND = {
     "paper": ".agents/skills/paper-analyst/scripts/paper.py",
@@ -561,6 +561,7 @@ def current_runtime_capabilities() -> dict[str, Any]:
         "version": sys.version.split()[0],
         "modules": module_status,
         "yaml_support": module_status["yaml"],
+        "markdown_support": module_status["markdownify"] and module_status["bs4"],
         "pdf_support": bool(pdf_backend_name),
         "pdf_backend": pdf_backend_name,
     }
@@ -569,7 +570,7 @@ def current_runtime_capabilities() -> dict[str, Any]:
 def inspect_python_runtime(python_executable: str) -> dict[str, Any]:
     script = (
         "import importlib.util, json, sys\n"
-        "mods = {name: bool(importlib.util.find_spec(name)) for name in ('yaml', 'pymupdf4llm', 'fitz', 'PyPDF2', 'pypdf')}\n"
+        "mods = {name: bool(importlib.util.find_spec(name)) for name in ('yaml', 'markdownify', 'bs4', 'pymupdf4llm', 'fitz', 'PyPDF2', 'pypdf')}\n"
         "backend = ('pymupdf4llm' if mods['pymupdf4llm'] and mods['fitz'] else "
         "('fitz' if mods['fitz'] else ('PyPDF2' if mods['PyPDF2'] else ('pypdf' if mods['pypdf'] else ''))))\n"
         "print(json.dumps({\n"
@@ -577,6 +578,7 @@ def inspect_python_runtime(python_executable: str) -> dict[str, Any]:
         "    'version': sys.version.split()[0],\n"
         "    'modules': mods,\n"
         "    'yaml_support': mods['yaml'],\n"
+        "    'markdown_support': mods['markdownify'] and mods['bs4'],\n"
         "    'pdf_support': bool(backend),\n"
         "    'pdf_backend': backend,\n"
         "}, ensure_ascii=False))\n"
@@ -593,6 +595,7 @@ def inspect_python_runtime(python_executable: str) -> dict[str, Any]:
             "version": "",
             "modules": {name: False for name in RUNTIME_MODULES},
             "yaml_support": False,
+            "markdown_support": False,
             "pdf_support": False,
             "pdf_backend": "",
             "probe_error": clean_text(completed.stderr or completed.stdout or "unknown runtime probe failure"),
@@ -605,6 +608,7 @@ def inspect_python_runtime(python_executable: str) -> dict[str, Any]:
             "version": "",
             "modules": {name: False for name in RUNTIME_MODULES},
             "yaml_support": False,
+            "markdown_support": False,
             "pdf_support": False,
             "pdf_backend": "",
             "probe_error": clean_text(completed.stdout or "runtime probe returned invalid JSON"),
@@ -647,6 +651,7 @@ def load_runtime_registry(project_root: Path) -> dict[str, Any]:
         modules = record.get("modules", {})
         record["modules"] = modules if isinstance(modules, dict) else {}
         record["yaml_support"] = bool(record.get("yaml_support"))
+        record["markdown_support"] = bool(record.get("markdown_support"))
         record["pdf_support"] = bool(record.get("pdf_support"))
         record["pdf_backend"] = str(record.get("pdf_backend") or "")
         record["captured_at"] = str(record.get("captured_at") or "")
@@ -667,6 +672,8 @@ def ensure_research_runtime(project_root: Path, skill_name: str, *, require_pdf_
     missing: list[str] = []
     if not capabilities["yaml_support"]:
         missing.append("PyYAML")
+    if not capabilities.get("markdown_support"):
+        missing.append("Markdown source conversion")
     if require_pdf_backend and not capabilities["pdf_support"]:
         missing.append("PyPDF2 or pypdf")
     if not missing:
@@ -682,6 +689,7 @@ def ensure_research_runtime(project_root: Path, skill_name: str, *, require_pdf_
         (
             "Current capabilities: "
             f"yaml={capabilities['yaml_support']}, "
+            f"markdown={capabilities.get('markdown_support', False)}, "
             f"pdf={capabilities['pdf_support']} ({capabilities['pdf_backend'] or 'missing'})"
         ),
     ]

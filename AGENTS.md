@@ -16,6 +16,17 @@
 | `temp/codex_prompt_*.md` | 单次施工 handoff | 一次性，用完留档 |
 | 记忆 `~/.claude/.../memory/` | 跨会话的项目事实/教训 | 里程碑 + 硬教训写这 |
 
+## 开发态禁止自调用 shipping skills
+
+在本仓库设计、开发、审查或修复 `.agents/skills/` 时，shipping skill 是**被开发/被审查的产品源码**，不是当前开发任务的执行规则：
+
+- 不得加载或调用本仓库 `.agents/skills/*/SKILL.md` 来指导其自身设计、施工、review 或外部调研；否则会形成循环依赖与确认偏差。
+- 可以把这些 `SKILL.md`、脚本和协议作为普通代码/设计材料直接阅读、检索和比较，但不得让被测 skill 反向决定自己的需求、架构或验收标准。
+- 开发态只服从本文件、`temp/SYSTEM_DESIGN_SSOT.md`、`.agents/lib/research/SCHEMAS.md` 与当前 handoff；外部调研使用通用检索/浏览能力，不借用 shipping skill 编排。
+- 只有三类场景允许实际调用 shipping skill：在临时工作区执行明确的行为测试、使用全新上下文做冷 acceptance、或用户明确要求测试某个 skill。调用时必须显式说明这是**测试**而不是设计依据。
+- 测试调用必须与开发上下文和真实用户数据隔离：只操作临时目录，不触碰真实 `kb/`，不把被测 skill 的自述或输出当作独立验收证据。
+- 只有安装到用户工作区后，才由工作区根 `AGENTS.md` 与已安装 skills 接管正常运行态路由。简言之：**开发态把 skill 当产品源码，运行态才把 skill 当操作说明。**
+
 ## 循环工作流（每个演进步骤走一遍）
 
 ### 1. 定 SSOT（设计是我的活，不外包）

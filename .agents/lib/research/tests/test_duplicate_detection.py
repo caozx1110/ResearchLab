@@ -65,6 +65,32 @@ def test_detect_duplicate_by_file_hash(tmp_path: Path) -> None:
     assert duplicate["id"] == "p-file-123456"
 
 
+def test_detect_duplicate_by_staged_remote_file_hash(tmp_path: Path) -> None:
+    ensure_workspace(tmp_path)
+    source = tmp_path / "query-planning.html"
+    source.write_bytes(b"<html><body><h1>Query Planning</h1></body></html>")
+    _write_record(
+        tmp_path,
+        {
+            "id": "b-query-planning-123456",
+            "kind": "blog",
+            "title": "Query Planning",
+            "source": {"original_uri": source.as_posix(), "file_hash": ""},
+        },
+    )
+    expected_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+
+    duplicate = detect_duplicate(
+        tmp_path,
+        "blog",
+        "https://example.com/query-planning.html",
+        candidate_file_hash=expected_hash,
+    )
+
+    assert duplicate is not None
+    assert duplicate["id"] == "b-query-planning-123456"
+
+
 def test_detect_duplicate_by_arxiv_id_in_title(tmp_path: Path) -> None:
     ensure_workspace(tmp_path)
     _write_record(

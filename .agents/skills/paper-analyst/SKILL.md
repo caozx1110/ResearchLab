@@ -15,13 +15,15 @@ description: 为 core paper unit 备料（解析源、产出待填结构）并�
 
 ## 负责范围
 
-1. 从 `source-intake` 创建的 paper unit（已带 parse-cache）出发。
+1. 从 `source-intake` 创建的 paper unit（已带完整 `source/document.md` 阅读层和兼容 parse-cache）出发。Agent 先读 Markdown 形成整体理解；需要核验逐字引用与既有 locator 时读 parse-cache，转换降级或细节缺失时回退原 PDF/HTML。
 2. `screen --phase prepare`：从 parse-cache 抽初筛证据摘要（带 page/section locator），产出 `screening.yaml` 待填结构（`paper_type` / `worth_deep_reading` / `judgement_reason` / `relevance_to_current_research` / `claims` 留空待 agent 填）。`paper_type` 是 agent 判断，脚本不做关键词推断；`keyword_mentions` 仅作定位线索，**不是评分**。
 3. `screen --phase verify`：校验 agent 填入的判断（含 `paper_type ∈ {method_system, benchmark, survey}`、`validate_claims` 结构 + `verify_claim_evidence` 逐字证据）后落盘；不合法则拒绝并指出问题。
 4. `complete-note --phase prepare`：新 intake 必须先有 evidence-verified screening，再按 `quick_screen.paper_type` 产出对应的**五要素待填骨架**；prepared/unverified screening 一律 fail-closed。已验证初筛仍无法分类，或旧单元已有 note 产物但没有类型时，才按 `method_system` 兼容；每要素留空、需 agent 填内容 + ≥1 条 `evidence_refs`。
 5. `complete-note --phase verify`：逐要素校验（结构 + 逐字证据），全过才写 `note.md` + `core_content`（过 `has_substantive_content`，可被确认）；任一要素空/无据/造据则拒绝并点名。
 6. `prewarm-cache` / `extract-figures` / `refresh-structure`：纯机械搬运（解析、裁图、结构提示）。
 7. AI judgement 默认保持 `pending_user_confirmation`；确认走已有空心门（`confirm`）。
+
+Markdown 阅读层中的图片只提供本地、可引用的源材料。脚本不得从图片文件名、alt text 或 OCR 片段自动生成论文判断；runtime agent 若使用图表内容，仍需在会话中实际阅读并挂可核验 evidence。
 
 ## 按论文类型的五要素契约（runtime agent 照此填）
 

@@ -25,7 +25,7 @@ These labels describe the current scope of each component, not the release statu
 |---|---|---|
 | `kb-cli` | stable | Fifteen-verb routing, conversational output filtering, and recovery entrypoints only. |
 | `knowledge-base-manager` | stable | Schema, evidence, confirmation, exact-path recovery, and index governance; it does not interpret research material. |
-| `source-intake` | beta | Staging, deduplication, immutable source capture, and retryable failures across heterogeneous sources. |
+| `source-intake` | beta | Staging, deduplication, immutable source capture, full Markdown reading views with local assets, and retryable failures across heterogeneous sources. |
 | `paper-analyst` | beta | Evidence-backed prepare and verify gates; the runtime agent supplies the substantive reading. |
 | `repo-analyst` | beta | File-oriented capability-map preparation and evidence verification; the runtime agent supplies code understanding. |
 | `dataset-analyst` | beta | Dataset-card profile preparation and verbatim evidence verification; suitability judgements remain agent-authored and confirmation-gated. |
@@ -62,7 +62,7 @@ The agent does the mechanical work. You review judgements and make research deci
 
 `kb init` creates a usable knowledge-base structure before asking for preferences. If no real human signature is configured, it offers a roughly one-minute quick setup or a clear “skip for now” path. Skipping writes no placeholder preference and does not block adding, searching, or analysing material; you can later say “补充我的研究偏好”. A real signature is requested again only before the first research judgement is confirmed.
 
-Installation is the one-time technical bootstrap. After it succeeds, ordinary users interact only through natural language and the fifteen `kb <verb>` pseudo-CLI shortcuts below. Internal scripts, flags, environment variables, and paths are private implementation details handled by the agent; only maintainers and installation automation need the advanced commands in the installation guide.
+Installation is the one-time technical bootstrap. After it succeeds, ordinary users interact only through natural language and the sixteen `kb <verb>` pseudo-CLI shortcuts below. Internal scripts, flags, environment variables, and paths are private implementation details handled by the agent; only maintainers and installation automation need the advanced commands in the installation guide.
 
 ## Install
 
@@ -76,7 +76,7 @@ The guided installer recommends a project-scoped copy into a workspace root. It 
 
 Read [docs/INSTALL.md](docs/INSTALL.md) for guided setup. Its flags, explicit paths, update, uninstall, and automation sections are administrator reference, not steps for everyday research use.
 
-## The fifteen `kb` pseudo-CLI verbs
+## The sixteen `kb` pseudo-CLI verbs
 
 These are the complete public shortcut surface. Internal script arguments are intentionally not part of the user contract.
 
@@ -86,6 +86,7 @@ These are the complete public shortcut surface. Internal script arguments are in
 | `kb init` | Initialize a usable knowledge-base layout, then optionally collect high-value preferences in chat. |
 | `kb doctor` | Check whether the local runtime can support the workspace. |
 | `kb update` | Check for an update and apply it only after explicit authorization. |
+| `kb obsidian update` / `kb obsidian status` | Rebuild or audit the no-plugin Obsidian knowledge-network projection. |
 | `kb add <链接或路径>` | Add a paper, repository, article, or local file as a lightweight source. |
 | `kb ingest <链接或路径>` | Add a source and prepare its evidence-backed analysis workflow. |
 | `kb review` | Show human-review-ready judgements and accept a natural-language decision. |
@@ -124,6 +125,8 @@ kb/
 └── .runtime/     # private local runtime state
 ```
 
+Convertible paper, HTML, Markdown, and text units preserve the original material and add a complete `source/document.md` reading view, a source map, a conversion manifest, and locally stored image assets. HTML units also add a passive normalized offline `source/archive.html`; the raw server response remains untouched. arXiv/ar5iv HTML must pass a structural quality gate before it is selected, otherwise intake falls back to PDF and finally an explicitly degraded abstract page; an explicitly requested arXiv version is preserved through every candidate. Markdown conversion preserves code, source front matter, formulae, complex tables, headings, and local image references, and the complete derived bundle is collision-checked before publication. Human readers and agents use Markdown first, while the offline page and original format remain fallbacks. Repository source stays in its native files; generated Obsidian pages can link to verified local code files without making machine-local URIs canonical evidence.
+
 The core rules are:
 
 1. durable artifacts beat chat-only answers;
@@ -144,7 +147,7 @@ You decide whether a judgement is accepted, which idea or baseline to pursue, wh
 
 ## Optional local developer diagnostics
 
-D1 adds an optional, local-only quality loop without adding a sixteenth `kb` verb. Its automatic mode is off by default. You can ask the Agent in natural language to “开启开发者诊断”, “仅在出错时记录”, “关闭 paper-analyst 诊断”, “对刚才失败做脱敏复盘”, or “检查知识库健康”.
+D1 adds an optional, local-only quality loop without adding a diagnostics verb. Its automatic mode is off by default. The later sixteenth verb is the unrelated no-plugin Obsidian projection entrypoint. You can ask the Agent in natural language to “开启开发者诊断”, “仅在出错时记录”, “关闭 paper-analyst 诊断”, “对刚才失败做脱敏复盘”, or “检查知识库健康”.
 
 `errors-only` records deterministic operation failures without asking a model to diagnose them. `developer` may also run a short, triggered retrospective, bounded by per-task token and issue budgets; per-skill settings can narrow either mode. An explicit request to record a problem is honored even when automatic capture is off.
 

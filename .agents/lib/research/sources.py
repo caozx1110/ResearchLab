@@ -1,8 +1,8 @@
 """Source backup/archival, duplicate detection, source-search staging, and storage layout sync.
 
-Dual-source ingestion (SSOT 3.1 decision A, B4): arxiv sources prefer the HTML
-edition (arxiv.org/html -> ar5iv Labs -> abs fallback) so no PDF parsing is needed and
-locators are section/anchor; non-arxiv PDFs are downloaded as real bytes and parsed
+Dual-source ingestion (SSOT 3.1 decision A, B4): arxiv sources prefer quality-gated
+HTML (arxiv.org/html -> ar5iv Labs), then PDF, then an abstract-only fallback;
+non-arxiv PDFs are downloaded as real bytes and parsed
 with the always-available lightweight PyMuPDF4LLM backend with page=N locators.
 Every archived source persists real bytes + a real sha256 and reports an explicit
 backup status/warning (fixing the G7 silent-failure where PDFs stored nothing).
@@ -15,9 +15,11 @@ import re
 import shutil
 import stat
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+from urllib.parse import urlparse
 
 from .common import (
     FETCH_MAX_BYTES,
@@ -63,6 +65,24 @@ from .confirm import (
     write_record,
 )
 from .journal import mutation_transaction
+from .source_materials import (
+    ARCHIVE_NAME,
+    ASSETS_DIR_NAME,
+    CONVERSION_NAME,
+    DOCUMENT_NAME,
+    SOURCE_MAP_NAME,
+    _extract_source_frontmatter,
+    _markdown_heading_positions,
+    html_reading_fragment,
+    inspect_html_quality,
+    materialization_paths,
+    materialize_fallback,
+    materialize_html,
+    materialize_pdf,
+    materialize_text,
+    source_fields as materialization_source_fields,
+)
+from .yaml_io import write_bytes_atomic
 
 WEB_SNAPSHOT_MAX_CHARS = 120_000
 
@@ -566,6 +586,10 @@ def validate_local_source(project_root: Path, source: str) -> Path | None:
 
 
 def _copy_regular_file_no_links(src: Path, dst: Path) -> None:
+    if _path_exists_without_following(dst):
+        if _file_sha256_no_links(src) != _file_sha256_no_links(dst):
+            raise ValueError(f"immutable source byte collision: {dst.name}")
+        return
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(src, flags)
@@ -646,9 +670,38 @@ def _copy_open_directory_no_links(source_fd: int, dst: Path) -> None:
             raise UnsafeLocalSourceError("这份本地资料包含不支持的文件类型，已停止入库。")
 
 
+def _directory_manifest(root: Path) -> list[tuple[str, str, str]]:
+    manifest: list[tuple[str, str, str]] = []
+    excluded = {".git", ".gitmodules"}
+    for current_text, directory_names, file_names in os.walk(root, topdown=True, followlinks=False):
+        current = Path(current_text)
+        directory_names[:] = sorted(name for name in directory_names if name not in excluded)
+        for name in directory_names:
+            path = current / name
+            status = path.lstat()
+            if stat.S_ISLNK(status.st_mode):
+                raise UnsafeLocalSourceError("本地资料目录包含符号链接，已停止入库。")
+            if not stat.S_ISDIR(status.st_mode):
+                raise UnsafeLocalSourceError("本地资料目录包含不支持的文件类型，已停止入库。")
+            manifest.append(("dir", path.relative_to(root).as_posix(), ""))
+        for name in sorted(item for item in file_names if item not in excluded):
+            path = current / name
+            status = path.lstat()
+            if stat.S_ISLNK(status.st_mode):
+                raise UnsafeLocalSourceError("本地资料目录包含符号链接，已停止入库。")
+            if not stat.S_ISREG(status.st_mode):
+                raise UnsafeLocalSourceError("本地资料目录包含不支持的文件类型，已停止入库。")
+            manifest.append(("file", path.relative_to(root).as_posix(), file_sha256(path)))
+    return sorted(manifest, key=lambda item: (item[1], item[0]))
+
+
 def _copy_dir(src: Path, dst: Path) -> None:
     _assert_contained_local_tree(src)
-    if dst.exists():
+    if dst.exists() or dst.is_symlink():
+        if dst.is_symlink() or not dst.is_dir():
+            raise ValueError(f"immutable source directory collision: {dst.name}")
+        if _directory_manifest(src) != _directory_manifest(dst):
+            raise ValueError(f"immutable source directory collision: {dst.name}")
         return
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -658,21 +711,73 @@ def _copy_dir(src: Path, dst: Path) -> None:
     try:
         if not stat.S_ISDIR(os.fstat(source_fd).st_mode):
             raise UnsafeLocalSourceError("本地资料在复制前发生了类型变化，已停止入库。")
-        _copy_open_directory_no_links(source_fd, dst)
+        ensure_dir(dst.parent)
+        with tempfile.TemporaryDirectory(prefix=f".{dst.name}.stage-", dir=dst.parent) as temporary:
+            staged = Path(temporary) / dst.name
+            _copy_open_directory_no_links(source_fd, staged)
+            os.replace(staged, dst)
     except Exception:
-        if dst.exists() and not dst.is_symlink():
-            shutil.rmtree(dst)
+        try:
+            if (
+                dst.exists()
+                and not dst.is_symlink()
+                and _directory_manifest(dst) == _directory_manifest(src)
+            ):
+                return
+        except (OSError, UnsafeLocalSourceError):
+            pass
         raise
     finally:
         os.close(source_fd)
 
 
 def _is_html_response(content_type: str, text: str) -> bool:
-    normalized = content_type.lower().strip()
+    normalized = content_type.split(";", 1)[0].lower().strip()
     if normalized in {"text/html", "application/xhtml+xml"} or normalized.endswith("+html"):
         return True
     prefix = text[:1000].lower()
     return "<html" in prefix or "<!doctype html" in prefix
+
+
+def _decode_source_text(data: bytes, content_type: str = "") -> tuple[str, str, str]:
+    """Decode downloaded text without silently discarding source bytes."""
+    candidates: list[str] = []
+    if data.startswith(b"\xef\xbb\xbf"):
+        candidates.append("utf-8-sig")
+    elif data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        candidates.append("utf-16")
+    charset = re.search(r"charset\s*=\s*[\"']?([^;\s\"']+)", content_type, flags=re.IGNORECASE)
+    if charset:
+        candidates.append(charset.group(1))
+    prefix = data[:8192].decode("latin-1")
+    xml_declaration = re.search(
+        r"(?is)^\s*<\?xml\b[^>]*\bencoding\s*=\s*[\"']([^\"']+)[\"']",
+        prefix,
+    )
+    if xml_declaration:
+        candidates.append(xml_declaration.group(1))
+    meta = re.search(
+        r"(?is)<meta\b[^>]*(?:charset\s*=\s*[\"']?([^\s\"'/>;]+)|content\s*=\s*[\"'][^\"']*charset=([^\s\"';>]+))",
+        prefix,
+    )
+    if meta:
+        candidates.append(str(meta.group(1) or meta.group(2)))
+    candidates.append("utf-8")
+    attempted: set[str] = set()
+    for encoding in candidates:
+        normalized = encoding.strip().lower()
+        if not normalized or normalized in attempted:
+            continue
+        attempted.add(normalized)
+        try:
+            return data.decode(normalized), normalized, ""
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return (
+        data.decode("latin-1"),
+        "latin-1",
+        "Source text was not valid UTF-8 and declared no usable charset; decoded losslessly as latin-1",
+    )
 
 
 def _truncate_snapshot_text(text: str) -> str:
@@ -688,32 +793,25 @@ _ARXIV_HOST_RE = re.compile(r"(?:^|\.)arxiv\.org$|(?:^|\.)ar5iv\.", re.IGNORECAS
 
 
 def _arxiv_id_from_source(source: str) -> str:
-    """Bare arxiv id (no version) for an arxiv URL or raw id, else ''."""
+    """Exact arxiv id, including an explicitly requested version, else ''."""
     text = str(source or "").strip()
     if not text:
         return ""
     if is_url(text):
-        from urllib.parse import urlparse
-
         if not _ARXIV_HOST_RE.search(urlparse(text).netloc.lower()):
             return ""
     arxiv_id = parse_arxiv_id(text)
-    return arxiv_id.split("v", 1)[0] if arxiv_id else ""
+    return arxiv_id or ""
 
 
 def _arxiv_html_candidates(arxiv_id: str) -> list[dict[str, str]]:
-    """Ordered HTML editions: native arxiv HTML -> ar5iv Labs -> abs fallback."""
+    """Ordered full-text HTML editions; PDF/abstract fallback is handled separately."""
     return [
         {"url": f"https://arxiv.org/html/{arxiv_id}", "edition": "arxiv-html", "degraded": ""},
         {
             "url": f"https://ar5iv.labs.arxiv.org/html/{arxiv_id}",
             "edition": "ar5iv-labs",
             "degraded": "",
-        },
-        {
-            "url": f"https://arxiv.org/abs/{arxiv_id}",
-            "edition": "arxiv-abs",
-            "degraded": "arxiv HTML/ar5iv editions unavailable; archived abstract page only (no full body).",
         },
     ]
 
@@ -742,15 +840,33 @@ def _pdf_to_page_chunks(
     import fitz  # type: ignore
     import pymupdf4llm  # type: ignore
 
-    chunks: list[dict[str, Any]] = []
     with fitz.open(str(pdf_path)) as doc:
         total = doc.page_count
         pages = list(range(min(page_limit, total)))
         page_data = pymupdf4llm.to_markdown(doc, pages=pages, page_chunks=True, show_progress=False)
-    for entry in page_data:
+    return _pdf_page_data_to_chunks(
+        pdf_path,
+        page_data,
+        page_limit=page_limit,
+        per_page_char_limit=per_page_char_limit,
+    )
+
+
+def _pdf_page_data_to_chunks(
+    pdf_path: Path,
+    page_data: Any,
+    *,
+    page_limit: int = PARSE_CACHE_PAGE_LIMIT,
+    per_page_char_limit: int = PARSE_CACHE_PER_PAGE_CHAR_LIMIT,
+) -> list[dict[str, Any]]:
+    """Project full PyMuPDF4LLM page dictionaries into the bounded cache view."""
+    chunks: list[dict[str, Any]] = []
+    entries = page_data if isinstance(page_data, list) else []
+    for entry in entries[:page_limit]:
         if not isinstance(entry, dict):
             continue
-        page_number = (entry.get("metadata") or {}).get("page")
+        metadata = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
+        page_number = metadata.get("page_number") or metadata.get("page")
         if not isinstance(page_number, int):
             page_number = len(chunks) + 1
         text = clean_text(str(entry.get("text") or ""))
@@ -847,8 +963,10 @@ def _html_to_section_chunks(
     Labels use ``section:<anchor>`` (never ``page-N``) so downstream evidence
     verification treats them as HTML section/anchor locators per SSOT B4. Falls
     back to a single whole-document chunk when no headings are present."""
+    reading_html, _root_info = html_reading_fragment(html)
+    selected_html = reading_html or html
     heading_re = re.compile(r"(?is)<(h[1-6])\b([^>]*)>(.*?)</\1>")
-    matches = list(heading_re.finditer(html))
+    matches = list(heading_re.finditer(selected_html))
     chunks: list[dict[str, Any]] = []
 
     def _emit(anchor: str, heading_html: str, body_html: str) -> None:
@@ -869,7 +987,7 @@ def _html_to_section_chunks(
         )
 
     if not matches:
-        body = clean_text(html_to_text(html))
+        body = clean_text(html_to_text(selected_html))
         if body:
             chunks.append(
                 {
@@ -883,13 +1001,13 @@ def _html_to_section_chunks(
             )
         return chunks
 
-    _emit("preamble", "", html[: matches[0].start()])
+    _emit("preamble", "", selected_html[: matches[0].start()])
     for index, match in enumerate(matches):
         id_match = re.search(r"""id\s*=\s*["']([^"']+)["']""", match.group(2) or "")
         heading_html = match.group(3) or ""
         anchor = id_match.group(1).strip() if id_match else _slug_anchor(clean_text(html_to_text(heading_html)), f"s{index + 1}")
-        body_end = matches[index + 1].start() if index + 1 < len(matches) else len(html)
-        _emit(anchor, heading_html, html[match.end():body_end])
+        body_end = matches[index + 1].start() if index + 1 < len(matches) else len(selected_html)
+        _emit(anchor, heading_html, selected_html[match.end():body_end])
         if len(chunks) >= section_limit:
             break
     return chunks
@@ -924,13 +1042,19 @@ def _text_to_section_chunks(
         )
 
     if markdown:
-        heading_re = re.compile(r"(?m)^(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$")
-        matches = list(heading_re.finditer(normalized))
-        if matches:
-            emit("preamble", "", normalized[: matches[0].start()])
+        _frontmatter, normalized = _extract_source_frontmatter(normalized)
+        lines = normalized.splitlines()
+        positions = _markdown_heading_positions(normalized)
+        if positions:
+            entries: list[tuple[int, int, str]] = []
+            for marker_line, heading in positions:
+                heading_line = marker_line
+                if marker_line > 0 and re.match(r"^ {0,3}(?:=+|-+)[ \t]*$", lines[marker_line]):
+                    heading_line = marker_line - 1
+                entries.append((heading_line, marker_line + 1, heading))
+            emit("preamble", "", "\n".join(lines[: entries[0][0]]))
             used_anchors: set[str] = set()
-            for index, match in enumerate(matches):
-                heading = match.group(2).strip()
+            for index, (heading_line, body_start, heading) in enumerate(entries):
                 base_anchor = _slug_anchor(heading, f"s{index + 1}")
                 anchor = base_anchor
                 suffix = 2
@@ -938,8 +1062,8 @@ def _text_to_section_chunks(
                     anchor = f"{base_anchor}-{suffix}"
                     suffix += 1
                 used_anchors.add(anchor)
-                body_end = matches[index + 1].start() if index + 1 < len(matches) else len(normalized)
-                emit(anchor, heading, normalized[match.end() : body_end])
+                body_end = entries[index + 1][0] if index + 1 < len(entries) else len(lines)
+                emit(anchor, heading, "\n".join(lines[body_start:body_end]))
             return chunks
 
     paragraphs = [clean_text(item) for item in re.split(r"\n\s*\n+", normalized) if clean_text(item)]
@@ -964,7 +1088,15 @@ def _html_metadata(html: str) -> dict[str, Any]:
 
 # Only keys in the on-disk source contract (SCHEMAS.md) belong in record.source;
 # status/warning/locator metadata travel via the return value + stderr + parse-cache.
-SOURCE_RECORD_KEYS = ("original_uri", "backup_paths", "backup_kind", "file_hash")
+SOURCE_RECORD_KEYS = (
+    "original_uri",
+    "backup_paths",
+    "backup_kind",
+    "file_hash",
+    "markdown_path",
+    "markdown_hash",
+    "materialization",
+)
 
 
 def source_record_fields(source_info: dict[str, Any]) -> dict[str, Any]:
@@ -973,6 +1105,54 @@ def source_record_fields(source_info: dict[str, Any]) -> dict[str, Any]:
     Keeps backup_status / backup_warning / locator metadata out of record.source
     (historical pollution guard — see SCHEMAS source contract)."""
     return {key: source_info[key] for key in SOURCE_RECORD_KEYS if key in source_info}
+
+
+def _attach_materialization(project_root: Path, source_info: dict[str, Any], result: dict[str, Any]) -> None:
+    """Attach additive source fields and archived paths without hiding degradation."""
+    source_info.update(materialization_source_fields(project_root, result))
+    existing = [str(item) for item in source_info.get("backup_paths", [])]
+    for path in materialization_paths(result):
+        relative = rel(project_root, path)
+        if relative not in existing:
+            existing.append(relative)
+    source_info["backup_paths"] = existing
+    warnings = [str(item).strip() for item in result.get("warnings", []) if str(item).strip()]
+    if warnings:
+        prior = str(source_info.get("backup_warning") or "").strip()
+        source_info["backup_warning"] = " ".join([item for item in [prior, *warnings] if item])
+        if source_info.get("backup_status") == "ok":
+            source_info["backup_status"] = "degraded"
+
+
+def _materialize_safely(
+    factory: Callable[[], dict[str, Any]],
+    *,
+    source_root: Path,
+    raw_path: Path,
+    source_type: str,
+    source_uri: str,
+) -> dict[str, Any]:
+    """Keep preserved source bytes usable when a converter rejects the input."""
+    try:
+        return factory()
+    except ValueError as exc:
+        if str(exc).startswith("immutable source bundle collision:"):
+            raise
+        return materialize_fallback(
+            source_root,
+            raw_path,
+            source_type=source_type,
+            source_uri=source_uri,
+            error=exc,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return materialize_fallback(
+            source_root,
+            raw_path,
+            source_type=source_type,
+            source_uri=source_uri,
+            error=exc,
+        )
 
 
 def write_parse_cache(unit_dir: Path, unit_id: str, source_info: dict[str, Any]) -> Path | None:
@@ -1012,13 +1192,16 @@ def _warn(message: str, source_label: str) -> None:
 
 def _store_bytes(root: Path, name: str, data: bytes) -> Path:
     dst = root / name
-    if not dst.exists():
-        dst.write_bytes(data)
+    if dst.exists() or dst.is_symlink():
+        if dst.is_symlink() or not dst.is_file() or file_sha256(dst) != hashlib.sha256(data).hexdigest():
+            raise ValueError(f"immutable source byte collision: {name}")
+        return dst
+    write_bytes_atomic(dst, data)
     return dst
 
 
 def _backup_arxiv_html(project_root: Path, root: Path, arxiv_id: str, original_source: str) -> dict[str, Any]:
-    """Download the best available HTML edition of an arxiv paper (HTML-first)."""
+    """Download quality-gated HTML, then PDF, then an abstract-only page."""
     txt = root / "source-url.txt"
     write_text_if_changed(txt, original_source.strip() + "\n")
     backup_paths = [rel(project_root, txt)]
@@ -1032,43 +1215,150 @@ def _backup_arxiv_html(project_root: Path, root: Path, arxiv_id: str, original_s
             attempts.append(f"{candidate['edition']}({url}): {exc}")
             continue
         raw_bytes = content if isinstance(content, bytes) else str(content).encode("utf-8")
-        html = content.decode("utf-8", errors="ignore") if isinstance(content, bytes) else str(content)
+        if isinstance(content, bytes):
+            html, source_encoding, decode_warning = _decode_source_text(content, content_type)
+        else:
+            html, source_encoding, decode_warning = str(content), "utf-8", ""
         if not _is_html_response(content_type, html):
             attempts.append(f"{candidate['edition']}({url}): non-HTML content_type={content_type or 'unknown'}")
             continue
+        quality = inspect_html_quality(html, require_full_text=True)
+        if decode_warning:
+            quality["warnings"] = [*quality.get("warnings", []), decode_warning]
+        if not quality["accepted"]:
+            reason = "; ".join(str(item) for item in quality["rejection_reasons"])
+            attempts.append(f"{candidate['edition']}({url}): quality gate rejected: {reason}")
+            continue
+        chunks = _html_to_section_chunks(html)
+        if not chunks:
+            attempts.append(f"{candidate['edition']}({url}): parsed to zero section chunks")
+            continue
         raw = _store_bytes(root, "source.html", raw_bytes)
         backup_paths.append(rel(project_root, raw))
-        chunks = _html_to_section_chunks(html)
-        body = _truncate_snapshot_text(html_to_text(html))
-        if body:
-            snapshot = root / "snapshot.md"
-            write_text_if_changed(snapshot, f"# Source Snapshot ({candidate['edition']})\n\nSource: {url}\n\n{body.rstrip()}\n")
-            backup_paths.append(rel(project_root, snapshot))
         result: dict[str, Any] = {
             "original_uri": abs_uri,
             "backup_paths": backup_paths,
             "backup_kind": "url",
             "file_hash": file_sha256(raw),
             "backup_status": "ok",
-            "source_type": "arxiv-abs" if candidate["edition"] == "arxiv-abs" else "arxiv-html",
+            "source_type": "arxiv-html",
             "locator_kind": "section",
             "parse_backend": "html-sectioner",
             "parse_chunks": chunks,
             "resolved_url": url,
-            "parse_metadata": {**_html_metadata(html), "arxiv_id": arxiv_id},
+            "parse_metadata": {
+                **_html_metadata(html),
+                "arxiv_id": arxiv_id,
+                "source_encoding": source_encoding,
+            },
         }
-        warnings: list[str] = []
-        if candidate["degraded"]:
-            result["backup_status"] = "degraded"
-            warnings.append(candidate["degraded"])
-        if not chunks:
-            warnings.append("HTML edition parsed to zero section chunks.")
-        if warnings:
-            result["backup_warning"] = " ".join(warnings)
+        materialized = _materialize_safely(
+            lambda: materialize_html(
+                root,
+                raw,
+                html,
+                source_uri=abs_uri,
+                resolved_url=url,
+                fetch_image=fetch_url,
+                initial_quality=quality,
+            ),
+            source_root=root,
+            raw_path=raw,
+            source_type="html",
+            source_uri=abs_uri,
+        )
+        _attach_materialization(project_root, result, materialized)
+        if result.get("backup_warning"):
             _warn(result["backup_warning"], abs_uri)
+        result["source_selection_attempts"] = attempts
         return result
 
-    warning = "arxiv HTML resolution failed for all editions: " + "; ".join(attempts)
+    pdf_url = f"https://arxiv.org/pdf/{arxiv_id}"
+    try:
+        pdf_content, pdf_content_type = fetch_url(pdf_url, binary=True, max_bytes=SOURCE_DOWNLOAD_MAX_BYTES)
+        pdf_bytes = pdf_content if isinstance(pdf_content, bytes) else str(pdf_content).encode("utf-8")
+        if not _looks_like_pdf(pdf_url, pdf_content_type, pdf_bytes):
+            attempts.append(f"arxiv-pdf({pdf_url}): non-PDF content_type={pdf_content_type or 'unknown'}")
+        else:
+            result = _backup_pdf_bytes(
+                project_root,
+                root,
+                pdf_bytes,
+                abs_uri,
+                backup_kind="url",
+                extra_backup_paths=backup_paths,
+            )
+            result["resolved_url"] = pdf_url
+            result["source_selection_attempts"] = attempts
+            return result
+    except Exception as exc:  # noqa: BLE001
+        attempts.append(f"arxiv-pdf({pdf_url}): {exc}")
+
+    abstract_url = abs_uri
+    try:
+        content, content_type = fetch_url(abstract_url, binary=True, max_bytes=SOURCE_DOWNLOAD_MAX_BYTES)
+        raw_bytes = content if isinstance(content, bytes) else str(content).encode("utf-8")
+        if isinstance(content, bytes):
+            html, source_encoding, decode_warning = _decode_source_text(content, content_type)
+        else:
+            html, source_encoding, decode_warning = str(content), "utf-8", ""
+        if not _is_html_response(content_type, html):
+            attempts.append(f"arxiv-abs({abstract_url}): non-HTML content_type={content_type or 'unknown'}")
+        else:
+            quality = inspect_html_quality(html)
+            if quality["accepted"]:
+                quality["warnings"] = [
+                    *[str(item) for item in quality.get("warnings", [])],
+                    *([decode_warning] if decode_warning else []),
+                    "Full-text HTML and PDF were unavailable; archived abstract page only",
+                ]
+                raw = _store_bytes(root, "source.html", raw_bytes)
+                fallback_paths = [*backup_paths, rel(project_root, raw)]
+                chunks = _html_to_section_chunks(html)
+                result = {
+                    "original_uri": abs_uri,
+                    "backup_paths": fallback_paths,
+                    "backup_kind": "url",
+                    "file_hash": file_sha256(raw),
+                    "backup_status": "degraded",
+                    "source_type": "arxiv-abs",
+                    "locator_kind": "section",
+                    "parse_backend": "html-sectioner",
+                    "parse_chunks": chunks,
+                    "resolved_url": abstract_url,
+                    "parse_metadata": {
+                        **_html_metadata(html),
+                        "arxiv_id": arxiv_id,
+                        "source_encoding": source_encoding,
+                    },
+                    "source_selection_attempts": attempts,
+                }
+                materialized = _materialize_safely(
+                    lambda: materialize_html(
+                        root,
+                        raw,
+                        html,
+                        source_uri=abs_uri,
+                        resolved_url=abstract_url,
+                        fetch_image=fetch_url,
+                        initial_quality=quality,
+                    ),
+                    source_root=root,
+                    raw_path=raw,
+                    source_type="html",
+                    source_uri=abs_uri,
+                )
+                _attach_materialization(project_root, result, materialized)
+                _warn(result["backup_warning"], abs_uri)
+                return result
+            attempts.append(
+                f"arxiv-abs({abstract_url}): quality gate rejected: "
+                + "; ".join(str(item) for item in quality["rejection_reasons"])
+            )
+    except Exception as exc:  # noqa: BLE001
+        attempts.append(f"arxiv-abs({abstract_url}): {exc}")
+
+    warning = "arxiv source resolution failed for HTML, PDF, and abstract editions: " + "; ".join(attempts)
     result = {
         "original_uri": abs_uri,
         "backup_paths": backup_paths,
@@ -1107,7 +1397,17 @@ def _backup_pdf_bytes(
         "locator_kind": "page",
         "parse_backend": "pymupdf4llm" if _pymupdf4llm_available() else "",
     }
-    chunks = _pdf_to_page_chunks(raw)
+    materialized: dict[str, Any] | None = None
+    chunks: list[dict[str, Any]] = []
+    if _pymupdf4llm_available():
+        materialized = _materialize_safely(
+            lambda: materialize_pdf(root, raw, source_uri=original_uri),
+            source_root=root,
+            raw_path=raw,
+            source_type="pdf",
+            source_uri=original_uri,
+        )
+        chunks = _pdf_page_data_to_chunks(raw, materialized.get("page_data"))
     result["parse_chunks"] = chunks
     if not _pymupdf4llm_available():
         result["backup_status"] = "stored-unparsed"
@@ -1122,32 +1422,143 @@ def _backup_pdf_bytes(
         _warn(result["backup_warning"], original_uri)
     else:
         result["parse_metadata"] = _pdf_metadata(raw, chunks)
+    if materialized is not None:
+        _attach_materialization(project_root, result, materialized)
     return result
 
 
 def _looks_like_pdf(url: str, content_type: str, data: bytes) -> bool:
-    if content_type == "application/pdf":
+    if content_type.split(";", 1)[0].strip().lower() == "application/pdf":
         return True
     if url.split("?", 1)[0].lower().endswith(".pdf"):
         return True
     return data[:5] == b"%PDF-"
 
 
-def _backup_generic_url(project_root: Path, root: Path, source: str) -> dict[str, Any]:
+def _huggingface_dataset_readme_url(source: str) -> str:
+    parsed = urlparse(source)
+    if (parsed.hostname or "").lower() not in {"huggingface.co", "www.huggingface.co"}:
+        return ""
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) < 3 or parts[0] != "datasets":
+        return ""
+    owner, repository = parts[1], parts[2]
+    if not all(re.fullmatch(r"[A-Za-z0-9._-]+", value) for value in (owner, repository)):
+        return ""
+    return f"https://huggingface.co/datasets/{owner}/{repository}/resolve/main/README.md"
+
+
+def _backup_huggingface_dataset_card(
+    project_root: Path,
+    root: Path,
+    source: str,
+    original_uri: str,
+    backup_paths: list[str],
+) -> tuple[dict[str, Any] | None, str]:
+    readme_url = _huggingface_dataset_readme_url(source)
+    if not readme_url:
+        return None, ""
+    try:
+        content, content_type = fetch_url(
+            readme_url,
+            binary=True,
+            max_bytes=SOURCE_DOWNLOAD_MAX_BYTES,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return None, f"Hugging Face dataset card endpoint was unavailable: {exc}"
+    data = content if isinstance(content, bytes) else str(content).encode("utf-8")
+    markdown, source_encoding, decode_warning = _decode_source_text(data, content_type)
+    frontmatter, card_body = _extract_source_frontmatter(markdown)
+    headings = _markdown_heading_positions(card_body)
+    normalized = clean_text(markdown)
+    card_markers = re.search(r"(?im)^(?:dataset_info|configs|license|task_categories):", markdown)
+    dataset_identity = bool(card_markers or re.search(r"\bdataset\b", normalized, flags=re.IGNORECASE))
+    if _is_html_response(content_type, markdown) or len(normalized) < 200 or not headings or not dataset_identity:
+        return None, "Hugging Face README endpoint did not return a substantive dataset card."
+
+    resolved_receipt = _store_bytes(
+        root,
+        "source-resolved-url.txt",
+        (readme_url + "\n").encode("utf-8"),
+    )
+    raw = _store_bytes(root, "source.md", data)
+    archived_paths = [*backup_paths, rel(project_root, resolved_receipt), rel(project_root, raw)]
+    chunks = _text_to_section_chunks(markdown, markdown=True)
+    pretty_name_match = re.search(r"(?m)^pretty_name\s*:\s*(.+?)\s*$", frontmatter)
+    pretty_name = ""
+    if pretty_name_match:
+        pretty_name = clean_text(pretty_name_match.group(1).strip().strip("'\""))
+    result: dict[str, Any] = {
+        "original_uri": original_uri,
+        "resolved_url": readme_url,
+        "backup_paths": archived_paths,
+        "backup_kind": "url",
+        "file_hash": file_sha256(raw),
+        "backup_status": "degraded" if decode_warning else "ok",
+        "source_type": "markdown",
+        "locator_kind": "section",
+        "parse_backend": "markdown-sectioner",
+        "parse_chunks": chunks,
+        "parse_metadata": {
+            "title": pretty_name or headings[0][1],
+            "source_encoding": source_encoding,
+            "content_type": content_type.split(";", 1)[0].strip().lower(),
+            "resolved_url": readme_url,
+        },
+    }
+    if decode_warning:
+        result["backup_warning"] = decode_warning
+    materialized = _materialize_safely(
+        lambda: materialize_text(
+            root,
+            raw,
+            markdown,
+            source_uri=original_uri,
+            markdown=True,
+            fetch_image=fetch_url,
+            asset_base_uri=readme_url,
+        ),
+        source_root=root,
+        raw_path=raw,
+        source_type="markdown",
+        source_uri=original_uri,
+    )
+    _attach_materialization(project_root, result, materialized)
+    if result.get("backup_warning"):
+        _warn(str(result["backup_warning"]), original_uri)
+    return result, ""
+
+
+def _backup_generic_url(project_root: Path, root: Path, source: str, *, kind: str) -> dict[str, Any]:
     """Non-arxiv URL: real download, PDF->page chunks, HTML->section chunks."""
     original_uri = normalize_remote_url(source)
     txt = root / "source-url.txt"
     write_text_if_changed(txt, source.strip() + "\n")
     backup_paths = [rel(project_root, txt)]
+    dataset_adapter_warning = ""
+    if kind == "dataset":
+        adapted, dataset_adapter_warning = _backup_huggingface_dataset_card(
+            project_root,
+            root,
+            source,
+            original_uri,
+            backup_paths,
+        )
+        if adapted is not None:
+            return adapted
     try:
         content, content_type = fetch_url(source, binary=True, max_bytes=SOURCE_DOWNLOAD_MAX_BYTES)
     except FetchTooLarge as exc:
         warning = f"URL source exceeded the {SOURCE_DOWNLOAD_MAX_BYTES}-byte size cap and was not archived: {exc}"
+        if dataset_adapter_warning:
+            warning = f"{dataset_adapter_warning} {warning}"
         result = {"original_uri": original_uri, "backup_paths": backup_paths, "backup_kind": "url", "file_hash": "", "backup_status": "failed", "backup_warning": warning}
         _warn(warning, original_uri)
         return result
     except Exception as exc:  # noqa: BLE001
         warning = f"URL source could not be downloaded: {exc}"
+        if dataset_adapter_warning:
+            warning = f"{dataset_adapter_warning} {warning}"
         result = {"original_uri": original_uri, "backup_paths": backup_paths, "backup_kind": "url", "file_hash": "", "backup_status": "failed", "backup_warning": warning}
         _warn(warning, original_uri)
         return result
@@ -1156,16 +1567,16 @@ def _backup_generic_url(project_root: Path, root: Path, source: str) -> dict[str
     if _looks_like_pdf(source, content_type, data):
         return _backup_pdf_bytes(project_root, root, data, original_uri, backup_kind="url", extra_backup_paths=backup_paths)
 
-    html = data.decode("utf-8", errors="ignore")
+    html, source_encoding, decode_warning = _decode_source_text(data, content_type)
     if _is_html_response(content_type, html):
         raw = _store_bytes(root, "source.html", data)
         backup_paths.append(rel(project_root, raw))
         chunks = _html_to_section_chunks(html)
-        body = _truncate_snapshot_text(html_to_text(html))
-        if body:
-            snapshot = root / "snapshot.md"
-            write_text_if_changed(snapshot, f"# Source Snapshot\n\nSource: {original_uri}\n\n{body.rstrip()}\n")
-            backup_paths.append(rel(project_root, snapshot))
+        quality = inspect_html_quality(html)
+        if dataset_adapter_warning:
+            quality["warnings"] = list(
+                dict.fromkeys([*quality.get("warnings", []), dataset_adapter_warning])
+            )
         result = {
             "original_uri": original_uri,
             "backup_paths": backup_paths,
@@ -1176,16 +1587,115 @@ def _backup_generic_url(project_root: Path, root: Path, source: str) -> dict[str
             "locator_kind": "section",
             "parse_backend": "html-sectioner",
             "parse_chunks": chunks,
-            "parse_metadata": _html_metadata(html),
+            "parse_metadata": {**_html_metadata(html), "source_encoding": source_encoding},
         }
+        if decode_warning:
+            result["backup_warning"] = decode_warning
+            result["backup_status"] = "degraded"
+        if dataset_adapter_warning:
+            prior = str(result.get("backup_warning") or "").strip()
+            result["backup_warning"] = " ".join(
+                item for item in [prior, dataset_adapter_warning] if item
+            )
+            result["backup_status"] = "degraded"
+        materialized = _materialize_safely(
+            lambda: materialize_html(
+                root,
+                raw,
+                html,
+                source_uri=original_uri,
+                resolved_url=original_uri,
+                fetch_image=fetch_url,
+                initial_quality=quality,
+            ),
+            source_root=root,
+            raw_path=raw,
+            source_type="html",
+            source_uri=original_uri,
+        )
+        _attach_materialization(project_root, result, materialized)
+        if decode_warning:
+            _warn(decode_warning, original_uri)
+        if dataset_adapter_warning:
+            _warn(dataset_adapter_warning, original_uri)
         if not chunks:
             result["backup_status"] = "degraded"
-            result["backup_warning"] = "URL source produced an empty HTML section parse."
+            prior = str(result.get("backup_warning") or "").strip()
+            result["backup_warning"] = " ".join(item for item in [prior, "URL source produced an empty HTML section parse."] if item)
             _warn(result["backup_warning"], original_uri)
         return result
 
-    warning = f"URL source archived by reference only (unsupported content_type={content_type or 'unknown'}); no text/bytes snapshot."
-    result = {"original_uri": original_uri, "backup_paths": backup_paths, "backup_kind": "url", "file_hash": "", "backup_status": "failed", "backup_warning": warning}
+    normalized_type = content_type.split(";", 1)[0].strip().lower()
+    suffix = Path(urlparse(original_uri).path).suffix.lower()
+    is_markdown = normalized_type in {"text/markdown", "text/x-markdown"} or suffix in {".md", ".markdown"}
+    is_text = (
+        is_markdown
+        or normalized_type.startswith("text/")
+        or normalized_type in {"application/json", "application/ld+json", "application/xml", "application/xhtml+xml"}
+        or normalized_type.endswith(("+json", "+xml"))
+    )
+    if is_text:
+        raw_name = "source.md" if is_markdown else "source.txt"
+        raw = _store_bytes(root, raw_name, data)
+        backup_paths.append(rel(project_root, raw))
+        chunks = _text_to_section_chunks(html, markdown=is_markdown)
+        parsed_title = next(
+            (str(chunk.get("heading") or "").strip() for chunk in chunks if str(chunk.get("heading") or "").strip()),
+            "",
+        )
+        source_type = "markdown" if is_markdown else "text"
+        result = {
+            "original_uri": original_uri,
+            "backup_paths": backup_paths,
+            "backup_kind": "url",
+            "file_hash": file_sha256(raw),
+            "backup_status": "degraded" if decode_warning else "ok",
+            "source_type": source_type,
+            "locator_kind": "section",
+            "parse_backend": "markdown-sectioner" if is_markdown else "text-sectioner",
+            "parse_chunks": chunks,
+            "parse_metadata": {
+                "title": parsed_title,
+                "source_encoding": source_encoding,
+                "content_type": normalized_type,
+            },
+        }
+        if decode_warning:
+            result["backup_warning"] = decode_warning
+        materialized = _materialize_safely(
+            lambda: materialize_text(
+                root,
+                raw,
+                html,
+                source_uri=original_uri,
+                markdown=is_markdown,
+                fetch_image=fetch_url,
+            ),
+            source_root=root,
+            raw_path=raw,
+            source_type=source_type,
+            source_uri=original_uri,
+        )
+        _attach_materialization(project_root, result, materialized)
+        if result.get("backup_warning"):
+            _warn(str(result["backup_warning"]), original_uri)
+        return result
+
+    raw = _store_bytes(root, "source.bin", data)
+    backup_paths.append(rel(project_root, raw))
+    warning = (
+        f"URL source bytes were archived but not parsed (unsupported content_type={normalized_type or 'unknown'})."
+    )
+    result = {
+        "original_uri": original_uri,
+        "backup_paths": backup_paths,
+        "backup_kind": "url",
+        "file_hash": file_sha256(raw),
+        "backup_status": "stored-unparsed",
+        "backup_warning": warning,
+        "source_type": "unsupported",
+        "locator_kind": "",
+    }
     _warn(warning, original_uri)
     return result
 
@@ -1195,13 +1705,14 @@ def _backup_local(project_root: Path, root: Path, source: str) -> dict[str, Any]
     src = validate_local_source(project_root, source)
     if src is None:
         raise SystemExit(f"Source not found: {source}")
-    dst = root / src.name
+    reserved_names = {DOCUMENT_NAME, SOURCE_MAP_NAME, CONVERSION_NAME, ARCHIVE_NAME, ASSETS_DIR_NAME}
+    archived_name = f"original-{src.name}" if src.name in reserved_names else src.name
+    dst = root / archived_name
     source_stat = src.lstat()
     if stat.S_ISDIR(source_stat.st_mode):
         _copy_dir(src, dst)
         return {"original_uri": src.as_posix(), "backup_paths": [rel(project_root, dst)], "backup_kind": "directory", "file_hash": "", "backup_status": "ok", "source_type": "directory", "locator_kind": ""}
-    if not dst.exists():
-        _copy_regular_file_no_links(src, dst)
+    _copy_regular_file_no_links(src, dst)
     result: dict[str, Any] = {
         "original_uri": src.as_posix(),
         "backup_paths": [rel(project_root, dst)],
@@ -1210,7 +1721,17 @@ def _backup_local(project_root: Path, root: Path, source: str) -> dict[str, Any]
         "backup_status": "ok",
     }
     if src.suffix.lower() == ".pdf":
-        chunks = _pdf_to_page_chunks(dst)
+        materialized: dict[str, Any] | None = None
+        chunks: list[dict[str, Any]] = []
+        if _pymupdf4llm_available():
+            materialized = _materialize_safely(
+                lambda: materialize_pdf(root, dst, source_uri=src.as_posix()),
+                source_root=root,
+                raw_path=dst,
+                source_type="pdf",
+                source_uri=src.as_posix(),
+            )
+            chunks = _pdf_page_data_to_chunks(dst, materialized.get("page_data"))
         result["source_type"] = "pdf"
         result["locator_kind"] = "page"
         result["parse_backend"] = "pymupdf4llm" if _pymupdf4llm_available() else ""
@@ -1225,33 +1746,74 @@ def _backup_local(project_root: Path, root: Path, source: str) -> dict[str, Any]
             _warn(result["backup_warning"], src.as_posix())
         else:
             result["parse_metadata"] = _pdf_metadata(dst, chunks)
+        if materialized is not None:
+            _attach_materialization(project_root, result, materialized)
         return result
 
     suffix = src.suffix.lower()
     if suffix in {".html", ".htm", ".md", ".markdown", ".txt"}:
-        try:
-            text = dst.read_text(encoding="utf-8")
-        except UnicodeDecodeError as exc:
-            result.update(
-                {
-                    "backup_status": "failed",
-                    "source_type": "unsupported-text-encoding",
-                    "locator_kind": "",
-                    "backup_warning": f"Local text source is not valid UTF-8: {exc}",
-                }
-            )
-            _warn(result["backup_warning"], src.as_posix())
-            return result
+        source_content_type = (
+            "text/html"
+            if suffix in {".html", ".htm"}
+            else "text/markdown"
+            if suffix in {".md", ".markdown"}
+            else "text/plain"
+        )
+        text, source_encoding, decode_warning = _decode_source_text(
+            dst.read_bytes(), source_content_type
+        )
+        if decode_warning:
+            result["backup_status"] = "degraded"
+            result["backup_warning"] = decode_warning
         if suffix in {".html", ".htm"}:
             chunks = _html_to_section_chunks(text)
             source_type = "html"
             parse_backend = "html-sectioner"
             metadata = _html_metadata(text)
+            materialized = _materialize_safely(
+                lambda: materialize_html(
+                    root,
+                    dst,
+                    text,
+                    source_uri=src.as_posix(),
+                    resolved_url=src.as_uri(),
+                    fetch_image=None,
+                    local_asset_root=src.parent,
+                ),
+                source_root=root,
+                raw_path=dst,
+                source_type="html",
+                source_uri=src.as_posix(),
+            )
         else:
             chunks = _text_to_section_chunks(text, markdown=suffix in {".md", ".markdown"})
             source_type = "markdown" if suffix in {".md", ".markdown"} else "text"
             parse_backend = "markdown-sectioner" if source_type == "markdown" else "text-sectioner"
-            metadata = {}
+            metadata = {
+                "title": next(
+                    (
+                        str(chunk.get("heading") or "").strip()
+                        for chunk in chunks
+                        if str(chunk.get("heading") or "").strip()
+                    ),
+                    "",
+                )
+            }
+            materialized = _materialize_safely(
+                lambda: materialize_text(
+                    root,
+                    dst,
+                    text,
+                    source_uri=src.as_posix(),
+                    markdown=source_type == "markdown",
+                    fetch_image=fetch_url,
+                    local_asset_root=src.parent,
+                ),
+                source_root=root,
+                raw_path=dst,
+                source_type=source_type,
+                source_uri=src.as_posix(),
+            )
         result.update(
             {
                 "source_type": source_type,
@@ -1260,8 +1822,11 @@ def _backup_local(project_root: Path, root: Path, source: str) -> dict[str, Any]
                 "parse_chunks": chunks,
             }
         )
-        if metadata:
-            result["parse_metadata"] = metadata
+        metadata["source_encoding"] = source_encoding
+        result["parse_metadata"] = metadata
+        _attach_materialization(project_root, result, materialized)
+        if decode_warning:
+            _warn(decode_warning, src.as_posix())
         if not chunks:
             result["backup_status"] = "failed"
             result["backup_warning"] = f"Local {source_type} source parsed to zero non-empty sections."
@@ -1311,16 +1876,29 @@ def rebase_source_backup_paths(
 ) -> dict[str, Any]:
     """Project staged backup paths onto their post-materialization unit paths."""
     rebased = dict(source_info)
-    paths: list[str] = []
     staging_root = from_unit_dir.resolve()
-    for item in source_info.get("backup_paths", []):
+
+    def rebase_path(item: Any) -> str:
         archived = (project_root / str(item)).resolve()
         try:
             relative = archived.relative_to(staging_root)
         except ValueError as exc:
             raise SystemExit(f"Staged source path escaped its transaction root: {item}") from exc
-        paths.append(rel(project_root, to_unit_dir / relative))
-    rebased["backup_paths"] = paths
+        return rel(project_root, to_unit_dir / relative)
+
+    rebased["backup_paths"] = [rebase_path(item) for item in source_info.get("backup_paths", [])]
+    if str(source_info.get("markdown_path") or "").strip():
+        rebased["markdown_path"] = rebase_path(source_info["markdown_path"])
+    materialization = source_info.get("materialization")
+    if isinstance(materialization, dict):
+        rebased_materialization = dict(materialization)
+        for key in ("source_map_path", "conversion_path", "archive_path"):
+            if str(materialization.get(key) or "").strip():
+                rebased_materialization[key] = rebase_path(materialization[key])
+        rebased_materialization["asset_paths"] = [
+            rebase_path(item) for item in materialization.get("asset_paths", [])
+        ]
+        rebased["materialization"] = rebased_materialization
     return rebased
 
 
@@ -1335,7 +1913,7 @@ def backup_source(
     """Archive a source as real bytes + real sha256, returning an explicit status.
 
     Dispatch (SSOT 3.1 decision A / B4):
-      * arxiv URL or id  -> HTML-first (arxiv.org/html -> ar5iv Labs -> abs), section locators
+      * arxiv URL or id  -> quality-gated HTML (arxiv.org/html -> ar5iv Labs), PDF, then abstract
       * other URL, PDF   -> real download + PyMuPDF4LLM page chunks, page=N locators
       * other URL, HTML  -> real download + section chunks, section/anchor locators
       * local file/dir   -> copy + sha256; local PDFs also get page=N chunks
@@ -1350,6 +1928,11 @@ def backup_source(
         destination_unit.relative_to(kb_root(project_root).resolve())
     except ValueError as exc:
         raise SystemExit(f"Source transaction destination must stay inside kb/: {destination_unit}") from exc
+    if kind == "repo" and is_url(source):
+        raise SystemExit(
+            "远程代码仓库尚未本地化；请让 AI 先建立安全的本地只读快照，再重新入库。"
+            "系统没有创建不可扫描的代码仓库单元。"
+        )
     # Validate a selected local tree before creating even a staging/canonical
     # destination.  Missing references may still be bare arxiv ids and are
     # resolved below; existing links or special files fail closed here.
@@ -1361,7 +1944,7 @@ def backup_source(
         arxiv_id = _arxiv_id_from_source(source)
         if arxiv_id:
             return _backup_arxiv_html(project_root, root, arxiv_id, source)
-        return _backup_generic_url(project_root, root, source)
+        return _backup_generic_url(project_root, root, source, kind=kind)
     # A bare arxiv id (not a URL, not an existing local path) is still an arxiv source.
     arxiv_id = _arxiv_id_from_source(source)
     if arxiv_id and resolve_local_reference(project_root, normalize_storage_reference(project_root, source)) is None:
@@ -1396,10 +1979,17 @@ def _record_blocks_source_retry(project_root: Path, record: dict[str, Any]) -> b
     return bool(str(source.get("file_hash") or "").strip()) and bool(existing)
 
 
-def detect_duplicate(project_root: Path, kind: str, source: str, *, title: str = "") -> dict[str, Any] | None:
+def detect_duplicate(
+    project_root: Path,
+    kind: str,
+    source: str,
+    *,
+    title: str = "",
+    candidate_file_hash: str = "",
+) -> dict[str, Any] | None:
     local_path = None if is_url(source) else validate_local_source(project_root, source)
     normalized = normalize_remote_url(source) if is_url(source) else normalize_storage_reference(project_root, source)
-    file_hash = ""
+    file_hash = str(candidate_file_hash or "").strip().lower()
     candidate_arxiv_id = parse_arxiv_id(source)
     candidate_title = normalize_title(title) if title else ""
     if not is_url(source):
@@ -1419,7 +2009,7 @@ def detect_duplicate(project_root: Path, kind: str, source: str, *, title: str =
         record_normalized = normalize_remote_url(record_original_uri) if is_url(record_original_uri) else record_original_uri
         if normalized and normalized == record_normalized:
             return record
-        if file_hash and file_hash == str(record_source.get("file_hash") or ""):
+        if file_hash and file_hash == str(record_source.get("file_hash") or "").strip().lower():
             return record
         if kind == "paper":
             record_arxiv_id = parse_arxiv_id(

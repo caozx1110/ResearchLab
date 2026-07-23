@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 import uuid
@@ -297,8 +298,15 @@ def _materialize_staged_source(
     )
     rollback_targets = [canonical_dir, stage_dir, quarantine_root]
     with mutation_transaction(root, "source-intake-materialize", rollback_targets):
-        duplicate = detect_duplicate(root, kind, source, title=title)
+        duplicate = detect_duplicate(
+            root,
+            kind,
+            source,
+            title=title,
+            candidate_file_hash=str(canonical_source_info.get("file_hash") or ""),
+        )
         if duplicate:
+            shutil.rmtree(stage_dir)
             return None, duplicate, canonical_source_info
 
         quarantine_dir: Path | None = None
@@ -537,8 +545,16 @@ def main() -> int:
         if better_title and not args.title and not (staged_candidate and staged_candidate.get("title")):
             title = better_title
             record["title"] = better_title
+    elif parse_metadata:
+        better_title = str(parse_metadata.get("title") or "").strip()
+        if better_title and not args.title and not (staged_candidate and staged_candidate.get("title")):
+            title = better_title
+            record["title"] = better_title
     record["status"] = "active"
-    record["summary"] = f"Lightweight {args.kind} intake for `{title}`."
+    # Intake archives and indexes the source; it does not understand the
+    # material.  Leave the summary empty until a runtime agent writes grounded
+    # analysis instead of persisting a generic scaffold sentence as knowledge.
+    record["summary"] = ""
     explicit_topics = list(staged_candidate.get("topics", []) if staged_candidate else [])
     explicit_tags = list(staged_candidate.get("tags", []) if staged_candidate else [])
     if args.kind == "paper":

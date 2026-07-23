@@ -41,6 +41,7 @@ from .records import (
 from .prefs import (
     load_runtime_preferences,
 )
+from .relations import link_identity, normalize_link
 
 GATED_CONFIRMATION_VALUES = {"pending_user_confirmation", "rejected"}
 
@@ -586,19 +587,44 @@ def write_record(
     return path
 
 
-def link_records(project_root: Path, from_id: str, to_id: str, relation: str, note: str = "") -> None:
+def link_records(
+    project_root: Path,
+    from_id: str,
+    to_id: str,
+    relation: str,
+    note: str = "",
+    *,
+    source_locator: dict[str, str] | None = None,
+    target_locator: dict[str, str] | None = None,
+) -> None:
     from_record, _ = locate_record(project_root, from_id)
-    to_record, _ = locate_record(project_root, to_id)
-    link = {"target_id": to_id, "relation": relation, "note": note}
-    back_link = {"target_id": from_id, "relation": f"reverse:{relation}", "note": note}
-    if link not in from_record.setdefault("links", []):
-        from_record["links"].append(link)
-        append_history(from_record, action="linked", summary=f"Linked to {to_id} as {relation}.", artifacts=[])
-        write_record(project_root, from_record)
-    if back_link not in to_record.setdefault("links", []):
-        to_record["links"].append(back_link)
-        append_history(to_record, action="linked", summary=f"Linked to {from_id} as reverse:{relation}.", artifacts=[])
-        write_record(project_root, to_record)
+    locate_record(project_root, to_id)
+    link = normalize_link(
+        {
+            "target_id": to_id,
+            "relation": relation,
+            "note": note,
+            "source_locator": source_locator,
+            "target_locator": target_locator,
+        }
+    )
+    links = from_record.setdefault("links", [])
+    identity = link_identity(link)
+    existing = next((item for item in links if link_identity(item) == identity), None)
+    if existing is not None:
+        if note and str(existing.get("note") or "") != str(link.get("note") or ""):
+            existing["note"] = str(link.get("note") or "")
+            append_history(
+                from_record,
+                action="link_updated",
+                summary=f"Updated link to {to_id} as {link['relation']}.",
+                artifacts=[],
+            )
+            write_record(project_root, from_record)
+        return
+    links.append(link)
+    append_history(from_record, action="linked", summary=f"Linked to {to_id} as {link['relation']}.", artifacts=[])
+    write_record(project_root, from_record)
 
 
 def promote_record(
