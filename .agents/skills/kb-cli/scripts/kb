@@ -41,6 +41,7 @@ from research.core import (
     iter_records,
     kb_root,
     load_runtime_preferences,
+    record_path,
     record_workflow_state,
     search_records,
     validate_claims,
@@ -1708,9 +1709,9 @@ def effective_ingest_scope(root: Path) -> set[str]:
 def _extract_ingest_unit_id(stdout: str) -> tuple[str, str]:
     """Parse (unit_id, status) from intake add stdout.
 
-    status is "created" | "duplicate" | "unknown". A duplicate must NOT be
-    re-prepared (re-scaffolding would blank an agent's in-progress fill), so the
-    caller stops and reports it.
+    status is "created" | "duplicate" | "unknown". Duplicate handling is
+    state-aware: a source-only unit may continue to prepare, while an existing
+    fill is preserved and resumed through the private AgentProtocol.
     """
     created = re.search(r"\[ok\] created\s+.*?/([^/\s]+)/record\.yaml", stdout)
     if created:
@@ -1719,6 +1720,84 @@ def _extract_ingest_unit_id(stdout: str) -> tuple[str, str]:
     if duplicate:
         return duplicate.group(1), "duplicate"
     return "", "unknown"
+
+
+_INGEST_FILL_ARTIFACTS = {
+    "paper": "screening.yaml",
+    "repo": "capability-fill.yaml",
+    "dataset": "dataset-fill.yaml",
+    "blog": "blog-fill.yaml",
+}
+
+
+def _duplicate_ingest_state(root: Path, kind: str, unit_id: str) -> tuple[str, Path | None]:
+    """Return canonical workflow state and the expected current fill artifact."""
+    path = record_path(root, kind, unit_id)
+    record = load_yaml(path, default={})
+    if not isinstance(record, dict) or not record:
+        return "unknown", None
+    state = record_workflow_state(record)
+    unit_root = path.parent
+    fill_path = unit_root / _INGEST_FILL_ARTIFACTS[kind]
+    if kind == "paper":
+        screening = load_yaml(fill_path, default={}) if fill_path.exists() else {}
+        screening_status = str(screening.get("status") or "").strip().lower() if isinstance(screening, dict) else ""
+        if screening_status == "verified":
+            fill_path = unit_root / "note-fill.yaml"
+    return state, fill_path
+
+
+def _resume_duplicate_ingest(
+    root: Path,
+    *,
+    kind: str,
+    unit_id: str,
+    public_unit_id: str,
+) -> tuple[bool, tuple[str, str, str] | None]:
+    """Preserve existing work and describe the safe continuation.
+
+    Returns ``(handled, prepare_spec)``. ``prepare_spec`` is non-None only when
+    no fill artifact exists and it is safe for the caller to create one.
+    """
+    state, fill_path = _duplicate_ingest_state(root, kind, unit_id)
+    relative_script, verb, id_flag = INGEST_ANALYZER[kind]
+    if state in {"source_ready", "awaiting_agent_fill"} and fill_path is not None and not fill_path.exists():
+        if kind == "paper" and fill_path.name == "note-fill.yaml":
+            return False, (relative_script, "complete-note", id_flag)
+        return False, (relative_script, verb, id_flag)
+
+    if state == "ready_for_review":
+        print(f"知识条目 {public_unit_id} 已完成核验，现有内容保持不变；接下来只需你确认判断。")
+        set_protocol_status("ready_for_review", unit_id=unit_id, source_kind=kind)
+        add_agent_action("request_user_confirmation", unit_id=unit_id, source_kind=kind)
+        return True, None
+    if state == "done":
+        print(f"知识条目 {public_unit_id} 已存在且流程已经完成，本次没有改动。")
+        set_protocol_status("already_complete", unit_id=unit_id, source_kind=kind)
+        return True, None
+    if state == "failed_retryable":
+        print(f"知识条目 {public_unit_id} 已存在，但上次处理尚未完成；现有内容保持不变，Agent 会检查后续恢复。")
+        set_protocol_status("failed_retryable", unit_id=unit_id, source_kind=kind)
+        add_agent_action("diagnose_retryable_ingest", unit_id=unit_id, source_kind=kind)
+        return True, None
+
+    if fill_path is not None and fill_path.exists():
+        next_verb = "complete-note" if kind == "paper" and fill_path.name == "note-fill.yaml" else verb
+        print(f"知识条目 {public_unit_id} 已有待补全或待核验内容，现有填写已保留；Agent 会从当前阶段继续。")
+        set_protocol_status("agent_action_required", unit_id=unit_id, source_kind=kind, workflow_state=state)
+        add_agent_action(
+            "continue_existing_fill",
+            unit_id=unit_id,
+            source_kind=kind,
+            owner=relative_script,
+            arguments=[next_verb, id_flag, unit_id, "--phase", "verify"],
+        )
+        return True, None
+
+    print(f"知识条目 {public_unit_id} 已存在；现有内容保持不变，Agent 会检查当前阶段后继续。")
+    set_protocol_status("duplicate_needs_inspection", unit_id=unit_id, source_kind=kind, workflow_state=state)
+    add_agent_action("inspect_existing_unit", unit_id=unit_id, source_kind=kind)
+    return True, None
 
 
 def handle_ingest(args: argparse.Namespace, root: Path) -> int:
@@ -1761,10 +1840,16 @@ def handle_ingest(args: argparse.Namespace, root: Path) -> int:
 
     unit_id, status = _extract_ingest_unit_id(intake.stdout)
     public_unit_id = _public_display_text(unit_id, root, "编号已隐藏", 100) if unit_id else ""
+    duplicate_prepare: tuple[str, str, str] | None = None
     if status == "duplicate":
-        print(f"知识条目 {public_unit_id} 已存在；为保护已有工作，本次没有重新生成骨架。")
-        set_protocol_status("duplicate", unit_id=unit_id, source_kind=kind)
-        return 0
+        handled, duplicate_prepare = _resume_duplicate_ingest(
+            root,
+            kind=kind,
+            unit_id=unit_id,
+            public_unit_id=public_unit_id,
+        )
+        if handled:
+            return 0
     if not unit_id:
         print("资料已交给入库流程，但暂时无法确认新条目编号；Agent 会检查详细结果。")
         set_protocol_status("error", source_kind=kind, reason="created unit id was not returned")
@@ -1784,7 +1869,7 @@ def handle_ingest(args: argparse.Namespace, root: Path) -> int:
         )
         return 0
 
-    relative_script, verb, id_flag = INGEST_ANALYZER[kind]
+    relative_script, verb, id_flag = duplicate_prepare or INGEST_ANALYZER[kind]
     prepare = forward_command(
         root,
         relative_script,
@@ -1797,15 +1882,20 @@ def handle_ingest(args: argparse.Namespace, root: Path) -> int:
         set_protocol_status("error", unit_id=unit_id, source_kind=kind, stage="prepare")
         return prepare.returncode
 
-    if kind == "paper":
+    if kind == "paper" and verb == "screen":
         print(
             f"资料已入库并备好初筛骨架，条目编号是 {public_unit_id}。"
             "Agent 接下来会先用逐字证据确定论文类型，再生成对应的深读笔记；需要判断时再请你拍板。"
         )
+    elif kind == "paper":
+        print(
+            f"已有资料已备好类型专属深读骨架，条目编号是 {public_unit_id}。"
+            "Agent 接下来会补全逐字证据并校验；需要判断时再请你拍板。"
+        )
     else:
         print(f"资料已入库并备好深读骨架，条目编号是 {public_unit_id}。Agent 接下来会补全逐字证据并校验；需要判断时再请你拍板。")
     verify_arguments = [verb, id_flag, unit_id, "--phase", "verify"]
-    if kind == "paper":
+    if kind == "paper" and verb == "screen":
         note_prepare_arguments = ["complete-note", id_flag, unit_id, "--phase", "prepare"]
         note_verify_arguments = ["complete-note", id_flag, unit_id, "--phase", "verify"]
         remaining_steps: list[dict[str, object]] = [
@@ -1958,6 +2048,51 @@ def config_set_runtime_pref_command(section: str, key: str, value: str) -> tuple
     )
 
 
+_MISSING_CONFIG_VALUE = object()
+
+
+def _nested_config_value(payload: object, dotted_key: str) -> object:
+    current = payload
+    for key in (part for part in dotted_key.split(".") if part):
+        if not isinstance(current, dict) or key not in current:
+            return _MISSING_CONFIG_VALUE
+        current = current[key]
+    return current
+
+
+def _parsed_config_value(raw: object) -> object:
+    text = str(raw).strip()
+    if text.lower() in {"true", "false"}:
+        return text.lower() == "true"
+    if text.lower() == "null":
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return raw
+
+
+def _append_profile_update(
+    commands: list[tuple[str, Sequence[str]]],
+    profile: object,
+    key: str,
+    value: object,
+) -> None:
+    if _nested_config_value(profile, key) != _parsed_config_value(value):
+        commands.append(config_set_profile_command(key, str(value)))
+
+
+def _append_runtime_update(
+    commands: list[tuple[str, Sequence[str]]],
+    preferences: object,
+    section: str,
+    key: str,
+    value: object,
+) -> None:
+    if _nested_config_value(preferences, f"{section}.{key}") != _parsed_config_value(value):
+        commands.append(config_set_runtime_pref_command(section, key, str(value)))
+
+
 def build_init_pref_commands(*, name: str, lang: str, auto_commit: str, auto_screen: str) -> list[tuple[str, Sequence[str]]]:
     return [
         config_set_runtime_pref_command("identity", "default_confirmed_by", name),
@@ -1989,24 +2124,26 @@ def build_headless_init_pref_commands(
     ):
         return None
     commands: list[tuple[str, Sequence[str]]] = []
+    profile = load_yaml(config_root(root) / "user-profile.yaml", default={})
+    preferences = load_runtime_preferences(root)
     if args.name is not None:
         name = str(args.name or "").strip()
         if not name:
             raise SystemExit("确认人姓名不能为空。")
         if is_ai_signer(name):
             raise SystemExit("确认人必须是真实用户，不能使用 AI 工具名称。")
-        commands.append(config_set_runtime_pref_command("identity", "default_confirmed_by", name))
+        _append_runtime_update(commands, preferences, "identity", "default_confirmed_by", name)
     if args.lang is not None:
-        commands.append(config_set_profile_command("preferences.language_preference", args.lang))
+        _append_profile_update(commands, profile, "preferences.language_preference", args.lang)
     if args.auto_commit is not None:
-        commands.append(config_set_runtime_pref_command("versioning", "auto_commit_mode", args.auto_commit))
+        _append_runtime_update(commands, preferences, "versioning", "auto_commit_mode", args.auto_commit)
     if args.auto_screen is not None:
-        commands.append(config_set_runtime_pref_command("paper", "auto_screen_on_intake", args.auto_screen))
+        _append_runtime_update(commands, preferences, "paper", "auto_screen_on_intake", args.auto_screen)
     if getattr(args, "quick_resource", None) is not None:
         resource_statement = str(args.quick_resource or "").strip()
         if not resource_statement:
             raise SystemExit("资源说明不能为空。")
-        commands.append(config_set_profile_command("resources.quick_setup", resource_statement))
+        _append_profile_update(commands, profile, "resources.quick_setup", resource_statement)
     quick_constraints = getattr(args, "quick_constraints", None)
     if quick_constraints is not None:
         profile = load_yaml(config_root(root) / "user-profile.yaml", default={})
@@ -2026,15 +2163,15 @@ def build_headless_init_pref_commands(
                 merged.append(constraint)
                 seen.add(constraint)
         if merged != existing:
-            commands.append(
-                config_set_profile_command(
-                    "constraints",
-                    json.dumps(merged, ensure_ascii=False),
-                )
+            _append_profile_update(
+                commands,
+                profile,
+                "constraints",
+                json.dumps(merged, ensure_ascii=False),
             )
     for key, value in persona_values:
         if value is not None:
-            commands.append(config_set_profile_command(key, value))
+            _append_profile_update(commands, profile, key, value)
     return commands
 
 

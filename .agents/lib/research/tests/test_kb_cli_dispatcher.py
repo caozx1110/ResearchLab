@@ -569,6 +569,60 @@ def test_kb_init_defer_is_zero_write_and_repeated_plain_init_is_no_churn(tmp_pat
     assert (tmp_path / "kb" / "config" / "user-profile.yaml").read_bytes() == profile_before
 
 
+def test_kb_init_repeated_identical_explicit_setup_is_strict_no_churn(tmp_path: Path, capsys) -> None:
+    kb = _load_kb_cli()
+    argv = [
+        "--root",
+        str(tmp_path),
+        "init",
+        "--name",
+        "Researcher",
+        "--lang",
+        "zh",
+        "--auto-commit",
+        "milestone",
+        "--auto-screen",
+        "true",
+        "--persona-focus",
+        "robot learning",
+        "--persona-term",
+        "bilingual",
+        "--quick-resource",
+        "8xA100 and one robot arm",
+        "--quick-constraint",
+        "数据不得离开本地",
+    ]
+
+    assert kb.main(argv) == 0
+    capsys.readouterr()
+    before_digest = _tree_metadata_digest(tmp_path)
+    before_journal_count = _journal_operation_count(tmp_path)
+    profile_path = tmp_path / "kb" / "config" / "user-profile.yaml"
+    runtime_path = tmp_path / "kb" / "config" / "runtime-preferences.yaml"
+    profile_before = profile_path.read_bytes()
+    runtime_before = runtime_path.read_bytes()
+    commits_before = subprocess.run(
+        ["git", "-C", str(tmp_path / "kb"), "rev-list", "--count", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    assert kb.main(argv) == 0
+    assert capsys.readouterr().out == "知识库和基础偏好已准备好。\n"
+    assert _tree_metadata_digest(tmp_path) == before_digest
+    assert _journal_operation_count(tmp_path) == before_journal_count
+    assert profile_path.read_bytes() == profile_before
+    assert runtime_path.read_bytes() == runtime_before
+    commits_after = subprocess.run(
+        ["git", "-C", str(tmp_path / "kb"), "rev-list", "--count", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert commits_after == commits_before
+
+
 def test_kb_init_optional_setup_reports_existing_allowlisted_defaults_without_echoing_unknown_values(
     monkeypatch,
     tmp_path: Path,
@@ -3082,23 +3136,100 @@ def test_kb_ingest_narrowed_scope_without_screen_runs_nothing(monkeypatch, tmp_p
     assert protocol["status"] == "paused_by_autonomy"
 
 
-def test_kb_ingest_duplicate_stops_before_prepare(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_kb_ingest_duplicate_source_ready_continues_safe_prepare(monkeypatch, tmp_path: Path, capsys) -> None:
     kb = _load_kb_cli()
-    calls: list[dict] = []
+    calls: list[tuple[str, tuple[str, ...]]] = []
+    write_yaml_if_changed(
+        record_path(tmp_path, "paper", "p-demo-abcd1234"),
+        {
+            "id": "p-demo-abcd1234",
+            "kind": "paper",
+            "status": "active",
+            "confirmation_status": "pending_user_confirmation",
+            "information_types": ["inference", "unverified"],
+            "payload": {"state": {"full_note_status": "not_started"}},
+        },
+    )
 
     def fake(root, relative_script, args, *, stream=True, extra_env=None):
-        calls.append(relative_script)
-        return kb.CommandResult((relative_script, *args), 0, "[ok] duplicate detected: p-demo-abcd1234\n")
+        calls.append((relative_script, tuple(args)))
+        if relative_script.endswith("intake.py"):
+            stdout = "[ok] duplicate detected: p-demo-abcd1234\n"
+        else:
+            stdout = _PAPER_PREPARE_STDOUT
+        return kb.CommandResult((relative_script, *args), 0, stdout)
 
     monkeypatch.setattr(kb, "effective_ingest_scope", lambda root: set(FULL_SCOPE))
     monkeypatch.setattr(kb, "forward_command", fake)
 
     assert kb.main(["--root", str(tmp_path), "ingest", "notes/demo.pdf"]) == 0
 
-    assert calls == [".agents/skills/source-intake/scripts/intake.py"]
+    assert [call[0] for call in calls] == [
+        ".agents/skills/source-intake/scripts/intake.py",
+        ".agents/skills/paper-analyst/scripts/paper.py",
+    ]
+    assert calls[1][1] == ("screen", "--paper-id", "p-demo-abcd1234", "--phase", "prepare")
     out = capsys.readouterr().out
-    assert "知识条目 p-demo-abcd1234 已存在" in out
-    assert "没有重新生成骨架" in out
+    assert "已入库并备好初筛骨架" in out
+    assert "--phase" not in out and ".py" not in out
+
+
+def test_kb_ingest_duplicate_preserves_existing_agent_fill_and_routes_privately(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    kb = _load_kb_cli()
+    unit_id = "p-demo-abcd1234"
+    write_yaml_if_changed(
+        record_path(tmp_path, "paper", unit_id),
+        {
+            "id": unit_id,
+            "kind": "paper",
+            "status": "screened",
+            "confirmation_status": "pending_user_confirmation",
+            "information_types": ["inference", "unverified"],
+            "payload": {"state": {"full_note_status": "awaiting_agent_fill"}},
+        },
+    )
+    fill_path = record_path(tmp_path, "paper", unit_id).parent / "screening.yaml"
+    write_yaml_if_changed(
+        fill_path,
+        {
+            "status": "awaiting_agent_judgement",
+            "worth_deep_reading": "maybe",
+            "judgement_reason": ["agent draft must survive"],
+        },
+    )
+    fill_before = fill_path.read_bytes()
+    calls: list[str] = []
+
+    def fake(root, relative_script, args, *, stream=True, extra_env=None):
+        calls.append(relative_script)
+        return kb.CommandResult((relative_script, *args), 0, f"[ok] duplicate detected: {unit_id}\n")
+
+    monkeypatch.setattr(kb, "effective_ingest_scope", lambda root: set(FULL_SCOPE))
+    monkeypatch.setattr(kb, "forward_command", fake)
+
+    assert kb.main(
+        ["--root", str(tmp_path), "--agent-protocol", "duplicate.json", "ingest", "notes/demo.pdf"]
+    ) == 0
+
+    assert calls == [".agents/skills/source-intake/scripts/intake.py"]
+    assert fill_path.read_bytes() == fill_before
+    out = capsys.readouterr().out
+    assert "现有填写已保留" in out
+    assert "--phase" not in out and ".py" not in out
+    protocol = json.loads((tmp_path / "kb" / ".runtime" / "duplicate.json").read_text(encoding="utf-8"))
+    assert protocol["status"] == "agent_action_required"
+    assert protocol["next_actions"][0]["action"] == "continue_existing_fill"
+    assert protocol["next_actions"][0]["arguments"] == [
+        "screen",
+        "--paper-id",
+        unit_id,
+        "--phase",
+        "verify",
+    ]
 
 
 def test_kb_ingest_unit_id_extraction_variants() -> None:
