@@ -53,6 +53,7 @@ from research.core import (
     restore_operation,
     migrate_repo_to_dataset,
     refresh_record_schemas,
+    search_passages,
     search_records,
     sync_storage_layout,
     topic_taxonomy_path,
@@ -656,6 +657,24 @@ def main() -> int:
         print(f"[ok] rebuilt {pools_path.relative_to(root)}")
         return 0
     if args.command == "query":
+        if str(args.query or "").strip():
+            payload = search_passages(
+                root,
+                args.query,
+                kind=args.kind,
+                pool=args.pool or None,
+                confirmation_status=args.confirmation_status,
+            )
+            for item in payload["results"]:
+                print(f"- {item['unit_id']} | {item['kind']} | {item['title']}")
+                if item.get("heading"):
+                    print(f"  {item['heading']} · {item['locator']}")
+                else:
+                    print(f"  {item['locator']}")
+                print(f"  {item['excerpt']}")
+            if not payload["results"]:
+                print("[ok] no matches")
+            return 0
         hits = search_records(root, args.query, kind=args.kind, pool=args.pool or None, confirmation_status=args.confirmation_status)
         for item in hits:
             pools = ",".join(item.get("candidate_pools", []))
