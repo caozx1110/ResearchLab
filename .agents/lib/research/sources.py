@@ -429,17 +429,48 @@ def _stage_search_results_unlocked(
             "history": [],
         },
     )
-    known_urls = {str(item.get("url") or "") for item in payload.get("candidates", []) if isinstance(item, dict)}
+    existing_candidates = [item for item in payload.get("candidates", []) if isinstance(item, dict)]
+    known_urls = {str(item.get("url") or "") for item in existing_candidates}
+    known_candidate_ids = {str(item.get("candidate_id") or ""): item for item in existing_candidates}
     query_topics, query_tags = infer_topics_and_tags(query, project_root=project_root)
     for index, candidate in enumerate(candidates, start=1):
         url = str(candidate.get("url") or "").strip()
         title = str(candidate.get("title") or "").strip()
-        if not url or url in known_urls:
+        if not url:
             continue
         candidate_id = str(candidate.get("candidate_id") or "").strip()
         if not candidate_id:
             seed = title or url or f"{current_stage_id}:{index}"
             candidate_id = f"{current_stage_id}-{hashlib.sha1(seed.encode('utf-8')).hexdigest()[:6]}"
+        provenance: dict[str, Any] = {}
+        raw_provenance = candidate.get("provenance")
+        raw_openalex = raw_provenance.get("openalex") if isinstance(raw_provenance, dict) else None
+        if isinstance(raw_openalex, dict):
+            allowed_openalex = {
+                "work_id",
+                "doi",
+                "publication_date",
+                "publication_year",
+                "type",
+                "language",
+                "cited_by_count",
+                "is_retracted",
+                "open_access_landing_url",
+                "open_access_pdf_url",
+                "queried_at",
+            }
+            provenance["openalex"] = {
+                key: raw_openalex.get(key)
+                for key in sorted(allowed_openalex)
+                if raw_openalex.get(key) not in (None, "", [], {})
+            }
+        existing_candidate = known_candidate_ids.get(candidate_id)
+        if existing_candidate is None and url in known_urls:
+            continue
+        if existing_candidate is not None:
+            if provenance:
+                existing_candidate["provenance"] = provenance
+            continue
         payload["candidates"].append(
             {
                 "candidate_id": candidate_id,
@@ -450,9 +481,11 @@ def _stage_search_results_unlocked(
                 "topics": _slug_list(candidate.get("topics")) or _slug_list(query_topics),
                 "tags": _slug_list(candidate.get("tags")) or _slug_list(query_tags),
                 "pool_hints": _slug_list(candidate.get("pool_hints")),
+                **({"provenance": provenance} if provenance else {}),
             }
         )
         known_urls.add(url)
+        known_candidate_ids[candidate_id] = payload["candidates"][-1]
     payload["history"].append({"timestamp": utc_now_iso(), "action": "staged", "summary": f"Captured {len(candidates)} candidates."})
     payload["generated_at"] = utc_now_iso()
     write_yaml_if_changed(path, payload)
