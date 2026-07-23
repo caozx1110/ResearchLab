@@ -4,7 +4,7 @@ All notable changes to this project will be documented here. The format follows 
 
 ## [Unreleased]
 
-The bundle currently declares **`0.2.0-rc.3`**. R3 local release checks are in progress. It is not a stable release, is not GA, has not been tagged or published, and carries no compatibility or response-time SLA. A green hosted Linux/macOS CI matrix remains a prerequisite for a release tag.
+The bundle currently declares **`0.2.0-rc.3`**. It has passed the complete 1,012-test local suite, installed-copy validation, real SQLite HTML intake, and Obsidian 1.12.7 Reading-view acceptance. It meets the local release-candidate gate, but is not a stable release or GA, has not been tagged or published, and carries no compatibility or response-time SLA. A green hosted Linux/macOS CI matrix remains a prerequisite for a release tag.
 
 ### Added
 
@@ -55,7 +55,7 @@ The bundle currently declares **`0.2.0-rc.3`**. R3 local release checks are in p
 
 ## [0.2.0-rc.3] - Unreleased
 
-The current local candidate adds the R3 retrieval, freshness, experiment identity, scouting, and review-UX closure. Local acceptance is still being completed; no tag or publication exists.
+The current local candidate adds the R3 retrieval, freshness, experiment identity, scouting, and review-UX closure. Local acceptance passed with 1,012 tests plus installed-copy, real-source, and Obsidian Reading-view checks; no tag or publication exists.
 
 ## [0.2.0-rc.2] - Unreleased
 
