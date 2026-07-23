@@ -28,6 +28,7 @@ from research.core import command_mutation, ensure_workspace, checkpoint_and_rep
 from research.evidence import read_claims, validate_claims, verification_receipt_violations
 from research.judgements import load_bound_judgement
 from research.records import locate_record
+from research.surveys import survey_staleness
 
 
 UNIT_ID_FIELDS = {"unit_id", "unit_ids", "related_unit_ids", "active_unit_ids"}
@@ -180,6 +181,43 @@ def _confirmed_judgement_event(root: Path, event: dict[str, Any]) -> tuple[bool,
     return True, "confirmation_status=confirmed; current ConfirmationReceipt"
 
 
+def _survey_event_staleness(root: Path, event: dict[str, Any]) -> dict[str, Any] | None:
+    event_type = str(event.get("event_type") or "").casefold()
+    binding = event.get("confirmation_binding")
+    binding = binding if isinstance(binding, dict) else {}
+    subject = binding.get("subject")
+    subject = subject if isinstance(subject, dict) else {}
+    subject_kind = str(subject.get("kind") or "").casefold()
+    if "survey" not in event_type and "survey" not in subject_kind:
+        return None
+    raw_path = str(subject.get("path") or "").strip()
+    if not raw_path:
+        return {"stale": True, "reasons": ["missing survey path"], "new_unit_ids": []}
+    project = root.resolve()
+    synthesis = (project / "kb" / "synthesis").resolve()
+    unresolved = project / raw_path
+    try:
+        relative = unresolved.relative_to(project)
+    except ValueError:
+        return {"stale": True, "reasons": ["unsafe survey path"], "new_unit_ids": []}
+    cursor = project
+    for part in relative.parts:
+        cursor = cursor / part
+        if cursor.is_symlink():
+            return {"stale": True, "reasons": ["unsafe survey path"], "new_unit_ids": []}
+    candidate = unresolved.resolve()
+    try:
+        candidate.relative_to(synthesis)
+    except ValueError:
+        return {"stale": True, "reasons": ["unsafe survey path"], "new_unit_ids": []}
+    if candidate.is_symlink() or not candidate.is_file() or candidate.name != "survey.yaml":
+        return {"stale": True, "reasons": ["missing survey artifact"], "new_unit_ids": []}
+    payload = load_yaml(candidate, default={})
+    if not isinstance(payload, dict):
+        return {"stale": True, "reasons": ["invalid survey artifact"], "new_unit_ids": []}
+    return survey_staleness(payload, root)
+
+
 def partition_reporting_events(
     root: Path,
     events: list[dict[str, Any]],
@@ -190,6 +228,15 @@ def partition_reporting_events(
         normalized = dict(event)
         if not _event_is_judgement(normalized):
             ordinary.append(normalized)
+            continue
+        freshness = _survey_event_staleness(root, normalized)
+        if isinstance(freshness, dict) and freshness.get("stale"):
+            reasons = freshness.get("reasons")
+            reason_count = len(reasons) if isinstance(reasons, list) else 1
+            normalized["_epistemic_reason"] = (
+                f"confirmation_status=stale; survey upstream binding changed ({reason_count} reason(s))"
+            )
+            pending.append(normalized)
             continue
         confirmed, reason = _confirmed_judgement_event(root, normalized)
         normalized["_epistemic_reason"] = reason

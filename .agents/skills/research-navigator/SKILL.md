@@ -5,7 +5,7 @@ description: Build human-facing entrypoints for the research system under `kb/us
 
 # Research Navigator
 
-> 协议参考：`.agents/lib/research/SCHEMAS.md#program-files` · `#ownership` · `#runtime`
+> 协议参考：`.agents/lib/research/SCHEMAS.md#program-files` · `#evidence-first-outputs` · `#ownership` · `#runtime`
 
 Use this skill to tell the human what to open next and to open a local browser for research assets.
 
@@ -29,6 +29,7 @@ Use this skill to tell the human what to open next and to open a local browser f
 - Keep source records canonical; browser output is generated under `kb/user/kb/`.
 - The browser supports a Workbench, Markdown preview/edit for `.md`/`.txt`, and portrait-friendly narrow-window adaptation. Terminal and system-terminal surfaces are disabled by default and are maintainer-only when explicitly enabled.
 - The browser editor is intentionally limited to `.md`/`.txt`; it can update markdown/text notes and trigger a configured checkpoint. Do not mutate raw sources or canonical YAML through the browser.
+- 在 current state、reading list 或 browser 中呈现 survey 前，纯读复算它的 `consumer_binding`。相同 selection 新增 unit、已有 unit 的 content/confirmation/evidence 变化或删除都标为 stale，并给出重新 prepare/fill/verify 的自然语言建议；不得为更新状态而改写 survey。
 
 ## Maintainer/private commands
 

@@ -4,7 +4,7 @@
 
 它不是预装好的知识库。安装后，能力包与研究数据分开保存。AI 负责提取、整理、追踪和汇总；你负责判断、确认和拍板。
 
-当前候选版本是 **`0.2.0-rc.2`**。它已通过完整本地测试套件和真实 copy-project 升级冒烟，达到项目定义的本地 release-candidate 质量；但它不是 stable 或 GA，也尚未 tag/publish。正式打发布 tag 前，仍须让 hosted Linux/macOS CI matrix 全绿；当前不承诺兼容性或响应时限 SLA。
+当前候选版本是 **`0.2.0-rc.3`**，R3 的本地发布验收仍在进行。它不是 stable 或 GA，也尚未 tag/publish。正式打发布 tag 前，仍须让 hosted Linux/macOS CI matrix 全绿；当前不承诺兼容性或响应时限 SLA。
 
 ## 能力成熟度（按组件）
 
@@ -20,6 +20,7 @@
 | `kb-cli` | stable | 十六个动词的路由、自然语言输出过滤和恢复入口；Obsidian 投影为 beta。 |
 | `knowledge-base-manager` | stable | 数据规范、证据、确认、精确恢复和索引治理；不负责理解研究材料。 |
 | `source-intake` | beta | 异构来源的暂存、去重、原始材料留存、完整 Markdown 阅读层和可重试失败。 |
+| `literature-scout` | beta | 把有界 OpenAlex 检索写入待审的 source-search 暂存；不判断相关性，也不直接创建正式单元。 |
 | `paper-analyst` | beta | 带证据的准备与验证是真实流程；实质阅读由 Agent 完成。 |
 | `repo-analyst` | beta | 能力地图准备与代码证据验证是真实流程；代码理解由 Agent 完成。 |
 | `dataset-analyst` | beta | 数据画像骨架与数据卡逐字证据校验是真实流程；适用性判断由 Agent 完成并等待确认。 |
@@ -27,10 +28,10 @@
 | `research-config-manager` | beta | 偏好与策略可以持久化，但尚非所有偏好都被所有下游能力消费。 |
 | `discussion-archivist` | beta | 按结论保存讨论、证据和开放问题。 |
 | `research-orchestrator` | scaffold | 研究计划主线、路由、看板和事件流已存在，优先级仍以固定策略为主。 |
-| `literature-synthesizer` | beta | 综述、分类、趋势、矛盾与空白会形成有证据的持久产物；综合质量仍依赖 Agent 与来源覆盖。 |
+| `literature-synthesizer` | beta | 综述、分类、趋势、矛盾与空白会形成绑定上游版本的有证据持久产物；综合质量仍依赖 Agent 与来源覆盖。 |
 | `idea-workbench` | beta | 候选、evidence-first 评审、讨论和显式选择已实现；创新性判断仍需用户或专家拍板。 |
 | `method-designer` | beta | 基于仓库证据的方法交接和实验矩阵已实现；生成设计仍需专家复核。 |
-| `experiment-workbench` | beta | 强类型计划、运行记录、follow-up 和确认门控诊断已实现；诊断质量仍依赖 Agent。 |
+| `experiment-workbench` | beta | 强类型计划、带 fingerprint 的可重复运行记录、follow-up 和确认门控诊断已实现；诊断质量仍依赖 Agent。 |
 | `report-author` | beta | 报告与大纲会消费持久 claim、event、evidence 和 decision；成文质量与覆盖仍需复核。 |
 | `skill-evolution-advisor` | scaffold | 本地学习与诊断问题的记录、复核已存在，不承诺自动修改 skill。 |
 | `wiki-adapter` | scaffold | 仅提供轻量兼容与路由，不是独立分析引擎。 |
@@ -123,7 +124,7 @@ Agent 会连续完成安全步骤：轻量入库、保留原格式、生成完�
 | `kb review` | 查看已准备好的人类判断项，并用自然语言确认或拒绝。 |
 | `kb status` | 刷新并查看当前 KB 或研究计划状态。 |
 | `kb next` | 查看当前最值得推进的下一步。 |
-| `kb find <关键词>` | 搜索已入库知识单元。 |
+| `kb find <关键词>` | 查找相关段落，并返回知识单元与可复开的定位。 |
 | `kb recall` | 回忆已确认习惯、已知坑和待审 skill 问题。 |
 | `kb resume` | 恢复中断的知识库操作。 |
 | `kb undo` | 撤销最近一次已提交的知识库操作。 |
@@ -172,11 +173,17 @@ Paper、repo 和 blog 使用同一套 review readiness 规则。事实型 metada
 
 如果初始化时跳过了真实署名，`kb review` 仍会正常展示可读的待确认内容；只有当你选择确认时，Agent 才会先询问并保存真实署名，再应用本次确认。选择拒绝不需要署名，AI 也不能代替你签字。
 
+每次展示的 review 卡片都是一次性、绑定当前内容版本的快照，默认 24 小时过期。已经处理、已过期、正文变化或无效的卡片会给出不同的自然语言恢复提示；正文变化时重新执行 `kb review`，你看到的一定是新正文。成功后会显示经过清洗的对象类型、标题以及“已确认”或“已拒绝”。
+
+你也可以用自然语言要求 Agent 去 OpenAlex 找一批候选文献。一次只拉取一个有上限的结果页，先进入 source-search 暂存，由 Agent 去重和阅读后再走正常入库；引用量只是来源 metadata，不会被当作质量结论。访问密钥只从私有运行环境读取，不写进知识库，也不会出现在用户输出里。
+
 ## 检索、综述与陪练
 
 ```text
 在知识库里找和 retrieval-augmented generation 相关的 paper、repo 和 idea。
 ```
+
+`kb find` 返回最多五段相关原文摘录，并附知识单元和项目内定位；不会只给标题列表。检索缓存缺失、损坏或过期时会在内存中只读回退，查询本身不写知识库。它支持同语种与中英混合词的 lexical 匹配，但不冒充跨语言语义检索。
 
 ```text
 请基于当前已入库资料，为这个方向生成方法分类、趋势、矛盾证据和空白点。

@@ -3357,6 +3357,7 @@ def test_kb_find_forwards_joined_keywords(monkeypatch, tmp_path: Path) -> None:
         return kb.CommandResult((relative_script, *args), 0)
 
     monkeypatch.setattr(kb, "forward_command", fake_forward)
+    monkeypatch.setattr(kb, "search_passages", lambda root, query, limit=25: {"health": "missing", "results": []})
 
     assert kb.main(["--root", str(tmp_path), "find", "policy", "gradient"]) == 0
 
@@ -3393,6 +3394,27 @@ def test_kb_find_public_output_is_natural_and_protocol_remains_structured(
             }
         ],
     )
+    monkeypatch.setattr(
+        kb,
+        "search_passages",
+        lambda root, query, limit=25: {
+            "health": "current",
+            "results": [
+                {
+                    "unit_id": "p-demo",
+                    "kind": "paper",
+                    "title": "Policy Gradient",
+                    "excerpt": "A concise policy-gradient passage.",
+                    "artifact": "kb/units/papers/p-demo/source/document.md",
+                    "locator": "kb/units/papers/p-demo/source/document.md#L10-L12",
+                    "heading": "Method",
+                    "line_start": 10,
+                    "line_end": 12,
+                    "_search_score": 9.0,
+                }
+            ],
+        },
+    )
     monkeypatch.setattr(kb, "record_workflow_state", lambda record: "source_ready")
 
     assert kb.main(
@@ -3400,8 +3422,11 @@ def test_kb_find_public_output_is_natural_and_protocol_remains_structured(
     ) == 0
 
     output = capsys.readouterr().out
-    assert "找到 1 条相关资料" in output
+    assert "找到 1 段相关内容" in output
     assert "论文「Policy Gradient」（p-demo）" in output
+    assert "定位：Method，第 10–12 行" in output
+    assert "摘录：A concise policy-gradient passage." in output
+    assert "kb/units" not in output
     assert "Agent 还需要继续整理或核验这条资料" in output
     _assert_public_governance_safe(output)
     protocol = json.loads((tmp_path / "kb" / ".runtime" / "find.json").read_text(encoding="utf-8"))
@@ -3415,6 +3440,9 @@ def test_kb_find_public_output_is_natural_and_protocol_remains_structured(
             "workflow_state": "source_ready",
         }
     ]
+    assert protocol["details"]["search_index_health"] == "current"
+    assert protocol["details"]["passages"][0]["artifact"].endswith("source/document.md")
+    assert "_search_score" not in protocol["details"]["passages"][0]
 
 
 def test_kb_find_excludes_rejected_matches_and_audits_count(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -3427,11 +3455,22 @@ def test_kb_find_excludes_rejected_matches_and_audits_count(monkeypatch, tmp_pat
         lambda root, relative_script, args, *, stream=True: kb.CommandResult((relative_script, *args), 0),
     )
     monkeypatch.setattr(kb, "search_records", lambda root, query: [active, rejected])
+    monkeypatch.setattr(
+        kb,
+        "search_passages",
+        lambda root, query, limit=25: {
+            "health": "current",
+            "results": [
+                {"unit_id": "p-active", "kind": "paper", "title": "Active", "excerpt": "active", "heading": ""},
+                {"unit_id": "b-rejected", "kind": "blog", "title": "Rejected", "excerpt": "rejected", "heading": ""},
+            ],
+        },
+    )
 
     assert kb.main(["--root", str(tmp_path), "--agent-protocol", "find-rejected.json", "find", "demo"]) == 0
 
     output = capsys.readouterr().out
-    assert "找到 1 条相关资料" in output
+    assert "找到 1 段相关内容" in output
     assert "Active" in output
     assert "Rejected" not in output
     protocol = json.loads((tmp_path / "kb" / ".runtime" / "find-rejected.json").read_text(encoding="utf-8"))
@@ -3458,12 +3497,28 @@ def test_kb_find_sanitizes_multiline_commands_controls_and_long_values(
         lambda root, relative_script, args, *, stream=True: kb.CommandResult((relative_script, *args), 0),
     )
     monkeypatch.setattr(kb, "search_records", lambda root, query: [record])
+    monkeypatch.setattr(
+        kb,
+        "search_passages",
+        lambda root, query, limit=25: {
+            "health": "current",
+            "results": [
+                {
+                    "unit_id": record["id"],
+                    "kind": record["kind"],
+                    "title": record["title"],
+                    "excerpt": record["summary"],
+                    "heading": "",
+                }
+            ],
+        },
+    )
 
     assert kb.main(["--root", str(tmp_path), "--agent-protocol", "find-injected.json", "find", "demo"]) == 0
 
     output = capsys.readouterr().out
     assert "标题需由 Agent 安全解释" in output
-    assert "摘要包含不适合直接展示的内容" in output
+    assert "摘录包含不适合直接展示的内容" in output
     assert "p-safe" in output
     for forbidden in ("NEXT FOR AGENT", "python3", ".agents/", "--force", "\x1b", "\u202e"):
         assert forbidden not in output

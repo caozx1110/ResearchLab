@@ -55,6 +55,44 @@ def test_navigator_current_state_renders_program_states() -> None:
     assert "暂无 program state" not in text
 
 
+def test_navigator_projects_survey_freshness_without_mutation(tmp_path: Path, monkeypatch) -> None:
+    navigate = _load_script("research-navigator", "navigate.py", "navigator_script_for_survey_freshness")
+    root = _make_workspace(tmp_path)
+    survey_path = root / "kb" / "synthesis" / "robot-learning" / "survey.yaml"
+    write_yaml_if_changed(survey_path, {"slug": "robot-learning", "consumer_binding": {}})
+    before = survey_path.read_bytes()
+    monkeypatch.setattr(
+        navigate,
+        "survey_staleness",
+        lambda payload, project_root: {"stale": True, "reasons": ["changed unit"], "new_unit_ids": []},
+    )
+
+    freshness = navigate.load_survey_freshness(root)
+    text = navigate.render_current([], survey_freshness=freshness)
+
+    assert freshness == [{"id": "robot-learning", "stale": True, "reason_count": 1}]
+    assert "可能过期" in text
+    assert "需要重新核验" in text
+    assert survey_path.read_bytes() == before
+
+
+def test_navigator_skips_survey_below_symlinked_directory(tmp_path: Path, monkeypatch) -> None:
+    navigate = _load_script("research-navigator", "navigate.py", "navigator_script_for_symlinked_survey")
+    root = _make_workspace(tmp_path)
+    outside = tmp_path / "outside-surveys"
+    write_yaml_if_changed(outside / "survey.yaml", {"slug": "outside", "consumer_binding": {}})
+    synthesis = root / "kb" / "synthesis"
+    synthesis.mkdir(parents=True)
+    (synthesis / "outside").symlink_to(outside, target_is_directory=True)
+    monkeypatch.setattr(
+        navigate,
+        "survey_staleness",
+        lambda payload, project_root: (_ for _ in ()).throw(AssertionError("unsafe survey must not be opened")),
+    )
+
+    assert navigate.load_survey_freshness(root) == []
+
+
 def test_navigator_current_state_includes_recall_digest_without_writing(tmp_path: Path, monkeypatch, capsys) -> None:
     navigate = _load_script("research-navigator", "navigate.py", "navigator_script_for_recall")
     root = _make_workspace(tmp_path)

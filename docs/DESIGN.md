@@ -35,11 +35,12 @@ Release bundle 不包含任何私有 `kb/`。安装、更新、storage sync 和�
 
 ## Skill 路由
 
-系统包含 18 个本地 skill：
+系统包含 19 个本地 skill：
 
 | 分组 | Skills |
 |---|---|
 | Governance and routing | `knowledge-base-manager`, `research-config-manager`, `source-intake`, `research-orchestrator` |
+| Discovery | `literature-scout` |
 | Analysis | `paper-analyst`, `repo-analyst`, `dataset-analyst`, `blog-analyst`, `literature-synthesizer` |
 | Creation and execution | `idea-workbench`, `method-designer`, `experiment-workbench`, `report-author` |
 | Navigation and meta | `research-navigator`, `discussion-archivist`, `wiki-adapter`, `skill-evolution-advisor` |
@@ -63,8 +64,10 @@ Release bundle 不包含任何私有 `kb/`。安装、更新、storage sync 和�
 - `prefs.py`：runtime preferences 与 workspace scaffold；
 - `confirm.py`：write gate、confirmation receipt、link 与 lifecycle mutation；
 - `sources.py`：source intake 与 KB-local storage migration；
+- `openalex.py`：有界 OpenAlex Works 查询、字段白名单映射与去密钥错误边界；
+- `surveys.py`：survey 上游 byte binding、selection 与消费者只读 freshness 检查；
 - `source_materials.py`：PDF / HTML / Markdown / text 的完整 Markdown 阅读层、图片本地化、source map 与转换清单；
-- `index.py`：index、governance、search 和 ID compaction；
+- `index.py` / `retrieval.py`：canonical index、deterministic passage extraction、FTS5 cache、只读 stale fallback 与 ID compaction；
 - `diagnostics.py`：可选诊断策略、脱敏 issue、确定性去重和本地导出预览；
 - `evidence.py`：逐字 evidence 和派生证据验证；
 - `relations.py` / `obsidian.py`：有向关系注册表、细粒度 locator、无插件 Obsidian 派生投影与只读审计；
@@ -127,6 +130,18 @@ confirmed or rejected
 7. 写入瞬间重新验证授权和版本，失败时 fail closed。
 
 Receipt 不改变原 epistemic type。内容或 evidence 改变时，旧 receipt 失效；公开层引导 Agent 基于当前材料重新核验，只有核验通过的新版判断才重新进入人类确认，不向用户暴露内部状态名。事实批量确认与判断逐项确认可以有不同 UX，但都不得自签。
+
+公开 review 将 Top-3 可确认对象复制到私有一次性 token registry。记录包含创建、过期与消费状态，默认有效期 24 小时；读取与应用时在锁内清理超过宽限期的已过期/已消费普通文件，并拒绝 symlink 或越界对象。应用只允许 token 中实际展示的一条对象，owner 在事务内复验身份、正文、状态和 verification。失败分为已处理、已过期、正文已变化、未知或被篡改四类自然语言恢复路径；正文变化后重新展示的新卡不得复用旧正文。成功输出只回显清洗后的类型、标题和确认/拒绝决定。
+
+## 外部发现、检索与新鲜度
+
+`literature-scout` 是第 19 个 skill，也是 source intake 之前的薄发现层。它把明确查询或 program evidence request 转成一次有界的 OpenAlex Works 请求，默认 25、硬上限 100，只保存字段白名单内的 fact metadata 到 `kb/synthesis/source-search/`。候选按 OpenAlex ID、再按 DOI 确定性去重；网络 payload、API key 与请求 URL 不落盘。stage 不直接创建 paper unit，也不判断 relevance、novelty 或 quality。
+
+终端 `kb find` 使用 deterministic passage extractor。Markdown 以 heading/段落切分，长段用固定重叠窗口；每段保留 unit、artifact、locator、text 和 source digest。显式索引构建把完整临时 SQLite FTS5 数据库原子替换到 runtime cache，不使用 external-content 双表。查询最多返回五段摘要；cache 缺失、损坏或 digest stale 时，以同一抽取器做内存只读 fallback。缓存不是 canonical evidence，不进入 checkpoint，检索也不宣称 embedding 或跨语言语义能力。
+
+已验证 survey 的 `consumer_binding` 保存 selection、unit、canonical content、confirmation receipt 与 evidence artifact digests。verify 发布前重新核对 anchor；任一上游变化即 fail closed。Navigator、report 等消费者以纯读方式判断：已有输入变化/删除、confirmation 失效或同一 selection 出现新 unit，都会把 survey 标为 stale，且不得把旧 judgement 混入正式报告。
+
+Experiment run 的 fingerprint 绑定 experiment id、tested hypothesis、规范化 changes、typed metric schema、artifact identities 与 config/input revision，但不绑定时间、结果摘要或 observed metric values。run id 仍单调递增；相同 fingerprint 的不同 seed 组成 repeat group，完全相同 fingerprint + seed/config revision 的再次写入必须显式声明 rerun/retry 并给 reason。编号、fingerprint、重复检查和相关文件写入都在同一锁与事务内完成；脚本不从重复数据推断显著性或因果。
 
 ## 对话层与 Agent 协议
 
@@ -213,4 +228,4 @@ Install manifest 记录 `source_origin` 与 `source_branch`，本地安装还可
 10. 在 Linux 与 macOS 支持的 Python 版本上验证；
 11. 发布前由冷 acceptance agent 端到端复现关键路径。
 
-当前标识为 `0.2.0-rc.2`，已通过完整本地套件与真实 copy-project 升级冒烟，达到本地 release-candidate gate。它仍不是 stable/GA，也尚未 tag 或 publish；hosted Linux/macOS CI matrix 全绿仍是 release tag 的前置。文档、tag 与 changelog 不得把本地 RC 验收外推为稳定兼容或 SLA 承诺。
+当前标识为 `0.2.0-rc.3`，R3 本地发布验收仍在进行。它不是 stable/GA，也尚未 tag 或 publish；hosted Linux/macOS CI matrix 全绿仍是 release tag 的前置。文档、tag 与 changelog 不得把本地 RC 验收外推为稳定兼容或 SLA 承诺。

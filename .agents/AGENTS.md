@@ -27,6 +27,7 @@ The user interacts through exactly two surfaces: natural language and the sixtee
 - Setup and choices are conversational. `kb init` first makes the KB usable, then offers “现在设置”（推荐）or “先跳过” when a real human signature is missing; never jump straight to asking for a name. Deferring adds or overwrites no preference or sentinel and does not block ingestion, search, or analysis. If the user configures now, ask once for human signature, language and terminology style, research focus, and resources or important constraints; show the current versioning and paper-screening defaults, accept “默认即可”, then persist headlessly. Low-frequency preferences remain progressive, and a missing signature is requested again only before the first confirmation is applied.
 - For quick setup, execute the private protocol's `apply.field_inputs` mapping exactly; never invent a dotted profile key. The canonical resource input preserves existing resource keys, and the repeatable constraint input appends and deduplicates rather than replacing prior constraints. Keep legacy inputs compatible, but do not use them in place of the canonical quick-setup mapping.
 - `kb review` behaves identically from a terminal, pipe, or agent call. Ask the user to confirm or reject in natural language; never solicit input from a script.
+- A review card is a one-time snapshot of the displayed content and expires after 24 hours. If it is already applied, expired, stale, or invalid, explain the matching recovery action in natural language. After content changes, run review again and show the new substance before accepting a decision; after success, name the sanitized subject and whether it was confirmed or rejected.
 - Empty and edge states stay natural. When there is no material yet, invite the user to send a paper, repository, dataset, article, or local file.
 - Structured owner output is an agent-only protocol. Request it explicitly, keep it under `kb/.runtime/`, and never relay its command arguments or diagnostics to the user.
 
@@ -67,6 +68,14 @@ Stop only at the two governance gates: confirmation of an AI judgement and a gen
 - Proactively surface the few most important pending judgements and why they matter. Do not wait for the user to discover a long queue.
 - When new evidence contradicts a confirmed belief, stop, show both sides with evidence, and ask the user to adjudicate. Never overwrite silently.
 
+## Discovery and retrieval
+
+- Natural-language literature discovery routes to `literature-scout`. It performs one bounded OpenAlex Works request, writes only source-search staging, and then hands candidates to the Agent for deduplication and reading. It never creates canonical paper units or turns citation counts into relevance or quality judgements.
+- OpenAlex access requires a privately supplied API key. Never persist, log, echo, or embed it in a protocol, error, URL, or KB artifact. A missing key or failed request leaves no empty success stage.
+- `kb find` returns up to five relevant passages with unit identity and a project-relative locator. Treat its on-disk FTS5 database as disposable runtime cache, never canonical evidence.
+- Querying is read-only. If the cache is missing, corrupt, or stale, use the deterministic in-memory fallback and privately report cache health; do not rebuild during a find request.
+- Lexical retrieval supports same-language and mixed CJK/ASCII tokens. Do not claim cross-language semantic equivalence; use native Agent reading for semantic or cross-language questions.
+
 ## Recovery and versioning
 
 - KB writes are atomic, revision-aware, journaled, and protected by exact-path operation locks.
@@ -90,6 +99,8 @@ Diagnostics are an optional local quality loop, not a governance bypass. Schema,
 ## Interactive research modes
 
 - **Durable continuation:** when promising work that should later be resumed by `kb next`—for example a batch survey or technical roadmap—create or reuse a program and persist that work in its `next_actions` before making the promise. `kb next` reads durable program and unit state; it never reconstructs a chat-only promise. A completed unit stays completed unless its canonical content or evidence actually changes.
+- **Survey freshness:** before consuming a verified survey, compare its selection and upstream content, confirmation, and evidence digests with current canonical units. Newly matching units or changed, deleted, or no-longer-confirmed inputs make it stale; keep the check read-only and route regeneration back through prepare/fill/verify.
+- **Experiment repeats:** each run records a stable configuration fingerprint, optional seed, and repeat group. An exact same fingerprint plus seed/config revision requires an explicit rerun intent and reason; a different seed is a valid repeat, not an accidental duplicate. Scripts group facts but do not infer significance or causal conclusions.
 
 - **Reading companion:** answer a question from the unit and related ingested units, with evidence. Do not persist an artifact unless asked.
 - **Sparring and outline:** use the owning skills when the user wants a durable, evidence-backed discussion or outline.
@@ -124,6 +135,7 @@ Diagnostics are an optional local quality loop, not a governance bypass. Schema,
 ## Routing
 
 - Governance and routing: `knowledge-base-manager`, `research-config-manager`, `source-intake`, `research-orchestrator`
+- Discovery: `literature-scout`
 - Analysis: `paper-analyst`, `repo-analyst`, `dataset-analyst`, `blog-analyst`, `literature-synthesizer`
 - Creation and execution: `idea-workbench`, `method-designer`, `experiment-workbench`, `report-author`
 - Navigation and meta: `research-navigator`, `discussion-archivist`, `wiki-adapter`, `skill-evolution-advisor`

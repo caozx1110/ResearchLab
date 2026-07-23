@@ -60,6 +60,7 @@ CAPABILITY_MATURITY = {
     "kb-cli": "stable",
     "knowledge-base-manager": "stable",
     "source-intake": "beta",
+    "literature-scout": "beta",
     "paper-analyst": "beta",
     "repo-analyst": "beta",
     "dataset-analyst": "beta",

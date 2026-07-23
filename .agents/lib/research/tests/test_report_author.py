@@ -103,6 +103,70 @@ def _load_report_module():
     return module
 
 
+def test_stale_survey_event_isolated_by_pure_read_consumer(tmp_path: Path, monkeypatch) -> None:
+    report = _load_report_module()
+    root = tmp_path / "workspace"
+    survey_path = root / "kb" / "synthesis" / "robot-learning" / "survey.yaml"
+    write_yaml_if_changed(survey_path, {"slug": "robot-learning", "consumer_binding": {}})
+    before = survey_path.read_bytes()
+    monkeypatch.setattr(
+        report,
+        "survey_staleness",
+        lambda payload, project_root: {"stale": True, "reasons": ["new matching unit"], "new_unit_ids": ["p-new"]},
+    )
+    event = {
+        "event_type": "survey-inference",
+        "confirmation_status": "confirmed",
+        "confirmation_binding": {
+            "subject": {
+                "kind": "survey_inference",
+                "id": "survey-robot-learning",
+                "owner": "literature-synthesizer",
+                "path": "kb/synthesis/robot-learning/survey.yaml",
+            }
+        },
+    }
+
+    ordinary, pending = report.partition_reporting_events(root, [event])
+
+    assert ordinary == []
+    assert len(pending) == 1
+    assert "survey upstream binding changed" in pending[0]["_epistemic_reason"]
+    assert survey_path.read_bytes() == before
+
+
+def test_survey_consumer_rejects_symlinked_artifact(tmp_path: Path, monkeypatch) -> None:
+    report = _load_report_module()
+    root = tmp_path / "workspace"
+    outside = tmp_path / "outside-survey.yaml"
+    write_yaml_if_changed(outside, {"consumer_binding": {}})
+    survey_path = root / "kb" / "synthesis" / "unsafe" / "survey.yaml"
+    survey_path.parent.mkdir(parents=True)
+    survey_path.symlink_to(outside)
+    monkeypatch.setattr(
+        report,
+        "survey_staleness",
+        lambda payload, project_root: (_ for _ in ()).throw(AssertionError("unsafe survey must not be opened")),
+    )
+    event = {
+        "event_type": "survey-inference",
+        "confirmation_binding": {
+            "subject": {
+                "kind": "survey_inference",
+                "id": "survey-unsafe",
+                "path": "kb/synthesis/unsafe/survey.yaml",
+            }
+        },
+    }
+
+    ordinary, pending = report.partition_reporting_events(root, [event])
+
+    assert ordinary == []
+    assert len(pending) == 1
+    assert "survey upstream binding changed" in pending[0]["_epistemic_reason"]
+    assert survey_path.is_symlink()
+
+
 def _make_workspace(tmp_path: Path, *, with_claim: bool = True) -> tuple[Path, str, str]:
     root = tmp_path / "workspace"
     (root / ".agents" / "lib").mkdir(parents=True)

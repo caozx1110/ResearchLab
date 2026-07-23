@@ -259,6 +259,13 @@ confidence: 1.0
 items:
 - id: <experiment-id>-run-log-001
   created_at: ''
+  fingerprint: sha256             # 仅绑定配置身份，不绑定观测结果或时间
+  repeat_group_id: sha256         # seed-independent；当前与 fingerprint 相同
+  seed: null                       # 可选；不同 seed 是同 fingerprint 的合法 repeat
+  repeat_index: 1                  # 同 fingerprint 内从 1 单调编号
+  repeats_run_ids: []              # 同组其它 canonical run ids
+  rerun_reason: ""                 # 同 fingerprint + seed/config 重跑时必填
+  config_revision: ""              # 显式 config/input revision 身份
   why_this_run: ""              # 触发动机
   tested_hypothesis: ""         # 这一跑想验证的具体假设
   changes: []                   # 相对上一跑的变更
@@ -271,6 +278,8 @@ items:
   artifacts: []                 # 输出文件 kb-path
   information_types: [fact]     # run-log 必须只含 fact，否则迁到 diagnoses
 ```
+
+`fingerprint` 的 canonical 输入是 experiment id、`tested_hypothesis`、规范化 `changes`、typed metric schema（name/unit/direction，不含 value）、声明 artifact identities 与 config/input revision。`created_at`、`result_summary`、outcome 与 observed metric values 不参与。完全相同 fingerprint + seed/config revision 的第二次写入默认拒绝；只有显式 rerun/retry 且 `rerun_reason` 非空才允许。不同 seed 进入同一 repeat group。run id 分配、fingerprint 计算、duplicate check 与 run-log/record/event 写入必须在同一 exact-target lock + journal transaction 内完成。
 
 ### diagnoses.yaml
 
@@ -551,12 +560,82 @@ issues:
 
 ---
 
+## discovery 与 passage retrieval <a id="discovery-retrieval"></a>
+
+### OpenAlex source-search stage
+
+`literature-scout` 只写 `kb/synthesis/source-search/<stage-id>.yaml`，并复用 source-intake 的 review/status/note 语义。一次 pull 是单 target journaled mutation；失败不得写空 stage。网络响应只投影以下字段白名单，不保存原 payload 或任何 credential：
+
+```yaml
+id: source-search-<stable-id>
+kind: source-search-stage
+status: staged
+source_kind: paper
+query: ""                         # 用户/Agent 的检索文本，不含 API 参数或 key
+note: ""
+generated_by: source-intake       # 复用统一 staging owner；入口 skill 是 literature-scout
+generated_at: ISO-8601
+candidates:
+  - candidate_id: openalex-<work-id>  # stable identity；缺失时退到 canonical DOI digest
+    title: ""
+    url: ""                       # 经过 http(s) 白名单清洗的 landing URL
+    status: staged
+    note: ""                      # rerun 不覆盖人工 status/note
+    topics: []
+    tags: []
+    pool_hints: []
+    provenance:
+      openalex:
+        work_id: ""
+        doi: ""
+        publication_date: ""
+        publication_year: null
+        type: ""
+        language: ""
+        cited_by_count: 0         # fact metadata，不是 relevance/quality judgement
+        is_retracted: false
+        open_access_landing_url: ""
+        open_access_pdf_url: ""
+        queried_at: ISO-8601
+history: []
+```
+
+同一 stage 内优先按 OpenAlex work id、其次 DOI 确定性折叠。相同查询重跑合并新 metadata，但保留人工 review state。API key 仅从进程私有输入取得，不进入 YAML、journal detail、protocol、错误或用户输出。
+
+### Passage cache
+
+SQLite FTS5 cache 位于 `kb/.runtime/search/passages.sqlite3`，是可丢弃 runtime state，不是 canonical evidence，也不进入 Git/checkpoint。逻辑 passage schema：
+
+```yaml
+revision: <integer>
+corpus_digest: sha256             # 当前 canonical records + indexed artifact bytes
+passages_digest: sha256           # passage rows 的确定性摘要
+passage:
+  passage_id: sha256
+  unit_id: ""
+  kind: paper|repo|dataset|blog|idea|experiment
+  title: ""
+  artifact: project-relative-path
+  locator: ""                     # heading/paragraph/window 的可复开定位
+  text: ""                        # 原文切片，不摘要、不翻译
+  source_digest: sha256
+```
+
+Extractor 只遍历 canonical unit containment 内允许的 record、Markdown 与 parse-cache 文本，跳过 raw/output/runtime/Obsidian/journal，拒绝 symlink escape。Markdown 以 heading + paragraph 切分，长段用固定窗口与 overlap。显式 build 在同目录完成全新数据库后原子 replace，任何失败保留旧 cache；不得用 external-content/trigger 双表。
+
+Read path 对 cache metadata 与当前 canonical digest 做 byte-level 检查。cache missing/corrupt/stale 时，使用同一 extractor 做纯内存 lexical fallback，查询绝不写盘。结果至多五条，返回 unit、短原文与 project-relative locator；public projection 不显示 BM25/internal score 或绝对路径。`unicode61` 与共享 CJK/ASCII tokenizer 只承诺 lexical matching，不承诺翻译或 embedding。
+
+---
+
 ## ownership 矩阵 <a id="ownership"></a>
 
 | artifact | 写入 skill | 读取 skill | 备注 |
 |---|---|---|---|
 | `kb/units/<kind>s/<id>/record.yaml` | source-intake (创建)、`<kind>`-analyst（精修）、knowledge-base-manager（合并/治理） | 全部 | confirmation gate 默认 warning；strict 模式拦截 |
 | experiment run-log/diagnoses/follow-ups | experiment-workbench | report-author, research-orchestrator | 三文件职责严格分离 |
+| `kb/synthesis/source-search/*.yaml` | source-intake、literature-scout | source-intake、research-orchestrator、runtime Agent | staging only；不得冒充 canonical unit |
+| `kb/.runtime/search/passages.sqlite3` | knowledge-base-manager/index builder | kb-cli、runtime Agent | disposable FTS5 cache；query read-only |
+| `kb/.runtime/review-snapshots/*.json` | kb-cli public adapter | kb-cli | one-time expiring snapshots/tombstones；private runtime only |
 | program state.yaml + workflow/* | research-orchestrator | report-author, navigator | 其它 skill emit reporting-event 让 orchestrator 写 |
 | program reporting-events.yaml | research-orchestrator（主要）、experiment-workbench / paper-analyst / method-designer / idea-workbench（事件附加） | report-author | 各 emit skill 必须填 `source_skill` |
 | program decisions.yaml + decision-log.md projection | research-orchestrator | navigator, report-author | judgement 两阶段；legacy Markdown 仅 pending/unverified 迁移 |
@@ -645,6 +724,8 @@ confirm_route: {}                # internal owner route
 
 Discovery is fail-closed: empty/invalid claims, any canonical `unverified` claim, missing or byte-stale verification, rejected items, already confirmed items, non-canonical owner/path/id relationships, escaping symlinks, and duplicate raw subjects are excluded. Artifact-provided routes are never trusted; kind + canonical identity derive the route. The public review layer may consume only this ready set, safely display the full bound side substance, and apply only through the snapshot-bound adapter. Displayed Top-3 items are copied into a one-time runtime snapshot token; apply must match that stored set exactly, consumes the token once, and currently accepts exactly one decision per invocation so cross-owner partial batches cannot occur. Owner confirm/reject rechecks global uniqueness/canonical identity and compares subject/status/content/verification inside its mutation before any write; stale, tampered, or replayed snapshots fail closed.
 
+Review token registry 位于私有 `kb/.runtime/review-snapshots/`；每个普通文件保存 `created_at`、`expires_at`、`status: unused|consumed|expired` 与完整 displayed snapshot，默认 24 小时有效。`consumed` / `expired` tombstone 再保留 24 小时以区分 replay 与 expiry。list/apply 在 registry lock 内执行有界、非递归 GC；symlink、非普通文件、越界路径一律拒绝且不遍历。公开失败分类固定为 `already_applied`、`expired`、`stale_content`、`tampered_or_unknown`，输出只提供自然语言恢复动作，不泄漏 token、digest 或路径。成功响应只显示经清洗的 subject type/title 与 decision。内容变化导致旧 token `stale_content`，新一轮 review 必须从 canonical bytes 重新生成卡片。
+
 Reporting judgement events carry `confirmation_binding.subject` plus `claim_ids`、`content_digest` and the current verification digests. Side subjects must include `owner` and project-relative `path`; consumers resolve that path with project-root containment. `decision` / `diagnosis` / discussion conclusion / survey inference / novelty / evaluation and unknown untyped events default to judgement. Only explicit factual/operational events or a judgement whose bound subject still has a current ConfirmationReceipt may enter ordinary report sections.
 
 ---
@@ -719,8 +800,9 @@ Wave3（2026-07-17）把 3.6/3.10/3.7 三个产出侧子系统从"一次性算�
 ### literature-synthesizer（survey）— `kb/synthesis/<slug>/survey-fill.yaml` → `survey.yaml` + `summary.md`
 
 - `prepare` 产 7 节骨架：`scope_positioning / background_terms / taxonomy(核心) / cross_cutting / trends / gaps_challenges / conclusion` + `comparison_matrix`（方法×维度）；每个 cell/item/matrix-cell 带空 `evidence_refs` + `claim_type`。
-- `kb_anchor: {as_of, unit_ids[], units[]}` 记录生成锚点（stale 判据，接 3.13）。
-- `verify`：`validate_claims` + 逐 evidence_ref `verify_claim_evidence`（对各自 `source_unit_id` 的 unit 目录逐字校验）；每个承重 cell 必须 ≥1 verbatim citation，全过才落 `survey.yaml`。无硬编码结论/confidence。
+- `kb_anchor: {as_of, selection, unit_ids[], units[]}` 记录生成锚点。每个 unit 保存 `id/kind/title/content_digest/confirmation_receipt_digest/evidence_artifact_digests[]`，不得只以 mtime 或标题代表版本。
+- `verify`：先重新定位 anchor 中每个 canonical unit 并比较 identity/content/confirmation/evidence digests，再运行 `validate_claims` + 逐 evidence_ref `verify_claim_evidence`；任一 unit 删除、身份或 byte binding 变化都 fail closed。每个承重 cell必须 ≥1 verbatim citation，全过才落 `survey.yaml`。无硬编码结论/confidence。
+- 已验证产物保存 `consumer_binding: {selection, unit_ids, units, verified_at}`。消费者用 pure-read staleness helper 复算：已有 unit 变化/删除、receipt 失效，或相同 selection 新增匹配 unit，均返回 `stale` + reason；不得查询时自动改写 survey，也不得把 stale judgement 放进正式报告。
 - R2 兼容状态：落盘产物为 `evidence_verification_status=verified`、`status/confirmation_status=pending_user_confirmation`、cell `epistemic_status=verified_pending_confirmation`。在 survey 获得独立 ConfirmationReceipt route 前同时标 `governance_status=needs_agent_repair`，不得作为正式结论进入报告。
 
 ### report-author — `kb/programs/<id>/reports/*.md`、`kb/user/report-materials/*`、`paper-outline.md`
@@ -745,4 +827,4 @@ Wave3（2026-07-17）把 3.6/3.10/3.7 三个产出侧子系统从"一次性算�
 > 协议参考：`.agents/lib/research/SCHEMAS.md#<anchor>`
 ```
 
-可用 anchor：`enums`, `unit-record`, `unit-payload`, `experiment-files`, `program-files`, `config-files`, `ownership`, `confirmation-gate`, `evidence-claims`, `evidence-first-outputs`。
+可用 anchor：`enums`, `unit-record`, `unit-payload`, `experiment-files`, `program-files`, `config-files`, `discovery-retrieval`, `ownership`, `confirmation-gate`, `evidence-claims`, `evidence-first-outputs`。

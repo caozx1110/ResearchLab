@@ -24,6 +24,7 @@ from research.common import add_project_root_argument, load_yaml, print_resolved
 from research.journal import mutation_transaction
 from research.learnings import load_learnings, render_recall_digest
 from research.core import checkpoint_and_report, iter_records, kb_root, project_root, user_root
+from research.surveys import survey_staleness
 
 
 CURRENT_STATE_STDOUT_LINES = 40
@@ -52,10 +53,52 @@ def load_program_states(root: Path) -> list[dict]:
     return states
 
 
+def load_survey_freshness(root: Path) -> list[dict]:
+    """Pure-read freshness projection for verified surveys."""
+    project = root.resolve()
+    synthesis = project / "kb" / "synthesis"
+    cursor = project
+    for part in ("kb", "synthesis"):
+        cursor = cursor / part
+        if cursor.is_symlink():
+            return []
+    if synthesis.is_symlink() or not synthesis.is_dir():
+        return []
+    items: list[dict] = []
+    for path in sorted(synthesis.glob("*/survey.yaml")):
+        try:
+            relative = path.relative_to(project)
+        except ValueError:
+            continue
+        cursor = project
+        unsafe = False
+        for part in relative.parts:
+            cursor = cursor / part
+            if cursor.is_symlink():
+                unsafe = True
+                break
+        if unsafe or path.is_symlink() or not path.is_file():
+            continue
+        payload = load_yaml(path, default={})
+        if not isinstance(payload, dict):
+            continue
+        freshness = survey_staleness(payload, root)
+        reasons = freshness.get("reasons") if isinstance(freshness, dict) else []
+        items.append(
+            {
+                "id": str(payload.get("slug") or path.parent.name),
+                "stale": bool(freshness.get("stale")) if isinstance(freshness, dict) else True,
+                "reason_count": len(reasons) if isinstance(reasons, list) else 1,
+            }
+        )
+    return items
+
+
 def render_current(
     records: list[dict],
     program_states: list[dict] | None = None,
     recall_digest: str = "",
+    survey_freshness: list[dict] | None = None,
 ) -> str:
     lines = ["# Current State", "", "## Programs", ""]
     states = sorted(program_states or [], key=lambda item: str(item.get("updated_at") or ""), reverse=True)
@@ -75,6 +118,16 @@ def render_current(
         lines.append(f"- `{item['id']}` · {item['kind']} · {item['title']} · {item.get('summary', '')}")
     if len(lines) == start:
         lines.append("- 暂无已确认条目")
+    surveys = survey_freshness or []
+    if surveys:
+        lines.extend(["", "## Survey Freshness", ""])
+        for item in surveys[:12]:
+            if item.get("stale"):
+                lines.append(
+                    f"- `{item.get('id')}` · 可能过期 · 检测到 {item.get('reason_count', 1)} 项上游变化，需要重新核验"
+                )
+            else:
+                lines.append(f"- `{item.get('id')}` · 上游版本仍匹配")
     if recall_digest.strip():
         lines.extend(["", recall_digest.strip()])
     return "\n".join(lines).strip() + "\n"
@@ -133,12 +186,13 @@ def main() -> int:
         print_resolved_project_roots(root)
     records = iter_records(root)
     program_states = load_program_states(root)
+    survey_freshness = load_survey_freshness(root)
     recall_digest = render_recall_digest(load_learnings(root), kind="all", limit=5)
     current_path = user_root(root) / "current-state.md"
     nav_path = user_root(root) / "navigation.md"
     reading_path = user_root(root) / "reading-lists" / "current-reading.md"
 
-    current_content = render_current(records, program_states, recall_digest)
+    current_content = render_current(records, program_states, recall_digest, survey_freshness)
     if args.command == "refresh":
         targets = [current_path, nav_path, reading_path]
         with mutation_transaction(root, "refresh_user_navigation", targets):

@@ -10,7 +10,7 @@ workspace/
 └── kb/        # your local research data
 ```
 
-The current candidate is **`0.2.0-rc.2`**. It has passed the complete local test suite and a live copy-project upgrade smoke test, so it meets the project's local release-candidate gate. It is not a stable or GA release, has not been tagged or published, and makes no compatibility or support-time SLA promise. A green hosted Linux/macOS CI matrix remains required before a release tag. See [CHANGELOG.md](CHANGELOG.md) for the current release state.
+The current candidate is **`0.2.0-rc.3`**. Its R3 release checks are in progress locally. It is not a stable or GA release, has not been tagged or published, and makes no compatibility or support-time SLA promise. A green hosted Linux/macOS CI matrix remains required before a release tag. See [CHANGELOG.md](CHANGELOG.md) for the current release state.
 
 ## Capability maturity
 
@@ -26,6 +26,7 @@ These labels describe the current scope of each component, not the release statu
 | `kb-cli` | stable | Sixteen-verb routing, conversational output filtering, and recovery entrypoints only. |
 | `knowledge-base-manager` | stable | Schema, evidence, confirmation, exact-path recovery, and index governance; it does not interpret research material. |
 | `source-intake` | beta | Staging, deduplication, immutable source capture, full Markdown reading views with local assets, and retryable failures across heterogeneous sources. |
+| `literature-scout` | beta | Bounded OpenAlex discovery into reviewable source-search staging; it does not judge relevance or create canonical units. |
 | `paper-analyst` | beta | Evidence-backed prepare and verify gates; the runtime agent supplies the substantive reading. |
 | `repo-analyst` | beta | File-oriented capability-map preparation and evidence verification; the runtime agent supplies code understanding. |
 | `dataset-analyst` | beta | Dataset-card profile preparation and verbatim evidence verification; suitability judgements remain agent-authored and confirmation-gated. |
@@ -33,10 +34,10 @@ These labels describe the current scope of each component, not the release statu
 | `research-config-manager` | beta | Preference and policy persistence is real, but not every preference is consumed by every downstream skill. |
 | `discussion-archivist` | beta | Durable conclusion-level discussion archives with explicit evidence and open questions. |
 | `research-orchestrator` | scaffold | Program spine, routing, dashboards, and event flow; prioritization remains policy-driven. |
-| `literature-synthesizer` | beta | Evidence-first survey, taxonomy, trend, contradiction, and gap artifacts are durable; synthesis quality still depends on the agent and source coverage. |
+| `literature-synthesizer` | beta | Evidence-first survey, taxonomy, trend, contradiction, and gap artifacts are durable and bound to upstream versions; synthesis quality still depends on the agent and source coverage. |
 | `idea-workbench` | beta | Candidate, evidence-first review, discussion, and explicit selection are implemented; novelty claims still require human or expert judgement. |
 | `method-designer` | beta | Repo-grounded design handoff and experiment matrices are implemented; generated methods still require expert review. |
-| `experiment-workbench` | beta | Typed plans, run logs, follow-ups, and confirmation-gated diagnoses are implemented; diagnosis quality remains agent-dependent. |
+| `experiment-workbench` | beta | Typed plans, fingerprinted repeat-aware run logs, follow-ups, and confirmation-gated diagnoses are implemented; diagnosis quality remains agent-dependent. |
 | `report-author` | beta | Reports and outlines consume durable claims, events, evidence, and decisions; composition quality and coverage still require review. |
 | `skill-evolution-advisor` | scaffold | Local learning and diagnostic-issue capture/review exist; automatic skill evolution is intentionally not a supported promise. |
 | `wiki-adapter` | scaffold | A thin compatibility and routing layer, not an independent analysis engine. |
@@ -92,7 +93,7 @@ These are the complete public shortcut surface. Internal script arguments are in
 | `kb review` | Show human-review-ready judgements and accept a natural-language decision. |
 | `kb status` | Refresh and summarize the current workspace or research program. |
 | `kb next` | Suggest the next useful research action. |
-| `kb find <关键词>` | Search the local knowledge units. |
+| `kb find <关键词>` | Find relevant passages with their knowledge unit and reopenable locator. |
 | `kb recall` | Recall confirmed preferences, known pitfalls, and reviewed skill issues. |
 | `kb resume` | Recover an interrupted knowledge-base operation. |
 | `kb undo` | Undo the most recent committed knowledge-base operation. |
@@ -144,6 +145,12 @@ The agent can safely extract metadata, deduplicate sources, build evidence-backe
 You decide whether a judgement is accepted, which idea or baseline to pursue, whether an experiment conclusion is sound, and when a research program changes stage. A confirmation must come from the current user interaction and retain evidence; remembered authorization is not enough.
 
 `kb review` includes only material whose agent fill and verification are complete. Items still awaiting analysis, verification, or retry remain out of the human decision queue.
+
+Review cards are one-time, version-bound snapshots. They expire after 24 hours; a used, expired, changed, or invalid card is rejected with a distinct recovery message. If the underlying content changes, run `kb review` again to see the new text before deciding. Successful decisions identify the sanitized subject and whether it was confirmed or rejected.
+
+Natural-language literature discovery can ask the Agent to search OpenAlex. It retrieves one bounded result page into source-search staging for deduplication and reading; citation counts remain source metadata, not quality scores, and no candidate becomes a canonical paper until the normal intake workflow accepts it. OpenAlex access requires a privately configured API key, which is never written to the KB or shown in output.
+
+`kb find` is passage-oriented lexical retrieval. It returns up to five short excerpts with unit identities and project-relative locators. A missing, stale, or damaged local search cache falls back to an in-memory read-only search, so querying never mutates the KB. It supports same-language and mixed CJK/ASCII tokens but does not pretend to provide cross-language semantic search.
 
 ## Optional local developer diagnostics
 

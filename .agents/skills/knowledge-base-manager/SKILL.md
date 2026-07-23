@@ -1,9 +1,11 @@
 ---
 name: knowledge-base-manager
-description: 管理 knowledge base 的统一 schema、索引、链接、taxonomy/topic/pool 治理、review classifier 与生命周期推进。
+description: 管理 knowledge base 的统一 schema、passage 索引、链接、taxonomy/topic/pool 治理、review classifier 与生命周期推进。
 ---
 
 # Knowledge Base Manager
+
+> 协议参考：`.agents/lib/research/SCHEMAS.md#discovery-retrieval` · `#ownership` · `#confirmation-gate`
 
 当任务是在维护知识单元协议、索引、治理目录、链接或 lifecycle，而不是深读某一篇 paper / repo / dataset / blog 时，使用这个 skill。
 
@@ -12,6 +14,7 @@ description: 管理 knowledge base 的统一 schema、索引、链接、taxonomy
 - `kb/units/<kind>/<id>/record.yaml`：canonical unit record。
 - `kb/config/candidate-pools.yaml` 与 `kb/config/topic-taxonomy.yaml`：治理 catalog。
 - `kb/index.yaml` / `kb/index.md`：派生索引。
+- `kb/.runtime/search/passages.sqlite3`：可丢弃的 passage FTS5 cache；不是 canonical evidence。
 - `kb/user/` 由 research-navigator 主写；`kb/raw/` 是不可变 source evidence；本 skill 不做材料理解。
 
 任何判断必须保留原 epistemic type。脚本只搬运、验证和过门，不替 Agent 生成结论。
@@ -26,6 +29,14 @@ Knowledge Base Manager 负责 knowledge-unit classifier；公共 `kb review` 还
 - 旧记录没有 classifier 字段时保持兼容，但 prepared shell 仍排除；paper 的 `not_started` 可能承载有效 screening 判断，不能误删。
 - `find`、public `kb review` 与 batch confirm 对 knowledge unit 必须消费同一筛选结果。
 - experiment diagnosis、program decision、idea discussion conclusion 与 method selection 仍由各自 owner 持有和写入；shared discovery 只接收 non-empty canonical claims + current verification 的 side artifact，并把 owner-specific confirm/reject route 交给 kb-cli 私有 protocol。公共 inbox 默认只展示优先级与陈旧度排序后的 Top 3，并说明剩余数量。
+
+## Passage retrieval
+
+- 显式 index mutation 用 deterministic extractor 建完整临时 FTS5 数据库并原子替换；正文只能切段/切窗，不摘要或解释。
+- 每个 passage 保存 unit、kind、title、artifact、locator、原文与 source digest；路径必须 project-relative 且通过 containment，拒绝 symlink escape。
+- `find` 是只读消费者。cache 缺失、损坏或 stale 时调用同一 extractor 做内存 fallback，绝不在 query path 重建或修改 KB。
+- 公开结果最多五段，只显示短原文、unit 和可复开 locator；BM25/internal score、绝对路径与 cache 诊断只留在私有 protocol。
+- lexical search 支持同语种与 CJK/ASCII 混合 token，但不承诺翻译、embedding 或跨语言同义召回。
 
 ## 分层机械审计
 

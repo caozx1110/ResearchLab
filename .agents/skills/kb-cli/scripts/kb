@@ -47,6 +47,7 @@ from research.core import (
     load_runtime_preferences,
     record_path,
     record_workflow_state,
+    search_passages,
     search_records,
     validate_claims,
 )
@@ -1373,6 +1374,34 @@ def _protocol_record_summary(record: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _protocol_passage_summary(passage: Mapping[str, object]) -> dict[str, object]:
+    """Keep complete reopen data private while dropping implementation scores."""
+    allowed = (
+        "unit_id",
+        "kind",
+        "title",
+        "excerpt",
+        "artifact",
+        "locator",
+        "heading",
+        "line_start",
+        "line_end",
+    )
+    return {key: passage.get(key) for key in allowed}
+
+
+def _public_passage_locator(passage: Mapping[str, object], root: Path) -> str:
+    heading = _public_display_text(passage.get("heading") or "", root, "对应段落", 120)
+    try:
+        line_start = int(passage.get("line_start") or 0)
+        line_end = int(passage.get("line_end") or 0)
+    except (TypeError, ValueError):
+        line_start = line_end = 0
+    if line_start > 0 and line_end >= line_start:
+        return f"{heading}，第 {line_start}–{line_end} 行"
+    return heading or "标题或摘要"
+
+
 def handle_find(args: argparse.Namespace, root: Path) -> int:
     query = " ".join(args.keywords).strip()
     if not query:
@@ -1389,16 +1418,61 @@ def handle_find(args: argparse.Namespace, root: Path) -> int:
     matched_records = search_records(root, query)
     rejected_records = [record for record in matched_records if _record_is_rejected(record)]
     records = [record for record in matched_records if not _record_is_rejected(record)]
+    records_by_id = {str(record.get("id") or ""): record for record in records}
+    passage_payload = search_passages(root, query, limit=25)
+    raw_passages = passage_payload.get("results") if isinstance(passage_payload, Mapping) else []
+    raw_passages = raw_passages if isinstance(raw_passages, list) else []
+    rejected_ids = {
+        str(record.get("id") or "")
+        for record in [*rejected_records, *iter_records(root)]
+        if _record_is_rejected(record)
+    }
+    passages = [
+        dict(item)
+        for item in raw_passages
+        if isinstance(item, Mapping) and str(item.get("unit_id") or "") not in rejected_ids
+    ][:5]
+    passage_summaries = [_protocol_passage_summary(item) for item in passages]
     summaries = [_protocol_record_summary(record) for record in records]
     set_protocol_status(
         "completed",
         query=query,
-        result_count=len(summaries),
+        result_count=len(passage_summaries) if passage_summaries else len(summaries),
         rejected_count=len(rejected_records),
         records=summaries,
+        passages=passage_summaries,
+        search_index_health=str(passage_payload.get("health") or "unknown")
+        if isinstance(passage_payload, Mapping)
+        else "unknown",
     )
+    if passages:
+        print(f"找到 {len(passages)} 段相关内容：")
+        for passage in passages:
+            raw_unit_id = str(passage.get("unit_id") or "")
+            raw_title = str(passage.get("title") or raw_unit_id)
+            unit_id = _public_display_text(raw_unit_id, root, "编号已隐藏", 100)
+            title = _public_display_text(raw_title, root, "标题需由 Agent 安全解释", 160)
+            kind = PUBLIC_KIND_LABELS.get(str(passage.get("kind") or ""), "知识")
+            excerpt = _public_display_text(
+                passage.get("excerpt") or "",
+                root,
+                "摘录包含不适合直接展示的内容，请让 Agent 安全解释。",
+                320,
+            )
+            print(f"- {kind}「{title}」（{unit_id}）")
+            print(f"  定位：{_public_passage_locator(passage, root)}")
+            print(f"  摘录：{excerpt}")
+            record = records_by_id.get(raw_unit_id)
+            if record is None:
+                continue
+            workflow_state = record_workflow_state(record)
+            if workflow_state == "ready_for_review":
+                print("  这条判断已经核验，等待你确认；可使用 kb review 查看。")
+            elif workflow_state in {"source_ready", "awaiting_agent_fill", "ready_to_verify", "failed_retryable"}:
+                print("  Agent 还需要继续整理或核验这条资料。")
+        return 0
     if not records:
-        print("没有找到匹配的知识条目。")
+        print("没有找到匹配的知识内容。")
         return 0
     print(f"找到 {len(records)} 条相关资料：")
     for record in records:
