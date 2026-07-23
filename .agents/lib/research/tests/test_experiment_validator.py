@@ -131,6 +131,156 @@ def test_diagnosis_context_contains_recent_runs_and_persistent_anchors() -> None
     assert context["anchors"][0]["metrics"]["loss"]["value"] == 2.0
 
 
+def test_run_fingerprint_excludes_observed_values_and_normalizes_change_order() -> None:
+    module = _experiment_module()
+    first, first_group = module.build_run_identity(
+        "experiment-a",
+        tested_hypothesis="  stable   hypothesis ",
+        changes=["beta = 2", "alpha = 1"],
+        metrics=module.parse_metrics(["loss=2.0[ratio]:lower-better"]),
+        artifacts=[{"path": "outputs/checkpoint.pt"}],
+        config_revision="rev-1",
+        seed=7,
+    )
+    second, second_group = module.build_run_identity(
+        "experiment-a",
+        tested_hypothesis="stable hypothesis",
+        changes=["alpha = 1", "beta = 2"],
+        metrics=module.parse_metrics(["loss=0.5[ratio]:lower-better"]),
+        artifacts=[{"path": "outputs/checkpoint.pt"}],
+        config_revision="rev-1",
+        seed=19,
+    )
+
+    assert first == second
+    assert first_group == second_group
+
+
+def test_duplicate_run_requires_reasoned_rerun_and_seed_forms_repeat_group(tmp_path: Path) -> None:
+    _run_experiment(tmp_path, "plan", "--title", "fingerprinted", "--program-id", "program-test")
+    record_path = next((tmp_path / "kb" / "units" / "experiments").glob("*/record.yaml"))
+    experiment_id = load_yaml(record_path)["id"]
+    base_args = (
+        "log-run",
+        "--experiment-id",
+        experiment_id,
+        "--tested-hypothesis",
+        "A deterministic hypothesis",
+        "--change",
+        "optimizer=adam",
+        "--metric",
+        "loss=1.0[ratio]:lower-better",
+        "--config-revision",
+        "config-rev-a",
+        "--seed",
+        "11",
+    )
+    _run_experiment(tmp_path, *base_args, "--result-summary", "first observation")
+
+    duplicate = _run_experiment(
+        tmp_path,
+        *base_args,
+        "--result-summary",
+        "different observed value does not change identity",
+        check=False,
+    )
+    assert duplicate.returncode != 0
+    assert "Duplicate experiment configuration and seed" in duplicate.stderr
+    no_reason = _run_experiment(
+        tmp_path,
+        *base_args,
+        "--result-summary",
+        "retry",
+        "--rerun",
+        check=False,
+    )
+    assert no_reason.returncode != 0
+    assert "non-empty rerun reason" in no_reason.stderr
+    _run_experiment(
+        tmp_path,
+        *base_args,
+        "--result-summary",
+        "reasoned retry",
+        "--rerun",
+        "--rerun-reason",
+        "worker preemption",
+    )
+    _run_experiment(
+        tmp_path,
+        *base_args[:-1],
+        "12",
+        "--result-summary",
+        "second seed",
+    )
+
+    items = load_yaml(record_path.parent / "run-log.yaml")["items"]
+    assert [item["id"] for item in items] == ["run-001", "run-002", "run-003"]
+    assert items[0]["fingerprint"] == items[1]["fingerprint"]
+    assert items[2]["fingerprint"] == items[0]["fingerprint"]
+    assert len({item["repeat_group_id"] for item in items}) == 1
+    assert [item["repeat_index"] for item in items] == [1, 2, 3]
+    assert items[1]["rerun_reason"] == "worker preemption"
+    assert items[2]["repeats_run_ids"] == ["run-001", "run-002", "run-003"]
+
+
+def test_concurrent_runs_allocate_unique_monotonic_ids(tmp_path: Path) -> None:
+    _run_experiment(tmp_path, "plan", "--title", "concurrent runs", "--program-id", "program-test")
+    record_path = next((tmp_path / "kb" / "units" / "experiments").glob("*/record.yaml"))
+    experiment_id = load_yaml(record_path)["id"]
+    project_root = Path(__file__).resolve().parents[4]
+    script = project_root / ".agents" / "skills" / "experiment-workbench" / "scripts" / "experiment.py"
+    commands = [
+        [
+            sys.executable,
+            str(script),
+            "--root",
+            str(tmp_path),
+            "log-run",
+            "--experiment-id",
+            experiment_id,
+            "--result-summary",
+            f"seed {seed}",
+            "--tested-hypothesis",
+            "concurrency",
+            "--config-revision",
+            "config-rev-concurrent",
+            "--seed",
+            str(seed),
+        ]
+        for seed in (21, 22)
+    ]
+    processes = [subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for command in commands]
+    results = [process.communicate(timeout=30) + (process.returncode,) for process in processes]
+
+    assert [returncode for _, _, returncode in results] == [0, 0], results
+    items = load_yaml(record_path.parent / "run-log.yaml")["items"]
+    assert [item["id"] for item in items] == ["run-001", "run-002"]
+    assert sorted(path.name for path in (record_path.parent / "runs").glob("run-*.md")) == ["run-001.md", "run-002.md"]
+
+
+def test_run_rejects_artifact_outside_project_before_write(tmp_path: Path) -> None:
+    _run_experiment(tmp_path, "plan", "--title", "contained artifact", "--program-id", "program-test")
+    record_path = next((tmp_path / "kb" / "units" / "experiments").glob("*/record.yaml"))
+    experiment_id = load_yaml(record_path)["id"]
+    rejected = _run_experiment(
+        tmp_path,
+        "log-run",
+        "--experiment-id",
+        experiment_id,
+        "--result-summary",
+        "outside",
+        "--artifact",
+        str(tmp_path.parent / "outside.pt"),
+        "--config-revision",
+        "config-v1",
+        check=False,
+    )
+
+    assert rejected.returncode != 0
+    assert "must remain inside the project workspace" in rejected.stderr
+    assert not (record_path.parent / "run-log.yaml").exists()
+
+
 def test_diagnosis_claim_verifies_verbatim_run_evidence_and_rejects_fabrication(tmp_path: Path) -> None:
     _run_experiment(tmp_path, "plan", "--title", "grounded diagnosis", "--program-id", "program-test")
     record_path = next((tmp_path / "kb" / "units" / "experiments").glob("*/record.yaml"))
@@ -146,6 +296,8 @@ def test_diagnosis_claim_verifies_verbatim_run_evidence_and_rejects_fabrication(
         "failed",
         "--classification",
         "data",
+        "--config-revision",
+        "config-v1",
     )
     claims_path = tmp_path / "diagnosis-claims.yaml"
     claim = {
@@ -224,6 +376,8 @@ def test_reports_isolate_pending_diagnoses_and_require_current_receipt_for_judge
         "failed",
         "--classification",
         "data",
+        "--config-revision",
+        "config-v1",
     )
     claims_path = record_path.parent / "diagnosis-claims.yaml"
     pending_claim = {
@@ -372,6 +526,8 @@ def test_experiment_validator_lifecycle(tmp_path: Path) -> None:
         "missing.log",
         "--tag",
         "baseline",
+        "--config-revision",
+        "config-v1",
     )
     assert "artifact does not exist: missing.log" in baseline.stderr
     _run_experiment(
@@ -383,6 +539,8 @@ def test_experiment_validator_lifecycle(tmp_path: Path) -> None:
         "improved",
         "--metric",
         "success_rate=0.82[ratio]:higher-better",
+        "--config-revision",
+        "config-v2",
     )
     claims_path = record_path.parent / "diagnosis-claims.yaml"
     write_yaml_if_changed(

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import re
 import sys
 from pathlib import Path
@@ -77,7 +79,7 @@ def _experiment_command_targets(args, root: Path) -> list[Path]:
     if args.command == "log-run":
         targets.extend(
             [
-                next_numbered_path(unit / "runs", "run", ".md"),
+                unit / "runs",
                 list_document_path(unit, "run-log"),
                 unit / "run-log.md",
             ]
@@ -137,20 +139,101 @@ def parse_metrics(items: list[str]) -> dict[str, dict[str, Any]]:
     return payload
 
 
+def _contained_artifact_identity(root: Path, item: str) -> tuple[str, Path]:
+    project = root.resolve()
+    candidate = Path(item).expanduser()
+    unresolved = candidate if candidate.is_absolute() else project / candidate
+    resolved = unresolved.resolve(strict=False)
+    try:
+        identity = resolved.relative_to(project).as_posix()
+    except ValueError as exc:
+        raise SystemExit(f"Experiment artifact must remain inside the project workspace: {item}") from exc
+    if not identity or identity == ".":
+        raise SystemExit("Experiment artifact must identify a file or directory inside the project workspace.")
+    return identity, resolved
+
+
 def verify_artifacts(root: Path, items: list[str]) -> list[dict[str, Any]]:
     artifacts = []
     for item in normalize_list(items):
-        candidate = Path(item).expanduser()
-        resolved = candidate if candidate.is_absolute() else root / candidate
+        identity, resolved = _contained_artifact_identity(root, item)
         present = resolved.exists()
         status = "present" if present else "missing"
-        artifact = {"path": item, "status": status, "generated": False}
+        artifact = {"path": identity, "status": status, "generated": False}
         if present:
             artifact["kind"] = "directory" if resolved.is_dir() else "file"
         else:
             sys.stderr.write(f"[experiment.verify_artifacts] WARN: artifact does not exist: {item}\n")
         artifacts.append(artifact)
     return artifacts
+
+
+def _normalized_text(value: Any) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _run_identity_payload(
+    experiment_id: str,
+    tested_hypothesis: str,
+    changes: list[str],
+    metrics: dict[str, dict[str, Any]],
+    artifacts: list[dict[str, Any]],
+    config_revision: str,
+) -> dict[str, Any]:
+    return {
+        "experiment_id": _normalized_text(experiment_id),
+        "tested_hypothesis": _normalized_text(tested_hypothesis),
+        "changes": sorted({_normalized_text(item) for item in changes if _normalized_text(item)}),
+        "metric_schema": sorted(
+            (
+                {
+                    "name": _normalized_text(metric.get("name") or name),
+                    "unit": _normalized_text(metric.get("unit")),
+                    "direction": _normalized_text(metric.get("direction") or "unknown"),
+                }
+                for name, metric in metrics.items()
+            ),
+            key=lambda item: (item["name"], item["unit"], item["direction"]),
+        ),
+        "artifact_identities": sorted(
+            {
+                _normalized_text(item.get("path"))
+                for item in artifacts
+                if isinstance(item, dict) and _normalized_text(item.get("path"))
+            }
+        ),
+        "config_revision": _normalized_text(config_revision),
+    }
+
+
+def _sha256_payload(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def build_run_identity(
+    experiment_id: str,
+    *,
+    tested_hypothesis: str,
+    changes: list[str],
+    metrics: dict[str, dict[str, Any]],
+    artifacts: list[dict[str, Any]],
+    config_revision: str,
+    seed: int | None,
+) -> tuple[str, str]:
+    """Return the seed-independent configuration fingerprint and repeat group."""
+    if not _normalized_text(config_revision):
+        raise SystemExit("Experiment run requires a non-empty config revision.")
+    payload = _run_identity_payload(
+        experiment_id,
+        tested_hypothesis,
+        changes,
+        metrics,
+        artifacts,
+        config_revision,
+    )
+    fingerprint = _sha256_payload(payload)
+    return fingerprint, fingerprint
 
 
 def generated_artifact(root: Path, path: Path) -> dict[str, Any]:
@@ -455,6 +538,10 @@ def build_parser() -> argparse.ArgumentParser:
     log_run.add_argument("--tested-hypothesis", default="")
     log_run.add_argument("--tag", action="append", default=[], choices=RUN_TAG_CHOICES)
     log_run.add_argument("--recent-runs", type=int, default=DEFAULT_RECENT_RUNS)
+    log_run.add_argument("--config-revision", required=True)
+    log_run.add_argument("--seed", type=int)
+    log_run.add_argument("--rerun", action="store_true")
+    log_run.add_argument("--rerun-reason", default="")
 
     follow_up = subparsers.add_parser("follow-up")
     follow_up.add_argument("--experiment-id", required=True)
@@ -518,15 +605,50 @@ def _dispatch(args, root: Path) -> int:
     unit_root = path.parent
 
     if args.command == "log-run":
+        if args.rerun and not _normalized_text(args.rerun_reason):
+            raise SystemExit("Explicit rerun mode requires a non-empty rerun reason.")
+        if not args.rerun and _normalized_text(args.rerun_reason):
+            raise SystemExit("A rerun reason is only valid in explicit rerun mode.")
         runs_dir = unit_root / "runs"
         runs_dir.mkdir(parents=True, exist_ok=True)
         run_path = next_numbered_path(runs_dir, "run", ".md")
+        run_id = run_path.stem
         run_log_document_path = list_document_path(unit_root, "run-log")
         prior_run_log = load_list_document(run_log_document_path, f"{args.experiment_id}-run-log", "experiment-workbench")
         prior_runs = [item for item in prior_run_log.get("items", []) if isinstance(item, dict)]
         metrics = parse_metrics(args.metric)
-        comparison = build_run_comparison(metrics, prior_runs, max(args.recent_runs, 0))
         claimed_artifacts = verify_artifacts(root, args.artifact)
+        tested_hypothesis = _normalized_text(
+            args.tested_hypothesis or record.get("payload", {}).get("process", {}).get("tested_hypothesis")
+        )
+        fingerprint, repeat_group_id = build_run_identity(
+            args.experiment_id,
+            tested_hypothesis=tested_hypothesis,
+            changes=args.change,
+            metrics=metrics,
+            artifacts=claimed_artifacts,
+            config_revision=args.config_revision,
+            seed=args.seed,
+        )
+        duplicate_run_ids = [
+            str(item.get("id") or "")
+            for item in prior_runs
+            if str(item.get("fingerprint") or "") == fingerprint
+            and item.get("seed") == args.seed
+            and _normalized_text(item.get("config_revision")) == _normalized_text(args.config_revision)
+        ]
+        if duplicate_run_ids and not args.rerun:
+            raise SystemExit(
+                "Duplicate experiment configuration and seed already logged; use explicit rerun mode with a reason."
+            )
+        repeated_runs = [
+            str(item.get("id") or "")
+            for item in prior_runs
+            if str(item.get("repeat_group_id") or "") == repeat_group_id
+        ]
+        repeat_index = len(repeated_runs) + 1
+        repeats_run_ids = [*repeated_runs, run_id]
+        comparison = build_run_comparison(metrics, prior_runs, max(args.recent_runs, 0))
         logged_artifacts = [
             generated_artifact(root, run_path),
             generated_artifact(root, run_log_document_path),
@@ -537,6 +659,15 @@ def _dispatch(args, root: Path) -> int:
             "\n".join(
                 [
                     f"# Run for {record.get('title', '')}",
+                    "",
+                    "## Run Identity",
+                    f"- Run ID: {run_id}",
+                    f"- Fingerprint: {fingerprint}",
+                    f"- Repeat group: {repeat_group_id}",
+                    f"- Repeat index: {repeat_index}",
+                    f"- Seed: {args.seed if args.seed is not None else 'unspecified'}",
+                    f"- Config revision: {_normalized_text(args.config_revision)}",
+                    f"- Rerun reason: {_normalized_text(args.rerun_reason) or 'none'}",
                     "",
                     "## Changes",
                     *[f"- {item}" for item in args.change],
@@ -570,13 +701,21 @@ def _dispatch(args, root: Path) -> int:
             f"{args.experiment_id}-run-log",
             "experiment-workbench",
             {
+                "id": run_id,
+                "fingerprint": fingerprint,
+                "repeat_group_id": repeat_group_id,
+                "repeat_index": repeat_index,
+                "repeats_run_ids": repeats_run_ids,
+                "seed": args.seed,
+                "config_revision": _normalized_text(args.config_revision),
+                "rerun_reason": _normalized_text(args.rerun_reason),
                 "result_summary": args.result_summary,
                 "outcome": args.outcome,
                 "classifications": normalize_list(args.classification) or ["unknown"],
                 "changes": normalize_list(args.change),
                 "metrics": metrics,
                 "why_this_run": args.why_this_run,
-                "tested_hypothesis": args.tested_hypothesis,
+                "tested_hypothesis": tested_hypothesis,
                 "tags": normalize_list(args.tag),
                 "artifacts": logged_artifacts,
                 "comparison": comparison,
@@ -588,7 +727,7 @@ def _dispatch(args, root: Path) -> int:
         record["status"] = "running"
         record["payload"]["process"]["change_summary"] = args.change
         record["payload"]["process"]["why_this_run"] = args.why_this_run
-        record["payload"]["process"]["tested_hypothesis"] = args.tested_hypothesis
+        record["payload"]["process"]["tested_hypothesis"] = tested_hypothesis
         record["payload"]["results"]["metrics"] = metrics
         record["payload"]["results"]["comparison"] = comparison
         record["payload"]["results"]["artifacts"] = logged_artifacts
