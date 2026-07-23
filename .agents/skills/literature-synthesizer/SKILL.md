@@ -43,7 +43,7 @@ verify 会：
 4. 对每个 evidence_ref 读取其 source_unit_id，在 kb_anchor.units 中取得 kind，并只在该 unit_dir 内运行 verify_claim_evidence；引用文件必须已存在于 prepare binding。
 5. 对 trend 与 gap 检查其 as_of 与 kb_anchor.as_of 一致。
 6. 任一结构、anchor、artifact、locator 或逐字 quote 校验失败即拒绝，且不写正式结果。
-7. 全部通过后标记 observed / inferred，保存含 selection filters、exact unit bindings 与 verified_at 的 consumer_binding，并渲染 comparison matrix。
+7. 全部通过后标记 observed / inferred，保存含 selection filters、unit_ids、exact unit bindings 与 verified_at 的 consumer_binding，并渲染 comparison matrix。
 
 读侧调用纯读 staleness helper 复算同一 binding：已有 unit 变化/删除、确认失效、evidence bytes 变化或出现新的 matching unit 都标 stale。它只返回原因，不改写 survey；runtime agent 重新 prepare、fill、verify 才能刷新绑定。
 

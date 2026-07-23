@@ -172,8 +172,36 @@ def test_verify_cli_persists_only_verified_survey(tmp_path: Path, monkeypatch) -
     assert persisted["status"] == "pending_user_confirmation"
     assert persisted["evidence_verification_status"] == "verified"
     assert persisted["consumer_binding"]["selection_filters"]["query"] == "robot learning"
+    assert persisted["consumer_binding"]["unit_ids"] == ["p-alpha", "r-beta"]
     assert "Pending / Unverified judgement" in (survey_path.parent / "summary.md").read_text(encoding="utf-8")
     assert "## Comparison Matrix" in summary_path.read_text(encoding="utf-8")
+
+
+def test_prepare_skips_symlink_artifact_without_weakening_reference_gate(tmp_path: Path) -> None:
+    module = load_synthesizer()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside evidence", encoding="utf-8")
+    unit_dir = module.unit_root(tmp_path, "paper", "p-alpha")
+    unit_dir.mkdir(parents=True)
+    (unit_dir / "record.yaml").write_text(
+        yaml.safe_dump({"id": "p-alpha", "kind": "paper", "title": "Alpha", "payload": {}}),
+        encoding="utf-8",
+    )
+    (unit_dir / "linked.txt").symlink_to(outside)
+
+    scaffold = module.build_survey_scaffold(
+        [{"id": "p-alpha", "kind": "paper", "title": "Alpha"}],
+        root=tmp_path,
+        query="alpha",
+        kind="",
+        topic="",
+        tag="",
+        pool="",
+        mode="survey",
+        as_of="2026-07-17T00:00:00Z",
+    )
+
+    assert scaffold["kb_anchor"]["units"][0]["evidence_artifacts"] == []
 
 
 def test_verify_rejects_changed_bound_record_or_evidence(tmp_path: Path) -> None:

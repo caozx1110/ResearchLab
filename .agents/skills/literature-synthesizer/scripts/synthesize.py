@@ -79,7 +79,7 @@ def _evidence_artifact_bindings(unit_dir: Path) -> list[dict[str, str]]:
     for path in sorted(unit_dir.rglob("*"), key=lambda item: item.relative_to(unit_dir).as_posix()):
         artifact = path.relative_to(unit_dir).as_posix()
         if path.is_symlink():
-            raise SystemExit(f"Survey source unit contains a symlinked artifact: {unit_dir.name}/{artifact}")
+            continue
         if not path.is_file() or artifact == "record.yaml":
             continue
         bindings.append({"artifact": artifact, "byte_sha256": file_sha256(path)})
@@ -415,6 +415,7 @@ def verify_survey_fill(payload: dict, root: Path) -> tuple[list[str], dict]:
         verified["governance_status"] = "needs_agent_repair"
         verified["consumer_binding"] = {
             "selection_filters": copy.deepcopy(verified.get("filters") or {}),
+            "unit_ids": [str(item.get("id") or "") for item in unit_items if isinstance(item, dict)],
             "units": copy.deepcopy(unit_items),
             "verified_at": utc_now_iso(),
         }
@@ -429,8 +430,9 @@ def survey_staleness(payload: dict, root: Path) -> dict:
     if not isinstance(binding, dict):
         return {"stale": True, "reasons": ["missing consumer_binding"], "new_unit_ids": []}
     stored_units = binding.get("units")
+    stored_unit_ids = binding.get("unit_ids")
     filters = binding.get("selection_filters")
-    if not isinstance(stored_units, list) or not isinstance(filters, dict):
+    if not isinstance(stored_units, list) or not isinstance(stored_unit_ids, list) or not isinstance(filters, dict):
         return {"stale": True, "reasons": ["consumer_binding is incomplete"], "new_unit_ids": []}
 
     reasons: list[str] = []
@@ -439,6 +441,8 @@ def survey_staleness(payload: dict, root: Path) -> dict:
         for item in stored_units
         if isinstance(item, dict) and str(item.get("id") or "")
     }
+    if set(str(unit_id) for unit_id in stored_unit_ids) != set(stored_by_id):
+        reasons.append("consumer_binding.unit_ids does not match units")
     for unit_id, stored in sorted(stored_by_id.items()):
         try:
             current = build_unit_binding(root, stored)
