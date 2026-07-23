@@ -22,13 +22,21 @@ def _project_root() -> Path:
 
 
 def _installer_env() -> dict[str, str]:
-    return {
+    env = {
         **os.environ,
         "NO_COLOR": "1",
         "RESEARCH_NO_MANAGED_VENV": "1",
         "RESEARCH_NO_PDF_BACKEND": "1",
         "RESEARCH_PYTHON": sys.executable,
     }
+    env.pop("_RESEARCH_RUNTIME_READY", None)
+    return env
+
+
+def test_installer_subprocess_env_never_inherits_bootstrap_ready_sentinel(monkeypatch) -> None:
+    monkeypatch.setenv("_RESEARCH_RUNTIME_READY", "1")
+
+    assert "_RESEARCH_RUNTIME_READY" not in _installer_env()
 
 
 def _run_installer(workspace: Path, action: str, *extra: str) -> subprocess.CompletedProcess[str]:

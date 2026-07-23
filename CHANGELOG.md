@@ -9,7 +9,7 @@ The bundle currently declares **`0.2.0-rc.2`**. It has passed the complete local
 ### Added
 
 - First-class dataset knowledge units, a dataset analyst with evidence-backed four-part profiles, and explicit journaled repo-to-dataset migration.
-- A fifteen-verb conversational `kb` surface with private, opt-in structured hand-off for runtime agents.
+- A sixteen-verb conversational `kb` surface with private, opt-in structured hand-off for runtime agents.
 - Unified human-review readiness across paper, repository, and article workflows.
 - Current-message authorization fields for confirmation hand-off and version-bound confirmation receipts.
 - Exact-path multi-file operation scopes, recovery ordering tests, and clean manual-checkpoint no-op behavior.

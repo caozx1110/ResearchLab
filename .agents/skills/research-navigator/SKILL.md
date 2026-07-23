@@ -11,15 +11,15 @@ Use this skill to tell the human what to open next and to open a local browser f
 
 ## First-time use
 
-新用户或新接手的协作者第一次进入 kb 时，按以下顺序起步（每步都是一句命令或一个文件）：
+新用户或新接手的协作者第一次进入工作区时，只提供自然语言与公开快捷入口：
 
-1. `python3 .agents/skills/research-navigator/scripts/navigate.py refresh` — 刷新 `kb/user/` 下的所有人面向页面。
-2. 打开 `kb/index.md` — 全局 unit 索引（papers / repos / datasets / blogs / ideas / experiments），按 status / pool 概览整个知识库当前规模。
-3. 打开 `kb/user/current-state.md` — 当前所有 active program 的状态、stage、next-actions。
-4. （可选）`python3 .agents/skills/research-navigator/scripts/open_kb_browser.py` — 在本地浏览器中打开 Workbench / 预览 / 编辑视图，适合需要一边读 paper 一边记录的工作流。
-5. 若想看具体某个 program 的来龙去脉：进 `kb/programs/<program-id>/README.md` → `state.yaml` → `workflow/decision-log.md`。
+1. 运行 `kb init`，先把可用的知识库结构准备好；快速偏好可现在设置，也可稍后补充。
+2. 运行 `kb status`，查看当前资料、研究计划与需要关注的问题。
+3. 运行 `kb next`，取得现在最值得推进的少量事项与原因。
+4. 需要 Obsidian 阅读网络时运行 `kb obsidian update`；需要检查投影状态时运行 `kb obsidian status`。
+5. 若需要本地浏览 Workbench，直接用自然语言请 Agent 打开；Agent 私下处理实现命令与访问地址。
 
-如果整个 `kb/user/` 为空，说明该 workspace 还没跑过 `navigate.py refresh` 或还没初始化；先 `python3 .agents/skills/knowledge-base-manager/scripts/kb.py init` 一次。
+空工作区应直接邀请用户发送论文、文件、数据卡或本地代码仓，不展示内部脚本、文件路径或参数。
 
 ## Scope
 
@@ -27,10 +27,12 @@ Use this skill to tell the human what to open next and to open a local browser f
 - Build a local browser snapshot from `kb/units/`, `kb/programs/`, `kb/synthesis/`, `kb/user/`, and `kb/config/`.
 - Program browser cards target the core program-root `state.yaml` / `README.md` layout.
 - Keep source records canonical; browser output is generated under `kb/user/kb/`.
-- The browser supports a Workbench, Markdown preview/edit for `.md`/`.txt`, a bottom terminal, Codex CLI launch, macOS system-terminal API, and portrait-friendly narrow-window adaptation.
+- The browser supports a Workbench, Markdown preview/edit for `.md`/`.txt`, and portrait-friendly narrow-window adaptation. Terminal and system-terminal surfaces are disabled by default and are maintainer-only when explicitly enabled.
 - The browser editor is intentionally limited to `.md`/`.txt`; it can update markdown/text notes and trigger a configured checkpoint. Do not mutate raw sources or canonical YAML through the browser.
 
-## Commands
+## Maintainer/private commands
+
+The following implementation commands are for Agent execution, maintenance, and isolated tests only. Never copy them into user-visible guidance or stdout.
 
 ```bash
 python3 .agents/skills/research-navigator/scripts/navigate.py refresh

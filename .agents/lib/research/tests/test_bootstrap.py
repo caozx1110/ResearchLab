@@ -2,7 +2,23 @@ from __future__ import annotations
 
 import sys
 
+import pytest
+
 from research import bootstrap
+
+
+@pytest.fixture(autouse=True)
+def _restore_runtime_ready_flag():
+    """A bootstrap unit test must not mutate later subprocess test environments."""
+    present = bootstrap.READY_FLAG in bootstrap.os.environ
+    original = bootstrap.os.environ.get(bootstrap.READY_FLAG)
+    try:
+        yield
+    finally:
+        if present and original is not None:
+            bootstrap.os.environ[bootstrap.READY_FLAG] = original
+        else:
+            bootstrap.os.environ.pop(bootstrap.READY_FLAG, None)
 
 
 def test_yaml_capable_shared_runtime_is_never_pip_mutated(monkeypatch, tmp_path) -> None:

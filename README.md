@@ -23,7 +23,7 @@ These labels describe the current scope of each component, not the release statu
 
 | Skill | Maturity | Current scope |
 |---|---|---|
-| `kb-cli` | stable | Fifteen-verb routing, conversational output filtering, and recovery entrypoints only. |
+| `kb-cli` | stable | Sixteen-verb routing, conversational output filtering, and recovery entrypoints only. |
 | `knowledge-base-manager` | stable | Schema, evidence, confirmation, exact-path recovery, and index governance; it does not interpret research material. |
 | `source-intake` | beta | Staging, deduplication, immutable source capture, full Markdown reading views with local assets, and retryable failures across heterogeneous sources. |
 | `paper-analyst` | beta | Evidence-backed prepare and verify gates; the runtime agent supplies the substantive reading. |
