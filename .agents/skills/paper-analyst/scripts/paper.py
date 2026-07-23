@@ -431,13 +431,13 @@ def build_screening_scaffold(
         "information_types": ["inference", "evaluation", "unverified"],
         "fill_contract": {
             "description": (
-                "Agent fills worth_deep_reading (yes|no|maybe) + judgement_reason + "
+                "Agent fills worth_deep_reading with the quoted string 'yes', 'no', or 'maybe' + judgement_reason + "
                 "paper_type (method_system|benchmark|survey) + relevance_to_current_research, "
                 "and attaches judgement claims to `claims` "
                 "with verbatim evidence. Then run `screen --phase verify` to validate + persist. "
                 "The script does NOT decide worth — that judgement is the agent's (SSOT §3.2)."
             ),
-            "worth_deep_reading": "agent fills: yes|no|maybe",
+            "worth_deep_reading": "agent fills one quoted string: 'yes'|'no'|'maybe'",
             "paper_type": "agent fills: method_system|benchmark|survey",
             "judgement_reason": "agent fills: list of short reasons",
             "relevance_to_current_research": "agent fills: strong|moderate|weak + why",
@@ -475,7 +475,7 @@ def verify_screening_fill(payload: dict, unit_dir: Path) -> list[str]:
             f"paper_type: agent must fill one of {'|'.join(PAPER_TYPES)} or leave blank "
             f"(got {paper_type!r})"
         )
-    worth = str(payload.get("worth_deep_reading") or "").strip().lower()
+    worth = _normalized_worth_deep_reading(payload.get("worth_deep_reading"))
     if worth not in {"yes", "no", "maybe"}:
         violations.append(
             f"worth_deep_reading: agent must fill one of yes|no|maybe (got {worth or '<blank>'!r})"
@@ -495,6 +495,13 @@ def verify_screening_fill(payload: dict, unit_dir: Path) -> list[str]:
             "paper_type is an agent judgement but no evidence-backed claims were attached"
         )
     return violations
+
+
+def _normalized_worth_deep_reading(value: object) -> str:
+    """Normalize YAML 1.1 yes/no booleans to the canonical string enum."""
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    return str(value or "").strip().lower()
 
 
 # --------------------------------------------------------------------------- #
@@ -999,6 +1006,15 @@ def _resolve_fill_input(unit_root: Path, default_name: str, explicit: str | None
     return unit_root / default_name
 
 
+def _unit_owned_fill_path(unit_root: Path, fill_path: Path) -> Path | None:
+    """Return a checkpoint-safe fill only when it resolves inside this unit."""
+    try:
+        fill_path.resolve().relative_to(unit_root.resolve())
+    except (OSError, ValueError):
+        return None
+    return fill_path
+
+
 def next_for_agent_note(root: Path, record: dict, cache_path: Path, fill_path: Path) -> str:
     """One machine-readable navigation line for the ingestion auto-drive (SSOT §7).
 
@@ -1122,11 +1138,12 @@ def _run_screen(args, root, record, unit_root, cache_path, source_chunks, paper_
             print(f"  - {violation}", file=sys.stderr)
         raise SystemExit(1)
 
-    worth = str(payload.get("worth_deep_reading") or "").strip().lower()
+    worth = _normalized_worth_deep_reading(payload.get("worth_deep_reading"))
     paper_type = str(payload.get("paper_type") or "").strip().lower()
     reasons = [str(item).strip() for item in (payload.get("judgement_reason") or []) if str(item).strip()]
     relevance = str(payload.get("relevance_to_current_research") or "").strip()
     attach_claims(payload, read_claims(payload))
+    payload["worth_deep_reading"] = worth
     payload["status"] = "verified"
     payload["phase"] = "verify"
     write_yaml_if_changed(screen_path, payload)
@@ -1274,8 +1291,12 @@ def _run_complete_note(args, root, record, unit_root, cache_path, source_chunks,
     write_record(root, record)
     print(f"[ok] verified + wrote {note_path.relative_to(root)} (core_content filled, {len(claims)} elements)")
     _auto_post_note_steps(root, record, unit_root, source_chunks, cache_path, paper_preferences, defer_post_actions)
+    note_targets = [unit_root / "record.yaml", note_path, unit_root / "note-claims.yaml", unit_root / "structure.yaml", unit_root / "figures.yaml", unit_root / "figures"]
+    owned_fill = _unit_owned_fill_path(unit_root, fill_path)
+    if owned_fill is not None:
+        note_targets.insert(1, owned_fill)
     _finalize_post_actions(root, trigger="milestone", message=f"milestone: verify note {args.paper_id}", defer_post_actions=defer_post_actions,
-                           target_paths=[unit_root / "record.yaml", note_path, unit_root / "note-claims.yaml", unit_root / "structure.yaml", unit_root / "figures.yaml", unit_root / "figures"])
+                           target_paths=note_targets)
     return 0
 
 

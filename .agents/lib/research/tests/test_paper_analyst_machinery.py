@@ -534,8 +534,15 @@ def test_cli_end_to_end_prepare_fill_verify_persist(tmp_path: Path, monkeypatch:
         }
     ]
     write_yaml_if_changed(unit_dir / "screening.yaml", screening)
+    screening_path = unit_dir / "screening.yaml"
+    serialized = screening_path.read_text(encoding="utf-8")
+    yaml_11_bare = serialized.replace("worth_deep_reading: 'yes'", "worth_deep_reading: yes")
+    assert yaml_11_bare != serialized
+    screening_path.write_text(yaml_11_bare, encoding="utf-8")
+    assert load_yaml(screening_path)["worth_deep_reading"] is True
     assert _run_cli(paper, monkeypatch, tmp_path, "screen", "--phase", "verify",
                     "--paper-id", paper_id, "--defer-post-actions") == 0
+    assert load_yaml(screening_path)["worth_deep_reading"] == "yes"
     screened = load_yaml(record_path(tmp_path, "paper", paper_id))
     assert screened["payload"]["quick_screen"]["paper_type"] == "method_system"
 

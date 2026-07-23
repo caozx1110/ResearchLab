@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
+import subprocess
 import sys
 from pathlib import Path
 
@@ -104,6 +105,88 @@ def test_dataset_profile_scaffold_and_verbatim_verification(tmp_path: Path) -> N
     assert record["payload"]["composition"]["summary"]
     assert record["payload"]["access"]["schema_access"]
     assert record["payload"]["quality"]["suitability_risks"]
+
+
+def test_dataset_verify_checkpoints_dirty_unit_owned_fill(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    dataset = _load_script(
+        ".agents/skills/dataset-analyst/scripts/dataset.py",
+        "dataset_analyst_checkpoint_fill",
+    )
+    ensure_workspace(tmp_path)
+    record = default_record("dataset", title="Checkpoint Dataset", maturity="lightweight")
+    dataset_id = record["id"]
+    record_file = write_record(tmp_path, record)
+    unit = record_file.parent
+    source_text = (
+        "The dataset contains 500 hours of robot demonstrations. "
+        "It covers manipulation and navigation tasks. "
+        "Files are available in Parquet with train and validation splits. "
+        "Known risk: camera calibration varies across sites."
+    )
+    (unit / "parse-cache.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "unit_id": dataset_id,
+                "locator_kind": "section",
+                "chunks": [{"label": "section:card", "text": source_text}],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["dataset.py", "--root", str(tmp_path), "profile", "--dataset-id", dataset_id, "--phase", "prepare"],
+    )
+    assert dataset.main() == 0
+
+    fill_path = unit / "dataset-fill.yaml"
+    fill = load_yaml(fill_path)
+    quotes = {
+        "positioning": "500 hours of robot demonstrations",
+        "composition": "manipulation and navigation tasks",
+        "schema_access": "Parquet with train and validation splits",
+        "suitability_risks": "camera calibration varies across sites",
+    }
+    for element in fill["elements"]:
+        name = element["element"]
+        element["content"] = f"Agent-authored {name} judgement."
+        element["evidence_refs"] = [
+            {
+                "source_unit_id": dataset_id,
+                "artifact": "parse-cache.yaml",
+                "locator": "section:card",
+                "quote": quotes[name],
+                "summary": "Dataset card evidence.",
+            }
+        ]
+    fill_path.write_text(yaml.safe_dump(fill, sort_keys=False), encoding="utf-8")
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["dataset.py", "--root", str(tmp_path), "profile", "--dataset-id", dataset_id, "--phase", "verify"],
+    )
+    assert dataset.main() == 0
+
+    committed = subprocess.run(
+        ["git", "-C", str(tmp_path / "kb"), "show", "--format=", "--name-only", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    relative_fill = f"units/datasets/{dataset_id}/dataset-fill.yaml"
+    assert relative_fill in committed
+    assert "dataset-fill.yaml" not in subprocess.run(
+        ["git", "-C", str(tmp_path / "kb"), "status", "--short"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
 
 
 def test_repo_dataset_migration_is_dry_run_then_journaled_and_undoable(tmp_path: Path) -> None:

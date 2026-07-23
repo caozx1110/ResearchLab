@@ -18,6 +18,7 @@ All fixtures are synthetic + offline so verification is deterministic.
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import sys
 from pathlib import Path
 
@@ -174,6 +175,19 @@ def test_f6_blog_verify_creates_git_checkpoint(tmp_path: Path, monkeypatch: pyte
     log = kb_git_log(tmp_path, limit=20)
     assert log.get("repo_exists") is True
     assert f"milestone: blog note {blog_id}" in log["text"], log["text"]
+    committed = subprocess.run(
+        ["git", "-C", str(tmp_path / "kb"), "show", "--format=", "--name-only", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    assert f"units/blogs/{blog_id}/blog-fill.yaml" in committed
+    assert "blog-fill.yaml" not in subprocess.run(
+        ["git", "-C", str(tmp_path / "kb"), "status", "--short"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
 
 
 def test_f6_blog_verify_defer_does_not_checkpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

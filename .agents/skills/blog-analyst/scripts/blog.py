@@ -450,6 +450,15 @@ def _resolve_fill_input(unit_root: Path, default_name: str, explicit: str | None
     return unit_root / default_name
 
 
+def _unit_owned_fill_path(unit_root: Path, fill_path: Path) -> Path | None:
+    """Return a checkpoint-safe fill only when it resolves inside this unit."""
+    try:
+        fill_path.resolve().relative_to(unit_root.resolve())
+    except (OSError, ValueError):
+        return None
+    return fill_path
+
+
 def next_for_agent_note(root: Path, record: dict, cache_path: Path, fill_path: Path) -> str:
     """One machine-readable navigation line for the ingestion auto-drive (SSOT §7).
 
@@ -582,12 +591,16 @@ def _run_complete_note(args, root: Path, record: dict, unit_root: Path, defer_po
     )
     write_record(root, record)
     print(f"[ok] verified + wrote {note_path.relative_to(root)} (content filled, {len(claims)} elements)")
+    note_targets = [unit_root / "record.yaml", note_path, unit_root / "blog-claims.yaml"]
+    owned_fill = _unit_owned_fill_path(unit_root, fill_path)
+    if owned_fill is not None:
+        note_targets.insert(1, owned_fill)
     _finalize_post_actions(
         root,
         trigger="milestone",
         message=f"milestone: blog note {record['id']}",
         defer_post_actions=defer_post_actions,
-        target_paths=[unit_root / "record.yaml", note_path, unit_root / "blog-claims.yaml"],
+        target_paths=note_targets,
     )
     return 0
 

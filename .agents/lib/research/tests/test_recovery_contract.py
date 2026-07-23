@@ -48,6 +48,41 @@ def _load_paper_module():
     return module
 
 
+@pytest.mark.parametrize(
+    ("skill", "script_name"),
+    [
+        ("paper-analyst", "paper.py"),
+        ("blog-analyst", "blog.py"),
+        ("dataset-analyst", "dataset.py"),
+    ],
+)
+def test_analyzer_fill_checkpoint_scope_rejects_external_and_symlink_inputs(
+    tmp_path: Path,
+    skill: str,
+    script_name: str,
+) -> None:
+    script = _project_root() / ".agents" / "skills" / skill / "scripts" / script_name
+    module_name = f"{skill.replace('-', '_')}_fill_scope_test"
+    spec = importlib.util.spec_from_file_location(module_name, script)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+
+    unit = tmp_path / "kb" / "units" / "kind" / "unit"
+    unit.mkdir(parents=True)
+    owned = unit / "fill.yaml"
+    owned.write_text("value: owned\n", encoding="utf-8")
+    external = tmp_path / "external-fill.yaml"
+    external.write_text("value: external\n", encoding="utf-8")
+    escaped = unit / "escaped-fill.yaml"
+    escaped.symlink_to(external)
+
+    assert module._unit_owned_fill_path(unit, owned) == owned
+    assert module._unit_owned_fill_path(unit, external) is None
+    assert module._unit_owned_fill_path(unit, escaped) is None
+
+
 def test_atomic_write_failure_does_not_clobber_existing_target(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -446,6 +481,16 @@ def test_paper_complete_note_verify_checkpoints_without_optional_figures(tmp_pat
     fill_path = unit / "note-fill.yaml"
     yaml_io.write_yaml_if_changed(
         fill_path,
+        paper.build_note_scaffold(record, chunks, "page", digest_chunks=1, digest_chars=1200),
+    )
+    git_checkpoint(
+        tmp_path,
+        "seed paper inputs",
+        auto_init=False,
+        target_paths=[record_path, cache, fill_path],
+    )
+    yaml_io.write_yaml_if_changed(
+        fill_path,
         {
             "elements": [
                 {
@@ -465,12 +510,6 @@ def test_paper_complete_note_verify_checkpoints_without_optional_figures(tmp_pat
                 for element, quote in quotes.items()
             ]
         },
-    )
-    git_checkpoint(
-        tmp_path,
-        "seed paper inputs",
-        auto_init=False,
-        target_paths=[record_path, cache, fill_path],
     )
     loaded = load_yaml(record_path)
     args = SimpleNamespace(
@@ -499,6 +538,19 @@ def test_paper_complete_note_verify_checkpoints_without_optional_figures(tmp_pat
     assert (unit / "structure.yaml").exists()
     assert not (unit / "figures.yaml").exists()
     assert not (unit / "figures").exists()
+    committed = subprocess.run(
+        ["git", "-C", str(tmp_path / "kb"), "show", "--format=", "--name-only", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    assert "units/papers/p-checkpoint-optional/note-fill.yaml" in committed
+    assert "note-fill.yaml" not in subprocess.run(
+        ["git", "-C", str(tmp_path / "kb"), "status", "--short"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
 
 
 def test_git_checkpoint_commits_tracked_deletion_with_absent_optional_target(
