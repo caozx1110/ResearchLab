@@ -1690,15 +1690,11 @@ def main() -> int:
                 "Program decisions cannot be created confirmed/auto_confirmed; "
                 "log a pending decision, then use confirm-decision."
             )
-        with program_mutation(root, args.program_id, args.command):
-            ensure_program_files(root, args.program_id)
-            state = load_state(root, args.program_id)
-            timestamp = utc_now_iso()
-            decision_id = "decision-" + hashlib.sha256(
-                f"{args.program_id}\n{timestamp}\n{args.decision}".encode("utf-8")
-            ).hexdigest()[:12]
-            claims = load_decision_claims(root, args.program_id, args.claims_file)
-            if not claims:
+        claims = load_decision_claims(root, args.program_id, args.claims_file)
+        if not claims:
+            with program_mutation(root, args.program_id, args.command):
+                ensure_program_files(root, args.program_id)
+                state = load_state(root, args.program_id)
                 fill_path = write_decision_fill_scaffold(
                     root,
                     args.program_id,
@@ -1708,8 +1704,21 @@ def main() -> int:
                     alternatives=normalize_list(args.alternative),
                     evidence=normalize_list(args.evidence),
                 )
-                print(fill_path.relative_to(root))
-                return 0
+            print(fill_path.relative_to(root))
+            checkpoint_and_report(
+                root,
+                trigger="milestone",
+                message=f"milestone: prepare decision fill {args.program_id}",
+                target_paths=[fill_path],
+            )
+            return 0
+        with program_mutation(root, args.program_id, args.command):
+            ensure_program_files(root, args.program_id)
+            state = load_state(root, args.program_id)
+            timestamp = utc_now_iso()
+            decision_id = "decision-" + hashlib.sha256(
+                f"{args.program_id}\n{timestamp}\n{args.decision}".encode("utf-8")
+            ).hexdigest()[:12]
             item = {
                 "id": decision_id,
                 "kind": "program_decision",
