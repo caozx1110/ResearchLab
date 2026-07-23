@@ -187,6 +187,9 @@ def test_confirm_scripts_require_provenance_arguments() -> None:
 
     idea_text = _script_text("idea-workbench", "idea.py")
     assert "require_confirmation_provenance" in idea_text
-    assert "apply_confirmation" not in idea_text
+    # R2 discussion conclusions are independent side judgement subjects and use
+    # the shared receipt validator; idea selection keeps its explicit user-choice
+    # provenance path.
+    assert "apply_confirmation(" in idea_text
     assert _has_optional_arg(idea_text, "--confirmed-by")
     assert _has_required_arg(idea_text, "--evidence")
