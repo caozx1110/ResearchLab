@@ -24,6 +24,7 @@ description: Generate self-contained weekly reports, stage summaries, PPT or wri
 5. 聚合固定 H2 decision blocks 与筛选后的 events。最终叙事由 agent 基于这些输入填写，不允许脚本生成判断。
 6. 任一输入缺失时保留明确的 `missing: X`；禁止静默省略、补写或推测。
 7. 只读加载 `kb/config/user-profile.yaml` 的自由文本 `reporting_style`：包含“简洁”/`concise`/`brief` 时压缩 decisions、claims 与 events 的展示量；包含“详细”/`detailed`/`full` 时保留完整输入；缺失、不可解析或无匹配信号时维持原默认行为。精简模式仍保留 decisions、claims + evidence、events 三部分及全部适用的 `missing:` 标记。
+8. Reporting events 默认 fail-closed：显式 factual/operational 事件可进普通区；decision/diagnosis/discussion conclusion/survey inference/novelty/evaluation 与未知未分型事件均视为 judgement。只有能解析到 canonical subject 且 binding 与当前 ConfirmationReceipt 完全一致的 judgement 才进入普通区；pending/rejected/stale 全部隔离到 `Pending / Unverified judgements`。
 
 ## Internal Verbs
 
@@ -44,6 +45,7 @@ description: Generate self-contained weekly reports, stage summaries, PPT or wri
 - 无 events、decisions、confirmed claims、关联 record 或 outline section inputs 时分别写 `missing: ...`。
 - 不输出 raw commands 或内部路径作为用户下一步；需要推进时改写成自然语言或已存在的 `kb <verb>`。
 - 不修改 source units、reporting events 或 decision log；报告是只读聚合后的派生产物。
+- `*-confirmed` 名称或 `confirmation_status: confirmed` 字符串本身不构成信任；confirmed event 必须绑定 subject、claim ids、content digest 与 verification receipt。
 
 ## Quality Gate
 

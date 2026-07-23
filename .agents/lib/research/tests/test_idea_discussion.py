@@ -115,6 +115,32 @@ def test_discuss_verify_accepts_verbatim_evidence_and_persists_one_conclusion(tm
     assert judgement["payload"]["verification"]["verified_at"]
     assert judgement["confirmation_status"] == "pending_user_confirmation"
 
+    assert _run(
+        idea,
+        monkeypatch,
+        "discuss",
+        "--id",
+        idea_id,
+        "--phase",
+        "confirm",
+        "--conclusion-id",
+        judgement["id"],
+        "--confirmed-by",
+        "Human Reviewer",
+        "--evidence",
+        "discussion evidence reviewed",
+        "--user-authorization",
+        "I confirm this discussion conclusion.",
+        "--authorization-source",
+        "user_message",
+    ) == 0
+    confirmed = load_yaml(record_path(tmp_path, "idea", idea_id).parent / "discussion-judgements.yaml")["items"][0]
+    assert confirmed["confirmation_status"] == "confirmed"
+    assert confirmed["confirmation"]["subject"] == {
+        "kind": "idea_discussion_conclusion",
+        "id": judgement["id"],
+    }
+
 
 def test_discuss_verify_rejects_fabricated_counter_example(tmp_path: Path, monkeypatch) -> None:
     idea = _load_idea_module()

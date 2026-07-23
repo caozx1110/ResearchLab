@@ -14,6 +14,8 @@ Use this skill when an important research discussion should become a durable not
 - **写到 `decision-log.md`（由 `research-orchestrator` 维护）**：单点、明确的"我们决定 X"，需要 stage 迁移、citation evidence、alternatives 一并落下。决策本身是事实，理由可能是 AI 推断（仍 pending）。
 - **写到 `discussions/<slug>.md`（本 skill）**：讨论过程比结论更值得保存 —— 多个 tradeoff、还没拍板的分歧、暂时挂起的 open question、需要后续 evidence 才能闭合的路线。常见场景：研讨结束但未决议、用户主导的研究方向辩论、要给协作者看的"我们当时怎么权衡的"。
 
+R2 兼容门：archive 还没有独立的 fill/verify/confirm artifact，因此所有新归档都显式标成 `Pending / Unverified judgement`；对应 event 为 `discussion-conclusion` + `needs_agent_repair`，没有 confirmation binding 时只能进入报告隔离区。归档笔记可以保存讨论过程，但不能作为已确认结论被下游消费。
+
 二者经常成对出现：先 `archive` 保存讨论过程，等用户拍板后再 `research-orchestrator log-decision` 引用本讨论笔记的 path 作为 evidence。
 
 ## 输入要素

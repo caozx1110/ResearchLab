@@ -585,7 +585,53 @@ IF record["source"].get("kind") == "ai"
    EXPECT record["needs_human_confirmation"] is True
 ```
 
-跨 skill 一致性：unit `record.yaml` 写入应统一走 `write_record()` 或显式调用 `validate_write()`。其它 artifact 若需要同等强度的门控，应另行实现并补测试。
+跨 skill 一致性：unit `record.yaml` 写入应统一走 `write_record()` 或显式调用 `validate_write()`；非 unit 判断必须使用下述 JudgementArtifact 同构门，不能再以 owner side file 绕开 canonical claims/receipt。
+
+### JudgementArtifact 跨 owner envelope（R2）
+
+Program decision、experiment diagnosis、idea discussion conclusion、method selection 等 side judgement 与 unit record 共用同一治理 envelope：
+
+```yaml
+id: stable-subject-id
+kind: program_decision|idea_discussion_conclusion|method_selection|...
+owner: research-orchestrator|idea-workbench|method-designer|...
+program_id: optional-program-id
+updated_at: ISO-8601
+priority: low|normal|high|critical
+confirmation_status: pending_user_confirmation|confirmed|rejected
+needs_human_confirmation: true
+information_types: [inference, evaluation, unverified]
+payload:
+  # owner-specific substance may coexist here
+  claims: []                     # canonical, non-empty before review
+  verification:
+    verified_at: ISO-8601
+    claims_digest: sha256
+    evidence_digest: sha256
+    artifacts: []                # canonical identity + byte sha256
+confirmation: {}                 # only after explicit human confirmation
+review_route:                    # internal execution plane, never public stdout
+  owner: owner-skill
+  action: owner-confirm-action
+```
+
+Lifecycle is `awaiting_agent_fill → ready_for_review → confirmed|rejected`. A missing claims invocation may persist an explicit `*-fill.yaml` request, but **must not** append a canonical judgement item, reporting event, or program state that pretends the judgement exists. Historical hollow items are `needs_agent_repair`, never review-ready.
+
+`research.judgements.discover_pending_judgements(root)` is the shared internal discovery API. A returned card contains:
+
+```yaml
+subject: {kind: ..., id: ..., owner: ..., path: project-relative-path}
+claims: []
+verification: {}
+confirmation_status: pending_user_confirmation
+priority: normal
+updated_at: ISO-8601
+confirm_route: {}                # internal owner route
+```
+
+Discovery is fail-closed: empty/invalid claims, any canonical `unverified` claim, missing or byte-stale verification, rejected items, and already confirmed items are excluded. The public review layer may consume only this ready set.
+
+Reporting judgement events carry `confirmation_binding.subject` plus `claim_ids`、`content_digest` and the current verification digests. Side subjects must include `owner` and project-relative `path`; consumers resolve that path with project-root containment. `decision` / `diagnosis` / discussion conclusion / survey inference / novelty / evaluation and unknown untyped events default to judgement. Only explicit factual/operational events or a judgement whose bound subject still has a current ConfirmationReceipt may enter ordinary report sections.
 
 ---
 
@@ -660,8 +706,8 @@ Wave3（2026-07-17）把 3.6/3.10/3.7 三个产出侧子系统从"一次性算�
 
 - `prepare` 产 7 节骨架：`scope_positioning / background_terms / taxonomy(核心) / cross_cutting / trends / gaps_challenges / conclusion` + `comparison_matrix`（方法×维度）；每个 cell/item/matrix-cell 带空 `evidence_refs` + `claim_type`。
 - `kb_anchor: {as_of, unit_ids[], units[]}` 记录生成锚点（stale 判据，接 3.13）。
-- `epistemic_status`：`claim_type=inference` → **inferred**；`fact/evaluation` → **observed**。
 - `verify`：`validate_claims` + 逐 evidence_ref `verify_claim_evidence`（对各自 `source_unit_id` 的 unit 目录逐字校验）；每个承重 cell 必须 ≥1 verbatim citation，全过才落 `survey.yaml`。无硬编码结论/confidence。
+- R2 兼容状态：落盘产物为 `evidence_verification_status=verified`、`status/confirmation_status=pending_user_confirmation`、cell `epistemic_status=verified_pending_confirmation`。在 survey 获得独立 ConfirmationReceipt route 前同时标 `governance_status=needs_agent_repair`，不得作为正式结论进入报告。
 
 ### report-author — `kb/programs/<id>/reports/*.md`、`kb/user/report-materials/*`、`paper-outline.md`
 
@@ -671,7 +717,7 @@ Wave3（2026-07-17）把 3.6/3.10/3.7 三个产出侧子系统从"一次性算�
 
 ### idea-workbench — 陪练 discussion + evidence-first analysis
 
-- `discuss`（别名 `spar`）prepare/verify：陪练身份=领域专家/审稿人，四类空白 judgement claim（challenge/probe/counter-example/constructive-suggestion）；verify 对 counter-example 引用的 KB unit 逐字校验，**按 conclusion 持久化**到 `payload.discussion.conclusions[]`（每条含 evidence + who/when）。
+- `discuss`（别名 `spar`）prepare/verify/confirm：陪练身份=领域专家/审稿人，五类空白 judgement claim（challenge/probe/counter-example/constructive-suggestion/conclusion）；verify 对引用的 KB unit 逐字校验，并按 conclusion 持久化为独立 `discussion-judgements.yaml` subject。`payload.discussion.conclusions[]` 只是 projection，不能覆盖 idea analysis/review claims；confirm 对指定 subject 生成版本绑定 receipt。
 - `analyze`/`review` 改 prepare/verify：novelty/feasibility/recommendation/killer-question 由 agent 填 + 挂证据；字段计数仅 descriptive hint，不再是 score/verdict 来源。
 - `select` 仍写 `pending_user_confirmation`（工作流态，不自签 confirmed）。
 

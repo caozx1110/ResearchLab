@@ -113,10 +113,12 @@ def test_verify_accepts_verbatim_cross_unit_evidence(tmp_path: Path) -> None:
     violations, verified = module.verify_survey_fill(scaffold, tmp_path)
 
     assert violations == []
-    assert verified["status"] == "verified"
+    assert verified["status"] == "pending_user_confirmation"
+    assert verified["evidence_verification_status"] == "verified"
+    assert verified["governance_status"] == "needs_agent_repair"
     _, entries = module.survey_claim_entries(verified)
     statuses = {cell["epistemic_status"] for _, cell, _ in entries}
-    assert statuses == {"observed", "inferred"}
+    assert statuses == {"verified_pending_confirmation"}
     summary = module.render_verified_summary(verified)
     assert "## Comparison Matrix" in summary
     assert "| Alpha Method |" in summary
@@ -149,5 +151,7 @@ def test_verify_cli_persists_only_verified_survey(tmp_path: Path, monkeypatch) -
     assert survey_path.exists()
     assert summary_path.exists()
     persisted = yaml.safe_load(survey_path.read_text(encoding="utf-8"))
-    assert persisted["status"] == "verified"
+    assert persisted["status"] == "pending_user_confirmation"
+    assert persisted["evidence_verification_status"] == "verified"
+    assert "Pending / Unverified judgement" in (survey_path.parent / "summary.md").read_text(encoding="utf-8")
     assert "## Comparison Matrix" in summary_path.read_text(encoding="utf-8")

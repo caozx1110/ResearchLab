@@ -22,7 +22,8 @@ Use this skill to anchor work to a concrete research program.
 
 - Program coordination artifacts are durable inputs for later reopen, not chat-only summaries.
 - Any promised resumable deliverable, such as a batch survey or technical roadmap, must be written into a program `next_actions` entry before the conversation says `kb next` can resume it. Persisted program actions outrank loose maintenance suggestions; completed units do not generate work merely because a refresh ran.
-- Decision records may cite evidence, but if rationale contains AI judgement it should stay `pending_user_confirmation` unless the user explicitly confirms it.
+- Decision records require non-empty agent-authored canonical claims with verified evidence and stay `pending_user_confirmation` until the user explicitly confirms the current receipt. A call without claims only prepares `workflow/decision-fill.yaml` in `awaiting_agent_fill`; it does not append a decision, update `last_decision`, or emit a reportable decision event.
+- Pending and confirmed decision events both bind the canonical decision subject, claim ids, content digest, and verification receipt. Report consumers must resolve that binding; an event name or `confirmation_status` string cannot manufacture trust.
 - `report-author` should read from `workflow/reporting-events.yaml`, so important state changes must emit reporting events.
 - Script-generated timestamps are stored in UTC.
 

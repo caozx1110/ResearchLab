@@ -13,7 +13,7 @@ description: 负责跨 paper / repo / dataset / blog / idea 的 evidence-first s
 - 不从 topic、tag、pool 或 kind 计数自动生成结论，不写固定 Observed / Inferred / Suggested / OpenQuestions 文案，也不写固定 confidence。
 - 不建立 semantic index。runtime agent 使用原生检索阅读单位产物并填写 scaffold。
 - 每个正式 claim cell 都必须有 evidence_refs；taxonomy cell、comparison-matrix cell、trend、gap 还会检查其结构字段。每个 ref 都按自己的 source_unit_id 解析到对应 unit_dir，再做逐字核验。
-- prepare 不产出正式 survey；只有 verify 全部通过后才写正式 YAML 与 summary.md。
+- prepare 不产出 survey；verify 全部通过后只写 evidence-verified、`pending_user_confirmation` 的 YAML 与 summary.md。当前 survey 尚无独立 ConfirmationReceipt route，因此还会显式标 `governance_status: needs_agent_repair`，不得被报告当正式结论消费。
 
 ## 两阶段流程
 
@@ -127,6 +127,6 @@ comparison_matrix:
 
 ## 输出语义
 
-- 正式 YAML 保留 sections、comparison_matrix、kb_anchor、claim_type、evidence_refs，并在每个 cell 上增加 `epistemic_status: observed|inferred`。
-- summary.md 按七段式渲染 verified content，并将 comparison matrix 输出为 method × dimension 表格。
+- YAML 保留 sections、comparison_matrix、kb_anchor、claim_type、evidence_refs，并在每个 cell 上增加 `epistemic_status: verified_pending_confirmation`；`evidence_verification_status: verified` 只表示逐字证据通过，不等于用户确认。
+- summary.md 按七段式渲染 evidence-verified content，显式显示 Pending / Unverified banner，并将 comparison matrix 输出为 method × dimension 表格。
 - metadata 只参与候选选择，不作为 survey conclusions。

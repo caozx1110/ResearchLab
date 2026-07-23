@@ -26,6 +26,7 @@ if __name__ == "__main__":
 from research.common import add_project_root_argument, load_program_reporting_events, load_yaml, print_resolved_project_roots, write_text_if_changed
 from research.core import command_mutation, ensure_workspace, checkpoint_and_report, has_complete_confirmation_receipt, project_root, user_root
 from research.evidence import read_claims, validate_claims, verification_receipt_violations
+from research.judgements import load_bound_judgement
 from research.records import locate_record
 
 
@@ -39,7 +40,27 @@ CONCISE_SOURCE_LIMIT = 3
 CONCISE_CLAIM_LIMIT = 3
 CONCISE_EVENT_LIMIT = 5
 JUDGEMENT_INFORMATION_TYPES = {"inference", "evaluation", "user_opinion", "unverified"}
-LEGACY_JUDGEMENT_EVENT_TYPES = {"diagnosis", "evaluation", "inference"}
+JUDGEMENT_EVENT_TOKENS = {
+    "decision",
+    "diagnosis",
+    "evaluation",
+    "inference",
+    "novelty",
+    "conclusion",
+    "survey",
+}
+OPERATIONAL_EVENT_TYPES = {
+    "program-created",
+    "stage-changed",
+    "next-action-added",
+    "next-action-resolved",
+    "evidence-requested",
+    "evidence-fulfilled",
+    "experiment-planned",
+    "experiment-run",
+    "experiment-follow-up",
+    "phase-completed",
+}
 
 
 @dataclass
@@ -92,11 +113,24 @@ def _event_is_judgement(event: dict[str, Any]) -> bool:
         for token in re.split(r"[^a-z0-9]+", str(event.get("event_type") or "").casefold())
         if token
     }
-    return (
+    event_type = str(event.get("event_type") or "").strip().casefold()
+    has_governance_binding = any(
+        field in event
+        for field in ("confirmation_binding", "confirmation_status", "needs_human_confirmation")
+    )
+    if (
         epistemic_type == "judgement"
         or bool(information_types & JUDGEMENT_INFORMATION_TYPES)
-        or bool(event_type_tokens & LEGACY_JUDGEMENT_EVENT_TYPES)
-    )
+        or bool(event_type_tokens & JUDGEMENT_EVENT_TOKENS)
+        or has_governance_binding
+    ):
+        return True
+    if epistemic_type in {"fact", "factual", "operational"}:
+        return False
+    if event_type in OPERATIONAL_EVENT_TYPES:
+        return False
+    # Unknown/untyped report events are not entitled to the factual lane.
+    return True
 
 
 def _confirmed_judgement_event(root: Path, event: dict[str, Any]) -> tuple[bool, str]:
@@ -119,13 +153,15 @@ def _confirmed_judgement_event(root: Path, event: dict[str, Any]) -> tuple[bool,
     if not bound_claim_ids:
         return False, f"confirmation_status={recorded_status}; missing: canonical claim/evidence binding"
     try:
-        record, _path = locate_record(root, subject_id, kind=subject_kind, fuzzy=False)
-    except SystemExit:
+        record, _path = load_bound_judgement(root, subject)
+    except (OSError, ValueError):
         return False, f"confirmation_status={recorded_status}; missing: bound record {subject_id}"
     if str(record.get("id") or "") != subject_id or str(record.get("kind") or "") != subject_kind:
         return False, f"confirmation_status={recorded_status}; missing: matching canonical subject"
-    if str(record.get("confirmation_status") or "") != "confirmed" or not has_complete_confirmation_receipt(record):
+    if str(record.get("confirmation_status") or "") != "confirmed":
         return False, f"confirmation_status={recorded_status}; missing: current ConfirmationReceipt"
+    if not has_complete_confirmation_receipt(record):
+        return False, "confirmation_status=stale; missing: current ConfirmationReceipt"
     receipt = record.get("confirmation")
     receipt = receipt if isinstance(receipt, dict) else {}
     receipt_claim_ids = sorted(_text_items(receipt.get("claim_ids")))

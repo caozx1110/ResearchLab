@@ -27,7 +27,9 @@ Use this skill for structured experiment memory rather than one-off chat summari
 - Every claimed artifact is checked when the run is logged. Artifact entries contain `path`, `status` (`present` or `missing`), `generated`, and `kind` when present; missing claims remain visible and emit a warning.
 - Runs may be tagged `baseline` or `milestone`. Every later run stores per-metric comparisons against the last run, the configured recent-run window, and all persistent anchors, including numeric delta and direction-aware `better` / `worse` results.
 - Diagnosis remains agent judgement. The script only attaches factual `comparison_context` containing recent runs plus all baseline/milestone anchors; it never generates a diagnosis from those facts.
-- A diagnosis may attach agent-authored `claims`. When present, every claim must pass the shared claim-structure gate and every evidence quote must be verified verbatim against this experiment unit's own `run-log.yaml` or `runs/run-NNN.md`; cross-unit, missing, or fabricated evidence is rejected before any diagnosis write. Claims remain `pending_user_confirmation`. Omitting claims preserves the legacy diagnosis workflow.
+- A diagnosis requires agent-authored canonical `claims`. Every claim must pass the shared claim-structure gate and every evidence quote must be verified verbatim against this experiment unit's own `run-log.yaml` or `runs/run-NNN.md`; cross-unit, missing, or fabricated evidence is rejected before any diagnosis write. Claims remain `pending_user_confirmation`.
+- If diagnosis is requested without claims, the script writes an explicit `diagnosis-fill.yaml` with `status: awaiting_agent_fill` and does not append a diagnosis, mutate the canonical diagnosis, or emit a judgement event. The Agent fills that scaffold and repeats verification.
+- Diagnosis reporting events bind the experiment subject, canonical claim ids, content digest, and verification receipt. Confirmation emits a second bound event; a name such as `experiment-confirmed` alone is never trusted.
 
 ## Commands
 

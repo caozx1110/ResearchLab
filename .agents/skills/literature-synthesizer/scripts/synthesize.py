@@ -319,9 +319,16 @@ def verify_survey_fill(payload: dict, root: Path) -> tuple[list[str], dict]:
 
     verified = copy.deepcopy(payload)
     if not violations:
-        verified["status"] = "verified"
+        # Evidence verification is not human confirmation.  Until surveys gain a
+        # first-class ConfirmationReceipt route, keep them explicitly pending so
+        # report consumers cannot mistake a grounded AI synthesis for settled fact.
+        verified["status"] = "pending_user_confirmation"
+        verified["evidence_verification_status"] = "verified"
+        verified["confirmation_status"] = "pending_user_confirmation"
+        verified["needs_human_confirmation"] = True
+        verified["governance_status"] = "needs_agent_repair"
         for _, cell, _ in survey_claim_entries(verified)[1]:
-            cell["epistemic_status"] = "inferred" if cell.get("claim_type") == "inference" else "observed"
+            cell["epistemic_status"] = "verified_pending_confirmation"
     return violations, verified
 
 
@@ -332,7 +339,14 @@ def _escape_table_cell(value: object) -> str:
 def render_verified_summary(payload: dict) -> str:
     filters = payload.get("filters") or {}
     subject = filters.get("query") or filters.get("topic") or filters.get("tag") or filters.get("pool") or filters.get("kind") or "survey"
-    lines = [f"# Survey: {subject}", "", f"KB anchor: `{payload.get('kb_anchor', {}).get('as_of', '')}`", ""]
+    lines = [
+        f"# Survey: {subject}",
+        "",
+        "> Pending / Unverified judgement: evidence has been checked, but no current human ConfirmationReceipt exists.",
+        "",
+        f"KB anchor: `{payload.get('kb_anchor', {}).get('as_of', '')}`",
+        "",
+    ]
     for section in payload.get("sections") or []:
         if not isinstance(section, dict):
             continue

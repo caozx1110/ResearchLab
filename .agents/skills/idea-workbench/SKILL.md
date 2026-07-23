@@ -37,12 +37,13 @@ description: 负责 core idea unit 的生成、evidence-first analysis、陪练�
 
 ## 陪练模式
 
-`discuss`（别名 `spar`）也是 `prepare|verify` 两阶段合同，并按 conclusion 粒度持久化：
+`discuss`（别名 `spar`）采用 `prepare|verify|confirm` 三阶段合同，并按 conclusion 粒度持久化：
 
-1. `prepare` 生成一份空白 conclusion，包含 `challenge`、`probe`、`counter-example`、`constructive-suggestion` 四条 judgement claims。
-2. runtime agent 填 reviewer、总结性 conclusion、四条 claim，以及每条 claim 的 KB 逐字证据。
+1. `prepare` 生成一份空白 conclusion，包含 `challenge`、`probe`、`counter-example`、`constructive-suggestion` 与 `conclusion` 五条 judgement claims。
+2. runtime agent 填 reviewer、总结性 conclusion、五条 claim，以及每条 claim 的 KB 逐字证据；canonical conclusion claim 的 text 必须与总结性 conclusion 完全一致。
 3. `verify` 对每个 evidence ref 到其 `source_unit_id` 的 canonical unit 中核验；例如 counter-example 引用 paper 时，quote 必须逐字存在于该 paper unit 的 artifact。
-4. 每次 verify 只追加一条 conclusion，不覆盖已有讨论结论。
+4. 每次 verify 向 `discussion-judgements.yaml` 追加独立 `idea_discussion_conclusion` subject，包含 canonical `payload.claims + payload.verification`；nested conclusion 只是人类可读 projection。
+5. `confirm` 只确认指定 conclusion subject 的当前 receipt；多轮 spar 互不覆盖既有讨论历史或已确认 analysis/review claims。
 
 ### `payload.discussion.conclusions[]` schema
 
@@ -55,9 +56,11 @@ payload:
         reviewer: runtime-agent-or-human-id
         verified_at: ISO-8601 timestamp
         verification: evidence_verified
+        judgement_id: discussion-<digest>
+        confirmation_status: pending_user_confirmation|confirmed
         claims:
-          - id: challenge|probe|counter-example|constructive-suggestion
-            role: challenge|probe|counter-example|constructive-suggestion
+          - id: challenge|probe|counter-example|constructive-suggestion|conclusion
+            role: challenge|probe|counter-example|constructive-suggestion|conclusion
             text: agent-authored judgement
             claim_type: inference|evaluation
             confirmation_status: pending_user_confirmation
@@ -69,7 +72,7 @@ payload:
                 summary: optional relevance note
 ```
 
-`verified_at` / `verification` 记录脚本证据校验结果；claim 的 epistemic type 与 `pending_user_confirmation` 保持不变。
+`verified_at` / verification 只代表证据核验；claim 的 epistemic type 与 `pending_user_confirmation` 保持不变，直到显式用户确认。
 
 ## Agent 内部调用
 
