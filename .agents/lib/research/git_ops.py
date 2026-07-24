@@ -9,7 +9,6 @@ from typing import Any, Sequence
 
 from .common import (
     ensure_dir,
-    exclusive_file_lock,
     load_yaml,
     parse_iso_datetime,
     utc_now_iso,
@@ -30,19 +29,19 @@ from .journal import (
     _recovery_workspace_scope,
     _target_key,
     incomplete_ops,
-    journal_root,
+    journal_runtime_lock,
     journaled_op,
     latest_committed_op,
     load_op,
     load_op_view,
     mark_op_undone,
-    operation_lock_path,
+    operation_lock,
     restore_before_snapshots,
     target_path,
     target_digest,
     terminalize_resumed_op,
     validated_recovery_target_keys,
-    workspace_transaction_lock_path,
+    workspace_transaction_lock,
 )
 from .prefs import (
     ensure_workspace,
@@ -92,7 +91,7 @@ def _git_head_exists(project_root: Path) -> bool:
 
 def ensure_kb_git_repo(project_root: Path, *, create_initial_commit: bool = True, initial_message: str = "chore: initialize kb repo") -> dict[str, Any]:
     _preflight_journal_envelopes(project_root)
-    with exclusive_file_lock(workspace_transaction_lock_path(project_root)):
+    with workspace_transaction_lock(project_root):
         _assert_no_incomplete_root(project_root)
         return _ensure_kb_git_repo_locked(
             project_root,
@@ -160,7 +159,7 @@ def git_checkpoint(
 ) -> dict[str, Any]:
     scoped_paths = _normalize_git_paths(project_root, target_paths)
     _preflight_journal_envelopes(project_root)
-    with exclusive_file_lock(workspace_transaction_lock_path(project_root)):
+    with workspace_transaction_lock(project_root):
         _assert_no_incomplete_root(project_root)
         return _git_checkpoint_locked(
             project_root,
@@ -246,9 +245,9 @@ def maybe_auto_checkpoint(
             return {"committed": False, "status": "missing-repo", "reason": "kb git repo is not initialized"}
 
     state_path = versioning_state_path(project_root)
-    with exclusive_file_lock(workspace_transaction_lock_path(project_root)):
+    with workspace_transaction_lock(project_root):
         _assert_no_incomplete_root(project_root)
-        with exclusive_file_lock(operation_lock_path(project_root, state_path)):
+        with operation_lock(project_root, state_path):
             if trigger == "browser-save":
                 state = load_versioning_state(project_root)
                 last_commit_at = parse_iso_datetime(state.get("last_auto_commit_at"))
@@ -437,7 +436,7 @@ def _checkpointable_git_paths(
 
 
 def restore_operation(project_root: Path, op_id: str, *, recovery_type: str = "restore") -> dict[str, Any]:
-    with exclusive_file_lock(workspace_transaction_lock_path(project_root)):
+    with workspace_transaction_lock(project_root):
         # The source journal is mutable runtime state.  Load and validate its
         # authoritative bytes only after obtaining the workspace lease; every
         # target lock and the recovery journal derive from this one view.
@@ -471,7 +470,7 @@ def restore_operation(project_root: Path, op_id: str, *, recovery_type: str = "r
             raise SystemExit("检测到未完成的知识库操作；请先使用 kb resume 完成恢复。")
         with ExitStack() as locks:
             for path in sorted(target_paths, key=lambda item: item.as_posix()):
-                locks.enter_context(exclusive_file_lock(operation_lock_path(project_root, path)))
+                locks.enter_context(operation_lock(project_root, path))
             if state == "commit":
                 after_digests = entry["after_digests"]
                 changed_after_operation = [
@@ -529,7 +528,7 @@ def undo_last_operation(project_root: Path) -> dict[str, Any]:
     # selected again while holding the lock so concurrent undo calls serialize
     # against the latest remaining business operation.
     latest_committed_op(project_root)
-    with exclusive_file_lock(journal_root(project_root) / ".undo.lock"):
+    with journal_runtime_lock(project_root, ".undo.lock"):
         entry = latest_committed_op(project_root)
         return restore_operation(project_root, str(entry["op_id"]), recovery_type="undo")
 

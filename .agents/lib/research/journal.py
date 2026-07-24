@@ -5,7 +5,6 @@ import hashlib
 import fcntl
 import copy
 import os
-import shutil
 import stat
 import time
 import threading
@@ -18,7 +17,6 @@ from typing import Callable, Iterator, Mapping, Sequence
 from .common import utc_now_iso
 from .paths import kb_root
 from . import yaml_io
-from .yaml_io import write_bytes_atomic, write_yaml_if_changed
 
 
 JOURNAL_DIRNAME = ".journal"
@@ -46,6 +44,9 @@ _RECOVERY_BEGIN_DEPTH: ContextVar[int] = ContextVar(
 )
 _JOURNAL_ENVELOPE_CACHE_LOCK = threading.Lock()
 _JOURNAL_ENVELOPE_CACHE: dict[str, tuple[tuple[int, int, int, int, int], dict]] = {}
+_JOURNAL_LOCK_GUARD = threading.Lock()
+_JOURNAL_THREAD_LOCKS: dict[str, threading.RLock] = {}
+_JOURNAL_LOCK_LOCAL = threading.local()
 
 
 def journal_root(project_root: Path) -> Path:
@@ -56,16 +57,6 @@ def journal_entry_path(project_root: Path, op_id: str) -> Path:
     if not op_id or Path(op_id).name != op_id:
         raise SystemExit(f"Invalid operation id: {op_id}")
     return journal_root(project_root) / f"{op_id}.yaml"
-
-
-def _existing_journal_root(project_root: Path) -> Path | None:
-    root = journal_root(project_root)
-    metadata = _lstat(root)
-    if metadata is None:
-        return None
-    if _node_kind(metadata) != "directory":
-        raise SystemExit("操作日志运行目录类型异常；知识库已进入恢复隔离状态。")
-    return root
 
 
 def operation_lock_path(project_root: Path, target_path: Path) -> Path:
@@ -161,29 +152,6 @@ def _update_regular_digest(
         os.close(descriptor)
 
 
-def _read_regular_bytes(
-    path: Path,
-    metadata: os.stat_result,
-    *,
-    max_bytes: int | None = None,
-) -> bytes:
-    chunks: list[bytes] = []
-    total = 0
-    descriptor = _open_regular_nonblocking(path, metadata)
-    try:
-        while True:
-            chunk = os.read(descriptor, 1024 * 1024)
-            if not chunk:
-                break
-            total += len(chunk)
-            if max_bytes is not None and total > max_bytes:
-                raise RuntimeError("Journal entry exceeded the bounded read limit.")
-            chunks.append(chunk)
-    finally:
-        os.close(descriptor)
-    return b"".join(chunks)
-
-
 def _yaml_has_duplicate_mapping_key(node: object) -> bool:
     node_id = getattr(node, "id", "")
     if node_id == "mapping":
@@ -202,24 +170,7 @@ def _yaml_has_duplicate_mapping_key(node: object) -> bool:
     return False
 
 
-def _load_journal_entry_view(path: Path) -> tuple[dict, str]:
-    metadata = _lstat(path)
-    if metadata is None or _node_kind(metadata) != "file":
-        raise SystemExit("操作日志包含非普通条目；知识库已进入恢复隔离状态。")
-    if metadata.st_size <= 0 or metadata.st_size > MAX_JOURNAL_ENTRY_BYTES:
-        raise SystemExit("操作日志条目为空或过大；知识库已进入恢复隔离状态。")
-    try:
-        raw = _read_regular_bytes(path, metadata, max_bytes=MAX_JOURNAL_ENTRY_BYTES)
-    except RuntimeError as exc:
-        raise SystemExit("操作日志条目超过安全读取上限；知识库已进入恢复隔离状态。") from exc
-    current = _lstat(path)
-    if (
-        current is None
-        or not _same_node(metadata, current)
-        or current.st_size != metadata.st_size
-        or current.st_mtime_ns != metadata.st_mtime_ns
-    ):
-        raise SystemExit("操作日志在读取期间发生变化；已停止当前操作。")
+def _parse_journal_entry_raw(raw: bytes, expected_op_id: str) -> dict:
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -238,33 +189,11 @@ def _load_journal_entry_view(path: Path) -> tuple[dict, str]:
         raise SystemExit("操作日志无法完整解析；知识库已进入恢复隔离状态。") from exc
     if not isinstance(payload, dict):
         raise SystemExit("操作日志条目结构无效；知识库已进入恢复隔离状态。")
-    if str(payload.get("op_id") or "") != path.stem:
+    if str(payload.get("op_id") or "") != expected_op_id:
         raise SystemExit("操作日志条目标识不一致；知识库已进入恢复隔离状态。")
     if str(payload.get("state") or "") not in KNOWN_JOURNAL_STATES:
         raise SystemExit("操作日志包含未知状态；知识库已进入恢复隔离状态。")
     _validate_journal_envelope_structure(payload)
-    return payload, hashlib.sha256(raw).hexdigest()
-
-
-def _load_journal_entry_file(path: Path) -> dict:
-    metadata = _lstat(path)
-    if metadata is None or _node_kind(metadata) != "file":
-        raise SystemExit("操作日志包含非普通条目；知识库已进入恢复隔离状态。")
-    signature = (
-        metadata.st_dev,
-        metadata.st_ino,
-        metadata.st_size,
-        metadata.st_mtime_ns,
-        metadata.st_ctime_ns,
-    )
-    cache_key = path.absolute().as_posix()
-    with _JOURNAL_ENVELOPE_CACHE_LOCK:
-        cached = _JOURNAL_ENVELOPE_CACHE.get(cache_key)
-        if cached is not None and cached[0] == signature:
-            return copy.deepcopy(cached[1])
-    payload, _ = _load_journal_entry_view(path)
-    with _JOURNAL_ENVELOPE_CACHE_LOCK:
-        _JOURNAL_ENVELOPE_CACHE[cache_key] = (signature, copy.deepcopy(payload))
     return payload
 
 
@@ -300,67 +229,6 @@ def _validate_journal_envelope_structure(entry: Mapping[str, object]) -> None:
         raise SystemExit("未完成操作日志包含意外后状态；知识库已进入恢复隔离状态。")
     if any(not isinstance(before_snapshots.get(key), dict) for key in keys):
         raise SystemExit("操作日志包含无效的恢复快照；知识库已进入恢复隔离状态。")
-
-
-def _copy_regular_nonblocking(
-    source: Path,
-    destination: Path,
-    metadata: os.stat_result,
-) -> None:
-    source_descriptor = _open_regular_nonblocking(source, metadata)
-    destination_descriptor = -1
-    try:
-        destination_descriptor = os.open(
-            destination,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-            stat.S_IMODE(metadata.st_mode),
-        )
-        while True:
-            chunk = os.read(source_descriptor, 1024 * 1024)
-            if not chunk:
-                break
-            view = memoryview(chunk)
-            while view:
-                written = os.write(destination_descriptor, view)
-                view = view[written:]
-    except BaseException:
-        if destination_descriptor >= 0:
-            os.close(destination_descriptor)
-            destination_descriptor = -1
-        if _lstat(destination) is not None:
-            destination.unlink()
-        raise
-    finally:
-        os.close(source_descriptor)
-        if destination_descriptor >= 0:
-            os.close(destination_descriptor)
-    shutil.copystat(source, destination, follow_symlinks=False)
-
-
-def _special_nodes(path: Path) -> list[str]:
-    metadata = _lstat(path)
-    if metadata is None:
-        return []
-    kind = _node_kind(metadata)
-    if kind == "special":
-        return ["."]
-    if kind != "directory":
-        return []
-    found: list[str] = []
-    for child in sorted(path.rglob("*"), key=lambda item: item.relative_to(path).as_posix()):
-        child_metadata = _lstat(child)
-        if child_metadata is not None and _node_kind(child_metadata) == "special":
-            found.append(child.relative_to(path).as_posix())
-    return found
-
-
-def _assert_snapshot_target_supported(path: Path, key: str) -> None:
-    special_nodes = _special_nodes(path)
-    if special_nodes:
-        raise SystemExit(
-            "Journal snapshot refuses special filesystem nodes in "
-            f"{key}: {', '.join(special_nodes)}"
-        )
 
 
 def file_digest(path: Path) -> str | None:
@@ -413,7 +281,13 @@ def _anchored_target_parent(
     flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
     descriptors: list[int] = []
     try:
-        descriptor = os.open(_canonical_kb_root(project_root), flags)
+        try:
+            descriptor = os.open(_canonical_kb_root(project_root), flags)
+        except FileNotFoundError:
+            if not create_missing:
+                yield None, parts[-1]
+                return
+            raise RuntimeError("Canonical KB root is missing during anchored restore.")
         descriptors.append(descriptor)
         for part in parts[:-1]:
             try:
@@ -439,6 +313,315 @@ def _lstat_at(parent_fd: int, name: str) -> os.stat_result | None:
         return os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
     except FileNotFoundError:
         return None
+
+
+def _directory_open_flags() -> int:
+    return os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+
+
+def _validate_journal_relative_path(relative_path: str) -> list[str]:
+    if not isinstance(relative_path, str) or not relative_path or relative_path.startswith("/"):
+        raise RuntimeError("Invalid journal runtime path.")
+    parts = relative_path.split("/")
+    if (
+        any(part in {"", ".", ".."} for part in parts)
+        or "\\" in relative_path
+        or Path(*parts).as_posix() != relative_path
+    ):
+        raise RuntimeError("Invalid journal runtime path.")
+    return parts
+
+
+@contextmanager
+def _anchored_journal_root_fd(
+    project_root: Path,
+    *,
+    create: bool = False,
+) -> Iterator[int | None]:
+    """Open ``kb/.journal`` from the canonical KB descriptor without following it."""
+    kb_fd = -1
+    journal_fd = -1
+    try:
+        try:
+            kb_fd = os.open(_canonical_kb_root(project_root), _directory_open_flags())
+        except FileNotFoundError:
+            if not create:
+                yield None
+                return
+            kb_root(project_root).mkdir(parents=True, exist_ok=True)
+            kb_fd = os.open(_canonical_kb_root(project_root), _directory_open_flags())
+        metadata = _lstat_at(kb_fd, JOURNAL_DIRNAME)
+        if metadata is None:
+            if not create:
+                yield None
+                return
+            os.mkdir(JOURNAL_DIRNAME, 0o700, dir_fd=kb_fd)
+            metadata = _lstat_at(kb_fd, JOURNAL_DIRNAME)
+        if metadata is None or _node_kind(metadata) != "directory":
+            raise SystemExit("操作日志运行目录类型异常；知识库已进入恢复隔离状态。")
+        try:
+            journal_fd = os.open(JOURNAL_DIRNAME, _directory_open_flags(), dir_fd=kb_fd)
+        except OSError as exc:
+            raise SystemExit("操作日志运行目录在访问期间发生变化；知识库已进入恢复隔离状态。") from exc
+        if not _same_node(metadata, os.fstat(journal_fd)):
+            raise SystemExit("操作日志运行目录在访问期间发生变化；知识库已进入恢复隔离状态。")
+        yield journal_fd
+        current = _lstat_at(kb_fd, JOURNAL_DIRNAME)
+        if current is None or not _same_node(os.fstat(journal_fd), current):
+            raise SystemExit("操作日志运行目录在访问期间发生变化；知识库已进入恢复隔离状态。")
+    finally:
+        if journal_fd >= 0:
+            os.close(journal_fd)
+        if kb_fd >= 0:
+            os.close(kb_fd)
+
+
+@contextmanager
+def _anchored_journal_parent(
+    project_root: Path,
+    relative_path: str,
+    *,
+    create_parents: bool = False,
+) -> Iterator[tuple[int, str]]:
+    """Traverse a journal-relative parent entirely through no-follow dirfds."""
+    parts = _validate_journal_relative_path(relative_path)
+    descriptors: list[int] = []
+    with _anchored_journal_root_fd(project_root, create=create_parents) as root_fd:
+        if root_fd is None:
+            raise RuntimeError("Journal runtime directory is missing.")
+        descriptor = root_fd
+        try:
+            for part in parts[:-1]:
+                metadata = _lstat_at(descriptor, part)
+                if metadata is None:
+                    if not create_parents:
+                        raise RuntimeError("Journal runtime ancestor is missing.")
+                    os.mkdir(part, 0o700, dir_fd=descriptor)
+                    metadata = _lstat_at(descriptor, part)
+                if metadata is None or _node_kind(metadata) != "directory":
+                    raise RuntimeError("Journal runtime ancestor is not a safe directory.")
+                try:
+                    child_fd = os.open(part, _directory_open_flags(), dir_fd=descriptor)
+                except OSError as exc:
+                    raise RuntimeError("Journal runtime ancestor changed during traversal.") from exc
+                if not _same_node(metadata, os.fstat(child_fd)):
+                    os.close(child_fd)
+                    raise RuntimeError("Journal runtime ancestor changed during traversal.")
+                descriptors.append(child_fd)
+                descriptor = child_fd
+            yield descriptor, parts[-1]
+        finally:
+            for child_fd in reversed(descriptors):
+                os.close(child_fd)
+
+
+@contextmanager
+def _anchored_journal_directory(
+    project_root: Path,
+    relative_path: str,
+    *,
+    create: bool = False,
+    exist_ok: bool = True,
+) -> Iterator[int]:
+    with _anchored_journal_parent(
+        project_root,
+        relative_path,
+        create_parents=create,
+    ) as (parent_fd, leaf):
+        metadata = _lstat_at(parent_fd, leaf)
+        if metadata is None:
+            if not create:
+                raise RuntimeError("Journal runtime directory is missing.")
+            os.mkdir(leaf, 0o700, dir_fd=parent_fd)
+            metadata = _lstat_at(parent_fd, leaf)
+        elif create and not exist_ok:
+            raise FileExistsError(relative_path)
+        if metadata is None or _node_kind(metadata) != "directory":
+            raise RuntimeError("Journal runtime node is not a safe directory.")
+        try:
+            descriptor = os.open(leaf, _directory_open_flags(), dir_fd=parent_fd)
+        except OSError as exc:
+            raise RuntimeError("Journal runtime directory changed while opening.") from exc
+        try:
+            if not _same_node(metadata, os.fstat(descriptor)):
+                raise RuntimeError("Journal runtime directory changed while opening.")
+            yield descriptor
+        finally:
+            os.close(descriptor)
+
+
+def _journal_entry_name(op_id: str) -> str:
+    if not op_id or Path(op_id).name != op_id or "/" in op_id or "\\" in op_id:
+        raise SystemExit(f"Invalid operation id: {op_id}")
+    return f"{op_id}.yaml"
+
+
+def _load_journal_entry_view(journal_fd: int, name: str) -> tuple[dict, str, os.stat_result]:
+    if not name.endswith(".yaml") or Path(name).name != name:
+        raise SystemExit("操作日志包含无效条目名称；知识库已进入恢复隔离状态。")
+    metadata = _lstat_at(journal_fd, name)
+    if metadata is None or _node_kind(metadata) != "file":
+        raise SystemExit("操作日志包含非普通条目；知识库已进入恢复隔离状态。")
+    if metadata.st_size <= 0 or metadata.st_size > MAX_JOURNAL_ENTRY_BYTES:
+        raise SystemExit("操作日志条目为空或过大；知识库已进入恢复隔离状态。")
+    try:
+        raw = _read_anchored_regular(journal_fd, name, metadata)
+    except RuntimeError as exc:
+        raise SystemExit("操作日志在读取期间发生变化；已停止当前操作。") from exc
+    current = _lstat_at(journal_fd, name)
+    if current is None or not _same_read_identity(metadata, current):
+        raise SystemExit("操作日志在读取期间发生变化；已停止当前操作。")
+    payload = _parse_journal_entry_raw(raw, name[:-5])
+    return payload, hashlib.sha256(raw).hexdigest(), metadata
+
+
+def _load_journal_entry_file_at(journal_fd: int, name: str) -> tuple[dict, os.stat_result]:
+    metadata = _lstat_at(journal_fd, name)
+    if metadata is None or _node_kind(metadata) != "file":
+        raise SystemExit("操作日志包含非普通条目；知识库已进入恢复隔离状态。")
+    root_metadata = os.fstat(journal_fd)
+    signature = (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+    cache_key = f"{root_metadata.st_dev}:{root_metadata.st_ino}:{name}"
+    with _JOURNAL_ENVELOPE_CACHE_LOCK:
+        cached = _JOURNAL_ENVELOPE_CACHE.get(cache_key)
+        if cached is not None and cached[0] == signature:
+            current = _lstat_at(journal_fd, name)
+            if current is None or not _same_read_identity(metadata, current):
+                raise SystemExit("操作日志在读取期间发生变化；已停止当前操作。")
+            return copy.deepcopy(cached[1]), current
+    payload, _, loaded_metadata = _load_journal_entry_view(journal_fd, name)
+    with _JOURNAL_ENVELOPE_CACHE_LOCK:
+        _JOURNAL_ENVELOPE_CACHE[cache_key] = (signature, copy.deepcopy(payload))
+    return payload, loaded_metadata
+
+
+def _anchored_journal_entries(project_root: Path) -> list[tuple[str, dict, os.stat_result]]:
+    with _anchored_journal_root_fd(project_root) as journal_fd:
+        if journal_fd is None:
+            return []
+        entries: list[tuple[str, dict, os.stat_result]] = []
+        for name in sorted(os.listdir(journal_fd)):
+            if not name.endswith(".yaml"):
+                continue
+            entry, metadata = _load_journal_entry_file_at(journal_fd, name)
+            entries.append((name, entry, metadata))
+        return entries
+
+
+def _write_journal_yaml(project_root: Path, op_id: str, value: Mapping[str, object]) -> None:
+    name = _journal_entry_name(op_id)
+    data = yaml_io.dump_yaml(dict(value)).encode("utf-8")
+    with _anchored_journal_root_fd(project_root, create=True) as journal_fd:
+        assert journal_fd is not None
+        existing = _lstat_at(journal_fd, name)
+        if existing is not None:
+            if _node_kind(existing) != "file":
+                raise SystemExit("操作日志包含非普通条目；知识库已进入恢复隔离状态。")
+            current = _read_anchored_regular(journal_fd, name, existing)
+            if current == data:
+                return
+        temporary = f".{name}.{uuid.uuid4().hex}.tmp"
+        try:
+            _write_new_regular_at(journal_fd, temporary, data, 0o600)
+            current_existing = _lstat_at(journal_fd, name)
+            if (
+                (existing is None and current_existing is not None)
+                or (
+                    existing is not None
+                    and (
+                        current_existing is None
+                        or not _same_read_identity(existing, current_existing)
+                    )
+                )
+            ):
+                raise SystemExit("操作日志在写入前发生变化；已停止当前操作。")
+            os.replace(temporary, name, src_dir_fd=journal_fd, dst_dir_fd=journal_fd)
+            os.fsync(journal_fd)
+        finally:
+            if _lstat_at(journal_fd, temporary) is not None:
+                _remove_at(journal_fd, temporary)
+
+
+def _journal_thread_lock(key: str) -> threading.RLock:
+    with _JOURNAL_LOCK_GUARD:
+        return _JOURNAL_THREAD_LOCKS.setdefault(key, threading.RLock())
+
+
+@contextmanager
+def journal_runtime_lock(project_root: Path, relative_path: str) -> Iterator[int]:
+    """Cross-process, thread-reentrant lock anchored below canonical ``kb/.journal``."""
+    parts = _validate_journal_relative_path(relative_path)
+    key = f"{_canonical_kb_root(project_root).as_posix()}::{relative_path}"
+    thread_lock = _journal_thread_lock(key)
+    with thread_lock:
+        held = getattr(_JOURNAL_LOCK_LOCAL, "held", None)
+        if held is None:
+            held = {}
+            _JOURNAL_LOCK_LOCAL.held = held
+        current = held.get(key)
+        if current is not None:
+            with _anchored_journal_parent(project_root, relative_path) as (parent_fd, leaf):
+                metadata = _lstat_at(parent_fd, leaf)
+                if metadata is None or not _same_node(
+                    metadata,
+                    os.fstat(int(current["descriptor"])),
+                ):
+                    raise SystemExit("操作日志锁路径在嵌套访问前发生变化；已停止当前操作。")
+            current["depth"] += 1
+            try:
+                yield int(current["descriptor"])
+            finally:
+                current["depth"] -= 1
+            return
+        with _anchored_journal_parent(
+            project_root,
+            "/".join(parts),
+            create_parents=True,
+        ) as (parent_fd, leaf):
+            metadata = _lstat_at(parent_fd, leaf)
+            flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+            try:
+                descriptor = os.open(leaf, flags, 0o600, dir_fd=parent_fd)
+            except OSError as exc:
+                raise SystemExit("操作日志锁路径在访问期间发生变化；已停止当前操作。") from exc
+            try:
+                opened = os.fstat(descriptor)
+                if _node_kind(opened) != "file" or (
+                    metadata is not None and not _same_node(metadata, opened)
+                ):
+                    raise SystemExit("操作日志锁路径不是安全的普通文件；已停止当前操作。")
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+                held[key] = {"descriptor": descriptor, "depth": 1}
+                try:
+                    yield descriptor
+                finally:
+                    held.pop(key, None)
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
+
+
+def operation_lock_name(project_root: Path, target_path: Path) -> str:
+    key = _target_key(project_root, target_path)
+    return f"locks/{hashlib.sha256(key.encode('utf-8')).hexdigest()}.lock"
+
+
+@contextmanager
+def operation_lock(project_root: Path, target_path: Path) -> Iterator[int]:
+    with journal_runtime_lock(project_root, operation_lock_name(project_root, target_path)) as descriptor:
+        yield descriptor
+
+
+@contextmanager
+def workspace_transaction_lock(project_root: Path) -> Iterator[int]:
+    with journal_runtime_lock(project_root, "workspace-transaction.lock") as descriptor:
+        yield descriptor
 
 
 def _open_regular_at(parent_fd: int, name: str, expected: os.stat_result) -> int:
@@ -506,6 +689,59 @@ def _update_anchored_directory_digest(
             digest.update(f"S\0{relative}\0{_special_identity(metadata)}\0".encode("utf-8"))
 
 
+def _anchored_special_nodes(directory_fd: int, prefix: str = "") -> list[str]:
+    found: list[str] = []
+    directory_metadata = os.fstat(directory_fd)
+    for name in sorted(os.listdir(directory_fd)):
+        relative = f"{prefix}/{name}" if prefix else name
+        metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        kind = _node_kind(metadata)
+        if kind == "special":
+            found.append(relative)
+        elif kind == "directory":
+            child_fd = os.open(name, _directory_open_flags(), dir_fd=directory_fd)
+            try:
+                if not _same_node(metadata, os.fstat(child_fd)):
+                    raise RuntimeError("Journal target directory changed during special-node scan.")
+                found.extend(_anchored_special_nodes(child_fd, relative))
+                if not _same_read_identity(metadata, os.fstat(child_fd)):
+                    raise RuntimeError("Journal target directory changed during special-node scan.")
+            finally:
+                os.close(child_fd)
+    if not _same_read_identity(directory_metadata, os.fstat(directory_fd)):
+        raise RuntimeError("Journal target directory changed during special-node scan.")
+    return found
+
+
+def _assert_anchored_snapshot_target_supported(project_root: Path, key: str) -> None:
+    with _anchored_target_parent(project_root, key) as (parent_fd, leaf):
+        if parent_fd is None:
+            return
+        metadata = _lstat_at(parent_fd, leaf)
+        if metadata is None:
+            return
+        kind = _node_kind(metadata)
+        if kind == "special":
+            special_nodes = ["."]
+        elif kind == "directory":
+            directory_fd = os.open(leaf, _directory_open_flags(), dir_fd=parent_fd)
+            try:
+                if not _same_node(metadata, os.fstat(directory_fd)):
+                    raise RuntimeError("Journal target changed during special-node scan.")
+                special_nodes = _anchored_special_nodes(directory_fd)
+                if not _same_read_identity(metadata, os.fstat(directory_fd)):
+                    raise RuntimeError("Journal target changed during special-node scan.")
+            finally:
+                os.close(directory_fd)
+        else:
+            special_nodes = []
+    if special_nodes:
+        raise SystemExit(
+            "Journal snapshot refuses special filesystem nodes in "
+            f"{key}: {', '.join(special_nodes)}"
+        )
+
+
 def _anchored_target_digest(project_root: Path, key: str) -> str | None:
     with _anchored_target_parent(project_root, key) as (parent_fd, leaf):
         if parent_fd is None:
@@ -569,66 +805,118 @@ def _read_anchored_regular(parent_fd: int, name: str, metadata: os.stat_result) 
         os.close(descriptor)
 
 
-def _copy_anchored_tree_to_path(source_fd: int, destination: Path) -> None:
-    source_metadata = os.fstat(source_fd)
-    destination.mkdir(mode=stat.S_IMODE(source_metadata.st_mode))
+def _write_all(descriptor: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        written = os.write(descriptor, view)
+        if written <= 0:
+            raise OSError("Journal write made no forward progress.")
+        view = view[written:]
+
+
+def _write_new_regular_at(parent_fd: int, name: str, data: bytes, mode: int) -> None:
+    descriptor = os.open(
+        name,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+        mode,
+        dir_fd=parent_fd,
+    )
     try:
-        for name in sorted(os.listdir(source_fd)):
-            metadata = os.stat(name, dir_fd=source_fd, follow_symlinks=False)
+        _write_all(descriptor, data)
+        os.fchmod(descriptor, mode)
+        os.fsync(descriptor)
+    except BaseException:
+        os.close(descriptor)
+        descriptor = -1
+        if _lstat_at(parent_fd, name) is not None:
+            _remove_at(parent_fd, name)
+        raise
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _anchored_node_digest_at(parent_fd: int, name: str) -> str | None:
+    metadata = _lstat_at(parent_fd, name)
+    if metadata is None:
+        return None
+    digest = hashlib.sha256()
+    mode = stat.S_IMODE(metadata.st_mode)
+    kind = _node_kind(metadata)
+    if kind == "symlink":
+        digest.update(f"symlink\0{mode}\0{os.readlink(name, dir_fd=parent_fd)}".encode("utf-8"))
+    elif kind == "directory":
+        digest.update(f"directory\0{mode}\0".encode("utf-8"))
+        directory_fd = os.open(name, _directory_open_flags(), dir_fd=parent_fd)
+        try:
+            if not _same_node(metadata, os.fstat(directory_fd)):
+                raise RuntimeError("Journal directory changed during anchored digest.")
+            _update_anchored_directory_digest(digest, directory_fd)
+            if not _same_read_identity(metadata, os.fstat(directory_fd)):
+                raise RuntimeError("Journal directory changed during anchored digest.")
+        finally:
+            os.close(directory_fd)
+    elif kind == "file":
+        digest.update(f"file\0{mode}\0{metadata.st_size}\0".encode("utf-8"))
+        descriptor = _open_regular_at(parent_fd, name, metadata)
+        try:
+            total = _update_digest_from_fd(digest, descriptor)
+            if total != metadata.st_size or not _same_read_identity(metadata, os.fstat(descriptor)):
+                raise RuntimeError("Journal file changed during anchored digest.")
+        finally:
+            os.close(descriptor)
+    else:
+        digest.update(f"special\0{_special_identity(metadata)}\0".encode("utf-8"))
+    return digest.hexdigest()
+
+
+def _anchored_journal_digest(project_root: Path, relative_path: str) -> str | None:
+    with _anchored_journal_parent(project_root, relative_path) as (parent_fd, leaf):
+        return _anchored_node_digest_at(parent_fd, leaf)
+
+
+def _copy_anchored_tree_to_fd(source_fd: int, destination_parent_fd: int, name: str) -> None:
+    source_metadata = os.fstat(source_fd)
+    os.mkdir(name, stat.S_IMODE(source_metadata.st_mode), dir_fd=destination_parent_fd)
+    destination_fd = os.open(name, _directory_open_flags(), dir_fd=destination_parent_fd)
+    try:
+        for child_name in sorted(os.listdir(source_fd)):
+            metadata = os.stat(child_name, dir_fd=source_fd, follow_symlinks=False)
             kind = _node_kind(metadata)
-            copied = destination / name
             if kind == "directory":
-                child_fd = os.open(
-                    name,
-                    os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
-                    dir_fd=source_fd,
-                )
+                child_fd = os.open(child_name, _directory_open_flags(), dir_fd=source_fd)
                 try:
                     if not _same_node(metadata, os.fstat(child_fd)):
-                        raise RuntimeError("Journal directory changed while snapshotting.")
-                    _copy_anchored_tree_to_path(child_fd, copied)
+                        raise RuntimeError("Journal source directory changed while snapshotting.")
+                    _copy_anchored_tree_to_fd(child_fd, destination_fd, child_name)
+                    if not _same_read_identity(metadata, os.fstat(child_fd)):
+                        raise RuntimeError("Journal source directory changed while snapshotting.")
                 finally:
                     os.close(child_fd)
             elif kind == "symlink":
-                os.symlink(os.readlink(name, dir_fd=source_fd), copied)
+                os.symlink(os.readlink(child_name, dir_fd=source_fd), child_name, dir_fd=destination_fd)
             elif kind == "file":
-                data = _read_anchored_regular(source_fd, name, metadata)
-                write_bytes_atomic(copied, data, mode=stat.S_IMODE(metadata.st_mode))
+                data = _read_anchored_regular(source_fd, child_name, metadata)
+                _write_new_regular_at(
+                    destination_fd,
+                    child_name,
+                    data,
+                    stat.S_IMODE(metadata.st_mode),
+                )
             else:
                 raise RuntimeError("Journal refuses special filesystem nodes in anchored snapshot.")
-        os.chmod(destination, stat.S_IMODE(source_metadata.st_mode))
+        os.fchmod(destination_fd, stat.S_IMODE(source_metadata.st_mode))
+        os.fsync(destination_fd)
         if not _same_read_identity(source_metadata, os.fstat(source_fd)):
-            raise RuntimeError("Journal directory changed while snapshotting.")
+            raise RuntimeError("Journal source directory changed while snapshotting.")
     except BaseException:
-        if destination.exists():
-            shutil.rmtree(destination)
+        os.close(destination_fd)
+        destination_fd = -1
+        _remove_at(destination_parent_fd, name)
         raise
-
-
-def _copy_safe_tree(source: Path, destination: Path) -> None:
-    source_metadata = source.lstat()
-    if _node_kind(source_metadata) != "directory":
-        raise RuntimeError(f"Journal directory changed type while copying: {source}")
-    destination.mkdir(mode=stat.S_IMODE(source_metadata.st_mode))
-    try:
-        for child in sorted(source.iterdir(), key=lambda item: item.name):
-            child_metadata = child.lstat()
-            child_kind = _node_kind(child_metadata)
-            copied = destination / child.name
-            if child_kind == "directory":
-                _copy_safe_tree(child, copied)
-            elif child_kind == "symlink":
-                os.symlink(os.readlink(child), copied)
-                shutil.copystat(child, copied, follow_symlinks=False)
-            elif child_kind == "file":
-                _copy_regular_nonblocking(child, copied, child_metadata)
-            else:
-                raise RuntimeError(f"Journal refuses to copy special filesystem node: {child}")
-        shutil.copystat(source, destination, follow_symlinks=False)
-    except BaseException:
-        if destination.exists():
-            shutil.rmtree(destination)
-        raise
+    finally:
+        if destination_fd >= 0:
+            os.close(destination_fd)
 
 
 def _validate_target_key(key: object) -> str:
@@ -701,27 +989,10 @@ def _ensure_journal_runtime(project_root: Path) -> None:
     # Workspace initialization owns the canonical .gitignore.  Lock/journal
     # bootstrap may create ignored runtime state only; it must never perform an
     # undeclared write to a caller's versioned path set.
-    root = journal_root(project_root)
-    metadata = _lstat(root)
-    if metadata is not None and _node_kind(metadata) != "directory":
-        raise SystemExit("操作日志运行目录类型异常；知识库已进入恢复隔离状态。")
+    root = kb_root(project_root)
     root.mkdir(parents=True, exist_ok=True)
-
-
-def _snapshot_payload_path(project_root: Path, relative_path: str) -> Path:
-    if not isinstance(relative_path, str) or not relative_path or relative_path.startswith("/"):
-        raise RuntimeError("Invalid journal snapshot path.")
-    parts = relative_path.split("/")
-    if any(part in {"", ".", ".."} for part in parts) or Path(*parts).as_posix() != relative_path:
-        raise RuntimeError("Invalid journal snapshot path.")
-    root = journal_root(project_root).resolve()
-    current = root
-    for part in parts[:-1]:
-        current = current / part
-        metadata = _lstat(current)
-        if metadata is None or _node_kind(metadata) != "directory":
-            raise RuntimeError("Invalid journal snapshot ancestor.")
-    return root.joinpath(*parts)
+    with _anchored_journal_root_fd(project_root, create=True):
+        pass
 
 
 def _valid_digest(value: object) -> bool:
@@ -777,16 +1048,13 @@ def _preflight_snapshot_material(
     if snapshot.get("snapshot_path") != expected_relative:
         raise SystemExit("操作日志的快照材料位置无效；已停止恢复。")
     try:
-        payload = _snapshot_payload_path(project_root, expected_relative)
-    except RuntimeError as exc:
-        raise SystemExit("操作日志的快照材料路径无效；已停止恢复。") from exc
-    payload_metadata = _lstat(payload)
-    if payload_metadata is None or _node_kind(payload_metadata) != kind:
-        raise SystemExit("操作日志缺少完整的快照材料；已停止恢复。")
-    if _special_nodes(payload):
-        raise SystemExit("操作日志快照包含不支持的特殊节点；已停止恢复。")
-    try:
-        payload_digest = file_digest(payload)
+        with _anchored_journal_parent(project_root, expected_relative) as (parent_fd, payload_leaf):
+            payload_metadata = _lstat_at(parent_fd, payload_leaf)
+            if payload_metadata is None or _node_kind(payload_metadata) != kind:
+                raise SystemExit("操作日志缺少完整的快照材料；已停止恢复。")
+            payload_digest = _anchored_node_digest_at(parent_fd, payload_leaf)
+    except SystemExit:
+        raise
     except (OSError, RuntimeError) as exc:
         raise SystemExit("操作日志快照材料读取失败；已停止恢复。") from exc
     if payload_digest != digest:
@@ -805,87 +1073,51 @@ def _snapshot_target(project_root: Path, op_id: str, key: str) -> dict:
             raise SystemExit(f"Journal snapshot refuses special filesystem node: {key}")
         mode = stat.S_IMODE(target_metadata.st_mode)
         digest = _anchored_target_digest(project_root, key)
-        payload_root = (
-            journal_root(project_root)
-            / SNAPSHOT_DIRNAME
+        payload_relative = (
+            Path(SNAPSHOT_DIRNAME)
             / op_id
             / hashlib.sha256(key.encode("utf-8")).hexdigest()
-        )
-        payload_root.mkdir(parents=True, exist_ok=False)
-        if kind == "symlink":
-            return {
-                "kind": "symlink",
-                "mode": mode,
-                "digest": digest,
-                "link_target": os.readlink(leaf, dir_fd=parent_fd),
-            }
-        if kind == "directory":
-            snapshot = payload_root / "tree"
-            directory_fd = os.open(
-                leaf,
-                os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
-                dir_fd=parent_fd,
-            )
-            try:
-                if not _same_node(target_metadata, os.fstat(directory_fd)):
+        ).as_posix()
+        with _anchored_journal_directory(
+            project_root,
+            payload_relative,
+            create=True,
+            exist_ok=False,
+        ) as payload_fd:
+            if kind == "symlink":
+                return {
+                    "kind": "symlink",
+                    "mode": mode,
+                    "digest": digest,
+                    "link_target": os.readlink(leaf, dir_fd=parent_fd),
+                }
+            if kind == "directory":
+                directory_fd = os.open(leaf, _directory_open_flags(), dir_fd=parent_fd)
+                try:
+                    if not _same_node(target_metadata, os.fstat(directory_fd)):
+                        raise RuntimeError(f"Journal target changed while snapshotting: {key}")
+                    _copy_anchored_tree_to_fd(directory_fd, payload_fd, "tree")
+                finally:
+                    os.close(directory_fd)
+                if _anchored_node_digest_at(payload_fd, "tree") != digest:
                     raise RuntimeError(f"Journal target changed while snapshotting: {key}")
-                _copy_anchored_tree_to_path(directory_fd, snapshot)
-            finally:
-                os.close(directory_fd)
-            if file_digest(snapshot) != digest:
+                return {
+                    "kind": "directory",
+                    "mode": mode,
+                    "digest": digest,
+                    "snapshot_path": f"{payload_relative}/tree",
+                }
+
+            data = _read_anchored_regular(parent_fd, leaf, target_metadata)
+            _write_new_regular_at(payload_fd, "data", data, mode)
+            if _anchored_target_digest(project_root, key) != digest:
                 raise RuntimeError(f"Journal target changed while snapshotting: {key}")
             return {
-                "kind": "directory",
+                "kind": "file",
                 "mode": mode,
                 "digest": digest,
-                "snapshot_path": snapshot.relative_to(journal_root(project_root)).as_posix(),
+                "snapshot_path": f"{payload_relative}/data",
             }
-
-        snapshot = payload_root / "data"
-        data = _read_anchored_regular(parent_fd, leaf, target_metadata)
-        write_bytes_atomic(snapshot, data, mode=mode)
-        if _anchored_target_digest(project_root, key) != digest:
-            raise RuntimeError(f"Journal target changed while snapshotting: {key}")
-        return {
-            "kind": "file",
-            "mode": mode,
-            "digest": digest,
-            "snapshot_path": snapshot.relative_to(journal_root(project_root)).as_posix(),
-        }
-
-
-def _remove_target(path: Path) -> None:
-    metadata = _lstat(path)
-    if metadata is None:
-        return
-    if _node_kind(metadata) != "directory":
-        path.unlink()
-    else:
-        shutil.rmtree(path)
-
-
-def _restore_directory(snapshot: Path, target: Path, mode: int) -> None:
-    target.parent.mkdir(parents=True, exist_ok=True)
-    token = uuid.uuid4().hex
-    staged = target.parent / f".{target.name}.restore-{token}"
-    previous = target.parent / f".{target.name}.previous-{token}"
-    _copy_safe_tree(snapshot, staged)
-    os.chmod(staged, mode)
-    moved_previous = False
-    try:
-        if target.exists() or target.is_symlink():
-            os.replace(target, previous)
-            moved_previous = True
-        os.replace(staged, target)
-    except BaseException:
-        if moved_previous and not target.exists() and previous.exists():
-            os.replace(previous, target)
-        raise
-    finally:
-        if staged.exists():
-            shutil.rmtree(staged)
-        if previous.exists() or previous.is_symlink():
-            _remove_target(previous)
 
 
 def _remove_at(parent_fd: int, name: str) -> None:
@@ -910,67 +1142,37 @@ def _remove_at(parent_fd: int, name: str) -> None:
     os.rmdir(name, dir_fd=parent_fd)
 
 
-def _copy_snapshot_tree_to_fd(source: Path, parent_fd: int, name: str) -> None:
-    source_metadata = source.lstat()
-    if _node_kind(source_metadata) != "directory":
-        raise RuntimeError("Journal directory snapshot changed type.")
-    os.mkdir(name, stat.S_IMODE(source_metadata.st_mode), dir_fd=parent_fd)
-    destination_fd = os.open(
-        name,
-        os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
-        dir_fd=parent_fd,
-    )
-    try:
-        for child in sorted(source.iterdir(), key=lambda item: item.name):
-            metadata = child.lstat()
-            kind = _node_kind(metadata)
-            if kind == "directory":
-                _copy_snapshot_tree_to_fd(child, destination_fd, child.name)
-            elif kind == "symlink":
-                os.symlink(os.readlink(child), child.name, dir_fd=destination_fd)
-            elif kind == "file":
-                descriptor = os.open(
-                    child.name,
-                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-                    stat.S_IMODE(metadata.st_mode),
-                    dir_fd=destination_fd,
-                )
-                try:
-                    data = _read_regular_bytes(child, metadata)
-                    view = memoryview(data)
-                    while view:
-                        written = os.write(descriptor, view)
-                        view = view[written:]
-                    os.fchmod(descriptor, stat.S_IMODE(metadata.st_mode))
-                finally:
-                    os.close(descriptor)
-            else:
-                raise RuntimeError("Journal snapshot contains a special filesystem node.")
-        os.fchmod(destination_fd, stat.S_IMODE(source_metadata.st_mode))
-    except BaseException:
-        os.close(destination_fd)
-        _remove_at(parent_fd, name)
-        raise
-    else:
-        os.close(destination_fd)
+def _remove_journal_relative(project_root: Path, relative_path: str) -> None:
+    with _anchored_journal_parent(project_root, relative_path) as (parent_fd, leaf):
+        _remove_at(parent_fd, leaf)
 
 
 def _replace_staged_at(parent_fd: int, staged: str, target: str) -> None:
     previous = f".{target}.previous-{uuid.uuid4().hex}"
     moved_previous = False
+    remove_previous = False
     try:
         if _lstat_at(parent_fd, target) is not None:
             os.replace(target, previous, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
             moved_previous = True
         os.replace(staged, target, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
-    except BaseException:
+        remove_previous = True
+    except BaseException as publish_error:
         if moved_previous and _lstat_at(parent_fd, target) is None:
-            os.replace(previous, target, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+            try:
+                os.replace(previous, target, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+            except BaseException as rollback_error:
+                raise RuntimeError(
+                    f"Journal restore publish and rollback failed; backup preserved as {previous}."
+                ) from rollback_error
+            remove_previous = True
+        elif not moved_previous:
+            remove_previous = True
         raise
     finally:
         if _lstat_at(parent_fd, staged) is not None:
             _remove_at(parent_fd, staged)
-        if _lstat_at(parent_fd, previous) is not None:
+        if remove_previous and _lstat_at(parent_fd, previous) is not None:
             _remove_at(parent_fd, previous)
 
 
@@ -979,53 +1181,72 @@ def _restore_target(project_root: Path, key: str, snapshot: dict) -> Path:
     kind = str(snapshot.get("kind") or "")
     mode_value = snapshot.get("mode")
     mode = int(mode_value) if mode_value is not None else 0o644
-    with _anchored_target_parent(
-        project_root,
-        key,
-        create_missing=kind != "absent",
-    ) as (parent_fd, leaf):
-        if parent_fd is None:
-            if kind == "absent":
-                return target
-            raise RuntimeError(f"Missing anchored target parent for {key}")
-        if kind == "absent":
-            _remove_at(parent_fd, leaf)
-        elif kind == "file":
-            payload = _snapshot_payload_path(project_root, str(snapshot.get("snapshot_path") or ""))
-            payload_metadata = _lstat(payload)
+    file_data: bytes | None = None
+    payload_fd = -1
+    payload_metadata: os.stat_result | None = None
+    with ExitStack() as material_stack:
+        if kind == "file":
+            payload_relative = str(snapshot.get("snapshot_path") or "")
+            payload_parent_fd, payload_leaf = material_stack.enter_context(
+                _anchored_journal_parent(project_root, payload_relative)
+            )
+            payload_metadata = _lstat_at(payload_parent_fd, payload_leaf)
             if payload_metadata is None or _node_kind(payload_metadata) != "file":
                 raise RuntimeError(f"Missing journal file snapshot for {key}")
-            staged = f".{leaf}.restore-file-{uuid.uuid4().hex}"
-            descriptor = os.open(
-                staged,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-                mode,
-                dir_fd=parent_fd,
-            )
-            try:
-                data = _read_regular_bytes(payload, payload_metadata)
-                view = memoryview(data)
-                while view:
-                    written = os.write(descriptor, view)
-                    view = view[written:]
-                os.fchmod(descriptor, mode)
-            finally:
-                os.close(descriptor)
-            _replace_staged_at(parent_fd, staged, leaf)
+            file_data = _read_anchored_regular(payload_parent_fd, payload_leaf, payload_metadata)
         elif kind == "directory":
-            payload = _snapshot_payload_path(project_root, str(snapshot.get("snapshot_path") or ""))
-            payload_metadata = _lstat(payload)
+            payload_relative = str(snapshot.get("snapshot_path") or "")
+            payload_parent_fd, payload_leaf = material_stack.enter_context(
+                _anchored_journal_parent(project_root, payload_relative)
+            )
+            payload_metadata = _lstat_at(payload_parent_fd, payload_leaf)
             if payload_metadata is None or _node_kind(payload_metadata) != "directory":
                 raise RuntimeError(f"Missing journal directory snapshot for {key}")
-            staged = f".{leaf}.restore-tree-{uuid.uuid4().hex}"
-            _copy_snapshot_tree_to_fd(payload, parent_fd, staged)
-            _replace_staged_at(parent_fd, staged, leaf)
-        elif kind == "symlink":
-            staged = f".{leaf}.restore-link-{uuid.uuid4().hex}"
-            os.symlink(str(snapshot.get("link_target") or ""), staged, dir_fd=parent_fd)
-            _replace_staged_at(parent_fd, staged, leaf)
-        else:
-            raise RuntimeError(f"Unsupported journal snapshot kind for {key}: {kind or '<empty>'}")
+            payload_fd = os.open(payload_leaf, _directory_open_flags(), dir_fd=payload_parent_fd)
+            material_stack.callback(os.close, payload_fd)
+            if not _same_node(payload_metadata, os.fstat(payload_fd)):
+                raise RuntimeError(f"Journal directory snapshot changed for {key}")
+
+        with _anchored_target_parent(
+            project_root,
+            key,
+            create_missing=kind != "absent",
+        ) as (parent_fd, leaf):
+            if parent_fd is None:
+                if kind == "absent":
+                    return target
+                raise RuntimeError(f"Missing anchored target parent for {key}")
+            if kind == "absent":
+                _remove_at(parent_fd, leaf)
+            elif kind == "file":
+                assert file_data is not None
+                staged = f".{leaf}.restore-file-{uuid.uuid4().hex}"
+                descriptor = os.open(
+                    staged,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    mode,
+                    dir_fd=parent_fd,
+                )
+                try:
+                    _write_all(descriptor, file_data)
+                    os.fchmod(descriptor, mode)
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                _replace_staged_at(parent_fd, staged, leaf)
+            elif kind == "directory":
+                assert payload_fd >= 0 and payload_metadata is not None
+                staged = f".{leaf}.restore-tree-{uuid.uuid4().hex}"
+                _copy_anchored_tree_to_fd(payload_fd, parent_fd, staged)
+                if not _same_read_identity(payload_metadata, os.fstat(payload_fd)):
+                    raise RuntimeError(f"Journal directory snapshot changed for {key}")
+                _replace_staged_at(parent_fd, staged, leaf)
+            elif kind == "symlink":
+                staged = f".{leaf}.restore-link-{uuid.uuid4().hex}"
+                os.symlink(str(snapshot.get("link_target") or ""), staged, dir_fd=parent_fd)
+                _replace_staged_at(parent_fd, staged, leaf)
+            else:
+                raise RuntimeError(f"Unsupported journal snapshot kind for {key}: {kind or '<empty>'}")
 
     expected_digest = snapshot.get("digest")
     actual_digest = _anchored_target_digest(project_root, key)
@@ -1041,12 +1262,12 @@ def load_op(project_root: Path, op_id: str) -> dict:
 
 
 def load_op_view(project_root: Path, op_id: str) -> tuple[dict, str]:
-    if _existing_journal_root(project_root) is None:
-        raise SystemExit("找不到指定的操作日志。")
-    path = journal_entry_path(project_root, op_id)
-    if _lstat(path) is None:
-        raise SystemExit("找不到指定的操作日志。")
-    return _load_journal_entry_view(path)
+    name = _journal_entry_name(op_id)
+    with _anchored_journal_root_fd(project_root) as journal_fd:
+        if journal_fd is None or _lstat_at(journal_fd, name) is None:
+            raise SystemExit("找不到指定的操作日志。")
+        payload, digest, _ = _load_journal_entry_view(journal_fd, name)
+        return payload, digest
 
 
 def _project_context_key(project_root: Path) -> str:
@@ -1126,24 +1347,33 @@ def _nested_context_has_live_workspace_lease(project_root: Path, parent_op_id: s
             return False
     except OSError:
         return False
-    lock_path = workspace_transaction_lock_path(project_root)
-    metadata = _lstat(lock_path)
-    if metadata is None or _node_kind(metadata) != "file":
-        return False
-    descriptor = os.open(
-        lock_path,
-        os.O_RDWR | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0),
-    )
     try:
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return True
-        else:
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
-            return False
-    finally:
-        os.close(descriptor)
+        with _anchored_journal_parent(project_root, "workspace-transaction.lock") as (
+            parent_fd,
+            leaf,
+        ):
+            metadata = _lstat_at(parent_fd, leaf)
+            if metadata is None or _node_kind(metadata) != "file":
+                return False
+            descriptor = os.open(
+                leaf,
+                os.O_RDWR | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=parent_fd,
+            )
+            try:
+                if not _same_node(metadata, os.fstat(descriptor)):
+                    return False
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    return True
+                else:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+                    return False
+            finally:
+                os.close(descriptor)
+    except (OSError, RuntimeError, SystemExit):
+        return False
 
 
 def _path_key_is_covered(key: str, declared_key: str) -> bool:
@@ -1164,18 +1394,14 @@ def _validate_nested_target_keys(root_entry: dict, keys: Sequence[str]) -> None:
 
 
 def committed_ops(project_root: Path) -> list[dict]:
-    root = _existing_journal_root(project_root)
-    if root is None:
-        return []
     ordered_entries: list[tuple[int, dict]] = []
-    for path in root.glob("*.yaml"):
-        entry = _load_journal_entry_file(path)
+    for _, entry, metadata in _anchored_journal_entries(project_root):
         if entry.get("state") != "commit":
             continue
         before = entry.get("before_digests", {})
         after = entry.get("after_digests", {})
         if isinstance(before, dict) and isinstance(after, dict) and before != after:
-            sequence = int(entry.get("sequence_ns") or path.stat().st_mtime_ns)
+            sequence = int(entry.get("sequence_ns") or metadata.st_mtime_ns)
             ordered_entries.append((sequence, entry))
     return [entry for _, entry in sorted(ordered_entries, key=lambda item: item[0])]
 
@@ -1187,15 +1413,11 @@ def incomplete_ops(project_root: Path) -> list[dict]:
     represents a partial state *after* its outer transaction began.  Resume must
     restore the root before-image once, then terminally abort all descendants.
     """
-    root = _existing_journal_root(project_root)
-    if root is None:
-        return []
     ordered_entries: list[tuple[str, dict]] = []
-    for path in root.glob("*.yaml"):
-        entry = _load_journal_entry_file(path)
+    for name, entry, _ in _anchored_journal_entries(project_root):
         if entry.get("state") != "begin":
             continue
-        ordered_entries.append((path.name, entry))
+        ordered_entries.append((name, entry))
     begin_by_id = {
         str(entry.get("op_id") or ""): entry
         for _, entry in ordered_entries
@@ -1256,11 +1478,7 @@ def _preflight_journal_envelopes(project_root: Path) -> None:
     wait for the workspace lease, because the owner may be about to commit or
     abort it.  Malformed entries cannot self-heal and fail immediately.
     """
-    root = _existing_journal_root(project_root)
-    if root is None:
-        return
-    for path in root.glob("*.yaml"):
-        _load_journal_entry_file(path)
+    _anchored_journal_entries(project_root)
 
 
 @contextmanager
@@ -1382,7 +1600,7 @@ def begin_op(
     # entry.  Existing FIFOs/sockets/devices must fail before the caller can
     # enter the business mutation body, and must never reach a copying reader.
     for key in keys:
-        _assert_snapshot_target_supported(_target_path(project_root, key), key)
+        _assert_anchored_snapshot_target_supported(project_root, key)
     requested_parent_id = str(parent_op_id or "").strip()
     active_parent_id = current_operation_id(project_root) if attach_to_active else ""
     if requested_parent_id and requested_parent_id != active_parent_id:
@@ -1394,10 +1612,8 @@ def begin_op(
         # command-level workspace lease.  Acquire it here so quarantine and the
         # creation of this root journal are one atomic decision.  The common
         # lock is thread-reentrant when mutation_transaction already owns it.
-        from .common import exclusive_file_lock
-
         _preflight_journal_envelopes(project_root)
-        with exclusive_file_lock(workspace_transaction_lock_path(project_root)):
+        with workspace_transaction_lock(project_root):
             _assert_no_incomplete_root(project_root)
             return _begin_op_with_keys(
                 project_root,
@@ -1432,8 +1648,7 @@ def _begin_op_with_keys(
     # Recheck target topology inside the root workspace lease (or inside the
     # inherited parent lease for nested work) before any snapshot/journal write.
     for key in keys:
-        target = _target_path(project_root, key)
-        _assert_snapshot_target_supported(target, key)
+        _assert_anchored_snapshot_target_supported(project_root, key)
     _ensure_journal_runtime(project_root)
     sequence_ns = time.time_ns()
     op_id = f"{sequence_ns}-{uuid.uuid4().hex[:12]}"
@@ -1453,9 +1668,13 @@ def _begin_op_with_keys(
     try:
         before_snapshots = {key: _snapshot_target(project_root, op_id, key) for key in keys}
     except BaseException:
-        operation_snapshots = journal_root(project_root) / SNAPSHOT_DIRNAME / op_id
-        if operation_snapshots.exists():
-            shutil.rmtree(operation_snapshots)
+        try:
+            _remove_journal_relative(project_root, f"{SNAPSHOT_DIRNAME}/{op_id}")
+        except (OSError, RuntimeError, SystemExit):
+            # Never follow a replaced runtime ancestor merely to clean up.  An
+            # orphaned snapshot under the original directory is safer than
+            # deleting through an untrusted replacement.
+            pass
         raise
     entry = {
         "op_id": op_id,
@@ -1476,7 +1695,7 @@ def _begin_op_with_keys(
         "after_digests": {},
         "state": "begin",
     }
-    write_yaml_if_changed(journal_entry_path(project_root, op_id), entry)
+    _write_journal_yaml(project_root, op_id, entry)
     return op_id
 
 
@@ -1486,7 +1705,7 @@ def commit_op(project_root: Path, op_id: str) -> None:
     entry["after_digests"] = {key: _anchored_target_digest(project_root, key) for key in keys}
     entry["completed_at"] = utc_now_iso()
     entry["state"] = "commit"
-    write_yaml_if_changed(journal_entry_path(project_root, op_id), entry)
+    _write_journal_yaml(project_root, op_id, entry)
 
 
 def restore_before_snapshots(
@@ -1520,15 +1739,9 @@ def restore_before_snapshots(
     return restored
 
 
-def _descendant_entries(project_root: Path, op_id: str) -> list[tuple[Path, dict]]:
-    root = _existing_journal_root(project_root)
-    if root is None:
-        return []
-    entries: list[tuple[Path, dict]] = []
-    for path in root.glob("*.yaml"):
-        entry = _load_journal_entry_file(path)
-        entries.append((path, entry))
-    descendants: list[tuple[Path, dict]] = []
+def _descendant_entries(project_root: Path, op_id: str) -> list[tuple[str, dict]]:
+    entries = [(name, entry) for name, entry, _ in _anchored_journal_entries(project_root)]
+    descendants: list[tuple[str, dict]] = []
     frontier = {op_id}
     while frontier:
         children = [
@@ -1550,7 +1763,7 @@ def _descendant_entries(project_root: Path, op_id: str) -> list[tuple[Path, dict
 
 
 def _abort_descendants(project_root: Path, op_id: str, *, error: str = "") -> None:
-    for path, entry in _descendant_entries(project_root, op_id):
+    for name, entry in _descendant_entries(project_root, op_id):
         if entry.get("state") in {"abort", "abort_failed"}:
             continue
         entry["completed_at"] = utc_now_iso()
@@ -1558,7 +1771,7 @@ def _abort_descendants(project_root: Path, op_id: str, *, error: str = "") -> No
         entry["aborted_with_ancestor"] = op_id
         if error:
             entry["operation_error"] = error
-        write_yaml_if_changed(path, entry)
+        _write_journal_yaml(project_root, name[:-5], entry)
 
 
 def terminalize_resumed_op(
@@ -1580,19 +1793,19 @@ def terminalize_resumed_op(
         raise SystemExit("恢复来源操作日志已变化；已停止完成本次恢复。")
     descendants = _descendant_entries(project_root, op_id)
     completed_at = utc_now_iso()
-    for path, descendant in descendants:
+    for name, descendant in descendants:
         if descendant.get("state") in {"abort", "abort_failed"}:
             continue
         descendant["completed_at"] = completed_at
         descendant["state"] = "abort"
         descendant["aborted_with_ancestor"] = op_id
-        write_yaml_if_changed(path, descendant)
+        _write_journal_yaml(project_root, name[:-5], descendant)
     terminal = dict(source_entry)
     terminal["completed_at"] = completed_at
     terminal["state"] = "abort"
     terminal["resumed_at"] = completed_at
     terminal["resumed_by"] = recovery_op_id
-    write_yaml_if_changed(journal_entry_path(project_root, op_id), terminal)
+    _write_journal_yaml(project_root, op_id, terminal)
 
 
 def abort_op(project_root: Path, op_id: str, *, restore: bool = False, error: str = "") -> None:
@@ -1606,7 +1819,7 @@ def abort_op(project_root: Path, op_id: str, *, restore: bool = False, error: st
             entry["restoration_error"] = str(exc)
             if error:
                 entry["operation_error"] = error
-            write_yaml_if_changed(journal_entry_path(project_root, op_id), entry)
+            _write_journal_yaml(project_root, op_id, entry)
             raise RuntimeError(f"Failed to restore operation {op_id}: {exc}") from exc
     entry = load_op(project_root, op_id)
     # Root-last terminalization keeps the authoritative root recoverable when a
@@ -1617,7 +1830,7 @@ def abort_op(project_root: Path, op_id: str, *, restore: bool = False, error: st
     entry["state"] = "abort"
     if error:
         entry["operation_error"] = error
-    write_yaml_if_changed(journal_entry_path(project_root, op_id), entry)
+    _write_journal_yaml(project_root, op_id, entry)
 
 
 def mark_op_undone(project_root: Path, op_id: str, recovery_op_id: str) -> None:
@@ -1626,7 +1839,7 @@ def mark_op_undone(project_root: Path, op_id: str, recovery_op_id: str) -> None:
         raise SystemExit(f"Operation is not undoable: {op_id}")
     entry["undone_by"] = recovery_op_id
     entry["undone_at"] = utc_now_iso()
-    write_yaml_if_changed(journal_entry_path(project_root, op_id), entry)
+    _write_journal_yaml(project_root, op_id, entry)
 
 
 @contextmanager
@@ -1709,9 +1922,6 @@ def mutation_transaction(
     if not keys:
         raise SystemExit("Mutation transaction requires at least one explicit target path.")
     targets = [_target_path(project_root, key) for key in keys]
-    # Lazy import avoids common -> journal -> common initialization cycles.
-    from .common import exclusive_file_lock
-
     parent_op_id = current_operation_id(project_root)
     if parent_op_id:
         _, root_entry = _nested_root_entry(project_root, parent_op_id)
@@ -1738,11 +1948,11 @@ def mutation_transaction(
     # not reacquire it: their signed parent context is validated above, avoiding
     # parent-waits-child deadlocks during analyzer execution.
     _preflight_journal_envelopes(project_root)
-    with exclusive_file_lock(workspace_transaction_lock_path(project_root)):
+    with workspace_transaction_lock(project_root):
         _assert_no_incomplete_root(project_root)
         with ExitStack() as locks:
             for path in targets:
-                locks.enter_context(exclusive_file_lock(operation_lock_path(project_root, path)))
+                locks.enter_context(operation_lock(project_root, path))
             if preflight is not None:
                 preflight()
             with journaled_op(
