@@ -172,3 +172,55 @@ def test_prepare_failure_leaves_no_workspace_or_external_stage(
 
     assert _snapshot(root) == before
     assert not list(root.parent.glob(f".research-intake-{intake._prepared_scope(root)}-*"))
+
+
+def test_missing_receipt_on_uninitialized_workspace_is_zero_write(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    intake = _load_intake_module()
+    root = tmp_path / "workspace"
+    root.mkdir()
+    args = _args(root)
+    before = _snapshot(root)
+    argv = _argv(root, args, "")[:-2]
+    argv.extend(["--preference-selection-id", "prefsel-does-not-exist"])
+    monkeypatch.setattr(sys, "argv", argv)
+
+    with pytest.raises(ValueError, match="does not exist"):
+        intake.main()
+
+    assert _snapshot(root) == before
+    assert not (root / "kb").exists()
+    assert not list(root.parent.glob(f".research-intake-{intake._prepared_scope(root)}-*"))
+
+
+def test_source_mutation_during_preference_resolution_is_caught_by_second_revalidation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    intake = _load_intake_module()
+    root = tmp_path / "workspace"
+    root.mkdir()
+    ensure_workspace(root)
+    args = _args(root)
+    source = Path(args.source)
+    prepared = intake._prepare_intake_snapshot(root, args)
+    token = str(prepared["token"])
+    before_kb = _snapshot(root / "kb")
+    original = intake.resolve_intake_preferences
+
+    def mutate_after_resolution(*call_args, **call_kwargs):
+        result = original(*call_args, **call_kwargs)
+        source.write_text("# Blog\n\nMutated during resolution.\n", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(intake, "resolve_intake_preferences", mutate_after_resolution)
+    monkeypatch.setattr(sys, "argv", _argv(root, args, token))
+
+    with pytest.raises(SystemExit, match="changed after preparation"):
+        intake.main()
+
+    assert _snapshot(root / "kb") == before_kb
+    assert not intake._prepared_dir(root, token).exists()
+    assert not list((root / "kb/units/blogs").glob("*/record.yaml"))
