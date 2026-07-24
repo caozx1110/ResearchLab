@@ -159,12 +159,20 @@ def _transactional(op_name: str, target_builder):
                         args[3],
                         bound_fill,
                     )
+                    # Prevalidation reads evidence paths. Recheck the held fill once
+                    # more after it returns and before command_mutation can create a
+                    # journal or touch any business target.
+                    _revalidate_managed_verify_fill(root, bound_fill)
             except BaseException:
                 if temporary_fill is not None:
                     temporary_fill.close()
                     delattr(command_args, "_bound_paper_verify_fill")
                 if temporary_command:
                     delattr(command_args, "command")
+                if command_args is not None and hasattr(
+                    command_args, "_prevalidated_paper_verify_fill"
+                ):
+                    delattr(command_args, "_prevalidated_paper_verify_fill")
                 raise
             active_token = _ACTIVE_MUTATION.set(True)
             checkpoint_token = _PENDING_CHECKPOINT.set(None)

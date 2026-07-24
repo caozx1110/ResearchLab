@@ -4,6 +4,7 @@ import importlib.util
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -172,6 +173,15 @@ def _workspace_snapshot(root: Path) -> dict[str, bytes]:
     }
 
 
+def _workspace_snapshot_except(root: Path, excluded: Path) -> dict[str, bytes]:
+    excluded_relative = excluded.relative_to(root).as_posix()
+    return {
+        key: value
+        for key, value in _workspace_snapshot(root).items()
+        if key != excluded_relative
+    }
+
+
 def test_screen_verify_rejects_workspace_external_absolute_fill_without_writes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -200,6 +210,100 @@ def test_screen_verify_rejects_workspace_external_absolute_fill_without_writes(
         )
 
     assert _workspace_snapshot(root) == before
+
+
+@pytest.mark.parametrize("round_index", (1, 2))
+def test_owner_direct_verify_rejects_external_fill_before_transaction(
+    tmp_path: Path,
+    round_index: int,
+) -> None:
+    paper = _load_paper_module()
+    root = tmp_path / f"workspace-{round_index}"
+    paper_id = f"p-direct-external-{round_index}"
+    unit_root = _setup_paper(root, paper_id)
+    outside = tmp_path / f"outside-direct-{round_index}.yaml"
+    write_yaml_if_changed(outside, _screen_fill(paper, paper_id))
+    before = _workspace_snapshot(root)
+    record = load_yaml(record_path(root, "paper", paper_id))
+    cache_path = unit_root / "parse-cache.yaml"
+    chunks = load_yaml(cache_path)["chunks"]
+    args = SimpleNamespace(
+        phase="verify",
+        mode="auto",
+        input=str(outside),
+        paper_id=paper_id,
+    )
+
+    with pytest.raises(ValueError, match="current paper unit"):
+        paper._run_screen(
+            args,
+            root,
+            record,
+            unit_root,
+            cache_path,
+            chunks,
+            {},
+            True,
+        )
+
+    assert _workspace_snapshot(root) == before
+
+
+@pytest.mark.parametrize("round_index", (1, 2))
+@pytest.mark.parametrize("mutation", ("bytes", "same-bytes-new-inode"))
+def test_owner_direct_verify_rejects_post_prevalidation_replacement_without_transaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    round_index: int,
+    mutation: str,
+) -> None:
+    paper = _load_paper_module()
+    root = tmp_path / f"workspace-{round_index}"
+    paper_id = f"p-direct-race-{mutation}-{round_index}"
+    unit_root = _setup_paper(root, paper_id)
+    fill_path = unit_root / "agent-screen.yaml"
+    write_yaml_if_changed(fill_path, _screen_fill(paper, paper_id))
+    record = load_yaml(record_path(root, "paper", paper_id))
+    cache_path = unit_root / "parse-cache.yaml"
+    chunks = load_yaml(cache_path)["chunks"]
+    args = SimpleNamespace(
+        phase="verify",
+        mode="auto",
+        input=fill_path.name,
+        paper_id=paper_id,
+    )
+    original_prevalidate = paper._prevalidate_bound_verify_fill
+
+    def replace_after_prevalidation(*call_args, **call_kwargs):
+        result = original_prevalidate(*call_args, **call_kwargs)
+        original_bytes = fill_path.read_bytes()
+        if mutation == "bytes":
+            fill_path.write_bytes(original_bytes + b"\nraced-direct: true\n")
+        else:
+            fill_path.unlink()
+            fill_path.write_bytes(original_bytes)
+        return result
+
+    monkeypatch.setattr(
+        paper, "_prevalidate_bound_verify_fill", replace_after_prevalidation
+    )
+    before = _workspace_snapshot_except(root, fill_path)
+
+    match = "metadata changed|bytes changed" if mutation == "bytes" else "inode changed"
+    with pytest.raises(ValueError, match=match):
+        paper._run_screen(
+            args,
+            root,
+            record,
+            unit_root,
+            cache_path,
+            chunks,
+            {},
+            True,
+        )
+
+    assert _workspace_snapshot_except(root, fill_path) == before
+    assert not (unit_root / "screening.yaml").exists()
 
 
 @pytest.mark.parametrize("round_index", (1, 2))
