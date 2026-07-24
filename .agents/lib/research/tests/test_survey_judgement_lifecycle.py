@@ -1208,6 +1208,13 @@ def test_duplicate_candidate_attaches_exact_selection_before_composite_intake(
 
     intake = load_intake()
     monkeypatch.setattr(
+        intake,
+        "backup_source",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("canonical duplicates must not fetch or archive the source again")
+        ),
+    )
+    monkeypatch.setattr(
         sys,
         "argv",
         [
@@ -1238,6 +1245,16 @@ def test_duplicate_candidate_attaches_exact_selection_before_composite_intake(
     assert current["confirmation"] == confirmation_before
     receipt = current["payload"]["source_search"]["selections"][0]
     assert receipt["candidate_identity_digest"] == literature_candidate_identity_digest(candidate)
+    preference_receipt = current["payload"]["source_search"]["preference_bindings"][0]
+    assert preference_receipt["stage_id"] == search_path.stem
+    assert preference_receipt["candidate_id"] == "paper-a"
+    assert len(preference_receipt["task_context_digest"]) == 64
+    assert preference_receipt["selection_binding"] == {}
+    assert set(preference_receipt["hard_value_digests"]).issubset({"profile.constraints"})
+    assert all(
+        len(digest) == 64 for digest in preference_receipt["hard_value_digests"].values()
+    )
+    assert "Keep paper-a" not in json.dumps(preference_receipt, ensure_ascii=False)
 
     state = update_composite_survey_stage(
         state,

@@ -612,6 +612,19 @@ def _candidate_binding_digest(
     )
 
 
+def _prepared_record_binding_digest(
+    record: dict,
+    *,
+    duplicate_record_binding_digest: str = "",
+) -> str:
+    return _canonical_digest(
+        {
+            "record": record,
+            "duplicate_record_binding_digest": str(duplicate_record_binding_digest or ""),
+        }
+    )
+
+
 def _prepared_scope(root: Path) -> str:
     return hashlib.sha256(root.resolve(strict=False).as_posix().encode("utf-8")).hexdigest()[:12]
 
@@ -973,6 +986,11 @@ def _prepare_intake_snapshot(root: Path, args: argparse.Namespace) -> dict[str, 
     source_input_digest = _source_input_digest(root, source)
     token, prepared_root = _new_prepared_dir(root)
     try:
+        if staged_candidate is not None and staged_search is not None:
+            current_stage = load_search_stage(root, args.stage_id)
+            current_candidate = resolve_search_candidate(root, args.stage_id, args.candidate_id)
+            if _candidate_binding_digest(stage=current_stage, candidate=current_candidate) != candidate_digest:
+                raise RuntimeError("The selected staged candidate changed while intake was prepared.")
         preliminary_record = default_record(
             args.kind,
             title=initial_title,
@@ -980,39 +998,56 @@ def _prepare_intake_snapshot(root: Path, args: argparse.Namespace) -> dict[str, 
             source={"original_uri": source},
         )
         stage_dir = prepared_root / "kb" / "intake-staging" / str(preliminary_record["id"])
-        source_info = backup_source(
-            prepared_root,
-            args.kind,
-            str(preliminary_record["id"]),
-            source,
-            unit_dir=stage_dir,
-        )
-        write_parse_cache(stage_dir, str(preliminary_record["id"]), source_info)
-        readiness_error = source_backup_error(prepared_root, args.kind, source_info)
-        if readiness_error:
-            raise RuntimeError(readiness_error)
+        duplicate_record_relative = ""
+        duplicate_record_binding_digest = ""
+        duplicate = detect_duplicate(root, args.kind, source, title=initial_title)
+        if duplicate is not None:
+            record, duplicate_record_path = locate_record(
+                root,
+                str(duplicate.get("id") or ""),
+                kind=str(duplicate.get("kind") or args.kind),
+                fuzzy=False,
+            )
+            duplicate_record_relative = duplicate_record_path.relative_to(root).as_posix()
+            duplicate_record_binding_digest = _path_snapshot_digest(duplicate_record_path)
+            stage_dir.mkdir(parents=True, exist_ok=False)
+            canonical_source_info = {
+                "backup_status": "duplicate-existing",
+                "file_hash": str(record.get("source", {}).get("file_hash") or ""),
+            }
+            title = str(record.get("title") or initial_title)
+        else:
+            source_info = backup_source(
+                prepared_root,
+                args.kind,
+                str(preliminary_record["id"]),
+                source,
+                unit_dir=stage_dir,
+            )
+            write_parse_cache(stage_dir, str(preliminary_record["id"]), source_info)
+            readiness_error = source_backup_error(prepared_root, args.kind, source_info)
+            if readiness_error:
+                raise RuntimeError(readiness_error)
+            record, canonical_source_info, title = _finish_prepared_record(
+                root,
+                args,
+                source=source,
+                initial_title=initial_title,
+                paper_metadata=paper_metadata,
+                staged_candidate=staged_candidate,
+                staged_search=staged_search,
+                source_info=source_info,
+                stage_dir=stage_dir,
+                prepared_root=prepared_root,
+            )
         if _source_input_digest(root, source) != source_input_digest:
             raise RuntimeError("The intake source changed while its snapshot was prepared.")
-        if staged_candidate is not None and staged_search is not None:
-            current_stage = load_search_stage(root, args.stage_id)
-            current_candidate = resolve_search_candidate(root, args.stage_id, args.candidate_id)
-            if _candidate_binding_digest(stage=current_stage, candidate=current_candidate) != candidate_digest:
-                raise RuntimeError("The selected staged candidate changed while intake was prepared.")
-        record, canonical_source_info, title = _finish_prepared_record(
-            root,
-            args,
-            source=source,
-            initial_title=initial_title,
-            paper_metadata=paper_metadata,
-            staged_candidate=staged_candidate,
-            staged_search=staged_search,
-            source_info=source_info,
-            stage_dir=stage_dir,
-            prepared_root=prepared_root,
-        )
         _harden_prepared_tree(stage_dir)
         source_content_digest = _path_snapshot_digest(stage_dir)
-        prepared_record_digest = _canonical_digest(record)
+        prepared_record_digest = _prepared_record_binding_digest(
+            record,
+            duplicate_record_binding_digest=duplicate_record_binding_digest,
+        )
         context = intake_preference_context(
             args,
             source=source,
@@ -1042,6 +1077,8 @@ def _prepare_intake_snapshot(root: Path, args: argparse.Namespace) -> dict[str, 
             "candidate_binding_digest": candidate_digest,
             "source_content_digest": source_content_digest,
             "prepared_record_digest": prepared_record_digest,
+            "duplicate_record_relative": duplicate_record_relative,
+            "duplicate_record_binding_digest": duplicate_record_binding_digest,
             "canonical_inputs": context,
             "record": record,
             "source_info": canonical_source_info,
@@ -1075,6 +1112,8 @@ def _load_prepared_intake(
         "candidate_binding_digest",
         "source_content_digest",
         "prepared_record_digest",
+        "duplicate_record_relative",
+        "duplicate_record_binding_digest",
         "canonical_inputs",
         "record",
         "source_info",
@@ -1126,7 +1165,32 @@ def _load_prepared_intake(
     context = payload.get("canonical_inputs")
     if not isinstance(record, dict) or not isinstance(source_info, dict) or not isinstance(context, dict):
         raise SystemExit("Prepared intake manifest content is invalid.")
-    if _canonical_digest(record) != payload.get("prepared_record_digest"):
+    duplicate_record_relative = str(payload.get("duplicate_record_relative") or "")
+    duplicate_record_binding_digest = str(
+        payload.get("duplicate_record_binding_digest") or ""
+    )
+    if bool(duplicate_record_relative) != bool(duplicate_record_binding_digest):
+        raise SystemExit("Prepared intake duplicate binding is incomplete.")
+    if duplicate_record_relative:
+        duplicate_relative = Path(duplicate_record_relative)
+        if duplicate_relative.is_absolute() or ".." in duplicate_relative.parts:
+            raise SystemExit("Prepared intake duplicate record escaped the workspace.")
+        current_duplicate, current_duplicate_path = locate_record(
+            root,
+            str(record.get("id") or ""),
+            kind=str(record.get("kind") or args.kind),
+            fuzzy=False,
+        )
+        if current_duplicate_path.relative_to(root).as_posix() != duplicate_record_relative:
+            raise SystemExit("Prepared intake duplicate record identity changed.")
+        if _path_snapshot_digest(current_duplicate_path) != duplicate_record_binding_digest:
+            raise SystemExit("Prepared intake duplicate record changed after preparation.")
+        if current_duplicate != record:
+            raise SystemExit("Prepared intake duplicate record content changed after preparation.")
+    if _prepared_record_binding_digest(
+        record,
+        duplicate_record_binding_digest=duplicate_record_binding_digest,
+    ) != payload.get("prepared_record_digest"):
         raise SystemExit("Prepared intake record changed after preparation.")
     recomputed_context = intake_preference_context(
         args,
@@ -1244,6 +1308,7 @@ def _attach_source_search_selection(
     candidate_id: str,
     user_authorization: str,
     authorization_source: str,
+    preference_state: dict[str, object] | None = None,
 ) -> bool:
     """Attach exact intake provenance without changing analysis or confirmation substance."""
     source_search = record.setdefault("payload", {}).setdefault("source_search", {})
@@ -1287,6 +1352,46 @@ def _attach_source_search_selection(
             "user_authorization": receipt["user_authorization"],
             "authorization_source": receipt["authorization_source"],
         }
+        if preference_state:
+            preference_receipt = {
+                "stage_id": stage_id,
+                "candidate_id": candidate_id,
+                "task_context_digest": str(
+                    preference_state.get("task_context_digest") or ""
+                ),
+                "selection_binding": dict(
+                    preference_state.get("selection_binding") or {}
+                ),
+                "hard_value_digests": dict(
+                    preference_state.get("hard_value_digests") or {}
+                ),
+            }
+            preference_bindings = [
+                item
+                for item in source_search.get("preference_bindings", [])
+                if isinstance(item, dict)
+            ]
+            prior_bindings = [
+                item
+                for item in preference_bindings
+                if item.get("stage_id") == stage_id
+                and item.get("candidate_id") == candidate_id
+            ]
+            if prior_bindings and (
+                len(prior_bindings) != 1 or prior_bindings[0] != preference_receipt
+            ):
+                raise SystemExit(
+                    "A staged candidate preference binding cannot be rebound after intake."
+                )
+            if not prior_bindings:
+                preference_bindings.append(preference_receipt)
+            source_search["preference_bindings"] = sorted(
+                preference_bindings,
+                key=lambda item: (
+                    str(item.get("stage_id") or ""),
+                    str(item.get("candidate_id") or ""),
+                ),
+            )
     return repr(source_search) != before
 
 
@@ -1295,6 +1400,10 @@ def _attach_duplicate_selection_and_mark(
     *,
     args: argparse.Namespace,
     duplicate: dict,
+    expected_record_binding_digest: str = "",
+    expected_prepared_record_digest: str = "",
+    expected_candidate_binding_digest: str = "",
+    preference_state: dict[str, object] | None = None,
 ) -> Path | None:
     if not args.stage_id or not args.candidate_id:
         return None
@@ -1318,6 +1427,21 @@ def _attach_duplicate_selection_and_mark(
         )
         stage = load_search_stage(root, args.stage_id)
         candidate = resolve_search_candidate(root, args.stage_id, args.candidate_id)
+        current_binding_digest = _path_snapshot_digest(record_path)
+        if (
+            not expected_record_binding_digest
+            or current_binding_digest != expected_record_binding_digest
+        ):
+            raise SystemExit("The duplicate record changed after intake preparation.")
+        if _prepared_record_binding_digest(
+            current,
+            duplicate_record_binding_digest=current_binding_digest,
+        ) != expected_prepared_record_digest:
+            raise SystemExit("The duplicate record content changed after intake preparation.")
+        if _candidate_binding_digest(stage=stage, candidate=candidate) != str(
+            expected_candidate_binding_digest or ""
+        ):
+            raise SystemExit("The selected candidate changed after intake preparation.")
         changed = _attach_source_search_selection(
             current,
             stage=stage,
@@ -1326,6 +1450,7 @@ def _attach_duplicate_selection_and_mark(
             candidate_id=args.candidate_id,
             user_authorization=args.user_authorization,
             authorization_source=args.authorization_source,
+            preference_state=preference_state,
         )
         if changed:
             append_history(
@@ -1377,18 +1502,8 @@ def _execute_intake_transaction(
             stage_dir=stage_dir,
         )
         if concurrent_duplicate:
-            updated_stage_path = _attach_duplicate_selection_and_mark(
-                root,
-                args=args,
-                duplicate=concurrent_duplicate,
-            )
-            return (
-                None,
-                concurrent_duplicate,
-                canonical_source_info,
-                auto_outputs,
-                note_created,
-                updated_stage_path,
+            raise SystemExit(
+                "A duplicate appeared after intake preparation; retry with a fresh snapshot."
             )
         if path is None:
             raise RuntimeError("Source materialization completed without a canonical record path.")
@@ -1529,7 +1644,26 @@ def main() -> int:
             candidate_file_hash=str(source_info.get("file_hash") or ""),
         )
         if duplicate:
-            _attach_duplicate_selection_and_mark(root, args=args, duplicate=duplicate)
+            duplicate_record_binding_digest = str(
+                prepared.get("duplicate_record_binding_digest") or ""
+            )
+            if not duplicate_record_binding_digest:
+                raise SystemExit(
+                    "A duplicate appeared after intake preparation; retry with a fresh snapshot."
+                )
+            _attach_duplicate_selection_and_mark(
+                root,
+                args=args,
+                duplicate=duplicate,
+                expected_record_binding_digest=duplicate_record_binding_digest,
+                expected_prepared_record_digest=str(
+                    prepared.get("prepared_record_digest") or ""
+                ),
+                expected_candidate_binding_digest=str(
+                    prepared.get("candidate_binding_digest") or ""
+                ),
+                preference_state=preference_state,
+            )
             print(f"[ok] duplicate detected: {duplicate['id']}")
             return 0
 
