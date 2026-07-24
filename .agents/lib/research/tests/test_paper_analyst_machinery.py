@@ -179,6 +179,18 @@ def _typed_note_fill(paper, paper_type: str) -> dict:
     }
 
 
+def _not_applicable_screening_dimensions(paper) -> dict:
+    return {
+        name: {
+            "status": "not_applicable",
+            "rating": "",
+            "reason": "The available excerpt does not support this dimension.",
+            "claim_ids": [],
+        }
+        for name in paper.SCREENING_DIMENSION_RATINGS
+    }
+
+
 # --------------------------------------------------------------------------- #
 # 1. screen --phase prepare produces a fillable structure with NO grading.
 # --------------------------------------------------------------------------- #
@@ -195,10 +207,11 @@ def test_screen_scaffold_has_no_count_driven_grading(tmp_path: Path) -> None:
     assert scaffold["judgement_reason"] == []
     assert scaffold["relevance_to_current_research"] == ""
     assert scaffold["claims"] == []
-    # No count->grade rating fields leak in (novelty/result_strength/experiment_signal...).
-    for banned in ("novelty_signal", "result_strength", "experiment_signal", "reliability_signal",
-                   "relevance_signal", "novelty", "experiment_quality"):
-        assert banned not in scaffold
+    # Structured judgement slots exist, but no rating is authored by Python.
+    assert set(paper.SCREENING_DIMENSION_RATINGS).issubset(scaffold)
+    for dimension in paper.SCREENING_DIMENSION_RATINGS:
+        assert scaffold[dimension] == {"status": "", "rating": "", "reason": "", "claim_ids": []}
+    assert "author identity" in scaffold["fill_contract"]["prohibited_shortcuts"]
     # keyword mentions are kept only as an explicitly-non-judgemental hint.
     assert "keyword_mentions" in scaffold["agent_hints"]
     assert "NOT" in scaffold["agent_hints"]["note"]
@@ -407,6 +420,7 @@ def test_screen_fill_requires_evidence_backed_judgement(tmp_path: Path) -> None:
                 ],
             }
         ],
+        **_not_applicable_screening_dimensions(paper),
     }
     assert paper.verify_screening_fill(payload_ok, unit_dir) == []
 
@@ -441,6 +455,7 @@ def test_screen_fill_validates_paper_type_enum(tmp_path: Path) -> None:
                 ],
             }
         ],
+        **_not_applicable_screening_dimensions(paper),
     }
     assert paper.verify_screening_fill(payload, unit_dir) == []
 
@@ -454,6 +469,58 @@ def test_screen_fill_validates_paper_type_enum(tmp_path: Path) -> None:
     payload["paper_type"] = "survey"
     payload["claims"] = []
     assert any("paper_type is an agent judgement" in violation for violation in paper.verify_screening_fill(payload, unit_dir))
+
+
+def test_screen_dimensions_require_agent_reason_and_bound_verbatim_evidence(tmp_path: Path) -> None:
+    paper = _load_paper_module()
+    unit_dir = tmp_path / "unit"
+    unit_dir.mkdir()
+    _write_parse_cache(unit_dir, "p-x")
+    claim = {
+        "id": "claim-result-strength",
+        "text": "The paper reports a strong result on its benchmark.",
+        "claim_type": "evaluation",
+        "confirmation_status": "pending_user_confirmation",
+        "evidence_refs": [
+            {
+                "source_unit_id": "p-x",
+                "artifact": "parse-cache.yaml",
+                "locator": "page=2",
+                "quote": "real robot benchmark",
+                "summary": "reported result context",
+            }
+        ],
+    }
+    payload = {
+        "paper_type": "benchmark",
+        "worth_deep_reading": "maybe",
+        "judgement_reason": ["requires deeper comparison"],
+        "claims": [claim],
+        **_not_applicable_screening_dimensions(paper),
+    }
+    payload["result_strength"] = {
+        "status": "assessed",
+        "rating": "strong",
+        "reason": "The reported benchmark result is directly supported by the quoted passage.",
+        "claim_ids": ["claim-result-strength"],
+    }
+    assert paper.verify_screening_fill(payload, unit_dir) == []
+
+    payload["result_strength"]["claim_ids"] = ["claim-missing"]
+    assert any(
+        "result_strength.claim_ids: unknown claim" in violation
+        for violation in paper.verify_screening_fill(payload, unit_dir)
+    )
+    payload["result_strength"] = {
+        "status": "not_applicable",
+        "rating": "strong",
+        "reason": "",
+        "claim_ids": ["claim-result-strength"],
+    }
+    violations = paper.verify_screening_fill(payload, unit_dir)
+    assert any("result_strength.reason" in violation for violation in violations)
+    assert any("result_strength.rating" in violation for violation in violations)
+    assert any("result_strength.claim_ids" in violation for violation in violations)
 
 
 # --------------------------------------------------------------------------- #
@@ -516,6 +583,7 @@ def test_cli_end_to_end_prepare_fill_verify_persist(tmp_path: Path, monkeypatch:
     screening["paper_type"] = "method_system"
     screening["worth_deep_reading"] = "yes"
     screening["judgement_reason"] = ["method/system paper is in scope"]
+    screening.update(_not_applicable_screening_dimensions(paper))
     screening["claims"] = [
         {
             "id": "claim-screen-type",

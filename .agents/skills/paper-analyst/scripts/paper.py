@@ -126,6 +126,15 @@ def _transactional(op_name: str, target_builder):
     return decorate
 
 PAPER_TYPES: tuple[str, ...] = ("method_system", "benchmark", "survey")
+SCREENING_DIMENSION_RATINGS: dict[str, tuple[str, ...]] = {
+    # institutions is descriptive only; it must never become a prestige score.
+    "institutions": ("identified", "not_disclosed", "unclear"),
+    "backing_strength": ("strong", "moderate", "weak", "unclear"),
+    "result_strength": ("strong", "moderate", "weak", "unclear"),
+    "experiment_quality": ("strong", "moderate", "weak", "unclear"),
+    "reliability": ("strong", "moderate", "weak", "unclear"),
+    "novelty": ("strong", "moderate", "weak", "unclear"),
+}
 
 # --------------------------------------------------------------------------- #
 # Per-paper-type 5-element fill contracts (SSOT §3.2).                         #
@@ -446,6 +455,19 @@ def build_screening_scaffold(
             "judgement_reason": "agent fills: list of short reasons",
             "relevance_to_current_research": "agent fills: strong|moderate|weak + why",
             "claims": "agent attaches judgement claims backing paper_type and worth_deep_reading",
+            "structured_dimensions": {
+                name: {
+                    "status": "agent fills: assessed|not_applicable",
+                    "rating": f"when assessed: {'|'.join(ratings)}",
+                    "reason": "agent fills an evidence-grounded reason; required for assessed and not_applicable",
+                    "claim_ids": "when assessed: one or more ids from claims with verbatim evidence",
+                }
+                for name, ratings in SCREENING_DIMENSION_RATINGS.items()
+            },
+            "prohibited_shortcuts": (
+                "Do not infer ratings from author identity, institution prestige, venue, citation count, "
+                "or other metadata heuristics. Institutions records disclosed affiliation only."
+            ),
             "evidence_ref_format": EVIDENCE_REF_FORMAT,
         },
         "agent_hints": {
@@ -461,6 +483,10 @@ def build_screening_scaffold(
         "worth_deep_reading": "",
         "judgement_reason": [],
         "relevance_to_current_research": "",
+        **{
+            name: {"status": "", "rating": "", "reason": "", "claim_ids": []}
+            for name in SCREENING_DIMENSION_RATINGS
+        },
         "claims": [],
     }
 
@@ -489,6 +515,43 @@ def verify_screening_fill(payload: dict, unit_dir: Path) -> list[str]:
     for claim in claims:
         for violation in verify_claim_evidence(claim, unit_dir):
             violations.append(f"screening claim: {violation}")
+    claims_by_id = {
+        str(claim.get("id") or ""): claim
+        for claim in claims
+        if isinstance(claim, Mapping) and str(claim.get("id") or "")
+    }
+    for name, ratings in SCREENING_DIMENSION_RATINGS.items():
+        dimension = payload.get(name)
+        if not isinstance(dimension, Mapping):
+            violations.append(f"{name}: agent must fill a structured judgement object")
+            continue
+        status = str(dimension.get("status") or "").strip().casefold()
+        rating = str(dimension.get("rating") or "").strip().casefold()
+        reason = str(dimension.get("reason") or "").strip()
+        raw_claim_ids = dimension.get("claim_ids")
+        claim_ids = (
+            [str(value).strip() for value in raw_claim_ids if str(value).strip()]
+            if isinstance(raw_claim_ids, list)
+            else []
+        )
+        if status not in {"assessed", "not_applicable"}:
+            violations.append(f"{name}.status: agent must fill assessed|not_applicable")
+            continue
+        if not reason:
+            violations.append(f"{name}.reason: required for {status}")
+        if status == "not_applicable":
+            if rating:
+                violations.append(f"{name}.rating: must be blank when not_applicable")
+            if claim_ids:
+                violations.append(f"{name}.claim_ids: must be empty when not_applicable")
+            continue
+        if rating not in ratings:
+            violations.append(f"{name}.rating: agent must fill one of {'|'.join(ratings)}")
+        if not claim_ids:
+            violations.append(f"{name}.claim_ids: assessed judgement requires evidence-backed claims")
+        for claim_id in claim_ids:
+            if claim_id not in claims_by_id:
+                violations.append(f"{name}.claim_ids: unknown claim {claim_id!r}")
     # Every verified screening judgement becomes a canonical, receipt-bound claim.
     if not claims:
         violations.append(
@@ -1219,6 +1282,19 @@ def _run_screen(args, root, record, unit_root, cache_path, source_chunks, paper_
     quick["worth_deep_reading"] = worth
     quick["judgement_reason"] = reasons
     quick["relevance_to_current_research"] = relevance
+    for dimension in SCREENING_DIMENSION_RATINGS:
+        value = payload.get(dimension)
+        if isinstance(value, Mapping):
+            quick[dimension] = {
+                "status": str(value.get("status") or "").strip().casefold(),
+                "rating": str(value.get("rating") or "").strip().casefold(),
+                "reason": str(value.get("reason") or "").strip(),
+                "claim_ids": [
+                    str(item).strip()
+                    for item in (value.get("claim_ids") or [])
+                    if str(item).strip()
+                ],
+            }
     quick["recommended_next_action"] = "complete-note" if worth in {"yes", "maybe"} else "defer-or-confirm"
     attach_claims(record.setdefault("payload", {}), read_claims(payload))
     build_verification_receipt(record, unit_root)
