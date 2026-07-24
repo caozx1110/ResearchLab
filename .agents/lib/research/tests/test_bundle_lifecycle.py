@@ -192,6 +192,76 @@ def test_merge_update_reinstall_uninstall_preserve_user_workspace(tmp_path: Path
     assert (workspace / ".venv" / "sentinel").read_text(encoding="utf-8") == "runtime\n"
 
 
+def test_reviewed_uninstall_plan_preserves_runtime_and_kb_lifecycle(tmp_path: Path) -> None:
+    workspace = tmp_path / "reviewed-uninstall-workspace"
+    workspace.mkdir()
+    home = tmp_path / "reviewed-uninstall-home"
+    home.mkdir()
+    env = {**_installer_env(), "HOME": str(home)}
+    installed = subprocess.run(
+        [
+            "bash",
+            str(_project_root() / "install.sh"),
+            "install",
+            "--project",
+            str(workspace),
+            "--codex",
+            "--yes",
+        ],
+        cwd=_project_root(),
+        env=env,
+        stdin=subprocess.DEVNULL,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert installed.returncode == 0, installed.stdout + installed.stderr
+    (workspace / "kb").mkdir()
+    (workspace / "kb/user.md").write_text("research data\n", encoding="utf-8")
+    (workspace / ".venv").mkdir()
+    (workspace / ".venv/sentinel").write_text("runtime\n", encoding="utf-8")
+    plan_path = tmp_path / "reviewed-uninstall.json"
+    planned = subprocess.run(
+        [
+            "bash",
+            str(_project_root() / "install.sh"),
+            "uninstall",
+            "--agent-plan-json",
+            str(plan_path),
+            "--project",
+            str(workspace),
+            "--yes",
+        ],
+        cwd=_project_root(),
+        env=env,
+        stdin=subprocess.DEVNULL,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert planned.returncode == 0, planned.stdout + planned.stderr
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    assert len(plan["conditional_runtime_changes"]) == 1
+    assert plan["conditional_runtime_changes"][0]["path"] == str(workspace / ".venv")
+
+    contract = plan["apply_contract"]
+    applied = subprocess.run(
+        [contract["executable"], *contract["argv"]],
+        cwd=_project_root(),
+        env=env,
+        stdin=subprocess.DEVNULL,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    assert not (workspace / ".agents/.install-manifest.json").exists()
+    assert (workspace / "kb/user.md").read_text(encoding="utf-8") == "research data\n"
+    assert (workspace / ".venv/sentinel").read_text(encoding="utf-8") == "runtime\n"
+    assert not any(home.iterdir())
+
+
 def test_clean_uninstall_removes_all_managed_files(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()

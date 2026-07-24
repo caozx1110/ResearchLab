@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import hashlib
 import json
 import os
 import pty
@@ -93,19 +94,41 @@ def test_agent_plan_lists_exact_targets_and_writes_nothing(tmp_path: Path) -> No
     assert plan["source"]["commit"] == _git_output(_project_root(), "rev-parse", "HEAD")
     assert plan["source"]["origin"] == _git_output(_project_root(), "remote", "get-url", "origin")
     targets = plan["targets"]
-    assert any(item == {"operation": "write", "path": str(workspace / ".agents/skills/kb-cli/scripts/kb")} for item in targets)
+    kb_target = next(
+        item
+        for item in targets
+        if item["operation"] == "write" and item["path"] == str(workspace / ".agents/skills/kb-cli/scripts/kb")
+    )
+    assert kb_target["precondition"] == {"type": "absent"}
+    assert re.fullmatch(r"[0-9a-f]{64}", kb_target["source_content_sha256"])
     assert any(item["operation"] == "write-managed-block" and item["path"] == str(workspace / "CLAUDE.md") for item in targets)
-    assert plan["conditional_runtime_changes"] == [
-        {
-            "condition": "only if required Python dependencies are unavailable",
-            "operation": "conditional-runtime-tree",
-            "path": str(workspace / ".venv"),
-            "source": "Python dependency manager",
-        }
-    ]
+    assert all(
+        re.fullmatch(r"[0-9a-f]{64}", item["source_content_sha256"])
+        for item in targets
+        if item["operation"] in {"copy", "overwrite", "write", "write-manifest", "write-managed-block"}
+    )
+    runtime = plan["conditional_runtime_changes"]
+    assert len(runtime) == 1
+    assert runtime[0]["path"] == str(workspace / ".venv")
+    assert runtime[0]["precondition"] == {"type": "absent"}
+    assert "yaml, markdownify, or bs4" in runtime[0]["condition"]
+    assert "intentionally not enumerated" in runtime[0]["boundary"]
+    assert "preserved" in runtime[0]["cleanup"]
+    tree = plan["source"]["distributable_tree"]
+    assert tree["entry_count"] == len(tree["entries"])
+    assert re.fullmatch(r"[0-9a-f]{64}", tree["digest"])
+    assert {item["type"] for item in tree["entries"]} <= {"regular", "symlink"}
+    assert all(re.fullmatch(r"[0-7]{4}", item["mode"]) for item in tree["entries"])
+    assert all(
+        ("byte_sha256" in item) if item["type"] == "regular" else ("target" in item)
+        for item in tree["entries"]
+    )
     assert plan["conflicts"] == []
     assert plan["apply_contract"]["headless"] is True
     assert plan["apply_contract"]["requires_same_source_commit"] == plan["source"]["commit"]
+    assert plan["apply_contract"]["requires_plan_digest"] == plan["plan_digest"]
+    assert plan["apply_contract"]["requires_source_tree_digest"] == tree["digest"]
+    assert plan["apply_contract"]["plan_path"] == str(plan_path)
     assert "--agent-plan-json" not in plan["apply_contract"]["argv"]
     expected_index = plan["apply_contract"]["argv"].index("--expected-source-commit")
     assert plan["apply_contract"]["argv"][expected_index + 1] == plan["source"]["commit"]
@@ -253,6 +276,248 @@ def test_agent_plan_apply_contract_installs_headlessly_with_bound_provenance(tmp
     assert manifest["source_origin"] == plan["source"]["origin"]
     assert manifest["source_branch"] == plan["source"]["branch"]
     assert manifest["source_commit"] == plan["source"]["commit"]
+    for target in plan["targets"]:
+        if target["operation"] not in {"copy", "overwrite", "write", "write-manifest", "write-managed-block"}:
+            continue
+        content = Path(target["path"]).read_bytes()
+        if target["operation"] == "write-managed-block":
+            begin = content.index(b"# >>> workspace-oss managed >>>")
+            end_marker = b"# <<< workspace-oss managed <<<"
+            end = content.index(end_marker, begin) + len(end_marker)
+            if content[end : end + 2] == b"\r\n":
+                end += 2
+            elif content[end : end + 1] == b"\n":
+                end += 1
+            content = content[begin:end]
+        assert hashlib.sha256(content).hexdigest() == target["source_content_sha256"]
+
+
+def _plan_from_source(
+    source: Path,
+    workspace: Path,
+    plan_path: Path,
+    *,
+    env: dict[str, str],
+) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+    result = subprocess.run(
+        [
+            "bash",
+            str(source / "install.sh"),
+            "--agent-plan-json",
+            str(plan_path),
+            "--codex",
+            "--project",
+            str(workspace),
+            "--yes",
+        ],
+        cwd=source,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    payload = json.loads(plan_path.read_text(encoding="utf-8")) if result.returncode == 0 else {}
+    return result, payload
+
+
+def _apply_reviewed_plan(
+    source: Path,
+    plan: dict[str, object],
+    *,
+    env: dict[str, str],
+) -> subprocess.CompletedProcess[str]:
+    contract = plan["apply_contract"]
+    assert isinstance(contract, dict)
+    executable = contract["executable"]
+    argv = contract["argv"]
+    assert isinstance(executable, str) and isinstance(argv, list)
+    return subprocess.run(
+        [executable, *argv],
+        cwd=source,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def test_agent_apply_rejects_uncommitted_distributable_drift_at_same_head_without_writes(tmp_path: Path) -> None:
+    source = _make_linked_source(tmp_path)
+    workspace = tmp_path / "source-drift-workspace"
+    workspace.mkdir()
+    home = tmp_path / "source-drift-home"
+    home.mkdir()
+    plan_path = tmp_path / "source-drift-plan.json"
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "RESEARCH_PYTHON": sys.executable,
+        "RESEARCH_NO_MANAGED_VENV": "1",
+        "RESEARCH_NO_PDF_BACKEND": "1",
+        "NO_COLOR": "1",
+    }
+    planned, plan = _plan_from_source(source, workspace, plan_path, env=env)
+    assert planned.returncode == 0, planned.stdout + planned.stderr
+    original_head = _git_output(source, "rev-parse", "HEAD")
+    source_agents = source / ".agents/AGENTS.md"
+    source_agents.write_text(source_agents.read_text(encoding="utf-8") + "\nUncommitted drift.\n", encoding="utf-8")
+    assert _git_output(source, "rev-parse", "HEAD") == original_head
+
+    applied = _apply_reviewed_plan(source, plan, env=env)
+
+    assert applied.returncode == 1
+    assert "计划、源码或目标状态已变化" in applied.stderr
+    assert not any(workspace.iterdir())
+    assert not any(home.iterdir())
+
+
+def test_agent_apply_rejects_source_origin_drift_without_writes(tmp_path: Path) -> None:
+    source = _make_linked_source(tmp_path)
+    workspace = tmp_path / "origin-drift-workspace"
+    workspace.mkdir()
+    home = tmp_path / "origin-drift-home"
+    home.mkdir()
+    plan_path = tmp_path / "origin-drift-plan.json"
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "RESEARCH_PYTHON": sys.executable,
+        "RESEARCH_NO_MANAGED_VENV": "1",
+        "RESEARCH_NO_PDF_BACKEND": "1",
+        "NO_COLOR": "1",
+    }
+    planned, plan = _plan_from_source(source, workspace, plan_path, env=env)
+    assert planned.returncode == 0, planned.stdout + planned.stderr
+    original_head = _git_output(source, "rev-parse", "HEAD")
+    _git_output(source, "remote", "set-url", "origin", "ssh://example.test/changed/workspace-oss.git")
+    assert _git_output(source, "rev-parse", "HEAD") == original_head
+
+    applied = _apply_reviewed_plan(source, plan, env=env)
+
+    assert applied.returncode == 1
+    assert "计划、源码或目标状态已变化" in applied.stderr
+    assert not any(workspace.iterdir())
+    assert not any(home.iterdir())
+
+
+def test_agent_apply_rejects_same_commit_branch_drift_without_writes(tmp_path: Path) -> None:
+    source = _make_linked_source(tmp_path)
+    workspace = tmp_path / "branch-drift-workspace"
+    workspace.mkdir()
+    home = tmp_path / "branch-drift-home"
+    home.mkdir()
+    plan_path = tmp_path / "branch-drift-plan.json"
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "RESEARCH_PYTHON": sys.executable,
+        "RESEARCH_NO_MANAGED_VENV": "1",
+        "RESEARCH_NO_PDF_BACKEND": "1",
+        "NO_COLOR": "1",
+    }
+    planned, plan = _plan_from_source(source, workspace, plan_path, env=env)
+    assert planned.returncode == 0, planned.stdout + planned.stderr
+    original_head = _git_output(source, "rev-parse", "HEAD")
+    _git_output(source, "checkout", "-b", "same-commit-review-drift")
+    assert _git_output(source, "rev-parse", "HEAD") == original_head
+
+    applied = _apply_reviewed_plan(source, plan, env=env)
+
+    assert applied.returncode == 1
+    assert "计划、源码或目标状态已变化" in applied.stderr
+    assert not any(workspace.iterdir())
+    assert not any(home.iterdir())
+
+
+def test_agent_apply_rejects_plan_tampering_without_writes(tmp_path: Path) -> None:
+    source = _make_linked_source(tmp_path)
+    workspace = tmp_path / "tampered-plan-workspace"
+    workspace.mkdir()
+    home = tmp_path / "tampered-plan-home"
+    home.mkdir()
+    plan_path = tmp_path / "tampered-plan.json"
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "RESEARCH_PYTHON": sys.executable,
+        "RESEARCH_NO_MANAGED_VENV": "1",
+        "RESEARCH_NO_PDF_BACKEND": "1",
+        "NO_COLOR": "1",
+    }
+    planned, plan = _plan_from_source(source, workspace, plan_path, env=env)
+    assert planned.returncode == 0, planned.stdout + planned.stderr
+    tampered = json.loads(plan_path.read_text(encoding="utf-8"))
+    tampered["conflicts"].append("tampered after review")
+    plan_path.write_text(json.dumps(tampered, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    applied = _apply_reviewed_plan(source, plan, env=env)
+
+    assert applied.returncode == 1
+    assert "计划、源码或目标状态已变化" in applied.stderr
+    assert not any(workspace.iterdir())
+    assert not any(home.iterdir())
+
+
+def test_agent_apply_rejects_target_concurrency_without_writes(tmp_path: Path) -> None:
+    source = _make_linked_source(tmp_path)
+    workspace = tmp_path / "target-drift-workspace"
+    workspace.mkdir()
+    home = tmp_path / "target-drift-home"
+    home.mkdir()
+    plan_path = tmp_path / "target-drift-plan.json"
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "RESEARCH_PYTHON": sys.executable,
+        "RESEARCH_NO_MANAGED_VENV": "1",
+        "RESEARCH_NO_PDF_BACKEND": "1",
+        "NO_COLOR": "1",
+    }
+    planned, plan = _plan_from_source(source, workspace, plan_path, env=env)
+    assert planned.returncode == 0, planned.stdout + planned.stderr
+    user_target = workspace / "AGENTS.md"
+    user_target.write_text("concurrent user change\n", encoding="utf-8")
+
+    applied = _apply_reviewed_plan(source, plan, env=env)
+
+    assert applied.returncode == 1
+    assert "计划、源码或目标状态已变化" in applied.stderr
+    assert user_target.read_text(encoding="utf-8") == "concurrent user change\n"
+    assert list(workspace.iterdir()) == [user_target]
+    assert not any(home.iterdir())
+
+
+def test_agent_plan_core_runtime_probe_catches_yaml_only_environment(tmp_path: Path) -> None:
+    workspace = tmp_path / "partial-runtime-workspace"
+    workspace.mkdir()
+    home = tmp_path / "partial-runtime-home"
+    home.mkdir()
+    stubs = tmp_path / "partial-runtime-stubs"
+    stubs.mkdir()
+    (stubs / "yaml.py").write_text("# available\n", encoding="utf-8")
+    (stubs / "markdownify.py").write_text("# available\n", encoding="utf-8")
+    isolated_python = tmp_path / "partial-python"
+    isolated_python.write_text(f"#!/bin/sh\nexec {sys.executable!s} -S \"$@\"\n", encoding="utf-8")
+    isolated_python.chmod(0o755)
+    plan_path = tmp_path / "partial-runtime-plan.json"
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "PYTHONPATH": str(stubs),
+        "RESEARCH_PYTHON": str(isolated_python),
+        "NO_COLOR": "1",
+    }
+
+    planned, plan = _plan_from_source(_project_root(), workspace, plan_path, env=env)
+
+    assert planned.returncode == 0, planned.stdout + planned.stderr
+    assert "首次使用时会自动准备" in planned.stderr
+    runtime = plan["conditional_runtime_changes"]
+    assert len(runtime) == 1
+    assert runtime[0]["path"] == str(workspace / ".venv")
+    assert "yaml, markdownify, or bs4" in runtime[0]["condition"]
 
 
 def test_agent_uninstall_plan_reports_managed_block_and_exact_count(tmp_path: Path) -> None:
