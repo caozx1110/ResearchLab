@@ -172,6 +172,61 @@ def test_agent_apply_contract_rejects_source_commit_drift_without_reading_stdin(
     assert not any(workspace.iterdir())
 
 
+def test_agent_plan_apply_contract_installs_headlessly_with_bound_provenance(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    home = tmp_path / "home"
+    workspace.mkdir()
+    home.mkdir()
+    plan_path = tmp_path / "plan.json"
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "RESEARCH_PYTHON": sys.executable,
+        "RESEARCH_NO_MANAGED_VENV": "1",
+        "RESEARCH_NO_PDF_BACKEND": "1",
+        "NO_COLOR": "1",
+    }
+    planned = subprocess.run(
+        [
+            "bash",
+            str(_project_root() / "install.sh"),
+            "--agent-plan-json",
+            str(plan_path),
+            "--codex",
+            "--project",
+            str(workspace),
+            "--yes",
+        ],
+        cwd=_project_root(),
+        env=env,
+        stdin=subprocess.DEVNULL,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert planned.returncode == 0, planned.stdout + planned.stderr
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+
+    applied = subprocess.run(
+        [plan["apply_contract"]["executable"], *plan["apply_contract"]["argv"]],
+        cwd=_project_root(),
+        env=env,
+        stdin=subprocess.DEVNULL,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    manifest = json.loads((workspace / ".agents/.install-manifest.json").read_text(encoding="utf-8"))
+    assert manifest["source_strategy"] == plan["source"]["strategy"]
+    assert manifest["source_checkout"] == plan["source"]["checkout"]
+    assert manifest["source_origin"] == plan["source"]["origin"]
+    assert manifest["source_branch"] == plan["source"]["branch"]
+    assert manifest["source_commit"] == plan["source"]["commit"]
+
+
 def test_agent_uninstall_plan_reports_managed_block_and_exact_count(tmp_path: Path) -> None:
     workspace = tmp_path / "agent-uninstall-workspace"
     installed = _run_copy_action(
