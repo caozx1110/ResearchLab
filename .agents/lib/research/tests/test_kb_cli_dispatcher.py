@@ -14,7 +14,8 @@ import pytest
 from research.common import load_yaml, write_yaml_if_changed
 from research.core import default_record, default_runtime_preferences, ensure_workspace, record_path
 from research.evidence import build_verification_receipt
-from research.paths import runtime_preferences_path
+from research.paths import config_root, runtime_preferences_path
+from research.preference_selection import eligible_preferences, record_effective_selection
 
 
 PUBLIC_GOVERNANCE_FORBIDDEN = (
@@ -271,6 +272,7 @@ def _write_ready_review_subject(root: Path, owner_kind: str) -> tuple[str, Path]
         return f"idea_discussion_conclusion:{judgement_id}", sidecar_path
 
     if owner_kind == "method":
+        method = _load_method_designer()
         idea_id = "i-public-method-123456"
         repo_id = "r-public-method-123456"
         program_id = "program-public-method"
@@ -315,11 +317,27 @@ def _write_ready_review_subject(root: Path, owner_kind: str) -> tuple[str, Path]
                 "claims": claims,
             },
         }
+        preference_context = method.method_preference_state(
+            method.resolve_method_preferences(
+                root,
+                idea,
+                program_id=program_id,
+                idea_id=idea_id,
+                selection_id="",
+            )
+        )
+        choice["preference_context"] = preference_context
         choice_path = design_root / f"{idea_id}-repo-choice.yaml"
         build_verification_receipt(choice, design_root, source_roots={repo_id: repo_path.parent})
         write_yaml_if_changed(choice_path, choice)
-        write_yaml_if_changed(design_root / f"{idea_id}-interfaces.yaml", {"proposal_status": "ready_for_review"})
-        write_yaml_if_changed(design_root / f"{idea_id}-experiment-matrix.yaml", {"proposal_status": "ready_for_review", "experiments": []})
+        write_yaml_if_changed(
+            design_root / f"{idea_id}-interfaces.yaml",
+            {"proposal_status": "ready_for_review", "preference_context": preference_context},
+        )
+        write_yaml_if_changed(
+            design_root / f"{idea_id}-experiment-matrix.yaml",
+            {"proposal_status": "ready_for_review", "experiments": [], "preference_context": preference_context},
+        )
         write_yaml_if_changed(root / "kb/programs" / program_id / "state.yaml", {"program_id": program_id, "stage": "idea-review", "selected_idea_id": idea_id})
         (design_root / f"{idea_id}-method.md").write_text(
             f"- Deterministic leading candidate: `{repo_id}`\n- Status: proposal only; runtime-agent evidence and human confirmation are still required.\n",
@@ -2458,6 +2476,10 @@ def test_kb_review_tty_and_pipe_are_identical_and_emit_private_protocol(monkeypa
         assert preference_contract["skill"] == "kb-cli"
         assert preference_contract["operation"] == "review-display"
         assert len(preference_contract["task_context_digest"]) == 64
+        assert preference_contract["task_context"]["displayed_count"] == 3
+        assert preference_contract["neutral_without_selection"] is True
+        assert preference_contract["selection_applied"] is False
+        assert preference_contract["display_density"] == "standard"
         assert preference_contract["allowed_effect"] == "explanation-density-only"
         assert preference_contract["hard_display_cap"] == 3
         identity_action = protocol["next_actions"][1]
@@ -2474,6 +2496,145 @@ def test_kb_review_tty_and_pipe_are_identical_and_emit_private_protocol(monkeypa
             },
             "then": "apply_review_snapshot_decision",
         }
+
+
+def test_kb_review_applies_only_selected_reporting_density_without_hiding_primary_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    kb = _load_kb_cli()
+    _prepare_review_workspace(tmp_path)
+    write_yaml_if_changed(
+        config_root(tmp_path) / "user-profile.yaml",
+        {"personalization": {"reporting_style": "concise"}},
+    )
+    record = _pending_record("p-density-123456", "paper", "Density")
+    record["payload"]["claims"][0]["evidence_refs"].append(
+        {
+            "source_unit_id": record["id"],
+            "artifact": "raw/source.txt",
+            "locator": "line:2",
+            "quote": "Density 的第二条逐字依据",
+        }
+    )
+    monkeypatch.setattr(
+        kb,
+        "forward_command",
+        lambda root, relative_script, args, *, stream=True: kb.CommandResult((relative_script, *args), 0),
+    )
+    monkeypatch.setattr(kb, "load_review_records", lambda root, fuzzy: [record])
+
+    assert kb.main(["--root", str(tmp_path), "--agent-protocol", "neutral.json", "review"]) == 0
+    neutral_output = capsys.readouterr().out
+    neutral = json.loads((tmp_path / "kb/.runtime/neutral.json").read_text(encoding="utf-8"))
+    preference_contract = neutral["next_actions"][0]["effective_preferences"]
+    eligible = eligible_preferences(tmp_path, skill="kb-cli", operation="review-display")
+    reporting_item = next(
+        item for item in eligible["items"] if item["path"] == "profile.personalization.reporting_style"
+    )
+    record_effective_selection(
+        tmp_path,
+        {
+            "selection_id": "prefsel-review-density",
+            "skill": "kb-cli",
+            "operation": "review-display",
+            "catalog_digest": eligible["catalog_digest"],
+            "task_context": preference_contract["task_context"],
+            "selected": [
+                {
+                    "preference_id": reporting_item["preference_id"],
+                    "reason": "the user requested concise review cards",
+                    "application": "omit only redundant evidence-count prose",
+                }
+            ],
+            "excluded": [
+                {"preference_id": item["preference_id"], "reason": "not relevant to display density"}
+                for item in eligible["items"]
+                if item["preference_id"] != reporting_item["preference_id"]
+            ],
+        },
+    )
+
+    assert kb.main([
+        "--root", str(tmp_path), "--agent-protocol", "compact.json", "review",
+        "--preference-selection-id", "prefsel-review-density",
+    ]) == 0
+    compact_output = capsys.readouterr().out
+    compact = json.loads((tmp_path / "kb/.runtime/compact.json").read_text(encoding="utf-8"))
+
+    assert "Density 的待确认判断" in compact_output
+    assert "Density 的逐字依据" in compact_output
+    assert "另有 1 条已核验证据" in neutral_output
+    assert "另有 1 条已核验证据" not in compact_output
+    applied = compact["next_actions"][0]["effective_preferences"]
+    assert applied["selection_applied"] is True
+    assert applied["selected_soft_paths"] == ["profile.personalization.reporting_style"]
+    assert applied["display_density"] == "compact"
+    assert applied["selection_binding"]["selection_id"] == "prefsel-review-density"
+
+
+def test_kb_review_rejects_wrong_task_preference_before_snapshot_write(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    kb = _load_kb_cli()
+    _prepare_review_workspace(tmp_path)
+    write_yaml_if_changed(
+        config_root(tmp_path) / "user-profile.yaml",
+        {"personalization": {"reporting_style": "detailed"}},
+    )
+    record = _pending_record("p-stale-density-123456", "paper", "Stale density")
+    monkeypatch.setattr(
+        kb,
+        "forward_command",
+        lambda root, relative_script, args, *, stream=True: kb.CommandResult((relative_script, *args), 0),
+    )
+    monkeypatch.setattr(kb, "load_review_records", lambda root, fuzzy: [record])
+    eligible = eligible_preferences(tmp_path, skill="kb-cli", operation="review-display")
+    reporting_item = next(
+        item for item in eligible["items"] if item["path"] == "profile.personalization.reporting_style"
+    )
+    record_effective_selection(
+        tmp_path,
+        {
+            "selection_id": "prefsel-review-wrong-task",
+            "skill": "kb-cli",
+            "operation": "review-display",
+            "catalog_digest": eligible["catalog_digest"],
+            "task_context": {
+                "review_snapshot_digest": "0" * 64,
+                "displayed_count": 1,
+                "hard_display_cap": 3,
+            },
+            "selected": [
+                {
+                    "preference_id": reporting_item["preference_id"],
+                    "reason": "detailed display is useful",
+                    "application": "add only a bounded evidence count summary",
+                }
+            ],
+            "excluded": [
+                {"preference_id": item["preference_id"], "reason": "not relevant to display density"}
+                for item in eligible["items"]
+                if item["preference_id"] != reporting_item["preference_id"]
+            ],
+        },
+    )
+
+    assert kb.main([
+        "--root", str(tmp_path), "--agent-protocol", "wrong-task.json", "review",
+        "--preference-selection-id", "prefsel-review-wrong-task",
+    ]) == 2
+    public = capsys.readouterr()
+    assert public.out == ""
+    assert "Agent 需要重新选择" in public.err
+    snapshot_root = tmp_path / "kb/.runtime/review-snapshots"
+    assert not snapshot_root.exists() or not list(snapshot_root.glob("*.json"))
+    protocol = json.loads((tmp_path / "kb/.runtime/wrong-task.json").read_text(encoding="utf-8"))
+    assert protocol["status"] == "agent_action_required"
+    assert protocol["details"]["review_preference_error"] == "stale_or_invalid"
 
 
 def test_review_top_three_sort_uses_priority_as_impact_then_oldest_first() -> None:

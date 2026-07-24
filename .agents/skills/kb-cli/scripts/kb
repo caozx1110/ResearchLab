@@ -67,6 +67,7 @@ from research.review_batches import (
     preview_obsidian_review_batch,
 )
 from research.journal import current_operation_id, mutation_transaction
+from research.preference_selection import resolve_operation_preferences
 from research import updater
 from research.obsidian import obsidian_projection_status, update_obsidian_projection
 
@@ -2888,7 +2889,40 @@ def public_review_projection(record: dict, root: Path) -> dict[str, object]:
     }
 
 
-def print_review_item(record: dict, projection: Mapping[str, object], root: Path) -> None:
+def review_display_preference_context(review_items: Sequence[Mapping[str, object]]) -> dict[str, object]:
+    """Canonical, content-bound inputs for the optional review display receipt."""
+    serialized = json.dumps(
+        list(review_items),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return {
+        "review_snapshot_digest": hashlib.sha256(serialized).hexdigest(),
+        "displayed_count": len(review_items),
+        "hard_display_cap": _PUBLIC_REVIEW_LIMIT,
+    }
+
+
+def review_display_density(preferences: Mapping[str, object]) -> str:
+    """Map only an explicitly selected reporting style to display density."""
+    values = preferences.get("values_by_path")
+    values = values if isinstance(values, Mapping) else {}
+    reporting_style = str(values.get("profile.personalization.reporting_style") or "").strip().casefold()
+    if reporting_style in {"concise", "compact", "brief", "简洁", "精简"}:
+        return "compact"
+    if reporting_style in {"detailed", "expanded", "verbose", "详细", "展开"}:
+        return "expanded"
+    return "standard"
+
+
+def print_review_item(
+    record: dict,
+    projection: Mapping[str, object],
+    root: Path,
+    *,
+    density: str = "standard",
+) -> None:
     raw_unit_id = str(record.get("id") or "-")
     unit_id = _public_display_text(raw_unit_id, root, "编号已隐藏", 100)
     raw_kind = str(record.get("kind") or "")
@@ -2906,6 +2940,9 @@ def print_review_item(record: dict, projection: Mapping[str, object], root: Path
             print(f"  - {item['label']}：{item['text']}")
     claims = projection.get("claims")
     claims = claims if isinstance(claims, list) else []
+    if density == "expanded" and claims:
+        evidence_count = sum(1 + _natural_count(claim.get("extra_evidence_count")) for claim in claims)
+        print(f"  本项包含 {len(claims)} 条待确认判断，共绑定 {evidence_count} 条逐字证据。")
     if claims:
         print("  待确认内容：")
     for claim in claims:
@@ -2913,7 +2950,7 @@ def print_review_item(record: dict, projection: Mapping[str, object], root: Path
         if claim.get("evidence"):
             print(f"    证据摘录（安全显示）：“{claim['evidence']}”")
         extra_count = _natural_count(claim.get("extra_evidence_count"))
-        if extra_count:
+        if extra_count and density != "compact":
             print(f"    另有 {extra_count} 条已核验证据。")
 
 
@@ -3981,6 +4018,34 @@ def handle_review(args: argparse.Namespace, root: Path) -> int:
         displayed_ids = [str(record.get("id") or "") for record in displayed]
         configured_actor = default_confirmed_by(root)
         confirmation_identity_required = not configured_actor or is_ai_signer(configured_actor)
+        review_items = [
+            _review_decision_routes(
+                record,
+                card_by_subject.get((str(record.get("kind") or ""), str(record.get("id") or ""))),
+            )
+            for record in displayed
+        ]
+        preference_task_context = review_display_preference_context(review_items)
+        try:
+            effective_preferences = resolve_operation_preferences(
+                root,
+                selection_id=str(getattr(args, "preference_selection_id", "") or ""),
+                skill="kb-cli",
+                operation="review-display",
+                canonical_inputs=preference_task_context,
+            )
+        except ValueError:
+            set_protocol_status("agent_action_required", review_preference_error="stale_or_invalid")
+            print("这次显示偏好与当前待确认内容不一致；Agent 需要重新选择后再展示。", file=sys.stderr)
+            return 2
+        density = review_display_density(effective_preferences)
+        selected_soft_paths = sorted(
+            str(item.get("path") or "")
+            for item in effective_preferences.get("soft_items", [])
+            if isinstance(item, Mapping) and str(item.get("path") or "")
+        )
+        selection_binding = effective_preferences.get("binding")
+        selection_binding = dict(selection_binding) if isinstance(selection_binding, Mapping) else {}
         set_protocol_status(
             "needs_user_authorization",
             review_count=len(pending),
@@ -3993,17 +4058,9 @@ def handle_review(args: argparse.Namespace, root: Path) -> int:
             invalid_review_count=len(structurally_blocked),
             unsafe_review_count=len(unsafe_blocked),
             confirmation_identity_required=confirmation_identity_required,
+            review_display_density=density,
+            preference_selection_applied=bool(selection_binding),
         )
-        review_items = [
-            _review_decision_routes(
-                record,
-                card_by_subject.get((str(record.get("kind") or ""), str(record.get("id") or ""))),
-            )
-            for record in displayed
-        ]
-        review_task_digest = hashlib.sha256(
-            json.dumps(review_items, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        ).hexdigest()
         snapshot_token = _store_review_snapshot(
             root,
             str(getattr(args, "agent_protocol", "") or ""),
@@ -4042,8 +4099,13 @@ def handle_review(args: argparse.Namespace, root: Path) -> int:
             effective_preferences={
                 "skill": "kb-cli",
                 "operation": "review-display",
-                "task_context_digest": review_task_digest,
-                "must_record_before_presentation": True,
+                "task_context": preference_task_context,
+                "task_context_digest": effective_preferences["task_context_digest"],
+                "selection_binding": selection_binding,
+                "selection_applied": bool(selection_binding),
+                "selected_soft_paths": selected_soft_paths,
+                "neutral_without_selection": True,
+                "display_density": density,
                 "allowed_effect": "explanation-density-only",
                 "hard_display_cap": _PUBLIC_REVIEW_LIMIT,
             },
@@ -4087,6 +4149,7 @@ def handle_review(args: argparse.Namespace, root: Path) -> int:
                 record,
                 projection_by_subject[(str(record.get("kind") or ""), str(record.get("id") or ""))],
                 root,
+                density=density,
             )
         if remaining_count:
             print(f"另有 {remaining_count} 条已准备好的内容暂未展开；处理这批后可继续查看。")
@@ -4199,6 +4262,7 @@ def register_review(subparsers: argparse._SubParsersAction[argparse.ArgumentPars
     parser.add_argument("--decision-evidence", action="append", default=[], help=argparse.SUPPRESS)
     parser.add_argument("--user-authorization", default="", help=argparse.SUPPRESS)
     parser.add_argument("--rejection-reason", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--preference-selection-id", default="", help=argparse.SUPPRESS)
     parser.set_defaults(handler=handle_review)
 
 
