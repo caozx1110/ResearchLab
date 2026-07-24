@@ -1468,12 +1468,6 @@ uninstall_workspace_copy() {
   [ -d "$WORKSPACE_ROOT/.agents" ] && [ ! -L "$WORKSPACE_ROOT/.agents" ] || die "这个工作区没有可卸载的受管配置"
   manifest_is_ours "$MANIFEST_PATH" || die "无法确认安装记录，为避免误删已停止卸载"
   had_manifest=1
-  remove_symlink_if_matches "$WORKSPACE_ROOT/.claude/skills" "../.agents/skills" "$SKILLS_SRC"
-  if claude_links_to_workspace_agents "$WORKSPACE_ROOT/CLAUDE.md"; then
-    :
-  else
-    remove_managed_block "$WORKSPACE_ROOT/CLAUDE.md"
-  fi
   ws_sync uninstall
   uninstall_kb_on_path
   [ "$had_manifest" -eq 1 ] && info "研究资料和本地运行环境已保留；这个工作区现在不再由安装器管理。"
@@ -1516,7 +1510,7 @@ PY
 guard_selected_managed_parents() {
   # Validate every selected integration directory before ws_sync performs the
   # first copy. A later ensure_dir() check cannot prevent a half-install.
-  if [ "$CONFIG_CLAUDE" -eq 1 ]; then
+  if [ "$CONFIG_CLAUDE" -eq 1 ] && [ "$COPY_PROJECT" -eq 0 ]; then
     if [ "$SCOPE" = "system" ]; then
       guard_managed_directory_chain "$HOME/.claude/skills"
     else
@@ -1964,7 +1958,9 @@ confirm_plan
 
 if [ "$ACTION" != "uninstall" ]; then
   preflight_yaml
-  guard_claude_project_target
+  if [ "$COPY_PROJECT" -eq 0 ]; then
+    guard_claude_project_target
+  fi
   guard_selected_managed_parents
 fi
 
@@ -1980,7 +1976,7 @@ case "$ACTION" in
     if [ "$CONFIG_CLAUDE" -eq 1 ]; then
       if [ "$SCOPE" = "system" ]; then
         install_claude_system
-      else
+      elif [ "$COPY_PROJECT" -eq 0 ]; then
         install_claude_project
       fi
     fi
@@ -2001,9 +1997,6 @@ case "$ACTION" in
     update_workspace_copy
     UPDATE_CONFIG_CLAUDE=$(manifest_agent_enabled "$MANIFEST_PATH" claude 2>/dev/null || printf '1')
     UPDATE_CONFIG_CODEX=$(manifest_agent_enabled "$MANIFEST_PATH" codex 2>/dev/null || printf '0')
-    if [ "$UPDATE_CONFIG_CLAUDE" = "1" ]; then
-      install_claude_project
-    fi
     if [ "$UPDATE_CONFIG_CODEX" = "1" ]; then
       install_codex_project
     fi
@@ -2016,9 +2009,6 @@ case "$ACTION" in
     reinstall_workspace_copy
     UPDATE_CONFIG_CLAUDE=$(manifest_agent_enabled "$MANIFEST_PATH" claude 2>/dev/null || printf '1')
     UPDATE_CONFIG_CODEX=$(manifest_agent_enabled "$MANIFEST_PATH" codex 2>/dev/null || printf '0')
-    if [ "$UPDATE_CONFIG_CLAUDE" = "1" ]; then
-      install_claude_project
-    fi
     if [ "$UPDATE_CONFIG_CODEX" = "1" ]; then
       install_codex_project
     fi

@@ -1465,7 +1465,7 @@ def test_incomplete_rollback_preserves_stage_and_original_backup(
 
     assert manifest_path.read_bytes() == manifest_before
     assert version.read_bytes() == b"0.3.0\n"
-    stages = list((workspace / ".agents").glob(".workspace-oss-stage-*"))
+    stages = list(workspace.glob(".workspace-oss-stage-*"))
     assert len(stages) == 1
     backup_bytes = [path.read_bytes() for path in (stages[0] / "backups").iterdir() if path.is_file()]
     assert b"0.2.0\n" in backup_bytes
@@ -1476,7 +1476,9 @@ def test_uninstall_root_fsync_failure_releases_root_lease_after_manifest_last(
     tmp_path: Path,
 ) -> None:
     ws_sync = _load_ws_sync()
-    workspace, manifest_path, _manifest_before = _write_concurrency_workspace(tmp_path)
+    workspace, manifest_path, manifest_before = _write_concurrency_workspace(tmp_path)
+    version = workspace / ".agents" / "VERSION"
+    version_before = version.read_bytes()
     root_status = workspace.stat()
     real_fsync = ws_sync.os.fsync
     failed = False
@@ -1500,7 +1502,112 @@ def test_uninstall_root_fsync_failure_releases_root_lease_after_manifest_last(
     with pytest.raises(OSError, match="root-fsync"):
         ws_sync.uninstall(args)
 
-    assert not manifest_path.exists()
-    assert not (workspace / ".agents").exists()
+    assert manifest_path.read_bytes() == manifest_before
+    assert version.read_bytes() == version_before
+    assert (workspace / ".agents").is_dir()
     with ws_sync.workspace_lease(workspace):
         pass
+
+    assert ws_sync.uninstall(args) == 0
+    assert not manifest_path.exists()
+    assert not (workspace / ".agents").exists()
+
+
+def test_stale_manifest_blocks_payload_and_project_claude_as_one_transaction(tmp_path: Path) -> None:
+    ws_sync = _load_ws_sync()
+    workspace, manifest_path, manifest_before = _write_concurrency_workspace(tmp_path)
+    version = workspace / ".agents" / "VERSION"
+    version_before = version.read_bytes()
+    snapshot = ws_sync.load_manifest_snapshot(workspace)
+    assert snapshot is not None
+    replacement_path = manifest_path.with_name(".same-bytes-new-inode")
+    replacement_path.write_bytes(manifest_before)
+    os.replace(replacement_path, manifest_path)
+    replacement_manifest = dict(snapshot.payload)
+    replacement_manifest["marker"] = "must-not-commit"
+
+    with pytest.raises(ws_sync.SyncError, match="changed after planning"):
+        ws_sync.transactional_apply(
+            workspace,
+            {".agents/VERSION": (b"9.9.9\n", 0o644)},
+            [],
+            replacement_manifest,
+            dry_run=False,
+            expected_manifest=snapshot,
+            project_claude=(True, False, _project_root() / ".agents" / "skills"),
+        )
+
+    assert manifest_path.read_bytes() == manifest_before
+    assert version.read_bytes() == version_before
+    assert not (workspace / "CLAUDE.md").exists()
+    assert not (workspace / ".claude").exists()
+    assert not list(workspace.glob(".workspace-oss-stage-*"))
+
+
+def test_uninstall_root_fsync_failure_restores_project_claude_and_payload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    ws_sync = _load_ws_sync()
+    workspace = tmp_path / "claude-root-fsync-workspace"
+    workspace.mkdir()
+    install_args = SimpleNamespace(
+        repo=str(_project_root()),
+        dir=str(workspace),
+        source="",
+        agents="claude",
+        operation_time="2026-07-25T00:00:00Z",
+        expected_manifest_state="",
+        source_commit="test-commit",
+        source_origin="local",
+        source_checkout=str(_project_root()),
+        source_branch="",
+        source_strategy="local-checkout",
+        force=False,
+        dry_run=False,
+    )
+    assert ws_sync.install(install_args) == 0
+    manifest = workspace / ".agents" / ".install-manifest.json"
+    version = workspace / ".agents" / "VERSION"
+    agents = workspace / "AGENTS.md"
+    claude = workspace / "CLAUDE.md"
+    skills = workspace / ".claude" / "skills"
+    before = {
+        manifest: manifest.read_bytes(),
+        version: version.read_bytes(),
+        agents: agents.read_bytes(),
+        claude: claude.read_bytes(),
+    }
+    root_status = workspace.stat()
+    real_fsync = ws_sync.os.fsync
+    failed = False
+
+    def failed_root_fsync(descriptor: int) -> None:
+        nonlocal failed
+        current = os.fstat(descriptor)
+        if not failed and current.st_dev == root_status.st_dev and current.st_ino == root_status.st_ino:
+            failed = True
+            raise OSError("injected root-fsync-with-claude")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(ws_sync.os, "fsync", failed_root_fsync)
+    uninstall_args = SimpleNamespace(
+        repo=str(_project_root()),
+        dir=str(workspace),
+        dry_run=False,
+        expected_manifest_state="",
+    )
+
+    with pytest.raises(OSError, match="root-fsync-with-claude"):
+        ws_sync.uninstall(uninstall_args)
+
+    for path, content in before.items():
+        assert path.read_bytes() == content
+    assert skills.is_symlink()
+    assert os.readlink(skills) == "../.agents/skills"
+    assert not list(workspace.glob(".workspace-oss-stage-*"))
+
+    assert ws_sync.uninstall(uninstall_args) == 0
+    assert not (workspace / ".agents").exists()
+    assert not claude.exists()
+    assert not skills.exists() and not skills.is_symlink()
