@@ -95,9 +95,11 @@ def test_agent_route_decision_must_follow_snapshot_and_dependency_order() -> Non
     module = _load_orchestrator_module()
     snapshot = module.route_candidate_snapshot("找论文，然后分析论文")
     decision = {
-        "route_snapshot_digest": snapshot["route_snapshot_digest"],
+        "task_digest": snapshot["route_snapshot_digest"],
+        "intents": ["find a bounded paper set", "analyze the selected papers"],
+        "negated_intents": [],
         "rationale": "Discovery must produce the bounded set consumed by analysis.",
-        "steps": [
+        "ordered_steps": [
             {
                 "step_id": "search",
                 "owner_skill": "literature-search",
@@ -116,14 +118,15 @@ def test_agent_route_decision_must_follow_snapshot_and_dependency_order() -> Non
     }
 
     normalized = module.validate_route_decision(decision, snapshot)
-    assert [item["order"] for item in normalized["steps"]] == [1, 2]
+    assert [item["order"] for item in normalized["ordered_steps"]] == [1, 2]
+    assert normalized["owner_skills"] == ["literature-search", "paper-analyst"]
 
-    stale = {**decision, "route_snapshot_digest": "0" * 64}
+    stale = {**decision, "task_digest": "0" * 64}
     with pytest.raises(SystemExit, match="stale"):
         module.validate_route_decision(stale, snapshot)
     invalid_dependency = {
         **decision,
-        "steps": [{**decision["steps"][0], "depends_on": ["analyze"]}],
+        "ordered_steps": [{**decision["ordered_steps"][0], "depends_on": ["analyze"]}],
     }
     with pytest.raises(SystemExit, match="earlier"):
         module.validate_route_decision(invalid_dependency, snapshot)
@@ -143,9 +146,11 @@ def test_agent_route_decision_can_recover_owners_missed_by_keyword_hints() -> No
         snapshot = module.route_candidate_snapshot(task)
         assert snapshot["planning_required"] is True
         decision = {
-            "route_snapshot_digest": snapshot["route_snapshot_digest"],
+            "task_digest": snapshot["route_snapshot_digest"],
+            "intents": [f"complete the requested {owner} step" for owner in owners],
+            "negated_intents": ["do not synthesize a survey"] if task.startswith("不要综述") else [],
             "rationale": "The complete task needs this ordered set even when lexical hints are incomplete.",
-            "steps": [
+            "ordered_steps": [
                 {
                     "step_id": f"step-{index}",
                     "owner_skill": owner,
@@ -157,15 +162,17 @@ def test_agent_route_decision_can_recover_owners_missed_by_keyword_hints() -> No
             ],
         }
         normalized = module.validate_route_decision(decision, snapshot)
-        assert [step["owner_skill"] for step in normalized["steps"]] == owners
+        assert [step["owner_skill"] for step in normalized["ordered_steps"]] == owners
 
     invalid = module.route_candidate_snapshot("做一个任务")
     with pytest.raises(SystemExit, match="non-routable"):
         module.validate_route_decision(
             {
-                "route_snapshot_digest": invalid["route_snapshot_digest"],
+                "task_digest": invalid["route_snapshot_digest"],
+                "intents": ["route the task"],
+                "negated_intents": [],
                 "rationale": "Do not route normal work into maintainer-only UI tooling.",
-                "steps": [
+                "ordered_steps": [
                     {
                         "step_id": "dev-ui",
                         "owner_skill": "research-navigator",

@@ -279,8 +279,10 @@ def route_candidate_snapshot(task: str) -> dict[str, Any]:
 
 def route_decision_fill_template(snapshot: dict[str, Any]) -> dict[str, Any]:
     return {
-        "route_snapshot_digest": str(snapshot.get("route_snapshot_digest") or ""),
-        "steps": [],
+        "task_digest": str(snapshot.get("route_snapshot_digest") or ""),
+        "intents": [],
+        "negated_intents": [],
+        "ordered_steps": [],
         "rationale": "",
     }
 
@@ -289,14 +291,28 @@ def validate_route_decision(decision: object, snapshot: dict[str, Any]) -> dict[
     """Validate an Agent-authored ordered route without judging its semantics."""
     if not isinstance(decision, dict):
         raise SystemExit("Route decision fill must be a mapping")
-    if str(decision.get("route_snapshot_digest") or "") != str(
+    expected_fields = {"task_digest", "intents", "negated_intents", "ordered_steps", "rationale"}
+    if set(decision) != expected_fields:
+        raise SystemExit("Route decision fields are not canonical")
+    if str(decision.get("task_digest") or "") != str(
         snapshot.get("route_snapshot_digest") or ""
     ):
         raise SystemExit("Route decision is stale: task snapshot changed")
+    semantic_lists: dict[str, list[str]] = {}
+    for field in ("intents", "negated_intents"):
+        raw_values = decision.get(field)
+        if not isinstance(raw_values, list) or len(raw_values) > 12:
+            raise SystemExit(f"Route decision {field} must be a bounded list")
+        values = [" ".join(str(value or "").split()) for value in raw_values]
+        if any(not value or len(value) > 240 for value in values) or len(values) != len(set(values)):
+            raise SystemExit(f"Route decision {field} entries must be unique bounded text")
+        semantic_lists[field] = values
+    if not semantic_lists["intents"]:
+        raise SystemExit("Route decision requires at least one positive intent")
     rationale = str(decision.get("rationale") or "").strip()
     if not rationale:
         raise SystemExit("Route decision requires a rationale")
-    raw_steps = decision.get("steps")
+    raw_steps = decision.get("ordered_steps")
     if not isinstance(raw_steps, list) or not raw_steps or len(raw_steps) > 12:
         raise SystemExit("Route decision requires one to twelve ordered steps")
     allowed_owners = set(snapshot.get("owner_catalog") or [])
@@ -337,8 +353,18 @@ def validate_route_decision(decision: object, snapshot: dict[str, Any]) -> dict[
             }
         )
     return {
-        "route_snapshot_digest": str(snapshot.get("route_snapshot_digest") or ""),
-        "steps": normalized_steps,
+        "task_digest": str(snapshot.get("route_snapshot_digest") or ""),
+        "intents": semantic_lists["intents"],
+        "negated_intents": semantic_lists["negated_intents"],
+        "ordered_steps": normalized_steps,
+        "owner_skills": list(dict.fromkeys(step["owner_skill"] for step in normalized_steps)),
+        "governance_gates": list(
+            dict.fromkeys(
+                step["governance_gate"]
+                for step in normalized_steps
+                if step["governance_gate"] != "none"
+            )
+        ),
         "rationale": rationale,
         "generated_by": "runtime-agent",
     }
