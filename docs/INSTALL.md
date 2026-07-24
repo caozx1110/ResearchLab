@@ -18,8 +18,8 @@
 
 1. 将链接视为代码来源而不是知识材料；先用版本控制把它检出到临时目录，不通过管道执行远端脚本。记录仓库 origin、branch 与 commit，并检查根目录存在 `install.sh`、`.agents/VERSION`、`.agents/AGENTS.md` 与 `.agents/skills/`。
 2. 把当前 workspace 根作为安装目标，绝不能把 `kb/` 当目标；已有普通根 `AGENTS.md` 时，确认安装器只追加/更新带 marker 的受管区块并保留块外原文。目标是 symlink、类型冲突、marker 异常或已有受管区块漂移时停止解释，不能覆盖整文件或猜测修复。
-3. 先让安装器生成 Agent JSON 计划（它隐含 dry-run）。终端保持短预览并显示目标数、冲突数和 plan digest；JSON 精确列出 action、scope、tools、source provenance、canonical distributable tree map/digest、按执行顺序排列的全部 targets、每项来源内容 digest 与目标前置状态、冲突、条件性 runtime 变化及可复现的 apply contract。除 Agent 明确指定的 JSON 计划文件外，这一步不写 workspace、HOME、runtime 或 Python cache。计划文件必须位于目标 workspace 与 HOME 之外。
-4. 核对计划中的 source commit 与 source tree digest 仍等于当前 checkout，目标只包含受管 `.agents/`、根规则文件、所选 Agent 接入和明确标出的条件性 `.venv` runtime tree；再在用户已要求“安装”的授权范围内原样执行 apply contract。安装器会在首个目标写入前重新验证计划 digest、源码树和每个目标的前置状态；计划后出现未提交源码漂移、计划篡改或目标并发变化时整次操作零写失败。计划和应用都使用显式参数，非交互运行不读取 stdin。
+3. 先让安装器生成 Agent JSON 计划（它隐含 dry-run）。终端保持短预览并显示目标数、冲突数和 semantic plan digest；JSON 精确列出 action、scope、tools、source provenance、canonical distributable tree map/digest、按执行顺序排列的全部 targets、每项来源内容 digest 与目标前置状态、冲突、条件性 runtime 变化及可复现的 apply contract。除 Agent 明确指定的 JSON 计划文件外，这一步不写 workspace、HOME、runtime 或 Python cache。计划文件必须位于目标 workspace 与 HOME 之外。
+4. 核对计划中的 source commit 与 source tree digest 仍等于当前 checkout，目标只包含受管 `.agents/`、根规则文件、所选 Agent 接入和明确标出的条件性 `.venv` runtime tree。完成审阅后，Agent 自动计算这份最终计划文件的精确 byte SHA-256，替换 apply contract 中的 `COMPUTE_AFTER_REVIEW` 占位，再在用户已要求“安装”的授权范围内执行；用户不需要查看、复制或填写 digest。安装器会在解析 JSON 或触碰首个目标前，以 no-follow 方式读取同一个普通文件 inode，同时校验外部 byte SHA 与 semantic plan digest，再验证源码树和每个目标的前置状态。计划后出现空白、换行、键序、编码字节、未提交源码、来源身份或目标状态变化时整次操作零写失败。计划和应用都使用显式参数，非交互运行不读取 stdin。
 5. 安装后核对 manifest、20 个 skill、bundle version、`kb help` 与临时目录中的 `kb init`；真实 `kb/` 不参与验收。
 6. 不安装 Obsidian 插件、daemon、cron、watcher 或全局 Python 包；不 push、tag、publish，也不改 shell 配置。可选终端快捷入口只在用户明确要求时创建。
 
@@ -102,7 +102,7 @@ Agent 安装前的可审计计划把终端输出限制为短预览，并把每�
 bash install.sh --agent-plan-json /tmp/workspace-oss-plan.json --claude --project /path/to/workspace --yes
 ```
 
-JSON 中的 `targets` 是完整、按执行顺序排列的精确清单，并为所有 copy/write/managed-block 目标保存来源内容 digest、为每个目标保存 `absent | regular | symlink | directory` 前置状态；`source.distributable_tree` 绑定受管 payload、安装器输入的相对路径、类型、mode、字节（或 symlink target）与总 digest；`conflicts` 列出会被保留或跳过的冲突；`conditional_runtime_changes` 单独暴露条件性运行环境树；`apply_contract` 携带计划路径、plan digest、source tree digest、source commit 与无交互应用参数。Agent 必须先核对这些字段，再原样执行应用合同，不能把计划模式换成网络下载或隐藏脚本执行。
+JSON 中的 `targets` 是完整、按执行顺序排列的精确清单，并为所有 copy/write/managed-block 目标保存来源内容 digest、为每个目标保存 `absent | regular | symlink | directory` 前置状态；`source.distributable_tree` 绑定受管 payload、安装器输入的相对路径、类型、mode、字节（或 symlink target）与总 digest；`conflicts` 列出会被保留或跳过的冲突；`conditional_runtime_changes` 单独暴露条件性运行环境树；`apply_contract` 携带计划路径、semantic plan digest、source tree digest、source commit 与无交互应用参数，并以 `COMPUTE_AFTER_REVIEW` 明示最终文件 byte SHA 必须在审阅后由 Agent 外部计算。该 byte SHA 不写回同一 JSON，避免伪造不可能成立的自引用文件哈希。Agent 必须核对这些字段、自动填入最终 byte SHA 后再执行应用合同，不能把计划模式换成网络下载或隐藏脚本执行；计划路径任一 leaf/ancestor symlink、非普通文件或超出有界大小都会在解析前被拒绝。
 
 同时配置 Claude 和 Codex：
 
