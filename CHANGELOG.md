@@ -4,12 +4,14 @@ All notable changes to this project will be documented here. The format follows 
 
 ## [Unreleased]
 
-The bundle currently declares **`0.2.0-rc.4`**. Its complete 1,041-test local suite and current installed-copy validation pass after adversarial remediation. The candidate is not a stable release or GA, has not been tagged or published, and carries no compatibility or response-time SLA. Real-source/Obsidian acceptance and a green hosted Linux/macOS CI matrix remain prerequisites for a release tag.
+The bundle currently declares **`0.2.0-rc.5`**. Its complete 1,089-test local suite and current installed-copy validation pass after the provider-neutral literature-search rebuild and three-agent adversarial review. The candidate is not a stable release or GA, has not been tagged or published, and carries no compatibility or response-time SLA. Real-source/Obsidian acceptance and a green hosted Linux/macOS CI matrix remain prerequisites for a release tag.
+
+## [0.2.0-rc.5] - Unreleased
 
 ### Added
 
 - Passage-level lexical retrieval backed by an atomic SQLite FTS5 runtime cache, with deterministic in-memory fallback when the cache is absent, stale, or corrupt.
-- A bounded OpenAlex literature scout that writes factual candidates to source-search staging without creating canonical units or judging relevance.
+- A provider-neutral `literature-search` skill in which the runtime Agent selects currently available search/browser/connector tools, while durable staging records query events, candidate identities and discovery edges, retry state, evidence-backed screening, coverage/frontier, budgets, and stop rationales.
 - Survey consumer bindings for upstream content, confirmation, evidence, and selection freshness.
 - Experiment run fingerprints, repeat grouping, seed-aware duplicate protection, and explicit rerun provenance.
 - Expiring review snapshot tokens, safe runtime garbage collection, outcome-specific recovery messages, and public confirm/reject coverage across all four judgement owners.
@@ -28,7 +30,9 @@ The bundle currently declares **`0.2.0-rc.4`**. Its complete 1,041-test local su
 
 - Current ConfirmationReceipt consumers revalidate canonical source containment and verification artifact bytes; stale evidence can no longer enter ordinary reports.
 - Committed-operation undo/restore now compares every current target with the operation's `after_digests` before creating a recovery operation.
-- Source-search stage identity is immutable across explicit ID reuse, and persisted OpenAlex candidates deduplicate by work ID then canonical DOI while retaining manual review state.
+- Literature run identity now binds the original question, mode, frozen scope, and optional fresh-run ID. Stage paths, candidate/query/frontier references, actual budget usage, evidence levels, systematic flow arithmetic, external-content boundaries, and current-user selection are fail-closed; coverage/frontier histories survive resume.
+- Source-search stage identity is immutable across explicit ID reuse; literature candidates merge by DOI, arXiv ID/PMID, then canonical URL, support URL-only identity upgrades, preserve multi-query provenance and screening history, and fail closed on ambiguous or conflicting identities.
+- Literature discovery no longer bundles an OpenAlex client or any fixed provider. Exploratory searches make no completeness claim, and systematic searches require a frozen reproducibility contract or are labeled bounded-systematic.
 - Markdown passage extraction excludes standalone Obsidian block IDs, and cache health separates internal corruption from canonical staleness.
 - Empty review queues no longer create snapshot runtime state, and public help exposes both Obsidian update and status forms.
 - Source/self-contained installation preserves an exact `CLAUDE.md → AGENTS.md` symlink and rejects unrelated configuration links without following them.
@@ -52,7 +56,7 @@ The bundle currently declares **`0.2.0-rc.4`**. Its complete 1,041-test local su
 ### Security
 
 - Canonical judgement/evidence resolution rejects symlink components, cross-unit ambiguity, mismatched record identity, and non-regular records across discovery, confirmation, indexing, and reporting.
-- OpenAlex credentials are process-private and never persisted, logged, or exposed through user or Agent protocols.
+- Literature-search staging accepts only a provider-neutral field whitelist: raw responses, request URLs, cookies, tokens, unsafe URLs, unredacted errors, and snippet-backed substantive screening are rejected before workspace mutation.
 - Retrieval cache targets, review-token cleanup, survey bindings, and experiment artifacts are containment-checked and fail closed on stale or unsafe state.
 - Judgement confirmation now binds canonical subject identity, owner route, pending status, content digest, and verification digests; duplicate identities, stale snapshots, replayed tokens, and symlink escapes fail closed.
 - Confirmation remains fail-closed for AI signers, hollow judgement content, missing evidence, stale content digests, and absent current-user authorization.

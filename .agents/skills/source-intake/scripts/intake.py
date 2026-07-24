@@ -25,6 +25,7 @@ if __name__ == "__main__":
     ensure_managed_runtime(PROJECT_ROOT)
 
 from research.common import add_project_root_argument, confirm_command as shared_confirm_command, extract_pdf_record, parse_arxiv_id, print_resolved_project_roots, skill_script_for_command, utc_now_iso, write_yaml_if_changed
+from research.confirm import require_user_authorization
 from research.journal import journal_subprocess_env, mutation_transaction
 from research.intake_cli import add_intake_add_arguments
 from research.core import (
@@ -195,10 +196,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     add = subparsers.add_parser("add", help="Add a paper, repo, dataset, or blog source")
     add_intake_add_arguments(add, include_stage_options=True)
+    add.add_argument("--user-authorization", default="")
+    add.add_argument("--authorization-source", default="")
 
     for search_name in ("search", "stage-search"):
         stage = subparsers.add_parser(search_name, help="Record search candidates before canonical intake")
-        stage.add_argument("--kind", required=True, choices=["paper", "repo", "dataset", "blog"])
+        stage.add_argument("--kind", required=True, choices=["repo", "dataset", "blog"])
         stage.add_argument("--query", required=True)
         stage.add_argument("--stage-id", default="")
         stage.add_argument("--candidate-url", action="append", default=[])
@@ -469,6 +472,18 @@ def main() -> int:
     staged_candidate = None
     if args.stage_id and args.candidate_id:
         staged_candidate = resolve_search_candidate(root, args.stage_id, args.candidate_id)
+        staged_search = load_search_stage(root, args.stage_id)
+        if args.kind != str(staged_search.get("source_kind") or ""):
+            raise SystemExit("A staged candidate must be materialized with its recorded source kind.")
+        if staged_search.get("entry_skill") == "literature-search":
+            if source:
+                raise SystemExit(
+                    "A selected literature candidate must be materialized from its staged source."
+                )
+            require_user_authorization(
+                user_authorization=args.user_authorization,
+                authorization_source=args.authorization_source,
+            )
         source = source or str(staged_candidate.get("url") or "")
     if not source:
         raise SystemExit("Provide --source or use --stage-id + --candidate-id.")
@@ -575,6 +590,11 @@ def main() -> int:
         payload["candidate_ids"] = sorted(set(payload.get("candidate_ids", [])) | {args.candidate_id})
         stage_payload = load_search_stage(root, args.stage_id)
         payload["queries"] = sorted(set(payload.get("queries", [])) | {str(stage_payload.get("query") or "")})
+        if stage_payload.get("entry_skill") == "literature-search":
+            payload["user_selection"] = {
+                "user_authorization": args.user_authorization,
+                "authorization_source": args.authorization_source,
+            }
 
     if args.kind == "paper":
         canonical_arxiv_id = str(paper_metadata.get("arxiv_id") or parse_arxiv_id(source) or "").split("v", 1)[0]

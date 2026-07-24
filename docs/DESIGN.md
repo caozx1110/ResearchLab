@@ -40,7 +40,7 @@ Release bundle 不包含任何私有 `kb/`。安装、更新、storage sync 和�
 | 分组 | Skills |
 |---|---|
 | Governance and routing | `knowledge-base-manager`, `research-config-manager`, `source-intake`, `research-orchestrator` |
-| Discovery | `literature-scout` |
+| Discovery | `literature-search` |
 | Analysis | `paper-analyst`, `repo-analyst`, `dataset-analyst`, `blog-analyst`, `literature-synthesizer` |
 | Creation and execution | `idea-workbench`, `method-designer`, `experiment-workbench`, `report-author` |
 | Navigation and meta | `research-navigator`, `discussion-archivist`, `wiki-adapter`, `skill-evolution-advisor` |
@@ -64,7 +64,6 @@ Release bundle 不包含任何私有 `kb/`。安装、更新、storage sync 和�
 - `prefs.py`：runtime preferences 与 workspace scaffold；
 - `confirm.py`：write gate、confirmation receipt、link 与 lifecycle mutation；
 - `sources.py`：source intake 与 KB-local storage migration；
-- `openalex.py`：有界 OpenAlex Works 查询、字段白名单映射与去密钥错误边界；
 - `surveys.py`：survey 上游 byte binding、selection 与消费者只读 freshness 检查；
 - `source_materials.py`：PDF / HTML / Markdown / text 的完整 Markdown 阅读层、图片本地化、source map 与转换清单；
 - `index.py` / `retrieval.py`：canonical index、deterministic passage extraction、FTS5 cache、只读 stale fallback 与 ID compaction；
@@ -135,7 +134,7 @@ Receipt 不改变原 epistemic type。内容或 evidence 改变时，旧 receipt
 
 ## 外部发现、检索与新鲜度
 
-`literature-scout` 是第 19 个 skill，也是 source intake 之前的薄发现层。它把明确查询或 program evidence request 转成一次有界的 OpenAlex Works 请求，默认 25、硬上限 100，只保存字段白名单内的 fact metadata 到 `kb/synthesis/source-search/`。候选按 OpenAlex ID、再按 DOI 确定性去重；网络 payload、API key 与请求 URL 不落盘。stage 不直接创建 paper unit，也不判断 relevance、novelty 或 quality。
+`literature-search` 是第 19 个 skill，也是 source intake 之前的 provider-neutral 发现层。runtime Agent 根据当前真正可用的 search/browser/connector 能力选择工具，将原始研究问题拆成互补查询，按批次持久化 query event、候选 identity/discovery edge、fetch/retry 状态、基于 title/abstract/fulltext 证据的初筛、coverage/frontier 及其 history、硬预算和停止依据。run identity 同时绑定问题、模式、范围摘要和可选 fresh-run ID。脚本不联网、不选 provider、不理解论文，只守 schema、identity、引用完整性、journal/lock/atomic write 和实际用量 budget；Agent 决定下一条查询、引用展开、gap-followup 与 semantic saturation。默认 exploratory 不宣称完整；系统请求在来源、查询式、结果深度和筛选不能完全复现时诚实标为 bounded-systematic，且 bounded 永远标 partial。外部内容视为不可信数据；初筛 include/maybe 不是用户批准，只有当前对话明确选择的候选才进入 source-intake。stage 不创建 paper unit、不生成 survey，也不把 citation count、venue、作者声誉或排名当 relevance/quality。
 
 终端 `kb find` 使用 deterministic passage extractor。Markdown 以 heading/段落切分，长段用固定重叠窗口；每段保留 unit、artifact、locator、text 和 source digest。显式索引构建把完整临时 SQLite FTS5 数据库原子替换到 runtime cache，不使用 external-content 双表。查询最多返回五段摘要；cache 缺失、损坏或 digest stale 时，以同一抽取器做内存只读 fallback。缓存不是 canonical evidence，不进入 checkpoint，检索也不宣称 embedding 或跨语言语义能力。
 
@@ -228,4 +227,4 @@ Install manifest 记录 `source_origin` 与 `source_branch`，本地安装还可
 10. 在 Linux 与 macOS 支持的 Python 版本上验证；
 11. 发布前由冷 acceptance agent 端到端复现关键路径。
 
-当前标识为 `0.2.0-rc.4`。对抗性复审修复后的完整 1,041 项本地测试与当前 installed-copy 验收已全绿；SQLite 官方 HTML 真实入库与 Obsidian 1.12.7 Reading-view 尚未针对 rc.4 重跑，仍属于发布门。它不是 stable/GA，也尚未 tag 或 publish；真实来源/Obsidian 验收与 hosted Linux/macOS CI matrix 全绿仍是 release tag 的前置。文档、tag 与 changelog 不得把本地 RC 验收外推为稳定兼容或 SLA 承诺。
+当前标识为 `0.2.0-rc.5`。provider-neutral `literature-search` 重构与三路对抗复审后的完整 1,089 项本地测试和当前 installed-copy 验收已全绿；SQLite 官方 HTML 真实入库与 Obsidian 1.12.7 Reading-view 尚未针对 rc.5 重跑，仍属于发布门。它不是 stable/GA，也尚未 tag 或 publish；真实来源/Obsidian 验收与 hosted Linux/macOS CI matrix 全绿仍是 release tag 的前置。文档、tag 与 changelog 不得把本地 RC 验收外推为稳定兼容或 SLA 承诺。

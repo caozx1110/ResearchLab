@@ -9,6 +9,7 @@ backup status/warning (fixing the G7 silent-failure where PDFs stored nothing).
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import os
 import re
@@ -19,7 +20,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from .common import (
     FETCH_MAX_BYTES,
@@ -65,7 +66,6 @@ from .confirm import (
     write_record,
 )
 from .journal import mutation_transaction
-from .openalex import sanitize_openalex_provenance
 from .source_materials import (
     ARCHIVE_NAME,
     ASSETS_DIR_NAME,
@@ -365,11 +365,938 @@ def sync_storage_layout(project_root: Path) -> dict[str, Any]:
         return _sync_storage_layout_unlocked(project_root)
 
 
+SEARCH_MODES = {"exploratory", "bounded-systematic", "systematic"}
+SEARCH_QUERY_INTENTS = {
+    "seed",
+    "terminology",
+    "method",
+    "benchmark",
+    "survey",
+    "backward-citation",
+    "forward-citation",
+    "gap-followup",
+}
+SEARCH_QUERY_OUTCOMES = {
+    "success",
+    "partial",
+    "failed_retryable",
+    "failed_terminal",
+    "blocked",
+}
+SEARCH_RETRIEVAL_STATUSES = {
+    "discovered",
+    "fetching",
+    "fetched",
+    "failed_retryable",
+    "failed_terminal",
+    "needs_fulltext",
+    "staged",
+}
+SEARCH_EVIDENCE_LEVELS = {"snippet", "title", "abstract", "fulltext"}
+SEARCH_SCREENING_DECISIONS = {"unassessed", "include", "maybe", "exclude"}
+SEARCH_STOP_REASONS = {
+    "in_progress",
+    "target_met",
+    "saturated",
+    "budget_exhausted",
+    "blocked_no_search_tool",
+    "blocked",
+    "user_stop",
+}
+SEARCH_BUDGET_FIELDS = {
+    "max_queries",
+    "max_candidates",
+    "max_full_reads",
+    "max_citation_hops",
+}
+SEARCH_USAGE_FIELDS = {
+    "queries",
+    "candidates_seen",
+    "full_reads",
+    "citation_hops",
+    "retryable_failures",
+}
+SEARCH_FLOW_COUNT_FIELDS = {
+    "identified",
+    "duplicates_removed",
+    "title_abstract_screened",
+    "title_abstract_excluded",
+    "fulltext_sought",
+    "fulltext_unavailable",
+    "fulltext_assessed",
+    "excluded_with_reason",
+    "included",
+    "automation_excluded",
+}
+
+
+def _bounded_search_text(value: Any, limit: int) -> str:
+    if not isinstance(value, str):
+        return ""
+    return " ".join(value.split())[:limit]
+
+
+def _safe_search_id(value: Any, *, field: str) -> str:
+    identifier = _bounded_search_text(value, 128)
+    if not identifier or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", identifier) is None:
+        raise SystemExit(f"Literature search {field} must be an ASCII-safe identifier.")
+    return identifier
+
+
+def _safe_search_int(value: Any, *, field: str, minimum: int = 0) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise SystemExit(f"Literature search {field} must be an integer of at least {minimum}.")
+    return value
+
+
+def _safe_search_url(value: Any) -> str:
+    raw = _bounded_search_text(value, 4096)
+    if not raw:
+        return ""
+    _reject_sensitive_search_text(raw, field="candidate URL")
+    parsed = urlparse(raw)
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.username
+        or parsed.password
+    ):
+        return ""
+    host = (parsed.hostname or "").lower()
+    try:
+        parsed_port = parsed.port
+    except ValueError:
+        return ""
+    port = f":{parsed_port}" if parsed_port is not None else ""
+    netloc = f"{host}{port}"
+    path = re.sub(r"/+", "/", parsed.path or "/")
+    query_pairs = parse_qsl(parsed.query, keep_blank_values=False)
+    tracking_keys = {"fbclid", "gclid", "ref", "referrer", "source"}
+    kept_pairs = [
+        (key, item)
+        for key, item in query_pairs
+        if not key.lower().startswith("utm_") and key.lower() not in tracking_keys
+    ]
+    if host in {"arxiv.org", "www.arxiv.org"}:
+        arxiv_id = _canonical_search_arxiv_id(raw)
+        if arxiv_id:
+            path = f"/abs/{arxiv_id}"
+        kept_pairs = []
+    elif host in {"doi.org", "dx.doi.org"}:
+        kept_pairs = []
+    query = urlencode(sorted(kept_pairs), doseq=True)
+    return urlunparse((parsed.scheme.lower(), netloc, path.rstrip("/") or "/", "", query, ""))
+
+
+def _search_stage_locator(value: Any) -> str:
+    remote = _safe_search_url(value)
+    if remote:
+        return remote
+    local_reference = _bounded_search_text(value, 4096)
+    if local_reference and not urlparse(local_reference).scheme:
+        return local_reference
+    return ""
+
+
+def _canonical_search_doi(value: Any) -> str:
+    doi = _bounded_search_text(value, 512)
+    if not doi:
+        return ""
+    doi = re.sub(
+        r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)",
+        "",
+        doi,
+        flags=re.IGNORECASE,
+    ).strip()
+    doi = doi.split("?", 1)[0].split("#", 1)[0].rstrip(".,")
+    if re.fullmatch(r"10\.\d{4,9}/[-._;()/:+A-Z0-9]+", doi, flags=re.IGNORECASE) is None:
+        return ""
+    return f"https://doi.org/{doi.lower()}"
+
+
+def _reject_sensitive_search_text(value: str, *, field: str) -> None:
+    if re.search(
+        r"(?i)(?:api[_-]?key|access[_-]?token|auth(?:orization)?|cookie|secret|token|signature|sig|x-amz-(?:credential|signature|security-token))\s*(?:=|:|%3d)|bearer\s+[A-Za-z0-9._~+/-]+",
+        value,
+    ):
+        raise SystemExit(f"Literature search {field} contains sensitive request material.")
+
+
+def _canonical_search_arxiv_id(value: Any) -> str:
+    arxiv_id = parse_arxiv_id(_bounded_search_text(value, 256))
+    return re.sub(r"v\d+$", "", arxiv_id, flags=re.IGNORECASE)
+
+
+def _canonical_search_pmid(value: Any) -> str:
+    pmid = _bounded_search_text(value, 32)
+    return pmid if re.fullmatch(r"[1-9]\d{0,15}", pmid) else ""
+
+
+def _search_string_list(value: Any, *, field: str, item_limit: int = 300) -> list[str]:
+    if value in (None, ""):
+        return []
+    if not isinstance(value, list):
+        raise SystemExit(f"Literature search {field} must be a list.")
+    cleaned: list[str] = []
+    for item in value:
+        text = _bounded_search_text(item, item_limit)
+        if not text:
+            raise SystemExit(f"Literature search {field} contains an invalid item.")
+        if text not in cleaned:
+            cleaned.append(text)
+    return cleaned
+
+
+def _freeze_search_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return tuple(sorted((str(key), _freeze_search_value(item)) for key, item in value.items()))
+    if isinstance(value, list):
+        return tuple(_freeze_search_value(item) for item in value)
+    return value
+
+
+def _sanitize_search_scope(raw: Any) -> dict[str, Any]:
+    if raw in (None, {}):
+        return {}
+    if not isinstance(raw, dict):
+        raise SystemExit("Literature search scope must be a mapping.")
+    scope: dict[str, Any] = {}
+    for key in ("facets", "inclusion", "exclusion", "languages", "source_types", "channels"):
+        if key in raw:
+            scope[key] = _search_string_list(raw.get(key), field=f"scope.{key}")
+    for key in ("as_of", "date_range", "result_depth", "screening", "disagreement_resolution"):
+        if key in raw:
+            text = _bounded_search_text(raw.get(key), 1000)
+            if not text:
+                raise SystemExit(f"Literature search scope.{key} must be non-empty text.")
+            scope[key] = text
+    if "target_count" in raw:
+        scope["target_count"] = _safe_search_int(
+            raw.get("target_count"), field="scope.target_count", minimum=1
+        )
+    if "screeners" in raw:
+        scope["screeners"] = _safe_search_int(
+            raw.get("screeners"), field="scope.screeners", minimum=1
+        )
+    if "reproducible" in raw:
+        if not isinstance(raw.get("reproducible"), bool):
+            raise SystemExit("Literature search scope.reproducible must be true or false.")
+        scope["reproducible"] = raw["reproducible"]
+    return scope
+
+
+def _validate_systematic_scope(mode: str, scope: dict[str, Any]) -> None:
+    if mode == "exploratory":
+        return
+    required = (
+        "inclusion",
+        "exclusion",
+        "languages",
+        "source_types",
+        "channels",
+        "date_range",
+        "result_depth",
+        "screening",
+        "screeners",
+    )
+    missing = [key for key in required if not scope.get(key)]
+    if missing:
+        raise SystemExit(
+            "Systematic literature search requires a frozen scope: " + ", ".join(missing) + "."
+        )
+    reproducible = scope.get("reproducible") is True
+    if mode == "systematic" and not reproducible:
+        raise SystemExit("A systematic literature search must declare a reproducible search scope.")
+    if mode == "bounded-systematic" and reproducible:
+        raise SystemExit("Use systematic mode when the full search scope is reproducible.")
+    if int(scope.get("screeners") or 0) > 1:
+        raise SystemExit(
+            "Multi-reviewer systematic screening is not supported without a per-reviewer ledger."
+        )
+
+
+def _sanitize_search_budget(raw: Any) -> dict[str, int]:
+    if raw in (None, {}):
+        return {}
+    if not isinstance(raw, dict):
+        raise SystemExit("Literature search budget must be a mapping.")
+    budget: dict[str, int] = {}
+    for key in SEARCH_BUDGET_FIELDS:
+        if key in raw:
+            budget[key] = _safe_search_int(raw[key], field=f"budget.{key}", minimum=1)
+    return budget
+
+
+def _sanitize_search_usage(raw: Any) -> dict[str, int]:
+    if raw in (None, {}):
+        return {}
+    if not isinstance(raw, dict):
+        raise SystemExit("Literature search usage must be a mapping.")
+    usage: dict[str, int] = {}
+    for key in SEARCH_USAGE_FIELDS:
+        if key in raw:
+            usage[key] = _safe_search_int(raw[key], field=f"usage.{key}")
+    return usage
+
+
+def _sanitize_search_query(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise SystemExit("Literature search query events must be mappings.")
+    query_id = _safe_search_id(raw.get("query_id"), field="query_id")
+    text = _bounded_search_text(raw.get("text"), 2000)
+    if not text:
+        raise SystemExit("Literature search query events require text.")
+    intent = _bounded_search_text(raw.get("intent"), 64)
+    if intent not in SEARCH_QUERY_INTENTS:
+        raise SystemExit("Literature search query intent is not supported.")
+    channel = _bounded_search_text(raw.get("channel"), 128)
+    tool = _bounded_search_text(raw.get("tool"), 128)
+    selection_reason = _bounded_search_text(raw.get("selection_reason"), 1000)
+    if not channel or not tool or not selection_reason:
+        raise SystemExit("Literature search query events require channel, tool, and selection_reason.")
+    outcome = _bounded_search_text(raw.get("outcome"), 64)
+    if outcome not in SEARCH_QUERY_OUTCOMES:
+        raise SystemExit("Literature search query outcome is not supported.")
+    facet = _bounded_search_text(raw.get("facet"), 300)
+    searched_at = _bounded_search_text(raw.get("searched_at"), 80)
+    result_depth = _bounded_search_text(raw.get("result_depth"), 300)
+    if not facet or not searched_at or not result_depth or "result_count" not in raw:
+        raise SystemExit(
+            "Literature search query events require facet, searched_at, result_depth, and result_count."
+        )
+    try:
+        parsed_time = datetime.fromisoformat(searched_at.replace("Z", "+00:00"))
+    except ValueError:
+        raise SystemExit("Literature search query searched_at must be an ISO-8601 timestamp.") from None
+    if parsed_time.tzinfo is None or parsed_time.utcoffset() is None:
+        raise SystemExit("Literature search query searched_at must include a timezone.")
+    event: dict[str, Any] = {
+        "query_id": query_id,
+        "text": text,
+        "intent": intent,
+        "channel": channel,
+        "tool": tool,
+        "selection_reason": selection_reason,
+        "outcome": outcome,
+        "facet": facet,
+        "searched_at": searched_at,
+        "result_depth": result_depth,
+        "result_count": _safe_search_int(raw["result_count"], field="query.result_count"),
+    }
+    if "reproducible" in raw:
+        if not isinstance(raw.get("reproducible"), bool):
+            raise SystemExit("Literature search query reproducible must be true or false.")
+        event["reproducible"] = raw["reproducible"]
+    error_class = _bounded_search_text(raw.get("error_class"), 128)
+    if error_class:
+        if re.fullmatch(r"[a-z0-9][a-z0-9-]{0,127}", error_class) is None:
+            raise SystemExit("Literature search query error_class must be a safe slug.")
+        event["error_class"] = error_class
+    return event
+
+
+def _sanitize_search_coverage(raw: Any) -> dict[str, Any]:
+    if raw in (None, {}):
+        return {}
+    if not isinstance(raw, dict):
+        raise SystemExit("Literature search coverage must be a mapping.")
+    coverage: dict[str, Any] = {}
+    if "round" in raw:
+        coverage["round"] = _safe_search_int(raw["round"], field="coverage.round")
+    for key in ("covered_facets", "uncovered_facets"):
+        if key in raw:
+            coverage[key] = _search_string_list(raw.get(key), field=f"coverage.{key}")
+    for key in ("new_candidates", "deduplicated", "new_relevant"):
+        if key in raw:
+            coverage[key] = _safe_search_int(raw[key], field=f"coverage.{key}")
+    for key in ("notes", "concentration_risk", "bias_risk"):
+        text = _bounded_search_text(raw.get(key), 1500)
+        if text:
+            coverage[key] = text
+    if "flow_counts" in raw:
+        raw_counts = raw.get("flow_counts")
+        if not isinstance(raw_counts, dict):
+            raise SystemExit("Literature search coverage.flow_counts must be a mapping.")
+        counts: dict[str, int] = {}
+        for key in SEARCH_FLOW_COUNT_FIELDS:
+            if key in raw_counts:
+                counts[key] = _safe_search_int(
+                    raw_counts[key], field=f"coverage.flow_counts.{key}"
+                )
+        coverage["flow_counts"] = counts
+    return coverage
+
+
+def _sanitize_search_frontier(raw: Any) -> list[dict[str, Any]]:
+    if raw in (None, []):
+        return []
+    if not isinstance(raw, list):
+        raise SystemExit("Literature search frontier must be a list.")
+    frontier: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise SystemExit("Literature search frontier items must be mappings.")
+        candidate_id = _safe_search_id(item.get("candidate_id"), field="frontier candidate_id")
+        status = _bounded_search_text(item.get("status"), 64) or "pending"
+        if status not in {"pending", "expanded", "skipped", "failed_retryable"}:
+            raise SystemExit("Literature search frontier status is not supported.")
+        reason = _bounded_search_text(item.get("priority_reason"), 1000)
+        if not reason:
+            raise SystemExit("Literature search frontier items require priority_reason.")
+        entry: dict[str, Any] = {
+            "candidate_id": candidate_id,
+            "priority_reason": reason,
+            "status": status,
+        }
+        direction = _bounded_search_text(item.get("direction"), 32)
+        if direction:
+            if direction not in {"backward", "forward"}:
+                raise SystemExit("Literature search frontier direction is not supported.")
+            entry["direction"] = direction
+        parent = _bounded_search_text(item.get("parent_candidate_id"), 128)
+        if parent:
+            entry["parent_candidate_id"] = _safe_search_id(
+                parent, field="frontier parent_candidate_id"
+            )
+        frontier.append(entry)
+    return frontier
+
+
+def _sanitize_search_stop(raw: Any) -> dict[str, Any]:
+    if raw in (None, {}):
+        return {}
+    if not isinstance(raw, dict):
+        raise SystemExit("Literature search stop state must be a mapping.")
+    reason = _bounded_search_text(raw.get("reason"), 64) or "in_progress"
+    if reason not in SEARCH_STOP_REASONS:
+        raise SystemExit("Literature search stop reason is not supported.")
+    rationale = _bounded_search_text(raw.get("rationale"), 1500)
+    if reason != "in_progress" and not rationale:
+        raise SystemExit("A terminal literature search stop reason requires rationale.")
+    stop: dict[str, Any] = {"reason": reason}
+    if rationale:
+        stop["rationale"] = rationale
+    if "uncovered_facets" in raw:
+        stop["uncovered_facets"] = _search_string_list(
+            raw.get("uncovered_facets"), field="stop.uncovered_facets"
+        )
+    return stop
+
+
+def _sanitize_search_state(raw: Any) -> dict[str, Any]:
+    if raw in (None, {}):
+        return {}
+    if not isinstance(raw, dict):
+        raise SystemExit("Literature search state must be a mapping.")
+    state: dict[str, Any] = {}
+    entry_skill = _bounded_search_text(raw.get("entry_skill"), 128)
+    if entry_skill:
+        if re.fullmatch(r"[a-z0-9][a-z0-9-]{0,127}", entry_skill) is None:
+            raise SystemExit("Literature search entry_skill must be a safe slug.")
+        state["entry_skill"] = entry_skill
+    mode = _bounded_search_text(raw.get("mode"), 64)
+    if mode:
+        if mode not in SEARCH_MODES:
+            raise SystemExit("Literature search mode is not supported.")
+        state["mode"] = mode
+    if "run_id" in raw:
+        state["run_id"] = _safe_search_id(raw.get("run_id"), field="run_id")
+    if "scope" in raw:
+        state["scope"] = _sanitize_search_scope(raw.get("scope"))
+    if "budget" in raw:
+        state["budget"] = _sanitize_search_budget(raw.get("budget"))
+    if "usage" in raw:
+        state["usage"] = _sanitize_search_usage(raw.get("usage"))
+    if "queries" in raw:
+        if not isinstance(raw.get("queries"), list):
+            raise SystemExit("Literature search queries must be a list.")
+        state["queries"] = [_sanitize_search_query(item) for item in raw["queries"]]
+    if "coverage" in raw:
+        state["coverage"] = _sanitize_search_coverage(raw.get("coverage"))
+    if "frontier" in raw:
+        state["frontier"] = _sanitize_search_frontier(raw.get("frontier"))
+    if "stop" in raw:
+        state["stop"] = _sanitize_search_stop(raw.get("stop"))
+    if "partial" in raw:
+        if not isinstance(raw.get("partial"), bool):
+            raise SystemExit("Literature search partial must be true or false.")
+        state["partial"] = raw["partial"]
+    effective_mode = str(state.get("mode") or "exploratory")
+    _validate_systematic_scope(effective_mode, dict(state.get("scope") or {}))
+    return state
+
+
+def _sanitize_search_identities(raw: Any, *, legacy_candidate: Any = None) -> dict[str, str]:
+    identities: dict[str, str] = {}
+    if raw not in (None, {}):
+        if not isinstance(raw, dict):
+            raise SystemExit("Literature search candidate identities must be a mapping.")
+        doi = _canonical_search_doi(raw.get("doi"))
+        arxiv_id = _canonical_search_arxiv_id(raw.get("arxiv_id"))
+        pmid = _canonical_search_pmid(raw.get("pmid"))
+        for key, value in (("doi", doi), ("arxiv_id", arxiv_id), ("pmid", pmid)):
+            if raw.get(key) not in (None, "") and not value:
+                raise SystemExit(f"Literature search candidate {key} is invalid.")
+            if value:
+                identities[key] = value
+    if isinstance(legacy_candidate, dict):
+        provenance = legacy_candidate.get("provenance")
+        openalex = provenance.get("openalex") if isinstance(provenance, dict) else None
+        if isinstance(openalex, dict) and "doi" not in identities:
+            legacy_doi = _canonical_search_doi(openalex.get("doi"))
+            if legacy_doi:
+                identities["doi"] = legacy_doi
+    return identities
+
+
+def _sanitize_search_discoveries(raw: Any) -> list[dict[str, Any]]:
+    if raw in (None, []):
+        return []
+    if not isinstance(raw, list):
+        raise SystemExit("Literature search discovered_by must be a list.")
+    discoveries: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise SystemExit("Literature search discovery entries must be mappings.")
+        query_id = _safe_search_id(item.get("query_id"), field="discovery query_id")
+        edge_type = _bounded_search_text(item.get("edge_type"), 32) or "direct"
+        if edge_type not in {"direct", "reference", "cited_by"}:
+            raise SystemExit("Literature search discovery edge_type is not supported.")
+        entry: dict[str, Any] = {"query_id": query_id, "edge_type": edge_type}
+        for key, limit in (
+            ("source_locator", 500),
+            ("channel", 128),
+            ("tool", 128),
+            ("discovered_at", 80),
+        ):
+            text = _bounded_search_text(item.get(key), limit)
+            if text:
+                if key == "source_locator":
+                    _reject_sensitive_search_text(text, field="discovery source_locator")
+                    text = _safe_search_url(text) or text
+                entry[key] = text
+        parent = _bounded_search_text(item.get("parent_candidate_id"), 128)
+        if parent:
+            entry["parent_candidate_id"] = _safe_search_id(
+                parent, field="discovery parent_candidate_id"
+            )
+        if edge_type != "direct" and "parent_candidate_id" not in entry:
+            raise SystemExit("Citation discovery edges require parent_candidate_id.")
+        discoveries.append(entry)
+    return discoveries
+
+
+def _sanitize_search_fetch(raw: Any) -> dict[str, Any]:
+    if raw in (None, {}):
+        return {}
+    if not isinstance(raw, dict):
+        raise SystemExit("Literature search candidate fetch must be a mapping.")
+    status = _bounded_search_text(raw.get("status"), 64)
+    if status not in SEARCH_RETRIEVAL_STATUSES:
+        raise SystemExit("Literature search candidate fetch status is not supported.")
+    result: dict[str, Any] = {"status": status}
+    if "attempts" in raw:
+        result["attempts"] = _safe_search_int(raw["attempts"], field="candidate.fetch.attempts")
+    error_class = _bounded_search_text(raw.get("error_class"), 128)
+    if error_class:
+        if re.fullmatch(r"[a-z0-9][a-z0-9-]{0,127}", error_class) is None:
+            raise SystemExit("Literature search candidate fetch error_class must be a safe slug.")
+        result["error_class"] = error_class
+    updated_at = _bounded_search_text(raw.get("updated_at"), 80)
+    if updated_at:
+        result["updated_at"] = updated_at
+    return result
+
+
+def _sanitize_search_screening(raw: Any) -> dict[str, Any]:
+    if raw in (None, {}):
+        return {}
+    if not isinstance(raw, dict):
+        raise SystemExit("Literature search candidate screening must be a mapping.")
+    decision = _bounded_search_text(raw.get("decision"), 32) or "unassessed"
+    if decision not in SEARCH_SCREENING_DECISIONS:
+        raise SystemExit("Literature search screening decision is not supported.")
+    screening: dict[str, Any] = {"decision": decision}
+    if decision == "unassessed":
+        return screening
+    basis = _bounded_search_text(raw.get("basis"), 32)
+    if basis not in {"title", "abstract", "fulltext"}:
+        raise SystemExit("Literature search screening requires title, abstract, or fulltext basis.")
+    phase = _bounded_search_text(raw.get("phase"), 32)
+    if not phase:
+        phase = "fulltext" if basis == "fulltext" else "title_abstract"
+    if phase not in {"automation", "title_abstract", "fulltext"}:
+        raise SystemExit("Literature search screening phase is not supported.")
+    if phase == "fulltext" and basis != "fulltext":
+        raise SystemExit("Fulltext screening phase requires fulltext evidence basis.")
+    if phase != "fulltext" and basis == "fulltext":
+        raise SystemExit("Fulltext evidence basis requires fulltext screening phase.")
+    rationale = _bounded_search_text(raw.get("rationale"), 1500)
+    evidence = raw.get("evidence")
+    if not rationale or not isinstance(evidence, list) or not evidence:
+        raise SystemExit("Literature search screening requires rationale and evidence.")
+    safe_evidence: list[dict[str, str]] = []
+    for item in evidence:
+        if not isinstance(item, dict):
+            raise SystemExit("Literature search screening evidence must be a mapping.")
+        quote = _bounded_search_text(item.get("quote"), 800)
+        locator = _bounded_search_text(item.get("locator"), 500)
+        if not quote or not locator:
+            raise SystemExit("Literature search screening evidence requires quote and locator.")
+        _reject_sensitive_search_text(locator, field="screening evidence locator")
+        locator = _safe_search_url(locator) or locator
+        safe_evidence.append({"quote": quote, "locator": locator})
+    screening.update(
+        {"phase": phase, "basis": basis, "rationale": rationale, "evidence": safe_evidence}
+    )
+    reviewer = _bounded_search_text(raw.get("reviewer"), 128)
+    if reviewer:
+        screening["reviewer"] = reviewer
+    return screening
+
+
+def _sanitize_search_metadata(raw: Any) -> dict[str, Any]:
+    if raw in (None, {}):
+        return {}
+    if not isinstance(raw, dict):
+        raise SystemExit("Literature search candidate metadata must be a mapping.")
+    metadata: dict[str, Any] = {}
+    for key, limit in (
+        ("publication_date", 32),
+        ("publication_type", 128),
+        ("language", 64),
+        ("venue", 300),
+    ):
+        text = _bounded_search_text(raw.get(key), limit)
+        if text:
+            metadata[key] = text
+    if "publication_year" in raw:
+        year = _safe_search_int(raw["publication_year"], field="candidate.metadata.publication_year")
+        if year > 9999:
+            raise SystemExit("Literature search publication_year is invalid.")
+        metadata["publication_year"] = year
+    if "is_retracted" in raw:
+        if not isinstance(raw.get("is_retracted"), bool):
+            raise SystemExit("Literature search is_retracted must be true or false.")
+        metadata["is_retracted"] = raw["is_retracted"]
+    if "authors" in raw:
+        metadata["authors"] = _search_string_list(
+            raw.get("authors"), field="candidate.metadata.authors", item_limit=300
+        )
+    return metadata
+
+
+def _sanitize_search_candidate(
+    raw: Any,
+    *,
+    stage_id: str,
+    index: int,
+    allow_local_reference: bool = False,
+) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise SystemExit("Literature search candidates must be mappings.")
+    raw_url = raw.get("url")
+    url = _safe_search_url(raw_url)
+    if not url and allow_local_reference:
+        local_reference = _bounded_search_text(raw_url, 4096)
+        if local_reference and not urlparse(local_reference).scheme:
+            url = local_reference
+    if raw_url not in (None, "") and not url:
+        raise SystemExit("Literature search candidate URL must be a safe http(s) URL.")
+    if not url:
+        raise SystemExit("Literature search candidates require a URL.")
+    title = _bounded_search_text(raw.get("title"), 1000)
+    candidate_id = _bounded_search_text(raw.get("candidate_id"), 128)
+    if candidate_id:
+        candidate_id = _safe_search_id(candidate_id, field="candidate_id")
+    else:
+        seed = title or url or f"{stage_id}:{index}"
+        candidate_id = f"{stage_id}-{hashlib.sha1(seed.encode('utf-8')).hexdigest()[:8]}"
+    candidate_note = _bounded_search_text(raw.get("note"), 2000)
+    if candidate_note:
+        _reject_sensitive_search_text(candidate_note, field="candidate note")
+    candidate: dict[str, Any] = {
+        "candidate_id": candidate_id,
+        "title": title,
+        "url": url,
+        "note": candidate_note,
+        "topics": _slug_list(raw.get("topics")),
+        "tags": _slug_list(raw.get("tags")),
+        "pool_hints": _slug_list(raw.get("pool_hints")),
+    }
+    identities = _sanitize_search_identities(raw.get("identities"))
+    if identities:
+        candidate["identities"] = identities
+    if "discovered_by" in raw:
+        candidate["discovered_by"] = _sanitize_search_discoveries(raw.get("discovered_by"))
+    if "fetch" in raw:
+        candidate["fetch"] = _sanitize_search_fetch(raw.get("fetch"))
+    evidence_level = _bounded_search_text(raw.get("evidence_level"), 32)
+    if evidence_level:
+        if evidence_level not in SEARCH_EVIDENCE_LEVELS:
+            raise SystemExit("Literature search candidate evidence_level is not supported.")
+        candidate["evidence_level"] = evidence_level
+    if "screening" in raw:
+        candidate["screening"] = _sanitize_search_screening(raw.get("screening"))
+    if "metadata" in raw:
+        candidate["metadata"] = _sanitize_search_metadata(raw.get("metadata"))
+    screening = candidate.get("screening") if isinstance(candidate.get("screening"), dict) else {}
+    if screening.get("decision") not in (None, "", "unassessed"):
+        level_rank = {"snippet": 0, "title": 1, "abstract": 2, "fulltext": 3}
+        evidence_level = str(candidate.get("evidence_level") or "")
+        basis = str(screening.get("basis") or "")
+        if level_rank.get(evidence_level, -1) < level_rank.get(basis, -1):
+            raise SystemExit("Literature search screening basis exceeds the candidate evidence level.")
+    return candidate
+
+
+def _candidate_search_identities(candidate: dict[str, Any]) -> dict[str, str]:
+    return _sanitize_search_identities(candidate.get("identities"), legacy_candidate=candidate)
+
+
+def _candidate_identity_conflicts(existing: dict[str, str], incoming: dict[str, str]) -> bool:
+    return any(
+        existing.get(key) and incoming.get(key) and existing[key] != incoming[key]
+        for key in ("doi", "arxiv_id", "pmid")
+    )
+
+
+def _merge_search_state(payload: dict[str, Any], incoming: dict[str, Any]) -> None:
+    for key in ("entry_skill", "mode", "scope", "run_id"):
+        if key not in incoming:
+            continue
+        if key in payload and payload.get(key) not in (None, {}, "") and payload.get(key) != incoming[key]:
+            raise SystemExit(f"Literature search {key} cannot change when resuming a stage.")
+        payload[key] = incoming[key]
+
+    if "budget" in incoming:
+        existing_budget = payload.get("budget") if isinstance(payload.get("budget"), dict) else {}
+        for key, value in existing_budget.items():
+            if key in incoming["budget"] and incoming["budget"][key] != value:
+                raise SystemExit("Literature search budget cannot change when resuming a stage.")
+        payload["budget"] = {**incoming["budget"], **existing_budget}
+
+    if "queries" in incoming:
+        existing_queries = [item for item in payload.get("queries", []) if isinstance(item, dict)]
+        by_id = {str(item.get("query_id") or ""): item for item in existing_queries}
+        for event in incoming["queries"]:
+            prior = by_id.get(event["query_id"])
+            if prior is not None:
+                if _freeze_search_value(prior) != _freeze_search_value(event):
+                    raise SystemExit("Literature search query_id conflicts with an existing event.")
+                continue
+            existing_queries.append(event)
+            by_id[event["query_id"]] = event
+        payload["queries"] = existing_queries
+
+    if "usage" in incoming:
+        existing_usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+        merged_usage = dict(existing_usage)
+        for key, value in incoming["usage"].items():
+            if value < int(existing_usage.get(key, 0)):
+                raise SystemExit("Literature search usage cannot decrease when resuming a stage.")
+            merged_usage[key] = value
+        payload["usage"] = merged_usage
+
+    if "coverage" in incoming:
+        prior_coverage = payload.get("coverage") if isinstance(payload.get("coverage"), dict) else {}
+        next_coverage = incoming["coverage"]
+        prior_round = int(prior_coverage.get("round", 0)) if prior_coverage else 0
+        next_round = int(next_coverage.get("round", prior_round)) if next_coverage else prior_round
+        if next_round < prior_round:
+            raise SystemExit("Literature search coverage round cannot decrease.")
+        if prior_coverage and _freeze_search_value(prior_coverage) != _freeze_search_value(next_coverage):
+            history = [
+                item for item in payload.get("coverage_history", []) if isinstance(item, dict)
+            ]
+            snapshot = {"replaced_at": utc_now_iso(), "coverage": prior_coverage}
+            if not history or _freeze_search_value(history[-1].get("coverage")) != _freeze_search_value(prior_coverage):
+                history.append(snapshot)
+            payload["coverage_history"] = history
+        payload["coverage"] = next_coverage
+
+    if "frontier" in incoming:
+        existing_frontier = [
+            item for item in payload.get("frontier", []) if isinstance(item, dict)
+        ]
+        frontier_history = [
+            item for item in payload.get("frontier_history", []) if isinstance(item, dict)
+        ]
+
+        def frontier_key(item: dict[str, Any]) -> tuple[str, str, str]:
+            return (
+                str(item.get("candidate_id") or ""),
+                str(item.get("direction") or ""),
+                str(item.get("parent_candidate_id") or ""),
+            )
+
+        by_key = {frontier_key(item): item for item in existing_frontier}
+        for action in incoming["frontier"]:
+            prior = by_key.get(frontier_key(action))
+            if prior is None:
+                existing_frontier.append(action)
+                by_key[frontier_key(action)] = action
+                continue
+            if _freeze_search_value(prior) != _freeze_search_value(action):
+                prior_status = str(prior.get("status") or "pending")
+                next_status = str(action.get("status") or "pending")
+                if prior_status in {"expanded", "skipped"} and next_status != prior_status:
+                    raise SystemExit("Literature search frontier terminal status cannot regress.")
+                frontier_history.append({"replaced_at": utc_now_iso(), "action": dict(prior)})
+                prior.clear()
+                prior.update(action)
+        payload["frontier"] = existing_frontier
+        if frontier_history:
+            payload["frontier_history"] = frontier_history
+
+    if "stop" in incoming:
+        prior_stop = payload.get("stop") if isinstance(payload.get("stop"), dict) else {}
+        next_stop = incoming["stop"]
+        prior_reason = str(prior_stop.get("reason") or "in_progress")
+        next_reason = str(next_stop.get("reason") or "in_progress")
+        if prior_reason in {"target_met", "saturated", "budget_exhausted", "user_stop"}:
+            if next_reason != prior_reason:
+                raise SystemExit(
+                    "A completed literature search run cannot be reopened; start a fresh run_id."
+                )
+        if prior_stop and _freeze_search_value(prior_stop) != _freeze_search_value(next_stop):
+            history = [item for item in payload.get("stop_history", []) if isinstance(item, dict)]
+            history.append({"replaced_at": utc_now_iso(), "stop": prior_stop})
+            payload["stop_history"] = history
+        payload["stop"] = next_stop
+    if "partial" in incoming:
+        payload["partial"] = incoming["partial"]
+
+    mode = str(payload.get("mode") or "exploratory")
+    _validate_systematic_scope(mode, dict(payload.get("scope") or {}))
+    if payload.get("entry_skill") == "literature-search":
+        missing_budget = sorted(SEARCH_BUDGET_FIELDS - set(payload.get("budget") or {}))
+        if missing_budget:
+            raise SystemExit("Literature search requires all persisted hard-budget fields.")
+    queries = [item for item in payload.get("queries", []) if isinstance(item, dict)]
+    if mode == "systematic" and any(item.get("reproducible") is not True for item in queries):
+        raise SystemExit("Every query event in systematic mode must be reproducible.")
+    stop = payload.get("stop") if isinstance(payload.get("stop"), dict) else {}
+    partial = payload.get("partial")
+    usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+    if mode == "bounded-systematic" and partial is not True:
+        raise SystemExit("A bounded-systematic literature search must remain partial.")
+    if (
+        mode != "exploratory"
+        and stop.get("reason") not in (None, "", "in_progress", "blocked_no_search_tool")
+    ):
+        if stop.get("reason") != "user_stop" and not queries:
+            raise SystemExit("A terminal systematic search requires at least one query event.")
+        coverage = payload.get("coverage") if isinstance(payload.get("coverage"), dict) else {}
+        counts = coverage.get("flow_counts") if isinstance(coverage.get("flow_counts"), dict) else {}
+        missing_counts = sorted(SEARCH_FLOW_COUNT_FIELDS - set(counts))
+        if missing_counts:
+            raise SystemExit(
+                "A terminal systematic search requires complete screening flow counts."
+            )
+        if counts:
+            identified = int(counts["identified"])
+            duplicates = int(counts["duplicates_removed"])
+            automated = int(counts["automation_excluded"])
+            screened = int(counts["title_abstract_screened"])
+            title_excluded = int(counts["title_abstract_excluded"])
+            fulltext_sought = int(counts["fulltext_sought"])
+            unavailable = int(counts["fulltext_unavailable"])
+            assessed = int(counts["fulltext_assessed"])
+            excluded = int(counts["excluded_with_reason"])
+            included = int(counts["included"])
+            if not (
+                duplicates + automated + screened == identified
+                and title_excluded + fulltext_sought == screened
+                and unavailable + assessed == fulltext_sought
+                and excluded + included == assessed
+            ):
+                raise SystemExit("Systematic literature search flow counts are not arithmetically consistent.")
+            query_results = sum(int(item.get("result_count", 0)) for item in queries)
+            if identified != query_results:
+                raise SystemExit(
+                    "Systematic literature search identified count must match recorded query results."
+                )
+    if payload.get("entry_skill") == "literature-search" and int(
+        usage.get("queries", 0)
+    ) != len(queries):
+        raise SystemExit("Literature search usage.queries must match the persisted query count.")
+    budget = payload.get("budget") if isinstance(payload.get("budget"), dict) else {}
+    usage_to_budget = {
+        "queries": "max_queries",
+        "candidates_seen": "max_candidates",
+        "full_reads": "max_full_reads",
+        "citation_hops": "max_citation_hops",
+    }
+    for usage_key, budget_key in usage_to_budget.items():
+        if budget_key in budget and int(usage.get(usage_key, 0)) > int(budget[budget_key]):
+            raise SystemExit(f"Literature search {usage_key} exceeds its persisted hard budget.")
+    if "max_queries" in budget and len(queries) > int(budget["max_queries"]):
+        raise SystemExit("Literature search query events exceed the persisted hard budget.")
+    if stop.get("reason") == "budget_exhausted":
+        if partial is not True:
+            raise SystemExit("A budget-exhausted literature search must remain partial.")
+        if not any(
+            int(usage.get(usage_key, 0)) >= int(budget.get(budget_key, 1))
+            for usage_key, budget_key in usage_to_budget.items()
+        ):
+            raise SystemExit(
+                "Literature search cannot claim budget_exhausted before reaching a hard budget."
+            )
+
+
 def build_search_stage_id(kind: str, query: str) -> str:
     normalized_query = " ".join(str(query or "").split())
     base = slugify(normalized_query, max_words=8) or kind
     short_hash = hashlib.sha1(f"{kind}:{normalized_query}".encode("utf-8")).hexdigest()[:8]
     return f"{kind}-search-{base}-{short_hash}"
+
+
+def build_literature_search_stage_id(
+    query: str,
+    *,
+    mode: str = "exploratory",
+    scope: dict[str, Any] | None = None,
+    run_id: str = "",
+) -> str:
+    normalized_query = " ".join(str(query or "").split())
+    safe_mode = _bounded_search_text(mode, 64) or "exploratory"
+    if safe_mode not in SEARCH_MODES:
+        raise SystemExit("Literature search mode is not supported.")
+    safe_scope = _sanitize_search_scope(scope)
+    _validate_systematic_scope(safe_mode, safe_scope)
+    safe_run_id = _safe_search_id(run_id, field="run_id") if run_id else ""
+    base = slugify(normalized_query, max_words=8) or "paper"
+    identity = _freeze_search_value(
+        {
+            "kind": "paper",
+            "query": normalized_query,
+            "mode": safe_mode,
+            "scope": safe_scope,
+            "run_id": safe_run_id,
+        }
+    )
+    short_hash = hashlib.sha256(repr(identity).encode("utf-8")).hexdigest()[:12]
+    return f"paper-search-{base}-{short_hash}"
+
+
+def _safe_search_stage_id(stage_id: str) -> str:
+    return _safe_search_id(stage_id, field="stage_id")
+
+
+def _validate_search_stage_target(project_root: Path, path: Path) -> None:
+    expected_root = search_stage_path(project_root, "safe-probe").parent
+    if path.parent != expected_root:
+        raise SystemExit("Search stage target must stay inside the source-search directory.")
+    cursor = kb_root(project_root)
+    if cursor.is_symlink() or (cursor.exists() and not cursor.is_dir()):
+        raise SystemExit("Search stage directory contains an unsafe path component.")
+    for component in ("synthesis", "source-search"):
+        cursor = cursor / component
+        if cursor.is_symlink() or (cursor.exists() and not cursor.is_dir()):
+            raise SystemExit("Search stage directory contains an unsafe path component.")
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise SystemExit("Search stage target must be a regular file or a missing path.")
 
 
 def _validate_search_stage_identity(
@@ -400,7 +1327,10 @@ def _validate_search_stage_identity(
 
 
 def load_search_stage(project_root: Path, stage_id: str) -> dict[str, Any]:
-    payload = load_yaml(search_stage_path(project_root, stage_id), default={})
+    safe_stage_id = _safe_search_stage_id(stage_id)
+    path = search_stage_path(project_root, safe_stage_id)
+    _validate_search_stage_target(project_root, path)
+    payload = load_yaml(path, default={})
     if not isinstance(payload, dict) or not payload.get("id"):
         raise SystemExit(f"Search stage not found: {stage_id}")
     return payload
@@ -414,23 +1344,76 @@ def stage_search_results(
     candidates: list[dict[str, Any]],
     stage_id: str = "",
     note: str = "",
+    search_state: dict[str, Any] | None = None,
 ) -> Path:
+    sanitized_state = _sanitize_search_state(search_state)
+    if sanitized_state.get("entry_skill") == "literature-search" and not isinstance(query, str):
+        raise SystemExit("Literature search requires a textual original research question.")
     normalized_query = " ".join(str(query or "").split())
-    current_stage_id = stage_id or build_search_stage_id(kind, normalized_query)
+    current_stage_id = (
+        _safe_search_stage_id(stage_id)
+        if stage_id
+        else build_search_stage_id(kind, normalized_query)
+    )
+    if not isinstance(note, str):
+        raise SystemExit("Search stage note must be text.")
+    sanitized_note = _bounded_search_text(note, 2000)
+    if sanitized_note:
+        _reject_sensitive_search_text(sanitized_note, field="note")
+    allow_local_reference = sanitized_state.get("entry_skill") != "literature-search"
+    sanitized_candidates = [
+        _sanitize_search_candidate(
+            candidate,
+            stage_id=current_stage_id,
+            index=index,
+            allow_local_reference=allow_local_reference,
+        )
+        for index, candidate in enumerate(candidates, start=1)
+    ]
+    if not allow_local_reference and any(
+        not candidate.get("discovered_by") for candidate in sanitized_candidates
+    ):
+        raise SystemExit("Literature search candidates require at least one discovery edge.")
     path = search_stage_path(project_root, current_stage_id)
+    _validate_search_stage_target(project_root, path)
+    existing = load_yaml(path, default={})
     _validate_search_stage_identity(
-        load_yaml(path, default={}),
+        existing,
         stage_id=current_stage_id,
         source_kind=kind,
         query=normalized_query,
     )
+    _stage_search_results_unlocked(
+        project_root,
+        path=path,
+        current_stage_id=current_stage_id,
+        kind=kind,
+        query=normalized_query,
+        candidates=copy.deepcopy(sanitized_candidates),
+        note=sanitized_note,
+        search_state=sanitized_state,
+        validate_only=True,
+    )
     ensure_workspace(project_root)
+
     def validate_locked_identity() -> None:
+        _validate_search_stage_target(project_root, path)
         _validate_search_stage_identity(
             load_yaml(path, default={}),
             stage_id=current_stage_id,
             source_kind=kind,
             query=normalized_query,
+        )
+        _stage_search_results_unlocked(
+            project_root,
+            path=path,
+            current_stage_id=current_stage_id,
+            kind=kind,
+            query=normalized_query,
+            candidates=copy.deepcopy(sanitized_candidates),
+            note=sanitized_note,
+            search_state=sanitized_state,
+            validate_only=True,
         )
 
     with mutation_transaction(
@@ -445,8 +1428,9 @@ def stage_search_results(
             current_stage_id=current_stage_id,
             kind=kind,
             query=normalized_query,
-            candidates=candidates,
-            note=note,
+            candidates=sanitized_candidates,
+            note=sanitized_note,
+            search_state=sanitized_state,
         )
 
 
@@ -459,10 +1443,22 @@ def _stage_search_results_unlocked(
     query: str,
     candidates: list[dict[str, Any]],
     note: str,
+    search_state: dict[str, Any],
+    validate_only: bool = False,
 ) -> Path:
     existing = load_yaml(path, default={})
     if not isinstance(existing, dict):
         existing = {}
+    existing_stop = existing.get("stop") if isinstance(existing.get("stop"), dict) else {}
+    if (
+        existing.get("entry_skill") == "literature-search"
+        and existing_stop.get("reason")
+        in {"target_met", "saturated", "budget_exhausted", "user_stop"}
+        and (candidates or search_state)
+    ):
+        raise SystemExit(
+            "A completed literature search run cannot be resumed; start a fresh run_id."
+        )
     payload = _deep_fill_missing(
         existing,
         {
@@ -472,55 +1468,63 @@ def _stage_search_results_unlocked(
             "source_kind": kind,
             "query": query,
             "note": note,
-            "generated_by": "source-intake",
+            "generated_by": (
+                "literature-search"
+                if search_state.get("entry_skill") == "literature-search"
+                else "source-intake"
+            ),
             "generated_at": utc_now_iso(),
             "candidates": [],
             "history": [],
         },
     )
+    _merge_search_state(payload, search_state)
     existing_candidates = [item for item in payload.get("candidates", []) if isinstance(item, dict)]
-    known_urls = {
-        str(item.get("url") or ""): item
-        for item in existing_candidates
-        if str(item.get("url") or "")
-    }
+    payload["candidates"] = existing_candidates
+    known_urls: dict[str, dict[str, Any]] = {}
     known_candidate_ids = {str(item.get("candidate_id") or ""): item for item in existing_candidates}
-    known_work_ids: dict[str, dict[str, Any]] = {}
-    known_dois: dict[str, dict[str, Any]] = {}
+    known_identities: dict[str, dict[str, dict[str, Any]]] = {
+        "doi": {},
+        "arxiv_id": {},
+        "pmid": {},
+    }
+
+    def register_identity(
+        mapping: dict[str, dict[str, Any]],
+        identity: str,
+        candidate: dict[str, Any],
+    ) -> None:
+        if not identity:
+            return
+        prior = mapping.get(identity)
+        if prior is not None and prior is not candidate:
+            raise SystemExit("Search candidate identities conflict within the existing stage.")
+        mapping[identity] = candidate
+
     for item in existing_candidates:
-        raw_provenance = item.get("provenance")
-        raw_openalex = raw_provenance.get("openalex") if isinstance(raw_provenance, dict) else None
-        openalex = sanitize_openalex_provenance(raw_openalex)
-        work_id = str(openalex.get("work_id") or "")
-        doi = str(openalex.get("doi") or "")
-        if work_id and work_id not in known_work_ids:
-            known_work_ids[work_id] = item
-        if doi and doi not in known_dois:
-            known_dois[doi] = item
-    query_topics, query_tags = infer_topics_and_tags(query, project_root=project_root)
+        existing_url = _search_stage_locator(item.get("url"))
+        register_identity(known_urls, existing_url, item)
+        for key, value in _candidate_search_identities(item).items():
+            register_identity(known_identities[key], value, item)
+
+    if payload.get("entry_skill") == "literature-search":
+        # Query text is not evidence for semantic classification.  The runtime
+        # Agent may supply topics/tags explicitly after reading the candidate.
+        query_topics, query_tags = [], []
+    else:
+        query_topics, query_tags = infer_topics_and_tags(query, project_root=project_root)
     for index, candidate in enumerate(candidates, start=1):
-        url = str(candidate.get("url") or "").strip()
-        title = str(candidate.get("title") or "").strip()
-        if not url:
-            continue
-        candidate_id = str(candidate.get("candidate_id") or "").strip()
-        if not candidate_id:
-            seed = title or url or f"{current_stage_id}:{index}"
-            candidate_id = f"{current_stage_id}-{hashlib.sha1(seed.encode('utf-8')).hexdigest()[:6]}"
-        provenance: dict[str, Any] = {}
-        raw_provenance = candidate.get("provenance")
-        raw_openalex = raw_provenance.get("openalex") if isinstance(raw_provenance, dict) else None
-        sanitized_openalex = sanitize_openalex_provenance(raw_openalex)
-        if sanitized_openalex:
-            provenance["openalex"] = sanitized_openalex
-        work_id = str(sanitized_openalex.get("work_id") or "")
-        doi = str(sanitized_openalex.get("doi") or "")
+        url = candidate["url"]
+        title = candidate["title"]
+        candidate_id = candidate["candidate_id"]
+        identities = _candidate_search_identities(candidate)
         identity_matches = [
             match
             for match in (
                 known_candidate_ids.get(candidate_id),
-                known_work_ids.get(work_id) if work_id else None,
-                known_dois.get(doi) if doi else None,
+                known_identities["doi"].get(identities.get("doi", "")),
+                known_identities["arxiv_id"].get(identities.get("arxiv_id", "")),
+                known_identities["pmid"].get(identities.get("pmid", "")),
                 known_urls.get(url),
             )
             if match is not None
@@ -530,46 +1534,284 @@ def _stage_search_results_unlocked(
             raise SystemExit("Search candidate identities conflict within the existing stage.")
         existing_candidate = next(iter(unique_matches.values()), None)
         if existing_candidate is not None:
+            existing_identities = _candidate_search_identities(existing_candidate)
+            if _candidate_identity_conflicts(existing_identities, identities):
+                raise SystemExit("Search candidate carries conflicting strong identities.")
+            existing_url = _search_stage_locator(existing_candidate.get("url"))
+            shared_strong_identity = any(
+                existing_identities.get(key)
+                and existing_identities.get(key) == identities.get(key)
+                for key in ("doi", "arxiv_id", "pmid")
+            )
+            matched_by_candidate_id = known_candidate_ids.get(candidate_id) is existing_candidate
+            if matched_by_candidate_id and existing_url and existing_url != url and not shared_strong_identity:
+                raise SystemExit("Search candidate_id cannot be reused for a different unresolved URL.")
             if title:
                 existing_candidate["title"] = title
             existing_candidate["url"] = url
             known_urls[url] = existing_candidate
-            if provenance:
-                prior_provenance = existing_candidate.get("provenance")
-                prior_openalex = (
-                    prior_provenance.get("openalex")
-                    if isinstance(prior_provenance, dict)
-                    else None
+            if identities:
+                merged_identities = {**existing_identities, **identities}
+                existing_candidate["identities"] = merged_identities
+                for key, value in merged_identities.items():
+                    register_identity(known_identities[key], value, existing_candidate)
+            if candidate.get("discovered_by"):
+                prior_discoveries = [
+                    item
+                    for item in existing_candidate.get("discovered_by", [])
+                    if isinstance(item, dict)
+                ]
+                seen_discoveries = {_freeze_search_value(item) for item in prior_discoveries}
+                for discovery in candidate["discovered_by"]:
+                    frozen = _freeze_search_value(discovery)
+                    if frozen not in seen_discoveries:
+                        prior_discoveries.append(discovery)
+                        seen_discoveries.add(frozen)
+                existing_candidate["discovered_by"] = prior_discoveries
+            if candidate.get("fetch"):
+                prior_fetch = existing_candidate.get("fetch")
+                if isinstance(prior_fetch, dict):
+                    prior_attempts = int(prior_fetch.get("attempts", 0))
+                    next_attempts = int(candidate["fetch"].get("attempts", prior_attempts))
+                    if next_attempts < prior_attempts:
+                        raise SystemExit("Literature search fetch attempts cannot decrease.")
+                    prior_status = str(prior_fetch.get("status") or "")
+                    next_status = str(candidate["fetch"].get("status") or "")
+                    if prior_status in {"fetched", "staged", "failed_terminal"}:
+                        if prior_status in {"fetched", "failed_terminal"} or next_status != "fetched":
+                            candidate["fetch"]["status"] = prior_status
+                existing_candidate["fetch"] = candidate["fetch"]
+            if candidate.get("evidence_level"):
+                level_rank = {"snippet": 0, "title": 1, "abstract": 2, "fulltext": 3}
+                prior_level = str(existing_candidate.get("evidence_level") or "")
+                next_level = str(candidate["evidence_level"])
+                if level_rank.get(next_level, -1) >= level_rank.get(prior_level, -1):
+                    existing_candidate["evidence_level"] = next_level
+            if candidate.get("screening"):
+                prior_screening = existing_candidate.get("screening")
+                prior_decision = (
+                    str(prior_screening.get("decision") or "unassessed")
+                    if isinstance(prior_screening, dict)
+                    else "unassessed"
                 )
-                prior_openalex = sanitize_openalex_provenance(prior_openalex)
-                merged_openalex = {**prior_openalex, **sanitized_openalex}
-                if prior_openalex.get("work_id"):
-                    merged_openalex["work_id"] = prior_openalex["work_id"]
-                if prior_openalex.get("doi"):
-                    merged_openalex["doi"] = prior_openalex["doi"]
-                existing_candidate["provenance"] = {"openalex": merged_openalex}
+                next_decision = str(candidate["screening"].get("decision") or "unassessed")
+                if not (prior_decision != "unassessed" and next_decision == "unassessed"):
+                    if (
+                        isinstance(prior_screening, dict)
+                        and prior_screening
+                        and _freeze_search_value(prior_screening)
+                        != _freeze_search_value(candidate["screening"])
+                    ):
+                        history = [
+                            item
+                            for item in existing_candidate.get("screening_history", [])
+                            if isinstance(item, dict)
+                        ]
+                        history.append({"replaced_at": utc_now_iso(), "screening": prior_screening})
+                        existing_candidate["screening_history"] = history
+                    existing_candidate["screening"] = candidate["screening"]
+            if candidate.get("metadata"):
+                prior_metadata = existing_candidate.get("metadata")
+                if not isinstance(prior_metadata, dict):
+                    prior_metadata = {}
+                existing_candidate["metadata"] = {**prior_metadata, **candidate["metadata"]}
+            for list_key, fallback in (
+                ("topics", query_topics),
+                ("tags", query_tags),
+                ("pool_hints", []),
+            ):
+                incoming_values = candidate.get(list_key) or fallback
+                if incoming_values:
+                    existing_candidate[list_key] = sorted(
+                        set(_slug_list(existing_candidate.get(list_key))) | set(_slug_list(incoming_values))
+                    )
             continue
-        payload["candidates"].append(
-            {
-                "candidate_id": candidate_id,
-                "title": title,
-                "url": url,
-                "status": "staged",
-                "note": str(candidate.get("note") or "").strip(),
-                "topics": _slug_list(candidate.get("topics")) or _slug_list(query_topics),
-                "tags": _slug_list(candidate.get("tags")) or _slug_list(query_tags),
-                "pool_hints": _slug_list(candidate.get("pool_hints")),
-                **({"provenance": provenance} if provenance else {}),
-            }
-        )
-        known_urls[url] = payload["candidates"][-1]
-        known_candidate_ids[candidate_id] = payload["candidates"][-1]
-        if work_id:
-            known_work_ids[work_id] = payload["candidates"][-1]
-        if doi:
-            known_dois[doi] = payload["candidates"][-1]
-    payload["history"].append({"timestamp": utc_now_iso(), "action": "staged", "summary": f"Captured {len(candidates)} candidates."})
+
+        new_candidate = {
+            **candidate,
+            "status": "staged",
+            "note": candidate.get("note", ""),
+            "topics": candidate.get("topics") or _slug_list(query_topics),
+            "tags": candidate.get("tags") or _slug_list(query_tags),
+            "pool_hints": candidate.get("pool_hints") or [],
+            "fetch": candidate.get("fetch") or {"status": "staged", "attempts": 0},
+            "screening": candidate.get("screening") or {"decision": "unassessed"},
+        }
+        payload["candidates"].append(new_candidate)
+        known_urls[url] = new_candidate
+        known_candidate_ids[candidate_id] = new_candidate
+        for key, value in identities.items():
+            register_identity(known_identities[key], value, new_candidate)
+
+    budget = payload.get("budget") if isinstance(payload.get("budget"), dict) else {}
+    if "max_candidates" in budget and len(payload["candidates"]) > int(budget["max_candidates"]):
+        raise SystemExit("Literature search candidate count exceeds its persisted hard budget.")
+    persisted_query_ids = {
+        str(item.get("query_id") or "")
+        for item in payload.get("queries", [])
+        if isinstance(item, dict)
+    }
+    candidate_ids = {
+        str(item.get("candidate_id") or "")
+        for item in payload["candidates"]
+        if isinstance(item, dict)
+    }
+    citation_edges = 0
+    discovery_occurrences = 0
+    discovery_occurrences_by_query: dict[str, int] = {}
+    fulltext_candidates = 0
+    for candidate in payload["candidates"]:
+        if payload.get("entry_skill") == "literature-search" and not candidate.get("discovered_by"):
+            raise SystemExit("Literature search candidates require at least one discovery edge.")
+        if str(candidate.get("evidence_level") or "") == "fulltext":
+            fulltext_candidates += 1
+        for discovery in candidate.get("discovered_by", []):
+            if (
+                isinstance(discovery, dict)
+                and str(discovery.get("query_id") or "") not in persisted_query_ids
+            ):
+                raise SystemExit("Literature search discovery references an unknown query event.")
+            if not isinstance(discovery, dict):
+                continue
+            discovery_occurrences += 1
+            discovery_query_id = str(discovery.get("query_id") or "")
+            discovery_occurrences_by_query[discovery_query_id] = (
+                discovery_occurrences_by_query.get(discovery_query_id, 0) + 1
+            )
+            if discovery.get("edge_type") in {"reference", "cited_by"}:
+                citation_edges += 1
+                if str(discovery.get("parent_candidate_id") or "") not in candidate_ids:
+                    raise SystemExit(
+                        "Literature search citation discovery references an unknown parent candidate."
+                    )
+    for action in payload.get("frontier", []):
+        if not isinstance(action, dict):
+            continue
+        if str(action.get("candidate_id") or "") not in candidate_ids:
+            raise SystemExit("Literature search frontier references an unknown candidate.")
+        parent_id = str(action.get("parent_candidate_id") or "")
+        if parent_id and parent_id not in candidate_ids:
+            raise SystemExit("Literature search frontier references an unknown parent candidate.")
+    if payload.get("entry_skill") == "literature-search":
+        usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+        if int(usage.get("candidates_seen", 0)) < len(payload["candidates"]):
+            raise SystemExit(
+                "Literature search usage.candidates_seen cannot be below the persisted candidate count."
+            )
+        if int(usage.get("full_reads", 0)) < fulltext_candidates:
+            raise SystemExit(
+                "Literature search usage.full_reads cannot be below the persisted fulltext count."
+            )
+        if int(usage.get("citation_hops", 0)) < citation_edges:
+            raise SystemExit(
+                "Literature search usage.citation_hops cannot be below the persisted citation edge count."
+            )
+        if "max_full_reads" in budget and fulltext_candidates > int(budget["max_full_reads"]):
+            raise SystemExit("Literature search fulltext candidates exceed the persisted hard budget.")
+        if "max_citation_hops" in budget and citation_edges > int(budget["max_citation_hops"]):
+            raise SystemExit("Literature search citation edges exceed the persisted hard budget.")
+        stop = payload.get("stop") if isinstance(payload.get("stop"), dict) else {}
+        mode = str(payload.get("mode") or "exploratory")
+        coverage = payload.get("coverage") if isinstance(payload.get("coverage"), dict) else {}
+        counts = coverage.get("flow_counts") if isinstance(coverage.get("flow_counts"), dict) else {}
+        if mode != "exploratory" and stop.get("reason") not in (None, "", "in_progress") and counts:
+            if int(counts.get("identified", 0)) != int(usage.get("candidates_seen", 0)):
+                raise SystemExit(
+                    "Systematic literature search identified count must match usage.candidates_seen."
+                )
+            included_candidates = 0
+            assessed_fulltext_candidates = 0
+            title_abstract_excluded_candidates = 0
+            automation_excluded_candidates = 0
+            unavailable_fulltext_candidates = 0
+            for candidate in payload["candidates"]:
+                screening = (
+                    candidate.get("screening")
+                    if isinstance(candidate.get("screening"), dict)
+                    else {}
+                )
+                decision = str(screening.get("decision") or "unassessed")
+                phase = str(screening.get("phase") or "")
+                if decision == "include":
+                    if phase != "fulltext":
+                        raise SystemExit(
+                            "Terminal systematic inclusion requires a fulltext screening decision."
+                        )
+                    included_candidates += 1
+                if decision in {"include", "exclude"} and phase == "fulltext":
+                    assessed_fulltext_candidates += 1
+                if decision == "exclude" and phase == "title_abstract":
+                    title_abstract_excluded_candidates += 1
+                if decision == "exclude" and phase == "automation":
+                    automation_excluded_candidates += 1
+                fetch = candidate.get("fetch") if isinstance(candidate.get("fetch"), dict) else {}
+                if fetch.get("status") == "failed_terminal":
+                    unavailable_fulltext_candidates += 1
+            expected_candidates = int(counts.get("identified", 0)) - int(
+                counts.get("duplicates_removed", 0)
+            )
+            if len(payload["candidates"]) != expected_candidates:
+                raise SystemExit(
+                    "Systematic literature search candidate ledger must cover every non-duplicate result."
+                )
+            if discovery_occurrences != int(counts.get("identified", 0)):
+                raise SystemExit(
+                    "Systematic literature search discovery ledger must cover every identified result."
+                )
+            for query_event in payload.get("queries", []):
+                if not isinstance(query_event, dict):
+                    continue
+                query_id = str(query_event.get("query_id") or "")
+                if discovery_occurrences_by_query.get(query_id, 0) != int(
+                    query_event.get("result_count", 0)
+                ):
+                    raise SystemExit(
+                        "Systematic literature search discovery occurrences must match each query result count."
+                    )
+            if int(counts.get("duplicates_removed", 0)) != discovery_occurrences - len(
+                payload["candidates"]
+            ):
+                raise SystemExit(
+                    "Systematic literature search duplicate count must match discovery occurrences."
+                )
+            if int(counts.get("included", 0)) != included_candidates:
+                raise SystemExit(
+                    "Systematic literature search included count must match persisted screening decisions."
+                )
+            if int(counts.get("fulltext_assessed", 0)) != assessed_fulltext_candidates:
+                raise SystemExit(
+                    "Systematic literature search fulltext assessed count must match persisted screening decisions."
+                )
+            if int(counts.get("title_abstract_excluded", 0)) != title_abstract_excluded_candidates:
+                raise SystemExit(
+                    "Systematic literature search title/abstract exclusions must match persisted screening decisions."
+                )
+            if int(counts.get("automation_excluded", 0)) != automation_excluded_candidates:
+                raise SystemExit(
+                    "Systematic literature search automation exclusions must match persisted screening decisions."
+                )
+            if int(counts.get("fulltext_unavailable", 0)) != unavailable_fulltext_candidates:
+                raise SystemExit(
+                    "Systematic literature search unavailable fulltexts must match terminal fetch failures."
+                )
+            if int(usage.get("full_reads", 0)) < int(counts.get("fulltext_assessed", 0)):
+                raise SystemExit(
+                    "Systematic literature search fulltext assessments exceed recorded full reads."
+                )
+    payload["history"].append(
+        {
+            "timestamp": utc_now_iso(),
+            "action": "staged",
+            "summary": (
+                f"Captured {len(candidates)} candidate inputs; "
+                f"the stage now holds {len(payload['candidates'])}."
+            ),
+        }
+    )
     payload["generated_at"] = utc_now_iso()
+    if validate_only:
+        return path
+    _validate_search_stage_target(project_root, path)
     write_yaml_if_changed(path, payload)
     return path
 
@@ -590,8 +1832,19 @@ def mark_search_candidate(
     status: str,
     record_id: str = "",
 ) -> Path:
-    path = search_stage_path(project_root, stage_id)
-    with mutation_transaction(project_root, "mark_search_candidate", [path]):
+    safe_stage_id = _safe_search_stage_id(stage_id)
+    path = search_stage_path(project_root, safe_stage_id)
+    _validate_search_stage_target(project_root, path)
+
+    def validate_locked_target() -> None:
+        _validate_search_stage_target(project_root, path)
+
+    with mutation_transaction(
+        project_root,
+        "mark_search_candidate",
+        [path],
+        preflight=validate_locked_target,
+    ):
         payload = load_search_stage(project_root, stage_id)
         found = False
         for candidate in payload.get("candidates", []):
@@ -611,6 +1864,7 @@ def mark_search_candidate(
                 "summary": f"{candidate_id} -> {status}",
             }
         )
+        _validate_search_stage_target(project_root, path)
         write_yaml_if_changed(path, payload)
     return path
 

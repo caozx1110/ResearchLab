@@ -485,7 +485,7 @@ def test_kb_doctor_prints_runtime_capabilities(monkeypatch, tmp_path: Path, caps
     assert kb.main(["--root", str(tmp_path), "--agent-protocol", "doctor.json", "doctor"]) == 0
 
     captured = capsys.readouterr()
-    assert "研究能力包版本为 0.2.0-rc.4" in captured.out
+    assert "研究能力包版本为 0.2.0-rc.5" in captured.out
     assert "配置读写能力正常" in captured.out
     assert "材料 Markdown 阅读层转换能力已就绪" in captured.out
     assert "论文解析能力已就绪" in captured.out

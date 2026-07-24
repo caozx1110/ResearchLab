@@ -1,4 +1,0 @@
-interface:
-  display_name: "Literature Scout"
-  short_description: "Stage bounded OpenAlex paper candidates"
-  default_prompt: "Use $literature-scout to find and stage bounded OpenAlex paper candidates for my research question."

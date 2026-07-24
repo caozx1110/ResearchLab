@@ -10,7 +10,7 @@ workspace/
 └── kb/        # your local research data
 ```
 
-The current candidate is **`0.2.0-rc.4`**. Its complete 1,041-test local suite and current installed-copy validation pass after adversarial remediation. Real SQLite HTML and Obsidian 1.12.7 Reading-view acceptance remain part of the release gate and have not been rerun for rc.4. The candidate is not stable or GA, has not been tagged or published, and makes no compatibility or support-time SLA promise. Real-source/Obsidian acceptance plus a green hosted Linux/macOS CI matrix remain required before a release tag. See [CHANGELOG.md](CHANGELOG.md) for the current release state.
+The current candidate is **`0.2.0-rc.5`**. Its complete 1,089-test local suite and current installed-copy validation pass after the provider-neutral literature-search rebuild and three-agent adversarial review. Real SQLite HTML and Obsidian 1.12.7 Reading-view acceptance remain part of the release gate and have not been rerun for rc.5. The candidate is not stable or GA, has not been tagged or published, and makes no compatibility or support-time SLA promise. Real-source/Obsidian acceptance plus a green hosted Linux/macOS CI matrix remain required before a release tag. See [CHANGELOG.md](CHANGELOG.md) for the current release state.
 
 ## Capability maturity
 
@@ -26,7 +26,7 @@ These labels describe the current scope of each component, not the release statu
 | `kb-cli` | stable | Sixteen-verb routing, conversational output filtering, and recovery entrypoints only. |
 | `knowledge-base-manager` | stable | Schema, evidence, confirmation, exact-path recovery, and index governance; it does not interpret research material. |
 | `source-intake` | beta | Staging, deduplication, immutable source capture, full Markdown reading views with local assets, and retryable failures across heterogeneous sources. |
-| `literature-scout` | beta | Bounded OpenAlex discovery into reviewable source-search staging; it does not judge relevance or create canonical units. |
+| `literature-search` | beta | Agent-led, provider-neutral literature discovery with durable queries, provenance, screening evidence, coverage, budgets, and stop reasons; it does not create canonical units. |
 | `paper-analyst` | beta | Evidence-backed prepare and verify gates; the runtime agent supplies the substantive reading. |
 | `repo-analyst` | beta | File-oriented capability-map preparation and evidence verification; the runtime agent supplies code understanding. |
 | `dataset-analyst` | beta | Dataset-card profile preparation and verbatim evidence verification; suitability judgements remain agent-authored and confirmation-gated. |
@@ -148,7 +148,7 @@ You decide whether a judgement is accepted, which idea or baseline to pursue, wh
 
 Review cards are one-time, version-bound snapshots. They expire after 24 hours; a used, expired, changed, or invalid card is rejected with a distinct recovery message. If the underlying content changes, run `kb review` again to see the new text before deciding. Successful decisions identify the sanitized subject and whether it was confirmed or rejected.
 
-Natural-language literature discovery can ask the Agent to search OpenAlex. It retrieves one bounded result page into source-search staging for deduplication and reading; citation counts remain source metadata, not quality scores, and no candidate becomes a canonical paper until the normal intake workflow accepts it. OpenAlex access requires a privately configured API key, which is never written to the KB or shown in output.
+Natural-language literature discovery routes to `literature-search`. The Agent uses whichever search, browser, or connector capabilities are actually available, explains the scope in human terms, and stores a bounded, resumable candidate stage with every query, discovery path, retryable failure, screening basis, coverage gap, hard budget, and stop rationale. Ordinary requests are exploratory and make no completeness claim; an explicit systematic request is labeled bounded unless its sources, queries, result depth, and screening are reproducible. Search content is treated as untrusted data. The Agent shows a small evidence-backed shortlist, and `include`/`maybe` never becomes intake authorization: only candidates explicitly selected by the user in the current conversation can become canonical papers. No provider SDK or credential is built into the bundle.
 
 `kb find` is passage-oriented lexical retrieval. It returns up to five short excerpts with unit identities and project-relative locators. A missing, stale, or damaged local search cache falls back to an in-memory read-only search, so querying never mutates the KB. It supports same-language and mixed CJK/ASCII tokens but does not pretend to provide cross-language semantic search.
 
