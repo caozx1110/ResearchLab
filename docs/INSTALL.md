@@ -16,11 +16,12 @@
 
 仓库对 Agent 的安装合同如下，Agent 应自行完成，不让用户复制内部 flags：
 
-1. 将链接视为代码来源而不是知识材料；在临时 checkout 检查根目录存在 `install.sh`、`.agents/VERSION`、`.agents/AGENTS.md` 与 `.agents/skills/`。
+1. 将链接视为代码来源而不是知识材料；先用版本控制把它检出到临时目录，不通过管道执行远端脚本。记录仓库 origin、branch 与 commit，并检查根目录存在 `install.sh`、`.agents/VERSION`、`.agents/AGENTS.md` 与 `.agents/skills/`。
 2. 把当前 workspace 根作为安装目标，绝不能把 `kb/` 当目标；已有普通根 `AGENTS.md` 时，确认安装器只追加/更新带 marker 的受管区块并保留块外原文。目标是 symlink、类型冲突、marker 异常或已有受管区块漂移时停止解释，不能覆盖整文件或猜测修复。
-3. 先执行安装器 `--agent-plan`（它隐含 dry-run），检查范围只包含受管 `.agents/`、根规则文件、所选 Agent 接入和明确标出的条件性 `.venv` runtime tree；再在用户已要求“安装”的授权范围内执行 project-scope copy install。该计划不写 workspace、HOME、TMP 或 Python cache，并逐条列出最终目录、文件、链接、managed block 和删除目标。
-4. 安装后核对 manifest、20 个 skill、bundle version、`kb help` 与临时目录中的 `kb init`；真实 `kb/` 不参与验收。
-5. 不安装 Obsidian 插件、daemon、cron、watcher 或全局 Python 包；不 push、tag、publish，也不改 shell 配置。可选终端快捷入口只在用户明确要求时创建。
+3. 先让安装器生成 Agent JSON 计划（它隐含 dry-run）。终端只显示目标数、冲突数和 plan digest；JSON 精确列出 action、scope、tools、source provenance、按执行顺序排列的全部 targets、冲突、条件性 runtime 变化与可复现的 apply contract。除 Agent 明确指定的 JSON 计划文件外，这一步不写 workspace、HOME、runtime 或 Python cache。计划文件必须位于目标 workspace 与 HOME 之外。
+4. 核对计划中的 source commit 仍等于当前 checkout，目标只包含受管 `.agents/`、根规则文件、所选 Agent 接入和明确标出的条件性 `.venv` runtime tree；再在用户已要求“安装”的授权范围内按 apply contract 做 project-scope copy install。计划和应用都使用显式参数，非交互运行不读取 stdin。
+5. 安装后核对 manifest、20 个 skill、bundle version、`kb help` 与临时目录中的 `kb init`；真实 `kb/` 不参与验收。
+6. 不安装 Obsidian 插件、daemon、cron、watcher 或全局 Python 包；不 push、tag、publish，也不改 shell 配置。可选终端快捷入口只在用户明确要求时创建。
 
 这使“粘贴 GitHub 链接让 Agent 安装”成为受支持主路径；当前没有市场包，也不需要插件。
 
@@ -95,11 +96,13 @@ bash install.sh --claude --project /path/to/workspace
 bash install.sh --dry-run --claude --project /path/to/workspace
 ```
 
-Agent 安装前的可审计计划会列出每个最终目标，并把平台相关依赖解析所管理的 `.venv` 标成一个条件性、边界明确的 runtime tree。它不会写 workspace、HOME、TMP 或 Python bytecode cache：
+Agent 安装前的可审计计划把终端输出限制为短摘要，并把每个最终目标写入显式 JSON 文件；平台相关依赖解析所管理的 `.venv` 会被标成条件性、边界明确的 runtime tree。除指定 JSON 文件外，它不会写 workspace、HOME、runtime 或 Python bytecode cache。计划文件应放在目标 workspace 与 HOME 之外：
 
 ```bash
-bash install.sh --agent-plan --claude --project /path/to/workspace --yes
+bash install.sh --agent-plan-json /tmp/workspace-oss-plan.json --claude --project /path/to/workspace --yes
 ```
+
+JSON 中的 `targets` 是完整、按执行顺序排列的精确清单；`source` 绑定 checkout、origin、branch 和 commit；`conflicts` 列出会被保留或跳过的冲突；`conditional_runtime_changes` 单独暴露条件性运行环境树；`apply_contract` 给出同一 source commit 下的无交互应用参数。Agent 必须先核对 plan digest 与这些字段，再执行应用合同，不能把计划模式换成网络下载或隐藏脚本执行。
 
 同时配置 Claude 和 Codex：
 

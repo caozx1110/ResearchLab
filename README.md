@@ -68,7 +68,7 @@ Installation is the one-time technical bootstrap. After it succeeds, ordinary us
 
 ## Install
 
-You can paste the repository URL into Codex or Claude Code and say “把它安装到我当前 workspace；先检查，再使用项目自带安装器；不要覆盖现有研究数据”. The Agent-facing installation contract is documented in [docs/INSTALL.md](docs/INSTALL.md); no marketplace or plugin is required.
+You can paste the repository URL into Codex or Claude Code and say “把它安装到我当前 workspace；先检查，再使用项目自带安装器；不要覆盖现有研究数据”. The supported Agent path checks out the repository without piping remote code into a shell, records source provenance, reviews a bounded terminal summary plus an exact JSON plan, and then applies that plan headlessly while preserving user data. The full contract is documented in [docs/INSTALL.md](docs/INSTALL.md); no marketplace or plugin is required.
 
 For the one-time guided setup, from this repository:
 
