@@ -56,6 +56,24 @@ COMPOSITE_STAGE_FIELDS = {
     "blocker",
     "resume_action",
 }
+COMPOSITE_BINDING_KIND = "composite-stage-binding"
+COMPOSITE_BINDING_FIELDS = {
+    "schema_version",
+    "kind",
+    "stage_id",
+    "refs",
+    "artifacts",
+    "facts",
+    "binding_digest",
+}
+COMPOSITE_ARTIFACT_FIELDS = {
+    "role",
+    "path",
+    "artifact_kind",
+    "artifact_id",
+    "content_sha256",
+}
+TERMINAL_SEARCH_REASONS = {"target_met", "saturated", "budget_exhausted", "user_stop"}
 
 
 def _canonical_digest_value(value: object) -> object:
@@ -266,13 +284,19 @@ def pending_composite_survey_states(root: Path) -> list[dict[str, Any]]:
             violations = composite_survey_state_violations(state)
             if violations:
                 raise SystemExit("Composite survey state is invalid: " + "; ".join(violations))
-            if state.get("status") == "completed":
+            current_violations = composite_survey_current_violations(root, state)
+            projected = (
+                composite_survey_repair_projection(root, state)
+                if current_violations
+                else copy.deepcopy(state)
+            )
+            if projected.get("status") == "completed":
                 continue
             pending.append(
                 {
                     "slug": survey_root.name,
                     "path": path.relative_to(root).as_posix(),
-                    "state": copy.deepcopy(state),
+                    "state": projected,
                     "state_digest": _canonical_digest(state),
                 }
             )
@@ -402,8 +426,9 @@ def update_composite_survey_stage(
     blocker: dict[str, Any] | None = None,
     resume_action: str = "",
     expected_revision: int | None = None,
+    root: Path | None = None,
 ) -> dict[str, Any]:
-    """Return an updated stage ledger; callers persist it under their own journal."""
+    """Return an updated ledger; completed transitions require the owner verifier."""
     violations = composite_survey_state_violations(state)
     if violations:
         raise ValueError("invalid composite survey state: " + "; ".join(violations))
@@ -412,6 +437,22 @@ def update_composite_survey_stage(
     if stage_id not in COMPOSITE_SURVEY_STAGES or status not in COMPOSITE_STAGE_STATUSES:
         raise ValueError("invalid composite survey stage update")
     updated = copy.deepcopy(state)
+    invalid_stage = _first_invalid_completed_stage(root, updated) if root is not None else ""
+    if invalid_stage and status != "completed":
+        raise ValueError(
+            f"composite survey must repair stale completed stage {invalid_stage} first"
+        )
+    if status == "completed":
+        if root is None:
+            raise ValueError("completed composite survey transitions require a workspace verifier")
+        if invalid_stage:
+            if stage_id != invalid_stage:
+                raise ValueError(
+                    f"composite survey must repair stale completed stage {invalid_stage} first"
+                )
+            updated = _reset_composite_from_stage(updated, invalid_stage)
+        elif stage_id != str(updated.get("current_stage") or ""):
+            raise ValueError("only the current composite survey stage may be completed")
     index = COMPOSITE_SURVEY_STAGES.index(stage_id)
     if any(updated["stages"][prior]["status"] != "completed" for prior in range(index)):
         raise ValueError("cannot advance past an incomplete composite survey stage")
@@ -422,11 +463,16 @@ def update_composite_survey_stage(
     else:
         updated["current_stage"] = stage_id
     stage = updated["stages"][index]
+    persisted_outputs = copy.deepcopy(outputs or [])
+    if status == "completed":
+        persisted_outputs = [
+            build_composite_stage_binding(root, stage_id, refs=outputs or [])
+        ]
     stage.update(
         {
             "status": status,
             "inputs": copy.deepcopy(inputs or []),
-            "outputs": copy.deepcopy(outputs or []),
+            "outputs": persisted_outputs,
             "blocker": copy.deepcopy(blocker or {}),
             "resume_action": str(resume_action or ""),
         }
@@ -442,7 +488,523 @@ def update_composite_survey_stage(
     violations = composite_survey_state_violations(updated)
     if violations:
         raise ValueError("invalid composite survey stage transition: " + "; ".join(violations))
+    if root is not None:
+        current_violations = composite_survey_current_violations(root, updated)
+        if current_violations:
+            raise ValueError(
+                "invalid composite survey artifact binding: " + "; ".join(current_violations)
+            )
     return updated
+
+
+def _safe_component(value: object, *, label: str) -> str:
+    text = str(value or "").strip()
+    if not text or Path(text).name != text or text in {".", ".."}:
+        raise ValueError(f"composite survey {label} is not canonical")
+    return text
+
+
+def _sha256(value: object, *, label: str) -> str:
+    text = str(value or "").strip()
+    if len(text) != 64 or any(char not in "0123456789abcdef" for char in text):
+        raise ValueError(f"composite survey {label} is not lowercase sha256")
+    return text
+
+
+def _trusted_artifact(
+    root: Path,
+    path: Path,
+    *,
+    role: str,
+    artifact_kind: str,
+    artifact_id: str,
+    content: object | None = None,
+) -> dict[str, str]:
+    canonical = trusted_project_path(
+        root,
+        path,
+        allowed_root=root / "kb",
+        require="file",
+    )
+    return {
+        "role": role,
+        "path": canonical.relative_to(root.resolve()).as_posix(),
+        "artifact_kind": artifact_kind,
+        "artifact_id": artifact_id,
+        "content_sha256": (
+            file_sha256(canonical) if content is None else _canonical_digest(content)
+        ),
+    }
+
+
+def _search_candidate_snapshot(stage: dict[str, Any]) -> list[dict[str, Any]]:
+    """Exclude only downstream materialization markers from a terminal search result."""
+    snapshot: list[dict[str, Any]] = []
+    for raw in stage.get("candidates", []):
+        if not isinstance(raw, dict):
+            continue
+        item = copy.deepcopy(raw)
+        item.pop("status", None)
+        item.pop("record_id", None)
+        snapshot.append(item)
+    return snapshot
+
+
+def _materialized_unit_snapshot(record: dict[str, Any]) -> dict[str, Any]:
+    payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+    return {
+        "id": record.get("id"),
+        "kind": record.get("kind"),
+        "status": record.get("status"),
+        "source": record.get("source"),
+        "source_search": payload.get("source_search"),
+    }
+
+
+def _normalized_unit_refs(value: object) -> list[dict[str, str]]:
+    if not isinstance(value, list) or not value:
+        raise ValueError("composite survey unit refs must be a non-empty list")
+    units: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {"kind", "id"}:
+            raise ValueError("composite survey unit refs are not canonical")
+        units.append(
+            {
+                "kind": _safe_component(item.get("kind"), label="unit kind"),
+                "id": _safe_component(item.get("id"), label="unit id"),
+            }
+        )
+    ordered = sorted(units, key=lambda item: (item["kind"], item["id"]))
+    if ordered != units or len({(item["kind"], item["id"]) for item in units}) != len(units):
+        raise ValueError("composite survey unit refs must be unique and sorted")
+    return units
+
+
+def _record_for_ref(root: Path, unit: dict[str, str]) -> tuple[dict[str, Any], Path]:
+    try:
+        record, path = locate_record(root, unit["id"], kind=unit["kind"], fuzzy=False)
+        path = trusted_project_path(root, path, allowed_root=root / "kb" / "units", require="file")
+    except (OSError, SystemExit, ValueError) as exc:
+        raise ValueError(f"canonical unit is missing or unsafe: {unit['kind']}/{unit['id']}") from exc
+    if str(record.get("id") or "") != unit["id"] or str(record.get("kind") or "") != unit["kind"]:
+        raise ValueError(f"canonical unit identity changed: {unit['kind']}/{unit['id']}")
+    return record, path
+
+
+def _search_stage(root: Path, stage_id: object) -> tuple[dict[str, Any], Path]:
+    safe_id = _safe_component(stage_id, label="literature stage id")
+    from .paths import search_stage_path
+    from .sources import _stage_search_results_unlocked, load_search_stage
+
+    try:
+        payload = load_search_stage(root, safe_id)
+        path = trusted_project_path(
+            root,
+            search_stage_path(root, safe_id),
+            allowed_root=root / "kb" / "synthesis" / "source-search",
+            require="file",
+        )
+        _stage_search_results_unlocked(
+            root,
+            path=path,
+            current_stage_id=safe_id,
+            kind=str(payload.get("source_kind") or ""),
+            query=str(payload.get("query") or ""),
+            candidates=[],
+            note=str(payload.get("note") or ""),
+            search_state={},
+            validate_only=True,
+        )
+    except (OSError, SystemExit, ValueError) as exc:
+        raise ValueError("literature search stage is missing or unsafe") from exc
+    if (
+        payload.get("entry_skill") != "literature-search"
+        or payload.get("kind") != "source-search-stage"
+        or payload.get("id") != safe_id
+    ):
+        raise ValueError("literature search stage identity is invalid")
+    return payload, path
+
+
+def _selected_candidate_units(
+    root: Path,
+    *,
+    stage_id: str,
+    candidate_ids: list[str],
+) -> tuple[list[dict[str, str]], list[dict[str, Any]], list[dict[str, Any]]]:
+    stage, _path = _search_stage(root, stage_id)
+    candidates = {
+        str(item.get("candidate_id") or ""): item
+        for item in stage.get("candidates", [])
+        if isinstance(item, dict) and str(item.get("candidate_id") or "")
+    }
+    units: list[dict[str, str]] = []
+    records: list[dict[str, Any]] = []
+    selections: list[dict[str, Any]] = []
+    for candidate_id in candidate_ids:
+        candidate = candidates.get(candidate_id)
+        if not candidate:
+            raise ValueError(f"selected candidate is missing from literature stage: {candidate_id}")
+        if str(candidate.get("status") or "") not in {"materialized", "duplicate"}:
+            raise ValueError(f"selected candidate is not materialized: {candidate_id}")
+        unit = {
+            "kind": _safe_component(stage.get("source_kind"), label="selected unit kind"),
+            "id": _safe_component(candidate.get("record_id"), label="selected unit id"),
+        }
+        record, _record_path = _record_for_ref(root, unit)
+        source_search = record.get("payload", {}).get("source_search", {})
+        source_search = source_search if isinstance(source_search, dict) else {}
+        if stage_id not in source_search.get("stage_ids", []) or candidate_id not in source_search.get("candidate_ids", []):
+            raise ValueError("canonical unit does not bind the selected stage candidate")
+        authorization = source_search.get("user_selection")
+        authorization = authorization if isinstance(authorization, dict) else {}
+        if (
+            str(authorization.get("authorization_source") or "") != "user_message"
+            or not str(authorization.get("user_authorization") or "").strip()
+        ):
+            raise ValueError("selected literature candidate lacks current-user authorization")
+        units.append(unit)
+        records.append(record)
+        selections.append(
+            {
+                "candidate_id": candidate_id,
+                "unit": unit,
+                "authorization_digest": _canonical_digest(authorization),
+            }
+        )
+    return units, records, selections
+
+
+def _survey_for_ref(root: Path, ref: dict[str, Any]) -> tuple[dict[str, Any], Path]:
+    slug = _safe_component(ref.get("slug"), label="survey slug")
+    mode = str(ref.get("mode") or "survey").strip()
+    try:
+        path = trusted_project_path(
+            root,
+            survey_artifact_path(root, slug, mode),
+            allowed_root=root / "kb" / "synthesis",
+            require="file",
+        )
+    except ValueError as exc:
+        raise ValueError("survey judgement is missing or unsafe") from exc
+    payload = load_yaml(path, default={})
+    if (
+        not isinstance(payload, dict)
+        or payload.get("kind") != "survey_judgement"
+        or payload.get("owner") != "literature-synthesizer"
+        or str(payload.get("slug") or "") != slug
+        or str(payload.get("mode") or "") != mode
+    ):
+        raise ValueError("survey judgement identity is invalid")
+    return payload, path
+
+
+def _normalize_stage_refs(stage_id: str, refs: object) -> dict[str, Any]:
+    if not isinstance(refs, list) or len(refs) != 1 or not isinstance(refs[0], dict):
+        raise ValueError("completed composite survey stage requires exactly one canonical ref")
+    ref = refs[0]
+    if stage_id == "search":
+        if set(ref) != {"kind", "stage_id"} or ref.get("kind") != "literature-search-stage":
+            raise ValueError("search completion ref is invalid")
+        return {"kind": "literature-search-stage", "stage_id": _safe_component(ref.get("stage_id"), label="literature stage id")}
+    if stage_id == "selection":
+        if set(ref) != {"kind", "stage_id", "candidate_ids"} or ref.get("kind") != "literature-search-selection":
+            raise ValueError("selection completion ref is invalid")
+        raw_ids = ref.get("candidate_ids")
+        if not isinstance(raw_ids, list) or not raw_ids:
+            raise ValueError("selection completion requires candidate ids")
+        ids = [_safe_component(item, label="candidate id") for item in raw_ids]
+        if ids != sorted(set(ids)):
+            raise ValueError("selection candidate ids must be unique and sorted")
+        return {"kind": "literature-search-selection", "stage_id": _safe_component(ref.get("stage_id"), label="literature stage id"), "candidate_ids": ids}
+    if stage_id in {"source_intake", "unit_analysis"}:
+        expected_kind = "materialized-units" if stage_id == "source_intake" else "confirmed-units"
+        if set(ref) != {"kind", "stage_id", "units"} or ref.get("kind") != expected_kind:
+            raise ValueError(f"{stage_id} completion ref is invalid")
+        return {"kind": expected_kind, "stage_id": _safe_component(ref.get("stage_id"), label="literature stage id"), "units": _normalized_unit_refs(ref.get("units"))}
+    if stage_id in {"synthesis", "review_confirmation"}:
+        expected_kind = "verified-survey" if stage_id == "synthesis" else "confirmed-survey"
+        if set(ref) != {"kind", "slug", "mode"} or ref.get("kind") != expected_kind:
+            raise ValueError(f"{stage_id} completion ref is invalid")
+        mode = str(ref.get("mode") or "").strip()
+        if mode not in {"survey", "review", "taxonomy"}:
+            raise ValueError("survey mode is invalid")
+        return {"kind": expected_kind, "slug": _safe_component(ref.get("slug"), label="survey slug"), "mode": mode}
+    if stage_id == "report_consumption":
+        if set(ref) != {"kind", "program_id", "event_digest", "survey_slug", "survey_mode"} or ref.get("kind") != "program-reporting-event":
+            raise ValueError("report consumption ref is invalid")
+        return {
+            "kind": "program-reporting-event",
+            "program_id": _safe_component(ref.get("program_id"), label="program id"),
+            "event_digest": _sha256(ref.get("event_digest"), label="event digest"),
+            "survey_slug": _safe_component(ref.get("survey_slug"), label="survey slug"),
+            "survey_mode": str(ref.get("survey_mode") or "").strip(),
+        }
+    raise ValueError("unsupported composite survey stage")
+
+
+def build_composite_stage_binding(root: Path, stage_id: str, *, refs: object) -> dict[str, Any]:
+    """Build one closed binding from canonical bytes; no research meaning is inferred."""
+    if stage_id not in COMPOSITE_SURVEY_STAGES:
+        raise ValueError("unsupported composite survey stage")
+    root = root.resolve()
+    ref = _normalize_stage_refs(stage_id, refs)
+    artifacts: list[dict[str, str]] = []
+    facts: dict[str, Any]
+    if stage_id == "search":
+        stage, path = _search_stage(root, ref["stage_id"])
+        stop = stage.get("stop") if isinstance(stage.get("stop"), dict) else {}
+        reason = str(stop.get("reason") or "")
+        if reason not in TERMINAL_SEARCH_REASONS or not str(stop.get("rationale") or "").strip():
+            raise ValueError("literature search stage is not terminal")
+        terminal_snapshot = {
+            "id": stage.get("id"),
+            "kind": stage.get("kind"),
+            "entry_skill": stage.get("entry_skill"),
+            "source_kind": stage.get("source_kind"),
+            "query": stage.get("query"),
+            "mode": stage.get("mode"),
+            "scope": stage.get("scope"),
+            "queries": stage.get("queries"),
+            "candidates": _search_candidate_snapshot(stage),
+            "coverage": stage.get("coverage"),
+            "frontier": stage.get("frontier"),
+            "stop": stage.get("stop"),
+            "partial": stage.get("partial"),
+        }
+        artifacts.append(_trusted_artifact(root, path, role="literature-search-stage", artifact_kind="source-search-stage", artifact_id=ref["stage_id"], content=terminal_snapshot))
+        facts = {"terminal_stop_reason": reason, "candidate_set_digest": _canonical_digest(_search_candidate_snapshot(stage))}
+    elif stage_id == "selection":
+        stage, path = _search_stage(root, ref["stage_id"])
+        units, _records, selections = _selected_candidate_units(root, stage_id=ref["stage_id"], candidate_ids=ref["candidate_ids"])
+        selection_stage_snapshot = [
+            {
+                "candidate_id": item.get("candidate_id"),
+                "status": item.get("status"),
+                "record_id": item.get("record_id"),
+            }
+            for item in stage.get("candidates", [])
+            if isinstance(item, dict) and str(item.get("candidate_id") or "") in ref["candidate_ids"]
+        ]
+        artifacts.append(_trusted_artifact(root, path, role="literature-search-stage", artifact_kind="source-search-stage", artifact_id=ref["stage_id"], content=selection_stage_snapshot))
+        for unit in units:
+            record, record_path = _record_for_ref(root, unit)
+            source_search = record.get("payload", {}).get("source_search", {})
+            artifacts.append(_trusted_artifact(root, record_path, role="selection-authorization", artifact_kind=unit["kind"], artifact_id=str(record.get("id") or ""), content=source_search.get("user_selection") if isinstance(source_search, dict) else {}))
+        facts = {"candidate_set_digest": _canonical_digest(_search_candidate_snapshot(stage)), "selected_candidates": selections}
+    elif stage_id == "source_intake":
+        stage, stage_path = _search_stage(root, ref["stage_id"])
+        artifacts.append(_trusted_artifact(root, stage_path, role="literature-search-stage", artifact_kind="source-search-stage", artifact_id=ref["stage_id"], content=[{"candidate_id": item.get("candidate_id"), "status": item.get("status"), "record_id": item.get("record_id")} for item in stage.get("candidates", []) if isinstance(item, dict) and str(item.get("record_id") or "") in {unit["id"] for unit in ref["units"]}]))
+        facts_units: list[dict[str, str]] = []
+        for unit in ref["units"]:
+            record, record_path = _record_for_ref(root, unit)
+            source_search = record.get("payload", {}).get("source_search", {})
+            source_search = source_search if isinstance(source_search, dict) else {}
+            candidate_ids = [str(item) for item in source_search.get("candidate_ids", [])]
+            matching = [item for item in stage.get("candidates", []) if isinstance(item, dict) and str(item.get("record_id") or "") == unit["id"] and str(item.get("candidate_id") or "") in candidate_ids and str(item.get("status") or "") in {"materialized", "duplicate"}]
+            if ref["stage_id"] not in source_search.get("stage_ids", []) or not matching or str(record.get("status") or "") != "active" or not isinstance(record.get("source"), dict) or not record.get("source"):
+                raise ValueError(f"canonical unit is not a current materialization: {unit['kind']}/{unit['id']}")
+            artifacts.append(_trusted_artifact(root, record_path, role="materialized-unit", artifact_kind=unit["kind"], artifact_id=unit["id"], content=_materialized_unit_snapshot(record)))
+            facts_units.append({**unit, "candidate_id": str(matching[0].get("candidate_id") or "")})
+        facts = {"units": facts_units}
+    elif stage_id == "unit_analysis":
+        _stage, stage_path = _search_stage(root, ref["stage_id"])
+        artifacts.append(_trusted_artifact(root, stage_path, role="literature-search-stage", artifact_kind="source-search-stage", artifact_id=ref["stage_id"], content={"id": ref["stage_id"], "source_kind": _stage.get("source_kind")}))
+        bindings: list[dict[str, Any]] = []
+        for unit in ref["units"]:
+            record, record_path = _record_for_ref(root, unit)
+            binding = build_unit_binding(root, record)
+            artifacts.append(_trusted_artifact(root, record_path, role="confirmed-unit", artifact_kind=unit["kind"], artifact_id=unit["id"], content=binding))
+            bindings.append(binding)
+        facts = {"unit_bindings": bindings}
+    elif stage_id in {"synthesis", "review_confirmation"}:
+        survey, path = _survey_for_ref(root, ref)
+        violations = survey_lifecycle_violations(survey, root)
+        if violations:
+            raise ValueError("survey judgement is stale: " + "; ".join(violations))
+        if stage_id == "synthesis":
+            from .evidence import verification_receipt_violations
+            violations = verification_receipt_violations(survey, path.parent, source_roots=survey_source_roots(root, survey, path))
+            if violations:
+                raise ValueError("survey judgement is not currently verified: " + "; ".join(violations))
+            verification = survey.get("payload", {}).get("verification", {})
+            facts = {"survey_content_digest": str(survey.get("survey_content_digest") or ""), "verification_receipt_digest": _canonical_digest(verification), "unit_ids": sorted(str(item) for item in survey.get("consumer_binding", {}).get("unit_ids", []))}
+            role = "verified-survey"
+        else:
+            from .judgements import judgement_confirmation_is_current
+            if not judgement_confirmation_is_current(root, survey, path):
+                raise ValueError("survey judgement confirmation is missing or stale")
+            facts = {"survey_content_digest": str(survey.get("survey_content_digest") or ""), "confirmation_receipt_digest": _canonical_digest(survey.get("confirmation", {}))}
+            role = "confirmed-survey"
+        survey_binding_content = {
+            "survey_content_digest": survey.get("survey_content_digest"),
+            "consumer_binding": survey.get("consumer_binding"),
+            "verification": survey.get("payload", {}).get("verification", {}),
+        }
+        if stage_id == "review_confirmation":
+            survey_binding_content["confirmation"] = survey.get("confirmation", {})
+        artifacts.append(_trusted_artifact(root, path, role=role, artifact_kind="survey_judgement", artifact_id=str(survey.get("id") or ""), content=survey_binding_content))
+    else:
+        from .common import program_reporting_events_path
+        from .judgements import confirmation_binding, judgement_confirmation_is_current
+
+        if ref["survey_mode"] not in {"survey", "review", "taxonomy"}:
+            raise ValueError("report consumption survey mode is invalid")
+        survey_ref = {"slug": ref["survey_slug"], "mode": ref["survey_mode"]}
+        survey, survey_path = _survey_for_ref(root, survey_ref)
+        if not judgement_confirmation_is_current(root, survey, survey_path):
+            raise ValueError("report consumption references a stale survey confirmation")
+        events_path = program_reporting_events_path(root, ref["program_id"])
+        events_path = trusted_project_path(root, events_path, allowed_root=root / "kb" / "programs", require="file")
+        event_doc = load_yaml(events_path, default={})
+        events = [item for item in event_doc.get("items", []) if isinstance(item, dict)] if isinstance(event_doc, dict) else []
+        matches = [item for item in events if _canonical_digest(item) == ref["event_digest"]]
+        expected_confirmation = confirmation_binding(survey, owner="literature-synthesizer", path=survey_path.relative_to(root).as_posix())
+        if len(matches) != 1 or matches[0].get("event_type") != "survey-confirmed" or matches[0].get("confirmation_binding") != expected_confirmation:
+            raise ValueError("program reporting event does not consume the current survey confirmation")
+        artifacts.append(_trusted_artifact(root, events_path, role="program-reporting-events", artifact_kind="program-reporting-events", artifact_id=ref["program_id"], content=matches[0]))
+        facts = {"event_digest": ref["event_digest"], "confirmation_binding_digest": _canonical_digest(expected_confirmation)}
+
+    binding: dict[str, Any] = {
+        "schema_version": 1,
+        "kind": COMPOSITE_BINDING_KIND,
+        "stage_id": stage_id,
+        "refs": [ref],
+        "artifacts": artifacts,
+        "facts": facts,
+        "binding_digest": "",
+    }
+    binding["binding_digest"] = _canonical_digest({key: value for key, value in binding.items() if key != "binding_digest"})
+    return binding
+
+
+def _completed_stage_binding(stage: object) -> dict[str, Any] | None:
+    if not isinstance(stage, dict) or stage.get("status") != "completed":
+        return None
+    outputs = stage.get("outputs")
+    if not isinstance(outputs, list) or len(outputs) != 1 or not isinstance(outputs[0], dict):
+        return None
+    binding = outputs[0]
+    if set(binding) != COMPOSITE_BINDING_FIELDS or binding.get("kind") != COMPOSITE_BINDING_KIND or binding.get("schema_version") != 1:
+        return None
+    artifacts = binding.get("artifacts")
+    if not isinstance(artifacts, list) or not artifacts or any(not isinstance(item, dict) or set(item) != COMPOSITE_ARTIFACT_FIELDS for item in artifacts):
+        return None
+    return binding
+
+
+def _completed_binding_violations(root: Path, stage: dict[str, Any]) -> list[str]:
+    stage_id = str(stage.get("id") or "")
+    binding = _completed_stage_binding(stage)
+    if binding is None:
+        return [f"completed stage {stage_id} lacks a closed artifact binding"]
+    if binding.get("stage_id") != stage_id:
+        return [f"completed stage {stage_id} binding identity is invalid"]
+    expected_digest = _canonical_digest({key: value for key, value in binding.items() if key != "binding_digest"})
+    if binding.get("binding_digest") != expected_digest:
+        return [f"completed stage {stage_id} binding digest is stale"]
+    try:
+        current = build_composite_stage_binding(root, stage_id, refs=binding.get("refs"))
+    except (OSError, SystemExit, ValueError) as exc:
+        return [f"completed stage {stage_id} is not current: {exc}"]
+    if current != binding:
+        return [f"completed stage {stage_id} canonical artifact binding changed"]
+    return []
+
+
+def _chain_violations(state: dict[str, Any]) -> list[str]:
+    bindings = {
+        str(stage.get("id") or ""): _completed_stage_binding(stage)
+        for stage in state.get("stages", [])
+        if isinstance(stage, dict) and stage.get("status") == "completed"
+    }
+    violations: list[str] = []
+    search = bindings.get("search")
+    selection = bindings.get("selection")
+    intake = bindings.get("source_intake")
+    analysis = bindings.get("unit_analysis")
+    synthesis = bindings.get("synthesis")
+    review = bindings.get("review_confirmation")
+    report = bindings.get("report_consumption")
+    if search and selection and search["refs"][0]["stage_id"] != selection["refs"][0]["stage_id"]:
+        violations.append("selection does not bind the completed literature search stage")
+    if selection and intake:
+        selected_units = [item["unit"] for item in selection["facts"].get("selected_candidates", [])]
+        intake_units = [{"kind": item.get("kind"), "id": item.get("id")} for item in intake["facts"].get("units", [])]
+        if selection["refs"][0]["stage_id"] != intake["refs"][0]["stage_id"] or selected_units != intake_units:
+            violations.append("source intake does not bind the selected candidate units")
+    if intake and analysis:
+        intake_units = [{"kind": item.get("kind"), "id": item.get("id")} for item in intake["facts"].get("units", [])]
+        analysis_units = [{"kind": item.get("kind"), "id": item.get("id")} for item in analysis["refs"][0].get("units", [])]
+        if intake_units != analysis_units:
+            violations.append("unit analysis does not bind the materialized units")
+    if analysis and synthesis:
+        analysis_ids = sorted(item.get("id") for item in analysis["refs"][0].get("units", []))
+        if analysis_ids != synthesis["facts"].get("unit_ids"):
+            violations.append("synthesis does not bind the confirmed analysis units")
+    if synthesis and review and (synthesis["refs"][0]["slug"], synthesis["refs"][0]["mode"]) != (review["refs"][0]["slug"], review["refs"][0]["mode"]):
+        violations.append("review confirmation does not bind the verified survey")
+    if review and report and (review["refs"][0]["slug"], review["refs"][0]["mode"]) != (report["refs"][0]["survey_slug"], report["refs"][0]["survey_mode"]):
+        violations.append("report consumption does not bind the confirmed survey")
+    return violations
+
+
+def composite_survey_current_violations(root: Path, state: object) -> list[str]:
+    """Revalidate every completed-prefix artifact before resume/status/next trust it."""
+    structural = composite_survey_state_violations(state)
+    if structural:
+        return structural
+    assert isinstance(state, dict)
+    violations: list[str] = []
+    for stage in state.get("stages", []):
+        if not isinstance(stage, dict) or stage.get("status") != "completed":
+            break
+        violations.extend(_completed_binding_violations(root.resolve(), stage))
+    violations.extend(_chain_violations(state))
+    return violations
+
+
+def _first_invalid_completed_stage(root: Path, state: dict[str, Any]) -> str:
+    for stage in state.get("stages", []):
+        if not isinstance(stage, dict) or stage.get("status") != "completed":
+            break
+        if _completed_binding_violations(root.resolve(), stage):
+            return str(stage.get("id") or "")
+    if _chain_violations(state):
+        for stage in state.get("stages", []):
+            if isinstance(stage, dict) and stage.get("status") == "completed":
+                return str(stage.get("id") or "")
+    return ""
+
+
+def _reset_composite_from_stage(state: dict[str, Any], stage_id: str) -> dict[str, Any]:
+    reset = copy.deepcopy(state)
+    index = COMPOSITE_SURVEY_STAGES.index(stage_id)
+    for current, stage in enumerate(reset["stages"]):
+        if current < index:
+            continue
+        stage["status"] = "in_progress" if current == index else "pending"
+        stage["inputs"] = []
+        stage["outputs"] = []
+        stage["blocker"] = {}
+        stage["resume_action"] = ""
+    reset["current_stage"] = stage_id
+    reset["status"] = "in_progress"
+    return reset
+
+
+def composite_survey_repair_projection(root: Path, state: dict[str, Any]) -> dict[str, Any]:
+    """Return a no-write blocked projection at the earliest stale completed stage."""
+    stage_id = _first_invalid_completed_stage(root, state)
+    if not stage_id:
+        return copy.deepcopy(state)
+    projected = _reset_composite_from_stage(state, stage_id)
+    stage = projected["stages"][COMPOSITE_SURVEY_STAGES.index(stage_id)]
+    stage["status"] = "blocked"
+    stage["blocker"] = {"code": "stale_composite_stage_binding"}
+    stage["resume_action"] = "rebuild_current_stage_binding"
+    projected["status"] = "blocked"
+    return projected
 
 
 def _evidence_artifact_bindings(unit_dir: Path) -> list[dict[str, str]]:
@@ -595,7 +1157,10 @@ def survey_lifecycle_violations(payload: object, root: Path) -> list[str]:
 
 __all__ = [
     "COMPOSITE_SURVEY_STAGES",
+    "build_composite_stage_binding",
     "build_unit_binding",
+    "composite_survey_current_violations",
+    "composite_survey_repair_projection",
     "composite_survey_state_violations",
     "composite_survey_request_digest",
     "composite_survey_state_path",

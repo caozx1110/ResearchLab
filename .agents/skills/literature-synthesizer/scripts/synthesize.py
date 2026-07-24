@@ -37,7 +37,9 @@ from research.journal import mutation_transaction
 from research.preference_selection import resolve_operation_preferences
 from research.surveys import (
     build_unit_binding,
+    composite_survey_current_violations,
     composite_survey_request_digest,
+    composite_survey_repair_projection,
     composite_survey_state_path,
     composite_survey_state_violations,
     evidence_gap_handoff,
@@ -263,7 +265,12 @@ def handle_composite_command(root: Path, args: argparse.Namespace) -> int:
     _assert_composite_path_safe(root, path)
     if args.action == "status":
         state = _load_composite_state(path)
-        print(json.dumps(state, ensure_ascii=False, sort_keys=True))
+        current = (
+            composite_survey_repair_projection(root, state)
+            if composite_survey_current_violations(root, state)
+            else state
+        )
+        print(json.dumps(current, ensure_ascii=False, sort_keys=True))
         return 0
     input_path = Path(args.input).expanduser()
     if not input_path.is_absolute():
@@ -291,6 +298,7 @@ def handle_composite_command(root: Path, args: argparse.Namespace) -> int:
                 blocker=request.get("blocker") if isinstance(request.get("blocker"), dict) else {},
                 resume_action=str(request.get("resume_action") or ""),
                 expected_revision=int(args.expected_revision),
+                root=root,
             )
         except ValueError as exc:
             raise SystemExit(str(exc)) from exc

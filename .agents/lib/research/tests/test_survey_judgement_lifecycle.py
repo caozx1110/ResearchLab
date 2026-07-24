@@ -18,12 +18,18 @@ from research.paths import config_root, runtime_preferences_path
 from research.prefs import default_runtime_preferences
 from research.surveys import (
     COMPOSITE_SURVEY_STAGES,
+    build_composite_stage_binding,
+    composite_survey_current_violations,
+    composite_survey_repair_projection,
+    composite_survey_state_path,
     composite_survey_state_violations,
     new_composite_survey_state,
+    pending_composite_survey_states,
     select_current_confirmed_survey_records,
     survey_lifecycle_violations,
     update_composite_survey_stage,
 )
+from research.sources import mark_search_candidate, stage_search_results
 
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -85,9 +91,115 @@ def write_confirmed_source(module, root: Path, *, unit_id: str = "p-alpha", conf
     return record
 
 
-def build_verified_survey(root: Path, *, program_id: str = ""):
+def write_terminal_search(root: Path, *, candidate_id: str = "paper-a") -> Path:
+    queried_at = "2026-07-24T00:00:00+00:00"
+    state = {
+        "entry_skill": "literature-search",
+        "mode": "exploratory",
+        "scope": {},
+        "budget": {
+            "max_queries": 8,
+            "max_candidates": 50,
+            "max_full_reads": 8,
+            "max_citation_hops": 6,
+        },
+        "usage": {
+            "queries": 1,
+            "candidates_seen": 1,
+            "full_reads": 0,
+            "citation_hops": 0,
+            "retryable_failures": 0,
+        },
+        "queries": [
+            {
+                "query_id": "q1",
+                "text": "robot learning",
+                "intent": "seed",
+                "facet": "seed",
+                "channel": "web-search",
+                "tool": "test-search",
+                "selection_reason": "bounded fixture query",
+                "searched_at": queried_at,
+                "result_count": 1,
+                "result_depth": "top-10",
+                "outcome": "success",
+                "reproducible": False,
+            }
+        ],
+        "coverage": {
+            "round": 1,
+            "covered_facets": ["seed"],
+            "uncovered_facets": [],
+            "new_candidates": 1,
+            "deduplicated": 0,
+            "new_relevant": 1,
+            "notes": "fixture coverage",
+        },
+        "frontier": [],
+        "stop": {"reason": "target_met", "rationale": "Fixture target reached."},
+        "partial": True,
+    }
+    candidate = {
+        "candidate_id": candidate_id,
+        "title": "Alpha Method",
+        "url": "https://example.test/alpha",
+        "status": "staged",
+        "note": "",
+        "topics": [],
+        "tags": [],
+        "pool_hints": [],
+        "discovered_by": [
+            {
+                "query_id": "q1",
+                "edge_type": "direct",
+                "channel": "web-search",
+                "tool": "test-search",
+                "discovered_at": queried_at,
+            }
+        ],
+        "fetch": {"status": "discovered", "attempts": 0, "updated_at": queried_at},
+        "evidence_level": "title",
+        "screening": {"decision": "unassessed"},
+    }
+    return stage_search_results(
+        root,
+        kind="paper",
+        query="robot learning",
+        candidates=[candidate],
+        stage_id="literature-search-alpha",
+        search_state=state,
+    )
+
+
+def bind_materialized_candidate(module, root: Path, stage_path: Path) -> dict:
+    record = write_confirmed_source(module, root)
+    record_path = root / "kb/units/papers/p-alpha/record.yaml"
+    current = load_yaml(record_path)
+    current["status"] = "active"
+    current["source"] = {"original_uri": "https://example.test/alpha"}
+    current.setdefault("payload", {})["source_search"] = {
+        "stage_ids": [stage_path.stem],
+        "candidate_ids": ["paper-a"],
+        "queries": ["robot learning"],
+        "user_selection": {
+            "user_authorization": "Keep paper-a for this survey.",
+            "authorization_source": "user_message",
+        },
+    }
+    write_yaml_if_changed(record_path, current)
+    mark_search_candidate(
+        root,
+        stage_path.stem,
+        "paper-a",
+        status="materialized",
+        record_id="p-alpha",
+    )
+    return load_yaml(record_path)
+
+
+def build_verified_survey(root: Path, *, program_id: str = "", source: dict | None = None):
     module = load_synthesizer()
-    source = write_confirmed_source(module, root)
+    source = source or write_confirmed_source(module, root)
     if program_id:
         (root / "kb" / "programs" / program_id).mkdir(parents=True, exist_ok=True)
     scaffold = module.build_survey_scaffold(
@@ -234,13 +346,16 @@ def test_composite_cli_updates_with_revision_cas_and_is_resumable(
     assert module.main() == 2
     handoff = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     binding = handoff["composite_handoff"]["state_binding"]
+    search_path = write_terminal_search(tmp_path)
     update_path = tmp_path / "search-complete.json"
     update_path.write_text(
         json.dumps(
             {
                 "stage_id": "search",
                 "status": "completed",
-                "outputs": [{"kind": "literature_stage", "id": "search-1"}],
+                "outputs": [
+                    {"kind": "literature-search-stage", "stage_id": search_path.stem}
+                ],
             }
         ),
         encoding="utf-8",
@@ -272,6 +387,342 @@ def test_composite_cli_updates_with_revision_cas_and_is_resumable(
     with pytest.raises(SystemExit, match="changed after"):
         module.main()
     assert load_yaml(tmp_path / binding["state_path"])["revision"] == updated["revision"]
+
+
+def test_composite_all_seven_stages_bind_current_canonical_artifacts(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    module = load_synthesizer()
+    search_path = write_terminal_search(tmp_path)
+    state = new_composite_survey_state(
+        composite_id="survey-run-binding",
+        request_digest=hashlib.sha256(b"canonical binding flow").hexdigest(),
+        mode="discovery",
+        filters={"query": "robot learning", "program_ids": "program-survey"},
+    )
+
+    stage_refs: dict[str, list[dict]] = {
+        "search": [
+            {"kind": "literature-search-stage", "stage_id": search_path.stem}
+        ]
+    }
+    with pytest.raises(ValueError, match="missing or unsafe"):
+        update_composite_survey_stage(
+            state,
+            "search",
+            status="completed",
+            outputs=[{"kind": "literature-search-stage", "stage_id": "fake-stage"}],
+            root=tmp_path,
+        )
+    state = update_composite_survey_stage(
+        state,
+        "search",
+        status="completed",
+        outputs=stage_refs["search"],
+        root=tmp_path,
+    )
+    source = bind_materialized_candidate(module, tmp_path, search_path)
+    assert composite_survey_current_violations(tmp_path, state) == []
+
+    stage_refs["selection"] = [
+        {
+            "kind": "literature-search-selection",
+            "stage_id": search_path.stem,
+            "candidate_ids": ["paper-a"],
+        }
+    ]
+    with pytest.raises(ValueError, match="missing from literature stage"):
+        update_composite_survey_stage(
+            state,
+            "selection",
+            status="completed",
+            outputs=[
+                {
+                    "kind": "literature-search-selection",
+                    "stage_id": search_path.stem,
+                    "candidate_ids": ["fake-candidate"],
+                }
+            ],
+            root=tmp_path,
+        )
+    state = update_composite_survey_stage(
+        state,
+        "selection",
+        status="completed",
+        outputs=stage_refs["selection"],
+        root=tmp_path,
+    )
+
+    unit_refs = [{"kind": "paper", "id": "p-alpha"}]
+    stage_refs["source_intake"] = [
+        {"kind": "materialized-units", "stage_id": search_path.stem, "units": unit_refs}
+    ]
+    with pytest.raises(ValueError, match="missing or unsafe"):
+        update_composite_survey_stage(
+            state,
+            "source_intake",
+            status="completed",
+            outputs=[
+                {
+                    "kind": "materialized-units",
+                    "stage_id": search_path.stem,
+                    "units": [{"kind": "paper", "id": "fake-unit"}],
+                }
+            ],
+            root=tmp_path,
+        )
+    state = update_composite_survey_stage(
+        state,
+        "source_intake",
+        status="completed",
+        outputs=stage_refs["source_intake"],
+        root=tmp_path,
+    )
+
+    stage_refs["unit_analysis"] = [
+        {"kind": "confirmed-units", "stage_id": search_path.stem, "units": unit_refs}
+    ]
+    with pytest.raises((SystemExit, ValueError), match="fake-unit|Record not found"):
+        update_composite_survey_stage(
+            state,
+            "unit_analysis",
+            status="completed",
+            outputs=[
+                {
+                    "kind": "confirmed-units",
+                    "stage_id": search_path.stem,
+                    "units": [{"kind": "paper", "id": "fake-unit"}],
+                }
+            ],
+            root=tmp_path,
+        )
+    state = update_composite_survey_stage(
+        state,
+        "unit_analysis",
+        status="completed",
+        outputs=stage_refs["unit_analysis"],
+        root=tmp_path,
+    )
+
+    module, survey_path, _verified = build_verified_survey(
+        tmp_path,
+        program_id="program-survey",
+        source=source,
+    )
+    stage_refs["synthesis"] = [
+        {"kind": "verified-survey", "slug": "robot-learning", "mode": "survey"}
+    ]
+    with pytest.raises(ValueError, match="missing or unsafe"):
+        update_composite_survey_stage(
+            state,
+            "synthesis",
+            status="completed",
+            outputs=[{"kind": "verified-survey", "slug": "fake-survey", "mode": "survey"}],
+            root=tmp_path,
+        )
+    state = update_composite_survey_stage(
+        state,
+        "synthesis",
+        status="completed",
+        outputs=stage_refs["synthesis"],
+        root=tmp_path,
+    )
+
+    with pytest.raises(ValueError, match="confirmation is missing or stale"):
+        update_composite_survey_stage(
+            state,
+            "review_confirmation",
+            status="completed",
+            outputs=[{"kind": "confirmed-survey", "slug": "robot-learning", "mode": "survey"}],
+            root=tmp_path,
+        )
+    card = discover_pending_judgements(tmp_path)[0]
+    module.apply_review_batch_decision(
+        tmp_path,
+        card,
+        "confirm",
+        actor="Alice Researcher",
+        evidence=["Reviewed the survey for report consumption."],
+        user_authorization="Confirm this displayed survey.",
+        authorization_source="user_message",
+        rejection_reason="",
+    )
+    stage_refs["review_confirmation"] = [
+        {"kind": "confirmed-survey", "slug": "robot-learning", "mode": "survey"}
+    ]
+    state = update_composite_survey_stage(
+        state,
+        "review_confirmation",
+        status="completed",
+        outputs=stage_refs["review_confirmation"],
+        root=tmp_path,
+    )
+
+    events_path = tmp_path / "kb/programs/program-survey/workflow/reporting-events.yaml"
+    event = load_yaml(events_path)["items"][0]
+    event_digest = module._canonical_digest(event)
+    stage_refs["report_consumption"] = [
+        {
+            "kind": "program-reporting-event",
+            "program_id": "program-survey",
+            "event_digest": event_digest,
+            "survey_slug": "robot-learning",
+            "survey_mode": "survey",
+        }
+    ]
+    with pytest.raises(ValueError, match="does not consume"):
+        update_composite_survey_stage(
+            state,
+            "report_consumption",
+            status="completed",
+            outputs=[
+                {
+                    "kind": "program-reporting-event",
+                    "program_id": "program-survey",
+                    "event_digest": "0" * 64,
+                    "survey_slug": "robot-learning",
+                    "survey_mode": "survey",
+                }
+            ],
+            root=tmp_path,
+        )
+    state = update_composite_survey_stage(
+        state,
+        "report_consumption",
+        status="completed",
+        outputs=stage_refs["report_consumption"],
+        root=tmp_path,
+    )
+    assert state["status"] == "completed"
+    assert composite_survey_current_violations(tmp_path, state) == []
+    for stage in state["stages"]:
+        persisted = stage["outputs"][0]
+        assert persisted == build_composite_stage_binding(
+            tmp_path,
+            stage["id"],
+            refs=persisted["refs"],
+        )
+
+    state_path = composite_survey_state_path(
+        tmp_path,
+        slug="robot-learning",
+        composite_id="survey-run-binding",
+    )
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    write_yaml_if_changed(state_path, state)
+    record_path = tmp_path / "kb/units/papers/p-alpha/record.yaml"
+    changed = load_yaml(record_path)
+    changed["payload"]["source_search"]["user_selection"]["user_authorization"] = (
+        "Changed authorization bytes."
+    )
+    write_yaml_if_changed(record_path, changed)
+    before_state = state_path.read_bytes()
+    journal = tmp_path / "kb/.journal"
+    before_journal = {
+        item.name: item.read_bytes() for item in journal.glob("*.yaml")
+    }
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(SCRIPT),
+            "--root",
+            str(tmp_path),
+            "composite",
+            "status",
+            "--slug",
+            "robot-learning",
+            "--composite-id",
+            "survey-run-binding",
+        ],
+    )
+    assert module.main() == 0
+    projected = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert projected["status"] == "blocked"
+    assert projected["current_stage"] == "selection"
+    assert projected["stages"][1]["blocker"] == {
+        "code": "stale_composite_stage_binding"
+    }
+    pending = pending_composite_survey_states(tmp_path)
+    repaired_route = next(item for item in pending if item["state"]["id"] == "survey-run-binding")
+    assert repaired_route["state"]["current_stage"] == "selection"
+    assert state_path.read_bytes() == before_state
+    assert {item.name: item.read_bytes() for item in journal.glob("*.yaml")} == before_journal
+
+
+def test_composite_fake_ref_and_stale_cas_fail_before_business_write(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    module = load_synthesizer()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(SCRIPT),
+            "--root",
+            str(tmp_path),
+            "survey",
+            "prepare",
+            "--query",
+            "robot learning",
+            "--as-of",
+            "2026-07-24",
+        ],
+    )
+    assert module.main() == 2
+    handoff = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    binding = handoff["composite_handoff"]["state_binding"]
+    state_path = tmp_path / binding["state_path"]
+    before = state_path.read_bytes()
+    update_path = tmp_path / "fake-complete.json"
+    update_path.write_text(
+        json.dumps(
+            {
+                "stage_id": "search",
+                "status": "completed",
+                "outputs": [
+                    {"kind": "literature-search-stage", "stage_id": "fake-stage"}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    base_argv = [
+        str(SCRIPT),
+        "--root",
+        str(tmp_path),
+        "composite",
+        "update",
+        "--slug",
+        "robot-learning",
+        "--composite-id",
+        binding["composite_id"],
+        "--input",
+        str(update_path),
+    ]
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [*base_argv, "--expected-revision", str(binding["revision"])],
+    )
+    with pytest.raises(SystemExit, match="missing or unsafe"):
+        module.main()
+    assert state_path.read_bytes() == before
+
+    write_terminal_search(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [*base_argv, "--expected-revision", str(binding["revision"] - 1)],
+    )
+    with pytest.raises(SystemExit, match="changed after"):
+        module.main()
+    assert state_path.read_bytes() == before
 
 
 def test_verified_survey_is_discovered_and_batch_confirmed_with_receipt(tmp_path: Path) -> None:
@@ -628,20 +1079,19 @@ def test_composite_survey_state_is_ordered_and_resumable() -> None:
         filters={"query": "robot learning"},
     )
     assert composite_survey_state_violations(state) == []
+    with pytest.raises(ValueError, match="workspace verifier"):
+        update_composite_survey_stage(
+            state,
+            "search",
+            status="completed",
+            outputs=[{"kind": "candidate_stage", "id": "search-1"}],
+        )
     state = update_composite_survey_stage(
         state,
         "search",
-        status="completed",
-        outputs=[{"kind": "candidate_stage", "id": "search-1"}],
-    )
-    assert state["current_stage"] == "selection"
-    state = update_composite_survey_stage(
-        state,
-        "selection",
         status="blocked",
-        inputs=[{"kind": "candidate_stage", "id": "search-1"}],
-        blocker={"code": "awaiting_current_user_selection"},
-        resume_action="record_current_user_selection",
+        blocker={"code": "awaiting_terminal_search"},
+        resume_action="finish_literature_search",
     )
     assert state["status"] == "blocked"
     assert composite_survey_state_violations(state) == []
