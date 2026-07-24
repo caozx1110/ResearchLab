@@ -802,6 +802,33 @@ def _require_current_survey(root: Path, record: dict, path: Path) -> None:
     violations = survey_lifecycle_violations(record, root)
     if violations:
         raise ValueError("survey judgement is stale: " + "; ".join(violations))
+    filters = record.get("filters") if isinstance(record.get("filters"), dict) else {}
+    anchor = record.get("kb_anchor") if isinstance(record.get("kb_anchor"), dict) else {}
+    preference_context = record.get("preference_context")
+    if not isinstance(preference_context, dict):
+        raise ValueError("survey preference context is missing; prepare the survey again")
+    selection_binding = preference_context.get("selection_binding")
+    selection_binding = selection_binding if isinstance(selection_binding, dict) else {}
+    try:
+        current_preferences = resolve_synthesis_preferences(
+            root,
+            selection_id=str(selection_binding.get("selection_id") or ""),
+            query=str(filters.get("query") or ""),
+            kind=str(filters.get("kind") or ""),
+            topic=str(filters.get("topic") or ""),
+            tag=str(filters.get("tag") or ""),
+            pool=str(filters.get("pool") or ""),
+            mode=str(record.get("mode") or ""),
+            as_of=str(anchor.get("as_of") or ""),
+            program_ids=record.get("program_ids") if isinstance(record.get("program_ids"), list) else [],
+        )
+    except SystemExit as exc:
+        raise ValueError(f"survey preferences are stale: {exc}") from exc
+    if (
+        synthesis_preference_state(current_preferences) != preference_context
+        or str(filters.get("preference_context_digest") or "") != _canonical_digest(preference_context)
+    ):
+        raise ValueError("survey preferences changed after verification; prepare the survey again")
     source_roots = survey_source_roots(root, record, path)
     verification_violations = verification_receipt_violations(
         record,

@@ -14,7 +14,7 @@ import yaml
 from research.common import load_yaml, write_yaml_if_changed
 from research.confirm import apply_confirmation
 from research.judgements import discover_pending_judgements, judgement_confirmation_is_current
-from research.paths import runtime_preferences_path
+from research.paths import config_root, runtime_preferences_path
 from research.prefs import default_runtime_preferences
 from research.surveys import (
     COMPOSITE_SURVEY_STAGES,
@@ -331,6 +331,31 @@ def test_verified_survey_is_discovered_and_batch_confirmed_with_receipt(tmp_path
             authorization_source="user_message",
             rejection_reason="",
         )
+
+
+def test_survey_confirmation_rejects_hard_preference_change_without_writes(tmp_path: Path) -> None:
+    module, survey_path, before = build_verified_survey(tmp_path)
+    card = discover_pending_judgements(tmp_path)[0]
+    before_bytes = survey_path.read_bytes()
+    write_yaml_if_changed(
+        config_root(tmp_path) / "user-profile.yaml",
+        {"constraints": ["new offline-only boundary"]},
+    )
+
+    with pytest.raises(ValueError, match="preferences changed"):
+        module.prepare_review_batch_decision(
+            tmp_path,
+            card,
+            "confirm",
+            actor="Alice Researcher",
+            evidence=["Reviewed all displayed survey claims"],
+            user_authorization="I confirm the displayed survey.",
+            authorization_source="user_message",
+            rejection_reason="",
+        )
+
+    assert survey_path.read_bytes() == before_bytes
+    assert load_yaml(survey_path)["confirmation_status"] == before["confirmation_status"]
 
 
 def test_public_dialogue_batch_routes_survey_to_its_owner(tmp_path: Path, capsys) -> None:
