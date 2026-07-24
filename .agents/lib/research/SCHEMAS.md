@@ -28,7 +28,7 @@ copy install 的 `.agents/.install-manifest.json` 以 `source_origin/source_chec
 
 Agent 在当前对话取得选择后才可重绑。重绑以 manifest byte digest 做 CAS，要求 manifest leaf/ancestor 均为受控普通路径，并只原子更新 provenance 字段：`local-checkout` 要求 checkout 是真实 bundle source；Git checkout 必须处于非空 attached branch 且 actual origin/branch 与选择精确匹配，detached + local/no-remote 也不得用空 branch 伪装 updateable，只有非 Git 的真实本地 bundle source 才允许 `origin=local` + 空 branch。`remote-branch` 要求非 local origin + 合法 branch，并清空 checkout，后续在隔离 cache fetch/clone。detached checkout 的 branch 选择不能替用户切换其工作树，只能显式转为 remote-branch 或绑定另一个已经位于所选 branch 的有效 checkout。重绑后自动重跑 check，但不得自动 apply；代码更新仍需另一条当前用户授权。公开输出只含自然语言和 `kb update`，source path、digest、flags 与裸 git 只留在私有 Agent protocol。
 
-copy manifest 的 rebind 与 installer update/reinstall 共享同一个跨进程独占 lease。双方在 lease 内重验 manifest ordinary-file identity 与 byte digest；installer 从计划到写入携带 expected manifest state，lease 内若发现并发 rebind/更新必须零 managed-write fail-closed 并重新规划。lease 覆盖 managed payload 事务与 manifest-last 原子提交，rebind 则覆盖 CAS 到 replace/fsync，不能只保护最终 rename。
+copy manifest 的 rebind 与 installer install/update/reinstall/uninstall 共享同一个跨进程独占 lease，锚定不会被 lifecycle 删除的真实 workspace root directory，不创建 unowned lock file。双方在 lease 内重验 manifest ordinary-file identity 与 byte digest/absent state；installer 从计划到写入携带 expected manifest state，lease 内若发现并发 rebind/更新必须零 managed-write fail-closed 并重新规划。lease 覆盖 managed payload 事务、rollback、manifest-last 原子提交或删除及目录持久化，rebind 则覆盖 CAS 到 replace/fsync，不能只保护最终 rename。
 
 ---
 
