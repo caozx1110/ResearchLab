@@ -7,8 +7,10 @@ from pathlib import Path
 
 import pytest
 
+from research.common import load_yaml, write_yaml_if_changed
+from research.paths import config_root, runtime_preferences_path
 from research.preference_selection import eligible_preferences, record_effective_selection
-from research.prefs import ensure_workspace
+from research.prefs import default_runtime_preferences, ensure_workspace
 
 
 def _project_root() -> Path:
@@ -66,6 +68,91 @@ def _record_intake_selection(
         },
     )
     return path
+
+
+def _workspace_snapshot(root: Path) -> dict[str, bytes]:
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+
+
+def _prepared_args(root: Path, kind: str, source: Path) -> argparse.Namespace:
+    return argparse.Namespace(
+        command="prepare-add",
+        kind=kind,
+        source=str(source),
+        maturity="lightweight",
+        title=f"{kind.title()} Source",
+        stage_id="",
+        candidate_id="",
+        pool=[],
+        user_authorization="",
+        authorization_source="",
+    )
+
+
+def _record_context_selection(
+    root: Path,
+    *,
+    selection_id: str,
+    context: dict[str, object],
+) -> Path:
+    eligible = eligible_preferences(root, skill="source-intake", operation="add")
+    selected = []
+    excluded = []
+    for item in eligible["items"]:
+        row = {"preference_id": item["preference_id"], "reason": "bounded intake test"}
+        if item["strength"] == "hard":
+            selected.append({**row, "application": "enforce this intake boundary"})
+        else:
+            excluded.append(row)
+    path, _receipt = record_effective_selection(
+        root,
+        {
+            "selection_id": selection_id,
+            "skill": "source-intake",
+            "operation": "add",
+            "catalog_digest": eligible["catalog_digest"],
+            "task_context": context,
+            "selected": selected,
+            "excluded": excluded,
+        },
+    )
+    return path
+
+
+def _add_argv(
+    root: Path,
+    args: argparse.Namespace,
+    *,
+    token: str = "",
+    selection_id: str = "",
+) -> list[str]:
+    argv = [
+        "intake.py",
+        "--root",
+        str(root),
+        "add",
+        "--kind",
+        args.kind,
+        "--source",
+        args.source,
+        "--maturity",
+        args.maturity,
+        "--title",
+        args.title,
+    ]
+    if args.user_authorization:
+        argv.extend(["--user-authorization", args.user_authorization])
+    if args.authorization_source:
+        argv.extend(["--authorization-source", args.authorization_source])
+    if token:
+        argv.extend(["--prepared-intake-token", token])
+    if selection_id:
+        argv.extend(["--preference-selection-id", selection_id])
+    return argv
 
 
 def test_intake_confirm_command_contains_created_record_id() -> None:
@@ -218,3 +305,229 @@ def test_kb_ingest_chain_owns_paper_analyzer_order(monkeypatch) -> None:
 
     monkeypatch.setenv("RESEARCH_INGEST_CHAIN", "1")
     assert intake.ingest_chain_active() is True
+
+
+@pytest.mark.parametrize("kind", ["repo", "dataset", "blog", "paper"])
+@pytest.mark.parametrize("receipt_fault", ["wrong-skill", "wrong-operation", "wrong-task"])
+def test_all_intake_kinds_reject_wrong_receipts_without_workspace_writes(
+    tmp_path: Path,
+    monkeypatch,
+    kind: str,
+    receipt_fault: str,
+) -> None:
+    intake = _load_intake_module()
+    root = tmp_path / "workspace"
+    root.mkdir()
+    ensure_workspace(root)
+    write_yaml_if_changed(
+        config_root(root) / "user-profile.yaml",
+        {"constraints": ["no cloud upload"]},
+    )
+    if kind == "repo":
+        source = root / "repo-source"
+        source.mkdir()
+        (source / "README.md").write_text("# Repo\n\nCode snapshot.\n", encoding="utf-8")
+    else:
+        source = root / f"{kind}-source.md"
+        source.write_text(f"# {kind.title()}\n\nArchived evidence.\n", encoding="utf-8")
+    args = _prepared_args(root, kind, source)
+    prepared = intake._prepare_intake_snapshot(root, args)
+    token = str(prepared["token"])
+    context = dict(prepared["canonical_inputs"])
+    if receipt_fault == "wrong-task":
+        context["title"] = "A different prepared title"
+    selection_id = f"prefsel-{kind}-{receipt_fault}"
+    receipt_path = _record_context_selection(
+        root,
+        selection_id=selection_id,
+        context=context,
+    )
+    if receipt_fault in {"wrong-skill", "wrong-operation"}:
+        receipt = load_yaml(receipt_path)
+        if receipt_fault == "wrong-skill":
+            receipt["skill"] = "report-author"
+        else:
+            receipt["operation"] = "search"
+        write_yaml_if_changed(receipt_path, receipt)
+    before = _workspace_snapshot(root)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        _add_argv(root, args, token=token, selection_id=selection_id),
+    )
+
+    with pytest.raises((ValueError, SystemExit)):
+        intake.main()
+
+    assert _workspace_snapshot(root) == before
+    assert not intake._prepared_dir(root, token).exists()
+    assert not list((root / "kb").glob(".runtime/intake-staging/**/*"))
+
+
+def test_no_receipt_uses_only_hard_fallback_and_persists_value_free_digests(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    intake = _load_intake_module()
+    root = tmp_path / "workspace"
+    root.mkdir()
+    ensure_workspace(root)
+    hard_text = "never upload private source material"
+    write_yaml_if_changed(
+        config_root(root) / "user-profile.yaml",
+        {"constraints": [hard_text]},
+    )
+    runtime = default_runtime_preferences()
+    runtime["paper"]["auto_screen_on_intake"] = False
+    write_yaml_if_changed(runtime_preferences_path(root), runtime)
+    source = root / "paper.md"
+    source.write_text("# Paper\n\nEvidence.\n", encoding="utf-8")
+    args = _prepared_args(root, "paper", source)
+    analyzer_calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        intake,
+        "run_paper_command",
+        lambda _root, *items: analyzer_calls.append(tuple(items)) or [],
+    )
+    monkeypatch.setattr(intake, "checkpoint_and_report", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(sys, "argv", _add_argv(root, args))
+
+    assert intake.main() == 0
+
+    records = list((root / "kb/units/papers").glob("*/record.yaml"))
+    assert len(records) == 1
+    record = load_yaml(records[0])
+    state = record["payload"]["preference_context"]
+    assert state["selection_binding"] == {}
+    assert set(state["hard_value_digests"]) == {"profile.constraints"}
+    assert len(state["hard_value_digests"]["profile.constraints"]) == 64
+    serialized = records[0].read_text(encoding="utf-8")
+    assert hard_text not in serialized
+    assert "auto_screen_on_intake" not in serialized
+    # The configured soft false value was not read: neutral behavior still prepares screening.
+    assert any(call and call[0] == "screen" for call in analyzer_calls)
+
+
+@pytest.mark.parametrize("mutation", ["input", "authorization", "source-bytes"])
+def test_prepared_intake_mutation_rejects_old_receipt_before_promotion(
+    tmp_path: Path,
+    monkeypatch,
+    mutation: str,
+) -> None:
+    intake = _load_intake_module()
+    root = tmp_path / "workspace"
+    root.mkdir()
+    ensure_workspace(root)
+    source = root / "blog.md"
+    source.write_text("# Blog\n\nOriginal bytes.\n", encoding="utf-8")
+    args = _prepared_args(root, "blog", source)
+    args.user_authorization = "Archive the original snapshot."
+    args.authorization_source = "user_message"
+    prepared = intake._prepare_intake_snapshot(root, args)
+    token = str(prepared["token"])
+    selection_id = f"prefsel-mutation-{mutation}"
+    _record_context_selection(
+        root,
+        selection_id=selection_id,
+        context=dict(prepared["canonical_inputs"]),
+    )
+    if mutation == "input":
+        args.maturity = "complete"
+    elif mutation == "authorization":
+        args.user_authorization = "Archive a different snapshot."
+    else:
+        source.write_text("# Blog\n\nChanged bytes.\n", encoding="utf-8")
+    before = _workspace_snapshot(root)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        _add_argv(root, args, token=token, selection_id=selection_id),
+    )
+
+    with pytest.raises(SystemExit, match="changed after preparation"):
+        intake.main()
+
+    assert _workspace_snapshot(root) == before
+    assert not intake._prepared_dir(root, token).exists()
+    assert not list((root / "kb/units/blogs").glob("*/record.yaml"))
+
+
+def test_ordinary_success_and_duplicate_keep_one_canonical_unit_and_cleanup(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    intake = _load_intake_module()
+    root = tmp_path / "workspace"
+    root.mkdir()
+    ensure_workspace(root)
+    source = root / "blog.md"
+    source.write_text("# Blog\n\nStable duplicate bytes.\n", encoding="utf-8")
+    args = _prepared_args(root, "blog", source)
+    monkeypatch.setattr(intake, "checkpoint_and_report", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(sys, "argv", _add_argv(root, args))
+
+    assert intake.main() == 0
+    records = list((root / "kb/units/blogs").glob("*/record.yaml"))
+    assert len(records) == 1
+    record = load_yaml(records[0])
+    assert record["source"]["file_hash"]
+    assert record["source"]["backup_paths"]
+    before_duplicate = _workspace_snapshot(root)
+    monkeypatch.setattr(sys, "argv", _add_argv(root, args))
+
+    assert intake.main() == 0
+
+    assert len(list((root / "kb/units/blogs").glob("*/record.yaml"))) == 1
+    assert _workspace_snapshot(root) == before_duplicate
+    assert not list(root.parent.glob(f".research-intake-{intake._prepared_scope(root)}-*"))
+
+
+def test_external_stage_is_cleaned_when_post_validation_execution_raises(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    intake = _load_intake_module()
+    root = tmp_path / "workspace"
+    root.mkdir()
+    ensure_workspace(root)
+    source = root / "dataset.md"
+    source.write_text("# Dataset\n\nSchema.\n", encoding="utf-8")
+    args = _prepared_args(root, "dataset", source)
+    prepared = intake._prepare_intake_snapshot(root, args)
+    token = str(prepared["token"])
+    before = _workspace_snapshot(root)
+    monkeypatch.setattr(
+        intake,
+        "_execute_intake_transaction",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("injected failure")),
+    )
+    monkeypatch.setattr(sys, "argv", _add_argv(root, args, token=token))
+
+    with pytest.raises(RuntimeError, match="injected failure"):
+        intake.main()
+
+    assert _workspace_snapshot(root) == before
+    assert not intake._prepared_dir(root, token).exists()
+
+
+def test_prepared_token_concurrent_consumer_fails_closed_without_deleting_owner_stage(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    intake = _load_intake_module()
+    root = tmp_path / "workspace"
+    root.mkdir()
+    ensure_workspace(root)
+    source = root / "blog.md"
+    source.write_text("# Blog\n\nConcurrent snapshot.\n", encoding="utf-8")
+    args = _prepared_args(root, "blog", source)
+    prepared = intake._prepare_intake_snapshot(root, args)
+    token = str(prepared["token"])
+    intake._claim_prepared_intake(root, token)
+    monkeypatch.setattr(sys, "argv", _add_argv(root, args, token=token))
+
+    with pytest.raises(SystemExit, match="already being consumed"):
+        intake.main()
+
+    assert intake._prepared_dir(root, token).is_dir()
+    intake._safe_remove_prepared(root, token)
