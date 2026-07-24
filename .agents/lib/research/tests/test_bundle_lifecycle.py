@@ -80,6 +80,33 @@ def _load_updater(project: str) -> ModuleType:
     return updater_module
 
 
+def test_ws_plan_manifest_expectation_is_exact_loaded_snapshot(capsys, tmp_path: Path) -> None:
+    ws_sync = _load_ws_sync()
+    workspace = tmp_path / "workspace-plan-snapshot"
+    manifest = workspace / ".agents" / ".install-manifest.json"
+    manifest.parent.mkdir(parents=True)
+    content = b'{"schema":1,"install_name":"workspace-oss","install_mode":"copy-project","files":{}}\n'
+    manifest.write_bytes(content)
+    manifest.chmod(0o640)
+    snapshot = ws_sync.load_manifest_snapshot(workspace)
+    assert snapshot is not None
+    ws_sync.PLAN_JSONL = True
+
+    ws_sync.emit_plan_manifest_expectation(snapshot, dry_run=True)
+
+    record = json.loads(capsys.readouterr().out)
+    assert record == {
+        "operation": "manifest-expectation",
+        "state": {
+            "type": "regular",
+            "mode": "0640",
+            "byte_sha256": hashlib.sha256(content).hexdigest(),
+            "device": manifest.stat().st_dev,
+            "inode": manifest.stat().st_ino,
+        },
+    }
+
+
 def _rebind_worker(
     project: str,
     workspace: str,

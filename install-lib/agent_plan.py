@@ -8,6 +8,7 @@ import copy
 import hashlib
 import json
 import os
+import re
 import stat
 import subprocess
 import tempfile
@@ -76,6 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source-commit")
     parser.add_argument("--distributable-root")
     parser.add_argument("--operation-time")
+    parser.add_argument("--manifest-precondition-json", default="")
     parser.add_argument(
         "--target-record",
         nargs=6,
@@ -276,24 +278,45 @@ def workspace_manifest_precondition(workspace: Path) -> dict[str, Any]:
         before = os.fstat(manifest_fd)
         if before.st_dev != lexical.st_dev or before.st_ino != lexical.st_ino or not stat.S_ISREG(before.st_mode):
             raise ValueError("workspace manifest changed while it was opened")
+        if before.st_size <= 0:
+            raise ValueError("workspace manifest is empty")
+        if before.st_size > MAX_PLAN_BYTES:
+            raise ValueError("workspace manifest exceeds the maximum supported size")
         chunks: list[bytes] = []
         total = 0
-        while True:
-            chunk = os.read(manifest_fd, min(1024 * 1024, MAX_PLAN_BYTES + 1 - total))
+        while total < before.st_size:
+            chunk = os.read(manifest_fd, min(1024 * 1024, before.st_size - total))
             if not chunk:
-                break
+                raise ValueError("workspace manifest changed while it was read")
             chunks.append(chunk)
             total += len(chunk)
-            if total > MAX_PLAN_BYTES:
-                raise ValueError("workspace manifest exceeds the maximum supported size")
         after = os.fstat(manifest_fd)
         lexical_after = os.stat(".install-manifest.json", dir_fd=agents_fd, follow_symlinks=False)
-        if (
-            before.st_dev != after.st_dev
-            or before.st_ino != after.st_ino
-            or after.st_dev != lexical_after.st_dev
-            or after.st_ino != lexical_after.st_ino
-        ):
+        before_identity = (
+            before.st_dev,
+            before.st_ino,
+            before.st_mode,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        )
+        after_identity = (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        )
+        lexical_identity = (
+            lexical_after.st_dev,
+            lexical_after.st_ino,
+            lexical_after.st_mode,
+            lexical_after.st_size,
+            lexical_after.st_mtime_ns,
+            lexical_after.st_ctime_ns,
+        )
+        if before_identity != after_identity or after_identity != lexical_identity or total != after.st_size:
             raise ValueError("workspace manifest changed while it was read")
         return {
             "type": "regular",
@@ -311,6 +334,33 @@ def workspace_manifest_precondition(workspace: Path) -> dict[str, Any]:
             os.close(agents_fd)
         if root_fd >= 0:
             os.close(root_fd)
+
+
+def parse_manifest_precondition(value: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError("sync manifest precondition is invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("sync manifest precondition is invalid")
+    if payload == {"type": "absent"}:
+        return payload
+    if set(payload) != {"type", "mode", "byte_sha256", "device", "inode"}:
+        raise ValueError("sync manifest precondition is incomplete")
+    if (
+        payload.get("type") != "regular"
+        or not isinstance(payload.get("device"), int)
+        or payload["device"] < 0
+        or not isinstance(payload.get("inode"), int)
+        or payload["inode"] <= 0
+        or not isinstance(payload.get("mode"), str)
+        or not re.fullmatch(r"0[0-7]{3}", payload["mode"])
+        or not isinstance(payload.get("byte_sha256"), str)
+        or len(payload["byte_sha256"]) != 64
+        or any(character not in "0123456789abcdef" for character in payload["byte_sha256"])
+    ):
+        raise ValueError("sync manifest precondition is unsafe")
+    return payload
 
 
 def normalize_target(raw: dict[str, Any]) -> dict[str, Any]:
@@ -570,6 +620,11 @@ def generate_plan(args: argparse.Namespace) -> int:
     if output.parent.is_symlink() or not output.parent.is_dir():
         raise SystemExit("plan output parent must be an existing regular directory")
     output = output.resolve(strict=False)
+    manifest_precondition = (
+        parse_manifest_precondition(args.manifest_precondition_json)
+        if args.manifest_precondition_json
+        else workspace_manifest_precondition(Path(args.workspace))
+    )
 
     targets: list[dict[str, Any]] = []
     for kind, value, path, source, condition, content_sha256 in args.target_record:
@@ -620,7 +675,7 @@ def generate_plan(args: argparse.Namespace) -> int:
         "workspace": str(Path(args.workspace).resolve()),
         "home": str(Path(args.home).resolve()),
         "operation_time": args.operation_time,
-        "workspace_manifest_precondition": workspace_manifest_precondition(Path(args.workspace)),
+        "workspace_manifest_precondition": manifest_precondition,
         "options": {
             "force": "--force" in args.apply_arg,
             "kb_on_path": "--kb-on-path" in args.apply_arg,
@@ -657,6 +712,9 @@ def generate_plan(args: argparse.Namespace) -> int:
     digest_index = payload["apply_contract"]["argv"].index("--expected-plan-digest") + 1
     payload["apply_contract"]["argv"][digest_index] = digest
     rendered = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+
+    if workspace_manifest_precondition(Path(args.workspace)) != manifest_precondition:
+        raise ValueError("install manifest changed after sync planning; regenerate the Agent plan")
 
     fd, temporary = tempfile.mkstemp(prefix=f".{output.name}.", dir=output.parent)
     try:

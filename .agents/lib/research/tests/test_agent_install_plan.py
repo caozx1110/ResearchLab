@@ -211,3 +211,100 @@ def test_manifest_plan_precondition_rejects_unsafe_path_without_following(
         agent_plan.workspace_manifest_precondition(workspace)
 
     assert victim_manifest.read_text(encoding="utf-8") == '{"victim": true}\n'
+
+
+def test_plan_generation_uses_sync_snapshot_and_rejects_later_rebind(tmp_path: Path) -> None:
+    install_lib = str(_project_root() / "install-lib")
+    if install_lib not in sys.path:
+        sys.path.insert(0, install_lib)
+    import agent_plan
+
+    workspace = tmp_path / "workspace-plan-cas"
+    manifest = workspace / ".agents" / ".install-manifest.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"schema":1,"files":{}}\n', encoding="utf-8")
+    planned = agent_plan.workspace_manifest_precondition(workspace)
+    original_inode = manifest.stat().st_ino
+    replacement = manifest.with_name(".replacement")
+    replacement.write_bytes(manifest.read_bytes())
+    os.replace(replacement, manifest)
+    assert manifest.stat().st_ino != original_inode
+
+    output = tmp_path / "stale-plan.json"
+    args = agent_plan.build_parser().parse_args(
+        [
+            "--output",
+            str(output),
+            "--action",
+            "uninstall",
+            "--scope",
+            "project",
+            "--workspace",
+            str(workspace),
+            "--home",
+            str(tmp_path / "home"),
+            "--source-strategy",
+            "local-checkout",
+            "--source-checkout",
+            str(_project_root()),
+            "--source-origin",
+            "local",
+            "--source-commit",
+            subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=_project_root(), text=True).strip(),
+            "--distributable-root",
+            str(_project_root()),
+            "--operation-time",
+            "2026-07-25T00:00:00Z",
+            "--manifest-precondition-json",
+            json.dumps(planned, sort_keys=True, separators=(",", ":")),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="changed after sync planning"):
+        agent_plan.generate_plan(args)
+
+    assert not output.exists()
+
+
+def test_plan_generation_records_exact_supplied_sync_snapshot(tmp_path: Path) -> None:
+    install_lib = str(_project_root() / "install-lib")
+    if install_lib not in sys.path:
+        sys.path.insert(0, install_lib)
+    import agent_plan
+
+    workspace = tmp_path / "workspace-plan-exact"
+    workspace.mkdir()
+    planned = {"type": "absent"}
+    output = tmp_path / "exact-plan.json"
+    args = agent_plan.build_parser().parse_args(
+        [
+            "--output",
+            str(output),
+            "--action",
+            "install",
+            "--scope",
+            "project",
+            "--workspace",
+            str(workspace),
+            "--home",
+            str(tmp_path / "home"),
+            "--source-strategy",
+            "local-checkout",
+            "--source-checkout",
+            str(_project_root()),
+            "--source-origin",
+            "local",
+            "--source-commit",
+            subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=_project_root(), text=True).strip(),
+            "--distributable-root",
+            str(_project_root()),
+            "--operation-time",
+            "2026-07-25T00:00:00Z",
+            "--manifest-precondition-json",
+            json.dumps(planned),
+        ]
+    )
+
+    assert agent_plan.generate_plan(args) == 0
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["workspace_manifest_precondition"] == planned

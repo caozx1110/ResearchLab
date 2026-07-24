@@ -268,6 +268,7 @@ EXPECTED_PLAN_DIGEST=""
 EXPECTED_PLAN_BYTE_SHA256=""
 EXPECTED_SOURCE_TREE_DIGEST=""
 VERIFIED_MANIFEST_STATE=""
+AGENT_PLAN_MANIFEST_STATE=""
 OPERATION_TIME=""
 ASSUME_YES=0
 WIZARD_MODE=0
@@ -1213,6 +1214,11 @@ write_agent_plan_json() {
     "--distributable-root" "$distribution_root"
     "--operation-time" "$OPERATION_TIME"
   )
+  if [ "$COPY_PROJECT" -eq 1 ]; then
+    [ -n "$AGENT_PLAN_MANIFEST_STATE" ] || \
+      die "Agent 安装计划缺少同步器提供的安装记录快照；未生成计划"
+    args+=("--manifest-precondition-json" "$AGENT_PLAN_MANIFEST_STATE")
+  fi
   [ "$CONFIG_CLAUDE" -eq 0 ] || args+=("--tool" "claude")
   [ "$CONFIG_CODEX" -eq 0 ] || args+=("--tool" "codex")
   for sequence in "${AGENT_PLAN_TARGET_SEQUENCE[@]}"; do
@@ -1372,6 +1378,13 @@ ws_sync() {
         change_count=0
         while IFS= read -r plan_line; do
           case "$plan_line" in
+            *'"operation": "manifest-expectation"'*)
+              [ -z "$AGENT_PLAN_MANIFEST_STATE" ] || \
+                die "同步器返回了重复的安装记录快照；未生成计划"
+              AGENT_PLAN_MANIFEST_STATE=$(python3 -c \
+                'import json,sys; payload=json.loads(sys.argv[1]); print(json.dumps(payload["state"], sort_keys=True, separators=(",", ":")))' \
+                "$plan_line") || die "同步器返回了无效的安装记录快照；未生成计划"
+              ;;
             \{*)
               AGENT_PLAN_TARGET_SEQUENCE+=("json:${#AGENT_PLAN_TARGET_JSON[@]}")
               AGENT_PLAN_TARGET_JSON+=("$plan_line")

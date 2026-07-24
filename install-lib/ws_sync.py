@@ -222,27 +222,69 @@ def source_agents_actual_nonempty(repo: Path, source: Path | None) -> bool:
 
 
 class ManifestSnapshot:
-    __slots__ = ("payload", "content", "device", "inode")
+    __slots__ = ("payload", "content", "device", "inode", "mode")
 
-    def __init__(self, payload: dict[str, Any], content: bytes, device: int, inode: int) -> None:
+    def __init__(self, payload: dict[str, Any], content: bytes, device: int, inode: int, mode: int) -> None:
         self.payload = payload
         self.content = content
         self.device = device
         self.inode = inode
+        self.mode = mode
 
 
 class ManifestExpectation:
-    __slots__ = ("kind", "device", "inode", "byte_sha256")
+    __slots__ = ("kind", "device", "inode", "mode", "byte_sha256")
 
-    def __init__(self, kind: str, device: int = 0, inode: int = 0, byte_sha256: str = "") -> None:
+    def __init__(
+        self,
+        kind: str,
+        device: int = 0,
+        inode: int = 0,
+        mode: int = 0,
+        byte_sha256: str = "",
+    ) -> None:
         self.kind = kind
         self.device = device
         self.inode = inode
+        self.mode = mode
         self.byte_sha256 = byte_sha256
+
+
+def manifest_snapshot_state(snapshot: ManifestSnapshot | None) -> dict[str, Any]:
+    if snapshot is None:
+        return {"type": "absent"}
+    return {
+        "type": "regular",
+        "mode": f"{stat.S_IMODE(snapshot.mode):04o}",
+        "byte_sha256": hashlib.sha256(snapshot.content).hexdigest(),
+        "device": snapshot.device,
+        "inode": snapshot.inode,
+    }
+
+
+def emit_plan_manifest_expectation(snapshot: ManifestSnapshot | None, *, dry_run: bool) -> None:
+    if dry_run and PLAN_JSONL:
+        print(
+            json.dumps(
+                {"operation": "manifest-expectation", "state": manifest_snapshot_state(snapshot)},
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
 
 
 def _same_node(left: os.stat_result, right: os.stat_result) -> bool:
     return left.st_dev == right.st_dev and left.st_ino == right.st_ino
+
+
+def _same_read_identity(left: os.stat_result, right: os.stat_result) -> bool:
+    return bool(
+        _same_node(left, right)
+        and left.st_mode == right.st_mode
+        and left.st_size == right.st_size
+        and left.st_mtime_ns == right.st_mtime_ns
+        and left.st_ctime_ns == right.st_ctime_ns
+    )
 
 
 def _directory_open_flags() -> int:
@@ -351,22 +393,28 @@ def _manifest_snapshot_at(root_fd: int, *, required: bool) -> ManifestSnapshot |
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode) or not _same_node(lexical_before, before):
             die("install manifest is not a stable regular file")
+        if before.st_size <= 0:
+            die("install manifest is empty")
+        if before.st_size > MAX_MANIFEST_BYTES:
+            die("install manifest is too large")
         chunks: list[bytes] = []
         total = 0
-        while True:
-            chunk = os.read(descriptor, min(1024 * 1024, MAX_MANIFEST_BYTES + 1 - total))
+        while total < before.st_size:
+            chunk = os.read(descriptor, min(1024 * 1024, before.st_size - total))
             if not chunk:
-                break
+                die("install manifest changed while it was read")
             chunks.append(chunk)
             total += len(chunk)
-            if total > MAX_MANIFEST_BYTES:
-                die("install manifest is too large")
         after = os.fstat(descriptor)
         lexical_after = os.stat(MANIFEST_NAME, dir_fd=agents_fd, follow_symlinks=False)
-        if not _same_node(before, after) or not _same_node(after, lexical_after):
+        if (
+            total != before.st_size
+            or not _same_read_identity(before, after)
+            or not _same_read_identity(after, lexical_after)
+        ):
             die("install manifest changed while it was read")
         content = b"".join(chunks)
-        return ManifestSnapshot(_parse_manifest(content), content, after.st_dev, after.st_ino)
+        return ManifestSnapshot(_parse_manifest(content), content, after.st_dev, after.st_ino, after.st_mode)
     finally:
         if descriptor >= 0:
             os.close(descriptor)
@@ -397,6 +445,7 @@ def _manifest_expectation(value: str) -> ManifestExpectation | object:
     if kind == "absent":
         return ManifestExpectation("absent")
     digest = str(payload.get("byte_sha256") or "")
+    mode_text = str(payload.get("mode") or "")
     device = payload.get("device")
     inode = payload.get("inode")
     if (
@@ -405,10 +454,11 @@ def _manifest_expectation(value: str) -> ManifestExpectation | object:
         or device < 0
         or not isinstance(inode, int)
         or inode <= 0
+        or not re.fullmatch(r"0[0-7]{3}", mode_text)
         or not re.fullmatch(r"[0-9a-f]{64}", digest)
     ):
         die("expected manifest state is invalid")
-    return ManifestExpectation("regular", device, inode, digest)
+    return ManifestExpectation("regular", device, inode, int(mode_text, 8), digest)
 
 
 def _snapshot_matches_expectation(current: ManifestSnapshot | None, expected: ManifestExpectation) -> bool:
@@ -419,6 +469,7 @@ def _snapshot_matches_expectation(current: ManifestSnapshot | None, expected: Ma
     return bool(
         current.device == expected.device
         and current.inode == expected.inode
+        and stat.S_IMODE(current.mode) == expected.mode
         and hmac.compare_digest(hashlib.sha256(current.content).hexdigest(), expected.byte_sha256)
     )
 
@@ -450,7 +501,11 @@ def _validate_expected_manifest_at(
         return
     if current is None:
         die("install manifest changed after planning; replan before writing")
-    same_identity = current.device == expected.device and current.inode == expected.inode
+    same_identity = (
+        current.device == expected.device
+        and current.inode == expected.inode
+        and stat.S_IMODE(current.mode) == stat.S_IMODE(expected.mode)
+    )
     same_digest = hmac.compare_digest(hashlib.sha256(current.content).digest(), hashlib.sha256(expected.content).digest())
     if not same_identity or not same_digest:
         die("install manifest changed after planning; replan before writing")
@@ -1349,6 +1404,7 @@ def install(args: argparse.Namespace) -> int:
         existing_snapshot,
         _manifest_expectation(args.expected_manifest_state),
     )
+    emit_plan_manifest_expectation(existing_snapshot, dry_run=args.dry_run)
     existing_manifest = existing_snapshot.payload if existing_snapshot is not None else None
     if existing_manifest is not None:
         die("copy-project install already exists; use update or reinstall")
@@ -1417,6 +1473,7 @@ def update(args: argparse.Namespace) -> int:
         manifest_snapshot,
         _manifest_expectation(args.expected_manifest_state),
     )
+    emit_plan_manifest_expectation(manifest_snapshot, dry_run=args.dry_run)
     manifest = manifest_snapshot.payload
     assert_no_symlinked_agent_subdirs(dst_root)
 
@@ -1520,6 +1577,7 @@ def reinstall(args: argparse.Namespace) -> int:
         manifest_snapshot,
         _manifest_expectation(args.expected_manifest_state),
     )
+    emit_plan_manifest_expectation(manifest_snapshot, dry_run=args.dry_run)
     manifest = manifest_snapshot.payload
     assert_no_symlinked_agent_subdirs(dst_root)
     items = source_items(repo, source)
@@ -1672,6 +1730,7 @@ def uninstall(args: argparse.Namespace) -> int:
             manifest_snapshot,
             _manifest_expectation(args.expected_manifest_state),
         )
+        emit_plan_manifest_expectation(manifest_snapshot, dry_run=args.dry_run)
         assert isinstance(expected_manifest, (ManifestSnapshot, ManifestExpectation))
         return _uninstall_locked(args, dst_root, manifest_snapshot, expected_manifest, lease_root_fd)
 
