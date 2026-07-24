@@ -560,6 +560,72 @@ def test_noninteractive_copy_lifecycle_hides_sync_engine_output_and_preserves_se
     assert not version_path.exists()
 
 
+def test_copy_lifecycle_preserves_claude_to_agents_symlink(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace-symlink"
+    workspace.mkdir()
+    claude = workspace / "CLAUDE.md"
+    claude.symlink_to("AGENTS.md")
+
+    install = _run_copy_action(
+        tmp_path,
+        workspace,
+        action="install",
+        extra=("--claude",),
+    )
+    assert install.returncode == 0, install.stdout + install.stderr
+    assert claude.is_symlink() and os.readlink(claude) == "AGENTS.md"
+    agents_after_install = (workspace / "AGENTS.md").read_bytes()
+    assert b"@AGENTS.md" not in agents_after_install
+
+    for action in ("update", "reinstall"):
+        result = _run_copy_action(tmp_path, workspace, action=action)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert claude.is_symlink() and os.readlink(claude) == "AGENTS.md"
+        assert (workspace / "AGENTS.md").read_bytes() == agents_after_install
+
+    uninstall = _run_copy_action(tmp_path, workspace, action="uninstall")
+    assert uninstall.returncode == 0, uninstall.stdout + uninstall.stderr
+    assert claude.is_symlink() and os.readlink(claude) == "AGENTS.md"
+
+
+def test_claude_project_install_rejects_unrelated_configuration_symlink(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace-unsafe-claude-link"
+    workspace.mkdir()
+    unrelated = tmp_path / "unrelated-claude.md"
+    unrelated.write_text("user-owned\n", encoding="utf-8")
+    claude = workspace / "CLAUDE.md"
+    claude.symlink_to(unrelated)
+
+    result = _run_copy_action(
+        tmp_path,
+        workspace,
+        action="install",
+        extra=("--claude",),
+    )
+
+    assert result.returncode != 0
+    assert claude.is_symlink() and claude.resolve() == unrelated
+    assert unrelated.read_text(encoding="utf-8") == "user-owned\n"
+    assert not (workspace / ".agents").exists()
+
+
+def test_codex_only_copy_lifecycle_ignores_unmanaged_claude_symlink(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace-codex-only"
+    workspace.mkdir()
+    unrelated = tmp_path / "unmanaged-claude.md"
+    unrelated.write_text("user-owned\n", encoding="utf-8")
+    claude = workspace / "CLAUDE.md"
+    claude.symlink_to(unrelated)
+
+    install = _run_copy_action(tmp_path, workspace, action="install")
+    assert install.returncode == 0, install.stdout + install.stderr
+    for action in ("update", "reinstall"):
+        result = _run_copy_action(tmp_path, workspace, action=action)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert claude.is_symlink() and claude.resolve() == unrelated
+        assert unrelated.read_text(encoding="utf-8") == "user-owned\n"
+
+
 def test_noninteractive_smoke_failure_hides_child_diagnostics(tmp_path: Path) -> None:
     source = _make_linked_source(tmp_path)
     private_detail = tmp_path / "internal" / "smoke-traceback.log"

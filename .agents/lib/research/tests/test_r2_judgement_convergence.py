@@ -212,6 +212,54 @@ def test_discovery_requires_current_verification_and_supports_side_artifacts(tmp
     assert discover_pending_judgements(tmp_path) == []
 
 
+def test_cross_unit_symlink_evidence_root_is_never_trusted(tmp_path: Path) -> None:
+    unit_id = "p-symlink-source-123456"
+    outside = tmp_path.parent / f"{tmp_path.name}-outside-source"
+    outside.mkdir()
+    evidence_path = outside / "parse-cache.yaml"
+    evidence_path.write_text("outside bytes must not become canonical evidence", encoding="utf-8")
+    record = default_record("paper", title="Escaping paper", maturity="complete")
+    record["id"] = unit_id
+    record["status"] = "screened"
+    record["confirmation_status"] = "pending_user_confirmation"
+    record["needs_human_confirmation"] = True
+    record["information_types"] = ["evaluation", "unverified"]
+    record["source"]["kind"] = "ai"
+    record["payload"]["core_content"]["research_problem"] = "Whether escaped evidence is trusted."
+    record["payload"]["claims"] = [
+        {
+            "id": "claim-symlink-source",
+            "text": "Escaped evidence should be rejected.",
+            "claim_type": "evaluation",
+            "confirmation_status": "pending_user_confirmation",
+            "evidence_refs": [
+                {
+                    "source_unit_id": unit_id,
+                    "artifact": "parse-cache.yaml",
+                    "locator": "section=outside",
+                    "quote": "outside bytes must not become canonical evidence",
+                }
+            ],
+        }
+    ]
+    build_verification_receipt(record, outside)
+    write_yaml_if_changed(outside / "record.yaml", record)
+    link = tmp_path / "kb/units/papers" / unit_id
+    link.parent.mkdir(parents=True)
+    link.symlink_to(outside, target_is_directory=True)
+
+    assert discover_pending_judgements(tmp_path) == []
+    with pytest.raises(SystemExit, match="canonical safe unit or program"):
+        apply_confirmation(
+            record,
+            confirmed_by="Human Reviewer",
+            evidence=["reviewed escaped evidence"],
+            user_authorization="I confirm this displayed judgement.",
+            authorization_source="user_message",
+            project_root=tmp_path,
+        )
+
+
 def test_discovery_and_owner_fail_closed_on_duplicate_program_subject(tmp_path: Path) -> None:
     program_root = tmp_path / "kb/programs/p-duplicate"
     workflow = program_root / "workflow"
@@ -300,6 +348,37 @@ def test_discovery_ignores_canonical_artifact_symlink_that_escapes_root(tmp_path
     (workflow / "decisions.yaml").symlink_to(outside)
 
     assert discover_pending_judgements(root) == []
+
+
+def test_discovery_rejects_unit_record_symlink_to_directory_before_read(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    unit = root / "kb/units/papers/p-directory-link"
+    unit.mkdir(parents=True)
+    outside = tmp_path / "outside-directory"
+    outside.mkdir()
+    (unit / "record.yaml").symlink_to(outside, target_is_directory=True)
+
+    assert discover_pending_judgements(root) == []
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "kb/units/papers/p-broken/record.yaml",
+        "kb/programs/p-broken/workflow/decisions.yaml",
+        "kb/units/ideas/i-broken/discussion-judgements.yaml",
+        "kb/programs/p-broken/design/i-broken-repo-choice.yaml",
+    ],
+)
+def test_discovery_skips_malformed_candidate_yaml_without_blocking_inbox(
+    tmp_path: Path,
+    relative: str,
+) -> None:
+    path = tmp_path / relative
+    path.parent.mkdir(parents=True)
+    path.write_text("items: [\n", encoding="utf-8")
+
+    assert discover_pending_judgements(tmp_path) == []
 
 
 def test_program_decision_reject_is_owner_owned_and_closes_pending_claims(tmp_path: Path) -> None:
@@ -599,6 +678,7 @@ def test_report_fail_closed_for_decision_unknown_and_stale_confirmation(tmp_path
     decision = {
         "id": "decision-r2",
         "kind": "program_decision",
+        "owner": "research-orchestrator",
         "program_id": "p-r2",
         "confirmation_status": "pending_user_confirmation",
         "needs_human_confirmation": True,
@@ -650,6 +730,12 @@ def test_report_fail_closed_for_decision_unknown_and_stale_confirmation(tmp_path
     }
     ordinary, pending = report.partition_reporting_events(tmp_path, [event])
     assert len(ordinary) == 1 and pending == []
+
+    evidence_path.write_text("benchmark bytes changed after confirmation", encoding="utf-8")
+    ordinary, pending = report.partition_reporting_events(tmp_path, [event])
+    assert ordinary == [] and len(pending) == 1
+    assert "stale" in pending[0]["_epistemic_reason"]
+    evidence_path.write_text("benchmark supports route A", encoding="utf-8")
 
     decision["payload"]["claims"][0]["text"] = "Route B is preferred."
     write_yaml_if_changed(decisions_path, {"items": [decision]})

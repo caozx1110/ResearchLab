@@ -13,6 +13,8 @@ import hashlib
 import re
 from typing import Any, Callable
 
+from .relations import BLOCK_ID_RE
+
 TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9_+-]*|[^\W\x00-\x7f]+", re.IGNORECASE)
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
 FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
@@ -231,6 +233,9 @@ def markdown_passages(
                 block.append(line)
                 fence_marker = ""
                 continue
+        if not fence_marker and stripped.startswith("^") and BLOCK_ID_RE.fullmatch(stripped[1:]):
+            flush(number - 1)
+            continue
         match = HEADING_RE.match(line) if not fence_marker else None
         if match:
             flush(number - 1)

@@ -68,6 +68,7 @@ from .records import (
     locate_record,
     normalize_record_schema,
     record_summary,
+    trusted_claim_source_roots,
 )
 from .evidence import (
     confirmation_claims,
@@ -670,13 +671,7 @@ def passage_corpus(
         {"artifact": artifact, "digest": manifest_by_artifact[artifact]}
         for artifact in sorted(manifest_by_artifact)
     ]
-    digest_payload = {
-        "revision": PASSAGE_INDEX_REVISION,
-        "sources": manifest,
-    }
-    corpus_digest = hashlib.sha256(
-        json.dumps(digest_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    corpus_digest = _passage_corpus_digest(manifest)
     passages.sort(
         key=lambda item: (
             str(item.get("unit_id") or ""),
@@ -702,6 +697,34 @@ _PASSAGE_DIGEST_FIELDS = (
     "line_end",
     "source_digest",
 )
+
+
+def _passage_corpus_digest(manifest: list[dict[str, str]]) -> str:
+    digest_payload = {
+        "revision": PASSAGE_INDEX_REVISION,
+        "sources": manifest,
+    }
+    return hashlib.sha256(
+        json.dumps(digest_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _valid_passage_source_manifest(manifest: list[dict[str, str]]) -> bool:
+    for item in manifest:
+        artifact = str(item.get("artifact") or "")
+        digest = str(item.get("digest") or "")
+        artifact_path = Path(artifact)
+        if (
+            not artifact
+            or "\\" in artifact
+            or artifact_path.is_absolute()
+            or artifact_path.as_posix() != artifact
+            or artifact_path.parts[:2] != ("kb", "units")
+            or any(part in {"", ".", ".."} for part in artifact_path.parts)
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+        ):
+            return False
+    return True
 
 
 def _passages_digest(passages: list[dict[str, Any]]) -> str:
@@ -908,21 +931,32 @@ def passage_cache_health(
             connection.close()
     except sqlite3.Error as exc:
         return _sqlite_health_for_error(exc)
+    if not integrity or str(integrity[0]).lower() != "ok":
+        return "corrupt"
+    if str(row["revision"]) != PASSAGE_INDEX_REVISION:
+        return "stale"
+    try:
+        cached_source_count = int(row["source_count"])
+        cached_passage_count = int(row["passage_count"])
+        cached_passages_digest = _passages_digest(cached_passages)
+    except (TypeError, ValueError):
+        return "corrupt"
+    if not _valid_passage_source_manifest(cached_manifest):
+        return "corrupt"
+    if cached_source_count != len(cached_manifest) or str(row["corpus_digest"]) != _passage_corpus_digest(cached_manifest):
+        return "corrupt"
+    if cached_passage_count != len(cached_passages) or str(row["passages_digest"]) != cached_passages_digest:
+        return "corrupt"
     if (
-        str(row["revision"]) != PASSAGE_INDEX_REVISION
-        or str(row["corpus_digest"]) != corpus_digest
-        or int(row["source_count"]) != len(manifest)
+        str(row["corpus_digest"]) != corpus_digest
+        or cached_source_count != len(manifest)
         or cached_manifest != manifest
     ):
         return "stale"
-    if not integrity or str(integrity[0]).lower() != "ok":
-        return "corrupt"
-    if (
-        str(row["passages_digest"]) != passages_digest
-        or int(row["passage_count"]) != passage_count
-        or len(cached_passages) != passage_count
-        or _passages_digest(cached_passages) != passages_digest
-    ):
+    if str(row["passages_digest"]) != passages_digest or cached_passage_count != passage_count:
+        # With identical canonical sources, deterministic extraction must produce
+        # identical rows. A coherent but different cached row set is corruption,
+        # not canonical staleness.
         return "corrupt"
     return "current"
 
@@ -1247,25 +1281,30 @@ def _binding_findings(
     entries: list[tuple[Path, dict[str, Any]]],
 ) -> list[dict[str, str]]:
     findings: list[dict[str, str]] = []
-    roots_by_id = {
-        str(record.get("id") or ""): path.parent
-        for path, record in entries
-        if str(record.get("id") or "")
-    }
     for path, record in entries:
         payload = record.get("payload")
         payload = payload if isinstance(payload, dict) else {}
         verification = payload.get("verification")
         has_verification = isinstance(verification, dict)
         violations: list[str] = []
-        if has_verification:
-            violations = verification_receipt_violations(
+        try:
+            source_roots = trusted_claim_source_roots(
+                project_root,
                 record,
-                path.parent,
-                external_source=record_external_source_contract(record),
-                source_roots=roots_by_id,
-                check_artifacts=True,
+                verification_root=path.parent,
             )
+        except ValueError:
+            source_roots = {}
+            violations = ["verification evidence source is not canonically contained"]
+        if has_verification:
+            if not violations:
+                violations = verification_receipt_violations(
+                    record,
+                    path.parent,
+                    external_source=record_external_source_contract(record),
+                    source_roots=source_roots,
+                    check_artifacts=True,
+                )
             if verification.get("invalidation") and not violations:
                 violations = ["verification receipt is marked invalid"]
             if violations:
@@ -1275,7 +1314,12 @@ def _binding_findings(
                     "The stored verification receipt is missing, invalid, or stale.",
                 ))
         if str(record.get("confirmation_status") or "") == "confirmed":
-            confirmation_invalid = not has_complete_confirmation_receipt(record)
+            confirmation_invalid = not has_complete_confirmation_receipt(
+                record,
+                verification_root=path.parent,
+                external_source=record_external_source_contract(record),
+                source_roots=source_roots,
+            )
             if confirmation_track(record) == "judgement" and violations:
                 confirmation_invalid = True
             if confirmation_invalid:

@@ -13,6 +13,8 @@ import json
 from pathlib import Path
 from typing import Any, Iterable
 
+import yaml
+
 from .common import load_yaml, utc_now_iso
 from .confirm import has_complete_confirmation_receipt
 from .evidence import (
@@ -23,8 +25,15 @@ from .evidence import (
     confirmation_claim_ids,
     confirmation_claims,
     confirmation_content_digest,
+    record_external_source_contract,
     validate_claims,
     verification_receipt_violations,
+)
+from .records import (
+    trusted_claim_source_roots,
+    trusted_program_root,
+    trusted_project_path,
+    trusted_unit_record_path,
 )
 
 
@@ -60,17 +69,20 @@ def _text(value: Any) -> str:
 
 def _safe_relative_path(root: Path, path: Path) -> str:
     resolved_root = root.resolve()
-    resolved = path.resolve()
-    try:
-        return resolved.relative_to(resolved_root).as_posix()
-    except ValueError as exc:
-        raise ValueError("judgement artifact path escapes the project root") from exc
+    resolved = trusted_project_path(
+        resolved_root,
+        path,
+        allowed_root=resolved_root / "kb",
+        require="file",
+    )
+    return resolved.relative_to(resolved_root).as_posix()
 
 
 def _unit_path(root: Path, unit_id: str) -> Path | None:
-    matches = list((root / "kb" / "units").glob(f"*/*/record.yaml"))
-    matched = [path for path in matches if path.parent.name == unit_id]
-    return matched[0] if len(matched) == 1 else None
+    try:
+        return trusted_unit_record_path(root, unit_id)
+    except ValueError:
+        return None
 
 
 def _identity_violations(root: Path, record: dict[str, Any], owner: str, artifact_path: Path) -> list[str]:
@@ -126,44 +138,46 @@ def _identity_violations(root: Path, record: dict[str, Any], owner: str, artifac
         violations.append("judgement owner does not match canonical kind owner")
     if kind not in UNIT_OWNER_BY_KIND and _text(record.get("owner")) != expected_owner:
         violations.append("side judgement record.owner does not match canonical kind owner")
-    if expected_path is not None and artifact_path.resolve() != expected_path.resolve():
-        violations.append("judgement artifact path does not match canonical subject identity")
+    if expected_path is not None:
+        try:
+            safe_artifact = trusted_project_path(
+                root,
+                artifact_path,
+                allowed_root=root / "kb",
+                require="file",
+            )
+            safe_expected = trusted_project_path(
+                root,
+                expected_path,
+                allowed_root=root / "kb",
+                require="file",
+            )
+        except ValueError:
+            violations.append("judgement artifact path is not a canonical safe file")
+        else:
+            if safe_artifact != safe_expected:
+                violations.append("judgement artifact path does not match canonical subject identity")
     return violations
 
 
 def _source_roots(root: Path, record: dict[str, Any], artifact_path: Path) -> dict[str, Path]:
-    roots: dict[str, Path] = {}
-    subject_id = _text(record.get("id"))
-    subject_kind = _text(record.get("kind"))
-    program_id = _text(record.get("program_id"))
-    for claim in confirmation_claims(record):
-        for ref in claim.get("evidence_refs") or []:
-            if not isinstance(ref, dict):
-                continue
-            source_id = _text(ref.get("source_unit_id"))
-            if not source_id or source_id in roots:
-                continue
-            if source_id == subject_id and subject_kind in UNIT_OWNER_BY_KIND:
-                roots[source_id] = artifact_path.parent
-                continue
-            if source_id.startswith("program:"):
-                candidate_program = source_id.split(":", 1)[1]
-                roots[source_id] = root / "kb" / "programs" / candidate_program
-                continue
-            source_path = _unit_path(root, source_id)
-            if source_path is not None:
-                roots[source_id] = source_path.parent
-                continue
-            if program_id and source_id == f"program:{program_id}":
-                roots[source_id] = root / "kb" / "programs" / program_id
-    return roots
+    return trusted_claim_source_roots(
+        root,
+        record,
+        verification_root=_verification_root(root, record, artifact_path),
+    )
 
 
 def _verification_root(root: Path, record: dict[str, Any], artifact_path: Path) -> Path:
     program_id = _text(record.get("program_id"))
     if _text(record.get("kind")) == "program_decision" and program_id:
-        return root / "kb" / "programs" / program_id
-    return artifact_path.parent
+        return trusted_program_root(root, program_id)
+    return trusted_project_path(
+        root,
+        artifact_path.parent,
+        allowed_root=root / "kb",
+        require="dir",
+    )
 
 
 def readiness_violations(root: Path, record: Any, artifact_path: Path) -> list[str]:
@@ -183,15 +197,35 @@ def readiness_violations(root: Path, record: Any, artifact_path: Path) -> list[s
         violations.append("artifact has no judgement-class canonical claim")
     if any(_text(claim.get("confirmation_status")) != "pending_user_confirmation" for claim in claims):
         violations.append("canonical claim confirmation status is not pending_user_confirmation")
-    verification_root = _verification_root(root, record, artifact_path)
-    violations.extend(
-        verification_receipt_violations(
-            record,
-            verification_root,
-            source_roots=_source_roots(root, record, artifact_path),
+    try:
+        verification_root = _verification_root(root, record, artifact_path)
+        source_roots = _source_roots(root, record, artifact_path)
+    except ValueError:
+        violations.append("judgement evidence source is not canonically contained")
+    else:
+        violations.extend(
+            verification_receipt_violations(
+                record,
+                verification_root,
+                source_roots=source_roots,
+            )
         )
-    )
     return violations
+
+
+def judgement_confirmation_is_current(root: Path, record: dict[str, Any], artifact_path: Path) -> bool:
+    """Validate a judgement receipt against canonical identity and current evidence bytes."""
+    try:
+        verification_root = _verification_root(root, record, artifact_path)
+        source_roots = _source_roots(root, record, artifact_path)
+    except ValueError:
+        return False
+    return has_complete_confirmation_receipt(
+        record,
+        verification_root=verification_root,
+        source_roots=source_roots,
+        external_source=record_external_source_contract(record),
+    )
 
 
 def _default_route(record: dict[str, Any], owner: str) -> dict[str, str]:
@@ -280,8 +314,26 @@ def pending_judgement_card(
     }
 
 
-def _list_items(path: Path) -> Iterable[dict[str, Any]]:
-    payload = load_yaml(path, default={})
+def _safe_candidate_file(root: Path, path: Path) -> Path | None:
+    try:
+        return trusted_project_path(
+            root,
+            path,
+            allowed_root=root / "kb",
+            require="file",
+        )
+    except ValueError:
+        return None
+
+
+def _list_items(root: Path, path: Path) -> Iterable[dict[str, Any]]:
+    safe_path = _safe_candidate_file(root, path)
+    if safe_path is None:
+        return []
+    try:
+        payload = load_yaml(safe_path, default={})
+    except (OSError, UnicodeError, yaml.YAMLError):
+        return []
     items = payload.get("items") if isinstance(payload, dict) else None
     if not isinstance(items, list):
         return []
@@ -290,20 +342,38 @@ def _list_items(path: Path) -> Iterable[dict[str, Any]]:
 
 def _candidate_artifacts(root: Path) -> Iterable[tuple[dict[str, Any], str, Path]]:
     for path in sorted((root / "kb" / "units").glob("*/*/record.yaml")):
-        record = load_yaml(path, default={})
+        safe_path = _safe_candidate_file(root, path)
+        if safe_path is None:
+            continue
+        try:
+            record = load_yaml(safe_path, default={})
+        except (OSError, UnicodeError, yaml.YAMLError):
+            continue
         if isinstance(record, dict):
             owner = UNIT_OWNER_BY_KIND.get(_text(record.get("kind")), _text(record.get("owner")) or "unknown")
-            yield record, owner, path
+            yield record, owner, safe_path
     for path in sorted((root / "kb" / "programs").glob("*/workflow/decisions.yaml")):
-        for item in _list_items(path):
-            yield item, "research-orchestrator", path
+        safe_path = _safe_candidate_file(root, path)
+        if safe_path is None:
+            continue
+        for item in _list_items(root, safe_path):
+            yield item, "research-orchestrator", safe_path
     for path in sorted((root / "kb" / "units" / "ideas").glob("*/discussion-judgements.yaml")):
-        for item in _list_items(path):
-            yield item, "idea-workbench", path
+        safe_path = _safe_candidate_file(root, path)
+        if safe_path is None:
+            continue
+        for item in _list_items(root, safe_path):
+            yield item, "idea-workbench", safe_path
     for path in sorted((root / "kb" / "programs").glob("*/design/*-repo-choice.yaml")):
-        payload = load_yaml(path, default={})
+        safe_path = _safe_candidate_file(root, path)
+        if safe_path is None:
+            continue
+        try:
+            payload = load_yaml(safe_path, default={})
+        except (OSError, UnicodeError, yaml.YAMLError):
+            continue
         if isinstance(payload, dict):
-            yield payload, "method-designer", path
+            yield payload, "method-designer", safe_path
 
 
 def discover_pending_judgements(root: str | Path) -> list[dict[str, Any]]:
@@ -476,9 +546,15 @@ def load_bound_judgement(root: str | Path, subject: Any) -> tuple[dict[str, Any]
     relative = _text(subject.get("path"))
     candidates: list[Path] = []
     if relative:
-        candidate = (project_root / relative).resolve()
-        _safe_relative_path(project_root, candidate)
-        candidates.append(candidate)
+        candidate = project_root / relative
+        candidates.append(
+            trusted_project_path(
+                project_root,
+                candidate,
+                allowed_root=project_root / "kb",
+                require="file",
+            )
+        )
     unit = _unit_path(project_root, subject_id)
     if unit is not None:
         candidates.append(unit)
@@ -487,13 +563,25 @@ def load_bound_judgement(root: str | Path, subject: Any) -> tuple[dict[str, Any]
     if subject_kind == "idea_discussion_conclusion":
         candidates.extend((project_root / "kb" / "units" / "ideas").glob("*/discussion-judgements.yaml"))
     for path in candidates:
-        payload = load_yaml(path, default={})
+        try:
+            safe_path = trusted_project_path(
+                project_root,
+                path,
+                allowed_root=project_root / "kb",
+                require="file",
+            )
+        except ValueError:
+            continue
+        payload = load_yaml(safe_path, default={})
         records = payload.get("items") if isinstance(payload, dict) and isinstance(payload.get("items"), list) else [payload]
         for record in records:
             if not isinstance(record, dict):
                 continue
             if _text(record.get("id")) == subject_id and _text(record.get("kind")) == subject_kind:
-                return record, path
+                owner = _text(subject.get("owner")) or UNIT_OWNER_BY_KIND.get(subject_kind) or _text(record.get("owner"))
+                if _identity_violations(project_root, record, owner, safe_path):
+                    continue
+                return record, safe_path
     raise ValueError(f"bound judgement not found: {subject_kind}:{subject_id}")
 
 
@@ -502,6 +590,7 @@ __all__ = [
     "confirmation_binding",
     "discover_pending_judgements",
     "judgement_snapshot_binding",
+    "judgement_confirmation_is_current",
     "load_bound_judgement",
     "pending_judgement_card",
     "require_judgement_snapshot",

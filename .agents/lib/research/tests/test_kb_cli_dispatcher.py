@@ -372,7 +372,7 @@ def test_kb_help_snapshot_contains_group_headers() -> None:
     assert "# kb 快捷命令" in text
     for header in ["kb 动词（16 个）", "纯自然语言（无 kb 动词）"]:
         assert f"## {header}" in text
-    for verb in ["kb help", "kb init", "kb doctor", "kb update", "kb obsidian update", "kb status", "kb next", "kb find", "kb add", "kb ingest", "kb review", "kb reject", "kb recall", "kb resume", "kb undo", "kb restore"]:
+    for verb in ["kb help", "kb init", "kb doctor", "kb update", "kb obsidian update", "kb obsidian status", "kb status", "kb next", "kb find", "kb add", "kb ingest", "kb review", "kb reject", "kb recall", "kb resume", "kb undo", "kb restore"]:
         assert verb in text
     assert "请基于当前知识库给我 3 个候选 idea" in text
     assert "为这个研究计划生成周报材料" in text
@@ -390,6 +390,19 @@ def test_kb_help_snapshot_contains_group_headers() -> None:
     assert "研究能力包" in text
     for implementation_term in ("Python", "YAML", "PDF 后端", "research skill", "skill 问题"):
         assert implementation_term not in text
+
+
+def test_fresh_empty_review_is_strictly_zero_write(tmp_path: Path, capsys) -> None:
+    kb = _load_kb_cli()
+    ensure_workspace(tmp_path)
+    before = _tree_metadata_digest(tmp_path)
+
+    assert kb.main(["--root", str(tmp_path), "review"]) == 0
+
+    assert "目前没有需要你确认的判断" in capsys.readouterr().out
+    assert _tree_metadata_digest(tmp_path) == before
+    assert not (tmp_path / "kb/.runtime/review-snapshots").exists()
+    assert not (tmp_path / "kb/.runtime/review-snapshots.lock").exists()
 
 
 @pytest.mark.parametrize(
@@ -472,7 +485,7 @@ def test_kb_doctor_prints_runtime_capabilities(monkeypatch, tmp_path: Path, caps
     assert kb.main(["--root", str(tmp_path), "--agent-protocol", "doctor.json", "doctor"]) == 0
 
     captured = capsys.readouterr()
-    assert "研究能力包版本为 0.2.0-rc.3" in captured.out
+    assert "研究能力包版本为 0.2.0-rc.4" in captured.out
     assert "配置读写能力正常" in captured.out
     assert "材料 Markdown 阅读层转换能力已就绪" in captured.out
     assert "论文解析能力已就绪" in captured.out

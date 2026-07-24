@@ -8,6 +8,7 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
+import research.sources as sources
 from research.common import load_yaml, write_yaml_if_changed
 from research.openalex import OpenAlexClient, OpenAlexError, WORK_SELECT_FIELDS
 from research.sources import stage_search_results
@@ -154,6 +155,155 @@ def test_rerun_preserves_manual_fields_and_dedupes_candidate(tmp_path: Path, mon
     assert rerun["candidates"][0]["status"] == "reviewed"
     assert rerun["candidates"][0]["note"] == "keep this manual assessment"
     assert rerun["candidates"][0]["provenance"]["openalex"]["work_id"] == "https://openalex.org/W123"
+
+
+@pytest.mark.parametrize(
+    ("kind", "query"),
+    [("paper", "different query"), ("blog", "robot learning")],
+)
+def test_explicit_stage_id_rejects_identity_mismatch_without_mutation(
+    tmp_path: Path,
+    kind: str,
+    query: str,
+) -> None:
+    stage_path = stage_search_results(
+        tmp_path,
+        kind="paper",
+        query="robot learning",
+        stage_id="shared-stage",
+        candidates=[{"candidate_id": "first", "title": "First", "url": "https://example.test/first"}],
+    )
+    stage_before = stage_path.read_bytes()
+    journal_root = tmp_path / "kb/.journal"
+    journal_before = {path.name: path.read_bytes() for path in journal_root.glob("*.yaml")}
+
+    with pytest.raises(SystemExit, match="identity does not match"):
+        stage_search_results(
+            tmp_path,
+            kind=kind,
+            query=query,
+            stage_id="shared-stage",
+            candidates=[{"candidate_id": "second", "title": "Second", "url": "https://example.test/second"}],
+        )
+
+    assert stage_path.read_bytes() == stage_before
+    assert {path.name: path.read_bytes() for path in journal_root.glob("*.yaml")} == journal_before
+
+
+def test_stage_identity_mismatch_precedes_workspace_seed_repairs(tmp_path: Path) -> None:
+    stage_path = stage_search_results(
+        tmp_path,
+        kind="paper",
+        query="robot learning",
+        stage_id="shared-stage",
+        candidates=[{"candidate_id": "first", "title": "First", "url": "https://example.test/first"}],
+    )
+    current_state = tmp_path / "kb/user/current-state.md"
+    current_state.unlink()
+    stage_before = stage_path.read_bytes()
+    journal_before = {path.name: path.read_bytes() for path in (tmp_path / "kb/.journal").glob("*.yaml")}
+
+    with pytest.raises(SystemExit, match="identity does not match"):
+        stage_search_results(
+            tmp_path,
+            kind="paper",
+            query="different query",
+            stage_id="shared-stage",
+            candidates=[{"candidate_id": "second", "title": "Second", "url": "https://example.test/second"}],
+        )
+
+    assert not current_state.exists()
+    assert stage_path.read_bytes() == stage_before
+    assert {path.name: path.read_bytes() for path in (tmp_path / "kb/.journal").glob("*.yaml")} == journal_before
+
+
+def test_stage_identity_race_fails_while_locked_before_journal_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+    validate = sources._validate_search_stage_identity
+
+    def fail_second_validation(*args, **kwargs) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise SystemExit("Search stage identity changed before the mutation lock.")
+        validate(*args, **kwargs)
+
+    monkeypatch.setattr(sources, "_validate_search_stage_identity", fail_second_validation)
+    with pytest.raises(SystemExit, match="changed before the mutation lock"):
+        sources.stage_search_results(
+            tmp_path,
+            kind="paper",
+            query="robot learning",
+            stage_id="shared-stage",
+            candidates=[{"candidate_id": "first", "title": "First", "url": "https://example.test/first"}],
+        )
+
+    assert not (tmp_path / "kb/library/search/results/shared-stage.yaml").exists()
+    assert not list((tmp_path / "kb/.journal").glob("*.yaml"))
+
+
+def test_same_url_candidates_fold_within_one_batch(tmp_path: Path) -> None:
+    path = stage_search_results(
+        tmp_path,
+        kind="paper",
+        query="shared landing",
+        candidates=[
+            {"candidate_id": "first", "title": "Old title", "url": "https://example.test/shared"},
+            {"candidate_id": "second", "title": "Corrected title", "url": "https://example.test/shared"},
+        ],
+    )
+
+    candidates = load_yaml(path)["candidates"]
+    assert len(candidates) == 1
+    assert candidates[0]["candidate_id"] == "first"
+    assert candidates[0]["title"] == "Corrected title"
+
+
+def test_persisted_candidates_dedupe_by_doi_across_different_openalex_work_ids(tmp_path: Path) -> None:
+    first = {
+        "candidate_id": "openalex-w1",
+        "title": "First title",
+        "url": "https://openalex.org/W1",
+        "provenance": {
+            "openalex": {
+                "work_id": "https://openalex.org/W1",
+                "doi": "https://doi.org/10.1234/shared",
+                "cited_by_count": 3,
+            }
+        },
+    }
+    stage_path = stage_search_results(tmp_path, kind="paper", query="shared doi", candidates=[first])
+    stage = load_yaml(stage_path)
+    stage["candidates"][0]["status"] = "reviewed"
+    stage["candidates"][0]["note"] = "manual assessment"
+    write_yaml_if_changed(stage_path, stage)
+
+    second = {
+        "candidate_id": "openalex-w2",
+        "title": "Second title",
+        "url": "https://openalex.org/W2",
+        "provenance": {
+            "openalex": {
+                "work_id": "https://openalex.org/W2",
+                "doi": "doi:10.1234/SHARED",
+                "cited_by_count": 9,
+            }
+        },
+    }
+    stage_search_results(tmp_path, kind="paper", query="shared doi", candidates=[second])
+    merged = load_yaml(stage_path)["candidates"]
+
+    assert len(merged) == 1
+    assert merged[0]["status"] == "reviewed"
+    assert merged[0]["note"] == "manual assessment"
+    assert merged[0]["title"] == "Second title"
+    assert merged[0]["url"] == "https://openalex.org/W2"
+    assert merged[0]["provenance"]["openalex"]["work_id"] == "https://openalex.org/W1"
+    assert merged[0]["provenance"]["openalex"]["doi"] == "https://doi.org/10.1234/shared"
+    assert merged[0]["provenance"]["openalex"]["cited_by_count"] == 9
 
 
 def test_source_stage_drops_unapproved_openalex_provenance(tmp_path: Path) -> None:

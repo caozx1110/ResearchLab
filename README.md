@@ -10,7 +10,7 @@ workspace/
 └── kb/        # your local research data
 ```
 
-The current candidate is **`0.2.0-rc.3`**. It has passed the complete 1,012-test local suite, an installed-copy workflow against a real SQLite documentation page, and Obsidian 1.12.7 Reading-view acceptance. It meets the project's local release-candidate gate, but is not stable or GA, has not been tagged or published, and makes no compatibility or support-time SLA promise. A green hosted Linux/macOS CI matrix remains required before a release tag. See [CHANGELOG.md](CHANGELOG.md) for the current release state.
+The current candidate is **`0.2.0-rc.4`**. Its complete 1,041-test local suite and current installed-copy validation pass after adversarial remediation. Real SQLite HTML and Obsidian 1.12.7 Reading-view acceptance remain part of the release gate and have not been rerun for rc.4. The candidate is not stable or GA, has not been tagged or published, and makes no compatibility or support-time SLA promise. Real-source/Obsidian acceptance plus a green hosted Linux/macOS CI matrix remain required before a release tag. See [CHANGELOG.md](CHANGELOG.md) for the current release state.
 
 ## Capability maturity
 

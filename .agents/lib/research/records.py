@@ -76,7 +76,96 @@ def command_mutation(
         yield
 
 
-def _trusted_claim_source_roots(project_root: Path, record: dict[str, Any]) -> dict[str, Path]:
+def trusted_project_path(
+    project_root: Path,
+    path: Path,
+    *,
+    allowed_root: Path,
+    require: str,
+) -> Path:
+    """Return an existing canonical path only when no component is a symlink."""
+    project = project_root.resolve()
+    candidate = path if path.is_absolute() else project / path
+    try:
+        relative = candidate.relative_to(project)
+    except ValueError as exc:
+        raise ValueError("canonical path escapes the project root") from exc
+    if any(part in {"", ".", ".."} for part in relative.parts):
+        raise ValueError("canonical path contains an unsafe component")
+    cursor = project
+    for part in relative.parts:
+        cursor = cursor / part
+        if cursor.is_symlink():
+            raise ValueError("canonical path contains a symlink component")
+    resolved = candidate.resolve()
+    allowed = allowed_root.resolve()
+    try:
+        resolved.relative_to(allowed)
+    except ValueError as exc:
+        raise ValueError("canonical path escapes its allowed root") from exc
+    if require == "file" and not resolved.is_file():
+        raise ValueError("canonical file is missing or not a regular file")
+    if require == "dir" and not resolved.is_dir():
+        raise ValueError("canonical directory is missing or not a directory")
+    if require not in {"file", "dir"}:
+        raise ValueError("unsupported canonical path requirement")
+    return resolved
+
+
+def trusted_unit_record_path(project_root: Path, unit_id: str) -> Path:
+    """Resolve one exact canonical unit record without aliases or symlink traversal."""
+    identifier = str(unit_id or "").strip()
+    if not identifier or Path(identifier).name != identifier or identifier in {".", ".."}:
+        raise ValueError("source unit id is not a canonical path component")
+    matches: list[Path] = []
+    unsafe = False
+    for source_kind, directory in UNIT_KIND_DIRS.items():
+        candidate = units_root(project_root) / directory / identifier / "record.yaml"
+        try:
+            resolved = trusted_project_path(
+                project_root,
+                candidate,
+                allowed_root=units_root(project_root),
+                require="file",
+            )
+        except ValueError as exc:
+            if candidate.exists() or candidate.is_symlink() or candidate.parent.is_symlink():
+                unsafe = True
+            continue
+        payload = load_yaml(resolved, default={})
+        if (
+            not isinstance(payload, dict)
+            or str(payload.get("id") or "").strip() != identifier
+            or str(payload.get("kind") or "").strip() != source_kind
+        ):
+            unsafe = True
+            continue
+        matches.append(resolved)
+    if unsafe or len(matches) != 1:
+        raise ValueError("source unit does not resolve to one canonical safe record")
+    return matches[0]
+
+
+def trusted_program_root(project_root: Path, program_id: str) -> Path:
+    identifier = str(program_id or "").strip()
+    if not identifier or Path(identifier).name != identifier or identifier in {".", ".."}:
+        raise ValueError("program id is not a canonical path component")
+    program_root = project_root / "kb" / "programs" / identifier
+    return trusted_project_path(
+        project_root,
+        program_root,
+        allowed_root=project_root / "kb" / "programs",
+        require="dir",
+    )
+
+
+def trusted_claim_source_roots(
+    project_root: Path,
+    record: dict[str, Any],
+    *,
+    verification_root: Path | None = None,
+) -> dict[str, Path]:
+    """Resolve evidence roots from canonical identity, rejecting every unsafe source."""
     roots: dict[str, Path] = {}
     record_id = str(record.get("id") or "").strip()
     record_kind = str(record.get("kind") or "").strip()
@@ -84,17 +173,29 @@ def _trusted_claim_source_roots(project_root: Path, record: dict[str, Any]) -> d
         for ref in claim.get("evidence_refs") or []:
             if not isinstance(ref, dict):
                 continue
+            if isinstance(ref.get("external_source"), dict):
+                # Repo evidence is rooted by the separately trusted external_source
+                # contract; the canonical unit directory is not its byte root.
+                continue
             source_unit_id = str(ref.get("source_unit_id") or "").strip()
             if not source_unit_id or source_unit_id in roots:
                 continue
-            if source_unit_id == record_id:
-                roots[source_unit_id] = unit_root(project_root, record_kind, record_id)
+            if source_unit_id == record_id and record_kind in UNIT_KIND_DIRS:
+                candidate = verification_root or unit_root(project_root, record_kind, record_id)
+                roots[source_unit_id] = trusted_project_path(
+                    project_root,
+                    candidate,
+                    allowed_root=units_root(project_root),
+                    require="dir",
+                )
                 continue
-            for source_kind in UNIT_KIND_DIRS:
-                candidate = record_path(project_root, source_kind, source_unit_id)
-                if candidate.exists():
-                    roots[source_unit_id] = candidate.parent
-                    break
+            if source_unit_id.startswith("program:"):
+                roots[source_unit_id] = trusted_program_root(
+                    project_root,
+                    source_unit_id.split(":", 1)[1],
+                )
+                continue
+            roots[source_unit_id] = trusted_unit_record_path(project_root, source_unit_id).parent
     return roots
 
 
@@ -564,17 +665,27 @@ def normalize_record_schema(record: dict[str, Any], *, project_root: Path | None
     verification = normalized.get("payload", {}).get("verification") if isinstance(normalized.get("payload"), dict) else None
     if isinstance(verification, dict):
         evidence_root = None
+        source_roots = None
+        source_root_violations: list[str] = []
         if project_root is not None:
             evidence_root = unit_root(
                 project_root,
                 str(normalized.get("kind") or ""),
                 str(normalized.get("id") or ""),
             )
-        verification_violations = verification_receipt_violations(
+            try:
+                source_roots = trusted_claim_source_roots(
+                    project_root,
+                    normalized,
+                    verification_root=evidence_root,
+                )
+            except ValueError:
+                source_root_violations.append("verification evidence source is not canonically contained")
+        verification_violations = source_root_violations or verification_receipt_violations(
             normalized,
             evidence_root,
             external_source=record_external_source_contract(normalized),
-            source_roots=_trusted_claim_source_roots(project_root, normalized) if project_root is not None else None,
+            source_roots=source_roots,
             check_artifacts=project_root is not None,
         )
         if verification_violations:
@@ -925,6 +1036,10 @@ __all__ = [
     "AI_INFORMATION_TYPES",
     "WORKFLOW_STATES",
     "command_mutation",
+    "trusted_project_path",
+    "trusted_unit_record_path",
+    "trusted_program_root",
+    "trusted_claim_source_roots",
     "kind_payload_skeleton",
     "_extract_unit_id_hash",
     "_record_template",

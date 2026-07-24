@@ -31,6 +31,7 @@ from research.common import load_yaml, write_yaml_if_changed
 from research.confirm import confirm_unit, has_substantive_content
 from research.core import ensure_workspace, record_path, write_record
 from research.evidence import attach_claims, build_verification_receipt
+from research.judgements import judgement_confirmation_is_current
 from research.records import kind_payload_skeleton
 
 
@@ -235,6 +236,9 @@ def test_capability_fill_legit_evidence_validates_and_clears_substance_gate(tmp_
                              user_authorization="I confirm this repo analysis.",
                              authorization_source="user_message", project_root=tmp_path)
     assert confirmed["confirmation_status"] == "confirmed"
+    canonical_path = record_path(tmp_path, "repo", record["id"])
+    write_yaml_if_changed(canonical_path, confirmed)
+    assert judgement_confirmation_is_current(tmp_path, confirmed, canonical_path)
 
 
 def test_capability_fill_accepts_raw_yaml_line_via_external_source_contract(tmp_path: Path) -> None:

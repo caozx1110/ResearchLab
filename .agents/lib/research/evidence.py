@@ -510,6 +510,10 @@ def _ref_unit_dir(
     unit_dir: str | Path | None,
     source_roots: dict[str, str | Path] | None,
 ) -> str | Path | None:
+    if isinstance(ref.get("external_source"), dict):
+        # The trusted external_source contract supplies this ref's byte root;
+        # cross-unit source_roots apply only to canonical KB artifacts.
+        return unit_dir
     if source_roots is None:
         return unit_dir
     source_unit_id = str(ref.get("source_unit_id") or "").strip()

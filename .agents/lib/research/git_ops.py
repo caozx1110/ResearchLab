@@ -27,6 +27,7 @@ from .journal import (
     JOURNAL_DIRNAME,
     journal_root,
     journaled_op,
+    file_digest,
     latest_committed_op,
     load_op,
     mark_op_undone,
@@ -428,6 +429,9 @@ def _restore_paths_from_revision(
 
 def restore_operation(project_root: Path, op_id: str, *, recovery_type: str = "restore") -> dict[str, Any]:
     entry = load_op(project_root, op_id)
+    state = str(entry.get("state") or "")
+    if state != "commit" and not (state == "begin" and recovery_type == "resume"):
+        raise SystemExit("只有已完成的操作可恢复；未完成操作只能通过 kb resume 自愈。")
     before_digests = entry.get("before_digests", {})
     if not isinstance(before_digests, dict) or not before_digests:
         raise SystemExit(f"操作 {op_id} 没有可恢复的目标。")
@@ -437,6 +441,18 @@ def restore_operation(project_root: Path, op_id: str, *, recovery_type: str = "r
         with ExitStack() as locks:
             for path in sorted(target_paths, key=lambda item: item.as_posix()):
                 locks.enter_context(exclusive_file_lock(operation_lock_path(project_root, path)))
+            if state == "commit":
+                after_digests = entry.get("after_digests")
+                expected_keys = {str(key) for key in before_digests}
+                if not isinstance(after_digests, dict) or set(after_digests) != expected_keys:
+                    raise SystemExit("该操作缺少完整的恢复后状态记录；为避免覆盖后续改动，已停止恢复。")
+                changed_after_operation = [
+                    key
+                    for key in sorted(expected_keys)
+                    if file_digest(target_path(project_root, key)) != after_digests.get(key)
+                ]
+                if changed_after_operation:
+                    raise SystemExit("目标在该操作完成后又被修改；为避免覆盖后续改动，已停止恢复。")
             with journaled_op(
                 project_root,
                 f"{recovery_type}:{op_id}",

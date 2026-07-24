@@ -24,10 +24,10 @@ if __name__ == "__main__":
     ensure_managed_runtime(PROJECT_ROOT)
 
 from research.common import add_project_root_argument, load_program_reporting_events, load_yaml, print_resolved_project_roots, write_text_if_changed
-from research.core import command_mutation, ensure_workspace, checkpoint_and_report, has_complete_confirmation_receipt, project_root, user_root
-from research.evidence import read_claims, validate_claims, verification_receipt_violations
-from research.judgements import load_bound_judgement
-from research.records import locate_record
+from research.core import command_mutation, ensure_workspace, checkpoint_and_report, project_root, user_root
+from research.evidence import read_claims, validate_claims
+from research.judgements import judgement_confirmation_is_current, load_bound_judgement
+from research.records import trusted_unit_record_path
 from research.surveys import survey_staleness
 
 
@@ -154,14 +154,14 @@ def _confirmed_judgement_event(root: Path, event: dict[str, Any]) -> tuple[bool,
     if not bound_claim_ids:
         return False, f"confirmation_status={recorded_status}; missing: canonical claim/evidence binding"
     try:
-        record, _path = load_bound_judgement(root, subject)
+        record, artifact_path = load_bound_judgement(root, subject)
     except (OSError, ValueError):
         return False, f"confirmation_status={recorded_status}; missing: bound record {subject_id}"
     if str(record.get("id") or "") != subject_id or str(record.get("kind") or "") != subject_kind:
         return False, f"confirmation_status={recorded_status}; missing: matching canonical subject"
     if str(record.get("confirmation_status") or "") != "confirmed":
         return False, f"confirmation_status={recorded_status}; missing: current ConfirmationReceipt"
-    if not has_complete_confirmation_receipt(record):
+    if not judgement_confirmation_is_current(root, record, artifact_path):
         return False, "confirmation_status=stale; missing: current ConfirmationReceipt"
     receipt = record.get("confirmation")
     receipt = receipt if isinstance(receipt, dict) else {}
@@ -301,8 +301,11 @@ def load_confirmed_claim_sources(root: Path, unit_ids: list[str]) -> tuple[list[
     missing_units: list[str] = []
     for unit_id in unit_ids:
         try:
-            record, _ = locate_record(root, unit_id, fuzzy=False)
-        except SystemExit:
+            path = trusted_unit_record_path(root, unit_id)
+            record = load_yaml(path, default={})
+            if not isinstance(record, dict):
+                raise ValueError("canonical record is not a mapping")
+        except ValueError:
             missing_units.append(unit_id)
             continue
         canonical_claims = read_claims(record.get("payload"))
@@ -314,7 +317,7 @@ def load_confirmed_claim_sources(root: Path, unit_ids: list[str]) -> tuple[list[
         }
         receipt_current = (
             str(record.get("confirmation_status") or "") == "confirmed"
-            and has_complete_confirmation_receipt(record)
+            and judgement_confirmation_is_current(root, record, path)
         )
         confirmed_claims = [
             claim
@@ -351,24 +354,6 @@ def _decision_value(lines: list[str], label: str) -> str:
     return ""
 
 
-def _decision_source_roots(root: Path, program_id: str, claims: list[dict[str, Any]]) -> dict[str, Path]:
-    roots: dict[str, Path] = {}
-    program_source_id = f"program:{program_id}"
-    for claim in claims:
-        for ref in claim.get("evidence_refs") or []:
-            if not isinstance(ref, dict):
-                continue
-            source_unit_id = str(ref.get("source_unit_id") or "").strip()
-            if not source_unit_id or source_unit_id in roots:
-                continue
-            if source_unit_id == program_source_id:
-                roots[source_unit_id] = root / "kb" / "programs" / program_id
-                continue
-            _record, path = locate_record(root, source_unit_id, fuzzy=False)
-            roots[source_unit_id] = path.parent
-    return roots
-
-
 def load_decisions(root: Path, program_id: str) -> list[dict[str, str]]:
     path = root / "kb" / "programs" / program_id / "workflow" / "decisions.yaml"
     payload = load_yaml(path, default={})
@@ -395,18 +380,7 @@ def load_decisions(root: Path, program_id: str) -> list[dict[str, str]]:
             continue
         if str(item.get("confirmation_status") or "") != "confirmed":
             continue
-        claims = read_claims(item.get("payload"))
-        try:
-            source_roots = _decision_source_roots(root, program_id, claims)
-        except SystemExit:
-            continue
-        if verification_receipt_violations(
-            item,
-            root / "kb" / "programs" / program_id,
-            source_roots=source_roots,
-        ):
-            continue
-        if not has_complete_confirmation_receipt(item):
+        if not judgement_confirmation_is_current(root, item, path):
             continue
         if not decision:
             continue

@@ -33,8 +33,8 @@ Knowledge Base Manager 负责 knowledge-unit classifier；公共 `kb review` 还
 ## Passage retrieval
 
 - 显式 index mutation 用 deterministic extractor 建完整临时 FTS5 数据库并原子替换；正文只能切段/切窗，不摘要或解释。
-- 每个 passage 保存 unit、kind、title、artifact、locator、原文与 source digest；路径必须 project-relative 且通过 containment，拒绝 symlink escape。
-- `find` 是只读消费者。cache 缺失、损坏或 stale 时调用同一 extractor 做内存 fallback，绝不在 query path 重建或修改 KB。
+- 每个 passage 保存 unit、kind、title、artifact、locator、原文与 source digest；路径必须 project-relative 且通过 containment，拒绝 symlink escape。fenced code 外 standalone `^block-id` 只作 locator metadata，不进入正文 passage。
+- `find` 是只读消费者。cache 先验内部 table/digest 自洽，再判 canonical stale；内部篡改归 `corrupt`，canonical 合法变化归 `stale`。cache 缺失、损坏或 stale 时调用同一 extractor 做内存 fallback，绝不在 query path 重建或修改 KB。
 - 公开结果最多五段，只显示短原文、unit 和可复开 locator；BM25/internal score、绝对路径与 cache 诊断只留在私有 protocol。
 - lexical search 支持同语种与 CJK/ASCII 混合 token，但不承诺翻译、embedding 或跨语言同义召回。
 

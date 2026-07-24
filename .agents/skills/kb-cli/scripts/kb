@@ -77,7 +77,7 @@ HELP_MENU: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("初始化知识库布局、索引和基础偏好。", "kb init"),
             ("检查运行环境、配置读写与论文解析能力，并检查材料 Markdown 转换能力。", "kb doctor"),
             ("检查并在确认后更新研究能力包。", "kb update"),
-            ("生成或检查可由 Obsidian 直接浏览的知识网络视图。", "kb obsidian update"),
+            ("生成或检查可由 Obsidian 直接浏览的知识网络视图。", "kb obsidian update / kb obsidian status"),
             ("刷新并查看当前知识库和研究计划的状态摘要。", "kb status"),
             ("查看下一步实验或研究计划推进建议。", "kb next"),
             ("按关键词检索已入库知识单元。", "kb find <关键词>"),
@@ -2874,17 +2874,20 @@ def _review_timestamp_epoch(value: object) -> float | None:
         return None
 
 
-def _review_snapshot_paths(root: Path) -> tuple[Path, Path, Path]:
+def _review_snapshot_paths(root: Path, *, create: bool = True) -> tuple[Path, Path, Path] | None:
     project_root = root.resolve()
     kb_path = project_root / "kb"
     runtime_path = kb_path / ".runtime"
     for container in (kb_path, runtime_path):
         if container.is_symlink() or (container.exists() and not container.is_dir()):
             raise ReviewSnapshotError("tampered_or_unknown", "review snapshot runtime has an unsafe symlink")
-    try:
-        runtime_path.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        raise ReviewSnapshotError("tampered_or_unknown", "review snapshot runtime is unavailable") from exc
+    if not runtime_path.exists() and not create:
+        return None
+    if create:
+        try:
+            runtime_path.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise ReviewSnapshotError("tampered_or_unknown", "review snapshot runtime is unavailable") from exc
     runtime_root = runtime_path.resolve()
     try:
         runtime_root.relative_to(project_root)
@@ -2894,7 +2897,10 @@ def _review_snapshot_paths(root: Path) -> tuple[Path, Path, Path]:
     lock_path = runtime_root / "review-snapshots.lock"
     if snapshot_root.is_symlink() or (snapshot_root.exists() and not snapshot_root.is_dir()):
         raise ReviewSnapshotError("tampered_or_unknown", "review snapshot registry is not a safe directory")
-    snapshot_root.mkdir(parents=True, exist_ok=True)
+    if not snapshot_root.exists() and not create:
+        return None
+    if create:
+        snapshot_root.mkdir(parents=True, exist_ok=True)
     if snapshot_root.is_symlink() or snapshot_root.resolve() != snapshot_root:
         raise ReviewSnapshotError("tampered_or_unknown", "review snapshot registry escaped its runtime root")
     if lock_path.is_symlink() or (lock_path.exists() and not lock_path.is_file()):
@@ -2998,7 +3004,10 @@ def _gc_review_snapshots_locked(snapshot_root: Path, *, now: float) -> None:
 
 
 def _gc_review_snapshots(root: Path) -> None:
-    _runtime_root, snapshot_root, lock_path = _review_snapshot_paths(root)
+    paths = _review_snapshot_paths(root, create=False)
+    if paths is None:
+        return
+    _runtime_root, snapshot_root, lock_path = paths
     with exclusive_file_lock(lock_path):
         _gc_review_snapshots_locked(snapshot_root, now=_review_now_epoch())
 
@@ -3009,7 +3018,10 @@ def _store_review_snapshot(
     items: Sequence[Mapping[str, object]],
 ) -> str:
     protocol_path = agent_protocol_path(root, protocol_name)
-    runtime_root, snapshot_root, lock_path = _review_snapshot_paths(root)
+    paths = _review_snapshot_paths(root)
+    if paths is None:  # pragma: no cover - create=True invariant
+        raise ReviewSnapshotError("tampered_or_unknown", "review snapshot registry is unavailable")
+    runtime_root, snapshot_root, lock_path = paths
     token = uuid.uuid4().hex
     path = snapshot_root / f"{token}.json"
     now = _review_now_epoch()
@@ -3053,7 +3065,10 @@ def _load_review_snapshot(root: Path, requested: str) -> list[dict[str, object]]
         raise ReviewSnapshotError("tampered_or_unknown", "review snapshot contains ambiguous subjects")
     if _REVIEW_SNAPSHOT_TOKEN_RE.fullmatch(token) is None:
         raise ReviewSnapshotError("tampered_or_unknown", "review snapshot has no valid one-time token")
-    runtime_root, snapshot_root, lock_path = _review_snapshot_paths(root)
+    paths = _review_snapshot_paths(root, create=False)
+    if paths is None:
+        raise ReviewSnapshotError("tampered_or_unknown", "review snapshot token is unknown or invalid")
+    runtime_root, snapshot_root, lock_path = paths
     stored_path = snapshot_root / f"{token}.json"
     now = _review_now_epoch()
     with exclusive_file_lock(lock_path):

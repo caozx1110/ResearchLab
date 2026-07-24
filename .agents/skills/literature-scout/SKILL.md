@@ -12,7 +12,7 @@ description: 通过一次有界 OpenAlex Works 检索暂存外部论文候选；
 1. 从用户问题或 program evidence request 提取一个明确检索主题；主题不清楚时先用自然语言补齐。
 2. 私下运行 bundled scout，默认只取一页 25 项，任何一次请求最多 100 项；不自动翻页或 cursor crawl。
 3. 默认排除 retracted works。只有内部审计明确需要时才启用私有 include-retracted 选项，并在后续阅读中保留撤稿事实。
-4. 让脚本按 OpenAlex ID、其次 DOI 做稳定去重，并复用 source-search staging。重跑不得覆盖候选的人工 note 或 status。
+4. 让脚本在 persisted stage 内按 OpenAlex ID、其次 canonical DOI 做稳定去重；DOI 相同但 work ID/URL 不同也合并。显式 stage identity 必须匹配原 source kind 与 normalized query，重跑不得覆盖候选的人工 note/status 或既有 stable work identity。
 5. 将候选交给 runtime agent 阅读、去重并形成待选建议；只有 source-intake 后续流程可以把用户接受的候选入库。
 
 ## 安全与边界

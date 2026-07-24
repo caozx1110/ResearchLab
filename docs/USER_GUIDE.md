@@ -4,7 +4,7 @@
 
 它不是预装好的知识库。安装后，能力包与研究数据分开保存。AI 负责提取、整理、追踪和汇总；你负责判断、确认和拍板。
 
-当前候选版本是 **`0.2.0-rc.3`**，已通过完整 1,012 项本地测试、安装副本、SQLite 官方 HTML 真实入库和 Obsidian 1.12.7 阅读视图验收，达到项目定义的本地 release-candidate gate。它不是 stable 或 GA，也尚未 tag/publish。正式打发布 tag 前，仍须让 hosted Linux/macOS CI matrix 全绿；当前不承诺兼容性或响应时限 SLA。
+当前候选版本是 **`0.2.0-rc.4`**。对抗性复审修复后的完整 1,041 项本地测试与当前安装副本验收已全绿；SQLite 官方 HTML 真实入库和 Obsidian 1.12.7 阅读视图尚未针对 rc.4 重跑，仍在发布门中。它不是 stable 或 GA，也尚未 tag/publish。正式打发布 tag 前，仍须完成真实来源/Obsidian 验收并让 hosted Linux/macOS CI matrix 全绿；当前不承诺兼容性或响应时限 SLA。
 
 ## 能力成熟度（按组件）
 

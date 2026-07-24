@@ -39,7 +39,8 @@
 - **确认溯源**：把 `confirmation_status` 迁到 `confirmed` 必须提供确认人（`--confirmed-by` 或 `identity.default_confirmed_by` 二选一）+ 至少一条 `--evidence`，否则 `apply_confirmation`/`promote_record` 直接拒绝（`SystemExit`）；确认时写入下方完整 `ConfirmationReceipt`。其它状态（auto_confirmed/pending/rejected）无需 provenance。
 - **确认时 evidence 复验**：receipt 落盘前重新运行 claim 结构/空据校验与 `verify_claim_evidence()` 逐字 quote + locator 校验；存在 claim evidence 却没有可解析的 `project_root` 时 fail-closed，不允许只凭上游 verify 结果签 receipt。
 - **judgement 授权**：judgement track 还必须保存用户原话 `user_authorization`，且 `authorization_source=user_message`。这是本地 attestation 完整性与审计留痕，不宣称密码学身份认证。
-- **verify→confirm 绑定**：judgement 必须先有非空 canonical `payload.claims` 与当前 `payload.verification`；receipt 的 `claim_ids` 非空并覆盖 canonical claims。claims/content/artifact bytes 改变均使确认失效并降回 pending。
+- **verify→confirm 绑定**：judgement 必须先有非空 canonical `payload.claims` 与当前 `payload.verification`；receipt 的 `claim_ids` 非空并覆盖 canonical claims。claims/content/artifact bytes 改变均使确认失效并降回 pending。公开 current-receipt consumer 必须提供从 project root 推导的 verification/source roots 并重新读取 artifact byte sha256；无可信路径 context 的结构校验不能放行 report/index/review judgement。
+- **恢复 after-state CAS**：已 commit operation 的 undo/restore 在 workspace + exact-target locks 内、创建 recovery journal 前，要求 `after_digests` 完整覆盖 target set 且每个当前 digest 完全匹配；缺失或后续人工修改均零业务写 fail-closed。`state=begin` 的 crash resume 仍按 root before snapshot 自愈，不适用 commit after-state CAS。
 - **claim 语义下限**：canonical claim 的类型不能被 record 级 `information_types` / `source` 降级；`inference` / `evaluation` / `user_opinion` 都强制 judgement track，`unverified` claim 在解决或替换前不得 `confirmed`。纯事实元数据且无 canonical claims 仍允许轻确认。
 
 ---
@@ -600,7 +601,7 @@ candidates:
 history: []
 ```
 
-同一 stage 内优先按 OpenAlex work id、其次 DOI 确定性折叠。相同查询重跑合并新 metadata，但保留人工 review state。API key 仅从进程私有输入取得，不进入 YAML、journal detail、protocol、错误或用户输出。
+显式 `stage_id` 的 `id/kind/source_kind/normalized query` 是不可变 identity；复用时任一不一致必须在业务/journal 写入前 fail-closed。候选在已持久化 stage 内优先按 OpenAlex work id、其次 canonical DOI、最后同 URL 确定性折叠；DOI 可跨不同 work id/URL 识别同一候选。相同查询重跑合并新 factual metadata，但保留人工 `status/note` 与已有 stable work identity。API key 仅从进程私有输入取得，不进入 YAML、journal detail、protocol、错误或用户输出。
 
 ### Passage cache
 
@@ -623,9 +624,9 @@ passage:
 
 `title` / record summary 是展示 metadata；只有各自独立的 `record.yaml#title` / `#summary` passage 把这些 bytes 放进可检索正文。不得因为 unit title 命中就把同一 unit 的无关正文 passage 全部提升为结果。
 
-Extractor 只遍历 canonical unit containment 内允许的 record、Markdown 与 parse-cache 文本，跳过 raw/output/runtime/Obsidian/journal，拒绝 symlink escape。Markdown 以 heading + paragraph 切分，长段用固定窗口与 overlap。显式 build 在同目录完成全新数据库后原子 replace，任何失败保留旧 cache；不得用 external-content/trigger 双表。
+Extractor 只遍历 canonical unit containment 内允许的 record、Markdown 与 parse-cache 文本，跳过 raw/output/runtime/Obsidian/journal，拒绝 symlink escape。Markdown 以 heading + paragraph 切分，长段用固定窗口与 overlap；fenced code 外的 standalone Obsidian block ID（`^...`）仅是 locator metadata，跳过该 anchor 行但保留相邻正文与真实行号。显式 build 在同目录完成全新数据库后原子 replace，任何失败保留旧 cache；不得用 external-content/trigger 双表。
 
-Read path 对 cache metadata 与当前 canonical digest 做 byte-level 检查。cache missing/corrupt/stale 时，使用同一 extractor 做纯内存 lexical fallback，查询绝不写盘。结果至多五条，返回 unit、短原文与 project-relative locator；public projection 不显示 BM25/internal score 或绝对路径。`unicode61` 与共享 CJK/ASCII tokenizer 只承诺 lexical matching，不承诺翻译或 embedding。
+Read path 先校验 cache 内部 metadata/source table/passage rows/digests/schema 自洽，再与当前 canonical digest 比较：source artifact 必须是 `kb/units/**` 下规范 project-relative path，digest 必须是 64 位小写 SHA-256，count/line 等数值必须可解析；非法 schema、SQLite/内部表或摘要被改均为 `corrupt`，只有 index revision/canonical corpus 合法变化为 `stale`。cache missing/corrupt/stale 时，使用同一 extractor 做纯内存 lexical fallback，查询绝不写盘。结果至多五条，返回 unit、短原文与 project-relative locator；public projection 不显示 BM25/internal score 或绝对路径。`unicode61` 与共享 CJK/ASCII tokenizer 只承诺 lexical matching，不承诺翻译或 embedding。
 
 ---
 
@@ -633,7 +634,7 @@ Read path 对 cache metadata 与当前 canonical digest 做 byte-level 检查。
 
 | artifact | 写入 skill | 读取 skill | 备注 |
 |---|---|---|---|
-| `kb/units/<kind>s/<id>/record.yaml` | source-intake (创建)、`<kind>`-analyst（精修）、knowledge-base-manager（合并/治理） | 全部 | confirmation gate 默认 warning；strict 模式拦截 |
+| `kb/units/<kind>s/<id>/record.yaml` | source-intake (创建)、`<kind>`-analyst（精修）、knowledge-base-manager（合并/治理） | 全部 | judgement confirmation gate 默认 fail-closed；仅显式 fail-open 诊断模式降级 warning |
 | experiment run-log/diagnoses/follow-ups | experiment-workbench | report-author, research-orchestrator | 三文件职责严格分离 |
 | `kb/synthesis/source-search/*.yaml` | source-intake、literature-scout | source-intake、research-orchestrator、runtime Agent | staging only；不得冒充 canonical unit |
 | `kb/.runtime/search/passages.sqlite3` | knowledge-base-manager/index builder | kb-cli、runtime Agent | disposable FTS5 cache；query read-only |
@@ -724,11 +725,11 @@ confirm_route: {}                # internal owner route
 
 `priority` 是当前 schema 唯一的 impact 等级，不另行推断一个不可验证的 `impact_score`。公共 Top-3 先按 `critical → high → normal → low`，同级再按最旧 `updated_at` 排序，最后用 subject id 保证确定性。
 
-Discovery is fail-closed: empty/invalid claims, any canonical `unverified` claim, missing or byte-stale verification, rejected items, already confirmed items, non-canonical owner/path/id relationships, escaping symlinks, and duplicate raw subjects are excluded. Artifact-provided routes are never trusted; kind + canonical identity derive the route. The public review layer may consume only this ready set, safely display the full bound side substance, and apply only through the snapshot-bound adapter. Displayed Top-3 items are copied into a one-time runtime snapshot token; apply must match that stored set exactly, consumes the token once, and currently accepts exactly one decision per invocation so cross-owner partial batches cannot occur. Owner confirm/reject rechecks global uniqueness/canonical identity and compares subject/status/content/verification inside its mutation before any write; stale, tampered, or replayed snapshots fail closed.
+Discovery is fail-closed: empty/invalid claims, any canonical `unverified` claim, missing or byte-stale verification, rejected items, already confirmed items, non-canonical owner/path/id relationships, escaping symlinks, duplicate raw subjects, and malformed candidate YAML are excluded. Artifact-provided routes are never trusted; kind + canonical identity derive the route. Canonical unit/program records and evidence roots are resolved only from project root + canonical kind/id; every existing component must be non-symlink, the record must be a regular file with matching id/kind, and cross-unit ambiguity fails closed. Candidate containment is proven before YAML read; one unreadable/malformed unit, decision, discussion, or repo-choice artifact cannot abort discovery of other inbox items. Discovery, confirmation, and report consumption share this resolver. The public review layer may consume only this ready set, safely display the full bound side substance, and apply only through the snapshot-bound adapter. Displayed Top-3 items are copied into a one-time runtime snapshot token; apply must match that stored set exactly, consumes the token once, and currently accepts exactly one decision per invocation so cross-owner partial batches cannot occur. Owner confirm/reject rechecks global uniqueness/canonical identity and compares subject/status/content/verification inside its mutation before any write; stale, tampered, or replayed snapshots fail closed.
 
-Review token registry 位于私有 `kb/.runtime/review-snapshots/`；每个普通文件保存 `created_at`、`expires_at`、`status: unused|consumed|expired` 与完整 displayed snapshot，默认 24 小时有效。`consumed` / `expired` tombstone 再保留 24 小时以区分 replay 与 expiry。list/apply 在 registry lock 内执行有界、非递归 GC；symlink、非普通文件、越界路径一律拒绝且不遍历。公开失败分类固定为 `already_applied`、`expired`、`stale_content`、`tampered_or_unknown`，输出只提供自然语言恢复动作，不泄漏 token、digest 或路径。成功响应只显示经清洗的 subject type/title 与 decision。内容变化导致旧 token `stale_content`，新一轮 review 必须从 canonical bytes 重新生成卡片。
+Review token registry 位于私有 `kb/.runtime/review-snapshots/`；每个普通文件保存 `created_at`、`expires_at`、`status: unused|consumed|expired` 与完整 displayed snapshot，默认 24 小时有效。`consumed` / `expired` tombstone 再保留 24 小时以区分 replay 与 expiry。list/apply 在已有 registry lock 内执行有界、非递归 GC；fresh/empty review 在 registry 不存在时严格零写，不为 no-op 创建目录或 lock；首次真正展示卡片时才创建。symlink、非普通文件、越界路径一律拒绝且不遍历。公开失败分类固定为 `already_applied`、`expired`、`stale_content`、`tampered_or_unknown`，输出只提供自然语言恢复动作，不泄漏 token、digest 或路径。成功响应只显示经清洗的 subject type/title 与 decision。内容变化导致旧 token `stale_content`，新一轮 review 必须从 canonical bytes 重新生成卡片。
 
-Reporting judgement events carry `confirmation_binding.subject` plus `claim_ids`、`content_digest` and the current verification digests. Side subjects must include `owner` and project-relative `path`; consumers resolve that path with project-root containment. `decision` / `diagnosis` / discussion conclusion / survey inference / novelty / evaluation and unknown untyped events default to judgement. Only explicit factual/operational events or a judgement whose bound subject still has a current ConfirmationReceipt may enter ordinary report sections.
+Reporting judgement events carry `confirmation_binding.subject` plus `claim_ids`、`content_digest` and the current verification digests. Side subjects must include `owner` and project-relative `path`; consumers resolve that path with project-root containment and no symlink components, then revalidate current verification artifact bytes. `decision` / `diagnosis` / discussion conclusion / survey inference / novelty / evaluation and unknown untyped events default to judgement. Only explicit factual/operational events or a judgement whose bound subject still has a current ConfirmationReceipt may enter ordinary report sections.
 
 ---
 

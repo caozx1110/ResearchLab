@@ -130,6 +130,53 @@ def test_operation_journal_tracks_begin_commit_and_abort(tmp_path: Path) -> None
         load_op(tmp_path, "../outside")
 
 
+@pytest.mark.parametrize("action", ["restore", "undo"])
+def test_recovery_refuses_to_overwrite_changes_made_after_committed_operation(
+    tmp_path: Path,
+    action: str,
+) -> None:
+    target = tmp_path / "kb" / "notes" / "route.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("before\n", encoding="utf-8")
+    op_id = begin_op(tmp_path, "edit-route", [target])
+    target.write_text("operation after-state\n", encoding="utf-8")
+    commit_op(tmp_path, op_id)
+    journal_files_before = {path.name: path.read_bytes() for path in (tmp_path / "kb/.journal").glob("*.yaml")}
+
+    target.write_text("manual edit after operation\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match="操作完成后又被修改"):
+        if action == "restore":
+            restore_operation(tmp_path, op_id)
+        else:
+            undo_last_operation(tmp_path)
+
+    assert target.read_text(encoding="utf-8") == "manual edit after operation\n"
+    assert {path.name: path.read_bytes() for path in (tmp_path / "kb/.journal").glob("*.yaml")} == journal_files_before
+    assert load_op(tmp_path, op_id).get("undone_by") in (None, "")
+
+
+def test_restore_refuses_committed_operation_with_incomplete_after_digests(tmp_path: Path) -> None:
+    target = tmp_path / "kb" / "notes" / "route.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("before\n", encoding="utf-8")
+    op_id = begin_op(tmp_path, "edit-route", [target])
+    target.write_text("after\n", encoding="utf-8")
+    commit_op(tmp_path, op_id)
+    entry_path = journal_entry_path(tmp_path, op_id)
+    entry = load_yaml(entry_path)
+    entry["after_digests"] = {}
+    from research.common import write_yaml_if_changed
+
+    write_yaml_if_changed(entry_path, entry)
+    journal_files_before = {path.name: path.read_bytes() for path in (tmp_path / "kb/.journal").glob("*.yaml")}
+
+    with pytest.raises(SystemExit, match="缺少完整的恢复后状态记录"):
+        restore_operation(tmp_path, op_id)
+
+    assert target.read_text(encoding="utf-8") == "after\n"
+    assert {path.name: path.read_bytes() for path in (tmp_path / "kb/.journal").glob("*.yaml")} == journal_files_before
+
+
 def test_incomplete_ops_lists_only_begin_state_entries(tmp_path: Path) -> None:
     first_target = tmp_path / "kb" / "notes" / "first.md"
     second_target = tmp_path / "kb" / "notes" / "second.md"

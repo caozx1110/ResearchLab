@@ -37,6 +37,7 @@ from .records import (
     kind_payload_skeleton,
     locate_record,
     normalize_record_schema,
+    trusted_claim_source_roots,
 )
 from .prefs import (
     load_runtime_preferences,
@@ -249,26 +250,6 @@ def require_user_authorization(
     return authorization, source
 
 
-def _trusted_claim_source_roots(project_root: Path, record: dict[str, Any]) -> dict[str, Path]:
-    """Resolve cross-unit evidence roots from canonical KB records, never claim paths."""
-    roots: dict[str, Path] = {}
-    record_id = str(record.get("id") or "").strip()
-    record_kind = str(record.get("kind") or "").strip()
-    for claim in confirmation_claims(record):
-        for ref in claim.get("evidence_refs") or []:
-            if not isinstance(ref, dict):
-                continue
-            source_unit_id = str(ref.get("source_unit_id") or "").strip()
-            if not source_unit_id or source_unit_id in roots:
-                continue
-            if source_unit_id == record_id:
-                roots[source_unit_id] = unit_root(project_root, record_kind, record_id)
-                continue
-            _source_record, source_path = locate_record(project_root, source_unit_id)
-            roots[source_unit_id] = source_path.parent
-    return roots
-
-
 def apply_confirmation(
     record: dict[str, Any],
     *,
@@ -314,7 +295,14 @@ def apply_confirmation(
             str(record.get("id") or ""),
         )
     if project_root is not None and source_roots is None:
-        source_roots = _trusted_claim_source_roots(project_root, record)
+        try:
+            source_roots = trusted_claim_source_roots(
+                project_root,
+                record,
+                verification_root=evidence_root,
+            )
+        except ValueError as exc:
+            raise SystemExit("Confirmation evidence source is not a canonical safe unit or program.") from exc
     claims_with_evidence = [claim for claim in claims if claim.get("evidence_refs")]
     if claims_with_evidence:
         if evidence_root is None:
@@ -430,9 +418,32 @@ def _has_complete_confirmation_receipt(record: dict[str, Any]) -> bool:
     return True
 
 
-def has_complete_confirmation_receipt(record: dict[str, Any]) -> bool:
-    """Public structural/current-content validator for downstream consumers."""
-    return _has_complete_confirmation_receipt(record)
+def has_complete_confirmation_receipt(
+    record: dict[str, Any],
+    *,
+    verification_root: Path | None = None,
+    source_roots: dict[str, Path] | None = None,
+    external_source: dict[str, Any] | None = None,
+) -> bool:
+    """Validate a receipt, including current artifact bytes for judgement material.
+
+    Judgement receipts are not considered complete without a trusted evidence
+    context. Internal write-gate code uses the private structural validator while
+    downstream trust consumers must supply canonical roots here.
+    """
+    if not _has_complete_confirmation_receipt(record):
+        return False
+    if confirmation_track(record) != "judgement":
+        return True
+    if verification_root is None:
+        return False
+    return not verification_receipt_violations(
+        record,
+        verification_root,
+        external_source=external_source,
+        source_roots=source_roots,
+        check_artifacts=True,
+    )
 
 
 def confirm_unit(

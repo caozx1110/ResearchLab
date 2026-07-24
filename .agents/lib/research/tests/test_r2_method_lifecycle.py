@@ -8,10 +8,13 @@ from pathlib import Path
 import pytest
 
 from research.common import load_yaml, write_yaml_if_changed
-from research.confirm import has_complete_confirmation_receipt
 from research.core import default_record, ensure_workspace, record_path
 from research.journal import committed_ops
-from research.judgements import discover_pending_judgements, judgement_snapshot_binding
+from research.judgements import (
+    discover_pending_judgements,
+    judgement_confirmation_is_current,
+    judgement_snapshot_binding,
+)
 
 
 IDEA_ID = "i-r2-method-123456"
@@ -232,7 +235,7 @@ def test_prepare_verify_confirm_promotes_state_and_event_only_at_confirmation(tm
     events = load_yaml(paths["events"], default={})["items"]
     assert choice["selected_repo_id"] == REPO_ID
     assert choice["confirmation_status"] == "confirmed"
-    assert has_complete_confirmation_receipt(choice)
+    assert judgement_confirmation_is_current(root, choice, paths["choice"])
     assert state["selected_repo_id"] == REPO_ID
     assert state["stage"] == "implementation-planning"
     assert interfaces["selected_repo_id"] == REPO_ID
@@ -260,7 +263,11 @@ def test_prepare_verify_confirm_promotes_state_and_event_only_at_confirmation(tm
 
     choice["payload"]["claims"][0]["text"] += " Changed after confirmation."
     write_yaml_if_changed(paths["choice"], choice)
-    assert not has_complete_confirmation_receipt(load_yaml(paths["choice"], default={}))
+    assert not judgement_confirmation_is_current(
+        root,
+        load_yaml(paths["choice"], default={}),
+        paths["choice"],
+    )
 
 
 def test_confirm_rejects_claim_changes_after_verification_without_side_effects(tmp_path: Path, monkeypatch) -> None:

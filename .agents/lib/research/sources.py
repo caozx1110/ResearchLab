@@ -366,9 +366,37 @@ def sync_storage_layout(project_root: Path) -> dict[str, Any]:
 
 
 def build_search_stage_id(kind: str, query: str) -> str:
-    base = slugify(query, max_words=8) or kind
-    short_hash = hashlib.sha1(f"{kind}:{query}".encode("utf-8")).hexdigest()[:8]
+    normalized_query = " ".join(str(query or "").split())
+    base = slugify(normalized_query, max_words=8) or kind
+    short_hash = hashlib.sha1(f"{kind}:{normalized_query}".encode("utf-8")).hexdigest()[:8]
     return f"{kind}-search-{base}-{short_hash}"
+
+
+def _validate_search_stage_identity(
+    existing: Any,
+    *,
+    stage_id: str,
+    source_kind: str,
+    query: str,
+) -> None:
+    if existing in (None, {}, []):
+        return
+    if not isinstance(existing, dict):
+        raise SystemExit("Existing search stage is not a valid mapping.")
+    expected = {
+        "id": stage_id,
+        "kind": "source-search-stage",
+        "source_kind": str(source_kind or "").strip(),
+        "query": " ".join(str(query or "").split()),
+    }
+    actual = {
+        "id": str(existing.get("id") or "").strip(),
+        "kind": str(existing.get("kind") or "").strip(),
+        "source_kind": str(existing.get("source_kind") or "").strip(),
+        "query": " ".join(str(existing.get("query") or "").split()),
+    }
+    if actual != expected:
+        raise SystemExit("Search stage identity does not match the existing staged query.")
 
 
 def load_search_stage(project_root: Path, stage_id: str) -> dict[str, Any]:
@@ -387,16 +415,36 @@ def stage_search_results(
     stage_id: str = "",
     note: str = "",
 ) -> Path:
-    ensure_workspace(project_root)
-    current_stage_id = stage_id or build_search_stage_id(kind, query)
+    normalized_query = " ".join(str(query or "").split())
+    current_stage_id = stage_id or build_search_stage_id(kind, normalized_query)
     path = search_stage_path(project_root, current_stage_id)
-    with mutation_transaction(project_root, "stage_search_results", [path]):
+    _validate_search_stage_identity(
+        load_yaml(path, default={}),
+        stage_id=current_stage_id,
+        source_kind=kind,
+        query=normalized_query,
+    )
+    ensure_workspace(project_root)
+    def validate_locked_identity() -> None:
+        _validate_search_stage_identity(
+            load_yaml(path, default={}),
+            stage_id=current_stage_id,
+            source_kind=kind,
+            query=normalized_query,
+        )
+
+    with mutation_transaction(
+        project_root,
+        "stage_search_results",
+        [path],
+        preflight=validate_locked_identity,
+    ):
         return _stage_search_results_unlocked(
             project_root,
             path=path,
             current_stage_id=current_stage_id,
             kind=kind,
-            query=query,
+            query=normalized_query,
             candidates=candidates,
             note=note,
         )
@@ -431,8 +479,24 @@ def _stage_search_results_unlocked(
         },
     )
     existing_candidates = [item for item in payload.get("candidates", []) if isinstance(item, dict)]
-    known_urls = {str(item.get("url") or "") for item in existing_candidates}
+    known_urls = {
+        str(item.get("url") or ""): item
+        for item in existing_candidates
+        if str(item.get("url") or "")
+    }
     known_candidate_ids = {str(item.get("candidate_id") or ""): item for item in existing_candidates}
+    known_work_ids: dict[str, dict[str, Any]] = {}
+    known_dois: dict[str, dict[str, Any]] = {}
+    for item in existing_candidates:
+        raw_provenance = item.get("provenance")
+        raw_openalex = raw_provenance.get("openalex") if isinstance(raw_provenance, dict) else None
+        openalex = sanitize_openalex_provenance(raw_openalex)
+        work_id = str(openalex.get("work_id") or "")
+        doi = str(openalex.get("doi") or "")
+        if work_id and work_id not in known_work_ids:
+            known_work_ids[work_id] = item
+        if doi and doi not in known_dois:
+            known_dois[doi] = item
     query_topics, query_tags = infer_topics_and_tags(query, project_root=project_root)
     for index, candidate in enumerate(candidates, start=1):
         url = str(candidate.get("url") or "").strip()
@@ -449,12 +513,41 @@ def _stage_search_results_unlocked(
         sanitized_openalex = sanitize_openalex_provenance(raw_openalex)
         if sanitized_openalex:
             provenance["openalex"] = sanitized_openalex
-        existing_candidate = known_candidate_ids.get(candidate_id)
-        if existing_candidate is None and url in known_urls:
-            continue
+        work_id = str(sanitized_openalex.get("work_id") or "")
+        doi = str(sanitized_openalex.get("doi") or "")
+        identity_matches = [
+            match
+            for match in (
+                known_candidate_ids.get(candidate_id),
+                known_work_ids.get(work_id) if work_id else None,
+                known_dois.get(doi) if doi else None,
+                known_urls.get(url),
+            )
+            if match is not None
+        ]
+        unique_matches = {id(match): match for match in identity_matches}
+        if len(unique_matches) > 1:
+            raise SystemExit("Search candidate identities conflict within the existing stage.")
+        existing_candidate = next(iter(unique_matches.values()), None)
         if existing_candidate is not None:
+            if title:
+                existing_candidate["title"] = title
+            existing_candidate["url"] = url
+            known_urls[url] = existing_candidate
             if provenance:
-                existing_candidate["provenance"] = provenance
+                prior_provenance = existing_candidate.get("provenance")
+                prior_openalex = (
+                    prior_provenance.get("openalex")
+                    if isinstance(prior_provenance, dict)
+                    else None
+                )
+                prior_openalex = sanitize_openalex_provenance(prior_openalex)
+                merged_openalex = {**prior_openalex, **sanitized_openalex}
+                if prior_openalex.get("work_id"):
+                    merged_openalex["work_id"] = prior_openalex["work_id"]
+                if prior_openalex.get("doi"):
+                    merged_openalex["doi"] = prior_openalex["doi"]
+                existing_candidate["provenance"] = {"openalex": merged_openalex}
             continue
         payload["candidates"].append(
             {
@@ -469,8 +562,12 @@ def _stage_search_results_unlocked(
                 **({"provenance": provenance} if provenance else {}),
             }
         )
-        known_urls.add(url)
+        known_urls[url] = payload["candidates"][-1]
         known_candidate_ids[candidate_id] = payload["candidates"][-1]
+        if work_id:
+            known_work_ids[work_id] = payload["candidates"][-1]
+        if doi:
+            known_dois[doi] = payload["candidates"][-1]
     payload["history"].append({"timestamp": utc_now_iso(), "action": "staged", "summary": f"Captured {len(candidates)} candidates."})
     payload["generated_at"] = utc_now_iso()
     write_yaml_if_changed(path, payload)

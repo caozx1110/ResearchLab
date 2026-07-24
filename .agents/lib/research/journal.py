@@ -9,7 +9,7 @@ import uuid
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Iterator, Mapping, Sequence
+from typing import Callable, Iterator, Mapping, Sequence
 
 from .common import utc_now_iso
 from .paths import kb_root
@@ -603,6 +603,7 @@ def mutation_transaction(
     *,
     undoable: bool = True,
     operation_role: str = "user",
+    preflight: Callable[[], None] | None = None,
 ) -> Iterator[str]:
     """Coordinate and journal one command-level mutation transaction.
 
@@ -629,6 +630,8 @@ def mutation_transaction(
             raise SystemExit(
                 "Nested mutation requires a root mutation_transaction with workspace coordination."
             )
+        if preflight is not None:
+            preflight()
         with journaled_op(
             project_root,
             op_type,
@@ -648,6 +651,8 @@ def mutation_transaction(
         with ExitStack() as locks:
             for path in targets:
                 locks.enter_context(exclusive_file_lock(operation_lock_path(project_root, path)))
+            if preflight is not None:
+                preflight()
             with journaled_op(
                 project_root,
                 op_type,

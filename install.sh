@@ -216,6 +216,34 @@ same_dir() {
   [ "$(abs_dir "$1")" = "$(abs_dir "$2")" ]
 }
 
+claude_links_to_workspace_agents() {
+  local file=$1 actual candidate candidate_dir expected expected_dir
+  [ -L "$file" ] || return 1
+  actual=$(readlink "$file")
+  case $actual in
+    /*) candidate=$actual ;;
+    *) candidate=$(dirname -- "$file")/$actual ;;
+  esac
+  candidate_dir=$(cd -P -- "$(dirname -- "$candidate")" >/dev/null 2>&1 && pwd) || return 1
+  expected="$WORKSPACE_ROOT/AGENTS.md"
+  expected_dir=$(cd -P -- "$(dirname -- "$expected")" >/dev/null 2>&1 && pwd) || return 1
+  [ "$candidate_dir/$(basename -- "$candidate")" = "$expected_dir/$(basename -- "$expected")" ]
+}
+
+guard_claude_project_target() {
+  local target="$WORKSPACE_ROOT/CLAUDE.md" effective_claude
+  [ "$CONFIG_CLAUDE" -eq 1 ] || return 0
+  [ "$SCOPE" != "system" ] || return 0
+  effective_claude=$CONFIG_CLAUDE
+  if [ "$ACTION" != "install" ] && manifest_is_ours "$MANIFEST_PATH"; then
+    effective_claude=$(manifest_agent_enabled "$MANIFEST_PATH" claude 2>/dev/null || printf '1')
+  fi
+  [ "$effective_claude" = "1" ] || return 0
+  [ -L "$target" ] || return 0
+  claude_links_to_workspace_agents "$target" || \
+    die "检测到指向其它位置的 Claude 配置链接；为避免跟随或替换链接，已停止"
+}
+
 ACTION=install
 ACTION_FROM_SUBCOMMAND=0
 ACTION_EXPLICIT=0
@@ -1129,7 +1157,11 @@ uninstall_workspace_copy() {
   manifest_is_ours "$MANIFEST_PATH" || die "无法确认安装记录，为避免误删已停止卸载"
   had_manifest=1
   remove_symlink_if_matches "$WORKSPACE_ROOT/.claude/skills" "../.agents/skills" "$SKILLS_SRC"
-  remove_managed_block "$WORKSPACE_ROOT/CLAUDE.md"
+  if claude_links_to_workspace_agents "$WORKSPACE_ROOT/CLAUDE.md"; then
+    :
+  else
+    remove_managed_block "$WORKSPACE_ROOT/CLAUDE.md"
+  fi
   ws_sync uninstall
   uninstall_kb_on_path
   [ "$had_manifest" -eq 1 ] && info "研究资料和本地运行环境已保留；这个工作区现在不再由安装器管理。"
@@ -1185,6 +1217,7 @@ remove_symlink_if_matches() {
 
 write_managed_block() {
   local file=$1 block_file=$2 tmp_file
+  [ ! -L "$file" ] || die "检测到符号链接形式的 Claude 配置；为避免跟随或替换链接，已停止"
   tmp_file=$(mktemp "${TMPDIR:-/tmp}/${INSTALL_NAME}.XXXXXX")
   if [ -f "$file" ]; then
     awk -v begin="$BEGIN_MARKER" -v end="$END_MARKER" -v block_file="$block_file" '
@@ -1229,6 +1262,7 @@ write_managed_block() {
 
 remove_managed_block() {
   local file=$1 tmp_file
+  [ ! -L "$file" ] || die "检测到符号链接形式的 Claude 配置；为避免跟随或替换链接，已停止"
   [ -f "$file" ] || return 0
   tmp_file=$(mktemp "${TMPDIR:-/tmp}/${INSTALL_NAME}.XXXXXX")
   awk -v begin="$BEGIN_MARKER" -v end="$END_MARKER" '
@@ -1285,7 +1319,11 @@ install_claude_project() {
     block_file=$(build_claude_block copy "$WORKSPACE_ROOT")
   fi
   link_force "$link_target" "$claude_dir/skills"
-  write_managed_block "$WORKSPACE_ROOT/CLAUDE.md" "$block_file"
+  if claude_links_to_workspace_agents "$WORKSPACE_ROOT/CLAUDE.md"; then
+    : # The link already exposes AGENTS.md to Claude; adding @AGENTS.md would self-reference.
+  else
+    write_managed_block "$WORKSPACE_ROOT/CLAUDE.md" "$block_file"
+  fi
   rm -f "$block_file"
 }
 
@@ -1297,7 +1335,11 @@ uninstall_claude_project() {
     expected="$SKILLS_SRC"
   fi
   remove_symlink_if_matches "$WORKSPACE_ROOT/.claude/skills" "$expected" "$SKILLS_SRC"
-  remove_managed_block "$WORKSPACE_ROOT/CLAUDE.md"
+  if claude_links_to_workspace_agents "$WORKSPACE_ROOT/CLAUDE.md"; then
+    :
+  else
+    remove_managed_block "$WORKSPACE_ROOT/CLAUDE.md"
+  fi
 }
 
 install_claude_system() {
@@ -1455,6 +1497,7 @@ confirm_plan
 
 if [ "$ACTION" != "uninstall" ]; then
   preflight_yaml
+  guard_claude_project_target
 fi
 
 case "$ACTION" in

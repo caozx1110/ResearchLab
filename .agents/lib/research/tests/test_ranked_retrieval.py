@@ -261,6 +261,160 @@ def test_valid_sqlite_with_tampered_passage_rows_is_corrupt_and_cannot_hide_resu
     assert "force-feedback" in payload["results"][0]["excerpt"]
 
 
+def test_valid_sqlite_with_tampered_source_manifest_is_corrupt(tmp_path: Path) -> None:
+    ensure_workspace(tmp_path)
+    _write_record(
+        tmp_path,
+        _record("p-source-table-tamper-123456", "Source table", summary="canonical actuator result"),
+    )
+    build_index(tmp_path)
+    cache = passage_search_cache_path(tmp_path)
+    connection = sqlite3.connect(cache)
+    try:
+        connection.execute("UPDATE sources SET digest = ?", ("0" * 64,))
+        connection.commit()
+    finally:
+        connection.close()
+
+    payload = search_passages(tmp_path, "actuator result")
+
+    assert payload["health"] == "corrupt"
+    assert payload["results"][0]["unit_id"] == "p-source-table-tamper-123456"
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [("digest", "not-a-sha256"), ("artifact", "../outside.yaml")],
+)
+def test_coherently_tampered_source_manifest_schema_is_corrupt(
+    tmp_path: Path,
+    column: str,
+    value: str,
+) -> None:
+    ensure_workspace(tmp_path)
+    _write_record(tmp_path, _record("p-source-schema-123456", "Source schema", summary="manifest fallback"))
+    build_index(tmp_path)
+    cache = passage_search_cache_path(tmp_path)
+    connection = sqlite3.connect(cache)
+    connection.row_factory = sqlite3.Row
+    try:
+        connection.execute(f"UPDATE sources SET {column} = ?", (value,))
+        manifest = [
+            {"artifact": row["artifact"], "digest": row["digest"]}
+            for row in connection.execute("SELECT artifact, digest FROM sources ORDER BY artifact")
+        ]
+        from research.index import _passage_corpus_digest
+
+        connection.execute("UPDATE metadata SET corpus_digest = ?", (_passage_corpus_digest(manifest),))
+        connection.commit()
+    finally:
+        connection.close()
+
+    payload = search_passages(tmp_path, "manifest fallback")
+    assert payload["health"] == "corrupt"
+    assert payload["results"][0]["unit_id"] == "p-source-schema-123456"
+
+
+def test_coherently_tampered_passage_rows_are_corrupt_not_stale(tmp_path: Path) -> None:
+    ensure_workspace(tmp_path)
+    _write_record(tmp_path, _record("p-coherent-tamper-123456", "Coherent tamper", summary="canonical needle"))
+    build_index(tmp_path)
+    cache = passage_search_cache_path(tmp_path)
+    connection = sqlite3.connect(cache)
+    connection.row_factory = sqlite3.Row
+    try:
+        connection.execute("UPDATE passages SET body = 'tampered cached body' WHERE passage_id = (SELECT passage_id FROM passages LIMIT 1)")
+        rows = [
+            {
+                "passage_id": row["passage_id"],
+                "unit_id": row["unit_id"],
+                "kind": row["kind"],
+                "title": row["title"],
+                "summary": row["summary"],
+                "heading": row["heading"],
+                "text": row["body"],
+                "artifact": row["artifact"],
+                "locator": row["locator"],
+                "line_start": row["line_start"],
+                "line_end": row["line_end"],
+                "source_digest": row["source_digest"],
+            }
+            for row in connection.execute("SELECT * FROM passages ORDER BY passage_id")
+        ]
+        from research.index import _passages_digest
+
+        connection.execute("UPDATE metadata SET passages_digest = ?", (_passages_digest(rows),))
+        connection.commit()
+    finally:
+        connection.close()
+
+    payload = search_passages(tmp_path, "canonical needle")
+    assert payload["health"] == "corrupt"
+    assert payload["results"][0]["unit_id"] == "p-coherent-tamper-123456"
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "UPDATE metadata SET source_count = 'garbage'",
+        "UPDATE metadata SET passage_count = 'garbage'",
+        "UPDATE passages SET line_start = 'garbage' WHERE passage_id = (SELECT passage_id FROM passages LIMIT 1)",
+    ],
+)
+def test_malformed_cache_scalar_is_corrupt_and_falls_back(tmp_path: Path, statement: str) -> None:
+    ensure_workspace(tmp_path)
+    _write_record(tmp_path, _record("p-malformed-cache-123456", "Malformed cache", summary="fallback needle"))
+    build_index(tmp_path)
+    connection = sqlite3.connect(passage_search_cache_path(tmp_path))
+    try:
+        connection.execute(statement)
+        connection.commit()
+    finally:
+        connection.close()
+
+    payload = search_passages(tmp_path, "fallback needle")
+    assert payload["health"] == "corrupt"
+    assert payload["results"][0]["unit_id"] == "p-malformed-cache-123456"
+
+
+@pytest.mark.parametrize("build_cache", [False, True], ids=["fallback", "current-cache"])
+def test_standalone_obsidian_block_ids_are_locator_metadata_not_passages(
+    tmp_path: Path,
+    build_cache: bool,
+) -> None:
+    ensure_workspace(tmp_path)
+    _write_record(tmp_path, _record("p-block-id-123456", "Block ID paper"))
+    note = unit_root(tmp_path, "paper", "p-block-id-123456") / "source" / "document.md"
+    write_text_if_changed(
+        note,
+        "# Routing notes\n\nAurora routing chooses the stable actuator path.\n^source-section-aurora-routing-notes\n",
+    )
+    if build_cache:
+        build_index(tmp_path)
+
+    anchor = search_passages(tmp_path, "source-section-aurora-routing-notes")
+    content = search_passages(tmp_path, "Aurora routing")
+
+    assert anchor["results"] == []
+    assert content["results"]
+    assert "Aurora routing chooses" in content["results"][0]["excerpt"]
+    assert "^source-section" not in content["results"][0]["excerpt"]
+
+
+def test_block_id_filter_uses_the_canonical_locator_grammar() -> None:
+    from research.retrieval import markdown_passages
+
+    passages = markdown_passages(
+        {"id": "p-grammar-123456", "kind": "paper", "title": "Grammar", "summary": ""},
+        artifact="source/document.md",
+        text="^literal_token\n^-canonical-anchor\n",
+        source_digest="digest",
+    )
+
+    assert any("^literal_token" in passage["text"] for passage in passages)
+    assert all("^-canonical-anchor" not in passage["text"] for passage in passages)
+
+
 def test_fts_unavailable_falls_back_and_reports_health(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     ensure_workspace(tmp_path)
     _write_record(tmp_path, _record("p-nofts-123456", "No FTS Paper", summary="mixed tactile recovery"))

@@ -4,7 +4,7 @@ All notable changes to this project will be documented here. The format follows 
 
 ## [Unreleased]
 
-The bundle currently declares **`0.2.0-rc.3`**. It has passed the complete 1,012-test local suite, installed-copy validation, real SQLite HTML intake, and Obsidian 1.12.7 Reading-view acceptance. It meets the local release-candidate gate, but is not a stable release or GA, has not been tagged or published, and carries no compatibility or response-time SLA. A green hosted Linux/macOS CI matrix remains a prerequisite for a release tag.
+The bundle currently declares **`0.2.0-rc.4`**. Its complete 1,041-test local suite and current installed-copy validation pass after adversarial remediation. The candidate is not a stable release or GA, has not been tagged or published, and carries no compatibility or response-time SLA. Real-source/Obsidian acceptance and a green hosted Linux/macOS CI matrix remain prerequisites for a release tag.
 
 ### Added
 
@@ -26,6 +26,12 @@ The bundle currently declares **`0.2.0-rc.3`**. It has passed the complete 1,012
 
 ### Changed
 
+- Current ConfirmationReceipt consumers revalidate canonical source containment and verification artifact bytes; stale evidence can no longer enter ordinary reports.
+- Committed-operation undo/restore now compares every current target with the operation's `after_digests` before creating a recovery operation.
+- Source-search stage identity is immutable across explicit ID reuse, and persisted OpenAlex candidates deduplicate by work ID then canonical DOI while retaining manual review state.
+- Markdown passage extraction excludes standalone Obsidian block IDs, and cache health separates internal corruption from canonical staleness.
+- Empty review queues no longer create snapshot runtime state, and public help exposes both Obsidian update and status forms.
+- Source/self-contained installation preserves an exact `CLAUDE.md → AGENTS.md` symlink and rejects unrelated configuration links without following them.
 - `kb find` now returns answer-relevant passages and reopenable locators instead of unit-title matches, while keeping query execution read-only.
 - Review success messages identify the sanitized subject and decision; stale cards require a fresh review that displays current content.
 - Verified surveys fail closed when an anchored upstream unit changes or a newly matching unit makes the selection stale.
@@ -45,6 +51,7 @@ The bundle currently declares **`0.2.0-rc.3`**. It has passed the complete 1,012
 
 ### Security
 
+- Canonical judgement/evidence resolution rejects symlink components, cross-unit ambiguity, mismatched record identity, and non-regular records across discovery, confirmation, indexing, and reporting.
 - OpenAlex credentials are process-private and never persisted, logged, or exposed through user or Agent protocols.
 - Retrieval cache targets, review-token cleanup, survey bindings, and experiment artifacts are containment-checked and fail closed on stale or unsafe state.
 - Judgement confirmation now binds canonical subject identity, owner route, pending status, content digest, and verification digests; duplicate identities, stale snapshots, replayed tokens, and symlink escapes fail closed.
@@ -52,6 +59,10 @@ The bundle currently declares **`0.2.0-rc.3`**. It has passed the complete 1,012
 - Update provenance no longer falls back from a fork, local checkout, or unknown legacy source to a canonical remote.
 - Storage migration is constrained to KB data and does not rewrite installed skills or root workspace rules.
 - Optional diagnostics cannot disable mandatory evidence, confirmation, containment, transaction, or recovery gates; capture failures preserve the original operation result and diagnostic exports require explicit authorization.
+
+## [0.2.0-rc.4] - Unreleased
+
+The adversarial-remediation candidate closes current-evidence, canonical-containment, recovery-CAS, installer-symlink, staging-identity, retrieval-integrity, and empty-review UX findings. The complete local test suite and installed-copy validation pass; real-source/Obsidian acceptance and hosted release gates remain pending.
 
 ## [0.2.0-rc.3] - Unreleased
 
