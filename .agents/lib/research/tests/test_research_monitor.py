@@ -15,6 +15,7 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[4]
 LIB_ROOT = REPO_ROOT / ".agents" / "lib"
 SEARCH_SCRIPT = REPO_ROOT / ".agents" / "skills" / "literature-search" / "scripts" / "search.py"
+MONITOR_SCRIPT = REPO_ROOT / ".agents" / "skills" / "research-monitor" / "scripts" / "monitor.py"
 if str(LIB_ROOT) not in sys.path:
     sys.path.insert(0, str(LIB_ROOT))
 
@@ -36,6 +37,15 @@ from research.monitoring import (
     value_digest,
 )
 from research.skill_validator import validate_skill
+
+
+def _load_monitor_script():
+    spec = importlib.util.spec_from_file_location("research_monitor_script_r7", MONITOR_SCRIPT)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def _time(day: int, hour: int = 0) -> datetime:
@@ -405,22 +415,27 @@ def test_completed_outcome_stays_visible_until_a_bound_disposition(tmp_path: Pat
         )
     assert receipt.read_bytes() == before
 
-    set_outcome_disposition(
+    result = _load_monitor_script()._apply(
         tmp_path,
-        run["id"],
-        "outcome-new-paper",
-        expected_run_revision=completed["revision"],
-        expected_run_content_digest=completed["content_digest"],
-        state="materialized",
-        actor="runtime-agent",
-        reason="The user selected the displayed candidate.",
-        target_ref="p-materialized",
-        user_authorization="Add this displayed paper to the knowledge base.",
-        authorization_source="user_message",
-        now=_time(15, 2),
+        {
+            "action": "set-outcome-disposition",
+            "run_id": run["id"],
+            "outcome_id": "outcome-new-paper",
+            "expected_run_revision": completed["revision"],
+            "expected_run_content_digest": completed["content_digest"],
+            "state": "materialized",
+            "actor": "runtime-agent",
+            "reason": "The user selected the displayed candidate.",
+            "target_ref": "p-materialized",
+            "user_authorization": "Add this displayed paper to the knowledge base.",
+            "authorization_source": "user_message",
+            "now": _time(15, 2),
+        },
     )
     resolved = load_run(tmp_path, run["id"])
 
+    assert result["action"] == "set-outcome-disposition"
+    assert result["disposition"]["state"] == "materialized"
     assert unresolved_monitor_outcomes(tmp_path) == []
     assert resolved["revision"] == completed["revision"] + 1
     assert resolved["review_outcomes"][0]["disposition"]["state"] == "materialized"

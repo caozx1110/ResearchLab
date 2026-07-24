@@ -22,7 +22,8 @@ description: 维护研究订阅、机械到期事实与冻结运行回执；当�
 4. 文献跟踪由 Agent 调用 `literature-search`，使用当前实际可用的 search/browser/connector。开始检索前从冻结 run 取得 `run_id + task_digest`，作为 `monitor_binding` 写入 literature stage；完成时同时记录该 stage 的实际字节摘要。survey 复查复用纯读 freshness 结果，再绑定实际读取的 survey bytes；unit recheck 必须列出全部冻结 unit id。
 5. Agent 把结果标为新增、重复、矛盾候选、值得复查或无实质变化，写明理由并挂引用。脚本只验证枚举、逐字引用、对象存在和 digest，不判断标注是否正确。
 6. 矛盾只生成 candidate。既有 confirmed claim 不得被监测 run 自动改写、撤销或覆盖；需要改变结论时交现有 review/confirmation 流程，由用户拍板。
-7. completed/cancelled run 不可重开。blocked 与 retryable failure 可恢复；真正新一轮使用下一 anchored due window。
+7. completed run 的每个结果都会继续出现在 `kb next` 的事实候选中，直到写入 `acknowledged / materialized / sent_to_review / dismissed` 之一。新增或值得复查的材料不能只因 run 已完成就从系统消失；materialized 必须绑定当前用户消息授权和实际 canonical unit，矛盾候选只能绑定现有 review 项。
+8. completed/cancelled run 不可重开。blocked 与 retryable failure 可恢复；真正新一轮使用下一 anchored due window。
 
 ## 状态与恢复
 
@@ -35,4 +36,4 @@ description: 维护研究订阅、机械到期事实与冻结运行回执；当�
 
 ## 内部接口
 
-Agent 私下使用 `scripts/monitor.py` 读取一个有界 JSON payload，执行 create-subscription、set-subscription-status、create-due-run、transition-run 或 finish-run；只读 due 检查也通过同一 helper。该接口不是用户命令，不得原样转发到对话。
+Agent 私下使用 `scripts/monitor.py` 读取一个有界 JSON payload，执行 create-subscription、set-subscription-status、create-due-run、transition-run、finish-run 或 set-outcome-disposition；只读 due 与 unresolved-outcomes 检查也通过同一 helper。该接口不是用户命令，不得原样转发到对话。

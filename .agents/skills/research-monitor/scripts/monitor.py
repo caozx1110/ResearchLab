@@ -32,8 +32,10 @@ from research.monitoring import (
     finish_run,
     load_run,
     load_subscription,
+    set_outcome_disposition,
     set_subscription_status,
     transition_run,
+    unresolved_monitor_outcomes,
 )
 
 
@@ -44,6 +46,7 @@ ACTIONS = {
     "create-due-run",
     "transition-run",
     "finish-run",
+    "set-outcome-disposition",
 }
 
 
@@ -123,6 +126,52 @@ def _apply(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
         )
         document = load_run(root, path.stem)
         return {"action": action, "run_id": document["id"], "revision": document["revision"]}
+    if action == "set-outcome-disposition":
+        if set(payload) - {
+            "action",
+            "run_id",
+            "outcome_id",
+            "expected_run_revision",
+            "expected_run_content_digest",
+            "state",
+            "actor",
+            "reason",
+            "target_ref",
+            "user_authorization",
+            "authorization_source",
+            "now",
+        }:
+            raise SystemExit("Research monitor request contains unsupported fields.")
+        path = set_outcome_disposition(
+            root,
+            str(payload.get("run_id") or ""),
+            str(payload.get("outcome_id") or ""),
+            expected_run_revision=_integer(
+                payload.get("expected_run_revision"), field="expected_run_revision"
+            ),
+            expected_run_content_digest=str(payload.get("expected_run_content_digest") or ""),
+            state=str(payload.get("state") or ""),
+            actor=str(payload.get("actor") or ""),
+            reason=str(payload.get("reason") or ""),
+            target_ref=str(payload.get("target_ref") or ""),
+            user_authorization=str(payload.get("user_authorization") or ""),
+            authorization_source=str(payload.get("authorization_source") or ""),
+            now=now,
+        )
+        document = load_run(root, path.stem)
+        disposition = next(
+            item.get("disposition")
+            for item in document.get("review_outcomes", [])
+            if isinstance(item, dict) and item.get("outcome_id") == payload.get("outcome_id")
+        )
+        return {
+            "action": action,
+            "run_id": document["id"],
+            "revision": document["revision"],
+            "content_digest": document["content_digest"],
+            "outcome_id": str(payload.get("outcome_id") or ""),
+            "disposition": disposition,
+        }
     if set(payload) - {
         "action",
         "run_id",
@@ -161,6 +210,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     due = subparsers.add_parser("due")
     due.add_argument("--now", default="")
+    subparsers.add_parser("unresolved-outcomes")
     apply = subparsers.add_parser("apply")
     apply.add_argument("--input", type=Path, required=True)
     return parser
@@ -171,6 +221,8 @@ def main() -> int:
     root = project_root(PROJECT_ROOT, explicit_root=args.root)
     if args.command == "due":
         result: Any = {"due": due_subscriptions(root, now=args.now or None)}
+    elif args.command == "unresolved-outcomes":
+        result = {"unresolved_outcomes": unresolved_monitor_outcomes(root)}
     else:
         result = _apply(root, _load_payload(args.input))
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
