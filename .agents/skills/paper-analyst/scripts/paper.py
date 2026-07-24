@@ -15,7 +15,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
+import stat
 import sys
 from contextvars import ContextVar
 from datetime import datetime
@@ -37,6 +39,8 @@ from research.bootstrap import ensure_managed_runtime
 
 if __name__ == "__main__":
     ensure_managed_runtime(PROJECT_ROOT)
+
+import yaml
 
 from research.common import add_project_root_argument, clean_text, extract_pdf_context_pages, load_yaml, print_resolved_project_roots, read_text_excerpt, write_text_if_changed, write_yaml_if_changed
 from research.pdf_layout import (
@@ -97,6 +101,7 @@ _ACTIVE_MUTATION: ContextVar[bool] = ContextVar("paper_active_mutation", default
 _PENDING_CHECKPOINT: ContextVar[tuple[Path, str, str, list[Path]] | None] = ContextVar(
     "paper_pending_checkpoint", default=None
 )
+_MAX_VERIFY_FILL_BYTES = 16 * 1024 * 1024
 
 
 def _index_targets(root: Path) -> list[Path]:
@@ -113,6 +118,54 @@ def _transactional(op_name: str, target_builder):
         @wraps(function)
         def wrapped(*args, **kwargs):
             root, targets = target_builder(*args, **kwargs)
+            command_args = args[0] if args else None
+            temporary_fill = None
+            temporary_command = False
+            try:
+                has_command_namespace = command_args is not None and (
+                    hasattr(command_args, "command") or hasattr(command_args, "phase")
+                )
+                command_name = (
+                    str(getattr(command_args, "command", "") or op_name)
+                    if has_command_namespace
+                    else op_name
+                )
+                if has_command_namespace and not hasattr(command_args, "command"):
+                    setattr(command_args, "command", command_name)
+                    temporary_command = True
+                if (
+                    has_command_namespace
+                    and str(getattr(command_args, "phase", "") or "") == "verify"
+                    and command_name in {"screen", "complete-note"}
+                    and getattr(command_args, "_bound_paper_verify_fill", None) is None
+                ):
+                    unit_root = args[3]
+                    default_name = (
+                        "screening.yaml" if command_name == "screen" else "note-fill.yaml"
+                    )
+                    temporary_fill = _open_managed_verify_fill(
+                        root,
+                        unit_root,
+                        command_args,
+                        default_name=default_name,
+                    )
+                    setattr(command_args, "_bound_paper_verify_fill", temporary_fill)
+                bound_fill = getattr(command_args, "_bound_paper_verify_fill", None)
+                if bound_fill is not None:
+                    _revalidate_managed_verify_fill(root, bound_fill)
+                    _prevalidate_bound_verify_fill(
+                        command_args,
+                        args[2],
+                        args[3],
+                        bound_fill,
+                    )
+            except BaseException:
+                if temporary_fill is not None:
+                    temporary_fill.close()
+                    delattr(command_args, "_bound_paper_verify_fill")
+                if temporary_command:
+                    delattr(command_args, "command")
+                raise
             active_token = _ACTIVE_MUTATION.set(True)
             checkpoint_token = _PENDING_CHECKPOINT.set(None)
             try:
@@ -122,6 +175,15 @@ def _transactional(op_name: str, target_builder):
             finally:
                 _PENDING_CHECKPOINT.reset(checkpoint_token)
                 _ACTIVE_MUTATION.reset(active_token)
+                if temporary_fill is not None:
+                    temporary_fill.close()
+                    delattr(command_args, "_bound_paper_verify_fill")
+                if temporary_command:
+                    delattr(command_args, "command")
+                if command_args is not None and hasattr(
+                    command_args, "_prevalidated_paper_verify_fill"
+                ):
+                    delattr(command_args, "_prevalidated_paper_verify_fill")
             if pending is not None:
                 checkpoint_and_report(
                     pending[0], trigger=pending[1], message=pending[2], target_paths=pending[3]
@@ -1120,6 +1182,355 @@ def _resolve_fill_input(unit_root: Path, default_name: str, explicit: str | None
     return unit_root / default_name
 
 
+class _BoundPaperVerifyFill:
+    def __init__(
+        self,
+        *,
+        operation: str,
+        unit_root: Path,
+        path: Path,
+        filename: str,
+        descriptor: int,
+        unit_identity: tuple[int, int],
+        file_identity: tuple[int, int],
+        metadata: tuple[int, int, int],
+        raw_bytes: bytes,
+        payload: object,
+        fingerprint: dict[str, object],
+    ) -> None:
+        self.operation = operation
+        self.unit_root = unit_root
+        self.path = path
+        self.filename = filename
+        self.descriptor = descriptor
+        self.unit_identity = unit_identity
+        self.file_identity = file_identity
+        self.metadata = metadata
+        self.raw_bytes = raw_bytes
+        self.payload = payload
+        self.fingerprint = fingerprint
+
+    def close(self) -> None:
+        if self.descriptor >= 0:
+            os.close(self.descriptor)
+            self.descriptor = -1
+
+
+def _directory_open_flags() -> int:
+    return (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+
+
+def _open_managed_directory(root: Path, directory: Path) -> tuple[int, tuple[int, int]]:
+    """Open an in-workspace directory through no-follow ancestor descriptors."""
+    lexical_root = root.absolute()
+    lexical_directory = directory.absolute()
+    try:
+        relative = lexical_directory.relative_to(lexical_root)
+    except ValueError as exc:
+        raise ValueError("paper verify fill must belong to the current paper unit") from exc
+    if any(part in {"", ".", ".."} for part in relative.parts):
+        raise ValueError("paper verify fill must belong to the current paper unit")
+
+    try:
+        descriptor = os.open(lexical_root, _directory_open_flags())
+    except OSError as exc:
+        raise ValueError(
+            "paper verify fill path contains a symlink or unavailable workspace root"
+        ) from exc
+    try:
+        root_metadata = os.fstat(descriptor)
+        if not stat.S_ISDIR(root_metadata.st_mode):
+            raise ValueError("paper workspace root is not a managed directory")
+        for part in relative.parts:
+            try:
+                child = os.open(part, _directory_open_flags(), dir_fd=descriptor)
+            except OSError as exc:
+                raise ValueError(
+                    "paper verify fill path contains a symlink or unavailable ancestor"
+                ) from exc
+            os.close(descriptor)
+            descriptor = child
+            if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                raise ValueError("paper verify fill ancestor is not a managed directory")
+        metadata = os.fstat(descriptor)
+        return descriptor, (metadata.st_dev, metadata.st_ino)
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _managed_verify_fill_path(
+    root: Path,
+    unit_root: Path,
+    args: argparse.Namespace,
+    *,
+    default_name: str,
+) -> Path:
+    explicit = str(getattr(args, "input", "") or "")
+    supplied = Path(explicit).expanduser() if explicit else Path(default_name)
+    if ".." in supplied.parts:
+        raise ValueError("paper verify fill must belong to the current paper unit")
+    candidate = supplied if supplied.is_absolute() else unit_root / supplied
+    lexical_unit = unit_root.absolute()
+    lexical_candidate = candidate.absolute()
+    try:
+        relative = lexical_candidate.relative_to(lexical_unit)
+    except ValueError as exc:
+        raise ValueError("paper verify fill must belong to the current paper unit") from exc
+    if len(relative.parts) != 1 or relative.parts[0] in {"", ".", ".."}:
+        raise ValueError("paper verify fill must belong to the current paper unit")
+    if relative.suffix.casefold() not in {".yaml", ".yml"}:
+        raise ValueError("paper verify fill must be a managed YAML file in the current paper unit")
+    return lexical_unit / relative
+
+
+def _read_descriptor_bytes(descriptor: int) -> bytes:
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = os.read(descriptor, min(1024 * 1024, _MAX_VERIFY_FILL_BYTES + 1 - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > _MAX_VERIFY_FILL_BYTES:
+            raise ValueError("paper verify fill exceeds the managed size limit")
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    return b"".join(chunks)
+
+
+def _file_metadata(metadata: os.stat_result) -> tuple[int, int, int]:
+    return (metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns)
+
+
+def _open_managed_verify_fill(
+    root: Path,
+    unit_root: Path,
+    args: argparse.Namespace,
+    *,
+    default_name: str,
+) -> _BoundPaperVerifyFill:
+    operation = str(getattr(args, "command", "") or "")
+    if operation not in {"screen", "complete-note"} or str(getattr(args, "phase", "") or "") != "verify":
+        raise ValueError("managed paper fill binding is only valid for a verify phase")
+    path = _managed_verify_fill_path(root, unit_root, args, default_name=default_name)
+    unit_descriptor, unit_identity = _open_managed_directory(root, unit_root)
+    descriptor = -1
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(path.name, flags, dir_fd=unit_descriptor)
+        except OSError as exc:
+            raise ValueError(
+                "paper verify fill path contains a symlink or unavailable leaf"
+            ) from exc
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError("paper verify fill must be a managed regular file")
+        if before.st_nlink != 1:
+            raise ValueError("paper verify fill must have a unique managed file identity")
+        raw_bytes = _read_descriptor_bytes(descriptor)
+        after = os.fstat(descriptor)
+        visible = os.stat(path.name, dir_fd=unit_descriptor, follow_symlinks=False)
+        if (
+            (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+            or (after.st_dev, after.st_ino) != (visible.st_dev, visible.st_ino)
+            or _file_metadata(before) != _file_metadata(after)
+        ):
+            raise ValueError("paper verify fill changed while it was being bound")
+        try:
+            text = raw_bytes.decode("utf-8")
+            payload = yaml.safe_load(text) if text.strip() else {}
+        except (UnicodeDecodeError, yaml.YAMLError) as exc:
+            raise ValueError("paper verify fill is not valid UTF-8 YAML") from exc
+        fingerprint = {
+            "path_identity_digest": hashlib.sha256(str(path).encode("utf-8")).hexdigest(),
+            "state": "regular-file",
+            "size": len(raw_bytes),
+            "byte_sha256": hashlib.sha256(raw_bytes).hexdigest(),
+            "inode_identity_digest": hashlib.sha256(
+                f"{after.st_dev}:{after.st_ino}".encode("ascii")
+            ).hexdigest(),
+        }
+        return _BoundPaperVerifyFill(
+            operation=operation,
+            unit_root=unit_root.absolute(),
+            path=path,
+            filename=path.name,
+            descriptor=descriptor,
+            unit_identity=unit_identity,
+            file_identity=(after.st_dev, after.st_ino),
+            metadata=_file_metadata(after),
+            raw_bytes=raw_bytes,
+            payload=payload,
+            fingerprint=fingerprint,
+        )
+    except Exception:
+        if descriptor >= 0:
+            os.close(descriptor)
+        raise
+    finally:
+        os.close(unit_descriptor)
+
+
+def _managed_verify_fill_fingerprint(
+    root: Path,
+    unit_root: Path,
+    args: argparse.Namespace,
+    *,
+    default_name: str,
+) -> dict[str, object]:
+    """Build receipt context safely while allowing a not-yet-created phase fill."""
+    path = _managed_verify_fill_path(root, unit_root, args, default_name=default_name)
+    unit_descriptor, _unit_identity = _open_managed_directory(root, unit_root)
+    try:
+        try:
+            visible = os.stat(path.name, dir_fd=unit_descriptor, follow_symlinks=False)
+        except FileNotFoundError:
+            return {
+                "path_identity_digest": hashlib.sha256(str(path).encode("utf-8")).hexdigest(),
+                "state": "missing",
+            }
+        if stat.S_ISLNK(visible.st_mode):
+            raise ValueError("paper verify fill path contains a symlink leaf")
+        if not stat.S_ISREG(visible.st_mode):
+            raise ValueError("paper verify fill must be a managed regular file")
+    finally:
+        os.close(unit_descriptor)
+    temporary = _open_managed_verify_fill(
+        root,
+        unit_root,
+        args,
+        default_name=default_name,
+    )
+    try:
+        return dict(temporary.fingerprint)
+    finally:
+        temporary.close()
+
+
+def _revalidate_managed_verify_fill(root: Path, bound: _BoundPaperVerifyFill) -> None:
+    if bound.descriptor < 0:
+        raise ValueError("paper verify fill binding is no longer current")
+    unit_descriptor, current_unit_identity = _open_managed_directory(root, bound.unit_root)
+    try:
+        try:
+            current = os.stat(bound.filename, dir_fd=unit_descriptor, follow_symlinks=False)
+        except OSError as exc:
+            raise ValueError("paper verify fill disappeared after binding") from exc
+        opened = os.fstat(bound.descriptor)
+        if not stat.S_ISREG(current.st_mode) or current.st_nlink != 1:
+            raise ValueError("paper verify fill is no longer a unique managed regular file")
+        if current_unit_identity != bound.unit_identity:
+            raise ValueError("paper verify fill unit changed after binding")
+        if (current.st_dev, current.st_ino) != bound.file_identity:
+            raise ValueError("paper verify fill inode changed after binding")
+        if (opened.st_dev, opened.st_ino) != bound.file_identity:
+            raise ValueError("paper verify fill descriptor changed after binding")
+        if _file_metadata(opened) != bound.metadata:
+            raise ValueError("paper verify fill metadata changed after binding")
+        if _read_descriptor_bytes(bound.descriptor) != bound.raw_bytes:
+            raise ValueError("paper verify fill bytes changed after binding")
+    finally:
+        os.close(unit_descriptor)
+
+
+def _bound_verify_fill(
+    root: Path,
+    unit_root: Path,
+    args: argparse.Namespace,
+    *,
+    default_name: str,
+) -> _BoundPaperVerifyFill:
+    bound = getattr(args, "_bound_paper_verify_fill", None)
+    if not isinstance(bound, _BoundPaperVerifyFill):
+        raise ValueError("paper verify fill was not safely bound")
+    expected = _managed_verify_fill_path(root, unit_root, args, default_name=default_name)
+    if bound.operation != str(args.command) or bound.path != expected:
+        raise ValueError("paper verify fill binding belongs to another phase or unit")
+    _revalidate_managed_verify_fill(root, bound)
+    return bound
+
+
+def _prevalidate_bound_verify_fill(
+    args: argparse.Namespace,
+    record: dict,
+    unit_root: Path,
+    bound: _BoundPaperVerifyFill,
+) -> None:
+    payload = bound.payload
+    operation = str(getattr(args, "command", "") or "")
+    if not isinstance(payload, dict):
+        raise SystemExit(f"{operation} --phase verify: managed fill input is not a mapping")
+    expected_paper_id = str(record.get("id") or "")
+    declared_paper_id = str(payload.get("paper_id") or "").strip()
+    binding_violations: list[str] = []
+    if declared_paper_id and declared_paper_id != expected_paper_id:
+        binding_violations.append("paper_id: fill belongs to another paper unit")
+    if operation == "screen":
+        violations = verify_screening_fill(payload, unit_root)
+        evidence_items = read_claims(payload)
+        verified_claims: list[dict] = []
+        label = "screening"
+    else:
+        violations, verified_claims = verify_note_fill(payload, unit_root, record)
+        evidence_items = list(_elements_by_name(payload).values())
+        label = "note"
+    for item in evidence_items:
+        if not isinstance(item, Mapping):
+            continue
+        for evidence_ref in item.get("evidence_refs") or []:
+            if not isinstance(evidence_ref, Mapping):
+                continue
+            source_unit_id = str(evidence_ref.get("source_unit_id") or "").strip()
+            if source_unit_id and source_unit_id != expected_paper_id:
+                binding_violations.append(
+                    "evidence_ref.source_unit_id: fill belongs to another paper unit"
+                )
+    violations = [*binding_violations, *violations]
+    if violations:
+        print(f"[reject] {label} fill failed verification:", file=sys.stderr)
+        for violation in violations:
+            print(f"  - {violation}", file=sys.stderr)
+        raise SystemExit(1)
+    setattr(
+        args,
+        "_prevalidated_paper_verify_fill",
+        {
+            "operation": operation,
+            "file_identity": bound.file_identity,
+            "payload": payload,
+            "claims": verified_claims,
+        },
+    )
+
+
+def _prevalidated_verify_fill(
+    args: argparse.Namespace,
+    bound: _BoundPaperVerifyFill,
+) -> tuple[dict, list[dict]]:
+    validated = getattr(args, "_prevalidated_paper_verify_fill", None)
+    if not isinstance(validated, Mapping):
+        raise ValueError("paper verify fill was not prevalidated")
+    if (
+        str(validated.get("operation") or "") != bound.operation
+        or validated.get("file_identity") != bound.file_identity
+        or validated.get("payload") is not bound.payload
+    ):
+        raise ValueError("paper verify fill prevalidation belongs to another input")
+    payload = validated.get("payload")
+    claims = validated.get("claims")
+    if not isinstance(payload, dict) or not isinstance(claims, list):
+        raise ValueError("paper verify fill prevalidation is malformed")
+    return payload, claims
+
+
 def _unit_owned_fill_path(unit_root: Path, fill_path: Path) -> Path | None:
     """Return a checkpoint-safe fill only when it resolves inside this unit."""
     try:
@@ -1283,12 +1694,22 @@ def paper_preference_context(
     fill_input: dict[str, object] | None = None
     if operation in {"screen", "complete-note"} and phase == "verify":
         default_name = "screening.yaml" if operation == "screen" else "note-fill.yaml"
-        fill_path = _resolve_fill_input(
-            canonical_unit_root,
-            default_name,
-            str(getattr(args, "input", "") or ""),
-        )
-        fill_input = _artifact_fingerprint(root, fill_path)
+        bound = getattr(args, "_bound_paper_verify_fill", None)
+        if isinstance(bound, _BoundPaperVerifyFill):
+            expected = _managed_verify_fill_path(
+                root, canonical_unit_root, args, default_name=default_name
+            )
+            if bound.operation != operation or bound.path != expected:
+                raise ValueError("paper verify fill binding belongs to another phase or unit")
+            _revalidate_managed_verify_fill(root, bound)
+            fill_input = dict(bound.fingerprint)
+        else:
+            fill_input = _managed_verify_fill_fingerprint(
+                root,
+                canonical_unit_root,
+                args,
+                default_name=default_name,
+            )
 
     return {
         "paper_id": str(record.get("id") or ""),
@@ -1388,19 +1809,10 @@ def _run_screen(args, root, record, unit_root, cache_path, source_chunks, paper_
         return 0
 
     # verify
-    fill_path = _resolve_fill_input(unit_root, "screening.yaml", args.input)
-    _assert_safe_paper_input_path(root, fill_path)
-    if not fill_path.exists():
-        raise SystemExit(f"screen --phase verify: fill input not found: {fill_path}")
-    payload = load_yaml(fill_path, default={})
-    if not isinstance(payload, dict):
-        raise SystemExit(f"screen --phase verify: {fill_path} is not a mapping")
-    violations = verify_screening_fill(payload, unit_root)
-    if violations:
-        print("[reject] screening fill failed verification:", file=sys.stderr)
-        for violation in violations:
-            print(f"  - {violation}", file=sys.stderr)
-        raise SystemExit(1)
+    bound_fill = _bound_verify_fill(
+        root, unit_root, args, default_name="screening.yaml"
+    )
+    payload, _verified_claims = _prevalidated_verify_fill(args, bound_fill)
 
     worth = _normalized_worth_deep_reading(payload.get("worth_deep_reading"))
     paper_type = str(payload.get("paper_type") or "").strip().lower()
@@ -1410,6 +1822,7 @@ def _run_screen(args, root, record, unit_root, cache_path, source_chunks, paper_
     payload["worth_deep_reading"] = worth
     payload["status"] = "verified"
     payload["phase"] = "verify"
+    _revalidate_managed_verify_fill(root, bound_fill)
     write_yaml_if_changed(screen_path, payload)
     record = apply_record_governance(root, record, infer_missing=True, source_label="paper-analyst")
     quick = record["payload"]["quick_screen"]
@@ -1535,20 +1948,13 @@ def _run_complete_note(args, root, record, unit_root, cache_path, source_chunks,
         return 0
 
     # verify
-    fill_path = _resolve_fill_input(unit_root, "note-fill.yaml", args.input)
-    _assert_safe_paper_input_path(root, fill_path)
-    if not fill_path.exists():
-        raise SystemExit(f"complete-note --phase verify: fill input not found: {fill_path}")
-    fill = load_yaml(fill_path, default={})
-    if not isinstance(fill, dict):
-        raise SystemExit(f"complete-note --phase verify: {fill_path} is not a mapping")
-    violations, claims = verify_note_fill(fill, unit_root, record)
-    if violations:
-        print("[reject] note fill failed verification:", file=sys.stderr)
-        for violation in violations:
-            print(f"  - {violation}", file=sys.stderr)
-        raise SystemExit(1)
+    bound_fill = _bound_verify_fill(
+        root, unit_root, args, default_name="note-fill.yaml"
+    )
+    fill_path = bound_fill.path
+    _fill, claims = _prevalidated_verify_fill(args, bound_fill)
 
+    _revalidate_managed_verify_fill(root, bound_fill)
     _apply_note_fill_to_payload(record, claims)
     attach_claims(record.setdefault("payload", {}), claims)
     build_verification_receipt(record, unit_root)
@@ -1634,13 +2040,12 @@ def _run_reject(args, root: Path, record: dict, unit_root: Path, defer_post_acti
     return 0
 
 
-def main() -> int:
-    args = build_parser().parse_args()
-    root = project_root(PROJECT_ROOT, explicit_root=args.root)
-    print_resolved_project_roots(root)
-    record, path = locate_record(root, args.paper_id, kind="paper")
-    if record.get("kind") != "paper":
-        raise SystemExit(f"{args.paper_id} is not a paper record")
+def _dispatch_loaded_command(
+    args: argparse.Namespace,
+    root: Path,
+    record: dict,
+    path: Path,
+) -> int:
     unit_root = path.parent
     defer_post_actions = bool(getattr(args, "defer_post_actions", False))
     paper_preferences: dict[str, object] = {}
@@ -1658,6 +2063,15 @@ def main() -> int:
     source_chunks: list[dict] = []
     cache_path = _cache_path(unit_root)
     if args.command in {"prewarm-cache", "screen", "complete-note", "extract-figures", "refresh-structure"}:
+        _assert_safe_paper_input_path(root, cache_path)
+        if (
+            str(getattr(args, "phase", "") or "") == "verify"
+            and args.command in {"screen", "complete-note"}
+            and not cache_path.exists()
+        ):
+            raise SystemExit(
+                "paper verify requires the existing managed parse cache; prepare the phase first"
+            )
         # refresh-structure re-derives structure.yaml from the EXISTING parse-cache;
         # it must NOT force a re-parse — doing so re-runs prewarm with the truncation
         # prefs (front_limit/back_limit) and overwrites the full intake cache, deleting
@@ -1713,6 +2127,33 @@ def main() -> int:
         return _run_reject(args, root, record, unit_root, defer_post_actions)
 
     return 1
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    root = project_root(PROJECT_ROOT, explicit_root=args.root)
+    print_resolved_project_roots(root)
+    record, path = locate_record(root, args.paper_id, kind="paper")
+    if record.get("kind") != "paper":
+        raise SystemExit(f"{args.paper_id} is not a paper record")
+    bound_fill: _BoundPaperVerifyFill | None = None
+    if (
+        str(getattr(args, "phase", "") or "") == "verify"
+        and args.command in {"screen", "complete-note"}
+    ):
+        default_name = "screening.yaml" if args.command == "screen" else "note-fill.yaml"
+        bound_fill = _open_managed_verify_fill(
+            root,
+            path.parent,
+            args,
+            default_name=default_name,
+        )
+        setattr(args, "_bound_paper_verify_fill", bound_fill)
+    try:
+        return _dispatch_loaded_command(args, root, record, path)
+    finally:
+        if bound_fill is not None:
+            bound_fill.close()
 
 
 if __name__ == "__main__":
