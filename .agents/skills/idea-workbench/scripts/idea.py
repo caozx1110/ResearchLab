@@ -276,6 +276,8 @@ def _require_existing_semantic_anchor_if_v2(
         return
     corpus, _binding = _validated_frozen_corpus(root, corpus_path)
     if corpus.get("schema") != "idea-evidence-corpus/v2":
+        if contracts:
+            raise ValueError("legacy semantic idea task cannot carry a v2 owner anchor")
         return
     if operation not in contracts:
         if allow_consumed_without_anchor:
@@ -2761,6 +2763,12 @@ def _dispatch(args, root: Path) -> int:
                     generation_scaffold(request_context, preference_context),
                 )
                 print("空白候选槽位已经恢复为当前准备状态。")
+                _queue_checkpoint(
+                    root,
+                    trigger="milestone",
+                    message=f"milestone: restore idea generation fill {bundle_id}",
+                    target_paths=[fill_path],
+                )
                 return 0
             anchor = _write_authoring_contract(
                 root,

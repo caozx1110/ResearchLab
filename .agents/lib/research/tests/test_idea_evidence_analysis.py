@@ -449,6 +449,47 @@ def test_one_active_semantic_operation_blocks_another_until_consumed(
     assert set(record["payload"]["idea_authoring_contracts"]) == {"review"}
 
 
+@pytest.mark.parametrize("command", ["analyze", "review", "discuss"])
+def test_semantic_prepare_rejects_v1_corpus_with_v2_owner_before_journal(
+    tmp_path: Path, monkeypatch, command: str
+) -> None:
+    idea = _load_idea_module()
+    idea_id, _source_id = _setup(tmp_path, idea)
+    unit = record_path(tmp_path, "idea", idea_id).parent
+    assert _run(
+        idea, monkeypatch, command, "--idea-id", idea_id, "--phase", "prepare"
+    ) == 0
+    operation = "discuss" if command == "discuss" else command
+    fill_path = (
+        unit / "discussion-fill.yaml"
+        if operation == "discuss"
+        else unit / f"{operation}-fill.yaml"
+    )
+    orientation_path = unit / f"{operation}-orientation.yaml"
+    corpus_path = unit / f"{operation}-evidence-corpus.yaml"
+    corpus = load_yaml(corpus_path, default={})
+    corpus["schema"] = "idea-evidence-corpus/v1"
+    for entry in corpus["entries"]:
+        entry.pop("size")
+    corpus["identity_digest"] = idea.canonical_digest([
+        {"path": item["path"], "identity_digest": item["identity_digest"]}
+        for item in corpus["entries"]
+    ])
+    corpus["bytes_digest"] = idea.canonical_digest([
+        {"path": item["path"], "bytes_digest": item["bytes_digest"]}
+        for item in corpus["entries"]
+    ])
+    write_yaml_if_changed(corpus_path, corpus)
+    protected = [unit / "record.yaml", fill_path, orientation_path, corpus_path]
+    before = _path_snapshot(protected)
+
+    with pytest.raises(SystemExit):
+        _run(
+            idea, monkeypatch, command, "--idea-id", idea_id, "--phase", "prepare"
+        )
+    assert _path_snapshot(protected) == before
+
+
 @pytest.mark.parametrize("tamper", ["duplicate", "unsafe", "bad_digest", "extra_key"])
 def test_frozen_manifest_malformed_entries_fail_closed(
     tmp_path: Path, monkeypatch, tamper: str
@@ -901,6 +942,40 @@ def test_generation_prepared_state_retries_then_materializes_and_becomes_termina
     with pytest.raises(SystemExit):
         _run(idea, monkeypatch, *common, "--phase", "prepare")
     assert index_path.read_bytes() == materialized
+
+
+def test_generation_prepare_rebuilds_missing_fill_and_checkpoints_exact_target(
+    tmp_path: Path, monkeypatch
+) -> None:
+    idea = _load_idea_module()
+    root = tmp_path / "workspace"
+    _multi_setup(root, idea, count=1)
+    bundle_id = "idea-bundle-rebuild-fill"
+    common = (
+        "generate", "--title", "Rebuild fill", "--count", "1",
+        "--bundle-id", bundle_id,
+    )
+    assert _run(idea, monkeypatch, *common, "--phase", "prepare") == 0
+    working = root / "kb/synthesis/idea-pools" / bundle_id
+    index_path = working / "index.yaml"
+    fill_path = working / "generation-fill.yaml"
+    prepared_bytes = index_path.read_bytes()
+    expected_fill_bytes = fill_path.read_bytes()
+    fill_path.unlink()
+    checkpoints: list[dict[str, object]] = []
+
+    def capture_checkpoint(project_root: Path, **kwargs) -> dict[str, object]:
+        checkpoints.append({"root": project_root, **kwargs})
+        return {"committed": False}
+
+    monkeypatch.setattr(idea, "checkpoint_and_report", capture_checkpoint)
+    assert _run(idea, monkeypatch, *common, "--phase", "prepare") == 0
+    assert fill_path.read_bytes() == expected_fill_bytes
+    assert index_path.read_bytes() == prepared_bytes
+    assert len(checkpoints) == 1
+    assert checkpoints[0]["root"] == root
+    assert checkpoints[0]["trigger"] == "milestone"
+    assert checkpoints[0]["target_paths"] == [fill_path]
 
 
 def test_prepared_generation_bundle_rejects_generic_bundle_entrypoints(
