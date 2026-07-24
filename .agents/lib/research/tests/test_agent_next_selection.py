@@ -164,6 +164,53 @@ def test_terminal_program_has_context_but_no_candidate(tmp_path: Path) -> None:
     assert snapshot["candidates"] == []
 
 
+@pytest.mark.parametrize("orphan_kind", ["missing", "symlink"])
+def test_unit_linked_only_to_noncanonical_program_remains_visible(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    orphan_kind: str,
+) -> None:
+    orchestrate = _load_orchestrator(f"orchestrator_orphan_{orphan_kind}")
+    root = _workspace(tmp_path)
+    programs = root / "kb" / "programs"
+    programs.mkdir(parents=True)
+    if orphan_kind == "symlink":
+        outside = tmp_path / "outside-program"
+        outside.mkdir()
+        (programs / "missing-program").symlink_to(outside, target_is_directory=True)
+    record = {
+        "id": "r-orphan-linked",
+        "kind": "repo",
+        "title": "Orphan-linked repository",
+        "status": "active",
+        "program_ids": ["missing-program"],
+        "payload": {},
+    }
+    monkeypatch.setattr(orchestrate, "iter_records", lambda _root: [record])
+    monkeypatch.setattr(orchestrate, "discover_pending_judgements", lambda _root: [])
+    monkeypatch.setattr(
+        orchestrate,
+        "safe_unit_step",
+        lambda current: {
+            "kind": "agent-work",
+            "step_type": "generate-note",
+            "reason": "The canonical repository still needs analysis.",
+            "safe_execute": False,
+            "command_parts": [],
+        }
+        if current["id"] == record["id"]
+        else None,
+    )
+
+    snapshot = orchestrate.portfolio_candidate_snapshot(root)
+
+    candidate = next(
+        item for item in snapshot["candidates"] if item["subject"]["id"] == record["id"]
+    )
+    assert candidate["program_id"] == "loose:r-orphan-linked"
+    assert candidate["action_type"] == "generate-note"
+
+
 def test_due_monitor_is_a_factual_candidate_not_an_automatic_winner(tmp_path: Path) -> None:
     orchestrate = _load_orchestrator("orchestrator_due_monitor")
     root = _workspace(tmp_path)

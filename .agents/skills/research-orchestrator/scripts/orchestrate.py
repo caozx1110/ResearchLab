@@ -1664,7 +1664,7 @@ def portfolio_candidates(root: Path, *, selected_program_id: str = "") -> tuple[
     if not selected_program_id:
         for record in records:
             unit_id = str(record.get("id") or "")
-            if not unit_id or unit_id in attached_unit_ids or normalize_list(record.get("program_ids")):
+            if not unit_id or unit_id in attached_unit_ids:
                 continue
             step = safe_unit_step(record)
             if not step:
