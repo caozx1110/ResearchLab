@@ -29,13 +29,13 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 
 PLAN_JSONL = False
 
 
-def dry_run_info(operation: str, path: Path, *, source: Path | None = None) -> None:
+def dry_run_info(operation: str, path: Path, *, source: Optional[Path] = None) -> None:
     """Keep human dry-run output stable while offering exact JSON to the installer."""
     if PLAN_JSONL:
         payload: dict[str, str] = {"operation": operation, "path": str(path)}

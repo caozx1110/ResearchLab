@@ -107,6 +107,8 @@ def test_agent_plan_lists_exact_targets_and_writes_nothing(tmp_path: Path) -> No
     assert plan["apply_contract"]["headless"] is True
     assert plan["apply_contract"]["requires_same_source_commit"] == plan["source"]["commit"]
     assert "--agent-plan-json" not in plan["apply_contract"]["argv"]
+    expected_index = plan["apply_contract"]["argv"].index("--expected-source-commit")
+    assert plan["apply_contract"]["argv"][expected_index + 1] == plan["source"]["commit"]
     summary = re.search(r"预计受管目标：(\d+) 项", result.stdout)
     assert summary is not None
     assert int(summary.group(1)) == plan["target_count"] == len(targets)
@@ -139,6 +141,34 @@ def test_agent_plan_requires_explicit_json_result_path(tmp_path: Path) -> None:
 
     assert result.returncode == 1
     assert "--agent-plan-json FILE" in result.stderr
+    assert not any(workspace.iterdir())
+
+
+def test_agent_apply_contract_rejects_source_commit_drift_without_reading_stdin(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    result = subprocess.run(
+        [
+            "bash",
+            str(_project_root() / "install.sh"),
+            "--codex",
+            "--project",
+            str(workspace),
+            "--expected-source-commit",
+            "0" * 40,
+            "--yes",
+        ],
+        cwd=_project_root(),
+        env={**os.environ, "HOME": str(tmp_path / "home"), "NO_COLOR": "1"},
+        stdin=subprocess.DEVNULL,
+        text=True,
+        capture_output=True,
+        timeout=5,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "源码版本已不同于审阅过的 Agent 计划" in result.stderr
     assert not any(workspace.iterdir())
 
 

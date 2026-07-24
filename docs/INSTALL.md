@@ -102,7 +102,7 @@ Agent 安装前的可审计计划把终端输出限制为短摘要，并把每�
 bash install.sh --agent-plan-json /tmp/workspace-oss-plan.json --claude --project /path/to/workspace --yes
 ```
 
-JSON 中的 `targets` 是完整、按执行顺序排列的精确清单；`source` 绑定 checkout、origin、branch 和 commit；`conflicts` 列出会被保留或跳过的冲突；`conditional_runtime_changes` 单独暴露条件性运行环境树；`apply_contract` 给出同一 source commit 下的无交互应用参数。Agent 必须先核对 plan digest 与这些字段，再执行应用合同，不能把计划模式换成网络下载或隐藏脚本执行。
+JSON 中的 `targets` 是完整、按执行顺序排列的精确清单；`source` 绑定 checkout、origin、branch 和 commit；`conflicts` 列出会被保留或跳过的冲突；`conditional_runtime_changes` 单独暴露条件性运行环境树；`apply_contract` 给出无交互应用参数，并让安装器在任何写入前验证 source commit 仍等于计划版本。Agent 必须先核对 plan digest 与这些字段，再执行应用合同，不能把计划模式换成网络下载或隐藏脚本执行。
 
 同时配置 Claude 和 Codex：
 

@@ -128,6 +128,7 @@ usage() {
   usage_option "--agent-plan-json FILE" "供 Agent 审阅：零写预览，并把精确计划保存为 JSON"
   usage_option "--force" "更新时覆盖已修改的受管文件"
   usage_option "--source DIR" "从指定源码目录更新"
+  usage_option "--expected-source-commit SHA" "应用 Agent 计划时锁定已审阅的源码版本"
   usage_option "--yes, --assume-yes" "交互运行时跳过执行前确认"
   usage_option "--uninstall" "兼容旧版的卸载选项"
   usage_option "-h, --help" "显示帮助"
@@ -261,6 +262,7 @@ KB_ON_PATH=0
 KB_ON_PATH_FLAG_SET=0
 FORCE=0
 SYNC_SOURCE=""
+EXPECTED_SOURCE_COMMIT=""
 ASSUME_YES=0
 WIZARD_MODE=0
 WIZARD_STEP=0
@@ -351,6 +353,16 @@ while [ "$#" -gt 0 ]; do
       ;;
     --source=*)
       SYNC_SOURCE=${1#--source=}
+      shift
+      ;;
+    --expected-source-commit)
+      [ "${2:-}" != "" ] && [[ ${2:-} != --* ]] || die "--expected-source-commit 需要一个 commit"
+      EXPECTED_SOURCE_COMMIT=$2
+      shift 2
+      ;;
+    --expected-source-commit=*)
+      EXPECTED_SOURCE_COMMIT=${1#--expected-source-commit=}
+      [ -n "$EXPECTED_SOURCE_COMMIT" ] || die "--expected-source-commit 需要一个 commit"
       shift
       ;;
     --claude)
@@ -1062,6 +1074,7 @@ write_agent_plan_json() {
   local digest commit origin branch index sequence target_index args=() apply_args=()
   [ "$AGENT_PLAN" -eq 1 ] || return 0
   commit=$(source_commit)
+  [ -n "$commit" ] || die "Agent 安装计划需要可验证的 Git commit"
   origin=$(source_origin)
   branch=$(source_branch)
   args=(
@@ -1118,6 +1131,7 @@ write_agent_plan_json() {
   [ "$KB_ON_PATH" -eq 0 ] || apply_args+=("--kb-on-path")
   [ "$FORCE" -eq 0 ] || apply_args+=("--force")
   [ -z "$SYNC_SOURCE" ] || apply_args+=("--source" "$SYNC_SOURCE")
+  apply_args+=("--expected-source-commit" "$commit")
   apply_args+=("--yes")
   for index in "${!apply_args[@]}"; do
     args+=("--apply-arg=${apply_args[index]}")
@@ -1782,6 +1796,10 @@ if [ "$ACTION" != "uninstall" ]; then
 fi
 
 validate_agent_plan_output
+
+if [ -n "$EXPECTED_SOURCE_COMMIT" ] && [ "$(source_commit)" != "$EXPECTED_SOURCE_COMMIT" ]; then
+  die "源码版本已不同于审阅过的 Agent 计划；请重新生成计划"
+fi
 confirm_plan
 
 if [ "$ACTION" != "uninstall" ]; then
