@@ -144,6 +144,7 @@ def distributable_tree(source_root: Path) -> dict[str, Any]:
             "path": relative,
             "role": "installer-input" if installer_input else "managed-payload",
             "destinations": destinations,
+            "mode": f"{stat.S_IMODE(mode):04o}",
         }
         if stat.S_ISREG(mode):
             entry.update({"type": "regular", "byte_sha256": sha256_file(source)})
@@ -186,7 +187,11 @@ def target_precondition(path: Path, *, managed_block: bool) -> dict[str, Any]:
         return {"type": "absent"}
     if stat.S_ISREG(mode):
         content = path.read_bytes()
-        state: dict[str, Any] = {"type": "regular", "byte_sha256": sha256_bytes(content)}
+        state: dict[str, Any] = {
+            "type": "regular",
+            "mode": f"{stat.S_IMODE(mode):04o}",
+            "byte_sha256": sha256_bytes(content),
+        }
         if managed_block:
             block_digest = _managed_block_digest(content)
             state["managed_block_sha256"] = block_digest or "absent"
@@ -194,7 +199,7 @@ def target_precondition(path: Path, *, managed_block: bool) -> dict[str, Any]:
     if stat.S_ISLNK(mode):
         return {"type": "symlink", "target": os.readlink(path)}
     if stat.S_ISDIR(mode):
-        return {"type": "directory"}
+        return {"type": "directory", "mode": f"{stat.S_IMODE(mode):04o}"}
     return {"type": "other", "mode": stat.S_IFMT(mode)}
 
 
