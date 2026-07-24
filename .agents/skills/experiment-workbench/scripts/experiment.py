@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -174,6 +175,35 @@ def verify_artifacts(root: Path, items: list[str]) -> list[dict[str, Any]]:
     return artifacts
 
 
+def _hash_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _artifact_content_digest(path: Path) -> str:
+    if path.is_file():
+        return _hash_file(path)
+    rows: list[dict[str, str]] = []
+    for child in sorted(path.rglob("*"), key=lambda item: item.relative_to(path).as_posix()):
+        identity = child.relative_to(path).as_posix()
+        if child.is_symlink():
+            rows.append(
+                {
+                    "identity": identity,
+                    "kind": "symlink",
+                    "content_digest": hashlib.sha256(os.readlink(child).encode("utf-8")).hexdigest(),
+                }
+            )
+        elif child.is_file():
+            rows.append({"identity": identity, "kind": "file", "content_digest": _hash_file(child)})
+        elif child.is_dir():
+            rows.append({"identity": identity, "kind": "directory", "content_digest": ""})
+    return _sha256_payload({"tree": rows})
+
+
 def _normalized_text(value: Any) -> str:
     return " ".join(str(value or "").split())
 
@@ -220,6 +250,7 @@ def _sha256_payload(payload: dict[str, Any]) -> str:
 def experiment_preference_context(
     args: argparse.Namespace,
     record: dict[str, Any] | None = None,
+    prepared: dict[str, Any] | None = None,
 ) -> dict[str, object]:
     """Return bounded canonical task inputs for one preference-sensitive action."""
     command = str(getattr(args, "command", "") or "")
@@ -232,6 +263,7 @@ def experiment_preference_context(
             "hypothesis_digest": _sha256_payload({"text": _normalized_text(args.hypothesis)}),
         }
     record = record if isinstance(record, dict) else {}
+    prepared = prepared if isinstance(prepared, dict) else {}
     base: dict[str, object] = {
         "experiment_id": str(getattr(args, "experiment_id", "") or ""),
         "record_digest": _sha256_payload(
@@ -255,8 +287,22 @@ def experiment_preference_context(
                         "result_summary": _normalized_text(args.result_summary),
                         "outcome": args.outcome,
                         "classifications": normalize_list(args.classification),
-                        "tested_hypothesis": _normalized_text(args.tested_hypothesis),
+                        "tested_hypothesis": _normalized_text(
+                            prepared.get("tested_hypothesis", args.tested_hypothesis)
+                        ),
+                        "next_actions": normalize_list(args.next_action),
+                        "why_this_run": _normalized_text(args.why_this_run),
+                        "tags": normalize_list(args.tag),
+                        "recent_runs": max(int(args.recent_runs or 0), 0),
+                        "rerun": bool(args.rerun),
+                        "rerun_reason": _normalized_text(args.rerun_reason),
                     }
+                ),
+                "artifact_facts_digest": _sha256_payload(
+                    {"artifacts": prepared.get("artifact_facts", [])}
+                ),
+                "prior_runs_digest": _sha256_payload(
+                    {"runs": prepared.get("prior_runs", [])}
                 ),
             }
         )
@@ -267,6 +313,7 @@ def experiment_preference_context(
                 "category": args.category,
                 "priority": args.priority,
                 "status": args.status,
+                "evidence_needed": normalize_list(args.evidence_needed),
             }
         )
     elif command == "diagnose":
@@ -279,15 +326,75 @@ def experiment_preference_context(
                 "unknowns": normalize_list(args.unknown),
                 "next_actions": normalize_list(args.next_action),
                 "recent_runs": max(int(args.recent_runs or 0), 0),
+                "claims_file_fact": prepared.get("claims_file_fact", {}),
+                "run_log_digest": _sha256_payload(
+                    {"runs": prepared.get("runs", [])}
+                ),
             }
         )
     return base
+
+
+def prepare_experiment_preference_inputs(
+    root: Path,
+    args: argparse.Namespace,
+    record: dict[str, Any],
+    unit_root: Path,
+) -> dict[str, Any]:
+    """Read and validate canonical inputs before resolving a task receipt."""
+    if args.command == "log-run":
+        if args.rerun and not _normalized_text(args.rerun_reason):
+            raise SystemExit("Explicit rerun mode requires a non-empty rerun reason.")
+        if not args.rerun and _normalized_text(args.rerun_reason):
+            raise SystemExit("A rerun reason is only valid in explicit rerun mode.")
+        run_log_document_path = list_document_path(unit_root, "run-log")
+        prior_run_log = load_list_document(
+            run_log_document_path,
+            f"{args.experiment_id}-run-log",
+            "experiment-workbench",
+        )
+        claimed_artifacts = verify_artifacts(root, args.artifact)
+        return {
+            "run_log_document_path": run_log_document_path,
+            "prior_runs": [item for item in prior_run_log.get("items", []) if isinstance(item, dict)],
+            "metrics": parse_metrics(args.metric),
+            "claimed_artifacts": claimed_artifacts,
+            "artifact_facts": [
+                {
+                    "identity_digest": _sha256_payload({"identity": item.get("path", "")}),
+                    "status": str(item.get("status") or ""),
+                    "kind": str(item.get("kind") or ""),
+                    "content_digest": (
+                        _artifact_content_digest(root / str(item.get("path") or ""))
+                        if item.get("status") == "present"
+                        else ""
+                    ),
+                }
+                for item in claimed_artifacts
+            ],
+            "tested_hypothesis": _normalized_text(
+                args.tested_hypothesis
+                or record.get("payload", {}).get("process", {}).get("tested_hypothesis")
+            ),
+        }
+    if args.command == "diagnose":
+        run_log = load_list_document(
+            list_document_path(unit_root, "run-log"),
+            f"{args.experiment_id}-run-log",
+            "experiment-workbench",
+        )
+        return {
+            "runs": [item for item in run_log.get("items", []) if isinstance(item, dict)],
+            "claims_file_fact": diagnosis_claims_file_fact(root, args.claims_file),
+        }
+    return {}
 
 
 def resolve_experiment_preferences(
     root: Path,
     args: argparse.Namespace,
     record: dict[str, Any] | None = None,
+    prepared: dict[str, Any] | None = None,
 ) -> dict[str, object]:
     command = str(getattr(args, "command", "") or "")
     if command not in {"plan", "log-run", "follow-up", "diagnose"}:
@@ -298,7 +405,7 @@ def resolve_experiment_preferences(
             selection_id=str(getattr(args, "preference_selection_id", "") or ""),
             skill="experiment-workbench",
             operation=command,
-            canonical_inputs=experiment_preference_context(args, record),
+            canonical_inputs=experiment_preference_context(args, record, prepared),
         )
     except ValueError as exc:
         raise SystemExit(f"Experiment preference selection is invalid: {exc}") from exc
@@ -554,6 +661,28 @@ def load_diagnosis_claims(root: Path, unit_root: Path, experiment_id: str, claim
     return claims
 
 
+def diagnosis_claims_file_fact(root: Path, claims_file: str) -> dict[str, str]:
+    if not claims_file:
+        return {"status": "not-provided", "identity_digest": "", "content_digest": "", "kind": ""}
+    candidate = Path(claims_file).expanduser()
+    resolved = (candidate if candidate.is_absolute() else root / candidate).resolve(strict=False)
+    identity_digest = _sha256_payload({"identity": resolved.as_posix()})
+    if not resolved.exists():
+        return {
+            "status": "missing",
+            "identity_digest": identity_digest,
+            "content_digest": "",
+            "kind": "",
+        }
+    kind = "directory" if resolved.is_dir() else "file"
+    return {
+        "status": "present",
+        "identity_digest": identity_digest,
+        "content_digest": _artifact_content_digest(resolved),
+        "kind": kind,
+    }
+
+
 def write_diagnosis_fill_scaffold(
     unit_root: Path,
     experiment_id: str,
@@ -772,25 +901,20 @@ def _dispatch(args, root: Path) -> int:
     if record.get("kind") != "experiment":
         raise SystemExit(f"{args.experiment_id} is not an experiment record")
     unit_root = path.parent
-    preferences = resolve_experiment_preferences(root, args, record)
+
+    prepared = prepare_experiment_preference_inputs(root, args, record, unit_root)
+    preferences = resolve_experiment_preferences(root, args, record, prepared)
 
     if args.command == "log-run":
-        if args.rerun and not _normalized_text(args.rerun_reason):
-            raise SystemExit("Explicit rerun mode requires a non-empty rerun reason.")
-        if not args.rerun and _normalized_text(args.rerun_reason):
-            raise SystemExit("A rerun reason is only valid in explicit rerun mode.")
         runs_dir = unit_root / "runs"
         runs_dir.mkdir(parents=True, exist_ok=True)
         run_path = next_numbered_path(runs_dir, "run", ".md")
         run_id = run_path.stem
-        run_log_document_path = list_document_path(unit_root, "run-log")
-        prior_run_log = load_list_document(run_log_document_path, f"{args.experiment_id}-run-log", "experiment-workbench")
-        prior_runs = [item for item in prior_run_log.get("items", []) if isinstance(item, dict)]
-        metrics = parse_metrics(args.metric)
-        claimed_artifacts = verify_artifacts(root, args.artifact)
-        tested_hypothesis = _normalized_text(
-            args.tested_hypothesis or record.get("payload", {}).get("process", {}).get("tested_hypothesis")
-        )
+        run_log_document_path = prepared["run_log_document_path"]
+        prior_runs = prepared["prior_runs"]
+        metrics = prepared["metrics"]
+        claimed_artifacts = prepared["claimed_artifacts"]
+        tested_hypothesis = prepared["tested_hypothesis"]
         fingerprint, repeat_group_id = build_run_identity(
             args.experiment_id,
             tested_hypothesis=tested_hypothesis,
@@ -974,10 +1098,11 @@ def _dispatch(args, root: Path) -> int:
         return 0
 
     if args.command == "diagnose":
-        run_log = load_list_document(list_document_path(unit_root, "run-log"), f"{args.experiment_id}-run-log", "experiment-workbench")
-        runs = [item for item in run_log.get("items", []) if isinstance(item, dict)]
+        runs = prepared["runs"]
         comparison_context = build_diagnosis_context(runs, max(args.recent_runs, 0))
         claims = load_diagnosis_claims(root, unit_root, args.experiment_id, args.claims_file)
+        if diagnosis_claims_file_fact(root, args.claims_file) != prepared["claims_file_fact"]:
+            raise SystemExit("Diagnosis claims changed while preparing the diagnosis; retry with current claims.")
         if not claims:
             fill_path = write_diagnosis_fill_scaffold(
                 unit_root,

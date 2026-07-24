@@ -346,12 +346,18 @@ def test_experiment_consumers_bind_each_operation_and_neutral_keeps_hard_context
     ]
     for index, args in enumerate(operation_args, start=1):
         current = load_yaml(record_path)
+        prepared = experiment.prepare_experiment_preference_inputs(
+            root,
+            args,
+            current,
+            record_path.parent,
+        )
         args.preference_selection_id = _record(
             root,
             selection_id=f"prefsel-experiment-op-{index}",
             skill="experiment-workbench",
             operation=args.command,
-            task_context=experiment.experiment_preference_context(args, current),
+            task_context=experiment.experiment_preference_context(args, current, prepared),
             selected_paths={"learned.experiment-format"},
         )
         assert experiment._dispatch(args, root) == 0
