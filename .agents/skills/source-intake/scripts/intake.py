@@ -252,8 +252,12 @@ def intake_preference_context(
         # canonical value without ever copying it into a preference receipt.
         "authorization_digest": _canonical_digest(
             {
-                "user_authorization": str(args.user_authorization or "").strip(),
-                "authorization_source": str(args.authorization_source or "").strip(),
+                "user_authorization": str(
+                    getattr(args, "user_authorization", "") or ""
+                ).strip(),
+                "authorization_source": str(
+                    getattr(args, "authorization_source", "") or ""
+                ).strip(),
             }
         ),
     }
