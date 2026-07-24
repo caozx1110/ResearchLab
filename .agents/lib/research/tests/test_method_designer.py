@@ -6,6 +6,8 @@ from pathlib import Path
 
 from research.common import load_yaml, write_yaml_if_changed
 from research.core import default_record, ensure_workspace, record_path
+from research.paths import config_root
+from research.preference_selection import eligible_preferences, record_effective_selection
 
 
 def _project_root() -> Path:
@@ -176,3 +178,89 @@ def test_method_prepares_agent_evidence_slots_instead_of_repo_judgement(tmp_path
     assert state["stage"] == "idea-review"
     assert "selected_repo_id" not in state
     assert not (root / "kb" / "programs" / "p-method" / "workflow" / "reporting-events.yaml").exists()
+
+
+def test_selected_research_focus_changes_only_bound_design_and_persists_receipt(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    method = _load_method_module()
+    root, idea_id, default_repo_id = _make_workspace(tmp_path, resources={"gpu_count": 1})
+    focused_repo_id = "r-vision-654321"
+    focused_repo = default_record(
+        "repo",
+        title="Vision transformer perception navigation benchmark",
+        maturity="lightweight",
+        source={"original_uri": "https://example.com/vision"},
+    )
+    focused_repo["id"] = focused_repo_id
+    focused_repo["summary"] = "Vision transformer perception navigation benchmark implementation."
+    write_yaml_if_changed(record_path(root, "repo", focused_repo_id), focused_repo)
+    write_yaml_if_changed(
+        config_root(root) / "user-profile.yaml",
+        {
+            "personalization": {
+                "research_focus": "vision transformer perception navigation benchmark",
+            },
+            "resources": {"gpu_count": 1},
+            "constraints": ["local only"],
+        },
+    )
+    args = method.build_parser().parse_args(
+        ["design", "--idea-id", idea_id, "--program-id", "p-method"]
+    )
+    context = method.method_preference_context(
+        load_yaml(record_path(root, "idea", idea_id)),
+        program_id="p-method",
+        idea_id=idea_id,
+    )
+    eligible = eligible_preferences(root, skill="method-designer", operation="design")
+    selected = []
+    excluded = []
+    for item in eligible["items"]:
+        row = {"preference_id": item["preference_id"], "reason": "bounded method design input"}
+        if item["strength"] == "hard" or item["path"] == "profile.personalization.research_focus":
+            selected.append({**row, "application": "apply to candidate proposal scoring"})
+        else:
+            excluded.append({**row, "reason": "not relevant to this method design"})
+    record_effective_selection(
+        root,
+        {
+            "selection_id": "prefsel-method-focus",
+            "skill": "method-designer",
+            "operation": "design",
+            "catalog_digest": eligible["catalog_digest"],
+            "task_context": context,
+            "selected": selected,
+            "excluded": excluded,
+        },
+    )
+    monkeypatch.setattr(method, "PROJECT_ROOT", root)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "method.py",
+            "--root",
+            str(root),
+            "design",
+            "--idea-id",
+            idea_id,
+            "--program-id",
+            "p-method",
+            "--preference-selection-id",
+            "prefsel-method-focus",
+        ],
+    )
+
+    assert method.main() == 0
+    choice = load_yaml(
+        root / "kb/programs/p-method/design" / f"{idea_id}-repo-choice.yaml"
+    )
+    assert choice["proposed_repo_id"] == focused_repo_id
+    assert choice["proposed_repo_id"] != default_repo_id
+    assert choice["preference_context"]["selection_binding"]["selection_id"] == "prefsel-method-focus"
+    assert set(choice["preference_context"]["hard_value_digests"]) == {
+        "profile.resources",
+        "profile.constraints",
+    }

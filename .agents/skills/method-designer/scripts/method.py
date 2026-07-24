@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import re
 import sys
@@ -31,6 +32,7 @@ from research.core import checkpoint_and_report, iter_records, locate_record, pr
 from research.evidence import JUDGEMENT_CLAIM_TYPES, build_verification_receipt, validate_claims
 from research.journal import mutation_transaction
 from research.judgements import apply_judgement_rejection, readiness_violations, require_judgement_snapshot
+from research.preference_selection import resolve_operation_preferences
 
 
 DEFAULT_EXPERIMENT_SCALE = {
@@ -191,6 +193,7 @@ def repo_candidates(
     record: dict[str, Any],
     pinned_repo_ids: list[str],
     active_unit_ids: list[str],
+    selected_research_focus: str = "",
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     all_repo_records = iter_records(root, kind="repo")
     repo_by_id = {str(repo.get("id") or ""): repo for repo in all_repo_records}
@@ -225,6 +228,7 @@ def repo_candidates(
                 " ".join(str(item) for item in analysis.get("related_work", [])),
                 " ".join(str(item) for item in record.get("tags", [])),
                 " ".join(str(item) for item in record.get("topics", [])),
+                selected_research_focus,
             ]
         )
     )
@@ -296,6 +300,7 @@ def build_parser() -> argparse.ArgumentParser:
     design.add_argument("--baseline", action="append", default=[])
     design.add_argument("--metric", action="append", default=[])
     design.add_argument("--risk", action="append", default=[])
+    design.add_argument("--preference-selection-id", default="", help=argparse.SUPPRESS)
     for command in ("confirm-selection", "confirm"):
         confirm = subparsers.add_parser(command)
         confirm.add_argument("--idea-id", required=True)
@@ -328,6 +333,83 @@ def method_paths(root: Path, program_id: str, idea_id: str) -> dict[str, Path]:
 
 def selection_subject_id(program_id: str, idea_id: str) -> str:
     return f"method-selection:{program_id}:{idea_id}"
+
+
+def _canonical_digest(value: object) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def method_preference_context(
+    record: dict[str, Any],
+    *,
+    program_id: str,
+    idea_id: str,
+) -> dict[str, object]:
+    return {
+        "program_id": str(program_id or ""),
+        "idea_id": str(idea_id or ""),
+        "idea_digest": _canonical_digest(
+            {
+                "id": record.get("id"),
+                "status": record.get("status"),
+                "title": record.get("title"),
+                "hypothesis": record.get("payload", {}).get("hypothesis"),
+                "analysis": record.get("payload", {}).get("analysis"),
+                "topics": record.get("topics"),
+                "tags": record.get("tags"),
+            }
+        ),
+    }
+
+
+def resolve_method_preferences(
+    root: Path,
+    record: dict[str, Any],
+    *,
+    program_id: str,
+    idea_id: str,
+    selection_id: str,
+) -> dict[str, object]:
+    try:
+        return resolve_operation_preferences(
+            root,
+            selection_id=selection_id,
+            skill="method-designer",
+            operation="design",
+            canonical_inputs=method_preference_context(
+                record,
+                program_id=program_id,
+                idea_id=idea_id,
+            ),
+        )
+    except ValueError as exc:
+        raise SystemExit(f"Method preference selection is invalid: {exc}") from exc
+
+
+def method_preference_state(resolution: dict[str, object]) -> dict[str, object]:
+    return {
+        "task_context_digest": str(resolution.get("task_context_digest") or ""),
+        "selection_binding": dict(resolution.get("binding") or {}),
+        "hard_value_digests": dict(resolution.get("hard_value_digests") or {}),
+    }
+
+
+def selected_method_research_focus(resolution: dict[str, object]) -> str:
+    values = resolution.get("values_by_path")
+    values = values if isinstance(values, dict) else {}
+    value = values.get("profile.personalization.research_focus")
+    if isinstance(value, list):
+        return " ".join(str(item) for item in value)
+    if isinstance(value, dict):
+        return " ".join(f"{key} {item}" for key, item in sorted(value.items()))
+    return str(value or "")
 
 
 def default_program_state(program_id: str) -> dict[str, Any]:
@@ -445,11 +527,22 @@ def prepare_method(root: Path, record: dict[str, Any], args: argparse.Namespace)
     if str(state.get("selected_repo_id") or "").strip():
         raise SystemExit("The program already has a selected repository; a proposal cannot replace it implicitly.")
 
+    preferences = resolve_method_preferences(
+        root,
+        record,
+        program_id=args.program_id,
+        idea_id=args.idea_id,
+        selection_id=str(getattr(args, "preference_selection_id", "") or ""),
+    )
+    preference_context = method_preference_state(preferences)
+    selected_research_focus = selected_method_research_focus(preferences)
+
     repo_rankings, repo_corpus = repo_candidates(
         root,
         record,
         normalize_list(args.repo_id),
         normalize_list(state.get("active_unit_ids", [])),
+        selected_research_focus,
     )
     proposed_repo = repo_rankings[0] if repo_rankings else {
         "id": normalize_list(args.repo_id)[0] if normalize_list(args.repo_id) else "",
@@ -595,6 +688,7 @@ def prepare_method(root: Path, record: dict[str, Any], args: argparse.Namespace)
             "idea_id": args.idea_id,
             "subject_id": subject_id,
         },
+        "preference_context": copy.deepcopy(preference_context),
     }
     interfaces_payload = {
         "idea_id": args.idea_id,
@@ -609,6 +703,7 @@ def prepare_method(root: Path, record: dict[str, Any], args: argparse.Namespace)
         "judgement_claim_id": "method-interfaces",
         "information_types": ["fact", "inference", "unverified"],
         "confirmation_status": "pending_user_confirmation",
+        "preference_context": copy.deepcopy(preference_context),
     }
     matrix_payload = {
         "idea_id": args.idea_id,
@@ -630,12 +725,14 @@ def prepare_method(root: Path, record: dict[str, Any], args: argparse.Namespace)
         "risk_judgement_claim_id": "method-risks",
         "information_types": ["fact", "inference", "evaluation", "unverified"],
         "confirmation_status": "pending_user_confirmation",
+        "preference_context": copy.deepcopy(preference_context),
     }
     state["selected_idea_id"] = args.idea_id
     state["method_proposal"] = {
         "subject_id": subject_id,
         "proposed_repo_id": proposed_repo_id,
         "status": "needs_agent_fill",
+        "preference_context": copy.deepcopy(preference_context),
     }
     if resources:
         state["resource_constraints"] = resources
@@ -663,12 +760,21 @@ def prepare_method(root: Path, record: dict[str, Any], args: argparse.Namespace)
             current_record,
             normalize_list(args.repo_id),
             normalize_list(state_before.get("active_unit_ids", [])) if isinstance(state_before, dict) else [],
+            selected_research_focus,
+        )
+        current_preferences = resolve_method_preferences(
+            root,
+            current_record,
+            program_id=args.program_id,
+            idea_id=args.idea_id,
+            selection_id=str(getattr(args, "preference_selection_id", "") or ""),
         )
         if (
             current_rankings != repo_rankings
             or current_corpus != repo_corpus
             or profile_resources(root) != resources
             or profile_constraints(root) != constraints
+            or method_preference_state(current_preferences) != preference_context
         ):
             raise SystemExit("Method inputs changed while preparing the proposal; reload before retrying.")
         write_text_if_changed(
@@ -721,6 +827,21 @@ def verify_method(root: Path, args: argparse.Namespace) -> int:
     with mutation_transaction(root, "method:verify", targets):
         choice = load_method_artifact(paths["choice"], label="selection artifact")
         require_current_method_subject(choice, args.program_id, args.idea_id)
+        idea_record, _idea_path = locate_record(root, args.idea_id, kind="idea", fuzzy=False)
+        stored_preference_context = choice.get("preference_context")
+        if not isinstance(stored_preference_context, dict):
+            raise SystemExit("Method preference context is missing; prepare the method again.")
+        stored_selection = stored_preference_context.get("selection_binding")
+        stored_selection = stored_selection if isinstance(stored_selection, dict) else {}
+        current_preferences = resolve_method_preferences(
+            root,
+            idea_record,
+            program_id=args.program_id,
+            idea_id=args.idea_id,
+            selection_id=str(stored_selection.get("selection_id") or ""),
+        )
+        if method_preference_state(current_preferences) != stored_preference_context:
+            raise SystemExit("Method preferences changed after prepare; prepare the method again.")
         if "selected_repo_id" in choice:
             raise SystemExit("Unconfirmed method artifacts must not contain selected_repo_id.")
         proposed_repo_id = str(choice.get("proposed_repo_id") or "").strip()

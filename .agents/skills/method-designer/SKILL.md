@@ -5,7 +5,7 @@ description: Turn a selected core idea unit into a per-program method design han
 
 # Method Designer
 
-开始设计前遵循 workspace 统一 task-scoped preference 合同，记录并加载 `method-designer + 当前 operation` 的 effective selection。资源与约束是 hard 边界，必须进入选择；research focus 等 soft 项只有被 Agent 选中时才影响本次方案。脚本直接读取 canonical resources 仅作为 hard-boundary safety fallback，不代表跳过 task receipt。
+开始设计前遵循 workspace 统一 task-scoped preference 合同，记录并加载 `method-designer + design` 的 effective selection。canonical task context 绑定 program、selected idea 与 idea substance digest。资源与约束是 hard 边界，无 receipt 时仍直接从 canonical profile 读取；research focus 等 soft 项只有被 Agent 选中时才影响本次方案。脚本把 selected research focus 仅作为候选提案 token scoring 的附加输入，不把排序升级成方法判断。
 
 > 协议参考：`.agents/lib/research/SCHEMAS.md#unit-record` · `#program-files` · `#confirmation-gate` · `#runtime`
 
@@ -28,6 +28,7 @@ Use this skill only after an idea has been explicitly selected.
 
 - Repo choice is a durable `method_selection` side judgement with `payload.claims`, `payload.verification`, optional `confirmation`, and an internal review route. Public review discovers only its `ready_for_review` state.
 - Candidate ordering may use deterministic record signals such as token overlap, but the script must not turn that ordering into a method judgement. Before verification, canonical claims are empty and status is `needs_agent_fill`, not ready for human review.
+- Prepare 将 task digest、可选 selection binding 与 hard-value digests 写入 repo choice、interfaces、matrix 和 program proposal state；不复制 soft preference 正文。Verify 重新计算 task/context/catalog，wrong binding、idea 变化或偏好 stale 都 fail closed。
 - `proposed_repo_id` and `selected_repo_id` are separate fields. The latter must be absent from the repo choice, interfaces, matrix, and program state until confirmation succeeds.
 - Interfaces should expose edit surfaces, config keys, metrics, and artifact expectations instead of hiding them in prose only.
 - The experiment matrix should cover baseline parity, minimal variant, ablation, and stress/failure slices.
