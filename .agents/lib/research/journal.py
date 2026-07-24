@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import stat
 import time
 import uuid
 from contextlib import ExitStack, contextmanager
@@ -52,36 +53,214 @@ def workspace_transaction_lock_path(project_root: Path) -> Path:
     return journal_root(project_root) / "workspace-transaction.lock"
 
 
+def _node_kind(metadata: os.stat_result) -> str:
+    node_type = stat.S_IFMT(metadata.st_mode)
+    if stat.S_ISREG(node_type):
+        return "file"
+    if stat.S_ISDIR(node_type):
+        return "directory"
+    if stat.S_ISLNK(node_type):
+        return "symlink"
+    return "special"
+
+
+def _lstat(path: Path) -> os.stat_result | None:
+    try:
+        return path.lstat()
+    except FileNotFoundError:
+        return None
+
+
+def _same_node(first: os.stat_result, second: os.stat_result) -> bool:
+    return (
+        first.st_dev,
+        first.st_ino,
+        stat.S_IFMT(first.st_mode),
+    ) == (
+        second.st_dev,
+        second.st_ino,
+        stat.S_IFMT(second.st_mode),
+    )
+
+
+def _special_identity(metadata: os.stat_result) -> str:
+    return "\0".join(
+        str(value)
+        for value in (
+            stat.S_IFMT(metadata.st_mode),
+            stat.S_IMODE(metadata.st_mode),
+            metadata.st_dev,
+            metadata.st_ino,
+            getattr(metadata, "st_rdev", 0),
+        )
+    )
+
+
+def _open_regular_nonblocking(path: Path, expected: os.stat_result) -> int:
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise RuntimeError(f"Journal file changed while opening: {path}") from exc
+    opened = os.fstat(descriptor)
+    if _node_kind(opened) != "file" or not _same_node(expected, opened):
+        os.close(descriptor)
+        raise RuntimeError(f"Journal file changed type or identity while opening: {path}")
+    return descriptor
+
+
+def _update_regular_digest(
+    digest: "hashlib._Hash",
+    path: Path,
+    metadata: os.stat_result,
+) -> None:
+    descriptor = _open_regular_nonblocking(path, metadata)
+    try:
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    finally:
+        os.close(descriptor)
+
+
+def _read_regular_bytes(path: Path, metadata: os.stat_result) -> bytes:
+    chunks: list[bytes] = []
+    descriptor = _open_regular_nonblocking(path, metadata)
+    try:
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    finally:
+        os.close(descriptor)
+    return b"".join(chunks)
+
+
+def _copy_regular_nonblocking(
+    source: Path,
+    destination: Path,
+    metadata: os.stat_result,
+) -> None:
+    source_descriptor = _open_regular_nonblocking(source, metadata)
+    destination_descriptor = -1
+    try:
+        destination_descriptor = os.open(
+            destination,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            stat.S_IMODE(metadata.st_mode),
+        )
+        while True:
+            chunk = os.read(source_descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            view = memoryview(chunk)
+            while view:
+                written = os.write(destination_descriptor, view)
+                view = view[written:]
+    except BaseException:
+        if destination_descriptor >= 0:
+            os.close(destination_descriptor)
+            destination_descriptor = -1
+        if _lstat(destination) is not None:
+            destination.unlink()
+        raise
+    finally:
+        os.close(source_descriptor)
+        if destination_descriptor >= 0:
+            os.close(destination_descriptor)
+    shutil.copystat(source, destination, follow_symlinks=False)
+
+
+def _special_nodes(path: Path) -> list[str]:
+    metadata = _lstat(path)
+    if metadata is None:
+        return []
+    kind = _node_kind(metadata)
+    if kind == "special":
+        return ["."]
+    if kind != "directory":
+        return []
+    found: list[str] = []
+    for child in sorted(path.rglob("*"), key=lambda item: item.relative_to(path).as_posix()):
+        child_metadata = _lstat(child)
+        if child_metadata is not None and _node_kind(child_metadata) == "special":
+            found.append(child.relative_to(path).as_posix())
+    return found
+
+
+def _assert_snapshot_target_supported(path: Path, key: str) -> None:
+    special_nodes = _special_nodes(path)
+    if special_nodes:
+        raise SystemExit(
+            "Journal snapshot refuses special filesystem nodes in "
+            f"{key}: {', '.join(special_nodes)}"
+        )
+
+
 def file_digest(path: Path) -> str | None:
-    if not path.exists() and not path.is_symlink():
+    metadata = _lstat(path)
+    if metadata is None:
         return None
     digest = hashlib.sha256()
-    stat_result = path.lstat()
-    mode = stat_result.st_mode & 0o7777
-    if path.is_symlink():
+    mode = stat.S_IMODE(metadata.st_mode)
+    kind = _node_kind(metadata)
+    if kind == "symlink":
         digest.update(f"symlink\0{mode}\0{os.readlink(path)}".encode("utf-8"))
         return digest.hexdigest()
-    if path.is_dir():
+    if kind == "directory":
         digest.update(f"directory\0{mode}\0".encode("utf-8"))
         for child in sorted(path.rglob("*"), key=lambda item: item.relative_to(path).as_posix()):
             relative = child.relative_to(path).as_posix()
-            child_stat = child.lstat()
-            child_mode = child_stat.st_mode & 0o7777
-            if child.is_symlink():
+            child_metadata = child.lstat()
+            child_mode = stat.S_IMODE(child_metadata.st_mode)
+            child_kind = _node_kind(child_metadata)
+            if child_kind == "symlink":
                 digest.update(f"L\0{relative}\0{child_mode}\0{os.readlink(child)}\0".encode("utf-8"))
-            elif child.is_dir():
+            elif child_kind == "directory":
                 digest.update(f"D\0{relative}\0{child_mode}\0".encode("utf-8"))
+            elif child_kind == "file":
+                digest.update(f"F\0{relative}\0{child_mode}\0{child_metadata.st_size}\0".encode("utf-8"))
+                _update_regular_digest(digest, child, child_metadata)
             else:
-                digest.update(f"F\0{relative}\0{child_mode}\0{child_stat.st_size}\0".encode("utf-8"))
-                with child.open("rb") as handle:
-                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                        digest.update(chunk)
+                digest.update(
+                    f"S\0{relative}\0{_special_identity(child_metadata)}\0".encode("utf-8")
+                )
         return digest.hexdigest()
-    digest.update(f"file\0{mode}\0{stat_result.st_size}\0".encode("utf-8"))
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
+    if kind == "file":
+        digest.update(f"file\0{mode}\0{metadata.st_size}\0".encode("utf-8"))
+        _update_regular_digest(digest, path, metadata)
+        return digest.hexdigest()
+    digest.update(f"special\0{_special_identity(metadata)}\0".encode("utf-8"))
     return digest.hexdigest()
+
+
+def _copy_safe_tree(source: Path, destination: Path) -> None:
+    source_metadata = source.lstat()
+    if _node_kind(source_metadata) != "directory":
+        raise RuntimeError(f"Journal directory changed type while copying: {source}")
+    destination.mkdir(mode=stat.S_IMODE(source_metadata.st_mode))
+    try:
+        for child in sorted(source.iterdir(), key=lambda item: item.name):
+            child_metadata = child.lstat()
+            child_kind = _node_kind(child_metadata)
+            copied = destination / child.name
+            if child_kind == "directory":
+                _copy_safe_tree(child, copied)
+            elif child_kind == "symlink":
+                os.symlink(os.readlink(child), copied)
+                shutil.copystat(child, copied, follow_symlinks=False)
+            elif child_kind == "file":
+                _copy_regular_nonblocking(child, copied, child_metadata)
+            else:
+                raise RuntimeError(f"Journal refuses to copy special filesystem node: {child}")
+        shutil.copystat(source, destination, follow_symlinks=False)
+    except BaseException:
+        if destination.exists():
+            shutil.rmtree(destination)
+        raise
 
 
 def _target_key(project_root: Path, path: Path) -> str:
@@ -131,23 +310,27 @@ def _snapshot_payload_path(project_root: Path, relative_path: str) -> Path:
 
 def _snapshot_target(project_root: Path, op_id: str, key: str) -> dict:
     target = _target_path(project_root, key)
-    if not target.exists() and not target.is_symlink():
+    target_metadata = _lstat(target)
+    if target_metadata is None:
         return {"kind": "absent", "mode": None, "digest": None}
 
-    mode = target.lstat().st_mode & 0o7777
+    kind = _node_kind(target_metadata)
+    if kind == "special":
+        raise SystemExit(f"Journal snapshot refuses special filesystem node: {key}")
+    mode = stat.S_IMODE(target_metadata.st_mode)
     digest = file_digest(target)
     payload_root = journal_root(project_root) / SNAPSHOT_DIRNAME / op_id / hashlib.sha256(key.encode("utf-8")).hexdigest()
     payload_root.mkdir(parents=True, exist_ok=False)
-    if target.is_symlink():
+    if kind == "symlink":
         return {
             "kind": "symlink",
             "mode": mode,
             "digest": digest,
             "link_target": os.readlink(target),
         }
-    if target.is_dir():
+    if kind == "directory":
         snapshot = payload_root / "tree"
-        shutil.copytree(target, snapshot, symlinks=True, copy_function=shutil.copy2)
+        _copy_safe_tree(target, snapshot)
         if file_digest(snapshot) != digest:
             raise RuntimeError(f"Journal target changed while snapshotting: {key}")
         return {
@@ -158,7 +341,7 @@ def _snapshot_target(project_root: Path, op_id: str, key: str) -> dict:
         }
 
     snapshot = payload_root / "data"
-    data = target.read_bytes()
+    data = _read_regular_bytes(target, target_metadata)
     write_bytes_atomic(snapshot, data, mode=mode)
     if file_digest(target) != digest:
         raise RuntimeError(f"Journal target changed while snapshotting: {key}")
@@ -171,9 +354,12 @@ def _snapshot_target(project_root: Path, op_id: str, key: str) -> dict:
 
 
 def _remove_target(path: Path) -> None:
-    if path.is_symlink() or (path.exists() and not path.is_dir()):
+    metadata = _lstat(path)
+    if metadata is None:
+        return
+    if _node_kind(metadata) != "directory":
         path.unlink()
-    elif path.exists():
+    else:
         shutil.rmtree(path)
 
 
@@ -182,7 +368,7 @@ def _restore_directory(snapshot: Path, target: Path, mode: int) -> None:
     token = uuid.uuid4().hex
     staged = target.parent / f".{target.name}.restore-{token}"
     previous = target.parent / f".{target.name}.previous-{token}"
-    shutil.copytree(snapshot, staged, symlinks=True, copy_function=shutil.copy2)
+    _copy_safe_tree(snapshot, staged)
     os.chmod(staged, mode)
     moved_previous = False
     try:
@@ -210,14 +396,17 @@ def _restore_target(project_root: Path, key: str, snapshot: dict) -> Path:
         _remove_target(target)
     elif kind == "file":
         payload = _snapshot_payload_path(project_root, str(snapshot.get("snapshot_path") or ""))
-        if not payload.is_file():
+        payload_metadata = _lstat(payload)
+        if payload_metadata is None or _node_kind(payload_metadata) != "file":
             raise RuntimeError(f"Missing journal file snapshot for {key}")
-        if target.exists() and target.is_dir() and not target.is_symlink():
+        target_metadata = _lstat(target)
+        if target_metadata is not None and _node_kind(target_metadata) == "directory":
             shutil.rmtree(target)
-        write_bytes_atomic(target, payload.read_bytes(), mode=mode)
+        write_bytes_atomic(target, _read_regular_bytes(payload, payload_metadata), mode=mode)
     elif kind == "directory":
         payload = _snapshot_payload_path(project_root, str(snapshot.get("snapshot_path") or ""))
-        if not payload.is_dir():
+        payload_metadata = _lstat(payload)
+        if payload_metadata is None or _node_kind(payload_metadata) != "directory":
             raise RuntimeError(f"Missing journal directory snapshot for {key}")
         _restore_directory(payload, target, mode)
     elif kind == "symlink":
@@ -225,7 +414,8 @@ def _restore_target(project_root: Path, key: str, snapshot: dict) -> Path:
         staged = target.parent / f".{target.name}.restore-link-{uuid.uuid4().hex}"
         os.symlink(str(snapshot.get("link_target") or ""), staged)
         try:
-            if target.exists() and target.is_dir() and not target.is_symlink():
+            target_metadata = _lstat(target)
+            if target_metadata is not None and _node_kind(target_metadata) == "directory":
                 shutil.rmtree(target)
             os.replace(staged, target)
         finally:
@@ -423,6 +613,11 @@ def begin_op(
         key_path = Path(key)
         if any(key_path in Path(other).parents for other in keys[index + 1 :]):
             raise SystemExit(f"Journal targets cannot overlap: {key}")
+    # Validate every declared target before creating any payload or journal
+    # entry.  Existing FIFOs/sockets/devices must fail before the caller can
+    # enter the business mutation body, and must never reach a copying reader.
+    for key in keys:
+        _assert_snapshot_target_supported(_target_path(project_root, key), key)
     sequence_ns = time.time_ns()
     op_id = f"{sequence_ns}-{uuid.uuid4().hex[:12]}"
     resolved_parent_id = str(parent_op_id or "").strip()
@@ -441,7 +636,13 @@ def begin_op(
     else:
         root_op_id, transaction_depth = op_id, 0
         resolved_coordination_scope = str(coordination_scope or "none")
-    before_snapshots = {key: _snapshot_target(project_root, op_id, key) for key in keys}
+    try:
+        before_snapshots = {key: _snapshot_target(project_root, op_id, key) for key in keys}
+    except BaseException:
+        operation_snapshots = journal_root(project_root) / SNAPSHOT_DIRNAME / op_id
+        if operation_snapshots.exists():
+            shutil.rmtree(operation_snapshots)
+        raise
     entry = {
         "op_id": op_id,
         "op_type": str(op_type),

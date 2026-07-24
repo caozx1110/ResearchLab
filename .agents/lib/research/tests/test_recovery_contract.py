@@ -3,6 +3,8 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import os
 from pathlib import Path
+import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -257,6 +259,131 @@ def test_explicit_abort_skips_unchanged_existing_and_absent_targets(tmp_path: Pa
         key: file_digest(tmp_path / "kb" / key)
         for key in entry["target_paths"]
     } == entry["before_digests"]
+
+
+def _digest_in_bounded_subprocess(path: Path) -> str:
+    environment = os.environ.copy()
+    library_root = _project_root() / ".agents" / "lib"
+    existing_pythonpath = environment.get("PYTHONPATH", "")
+    environment["PYTHONPATH"] = os.pathsep.join(
+        part for part in (str(library_root), existing_pythonpath) if part
+    )
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "from pathlib import Path; import sys; "
+                "from research.journal import file_digest; "
+                "print(file_digest(Path(sys.argv[1])))"
+            ),
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=3,
+        env=environment,
+    )
+    return completed.stdout.strip()
+
+
+def test_file_digest_classifies_fifo_and_socket_without_blocking(tmp_path: Path) -> None:
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("FIFO creation is unavailable on this platform")
+    fifo = tmp_path / "root-fifo"
+    os.mkfifo(fifo)
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    (tree / "ordinary.txt").write_bytes(b"ordinary\n")
+    os.mkfifo(tree / "child-fifo")
+
+    digests = [_digest_in_bounded_subprocess(fifo), _digest_in_bounded_subprocess(tree)]
+    if hasattr(socket, "AF_UNIX"):
+        socket_path = tmp_path / "root-socket"
+        endpoint = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        previous_cwd = Path.cwd()
+        try:
+            os.chdir(tmp_path)
+            endpoint.bind(socket_path.name)
+        finally:
+            os.chdir(previous_cwd)
+            endpoint.close()
+        digests.append(_digest_in_bounded_subprocess(socket_path))
+
+    assert all(len(digest) == 64 for digest in digests)
+    assert len(set(digests)) == len(digests)
+
+
+@pytest.mark.parametrize("location", ("root", "directory-child"))
+def test_begin_snapshot_rejects_existing_fifo_before_business_mutation(
+    tmp_path: Path,
+    location: str,
+) -> None:
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("FIFO creation is unavailable on this platform")
+    kb = tmp_path / "kb"
+    kb.mkdir()
+    declared = kb / "notes" / "special-target"
+    declared.parent.mkdir(parents=True)
+    if location == "root":
+        special = declared
+    else:
+        declared.mkdir()
+        special = declared / "child-fifo"
+    os.mkfifo(special)
+    special_before = special.lstat()
+
+    with pytest.raises(SystemExit, match="refuses special filesystem node"):
+        begin_op(tmp_path, "existing-special", [declared])
+
+    special_after = special.lstat()
+    assert stat.S_ISFIFO(special_after.st_mode)
+    assert (special_after.st_dev, special_after.st_ino) == (
+        special_before.st_dev,
+        special_before.st_ino,
+    )
+    assert list((kb / ".journal").glob("*.yaml")) == []
+
+
+@pytest.mark.parametrize("location", ("root", "directory-child"))
+def test_abort_restores_before_image_after_fifo_replacement(
+    tmp_path: Path,
+    location: str,
+) -> None:
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("FIFO creation is unavailable on this platform")
+    declared = tmp_path / "kb" / "notes" / "journal-target"
+    declared.parent.mkdir(parents=True)
+    if location == "root":
+        declared.write_bytes(b"before root replacement\n")
+        replaced = declared
+        expected_digest = file_digest(declared)
+    else:
+        declared.mkdir()
+        replaced = declared / "child.txt"
+        replaced.write_bytes(b"before child replacement\n")
+        expected_digest = file_digest(declared)
+    operation_id = ""
+
+    with pytest.raises(RuntimeError, match="force journal abort"):
+        with journaled_op(tmp_path, "fifo-replacement", [declared]) as operation_id:
+            replaced.unlink()
+            os.mkfifo(replaced)
+            raise RuntimeError("force journal abort")
+
+    assert operation_id
+    assert file_digest(declared) == expected_digest
+    if location == "root":
+        assert declared.read_bytes() == b"before root replacement\n"
+    else:
+        assert replaced.read_bytes() == b"before child replacement\n"
+    entry = load_op(tmp_path, operation_id)
+    assert entry["state"] == "abort"
+    assert "restoration_error" not in entry
+    assert entry["before_digests"] == {
+        entry["target_paths"][0]: expected_digest,
+    }
 
 
 def test_resume_of_unchanged_incomplete_operation_preserves_target_identity(
