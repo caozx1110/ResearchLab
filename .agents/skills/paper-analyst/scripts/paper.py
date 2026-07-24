@@ -1504,14 +1504,24 @@ def main() -> int:
         raise SystemExit(f"{args.paper_id} is not a paper record")
     unit_root = path.parent
     defer_post_actions = bool(getattr(args, "defer_post_actions", False))
-    paper_preferences, pdf_preferences, preference_binding = resolve_paper_preferences(
-        root, args, record
-    )
-    record.setdefault("payload", {})["preference_contract"] = operation_contract(
-        skill="paper-analyst", operation=args.command
-    )
-    if preference_binding:
-        record["payload"]["preference_binding"] = preference_binding
+    preference_operations = {
+        "prewarm-cache",
+        "screen",
+        "complete-note",
+        "extract-figures",
+        "refresh-structure",
+    }
+    paper_preferences: dict[str, object] = {}
+    pdf_preferences: dict[str, object] = {}
+    if args.command in preference_operations:
+        paper_preferences, pdf_preferences, preference_binding = resolve_paper_preferences(
+            root, args, record
+        )
+        record.setdefault("payload", {})["preference_contract"] = operation_contract(
+            skill="paper-analyst", operation=args.command
+        )
+        if preference_binding:
+            record["payload"]["preference_binding"] = preference_binding
 
     source_chunks: list[dict] = []
     cache_path = _cache_path(unit_root)

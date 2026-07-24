@@ -623,7 +623,11 @@ def test_cli_end_to_end_prepare_fill_verify_persist(tmp_path: Path, monkeypatch:
     assert has_substantive_content(reloaded, "paper") is False  # scaffold is not content
 
     # Agent fills the scaffold; verify persists note.md + core_content.
-    write_yaml_if_changed(fill_path, _legit_note_fill())
+    legit_fill = _legit_note_fill()
+    for element in legit_fill["elements"]:
+        for evidence_ref in element["evidence_refs"]:
+            evidence_ref["source_unit_id"] = paper_id
+    write_yaml_if_changed(fill_path, legit_fill)
     assert _run_cli(paper, monkeypatch, tmp_path, "complete-note", "--phase", "verify",
                     "--paper-id", paper_id, "--defer-post-actions") == 0
     assert (unit_dir / "note.md").exists()
@@ -640,3 +644,47 @@ def test_cli_end_to_end_prepare_fill_verify_persist(tmp_path: Path, monkeypatch:
     with pytest.raises(SystemExit):
         _run_cli(paper, monkeypatch, tmp_path, "complete-note", "--phase", "verify",
                  "--paper-id", paper_id, "--defer-post-actions")
+
+    # Governance-only commands are deliberately not preference consumers.
+    # Exercise the real CLI dispatch so a preference operation allowlist cannot
+    # accidentally block confirmation before the governance gate runs.
+    assert _run_cli(
+        paper,
+        monkeypatch,
+        tmp_path,
+        "confirm",
+        "--paper-id",
+        paper_id,
+        "--confirmed-by",
+        "Human Reviewer",
+        "--evidence",
+        "I reviewed the verified paper analysis.",
+        "--user-authorization",
+        "I confirm this paper analysis.",
+        "--authorization-source",
+        "user_message",
+        "--defer-post-actions",
+    ) == 0
+    assert load_yaml(record_path(tmp_path, "paper", paper_id))["confirmation_status"] == "confirmed"
+
+
+def test_cli_reject_is_not_misclassified_as_a_preference_consumer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paper = _load_paper_module()
+    ensure_workspace(tmp_path)
+    paper_id = "p-reject-000001"
+    write_record(tmp_path, _paper_record(paper_id))
+
+    assert _run_cli(
+        paper,
+        monkeypatch,
+        tmp_path,
+        "reject",
+        "--paper-id",
+        paper_id,
+        "--defer-post-actions",
+    ) == 0
+    rejected = load_yaml(record_path(tmp_path, "paper", paper_id))
+    assert rejected["confirmation_status"] == "rejected"
