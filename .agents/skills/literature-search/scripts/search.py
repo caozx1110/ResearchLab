@@ -102,18 +102,81 @@ def literature_search_preference_context(
     payload: dict[str, Any],
     *,
     stage_id: str = "",
+    existing: dict[str, Any] | None = None,
 ) -> dict[str, object]:
     """Return bounded owner-canonical inputs for one search run."""
-    request = " ".join(str(payload.get("request") or "").split())
-    mode = str(payload.get("mode") or "exploratory").strip() or "exploratory"
-    run_id = str(payload.get("run_id") or "").strip()
-    scope = payload.get("scope") if isinstance(payload.get("scope"), dict) else {}
+    frozen = effective_literature_search_inputs(payload, existing=existing)
     return {
         "stage_id": str(stage_id or ""),
-        "request_digest": _canonical_digest(request),
-        "mode": mode,
-        "run_id": run_id,
-        "scope_digest": _canonical_digest(scope),
+        "request_digest": _canonical_digest(frozen["request"]),
+        "mode": frozen["mode"],
+        "run_id": frozen["run_id"],
+        "scope_digest": _canonical_digest(frozen["scope"]),
+        "budget_digest": _canonical_digest(frozen["budget"]),
+        "review_protocol_digest": _canonical_digest(frozen["review_protocol"]),
+        "reviewers_digest": _canonical_digest(frozen["reviewers"]),
+        "monitor_binding_digest": _canonical_digest(frozen["monitor_binding"]),
+    }
+
+
+def effective_literature_search_inputs(
+    payload: dict[str, Any],
+    *,
+    existing: dict[str, Any] | None = None,
+) -> dict[str, object]:
+    """Resolve the frozen search contract used by both initial and resume calls."""
+    current = (
+        existing
+        if isinstance(existing, dict)
+        and existing.get("id")
+        and existing.get("entry_skill") == "literature-search"
+        else {}
+    )
+
+    def chosen(key: str, default: object) -> object:
+        if key in payload:
+            return payload[key]
+        if key in current:
+            return current[key]
+        return default
+
+    request = " ".join(str(payload.get("request") or "").split())
+    raw_mode = chosen("mode", "exploratory")
+    raw_run_id = chosen("run_id", "")
+    scope = chosen("scope", {})
+    review_protocol = chosen("review_protocol", {})
+    reviewers = chosen("reviewers", [])
+    monitor_binding = chosen("monitor_binding", {})
+    incoming_budget = payload.get("budget") if "budget" in payload else None
+    existing_budget = current.get("budget") if isinstance(current.get("budget"), dict) else {}
+    if incoming_budget is not None and not isinstance(incoming_budget, dict):
+        raise SystemExit("Literature search budget must be a mapping.")
+    budget = {
+        **DEFAULT_EXPLORATORY_BUDGET,
+        **existing_budget,
+        **(incoming_budget or {}),
+    }
+    if not isinstance(raw_mode, str):
+        raise SystemExit("Literature search mode must be text.")
+    if not isinstance(raw_run_id, str):
+        raise SystemExit("Literature search run_id must be text.")
+    if not isinstance(scope, dict):
+        raise SystemExit("Literature search scope must be a mapping.")
+    if not isinstance(review_protocol, dict):
+        raise SystemExit("Literature search review_protocol must be a mapping.")
+    if not isinstance(reviewers, list):
+        raise SystemExit("Literature search reviewers must be a list.")
+    if not isinstance(monitor_binding, dict):
+        raise SystemExit("Literature search monitor_binding must be a mapping.")
+    return {
+        "request": request,
+        "mode": raw_mode.strip() or "exploratory",
+        "run_id": raw_run_id.strip(),
+        "scope": scope,
+        "budget": budget,
+        "review_protocol": review_protocol,
+        "reviewers": reviewers,
+        "monitor_binding": monitor_binding,
     }
 
 
@@ -122,6 +185,7 @@ def resolve_literature_search_preferences(
     payload: dict[str, Any],
     *,
     stage_id: str = "",
+    existing: dict[str, Any] | None = None,
 ) -> dict[str, object]:
     selection_id = payload.get("preference_selection_id", "")
     if not isinstance(selection_id, str):
@@ -132,7 +196,11 @@ def resolve_literature_search_preferences(
             selection_id=selection_id,
             skill="literature-search",
             operation="search",
-            canonical_inputs=literature_search_preference_context(payload, stage_id=stage_id),
+            canonical_inputs=literature_search_preference_context(
+                payload,
+                stage_id=stage_id,
+                existing=existing,
+            ),
         )
     except ValueError as exc:
         raise SystemExit(f"Literature search preference selection is invalid: {exc}") from exc
@@ -215,6 +283,7 @@ def stage_payload(root: Path, payload: dict[str, Any]) -> Path:
         root,
         payload,
         stage_id=current_stage_id,
+        existing=existing,
     )
     search_state: dict[str, Any] = {
         "entry_skill": "literature-search",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import importlib.util
 import json
 import sys
@@ -1138,6 +1139,151 @@ def test_stage_helper_without_selection_keeps_soft_behavior_neutral_and_hard_con
     assert resolved["values_by_path"] == {"profile.constraints": ["offline only"]}
     path = module.stage_payload(tmp_path, payload)
     assert load_yaml(path)["preference_context"]["selection_binding"] == {}
+
+
+@pytest.mark.parametrize(
+    ("field", "mutate"),
+    [
+        ("stage_id", lambda payload, values: values.update(stage_id="source-search-other")),
+        ("request", lambda payload, values: payload.update(request="changed question")),
+        ("mode", lambda payload, values: payload.update(mode="bounded-systematic")),
+        ("run_id", lambda payload, values: payload.update(run_id="run-other")),
+        ("scope", lambda payload, values: payload.update(scope={"facets": ["other"]})),
+        ("budget", lambda payload, values: payload.update(budget={"max_queries": 7})),
+        (
+            "review_protocol",
+            lambda payload, values: payload.update(review_protocol={"mode": "independent"}),
+        ),
+        ("reviewers", lambda payload, values: payload.update(reviewers=[{"reviewer_id": "b"}])),
+        (
+            "monitor_binding",
+            lambda payload, values: payload.update(
+                monitor_binding={"run_id": "monitor-run-b", "task_digest": "b" * 64}
+            ),
+        ),
+    ],
+)
+def test_search_preference_context_binds_every_frozen_field(field, mutate) -> None:
+    module = _search_module()
+    payload = {
+        "request": "robot learning",
+        "mode": "exploratory",
+        "run_id": "run-a",
+        "scope": {"facets": ["robot"]},
+        "budget": {"max_queries": 4},
+        "review_protocol": {},
+        "reviewers": [],
+        "monitor_binding": {},
+    }
+    values = {"stage_id": "source-search-a"}
+    before = module.literature_search_preference_context(payload, **values)
+    mutate(payload, values)
+    after = module.literature_search_preference_context(payload, **values)
+
+    assert after != before, field
+
+
+@pytest.mark.parametrize(
+    ("field", "mutate"),
+    [
+        ("stage_id", lambda payload: payload.update(stage_id="source-search-other")),
+        ("request", lambda payload: payload.update(request="changed question")),
+        ("mode", lambda payload: payload.update(mode="bounded-systematic")),
+        ("run_id", lambda payload: payload.update(run_id="run-other")),
+        ("scope", lambda payload: payload.update(scope={"facets": ["other"]})),
+        ("budget", lambda payload: payload.update(budget={"max_queries": 7})),
+        ("review_protocol", lambda payload: payload.update(review_protocol={"mode": "assisted"})),
+        ("reviewers", lambda payload: payload.update(reviewers=[{"reviewer_id": "b"}])),
+        (
+            "monitor_binding",
+            lambda payload: payload.update(
+                monitor_binding={"run_id": "monitor-run-b", "task_digest": "b" * 64}
+            ),
+        ),
+    ],
+)
+def test_search_old_preference_receipt_rejects_each_scope_replay_before_stage_write(
+    tmp_path: Path,
+    field: str,
+    mutate,
+) -> None:
+    module = _search_module()
+    ensure_workspace(tmp_path)
+    base = {
+        "request": "robot learning",
+        "mode": "exploratory",
+        "run_id": "run-a",
+        "scope": {"facets": ["robot"], "target_count": 20},
+        "budget": {"max_queries": 4},
+        "candidates": [],
+    }
+    selection_id = _record_search_selection(
+        tmp_path,
+        module,
+        base,
+        f"prefsel-search-{field.replace('_', '-')}",
+    )
+    initial = {**base, "preference_selection_id": selection_id}
+    path = module.stage_payload(tmp_path, initial)
+    before = {
+        item.relative_to(path.parent): item.read_bytes()
+        for item in path.parent.glob("*.yaml")
+        if item.is_file()
+    }
+    replay = {**copy.deepcopy(base), "stage_id": path.stem, "preference_selection_id": selection_id}
+    mutate(replay)
+
+    with pytest.raises(SystemExit, match="another task"):
+        module.stage_payload(tmp_path, replay)
+
+    assert {
+        item.relative_to(path.parent): item.read_bytes()
+        for item in path.parent.glob("*.yaml")
+        if item.is_file()
+    } == before, field
+
+
+def test_search_resume_omissions_reuse_the_persisted_frozen_preference_context(
+    tmp_path: Path,
+) -> None:
+    module = _search_module()
+    ensure_workspace(tmp_path)
+    initial = {
+        "request": "resume frozen search",
+        "mode": "exploratory",
+        "run_id": "run-frozen",
+        "scope": {"facets": ["robot"], "target_count": 20},
+        "budget": {"max_queries": 4, "max_candidates": 20},
+        "candidates": [],
+    }
+    selection_id = _record_search_selection(
+        tmp_path,
+        module,
+        initial,
+        "prefsel-search-resume-frozen",
+    )
+    path = module.stage_payload(
+        tmp_path,
+        {**initial, "preference_selection_id": selection_id},
+    )
+    persisted = load_yaml(path)
+    initial_context = module.literature_search_preference_context(
+        initial,
+        stage_id=path.stem,
+    )
+    resume = {
+        "request": initial["request"],
+        "stage_id": path.stem,
+        "preference_selection_id": selection_id,
+        "candidates": [],
+    }
+
+    assert module.literature_search_preference_context(
+        resume,
+        stage_id=path.stem,
+        existing=persisted,
+    ) == initial_context
+    assert module.stage_payload(tmp_path, resume) == path
 
 
 @pytest.mark.parametrize("url", ["javascript:alert(1)", "file:///private/paper", "https://u:p@example.test/a"])
