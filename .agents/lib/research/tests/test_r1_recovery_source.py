@@ -25,6 +25,7 @@ from research.git_ops import (
 from research.common import (
     append_program_reporting_event,
     current_runtime_capabilities,
+    exclusive_file_lock,
     inspect_python_runtime,
     program_reporting_events_path,
 )
@@ -42,6 +43,7 @@ from research.journal import (
     load_op,
     mutation_transaction,
     operation_lock_path,
+    workspace_transaction_lock_path,
 )
 from research.records import default_record
 from research.prefs import ensure_workspace
@@ -510,16 +512,32 @@ def test_config_runtime_command_is_one_scoped_undoable_transaction(
     assert path.read_bytes() == before
 
 
-def test_nested_crash_resume_restores_only_root_before_image_and_aborts_descendants(tmp_path: Path) -> None:
+def test_nested_crash_resume_restores_only_root_before_image_and_aborts_descendants(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _configure_kb_git(tmp_path)
     path = tmp_path / "kb" / "notes" / "nested-crash.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("outer before\n", encoding="utf-8")
     git_checkpoint(tmp_path, "seed nested crash target", auto_init=False, target_paths=[path])
 
-    outer_op_id = begin_op(tmp_path, "outer-command", [path])
+    outer_op_id = begin_op(
+        tmp_path,
+        "outer-command",
+        [path],
+        coordination_scope="workspace-exclusive",
+    )
     path.write_text("outer partial\n", encoding="utf-8")
-    inner_op_id = begin_op(tmp_path, "inner-write", [path], parent_op_id=outer_op_id)
+    # Model a child process that inherited the active root transaction.  A
+    # caller-supplied parent id without this active context is not a quarantine
+    # bypass.
+    monkeypatch.setenv(journal.JOURNAL_PARENT_OP_ENV, outer_op_id)
+    monkeypatch.setenv(journal.JOURNAL_PARENT_ROOT_ENV, tmp_path.resolve().as_posix())
+    with exclusive_file_lock(workspace_transaction_lock_path(tmp_path)):
+        inner_op_id = begin_op(tmp_path, "inner-write", [path])
+    monkeypatch.delenv(journal.JOURNAL_PARENT_OP_ENV)
+    monkeypatch.delenv(journal.JOURNAL_PARENT_ROOT_ENV)
     path.write_text("inner partial\n", encoding="utf-8")
 
     assert [entry["op_id"] for entry in incomplete_ops(tmp_path)] == [outer_op_id]

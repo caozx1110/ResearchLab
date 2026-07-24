@@ -30,10 +30,12 @@ from research.journal import (
     journal_entry_path,
     journaled_op,
     load_op,
+    mutation_transaction,
+    target_path,
 )
 from research.prefs import ensure_workspace
 from research.records import default_record
-from research import git_ops, yaml_io
+from research import git_ops, journal, yaml_io
 from research.yaml_io import load_yaml
 
 
@@ -494,11 +496,11 @@ def test_restore_refuses_committed_operation_with_incomplete_after_digests(tmp_p
 def test_incomplete_ops_lists_only_begin_state_entries(tmp_path: Path) -> None:
     first_target = tmp_path / "kb" / "notes" / "first.md"
     second_target = tmp_path / "kb" / "notes" / "second.md"
-    first_op = begin_op(tmp_path, "first-write", [first_target])
     second_op = begin_op(tmp_path, "second-write", [second_target])
     second_target.parent.mkdir(parents=True, exist_ok=True)
     second_target.write_text("changed\n", encoding="utf-8")
     commit_op(tmp_path, second_op)
+    first_op = begin_op(tmp_path, "first-write", [first_target])
 
     entries = incomplete_ops(tmp_path)
 
@@ -507,6 +509,668 @@ def test_incomplete_ops_lists_only_begin_state_entries(tmp_path: Path) -> None:
     assert entries[0]["before_digests"] == {"notes/first.md": None}
     assert entries[0]["started_at"]
     assert first_op not in {entry["op_id"] for entry in committed_ops(tmp_path)}
+
+
+def test_incomplete_root_quarantines_new_root_before_journal_or_business_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "kb" / "notes" / "quarantine.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("v0\n", encoding="utf-8")
+    first_op = begin_op(tmp_path, "stranded-root", [target])
+    target.write_text("partial-v1\n", encoding="utf-8")
+    journal_before = {
+        path.name: path.read_bytes()
+        for path in (tmp_path / "kb" / ".journal").glob("*.yaml")
+    }
+    entered = False
+
+    with pytest.raises(SystemExit, match="kb resume"):
+        with journaled_op(tmp_path, "forbidden-second-root", [target]):
+            entered = True
+            target.write_text("v2\n", encoding="utf-8")
+
+    assert entered is False
+    assert target.read_text(encoding="utf-8") == "partial-v1\n"
+    assert {
+        path.name: path.read_bytes()
+        for path in (tmp_path / "kb" / ".journal").glob("*.yaml")
+    } == journal_before
+    with pytest.raises(SystemExit, match="kb resume"):
+        begin_op(
+            tmp_path,
+            "caller-labeled-recovery",
+            [target],
+            operation_role="recovery",
+            attach_to_active=False,
+        )
+    with pytest.raises(SystemExit, match="active transaction context"):
+        begin_op(tmp_path, "caller-forged-child", [target], parent_op_id=first_op)
+    assert {
+        path.name: path.read_bytes()
+        for path in (tmp_path / "kb" / ".journal").glob("*.yaml")
+    } == journal_before
+
+    monkeypatch.setattr(
+        git_ops,
+        "git_checkpoint",
+        lambda *args, **kwargs: {"committed": False, "files": []},
+    )
+    restore_operation(tmp_path, first_op, recovery_type="resume")
+    abort_op(tmp_path, first_op)
+    assert target.read_text(encoding="utf-8") == "v0\n"
+
+
+@pytest.mark.parametrize(
+    "malformed_kind",
+    ("truncated", "unknown-state", "duplicate-key", "symlink", "fifo"),
+)
+def test_malformed_journal_entry_quarantines_before_new_runtime_or_business_write(
+    tmp_path: Path,
+    malformed_kind: str,
+) -> None:
+    journal_dir = tmp_path / "kb" / ".journal"
+    journal_dir.mkdir(parents=True)
+    entry_path = journal_dir / "broken.yaml"
+    if malformed_kind == "truncated":
+        entry_path.write_text("op_id: broken\nstate: abort\n", encoding="utf-8")
+    elif malformed_kind == "unknown-state":
+        entry_path.write_text("op_id: broken\nstate: unknown\n", encoding="utf-8")
+    elif malformed_kind == "duplicate-key":
+        entry_path.write_text(
+            "op_id: broken\nop_id: broken\nstate: begin\n",
+            encoding="utf-8",
+        )
+    elif malformed_kind == "symlink":
+        outside = tmp_path / "outside-journal.yaml"
+        outside.write_text("op_id: broken\nstate: begin\n", encoding="utf-8")
+        entry_path.symlink_to(outside)
+    else:
+        if not hasattr(os, "mkfifo"):
+            pytest.skip("FIFO creation is unavailable on this platform")
+        os.mkfifo(entry_path)
+    baseline = sorted(path.name for path in journal_dir.iterdir())
+    target = tmp_path / "kb" / "notes" / "must-not-write.md"
+    entered = False
+
+    with pytest.raises(SystemExit):
+        with mutation_transaction(tmp_path, "blocked-by-malformed-journal", [target]):
+            entered = True
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("unsafe\n", encoding="utf-8")
+
+    assert entered is False
+    assert not target.exists()
+    assert sorted(path.name for path in journal_dir.iterdir()) == baseline
+
+
+def test_legacy_overlapping_roots_without_provable_order_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "kb" / "notes" / "legacy-stack.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("v0\n", encoding="utf-8")
+    first_op = begin_op(tmp_path, "legacy-first", [target])
+    target.write_text("partial-v1\n", encoding="utf-8")
+
+    # Test-only fixture for state written by versions that predate quarantine:
+    # temporarily hide op1, create op2's real partial-state before-image, then
+    # restore op1 to begin.  No production bypass is exposed.
+    first_entry = load_op(tmp_path, first_op)
+    first_entry["state"] = "abort"
+    yaml_io.write_yaml_if_changed(journal_entry_path(tmp_path, first_op), first_entry)
+    second_op = begin_op(tmp_path, "legacy-second", [target])
+    target.write_text("partial-v2\n", encoding="utf-8")
+    first_entry["state"] = "begin"
+    first_entry.pop("completed_at", None)
+    first_entry["sequence_ns"] = 7
+    first_entry["started_at"] = "2026-01-01T00:00:00Z"
+    yaml_io.write_yaml_if_changed(journal_entry_path(tmp_path, first_op), first_entry)
+    second_entry = load_op(tmp_path, second_op)
+    second_entry["sequence_ns"] = 1
+    second_entry["started_at"] = "2025-01-01T00:00:00Z"
+    yaml_io.write_yaml_if_changed(journal_entry_path(tmp_path, second_op), second_entry)
+
+    journals_before = {
+        path.name: path.read_bytes()
+        for path in (tmp_path / "kb" / ".journal").glob("*.yaml")
+    }
+    with pytest.raises(SystemExit, match="因果顺序无法证明"):
+        incomplete_ops(tmp_path)
+    assert target.read_text(encoding="utf-8") == "partial-v2\n"
+    assert {
+        path.name: path.read_bytes()
+        for path in (tmp_path / "kb" / ".journal").glob("*.yaml")
+    } == journals_before
+
+    kb = _load_kb_module()
+    monkeypatch.setattr(sys, "argv", ["kb.py", "--root", str(tmp_path), "resume"])
+    with pytest.raises(SystemExit, match="因果顺序无法证明"):
+        kb.main()
+
+    assert target.read_text(encoding="utf-8") == "partial-v2\n"
+    assert load_op(tmp_path, second_op)["state"] == "begin"
+    assert load_op(tmp_path, first_op)["state"] == "begin"
+    assert {
+        path.name: path.read_bytes()
+        for path in (tmp_path / "kb" / ".journal").glob("*.yaml")
+    } == journals_before
+
+
+def test_public_resume_recovers_disjoint_legacy_roots_in_stable_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = tmp_path / "kb" / "notes" / "legacy-a.md"
+    second = tmp_path / "kb" / "notes" / "legacy-b.md"
+    first.parent.mkdir(parents=True)
+    first.write_text("a0\n", encoding="utf-8")
+    second.write_text("b0\n", encoding="utf-8")
+    first_op = begin_op(tmp_path, "legacy-disjoint-first", [first])
+    first.write_text("a-partial\n", encoding="utf-8")
+    first_entry = load_op(tmp_path, first_op)
+    first_entry["state"] = "abort"
+    yaml_io.write_yaml_if_changed(journal_entry_path(tmp_path, first_op), first_entry)
+    second_op = begin_op(tmp_path, "legacy-disjoint-second", [second])
+    second.write_text("b-partial\n", encoding="utf-8")
+    first_entry["state"] = "begin"
+    yaml_io.write_yaml_if_changed(journal_entry_path(tmp_path, first_op), first_entry)
+
+    expected_order = sorted([first_op, second_op])
+    assert [entry["op_id"] for entry in incomplete_ops(tmp_path)] == expected_order
+    monkeypatch.setattr(
+        git_ops,
+        "git_checkpoint",
+        lambda *args, **kwargs: {"committed": False, "files": []},
+    )
+    kb = _load_kb_module()
+    monkeypatch.setattr(sys, "argv", ["kb.py", "--root", str(tmp_path), "resume"])
+    assert kb.main() == 0
+
+    assert first.read_text(encoding="utf-8") == "a0\n"
+    assert second.read_text(encoding="utf-8") == "b0\n"
+    assert load_op(tmp_path, first_op)["state"] == "abort"
+    assert load_op(tmp_path, second_op)["state"] == "abort"
+    assert incomplete_ops(tmp_path) == []
+
+
+def test_concurrent_resume_consumes_one_root_exactly_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "kb" / "notes" / "single-consume.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("v0\n", encoding="utf-8")
+    operation_id = begin_op(tmp_path, "single-consume-source", [target])
+    target.write_text("partial\n", encoding="utf-8")
+    checkpoint_entered = threading.Event()
+    checkpoint_release = threading.Event()
+    checkpoint_calls = 0
+
+    def paused_checkpoint(*args, **kwargs):
+        nonlocal checkpoint_calls
+        checkpoint_calls += 1
+        checkpoint_entered.set()
+        assert checkpoint_release.wait(timeout=5)
+        return {"committed": False, "files": []}
+
+    monkeypatch.setattr(git_ops, "git_checkpoint", paused_checkpoint)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(restore_operation, tmp_path, operation_id, recovery_type="resume")
+        assert checkpoint_entered.wait(timeout=5)
+        second = executor.submit(restore_operation, tmp_path, operation_id, recovery_type="resume")
+        assert not second.done()
+        checkpoint_release.set()
+        first_result = first.result(timeout=5)
+        second_result = second.result(timeout=5)
+
+    assert checkpoint_calls == 1
+    assert first_result.get("status") != "already-resumed"
+    assert second_result["status"] == "already-resumed"
+    assert target.read_text(encoding="utf-8") == "v0\n"
+    source = load_op(tmp_path, operation_id)
+    assert source["state"] == "abort"
+    assert source["resumed_by"] == first_result["recovery_op_id"]
+
+
+def test_failed_disjoint_resume_does_not_advance_to_later_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    targets = [
+        tmp_path / "kb" / "notes" / "failure-a.md",
+        tmp_path / "kb" / "notes" / "failure-b.md",
+    ]
+    targets[0].parent.mkdir(parents=True)
+    for index, target in enumerate(targets):
+        target.write_text(f"v{index}\n", encoding="utf-8")
+    first_op = begin_op(tmp_path, "failure-first", [targets[0]])
+    targets[0].write_text("partial-a\n", encoding="utf-8")
+    first_entry = load_op(tmp_path, first_op)
+    first_entry["state"] = "abort"
+    yaml_io.write_yaml_if_changed(journal_entry_path(tmp_path, first_op), first_entry)
+    second_op = begin_op(tmp_path, "failure-second", [targets[1]])
+    targets[1].write_text("partial-b\n", encoding="utf-8")
+    first_entry["state"] = "begin"
+    yaml_io.write_yaml_if_changed(journal_entry_path(tmp_path, first_op), first_entry)
+    ordered = incomplete_ops(tmp_path)
+    first_selected = str(ordered[0]["op_id"])
+    later_selected = str(ordered[1]["op_id"])
+    selected_target = targets[0] if first_selected == first_op else targets[1]
+    later_target = targets[1] if later_selected == second_op else targets[0]
+    later_before = later_target.read_bytes()
+
+    def fail_checkpoint(*args, **kwargs):
+        raise OSError("simulated recovery checkpoint failure")
+
+    monkeypatch.setattr(git_ops, "git_checkpoint", fail_checkpoint)
+    kb = _load_kb_module()
+    monkeypatch.setattr(sys, "argv", ["kb.py", "--root", str(tmp_path), "resume"])
+    with pytest.raises(OSError, match="checkpoint failure"):
+        kb.main()
+
+    assert selected_target.read_text(encoding="utf-8").startswith("v")
+    assert later_target.read_bytes() == later_before
+    assert load_op(tmp_path, first_selected)["state"] == "begin"
+    assert load_op(tmp_path, later_selected)["state"] == "begin"
+
+
+def test_resume_terminalizes_root_last_and_retries_after_descendant_write_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "kb" / "notes" / "root-last.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("v0\n", encoding="utf-8")
+    root_op = begin_op(
+        tmp_path,
+        "root-last-source",
+        [target],
+        coordination_scope="workspace-exclusive",
+    )
+    target.write_text("root-partial\n", encoding="utf-8")
+    root_entry = load_op(tmp_path, root_op)
+    root_entry["state"] = "abort"
+    yaml_io.write_yaml_if_changed(journal_entry_path(tmp_path, root_op), root_entry)
+    child_op = begin_op(tmp_path, "root-last-child", [target])
+    target.write_text("child-partial\n", encoding="utf-8")
+    child_entry = load_op(tmp_path, child_op)
+    child_entry["parent_op_id"] = root_op
+    child_entry["root_op_id"] = root_op
+    child_entry["transaction_depth"] = 1
+    child_entry["coordination_scope"] = "inherited"
+    yaml_io.write_yaml_if_changed(journal_entry_path(tmp_path, child_op), child_entry)
+    root_entry["state"] = "begin"
+    yaml_io.write_yaml_if_changed(journal_entry_path(tmp_path, root_op), root_entry)
+
+    monkeypatch.setattr(
+        git_ops,
+        "git_checkpoint",
+        lambda *args, **kwargs: {"committed": False, "files": []},
+    )
+    real_write = journal.write_yaml_if_changed
+    failed = False
+
+    def fail_child_terminal(path: Path, payload: object) -> None:
+        nonlocal failed
+        if (
+            not failed
+            and path == journal_entry_path(tmp_path, child_op)
+            and isinstance(payload, dict)
+            and payload.get("state") == "abort"
+        ):
+            failed = True
+            raise OSError("simulated descendant terminalization failure")
+        real_write(path, payload)
+
+    monkeypatch.setattr(journal, "write_yaml_if_changed", fail_child_terminal)
+    with pytest.raises(OSError, match="descendant terminalization"):
+        restore_operation(tmp_path, root_op, recovery_type="resume")
+
+    assert load_op(tmp_path, root_op)["state"] == "begin"
+    assert load_op(tmp_path, child_op)["state"] == "begin"
+    result = restore_operation(tmp_path, root_op, recovery_type="resume")
+    assert result["recovery_op_id"]
+    assert target.read_text(encoding="utf-8") == "v0\n"
+    assert load_op(tmp_path, child_op)["state"] == "abort"
+    assert load_op(tmp_path, root_op)["state"] == "abort"
+
+
+def test_leaf_symlink_is_snapshotted_and_restored_as_lexical_target(tmp_path: Path) -> None:
+    real = tmp_path / "kb" / "notes" / "real.txt"
+    real.parent.mkdir(parents=True)
+    real.write_text("referent\n", encoding="utf-8")
+    alias = real.parent / "alias.txt"
+    alias.symlink_to("real.txt")
+    operation_id = ""
+
+    with pytest.raises(RuntimeError, match="force lexical abort"):
+        with journaled_op(tmp_path, "replace-leaf-symlink", [alias]) as operation_id:
+            alias.unlink()
+            alias.write_text("replacement\n", encoding="utf-8")
+            raise RuntimeError("force lexical abort")
+
+    assert operation_id
+    entry = load_op(tmp_path, operation_id)
+    assert entry["target_paths"] == ["notes/alias.txt"]
+    assert entry["before_snapshots"]["notes/alias.txt"]["kind"] == "symlink"
+    assert alias.is_symlink()
+    assert os.readlink(alias) == "real.txt"
+    assert real.read_text(encoding="utf-8") == "referent\n"
+
+
+@pytest.mark.parametrize("link_kind", ("dangling", "relative", "absolute-outside"))
+def test_leaf_symlink_abort_preserves_exact_link_text_and_never_touches_referent(
+    tmp_path: Path,
+    link_kind: str,
+) -> None:
+    notes = tmp_path / "kb" / "notes"
+    notes.mkdir(parents=True)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside-sentinel\n", encoding="utf-8")
+    link_text = {
+        "dangling": "missing.txt",
+        "relative": "../outside.txt",
+        "absolute-outside": outside.as_posix(),
+    }[link_kind]
+    alias = notes / "alias.txt"
+    alias.symlink_to(link_text)
+
+    with pytest.raises(RuntimeError, match="force exact-link abort"):
+        with journaled_op(tmp_path, "exact-link-abort", [alias]):
+            alias.unlink()
+            alias.write_text("replacement\n", encoding="utf-8")
+            raise RuntimeError("force exact-link abort")
+
+    assert alias.is_symlink()
+    assert os.readlink(alias) == link_text
+    assert outside.read_text(encoding="utf-8") == "outside-sentinel\n"
+
+
+def test_committed_leaf_symlink_undo_uses_lexical_git_scope(tmp_path: Path) -> None:
+    _configure_kb_git(tmp_path)
+    notes = tmp_path / "kb" / "notes"
+    notes.mkdir(parents=True, exist_ok=True)
+    alias = notes / "alias.txt"
+    alias.symlink_to("missing-before.txt")
+    git_checkpoint(tmp_path, "seed lexical symlink", auto_init=False, target_paths=[alias])
+
+    with mutation_transaction(tmp_path, "change-lexical-symlink", [alias]):
+        alias.unlink()
+        alias.symlink_to("missing-after.txt")
+    git_checkpoint(tmp_path, "checkpoint changed symlink", auto_init=False, target_paths=[alias])
+    undo_last_operation(tmp_path)
+
+    assert alias.is_symlink()
+    assert os.readlink(alias) == "missing-before.txt"
+    tracked = subprocess.run(
+        ["git", "-C", str(tmp_path / "kb"), "ls-files", "--", "notes/alias.txt"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    assert tracked == ["notes/alias.txt"]
+
+
+@pytest.mark.parametrize(
+    "unsafe_target",
+    ("absolute-key", "parent-key", "noncanonical-key"),
+)
+def test_target_path_rejects_unsafe_journal_keys(tmp_path: Path, unsafe_target: str) -> None:
+    key = {
+        "absolute-key": "/outside",
+        "parent-key": "../outside",
+        "noncanonical-key": "notes/../outside",
+    }[unsafe_target]
+    with pytest.raises(SystemExit):
+        target_path(tmp_path, key)
+    assert not (tmp_path / "kb" / ".journal").exists()
+
+
+@pytest.mark.parametrize("unsafe_kind", ("outside", "parent-traversal", "symlink-ancestor"))
+def test_declared_unsafe_target_fails_before_journal_and_business_write(
+    tmp_path: Path,
+    unsafe_kind: str,
+) -> None:
+    kb_root = tmp_path / "kb"
+    kb_root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    if unsafe_kind == "outside":
+        declared = outside / "record.yaml"
+    elif unsafe_kind == "parent-traversal":
+        declared = Path(os.fspath(kb_root) + "/notes/../escaped.yaml")
+    else:
+        (kb_root / "linked").symlink_to(outside, target_is_directory=True)
+        declared = kb_root / "linked" / "record.yaml"
+    entered = False
+
+    with pytest.raises(SystemExit):
+        with mutation_transaction(tmp_path, "unsafe-declared-target", [declared]):
+            entered = True
+            declared.write_text("unsafe\n", encoding="utf-8")
+
+    assert entered is False
+    assert not (kb_root / ".journal").exists()
+    assert not (outside / "record.yaml").exists()
+
+
+@pytest.mark.parametrize("stage", ("snapshot", "commit-digest", "restore-digest"))
+def test_anchored_journal_path_rejects_ancestor_swap_without_touching_outside(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+) -> None:
+    notes = tmp_path / "kb" / "notes"
+    notes.mkdir(parents=True)
+    target = notes / "victim.txt"
+    target.write_text("inside-before\n", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside_target = outside / "victim.txt"
+    outside_target.write_text("outside-sentinel\n", encoding="utf-8")
+    operation_id = ""
+    if stage != "snapshot":
+        operation_id = begin_op(tmp_path, "anchored-source", [target])
+        target.write_text("inside-after\n", encoding="utf-8")
+        if stage == "restore-digest":
+            commit_op(tmp_path, operation_id)
+
+    real_anchored_parent = journal._anchored_target_parent
+    swapped = False
+
+    @contextmanager
+    def swap_before_open(project_root: Path, key: str, *, create_missing: bool = False):
+        nonlocal swapped
+        if not swapped and key == "notes/victim.txt":
+            swapped = True
+            os.replace(notes, tmp_path / "parked-notes")
+            notes.symlink_to(outside, target_is_directory=True)
+        with real_anchored_parent(project_root, key, create_missing=create_missing) as anchored:
+            yield anchored
+
+    monkeypatch.setattr(journal, "_anchored_target_parent", swap_before_open)
+    with pytest.raises(SystemExit, match="ancestor"):
+        if stage == "snapshot":
+            begin_op(tmp_path, "anchored-snapshot", [target])
+        elif stage == "commit-digest":
+            commit_op(tmp_path, operation_id)
+        else:
+            restore_operation(tmp_path, operation_id)
+
+    assert swapped is True
+    assert outside_target.read_text(encoding="utf-8") == "outside-sentinel\n"
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    (
+        "target-missing",
+        "target-duplicate",
+        "target-noncanonical",
+        "before-digest-missing",
+        "before-snapshot-extra",
+        "after-digest-missing",
+        "legacy-snapshots-empty",
+        "snapshot-path-escape",
+        "snapshot-payload-missing",
+        "snapshot-payload-drift",
+        "snapshot-kind-invalid",
+    ),
+)
+def test_recovery_rejects_malformed_target_sets_before_any_recovery_write(
+    tmp_path: Path,
+    tamper: str,
+) -> None:
+    first = tmp_path / "kb" / "notes" / "a.txt"
+    second = tmp_path / "kb" / "notes" / "b.txt"
+    first.parent.mkdir(parents=True)
+    first.write_text("a0\n", encoding="utf-8")
+    second.write_text("b0\n", encoding="utf-8")
+    with journaled_op(tmp_path, "two-target-source", [first, second]) as operation_id:
+        first.write_text("a1\n", encoding="utf-8")
+        second.write_text("b1\n", encoding="utf-8")
+    entry = load_op(tmp_path, operation_id)
+    first_key, second_key = entry["target_paths"]
+    if tamper == "target-missing":
+        entry["target_paths"] = [first_key]
+    elif tamper == "target-duplicate":
+        entry["target_paths"] = [first_key, first_key, second_key]
+    elif tamper == "target-noncanonical":
+        entry["target_paths"] = ["notes/../notes/a.txt", second_key]
+    elif tamper == "before-digest-missing":
+        entry["before_digests"].pop(second_key)
+    elif tamper == "before-snapshot-extra":
+        entry["before_snapshots"]["notes/extra.txt"] = {"kind": "absent", "digest": None}
+    elif tamper == "after-digest-missing":
+        entry["after_digests"].pop(second_key)
+    elif tamper == "legacy-snapshots-empty":
+        entry["before_snapshots"] = {}
+    elif tamper == "snapshot-path-escape":
+        entry["before_snapshots"][first_key]["snapshot_path"] = "../outside"
+    elif tamper == "snapshot-payload-missing":
+        payload = tmp_path / "kb" / ".journal" / entry["before_snapshots"][first_key]["snapshot_path"]
+        payload.unlink()
+    elif tamper == "snapshot-payload-drift":
+        payload = tmp_path / "kb" / ".journal" / entry["before_snapshots"][first_key]["snapshot_path"]
+        payload.write_text("tampered snapshot bytes\n", encoding="utf-8")
+    else:
+        entry["before_snapshots"][first_key]["kind"] = "unknown"
+    yaml_io.write_yaml_if_changed(journal_entry_path(tmp_path, operation_id), entry)
+    journal_names = {path.name for path in (tmp_path / "kb" / ".journal").glob("*.yaml")}
+    target_state = (_lstat_state(first), _lstat_state(second))
+
+    with pytest.raises(SystemExit):
+        restore_operation(tmp_path, operation_id)
+
+    assert (_lstat_state(first), _lstat_state(second)) == target_state
+    assert {path.name for path in (tmp_path / "kb" / ".journal").glob("*.yaml")} == journal_names
+
+
+def test_recovery_rejects_raw_yaml_duplicate_mapping_keys(tmp_path: Path) -> None:
+    target = tmp_path / "kb" / "notes" / "duplicate-map.txt"
+    target.parent.mkdir(parents=True)
+    target.write_text("before\n", encoding="utf-8")
+    with journaled_op(tmp_path, "duplicate-map-source", [target]) as operation_id:
+        target.write_text("after\n", encoding="utf-8")
+    entry = load_op(tmp_path, operation_id)
+    key = entry["target_paths"][0]
+    digest = entry["before_digests"][key]
+    entry_path = journal_entry_path(tmp_path, operation_id)
+    text = entry_path.read_text(encoding="utf-8")
+    text = text.replace(
+        "before_digests:\n",
+        f"before_digests:\n  {key}: {digest}\n",
+        1,
+    )
+    entry_path.write_text(text, encoding="utf-8")
+    journal_names = {path.name for path in (tmp_path / "kb" / ".journal").glob("*.yaml")}
+
+    with pytest.raises(SystemExit, match="重复字段"):
+        restore_operation(tmp_path, operation_id)
+
+    assert target.read_text(encoding="utf-8") == "after\n"
+    assert {path.name for path in (tmp_path / "kb" / ".journal").glob("*.yaml")} == journal_names
+
+
+def test_recovery_source_byte_cas_rejects_change_after_validation_before_restore(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "kb" / "notes" / "source-cas.txt"
+    target.parent.mkdir(parents=True)
+    target.write_text("before\n", encoding="utf-8")
+    with journaled_op(tmp_path, "source-cas-operation", [target]) as operation_id:
+        target.write_text("after\n", encoding="utf-8")
+    real_validate = git_ops.validated_recovery_target_keys
+    changed = False
+
+    def mutate_after_validation(project_root: Path, entry: dict, *, require_after: bool):
+        nonlocal changed
+        keys = real_validate(project_root, entry, require_after=require_after)
+        if not changed:
+            changed = True
+            replacement = load_op(tmp_path, operation_id)
+            key = replacement["target_paths"][0]
+            replacement["before_snapshots"][key] = {
+                "kind": "absent",
+                "mode": None,
+                "digest": None,
+            }
+            yaml_io.write_yaml_if_changed(journal_entry_path(tmp_path, operation_id), replacement)
+        return keys
+
+    monkeypatch.setattr(git_ops, "validated_recovery_target_keys", mutate_after_validation)
+    journal_names = {path.name for path in (tmp_path / "kb" / ".journal").glob("*.yaml")}
+    with pytest.raises(SystemExit, match="执行前发生变化"):
+        restore_operation(tmp_path, operation_id)
+
+    assert changed is True
+    assert target.read_text(encoding="utf-8") == "after\n"
+    assert {path.name for path in (tmp_path / "kb" / ".journal").glob("*.yaml")} == journal_names
+
+
+def test_resume_rejects_incomplete_journal_with_partial_snapshot_map(tmp_path: Path) -> None:
+    first = tmp_path / "kb" / "notes" / "begin-a.txt"
+    second = tmp_path / "kb" / "notes" / "begin-b.txt"
+    first.parent.mkdir(parents=True)
+    first.write_text("a0\n", encoding="utf-8")
+    second.write_text("b0\n", encoding="utf-8")
+    operation_id = begin_op(tmp_path, "malformed-begin", [first, second])
+    first.write_text("a-partial\n", encoding="utf-8")
+    second.write_text("b-partial\n", encoding="utf-8")
+    entry = load_op(tmp_path, operation_id)
+    entry["before_snapshots"].pop(entry["target_paths"][1])
+    yaml_io.write_yaml_if_changed(journal_entry_path(tmp_path, operation_id), entry)
+    journal_names = {path.name for path in (tmp_path / "kb" / ".journal").glob("*.yaml")}
+
+    with pytest.raises(SystemExit, match="目标集合"):
+        restore_operation(tmp_path, operation_id, recovery_type="resume")
+
+    assert first.read_text(encoding="utf-8") == "a-partial\n"
+    assert second.read_text(encoding="utf-8") == "b-partial\n"
+    assert {path.name for path in (tmp_path / "kb" / ".journal").glob("*.yaml")} == journal_names
+
+
+def test_undo_rejects_legacy_journal_without_before_snapshots(tmp_path: Path) -> None:
+    target = tmp_path / "kb" / "notes" / "legacy-no-snapshot.txt"
+    target.parent.mkdir(parents=True)
+    target.write_text("before\n", encoding="utf-8")
+    with journaled_op(tmp_path, "legacy-source", [target]) as operation_id:
+        target.write_text("after\n", encoding="utf-8")
+    entry = load_op(tmp_path, operation_id)
+    entry.pop("before_snapshots")
+    yaml_io.write_yaml_if_changed(journal_entry_path(tmp_path, operation_id), entry)
+    journal_names = {path.name for path in (tmp_path / "kb" / ".journal").glob("*.yaml")}
+
+    with pytest.raises(SystemExit, match="恢复前状态记录"):
+        undo_last_operation(tmp_path)
+
+    assert target.read_text(encoding="utf-8") == "after\n"
+    assert yaml_io.load_yaml(journal_entry_path(tmp_path, operation_id)).get("undone_by") in (None, "")
+    assert {path.name for path in (tmp_path / "kb" / ".journal").glob("*.yaml")} == journal_names
 
 
 def test_write_record_creates_committed_journal_entry(tmp_path: Path) -> None:
@@ -695,6 +1359,120 @@ def _configure_kb_git(root: Path) -> None:
         auto_init=False,
         target_paths=dirty_kb_paths(root),
     )
+
+
+def test_pending_root_blocks_manual_milestone_and_public_checkpoints_before_git_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_kb_git(tmp_path)
+    target = tmp_path / "kb" / "notes" / "pending-checkpoint.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("v0\n", encoding="utf-8")
+    git_checkpoint(tmp_path, "seed checkpoint target", auto_init=False, target_paths=[target])
+    operation_id = begin_op(tmp_path, "stranded-checkpoint-source", [target])
+    target.write_text("partial-v1\n", encoding="utf-8")
+
+    def git_state() -> tuple[str, str, str]:
+        head = subprocess.run(
+            ["git", "-C", str(tmp_path / "kb"), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        index = subprocess.run(
+            ["git", "-C", str(tmp_path / "kb"), "ls-files", "--stage"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        status = subprocess.run(
+            ["git", "-C", str(tmp_path / "kb"), "status", "--porcelain=v1"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        return head, index, status
+
+    before_git = git_state()
+    before_journal = {
+        path.relative_to(tmp_path / "kb" / ".journal").as_posix(): path.read_bytes()
+        for path in (tmp_path / "kb" / ".journal").rglob("*")
+        if path.is_file()
+    }
+    kb = _load_kb_module()
+
+    with pytest.raises(SystemExit, match="kb resume"):
+        git_checkpoint(tmp_path, "manual while pending", auto_init=False, target_paths=[target])
+    with pytest.raises(SystemExit, match="kb resume"):
+        git_ops.maybe_auto_checkpoint(
+            tmp_path,
+            trigger="milestone",
+            message="milestone while pending",
+            target_paths=[target],
+        )
+    with pytest.raises(SystemExit, match="kb resume"):
+        ensure_kb_git_repo(tmp_path, create_initial_commit=False)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["kb.py", "--root", str(tmp_path), "git-checkpoint", "--message", "public pending"],
+    )
+    with pytest.raises(SystemExit, match="kb resume"):
+        kb.main()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["kb.py", "--root", str(tmp_path), "git-init", "--no-initial-commit"],
+    )
+    with pytest.raises(SystemExit, match="kb resume"):
+        kb.main()
+
+    assert target.read_text(encoding="utf-8") == "partial-v1\n"
+    assert git_state() == before_git
+    assert {
+        path.relative_to(tmp_path / "kb" / ".journal").as_posix(): path.read_bytes()
+        for path in (tmp_path / "kb" / ".journal").rglob("*")
+        if path.is_file()
+    } == before_journal
+    assert load_op(tmp_path, operation_id)["state"] == "begin"
+
+
+def test_symlinked_journal_root_blocks_checkpoint_without_git_or_target_write(tmp_path: Path) -> None:
+    _configure_kb_git(tmp_path)
+    target = tmp_path / "kb" / "notes" / "journal-root-symlink.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("v0\n", encoding="utf-8")
+    git_checkpoint(tmp_path, "seed symlink-root target", auto_init=False, target_paths=[target])
+    real_journal = tmp_path / "saved-journal-runtime"
+    os.replace(tmp_path / "kb" / ".journal", real_journal)
+    fake_journal = tmp_path / "outside-journal-runtime"
+    fake_journal.mkdir()
+    (tmp_path / "kb" / ".journal").symlink_to(fake_journal, target_is_directory=True)
+    target.write_text("dirty\n", encoding="utf-8")
+
+    def git_state() -> tuple[str, str, str]:
+        return tuple(
+            subprocess.run(
+                ["git", "-C", str(tmp_path / "kb"), *args],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+            for args in (
+                ("rev-parse", "HEAD"),
+                ("ls-files", "--stage"),
+                ("status", "--porcelain=v1"),
+            )
+        )
+
+    before = git_state()
+    with pytest.raises(SystemExit, match="恢复隔离状态"):
+        git_checkpoint(tmp_path, "must not checkpoint", auto_init=False, target_paths=[target])
+
+    assert git_state() == before
+    assert target.read_text(encoding="utf-8") == "dirty\n"
+    assert list(fake_journal.iterdir()) == []
 
 
 def test_git_checkpoint_stages_only_target_paths(tmp_path: Path) -> None:
