@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 from pathlib import Path
 
@@ -122,6 +123,21 @@ def _optional_path_snapshot(
             else None
         )
         for path in paths
+    }
+
+
+def _symlink_snapshot(path: Path) -> tuple[str, tuple[int, int, int]]:
+    metadata = path.lstat()
+    return os.readlink(path), (metadata.st_dev, metadata.st_ino, metadata.st_mode)
+
+
+def _journal_entry_snapshot(root: Path) -> dict[str, bytes]:
+    journal = root / "kb/.journal"
+    if not journal.exists():
+        return {}
+    return {
+        path.relative_to(journal).as_posix(): path.read_bytes()
+        for path in journal.glob("*.yaml")
     }
 
 
@@ -1191,6 +1207,115 @@ def test_prepared_generation_bundle_rejects_generic_bundle_entrypoints(
     with pytest.raises(ValueError):
         idea.update_bundle(root, bundle_id, idea_ids=[])
     assert _path_snapshot([index_path]) == before
+
+
+@pytest.mark.parametrize("attack", ["index_symlink", "bundle_ancestor_symlink"])
+def test_generic_bundle_symlink_paths_fail_before_journal_without_touching_victim(
+    tmp_path: Path, monkeypatch, attack: str
+) -> None:
+    idea = _load_idea_module()
+    root = tmp_path / "workspace"
+    _multi_setup(root, idea, count=1)
+    pool = "unsafe-pool"
+    bundle_id = "unsafe-pool"
+    pools_root = root / "kb/synthesis/idea-pools"
+    pools_root.mkdir(parents=True, exist_ok=True)
+    bundle = pools_root / bundle_id
+    victim = root / "victim-bundle"
+    victim.mkdir()
+    victim_index = victim / "index.yaml"
+    write_yaml_if_changed(victim_index, {"id": "victim", "sentinel": "preserve"})
+    victim_marker = victim / "marker.txt"
+    victim_marker.write_text("do not touch\n", encoding="utf-8")
+    if attack == "index_symlink":
+        bundle.mkdir()
+        link_path = bundle / "index.yaml"
+        link_path.symlink_to(victim_index)
+    else:
+        link_path = bundle
+        link_path.symlink_to(victim, target_is_directory=True)
+    victim_before = _path_snapshot([victim_index, victim_marker])
+    link_before = _symlink_snapshot(link_path)
+    journal_before = _journal_entry_snapshot(root)
+
+    with pytest.raises(SystemExit):
+        _run(idea, monkeypatch, "review-assist", "--pool", pool)
+    assert _path_snapshot([victim_index, victim_marker]) == victim_before
+    assert _symlink_snapshot(link_path) == link_before
+    assert not (victim / "review-assist.md").exists()
+    assert _journal_entry_snapshot(root) == journal_before
+
+    with pytest.raises(SystemExit):
+        _run(
+            idea,
+            monkeypatch,
+            "select-best",
+            "--pool",
+            pool,
+            "--evidence",
+            "fixture",
+        )
+    with pytest.raises(ValueError):
+        idea.ensure_bundle(
+            root, bundle_id, title="unsafe", source="", pool=pool, strategy="review"
+        )
+    with pytest.raises(ValueError):
+        idea.update_bundle(root, bundle_id, idea_ids=[])
+    assert _path_snapshot([victim_index, victim_marker]) == victim_before
+    assert _symlink_snapshot(link_path) == link_before
+    assert _journal_entry_snapshot(root) == journal_before
+
+
+def test_generic_bundle_locked_preflight_rejects_index_symlink_swap(
+    tmp_path: Path, monkeypatch
+) -> None:
+    idea = _load_idea_module()
+    root = tmp_path / "workspace"
+    _multi_setup(root, idea, count=1)
+    pool = "locked-swap-pool"
+    bundle_id = "locked-swap-pool"
+    idea.ensure_bundle(
+        root, bundle_id, title="safe before swap", source="", pool=pool, strategy="review"
+    )
+    bundle = root / "kb/synthesis/idea-pools" / bundle_id
+    index_path = bundle / "index.yaml"
+    victim = root / "locked-swap-victim.yaml"
+    write_yaml_if_changed(victim, {"sentinel": "preserve"})
+    victim_before = _path_snapshot([victim])
+    journal_before = _journal_entry_snapshot(root)
+    original_preflight = idea._idea_transaction_preflight
+    swapped: dict[str, object] = {}
+
+    def swap_under_lock(args, project_root):
+        if not swapped:
+            index_path.unlink()
+            index_path.symlink_to(victim)
+            swapped["link"] = _symlink_snapshot(index_path)
+        return original_preflight(args, project_root)
+
+    monkeypatch.setattr(idea, "_idea_transaction_preflight", swap_under_lock)
+    with pytest.raises(SystemExit):
+        _run(idea, monkeypatch, "review-assist", "--pool", pool)
+    assert _symlink_snapshot(index_path) == swapped["link"]
+    assert _path_snapshot([victim]) == victim_before
+    assert not (bundle / "review-assist.md").exists()
+    assert _journal_entry_snapshot(root) == journal_before
+
+
+def test_generic_bundle_regular_path_still_supports_review_assist(
+    tmp_path: Path, monkeypatch
+) -> None:
+    idea = _load_idea_module()
+    root = tmp_path / "workspace"
+    idea_ids, _source_id, _evidence = _multi_setup(root, idea, count=1)
+    assert _run(
+        idea, monkeypatch, "review-assist", "--idea-id", idea_ids[0]
+    ) == 0
+    bundles = [path for path in (root / "kb/synthesis/idea-pools").iterdir() if path.is_dir()]
+    assert len(bundles) == 1
+    assert (bundles[0] / "index.yaml").is_file()
+    assert not (bundles[0] / "index.yaml").is_symlink()
+    assert (bundles[0] / "review-assist.md").is_file()
 
 
 def test_legacy_v1_generation_is_one_time_and_records_value_free_provenance(

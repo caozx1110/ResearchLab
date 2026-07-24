@@ -140,6 +140,54 @@ def _index_checkpoint_paths(root: Path) -> list[Path]:
     ]
 
 
+def _generic_bundle_id(args) -> str:
+    if str(args.bundle_id or ""):
+        return str(args.bundle_id)
+    if str(args.pool or ""):
+        return slugify(args.pool, max_words=12) or "idea-pool"
+    idea_ids = list(args.idea_id)
+    return f"idea-review-{hashlib.sha1(' '.join(idea_ids).encode('utf-8')).hexdigest()[:8]}"
+
+
+def _assert_safe_generic_bundle_path(root: Path, bundle_id: str) -> None:
+    lexical_root = root.absolute()
+    pool_root = (synthesis_root(root) / "idea-pools").absolute()
+    bundle = bundle_root(root, bundle_id).absolute()
+    try:
+        relative_bundle = bundle.relative_to(pool_root)
+        relative_to_workspace = bundle.relative_to(lexical_root)
+    except ValueError as exc:
+        raise ValueError("idea bundle path escaped its managed directory") from exc
+    if not relative_bundle.parts:
+        raise ValueError("idea bundle id must identify one managed bundle")
+    cursor = lexical_root
+    if cursor.is_symlink() or (cursor.exists() and not cursor.is_dir()):
+        raise ValueError("idea bundle path has an unsafe workspace root")
+    for part in relative_to_workspace.parts:
+        cursor = cursor / part
+        if cursor.is_symlink() or (cursor.exists() and not cursor.is_dir()):
+            raise ValueError("idea bundle path has a symlink or non-directory ancestor")
+    index_path = bundle / "index.yaml"
+    if index_path.is_symlink() or (index_path.exists() and not index_path.is_file()):
+        raise ValueError("idea bundle index must be a lexical regular file")
+
+
+def _generic_bundle_preflight(args, root: Path) -> None:
+    bundle_id = _generic_bundle_id(args)
+    planned = str(getattr(args, "_planned_generic_bundle_id", "") or "")
+    if planned and planned != bundle_id:
+        raise SystemExit("Idea bundle resolution changed before the operation lock.")
+    try:
+        _assert_safe_generic_bundle_path(root, bundle_id)
+        existing = load_yaml(bundle_index_path(root, bundle_id), default={})
+        if _is_prepared_generation_bundle(existing):
+            raise ValueError(
+                "prepared idea generation bundle cannot be used by generic bundle operations"
+            )
+    except ValueError as exc:
+        raise SystemExit("Idea bundle state is unsafe or reserved.") from exc
+
+
 def _queue_checkpoint(root: Path, *, trigger: str, message: str, target_paths: list[Path]) -> dict:
     if _ACTIVE_MUTATION.get():
         _PENDING_CHECKPOINT.set((root, trigger, message, target_paths))
@@ -168,8 +216,10 @@ def _idea_command_targets(args, root: Path) -> list[Path]:
         return [bundle_index_path(root, bundle_id), *idea_paths, *targets]
     if args.command in {"review-assist", "select-best"}:
         idea_ids = list(args.idea_id)
-        bundle_id = args.bundle_id
-        if bundle_id:
+        bundle_id = _generic_bundle_id(args)
+        _assert_safe_generic_bundle_path(root, bundle_id)
+        args._planned_generic_bundle_id = bundle_id
+        if args.bundle_id:
             payload = load_yaml(bundle_index_path(root, bundle_id), default={})
             idea_ids = list(payload.get("idea_ids", [])) if isinstance(payload, dict) else []
         elif args.pool:
@@ -178,9 +228,6 @@ def _idea_command_targets(args, root: Path) -> list[Path]:
                 record["id"] for record in iter_records(root, kind="idea")
                 if normalized_pool in record.get("candidate_pools", [])
             ]
-            bundle_id = normalized_pool or "idea-pool"
-        else:
-            bundle_id = f"idea-review-{hashlib.sha1(' '.join(idea_ids).encode('utf-8')).hexdigest()[:8]}"
         existing_bundle = load_yaml(bundle_index_path(root, bundle_id), default={})
         if _is_prepared_generation_bundle(existing_bundle):
             raise ValueError(
@@ -490,6 +537,9 @@ def _idea_verify_preflight(args, root: Path) -> None:
 
 
 def _idea_transaction_preflight(args, root: Path) -> None:
+    if args.command in {"review-assist", "select-best"}:
+        _generic_bundle_preflight(args, root)
+        return
     _idea_prepare_preflight(args, root)
     _idea_verify_preflight(args, root)
 
@@ -1849,7 +1899,9 @@ def generation_materialization_plan(root: Path, args, *, bundle_id: str) -> dict
 
 
 def ensure_bundle(root: Path, bundle_id: str, *, title: str, source: str, pool: str, strategy: str = "generated") -> dict:
+    _assert_safe_generic_bundle_path(root, bundle_id)
     ensure_dir(bundle_root(root, bundle_id))
+    _assert_safe_generic_bundle_path(root, bundle_id)
     existing = load_yaml(bundle_index_path(root, bundle_id), default={})
     if _is_prepared_generation_bundle(existing):
         raise ValueError("prepared idea generation bundle cannot be used by generic bundle operations")
