@@ -10,7 +10,7 @@ Use this skill when a real workflow exposes friction in the research system, whe
 ## Workflow
 
 1. For lightweight memory, log one short learning and leave it `pending` until user review.
-2. Recall confirmed user preferences and recurring issues at session start.
+2. Do not recall or broadcast the full memory at session start. Confirmed habits that should affect work are promoted to the canonical preference profile; each routed consumer then receives only its task-eligible selected subset. Recall recurring issues only for an explicit memory/diagnostic task.
 3. Keep `skill-defect` entries record-only; do not auto-edit skills or roadmap files from them.
 4. For deeper retrospectives, record which skills were used, separate observed friction from inferred causes, and generate an AI-ready patch prompt.
 5. When the user explicitly asks to remember a failure, record one local redacted diagnostic issue even if automatic diagnostics are off.

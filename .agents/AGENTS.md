@@ -15,7 +15,7 @@ Default preference order:
 - Preserve original English paper titles, repository names, benchmark names, and technical terms on first mention.
 - YAML keys, IDs, slugs, and folder names stay ASCII-safe.
 - Runtime configuration belongs in `kb/config/`; private runtime hand-offs belong in `kb/.runtime/`.
-- At session start, read the optional personalization block in `kb/config/user-profile.yaml` and confirmed preference memory once. `research-navigator` may project convenience pages, but it is not a required product entrypoint or a source of truth. Personalization is user context, never confirmed fact, and never overrides governance.
+- At session start, load product rules and hard governance only; do not read or broadcast the full personalization profile or confirmed preference memory. First route the current request to an owner and operation, then ask `research-config-manager` for that operation's eligible view and select only the task-relevant subset under the Preference memory contract below. An explicit preference in the current user message wins for that task. `research-navigator` may project convenience pages, but it is not a required product entrypoint or a source of truth.
 - When the user explicitly asks you to record a correction or friction, do so through `skill-evolution-advisor`. Otherwise capture it only when the effective diagnostics policy enables capture. Skill defects are record-only: never rewrite a skill from a captured defect.
 
 ## Conversational contract
