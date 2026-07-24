@@ -1,6 +1,7 @@
 import importlib.util
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -17,7 +18,17 @@ from research.git_ops import (
     restore_operation,
     undo_last_operation,
 )
-from research.journal import abort_op, begin_op, commit_op, committed_ops, incomplete_ops, journal_entry_path, load_op
+from research.journal import (
+    abort_op,
+    begin_op,
+    commit_op,
+    committed_ops,
+    file_digest,
+    incomplete_ops,
+    journal_entry_path,
+    journaled_op,
+    load_op,
+)
 from research.prefs import ensure_workspace
 from research.records import default_record
 from research import git_ops, yaml_io
@@ -46,6 +57,24 @@ def _load_paper_module():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def _lstat_state(path: Path) -> tuple[int, int, int, object]:
+    metadata = path.lstat()
+    if path.is_symlink():
+        payload: object = os.readlink(path)
+    elif path.is_file():
+        payload = path.read_bytes()
+    else:
+        payload = None
+    return metadata.st_dev, metadata.st_ino, metadata.st_mode, payload
+
+
+def _tree_lstat_state(path: Path) -> dict[str, tuple[int, int, int, object]]:
+    return {
+        item.relative_to(path).as_posix() or ".": _lstat_state(item)
+        for item in [path, *sorted(path.rglob("*"))]
+    }
 
 
 @pytest.mark.parametrize(
@@ -128,6 +157,134 @@ def test_operation_journal_tracks_begin_commit_and_abort(tmp_path: Path) -> None
 
     with pytest.raises(SystemExit, match="Invalid operation id"):
         load_op(tmp_path, "../outside")
+
+
+def test_journaled_abort_without_target_writes_preserves_file_and_tree_identities(
+    tmp_path: Path,
+) -> None:
+    file_target = tmp_path / "kb" / "notes" / "unchanged.md"
+    tree_target = tmp_path / "kb" / "artifacts" / "unchanged-tree"
+    file_target.parent.mkdir(parents=True)
+    tree_target.mkdir(parents=True)
+    file_target.write_bytes(b"unchanged file bytes\n")
+    tree_child = tree_target / "child.txt"
+    tree_child.write_bytes(b"unchanged tree bytes\n")
+    (tree_target / "child-link").symlink_to("child.txt")
+    os.chmod(file_target, 0o640)
+    os.chmod(tree_target, 0o750)
+
+    file_before = _lstat_state(file_target)
+    tree_before = _tree_lstat_state(tree_target)
+    operation_id = ""
+
+    with pytest.raises(RuntimeError, match="expected validation rejection"):
+        with journaled_op(
+            tmp_path,
+            "zero-write-validation-failure",
+            [file_target, tree_target],
+        ) as operation_id:
+            raise RuntimeError("expected validation rejection")
+
+    assert operation_id
+    assert _lstat_state(file_target) == file_before
+    assert _tree_lstat_state(tree_target) == tree_before
+    entry = load_op(tmp_path, operation_id)
+    assert entry["state"] == "abort"
+    assert entry["after_digests"] == {}
+    assert {
+        key: file_digest(tmp_path / "kb" / key)
+        for key in entry["target_paths"]
+    } == entry["before_digests"]
+
+
+def test_journaled_abort_mixed_targets_skips_unchanged_and_restores_only_divergence(
+    tmp_path: Path,
+) -> None:
+    unchanged = tmp_path / "kb" / "notes" / "unchanged.md"
+    changed = tmp_path / "kb" / "notes" / "changed.md"
+    created = tmp_path / "kb" / "notes" / "created.md"
+    unchanged.parent.mkdir(parents=True)
+    unchanged.write_bytes(b"unchanged\n")
+    changed.write_bytes(b"before\n")
+    os.chmod(unchanged, 0o600)
+    os.chmod(changed, 0o640)
+    unchanged_before = _lstat_state(unchanged)
+    changed_before_digest = file_digest(changed)
+    operation_id = ""
+
+    with pytest.raises(RuntimeError, match="mixed failure"):
+        with journaled_op(
+            tmp_path,
+            "mixed-zero-churn-failure",
+            [unchanged, changed, created],
+        ) as operation_id:
+            changed.write_bytes(b"after\n")
+            os.chmod(changed, 0o600)
+            created.write_bytes(b"created\n")
+            raise RuntimeError("mixed failure")
+
+    assert _lstat_state(unchanged) == unchanged_before
+    assert changed.read_bytes() == b"before\n"
+    assert changed.stat().st_mode & 0o777 == 0o640
+    assert file_digest(changed) == changed_before_digest
+    assert not created.exists() and not created.is_symlink()
+    entry = load_op(tmp_path, operation_id)
+    assert entry["state"] == "abort"
+    assert entry["after_digests"] == {}
+    assert {
+        key: file_digest(tmp_path / "kb" / key)
+        for key in entry["target_paths"]
+    } == entry["before_digests"]
+
+
+def test_explicit_abort_skips_unchanged_existing_and_absent_targets(tmp_path: Path) -> None:
+    existing = tmp_path / "kb" / "notes" / "existing.md"
+    absent = tmp_path / "kb" / "notes" / "absent.md"
+    existing.parent.mkdir(parents=True)
+    existing.write_bytes(b"same before and after\n")
+    os.chmod(existing, 0o600)
+    existing_before = _lstat_state(existing)
+    operation_id = begin_op(tmp_path, "explicit-zero-churn-abort", [existing, absent])
+
+    abort_op(tmp_path, operation_id, restore=True, error="validation rejected")
+
+    assert _lstat_state(existing) == existing_before
+    assert not absent.exists() and not absent.is_symlink()
+    entry = load_op(tmp_path, operation_id)
+    assert entry["state"] == "abort"
+    assert entry["operation_error"] == "validation rejected"
+    assert {
+        key: file_digest(tmp_path / "kb" / key)
+        for key in entry["target_paths"]
+    } == entry["before_digests"]
+
+
+def test_resume_of_unchanged_incomplete_operation_preserves_target_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "kb" / "notes" / "unchanged-resume.md"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"unchanged incomplete target\n")
+    os.chmod(target, 0o640)
+    target_before = _lstat_state(target)
+    operation_id = begin_op(tmp_path, "unchanged-incomplete", [target])
+    monkeypatch.setattr(
+        git_ops,
+        "git_checkpoint",
+        lambda *args, **kwargs: {"committed": False, "files": []},
+    )
+
+    result = restore_operation(tmp_path, operation_id, recovery_type="resume")
+
+    assert _lstat_state(target) == target_before
+    assert result["restored_paths"] == ["notes/unchanged-resume.md"]
+    recovery = load_op(tmp_path, result["recovery_op_id"])
+    assert recovery["state"] == "commit"
+    assert recovery["before_digests"] == recovery["after_digests"]
+    abort_op(tmp_path, operation_id)
+    assert load_op(tmp_path, operation_id)["state"] == "abort"
+    assert incomplete_ops(tmp_path) == []
 
 
 @pytest.mark.parametrize("action", ["restore", "undo"])
