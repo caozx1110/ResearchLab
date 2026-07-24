@@ -883,6 +883,23 @@ def test_detached_git_local_rebind_fails_closed_without_manifest_churn(tmp_path:
     # Historical manifests with the same invalid binding must also fail closed.
     assert updater.check(install, tmp_path / "cache")["status"] == "needs_source_choice"
 
+    attached_choice = tmp_path / "attached-choice"
+    subprocess.run(
+        ["git", "clone", "--branch", "feature/local", "--", str(source), str(attached_choice)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    rebound = updater.rebind_source(
+        install,
+        expected_manifest_digest=local_choice["apply"]["expected_manifest_digest"],
+        source_checkout=str(attached_choice),
+        source_strategy=local_choice["apply"]["source_strategy"],
+    )
+    assert rebound["source_checkout"] == str(attached_choice)
+    assert rebound["source_branch"] == "feature/local"
+    assert rebound["source_origin"] == str(source)
+
 
 def test_attached_git_and_nongit_local_rebinds_are_explicitly_supported(tmp_path: Path) -> None:
     attached_install = tmp_path / "attached-install"
@@ -1033,6 +1050,38 @@ def test_rebind_rejects_stale_digest_and_local_mismatch_without_byte_change(monk
         )
     assert detached.value.code == "source-branch-mismatch"
     assert manifest.read_bytes() == before
+
+
+def test_local_rebind_rechecks_checkout_head_at_manifest_commit_boundary(monkeypatch, tmp_path: Path) -> None:
+    install = tmp_path / "install"
+    manifest = _write_copy_manifest(install, source_repo="")
+    before = manifest.read_bytes()
+    inode_before = manifest.stat().st_ino
+    source = tmp_path / "source"
+    (source / ".git").mkdir(parents=True)
+    (source / ".agents").mkdir()
+    (source / ".agents" / "VERSION").write_text("0.2.0\n", encoding="utf-8")
+    (source / "install-lib").mkdir()
+    (source / "install-lib" / "ws_sync.py").write_text("", encoding="utf-8")
+    monkeypatch.setattr(updater, "_checkout_origin", lambda _checkout: "ssh://example.test/team/source.git")
+    monkeypatch.setattr(updater, "_checkout_branch", lambda _checkout: "release/r17")
+    commits = iter(("commit-before", "commit-after"))
+    monkeypatch.setattr(updater, "_source_commit", lambda _checkout: next(commits))
+
+    with pytest.raises(updater.SourceRebindError) as changed:
+        updater.rebind_source(
+            install,
+            expected_manifest_digest=hashlib.sha256(before).hexdigest(),
+            source_origin="ssh://example.test/team/source.git",
+            source_checkout=str(source),
+            source_branch="release/r17",
+            source_strategy="local-checkout",
+        )
+
+    assert changed.value.code == "source-commit-mismatch"
+    assert manifest.read_bytes() == before
+    assert manifest.stat().st_ino == inode_before
+    assert not list(manifest.parent.glob("..install-manifest.json.*.tmp"))
 
 
 def test_rebind_rejects_manifest_symlink_and_symlinked_ancestor_without_touching_target(tmp_path: Path) -> None:

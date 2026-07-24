@@ -11,7 +11,7 @@ import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator, Sequence
+from typing import Any, Callable, Iterator, Sequence
 
 import fcntl
 
@@ -391,6 +391,7 @@ def _write_manifest_at(
     expected_content: bytes,
     replacement: bytes,
     mode: int,
+    precommit_check: Callable[[], None] | None = None,
 ) -> None:
     """CAS and atomically replace the manifest through the anchored directory."""
     _assert_anchored_agents(root_fd, agents_fd)
@@ -419,6 +420,8 @@ def _write_manifest_at(
         _payload, current, _status = _read_manifest_at(agents_fd)
         if not hmac.compare_digest(_manifest_digest(current), _manifest_digest(expected_content)):
             raise SourceRebindError("stale-manifest", "the install manifest changed before commit")
+        if precommit_check is not None:
+            precommit_check()
         os.replace(
             temporary_name,
             MANIFEST_REL.name,
@@ -460,24 +463,25 @@ def source_choice_request(install_root: Path) -> dict[str, Any]:
         actual_origin = _checkout_origin(checkout) if checkout_valid and is_git_checkout(checkout) else ""
         actual_branch = _checkout_branch(checkout) if checkout_valid and is_git_checkout(checkout) else ""
         checkout_is_git = bool(checkout_valid and checkout is not None and is_git_checkout(checkout))
+        origin = recorded_origin if _valid_origin(recorded_origin) else (
+            actual_origin if _valid_origin(actual_origin) else ""
+        )
+        branch = recorded_branch if _valid_branch_name(recorded_branch) else (
+            actual_branch if _valid_branch_name(actual_branch) else ""
+        )
         local_checkout_reusable = bool(
             checkout_valid
             and (
                 not checkout_is_git
                 or (
                     _valid_branch_name(actual_branch)
+                    and branch == actual_branch
                     and (
-                        (actual_origin and recorded_origin == actual_origin)
-                        or (not actual_origin and recorded_origin in {"", LOCAL_ORIGIN})
+                        (actual_origin and origin == actual_origin)
+                        or (not actual_origin and origin in {"", LOCAL_ORIGIN})
                     )
                 )
             )
-        )
-        origin = recorded_origin if _valid_origin(recorded_origin) else (
-            actual_origin if _valid_origin(actual_origin) else ""
-        )
-        branch = recorded_branch if _valid_branch_name(recorded_branch) else (
-            actual_branch if _valid_branch_name(actual_branch) else ""
         )
 
         current: dict[str, str] = {}
@@ -587,6 +591,7 @@ def rebind_source(
         branch = str(source_branch or "").strip()
         checkout_value = ""
         commit = ""
+        precommit_check: Callable[[], None] | None = None
 
         if strategy == REMOTE_BRANCH_STRATEGY:
             if not _valid_origin(origin) or origin == LOCAL_ORIGIN:
@@ -633,6 +638,33 @@ def rebind_source(
             except (OSError, subprocess.SubprocessError) as exc:
                 raise SourceRebindError("invalid-source-commit", "the selected checkout commit cannot be verified") from exc
 
+            def validate_checkout_at_commit() -> None:
+                if not _strict_source_checkout(checkout) or is_git_checkout(checkout) != git_checkout:
+                    raise SourceRebindError("invalid-source-checkout", "the selected checkout changed before rebind")
+                if git_checkout:
+                    final_origin = _checkout_origin(checkout)
+                    final_branch = _checkout_branch(checkout)
+                    if origin == LOCAL_ORIGIN:
+                        if final_origin:
+                            raise SourceRebindError("source-origin-mismatch", "the checkout origin changed before rebind")
+                    elif final_origin != origin:
+                        raise SourceRebindError("source-origin-mismatch", "the checkout origin changed before rebind")
+                    if final_branch != branch or not _valid_branch_name(final_branch):
+                        raise SourceRebindError("source-branch-mismatch", "the checkout branch changed before rebind")
+                    try:
+                        final_commit = _source_commit(checkout)
+                    except (OSError, subprocess.SubprocessError) as exc:
+                        raise SourceRebindError(
+                            "invalid-source-commit",
+                            "the selected checkout commit cannot be reverified",
+                        ) from exc
+                    if not hmac.compare_digest(final_commit, commit):
+                        raise SourceRebindError("source-commit-mismatch", "the checkout HEAD changed before rebind")
+                elif origin != LOCAL_ORIGIN or branch:
+                    raise SourceRebindError("source-origin-mismatch", "the local bundle binding changed before rebind")
+
+            precommit_check = validate_checkout_at_commit
+
         replacement = dict(manifest)
         replacement.update(
             {
@@ -652,6 +684,7 @@ def rebind_source(
                 expected_content=content,
                 replacement=rendered,
                 mode=status.st_mode,
+                precommit_check=precommit_check,
             )
         return {
             "status": "rebound",
