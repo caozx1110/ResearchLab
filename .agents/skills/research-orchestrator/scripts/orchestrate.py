@@ -52,7 +52,7 @@ from research.evidence import attach_claims, build_verification_receipt, validat
 from research.judgements import apply_judgement_rejection, confirmation_binding, discover_pending_judgements, judgement_confirmation_is_current, judgement_snapshot_binding, readiness_violations, require_judgement_snapshot
 from research.journal import mutation_transaction
 from research.monitoring import due_subscriptions, unresolved_monitor_outcomes
-from research.preference_selection import load_effective_selection
+from research.preference_selection import resolve_task_preferences, selection_binding
 
 OPEN_QUESTION_OPEN_STATUSES = {"open"}
 EVIDENCE_REQUEST_OPEN_STATUSES = {"open"}
@@ -1654,6 +1654,19 @@ def portfolio_decision_fill_template(snapshot: dict[str, Any]) -> dict[str, Any]
     }
 
 
+def portfolio_preference_context(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Canonical owner inputs binding one preference choice to one planning snapshot."""
+    return {
+        "candidate_snapshot_digest": str(snapshot.get("candidate_snapshot_digest") or ""),
+        "scope": snapshot.get("scope") if isinstance(snapshot.get("scope"), dict) else {},
+        "candidate_action_ids": sorted(
+            str(item.get("action_id") or "")
+            for item in snapshot.get("candidates", [])
+            if isinstance(item, dict) and str(item.get("action_id") or "")
+        ),
+    }
+
+
 def _load_portfolio_history(root: Path) -> dict[str, Any]:
     path = portfolio_history_path(root)
     if path.parent.is_symlink() or path.is_symlink() or (path.exists() and not path.is_file()):
@@ -1668,16 +1681,20 @@ def _load_portfolio_history(root: Path) -> dict[str, Any]:
     return payload
 
 
-def _validate_preference_selection_reference(root: Path, selection_id: str, task_context_digest: str) -> None:
+def _validate_preference_selection_reference(
+    root: Path,
+    selection_id: str,
+    snapshot: dict[str, Any],
+) -> dict[str, object]:
     if not selection_id:
         raise SystemExit("Portfolio decision requires an effective preference selection")
     try:
-        load_effective_selection(
+        return resolve_task_preferences(
             root,
             selection_id=selection_id,
             skill="research-orchestrator",
             operation="plan",
-            expected_task_context_digest=task_context_digest,
+            canonical_inputs=portfolio_preference_context(snapshot),
         )
     except ValueError as exc:
         raise SystemExit("Referenced preference selection is unavailable, invalid, or stale") from exc
@@ -1773,7 +1790,11 @@ def validate_portfolio_decision(
         if not str(decision.get(field) or "").strip():
             raise SystemExit(f"Portfolio decision requires non-empty {field}")
     preference_selection_id = str(decision.get("preference_selection_id") or "").strip()
-    _validate_preference_selection_reference(root, preference_selection_id, expected_digest)
+    effective_preferences = _validate_preference_selection_reference(
+        root,
+        preference_selection_id,
+        snapshot,
+    )
     decision_scope = str(decision.get("decision_scope") or "procedural_planning").strip()
     if decision_scope not in PORTFOLIO_DECISION_SCOPES:
         raise SystemExit("Portfolio decision_scope is invalid")
@@ -1819,6 +1840,7 @@ def validate_portfolio_decision(
         "expected_information_gain": str(decision.get("expected_information_gain") or "").strip(),
         "cost_and_risk": str(decision.get("cost_and_risk") or "").strip(),
         "preference_selection_id": preference_selection_id,
+        "preference_selection_binding": selection_binding(effective_preferences),
         "decision_scope": decision_scope,
         "program_decision_ids": program_decision_ids,
         "program_decision_bindings": program_decision_bindings,
@@ -1886,13 +1908,20 @@ def current_portfolio_decision(root: Path, snapshot: dict[str, Any]) -> dict[str
             if not isinstance(stored_program_bindings, dict) or stored_program_bindings != current_program_bindings:
                 stale_reasons.append("program_decision_changed")
     try:
-        _validate_preference_selection_reference(
+        effective_preferences = _validate_preference_selection_reference(
             root,
             str(current.get("preference_selection_id") or ""),
-            str(snapshot.get("candidate_snapshot_digest") or ""),
+            snapshot,
         )
     except SystemExit:
         stale_reasons.append("preference_selection_stale")
+    else:
+        stored_preference_binding = current.get("preference_selection_binding")
+        if (
+            not isinstance(stored_preference_binding, dict)
+            or stored_preference_binding != selection_binding(effective_preferences)
+        ):
+            stale_reasons.append("preference_selection_changed")
     current["effective_status"] = "stale" if stale_reasons else "current"
     current["stale_reasons"] = sorted(set(stale_reasons))
     if not stale_reasons:

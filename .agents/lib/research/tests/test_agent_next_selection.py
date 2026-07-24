@@ -51,7 +51,7 @@ def _program(orchestrate, root: Path, program_id: str, *, actions: list[str] | N
     write_yaml_if_changed(orchestrate.state_path(root, program_id), state)
 
 
-def _effective_preference_selection(root: Path, task_context_digest: str) -> str:
+def _effective_preference_selection(root: Path, task_context: dict[str, object]) -> str:
     eligible = eligible_preferences(root, skill="research-orchestrator", operation="plan")
     selected = []
     excluded = []
@@ -71,7 +71,7 @@ def _effective_preference_selection(root: Path, task_context_digest: str) -> str
                 "skill": "research-orchestrator",
                 "operation": "plan",
                 "catalog_digest": eligible["catalog_digest"],
-                "task_context_digest": task_context_digest,
+                "task_context": task_context,
                 "selected": selected,
                 "excluded": excluded,
             },
@@ -87,7 +87,16 @@ def _decision(root: Path, snapshot: dict, action_ids: list[str], *, decision_id:
         "rationale": "This action addresses the current evidence gap; the other candidates can wait.",
         "expected_information_gain": "It will distinguish the two remaining hypotheses.",
         "cost_and_risk": "One short analysis pass; no external commitment.",
-        "preference_selection_id": _effective_preference_selection(root, snapshot["candidate_snapshot_digest"]),
+        "preference_selection_id": _effective_preference_selection(
+            root,
+            {
+                "candidate_snapshot_digest": snapshot["candidate_snapshot_digest"],
+                "scope": snapshot["scope"],
+                "candidate_action_ids": sorted(
+                    item["action_id"] for item in snapshot["candidates"]
+                ),
+            },
+        ),
         "decision_scope": "procedural_planning",
         "program_decision_ids": [],
         "decided_at": "2026-07-24T12:00:00+08:00",
