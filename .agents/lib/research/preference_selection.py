@@ -188,11 +188,14 @@ SKILL_OPERATIONS: dict[str, tuple[str, ...]] = {
 # for runtime-Agent consumers, but still require a declared operation above.
 OPERATION_ELIGIBILITY: dict[tuple[str, str], tuple[str, ...]] = {
     ("source-intake", "add"): ("profile.constraints", "runtime.paper", "runtime.pdf", "learned.*"),
-    ("report-author", "weekly"): ("profile.personalization.reporting_style", "learned.*"),
-    ("report-author", "ppt-materials"): ("profile.personalization.reporting_style", "learned.*"),
-    ("report-author", "stage-summary"): ("profile.personalization.reporting_style", "learned.*"),
-    ("report-author", "writing-materials"): ("profile.personalization.reporting_style", "learned.*"),
-    ("report-author", "outline"): ("profile.personalization.reporting_style", "learned.*"),
+    **{
+        ("report-author", operation): (
+            "profile.preferences.language_preference",
+            "profile.personalization.reporting_style",
+            "learned.*",
+        )
+        for operation in SKILL_OPERATIONS["report-author"]
+    },
     ("literature-search", "search"): (
         "profile.preferences.language_preference",
         "profile.personalization.research_focus",

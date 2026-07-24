@@ -59,6 +59,23 @@ def test_declared_consumer_operations_are_real_not_aspirational() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    "operation",
+    ("weekly", "ppt-materials", "stage-summary", "writing-materials", "outline"),
+)
+def test_every_report_operation_discloses_language_and_reporting_style(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    root = _configured_workspace(tmp_path)
+    paths = {
+        str(item["path"])
+        for item in eligible_preferences(root, skill="report-author", operation=operation)["items"]
+    }
+    assert "profile.preferences.language_preference" in paths
+    assert "profile.personalization.reporting_style" in paths
+
+
 def test_semantic_consumers_have_closed_canonical_input_registries() -> None:
     expected_pairs = {
         (skill, operation)
