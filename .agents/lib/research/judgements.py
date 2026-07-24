@@ -227,6 +227,7 @@ def readiness_violations(root: Path, record: Any, artifact_path: Path) -> list[s
             verification_receipt_violations(
                 record,
                 verification_root,
+                external_source=record_external_source_contract(record),
                 source_roots=source_roots,
             )
         )

@@ -31,7 +31,11 @@ from research.common import load_yaml, write_yaml_if_changed
 from research.confirm import confirm_unit, has_substantive_content
 from research.core import ensure_workspace, record_path, write_record
 from research.evidence import attach_claims, build_verification_receipt
-from research.judgements import judgement_confirmation_is_current
+from research.judgements import (
+    discover_pending_judgements,
+    judgement_confirmation_is_current,
+    readiness_violations,
+)
 from research.records import kind_payload_skeleton
 
 
@@ -217,6 +221,14 @@ def test_capability_fill_legit_evidence_validates_and_clears_substance_gate(tmp_
         record_path(tmp_path, "repo", record["id"]).parent,
         external_source={"kind": "repo", "base_root": mini.resolve().as_posix()},
     )
+
+    # The cross-owner review resolver must use the same trusted external-source
+    # contract as repo verification and confirmation.  A coarse workflow state
+    # alone is not sufficient for the public inbox.
+    canonical_path = write_record(tmp_path, record)
+    assert readiness_violations(tmp_path, record, canonical_path) == []
+    cards = discover_pending_judgements(tmp_path)
+    assert [card["subject"]["id"] for card in cards] == [record["id"]]
 
     cap = record["payload"]["capability"]
     assert cap["core_capabilities"]  # capability -> core_capabilities (clears gate)
