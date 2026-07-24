@@ -106,7 +106,10 @@ def test_fresh_install_rejects_unverified_existing_managed_block(tmp_path: Path)
     )
     agents.write_text(original, encoding="utf-8")
 
-    for extra in (("--codex", "--agent-plan"), ("--codex",)):
+    for extra in (
+        ("--codex", "--agent-plan", "--agent-plan-json", str(tmp_path / "unverified-plan.json")),
+        ("--codex",),
+    ):
         result = _run_installer(workspace, "install", *extra)
         assert result.returncode == 1
         assert agents.read_text(encoding="utf-8") == original
@@ -127,7 +130,10 @@ def test_reinstall_rejects_managed_block_drift_unless_forced(tmp_path: Path) -> 
     )
     agents.write_text(drifted, encoding="utf-8")
 
-    for extra in (("--agent-plan",), ()):
+    for extra in (
+        ("--agent-plan", "--agent-plan-json", str(tmp_path / "drift-plan.json")),
+        (),
+    ):
         rejected = _run_installer(workspace, "reinstall", *extra)
         assert rejected.returncode == 3
         assert agents.read_text(encoding="utf-8") == drifted

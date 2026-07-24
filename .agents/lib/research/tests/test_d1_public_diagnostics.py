@@ -122,7 +122,7 @@ def test_default_off_failure_creates_no_diagnostic_write(monkeypatch, tmp_path: 
     assert captured.err == "知识库状态暂时无法读取；详细诊断已保留给 Agent。\n"
     assert capture.calls == [
         {
-            "skill": "research-navigator",
+            "skill": "knowledge-base-manager",
             "operation": "status",
             "returncode": 17,
             "public_summary": "知识库操作未完成。",
@@ -151,7 +151,7 @@ def test_enabled_failure_creates_one_issue_and_repeat_bumps(monkeypatch, tmp_pat
 
 def test_per_skill_off_overrides_developer_mode(monkeypatch, tmp_path: Path, capsys) -> None:
     kb = _load_kb_cli()
-    capture = CaptureDependencyStub("developer", skill_modes={"research-navigator": "off"})
+    capture = CaptureDependencyStub("developer", skill_modes={"knowledge-base-manager": "off"})
     monkeypatch.setattr(kb, "_capture_runtime_failure", capture)
     monkeypatch.setattr(kb.subprocess, "run", lambda *args, **kwargs: _child_result(5))
 
@@ -202,7 +202,7 @@ def test_capture_exception_preserves_original_exit_and_public_text(
         {
             "code": "runtime-failure-capture-failed",
             "operation": "status",
-            "skill": "research-navigator",
+            "skill": "knowledge-base-manager",
         }
     ]
     assert "secret traceback" not in protocol_text
