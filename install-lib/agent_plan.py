@@ -56,7 +56,8 @@ def main() -> int:
     output = Path(args.output).expanduser()
     if output.exists() and (output.is_symlink() or not output.is_file()):
         raise SystemExit("plan output must be a regular file or a new path")
-    output.parent.mkdir(parents=True, exist_ok=True)
+    if output.parent.is_symlink() or not output.parent.is_dir():
+        raise SystemExit("plan output parent must be an existing regular directory")
 
     targets: list[dict[str, Any]] = []
     for kind, value, path, source, condition in args.target_record:

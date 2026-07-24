@@ -144,6 +144,34 @@ def test_agent_plan_requires_explicit_json_result_path(tmp_path: Path) -> None:
     assert not any(workspace.iterdir())
 
 
+def test_agent_plan_does_not_create_an_unplanned_output_parent(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    missing_parent = tmp_path / "missing-plan-parent"
+    result = subprocess.run(
+        [
+            "bash",
+            str(_project_root() / "install.sh"),
+            "--agent-plan-json",
+            str(missing_parent / "plan.json"),
+            "--codex",
+            "--project",
+            str(workspace),
+            "--yes",
+        ],
+        cwd=_project_root(),
+        env={**os.environ, "HOME": str(tmp_path / "home"), "NO_COLOR": "1"},
+        stdin=subprocess.DEVNULL,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert not missing_parent.exists()
+    assert not any(workspace.iterdir())
+
+
 def test_agent_apply_contract_rejects_source_commit_drift_without_reading_stdin(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
