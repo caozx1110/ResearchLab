@@ -38,6 +38,7 @@ from research.common import (
 from research.core import append_history, build_index, build_unit_id, candidate_pools_path, command_mutation, confirm_unit, default_record, ensure_workspace, kb_root, locate_record, project_root, record_path, rel, topic_taxonomy_path, write_record
 from research.evidence import attach_claims, build_verification_receipt, validate_claims, verify_claim_evidence
 from research.judgements import confirmation_binding
+from research.preference_selection import resolve_operation_preferences
 
 RUN_OUTCOME_CHOICES = ["success", "partial", "failed", "blocked", "inconclusive"]
 CLASSIFICATION_CHOICES = ["method", "implementation", "data", "evaluation", "resource", "environment", "process", "unknown"]
@@ -209,6 +210,114 @@ def _run_identity_payload(
 def _sha256_payload(payload: dict[str, Any]) -> str:
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def experiment_preference_context(
+    args: argparse.Namespace,
+    record: dict[str, Any] | None = None,
+) -> dict[str, object]:
+    """Return bounded canonical task inputs for one preference-sensitive action."""
+    command = str(getattr(args, "command", "") or "")
+    if command == "plan":
+        return {
+            "program_id": str(args.program_id or ""),
+            "title_digest": _sha256_payload({"text": _normalized_text(args.title)}),
+            "idea_id": str(args.idea_id or ""),
+            "goal_digest": _sha256_payload({"text": _normalized_text(args.goal)}),
+            "hypothesis_digest": _sha256_payload({"text": _normalized_text(args.hypothesis)}),
+        }
+    record = record if isinstance(record, dict) else {}
+    base: dict[str, object] = {
+        "experiment_id": str(getattr(args, "experiment_id", "") or ""),
+        "record_digest": _sha256_payload(
+            {
+                "id": record.get("id"),
+                "status": record.get("status"),
+                "summary": record.get("summary"),
+                "payload": record.get("payload"),
+            }
+        ),
+    }
+    if command == "log-run":
+        base.update(
+            {
+                "config_revision": _normalized_text(args.config_revision),
+                "seed": args.seed,
+                "run_input_digest": _sha256_payload(
+                    {
+                        "changes": normalize_list(args.change),
+                        "metrics": normalize_list(args.metric),
+                        "result_summary": _normalized_text(args.result_summary),
+                        "outcome": args.outcome,
+                        "classifications": normalize_list(args.classification),
+                        "tested_hypothesis": _normalized_text(args.tested_hypothesis),
+                    }
+                ),
+            }
+        )
+    elif command == "follow-up":
+        base["follow_up_digest"] = _sha256_payload(
+            {
+                "action": _normalized_text(args.action),
+                "category": args.category,
+                "priority": args.priority,
+                "status": args.status,
+            }
+        )
+    elif command == "diagnose":
+        base["diagnosis_input_digest"] = _sha256_payload(
+            {
+                "summary": _normalized_text(args.summary),
+                "categories": normalize_list(args.category),
+                "likely_causes": normalize_list(args.likely_cause),
+                "ruled_out": normalize_list(args.ruled_out),
+                "unknowns": normalize_list(args.unknown),
+                "next_actions": normalize_list(args.next_action),
+                "recent_runs": max(int(args.recent_runs or 0), 0),
+            }
+        )
+    return base
+
+
+def resolve_experiment_preferences(
+    root: Path,
+    args: argparse.Namespace,
+    record: dict[str, Any] | None = None,
+) -> dict[str, object]:
+    command = str(getattr(args, "command", "") or "")
+    if command not in {"plan", "log-run", "follow-up", "diagnose"}:
+        return {}
+    try:
+        return resolve_operation_preferences(
+            root,
+            selection_id=str(getattr(args, "preference_selection_id", "") or ""),
+            skill="experiment-workbench",
+            operation=command,
+            canonical_inputs=experiment_preference_context(args, record),
+        )
+    except ValueError as exc:
+        raise SystemExit(f"Experiment preference selection is invalid: {exc}") from exc
+
+
+def experiment_preference_state(resolution: dict[str, object]) -> dict[str, object]:
+    if not resolution:
+        return {}
+    return {
+        "task_context_digest": str(resolution.get("task_context_digest") or ""),
+        "selection_binding": dict(resolution.get("binding") or {}),
+        "hard_value_digests": dict(resolution.get("hard_value_digests") or {}),
+    }
+
+
+def _record_experiment_preference_state(
+    record: dict[str, Any],
+    resolution: dict[str, object],
+) -> None:
+    if not resolution:
+        return
+    payload = record.setdefault("payload", {})
+    contexts = payload.setdefault("preference_contexts", {})
+    contexts[str(resolution.get("operation") or "")] = experiment_preference_state(resolution)
 
 
 def build_run_identity(
@@ -404,6 +513,7 @@ def write_diagnosis_fill_scaffold(
     unknowns: list[str],
     next_actions: list[str],
     comparison_context: dict[str, Any],
+    preference_context: dict[str, object],
 ) -> Path:
     """Prepare an agent-fill request without creating a hollow judgement."""
     path = unit_root / "diagnosis-fill.yaml"
@@ -420,6 +530,7 @@ def write_diagnosis_fill_scaffold(
             "unknowns": unknowns,
             "next_actions": next_actions,
             "comparison_context": comparison_context,
+            "preference_context": preference_context,
             "claims": [
                 {
                     "id": "diagnosis-claim-001",
@@ -524,6 +635,7 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--goal", default="")
     plan.add_argument("--idea-id", default="")
     plan.add_argument("--hypothesis", default="")
+    plan.add_argument("--preference-selection-id", default="", help=argparse.SUPPRESS)
 
     log_run = subparsers.add_parser("log-run")
     log_run.add_argument("--experiment-id", required=True)
@@ -542,6 +654,7 @@ def build_parser() -> argparse.ArgumentParser:
     log_run.add_argument("--seed", type=int)
     log_run.add_argument("--rerun", action="store_true")
     log_run.add_argument("--rerun-reason", default="")
+    log_run.add_argument("--preference-selection-id", default="", help=argparse.SUPPRESS)
 
     follow_up = subparsers.add_parser("follow-up")
     follow_up.add_argument("--experiment-id", required=True)
@@ -550,6 +663,7 @@ def build_parser() -> argparse.ArgumentParser:
     follow_up.add_argument("--priority", default="normal", choices=FOLLOW_UP_PRIORITY_CHOICES)
     follow_up.add_argument("--status", default="open", choices=FOLLOW_UP_STATUS_CHOICES)
     follow_up.add_argument("--evidence-needed", action="append", default=[])
+    follow_up.add_argument("--preference-selection-id", default="", help=argparse.SUPPRESS)
 
     diagnose = subparsers.add_parser("diagnose")
     diagnose.add_argument("--experiment-id", required=True)
@@ -561,6 +675,7 @@ def build_parser() -> argparse.ArgumentParser:
     diagnose.add_argument("--next-action", action="append", default=[])
     diagnose.add_argument("--recent-runs", type=int, default=DEFAULT_RECENT_RUNS)
     diagnose.add_argument("--claims-file", default="")
+    diagnose.add_argument("--preference-selection-id", default="", help=argparse.SUPPRESS)
 
     confirm = subparsers.add_parser("confirm")
     confirm.add_argument("--experiment-id", required=True)
@@ -570,6 +685,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _dispatch(args, root: Path) -> int:
     if args.command == "plan":
+        preferences = resolve_experiment_preferences(root, args)
         record = default_record("experiment", title=args.title, maturity="lightweight", source={"original_uri": f"program:{args.program_id}"})
         record["status"] = "planned"
         record["confirmation_status"] = "auto_confirmed"
@@ -579,6 +695,7 @@ def _dispatch(args, root: Path) -> int:
         record["payload"]["process"]["tested_hypothesis"] = args.hypothesis
         record["program_ids"] = [args.program_id]
         record["summary"] = args.goal or f"Planned experiment: {args.title}"
+        _record_experiment_preference_state(record, preferences)
         path = write_record(root, record)
         build_index(root)
         append_program_reporting_event(
@@ -603,6 +720,7 @@ def _dispatch(args, root: Path) -> int:
     if record.get("kind") != "experiment":
         raise SystemExit(f"{args.experiment_id} is not an experiment record")
     unit_root = path.parent
+    preferences = resolve_experiment_preferences(root, args, record)
 
     if args.command == "log-run":
         if args.rerun and not _normalized_text(args.rerun_reason):
@@ -721,6 +839,7 @@ def _dispatch(args, root: Path) -> int:
                 "comparison": comparison,
                 "next_actions": normalize_list(args.next_action),
                 "information_types": ["fact"],
+                "preference_context": experiment_preference_state(preferences),
             },
         )
         sync_run_log_summary(unit_root)
@@ -735,6 +854,7 @@ def _dispatch(args, root: Path) -> int:
         record["payload"]["results"]["abnormalities"] = normalize_list(args.classification)
         record["payload"]["diagnosis"]["next_actions"] = args.next_action
         record["summary"] = args.result_summary
+        _record_experiment_preference_state(record, preferences)
         record.setdefault("artifacts", [])
         for artifact in [rel(root, run_path), rel(root, run_log_path)]:
             if artifact not in record["artifacts"]:
@@ -773,10 +893,12 @@ def _dispatch(args, root: Path) -> int:
                 "status": args.status,
                 "evidence_needed": normalize_list(args.evidence_needed),
                 "information_types": ["fact", "unverified"],
+                "preference_context": experiment_preference_state(preferences),
             },
         )
         sync_follow_up_summary(unit_root)
         record["payload"]["diagnosis"]["next_actions"] = normalize_list(record["payload"]["diagnosis"].get("next_actions", [])) + [args.action]
+        _record_experiment_preference_state(record, preferences)
         append_history(record, action="experiment-follow-up-added", summary=args.action, information_types=["fact", "unverified"], artifacts=[rel(root, follow_up_path)])
         write_record(root, record)
         build_index(root)
@@ -815,6 +937,7 @@ def _dispatch(args, root: Path) -> int:
                 unknowns=normalize_list(args.unknown),
                 next_actions=normalize_list(args.next_action),
                 comparison_context=comparison_context,
+                preference_context=experiment_preference_state(preferences),
             )
             print(fill_path.relative_to(root))
             return 0
@@ -833,6 +956,7 @@ def _dispatch(args, root: Path) -> int:
                 "claims": claims,
                 "confirmation_status": "pending_user_confirmation",
                 "information_types": ["inference", "evaluation", "unverified"],
+                "preference_context": experiment_preference_state(preferences),
             },
         )
         sync_diagnosis_summary(unit_root)
@@ -846,6 +970,7 @@ def _dispatch(args, root: Path) -> int:
         record["payload"]["diagnosis"]["next_actions"] = normalize_list(args.next_action)
         record["payload"]["diagnosis"]["comparison_context"] = comparison_context
         record["payload"]["diagnosis"]["claims"] = claims
+        _record_experiment_preference_state(record, preferences)
         record["payload"].pop("claims", None)
         record["payload"].pop("verification", None)
         if claims:

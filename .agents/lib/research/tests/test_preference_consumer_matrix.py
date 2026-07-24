@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from research.common import write_yaml_if_changed
+from research.common import load_yaml, write_yaml_if_changed
 from research.paths import config_root, runtime_preferences_path
 from research.preference_selection import eligible_preferences, record_effective_selection
 from research.prefs import default_runtime_preferences, ensure_workspace
@@ -211,8 +211,161 @@ def test_catalog_change_stales_real_report_consumer_and_hard_resource_stays_elig
     assert resources == {"gpu_count": 1}
     assert method.profile_constraints(root) == ["no cloud upload"]
     assert method.resource_capacity(resources)["source"] == "profile.resources"
-    hard = eligible_preferences(root, skill="method-designer", operation="design")
+    hard = eligible_preferences(root, skill="experiment-workbench", operation="plan")
     assert {item["path"] for item in hard["items"] if item["strength"] == "hard"} == {
         "profile.resources",
         "profile.constraints",
+        "runtime.autonomy.auto_execute_scope",
     }
+
+
+def test_literature_synthesis_persists_selected_binding_and_hard_fallback(
+    tmp_path: Path,
+) -> None:
+    synth = _script("literature-synthesizer", "synthesize.py")
+    root = _workspace(tmp_path)
+    context = synth.synthesis_preference_context(
+        query="robot learning",
+        kind="paper",
+        topic="",
+        tag="",
+        pool="",
+        mode="survey",
+        as_of="2026-07-24",
+        program_ids=[],
+    )
+    selection_id = _record(
+        root,
+        selection_id="prefsel-matrix-synthesis",
+        skill="literature-synthesizer",
+        operation="synthesize",
+        task_context=context,
+        selected_paths={"profile.personalization.reporting_style"},
+    )
+    selected = synth.resolve_synthesis_preferences(
+        root,
+        selection_id=selection_id,
+        query="robot learning",
+        kind="paper",
+        topic="",
+        tag="",
+        pool="",
+        mode="survey",
+        as_of="2026-07-24",
+        program_ids=[],
+    )
+    assert {item["path"] for item in selected["soft_items"]} == {
+        "profile.personalization.reporting_style"
+    }
+    assert selected["values_by_path"]["profile.constraints"] == ["no cloud upload"]
+    preference_context = synth.synthesis_preference_state(selected)
+    binding = synth.ensure_evidence_gap_composite(
+        root,
+        slug="robot-learning",
+        filters={"query": "robot learning", "kind": "paper", "topic": "", "tag": "", "pool": ""},
+        as_of="2026-07-24",
+        preference_context=preference_context,
+    )
+    state = load_yaml(root / str(binding["state_path"]))
+    assert state["stages"][0]["inputs"][0]["context"] == preference_context
+
+    with pytest.raises(SystemExit, match="another task"):
+        synth.resolve_synthesis_preferences(
+            root,
+            selection_id=selection_id,
+            query="another question",
+            kind="paper",
+            topic="",
+            tag="",
+            pool="",
+            mode="survey",
+            as_of="2026-07-24",
+            program_ids=[],
+        )
+
+
+def test_experiment_consumers_bind_each_operation_and_neutral_keeps_hard_context(
+    tmp_path: Path,
+) -> None:
+    experiment = _script("experiment-workbench", "experiment.py")
+    root = _workspace(tmp_path)
+    runtime = load_yaml(runtime_preferences_path(root))
+    runtime["learned_preferences"]["items"] = [
+        {
+            "id": "experiment-format",
+            "text": "keep operation notes compact",
+            "source": "user",
+            "skill": "experiment-workbench",
+            "operations": ["plan", "log-run", "follow-up", "diagnose"],
+        }
+    ]
+    write_yaml_if_changed(runtime_preferences_path(root), runtime)
+
+    plan_args = experiment.build_parser().parse_args(
+        ["plan", "--title", "preference route", "--program-id", "program-a", "--goal", "measure"]
+    )
+    neutral = experiment.resolve_experiment_preferences(root, plan_args)
+    assert neutral["soft_items"] == []
+    assert set(neutral["values_by_path"]) == {
+        "profile.resources",
+        "profile.constraints",
+        "runtime.autonomy.auto_execute_scope",
+    }
+    plan_args.preference_selection_id = _record(
+        root,
+        selection_id="prefsel-experiment-plan",
+        skill="experiment-workbench",
+        operation="plan",
+        task_context=experiment.experiment_preference_context(plan_args),
+        selected_paths={"learned.experiment-format"},
+    )
+    assert experiment._dispatch(plan_args, root) == 0
+    record_path = next((root / "kb/units/experiments").glob("*/record.yaml"))
+    record = load_yaml(record_path)
+    experiment_id = str(record["id"])
+    assert record["payload"]["preference_contexts"]["plan"]["selection_binding"]["selection_id"] == plan_args.preference_selection_id
+
+    operation_args = [
+        experiment.build_parser().parse_args(
+            [
+                "log-run",
+                "--experiment-id",
+                experiment_id,
+                "--result-summary",
+                "completed",
+                "--config-revision",
+                "config-v1",
+            ]
+        ),
+        experiment.build_parser().parse_args(
+            ["follow-up", "--experiment-id", experiment_id, "--action", "inspect metrics"]
+        ),
+        experiment.build_parser().parse_args(
+            ["diagnose", "--experiment-id", experiment_id, "--summary", "inspect failure"]
+        ),
+    ]
+    for index, args in enumerate(operation_args, start=1):
+        current = load_yaml(record_path)
+        args.preference_selection_id = _record(
+            root,
+            selection_id=f"prefsel-experiment-op-{index}",
+            skill="experiment-workbench",
+            operation=args.command,
+            task_context=experiment.experiment_preference_context(args, current),
+            selected_paths={"learned.experiment-format"},
+        )
+        assert experiment._dispatch(args, root) == 0
+
+    run_log = load_yaml(record_path.parent / "run-log.yaml")
+    follow_ups = load_yaml(record_path.parent / "follow-ups.yaml")
+    diagnosis_fill = load_yaml(record_path.parent / "diagnosis-fill.yaml")
+    assert run_log["items"][-1]["preference_context"]["selection_binding"]["operation"] == "log-run"
+    assert follow_ups["items"][-1]["preference_context"]["selection_binding"]["operation"] == "follow-up"
+    assert diagnosis_fill["preference_context"]["selection_binding"]["operation"] == "diagnose"
+
+    wrong = experiment.build_parser().parse_args(
+        ["follow-up", "--experiment-id", experiment_id, "--action", "wrong binding"]
+    )
+    wrong.preference_selection_id = plan_args.preference_selection_id
+    with pytest.raises(SystemExit, match="another operation"):
+        experiment.resolve_experiment_preferences(root, wrong, load_yaml(record_path))

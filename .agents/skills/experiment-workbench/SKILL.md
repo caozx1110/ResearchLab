@@ -36,15 +36,13 @@ Use this skill for structured experiment memory rather than one-off chat summari
 - If diagnosis is requested without claims, the script writes an explicit `diagnosis-fill.yaml` with `status: awaiting_agent_fill` and does not append a diagnosis, mutate the canonical diagnosis, or emit a judgement event. The Agent fills that scaffold and repeats verification.
 - Diagnosis reporting events bind the experiment subject, canonical claim ids, content digest, and verification receipt. Confirmation emits a second bound event; a name such as `experiment-confirmed` alone is never trusted.
 
-## Commands
+## Task-scoped Preference Contract
 
-```bash
-${RESEARCH_PYTHON:-python3} .agents/skills/experiment-workbench/scripts/experiment.py plan --title "baseline parity" --program-id my-program --idea-id idea-foo
-${RESEARCH_PYTHON:-python3} .agents/skills/experiment-workbench/scripts/experiment.py log-run --experiment-id experiment-foo --result-summary "baseline failed on eval slice" --outcome failed --classification implementation --config-revision config-v1
-${RESEARCH_PYTHON:-python3} .agents/skills/experiment-workbench/scripts/experiment.py follow-up --experiment-id experiment-foo --action "check dataset path rewrite" --category implementation --priority high
-${RESEARCH_PYTHON:-python3} .agents/skills/experiment-workbench/scripts/experiment.py diagnose --experiment-id experiment-foo --summary "Likely data / implementation mix-up" --category data --category implementation
-${RESEARCH_PYTHON:-python3} .agents/skills/experiment-workbench/scripts/experiment.py confirm --experiment-id experiment-foo --confirmed-by research-lead --evidence kb/programs/example-program/experiments/phase-feedback.md
-```
+- `plan` 绑定 program、idea 以及目标/假设摘要；`log-run` 绑定当前 experiment 版本、配置修订与本次 run 输入；`follow-up` 和 `diagnose` 分别绑定当前 experiment 版本与本次操作内容。
+- 每次操作都重新计算 task digest；receipt 若属于其他 skill、operation 或 task，或 canonical preference 已变更，则在写入前失败。
+- 无 receipt 时 soft preference 保持中性；资源、约束与自动执行边界始终作为 hard fallback 被加载。
+- record、run log、follow-up 或 diagnosis 只保存 task digest、selection binding 与 hard-value digests，不复制 preference 正文。
+- preference 只能在现有安全、evidence、confirmation、recovery 边界内改变 Agent 的执行方式，不得降级任何治理门。
 
 ## Phase Plan / Feedback Integration (added 2026-05-13)
 
@@ -55,30 +53,22 @@ When a program runs under the **phase-by-phase iterative workflow** (see `resear
 | Phase plan section | experiment-workbench artifact |
 |---|---|
 | Plan §X "Convergence criteria" | one `run-log` entry per training/eval run; `outcome` ∈ {success, partial, failed, blocked, inconclusive} |
-| Plan §X "Experimental Arms Registry" | one `run-log` per arm × seed; record the arm in `--change`, `--tested-hypothesis`, or artifacts |
-| Phase feedback §2 "Final metrics" | metrics captured as `--metric key=value` in run logs, then aggregated in the phase feedback report |
+| Plan §X "Experimental Arms Registry" | one `run-log` per arm × seed; record the arm, tested hypothesis, and artifacts as structured run inputs |
+| Phase feedback §2 "Final metrics" | typed metrics captured in run logs, then aggregated in the phase feedback report |
 | Phase feedback §3 "Ablation decisions" | derived in the feedback report by comparing run-log entries within each arm |
 | Phase feedback §4 "Surprises" | `diagnoses.yaml` entries with categories such as method / implementation / data / evaluation / resource / environment / process / unknown |
 | Phase feedback §5 "Open issues" | `follow-up` items, `category=implementation` or `unknown` |
 
 ### Recommended workflow for phase executor agents
 
-1. Create a parent experiment unit per phase: `experiment.py plan --title "phase-1-track-a" --program-id <pid> --idea-id <iid>`
-2. For each training run: `experiment.py log-run` with outcome + classification; use classification for issue category, not arm name
-3. For each unexpected behavior: `experiment.py diagnose --category unknown` (becomes feedback §4)
-4. For each implementation issue blocking next step: `experiment.py follow-up --priority high` (becomes feedback §5)
-5. When phase converges: aggregate run-logs into the phase feedback report (per master plan §11)
-6. `experiment.py confirm` after user approves phase outcome
+1. Create one parent experiment unit for each phase and bind it to the selected program and idea.
+2. Log every training or evaluation run with its outcome, issue classification, tested hypothesis, config revision, seed, structured metrics, changes, and artifacts. Classification describes the issue category, not the arm name.
+3. For unexpected behavior, create an evidence-backed diagnosis or first prepare the diagnosis scaffold for the runtime Agent to fill.
+4. Record blocking implementation work as a high-priority follow-up rather than burying it in diagnosis prose.
+5. When the phase converges, aggregate its run logs into the phase feedback report defined by the program workflow.
+6. Ask the user to confirm the phase outcome before any judgement or winner is treated as accepted.
 
-### Standard feedback report file path
-
-Per `research-orchestrator` workflow:
-
-```
-runs/{phase-id}/feedback-to-main-agent-{YYYY-MM-DD}.md
-```
-
-This file is the **single hand-off artifact** to the main agent (user-facing AI). The main agent uses it to update program state. Without this file, no state advancement happens.
+The phase feedback report is the single hand-off artifact to the user-facing main Agent. The main Agent uses it to update program state; without that artifact, state does not advance. Internal locations and execution parameters stay private and are never printed as user instructions.
 
 ### Confirmation gating
 
@@ -86,3 +76,7 @@ Per shared contract, all AI judgements stay `pending_user_confirmation`. Phase e
 - can mark `run-log.outcome` as factual (pass/fail observed)
 - must keep `diagnoses` confirmation-gated
 - must keep recommended winners (ablation §3 of feedback) marked as `pending_user_confirmation` until user accepts
+
+## Private Execution Boundary
+
+The runtime Agent uses the implementation's private plan, log-run, follow-up, diagnose, and confirm routes. Never expose script paths, flags, environment variables, or internal artifact paths to the user. User-facing responses summarize what was recorded, what remains uncertain, and which human decision is needed; the only command-like next action they may offer is a public `kb <verb>` action.
