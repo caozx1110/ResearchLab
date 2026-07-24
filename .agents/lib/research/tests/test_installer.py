@@ -116,6 +116,32 @@ def test_agent_plan_lists_exact_targets_and_writes_nothing(tmp_path: Path) -> No
     assert not any(scratch.iterdir())
 
 
+def test_agent_plan_requires_explicit_json_result_path(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    result = subprocess.run(
+        [
+            "bash",
+            str(_project_root() / "install.sh"),
+            "--agent-plan",
+            "--codex",
+            "--project",
+            str(workspace),
+            "--yes",
+        ],
+        cwd=_project_root(),
+        env={**os.environ, "HOME": str(tmp_path / "home"), "NO_COLOR": "1"},
+        stdin=subprocess.DEVNULL,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "--agent-plan-json FILE" in result.stderr
+    assert not any(workspace.iterdir())
+
+
 def test_agent_uninstall_plan_reports_managed_block_and_exact_count(tmp_path: Path) -> None:
     workspace = tmp_path / "agent-uninstall-workspace"
     installed = _run_copy_action(

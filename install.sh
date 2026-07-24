@@ -313,7 +313,9 @@ while [ "$#" -gt 0 ]; do
       shift
       ;;
     --agent-plan)
-      die "--agent-plan 需要配合 --agent-plan-json FILE，以免把大量内部路径输出到终端"
+      DRY_RUN=1
+      AGENT_PLAN=1
+      shift
       ;;
     --agent-plan-json)
       [ "${2:-}" != "" ] && [[ ${2:-} != --* ]] || die "--agent-plan-json 需要一个输出文件"
@@ -398,6 +400,10 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+
+if [ "$AGENT_PLAN" -eq 1 ] && [ -z "$AGENT_PLAN_JSON" ]; then
+  die "--agent-plan 需要配合 --agent-plan-json FILE，以免把大量内部路径输出到终端"
+fi
 
 # Installer preflight and smoke imports are implementation details, not durable
 # workspace targets.  Suppress them for both planning and the matching apply so
