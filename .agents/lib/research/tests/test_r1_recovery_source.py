@@ -630,7 +630,7 @@ def test_local_text_sources_write_nonempty_unit_id_parse_cache(
     assert "paper_id" not in cache
 
 
-def test_failed_url_creates_only_retryable_staging_then_same_url_succeeds(
+def test_failed_url_leaves_no_workspace_staging_then_same_url_succeeds(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -665,9 +665,10 @@ def test_failed_url_creates_only_retryable_staging_then_same_url_succeeds(
     with pytest.raises(SystemExit, match="retry is safe"):
         intake.main()
     assert list((tmp_path / "kb" / "units" / "blogs").glob("*/record.yaml")) == []
-    failures = list((tmp_path / "kb" / ".runtime" / "intake-staging").glob("**/failure.yaml"))
-    assert len(failures) == 1
-    assert load_yaml(failures[0])["status"] == "failed_retryable"
+    staging_root = tmp_path / "kb" / ".runtime" / "intake-staging"
+    assert not staging_root.exists() or list(staging_root.rglob("*")) == []
+    prepared_scope = intake._prepared_scope(tmp_path)
+    assert list(tmp_path.parent.glob(f".research-intake-{prepared_scope}-*")) == []
 
     available = True
     monkeypatch.setattr(sys, "argv", argv)

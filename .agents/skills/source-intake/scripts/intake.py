@@ -330,18 +330,29 @@ def stage_candidates(args: argparse.Namespace) -> list[dict]:
 PREPARED_INTAKE_SCHEMA = 1
 PREPARED_TOKEN_PATTERN = re.compile(r"[0-9a-f]{32}")
 PREPARED_INTAKE_TTL_SECONDS = 60 * 60
-PREPARED_MAX_ENTRIES = 100_000
-PREPARED_MAX_TOTAL_BYTES = 8 * 1024 * 1024 * 1024
+PREPARED_MAX_FILE_BYTES = 64 * 1024 * 1024
+PREPARED_MAX_ENTRIES = 20_000
+PREPARED_MAX_TOTAL_BYTES = 512 * 1024 * 1024
 PREPARED_MAX_DEPTH = 64
 
 
-def _stream_regular_file(descriptor: int) -> tuple[dict[str, object], str]:
+def _stream_regular_file(
+    descriptor: int,
+    *,
+    max_bytes: int = PREPARED_MAX_FILE_BYTES,
+) -> tuple[dict[str, object], str]:
     before = os.fstat(descriptor)
     if not stat.S_ISREG(before.st_mode):
         raise ValueError("prepared intake contains a non-regular file")
+    if before.st_size > max_bytes:
+        raise ValueError("prepared intake source exceeds the byte budget")
     digest = hashlib.sha256()
+    byte_count = 0
     with os.fdopen(os.dup(descriptor), "rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            byte_count += len(chunk)
+            if byte_count > max_bytes:
+                raise ValueError("prepared intake source exceeds the byte budget")
             digest.update(chunk)
     after = os.fstat(descriptor)
     stable_fields = (
@@ -354,6 +365,8 @@ def _stream_regular_file(descriptor: int) -> tuple[dict[str, object], str]:
         "st_mtime_ns",
     )
     if any(getattr(before, name) != getattr(after, name) for name in stable_fields):
+        raise ValueError("prepared intake source changed while it was read")
+    if byte_count != after.st_size:
         raise ValueError("prepared intake source changed while it was read")
     return (
         {
@@ -375,8 +388,18 @@ def _directory_snapshot(
     rows: list[dict[str, object]],
     budget: dict[str, int],
 ) -> None:
+    directory_before = os.fstat(descriptor)
+    remaining_entries = PREPARED_MAX_ENTRIES - budget["entries"]
+    entries: list[os.DirEntry[str]] = []
     try:
-        entries = sorted(os.scandir(descriptor), key=lambda item: item.name)
+        with os.scandir(descriptor) as iterator:
+            for entry in iterator:
+                entries.append(entry)
+                if len(entries) > remaining_entries:
+                    raise ValueError("prepared intake source tree exceeds the entry budget")
+        entries.sort(key=lambda item: item.name)
+    except ValueError:
+        raise
     except OSError as exc:
         raise ValueError("prepared intake source tree is unreadable") from exc
     for entry in entries:
@@ -430,7 +453,11 @@ def _directory_snapshot(
         except OSError as exc:
             raise ValueError("prepared intake source tree changed while it was read") from exc
         try:
-            metadata, byte_digest = _stream_regular_file(child_descriptor)
+            remaining_bytes = PREPARED_MAX_TOTAL_BYTES - budget["bytes"]
+            metadata, byte_digest = _stream_regular_file(
+                child_descriptor,
+                max_bytes=min(PREPARED_MAX_FILE_BYTES, max(remaining_bytes, 0)),
+            )
             budget["bytes"] += int(metadata["size"])
             if budget["bytes"] > PREPARED_MAX_TOTAL_BYTES:
                 raise ValueError("prepared intake source tree exceeds the byte budget")
@@ -446,6 +473,22 @@ def _directory_snapshot(
             )
         finally:
             os.close(child_descriptor)
+    directory_after = os.fstat(descriptor)
+    stable_directory_fields = (
+        "st_dev",
+        "st_ino",
+        "st_mode",
+        "st_uid",
+        "st_gid",
+        "st_size",
+        "st_mtime_ns",
+        "st_ctime_ns",
+    )
+    if any(
+        getattr(directory_before, name) != getattr(directory_after, name)
+        for name in stable_directory_fields
+    ):
+        raise ValueError("prepared intake source tree changed while it was read")
 
 
 def _path_snapshot_digest(path: Path) -> str:
@@ -463,11 +506,35 @@ def _path_snapshot_digest(path: Path) -> str:
         except OSError as exc:
             raise ValueError("prepared intake source changed before it was read") from exc
         try:
-            metadata, byte_digest = _stream_regular_file(descriptor)
+            metadata, byte_digest = _stream_regular_file(
+                descriptor,
+                max_bytes=PREPARED_MAX_FILE_BYTES,
+            )
         finally:
             os.close(descriptor)
-        if int(metadata["size"]) > PREPARED_MAX_TOTAL_BYTES:
-            raise ValueError("prepared intake source exceeds the byte budget")
+        if (int(metadata["device"]), int(metadata["inode"])) != (
+            root_stat.st_dev,
+            root_stat.st_ino,
+        ):
+            raise ValueError("prepared intake source changed before it was read")
+        try:
+            visible_after = path.lstat()
+        except OSError as exc:
+            raise ValueError("prepared intake source changed while it was read") from exc
+        if (
+            visible_after.st_dev,
+            visible_after.st_ino,
+            visible_after.st_mode,
+            visible_after.st_size,
+            visible_after.st_mtime_ns,
+        ) != (
+            int(metadata["device"]),
+            int(metadata["inode"]),
+            root_stat.st_mode,
+            int(metadata["size"]),
+            int(metadata["mtime_ns"]),
+        ):
+            raise ValueError("prepared intake source changed while it was read")
         return _canonical_digest(
             [{"relative": ".", "type": "file", **metadata, "sha256": byte_digest}]
         )
@@ -485,6 +552,8 @@ def _path_snapshot_digest(path: Path) -> str:
         raise ValueError("prepared intake source changed before it was read") from exc
     try:
         opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != (root_stat.st_dev, root_stat.st_ino):
+            raise ValueError("prepared intake source tree changed before it was read")
         rows: list[dict[str, object]] = [
             {
                 "relative": ".",
@@ -499,6 +568,12 @@ def _path_snapshot_digest(path: Path) -> str:
         _directory_snapshot(descriptor, Path(), rows, {"entries": 0, "bytes": 0})
     finally:
         os.close(descriptor)
+    try:
+        visible_after = path.lstat()
+    except OSError as exc:
+        raise ValueError("prepared intake source tree changed while it was read") from exc
+    if (visible_after.st_dev, visible_after.st_ino) != (opened.st_dev, opened.st_ino):
+        raise ValueError("prepared intake source tree changed while it was read")
     return _canonical_digest(rows)
 
 

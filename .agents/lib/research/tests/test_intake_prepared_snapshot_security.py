@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 import stat
 import sys
 import time
@@ -224,3 +225,58 @@ def test_source_mutation_during_preference_resolution_is_caught_by_second_revali
     assert _snapshot(root / "kb") == before_kb
     assert not intake._prepared_dir(root, token).exists()
     assert not list((root / "kb/units/blogs").glob("*/record.yaml"))
+
+
+def test_snapshot_digest_enforces_file_entry_and_total_byte_budgets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    intake = _load_intake_module()
+    large = tmp_path / "large.bin"
+    large.write_bytes(b"x" * 9)
+    monkeypatch.setattr(intake, "PREPARED_MAX_FILE_BYTES", 8)
+    with pytest.raises(ValueError, match="byte budget"):
+        intake._path_snapshot_digest(large)
+
+    entries = tmp_path / "entries"
+    entries.mkdir()
+    for name in ("a", "b", "c"):
+        (entries / name).write_text(name, encoding="utf-8")
+    monkeypatch.setattr(intake, "PREPARED_MAX_FILE_BYTES", 64)
+    monkeypatch.setattr(intake, "PREPARED_MAX_ENTRIES", 2)
+    with pytest.raises(ValueError, match="entry budget"):
+        intake._path_snapshot_digest(entries)
+
+    total = tmp_path / "total"
+    total.mkdir()
+    (total / "a").write_bytes(b"a" * 6)
+    (total / "b").write_bytes(b"b" * 6)
+    monkeypatch.setattr(intake, "PREPARED_MAX_ENTRIES", 20)
+    monkeypatch.setattr(intake, "PREPARED_MAX_TOTAL_BYTES", 10)
+    with pytest.raises(ValueError, match="byte budget"):
+        intake._path_snapshot_digest(total)
+
+
+def test_snapshot_digest_rejects_root_inode_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    intake = _load_intake_module()
+    source = tmp_path / "source.bin"
+    source.write_bytes(b"old")
+    original_stream = intake._stream_regular_file
+    replaced = False
+
+    def replacing_stream(*args: object, **kwargs: object) -> tuple[dict[str, object], str]:
+        nonlocal replaced
+        result = original_stream(*args, **kwargs)
+        if not replaced:
+            replacement = tmp_path / "replacement.bin"
+            replacement.write_bytes(b"new")
+            os.replace(replacement, source)
+            replaced = True
+        return result
+
+    monkeypatch.setattr(intake, "_stream_regular_file", replacing_stream)
+    with pytest.raises(ValueError, match="changed while it was read"):
+        intake._path_snapshot_digest(source)

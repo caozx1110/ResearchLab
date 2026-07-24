@@ -16,7 +16,7 @@ description: 把 paper / repo / dataset / blog source 先做 staging，再做去
 3. 去重、轻量 record 创建、topic / tag / pool 初始归档。
 4. 把深分析路由给 `paper-analyst`、`repo-analyst`、`dataset-analyst`、`blog-analyst`。
 5. 新建 unit 默认使用紧凑型 id，例如 `p-example-bf86ee46`、`r-example-dadda683`。
-6. 对 standalone paper add，只有当前 `source-intake:add` task-bound effective selection 中明确选入的 `runtime.paper` 才能改变预热 parse cache、准备 quick-screen 的 neutral defaults；未选 soft preference 不直读 canonical runtime preference。record 保存 selection/task/receipt digest 绑定，并注明 `profile.constraints` 是 hard fallback；不复制偏好原值。完整笔记必须等 runtime agent 填充并 verify `paper_type` 后才准备。在 `kb ingest` 链中由 dispatcher 独占同一顺序。
+6. 所有 kind 的 add 都先冻结 workspace 外的 exact source/parse snapshot，再解析当前 `source-intake:add` preference。需要 soft preference 时，Agent 先通过私有 `prepare-add` 取得 opaque token 与闭合 canonical context，生成 receipt 后用同一 token 提升；没有 receipt 时自动只执行 hard-only fallback。token、JSON、flags 和内部路径绝不展示给用户。只有明确选入的 `runtime.paper` 才能改变 paper 预热与 quick-screen neutral defaults；record 只保存 task/selection/hard-value digests，不复制偏好原值。receipt、授权、containment 或解析失败对 workspace 零写入，外部 snapshot 必须清理。完整笔记仍须等 runtime Agent 填充并 verify `paper_type` 后才准备；`kb ingest` 链由 dispatcher 独占同一顺序。
 
 `literature-search` 是本 skill 之前的外部文献发现 owner：runtime Agent 使用当前可用的 search/browser/connector 能力做有界、多轮检索，本 skill 不替它选 provider。它只把候选、query/discovery provenance、初筛证据、coverage/frontier 与停止依据写入同一 source-search staging，不创建 canonical paper。收到 search stage 后，本 skill 继续拥有候选 review、去重与正式 materialization；stage id/source kind/normalized original request 不可混用，候选按 DOI、arXiv ID/PMID、canonical URL 跨重跑折叠，并保留人工 status/note、screening history 和全部发现路径。
 

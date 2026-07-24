@@ -4,6 +4,7 @@ import argparse
 import copy
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -207,7 +208,22 @@ def test_real_source_and_paper_consumers_do_not_direct_read_runtime_soft_prefere
         candidate_id="",
         preference_selection_id="",
     )
-    assert intake.resolve_intake_preferences(root, intake_args, source="paper.pdf", title="Paper") == ({}, {})
+    selected_paper, hard_only = intake.resolve_intake_preferences(
+        root, intake_args, source="paper.pdf", title="Paper"
+    )
+    assert selected_paper == {}
+    assert hard_only["selection_binding"] == {}
+    assert set(hard_only["hard_value_digests"]) == {"profile.constraints"}
+    assert len(hard_only["task_context_digest"]) == 64
+    assert set(hard_only) == {
+        "task_context_digest",
+        "selection_binding",
+        "hard_value_digests",
+    }
+    assert all(
+        re.fullmatch(r"[0-9a-f]{64}", digest)
+        for digest in hard_only["hard_value_digests"].values()
+    )
     intake_context = intake.intake_preference_context(intake_args, source="paper.pdf", title="Paper")
     intake_args.preference_selection_id = _record(
         root,
@@ -221,7 +237,7 @@ def test_real_source_and_paper_consumers_do_not_direct_read_runtime_soft_prefere
         root, intake_args, source="paper.pdf", title="Paper"
     )
     assert selected_paper["screening_context_pages"] == 2
-    assert binding["selection_id"] == "prefsel-matrix-intake"
+    assert binding["selection_binding"]["selection_id"] == "prefsel-matrix-intake"
 
     record = {"id": "paper-1", "sources": [], "payload": {"basic_info": {"title": "Paper"}}}
     paper_args = argparse.Namespace(
