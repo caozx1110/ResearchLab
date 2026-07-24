@@ -483,7 +483,7 @@ def restore_operation(project_root: Path, op_id: str, *, recovery_type: str = "r
     return {
         "op_id": op_id,
         "recovery_op_id": recovery_op_id,
-        "restored_paths": [path.relative_to(kb_repo_path(project_root)).as_posix() for path in restored],
+        "restored_paths": [path.relative_to(kb_repo_path(project_root).resolve()).as_posix() for path in restored],
         "checkpoint": checkpoint,
     }
 

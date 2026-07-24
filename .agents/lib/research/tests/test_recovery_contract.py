@@ -287,6 +287,36 @@ def test_resume_of_unchanged_incomplete_operation_preserves_target_identity(
     assert incomplete_ops(tmp_path) == []
 
 
+def test_restore_reports_paths_relative_to_canonical_kb_for_project_root_alias(
+    tmp_path: Path,
+) -> None:
+    canonical_project = (tmp_path / "canonical-project").resolve()
+    canonical_project.mkdir()
+    try:
+        # Exercise the exact macOS /var -> /private/var ancestor alias when the
+        # temporary directory lives there; use an equivalent portable alias in CI.
+        alias_project = Path("/var") / canonical_project.relative_to("/private/var")
+        if alias_project.resolve() != canonical_project:
+            raise ValueError
+    except ValueError:
+        alias_project = tmp_path / "project-alias"
+        alias_project.symlink_to(canonical_project, target_is_directory=True)
+    assert alias_project.resolve() == canonical_project
+
+    ensure_workspace(alias_project)
+    target = alias_project / "kb" / "notes" / "aliased-root.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("before\n", encoding="utf-8")
+    operation_id = begin_op(alias_project, "edit-through-project-alias", [target])
+    target.write_text("after\n", encoding="utf-8")
+    commit_op(alias_project, operation_id)
+
+    result = restore_operation(alias_project, operation_id)
+
+    assert target.read_text(encoding="utf-8") == "before\n"
+    assert result["restored_paths"] == ["notes/aliased-root.md"]
+
+
 @pytest.mark.parametrize("action", ["restore", "undo"])
 def test_recovery_refuses_to_overwrite_changes_made_after_committed_operation(
     tmp_path: Path,
