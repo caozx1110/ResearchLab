@@ -518,6 +518,8 @@ def test_public_review_snapshot_rejects_unit_and_closes_canonical_claims(tmp_pat
         subject_ref,
         "--rejection-reason",
         "Do not keep this route.",
+        "--user-authorization",
+        "Reject this displayed judgement.",
         check=False,
     )
     assert applied.returncode == 0, applied.stderr

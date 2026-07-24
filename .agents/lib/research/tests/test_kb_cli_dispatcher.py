@@ -349,7 +349,14 @@ def _apply_review_protocol(
 ) -> int:
     decision_args = ["--confirm-ref", ref, "--decision-evidence", "I reviewed the displayed evidence.", "--user-authorization", "I confirm this displayed judgement."]
     if decision == "reject":
-        decision_args = ["--reject-ref", ref, "--rejection-reason", "Not suitable for the current route."]
+        decision_args = [
+            "--reject-ref",
+            ref,
+            "--rejection-reason",
+            "Not suitable for the current route.",
+            "--user-authorization",
+            "I reject this displayed judgement.",
+        ]
     return kb.main(
         [
             "--root",
@@ -2396,7 +2403,7 @@ def test_kb_review_tty_and_pipe_are_identical_and_emit_private_protocol(monkeypa
     ]
     assert stream_values == [False, False]
     assert tty_output == pipe_output
-    assert "需要你用自然语言确认或拒绝" in tty_output
+    assert "请回到 Agent 对话" in tty_output
     assert "确认前还需要你的真实署名" in tty_output
     assert "# review queue" not in tty_output
     assert "p-hollow-123456" not in tty_output
@@ -2417,7 +2424,7 @@ def test_kb_review_tty_and_pipe_are_identical_and_emit_private_protocol(monkeypa
         assert set(protocol["details"]["displayed_record_ids"]) == displayed_ids
         assert protocol["details"]["remaining_review_count"] == 1
         assert len(protocol["next_actions"][0]["review_items"]) == 3
-        assert protocol["next_actions"][0]["apply"]["max_decisions_per_apply"] == 1
+        assert protocol["next_actions"][0]["apply"]["max_decisions_per_apply"] == 3
         assert len(protocol["next_actions"][0]["apply"]["snapshot_token"]) == 32
         assert all(item["confirm_route"]["owner"] == "knowledge-base-manager" for item in protocol["next_actions"][0]["review_items"])
         assert all(item["reject_route"]["action"] == "promote" for item in protocol["next_actions"][0]["review_items"])
@@ -2516,33 +2523,22 @@ def test_kb_review_rejects_protocol_tampering_that_injects_an_unshown_subject(
     assert "请重新运行 kb review" in capsys.readouterr().err
 
 
-def test_kb_review_apply_rejects_non_atomic_multi_owner_batch(
-    monkeypatch,
+def test_kb_review_apply_atomically_handles_three_decisions_across_owners(
     tmp_path: Path,
     capsys,
 ) -> None:
     kb = _load_kb_cli()
-    calls: list[tuple[str, tuple[str, ...]]] = []
-
-    def fake_forward(root: Path, script: str, args, *, stream: bool = True, **_kwargs):
-        calls.append((script, tuple(args)))
-        return kb.CommandResult((script, *args), 0, "# review queue\n")
-
-    monkeypatch.setattr(kb, "forward_command", fake_forward)
-    monkeypatch.setattr(
-        kb,
-        "load_review_records",
-        lambda root, fuzzy: [
-            _pending_record("p-one-123456", "paper", "One"),
-            _pending_record("r-two-123456", "repo", "Two"),
-        ],
-    )
+    unit_ref, unit_path = _write_ready_review_subject(tmp_path, "unit")
+    program_ref, program_path = _write_ready_review_subject(tmp_path, "program")
+    method_ref, method_path = _write_ready_review_subject(tmp_path, "method")
     assert kb.main(["--root", str(tmp_path), "--agent-protocol", "batch-review.json", "review"]) == 0
+    capsys.readouterr()
     protocol = json.loads((tmp_path / "kb/.runtime/batch-review.json").read_text(encoding="utf-8"))
-    refs = [
+    refs = {
         f"{item['subject']['kind']}:{item['subject']['id']}"
         for item in protocol["next_actions"][0]["review_items"]
-    ]
+    }
+    assert refs == {unit_ref, program_ref, method_ref}
 
     assert kb.main(
         [
@@ -2551,14 +2547,141 @@ def test_kb_review_apply_rejects_non_atomic_multi_owner_batch(
             "review",
             "--apply-snapshot",
             "batch-review.json",
+            "--confirm-ref",
+            unit_ref,
             "--reject-ref",
-            refs[0],
-            "--reject-ref",
-            refs[1],
+            program_ref,
+            "--defer-ref",
+            method_ref,
+            "--decision-evidence",
+            "I reviewed the displayed evidence.",
+            "--rejection-reason",
+            "Not suitable for the current route.",
+            "--user-authorization",
+            "Apply these three displayed decisions together.",
         ]
-    ) == 2
-    assert len(calls) == 1
-    assert "请重新运行 kb review" in capsys.readouterr().err
+    ) == 0
+    public = capsys.readouterr()
+    assert "已应用 3 条拍板结果（原子批量）" in public.out
+    assert "已确认" in public.out and "已拒绝" in public.out and "已暂缓" in public.out
+    assert load_yaml(unit_path)["confirmation_status"] == "confirmed"
+    assert load_yaml(program_path)["items"][0]["confirmation_status"] == "rejected"
+    assert load_yaml(method_path)["confirmation_status"] == "pending_user_confirmation"
+    token = protocol["next_actions"][0]["apply"]["snapshot_token"]
+    assert json.loads((tmp_path / f"kb/.runtime/review-snapshots/{token}.json").read_text())["status"] == "consumed"
+
+
+def test_invalid_double_decision_keeps_snapshot_retriable_then_single_retry_succeeds(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    kb = _load_kb_cli()
+    ref, artifact_path = _write_ready_review_subject(tmp_path, "unit")
+    _item, displayed_ref = _review_protocol_item(tmp_path, kb, "retryable.json")
+    assert displayed_ref == ref
+    capsys.readouterr()
+    protocol = json.loads((tmp_path / "kb/.runtime/retryable.json").read_text(encoding="utf-8"))
+    token = protocol["next_actions"][0]["apply"]["snapshot_token"]
+    token_path = tmp_path / f"kb/.runtime/review-snapshots/{token}.json"
+    canonical_before = artifact_path.read_bytes()
+
+    assert kb.main([
+        "--root", str(tmp_path), "--agent-protocol", "invalid-double.json", "review",
+        "--apply-snapshot", "retryable.json",
+        "--confirm-ref", ref,
+        "--reject-ref", ref,
+        "--decision-evidence", "reviewed",
+        "--rejection-reason", "not suitable",
+        "--user-authorization", "This conflicting request must not apply.",
+    ]) == 2
+    capsys.readouterr()
+    assert artifact_path.read_bytes() == canonical_before
+    assert json.loads(token_path.read_text(encoding="utf-8"))["status"] == "unused"
+
+    assert kb.main([
+        "--root", str(tmp_path), "--agent-protocol", "corrected.json", "review",
+        "--apply-snapshot", "retryable.json",
+        "--reject-ref", ref,
+        "--rejection-reason", "not suitable",
+        "--user-authorization", "Reject this displayed judgement.",
+    ]) == 0
+    capsys.readouterr()
+    assert load_yaml(artifact_path)["confirmation_status"] == "rejected"
+    assert json.loads(token_path.read_text(encoding="utf-8"))["status"] == "consumed"
+
+
+def test_dialogue_owner_failure_rolls_back_all_owners_and_keeps_snapshot_unused(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kb = _load_kb_cli()
+    unit_ref, unit_path = _write_ready_review_subject(tmp_path, "unit")
+    program_ref, program_path = _write_ready_review_subject(tmp_path, "program")
+    assert kb.main(["--root", str(tmp_path), "--agent-protocol", "rollback.json", "review"]) == 0
+    capsys.readouterr()
+    protocol = json.loads((tmp_path / "kb/.runtime/rollback.json").read_text(encoding="utf-8"))
+    token = protocol["next_actions"][0]["apply"]["snapshot_token"]
+    before = {unit_path: unit_path.read_bytes(), program_path: program_path.read_bytes()}
+    unit_module = kb._review_owner_module(tmp_path, "knowledge-base-manager")
+    monkeypatch.setattr(
+        unit_module,
+        "apply_review_batch_decision",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("injected second-owner failure")),
+    )
+
+    assert kb.main([
+        "--root", str(tmp_path), "--agent-protocol", "rollback-result.json", "review",
+        "--apply-snapshot", "rollback.json",
+        "--reject-ref", program_ref,
+        "--reject-ref", unit_ref,
+        "--rejection-reason", "not suitable",
+        "--user-authorization", "Reject both displayed judgements together.",
+    ]) == 2
+    capsys.readouterr()
+    assert unit_path.read_bytes() == before[unit_path]
+    assert program_path.read_bytes() == before[program_path]
+    assert json.loads(
+        (tmp_path / f"kb/.runtime/review-snapshots/{token}.json").read_text(encoding="utf-8")
+    )["status"] == "unused"
+
+
+def test_dialogue_checkpoint_failure_reports_business_state_after_atomic_apply(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kb = _load_kb_cli()
+    ref, artifact_path = _write_ready_review_subject(tmp_path, "unit")
+    _item, displayed_ref = _review_protocol_item(tmp_path, kb, "checkpoint-review.json")
+    assert displayed_ref == ref
+    capsys.readouterr()
+    protocol = json.loads((tmp_path / "kb/.runtime/checkpoint-review.json").read_text(encoding="utf-8"))
+    token = protocol["next_actions"][0]["apply"]["snapshot_token"]
+
+    def fail_checkpoint(*args, **kwargs):
+        print("[ok] git checkpoint: private-deadbeef")
+        raise RuntimeError("injected dialogue checkpoint failure")
+
+    monkeypatch.setattr(kb, "checkpoint_and_report", fail_checkpoint)
+    with pytest.raises(RuntimeError, match="injected dialogue checkpoint failure"):
+        kb.main([
+            "--root", str(tmp_path), "--agent-protocol", "checkpoint-result.json", "review",
+            "--apply-snapshot", "checkpoint-review.json",
+            "--confirm-ref", ref,
+            "--decision-evidence", "reviewed",
+            "--user-authorization", "Confirm this displayed judgement.",
+        ])
+    public = capsys.readouterr()
+    assert "checkpoint" not in public.out + public.err
+    assert load_yaml(artifact_path)["confirmation_status"] == "confirmed"
+    assert json.loads(
+        (tmp_path / f"kb/.runtime/review-snapshots/{token}.json").read_text(encoding="utf-8")
+    )["status"] == "consumed"
+    result = json.loads((tmp_path / "kb/.runtime/checkpoint-result.json").read_text(encoding="utf-8"))
+    assert result["status"] == "error"
+    assert result["details"]["checkpoint_status"] == "failed_after_business_apply"
+    assert result["details"]["business_state"] == "applied_before_checkpoint"
 
 
 def test_kb_review_discovers_verified_side_judgement_and_keeps_owner_routes_private(
@@ -2846,7 +2969,7 @@ def test_review_snapshot_expiry_and_bounded_gc_are_safe_and_classified(
     assert token not in expired
     expired_protocol = json.loads((tmp_path / "kb/.runtime/expired.json").read_text(encoding="utf-8"))
     assert expired_protocol["details"]["review_apply_error"] == "expired"
-    assert json.loads(token_path.read_text(encoding="utf-8"))["status"] == "expired"
+    assert json.loads(token_path.read_text(encoding="utf-8"))["status"] == "unused"
     assert outside.read_text(encoding="utf-8") == "do not delete"
     assert (nested / ("e" * 32 + ".json")).exists()
 
@@ -2965,7 +3088,8 @@ def test_review_success_sanitizes_untrusted_title(
         result_protocol="unsafe-title-result.json",
     ) == 0
     public = capsys.readouterr().out
-    assert "已应用 1 条拍板结果：已拒绝论文「标题需由 Agent 安全解释」" in public
+    assert "已应用 1 条拍板结果（原子批量）" in public
+    assert "已拒绝论文「标题需由 Agent 安全解释」" in public
     assert "NEXT FOR AGENT" not in public
 
 

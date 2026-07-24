@@ -76,7 +76,9 @@ def _review_item(index: int) -> dict:
 def _display_item(index: int) -> dict:
     return {
         "kind_label": "论文",
-        "title": f"Paper {index}",
+        "title": "Same title" if index <= 2 else f"Paper {index}",
+        "subject_id": f"p-sheet-{index:02d}",
+        "location_summary": f"来源位置 {index}",
         "fact_summary": "",
         "substance": [],
         "claims": [
@@ -147,6 +149,10 @@ def test_sheet_preview_is_checkbox_only_pure_read_and_preflights_all_items(tmp_p
     assert "knowledge-base-manager" not in text
     assert "kb/units/" not in text
     assert "完整判断 1" in text and "逐字证据 2" in text
+    assert "有效至：2099-07-25T00:00:00Z" in text
+    assert "公共编号：p-sheet-01" in text and "公共编号：p-sheet-02" in text
+    assert "来源 / 定位：来源位置 1" in text and "来源 / 定位：来源位置 2" in text
+    assert text.count("Same title") == 2
     text = text.replace("- [ ] 确认", "- [x] 确认", 1)
     second = text.find("- [ ] 拒绝", text.find("<!-- kb-review-slot:", text.find("<!-- kb-review-slot:") + 1))
     assert second >= 0
@@ -676,6 +682,10 @@ def test_kb_cli_exports_previews_and_atomically_applies_once(
     )
     assert batch_registry["status"] == "consumed"
     assert source_registry["status"] == "consumed"
+    applied_sheet = sheet.read_text(encoding="utf-8")
+    assert "# 已处理判断" in applied_sheet
+    assert "作为一个整体应用" in applied_sheet
+    assert "- [x] 确认" in applied_sheet
     applied = record.read_bytes()
     assert kb.main(
         [
@@ -707,6 +717,7 @@ def test_kb_cli_owner_failure_rolls_back_every_canonical_write_and_keeps_batch_u
     batch_ref = action["batch_ref"]
     sheet = tmp_path / action["sheet_path"]
     sheet.write_text(sheet.read_text(encoding="utf-8").replace("- [ ] 确认", "- [x] 确认"), encoding="utf-8")
+    sheet_before = sheet.read_bytes()
     expected_preview_digest = _preview_digest(tmp_path, batch_ref)
     passage_cache = tmp_path / "kb/.runtime/search/passages.sqlite3"
     assert not passage_cache.exists()
@@ -740,6 +751,8 @@ def test_kb_cli_owner_failure_rolls_back_every_canonical_write_and_keeps_batch_u
     )
     assert batch_registry["status"] == "unused"
     assert source_registry["status"] == "unused"
+    assert sheet.read_bytes() == sheet_before
+    assert "# 待确认判断" in sheet.read_text(encoding="utf-8")
     assert not passage_cache.exists()
 
 
