@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -33,6 +34,7 @@ from research.evidence import (
 )
 from research.judgements import apply_judgement_rejection, confirmation_binding, require_judgement_snapshot
 from research.journal import mutation_transaction
+from research.preference_selection import resolve_operation_preferences
 from research.surveys import (
     build_unit_binding,
     composite_survey_request_digest,
@@ -61,6 +63,86 @@ SECTION_SPECS = (
     ("conclusion", "Conclusion", "inference"),
 )
 MAX_COMPOSITE_INPUT_BYTES = 256 * 1024
+
+
+def _canonical_digest(value: object) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def synthesis_preference_context(
+    *,
+    query: str,
+    kind: str,
+    topic: str,
+    tag: str,
+    pool: str,
+    mode: str,
+    as_of: str,
+    program_ids: list[str] | None = None,
+) -> dict[str, object]:
+    return {
+        "mode": str(mode or ""),
+        "selection_digest": _canonical_digest(
+            {
+                "query": " ".join(str(query or "").split()),
+                "kind": str(kind or ""),
+                "topic": str(topic or ""),
+                "tag": str(tag or ""),
+                "pool": str(pool or ""),
+            }
+        ),
+        "as_of": str(as_of or ""),
+        "program_ids": sorted({str(item or "").strip() for item in program_ids or [] if str(item or "").strip()}),
+    }
+
+
+def resolve_synthesis_preferences(
+    root: Path,
+    *,
+    selection_id: str,
+    query: str,
+    kind: str,
+    topic: str,
+    tag: str,
+    pool: str,
+    mode: str,
+    as_of: str,
+    program_ids: list[str] | None = None,
+) -> dict[str, object]:
+    try:
+        return resolve_operation_preferences(
+            root,
+            selection_id=selection_id,
+            skill="literature-synthesizer",
+            operation="synthesize",
+            canonical_inputs=synthesis_preference_context(
+                query=query,
+                kind=kind,
+                topic=topic,
+                tag=tag,
+                pool=pool,
+                mode=mode,
+                as_of=as_of,
+                program_ids=program_ids,
+            ),
+        )
+    except ValueError as exc:
+        raise SystemExit(f"Synthesis preference selection is invalid: {exc}") from exc
+
+
+def synthesis_preference_state(resolution: dict[str, object]) -> dict[str, object]:
+    return {
+        "task_context_digest": str(resolution.get("task_context_digest") or ""),
+        "selection_binding": dict(resolution.get("binding") or {}),
+        "hard_value_digests": dict(resolution.get("hard_value_digests") or {}),
+    }
 
 
 def _assert_composite_path_safe(root: Path, path: Path) -> None:
@@ -117,6 +199,7 @@ def ensure_evidence_gap_composite(
     filters: dict[str, str],
     as_of: str,
     program_ids: list[str] | None = None,
+    preference_context: dict[str, object] | None = None,
 ) -> dict[str, object]:
     linked_program_ids = sorted({str(item) for item in program_ids or [] if str(item)})
     for program_id in linked_program_ids:
@@ -128,6 +211,7 @@ def ensure_evidence_gap_composite(
     request_filters = {
         **filters,
         "program_ids": ",".join(linked_program_ids),
+        "preference_context_digest": _canonical_digest(preference_context or {}),
     }
     request_digest = composite_survey_request_digest(
         filters=request_filters,
@@ -155,6 +239,7 @@ def ensure_evidence_gap_composite(
                 status="blocked",
                 blocker={"code": "no_current_confirmed_units"},
                 resume_action="run_agent_literature_search",
+                inputs=[{"kind": "effective_preferences", "context": copy.deepcopy(preference_context or {})}],
                 expected_revision=1,
             )
             ensure_dir(path.parent)
@@ -236,6 +321,7 @@ def build_survey_scaffold(
     mode: str,
     as_of: str,
     program_ids: list[str] | None = None,
+    preference_context: dict[str, object] | None = None,
 ) -> dict:
     """Build a fillable survey structure; the script authors no conclusions."""
     if not records:
@@ -249,6 +335,21 @@ def build_survey_scaffold(
         program = root / "kb" / "programs" / program_id
         if program.is_symlink() or not program.is_dir():
             raise ValueError(f"survey program does not exist: {program_id}")
+    if preference_context is None:
+        preference_context = synthesis_preference_state(
+            resolve_synthesis_preferences(
+                root,
+                selection_id="",
+                query=query,
+                kind=kind,
+                topic=topic,
+                tag=tag,
+                pool=pool,
+                mode=mode,
+                as_of=as_of,
+                program_ids=linked_program_ids,
+            )
+        )
     units = [build_unit_binding(root, record) for record in records if str(record.get("id") or "")]
     sections = []
     for section_id, title, claim_type in SECTION_SPECS:
@@ -290,7 +391,15 @@ def build_survey_scaffold(
         "slug": slug,
         "status": "awaiting_agent_fill",
         "program_ids": linked_program_ids,
-        "filters": {"query": query, "kind": kind, "topic": topic, "tag": tag, "pool": pool},
+        "filters": {
+            "query": query,
+            "kind": kind,
+            "topic": topic,
+            "tag": tag,
+            "pool": pool,
+            "preference_context_digest": _canonical_digest(preference_context),
+        },
+        "preference_context": copy.deepcopy(preference_context),
         "kb_anchor": {
             "as_of": as_of,
             "unit_ids": [unit["id"] for unit in units],
@@ -425,6 +534,35 @@ def claim_from_cell(cell: dict) -> dict:
 def verify_survey_fill(payload: dict, root: Path) -> tuple[list[str], dict]:
     """Verify every agent-authored claim and each ref against its cited unit."""
     violations, entries = survey_claim_entries(payload)
+    filters = payload.get("filters") if isinstance(payload.get("filters"), dict) else {}
+    anchor_for_preferences = payload.get("kb_anchor") if isinstance(payload.get("kb_anchor"), dict) else {}
+    preference_context = payload.get("preference_context")
+    if not isinstance(preference_context, dict):
+        violations.append("preference_context: missing or not a mapping")
+    else:
+        selection_binding = preference_context.get("selection_binding")
+        selection_binding = selection_binding if isinstance(selection_binding, dict) else {}
+        try:
+            current_preferences = resolve_synthesis_preferences(
+                root,
+                selection_id=str(selection_binding.get("selection_id") or ""),
+                query=str(filters.get("query") or ""),
+                kind=str(filters.get("kind") or ""),
+                topic=str(filters.get("topic") or ""),
+                tag=str(filters.get("tag") or ""),
+                pool=str(filters.get("pool") or ""),
+                mode=str(payload.get("mode") or ""),
+                as_of=str(anchor_for_preferences.get("as_of") or ""),
+                program_ids=payload.get("program_ids") if isinstance(payload.get("program_ids"), list) else [],
+            )
+        except SystemExit as exc:
+            violations.append(str(exc))
+        else:
+            current_state = synthesis_preference_state(current_preferences)
+            if current_state != preference_context:
+                violations.append("preference_context: canonical preferences changed; prepare again")
+            if str(filters.get("preference_context_digest") or "") != _canonical_digest(preference_context):
+                violations.append("filters.preference_context_digest: does not match preference_context")
     anchor = payload.get("kb_anchor")
     if not isinstance(anchor, dict):
         violations.append("kb_anchor: missing or not a mapping")
@@ -563,6 +701,7 @@ def verify_survey_fill(payload: dict, root: Path) -> tuple[list[str], dict]:
             "unit_ids": [str(item.get("id") or "") for item in unit_items if isinstance(item, dict)],
             "units": copy.deepcopy(unit_items),
             "verified_at": verified_at,
+            "preference_context": copy.deepcopy(verified.get("preference_context") or {}),
         }
         for _, cell, _ in survey_claim_entries(verified)[1]:
             cell["epistemic_status"] = "verified_pending_confirmation"
@@ -869,6 +1008,7 @@ def build_parser() -> argparse.ArgumentParser:
         cmd.add_argument("--authorization-source", default="")
         cmd.add_argument("--rejection-reason", default="")
         cmd.add_argument("--program-id", action="append", default=[])
+        cmd.add_argument("--preference-selection-id", default="", help=argparse.SUPPRESS)
     composite = subparsers.add_parser("composite")
     composite.add_argument("action", choices=("status", "update"))
     composite.add_argument("--slug", required=True)
@@ -985,6 +1125,19 @@ def main() -> int:
             "tag": args.tag,
             "pool": args.pool,
         }
+        preferences = resolve_synthesis_preferences(
+            root,
+            selection_id=str(args.preference_selection_id or ""),
+            query=query,
+            kind=args.kind,
+            topic=args.topic,
+            tag=args.tag,
+            pool=args.pool,
+            mode=mode,
+            as_of=args.as_of,
+            program_ids=args.program_id,
+        )
+        preference_context = synthesis_preference_state(preferences)
         selected, excluded = select_current_confirmed_survey_records(root, iter_records(root), **filters)
         if not selected:
             binding = ensure_evidence_gap_composite(
@@ -993,6 +1146,7 @@ def main() -> int:
                 filters=filters,
                 as_of=args.as_of,
                 program_ids=args.program_id,
+                preference_context=preference_context,
             )
             print(
                 json.dumps(
@@ -1019,6 +1173,7 @@ def main() -> int:
                 mode=mode,
                 as_of=args.as_of,
                 program_ids=args.program_id,
+                preference_context=preference_context,
             )
             ensure_dir(out_root)
             write_yaml_if_changed(fill_path, payload)

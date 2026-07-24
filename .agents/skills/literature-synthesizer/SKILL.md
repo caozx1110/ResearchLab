@@ -5,7 +5,7 @@ description: 负责跨 paper / repo / dataset / blog / idea 的 evidence-first s
 
 # Literature Synthesizer
 
-开始 survey/review/taxonomy 前遵循 workspace 统一 task-scoped preference 合同：只接收本 skill/operation allowlist 中由 Agent 选中的 effective subset，并绑定当前 synthesis task digest。未选中的软偏好不得静默改变 selection、taxonomy 或写作口径；hard constraints 仍必须执行。
+开始 survey/review/taxonomy 前遵循 workspace 统一 task-scoped preference 合同：`literature-synthesizer + synthesize` 只接收 allowlist 中由 Agent 选中的 effective subset，并绑定 mode、selection filters、as_of 与 program ids 构成的 canonical task digest。未选中的软偏好不得静默改变 selection、taxonomy 或写作口径；无 receipt 时软行为中性，hard constraints 仍必须执行。
 
 当任务是在多个知识单元之间形成综述、趋势、taxonomy、topic map 或 pool review，而不是分析单个 source 时，使用这个 skill。
 
@@ -31,8 +31,11 @@ prepare 会：
 3. 生成七段式 fillable scaffold、taxonomy grid frame 与 method × dimension comparison matrix frame。
 4. 发布 required-cell、claim field 与 evidence_ref field 合同。
 5. 保持所有 content 与 evidence_refs 为空，不替 runtime agent 写任何理解。
+6. 把 task digest、可选 selection binding 与 hard-value digests 写入 scaffold；receipt 不复制偏好正文。偏好 context digest 同时进入 survey content binding。
 
 若第 1 步没有合格输入，prepare 返回结构化 evidence gap，并创建按请求 digest / revision 绑定的 durable composite state，handoff 到 `search → selection → source_intake → unit_analysis → synthesis → review_confirmation → report_consumption`；每阶段记录 inputs、outputs、blocker 与 resume action，更新使用 revision CAS，并作为 `kb next` 正式候选跨会话恢复。候选选择和结论仍由 runtime agent 完成。
+
+evidence-gap 路由把同一 preference context 作为 composite search stage 的冻结 input；偏好或 hard constraint 变化会得到不同 request digest，不能静默续接旧 composite。
 
 当本次综合属于一个或多个 program 时，Agent 在 prepare 时绑定 program id。该关联进入 survey content digest；确认后 owner 在同一原子 review 事务中为每个 program 写入带当前 ConfirmationReceipt binding 的 `survey-confirmed` reporting event，供 `report-author` 消费。没有 program 关联的 survey 仍可作为全局 synthesis judgement 使用。
 
@@ -48,10 +51,11 @@ verify 会：
 2. 检查七个 section 与 comparison matrix 的 required cells 是否存在且 content 非空。
 3. 把 cell 转成 research.evidence claim，并运行 validate_claims。
 4. 对每个 evidence_ref 读取其 source_unit_id，在 kb_anchor.units 中取得 kind，并只在该 unit_dir 内运行 verify_claim_evidence；引用文件必须已存在于 prepare binding。
-5. 对 trend 与 gap 检查其 as_of 与 kb_anchor.as_of 一致。
-6. 任一结构、anchor、artifact、locator 或逐字 quote 校验失败即拒绝，且不写正式结果。
-7. 全部通过后标记 observed / inferred，保存含 selection filters、unit_ids、exact unit bindings 与 verified_at 的 consumer_binding，并渲染 comparison matrix。
-8. 同步生成 canonical `payload.claims`、current verification receipt、survey 全内容 digest、稳定 subject/owner/path 与 `ready_for_review` 状态；不得为新产物写 `needs_agent_repair`。
+5. 重新加载并校验原 `synthesize` receipt、canonical task context 和 hard-value digests；wrong binding 或 stale catalog 要求重新 prepare，不得继续验证旧 scaffold。
+6. 对 trend 与 gap 检查其 as_of 与 kb_anchor.as_of 一致。
+7. 任一结构、anchor、artifact、locator 或逐字 quote 校验失败即拒绝，且不写正式结果。
+8. 全部通过后标记 observed / inferred，保存含 selection filters、unit_ids、exact unit bindings 与 verified_at 的 consumer_binding，并渲染 comparison matrix。
+9. 同步生成 canonical `payload.claims`、current verification receipt、survey 全内容 digest、稳定 subject/owner/path 与 `ready_for_review` 状态；不得为新产物写 `needs_agent_repair`。
 
 读侧调用纯读 staleness helper 复算同一 binding：已有 unit 变化/删除、确认失效、evidence bytes 变化或出现新的 matching unit 都标 stale。它只返回原因，不改写 survey；runtime agent 重新 prepare、fill、verify 才能刷新绑定。
 
@@ -80,6 +84,11 @@ filters:
   topic: ""
   tag: ""
   pool: ""
+  preference_context_digest: <sha256>
+preference_context:
+  task_context_digest: <sha256>
+  selection_binding: {} # 无 receipt 时为空；有 receipt 时只存 ID/digest 绑定
+  hard_value_digests: {}
 kb_anchor:
   as_of: <caller-supplied timestamp>
   unit_ids: [p-..., r-...]
