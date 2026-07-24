@@ -234,6 +234,8 @@ def readiness_violations(root: Path, record: Any, artifact_path: Path) -> list[s
 
 def judgement_confirmation_is_current(root: Path, record: dict[str, Any], artifact_path: Path) -> bool:
     """Validate a judgement receipt against canonical identity and current evidence bytes."""
+    root = root.resolve()
+    artifact_path = artifact_path.resolve()
     if _text(record.get("kind")) == "survey_judgement" and survey_lifecycle_violations(record, root):
         return False
     try:

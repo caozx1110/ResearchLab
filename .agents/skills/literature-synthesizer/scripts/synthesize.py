@@ -25,7 +25,12 @@ if __name__ == "__main__":
 from research.common import add_project_root_argument, ensure_dir, file_sha256, load_yaml, print_resolved_project_roots, slugify, utc_now_iso, write_text_if_changed, write_yaml_if_changed
 from research.core import iter_records, project_root, rel, synthesis_root, unit_root
 from research.confirm import apply_confirmation
-from research.evidence import build_verification_receipt, confirmation_claims, validate_claims, verify_claim_evidence
+from research.evidence import (
+    build_verification_receipt,
+    validate_claims,
+    verification_receipt_violations,
+    verify_claim_evidence,
+)
 from research.judgements import apply_judgement_rejection, require_judgement_snapshot
 from research.journal import mutation_transaction
 from research.surveys import (
@@ -476,8 +481,6 @@ def _require_current_survey(root: Path, record: dict, path: Path) -> None:
     if violations:
         raise ValueError("survey judgement is stale: " + "; ".join(violations))
     source_roots = survey_source_roots(root, record, path)
-    from research.evidence import verification_receipt_violations
-
     verification_violations = verification_receipt_violations(
         record,
         path.parent,

@@ -59,7 +59,14 @@ def _canonical_digest(value: object) -> str:
 
 def _record_content_digest(record: dict[str, Any]) -> str:
     content = copy.deepcopy(record)
-    for volatile in ("created_at", "updated_at", "history", "confirmation"):
+    for volatile in (
+        "created_at",
+        "first_ingested_at",
+        "updated_at",
+        "last_human_confirmed_at",
+        "history",
+        "confirmation",
+    ):
         content.pop(volatile, None)
     return _canonical_digest(content)
 
@@ -96,6 +103,8 @@ def survey_artifact_path(root: Path, slug: str, mode: str = "survey") -> Path:
 
 def survey_source_roots(root: Path, record: dict[str, Any], artifact_path: Path) -> dict[str, Path]:
     """Resolve survey evidence sources from canonical unit identities."""
+    root = root.resolve()
+    artifact_path = artifact_path.resolve()
     verification_root = trusted_project_path(
         root,
         artifact_path.parent,

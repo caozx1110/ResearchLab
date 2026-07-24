@@ -97,7 +97,7 @@ def build_verified_survey(root: Path):
     scaffold["comparison_matrix"]["methods"][0]["label"] = "Alpha Method"
     scaffold["comparison_matrix"]["methods"][0]["source_unit_ids"] = ["p-alpha"]
     violations, verified = module.verify_survey_fill(scaffold, root)
-    assert violations == []
+    assert violations == [], violations
     survey_path = root / "kb/synthesis/robot-learning/survey.yaml"
     survey_path.parent.mkdir(parents=True, exist_ok=True)
     write_yaml_if_changed(survey_path, verified)
@@ -300,6 +300,43 @@ def test_snapshot_cas_fails_before_any_write(tmp_path: Path) -> None:
             rejection_reason="",
         )
     assert survey_path.read_bytes() == before
+
+
+def test_confirm_cli_transaction_restores_survey_on_summary_failure(tmp_path: Path, monkeypatch) -> None:
+    module, survey_path, _verified = build_verified_survey(tmp_path)
+    card = discover_pending_judgements(tmp_path)[0]
+    before_survey = survey_path.read_bytes()
+    before_summary = (survey_path.parent / "summary.md").read_bytes()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(SCRIPT),
+            "--root",
+            str(tmp_path),
+            "survey",
+            "confirm",
+            "--expected-snapshot",
+            json.dumps(card["snapshot_binding"], ensure_ascii=False),
+            "--confirmed-by",
+            "Alice Researcher",
+            "--evidence",
+            "Reviewed survey",
+            "--user-authorization",
+            "I confirm it.",
+            "--authorization-source",
+            "user_message",
+        ],
+    )
+
+    def fail_summary(_path: Path, _text: str) -> None:
+        raise RuntimeError("injected summary failure")
+
+    monkeypatch.setattr(module, "write_text_if_changed", fail_summary)
+    with pytest.raises(RuntimeError, match="injected summary failure"):
+        module.main()
+    assert survey_path.read_bytes() == before_survey
+    assert (survey_path.parent / "summary.md").read_bytes() == before_summary
 
 
 def test_legacy_needs_agent_repair_is_readable_but_not_reviewable(tmp_path: Path) -> None:
