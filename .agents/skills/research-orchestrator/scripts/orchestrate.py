@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -50,12 +51,24 @@ from research.core import apply_confirmation, append_history, ensure_workspace, 
 from research.evidence import attach_claims, build_verification_receipt, validate_claims, verify_claim_evidence
 from research.judgements import apply_judgement_rejection, confirmation_binding, readiness_violations, require_judgement_snapshot
 from research.journal import mutation_transaction
+from research.monitoring import due_subscriptions
+from research.preference_selection import load_effective_selection
 
 OPEN_QUESTION_OPEN_STATUSES = {"open"}
 EVIDENCE_REQUEST_OPEN_STATUSES = {"open"}
 PRIORITY_SCORE = {"critical": 40, "high": 30, "normal": 10, "low": 5}
 TERMINAL_PROGRAM_STAGES = {"done", "completed", "archived", "published"}
-SEMANTIC_READ_COMMANDS = {"status", "dashboard", "next", "route"}
+SEMANTIC_READ_COMMANDS = {
+    "status",
+    "dashboard",
+    "next",
+    "route",
+    "prepare-next-selection",
+    "verify-next-selection",
+}
+PORTFOLIO_HISTORY_ID = "portfolio-next-selections"
+PORTFOLIO_DECISION_KIND = "portfolio_decision"
+PORTFOLIO_DECISION_SCOPES = {"procedural_planning", "research_judgement"}
 
 ROUTE_HINTS = {
     "source": "source-intake",
@@ -75,6 +88,15 @@ ROUTE_HINTS = {
     "新博客": "source-intake",
     "新 blog": "source-intake",
     "new blog": "source-intake",
+    "文献检索": "literature-search",
+    "检索文献": "literature-search",
+    "找论文": "literature-search",
+    "搜论文": "literature-search",
+    "补相关工作": "literature-search",
+    "literature search": "literature-search",
+    "find papers": "literature-search",
+    "search papers": "literature-search",
+    "related papers": "literature-search",
     "论文": "paper-analyst",
     "paper": "paper-analyst",
     "仓库": "repo-analyst",
@@ -83,7 +105,31 @@ ROUTE_HINTS = {
     "dataset": "dataset-analyst",
     "博客": "blog-analyst",
     "blog": "blog-analyst",
+    "文献综述": "literature-synthesizer",
+    "系统综述": "literature-synthesizer",
+    "横向综述": "literature-synthesizer",
     "综述": "literature-synthesizer",
+    "survey": "literature-synthesizer",
+    "systematic literature review": "literature-synthesizer",
+    "systematic review": "literature-synthesizer",
+    "scoping review": "literature-synthesizer",
+    "meta-analysis": "literature-synthesizer",
+    "meta analysis": "literature-synthesizer",
+    "literature review": "literature-synthesizer",
+    "review recent papers": "literature-synthesizer",
+    "related work": "literature-synthesizer",
+    "evidence synthesis": "literature-synthesizer",
+    "rapid review": "literature-synthesizer",
+    "narrative review": "literature-synthesizer",
+    "review of the literature": "literature-synthesizer",
+    "systematic mapping study": "literature-synthesizer",
+    "state-of-the-art review": "literature-synthesizer",
+    "相关工作": "literature-synthesizer",
+    "元分析": "literature-synthesizer",
+    "证据综合": "literature-synthesizer",
+    "系统映射研究": "literature-synthesizer",
+    "taxonomy": "literature-synthesizer",
+    "趋势与空白": "literature-synthesizer",
     "idea": "idea-workbench",
     "方法": "method-designer",
     "method": "method-designer",
@@ -104,18 +150,31 @@ ROUTE_HINTS = {
     "schema": "knowledge-base-manager",
     "lint": "knowledge-base-manager",
     "governance": "knowledge-base-manager",
-    "导航": "research-navigator",
     "讨论": "discussion-archivist",
     "discussion": "discussion-archivist",
     "skill evolution": "skill-evolution-advisor",
     "技能演化": "skill-evolution-advisor",
     "skill drift": "skill-evolution-advisor",
     "retrospective": "skill-evolution-advisor",
+    "监测": "research-monitor",
+    "监控": "research-monitor",
+    "定期追踪": "research-monitor",
+    "定期关注": "research-monitor",
+    "monitor": "research-monitor",
+    "subscription": "research-monitor",
     "wiki": "wiki-adapter",
     "知识库": "wiki-adapter",
 }
 
 COMMAND_PREFIX = "${RESEARCH_PYTHON:-python3}"
+
+
+def route_task(task: str) -> str:
+    lower = str(task or "").lower()
+    for key, skill in sorted(ROUTE_HINTS.items(), key=lambda item: (-len(item[0]), item[0])):
+        if key in lower:
+            return skill
+    return "research-orchestrator"
 # Governance cap: runtime preferences may narrow this scope, but cannot add steps
 # beyond this set.
 GOVERNANCE_MAX_AUTO_STEPS = {"screen", "build-index", "refresh", "generate-note"}
@@ -388,15 +447,6 @@ def safe_unit_step(record: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def auto_plan(root: Path) -> dict[str, Any]:
-    build_index_command = {
-        "kind": "kb",
-        "step_type": "build-index",
-        "record_id": "",
-        "title": "Build KB index",
-        "reason": "KB has records but index should be refreshed before deeper orchestration",
-        "command_parts": [COMMAND_PREFIX, ".agents/skills/knowledge-base-manager/scripts/kb.py", "index"],
-        "safe_execute": True,
-    }
     records = iter_records(root)
     if not records:
         return {
@@ -413,11 +463,53 @@ def auto_plan(root: Path) -> dict[str, Any]:
             ],
             "safe_execute": False,
         }
-    for record in records:
-        step = safe_unit_step(record)
-        if step:
-            return {"status": "planned", **step}
-    return {"status": "planned", **build_index_command}
+    snapshot = portfolio_candidate_snapshot(root)
+    current = current_portfolio_decision(root, snapshot)
+    if current is None or str(current.get("effective_status") or "") != "current":
+        return {
+            "status": "planning_required",
+            "kind": "agent-work",
+            "step_type": "portfolio-planning",
+            "record_id": "",
+            "title": "Agent portfolio planning required",
+            "reason": "Agent must compare the current candidate snapshot before any auto execution.",
+            "candidate_snapshot_digest": snapshot["candidate_snapshot_digest"],
+            "command_parts": [],
+            "safe_execute": False,
+        }
+    selected = [item for item in current.get("selected_actions", []) if isinstance(item, dict)]
+    if len(selected) != 1:
+        return {
+            "status": "selection_requires_dispatch",
+            "kind": "agent-work",
+            "step_type": "portfolio-dispatch",
+            "record_id": "",
+            "title": "Agent-selected actions require explicit dispatch",
+            "reason": "Auto execution requires exactly one current Agent-selected action.",
+            "portfolio_decision_id": str(current.get("decision_id") or ""),
+            "command_parts": [],
+            "safe_execute": False,
+        }
+    candidate = selected[0]
+    command_parts = [str(item) for item in candidate.get("command_parts") or []]
+    safe = (
+        bool(candidate.get("safe_execute_capability"))
+        and str(candidate.get("governance_gate") or "none") == "none"
+        and bool(command_parts)
+    )
+    subject = candidate.get("subject") if isinstance(candidate.get("subject"), dict) else {}
+    return {
+        "status": "planned" if safe else "selected_action_requires_agent",
+        "kind": str(subject.get("kind") or "agent-work"),
+        "step_type": str(candidate.get("action_type") or "portfolio-action"),
+        "record_id": str(subject.get("id") or ""),
+        "title": str(candidate.get("title") or ""),
+        "reason": str(candidate.get("reason") or "Agent-selected portfolio action."),
+        "portfolio_decision_id": str(current.get("decision_id") or ""),
+        "selected_action_id": str(candidate.get("action_id") or ""),
+        "command_parts": command_parts,
+        "safe_execute": safe,
+    }
 
 
 def format_auto_plan(plan: dict[str, Any]) -> str:
@@ -500,6 +592,11 @@ def decision_log_path(root: Path, program_id: str) -> Path:
 
 def decisions_path(root: Path, program_id: str) -> Path:
     return workflow_root(root, program_id) / "decisions.yaml"
+
+
+def portfolio_history_path(root: Path) -> Path:
+    """Canonical append-only history for cross-program planning decisions."""
+    return kb_root(root) / "programs" / "portfolio-next-selections.yaml"
 
 
 def legacy_decision_items(root: Path, program_id: str) -> list[dict[str, Any]]:
@@ -593,7 +690,9 @@ def program_ids(root: Path) -> list[str]:
     programs_root = kb_root(root) / "programs"
     if not programs_root.exists():
         return []
-    return sorted(path.name for path in programs_root.iterdir() if path.is_dir())
+    if programs_root.is_symlink() or not programs_root.is_dir():
+        raise SystemExit("Programs root must be a regular directory")
+    return sorted(path.name for path in programs_root.iterdir() if path.is_dir() and not path.is_symlink())
 
 
 def load_state(root: Path, program_id: str) -> dict:
@@ -729,7 +828,45 @@ def _program_unit_ids(program_id: str, state: dict[str, Any], records: list[dict
     return {unit_id for unit_id in unit_ids if unit_id}
 
 
+def _validate_portfolio_program_scope(root: Path, program_id: str) -> None:
+    identifier = str(program_id or "").strip()
+    if (
+        not identifier
+        or Path(identifier).name != identifier
+        or identifier in {".", ".."}
+        or "\\" in identifier
+    ):
+        raise SystemExit("Program id is not a canonical path component")
+    programs = kb_root(root) / "programs"
+    path = program_root(root, identifier)
+    if programs.is_symlink() or path.is_symlink():
+        raise SystemExit("Program candidate scope cannot traverse a symlink")
+    if not path.is_dir():
+        raise SystemExit(f"Program `{identifier}` does not exist")
+    try:
+        path.resolve().relative_to(programs.resolve())
+    except ValueError as exc:
+        raise SystemExit("Program candidate scope must stay inside kb/programs") from exc
+    workflow = workflow_root(root, identifier)
+    guarded = [
+        state_path(root, identifier),
+        workflow,
+        open_questions_path(root, identifier),
+        evidence_requests_path(root, identifier),
+        decisions_path(root, identifier),
+        reporting_events_path(root, identifier),
+    ]
+    if any(candidate.is_symlink() for candidate in guarded):
+        raise SystemExit("Program candidate inputs cannot be symlinks")
+
+
 def program_dashboard_items(root: Path) -> list[dict[str, Any]]:
+    """Legacy ranked projection for pre-R6 private protocol compatibility only.
+
+    New planning must consume :func:`portfolio_candidate_snapshot`; neither
+    ``next``'s plain renderer nor an R6-aware adapter may treat this list as a
+    PortfolioDecision.
+    """
     records = iter_records(root)
     record_by_id = {str(record.get("id") or ""): record for record in records}
     items: list[dict[str, Any]] = []
@@ -892,6 +1029,636 @@ def program_dashboard_items(root: Path) -> list[dict[str, Any]]:
     return sorted(items, key=lambda item: (-int(item.get("score") or 0), str(item.get("updated_at") or ""), str(item.get("program_id") or "")))
 
 
+def _canonical_digest(value: object) -> str:
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _portfolio_action_id(*, program_id: str, action_type: str, subject_id: str, discriminator: str = "") -> str:
+    identity = {
+        "program_id": program_id,
+        "action_type": action_type,
+        "subject_id": subject_id,
+        "discriminator": discriminator,
+    }
+    return "action-" + _canonical_digest(identity)[:20]
+
+
+def _unit_owner_skill(kind: str) -> str:
+    return {
+        "paper": "paper-analyst",
+        "repo": "repo-analyst",
+        "dataset": "dataset-analyst",
+        "blog": "blog-analyst",
+        "idea": "idea-workbench",
+        "experiment": "experiment-workbench",
+    }.get(kind, "knowledge-base-manager")
+
+
+def _candidate(
+    *,
+    program_id: str,
+    action_type: str,
+    subject_id: str,
+    discriminator: str = "",
+    owner_skill: str,
+    stage: str,
+    goal: str,
+    question: str,
+    reason: str,
+    title: str = "",
+    subject_kind: str = "",
+    priority: str = "normal",
+    blocking: bool = False,
+    dependencies: list[dict[str, Any]] | None = None,
+    governance_gate: str = "none",
+    safe_execute_capability: bool = False,
+    command_parts: list[str] | None = None,
+    recommended_command: str = "",
+) -> dict[str, Any]:
+    # This structure is factual context for a runtime Agent.  In particular it
+    # contains no semantic value score and does not name a winner.
+    if governance_gate != "none":
+        safe_execute_capability = False
+    payload = {
+        "action_id": _portfolio_action_id(
+            program_id=program_id,
+            action_type=action_type,
+            subject_id=subject_id,
+            discriminator=discriminator,
+        ),
+        "program_id": program_id,
+        "action_type": action_type,
+        "owner_skill": owner_skill,
+        "subject": {"kind": subject_kind, "id": subject_id},
+        "title": title,
+        "stage": stage,
+        "goal": goal,
+        "question": question,
+        "reason": reason,
+        "priority": priority if priority in PRIORITY_SCORE else "normal",
+        "blocking": bool(blocking),
+        "dependencies": dependencies or [],
+        "governance_gate": governance_gate,
+        "safe_execute_capability": bool(safe_execute_capability),
+        "command_parts": [str(part) for part in command_parts or []],
+        "recommended_command": recommended_command,
+    }
+    payload["binding_digest"] = _canonical_digest(
+        {key: value for key, value in payload.items() if key not in {"command_parts", "recommended_command"}}
+    )
+    return payload
+
+
+def portfolio_candidates(root: Path, *, selected_program_id: str = "") -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Enumerate all legal actions and factual context without ranking them."""
+    records = iter_records(root)
+    record_by_id = {str(record.get("id") or ""): record for record in records}
+    candidates: list[dict[str, Any]] = []
+    program_contexts: list[dict[str, Any]] = []
+    attached_unit_ids: set[str] = set()
+
+    selected_ids = [selected_program_id] if selected_program_id else program_ids(root)
+    for program_id in selected_ids:
+        _validate_portfolio_program_scope(root, program_id)
+        state = load_state(root, program_id)
+        unit_ids = _program_unit_ids(program_id, state, records)
+        attached_unit_ids.update(unit_ids)
+        stage = str(state.get("stage") or "")
+        context = {
+            "program_id": program_id,
+            "status": str(state.get("status") or "active"),
+            "stage": stage,
+            "question": str(state.get("question") or ""),
+            "goal": str(state.get("goal") or ""),
+            "blockers": normalize_list(state.get("blockers")),
+            "active_unit_ids": sorted(unit_ids),
+            "selected_idea_id": str(state.get("selected_idea_id") or ""),
+            "selected_repo_id": str(state.get("selected_repo_id") or ""),
+            "resource_constraints": state.get("resource_constraints")
+            if isinstance(state.get("resource_constraints"), (list, dict))
+            else [],
+        }
+        program_contexts.append(context)
+        if stage in TERMINAL_PROGRAM_STAGES or context["status"] in {"completed", "archived"}:
+            continue
+
+        open_questions = _open_workflow_items(
+            list_items(open_questions_path(root, program_id), f"{program_id}-open-questions", "research-orchestrator"),
+            OPEN_QUESTION_OPEN_STATUSES,
+        )
+        evidence_requests = _open_workflow_items(
+            list_items(evidence_requests_path(root, program_id), f"{program_id}-evidence-requests", "research-orchestrator"),
+            EVIDENCE_REQUEST_OPEN_STATUSES,
+        )
+        before_count = len(candidates)
+
+        for item in evidence_requests:
+            item_id = str(item.get("id") or "") or _canonical_digest(item)[:16]
+            needed = str(item.get("needed") or item.get("question") or "")
+            related_ids = normalize_list(item.get("related_unit_ids"))
+            candidates.append(
+                _candidate(
+                    program_id=program_id,
+                    action_type="resolve-evidence-request",
+                    subject_id=item_id,
+                    owner_skill="research-orchestrator",
+                    stage=stage,
+                    goal=context["goal"],
+                    question=str(item.get("question") or context["question"]),
+                    reason=f"Resolve evidence request: {needed}",
+                    priority=str(item.get("priority") or "normal"),
+                    blocking=bool(item.get("blocking")),
+                    dependencies=[{"kind": "unit", "id": unit_id} for unit_id in related_ids],
+                )
+            )
+
+        for unit_id in sorted(unit_ids):
+            record = record_by_id.get(unit_id)
+            if record is None:
+                continue
+            step = safe_unit_step(record)
+            if not step or str(step.get("kind") or "") == "human-gate":
+                continue
+            kind = str(record.get("kind") or "")
+            candidates.append(
+                _candidate(
+                    program_id=program_id,
+                    action_type=str(step.get("step_type") or "agent-work"),
+                    subject_id=unit_id,
+                    owner_skill=_unit_owner_skill(kind),
+                    stage=stage,
+                    goal=context["goal"],
+                    question=context["question"],
+                    reason=str(step.get("reason") or "Agent work is required."),
+                    title=str(record.get("title") or ""),
+                    subject_kind=kind,
+                    dependencies=[
+                        {
+                            "kind": "unit-state",
+                            "id": unit_id,
+                            "workflow_state": record_workflow_state(record),
+                            "record_digest": _canonical_digest(record),
+                        }
+                    ],
+                    safe_execute_capability=bool(step.get("safe_execute")),
+                    command_parts=[str(part) for part in step.get("command_parts") or []],
+                )
+            )
+
+        for item in open_questions:
+            item_id = str(item.get("id") or "") or _canonical_digest(item)[:16]
+            related_ids = normalize_list(item.get("related_unit_ids"))
+            candidates.append(
+                _candidate(
+                    program_id=program_id,
+                    action_type="answer-open-question",
+                    subject_id=item_id,
+                    owner_skill=str(item.get("owner") or "research-orchestrator"),
+                    stage=stage,
+                    goal=context["goal"],
+                    question=str(item.get("question") or ""),
+                    reason=f"Answer open question: {item.get('question') or ''}",
+                    priority=str(item.get("priority") or "normal"),
+                    dependencies=[{"kind": "unit", "id": unit_id} for unit_id in related_ids],
+                )
+            )
+
+        for unit_id in sorted(unit_ids):
+            record = record_by_id.get(unit_id)
+            if record is None or not is_user_confirmable(record):
+                continue
+            kind = str(record.get("kind") or "")
+            candidates.append(
+                _candidate(
+                    program_id=program_id,
+                    action_type="human-decision",
+                    subject_id=unit_id,
+                    owner_skill=_unit_owner_skill(kind),
+                    stage=stage,
+                    goal=context["goal"],
+                    question=context["question"],
+                    reason="A verified judgement is waiting for the user's decision.",
+                    title=str(record.get("title") or ""),
+                    subject_kind=kind,
+                    dependencies=[
+                        {
+                            "kind": "unit-state",
+                            "id": unit_id,
+                            "workflow_state": record_workflow_state(record),
+                            "record_digest": _canonical_digest(record),
+                        }
+                    ],
+                    governance_gate="human-decision",
+                    recommended_command=confirm_command_for_record(record),
+                )
+            )
+
+        for action in normalize_list(state.get("next_actions")):
+            candidates.append(
+                _candidate(
+                    program_id=program_id,
+                    action_type="persisted-program-action",
+                    subject_id="next-action",
+                    discriminator=action,
+                    owner_skill="research-orchestrator",
+                    stage=stage,
+                    goal=context["goal"],
+                    question=context["question"],
+                    reason=action,
+                    dependencies=[{"kind": "program-stage", "id": stage or "init"}],
+                )
+            )
+
+        if len(candidates) == before_count:
+            candidates.append(
+                _candidate(
+                    program_id=program_id,
+                    action_type="review-program-stage",
+                    subject_id=f"program:{program_id}",
+                    owner_skill="research-orchestrator",
+                    stage=stage,
+                    goal=context["goal"],
+                    question=context["question"],
+                    reason="Review the current program stage and identify the next grounded action.",
+                    dependencies=[{"kind": "program-stage", "id": stage or "init"}],
+                )
+            )
+
+    if not selected_program_id:
+        for record in records:
+            unit_id = str(record.get("id") or "")
+            if not unit_id or unit_id in attached_unit_ids or normalize_list(record.get("program_ids")):
+                continue
+            step = safe_unit_step(record)
+            if not step:
+                continue
+            kind = str(record.get("kind") or "")
+            governance_gate = "human-decision" if str(step.get("kind") or "") == "human-gate" else "none"
+            candidates.append(
+                _candidate(
+                    program_id=f"loose:{unit_id}",
+                    action_type=str(step.get("step_type") or "unit-work"),
+                    subject_id=unit_id,
+                    owner_skill=_unit_owner_skill(kind),
+                    stage="loose-unit",
+                    goal=str(record.get("title") or ""),
+                    question="",
+                    reason=str(step.get("reason") or ""),
+                    title=str(record.get("title") or ""),
+                    subject_kind=kind,
+                    dependencies=[
+                        {
+                            "kind": "unit-state",
+                            "id": unit_id,
+                            "workflow_state": record_workflow_state(record),
+                            "record_digest": _canonical_digest(record),
+                        }
+                    ],
+                    governance_gate=governance_gate,
+                    safe_execute_capability=bool(step.get("safe_execute")),
+                    command_parts=[str(part) for part in step.get("command_parts") or []],
+                    recommended_command=str(step.get("recommended_command") or ""),
+                )
+            )
+
+    for due in due_subscriptions(root):
+        linked_program_ids = [str(item) for item in due.get("program_ids") or [] if str(item)]
+        if selected_program_id and selected_program_id not in linked_program_ids:
+            continue
+        subscription_id = str(due.get("subscription_id") or "")
+        candidates.append(
+            _candidate(
+                program_id=f"monitor:{subscription_id}",
+                action_type="run-due-monitor",
+                subject_id=subscription_id,
+                owner_skill="research-monitor",
+                stage="monitor-due",
+                goal=str(due.get("title") or subscription_id),
+                question="",
+                reason="A saved research subscription is due for an Agent-led monitoring run.",
+                title=str(due.get("title") or subscription_id),
+                subject_kind="research-monitor-subscription",
+                dependencies=[
+                    {
+                        "kind": "monitor-due-window",
+                        "id": subscription_id,
+                        "due_at": str(due.get("due_at") or ""),
+                        "overdue_windows": int(due.get("overdue_windows") or 0),
+                        "subscription_revision": int(due.get("subscription_revision") or 0),
+                        "scope_digest": str(due.get("scope_digest") or ""),
+                        "program_ids": linked_program_ids,
+                    }
+                ],
+                safe_execute_capability=False,
+            )
+        )
+
+    action_ids = [str(item.get("action_id") or "") for item in candidates]
+    if len(action_ids) != len(set(action_ids)):
+        raise SystemExit("Portfolio candidate identities are not unique")
+    candidates.sort(key=lambda item: str(item.get("action_id") or ""))
+    program_contexts.sort(key=lambda item: str(item.get("program_id") or ""))
+    return candidates, program_contexts
+
+
+def portfolio_candidate_snapshot(root: Path, *, selected_program_id: str = "") -> dict[str, Any]:
+    candidates, program_contexts = portfolio_candidates(root, selected_program_id=selected_program_id)
+    scope = {
+        "program_ids": [selected_program_id] if selected_program_id else [],
+        "include_loose_units": not bool(selected_program_id),
+    }
+    digest_input = {
+        "schema_version": 1,
+        "scope": scope,
+        "program_contexts": program_contexts,
+        "candidates": candidates,
+    }
+    return {
+        **digest_input,
+        "candidate_snapshot_digest": _canonical_digest(digest_input),
+        "candidate_count": len(candidates),
+    }
+
+
+def portfolio_decision_fill_template(snapshot: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "decision_id": "",
+        "candidate_snapshot_digest": str(snapshot.get("candidate_snapshot_digest") or ""),
+        "selected_action_ids": [],
+        "rationale": "",
+        "expected_information_gain": "",
+        "cost_and_risk": "",
+        "preference_selection_id": "",
+        "decision_scope": "procedural_planning",
+        "program_decision_ids": [],
+        "decided_at": "",
+    }
+
+
+def _load_portfolio_history(root: Path) -> dict[str, Any]:
+    path = portfolio_history_path(root)
+    if path.parent.is_symlink() or path.is_symlink() or (path.exists() and not path.is_file()):
+        raise SystemExit("Portfolio history must be a regular file")
+    payload = load_yaml(path, default={})
+    if not isinstance(payload, dict):
+        return {"id": PORTFOLIO_HISTORY_ID, "generated_by": "research-orchestrator", "items": []}
+    items = payload.get("items", [])
+    payload["items"] = [dict(item) for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+    payload.setdefault("id", PORTFOLIO_HISTORY_ID)
+    payload.setdefault("generated_by", "research-orchestrator")
+    return payload
+
+
+def _validate_preference_selection_reference(root: Path, selection_id: str, task_context_digest: str) -> None:
+    if not selection_id:
+        raise SystemExit("Portfolio decision requires an effective preference selection")
+    try:
+        load_effective_selection(
+            root,
+            selection_id=selection_id,
+            skill="research-orchestrator",
+            operation="plan",
+            expected_task_context_digest=task_context_digest,
+        )
+    except ValueError as exc:
+        raise SystemExit("Referenced preference selection is unavailable, invalid, or stale") from exc
+
+
+def _validate_program_decision_references(root: Path, decision_ids: list[str], selected: list[dict[str, Any]]) -> None:
+    if not decision_ids:
+        raise SystemExit("Research-judgement planning requires a program decision reference")
+    selected_programs = {
+        str(item.get("program_id") or "")
+        for item in selected
+        if str(item.get("program_id") or "") and not str(item.get("program_id") or "").startswith("loose:")
+    }
+    for reference in decision_ids:
+        program_id, separator, decision_id = str(reference).partition(":")
+        if not separator or program_id not in selected_programs or not decision_id:
+            raise SystemExit("Program decision reference is not bound to a selected program")
+        matches = [
+            item
+            for item in decision_items_with_legacy(root, program_id)
+            if str(item.get("id") or "") == decision_id and not item.get("legacy_import")
+        ]
+        if len(matches) != 1:
+            raise SystemExit("Program decision reference is unavailable or unverified")
+        if str(matches[0].get("confirmation_status") or "") not in {
+            "pending_user_confirmation",
+            "confirmed",
+        }:
+            raise SystemExit("Program decision reference has an invalid confirmation state")
+
+
+def _aware_iso_timestamp(value: object) -> str:
+    text = str(value or "").strip()
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise SystemExit("Portfolio decision decided_at must be an ISO timestamp") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise SystemExit("Portfolio decision decided_at must include a timezone")
+    return text
+
+
+def validate_portfolio_decision(
+    root: Path,
+    decision: object,
+    snapshot: dict[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    if not isinstance(decision, dict):
+        raise SystemExit("Portfolio decision fill must be a mapping")
+    decision_id = str(decision.get("decision_id") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", decision_id):
+        raise SystemExit("Portfolio decision id is invalid")
+    expected_digest = str(snapshot.get("candidate_snapshot_digest") or "")
+    if str(decision.get("candidate_snapshot_digest") or "") != expected_digest:
+        raise SystemExit("Portfolio decision is stale: candidate snapshot changed")
+    raw_selected = decision.get("selected_action_ids")
+    if not isinstance(raw_selected, list) or not raw_selected:
+        raise SystemExit("Portfolio decision must select at least one candidate action")
+    selected_ids = [str(item or "").strip() for item in raw_selected]
+    if any(not item for item in selected_ids) or len(set(selected_ids)) != len(selected_ids):
+        raise SystemExit("Portfolio decision selected_action_ids must be unique non-empty ids")
+    candidate_by_id = {
+        str(item.get("action_id") or ""): item
+        for item in snapshot.get("candidates", [])
+        if isinstance(item, dict)
+    }
+    unknown = [item for item in selected_ids if item not in candidate_by_id]
+    if unknown:
+        raise SystemExit("Portfolio decision selected an action outside the current snapshot")
+    selected = [candidate_by_id[item] for item in selected_ids]
+    for field in ("rationale", "expected_information_gain", "cost_and_risk"):
+        if not str(decision.get(field) or "").strip():
+            raise SystemExit(f"Portfolio decision requires non-empty {field}")
+    preference_selection_id = str(decision.get("preference_selection_id") or "").strip()
+    _validate_preference_selection_reference(root, preference_selection_id, expected_digest)
+    decision_scope = str(decision.get("decision_scope") or "procedural_planning").strip()
+    if decision_scope not in PORTFOLIO_DECISION_SCOPES:
+        raise SystemExit("Portfolio decision_scope is invalid")
+    raw_program_decision_ids = decision.get("program_decision_ids", [])
+    if not isinstance(raw_program_decision_ids, list):
+        raise SystemExit("Portfolio decision program_decision_ids must be a list")
+    program_decision_ids = [str(item or "").strip() for item in raw_program_decision_ids if str(item or "").strip()]
+    if decision_scope == "research_judgement":
+        _validate_program_decision_references(root, program_decision_ids, selected)
+    elif program_decision_ids:
+        raise SystemExit("Procedural planning cannot attach research decision references")
+    decided_at = _aware_iso_timestamp(decision.get("decided_at"))
+    normalized = {
+        "decision_id": decision_id,
+        "kind": PORTFOLIO_DECISION_KIND,
+        "candidate_snapshot_digest": expected_digest,
+        "scope": snapshot.get("scope") if isinstance(snapshot.get("scope"), dict) else {},
+        "selected_action_ids": selected_ids,
+        "selected_action_bindings": {
+            str(item.get("action_id") or ""): str(item.get("binding_digest") or "") for item in selected
+        },
+        "selected_action_summaries": [
+            {
+                "action_id": str(item.get("action_id") or ""),
+                "program_id": str(item.get("program_id") or ""),
+                "action_type": str(item.get("action_type") or ""),
+                "owner_skill": str(item.get("owner_skill") or ""),
+                "subject": item.get("subject") if isinstance(item.get("subject"), dict) else {},
+                "governance_gate": str(item.get("governance_gate") or "none"),
+                "safe_execute_capability": bool(item.get("safe_execute_capability")),
+                "binding_digest": str(item.get("binding_digest") or ""),
+            }
+            for item in selected
+        ],
+        "rationale": str(decision.get("rationale") or "").strip(),
+        "expected_information_gain": str(decision.get("expected_information_gain") or "").strip(),
+        "cost_and_risk": str(decision.get("cost_and_risk") or "").strip(),
+        "preference_selection_id": preference_selection_id,
+        "decision_scope": decision_scope,
+        "program_decision_ids": program_decision_ids,
+        "decided_at": decided_at,
+        "generated_by": "runtime-agent",
+        "status": "recorded",
+        "safe_to_continue": bool(selected)
+        and decision_scope == "procedural_planning"
+        and all(bool(item.get("safe_execute_capability")) and item.get("governance_gate") == "none" for item in selected),
+    }
+    return normalized, selected
+
+
+def load_portfolio_decision_file(path: Path) -> dict[str, Any]:
+    if path.is_symlink() or not path.is_file():
+        raise SystemExit("Portfolio decision fill must be a regular file")
+    payload = load_yaml(path, default={})
+    if not isinstance(payload, dict):
+        raise SystemExit("Portfolio decision fill must contain a mapping")
+    return payload
+
+
+def current_portfolio_decision(root: Path, snapshot: dict[str, Any]) -> dict[str, Any] | None:
+    scope = snapshot.get("scope") if isinstance(snapshot.get("scope"), dict) else {}
+    matching = [
+        item
+        for item in _load_portfolio_history(root).get("items", [])
+        if isinstance(item, dict) and item.get("scope") == scope
+    ]
+    if not matching:
+        return None
+    current = dict(matching[-1])
+    stale_reasons: list[str] = []
+    if str(current.get("candidate_snapshot_digest") or "") != str(snapshot.get("candidate_snapshot_digest") or ""):
+        stale_reasons.append("candidate_snapshot_changed")
+    current_candidates = {
+        str(item.get("action_id") or ""): item
+        for item in snapshot.get("candidates", [])
+        if isinstance(item, dict)
+    }
+    bindings = current.get("selected_action_bindings") if isinstance(current.get("selected_action_bindings"), dict) else {}
+    for action_id in current.get("selected_action_ids", []):
+        candidate = current_candidates.get(str(action_id))
+        if candidate is None:
+            stale_reasons.append("selected_action_missing")
+            continue
+        if str(bindings.get(str(action_id)) or "") != str(candidate.get("binding_digest") or ""):
+            stale_reasons.append("selected_action_changed")
+    try:
+        _validate_preference_selection_reference(
+            root,
+            str(current.get("preference_selection_id") or ""),
+            str(snapshot.get("candidate_snapshot_digest") or ""),
+        )
+    except SystemExit:
+        stale_reasons.append("preference_selection_stale")
+    current["effective_status"] = "stale" if stale_reasons else "current"
+    current["stale_reasons"] = sorted(set(stale_reasons))
+    if not stale_reasons:
+        current["selected_actions"] = [
+            current_candidates[str(action_id)]
+            for action_id in current.get("selected_action_ids", [])
+            if str(action_id) in current_candidates
+        ]
+    else:
+        current["selected_actions"] = []
+        current["safe_to_continue"] = False
+    return current
+
+
+def _validate_portfolio_history_target(root: Path) -> Path:
+    programs = kb_root(root) / "programs"
+    path = portfolio_history_path(root)
+    if programs.is_symlink() or path.is_symlink():
+        raise SystemExit("Portfolio history target cannot be a symlink")
+    resolved_root = kb_root(root).resolve()
+    try:
+        path.resolve().relative_to(resolved_root)
+    except ValueError as exc:
+        raise SystemExit("Portfolio history target must stay inside kb") from exc
+    return path
+
+
+def record_portfolio_decision(
+    root: Path,
+    decision: dict[str, Any],
+    *,
+    selected_program_id: str = "",
+) -> tuple[dict[str, Any], bool]:
+    # Validate once before a mutation is opened, then recompute and validate
+    # under the workspace/exact-target transaction to close the stale-write gap.
+    initial_snapshot = portfolio_candidate_snapshot(root, selected_program_id=selected_program_id)
+    validate_portfolio_decision(root, decision, initial_snapshot)
+    path = _validate_portfolio_history_target(root)
+    changed = False
+    stored: dict[str, Any] = {}
+    with mutation_transaction(root, "research-orchestrator:record-next-selection", [path]):
+        current_snapshot = portfolio_candidate_snapshot(root, selected_program_id=selected_program_id)
+        normalized, selected = validate_portfolio_decision(root, decision, current_snapshot)
+        history = _load_portfolio_history(root)
+        existing = [
+            item
+            for item in history.get("items", [])
+            if isinstance(item, dict) and str(item.get("decision_id") or "") == normalized["decision_id"]
+        ]
+        if existing:
+            comparable = dict(existing[0])
+            comparable.pop("recorded_at", None)
+            if comparable != normalized:
+                raise SystemExit("Portfolio decision id is already bound to different content")
+            stored = existing[0]
+        else:
+            stored = {**normalized, "recorded_at": utc_now_iso()}
+            history.setdefault("items", []).append(stored)
+            history["generated_at"] = utc_now_iso()
+            write_yaml_if_changed(path, history)
+            changed = True
+    if changed:
+        checkpoint_and_report(
+            root,
+            trigger="milestone",
+            message=f"milestone: record portfolio decision {stored['decision_id']}",
+            target_paths=[path],
+        )
+    return stored, changed
+
+
 def format_dashboard(items: list[dict[str, Any]], *, limit: int = 20) -> str:
     selected = items[:limit] if limit > 0 else items
     lines = ["# Program Dashboard", ""]
@@ -902,12 +1669,94 @@ def format_dashboard(items: list[dict[str, Any]], *, limit: int = 20) -> str:
     for item in selected:
         reasons = ", ".join(item.get("reasons", [])) or "no urgent blocker"
         lines.append(
-            f"- `{item['program_id']}` · stage={item.get('stage') or 'init'} · "
-            f"score={item.get('score', 0)} · {reasons}"
+            f"- `{item['program_id']}` · stage={item.get('stage') or 'init'} · {reasons}"
         )
         lines.append(f"  next: {item.get('next_action')}")
         lines.append("  操作：可运行 kb next，或直接让 AI 推进上述事项。")
     return "\n".join(lines).strip()
+
+
+def _portfolio_public_action_label(candidate: dict[str, Any]) -> str:
+    return {
+        "resolve-evidence-request": "补齐一项证据请求",
+        "agent-fill": "补全一项有证据支撑的分析",
+        "agent-verify": "重新核验一项分析及其证据",
+        "answer-open-question": "回答一个尚未解决的研究问题",
+        "human-decision": "请你审阅一项已经核验的判断",
+        "persisted-program-action": "继续一项已经保存的研究工作",
+        "review-program-stage": "检查当前阶段并形成有依据的后续行动",
+        "screen": "对一项资料做初步筛选",
+        "generate-note": "整理一项资料的完整分析",
+        "refresh": "刷新一项资料的结构或分析",
+        "run-due-monitor": "执行一项已到期的研究跟踪",
+    }.get(str(candidate.get("action_type") or ""), "继续一项当前可行的研究工作")
+
+
+def format_portfolio_dashboard(snapshot: dict[str, Any]) -> str:
+    candidates = [item for item in snapshot.get("candidates", []) if isinstance(item, dict)]
+    if not candidates:
+        return "# Program Dashboard\n\n- 当前没有待比较的研究行动。"
+    grouped: dict[str, int] = {}
+    for item in candidates:
+        program_id = str(item.get("program_id") or "")
+        grouped[program_id] = grouped.get(program_id, 0) + 1
+    lines = ["# Program Dashboard", "", "以下是供 Agent 比较的事实候选，不代表优先级："]
+    for program_id in sorted(grouped):
+        lines.append(f"- 研究计划「{program_id}」：{grouped[program_id]} 项可行行动")
+    return "\n".join(lines).strip()
+
+
+def format_portfolio_next(
+    snapshot: dict[str, Any],
+    current: dict[str, Any] | None,
+    *,
+    has_records: bool,
+) -> str:
+    candidates = [item for item in snapshot.get("candidates", []) if isinstance(item, dict)]
+    if not candidates:
+        if has_records:
+            return "知识库已有资料，但目前没有待处理事项。"
+        return "知识库还是空的。请告诉我一篇论文、一个代码仓或一篇博客的来源，或使用 kb ingest 添加资料。"
+    if current is None:
+        return f"Agent 需要先比较当前 {len(candidates)} 项可行行动，再说明为什么选择其中的下一步。"
+    if str(current.get("effective_status") or "") != "current":
+        return "研究状态已发生变化，旧的下一步选择不再有效；Agent 需要根据当前信息重新规划。"
+    lines = ["Agent 已根据当前研究状态选择下一步："]
+    for candidate in current.get("selected_actions", []):
+        if not isinstance(candidate, dict):
+            continue
+        program_id = str(candidate.get("program_id") or "")
+        lines.append(f"- 研究计划「{program_id}」：{_portfolio_public_action_label(candidate)}。")
+    has_human_gate = any(
+        isinstance(candidate, dict) and str(candidate.get("governance_gate") or "") != "none"
+        for candidate in current.get("selected_actions", [])
+    )
+    if has_human_gate:
+        lines.append("其中包含需要你决定的事项，Agent 会先向你说明再继续。")
+    elif str(current.get("decision_scope") or "") == "research_judgement":
+        lines.append("这个选择涉及研究判断，必须继续走现有确认流程，不能自动执行。")
+    else:
+        lines.append("Agent 可以按这个选择继续推进；执行前仍会重新核对当前状态。")
+    return "\n".join(lines)
+
+
+def _legacy_next_item(candidate: dict[str, Any]) -> dict[str, Any]:
+    subject = candidate.get("subject") if isinstance(candidate.get("subject"), dict) else {}
+    gate = str(candidate.get("governance_gate") or "none")
+    return {
+        "program_id": str(candidate.get("program_id") or ""),
+        "record_id": str(subject.get("id") or ""),
+        "title": str(candidate.get("title") or ""),
+        "step_type": "human-decision" if gate == "human-decision" else str(candidate.get("action_type") or ""),
+        "action_kind": "human-gate" if gate == "human-decision" else "agent-work",
+        "safe_execute": bool(candidate.get("safe_execute_capability")) and gate == "none",
+        "stage": str(candidate.get("stage") or ""),
+        "goal": str(candidate.get("goal") or ""),
+        "question": str(candidate.get("question") or ""),
+        "next_action": str(candidate.get("reason") or ""),
+        "recommended_command": str(candidate.get("recommended_command") or ""),
+        "portfolio_action_id": str(candidate.get("action_id") or ""),
+    }
 
 
 def format_next(
@@ -1163,13 +2012,35 @@ def build_parser() -> argparse.ArgumentParser:
     status = subparsers.add_parser("status", help="Show program status")
     status.add_argument("--program-id", required=True)
 
-    dashboard = subparsers.add_parser("dashboard", help="Show prioritized program dashboard")
+    dashboard = subparsers.add_parser("dashboard", help="Show factual program candidate context")
     dashboard.add_argument("--limit", type=int, default=20)
 
-    next_cmd = subparsers.add_parser("next", help="Show prioritized next actions across programs")
+    next_cmd = subparsers.add_parser("next", help="Show the current Agent-selected next action or request planning")
     next_cmd.add_argument("--limit", type=int, default=5)
     next_cmd.add_argument("--program-id")
     next_cmd.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
+
+    prepare_next = subparsers.add_parser(
+        "prepare-next-selection",
+        help="Prepare an Agent-fillable portfolio decision without choosing a winner",
+    )
+    prepare_next.add_argument("--program-id")
+    prepare_next.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
+
+    verify_next = subparsers.add_parser(
+        "verify-next-selection",
+        help="Verify an Agent-authored portfolio decision against current state",
+    )
+    verify_next.add_argument("--selection-file", required=True)
+    verify_next.add_argument("--program-id")
+    verify_next.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
+
+    record_next = subparsers.add_parser(
+        "record-next-selection",
+        help="Record a verified Agent-authored portfolio decision",
+    )
+    record_next.add_argument("--selection-file", required=True)
+    record_next.add_argument("--program-id")
 
     auto = subparsers.add_parser("auto", help="Plan or execute the next safe orchestration step")
     auto.add_argument("--max-steps", type=int, default=1)
@@ -1258,6 +2129,165 @@ def build_parser() -> argparse.ArgumentParser:
     event.add_argument("--artifact", action="append", default=[])
     event.add_argument("--tag", action="append", default=[])
     return parser
+
+
+def _program_decision_context(
+    root: Path,
+    program_id: str,
+    decision_id: str,
+    expected_snapshot: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any], Path]:
+    decisions_yaml = decisions_path(root, program_id)
+    items = list_items(decisions_yaml, f"{program_id}-decisions", "research-orchestrator")
+    matches = [item for item in items if str(item.get("id") or "") == decision_id]
+    if len(matches) != 1:
+        raise ValueError("program decision is no longer uniquely available")
+    selected = matches[0]
+    violations = readiness_violations(root, selected, decisions_yaml)
+    if violations:
+        raise ValueError("program decision is no longer ready")
+    require_judgement_snapshot(
+        selected,
+        expected_snapshot=expected_snapshot,
+        owner="research-orchestrator",
+        path=decisions_yaml.relative_to(root).as_posix(),
+        root=root,
+    )
+    return items, selected, decisions_yaml
+
+
+def prepare_review_batch_decision(
+    root: Path,
+    item: dict,
+    decision: str,
+    *,
+    actor: str,
+    evidence: list[str],
+    user_authorization: str,
+    authorization_source: str,
+    rejection_reason: str,
+) -> dict:
+    route = item.get("confirm_route" if decision == "confirm" else "reject_route")
+    route = route if isinstance(route, dict) else {}
+    expected_action = "confirm-decision" if decision == "confirm" else "reject-decision"
+    if route.get("owner") != "research-orchestrator" or route.get("action") != expected_action:
+        raise ValueError("program decision route is invalid")
+    snapshot = item.get("snapshot_binding")
+    if not isinstance(snapshot, dict):
+        raise ValueError("program decision snapshot is missing")
+    program_id = str(route.get("program_id") or "")
+    decision_id = str(route.get("decision_id") or "")
+    snapshot_text = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    _items, selected, decisions_yaml = _program_decision_context(root, program_id, decision_id, snapshot_text)
+    candidate = dict(selected)
+    if decision == "confirm":
+        claims = candidate.get("payload", {}).get("claims", [])
+        apply_confirmation(
+            candidate,
+            confirmed_by=actor,
+            evidence=evidence,
+            user_authorization=user_authorization,
+            authorization_source=authorization_source,
+            method="orchestrate.py confirm-decision",
+            project_root=root,
+            verification_root=program_root(root, program_id),
+            trusted_source_roots=_decision_source_roots(root, program_id, claims),
+        )
+        targets = [decisions_yaml, decision_log_path(root, program_id), reporting_events_path(root, program_id), state_path(root, program_id)]
+    elif decision == "reject":
+        apply_judgement_rejection(candidate, reason=rejection_reason)
+        targets = [decisions_yaml, decision_log_path(root, program_id), state_path(root, program_id)]
+    else:
+        raise ValueError("program decision is invalid")
+    return {
+        "owner": "research-orchestrator",
+        "decision": decision,
+        "program_id": program_id,
+        "decision_id": decision_id,
+        "target_paths": targets,
+    }
+
+
+def apply_review_batch_decision(
+    root: Path,
+    item: dict,
+    decision: str,
+    *,
+    actor: str,
+    evidence: list[str],
+    user_authorization: str,
+    authorization_source: str,
+    rejection_reason: str,
+) -> list[Path]:
+    plan = prepare_review_batch_decision(
+        root,
+        item,
+        decision,
+        actor=actor,
+        evidence=evidence,
+        user_authorization=user_authorization,
+        authorization_source=authorization_source,
+        rejection_reason=rejection_reason,
+    )
+    snapshot_text = json.dumps(item["snapshot_binding"], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    items, selected, decisions_yaml = _program_decision_context(
+        root, plan["program_id"], plan["decision_id"], snapshot_text
+    )
+    if decision == "confirm":
+        claims = selected.get("payload", {}).get("claims", [])
+        apply_confirmation(
+            selected,
+            confirmed_by=actor,
+            evidence=evidence,
+            user_authorization=user_authorization,
+            authorization_source=authorization_source,
+            method="orchestrate.py confirm-decision",
+            project_root=root,
+            verification_root=program_root(root, plan["program_id"]),
+            trusted_source_roots=_decision_source_roots(root, plan["program_id"], claims),
+        )
+        decisions_yaml, log_path = write_decisions(root, plan["program_id"], items)
+        decision_payload = selected.get("payload", {}).get("decision", {})
+        append_program_reporting_event(
+            root,
+            plan["program_id"],
+            {
+                "source_skill": "research-orchestrator",
+                "event_type": "decision-confirmed",
+                "title": str(decision_payload.get("text") or plan["decision_id"]),
+                "summary": str(decision_payload.get("rationale") or ""),
+                "stage": str(decision_payload.get("stage") or ""),
+                "tags": ["decision", "confirmed"],
+                "artifacts": [decisions_yaml.relative_to(root).as_posix(), log_path.relative_to(root).as_posix()],
+                "epistemic_type": "judgement",
+                "information_types": ["inference", "evaluation"],
+                "confirmation_status": "confirmed",
+                "confirmation_binding": confirmation_binding(
+                    selected, owner="research-orchestrator", path=decisions_yaml.relative_to(root).as_posix()
+                ),
+            },
+            generated_by="research-orchestrator",
+        )
+        confirmation_status = "confirmed"
+    else:
+        apply_judgement_rejection(selected, reason=rejection_reason)
+        selected["updated_at"] = utc_now_iso()
+        _yaml_path, _log_path = write_decisions(root, plan["program_id"], items)
+        decision_payload = selected.get("payload", {}).get("decision", {})
+        confirmation_status = "rejected"
+    state = load_state(root, plan["program_id"])
+    state["last_decision"] = {
+        "id": plan["decision_id"],
+        "decision": str(decision_payload.get("text") or ""),
+        "timestamp": str(selected.get("timestamp") or ""),
+        "confirmation_status": confirmation_status,
+    }
+    # The root Obsidian transaction has already declared every mutable target.
+    # Do not let the general state writer materialize unrelated workflow files
+    # behind the coordinator's back.
+    state = refresh_state_counts(root, plan["program_id"], state, materialize=False)
+    write_yaml_if_changed(state_path(root, plan["program_id"]), state)
+    return list(plan["target_paths"])
 
 
 def main() -> int:
@@ -1395,32 +2425,91 @@ def main() -> int:
         print(f"workflow_files: {payload.get('workflow_files', {})}")
         return 0
     if args.command == "dashboard":
-        print(format_dashboard(program_dashboard_items(root), limit=args.limit))
+        print(format_portfolio_dashboard(portfolio_candidate_snapshot(root)))
         return 0
-    if args.command == "next":
+    if args.command in {
+        "next",
+        "prepare-next-selection",
+        "verify-next-selection",
+        "record-next-selection",
+    }:
+        selected_program_id = str(getattr(args, "program_id", None) or "")
+        if selected_program_id and not program_root(root, selected_program_id).is_dir():
+            existing = ", ".join(program_ids(root)) or "(none)"
+            raise SystemExit(
+                f"program `{selected_program_id}` not found; existing: {existing}. "
+                "Use init-program to create it."
+            )
+        snapshot = portfolio_candidate_snapshot(root, selected_program_id=selected_program_id)
         has_records = bool(iter_records(root))
-        items = program_dashboard_items(root)
-        if args.program_id:
-            if not program_root(root, args.program_id).is_dir():
-                existing = ", ".join(program_ids(root)) or "(none)"
-                raise SystemExit(
-                    f"program `{args.program_id}` not found; existing: {existing}. "
-                    "Use init-program to create it."
+        if args.command == "prepare-next-selection":
+            payload = {
+                "candidate_snapshot": snapshot,
+                "portfolio_decision_fill": portfolio_decision_fill_template(snapshot),
+            }
+            if args.json:
+                print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+            else:
+                print(
+                    f"Agent 可以从当前 {snapshot['candidate_count']} 项可行行动中进行比较；"
+                    "脚本尚未选择任何下一步。"
                 )
-            items = [item for item in items if item.get("program_id") == args.program_id]
-            if not items and not args.json:
-                print(f"# Next Actions\n\n- No actions for program `{args.program_id}`.")
+            return 0
+        if args.command in {"verify-next-selection", "record-next-selection"}:
+            fill_path = Path(args.selection_file).expanduser()
+            if not fill_path.is_absolute():
+                fill_path = root / fill_path
+            decision = load_portfolio_decision_file(fill_path)
+            if args.command == "verify-next-selection":
+                normalized, selected = validate_portfolio_decision(root, decision, snapshot)
+                payload = {"status": "verified", "decision": normalized, "selected_actions": selected}
+                if args.json:
+                    print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+                else:
+                    print("Agent 提交的下一步选择与当前状态一致，可以记录。")
                 return 0
+            stored, changed = record_portfolio_decision(
+                root,
+                decision,
+                selected_program_id=selected_program_id,
+            )
+            status = "recorded" if changed else "already recorded"
+            print(f"[ok] portfolio decision {stored['decision_id']} {status}")
+            return 0
+        current = current_portfolio_decision(root, snapshot)
+        planning_required = current is None or str(current.get("effective_status") or "") != "current"
+        if not planning_required:
+            items = [_legacy_next_item(item) for item in current.get("selected_actions", [])]
+            if str(current.get("decision_scope") or "") == "research_judgement":
+                for item in items:
+                    item["safe_execute"] = False
+                    item["action_kind"] = "human-gate"
+        else:
+            # Transitional owner-protocol compatibility for callers released
+            # before PortfolioDecision existed.  New callers MUST branch on
+            # planning_required and consume candidate_snapshot; these legacy
+            # items are not a decision and are never used by the plain renderer.
+            items = program_dashboard_items(root)
+            if selected_program_id:
+                items = [item for item in items if item.get("program_id") == selected_program_id]
         if args.json:
             print(
                 json.dumps(
-                    {"has_records": has_records, "items": items[: args.limit] if args.limit > 0 else items},
+                    {
+                        "has_records": has_records,
+                        "items": items,
+                        "candidate_snapshot": snapshot,
+                        "portfolio_decision_fill": portfolio_decision_fill_template(snapshot),
+                        "portfolio_decision": current,
+                        "planning_required": planning_required,
+                        "legacy_items_are_not_a_decision": planning_required,
+                    },
                     ensure_ascii=False,
                     sort_keys=True,
                 )
             )
         else:
-            print(format_next(items, limit=args.limit, has_records=has_records))
+            print(format_portfolio_next(snapshot, current, has_records=has_records))
         return 0
     if args.command == "auto":
         exit_code = 0
@@ -1440,12 +2529,7 @@ def main() -> int:
                 print("[stop] human decision required; not executing")
         return exit_code
     if args.command == "route":
-        lower = args.task.lower()
-        for key, skill in ROUTE_HINTS.items():
-            if key in lower:
-                print(skill)
-                return 0
-        print("research-orchestrator")
+        print(route_task(args.task))
         return 0
     if args.command == "attach-unit":
         warning = ""

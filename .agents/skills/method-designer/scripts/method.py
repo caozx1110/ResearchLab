@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import argparse
+import copy
+import json
 import re
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -733,10 +736,18 @@ def verify_method(root: Path, args: argparse.Namespace) -> int:
     return 0
 
 
-def confirm_method(root: Path, args: argparse.Namespace) -> int:
+def confirm_method(
+    root: Path,
+    args: argparse.Namespace,
+    *,
+    manage_transaction: bool = True,
+    create_checkpoint: bool = True,
+    emit_output: bool = True,
+) -> int:
     paths = method_paths(root, args.program_id, args.idea_id)
     targets = [paths["method"], paths["choice"], paths["interfaces"], paths["matrix"], paths["state"], paths["events"]]
-    with mutation_transaction(root, "method:confirm", targets):
+    transaction = mutation_transaction(root, "method:confirm", targets) if manage_transaction else nullcontext()
+    with transaction:
         current_idea, _ = locate_record(root, args.idea_id, kind="idea", fuzzy=False)
         if str(current_idea.get("status") or "") != "selected":
             raise SystemExit("The idea is no longer selected; refusing to confirm this method proposal.")
@@ -873,20 +884,30 @@ def confirm_method(root: Path, args: argparse.Namespace) -> int:
             },
             generated_by="method-designer",
         )
-    checkpoint_and_report(
-        root,
-        trigger="milestone",
-        message=f"milestone: confirm method {args.program_id} {args.idea_id}",
-        target_paths=targets,
-    )
-    print("方法选择已确认，实验规划阶段已经同步推进。下一步可运行 kb next。")
+    if create_checkpoint:
+        checkpoint_and_report(
+            root,
+            trigger="milestone",
+            message=f"milestone: confirm method {args.program_id} {args.idea_id}",
+            target_paths=targets,
+        )
+    if emit_output:
+        print("方法选择已确认，实验规划阶段已经同步推进。下一步可运行 kb next。")
     return 0
 
 
-def reject_method(root: Path, args: argparse.Namespace) -> int:
+def reject_method(
+    root: Path,
+    args: argparse.Namespace,
+    *,
+    manage_transaction: bool = True,
+    create_checkpoint: bool = True,
+    emit_output: bool = True,
+) -> int:
     paths = method_paths(root, args.program_id, args.idea_id)
     targets = [paths["method"], paths["choice"], paths["interfaces"], paths["matrix"], paths["state"]]
-    with mutation_transaction(root, "method:reject", targets):
+    transaction = mutation_transaction(root, "method:reject", targets) if manage_transaction else nullcontext()
+    with transaction:
         current_idea, _ = locate_record(root, args.idea_id, kind="idea", fuzzy=False)
         if str(current_idea.get("status") or "") != "selected":
             raise SystemExit("The idea is no longer selected; refusing to reject this method proposal.")
@@ -944,14 +965,143 @@ def reject_method(root: Path, args: argparse.Namespace) -> int:
         write_yaml_if_changed(paths["interfaces"], interfaces)
         write_yaml_if_changed(paths["matrix"], matrix)
         write_yaml_if_changed(paths["state"], state)
-    checkpoint_and_report(
-        root,
-        trigger="milestone",
-        message=f"milestone: reject method {args.program_id} {args.idea_id}",
-        target_paths=targets,
-    )
-    print("方法选择已拒绝；没有选择仓库，也没有推进实验规划阶段。")
+    if create_checkpoint:
+        checkpoint_and_report(
+            root,
+            trigger="milestone",
+            message=f"milestone: reject method {args.program_id} {args.idea_id}",
+            target_paths=targets,
+        )
+    if emit_output:
+        print("方法选择已拒绝；没有选择仓库，也没有推进实验规划阶段。")
     return 0
+
+
+def prepare_review_batch_decision(
+    root: Path,
+    item: dict,
+    decision: str,
+    *,
+    actor: str,
+    evidence: list[str],
+    user_authorization: str,
+    authorization_source: str,
+    rejection_reason: str,
+) -> dict:
+    """Pure-read method-selection preflight for the root Obsidian transaction."""
+    route = item.get("confirm_route" if decision == "confirm" else "reject_route")
+    route = route if isinstance(route, dict) else {}
+    expected_action = "confirm-selection" if decision == "confirm" else "reject-selection"
+    if route.get("owner") != "method-designer" or route.get("action") != expected_action:
+        raise ValueError("method review route is invalid")
+    program_id = str(route.get("program_id") or "")
+    idea_id = str(route.get("idea_id") or "")
+    paths = method_paths(root, program_id, idea_id)
+    current_idea, _ = locate_record(root, idea_id, kind="idea", fuzzy=False)
+    if str(current_idea.get("status") or "") != "selected":
+        raise ValueError("the method idea is no longer selected")
+    choice = load_method_artifact(paths["choice"], label="selection artifact")
+    require_current_method_subject(choice, program_id, idea_id)
+    violations = readiness_violations(root, choice, paths["choice"])
+    if violations:
+        raise ValueError("method selection is no longer ready")
+    snapshot = item.get("snapshot_binding")
+    if not isinstance(snapshot, dict):
+        raise ValueError("method review snapshot is missing")
+    require_judgement_snapshot(
+        choice,
+        expected_snapshot=json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        owner="method-designer",
+        path=rel(root, paths["choice"]),
+        root=root,
+    )
+    state = load_program_state(paths["state"], program_id)
+    existing_idea_id = str(state.get("selected_idea_id") or "").strip()
+    if existing_idea_id and existing_idea_id != idea_id:
+        raise ValueError("program now points to another selected idea")
+    if decision == "confirm":
+        if str(choice.get("status") or "") != "ready_for_review" or "selected_repo_id" in choice:
+            raise ValueError("method selection is no longer confirmable")
+        proposed_repo_id = str(choice.get("proposed_repo_id") or "").strip()
+        claims, claim_violations = validate_method_claims(choice, proposed_repo_id)
+        if claim_violations:
+            raise ValueError("method selection claims are invalid")
+        locate_record(root, proposed_repo_id, kind="repo", fuzzy=False)
+        existing_repo_id = str(state.get("selected_repo_id") or "").strip()
+        if existing_repo_id and existing_repo_id != proposed_repo_id:
+            raise ValueError("program already selected another repository")
+        candidate = copy.deepcopy(choice)
+        candidate["selected_repo_id"] = proposed_repo_id
+        candidate["selection_status"] = "confirmed"
+        candidate["status"] = "confirmed"
+        candidate["payload"]["method_selection"]["selected_repo_id"] = proposed_repo_id
+        candidate["payload"]["method_selection"]["agent_fill_status"] = "confirmed"
+        apply_confirmation(
+            candidate,
+            confirmed_by=actor,
+            evidence=evidence,
+            user_authorization=user_authorization,
+            authorization_source=authorization_source,
+            method="method-designer confirm-selection",
+            project_root=root,
+            verification_root=paths["design_root"],
+            trusted_source_roots=method_source_roots(root, program_id, claims),
+        )
+        targets = [paths["method"], paths["choice"], paths["interfaces"], paths["matrix"], paths["state"], paths["events"]]
+    elif decision == "reject":
+        candidate = copy.deepcopy(choice)
+        apply_judgement_rejection(candidate, reason=rejection_reason)
+        targets = [paths["method"], paths["choice"], paths["interfaces"], paths["matrix"], paths["state"]]
+    else:
+        raise ValueError("method review decision is invalid")
+    load_method_artifact(paths["interfaces"], label="interface artifact")
+    load_method_artifact(paths["matrix"], label="experiment matrix")
+    return {
+        "owner": "method-designer",
+        "decision": decision,
+        "program_id": program_id,
+        "idea_id": idea_id,
+        "target_paths": targets,
+    }
+
+
+def apply_review_batch_decision(
+    root: Path,
+    item: dict,
+    decision: str,
+    *,
+    actor: str,
+    evidence: list[str],
+    user_authorization: str,
+    authorization_source: str,
+    rejection_reason: str,
+) -> list[Path]:
+    """Apply one method decision under the coordinator's existing transaction."""
+    plan = prepare_review_batch_decision(
+        root,
+        item,
+        decision,
+        actor=actor,
+        evidence=evidence,
+        user_authorization=user_authorization,
+        authorization_source=authorization_source,
+        rejection_reason=rejection_reason,
+    )
+    args = argparse.Namespace(
+        program_id=plan["program_id"],
+        idea_id=plan["idea_id"],
+        expected_snapshot=json.dumps(item["snapshot_binding"], ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        confirmed_by=actor,
+        evidence=evidence,
+        user_authorization=user_authorization,
+        authorization_source=authorization_source,
+        reason=rejection_reason,
+    )
+    if decision == "confirm":
+        confirm_method(root, args, manage_transaction=False, create_checkpoint=False, emit_output=False)
+    else:
+        reject_method(root, args, manage_transaction=False, create_checkpoint=False, emit_output=False)
+    return list(plan["target_paths"])
 
 
 def main() -> int:

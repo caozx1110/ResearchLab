@@ -5,6 +5,8 @@ description: Manage core experiment units, including plans, classified run logs,
 
 # Experiment Workbench
 
+开始计划、运行或诊断前遵循 workspace 统一 task-scoped preference 合同：按具体 operation 记录并加载 effective selection；资源、约束和自动执行边界作为 hard 项必须保留，其他 soft 项只在 Agent 明确选入本任务时应用。
+
 > 协议参考：`.agents/lib/research/SCHEMAS.md#unit-record` · `#experiment-files` · `#program-files` · `#confirmation-gate` · `#runtime`
 
 Use this skill for structured experiment memory rather than one-off chat summaries.

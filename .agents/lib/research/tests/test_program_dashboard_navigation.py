@@ -305,7 +305,7 @@ def test_orchestrator_status_existing_program_still_works(tmp_path: Path, monkey
     assert orchestrate.state_path(root, "p-existing").read_bytes() == before
 
 
-def test_orchestrator_next_program_filter_narrows_output(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_orchestrator_next_program_filter_requests_agent_planning_without_fixed_winner(tmp_path: Path, monkeypatch, capsys) -> None:
     orchestrate = _load_script("research-orchestrator", "orchestrate.py", "orchestrator_script_for_filtered_next")
     root = _make_workspace(tmp_path)
     for program_id, action in (("p-one", "Advance one"), ("p-two", "Advance two")):
@@ -321,7 +321,8 @@ def test_orchestrator_next_program_filter_narrows_output(tmp_path: Path, monkeyp
 
     assert orchestrate.main() == 0
     output = capsys.readouterr().out
-    assert "研究计划「p-one」：Advance one" in output
+    assert "Agent 需要先比较当前 1 项可行行动" in output
+    assert "Advance one" not in output
     assert "p-two" not in output
 
 
@@ -763,7 +764,7 @@ def test_orchestrator_dashboard_detects_loose_unscreened_unit(tmp_path: Path) ->
     assert "--paper-id" not in dashboard
 
 
-def test_orchestrator_auto_dry_run_plans_exact_command_for_loose_unit(tmp_path: Path) -> None:
+def test_orchestrator_auto_requires_agent_portfolio_decision_for_loose_unit(tmp_path: Path) -> None:
     orchestrate = _load_script("research-orchestrator", "orchestrate.py", "orchestrator_script_for_auto_plan")
     root = _make_workspace(tmp_path)
     write_yaml_if_changed(
@@ -789,11 +790,12 @@ def test_orchestrator_auto_dry_run_plans_exact_command_for_loose_unit(tmp_path: 
     plan = orchestrate.auto_plan(root)
     text = orchestrate.format_auto_plan(plan)
 
-    assert "idea `i-loose-123456` needs analysis" in text
-    assert "--idea-id i-loose-123456" in " ".join(plan["command_parts"])
+    assert "Agent must compare" in text
+    assert plan["command_parts"] == []
     assert ".py " not in text
     assert "--idea-id" not in text
-    assert "safe refresh" in text
+    assert "stop for human decision" in text
+    assert plan["status"] == "planning_required"
 
 
 def test_orchestrator_auto_stops_before_hollow_pending_confirmation(tmp_path: Path, capsys) -> None:
@@ -830,7 +832,7 @@ def test_orchestrator_auto_stops_before_hollow_pending_confirmation(tmp_path: Pa
     assert plan["safe_execute"] is False
     assert "stop for human decision" in output
     assert "not executing" in output
-    assert plan["step_type"] == "agent-fill"
+    assert plan["step_type"] == "portfolio-planning"
     assert plan["kind"] == "agent-work"
     assert "recommended_command" not in plan
     for leaked_fragment in ("python3", ".py ", "--paper-id", "${"):

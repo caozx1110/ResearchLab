@@ -41,7 +41,10 @@ ALLOWED_PAYLOAD_KEYS = {
     "note",
     "mode",
     "run_id",
+    "monitor_binding",
     "scope",
+    "review_protocol",
+    "reviewers",
     "budget",
     "usage",
     "queries",
@@ -54,7 +57,10 @@ ALLOWED_PAYLOAD_KEYS = {
 SEARCH_STATE_KEYS = {
     "mode",
     "run_id",
+    "monitor_binding",
     "scope",
+    "review_protocol",
+    "reviewers",
     "budget",
     "usage",
     "queries",
@@ -220,8 +226,10 @@ def main() -> int:
         print("当前没有可用的文献检索工具；已记录阻塞原因，没有把空结果当作成功。")
         return 0
     screening_counts = {"include": 0, "maybe": 0, "exclude": 0, "unassessed": 0}
+    multi_reviewer = int((persisted.get("scope") or {}).get("screeners") or 1) > 1
     for candidate in candidates:
-        screening = candidate.get("screening") if isinstance(candidate.get("screening"), dict) else {}
+        screening_key = "effective_screening" if multi_reviewer else "screening"
+        screening = candidate.get(screening_key) if isinstance(candidate.get(screening_key), dict) else {}
         decision = str(screening.get("decision") or "unassessed")
         if decision in screening_counts:
             screening_counts[decision] += 1

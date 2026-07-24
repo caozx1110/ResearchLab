@@ -994,6 +994,41 @@ def test_stage_helper_rejects_unknown_raw_payload_before_workspace_write(tmp_pat
     assert not (tmp_path / "kb").exists()
 
 
+def test_stage_helper_accepts_and_persists_immutable_monitor_binding(tmp_path: Path) -> None:
+    module = _search_module()
+    binding = {"run_id": "monitor-run-probe", "task_digest": "0" * 64}
+    payload_path = tmp_path / "payload.json"
+    payload_path.write_text(
+        json.dumps(
+            {
+                "request": "monitor route probe",
+                "monitor_binding": binding,
+                "candidates": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    payload = module._load_payload(payload_path)
+    path = module.stage_payload(tmp_path, payload)
+    persisted = load_yaml(path)
+    assert persisted["monitor_binding"] == binding
+
+    with pytest.raises(SystemExit, match="monitor_binding cannot change"):
+        module.stage_payload(
+            tmp_path,
+            {
+                "request": "monitor route probe",
+                "stage_id": path.stem,
+                "monitor_binding": {
+                    "run_id": "monitor-run-other",
+                    "task_digest": "1" * 64,
+                },
+                "candidates": [],
+            },
+        )
+    assert load_yaml(path)["monitor_binding"] == binding
+
+
 @pytest.mark.parametrize("url", ["javascript:alert(1)", "file:///private/paper", "https://u:p@example.test/a"])
 def test_unsafe_candidate_urls_fail_before_workspace_write(tmp_path: Path, url: str) -> None:
     with pytest.raises(SystemExit, match="safe http"):
@@ -1932,18 +1967,33 @@ def test_systematic_time_multi_reviewer_and_terminal_stop_contracts_fail_closed(
         "max_full_reads": 4,
         "max_citation_hops": 2,
     }
-    with pytest.raises(SystemExit, match="per-reviewer ledger"):
-        stage_search_results(
-            tmp_path,
-            kind="paper",
-            query="unsupported double screening",
-            candidates=[],
-            search_state={
-                "entry_skill": "literature-search",
-                "mode": "systematic",
-                "scope": {**base_scope, "screeners": 2, "disagreement_resolution": "third reviewer"},
+    multi_path = stage_search_results(
+        tmp_path,
+        kind="paper",
+        query="supported double screening",
+        candidates=[],
+        search_state={
+            "entry_skill": "literature-search",
+            "mode": "systematic",
+            "scope": {**base_scope, "screeners": 2, "disagreement_resolution": "third reviewer"},
+            "review_protocol": {
+                "required_reviewer_ids": ["reviewer-a", "reviewer-b"],
+                "mode": "independent",
+                "phases": ["title_abstract", "fulltext"],
+                "adjudication_mode": "third_reviewer",
             },
-        )
+            "reviewers": [
+                {"reviewer_id": "reviewer-a", "actor_type": "agent", "execution_id": "exec-a"},
+                {"reviewer_id": "reviewer-b", "actor_type": "agent", "execution_id": "exec-b"},
+            ],
+            "budget": budget,
+            "usage": {"queries": 0, "candidates_seen": 0, "full_reads": 0, "citation_hops": 0},
+            "queries": [],
+            "stop": {"reason": "in_progress"},
+            "partial": True,
+        },
+    )
+    assert load_yaml(multi_path)["review_protocol"]["mode"] == "independent"
 
     naive_query = {**_query("q1"), "searched_at": "2026-07-24", "reproducible": True}
     with pytest.raises(SystemExit, match="include a timezone"):
@@ -2007,6 +2057,517 @@ def test_systematic_time_multi_reviewer_and_terminal_stop_contracts_fail_closed(
                 "partial": True,
             },
         )
+
+
+def _reviewer_decision(
+    decision_id: str,
+    reviewer_id: str,
+    decision: str,
+    *,
+    phase: str = "fulltext",
+    supersedes: str = "",
+) -> dict:
+    item = {
+        "decision_id": decision_id,
+        "reviewer_id": reviewer_id,
+        "phase": phase,
+        "decision": decision,
+        "basis": "fulltext" if phase == "fulltext" else "abstract",
+        "rationale": f"{reviewer_id} independently chose {decision}.",
+        "evidence": [{"quote": f"{reviewer_id} evidence", "locator": phase}],
+        "decided_at": "2026-07-24T01:00:00+00:00",
+    }
+    if supersedes:
+        item["supersedes_decision_id"] = supersedes
+    return item
+
+
+def _multi_reviewer_state(*, terminal: bool = False, duplicate_execution: bool = False) -> dict:
+    query = {**_query("q1"), "result_count": 1, "reproducible": True}
+    state = {
+        "entry_skill": "literature-search",
+        "mode": "systematic",
+        "scope": {
+            "inclusion": ["peer-reviewed"],
+            "exclusion": ["non-research"],
+            "languages": ["en"],
+            "source_types": ["paper"],
+            "channels": ["database export"],
+            "date_range": "2020-2026",
+            "result_depth": "all exported results",
+            "screening": "two evidence-backed reviewers",
+            "screeners": 2,
+            "disagreement_resolution": "third reviewer",
+            "reproducible": True,
+        },
+        "review_protocol": {
+            "required_reviewer_ids": ["reviewer-a", "reviewer-b"],
+            "mode": "independent",
+            "phases": ["title_abstract", "fulltext"],
+            "adjudication_mode": "third_reviewer",
+        },
+        "reviewers": [
+            {"reviewer_id": "reviewer-a", "actor_type": "agent", "execution_id": "exec-a"},
+            {
+                "reviewer_id": "reviewer-b",
+                "actor_type": "agent",
+                "execution_id": "exec-a" if duplicate_execution else "exec-b",
+            },
+            {"reviewer_id": "reviewer-c", "actor_type": "agent", "execution_id": "exec-c"},
+        ],
+        "budget": {
+            "max_queries": 4,
+            "max_candidates": 20,
+            "max_full_reads": 4,
+            "max_citation_hops": 2,
+        },
+        "usage": {
+            "queries": 1,
+            "candidates_seen": 1,
+            "full_reads": 1,
+            "citation_hops": 0,
+            "retryable_failures": 0,
+        },
+        "queries": [query],
+        "coverage": {"round": 1, "covered_facets": ["main facet"], "uncovered_facets": []},
+        "stop": {"reason": "in_progress"},
+        "partial": True,
+    }
+    if terminal:
+        state["coverage"]["flow_counts"] = {
+            "identified": 1,
+            "duplicates_removed": 0,
+            "automation_excluded": 0,
+            "title_abstract_screened": 1,
+            "title_abstract_excluded": 0,
+            "fulltext_sought": 1,
+            "fulltext_unavailable": 0,
+            "fulltext_assessed": 1,
+            "excluded_with_reason": 0,
+            "included": 1,
+        }
+        state["stop"] = {"reason": "target_met", "rationale": "The frozen target was met."}
+        state["partial"] = False
+    return state
+
+
+def _multi_candidate(decisions: list[dict], adjudications: list[dict] | None = None) -> dict:
+    candidate = _candidate("paper-multi", "https://example.test/paper-multi")
+    candidate.pop("screening")
+    candidate["evidence_level"] = "fulltext"
+    candidate["screening_decisions"] = decisions
+    if adjudications is not None:
+        candidate["adjudications"] = adjudications
+    return candidate
+
+
+def test_multi_reviewer_consensus_derives_effective_screening(tmp_path: Path) -> None:
+    candidate = _multi_candidate(
+        [
+            _reviewer_decision("decision-a", "reviewer-a", "include"),
+            _reviewer_decision("decision-b", "reviewer-b", "include"),
+        ]
+    )
+    path = stage_search_results(
+        tmp_path,
+        kind="paper",
+        query="multi reviewer consensus",
+        candidates=[candidate],
+        search_state=_multi_reviewer_state(terminal=True),
+    )
+
+    persisted = load_yaml(path)["candidates"][0]
+    assert persisted["effective_screening"]["status"] == "consensus"
+    assert persisted["effective_screening"]["decision"] == "include"
+    assert persisted["effective_screening"]["phase"] == "fulltext"
+    assert len(persisted["screening_decisions"]) == 2
+
+
+def test_multi_reviewer_conflict_requires_adjudication_before_terminal_stop(tmp_path: Path) -> None:
+    candidate = _multi_candidate(
+        [
+            _reviewer_decision("decision-a", "reviewer-a", "include"),
+            _reviewer_decision("decision-b", "reviewer-b", "exclude"),
+        ]
+    )
+    with pytest.raises(SystemExit, match="complete screening and adjudication"):
+        stage_search_results(
+            tmp_path,
+            kind="paper",
+            query="multi reviewer conflict",
+            candidates=[candidate],
+            search_state=_multi_reviewer_state(terminal=True),
+        )
+
+
+def test_multi_reviewer_third_reviewer_adjudication_preserves_original_decisions(
+    tmp_path: Path,
+) -> None:
+    decisions = [
+        _reviewer_decision("decision-a", "reviewer-a", "include"),
+        _reviewer_decision("decision-b", "reviewer-b", "exclude"),
+    ]
+    candidate = _multi_candidate(
+        decisions,
+        [
+            {
+                "adjudication_id": "adjudication-c",
+                "phase": "fulltext",
+                "input_decision_ids": ["decision-a", "decision-b"],
+                "status": "resolved",
+                "final_decision": "include",
+                "resolved_by": "reviewer-c",
+                "rationale": "The full method satisfies the frozen criteria.",
+                "evidence": [{"quote": "adjudication evidence", "locator": "fulltext"}],
+                "resolved_at": "2026-07-24T02:00:00+00:00",
+            }
+        ],
+    )
+    path = stage_search_results(
+        tmp_path,
+        kind="paper",
+        query="multi reviewer adjudication",
+        candidates=[candidate],
+        search_state=_multi_reviewer_state(terminal=True),
+    )
+
+    persisted = load_yaml(path)["candidates"][0]
+    assert persisted["effective_screening"]["status"] == "adjudicated"
+    assert persisted["effective_screening"]["decision"] == "include"
+    assert [item["decision"] for item in persisted["screening_decisions"]] == ["include", "exclude"]
+    assert persisted["adjudications"][0]["input_digest"]
+
+
+def test_independent_reviewers_cannot_share_an_execution_context(tmp_path: Path) -> None:
+    before = list(tmp_path.rglob("*"))
+    with pytest.raises(SystemExit, match="distinct execution/context ids"):
+        stage_search_results(
+            tmp_path,
+            kind="paper",
+            query="fake independent reviewers",
+            candidates=[],
+            search_state=_multi_reviewer_state(duplicate_execution=True),
+        )
+    assert list(tmp_path.rglob("*")) == before
+
+
+def test_reviewer_decisions_are_append_only_and_supersede_explicitly(tmp_path: Path) -> None:
+    first = _multi_candidate(
+        [
+            _reviewer_decision("decision-a", "reviewer-a", "include"),
+            _reviewer_decision("decision-b", "reviewer-b", "include"),
+        ]
+    )
+    path = stage_search_results(
+        tmp_path,
+        kind="paper",
+        query="review decision history",
+        candidates=[first],
+        search_state=_multi_reviewer_state(),
+    )
+    update = _multi_candidate(
+        [
+            _reviewer_decision(
+                "decision-a2",
+                "reviewer-a",
+                "exclude",
+                supersedes="decision-a",
+            )
+        ]
+    )
+    stage_search_results(
+        tmp_path,
+        kind="paper",
+        query="review decision history",
+        stage_id=path.stem,
+        candidates=[update],
+        search_state={},
+    )
+
+    persisted = load_yaml(path)["candidates"][0]
+    assert [item["decision_id"] for item in persisted["screening_decisions"]] == [
+        "decision-a",
+        "decision-b",
+        "decision-a2",
+    ]
+    assert persisted["effective_screening"]["status"] == "conflict"
+
+
+def test_human_reviewer_and_user_adjudication_require_current_message_attestation(
+    tmp_path: Path,
+) -> None:
+    state = _multi_reviewer_state()
+    state["reviewers"][1] = {
+        "reviewer_id": "reviewer-b",
+        "actor_type": "human",
+        "execution_id": "exec-b",
+    }
+    with pytest.raises(SystemExit, match="current user-message attestation"):
+        stage_search_results(
+            tmp_path,
+            kind="paper",
+            query="human reviewer attestation",
+            candidates=[],
+            search_state=state,
+        )
+
+
+def test_multi_reviewer_phase_order_and_adjudicator_mode_fail_closed(tmp_path: Path) -> None:
+    reversed_state = _multi_reviewer_state()
+    reversed_state["review_protocol"]["phases"] = ["fulltext", "title_abstract"]
+    with pytest.raises(SystemExit, match="canonical screening order"):
+        stage_search_results(
+            tmp_path,
+            kind="paper",
+            query="reversed screening phases",
+            candidates=[],
+            search_state=reversed_state,
+        )
+
+    conflict = [
+        _reviewer_decision("decision-a", "reviewer-a", "include"),
+        _reviewer_decision("decision-b", "reviewer-b", "exclude"),
+    ]
+    self_adjudicated = _multi_candidate(
+        conflict,
+        [{
+            "adjudication_id": "adjudication-self",
+            "phase": "fulltext",
+            "input_decision_ids": ["decision-a", "decision-b"],
+            "status": "resolved",
+            "final_decision": "include",
+            "resolved_by": "reviewer-a",
+            "rationale": "The original reviewer tried to resolve the conflict.",
+            "evidence": [{"quote": "adjudication evidence", "locator": "fulltext"}],
+            "resolved_at": "2026-07-24T02:00:00+00:00",
+        }],
+    )
+    with pytest.raises(SystemExit, match="distinct reviewer"):
+        stage_search_results(
+            tmp_path,
+            kind="paper",
+            query="self adjudication",
+            candidates=[self_adjudicated],
+            search_state=_multi_reviewer_state(),
+        )
+
+    user_state = _multi_reviewer_state()
+    user_state["review_protocol"]["adjudication_mode"] = "user"
+    user_state["scope"]["disagreement_resolution"] = "user"
+    agent_adjudication = _multi_candidate(
+        conflict,
+        [{
+            "adjudication_id": "adjudication-agent",
+            "phase": "fulltext",
+            "input_decision_ids": ["decision-a", "decision-b"],
+            "status": "resolved",
+            "final_decision": "include",
+            "resolved_by": "reviewer-c",
+            "rationale": "An Agent cannot resolve a user-mode conflict.",
+            "evidence": [{"quote": "adjudication evidence", "locator": "fulltext"}],
+            "resolved_at": "2026-07-24T02:00:00+00:00",
+        }],
+    )
+    with pytest.raises(SystemExit, match="current user"):
+        stage_search_results(
+            tmp_path,
+            kind="paper",
+            query="user mode agent adjudication",
+            candidates=[agent_adjudication],
+            search_state=user_state,
+        )
+
+
+def test_multi_reviewer_decision_ledger_cannot_return_to_earlier_phase(tmp_path: Path) -> None:
+    first = _multi_candidate(
+        [
+            _reviewer_decision("full-a", "reviewer-a", "include", phase="fulltext"),
+            _reviewer_decision("full-b", "reviewer-b", "include", phase="fulltext"),
+        ]
+    )
+    path = stage_search_results(
+        tmp_path,
+        kind="paper",
+        query="phase regression",
+        candidates=[first],
+        search_state=_multi_reviewer_state(),
+    )
+    before = path.read_bytes()
+    regressed = _multi_candidate(
+        [
+            _reviewer_decision("title-a", "reviewer-a", "include", phase="title_abstract"),
+            _reviewer_decision("title-b", "reviewer-b", "include", phase="title_abstract"),
+        ]
+    )
+    with pytest.raises(SystemExit, match="cannot return to an earlier phase"):
+        stage_search_results(
+            tmp_path,
+            kind="paper",
+            query="phase regression",
+            stage_id=path.stem,
+            candidates=[regressed],
+            search_state={},
+        )
+    assert path.read_bytes() == before
+
+
+def test_persisted_multi_reviewer_ledger_reordering_fails_closed(tmp_path: Path) -> None:
+    title = _multi_candidate(
+        [
+            _reviewer_decision("title-a", "reviewer-a", "include", phase="title_abstract"),
+            _reviewer_decision("title-b", "reviewer-b", "include", phase="title_abstract"),
+        ]
+    )
+    path = stage_search_results(
+        tmp_path,
+        kind="paper",
+        query="persisted phase reorder",
+        candidates=[title],
+        search_state=_multi_reviewer_state(),
+    )
+    fulltext = _multi_candidate(
+        [
+            _reviewer_decision("full-a", "reviewer-a", "include", phase="fulltext"),
+            _reviewer_decision("full-b", "reviewer-b", "include", phase="fulltext"),
+        ]
+    )
+    stage_search_results(
+        tmp_path,
+        kind="paper",
+        query="persisted phase reorder",
+        stage_id=path.stem,
+        candidates=[fulltext],
+        search_state={},
+    )
+    payload = load_yaml(path)
+    decisions = payload["candidates"][0]["screening_decisions"]
+    payload["candidates"][0]["screening_decisions"] = [*decisions[2:], *decisions[:2]]
+    write_yaml_if_changed(path, payload)
+    tampered = path.read_bytes()
+
+    with pytest.raises(SystemExit, match="cannot return to an earlier phase"):
+        stage_search_results(
+            tmp_path,
+            kind="paper",
+            query="persisted phase reorder",
+            stage_id=path.stem,
+            candidates=[],
+            search_state={},
+        )
+    assert path.read_bytes() == tampered
+
+
+def test_pending_adjudication_can_be_resolved_append_only_and_replayed(tmp_path: Path) -> None:
+    decisions = [
+        _reviewer_decision("decision-a", "reviewer-a", "include"),
+        _reviewer_decision("decision-b", "reviewer-b", "exclude"),
+    ]
+    pending = _multi_candidate(
+        decisions,
+        [{
+            "adjudication_id": "adjudication-pending",
+            "phase": "fulltext",
+            "input_decision_ids": ["decision-a", "decision-b"],
+            "status": "pending",
+        }],
+    )
+    path = stage_search_results(
+        tmp_path,
+        kind="paper",
+        query="pending then resolved adjudication",
+        candidates=[pending],
+        search_state=_multi_reviewer_state(),
+    )
+    resolved = _multi_candidate(
+        [],
+        [{
+            "adjudication_id": "adjudication-resolved",
+            "phase": "fulltext",
+            "input_decision_ids": ["decision-a", "decision-b"],
+            "status": "resolved",
+            "final_decision": "include",
+            "resolved_by": "reviewer-c",
+            "rationale": "The third reviewer resolved the persisted conflict.",
+            "evidence": [{"quote": "adjudication evidence", "locator": "fulltext"}],
+            "resolved_at": "2026-07-24T02:00:00+00:00",
+        }],
+    )
+    stage_search_results(
+        tmp_path,
+        kind="paper",
+        query="pending then resolved adjudication",
+        stage_id=path.stem,
+        candidates=[resolved],
+        search_state={},
+    )
+    persisted = load_yaml(path)["candidates"][0]
+    assert [item["status"] for item in persisted["adjudications"]] == ["pending", "resolved"]
+    assert persisted["effective_screening"]["status"] == "adjudicated"
+    stage_search_results(
+        tmp_path,
+        kind="paper",
+        query="pending then resolved adjudication",
+        stage_id=path.stem,
+        candidates=[persisted],
+        search_state={},
+    )
+
+
+def test_persisted_decision_tamper_and_multi_automation_exclusion(tmp_path: Path) -> None:
+    candidate = _multi_candidate([
+        _reviewer_decision("decision-a", "reviewer-a", "exclude"),
+        _reviewer_decision("decision-b", "reviewer-b", "exclude"),
+    ])
+    path = stage_search_results(
+        tmp_path,
+        kind="paper",
+        query="tamper decision ledger",
+        candidates=[candidate],
+        search_state=_multi_reviewer_state(),
+    )
+    payload = load_yaml(path)
+    payload["candidates"][0]["screening_decisions"][0]["decision"] = "include"
+    write_yaml_if_changed(path, payload)
+    with pytest.raises(SystemExit, match="decision digest"):
+        stage_search_results(
+            tmp_path,
+            kind="paper",
+            query="tamper decision ledger",
+            stage_id=path.stem,
+            candidates=[],
+            search_state={},
+        )
+
+    automation = _candidate("paper-automation", "https://example.test/paper-automation")
+    automation["evidence_level"] = "abstract"
+    automation["screening"] = {
+        "decision": "exclude",
+        "phase": "automation",
+        "basis": "abstract",
+        "rationale": "The frozen mechanical duplicate rule excluded this record.",
+        "evidence": [{"quote": "duplicate record", "locator": "abstract"}],
+    }
+    terminal = _multi_reviewer_state(terminal=True)
+    terminal["usage"]["full_reads"] = 0
+    terminal["coverage"]["flow_counts"].update(
+        {
+            "automation_excluded": 1,
+            "title_abstract_screened": 0,
+            "fulltext_sought": 0,
+            "fulltext_assessed": 0,
+            "included": 0,
+        }
+    )
+    automation_path = stage_search_results(
+        tmp_path,
+        kind="paper",
+        query="multi reviewer automation exclusion",
+        candidates=[automation],
+        search_state=terminal,
+    )
+    effective = load_yaml(automation_path)["candidates"][0]["effective_screening"]
+    assert effective["status"] == "automation-excluded"
+    assert effective["phase"] == "automation"
 
 
 def test_generic_source_intake_search_cannot_bypass_literature_search_for_papers() -> None:

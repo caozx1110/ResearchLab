@@ -27,6 +27,7 @@ from research.common import add_project_root_argument, load_program_reporting_ev
 from research.core import command_mutation, ensure_workspace, checkpoint_and_report, project_root, user_root
 from research.evidence import read_claims, validate_claims
 from research.judgements import judgement_confirmation_is_current, load_bound_judgement
+from research.preference_selection import resolve_effective_preferences
 from research.records import trusted_unit_record_path
 from research.surveys import survey_staleness
 
@@ -92,6 +93,8 @@ def build_parser() -> argparse.ArgumentParser:
         cmd.add_argument("--program-id", required=True)
         cmd.add_argument("--stage", default="")
         cmd.add_argument("--limit", type=int, default=20)
+        cmd.add_argument("--preference-selection-id", default="")
+        cmd.add_argument("--preference-task-digest", default="")
     return parser
 
 
@@ -248,19 +251,46 @@ def partition_reporting_events(
     return ordinary, pending
 
 
-def load_reporting_style(root: Path) -> str:
+def _normalize_reporting_style(value: object) -> str:
+    style = str(value or "").casefold()
+    if any(signal in style for signal in CONCISE_STYLE_SIGNALS):
+        return "concise"
+    if any(signal in style for signal in DETAILED_STYLE_SIGNALS):
+        return "detailed"
+    return "default"
+
+
+def load_reporting_style(
+    root: Path,
+    *,
+    preference_selection_id: str = "",
+    preference_task_digest: str = "",
+    operation: str = "",
+) -> str:
+    if preference_selection_id:
+        effective = resolve_effective_preferences(
+            root,
+            selection_id=preference_selection_id,
+            skill="report-author",
+            operation=operation,
+            expected_task_context_digest=preference_task_digest,
+        )
+        selected = {
+            str(item.get("path") or ""): item.get("value")
+            for item in effective.get("effective_items", [])
+            if isinstance(item, dict)
+        }
+        return _normalize_reporting_style(selected.get("profile.personalization.reporting_style"))
     try:
         profile = load_yaml(root / "kb" / "config" / "user-profile.yaml", default={})
     except Exception:
         return "default"
     if not isinstance(profile, dict):
         return "default"
-    style = str(profile.get("reporting_style") or "").casefold()
-    if any(signal in style for signal in CONCISE_STYLE_SIGNALS):
-        return "concise"
-    if any(signal in style for signal in DETAILED_STYLE_SIGNALS):
-        return "detailed"
-    return "default"
+    personalization = profile.get("personalization") if isinstance(profile.get("personalization"), dict) else {}
+    # Top-level reporting_style is a read-only compatibility fallback for old
+    # profiles; current setup writes personalization.reporting_style.
+    return _normalize_reporting_style(personalization.get("reporting_style") or profile.get("reporting_style"))
 
 
 def _text_items(value: Any) -> list[str]:
@@ -416,7 +446,16 @@ def load_decisions(root: Path, program_id: str) -> list[dict[str, str]]:
     return decisions
 
 
-def load_report_inputs(root: Path, program_id: str, *, stage: str = "", limit: int = 20) -> ReportInputs:
+def load_report_inputs(
+    root: Path,
+    program_id: str,
+    *,
+    stage: str = "",
+    limit: int = 20,
+    preference_selection_id: str = "",
+    preference_task_digest: str = "",
+    preference_operation: str = "",
+) -> ReportInputs:
     loaded_events = normalize_events(load_program_reporting_events(root, program_id), stage=stage, limit=limit)
     events, pending_judgement_events = partition_reporting_events(root, loaded_events)
     unit_ids = program_unit_ids(root, program_id, loaded_events)
@@ -427,7 +466,12 @@ def load_report_inputs(root: Path, program_id: str, *, stage: str = "", limit: i
         claim_sources=claim_sources,
         decisions=load_decisions(root, program_id),
         missing_units=missing_units,
-        reporting_style=load_reporting_style(root),
+        reporting_style=load_reporting_style(
+            root,
+            preference_selection_id=preference_selection_id,
+            preference_task_digest=preference_task_digest,
+            operation=preference_operation,
+        ),
     )
 
 
@@ -678,7 +722,15 @@ def main() -> int:
     ensure_workspace(root)
     reports_root = root / "kb" / "programs" / args.program_id / "reports"
     reports_root.mkdir(parents=True, exist_ok=True)
-    inputs = load_report_inputs(root, args.program_id, stage=args.stage, limit=args.limit)
+    inputs = load_report_inputs(
+        root,
+        args.program_id,
+        stage=args.stage,
+        limit=args.limit,
+        preference_selection_id=args.preference_selection_id,
+        preference_task_digest=args.preference_task_digest,
+        preference_operation=args.command,
+    )
     if args.command == "weekly":
         path = reports_root / "weekly.md"
         title = f"Weekly Report: {args.program_id}"

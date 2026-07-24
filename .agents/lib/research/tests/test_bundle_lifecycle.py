@@ -79,6 +79,7 @@ def test_clean_install_ships_only_runtime_allowlist(tmp_path: Path) -> None:
     assert (workspace / ".agents" / "VERSION").is_file()
     assert (workspace / ".agents" / "LICENSE").is_file()
     assert (workspace / ".agents" / "skills" / "kb-cli" / "SKILL.md").is_file()
+    assert (workspace / ".agents" / "skills" / "research-monitor" / "SKILL.md").is_file()
     assert (workspace / ".agents" / "lib" / "research" / "common.py").is_file()
     assert not (workspace / ".agents" / "lib" / "research" / "tests").exists()
     assert not (workspace / ".agents" / "skills" / "skill-evolution-advisor" / "scripts" / "eval_research_value.py").exists()
@@ -91,6 +92,51 @@ def test_clean_install_ships_only_runtime_allowlist(tmp_path: Path) -> None:
     duplicate = _run_installer(workspace, "install", "--codex")
     assert duplicate.returncode == 1
     assert "更新”或“重装" in duplicate.stderr
+
+
+def test_fresh_install_rejects_unverified_existing_managed_block(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace-unverified-block"
+    workspace.mkdir()
+    agents = workspace / "AGENTS.md"
+    original = (
+        "# User rules\n\n"
+        f"{BEGIN_MARKER}\n"
+        "unverified prior bundle content\n"
+        f"{END_MARKER}\n"
+    )
+    agents.write_text(original, encoding="utf-8")
+
+    for extra in (("--codex", "--agent-plan"), ("--codex",)):
+        result = _run_installer(workspace, "install", *extra)
+        assert result.returncode == 1
+        assert agents.read_text(encoding="utf-8") == original
+        assert not (workspace / ".agents/.install-manifest.json").exists()
+
+
+def test_reinstall_rejects_managed_block_drift_unless_forced(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace-reinstall-drift"
+    workspace.mkdir()
+    agents = workspace / "AGENTS.md"
+    agents.write_text("# User rules\n\nKeep this prose.\n", encoding="utf-8")
+    installed = _run_installer(workspace, "install", "--codex")
+    assert installed.returncode == 0, installed.stdout + installed.stderr
+    drifted = agents.read_text(encoding="utf-8").replace(
+        "<!-- Managed by workspace-oss. Content outside this block is user-owned. -->",
+        "<!-- Locally edited managed block. -->",
+        1,
+    )
+    agents.write_text(drifted, encoding="utf-8")
+
+    for extra in (("--agent-plan",), ()):
+        rejected = _run_installer(workspace, "reinstall", *extra)
+        assert rejected.returncode == 3
+        assert agents.read_text(encoding="utf-8") == drifted
+
+    forced = _run_installer(workspace, "reinstall", "--force")
+    assert forced.returncode == 0, forced.stdout + forced.stderr
+    repaired = agents.read_text(encoding="utf-8")
+    assert "Keep this prose." in repaired
+    assert "Locally edited managed block" not in repaired
 
 
 def test_merge_update_reinstall_uninstall_preserve_user_workspace(tmp_path: Path) -> None:

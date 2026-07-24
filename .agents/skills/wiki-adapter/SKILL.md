@@ -13,7 +13,7 @@ Use this skill when the user speaks in generic wiki or knowledge-base terms rath
 
 - 用 wiki-adapter：用户说 "wiki / 词条 / 术语 / glossary / 知识库里有 X 吗"，并且不清楚走哪个 owner skill。
 - 不用 wiki-adapter：用户已明确说 "添加 paper" / "深读 repo" / "看当前 program 状态"，此时直接调用对应 owner skill 更短路。
-- 新用户起步：转给 `research-navigator` 的 `First-time use` 流程，而不是在这里堆术语。
+- 新用户起步：直接使用公开的 `kb init`、`kb status`、`kb next` 对话入口；不要把可选投影 helper 包装成正式产品入口。
 
 ## Routing table
 
@@ -27,7 +27,7 @@ Use this skill when the user speaks in generic wiki or knowledge-base terms rath
 | lint · schema 检查 · 索引刷新 | `knowledge-base-manager` | `kb.py lint` / `kb.py refresh-schema` |
 | 检查知识库健康 · 恢复/安全/质量机械审计 | `knowledge-base-manager` | Agent 私下调用 owner `audit`，自然语言概述结果；不增加公开 `kb` 动词 |
 | topic / tag / pool 治理 | `knowledge-base-manager`（结构）+ `research-config-manager`（seed） | `kb.py govern` / `config.py set-taxonomy-seed` |
-| 我是新用户 / 不知道从哪看起 | `research-navigator` | `navigate.py refresh` 后看 `kb/index.md` |
+| 我是新用户 / 不知道从哪看起 | `kb-cli` + `research-orchestrator` | Agent 依次使用 `kb init`、`kb status`、`kb next` 并自然语言解释 |
 | 当前 program 状态 / next actions | `research-orchestrator` | `orchestrate.py status` |
 | 想在 kb 里留一条复用笔记或术语解释 | 本 skill | `wiki.py query --question ...`（每次 query 都会落盘） |
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import sys
 from contextvars import ContextVar
 from pathlib import Path
@@ -173,6 +174,156 @@ def review_payload(record: dict) -> dict:
         "claims": review.get("claims", []),
         "descriptive_counts": descriptive_counts(record),
     }
+
+
+def _idea_discussion_decision_context(
+    root: Path,
+    idea_id: str,
+    conclusion_id: str,
+    expected_snapshot: str,
+) -> tuple[dict, Path, Path, list[dict], dict, Path]:
+    record, path = locate_record(root, idea_id, kind="idea")
+    unit_root = path.parent
+    judgements = load_discussion_judgements(unit_root, record["id"])
+    matches = [item for item in judgements if str(item.get("id") or "") == conclusion_id]
+    if len(matches) != 1:
+        raise ValueError("discussion conclusion is no longer uniquely available")
+    selected = matches[0]
+    sidecar_path = discussion_judgements_path(unit_root)
+    violations = readiness_violations(root, selected, sidecar_path)
+    if violations:
+        raise ValueError("Discussion conclusion is not ready for this decision")
+    require_judgement_snapshot(
+        selected,
+        expected_snapshot=expected_snapshot,
+        owner="idea-workbench",
+        path=rel(root, sidecar_path),
+        root=root,
+    )
+    return record, path, unit_root, judgements, selected, sidecar_path
+
+
+def prepare_review_batch_decision(
+    root: Path,
+    item: dict,
+    decision: str,
+    *,
+    actor: str,
+    evidence: list[str],
+    user_authorization: str,
+    authorization_source: str,
+    rejection_reason: str,
+) -> dict:
+    route = item.get("confirm_route" if decision == "confirm" else "reject_route")
+    route = route if isinstance(route, dict) else {}
+    expected_phase = "confirm" if decision == "confirm" else "reject"
+    if route.get("owner") != "idea-workbench" or route.get("action") != "discuss" or route.get("phase") != expected_phase:
+        raise ValueError("idea review route is invalid")
+    snapshot = item.get("snapshot_binding")
+    if not isinstance(snapshot, dict):
+        raise ValueError("idea review snapshot is missing")
+    snapshot_text = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    record, path, unit_root, _judgements, selected, sidecar_path = _idea_discussion_decision_context(
+        root,
+        str(route.get("idea_id") or ""),
+        str(route.get("conclusion_id") or ""),
+        snapshot_text,
+    )
+    candidate = dict(selected)
+    if decision == "confirm":
+        claims = candidate.get("payload", {}).get("claims", [])
+        apply_confirmation(
+            candidate,
+            confirmed_by=actor,
+            evidence=evidence,
+            user_authorization=user_authorization,
+            authorization_source=authorization_source,
+            method="idea.py discuss confirm",
+            project_root=root,
+            verification_root=unit_root,
+            trusted_source_roots=_trusted_claim_source_roots(root, claims),
+        )
+    elif decision == "reject":
+        apply_judgement_rejection(candidate, reason=rejection_reason)
+    else:
+        raise ValueError("idea review decision is invalid")
+    return {
+        "owner": "idea-workbench",
+        "decision": decision,
+        "idea_id": str(record["id"]),
+        "conclusion_id": str(route.get("conclusion_id") or ""),
+        "target_paths": [path, sidecar_path],
+    }
+
+
+def apply_review_batch_decision(
+    root: Path,
+    item: dict,
+    decision: str,
+    *,
+    actor: str,
+    evidence: list[str],
+    user_authorization: str,
+    authorization_source: str,
+    rejection_reason: str,
+) -> list[Path]:
+    plan = prepare_review_batch_decision(
+        root,
+        item,
+        decision,
+        actor=actor,
+        evidence=evidence,
+        user_authorization=user_authorization,
+        authorization_source=authorization_source,
+        rejection_reason=rejection_reason,
+    )
+    route = item["confirm_route" if decision == "confirm" else "reject_route"]
+    snapshot_text = json.dumps(item["snapshot_binding"], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    record, _path, unit_root, judgements, selected, sidecar_path = _idea_discussion_decision_context(
+        root, plan["idea_id"], plan["conclusion_id"], snapshot_text
+    )
+    if decision == "reject":
+        apply_judgement_rejection(selected, reason=rejection_reason)
+        selected["updated_at"] = utc_now_iso()
+        for projection in record.setdefault("payload", {}).setdefault("discussion", {}).setdefault("conclusions", []):
+            if isinstance(projection, dict) and str(projection.get("judgement_id") or "") == plan["conclusion_id"]:
+                projection["confirmation_status"] = "rejected"
+                projection["rejection"] = dict(selected.get("rejection") or {})
+        action, summary, information_types = (
+            "idea-discussion-rejected",
+            "Rejected one evidence-grounded discussion conclusion.",
+            ["user_opinion", "evaluation"],
+        )
+    else:
+        claims = selected.get("payload", {}).get("claims", [])
+        apply_confirmation(
+            selected,
+            confirmed_by=actor,
+            evidence=evidence,
+            user_authorization=user_authorization,
+            authorization_source=authorization_source,
+            method="idea.py discuss confirm",
+            project_root=root,
+            verification_root=unit_root,
+            trusted_source_roots=_trusted_claim_source_roots(root, claims),
+        )
+        selected["updated_at"] = utc_now_iso()
+        for projection in record.setdefault("payload", {}).setdefault("discussion", {}).setdefault("conclusions", []):
+            if isinstance(projection, dict) and str(projection.get("judgement_id") or "") == plan["conclusion_id"]:
+                projection["confirmation_status"] = "confirmed"
+                projection["confirmation"] = {
+                    "by": selected.get("confirmation", {}).get("by", ""),
+                    "at": selected.get("confirmation", {}).get("at", ""),
+                }
+        action, summary, information_types = (
+            "idea-discussion-confirmed",
+            "Confirmed one evidence-grounded discussion conclusion.",
+            ["inference", "evaluation"],
+        )
+    write_discussion_judgements(unit_root, record["id"], judgements)
+    append_history(record, action=action, summary=summary, information_types=information_types, artifacts=[rel(root, sidecar_path)])
+    write_record(root, record)
+    return list(plan["target_paths"])
 
 
 def idea_card(record: dict, review: dict) -> str:
@@ -946,89 +1097,36 @@ def _dispatch(args, root: Path) -> int:
         if args.phase in {"confirm", "reject"}:
             if not str(args.conclusion_id or "").strip():
                 raise SystemExit("Discussion decision requires a conclusion id.")
-            judgements = load_discussion_judgements(unit_root, record["id"])
-            matches = [
-                item
-                for item in judgements
-                if str(item.get("id") or "") == str(args.conclusion_id)
-            ]
-            if not matches:
-                raise SystemExit("Discussion conclusion is not available for this decision.")
-            if len(matches) != 1:
-                raise SystemExit("Discussion conclusion id is duplicated and requires repair.")
-            selected = matches[0]
-            sidecar_path = discussion_judgements_path(unit_root)
-            violations = readiness_violations(root, selected, sidecar_path)
-            if violations:
-                raise SystemExit("Discussion conclusion is not ready for this decision:\n  - " + "\n  - ".join(violations))
             try:
-                require_judgement_snapshot(
-                    selected,
-                    expected_snapshot=args.expected_snapshot,
-                    owner="idea-workbench",
-                    path=rel(root, sidecar_path),
-                    root=root,
-                )
-            except ValueError as exc:
-                raise SystemExit(str(exc)) from exc
-            if args.phase == "reject":
-                apply_judgement_rejection(selected, reason=args.reason)
-                selected["updated_at"] = utc_now_iso()
-                write_discussion_judgements(unit_root, record["id"], judgements)
-                for projection in record.setdefault("payload", {}).setdefault("discussion", {}).setdefault("conclusions", []):
-                    if isinstance(projection, dict) and str(projection.get("judgement_id") or "") == str(args.conclusion_id):
-                        projection["confirmation_status"] = "rejected"
-                        projection["rejection"] = dict(selected.get("rejection") or {})
-                append_history(
-                    record,
-                    action="idea-discussion-rejected",
-                    summary="Rejected one evidence-grounded discussion conclusion.",
-                    information_types=["user_opinion", "evaluation"],
-                    artifacts=[rel(root, sidecar_path)],
-                )
-                write_record(root, record)
-                print(f"[ok] rejected discussion conclusion {args.conclusion_id}")
-                _queue_checkpoint(
+                snapshot = json.loads(args.expected_snapshot)
+                item = {
+                    "snapshot_binding": snapshot,
+                    "confirm_route": {
+                        "owner": "idea-workbench", "action": "discuss", "phase": "confirm",
+                        "idea_id": record["id"], "conclusion_id": args.conclusion_id,
+                    },
+                    "reject_route": {
+                        "owner": "idea-workbench", "action": "discuss", "phase": "reject",
+                        "idea_id": record["id"], "conclusion_id": args.conclusion_id,
+                    },
+                }
+                apply_review_batch_decision(
                     root,
-                    trigger="milestone",
-                    message=f"milestone: reject idea discussion {record['id']}",
-                    target_paths=[unit_root / "record.yaml", sidecar_path],
+                    item,
+                    args.phase,
+                    actor=str(getattr(args, "confirmed_by", "") or ""),
+                    evidence=list(getattr(args, "evidence", []) or []),
+                    user_authorization=str(getattr(args, "user_authorization", "") or ""),
+                    authorization_source=str(getattr(args, "authorization_source", "") or ""),
+                    rejection_reason=str(getattr(args, "reason", "") or ""),
                 )
-                return 0
-            claims = selected.get("payload", {}).get("claims", [])
-            apply_confirmation(
-                selected,
-                confirmed_by=args.confirmed_by,
-                evidence=args.evidence,
-                user_authorization=args.user_authorization,
-                authorization_source=args.authorization_source,
-                method="idea.py discuss confirm",
-                project_root=root,
-                verification_root=unit_root,
-                trusted_source_roots=_trusted_claim_source_roots(root, claims),
-            )
-            selected["updated_at"] = utc_now_iso()
-            write_discussion_judgements(unit_root, record["id"], judgements)
-            for projection in record.setdefault("payload", {}).setdefault("discussion", {}).setdefault("conclusions", []):
-                if isinstance(projection, dict) and str(projection.get("judgement_id") or "") == str(args.conclusion_id):
-                    projection["confirmation_status"] = "confirmed"
-                    projection["confirmation"] = {
-                        "by": selected.get("confirmation", {}).get("by", ""),
-                        "at": selected.get("confirmation", {}).get("at", ""),
-                    }
-            append_history(
-                record,
-                action="idea-discussion-confirmed",
-                summary="Confirmed one evidence-grounded discussion conclusion.",
-                information_types=["inference", "evaluation"],
-                artifacts=[rel(root, discussion_judgements_path(unit_root))],
-            )
-            write_record(root, record)
-            print(f"[ok] confirmed discussion conclusion {args.conclusion_id}")
+            except (json.JSONDecodeError, ValueError) as exc:
+                raise SystemExit(str(exc)) from exc
+            print(f"[ok] {args.phase}ed discussion conclusion {args.conclusion_id}")
             _queue_checkpoint(
                 root,
                 trigger="milestone",
-                message=f"milestone: confirm idea discussion {record['id']}",
+                message=f"milestone: {args.phase} idea discussion {record['id']}",
                 target_paths=[unit_root / "record.yaml", discussion_judgements_path(unit_root)],
             )
             return 0

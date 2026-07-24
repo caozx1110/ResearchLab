@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import sys
 from pathlib import Path
@@ -63,7 +64,15 @@ from research.core import (
 from research.git_ops import dirty_kb_paths
 from research.journal import abort_op, incomplete_ops, mutation_transaction
 from research.judgements import apply_judgement_rejection, require_judgement_snapshot
-from research.paths import KB_GITIGNORE_LINES, TEXT_REWRITE_SUFFIXES, kb_gitignore_path, kb_root, runtime_preferences_path, user_root
+from research.paths import (
+    KB_GITIGNORE_LINES,
+    TEXT_REWRITE_SUFFIXES,
+    kb_gitignore_path,
+    kb_root,
+    passage_search_cache_path,
+    runtime_preferences_path,
+    user_root,
+)
 
 COMMAND_PREFIX = "${RESEARCH_PYTHON:-python3}"
 SCRIPT_BY_KIND = {
@@ -146,6 +155,7 @@ def index_mutation_targets(root: Path) -> list[Path]:
             candidate_pools_path(root),
             root / "kb" / "index.yaml",
             root / "kb" / "index.md",
+            passage_search_cache_path(root),
         ]
     )
 
@@ -312,6 +322,115 @@ def apply_batch_confirmation(
         )
         written.append(write_record(root, updated))
     return written
+
+
+def prepare_review_batch_decision(
+    root: Path,
+    item: dict,
+    decision: str,
+    *,
+    actor: str,
+    evidence: list[str],
+    user_authorization: str,
+    authorization_source: str,
+    rejection_reason: str,
+) -> dict:
+    """Pure-read validation and exact target planning for a root review batch."""
+    route_key = "confirm_route" if decision == "confirm" else "reject_route"
+    route = item.get(route_key) if isinstance(item, dict) else None
+    route = route if isinstance(route, dict) else {}
+    expected_action = "confirm" if decision == "confirm" else "promote"
+    if route.get("owner") != "knowledge-base-manager" or route.get("action") != expected_action:
+        raise ValueError("knowledge review route is invalid")
+    unit_id = str(route.get("id") or "")
+    record, path = locate_record(root, unit_id)
+    if not is_ready_for_human_review(record):
+        raise ValueError("knowledge judgement is no longer ready")
+    snapshot = item.get("snapshot_binding")
+    if not isinstance(snapshot, dict):
+        raise ValueError("knowledge review snapshot is missing")
+    require_judgement_snapshot(
+        record,
+        expected_snapshot=json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        owner="knowledge-base-manager",
+        path=path.relative_to(root).as_posix(),
+        root=root,
+    )
+    candidate = copy.deepcopy(record)
+    if decision == "confirm":
+        confirm_unit(
+            candidate,
+            str(candidate.get("kind") or ""),
+            confirmed_by=actor,
+            evidence=evidence,
+            method="kb obsidian review batch",
+            project_root=root,
+            user_authorization=user_authorization,
+            authorization_source=authorization_source,
+        )
+    elif decision == "reject":
+        if confirmation_track(candidate) == "judgement":
+            apply_judgement_rejection(candidate, reason=rejection_reason)
+        elif str(candidate.get("confirmation_status") or "") != "pending_user_confirmation":
+            raise ValueError("knowledge fact is no longer pending review")
+    else:
+        raise ValueError("knowledge review decision is invalid")
+    targets = _unique_paths(record_targets([record], root) + index_mutation_targets(root))
+    return {
+        "owner": "knowledge-base-manager",
+        "decision": decision,
+        "unit_id": unit_id,
+        "target_paths": targets,
+    }
+
+
+def apply_review_batch_decision(
+    root: Path,
+    item: dict,
+    decision: str,
+    *,
+    actor: str,
+    evidence: list[str],
+    user_authorization: str,
+    authorization_source: str,
+    rejection_reason: str,
+) -> list[Path]:
+    """Apply one already-root-journaled decision without a nested transaction."""
+    prepare_review_batch_decision(
+        root,
+        item,
+        decision,
+        actor=actor,
+        evidence=evidence,
+        user_authorization=user_authorization,
+        authorization_source=authorization_source,
+        rejection_reason=rejection_reason,
+    )
+    route = item["confirm_route" if decision == "confirm" else "reject_route"]
+    record, _path = locate_record(root, str(route["id"]))
+    if decision == "confirm":
+        updated = confirm_unit(
+            record,
+            str(record.get("kind") or ""),
+            confirmed_by=actor,
+            evidence=evidence,
+            method="kb obsidian review batch",
+            project_root=root,
+            user_authorization=user_authorization,
+            authorization_source=authorization_source,
+        )
+    elif confirmation_track(record) == "judgement":
+        apply_judgement_rejection(record, reason=rejection_reason)
+        updated = record
+    else:
+        record["confirmation_status"] = "rejected"
+        record["needs_human_confirmation"] = False
+        record.pop("confirmation", None)
+        record["rejection"] = {"at": utc_now_iso(), "reason": rejection_reason}
+        updated = record
+    written = write_record(root, updated)
+    build_index(root)
+    return [written]
 
 
 def partition_review_tracks(hits: list[dict]) -> tuple[list[dict], list[dict]]:

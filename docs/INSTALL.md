@@ -6,6 +6,24 @@
 
 ## 新用户快速安装
 
+### 直接把 GitHub 链接交给 Agent（推荐）
+
+你可以不先克隆仓库。把仓库链接粘贴给 Codex 或 Claude Code，并直接说：
+
+```text
+把这个 research skill 系统安装到我当前 workspace。先检查目标目录和已有 AGENTS.md，再使用仓库自带安装器；保留 kb、虚拟环境和所有用户文件。安装后验证 skill metadata、kb help 和一次全新临时 workspace 的 init，不要替我推送或发布。
+```
+
+仓库对 Agent 的安装合同如下，Agent 应自行完成，不让用户复制内部 flags：
+
+1. 将链接视为代码来源而不是知识材料；在临时 checkout 检查根目录存在 `install.sh`、`.agents/VERSION`、`.agents/AGENTS.md` 与 `.agents/skills/`。
+2. 把当前 workspace 根作为安装目标，绝不能把 `kb/` 当目标；已有普通根 `AGENTS.md` 时，确认安装器只追加/更新带 marker 的受管区块并保留块外原文。目标是 symlink、类型冲突、marker 异常或已有受管区块漂移时停止解释，不能覆盖整文件或猜测修复。
+3. 先执行安装器 `--agent-plan`（它隐含 dry-run），检查范围只包含受管 `.agents/`、根规则文件、所选 Agent 接入和明确标出的条件性 `.venv` runtime tree；再在用户已要求“安装”的授权范围内执行 project-scope copy install。该计划不写 workspace、HOME、TMP 或 Python cache，并逐条列出最终目录、文件、链接、managed block 和删除目标。
+4. 安装后核对 manifest、20 个 skill、bundle version、`kb help` 与临时目录中的 `kb init`；真实 `kb/` 不参与验收。
+5. 不安装 Obsidian 插件、daemon、cron、watcher 或全局 Python 包；不 push、tag、publish，也不改 shell 配置。可选终端快捷入口只在用户明确要求时创建。
+
+这使“粘贴 GitHub 链接让 Agent 安装”成为受支持主路径；当前没有市场包，也不需要插件。
+
 在仓库根目录运行下面这条一次性引导命令：
 
 ```bash
@@ -47,7 +65,7 @@ kb init
 
 整棵 `.agents` 一起复制是受支持的安装单元；不要只复制单个 skill，也不要把 bundle 指向或安装进 `DIR/kb/`。system scope 与 symlink 模式只保留兼容性，不作为新安装建议。
 
-project copy workspace 不需要 `RESEARCH_SKILLS_HOME`。首次运行脚本时，受管 venv 会建在 `DIR/.venv`，安装器本身不会创建 venv。
+project copy workspace 不需要 `RESEARCH_SKILLS_HOME`。若当前 Python 缺运行依赖，正式安装末尾的 smoke check 或首次运行会把受管 venv 建在 `DIR/.venv`；依赖已满足时不会无条件创建。
 
 ## 管理员参考：运行环境
 
@@ -75,6 +93,12 @@ bash install.sh --claude --project /path/to/workspace
 
 ```bash
 bash install.sh --dry-run --claude --project /path/to/workspace
+```
+
+Agent 安装前的可审计计划会列出每个最终目标，并把平台相关依赖解析所管理的 `.venv` 标成一个条件性、边界明确的 runtime tree。它不会写 workspace、HOME、TMP 或 Python bytecode cache：
+
+```bash
+bash install.sh --agent-plan --claude --project /path/to/workspace --yes
 ```
 
 同时配置 Claude 和 Codex：
@@ -125,19 +149,19 @@ Codex 直接读取仓库已有的 `AGENTS.md`（开发者工作流；`CLAUDE.md`
 ```text
 <workspace>/.agents/                      # 真实目录，整棵拷贝
 <workspace>/.agents/.install-manifest.json
-<workspace>/AGENTS.md                     # 源仓 .agents/AGENTS.md 使用规则的受管拷贝
+<workspace>/AGENTS.md                     # 保留用户原文，只维护本 bundle 的 marker 区块
 <workspace>/.claude/skills -> ../.agents/skills
 <workspace>/CLAUDE.md                     # managed block 内使用 @AGENTS.md
 ```
 
-`CLAUDE.md` 只更新以下标记之间的内容，不会覆盖用户文件的其他部分：
+`AGENTS.md` 与普通文件形式的 `CLAUDE.md` 都只更新以下标记之间的内容，不会覆盖用户文件的其他部分：
 
 ```text
 # >>> workspace-oss managed >>>
 # <<< workspace-oss managed <<<
 ```
 
-`AGENTS.md` 冲突会拒绝安装：如果目标 workspace 已有真实 `AGENTS.md`，安装器不会覆盖，也不会 fallback 到 embedded block。先移动、合并或删除冲突文件后再安装。
+如果目标 workspace 已有普通 `AGENTS.md` 且没有异常 marker，安装器会保留块外原文并加入本 bundle 区块；update/reinstall 也只维护该区块。`AGENTS.md` 是 symlink、非普通文件、marker 结构异常，或已有受管区块发生未授权漂移时会 fail closed，不跟随链接、不替换整文件。
 
 `.install-manifest.json` 记录源仓、源 commit、安装时间、每个受管文件的 sha256，以及 `AGENTS.md` 的受管状态。它用于后续 update/uninstall 的精确同步和删除。
 

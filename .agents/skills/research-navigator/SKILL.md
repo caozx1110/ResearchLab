@@ -1,25 +1,13 @@
 ---
 name: research-navigator
-description: Build human-facing entrypoints for the research system under `kb/user/`, including current state, navigation, reading lists, report-material pages, and an optional browser workbench.
+description: Optional maintainer/development projection helper for generated pages under `kb/user/`; not a formal product entrypoint, routing target, or source of truth.
 ---
 
 # Research Navigator
 
 > 协议参考：`.agents/lib/research/SCHEMAS.md#program-files` · `#evidence-first-outputs` · `#ownership` · `#runtime`
 
-Use this skill to tell the human what to open next and to open a local browser for research assets.
-
-## First-time use
-
-新用户或新接手的协作者第一次进入工作区时，只提供自然语言与公开快捷入口：
-
-1. 运行 `kb init`，先把可用的知识库结构准备好；快速偏好可现在设置，也可稍后补充。
-2. 运行 `kb status`，查看当前资料、研究计划与需要关注的问题。
-3. 运行 `kb next`，取得现在最值得推进的少量事项与原因。
-4. 需要 Obsidian 阅读网络时运行 `kb obsidian update`；需要检查投影状态时运行 `kb obsidian status`。
-5. 若需要本地浏览 Workbench，直接用自然语言请 Agent 打开；Agent 私下处理实现命令与访问地址。
-
-空工作区应直接邀请用户发送论文、文件、数据卡或本地代码仓，不展示内部脚本、文件路径或参数。
+This is an optional maintainer/development helper for rebuilding derived pages or a local browser snapshot. Normal users start from `kb init`, `kb status`, `kb next`, and `kb obsidian`; generic navigation requests must not route here automatically. Nothing generated here is canonical or a formal selling point.
 
 ## Scope
 

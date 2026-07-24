@@ -461,6 +461,7 @@ def remove_managed_bytecode_caches(
     *,
     dry_run: bool,
     preserve: set[Path] | None = None,
+    planned_removals: set[Path] | None = None,
 ) -> bool:
     """Remove only bytecode caches attributable to manifest-owned Python modules."""
 
@@ -504,8 +505,32 @@ def remove_managed_bytecode_caches(
                 if preserve is not None:
                     preserve.add(entry)
                 continue
+            if planned_removals is not None:
+                planned_removals.add(entry)
             removed_any = remove_file(entry, dst_root, dry_run=dry_run) or removed_any
     return removed_any
+
+
+def planned_empty_directories_after_removals(dst_root: Path, removals: set[Path]) -> list[Path]:
+    """Return the exact directory prune set without mutating the target tree."""
+
+    root = agents_root(dst_root)
+    if not root.is_dir() or root.is_symlink():
+        return []
+    directories = sorted(
+        [root, *(path for path in root.rglob("*") if path.is_dir() and not path.is_symlink())],
+        key=lambda path: (len(path.parts), path.as_posix()),
+        reverse=True,
+    )
+    removable_dirs: set[Path] = set()
+    for directory in directories:
+        try:
+            entries = list(directory.iterdir())
+        except OSError:
+            continue
+        if all(entry in removals or entry in removable_dirs for entry in entries):
+            removable_dirs.add(directory)
+    return sorted(removable_dirs, key=lambda path: (len(path.parts), path.as_posix()), reverse=True)
 
 
 def path_mode(path: Path, default: int = 0o644) -> int:
@@ -555,6 +580,18 @@ def transactional_apply(
         manifest_changed = not target_manifest.exists() or read_bytes(target_manifest) != manifest_bytes
 
     if dry_run:
+        write_targets = [path_for_rel(dst_root, rel) for rel in changed_writes]
+        if manifest_changed:
+            write_targets.append(manifest_path(dst_root))
+        missing_parents: set[Path] = set()
+        for target in write_targets:
+            parent = target.parent
+            while parent != dst_root and dst_root in parent.parents:
+                if not parent.exists():
+                    missing_parents.add(parent)
+                parent = parent.parent
+        for directory in sorted(missing_parents, key=lambda path: (len(path.parts), path.as_posix())):
+            info(f"[dry-run] mkdir {directory}")
         for rel in changed_writes:
             info(f"[dry-run] write {path_for_rel(dst_root, rel)}")
         for rel in changed_removals:
@@ -936,6 +973,14 @@ def install(args: argparse.Namespace) -> int:
         die("copy-project install already exists; use update or reinstall")
     if manifest_path(dst_root).exists():
         die(f"refusing to overwrite an unrecognized manifest: {manifest_path(dst_root)}")
+    existing_agents = dst_root / "AGENTS.md"
+    if existing_agents.exists() and existing_agents.is_file() and not existing_agents.is_symlink():
+        try:
+            existing_agents_bytes = read_bytes(existing_agents)
+            if managed_block_span(existing_agents_bytes) is not None:
+                die("existing AGENTS.md contains an unverified workspace-oss managed block")
+        except UnicodeDecodeError:
+            die("existing AGENTS.md is not valid UTF-8")
     assert_no_symlinked_agent_subdirs(dst_root)
     drift = detect_drift(dst_root, {}, files)
     if drift and not args.force:
@@ -1071,10 +1116,14 @@ def reinstall(args: argparse.Namespace) -> int:
     old_files = dict(manifest["files"])
     new_files = current_files_from_items(items)
     collisions = [entry for entry in detect_drift(dst_root, old_files, new_files) if entry[3] == "collides-with-local"]
-    if collisions and not args.force:
-        for rel, expected_hash, actual_hash, reason in collisions:
+    agents_drift = agents_md_drift(dst_root, manifest)
+    blocked_drift = [*collisions, *([agents_drift] if agents_drift is not None else [])]
+    if blocked_drift and not args.force:
+        for rel, expected_hash, actual_hash, reason in blocked_drift:
             warn(f"  MODIFIED {rel} reason={reason} expected={expected_hash} actual={actual_hash}")
         die("copy-project reinstall collides with local files; rerun with --force only if they may be replaced", code=3)
+    if blocked_drift and args.force:
+        warn("local managed-block drift will be overwritten because --force was set")
     legacy_agents_digest = ""
     if manifest.get("agents_md") != "managed-block":
         legacy_agents_digest = str(manifest.get("agents_md_sha") or old_files.get("AGENTS.md") or "")
@@ -1113,6 +1162,7 @@ def uninstall(args: argparse.Namespace) -> int:
     files = dict(manifest["files"])
     preserved_paths: set[Path] = set()
     removable_paths: list[Path] = []
+    planned_removals: set[Path] = set()
     for rel in sorted(files, reverse=True):
         if rel == "AGENTS.md":
             continue
@@ -1162,30 +1212,34 @@ def uninstall(args: argparse.Namespace) -> int:
             )
     removed_any = False
     for path in removable_paths:
+        planned_removals.add(path)
         removed_any = remove_file(path, dst_root, dry_run=args.dry_run) or removed_any
     removed_any = remove_managed_bytecode_caches(
         files,
         dst_root,
         dry_run=args.dry_run,
         preserve=preserved_paths,
+        planned_removals=planned_removals,
     ) or removed_any
     if manifest_path(dst_root).exists() or manifest_path(dst_root).is_symlink():
+        planned_removals.add(manifest_path(dst_root))
         if args.dry_run:
             info(f"[dry-run] delete {manifest_path(dst_root)}")
         else:
             manifest_path(dst_root).unlink()
         removed_any = True
-    prune_empty_dirs(dst_root, dry_run=args.dry_run, preserve=preserved_paths)
     root = agents_root(dst_root)
-    if root.exists() and root.is_dir():
+    if args.dry_run:
+        for directory in planned_empty_directories_after_removals(dst_root, planned_removals):
+            info(f"[dry-run] rmdir {directory}")
+    else:
+        prune_empty_dirs(dst_root, dry_run=False, preserve=preserved_paths)
+    if not args.dry_run and root.exists() and root.is_dir():
         try:
             next(root.iterdir())
             warn(f".agents not empty after uninstall; preserving user files: {root}")
         except StopIteration:
-            if args.dry_run:
-                info(f"[dry-run] rmdir {root}")
-            else:
-                root.rmdir()
+            root.rmdir()
     if removed_any:
         info(f"copy-project uninstall complete: {dst_root}")
     else:

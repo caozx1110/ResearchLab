@@ -359,11 +359,11 @@ def test_reporting_style_controls_verbosity_and_preserves_missing_markers(tmp_pa
     )
     profile_path = root / "kb" / "config" / "user-profile.yaml"
 
-    write_yaml_if_changed(profile_path, {"reporting_style": "详细 / detailed"})
+    write_yaml_if_changed(profile_path, {"personalization": {"reporting_style": "详细 / detailed"}})
     detailed_inputs = report.load_report_inputs(root, program_id)
     detailed = report.render_report(f"Weekly Report: {program_id}", detailed_inputs, report_kind="weekly")
 
-    write_yaml_if_changed(profile_path, {"reporting_style": "简洁 concise"})
+    write_yaml_if_changed(profile_path, {"personalization": {"reporting_style": "简洁 concise"}})
     concise_inputs = report.load_report_inputs(root, program_id)
     concise = report.render_report(f"Weekly Report: {program_id}", concise_inputs, report_kind="weekly")
 

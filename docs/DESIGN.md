@@ -35,15 +35,16 @@ Release bundle 不包含任何私有 `kb/`。安装、更新、storage sync 和�
 
 ## Skill 路由
 
-系统包含 19 个本地 skill：
+系统包含 20 个本地 skill：
 
 | 分组 | Skills |
 |---|---|
 | Governance and routing | `knowledge-base-manager`, `research-config-manager`, `source-intake`, `research-orchestrator` |
 | Discovery | `literature-search` |
+| Ongoing tracking | `research-monitor` |
 | Analysis | `paper-analyst`, `repo-analyst`, `dataset-analyst`, `blog-analyst`, `literature-synthesizer` |
 | Creation and execution | `idea-workbench`, `method-designer`, `experiment-workbench`, `report-author` |
-| Navigation and meta | `research-navigator`, `discussion-archivist`, `wiki-adapter`, `skill-evolution-advisor` |
+| Navigation and meta | `discussion-archivist`, `wiki-adapter`, `skill-evolution-advisor`; optional dev-only projection helper: `research-navigator` |
 | Conversational shortcut | `kb-cli` |
 
 路由原则：
@@ -54,6 +55,10 @@ Release bundle 不包含任何私有 `kb/`。安装、更新、storage sync 和�
 4. `kb-cli` 只暴露 16 个公开动词；业务 owner 继续拥有 canonical 写入，`obsidian` 只调用可重建的派生投影；
 5. `wiki-adapter` 只路由泛化 wiki 意图；
 6. 确定性的共同行为下沉到共享库，Agent 理解留在 runtime。
+
+跨 program 规划也遵循这条边界：脚本枚举全部合法 action、依赖、治理门、阻塞事实和已到期订阅，runtime Agent 比较信息增益、成本风险与用户约束。Agent 选择必须保存 `PortfolioDecision`，绑定当前候选快照与 effective preference receipt；不存在或已 stale 时，`kb next` 只请求重新规划，绝不把 legacy 固定排序冒充智能选择。
+
+偏好不复制到各 skill。Canonical profile/runtime/confirmed learning 组成总偏好；显式 allowlist 先决定某个 skill/operation 最多可以看到什么，runtime Agent 再决定本任务采用哪些 soft preferences，hard constraints 必须保留。只保存 ID/digest/reason/application 回执，总偏好变化自动使旧回执失效。这是“规则管披露边界，Agent 管任务相关性”的混合分发。
 
 ## 共享运行库
 
@@ -68,6 +73,9 @@ Release bundle 不包含任何私有 `kb/`。安装、更新、storage sync 和�
 - `source_materials.py`：PDF / HTML / Markdown / text 的完整 Markdown 阅读层、图片本地化、source map 与转换清单；
 - `index.py` / `retrieval.py`：canonical index、deterministic passage extraction、FTS5 cache、只读 stale fallback 与 ID compaction；
 - `diagnostics.py`：可选诊断策略、脱敏 issue、确定性去重和本地导出预览；
+- `preference_selection.py`：task-scoped eligible view、Agent effective-selection receipt 与 stale binding；
+- `monitoring.py`：provider-neutral subscriptions、due facts、frozen run receipt 与引用验证；
+- `review_batches.py`：无插件 Obsidian editable sheet、严格 checkbox 解析与跨 owner batch binding；
 - `evidence.py`：逐字 evidence 和派生证据验证；
 - `relations.py` / `obsidian.py`：有向关系注册表、细粒度 locator、无插件 Obsidian 派生投影与只读审计；
 - `journal.py` / `git_ops.py`：恢复与精确 checkpoint；
@@ -79,6 +87,8 @@ Release bundle 不包含任何私有 `kb/`。安装、更新、storage sync 和�
 ### Obsidian 派生视图
 
 `kb/` 可直接作为无需社区插件的 Obsidian Vault；canonical record、program state、taxonomy 与 evidence 仍是唯一事实源。系统只管理 `kb/obsidian/managed/`，人工内容放在 `inbox/` 与 `annotations/`，不得生成或改写 `.obsidian/`。生成页以 Reading view 为消费合同；编辑/Live Preview 显示 wikilink、code span 与 block ID 源码是 Obsidian 原生行为。Paper、文章与本地文档页回链 canonical `source/document.md`，source map 能把 page/section evidence locator 投影到稳定 source block；repo evidence 可以渲染为经过路径 containment 和文件存在性检查的本地文件链接，但 canonical 身份始终是 unit id 与仓库相对路径，机器本地 URI 不写回证据。动态 canonical 文本必须经 Markdown-safe 字面渲染，frontmatter wikilink 必须保持物理单行；manifest 的 renderer revision 变化会令旧投影 stale 并触发可恢复重建。
+
+原生 Bases 面板仍然只读。批量审核需要时，`kb review` 把同一批 Top-3 导出为 `annotations/` 下 human-owned sheet，用户只改确认/拒绝/暂缓 checkbox。下一次对话由 Agent 读取并复述整批选择，当前消息授权后再用一个跨 owner root transaction 全量应用；任一 stale/tamper/owner failure 都整批回滚。Checkbox 本身从不等于授权，projection rebuild 也从不读取或覆盖这份 sheet。
 
 ## 数据模型
 
@@ -130,11 +140,13 @@ confirmed or rejected
 
 Receipt 不改变原 epistemic type。内容或 evidence 改变时，旧 receipt 失效；公开层引导 Agent 基于当前材料重新核验，只有核验通过的新版判断才重新进入人类确认，不向用户暴露内部状态名。事实批量确认与判断逐项确认可以有不同 UX，但都不得自签。
 
-公开 review 将 Top-3 可确认对象复制到私有一次性 token registry。记录包含创建、过期与消费状态，默认有效期 24 小时；读取与应用时在锁内清理超过宽限期的已过期/已消费普通文件，并拒绝 symlink 或越界对象。应用只允许 token 中实际展示的一条对象，owner 在事务内复验身份、正文、状态和 verification。失败分为已处理、已过期、正文已变化、未知或被篡改四类自然语言恢复路径；正文变化后重新展示的新卡不得复用旧正文。成功输出只回显清洗后的类型、标题和确认/拒绝决定。
+公开 review 将 Top-3 可确认对象复制到私有一次性 token registry。记录包含创建、过期与消费状态，默认有效期 24 小时；读取与应用时在锁内清理超过宽限期的已过期/已消费普通文件，并拒绝 symlink 或越界对象。对话内可以逐项处理；无插件 Obsidian 往返可把最多三项放入 editable sheet，checkbox 只是意图草稿。Agent 必须复述完整批次并用当前消息授权绑定 preview decision digest；confirm 另需真实 signer 与 evidence，reject/defer 也不能仅凭文件变化自动执行。跨 owner apply 在一个 root transaction 中全量预检、复验、应用和消费，任何失败整批回滚。registry/sheet 读写逐层使用 no-follow directory descriptor，防止中间目录 swap 将访问重定向到 workspace 外。失败分为已处理、已过期、正文变化、授权预览过时、未知或被篡改等自然语言恢复路径。
 
 ## 外部发现、检索与新鲜度
 
-`literature-search` 是第 19 个 skill，也是 source intake 之前的 provider-neutral 发现层。runtime Agent 根据当前真正可用的 search/browser/connector 能力选择工具，将原始研究问题拆成互补查询，按批次持久化 query event、候选 identity/discovery edge、fetch/retry 状态、基于 title/abstract/fulltext 证据的初筛、coverage/frontier 及其 history、硬预算和停止依据。run identity 同时绑定问题、模式、范围摘要和可选 fresh-run ID。脚本不联网、不选 provider、不理解论文，只守 schema、identity、引用完整性、journal/lock/atomic write 和实际用量 budget；Agent 决定下一条查询、引用展开、gap-followup 与 semantic saturation。默认 exploratory 不宣称完整；系统请求在来源、查询式、结果深度和筛选不能完全复现时诚实标为 bounded-systematic，且 bounded 永远标 partial。外部内容视为不可信数据；初筛 include/maybe 不是用户批准，只有当前对话明确选择的候选才进入 source-intake。stage 不创建 paper unit、不生成 survey，也不把 citation count、venue、作者声誉或排名当 relevance/quality。
+`literature-search` 是 source intake 之前的 provider-neutral 发现层。runtime Agent 根据当前真正可用的 search/browser/connector 能力选择工具，将原始研究问题拆成互补查询，按批次持久化 query event、候选 identity/discovery edge、fetch/retry 状态、基于 title/abstract/fulltext 证据的初筛、coverage/frontier 及其 history、硬预算和停止依据。run identity 同时绑定问题、模式、范围摘要和可选 fresh-run ID。脚本不联网、不选 provider、不理解论文，只守 schema、identity、引用完整性、journal/lock/atomic write 和实际用量 budget；Agent 决定下一条查询、引用展开、gap-followup 与 semantic saturation。默认 exploratory 不宣称完整；系统请求在来源、查询式、结果深度和筛选不能完全复现时诚实标为 bounded-systematic，且 bounded 永远标 partial。多 reviewer 以 append-only ledger 保存各自决定与冲突；阶段只能按 title/abstract 到 fulltext 的 canonical 顺序，旧决定由 evidence/decision digest 重验，pending 裁决保留、resolved 追加并绑定输入决定。只有不同 execution/context 可称 independent，同一 Agent 多角色明确标 assisted。外部内容视为不可信数据；初筛 include/maybe 不是用户批准，只有当前对话明确选择的候选才进入 source-intake。stage 不创建 paper unit、不生成 survey，也不把 citation count、venue、作者声誉或排名当 relevance/quality。
+
+`research-monitor` 是 provider-neutral 持续跟踪层。它保存带时区 anchored cadence、到期事实、冻结 scope/budget/run receipt、pause/resume/retry 与 evidence-bound outcome，不内置检索源，也不安装 daemon、cron、watcher 或插件。run task digest 绑定 subscription、schedule、target、scope 和 budget，receipt content digest 防止事后改写。实际文献跟踪仍由 Agent 调用 `literature-search`，stage 从创建起携带同一 monitor binding，完成时再绑定 stage bytes；survey freshness 绑定冻结 survey bytes，unit recheck 必须覆盖全部冻结 unit。宿主 automation 只在当前用户明确授权后建立；没有 automation 时，下一次 Agent 会话或 `kb next` 仍能发现 due subscription。矛盾只能形成有两侧不同 evidence 的 candidate，不能自动改 confirmed claim。
 
 终端 `kb find` 使用 deterministic passage extractor。Markdown 以 heading/段落切分，长段用固定重叠窗口；每段保留 unit、artifact、locator、text 和 source digest。显式索引构建把完整临时 SQLite FTS5 数据库原子替换到 runtime cache，不使用 external-content 双表。查询最多返回五段摘要；cache 缺失、损坏或 digest stale 时，以同一抽取器做内存只读 fallback。缓存不是 canonical evidence，不进入 checkpoint，检索也不宣称 embedding 或跨语言语义能力。
 
@@ -227,4 +239,4 @@ Install manifest 记录 `source_origin` 与 `source_branch`，本地安装还可
 10. 在 Linux 与 macOS 支持的 Python 版本上验证；
 11. 发布前由冷 acceptance agent 端到端复现关键路径。
 
-当前标识为 `0.2.0-rc.5`。provider-neutral `literature-search` 重构与三路对抗复审后的完整 1,089 项本地测试和当前 installed-copy 验收已全绿；SQLite 官方 HTML 真实入库与 Obsidian 1.12.7 Reading-view 尚未针对 rc.5 重跑，仍属于发布门。它不是 stable/GA，也尚未 tag 或 publish；真实来源/Obsidian 验收与 hosted Linux/macOS CI matrix 全绿仍是 release tag 的前置。文档、tag 与 changelog 不得把本地 RC 验收外推为稳定兼容或 SLA 承诺。
+当前标识为 `0.2.0-rc.6`。Agent-led portfolio、任务绑定偏好、无插件多项 review、research-monitor、多 reviewer ledger 与 Agent 安装计划已经通过完整本地套件、R6 定向回归和当前 20-skill installed-copy 生命周期。SQLite 官方 HTML 真实入库与 Obsidian 1.12.7 Reading-view 尚未针对 rc.6 重跑，仍属于发布门。它不是 stable/GA，也尚未 tag 或 publish；真实来源/Obsidian 验收与 hosted Linux/macOS CI matrix 全绿仍是 release tag 的前置。文档、tag 与 changelog 不得把本地 RC 验收外推为稳定兼容或 SLA 承诺。

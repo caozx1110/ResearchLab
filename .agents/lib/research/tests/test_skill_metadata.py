@@ -10,5 +10,5 @@ SKILLS_ROOT = REPO_ROOT / ".agents" / "skills"
 def test_all_skill_metadata_is_valid():
     skill_dirs = skill_directories(SKILLS_ROOT)
 
-    assert len(skill_dirs) == 19
+    assert len(skill_dirs) == 20
     assert validate_skills(SKILLS_ROOT) == []

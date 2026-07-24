@@ -39,6 +39,12 @@ from research.core import (
     write_runtime_preferences,
 )
 from research.prefs import DIAGNOSTIC_MODES, DIAGNOSTIC_SKILL_MODES
+from research.preference_selection import (
+    eligible_preferences,
+    load_effective_selection,
+    record_effective_selection,
+    resolve_effective_preferences,
+)
 
 
 def profile_path(root: Path) -> Path:
@@ -296,6 +302,19 @@ def build_parser() -> argparse.ArgumentParser:
     diagnostics.add_argument("--max-issues-per-task", type=int)
     diagnostics.add_argument("--dedup-window-seconds", type=int)
     diagnostics.add_argument("--cooldown-seconds", type=int)
+
+    eligible = subparsers.add_parser("eligible-preferences", help="Return the task-scoped eligible preference view")
+    eligible.add_argument("--skill", required=True)
+    eligible.add_argument("--operation", default="")
+
+    record_effective = subparsers.add_parser("record-effective", help="Validate and persist an Agent preference selection")
+    record_effective.add_argument("--selection-json", required=True)
+
+    load_effective = subparsers.add_parser("load-effective", help="Load a current task-scoped preference selection")
+    load_effective.add_argument("--selection-id", required=True)
+    load_effective.add_argument("--skill", required=True)
+    load_effective.add_argument("--operation", default="")
+    load_effective.add_argument("--task-context-digest", required=True)
     return parser
 
 
@@ -303,7 +322,38 @@ def main() -> int:
     args = build_parser().parse_args()
     root = project_root(PROJECT_ROOT, explicit_root=args.root)
     print_resolved_project_roots(root)
-    ensure_workspace(root)
+    if args.command not in {"eligible-preferences", "load-effective"}:
+        ensure_workspace(root)
+
+    if args.command == "eligible-preferences":
+        print(json.dumps(eligible_preferences(root, skill=args.skill, operation=args.operation), ensure_ascii=False, sort_keys=True))
+        return 0
+    if args.command == "record-effective":
+        try:
+            selection = json.loads(args.selection_json)
+        except json.JSONDecodeError as exc:
+            raise SystemExit("Invalid effective preference selection JSON") from exc
+        if not isinstance(selection, dict):
+            raise SystemExit("Effective preference selection must be an object")
+        path, receipt = record_effective_selection(root, selection)
+        checkpoint_and_report(
+            root,
+            trigger="milestone",
+            message=f"milestone: record effective preferences {receipt['selection_id']}",
+            target_paths=[path],
+        )
+        print(json.dumps(receipt, ensure_ascii=False, sort_keys=True))
+        return 0
+    if args.command == "load-effective":
+        effective = resolve_effective_preferences(
+            root,
+            selection_id=args.selection_id,
+            skill=args.skill,
+            operation=args.operation,
+            expected_task_context_digest=args.task_context_digest,
+        )
+        print(json.dumps(effective, ensure_ascii=False, sort_keys=True))
+        return 0
 
     if args.command == "init":
         warn_if_cwd_differs_from_project_root(root, command="config.py init")

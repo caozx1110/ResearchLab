@@ -20,6 +20,18 @@ description: 管理 core 研究系统配置，包括资源画像、语言偏好�
 5. 管理 `kb` 独立仓库的 versioning 策略，例如 `manual | milestone | aggressive`。
 6. 给用户解释 paper intake 的默认模式，并提供可直接复制的配置修改命令。
 7. 管理本地可选诊断策略：workspace `off|errors-only|developer`、逐 skill override、任务 token/issue 上限与 dedup/cooldown；`local_only=true` 不可关闭。
+8. 为具体任务生成分层偏好视图：本 skill 保持总偏好唯一事实源，规则只筛出目标 skill/operation 有资格看到的字段，runtime Agent 再选择本次真正相关的子集并记录理由。
+
+## 分层偏好分发
+
+不要给每个 skill 复制一份用户画像。执行需要个性化的任务时：
+
+1. 私下读取目标 skill/operation 的 eligible view；它只是最小披露 allowlist，不代表每项都与本任务相关。
+2. Agent 结合当前任务选择 relevant subset；每个 selected 项写明如何影响本次工作，每个未选 soft 项写明为何无关。hard 项必须保留，且任何偏好都不能关闭 evidence、confirmation、containment、journal、lock、CAS 或 recovery。
+3. 保存 effective-selection receipt。回执只持久化 preference ID、value digest、理由和 task-context digest，不复制偏好正文、用户原话、secret 或绝对路径。
+4. consumer 按 `selection_id + skill + operation` 加载；总偏好变化会使旧回执 stale，必须重新选择。不得把一个 skill 的回执转给另一个 skill，也不得把 planning 偏好当成用户对研究判断的确认。
+
+推断出的偏好必须先经过现有 learning review/promotion；pending 或 dismissed learning 不进入 eligible view。规则决定“能不能给”，Agent 决定“这次要不要用”。
 
 ## 渐进式首次配置
 

@@ -5,6 +5,8 @@ description: Turn a selected core idea unit into a per-program method design han
 
 # Method Designer
 
+开始设计前遵循 workspace 统一 task-scoped preference 合同，记录并加载 `method-designer + 当前 operation` 的 effective selection。资源与约束是 hard 边界，必须进入选择；research focus 等 soft 项只有被 Agent 选中时才影响本次方案。脚本直接读取 canonical resources 仅作为 hard-boundary safety fallback，不代表跳过 task receipt。
+
 > 协议参考：`.agents/lib/research/SCHEMAS.md#unit-record` · `#program-files` · `#confirmation-gate` · `#runtime`
 
 Use this skill only after an idea has been explicitly selected.

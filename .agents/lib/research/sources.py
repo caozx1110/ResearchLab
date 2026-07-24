@@ -394,6 +394,10 @@ SEARCH_RETRIEVAL_STATUSES = {
 }
 SEARCH_EVIDENCE_LEVELS = {"snippet", "title", "abstract", "fulltext"}
 SEARCH_SCREENING_DECISIONS = {"unassessed", "include", "maybe", "exclude"}
+SEARCH_REVIEW_MODES = {"independent", "assisted"}
+SEARCH_REVIEWER_ACTOR_TYPES = {"agent", "human"}
+SEARCH_REVIEW_PHASES = {"title_abstract", "fulltext"}
+SEARCH_ADJUDICATION_MODES = {"consensus", "third_reviewer", "user"}
 SEARCH_STOP_REASONS = {
     "in_progress",
     "target_met",
@@ -609,10 +613,6 @@ def _validate_systematic_scope(mode: str, scope: dict[str, Any]) -> None:
         raise SystemExit("A systematic literature search must declare a reproducible search scope.")
     if mode == "bounded-systematic" and reproducible:
         raise SystemExit("Use systematic mode when the full search scope is reproducible.")
-    if int(scope.get("screeners") or 0) > 1:
-        raise SystemExit(
-            "Multi-reviewer systematic screening is not supported without a per-reviewer ledger."
-        )
 
 
 def _sanitize_search_budget(raw: Any) -> dict[str, int]:
@@ -783,6 +783,81 @@ def _sanitize_search_stop(raw: Any) -> dict[str, Any]:
     return stop
 
 
+def _search_sha256(value: object) -> str:
+    rendered = repr(_freeze_search_value(value)).encode("utf-8")
+    return hashlib.sha256(rendered).hexdigest()
+
+
+def _sanitize_search_review_protocol(raw: Any) -> dict[str, Any]:
+    if raw in (None, {}):
+        return {}
+    if not isinstance(raw, dict):
+        raise SystemExit("Literature search review_protocol must be a mapping.")
+    reviewer_ids = _search_string_list(
+        raw.get("required_reviewer_ids"), field="review_protocol.required_reviewer_ids", item_limit=128
+    )
+    reviewer_ids = [
+        _safe_search_id(item, field="review_protocol reviewer_id") for item in reviewer_ids
+    ]
+    if len(reviewer_ids) < 2:
+        raise SystemExit("Multi-reviewer search requires at least two reviewer ids.")
+    mode = _bounded_search_text(raw.get("mode"), 32)
+    if mode not in SEARCH_REVIEW_MODES:
+        raise SystemExit("Literature search review_protocol mode is not supported.")
+    phases = _search_string_list(raw.get("phases"), field="review_protocol.phases", item_limit=32)
+    if not phases or any(phase not in SEARCH_REVIEW_PHASES for phase in phases):
+        raise SystemExit("Literature search review_protocol phases are not supported.")
+    phase_rank = {"title_abstract": 0, "fulltext": 1}
+    if len(set(phases)) != len(phases) or phases != sorted(phases, key=phase_rank.__getitem__):
+        raise SystemExit("Literature search review_protocol phases must use canonical screening order.")
+    adjudication_mode = _bounded_search_text(raw.get("adjudication_mode"), 32)
+    if adjudication_mode not in SEARCH_ADJUDICATION_MODES:
+        raise SystemExit("Literature search adjudication mode is not supported.")
+    return {
+        "required_reviewer_ids": reviewer_ids,
+        "mode": mode,
+        "phases": phases,
+        "adjudication_mode": adjudication_mode,
+    }
+
+
+def _sanitize_search_reviewers(raw: Any) -> list[dict[str, Any]]:
+    if raw in (None, []):
+        return []
+    if not isinstance(raw, list):
+        raise SystemExit("Literature search reviewers must be a list.")
+    reviewers: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            raise SystemExit("Literature search reviewers must be mappings.")
+        reviewer_id = _safe_search_id(item.get("reviewer_id"), field="reviewer_id")
+        if reviewer_id in seen:
+            raise SystemExit("Literature search reviewer ids must be unique.")
+        seen.add(reviewer_id)
+        actor_type = _bounded_search_text(item.get("actor_type"), 32)
+        if actor_type not in SEARCH_REVIEWER_ACTOR_TYPES:
+            raise SystemExit("Literature search reviewer actor_type is not supported.")
+        execution_id = _safe_search_id(item.get("execution_id"), field="reviewer execution_id")
+        reviewer: dict[str, Any] = {
+            "reviewer_id": reviewer_id,
+            "actor_type": actor_type,
+            "role": "screener",
+            "execution_id": execution_id,
+        }
+        if actor_type == "human":
+            attestation = _bounded_search_text(item.get("attestation"), 1000)
+            authorization_source = _bounded_search_text(item.get("authorization_source"), 64)
+            if not attestation or authorization_source != "user_message":
+                raise SystemExit(
+                    "A human literature reviewer requires a current user-message attestation."
+                )
+            reviewer["attestation"] = attestation
+            reviewer["authorization_source"] = authorization_source
+        reviewers.append(reviewer)
+    return reviewers
+
+
 def _sanitize_search_state(raw: Any) -> dict[str, Any]:
     if raw in (None, {}):
         return {}
@@ -801,8 +876,23 @@ def _sanitize_search_state(raw: Any) -> dict[str, Any]:
         state["mode"] = mode
     if "run_id" in raw:
         state["run_id"] = _safe_search_id(raw.get("run_id"), field="run_id")
+    if "monitor_binding" in raw:
+        binding = raw.get("monitor_binding")
+        if not isinstance(binding, dict) or set(binding) != {"run_id", "task_digest"}:
+            raise SystemExit("Literature search monitor binding is invalid.")
+        task_digest = _bounded_search_text(binding.get("task_digest"), 64)
+        if re.fullmatch(r"[0-9a-f]{64}", task_digest) is None:
+            raise SystemExit("Literature search monitor task digest is invalid.")
+        state["monitor_binding"] = {
+            "run_id": _safe_search_id(binding.get("run_id"), field="monitor run_id"),
+            "task_digest": task_digest,
+        }
     if "scope" in raw:
         state["scope"] = _sanitize_search_scope(raw.get("scope"))
+    if "review_protocol" in raw:
+        state["review_protocol"] = _sanitize_search_review_protocol(raw.get("review_protocol"))
+    if "reviewers" in raw:
+        state["reviewers"] = _sanitize_search_reviewers(raw.get("reviewers"))
     if "budget" in raw:
         state["budget"] = _sanitize_search_budget(raw.get("budget"))
     if "usage" in raw:
@@ -955,6 +1045,342 @@ def _sanitize_search_screening(raw: Any) -> dict[str, Any]:
     return screening
 
 
+def _validate_search_timestamp(value: Any, *, field: str) -> str:
+    text = _bounded_search_text(value, 80)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        raise SystemExit(f"Literature search {field} must be an ISO-8601 timestamp.") from None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise SystemExit(f"Literature search {field} must include a timezone.")
+    return text
+
+
+def _sanitize_search_screening_decision(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise SystemExit("Literature search screening decisions must be mappings.")
+    decision_id = _safe_search_id(raw.get("decision_id"), field="screening decision_id")
+    reviewer_id = _safe_search_id(raw.get("reviewer_id"), field="screening reviewer_id")
+    screening = _sanitize_search_screening(raw)
+    if screening.get("decision") == "unassessed":
+        raise SystemExit("A per-reviewer screening decision cannot be unassessed.")
+    phase = str(screening.get("phase") or "")
+    if phase not in SEARCH_REVIEW_PHASES:
+        raise SystemExit("Per-reviewer decisions support title_abstract or fulltext phases only.")
+    entry: dict[str, Any] = {
+        "decision_id": decision_id,
+        "reviewer_id": reviewer_id,
+        "phase": phase,
+        "decision": screening["decision"],
+        "basis": screening["basis"],
+        "rationale": screening["rationale"],
+        "evidence": screening["evidence"],
+        "decided_at": _validate_search_timestamp(raw.get("decided_at"), field="decision decided_at"),
+    }
+    supersedes = _bounded_search_text(raw.get("supersedes_decision_id"), 128)
+    if supersedes:
+        entry["supersedes_decision_id"] = _safe_search_id(
+            supersedes, field="supersedes_decision_id"
+        )
+    entry["evidence_digest"] = _search_sha256(entry["evidence"])
+    entry["decision_digest"] = _search_sha256(entry)
+    return entry
+
+
+def _validate_search_decision_phase_order(decisions: list[dict[str, Any]]) -> None:
+    phase_rank = {"title_abstract": 0, "fulltext": 1}
+    highest = -1
+    for decision in decisions:
+        rank = phase_rank.get(str(decision.get("phase") or ""), -1)
+        if rank < highest:
+            raise SystemExit(
+                "Literature search screening decisions cannot return to an earlier phase."
+            )
+        highest = max(highest, rank)
+
+
+def _sanitize_search_adjudication(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise SystemExit("Literature search adjudications must be mappings.")
+    adjudication_id = _safe_search_id(raw.get("adjudication_id"), field="adjudication_id")
+    phase = _bounded_search_text(raw.get("phase"), 32)
+    if phase not in SEARCH_REVIEW_PHASES:
+        raise SystemExit("Literature search adjudication phase is not supported.")
+    input_ids = _search_string_list(
+        raw.get("input_decision_ids"), field="adjudication.input_decision_ids", item_limit=128
+    )
+    input_ids = [_safe_search_id(item, field="adjudication decision id") for item in input_ids]
+    if len(input_ids) < 2:
+        raise SystemExit("Literature search adjudication requires at least two input decisions.")
+    status = _bounded_search_text(raw.get("status"), 32)
+    if status not in {"pending", "resolved"}:
+        raise SystemExit("Literature search adjudication status is not supported.")
+    result: dict[str, Any] = {
+        "adjudication_id": adjudication_id,
+        "phase": phase,
+        "input_decision_ids": input_ids,
+        "status": status,
+    }
+    if status == "resolved":
+        final_decision = _bounded_search_text(raw.get("final_decision"), 32)
+        if final_decision not in SEARCH_SCREENING_DECISIONS - {"unassessed"}:
+            raise SystemExit("Resolved adjudication requires a final screening decision.")
+        resolved_by = _bounded_search_text(raw.get("resolved_by"), 128)
+        rationale = _bounded_search_text(raw.get("rationale"), 1500)
+        if not resolved_by or not rationale:
+            raise SystemExit("Resolved adjudication requires resolved_by and rationale.")
+        evidence = raw.get("evidence")
+        if not isinstance(evidence, list) or not evidence:
+            raise SystemExit("Resolved adjudication requires evidence.")
+        safe_evidence: list[dict[str, str]] = []
+        for item in evidence:
+            if not isinstance(item, dict):
+                raise SystemExit("Adjudication evidence must be a mapping.")
+            quote = _bounded_search_text(item.get("quote"), 800)
+            locator = _bounded_search_text(item.get("locator"), 500)
+            if not quote or not locator:
+                raise SystemExit("Adjudication evidence requires quote and locator.")
+            _reject_sensitive_search_text(locator, field="adjudication evidence locator")
+            safe_evidence.append({"quote": quote, "locator": _safe_search_url(locator) or locator})
+        result.update(
+            {
+                "final_decision": final_decision,
+                "resolved_by": resolved_by,
+                "rationale": rationale,
+                "evidence": safe_evidence,
+                "resolved_at": _validate_search_timestamp(
+                    raw.get("resolved_at"), field="adjudication resolved_at"
+                ),
+            }
+        )
+        if resolved_by == "current-user":
+            authorization = _bounded_search_text(raw.get("user_authorization"), 1500)
+            authorization_source = _bounded_search_text(raw.get("authorization_source"), 64)
+            if not authorization or authorization_source != "user_message":
+                raise SystemExit("User adjudication requires current user-message authorization.")
+            result["user_authorization"] = authorization
+            result["authorization_source"] = authorization_source
+    input_digest = _bounded_search_text(raw.get("input_digest"), 64)
+    if input_digest:
+        if re.fullmatch(r"[0-9a-f]{64}", input_digest) is None:
+            raise SystemExit("Literature search adjudication input digest is invalid.")
+        result["input_digest"] = input_digest
+    return result
+
+
+def _active_search_decisions(candidate: dict[str, Any]) -> list[dict[str, Any]]:
+    decisions = [
+        item for item in candidate.get("screening_decisions", []) if isinstance(item, dict)
+    ]
+    by_id = {str(item.get("decision_id") or ""): item for item in decisions}
+    if len(by_id) != len(decisions):
+        raise SystemExit("Literature search screening decision ids must be unique.")
+    superseded: set[str] = set()
+    for item in decisions:
+        prior_id = str(item.get("supersedes_decision_id") or "")
+        if not prior_id:
+            continue
+        prior = by_id.get(prior_id)
+        if prior is None:
+            raise SystemExit("Literature search screening supersedes an unknown decision.")
+        if (
+            prior.get("reviewer_id") != item.get("reviewer_id")
+            or prior.get("phase") != item.get("phase")
+        ):
+            raise SystemExit("A screening decision may supersede only the same reviewer and phase.")
+        if prior_id in superseded:
+            raise SystemExit("A screening decision cannot be superseded more than once.")
+        superseded.add(prior_id)
+    active = [item for item in decisions if str(item.get("decision_id") or "") not in superseded]
+    keys = [(str(item.get("reviewer_id") or ""), str(item.get("phase") or "")) for item in active]
+    if len(keys) != len(set(keys)):
+        raise SystemExit("A reviewer may have only one active decision per phase and candidate.")
+    return active
+
+
+def _validate_persisted_multi_reviewer_ledgers(payload: dict[str, Any]) -> None:
+    """Re-sanitize append-only ledgers before any resume/terminal derivation."""
+    for candidate in payload.get("candidates", []):
+        if not isinstance(candidate, dict):
+            continue
+        raw_decisions = candidate.get("screening_decisions", [])
+        if raw_decisions not in (None, []) and not isinstance(raw_decisions, list):
+            raise SystemExit("Persisted literature screening ledger is invalid.")
+        for raw in raw_decisions or []:
+            sanitized = _sanitize_search_screening_decision(raw)
+            if sanitized != raw:
+                raise SystemExit("Persisted literature screening decision digest is stale or invalid.")
+        _validate_search_decision_phase_order(raw_decisions or [])
+        raw_adjudications = candidate.get("adjudications", [])
+        if raw_adjudications not in (None, []) and not isinstance(raw_adjudications, list):
+            raise SystemExit("Persisted literature adjudication ledger is invalid.")
+        for raw in raw_adjudications or []:
+            sanitized = _sanitize_search_adjudication(raw)
+            if sanitized != raw:
+                raise SystemExit("Persisted literature adjudication is not canonical.")
+
+
+def _derive_multi_reviewer_screening(
+    candidate: dict[str, Any],
+    *,
+    protocol: dict[str, Any],
+    reviewers: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    required = [str(item) for item in protocol.get("required_reviewer_ids", [])]
+    active = _active_search_decisions(candidate)
+    for item in active:
+        if str(item.get("reviewer_id") or "") not in reviewers:
+            raise SystemExit("Literature search decision references an unknown reviewer.")
+    phases = [str(item) for item in protocol.get("phases", [])]
+    chosen: list[dict[str, Any]] = []
+    chosen_phase = ""
+    for phase in reversed(phases):
+        decisions = [item for item in active if str(item.get("phase") or "") == phase]
+        by_reviewer = {str(item.get("reviewer_id") or ""): item for item in decisions}
+        if all(reviewer_id in by_reviewer for reviewer_id in required):
+            chosen = [by_reviewer[reviewer_id] for reviewer_id in required]
+            chosen_phase = phase
+            break
+    if not chosen:
+        return {"status": "incomplete", "decision": "unassessed", "derived_from": []}
+    decisions = {str(item.get("decision") or "") for item in chosen}
+    decision_ids = [str(item.get("decision_id") or "") for item in chosen]
+    if len(decisions) == 1:
+        decision = next(iter(decisions))
+        result = {
+            "status": "consensus",
+            "phase": chosen_phase,
+            "decision": decision,
+            "derived_from": decision_ids,
+        }
+        result["digest"] = _search_sha256(result)
+        return result
+    adjudications = [
+        item for item in candidate.get("adjudications", []) if isinstance(item, dict)
+    ]
+    matching = [
+        item
+        for item in adjudications
+        if str(item.get("phase") or "") == chosen_phase
+        and set(item.get("input_decision_ids", [])) == set(decision_ids)
+    ]
+    resolved = [item for item in matching if str(item.get("status") or "") == "resolved"]
+    if len(resolved) > 1:
+        raise SystemExit("Literature search conflict has multiple resolved adjudications.")
+    if not resolved:
+        return {
+            "status": "conflict",
+            "phase": chosen_phase,
+            "decision": "unassessed",
+            "derived_from": decision_ids,
+        }
+    adjudication = resolved[0]
+    resolved_by = str(adjudication.get("resolved_by") or "")
+    if resolved_by != "current-user" and resolved_by not in reviewers:
+        raise SystemExit("Literature search adjudication resolver is unknown.")
+    adjudication_mode = str(protocol.get("adjudication_mode") or "")
+    if adjudication_mode == "user" and resolved_by != "current-user":
+        raise SystemExit("User-mode literature adjudication must be resolved by the current user.")
+    if adjudication_mode == "third_reviewer":
+        if resolved_by == "current-user" or resolved_by in required:
+            raise SystemExit("Third-reviewer adjudication requires a distinct reviewer.")
+        if str(protocol.get("mode") or "") == "independent":
+            resolver_execution = str(reviewers[resolved_by].get("execution_id") or "")
+            required_executions = {str(reviewers[item].get("execution_id") or "") for item in required}
+            if not resolver_execution or resolver_execution in required_executions:
+                raise SystemExit("Independent third-reviewer adjudication requires a distinct execution/context id.")
+    input_digest = _search_sha256(chosen)
+    if adjudication.get("input_digest") not in (None, "", input_digest):
+        raise SystemExit("Literature search adjudication input binding is stale or invalid.")
+    result = {
+        "status": "adjudicated",
+        "phase": chosen_phase,
+        "decision": str(adjudication.get("final_decision") or ""),
+        "derived_from": [*decision_ids, str(adjudication.get("adjudication_id") or "")],
+        "input_digest": input_digest,
+    }
+    result["digest"] = _search_sha256(result)
+    adjudication["input_digest"] = input_digest
+    return result
+
+
+def _validate_multi_reviewer_stage(payload: dict[str, Any]) -> None:
+    scope = payload.get("scope") if isinstance(payload.get("scope"), dict) else {}
+    screeners = int(scope.get("screeners") or 1)
+    protocol = (
+        payload.get("review_protocol")
+        if isinstance(payload.get("review_protocol"), dict)
+        else {}
+    )
+    reviewer_rows = [item for item in payload.get("reviewers", []) if isinstance(item, dict)]
+    if screeners <= 1 and not protocol and not reviewer_rows:
+        for candidate in payload.get("candidates", []):
+            if isinstance(candidate, dict) and candidate.get("screening_decisions"):
+                raise SystemExit("Per-reviewer decisions require a multi-reviewer protocol.")
+        return
+    required = [str(item) for item in protocol.get("required_reviewer_ids", [])]
+    if screeners < 2 or len(required) != screeners:
+        raise SystemExit("scope.screeners must match the multi-reviewer protocol.")
+    reviewers = {str(item.get("reviewer_id") or ""): item for item in reviewer_rows}
+    if len(reviewers) != len(reviewer_rows) or any(item not in reviewers for item in required):
+        raise SystemExit("Multi-reviewer protocol references an unknown reviewer.")
+    if str(protocol.get("mode") or "") == "independent":
+        execution_ids = [str(reviewers[item].get("execution_id") or "") for item in required]
+        if any(not execution_id for execution_id in execution_ids) or len(set(execution_ids)) != len(
+            execution_ids
+        ):
+            raise SystemExit(
+                "Independent literature reviewers require distinct execution/context ids."
+            )
+    resolution = " ".join(str(scope.get("disagreement_resolution") or "").casefold().replace("_", " ").replace("-", " ").split())
+    adjudication_mode = str(protocol.get("adjudication_mode") or "")
+    expected_resolution = "third reviewer" if adjudication_mode == "third_reviewer" else "user"
+    if resolution != expected_resolution:
+        raise SystemExit("scope.disagreement_resolution must match the review adjudication mode.")
+    for candidate in payload.get("candidates", []):
+        if not isinstance(candidate, dict):
+            continue
+        if candidate.get("screening"):
+            screening = candidate.get("screening")
+            if (
+                isinstance(screening, dict)
+                and screening.get("decision") == "exclude"
+                and screening.get("phase") == "automation"
+            ):
+                if candidate.get("screening_decisions") or candidate.get("adjudications"):
+                    raise SystemExit("Automation exclusion cannot be mixed with reviewer decisions.")
+                effective = {
+                    "status": "automation-excluded",
+                    "phase": "automation",
+                    "decision": "exclude",
+                    "derived_from": [],
+                    "screening_digest": _search_sha256(screening),
+                }
+                effective["digest"] = _search_sha256(effective)
+                candidate["effective_screening"] = effective
+                continue
+            if isinstance(screening, dict) and screening.get("decision") not in {None, "", "unassessed"}:
+                raise SystemExit("Multi-reviewer search cannot use a legacy single screening.")
+            candidate.pop("screening", None)
+        decisions = [
+            item for item in candidate.get("screening_decisions", []) if isinstance(item, dict)
+        ]
+        by_id = {str(item.get("decision_id") or ""): item for item in decisions}
+        for adjudication in candidate.get("adjudications", []):
+            if not isinstance(adjudication, dict):
+                continue
+            inputs = [str(item) for item in adjudication.get("input_decision_ids", [])]
+            if any(item not in by_id for item in inputs):
+                raise SystemExit("Literature search adjudication references an unknown decision.")
+            if any(str(by_id[item].get("phase") or "") != adjudication.get("phase") for item in inputs):
+                raise SystemExit("Literature search adjudication mixes screening phases.")
+        candidate["effective_screening"] = _derive_multi_reviewer_screening(
+            candidate,
+            protocol=protocol,
+            reviewers=reviewers,
+        )
+
+
 def _sanitize_search_metadata(raw: Any) -> dict[str, Any]:
     if raw in (None, {}):
         return {}
@@ -1038,6 +1464,22 @@ def _sanitize_search_candidate(
         candidate["evidence_level"] = evidence_level
     if "screening" in raw:
         candidate["screening"] = _sanitize_search_screening(raw.get("screening"))
+    if "screening_decisions" in raw:
+        if not isinstance(raw.get("screening_decisions"), list):
+            raise SystemExit("Literature search screening_decisions must be a list.")
+        candidate["screening_decisions"] = [
+            _sanitize_search_screening_decision(item)
+            for item in raw["screening_decisions"]
+        ]
+        _validate_search_decision_phase_order(candidate["screening_decisions"])
+    if "adjudications" in raw:
+        if not isinstance(raw.get("adjudications"), list):
+            raise SystemExit("Literature search adjudications must be a list.")
+        candidate["adjudications"] = [
+            _sanitize_search_adjudication(item) for item in raw["adjudications"]
+        ]
+    if candidate.get("screening") and candidate.get("screening_decisions"):
+        raise SystemExit("Use either legacy single screening or per-reviewer decisions, not both.")
     if "metadata" in raw:
         candidate["metadata"] = _sanitize_search_metadata(raw.get("metadata"))
     screening = candidate.get("screening") if isinstance(candidate.get("screening"), dict) else {}
@@ -1045,6 +1487,12 @@ def _sanitize_search_candidate(
         level_rank = {"snippet": 0, "title": 1, "abstract": 2, "fulltext": 3}
         evidence_level = str(candidate.get("evidence_level") or "")
         basis = str(screening.get("basis") or "")
+        if level_rank.get(evidence_level, -1) < level_rank.get(basis, -1):
+            raise SystemExit("Literature search screening basis exceeds the candidate evidence level.")
+    for decision in candidate.get("screening_decisions", []):
+        level_rank = {"snippet": 0, "title": 1, "abstract": 2, "fulltext": 3}
+        evidence_level = str(candidate.get("evidence_level") or "")
+        basis = str(decision.get("basis") or "")
         if level_rank.get(evidence_level, -1) < level_rank.get(basis, -1):
             raise SystemExit("Literature search screening basis exceeds the candidate evidence level.")
     return candidate
@@ -1062,7 +1510,15 @@ def _candidate_identity_conflicts(existing: dict[str, str], incoming: dict[str, 
 
 
 def _merge_search_state(payload: dict[str, Any], incoming: dict[str, Any]) -> None:
-    for key in ("entry_skill", "mode", "scope", "run_id"):
+    for key in (
+        "entry_skill",
+        "mode",
+        "scope",
+        "run_id",
+        "monitor_binding",
+        "review_protocol",
+        "reviewers",
+    ):
         if key not in incoming:
             continue
         if key in payload and payload.get(key) not in (None, {}, "") and payload.get(key) != incoming[key]:
@@ -1449,6 +1905,7 @@ def _stage_search_results_unlocked(
     existing = load_yaml(path, default={})
     if not isinstance(existing, dict):
         existing = {}
+    _validate_persisted_multi_reviewer_ledgers(existing)
     existing_stop = existing.get("stop") if isinstance(existing.get("stop"), dict) else {}
     if (
         existing.get("entry_skill") == "literature-search"
@@ -1610,6 +2067,51 @@ def _stage_search_results_unlocked(
                         history.append({"replaced_at": utc_now_iso(), "screening": prior_screening})
                         existing_candidate["screening_history"] = history
                     existing_candidate["screening"] = candidate["screening"]
+            if candidate.get("screening_decisions"):
+                if existing_candidate.get("screening"):
+                    raise SystemExit("Legacy screening cannot be mixed with a multi-reviewer ledger.")
+                decisions = [
+                    item
+                    for item in existing_candidate.get("screening_decisions", [])
+                    if isinstance(item, dict)
+                ]
+                by_id = {str(item.get("decision_id") or ""): item for item in decisions}
+                for decision in candidate["screening_decisions"]:
+                    decision_id = str(decision.get("decision_id") or "")
+                    prior = by_id.get(decision_id)
+                    if prior is not None:
+                        if _freeze_search_value(prior) != _freeze_search_value(decision):
+                            raise SystemExit("Literature search decision_id conflicts with existing history.")
+                        continue
+                    decisions.append(decision)
+                    by_id[decision_id] = decision
+                _validate_search_decision_phase_order(decisions)
+                existing_candidate["screening_decisions"] = decisions
+            if candidate.get("adjudications"):
+                adjudications = [
+                    item
+                    for item in existing_candidate.get("adjudications", [])
+                    if isinstance(item, dict)
+                ]
+                by_id = {
+                    str(item.get("adjudication_id") or ""): item for item in adjudications
+                }
+                for adjudication in candidate["adjudications"]:
+                    adjudication_id = str(adjudication.get("adjudication_id") or "")
+                    prior = by_id.get(adjudication_id)
+                    if prior is not None:
+                        prior_semantic = {key: value for key, value in prior.items() if key != "input_digest"}
+                        incoming_semantic = {
+                            key: value for key, value in adjudication.items() if key != "input_digest"
+                        }
+                        if _freeze_search_value(prior_semantic) != _freeze_search_value(incoming_semantic):
+                            raise SystemExit(
+                                "Literature search adjudication_id conflicts with existing history."
+                            )
+                        continue
+                    adjudications.append(adjudication)
+                    by_id[adjudication_id] = adjudication
+                existing_candidate["adjudications"] = adjudications
             if candidate.get("metadata"):
                 prior_metadata = existing_candidate.get("metadata")
                 if not isinstance(prior_metadata, dict):
@@ -1637,6 +2139,8 @@ def _stage_search_results_unlocked(
             "fetch": candidate.get("fetch") or {"status": "staged", "attempts": 0},
             "screening": candidate.get("screening") or {"decision": "unassessed"},
         }
+        if candidate.get("screening_decisions"):
+            new_candidate.pop("screening", None)
         payload["candidates"].append(new_candidate)
         known_urls[url] = new_candidate
         known_candidate_ids[candidate_id] = new_candidate
@@ -1646,6 +2150,7 @@ def _stage_search_results_unlocked(
     budget = payload.get("budget") if isinstance(payload.get("budget"), dict) else {}
     if "max_candidates" in budget and len(payload["candidates"]) > int(budget["max_candidates"]):
         raise SystemExit("Literature search candidate count exceeds its persisted hard budget.")
+    _validate_multi_reviewer_stage(payload)
     persisted_query_ids = {
         str(item.get("query_id") or "")
         for item in payload.get("queries", [])
@@ -1725,13 +2230,15 @@ def _stage_search_results_unlocked(
             automation_excluded_candidates = 0
             unavailable_fulltext_candidates = 0
             for candidate in payload["candidates"]:
-                screening = (
-                    candidate.get("screening")
-                    if isinstance(candidate.get("screening"), dict)
-                    else {}
-                )
+                multi = int((payload.get("scope") or {}).get("screeners") or 1) > 1
+                screening_key = "effective_screening" if multi else "screening"
+                screening = candidate.get(screening_key) if isinstance(candidate.get(screening_key), dict) else {}
                 decision = str(screening.get("decision") or "unassessed")
                 phase = str(screening.get("phase") or "")
+                if multi and str(screening.get("status") or "") in {"incomplete", "conflict"}:
+                    raise SystemExit(
+                        "Terminal multi-reviewer search requires complete screening and adjudication."
+                    )
                 if decision == "include":
                     if phase != "fulltext":
                         raise SystemExit(

@@ -10,7 +10,7 @@ workspace/
 └── kb/        # your local research data
 ```
 
-The current candidate is **`0.2.0-rc.5`**. Its complete 1,089-test local suite and current installed-copy validation pass after the provider-neutral literature-search rebuild and three-agent adversarial review. Real SQLite HTML and Obsidian 1.12.7 Reading-view acceptance remain part of the release gate and have not been rerun for rc.5. The candidate is not stable or GA, has not been tagged or published, and makes no compatibility or support-time SLA promise. Real-source/Obsidian acceptance plus a green hosted Linux/macOS CI matrix remain required before a release tag. See [CHANGELOG.md](CHANGELOG.md) for the current release state.
+The current candidate is **`0.2.0-rc.6`**. It adds Agent-led portfolio planning, task-scoped preference selection, no-plugin multi-item Obsidian review, provider-neutral research monitoring, multi-reviewer literature screening, and an Agent-auditable install plan. The complete local suite, targeted R6 regression suites, and current 20-skill installed-copy lifecycle pass. Real SQLite HTML and Obsidian 1.12.7 Reading-view acceptance remain part of the release gate and have not been rerun for rc.6. The candidate is not stable or GA, has not been tagged or published, and makes no compatibility or support-time SLA promise. Real-source/Obsidian acceptance plus a green hosted Linux/macOS CI matrix remain required before a release tag. See [CHANGELOG.md](CHANGELOG.md) for the current release state.
 
 ## Capability maturity
 
@@ -27,13 +27,14 @@ These labels describe the current scope of each component, not the release statu
 | `knowledge-base-manager` | stable | Schema, evidence, confirmation, exact-path recovery, and index governance; it does not interpret research material. |
 | `source-intake` | beta | Staging, deduplication, immutable source capture, full Markdown reading views with local assets, and retryable failures across heterogeneous sources. |
 | `literature-search` | beta | Agent-led, provider-neutral literature discovery with durable queries, provenance, screening evidence, coverage, budgets, and stop reasons; it does not create canonical units. |
+| `research-monitor` | beta | Provider-neutral subscriptions, due facts, frozen run receipts, retries, and evidence-bound outcomes; no daemon, scheduler, provider, or plugin is bundled. |
 | `paper-analyst` | beta | Evidence-backed prepare and verify gates; the runtime agent supplies the substantive reading. |
 | `repo-analyst` | beta | File-oriented capability-map preparation and evidence verification; the runtime agent supplies code understanding. |
 | `dataset-analyst` | beta | Dataset-card profile preparation and verbatim evidence verification; suitability judgements remain agent-authored and confirmation-gated. |
 | `blog-analyst` | beta | Article preparation and claim verification; the runtime agent supplies interpretation and credibility judgement. |
-| `research-config-manager` | beta | Preference and policy persistence is real, but not every preference is consumed by every downstream skill. |
+| `research-config-manager` | beta | One canonical preference profile is filtered by per-skill disclosure rules, then the Agent selects the task-relevant subset and stores a digest-bound receipt. |
 | `discussion-archivist` | beta | Durable conclusion-level discussion archives with explicit evidence and open questions. |
-| `research-orchestrator` | scaffold | Program spine, routing, dashboards, and event flow; prioritization remains policy-driven. |
+| `research-orchestrator` | beta | Program spine, complete survey routing, dashboards and event flow; cross-program next-step choice is Agent-authored over a complete factual snapshot and becomes stale when inputs change. |
 | `literature-synthesizer` | beta | Evidence-first survey, taxonomy, trend, contradiction, and gap artifacts are durable and bound to upstream versions; synthesis quality still depends on the agent and source coverage. |
 | `idea-workbench` | beta | Candidate, evidence-first review, discussion, and explicit selection are implemented; novelty claims still require human or expert judgement. |
 | `method-designer` | beta | Repo-grounded design handoff and experiment matrices are implemented; generated methods still require expert review. |
@@ -41,7 +42,7 @@ These labels describe the current scope of each component, not the release statu
 | `report-author` | beta | Reports and outlines consume durable claims, events, evidence, and decisions; composition quality and coverage still require review. |
 | `skill-evolution-advisor` | scaffold | Local learning and diagnostic-issue capture/review exist; automatic skill evolution is intentionally not a supported promise. |
 | `wiki-adapter` | scaffold | A thin compatibility and routing layer, not an independent analysis engine. |
-| `research-navigator` | dev-only | The local browser workbench remains a development surface; generated Markdown navigation is beta. |
+| `research-navigator` | dev-only | Optional projection helper only; it is not marketed as a formal product entrypoint or a source of truth. |
 
 A score or successful run for one component is evidence only for that component. It must not be extrapolated to a different workflow or the bundle as a whole. In particular, the scoped **stable** rows above do not make this release candidate a stable release.
 
@@ -67,6 +68,8 @@ Installation is the one-time technical bootstrap. After it succeeds, ordinary us
 
 ## Install
 
+You can paste the repository URL into Codex or Claude Code and say “把它安装到我当前 workspace；先检查，再使用项目自带安装器；不要覆盖现有研究数据”. The Agent-facing installation contract is documented in [docs/INSTALL.md](docs/INSTALL.md); no marketplace or plugin is required.
+
 For the one-time guided setup, from this repository:
 
 ```bash
@@ -90,9 +93,9 @@ These are the complete public shortcut surface. Internal script arguments are in
 | `kb obsidian update` / `kb obsidian status` | Rebuild or audit the no-plugin Obsidian knowledge-network projection. |
 | `kb add <链接或路径>` | Add a paper, repository, article, or local file as a lightweight source. |
 | `kb ingest <链接或路径>` | Add a source and prepare its evidence-backed analysis workflow. |
-| `kb review` | Show human-review-ready judgements and accept a natural-language decision. |
+| `kb review` | Show up to three review-ready judgements; decide in conversation or export a no-plugin Obsidian checkbox sheet and confirm the batch later. |
 | `kb status` | Refresh and summarize the current workspace or research program. |
-| `kb next` | Suggest the next useful research action. |
+| `kb next` | Show the current Agent-selected action, or ask the Agent to compare all current candidates when the previous choice is absent or stale. |
 | `kb find <关键词>` | Find relevant passages with their knowledge unit and reopenable locator. |
 | `kb recall` | Recall confirmed preferences, known pitfalls, and reviewed skill issues. |
 | `kb resume` | Recover an interrupted knowledge-base operation. |
@@ -146,9 +149,11 @@ You decide whether a judgement is accepted, which idea or baseline to pursue, wh
 
 `kb review` includes only material whose agent fill and verification are complete. Items still awaiting analysis, verification, or retry remain out of the human decision queue.
 
-Review cards are one-time, version-bound snapshots. They expire after 24 hours; a used, expired, changed, or invalid card is rejected with a distinct recovery message. If the underlying content changes, run `kb review` again to see the new text before deciding. Successful decisions identify the sanitized subject and whether it was confirmed or rejected.
+Review cards are one-time, version-bound snapshots. They expire after 24 hours; a used, expired, changed, or invalid card is rejected with a distinct recovery message. If the underlying content changes, run `kb review` again to see the new text before deciding. For an Obsidian round-trip, the generated Bases stay read-only and a separate human-owned annotation sheet exposes only confirm/reject/defer checkboxes. The Agent must restate the checked batch in the current conversation before applying it; checkboxes alone are not authorization. Cross-owner application is all-or-none.
 
-Natural-language literature discovery routes to `literature-search`. The Agent uses whichever search, browser, or connector capabilities are actually available, explains the scope in human terms, and stores a bounded, resumable candidate stage with every query, discovery path, retryable failure, screening basis, coverage gap, hard budget, and stop rationale. Ordinary requests are exploratory and make no completeness claim; an explicit systematic request is labeled bounded unless its sources, queries, result depth, and screening are reproducible. Search content is treated as untrusted data. The Agent shows a small evidence-backed shortlist, and `include`/`maybe` never becomes intake authorization: only candidates explicitly selected by the user in the current conversation can become canonical papers. No provider SDK or credential is built into the bundle.
+Natural-language literature discovery routes to `literature-search`. The Agent uses whichever search, browser, or connector capabilities are actually available, explains the scope in human terms, and stores a bounded, resumable candidate stage with every query, discovery path, retryable failure, screening basis, coverage gap, hard budget, and stop rationale. Ordinary requests are exploratory and make no completeness claim; an explicit systematic request is labeled bounded unless its sources, queries, result depth, and screening are reproducible. Multi-reviewer runs retain append-only per-reviewer decisions and explicit adjudication; separate execution contexts may be called independent, while one Agent using several roles is labeled assisted. Search content is treated as untrusted data. The Agent shows a small evidence-backed shortlist, and `include`/`maybe` never becomes intake authorization: only candidates explicitly selected by the user in the current conversation can become canonical papers. No provider SDK or credential is built into the bundle.
+
+Natural-language requests such as “每两周关注这个方向的新论文” route to `research-monitor`. It preserves the target, timezone-aware cadence, scope, budget, due windows, retry state and evidence-bound results. It deliberately includes no search provider, daemon, cron job, file watcher or Obsidian plugin. A host automation is optional and requires explicit user authorization; otherwise the subscription becomes visible the next time the Agent checks `kb next` or resumes the workspace.
 
 `kb find` is passage-oriented lexical retrieval. It returns up to five short excerpts with unit identities and project-relative locators. A missing, stale, or damaged local search cache falls back to an in-memory read-only search, so querying never mutates the KB. It supports same-language and mixed CJK/ASCII tokens but does not pretend to provide cross-language semantic search.
 

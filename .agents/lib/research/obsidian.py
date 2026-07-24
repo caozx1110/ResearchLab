@@ -82,6 +82,16 @@ def obsidian_manifest_path(project_root: Path) -> Path:
     return obsidian_managed_root(project_root) / MANIFEST_NAME
 
 
+def obsidian_review_annotations_root(project_root: Path) -> Path:
+    """Human-owned exchange area for explicit, no-plugin review handoffs.
+
+    Projection update/status code must never traverse this directory.  A review
+    sync may read one registry-bound regular file from it only after the user
+    explicitly asks the runtime Agent to do so.
+    """
+    return obsidian_root(project_root) / "annotations"
+
+
 def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -1085,7 +1095,7 @@ def _render_home(
             f"## {_t(zh, 'Start here', '从这里开始')}",
             "",
             f"- [[obsidian/managed/dashboards/All Units.base|{_t(zh, 'Browse all units', '浏览全部单元')}]]",
-            f"- [[obsidian/managed/dashboards/Pending Review.base|{_t(zh, 'Review pending conclusions', '查看待确认判断')}]]",
+            f"- [[obsidian/managed/dashboards/Pending Review.base|{_t(zh, 'Browse pending conclusions (read-only overview)', '浏览待确认判断（只读总览）')}]]",
             f"- [[obsidian/managed/dashboards/By Topic.base|{_t(zh, 'Explore by topic', '按主题浏览')}]]",
             "",
             f"## {_t(zh, 'Library overview', '资料概览')}",
@@ -1114,6 +1124,11 @@ def _render_home(
             "",
             _t(zh, "- Put unprocessed notes in `obsidian/inbox/`.", "- 未整理笔记请放在 `obsidian/inbox/`。"),
             _t(zh, "- Put durable human commentary in `obsidian/annotations/`.", "- 需要长期保留的人工批注请放在 `obsidian/annotations/`。"),
+            _t(
+                zh,
+                "- Editable review sheets may appear in annotations after you ask the Agent; checkbox changes are drafts until you return to the conversation and explicitly authorize sync.",
+                "- 让 Agent 生成待确认表后，可直接在人工批注区勾选；勾选只是草稿，必须回到对话明确授权同步才会生效。",
+            ),
             "",
             f"> [!warning] {_t(zh, 'Managed projection', '受管投影')}",
             "> " + _t(zh, "Files below `obsidian/managed` are generated. Put human-authored notes in inbox or annotations.", "`obsidian/managed` 下的文件会自动生成；人工内容请写入 inbox 或 annotations。"),

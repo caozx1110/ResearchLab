@@ -485,7 +485,7 @@ def test_kb_doctor_prints_runtime_capabilities(monkeypatch, tmp_path: Path, caps
     assert kb.main(["--root", str(tmp_path), "--agent-protocol", "doctor.json", "doctor"]) == 0
 
     captured = capsys.readouterr()
-    assert "研究能力包版本为 0.2.0-rc.5" in captured.out
+    assert "研究能力包版本为 0.2.0-rc.6" in captured.out
     assert "配置读写能力正常" in captured.out
     assert "材料 Markdown 阅读层转换能力已就绪" in captured.out
     assert "论文解析能力已就绪" in captured.out
@@ -1460,6 +1460,78 @@ def test_kb_next_forwards_program_filter(monkeypatch, tmp_path: Path) -> None:
     assert stream_values == [False]
 
 
+def test_kb_next_requests_agent_planning_and_ignores_legacy_ranked_items(
+    monkeypatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    kb = _load_kb_cli()
+    candidate = {
+        "action_id": "action-portfolio",
+        "program_id": "program-a",
+        "action_type": "persisted-program-action",
+        "owner_skill": "research-orchestrator",
+        "subject": {"kind": "", "id": "next-action"},
+        "reason": "Compare evidence",
+        "binding_digest": "a" * 64,
+    }
+    payload = {
+        "has_records": True,
+        "items": [{"program_id": "wrong-fixed-winner", "score": 999}],
+        "planning_required": True,
+        "legacy_items_are_not_a_decision": True,
+        "candidate_snapshot": {
+            "candidate_snapshot_digest": "b" * 64,
+            "candidate_count": 1,
+            "candidates": [candidate],
+            "program_contexts": [],
+            "scope": {"program_ids": [], "include_loose_units": True},
+        },
+        "portfolio_decision": None,
+        "portfolio_decision_fill": {
+            "decision_id": "",
+            "candidate_snapshot_digest": "b" * 64,
+            "selected_action_ids": [],
+            "rationale": "",
+            "expected_information_gain": "",
+            "cost_and_risk": "",
+            "preference_selection_id": "",
+            "decision_scope": "procedural_planning",
+            "program_decision_ids": [],
+            "decided_at": "",
+        },
+    }
+    monkeypatch.setattr(
+        kb,
+        "forward_command",
+        lambda root, relative_script, args, *, stream=True: kb.CommandResult(
+            (relative_script, *args), 0, json.dumps(payload)
+        ),
+    )
+
+    assert kb.main(["--root", str(tmp_path), "--agent-protocol", "portfolio-next.json", "next"]) == 0
+
+    output = capsys.readouterr().out
+    assert output == "Agent 需要比较当前 1 项可行行动，再说明为什么选择下一步。\n"
+    assert "wrong-fixed-winner" not in output
+    protocol = json.loads(
+        (tmp_path / "kb" / ".runtime" / "portfolio-next.json").read_text(encoding="utf-8")
+    )
+    assert protocol["status"] == "agent_action_required"
+    assert protocol["next_actions"][0]["action"] == "plan_portfolio_next"
+    assert protocol["next_actions"][0]["candidate_snapshot"]["candidates"] == [candidate]
+    action = protocol["next_actions"][0]
+    assert action["owner_skill"] == "research-orchestrator"
+    assert action["effective_preferences"]["task_context_digest"] == "b" * 64
+    assert action["private_owner_contract"] == {
+        "prepare": "prepare-next-selection",
+        "verify": "verify-next-selection",
+        "record": "record-next-selection",
+        "complete_in_current_turn": True,
+    }
+    assert set(action["required_decision_fields"]) == set(action["portfolio_decision_fill"])
+
+
 def test_kb_next_public_output_and_protocol_preserve_human_gate_semantics(
     monkeypatch,
     tmp_path: Path,
@@ -1649,8 +1721,7 @@ def test_kb_next_blog_only_source_ready_is_not_reported_as_empty(
     assert kb.main(["--root", str(tmp_path), "next"]) == 0
 
     output = capsys.readouterr().out
-    assert "资料「Blog Only」（b-blog-only-123456）" in output
-    assert "有逐字证据支持的摘要" in output
+    assert output == "Agent 需要比较当前 1 项可行行动，再说明为什么选择下一步。\n"
     assert "知识库还是空的" not in output
     _assert_public_governance_safe(output)
 
@@ -2356,6 +2427,12 @@ def test_kb_review_tty_and_pipe_are_identical_and_emit_private_protocol(monkeypa
             "authorization_source",
             "evidence",
         ]
+        preference_contract = protocol["next_actions"][0]["effective_preferences"]
+        assert preference_contract["skill"] == "kb-cli"
+        assert preference_contract["operation"] == "review-display"
+        assert len(preference_contract["task_context_digest"]) == 64
+        assert preference_contract["allowed_effect"] == "explanation-density-only"
+        assert preference_contract["hard_display_cap"] == 3
         identity_action = protocol["next_actions"][1]
         assert identity_action == {
             "action": "collect_confirmation_identity",

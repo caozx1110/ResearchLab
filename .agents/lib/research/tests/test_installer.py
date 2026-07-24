@@ -4,6 +4,7 @@ import errno
 import json
 import os
 import pty
+import re
 import select
 import shutil
 import subprocess
@@ -38,6 +39,228 @@ def _run_dry_install(tmp_path: Path, *, no_managed_venv: bool = False) -> subpro
         capture_output=True,
         check=False,
     )
+
+
+def test_agent_plan_lists_exact_targets_and_writes_nothing(tmp_path: Path) -> None:
+    workspace = tmp_path / "agent-workspace"
+    workspace.mkdir()
+    home = tmp_path / "agent-home"
+    cache = tmp_path / "agent-pycache"
+    scratch = tmp_path / "agent-tmp"
+    for directory in (home, cache, scratch):
+        directory.mkdir()
+    result = subprocess.run(
+        [
+            "bash",
+            str(_project_root() / "install.sh"),
+            "--agent-plan",
+            "--all",
+            "--kb-on-path",
+            "--project",
+            str(workspace),
+            "--yes",
+        ],
+        cwd=_project_root(),
+        env={
+            **os.environ,
+            "HOME": str(home),
+            "PYTHONPYCACHEPREFIX": str(cache),
+            "TMPDIR": str(scratch),
+            "RESEARCH_PYTHON": "/bin/false",
+            "NO_COLOR": "1",
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "[dry-run]" in result.stdout
+    assert f"[dry-run] mkdir {workspace}/.agents/skills/kb-cli/scripts" in result.stdout
+    assert ".agents/skills/kb-cli/scripts/kb" in result.stdout
+    assert f"[agent-plan] write-managed-block {workspace}/CLAUDE.md" in result.stdout
+    assert f"[agent-plan] conditional-runtime-tree {workspace}/.venv" in result.stdout
+    target_lines = [
+        line
+        for line in result.stdout.splitlines()
+        if line.startswith(("[dry-run]", "[agent-plan]"))
+    ]
+    summary = re.search(r"预计受管目标：(\d+) 项", result.stdout)
+    assert summary is not None
+    assert int(summary.group(1)) == len(target_lines)
+    assert not any(workspace.iterdir())
+    assert not any(home.iterdir())
+    assert not any(cache.iterdir())
+    assert not any(scratch.iterdir())
+
+
+def test_agent_uninstall_plan_reports_managed_block_and_exact_count(tmp_path: Path) -> None:
+    workspace = tmp_path / "agent-uninstall-workspace"
+    installed = _run_copy_action(
+        tmp_path,
+        workspace,
+        action="install",
+        extra=("--claude",),
+    )
+    assert installed.returncode == 0, installed.stdout + installed.stderr
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(_project_root() / "install.sh"),
+            "uninstall",
+            "--agent-plan",
+            "--project",
+            str(workspace),
+            "--yes",
+        ],
+        cwd=_project_root(),
+        env={
+            **os.environ,
+            "HOME": str(tmp_path / "home"),
+            "RESEARCH_PYTHON": sys.executable,
+            "RESEARCH_NO_MANAGED_VENV": "1",
+            "NO_COLOR": "1",
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"[agent-plan] remove-managed-block {workspace}/CLAUDE.md" in result.stdout
+    assert f"[dry-run] rmdir {workspace}/.agents" in result.stdout
+    target_lines = [
+        line
+        for line in result.stdout.splitlines()
+        if line.startswith(("[dry-run]", "[agent-plan]"))
+    ]
+    summary = re.search(r"预计受管目标：(\d+) 项", result.stdout)
+    assert summary is not None
+    assert int(summary.group(1)) == len(target_lines)
+
+
+def test_installer_smoke_does_not_create_unplanned_bytecode(tmp_path: Path) -> None:
+    workspace = tmp_path / "bytecode-workspace"
+    workspace.mkdir()
+    home = tmp_path / "bytecode-home"
+    cache = tmp_path / "bytecode-cache"
+    home.mkdir()
+    cache.mkdir()
+    result = subprocess.run(
+        [
+            "bash",
+            str(_project_root() / "install.sh"),
+            "install",
+            "--all",
+            "--project",
+            str(workspace),
+            "--yes",
+        ],
+        cwd=_project_root(),
+        env={
+            **os.environ,
+            "HOME": str(home),
+            "PYTHONPYCACHEPREFIX": str(cache),
+            "RESEARCH_PYTHON": sys.executable,
+            "RESEARCH_NO_MANAGED_VENV": "1",
+            "RESEARCH_NO_PDF_BACKEND": "1",
+            "NO_COLOR": "1",
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not list((workspace / ".agents").rglob("__pycache__"))
+    assert not list((workspace / ".agents").rglob("*.pyc"))
+    assert not any(cache.iterdir())
+
+
+def test_project_install_rejects_symlinked_managed_parent(tmp_path: Path) -> None:
+    workspace = tmp_path / "symlink-parent-workspace"
+    outside = tmp_path / "outside-claude"
+    workspace.mkdir()
+    outside.mkdir()
+    (workspace / ".claude").symlink_to(outside, target_is_directory=True)
+
+    for plan_flag in (("--agent-plan",), ()):
+        result = subprocess.run(
+            [
+                "bash",
+                str(_project_root() / "install.sh"),
+                "install",
+                "--claude",
+                "--project",
+                str(workspace),
+                "--yes",
+                *plan_flag,
+            ],
+            cwd=_project_root(),
+            env={**os.environ, "RESEARCH_PYTHON": sys.executable, "NO_COLOR": "1"},
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert result.returncode == 1
+        assert not any(outside.iterdir())
+        assert not (workspace / ".agents").exists()
+        assert not (workspace / "AGENTS.md").exists()
+
+
+def test_system_agent_plan_lists_missing_parent_directories(tmp_path: Path) -> None:
+    home = tmp_path / "system-plan-home"
+    cache = tmp_path / "system-plan-cache"
+    scratch = tmp_path / "system-plan-tmp"
+    for directory in (home, cache, scratch):
+        directory.mkdir()
+    result = subprocess.run(
+        [
+            "bash",
+            str(_project_root() / "install.sh"),
+            "install",
+            "--agent-plan",
+            "--all",
+            "--system",
+            "--kb-on-path",
+            "--yes",
+        ],
+        cwd=_project_root(),
+        env={
+            **os.environ,
+            "HOME": str(home),
+            "PYTHONPYCACHEPREFIX": str(cache),
+            "TMPDIR": str(scratch),
+            "RESEARCH_PYTHON": sys.executable,
+            "RESEARCH_NO_MANAGED_VENV": "1",
+            "NO_COLOR": "1",
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    for directory in (
+        home / ".claude",
+        home / ".claude/skills",
+        home / ".codex",
+        home / ".codex/workspace-oss",
+        home / ".local",
+        home / ".local/bin",
+    ):
+        assert f"[agent-plan] mkdir {directory}" in result.stdout
+    target_lines = [
+        line
+        for line in result.stdout.splitlines()
+        if line.startswith(("[dry-run]", "[agent-plan]"))
+    ]
+    summary = re.search(r"预计受管目标：(\d+) 项", result.stdout)
+    assert summary is not None and int(summary.group(1)) == len(target_lines)
+    assert not any(home.iterdir())
+    assert not any(cache.iterdir())
+    assert not any(scratch.iterdir())
 
 
 def _run_pty_dialog(

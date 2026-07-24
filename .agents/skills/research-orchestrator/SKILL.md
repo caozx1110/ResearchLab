@@ -14,19 +14,25 @@ Use this skill to anchor work to a concrete research program.
 1. Create or reopen a program under `kb/programs/<program-id>/`.
 2. Keep `state.yaml` aligned with workflow counts and selected context.
 3. Persist `workflow/open-questions.yaml`, `workflow/evidence-requests.yaml`, `workflow/decision-log.md`, and `workflow/reporting-events.yaml`.
-4. Route source work to `source-intake`, analysis to analyst skills, experiments to `experiment-workbench`, and reports to `report-author`.
+4. Route source work to `source-intake`, external discovery to `literature-search`, cross-unit survey/taxonomy/trend/gap work to `literature-synthesizer`, due subscriptions to `research-monitor`, experiments to `experiment-workbench`, and reports to `report-author`.
 5. Keep user constraints and resource boundaries visible in the program state.
 6. Program writes are serialized per program; `attach-unit` also backfills the unit-side `program_ids`.
+7. Treat cross-program planning as an Agent judgement over a complete factual candidate snapshot. Scripts enumerate and validate; they never assign semantic value scores or choose a winner.
 
 ## Shared Contract
 
 - Program coordination artifacts are durable inputs for later reopen, not chat-only summaries.
-- Any promised resumable deliverable, such as a batch survey or technical roadmap, must be written into a program `next_actions` entry before the conversation says `kb next` can resume it. Persisted program actions outrank loose maintenance suggestions; completed units do not generate work merely because a refresh ran.
+- Any promised resumable deliverable, such as a batch survey or technical roadmap, must be written into a program `next_actions` entry before the conversation says `kb next` can resume it. Persisted program actions and loose maintenance suggestions are peer candidates for the Agent to compare; neither category has a fixed priority. Completed units do not generate work merely because a refresh ran.
 - Decision records require non-empty agent-authored canonical claims with verified evidence and stay `pending_user_confirmation` until the user explicitly confirms the current receipt. A call without claims only prepares `workflow/decision-fill.yaml` in `awaiting_agent_fill`; it does not append a decision, update `last_decision`, or emit a reportable decision event.
 - Public review routes an accepted decision to private `confirm-decision` with current-message authorization, or a rejected decision to private `reject-decision` without requiring a signature. Rejection changes the canonical decision and all of its claims to `rejected`, updates `last_decision`, and never creates a confirmed reporting event.
 - Pending and confirmed decision events both bind the canonical decision subject, claim ids, content digest, and verification receipt. Report consumers must resolve that binding; an event name or `confirmation_status` string cannot manufacture trust.
 - `report-author` should read from `workflow/reporting-events.yaml`, so important state changes must emit reporting events.
 - Script-generated timestamps are stored in UTC.
+- `kb next` is a pure read. If no current portfolio decision exists, or its candidate/state/preference binding is stale, request an Agent planning pass instead of falling back to a fixed priority rule.
+- A `PortfolioDecision` is Agent-filled and must bind `decision_id`, the current `candidate_snapshot_digest`, one or more `selected_action_ids`, non-empty `rationale`, `expected_information_gain`, `cost_and_risk`, a current `research-orchestrator + plan` effective `preference_selection_id`, and a timezone-aware `decided_at`. The script checks shape and current bindings only; it never grades the rationale.
+- Candidate snapshots contain every legal persisted next action plus open evidence requests, open questions, ready Agent work, human gates, loose-unit maintenance, and currently due monitor subscriptions. `blocking`, declared priority, and due time are facts for the Agent, not an automatic winner. Terminal programs produce no program candidates.
+- Portfolio history is append-only. State, evidence, unit content, candidate membership, or effective-preference changes make the latest bound decision stale and require the Agent to plan again.
+- A human gate is never safe to continue automatically. A planning choice that itself asserts a research winner, baseline, idea, causal conclusion, or other judgement must reference a verified program decision and continue through the existing user-confirmation gate; portfolio planning cannot confirm it.
 
 ## Commands
 
@@ -48,6 +54,9 @@ ${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchest
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py status --program-id example-program
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py dashboard --limit 10
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py next --limit 5
+${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py prepare-next-selection --json
+${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py verify-next-selection --selection-file /tmp/portfolio-decision.yaml --json
+${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py record-next-selection --selection-file /tmp/portfolio-decision.yaml
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py route --task "分析新论文是否值得细读"
 ```
 

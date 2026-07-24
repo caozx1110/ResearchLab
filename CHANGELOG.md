@@ -4,7 +4,37 @@ All notable changes to this project will be documented here. The format follows 
 
 ## [Unreleased]
 
-The bundle currently declares **`0.2.0-rc.5`**. Its complete 1,089-test local suite and current installed-copy validation pass after the provider-neutral literature-search rebuild and three-agent adversarial review. The candidate is not a stable release or GA, has not been tagged or published, and carries no compatibility or response-time SLA. Real-source/Obsidian acceptance and a green hosted Linux/macOS CI matrix remain prerequisites for a release tag.
+The bundle currently declares **`0.2.0-rc.6`**. Its complete local suite, targeted R6 regression suites, and current 20-skill installed-copy lifecycle pass. The candidate is not a stable release or GA, has not been tagged or published, and carries no compatibility or response-time SLA. Real-source/Obsidian acceptance and a green hosted Linux/macOS CI matrix remain prerequisites for a release tag.
+
+## [0.2.0-rc.6] - Unreleased
+
+### Added
+
+- Agent-authored portfolio decisions for multi-program `kb next`, with complete candidate snapshots, task-bound preference receipts, and no rule-computed semantic winner.
+- A single canonical preference system with per-skill eligibility allowlists, Agent-selected task subsets, hard-preference enforcement, source/task staleness, and privacy-bounded receipts.
+- No-plugin Obsidian review sheets for up to three confirm/reject/defer decisions, preview-digest authorization, and one cross-owner root transaction.
+- Provider-neutral `research-monitor` subscriptions and frozen run receipts for literature tracking, survey freshness, and unit rechecks.
+- Append-only multi-reviewer screening and adjudication ledgers for systematic literature search.
+- An installer `--agent-plan` mode that performs no writes, lists all durable parent/file/link/managed-block/delete/rmdir targets, and explicitly bounds a conditional dependency-managed runtime tree for a GitHub-link installation workflow.
+
+### Changed
+
+- `kb next` now requires a current Agent `PortfolioDecision`; only one explicitly selected safe action can be auto-executed, while multiple selections require Agent dispatch.
+- Survey and literature-search phrases have complete, longest-match routing; `research-navigator` remains an optional development projection helper rather than a formal product entrypoint.
+- Literature discovery remains runtime-Agent-led and provider-neutral. OpenAlex is retained only as a read-only legacy identity migration shape, never as a runtime retrieval source.
+- Multi-reviewer protocols enforce canonical phase order, immutable decision digests, actor-specific adjudication, and append-only pending-to-resolved convergence.
+- Monitor completion binds the frozen task, entire run receipt, literature stage bytes, survey bytes, and the exact unit-recheck set.
+- Reporting, synthesis, method, experiment, review, literature, and orchestration consumers now receive only their validated effective preference view.
+- Existing root `AGENTS.md` prose continues to be preserved through the established marker-scoped managed-block contract; the GitHub-link installation guide now states the same behavior.
+
+### Security
+
+- Effective-preference receipts reject secrets, credentials, URLs, absolute paths, multiline content, and high-entropy payloads, and cannot be replayed across tasks.
+- Obsidian batch apply requires current-message authorization for the complete preview, rolls back canonical and derived cache targets together, and revalidates under lock.
+- Review registries and editable sheets use component-by-component no-follow directory handles, preventing intermediate-directory symlink or rename swaps from redirecting access outside the workspace.
+- Literature reviewer ledgers and monitor receipts are revalidated from persisted bytes before resume or completion; stale or tampered bindings fail closed.
+- Late namespace-renames during review registry writes restore or remove only the exact inode created by the operation, and reviewer decisions cannot regress from full-text screening to an earlier phase.
+- Agent install plans suppress Python bytecode and temporary managed-block writes; public Obsidian batch completion suppresses internal checkpoint labels and commit hashes.
 
 ## [0.2.0-rc.5] - Unreleased
 

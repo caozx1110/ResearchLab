@@ -5,6 +5,8 @@ description: 负责跨 paper / repo / dataset / blog / idea 的 evidence-first s
 
 # Literature Synthesizer
 
+开始 survey/review/taxonomy 前遵循 workspace 统一 task-scoped preference 合同：只接收本 skill/operation allowlist 中由 Agent 选中的 effective subset，并绑定当前 synthesis task digest。未选中的软偏好不得静默改变 selection、taxonomy 或写作口径；hard constraints 仍必须执行。
+
 当任务是在多个知识单元之间形成综述、趋势、taxonomy、topic map 或 pool review，而不是分析单个 source 时，使用这个 skill。
 
 ## 核心边界

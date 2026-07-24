@@ -187,6 +187,48 @@ def test_discuss_verify_accepts_verbatim_evidence_and_persists_one_conclusion(tm
         )
 
 
+def test_discuss_confirm_cannot_forge_missing_authorization_source(tmp_path: Path, monkeypatch) -> None:
+    idea = _load_idea_module()
+    idea_id, source_id = _setup_records(tmp_path, idea)
+    assert _run(idea, monkeypatch, "discuss", "--id", idea_id, "--phase", "prepare") == 0
+    unit_root = record_path(tmp_path, "idea", idea_id).parent
+    fill_path = unit_root / "discussion-fill.yaml"
+    write_yaml_if_changed(
+        fill_path,
+        _filled_scaffold(fill_path, source_id, "Transfer failed when the visual domain changed abruptly."),
+    )
+    assert _run(idea, monkeypatch, "discuss", "--id", idea_id, "--phase", "verify") == 0
+    sidecar_path = unit_root / "discussion-judgements.yaml"
+    judgement = load_yaml(sidecar_path)["items"][0]
+    expected = judgement_snapshot_binding(
+        judgement,
+        owner="idea-workbench",
+        path=sidecar_path.relative_to(tmp_path).as_posix(),
+    )
+
+    with pytest.raises(SystemExit, match="authorization_source=user_message"):
+        _run(
+            idea,
+            monkeypatch,
+            "discuss",
+            "--id",
+            idea_id,
+            "--phase",
+            "confirm",
+            "--conclusion-id",
+            judgement["id"],
+            "--confirmed-by",
+            "Human Reviewer",
+            "--evidence",
+            "discussion evidence reviewed",
+            "--user-authorization",
+            "I confirm this discussion conclusion.",
+            "--expected-snapshot",
+            json.dumps(expected),
+        )
+    assert load_yaml(sidecar_path)["items"][0]["confirmation_status"] == "pending_user_confirmation"
+
+
 def test_discuss_reject_closes_verified_side_judgement_without_human_signature(tmp_path: Path, monkeypatch) -> None:
     idea = _load_idea_module()
     idea_id, source_id = _setup_records(tmp_path, idea)

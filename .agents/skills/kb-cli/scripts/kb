@@ -3,6 +3,10 @@ from __future__ import annotations
 
 import argparse
 import calendar
+import contextlib
+import hashlib
+import importlib.util
+import io
 import json
 import os
 import re
@@ -37,6 +41,7 @@ from research.core import (
     CLAIM_CONFIRMATION_VALUES,
     confirmation_track,
     confirmation_claims,
+    checkpoint_and_report,
     config_root,
     default_confirmed_by,
     default_runtime_preferences,
@@ -53,6 +58,15 @@ from research.core import (
 )
 from research.sources import UnsafeLocalSourceError, validate_local_source
 from research.judgements import discover_pending_judgements, judgement_snapshot_binding
+from research.review_batches import (
+    ReviewBatchError,
+    consume_obsidian_review_batch,
+    create_obsidian_review_batch,
+    obsidian_review_batch_runtime_targets,
+    preflight_obsidian_review_batch,
+    preview_obsidian_review_batch,
+)
+from research.journal import mutation_transaction
 from research import updater
 from research.obsidian import obsidian_projection_status, update_obsidian_projection
 
@@ -122,6 +136,7 @@ REVIEW_OWNER_SCRIPTS = {
     "idea-workbench": owner_script("idea-workbench", "idea"),
     "method-designer": owner_script("method-designer", "method"),
 }
+_REVIEW_OWNER_MODULES: dict[str, object] = {}
 
 
 @dataclass(frozen=True)
@@ -905,7 +920,13 @@ def forward_command(
     extra_env: Mapping[str, str] | None = None,
 ) -> CommandResult:
     argv = build_child_argv(root, relative_script, args)
-    env = {**os.environ, "RESEARCH_PROJECT_ROOT": str(root)}
+    env = {
+        **os.environ,
+        "RESEARCH_PROJECT_ROOT": str(root),
+        # A read such as `kb next` must not dirty an installed workspace merely
+        # because a newly introduced owner module has not been imported before.
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
     if extra_env:
         env.update({str(key): str(value) for key, value in extra_env.items()})
     completed = subprocess.run(argv, cwd=root, env=env, text=True, capture_output=True, check=False)
@@ -1336,6 +1357,70 @@ def handle_next(args: argparse.Namespace, root: Path) -> int:
         print("暂时无法判断下一步；详细诊断已保留给 Agent。", file=sys.stderr)
         set_protocol_status("error", reason="invalid orchestrator protocol")
         return 1
+    planning_required = bool(payload.get("planning_required")) if isinstance(payload, dict) else False
+    if planning_required:
+        snapshot = payload.get("candidate_snapshot") if isinstance(payload, dict) else None
+        if not isinstance(snapshot, dict):
+            print("暂时无法判断下一步；详细诊断已保留给 Agent。", file=sys.stderr)
+            set_protocol_status("error", reason="missing portfolio candidate snapshot")
+            return 1
+        raw_candidates = snapshot.get("candidates")
+        candidates = (
+            [dict(item) for item in raw_candidates if isinstance(item, dict)]
+            if isinstance(raw_candidates, list)
+            else []
+        )
+        has_records = bool(payload.get("has_records"))
+        fill_template = payload.get("portfolio_decision_fill") if isinstance(payload, dict) else None
+        if not isinstance(fill_template, dict):
+            fill_template = {
+                "decision_id": "",
+                "candidate_snapshot_digest": str(snapshot.get("candidate_snapshot_digest") or ""),
+                "selected_action_ids": [],
+                "rationale": "",
+                "expected_information_gain": "",
+                "cost_and_risk": "",
+                "preference_selection_id": "",
+                "decision_scope": "procedural_planning",
+                "program_decision_ids": [],
+                "decided_at": "",
+            }
+        if candidates:
+            set_protocol_status(
+                "agent_action_required",
+                has_records=has_records,
+                candidate_count=len(candidates),
+                candidate_snapshot=snapshot,
+                prior_portfolio_decision=payload.get("portfolio_decision"),
+            )
+            add_agent_action(
+                "plan_portfolio_next",
+                owner_skill="research-orchestrator",
+                operation="plan",
+                candidate_snapshot=snapshot,
+                portfolio_decision_fill=fill_template,
+                effective_preferences={
+                    "skill": "research-orchestrator",
+                    "operation": "plan",
+                    "task_context_digest": str(snapshot.get("candidate_snapshot_digest") or ""),
+                    "must_record_before_decision": True,
+                },
+                required_decision_fields=list(fill_template),
+                private_owner_contract={
+                    "prepare": "prepare-next-selection",
+                    "verify": "verify-next-selection",
+                    "record": "record-next-selection",
+                    "complete_in_current_turn": True,
+                },
+            )
+            print(f"Agent 需要比较当前 {len(candidates)} 项可行行动，再说明为什么选择下一步。")
+        else:
+            set_protocol_status("completed", has_records=has_records, candidate_count=0)
+            if has_records:
+                print("知识库已有资料，但目前没有待处理事项。")
+            else:
+                print("知识库还是空的。请告诉我一篇论文、一个代码仓或一篇博客的来源，或使用 kb ingest 添加资料。")
+        return 0
     raw_items = payload.get("items") if isinstance(payload, dict) else []
     items = [dict(item) for item in raw_items if isinstance(item, dict)] if isinstance(raw_items, list) else []
     has_records = bool(payload.get("has_records")) if isinstance(payload, dict) else False
@@ -2815,6 +2900,24 @@ def print_review_item(record: dict, projection: Mapping[str, object], root: Path
             print(f"    另有 {extra_count} 条已核验证据。")
 
 
+def _obsidian_review_display(
+    record: Mapping[str, object],
+    projection: Mapping[str, object],
+    root: Path,
+) -> dict[str, object]:
+    """Build the already-sanitized, human-visible part of an editable sheet."""
+    raw_kind = str(record.get("kind") or "")
+    kind_label = PUBLIC_KIND_LABELS.get(raw_kind, _SIDE_JUDGEMENT_KIND_LABELS.get(raw_kind, "知识条目"))
+    title = _public_display_text(record.get("title") or "-", root, "标题需由 Agent 安全解释", 160)
+    return {
+        "kind_label": kind_label,
+        "title": title,
+        "fact_summary": str(projection.get("fact_summary") or ""),
+        "substance": list(projection.get("substance") or []),
+        "claims": list(projection.get("claims") or []),
+    }
+
+
 def build_review_apply_commands(
     root: Path,
     confirm_ids: Sequence[str],
@@ -2996,7 +3099,7 @@ def _gc_review_snapshots_locked(snapshot_root: Path, *, now: float) -> None:
             terminal_at = _review_timestamp_epoch(payload.get("expired_at"))
         if terminal_at is not None and now >= terminal_at + _REVIEW_SNAPSHOT_TOMBSTONE_GRACE_SECONDS:
             try:
-                metadata = path.stat(follow_symlinks=False)
+                metadata = path.lstat()
                 if stat.S_ISREG(metadata.st_mode):
                     path.unlink()
             except OSError:
@@ -3220,11 +3323,308 @@ def _review_apply_failure_message(code: str) -> str:
         "already_applied": "这条拍板已经应用过；请重新运行 kb review 查看剩余内容。",
         "expired": "这份待确认清单已经过期；请重新运行 kb review 获取当前内容。",
         "stale_content": "待确认内容已经更新，这次拍板没有应用；请重新运行 kb review 查看最新内容。",
+        "authorization_stale": "Obsidian 勾选与刚才展示的预览已经不同；没有应用任何决定，请重新预览后再授权。",
         "tampered_or_unknown": "无法验证这份待确认清单；请重新运行 kb review 获取新的安全清单。",
         "invalid_decision": "这次拍板不在刚才展示的范围内；请重新运行 kb review 后再决定。",
         "missing_confirmation_context": "确认所需的真实署名或当前授权还不完整；补充后请重新运行 kb review。",
+        "sheet_tampered": "Obsidian 待确认表除勾选框外发生了变化；没有应用任何决定，请重新生成待确认表。",
+        "unsafe_display": "有内容不适合安全写入 Obsidian 待确认表；请先让 Agent 安全解释。",
+        "invalid_batch": "这份 Obsidian 待确认表不完整；请重新运行 kb review。",
     }
     return messages.get(code, "这次拍板没有完整应用；请重新运行 kb review 查看当前状态。")
+
+
+def _obsidian_batch_decision_summary(
+    root: Path,
+    review_items: Sequence[Mapping[str, object]],
+    decisions: Sequence[Mapping[str, object]],
+) -> list[dict[str, str]]:
+    by_ref = {
+        _review_subject_ref(item.get("subject", {})): item
+        for item in review_items
+    }
+    summaries: list[dict[str, str]] = []
+    labels = {"confirm": "确认", "reject": "拒绝", "defer": "暂缓"}
+    for decision in decisions:
+        subject = decision.get("subject") if isinstance(decision, Mapping) else {}
+        subject = subject if isinstance(subject, Mapping) else {}
+        item = by_ref.get(_review_subject_ref(subject), {})
+        display = item.get("display") if isinstance(item, Mapping) else {}
+        display = display if isinstance(display, Mapping) else {}
+        raw_kind = str(display.get("kind") or subject.get("kind") or "")
+        summaries.append(
+            {
+                "decision": str(decision.get("decision") or ""),
+                "decision_label": labels.get(str(decision.get("decision") or ""), "暂缓"),
+                "kind_label": PUBLIC_KIND_LABELS.get(
+                    raw_kind,
+                    _SIDE_JUDGEMENT_KIND_LABELS.get(raw_kind, "判断"),
+                ),
+                "title": _public_display_text(
+                    display.get("title") or "",
+                    root,
+                    "标题需由 Agent 安全解释",
+                    160,
+                ),
+            }
+        )
+    return summaries
+
+
+def handle_obsidian_review_preview(args: argparse.Namespace, root: Path) -> int:
+    try:
+        preview = preview_obsidian_review_batch(root, str(args.preview_obsidian_batch or ""))
+    except ReviewBatchError as exc:
+        set_protocol_status("agent_action_required", review_apply_error=exc.code)
+        print(_review_apply_failure_message(exc.code), file=sys.stderr)
+        return 2
+    summaries = _obsidian_batch_decision_summary(root, preview.review_items, preview.decisions)
+    set_protocol_status(
+        "needs_user_authorization",
+        obsidian_review_count=len(summaries),
+        obsidian_review_confirm_count=sum(item["decision"] == "confirm" for item in summaries),
+        obsidian_review_reject_count=sum(item["decision"] == "reject" for item in summaries),
+        obsidian_review_defer_count=sum(item["decision"] == "defer" for item in summaries),
+    )
+    add_agent_action(
+        "present_obsidian_review_diff",
+        decisions=summaries,
+        apply={
+            "verb": "review",
+            "mode": "obsidian-batch-atomic",
+            "batch_ref": preview.batch_ref,
+            "expected_preview_digest": preview.decision_digest,
+            "requires_current_user_authorization": True,
+        },
+    )
+    print("已读取 Obsidian 中的勾选；下面是准备同步的决定草稿：")
+    for item in summaries:
+        print(f"- {item['decision_label']}{item['kind_label']}「{item['title']}」")
+    print("这些勾选尚未修改知识库。请核对后用自然语言明确授权 Agent 按以上决定同步。")
+    return 0
+
+
+def _review_owner_module(root: Path, owner: str) -> object:
+    cached = _REVIEW_OWNER_MODULES.get(owner)
+    if cached is not None:
+        return cached
+    relative = REVIEW_OWNER_SCRIPTS.get(owner)
+    if relative is None:
+        raise ValueError("review owner is unsupported")
+    script_path = (DEFAULT_PROJECT_ROOT / relative).resolve()
+    expected_root = (DEFAULT_PROJECT_ROOT / ".agents" / "skills").resolve()
+    try:
+        script_path.relative_to(expected_root)
+    except ValueError as exc:
+        raise ValueError("review owner script escaped the skill tree") from exc
+    spec = importlib.util.spec_from_file_location(f"kb_review_owner_{owner.replace('-', '_')}", script_path)
+    if spec is None or spec.loader is None:
+        raise ValueError("review owner integration is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    if not callable(getattr(module, "prepare_review_batch_decision", None)) or not callable(
+        getattr(module, "apply_review_batch_decision", None)
+    ):
+        raise ValueError("review owner integration is incomplete")
+    _REVIEW_OWNER_MODULES[owner] = module
+    return module
+
+
+def _review_batch_owner_plan(
+    root: Path,
+    item: Mapping[str, object],
+    decision: str,
+    *,
+    actor: str,
+    evidence: list[str],
+    user_authorization: str,
+    authorization_source: str,
+    rejection_reason: str,
+) -> tuple[object, dict[str, object]]:
+    route = item.get("confirm_route" if decision == "confirm" else "reject_route")
+    route = route if isinstance(route, Mapping) else {}
+    owner = str(route.get("owner") or "")
+    module = _review_owner_module(root, owner)
+    plan = module.prepare_review_batch_decision(
+        root,
+        dict(item),
+        decision,
+        actor=actor,
+        evidence=evidence,
+        user_authorization=user_authorization,
+        authorization_source=authorization_source,
+        rejection_reason=rejection_reason,
+    )
+    if not isinstance(plan, dict) or plan.get("owner") != owner or plan.get("decision") != decision:
+        raise ValueError("review owner returned an invalid plan")
+    raw_targets = plan.get("target_paths")
+    if not isinstance(raw_targets, list) or not raw_targets:
+        raise ValueError("review owner returned no exact targets")
+    kb = (root / "kb").resolve()
+    targets: list[Path] = []
+    for raw_target in raw_targets:
+        target = Path(raw_target).resolve()
+        try:
+            target.relative_to(kb)
+        except ValueError as exc:
+            raise ValueError("review owner target escaped kb") from exc
+        targets.append(target)
+    plan["target_paths"] = sorted(set(targets), key=lambda path: path.as_posix())
+    return module, plan
+
+
+def _review_plan_identity(plan: Mapping[str, object]) -> tuple[tuple[str, str], ...]:
+    normalized: list[tuple[str, str]] = []
+    for key, value in plan.items():
+        if key == "target_paths":
+            normalized.append((key, "|".join(Path(path).as_posix() for path in value)))
+        else:
+            normalized.append((str(key), json.dumps(value, ensure_ascii=False, sort_keys=True)))
+    return tuple(sorted(normalized))
+
+
+def handle_obsidian_review_apply(args: argparse.Namespace, root: Path) -> int:
+    actor = default_confirmed_by(root)
+    authorization = str(args.user_authorization or "").strip()
+    expected_preview_digest = str(getattr(args, "expected_preview_digest", "") or "").strip()
+    evidence = [str(item).strip() for item in args.decision_evidence if str(item).strip()]
+    rejection_reason = str(args.rejection_reason or "").strip()
+    try:
+        preflight = preflight_obsidian_review_batch(
+            root,
+            str(args.apply_obsidian_batch or ""),
+            current_item_resolver=lambda subject: _current_review_item(root, subject),
+        )
+        if not expected_preview_digest or preflight.preview.decision_digest != expected_preview_digest:
+            raise ReviewBatchError(
+                "authorization_stale",
+                "the authorized preview no longer matches the review decisions",
+            )
+        if not authorization:
+            raise ReviewBatchError(
+                "missing_confirmation_context",
+                "every review batch apply requires current-message user authorization",
+            )
+        confirm_count = sum(item.get("decision") == "confirm" for item in preflight.preview.decisions)
+        if confirm_count:
+            if not actor or is_ai_signer(actor) or not authorization or not evidence:
+                raise ReviewBatchError(
+                    "missing_confirmation_context",
+                    "confirmation requires a real signer, current authorization, and evidence",
+                )
+        planned: list[tuple[object, dict[str, object], dict[str, object], str]] = []
+        canonical_targets: list[Path] = []
+        for current_item, chosen in zip(preflight.current_items, preflight.preview.decisions):
+            decision = str(chosen.get("decision") or "")
+            if decision == "defer":
+                continue
+            module, plan = _review_batch_owner_plan(
+                root,
+                current_item,
+                decision,
+                actor=actor,
+                evidence=evidence,
+                user_authorization=authorization,
+                authorization_source="user_message",
+                rejection_reason=rejection_reason,
+            )
+            canonical_targets.extend(plan["target_paths"])
+            planned.append((module, plan, dict(current_item), decision))
+        runtime_targets = list(obsidian_review_batch_runtime_targets(root, preflight.preview.batch_ref))
+        all_targets = sorted(set(canonical_targets + runtime_targets), key=lambda path: path.as_posix())
+    except ReviewBatchError as exc:
+        set_protocol_status("agent_action_required", review_apply_error=exc.code)
+        print(_review_apply_failure_message(exc.code), file=sys.stderr)
+        return 2
+    except ValueError:
+        set_protocol_status("agent_action_required", review_apply_error="stale_content")
+        print(_review_apply_failure_message("stale_content"), file=sys.stderr)
+        return 2
+    except (OSError, RuntimeError, SystemExit, TypeError, ValueError):
+        set_protocol_status("agent_action_required", review_apply_error="stale_content")
+        print(_review_apply_failure_message("stale_content"), file=sys.stderr)
+        return 2
+
+    try:
+        with mutation_transaction(root, "kb-cli:obsidian-review-batch", all_targets):
+            locked = preflight_obsidian_review_batch(
+                root,
+                preflight.preview.batch_ref,
+                current_item_resolver=lambda subject: _current_review_item(root, subject),
+            )
+            if (
+                locked.preview.decision_digest != expected_preview_digest
+                or locked.preview.decisions != preflight.preview.decisions
+            ):
+                raise ReviewBatchError("authorization_stale", "review decisions changed after authorization")
+            locked_plans: list[tuple[object, dict[str, object], dict[str, object], str]] = []
+            for current_item, chosen in zip(locked.current_items, locked.preview.decisions):
+                decision = str(chosen.get("decision") or "")
+                if decision == "defer":
+                    continue
+                module, plan = _review_batch_owner_plan(
+                    root,
+                    current_item,
+                    decision,
+                    actor=actor,
+                    evidence=evidence,
+                    user_authorization=authorization,
+                    authorization_source="user_message",
+                    rejection_reason=rejection_reason,
+                )
+                locked_plans.append((module, plan, dict(current_item), decision))
+            if [_review_plan_identity(item[1]) for item in locked_plans] != [
+                _review_plan_identity(item[1]) for item in planned
+            ]:
+                raise ReviewBatchError("stale_content", "review owner targets changed while applying")
+            for module, _plan, current_item, decision in locked_plans:
+                module.apply_review_batch_decision(
+                    root,
+                    current_item,
+                    decision,
+                    actor=actor,
+                    evidence=evidence,
+                    user_authorization=authorization,
+                    authorization_source="user_message",
+                    rejection_reason=rejection_reason,
+                )
+            consume_obsidian_review_batch(root, locked.preview.batch_ref)
+    except ReviewBatchError as exc:
+        set_protocol_status("agent_action_required", review_apply_error=exc.code)
+        print(_review_apply_failure_message(exc.code), file=sys.stderr)
+        return 2
+    except (OSError, RuntimeError, SystemExit, TypeError, ValueError):
+        set_protocol_status("agent_action_required", review_apply_error="stale_content")
+        print(_review_apply_failure_message("stale_content"), file=sys.stderr)
+        return 2
+
+    exact_checkpoint_targets = sorted(set(canonical_targets), key=lambda path: path.as_posix())
+    if exact_checkpoint_targets:
+        # The commit id is an internal recovery detail.  This public owner path
+        # reports only the atomic batch result.
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                checkpoint_and_report(
+                    root,
+                    trigger="milestone",
+                    message=f"milestone: apply Obsidian review batch ({len(planned)} decisions)",
+                    target_paths=exact_checkpoint_targets,
+                )
+        except BaseException:
+            set_protocol_status(
+                "error",
+                checkpoint_status="failed_after_business_apply",
+                business_state="applied_before_checkpoint",
+            )
+            raise
+    summaries = _obsidian_batch_decision_summary(root, preflight.preview.review_items, preflight.preview.decisions)
+    set_protocol_status(
+        "completed",
+        obsidian_review_applied_count=len(planned),
+        obsidian_review_deferred_count=sum(item["decision"] == "defer" for item in summaries),
+    )
+    print("Obsidian 中的决定已作为一个整体同步；所有项目均成功，待确认表已安全消费。")
+    return 0
 
 
 def handle_review_apply(args: argparse.Namespace, root: Path) -> int:
@@ -3314,6 +3714,10 @@ def handle_review_apply(args: argparse.Namespace, root: Path) -> int:
 
 
 def handle_review(args: argparse.Namespace, root: Path) -> int:
+    if str(getattr(args, "preview_obsidian_batch", "") or "").strip():
+        return handle_obsidian_review_preview(args, root)
+    if str(getattr(args, "apply_obsidian_batch", "") or "").strip():
+        return handle_obsidian_review_apply(args, root)
     if str(getattr(args, "apply_snapshot", "") or "").strip():
         return handle_review_apply(args, root)
     try:
@@ -3413,17 +3817,52 @@ def handle_review(args: argparse.Namespace, root: Path) -> int:
             )
             for record in displayed
         ]
+        review_task_digest = hashlib.sha256(
+            json.dumps(review_items, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
         snapshot_token = _store_review_snapshot(
             root,
             str(getattr(args, "agent_protocol", "") or ""),
             review_items,
         ) if _ACTIVE_PROTOCOL is not None else ""
+        obsidian_batch: dict[str, object] | None = None
+        if bool(getattr(args, "obsidian_export", False)):
+            if not snapshot_token:
+                set_protocol_status("agent_action_required", review_apply_error="invalid_batch")
+                print("需要由 Agent 建立安全待确认表；请重新运行 kb review。", file=sys.stderr)
+                return 2
+            try:
+                obsidian_batch = create_obsidian_review_batch(
+                    root,
+                    source_snapshot_token=snapshot_token,
+                    review_items=review_items,
+                    display_items=[
+                        _obsidian_review_display(
+                            record,
+                            projection_by_subject[(str(record.get("kind") or ""), str(record.get("id") or ""))],
+                            root,
+                        )
+                        for record in displayed
+                    ],
+                )
+            except ReviewBatchError as exc:
+                set_protocol_status("agent_action_required", review_apply_error=exc.code)
+                print(_review_apply_failure_message(exc.code), file=sys.stderr)
+                return 2
         add_agent_action(
             "present_review_items",
             records=displayed,
             review_items=review_items,
             decision_fields=["decision", "user_authorization", "authorization_source", "evidence"],
             authorization_source="user_message",
+            effective_preferences={
+                "skill": "kb-cli",
+                "operation": "review-display",
+                "task_context_digest": review_task_digest,
+                "must_record_before_presentation": True,
+                "allowed_effect": "explanation-density-only",
+                "hard_display_cap": _PUBLIC_REVIEW_LIMIT,
+            },
             apply={
                 "verb": "review",
                 "mode": "snapshot-bound",
@@ -3433,6 +3872,14 @@ def handle_review(args: argparse.Namespace, root: Path) -> int:
                 "snapshot_token": snapshot_token,
             },
         )
+        if obsidian_batch is not None:
+            add_agent_action(
+                "open_obsidian_review_sheet",
+                sheet_path=obsidian_batch["sheet_relative_path"],
+                batch_ref=obsidian_batch["batch_ref"],
+                expires_at=obsidian_batch["expires_at"],
+                then="preview_obsidian_review_diff",
+            )
         if confirmation_identity_required:
             add_agent_action(
                 "collect_confirmation_identity",
@@ -3460,6 +3907,8 @@ def handle_review(args: argparse.Namespace, root: Path) -> int:
         if remaining_count:
             print(f"另有 {remaining_count} 条已准备好的内容暂未展开；处理这批后可继续查看。")
         print("以上待确认内容已经过当前流程核验；以上内容需要你用自然语言确认或拒绝，在你拍板前不会写成已确认结论。")
+        if obsidian_batch is not None:
+            print("已在 Obsidian 的人工批注区生成可编辑待确认表；勾选后请回到对话中要求 Agent 同步。")
         if confirmation_identity_required:
             print("如果你选择确认，确认前还需要你的真实署名。")
         if structurally_blocked:
@@ -3555,6 +4004,10 @@ def register_ingest(subparsers: argparse._SubParsersAction[argparse.ArgumentPars
 def register_review(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     parser = subparsers.add_parser("review", help="查看确认收件箱并用自然语言拍板")
     parser.add_argument("fuzzy", nargs="?", metavar="<筛选词>", help="可选的资料类型或关键词")
+    parser.add_argument("--obsidian-export", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--preview-obsidian-batch", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--apply-obsidian-batch", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--expected-preview-digest", default="", help=argparse.SUPPRESS)
     parser.add_argument("--apply-snapshot", default="", help=argparse.SUPPRESS)
     parser.add_argument("--confirm-ref", action="append", default=[], help=argparse.SUPPRESS)
     parser.add_argument("--reject-ref", action="append", default=[], help=argparse.SUPPRESS)
@@ -3689,6 +4142,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     _ACTIVE_PROTOCOL = protocol
     _ACTIVE_PUBLIC_VERB = str(args.command or "")
     stopped: SystemExit | None = None
+    raised: BaseException | None = None
     exit_code = 0
     try:
         try:
@@ -3702,6 +4156,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if protocol.details is None:
                         protocol.details = {}
                     protocol.details["error"] = str(exc.code)
+        except BaseException as exc:
+            raised = exc
+            exit_code = 1
+            if protocol is not None:
+                protocol.status = "error"
+                if protocol.details is None:
+                    protocol.details = {}
+                protocol.details.setdefault("error_class", type(exc).__name__)
     finally:
         _ACTIVE_PROTOCOL = None
         _ACTIVE_PUBLIC_VERB = ""
@@ -3712,6 +4174,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             write_agent_protocol(root, str(args.agent_protocol), protocol)
     if stopped is not None:
         raise stopped
+    if raised is not None:
+        raise raised
     return exit_code
 
 

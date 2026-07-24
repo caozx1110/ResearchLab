@@ -125,6 +125,7 @@ usage() {
   section "其他选项"
   usage_option "--kb-on-path" "创建可在终端使用的 kb 快捷命令"
   usage_option "--dry-run" "只预览，不写入文件"
+  usage_option "--agent-plan" "供 Agent 审阅：零写并列出每个精确目标"
   usage_option "--force" "更新时覆盖已修改的受管文件"
   usage_option "--source DIR" "从指定源码目录更新"
   usage_option "--yes, --assume-yes" "交互运行时跳过执行前确认"
@@ -248,6 +249,7 @@ ACTION=install
 ACTION_FROM_SUBCOMMAND=0
 ACTION_EXPLICIT=0
 DRY_RUN=0
+AGENT_PLAN=0
 CONFIG_CLAUDE=0
 CONFIG_CODEX=0
 AGENT_FLAG_SET=0
@@ -266,6 +268,7 @@ KB_SHORTCUT_CREATED=0
 KB_SHORTCUT_AVAILABLE=0
 UPDATE_NO_CHANGES=0
 DRY_RUN_CHANGE_COUNT=0
+RUNTIME_BOOTSTRAP_NEEDED=0
 
 REPO_ROOT=$(script_dir)
 for arg in "$@"; do
@@ -276,6 +279,7 @@ for arg in "$@"; do
       ;;
   esac
 done
+
 [ -d "$REPO_ROOT/.agents/lib" ] || die "安装包不完整：缺少 .agents/lib"
 [ -d "$REPO_ROOT/.agents/skills" ] || die "安装包不完整：缺少 .agents/skills"
 [ -f "$REPO_ROOT/.agents/AGENTS.md" ] || die "安装包不完整：缺少 .agents/AGENTS.md"
@@ -301,6 +305,11 @@ while [ "$#" -gt 0 ]; do
       ;;
     --dry-run)
       DRY_RUN=1
+      shift
+      ;;
+    --agent-plan)
+      DRY_RUN=1
+      AGENT_PLAN=1
       shift
       ;;
     --uninstall)
@@ -372,6 +381,11 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+
+# Installer preflight and smoke imports are implementation details, not durable
+# workspace targets.  Suppress them for both planning and the matching apply so
+# an Agent plan does not omit a dynamic __pycache__ tree.
+export PYTHONDONTWRITEBYTECODE=1
 
 is_interactive_input() {
   [ -t 0 ] && [ -z "${CI:-}" ]
@@ -890,7 +904,11 @@ print_next_steps() {
 print_done() {
   if [ "$DRY_RUN" -eq 1 ]; then
     section "预览完成"
-    bullet "预计文件变更：$DRY_RUN_CHANGE_COUNT 项（详细路径已折叠）"
+    if [ "$AGENT_PLAN" -eq 1 ]; then
+      bullet "预计受管目标：$DRY_RUN_CHANGE_COUNT 项（含条件目标，均已在上方列出）"
+    else
+      bullet "预计文件变更：$DRY_RUN_CHANGE_COUNT 项（详细路径已折叠）"
+    fi
     ok "没有写入任何文件。"
     info "以上是计划内容；确认无误后再执行正式操作。"
     return 0
@@ -965,6 +983,7 @@ preflight_yaml() {
   if [ "${RESEARCH_NO_MANAGED_VENV:-}" = "1" ]; then
     die "已关闭自动运行环境，但所选 Python 缺少 PyYAML；请先安装 requirements.txt 中的依赖"
   fi
+  RUNTIME_BOOTSTRAP_NEEDED=1
   note "Python 依赖尚未就绪；首次使用时会自动准备，无需手动处理。" >&2
 }
 
@@ -999,26 +1018,6 @@ with path.open("rb") as handle:
 print(digest.hexdigest())
 PY
   fi
-}
-
-guard_agents_md_for_copy_install() {
-  local target expected actual_link actual_abs expected_abs
-  target="$WORKSPACE_ROOT/AGENTS.md"
-  [ -e "$target" ] || [ -L "$target" ] || return 0
-  expected="$REPO_ROOT/.agents/AGENTS.md"
-  if [ -L "$target" ]; then
-    actual_link=$(readlink "$target")
-    case $actual_link in
-      /*) actual_abs=$actual_link ;;
-      *) actual_abs=$WORKSPACE_ROOT/$actual_link ;;
-    esac
-    expected_abs=$(cd -P -- "$(dirname -- "$expected")" >/dev/null 2>&1 && pwd)/$(basename -- "$expected")
-    if [ "$(cd -P -- "$(dirname -- "$actual_abs")" >/dev/null 2>&1 && pwd 2>/dev/null || true)/$(basename -- "$actual_abs")" = "$expected_abs" ]; then
-      return 0
-    fi
-    die "$WORKSPACE_ROOT 中已有其他 AGENTS.md；请先移动或合并后再安装"
-  fi
-  die "$WORKSPACE_ROOT 中已有 AGENTS.md；请先移动或合并后再安装"
 }
 
 guard_copy_install_target() {
@@ -1091,6 +1090,9 @@ ws_sync() {
     if [ "$DRY_RUN" -eq 1 ]; then
       change_count=$(printf '%s\n' "$output" | awk '/^\[dry-run\]/ { count += 1 } END { print count + 0 }')
       DRY_RUN_CHANGE_COUNT=$((DRY_RUN_CHANGE_COUNT + change_count))
+      if [ "$AGENT_PLAN" -eq 1 ]; then
+        printf '%s\n' "$output" | awk '/^\[dry-run\]/'
+      fi
     else
       case "$action" in
         install) info "工作区文件已准备。" ;;
@@ -1167,9 +1169,97 @@ uninstall_workspace_copy() {
   [ "$had_manifest" -eq 1 ] && info "研究资料和本地运行环境已保留；这个工作区现在不再由安装器管理。"
 }
 
+guard_managed_directory_chain() {
+  local target=$1 base
+  case "$target" in
+    "$WORKSPACE_ROOT"|"$WORKSPACE_ROOT"/*) base=$WORKSPACE_ROOT ;;
+    "$HOME"|"$HOME"/*) base=$HOME ;;
+    *) die "受管目录超出安装边界，已停止" ;;
+  esac
+  python3 - "$base" "$target" <<'PY' >/dev/null 2>&1 || \
+    die "检测到受管目录路径包含符号链接或非目录组件，已停止"
+import os
+import stat
+import sys
+from pathlib import Path
+
+base = Path(sys.argv[1])
+target = Path(sys.argv[2])
+try:
+    relative = target.relative_to(base)
+except ValueError:
+    raise SystemExit(1)
+current = base
+for part in relative.parts:
+    current = current / part
+    try:
+        mode = os.lstat(current).st_mode
+    except FileNotFoundError:
+        continue
+    except OSError:
+        raise SystemExit(1)
+    if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+        raise SystemExit(1)
+PY
+}
+
+guard_selected_managed_parents() {
+  # Validate every selected integration directory before ws_sync performs the
+  # first copy. A later ensure_dir() check cannot prevent a half-install.
+  if [ "$CONFIG_CLAUDE" -eq 1 ]; then
+    if [ "$SCOPE" = "system" ]; then
+      guard_managed_directory_chain "$HOME/.claude/skills"
+    else
+      guard_managed_directory_chain "$WORKSPACE_ROOT/.claude"
+    fi
+  fi
+  if [ "$CONFIG_CODEX" -eq 1 ] && [ "$SCOPE" = "system" ]; then
+    guard_managed_directory_chain "$HOME/.codex/$INSTALL_NAME"
+    if [ -e "$HOME/.codex/skills" ] || [ -L "$HOME/.codex/skills" ]; then
+      guard_managed_directory_chain "$HOME/.codex/skills"
+    fi
+  fi
+  if [ "$KB_ON_PATH" -eq 1 ]; then
+    if [ "$SCOPE" = "system" ]; then
+      guard_managed_directory_chain "$HOME/.local/bin"
+    else
+      guard_managed_directory_chain "$WORKSPACE_ROOT/bin"
+    fi
+  fi
+}
+
 ensure_dir() {
+  local base missing_dir
+  guard_managed_directory_chain "$1"
+  if [ -d "$1" ] && [ ! -L "$1" ]; then
+    return 0
+  fi
   if [ "$DRY_RUN" -eq 1 ]; then
-    DRY_RUN_CHANGE_COUNT=$((DRY_RUN_CHANGE_COUNT + 1))
+    case "$1" in
+      "$WORKSPACE_ROOT"|"$WORKSPACE_ROOT"/*) base=$WORKSPACE_ROOT ;;
+      "$HOME"|"$HOME"/*) base=$HOME ;;
+      *) die "受管目录超出安装边界，已停止" ;;
+    esac
+    while IFS= read -r missing_dir; do
+      [ -n "$missing_dir" ] || continue
+      DRY_RUN_CHANGE_COUNT=$((DRY_RUN_CHANGE_COUNT + 1))
+      [ "$AGENT_PLAN" -eq 0 ] || printf '[agent-plan] mkdir %s\n' "$missing_dir"
+    done < <(python3 - "$base" "$1" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+base = Path(sys.argv[1])
+target = Path(sys.argv[2])
+current = base
+for part in target.relative_to(base).parts:
+    current = current / part
+    try:
+        os.lstat(current)
+    except FileNotFoundError:
+        print(current)
+PY
+)
   else
     mkdir -p "$1"
   fi
@@ -1177,6 +1267,7 @@ ensure_dir() {
 
 link_force() {
   local target=$1 link=$2 actual
+  guard_managed_directory_chain "$(dirname -- "$link")"
   if [ -e "$link" ] && [ ! -L "$link" ]; then
     warn "已有文件未覆盖：$link"
     INSTALL_INCOMPLETE=1
@@ -1193,6 +1284,7 @@ link_force() {
   fi
   if [ "$DRY_RUN" -eq 1 ]; then
     DRY_RUN_CHANGE_COUNT=$((DRY_RUN_CHANGE_COUNT + 1))
+    [ "$AGENT_PLAN" -eq 0 ] || printf '[agent-plan] symlink %s -> %s\n' "$link" "$target"
   else
     ln -sfn "$target" "$link"
   fi
@@ -1201,11 +1293,13 @@ link_force() {
 remove_symlink_if_matches() {
   local link=$1 expected=$2 expected_alt=${3:-}
   local actual
+  guard_managed_directory_chain "$(dirname -- "$link")"
   [ -L "$link" ] || return 0
   actual=$(readlink "$link")
   if [ "$actual" = "$expected" ] || { [ -n "$expected_alt" ] && [ "$actual" = "$expected_alt" ]; }; then
     if [ "$DRY_RUN" -eq 1 ]; then
       DRY_RUN_CHANGE_COUNT=$((DRY_RUN_CHANGE_COUNT + 1))
+      [ "$AGENT_PLAN" -eq 0 ] || printf '[agent-plan] remove-symlink %s\n' "$link"
     else
       rm "$link"
     fi
@@ -1217,7 +1311,13 @@ remove_symlink_if_matches() {
 
 write_managed_block() {
   local file=$1 block_file=$2 tmp_file
+  guard_managed_directory_chain "$(dirname -- "$file")"
   [ ! -L "$file" ] || die "检测到符号链接形式的 Claude 配置；为避免跟随或替换链接，已停止"
+  if [ "$AGENT_PLAN" -eq 1 ]; then
+    DRY_RUN_CHANGE_COUNT=$((DRY_RUN_CHANGE_COUNT + 1))
+    printf '[agent-plan] write-managed-block %s\n' "$file"
+    return 0
+  fi
   tmp_file=$(mktemp "${TMPDIR:-/tmp}/${INSTALL_NAME}.XXXXXX")
   if [ -f "$file" ]; then
     awk -v begin="$BEGIN_MARKER" -v end="$END_MARKER" -v block_file="$block_file" '
@@ -1262,8 +1362,24 @@ write_managed_block() {
 
 remove_managed_block() {
   local file=$1 tmp_file
+  guard_managed_directory_chain "$(dirname -- "$file")"
   [ ! -L "$file" ] || die "检测到符号链接形式的 Claude 配置；为避免跟随或替换链接，已停止"
   [ -f "$file" ] || return 0
+  if [ "$AGENT_PLAN" -eq 1 ]; then
+    if awk -v begin="$BEGIN_MARKER" -v end="$END_MARKER" '
+      $0 == begin { in_block = 1; removed = 1; next }
+      $0 == end { in_block = 0; next }
+      END { exit removed ? 0 : 2 }
+    ' "$file" >/dev/null; then
+      DRY_RUN_CHANGE_COUNT=$((DRY_RUN_CHANGE_COUNT + 1))
+      printf '[agent-plan] remove-managed-block %s\n' "$file"
+    else
+      local plan_status=$?
+      [ "$plan_status" -eq 2 ] && return 0
+      return "$plan_status"
+    fi
+    return 0
+  fi
   tmp_file=$(mktemp "${TMPDIR:-/tmp}/${INSTALL_NAME}.XXXXXX")
   awk -v begin="$BEGIN_MARKER" -v end="$END_MARKER" '
     $0 == begin { in_block = 1; removed = 1; next }
@@ -1313,18 +1429,18 @@ install_claude_project() {
   # so Claude can use an include block plus a relative skills symlink.
   if [ "$SELF_CONTAINED" -eq 1 ]; then
     link_target="../.agents/skills"
-    block_file=$(build_claude_block include "$WORKSPACE_ROOT")
+    [ "$AGENT_PLAN" -eq 1 ] || block_file=$(build_claude_block include "$WORKSPACE_ROOT")
   else
     link_target="$SKILLS_SRC"
-    block_file=$(build_claude_block copy "$WORKSPACE_ROOT")
+    [ "$AGENT_PLAN" -eq 1 ] || block_file=$(build_claude_block copy "$WORKSPACE_ROOT")
   fi
   link_force "$link_target" "$claude_dir/skills"
   if claude_links_to_workspace_agents "$WORKSPACE_ROOT/CLAUDE.md"; then
     : # The link already exposes AGENTS.md to Claude; adding @AGENTS.md would self-reference.
   else
-    write_managed_block "$WORKSPACE_ROOT/CLAUDE.md" "$block_file"
+    write_managed_block "$WORKSPACE_ROOT/CLAUDE.md" "${block_file:-}"
   fi
-  rm -f "$block_file"
+  [ -z "${block_file:-}" ] || rm -f "$block_file"
 }
 
 uninstall_claude_project() {
@@ -1352,9 +1468,9 @@ install_claude_system() {
     name=${skill##*/}
     link_force "$skill" "$HOME/.claude/skills/$name"
   done
-  block_file=$(build_claude_block copy "$HOME/.claude")
-  write_managed_block "$HOME/.claude/CLAUDE.md" "$block_file"
-  rm -f "$block_file"
+  [ "$AGENT_PLAN" -eq 1 ] || block_file=$(build_claude_block copy "$HOME/.claude")
+  write_managed_block "$HOME/.claude/CLAUDE.md" "${block_file:-}"
+  [ -z "${block_file:-}" ] || rm -f "$block_file"
   note "系统级配置完成后，每个项目仍需选择自己的研究工作区；详见安装指南。"
 }
 
@@ -1463,7 +1579,14 @@ uninstall_kb_on_path() {
 
 run_smoke() {
   local smoke_output
-  if [ "$DRY_RUN" -eq 1 ] || { [ "$ACTION" != "install" ] && [ "$ACTION" != "reinstall" ]; }; then
+  if [ "$DRY_RUN" -eq 1 ]; then
+    if [ "$AGENT_PLAN" -eq 1 ] && [ "$RUNTIME_BOOTSTRAP_NEEDED" -eq 1 ] && { [ "$ACTION" = "install" ] || [ "$ACTION" = "reinstall" ]; }; then
+      DRY_RUN_CHANGE_COUNT=$((DRY_RUN_CHANGE_COUNT + 1))
+      printf '[agent-plan] conditional-runtime-tree %s (dependency-managed contents)\n' "$WORKSPACE_ROOT/.venv"
+    fi
+    return 0
+  fi
+  if [ "$ACTION" != "install" ] && [ "$ACTION" != "reinstall" ]; then
     return 0
   fi
   section "安装检查"
@@ -1498,6 +1621,7 @@ confirm_plan
 if [ "$ACTION" != "uninstall" ]; then
   preflight_yaml
   guard_claude_project_target
+  guard_selected_managed_parents
 fi
 
 case "$ACTION" in

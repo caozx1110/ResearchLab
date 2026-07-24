@@ -39,6 +39,33 @@ def test_source_intake_routes_cover_new_source_tasks() -> None:
     assert module.ROUTE_HINTS["新论文"] == "source-intake"
 
 
+def test_survey_routes_cover_chinese_and_english_without_falling_into_paper_analysis() -> None:
+    module = _load_orchestrator_module()
+    for task in (
+        "做一份论文文献综述",
+        "build a systematic survey",
+        "systematic literature review of VLA",
+        "prepare a scoping review",
+        "meta-analysis of recent results",
+        "review recent papers on robotics",
+        "review of the literature",
+        "systematic mapping study",
+        "state-of-the-art review",
+        "整理相关工作",
+        "做一个元分析",
+        "完成证据综合",
+        "系统映射研究",
+        "整理 taxonomy 和趋势",
+    ):
+        assert module.route_task(task) == "literature-synthesizer"
+
+
+def test_literature_discovery_routes_to_literature_search_not_single_paper_analysis() -> None:
+    module = _load_orchestrator_module()
+    for task in ("找论文", "补相关工作", "literature search for VLA", "find papers on robot learning"):
+        assert module.route_task(task) == "literature-search"
+
+
 def test_orchestrator_confirm_command_uses_shared_helper() -> None:
     module = _load_orchestrator_module()
     record = {"kind": "experiment", "id": "e-run-12345678"}

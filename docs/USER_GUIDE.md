@@ -4,7 +4,7 @@
 
 它不是预装好的知识库。安装后，能力包与研究数据分开保存。AI 负责提取、整理、追踪和汇总；你负责判断、确认和拍板。
 
-当前候选版本是 **`0.2.0-rc.5`**。provider-neutral `literature-search` 重构与三路对抗复审后的完整 1,089 项本地测试和当前安装副本验收已全绿；SQLite 官方 HTML 真实入库和 Obsidian 1.12.7 阅读视图尚未针对 rc.5 重跑，仍在发布门中。它不是 stable 或 GA，也尚未 tag/publish。正式打发布 tag 前，仍须完成真实来源/Obsidian 验收并让 hosted Linux/macOS CI matrix 全绿；当前不承诺兼容性或响应时限 SLA。
+当前候选版本是 **`0.2.0-rc.6`**。Agent-led portfolio、任务绑定偏好、无插件多项 review、research-monitor、多 reviewer ledger 与 Agent 安装计划已经通过完整本地套件、R6 定向回归和当前 20-skill 安装副本生命周期。SQLite 官方 HTML 真实入库和 Obsidian 1.12.7 阅读视图尚未针对 rc.6 重跑，仍在发布门中。它不是 stable 或 GA，也尚未 tag/publish。正式打发布 tag 前，仍须完成真实来源/Obsidian 验收并让 hosted Linux/macOS CI matrix 全绿；当前不承诺兼容性或响应时限 SLA。
 
 ## 能力成熟度（按组件）
 
@@ -21,13 +21,14 @@
 | `knowledge-base-manager` | stable | 数据规范、证据、确认、精确恢复和索引治理；不负责理解研究材料。 |
 | `source-intake` | beta | 异构来源的暂存、去重、原始材料留存、完整 Markdown 阅读层和可重试失败。 |
 | `literature-search` | beta | Agent 使用当前可用检索能力做 provider-neutral 文献发现，持久保存查询、来源路径、初筛证据、覆盖、预算和停止依据；会先给你候选清单，只有你明确选中的文献才会入库。 |
+| `research-monitor` | beta | 保存定期关注目标、到期事实、冻结运行与有证据结果；不内置检索源、后台 daemon、定时器或插件。 |
 | `paper-analyst` | beta | 带证据的准备与验证是真实流程；实质阅读由 Agent 完成。 |
 | `repo-analyst` | beta | 能力地图准备与代码证据验证是真实流程；代码理解由 Agent 完成。 |
 | `dataset-analyst` | beta | 数据画像骨架与数据卡逐字证据校验是真实流程；适用性判断由 Agent 完成并等待确认。 |
 | `blog-analyst` | beta | 文章准备与观点证据验证是真实流程；解释和可信度判断由 Agent 完成。 |
-| `research-config-manager` | beta | 偏好与策略可以持久化，但尚非所有偏好都被所有下游能力消费。 |
+| `research-config-manager` | beta | 总偏好只有一份；规则先限定每个能力可见的最小范围，Agent 再按当前任务选取真正相关的偏好并保存回执。 |
 | `discussion-archivist` | beta | 按结论保存讨论、证据和开放问题。 |
-| `research-orchestrator` | scaffold | 研究计划主线、路由、看板和事件流已存在，优先级仍以固定策略为主。 |
+| `research-orchestrator` | beta | 研究计划主线、完整 survey 路由、看板和事件流已存在；跨计划下一步由 Agent 比较全部事实候选，输入变化后自动要求重选。 |
 | `literature-synthesizer` | beta | 综述、分类、趋势、矛盾与空白会形成绑定上游版本的有证据持久产物；综合质量仍依赖 Agent 与来源覆盖。 |
 | `idea-workbench` | beta | 候选、evidence-first 评审、讨论和显式选择已实现；创新性判断仍需用户或专家拍板。 |
 | `method-designer` | beta | 基于仓库证据的方法交接和实验矩阵已实现；生成设计仍需专家复核。 |
@@ -35,13 +36,15 @@
 | `report-author` | beta | 报告与大纲会消费持久 claim、event、evidence 和 decision；成文质量与覆盖仍需复核。 |
 | `skill-evolution-advisor` | scaffold | 本地学习与诊断问题的记录、复核已存在，不承诺自动修改 skill。 |
 | `wiki-adapter` | scaffold | 仅提供轻量兼容与路由，不是独立分析引擎。 |
-| `research-navigator` | dev-only | 本地浏览工作台仍是开发能力；自然语言导航摘要属于 beta。 |
+| `research-navigator` | dev-only | 仅作为可选投影辅助，不作为正式产品入口或事实源宣传。 |
 
 某个组件的一次成功运行，只能说明对应流程的表现，不能外推到其他流程或整个 bundle。上面范围受限的 **stable** 组件，也不代表当前 release candidate 已成为稳定发布。
 
 ## 第一次使用
 
-先按[安装指南](INSTALL.md)完成一次性安装，然后在 Codex 或 Claude Code 的对话中输入：
+最省事的方式是把 GitHub 仓库链接直接发给 Codex 或 Claude Code，并说：“把它安装到我当前 workspace；先检查现有文件，再使用仓库自带安装器；不要覆盖研究数据。” Agent 可以从仓库中的安装合同判断目标目录、冲突与验证步骤，不需要市场或插件。也可以按[安装指南](INSTALL.md)手工完成一次性安装。
+
+安装后在 Codex 或 Claude Code 的对话中输入：
 
 ```text
 kb init
@@ -121,9 +124,9 @@ Agent 会连续完成安全步骤：轻量入库、保留原格式、生成完�
 | `kb obsidian update` / `kb obsidian status` | 生成或检查无需插件的 Obsidian 知识网络视图。 |
 | `kb add <链接或路径>` | 轻量加入论文、代码仓、文章或本地文件。 |
 | `kb ingest <链接或路径>` | 加入资料并准备有证据的深读流程。 |
-| `kb review` | 查看已准备好的人类判断项，并用自然语言确认或拒绝。 |
+| `kb review` | 查看最多三条已准备好的人类判断项；可在对话里决定，也可导出 Obsidian 勾选表后整批确认。 |
 | `kb status` | 刷新并查看当前 KB 或研究计划状态。 |
-| `kb next` | 查看当前最值得推进的下一步。 |
+| `kb next` | 查看 Agent 已选择的下一步；若选择缺失或过期，Agent 会先比较全部候选再说明理由。 |
 | `kb find <关键词>` | 查找相关段落，并返回知识单元与可复开的定位。 |
 | `kb recall` | 回忆已确认习惯、已知坑和待审 skill 问题。 |
 | `kb resume` | 恢复中断的知识库操作。 |
@@ -137,7 +140,7 @@ Agent 会连续完成安全步骤：轻量入库、保留原格式、生成完�
 
 把工作区的 `kb` 目录作为 Obsidian Vault 打开即可，无需社区插件。首次查看或 canonical 内容变化后使用 `kb obsidian update`；需要检查是否过期、断链或被人工改动时使用 `kb obsidian status`。
 
-系统生成的页面位于 `obsidian/managed/`，包含 unit、program、topic、claim/evidence 块链接和三个原生 Bases 面板。Paper、文章和本地文档页还提供完整 Markdown 原文入口；已有 page/section locator 的 evidence 会尽量直接跳到该 Markdown 页或小节。Repo 证据在本地源码仍可达时可以直接打开对应代码文件，当前不保证精确跳到行号。这个目录是可重建视图，不要直接编辑；你自己的阅读笔记分别放在 `obsidian/inbox/` 或 `obsidian/annotations/`。系统不会生成或修改 `.obsidian/` 配置。
+系统生成的页面位于 `obsidian/managed/`，包含 unit、program、topic、claim/evidence 块链接和三个原生 Bases 面板。Paper、文章和本地文档页还提供完整 Markdown 原文入口；已有 page/section locator 的 evidence 会尽量直接跳到该 Markdown 页或小节。Repo 证据在本地源码仍可达时可以直接打开对应代码文件，当前不保证精确跳到行号。这个目录和 Bases 都是只读可重建视图，不要直接编辑；你自己的阅读笔记分别放在 `obsidian/inbox/` 或 `obsidian/annotations/`。需要批量审核时，Agent 会在 annotations 生成一份只允许修改 checkbox 的待确认表。系统不会生成或修改 `.obsidian/` 配置。
 
 生成页应使用 Obsidian 的**阅读视图**查看：点击页面右上角的书本图标即可。编辑或 Live Preview 视图会按 Obsidian 原生行为显示 `[[双链]]`、反引号和 `^block-id` 等 Markdown 源码，这不代表链接损坏。
 
@@ -175,7 +178,11 @@ Paper、repo 和 blog 使用同一套 review readiness 规则。事实型 metada
 
 每次展示的 review 卡片都是一次性、绑定当前内容版本的快照，默认 24 小时过期。已经处理、已过期、正文变化或无效的卡片会给出不同的自然语言恢复提示；正文变化时重新执行 `kb review`，你看到的一定是新正文。成功后会显示经过清洗的对象类型、标题以及“已确认”或“已拒绝”。
 
-你也可以直接用自然语言让 Agent 找一批候选文献。它会从当前会话真正可用的搜索、浏览或连接能力中选择合适工具，按互补问题分批检索，并保留每条查询、候选发现路径、可重试失败、初筛证据、覆盖缺口、预算和停止原因。普通“找几篇”默认是有界探索，不会声称查全；只有来源、查询式、时间范围、结果深度和筛选流程都可复现时，才会称为完整系统检索。搜索结果先进入待审暂存，接受后再走正常入库和论文分析；引用量、期刊、作者声誉和结果排名都不会被直接当作质量结论。
+若一次要看多条，可让 Agent 把当前三条导出到 Obsidian。你只勾选每条的“确认 / 拒绝 / 暂缓”，不要改其它文字。之后回到对话说“按我在 Obsidian 的勾选处理”；Agent 会先复述整批决定并请你在当前消息确认，且只应用这次预览中完全相同的决定。勾选本身不算授权，拒绝和暂缓也不会仅因文件变化自动执行；所有 owner 会在一个原子批次中应用，任一条过期、被改、预览变化或执行失败都会整批不生效。
+
+你也可以直接用自然语言让 Agent 找一批候选文献。它会从当前会话真正可用的搜索、浏览或连接能力中选择合适工具，按互补问题分批检索，并保留每条查询、候选发现路径、可重试失败、初筛证据、覆盖缺口、预算和停止原因。普通“找几篇”默认是有界探索，不会声称查全；只有来源、查询式、时间范围、结果深度和筛选流程都可复现时，才会称为完整系统检索。需要多 reviewer 时，每位 reviewer 的原始决定和冲突都会追加保留：不同执行上下文才叫独立复核，同一 Agent 分角色会明确写成辅助复核；裁决不会覆盖分歧历史。搜索结果先进入待审暂存，接受后再走正常入库和论文分析；引用量、期刊、作者声誉和结果排名都不会被直接当作质量结论。
+
+若想持续关注，可直接说：“每两周关注这个方向的新论文，预算每次 4 次检索。”系统会保存目标、时区、周期、范围和预算，不安装后台程序或插件。只有你明确同意，Agent 才会在宿主环境创建自动唤醒；否则到期项会在下次打开 workspace 或使用 `kb next` 时出现。实际检索仍由 Agent 使用当时可用的工具完成，并把这轮检索、survey 或复查结果绑定到当时冻结的任务与文件版本；事后改过的旧结果不会继续冒充本轮已完成证据。
 
 ## 检索、综述与陪练
 
@@ -229,7 +236,7 @@ Run log 是事实；diagnosis 是推断，默认待确认。报告系统从 prog
 记住：我的 summary 用中文，保留技术术语英文，结论尽量简洁。
 ```
 
-偏好确认后才能影响后续行为。Skill defect 只记录和复盘，不能触发自动改 skill。
+偏好确认后才能影响后续行为。系统不会给每个 skill 复制一份偏好：规则先筛出该能力可用的最小集合，Agent 再根据当前任务选择真正相关的部分；资源和硬约束不能被遗漏。选择会保存为只含编号、摘要值和理由的回执，总偏好变化后会自动重新选择。Skill defect 只记录和复盘，不能触发自动改 skill。
 
 ## 可选的本地开发者诊断
 
