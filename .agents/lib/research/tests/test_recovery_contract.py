@@ -810,22 +810,22 @@ def test_resume_terminalizes_root_last_and_retries_after_descendant_write_failur
         "git_checkpoint",
         lambda *args, **kwargs: {"committed": False, "files": []},
     )
-    real_write = journal.write_yaml_if_changed
+    real_write = journal._write_journal_yaml
     failed = False
 
-    def fail_child_terminal(path: Path, payload: object) -> None:
+    def fail_child_terminal(project_root: Path, op_id: str, payload: object) -> None:
         nonlocal failed
         if (
             not failed
-            and path == journal_entry_path(tmp_path, child_op)
+            and op_id == child_op
             and isinstance(payload, dict)
             and payload.get("state") == "abort"
         ):
             failed = True
             raise OSError("simulated descendant terminalization failure")
-        real_write(path, payload)
+        real_write(project_root, op_id, payload)
 
-    monkeypatch.setattr(journal, "write_yaml_if_changed", fail_child_terminal)
+    monkeypatch.setattr(journal, "_write_journal_yaml", fail_child_terminal)
     with pytest.raises(OSError, match="descendant terminalization"):
         restore_operation(tmp_path, root_op, recovery_type="resume")
 
@@ -1002,6 +1002,316 @@ def test_anchored_journal_path_rejects_ancestor_swap_without_touching_outside(
 
     assert swapped is True
     assert outside_target.read_text(encoding="utf-8") == "outside-sentinel\n"
+
+
+def test_journal_entry_read_detects_ctime_only_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "kb" / "notes" / "ctime.txt"
+    target.parent.mkdir(parents=True)
+    target.write_text("before\n", encoding="utf-8")
+    operation_id = begin_op(tmp_path, "ctime-source", [target])
+    entry_path = journal_entry_path(tmp_path, operation_id)
+    original_read = journal._read_anchored_regular
+    changed = False
+
+    def mutate_after_read(parent_fd: int, name: str, metadata: os.stat_result) -> bytes:
+        nonlocal changed
+        raw = original_read(parent_fd, name, metadata)
+        if name == entry_path.name and not changed:
+            changed = True
+            replacement = raw.replace(b"ctime-source", b"ctime-change", 1)
+            assert len(replacement) == len(raw)
+            descriptor = os.open(name, os.O_WRONLY, dir_fd=parent_fd)
+            try:
+                os.write(descriptor, replacement)
+            finally:
+                os.close(descriptor)
+            os.utime(
+                name,
+                ns=(metadata.st_atime_ns, metadata.st_mtime_ns),
+                dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+        return raw
+
+    monkeypatch.setattr(journal, "_read_anchored_regular", mutate_after_read)
+    with pytest.raises(SystemExit, match="读取期间发生变化"):
+        journal.load_op_view(tmp_path, operation_id)
+    assert changed is True
+
+
+def test_snapshot_creation_rejects_journal_root_swap_without_outside_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "kb" / "notes" / "snapshot-root.txt"
+    target.parent.mkdir(parents=True)
+    target.write_text("before\n", encoding="utf-8")
+    parked = tmp_path / "parked-journal"
+    outside = tmp_path / "outside-journal"
+    outside.mkdir()
+    original_snapshot = journal._snapshot_target
+    swapped = False
+
+    def swap_before_snapshot(project_root: Path, op_id: str, key: str) -> dict:
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            os.replace(tmp_path / "kb" / ".journal", parked)
+            (tmp_path / "kb" / ".journal").symlink_to(outside, target_is_directory=True)
+        return original_snapshot(project_root, op_id, key)
+
+    monkeypatch.setattr(journal, "_snapshot_target", swap_before_snapshot)
+    with pytest.raises((SystemExit, RuntimeError)):
+        begin_op(tmp_path, "journal-root-swap", [target])
+
+    assert swapped is True
+    assert list(outside.iterdir()) == []
+    assert target.read_text(encoding="utf-8") == "before\n"
+
+
+@pytest.mark.parametrize("target_kind", ("file", "directory"))
+def test_restore_rejects_snapshot_ancestor_swap_before_target_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target_kind: str,
+) -> None:
+    target = tmp_path / "kb" / "notes" / ("victim.txt" if target_kind == "file" else "victim")
+    target.parent.mkdir(parents=True)
+    if target_kind == "file":
+        target.write_text("before\n", encoding="utf-8")
+    else:
+        target.mkdir()
+        (target / "child.txt").write_text("before\n", encoding="utf-8")
+    operation_id = begin_op(tmp_path, "snapshot-ancestor-source", [target])
+    entry = load_op(tmp_path, operation_id)
+    if target_kind == "file":
+        target.write_text("partial\n", encoding="utf-8")
+    else:
+        (target / "child.txt").write_text("partial\n", encoding="utf-8")
+
+    key = entry["target_paths"][0]
+    snapshot_path = str(entry["before_snapshots"][key]["snapshot_path"])
+    outside = tmp_path / "outside-journal"
+    outside_payload = outside / snapshot_path
+    if target_kind == "file":
+        outside_payload.parent.mkdir(parents=True)
+        outside_payload.write_text("outside-evil\n", encoding="utf-8")
+    else:
+        outside_payload.mkdir(parents=True)
+        (outside_payload / "child.txt").write_text("outside-evil\n", encoding="utf-8")
+    outside_sentinel = outside / "sentinel.txt"
+    outside_sentinel.write_text("outside-sentinel\n", encoding="utf-8")
+    parked = tmp_path / "parked-journal"
+    original_restore = journal._restore_target
+    swapped = False
+
+    def swap_before_restore(project_root: Path, restore_key: str, snapshot: dict) -> Path:
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            os.replace(tmp_path / "kb" / ".journal", parked)
+            (tmp_path / "kb" / ".journal").symlink_to(outside, target_is_directory=True)
+        return original_restore(project_root, restore_key, snapshot)
+
+    monkeypatch.setattr(journal, "_restore_target", swap_before_restore)
+    with pytest.raises((SystemExit, RuntimeError)):
+        journal.restore_before_snapshots(tmp_path, operation_id, source_entry=entry)
+
+    assert swapped is True
+    if target_kind == "file":
+        assert target.read_text(encoding="utf-8") == "partial\n"
+    else:
+        assert (target / "child.txt").read_text(encoding="utf-8") == "partial\n"
+    assert outside_sentinel.read_text(encoding="utf-8") == "outside-sentinel\n"
+
+
+def test_replace_staged_preserves_previous_when_rollback_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "target.txt"
+    staged = tmp_path / ".target.txt.staged"
+    target.write_text("old\n", encoding="utf-8")
+    staged.write_text("new\n", encoding="utf-8")
+    parent_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    original_replace = journal.os.replace
+    calls = 0
+
+    def fail_publish_and_rollback(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return original_replace(*args, **kwargs)
+        if calls == 2:
+            raise OSError("publish failed")
+        raise OSError("rollback failed")
+
+    monkeypatch.setattr(journal.os, "replace", fail_publish_and_rollback)
+    try:
+        with pytest.raises(RuntimeError, match="backup preserved"):
+            journal._replace_staged_at(parent_fd, staged.name, target.name)
+    finally:
+        os.close(parent_fd)
+
+    backups = list(tmp_path.glob(".target.txt.previous-*"))
+    assert not target.exists()
+    assert not staged.exists()
+    assert len(backups) == 1
+    assert backups[0].read_text(encoding="utf-8") == "old\n"
+
+
+@pytest.mark.parametrize("reader", ("single", "enumeration"))
+def test_journal_entry_reads_fail_closed_when_root_is_swapped_after_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reader: str,
+) -> None:
+    target = tmp_path / "kb" / "notes" / "entry-root.txt"
+    target.parent.mkdir(parents=True)
+    target.write_text("before\n", encoding="utf-8")
+    operation_id = begin_op(tmp_path, "entry-root-source", [target])
+    parked = tmp_path / "parked-journal"
+    outside = tmp_path / "outside-journal"
+    outside.mkdir()
+    outside_entry = outside / f"{operation_id}.yaml"
+    outside_entry.write_text("outside-sentinel\n", encoding="utf-8")
+    original_root = journal._anchored_journal_root_fd
+    swapped = False
+
+    @contextmanager
+    def swap_after_root_open(project_root: Path, *, create: bool = False):
+        nonlocal swapped
+        with original_root(project_root, create=create) as descriptor:
+            if descriptor is not None and not swapped:
+                swapped = True
+                os.replace(tmp_path / "kb" / ".journal", parked)
+                (tmp_path / "kb" / ".journal").symlink_to(outside, target_is_directory=True)
+            yield descriptor
+
+    monkeypatch.setattr(journal, "_anchored_journal_root_fd", swap_after_root_open)
+    with pytest.raises(SystemExit, match="访问期间发生变化"):
+        if reader == "single":
+            journal.load_op_view(tmp_path, operation_id)
+        else:
+            incomplete_ops(tmp_path)
+
+    assert swapped is True
+    assert outside_entry.read_text(encoding="utf-8") == "outside-sentinel\n"
+    assert (parked / f"{operation_id}.yaml").exists()
+
+
+def test_workspace_lock_rejects_journal_root_swap_without_outside_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "kb").mkdir()
+    journal._ensure_journal_runtime(tmp_path)
+    parked = tmp_path / "parked-journal"
+    outside = tmp_path / "outside-journal"
+    outside.mkdir()
+    original_preflight = git_ops._preflight_journal_envelopes
+    swapped = False
+
+    def swap_after_preflight(project_root: Path) -> None:
+        nonlocal swapped
+        original_preflight(project_root)
+        if not swapped:
+            swapped = True
+            os.replace(tmp_path / "kb" / ".journal", parked)
+            (tmp_path / "kb" / ".journal").symlink_to(outside, target_is_directory=True)
+
+    monkeypatch.setattr(git_ops, "_preflight_journal_envelopes", swap_after_preflight)
+    with pytest.raises((SystemExit, RuntimeError)):
+        ensure_kb_git_repo(tmp_path, create_initial_commit=False)
+
+    assert swapped is True
+    assert list(outside.iterdir()) == []
+    assert not (tmp_path / "kb" / ".git").exists()
+
+
+def test_journal_entry_write_stays_anchored_when_root_is_swapped_after_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "kb" / "notes" / "entry-write.txt"
+    target.parent.mkdir(parents=True)
+    target.write_text("before\n", encoding="utf-8")
+    operation_id = begin_op(tmp_path, "entry-write-source", [target])
+    entry = load_op(tmp_path, operation_id)
+    entry["op_type"] = "entry-write-changed"
+    parked = tmp_path / "parked-journal"
+    outside = tmp_path / "outside-journal"
+    outside.mkdir()
+    outside_entry = outside / f"{operation_id}.yaml"
+    outside_entry.write_text("outside-sentinel\n", encoding="utf-8")
+    original_root = journal._anchored_journal_root_fd
+    swapped = False
+
+    @contextmanager
+    def swap_after_write_root_open(project_root: Path, *, create: bool = False):
+        nonlocal swapped
+        with original_root(project_root, create=create) as descriptor:
+            if create and descriptor is not None and not swapped:
+                swapped = True
+                os.replace(tmp_path / "kb" / ".journal", parked)
+                (tmp_path / "kb" / ".journal").symlink_to(outside, target_is_directory=True)
+            yield descriptor
+
+    monkeypatch.setattr(journal, "_anchored_journal_root_fd", swap_after_write_root_open)
+    with pytest.raises(SystemExit, match="访问期间发生变化"):
+        journal._write_journal_yaml(tmp_path, operation_id, entry)
+
+    assert swapped is True
+    assert outside_entry.read_text(encoding="utf-8") == "outside-sentinel\n"
+    assert b"entry-write-changed" in (parked / f"{operation_id}.yaml").read_bytes()
+
+
+def test_target_lock_rejects_swapped_runtime_ancestor_without_outside_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "kb" / "notes" / "locked.txt"
+    target.parent.mkdir(parents=True)
+    target.write_text("sentinel\n", encoding="utf-8")
+    journal._ensure_journal_runtime(tmp_path)
+    locks = tmp_path / "kb" / ".journal" / "locks"
+    locks.mkdir()
+    parked = tmp_path / "parked-locks"
+    outside = tmp_path / "outside-locks"
+    outside.mkdir()
+    original_parent = journal._anchored_journal_parent
+    swapped = False
+
+    @contextmanager
+    def swap_before_lock_parent(
+        project_root: Path,
+        relative_path: str,
+        *,
+        create_parents: bool = False,
+    ):
+        nonlocal swapped
+        if relative_path.startswith("locks/") and not swapped:
+            swapped = True
+            os.replace(locks, parked)
+            locks.symlink_to(outside, target_is_directory=True)
+        with original_parent(
+            project_root,
+            relative_path,
+            create_parents=create_parents,
+        ) as anchored:
+            yield anchored
+
+    monkeypatch.setattr(journal, "_anchored_journal_parent", swap_before_lock_parent)
+    with pytest.raises(RuntimeError, match="safe directory"):
+        with journal.operation_lock(tmp_path, target):
+            pytest.fail("unsafe target lock unexpectedly acquired")
+
+    assert swapped is True
+    assert list(outside.iterdir()) == []
+    assert target.read_text(encoding="utf-8") == "sentinel\n"
 
 
 @pytest.mark.parametrize(
