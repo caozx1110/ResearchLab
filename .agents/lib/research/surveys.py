@@ -982,13 +982,14 @@ def _completed_binding_violations(root: Path, stage: dict[str, Any]) -> list[str
     return []
 
 
-def _chain_violations(state: dict[str, Any]) -> list[str]:
+def _chain_violation_items(state: dict[str, Any]) -> list[tuple[str, str]]:
+    """Return the earliest downstream stage made invalid by each broken edge."""
     bindings = {
         str(stage.get("id") or ""): _completed_stage_binding(stage)
         for stage in state.get("stages", [])
         if isinstance(stage, dict) and stage.get("status") == "completed"
     }
-    violations: list[str] = []
+    violations: list[tuple[str, str]] = []
     search = bindings.get("search")
     selection = bindings.get("selection")
     intake = bindings.get("source_intake")
@@ -997,7 +998,9 @@ def _chain_violations(state: dict[str, Any]) -> list[str]:
     review = bindings.get("review_confirmation")
     report = bindings.get("report_consumption")
     if search and selection and search["refs"][0]["stage_id"] != selection["refs"][0]["stage_id"]:
-        violations.append("selection does not bind the completed literature search stage")
+        violations.append(
+            ("selection", "selection does not bind the completed literature search stage")
+        )
     if selection and intake:
         selected_ids = [
             item.get("candidate_id")
@@ -1011,21 +1014,44 @@ def _chain_violations(state: dict[str, Any]) -> list[str]:
             or selected_ids != intake_ids
             or any(item.get("authorization_digest") != authorization_digest for item in intake_items)
         ):
-            violations.append("source intake does not bind the selected candidates and authorization")
+            violations.append(
+                (
+                    "source_intake",
+                    "source intake does not bind the selected candidates and authorization",
+                )
+            )
     if intake and analysis:
         intake_units = [{"kind": item.get("kind"), "id": item.get("id")} for item in intake["facts"].get("units", [])]
         analysis_units = [{"kind": item.get("kind"), "id": item.get("id")} for item in analysis["refs"][0].get("units", [])]
         if intake_units != analysis_units:
-            violations.append("unit analysis does not bind the materialized units")
+            violations.append(
+                ("unit_analysis", "unit analysis does not bind the materialized units")
+            )
     if analysis and synthesis:
         analysis_ids = sorted(item.get("id") for item in analysis["refs"][0].get("units", []))
         if analysis_ids != synthesis["facts"].get("unit_ids"):
-            violations.append("synthesis does not bind the confirmed analysis units")
+            violations.append(
+                ("synthesis", "synthesis does not bind the confirmed analysis units")
+            )
     if synthesis and review and (synthesis["refs"][0]["slug"], synthesis["refs"][0]["mode"]) != (review["refs"][0]["slug"], review["refs"][0]["mode"]):
-        violations.append("review confirmation does not bind the verified survey")
+        violations.append(
+            (
+                "review_confirmation",
+                "review confirmation does not bind the verified survey",
+            )
+        )
     if review and report and (review["refs"][0]["slug"], review["refs"][0]["mode"]) != (report["refs"][0]["survey_slug"], report["refs"][0]["survey_mode"]):
-        violations.append("report consumption does not bind the confirmed survey")
+        violations.append(
+            (
+                "report_consumption",
+                "report consumption does not bind the confirmed survey",
+            )
+        )
     return violations
+
+
+def _chain_violations(state: dict[str, Any]) -> list[str]:
+    return [message for _stage_id, message in _chain_violation_items(state)]
 
 
 def composite_survey_current_violations(root: Path, state: object) -> list[str]:
@@ -1049,10 +1075,9 @@ def _first_invalid_completed_stage(root: Path, state: dict[str, Any]) -> str:
             break
         if _completed_binding_violations(root.resolve(), stage):
             return str(stage.get("id") or "")
-    if _chain_violations(state):
-        for stage in state.get("stages", []):
-            if isinstance(stage, dict) and stage.get("status") == "completed":
-                return str(stage.get("id") or "")
+    chain_violations = _chain_violation_items(state)
+    if chain_violations:
+        return chain_violations[0][0]
     return ""
 
 
