@@ -850,7 +850,15 @@ def test_report_operation_matrix_rejects_event_replay(
         limit=7,
         inputs=baseline,
     )
-    assert set(context) == {"program_id", "operation", "stage", "limit", "input_snapshot"}
+    assert set(context) == {
+        "program_id",
+        "operation",
+        "stage",
+        "limit",
+        "presentation_contract",
+        "input_snapshot",
+    }
+    assert context["presentation_contract"] == "report-presentation/v2"
     assert len(context["input_snapshot"]["digest"]) == 64
     selection_id = _record(
         root,

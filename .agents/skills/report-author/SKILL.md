@@ -22,8 +22,8 @@ description: Generate self-contained weekly reports, stage summaries, PPT or wri
 3. 对每个 record 的 `payload.claims` 调用 `research.evidence.read_claims`；仅聚合 `confirmed` / `auto_confirmed` claims，并用 `validate_claims` 过结构门。
 4. 将 claim 文本与 evidence ref 的 `source_unit_id`、`locator`、逐字 `quote`、可选 `summary` 一起写入材料；不把 essential evidence 留给读者自行打开。
 5. 聚合固定 H2 decision blocks 与筛选后的 events。最终叙事由 agent 基于这些输入填写，不允许脚本生成判断。
-6. 任一输入缺失时保留明确的 `missing: X`；禁止静默省略、补写或推测。
-7. 按 workspace 统一偏好合同为本次 report operation 记录并加载 task-bound effective selection；task digest 由 owner 按 program、operation、stage、limit 重算，不能由调用方传入。只有被 Agent 选中的 `profile.personalization.reporting_style` 才控制展示量。包含“简洁”/`concise`/`brief` 时压缩 decisions、claims 与 events；包含“详细”/`detailed`/`full` 时保留完整输入；未选中、缺失或不可解析时维持 neutral default。旧顶层及 canonical profile 中未选中的 `reporting_style` 都不得作为兼容直读旁路。报告持久化 selection/task/receipt digest 绑定，不复制偏好原值。精简模式仍保留 decisions、claims + evidence、events 三部分及全部适用的 `missing:` 标记。
+6. 任一输入缺失时保留明确的 `缺少：X`（显式英文模板为 `missing: X`）；禁止静默省略、补写或推测。
+7. 按 workspace 统一偏好合同为本次 report operation 记录并加载 task-bound effective selection；task digest 由 owner 按 program、operation、stage、limit 与完整输入快照重算，不能由调用方传入。五个 operation 的 consumed allowlist 都包含 `profile.preferences.language_preference` 与 `profile.personalization.reporting_style`。只有被 Agent 为当前任务选中的英文语言值才切到英文模板；未选择语言、只在 profile 配置英文、缺失或不可解析时一律使用产品默认中文。只有被当前任务选中的 reporting style 才控制展示量：包含“简洁”/`concise`/`brief` 时压缩 decisions、claims 与 events；包含“详细”/`detailed`/`full` 时保留完整输入；未选中时维持 neutral default。不得通过旧顶层字段或 canonical profile 直读 soft preference。报告持久化 selection/task/receipt digest 绑定，不复制偏好原值。精简模式仍保留 decisions、claims + evidence、events 三部分及全部适用的缺失标记。
 8. Reporting events 默认 fail-closed：显式 factual/operational 事件可进普通区；decision/diagnosis/discussion conclusion/survey inference/novelty/evaluation 与未知未分型事件均视为 judgement。只有能经无 symlink canonical containment 解析 subject、binding 完全一致且 verification artifact 当前 bytes 仍匹配的 ConfirmationReceipt 才进入普通区；pending/rejected/stale 全部隔离到 `Pending / Unverified judgements`。
 9. Survey inference 还必须通过 `consumer_binding` 的纯读 freshness 检查；新增匹配 unit、上游 content/evidence 变化、删除或 confirmation 失效时只进入 pending/stale 区，不得自动改写 survey 或继续当正式结论。
 
@@ -40,10 +40,11 @@ description: Generate self-contained weekly reports, stage summaries, PPT or wri
 ## Output Contract
 
 - 报告正文按 decisions、claims + evidence、events 组成 self-contained triple，不再以 event log 充当报告。
-- `reporting_style` 只控制展示量，不改变 claim confirmation status、不删除适用的缺失标记，也不生成补全文本。
+- 默认报告与 outline 的标题、章节、事件/决策标签、待确认区和缺失标记使用中文；只有当前 task receipt 明确选择英文语言值时才使用英文模板。
+- `language_preference` 与 `reporting_style` 只控制展示，不改变输入筛选、claim 文本、逐字 evidence、subject identity、epistemic/confirmation 类型，不删除适用的缺失标记，也不生成补全文本。
 - confirmed claim 的最小结构为 `id`、`text`、`claim_type`、`confirmation_status`、`evidence_refs`。
-- evidence ref 展示来源 unit、locator、逐字 quote 与可选 context；空 evidence 显式写 `missing: evidence for claim ...`。
-- 无 events、decisions、confirmed claims、关联 record 或 outline section inputs 时分别写 `missing: ...`。
+- evidence ref 展示来源 unit、locator、逐字 quote 与可选 context；空 evidence 用当前模板语言显式标缺。
+- 无 events、decisions、confirmed claims、关联 record 或 outline section inputs 时分别用当前模板语言显式标缺。
 - 不输出 raw commands 或内部路径作为用户下一步；需要推进时改写成自然语言或已存在的 `kb <verb>`。
 - 不修改 source units、reporting events 或 decision log；报告是只读聚合后的派生产物。
 - `*-confirmed` 名称或 `confirmation_status: confirmed` 字符串本身不构成信任；confirmed event 必须绑定 subject、claim ids、content digest 与 verification receipt。

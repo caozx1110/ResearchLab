@@ -385,6 +385,7 @@ def test_analyzer_owner_rejects_valid_receipt_bound_to_another_skill_before_writ
                     "operation": "weekly",
                     "stage": "",
                     "limit": 20,
+                    "presentation_contract": "report-presentation/v2",
                     "input_snapshot": {
                         "digest": "0" * 64,
                         "accepted_event_count": 0,

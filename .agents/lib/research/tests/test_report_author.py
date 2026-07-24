@@ -415,7 +415,9 @@ def test_copied_survey_event_is_pending_for_the_wrong_program_after_reload(tmp_p
         text = report.render_report("Stage Summary: program-b", inputs, report_kind="stage-summary")
         assert inputs.claim_sources == []
         assert len(inputs.pending_judgement_events) == 1
-        assert "survey binding for this program" in text
+        assert "survey binding for this program" in inputs.pending_judgement_events[0]["_epistemic_reason"]
+        assert "## 待确认 / 未核验的判断" in text
+        assert "当前确认回执或其证据绑定已失效" in text
         assert "Agent-authored survey judgement" not in text
 
 
@@ -467,7 +469,7 @@ def test_stale_or_tampered_survey_never_reaches_formal_claims(tmp_path: Path, mu
 
     assert inputs.claim_sources == []
     assert len(inputs.pending_judgement_events) == 1
-    assert "## Pending / Unverified judgements" in text
+    assert "## 待确认 / 未核验的判断" in text
     assert original_claim not in text
     assert "TAMPERED SURVEY CLAIM" not in text
 
@@ -569,10 +571,10 @@ def test_mutated_survey_confirmation_binding_moves_event_to_pending(
             inputs,
             report_kind="stage-summary",
         )
-        assert "Pending / Unverified" in text
+        assert "待确认 / 未核验" in text
         assert "Agent-authored survey judgement" not in text
         if mutation in {"missing_owner", "extra_field", "content_digest", "decoy_path"}:
-            assert "exact current judgement binding" in text
+            assert "exact current judgement binding" in inputs.pending_judgement_events[0]["_epistemic_reason"]
 
 
 def _make_workspace(tmp_path: Path, *, with_claim: bool = True) -> tuple[Path, str, str]:
@@ -654,7 +656,7 @@ def test_weekly_and_stage_reports_include_claims_evidence_events_and_decisions(t
         assert "Success rate improves by 8 points." in text
         assert "Grounded review completed" in text
         assert "Use the grounded baseline" in text
-    assert "## Writing Claims & Evidence" in writing
+    assert "## 写作判断与证据" in writing
 
 
 def test_legacy_judgement_event_with_confirmed_string_fails_safe_without_canonical_binding(tmp_path: Path) -> None:
@@ -688,14 +690,15 @@ def test_legacy_judgement_event_with_confirmed_string_fails_safe_without_canonic
 
     inputs = report.load_report_inputs(root, program_id)
     weekly = report.render_report(f"Weekly Report: {program_id}", inputs, report_kind="weekly")
-    ordinary_section = weekly[weekly.index("## Reporting Events") : weekly.index("## Pending / Unverified judgements")]
-    pending_section = weekly[weekly.index("## Pending / Unverified judgements") :]
+    ordinary_section = weekly[weekly.index("## 报告事件") : weekly.index("## 待确认 / 未核验的判断")]
+    pending_section = weekly[weekly.index("## 待确认 / 未核验的判断") :]
 
     assert "The paper analysis is ready for reporting." in ordinary_section
     assert "A stale legacy diagnosis asserted a likely cause." not in ordinary_section
     assert "A stale legacy diagnosis asserted a likely cause." in pending_section
-    assert "confirmation_status=confirmed" in pending_section
-    assert "missing: canonical confirmation subject and claim/evidence binding" in pending_section
+    assert "当前缺少有效的确认回执或证据绑定" in pending_section
+    assert "confirmation_status=confirmed" in inputs.pending_judgement_events[0]["_epistemic_reason"]
+    assert "missing: canonical confirmation subject and claim/evidence binding" in inputs.pending_judgement_events[0]["_epistemic_reason"]
 
 
 def test_outline_produces_evidence_backed_section_skeleton(tmp_path: Path) -> None:
@@ -704,10 +707,187 @@ def test_outline_produces_evidence_backed_section_skeleton(tmp_path: Path) -> No
 
     outline = report.render_outline(program_id, report.load_report_inputs(root, program_id))
 
-    for heading in ("## Introduction", "## Related Work", "## Method", "## Experiments", "## Results", "## Discussion", "## Conclusion"):
+    for heading in ("## 引言", "## 相关工作", "## 方法", "## 实验", "## 结果", "## 讨论", "## 结论"):
         assert heading in outline
     assert "The method improves benchmark success rate." in outline
     assert "Success rate improves by 8 points." in outline
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected_title"),
+    [
+        ("weekly", "周报"),
+        ("stage-summary", "阶段总结"),
+        ("ppt-materials", "PPT 素材"),
+        ("writing-materials", "写作素材"),
+    ],
+)
+def test_default_report_templates_are_chinese_without_translating_grounded_bytes(
+    tmp_path: Path,
+    operation: str,
+    expected_title: str,
+) -> None:
+    report = _load_report_module()
+    root, program_id, _ = _make_workspace(tmp_path)
+    inputs = report.load_report_inputs(root, program_id)
+
+    text = report.render_report(
+        report.report_title(operation, program_id, language=inputs.language),
+        inputs,
+        report_kind=operation,
+    )
+
+    assert text.startswith(f"# {expected_title}：{program_id}\n")
+    assert "## 决策" in text
+    assert "## 已确认判断与证据" in text or "## 写作判断与证据" in text or "## 有证据支撑的幻灯片素材" in text
+    assert "- 阶段：literature-review" in text
+    assert "- 证据 1（来源 p-grounded-123456，page=3）：Success rate improves by 8 points." in text
+    assert "The method improves benchmark success rate." in text
+    assert "Success rate improves by 8 points." in text
+    assert "Grounded review completed" in text
+    assert "Use the grounded baseline" in text
+
+
+def test_default_outline_is_chinese_and_preserves_claim_and_evidence_bytes(tmp_path: Path) -> None:
+    report = _load_report_module()
+    root, program_id, _ = _make_workspace(tmp_path)
+    inputs = report.load_report_inputs(root, program_id)
+
+    outline = report.render_outline(program_id, inputs)
+
+    for heading in ("## 引言", "## 相关工作", "## 方法", "## 实验", "## 结果", "## 讨论", "## 结论"):
+        assert heading in outline
+    assert outline.startswith(f"# 论文大纲：{program_id}\n")
+    assert "The method improves benchmark success rate." in outline
+    assert "Success rate improves by 8 points." in outline
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected_title", "expected_heading"),
+    [
+        ("weekly", "Weekly Report", "## Decisions"),
+        ("stage-summary", "Stage Summary", "## Confirmed Claims & Evidence"),
+        ("ppt-materials", "PPT Materials", "## Evidence-backed Slide Inputs"),
+        ("writing-materials", "Writing Materials", "## Writing Claims & Evidence"),
+        ("outline", "Paper Outline", "## Introduction"),
+    ],
+)
+def test_language_requires_current_task_bound_selection_and_explicit_english(
+    tmp_path: Path,
+    operation: str,
+    expected_title: str,
+    expected_heading: str,
+) -> None:
+    report = _load_report_module()
+    root, program_id, _ = _make_workspace(tmp_path)
+    profile_path = root / "kb" / "config" / "user-profile.yaml"
+    write_yaml_if_changed(
+        profile_path,
+        {
+            "preferences": {"language_preference": "en-US"},
+            "personalization": {"reporting_style": "detailed"},
+        },
+    )
+    baseline = report.load_report_inputs(root, program_id)
+    assert baseline.language == "zh-CN"
+    context = report.report_preference_context(
+        program_id,
+        operation=operation,
+        stage="",
+        limit=20,
+        inputs=baseline,
+    )
+    eligible = eligible_preferences(root, skill="report-author", operation=operation)
+    language_item = next(
+        item for item in eligible["items"] if item["path"] == "profile.preferences.language_preference"
+    )
+    style_item = next(
+        item for item in eligible["items"] if item["path"] == "profile.personalization.reporting_style"
+    )
+    style_only_id = f"prefsel-report-style-only-{operation}"
+    record_effective_selection(
+        root,
+        {
+            "selection_id": style_only_id,
+            "skill": "report-author",
+            "operation": operation,
+            "catalog_digest": eligible["catalog_digest"],
+            "task_context": context,
+            "selected": [
+                {
+                    "preference_id": style_item["preference_id"],
+                    "reason": "detail level is relevant to this report",
+                    "application": "render all report inputs",
+                }
+            ],
+            "excluded": [
+                {
+                    "preference_id": item["preference_id"],
+                    "reason": "not relevant to this report",
+                }
+                for item in eligible["items"]
+                if item is not style_item
+            ],
+        },
+    )
+    style_only_inputs = report.load_report_inputs(
+        root,
+        program_id,
+        preference_selection_id=style_only_id,
+        preference_operation=operation,
+    )
+    assert style_only_inputs.reporting_style == "detailed"
+    assert style_only_inputs.language == "zh-CN"
+
+    selection_id = f"prefsel-report-english-{operation}"
+    record_effective_selection(
+        root,
+        {
+            "selection_id": selection_id,
+            "skill": "report-author",
+            "operation": operation,
+            "catalog_digest": eligible["catalog_digest"],
+            "task_context": context,
+            "selected": [
+                {
+                    "preference_id": language_item["preference_id"],
+                    "reason": "English is relevant to this report audience",
+                    "application": "render this report in English",
+                }
+            ],
+            "excluded": [
+                {
+                    "preference_id": item["preference_id"],
+                    "reason": "not relevant to this report",
+                }
+                for item in eligible["items"]
+                if item is not language_item
+            ],
+        },
+    )
+
+    english_inputs = report.load_report_inputs(
+        root,
+        program_id,
+        preference_selection_id=selection_id,
+        preference_operation=operation,
+    )
+    english = (
+        report.render_outline(program_id, english_inputs)
+        if operation == "outline"
+        else report.render_report(
+            report.report_title(operation, program_id, language=english_inputs.language),
+            english_inputs,
+            report_kind=operation,
+        )
+    )
+
+    assert english_inputs.language == "en-US"
+    assert english.startswith(f"# {expected_title}: {program_id}\n")
+    assert expected_heading in english
+    assert "Evidence 1 (source p-grounded-123456, page=3): Success rate improves by 8 points." in english
+    assert "The method improves benchmark success rate." in english
+    assert "Success rate improves by 8 points." in english
 
 
 def test_missing_inputs_are_explicit_and_never_fabricated(tmp_path: Path) -> None:
@@ -725,10 +905,10 @@ def test_missing_inputs_are_explicit_and_never_fabricated(tmp_path: Path) -> Non
     weekly = report.render_report(f"Weekly Report: {program_id}", inputs, report_kind="weekly")
     outline = report.render_outline(program_id, inputs)
 
-    assert "missing: confirmed claims" in weekly
-    assert "missing: reporting events" in weekly
-    assert "missing: decisions" in weekly
-    assert "missing: related-work claims and evidence" in outline
+    assert "缺少：已确认判断" in weekly
+    assert "缺少：报告事件" in weekly
+    assert "缺少：决策" in weekly
+    assert "缺少：相关工作判断与证据" in outline
     assert "improves benchmark success rate" not in weekly
 
 
@@ -828,8 +1008,8 @@ def test_reporting_style_controls_verbosity_and_preserves_missing_markers(tmp_pa
     assert "Reporting event 0" not in concise
     assert "Confirmed claim 5." in detailed
     assert "Confirmed claim 5." not in concise
-    assert "missing: evidence for claim claim-0" in concise
-    assert "missing: evidence for claim claim-0" in detailed
+    assert "缺少：判断 claim-0 的证据" in concise
+    assert "缺少：判断 claim-0 的证据" in detailed
 
 
 def test_unparseable_reporting_style_uses_default_behavior(tmp_path: Path) -> None:
@@ -881,7 +1061,7 @@ def test_outline_cli_writes_report_without_raw_command_stdout(tmp_path: Path, mo
     text = (root / "kb" / "programs" / program_id / "reports" / "paper-outline.md").read_text(encoding="utf-8")
     stdout = capsys.readouterr().out
 
-    assert "## Related Work: Confirmed Claims & Evidence" in text
+    assert "## 相关工作：已确认判断与证据" in text
     assert "Success rate improves by 8 points." in text
     for token in ("python3 ", ".agents/skills/", "--program-id", "${", "NEXT FOR AGENT:"):
         assert token not in stdout

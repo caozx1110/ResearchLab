@@ -368,6 +368,7 @@ OPERATION_CANONICAL_INPUTS: dict[tuple[str, str], tuple[str, ...]] = {
             "operation",
             "stage",
             "limit",
+            "presentation_contract",
             "input_snapshot",
         )
         for operation in SKILL_OPERATIONS["report-author"]

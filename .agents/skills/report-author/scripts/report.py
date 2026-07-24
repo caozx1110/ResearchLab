@@ -58,6 +58,9 @@ UNIT_PATH_RE = re.compile(r"(?:^|/)kb/units/(?:papers|repos|datasets|blogs|ideas
 DECISION_HEADING_RE = re.compile(r"^##\s+(.+)$", flags=re.MULTILINE)
 CONCISE_STYLE_SIGNALS = ("简洁", "concise", "brief")
 DETAILED_STYLE_SIGNALS = ("详细", "detailed", "full")
+DEFAULT_REPORT_LANGUAGE = "zh-CN"
+REPORT_PRESENTATION_CONTRACT = "report-presentation/v2"
+ENGLISH_LANGUAGE_RE = re.compile(r"(?:en(?:[-_][a-z0-9]+)*|english(?:\b.*)?)", re.IGNORECASE)
 CONCISE_DECISION_LIMIT = 3
 CONCISE_SOURCE_LIMIT = 3
 CONCISE_CLAIM_LIMIT = 3
@@ -116,6 +119,7 @@ class ReportInputs:
     decisions: list[dict[str, str]] = field(default_factory=list)
     missing_units: list[str] = field(default_factory=list)
     reporting_style: str = "default"
+    language: str = DEFAULT_REPORT_LANGUAGE
     preference_binding: dict[str, object] = field(default_factory=dict)
 
 
@@ -314,6 +318,47 @@ def _normalize_reporting_style(value: object) -> str:
     return "default"
 
 
+def _normalize_report_language(value: object) -> str:
+    """Return the only opt-in language override supported by the renderer.
+
+    Chinese is the product default.  A canonical profile value is not enough:
+    callers pass only values resolved from the current task-bound selection.
+    Unknown, missing, or non-English values therefore remain Chinese.
+    """
+    language = str(value or "").strip()
+    if language and ENGLISH_LANGUAGE_RE.fullmatch(language):
+        return "en-US"
+    return DEFAULT_REPORT_LANGUAGE
+
+
+def _is_english(language: str) -> bool:
+    return _normalize_report_language(language) == "en-US"
+
+
+def _resolved_report_preferences(
+    root: Path,
+    *,
+    preference_selection_id: str,
+    operation: str,
+    canonical_inputs: dict[str, object],
+) -> tuple[dict[str, object], dict[str, object]]:
+    if not preference_selection_id:
+        return {}, {}
+    effective = resolve_task_preferences(
+        root,
+        selection_id=preference_selection_id,
+        skill="report-author",
+        operation=operation,
+        canonical_inputs=canonical_inputs,
+    )
+    selected = {
+        str(item.get("path") or ""): item.get("value")
+        for item in effective.get("effective_items", [])
+        if isinstance(item, dict)
+    }
+    return selected, selection_binding(effective)
+
+
 def load_reporting_style(
     root: Path,
     *,
@@ -321,23 +366,33 @@ def load_reporting_style(
     operation: str = "",
     canonical_inputs: dict[str, object] | None = None,
 ) -> str:
-    if preference_selection_id:
-        effective = resolve_task_preferences(
-            root,
-            selection_id=preference_selection_id,
-            skill="report-author",
-            operation=operation,
-            canonical_inputs=canonical_inputs or {},
-        )
-        selected = {
-            str(item.get("path") or ""): item.get("value")
-            for item in effective.get("effective_items", [])
-            if isinstance(item, dict)
-        }
+    selected, _binding = _resolved_report_preferences(
+        root,
+        preference_selection_id=preference_selection_id,
+        operation=operation,
+        canonical_inputs=canonical_inputs or {},
+    )
+    if selected:
         return _normalize_reporting_style(selected.get("profile.personalization.reporting_style"))
     # A canonical profile is only a catalog.  Unselected soft style must be
     # neutral, including legacy top-level reporting_style values.
     return "default"
+
+
+def load_report_language(
+    root: Path,
+    *,
+    preference_selection_id: str = "",
+    operation: str = "",
+    canonical_inputs: dict[str, object] | None = None,
+) -> str:
+    selected, _binding = _resolved_report_preferences(
+        root,
+        preference_selection_id=preference_selection_id,
+        operation=operation,
+        canonical_inputs=canonical_inputs or {},
+    )
+    return _normalize_report_language(selected.get("profile.preferences.language_preference"))
 
 
 def _canonical_digest(value: object) -> str:
@@ -392,6 +447,7 @@ def report_preference_context(
         "operation": str(operation),
         "stage": str(stage),
         "limit": int(limit),
+        "presentation_contract": REPORT_PRESENTATION_CONTRACT,
         "input_snapshot": {
             "digest": _canonical_digest(snapshot),
             "accepted_event_count": len(inputs.events),
@@ -552,7 +608,7 @@ def load_confirmed_survey_claim_source(
     return (
         ClaimSource(
             unit_id=str(record.get("id") or ""),
-            title=f"Confirmed survey: {str(record.get('slug') or record.get('id') or 'survey')}",
+            title=str(record.get("slug") or record.get("id") or "survey"),
             kind="survey_judgement",
             claims=[{**claim, "confirmation_status": "confirmed"} for claim in canonical_claims],
             binding_digest=_canonical_digest(
@@ -713,23 +769,20 @@ def load_report_inputs(
         limit=limit,
         inputs=inputs,
     )
+    selected, binding = _resolved_report_preferences(
+        root,
+        preference_selection_id=preference_selection_id,
+        operation=preference_operation,
+        canonical_inputs=canonical_inputs,
+    )
     if preference_selection_id:
-        effective = resolve_task_preferences(
-            root,
-            selection_id=preference_selection_id,
-            skill="report-author",
-            operation=preference_operation,
-            canonical_inputs=canonical_inputs,
-        )
-        selected = {
-            str(item.get("path") or ""): item.get("value")
-            for item in effective.get("effective_items", [])
-            if isinstance(item, dict)
-        }
         inputs.reporting_style = _normalize_reporting_style(
             selected.get("profile.personalization.reporting_style")
         )
-        inputs.preference_binding = selection_binding(effective)
+        inputs.language = _normalize_report_language(
+            selected.get("profile.preferences.language_preference")
+        )
+        inputs.preference_binding = binding
     return inputs
 
 
@@ -754,11 +807,42 @@ def concise_report_inputs(inputs: ReportInputs) -> ReportInputs:
         decisions=inputs.decisions[-CONCISE_DECISION_LIMIT:],
         missing_units=inputs.missing_units,
         reporting_style=inputs.reporting_style,
+        language=inputs.language,
         preference_binding=inputs.preference_binding,
     )
 
 
-def render_event_line(event: dict[str, Any]) -> str:
+def _missing(label: str, *, language: str) -> str:
+    return f"missing: {label}" if _is_english(language) else f"缺少：{label}"
+
+
+def _pending_reason(reason: str, *, language: str) -> str:
+    if _is_english(language):
+        return reason
+    if "stale" in reason.casefold() or "changed" in reason.casefold():
+        return "当前确认回执或其证据绑定已失效。"
+    return "当前缺少有效的确认回执或证据绑定。"
+
+
+def report_title(report_kind: str, program_id: str, *, language: str) -> str:
+    if _is_english(language):
+        labels = {
+            "weekly": "Weekly Report",
+            "ppt-materials": "PPT Materials",
+            "writing-materials": "Writing Materials",
+            "stage-summary": "Stage Summary",
+        }
+        return f"{labels.get(report_kind, 'Report')}: {program_id}"
+    labels = {
+        "weekly": "周报",
+        "ppt-materials": "PPT 素材",
+        "writing-materials": "写作素材",
+        "stage-summary": "阶段总结",
+    }
+    return f"{labels.get(report_kind, '报告')}：{program_id}"
+
+
+def render_event_line(event: dict[str, Any], *, language: str = "en-US") -> str:
     if str(event.get("_effective_confirmation_status") or "") == "confirmed":
         binding = event.get("confirmation_binding")
         binding = binding if isinstance(binding, dict) else {}
@@ -766,104 +850,168 @@ def render_event_line(event: dict[str, Any]) -> str:
         subject = subject if isinstance(subject, dict) else {}
         subject_kind = str(subject.get("kind") or "judgement").replace("_", " ")
         subject_id = str(subject.get("id") or "confirmed subject")
-        return (
-            f"- Confirmed judgement · {subject_kind}: {subject_id} "
-            "(confirmation: current receipt)"
-        )
-    timestamp = str(event.get("timestamp") or "unknown time")
-    source_skill = str(event.get("source_skill") or "unknown source")
+        if _is_english(language):
+            return (
+                f"- Confirmed judgement · {subject_kind}: {subject_id} "
+                "(confirmation: current receipt)"
+            )
+        return f"- 已确认判断 · {subject_kind}：{subject_id}（确认：当前回执）"
+    timestamp = str(event.get("timestamp") or ("unknown time" if _is_english(language) else "时间未知"))
+    source_skill = str(event.get("source_skill") or ("unknown source" if _is_english(language) else "来源未知"))
     event_type = str(event.get("event_type") or "update")
-    title = str(event.get("title") or "Untitled event")
+    title = str(event.get("title") or ("Untitled event" if _is_english(language) else "未命名事件"))
     summary = str(event.get("summary") or "").strip()
     stage = str(event.get("stage") or "").strip()
-    details = [f"type: {event_type}", f"source: {source_skill}"]
+    details = (
+        [f"type: {event_type}", f"source: {source_skill}"]
+        if _is_english(language)
+        else [f"类型：{event_type}", f"来源：{source_skill}"]
+    )
     if stage:
-        details.append(f"stage: {stage}")
+        details.append(f"stage: {stage}" if _is_english(language) else f"阶段：{stage}")
     suffix = f" — {summary}" if summary else ""
-    return f"- {timestamp} · {title} ({'; '.join(details)}){suffix}"
+    if _is_english(language):
+        return f"- {timestamp} · {title} ({'; '.join(details)}){suffix}"
+    return f"- {timestamp} · {title}（{'；'.join(details)}）{suffix}"
 
 
-def render_decisions(decisions: list[dict[str, str]]) -> list[str]:
-    lines = ["## Decisions", ""]
+def render_decisions(decisions: list[dict[str, str]], *, language: str = "en-US") -> list[str]:
+    lines = ["## Decisions" if _is_english(language) else "## 决策", ""]
     if not decisions:
-        return [*lines, "- missing: decisions"]
+        return [*lines, f"- {_missing('decisions' if _is_english(language) else '决策', language=language)}"]
     for decision in decisions:
         if decision.get("legacy_pending") == "true":
-            lines.append(
-                f"- pending/unverified legacy decision requires two-stage confirmation: {decision['title']}"
-            )
+            if _is_english(language):
+                lines.append(
+                    f"- pending/unverified legacy decision requires two-stage confirmation: {decision['title']}"
+                )
+            else:
+                lines.append(f"- 待确认 / 未核验的历史决策需要完成两阶段确认：{decision['title']}")
             continue
         lines.append(f"### {decision['title']}")
         lines.append("")
-        lines.append(f"- Stage: {decision['stage'] or 'missing: decision stage'}")
-        lines.append(f"- Rationale: {decision['rationale'] or 'missing: decision rationale'}")
-        lines.append(f"- Alternatives: {decision['alternatives'] or 'missing: decision alternatives'}")
-        lines.append(f"- Confirmation: {decision['confirmation'] or 'missing: decision confirmation'}")
+        if _is_english(language):
+            lines.append(f"- Stage: {decision['stage'] or 'missing: decision stage'}")
+            lines.append(f"- Rationale: {decision['rationale'] or 'missing: decision rationale'}")
+            lines.append(f"- Alternatives: {decision['alternatives'] or 'missing: decision alternatives'}")
+            lines.append(f"- Confirmation: {decision['confirmation'] or 'missing: decision confirmation'}")
+        else:
+            lines.append(f"- 阶段：{decision['stage'] or '缺少：决策阶段'}")
+            lines.append(f"- 理由：{decision['rationale'] or '缺少：决策理由'}")
+            lines.append(f"- 备选方案：{decision['alternatives'] or '缺少：决策备选方案'}")
+            lines.append(f"- 确认状态：{decision['confirmation'] or '缺少：决策确认状态'}")
         lines.append("")
     return lines[:-1]
 
 
-def render_claims(claim_sources: list[ClaimSource], missing_units: list[str], *, heading: str) -> list[str]:
+def render_claims(
+    claim_sources: list[ClaimSource],
+    missing_units: list[str],
+    *,
+    heading: str,
+    language: str = "en-US",
+) -> list[str]:
     lines = [f"## {heading}", ""]
     claims_found = False
     for source in claim_sources:
         if not source.claims and not source.issues:
             continue
-        lines.extend([f"### {source.title}", "", f"- Unit: {source.unit_id} ({source.kind})"])
+        source_title = source.title
+        if source.kind == "survey_judgement":
+            source_title = (
+                f"Confirmed survey: {source.title}"
+                if _is_english(language)
+                else f"已确认综述：{source.title}"
+            )
+        if _is_english(language):
+            unit_line = f"- Unit: {source.unit_id} ({source.kind})"
+        else:
+            unit_line = f"- 单元：{source.unit_id}（{source.kind}）"
+        lines.extend([f"### {source_title}", "", unit_line])
         for issue in source.issues:
-            lines.append(f"- missing: structurally valid confirmed claim ({issue})")
+            if _is_english(language):
+                lines.append(f"- missing: structurally valid confirmed claim ({issue})")
+            else:
+                lines.append("- 缺少：结构合法且已确认的判断（结构或证据核验未通过）")
         for claim in source.claims:
             claims_found = True
             claim_id = str(claim.get("id") or "unnamed claim")
             claim_type = str(claim.get("claim_type") or "unspecified")
             status = str(claim.get("confirmation_status") or "unspecified")
-            lines.append(f"- Claim {claim_id} [{claim_type}; {status}]: {str(claim.get('text') or '').strip()}")
+            claim_text = str(claim.get("text") or "").strip()
+            if _is_english(language):
+                lines.append(f"- Claim {claim_id} [{claim_type}; {status}]: {claim_text}")
+            else:
+                lines.append(f"- 判断 {claim_id} [{claim_type}; {status}]：{claim_text}")
             evidence_refs = [ref for ref in claim.get("evidence_refs", []) if isinstance(ref, dict)]
             if not evidence_refs:
-                lines.append(f"  - missing: evidence for claim {claim_id}")
+                if _is_english(language):
+                    lines.append(f"  - missing: evidence for claim {claim_id}")
+                else:
+                    lines.append(f"  - 缺少：判断 {claim_id} 的证据")
             for index, evidence in enumerate(evidence_refs, start=1):
                 quote = str(evidence.get("quote") or "").strip()
                 locator = str(evidence.get("locator") or "").strip()
                 source_unit_id = str(evidence.get("source_unit_id") or source.unit_id).strip()
                 summary = str(evidence.get("summary") or "").strip()
-                detail = f"source {source_unit_id}"
+                detail = f"source {source_unit_id}" if _is_english(language) else f"来源 {source_unit_id}"
                 if locator:
-                    detail += f", {locator}"
-                lines.append(f"  - Evidence {index} ({detail}): {quote or 'missing: verbatim quote'}")
+                    detail += f", {locator}" if _is_english(language) else f"，{locator}"
+                missing_quote = "missing: verbatim quote" if _is_english(language) else "缺少：逐字证据摘录"
+                if _is_english(language):
+                    lines.append(f"  - Evidence {index} ({detail}): {quote or missing_quote}")
+                else:
+                    lines.append(f"  - 证据 {index}（{detail}）：{quote or missing_quote}")
                 if summary:
-                    lines.append(f"    - Context: {summary}")
+                    if _is_english(language):
+                        lines.append(f"    - Context: {summary}")
+                    else:
+                        lines.append(f"    - 上下文：{summary}")
         lines.append("")
     if missing_units:
-        lines.append(f"- missing: records for linked units {', '.join(missing_units)}")
+        if _is_english(language):
+            lines.append(f"- missing: records for linked units {', '.join(missing_units)}")
+        else:
+            lines.append(f"- 缺少：关联单元的记录 {', '.join(missing_units)}")
     if not claims_found:
-        lines.append("- missing: confirmed claims")
+        lines.append("- missing: confirmed claims" if _is_english(language) else "- 缺少：已确认判断")
     return lines
 
 
-def render_events(events: list[dict[str, Any]], *, heading: str) -> list[str]:
+def render_events(events: list[dict[str, Any]], *, heading: str, language: str = "en-US") -> list[str]:
     lines = [f"## {heading}", ""]
     if not events:
-        return [*lines, "- missing: reporting events"]
-    lines.extend(render_event_line(event) for event in events)
+        return [*lines, "- missing: reporting events" if _is_english(language) else "- 缺少：报告事件"]
+    lines.extend(render_event_line(event, language=language) for event in events)
     return lines
 
 
-def render_pending_judgement_events(events: list[dict[str, Any]]) -> list[str]:
+def render_pending_judgement_events(events: list[dict[str, Any]], *, language: str = "en-US") -> list[str]:
     if not events:
         return []
-    lines = ["## Pending / Unverified judgements", ""]
+    lines = ["## Pending / Unverified judgements" if _is_english(language) else "## 待确认 / 未核验的判断", ""]
     for event in events:
         reason = str(event.get("_epistemic_reason") or "missing: current ConfirmationReceipt")
         summary = str(event.get("summary") or "").strip()
-        title = str(event.get("title") or "Untitled event").strip()
-        lines.append(f"- PENDING / UNVERIFIED JUDGEMENT — {summary or title}")
+        title = str(event.get("title") or ("Untitled event" if _is_english(language) else "未命名事件")).strip()
+        prefix = "PENDING / UNVERIFIED JUDGEMENT" if _is_english(language) else "待确认 / 未核验的判断"
+        lines.append(f"- {prefix} — {summary or title}")
         metadata_event = {**event, "summary": ""}
-        lines.append(f"  - Event: {render_event_line(metadata_event)[2:]}")
-        lines.append(f"  - {reason}")
+        event_label = "Event" if _is_english(language) else "事件"
+        lines.append(f"  - {event_label}: {render_event_line(metadata_event, language=language)[2:]}")
+        lines.append(f"  - {_pending_reason(reason, language=language)}")
     return lines
 
 
-def report_headings(report_kind: str) -> tuple[str, str]:
+def report_headings(report_kind: str, *, language: str = "en-US") -> tuple[str, str]:
+    if not _is_english(language):
+        if report_kind == "ppt-materials":
+            return "有证据支撑的幻灯片素材", "研究计划事件"
+        if report_kind == "writing-materials":
+            return "写作判断与证据", "研究计划事件"
+        if report_kind == "stage-summary":
+            return "已确认判断与证据", "阶段事件"
+        return "已确认判断与证据", "报告事件"
     if report_kind == "ppt-materials":
         return "Evidence-backed Slide Inputs", "Program Events"
     if report_kind == "writing-materials":
@@ -875,13 +1023,14 @@ def report_headings(report_kind: str) -> tuple[str, str]:
 
 def render_report(title: str, inputs: ReportInputs, *, report_kind: str) -> str:
     inputs = concise_report_inputs(inputs)
-    claims_heading, events_heading = report_headings(report_kind)
+    language = inputs.language
+    claims_heading, events_heading = report_headings(report_kind, language=language)
     sections = [
         [f"# {title}", ""],
-        render_decisions(inputs.decisions),
-        render_claims(inputs.claim_sources, inputs.missing_units, heading=claims_heading),
-        render_events(inputs.events, heading=events_heading),
-        render_pending_judgement_events(inputs.pending_judgement_events),
+        render_decisions(inputs.decisions, language=language),
+        render_claims(inputs.claim_sources, inputs.missing_units, heading=claims_heading, language=language),
+        render_events(inputs.events, heading=events_heading, language=language),
+        render_pending_judgement_events(inputs.pending_judgement_events, language=language),
     ]
     lines: list[str] = []
     for section in sections:
@@ -916,78 +1065,127 @@ def _event_matches(event: dict[str, Any], terms: set[str]) -> bool:
     return any(term in searchable for term in terms)
 
 
-def render_outline_event_inputs(events: list[dict[str, Any]], *, section: str, terms: set[str]) -> list[str]:
+def render_outline_event_inputs(
+    events: list[dict[str, Any]],
+    *,
+    section: str,
+    terms: set[str],
+    language: str = "en-US",
+) -> list[str]:
     matched = [event for event in events if _event_matches(event, terms)]
-    lines = [f"### {section} Inputs", ""]
+    lines = [f"### {section} Inputs" if _is_english(language) else f"### {section}素材", ""]
     if not matched:
-        return [*lines, f"- missing: {section.casefold()} events or evidence"]
-    lines.extend(render_event_line(event) for event in matched)
+        if _is_english(language):
+            return [*lines, f"- missing: {section.casefold()} events or evidence"]
+        return [*lines, f"- 缺少：{section}事件或证据"]
+    lines.extend(render_event_line(event, language=language) for event in matched)
     return lines
 
 
 def render_outline(program_id: str, inputs: ReportInputs) -> str:
     inputs = concise_report_inputs(inputs)
+    language = inputs.language
+    english = _is_english(language)
     related_work = render_claims(
         inputs.claim_sources,
         inputs.missing_units,
-        heading="Related Work: Confirmed Claims & Evidence",
+        heading="Related Work: Confirmed Claims & Evidence" if english else "相关工作：已确认判断与证据",
+        language=language,
     )
     if not any(source.claims for source in inputs.claim_sources):
-        related_work.append("- missing: related-work claims and evidence")
-    sections = [
-        [f"# Paper Outline: {program_id}", ""],
-        [
+        related_work.append("- missing: related-work claims and evidence" if english else "- 缺少：相关工作判断与证据")
+    if english:
+        title = f"Paper Outline: {program_id}"
+        introduction = [
             "## Introduction",
             "",
             "- Fill in: research problem, motivation, gap, contribution thesis, and paper roadmap.",
             "- missing: introduction narrative",
-        ],
-        related_work,
-        [
-            "## Method",
-            "",
-            "- Fill in: method overview, components, interfaces, assumptions, and implementation choices.",
-            *render_outline_event_inputs(
-                inputs.events,
-                section="Method",
-                terms={"method", "design", "implementation", "baseline", "architecture"},
-            ),
-        ],
-        [
-            "## Experiments",
-            "",
-            "- Fill in: research questions, datasets, baselines, metrics, ablations, and reproducibility details.",
-            *render_outline_event_inputs(
-                inputs.events,
-                section="Experiment",
-                terms={"experiment", "evaluation", "benchmark", "ablation", "metric"},
-            ),
-        ],
-        [
-            "## Results",
-            "",
-            "- Fill in: confirmed results, comparisons, uncertainty, and negative findings.",
-            *render_outline_event_inputs(
-                inputs.events,
-                section="Result",
-                terms={"result", "finding", "completed", "failure", "comparison"},
-            ),
-        ],
-        [
+        ]
+        method_intro = "- Fill in: method overview, components, interfaces, assumptions, and implementation choices."
+        experiment_intro = "- Fill in: research questions, datasets, baselines, metrics, ablations, and reproducibility details."
+        result_intro = "- Fill in: confirmed results, comparisons, uncertainty, and negative findings."
+        discussion = [
             "## Discussion",
             "",
             "- Fill in: interpretation, limitations, threats to validity, and broader implications.",
             "- missing: discussion narrative",
-        ],
-        [
+        ]
+        conclusion = [
             "## Conclusion",
             "",
             "- Fill in: concise answer to the research question and evidence-backed takeaways.",
             "- missing: conclusion narrative",
+        ]
+        section_labels = {"method": "Method", "experiment": "Experiments", "experiment_input": "Experiment", "result": "Results", "result_input": "Result"}
+        event_heading = "Program Events"
+    else:
+        title = f"论文大纲：{program_id}"
+        introduction = [
+            "## 引言",
+            "",
+            "- 待填写：研究问题、动机、缺口、贡献主张与全文路线。",
+            "- 缺少：引言叙事",
+        ]
+        method_intro = "- 待填写：方法概览、组成部分、接口、假设与实现选择。"
+        experiment_intro = "- 待填写：研究问题、数据集、基线、指标、消融与可复现细节。"
+        result_intro = "- 待填写：已确认结果、对比、不确定性与负面发现。"
+        discussion = [
+            "## 讨论",
+            "",
+            "- 待填写：结果解释、局限、有效性威胁与更广泛影响。",
+            "- 缺少：讨论叙事",
+        ]
+        conclusion = [
+            "## 结论",
+            "",
+            "- 待填写：对研究问题的简洁回答与有证据支撑的要点。",
+            "- 缺少：结论叙事",
+        ]
+        section_labels = {"method": "方法", "experiment": "实验", "experiment_input": "实验", "result": "结果", "result_input": "结果"}
+        event_heading = "研究计划事件"
+    sections = [
+        [f"# {title}", ""],
+        introduction,
+        related_work,
+        [
+            f"## {section_labels['method']}",
+            "",
+            method_intro,
+            *render_outline_event_inputs(
+                inputs.events,
+                section=section_labels["method"],
+                terms={"method", "design", "implementation", "baseline", "architecture"},
+                language=language,
+            ),
         ],
-        render_decisions(inputs.decisions),
-        render_events(inputs.events, heading="Program Events"),
-        render_pending_judgement_events(inputs.pending_judgement_events),
+        [
+            f"## {section_labels['experiment']}",
+            "",
+            experiment_intro,
+            *render_outline_event_inputs(
+                inputs.events,
+                section=section_labels["experiment_input"],
+                terms={"experiment", "evaluation", "benchmark", "ablation", "metric"},
+                language=language,
+            ),
+        ],
+        [
+            f"## {section_labels['result']}",
+            "",
+            result_intro,
+            *render_outline_event_inputs(
+                inputs.events,
+                section=section_labels["result_input"],
+                terms={"result", "finding", "completed", "failure", "comparison"},
+                language=language,
+            ),
+        ],
+        discussion,
+        conclusion,
+        render_decisions(inputs.decisions, language=language),
+        render_events(inputs.events, heading=event_heading, language=language),
+        render_pending_judgement_events(inputs.pending_judgement_events, language=language),
     ]
     lines: list[str] = []
     for section in sections:
@@ -1013,19 +1211,15 @@ def main() -> int:
     )
     if args.command == "weekly":
         path = reports_root / "weekly.md"
-        title = f"Weekly Report: {args.program_id}"
     elif args.command == "ppt-materials":
         path = user_root(root) / "report-materials" / f"{args.program_id}-ppt-materials.md"
-        title = f"PPT Materials: {args.program_id}"
     elif args.command == "writing-materials":
         path = user_root(root) / "report-materials" / f"{args.program_id}-writing-materials.md"
-        title = f"Writing Materials: {args.program_id}"
     elif args.command == "outline":
         path = reports_root / "paper-outline.md"
-        title = ""
     else:
         path = reports_root / "stage-summary.md"
-        title = f"Stage Summary: {args.program_id}"
+    title = report_title(args.command, args.program_id, language=inputs.language)
     text = render_outline(args.program_id, inputs) if args.command == "outline" else render_report(title, inputs, report_kind=args.command)
     if inputs.preference_binding:
         binding_text = json.dumps(inputs.preference_binding, ensure_ascii=False, sort_keys=True)

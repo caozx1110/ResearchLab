@@ -136,6 +136,7 @@ def test_bound_consumer_resolves_selected_values_without_copying_them_into_recei
         "operation": "weekly",
         "stage": "",
         "limit": 20,
+        "presentation_contract": "report-presentation/v2",
         "input_snapshot": {
             "digest": "0" * 64,
             "accepted_event_count": 0,
