@@ -421,7 +421,15 @@ def test_copied_survey_event_is_pending_for_the_wrong_program_after_reload(tmp_p
 
 @pytest.mark.parametrize(
     "mutation",
-    ["content", "confirmation", "verification", "evidence", "upstream_binding"],
+    [
+        "content",
+        "confirmation",
+        "verification",
+        "evidence",
+        "upstream_binding",
+        "invalid_survey_yaml",
+        "invalid_upstream_yaml",
+    ],
 )
 def test_stale_or_tampered_survey_never_reaches_formal_claims(tmp_path: Path, mutation: str) -> None:
     report = _load_report_module()
@@ -441,9 +449,14 @@ def test_stale_or_tampered_survey_never_reaches_formal_claims(tmp_path: Path, mu
     elif mutation == "evidence":
         evidence_path = tmp_path / "kb" / "units" / "papers" / "p-survey-alpha" / "note.md"
         evidence_path.write_text("# Evidence\n\nChanged after confirmation.\n", encoding="utf-8")
-    else:
+    elif mutation == "upstream_binding":
         survey["consumer_binding"]["unit_ids"] = []
         write_yaml_if_changed(survey_path, survey)
+    elif mutation == "invalid_survey_yaml":
+        survey_path.write_text("kind: survey_judgement\npayload: [unterminated\n", encoding="utf-8")
+    else:
+        upstream = tmp_path / "kb" / "units" / "papers" / "p-survey-alpha" / "record.yaml"
+        upstream.write_text("kind: paper\npayload: [unterminated\n", encoding="utf-8")
 
     inputs = report.load_report_inputs(tmp_path, program_id, stage="survey")
     text = report.render_report(
