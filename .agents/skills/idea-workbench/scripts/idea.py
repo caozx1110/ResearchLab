@@ -66,6 +66,24 @@ GENERATION_FILL_NAME = "generation-fill.yaml"
 GENERATION_ORIENTATION_NAME = "generation-orientation.yaml"
 GENERATION_CORPUS_NAME = "generation-evidence-corpus.yaml"
 MAX_GENERATED_CANDIDATES = 12
+AUTHORING_ANCHOR_SCHEMA = "idea-authoring-anchor/v1"
+PREPARED_BUNDLE_SCHEMA = "idea-generation-bundle/v1"
+AUTHORING_ANCHOR_KEYS = {
+    "schema",
+    "operation",
+    "canonical_id",
+    "request_context_digest",
+    "orientation_binding",
+    "corpus_commitment",
+}
+PREPARED_BUNDLE_KEYS = {
+    "schema",
+    "id",
+    "owner",
+    "status",
+    "request_context_digest",
+    "authoring_contract",
+}
 HEX_DIGEST_RE = re.compile(r"[0-9a-f]{64}")
 CANONICAL_UNIT_DIRECTORIES = {"papers", "repos", "datasets", "blogs", "ideas", "experiments"}
 MAX_CORPUS_FILE_BYTES = 16 * 1024 * 1024
@@ -143,7 +161,7 @@ def _idea_command_targets(args, root: Path) -> list[Path]:
             working_root / GENERATION_CORPUS_NAME,
         ]
         if args.phase == "prepare":
-            return private_targets
+            return [bundle_index_path(root, bundle_id), *private_targets]
         plan = generation_materialization_plan(root, args, bundle_id=bundle_id)
         args._generation_plan = plan
         idea_paths = [record_path(root, "idea", item["idea_id"]) for item in plan["candidates"]]
@@ -163,6 +181,11 @@ def _idea_command_targets(args, root: Path) -> list[Path]:
             bundle_id = normalized_pool or "idea-pool"
         else:
             bundle_id = f"idea-review-{hashlib.sha1(' '.join(idea_ids).encode('utf-8')).hexdigest()[:8]}"
+        existing_bundle = load_yaml(bundle_index_path(root, bundle_id), default={})
+        if _is_prepared_generation_bundle(existing_bundle):
+            raise ValueError(
+                "prepared idea generation bundle cannot be used by generic bundle operations"
+            )
         bundle = bundle_root(root, bundle_id)
         extra = [bundle / "review-assist.md"] if args.command == "review-assist" else [bundle / "selection.yaml"]
         return [bundle_index_path(root, bundle_id), *extra, *[record_path(root, "idea", idea_id) for idea_id in idea_ids], *targets]
@@ -210,6 +233,65 @@ def _assert_planned_idea_resolution(args, record: Mapping[str, object], path: Pa
         raise SystemExit("Idea resolution changed before the operation lock; no changes were made.")
 
 
+def _generation_prepare_has_current_owner(
+    root: Path,
+    *,
+    bundle_id: str,
+    request_context: Mapping[str, object],
+) -> bool:
+    index_path = bundle_index_path(root, bundle_id)
+    if index_path.exists() or index_path.is_symlink():
+        idea_preference_context(
+            root,
+            operation="generate",
+            canonical_id=bundle_id,
+            orientation_path=bundle_root(root, bundle_id) / GENERATION_ORIENTATION_NAME,
+            corpus_path=bundle_root(root, bundle_id) / GENERATION_CORPUS_NAME,
+            excluded_paths=set(),
+            request_context=request_context,
+        )
+        return True
+    corpus_path = bundle_root(root, bundle_id) / GENERATION_CORPUS_NAME
+    if corpus_path.exists() or corpus_path.is_symlink():
+        corpus, _binding = _validated_frozen_corpus(root, corpus_path)
+        if corpus.get("schema") == "idea-evidence-corpus/v2":
+            raise ValueError("unanchored v2 idea generation task cannot be adopted")
+    return False
+
+
+def _require_existing_semantic_anchor_if_v2(
+    root: Path,
+    *,
+    operation: str,
+    record: Mapping[str, object],
+    unit_root: Path,
+    allow_consumed_without_anchor: bool,
+) -> None:
+    contracts = _record_authoring_contracts(record)
+    other_active = set(contracts) - {operation}
+    if other_active:
+        raise ValueError("another semantic idea authoring operation is already active")
+    corpus_path = unit_root / f"{operation}-evidence-corpus.yaml"
+    if not corpus_path.exists() and not corpus_path.is_symlink():
+        return
+    corpus, _binding = _validated_frozen_corpus(root, corpus_path)
+    if corpus.get("schema") != "idea-evidence-corpus/v2":
+        return
+    if operation not in contracts:
+        if allow_consumed_without_anchor:
+            return
+        raise ValueError("unanchored v2 semantic idea authoring task cannot be adopted")
+    idea_preference_context(
+        root,
+        operation=operation,
+        canonical_id=str(record["id"]),
+        orientation_path=unit_root / f"{operation}-orientation.yaml",
+        corpus_path=corpus_path,
+        excluded_paths=_corpus_exclusions(unit_root, operation),
+        record_path_value=unit_root / "record.yaml",
+    )
+
+
 def _idea_prepare_preflight(args, root: Path) -> None:
     """Run lossless prepare guards under locks and before journal snapshots."""
     if getattr(args, "phase", "") != "prepare":
@@ -218,6 +300,14 @@ def _idea_prepare_preflight(args, root: Path) -> None:
         bundle_id = generation_bundle_id(args)
         request_context = generation_request_context(args, bundle_id=bundle_id)
         working_root = bundle_root(root, bundle_id)
+        try:
+            _generation_prepare_has_current_owner(
+                root,
+                bundle_id=bundle_id,
+                request_context=request_context,
+            )
+        except ValueError as exc:
+            raise SystemExit("This idea generation bundle is terminal or its prepared state changed.") from exc
         _guard_existing_empty_fill(
             root,
             working_root / GENERATION_FILL_NAME,
@@ -232,20 +322,42 @@ def _idea_prepare_preflight(args, root: Path) -> None:
     _assert_planned_idea_resolution(args, record, path)
     unit_root = path.parent
     if args.command in {"discuss", "spar"}:
+        consumed_bindings = _consumed_fill_bindings(root, record, unit_root, "discuss")
+        try:
+            _require_existing_semantic_anchor_if_v2(
+                root,
+                operation="discuss",
+                record=record,
+                unit_root=unit_root,
+                allow_consumed_without_anchor=bool(consumed_bindings),
+            )
+        except ValueError as exc:
+            raise SystemExit("Existing idea discussion contract is stale or unanchored.") from exc
         _guard_existing_empty_fill(
             root,
             unit_root / "discussion-fill.yaml",
             discussion_scaffold(record, preference_context=None),
-            consumed_bindings=_consumed_fill_bindings(root, record, unit_root, "discuss"),
+            consumed_bindings=consumed_bindings,
         )
         _guard_existing_contract_target(root, unit_root / "discuss-orientation.yaml")
         _guard_existing_contract_target(root, unit_root / "discuss-evidence-corpus.yaml")
         return
+    consumed_bindings = _consumed_fill_bindings(root, record, unit_root, args.command)
+    try:
+        _require_existing_semantic_anchor_if_v2(
+            root,
+            operation=args.command,
+            record=record,
+            unit_root=unit_root,
+            allow_consumed_without_anchor=bool(consumed_bindings),
+        )
+    except ValueError as exc:
+        raise SystemExit("Existing idea authoring contract is stale or unanchored.") from exc
     _guard_existing_empty_fill(
         root,
         unit_root / f"{args.command}-fill.yaml",
         analysis_scaffold(record, mode=args.command, preference_context=None),
-        consumed_bindings=_consumed_fill_bindings(root, record, unit_root, args.command),
+        consumed_bindings=consumed_bindings,
     )
     _guard_existing_contract_target(root, unit_root / f"{args.command}-orientation.yaml")
     _guard_existing_contract_target(root, unit_root / f"{args.command}-evidence-corpus.yaml")
@@ -884,6 +996,174 @@ def _corpus_commitment(
     }
 
 
+def _authoring_request_digest(
+    operation: str,
+    request_context: Mapping[str, object] | None,
+) -> str:
+    if operation == "generate":
+        if request_context is None:
+            raise ValueError("idea generation anchor requires exact request context")
+        return canonical_digest(dict(request_context))
+    return canonical_digest({})
+
+
+def _authoring_anchor(
+    *,
+    operation: str,
+    canonical_id: str,
+    request_context: Mapping[str, object] | None,
+    orientation_binding: Mapping[str, str],
+    corpus_commitment: Mapping[str, str],
+) -> dict[str, object]:
+    anchor: dict[str, object] = {
+        "schema": AUTHORING_ANCHOR_SCHEMA,
+        "operation": operation,
+        "canonical_id": canonical_id,
+        "request_context_digest": _authoring_request_digest(operation, request_context),
+        "orientation_binding": dict(orientation_binding),
+        "corpus_commitment": dict(corpus_commitment),
+    }
+    _validate_authoring_anchor(anchor, operation=operation, canonical_id=canonical_id)
+    return anchor
+
+
+def _validate_authoring_anchor(
+    anchor: object,
+    *,
+    operation: str,
+    canonical_id: str,
+) -> dict[str, object]:
+    if not isinstance(anchor, dict) or set(anchor) != AUTHORING_ANCHOR_KEYS:
+        raise ValueError("idea authoring owner anchor is missing or malformed")
+    if (
+        anchor.get("schema") != AUTHORING_ANCHOR_SCHEMA
+        or anchor.get("operation") != operation
+        or anchor.get("canonical_id") != canonical_id
+        or not HEX_DIGEST_RE.fullmatch(str(anchor.get("request_context_digest") or ""))
+    ):
+        raise ValueError("idea authoring owner anchor identity is invalid")
+    orientation_binding = anchor.get("orientation_binding")
+    corpus_commitment = anchor.get("corpus_commitment")
+    if (
+        not isinstance(orientation_binding, dict)
+        or set(orientation_binding) != {"identity_digest", "bytes_digest"}
+        or not all(HEX_DIGEST_RE.fullmatch(str(value or "")) for value in orientation_binding.values())
+        or not isinstance(corpus_commitment, dict)
+        or set(corpus_commitment) != {
+            "manifest_identity_digest",
+            "manifest_bytes_digest",
+            "corpus_file_identity_digest",
+            "corpus_file_bytes_digest",
+        }
+        or not all(HEX_DIGEST_RE.fullmatch(str(value or "")) for value in corpus_commitment.values())
+    ):
+        raise ValueError("idea authoring owner anchor bindings are malformed")
+    return anchor
+
+
+def _record_authoring_contracts(record: Mapping[str, object]) -> dict[str, object]:
+    payload = record.get("payload")
+    contracts = payload.get("idea_authoring_contracts") if isinstance(payload, Mapping) else None
+    if contracts is None:
+        return {}
+    if not isinstance(contracts, Mapping):
+        raise ValueError("idea authoring owner contract registry is malformed")
+    canonical_id = str(record.get("id") or "")
+    normalized = dict(contracts)
+    if len(normalized) > 1 or any(
+        operation not in {"analyze", "review", "discuss"}
+        for operation in normalized
+    ):
+        raise ValueError("an idea may have only one active semantic authoring contract")
+    for operation, anchor in normalized.items():
+        _validate_authoring_anchor(
+            anchor,
+            operation=operation,
+            canonical_id=canonical_id,
+        )
+    return normalized
+
+
+def _record_authoring_anchor(
+    record: Mapping[str, object],
+    operation: str,
+) -> object:
+    return _record_authoring_contracts(record).get(operation)
+
+
+def _persist_record_authoring_anchor(
+    record: dict,
+    operation: str,
+    anchor: Mapping[str, object],
+) -> None:
+    contracts = _record_authoring_contracts(record)
+    if set(contracts) - {operation}:
+        raise ValueError("another semantic idea authoring operation is already active")
+    record.setdefault("payload", {}).setdefault("idea_authoring_contracts", {})[
+        operation
+    ] = dict(anchor)
+
+
+def _consume_record_authoring_anchor(record: dict, operation: str) -> None:
+    payload = record.setdefault("payload", {})
+    contracts = payload.get("idea_authoring_contracts")
+    if not isinstance(contracts, dict) or operation not in contracts:
+        raise ValueError("active idea authoring owner anchor is missing at consumption")
+    del contracts[operation]
+    if not contracts:
+        payload.pop("idea_authoring_contracts", None)
+
+
+def _authoring_provenance(anchor: Mapping[str, object] | None) -> dict[str, str]:
+    if anchor is None:
+        return {"mode": "legacy-unanchored/v1"}
+    return {
+        "mode": "owner-anchored/v1",
+        "authoring_contract_digest": canonical_digest(dict(anchor)),
+    }
+
+
+def _prepared_generation_bundle(
+    bundle_id: str,
+    request_context: Mapping[str, object],
+    anchor: Mapping[str, object],
+) -> dict[str, object]:
+    return {
+        "schema": PREPARED_BUNDLE_SCHEMA,
+        "id": bundle_id,
+        "owner": "idea-workbench",
+        "status": "prepared",
+        "request_context_digest": canonical_digest(dict(request_context)),
+        "authoring_contract": dict(anchor),
+    }
+
+
+def _load_prepared_generation_bundle(
+    root: Path,
+    *,
+    bundle_id: str,
+    request_context: Mapping[str, object],
+    current_anchor: Mapping[str, object],
+) -> tuple[dict[str, object], dict[str, str]]:
+    index_path = bundle_index_path(root, bundle_id)
+    payload, binding = _bound_yaml(
+        index_path,
+        logical_identity=index_path.relative_to(root).as_posix(),
+        trusted_root=root,
+    )
+    expected = _prepared_generation_bundle(bundle_id, request_context, current_anchor)
+    if payload != expected or not isinstance(payload, dict) or set(payload) != PREPARED_BUNDLE_KEYS:
+        raise ValueError("idea generation prepared bundle state is stale or malformed")
+    return payload, binding
+
+
+def _is_prepared_generation_bundle(payload: object) -> bool:
+    return isinstance(payload, Mapping) and (
+        payload.get("schema") == PREPARED_BUNDLE_SCHEMA
+        or payload.get("status") == "prepared"
+    )
+
+
 def _has_current_v2_corpus(root: Path, corpus_path: Path) -> bool:
     corpus, _binding = _validated_frozen_corpus(root, corpus_path)
     return corpus.get("schema") == "idea-evidence-corpus/v2"
@@ -898,7 +1178,7 @@ def _write_authoring_contract(
     corpus_path: Path,
     excluded_paths: set[Path],
     request_context: Mapping[str, object] | None = None,
-) -> None:
+) -> dict[str, object]:
     write_yaml_if_changed(
         corpus_path,
         _evidence_corpus_snapshot(root, excluded_paths=excluded_paths),
@@ -912,6 +1192,18 @@ def _write_authoring_contract(
             corpus_commitment=_corpus_commitment(corpus, binding),
             request_context=request_context,
         ),
+    )
+    orientation_binding = regular_file_binding(
+        orientation_path,
+        logical_identity=orientation_path.name,
+        trusted_root=root,
+    )
+    return _authoring_anchor(
+        operation=operation,
+        canonical_id=canonical_id,
+        request_context=request_context,
+        orientation_binding=orientation_binding,
+        corpus_commitment=_corpus_commitment(corpus, binding),
     )
 
 
@@ -1171,19 +1463,81 @@ def idea_preference_context(
     )
     if orientation != expected_orientation:
         raise ValueError("immutable idea authoring orientation was modified")
+    current_anchor = _authoring_anchor(
+        operation=operation,
+        canonical_id=canonical_id,
+        request_context=request_context,
+        orientation_binding=orientation_binding,
+        corpus_commitment=commitment,
+    )
+    owner_anchor: object = None
+    record: object = None
+    record_binding: dict[str, str] | None = None
+    if operation == "generate":
+        if request_context is None:
+            raise ValueError("idea generation preference context requires exact request context")
+        if corpus.get("schema") == "idea-evidence-corpus/v2":
+            prepared, _prepared_binding = _load_prepared_generation_bundle(
+                root,
+                bundle_id=canonical_id,
+                request_context=request_context,
+                current_anchor=current_anchor,
+            )
+            owner_anchor = prepared.get("authoring_contract")
+        elif bundle_index_path(root, canonical_id).exists() or bundle_index_path(
+            root, canonical_id
+        ).is_symlink():
+            raise ValueError("legacy idea generation cannot carry a v2 prepared owner bundle")
+    else:
+        if record_path_value is None:
+            raise ValueError("semantic idea preference context requires the canonical record")
+        record, record_binding = _bound_yaml(
+            record_path_value,
+            logical_identity="record.yaml",
+            trusted_root=root,
+        )
+        if not isinstance(record, Mapping):
+            raise ValueError("canonical idea record is malformed")
+        owner_anchor = _record_authoring_anchor(record, operation)
+        if corpus.get("schema") == "idea-evidence-corpus/v1":
+            if owner_anchor is not None:
+                raise ValueError("legacy semantic idea task cannot carry a v2 owner anchor")
+            payload = record.get("payload")
+            consumptions = payload.get("idea_authoring_consumptions") if isinstance(payload, Mapping) else None
+            if isinstance(consumptions, Mapping) and operation in consumptions:
+                raise ValueError("legacy unanchored idea authoring task was already consumed")
+    if corpus.get("schema") == "idea-evidence-corpus/v2":
+        _validate_authoring_anchor(
+            owner_anchor,
+            operation=operation,
+            canonical_id=canonical_id,
+        )
+        if owner_anchor != current_anchor:
+            raise ValueError("idea authoring owner anchor does not match current contract")
+        owner_anchor_digest = canonical_digest(owner_anchor)
+    else:
+        owner_anchor_digest = canonical_digest({})
+    phase_contract_digest = (
+        canonical_digest(expected_orientation["phase_contract"])
+        if corpus.get("schema") == "idea-evidence-corpus/v1"
+        else canonical_digest(
+            {
+                "phase_contract": expected_orientation["phase_contract"],
+                "owner_anchor_digest": owner_anchor_digest,
+            }
+        )
+    )
     common = {
         "canonical_id": canonical_id,
         "canonical_kind": "idea-generation-bundle" if operation == "generate" else "idea",
         "operation": operation,
-        "phase_contract_digest": canonical_digest(expected_orientation["phase_contract"]),
+        "phase_contract_digest": phase_contract_digest,
         "immutable_orientation_identity_digest": orientation_binding["identity_digest"],
         "immutable_orientation_bytes_digest": orientation_binding["bytes_digest"],
         "evidence_corpus_identity_digest": str(corpus["identity_digest"]),
         "evidence_corpus_bytes_digest": str(corpus["bytes_digest"]),
     }
     if operation == "generate":
-        if request_context is None:
-            raise ValueError("idea generation preference context requires exact request context")
         return {
             **common,
             "request_context_digest": canonical_digest(dict(request_context)),
@@ -1192,13 +1546,7 @@ def idea_preference_context(
             "pool_digest": canonical_digest(request_context["pool"]),
             "source_digest": canonical_digest(request_context["source"]),
         }
-    if record_path_value is None:
-        raise ValueError("semantic idea preference context requires the canonical record")
-    record_binding = regular_file_binding(
-        record_path_value,
-        logical_identity="record.yaml",
-        trusted_root=root,
-    )
+    assert record_binding is not None
     return {
         **common,
         "record_identity_digest": (
@@ -1322,6 +1670,51 @@ def generation_materialization_plan(root: Path, args, *, bundle_id: str) -> dict
         excluded_paths=set(),
         request_context=request_context,
     )
+    index_path = bundle_index_path(root, bundle_id)
+    if index_path.exists() or index_path.is_symlink():
+        prepared_bundle, prepared_bundle_binding = _bound_yaml(
+            index_path,
+            logical_identity=index_path.relative_to(root).as_posix(),
+            trusted_root=root,
+        )
+        corpus, corpus_binding = _validated_frozen_corpus(root, corpus_path)
+        orientation, orientation_binding = _bound_yaml(
+            orientation_path,
+            logical_identity=orientation_path.name,
+            trusted_root=root,
+        )
+        expected_orientation = idea_preference_orientation(
+            "generate",
+            canonical_id=bundle_id,
+            corpus_commitment=_corpus_commitment(corpus, corpus_binding),
+            request_context=request_context,
+        )
+        if orientation != expected_orientation:
+            raise ValueError("immutable idea generation orientation was modified")
+        current_anchor = _authoring_anchor(
+            operation="generate",
+            canonical_id=bundle_id,
+            request_context=request_context,
+            orientation_binding=orientation_binding,
+            corpus_commitment=_corpus_commitment(corpus, corpus_binding),
+        )
+        if prepared_bundle != _prepared_generation_bundle(
+            bundle_id, request_context, current_anchor
+        ):
+            raise ValueError("idea generation prepared bundle is malformed")
+        authoring_contract = _validate_authoring_anchor(
+            prepared_bundle.get("authoring_contract"),
+            operation="generate",
+            canonical_id=bundle_id,
+        )
+        authoring_provenance = _authoring_provenance(authoring_contract)
+    else:
+        corpus, _corpus_binding = _validated_frozen_corpus(root, corpus_path)
+        if corpus.get("schema") != "idea-evidence-corpus/v1":
+            raise ValueError("v2 idea generation requires a prepared owner bundle")
+        prepared_bundle_binding = {}
+        authoring_contract = None
+        authoring_provenance = _authoring_provenance(None)
     fill_path = _generation_fill_path(root, args, bundle_id=bundle_id)
     fill, fill_binding = _bound_yaml(
         fill_path,
@@ -1392,6 +1785,11 @@ def generation_materialization_plan(root: Path, args, *, bundle_id: str) -> dict
         "bundle_id": bundle_id,
         "request_context": request_context,
         "preference_context": context,
+        "prepared_bundle_binding": prepared_bundle_binding,
+        "authoring_contract": (
+            dict(authoring_contract) if authoring_contract is not None else {}
+        ),
+        "authoring_provenance": authoring_provenance,
         "fill_path": fill_path,
         "fill_binding": fill_binding,
         "candidates": candidates,
@@ -1401,6 +1799,8 @@ def generation_materialization_plan(root: Path, args, *, bundle_id: str) -> dict
 def ensure_bundle(root: Path, bundle_id: str, *, title: str, source: str, pool: str, strategy: str = "generated") -> dict:
     ensure_dir(bundle_root(root, bundle_id))
     existing = load_yaml(bundle_index_path(root, bundle_id), default={})
+    if _is_prepared_generation_bundle(existing):
+        raise ValueError("prepared idea generation bundle cannot be used by generic bundle operations")
     if isinstance(existing, dict) and existing.get("id"):
         return existing
     payload = {
@@ -1840,11 +2240,24 @@ def run_analysis_phase(args, root: Path, record: dict, unit_root: Path, *, mode:
     exclusions = _corpus_exclusions(unit_root, mode)
     result_path = unit_root / f"{mode}.yaml"
     if args.phase == "prepare":
+        consumed_bindings = _consumed_fill_bindings(root, record, unit_root, mode)
+        try:
+            _require_existing_semantic_anchor_if_v2(
+                root,
+                operation=mode,
+                record=record,
+                unit_root=unit_root,
+                allow_consumed_without_anchor=bool(consumed_bindings),
+            )
+        except ValueError as exc:
+            raise SystemExit(
+                "Existing idea authoring contract is stale, unanchored, or conflicts with another active operation."
+            ) from exc
         existing_fill = _guard_existing_empty_fill(
             root,
             fill_path,
             analysis_scaffold(record, mode=mode, preference_context=None),
-            consumed_bindings=_consumed_fill_bindings(root, record, unit_root, mode),
+            consumed_bindings=consumed_bindings,
         )
         if existing_fill is not None:
             try:
@@ -1884,7 +2297,7 @@ def run_analysis_phase(args, root: Path, record: dict, unit_root: Path, *, mode:
                 artifacts=[rel(root, fill_path)],
             )
         write_record(root, record)
-        _write_authoring_contract(
+        anchor = _write_authoring_contract(
             root,
             operation=mode,
             canonical_id=str(record["id"]),
@@ -1892,6 +2305,8 @@ def run_analysis_phase(args, root: Path, record: dict, unit_root: Path, *, mode:
             corpus_path=corpus_path,
             excluded_paths=exclusions,
         )
+        _persist_record_authoring_anchor(record, mode, anchor)
+        write_record(root, record)
         preference_context = idea_preference_context(
             root,
             operation=mode,
@@ -1968,6 +2383,16 @@ def run_analysis_phase(args, root: Path, record: dict, unit_root: Path, *, mode:
     except ValueError as exc:
         print(f"[reject] {mode} evidence corpus: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
+    active_anchor = (
+        _validate_authoring_anchor(
+            _record_authoring_anchor(record, mode),
+            operation=mode,
+            canonical_id=str(record["id"]),
+        )
+        if corpus.get("schema") == "idea-evidence-corpus/v2"
+        else None
+    )
+    authoring_provenance = _authoring_provenance(active_anchor)
     violations.extend(_claim_input_violations(root, claims, corpus))
     if violations:
         print(f"[reject] {mode} failed evidence verification:", file=sys.stderr)
@@ -2036,6 +2461,8 @@ def run_analysis_phase(args, root: Path, record: dict, unit_root: Path, *, mode:
     except ValueError as exc:
         print(f"[reject] {mode} final write-boundary check: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
+    if active_anchor is not None:
+        _consume_record_authoring_anchor(record, mode)
     record["status"] = "pending"
     record["confirmation_status"] = "pending_user_confirmation"
     record["needs_human_confirmation"] = True
@@ -2053,6 +2480,7 @@ def run_analysis_phase(args, root: Path, record: dict, unit_root: Path, *, mode:
         "claims": claims,
         "descriptive_counts": descriptive_counts(record),
         "consumed_fill_binding": dict(fill_binding),
+        "authoring_provenance": authoring_provenance,
     }
     if preference_binding:
         payload["preference_selection"] = preference_binding
@@ -2114,6 +2542,7 @@ def persist_discussion_conclusion(
     claims: list[dict],
     *,
     fill_binding: Mapping[str, str],
+    authoring_provenance: Mapping[str, str],
     preference_binding: Mapping[str, object] | None = None,
 ) -> tuple[dict, dict, list[dict]]:
     verified_at = utc_now_iso()
@@ -2126,6 +2555,7 @@ def persist_discussion_conclusion(
         "verification": "evidence_verified",
         "claims": claims,
         "consumed_fill_binding": dict(fill_binding),
+        "authoring_provenance": dict(authoring_provenance),
     }
     judgement = {
         "id": conclusion["id"],
@@ -2138,6 +2568,7 @@ def persist_discussion_conclusion(
         "confirmation_status": "pending_user_confirmation",
         "needs_human_confirmation": True,
         "consumed_fill_binding": dict(fill_binding),
+        "authoring_provenance": dict(authoring_provenance),
         "information_types": ["inference", "evaluation", "unverified"],
         "payload": {
             "discussion_conclusion": {
@@ -2280,8 +2711,16 @@ def _dispatch(args, root: Path) -> int:
         fill_path = working_root / GENERATION_FILL_NAME
         request_context = generation_request_context(args, bundle_id=bundle_id)
         if args.phase == "prepare":
-            if bundle_index_path(root, bundle_id).exists() or bundle_index_path(root, bundle_id).is_symlink():
-                raise SystemExit("This idea generation bundle has already been materialized.")
+            try:
+                has_prepared_owner = _generation_prepare_has_current_owner(
+                    root,
+                    bundle_id=bundle_id,
+                    request_context=request_context,
+                )
+            except ValueError as exc:
+                raise SystemExit(
+                    "This idea generation bundle is terminal or its prepared state changed."
+                ) from exc
             static_scaffold = generation_scaffold(request_context, None)
             existing_fill = _guard_existing_empty_fill(
                 root,
@@ -2307,7 +2746,23 @@ def _dispatch(args, root: Path) -> int:
                         return 0
                 except ValueError:
                     pass
-            _write_authoring_contract(
+            if has_prepared_owner:
+                preference_context = idea_preference_context(
+                    root,
+                    operation="generate",
+                    canonical_id=bundle_id,
+                    orientation_path=orientation_path,
+                    corpus_path=corpus_path,
+                    excluded_paths=set(),
+                    request_context=request_context,
+                )
+                write_yaml_if_changed(
+                    fill_path,
+                    generation_scaffold(request_context, preference_context),
+                )
+                print("空白候选槽位已经恢复为当前准备状态。")
+                return 0
+            anchor = _write_authoring_contract(
                 root,
                 operation="generate",
                 canonical_id=bundle_id,
@@ -2315,6 +2770,10 @@ def _dispatch(args, root: Path) -> int:
                 corpus_path=corpus_path,
                 excluded_paths=set(),
                 request_context=request_context,
+            )
+            write_yaml_if_changed(
+                bundle_index_path(root, bundle_id),
+                _prepared_generation_bundle(bundle_id, request_context, anchor),
             )
             preference_context = idea_preference_context(
                 root,
@@ -2334,7 +2793,12 @@ def _dispatch(args, root: Path) -> int:
                 root,
                 trigger="milestone",
                 message=f"milestone: prepare idea generation {bundle_id}",
-                target_paths=[orientation_path, corpus_path, fill_path],
+                target_paths=[
+                    bundle_index_path(root, bundle_id),
+                    orientation_path,
+                    corpus_path,
+                    fill_path,
+                ],
             )
             return 0
 
@@ -2343,6 +2807,8 @@ def _dispatch(args, root: Path) -> int:
             current_plan = generation_materialization_plan(root, args, bundle_id=bundle_id)
             if not isinstance(planned, dict) or (
                 planned.get("fill_binding") != current_plan.get("fill_binding")
+                or planned.get("prepared_bundle_binding")
+                != current_plan.get("prepared_bundle_binding")
                 or planned.get("candidates") != current_plan.get("candidates")
                 or planned.get("preference_context") != current_plan.get("preference_context")
             ):
@@ -2409,6 +2875,8 @@ def _dispatch(args, root: Path) -> int:
             "generation_context": dict(request_context),
             "idea_ids": [str(record["id"]) for record, _path in candidate_records],
             "selected_id": "",
+            "authoring_provenance": dict(current_plan["authoring_provenance"]),
+            "consumed_fill_binding": dict(current_plan["fill_binding"]),
         }
         if preference_binding:
             bundle_payload["preference_selection"] = preference_binding
@@ -2423,6 +2891,8 @@ def _dispatch(args, root: Path) -> int:
             )
             if (
                 final_plan.get("fill_binding") != current_plan.get("fill_binding")
+                or final_plan.get("prepared_bundle_binding")
+                != current_plan.get("prepared_bundle_binding")
                 or final_plan.get("candidates") != current_plan.get("candidates")
                 or final_plan.get("preference_context") != current_plan.get("preference_context")
                 or final_resolution.get("task_context_digest")
@@ -2531,11 +3001,26 @@ def _dispatch(args, root: Path) -> int:
         corpus_path = unit_root / "discuss-evidence-corpus.yaml"
         exclusions = _corpus_exclusions(unit_root, "discuss")
         if args.phase == "prepare":
+            consumed_bindings = _consumed_fill_bindings(
+                root, record, unit_root, "discuss"
+            )
+            try:
+                _require_existing_semantic_anchor_if_v2(
+                    root,
+                    operation="discuss",
+                    record=record,
+                    unit_root=unit_root,
+                    allow_consumed_without_anchor=bool(consumed_bindings),
+                )
+            except ValueError as exc:
+                raise SystemExit(
+                    "Existing idea discussion contract is stale, unanchored, or conflicts with another active operation."
+                ) from exc
             existing_fill = _guard_existing_empty_fill(
                 root,
                 scaffold_path,
                 discussion_scaffold(record, preference_context=None),
-                consumed_bindings=_consumed_fill_bindings(root, record, unit_root, "discuss"),
+                consumed_bindings=consumed_bindings,
             )
             if existing_fill is not None:
                 try:
@@ -2568,7 +3053,7 @@ def _dispatch(args, root: Path) -> int:
                     artifacts=[rel(root, scaffold_path)],
                 )
             write_record(root, record)
-            _write_authoring_contract(
+            anchor = _write_authoring_contract(
                 root,
                 operation="discuss",
                 canonical_id=str(record["id"]),
@@ -2576,6 +3061,8 @@ def _dispatch(args, root: Path) -> int:
                 corpus_path=corpus_path,
                 excluded_paths=exclusions,
             )
+            _persist_record_authoring_anchor(record, "discuss", anchor)
+            write_record(root, record)
             preference_context = idea_preference_context(
                 root,
                 operation="discuss",
@@ -2689,6 +3176,16 @@ def _dispatch(args, root: Path) -> int:
         except ValueError as exc:
             print(f"[reject] discuss evidence corpus: {exc}", file=sys.stderr)
             raise SystemExit(1) from exc
+        active_anchor = (
+            _validate_authoring_anchor(
+                _record_authoring_anchor(record, "discuss"),
+                operation="discuss",
+                canonical_id=str(record["id"]),
+            )
+            if corpus.get("schema") == "idea-evidence-corpus/v2"
+            else None
+        )
+        authoring_provenance = _authoring_provenance(active_anchor)
         violations.extend(_claim_input_violations(root, claims, corpus))
         if violations:
             print("[reject] discussion conclusion failed verification:", file=sys.stderr)
@@ -2725,6 +3222,7 @@ def _dispatch(args, root: Path) -> int:
             fill,
             claims,
             fill_binding=fill_binding,
+            authoring_provenance=authoring_provenance,
             preference_binding=dict(preference_resolution.get("binding") or {}),
         )
         try:
@@ -2750,6 +3248,8 @@ def _dispatch(args, root: Path) -> int:
         except ValueError as exc:
             print(f"[reject] discuss final write-boundary check: {exc}", file=sys.stderr)
             raise SystemExit(1) from exc
+        if active_anchor is not None:
+            _consume_record_authoring_anchor(record, "discuss")
         write_discussion_judgements(unit_root, record["id"], judgement_items)
         append_history(
             record,
