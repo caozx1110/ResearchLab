@@ -154,7 +154,7 @@ def test_apply_copy_install_invokes_ws_sync_update_without_force(monkeypatch, tm
     assert result == {"before": "0.1.0", "after": "0.2.0", "status": "updated"}
     assert len(process_calls) == 1
     argv = process_calls[0]
-    assert argv[2:] == (
+    assert argv[2:15] == (
         "update",
         "--repo",
         str(source),
@@ -168,6 +168,17 @@ def test_apply_copy_install_invokes_ws_sync_update_without_force(monkeypatch, tm
         "release/r1",
         "--source-strategy",
         "remote-branch",
+    )
+    assert argv[15] == "--expected-manifest-state"
+    expectation = json.loads(argv[16])
+    assert expectation == {
+        "type": "regular",
+        "mode": "0644",
+        "byte_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+        "device": manifest_path.stat().st_dev,
+        "inode": manifest_path.stat().st_ino,
+    }
+    assert argv[17:] == (
         "--source-checkout",
         str(source),
     )
@@ -414,7 +425,16 @@ def test_local_checkout_strategy_with_remote_origin_never_uses_network(monkeypat
     monkeypatch.setattr(updater, "_source_commit", lambda _checkout: "local-only-commit")
     synced: list[updater.SourceProvenance] = []
 
-    def fake_sync(_source: Path, _install: Path, _commit: str, provenance: updater.SourceProvenance) -> None:
+    def fake_sync(
+        _source: Path,
+        _install: Path,
+        _commit: str,
+        provenance: updater.SourceProvenance,
+        expected_manifest_state: str,
+    ) -> None:
+        assert json.loads(expected_manifest_state)["byte_sha256"] == hashlib.sha256(
+            (install / updater.MANIFEST_REL).read_bytes()
+        ).hexdigest()
         synced.append(provenance)
         (install / ".agents" / "VERSION").write_text("0.2.0\n", encoding="utf-8")
 
@@ -1137,3 +1157,171 @@ def test_rebind_rejects_nonregular_manifest_without_blocking(tmp_path: Path) -> 
 
     assert rejected.value.code == "unsafe-manifest-leaf"
     assert manifest.exists()
+
+
+def test_all_public_updater_manifest_reads_reject_fifo_without_blocking(tmp_path: Path) -> None:
+    install = tmp_path / "fifo-public"
+    agents = install / ".agents"
+    agents.mkdir(parents=True)
+    (agents / "VERSION").write_text("0.1.0\n", encoding="utf-8")
+    os.mkfifo(install / updater.MANIFEST_REL)
+    script = f"""
+import json
+import sys
+sys.path.insert(0, {str(Path(updater.__file__).parent.parent)!r})
+from research import updater
+root = updater.Path({str(install)!r})
+cache = updater.Path({str(tmp_path / 'cache')!r})
+print(json.dumps({{
+    'source': updater.source_provenance(root) is None,
+    'check': updater.check(root, cache)['status'],
+    'apply': updater.apply(root, cache)['status'],
+}}))
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=3,
+    )
+
+    assert json.loads(completed.stdout) == {
+        "source": True,
+        "check": "needs_source_choice",
+        "apply": "needs_source_choice",
+    }
+
+
+def test_manifest_snapshot_rejects_same_inode_in_place_rewrite(monkeypatch, tmp_path: Path) -> None:
+    install = tmp_path / "install"
+    manifest = _write_copy_manifest(install, source_origin="local")
+    inode = manifest.stat().st_ino
+    real_read = updater.os.read
+    changed = False
+
+    def racing_read(descriptor: int, count: int) -> bytes:
+        nonlocal changed
+        content = real_read(descriptor, count)
+        if content and not changed:
+            changed = True
+            replacement = bytearray(manifest.read_bytes())
+            replacement[-2] = ord(" ") if replacement[-2] != ord(" ") else ord("\t")
+            manifest.write_bytes(bytes(replacement))
+            assert manifest.stat().st_ino == inode
+        return content
+
+    monkeypatch.setattr(updater.os, "read", racing_read)
+
+    with pytest.raises(updater.SourceRebindError) as raced:
+        updater._manifest_snapshot(install)
+
+    assert raced.value.code == "manifest-raced"
+
+
+def test_apply_noop_revalidates_original_manifest_snapshot(monkeypatch, tmp_path: Path) -> None:
+    install = tmp_path / "install"
+    source = tmp_path / "source"
+    (source / "install-lib").mkdir(parents=True)
+    (source / "install-lib" / "ws_sync.py").write_text("", encoding="utf-8")
+    (source / ".agents").mkdir()
+    (source / ".agents" / "VERSION").write_text("0.1.0\n", encoding="utf-8")
+    manifest = _write_copy_manifest(
+        install,
+        source_origin="local",
+        source_checkout=str(source),
+        source_strategy="local-checkout",
+    )
+    before = manifest.read_bytes()
+    replacement = before.replace(b'"version": "0.1.0"', b'"version": "0.1.1"')
+    real_resolve = updater._resolve_checkout
+
+    def rebind_after_snapshot(provenance, cache_dir, *, pull):
+        temporary = manifest.with_suffix(".replacement")
+        temporary.write_bytes(replacement)
+        os.replace(temporary, manifest)
+        return real_resolve(provenance, cache_dir, pull=pull)
+
+    monkeypatch.setattr(updater, "_resolve_checkout", rebind_after_snapshot)
+
+    result = updater.apply(install, tmp_path / "cache")
+
+    assert result["status"] == "error"
+    assert result["before"] == result["after"] == "0.1.0"
+    assert manifest.read_bytes() == replacement
+
+
+def test_rebind_directory_fsync_failure_restores_old_manifest(monkeypatch, tmp_path: Path) -> None:
+    install = tmp_path / "install"
+    manifest = _write_copy_manifest(install, source_repo="")
+    before = manifest.read_bytes()
+    before_mode = manifest.stat().st_mode & 0o777
+    real_fsync = updater.os.fsync
+    directory_calls = 0
+
+    def fail_commit_fsync(descriptor: int) -> None:
+        nonlocal directory_calls
+        if updater.stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            directory_calls += 1
+            if directory_calls == 2:
+                raise OSError("injected manifest commit fsync failure")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(updater.os, "fsync", fail_commit_fsync)
+
+    with pytest.raises(updater.SourceRebindError) as failed:
+        updater.rebind_source(
+            install,
+            expected_manifest_digest=hashlib.sha256(before).hexdigest(),
+            source_origin="ssh://example.test/team/fork.git",
+            source_branch="release/r1",
+            source_strategy="remote-branch",
+        )
+
+    assert failed.value.code == "manifest-commit-failed"
+    assert manifest.read_bytes() == before
+    assert manifest.stat().st_mode & 0o777 == before_mode
+    assert not list(manifest.parent.glob("..install-manifest.json.*"))
+
+
+def test_rebind_incomplete_fsync_recovery_preserves_old_bytes(monkeypatch, tmp_path: Path) -> None:
+    install = tmp_path / "install"
+    manifest = _write_copy_manifest(install, source_repo="")
+    before = manifest.read_bytes()
+    real_fsync = updater.os.fsync
+    directory_calls = 0
+
+    def fail_commit_fsync(descriptor: int) -> None:
+        nonlocal directory_calls
+        if updater.stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            directory_calls += 1
+            if directory_calls == 2:
+                raise OSError("injected manifest commit fsync failure")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(updater.os, "fsync", fail_commit_fsync)
+    monkeypatch.setattr(updater.os, "link", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("no restore")))
+
+    with pytest.raises(updater.SourceRebindError) as failed:
+        updater.rebind_source(
+            install,
+            expected_manifest_digest=hashlib.sha256(before).hexdigest(),
+            source_origin="ssh://example.test/team/fork.git",
+            source_branch="release/r1",
+            source_strategy="remote-branch",
+        )
+
+    assert failed.value.code == "manifest-recovery-incomplete"
+    recovery = list(manifest.parent.glob("..install-manifest.json.*.rollback"))
+    assert len(recovery) == 1
+    assert recovery[0].read_bytes() == before
+
+
+def test_manifest_lock_does_not_misclassify_yielded_oserror(tmp_path: Path) -> None:
+    install = tmp_path / "install"
+    _write_copy_manifest(install)
+
+    with pytest.raises(OSError, match="body failure"):
+        with updater._locked_manifest_directory(install):
+            raise OSError("body failure")

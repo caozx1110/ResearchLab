@@ -46,6 +46,24 @@ class SourceProvenance:
         return self.effective_strategy == LOCAL_CHECKOUT_STRATEGY
 
 
+@dataclass(frozen=True)
+class InstallManifestSnapshot:
+    payload: dict[str, Any]
+    content: bytes
+    device: int
+    inode: int
+    mode: int
+
+    def expectation(self) -> dict[str, Any]:
+        return {
+            "type": "regular",
+            "mode": f"{stat.S_IMODE(self.mode):04o}",
+            "byte_sha256": _manifest_digest(self.content),
+            "device": self.device,
+            "inode": self.inode,
+        }
+
+
 class SourceChoiceRequired(RuntimeError):
     pass
 
@@ -165,6 +183,7 @@ def _invoke_ws_sync(
     install_root: Path,
     source_commit: str,
     provenance: SourceProvenance,
+    expected_manifest_state: str,
 ) -> None:
     sync_script = source_checkout / "install-lib" / "ws_sync.py"
     if not sync_script.is_file():
@@ -185,6 +204,8 @@ def _invoke_ws_sync(
         provenance.branch,
         "--source-strategy",
         provenance.effective_strategy,
+        "--expected-manifest-state",
+        expected_manifest_state,
     ]
     if provenance.checkout is not None:
         argv.extend(["--source-checkout", str(provenance.checkout)])
@@ -251,6 +272,16 @@ def _same_node(left: os.stat_result, right: os.stat_result) -> bool:
     return left.st_dev == right.st_dev and left.st_ino == right.st_ino
 
 
+def _same_read_identity(left: os.stat_result, right: os.stat_result) -> bool:
+    return bool(
+        _same_node(left, right)
+        and left.st_mode == right.st_mode
+        and left.st_size == right.st_size
+        and left.st_mtime_ns == right.st_mtime_ns
+        and left.st_ctime_ns == right.st_ctime_ns
+    )
+
+
 def _directory_open_flags() -> int:
     return (
         os.O_RDONLY
@@ -267,28 +298,29 @@ def _locked_manifest_directory(install_root: Path) -> Iterator[tuple[Path, int, 
     root_fd = -1
     agents_fd = -1
     try:
-        root_fd = os.open(str(root), _directory_open_flags())
-        root_status = os.fstat(root_fd)
-        if not stat.S_ISDIR(root_status.st_mode):
-            raise SourceRebindError("unsafe-install-root", "the install root is not a regular directory")
-        fcntl.flock(root_fd, fcntl.LOCK_EX)
-        current_root = os.stat(str(root), follow_symlinks=False)
-        if not _same_node(root_status, current_root):
-            raise SourceRebindError("unsafe-install-root", "the install root changed before locking")
-        agents_status = os.stat(".agents", dir_fd=root_fd, follow_symlinks=False)
-        if not stat.S_ISDIR(agents_status.st_mode):
-            raise SourceRebindError("unsafe-manifest-ancestor", "the manifest ancestor is not a directory")
-        agents_fd = os.open(".agents", _directory_open_flags(), dir_fd=root_fd)
-        if not _same_node(agents_status, os.fstat(agents_fd)):
-            raise SourceRebindError("unsafe-manifest-ancestor", "the manifest ancestor changed during validation")
-        current_agents = os.stat(".agents", dir_fd=root_fd, follow_symlinks=False)
-        if not _same_node(current_agents, os.fstat(agents_fd)):
-            raise SourceRebindError("unsafe-manifest-ancestor", "the manifest ancestor changed before locking")
+        try:
+            root_fd = os.open(str(root), _directory_open_flags())
+            root_status = os.fstat(root_fd)
+            if not stat.S_ISDIR(root_status.st_mode):
+                raise SourceRebindError("unsafe-install-root", "the install root is not a regular directory")
+            fcntl.flock(root_fd, fcntl.LOCK_EX)
+            current_root = os.stat(str(root), follow_symlinks=False)
+            if not _same_node(root_status, current_root):
+                raise SourceRebindError("unsafe-install-root", "the install root changed before locking")
+            agents_status = os.stat(".agents", dir_fd=root_fd, follow_symlinks=False)
+            if not stat.S_ISDIR(agents_status.st_mode):
+                raise SourceRebindError("unsafe-manifest-ancestor", "the manifest ancestor is not a directory")
+            agents_fd = os.open(".agents", _directory_open_flags(), dir_fd=root_fd)
+            if not _same_node(agents_status, os.fstat(agents_fd)):
+                raise SourceRebindError("unsafe-manifest-ancestor", "the manifest ancestor changed during validation")
+            current_agents = os.stat(".agents", dir_fd=root_fd, follow_symlinks=False)
+            if not _same_node(current_agents, os.fstat(agents_fd)):
+                raise SourceRebindError("unsafe-manifest-ancestor", "the manifest ancestor changed before locking")
+        except SourceRebindError:
+            raise
+        except (FileNotFoundError, NotADirectoryError, OSError) as exc:
+            raise SourceRebindError("unsafe-manifest-path", "the install manifest path cannot be safely opened") from exc
         yield root, root_fd, agents_fd
-    except SourceRebindError:
-        raise
-    except (FileNotFoundError, NotADirectoryError, OSError) as exc:
-        raise SourceRebindError("unsafe-manifest-path", "the install manifest path cannot be safely opened") from exc
     finally:
         if agents_fd >= 0:
             os.close(agents_fd)
@@ -308,7 +340,11 @@ def _assert_anchored_agents(root_fd: int, agents_fd: int) -> None:
         raise SourceRebindError("unsafe-manifest-ancestor", "the manifest ancestor changed during rebind")
 
 
-def _read_manifest_at(agents_fd: int) -> tuple[dict[str, Any], bytes, os.stat_result]:
+def _read_manifest_at(
+    agents_fd: int,
+    *,
+    required: bool = True,
+) -> tuple[dict[str, Any], bytes, os.stat_result] | None:
     flags = (
         os.O_RDONLY
         | getattr(os, "O_CLOEXEC", 0)
@@ -317,26 +353,38 @@ def _read_manifest_at(agents_fd: int) -> tuple[dict[str, Any], bytes, os.stat_re
     )
     descriptor = -1
     try:
-        lexical_before = os.stat(MANIFEST_REL.name, dir_fd=agents_fd, follow_symlinks=False)
+        try:
+            lexical_before = os.stat(MANIFEST_REL.name, dir_fd=agents_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            if not required:
+                return None
+            raise
         if not stat.S_ISREG(lexical_before.st_mode):
             raise SourceRebindError("unsafe-manifest-leaf", "the install manifest is not a regular file")
         descriptor = os.open(MANIFEST_REL.name, flags, dir_fd=agents_fd)
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode) or not _same_node(lexical_before, before):
             raise SourceRebindError("unsafe-manifest-leaf", "the install manifest is not a regular file")
+        if before.st_size <= 0:
+            raise SourceRebindError("invalid-manifest-size", "the install manifest is empty")
+        if before.st_size > _MAX_MANIFEST_BYTES:
+            raise SourceRebindError("manifest-too-large", "the install manifest is too large")
         chunks: list[bytes] = []
         total = 0
-        while True:
-            chunk = os.read(descriptor, min(1024 * 1024, _MAX_MANIFEST_BYTES + 1 - total))
+        while total < before.st_size:
+            chunk = os.read(descriptor, min(1024 * 1024, before.st_size - total))
             if not chunk:
-                break
+                raise SourceRebindError("manifest-raced", "the install manifest changed while it was read")
             chunks.append(chunk)
             total += len(chunk)
-            if total > _MAX_MANIFEST_BYTES:
-                raise SourceRebindError("manifest-too-large", "the install manifest is too large")
         after = os.fstat(descriptor)
         lexical = os.stat(MANIFEST_REL.name, dir_fd=agents_fd, follow_symlinks=False)
-        if not stat.S_ISREG(lexical.st_mode) or not _same_node(before, after) or not _same_node(after, lexical):
+        if (
+            total != before.st_size
+            or not stat.S_ISREG(lexical.st_mode)
+            or not _same_read_identity(before, after)
+            or not _same_read_identity(after, lexical)
+        ):
             raise SourceRebindError("manifest-raced", "the install manifest changed while it was read")
         content = b"".join(chunks)
     except SourceRebindError:
@@ -353,6 +401,34 @@ def _read_manifest_at(agents_fd: int) -> tuple[dict[str, Any], bytes, os.stat_re
     if not isinstance(payload, dict):
         raise SourceRebindError("invalid-manifest-shape", "the install manifest is not an object")
     return payload, content, after
+
+
+def _manifest_snapshot(install_root: Path, *, required: bool = True) -> InstallManifestSnapshot | None:
+    with _locked_manifest_directory(install_root) as (_root, root_fd, agents_fd):
+        _assert_anchored_agents(root_fd, agents_fd)
+        result = _read_manifest_at(agents_fd, required=required)
+        if result is None:
+            return None
+        payload, content, status = result
+        return InstallManifestSnapshot(payload, content, status.st_dev, status.st_ino, status.st_mode)
+
+
+def _snapshot_matches_current(install_root: Path, expected: InstallManifestSnapshot) -> bool:
+    try:
+        current = _manifest_snapshot(install_root)
+    except SourceRebindError:
+        return False
+    assert current is not None
+    return bool(
+        current.device == expected.device
+        and current.inode == expected.inode
+        and stat.S_IMODE(current.mode) == stat.S_IMODE(expected.mode)
+        and hmac.compare_digest(_manifest_digest(current.content), _manifest_digest(expected.content))
+    )
+
+
+def _manifest_expectation_json(snapshot: InstallManifestSnapshot) -> str:
+    return json.dumps(snapshot.expectation(), ensure_ascii=True, separators=(",", ":"), sort_keys=True)
 
 
 def _validate_install_manifest(payload: dict[str, Any]) -> None:
@@ -398,24 +474,41 @@ def _write_manifest_at(
     _payload, current, _status = _read_manifest_at(agents_fd)
     if not hmac.compare_digest(_manifest_digest(current), _manifest_digest(expected_content)):
         raise SourceRebindError("stale-manifest", "the install manifest changed before rebind")
-    temporary_name = f".{MANIFEST_REL.name}.{os.urandom(12).hex()}.tmp"
+    token = os.urandom(12).hex()
+    temporary_name = f".{MANIFEST_REL.name}.{token}.tmp"
+    rollback_name = f".{MANIFEST_REL.name}.{token}.rollback"
+    restore_name = f".{MANIFEST_REL.name}.{token}.restore"
     descriptor = -1
-    try:
+    preserve_recovery = False
+
+    def stage(name: str, content: bytes) -> os.stat_result:
+        nonlocal descriptor
         descriptor = os.open(
-            temporary_name,
+            name,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
             mode & 0o777,
             dir_fd=agents_fd,
         )
-        view = memoryview(replacement)
-        while view:
-            written = os.write(descriptor, view)
-            if written <= 0:
-                raise OSError("short manifest write")
-            view = view[written:]
-        os.fsync(descriptor)
-        os.close(descriptor)
-        descriptor = -1
+        try:
+            view = memoryview(content)
+            while view:
+                written = os.write(descriptor, view)
+                if written <= 0:
+                    raise OSError("short manifest write")
+                view = view[written:]
+            os.fchmod(descriptor, mode & 0o777)
+            os.fsync(descriptor)
+            return os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+            descriptor = -1
+
+    try:
+        replacement_status = stage(temporary_name, replacement)
+        stage(rollback_name, expected_content)
+        # Make the rollback material durable before the operation can replace
+        # the only committed copy of the old manifest.
+        os.fsync(agents_fd)
         _assert_anchored_agents(root_fd, agents_fd)
         _payload, current, _status = _read_manifest_at(agents_fd)
         if not hmac.compare_digest(_manifest_digest(current), _manifest_digest(expected_content)):
@@ -428,22 +521,65 @@ def _write_manifest_at(
             src_dir_fd=agents_fd,
             dst_dir_fd=agents_fd,
         )
-        os.fsync(agents_fd)
+        try:
+            os.fsync(agents_fd)
+        except OSError as commit_exc:
+            preserve_recovery = True
+            try:
+                current_status = os.stat(MANIFEST_REL.name, dir_fd=agents_fd, follow_symlinks=False)
+                if not stat.S_ISREG(current_status.st_mode) or not _same_node(current_status, replacement_status):
+                    raise SourceRebindError(
+                        "manifest-recovery-incomplete",
+                        "the manifest commit failed and its target changed before recovery",
+                    )
+                os.link(
+                    rollback_name,
+                    restore_name,
+                    src_dir_fd=agents_fd,
+                    dst_dir_fd=agents_fd,
+                    follow_symlinks=False,
+                )
+                os.replace(
+                    restore_name,
+                    MANIFEST_REL.name,
+                    src_dir_fd=agents_fd,
+                    dst_dir_fd=agents_fd,
+                )
+                os.fsync(agents_fd)
+            except SourceRebindError:
+                raise
+            except OSError as recovery_exc:
+                raise SourceRebindError(
+                    "manifest-recovery-incomplete",
+                    "the manifest commit failed and the previous manifest could not be durably restored",
+                ) from recovery_exc
+            preserve_recovery = False
+            raise SourceRebindError(
+                "manifest-commit-failed",
+                "the manifest commit failed; the previous manifest was restored",
+            ) from commit_exc
+    except SourceRebindError:
+        raise
+    except OSError as exc:
+        raise SourceRebindError("manifest-write-failed", "the install manifest could not be safely written") from exc
     finally:
         if descriptor >= 0:
             os.close(descriptor)
-        try:
-            os.unlink(temporary_name, dir_fd=agents_fd)
-        except FileNotFoundError:
-            pass
+        for cleanup_name in (temporary_name, restore_name, rollback_name):
+            if preserve_recovery and cleanup_name == rollback_name:
+                continue
+            try:
+                os.unlink(cleanup_name, dir_fd=agents_fd)
+            except FileNotFoundError:
+                pass
 
 
 def _load_manifest(install_root: Path) -> dict[str, Any] | None:
     try:
-        payload = json.loads((Path(install_root) / MANIFEST_REL).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        snapshot = _manifest_snapshot(install_root, required=False)
+    except SourceRebindError:
         return None
-    return payload if isinstance(payload, dict) else None
+    return snapshot.payload if snapshot is not None else None
 
 
 def source_choice_request(install_root: Path) -> dict[str, Any]:
@@ -697,19 +833,7 @@ def rebind_source(
         }
 
 
-def source_provenance(install_root: Path) -> SourceProvenance | None:
-    root = Path(install_root).expanduser().resolve(strict=False)
-    if is_git_checkout(root):
-        origin = _checkout_origin(root) or LOCAL_ORIGIN
-        branch = _checkout_branch(root)
-        if not _valid_branch_name(branch):
-            return None
-        strategy = LOCAL_CHECKOUT_STRATEGY if origin == LOCAL_ORIGIN else REMOTE_BRANCH_STRATEGY
-        return SourceProvenance(origin, root, branch, strategy)
-
-    manifest = _load_manifest(root)
-    if manifest is None:
-        return None
+def _source_provenance_from_manifest(root: Path, manifest: dict[str, Any]) -> SourceProvenance | None:
     origin = str(manifest.get("source_origin") or "").strip()
     branch = str(manifest.get("source_branch") or "").strip()
     strategy = str(manifest.get("source_strategy") or "").strip()
@@ -768,6 +892,31 @@ def source_provenance(install_root: Path) -> SourceProvenance | None:
     if not _valid_branch_name(branch):
         return None
     return SourceProvenance(origin, checkout, branch, REMOTE_BRANCH_STRATEGY)
+
+
+def _provenance_state(
+    install_root: Path,
+) -> tuple[SourceProvenance | None, InstallManifestSnapshot | None]:
+    root = Path(install_root).expanduser().resolve(strict=False)
+    try:
+        snapshot = _manifest_snapshot(root, required=False)
+    except SourceRebindError:
+        return None, None
+    if snapshot is not None:
+        return _source_provenance_from_manifest(root, snapshot.payload), snapshot
+    if is_git_checkout(root):
+        origin = _checkout_origin(root) or LOCAL_ORIGIN
+        branch = _checkout_branch(root)
+        if not _valid_branch_name(branch):
+            return None, None
+        strategy = LOCAL_CHECKOUT_STRATEGY if origin == LOCAL_ORIGIN else REMOTE_BRANCH_STRATEGY
+        return SourceProvenance(origin, root, branch, strategy), None
+    return None, None
+
+
+def source_provenance(install_root: Path) -> SourceProvenance | None:
+    provenance, _snapshot = _provenance_state(install_root)
+    return provenance
 
 
 def resolve_source_checkout(install_root: Path) -> Path | None:
@@ -861,7 +1010,7 @@ def _error_result(before: str, message: str) -> dict[str, str]:
 def apply(install_root: Path, cache_dir: Path) -> dict[str, Any]:
     root = Path(install_root).expanduser().resolve(strict=False)
     before = read_local_version(root)
-    provenance = source_provenance(root)
+    provenance, manifest_snapshot = _provenance_state(root)
     if provenance is None:
         return {
             "before": before,
@@ -875,6 +1024,8 @@ def apply(install_root: Path, cache_dir: Path) -> dict[str, Any]:
             return {"before": before, "after": read_local_version(root), "status": "updated"}
         source_version = read_local_version(source_checkout)
         if compare_versions(before, source_version) >= 0:
+            if manifest_snapshot is not None and not _snapshot_matches_current(root, manifest_snapshot):
+                return _error_result(before, "更新未完成：安装记录已变化，请重新执行更新。")
             return {"before": before, "after": before, "status": "up_to_date"}
         source_commit = _source_commit(source_checkout)
         effective_checkout = provenance.checkout
@@ -884,7 +1035,15 @@ def apply(install_root: Path, cache_dir: Path) -> dict[str, Any]:
             provenance.branch,
             provenance.effective_strategy,
         )
-        _invoke_ws_sync(source_checkout, root, source_commit, effective)
+        if manifest_snapshot is None:
+            return _error_result(before, "更新未完成：安装记录已变化，请重新执行更新。")
+        _invoke_ws_sync(
+            source_checkout,
+            root,
+            source_commit,
+            effective,
+            _manifest_expectation_json(manifest_snapshot),
+        )
         return {"before": before, "after": read_local_version(root), "status": "updated"}
     except SourceChoiceRequired as exc:
         return {
