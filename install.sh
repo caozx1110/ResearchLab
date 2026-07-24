@@ -125,7 +125,7 @@ usage() {
   section "其他选项"
   usage_option "--kb-on-path" "创建可在终端使用的 kb 快捷命令"
   usage_option "--dry-run" "只预览，不写入文件"
-  usage_option "--agent-plan" "供 Agent 审阅：零写并列出每个精确目标"
+  usage_option "--agent-plan-json FILE" "供 Agent 审阅：零写预览，并把精确计划保存为 JSON"
   usage_option "--force" "更新时覆盖已修改的受管文件"
   usage_option "--source DIR" "从指定源码目录更新"
   usage_option "--yes, --assume-yes" "交互运行时跳过执行前确认"
@@ -250,6 +250,7 @@ ACTION_FROM_SUBCOMMAND=0
 ACTION_EXPLICIT=0
 DRY_RUN=0
 AGENT_PLAN=0
+AGENT_PLAN_JSON=""
 CONFIG_CLAUDE=0
 CONFIG_CODEX=0
 AGENT_FLAG_SET=0
@@ -269,6 +270,10 @@ KB_SHORTCUT_AVAILABLE=0
 UPDATE_NO_CHANGES=0
 DRY_RUN_CHANGE_COUNT=0
 RUNTIME_BOOTSTRAP_NEEDED=0
+AGENT_PLAN_TARGET_ARGS=()
+AGENT_PLAN_TARGET_JSON=()
+AGENT_PLAN_TARGET_SEQUENCE=()
+AGENT_PLAN_CONFLICTS=()
 
 REPO_ROOT=$(script_dir)
 for arg in "$@"; do
@@ -308,8 +313,20 @@ while [ "$#" -gt 0 ]; do
       shift
       ;;
     --agent-plan)
+      die "--agent-plan 需要配合 --agent-plan-json FILE，以免把大量内部路径输出到终端"
+      ;;
+    --agent-plan-json)
+      [ "${2:-}" != "" ] && [[ ${2:-} != --* ]] || die "--agent-plan-json 需要一个输出文件"
       DRY_RUN=1
       AGENT_PLAN=1
+      AGENT_PLAN_JSON=$2
+      shift 2
+      ;;
+    --agent-plan-json=*)
+      DRY_RUN=1
+      AGENT_PLAN=1
+      AGENT_PLAN_JSON=${1#--agent-plan-json=}
+      [ -n "$AGENT_PLAN_JSON" ] || die "--agent-plan-json 需要一个输出文件"
       shift
       ;;
     --uninstall)
@@ -905,12 +922,15 @@ print_done() {
   if [ "$DRY_RUN" -eq 1 ]; then
     section "预览完成"
     if [ "$AGENT_PLAN" -eq 1 ]; then
-      bullet "预计受管目标：$DRY_RUN_CHANGE_COUNT 项（含条件目标，均已在上方列出）"
+      write_agent_plan_json
+      bullet "预计受管目标：$DRY_RUN_CHANGE_COUNT 项（含条件目标；精确清单保存在 JSON 计划中）"
+      ok "没有写入工作区、HOME 或运行环境。"
+      info "请核对计划摘要和 JSON 后，再按其中的应用合同执行正式操作。"
     else
       bullet "预计文件变更：$DRY_RUN_CHANGE_COUNT 项（详细路径已折叠）"
+      ok "没有写入任何文件。"
+      info "以上是计划内容；确认无误后再执行正式操作。"
     fi
-    ok "没有写入任何文件。"
-    info "以上是计划内容；确认无误后再执行正式操作。"
     return 0
   fi
 
@@ -999,6 +1019,109 @@ source_branch() {
   git -C "$REPO_ROOT" symbolic-ref --quiet --short HEAD 2>/dev/null || printf ''
 }
 
+record_agent_plan_target() {
+  [ "$AGENT_PLAN" -eq 1 ] || return 0
+  AGENT_PLAN_TARGET_SEQUENCE+=("args:${#AGENT_PLAN_TARGET_ARGS[@]}")
+  AGENT_PLAN_TARGET_ARGS+=("$1" "$2" "${3:-}" "${4:-}")
+  DRY_RUN_CHANGE_COUNT=$((DRY_RUN_CHANGE_COUNT + 1))
+}
+
+record_agent_plan_conflict() {
+  [ "$AGENT_PLAN" -eq 1 ] || return 0
+  AGENT_PLAN_CONFLICTS+=("$1")
+}
+
+validate_agent_plan_output() {
+  [ "$AGENT_PLAN" -eq 1 ] || return 0
+  AGENT_PLAN_JSON=$(python3 - "$AGENT_PLAN_JSON" "$WORKSPACE_ROOT" "$HOME" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+output = Path(sys.argv[1]).expanduser().resolve(strict=False)
+workspace = Path(sys.argv[2]).resolve(strict=False)
+home = Path(sys.argv[3]).resolve(strict=False)
+if output == workspace or workspace in output.parents:
+    raise SystemExit("Agent plan JSON must be outside the target workspace")
+if output == home or home in output.parents:
+    raise SystemExit("Agent plan JSON must be outside HOME")
+if output.exists() and (output.is_symlink() or not output.is_file()):
+    raise SystemExit("Agent plan JSON target must be a regular file or a new path")
+print(output)
+PY
+  ) || die "计划文件必须位于目标工作区和 HOME 之外，且不能是符号链接"
+}
+
+write_agent_plan_json() {
+  local digest commit origin branch index sequence target_index args=() apply_args=()
+  [ "$AGENT_PLAN" -eq 1 ] || return 0
+  commit=$(source_commit)
+  origin=$(source_origin)
+  branch=$(source_branch)
+  args=(
+    "--output" "$AGENT_PLAN_JSON"
+    "--action" "$ACTION"
+    "--scope" "$SCOPE"
+    "--workspace" "$WORKSPACE_ROOT"
+    "--source-strategy" "local-checkout"
+    "--source-checkout" "$REPO_ROOT"
+    "--source-origin" "$origin"
+    "--source-branch" "$branch"
+    "--source-commit" "$commit"
+  )
+  [ "$CONFIG_CLAUDE" -eq 0 ] || args+=("--tool" "claude")
+  [ "$CONFIG_CODEX" -eq 0 ] || args+=("--tool" "codex")
+  for sequence in "${AGENT_PLAN_TARGET_SEQUENCE[@]}"; do
+    target_index=${sequence#*:}
+    case "$sequence" in
+      args:*)
+        args+=(
+          "--target-record"
+          "fields"
+          "${AGENT_PLAN_TARGET_ARGS[target_index]}"
+          "${AGENT_PLAN_TARGET_ARGS[target_index + 1]}"
+          "${AGENT_PLAN_TARGET_ARGS[target_index + 2]}"
+          "${AGENT_PLAN_TARGET_ARGS[target_index + 3]}"
+        )
+        ;;
+      json:*)
+        args+=("--target-record" "json" "${AGENT_PLAN_TARGET_JSON[target_index]}" "" "" "")
+        ;;
+    esac
+  done
+  for index in "${!AGENT_PLAN_CONFLICTS[@]}"; do
+    args+=("--conflict" "${AGENT_PLAN_CONFLICTS[index]}")
+  done
+
+  apply_args=("$REPO_ROOT/install.sh")
+  [ "$ACTION" = "install" ] || apply_args+=("$ACTION")
+  if [ "$SCOPE" = "project" ]; then
+    apply_args+=("--project" "$WORKSPACE_ROOT")
+  else
+    apply_args+=("--system")
+  fi
+  if [ "$ACTION" = "install" ]; then
+    if [ "$CONFIG_CLAUDE" -eq 1 ] && [ "$CONFIG_CODEX" -eq 1 ]; then
+      apply_args+=("--all")
+    elif [ "$CONFIG_CLAUDE" -eq 1 ]; then
+      apply_args+=("--claude")
+    else
+      apply_args+=("--codex")
+    fi
+  fi
+  [ "$KB_ON_PATH" -eq 0 ] || apply_args+=("--kb-on-path")
+  [ "$FORCE" -eq 0 ] || apply_args+=("--force")
+  [ -z "$SYNC_SOURCE" ] || apply_args+=("--source" "$SYNC_SOURCE")
+  apply_args+=("--yes")
+  for index in "${!apply_args[@]}"; do
+    args+=("--apply-arg=${apply_args[index]}")
+  done
+
+  digest=$(python3 "$REPO_ROOT/install-lib/agent_plan.py" "${args[@]}") || die "无法写入 Agent 安装计划"
+  bullet "精确 JSON 计划：$AGENT_PLAN_JSON"
+  bullet "计划摘要：${digest:0:12} · $DRY_RUN_CHANGE_COUNT 个目标 · ${#AGENT_PLAN_CONFLICTS[@]} 个冲突"
+}
+
 file_sha256() {
   if is_command shasum; then
     shasum -a 256 "$1" | awk '{ print $1 }'
@@ -1072,6 +1195,9 @@ ws_sync() {
   if [ "$DRY_RUN" -eq 1 ]; then
     args+=("--dry-run")
   fi
+  if [ "$AGENT_PLAN" -eq 1 ]; then
+    args+=("--plan-jsonl")
+  fi
   if [ "$FORCE" -eq 1 ]; then
     args+=("--force")
   fi
@@ -1084,14 +1210,26 @@ ws_sync() {
     case "$output" in
       *"warn:"*)
         warn "检测到用户修改并按安全策略保留，请让 Agent 检查。"
+        record_agent_plan_conflict "检测到受管文件漂移；按安全策略保留"
         INSTALL_INCOMPLETE=1
         ;;
     esac
     if [ "$DRY_RUN" -eq 1 ]; then
-      change_count=$(printf '%s\n' "$output" | awk '/^\[dry-run\]/ { count += 1 } END { print count + 0 }')
-      DRY_RUN_CHANGE_COUNT=$((DRY_RUN_CHANGE_COUNT + change_count))
       if [ "$AGENT_PLAN" -eq 1 ]; then
-        printf '%s\n' "$output" | awk '/^\[dry-run\]/'
+        change_count=0
+        while IFS= read -r plan_line; do
+          case "$plan_line" in
+            \{*)
+              AGENT_PLAN_TARGET_SEQUENCE+=("json:${#AGENT_PLAN_TARGET_JSON[@]}")
+              AGENT_PLAN_TARGET_JSON+=("$plan_line")
+              change_count=$((change_count + 1))
+              ;;
+          esac
+        done <<< "$output"
+        DRY_RUN_CHANGE_COUNT=$((DRY_RUN_CHANGE_COUNT + change_count))
+      else
+        change_count=$(printf '%s\n' "$output" | awk '/^\[dry-run\]/ { count += 1 } END { print count + 0 }')
+        DRY_RUN_CHANGE_COUNT=$((DRY_RUN_CHANGE_COUNT + change_count))
       fi
     else
       case "$action" in
@@ -1135,6 +1273,7 @@ remove_agents_md_if_managed() {
   sha=$(manifest_field "$MANIFEST_PATH" agents_md_sha)
   [ "$mode" = "managed" ] || {
     warn "AGENTS.md 已由用户管理，予以保留"
+    record_agent_plan_conflict "保留用户管理的 AGENTS.md"
     INSTALL_INCOMPLETE=1
     return 0
   }
@@ -1142,12 +1281,17 @@ remove_agents_md_if_managed() {
   actual=$(file_sha256 "$WORKSPACE_ROOT/AGENTS.md")
   if [ -n "$sha" ] && [ "$actual" = "$sha" ]; then
     if [ "$DRY_RUN" -eq 1 ]; then
-      DRY_RUN_CHANGE_COUNT=$((DRY_RUN_CHANGE_COUNT + 1))
+      if [ "$AGENT_PLAN" -eq 1 ]; then
+        record_agent_plan_target "delete" "$WORKSPACE_ROOT/AGENTS.md"
+      else
+        DRY_RUN_CHANGE_COUNT=$((DRY_RUN_CHANGE_COUNT + 1))
+      fi
     else
       rm "$WORKSPACE_ROOT/AGENTS.md"
     fi
   else
     warn "AGENTS.md 已被修改，予以保留"
+    record_agent_plan_conflict "保留已修改的 AGENTS.md"
     INSTALL_INCOMPLETE=1
   fi
 }
@@ -1242,8 +1386,11 @@ ensure_dir() {
     esac
     while IFS= read -r missing_dir; do
       [ -n "$missing_dir" ] || continue
-      DRY_RUN_CHANGE_COUNT=$((DRY_RUN_CHANGE_COUNT + 1))
-      [ "$AGENT_PLAN" -eq 0 ] || printf '[agent-plan] mkdir %s\n' "$missing_dir"
+      if [ "$AGENT_PLAN" -eq 1 ]; then
+        record_agent_plan_target "mkdir" "$missing_dir"
+      else
+        DRY_RUN_CHANGE_COUNT=$((DRY_RUN_CHANGE_COUNT + 1))
+      fi
     done < <(python3 - "$base" "$1" <<'PY'
 import os
 import sys
@@ -1270,6 +1417,7 @@ link_force() {
   guard_managed_directory_chain "$(dirname -- "$link")"
   if [ -e "$link" ] && [ ! -L "$link" ]; then
     warn "已有文件未覆盖：$link"
+    record_agent_plan_conflict "已有普通文件，保留：$link"
     INSTALL_INCOMPLETE=1
     return 0
   fi
@@ -1279,12 +1427,16 @@ link_force() {
       return 0
     fi
     warn "已有链接指向其他位置，已保留：$link"
+    record_agent_plan_conflict "已有链接指向其他位置，保留：$link"
     INSTALL_INCOMPLETE=1
     return 0
   fi
   if [ "$DRY_RUN" -eq 1 ]; then
-    DRY_RUN_CHANGE_COUNT=$((DRY_RUN_CHANGE_COUNT + 1))
-    [ "$AGENT_PLAN" -eq 0 ] || printf '[agent-plan] symlink %s -> %s\n' "$link" "$target"
+    if [ "$AGENT_PLAN" -eq 1 ]; then
+      record_agent_plan_target "symlink" "$link" "$target"
+    else
+      DRY_RUN_CHANGE_COUNT=$((DRY_RUN_CHANGE_COUNT + 1))
+    fi
   else
     ln -sfn "$target" "$link"
   fi
@@ -1298,13 +1450,17 @@ remove_symlink_if_matches() {
   actual=$(readlink "$link")
   if [ "$actual" = "$expected" ] || { [ -n "$expected_alt" ] && [ "$actual" = "$expected_alt" ]; }; then
     if [ "$DRY_RUN" -eq 1 ]; then
-      DRY_RUN_CHANGE_COUNT=$((DRY_RUN_CHANGE_COUNT + 1))
-      [ "$AGENT_PLAN" -eq 0 ] || printf '[agent-plan] remove-symlink %s\n' "$link"
+      if [ "$AGENT_PLAN" -eq 1 ]; then
+        record_agent_plan_target "remove-symlink" "$link" "$actual"
+      else
+        DRY_RUN_CHANGE_COUNT=$((DRY_RUN_CHANGE_COUNT + 1))
+      fi
     else
       rm "$link"
     fi
   else
     warn "链接目标与安装记录不一致，已保留：$link"
+    record_agent_plan_conflict "链接目标与安装记录不一致，保留：$link"
     INSTALL_INCOMPLETE=1
   fi
 }
@@ -1314,8 +1470,7 @@ write_managed_block() {
   guard_managed_directory_chain "$(dirname -- "$file")"
   [ ! -L "$file" ] || die "检测到符号链接形式的 Claude 配置；为避免跟随或替换链接，已停止"
   if [ "$AGENT_PLAN" -eq 1 ]; then
-    DRY_RUN_CHANGE_COUNT=$((DRY_RUN_CHANGE_COUNT + 1))
-    printf '[agent-plan] write-managed-block %s\n' "$file"
+    record_agent_plan_target "write-managed-block" "$file" "$block_file"
     return 0
   fi
   tmp_file=$(mktemp "${TMPDIR:-/tmp}/${INSTALL_NAME}.XXXXXX")
@@ -1371,8 +1526,7 @@ remove_managed_block() {
       $0 == end { in_block = 0; next }
       END { exit removed ? 0 : 2 }
     ' "$file" >/dev/null; then
-      DRY_RUN_CHANGE_COUNT=$((DRY_RUN_CHANGE_COUNT + 1))
-      printf '[agent-plan] remove-managed-block %s\n' "$file"
+      record_agent_plan_target "remove-managed-block" "$file"
     else
       local plan_status=$?
       [ "$plan_status" -eq 2 ] && return 0
@@ -1520,6 +1674,7 @@ install_codex_system() {
     done
   else
     warn "未找到 Codex 的系统级 skills 目录，已跳过这部分配置。"
+    record_agent_plan_conflict "未找到 Codex 系统级 skills 目录，跳过 skill 链接"
     INSTALL_INCOMPLETE=1
   fi
   note "Codex 的系统级接入能力有限，优先推荐按工作区安装。"
@@ -1571,6 +1726,7 @@ uninstall_kb_on_path() {
   link="$dir/kb"
   if [ -e "$link" ] && [ ! -L "$link" ]; then
     warn "kb 快捷入口不是安装器创建的链接，已保留：$link"
+    record_agent_plan_conflict "kb 快捷入口是普通文件，保留：$link"
     INSTALL_INCOMPLETE=1
     return 0
   fi
@@ -1581,8 +1737,11 @@ run_smoke() {
   local smoke_output
   if [ "$DRY_RUN" -eq 1 ]; then
     if [ "$AGENT_PLAN" -eq 1 ] && [ "$RUNTIME_BOOTSTRAP_NEEDED" -eq 1 ] && { [ "$ACTION" = "install" ] || [ "$ACTION" = "reinstall" ]; }; then
-      DRY_RUN_CHANGE_COUNT=$((DRY_RUN_CHANGE_COUNT + 1))
-      printf '[agent-plan] conditional-runtime-tree %s (dependency-managed contents)\n' "$WORKSPACE_ROOT/.venv"
+      record_agent_plan_target \
+        "conditional-runtime-tree" \
+        "$WORKSPACE_ROOT/.venv" \
+        "Python dependency manager" \
+        "only if required Python dependencies are unavailable"
     fi
     return 0
   fi
@@ -1616,6 +1775,7 @@ if [ "$ACTION" != "uninstall" ]; then
   fi
 fi
 
+validate_agent_plan_output
 confirm_plan
 
 if [ "$ACTION" != "uninstall" ]; then

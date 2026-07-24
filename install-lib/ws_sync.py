@@ -32,6 +32,25 @@ from pathlib import Path
 from typing import Any
 
 
+PLAN_JSONL = False
+
+
+def dry_run_info(operation: str, path: Path, *, source: Path | None = None) -> None:
+    """Keep human dry-run output stable while offering exact JSON to the installer."""
+    if PLAN_JSONL:
+        payload: dict[str, str] = {"operation": operation, "path": str(path)}
+        if source is not None:
+            payload["source"] = str(source)
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        return
+    if operation in {"copy", "overwrite"} and source is not None:
+        info(f"[dry-run] {operation} {source} -> {path}")
+    elif operation == "write-manifest":
+        info(f"[dry-run] write manifest {path}")
+    else:
+        info(f"[dry-run] {operation} {path}")
+
+
 INSTALL_NAME = "workspace-oss"
 INSTALL_MODE = "copy-project"
 MANIFEST_REL = Path(".agents/.install-manifest.json")
@@ -591,13 +610,13 @@ def transactional_apply(
                     missing_parents.add(parent)
                 parent = parent.parent
         for directory in sorted(missing_parents, key=lambda path: (len(path.parts), path.as_posix())):
-            info(f"[dry-run] mkdir {directory}")
+            dry_run_info("mkdir", directory)
         for rel in changed_writes:
-            info(f"[dry-run] write {path_for_rel(dst_root, rel)}")
+            dry_run_info("write", path_for_rel(dst_root, rel))
         for rel in changed_removals:
-            info(f"[dry-run] delete {path_for_rel(dst_root, rel)}")
+            dry_run_info("delete", path_for_rel(dst_root, rel))
         if manifest_changed:
-            info(f"[dry-run] write manifest {manifest_path(dst_root)}")
+            dry_run_info("write-manifest", manifest_path(dst_root))
         return bool(changed_writes or changed_removals or manifest_changed)
     if not changed_writes and not changed_removals and not manifest_changed:
         return False
@@ -679,7 +698,7 @@ def write_file_if_needed(src: Path, dst: Path, dst_root: Path, *, dry_run: bool)
     assert_write_target(dst, dst_root)
     action = "overwrite" if exists else "copy"
     if dry_run:
-        info(f"[dry-run] {action} {src} -> {dst}")
+        dry_run_info(action, dst, source=src)
         return True
     dst.parent.mkdir(parents=True, exist_ok=True)
     tmp = dst.with_name(f".{dst.name}.tmp.{os.getpid()}")
@@ -695,7 +714,7 @@ def remove_file(path: Path, dst_root: Path, *, dry_run: bool) -> bool:
     if not path.exists() and not path.is_symlink():
         return False
     if dry_run:
-        info(f"[dry-run] delete {path}")
+        dry_run_info("delete", path)
         return True
     path.unlink()
     return True
@@ -718,7 +737,7 @@ def prune_empty_dirs(dst_root: Path, *, dry_run: bool, preserve: set[Path] | Non
             next(directory.iterdir())
         except StopIteration:
             if dry_run:
-                info(f"[dry-run] rmdir {directory}")
+                dry_run_info("rmdir", directory)
             else:
                 directory.rmdir()
         except OSError:
@@ -735,7 +754,7 @@ def write_manifest(dst_root: Path, manifest: dict[str, Any], *, dry_run: bool) -
         except OSError:
             pass
     if dry_run:
-        info(f"[dry-run] write manifest {path}")
+        dry_run_info("write-manifest", path)
         return True
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}")
@@ -1224,14 +1243,14 @@ def uninstall(args: argparse.Namespace) -> int:
     if manifest_path(dst_root).exists() or manifest_path(dst_root).is_symlink():
         planned_removals.add(manifest_path(dst_root))
         if args.dry_run:
-            info(f"[dry-run] delete {manifest_path(dst_root)}")
+            dry_run_info("delete", manifest_path(dst_root))
         else:
             manifest_path(dst_root).unlink()
         removed_any = True
     root = agents_root(dst_root)
     if args.dry_run:
         for directory in planned_empty_directories_after_removals(dst_root, planned_removals):
-            info(f"[dry-run] rmdir {directory}")
+            dry_run_info("rmdir", directory)
     else:
         prune_empty_dirs(dst_root, dry_run=False, preserve=preserved_paths)
     if not args.dry_run and root.exists() and root.is_dir():
@@ -1261,12 +1280,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--agents", default="")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--plan-jsonl", action="store_true", help=argparse.SUPPRESS)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
+    global PLAN_JSONL
     parser = build_parser()
     args = parser.parse_args(argv)
+    PLAN_JSONL = bool(args.plan_jsonl)
     try:
         if args.action == "install":
             return install(args)

@@ -49,11 +49,13 @@ def test_agent_plan_lists_exact_targets_and_writes_nothing(tmp_path: Path) -> No
     scratch = tmp_path / "agent-tmp"
     for directory in (home, cache, scratch):
         directory.mkdir()
+    plan_path = tmp_path / "install-plan.json"
     result = subprocess.run(
         [
             "bash",
             str(_project_root() / "install.sh"),
-            "--agent-plan",
+            "--agent-plan-json",
+            str(plan_path),
             "--all",
             "--kb-on-path",
             "--project",
@@ -71,23 +73,43 @@ def test_agent_plan_lists_exact_targets_and_writes_nothing(tmp_path: Path) -> No
         },
         text=True,
         capture_output=True,
+        stdin=subprocess.DEVNULL,
         check=False,
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "[dry-run]" in result.stdout
-    assert f"[dry-run] mkdir {workspace}/.agents/skills/kb-cli/scripts" in result.stdout
-    assert ".agents/skills/kb-cli/scripts/kb" in result.stdout
-    assert f"[agent-plan] write-managed-block {workspace}/CLAUDE.md" in result.stdout
-    assert f"[agent-plan] conditional-runtime-tree {workspace}/.venv" in result.stdout
-    target_lines = [
-        line
-        for line in result.stdout.splitlines()
-        if line.startswith(("[dry-run]", "[agent-plan]"))
+    assert "[dry-run]" not in result.stdout
+    assert ".agents/skills/kb-cli/scripts/kb" not in result.stdout
+    assert len(result.stdout.splitlines()) <= 20
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    assert plan["mode"] == "agent-plan"
+    assert plan["zero_write_scope"] == "workspace-home-and-runtime"
+    assert plan["action"] == "install"
+    assert plan["scope"] == "project"
+    assert plan["tools"] == ["claude", "codex"]
+    assert plan["workspace"] == str(workspace.resolve())
+    assert plan["source"]["strategy"] == "local-checkout"
+    assert plan["source"]["checkout"] == str(_project_root())
+    assert plan["source"]["commit"] == _git_output(_project_root(), "rev-parse", "HEAD")
+    assert plan["source"]["origin"] == _git_output(_project_root(), "remote", "get-url", "origin")
+    targets = plan["targets"]
+    assert any(item == {"operation": "write", "path": str(workspace / ".agents/skills/kb-cli/scripts/kb")} for item in targets)
+    assert any(item["operation"] == "write-managed-block" and item["path"] == str(workspace / "CLAUDE.md") for item in targets)
+    assert plan["conditional_runtime_changes"] == [
+        {
+            "condition": "only if required Python dependencies are unavailable",
+            "operation": "conditional-runtime-tree",
+            "path": str(workspace / ".venv"),
+            "source": "Python dependency manager",
+        }
     ]
+    assert plan["conflicts"] == []
+    assert plan["apply_contract"]["headless"] is True
+    assert plan["apply_contract"]["requires_same_source_commit"] == plan["source"]["commit"]
+    assert "--agent-plan-json" not in plan["apply_contract"]["argv"]
     summary = re.search(r"预计受管目标：(\d+) 项", result.stdout)
     assert summary is not None
-    assert int(summary.group(1)) == len(target_lines)
+    assert int(summary.group(1)) == plan["target_count"] == len(targets)
     assert not any(workspace.iterdir())
     assert not any(home.iterdir())
     assert not any(cache.iterdir())
@@ -103,13 +125,15 @@ def test_agent_uninstall_plan_reports_managed_block_and_exact_count(tmp_path: Pa
         extra=("--claude",),
     )
     assert installed.returncode == 0, installed.stdout + installed.stderr
+    plan_path = tmp_path / "uninstall-plan.json"
 
     result = subprocess.run(
         [
             "bash",
             str(_project_root() / "install.sh"),
             "uninstall",
-            "--agent-plan",
+            "--agent-plan-json",
+            str(plan_path),
             "--project",
             str(workspace),
             "--yes",
@@ -128,16 +152,12 @@ def test_agent_uninstall_plan_reports_managed_block_and_exact_count(tmp_path: Pa
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert f"[agent-plan] remove-managed-block {workspace}/CLAUDE.md" in result.stdout
-    assert f"[dry-run] rmdir {workspace}/.agents" in result.stdout
-    target_lines = [
-        line
-        for line in result.stdout.splitlines()
-        if line.startswith(("[dry-run]", "[agent-plan]"))
-    ]
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    assert any(item["operation"] == "remove-managed-block" and item["path"] == str(workspace / "CLAUDE.md") for item in plan["targets"])
+    assert any(item["operation"] == "rmdir" and item["path"] == str(workspace / ".agents") for item in plan["targets"])
     summary = re.search(r"预计受管目标：(\d+) 项", result.stdout)
     assert summary is not None
-    assert int(summary.group(1)) == len(target_lines)
+    assert int(summary.group(1)) == plan["target_count"] == len(plan["targets"])
 
 
 def test_installer_smoke_does_not_create_unplanned_bytecode(tmp_path: Path) -> None:
@@ -185,7 +205,7 @@ def test_project_install_rejects_symlinked_managed_parent(tmp_path: Path) -> Non
     outside.mkdir()
     (workspace / ".claude").symlink_to(outside, target_is_directory=True)
 
-    for plan_flag in (("--agent-plan",), ()):
+    for plan_flag in (("--agent-plan-json", str(tmp_path / "rejected-plan.json")), ()):
         result = subprocess.run(
             [
                 "bash",
@@ -215,12 +235,14 @@ def test_system_agent_plan_lists_missing_parent_directories(tmp_path: Path) -> N
     scratch = tmp_path / "system-plan-tmp"
     for directory in (home, cache, scratch):
         directory.mkdir()
+    plan_path = tmp_path / "system-plan.json"
     result = subprocess.run(
         [
             "bash",
             str(_project_root() / "install.sh"),
             "install",
-            "--agent-plan",
+            "--agent-plan-json",
+            str(plan_path),
             "--all",
             "--system",
             "--kb-on-path",
@@ -242,6 +264,8 @@ def test_system_agent_plan_lists_missing_parent_directories(tmp_path: Path) -> N
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    targets = {(item["operation"], item["path"]) for item in plan["targets"]}
     for directory in (
         home / ".claude",
         home / ".claude/skills",
@@ -250,14 +274,10 @@ def test_system_agent_plan_lists_missing_parent_directories(tmp_path: Path) -> N
         home / ".local",
         home / ".local/bin",
     ):
-        assert f"[agent-plan] mkdir {directory}" in result.stdout
-    target_lines = [
-        line
-        for line in result.stdout.splitlines()
-        if line.startswith(("[dry-run]", "[agent-plan]"))
-    ]
+        assert ("mkdir", str(directory)) in targets
     summary = re.search(r"预计受管目标：(\d+) 项", result.stdout)
-    assert summary is not None and int(summary.group(1)) == len(target_lines)
+    assert summary is not None and int(summary.group(1)) == plan["target_count"] == len(plan["targets"])
+    assert len(result.stdout.splitlines()) <= 20
     assert not any(home.iterdir())
     assert not any(cache.iterdir())
     assert not any(scratch.iterdir())
