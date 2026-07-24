@@ -262,7 +262,7 @@ def _directory_open_flags() -> int:
 
 @contextmanager
 def _locked_manifest_directory(install_root: Path) -> Iterator[tuple[Path, int, int]]:
-    """Anchor and lock ``.agents`` without traversing a symlink component."""
+    """Lock the stable workspace root, then anchor ``.agents`` below it."""
     root = Path(install_root).expanduser().resolve(strict=False)
     root_fd = -1
     agents_fd = -1
@@ -271,13 +271,16 @@ def _locked_manifest_directory(install_root: Path) -> Iterator[tuple[Path, int, 
         root_status = os.fstat(root_fd)
         if not stat.S_ISDIR(root_status.st_mode):
             raise SourceRebindError("unsafe-install-root", "the install root is not a regular directory")
+        fcntl.flock(root_fd, fcntl.LOCK_EX)
+        current_root = os.stat(str(root), follow_symlinks=False)
+        if not _same_node(root_status, current_root):
+            raise SourceRebindError("unsafe-install-root", "the install root changed before locking")
         agents_status = os.stat(".agents", dir_fd=root_fd, follow_symlinks=False)
         if not stat.S_ISDIR(agents_status.st_mode):
             raise SourceRebindError("unsafe-manifest-ancestor", "the manifest ancestor is not a directory")
         agents_fd = os.open(".agents", _directory_open_flags(), dir_fd=root_fd)
         if not _same_node(agents_status, os.fstat(agents_fd)):
             raise SourceRebindError("unsafe-manifest-ancestor", "the manifest ancestor changed during validation")
-        fcntl.flock(agents_fd, fcntl.LOCK_EX)
         current_agents = os.stat(".agents", dir_fd=root_fd, follow_symlinks=False)
         if not _same_node(current_agents, os.fstat(agents_fd)):
             raise SourceRebindError("unsafe-manifest-ancestor", "the manifest ancestor changed before locking")
@@ -288,12 +291,12 @@ def _locked_manifest_directory(install_root: Path) -> Iterator[tuple[Path, int, 
         raise SourceRebindError("unsafe-manifest-path", "the install manifest path cannot be safely opened") from exc
     finally:
         if agents_fd >= 0:
-            try:
-                fcntl.flock(agents_fd, fcntl.LOCK_UN)
-            finally:
-                os.close(agents_fd)
+            os.close(agents_fd)
         if root_fd >= 0:
-            os.close(root_fd)
+            try:
+                fcntl.flock(root_fd, fcntl.LOCK_UN)
+            finally:
+                os.close(root_fd)
 
 
 def _assert_anchored_agents(root_fd: int, agents_fd: int) -> None:
@@ -456,6 +459,20 @@ def source_choice_request(install_root: Path) -> dict[str, Any]:
 
         actual_origin = _checkout_origin(checkout) if checkout_valid and is_git_checkout(checkout) else ""
         actual_branch = _checkout_branch(checkout) if checkout_valid and is_git_checkout(checkout) else ""
+        checkout_is_git = bool(checkout_valid and checkout is not None and is_git_checkout(checkout))
+        local_checkout_reusable = bool(
+            checkout_valid
+            and (
+                not checkout_is_git
+                or (
+                    _valid_branch_name(actual_branch)
+                    and (
+                        (actual_origin and recorded_origin == actual_origin)
+                        or (not actual_origin and recorded_origin in {"", LOCAL_ORIGIN})
+                    )
+                )
+            )
+        )
         origin = recorded_origin if _valid_origin(recorded_origin) else (
             actual_origin if _valid_origin(actual_origin) else ""
         )
@@ -518,7 +535,7 @@ def source_choice_request(install_root: Path) -> dict[str, Any]:
 
         local_fields: list[str] = []
         local_template = {**base_apply, "source_strategy": LOCAL_CHECKOUT_STRATEGY}
-        if checkout_valid and checkout is not None:
+        if local_checkout_reusable and checkout is not None:
             local_template["source_checkout"] = str(checkout)
             if origin:
                 local_template["source_origin"] = origin
@@ -584,29 +601,33 @@ def rebind_source(
             if not _strict_source_checkout(checkout):
                 raise SourceRebindError("invalid-source-checkout", "the selected checkout is not a bundle source")
             checkout_value = str(checkout)
-            actual_origin = _checkout_origin(checkout) if is_git_checkout(checkout) else ""
-            actual_branch = _checkout_branch(checkout) if is_git_checkout(checkout) else ""
+            git_checkout = is_git_checkout(checkout)
+            actual_origin = _checkout_origin(checkout) if git_checkout else ""
+            actual_branch = _checkout_branch(checkout) if git_checkout else ""
             if not origin:
                 origin = actual_origin or LOCAL_ORIGIN
             if not branch and _valid_branch_name(actual_branch):
                 branch = actual_branch
             if not _valid_origin(origin):
                 raise SourceRebindError("invalid-source-origin", "the selected source origin is invalid")
-            if origin != LOCAL_ORIGIN:
-                if not actual_origin or not hmac.compare_digest(actual_origin, origin):
-                    raise SourceRebindError("source-origin-mismatch", "the checkout origin does not match the selection")
-                if not _valid_branch_name(branch) or not actual_branch or not hmac.compare_digest(actual_branch, branch):
-                    raise SourceRebindError("source-branch-mismatch", "the checkout branch does not match the selection")
-            else:
-                if actual_origin:
+            if git_checkout:
+                if origin != LOCAL_ORIGIN:
+                    if not actual_origin or not hmac.compare_digest(actual_origin, origin):
+                        raise SourceRebindError("source-origin-mismatch", "the checkout origin does not match the selection")
+                elif actual_origin:
                     raise SourceRebindError("source-origin-mismatch", "the checkout has a different verifiable origin")
-                if branch:
-                    if not _valid_branch_name(branch):
-                        raise SourceRebindError("invalid-source-branch", "the selected source branch is invalid")
-                    if actual_branch and not hmac.compare_digest(actual_branch, branch):
-                        raise SourceRebindError("source-branch-mismatch", "the checkout branch does not match the selection")
-                elif _valid_branch_name(actual_branch):
-                    branch = actual_branch
+                if not _valid_branch_name(actual_branch):
+                    raise SourceRebindError(
+                        "source-branch-mismatch",
+                        "a Git source checkout must be on an attached branch",
+                    )
+                if not _valid_branch_name(branch) or not hmac.compare_digest(actual_branch, branch):
+                    raise SourceRebindError("source-branch-mismatch", "the checkout branch does not match the selection")
+            elif origin != LOCAL_ORIGIN or branch:
+                raise SourceRebindError(
+                    "source-origin-mismatch",
+                    "a non-Git checkout must use local origin without a branch",
+                )
             try:
                 commit = _source_commit(checkout)
             except (OSError, subprocess.SubprocessError) as exc:
@@ -648,7 +669,7 @@ def source_provenance(install_root: Path) -> SourceProvenance | None:
     if is_git_checkout(root):
         origin = _checkout_origin(root) or LOCAL_ORIGIN
         branch = _checkout_branch(root)
-        if origin != LOCAL_ORIGIN and not _valid_branch_name(branch):
+        if not _valid_branch_name(branch):
             return None
         strategy = LOCAL_CHECKOUT_STRATEGY if origin == LOCAL_ORIGIN else REMOTE_BRANCH_STRATEGY
         return SourceProvenance(origin, root, branch, strategy)
@@ -671,6 +692,18 @@ def source_provenance(install_root: Path) -> SourceProvenance | None:
             return None
         if not origin:
             origin = _checkout_origin(checkout) or LOCAL_ORIGIN
+        if is_git_checkout(checkout):
+            actual_origin = _checkout_origin(checkout)
+            actual_branch = _checkout_branch(checkout)
+            if not _valid_branch_name(actual_branch) or not _valid_branch_name(branch) or actual_branch != branch:
+                return None
+            if origin == LOCAL_ORIGIN:
+                if actual_origin:
+                    return None
+            elif not actual_origin or actual_origin != origin:
+                return None
+        elif origin != LOCAL_ORIGIN or branch:
+            return None
         return SourceProvenance(origin, checkout, branch, LOCAL_CHECKOUT_STRATEGY)
 
     checkout_text = str(manifest.get("source_checkout") or manifest.get("source_repo") or "").strip()
@@ -691,6 +724,12 @@ def source_provenance(install_root: Path) -> SourceProvenance | None:
         return None
     if origin == LOCAL_ORIGIN:
         if checkout is None:
+            return None
+        if is_git_checkout(checkout):
+            actual_branch = _checkout_branch(checkout)
+            if _checkout_origin(checkout) or not _valid_branch_name(actual_branch) or actual_branch != branch:
+                return None
+        elif branch:
             return None
         return SourceProvenance(origin, checkout, branch, LOCAL_CHECKOUT_STRATEGY)
     if not _valid_branch_name(branch):
@@ -714,13 +753,18 @@ def _resolve_checkout(provenance: SourceProvenance, cache_dir: Path, *, pull: bo
     if provenance.is_local:
         if checkout is None or not is_source_checkout(checkout):
             raise SourceChoiceRequired("记录的本地更新源已不可用；需要重新选择源码位置。")
+        if is_git_checkout(checkout):
+            if not _valid_branch_name(provenance.branch):
+                raise SourceChoiceRequired("记录的本地更新源缺少有效分支；需要重新选择更新源。")
+            _validate_checkout_branch(checkout, provenance.branch)
+        elif provenance.origin != LOCAL_ORIGIN or provenance.branch:
+            raise SourceChoiceRequired("记录的本地更新源绑定无效；需要重新选择更新源。")
         if provenance.origin != LOCAL_ORIGIN:
             actual_origin = _checkout_origin(checkout)
             if not actual_origin or actual_origin != provenance.origin:
                 raise SourceChoiceRequired("记录的本地更新源已更换远端；需要重新选择更新源。")
-            if not _valid_branch_name(provenance.branch):
-                raise SourceChoiceRequired("记录的本地更新源缺少有效分支；需要重新选择更新源。")
-            _validate_checkout_branch(checkout, provenance.branch)
+        elif is_git_checkout(checkout) and _checkout_origin(checkout):
+            raise SourceChoiceRequired("记录的本地更新源已更换远端；需要重新选择更新源。")
         return checkout
     if provenance.effective_strategy != REMOTE_BRANCH_STRATEGY:
         raise SourceChoiceRequired("安装记录包含无法识别的更新策略；需要重新选择更新源。")

@@ -80,8 +80,7 @@ def test_check_reports_available_equal_and_unknown(monkeypatch, tmp_path: Path) 
 
 def test_resolve_source_checkout_uses_manifest_checkout(tmp_path: Path) -> None:
     source = tmp_path / "source"
-    (source / ".git").mkdir(parents=True)
-    (source / "install-lib").mkdir()
+    (source / "install-lib").mkdir(parents=True)
     (source / "install-lib" / "ws_sync.py").write_text("", encoding="utf-8")
     install = tmp_path / "install"
     manifest = install / updater.MANIFEST_REL
@@ -276,9 +275,10 @@ def test_remote_manifest_without_branch_requires_choice(monkeypatch, tmp_path: P
     assert updater.apply(install, tmp_path / "cache")["status"] == "needs_source_choice"
 
 
-def test_detached_remote_checkout_requires_source_choice(monkeypatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize("origin", ["git@example.test:team/fork.git", ""])
+def test_detached_git_root_requires_source_choice(monkeypatch, tmp_path: Path, origin: str) -> None:
     (tmp_path / ".git").mkdir()
-    monkeypatch.setattr(updater, "_checkout_origin", lambda _checkout: "git@example.test:team/fork.git")
+    monkeypatch.setattr(updater, "_checkout_origin", lambda _checkout: origin)
     monkeypatch.setattr(updater, "_checkout_branch", lambda _checkout: "")
 
     assert updater.source_provenance(tmp_path) is None
@@ -627,7 +627,7 @@ def test_unknown_source_strategy_fails_closed(monkeypatch, tmp_path: Path) -> No
     assert updater.apply(install, tmp_path / "cache")["status"] == "needs_source_choice"
 
 
-def test_linked_worktree_marker_is_accepted_for_local_checkout(tmp_path: Path) -> None:
+def test_linked_worktree_marker_is_accepted_for_local_checkout(monkeypatch, tmp_path: Path) -> None:
     install = tmp_path / "install"
     source = tmp_path / "linked-source"
     source.mkdir()
@@ -647,6 +647,8 @@ def test_linked_worktree_marker_is_accepted_for_local_checkout(tmp_path: Path) -
         ),
         encoding="utf-8",
     )
+    monkeypatch.setattr(updater, "_checkout_origin", lambda _checkout: "ssh://example.test/team/workspace-oss.git")
+    monkeypatch.setattr(updater, "_checkout_branch", lambda _checkout: "feature/linked")
 
     provenance = updater.source_provenance(install)
 
@@ -823,6 +825,112 @@ def test_legacy_local_choice_derives_attached_checkout_origin_and_branch(tmp_pat
     assert manifest["source_origin"] == str(remote)
     assert manifest["source_branch"] == "feature/inferred"
     assert manifest["source_checkout"] == str(source)
+
+
+def test_detached_git_local_rebind_fails_closed_without_manifest_churn(tmp_path: Path) -> None:
+    install = tmp_path / "install"
+    manifest_path = _write_copy_manifest(install, source_repo="")
+    source = tmp_path / "detached-local-source"
+    (source / ".agents").mkdir(parents=True)
+    (source / ".agents" / "VERSION").write_text("0.2.0\n", encoding="utf-8")
+    (source / "install-lib").mkdir()
+    (source / "install-lib" / "ws_sync.py").write_text("", encoding="utf-8")
+    subprocess.run(["git", "init", str(source)], check=True, capture_output=True, text=True)
+    _git(source, "config", "user.name", "Updater Rebind")
+    _git(source, "config", "user.email", "updater-rebind@example.test")
+    _git(source, "checkout", "-b", "feature/local")
+    _git(source, "add", ".agents", "install-lib")
+    _git(source, "commit", "-m", "source")
+    _git(source, "checkout", "--detach", "HEAD")
+    before = manifest_path.read_bytes()
+    inode_before = manifest_path.stat().st_ino
+
+    payload = json.loads(before)
+    payload.update(
+        {
+            "source_origin": "local",
+            "source_checkout": str(source),
+            "source_repo": str(source),
+            "source_branch": "",
+            "source_strategy": "local-checkout",
+        }
+    )
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    before = manifest_path.read_bytes()
+    inode_before = manifest_path.stat().st_ino
+
+    request = updater.source_choice_request(install)
+    local_choice = next(
+        choice for choice in request["alternatives"] if choice["source_strategy"] == "local-checkout"
+    )
+    assert local_choice["fields"] == ["source_checkout"]
+    assert "source_checkout" not in local_choice["apply"]
+
+    with pytest.raises(updater.SourceRebindError) as rejected:
+        updater.rebind_source(
+            install,
+            expected_manifest_digest=hashlib.sha256(before).hexdigest(),
+            source_origin="local",
+            source_checkout=str(source),
+            source_branch="",
+            source_strategy="local-checkout",
+        )
+
+    assert rejected.value.code == "source-branch-mismatch"
+    assert manifest_path.read_bytes() == before
+    assert manifest_path.stat().st_ino == inode_before
+
+    # Historical manifests with the same invalid binding must also fail closed.
+    assert updater.check(install, tmp_path / "cache")["status"] == "needs_source_choice"
+
+
+def test_attached_git_and_nongit_local_rebinds_are_explicitly_supported(tmp_path: Path) -> None:
+    attached_install = tmp_path / "attached-install"
+    attached_manifest = _write_copy_manifest(attached_install, source_repo="")
+    attached = tmp_path / "attached-local-source"
+    (attached / ".agents").mkdir(parents=True)
+    (attached / ".agents" / "VERSION").write_text("0.2.0\n", encoding="utf-8")
+    (attached / "install-lib").mkdir()
+    (attached / "install-lib" / "ws_sync.py").write_text("", encoding="utf-8")
+    subprocess.run(["git", "init", str(attached)], check=True, capture_output=True, text=True)
+    _git(attached, "config", "user.name", "Updater Rebind")
+    _git(attached, "config", "user.email", "updater-rebind@example.test")
+    _git(attached, "checkout", "-b", "feature/local")
+    _git(attached, "add", ".agents", "install-lib")
+    _git(attached, "commit", "-m", "source")
+
+    attached_result = updater.rebind_source(
+        attached_install,
+        expected_manifest_digest=hashlib.sha256(attached_manifest.read_bytes()).hexdigest(),
+        source_origin="local",
+        source_checkout=str(attached),
+        source_branch="feature/local",
+        source_strategy="local-checkout",
+    )
+
+    assert attached_result["source_branch"] == "feature/local"
+    assert attached_result["source_commit"] == _git(attached, "rev-parse", "HEAD")
+
+    nongit_install = tmp_path / "nongit-install"
+    nongit_manifest = _write_copy_manifest(nongit_install, source_repo="")
+    nongit = tmp_path / "nongit-source"
+    (nongit / ".agents").mkdir(parents=True)
+    (nongit / ".agents" / "VERSION").write_text("0.2.0\n", encoding="utf-8")
+    (nongit / "install-lib").mkdir()
+    (nongit / "install-lib" / "ws_sync.py").write_text("", encoding="utf-8")
+
+    nongit_result = updater.rebind_source(
+        nongit_install,
+        expected_manifest_digest=hashlib.sha256(nongit_manifest.read_bytes()).hexdigest(),
+        source_origin="local",
+        source_checkout=str(nongit),
+        source_branch="",
+        source_strategy="local-checkout",
+    )
+
+    assert nongit_result["source_origin"] == "local"
+    assert nongit_result["source_branch"] == ""
+    assert nongit_result["source_commit"] == "local"
 
 
 @pytest.mark.parametrize(
