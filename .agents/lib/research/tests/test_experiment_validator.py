@@ -481,10 +481,14 @@ def test_reports_isolate_pending_diagnoses_and_require_current_receipt_for_judge
     )
     _run_report(tmp_path, "weekly", "--program-id", program_id)
     confirmed_report = report_path.read_text(encoding="utf-8")
+    claims_section = _markdown_section(confirmed_report, "## Confirmed Claims & Evidence")
     ordinary_section = _markdown_section(confirmed_report, "## Reporting Events")
     pending_section = _markdown_section(confirmed_report, "## Pending / Unverified judgements")
+    assert confirmed_summary in claims_section
+    assert run_summary in claims_section
     assert run_summary in ordinary_section
-    assert confirmed_summary in ordinary_section
+    assert confirmed_summary not in ordinary_section
+    assert "Confirmed judgement" in ordinary_section
     assert "confirmation: current receipt" in ordinary_section
     assert confirmed_summary not in pending_section
     assert pending_summary in pending_section
