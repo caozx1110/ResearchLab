@@ -37,6 +37,7 @@ from .records import (
 )
 from .surveys import (
     survey_artifact_path,
+    survey_content_digest,
     survey_lifecycle_violations,
     survey_source_roots,
 )
@@ -358,6 +359,9 @@ def pending_judgement_card(
             "slug": _text(record.get("slug")),
             "mode": _text(record.get("mode")),
         }
+        card["program_ids"] = [
+            _text(item) for item in record.get("program_ids", []) if _text(item)
+        ]
     return card
 
 
@@ -525,6 +529,11 @@ def judgement_snapshot_binding(
     payload = payload if isinstance(payload, dict) else {}
     verification = payload.get("verification")
     verification = verification if isinstance(verification, dict) else {}
+    content_digest = (
+        survey_content_digest(record)
+        if _text(record.get("kind")) == "survey_judgement"
+        else confirmation_content_digest(record)
+    )
     return {
         "subject": {
             "kind": _text(record.get("kind")),
@@ -533,7 +542,7 @@ def judgement_snapshot_binding(
             "path": _text(path),
         },
         "confirmation_status": _text(record.get("confirmation_status")),
-        "content_digest": confirmation_content_digest(record),
+        "content_digest": content_digest,
         "verification": {
             key: _text(verification.get(key))
             for key in ("verified_at", "claims_digest", "evidence_digest")

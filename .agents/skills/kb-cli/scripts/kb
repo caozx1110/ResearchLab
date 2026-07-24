@@ -135,6 +135,7 @@ REVIEW_OWNER_SCRIPTS = {
     "research-orchestrator": owner_script("research-orchestrator", "orchestrate"),
     "idea-workbench": owner_script("idea-workbench", "idea"),
     "method-designer": owner_script("method-designer", "method"),
+    "literature-synthesizer": owner_script("literature-synthesizer", "synthesize"),
 }
 _REVIEW_OWNER_MODULES: dict[str, object] = {}
 
@@ -2556,6 +2557,7 @@ _SIDE_JUDGEMENT_KIND_LABELS = {
     "program_decision": "研究决策",
     "idea_discussion_conclusion": "想法讨论结论",
     "method_selection": "方法仓库选择",
+    "survey_judgement": "文献综述",
 }
 _REVIEW_PRIORITY = {"critical": 4, "high": 3, "normal": 2, "low": 1}
 
@@ -3353,10 +3355,18 @@ def _review_owner_command(
             "--idea-id",
             str(route.get("idea_id") or ""),
         ]
+    elif owner == "literature-synthesizer" and action in {"confirm", "reject"}:
+        arguments = [
+            str(route.get("mode") or "survey"),
+            action,
+            "--expected-snapshot",
+            expected_snapshot,
+        ]
     else:
         raise ValueError("review route action is invalid")
 
-    arguments.extend(["--expected-snapshot", expected_snapshot])
+    if owner != "literature-synthesizer":
+        arguments.extend(["--expected-snapshot", expected_snapshot])
     if decision == "confirm":
         arguments.extend(["--confirmed-by", actor])
         for item_evidence in evidence:

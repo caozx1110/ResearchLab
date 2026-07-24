@@ -1262,6 +1262,7 @@ def _judgement_card_program_ids(
     subject = card.get("subject") if isinstance(card.get("subject"), dict) else {}
     route = card.get("confirm_route") if isinstance(card.get("confirm_route"), dict) else {}
     result: set[str] = set()
+    result.update(str(item) for item in card.get("program_ids", []) if str(item))
     if str(route.get("program_id") or ""):
         result.add(str(route["program_id"]))
     subject_id = str(subject.get("id") or "")

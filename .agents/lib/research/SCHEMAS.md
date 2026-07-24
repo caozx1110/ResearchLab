@@ -874,6 +874,8 @@ outputs:
 review_outcomes:
   - outcome_id: outcome-...
     classification: new | duplicate | contradiction_candidate | worth_reviewing | no_material_change
+    disposition: unresolved | acknowledged | materialized | sent_to_review | dismissed
+    disposition_receipt: {}       # 非 unresolved 时绑定 actor/reason/target/revision/content digest
     subject_ref: ""
     rationale: ""
     references:
@@ -897,7 +899,7 @@ history:
 content_digest: <sha256>
 ```
 
-subscription、run、frozen_subscription、history、outputs、review outcome/reference 都是闭合 schema：未知或缺失字段、非 canonical 时间/ID/列表、任意 `provider` 字段即使重算 `content_digest` 也 fail closed。错过多个 anchored window 合并成一次 due run，不补建任务风暴；completed/cancelled 不可重开，blocked/retryable 可恢复。run 的 task binding 固定 `run/subscription/schedule/kind/target/scope/budget`，content digest 覆盖整个 receipt。文献输出必须绑定同一 task 的 terminal `literature-search` stage 及其实际 bytes；survey 输出绑定冻结 survey 的实际 bytes；unit recheck 完成态必须精确覆盖全部冻结 unit id。任一已绑定产物或 receipt 被改写后加载 fail closed。`contradiction_candidate` 必须挂两个不同的、新旧两侧 evidence，不能自动覆盖 confirmed claim。
+subscription、run、frozen_subscription、history、outputs、review outcome/reference 都是闭合 schema：未知或缺失字段、非 canonical 时间/ID/列表、任意 `provider` 字段即使重算 `content_digest` 也 fail closed。错过多个 anchored window 合并成一次 due run，不补建任务风暴；completed/cancelled 不可重开，blocked/retryable 可恢复。run 的 task binding 固定 `run/subscription/schedule/kind/target/scope/budget`，content digest 覆盖整个 receipt。文献输出必须绑定同一 task 的 terminal `literature-search` stage 及其实际 bytes；survey 输出绑定冻结 survey 的实际 bytes；unit recheck 完成态必须精确覆盖全部冻结 unit id。任一已绑定产物或 receipt 被改写后加载 fail closed。`contradiction_candidate` 必须挂两个不同的、新旧两侧 evidence，不能自动覆盖 confirmed claim。outcome 初始为 `unresolved`；后续处置通过 run revision + content digest CAS 原子更新。`materialized` 必须携带当前用户授权，`sent_to_review` 必须绑定合法 review target；旧 receipt 未含 disposition 时只读兼容为 unresolved，不静默重写历史。
 
 ### Passage cache
 
@@ -1111,7 +1113,9 @@ Wave3（2026-07-17）把 3.6/3.10/3.7 三个产出侧子系统从"一次性算�
 - `kb_anchor: {as_of, selection, unit_ids[], units[]}` 记录生成锚点。每个 unit 保存 `id/kind/title/content_digest/confirmation_receipt_digest/evidence_artifact_digests[]`，不得只以 mtime 或标题代表版本。
 - `verify`：先重新定位 anchor 中每个 canonical unit 并比较 identity/content/confirmation/evidence digests，再运行 `validate_claims` + 逐 evidence_ref `verify_claim_evidence`；任一 unit 删除、身份或 byte binding 变化都 fail closed。每个承重 cell必须 ≥1 verbatim citation，全过才落 `survey.yaml`。无硬编码结论/confidence。
 - 已验证产物保存 `consumer_binding: {selection, unit_ids, units, verified_at}`。消费者用 pure-read staleness helper 复算：已有 unit 变化/删除、receipt 失效，或相同 selection 新增匹配 unit，均返回 `stale` + reason；不得查询时自动改写 survey，也不得把 stale judgement 放进正式报告。
-- R2 兼容状态：落盘产物为 `evidence_verification_status=verified`、`status/confirmation_status=pending_user_confirmation`、cell `epistemic_status=verified_pending_confirmation`。在 survey 获得独立 ConfirmationReceipt route 前同时标 `governance_status=needs_agent_repair`，不得作为正式结论进入报告。
+- 落盘产物为一等 `survey_judgement`：`evidence_verification_status=verified`、`status/confirmation_status=pending_user_confirmation`、cell `epistemic_status=verified_pending_confirmation`。它由 owner `literature-synthesizer` 通过统一 dialogue/Obsidian review batch 原子 confirm/reject；snapshot 绑定整个 `survey_content_digest` 与 verification digest，内容或上游 unit 变化即失效。
+- 可选 `program_ids[]` 必须是已存在的 canonical program。确认与 survey/summary 写入同一 root transaction，并向每个 program 的 reporting events 追加携带当前 `confirmation_binding` 的 `survey-confirmed` judgement event；正式报告仍会重新验证绑定，不消费 stale/rejected survey。
+- 空输入不会制造 survey 空壳，而是在 `kb/synthesis/<slug>/composite-requests/<id>.yaml` 落一个闭合、revision/CAS 保护的 `composite_survey_state`。状态按 `search → source_intake → unit_analysis → synthesis → review_confirmation` 顺序持久化 stage/input/output/blocker/resume action；runtime Agent 完成语义选择，脚本只验证合同与搬运状态。
 
 ### report-author — `kb/programs/<id>/reports/*.md`、`kb/user/report-materials/*`、`paper-outline.md`
 

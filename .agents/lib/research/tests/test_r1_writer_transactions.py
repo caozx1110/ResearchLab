@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from research.common import load_yaml, write_text_if_changed, write_yaml_if_changed
+from research.confirm import apply_confirmation
 from research.core import default_record, ensure_workspace, record_path
 from research.git_ops import dirty_kb_paths, undo_last_operation
 
@@ -38,6 +39,25 @@ def _workspace(root: Path) -> None:
     (root / ".agents").mkdir(parents=True, exist_ok=True)
     (root / "AGENTS.md").write_text("# test\n", encoding="utf-8")
     ensure_workspace(root)
+
+
+def _confirmed_survey_source(root: Path) -> None:
+    unit_id = "p-survey-writer-123456"
+    record = default_record("paper", title="Robot Learning", maturity="complete")
+    record.update(
+        id=unit_id,
+        summary="robot learning",
+        confirmation_status="pending_user_confirmation",
+        needs_human_confirmation=True,
+        information_types=["fact"],
+    )
+    apply_confirmation(
+        record,
+        confirmed_by="Human Reviewer",
+        evidence=["Reviewed source unit"],
+        project_root=root,
+    )
+    write_yaml_if_changed(record_path(root, "paper", unit_id), record)
 
 
 def _tree_snapshot(root: Path) -> list[tuple[str, str, bytes]]:
@@ -91,6 +111,7 @@ def test_synthesizer_fault_restores_single_prepare_output(tmp_path: Path, monkey
     module = _load(".agents/skills/literature-synthesizer/scripts/synthesize.py", "r1_synth_fault")
     root = tmp_path / "workspace"
     _workspace(root)
+    _confirmed_survey_source(root)
     _argv(monkeypatch, "synthesize.py", "--root", str(root), "survey", "prepare", "--query", "robot learning", "--as-of", "2026-07-19")
     original = module.write_yaml_if_changed
 
@@ -274,6 +295,7 @@ def test_single_file_prepare_is_undoable(tmp_path: Path, monkeypatch) -> None:
     module = _load(".agents/skills/literature-synthesizer/scripts/synthesize.py", "r1_synth_undo")
     root = tmp_path / "workspace"
     _workspace(root)
+    _confirmed_survey_source(root)
     _argv(monkeypatch, "synthesize.py", "--root", str(root), "survey", "prepare", "--query", "robot learning", "--as-of", "2026-07-19")
     assert module.main() == 0
     output = root / "kb/synthesis/robot-learning/survey-fill.yaml"

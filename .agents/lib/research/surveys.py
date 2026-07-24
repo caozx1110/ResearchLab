@@ -30,6 +30,30 @@ COMPOSITE_SURVEY_STAGES = (
     "review_confirmation",
 )
 COMPOSITE_STAGE_STATUSES = {"pending", "in_progress", "blocked", "completed"}
+COMPOSITE_STATE_STATUSES = {"in_progress", "blocked", "completed"}
+COMPOSITE_STATE_FIELDS = {
+    "schema_version",
+    "kind",
+    "id",
+    "request_digest",
+    "mode",
+    "selection_filters",
+    "current_stage",
+    "status",
+    "created_at",
+    "updated_at",
+    "revision",
+    "stages",
+}
+COMPOSITE_STAGE_FIELDS = {
+    "id",
+    "order",
+    "status",
+    "inputs",
+    "outputs",
+    "blocker",
+    "resume_action",
+}
 
 
 def _canonical_digest_value(value: object) -> object:
@@ -79,6 +103,7 @@ def survey_content_digest(payload: dict[str, Any]) -> str:
         {
             "mode": payload.get("mode"),
             "slug": payload.get("slug"),
+            "program_ids": payload.get("program_ids"),
             "filters": payload.get("filters"),
             "as_of": anchor.get("as_of"),
             "sections": payload.get("sections"),
@@ -171,8 +196,13 @@ def select_current_confirmed_survey_records(
     return eligible, excluded
 
 
-def evidence_gap_handoff(*, filters: dict[str, str], excluded: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    """Structured no-write handoff for discovery/intake/analysis orchestration."""
+def evidence_gap_handoff(
+    *,
+    filters: dict[str, str],
+    excluded: list[dict[str, Any]] | None = None,
+    composite_binding: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Structured discovery/intake/analysis handoff with an optional durable binding."""
     return {
         "status": "evidence_gap",
         "reason": "no_current_confirmed_units",
@@ -182,8 +212,33 @@ def evidence_gap_handoff(*, filters: dict[str, str], excluded: list[dict[str, An
             "entry_stage": "search",
             "ordered_stages": list(COMPOSITE_SURVEY_STAGES),
             "resume_action": "discover_select_intake_analyze_then_retry_synthesis",
+            "state_binding": copy.deepcopy(composite_binding or {}),
         },
     }
+
+
+def composite_survey_request_digest(
+    *,
+    filters: dict[str, str],
+    as_of: str,
+    mode: str,
+) -> str:
+    return _canonical_digest(
+        {
+            "filters": {str(key): str(value or "") for key, value in filters.items()},
+            "as_of": str(as_of or ""),
+            "mode": str(mode or ""),
+        }
+    )
+
+
+def composite_survey_state_path(root: Path, *, slug: str, composite_id: str) -> Path:
+    safe_slug = str(slug or "").strip()
+    safe_id = str(composite_id or "").strip()
+    for label, value in (("slug", safe_slug), ("composite id", safe_id)):
+        if not value or Path(value).name != value or value in {".", ".."}:
+            raise ValueError(f"composite survey {label} is not canonical")
+    return root / "kb" / "synthesis" / safe_slug / "composite-requests" / f"{safe_id}.yaml"
 
 
 def new_composite_survey_state(
@@ -210,6 +265,7 @@ def new_composite_survey_state(
         "request_digest": digest,
         "mode": mode,
         "selection_filters": copy.deepcopy(filters or {}),
+        "revision": 1,
         "current_stage": COMPOSITE_SURVEY_STAGES[0],
         "status": "in_progress",
         "created_at": now,
@@ -234,8 +290,29 @@ def composite_survey_state_violations(state: object) -> list[str]:
     if not isinstance(state, dict):
         return ["composite survey state must be a mapping"]
     violations: list[str] = []
+    if set(state) != COMPOSITE_STATE_FIELDS:
+        violations.append("composite survey state fields are not canonical")
     if state.get("kind") != "composite_survey_state" or state.get("schema_version") != 1:
         violations.append("composite survey state kind/schema_version is invalid")
+    identifier = str(state.get("id") or "")
+    if not identifier or Path(identifier).name != identifier or identifier in {".", ".."}:
+        violations.append("composite survey id is invalid")
+    digest = str(state.get("request_digest") or "")
+    if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+        violations.append("composite survey request digest is invalid")
+    if state.get("mode") not in {"kb_only", "discovery"}:
+        violations.append("composite survey mode is invalid")
+    filters = state.get("selection_filters")
+    if not isinstance(filters, dict) or any(
+        not isinstance(key, str) or not isinstance(value, str) for key, value in filters.items()
+    ):
+        violations.append("composite survey filters are invalid")
+    if state.get("status") not in COMPOSITE_STATE_STATUSES:
+        violations.append("composite survey status is invalid")
+    if not str(state.get("created_at") or "") or not str(state.get("updated_at") or ""):
+        violations.append("composite survey timestamps are missing")
+    if type(state.get("revision")) is not int or int(state.get("revision") or 0) < 1:
+        violations.append("composite survey revision is invalid")
     stages = state.get("stages")
     if not isinstance(stages, list) or [item.get("id") for item in stages if isinstance(item, dict)] != list(COMPOSITE_SURVEY_STAGES):
         return violations + ["composite survey stages are missing or out of order"]
@@ -245,6 +322,8 @@ def composite_survey_state_violations(state: object) -> list[str]:
         if not isinstance(item, dict):
             violations.append(f"stage[{index}] must be a mapping")
             continue
+        if set(item) != COMPOSITE_STAGE_FIELDS:
+            violations.append(f"stage[{index}] fields are not canonical")
         if item.get("order") != index:
             violations.append(f"stage[{index}] order is invalid")
         status = str(item.get("status") or "")
@@ -284,11 +363,14 @@ def update_composite_survey_stage(
     outputs: list[dict[str, Any]] | None = None,
     blocker: dict[str, Any] | None = None,
     resume_action: str = "",
+    expected_revision: int | None = None,
 ) -> dict[str, Any]:
     """Return an updated stage ledger; callers persist it under their own journal."""
     violations = composite_survey_state_violations(state)
     if violations:
         raise ValueError("invalid composite survey state: " + "; ".join(violations))
+    if expected_revision is not None and state.get("revision") != expected_revision:
+        raise ValueError("composite survey state changed after it was displayed")
     if stage_id not in COMPOSITE_SURVEY_STAGES or status not in COMPOSITE_STAGE_STATUSES:
         raise ValueError("invalid composite survey stage update")
     updated = copy.deepcopy(state)
@@ -318,6 +400,7 @@ def update_composite_survey_stage(
     else:
         updated["status"] = "in_progress"
     updated["updated_at"] = utc_now_iso()
+    updated["revision"] = int(state["revision"]) + 1
     violations = composite_survey_state_violations(updated)
     if violations:
         raise ValueError("invalid composite survey stage transition: " + "; ".join(violations))
@@ -450,6 +533,15 @@ def survey_lifecycle_violations(payload: object, root: Path) -> list[str]:
         return ["legacy survey requires agent repair and re-verification"]
     if payload.get("kind") != "survey_judgement" or payload.get("owner") != "literature-synthesizer":
         return ["survey judgement owner identity is invalid"]
+    program_ids = payload.get("program_ids", [])
+    if not isinstance(program_ids, list) or program_ids != sorted(set(program_ids)) or any(
+        not isinstance(item, str)
+        or not item
+        or Path(item).name != item
+        or item in {".", ".."}
+        for item in program_ids
+    ):
+        return ["survey judgement program_ids are invalid"]
     stored_digest = str(payload.get("survey_content_digest") or "")
     if len(stored_digest) != 64 or stored_digest != survey_content_digest(payload):
         return ["survey content digest is missing or stale"]
@@ -467,6 +559,8 @@ __all__ = [
     "COMPOSITE_SURVEY_STAGES",
     "build_unit_binding",
     "composite_survey_state_violations",
+    "composite_survey_request_digest",
+    "composite_survey_state_path",
     "evidence_gap_handoff",
     "new_composite_survey_state",
     "select_current_confirmed_survey_records",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import importlib.machinery
 import importlib.util
 import json
 import sys
@@ -13,6 +14,8 @@ import yaml
 from research.common import load_yaml, write_yaml_if_changed
 from research.confirm import apply_confirmation
 from research.judgements import discover_pending_judgements, judgement_confirmation_is_current
+from research.paths import runtime_preferences_path
+from research.prefs import default_runtime_preferences
 from research.surveys import (
     COMPOSITE_SURVEY_STAGES,
     composite_survey_state_violations,
@@ -32,6 +35,27 @@ def load_synthesizer():
     spec = importlib.util.spec_from_file_location("survey_lifecycle_synthesizer", SCRIPT)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_kb_cli():
+    script = ROOT / ".agents" / "skills" / "kb-cli" / "scripts" / "kb"
+    loader = importlib.machinery.SourceFileLoader("survey_lifecycle_kb_cli", str(script))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[loader.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_orchestrator():
+    script = ROOT / ".agents" / "skills" / "research-orchestrator" / "scripts" / "orchestrate.py"
+    spec = importlib.util.spec_from_file_location("survey_lifecycle_orchestrator", script)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -61,9 +85,11 @@ def write_confirmed_source(module, root: Path, *, unit_id: str = "p-alpha", conf
     return record
 
 
-def build_verified_survey(root: Path):
+def build_verified_survey(root: Path, *, program_id: str = ""):
     module = load_synthesizer()
     source = write_confirmed_source(module, root)
+    if program_id:
+        (root / "kb" / "programs" / program_id).mkdir(parents=True, exist_ok=True)
     scaffold = module.build_survey_scaffold(
         [source],
         root=root,
@@ -74,6 +100,7 @@ def build_verified_survey(root: Path):
         pool="",
         mode="survey",
         as_of="2026-07-24T00:00:00Z",
+        program_ids=[program_id] if program_id else [],
     )
     _, entries = module.survey_claim_entries(scaffold)
     for _, cell, _ in entries:
@@ -131,7 +158,78 @@ def test_prepare_zero_current_inputs_returns_structured_gap_without_scaffold(tmp
     handoff = json.loads(output[-1])
     assert handoff["status"] == "evidence_gap"
     assert handoff["composite_handoff"]["ordered_stages"] == list(COMPOSITE_SURVEY_STAGES)
+    binding = handoff["composite_handoff"]["state_binding"]
+    state_path = tmp_path / binding["state_path"]
+    state = load_yaml(state_path)
+    assert state["status"] == "blocked"
+    assert state["current_stage"] == "search"
+    assert state["revision"] == binding["revision"] == 2
+    assert composite_survey_state_violations(state) == []
     assert not (tmp_path / "kb/synthesis/robot-learning/survey-fill.yaml").exists()
+
+
+def test_composite_cli_updates_with_revision_cas_and_is_resumable(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    module = load_synthesizer()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(SCRIPT),
+            "--root",
+            str(tmp_path),
+            "survey",
+            "prepare",
+            "--query",
+            "robot learning",
+            "--as-of",
+            "2026-07-24",
+        ],
+    )
+    assert module.main() == 2
+    handoff = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    binding = handoff["composite_handoff"]["state_binding"]
+    update_path = tmp_path / "search-complete.json"
+    update_path.write_text(
+        json.dumps(
+            {
+                "stage_id": "search",
+                "status": "completed",
+                "outputs": [{"kind": "literature_stage", "id": "search-1"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(SCRIPT),
+            "--root",
+            str(tmp_path),
+            "composite",
+            "update",
+            "--slug",
+            "robot-learning",
+            "--composite-id",
+            binding["composite_id"],
+            "--expected-revision",
+            str(binding["revision"]),
+            "--input",
+            str(update_path),
+        ],
+    )
+    assert module.main() == 0
+    updated = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert updated["current_stage"] == "selection"
+    assert updated["revision"] == binding["revision"] + 1
+
+    with pytest.raises(SystemExit, match="changed after"):
+        module.main()
+    assert load_yaml(tmp_path / binding["state_path"])["revision"] == updated["revision"]
 
 
 def test_verified_survey_is_discovered_and_batch_confirmed_with_receipt(tmp_path: Path) -> None:
@@ -191,6 +289,93 @@ def test_verified_survey_is_discovered_and_batch_confirmed_with_receipt(tmp_path
             authorization_source="user_message",
             rejection_reason="",
         )
+
+
+def test_public_dialogue_batch_routes_survey_to_its_owner(tmp_path: Path, capsys) -> None:
+    _module, survey_path, _verified = build_verified_survey(tmp_path)
+    (tmp_path / ".agents").mkdir(exist_ok=True)
+    (tmp_path / "AGENTS.md").write_text("# isolated survey review\n", encoding="utf-8")
+    preferences = default_runtime_preferences()
+    preferences["identity"]["default_confirmed_by"] = "Human Reviewer"
+    write_yaml_if_changed(runtime_preferences_path(tmp_path), preferences)
+    kb = load_kb_cli()
+
+    assert kb.main(
+        ["--root", str(tmp_path), "--agent-protocol", "survey-review.json", "review"]
+    ) == 0
+    capsys.readouterr()
+    protocol = json.loads(
+        (tmp_path / "kb/.runtime/survey-review.json").read_text(encoding="utf-8")
+    )
+    item = next(
+        row
+        for row in protocol["next_actions"][0]["review_items"]
+        if row["subject"]["kind"] == "survey_judgement"
+    )
+    reference = f"survey_judgement:{item['subject']['id']}"
+
+    assert kb.main(
+        [
+            "--root",
+            str(tmp_path),
+            "review",
+            "--apply-snapshot",
+            "survey-review.json",
+            "--confirm-ref",
+            reference,
+            "--decision-evidence",
+            "I reviewed every displayed survey claim.",
+            "--user-authorization",
+            "Confirm this displayed survey judgement.",
+        ]
+    ) == 0
+    public = capsys.readouterr().out
+
+    assert "已应用 1 条拍板结果" in public
+    assert load_yaml(survey_path)["confirmation_status"] == "confirmed"
+
+
+def test_confirmed_program_survey_emits_a_current_reportable_event(tmp_path: Path) -> None:
+    module, survey_path, _verified = build_verified_survey(tmp_path, program_id="program-survey")
+    card = discover_pending_judgements(tmp_path)[0]
+    assert card["program_ids"] == ["program-survey"]
+    snapshot = load_orchestrator().portfolio_candidate_snapshot(
+        tmp_path,
+        selected_program_id="program-survey",
+    )
+    candidate = next(
+        item for item in snapshot["candidates"] if item["subject"]["kind"] == "survey_judgement"
+    )
+    assert candidate["owner_skill"] == "literature-synthesizer"
+    assert candidate["governance_gate"] == "human-decision"
+
+    plan = module.prepare_review_batch_decision(
+        tmp_path,
+        card,
+        "confirm",
+        actor="Alice Researcher",
+        evidence=["Reviewed the survey for the program report."],
+        user_authorization="Confirm this displayed survey.",
+        authorization_source="user_message",
+        rejection_reason="",
+    )
+    events_path = tmp_path / "kb/programs/program-survey/workflow/reporting-events.yaml"
+    assert events_path in plan["target_paths"]
+    module.apply_review_batch_decision(
+        tmp_path,
+        card,
+        "confirm",
+        actor="Alice Researcher",
+        evidence=["Reviewed the survey for the program report."],
+        user_authorization="Confirm this displayed survey.",
+        authorization_source="user_message",
+        rejection_reason="",
+    )
+    event = load_yaml(events_path)["items"][0]
+
+    assert event["event_type"] == "survey-confirmed"
+    assert event["confirmation_binding"]["subject"]["path"] == survey_path.relative_to(tmp_path).as_posix()
+    assert event["confirmation_status"] == "confirmed"
 
 
 def test_reject_is_terminal_without_fabricating_confirmation(tmp_path: Path) -> None:

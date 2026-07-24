@@ -46,6 +46,7 @@ _ALLOWED_OWNER_ACTIONS = {
     "research-orchestrator": {"confirm-decision", "reject-decision"},
     "idea-workbench": {"discuss"},
     "method-designer": {"confirm-selection", "reject-selection"},
+    "literature-synthesizer": {"confirm", "reject"},
 }
 
 
