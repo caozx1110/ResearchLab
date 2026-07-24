@@ -35,6 +35,11 @@ from .records import (
     trusted_project_path,
     trusted_unit_record_path,
 )
+from .surveys import (
+    survey_artifact_path,
+    survey_lifecycle_violations,
+    survey_source_roots,
+)
 
 
 UNIT_OWNER_BY_KIND = {
@@ -132,6 +137,16 @@ def _identity_violations(root: Path, record: dict[str, Any], owner: str, artifac
             violations.append("method selection operative and confirmable proposed_repo_id differ")
         if _text(record.get("selected_repo_id")) or _text(selection.get("selected_repo_id")):
             violations.append("pending method selection already contains selected_repo_id")
+    elif kind == "survey_judgement":
+        expected_owner = "literature-synthesizer"
+        slug = _text(record.get("slug"))
+        mode = _text(record.get("mode"))
+        if subject_id != f"survey:{mode}:{slug}":
+            violations.append("survey judgement id does not match mode/slug")
+        try:
+            expected_path = survey_artifact_path(root, slug, mode)
+        except ValueError:
+            violations.append("survey judgement has no canonical mode/slug")
     else:
         violations.append(f"unsupported judgement kind: {kind or '<empty>'}")
     if expected_owner and owner != expected_owner:
@@ -161,6 +176,8 @@ def _identity_violations(root: Path, record: dict[str, Any], owner: str, artifac
 
 
 def _source_roots(root: Path, record: dict[str, Any], artifact_path: Path) -> dict[str, Path]:
+    if _text(record.get("kind")) == "survey_judgement":
+        return survey_source_roots(root, record, artifact_path)
     return trusted_claim_source_roots(
         root,
         record,
@@ -197,6 +214,8 @@ def readiness_violations(root: Path, record: Any, artifact_path: Path) -> list[s
         violations.append("artifact has no judgement-class canonical claim")
     if any(_text(claim.get("confirmation_status")) != "pending_user_confirmation" for claim in claims):
         violations.append("canonical claim confirmation status is not pending_user_confirmation")
+    if _text(record.get("kind")) == "survey_judgement":
+        violations.extend(survey_lifecycle_violations(record, root))
     try:
         verification_root = _verification_root(root, record, artifact_path)
         source_roots = _source_roots(root, record, artifact_path)
@@ -215,6 +234,8 @@ def readiness_violations(root: Path, record: Any, artifact_path: Path) -> list[s
 
 def judgement_confirmation_is_current(root: Path, record: dict[str, Any], artifact_path: Path) -> bool:
     """Validate a judgement receipt against canonical identity and current evidence bytes."""
+    if _text(record.get("kind")) == "survey_judgement" and survey_lifecycle_violations(record, root):
+        return False
     try:
         verification_root = _verification_root(root, record, artifact_path)
         source_roots = _source_roots(root, record, artifact_path)
@@ -253,6 +274,13 @@ def _default_route(record: dict[str, Any], owner: str) -> dict[str, str]:
             "program_id": _text(record.get("program_id")),
             "idea_id": _text(record.get("idea_id")),
         }
+    if kind == "survey_judgement":
+        return {
+            "owner": owner,
+            "action": "confirm",
+            "slug": _text(record.get("slug")),
+            "mode": _text(record.get("mode")),
+        }
     return {"owner": owner, "action": "confirm", "subject_id": subject_id}
 
 
@@ -276,6 +304,15 @@ def pending_judgement_card(
         for section in CONFIRMABLE_CONTENT_SECTIONS.get(_text(record.get("kind")), ())
         if payload.get(section) not in (None, "", [], {})
     }
+    if _text(record.get("kind")) == "survey_judgement":
+        substance = {
+            "filters": record.get("filters") if isinstance(record.get("filters"), dict) else {},
+            "as_of": (record.get("kb_anchor") or {}).get("as_of") if isinstance(record.get("kb_anchor"), dict) else "",
+            "sections": record.get("sections") if isinstance(record.get("sections"), list) else [],
+            "comparison_matrix": record.get("comparison_matrix") if isinstance(record.get("comparison_matrix"), dict) else {},
+        }
+        if not substance["sections"] or not substance["comparison_matrix"]:
+            return None
     selected_fields = CONFIRMABLE_CONTENT_FIELDS.get(_text(record.get("kind")), {})
     if selected_fields:
         has_substance = any(
@@ -295,7 +332,7 @@ def pending_judgement_card(
         owner=owner,
         path=_safe_relative_path(root, artifact_path),
     )
-    return {
+    card = {
         "subject": {
             "kind": _text(record.get("kind")),
             "id": _text(record.get("id")),
@@ -312,6 +349,14 @@ def pending_judgement_card(
         "updated_at": _text(record.get("updated_at") or record.get("timestamp")),
         "confirm_route": {str(key): _text(value) for key, value in route.items()},
     }
+    if _text(record.get("kind")) == "survey_judgement":
+        card["reject_route"] = {
+            "owner": owner,
+            "action": "reject",
+            "slug": _text(record.get("slug")),
+            "mode": _text(record.get("mode")),
+        }
+    return card
 
 
 def _safe_candidate_file(root: Path, path: Path) -> Path | None:
@@ -374,6 +419,18 @@ def _candidate_artifacts(root: Path) -> Iterable[tuple[dict[str, Any], str, Path
             continue
         if isinstance(payload, dict):
             yield payload, "method-designer", safe_path
+    for path in sorted((root / "kb" / "synthesis").glob("*/*.yaml")):
+        if path.name.endswith("-fill.yaml"):
+            continue
+        safe_path = _safe_candidate_file(root, path)
+        if safe_path is None:
+            continue
+        try:
+            payload = load_yaml(safe_path, default={})
+        except (OSError, UnicodeError, yaml.YAMLError):
+            continue
+        if isinstance(payload, dict) and _text(payload.get("kind")) == "survey_judgement":
+            yield payload, "literature-synthesizer", safe_path
 
 
 def discover_pending_judgements(root: str | Path) -> list[dict[str, Any]]:
@@ -562,6 +619,8 @@ def load_bound_judgement(root: str | Path, subject: Any) -> tuple[dict[str, Any]
         candidates.extend((project_root / "kb" / "programs").glob("*/workflow/decisions.yaml"))
     if subject_kind == "idea_discussion_conclusion":
         candidates.extend((project_root / "kb" / "units" / "ideas").glob("*/discussion-judgements.yaml"))
+    if subject_kind == "survey_judgement":
+        candidates.extend((project_root / "kb" / "synthesis").glob("*/*.yaml"))
     for path in candidates:
         try:
             safe_path = trusted_project_path(

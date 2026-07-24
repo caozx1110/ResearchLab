@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import json
 import sys
 from pathlib import Path
 
@@ -23,9 +24,21 @@ if __name__ == "__main__":
 
 from research.common import add_project_root_argument, ensure_dir, file_sha256, load_yaml, print_resolved_project_roots, slugify, utc_now_iso, write_text_if_changed, write_yaml_if_changed
 from research.core import iter_records, project_root, rel, synthesis_root, unit_root
-from research.evidence import validate_claims, verify_claim_evidence
+from research.confirm import apply_confirmation
+from research.evidence import build_verification_receipt, confirmation_claims, validate_claims, verify_claim_evidence
+from research.judgements import apply_judgement_rejection, require_judgement_snapshot
 from research.journal import mutation_transaction
-from research.surveys import build_unit_binding, select_survey_records, survey_staleness, unit_bindings_equal
+from research.surveys import (
+    build_unit_binding,
+    evidence_gap_handoff,
+    select_current_confirmed_survey_records,
+    survey_artifact_path,
+    survey_content_digest,
+    survey_lifecycle_violations,
+    survey_source_roots,
+    survey_staleness,
+    unit_bindings_equal,
+)
 
 
 SECTION_SPECS = (
@@ -62,6 +75,8 @@ def build_survey_scaffold(
     as_of: str,
 ) -> dict:
     """Build a fillable survey structure; the script authors no conclusions."""
+    if not records:
+        raise ValueError("survey scaffold requires at least one current confirmed input unit")
     subject = query or topic or tag or pool or kind or mode
     slug = slugify(subject, max_words=8) or mode
     units = [build_unit_binding(root, record) for record in records if str(record.get("id") or "")]
@@ -222,13 +237,18 @@ def survey_claim_entries(payload: dict) -> tuple[list[str], list[tuple[str, dict
 
 
 def claim_from_cell(cell: dict) -> dict:
-    return {
+    claim = {
         "id": str(cell.get("id") or "").strip(),
         "text": " ".join(str(cell.get("content") or "").split()),
         "claim_type": str(cell.get("claim_type") or "").strip(),
         "confirmation_status": "pending_user_confirmation",
         "evidence_refs": cell.get("evidence_refs") or [],
     }
+    # Bind domain fields authored by the runtime Agent without interpreting them.
+    for key in ("row_label", "column_label", "trajectory", "as_of", "gap_type", "method_id", "dimension_id"):
+        if key in cell:
+            claim[key] = copy.deepcopy(cell.get(key))
+    return claim
 
 
 def verify_survey_fill(payload: dict, root: Path) -> tuple[list[str], dict]:
@@ -338,22 +358,51 @@ def verify_survey_fill(payload: dict, root: Path) -> tuple[list[str], dict]:
 
     verified = copy.deepcopy(payload)
     if not violations:
-        # Evidence verification is not human confirmation.  Until surveys gain a
-        # first-class ConfirmationReceipt route, keep them explicitly pending so
-        # report consumers cannot mistake a grounded AI synthesis for settled fact.
+        verified_at = utc_now_iso()
         verified["status"] = "pending_user_confirmation"
         verified["evidence_verification_status"] = "verified"
         verified["confirmation_status"] = "pending_user_confirmation"
         verified["needs_human_confirmation"] = True
-        verified["governance_status"] = "needs_agent_repair"
+        verified["governance_status"] = "ready_for_review"
+        verified["kind"] = "survey_judgement"
+        verified["id"] = f"survey:{verified.get('mode')}:{verified.get('slug')}"
+        verified["owner"] = "literature-synthesizer"
+        verified["information_types"] = ["evaluation", "inference"]
+        verified["priority"] = str(verified.get("priority") or "normal")
+        verified["updated_at"] = verified_at
         verified["consumer_binding"] = {
             "selection_filters": copy.deepcopy(verified.get("filters") or {}),
             "unit_ids": [str(item.get("id") or "") for item in unit_items if isinstance(item, dict)],
             "units": copy.deepcopy(unit_items),
-            "verified_at": utc_now_iso(),
+            "verified_at": verified_at,
         }
         for _, cell, _ in survey_claim_entries(verified)[1]:
             cell["epistemic_status"] = "verified_pending_confirmation"
+        content_digest = survey_content_digest(verified)
+        canonical_claims = [claim_from_cell(cell) for _, cell, _ in survey_claim_entries(verified)[1]]
+        for claim in canonical_claims:
+            claim["survey_content_digest"] = content_digest
+        verified["survey_content_digest"] = content_digest
+        verified["payload"] = {"claims": canonical_claims}
+        verified["review_route"] = {
+            "owner": "literature-synthesizer",
+            "action": "confirm",
+            "slug": str(verified.get("slug") or ""),
+            "mode": str(verified.get("mode") or "survey"),
+        }
+        source_roots = {
+            unit_id: unit_root(root, unit_kind, unit_id)
+            for unit_id, unit_kind in anchored_units.items()
+        }
+        try:
+            build_verification_receipt(
+                verified,
+                synthesis_root(root) / str(verified.get("slug") or "survey"),
+                source_roots=source_roots,
+                verified_at=verified_at,
+            )
+        except SystemExit as exc:
+            violations.append(str(exc))
     return violations, verified
 
 
@@ -364,10 +413,17 @@ def _escape_table_cell(value: object) -> str:
 def render_verified_summary(payload: dict) -> str:
     filters = payload.get("filters") or {}
     subject = filters.get("query") or filters.get("topic") or filters.get("tag") or filters.get("pool") or filters.get("kind") or "survey"
+    confirmation_status = str(payload.get("confirmation_status") or "")
+    if confirmation_status == "confirmed":
+        governance_line = "> Confirmed judgement: the current content and evidence bindings have a human ConfirmationReceipt."
+    elif confirmation_status == "rejected":
+        governance_line = "> Rejected judgement: retained for audit and excluded from review/reporting."
+    else:
+        governance_line = "> Pending / Unverified judgement: evidence has been checked, but no current human ConfirmationReceipt exists."
     lines = [
         f"# Survey: {subject}",
         "",
-        "> Pending / Unverified judgement: evidence has been checked, but no current human ConfirmationReceipt exists.",
+        governance_line,
         "",
         f"KB anchor: `{payload.get('kb_anchor', {}).get('as_of', '')}`",
         "",
@@ -403,6 +459,140 @@ def render_verified_summary(payload: dict) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _load_survey_judgement(root: Path, *, slug: str, mode: str) -> tuple[dict, Path]:
+    path = survey_artifact_path(root, slug, mode)
+    if not path.is_file() or path.is_symlink():
+        raise ValueError("survey judgement does not exist as a canonical regular file")
+    payload = load_yaml(path, default={})
+    if not isinstance(payload, dict):
+        raise ValueError("survey judgement is not a mapping")
+    if str(payload.get("slug") or "") != slug or str(payload.get("mode") or "") != mode:
+        raise ValueError("survey judgement identity does not match its canonical path")
+    return payload, path
+
+
+def _require_current_survey(root: Path, record: dict, path: Path) -> None:
+    violations = survey_lifecycle_violations(record, root)
+    if violations:
+        raise ValueError("survey judgement is stale: " + "; ".join(violations))
+    source_roots = survey_source_roots(root, record, path)
+    from research.evidence import verification_receipt_violations
+
+    verification_violations = verification_receipt_violations(
+        record,
+        path.parent,
+        source_roots=source_roots,
+    )
+    if verification_violations:
+        raise ValueError("survey verification is stale: " + "; ".join(verification_violations))
+
+
+def prepare_review_batch_decision(
+    root: Path,
+    item: dict,
+    decision: str,
+    *,
+    actor: str,
+    evidence: list[str],
+    user_authorization: str,
+    authorization_source: str,
+    rejection_reason: str,
+) -> dict:
+    """Pure-read preflight for the public cross-owner review coordinator."""
+    route_key = "confirm_route" if decision == "confirm" else "reject_route"
+    route = item.get(route_key) if isinstance(item, dict) else None
+    route = route if isinstance(route, dict) else {}
+    expected_action = "confirm" if decision == "confirm" else "reject"
+    if route.get("owner") != "literature-synthesizer" or route.get("action") != expected_action:
+        raise ValueError("survey review route is invalid")
+    slug = str(route.get("slug") or "")
+    mode = str(route.get("mode") or "survey")
+    record, path = _load_survey_judgement(root, slug=slug, mode=mode)
+    if str(record.get("confirmation_status") or "") != "pending_user_confirmation":
+        raise ValueError("survey judgement is no longer pending review")
+    _require_current_survey(root, record, path)
+    snapshot = item.get("snapshot_binding")
+    if not isinstance(snapshot, dict):
+        raise ValueError("survey review snapshot is missing")
+    require_judgement_snapshot(
+        record,
+        expected_snapshot=snapshot,
+        owner="literature-synthesizer",
+        path=rel(root, path),
+        root=root,
+    )
+    candidate = copy.deepcopy(record)
+    if decision == "confirm":
+        apply_confirmation(
+            candidate,
+            confirmed_by=actor,
+            evidence=evidence,
+            user_authorization=user_authorization,
+            authorization_source=authorization_source,
+            method="literature-synthesizer confirm",
+            project_root=root,
+            verification_root=path.parent,
+            trusted_source_roots=survey_source_roots(root, candidate, path),
+        )
+    elif decision == "reject":
+        apply_judgement_rejection(candidate, reason=rejection_reason)
+    else:
+        raise ValueError("survey review decision is invalid")
+    return {
+        "owner": "literature-synthesizer",
+        "decision": decision,
+        "slug": slug,
+        "mode": mode,
+        "target_paths": [path, path.parent / "summary.md"],
+    }
+
+
+def apply_review_batch_decision(
+    root: Path,
+    item: dict,
+    decision: str,
+    *,
+    actor: str,
+    evidence: list[str],
+    user_authorization: str,
+    authorization_source: str,
+    rejection_reason: str,
+) -> list[Path]:
+    """Apply one preflighted decision inside the coordinator's root transaction."""
+    plan = prepare_review_batch_decision(
+        root,
+        item,
+        decision,
+        actor=actor,
+        evidence=evidence,
+        user_authorization=user_authorization,
+        authorization_source=authorization_source,
+        rejection_reason=rejection_reason,
+    )
+    record, path = _load_survey_judgement(root, slug=plan["slug"], mode=plan["mode"])
+    if decision == "confirm":
+        apply_confirmation(
+            record,
+            confirmed_by=actor,
+            evidence=evidence,
+            user_authorization=user_authorization,
+            authorization_source=authorization_source,
+            method="literature-synthesizer confirm",
+            project_root=root,
+            verification_root=path.parent,
+            trusted_source_roots=survey_source_roots(root, record, path),
+        )
+        record["status"] = "confirmed"
+        record["governance_status"] = "confirmed"
+    else:
+        apply_judgement_rejection(record, reason=rejection_reason)
+        record["status"] = "rejected"
+        record["governance_status"] = "rejected"
+    write_yaml_if_changed(path, record)
+    write_text_if_changed(path.parent / "summary.md", render_verified_summary(record))
+    return list(plan["target_paths"])
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Synthesize research units in core.")
     add_project_root_argument(parser)
@@ -410,7 +600,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     for name in ("survey", "review", "taxonomy"):
         cmd = subparsers.add_parser(name)
-        cmd.add_argument("action", choices=("prepare", "verify"))
+        actions = ("prepare", "verify", "confirm", "reject") if name == "survey" else ("prepare", "verify")
+        cmd.add_argument("action", choices=actions)
         cmd.add_argument("--field", default="")
         cmd.add_argument("--query", default="")
         cmd.add_argument("--as-of", default="")
@@ -419,6 +610,12 @@ def build_parser() -> argparse.ArgumentParser:
         cmd.add_argument("--topic", default="")
         cmd.add_argument("--tag", default="")
         cmd.add_argument("--pool", default="")
+        cmd.add_argument("--expected-snapshot", default="")
+        cmd.add_argument("--confirmed-by", default="")
+        cmd.add_argument("--evidence", action="append", default=[])
+        cmd.add_argument("--user-authorization", default="")
+        cmd.add_argument("--authorization-source", default="")
+        cmd.add_argument("--rejection-reason", default="")
     return parser
 
 
@@ -428,6 +625,55 @@ def main() -> int:
     print_resolved_project_roots(root)
     mode = args.command
     query = getattr(args, "field", "") or getattr(args, "query", "")
+    if args.action in {"confirm", "reject"}:
+        if not args.expected_snapshot:
+            raise SystemExit("survey review decision requires an expected snapshot")
+        try:
+            snapshot = json.loads(args.expected_snapshot)
+        except json.JSONDecodeError as exc:
+            raise SystemExit("survey expected snapshot is not valid JSON") from exc
+        if not isinstance(snapshot, dict):
+            raise SystemExit("survey expected snapshot must be a mapping")
+        subject = snapshot.get("subject")
+        subject = subject if isinstance(subject, dict) else {}
+        subject_id = str(subject.get("id") or "")
+        prefix = "survey:survey:"
+        if not subject_id.startswith(prefix):
+            raise SystemExit("survey expected snapshot has an invalid subject")
+        slug = subject_id[len(prefix):]
+        route = {
+            "owner": "literature-synthesizer",
+            "action": "confirm" if args.action == "confirm" else "reject",
+            "slug": slug,
+            "mode": "survey",
+        }
+        item = {
+            "snapshot_binding": snapshot,
+            "confirm_route" if args.action == "confirm" else "reject_route": route,
+        }
+        plan = prepare_review_batch_decision(
+            root,
+            item,
+            args.action,
+            actor=args.confirmed_by,
+            evidence=args.evidence,
+            user_authorization=args.user_authorization,
+            authorization_source=args.authorization_source,
+            rejection_reason=args.rejection_reason,
+        )
+        with mutation_transaction(root, f"{args.action}-survey", plan["target_paths"]):
+            apply_review_batch_decision(
+                root,
+                item,
+                args.action,
+                actor=args.confirmed_by,
+                evidence=args.evidence,
+                user_authorization=args.user_authorization,
+                authorization_source=args.authorization_source,
+                rejection_reason=args.rejection_reason,
+            )
+        print("Survey review decision recorded.")
+        return 0
     if args.action == "verify":
         if args.input:
             fill_path = Path(args.input)
@@ -469,16 +715,19 @@ def main() -> int:
             raise SystemExit(f"{mode} prepare requires --field/--query or another selection filter")
         if not args.as_of:
             raise SystemExit(f"{mode} prepare requires --as-of to anchor the selected KB snapshot")
+        filters = {
+            "query": query,
+            "kind": args.kind,
+            "topic": args.topic,
+            "tag": args.tag,
+            "pool": args.pool,
+        }
+        selected, excluded = select_current_confirmed_survey_records(root, iter_records(root), **filters)
+        if not selected:
+            print(json.dumps(evidence_gap_handoff(filters=filters, excluded=excluded), ensure_ascii=False, sort_keys=True))
+            return 2
         fill_path = out_root / f"{mode}-fill.yaml"
         with mutation_transaction(root, f"prepare-{mode}", [fill_path]):
-            selected = select_survey_records(
-                iter_records(root),
-                query=query,
-                kind=args.kind,
-                topic=args.topic,
-                tag=args.tag,
-                pool=args.pool,
-            )
             payload = build_survey_scaffold(
                 selected,
                 root=root,

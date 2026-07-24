@@ -6,6 +6,8 @@ from pathlib import Path
 
 import yaml
 
+from research.confirm import apply_confirmation
+
 
 ROOT = Path(__file__).resolve().parents[4]
 SCRIPT = ROOT / ".agents" / "skills" / "literature-synthesizer" / "scripts" / "synthesize.py"
@@ -19,6 +21,31 @@ def load_synthesizer():
     return module
 
 
+def write_confirmed_unit(module, root: Path, record: dict, evidence_text: str = "") -> Path:
+    unit_dir = module.unit_root(root, record["kind"], record["id"])
+    unit_dir.mkdir(parents=True, exist_ok=True)
+    if evidence_text:
+        (unit_dir / "note.md").write_text(evidence_text, encoding="utf-8")
+    canonical = {
+        **record,
+        "confirmation_status": "pending_user_confirmation",
+        "needs_human_confirmation": True,
+        "information_types": ["fact"],
+        "payload": record.get("payload") or {},
+    }
+    apply_confirmation(
+        canonical,
+        confirmed_by="Alice Researcher",
+        evidence=["Reviewed source unit"],
+        project_root=root,
+    )
+    (unit_dir / "record.yaml").write_text(
+        yaml.safe_dump(canonical, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    return unit_dir
+
+
 def build_filled_survey(tmp_path: Path):
     module = load_synthesizer()
     records = [
@@ -30,13 +57,12 @@ def build_filled_survey(tmp_path: Path):
         "r-beta": "Beta reports benchmark metrics for recovery tasks.",
     }
     for record in records:
-        unit_dir = module.unit_root(tmp_path, record["kind"], record["id"])
-        unit_dir.mkdir(parents=True)
-        (unit_dir / "record.yaml").write_text(
-            yaml.safe_dump({**record, "summary": "robot learning", "payload": {}}, allow_unicode=True),
-            encoding="utf-8",
+        write_confirmed_unit(
+            module,
+            tmp_path,
+            {**record, "summary": "robot learning", "payload": {}},
+            f"# Evidence\n\n{quotes[record['id']]}\n",
         )
-        (unit_dir / "note.md").write_text(f"# Evidence\n\n{quotes[record['id']]}\n", encoding="utf-8")
     scaffold = module.build_survey_scaffold(
         records,
         root=tmp_path,
@@ -82,13 +108,12 @@ def build_filled_survey(tmp_path: Path):
 
 def test_prepare_emits_seven_section_evidence_first_scaffold(tmp_path: Path) -> None:
     module = load_synthesizer()
-    unit_dir = module.unit_root(tmp_path, "paper", "p-alpha")
-    unit_dir.mkdir(parents=True)
-    (unit_dir / "record.yaml").write_text(
-        yaml.safe_dump({"id": "p-alpha", "kind": "paper", "title": "Alpha", "payload": {}}),
-        encoding="utf-8",
+    unit_dir = write_confirmed_unit(
+        module,
+        tmp_path,
+        {"id": "p-alpha", "kind": "paper", "title": "Alpha", "payload": {}},
+        "# Alpha\n\nGrounded evidence.\n",
     )
-    (unit_dir / "note.md").write_text("# Alpha\n\nGrounded evidence.\n", encoding="utf-8")
     scaffold = module.build_survey_scaffold(
         [{"id": "p-alpha", "kind": "paper", "title": "Alpha"}],
         root=tmp_path,
@@ -133,7 +158,9 @@ def test_verify_accepts_verbatim_cross_unit_evidence(tmp_path: Path) -> None:
     assert violations == []
     assert verified["status"] == "pending_user_confirmation"
     assert verified["evidence_verification_status"] == "verified"
-    assert verified["governance_status"] == "needs_agent_repair"
+    assert verified["governance_status"] == "ready_for_review"
+    assert verified["payload"]["claims"]
+    assert verified["payload"]["verification"]["verified_at"]
     _, entries = module.survey_claim_entries(verified)
     statuses = {cell["epistemic_status"] for _, cell, _ in entries}
     assert statuses == {"verified_pending_confirmation"}
@@ -181,11 +208,10 @@ def test_prepare_skips_symlink_artifact_without_weakening_reference_gate(tmp_pat
     module = load_synthesizer()
     outside = tmp_path / "outside.txt"
     outside.write_text("outside evidence", encoding="utf-8")
-    unit_dir = module.unit_root(tmp_path, "paper", "p-alpha")
-    unit_dir.mkdir(parents=True)
-    (unit_dir / "record.yaml").write_text(
-        yaml.safe_dump({"id": "p-alpha", "kind": "paper", "title": "Alpha", "payload": {}}),
-        encoding="utf-8",
+    unit_dir = write_confirmed_unit(
+        module,
+        tmp_path,
+        {"id": "p-alpha", "kind": "paper", "title": "Alpha", "payload": {}},
     )
     (unit_dir / "linked.txt").symlink_to(outside)
 
@@ -228,13 +254,10 @@ def test_survey_staleness_detects_changed_deleted_and_new_matching_units(tmp_pat
     (paper_dir / "note.md").write_text("# Evidence\n\nChanged bytes.\n", encoding="utf-8")
     repo_dir = module.unit_root(tmp_path, "repo", "r-beta")
     (repo_dir / "record.yaml").unlink()
-    new_dir = module.unit_root(tmp_path, "paper", "p-gamma")
-    new_dir.mkdir(parents=True)
-    (new_dir / "record.yaml").write_text(
-        yaml.safe_dump(
-            {"id": "p-gamma", "kind": "paper", "title": "Gamma", "summary": "robot learning", "payload": {}}
-        ),
-        encoding="utf-8",
+    write_confirmed_unit(
+        module,
+        tmp_path,
+        {"id": "p-gamma", "kind": "paper", "title": "Gamma", "summary": "robot learning", "payload": {}},
     )
 
     stale = module.survey_staleness(verified, tmp_path)
