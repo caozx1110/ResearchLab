@@ -380,12 +380,20 @@ def test_analyzer_owner_rejects_valid_receipt_bound_to_another_skill_before_writ
             "skill": "report-author",
             "operation": "weekly",
             "catalog_digest": eligible["catalog_digest"],
-            "task_context": {
-                "program_id": "p-r11",
-                "operation": "weekly",
-                "stage": "",
-                "limit": 20,
-            },
+                "task_context": {
+                    "program_id": "p-r11",
+                    "operation": "weekly",
+                    "stage": "",
+                    "limit": 20,
+                    "input_snapshot": {
+                        "digest": "0" * 64,
+                        "accepted_event_count": 0,
+                        "pending_judgement_event_count": 0,
+                        "claim_source_count": 0,
+                        "decision_count": 0,
+                        "missing_unit_count": 0,
+                    },
+                },
             "selected": [
                 {
                     "preference_id": item["preference_id"],
