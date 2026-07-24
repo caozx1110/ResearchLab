@@ -146,3 +146,62 @@ def test_tree_binding_rejects_directory_entry_race(
     monkeypatch.setattr(preferences, "_hash_regular_file_at", mutating_hash)
     with pytest.raises(ValueError, match="tree changed while it was read"):
         preferences.regular_tree_binding(tree, logical_identity="tree", trusted_root=tmp_path)
+
+
+def test_file_binding_rejects_ancestor_path_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ancestor = tmp_path / "ancestor"
+    ancestor.mkdir()
+    artifact = ancestor / "artifact.bin"
+    artifact.write_bytes(b"old")
+    original_hash = preferences._hash_regular_file_at
+    replaced = False
+
+    def replacing_hash(*args: object, **kwargs: object) -> tuple[str, os.stat_result, int]:
+        nonlocal replaced
+        result = original_hash(*args, **kwargs)
+        if not replaced:
+            ancestor.rename(tmp_path / "old-ancestor")
+            ancestor.mkdir()
+            (ancestor / "artifact.bin").write_bytes(b"new")
+            replaced = True
+        return result
+
+    monkeypatch.setattr(preferences, "_hash_regular_file_at", replacing_hash)
+    with pytest.raises(ValueError, match="ancestor changed while it was read"):
+        preferences.regular_file_binding(
+            artifact,
+            logical_identity="ancestor/artifact.bin",
+            trusted_root=tmp_path,
+        )
+
+
+def test_tree_binding_rejects_root_path_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    (tree / "artifact.bin").write_bytes(b"old")
+    original_hash = preferences._hash_regular_file_at
+    replaced = False
+
+    def replacing_hash(*args: object, **kwargs: object) -> tuple[str, os.stat_result, int]:
+        nonlocal replaced
+        result = original_hash(*args, **kwargs)
+        if not replaced:
+            tree.rename(tmp_path / "old-tree")
+            tree.mkdir()
+            (tree / "artifact.bin").write_bytes(b"new")
+            replaced = True
+        return result
+
+    monkeypatch.setattr(preferences, "_hash_regular_file_at", replacing_hash)
+    with pytest.raises(ValueError, match="tree path changed while it was read"):
+        preferences.regular_tree_binding(
+            tree,
+            logical_identity="tree",
+            trusted_root=tmp_path,
+        )

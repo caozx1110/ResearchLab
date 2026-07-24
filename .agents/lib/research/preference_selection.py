@@ -328,6 +328,10 @@ OPERATION_CANONICAL_INPUTS: dict[tuple[str, str], tuple[str, ...]] = {
         "stage_id",
         "candidate_id",
         "canonical_pools",
+        "source_content_digest",
+        "source_input_digest",
+        "candidate_binding_digest",
+        "prepared_record_digest",
         "authorization_digest",
     ),
     ("research-orchestrator", "plan"): (
@@ -720,7 +724,21 @@ def _hash_regular_file(
     if parent_descriptor is None:  # pragma: no cover - non-optional call
         raise ValueError("canonical source artifact ancestor is missing")
     try:
-        return _hash_regular_file_at(parent_descriptor, relative.name, max_bytes=max_bytes)
+        binding = _hash_regular_file_at(parent_descriptor, relative.name, max_bytes=max_bytes)
+        reopened_parent = _open_trusted_directory(trusted_root, relative.parts[:-1])
+        if reopened_parent is None:  # pragma: no cover - non-optional call
+            raise ValueError("canonical source artifact ancestor changed while it was read")
+        try:
+            original_parent = os.fstat(parent_descriptor)
+            current_parent = os.fstat(reopened_parent)
+            if (original_parent.st_dev, original_parent.st_ino) != (
+                current_parent.st_dev,
+                current_parent.st_ino,
+            ):
+                raise ValueError("canonical source artifact ancestor changed while it was read")
+        finally:
+            os.close(reopened_parent)
+        return binding
     finally:
         os.close(parent_descriptor)
 
@@ -872,6 +890,18 @@ def regular_tree_binding(
             raise ValueError("canonical source artifact tree changed while it was read")
     try:
         visit(root_descriptor, Path())
+        reopened_root = _open_trusted_directory(trusted_root, relative.parts)
+        if reopened_root is None:  # pragma: no cover - existing tree
+            raise ValueError("canonical source artifact tree path changed while it was read")
+        try:
+            current_root = os.fstat(reopened_root)
+            if (root_metadata.st_dev, root_metadata.st_ino) != (
+                current_root.st_dev,
+                current_root.st_ino,
+            ):
+                raise ValueError("canonical source artifact tree path changed while it was read")
+        finally:
+            os.close(reopened_root)
     finally:
         os.close(root_descriptor)
     return {
