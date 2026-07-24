@@ -688,6 +688,19 @@ def _hash_regular_file_at(
             raise ValueError("canonical source artifact changed while it was read")
         if byte_count != after.st_size:
             raise ValueError("canonical source artifact changed while it was read")
+        try:
+            path_after = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+        except OSError as exc:
+            raise ValueError("canonical source artifact changed while it was read") from exc
+        path_identity_after = (
+            path_after.st_dev,
+            path_after.st_ino,
+            path_after.st_mode,
+            path_after.st_size,
+            path_after.st_mtime_ns,
+        )
+        if path_identity_after != identity_after or not stat.S_ISREG(path_after.st_mode):
+            raise ValueError("canonical source artifact changed while it was read")
         return digest.hexdigest(), after, byte_count
     finally:
         os.close(descriptor)
@@ -774,6 +787,7 @@ def regular_tree_binding(
         return sorted(entries, key=lambda item: item.name)
 
     def visit(directory_descriptor: int, relative_path: Path) -> None:
+        directory_before = os.fstat(directory_descriptor)
         for entry in bounded_entries(directory_descriptor):
             child_relative = relative_path / entry.name
             if len(child_relative.parts) > MAX_BINDING_TREE_DEPTH:
@@ -836,6 +850,23 @@ def regular_tree_binding(
                     "sha256": bytes_digest,
                 }
             )
+        directory_after = os.fstat(directory_descriptor)
+        directory_identity_before = (
+            directory_before.st_dev,
+            directory_before.st_ino,
+            directory_before.st_mode,
+            directory_before.st_size,
+            directory_before.st_mtime_ns,
+        )
+        directory_identity_after = (
+            directory_after.st_dev,
+            directory_after.st_ino,
+            directory_after.st_mode,
+            directory_after.st_size,
+            directory_after.st_mtime_ns,
+        )
+        if directory_identity_before != directory_identity_after:
+            raise ValueError("canonical source artifact tree changed while it was read")
     try:
         visit(root_descriptor, Path())
     finally:

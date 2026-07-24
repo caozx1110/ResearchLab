@@ -95,3 +95,54 @@ def test_stream_hash_contract_does_not_return_file_bytes(tmp_path: Path) -> None
     assert digest == hashlib.sha256(artifact.read_bytes()).hexdigest()
     assert byte_count == metadata.st_size
     assert isinstance(digest, str)
+
+
+def test_stream_hash_rejects_same_path_inode_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = tmp_path / "artifact.bin"
+    artifact.write_bytes(b"original")
+    descriptor = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    original_read = os.read
+    replaced = False
+
+    def replacing_read(file_descriptor: int, count: int) -> bytes:
+        nonlocal replaced
+        chunk = original_read(file_descriptor, count)
+        if chunk and not replaced:
+            replacement = tmp_path / "replacement.bin"
+            replacement.write_bytes(b"original")
+            os.replace(replacement, artifact)
+            replaced = True
+        return chunk
+
+    monkeypatch.setattr(preferences.os, "read", replacing_read)
+    try:
+        with pytest.raises(ValueError, match="changed while it was read"):
+            preferences._hash_regular_file_at(descriptor, artifact.name)
+    finally:
+        os.close(descriptor)
+
+
+def test_tree_binding_rejects_directory_entry_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    (tree / "first").write_text("first", encoding="utf-8")
+    original_hash = preferences._hash_regular_file_at
+    mutated = False
+
+    def mutating_hash(*args: object, **kwargs: object) -> tuple[str, os.stat_result, int]:
+        nonlocal mutated
+        result = original_hash(*args, **kwargs)
+        if not mutated:
+            (tree / "inserted").write_text("inserted", encoding="utf-8")
+            mutated = True
+        return result
+
+    monkeypatch.setattr(preferences, "_hash_regular_file_at", mutating_hash)
+    with pytest.raises(ValueError, match="tree changed while it was read"):
+        preferences.regular_tree_binding(tree, logical_identity="tree", trusted_root=tmp_path)
