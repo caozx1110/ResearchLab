@@ -60,6 +60,30 @@ REVIEW_OUTCOMES = {
     "worth_reviewing",
     "no_material_change",
 }
+OUTCOME_DISPOSITION_STATES = {
+    "unresolved",
+    "acknowledged",
+    "materialized",
+    "sent_to_review",
+    "dismissed",
+}
+OUTCOME_FINAL_DISPOSITIONS = OUTCOME_DISPOSITION_STATES - {"unresolved"}
+OUTCOME_DISPOSITION_FIELDS = {
+    "state",
+    "actor",
+    "at",
+    "reason",
+    "target_ref",
+    "user_authorization",
+    "authorization_source",
+}
+OUTCOME_DISPOSITIONS_BY_CLASSIFICATION = {
+    "new": {"acknowledged", "materialized", "dismissed"},
+    "worth_reviewing": {"acknowledged", "materialized", "dismissed"},
+    "contradiction_candidate": {"acknowledged", "sent_to_review", "dismissed"},
+    "duplicate": {"acknowledged", "dismissed"},
+    "no_material_change": {"acknowledged", "dismissed"},
+}
 REFERENCE_KINDS = {"literature-candidate", "survey-output", "artifact"}
 MAX_TEXT = 4000
 MAX_COLLECTION = 500
@@ -582,7 +606,14 @@ def _validate_run_document(project_root: Path, document: dict[str, Any]) -> None
     outputs = _sanitize_outputs(project_root, document.get("outputs"), expected_monitor_binding=task_binding)
     if outputs != document.get("outputs"):
         raise SystemExit("Research monitor run outputs are not canonical.")
-    outcomes = _sanitize_review_outcomes(project_root, document.get("review_outcomes"))
+    # Legacy rc.6 receipts did not persist a disposition object.  They remain
+    # readable and are treated as unresolved by the read model; every new or
+    # subsequently resolved receipt writes the explicit disposition.
+    outcomes = _sanitize_review_outcomes(
+        project_root,
+        document.get("review_outcomes"),
+        add_default_disposition=False,
+    )
     if outcomes != document.get("review_outcomes"):
         raise SystemExit("Research monitor review outcomes are not canonical.")
     _validate_outcome_links(outputs, outcomes)
@@ -1132,7 +1163,77 @@ def _sanitize_reference(project_root: Path, value: Any) -> dict[str, Any]:
     }
 
 
-def _sanitize_review_outcomes(project_root: Path, value: Any) -> list[dict[str, Any]]:
+def _sanitize_outcome_disposition(
+    value: Any,
+    *,
+    classification: str,
+) -> dict[str, str]:
+    if value in (None, {}):
+        return {
+            "state": "unresolved",
+            "actor": "",
+            "at": "",
+            "reason": "",
+            "target_ref": "",
+            "user_authorization": "",
+            "authorization_source": "",
+        }
+    if not isinstance(value, dict) or set(value) != OUTCOME_DISPOSITION_FIELDS:
+        raise SystemExit("Research monitor outcome disposition is invalid.")
+    state = _bounded_text(value.get("state"), field="outcome disposition state", required=True, limit=64)
+    if state not in OUTCOME_DISPOSITION_STATES:
+        raise SystemExit("Research monitor outcome disposition state is unsupported.")
+    actor = _bounded_text(value.get("actor"), field="outcome disposition actor", limit=200)
+    at = _canonical_timestamp(
+        value.get("at"),
+        field="outcome disposition at",
+        allow_empty=True,
+    )
+    reason = _bounded_text(value.get("reason"), field="outcome disposition reason", limit=1000)
+    target_ref = _bounded_text(value.get("target_ref"), field="outcome disposition target", limit=500)
+    user_authorization = _bounded_text(
+        value.get("user_authorization"),
+        field="outcome disposition authorization",
+        limit=1000,
+    )
+    authorization_source = _bounded_text(
+        value.get("authorization_source"),
+        field="outcome disposition authorization source",
+        limit=64,
+    )
+    if state == "unresolved":
+        if any((actor, at, reason, target_ref, user_authorization, authorization_source)):
+            raise SystemExit("Unresolved monitor outcomes cannot contain a completed disposition.")
+    else:
+        if state not in OUTCOME_DISPOSITIONS_BY_CLASSIFICATION.get(classification, set()):
+            raise SystemExit("Research monitor outcome disposition does not match its classification.")
+        if not actor or not at or not reason:
+            raise SystemExit("Resolved monitor outcomes require actor, time, and reason.")
+        if state in {"materialized", "sent_to_review"} and not target_ref:
+            raise SystemExit("Materialized or review-routed outcomes require a target reference.")
+        if state == "materialized" and (
+            authorization_source != "user_message" or not user_authorization
+        ):
+            raise SystemExit("Materializing a monitor candidate requires current user authorization.")
+        if authorization_source and authorization_source != "user_message":
+            raise SystemExit("Research monitor authorization_source is unsupported.")
+    return {
+        "state": state,
+        "actor": actor,
+        "at": at,
+        "reason": reason,
+        "target_ref": target_ref,
+        "user_authorization": user_authorization,
+        "authorization_source": authorization_source,
+    }
+
+
+def _sanitize_review_outcomes(
+    project_root: Path,
+    value: Any,
+    *,
+    add_default_disposition: bool = True,
+) -> list[dict[str, Any]]:
     if value in (None, []):
         return []
     if not isinstance(value, list) or len(value) > MAX_COLLECTION:
@@ -1146,6 +1247,7 @@ def _sanitize_review_outcomes(project_root: Path, value: Any) -> list[dict[str, 
             "subject_ref",
             "rationale",
             "references",
+            "disposition",
         }:
             raise SystemExit("Research monitor review outcome is invalid.")
         outcome_id = _safe_id(item.get("outcome_id"), field="outcome id")
@@ -1167,19 +1269,23 @@ def _sanitize_review_outcomes(project_root: Path, value: Any) -> list[dict[str, 
             {value_digest(reference) for reference in references}
         ) < 2:
             raise SystemExit("Research monitor contradiction candidate requires both sides of evidence.")
-        outcomes.append(
-            {
-                "outcome_id": outcome_id,
-                "classification": classification,
-                "subject_ref": _bounded_text(
-                    item.get("subject_ref"), field="outcome subject", required=True, limit=500
-                ),
-                "rationale": _bounded_text(
-                    item.get("rationale"), field="outcome rationale", required=True, limit=2000
-                ),
-                "references": references,
-            }
-        )
+        normalized = {
+            "outcome_id": outcome_id,
+            "classification": classification,
+            "subject_ref": _bounded_text(
+                item.get("subject_ref"), field="outcome subject", required=True, limit=500
+            ),
+            "rationale": _bounded_text(
+                item.get("rationale"), field="outcome rationale", required=True, limit=2000
+            ),
+            "references": references,
+        }
+        if "disposition" in item or add_default_disposition:
+            normalized["disposition"] = _sanitize_outcome_disposition(
+                item.get("disposition"),
+                classification=classification,
+            )
+        outcomes.append(normalized)
     return outcomes
 
 
@@ -1373,7 +1479,161 @@ def finish_run(
     return receipt_file
 
 
+def unresolved_monitor_outcomes(project_root: Path) -> list[dict[str, Any]]:
+    """Return completed outcomes that still require an Agent or user disposition.
+
+    This is a pure read model.  Legacy receipts without the R7 disposition
+    object are surfaced as unresolved without mutating their bytes.
+    """
+    unresolved: list[dict[str, Any]] = []
+    for path in _iter_documents(runs_root(project_root), label="runs"):
+        run = load_run(project_root, path.stem)
+        if str(run.get("state") or "") != "completed":
+            continue
+        subscription_id = str(run.get("subscription_id") or "")
+        subscription = load_subscription(project_root, subscription_id)
+        outcomes = _sanitize_review_outcomes(
+            project_root,
+            run.get("review_outcomes"),
+            add_default_disposition=True,
+        )
+        for outcome in outcomes:
+            disposition = outcome.get("disposition")
+            disposition = disposition if isinstance(disposition, dict) else {}
+            if str(disposition.get("state") or "unresolved") != "unresolved":
+                continue
+            binding = {
+                "run_id": str(run.get("id") or ""),
+                "run_revision": int(run.get("revision") or 0),
+                "run_content_digest": str(run.get("content_digest") or ""),
+                "outcome_id": str(outcome.get("outcome_id") or ""),
+                "classification": str(outcome.get("classification") or ""),
+                "subject_ref": str(outcome.get("subject_ref") or ""),
+                "references": deepcopy(outcome.get("references") or []),
+            }
+            unresolved.append(
+                {
+                    **binding,
+                    "outcome_binding_digest": value_digest(binding),
+                    "subscription_id": subscription_id,
+                    "subscription_title": str(subscription.get("title") or subscription_id),
+                    "program_ids": list(subscription.get("program_ids") or []),
+                    "rationale": str(outcome.get("rationale") or ""),
+                    "disposition_state": "unresolved",
+                }
+            )
+    return sorted(
+        unresolved,
+        key=lambda item: (
+            str(item.get("run_id") or ""),
+            str(item.get("outcome_id") or ""),
+        ),
+    )
+
+
+def set_outcome_disposition(
+    project_root: Path,
+    run_id: str,
+    outcome_id: str,
+    *,
+    expected_run_revision: int,
+    expected_run_content_digest: str,
+    state: str,
+    actor: str,
+    reason: str,
+    target_ref: str = "",
+    user_authorization: str = "",
+    authorization_source: str = "",
+    now: datetime | str | None = None,
+) -> Path:
+    """Resolve one completed monitor outcome with revision/content CAS."""
+    if state not in OUTCOME_FINAL_DISPOSITIONS:
+        raise SystemExit("Research monitor outcome disposition must be terminal.")
+    safe_run_id = _safe_id(run_id, field="run id")
+    safe_outcome_id = _safe_id(outcome_id, field="outcome id")
+    changed_at = _utc_iso(_now(now))
+    candidate_disposition = {
+        "state": state,
+        "actor": actor,
+        "at": changed_at,
+        "reason": reason,
+        "target_ref": target_ref,
+        "user_authorization": user_authorization,
+        "authorization_source": authorization_source,
+    }
+    receipt_file = run_path(project_root, safe_run_id)
+
+    def checked_document() -> tuple[dict[str, Any], list[dict[str, Any]], int]:
+        current = load_run(project_root, safe_run_id)
+        _expected_revision(current, expected_run_revision, subject="run")
+        if str(current.get("content_digest") or "") != str(expected_run_content_digest or ""):
+            raise SystemExit("Research monitor run changed after the outcome was displayed.")
+        if str(current.get("state") or "") != "completed":
+            raise SystemExit("Only a completed research monitor run can resolve outcomes.")
+        outcomes = _sanitize_review_outcomes(
+            project_root,
+            current.get("review_outcomes"),
+            add_default_disposition=True,
+        )
+        matches = [index for index, item in enumerate(outcomes) if item.get("outcome_id") == safe_outcome_id]
+        if len(matches) != 1:
+            raise SystemExit("Research monitor outcome is unavailable or ambiguous.")
+        index = matches[0]
+        disposition = outcomes[index].get("disposition")
+        if not isinstance(disposition, dict) or disposition.get("state") != "unresolved":
+            raise SystemExit("Research monitor outcome was already resolved.")
+        outcomes[index]["disposition"] = _sanitize_outcome_disposition(
+            candidate_disposition,
+            classification=str(outcomes[index].get("classification") or ""),
+        )
+        if state == "materialized":
+            from .records import trusted_unit_record_path
+
+            try:
+                trusted_unit_record_path(project_root, str(target_ref or ""))
+            except ValueError as exc:
+                raise SystemExit("Materialized monitor outcome target is not a canonical unit.") from exc
+        if state == "sent_to_review":
+            from .judgements import discover_pending_judgements
+
+            target_kind, separator, target_id = str(target_ref or "").partition(":")
+            matching_cards = [
+                card
+                for card in discover_pending_judgements(project_root)
+                if str(card.get("subject", {}).get("kind") or "") == target_kind
+                and str(card.get("subject", {}).get("id") or "") == target_id
+            ]
+            if not separator or len(matching_cards) != 1:
+                raise SystemExit("Review-routed monitor outcome target is not uniquely ready.")
+        return current, outcomes, index
+
+    def preflight() -> None:
+        checked_document()
+
+    with mutation_transaction(
+        project_root,
+        "research-monitor:set-outcome-disposition",
+        [receipt_file],
+        preflight=preflight,
+    ):
+        current, outcomes, _index = checked_document()
+        current.setdefault("history", []).append(
+            _history_snapshot(
+                current,
+                at=changed_at,
+                action=f"outcome:{safe_outcome_id}->{state}",
+            )
+        )
+        current["review_outcomes"] = outcomes
+        current["updated_at"] = changed_at
+        current["revision"] = int(current["revision"]) + 1
+        current["content_digest"] = _run_content_digest(current)
+        write_yaml_if_changed(receipt_file, current)
+    return receipt_file
+
+
 __all__ = [
+    "OUTCOME_DISPOSITION_STATES",
     "RUN_STATES",
     "SUBSCRIPTION_KINDS",
     "SUBSCRIPTION_STATUSES",
@@ -1389,7 +1649,9 @@ __all__ = [
     "run_path",
     "runs_root",
     "set_subscription_status",
+    "set_outcome_disposition",
     "subscription_path",
+    "unresolved_monitor_outcomes",
     "subscriptions_root",
     "transition_run",
     "value_digest",

@@ -28,9 +28,11 @@ from research.monitoring import (
     load_subscription,
     monitor_task_binding,
     run_path,
+    set_outcome_disposition,
     set_subscription_status,
     subscription_path,
     transition_run,
+    unresolved_monitor_outcomes,
     value_digest,
 )
 from research.skill_validator import validate_skill
@@ -335,6 +337,185 @@ def test_completed_run_advances_from_anchor_not_completion_time(tmp_path: Path) 
     assert updated["last_completed_run_id"] == run["id"]
     assert updated["next_due_at"] == "2026-08-12T00:00:00+00:00"
     assert due_subscriptions(tmp_path, now=_time(31, 13)) == []
+
+
+def test_completed_outcome_stays_visible_until_a_bound_disposition(tmp_path: Path) -> None:
+    subscription, run = _start_run(tmp_path)
+    stage = _write_literature_stage(tmp_path)
+    finish_run(
+        tmp_path,
+        run["id"],
+        expected_run_revision=run["revision"],
+        expected_subscription_revision=subscription["revision"],
+        state="completed",
+        stop={"reason": "completed", "rationale": "Agent completed the bounded review."},
+        outputs={"literature_stage_ids": [stage.stem]},
+        review_outcomes=[
+            {
+                "outcome_id": "outcome-new-paper",
+                "classification": "new",
+                "subject_ref": "candidate-new",
+                "rationale": "Agent marked this candidate for user review.",
+                "references": [
+                    {
+                        "kind": "literature-candidate",
+                        "stage_id": stage.stem,
+                        "candidate_id": "candidate-new",
+                    }
+                ],
+            }
+        ],
+        now=_time(15, 1),
+    )
+    completed = load_run(tmp_path, run["id"])
+    receipt = run_path(tmp_path, run["id"])
+    before = receipt.read_bytes()
+
+    unresolved = unresolved_monitor_outcomes(tmp_path)
+
+    assert receipt.read_bytes() == before
+    assert len(unresolved) == 1
+    assert unresolved[0]["outcome_id"] == "outcome-new-paper"
+    assert unresolved[0]["program_ids"] == ["program-vla"]
+    assert unresolved[0]["run_content_digest"] == completed["content_digest"]
+    assert completed["review_outcomes"][0]["disposition"] == {
+        "state": "unresolved",
+        "actor": "",
+        "at": "",
+        "reason": "",
+        "target_ref": "",
+        "user_authorization": "",
+        "authorization_source": "",
+    }
+
+    unit_record = tmp_path / "kb/units/papers/p-materialized/record.yaml"
+    unit_record.parent.mkdir(parents=True)
+    unit_record.write_text("id: p-materialized\nkind: paper\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match="current user authorization"):
+        set_outcome_disposition(
+            tmp_path,
+            run["id"],
+            "outcome-new-paper",
+            expected_run_revision=completed["revision"],
+            expected_run_content_digest=completed["content_digest"],
+            state="materialized",
+            actor="runtime-agent",
+            reason="The user selected the candidate.",
+            target_ref="p-materialized",
+        )
+    assert receipt.read_bytes() == before
+
+    set_outcome_disposition(
+        tmp_path,
+        run["id"],
+        "outcome-new-paper",
+        expected_run_revision=completed["revision"],
+        expected_run_content_digest=completed["content_digest"],
+        state="materialized",
+        actor="runtime-agent",
+        reason="The user selected the displayed candidate.",
+        target_ref="p-materialized",
+        user_authorization="Add this displayed paper to the knowledge base.",
+        authorization_source="user_message",
+        now=_time(15, 2),
+    )
+    resolved = load_run(tmp_path, run["id"])
+
+    assert unresolved_monitor_outcomes(tmp_path) == []
+    assert resolved["revision"] == completed["revision"] + 1
+    assert resolved["review_outcomes"][0]["disposition"]["state"] == "materialized"
+    assert resolved["review_outcomes"][0]["disposition"]["target_ref"] == "p-materialized"
+
+
+def test_legacy_completed_outcome_is_read_as_unresolved_without_rewrite(tmp_path: Path) -> None:
+    subscription, run = _start_run(tmp_path)
+    stage = _write_literature_stage(tmp_path)
+    finish_run(
+        tmp_path,
+        run["id"],
+        expected_run_revision=run["revision"],
+        expected_subscription_revision=subscription["revision"],
+        state="completed",
+        stop={"reason": "completed", "rationale": "Done."},
+        outputs={"literature_stage_ids": [stage.stem]},
+        review_outcomes=[
+            {
+                "outcome_id": "legacy-outcome",
+                "classification": "new",
+                "subject_ref": "candidate-new",
+                "rationale": "This receipt predates explicit dispositions.",
+                "references": [
+                    {
+                        "kind": "literature-candidate",
+                        "stage_id": stage.stem,
+                        "candidate_id": "candidate-new",
+                    }
+                ],
+            }
+        ],
+        now=_time(15, 1),
+    )
+    receipt = run_path(tmp_path, run["id"])
+    legacy = yaml.safe_load(receipt.read_text(encoding="utf-8"))
+    legacy["review_outcomes"][0].pop("disposition")
+    legacy["content_digest"] = value_digest(
+        {key: value for key, value in legacy.items() if key != "content_digest"}
+    )
+    receipt.write_text(yaml.safe_dump(legacy, sort_keys=False), encoding="utf-8")
+    before = receipt.read_bytes()
+
+    assert load_run(tmp_path, run["id"])["review_outcomes"][0].get("disposition") is None
+    unresolved = unresolved_monitor_outcomes(tmp_path)
+    assert len(unresolved) == 1
+    assert unresolved[0]["outcome_id"] == "legacy-outcome"
+    assert receipt.read_bytes() == before
+
+
+def test_outcome_disposition_rejects_stale_run_binding_without_writes(tmp_path: Path) -> None:
+    subscription, run = _start_run(tmp_path)
+    stage = _write_literature_stage(tmp_path)
+    finish_run(
+        tmp_path,
+        run["id"],
+        expected_run_revision=run["revision"],
+        expected_subscription_revision=subscription["revision"],
+        state="completed",
+        stop={"reason": "completed", "rationale": "Done."},
+        outputs={"literature_stage_ids": [stage.stem]},
+        review_outcomes=[
+            {
+                "outcome_id": "outcome-duplicate",
+                "classification": "duplicate",
+                "subject_ref": "candidate-new",
+                "rationale": "Agent found this result duplicates a known candidate.",
+                "references": [
+                    {
+                        "kind": "literature-candidate",
+                        "stage_id": stage.stem,
+                        "candidate_id": "candidate-new",
+                    }
+                ],
+            }
+        ],
+        now=_time(15, 1),
+    )
+    completed = load_run(tmp_path, run["id"])
+    receipt = run_path(tmp_path, run["id"])
+    before = receipt.read_bytes()
+
+    with pytest.raises(SystemExit, match="changed after"):
+        set_outcome_disposition(
+            tmp_path,
+            run["id"],
+            "outcome-duplicate",
+            expected_run_revision=completed["revision"],
+            expected_run_content_digest="0" * 64,
+            state="acknowledged",
+            actor="runtime-agent",
+            reason="Duplicate result accounted for.",
+        )
+
+    assert receipt.read_bytes() == before
 
 
 def test_calendar_cadence_preserves_local_wall_time_across_dst(tmp_path: Path) -> None:
