@@ -60,6 +60,27 @@ def test_declared_consumer_operations_are_real_not_aspirational() -> None:
 
 
 def test_semantic_consumers_have_closed_canonical_input_registries() -> None:
+    expected_pairs = {
+        (skill, operation)
+        for skill, operations in SKILL_OPERATIONS.items()
+        for operation in operations
+    }
+    assert set(OPERATION_CANONICAL_INPUTS) == expected_pairs
+    for skill, operation in sorted(expected_pairs):
+        fields = OPERATION_CANONICAL_INPUTS[(skill, operation)]
+        canonical = {field: None for field in fields}
+        assert len(task_context_digest(skill=skill, operation=operation, canonical_inputs=canonical)) == 64
+        with pytest.raises(ValueError, match="unexpected=unregistered"):
+            task_context_digest(
+                skill=skill,
+                operation=operation,
+                canonical_inputs={**canonical, "unregistered": None},
+            )
+        missing = dict(canonical)
+        missing.pop(fields[0])
+        with pytest.raises(ValueError, match="missing="):
+            task_context_digest(skill=skill, operation=operation, canonical_inputs=missing)
+
     common = {
         "canonical_id",
         "canonical_kind",
@@ -93,6 +114,20 @@ def test_bound_consumer_resolves_selected_values_without_copying_them_into_recei
     eligible = eligible_preferences(root, skill="report-author", operation="weekly")
     selected = eligible["items"][:1]
     selection_id = "prefsel-report01"
+    report_context = {
+        "program_id": "p1",
+        "operation": "weekly",
+        "stage": "",
+        "limit": 20,
+        "input_snapshot": {
+            "digest": "0" * 64,
+            "accepted_event_count": 0,
+            "pending_judgement_event_count": 0,
+            "claim_source_count": 0,
+            "decision_count": 0,
+            "missing_unit_count": 0,
+        },
+    }
     path, receipt = record_effective_selection(
         root,
         {
@@ -100,7 +135,7 @@ def test_bound_consumer_resolves_selected_values_without_copying_them_into_recei
             "skill": "report-author",
             "operation": "weekly",
             "catalog_digest": eligible["catalog_digest"],
-            "task_context": {"program_id": "p1", "operation": "weekly", "stage": "", "limit": 20},
+            "task_context": report_context,
             "selected": [
                 {
                     "preference_id": item["preference_id"],
@@ -125,7 +160,7 @@ def test_bound_consumer_resolves_selected_values_without_copying_them_into_recei
         expected_task_context_digest=task_context_digest(
             skill="report-author",
             operation="weekly",
-            canonical_inputs={"program_id": "p1", "operation": "weekly", "stage": "", "limit": 20},
+            canonical_inputs=report_context,
         ),
     )
 
@@ -174,7 +209,13 @@ def _selection(root: Path, skill: str, operation: str = "plan") -> dict[str, obj
         "skill": skill,
         "operation": operation,
         "catalog_digest": eligible["catalog_digest"],
-        "task_context": {"subject_id": "subject-1"},
+        "task_context": {
+            "program_id": "program-1",
+            "title_digest": "1" * 64,
+            "idea_id": "idea-1",
+            "goal_digest": "2" * 64,
+            "hypothesis_digest": "3" * 64,
+        },
         "selected": selected,
         "excluded": excluded,
     }
@@ -209,7 +250,9 @@ def test_agent_selection_receipt_keeps_only_ids_digests_and_reasons(tmp_path: Pa
         skill="experiment-workbench",
         operation="plan",
         expected_task_context_digest=task_context_digest(
-            skill="experiment-workbench", operation="plan", canonical_inputs={"subject_id": "subject-1"}
+            skill="experiment-workbench",
+            operation="plan",
+            canonical_inputs=payload["task_context"],
         ),
     )
 
@@ -257,7 +300,9 @@ def test_profile_change_makes_existing_selection_stale(tmp_path: Path) -> None:
             skill="experiment-workbench",
             operation="plan",
             expected_task_context_digest=task_context_digest(
-                skill="experiment-workbench", operation="plan", canonical_inputs={"subject_id": "subject-1"}
+                skill="experiment-workbench",
+                operation="plan",
+                canonical_inputs=_selection(root, "experiment-workbench")["task_context"],
             ),
         )
 

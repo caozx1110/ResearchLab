@@ -26,6 +26,10 @@ SELECTION_SCHEMA = "effective-preference-selection/v1"
 SELECTION_ID_RE = re.compile(r"prefsel-[a-z0-9][a-z0-9-]{5,80}")
 HEX_DIGEST_RE = re.compile(r"[0-9a-f]{64}")
 MAX_AGENT_EXPLANATION = 240
+MAX_BINDING_FILE_BYTES = 64 * 1024 * 1024
+MAX_BINDING_TREE_BYTES = 512 * 1024 * 1024
+MAX_BINDING_TREE_ENTRIES = 20_000
+MAX_BINDING_TREE_DEPTH = 64
 _ABSOLUTE_PATH_RE = re.compile(r"(?:^|[\s'\"(])(?:/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._~ -]+)+|[A-Za-z]:[\\/])")
 _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)(?:api[_-]?key|access[_-]?token|token|credential|authorization|password|passwd|secret|private[_-]?key)"
@@ -316,6 +320,103 @@ OPERATION_ELIGIBILITY: dict[tuple[str, str], tuple[str, ...]] = {
 # makes omissions and accidental new inputs fail closed, and gives the mutation
 # matrix a complete registry rather than a hand-maintained list of examples.
 OPERATION_CANONICAL_INPUTS: dict[tuple[str, str], tuple[str, ...]] = {
+    ("source-intake", "add"): (
+        "kind",
+        "source",
+        "title",
+        "maturity",
+        "stage_id",
+        "candidate_id",
+        "canonical_pools",
+        "authorization_digest",
+    ),
+    ("research-orchestrator", "plan"): (
+        "candidate_snapshot_digest",
+        "scope",
+        "candidate_action_ids",
+    ),
+    ("literature-search", "search"): (
+        "stage_id",
+        "request_digest",
+        "mode",
+        "run_id",
+        "scope_digest",
+        "budget_digest",
+        "review_protocol_digest",
+        "reviewers_digest",
+        "monitor_binding_digest",
+    ),
+    ("literature-synthesizer", "synthesize"): (
+        "mode",
+        "discovery_mode",
+        "search_protocol_digest",
+        "selection_digest",
+        "as_of",
+        "program_ids",
+        "input_units_digest",
+    ),
+    **{
+        ("report-author", operation): (
+            "program_id",
+            "operation",
+            "stage",
+            "limit",
+            "input_snapshot",
+        )
+        for operation in SKILL_OPERATIONS["report-author"]
+    },
+    ("method-designer", "design"): (
+        "preference_task_inputs",
+        "preference_task_inputs_digest",
+    ),
+    ("experiment-workbench", "plan"): (
+        "program_id",
+        "title_digest",
+        "idea_id",
+        "goal_digest",
+        "hypothesis_digest",
+    ),
+    ("experiment-workbench", "log-run"): (
+        "experiment_id",
+        "record_digest",
+        "config_revision",
+        "seed",
+        "run_input_digest",
+        "artifact_facts_digest",
+        "prior_runs_digest",
+    ),
+    ("experiment-workbench", "follow-up"): (
+        "experiment_id",
+        "record_digest",
+        "follow_up_digest",
+    ),
+    ("experiment-workbench", "diagnose"): (
+        "experiment_id",
+        "record_digest",
+        "diagnosis_input_digest",
+    ),
+    ("kb-cli", "review-display"): (
+        "review_snapshot_digest",
+        "displayed_count",
+        "hard_display_cap",
+    ),
+    **{
+        ("paper-analyst", operation): (
+            "paper_id",
+            "operation",
+            "phase",
+            "mode",
+            "force",
+            "defer_post_actions",
+            "record_content_digest",
+            "source_identity_digest",
+            "parse_cache",
+            "source_artifacts",
+            "auxiliary_artifacts",
+            "fill_input",
+        )
+        for operation in SKILL_OPERATIONS["paper-analyst"]
+    },
     ("repo-analyst", "map-capability"): (
         "canonical_id",
         "canonical_kind",
@@ -442,6 +543,21 @@ def validate_preference_registry() -> None:
         skill, operation = pair
         if operation not in SKILL_OPERATIONS.get(skill, ()) or not paths:
             raise RuntimeError(f"operation preference registry contains a dead entry: {pair}")
+    expected_operations = {
+        (skill, operation)
+        for skill, operations in SKILL_OPERATIONS.items()
+        for operation in operations
+    }
+    if set(OPERATION_CANONICAL_INPUTS) != expected_operations:
+        missing = sorted(expected_operations - set(OPERATION_CANONICAL_INPUTS))
+        unexpected = sorted(set(OPERATION_CANONICAL_INPUTS) - expected_operations)
+        raise RuntimeError(
+            "canonical task-input registry must cover every consumer operation exactly; "
+            f"missing={missing}; unexpected={unexpected}"
+        )
+    for pair, fields in OPERATION_CANONICAL_INPUTS.items():
+        if not fields or len(fields) != len(set(fields)) or any(not str(field).strip() for field in fields):
+            raise RuntimeError(f"canonical task-input registry is invalid: {pair}")
 
 
 validate_preference_registry()
@@ -537,8 +653,13 @@ def _open_trusted_directory(
         raise
 
 
-def _read_regular_file_at(parent_descriptor: int, name: str) -> tuple[bytes, os.stat_result]:
-    """Read one exact leaf from an already no-follow-opened parent directory."""
+def _hash_regular_file_at(
+    parent_descriptor: int,
+    name: str,
+    *,
+    max_bytes: int = MAX_BINDING_FILE_BYTES,
+) -> tuple[str, os.stat_result, int]:
+    """Stream-hash one exact no-follow leaf without retaining its contents."""
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(name, flags, dir_fd=parent_descriptor)
@@ -548,29 +669,42 @@ def _read_regular_file_at(parent_descriptor: int, name: str) -> tuple[bytes, os.
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode):
             raise ValueError("canonical source artifact is not a regular file")
-        chunks: list[bytes] = []
+        if before.st_size > max_bytes:
+            raise ValueError("canonical source artifact exceeds the binding byte budget")
+        digest = hashlib.sha256()
+        byte_count = 0
         while True:
             chunk = os.read(descriptor, 1024 * 1024)
             if not chunk:
                 break
-            chunks.append(chunk)
+            byte_count += len(chunk)
+            if byte_count > max_bytes:
+                raise ValueError("canonical source artifact exceeds the binding byte budget")
+            digest.update(chunk)
         after = os.fstat(descriptor)
         identity_before = (before.st_dev, before.st_ino, before.st_mode, before.st_size, before.st_mtime_ns)
         identity_after = (after.st_dev, after.st_ino, after.st_mode, after.st_size, after.st_mtime_ns)
         if identity_before != identity_after:
             raise ValueError("canonical source artifact changed while it was read")
-        return b"".join(chunks), after
+        if byte_count != after.st_size:
+            raise ValueError("canonical source artifact changed while it was read")
+        return digest.hexdigest(), after, byte_count
     finally:
         os.close(descriptor)
 
 
-def _read_regular_file(path: Path, *, trusted_root: Path) -> tuple[bytes, os.stat_result]:
+def _hash_regular_file(
+    path: Path,
+    *,
+    trusted_root: Path,
+    max_bytes: int = MAX_BINDING_FILE_BYTES,
+) -> tuple[str, os.stat_result, int]:
     relative = _trusted_relative(path, trusted_root)
     parent_descriptor = _open_trusted_directory(trusted_root, relative.parts[:-1])
     if parent_descriptor is None:  # pragma: no cover - non-optional call
         raise ValueError("canonical source artifact ancestor is missing")
     try:
-        return _read_regular_file_at(parent_descriptor, relative.name)
+        return _hash_regular_file_at(parent_descriptor, relative.name, max_bytes=max_bytes)
     finally:
         os.close(parent_descriptor)
 
@@ -582,7 +716,7 @@ def regular_file_binding(
     trusted_root: Path,
 ) -> dict[str, str]:
     """Return exact, value-free identity/byte digests for a safe regular file."""
-    data, metadata = _read_regular_file(path, trusted_root=trusted_root)
+    bytes_digest, metadata, _ = _hash_regular_file(path, trusted_root=trusted_root)
     return {
         "identity_digest": _digest(
             {
@@ -592,7 +726,7 @@ def regular_file_binding(
                 "mode": stat.S_IMODE(metadata.st_mode),
             }
         ),
-        "bytes_digest": hashlib.sha256(data).hexdigest(),
+        "bytes_digest": bytes_digest,
     }
 
 
@@ -622,14 +756,29 @@ def regular_tree_binding(
 
     identities: list[dict[str, object]] = []
     contents: list[dict[str, str]] = []
+    budget = {"entries": 0, "bytes": 0}
 
-    def visit(directory_descriptor: int, relative_path: Path) -> None:
+    def bounded_entries(directory_descriptor: int) -> list[os.DirEntry[str]]:
+        remaining = MAX_BINDING_TREE_ENTRIES - budget["entries"]
+        entries: list[os.DirEntry[str]] = []
         try:
-            entries = sorted(os.scandir(directory_descriptor), key=lambda item: item.name)
+            with os.scandir(directory_descriptor) as iterator:
+                for entry in iterator:
+                    entries.append(entry)
+                    if len(entries) > remaining:
+                        raise ValueError("canonical source artifact tree exceeds the entry budget")
+        except ValueError:
+            raise
         except OSError as exc:
             raise ValueError("canonical source artifact tree is unreadable") from exc
-        for entry in entries:
+        return sorted(entries, key=lambda item: item.name)
+
+    def visit(directory_descriptor: int, relative_path: Path) -> None:
+        for entry in bounded_entries(directory_descriptor):
             child_relative = relative_path / entry.name
+            if len(child_relative.parts) > MAX_BINDING_TREE_DEPTH:
+                raise ValueError("canonical source artifact tree exceeds the depth budget")
+            budget["entries"] += 1
             if entry.is_symlink():
                 raise ValueError("canonical source artifact tree contains a symlink")
             if entry.is_dir(follow_symlinks=False):
@@ -662,7 +811,16 @@ def regular_tree_binding(
                 continue
             if not entry.is_file(follow_symlinks=False):
                 raise ValueError("canonical source artifact tree contains a non-regular entry")
-            data, metadata = _read_regular_file_at(directory_descriptor, entry.name)
+            remaining_bytes = MAX_BINDING_TREE_BYTES - budget["bytes"]
+            if remaining_bytes < 0:
+                raise ValueError("canonical source artifact tree exceeds the total byte budget")
+            file_limit = min(MAX_BINDING_FILE_BYTES, remaining_bytes)
+            bytes_digest, metadata, byte_count = _hash_regular_file_at(
+                directory_descriptor,
+                entry.name,
+                max_bytes=file_limit,
+            )
+            budget["bytes"] += byte_count
             identities.append(
                 {
                     "relative": child_relative.as_posix(),
@@ -675,7 +833,7 @@ def regular_tree_binding(
             contents.append(
                 {
                     "relative": child_relative.as_posix(),
-                    "sha256": hashlib.sha256(data).hexdigest(),
+                    "sha256": bytes_digest,
                 }
             )
     try:
