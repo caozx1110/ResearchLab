@@ -26,7 +26,9 @@
 
 copy install 的 `.agents/.install-manifest.json` 以 `source_origin/source_checkout/source_branch/source_strategy/source_commit` 记录更新 provenance。`kb update` 返回 `needs_source_choice` 时，私有 Agent protocol 必须包含当前可验证 provenance、真正缺失的用户字段、manifest byte digest 与 headless apply contract；不得只返回无法执行的 `choose_update_source` 名称。
 
-Agent 在当前对话取得选择后才可重绑。重绑以 manifest byte digest 做 CAS，要求 manifest leaf/ancestor 均为受控普通路径，并只原子更新 provenance 字段：`local-checkout` 要求 checkout 是真实 bundle source，且非 local origin 时 actual origin 与当前 branch 精确匹配；`remote-branch` 要求非 local origin + 合法 branch，并清空 checkout，后续在隔离 cache fetch/clone。detached checkout 的 branch 选择不能替用户切换其工作树，只能显式转为 remote-branch 或绑定另一个已经位于所选 branch 的有效 checkout。重绑后自动重跑 check，但不得自动 apply；代码更新仍需另一条当前用户授权。公开输出只含自然语言和 `kb update`，source path、digest、flags 与裸 git 只留在私有 Agent protocol。
+Agent 在当前对话取得选择后才可重绑。重绑以 manifest byte digest 做 CAS，要求 manifest leaf/ancestor 均为受控普通路径，并只原子更新 provenance 字段：`local-checkout` 要求 checkout 是真实 bundle source；Git checkout 必须处于非空 attached branch 且 actual origin/branch 与选择精确匹配，detached + local/no-remote 也不得用空 branch 伪装 updateable，只有非 Git 的真实本地 bundle source 才允许 `origin=local` + 空 branch。`remote-branch` 要求非 local origin + 合法 branch，并清空 checkout，后续在隔离 cache fetch/clone。detached checkout 的 branch 选择不能替用户切换其工作树，只能显式转为 remote-branch 或绑定另一个已经位于所选 branch 的有效 checkout。重绑后自动重跑 check，但不得自动 apply；代码更新仍需另一条当前用户授权。公开输出只含自然语言和 `kb update`，source path、digest、flags 与裸 git 只留在私有 Agent protocol。
+
+copy manifest 的 rebind 与 installer update/reinstall 共享同一个跨进程独占 lease。双方在 lease 内重验 manifest ordinary-file identity 与 byte digest；installer 从计划到写入携带 expected manifest state，lease 内若发现并发 rebind/更新必须零 managed-write fail-closed 并重新规划。lease 覆盖 managed payload 事务与 manifest-last 原子提交，rebind 则覆盖 CAS 到 replace/fsync，不能只保护最终 rename。
 
 ---
 
@@ -52,6 +54,9 @@ Agent 在当前对话取得选择后才可重绑。重绑以 manifest byte diges
 - **Abort zero-churn**：abort/resume 对每个 target 先比较 current digest 与 before digest；相等时不得调用 restore/atomic replace，必须保留原 bytes、mode 与 inode identity。只有实际偏离 before-state 的 target 才恢复。可预期的验证拒绝优先放在 lock 下、journal snapshot 前的 preflight；只读 fill/orientation/corpus 等 input 不进入 mutation target set。
 - **Canonical recovery projection**：journal/restore/undo/resume 的内部 target 与返回路径必须统一相对于 `kb_root(project_root).resolve()` 投影；调用者传入 macOS `/var/...` 等等价 alias 时，不能在恢复已执行后因 resolved target 对未 resolve root 的 `relative_to` 抛错。alias 与 canonical path 的结果、journal state 和可重试性必须等价。
 - **Special-file nonblocking**：journal digest/snapshot/abort/restore 必须以 `lstat` 分类且有界处理 filesystem node。普通文件才可读取 bytes；symlink 只读 link target；目录递归时遇 FIFO/socket/device 等特殊 child 只能记录类型/identity sentinel，绝不 `open`。begin snapshot 的既存特殊 target fail-closed；transaction 中途被替换成特殊类型时，abort 必须无需读取该节点即可识别偏离、移除替换物并恢复 before-image，不能挂死或留下 `abort_failed`。
+- **Incomplete-root quarantine**：任一 `state=begin` root operation 存在时，新独立 root mutation 必须在 journal/checkpoint/business write 前 fail-closed；检查与新 root begin 共用 workspace lease。只有显式 nested child/recovery role 可例外。历史多个 incomplete roots 由 `kb resume` 按 newest-first 恢复，才能还原最早 root 前状态。
+- **Lexical target identity**：canonical KB root 可 resolve，但 target key 必须保留 root 下 lexical relative path；禁止 absolute/`.`/`..`、escape 与 symlink ancestor。leaf symlink 按节点本身 snapshot/lock/restore，不得 resolve 成 referent。target key 同时约束 journal、digest maps、locks、checkpoint 与恢复结果。
+- **Journal target-set integrity**：恢复前要求无重复 canonical `target_paths`，且它与 `before_digests`、`before_snapshots` key set 精确相等；commit recovery 还与 `after_digests` 精确相等。任何缺失、多余、重复或不安全 key 都必须在 recovery journal/target write 前 fail-closed。
 - **claim 语义下限**：canonical claim 的类型不能被 record 级 `information_types` / `source` 降级；`inference` / `evaluation` / `user_opinion` 都强制 judgement track，`unverified` claim 在解决或替换前不得 `confirmed`。纯事实元数据且无 canonical claims 仍允许轻确认。
 
 ---
