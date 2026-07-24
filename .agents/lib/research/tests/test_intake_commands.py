@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import sys
 from pathlib import Path
+
+import pytest
+
+from research.preference_selection import eligible_preferences, record_effective_selection
+from research.prefs import ensure_workspace
 
 
 def _project_root() -> Path:
@@ -18,6 +24,48 @@ def _load_intake_module():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def _record_intake_selection(
+    root: Path,
+    intake,
+    args: argparse.Namespace,
+    *,
+    source: str,
+    title: str,
+    canonical_pools: list[str],
+    selection_id: str,
+) -> Path:
+    eligible = eligible_preferences(root, skill="source-intake", operation="add")
+    selected = []
+    excluded = []
+    for item in eligible["items"]:
+        row = {
+            "preference_id": item["preference_id"],
+            "reason": "bounded intake preference",
+        }
+        if item["strength"] == "hard":
+            selected.append({**row, "application": "enforce during this intake only"})
+        else:
+            excluded.append({**row, "reason": "not relevant to this intake"})
+    path, _receipt = record_effective_selection(
+        root,
+        {
+            "selection_id": selection_id,
+            "skill": "source-intake",
+            "operation": "add",
+            "catalog_digest": eligible["catalog_digest"],
+            "task_context": intake.intake_preference_context(
+                args,
+                source=source,
+                title=title,
+                canonical_pools=canonical_pools,
+            ),
+            "selected": selected,
+            "excluded": excluded,
+        },
+    )
+    return path
 
 
 def test_intake_confirm_command_contains_created_record_id() -> None:
@@ -61,6 +109,105 @@ def test_intake_user_guidance_hides_internal_config_commands() -> None:
     assert "kb next" in rendered
     for leaked_fragment in ("python3", "config.py", ".py ", "--section", "${"):
         assert leaked_fragment not in rendered
+
+
+@pytest.mark.parametrize(
+    ("field", "mutate"),
+    [
+        ("kind", lambda args, values: setattr(args, "kind", "repo")),
+        ("source", lambda _args, values: values.update(source="https://example.test/b")),
+        ("title", lambda _args, values: values.update(title="Paper B")),
+        ("maturity", lambda args, values: setattr(args, "maturity", "complete")),
+        ("stage_id", lambda args, values: setattr(args, "stage_id", "source-search-b")),
+        ("candidate_id", lambda args, values: setattr(args, "candidate_id", "candidate-b")),
+        ("canonical_pools", lambda _args, values: values.update(canonical_pools=["baseline"])),
+        ("user_authorization", lambda args, values: setattr(args, "user_authorization", "Keep candidate B.")),
+        ("authorization_source", lambda args, values: setattr(args, "authorization_source", "other")),
+    ],
+)
+def test_intake_preference_context_binds_every_consumed_scope_field(field, mutate) -> None:
+    intake = _load_intake_module()
+    args = argparse.Namespace(
+        kind="paper",
+        maturity="lightweight",
+        stage_id="source-search-a",
+        candidate_id="candidate-a",
+        user_authorization="Keep candidate A.",
+        authorization_source="user_message",
+    )
+    values = {
+        "source": "https://example.test/a",
+        "title": "Paper A",
+        "canonical_pools": ["shortlist"],
+    }
+    before = intake.intake_preference_context(args, **values)
+    mutate(args, values)
+    after = intake.intake_preference_context(args, **values)
+
+    assert after != before, field
+    assert "user_authorization" not in after
+    assert "authorization_source" not in after
+
+
+@pytest.mark.parametrize(
+    ("mutation", "canonical_pools"),
+    [
+        ("authorization", ["shortlist"]),
+        ("pools", ["baseline"]),
+    ],
+)
+def test_intake_old_preference_receipt_rejects_scope_replay_without_unit_write(
+    tmp_path: Path,
+    mutation: str,
+    canonical_pools: list[str],
+) -> None:
+    intake = _load_intake_module()
+    ensure_workspace(tmp_path)
+    args = argparse.Namespace(
+        kind="paper",
+        maturity="lightweight",
+        stage_id="source-search-a",
+        candidate_id="candidate-a",
+        user_authorization="Keep candidate A.",
+        authorization_source="user_message",
+        preference_selection_id="prefsel-intake-replay",
+    )
+    source = "https://example.test/private-source"
+    receipt_path = _record_intake_selection(
+        tmp_path,
+        intake,
+        args,
+        source=source,
+        title="Paper A",
+        canonical_pools=["shortlist"],
+        selection_id=args.preference_selection_id,
+    )
+    if mutation == "authorization":
+        args.user_authorization = "Keep candidate B."
+    units_root = tmp_path / "kb/units"
+    before_units = {
+        path.relative_to(units_root): path.read_bytes()
+        for path in units_root.rglob("*")
+        if path.is_file()
+    }
+
+    with pytest.raises(ValueError, match="another task"):
+        intake.resolve_intake_preferences(
+            tmp_path,
+            args,
+            source=source,
+            title="Paper A",
+            canonical_pools=canonical_pools,
+        )
+
+    assert {
+        path.relative_to(units_root): path.read_bytes()
+        for path in units_root.rglob("*")
+        if path.is_file()
+    } == before_units == {}
+    persisted = receipt_path.read_text(encoding="utf-8")
+    assert "Keep candidate A." not in persisted
+    assert source not in persisted
 
 
 def test_kb_ingest_chain_owns_paper_analyzer_order(monkeypatch) -> None:

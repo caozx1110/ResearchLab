@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -217,7 +219,24 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def intake_preference_context(args: argparse.Namespace, *, source: str, title: str) -> dict[str, object]:
+def _canonical_digest(value: object) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def intake_preference_context(
+    args: argparse.Namespace,
+    *,
+    source: str,
+    title: str,
+    canonical_pools: list[str] | None = None,
+) -> dict[str, object]:
     """Canonical source-intake inputs used to bind an effective selection."""
     return {
         "kind": str(args.kind),
@@ -226,11 +245,27 @@ def intake_preference_context(args: argparse.Namespace, *, source: str, title: s
         "maturity": str(args.maturity),
         "stage_id": str(args.stage_id or ""),
         "candidate_id": str(args.candidate_id or ""),
+        "canonical_pools": sorted(
+            {str(item).strip() for item in canonical_pools or [] if str(item).strip()}
+        ),
+        # Authorization text can contain sensitive user wording.  Bind its
+        # canonical value without ever copying it into a preference receipt.
+        "authorization_digest": _canonical_digest(
+            {
+                "user_authorization": str(args.user_authorization or "").strip(),
+                "authorization_source": str(args.authorization_source or "").strip(),
+            }
+        ),
     }
 
 
 def resolve_intake_preferences(
-    root: Path, args: argparse.Namespace, *, source: str, title: str
+    root: Path,
+    args: argparse.Namespace,
+    *,
+    source: str,
+    title: str,
+    canonical_pools: list[str] | None = None,
 ) -> tuple[dict[str, object], dict[str, object]]:
     """Return selected runtime.paper values plus a value-free persistence binding."""
     selection_id = str(getattr(args, "preference_selection_id", "") or "")
@@ -241,7 +276,12 @@ def resolve_intake_preferences(
         selection_id=selection_id,
         skill="source-intake",
         operation="add",
-        canonical_inputs=intake_preference_context(args, source=source, title=title),
+        canonical_inputs=intake_preference_context(
+            args,
+            source=source,
+            title=title,
+            canonical_pools=canonical_pools,
+        ),
     )
     selected = {
         str(item.get("path") or ""): item.get("value")
@@ -768,7 +808,11 @@ def main() -> int:
         record["payload"]["basic_info"]["title"] = title
         record["payload"]["basic_info"]["url"] = source if source.startswith("http") else ""
     paper_preferences, preference_binding = resolve_intake_preferences(
-        root, args, source=source, title=title
+        root,
+        args,
+        source=source,
+        title=title,
+        canonical_pools=list(record.get("candidate_pools") or []),
     )
     record["payload"]["preference_contract"] = operation_contract(
         skill="source-intake", operation="add"
