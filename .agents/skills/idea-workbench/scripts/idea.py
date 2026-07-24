@@ -233,6 +233,40 @@ def _assert_planned_idea_resolution(args, record: Mapping[str, object], path: Pa
         raise SystemExit("Idea resolution changed before the operation lock; no changes were made.")
 
 
+def _prepare_contract_tuple_state(
+    root: Path,
+    *,
+    operation: str,
+    canonical_id: str,
+    corpus_path: Path,
+    orientation_path: Path,
+    request_context: Mapping[str, object] | None = None,
+) -> str:
+    corpus_exists = corpus_path.exists() or corpus_path.is_symlink()
+    orientation_exists = orientation_path.exists() or orientation_path.is_symlink()
+    if not corpus_exists and not orientation_exists:
+        return "new"
+    if corpus_exists != orientation_exists:
+        raise ValueError("idea authoring contract tuple is incomplete")
+    corpus, corpus_binding = _validated_frozen_corpus(root, corpus_path)
+    schema_version = 1 if corpus.get("schema") == "idea-evidence-corpus/v1" else 2
+    expected_orientation = idea_preference_orientation(
+        operation,
+        canonical_id=canonical_id,
+        corpus_commitment=_corpus_commitment(corpus, corpus_binding),
+        request_context=request_context,
+        schema_version=schema_version,
+    )
+    orientation, _orientation_binding = _bound_yaml(
+        orientation_path,
+        logical_identity=orientation_path.name,
+        trusted_root=root,
+    )
+    if orientation != expected_orientation:
+        raise ValueError("idea authoring contract tuple is mixed or stale")
+    return "legacy" if schema_version == 1 else "v2"
+
+
 def _generation_prepare_has_current_owner(
     root: Path,
     *,
@@ -251,11 +285,17 @@ def _generation_prepare_has_current_owner(
             request_context=request_context,
         )
         return True
-    corpus_path = bundle_root(root, bundle_id) / GENERATION_CORPUS_NAME
-    if corpus_path.exists() or corpus_path.is_symlink():
-        corpus, _binding = _validated_frozen_corpus(root, corpus_path)
-        if corpus.get("schema") == "idea-evidence-corpus/v2":
-            raise ValueError("unanchored v2 idea generation task cannot be adopted")
+    working_root = bundle_root(root, bundle_id)
+    tuple_state = _prepare_contract_tuple_state(
+        root,
+        operation="generate",
+        canonical_id=bundle_id,
+        corpus_path=working_root / GENERATION_CORPUS_NAME,
+        orientation_path=working_root / GENERATION_ORIENTATION_NAME,
+        request_context=request_context,
+    )
+    if tuple_state == "v2":
+        raise ValueError("unanchored v2 idea generation task cannot be adopted")
     return False
 
 
@@ -272,12 +312,18 @@ def _require_existing_semantic_anchor_if_v2(
     if other_active:
         raise ValueError("another semantic idea authoring operation is already active")
     corpus_path = unit_root / f"{operation}-evidence-corpus.yaml"
-    if not corpus_path.exists() and not corpus_path.is_symlink():
+    tuple_state = _prepare_contract_tuple_state(
+        root,
+        operation=operation,
+        canonical_id=str(record["id"]),
+        corpus_path=corpus_path,
+        orientation_path=unit_root / f"{operation}-orientation.yaml",
+    )
+    if tuple_state == "new":
         if contracts:
-            raise ValueError("active semantic idea owner anchor has no evidence corpus")
+            raise ValueError("active semantic idea owner anchor has no contract tuple")
         return
-    corpus, _binding = _validated_frozen_corpus(root, corpus_path)
-    if corpus.get("schema") != "idea-evidence-corpus/v2":
+    if tuple_state == "legacy":
         if contracts:
             raise ValueError("legacy semantic idea task cannot carry a v2 owner anchor")
         return

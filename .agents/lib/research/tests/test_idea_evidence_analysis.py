@@ -112,6 +112,35 @@ def _path_snapshot(paths: list[Path]) -> dict[Path, tuple[bytes, tuple[int, int,
     }
 
 
+def _optional_path_snapshot(
+    paths: list[Path],
+) -> dict[Path, tuple[bytes, tuple[int, int, int]] | None]:
+    return {
+        path: (
+            _path_snapshot([path])[path]
+            if path.exists() or path.is_symlink()
+            else None
+        )
+        for path in paths
+    }
+
+
+def _rewrite_corpus_as_v1(idea, corpus_path: Path) -> None:
+    corpus = load_yaml(corpus_path, default={})
+    corpus["schema"] = "idea-evidence-corpus/v1"
+    for entry in corpus["entries"]:
+        entry.pop("size")
+    corpus["identity_digest"] = idea.canonical_digest([
+        {"path": item["path"], "identity_digest": item["identity_digest"]}
+        for item in corpus["entries"]
+    ])
+    corpus["bytes_digest"] = idea.canonical_digest([
+        {"path": item["path"], "bytes_digest": item["bytes_digest"]}
+        for item in corpus["entries"]
+    ])
+    write_yaml_if_changed(corpus_path, corpus)
+
+
 def _discussion_fill(path: Path, source_id: str) -> dict:
     payload = load_yaml(path, default={})
     payload["reviewer"] = "runtime-agent"
@@ -469,36 +498,66 @@ def test_semantic_prepare_rejects_hybrid_owner_before_journal(
     orientation_path = unit / f"{operation}-orientation.yaml"
     corpus_path = unit / f"{operation}-evidence-corpus.yaml"
     if corpus_state == "v1":
-        corpus = load_yaml(corpus_path, default={})
-        corpus["schema"] = "idea-evidence-corpus/v1"
-        for entry in corpus["entries"]:
-            entry.pop("size")
-        corpus["identity_digest"] = idea.canonical_digest([
-            {"path": item["path"], "identity_digest": item["identity_digest"]}
-            for item in corpus["entries"]
-        ])
-        corpus["bytes_digest"] = idea.canonical_digest([
-            {"path": item["path"], "bytes_digest": item["bytes_digest"]}
-            for item in corpus["entries"]
-        ])
-        write_yaml_if_changed(corpus_path, corpus)
+        _rewrite_corpus_as_v1(idea, corpus_path)
     else:
         corpus_path.unlink()
     protected = [unit / "record.yaml", fill_path, orientation_path, corpus_path]
-    before = {
-        path: _path_snapshot([path])[path] if path.exists() else None
-        for path in protected
-    }
+    before = _optional_path_snapshot(protected)
 
     with pytest.raises(SystemExit):
         _run(
             idea, monkeypatch, command, "--idea-id", idea_id, "--phase", "prepare"
         )
-    after = {
-        path: _path_snapshot([path])[path] if path.exists() else None
-        for path in protected
-    }
-    assert after == before
+    assert _optional_path_snapshot(protected) == before
+
+
+@pytest.mark.parametrize("command", ["analyze", "review", "discuss"])
+@pytest.mark.parametrize(
+    "tuple_state",
+    [
+        "v1_with_v2_orientation",
+        "v1_without_orientation",
+        "v1_with_malformed_orientation",
+        "orientation_without_corpus",
+    ],
+)
+def test_semantic_ownerless_mixed_tuple_is_rejected_before_journal(
+    tmp_path: Path, monkeypatch, command: str, tuple_state: str
+) -> None:
+    idea = _load_idea_module()
+    idea_id, _source_id = _setup(tmp_path, idea)
+    unit = record_path(tmp_path, "idea", idea_id).parent
+    assert _run(
+        idea, monkeypatch, command, "--idea-id", idea_id, "--phase", "prepare"
+    ) == 0
+    operation = "discuss" if command == "discuss" else command
+    fill_path = (
+        unit / "discussion-fill.yaml"
+        if operation == "discuss"
+        else unit / f"{operation}-fill.yaml"
+    )
+    orientation_path = unit / f"{operation}-orientation.yaml"
+    corpus_path = unit / f"{operation}-evidence-corpus.yaml"
+    record_file = unit / "record.yaml"
+    record = load_yaml(record_file, default={})
+    record["payload"].pop("idea_authoring_contracts", None)
+    write_yaml_if_changed(record_file, record)
+    if tuple_state.startswith("v1_"):
+        _rewrite_corpus_as_v1(idea, corpus_path)
+    if tuple_state == "v1_without_orientation":
+        orientation_path.unlink()
+    elif tuple_state == "v1_with_malformed_orientation":
+        write_yaml_if_changed(orientation_path, {"schema": "malformed"})
+    elif tuple_state == "orientation_without_corpus":
+        corpus_path.unlink()
+    protected = [record_file, fill_path, orientation_path, corpus_path]
+    before = _optional_path_snapshot(protected)
+
+    with pytest.raises(SystemExit):
+        _run(
+            idea, monkeypatch, command, "--idea-id", idea_id, "--phase", "prepare"
+        )
+    assert _optional_path_snapshot(protected) == before
 
 
 @pytest.mark.parametrize("tamper", ["duplicate", "unsafe", "bad_digest", "extra_key"])
@@ -987,6 +1046,104 @@ def test_generation_prepare_rebuilds_missing_fill_and_checkpoints_exact_target(
     assert checkpoints[0]["root"] == root
     assert checkpoints[0]["trigger"] == "milestone"
     assert checkpoints[0]["target_paths"] == [fill_path]
+
+
+@pytest.mark.parametrize(
+    "tuple_state",
+    [
+        "v1_with_v2_orientation",
+        "v1_without_orientation",
+        "v1_with_malformed_orientation",
+        "v1_with_wrong_request_orientation",
+        "orientation_without_corpus",
+    ],
+)
+def test_generation_ownerless_mixed_tuple_is_rejected_before_journal(
+    tmp_path: Path, monkeypatch, tuple_state: str
+) -> None:
+    idea = _load_idea_module()
+    root = tmp_path / "workspace"
+    _multi_setup(root, idea, count=1)
+    bundle_id = "idea-bundle-ownerless-mixed"
+    common = (
+        "generate", "--title", "Ownerless mixed", "--count", "1",
+        "--bundle-id", bundle_id,
+    )
+    assert _run(idea, monkeypatch, *common, "--phase", "prepare") == 0
+    working = root / "kb/synthesis/idea-pools" / bundle_id
+    index_path = working / "index.yaml"
+    fill_path = working / "generation-fill.yaml"
+    orientation_path = working / "generation-orientation.yaml"
+    corpus_path = working / "generation-evidence-corpus.yaml"
+    request_context = dict(load_yaml(fill_path, default={})["request_context"])
+    index_path.unlink()
+    if tuple_state.startswith("v1_"):
+        _rewrite_corpus_as_v1(idea, corpus_path)
+    if tuple_state == "v1_without_orientation":
+        orientation_path.unlink()
+    elif tuple_state == "v1_with_malformed_orientation":
+        write_yaml_if_changed(orientation_path, {"schema": "malformed"})
+    elif tuple_state == "v1_with_wrong_request_orientation":
+        wrong_request = {**request_context, "title": "Different request"}
+        write_yaml_if_changed(
+            orientation_path,
+            idea.idea_preference_orientation(
+                "generate",
+                canonical_id=bundle_id,
+                corpus_commitment={},
+                request_context=wrong_request,
+                schema_version=1,
+            ),
+        )
+    elif tuple_state == "orientation_without_corpus":
+        corpus_path.unlink()
+    protected = [index_path, fill_path, orientation_path, corpus_path]
+    before = _optional_path_snapshot(protected)
+
+    with pytest.raises(SystemExit):
+        _run(idea, monkeypatch, *common, "--phase", "prepare")
+    assert _optional_path_snapshot(protected) == before
+
+
+def test_generation_exact_legacy_tuple_can_refresh_to_new_owner(
+    tmp_path: Path, monkeypatch
+) -> None:
+    idea = _load_idea_module()
+    root = tmp_path / "workspace"
+    _multi_setup(root, idea, count=1)
+    bundle_id = "idea-bundle-legacy-refresh"
+    common = (
+        "generate", "--title", "Legacy refresh", "--count", "1",
+        "--bundle-id", bundle_id,
+    )
+    assert _run(idea, monkeypatch, *common, "--phase", "prepare") == 0
+    working = root / "kb/synthesis/idea-pools" / bundle_id
+    index_path = working / "index.yaml"
+    fill_path = working / "generation-fill.yaml"
+    orientation_path = working / "generation-orientation.yaml"
+    corpus_path = working / "generation-evidence-corpus.yaml"
+    request_context = dict(load_yaml(fill_path, default={})["request_context"])
+    index_path.unlink()
+    fill_path.unlink()
+    _rewrite_corpus_as_v1(idea, corpus_path)
+    write_yaml_if_changed(
+        orientation_path,
+        idea.idea_preference_orientation(
+            "generate",
+            canonical_id=bundle_id,
+            corpus_commitment={},
+            request_context=request_context,
+            schema_version=1,
+        ),
+    )
+
+    assert _run(idea, monkeypatch, *common, "--phase", "prepare") == 0
+    prepared = load_yaml(index_path, default={})
+    assert prepared["status"] == "prepared"
+    assert prepared["authoring_contract"]["operation"] == "generate"
+    assert load_yaml(corpus_path, default={})["schema"] == "idea-evidence-corpus/v2"
+    assert load_yaml(orientation_path, default={})["schema"] == "idea-preference-orientation/v2"
+    assert fill_path.exists()
 
 
 def test_prepared_generation_bundle_rejects_generic_bundle_entrypoints(
