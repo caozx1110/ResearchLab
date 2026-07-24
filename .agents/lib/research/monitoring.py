@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from .common import file_sha256, utc_now_iso
+from .common import file_sha256, load_list_document, program_reporting_events_path, utc_now_iso
 from .journal import mutation_transaction
 from .paths import kb_root, search_stage_path, source_search_root, synthesis_root, units_root
 from .yaml_io import load_yaml, write_yaml_if_changed, yaml_duplicate_key_issues
@@ -147,6 +147,72 @@ def subscriptions_root(project_root: Path) -> Path:
 
 def runs_root(project_root: Path) -> Path:
     return monitoring_root(project_root) / "runs"
+
+
+def _program_reporting_paths(project_root: Path, program_ids: Iterable[str]) -> list[Path]:
+    programs_root = kb_root(project_root) / "programs"
+    paths: list[Path] = []
+    for raw_program_id in program_ids:
+        program_id = _safe_id(raw_program_id, field="program id")
+        program = programs_root / program_id
+        if programs_root.is_symlink() or program.is_symlink() or not program.is_dir():
+            raise SystemExit(f"Research monitor program does not exist: {program_id}")
+        workflow = program / "workflow"
+        if workflow.is_symlink() or (workflow.exists() and not workflow.is_dir()):
+            raise SystemExit(f"Research monitor program workflow is unsafe: {program_id}")
+        paths.append(program_reporting_events_path(project_root, program_id))
+    return paths
+
+
+def _append_completion_events_unlocked(
+    project_root: Path,
+    *,
+    subscription: dict[str, Any],
+    run: dict[str, Any],
+    completed_at: str,
+) -> None:
+    outcome_count = len([item for item in run.get("review_outcomes", []) if isinstance(item, dict)])
+    for program_id in subscription.get("program_ids", []):
+        path = program_reporting_events_path(project_root, str(program_id))
+        payload = load_list_document(
+            path,
+            f"{program_id}-reporting-events",
+            "research-monitor",
+        )
+        payload["program_id"] = str(program_id)
+        payload["generated_by"] = "research-monitor"
+        payload["generated_at"] = completed_at
+        items = [item for item in payload.get("items", []) if isinstance(item, dict)]
+        if not any(
+            item.get("event_type") == "monitor-run-completed"
+            and item.get("monitor_run_id") == run.get("id")
+            for item in items
+        ):
+            items.append(
+                {
+                    "timestamp": completed_at,
+                    "source_skill": "research-monitor",
+                    "event_type": "monitor-run-completed",
+                    "title": f"Monitoring run completed: {subscription.get('title') or subscription.get('id')}",
+                    "summary": (
+                        f"The bounded monitoring run completed and produced {outcome_count} review outcome(s); "
+                        "each outcome remains subject to its separate disposition or review gate."
+                    ),
+                    "stage": "monitoring",
+                    "tags": ["monitor", "completed"],
+                    "artifacts": [run_path(project_root, str(run.get("id") or "")).relative_to(project_root).as_posix()],
+                    "idea_ids": [],
+                    "paper_ids": [],
+                    "repo_ids": [],
+                    "epistemic_type": "operational",
+                    "information_types": ["fact"],
+                    "monitor_subscription_id": str(subscription.get("id") or ""),
+                    "monitor_run_id": str(run.get("id") or ""),
+                    "monitor_run_completion_revision": int(run.get("revision") or 0),
+                }
+            )
+        payload["items"] = items
+        write_yaml_if_changed(path, payload)
 
 
 def _safe_id(value: Any, *, field: str) -> str:
@@ -673,16 +739,18 @@ def create_subscription(
     scope = _safe_json_value(raw_scope, field="scope")
     if not isinstance(scope, dict):
         raise SystemExit("Research monitor scope must be a mapping.")
+    program_ids = [
+        _safe_id(item, field="program id")
+        for item in _safe_string_list(payload.get("program_ids"), field="program_ids")
+    ]
+    _program_reporting_paths(project_root, program_ids)
     document = {
         "schema_version": SCHEMA_VERSION,
         "id": subscription_id,
         "kind": kind,
         "status": "active",
         "title": _bounded_text(payload.get("title"), field="title", limit=500),
-        "program_ids": [
-            _safe_id(item, field="program id")
-            for item in _safe_string_list(payload.get("program_ids"), field="program_ids")
-        ],
+        "program_ids": program_ids,
         "target": target,
         "scope_snapshot": scope,
         "scope_digest": value_digest(scope),
@@ -1400,6 +1468,12 @@ def finish_run(
     subscription_id = _safe_id(initial_run.get("subscription_id"), field="subscription id")
     receipt_file = run_path(project_root, run_id)
     subscription_file = subscription_path(project_root, subscription_id)
+    initial_subscription = load_subscription(project_root, subscription_id)
+    reporting_paths = (
+        _program_reporting_paths(project_root, initial_subscription.get("program_ids", []))
+        if state == "completed"
+        else []
+    )
 
     def preflight() -> None:
         current_run = load_run(project_root, run_id)
@@ -1414,6 +1488,13 @@ def finish_run(
         checked_outcomes = _sanitize_review_outcomes(project_root, safe_outcomes)
         _validate_outcome_links(checked_outputs, checked_outcomes)
         current_subscription = load_subscription(project_root, subscription_id)
+        if state == "completed":
+            current_reporting_paths = _program_reporting_paths(
+                project_root,
+                current_subscription.get("program_ids", []),
+            )
+            if current_reporting_paths != reporting_paths:
+                raise SystemExit("Research monitor program reporting targets changed during completion.")
         _expected_revision(current_run, expected_run_revision, subject="run")
         _expected_revision(
             current_subscription,
@@ -1445,7 +1526,7 @@ def finish_run(
     with mutation_transaction(
         project_root,
         "research-monitor:finish-run",
-        [receipt_file, subscription_file],
+        [receipt_file, subscription_file, *reporting_paths],
         preflight=preflight,
     ):
         current_run = load_run(project_root, run_id)
@@ -1476,6 +1557,13 @@ def finish_run(
         current_subscription["revision"] = int(current_subscription["revision"]) + 1
         write_yaml_if_changed(receipt_file, current_run)
         write_yaml_if_changed(subscription_file, current_subscription)
+        if state == "completed":
+            _append_completion_events_unlocked(
+                project_root,
+                subscription=current_subscription,
+                run=current_run,
+                completed_at=changed_at,
+            )
     return receipt_file
 
 

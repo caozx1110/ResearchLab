@@ -39,6 +39,11 @@ from research.monitoring import (
 from research.skill_validator import validate_skill
 
 
+@pytest.fixture(autouse=True)
+def _existing_monitor_program(tmp_path: Path) -> None:
+    (tmp_path / "kb" / "programs" / "program-vla").mkdir(parents=True, exist_ok=True)
+
+
 def _load_monitor_script():
     spec = importlib.util.spec_from_file_location("research_monitor_script_r7", MONITOR_SCRIPT)
     assert spec and spec.loader
@@ -286,6 +291,14 @@ def test_subscription_due_facts_are_read_only_and_anchored(tmp_path: Path) -> No
     assert path.read_bytes() == before
 
 
+def test_subscription_rejects_a_nonexistent_program_binding(tmp_path: Path) -> None:
+    payload = _literature_subscription(subscription_id="monitor-missing-program")
+    payload["program_ids"] = ["missing-program"]
+    with pytest.raises(SystemExit, match="program does not exist"):
+        create_subscription(tmp_path, payload, now=_time(1))
+    assert not subscription_path(tmp_path, "monitor-missing-program").exists()
+
+
 def test_due_run_freezes_subscription_and_coalesces_missed_windows(tmp_path: Path) -> None:
     create_subscription(tmp_path, _literature_subscription(), now=_time(1))
     run_file = create_due_run(
@@ -347,6 +360,17 @@ def test_completed_run_advances_from_anchor_not_completion_time(tmp_path: Path) 
     assert updated["last_completed_run_id"] == run["id"]
     assert updated["next_due_at"] == "2026-08-12T00:00:00+00:00"
     assert due_subscriptions(tmp_path, now=_time(31, 13)) == []
+    events = yaml.safe_load(
+        (tmp_path / "kb/programs/program-vla/workflow/reporting-events.yaml").read_text(
+            encoding="utf-8"
+        )
+    )["items"]
+    assert len(events) == 1
+    assert events[0]["event_type"] == "monitor-run-completed"
+    assert events[0]["epistemic_type"] == "operational"
+    assert events[0]["monitor_run_id"] == run["id"]
+    assert events[0]["monitor_run_completion_revision"] == completed["revision"]
+    assert "classification" not in events[0]
 
 
 def test_completed_outcome_stays_visible_until_a_bound_disposition(tmp_path: Path) -> None:
@@ -1078,7 +1102,7 @@ def test_symlinked_subscription_and_reference_paths_are_rejected(tmp_path: Path)
         )
 
 
-def test_failed_terminal_write_rolls_back_both_documents(
+def test_failed_completion_event_write_rolls_back_run_subscription_and_event(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monitoring = importlib.import_module("research.monitoring")
@@ -1086,14 +1110,16 @@ def test_failed_terminal_write_rolls_back_both_documents(
     stage = _write_literature_stage(tmp_path)
     before_run = run_path(tmp_path, run["id"]).read_bytes()
     before_subscription = subscription_path(tmp_path, "monitor-vla").read_bytes()
+    event_path = tmp_path / "kb/programs/program-vla/workflow/reporting-events.yaml"
+    assert not event_path.exists()
     original_write = monitoring.write_yaml_if_changed
 
-    def fail_subscription(path: Path, value: object) -> None:
-        if path == subscription_path(tmp_path, "monitor-vla"):
-            raise RuntimeError("injected second-write failure")
+    def fail_event(path: Path, value: object) -> None:
+        if path == event_path:
+            raise RuntimeError("injected reporting-event failure")
         original_write(path, value)
 
-    monkeypatch.setattr(monitoring, "write_yaml_if_changed", fail_subscription)
+    monkeypatch.setattr(monitoring, "write_yaml_if_changed", fail_event)
     with pytest.raises(RuntimeError, match="injected"):
         monitoring.finish_run(
             tmp_path,
@@ -1107,6 +1133,7 @@ def test_failed_terminal_write_rolls_back_both_documents(
         )
     assert run_path(tmp_path, run["id"]).read_bytes() == before_run
     assert subscription_path(tmp_path, "monitor-vla").read_bytes() == before_subscription
+    assert not event_path.exists()
 
 
 def test_module_has_no_network_client_or_content_judgement_heuristic() -> None:

@@ -24,6 +24,7 @@ description: 维护研究订阅、机械到期事实与冻结运行回执；当�
 6. 矛盾只生成 candidate。既有 confirmed claim 不得被监测 run 自动改写、撤销或覆盖；需要改变结论时交现有 review/confirmation 流程，由用户拍板。
 7. completed run 的每个结果都会继续出现在 `kb next` 的事实候选中，直到写入 `acknowledged / materialized / sent_to_review / dismissed` 之一。新增或值得复查的材料不能只因 run 已完成就从系统消失；materialized 必须绑定当前用户消息授权和实际 canonical unit，矛盾候选只能绑定现有 review 项。
 8. completed/cancelled run 不可重开。blocked 与 retryable failure 可恢复；真正新一轮使用下一 anchored due window。
+9. 绑定 program 的 completed run 会在同一原子操作中写一条纯 operational/factual reporting event，只说明本轮已完成和 outcome 数量；它不把任何 `new / worth_reviewing / contradiction_candidate` 判断升级为已确认结论。
 
 ## 状态与恢复
 
