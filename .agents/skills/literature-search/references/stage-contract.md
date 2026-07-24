@@ -5,6 +5,7 @@ The runtime Agent writes a temporary JSON object and passes it privately to the 
 ```json
 {
   "request": "original research question",
+  "preference_selection_id": "optional current literature-search + search receipt id",
   "stage_id": "optional-existing-stage-id",
   "run_id": "optional-safe-id-for-an-explicit-fresh-run",
   "monitor_binding": {
@@ -188,6 +189,8 @@ For `bounded-systematic` and `systematic`, freeze non-empty inclusion, exclusion
 `systematic` requires `reproducible: true` for the scope and every query event; `bounded-systematic` requires `false` and always persists `partial: true`. Every query event records its facet, timezone-aware timestamp, result depth, count, and outcome, and usage must equal the durable event count. Before a systematic-family stage reaches a terminal stop reason, `coverage.flow_counts` must contain all fields above; `identified` equals both the sum of query result counts and the number of persisted discovery occurrences, and each query's own result count equals the discovery occurrences that reference it, while duplicates equal discovery occurrences minus unique candidates. The flow must satisfy the identification → dedup/automation → title/abstract → full-text → included/excluded arithmetic and agree with the legacy or derived effective decisions, evidence levels, fetch availability, and full-read usage.
 
 Omit `stage_id` for the first batch and resend the same request, mode, and frozen scope for later batches; the helper derives the same run identity. Supply a new safe `run_id` only when intentionally starting a fresh run with otherwise identical inputs. Candidate and discovery URLs must be credential-free; raw responses, headers, cookies, tokens, and signed request URLs are forbidden.
+
+`preference_selection_id` is optional. When present, the helper recomputes the canonical task context from the normalized request, mode, run id, frozen scope digest, and resolved stage id, then fails closed on a wrong skill, wrong operation, another task, or stale catalog. The persisted stage contains only the receipt binding and hard-value digests under `preference_context`, never copied soft preference values. Without a receipt, the selection binding is empty and soft behavior is neutral; current hard constraints remain frozen by digest. `preference_context` cannot change when resuming a stage.
 
 When `research-monitor` owns the run, include its exact `monitor_binding` in the first and every resumed batch. The binding is immutable and makes the completed monitor receipt reject an unrelated or later-repurposed stage.
 

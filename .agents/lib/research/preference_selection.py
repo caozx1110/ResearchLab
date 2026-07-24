@@ -7,6 +7,7 @@ task text.
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import re
@@ -172,30 +173,20 @@ SKILL_ELIGIBILITY: dict[str, tuple[str, ...]] = {
 
 
 # Consumer operations are an enforcement boundary, rather than descriptive
-# metadata.  A receipt may disclose only paths allowed for the exact operation
-# that will consume it.  Integration-owned skills are listed here as well so
-# the shared contract can fail closed even before their consumer wiring lands.
+# metadata.  This table lists only operations with an execution consumer that
+# recomputes canonical task context and resolves the receipt.  Deterministic
+# operations which do not vary with preferences are intentionally absent; do
+# not add aspirational entries merely because a skill has an allowlist above.
 SKILL_OPERATIONS: dict[str, tuple[str, ...]] = {
-    "knowledge-base-manager": ("review-display",),
-    "research-config-manager": ("configure",),
     "source-intake": ("add",),
     "research-orchestrator": ("plan",),
-    "literature-search": ("search", "stage"),
+    "literature-search": ("search",),
     "literature-synthesizer": ("synthesize",),
     "report-author": ("weekly", "ppt-materials", "stage-summary", "writing-materials", "outline"),
     "method-designer": ("design",),
     "experiment-workbench": ("plan", "log-run", "follow-up", "diagnose"),
-    "idea-workbench": ("ideate",),
-    "discussion-archivist": ("archive",),
     "kb-cli": ("review-display",),
     "paper-analyst": ("prewarm-cache", "screen", "complete-note", "extract-figures", "refresh-structure"),
-    "repo-analyst": ("scan-structure", "map-capability"),
-    "dataset-analyst": ("profile",),
-    "blog-analyst": ("complete-note",),
-    "research-monitor": ("due", "apply"),
-    "research-navigator": ("render",),
-    "wiki-adapter": ("query",),
-    "skill-evolution-advisor": ("capture",),
 }
 
 
@@ -209,10 +200,53 @@ OPERATION_ELIGIBILITY: dict[tuple[str, str], tuple[str, ...]] = {
     ("report-author", "stage-summary"): ("profile.personalization.reporting_style", "learned.*"),
     ("report-author", "writing-materials"): ("profile.personalization.reporting_style", "learned.*"),
     ("report-author", "outline"): ("profile.personalization.reporting_style", "learned.*"),
+    ("literature-search", "search"): (
+        "profile.preferences.language_preference",
+        "profile.personalization.research_focus",
+        "profile.personalization.term_style",
+        "profile.constraints",
+        "learned.*",
+    ),
+    ("literature-synthesizer", "synthesize"): (
+        "profile.preferences.language_preference",
+        "profile.personalization.research_focus",
+        "profile.personalization.reporting_style",
+        "profile.personalization.term_style",
+        "profile.constraints",
+        "learned.*",
+    ),
     ("method-designer", "design"): (
         "profile.personalization.research_focus",
         "profile.resources",
         "profile.constraints",
+        "learned.*",
+    ),
+    ("experiment-workbench", "plan"): (
+        "profile.resources",
+        "profile.constraints",
+        "runtime.autonomy.auto_execute_scope",
+        "learned.*",
+    ),
+    ("experiment-workbench", "log-run"): (
+        "profile.resources",
+        "profile.constraints",
+        "runtime.autonomy.auto_execute_scope",
+        "learned.*",
+    ),
+    ("experiment-workbench", "follow-up"): (
+        "profile.resources",
+        "profile.constraints",
+        "runtime.autonomy.auto_execute_scope",
+        "learned.*",
+    ),
+    ("experiment-workbench", "diagnose"): (
+        "profile.resources",
+        "profile.constraints",
+        "runtime.autonomy.auto_execute_scope",
+        "learned.*",
+    ),
+    ("kb-cli", "review-display"): (
+        "profile.personalization.reporting_style",
         "learned.*",
     ),
     ("paper-analyst", "prewarm-cache"): ("runtime.paper", "learned.*"),
@@ -747,6 +781,78 @@ def resolve_task_preferences(
     return effective
 
 
+def resolve_operation_preferences(
+    project_root: Path,
+    *,
+    selection_id: str,
+    skill: str,
+    operation: str,
+    canonical_inputs: Mapping[str, object],
+) -> dict[str, object]:
+    """Resolve one optional receipt while preserving every hard fallback.
+
+    With no receipt, soft behavior is neutral and only current hard items are
+    returned.  With a receipt, ``resolve_task_preferences`` performs all
+    skill/operation/task/catalog checks and the Agent-selected soft subset is
+    added.  Consumers may use the values during this operation, but persist
+    only the returned binding/digests rather than copying the preference
+    profile into per-skill state.
+    """
+    normalized_selection_id = str(selection_id or "").strip()
+    eligible = eligible_preferences(project_root, skill=skill, operation=operation)
+    hard_items = [
+        copy.deepcopy(item)
+        for item in eligible["items"]
+        if isinstance(item, Mapping) and str(item.get("strength") or "") == "hard"
+    ]
+    expected = task_context_digest(
+        skill=skill,
+        operation=operation,
+        canonical_inputs=canonical_inputs,
+    )
+    binding: dict[str, object] = {}
+    if normalized_selection_id:
+        effective = resolve_task_preferences(
+            project_root,
+            selection_id=normalized_selection_id,
+            skill=skill,
+            operation=operation,
+            canonical_inputs=canonical_inputs,
+        )
+        effective_items = [
+            copy.deepcopy(item)
+            for item in effective.get("effective_items", [])
+            if isinstance(item, Mapping)
+        ]
+        binding = selection_binding(effective)
+    else:
+        effective_items = hard_items
+    return {
+        "skill": str(skill or "").strip().casefold(),
+        "operation": str(operation or "").strip().casefold(),
+        "task_context_digest": expected,
+        "effective_items": effective_items,
+        "hard_items": hard_items,
+        "soft_items": [
+            copy.deepcopy(item)
+            for item in effective_items
+            if str(item.get("strength") or "") == "soft"
+        ],
+        "values_by_path": {
+            str(item.get("path") or ""): copy.deepcopy(item.get("value"))
+            for item in effective_items
+            if str(item.get("path") or "")
+        },
+        "hard_value_digests": {
+            str(item.get("path") or ""): str(item.get("value_digest") or "")
+            for item in hard_items
+            if str(item.get("path") or "")
+        },
+        "binding": binding,
+        "consumer_contract": copy.deepcopy(eligible["consumer_contract"]),
+    }
+
+
 def selection_binding(effective: Mapping[str, object]) -> dict[str, object]:
     """Stable persistence binding; intentionally excludes preference values."""
     return {
@@ -771,5 +877,6 @@ __all__ = [
     "load_effective_selection",
     "resolve_effective_preferences",
     "resolve_task_preferences",
+    "resolve_operation_preferences",
     "selection_binding",
 ]

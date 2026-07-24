@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -27,6 +28,7 @@ if __name__ == "__main__":
 from research.common import add_project_root_argument, load_yaml
 from research.core import project_root
 from research.paths import search_stage_path
+from research.preference_selection import resolve_operation_preferences
 from research.sources import (
     _validate_search_stage_target,
     build_literature_search_stage_id,
@@ -53,6 +55,7 @@ ALLOWED_PAYLOAD_KEYS = {
     "frontier",
     "stop",
     "partial",
+    "preference_selection_id",
 }
 SEARCH_STATE_KEYS = {
     "mode",
@@ -82,6 +85,57 @@ EMPTY_USAGE = {
     "citation_hops": 0,
     "retryable_failures": 0,
 }
+
+
+def _canonical_digest(value: object) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def literature_search_preference_context(
+    payload: dict[str, Any],
+    *,
+    stage_id: str = "",
+) -> dict[str, object]:
+    """Return bounded owner-canonical inputs for one search run."""
+    request = " ".join(str(payload.get("request") or "").split())
+    mode = str(payload.get("mode") or "exploratory").strip() or "exploratory"
+    run_id = str(payload.get("run_id") or "").strip()
+    scope = payload.get("scope") if isinstance(payload.get("scope"), dict) else {}
+    return {
+        "stage_id": str(stage_id or ""),
+        "request_digest": _canonical_digest(request),
+        "mode": mode,
+        "run_id": run_id,
+        "scope_digest": _canonical_digest(scope),
+    }
+
+
+def resolve_literature_search_preferences(
+    root: Path,
+    payload: dict[str, Any],
+    *,
+    stage_id: str = "",
+) -> dict[str, object]:
+    selection_id = payload.get("preference_selection_id", "")
+    if not isinstance(selection_id, str):
+        raise SystemExit("Literature search preference selection id must be text.")
+    try:
+        return resolve_operation_preferences(
+            root,
+            selection_id=selection_id,
+            skill="literature-search",
+            operation="search",
+            canonical_inputs=literature_search_preference_context(payload, stage_id=stage_id),
+        )
+    except ValueError as exc:
+        raise SystemExit(f"Literature search preference selection is invalid: {exc}") from exc
 
 
 def _load_payload(path: Path) -> dict[str, Any]:
@@ -157,9 +211,19 @@ def stage_payload(root: Path, payload: dict[str, Any]) -> Path:
         current_path = search_stage_path(root, current_stage_id)
         _validate_search_stage_target(root, current_path)
         existing = load_yaml(current_path, default={})
+    preferences = resolve_literature_search_preferences(
+        root,
+        payload,
+        stage_id=current_stage_id,
+    )
     search_state: dict[str, Any] = {
         "entry_skill": "literature-search",
         **{key: payload[key] for key in SEARCH_STATE_KEYS if key in payload},
+        "preference_context": {
+            "task_context_digest": preferences["task_context_digest"],
+            "selection_binding": preferences["binding"],
+            "hard_value_digests": preferences["hard_value_digests"],
+        },
     }
     if (
         not isinstance(existing, dict)

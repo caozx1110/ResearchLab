@@ -35,7 +35,7 @@ description: 由 runtime Agent 使用当前可用的搜索、浏览或 connector
 
 ## 偏好消费
 
-开始检索前，私下向 `research-config-manager` 请求 `literature-search` 当前 operation 的 eligible preferences，由 Agent 只选择本任务相关的研究方向、语言和术语偏好并记录 effective-selection receipt。冻结的本次检索 scope 始终优先；总偏好不能静默改写用户刚确认的 inclusion/exclusion、预算或系统检索协议。总偏好变化后旧 receipt 自动 stale，下一次任务重新选择。
+开始检索前，私下向 `research-config-manager` 请求 `literature-search + search` 的 eligible preferences，由 Agent 只选择本任务相关的研究方向、语言和术语偏好并记录 effective-selection receipt。`stage` 是确定性落盘步骤，不是第二个偏好 consumer；它重新计算由问题、模式、run、冻结 scope 和 stage identity 构成的 canonical task context，校验 `search` receipt，再把 selection binding、task digest 与 hard constraint digests 同候选 ledger 原子落盘。无 receipt 时软行为保持中性，但 hard constraints 仍进入冻结 context。冻结的本次检索 scope 始终优先；总偏好不能静默改写用户刚确认的 inclusion/exclusion、预算或系统检索协议。总偏好或 hard constraint 变化后，旧 receipt 或已冻结 run 不能继续复用，Agent 必须重新选择或开始新 run。
 
 ## 内部写入合同
 

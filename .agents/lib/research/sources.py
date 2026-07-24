@@ -893,6 +893,61 @@ def _sanitize_search_state(raw: Any) -> dict[str, Any]:
         state["review_protocol"] = _sanitize_search_review_protocol(raw.get("review_protocol"))
     if "reviewers" in raw:
         state["reviewers"] = _sanitize_search_reviewers(raw.get("reviewers"))
+    if "preference_context" in raw:
+        context = raw.get("preference_context")
+        if not isinstance(context, dict) or set(context) != {
+            "task_context_digest",
+            "selection_binding",
+            "hard_value_digests",
+        }:
+            raise SystemExit("Literature search preference context is invalid.")
+        task_digest = _bounded_search_text(context.get("task_context_digest"), 64)
+        if re.fullmatch(r"[0-9a-f]{64}", task_digest) is None:
+            raise SystemExit("Literature search preference task context digest is invalid.")
+        raw_binding = context.get("selection_binding")
+        if not isinstance(raw_binding, dict):
+            raise SystemExit("Literature search preference selection binding is invalid.")
+        binding: dict[str, str] = {}
+        if raw_binding:
+            if set(raw_binding) != {
+                "selection_id",
+                "selection_digest",
+                "task_context_digest",
+                "skill",
+                "operation",
+            }:
+                raise SystemExit("Literature search preference selection binding is invalid.")
+            selection_id = _bounded_search_text(raw_binding.get("selection_id"), 96)
+            selection_digest = _bounded_search_text(raw_binding.get("selection_digest"), 64)
+            binding_task_digest = _bounded_search_text(raw_binding.get("task_context_digest"), 64)
+            if (
+                re.fullmatch(r"prefsel-[a-z0-9][a-z0-9-]{5,80}", selection_id) is None
+                or re.fullmatch(r"[0-9a-f]{64}", selection_digest) is None
+                or binding_task_digest != task_digest
+                or raw_binding.get("skill") != "literature-search"
+                or raw_binding.get("operation") != "search"
+            ):
+                raise SystemExit("Literature search preference selection binding is invalid.")
+            binding = {
+                "selection_id": selection_id,
+                "selection_digest": selection_digest,
+                "task_context_digest": binding_task_digest,
+                "skill": "literature-search",
+                "operation": "search",
+            }
+        raw_hard_digests = context.get("hard_value_digests")
+        if not isinstance(raw_hard_digests, dict):
+            raise SystemExit("Literature search hard preference digests are invalid.")
+        hard_digests: dict[str, str] = {}
+        for path, digest in raw_hard_digests.items():
+            if path != "profile.constraints" or re.fullmatch(r"[0-9a-f]{64}", str(digest or "")) is None:
+                raise SystemExit("Literature search hard preference digests are invalid.")
+            hard_digests[path] = str(digest)
+        state["preference_context"] = {
+            "task_context_digest": task_digest,
+            "selection_binding": binding,
+            "hard_value_digests": hard_digests,
+        }
     if "budget" in raw:
         state["budget"] = _sanitize_search_budget(raw.get("budget"))
     if "usage" in raw:
@@ -1518,6 +1573,7 @@ def _merge_search_state(payload: dict[str, Any], incoming: dict[str, Any]) -> No
         "monitor_binding",
         "review_protocol",
         "reviewers",
+        "preference_context",
     ):
         if key not in incoming:
             continue

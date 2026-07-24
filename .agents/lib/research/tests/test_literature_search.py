@@ -9,6 +9,9 @@ import pytest
 
 import research.sources as sources
 from research.common import load_yaml, write_yaml_if_changed
+from research.paths import config_root
+from research.preference_selection import eligible_preferences, record_effective_selection
+from research.prefs import ensure_workspace
 from research.sources import build_literature_search_stage_id, stage_search_results
 
 
@@ -31,6 +34,40 @@ def _intake_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _record_search_selection(root: Path, module, payload: dict, selection_id: str) -> str:
+    stage_id = build_literature_search_stage_id(
+        str(payload.get("request") or ""),
+        mode=str(payload.get("mode") or "exploratory"),
+        scope=payload.get("scope") if isinstance(payload.get("scope"), dict) else {},
+        run_id=str(payload.get("run_id") or ""),
+    )
+    eligible = eligible_preferences(root, skill="literature-search", operation="search")
+    selected = []
+    excluded = []
+    for item in eligible["items"]:
+        row = {
+            "preference_id": item["preference_id"],
+            "reason": "relevant to this search",
+        }
+        if item["strength"] == "hard" or item["path"] == "profile.preferences.language_preference":
+            selected.append({**row, "application": "apply to this bounded search only"})
+        else:
+            excluded.append({**row, "reason": "not relevant to this search"})
+    record_effective_selection(
+        root,
+        {
+            "selection_id": selection_id,
+            "skill": "literature-search",
+            "operation": "search",
+            "catalog_digest": eligible["catalog_digest"],
+            "task_context": module.literature_search_preference_context(payload, stage_id=stage_id),
+            "selected": selected,
+            "excluded": excluded,
+        },
+    )
+    return selection_id
 
 
 def _query(query_id: str, *, text: str | None = None, intent: str = "seed") -> dict:
@@ -1027,6 +1064,80 @@ def test_stage_helper_accepts_and_persists_immutable_monitor_binding(tmp_path: P
             },
         )
     assert load_yaml(path)["monitor_binding"] == binding
+
+
+def test_stage_helper_binds_current_search_preferences_and_rejects_stale_resume(
+    tmp_path: Path,
+) -> None:
+    module = _search_module()
+    ensure_workspace(tmp_path)
+    profile_path = config_root(tmp_path) / "user-profile.yaml"
+    write_yaml_if_changed(
+        profile_path,
+        {
+            "preferences": {"language_preference": "zh-CN"},
+            "constraints": ["no cloud upload"],
+        },
+    )
+    payload = {
+        "request": "preference-bound search",
+        "scope": {"facets": ["robot learning"]},
+        "candidates": [],
+    }
+    payload["preference_selection_id"] = _record_search_selection(
+        tmp_path,
+        module,
+        payload,
+        "prefsel-search-bound",
+    )
+    path = module.stage_payload(tmp_path, payload)
+    persisted = load_yaml(path)
+    context = persisted["preference_context"]
+    assert context["selection_binding"]["selection_id"] == "prefsel-search-bound"
+    assert context["selection_binding"]["operation"] == "search"
+    assert context["hard_value_digests"]["profile.constraints"]
+
+    before = path.read_bytes()
+    write_yaml_if_changed(
+        profile_path,
+        {
+            "preferences": {"language_preference": "en-US"},
+            "constraints": ["no cloud upload"],
+        },
+    )
+    with pytest.raises(SystemExit, match="stale catalog"):
+        module.stage_payload(
+            tmp_path,
+            {
+                **payload,
+                "stage_id": persisted["id"],
+            },
+        )
+    assert path.read_bytes() == before
+
+
+def test_stage_helper_without_selection_keeps_soft_behavior_neutral_and_hard_context(
+    tmp_path: Path,
+) -> None:
+    module = _search_module()
+    ensure_workspace(tmp_path)
+    write_yaml_if_changed(
+        config_root(tmp_path) / "user-profile.yaml",
+        {
+            "preferences": {"language_preference": "zh-CN"},
+            "constraints": ["offline only"],
+        },
+    )
+    payload = {"request": "neutral search", "candidates": []}
+    resolved = module.resolve_literature_search_preferences(
+        tmp_path,
+        payload,
+        stage_id=build_literature_search_stage_id("neutral search"),
+    )
+    assert resolved["soft_items"] == []
+    assert resolved["values_by_path"] == {"profile.constraints": ["offline only"]}
+    path = module.stage_payload(tmp_path, payload)
+    assert load_yaml(path)["preference_context"]["selection_binding"] == {}
 
 
 @pytest.mark.parametrize("url", ["javascript:alert(1)", "file:///private/paper", "https://u:p@example.test/a"])

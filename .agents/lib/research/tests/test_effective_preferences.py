@@ -9,6 +9,7 @@ from research.common import write_yaml_if_changed
 from research.paths import config_root, runtime_preferences_path
 from research.preference_selection import (
     SKILL_ELIGIBILITY,
+    SKILL_OPERATIONS,
     eligible_preferences,
     load_effective_selection,
     record_effective_selection,
@@ -23,6 +24,26 @@ def test_every_shipping_skill_has_an_explicit_preference_eligibility_rule() -> N
     shipping = {path.name for path in skills_root.iterdir() if (path / "SKILL.md").is_file()}
 
     assert set(SKILL_ELIGIBILITY) == shipping
+
+
+def test_declared_consumer_operations_are_real_not_aspirational() -> None:
+    assert SKILL_OPERATIONS == {
+        "source-intake": ("add",),
+        "research-orchestrator": ("plan",),
+        "literature-search": ("search",),
+        "literature-synthesizer": ("synthesize",),
+        "report-author": ("weekly", "ppt-materials", "stage-summary", "writing-materials", "outline"),
+        "method-designer": ("design",),
+        "experiment-workbench": ("plan", "log-run", "follow-up", "diagnose"),
+        "kb-cli": ("review-display",),
+        "paper-analyst": (
+            "prewarm-cache",
+            "screen",
+            "complete-note",
+            "extract-figures",
+            "refresh-structure",
+        ),
+    }
 
 
 def test_bound_consumer_resolves_selected_values_without_copying_them_into_receipt(
@@ -94,7 +115,7 @@ def _configured_workspace(tmp_path: Path) -> Path:
     return root
 
 
-def _selection(root: Path, skill: str, operation: str = "design") -> dict[str, object]:
+def _selection(root: Path, skill: str, operation: str = "plan") -> dict[str, object]:
     eligible = eligible_preferences(root, skill=skill, operation=operation)
     selected = []
     excluded = []
@@ -126,12 +147,12 @@ def test_eligible_preferences_are_skill_scoped_and_exclude_identity_and_diagnost
     runtime["diagnostics"]["mode"] = "developer"
     write_yaml_if_changed(runtime_preferences_path(root), runtime)
 
-    method = eligible_preferences(root, skill="method-designer", operation="design")
-    paths = {str(item["path"]) for item in method["items"]}
+    experiment = eligible_preferences(root, skill="experiment-workbench", operation="plan")
+    paths = {str(item["path"]) for item in experiment["items"]}
 
     assert "profile.resources" in paths
     assert "profile.constraints" in paths
-    assert "profile.personalization.research_focus" in paths
+    assert "runtime.autonomy.auto_execute_scope" in paths
     assert all(not path.startswith("runtime.identity") for path in paths)
     assert all(not path.startswith("runtime.diagnostics") for path in paths)
     assert "profile.personalization.reporting_style" not in paths
@@ -139,16 +160,16 @@ def test_eligible_preferences_are_skill_scoped_and_exclude_identity_and_diagnost
 
 def test_agent_selection_receipt_keeps_only_ids_digests_and_reasons(tmp_path: Path) -> None:
     root = _configured_workspace(tmp_path)
-    payload = _selection(root, "method-designer")
+    payload = _selection(root, "experiment-workbench")
 
     path, receipt = record_effective_selection(root, payload)
     loaded = load_effective_selection(
         root,
         selection_id="prefsel-abcdef01",
-        skill="method-designer",
-        operation="design",
+        skill="experiment-workbench",
+        operation="plan",
         expected_task_context_digest=task_context_digest(
-            skill="method-designer", operation="design", canonical_inputs={"subject_id": "subject-1"}
+            skill="experiment-workbench", operation="plan", canonical_inputs={"subject_id": "subject-1"}
         ),
     )
 
@@ -163,7 +184,7 @@ def test_agent_selection_receipt_keeps_only_ids_digests_and_reasons(tmp_path: Pa
 
 def test_hard_preferences_cannot_be_omitted_and_all_eligible_items_are_accounted_for(tmp_path: Path) -> None:
     root = _configured_workspace(tmp_path)
-    payload = _selection(root, "method-designer")
+    payload = _selection(root, "experiment-workbench")
     selected = payload["selected"]
     assert isinstance(selected, list) and selected
     payload["excluded"].append(selected.pop())
@@ -171,15 +192,15 @@ def test_hard_preferences_cannot_be_omitted_and_all_eligible_items_are_accounted
     with pytest.raises(ValueError, match="hard preferences"):
         record_effective_selection(root, payload)
 
-    payload = _selection(root, "method-designer")
-    payload["excluded"].pop()
+    payload = _selection(root, "experiment-workbench")
+    payload["selected"].pop()
     with pytest.raises(ValueError, match="account for every eligible"):
         record_effective_selection(root, payload)
 
 
 def test_profile_change_makes_existing_selection_stale(tmp_path: Path) -> None:
     root = _configured_workspace(tmp_path)
-    record_effective_selection(root, _selection(root, "method-designer"))
+    record_effective_selection(root, _selection(root, "experiment-workbench"))
     profile_path = config_root(root) / "user-profile.yaml"
     profile = {
         "preferences": {"language_preference": "zh-CN"},
@@ -193,10 +214,10 @@ def test_profile_change_makes_existing_selection_stale(tmp_path: Path) -> None:
         load_effective_selection(
             root,
             selection_id="prefsel-abcdef01",
-            skill="method-designer",
-            operation="design",
+            skill="experiment-workbench",
+            operation="plan",
             expected_task_context_digest=task_context_digest(
-                skill="method-designer", operation="design", canonical_inputs={"subject_id": "subject-1"}
+                skill="experiment-workbench", operation="plan", canonical_inputs={"subject_id": "subject-1"}
             ),
         )
 
@@ -217,10 +238,10 @@ def test_confirmed_learned_preferences_follow_their_skill_hint(tmp_path: Path) -
     write_yaml_if_changed(runtime_preferences_path(root), runtime)
 
     report_paths = {str(item["path"]) for item in eligible_preferences(root, skill="report-author", operation="weekly")["items"]}
-    method_paths = {str(item["path"]) for item in eligible_preferences(root, skill="method-designer", operation="design")["items"]}
+    experiment_paths = {str(item["path"]) for item in eligible_preferences(root, skill="experiment-workbench", operation="plan")["items"]}
 
     assert "learned.learning-1" in report_paths
-    assert "learned.learning-1" not in method_paths
+    assert "learned.learning-1" not in experiment_paths
 
 
 def test_unknown_consumer_and_unsafe_receipt_root_fail_closed(tmp_path: Path) -> None:
@@ -233,7 +254,7 @@ def test_unknown_consumer_and_unsafe_receipt_root_fail_closed(tmp_path: Path) ->
     selection_root = config_root(root) / "effective-preferences"
     selection_root.symlink_to(external, target_is_directory=True)
     with pytest.raises(ValueError, match="unsafe|symlink"):
-        record_effective_selection(root, _selection(root, "method-designer"))
+        record_effective_selection(root, _selection(root, "experiment-workbench"))
 
 
 def test_kb_ancestor_symlink_cannot_read_or_write_preferences_outside_workspace(tmp_path: Path) -> None:
@@ -245,13 +266,13 @@ def test_kb_ancestor_symlink_cannot_read_or_write_preferences_outside_workspace(
     (root / "kb").symlink_to(outside, target_is_directory=True)
 
     with pytest.raises(ValueError, match="symlink"):
-        eligible_preferences(root, skill="method-designer", operation="design")
+        eligible_preferences(root, skill="experiment-workbench", operation="plan")
     assert not (outside / "config/effective-preferences").exists()
 
 
 def test_receipt_is_task_bound_private_and_idempotent(tmp_path: Path) -> None:
     root = _configured_workspace(tmp_path)
-    payload = _selection(root, "method-designer")
+    payload = _selection(root, "experiment-workbench")
     path, first = record_effective_selection(root, payload)
     path_again, second = record_effective_selection(root, payload)
 
@@ -261,8 +282,8 @@ def test_receipt_is_task_bound_private_and_idempotent(tmp_path: Path) -> None:
         load_effective_selection(
             root,
             selection_id="prefsel-abcdef01",
-            skill="method-designer",
-            operation="design",
+            skill="experiment-workbench",
+            operation="plan",
             expected_task_context_digest="b" * 64,
         )
     unsafe = _selection(root, "report-author", operation="weekly")
