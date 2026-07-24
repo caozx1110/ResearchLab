@@ -271,6 +271,34 @@ def test_prepare_verify_confirm_promotes_state_and_event_only_at_confirmation(tm
     )
 
 
+def test_method_input_change_after_prepare_stales_receipt_before_verify_writes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    method = _load_method_module()
+    root = _workspace(tmp_path)
+    paths = _paths(root)
+    assert _prepare(method, monkeypatch, root) == 0
+    repo_path = record_path(root, "repo", REPO_ID)
+    repo = load_yaml(repo_path, default={})
+    repo["summary"] = "changed at the same canonical repository path"
+    write_yaml_if_changed(repo_path, repo)
+    before = {
+        key: path.read_bytes()
+        for key, path in paths.items()
+        if key in {"choice", "interfaces", "matrix"}
+    }
+
+    with pytest.raises(SystemExit, match="Method inputs changed after prepare"):
+        _verify(method, monkeypatch, root)
+
+    assert {
+        key: paths[key].read_bytes()
+        for key in before
+    } == before
+    assert not paths["events"].exists()
+
+
 def test_confirm_rejects_claim_changes_after_verification_without_side_effects(tmp_path: Path, monkeypatch) -> None:
     method = _load_method_module()
     root = _workspace(tmp_path)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import importlib.util
 import sys
 from pathlib import Path
@@ -10,6 +11,7 @@ import pytest
 from research.common import load_yaml, write_yaml_if_changed
 from research.paths import config_root, runtime_preferences_path
 from research.preference_selection import eligible_preferences, record_effective_selection
+from research.core import default_record, record_path
 from research.prefs import default_runtime_preferences, ensure_workspace
 
 
@@ -375,3 +377,326 @@ def test_experiment_consumers_bind_each_operation_and_neutral_keeps_hard_context
     wrong.preference_selection_id = plan_args.preference_selection_id
     with pytest.raises(SystemExit, match="another operation"):
         experiment.resolve_experiment_preferences(root, wrong, load_yaml(record_path))
+
+
+def test_method_design_consumed_input_mutation_matrix_rejects_old_selection(
+    tmp_path: Path,
+) -> None:
+    method = _script("method-designer", "method.py")
+    root = _workspace(tmp_path)
+    idea_id = "i-preference-method-matrix"
+    repo_id = "r-preference-method-matrix"
+    idea = default_record(
+        "idea", title="Bound method idea", maturity="lightweight", source={"original_uri": "discussion"}
+    )
+    idea["id"] = idea_id
+    idea["status"] = "selected"
+    idea["payload"]["analysis"]["risks"] = ["base risk"]
+    repo = default_record(
+        "repo", title="Bound repository", maturity="lightweight", source={"original_uri": "https://example.com/repo"}
+    )
+    repo["id"] = repo_id
+    repo["summary"] = "canonical repository summary"
+    write_yaml_if_changed(record_path(root, "idea", idea_id), idea)
+    repo_path = record_path(root, "repo", repo_id)
+    write_yaml_if_changed(repo_path, repo)
+    state = method.default_program_state("program-method-matrix")
+    base_values = {
+        "repo_ids": [repo_id],
+        "interfaces": [{"name": "adapter", "detail": "insert after encoder"}],
+        "baselines": ["repo baseline"],
+        "metrics": ["success rate"],
+        "risks": ["base risk"],
+    }
+
+    def task_inputs(
+        *,
+        idea_record: dict | None = None,
+        state_value: dict | None = None,
+        values: dict | None = None,
+    ) -> dict[str, object]:
+        selected = values or base_values
+        return method.method_preference_task_inputs(
+            root,
+            idea_record or idea,
+            program_id="program-method-matrix",
+            idea_id=idea_id,
+            state=state_value or state,
+            **selected,
+        )
+
+    cases = ["idea", "repo_ids", "interfaces", "baselines", "metrics", "risks", "program_state", "repo_corpus"]
+    for index, field in enumerate(cases, start=1):
+        base = task_inputs()
+        selection_id = _record(
+            root,
+            selection_id=f"prefsel-method-mutation-{index}",
+            skill="method-designer",
+            operation="design",
+            task_context=method.method_preference_context(base),
+            selected_paths=set(),
+        )
+        changed_idea = copy.deepcopy(idea)
+        changed_state = copy.deepcopy(state)
+        changed_values = copy.deepcopy(base_values)
+        if field == "idea":
+            changed_idea["summary"] = "changed idea bytes"
+        elif field == "program_state":
+            changed_state["active_unit_ids"] = [repo_id]
+        elif field == "repo_corpus":
+            changed_repo = copy.deepcopy(repo)
+            changed_repo["summary"] = "changed canonical repository bytes"
+            write_yaml_if_changed(repo_path, changed_repo)
+        else:
+            changed_values[field] = [f"changed {field}"]
+        changed = task_inputs(
+            idea_record=changed_idea,
+            state_value=changed_state,
+            values=changed_values,
+        )
+        if field == "repo_corpus":
+            write_yaml_if_changed(repo_path, repo)
+        assert method.method_preference_context(changed) != method.method_preference_context(base), field
+        with pytest.raises(SystemExit, match="another task"):
+            method.resolve_method_preferences(
+                root,
+                task_inputs=changed,
+                selection_id=selection_id,
+            )
+
+
+def test_experiment_operation_consumed_input_mutation_matrix_rejects_old_selection(
+    tmp_path: Path,
+) -> None:
+    experiment = _script("experiment-workbench", "experiment.py")
+    root = _workspace(tmp_path)
+    unit_root = root / "kb/units/experiments/x-preference-matrix"
+    unit_root.mkdir(parents=True)
+    artifact = root / "artifact.bin"
+    artifact.write_bytes(b"artifact-v1")
+    claims_path = root / "claims.yaml"
+    write_yaml_if_changed(claims_path, {"claims": []})
+    record = default_record(
+        "experiment", title="Preference matrix", maturity="lightweight", source={"original_uri": "program:p"}
+    )
+    record["id"] = "x-preference-matrix"
+    record["payload"]["process"]["tested_hypothesis"] = "record hypothesis"
+
+    operation_cases = {
+        "plan": ["title", "program_id", "goal", "idea_id", "hypothesis"],
+        "log-run": [
+            "experiment_id",
+            "record",
+            "change",
+            "metric",
+            "result_summary",
+            "next_action",
+            "artifact_identity",
+            "artifact_content",
+            "artifact_status",
+            "outcome",
+            "classification",
+            "why_this_run",
+            "tested_hypothesis",
+            "tag",
+            "recent_runs",
+            "config_revision",
+            "seed",
+            "rerun",
+            "rerun_reason",
+            "prior_runs",
+        ],
+        "follow-up": ["experiment_id", "record", "action", "category", "priority", "status", "evidence_needed"],
+        "diagnose": [
+            "experiment_id",
+            "record",
+            "summary",
+            "category",
+            "likely_cause",
+            "ruled_out",
+            "unknown",
+            "next_action",
+            "recent_runs",
+            "claims_identity",
+            "claims_content",
+            "claims_status",
+            "runs",
+        ],
+    }
+
+    def args_for(operation: str):
+        if operation == "plan":
+            return experiment.build_parser().parse_args(
+                ["plan", "--title", "bound plan", "--program-id", "p", "--goal", "measure", "--idea-id", "i", "--hypothesis", "h"]
+            )
+        if operation == "log-run":
+            return experiment.build_parser().parse_args(
+                [
+                    "log-run", "--experiment-id", record["id"], "--change", "adapter", "--metric", "score=1",
+                    "--result-summary", "completed", "--next-action", "inspect", "--artifact", "artifact.bin",
+                    "--outcome", "partial", "--classification", "method", "--why-this-run", "ablation",
+                    "--tested-hypothesis", "explicit hypothesis", "--tag", "baseline", "--recent-runs", "3",
+                    "--config-revision", "config-v1", "--seed", "7", "--rerun", "--rerun-reason", "controlled repeat",
+                ]
+            )
+        if operation == "follow-up":
+            return experiment.build_parser().parse_args(
+                [
+                    "follow-up", "--experiment-id", record["id"], "--action", "inspect metrics",
+                    "--category", "evaluation", "--priority", "high", "--status", "blocked",
+                    "--evidence-needed", "failure trace",
+                ]
+            )
+        return experiment.build_parser().parse_args(
+            [
+                "diagnose", "--experiment-id", record["id"], "--summary", "failure summary",
+                "--category", "implementation", "--likely-cause", "cache", "--ruled-out", "data",
+                "--unknown", "seed effect", "--next-action", "rerun", "--recent-runs", "3",
+                "--claims-file", str(claims_path),
+            ]
+        )
+
+    index = 0
+    for operation, fields in operation_cases.items():
+        for field in fields:
+            index += 1
+            args = args_for(operation)
+            prepared = experiment.prepare_experiment_preference_inputs(root, args, record, unit_root)
+            base_context = experiment.experiment_preference_context(args, record, prepared)
+            selection_id = _record(
+                root,
+                selection_id=f"prefsel-experiment-mutation-{index}",
+                skill="experiment-workbench",
+                operation=operation,
+                task_context=base_context,
+                selected_paths=set(),
+            )
+            changed_args = copy.deepcopy(args)
+            changed_record = copy.deepcopy(record)
+            changed_prepared = copy.deepcopy(prepared)
+            if field == "record":
+                changed_record["summary"] = "changed canonical record"
+            elif field == "artifact_identity":
+                changed_prepared["artifact_facts"][0]["identity_digest"] = "a" * 64
+            elif field == "artifact_content":
+                changed_prepared["artifact_facts"][0]["content_digest"] = "b" * 64
+            elif field == "artifact_status":
+                changed_prepared["artifact_facts"][0]["status"] = "missing"
+            elif field == "prior_runs":
+                changed_prepared["prior_runs"] = [{"id": "run-prior"}]
+            elif field == "claims_identity":
+                changed_prepared["claims_file_fact"]["identity_digest"] = "c" * 64
+            elif field == "claims_content":
+                changed_prepared["claims_file_fact"]["content_digest"] = "d" * 64
+            elif field == "claims_status":
+                changed_prepared["claims_file_fact"]["status"] = "missing"
+            elif field == "runs":
+                changed_prepared["runs"] = [{"id": "run-prior"}]
+            else:
+                current = getattr(changed_args, field)
+                if isinstance(current, list):
+                    setattr(changed_args, field, [*current, f"changed-{field}"])
+                elif isinstance(current, bool):
+                    setattr(changed_args, field, not current)
+                elif isinstance(current, int):
+                    setattr(changed_args, field, current + 1)
+                else:
+                    setattr(changed_args, field, f"changed-{field}")
+                if field == "tested_hypothesis":
+                    changed_prepared["tested_hypothesis"] = changed_args.tested_hypothesis
+            changed_context = experiment.experiment_preference_context(
+                changed_args,
+                changed_record,
+                changed_prepared,
+            )
+            assert changed_context != base_context, f"{operation}:{field}"
+            changed_args.preference_selection_id = selection_id
+            with pytest.raises(SystemExit, match="another task"):
+                experiment.resolve_experiment_preferences(
+                    root,
+                    changed_args,
+                    changed_record,
+                    changed_prepared,
+                )
+
+
+def test_experiment_stale_receipts_write_no_run_follow_up_or_diagnosis_artifacts(
+    tmp_path: Path,
+) -> None:
+    experiment = _script("experiment-workbench", "experiment.py")
+    root = _workspace(tmp_path)
+    plan = experiment.build_parser().parse_args(
+        ["plan", "--title", "stale write gate", "--program-id", "program-stale"]
+    )
+    assert experiment._dispatch(plan, root) == 0
+    path = next((root / "kb/units/experiments").glob("*/record.yaml"))
+    record = load_yaml(path)
+    experiment_id = str(record["id"])
+    artifact = root / "bound-artifact.txt"
+    artifact.write_text("v1", encoding="utf-8")
+
+    log_args = experiment.build_parser().parse_args(
+        [
+            "log-run", "--experiment-id", experiment_id, "--result-summary", "done",
+            "--artifact", "bound-artifact.txt", "--config-revision", "config-v1",
+        ]
+    )
+    log_prepared = experiment.prepare_experiment_preference_inputs(root, log_args, record, path.parent)
+    log_args.preference_selection_id = _record(
+        root,
+        selection_id="prefsel-stale-log-write-gate",
+        skill="experiment-workbench",
+        operation="log-run",
+        task_context=experiment.experiment_preference_context(log_args, record, log_prepared),
+        selected_paths=set(),
+    )
+    artifact.write_text("v2", encoding="utf-8")
+    with pytest.raises(SystemExit, match="another task"):
+        experiment._dispatch(log_args, root)
+    assert not (path.parent / "runs").exists()
+    assert not (path.parent / "run-log.yaml").exists()
+    assert load_yaml(path) == record
+
+    follow_args = experiment.build_parser().parse_args(
+        ["follow-up", "--experiment-id", experiment_id, "--action", "inspect"]
+    )
+    follow_args.preference_selection_id = _record(
+        root,
+        selection_id="prefsel-stale-follow-write-gate",
+        skill="experiment-workbench",
+        operation="follow-up",
+        task_context=experiment.experiment_preference_context(follow_args, record),
+        selected_paths=set(),
+    )
+    follow_args.evidence_needed = ["new evidence"]
+    with pytest.raises(SystemExit, match="another task"):
+        experiment._dispatch(follow_args, root)
+    assert not (path.parent / "follow-ups.yaml").exists()
+    assert load_yaml(path) == record
+
+    claims = root / "diagnosis-claims.yaml"
+    write_yaml_if_changed(claims, {"claims": []})
+    diagnose_args = experiment.build_parser().parse_args(
+        ["diagnose", "--experiment-id", experiment_id, "--claims-file", str(claims)]
+    )
+    diagnose_prepared = experiment.prepare_experiment_preference_inputs(
+        root,
+        diagnose_args,
+        record,
+        path.parent,
+    )
+    diagnose_args.preference_selection_id = _record(
+        root,
+        selection_id="prefsel-stale-diagnose-write-gate",
+        skill="experiment-workbench",
+        operation="diagnose",
+        task_context=experiment.experiment_preference_context(diagnose_args, record, diagnose_prepared),
+        selected_paths=set(),
+    )
+    write_yaml_if_changed(claims, {"claims": [], "revision": 1})
+    with pytest.raises(SystemExit, match="another task"):
+        experiment._dispatch(diagnose_args, root)
+    assert not (path.parent / "diagnosis-fill.yaml").exists()
+    assert not (path.parent / "diagnoses.yaml").exists()
+    assert not (path.parent / "diagnosis.md").exists()
+    assert load_yaml(path) == record

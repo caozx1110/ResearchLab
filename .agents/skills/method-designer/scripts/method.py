@@ -497,6 +497,9 @@ def require_current_method_preferences(
     state = load_program_state(paths["state"], program_id)
     repo_policy = choice.get("repo_choice_policy")
     repo_policy = repo_policy if isinstance(repo_policy, dict) else {}
+    input_sources = choice.get("preference_input_sources")
+    if not isinstance(input_sources, dict):
+        raise SystemExit("Method preference input sources are missing; prepare the method again.")
     current_task_inputs = method_preference_task_inputs(
         root,
         idea_record,
@@ -504,10 +507,26 @@ def require_current_method_preferences(
         idea_id=idea_id,
         state=state,
         repo_ids=repo_policy.get("pinned_repo_ids", []),
-        interfaces=interfaces_payload.get("interfaces", []),
-        baselines=matrix_payload.get("baselines", []),
-        metrics=interfaces_payload.get("metrics", []),
-        risks=matrix_payload.get("risks", []),
+        interfaces=(
+            interfaces_payload.get("interfaces", [])
+            if input_sources.get("interfaces") == "explicit"
+            else []
+        ),
+        baselines=(
+            matrix_payload.get("baselines", [])
+            if input_sources.get("baselines") == "explicit"
+            else []
+        ),
+        metrics=(
+            interfaces_payload.get("metrics", [])
+            if input_sources.get("metrics") == "explicit"
+            else []
+        ),
+        risks=(
+            matrix_payload.get("risks", [])
+            if input_sources.get("risks") == "explicit"
+            else []
+        ),
     )
     if current_task_inputs != stored_task_inputs:
         raise SystemExit("Method inputs changed after prepare; prepare the method again.")
@@ -647,8 +666,9 @@ def prepare_method(root: Path, record: dict[str, Any], args: argparse.Namespace)
     if str(state.get("selected_repo_id") or "").strip():
         raise SystemExit("The program already has a selected repository; a proposal cannot replace it implicitly.")
 
-    interfaces = parse_name_detail(args.interface, "interface")
-    if not interfaces:
+    explicit_interfaces = parse_name_detail(args.interface, "interface")
+    interfaces = copy.deepcopy(explicit_interfaces)
+    if not explicit_interfaces:
         interfaces = [
             {"name": "interface-1", "detail": "", "status": "pending_agent_fill"},
             {"name": "interface-2", "detail": "", "status": "pending_agent_fill"},
@@ -671,10 +691,10 @@ def prepare_method(root: Path, record: dict[str, Any], args: argparse.Namespace)
         idea_id=args.idea_id,
         state=state,
         repo_ids=args.repo_id,
-        interfaces=interfaces,
-        baselines=baselines,
-        metrics=metrics,
-        risks=risks,
+        interfaces=explicit_interfaces,
+        baselines=args.baseline,
+        metrics=args.metric,
+        risks=args.risk,
     )
     preferences = resolve_method_preferences(
         root,
@@ -811,6 +831,12 @@ def prepare_method(root: Path, record: dict[str, Any], args: argparse.Namespace)
             "prefer_existing_repo_units": True,
             "fallback": "manual-selection-required",
         },
+        "preference_input_sources": {
+            "interfaces": "explicit" if args.interface else "default",
+            "baselines": "explicit" if args.baseline else "default",
+            "metrics": "explicit" if args.metric else "default",
+            "risks": "explicit" if args.risk else "idea-derived",
+        },
         "candidate_corpus": repo_corpus,
         "review_route": {
             "owner": "method-designer",
@@ -903,10 +929,10 @@ def prepare_method(root: Path, record: dict[str, Any], args: argparse.Namespace)
                 idea_id=args.idea_id,
                 state=load_program_state(paths["state"], args.program_id),
                 repo_ids=args.repo_id,
-                interfaces=interfaces,
-                baselines=baselines,
-                metrics=metrics,
-                risks=risks,
+                interfaces=explicit_interfaces,
+                baselines=args.baseline,
+                metrics=args.metric,
+                risks=args.risk,
             ),
             selection_id=str(getattr(args, "preference_selection_id", "") or ""),
         )
@@ -922,10 +948,10 @@ def prepare_method(root: Path, record: dict[str, Any], args: argparse.Namespace)
                 idea_id=args.idea_id,
                 state=load_program_state(paths["state"], args.program_id),
                 repo_ids=args.repo_id,
-                interfaces=interfaces,
-                baselines=baselines,
-                metrics=metrics,
-                risks=risks,
+                interfaces=explicit_interfaces,
+                baselines=args.baseline,
+                metrics=args.metric,
+                risks=args.risk,
             )
             != preference_task_inputs
             or method_preference_state(current_preferences) != preference_context

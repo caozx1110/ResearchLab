@@ -168,6 +168,18 @@ def test_method_prepares_agent_evidence_slots_instead_of_repo_judgement(tmp_path
     assert choice["status"] == "needs_agent_fill"
     assert choice["needs_human_confirmation"] is False
     assert choice["ranking_basis"]["type"] == "deterministic-token-overlap"
+    assert set(choice["preference_task_inputs"]) == {
+        "schema_version",
+        "program_id",
+        "idea_id",
+        "idea_digest",
+        "explicit_repo_ids",
+        "explicit_values_digest",
+        "program_state_digest",
+        "repo_corpus",
+    }
+    assert "success_rate" not in str(choice["preference_task_inputs"])
+    assert "pending runtime-agent fill" not in str(choice["preference_task_inputs"])
     assert matrix["baseline_judgement_claim_id"] == "method-baselines"
     assert matrix["proposal_status"] == "pending_agent_evidence"
     assert all(item["status"] == "proposal" for item in matrix["experiments"])
@@ -220,13 +232,10 @@ def test_selected_research_focus_changes_only_bound_design_and_persists_receipt(
                 root / "kb/programs/p-method/state.yaml", "p-method"
             ),
             repo_ids=[],
-            interfaces=[
-                {"name": "interface-1", "detail": "", "status": "pending_agent_fill"},
-                {"name": "interface-2", "detail": "", "status": "pending_agent_fill"},
-            ],
-            baselines=["closest-unmodified-repo-baseline", "current-best-manual-baseline"],
-            metrics=["success_rate", "recovery_rate", "runtime_cost"],
-            risks=idea_record["payload"]["analysis"].get("risks", []),
+            interfaces=[],
+            baselines=[],
+            metrics=[],
+            risks=[],
         )
     )
     eligible = eligible_preferences(root, skill="method-designer", operation="design")

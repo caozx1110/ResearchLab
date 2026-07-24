@@ -906,6 +906,8 @@ def _dispatch(args, root: Path) -> int:
     preferences = resolve_experiment_preferences(root, args, record, prepared)
 
     if args.command == "log-run":
+        if prepare_experiment_preference_inputs(root, args, record, unit_root) != prepared:
+            raise SystemExit("Experiment run inputs changed while preparing the run; retry with current inputs.")
         runs_dir = unit_root / "runs"
         runs_dir.mkdir(parents=True, exist_ok=True)
         run_path = next_numbered_path(runs_dir, "run", ".md")
@@ -1101,8 +1103,8 @@ def _dispatch(args, root: Path) -> int:
         runs = prepared["runs"]
         comparison_context = build_diagnosis_context(runs, max(args.recent_runs, 0))
         claims = load_diagnosis_claims(root, unit_root, args.experiment_id, args.claims_file)
-        if diagnosis_claims_file_fact(root, args.claims_file) != prepared["claims_file_fact"]:
-            raise SystemExit("Diagnosis claims changed while preparing the diagnosis; retry with current claims.")
+        if prepare_experiment_preference_inputs(root, args, record, unit_root) != prepared:
+            raise SystemExit("Diagnosis inputs changed while preparing the diagnosis; retry with current inputs.")
         if not claims:
             fill_path = write_diagnosis_fill_scaffold(
                 unit_root,
