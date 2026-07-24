@@ -263,6 +263,10 @@ KB_ON_PATH_FLAG_SET=0
 FORCE=0
 SYNC_SOURCE=""
 EXPECTED_SOURCE_COMMIT=""
+APPLY_AGENT_PLAN=""
+EXPECTED_PLAN_DIGEST=""
+EXPECTED_SOURCE_TREE_DIGEST=""
+OPERATION_TIME=""
 ASSUME_YES=0
 WIZARD_MODE=0
 WIZARD_STEP=0
@@ -365,6 +369,46 @@ while [ "$#" -gt 0 ]; do
       [ -n "$EXPECTED_SOURCE_COMMIT" ] || die "--expected-source-commit 需要一个 commit"
       shift
       ;;
+    --apply-agent-plan)
+      [ "${2:-}" != "" ] && [[ ${2:-} != --* ]] || die "--apply-agent-plan 需要一个计划文件"
+      APPLY_AGENT_PLAN=$2
+      shift 2
+      ;;
+    --apply-agent-plan=*)
+      APPLY_AGENT_PLAN=${1#--apply-agent-plan=}
+      [ -n "$APPLY_AGENT_PLAN" ] || die "--apply-agent-plan 需要一个计划文件"
+      shift
+      ;;
+    --expected-plan-digest)
+      [ "${2:-}" != "" ] && [[ ${2:-} != --* ]] || die "--expected-plan-digest 需要一个 digest"
+      EXPECTED_PLAN_DIGEST=$2
+      shift 2
+      ;;
+    --expected-plan-digest=*)
+      EXPECTED_PLAN_DIGEST=${1#--expected-plan-digest=}
+      [ -n "$EXPECTED_PLAN_DIGEST" ] || die "--expected-plan-digest 需要一个 digest"
+      shift
+      ;;
+    --expected-source-tree-digest)
+      [ "${2:-}" != "" ] && [[ ${2:-} != --* ]] || die "--expected-source-tree-digest 需要一个 digest"
+      EXPECTED_SOURCE_TREE_DIGEST=$2
+      shift 2
+      ;;
+    --expected-source-tree-digest=*)
+      EXPECTED_SOURCE_TREE_DIGEST=${1#--expected-source-tree-digest=}
+      [ -n "$EXPECTED_SOURCE_TREE_DIGEST" ] || die "--expected-source-tree-digest 需要一个 digest"
+      shift
+      ;;
+    --operation-time)
+      [ "${2:-}" != "" ] && [[ ${2:-} != --* ]] || die "--operation-time 需要一个 UTC 时间"
+      OPERATION_TIME=$2
+      shift 2
+      ;;
+    --operation-time=*)
+      OPERATION_TIME=${1#--operation-time=}
+      [ -n "$OPERATION_TIME" ] || die "--operation-time 需要一个 UTC 时间"
+      shift
+      ;;
     --claude)
       CONFIG_CLAUDE=1
       AGENT_FLAG_SET=1
@@ -415,6 +459,14 @@ done
 
 if [ "$AGENT_PLAN" -eq 1 ] && [ -z "$AGENT_PLAN_JSON" ]; then
   die "--agent-plan 需要配合 --agent-plan-json FILE，以免把大量内部路径输出到终端"
+fi
+if [ -n "$APPLY_AGENT_PLAN$EXPECTED_PLAN_DIGEST$EXPECTED_SOURCE_TREE_DIGEST" ]; then
+  [ -n "$APPLY_AGENT_PLAN" ] && [ -n "$EXPECTED_PLAN_DIGEST" ] && [ -n "$EXPECTED_SOURCE_TREE_DIGEST" ] && [ -n "$EXPECTED_SOURCE_COMMIT" ] || \
+    die "应用 Agent 计划时必须同时提供计划、计划 digest、源码树 digest 和源码 commit"
+  [ "$AGENT_PLAN" -eq 0 ] || die "不能同时生成并应用 Agent 计划"
+fi
+if [ "$AGENT_PLAN" -eq 1 ] && [ -z "$OPERATION_TIME" ]; then
+  OPERATION_TIME=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 fi
 
 # Installer preflight and smoke imports are implementation details, not durable
@@ -1015,14 +1067,37 @@ print_done() {
 preflight_yaml() {
   local py
   py=${RESEARCH_PYTHON:-python3}
-  if "$py" -c 'import yaml' >/dev/null 2>&1; then
+  if PYTHONPATH="$REPO_ROOT/.agents/lib${PYTHONPATH:+:$PYTHONPATH}" \
+    "$py" -c 'from research.bootstrap import _current_has_yaml; raise SystemExit(0 if _current_has_yaml() else 1)' \
+    >/dev/null 2>&1; then
     return 0
   fi
   if [ "${RESEARCH_NO_MANAGED_VENV:-}" = "1" ]; then
-    die "已关闭自动运行环境，但所选 Python 缺少 PyYAML；请先安装 requirements.txt 中的依赖"
+    die "已关闭自动运行环境，但所选 Python 缺少完整核心依赖；请先安装 requirements.txt 中的依赖"
   fi
   RUNTIME_BOOTSTRAP_NEEDED=1
   note "Python 依赖尚未就绪；首次使用时会自动准备，无需手动处理。" >&2
+}
+
+managed_runtime_root() {
+  python3 - "$WORKSPACE_ROOT" "${RESEARCH_VENV:-}" <<'PY'
+import sys
+from pathlib import Path
+
+workspace = Path(sys.argv[1])
+configured = sys.argv[2].strip()
+root = Path(configured).expanduser() if configured else workspace / ".venv"
+print(root.resolve(strict=False))
+PY
+}
+
+record_agent_runtime_target() {
+  [ "$AGENT_PLAN" -eq 1 ] || return 0
+  record_agent_plan_target \
+    "conditional-runtime-tree" \
+    "$(managed_runtime_root)" \
+    "research.bootstrap.CORE_RUNTIME_MODULES / managed dependency resolver" \
+    "only when managed runtime is enabled and the selected Python lacks yaml, markdownify, or bs4"
 }
 
 source_commit() {
@@ -1037,10 +1112,34 @@ source_branch() {
   git -C "$REPO_ROOT" symbolic-ref --quiet --short HEAD 2>/dev/null || printf ''
 }
 
+verify_agent_apply_contract() {
+  local distribution_root args=()
+  [ -n "$APPLY_AGENT_PLAN" ] || return 0
+  distribution_root=${SYNC_SOURCE:-$REPO_ROOT}
+  args=(
+    "--verify-plan" "$APPLY_AGENT_PLAN"
+    "--expected-plan-digest" "$EXPECTED_PLAN_DIGEST"
+    "--expected-source-tree-digest" "$EXPECTED_SOURCE_TREE_DIGEST"
+    "--expected-source-commit" "$EXPECTED_SOURCE_COMMIT"
+    "--current-action" "$ACTION"
+    "--current-scope" "$SCOPE"
+    "--current-workspace" "$WORKSPACE_ROOT"
+    "--current-distributable-root" "$distribution_root"
+    "--current-runtime-root" "$(managed_runtime_root)"
+    "--current-operation-time" "$OPERATION_TIME"
+  )
+  [ "$CONFIG_CLAUDE" -eq 0 ] || args+=("--current-tool" "claude")
+  [ "$CONFIG_CODEX" -eq 0 ] || args+=("--current-tool" "codex")
+  [ "$FORCE" -eq 0 ] || args+=("--current-force")
+  [ "$KB_ON_PATH" -eq 0 ] || args+=("--current-kb-on-path")
+  python3 "$REPO_ROOT/install-lib/agent_plan.py" "${args[@]}" >/dev/null 2>&1 || \
+    die "Agent 安装计划、源码或目标状态已变化；未写入任何内容，请重新生成并审阅计划"
+}
+
 record_agent_plan_target() {
   [ "$AGENT_PLAN" -eq 1 ] || return 0
   AGENT_PLAN_TARGET_SEQUENCE+=("args:${#AGENT_PLAN_TARGET_ARGS[@]}")
-  AGENT_PLAN_TARGET_ARGS+=("$1" "$2" "${3:-}" "${4:-}")
+  AGENT_PLAN_TARGET_ARGS+=("$1" "$2" "${3:-}" "${4:-}" "${5:-}")
   DRY_RUN_CHANGE_COUNT=$((DRY_RUN_CHANGE_COUNT + 1))
 }
 
@@ -1071,12 +1170,13 @@ PY
 }
 
 write_agent_plan_json() {
-  local digest commit origin branch index sequence target_index args=() apply_args=()
+  local digest commit origin branch distribution_root index sequence target_index args=() apply_args=()
   [ "$AGENT_PLAN" -eq 1 ] || return 0
   commit=$(source_commit)
   [ -n "$commit" ] || die "Agent 安装计划需要可验证的 Git commit"
   origin=$(source_origin)
   branch=$(source_branch)
+  distribution_root=${SYNC_SOURCE:-$REPO_ROOT}
   args=(
     "--output" "$AGENT_PLAN_JSON"
     "--action" "$ACTION"
@@ -1087,6 +1187,8 @@ write_agent_plan_json() {
     "--source-origin" "$origin"
     "--source-branch" "$branch"
     "--source-commit" "$commit"
+    "--distributable-root" "$distribution_root"
+    "--operation-time" "$OPERATION_TIME"
   )
   [ "$CONFIG_CLAUDE" -eq 0 ] || args+=("--tool" "claude")
   [ "$CONFIG_CODEX" -eq 0 ] || args+=("--tool" "codex")
@@ -1101,10 +1203,11 @@ write_agent_plan_json() {
           "${AGENT_PLAN_TARGET_ARGS[target_index + 1]}"
           "${AGENT_PLAN_TARGET_ARGS[target_index + 2]}"
           "${AGENT_PLAN_TARGET_ARGS[target_index + 3]}"
+          "${AGENT_PLAN_TARGET_ARGS[target_index + 4]}"
         )
         ;;
       json:*)
-        args+=("--target-record" "json" "${AGENT_PLAN_TARGET_JSON[target_index]}" "" "" "")
+        args+=("--target-record" "json" "${AGENT_PLAN_TARGET_JSON[target_index]}" "" "" "" "")
         ;;
     esac
   done
@@ -1131,6 +1234,7 @@ write_agent_plan_json() {
   [ "$KB_ON_PATH" -eq 0 ] || apply_args+=("--kb-on-path")
   [ "$FORCE" -eq 0 ] || apply_args+=("--force")
   [ -z "$SYNC_SOURCE" ] || apply_args+=("--source" "$SYNC_SOURCE")
+  [ -z "$OPERATION_TIME" ] || apply_args+=("--operation-time" "$OPERATION_TIME")
   apply_args+=("--expected-source-commit" "$commit")
   apply_args+=("--yes")
   for index in "${!apply_args[@]}"; do
@@ -1211,6 +1315,9 @@ ws_sync() {
   fi
   if [ -n "$SYNC_SOURCE" ]; then
     args+=("--source" "$SYNC_SOURCE")
+  fi
+  if [ -n "$OPERATION_TIME" ]; then
+    args+=("--operation-time" "$OPERATION_TIME")
   fi
   if [ "$DRY_RUN" -eq 1 ]; then
     args+=("--dry-run")
@@ -1486,11 +1593,12 @@ remove_symlink_if_matches() {
 }
 
 write_managed_block() {
-  local file=$1 block_file=$2 tmp_file
+  local file=$1 block_file=$2 planned_content_digest=${3:-} tmp_file
   guard_managed_directory_chain "$(dirname -- "$file")"
   [ ! -L "$file" ] || die "检测到符号链接形式的 Claude 配置；为避免跟随或替换链接，已停止"
   if [ "$AGENT_PLAN" -eq 1 ]; then
-    record_agent_plan_target "write-managed-block" "$file" "$block_file"
+    [ -n "$planned_content_digest" ] || die "Agent 计划缺少 managed block 内容 digest"
+    record_agent_plan_target "write-managed-block" "$file" "$REPO_ROOT/.agents/AGENTS.md" "" "$planned_content_digest"
     return 0
   fi
   tmp_file=$(mktemp "${TMPDIR:-/tmp}/${INSTALL_NAME}.XXXXXX")
@@ -1578,41 +1686,56 @@ remove_managed_block() {
   fi
 }
 
+render_claude_block() {
+  local mode=$1 ws=$2
+  printf '%s\n' "$BEGIN_MARKER"
+  printf '<!-- Managed by workspace-oss install.sh. AGENTS.md is the source of truth; refresh this block by rerunning install.sh. -->\n'
+  if [ "$mode" = "include" ]; then
+    printf '@AGENTS.md\n'
+  else
+    printf '<!-- Generated from %s/.agents/AGENTS.md for workspace %s. -->\n\n' "$REPO_ROOT" "$ws"
+    sed -n '1,$p' "$REPO_ROOT/.agents/AGENTS.md"
+  fi
+  printf '%s\n' "$END_MARKER"
+}
+
+claude_block_digest() {
+  render_claude_block "$1" "$2" | python3 -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())'
+}
+
 build_claude_block() {
   local mode=$1 ws=$2 block_file
   block_file=$(mktemp "${TMPDIR:-/tmp}/${INSTALL_NAME}.block.XXXXXX")
-  {
-    printf '%s\n' "$BEGIN_MARKER"
-    printf '<!-- Managed by workspace-oss install.sh. AGENTS.md is the source of truth; refresh this block by rerunning install.sh. -->\n'
-    if [ "$mode" = "include" ]; then
-      printf '@AGENTS.md\n'
-    else
-      printf '<!-- Generated from %s/.agents/AGENTS.md for workspace %s. -->\n\n' "$REPO_ROOT" "$ws"
-      sed -n '1,$p' "$REPO_ROOT/.agents/AGENTS.md"
-    fi
-    printf '%s\n' "$END_MARKER"
-  } >"$block_file"
+  render_claude_block "$mode" "$ws" >"$block_file"
   printf '%s\n' "$block_file"
 }
 
 install_claude_project() {
-  local claude_dir link_target block_file
+  local claude_dir link_target block_file block_digest
   claude_dir="$WORKSPACE_ROOT/.claude"
   ensure_dir "$claude_dir"
   # Self-contained workspaces keep .agents and AGENTS.md in the workspace root,
   # so Claude can use an include block plus a relative skills symlink.
   if [ "$SELF_CONTAINED" -eq 1 ]; then
     link_target="../.agents/skills"
-    [ "$AGENT_PLAN" -eq 1 ] || block_file=$(build_claude_block include "$WORKSPACE_ROOT")
+    if [ "$AGENT_PLAN" -eq 1 ]; then
+      block_digest=$(claude_block_digest include "$WORKSPACE_ROOT")
+    else
+      block_file=$(build_claude_block include "$WORKSPACE_ROOT")
+    fi
   else
     link_target="$SKILLS_SRC"
-    [ "$AGENT_PLAN" -eq 1 ] || block_file=$(build_claude_block copy "$WORKSPACE_ROOT")
+    if [ "$AGENT_PLAN" -eq 1 ]; then
+      block_digest=$(claude_block_digest copy "$WORKSPACE_ROOT")
+    else
+      block_file=$(build_claude_block copy "$WORKSPACE_ROOT")
+    fi
   fi
   link_force "$link_target" "$claude_dir/skills"
   if claude_links_to_workspace_agents "$WORKSPACE_ROOT/CLAUDE.md"; then
     : # The link already exposes AGENTS.md to Claude; adding @AGENTS.md would self-reference.
   else
-    write_managed_block "$WORKSPACE_ROOT/CLAUDE.md" "${block_file:-}"
+    write_managed_block "$WORKSPACE_ROOT/CLAUDE.md" "${block_file:-}" "${block_digest:-}"
   fi
   [ -z "${block_file:-}" ] || rm -f "$block_file"
 }
@@ -1633,7 +1756,7 @@ uninstall_claude_project() {
 }
 
 install_claude_system() {
-  local skill name block_file
+  local skill name block_file block_digest
   ensure_dir "$HOME/.claude/skills"
   # System scope links each skill back to the repo so __file__.resolve() can
   # still find the sibling .agents/lib in the source checkout.
@@ -1642,8 +1765,12 @@ install_claude_system() {
     name=${skill##*/}
     link_force "$skill" "$HOME/.claude/skills/$name"
   done
-  [ "$AGENT_PLAN" -eq 1 ] || block_file=$(build_claude_block copy "$HOME/.claude")
-  write_managed_block "$HOME/.claude/CLAUDE.md" "${block_file:-}"
+  if [ "$AGENT_PLAN" -eq 1 ]; then
+    block_digest=$(claude_block_digest copy "$HOME/.claude")
+  else
+    block_file=$(build_claude_block copy "$HOME/.claude")
+  fi
+  write_managed_block "$HOME/.claude/CLAUDE.md" "${block_file:-}" "${block_digest:-}"
   [ -z "${block_file:-}" ] || rm -f "$block_file"
   note "系统级配置完成后，每个项目仍需选择自己的研究工作区；详见安装指南。"
 }
@@ -1756,13 +1883,6 @@ uninstall_kb_on_path() {
 run_smoke() {
   local smoke_output
   if [ "$DRY_RUN" -eq 1 ]; then
-    if [ "$AGENT_PLAN" -eq 1 ] && [ "$RUNTIME_BOOTSTRAP_NEEDED" -eq 1 ] && { [ "$ACTION" = "install" ] || [ "$ACTION" = "reinstall" ]; }; then
-      record_agent_plan_target \
-        "conditional-runtime-tree" \
-        "$WORKSPACE_ROOT/.venv" \
-        "Python dependency manager" \
-        "only if required Python dependencies are unavailable"
-    fi
     return 0
   fi
   if [ "$ACTION" != "install" ] && [ "$ACTION" != "reinstall" ]; then
@@ -1800,6 +1920,7 @@ validate_agent_plan_output
 if [ -n "$EXPECTED_SOURCE_COMMIT" ] && [ "$(source_commit)" != "$EXPECTED_SOURCE_COMMIT" ]; then
   die "源码版本已不同于审阅过的 Agent 计划；请重新生成计划"
 fi
+verify_agent_apply_contract
 confirm_plan
 
 if [ "$ACTION" != "uninstall" ]; then
@@ -1807,6 +1928,10 @@ if [ "$ACTION" != "uninstall" ]; then
   guard_claude_project_target
   guard_selected_managed_parents
 fi
+
+# Every Agent plan exposes the possible resolver-owned runtime tree, even when
+# the planning interpreter is currently ready or this action will not smoke it.
+record_agent_runtime_target
 
 case "$ACTION" in
   install)

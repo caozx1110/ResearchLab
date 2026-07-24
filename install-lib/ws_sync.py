@@ -35,12 +35,20 @@ from typing import Any, Optional
 PLAN_JSONL = False
 
 
-def dry_run_info(operation: str, path: Path, *, source: Optional[Path] = None) -> None:
+def dry_run_info(
+    operation: str,
+    path: Path,
+    *,
+    source: Optional[Path] = None,
+    content: bytes | None = None,
+) -> None:
     """Keep human dry-run output stable while offering exact JSON to the installer."""
     if PLAN_JSONL:
         payload: dict[str, str] = {"operation": operation, "path": str(path)}
         if source is not None:
             payload["source"] = str(source)
+        if content is not None:
+            payload["content_sha256"] = hashlib.sha256(content).hexdigest()
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
         return
     if operation in {"copy", "overwrite"} and source is not None:
@@ -96,6 +104,16 @@ def die(message: str, code: int = 1) -> None:
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def operation_timestamp(value: str) -> str:
+    if not value:
+        return utc_now()
+    try:
+        parsed = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        die("operation time must use canonical UTC YYYY-MM-DDTHH:MM:SSZ")
+    return parsed.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def resolve_dir(path: str, label: str) -> Path:
@@ -611,12 +629,12 @@ def transactional_apply(
                 parent = parent.parent
         for directory in sorted(missing_parents, key=lambda path: (len(path.parts), path.as_posix())):
             dry_run_info("mkdir", directory)
-        for rel in changed_writes:
-            dry_run_info("write", path_for_rel(dst_root, rel))
+        for rel, (content, _mode) in changed_writes.items():
+            dry_run_info("write", path_for_rel(dst_root, rel), content=content)
         for rel in changed_removals:
             dry_run_info("delete", path_for_rel(dst_root, rel))
         if manifest_changed:
-            dry_run_info("write-manifest", manifest_path(dst_root))
+            dry_run_info("write-manifest", manifest_path(dst_root), content=manifest_bytes)
         return bool(changed_writes or changed_removals or manifest_changed)
     if not changed_writes and not changed_removals and not manifest_changed:
         return False
@@ -698,7 +716,7 @@ def write_file_if_needed(src: Path, dst: Path, dst_root: Path, *, dry_run: bool)
     assert_write_target(dst, dst_root)
     action = "overwrite" if exists else "copy"
     if dry_run:
-        dry_run_info(action, dst, source=src)
+        dry_run_info(action, dst, source=src, content=src_bytes)
         return True
     dst.parent.mkdir(parents=True, exist_ok=True)
     tmp = dst.with_name(f".{dst.name}.tmp.{os.getpid()}")
@@ -925,6 +943,7 @@ def build_manifest(
     agents: dict[str, bool],
     files: dict[str, str],
     agents_md_sha: str,
+    updated_at: str,
 ) -> dict[str, Any]:
     if source_strategy not in SOURCE_STRATEGIES:
         die(f"invalid source strategy: {source_strategy}")
@@ -942,7 +961,7 @@ def build_manifest(
         "source_commit": source_commit,
         "version": version,
         "installed_at": installed_at,
-        "updated_at": utc_now(),
+        "updated_at": updated_at,
         "agents": agents,
         "agents_md": "managed-block",
         "agents_md_sha": agents_md_sha,
@@ -986,7 +1005,7 @@ def install(args: argparse.Namespace) -> int:
     items = source_items(repo, source)
     files = current_files_from_items(items)
     agents = parse_agents(args.agents)
-    installed_at = utc_now()
+    installed_at = operation_timestamp(args.operation_time)
     existing_manifest = load_manifest(manifest_path(dst_root), required=False)
     if existing_manifest is not None:
         die("copy-project install already exists; use update or reinstall")
@@ -1026,6 +1045,7 @@ def install(args: argparse.Namespace) -> int:
         agents=agents,
         files=files,
         agents_md_sha=agents_md_sha,
+        updated_at=installed_at,
     )
     changed = transactional_apply(dst_root, writes, [], manifest, dry_run=args.dry_run)
     if changed:
@@ -1103,6 +1123,7 @@ def update(args: argparse.Namespace) -> int:
     )
 
     if changed:
+        updated_at = operation_timestamp(args.operation_time)
         installed_at = str(manifest.get("installed_at") or utc_now())
         agents = normalize_manifest_agents(manifest.get("agents"))
         new_manifest = build_manifest(
@@ -1117,6 +1138,7 @@ def update(args: argparse.Namespace) -> int:
             agents=agents,
             files=new_files,
             agents_md_sha=agents_md_sha,
+            updated_at=updated_at,
         )
         transactional_apply(dst_root, writes, removed, new_manifest, dry_run=args.dry_run)
     else:
@@ -1154,6 +1176,7 @@ def reinstall(args: argparse.Namespace) -> int:
         requested=args.source_strategy,
         source_origin=effective_origin,
     )
+    operation_time = operation_timestamp(args.operation_time)
     new_manifest = build_manifest(
         repo=repo,
         source_commit=args.source_commit or "",
@@ -1162,10 +1185,11 @@ def reinstall(args: argparse.Namespace) -> int:
         source_branch=str(args.source_branch or manifest.get("source_branch") or "").strip(),
         source_strategy=effective_strategy,
         version=read_source_version(repo, source),
-        installed_at=utc_now(),
+        installed_at=operation_time,
         agents=normalize_manifest_agents(manifest.get("agents")),
         files=new_files,
         agents_md_sha=agents_md_sha,
+        updated_at=operation_time,
     )
     transactional_apply(dst_root, writes, removed, new_manifest, dry_run=args.dry_run)
     info(f"copy-project reinstall complete: {dst_root}")
@@ -1276,6 +1300,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source-checkout", default="")
     parser.add_argument("--source-branch", default="")
     parser.add_argument("--source-strategy", choices=SOURCE_STRATEGIES, default=None)
+    parser.add_argument("--operation-time", default="", help=argparse.SUPPRESS)
     parser.add_argument("--source", default="")
     parser.add_argument("--agents", default="")
     parser.add_argument("--force", action="store_true")
