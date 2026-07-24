@@ -533,6 +533,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("init", help="Initialize the knowledge base layout")
     subparsers.add_parser("lint", help="Validate record schemas and lifecycle fields")
     subparsers.add_parser("audit", help="Run layered, read-only KB health checks for the Agent")
+    subparsers.add_parser("current-state", help="Return a read-only core status snapshot for kb-cli")
     subparsers.add_parser("index", help="Rebuild kb/index.yaml and kb/index.md")
     subparsers.add_parser("storage-sync", help="Move legacy raw/output into kb and rewrite old storage references")
     git_init = subparsers.add_parser("git-init", help="Initialize kb as a nested Git repository")
@@ -620,8 +621,24 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
     root = project_root(PROJECT_ROOT, explicit_root=args.root)
-    if args.command not in {"audit", "resume", "undo", "restore"}:
+    if args.command not in {"audit", "current-state", "resume", "undo", "restore"}:
         print_resolved_project_roots(root)
+
+    if args.command == "current-state":
+        records = iter_records(root)
+        program_ids = [path.parent.name for path in sorted((kb_root(root) / "programs").glob("*/state.yaml"))]
+        print(
+            json.dumps(
+                {
+                    "record_count": len(records),
+                    "ready_review_count": len([record for record in records if is_ready_for_human_review(record)]),
+                    "program_ids": program_ids,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+        return 0
 
     if args.command == "init":
         warn_if_cwd_differs_from_project_root(root, command="kb.py init")

@@ -16,6 +16,7 @@ description: 管理 knowledge base 的统一 schema、passage 索引、链接、
 - `kb/index.yaml` / `kb/index.md`：派生索引。
 - `kb/.runtime/search/passages.sqlite3`：可丢弃的 passage FTS5 cache；不是 canonical evidence。
 - `kb/user/` 由 research-navigator 主写；`kb/raw/` 是不可变 source evidence；本 skill 不做材料理解。
+- 公共 `kb status` 的 core current-state 读取由本 owner 提供，只读返回资料、待确认项与 program 编号；它不依赖 dev-only research-navigator，也不刷新 `kb/user/` 投影视图。
 
 任何判断必须保留原 epistemic type。脚本只搬运、验证和过门，不替 Agent 生成结论。
 

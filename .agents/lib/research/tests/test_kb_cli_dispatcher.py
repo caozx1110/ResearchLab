@@ -383,6 +383,14 @@ def test_kb_help_snapshot_contains_group_headers() -> None:
         assert verb in text
     assert "请基于当前知识库给我 3 个候选 idea" in text
     assert "为这个研究计划生成周报材料" in text
+    for example in [
+        "帮我检索近两年的相关论文",
+        "围绕这个研究问题完成一轮完整 survey",
+        "每两周关注这个方向的新论文",
+        "只在相关任务中使用",
+        "把待确认项导出到 Obsidian",
+    ]:
+        assert example in text
     assert "也可以直接对 AI 说" in text
     assert "grounded" not in text
     assert "rejected" not in text
@@ -1260,7 +1268,7 @@ def test_kb_status_forwards_current_state_and_program(monkeypatch, tmp_path: Pat
     assert kb.main(["--root", str(tmp_path), "status", "p-demo"]) == 0
 
     assert calls == [
-        (".agents/skills/research-navigator/scripts/navigate.py", ("current-state",)),
+        (".agents/skills/knowledge-base-manager/scripts/kb.py", ("current-state",)),
         (".agents/skills/research-orchestrator/scripts/orchestrate.py", ("status", "--program-id", "p-demo")),
     ]
     assert stream_values == [False, False]
@@ -1280,9 +1288,21 @@ def test_kb_status_stops_when_first_forward_fails(monkeypatch, tmp_path: Path) -
 
     assert kb.main(["--root", str(tmp_path), "status", "p-demo"]) == 17
     assert calls == [
-        (".agents/skills/research-navigator/scripts/navigate.py", ("current-state",)),
+        (".agents/skills/knowledge-base-manager/scripts/kb.py", ("current-state",)),
     ]
     assert stream_values == [False]
+
+
+def test_kb_status_uses_read_only_core_owner_without_navigator(tmp_path: Path, capsys) -> None:
+    kb = _load_kb_cli()
+    assert "knowledge-base-manager" in kb.SCRIPT_BY_VERB["status_current"]
+    assert "research-navigator" not in kb.SCRIPT_BY_VERB["status_current"]
+    before = _tree_metadata_digest(tmp_path)
+
+    assert kb.main(["--root", str(tmp_path), "status"]) == 0
+
+    assert capsys.readouterr().out == "知识库尚未收录资料。\n"
+    assert _tree_metadata_digest(tmp_path) == before
 
 
 def test_kb_status_public_output_hides_owner_machine_lines(
