@@ -25,6 +25,7 @@ from research.common import load_yaml, write_yaml_if_changed
 from research.confirm import confirm_unit, has_substantive_content
 from research.core import ensure_workspace, record_path, write_record
 from research.evidence import attach_claims, build_verification_receipt
+from research.preference_selection import eligible_preferences, record_effective_selection
 from research.records import kind_payload_skeleton
 
 
@@ -529,6 +530,152 @@ def test_screen_dimensions_require_agent_reason_and_bound_verbatim_evidence(tmp_
 def _run_cli(paper, monkeypatch, root: Path, *argv: str) -> int:
     monkeypatch.setattr(sys, "argv", ["paper.py", "--root", str(root), *argv])
     return paper.main()
+
+
+def _select_paper_preferences(
+    root: Path,
+    paper,
+    *,
+    selection_id: str,
+    args,
+    record: dict,
+    unit_root: Path,
+) -> str:
+    eligible = eligible_preferences(root, skill="paper-analyst", operation=args.command)
+    record_effective_selection(
+        root,
+        {
+            "selection_id": selection_id,
+            "skill": "paper-analyst",
+            "operation": args.command,
+            "catalog_digest": eligible["catalog_digest"],
+            "task_context": paper.paper_preference_context(
+                root, args, record, unit_root=unit_root
+            ),
+            "selected": [
+                {
+                    "preference_id": item["preference_id"],
+                    "reason": "relevant to this paper phase",
+                    "application": "apply within the bounded paper operation",
+                }
+                for item in eligible["items"]
+            ],
+            "excluded": [],
+        },
+    )
+    return selection_id
+
+
+def test_prepare_fill_verify_requires_fresh_phase_receipt_and_then_succeeds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paper = _load_paper_module()
+    ensure_workspace(tmp_path)
+    paper_id = "p-phase-receipt-0001"
+    write_record(tmp_path, _paper_record(paper_id))
+    unit_dir = record_path(tmp_path, "paper", paper_id).parent
+    _write_parse_cache(unit_dir, paper_id)
+
+    prepare_args = paper.build_parser().parse_args(
+        ["screen", "--paper-id", paper_id, "--phase", "prepare", "--defer-post-actions"]
+    )
+    prepare_selection = _select_paper_preferences(
+        tmp_path,
+        paper,
+        selection_id="prefsel-paper-phase-prepare",
+        args=prepare_args,
+        record=load_yaml(record_path(tmp_path, "paper", paper_id)),
+        unit_root=unit_dir,
+    )
+    assert _run_cli(
+        paper,
+        monkeypatch,
+        tmp_path,
+        "screen",
+        "--paper-id",
+        paper_id,
+        "--phase",
+        "prepare",
+        "--preference-selection-id",
+        prepare_selection,
+        "--defer-post-actions",
+    ) == 0
+
+    screening_path = unit_dir / "screening.yaml"
+    screening = load_yaml(screening_path)
+    screening.update(
+        {
+            "paper_type": "method_system",
+            "worth_deep_reading": "yes",
+            "judgement_reason": ["The method directly addresses the target setting."],
+            "claims": [
+                {
+                    "id": "claim-phase-receipt",
+                    "text": "The paper studies VLA policies for robot manipulation.",
+                    "claim_type": "evaluation",
+                    "confirmation_status": "pending_user_confirmation",
+                    "evidence_refs": [
+                        {
+                            "source_unit_id": paper_id,
+                            "artifact": "parse-cache.yaml",
+                            "locator": "page=1",
+                            "quote": "vision language action policies for robot manipulation",
+                            "summary": "direct scope evidence",
+                        }
+                    ],
+                }
+            ],
+            **_not_applicable_screening_dimensions(paper),
+        }
+    )
+    write_yaml_if_changed(screening_path, screening)
+    record_before_stale_attempt = record_path(tmp_path, "paper", paper_id).read_bytes()
+    fill_before_stale_attempt = screening_path.read_bytes()
+    with pytest.raises(ValueError, match="another task"):
+        _run_cli(
+            paper,
+            monkeypatch,
+            tmp_path,
+            "screen",
+            "--paper-id",
+            paper_id,
+            "--phase",
+            "verify",
+            "--preference-selection-id",
+            prepare_selection,
+            "--defer-post-actions",
+        )
+    assert record_path(tmp_path, "paper", paper_id).read_bytes() == record_before_stale_attempt
+    assert screening_path.read_bytes() == fill_before_stale_attempt
+
+    verify_args = paper.build_parser().parse_args(
+        ["screen", "--paper-id", paper_id, "--phase", "verify", "--defer-post-actions"]
+    )
+    verify_selection = _select_paper_preferences(
+        tmp_path,
+        paper,
+        selection_id="prefsel-paper-phase-verify",
+        args=verify_args,
+        record=load_yaml(record_path(tmp_path, "paper", paper_id)),
+        unit_root=unit_dir,
+    )
+    assert _run_cli(
+        paper,
+        monkeypatch,
+        tmp_path,
+        "screen",
+        "--paper-id",
+        paper_id,
+        "--phase",
+        "verify",
+        "--preference-selection-id",
+        verify_selection,
+        "--defer-post-actions",
+    ) == 0
+    verified = load_yaml(screening_path)
+    assert verified["status"] == "verified"
+    assert verified["worth_deep_reading"] == "yes"
 
 
 def test_verified_unclassified_screen_uses_method_system_fallback(

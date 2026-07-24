@@ -240,16 +240,39 @@ def add_confirmation_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--authorization-source", default="")
 
 
+def _assert_safe_paper_input_path(root: Path, path: Path) -> None:
+    """Reject symlink leaves and workspace-relative symlink ancestors."""
+    lexical_root = root.absolute()
+    lexical_path = path.absolute()
+    if lexical_root.is_symlink() or lexical_path.is_symlink():
+        raise ValueError("paper preference input path contains a symlink")
+    try:
+        relative = lexical_path.relative_to(lexical_root)
+    except ValueError:
+        return
+    cursor = lexical_root
+    for part in relative.parts:
+        cursor = cursor / part
+        if cursor.is_symlink():
+            raise ValueError("paper preference input path contains a symlink")
+
+
 def _source_paths(root: Path, record: dict) -> list[Path]:
     paths: list[Path] = []
     source = record.get("source", {})
     for backup in source.get("backup_paths", []):
         path = root / str(backup)
+        _assert_safe_paper_input_path(root, path)
         if path.exists():
             paths.append(path)
     original_uri = str(source.get("original_uri") or "")
     if original_uri and not original_uri.startswith("http"):
+        lexical_original = Path(original_uri).expanduser()
+        if not lexical_original.is_absolute():
+            lexical_original = root / lexical_original
+        _assert_safe_paper_input_path(root, lexical_original)
         path = resolve_local_reference(root, original_uri) or Path(original_uri).expanduser()
+        _assert_safe_paper_input_path(root, path)
         if path.exists():
             paths.append(path.resolve())
     deduped: list[Path] = []
@@ -1193,18 +1216,11 @@ def _record_content_digest(record: Mapping[str, object]) -> str:
     return _preference_digest(snapshot)
 
 
-def _artifact_fingerprint(path: Path) -> dict[str, object]:
+def _artifact_fingerprint(root: Path, path: Path) -> dict[str, object]:
     """Content-bind an input without exposing its raw path in a receipt context."""
+    _assert_safe_paper_input_path(root, path)
     identity = hashlib.sha256(str(path.absolute()).encode("utf-8")).hexdigest()
     fingerprint: dict[str, object] = {"path_identity_digest": identity}
-    if path.is_symlink():
-        try:
-            target = path.readlink()
-        except OSError:
-            target = Path("<unreadable>")
-        fingerprint["symlink_target_digest"] = hashlib.sha256(
-            str(target).encode("utf-8")
-        ).hexdigest()
     if not path.exists():
         fingerprint["state"] = "missing"
         return fingerprint
@@ -1252,13 +1268,14 @@ def paper_preference_context(
     auxiliary: dict[str, dict[str, object]] = {}
     if operation == "complete-note" and phase == "prepare":
         for name in ("screening.yaml", "note-fill.yaml", "note.md"):
-            auxiliary[name] = _artifact_fingerprint(canonical_unit_root / name)
+            auxiliary[name] = _artifact_fingerprint(root, canonical_unit_root / name)
     elif operation == "screen" and phase == "verify":
         auxiliary["note-fill.yaml"] = _artifact_fingerprint(
+            root,
             canonical_unit_root / "note-fill.yaml"
         )
     elif operation == "refresh-structure":
-        auxiliary["note.md"] = _artifact_fingerprint(canonical_unit_root / "note.md")
+        auxiliary["note.md"] = _artifact_fingerprint(root, canonical_unit_root / "note.md")
 
     fill_input: dict[str, object] | None = None
     if operation in {"screen", "complete-note"} and phase == "verify":
@@ -1268,7 +1285,7 @@ def paper_preference_context(
             default_name,
             str(getattr(args, "input", "") or ""),
         )
-        fill_input = _artifact_fingerprint(fill_path)
+        fill_input = _artifact_fingerprint(root, fill_path)
 
     return {
         "paper_id": str(record.get("id") or ""),
@@ -1279,9 +1296,9 @@ def paper_preference_context(
         "defer_post_actions": bool(getattr(args, "defer_post_actions", False)),
         "record_content_digest": _record_content_digest(record),
         "source_identity_digest": _preference_digest(source_identity),
-        "parse_cache": _artifact_fingerprint(cache_path),
+        "parse_cache": _artifact_fingerprint(root, cache_path),
         "source_artifacts": [
-            _artifact_fingerprint(path) for path in _source_paths(root, dict(record))
+            _artifact_fingerprint(root, path) for path in _source_paths(root, dict(record))
         ],
         "auxiliary_artifacts": auxiliary,
         "fill_input": fill_input,

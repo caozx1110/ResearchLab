@@ -1179,3 +1179,30 @@ def test_paper_verify_same_path_byte_change_fails_before_canonical_write(
     )
     assert str(root) not in receipt
     assert "status: original" not in receipt
+
+
+@pytest.mark.parametrize("artifact", ("source", "parse-cache", "fill"))
+def test_paper_preference_inputs_reject_symlinks(
+    tmp_path: Path,
+    artifact: str,
+) -> None:
+    paper = _script("paper-analyst", "paper.py")
+    root, record, unit_root, source_path = _paper_workspace(tmp_path)
+    outside = tmp_path / f"outside-{artifact}.txt"
+    outside.write_text("outside bytes", encoding="utf-8")
+    if artifact == "source":
+        source_path.unlink()
+        source_path.symlink_to(outside)
+        args = _paper_args("screen", phase="prepare")
+    elif artifact == "parse-cache":
+        cache_path = unit_root / "parse-cache.yaml"
+        cache_path.unlink()
+        cache_path.symlink_to(outside)
+        args = _paper_args("screen", phase="prepare")
+    else:
+        fill_path = unit_root / "agent-fill.yaml"
+        fill_path.symlink_to(outside)
+        args = _paper_args("screen", phase="verify", input_path=fill_path.name)
+
+    with pytest.raises(ValueError, match="symlink"):
+        paper.paper_preference_context(root, args, record, unit_root=unit_root)
