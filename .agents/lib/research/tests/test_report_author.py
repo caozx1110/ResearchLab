@@ -370,7 +370,11 @@ def test_reporting_style_controls_verbosity_and_preserves_missing_markers(tmp_pa
                 "operation": "weekly",
                 "catalog_digest": eligible["catalog_digest"],
                 "task_context": report.report_preference_context(
-                    program_id, operation="weekly", stage="", limit=20
+                    program_id,
+                    operation="weekly",
+                    stage="",
+                    limit=20,
+                    inputs=report.load_report_inputs(root, program_id),
                 ),
                 "selected": [
                     {

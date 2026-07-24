@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import copy
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -13,6 +14,22 @@ from research.paths import config_root, runtime_preferences_path
 from research.preference_selection import eligible_preferences, record_effective_selection
 from research.core import default_record, record_path
 from research.prefs import default_runtime_preferences, ensure_workspace
+
+
+REPORT_OPERATIONS = (
+    "weekly",
+    "ppt-materials",
+    "stage-summary",
+    "writing-materials",
+    "outline",
+)
+PAPER_OPERATIONS = (
+    "prewarm-cache",
+    "screen",
+    "complete-note",
+    "extract-figures",
+    "refresh-structure",
+)
 
 
 def _script(skill: str, filename: str):
@@ -86,10 +103,56 @@ def _record(
     return selection_id
 
 
+def _paper_args(operation: str, *, phase: str = "", input_path: str = "") -> argparse.Namespace:
+    return argparse.Namespace(
+        command=operation,
+        paper_id="p-preference-matrix",
+        phase=phase,
+        input=input_path,
+        mode="auto" if operation in {"screen", "complete-note"} else "",
+        force=False,
+        defer_post_actions=True,
+        preference_selection_id="",
+    )
+
+
+def _paper_workspace(tmp_path: Path) -> tuple[Path, dict[str, object], Path, Path]:
+    root = _workspace(tmp_path)
+    paper_id = "p-preference-matrix"
+    unit_root = root / "kb" / "units" / "papers" / paper_id
+    unit_root.mkdir(parents=True, exist_ok=True)
+    source_path = unit_root / "source.txt"
+    source_path.write_text("immutable paper source bytes", encoding="utf-8")
+    cache_path = unit_root / "parse-cache.yaml"
+    cache_path.write_text(
+        "paper_id: p-preference-matrix\nchunks:\n  - label: source\n    text: immutable cache bytes\n",
+        encoding="utf-8",
+    )
+    record: dict[str, object] = {
+        "id": paper_id,
+        "kind": "paper",
+        "title": "Preference matrix paper",
+        "status": "screened",
+        "maturity": "lightweight",
+        "confirmation_status": "pending_user_confirmation",
+        "source": {"original_uri": str(source_path.relative_to(root)), "backup_paths": []},
+        "sources": [{"kind": "local", "identity": "source-v1"}],
+        "payload": {
+            "basic_info": {"title": "Preference matrix paper"},
+            "quick_screen": {"paper_type": "method_system"},
+        },
+    }
+    write_yaml_if_changed(unit_root / "record.yaml", record)
+    return root, record, unit_root, source_path
+
+
 def test_real_report_consumer_is_neutral_until_selected_and_rejects_wrong_binding(tmp_path: Path) -> None:
     report = _script("report-author", "report.py")
     root = _workspace(tmp_path)
-    context = report.report_preference_context("program-a", operation="weekly", stage="", limit=20)
+    inputs = report.load_report_inputs(root, "program-a")
+    context = report.report_preference_context(
+        "program-a", operation="weekly", stage="", limit=20, inputs=inputs
+    )
     selection_id = _record(
         root,
         selection_id="prefsel-matrix-report",
@@ -115,7 +178,11 @@ def test_real_report_consumer_is_neutral_until_selected_and_rejects_wrong_bindin
             preference_selection_id=selection_id,
             operation="stage-summary",
             canonical_inputs=report.report_preference_context(
-                "program-a", operation="stage-summary", stage="", limit=20
+                "program-a",
+                operation="stage-summary",
+                stage="",
+                limit=20,
+                inputs=inputs,
             ),
         )
     with pytest.raises(ValueError, match="another task"):
@@ -124,7 +191,7 @@ def test_real_report_consumer_is_neutral_until_selected_and_rejects_wrong_bindin
             preference_selection_id=selection_id,
             operation="weekly",
             canonical_inputs=report.report_preference_context(
-                "program-b", operation="weekly", stage="", limit=20
+                "program-b", operation="weekly", stage="", limit=20, inputs=inputs
             ),
         )
 
@@ -170,7 +237,7 @@ def test_real_source_and_paper_consumers_do_not_direct_read_runtime_soft_prefere
         selection_id="prefsel-matrix-paper",
         skill="paper-analyst",
         operation="screen",
-        task_context=paper.paper_preference_context(paper_args, record),
+        task_context=paper.paper_preference_context(root, paper_args, record),
         selected_paths={"runtime.paper"},
     )
     selected_paper, selected_pdf, binding = paper.resolve_paper_preferences(root, paper_args, record)
@@ -183,7 +250,10 @@ def test_catalog_change_stales_real_report_consumer_and_hard_resource_stays_elig
     report = _script("report-author", "report.py")
     method = _script("method-designer", "method.py")
     root = _workspace(tmp_path)
-    context = report.report_preference_context("program-a", operation="weekly", stage="", limit=20)
+    inputs = report.load_report_inputs(root, "program-a")
+    context = report.report_preference_context(
+        "program-a", operation="weekly", stage="", limit=20, inputs=inputs
+    )
     selection_id = _record(
         root,
         selection_id="prefsel-matrix-stale",
@@ -732,3 +802,380 @@ def test_diagnosis_claims_outside_workspace_fail_closed_without_writes(
     assert not (path.parent / "diagnoses.yaml").exists()
     assert not (path.parent / "diagnosis.md").exists()
     assert load_yaml(path) == record
+@pytest.mark.parametrize("operation", REPORT_OPERATIONS)
+def test_report_operation_matrix_rejects_event_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    report = _script("report-author", "report.py")
+    root = _workspace(tmp_path)
+    program_id = "program-report-matrix"
+    events_path = root / "kb" / "programs" / program_id / "workflow" / "reporting-events.yaml"
+    write_yaml_if_changed(
+        events_path,
+        {
+            "items": [
+                {
+                    "event_type": "phase-completed",
+                    "source_skill": "paper-analyst",
+                    "title": "Original event",
+                    "summary": "original event bytes",
+                    "stage": "analysis",
+                }
+            ]
+        },
+    )
+    baseline = report.load_report_inputs(root, program_id, stage="analysis", limit=7)
+    context = report.report_preference_context(
+        program_id,
+        operation=operation,
+        stage="analysis",
+        limit=7,
+        inputs=baseline,
+    )
+    assert set(context) == {"program_id", "operation", "stage", "limit", "input_snapshot"}
+    assert len(context["input_snapshot"]["digest"]) == 64
+    selection_id = _record(
+        root,
+        selection_id=f"prefsel-report-{operation}",
+        skill="report-author",
+        operation=operation,
+        task_context=context,
+        selected_paths={"profile.personalization.reporting_style"},
+    )
+    assert report.load_report_inputs(
+        root,
+        program_id,
+        stage="analysis",
+        limit=7,
+        preference_selection_id=selection_id,
+        preference_operation=operation,
+    ).reporting_style == "concise"
+
+    changed = load_yaml(events_path)
+    changed["items"][0]["summary"] = "changed after selection"
+    write_yaml_if_changed(events_path, changed)
+    with pytest.raises(ValueError, match="another task"):
+        report.load_report_inputs(
+            root,
+            program_id,
+            stage="analysis",
+            limit=7,
+            preference_selection_id=selection_id,
+            preference_operation=operation,
+        )
+    output_by_operation = {
+        "weekly": root / "kb" / "programs" / program_id / "reports" / "weekly.md",
+        "stage-summary": root / "kb" / "programs" / program_id / "reports" / "stage-summary.md",
+        "outline": root / "kb" / "programs" / program_id / "reports" / "paper-outline.md",
+        "ppt-materials": root / "kb" / "user" / "report-materials" / f"{program_id}-ppt-materials.md",
+        "writing-materials": root / "kb" / "user" / "report-materials" / f"{program_id}-writing-materials.md",
+    }
+    output_path = output_by_operation[operation]
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "report.py",
+            "--root",
+            str(root),
+            operation,
+            "--program-id",
+            program_id,
+            "--stage",
+            "analysis",
+            "--limit",
+            "7",
+            "--preference-selection-id",
+            selection_id,
+        ],
+    )
+    with pytest.raises(ValueError, match="another task"):
+        report.main()
+    assert not output_path.exists()
+
+
+@pytest.mark.parametrize(
+    "component",
+    ("accepted_event", "pending_judgement", "claim", "source_binding", "decision", "missing_unit"),
+)
+def test_report_snapshot_binds_every_rendered_component(
+    tmp_path: Path,
+    component: str,
+) -> None:
+    report = _script("report-author", "report.py")
+    root = _workspace(tmp_path)
+    inputs = report.ReportInputs(
+        events=[{"event_type": "phase-completed", "summary": "accepted"}],
+        pending_judgement_events=[
+            {"event_type": "evaluation", "_epistemic_reason": "missing receipt"}
+        ],
+        claim_sources=[
+            report.ClaimSource(
+                unit_id="p-one",
+                title="Paper One",
+                kind="paper",
+                claims=[{"id": "claim-one", "text": "grounded"}],
+                binding_digest="a" * 64,
+            )
+        ],
+        decisions=[{"title": "Use baseline", "confirmation": "confirmed"}],
+        missing_units=["p-missing"],
+    )
+    context = report.report_preference_context(
+        "program-a", operation="weekly", stage="", limit=20, inputs=inputs
+    )
+    selection_id = _record(
+        root,
+        selection_id=f"prefsel-report-component-{component.replace('_', '-')}",
+        skill="report-author",
+        operation="weekly",
+        task_context=context,
+        selected_paths={"profile.personalization.reporting_style"},
+    )
+    changed = copy.deepcopy(inputs)
+    if component == "accepted_event":
+        changed.events[0]["summary"] = "changed"
+    elif component == "pending_judgement":
+        changed.pending_judgement_events[0]["_epistemic_reason"] = "stale receipt"
+    elif component == "claim":
+        changed.claim_sources[0].claims[0]["text"] = "changed"
+    elif component == "source_binding":
+        changed.claim_sources[0].binding_digest = "b" * 64
+    elif component == "decision":
+        changed.decisions[0]["title"] = "Changed decision"
+    else:
+        changed.missing_units.append("p-another-missing")
+    changed_context = report.report_preference_context(
+        "program-a", operation="weekly", stage="", limit=20, inputs=changed
+    )
+    with pytest.raises(ValueError, match="another task"):
+        report.load_reporting_style(
+            root,
+            preference_selection_id=selection_id,
+            operation="weekly",
+            canonical_inputs=changed_context,
+        )
+    for field, value in (
+        ("program_id", "program-b"),
+        ("stage", "changed-stage"),
+        ("limit", 21),
+    ):
+        changed_scalar = copy.deepcopy(context)
+        changed_scalar[field] = value
+        with pytest.raises(ValueError, match="another task"):
+            report.load_reporting_style(
+                root,
+                preference_selection_id=selection_id,
+                operation="weekly",
+                canonical_inputs=changed_scalar,
+            )
+    serialized = json.dumps(context, sort_keys=True)
+    assert "phase-completed" not in serialized
+    assert "missing receipt" not in serialized
+    assert "Use baseline" not in serialized
+    assert "grounded" not in serialized
+
+
+@pytest.mark.parametrize("operation", PAPER_OPERATIONS)
+@pytest.mark.parametrize("artifact", ("source", "parse-cache", "record"))
+def test_paper_operation_artifact_matrix_rejects_replay(
+    tmp_path: Path,
+    operation: str,
+    artifact: str,
+) -> None:
+    paper = _script("paper-analyst", "paper.py")
+    root, record, unit_root, source_path = _paper_workspace(tmp_path)
+    args = _paper_args(operation, phase="prepare" if operation in {"screen", "complete-note"} else "")
+    context = paper.paper_preference_context(root, args, record, unit_root=unit_root)
+    assert set(context) == {
+        "paper_id",
+        "operation",
+        "phase",
+        "mode",
+        "force",
+        "defer_post_actions",
+        "record_content_digest",
+        "source_identity_digest",
+        "parse_cache",
+        "source_artifacts",
+        "auxiliary_artifacts",
+        "fill_input",
+    }
+    selection_id = _record(
+        root,
+        selection_id=f"prefsel-paper-{operation}-{artifact}",
+        skill="paper-analyst",
+        operation=operation,
+        task_context=context,
+        selected_paths={"runtime.paper", "runtime.pdf"},
+    )
+    args.preference_selection_id = selection_id
+    paper.resolve_paper_preferences(root, args, record, unit_root=unit_root)
+    record_path = unit_root / "record.yaml"
+    record_before = record_path.read_bytes()
+
+    changed_record = copy.deepcopy(record)
+    if artifact == "source":
+        source_path.write_text("changed paper source bytes", encoding="utf-8")
+    elif artifact == "parse-cache":
+        (unit_root / "parse-cache.yaml").write_text("chunks: [{text: changed}]\n", encoding="utf-8")
+    else:
+        changed_record["title"] = "Changed record content"
+    with pytest.raises(ValueError, match="another task"):
+        paper.resolve_paper_preferences(
+            root,
+            args,
+            changed_record,
+            unit_root=unit_root,
+        )
+    assert record_path.read_bytes() == record_before
+
+
+@pytest.mark.parametrize(
+    ("operation", "field", "changed_value"),
+    (
+        ("prewarm-cache", "force", True),
+        ("prewarm-cache", "defer_post_actions", False),
+        ("screen", "phase", "verify"),
+        ("screen", "mode", "direct"),
+        ("screen", "defer_post_actions", False),
+        ("complete-note", "phase", "verify"),
+        ("complete-note", "mode", "direct"),
+        ("complete-note", "defer_post_actions", False),
+        ("extract-figures", "defer_post_actions", False),
+        ("refresh-structure", "defer_post_actions", False),
+    ),
+)
+def test_paper_operation_argument_matrix_rejects_replay(
+    tmp_path: Path,
+    operation: str,
+    field: str,
+    changed_value: object,
+) -> None:
+    paper = _script("paper-analyst", "paper.py")
+    root, record, unit_root, _ = _paper_workspace(tmp_path)
+    args = _paper_args(operation)
+    context = paper.paper_preference_context(root, args, record, unit_root=unit_root)
+    selection_id = _record(
+        root,
+        selection_id=f"prefsel-paper-arg-{operation}-{field.replace('_', '-')}",
+        skill="paper-analyst",
+        operation=operation,
+        task_context=context,
+        selected_paths={"runtime.paper", "runtime.pdf"},
+    )
+    changed = copy.copy(args)
+    changed.preference_selection_id = selection_id
+    setattr(changed, field, changed_value)
+    with pytest.raises(ValueError, match="another task"):
+        paper.resolve_paper_preferences(root, changed, record, unit_root=unit_root)
+
+
+@pytest.mark.parametrize(
+    ("operation", "phase", "artifact_name"),
+    (
+        ("screen", "verify", "note-fill.yaml"),
+        ("complete-note", "prepare", "screening.yaml"),
+        ("complete-note", "prepare", "note-fill.yaml"),
+        ("complete-note", "prepare", "note.md"),
+        ("refresh-structure", "", "note.md"),
+    ),
+)
+def test_paper_auxiliary_input_matrix_rejects_replay(
+    tmp_path: Path,
+    operation: str,
+    phase: str,
+    artifact_name: str,
+) -> None:
+    paper = _script("paper-analyst", "paper.py")
+    root, record, unit_root, _ = _paper_workspace(tmp_path)
+    artifact_path = unit_root / artifact_name
+    artifact_path.write_text("original auxiliary bytes", encoding="utf-8")
+    args = _paper_args(operation, phase=phase)
+    context = paper.paper_preference_context(root, args, record, unit_root=unit_root)
+    selection_id = _record(
+        root,
+        selection_id=f"prefsel-paper-aux-{operation}-{artifact_name.split('.')[0]}",
+        skill="paper-analyst",
+        operation=operation,
+        task_context=context,
+        selected_paths={"runtime.paper", "runtime.pdf"},
+    )
+    args.preference_selection_id = selection_id
+    artifact_path.write_text("changed auxiliary bytes", encoding="utf-8")
+    with pytest.raises(ValueError, match="another task"):
+        paper.resolve_paper_preferences(root, args, record, unit_root=unit_root)
+
+
+@pytest.mark.parametrize("operation", ("screen", "complete-note"))
+def test_paper_verify_same_path_byte_change_fails_before_canonical_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    paper = _script("paper-analyst", "paper.py")
+    root, record, unit_root, _ = _paper_workspace(tmp_path)
+    fill_path = unit_root / "agent-fill.yaml"
+    fill_path.write_text("status: original\n", encoding="utf-8")
+    phase = "verify"
+    args = _paper_args(operation, phase=phase, input_path=fill_path.name)
+    context = paper.paper_preference_context(root, args, record, unit_root=unit_root)
+    selection_id = _record(
+        root,
+        selection_id=f"prefsel-paper-fill-{operation}",
+        skill="paper-analyst",
+        operation=operation,
+        task_context=context,
+        selected_paths={"runtime.paper", "runtime.pdf"},
+    )
+    alternate_fill = unit_root / "agent-fill-copy.yaml"
+    alternate_fill.write_bytes(fill_path.read_bytes())
+    changed_identity = copy.copy(args)
+    changed_identity.preference_selection_id = selection_id
+    changed_identity.input = alternate_fill.name
+    with pytest.raises(ValueError, match="another task"):
+        paper.resolve_paper_preferences(
+            root,
+            changed_identity,
+            record,
+            unit_root=unit_root,
+        )
+    record_path = unit_root / "record.yaml"
+    record_before = record_path.read_bytes()
+    cache_before = (unit_root / "parse-cache.yaml").read_bytes()
+    canonical_output = unit_root / ("screening.yaml" if operation == "screen" else "note.md")
+    output_before = canonical_output.read_bytes() if canonical_output.exists() else None
+    fill_path.write_text("status: changed-at-same-path\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "paper.py",
+            "--root",
+            str(root),
+            operation,
+            "--paper-id",
+            str(record["id"]),
+            "--phase",
+            phase,
+            "--input",
+            fill_path.name,
+            "--preference-selection-id",
+            selection_id,
+            "--defer-post-actions",
+        ],
+    )
+    with pytest.raises(ValueError, match="another task"):
+        paper.main()
+    assert record_path.read_bytes() == record_before
+    assert (unit_root / "parse-cache.yaml").read_bytes() == cache_before
+    assert (canonical_output.read_bytes() if canonical_output.exists() else None) == output_before
+
+    receipt = (root / "kb" / "config" / "effective-preferences" / f"{selection_id}.yaml").read_text(
+        encoding="utf-8"
+    )
+    assert str(root) not in receipt
+    assert "status: original" not in receipt
