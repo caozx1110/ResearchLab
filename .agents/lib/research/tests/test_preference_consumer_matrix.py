@@ -700,3 +700,35 @@ def test_experiment_stale_receipts_write_no_run_follow_up_or_diagnosis_artifacts
     assert not (path.parent / "diagnoses.yaml").exists()
     assert not (path.parent / "diagnosis.md").exists()
     assert load_yaml(path) == record
+
+
+@pytest.mark.parametrize("through_symlink", [False, True])
+def test_diagnosis_claims_outside_workspace_fail_closed_without_writes(
+    tmp_path: Path,
+    through_symlink: bool,
+) -> None:
+    experiment = _script("experiment-workbench", "experiment.py")
+    root = _workspace(tmp_path)
+    plan = experiment.build_parser().parse_args(
+        ["plan", "--title", "claims containment", "--program-id", "program-containment"]
+    )
+    assert experiment._dispatch(plan, root) == 0
+    path = next((root / "kb/units/experiments").glob("*/record.yaml"))
+    record = load_yaml(path)
+    outside = tmp_path / "outside-claims.yaml"
+    write_yaml_if_changed(outside, {"claims": []})
+    claims_arg = outside
+    if through_symlink:
+        claims_arg = root / "claims-link.yaml"
+        claims_arg.symlink_to(outside)
+    args = experiment.build_parser().parse_args(
+        ["diagnose", "--experiment-id", str(record["id"]), "--claims-file", str(claims_arg)]
+    )
+
+    with pytest.raises(SystemExit, match="must remain inside the project workspace"):
+        experiment._dispatch(args, root)
+
+    assert not (path.parent / "diagnosis-fill.yaml").exists()
+    assert not (path.parent / "diagnoses.yaml").exists()
+    assert not (path.parent / "diagnosis.md").exists()
+    assert load_yaml(path) == record

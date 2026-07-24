@@ -628,9 +628,7 @@ def build_diagnosis_context(runs: list[dict[str, Any]], recent_n: int) -> dict[s
 def load_diagnosis_claims(root: Path, unit_root: Path, experiment_id: str, claims_file: str) -> list[dict[str, Any]]:
     if not claims_file:
         return []
-    claims_path = Path(claims_file).expanduser()
-    if not claims_path.is_absolute():
-        claims_path = root / claims_path
+    _identity, claims_path = _contained_artifact_identity(root, claims_file)
     payload = load_yaml(claims_path, default=[])
     claims = payload.get("claims", []) if isinstance(payload, dict) else payload
     violations = validate_claims(claims)
@@ -664,9 +662,8 @@ def load_diagnosis_claims(root: Path, unit_root: Path, experiment_id: str, claim
 def diagnosis_claims_file_fact(root: Path, claims_file: str) -> dict[str, str]:
     if not claims_file:
         return {"status": "not-provided", "identity_digest": "", "content_digest": "", "kind": ""}
-    candidate = Path(claims_file).expanduser()
-    resolved = (candidate if candidate.is_absolute() else root / candidate).resolve(strict=False)
-    identity_digest = _sha256_payload({"identity": resolved.as_posix()})
+    identity, resolved = _contained_artifact_identity(root, claims_file)
+    identity_digest = _sha256_payload({"identity": identity})
     if not resolved.exists():
         return {
             "status": "missing",
