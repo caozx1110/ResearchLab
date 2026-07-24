@@ -32,7 +32,7 @@ prepare 会：
 4. 发布 required-cell、claim field 与 evidence_ref field 合同。
 5. 保持所有 content 与 evidence_refs 为空，不替 runtime agent 写任何理解。
 
-若第 1 步没有合格输入，prepare 返回结构化 evidence gap，并创建按请求 digest / revision 绑定的 durable composite state，handoff 到 `search → selection → intake/analysis → synthesis → review/confirmation`；每阶段记录 inputs、outputs、blocker 与 resume action，更新使用 revision CAS，跨会话可恢复。候选选择和结论仍由 runtime agent 完成。
+若第 1 步没有合格输入，prepare 返回结构化 evidence gap，并创建按请求 digest / revision 绑定的 durable composite state，handoff 到 `search → selection → source_intake → unit_analysis → synthesis → review_confirmation → report_consumption`；每阶段记录 inputs、outputs、blocker 与 resume action，更新使用 revision CAS，并作为 `kb next` 正式候选跨会话恢复。候选选择和结论仍由 runtime agent 完成。
 
 当本次综合属于一个或多个 program 时，Agent 在 prepare 时绑定 program id。该关联进入 survey content digest；确认后 owner 在同一原子 review 事务中为每个 program 写入带当前 ConfirmationReceipt binding 的 `survey-confirmed` reporting event，供 `report-author` 消费。没有 program 关联的 survey 仍可作为全局 synthesis judgement 使用。
 

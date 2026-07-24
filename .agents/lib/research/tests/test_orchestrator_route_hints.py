@@ -29,6 +29,9 @@ def test_route_hints_point_to_existing_skill_dirs() -> None:
     module = _load_orchestrator_module()
 
     assert set(module.ROUTE_HINTS.values()) <= existing
+    assert set(module.ROUTABLE_OWNER_SKILLS) <= existing
+    assert "research-navigator" not in module.ROUTABLE_OWNER_SKILLS
+    assert "kb-cli" not in module.ROUTABLE_OWNER_SKILLS
 
 
 def test_source_intake_routes_cover_new_source_tasks() -> None:
@@ -124,6 +127,56 @@ def test_agent_route_decision_must_follow_snapshot_and_dependency_order() -> Non
     }
     with pytest.raises(SystemExit, match="earlier"):
         module.validate_route_decision(invalid_dependency, snapshot)
+
+
+def test_agent_route_decision_can_recover_owners_missed_by_keyword_hints() -> None:
+    module = _load_orchestrator_module()
+    cases = (
+        (
+            "每两周检索并更新综述",
+            ["research-monitor", "literature-search", "literature-synthesizer"],
+        ),
+        ("不要综述，只找三篇", ["literature-search"]),
+        ("基于 repo 写周报", ["repo-analyst", "report-author"]),
+    )
+    for task, owners in cases:
+        snapshot = module.route_candidate_snapshot(task)
+        assert snapshot["planning_required"] is True
+        decision = {
+            "route_snapshot_digest": snapshot["route_snapshot_digest"],
+            "rationale": "The complete task needs this ordered set even when lexical hints are incomplete.",
+            "steps": [
+                {
+                    "step_id": f"step-{index}",
+                    "owner_skill": owner,
+                    "instruction": f"Complete the bounded {owner} portion.",
+                    "depends_on": [] if index == 1 else [f"step-{index - 1}"],
+                    "governance_gate": "none",
+                }
+                for index, owner in enumerate(owners, start=1)
+            ],
+        }
+        normalized = module.validate_route_decision(decision, snapshot)
+        assert [step["owner_skill"] for step in normalized["steps"]] == owners
+
+    invalid = module.route_candidate_snapshot("做一个任务")
+    with pytest.raises(SystemExit, match="non-routable"):
+        module.validate_route_decision(
+            {
+                "route_snapshot_digest": invalid["route_snapshot_digest"],
+                "rationale": "Do not route normal work into maintainer-only UI tooling.",
+                "steps": [
+                    {
+                        "step_id": "dev-ui",
+                        "owner_skill": "research-navigator",
+                        "instruction": "Use a maintainer-only owner.",
+                        "depends_on": [],
+                        "governance_gate": "none",
+                    }
+                ],
+            },
+            invalid,
+        )
 
 
 def test_orchestrator_confirm_command_uses_shared_helper() -> None:

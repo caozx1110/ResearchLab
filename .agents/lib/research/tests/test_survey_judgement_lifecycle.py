@@ -167,6 +167,22 @@ def test_prepare_zero_current_inputs_returns_structured_gap_without_scaffold(tmp
     assert composite_survey_state_violations(state) == []
     assert not (tmp_path / "kb/synthesis/robot-learning/survey-fill.yaml").exists()
 
+    orchestrator = load_orchestrator()
+    snapshot = orchestrator.portfolio_candidate_snapshot(tmp_path)
+    resumable = [
+        item
+        for item in snapshot["candidates"]
+        if item["action_type"] == "resume-composite-survey"
+    ]
+    assert len(resumable) == 1
+    assert resumable[0]["subject"] == {
+        "kind": "composite-survey-state",
+        "id": binding["composite_id"],
+    }
+    assert resumable[0]["owner_skill"] == "literature-search"
+    assert resumable[0]["stage"] == "search"
+    assert resumable[0]["dependencies"][0]["revision"] == binding["revision"]
+
 
 def test_composite_cli_updates_with_revision_cas_and_is_resumable(
     tmp_path: Path,
@@ -545,6 +561,15 @@ def test_legacy_needs_agent_repair_is_readable_but_not_reviewable(tmp_path: Path
 
 
 def test_composite_survey_state_is_ordered_and_resumable() -> None:
+    assert COMPOSITE_SURVEY_STAGES == (
+        "search",
+        "selection",
+        "source_intake",
+        "unit_analysis",
+        "synthesis",
+        "review_confirmation",
+        "report_consumption",
+    )
     state = new_composite_survey_state(
         composite_id="survey-run-1",
         request_digest=hashlib.sha256(b"find papers then survey").hexdigest(),

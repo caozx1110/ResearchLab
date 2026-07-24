@@ -53,6 +53,7 @@ from research.judgements import apply_judgement_rejection, confirmation_binding,
 from research.journal import mutation_transaction
 from research.monitoring import due_subscriptions, unresolved_monitor_outcomes
 from research.preference_selection import resolve_task_preferences, selection_binding
+from research.surveys import pending_composite_survey_states
 
 OPEN_QUESTION_OPEN_STATUSES = {"open"}
 EVIDENCE_REQUEST_OPEN_STATUSES = {"open"}
@@ -184,9 +185,33 @@ ROUTE_COMPOSITION_MARKERS = (
     "and then",
     " then ",
     " after ",
+    "基于",
+    "根据",
+    "based on ",
+    "using ",
 )
 ROUTE_NEGATION_MARKERS = ("不要", "不需要", "无需", "跳过", "别用", "without ", "skip ")
 ROUTE_GENERIC_ENTITY_HINTS = {"论文", "paper", "仓库", "repo", "数据集", "dataset", "博客", "blog"}
+ROUTABLE_OWNER_SKILLS = (
+    "blog-analyst",
+    "dataset-analyst",
+    "discussion-archivist",
+    "experiment-workbench",
+    "idea-workbench",
+    "knowledge-base-manager",
+    "literature-search",
+    "literature-synthesizer",
+    "method-designer",
+    "paper-analyst",
+    "repo-analyst",
+    "report-author",
+    "research-config-manager",
+    "research-monitor",
+    "research-orchestrator",
+    "skill-evolution-advisor",
+    "source-intake",
+    "wiki-adapter",
+)
 
 COMMAND_PREFIX = "${RESEARCH_PYTHON:-python3}"
 
@@ -240,6 +265,7 @@ def route_candidate_snapshot(task: str) -> dict[str, Any]:
             key=lambda item: (int(item["start"]), -len(str(item["hint"])), str(item["hint"])),
         ),
         "candidate_skills": candidate_skills,
+        "owner_catalog": list(ROUTABLE_OWNER_SKILLS),
         "composition_markers": sorted(set(composition_markers)),
         "negation_markers": sorted(set(negation_markers)),
     }
@@ -273,9 +299,9 @@ def validate_route_decision(decision: object, snapshot: dict[str, Any]) -> dict[
     raw_steps = decision.get("steps")
     if not isinstance(raw_steps, list) or not raw_steps or len(raw_steps) > 12:
         raise SystemExit("Route decision requires one to twelve ordered steps")
-    allowed_owners = set(snapshot.get("candidate_skills") or [])
-    if not allowed_owners:
-        allowed_owners = {"research-orchestrator"}
+    allowed_owners = set(snapshot.get("owner_catalog") or [])
+    if allowed_owners != set(ROUTABLE_OWNER_SKILLS):
+        raise SystemExit("Route snapshot owner catalog is invalid")
     normalized_steps: list[dict[str, Any]] = []
     seen: set[str] = set()
     for index, raw_step in enumerate(raw_steps, start=1):
@@ -286,7 +312,7 @@ def validate_route_decision(decision: object, snapshot: dict[str, Any]) -> dict[
             raise SystemExit("Route decision step ids must be unique safe identifiers")
         owner = str(raw_step.get("owner_skill") or "").strip()
         if owner not in allowed_owners:
-            raise SystemExit("Route decision selected an owner outside the task snapshot")
+            raise SystemExit("Route decision selected a non-routable owner")
         instruction = str(raw_step.get("instruction") or "").strip()
         if not instruction:
             raise SystemExit("Route decision steps require an instruction")
@@ -1316,6 +1342,80 @@ def _judgement_candidate(
     )
 
 
+def _composite_survey_candidate(
+    entry: dict[str, Any],
+    *,
+    selected_program_id: str = "",
+) -> dict[str, Any] | None:
+    state = entry.get("state") if isinstance(entry.get("state"), dict) else {}
+    filters = state.get("selection_filters") if isinstance(state.get("selection_filters"), dict) else {}
+    linked_program_ids = sorted(
+        {
+            item.strip()
+            for item in str(filters.get("program_ids") or "").split(",")
+            if item.strip()
+        }
+    )
+    if selected_program_id and selected_program_id not in linked_program_ids:
+        return None
+    stage = str(state.get("current_stage") or "")
+    owner_by_stage = {
+        "search": "literature-search",
+        "selection": "literature-search",
+        "source_intake": "source-intake",
+        "unit_analysis": "research-orchestrator",
+        "synthesis": "literature-synthesizer",
+        "review_confirmation": "literature-synthesizer",
+        "report_consumption": "report-author",
+    }
+    owner = owner_by_stage.get(stage)
+    if not owner:
+        raise SystemExit("Composite survey current stage has no formal owner")
+    active = next(
+        (
+            item
+            for item in state.get("stages", [])
+            if isinstance(item, dict) and str(item.get("id") or "") == stage
+        ),
+        {},
+    )
+    resume_action = str(active.get("resume_action") or "").strip()
+    reason = resume_action or f"Resume the durable survey workflow at {stage}."
+    composite_id = str(state.get("id") or "")
+    return _candidate(
+        program_id=selected_program_id
+        or (linked_program_ids[0] if len(linked_program_ids) == 1 else f"survey:{composite_id}"),
+        action_type="resume-composite-survey",
+        subject_id=composite_id,
+        discriminator=stage,
+        owner_skill=owner,
+        stage=stage,
+        goal=str(filters.get("query") or filters.get("topic") or composite_id),
+        question=str(filters.get("query") or ""),
+        reason=reason,
+        title=str(filters.get("query") or filters.get("topic") or composite_id),
+        subject_kind="composite-survey-state",
+        dependencies=[
+            {
+                "kind": "composite-survey-state",
+                "id": composite_id,
+                "path": str(entry.get("path") or ""),
+                "request_digest": str(state.get("request_digest") or ""),
+                "state_digest": str(entry.get("state_digest") or ""),
+                "revision": int(state.get("revision") or 0),
+                "status": str(state.get("status") or ""),
+                "current_stage": stage,
+                "program_ids": linked_program_ids,
+                "blocker": active.get("blocker") if isinstance(active.get("blocker"), dict) else {},
+            }
+        ],
+        governance_gate="human-decision"
+        if stage in {"selection", "review_confirmation"}
+        else "none",
+        safe_execute_capability=False,
+    )
+
+
 def portfolio_candidates(root: Path, *, selected_program_id: str = "") -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Enumerate all legal actions and factual context without ranking them."""
     records = iter_records(root)
@@ -1542,6 +1642,14 @@ def portfolio_candidates(root: Path, *, selected_program_id: str = "") -> tuple[
                 )
             )
             attached_judgements.add(key)
+
+    for entry in pending_composite_survey_states(root):
+        candidate = _composite_survey_candidate(
+            entry,
+            selected_program_id=selected_program_id,
+        )
+        if candidate is not None:
+            candidates.append(candidate)
 
     for due in due_subscriptions(root):
         linked_program_ids = [str(item) for item in due.get("program_ids") or [] if str(item)]

@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .common import file_sha256, utc_now_iso
+from .common import file_sha256, load_yaml, utc_now_iso
 from .confirm import has_complete_confirmation_receipt
 from .records import (
     iter_records,
@@ -25,9 +25,11 @@ from .records import (
 COMPOSITE_SURVEY_STAGES = (
     "search",
     "selection",
-    "intake_analysis",
+    "source_intake",
+    "unit_analysis",
     "synthesis",
     "review_confirmation",
+    "report_consumption",
 )
 COMPOSITE_STAGE_STATUSES = {"pending", "in_progress", "blocked", "completed"}
 COMPOSITE_STATE_STATUSES = {"in_progress", "blocked", "completed"}
@@ -239,6 +241,42 @@ def composite_survey_state_path(root: Path, *, slug: str, composite_id: str) -> 
         if not value or Path(value).name != value or value in {".", ".."}:
             raise ValueError(f"composite survey {label} is not canonical")
     return root / "kb" / "synthesis" / safe_slug / "composite-requests" / f"{safe_id}.yaml"
+
+
+def pending_composite_survey_states(root: Path) -> list[dict[str, Any]]:
+    """Discover current durable survey routes without mutating or interpreting them."""
+    synthesis = root / "kb" / "synthesis"
+    if not synthesis.exists():
+        return []
+    if synthesis.is_symlink() or not synthesis.is_dir():
+        raise SystemExit("Survey synthesis root is unsafe.")
+    pending: list[dict[str, Any]] = []
+    for survey_root in sorted(synthesis.iterdir(), key=lambda item: item.name):
+        if survey_root.is_symlink() or not survey_root.is_dir():
+            continue
+        requests = survey_root / "composite-requests"
+        if not requests.exists():
+            continue
+        if requests.is_symlink() or not requests.is_dir():
+            raise SystemExit("Composite survey request root is unsafe.")
+        for path in sorted(requests.glob("*.yaml"), key=lambda item: item.name):
+            if path.is_symlink() or not path.is_file():
+                raise SystemExit("Composite survey state is unsafe.")
+            state = load_yaml(path, default={})
+            violations = composite_survey_state_violations(state)
+            if violations:
+                raise SystemExit("Composite survey state is invalid: " + "; ".join(violations))
+            if state.get("status") == "completed":
+                continue
+            pending.append(
+                {
+                    "slug": survey_root.name,
+                    "path": path.relative_to(root).as_posix(),
+                    "state": copy.deepcopy(state),
+                    "state_digest": _canonical_digest(state),
+                }
+            )
+    return pending
 
 
 def new_composite_survey_state(
@@ -563,6 +601,7 @@ __all__ = [
     "composite_survey_state_path",
     "evidence_gap_handoff",
     "new_composite_survey_state",
+    "pending_composite_survey_states",
     "select_current_confirmed_survey_records",
     "select_survey_records",
     "survey_artifact_path",
