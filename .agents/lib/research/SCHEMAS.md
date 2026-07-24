@@ -41,6 +41,7 @@
 - **judgement 授权**：judgement track 还必须保存用户原话 `user_authorization`，且 `authorization_source=user_message`。这是本地 attestation 完整性与审计留痕，不宣称密码学身份认证。
 - **verify→confirm 绑定**：judgement 必须先有非空 canonical `payload.claims` 与当前 `payload.verification`；receipt 的 `claim_ids` 非空并覆盖 canonical claims。claims/content/artifact bytes 改变均使确认失效并降回 pending。公开 current-receipt consumer 必须提供从 project root 推导的 verification/source roots 并重新读取 artifact byte sha256；无可信路径 context 的结构校验不能放行 report/index/review judgement。
 - **恢复 after-state CAS**：已 commit operation 的 undo/restore 在 workspace + exact-target locks 内、创建 recovery journal 前，要求 `after_digests` 完整覆盖 target set 且每个当前 digest 完全匹配；缺失或后续人工修改均零业务写 fail-closed。`state=begin` 的 crash resume 仍按 root before snapshot 自愈，不适用 commit after-state CAS。
+- **Abort zero-churn**：abort/resume 对每个 target 先比较 current digest 与 before digest；相等时不得调用 restore/atomic replace，必须保留原 bytes、mode 与 inode identity。只有实际偏离 before-state 的 target 才恢复。可预期的验证拒绝优先放在 lock 下、journal snapshot 前的 preflight；只读 fill/orientation/corpus 等 input 不进入 mutation target set。
 - **claim 语义下限**：canonical claim 的类型不能被 record 级 `information_types` / `source` 降级；`inference` / `evaluation` / `user_opinion` 都强制 judgement track，`unverified` claim 在解决或替换前不得 `confirmed`。纯事实元数据且无 canonical claims 仍允许轻确认。
 
 ---
