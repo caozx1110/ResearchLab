@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Mapping, Sequence
 
+from .common import exclusive_file_lock
 from .journal import current_operation_id
 
 
@@ -467,6 +468,8 @@ def _validate_display_item(item: object) -> dict[str, Any]:
     normalized = dict(item)
     _safe_display_text(normalized.get("kind_label"), field="kind label", max_length=80)
     _safe_display_text(normalized.get("title"), field="title", max_length=320)
+    _safe_display_text(normalized.get("subject_id"), field="subject id", max_length=200)
+    _safe_display_text(normalized.get("location_summary"), field="location summary", max_length=320)
     substance = normalized.get("substance", [])
     claims = normalized.get("claims", [])
     if not isinstance(substance, list) or not isinstance(claims, list):
@@ -500,7 +503,12 @@ def _validate_display_item(item: object) -> dict[str, Any]:
     return normalized
 
 
-def _render_sheet(batch_ref: str, slots: Sequence[Mapping[str, Any]], displays: Sequence[Mapping[str, Any]]) -> str:
+def _render_sheet(
+    batch_ref: str,
+    expires_at: str,
+    slots: Sequence[Mapping[str, Any]],
+    displays: Sequence[Mapping[str, Any]],
+) -> str:
     lines = [
         "---",
         f"schema: {REVIEW_SHEET_SCHEMA}",
@@ -511,6 +519,7 @@ def _render_sheet(batch_ref: str, slots: Sequence[Mapping[str, Any]], displays: 
         "",
         "> 这里的勾选只是决定草稿，不会自动修改知识库。勾选后请回到与 Agent 的对话中要求同步。",
         "> 每项只能选择一个：确认、拒绝或暂缓。",
+        f"> 有效至：{_markdown(expires_at, field='expiry', max_length=40)}",
         "",
         f"<!-- kb-review-batch:{batch_ref} -->",
         "",
@@ -521,6 +530,10 @@ def _render_sheet(batch_ref: str, slots: Sequence[Mapping[str, Any]], displays: 
             [
                 f"<!-- kb-review-slot:{slot_ref} -->",
                 f"## {index}. {_markdown(display.get('kind_label'), field='kind label', max_length=80)}「{_markdown(display.get('title'), field='title', max_length=320)}」",
+                "",
+                f"公共编号：{_markdown(display.get('subject_id'), field='subject id', max_length=200)}",
+                "",
+                f"来源 / 定位：{_markdown(display.get('location_summary'), field='location summary', max_length=320)}",
                 "",
             ]
         )
@@ -613,7 +626,7 @@ def create_obsidian_review_batch(
     }
     batch_ref = _batch_ref(payload)
     payload["batch_ref"] = batch_ref
-    sheet_text = _render_sheet(batch_ref, slots, normalized_displays)
+    sheet_text = _render_sheet(batch_ref, str(payload["expires_at"]), slots, normalized_displays)
     sheet_name = f"Pending Review {batch_ref[:12]}.md"
     root = project_root.resolve()
     registry_path = root / _RUNTIME_BATCHES_DIR / f"{batch_ref}.json"
@@ -707,7 +720,7 @@ def _parse_sheet_decisions(text: str, payload: Mapping[str, Any]) -> tuple[dict[
     slots = payload.get("slots")
     displays = payload.get("display_items")
     items = payload.get("review_items")
-    expected = _render_sheet(batch_ref, slots, displays)
+    expected = _render_sheet(batch_ref, str(payload.get("expires_at") or ""), slots, displays)
     normalized = _CHECKBOX_NORMALIZE_RE.sub(r"- [ ] \1", text)
     if normalized != expected:
         raise ReviewBatchError("sheet_tampered", "only the generated review checkboxes may be edited")
@@ -813,16 +826,16 @@ def preflight_obsidian_review_batch(
     return ReviewBatchPreflight(preview=preview, current_items=tuple(current_items))
 
 
-def obsidian_review_batch_runtime_targets(project_root: Path, batch_ref: str) -> tuple[Path, Path]:
+def obsidian_review_batch_runtime_targets(project_root: Path, batch_ref: str) -> tuple[Path, Path, Path]:
     """Return the exact mutable registry files after validating an unused batch."""
     root = project_root.resolve()
     payload = _load_batch(root, batch_ref)
     batch_path = root / _RUNTIME_BATCHES_DIR / f"{batch_ref}.json"
     source_path = root / _SOURCE_SNAPSHOTS_DIR / f"{payload['source_snapshot_token']}.json"
-    return batch_path, source_path
+    return batch_path, source_path, _sheet_path(root, batch_ref)
 
 
-def consume_obsidian_review_batch(project_root: Path, batch_ref: str) -> tuple[Path, Path]:
+def _consume_obsidian_review_batch_locked(project_root: Path, batch_ref: str) -> tuple[Path, Path, Path]:
     """Consume both one-time registries inside the caller's root transaction."""
     root = project_root.resolve()
     if not current_operation_id(root):
@@ -833,6 +846,20 @@ def consume_obsidian_review_batch(project_root: Path, batch_ref: str) -> tuple[P
     if source.get("status") != "unused" or source.get("review_items") != payload.get("review_items"):
         raise ReviewBatchError("tampered_or_unknown", "source review snapshot changed during apply")
     consumed_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    sheet_name = f"Pending Review {batch_ref[:12]}.md"
+    try:
+        sheet_text = _regular_file_bytes_at(root, _ANNOTATIONS_DIR, sheet_name).decode("utf-8")
+    except UnicodeError as exc:
+        raise ReviewBatchError("sheet_tampered", "review sheet is not valid UTF-8") from exc
+    title = "# 待确认判断\n"
+    if title not in sheet_text:
+        raise ReviewBatchError("sheet_tampered", "review sheet title is missing")
+    applied_sheet = sheet_text.replace(
+        title,
+        "# 已处理判断\n\n"
+        f"> ✅ 本批决定已于 {consumed_at} 作为一个整体应用；以下人工勾选原样保留为处理记录。\n",
+        1,
+    )
     consumed_batch = dict(payload)
     consumed_batch["status"] = "consumed"
     consumed_batch["consumed_at"] = consumed_at
@@ -841,6 +868,7 @@ def consume_obsidian_review_batch(project_root: Path, batch_ref: str) -> tuple[P
     consumed_source["consumed_at"] = consumed_at
     batch_path = root / _RUNTIME_BATCHES_DIR / f"{batch_ref}.json"
     source_path = root / _SOURCE_SNAPSHOTS_DIR / f"{source_token}.json"
+    sheet_path = root / _ANNOTATIONS_DIR / sheet_name
     _replace_regular_file_at(
         root,
         _RUNTIME_BATCHES_DIR,
@@ -853,7 +881,16 @@ def consume_obsidian_review_batch(project_root: Path, batch_ref: str) -> tuple[P
         f"{source_token}.json",
         (_canonical_json(consumed_source) + "\n").encode("utf-8"),
     )
-    return batch_path, source_path
+    _replace_regular_file_at(root, _ANNOTATIONS_DIR, sheet_name, applied_sheet.encode("utf-8"))
+    return batch_path, source_path, sheet_path
+
+
+def consume_obsidian_review_batch(project_root: Path, batch_ref: str) -> tuple[Path, Path, Path]:
+    """Consume an Obsidian batch while excluding source-snapshot GC races."""
+    root = project_root.resolve()
+    lock_path = root / "kb/.runtime/review-snapshots.lock"
+    with exclusive_file_lock(lock_path):
+        return _consume_obsidian_review_batch_locked(root, batch_ref)
 
 
 __all__ = [

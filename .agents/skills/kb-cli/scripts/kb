@@ -66,7 +66,7 @@ from research.review_batches import (
     preflight_obsidian_review_batch,
     preview_obsidian_review_batch,
 )
-from research.journal import mutation_transaction
+from research.journal import current_operation_id, mutation_transaction
 from research import updater
 from research.obsidian import obsidian_projection_status, update_obsidian_projection
 
@@ -2568,6 +2568,16 @@ class ReviewSnapshotError(ValueError):
         self.code = code
 
 
+@dataclass(frozen=True)
+class ReviewSnapshotLease:
+    """Pure-read binding for one displayed review decision set."""
+
+    token: str
+    protocol_relative_path: str
+    review_items: tuple[dict[str, object], ...]
+    registry_path: Path
+
+
 def _review_card_record(card: Mapping[str, object]) -> dict[str, object]:
     """Project an internal side-artifact card into the existing review renderer."""
     subject = card.get("subject")
@@ -2909,9 +2919,26 @@ def _obsidian_review_display(
     raw_kind = str(record.get("kind") or "")
     kind_label = PUBLIC_KIND_LABELS.get(raw_kind, _SIDE_JUDGEMENT_KIND_LABELS.get(raw_kind, "知识条目"))
     title = _public_display_text(record.get("title") or "-", root, "标题需由 Agent 安全解释", 160)
+    subject_id = _public_display_text(record.get("id") or "-", root, "编号已隐藏", 100)
+    source = record.get("source")
+    source = source if isinstance(source, Mapping) else {}
+    raw_location = (
+        source.get("original_uri")
+        or record.get("program_id")
+        or record.get("idea_id")
+        or f"{kind_label} · {subject_id}"
+    )
+    location_summary = _public_display_text(
+        raw_location,
+        root,
+        f"{kind_label} · {subject_id}",
+        240,
+    )
     return {
         "kind_label": kind_label,
         "title": title,
+        "subject_id": subject_id,
+        "location_summary": location_summary,
         "fact_summary": str(projection.get("fact_summary") or ""),
         "substance": list(projection.get("substance") or []),
         "claims": list(projection.get("claims") or []),
@@ -3142,7 +3169,8 @@ def _store_review_snapshot(
     return token
 
 
-def _load_review_snapshot(root: Path, requested: str) -> list[dict[str, object]]:
+def _load_review_snapshot(root: Path, requested: str) -> ReviewSnapshotLease:
+    """Validate a displayed snapshot without changing its lifecycle state."""
     path = agent_protocol_path(root, requested)
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -3175,7 +3203,6 @@ def _load_review_snapshot(root: Path, requested: str) -> list[dict[str, object]]
     stored_path = snapshot_root / f"{token}.json"
     now = _review_now_epoch()
     with exclusive_file_lock(lock_path):
-        _gc_review_snapshots_locked(snapshot_root, now=now)
         stored = _regular_review_snapshot_payload(stored_path)
         if stored is None:
             raise ReviewSnapshotError("tampered_or_unknown", "review snapshot token is unknown or invalid")
@@ -3188,25 +3215,57 @@ def _load_review_snapshot(root: Path, requested: str) -> list[dict[str, object]]
         if status_value != "unused" or expires_at is None:
             raise ReviewSnapshotError("tampered_or_unknown", "review snapshot lifecycle is invalid")
         if now >= expires_at:
-            stored = {
-                "schema": _REVIEW_SNAPSHOT_SCHEMA,
-                "created_at": str(stored.get("created_at") or ""),
-                "expires_at": str(stored.get("expires_at") or ""),
-                "status": "expired",
-                "expired_at": _review_timestamp(expires_at),
-            }
-            _atomic_write_review_snapshot(stored_path, stored)
             raise ReviewSnapshotError("expired", "review snapshot token expired")
+        protocol_relative_path = path.relative_to(runtime_root).as_posix()
         if (
-            stored.get("protocol_path") != path.relative_to(runtime_root).as_posix()
+            stored.get("protocol_path") != protocol_relative_path
             or stored.get("review_items") != normalized
         ):
             raise ReviewSnapshotError("tampered_or_unknown", "review snapshot does not match the displayed one-time decision set")
+    return ReviewSnapshotLease(
+        token=token,
+        protocol_relative_path=protocol_relative_path,
+        review_items=tuple(normalized),
+        registry_path=stored_path,
+    )
+
+
+def _consume_review_snapshot(root: Path, lease: ReviewSnapshotLease) -> Path:
+    """Consume a revalidated lease inside the caller's root transaction."""
+    if not current_operation_id(root):
+        raise ReviewSnapshotError("tampered_or_unknown", "snapshot consumption requires a root transaction")
+    paths = _review_snapshot_paths(root, create=False)
+    if paths is None:
+        raise ReviewSnapshotError("tampered_or_unknown", "review snapshot token is unknown or invalid")
+    _runtime_root, snapshot_root, lock_path = paths
+    stored_path = snapshot_root / f"{lease.token}.json"
+    if stored_path != lease.registry_path:
+        raise ReviewSnapshotError("tampered_or_unknown", "review snapshot registry changed")
+    with exclusive_file_lock(lock_path):
+        stored = _regular_review_snapshot_payload(stored_path)
+        if stored is None:
+            raise ReviewSnapshotError("tampered_or_unknown", "review snapshot token is unknown or invalid")
+        status_value = str(stored.get("status") or "")
+        if status_value == "consumed":
+            raise ReviewSnapshotError("already_applied", "review snapshot token was already applied")
+        if status_value == "expired":
+            raise ReviewSnapshotError("expired", "review snapshot token expired")
+        expires_at = _review_timestamp_epoch(stored.get("expires_at"))
+        now = _review_now_epoch()
+        if status_value != "unused" or expires_at is None:
+            raise ReviewSnapshotError("tampered_or_unknown", "review snapshot lifecycle is invalid")
+        if now >= expires_at:
+            raise ReviewSnapshotError("expired", "review snapshot token expired")
+        if (
+            stored.get("protocol_path") != lease.protocol_relative_path
+            or stored.get("review_items") != list(lease.review_items)
+        ):
+            raise ReviewSnapshotError("tampered_or_unknown", "review snapshot changed during apply")
         consumed = dict(stored)
         consumed["status"] = "consumed"
         consumed["consumed_at"] = _review_timestamp(now)
         _atomic_write_review_snapshot(stored_path, consumed)
-    return normalized
+    return stored_path
 
 
 def _current_review_item(root: Path, subject: Mapping[str, object]) -> dict[str, object]:
@@ -3325,8 +3384,8 @@ def _review_apply_failure_message(code: str) -> str:
         "stale_content": "待确认内容已经更新，这次拍板没有应用；请重新运行 kb review 查看最新内容。",
         "authorization_stale": "Obsidian 勾选与刚才展示的预览已经不同；没有应用任何决定，请重新预览后再授权。",
         "tampered_or_unknown": "无法验证这份待确认清单；请重新运行 kb review 获取新的安全清单。",
-        "invalid_decision": "这次拍板不在刚才展示的范围内；请重新运行 kb review 后再决定。",
-        "missing_confirmation_context": "确认所需的真实署名或当前授权还不完整；补充后请重新运行 kb review。",
+        "invalid_decision": "这次拍板不在刚才展示的范围内；没有应用任何决定。请回到 Agent 对话修正后用同一清单重试。",
+        "missing_confirmation_context": "拍板所需的真实署名、当前授权或证据还不完整；没有应用任何决定。补充后请回到 Agent 对话用同一清单重试。",
         "sheet_tampered": "Obsidian 待确认表除勾选框外发生了变化；没有应用任何决定，请重新生成待确认表。",
         "unsafe_display": "有内容不适合安全写入 Obsidian 待确认表；请先让 Agent 安全解释。",
         "invalid_batch": "这份 Obsidian 待确认表不完整；请重新运行 kb review。",
@@ -3483,6 +3542,104 @@ def _review_plan_identity(plan: Mapping[str, object]) -> tuple[tuple[str, str], 
     return tuple(sorted(normalized))
 
 
+def _review_batch_owner_plans(
+    root: Path,
+    current_items: Sequence[Mapping[str, object]],
+    decisions: Sequence[Mapping[str, object]],
+    *,
+    actor: str,
+    evidence: list[str],
+    user_authorization: str,
+    rejection_reason: str,
+) -> tuple[list[tuple[object, dict[str, object], dict[str, object], str]], list[Path]]:
+    if len(current_items) != len(decisions):
+        raise ReviewBatchError("invalid_decision", "review decisions do not match the validated subjects")
+    planned: list[tuple[object, dict[str, object], dict[str, object], str]] = []
+    canonical_targets: list[Path] = []
+    for current_item, chosen in zip(current_items, decisions):
+        decision = str(chosen.get("decision") or "")
+        if decision == "defer":
+            continue
+        if decision not in {"confirm", "reject"}:
+            raise ReviewBatchError("invalid_decision", "review decision is unsupported")
+        module, plan = _review_batch_owner_plan(
+            root,
+            current_item,
+            decision,
+            actor=actor,
+            evidence=evidence,
+            user_authorization=user_authorization,
+            authorization_source="user_message",
+            rejection_reason=rejection_reason,
+        )
+        canonical_targets.extend(plan["target_paths"])
+        planned.append((module, plan, dict(current_item), decision))
+    return planned, canonical_targets
+
+
+def _apply_review_atomic_batch(
+    root: Path,
+    *,
+    op_type: str,
+    current_items: Sequence[Mapping[str, object]],
+    decisions: Sequence[Mapping[str, object]],
+    runtime_targets: Sequence[Path],
+    actor: str,
+    evidence: list[str],
+    user_authorization: str,
+    rejection_reason: str,
+    locked_preflight: Callable[
+        [], tuple[Sequence[Mapping[str, object]], Sequence[Mapping[str, object]]]
+    ],
+    consume: Callable[[], object],
+) -> tuple[list[Path], int]:
+    """Apply dialogue or Obsidian decisions through one shared coordinator."""
+    expected_decisions = tuple(dict(item) for item in decisions)
+    planned, canonical_targets = _review_batch_owner_plans(
+        root,
+        current_items,
+        expected_decisions,
+        actor=actor,
+        evidence=evidence,
+        user_authorization=user_authorization,
+        rejection_reason=rejection_reason,
+    )
+    all_targets = sorted(set([*canonical_targets, *runtime_targets]), key=lambda path: path.as_posix())
+    with mutation_transaction(root, op_type, all_targets):
+        locked_items, locked_decisions = locked_preflight()
+        normalized_locked_decisions = tuple(dict(item) for item in locked_decisions)
+        if normalized_locked_decisions != expected_decisions:
+            raise ReviewBatchError("authorization_stale", "review decisions changed after authorization")
+        locked_plans, locked_targets = _review_batch_owner_plans(
+            root,
+            locked_items,
+            normalized_locked_decisions,
+            actor=actor,
+            evidence=evidence,
+            user_authorization=user_authorization,
+            rejection_reason=rejection_reason,
+        )
+        if sorted(set(locked_targets), key=lambda path: path.as_posix()) != sorted(
+            set(canonical_targets), key=lambda path: path.as_posix()
+        ) or [_review_plan_identity(item[1]) for item in locked_plans] != [
+            _review_plan_identity(item[1]) for item in planned
+        ]:
+            raise ReviewBatchError("stale_content", "review owner targets changed while applying")
+        for module, _plan, current_item, decision in locked_plans:
+            module.apply_review_batch_decision(
+                root,
+                current_item,
+                decision,
+                actor=actor,
+                evidence=evidence,
+                user_authorization=user_authorization,
+                authorization_source="user_message",
+                rejection_reason=rejection_reason,
+            )
+        consume()
+    return sorted(set(canonical_targets), key=lambda path: path.as_posix()), len(planned)
+
+
 def handle_obsidian_review_apply(args: argparse.Namespace, root: Path) -> int:
     actor = default_confirmed_by(root)
     authorization = str(args.user_authorization or "").strip()
@@ -3512,26 +3669,7 @@ def handle_obsidian_review_apply(args: argparse.Namespace, root: Path) -> int:
                     "missing_confirmation_context",
                     "confirmation requires a real signer, current authorization, and evidence",
                 )
-        planned: list[tuple[object, dict[str, object], dict[str, object], str]] = []
-        canonical_targets: list[Path] = []
-        for current_item, chosen in zip(preflight.current_items, preflight.preview.decisions):
-            decision = str(chosen.get("decision") or "")
-            if decision == "defer":
-                continue
-            module, plan = _review_batch_owner_plan(
-                root,
-                current_item,
-                decision,
-                actor=actor,
-                evidence=evidence,
-                user_authorization=authorization,
-                authorization_source="user_message",
-                rejection_reason=rejection_reason,
-            )
-            canonical_targets.extend(plan["target_paths"])
-            planned.append((module, plan, dict(current_item), decision))
         runtime_targets = list(obsidian_review_batch_runtime_targets(root, preflight.preview.batch_ref))
-        all_targets = sorted(set(canonical_targets + runtime_targets), key=lambda path: path.as_posix())
     except ReviewBatchError as exc:
         set_protocol_status("agent_action_required", review_apply_error=exc.code)
         print(_review_apply_failure_message(exc.code), file=sys.stderr)
@@ -3545,50 +3683,30 @@ def handle_obsidian_review_apply(args: argparse.Namespace, root: Path) -> int:
         print(_review_apply_failure_message("stale_content"), file=sys.stderr)
         return 2
 
+    def locked_preflight() -> tuple[Sequence[Mapping[str, object]], Sequence[Mapping[str, object]]]:
+        locked = preflight_obsidian_review_batch(
+            root,
+            preflight.preview.batch_ref,
+            current_item_resolver=lambda subject: _current_review_item(root, subject),
+        )
+        if locked.preview.decision_digest != expected_preview_digest:
+            raise ReviewBatchError("authorization_stale", "review decisions changed after authorization")
+        return locked.current_items, locked.preview.decisions
+
     try:
-        with mutation_transaction(root, "kb-cli:obsidian-review-batch", all_targets):
-            locked = preflight_obsidian_review_batch(
-                root,
-                preflight.preview.batch_ref,
-                current_item_resolver=lambda subject: _current_review_item(root, subject),
-            )
-            if (
-                locked.preview.decision_digest != expected_preview_digest
-                or locked.preview.decisions != preflight.preview.decisions
-            ):
-                raise ReviewBatchError("authorization_stale", "review decisions changed after authorization")
-            locked_plans: list[tuple[object, dict[str, object], dict[str, object], str]] = []
-            for current_item, chosen in zip(locked.current_items, locked.preview.decisions):
-                decision = str(chosen.get("decision") or "")
-                if decision == "defer":
-                    continue
-                module, plan = _review_batch_owner_plan(
-                    root,
-                    current_item,
-                    decision,
-                    actor=actor,
-                    evidence=evidence,
-                    user_authorization=authorization,
-                    authorization_source="user_message",
-                    rejection_reason=rejection_reason,
-                )
-                locked_plans.append((module, plan, dict(current_item), decision))
-            if [_review_plan_identity(item[1]) for item in locked_plans] != [
-                _review_plan_identity(item[1]) for item in planned
-            ]:
-                raise ReviewBatchError("stale_content", "review owner targets changed while applying")
-            for module, _plan, current_item, decision in locked_plans:
-                module.apply_review_batch_decision(
-                    root,
-                    current_item,
-                    decision,
-                    actor=actor,
-                    evidence=evidence,
-                    user_authorization=authorization,
-                    authorization_source="user_message",
-                    rejection_reason=rejection_reason,
-                )
-            consume_obsidian_review_batch(root, locked.preview.batch_ref)
+        canonical_targets, applied_count = _apply_review_atomic_batch(
+            root,
+            op_type="kb-cli:obsidian-review-batch",
+            current_items=preflight.current_items,
+            decisions=preflight.preview.decisions,
+            runtime_targets=runtime_targets,
+            actor=actor,
+            evidence=evidence,
+            user_authorization=authorization,
+            rejection_reason=rejection_reason,
+            locked_preflight=locked_preflight,
+            consume=lambda: consume_obsidian_review_batch(root, preflight.preview.batch_ref),
+        )
     except ReviewBatchError as exc:
         set_protocol_status("agent_action_required", review_apply_error=exc.code)
         print(_review_apply_failure_message(exc.code), file=sys.stderr)
@@ -3607,7 +3725,7 @@ def handle_obsidian_review_apply(args: argparse.Namespace, root: Path) -> int:
                 checkpoint_and_report(
                     root,
                     trigger="milestone",
-                    message=f"milestone: apply Obsidian review batch ({len(planned)} decisions)",
+                    message=f"milestone: apply Obsidian review batch ({applied_count} decisions)",
                     target_paths=exact_checkpoint_targets,
                 )
         except BaseException:
@@ -3620,7 +3738,7 @@ def handle_obsidian_review_apply(args: argparse.Namespace, root: Path) -> int:
     summaries = _obsidian_batch_decision_summary(root, preflight.preview.review_items, preflight.preview.decisions)
     set_protocol_status(
         "completed",
-        obsidian_review_applied_count=len(planned),
+        obsidian_review_applied_count=applied_count,
         obsidian_review_deferred_count=sum(item["decision"] == "defer" for item in summaries),
     )
     print("Obsidian 中的决定已作为一个整体同步；所有项目均成功，待确认表已安全消费。")
@@ -3628,64 +3746,67 @@ def handle_obsidian_review_apply(args: argparse.Namespace, root: Path) -> int:
 
 
 def handle_review_apply(args: argparse.Namespace, root: Path) -> int:
+    def current_selection(
+        lease: ReviewSnapshotLease,
+        selected_decisions: Mapping[str, str],
+    ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+        current_items: list[dict[str, object]] = []
+        decisions: list[dict[str, object]] = []
+        for snapshot_item in lease.review_items:
+            subject = snapshot_item.get("subject", {})
+            ref = _review_subject_ref(subject)
+            decision = selected_decisions.get(ref)
+            if decision is None:
+                continue
+            try:
+                current = _current_review_item(root, subject)
+            except ValueError as exc:
+                raise ReviewSnapshotError("stale_content", "displayed judgement is no longer current") from exc
+            if any(
+                current.get(key) != snapshot_item.get(key)
+                for key in ("subject", "snapshot_binding", "confirm_route", "reject_route")
+            ):
+                raise ReviewSnapshotError("stale_content", "review snapshot content is stale")
+            current_items.append(current)
+            decisions.append(
+                {
+                    "decision": decision,
+                    "subject": dict(subject) if isinstance(subject, Mapping) else {},
+                }
+            )
+        return current_items, decisions
+
     try:
-        snapshot_items = _load_review_snapshot(root, args.apply_snapshot)
+        lease = _load_review_snapshot(root, args.apply_snapshot)
         snapshot_by_ref = {
             _review_subject_ref(item.get("subject", {})): item
-            for item in snapshot_items
+            for item in lease.review_items
         }
         confirm_refs = [str(item) for item in args.confirm_ref]
         reject_refs = [str(item) for item in args.reject_ref]
-        requested = [*confirm_refs, *reject_refs]
-        if not requested or len(set(requested)) != len(requested):
+        defer_refs = [str(item) for item in args.defer_ref]
+        requested = [*confirm_refs, *reject_refs, *defer_refs]
+        if not requested or len(requested) > _PUBLIC_REVIEW_LIMIT or len(set(requested)) != len(requested):
             raise ReviewSnapshotError("invalid_decision", "review decisions are empty or duplicated")
-        if len(requested) != 1:
-            raise ReviewSnapshotError("invalid_decision", "apply exactly one displayed review decision at a time")
         outside = sorted(set(requested) - set(snapshot_by_ref))
         if outside:
             raise ReviewSnapshotError("invalid_decision", "review decision is outside the displayed Top 3 snapshot")
+        selected_decisions = {
+            **{ref: "confirm" for ref in confirm_refs},
+            **{ref: "reject" for ref in reject_refs},
+            **{ref: "defer" for ref in defer_refs},
+        }
         actor = default_confirmed_by(root)
         if confirm_refs and (not actor or is_ai_signer(actor)):
             raise ReviewSnapshotError("missing_confirmation_context", "a real human confirmation identity is required")
         user_authorization = str(args.user_authorization or "").strip()
         evidence = [str(item).strip() for item in args.decision_evidence if str(item).strip()]
-        if confirm_refs and (not user_authorization or not evidence):
+        if not user_authorization or (confirm_refs and not evidence):
             raise ReviewSnapshotError(
                 "missing_confirmation_context",
-                "confirmation requires the user's current authorization and evidence",
+                "review decisions require current authorization; confirmation also requires evidence",
             )
-
-        current_items: dict[str, dict[str, object]] = {}
-        for ref in requested:
-            snapshot_item = snapshot_by_ref[ref]
-            try:
-                current = _current_review_item(root, snapshot_item.get("subject", {}))
-            except ValueError as exc:
-                raise ReviewSnapshotError("stale_content", "displayed judgement is no longer current") from exc
-            if current.get("snapshot_binding") != snapshot_item.get("snapshot_binding"):
-                raise ReviewSnapshotError("stale_content", "review snapshot content is stale")
-            current_items[ref] = current
-        commands = [
-            _review_owner_command(
-                current_items[ref],
-                "confirm",
-                actor=actor,
-                evidence=evidence,
-                user_authorization=user_authorization,
-                rejection_reason="",
-            )
-            for ref in confirm_refs
-        ] + [
-            _review_owner_command(
-                current_items[ref],
-                "reject",
-                actor="",
-                evidence=[],
-                user_authorization="",
-                rejection_reason=str(args.rejection_reason or "").strip(),
-            )
-            for ref in reject_refs
-        ]
+        current_items, decisions = current_selection(lease, selected_decisions)
     except ReviewSnapshotError as exc:
         set_protocol_status("agent_action_required", review_apply_error=exc.code)
         print(_review_apply_failure_message(exc.code), file=sys.stderr)
@@ -3695,21 +3816,69 @@ def handle_review_apply(args: argparse.Namespace, root: Path) -> int:
         print(_review_apply_failure_message("tampered_or_unknown"), file=sys.stderr)
         return 2
 
-    for script, arguments in commands:
-        result = forward_command(root, script, arguments, stream=False)
-        if result.returncode != 0:
-            set_protocol_status("agent_action_required", review_apply_error="stale_content")
-            print(_review_apply_failure_message("stale_content"), file=sys.stderr)
-            return result.returncode
-    set_protocol_status("completed", applied_review_count=len(commands))
-    ref = requested[0]
-    display = current_items[ref].get("display")
-    display = display if isinstance(display, Mapping) else {}
-    raw_kind = str(display.get("kind") or current_items[ref].get("subject", {}).get("kind") or "")
-    kind_label = PUBLIC_KIND_LABELS.get(raw_kind, _SIDE_JUDGEMENT_KIND_LABELS.get(raw_kind, "判断"))
-    title = _public_display_text(display.get("title") or "", root, "标题需由 Agent 安全解释", 160)
-    decision_label = "已确认" if confirm_refs else "已拒绝"
-    print(f"已应用 1 条拍板结果：{decision_label}{kind_label}「{title}」；可再次运行 kb review 查看剩余内容。")
+    def locked_preflight() -> tuple[Sequence[Mapping[str, object]], Sequence[Mapping[str, object]]]:
+        locked_lease = _load_review_snapshot(root, args.apply_snapshot)
+        if locked_lease != lease:
+            raise ReviewSnapshotError("stale_content", "review snapshot changed while applying")
+        return current_selection(locked_lease, selected_decisions)
+
+    try:
+        canonical_targets, applied_count = _apply_review_atomic_batch(
+            root,
+            op_type="kb-cli:dialogue-review-batch",
+            current_items=current_items,
+            decisions=decisions,
+            runtime_targets=[lease.registry_path],
+            actor=actor,
+            evidence=evidence,
+            user_authorization=user_authorization,
+            rejection_reason=str(args.rejection_reason or "").strip(),
+            locked_preflight=locked_preflight,
+            consume=lambda: _consume_review_snapshot(root, _load_review_snapshot(root, args.apply_snapshot)),
+        )
+    except (ReviewBatchError, ReviewSnapshotError) as exc:
+        set_protocol_status("agent_action_required", review_apply_error=exc.code)
+        print(_review_apply_failure_message(exc.code), file=sys.stderr)
+        return 2
+    except (OSError, RuntimeError, SystemExit, TypeError, ValueError):
+        set_protocol_status("agent_action_required", review_apply_error="stale_content")
+        print(_review_apply_failure_message("stale_content"), file=sys.stderr)
+        return 2
+
+    if canonical_targets:
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                checkpoint_and_report(
+                    root,
+                    trigger="milestone",
+                    message=f"milestone: apply dialogue review batch ({applied_count} decisions)",
+                    target_paths=canonical_targets,
+                )
+        except BaseException:
+            set_protocol_status(
+                "error",
+                checkpoint_status="failed_after_business_apply",
+                business_state="applied_before_checkpoint",
+            )
+            raise
+    labels = {"confirm": "已确认", "reject": "已拒绝", "defer": "已暂缓"}
+    set_protocol_status(
+        "completed",
+        applied_review_count=applied_count,
+        deferred_review_count=len(defer_refs),
+        decided_review_count=len(requested),
+    )
+    print(f"已应用 {len(requested)} 条拍板结果（原子批量）：")
+    for current_item, decision in zip(current_items, decisions):
+        display = current_item.get("display")
+        display = display if isinstance(display, Mapping) else {}
+        subject = current_item.get("subject")
+        subject = subject if isinstance(subject, Mapping) else {}
+        raw_kind = str(display.get("kind") or subject.get("kind") or "")
+        kind_label = PUBLIC_KIND_LABELS.get(raw_kind, _SIDE_JUDGEMENT_KIND_LABELS.get(raw_kind, "判断"))
+        title = _public_display_text(display.get("title") or "", root, "标题需由 Agent 安全解释", 160)
+        print(f"- {labels[str(decision['decision'])]}{kind_label}「{title}」")
+    print("这批决定已作为一个整体处理；可再次运行 kb review 查看剩余内容。")
     return 0
 
 
@@ -3868,7 +4037,7 @@ def handle_review(args: argparse.Namespace, root: Path) -> int:
                 "mode": "snapshot-bound",
                 "snapshot_protocol": str(getattr(args, "agent_protocol", "") or ""),
                 "scope": "displayed_review_items_only",
-                "max_decisions_per_apply": 1,
+                "max_decisions_per_apply": _PUBLIC_REVIEW_LIMIT,
                 "snapshot_token": snapshot_token,
             },
         )
@@ -3906,7 +4075,7 @@ def handle_review(args: argparse.Namespace, root: Path) -> int:
             )
         if remaining_count:
             print(f"另有 {remaining_count} 条已准备好的内容暂未展开；处理这批后可继续查看。")
-        print("以上待确认内容已经过当前流程核验；以上内容需要你用自然语言确认或拒绝，在你拍板前不会写成已确认结论。")
+        print("以上待确认内容已经过当前流程核验；请回到 Agent 对话，用自然语言一次确认、拒绝或暂缓最多 3 项。在你拍板前不会写成已确认结论。")
         if obsidian_batch is not None:
             print("已在 Obsidian 的人工批注区生成可编辑待确认表；勾选后请回到对话中要求 Agent 同步。")
         if confirmation_identity_required:
@@ -4011,6 +4180,7 @@ def register_review(subparsers: argparse._SubParsersAction[argparse.ArgumentPars
     parser.add_argument("--apply-snapshot", default="", help=argparse.SUPPRESS)
     parser.add_argument("--confirm-ref", action="append", default=[], help=argparse.SUPPRESS)
     parser.add_argument("--reject-ref", action="append", default=[], help=argparse.SUPPRESS)
+    parser.add_argument("--defer-ref", action="append", default=[], help=argparse.SUPPRESS)
     parser.add_argument("--decision-evidence", action="append", default=[], help=argparse.SUPPRESS)
     parser.add_argument("--user-authorization", default="", help=argparse.SUPPRESS)
     parser.add_argument("--rejection-reason", default="", help=argparse.SUPPRESS)
