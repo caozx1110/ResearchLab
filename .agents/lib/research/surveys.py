@@ -231,11 +231,12 @@ def evidence_gap_handoff(
     filters: dict[str, str],
     excluded: list[dict[str, Any]] | None = None,
     composite_binding: dict[str, Any] | None = None,
+    reason: str = "no_current_confirmed_units",
 ) -> dict[str, Any]:
     """Structured discovery/intake/analysis handoff with an optional durable binding."""
     return {
         "status": "evidence_gap",
-        "reason": "no_current_confirmed_units",
+        "reason": str(reason or "no_current_confirmed_units"),
         "selection_filters": {str(key): str(value or "") for key, value in filters.items()},
         "excluded_inputs": copy.deepcopy(excluded or []),
         "composite_handoff": {

@@ -65,6 +65,18 @@ SECTION_SPECS = (
     ("conclusion", "Conclusion", "inference"),
 )
 MAX_COMPOSITE_INPUT_BYTES = 256 * 1024
+EXPLICIT_EXTERNAL_DISCOVERY_MARKERS = (
+    "systematic",
+    "scoping review",
+    "meta-analysis",
+    "meta analysis",
+    "systematic mapping",
+    "review recent papers",
+    "系统综述",
+    "系统映射",
+    "元分析",
+    "外部检索",
+)
 
 
 def _canonical_digest(value: object) -> str:
@@ -184,6 +196,52 @@ def _load_composite_input(path: Path) -> dict[str, object]:
     return payload
 
 
+def _load_frozen_search_protocol(
+    root: Path,
+    *,
+    discovery_mode: str,
+    input_value: str,
+) -> dict[str, object]:
+    if discovery_mode == "kb_only":
+        if input_value:
+            raise SystemExit("KB-only synthesis cannot carry an external search protocol.")
+        return {}
+    if not input_value:
+        raise SystemExit("External-discovery synthesis requires a frozen search protocol input.")
+    path = Path(input_value).expanduser()
+    if not path.is_absolute():
+        path = root / path
+    protocol = _load_composite_input(path)
+    allowed = {"mode", "scope", "budget", "review_protocol", "reviewers"}
+    if set(protocol) - allowed or protocol.get("mode") != discovery_mode:
+        raise SystemExit("Frozen search protocol mode or fields are invalid.")
+    if not isinstance(protocol.get("scope"), dict) or not protocol["scope"]:
+        raise SystemExit("Frozen search protocol requires a non-empty scope.")
+    if not isinstance(protocol.get("budget"), dict) or not protocol["budget"]:
+        raise SystemExit("Frozen search protocol requires a non-empty budget.")
+    if discovery_mode in {"bounded-systematic", "systematic"}:
+        required_scope = {
+            "inclusion",
+            "exclusion",
+            "languages",
+            "source_types",
+            "channels",
+            "date_range",
+            "result_depth",
+            "screening",
+            "screeners",
+        }
+        if not required_scope <= set(protocol["scope"]):
+            raise SystemExit("Systematic search protocol scope is incomplete.")
+    for key in ("review_protocol", "reviewers"):
+        value = protocol.get(key, {} if key == "review_protocol" else [])
+        if key == "review_protocol" and not isinstance(value, dict):
+            raise SystemExit("Frozen search review protocol must be a mapping.")
+        if key == "reviewers" and not isinstance(value, list):
+            raise SystemExit("Frozen search reviewers must be a list.")
+    return protocol
+
+
 def _load_composite_state(path: Path) -> dict[str, object]:
     if path.is_symlink() or not path.is_file():
         raise SystemExit("Composite survey state is unavailable or unsafe.")
@@ -202,6 +260,8 @@ def ensure_evidence_gap_composite(
     as_of: str,
     program_ids: list[str] | None = None,
     preference_context: dict[str, object] | None = None,
+    discovery_mode: str = "kb_only",
+    search_protocol: dict[str, object] | None = None,
 ) -> dict[str, object]:
     linked_program_ids = sorted({str(item) for item in program_ids or [] if str(item)})
     for program_id in linked_program_ids:
@@ -214,6 +274,13 @@ def ensure_evidence_gap_composite(
         **filters,
         "program_ids": ",".join(linked_program_ids),
         "preference_context_digest": _canonical_digest(preference_context or {}),
+        "discovery_mode": str(discovery_mode or "kb_only"),
+        "search_protocol": json.dumps(
+            search_protocol or {},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
     }
     request_digest = composite_survey_request_digest(
         filters=request_filters,
@@ -239,7 +306,13 @@ def ensure_evidence_gap_composite(
                 state,
                 "search",
                 status="blocked",
-                blocker={"code": "no_current_confirmed_units"},
+                blocker={
+                    "code": (
+                        "external_discovery_required"
+                        if discovery_mode != "kb_only"
+                        else "no_current_confirmed_units"
+                    )
+                },
                 resume_action="run_agent_literature_search",
                 inputs=[{"kind": "effective_preferences", "context": copy.deepcopy(preference_context or {})}],
                 expected_revision=1,
@@ -1044,6 +1117,13 @@ def build_parser() -> argparse.ArgumentParser:
         cmd.add_argument("--rejection-reason", default="")
         cmd.add_argument("--program-id", action="append", default=[])
         cmd.add_argument("--preference-selection-id", default="", help=argparse.SUPPRESS)
+        cmd.add_argument(
+            "--discovery-mode",
+            choices=("kb_only", "exploratory", "bounded-systematic", "systematic"),
+            default="kb_only",
+            help=argparse.SUPPRESS,
+        )
+        cmd.add_argument("--search-protocol-input", default="", help=argparse.SUPPRESS)
     composite = subparsers.add_parser("composite")
     composite.add_argument("action", choices=("status", "update"))
     composite.add_argument("--slug", required=True)
@@ -1173,8 +1253,22 @@ def main() -> int:
             program_ids=args.program_id,
         )
         preference_context = synthesis_preference_state(preferences)
+        normalized_query = query.casefold()
+        explicit_external = any(
+            marker in normalized_query for marker in EXPLICIT_EXTERNAL_DISCOVERY_MARKERS
+        )
+        if explicit_external and args.discovery_mode == "kb_only":
+            raise SystemExit(
+                "An explicit systematic or external-discovery survey cannot use KB-only synthesis."
+            )
+        search_protocol = _load_frozen_search_protocol(
+            root,
+            discovery_mode=str(args.discovery_mode or "kb_only"),
+            input_value=str(args.search_protocol_input or ""),
+        )
         selected, excluded = select_current_confirmed_survey_records(root, iter_records(root), **filters)
-        if not selected:
+        discovery_required = args.discovery_mode != "kb_only"
+        if discovery_required or not selected:
             binding = ensure_evidence_gap_composite(
                 root,
                 slug=slug,
@@ -1182,6 +1276,8 @@ def main() -> int:
                 as_of=args.as_of,
                 program_ids=args.program_id,
                 preference_context=preference_context,
+                discovery_mode=str(args.discovery_mode or "kb_only"),
+                search_protocol=search_protocol,
             )
             print(
                 json.dumps(
@@ -1189,6 +1285,11 @@ def main() -> int:
                         filters=filters,
                         excluded=excluded,
                         composite_binding=binding,
+                        reason=(
+                            "external_discovery_required"
+                            if discovery_required
+                            else "no_current_confirmed_units"
+                        ),
                     ),
                     ensure_ascii=False,
                     sort_keys=True,

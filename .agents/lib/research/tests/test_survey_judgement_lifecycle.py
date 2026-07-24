@@ -344,6 +344,78 @@ def test_prepare_zero_current_inputs_returns_structured_gap_without_scaffold(tmp
     )
 
 
+def test_systematic_prepare_with_matching_unit_still_starts_frozen_search_composite(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    module = load_synthesizer()
+    source = write_confirmed_source(module, tmp_path)
+    selected, _excluded = select_current_confirmed_survey_records(
+        tmp_path,
+        [source],
+        query="robot learning",
+        kind="",
+        topic="",
+        tag="",
+        pool="",
+    )
+    assert [item["id"] for item in selected] == ["p-alpha"]
+    protocol_path = tmp_path / "systematic-protocol.json"
+    protocol_path.write_text(
+        json.dumps(
+            {
+                "mode": "systematic",
+                "scope": {
+                    "inclusion": ["robot learning"],
+                    "exclusion": [],
+                    "languages": ["en"],
+                    "source_types": ["paper"],
+                    "channels": ["runtime-search"],
+                    "date_range": "through 2026-07-24",
+                    "result_depth": "all bounded results",
+                    "screening": "title_abstract_then_fulltext",
+                    "screeners": 1,
+                },
+                "budget": {"max_queries": 8, "max_candidates": 50},
+                "review_protocol": {},
+                "reviewers": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(SCRIPT),
+            "--root",
+            str(tmp_path),
+            "survey",
+            "prepare",
+            "--query",
+            "robot learning",
+            "--as-of",
+            "2026-07-24",
+            "--discovery-mode",
+            "systematic",
+            "--search-protocol-input",
+            str(protocol_path),
+        ],
+    )
+    assert module.main() == 2
+    handoff = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert handoff["reason"] == "external_discovery_required"
+    binding = handoff["composite_handoff"]["state_binding"]
+    state = load_yaml(tmp_path / binding["state_path"])
+    assert state["current_stage"] == "search"
+    assert state["stages"][0]["blocker"] == {"code": "external_discovery_required"}
+    assert state["selection_filters"]["discovery_mode"] == "systematic"
+    frozen = json.loads(state["selection_filters"]["search_protocol"])
+    assert frozen["scope"]["inclusion"] == ["robot learning"]
+    assert not (tmp_path / "kb/synthesis/robot-learning/survey-fill.yaml").exists()
+
+
 def test_composite_cli_updates_with_revision_cas_and_is_resumable(
     tmp_path: Path,
     monkeypatch,

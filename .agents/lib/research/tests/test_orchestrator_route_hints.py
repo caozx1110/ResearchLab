@@ -44,7 +44,7 @@ def test_source_intake_routes_cover_new_source_tasks() -> None:
     assert module.ROUTE_HINTS["新论文"] == "source-intake"
 
 
-def test_survey_routes_cover_chinese_and_english_without_falling_into_paper_analysis() -> None:
+def test_survey_routes_require_agent_scope_decision_before_synthesis() -> None:
     module = _load_orchestrator_module()
     for task in (
         "做一份论文文献综述",
@@ -62,6 +62,18 @@ def test_survey_routes_cover_chinese_and_english_without_falling_into_paper_anal
         "系统映射研究",
         "整理 taxonomy 和趋势",
     ):
+        snapshot = module.route_candidate_snapshot(task)
+        assert module.route_task(task) == "research-orchestrator"
+        assert snapshot["planning_required"] is True
+        assert "literature-synthesizer" in snapshot["candidate_skills"]
+
+
+def test_explicit_kb_only_survey_can_route_directly_to_synthesis() -> None:
+    module = _load_orchestrator_module()
+
+    for task in ("仅基于当前 KB 做综述", "synthesize a survey from the current KB"):
+        snapshot = module.route_candidate_snapshot(task)
+        assert snapshot["planning_required"] is False
         assert module.route_task(task) == "literature-synthesizer"
 
 

@@ -192,6 +192,29 @@ ROUTE_COMPOSITION_MARKERS = (
 )
 ROUTE_NEGATION_MARKERS = ("不要", "不需要", "无需", "跳过", "别用", "without ", "skip ")
 ROUTE_GENERIC_ENTITY_HINTS = {"论文", "paper", "仓库", "repo", "数据集", "dataset", "博客", "blog"}
+ROUTE_EXTERNAL_SURVEY_MARKERS = (
+    "systematic",
+    "scoping review",
+    "meta-analysis",
+    "meta analysis",
+    "systematic mapping",
+    "review recent papers",
+    "state-of-the-art review",
+    "系统综述",
+    "系统映射",
+    "元分析",
+    "最新文献",
+    "外部检索",
+)
+ROUTE_KB_ONLY_SURVEY_MARKERS = (
+    "当前 kb",
+    "现有 kb",
+    "仅基于 kb",
+    "只基于 kb",
+    "current kb",
+    "existing kb",
+    "kb only",
+)
 ROUTABLE_OWNER_SKILLS = (
     "blog-analyst",
     "dataset-analyst",
@@ -251,10 +274,30 @@ def route_candidate_snapshot(task: str) -> dict[str, Any]:
             if not bool(hit["suppressed_by_specific_hint"])
         }
     )
+    external_survey_markers = [
+        marker for marker in ROUTE_EXTERNAL_SURVEY_MARKERS if marker in lower
+    ]
+    kb_only_survey_markers = [
+        marker for marker in ROUTE_KB_ONLY_SURVEY_MARKERS if marker in lower
+    ]
+    if external_survey_markers and "literature-synthesizer" in candidate_skills:
+        candidate_skills = sorted(set(candidate_skills) | {"literature-search"})
+    survey_scope_decision_required = (
+        "literature-synthesizer" in candidate_skills and not kb_only_survey_markers
+    )
+    effective_composition_markers = [
+        marker
+        for marker in composition_markers
+        if not (
+            kb_only_survey_markers
+            and marker in {"基于", "根据", "based on ", "using "}
+        )
+    ]
     planning_required = (
         len(candidate_skills) != 1
-        or bool(composition_markers)
+        or bool(effective_composition_markers)
         or bool(negation_markers)
+        or survey_scope_decision_required
     )
     direct_owner = candidate_skills[0] if not planning_required else "research-orchestrator"
     digest_input = {
@@ -267,7 +310,10 @@ def route_candidate_snapshot(task: str) -> dict[str, Any]:
         "candidate_skills": candidate_skills,
         "owner_catalog": list(ROUTABLE_OWNER_SKILLS),
         "composition_markers": sorted(set(composition_markers)),
+        "effective_composition_markers": sorted(set(effective_composition_markers)),
         "negation_markers": sorted(set(negation_markers)),
+        "external_survey_markers": sorted(set(external_survey_markers)),
+        "kb_only_survey_markers": sorted(set(kb_only_survey_markers)),
     }
     return {
         **digest_input,
