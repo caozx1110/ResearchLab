@@ -110,7 +110,7 @@ def _fetch_checkout(checkout: Path, *, branch: str) -> None:
 
 def _clone_checkout(origin: str, destination: Path, *, branch: str) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
-    _run_process(("git", "clone", "--depth", "1", "--branch", branch, origin, str(destination)))
+    _run_process(("git", "clone", "--depth", "1", "--branch", branch, "--", origin, str(destination)))
 
 
 def _cached_checkout(cache_dir: Path, origin: str, branch: str) -> Path:
@@ -365,7 +365,12 @@ def _validate_install_manifest(payload: dict[str, Any]) -> None:
 
 
 def _valid_origin(origin: str) -> bool:
-    return bool(origin and len(origin) <= 4096 and not any(ord(character) < 32 for character in origin))
+    return bool(
+        origin
+        and not origin.startswith("-")
+        and len(origin) <= 4096
+        and not any(ord(character) < 32 for character in origin)
+    )
 
 
 def _strict_source_checkout(path: Path) -> bool:
@@ -451,7 +456,9 @@ def source_choice_request(install_root: Path) -> dict[str, Any]:
 
         actual_origin = _checkout_origin(checkout) if checkout_valid and is_git_checkout(checkout) else ""
         actual_branch = _checkout_branch(checkout) if checkout_valid and is_git_checkout(checkout) else ""
-        origin = recorded_origin if _valid_origin(recorded_origin) else (actual_origin or "")
+        origin = recorded_origin if _valid_origin(recorded_origin) else (
+            actual_origin if _valid_origin(actual_origin) else ""
+        )
         branch = recorded_branch if _valid_branch_name(recorded_branch) else (
             actual_branch if _valid_branch_name(actual_branch) else ""
         )
@@ -581,6 +588,8 @@ def rebind_source(
             actual_branch = _checkout_branch(checkout) if is_git_checkout(checkout) else ""
             if not origin:
                 origin = actual_origin or LOCAL_ORIGIN
+            if not branch and _valid_branch_name(actual_branch):
+                branch = actual_branch
             if not _valid_origin(origin):
                 raise SourceRebindError("invalid-source-origin", "the selected source origin is invalid")
             if origin != LOCAL_ORIGIN:

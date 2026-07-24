@@ -784,11 +784,53 @@ def test_local_checkout_rebind_verifies_origin_branch_and_preserves_manifest(tmp
         assert after[key] == before[key]
 
 
+def test_legacy_local_choice_derives_attached_checkout_origin_and_branch(tmp_path: Path) -> None:
+    install = tmp_path / "install"
+    manifest_path = _write_copy_manifest(install, source_repo="")
+    request = updater.source_choice_request(install)
+    local_choice = next(
+        alternative
+        for alternative in request["alternatives"]
+        if alternative["source_strategy"] == "local-checkout"
+    )
+    assert local_choice["fields"] == ["source_checkout"]
+
+    source = tmp_path / "attached-source"
+    (source / ".agents").mkdir(parents=True)
+    (source / ".agents" / "VERSION").write_text("0.2.0\n", encoding="utf-8")
+    (source / "install-lib").mkdir()
+    (source / "install-lib" / "ws_sync.py").write_text("", encoding="utf-8")
+    subprocess.run(["git", "init", str(source)], check=True, capture_output=True, text=True)
+    _git(source, "config", "user.name", "Updater Rebind")
+    _git(source, "config", "user.email", "updater-rebind@example.test")
+    _git(source, "checkout", "-b", "feature/inferred")
+    _git(source, "add", ".agents", "install-lib")
+    _git(source, "commit", "-m", "source")
+    remote = tmp_path / "attached.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True, text=True)
+    _git(source, "remote", "add", "origin", str(remote))
+
+    rebound = updater.rebind_source(
+        install,
+        expected_manifest_digest=local_choice["apply"]["expected_manifest_digest"],
+        source_checkout=str(source),
+        source_strategy=local_choice["apply"]["source_strategy"],
+    )
+
+    assert rebound["source_origin"] == str(remote)
+    assert rebound["source_branch"] == "feature/inferred"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["source_origin"] == str(remote)
+    assert manifest["source_branch"] == "feature/inferred"
+    assert manifest["source_checkout"] == str(source)
+
+
 @pytest.mark.parametrize(
     ("choice", "code"),
     [
         ({"source_origin": "ssh://example.test/team/fork.git", "source_branch": "../bad"}, "invalid-source-branch"),
         ({"source_origin": "local", "source_branch": "release/r1"}, "invalid-source-origin"),
+        ({"source_origin": "--upload-pack=malicious", "source_branch": "release/r1"}, "invalid-source-origin"),
     ],
 )
 def test_remote_rebind_rejects_invalid_choice_without_byte_change(
@@ -810,6 +852,31 @@ def test_remote_rebind_rejects_invalid_choice_without_byte_change(
 
     assert rejected.value.code == code
     assert manifest.read_bytes() == before
+
+
+def test_clone_checkout_terminates_git_options_before_origin(monkeypatch, tmp_path: Path) -> None:
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        updater,
+        "_run_process",
+        lambda argv, **_kwargs: calls.append(tuple(argv)),
+    )
+
+    updater._clone_checkout("/tmp/local-remote.git", tmp_path / "checkout", branch="release/r1")
+
+    assert calls == [
+        (
+            "git",
+            "clone",
+            "--depth",
+            "1",
+            "--branch",
+            "release/r1",
+            "--",
+            "/tmp/local-remote.git",
+            str(tmp_path / "checkout"),
+        )
+    ]
 
 
 def test_rebind_rejects_stale_digest_and_local_mismatch_without_byte_change(monkeypatch, tmp_path: Path) -> None:
@@ -845,6 +912,18 @@ def test_rebind_rejects_stale_digest_and_local_mismatch_without_byte_change(monk
             source_strategy="local-checkout",
         )
     assert mismatch.value.code == "source-origin-mismatch"
+    assert manifest.read_bytes() == before
+
+    monkeypatch.setattr(updater, "_checkout_branch", lambda _checkout: "")
+    with pytest.raises(updater.SourceRebindError) as detached:
+        updater.rebind_source(
+            install,
+            expected_manifest_digest=hashlib.sha256(before).hexdigest(),
+            source_origin="ssh://example.test/actual.git",
+            source_checkout=str(source),
+            source_strategy="local-checkout",
+        )
+    assert detached.value.code == "source-branch-mismatch"
     assert manifest.read_bytes() == before
 
 
