@@ -8,6 +8,7 @@ import pytest
 from research.common import write_yaml_if_changed
 from research.paths import config_root, runtime_preferences_path
 from research.preference_selection import (
+    OPERATION_CANONICAL_INPUTS,
     SKILL_ELIGIBILITY,
     SKILL_OPERATIONS,
     eligible_preferences,
@@ -43,7 +44,28 @@ def test_declared_consumer_operations_are_real_not_aspirational() -> None:
             "extract-figures",
             "refresh-structure",
         ),
+        "repo-analyst": ("map-capability",),
+        "dataset-analyst": ("profile",),
+        "blog-analyst": ("complete-note",),
     }
+
+
+def test_analyzer_consumers_have_closed_canonical_input_registries() -> None:
+    common = {
+        "canonical_id",
+        "canonical_kind",
+        "operation",
+        "record_content_digest",
+        "phase_contract_digest",
+        "immutable_orientation_digest",
+    }
+    assert set(OPERATION_CANONICAL_INPUTS) == {
+        ("repo-analyst", "map-capability"),
+        ("dataset-analyst", "profile"),
+        ("blog-analyst", "complete-note"),
+    }
+    for fields in OPERATION_CANONICAL_INPUTS.values():
+        assert common.issubset(fields)
 
 
 def test_bound_consumer_resolves_selected_values_without_copying_them_into_receipt(

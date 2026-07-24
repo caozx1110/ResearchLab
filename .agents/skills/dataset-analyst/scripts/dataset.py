@@ -21,7 +21,7 @@ import sys
 from contextvars import ContextVar
 from functools import wraps
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 SCRIPT_PATH = Path(__file__).resolve()
 for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
@@ -66,6 +66,13 @@ from research.evidence import (
     validate_claims,
     verify_claim_evidence,
 )
+from research.preference_selection import (
+    canonical_digest,
+    regular_file_binding,
+    regular_tree_binding,
+    resolve_operation_preferences,
+    task_context_digest,
+)
 
 # --------------------------------------------------------------------------- #
 # The 4-element fill contract (SSOT §3.3A).                                   #
@@ -83,6 +90,9 @@ NOTE_ELEMENTS: tuple[str, ...] = (
     "schema_access",
     "suitability_risks",
 )
+PREFERENCE_SKILL = "dataset-analyst"
+PREFERENCE_OPERATION = "profile"
+PREFERENCE_ORIENTATION_NAME = "dataset-orientation.yaml"
 
 _ACTIVE_MUTATION: ContextVar[bool] = ContextVar("dataset_active_mutation", default=False)
 _PENDING_CHECKPOINT: ContextVar[tuple[Path, str, str, list[Path]] | None] = ContextVar(
@@ -263,6 +273,7 @@ def build_note_scaffold(
     *,
     digest_chunks: int,
     digest_chars: int,
+    preference_task_context: Mapping[str, object] | None = None,
 ) -> dict:
     """Produce the 4-element fillable dataset profile skeleton. Each element is blank for the agent to
     fill with content + >=1 evidence_ref. The script authors nothing here."""
@@ -276,7 +287,7 @@ def build_note_scaffold(
         }
         for name in NOTE_ELEMENTS
     ]
-    return {
+    scaffold = {
         "dataset_id": record["id"],
         "kind": "dataset",
         "status": "awaiting_agent_fill",
@@ -297,6 +308,121 @@ def build_note_scaffold(
         # --- agent fills each element.content + element.evidence_refs below ---
         "elements": elements,
     }
+    if preference_task_context is not None:
+        context = dict(preference_task_context)
+        scaffold["preference_consumer"] = {
+            "skill": PREFERENCE_SKILL,
+            "operation": PREFERENCE_OPERATION,
+            "task_context": context,
+            "task_context_digest": task_context_digest(
+                skill=PREFERENCE_SKILL,
+                operation=PREFERENCE_OPERATION,
+                canonical_inputs=context,
+            ),
+        }
+    return scaffold
+
+
+def dataset_preference_orientation(record: Mapping[str, object]) -> dict[str, object]:
+    """Immutable authoring contract kept separate from Agent-fillable fields."""
+    phase_contract = {
+        "prepare": "owner-writes-canonical-orientation-before-agent-authoring",
+        "author": "runtime-agent",
+        "verify": "owner-recomputes-context-before-business-write",
+        "fillable_fields": ["elements[].content", "elements[].evidence_refs"],
+    }
+    return {
+        "schema": "analyzer-preference-orientation/v1",
+        "canonical_id": str(record.get("id") or ""),
+        "canonical_kind": "dataset",
+        "skill": PREFERENCE_SKILL,
+        "operation": PREFERENCE_OPERATION,
+        "phase_contract": phase_contract,
+        "required_elements": list(NOTE_ELEMENTS),
+        "element_claim_types": dict(ELEMENT_CLAIM_TYPE),
+        "evidence_locator_family": "html-section-anchor",
+    }
+
+
+def dataset_preference_context(
+    root: Path,
+    record: Mapping[str, object],
+    unit_root: Path,
+) -> dict[str, object]:
+    """Recompute the exact record/orientation/parse/source task inputs."""
+    orientation_path = unit_root / PREFERENCE_ORIENTATION_NAME
+    orientation_binding = regular_file_binding(
+        orientation_path,
+        logical_identity=PREFERENCE_ORIENTATION_NAME,
+        trusted_root=root,
+    )
+    orientation = load_yaml(orientation_path, default={})
+    expected_orientation = dataset_preference_orientation(record)
+    if orientation != expected_orientation:
+        raise ValueError("immutable analyzer orientation contract was modified")
+
+    cache_path = _cache_path(unit_root)
+    cache_binding = regular_file_binding(
+        cache_path, logical_identity="parse-cache.yaml", trusted_root=root
+    )
+    cache = load_yaml(cache_path, default={})
+    if not isinstance(cache, dict) or _cache_unit_id(cache) != str(record.get("id") or ""):
+        raise ValueError("canonical dataset parse cache has a mismatched identity")
+    record_binding = regular_file_binding(
+        unit_root / "record.yaml", logical_identity="record.yaml", trusted_root=root
+    )
+    source_binding = regular_tree_binding(
+        unit_root / "source",
+        logical_identity="dataset-source-artifacts",
+        trusted_root=root,
+    )
+    return {
+        "canonical_id": str(record.get("id") or ""),
+        "canonical_kind": "dataset",
+        "operation": PREFERENCE_OPERATION,
+        "record_content_digest": record_binding["bytes_digest"],
+        "phase_contract_digest": canonical_digest(expected_orientation["phase_contract"]),
+        "immutable_orientation_digest": orientation_binding["bytes_digest"],
+        "parse_cache_identity_digest": cache_binding["identity_digest"],
+        "parse_cache_bytes_digest": cache_binding["bytes_digest"],
+        "source_artifacts_identity_digest": source_binding["identity_digest"],
+        "source_artifacts_bytes_digest": source_binding["bytes_digest"],
+    }
+
+
+def resolve_dataset_preferences(
+    root: Path,
+    record: Mapping[str, object],
+    unit_root: Path,
+    *,
+    selection_id: str,
+) -> dict[str, object]:
+    """Validate an optional private receipt; empty selection is strictly neutral."""
+    if not str(selection_id or "").strip():
+        return {}
+    context = dataset_preference_context(root, record, unit_root)
+    resolution = resolve_operation_preferences(
+        root,
+        selection_id=selection_id,
+        skill=PREFERENCE_SKILL,
+        operation=PREFERENCE_OPERATION,
+        canonical_inputs=context,
+    )
+    return dict(resolution.get("binding") or {})
+
+
+def _persist_preference_binding(record: dict, binding: Mapping[str, object]) -> None:
+    payload = record.setdefault("payload", {})
+    contexts = payload.get("preference_contexts")
+    contexts = dict(contexts) if isinstance(contexts, Mapping) else {}
+    if binding:
+        contexts[PREFERENCE_OPERATION] = dict(binding)
+    else:
+        contexts.pop(PREFERENCE_OPERATION, None)
+    if contexts:
+        payload["preference_contexts"] = contexts
+    else:
+        payload.pop("preference_contexts", None)
 
 
 def _elements_by_name(fill: Any) -> dict[str, dict]:
@@ -488,6 +614,7 @@ def build_parser() -> argparse.ArgumentParser:
     note.add_argument("--dataset-id", required=True)
     note.add_argument("--phase", choices=["prepare", "verify"], default="prepare")
     note.add_argument("--input", default="")
+    note.add_argument("--preference-selection-id", default="", help=argparse.SUPPRESS)
     note.add_argument("--defer-post-actions", action="store_true")
 
     confirm = subparsers.add_parser("confirm")
@@ -505,6 +632,7 @@ def build_parser() -> argparse.ArgumentParser:
         [
             unit_root / "record.yaml",
             unit_root / "dataset-fill.yaml",
+            unit_root / PREFERENCE_ORIENTATION_NAME,
             unit_root / "dataset-note.md",
             unit_root / "dataset-claims.yaml",
             *([] if defer_post_actions else _index_targets(root)),
@@ -525,6 +653,8 @@ def _run_complete_note(args, root: Path, record: dict, unit_root: Path, defer_po
             digest_chars=1200,
         )
         write_yaml_if_changed(fill_scaffold_path, payload)
+        orientation_path = unit_root / PREFERENCE_ORIENTATION_NAME
+        write_yaml_if_changed(orientation_path, dataset_preference_orientation(record))
         record["maturity"] = "complete"
         record["confirmation_status"] = "pending_user_confirmation"
         record["needs_human_confirmation"] = True
@@ -535,9 +665,18 @@ def _run_complete_note(args, root: Path, record: dict, unit_root: Path, defer_po
             action="dataset-profile-scaffolded",
             summary="Prepared 4-element fillable dataset profile skeleton (script authored nothing).",
             information_types=["inference", "unverified"],
-            artifacts=[rel(root, fill_scaffold_path), rel(root, cache_path)] if cache_path.exists() else [rel(root, fill_scaffold_path)],
+            artifacts=[rel(root, fill_scaffold_path), rel(root, orientation_path), rel(root, cache_path)],
         )
         write_record(root, record)
+        preference_task_context = dataset_preference_context(root, record, unit_root)
+        payload = build_note_scaffold(
+            record,
+            source_chunks,
+            digest_chunks=12,
+            digest_chars=1200,
+            preference_task_context=preference_task_context,
+        )
+        write_yaml_if_changed(fill_scaffold_path, payload)
         print(f"[ok] wrote {fill_scaffold_path.relative_to(root)}")
         print(
             "下一步：agent 读 parse-cache 填四要素"
@@ -550,7 +689,7 @@ def _run_complete_note(args, root: Path, record: dict, unit_root: Path, defer_po
             trigger="milestone",
             message=f"milestone: scaffold dataset profile {record['id']}",
             defer_post_actions=defer_post_actions,
-            target_paths=[unit_root / "record.yaml", fill_scaffold_path],
+            target_paths=[unit_root / "record.yaml", orientation_path, fill_scaffold_path],
         )
         return 0
 
@@ -561,6 +700,16 @@ def _run_complete_note(args, root: Path, record: dict, unit_root: Path, defer_po
     fill = load_yaml(fill_path, default={})
     if not isinstance(fill, dict):
         raise SystemExit(f"profile --phase verify: {fill_path} is not a mapping")
+    preference_selection_id = str(getattr(args, "preference_selection_id", "") or "")
+    try:
+        preference_binding = resolve_dataset_preferences(
+            root,
+            record,
+            unit_root,
+            selection_id=preference_selection_id,
+        )
+    except ValueError as exc:
+        raise SystemExit(f"dataset profile preference receipt rejected: {exc}") from exc
     violations, claims = verify_note_fill(fill, unit_root)
     if violations:
         print("[reject] dataset profile fill failed verification:", file=sys.stderr)
@@ -568,7 +717,21 @@ def _run_complete_note(args, root: Path, record: dict, unit_root: Path, defer_po
             print(f"  - {violation}", file=sys.stderr)
         raise SystemExit(1)
 
+    if preference_selection_id:
+        try:
+            rechecked_binding = resolve_dataset_preferences(
+                root,
+                record,
+                unit_root,
+                selection_id=preference_selection_id,
+            )
+        except ValueError as exc:
+            raise SystemExit(f"dataset profile preference receipt rejected: {exc}") from exc
+        if rechecked_binding != preference_binding:
+            raise SystemExit("dataset profile preference receipt changed before write")
+
     _apply_note_fill_to_payload(record, claims)
+    _persist_preference_binding(record, preference_binding)
     attach_claims(record.setdefault("payload", {}), claims)
     build_verification_receipt(record, unit_root)
     write_text_if_changed(note_path, render_note_md(record, claims))

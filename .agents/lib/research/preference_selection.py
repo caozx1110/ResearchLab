@@ -10,7 +10,9 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import re
+import stat
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -187,6 +189,9 @@ SKILL_OPERATIONS: dict[str, tuple[str, ...]] = {
     "experiment-workbench": ("plan", "log-run", "follow-up", "diagnose"),
     "kb-cli": ("review-display",),
     "paper-analyst": ("prewarm-cache", "screen", "complete-note", "extract-figures", "refresh-structure"),
+    "repo-analyst": ("map-capability",),
+    "dataset-analyst": ("profile",),
+    "blog-analyst": ("complete-note",),
 }
 
 
@@ -262,6 +267,67 @@ OPERATION_ELIGIBILITY: dict[tuple[str, str], tuple[str, ...]] = {
     ),
     ("paper-analyst", "extract-figures"): ("runtime.pdf", "learned.*"),
     ("paper-analyst", "refresh-structure"): ("learned.*",),
+    ("repo-analyst", "map-capability"): (
+        "profile.preferences.language_preference",
+        "profile.personalization.research_focus",
+        "profile.personalization.term_style",
+        "learned.*",
+    ),
+    ("dataset-analyst", "profile"): (
+        "profile.preferences.language_preference",
+        "profile.personalization.research_focus",
+        "profile.personalization.term_style",
+        "learned.*",
+    ),
+    ("blog-analyst", "complete-note"): (
+        "profile.preferences.language_preference",
+        "profile.personalization.research_focus",
+        "profile.personalization.term_style",
+        "learned.*",
+    ),
+}
+
+
+# Exact canonical-input fields for task-scoped consumers whose receipts are
+# recomputed from analyzer-owned artifacts.  The flat shape is deliberate: it
+# makes omissions and accidental new inputs fail closed, and gives the mutation
+# matrix a complete registry rather than a hand-maintained list of examples.
+OPERATION_CANONICAL_INPUTS: dict[tuple[str, str], tuple[str, ...]] = {
+    ("repo-analyst", "map-capability"): (
+        "canonical_id",
+        "canonical_kind",
+        "operation",
+        "record_content_digest",
+        "phase_contract_digest",
+        "immutable_orientation_digest",
+        "structure_scan_identity_digest",
+        "structure_scan_bytes_digest",
+        "repo_source_identity_digest",
+    ),
+    ("dataset-analyst", "profile"): (
+        "canonical_id",
+        "canonical_kind",
+        "operation",
+        "record_content_digest",
+        "phase_contract_digest",
+        "immutable_orientation_digest",
+        "parse_cache_identity_digest",
+        "parse_cache_bytes_digest",
+        "source_artifacts_identity_digest",
+        "source_artifacts_bytes_digest",
+    ),
+    ("blog-analyst", "complete-note"): (
+        "canonical_id",
+        "canonical_kind",
+        "operation",
+        "record_content_digest",
+        "phase_contract_digest",
+        "immutable_orientation_digest",
+        "parse_cache_identity_digest",
+        "parse_cache_bytes_digest",
+        "source_artifacts_identity_digest",
+        "source_artifacts_bytes_digest",
+    ),
 }
 
 
@@ -292,6 +358,251 @@ def _digest(value: object) -> str:
     return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
 
 
+def canonical_digest(value: object) -> str:
+    """Public value-free digest helper for owner-supplied contracts."""
+    return _digest(value)
+
+
+def _trusted_relative(path: Path, trusted_root: Path) -> Path:
+    lexical_root = trusted_root.absolute()
+    lexical_path = path.absolute()
+    try:
+        relative = lexical_path.relative_to(lexical_root)
+    except ValueError as exc:
+        raise ValueError("canonical source artifact escaped its trusted root") from exc
+    if relative == Path() or any(part in {"", ".", ".."} for part in relative.parts):
+        raise ValueError("canonical source artifact has an unsafe relative identity")
+    return relative
+
+
+def _open_trusted_directory(
+    trusted_root: Path,
+    relative_parts: Sequence[str],
+    *,
+    allow_missing: bool = False,
+) -> int | None:
+    """Open a descendant directory through no-follow dirfds for every component."""
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        root_metadata = trusted_root.lstat()
+        if trusted_root.is_symlink() or not stat.S_ISDIR(root_metadata.st_mode):
+            raise ValueError("trusted artifact root is not a safe directory")
+        descriptor = os.open(trusted_root, directory_flags)
+    except FileNotFoundError:
+        if allow_missing:
+            return None
+        raise ValueError("trusted artifact root is missing")
+    except OSError as exc:
+        raise ValueError("trusted artifact root is unsafe") from exc
+    try:
+        for part in relative_parts:
+            try:
+                next_descriptor = os.open(part, directory_flags, dir_fd=descriptor)
+            except FileNotFoundError:
+                if allow_missing:
+                    os.close(descriptor)
+                    return None
+                raise ValueError("canonical source artifact ancestor is missing")
+            except OSError as exc:
+                raise ValueError("canonical source artifact ancestor is unsafe") from exc
+            os.close(descriptor)
+            descriptor = next_descriptor
+        return descriptor
+    except Exception:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+
+
+def _read_regular_file_at(parent_descriptor: int, name: str) -> tuple[bytes, os.stat_result]:
+    """Read one exact leaf from an already no-follow-opened parent directory."""
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(name, flags, dir_fd=parent_descriptor)
+    except (FileNotFoundError, OSError) as exc:
+        raise ValueError("canonical source artifact is missing or unsafe") from exc
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError("canonical source artifact is not a regular file")
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        identity_before = (before.st_dev, before.st_ino, before.st_mode, before.st_size, before.st_mtime_ns)
+        identity_after = (after.st_dev, after.st_ino, after.st_mode, after.st_size, after.st_mtime_ns)
+        if identity_before != identity_after:
+            raise ValueError("canonical source artifact changed while it was read")
+        return b"".join(chunks), after
+    finally:
+        os.close(descriptor)
+
+
+def _read_regular_file(path: Path, *, trusted_root: Path) -> tuple[bytes, os.stat_result]:
+    relative = _trusted_relative(path, trusted_root)
+    parent_descriptor = _open_trusted_directory(trusted_root, relative.parts[:-1])
+    if parent_descriptor is None:  # pragma: no cover - non-optional call
+        raise ValueError("canonical source artifact ancestor is missing")
+    try:
+        return _read_regular_file_at(parent_descriptor, relative.name)
+    finally:
+        os.close(parent_descriptor)
+
+
+def regular_file_binding(
+    path: Path,
+    *,
+    logical_identity: str,
+    trusted_root: Path,
+) -> dict[str, str]:
+    """Return exact, value-free identity/byte digests for a safe regular file."""
+    data, metadata = _read_regular_file(path, trusted_root=trusted_root)
+    return {
+        "identity_digest": _digest(
+            {
+                "logical_identity": str(logical_identity),
+                "device": metadata.st_dev,
+                "inode": metadata.st_ino,
+                "mode": stat.S_IMODE(metadata.st_mode),
+            }
+        ),
+        "bytes_digest": hashlib.sha256(data).hexdigest(),
+    }
+
+
+def directory_identity_digest(
+    path: Path,
+    *,
+    logical_identity: str,
+    owner_identity: Mapping[str, object],
+) -> str:
+    """Bind a repo source directory without persisting its local path or source values."""
+    try:
+        metadata = path.lstat()
+    except (FileNotFoundError, OSError) as exc:
+        raise ValueError("canonical repo source is missing or unsafe") from exc
+    if path.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
+        raise ValueError("canonical repo source is not a safe directory")
+    return _digest(
+        {
+            "logical_identity": str(logical_identity),
+            "owner_identity_digest": _digest(dict(owner_identity)),
+            "device": metadata.st_dev,
+            "inode": metadata.st_ino,
+            "mode": stat.S_IMODE(metadata.st_mode),
+        }
+    )
+
+
+def regular_tree_binding(
+    path: Path,
+    *,
+    logical_identity: str,
+    trusted_root: Path,
+) -> dict[str, str]:
+    """Bind every byte in an optional immutable source-artifact directory.
+
+    Missing source directories are represented explicitly.  Existing trees are
+    closed over regular files/directories only; any symlink or special file fails
+    before a consumer can write business state.
+    """
+    relative = _trusted_relative(path, trusted_root)
+    root_descriptor = _open_trusted_directory(
+        trusted_root, relative.parts, allow_missing=True
+    )
+    if root_descriptor is None:
+        missing = {"logical_identity": str(logical_identity), "state": "absent"}
+        return {"identity_digest": _digest(missing), "bytes_digest": _digest([])}
+    root_metadata = os.fstat(root_descriptor)
+    if not stat.S_ISDIR(root_metadata.st_mode):  # pragma: no cover - O_DIRECTORY already enforces this
+        os.close(root_descriptor)
+        raise ValueError("canonical source artifact tree is not a safe directory")
+
+    identities: list[dict[str, object]] = []
+    contents: list[dict[str, str]] = []
+
+    def visit(directory_descriptor: int, relative_path: Path) -> None:
+        try:
+            entries = sorted(os.scandir(directory_descriptor), key=lambda item: item.name)
+        except OSError as exc:
+            raise ValueError("canonical source artifact tree is unreadable") from exc
+        for entry in entries:
+            child_relative = relative_path / entry.name
+            if entry.is_symlink():
+                raise ValueError("canonical source artifact tree contains a symlink")
+            if entry.is_dir(follow_symlinks=False):
+                directory_flags = (
+                    os.O_RDONLY
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0)
+                )
+                try:
+                    child_descriptor = os.open(
+                        entry.name, directory_flags, dir_fd=directory_descriptor
+                    )
+                except OSError as exc:
+                    raise ValueError("canonical source artifact tree changed while it was read") from exc
+                try:
+                    metadata = os.fstat(child_descriptor)
+                    identities.append(
+                        {
+                            "relative": child_relative.as_posix(),
+                            "type": "directory",
+                            "device": metadata.st_dev,
+                            "inode": metadata.st_ino,
+                            "mode": stat.S_IMODE(metadata.st_mode),
+                        }
+                    )
+                    visit(child_descriptor, child_relative)
+                finally:
+                    os.close(child_descriptor)
+                continue
+            if not entry.is_file(follow_symlinks=False):
+                raise ValueError("canonical source artifact tree contains a non-regular entry")
+            data, metadata = _read_regular_file_at(directory_descriptor, entry.name)
+            identities.append(
+                {
+                    "relative": child_relative.as_posix(),
+                    "type": "file",
+                    "device": metadata.st_dev,
+                    "inode": metadata.st_ino,
+                    "mode": stat.S_IMODE(metadata.st_mode),
+                }
+            )
+            contents.append(
+                {
+                    "relative": child_relative.as_posix(),
+                    "sha256": hashlib.sha256(data).hexdigest(),
+                }
+            )
+    try:
+        visit(root_descriptor, Path())
+    finally:
+        os.close(root_descriptor)
+    return {
+        "identity_digest": _digest(
+            {
+                "logical_identity": str(logical_identity),
+                "root_device": root_metadata.st_dev,
+                "root_inode": root_metadata.st_ino,
+                "entries": identities,
+            }
+        ),
+        "bytes_digest": _digest(contents),
+    }
+
+
 def _consumer_pair(skill: str, operation: str) -> tuple[str, str]:
     normalized_skill = str(skill or "").strip().casefold()
     normalized_operation = str(operation or "").strip().casefold()
@@ -309,6 +620,16 @@ def task_context_digest(*, skill: str, operation: str, canonical_inputs: Mapping
     normalized_skill, normalized_operation = _consumer_pair(skill, operation)
     if not isinstance(canonical_inputs, Mapping):
         raise ValueError("canonical task inputs must be an object")
+    registered = OPERATION_CANONICAL_INPUTS.get((normalized_skill, normalized_operation))
+    if registered is not None and set(canonical_inputs) != set(registered):
+        missing = sorted(set(registered) - set(canonical_inputs))
+        unexpected = sorted(set(canonical_inputs) - set(registered))
+        detail = []
+        if missing:
+            detail.append("missing=" + ",".join(missing))
+        if unexpected:
+            detail.append("unexpected=" + ",".join(unexpected))
+        raise ValueError("canonical task inputs do not match the operation registry: " + "; ".join(detail))
     return _digest(
         {
             "skill": normalized_skill,
@@ -799,15 +1120,11 @@ def resolve_operation_preferences(
     profile into per-skill state.
     """
     normalized_selection_id = str(selection_id or "").strip()
-    eligible = eligible_preferences(project_root, skill=skill, operation=operation)
-    hard_items = [
-        copy.deepcopy(item)
-        for item in eligible["items"]
-        if isinstance(item, Mapping) and str(item.get("strength") or "") == "hard"
-    ]
+    normalized_skill, normalized_operation = _consumer_pair(skill, operation)
+    contract = operation_contract(skill=normalized_skill, operation=normalized_operation)
     expected = task_context_digest(
-        skill=skill,
-        operation=operation,
+        skill=normalized_skill,
+        operation=normalized_operation,
         canonical_inputs=canonical_inputs,
     )
     binding: dict[str, object] = {}
@@ -815,8 +1132,8 @@ def resolve_operation_preferences(
         effective = resolve_task_preferences(
             project_root,
             selection_id=normalized_selection_id,
-            skill=skill,
-            operation=operation,
+            skill=normalized_skill,
+            operation=normalized_operation,
             canonical_inputs=canonical_inputs,
         )
         effective_items = [
@@ -825,11 +1142,31 @@ def resolve_operation_preferences(
             if isinstance(item, Mapping)
         ]
         binding = selection_binding(effective)
+        hard_items = [
+            copy.deepcopy(item)
+            for item in effective_items
+            if str(item.get("strength") or "") == "hard"
+        ]
     else:
+        # Neutral analyzer operations have no hard fallback and therefore do
+        # not touch the canonical preference files at all.  Other operations
+        # keep their established hard-only behavior through the eligible view.
+        hard_paths = list(contract.get("hard_fallback_paths") or [])
+        if hard_paths:
+            eligible = eligible_preferences(
+                project_root, skill=normalized_skill, operation=normalized_operation
+            )
+            hard_items = [
+                copy.deepcopy(item)
+                for item in eligible["items"]
+                if isinstance(item, Mapping) and str(item.get("strength") or "") == "hard"
+            ]
+        else:
+            hard_items = []
         effective_items = hard_items
     return {
-        "skill": str(skill or "").strip().casefold(),
-        "operation": str(operation or "").strip().casefold(),
+        "skill": normalized_skill,
+        "operation": normalized_operation,
         "task_context_digest": expected,
         "effective_items": effective_items,
         "hard_items": hard_items,
@@ -849,7 +1186,7 @@ def resolve_operation_preferences(
             if str(item.get("path") or "")
         },
         "binding": binding,
-        "consumer_contract": copy.deepcopy(eligible["consumer_contract"]),
+        "consumer_contract": copy.deepcopy(contract),
     }
 
 
@@ -869,6 +1206,11 @@ __all__ = [
     "SKILL_ELIGIBILITY",
     "SKILL_OPERATIONS",
     "OPERATION_ELIGIBILITY",
+    "OPERATION_CANONICAL_INPUTS",
+    "canonical_digest",
+    "regular_file_binding",
+    "regular_tree_binding",
+    "directory_identity_digest",
     "eligible_preferences",
     "operation_contract",
     "task_context_digest",

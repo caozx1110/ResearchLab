@@ -19,7 +19,7 @@ import sys
 from contextvars import ContextVar
 from functools import wraps
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 SCRIPT_PATH = Path(__file__).resolve()
 for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
@@ -68,6 +68,13 @@ from research.evidence import (
     validate_claims,
     verify_claim_evidence,
 )
+from research.preference_selection import (
+    canonical_digest,
+    directory_identity_digest,
+    regular_file_binding,
+    resolve_operation_preferences,
+    task_context_digest,
+)
 
 IGNORE_DIRS = {
     ".git", "__pycache__", ".venv", "node_modules", "build", "dist",
@@ -89,6 +96,9 @@ ENTRYPOINT_HINTS = {
 # ("capability",)).                                                            #
 # --------------------------------------------------------------------------- #
 CAP_ELEMENTS: tuple[str, ...] = ("capability", "reuse_points", "entry_map")
+PREFERENCE_SKILL = "repo-analyst"
+PREFERENCE_OPERATION = "map-capability"
+PREFERENCE_ORIENTATION_NAME = "capability-orientation.yaml"
 
 _ACTIVE_MUTATION: ContextVar[bool] = ContextVar("repo_active_mutation", default=False)
 _PENDING_CHECKPOINT: ContextVar[tuple[Path, str, str, list[Path]] | None] = ContextVar(
@@ -294,7 +304,13 @@ def scan_structure_payload(root: Path, record: dict) -> dict:
 # map-capability: prepare a fillable 3-element structure / verify a fill.      #
 # --------------------------------------------------------------------------- #
 
-def build_capability_scaffold(record: dict, structure_payload: dict, repo_root: Path | None) -> dict:
+def build_capability_scaffold(
+    record: dict,
+    structure_payload: dict,
+    repo_root: Path | None,
+    *,
+    preference_task_context: Mapping[str, object] | None = None,
+) -> dict:
     """Produce the fillable capability skeleton (NO heuristic capability judgement).
 
     The three elements (capability / reuse_points / entry_map) are blank for a
@@ -324,7 +340,7 @@ def build_capability_scaffold(record: dict, structure_payload: dict, repo_root: 
         for name in CAP_ELEMENTS
     ]
 
-    return {
+    scaffold = {
         "repo_id": repo_id,
         "kind": "repo",
         "status": "awaiting_agent_fill",
@@ -350,6 +366,124 @@ def build_capability_scaffold(record: dict, structure_payload: dict, repo_root: 
         # --- agent fills each element.content + element.evidence_refs below ---
         "elements": elements,
     }
+    if preference_task_context is not None:
+        context = dict(preference_task_context)
+        scaffold["preference_consumer"] = {
+            "skill": PREFERENCE_SKILL,
+            "operation": PREFERENCE_OPERATION,
+            "task_context": context,
+            "task_context_digest": task_context_digest(
+                skill=PREFERENCE_SKILL,
+                operation=PREFERENCE_OPERATION,
+                canonical_inputs=context,
+            ),
+        }
+    return scaffold
+
+
+def capability_preference_orientation(record: Mapping[str, object]) -> dict[str, object]:
+    """Immutable, value-free authoring contract; no fillable content is included."""
+    phase_contract = {
+        "prepare": "owner-writes-canonical-orientation-before-agent-authoring",
+        "author": "runtime-agent",
+        "verify": "owner-recomputes-context-before-business-write",
+        "fillable_fields": ["elements[].content", "elements[].evidence_refs"],
+    }
+    return {
+        "schema": "analyzer-preference-orientation/v1",
+        "canonical_id": str(record.get("id") or ""),
+        "canonical_kind": "repo",
+        "skill": PREFERENCE_SKILL,
+        "operation": PREFERENCE_OPERATION,
+        "phase_contract": phase_contract,
+        "required_elements": list(CAP_ELEMENTS),
+        "element_claim_types": dict(ELEMENT_CLAIM_TYPE),
+        "evidence_locator_family": "repo-file-line",
+    }
+
+
+def repo_preference_context(
+    root: Path,
+    record: Mapping[str, object],
+    unit_root: Path,
+    repo_root: Path,
+) -> dict[str, object]:
+    """Recompute every canonical input consumed by runtime Agent authoring."""
+    orientation_path = unit_root / PREFERENCE_ORIENTATION_NAME
+    orientation_binding = regular_file_binding(
+        orientation_path,
+        logical_identity=PREFERENCE_ORIENTATION_NAME,
+        trusted_root=root,
+    )
+    orientation = load_yaml(orientation_path, default={})
+    expected_orientation = capability_preference_orientation(record)
+    if orientation != expected_orientation:
+        raise ValueError("immutable analyzer orientation contract was modified")
+
+    scan_path = unit_root / "structure-scan.yaml"
+    scan_binding = regular_file_binding(
+        scan_path, logical_identity="structure-scan.yaml", trusted_root=root
+    )
+    scan = load_yaml(scan_path, default={})
+    if scan != scan_structure_payload(root, dict(record)):
+        raise ValueError("canonical repo structure scan is stale")
+
+    record_binding = regular_file_binding(
+        unit_root / "record.yaml", logical_identity="record.yaml", trusted_root=root
+    )
+    source = record.get("source")
+    source = source if isinstance(source, Mapping) else {}
+    return {
+        "canonical_id": str(record.get("id") or ""),
+        "canonical_kind": "repo",
+        "operation": PREFERENCE_OPERATION,
+        "record_content_digest": record_binding["bytes_digest"],
+        "phase_contract_digest": canonical_digest(expected_orientation["phase_contract"]),
+        "immutable_orientation_digest": orientation_binding["bytes_digest"],
+        "structure_scan_identity_digest": scan_binding["identity_digest"],
+        "structure_scan_bytes_digest": scan_binding["bytes_digest"],
+        "repo_source_identity_digest": directory_identity_digest(
+            repo_root,
+            logical_identity="repo-source-root",
+            owner_identity={"source": dict(source)},
+        ),
+    }
+
+
+def resolve_repo_preferences(
+    root: Path,
+    record: Mapping[str, object],
+    unit_root: Path,
+    repo_root: Path,
+    *,
+    selection_id: str,
+) -> dict[str, object]:
+    """Validate an optional private receipt; neutral mode never reads soft preferences."""
+    if not str(selection_id or "").strip():
+        return {}
+    context = repo_preference_context(root, record, unit_root, repo_root)
+    resolution = resolve_operation_preferences(
+        root,
+        selection_id=selection_id,
+        skill=PREFERENCE_SKILL,
+        operation=PREFERENCE_OPERATION,
+        canonical_inputs=context,
+    )
+    return dict(resolution.get("binding") or {})
+
+
+def _persist_preference_binding(record: dict, binding: Mapping[str, object]) -> None:
+    payload = record.setdefault("payload", {})
+    contexts = payload.get("preference_contexts")
+    contexts = dict(contexts) if isinstance(contexts, Mapping) else {}
+    if binding:
+        contexts[PREFERENCE_OPERATION] = dict(binding)
+    else:
+        contexts.pop(PREFERENCE_OPERATION, None)
+    if contexts:
+        payload["preference_contexts"] = contexts
+    else:
+        payload.pop("preference_contexts", None)
 
 
 def _elements_by_name(fill: Any) -> dict[str, dict]:
@@ -569,6 +703,7 @@ def build_parser() -> argparse.ArgumentParser:
     cap.add_argument("--repo-id", required=True)
     cap.add_argument("--phase", choices=["prepare", "verify"], default="prepare")
     cap.add_argument("--input", default="")
+    cap.add_argument("--preference-selection-id", default="", help=argparse.SUPPRESS)
     cap.add_argument("--defer-post-actions", action="store_true")
 
     confirm = subparsers.add_parser("confirm")
@@ -627,7 +762,9 @@ def _run_scan_structure(args, root, record, unit_root, defer_post_actions) -> in
         root,
         [
             unit_root / "record.yaml",
+            unit_root / "structure-scan.yaml",
             unit_root / "capability-fill.yaml",
+            unit_root / PREFERENCE_ORIENTATION_NAME,
             unit_root / "repo-note.md",
             unit_root / "capability-claims.yaml",
             *([] if defer_post_actions else _index_targets(root)),
@@ -640,6 +777,8 @@ def _run_map_capability(args, root, record, unit_root, defer_post_actions) -> in
 
     if args.phase == "prepare":
         structure_payload = scan_structure_payload(root, record)
+        scan_path = unit_root / "structure-scan.yaml"
+        write_yaml_if_changed(scan_path, structure_payload)
         repo_root_str = structure_payload.get("repo_root", "")
         repo_root_path: Path | None = None
         if repo_root_str:
@@ -649,6 +788,8 @@ def _run_map_capability(args, root, record, unit_root, defer_post_actions) -> in
 
         payload = build_capability_scaffold(record, structure_payload, repo_root_path)
         write_yaml_if_changed(fill_path, payload)
+        orientation_path = unit_root / PREFERENCE_ORIENTATION_NAME
+        write_yaml_if_changed(orientation_path, capability_preference_orientation(record))
         record = apply_record_governance(root, record, infer_missing=True, source_label="repo-analyst")
         record["status"] = "screened"
         record["confirmation_status"] = "pending_user_confirmation"
@@ -660,9 +801,21 @@ def _run_map_capability(args, root, record, unit_root, defer_post_actions) -> in
             action="repo-capability-scaffolded",
             summary="Prepared 3-element fillable capability skeleton (script authored nothing).",
             information_types=["inference", "unverified"],
-            artifacts=[rel(root, fill_path)],
+            artifacts=[rel(root, fill_path), rel(root, orientation_path), rel(root, scan_path)],
         )
         write_record(root, record)
+        if repo_root_path is None:
+            raise SystemExit("map-capability prepare requires a safe local repo source")
+        preference_task_context = repo_preference_context(
+            root, record, unit_root, repo_root_path
+        )
+        payload = build_capability_scaffold(
+            record,
+            structure_payload,
+            repo_root_path,
+            preference_task_context=preference_task_context,
+        )
+        write_yaml_if_changed(fill_path, payload)
         print(f"[ok] wrote {fill_path.relative_to(root)}")
         print(
             "下一步：runtime agent 为三要素 (capability/reuse_points/entry_map) 填内容 + "
@@ -671,7 +824,7 @@ def _run_map_capability(args, root, record, unit_root, defer_post_actions) -> in
         print(next_for_agent_capability(root, record, fill_path))
         _finalize_post_actions(root, trigger="milestone", message=f"milestone: scaffold capability {args.repo_id}",
                                defer_post_actions=defer_post_actions,
-                               target_paths=[unit_root / "record.yaml", fill_path])
+                               target_paths=[unit_root / "record.yaml", scan_path, orientation_path, fill_path])
         return 0
 
     # verify phase
@@ -694,6 +847,18 @@ def _run_map_capability(args, root, record, unit_root, defer_post_actions) -> in
     if not repo_root_path.is_dir():
         raise SystemExit(f"map-capability --phase verify: repo_root '{repo_root_str}' is not a directory")
 
+    preference_selection_id = str(getattr(args, "preference_selection_id", "") or "")
+    try:
+        preference_binding = resolve_repo_preferences(
+            root,
+            record,
+            unit_root,
+            repo_root_path,
+            selection_id=preference_selection_id,
+        )
+    except ValueError as exc:
+        raise SystemExit(f"map-capability preference receipt rejected: {exc}") from exc
+
     violations, claims = verify_capability_fill(fill, repo_root_path)
     if violations:
         print("[reject] capability fill failed verification:", file=sys.stderr)
@@ -701,7 +866,22 @@ def _run_map_capability(args, root, record, unit_root, defer_post_actions) -> in
             print(f"  - {violation}", file=sys.stderr)
         raise SystemExit(1)
 
+    if preference_selection_id:
+        try:
+            rechecked_binding = resolve_repo_preferences(
+                root,
+                record,
+                unit_root,
+                repo_root_path,
+                selection_id=preference_selection_id,
+            )
+        except ValueError as exc:
+            raise SystemExit(f"map-capability preference receipt rejected: {exc}") from exc
+        if rechecked_binding != preference_binding:
+            raise SystemExit("map-capability preference receipt changed before write")
+
     _apply_capability_fill_to_payload(record, claims)
+    _persist_preference_binding(record, preference_binding)
     record["payload"].setdefault("structure", {})["repo_root"] = repo_root_path.resolve().as_posix()
     attach_claims(record.setdefault("payload", {}), claims)
     build_verification_receipt(
