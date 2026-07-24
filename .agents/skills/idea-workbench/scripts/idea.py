@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
+import re
 import stat
 import sys
 from contextvars import ContextVar
@@ -33,7 +35,6 @@ from research.core import (
     build_index,
     build_unit_id,
     candidate_pools_path,
-    command_mutation,
     default_record,
     ensure_workspace,
     iter_records,
@@ -51,6 +52,7 @@ from research.core import (
 )
 from research.evidence import attach_claims, build_verification_receipt, validate_claims, verify_claim_evidence
 from research.judgements import apply_judgement_rejection, readiness_violations, require_judgement_snapshot
+from research.journal import mutation_transaction
 from research.preference_selection import (
     canonical_digest,
     regular_file_binding,
@@ -64,6 +66,23 @@ GENERATION_FILL_NAME = "generation-fill.yaml"
 GENERATION_ORIENTATION_NAME = "generation-orientation.yaml"
 GENERATION_CORPUS_NAME = "generation-evidence-corpus.yaml"
 MAX_GENERATED_CANDIDATES = 12
+HEX_DIGEST_RE = re.compile(r"[0-9a-f]{64}")
+CANONICAL_UNIT_DIRECTORIES = {"papers", "repos", "datasets", "blogs", "ideas", "experiments"}
+MAX_CORPUS_FILE_BYTES = 16 * 1024 * 1024
+MAX_CORPUS_TOTAL_BYTES = 256 * 1024 * 1024
+MAX_CORPUS_ENTRIES = 20_000
+MAX_CORPUS_DEPTH = 64
+CITABLE_TEXT_SUFFIXES = {
+    ".bash", ".bib", ".c", ".cc", ".cfg", ".conf", ".cpp", ".css", ".csv",
+    ".go", ".h", ".hpp", ".htm", ".html", ".ini", ".java", ".js", ".json",
+    ".jsonl", ".jsx", ".kt", ".m", ".markdown", ".md", ".mm", ".php", ".py",
+    ".rb", ".rs", ".rst", ".scss", ".sh", ".sql", ".swift", ".tex", ".toml",
+    ".ts", ".tsv", ".tsx", ".txt", ".xml", ".yaml", ".yml", ".zsh",
+}
+CITABLE_TEXT_NAMES = {
+    "authors", "changelog", "citation", "codeowners", "contributing", "copying",
+    "license", "makefile", "notice", "readme",
+}
 
 DISCUSSION_CLAIMS = (
     ("challenge", "evaluation"),
@@ -128,7 +147,7 @@ def _idea_command_targets(args, root: Path) -> list[Path]:
         plan = generation_materialization_plan(root, args, bundle_id=bundle_id)
         args._generation_plan = plan
         idea_paths = [record_path(root, "idea", item["idea_id"]) for item in plan["candidates"]]
-        return [bundle_index_path(root, bundle_id), *idea_paths, *private_targets, *targets]
+        return [bundle_index_path(root, bundle_id), *idea_paths, *targets]
     if args.command in {"review-assist", "select-best"}:
         idea_ids = list(args.idea_id)
         bundle_id = args.bundle_id
@@ -148,27 +167,169 @@ def _idea_command_targets(args, root: Path) -> list[Path]:
         extra = [bundle / "review-assist.md"] if args.command == "review-assist" else [bundle / "selection.yaml"]
         return [bundle_index_path(root, bundle_id), *extra, *[record_path(root, "idea", idea_id) for idea_id in idea_ids], *targets]
     record, path = locate_record(root, args.idea_id, kind="idea")
+    args._planned_idea_id = str(record.get("id") or "")
+    args._planned_idea_path = path.absolute().as_posix()
     unit = path.parent
     if args.command in {"analyze", "review"}:
+        if args.phase == "prepare":
+            return [
+                path,
+                unit / f"{args.command}-fill.yaml",
+                unit / f"{args.command}-orientation.yaml",
+                unit / f"{args.command}-evidence-corpus.yaml",
+            ]
         return [
             path,
-            unit / f"{args.command}-fill.yaml",
-            unit / f"{args.command}-orientation.yaml",
-            unit / f"{args.command}-evidence-corpus.yaml",
             unit / f"{args.command}.yaml",
-            unit / "idea-card.md",
+            *([unit / "idea-card.md"] if args.command == "review" else []),
             *targets,
         ]
     if args.command in {"discuss", "spar"}:
+        if args.phase == "prepare":
+            return [
+                path,
+                unit / "discussion-fill.yaml",
+                unit / "discuss-orientation.yaml",
+                unit / "discuss-evidence-corpus.yaml",
+            ]
         return [
             path,
-            unit / "discussion-fill.yaml",
-            unit / "discuss-orientation.yaml",
-            unit / "discuss-evidence-corpus.yaml",
             unit / "discussion-judgements.yaml",
             *targets,
         ]
     return [path, *targets]
+
+
+def _assert_planned_idea_resolution(args, record: Mapping[str, object], path: Path) -> None:
+    planned_id = str(getattr(args, "_planned_idea_id", "") or "")
+    planned_path = str(getattr(args, "_planned_idea_path", "") or "")
+    if planned_id and (
+        planned_id != str(record.get("id") or "")
+        or planned_path != path.absolute().as_posix()
+    ):
+        raise SystemExit("Idea resolution changed before the operation lock; no changes were made.")
+
+
+def _idea_prepare_preflight(args, root: Path) -> None:
+    """Run lossless prepare guards under locks and before journal snapshots."""
+    if getattr(args, "phase", "") != "prepare":
+        return
+    if args.command == "generate":
+        bundle_id = generation_bundle_id(args)
+        request_context = generation_request_context(args, bundle_id=bundle_id)
+        working_root = bundle_root(root, bundle_id)
+        _guard_existing_empty_fill(
+            root,
+            working_root / GENERATION_FILL_NAME,
+            generation_scaffold(request_context, None),
+        )
+        _guard_existing_contract_target(root, working_root / GENERATION_ORIENTATION_NAME)
+        _guard_existing_contract_target(root, working_root / GENERATION_CORPUS_NAME)
+        return
+    if args.command not in {"analyze", "review", "discuss", "spar"}:
+        return
+    record, path = locate_record(root, args.idea_id, kind="idea")
+    _assert_planned_idea_resolution(args, record, path)
+    unit_root = path.parent
+    if args.command in {"discuss", "spar"}:
+        _guard_existing_empty_fill(
+            root,
+            unit_root / "discussion-fill.yaml",
+            discussion_scaffold(record, preference_context=None),
+            consumed_bindings=_consumed_fill_bindings(root, record, unit_root, "discuss"),
+        )
+        _guard_existing_contract_target(root, unit_root / "discuss-orientation.yaml")
+        _guard_existing_contract_target(root, unit_root / "discuss-evidence-corpus.yaml")
+        return
+    _guard_existing_empty_fill(
+        root,
+        unit_root / f"{args.command}-fill.yaml",
+        analysis_scaffold(record, mode=args.command, preference_context=None),
+        consumed_bindings=_consumed_fill_bindings(root, record, unit_root, args.command),
+    )
+    _guard_existing_contract_target(root, unit_root / f"{args.command}-orientation.yaml")
+    _guard_existing_contract_target(root, unit_root / f"{args.command}-evidence-corpus.yaml")
+
+
+def _idea_verify_preflight(args, root: Path) -> None:
+    if getattr(args, "phase", "") != "verify":
+        return
+    if args.command == "generate":
+        bundle_id = generation_bundle_id(args)
+        try:
+            plan = generation_materialization_plan(root, args, bundle_id=bundle_id)
+            resolve_idea_preferences(
+                root,
+                operation="generate",
+                context=plan["preference_context"],
+                selection_id=str(args.preference_selection_id or ""),
+            )
+        except ValueError as exc:
+            raise SystemExit(1) from exc
+        return
+    if args.command not in {"analyze", "review", "discuss", "spar"}:
+        return
+    record, path = locate_record(root, args.idea_id, kind="idea")
+    _assert_planned_idea_resolution(args, record, path)
+    unit_root = path.parent
+    operation = "discuss" if args.command in {"discuss", "spar"} else args.command
+    fill_path = (
+        unit_root / "discussion-fill.yaml"
+        if operation == "discuss"
+        else unit_root / f"{operation}-fill.yaml"
+    )
+    orientation_path = unit_root / f"{operation}-orientation.yaml"
+    corpus_path = unit_root / f"{operation}-evidence-corpus.yaml"
+    exclusions = _corpus_exclusions(unit_root, operation)
+    try:
+        context = idea_preference_context(
+            root,
+            operation=operation,
+            canonical_id=str(record["id"]),
+            orientation_path=orientation_path,
+            corpus_path=corpus_path,
+            excluded_paths=exclusions,
+            record_path_value=path,
+        )
+        resolve_idea_preferences(
+            root,
+            operation=operation,
+            context=context,
+            selection_id=str(getattr(args, "preference_selection_id", "") or ""),
+        )
+        candidate_path = Path(args.input) if str(args.input or "") else fill_path
+        if not candidate_path.is_absolute():
+            candidate_path = unit_root / candidate_path
+        fill, _binding = _bound_yaml(
+            candidate_path,
+            logical_identity=candidate_path.relative_to(root).as_posix(),
+            trusted_root=root,
+        )
+        if not isinstance(fill, Mapping):
+            raise ValueError("idea fill must be a mapping")
+        expected = (
+            discussion_scaffold(record, preference_context=context)
+            if operation == "discuss"
+            else analysis_scaffold(record, mode=operation, preference_context=context)
+        )
+        _validate_owner_static_fill(fill, expected, operation=operation)
+        _validate_preference_consumer_view(fill, operation=operation, context=context)
+        violations, claims = (
+            verify_discussion_fill(root, fill, str(record["id"]))
+            if operation == "discuss"
+            else verify_analysis_fill(root, fill, str(record["id"]), mode=operation)
+        )
+        corpus, _corpus_binding = _validated_frozen_corpus(root, corpus_path)
+        violations.extend(_claim_input_violations(root, claims, corpus))
+        if violations:
+            raise ValueError("idea fill or cited evidence failed verification: " + "; ".join(violations))
+    except ValueError as exc:
+        raise SystemExit(1) from exc
+
+
+def _idea_transaction_preflight(args, root: Path) -> None:
+    _idea_prepare_preflight(args, root)
+    _idea_verify_preflight(args, root)
 
 
 def add_confirmation_arguments(parser: argparse.ArgumentParser) -> None:
@@ -443,12 +604,14 @@ def idea_preference_orientation(
     operation: str,
     *,
     canonical_id: str,
+    corpus_commitment: Mapping[str, str],
     request_context: Mapping[str, object] | None = None,
+    schema_version: int = 2,
 ) -> dict[str, object]:
     if operation not in PREFERENCE_OPERATIONS:
         raise ValueError("unsupported idea preference operation")
     payload: dict[str, object] = {
-        "schema": "idea-preference-orientation/v1",
+        "schema": f"idea-preference-orientation/v{schema_version}",
         "canonical_id": canonical_id,
         "canonical_kind": "idea-generation-bundle" if operation == "generate" else "idea",
         "skill": PREFERENCE_SKILL,
@@ -456,6 +619,10 @@ def idea_preference_orientation(
         "phase_contract": _idea_phase_contract(operation),
         "evidence_corpus": "frozen-pre-authoring-canonical-unit-artifacts",
     }
+    if schema_version == 2:
+        payload["evidence_corpus_commitment"] = dict(corpus_commitment)
+    elif schema_version != 1:
+        raise ValueError("unsupported idea orientation schema")
     if operation == "generate":
         if request_context is None:
             raise ValueError("idea generation orientation requires exact request context")
@@ -480,7 +647,8 @@ def _evidence_corpus_snapshot(
     """Freeze value-free identity/byte bindings for pre-authoring KB artifacts."""
     excluded = {path.absolute() for path in excluded_paths or set()}
     units = kb_root(root) / "units"
-    entries: list[dict[str, str]] = []
+    entries: list[dict[str, object]] = []
+    total_bytes = 0
     if units.exists():
         if units.is_symlink() or not units.is_dir():
             raise ValueError("canonical unit corpus is unsafe")
@@ -492,28 +660,53 @@ def _evidence_corpus_snapshot(
                 continue
             if not stat.S_ISREG(metadata.st_mode):
                 raise ValueError("canonical unit corpus contains a non-regular artifact")
-            if path.absolute() in excluded:
+            if path.absolute() in excluded or _is_authoring_control_artifact(path):
                 continue
+            if not _is_citable_text_artifact(path):
+                continue
+            relative_to_units = path.relative_to(units)
+            if len(relative_to_units.parts) > MAX_CORPUS_DEPTH:
+                raise ValueError("citable idea evidence corpus exceeds the path-depth budget")
+            if metadata.st_size > MAX_CORPUS_FILE_BYTES:
+                raise ValueError("citable idea evidence artifact exceeds the per-file byte budget")
+            if len(entries) >= MAX_CORPUS_ENTRIES:
+                raise ValueError("citable idea evidence corpus exceeds the entry budget")
+            total_bytes += metadata.st_size
+            if total_bytes > MAX_CORPUS_TOTAL_BYTES:
+                raise ValueError("citable idea evidence corpus exceeds the total byte budget")
             binding = regular_file_binding(
                 path,
                 logical_identity=path.relative_to(root).as_posix(),
                 trusted_root=root,
             )
+            try:
+                path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                continue
+            except OSError as exc:
+                raise ValueError("citable idea evidence artifact is unreadable") from exc
+            if binding != regular_file_binding(
+                path,
+                logical_identity=path.relative_to(root).as_posix(),
+                trusted_root=root,
+            ):
+                raise ValueError("citable idea evidence artifact changed while it was read")
             entries.append(
                 {
                     "path": path.relative_to(root).as_posix(),
                     "identity_digest": binding["identity_digest"],
                     "bytes_digest": binding["bytes_digest"],
+                    "size": metadata.st_size,
                 }
             )
     return {
-        "schema": "idea-evidence-corpus/v1",
+        "schema": "idea-evidence-corpus/v2",
         "entries": entries,
         "identity_digest": canonical_digest(
-            [{"path": item["path"], "identity_digest": item["identity_digest"]} for item in entries]
+            [{"path": item["path"], "identity_digest": item["identity_digest"], "size": item["size"]} for item in entries]
         ),
         "bytes_digest": canonical_digest(
-            [{"path": item["path"], "bytes_digest": item["bytes_digest"]} for item in entries]
+            [{"path": item["path"], "bytes_digest": item["bytes_digest"], "size": item["size"]} for item in entries]
         ),
     }
 
@@ -521,15 +714,417 @@ def _evidence_corpus_snapshot(
 def _corpus_exclusions(unit_root: Path, operation: str) -> set[Path]:
     if operation == "discuss":
         return {
+            unit_root / "record.yaml",
             unit_root / "discussion-fill.yaml",
             unit_root / "discuss-orientation.yaml",
             unit_root / "discuss-evidence-corpus.yaml",
+            unit_root / "discussion-judgements.yaml",
         }
-    return {
+    excluded = {
+        unit_root / "record.yaml",
         unit_root / f"{operation}-fill.yaml",
         unit_root / f"{operation}-orientation.yaml",
         unit_root / f"{operation}-evidence-corpus.yaml",
+        unit_root / f"{operation}.yaml",
     }
+    if operation == "review":
+        excluded.add(unit_root / "idea-card.md")
+    return excluded
+
+
+def _is_authoring_control_artifact(path: Path) -> bool:
+    name = path.name
+    return any(
+        name.endswith(suffix)
+        for suffix in ("-fill.yaml", "-orientation.yaml", "-evidence-corpus.yaml")
+    )
+
+
+def _is_citable_text_artifact(path: Path) -> bool:
+    suffix = path.suffix.lower()
+    if suffix in CITABLE_TEXT_SUFFIXES:
+        return True
+    stem = path.name.lower().split(".", 1)[0]
+    return stem in CITABLE_TEXT_NAMES
+
+
+def _bound_yaml(
+    path: Path,
+    *,
+    logical_identity: str,
+    trusted_root: Path,
+) -> tuple[object, dict[str, str]]:
+    """Load YAML only when one exact safe regular-file binding spans the parse."""
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise ValueError("idea authoring artifact is missing or unsafe") from exc
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MAX_CORPUS_FILE_BYTES:
+        raise ValueError("idea authoring artifact is unsafe or exceeds the YAML byte budget")
+    before = regular_file_binding(
+        path,
+        logical_identity=logical_identity,
+        trusted_root=trusted_root,
+    )
+    try:
+        payload = load_yaml(path, default={})
+    except Exception as exc:  # YAML parser/runtime failures must fail closed.
+        raise ValueError("idea authoring artifact is unreadable or malformed") from exc
+    after = regular_file_binding(
+        path,
+        logical_identity=logical_identity,
+        trusted_root=trusted_root,
+    )
+    if before != after:
+        raise ValueError("idea authoring artifact changed while it was read")
+    return payload, before
+
+
+def _validated_frozen_corpus(
+    root: Path,
+    corpus_path: Path,
+) -> tuple[dict[str, object], dict[str, str]]:
+    payload, binding = _bound_yaml(
+        corpus_path,
+        logical_identity=corpus_path.relative_to(root).as_posix(),
+        trusted_root=root,
+    )
+    if not isinstance(payload, dict) or set(payload) != {
+        "schema",
+        "entries",
+        "identity_digest",
+        "bytes_digest",
+    }:
+        raise ValueError("frozen pre-authoring evidence corpus is malformed")
+    schema = payload.get("schema")
+    if schema not in {"idea-evidence-corpus/v1", "idea-evidence-corpus/v2"}:
+        raise ValueError("frozen pre-authoring evidence corpus schema is invalid")
+    entries = payload.get("entries")
+    if not isinstance(entries, list):
+        raise ValueError("frozen pre-authoring evidence corpus entries are malformed")
+    normalized: list[dict[str, object]] = []
+    previous = ""
+    total_bytes = 0
+    if len(entries) > MAX_CORPUS_ENTRIES:
+        raise ValueError("frozen pre-authoring evidence corpus exceeds the entry budget")
+    for item in entries:
+        expected_entry_keys = {"path", "identity_digest", "bytes_digest"}
+        if schema == "idea-evidence-corpus/v2":
+            expected_entry_keys.add("size")
+        if not isinstance(item, dict) or set(item) != expected_entry_keys:
+            raise ValueError("frozen pre-authoring evidence corpus entry is malformed")
+        relative_text = item.get("path")
+        identity_digest = item.get("identity_digest")
+        bytes_digest = item.get("bytes_digest")
+        if not all(isinstance(value, str) for value in (relative_text, identity_digest, bytes_digest)):
+            raise ValueError("frozen pre-authoring evidence corpus entry values are malformed")
+        relative = Path(relative_text)
+        if (
+            relative.is_absolute()
+            or relative.as_posix() != relative_text
+            or any(part in {"", ".", ".."} for part in relative.parts)
+            or relative.parts[:2] != ("kb", "units")
+            or len(relative.parts) < 5
+            or relative.parts[2] not in CANONICAL_UNIT_DIRECTORIES
+            or not relative.parts[3].strip()
+            or (schema == "idea-evidence-corpus/v2" and _is_authoring_control_artifact(relative))
+            or (schema == "idea-evidence-corpus/v2" and not _is_citable_text_artifact(relative))
+            or (schema == "idea-evidence-corpus/v2" and len(relative.parts[2:]) > MAX_CORPUS_DEPTH)
+        ):
+            raise ValueError("frozen pre-authoring evidence corpus path is unsafe")
+        if relative_text <= previous:
+            raise ValueError("frozen pre-authoring evidence corpus paths are duplicated or unsorted")
+        if not HEX_DIGEST_RE.fullmatch(identity_digest) or not HEX_DIGEST_RE.fullmatch(bytes_digest):
+            raise ValueError("frozen pre-authoring evidence corpus digest is malformed")
+        previous = relative_text
+        normalized_item: dict[str, object] = {
+            "path": relative_text,
+            "identity_digest": identity_digest,
+            "bytes_digest": bytes_digest,
+        }
+        if schema == "idea-evidence-corpus/v2":
+            size = item.get("size")
+            if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+                raise ValueError("frozen pre-authoring evidence corpus size is malformed")
+            if size > MAX_CORPUS_FILE_BYTES:
+                raise ValueError("frozen pre-authoring evidence artifact exceeds the per-file byte budget")
+            total_bytes += size
+            if total_bytes > MAX_CORPUS_TOTAL_BYTES:
+                raise ValueError("frozen pre-authoring evidence corpus exceeds the total byte budget")
+            normalized_item["size"] = size
+        normalized.append(normalized_item)
+    if schema == "idea-evidence-corpus/v2":
+        expected_identity = canonical_digest(
+            [{"path": item["path"], "identity_digest": item["identity_digest"], "size": item["size"]} for item in normalized]
+        )
+        expected_bytes = canonical_digest(
+            [{"path": item["path"], "bytes_digest": item["bytes_digest"], "size": item["size"]} for item in normalized]
+        )
+    else:
+        expected_identity = canonical_digest(
+            [{"path": item["path"], "identity_digest": item["identity_digest"]} for item in normalized]
+        )
+        expected_bytes = canonical_digest(
+            [{"path": item["path"], "bytes_digest": item["bytes_digest"]} for item in normalized]
+        )
+    if payload.get("identity_digest") != expected_identity or payload.get("bytes_digest") != expected_bytes:
+        raise ValueError("frozen pre-authoring evidence corpus digest is invalid")
+    return payload, binding
+
+
+def _corpus_commitment(
+    corpus: Mapping[str, object],
+    binding: Mapping[str, str],
+) -> dict[str, str]:
+    return {
+        "manifest_identity_digest": str(corpus["identity_digest"]),
+        "manifest_bytes_digest": str(corpus["bytes_digest"]),
+        "corpus_file_identity_digest": str(binding["identity_digest"]),
+        "corpus_file_bytes_digest": str(binding["bytes_digest"]),
+    }
+
+
+def _has_current_v2_corpus(root: Path, corpus_path: Path) -> bool:
+    corpus, _binding = _validated_frozen_corpus(root, corpus_path)
+    return corpus.get("schema") == "idea-evidence-corpus/v2"
+
+
+def _write_authoring_contract(
+    root: Path,
+    *,
+    operation: str,
+    canonical_id: str,
+    orientation_path: Path,
+    corpus_path: Path,
+    excluded_paths: set[Path],
+    request_context: Mapping[str, object] | None = None,
+) -> None:
+    write_yaml_if_changed(
+        corpus_path,
+        _evidence_corpus_snapshot(root, excluded_paths=excluded_paths),
+    )
+    corpus, binding = _validated_frozen_corpus(root, corpus_path)
+    write_yaml_if_changed(
+        orientation_path,
+        idea_preference_orientation(
+            operation,
+            canonical_id=canonical_id,
+            corpus_commitment=_corpus_commitment(corpus, binding),
+            request_context=request_context,
+        ),
+    )
+
+
+def _guard_existing_empty_fill(
+    root: Path,
+    fill_path: Path,
+    expected_static_scaffold: Mapping[str, object],
+    *,
+    consumed_bindings: list[Mapping[str, object]] | None = None,
+) -> dict[str, object] | None:
+    """Reject before prepare writes unless the old fill is an owner-empty scaffold."""
+    if not fill_path.exists() and not fill_path.is_symlink():
+        return None
+    try:
+        payload, binding = _bound_yaml(
+            fill_path,
+            logical_identity=fill_path.relative_to(root).as_posix(),
+            trusted_root=root,
+        )
+    except ValueError as exc:
+        raise SystemExit(
+            "已有填写文件不安全或无法读取；为避免覆盖，准备操作已停止。"
+        ) from exc
+    if not isinstance(payload, dict) or "preference_consumer" not in payload:
+        raise SystemExit("已有填写内容无法确认为空白模板；为避免覆盖，准备操作已停止。")
+    static_projection = dict(payload)
+    static_projection.pop("preference_consumer")
+    if static_projection != dict(expected_static_scaffold):
+        if any(dict(item) == binding for item in consumed_bindings or []):
+            return payload
+        raise SystemExit("已有 Agent 填写或模板改动；为避免覆盖，准备操作已停止。")
+    return payload
+
+
+def _consumed_fill_bindings(
+    root: Path,
+    record: Mapping[str, object],
+    unit_root: Path,
+    operation: str,
+) -> list[Mapping[str, object]]:
+    payload = record.get("payload") if isinstance(record, Mapping) else None
+    consumptions = payload.get("idea_authoring_consumptions") if isinstance(payload, Mapping) else None
+    record_binding = consumptions.get(operation) if isinstance(consumptions, Mapping) else None
+    if not isinstance(record_binding, Mapping):
+        return []
+    if operation in {"analyze", "review"}:
+        result_path = unit_root / f"{operation}.yaml"
+        try:
+            result, _result_binding = _bound_yaml(
+                result_path,
+                logical_identity=result_path.relative_to(root).as_posix(),
+                trusted_root=root,
+            )
+        except ValueError:
+            return []
+        if (
+            isinstance(result, Mapping)
+            and result.get("idea_id") == record.get("id")
+            and result.get("mode") == operation
+            and result.get("consumed_fill_binding") == record_binding
+        ):
+            return [record_binding]
+        return []
+    if operation == "discuss":
+        sidecar_path = discussion_judgements_path(unit_root)
+        try:
+            sidecar, _sidecar_binding = _bound_yaml(
+                sidecar_path,
+                logical_identity=sidecar_path.relative_to(root).as_posix(),
+                trusted_root=root,
+            )
+        except ValueError:
+            return []
+        items = sidecar.get("items") if isinstance(sidecar, Mapping) else None
+        if isinstance(items, list) and any(
+            isinstance(item, Mapping)
+            and item.get("idea_id") == record.get("id")
+            and item.get("consumed_fill_binding") == record_binding
+            for item in items
+        ):
+            return [record_binding]
+    return []
+
+
+def _guard_existing_contract_target(root: Path, path: Path) -> None:
+    if not path.exists() and not path.is_symlink():
+        return
+    try:
+        regular_file_binding(
+            path,
+            logical_identity=path.relative_to(root).as_posix(),
+            trusted_root=root,
+        )
+    except ValueError as exc:
+        raise SystemExit("已有准备契约不安全；为避免误写，准备操作已停止。") from exc
+
+
+def _validate_owner_static_fill(
+    fill: Mapping[str, object],
+    expected: Mapping[str, object],
+    *,
+    operation: str,
+) -> None:
+    projection = copy.deepcopy(dict(fill))
+    if operation == "generate":
+        candidates = projection.get("candidates")
+        if not isinstance(candidates, list):
+            raise ValueError("idea generation fill shape is invalid")
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                raise ValueError("idea generation candidate shape is invalid")
+            for field, empty in (
+                ("title", ""),
+                ("strategy", ""),
+                ("problem", ""),
+                ("hypothesis", ""),
+                ("next_actions", []),
+            ):
+                candidate[field] = empty
+    else:
+        projection["reviewer"] = ""
+        if operation == "discuss":
+            projection["conclusion"] = ""
+        elif operation == "review":
+            projection["selection_rank"] = ""
+        claims = projection.get("claims")
+        if not isinstance(claims, list):
+            raise ValueError("idea fill claims are malformed")
+        for claim in claims:
+            if not isinstance(claim, dict):
+                raise ValueError("idea fill claim is malformed")
+            claim["text"] = ""
+            claim["evidence_refs"] = []
+    if projection != dict(expected):
+        raise ValueError("immutable idea fill scaffold was modified")
+
+
+def _assert_bound_fill_unchanged(
+    root: Path,
+    fill_path: Path,
+    *,
+    initial_fill: object,
+    initial_binding: Mapping[str, str],
+) -> None:
+    current_fill, current_binding = _bound_yaml(
+        fill_path,
+        logical_identity=fill_path.relative_to(root).as_posix(),
+        trusted_root=root,
+    )
+    if current_binding != initial_binding or current_fill != initial_fill:
+        raise ValueError("Agent-authored idea fill changed before write")
+
+
+def _assert_semantic_write_boundary(
+    root: Path,
+    *,
+    operation: str,
+    canonical_id: str,
+    orientation_path: Path,
+    corpus_path: Path,
+    excluded_paths: set[Path],
+    record_path_value: Path,
+    fill_path: Path,
+    initial_fill: object,
+    initial_fill_binding: Mapping[str, str],
+    initial_context: Mapping[str, object],
+    initial_resolution: Mapping[str, object],
+    initial_corpus: Mapping[str, object],
+    initial_corpus_binding: Mapping[str, str],
+    initial_record_binding: Mapping[str, str],
+    claims: list[dict],
+    selection_id: str,
+) -> None:
+    context = idea_preference_context(
+        root,
+        operation=operation,
+        canonical_id=canonical_id,
+        orientation_path=orientation_path,
+        corpus_path=corpus_path,
+        excluded_paths=excluded_paths,
+        record_path_value=record_path_value,
+    )
+    resolution = resolve_idea_preferences(
+        root,
+        operation=operation,
+        context=context,
+        selection_id=selection_id,
+    )
+    if (
+        context != initial_context
+        or resolution.get("task_context_digest") != initial_resolution.get("task_context_digest")
+        or resolution.get("binding") != initial_resolution.get("binding")
+        or resolution.get("hard_value_digests") != initial_resolution.get("hard_value_digests")
+    ):
+        raise ValueError("idea authoring inputs changed before write")
+    current_record_binding = regular_file_binding(
+        record_path_value,
+        logical_identity="record.yaml",
+        trusted_root=root,
+    )
+    if current_record_binding != initial_record_binding:
+        raise ValueError("canonical idea record changed before write")
+    _assert_bound_fill_unchanged(
+        root,
+        fill_path,
+        initial_fill=initial_fill,
+        initial_binding=initial_fill_binding,
+    )
+    corpus, corpus_binding = _validated_frozen_corpus(root, corpus_path)
+    if corpus != initial_corpus or corpus_binding != initial_corpus_binding:
+        raise ValueError("frozen idea evidence corpus changed before write")
+    if _claim_input_violations(root, claims, corpus):
+        raise ValueError("cited idea evidence changed before write")
 
 
 def _load_current_corpus(
@@ -537,12 +1132,11 @@ def _load_current_corpus(
     corpus_path: Path,
     *,
     excluded_paths: set[Path],
-) -> dict[str, object]:
-    frozen = load_yaml(corpus_path, default={})
-    current = _evidence_corpus_snapshot(root, excluded_paths=excluded_paths)
-    if frozen != current:
-        raise ValueError("frozen pre-authoring evidence corpus is stale or modified")
-    return current
+) -> tuple[dict[str, object], dict[str, str]]:
+    # `excluded_paths` remains part of the owner API for compatibility.  The
+    # frozen manifest is intentionally not compared with the mutable live KB.
+    del excluded_paths
+    return _validated_frozen_corpus(root, corpus_path)
 
 
 def idea_preference_context(
@@ -556,24 +1150,27 @@ def idea_preference_context(
     record_path_value: Path | None = None,
     request_context: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
-    expected_orientation = idea_preference_orientation(
-        operation,
-        canonical_id=canonical_id,
-        request_context=request_context,
-    )
-    orientation = load_yaml(orientation_path, default={})
-    if orientation != expected_orientation:
-        raise ValueError("immutable idea authoring orientation was modified")
-    orientation_binding = regular_file_binding(
-        orientation_path,
-        logical_identity=orientation_path.name,
-        trusted_root=root,
-    )
-    corpus = _load_current_corpus(
+    corpus, corpus_binding = _load_current_corpus(
         root,
         corpus_path,
         excluded_paths=excluded_paths,
     )
+    commitment = _corpus_commitment(corpus, corpus_binding)
+    schema_version = 1 if corpus.get("schema") == "idea-evidence-corpus/v1" else 2
+    expected_orientation = idea_preference_orientation(
+        operation,
+        canonical_id=canonical_id,
+        corpus_commitment=commitment,
+        request_context=request_context,
+        schema_version=schema_version,
+    )
+    orientation, orientation_binding = _bound_yaml(
+        orientation_path,
+        logical_identity=orientation_path.name,
+        trusted_root=root,
+    )
+    if orientation != expected_orientation:
+        raise ValueError("immutable idea authoring orientation was modified")
     common = {
         "canonical_id": canonical_id,
         "canonical_kind": "idea-generation-bundle" if operation == "generate" else "idea",
@@ -604,7 +1201,13 @@ def idea_preference_context(
     )
     return {
         **common,
-        "record_identity_digest": record_binding["identity_digest"],
+        "record_identity_digest": (
+            record_binding["identity_digest"]
+            if corpus.get("schema") == "idea-evidence-corpus/v1"
+            else canonical_digest(
+                {"logical_identity": record_path_value.relative_to(root).as_posix()}
+            )
+        ),
         "record_bytes_digest": record_binding["bytes_digest"],
     }
 
@@ -650,14 +1253,13 @@ def resolve_idea_preferences(
 
 def generation_scaffold(
     request_context: Mapping[str, object],
-    preference_context: Mapping[str, object],
+    preference_context: Mapping[str, object] | None,
 ) -> dict[str, object]:
     count = int(request_context["count"])
-    return {
+    payload: dict[str, object] = {
         "schema": "idea-generation-fill/v1",
         "bundle_id": str(request_context["bundle_id"]),
         "request_context": dict(request_context),
-        "preference_consumer": _preference_consumer_view("generate", preference_context),
         "agent_instructions": {
             "task": "Author genuinely distinct research candidates from the supplied context and selected task preferences.",
             "semantic_boundary": "The script supplies empty slots only; every title, strategy, problem, hypothesis, and next action is authored by the runtime Agent.",
@@ -675,6 +1277,11 @@ def generation_scaffold(
             for index in range(1, count + 1)
         ],
     }
+    if preference_context is not None:
+        payload["preference_consumer"] = _preference_consumer_view(
+            "generate", preference_context
+        )
+    return payload
 
 
 def _bounded_agent_text(value: object, *, field: str, limit: int = 4000) -> str:
@@ -716,12 +1323,11 @@ def generation_materialization_plan(root: Path, args, *, bundle_id: str) -> dict
         request_context=request_context,
     )
     fill_path = _generation_fill_path(root, args, bundle_id=bundle_id)
-    fill_binding = regular_file_binding(
+    fill, fill_binding = _bound_yaml(
         fill_path,
-        logical_identity=f"{bundle_id}/{GENERATION_FILL_NAME}",
+        logical_identity=fill_path.relative_to(root).as_posix(),
         trusted_root=root,
     )
-    fill = load_yaml(fill_path, default={})
     if not isinstance(fill, dict):
         raise ValueError("idea generation fill must be a mapping")
     expected_keys = {
@@ -736,6 +1342,11 @@ def generation_materialization_plan(root: Path, args, *, bundle_id: str) -> dict
         raise ValueError("idea generation fill shape is invalid")
     if fill.get("bundle_id") != bundle_id or fill.get("request_context") != request_context:
         raise ValueError("idea generation request context was modified")
+    _validate_owner_static_fill(
+        fill,
+        generation_scaffold(request_context, context),
+        operation="generate",
+    )
     _validate_preference_consumer_view(fill, operation="generate", context=context)
     raw_candidates = fill.get("candidates")
     if not isinstance(raw_candidates, list) or len(raw_candidates) != int(request_context["count"]):
@@ -1048,8 +1659,8 @@ def _trusted_claim_source_roots(root: Path, claims: list[dict]) -> dict[str, Pat
 
 
 def _claims_corpus_violations(root: Path, claims: list[dict], corpus: Mapping[str, object]) -> list[str]:
-    frozen_paths = {
-        str(item.get("path") or "")
+    frozen_entries = {
+        str(item.get("path") or ""): item
         for item in corpus.get("entries", [])
         if isinstance(item, Mapping)
     }
@@ -1062,17 +1673,68 @@ def _claims_corpus_violations(root: Path, claims: list[dict], corpus: Mapping[st
             artifact = str(evidence_ref.get("artifact") or "").strip()
             if not source_unit_id or not artifact:
                 continue
+            if _is_authoring_control_artifact(Path(artifact)):
+                violations.append(
+                    f"claims[{claim_index}].evidence_refs[{ref_index}]: "
+                    "Agent authoring control artifacts cannot be cited"
+                )
+                continue
             try:
                 _source_record, source_path = locate_record(root, source_unit_id, fuzzy=False)
                 relative = (source_path.parent / artifact).absolute().relative_to(root.absolute()).as_posix()
             except (SystemExit, ValueError):
                 continue
-            if relative not in frozen_paths:
+            frozen = frozen_entries.get(relative)
+            if not isinstance(frozen, Mapping):
                 violations.append(
                     f"claims[{claim_index}].evidence_refs[{ref_index}]: "
                     "artifact was not present in the frozen pre-authoring evidence corpus"
                 )
+                continue
+            try:
+                metadata = (root / relative).lstat()
+                if (
+                    not stat.S_ISREG(metadata.st_mode)
+                    or metadata.st_size > MAX_CORPUS_FILE_BYTES
+                    or (
+                        corpus.get("schema") == "idea-evidence-corpus/v2"
+                        and metadata.st_size != frozen.get("size")
+                    )
+                ):
+                    raise ValueError("frozen evidence artifact size or type changed")
+                current = regular_file_binding(
+                    root / relative,
+                    logical_identity=relative,
+                    trusted_root=root,
+                )
+            except ValueError:
+                violations.append(
+                    f"claims[{claim_index}].evidence_refs[{ref_index}]: "
+                    "frozen evidence artifact is missing or unsafe"
+                )
+                continue
+            if current != {
+                "identity_digest": str(frozen.get("identity_digest") or ""),
+                "bytes_digest": str(frozen.get("bytes_digest") or ""),
+            }:
+                violations.append(
+                    f"claims[{claim_index}].evidence_refs[{ref_index}]: "
+                    "frozen evidence artifact identity or bytes changed"
+                )
     return violations
+
+
+def _claim_input_violations(
+    root: Path,
+    claims: list[dict],
+    corpus: Mapping[str, object],
+) -> list[str]:
+    before = _claims_corpus_violations(root, claims, corpus)
+    if before:
+        return before
+    evidence = _verify_cross_unit_claims(root, claims)
+    after = _claims_corpus_violations(root, claims, corpus)
+    return [*evidence, *after]
 
 
 def _persist_idea_preference_binding(
@@ -1113,7 +1775,7 @@ def verify_discussion_fill(root: Path, fill: object, idea_id: str) -> tuple[list
     ]
     if conclusion_claims and str(conclusion_claims[0].get("text") or "").strip() != str(fill.get("conclusion") or "").strip():
         violations.append("the canonical conclusion claim text must exactly match conclusion")
-    violations.extend(_verify_cross_unit_claims(root, claims))
+    violations.extend(validate_claims(claims))
     return violations, [dict(claim) for claim in claims or [] if isinstance(claim, dict)]
 
 
@@ -1142,7 +1804,7 @@ def verify_analysis_fill(root: Path, fill: object, idea_id: str, *, mode: str) -
                 raise ValueError
         except (TypeError, ValueError):
             violations.append("selection_rank must be a positive integer when provided")
-    violations.extend(_verify_cross_unit_claims(root, claims))
+    violations.extend(validate_claims(claims))
     return violations, [dict(claim) for claim in claims or [] if isinstance(claim, dict)]
 
 
@@ -1178,27 +1840,57 @@ def run_analysis_phase(args, root: Path, record: dict, unit_root: Path, *, mode:
     exclusions = _corpus_exclusions(unit_root, mode)
     result_path = unit_root / f"{mode}.yaml"
     if args.phase == "prepare":
+        existing_fill = _guard_existing_empty_fill(
+            root,
+            fill_path,
+            analysis_scaffold(record, mode=mode, preference_context=None),
+            consumed_bindings=_consumed_fill_bindings(root, record, unit_root, mode),
+        )
+        if existing_fill is not None:
+            try:
+                current_context = idea_preference_context(
+                    root,
+                    operation=mode,
+                    canonical_id=str(record["id"]),
+                    orientation_path=orientation_path,
+                    corpus_path=corpus_path,
+                    excluded_paths=exclusions,
+                    record_path_value=unit_root / "record.yaml",
+                )
+                if existing_fill == analysis_scaffold(
+                    record,
+                    mode=mode,
+                    preference_context=current_context,
+                ) and _has_current_v2_corpus(root, corpus_path):
+                    print(f"[ok] evidence-first {mode} scaffold is already prepared")
+                    return 0
+            except ValueError:
+                pass
         record["confirmation_status"] = "pending_user_confirmation"
         record["needs_human_confirmation"] = True
         if mode == "analyze":
             record["payload"]["analysis"]["analysis_status"] = "awaiting_agent_fill"
         else:
             record["payload"]["review"]["review_status"] = "awaiting_agent_fill"
-        append_history(
-            record,
-            action=f"idea-{mode}-scaffolded",
-            summary=f"Prepared an empty evidence-first {mode} scaffold.",
-            information_types=["inference", "evaluation", "unverified"],
-            artifacts=[rel(root, fill_path)],
-        )
+        if not any(
+            isinstance(item, Mapping) and item.get("action") == f"idea-{mode}-scaffolded"
+            for item in record.get("history", [])
+        ):
+            append_history(
+                record,
+                action=f"idea-{mode}-scaffolded",
+                summary=f"Prepared an empty evidence-first {mode} scaffold.",
+                information_types=["inference", "evaluation", "unverified"],
+                artifacts=[rel(root, fill_path)],
+            )
         write_record(root, record)
-        write_yaml_if_changed(
-            orientation_path,
-            idea_preference_orientation(mode, canonical_id=str(record["id"])),
-        )
-        write_yaml_if_changed(
-            corpus_path,
-            _evidence_corpus_snapshot(root, excluded_paths=exclusions),
+        _write_authoring_contract(
+            root,
+            operation=mode,
+            canonical_id=str(record["id"]),
+            orientation_path=orientation_path,
+            corpus_path=corpus_path,
+            excluded_paths=exclusions,
         )
         preference_context = idea_preference_context(
             root,
@@ -1234,6 +1926,11 @@ def run_analysis_phase(args, root: Path, record: dict, unit_root: Path, *, mode:
             excluded_paths=exclusions,
             record_path_value=unit_root / "record.yaml",
         )
+        record_runtime_binding = regular_file_binding(
+            unit_root / "record.yaml",
+            logical_identity="record.yaml",
+            trusted_root=root,
+        )
         preference_resolution = resolve_idea_preferences(
             root,
             operation=mode,
@@ -1248,18 +1945,30 @@ def run_analysis_phase(args, root: Path, record: dict, unit_root: Path, *, mode:
         candidate_path = unit_root / candidate_path
     if not candidate_path.exists():
         raise SystemExit(f"{mode} verify input not found")
-    fill = load_yaml(candidate_path, default={})
     try:
+        fill, fill_binding = _bound_yaml(
+            candidate_path,
+            logical_identity=candidate_path.relative_to(root).as_posix(),
+            trusted_root=root,
+        )
         if not isinstance(fill, Mapping):
             raise ValueError(f"{mode} fill must be a mapping")
+        _validate_owner_static_fill(
+            fill,
+            analysis_scaffold(record, mode=mode, preference_context=preference_context),
+            operation=mode,
+        )
         _validate_preference_consumer_view(fill, operation=mode, context=preference_context)
     except ValueError as exc:
         print(f"[reject] {mode} preference binding: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
     violations, claims = verify_analysis_fill(root, fill, record["id"], mode=mode)
-    corpus = load_yaml(corpus_path, default={})
-    if isinstance(corpus, Mapping):
-        violations.extend(_claims_corpus_violations(root, claims, corpus))
+    try:
+        corpus, corpus_binding = _validated_frozen_corpus(root, corpus_path)
+    except ValueError as exc:
+        print(f"[reject] {mode} evidence corpus: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
+    violations.extend(_claim_input_violations(root, claims, corpus))
     if violations:
         print(f"[reject] {mode} failed evidence verification:", file=sys.stderr)
         for violation in violations:
@@ -1267,7 +1976,7 @@ def run_analysis_phase(args, root: Path, record: dict, unit_root: Path, *, mode:
         raise SystemExit(1)
 
     try:
-        rechecked_context = idea_preference_context(
+        _assert_semantic_write_boundary(
             root,
             operation=mode,
             canonical_id=str(record["id"]),
@@ -1275,20 +1984,17 @@ def run_analysis_phase(args, root: Path, record: dict, unit_root: Path, *, mode:
             corpus_path=corpus_path,
             excluded_paths=exclusions,
             record_path_value=unit_root / "record.yaml",
-        )
-        rechecked_resolution = resolve_idea_preferences(
-            root,
-            operation=mode,
-            context=rechecked_context,
+            fill_path=candidate_path,
+            initial_fill=fill,
+            initial_fill_binding=fill_binding,
+            initial_context=preference_context,
+            initial_resolution=preference_resolution,
+            initial_corpus=corpus,
+            initial_corpus_binding=corpus_binding,
+            initial_record_binding=record_runtime_binding,
+            claims=claims,
             selection_id=str(getattr(args, "preference_selection_id", "") or ""),
         )
-        if (
-            rechecked_context != preference_context
-            or rechecked_resolution.get("task_context_digest")
-            != preference_resolution.get("task_context_digest")
-            or rechecked_resolution.get("binding") != preference_resolution.get("binding")
-        ):
-            raise ValueError("idea authoring inputs changed before write")
     except ValueError as exc:
         print(f"[reject] {mode} write-boundary preference check: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
@@ -1301,11 +2007,35 @@ def run_analysis_phase(args, root: Path, record: dict, unit_root: Path, *, mode:
         binding=preference_binding,
     )
     attach_claims(record.setdefault("payload", {}), claims)
+    record["payload"].setdefault("idea_authoring_consumptions", {})[mode] = dict(fill_binding)
     build_verification_receipt(
         record,
         unit_root,
         source_roots=_trusted_claim_source_roots(root, claims),
     )
+    try:
+        _assert_semantic_write_boundary(
+            root,
+            operation=mode,
+            canonical_id=str(record["id"]),
+            orientation_path=orientation_path,
+            corpus_path=corpus_path,
+            excluded_paths=exclusions,
+            record_path_value=unit_root / "record.yaml",
+            fill_path=candidate_path,
+            initial_fill=fill,
+            initial_fill_binding=fill_binding,
+            initial_context=preference_context,
+            initial_resolution=preference_resolution,
+            initial_corpus=corpus,
+            initial_corpus_binding=corpus_binding,
+            initial_record_binding=record_runtime_binding,
+            claims=claims,
+            selection_id=str(getattr(args, "preference_selection_id", "") or ""),
+        )
+    except ValueError as exc:
+        print(f"[reject] {mode} final write-boundary check: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
     record["status"] = "pending"
     record["confirmation_status"] = "pending_user_confirmation"
     record["needs_human_confirmation"] = True
@@ -1322,6 +2052,7 @@ def run_analysis_phase(args, root: Path, record: dict, unit_root: Path, *, mode:
         "verified_at": utc_now_iso(),
         "claims": claims,
         "descriptive_counts": descriptive_counts(record),
+        "consumed_fill_binding": dict(fill_binding),
     }
     if preference_binding:
         payload["preference_selection"] = preference_binding
@@ -1382,8 +2113,9 @@ def persist_discussion_conclusion(
     fill: dict,
     claims: list[dict],
     *,
+    fill_binding: Mapping[str, str],
     preference_binding: Mapping[str, object] | None = None,
-) -> tuple[dict, dict]:
+) -> tuple[dict, dict, list[dict]]:
     verified_at = utc_now_iso()
     digest_source = f"{record['id']}\n{fill['reviewer']}\n{fill['conclusion']}\n{verified_at}"
     conclusion = {
@@ -1393,6 +2125,7 @@ def persist_discussion_conclusion(
         "verified_at": verified_at,
         "verification": "evidence_verified",
         "claims": claims,
+        "consumed_fill_binding": dict(fill_binding),
     }
     judgement = {
         "id": conclusion["id"],
@@ -1404,6 +2137,7 @@ def persist_discussion_conclusion(
         "priority": "normal",
         "confirmation_status": "pending_user_confirmation",
         "needs_human_confirmation": True,
+        "consumed_fill_binding": dict(fill_binding),
         "information_types": ["inference", "evaluation", "unverified"],
         "payload": {
             "discussion_conclusion": {
@@ -1430,7 +2164,6 @@ def persist_discussion_conclusion(
     )
     items = load_discussion_judgements(unit_root, record["id"])
     items.append(judgement)
-    write_discussion_judgements(unit_root, record["id"], items)
     conclusion["judgement_id"] = judgement["id"]
     conclusion["confirmation_status"] = "pending_user_confirmation"
     if preference_binding:
@@ -1442,7 +2175,10 @@ def persist_discussion_conclusion(
         )
     discussion = record.setdefault("payload", {}).setdefault("discussion", {})
     discussion.setdefault("conclusions", []).append(conclusion)
-    return conclusion, judgement
+    record["payload"].setdefault("idea_authoring_consumptions", {})["discuss"] = dict(
+        fill_binding
+    )
+    return conclusion, judgement, items
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1546,15 +2282,40 @@ def _dispatch(args, root: Path) -> int:
         if args.phase == "prepare":
             if bundle_index_path(root, bundle_id).exists() or bundle_index_path(root, bundle_id).is_symlink():
                 raise SystemExit("This idea generation bundle has already been materialized.")
-            write_yaml_if_changed(
-                orientation_path,
-                idea_preference_orientation(
-                    "generate",
-                    canonical_id=bundle_id,
-                    request_context=request_context,
-                ),
+            static_scaffold = generation_scaffold(request_context, None)
+            existing_fill = _guard_existing_empty_fill(
+                root,
+                fill_path,
+                static_scaffold,
             )
-            write_yaml_if_changed(corpus_path, _evidence_corpus_snapshot(root))
+            if existing_fill is not None:
+                try:
+                    current_context = idea_preference_context(
+                        root,
+                        operation="generate",
+                        canonical_id=bundle_id,
+                        orientation_path=orientation_path,
+                        corpus_path=corpus_path,
+                        excluded_paths=set(),
+                        request_context=request_context,
+                    )
+                    if (
+                        existing_fill == generation_scaffold(request_context, current_context)
+                        and _has_current_v2_corpus(root, corpus_path)
+                    ):
+                        print("空白候选槽位已经准备完成。")
+                        return 0
+                except ValueError:
+                    pass
+            _write_authoring_contract(
+                root,
+                operation="generate",
+                canonical_id=bundle_id,
+                orientation_path=orientation_path,
+                corpus_path=corpus_path,
+                excluded_paths=set(),
+                request_context=request_context,
+            )
             preference_context = idea_preference_context(
                 root,
                 operation="generate",
@@ -1667,6 +2428,8 @@ def _dispatch(args, root: Path) -> int:
                 or final_resolution.get("task_context_digest")
                 != preference_resolution.get("task_context_digest")
                 or final_resolution.get("binding") != preference_resolution.get("binding")
+                or final_resolution.get("hard_value_digests")
+                != preference_resolution.get("hard_value_digests")
             ):
                 raise ValueError("idea generation inputs changed before write")
         except ValueError as exc:
@@ -1756,6 +2519,7 @@ def _dispatch(args, root: Path) -> int:
         return 0
 
     record, path = locate_record(root, args.idea_id, kind="idea")
+    _assert_planned_idea_resolution(args, record, path)
     if record.get("kind") != "idea":
         raise SystemExit(f"{args.idea_id} is not an idea record")
     print_idea_resolution(root, args.idea_id, record, path)
@@ -1767,21 +2531,50 @@ def _dispatch(args, root: Path) -> int:
         corpus_path = unit_root / "discuss-evidence-corpus.yaml"
         exclusions = _corpus_exclusions(unit_root, "discuss")
         if args.phase == "prepare":
-            append_history(
-                record,
-                action="idea-discussion-scaffolded",
-                summary="Prepared an empty evidence-first sparring conclusion scaffold.",
-                information_types=["inference", "evaluation", "unverified"],
-                artifacts=[rel(root, scaffold_path)],
+            existing_fill = _guard_existing_empty_fill(
+                root,
+                scaffold_path,
+                discussion_scaffold(record, preference_context=None),
+                consumed_bindings=_consumed_fill_bindings(root, record, unit_root, "discuss"),
             )
+            if existing_fill is not None:
+                try:
+                    current_context = idea_preference_context(
+                        root,
+                        operation="discuss",
+                        canonical_id=str(record["id"]),
+                        orientation_path=orientation_path,
+                        corpus_path=corpus_path,
+                        excluded_paths=exclusions,
+                        record_path_value=unit_root / "record.yaml",
+                    )
+                    if existing_fill == discussion_scaffold(
+                        record,
+                        preference_context=current_context,
+                    ) and _has_current_v2_corpus(root, corpus_path):
+                        print("[ok] evidence-first sparring conclusion is already prepared")
+                        return 0
+                except ValueError:
+                    pass
+            if not any(
+                isinstance(item, Mapping) and item.get("action") == "idea-discussion-scaffolded"
+                for item in record.get("history", [])
+            ):
+                append_history(
+                    record,
+                    action="idea-discussion-scaffolded",
+                    summary="Prepared an empty evidence-first sparring conclusion scaffold.",
+                    information_types=["inference", "evaluation", "unverified"],
+                    artifacts=[rel(root, scaffold_path)],
+                )
             write_record(root, record)
-            write_yaml_if_changed(
-                orientation_path,
-                idea_preference_orientation("discuss", canonical_id=str(record["id"])),
-            )
-            write_yaml_if_changed(
-                corpus_path,
-                _evidence_corpus_snapshot(root, excluded_paths=exclusions),
+            _write_authoring_contract(
+                root,
+                operation="discuss",
+                canonical_id=str(record["id"]),
+                orientation_path=orientation_path,
+                corpus_path=corpus_path,
+                excluded_paths=exclusions,
             )
             preference_context = idea_preference_context(
                 root,
@@ -1850,6 +2643,11 @@ def _dispatch(args, root: Path) -> int:
                 excluded_paths=exclusions,
                 record_path_value=unit_root / "record.yaml",
             )
+            record_runtime_binding = regular_file_binding(
+                unit_root / "record.yaml",
+                logical_identity="record.yaml",
+                trusted_root=root,
+            )
             preference_resolution = resolve_idea_preferences(
                 root,
                 operation="discuss",
@@ -1864,10 +2662,19 @@ def _dispatch(args, root: Path) -> int:
             fill_path = unit_root / fill_path
         if not fill_path.exists():
             raise SystemExit("Discussion fill is missing; prepare or provide the agent-filled conclusion first.")
-        fill = load_yaml(fill_path, default={})
         try:
+            fill, fill_binding = _bound_yaml(
+                fill_path,
+                logical_identity=fill_path.relative_to(root).as_posix(),
+                trusted_root=root,
+            )
             if not isinstance(fill, Mapping):
                 raise ValueError("discussion fill must be a mapping")
+            _validate_owner_static_fill(
+                fill,
+                discussion_scaffold(record, preference_context=preference_context),
+                operation="discuss",
+            )
             _validate_preference_consumer_view(
                 fill,
                 operation="discuss",
@@ -1877,16 +2684,19 @@ def _dispatch(args, root: Path) -> int:
             print(f"[reject] discuss preference binding: {exc}", file=sys.stderr)
             raise SystemExit(1) from exc
         violations, claims = verify_discussion_fill(root, fill, record["id"])
-        corpus = load_yaml(corpus_path, default={})
-        if isinstance(corpus, Mapping):
-            violations.extend(_claims_corpus_violations(root, claims, corpus))
+        try:
+            corpus, corpus_binding = _validated_frozen_corpus(root, corpus_path)
+        except ValueError as exc:
+            print(f"[reject] discuss evidence corpus: {exc}", file=sys.stderr)
+            raise SystemExit(1) from exc
+        violations.extend(_claim_input_violations(root, claims, corpus))
         if violations:
             print("[reject] discussion conclusion failed verification:", file=sys.stderr)
             for violation in violations:
                 print(f"  - {violation}", file=sys.stderr)
             raise SystemExit(1)
         try:
-            rechecked_context = idea_preference_context(
+            _assert_semantic_write_boundary(
                 root,
                 operation="discuss",
                 canonical_id=str(record["id"]),
@@ -1894,31 +2704,53 @@ def _dispatch(args, root: Path) -> int:
                 corpus_path=corpus_path,
                 excluded_paths=exclusions,
                 record_path_value=unit_root / "record.yaml",
-            )
-            rechecked_resolution = resolve_idea_preferences(
-                root,
-                operation="discuss",
-                context=rechecked_context,
+                fill_path=fill_path,
+                initial_fill=fill,
+                initial_fill_binding=fill_binding,
+                initial_context=preference_context,
+                initial_resolution=preference_resolution,
+                initial_corpus=corpus,
+                initial_corpus_binding=corpus_binding,
+                initial_record_binding=record_runtime_binding,
+                claims=claims,
                 selection_id=str(args.preference_selection_id or ""),
             )
-            if (
-                rechecked_context != preference_context
-                or rechecked_resolution.get("task_context_digest")
-                != preference_resolution.get("task_context_digest")
-                or rechecked_resolution.get("binding") != preference_resolution.get("binding")
-            ):
-                raise ValueError("idea discussion inputs changed before write")
         except ValueError as exc:
             print(f"[reject] discuss write-boundary preference check: {exc}", file=sys.stderr)
             raise SystemExit(1) from exc
-        conclusion, _judgement = persist_discussion_conclusion(
+        conclusion, _judgement, judgement_items = persist_discussion_conclusion(
             root,
             unit_root,
             record,
             fill,
             claims,
+            fill_binding=fill_binding,
             preference_binding=dict(preference_resolution.get("binding") or {}),
         )
+        try:
+            _assert_semantic_write_boundary(
+                root,
+                operation="discuss",
+                canonical_id=str(record["id"]),
+                orientation_path=orientation_path,
+                corpus_path=corpus_path,
+                excluded_paths=exclusions,
+                record_path_value=unit_root / "record.yaml",
+                fill_path=fill_path,
+                initial_fill=fill,
+                initial_fill_binding=fill_binding,
+                initial_context=preference_context,
+                initial_resolution=preference_resolution,
+                initial_corpus=corpus,
+                initial_corpus_binding=corpus_binding,
+                initial_record_binding=record_runtime_binding,
+                claims=claims,
+                selection_id=str(args.preference_selection_id or ""),
+            )
+        except ValueError as exc:
+            print(f"[reject] discuss final write-boundary check: {exc}", file=sys.stderr)
+            raise SystemExit(1) from exc
+        write_discussion_judgements(unit_root, record["id"], judgement_items)
         append_history(
             record,
             action="idea-discussion-verified",
@@ -1993,7 +2825,12 @@ def main() -> int:
     active_token = _ACTIVE_MUTATION.set(True)
     checkpoint_token = _PENDING_CHECKPOINT.set(None)
     try:
-        with command_mutation(root, f"idea-workbench:{args.command}", targets):
+        with mutation_transaction(
+            root,
+            f"idea-workbench:{args.command}",
+            targets,
+            preflight=lambda: _idea_transaction_preflight(args, root),
+        ):
             result = _dispatch(args, root)
         pending = _PENDING_CHECKPOINT.get()
     finally:
