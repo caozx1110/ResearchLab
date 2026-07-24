@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from research.common import load_yaml, write_yaml_if_changed
+from research.paths import config_root
 
 
 def _experiment_module():
@@ -609,3 +610,78 @@ def test_experiment_validator_lifecycle(tmp_path: Path) -> None:
         "user_message",
     )
     assert load_yaml(record_path)["confirmation_status"] == "confirmed"
+
+
+def test_experiment_confirmation_rejects_hard_preference_change(tmp_path: Path) -> None:
+    _run_experiment(tmp_path, "plan", "--title", "preference freshness", "--program-id", "program-test")
+    record_path = next((tmp_path / "kb" / "units" / "experiments").glob("*/record.yaml"))
+    experiment_id = load_yaml(record_path)["id"]
+    _run_experiment(
+        tmp_path,
+        "log-run",
+        "--experiment-id",
+        experiment_id,
+        "--result-summary",
+        "observed failure",
+        "--config-revision",
+        "config-v1",
+    )
+    claims_path = record_path.parent / "diagnosis-claims.yaml"
+    write_yaml_if_changed(
+        claims_path,
+        {
+            "claims": [
+                {
+                    "id": "claim-preference-freshness",
+                    "text": "The run recorded an observed failure.",
+                    "claim_type": "inference",
+                    "confirmation_status": "pending_user_confirmation",
+                    "evidence_refs": [
+                        {
+                            "source_unit_id": experiment_id,
+                            "artifact": "run-log.yaml",
+                            "locator": "run=latest",
+                            "quote": "observed failure",
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    _run_experiment(
+        tmp_path,
+        "diagnose",
+        "--experiment-id",
+        experiment_id,
+        "--summary",
+        "preference-bound diagnosis",
+        "--category",
+        "unknown",
+        "--claims-file",
+        str(claims_path),
+    )
+    before = record_path.read_bytes()
+    write_yaml_if_changed(
+        config_root(tmp_path) / "user-profile.yaml",
+        {"constraints": ["new offline-only boundary"]},
+    )
+
+    result = _run_experiment(
+        tmp_path,
+        "confirm",
+        "--experiment-id",
+        experiment_id,
+        "--confirmed-by",
+        "human-reviewer",
+        "--evidence",
+        str((record_path.parent / "run-log.yaml").relative_to(tmp_path)),
+        "--user-authorization",
+        "I confirm this experiment diagnosis.",
+        "--authorization-source",
+        "user_message",
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "hard preferences changed" in result.stderr
+    assert record_path.read_bytes() == before

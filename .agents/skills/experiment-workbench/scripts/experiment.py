@@ -38,7 +38,12 @@ from research.common import (
 from research.core import append_history, build_index, build_unit_id, candidate_pools_path, command_mutation, confirm_unit, default_record, ensure_workspace, kb_root, locate_record, project_root, record_path, rel, topic_taxonomy_path, write_record
 from research.evidence import attach_claims, build_verification_receipt, validate_claims, verify_claim_evidence
 from research.judgements import confirmation_binding
-from research.preference_selection import resolve_operation_preferences
+from research.preference_selection import (
+    eligible_preferences,
+    load_effective_selection,
+    resolve_operation_preferences,
+    selection_binding,
+)
 
 RUN_OUTCOME_CHOICES = ["success", "partial", "failed", "blocked", "inconclusive"]
 CLASSIFICATION_CHOICES = ["method", "implementation", "data", "evaluation", "resource", "environment", "process", "unknown"]
@@ -318,6 +323,53 @@ def _record_experiment_preference_state(
     payload = record.setdefault("payload", {})
     contexts = payload.setdefault("preference_contexts", {})
     contexts[str(resolution.get("operation") or "")] = experiment_preference_state(resolution)
+
+
+def require_current_experiment_preference_state(
+    root: Path,
+    record: dict[str, Any],
+    *,
+    operation: str,
+) -> None:
+    """Check a verification-bound operation receipt before downstream confirmation.
+
+    The original task context is intentionally not copied into the record.  At
+    this later governance step its digest is already protected by the
+    verification receipt, so this check only proves that the same selection and
+    hard canonical values remain current.
+    """
+    payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+    contexts = payload.get("preference_contexts") if isinstance(payload.get("preference_contexts"), dict) else {}
+    stored = contexts.get(operation)
+    if not isinstance(stored, dict):
+        raise SystemExit("Experiment preference context is missing; repeat diagnosis before confirmation.")
+    task_digest = str(stored.get("task_context_digest") or "")
+    binding = stored.get("selection_binding")
+    hard_digests = stored.get("hard_value_digests")
+    if not isinstance(binding, dict) or not isinstance(hard_digests, dict):
+        raise SystemExit("Experiment preference context is invalid; repeat diagnosis before confirmation.")
+    eligible = eligible_preferences(root, skill="experiment-workbench", operation=operation)
+    current_hard = {
+        str(item.get("path") or ""): str(item.get("value_digest") or "")
+        for item in eligible.get("items", [])
+        if isinstance(item, dict) and str(item.get("strength") or "") == "hard"
+    }
+    if hard_digests != current_hard:
+        raise SystemExit("Experiment hard preferences changed after diagnosis; repeat diagnosis before confirmation.")
+    if not binding:
+        return
+    try:
+        receipt = load_effective_selection(
+            root,
+            selection_id=str(binding.get("selection_id") or ""),
+            skill="experiment-workbench",
+            operation=operation,
+            expected_task_context_digest=task_digest,
+        )
+    except ValueError as exc:
+        raise SystemExit(f"Experiment preferences are stale: {exc}") from exc
+    if selection_binding(receipt) != binding:
+        raise SystemExit("Experiment preference binding changed after diagnosis; repeat diagnosis before confirmation.")
 
 
 def build_run_identity(
@@ -1008,6 +1060,11 @@ def _dispatch(args, root: Path) -> int:
         return 0
 
     if args.command == "confirm":
+        require_current_experiment_preference_state(
+            root,
+            record,
+            operation="diagnose",
+        )
         record = confirm_unit(
             record,
             "experiment",
