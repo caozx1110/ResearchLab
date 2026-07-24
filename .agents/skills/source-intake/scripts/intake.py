@@ -28,7 +28,7 @@ from research.common import add_project_root_argument, confirm_command as shared
 from research.confirm import require_user_authorization
 from research.journal import journal_subprocess_env, mutation_transaction
 from research.intake_cli import add_intake_add_arguments
-from research.preference_selection import resolve_task_preferences, selection_binding
+from research.preference_selection import operation_contract, resolve_task_preferences, selection_binding
 from research.core import (
     apply_record_governance,
     backup_source,
@@ -662,12 +662,9 @@ def main() -> int:
     paper_preferences, preference_binding = resolve_intake_preferences(
         root, args, source=source, title=title
     )
-    record["payload"]["preference_contract"] = {
-        "skill": "source-intake",
-        "operation": "add",
-        "soft_missing": "neutral-default",
-        "hard_fallback_paths": ["profile.constraints"],
-    }
+    record["payload"]["preference_contract"] = operation_contract(
+        skill="source-intake", operation="add"
+    )
     if preference_binding:
         record["payload"]["preference_binding"] = preference_binding
     path, concurrent_duplicate, source_info, auto_outputs, note_created, updated_stage_path = (

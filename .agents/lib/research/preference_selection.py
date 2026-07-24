@@ -120,6 +120,7 @@ SKILL_ELIGIBILITY: dict[str, tuple[str, ...]] = {
         "profile.personalization.term_style",
         "runtime.paper",
         "runtime.pdf",
+        "runtime.autonomy.auto_execute_scope",
         "learned.*",
     ),
     "repo-analyst": (
@@ -215,8 +216,16 @@ OPERATION_ELIGIBILITY: dict[tuple[str, str], tuple[str, ...]] = {
         "learned.*",
     ),
     ("paper-analyst", "prewarm-cache"): ("runtime.paper", "learned.*"),
-    ("paper-analyst", "screen"): ("runtime.paper", "learned.*"),
-    ("paper-analyst", "complete-note"): ("runtime.paper", "learned.*"),
+    ("paper-analyst", "screen"): (
+        "runtime.paper",
+        "runtime.autonomy.auto_execute_scope",
+        "learned.*",
+    ),
+    ("paper-analyst", "complete-note"): (
+        "runtime.paper",
+        "runtime.autonomy.auto_execute_scope",
+        "learned.*",
+    ),
     ("paper-analyst", "extract-figures"): ("runtime.pdf", "learned.*"),
     ("paper-analyst", "refresh-structure"): ("learned.*",),
 }

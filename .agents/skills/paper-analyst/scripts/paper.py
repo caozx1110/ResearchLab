@@ -68,7 +68,7 @@ from research.evidence import (
     validate_claims,
     verify_claim_evidence,
 )
-from research.preference_selection import resolve_task_preferences, selection_binding
+from research.preference_selection import operation_contract, resolve_task_preferences, selection_binding
 
 SECTION_PATTERNS = (
     "abstract",
@@ -1507,12 +1507,9 @@ def main() -> int:
     paper_preferences, pdf_preferences, preference_binding = resolve_paper_preferences(
         root, args, record
     )
-    record.setdefault("payload", {})["preference_contract"] = {
-        "skill": "paper-analyst",
-        "operation": args.command,
-        "soft_missing": "neutral-default",
-        "hard_fallback_paths": ["runtime.autonomy.auto_execute_scope"],
-    }
+    record.setdefault("payload", {})["preference_contract"] = operation_contract(
+        skill="paper-analyst", operation=args.command
+    )
     if preference_binding:
         record["payload"]["preference_binding"] = preference_binding
 
