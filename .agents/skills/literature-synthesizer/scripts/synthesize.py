@@ -100,9 +100,18 @@ def synthesis_preference_context(
     mode: str,
     as_of: str,
     program_ids: list[str] | None = None,
+    discovery_mode: str = "kb_only",
+    search_protocol_digest: str = "",
+    input_unit_bindings: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
+    normalized_bindings = sorted(
+        [copy.deepcopy(item) for item in input_unit_bindings or [] if isinstance(item, dict)],
+        key=lambda item: (str(item.get("kind") or ""), str(item.get("id") or "")),
+    )
     return {
         "mode": str(mode or ""),
+        "discovery_mode": str(discovery_mode or "kb_only"),
+        "search_protocol_digest": str(search_protocol_digest or _canonical_digest({})),
         "selection_digest": _canonical_digest(
             {
                 "query": " ".join(str(query or "").split()),
@@ -114,7 +123,30 @@ def synthesis_preference_context(
         ),
         "as_of": str(as_of or ""),
         "program_ids": sorted({str(item or "").strip() for item in program_ids or [] if str(item or "").strip()}),
+        "input_units_digest": _canonical_digest(normalized_bindings),
     }
+
+
+def synthesis_input_unit_bindings(
+    root: Path,
+    records: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Read the exact current unit snapshot selected by prepare."""
+    return sorted(
+        [build_unit_binding(root, record) for record in records],
+        key=lambda item: (str(item.get("kind") or ""), str(item.get("id") or "")),
+    )
+
+
+def validated_synthesis_program_ids(root: Path, program_ids: list[str] | None) -> list[str]:
+    linked = sorted({str(item or "").strip() for item in program_ids or [] if str(item or "").strip()})
+    for program_id in linked:
+        if Path(program_id).name != program_id or program_id in {".", ".."}:
+            raise ValueError("survey program id is not canonical")
+        program = root / "kb" / "programs" / program_id
+        if program.is_symlink() or not program.is_dir():
+            raise ValueError(f"survey program does not exist: {program_id}")
+    return linked
 
 
 def resolve_synthesis_preferences(
@@ -129,6 +161,9 @@ def resolve_synthesis_preferences(
     mode: str,
     as_of: str,
     program_ids: list[str] | None = None,
+    discovery_mode: str = "kb_only",
+    search_protocol_digest: str = "",
+    input_unit_bindings: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     try:
         return resolve_operation_preferences(
@@ -145,6 +180,9 @@ def resolve_synthesis_preferences(
                 mode=mode,
                 as_of=as_of,
                 program_ids=program_ids,
+                discovery_mode=discovery_mode,
+                search_protocol_digest=search_protocol_digest,
+                input_unit_bindings=input_unit_bindings,
             ),
         )
     except ValueError as exc:
@@ -403,19 +441,25 @@ def build_survey_scaffold(
     as_of: str,
     program_ids: list[str] | None = None,
     preference_context: dict[str, object] | None = None,
+    discovery_mode: str = "kb_only",
+    search_protocol_digest: str = "",
+    input_unit_bindings: list[dict[str, object]] | None = None,
 ) -> dict:
     """Build a fillable survey structure; the script authors no conclusions."""
     if not records:
         raise ValueError("survey scaffold requires at least one current confirmed input unit")
     subject = query or topic or tag or pool or kind or mode
     slug = slugify(subject, max_words=8) or mode
-    linked_program_ids = sorted({str(item or "").strip() for item in program_ids or [] if str(item or "").strip()})
-    for program_id in linked_program_ids:
-        if Path(program_id).name != program_id or program_id in {".", ".."}:
-            raise ValueError("survey program id is not canonical")
-        program = root / "kb" / "programs" / program_id
-        if program.is_symlink() or not program.is_dir():
-            raise ValueError(f"survey program does not exist: {program_id}")
+    linked_program_ids = validated_synthesis_program_ids(root, program_ids)
+    units = (
+        synthesis_input_unit_bindings(root, records)
+        if input_unit_bindings is None
+        else sorted(
+            [copy.deepcopy(item) for item in input_unit_bindings if isinstance(item, dict)],
+            key=lambda item: (str(item.get("kind") or ""), str(item.get("id") or "")),
+        )
+    )
+    effective_protocol_digest = str(search_protocol_digest or _canonical_digest({}))
     if preference_context is None:
         preference_context = synthesis_preference_state(
             resolve_synthesis_preferences(
@@ -429,9 +473,11 @@ def build_survey_scaffold(
                 mode=mode,
                 as_of=as_of,
                 program_ids=linked_program_ids,
+                discovery_mode=discovery_mode,
+                search_protocol_digest=effective_protocol_digest,
+                input_unit_bindings=units,
             )
         )
-    units = [build_unit_binding(root, record) for record in records if str(record.get("id") or "")]
     sections = []
     for section_id, title, claim_type in SECTION_SPECS:
         section = {"id": section_id, "title": title}
@@ -472,6 +518,8 @@ def build_survey_scaffold(
         "slug": slug,
         "status": "awaiting_agent_fill",
         "program_ids": linked_program_ids,
+        "discovery_mode": str(discovery_mode or "kb_only"),
+        "search_protocol_digest": effective_protocol_digest,
         "filters": {
             "query": query,
             "kind": kind,
@@ -617,6 +665,20 @@ def verify_survey_fill(payload: dict, root: Path) -> tuple[list[str], dict]:
     violations, entries = survey_claim_entries(payload)
     filters = payload.get("filters") if isinstance(payload.get("filters"), dict) else {}
     anchor_for_preferences = payload.get("kb_anchor") if isinstance(payload.get("kb_anchor"), dict) else {}
+    current_input_bindings: list[dict[str, object]] = []
+    try:
+        current_selected, _current_excluded = select_current_confirmed_survey_records(
+            root,
+            iter_records(root),
+            query=str(filters.get("query") or ""),
+            kind=str(filters.get("kind") or ""),
+            topic=str(filters.get("topic") or ""),
+            tag=str(filters.get("tag") or ""),
+            pool=str(filters.get("pool") or ""),
+        )
+        current_input_bindings = synthesis_input_unit_bindings(root, current_selected)
+    except (OSError, SystemExit) as exc:
+        violations.append(f"preference_context: current input selection is unavailable: {exc}")
     preference_context = payload.get("preference_context")
     if not isinstance(preference_context, dict):
         violations.append("preference_context: missing or not a mapping")
@@ -635,6 +697,11 @@ def verify_survey_fill(payload: dict, root: Path) -> tuple[list[str], dict]:
                 mode=str(payload.get("mode") or ""),
                 as_of=str(anchor_for_preferences.get("as_of") or ""),
                 program_ids=payload.get("program_ids") if isinstance(payload.get("program_ids"), list) else [],
+                discovery_mode=str(payload.get("discovery_mode") or "kb_only"),
+                search_protocol_digest=str(
+                    payload.get("search_protocol_digest") or _canonical_digest({})
+                ),
+                input_unit_bindings=current_input_bindings,
             )
         except SystemExit as exc:
             violations.append(str(exc))
@@ -891,6 +958,16 @@ def _require_current_survey(root: Path, record: dict, path: Path) -> None:
     selection_binding = preference_context.get("selection_binding")
     selection_binding = selection_binding if isinstance(selection_binding, dict) else {}
     try:
+        current_selected, _current_excluded = select_current_confirmed_survey_records(
+            root,
+            iter_records(root),
+            query=str(filters.get("query") or ""),
+            kind=str(filters.get("kind") or ""),
+            topic=str(filters.get("topic") or ""),
+            tag=str(filters.get("tag") or ""),
+            pool=str(filters.get("pool") or ""),
+        )
+        current_input_bindings = synthesis_input_unit_bindings(root, current_selected)
         current_preferences = resolve_synthesis_preferences(
             root,
             selection_id=str(selection_binding.get("selection_id") or ""),
@@ -902,8 +979,13 @@ def _require_current_survey(root: Path, record: dict, path: Path) -> None:
             mode=str(record.get("mode") or ""),
             as_of=str(anchor.get("as_of") or ""),
             program_ids=record.get("program_ids") if isinstance(record.get("program_ids"), list) else [],
+            discovery_mode=str(record.get("discovery_mode") or "kb_only"),
+            search_protocol_digest=str(
+                record.get("search_protocol_digest") or _canonical_digest({})
+            ),
+            input_unit_bindings=current_input_bindings,
         )
-    except SystemExit as exc:
+    except (OSError, SystemExit) as exc:
         raise ValueError(f"survey preferences are stale: {exc}") from exc
     if (
         synthesis_preference_state(current_preferences) != preference_context
@@ -1240,6 +1322,26 @@ def main() -> int:
             "tag": args.tag,
             "pool": args.pool,
         }
+        normalized_query = query.casefold()
+        explicit_external = any(
+            marker in normalized_query for marker in EXPLICIT_EXTERNAL_DISCOVERY_MARKERS
+        )
+        if explicit_external and args.discovery_mode == "kb_only":
+            raise SystemExit(
+                "An explicit systematic or external-discovery survey cannot use KB-only synthesis."
+            )
+        try:
+            linked_program_ids = validated_synthesis_program_ids(root, args.program_id)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        search_protocol = _load_frozen_search_protocol(
+            root,
+            discovery_mode=str(args.discovery_mode or "kb_only"),
+            input_value=str(args.search_protocol_input or ""),
+        )
+        selected, excluded = select_current_confirmed_survey_records(root, iter_records(root), **filters)
+        input_unit_bindings = synthesis_input_unit_bindings(root, selected)
+        search_protocol_digest = _canonical_digest(search_protocol)
         preferences = resolve_synthesis_preferences(
             root,
             selection_id=str(args.preference_selection_id or ""),
@@ -1250,23 +1352,12 @@ def main() -> int:
             pool=args.pool,
             mode=mode,
             as_of=args.as_of,
-            program_ids=args.program_id,
+            program_ids=linked_program_ids,
+            discovery_mode=str(args.discovery_mode or "kb_only"),
+            search_protocol_digest=search_protocol_digest,
+            input_unit_bindings=input_unit_bindings,
         )
         preference_context = synthesis_preference_state(preferences)
-        normalized_query = query.casefold()
-        explicit_external = any(
-            marker in normalized_query for marker in EXPLICIT_EXTERNAL_DISCOVERY_MARKERS
-        )
-        if explicit_external and args.discovery_mode == "kb_only":
-            raise SystemExit(
-                "An explicit systematic or external-discovery survey cannot use KB-only synthesis."
-            )
-        search_protocol = _load_frozen_search_protocol(
-            root,
-            discovery_mode=str(args.discovery_mode or "kb_only"),
-            input_value=str(args.search_protocol_input or ""),
-        )
-        selected, excluded = select_current_confirmed_survey_records(root, iter_records(root), **filters)
         discovery_required = args.discovery_mode != "kb_only"
         if discovery_required or not selected:
             binding = ensure_evidence_gap_composite(
@@ -1274,7 +1365,7 @@ def main() -> int:
                 slug=slug,
                 filters=filters,
                 as_of=args.as_of,
-                program_ids=args.program_id,
+                program_ids=linked_program_ids,
                 preference_context=preference_context,
                 discovery_mode=str(args.discovery_mode or "kb_only"),
                 search_protocol=search_protocol,
@@ -1308,8 +1399,11 @@ def main() -> int:
                 pool=args.pool,
                 mode=mode,
                 as_of=args.as_of,
-                program_ids=args.program_id,
+                program_ids=linked_program_ids,
                 preference_context=preference_context,
+                discovery_mode=str(args.discovery_mode or "kb_only"),
+                search_protocol_digest=search_protocol_digest,
+                input_unit_bindings=input_unit_bindings,
             )
             ensure_dir(out_root)
             write_yaml_if_changed(fill_path, payload)

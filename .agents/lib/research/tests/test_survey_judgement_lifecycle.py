@@ -15,6 +15,7 @@ from research.common import load_yaml, write_yaml_if_changed
 from research.confirm import apply_confirmation
 from research.judgements import discover_pending_judgements, judgement_confirmation_is_current
 from research.paths import config_root, runtime_preferences_path
+from research.preference_selection import eligible_preferences, record_effective_selection
 from research.prefs import default_runtime_preferences
 from research.surveys import (
     COMPOSITE_SURVEY_STAGES,
@@ -74,6 +75,44 @@ def load_orchestrator():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def record_synthesis_selection(
+    root: Path,
+    module,
+    *,
+    selection_id: str,
+    context: dict,
+) -> Path:
+    eligible = eligible_preferences(
+        root,
+        skill="literature-synthesizer",
+        operation="synthesize",
+    )
+    selected = []
+    excluded = []
+    for item in eligible["items"]:
+        row = {
+            "preference_id": item["preference_id"],
+            "reason": "bounded survey preference",
+        }
+        if item["strength"] == "hard":
+            selected.append({**row, "application": "enforce for this survey only"})
+        else:
+            excluded.append({**row, "reason": "not relevant to this survey"})
+    path, _receipt = record_effective_selection(
+        root,
+        {
+            "selection_id": selection_id,
+            "skill": "literature-synthesizer",
+            "operation": "synthesize",
+            "catalog_digest": eligible["catalog_digest"],
+            "task_context": module.synthesis_preference_context(**context),
+            "selected": selected,
+            "excluded": excluded,
+        },
+    )
+    return path
 
 
 def write_confirmed_source(module, root: Path, *, unit_id: str = "p-alpha", confirmed: bool = True) -> dict:
@@ -414,6 +453,233 @@ def test_systematic_prepare_with_matching_unit_still_starts_frozen_search_compos
     frozen = json.loads(state["selection_filters"]["search_protocol"])
     assert frozen["scope"]["inclusion"] == ["robot learning"]
     assert not (tmp_path / "kb/synthesis/robot-learning/survey-fill.yaml").exists()
+
+
+@pytest.mark.parametrize(
+    ("field", "mutate"),
+    [
+        ("query", lambda values: values.update(query="changed query")),
+        ("kind", lambda values: values.update(kind="repo")),
+        ("topic", lambda values: values.update(topic="control")),
+        ("tag", lambda values: values.update(tag="benchmark")),
+        ("pool", lambda values: values.update(pool="shortlist")),
+        ("mode", lambda values: values.update(mode="review")),
+        ("as_of", lambda values: values.update(as_of="2026-07-26")),
+        ("program_ids", lambda values: values.update(program_ids=["program-b"])),
+        ("discovery_mode", lambda values: values.update(discovery_mode="systematic")),
+        (
+            "search_protocol_digest",
+            lambda values: values.update(search_protocol_digest=hashlib.sha256(b"changed").hexdigest()),
+        ),
+        (
+            "input_unit_bindings",
+            lambda values: values["input_unit_bindings"][0].update(title="Changed title"),
+        ),
+    ],
+)
+def test_synthesis_old_preference_receipt_rejects_each_consumed_field_without_write(
+    tmp_path: Path,
+    field: str,
+    mutate,
+) -> None:
+    module = load_synthesizer()
+    source = write_confirmed_source(module, tmp_path)
+    bindings = module.synthesis_input_unit_bindings(tmp_path, [source])
+    base = {
+        "query": "robot learning",
+        "kind": "",
+        "topic": "",
+        "tag": "",
+        "pool": "",
+        "mode": "survey",
+        "as_of": "2026-07-25",
+        "program_ids": [],
+        "discovery_mode": "kb_only",
+        "search_protocol_digest": module._canonical_digest({}),
+        "input_unit_bindings": bindings,
+    }
+    selection_id = f"prefsel-synth-{field.replace('_', '-')}"
+    receipt_path = record_synthesis_selection(
+        tmp_path,
+        module,
+        selection_id=selection_id,
+        context=base,
+    )
+    replay = copy.deepcopy(base)
+    mutate(replay)
+    assert module.synthesis_preference_context(**replay) != module.synthesis_preference_context(**base)
+    synthesis_dir = tmp_path / "kb/synthesis"
+    before = {
+        path.relative_to(synthesis_dir): path.read_bytes()
+        for path in synthesis_dir.rglob("*")
+        if path.is_file()
+    } if synthesis_dir.exists() else {}
+
+    with pytest.raises(SystemExit, match="another task"):
+        module.resolve_synthesis_preferences(
+            tmp_path,
+            selection_id=selection_id,
+            **replay,
+        )
+
+    assert ({
+        path.relative_to(synthesis_dir): path.read_bytes()
+        for path in synthesis_dir.rglob("*")
+        if path.is_file()
+    } if synthesis_dir.exists() else {}) == before
+    persisted = receipt_path.read_text(encoding="utf-8")
+    assert "robot learning" not in persisted
+
+
+@pytest.mark.parametrize("mutation", ["added", "removed", "changed", "confirmation"])
+def test_synthesis_prepare_rejects_old_receipt_when_current_unit_snapshot_changes(
+    tmp_path: Path,
+    monkeypatch,
+    mutation: str,
+) -> None:
+    module = load_synthesizer()
+    source = write_confirmed_source(module, tmp_path)
+    bindings = module.synthesis_input_unit_bindings(tmp_path, [source])
+    context = {
+        "query": "robot learning",
+        "kind": "",
+        "topic": "",
+        "tag": "",
+        "pool": "",
+        "mode": "survey",
+        "as_of": "2026-07-25",
+        "program_ids": [],
+        "discovery_mode": "kb_only",
+        "search_protocol_digest": module._canonical_digest({}),
+        "input_unit_bindings": bindings,
+    }
+    selection_id = f"prefsel-synth-unit-{mutation}"
+    record_synthesis_selection(
+        tmp_path,
+        module,
+        selection_id=selection_id,
+        context=context,
+    )
+    record_path = tmp_path / "kb/units/papers/p-alpha/record.yaml"
+    if mutation == "added":
+        write_confirmed_source(module, tmp_path, unit_id="p-beta")
+    elif mutation == "removed":
+        record_path.unlink()
+    else:
+        changed = load_yaml(record_path)
+        if mutation == "changed":
+            changed["title"] = "Changed robot learning source"
+        else:
+            changed["confirmation_status"] = "pending_user_confirmation"
+        write_yaml_if_changed(record_path, changed)
+    synthesis_dir = tmp_path / "kb/synthesis"
+    before = {
+        path.relative_to(synthesis_dir): path.read_bytes()
+        for path in synthesis_dir.rglob("*")
+        if path.is_file()
+    } if synthesis_dir.exists() else {}
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(SCRIPT),
+            "--root",
+            str(tmp_path),
+            "survey",
+            "prepare",
+            "--query",
+            "robot learning",
+            "--as-of",
+            "2026-07-25",
+            "--preference-selection-id",
+            selection_id,
+        ],
+    )
+
+    with pytest.raises(SystemExit, match="another task"):
+        module.main()
+
+    assert ({
+        path.relative_to(synthesis_dir): path.read_bytes()
+        for path in synthesis_dir.rglob("*")
+        if path.is_file()
+    } if synthesis_dir.exists() else {}) == before
+
+
+def test_synthesis_prepare_binds_frozen_protocol_bytes_not_its_path(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = load_synthesizer()
+    source = write_confirmed_source(module, tmp_path)
+    bindings = module.synthesis_input_unit_bindings(tmp_path, [source])
+    protocol = {
+        "mode": "systematic",
+        "scope": {
+            "inclusion": ["robot learning"],
+            "exclusion": [],
+            "languages": ["en"],
+            "source_types": ["paper"],
+            "channels": ["runtime-search"],
+            "date_range": "through 2026-07-25",
+            "result_depth": "bounded",
+            "screening": "title_abstract_then_fulltext",
+            "screeners": 1,
+        },
+        "budget": {"max_queries": 8, "max_candidates": 50},
+        "review_protocol": {},
+        "reviewers": [],
+    }
+    context = {
+        "query": "robot learning",
+        "kind": "",
+        "topic": "",
+        "tag": "",
+        "pool": "",
+        "mode": "survey",
+        "as_of": "2026-07-25",
+        "program_ids": [],
+        "discovery_mode": "systematic",
+        "search_protocol_digest": module._canonical_digest(protocol),
+        "input_unit_bindings": bindings,
+    }
+    selection_id = "prefsel-synth-protocol-bytes"
+    record_synthesis_selection(
+        tmp_path,
+        module,
+        selection_id=selection_id,
+        context=context,
+    )
+    protocol_path = tmp_path / "search-protocol.json"
+    changed_protocol = copy.deepcopy(protocol)
+    changed_protocol["budget"]["max_queries"] = 9
+    protocol_path.write_text(json.dumps(changed_protocol), encoding="utf-8")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(SCRIPT),
+            "--root",
+            str(tmp_path),
+            "survey",
+            "prepare",
+            "--query",
+            "robot learning",
+            "--as-of",
+            "2026-07-25",
+            "--discovery-mode",
+            "systematic",
+            "--search-protocol-input",
+            str(protocol_path),
+            "--preference-selection-id",
+            selection_id,
+        ],
+    )
+
+    with pytest.raises(SystemExit, match="another task"):
+        module.main()
+
+    assert not (tmp_path / "kb/synthesis/robot-learning").exists()
 
 
 def test_composite_cli_updates_with_revision_cas_and_is_resumable(
