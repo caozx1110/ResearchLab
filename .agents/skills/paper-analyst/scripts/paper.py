@@ -68,7 +68,12 @@ from research.evidence import (
     validate_claims,
     verify_claim_evidence,
 )
-from research.preference_selection import operation_contract, resolve_task_preferences, selection_binding
+from research.preference_selection import (
+    SKILL_OPERATIONS,
+    operation_contract,
+    resolve_task_preferences,
+    selection_binding,
+)
 
 SECTION_PATTERNS = (
     "abstract",
@@ -1504,16 +1509,9 @@ def main() -> int:
         raise SystemExit(f"{args.paper_id} is not a paper record")
     unit_root = path.parent
     defer_post_actions = bool(getattr(args, "defer_post_actions", False))
-    preference_operations = {
-        "prewarm-cache",
-        "screen",
-        "complete-note",
-        "extract-figures",
-        "refresh-structure",
-    }
     paper_preferences: dict[str, object] = {}
     pdf_preferences: dict[str, object] = {}
-    if args.command in preference_operations:
+    if args.command in SKILL_OPERATIONS["paper-analyst"]:
         paper_preferences, pdf_preferences, preference_binding = resolve_paper_preferences(
             root, args, record
         )
