@@ -277,8 +277,9 @@ def _read_plan(path: Path) -> dict[str, Any]:
 
 
 def verify_plan(args: argparse.Namespace) -> int:
-    plan_path = Path(args.verify_plan).expanduser().resolve(strict=False)
-    payload = _read_plan(plan_path)
+    plan_input = Path(args.verify_plan).expanduser()
+    payload = _read_plan(plan_input)
+    plan_path = plan_input.resolve(strict=False)
     actual_digest = plan_digest(payload)
     recorded_digest = str(payload.get("plan_digest") or "")
     if not args.expected_plan_digest or actual_digest != recorded_digest or actual_digest != args.expected_plan_digest:
