@@ -1028,18 +1028,39 @@ def _prepare_intake_snapshot(root: Path, args: argparse.Namespace) -> dict[str, 
             readiness_error = source_backup_error(prepared_root, args.kind, source_info)
             if readiness_error:
                 raise RuntimeError(readiness_error)
-            record, canonical_source_info, title = _finish_prepared_record(
+            byte_duplicate = detect_duplicate(
                 root,
-                args,
-                source=source,
-                initial_title=initial_title,
-                paper_metadata=paper_metadata,
-                staged_candidate=staged_candidate,
-                staged_search=staged_search,
-                source_info=source_info,
-                stage_dir=stage_dir,
-                prepared_root=prepared_root,
+                args.kind,
+                source,
+                title=initial_title,
+                candidate_file_hash=str(source_info.get("file_hash") or ""),
             )
+            if byte_duplicate is not None:
+                record, duplicate_record_path = locate_record(
+                    root,
+                    str(byte_duplicate.get("id") or ""),
+                    kind=str(byte_duplicate.get("kind") or args.kind),
+                    fuzzy=False,
+                )
+                duplicate_record_relative = duplicate_record_path.relative_to(root).as_posix()
+                duplicate_record_binding_digest = _path_snapshot_digest(
+                    duplicate_record_path
+                )
+                canonical_source_info = source_info
+                title = str(record.get("title") or initial_title)
+            else:
+                record, canonical_source_info, title = _finish_prepared_record(
+                    root,
+                    args,
+                    source=source,
+                    initial_title=initial_title,
+                    paper_metadata=paper_metadata,
+                    staged_candidate=staged_candidate,
+                    staged_search=staged_search,
+                    source_info=source_info,
+                    stage_dir=stage_dir,
+                    prepared_root=prepared_root,
+                )
         if _source_input_digest(root, source) != source_input_digest:
             raise RuntimeError("The intake source changed while its snapshot was prepared.")
         _harden_prepared_tree(stage_dir)
