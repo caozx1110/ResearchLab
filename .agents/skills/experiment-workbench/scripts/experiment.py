@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -247,6 +248,13 @@ def _sha256_payload(payload: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _canonical_record_digest(record: dict[str, Any]) -> str:
+    canonical = copy.deepcopy(record)
+    if canonical.get("revision") in (None, 0):
+        canonical.pop("revision", None)
+    return _sha256_payload(canonical)
+
+
 def experiment_preference_context(
     args: argparse.Namespace,
     record: dict[str, Any] | None = None,
@@ -266,14 +274,7 @@ def experiment_preference_context(
     prepared = prepared if isinstance(prepared, dict) else {}
     base: dict[str, object] = {
         "experiment_id": str(getattr(args, "experiment_id", "") or ""),
-        "record_digest": _sha256_payload(
-            {
-                "id": record.get("id"),
-                "status": record.get("status"),
-                "summary": record.get("summary"),
-                "payload": record.get("payload"),
-            }
-        ),
+        "record_digest": _canonical_record_digest(record),
     }
     if command == "log-run":
         base.update(

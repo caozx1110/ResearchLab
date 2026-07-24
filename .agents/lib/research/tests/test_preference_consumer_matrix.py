@@ -575,7 +575,7 @@ def test_experiment_operation_consumed_input_mutation_matrix_rejects_old_selecti
             changed_record = copy.deepcopy(record)
             changed_prepared = copy.deepcopy(prepared)
             if field == "record":
-                changed_record["summary"] = "changed canonical record"
+                changed_record["title"] = "changed canonical record title"
             elif field == "artifact_identity":
                 changed_prepared["artifact_facts"][0]["identity_digest"] = "a" * 64
             elif field == "artifact_content":
