@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 SCRIPT_PATH = Path(__file__).resolve()
 for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
     lib = candidate / ".agents" / "lib"
@@ -28,13 +30,30 @@ if __name__ == "__main__":
 from research.common import add_project_root_argument, load_program_reporting_events, load_yaml, print_resolved_project_roots, write_text_if_changed
 from research.core import command_mutation, ensure_workspace, checkpoint_and_report, project_root, user_root
 from research.evidence import read_claims, validate_claims
-from research.judgements import judgement_confirmation_is_current, load_bound_judgement
+from research.judgements import confirmation_binding, judgement_confirmation_is_current, load_bound_judgement
 from research.preference_selection import resolve_task_preferences, selection_binding
 from research.records import trusted_unit_record_path
 from research.surveys import survey_staleness
 
 
-UNIT_ID_FIELDS = {"unit_id", "unit_ids", "related_unit_ids", "active_unit_ids"}
+UNIT_ID_FIELDS = {
+    "unit_id",
+    "unit_ids",
+    "related_unit_ids",
+    "active_unit_ids",
+    "blog_id",
+    "blog_ids",
+    "dataset_id",
+    "dataset_ids",
+    "experiment_id",
+    "experiment_ids",
+    "idea_id",
+    "idea_ids",
+    "paper_id",
+    "paper_ids",
+    "repo_id",
+    "repo_ids",
+}
 UNIT_PATH_RE = re.compile(r"(?:^|/)kb/units/(?:papers|repos|datasets|blogs|ideas|experiments)/([^/]+)(?:/|$)")
 DECISION_HEADING_RE = re.compile(r"^##\s+(.+)$", flags=re.MULTILINE)
 CONCISE_STYLE_SIGNALS = ("简洁", "concise", "brief")
@@ -52,6 +71,18 @@ JUDGEMENT_EVENT_TOKENS = {
     "novelty",
     "conclusion",
     "survey",
+}
+JUDGEMENT_OWNER_BY_KIND = {
+    "paper": "paper-analyst",
+    "repo": "repo-analyst",
+    "dataset": "dataset-analyst",
+    "blog": "blog-analyst",
+    "idea": "idea-workbench",
+    "experiment": "experiment-workbench",
+    "program_decision": "research-orchestrator",
+    "idea_discussion_conclusion": "idea-workbench",
+    "method_selection": "method-designer",
+    "survey_judgement": "literature-synthesizer",
 }
 OPERATIONAL_EVENT_TYPES = {
     "program-created",
@@ -161,7 +192,7 @@ def _confirmed_judgement_event(root: Path, event: dict[str, Any]) -> tuple[bool,
         return False, f"confirmation_status={recorded_status}; missing: canonical claim/evidence binding"
     try:
         record, artifact_path = load_bound_judgement(root, subject)
-    except (OSError, ValueError):
+    except (OSError, RuntimeError, UnicodeError, ValueError, yaml.YAMLError):
         return False, f"confirmation_status={recorded_status}; missing: bound record {subject_id}"
     if str(record.get("id") or "") != subject_id or str(record.get("kind") or "") != subject_kind:
         return False, f"confirmation_status={recorded_status}; missing: matching canonical subject"
@@ -169,6 +200,20 @@ def _confirmed_judgement_event(root: Path, event: dict[str, Any]) -> tuple[bool,
         return False, f"confirmation_status={recorded_status}; missing: current ConfirmationReceipt"
     if not judgement_confirmation_is_current(root, record, artifact_path):
         return False, "confirmation_status=stale; missing: current ConfirmationReceipt"
+    canonical_owner = JUDGEMENT_OWNER_BY_KIND.get(subject_kind)
+    try:
+        canonical_path = artifact_path.relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return False, "confirmation_status=stale; missing: canonical judgement binding"
+    if not canonical_owner:
+        return False, "confirmation_status=stale; missing: canonical judgement owner"
+    expected_binding = confirmation_binding(
+        record,
+        owner=canonical_owner,
+        path=canonical_path,
+    )
+    if binding != expected_binding:
+        return False, "confirmation_status=stale; missing: exact current judgement binding"
     receipt = record.get("confirmation")
     receipt = receipt if isinstance(receipt, dict) else {}
     receipt_claim_ids = sorted(_text_items(receipt.get("claim_ids")))
@@ -218,10 +263,16 @@ def _survey_event_staleness(root: Path, event: dict[str, Any]) -> dict[str, Any]
         return {"stale": True, "reasons": ["unsafe survey path"], "new_unit_ids": []}
     if candidate.is_symlink() or not candidate.is_file() or candidate.name != "survey.yaml":
         return {"stale": True, "reasons": ["missing survey artifact"], "new_unit_ids": []}
-    payload = load_yaml(candidate, default={})
+    try:
+        payload = load_yaml(candidate, default={})
+    except (OSError, RuntimeError, UnicodeError, yaml.YAMLError):
+        return {"stale": True, "reasons": ["invalid survey artifact"], "new_unit_ids": []}
     if not isinstance(payload, dict):
         return {"stale": True, "reasons": ["invalid survey artifact"], "new_unit_ids": []}
-    return survey_staleness(payload, root)
+    try:
+        return survey_staleness(payload, root)
+    except (OSError, RuntimeError, UnicodeError, ValueError, yaml.YAMLError, SystemExit):
+        return {"stale": True, "reasons": ["unreadable survey upstream binding"], "new_unit_ids": []}
 
 
 def partition_reporting_events(
@@ -365,7 +416,7 @@ def _collect_unit_ids(value: Any, *, key: str = "") -> set[str]:
     if isinstance(value, dict):
         for child_key, child_value in value.items():
             child_name = str(child_key)
-            if child_name in UNIT_ID_FIELDS or child_name.endswith("_ids"):
+            if child_name in UNIT_ID_FIELDS:
                 unit_ids.update(_text_items(child_value))
             unit_ids.update(_collect_unit_ids(child_value, key=child_name))
     elif isinstance(value, (list, tuple)):
@@ -445,6 +496,108 @@ def load_confirmed_claim_sources(root: Path, unit_ids: list[str]) -> tuple[list[
             )
         )
     return sources, missing_units
+
+
+def load_confirmed_survey_claim_source(
+    root: Path,
+    program_id: str,
+    event: dict[str, Any],
+) -> tuple[ClaimSource | None, str]:
+    """Transport one exact current survey confirmation into report claims.
+
+    The survey owner remains authoritative for the judgement.  This consumer
+    only re-resolves the event subject, revalidates its current receipt/evidence
+    bytes, and carries receipt-bound canonical claims into the report.
+    """
+    if str(event.get("event_type") or "") != "survey-confirmed":
+        return None, ""
+    binding = event.get("confirmation_binding")
+    binding = binding if isinstance(binding, dict) else {}
+    subject = binding.get("subject")
+    subject = subject if isinstance(subject, dict) else {}
+    if str(subject.get("kind") or "") != "survey_judgement":
+        return None, "confirmation_status=stale; missing: canonical survey subject"
+    try:
+        record, artifact_path = load_bound_judgement(root, subject)
+    except (OSError, RuntimeError, UnicodeError, ValueError, yaml.YAMLError):
+        return None, "confirmation_status=stale; missing: bound survey judgement"
+    confirmed, reason = _confirmed_judgement_event(root, event)
+    if not confirmed:
+        return None, reason
+    program_ids = record.get("program_ids")
+    if not isinstance(program_ids, list) or program_id not in program_ids:
+        return None, "confirmation_status=stale; missing: survey binding for this program"
+    canonical_claims = read_claims(record.get("payload"))
+    receipt = record.get("confirmation")
+    receipt = receipt if isinstance(receipt, dict) else {}
+    receipt_claim_ids = sorted(_text_items(receipt.get("claim_ids")))
+    current_claim_ids = sorted(
+        str(claim.get("id") or "").strip()
+        for claim in canonical_claims
+        if str(claim.get("id") or "").strip()
+    )
+    if not canonical_claims or receipt_claim_ids != current_claim_ids:
+        return None, "confirmation_status=stale; missing: receipt-bound canonical survey claims"
+    violations = validate_claims(canonical_claims)
+    if violations:
+        return None, "confirmation_status=stale; missing: structurally valid survey claims and evidence"
+    canonical_path = artifact_path.relative_to(root.resolve()).as_posix()
+    expected_binding = confirmation_binding(
+        record,
+        owner="literature-synthesizer",
+        path=canonical_path,
+    )
+    if binding != expected_binding or not judgement_confirmation_is_current(root, record, artifact_path):
+        return None, "confirmation_status=stale; missing: exact current survey binding"
+    return (
+        ClaimSource(
+            unit_id=str(record.get("id") or ""),
+            title=f"Confirmed survey: {str(record.get('slug') or record.get('id') or 'survey')}",
+            kind="survey_judgement",
+            claims=[{**claim, "confirmation_status": "confirmed"} for claim in canonical_claims],
+            binding_digest=_canonical_digest(
+                {
+                    "confirmation_binding": expected_binding,
+                    "survey_content_digest": record.get("survey_content_digest"),
+                    "confirmation": receipt,
+                    "verification": (
+                        record.get("payload", {}).get("verification")
+                        if isinstance(record.get("payload"), dict)
+                        else None
+                    ),
+                }
+            ),
+        ),
+        "",
+    )
+
+
+def attach_confirmed_survey_claim_sources(
+    root: Path,
+    program_id: str,
+    events: list[dict[str, Any]],
+    pending: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[ClaimSource]]:
+    accepted: list[dict[str, Any]] = []
+    pending_events = list(pending)
+    sources: list[ClaimSource] = []
+    seen_bindings: set[str] = set()
+    for event in events:
+        if str(event.get("event_type") or "") != "survey-confirmed":
+            accepted.append(event)
+            continue
+        source, reason = load_confirmed_survey_claim_source(root, program_id, event)
+        if source is None:
+            normalized = dict(event)
+            normalized.pop("_effective_confirmation_status", None)
+            normalized["_epistemic_reason"] = reason or "confirmation_status=stale; missing: current survey claims"
+            pending_events.append(normalized)
+            continue
+        accepted.append(event)
+        if source.binding_digest not in seen_bindings:
+            sources.append(source)
+            seen_bindings.add(source.binding_digest)
+    return accepted, pending_events, sources
 
 
 def _decision_value(lines: list[str], label: str) -> str:
@@ -538,12 +691,18 @@ def load_report_inputs(
 ) -> ReportInputs:
     loaded_events = normalize_events(load_program_reporting_events(root, program_id), stage=stage, limit=limit)
     events, pending_judgement_events = partition_reporting_events(root, loaded_events)
+    events, pending_judgement_events, survey_claim_sources = attach_confirmed_survey_claim_sources(
+        root,
+        program_id,
+        events,
+        pending_judgement_events,
+    )
     unit_ids = program_unit_ids(root, program_id, loaded_events)
     claim_sources, missing_units = load_confirmed_claim_sources(root, unit_ids)
     inputs = ReportInputs(
         events=events,
         pending_judgement_events=pending_judgement_events,
-        claim_sources=claim_sources,
+        claim_sources=[*claim_sources, *survey_claim_sources],
         decisions=load_decisions(root, program_id),
         missing_units=missing_units,
     )
@@ -600,6 +759,17 @@ def concise_report_inputs(inputs: ReportInputs) -> ReportInputs:
 
 
 def render_event_line(event: dict[str, Any]) -> str:
+    if str(event.get("_effective_confirmation_status") or "") == "confirmed":
+        binding = event.get("confirmation_binding")
+        binding = binding if isinstance(binding, dict) else {}
+        subject = binding.get("subject")
+        subject = subject if isinstance(subject, dict) else {}
+        subject_kind = str(subject.get("kind") or "judgement").replace("_", " ")
+        subject_id = str(subject.get("id") or "confirmed subject")
+        return (
+            f"- Confirmed judgement · {subject_kind}: {subject_id} "
+            "(confirmation: current receipt)"
+        )
     timestamp = str(event.get("timestamp") or "unknown time")
     source_skill = str(event.get("source_skill") or "unknown source")
     event_type = str(event.get("event_type") or "update")
@@ -609,8 +779,6 @@ def render_event_line(event: dict[str, Any]) -> str:
     details = [f"type: {event_type}", f"source: {source_skill}"]
     if stage:
         details.append(f"stage: {stage}")
-    if str(event.get("_effective_confirmation_status") or "") == "confirmed":
-        details.extend(["epistemic: judgement", "confirmation: current receipt"])
     suffix = f" — {summary}" if summary else ""
     return f"- {timestamp} · {title} ({'; '.join(details)}){suffix}"
 
@@ -724,6 +892,19 @@ def render_report(title: str, inputs: ReportInputs, *, report_kind: str) -> str:
 
 
 def _event_matches(event: dict[str, Any], terms: set[str]) -> bool:
+    if str(event.get("_effective_confirmation_status") or "") == "confirmed":
+        binding = event.get("confirmation_binding")
+        binding = binding if isinstance(binding, dict) else {}
+        subject = binding.get("subject")
+        subject = subject if isinstance(subject, dict) else {}
+        searchable = " ".join(
+            [
+                "judgement confirmed",
+                str(subject.get("kind") or ""),
+                str(subject.get("id") or ""),
+            ]
+        ).casefold()
+        return any(term in searchable for term in terms)
     searchable = " ".join(
         [
             str(event.get("event_type") or ""),
