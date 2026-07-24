@@ -15,7 +15,8 @@ description: 负责跨 paper / repo / dataset / blog / idea 的 evidence-first s
 - 不从 topic、tag、pool 或 kind 计数自动生成结论，不写固定 Observed / Inferred / Suggested / OpenQuestions 文案，也不写固定 confidence。
 - 不建立 semantic index。runtime agent 使用原生检索阅读单位产物并填写 scaffold。
 - 每个正式 claim cell 都必须有 evidence_refs；taxonomy cell、comparison-matrix cell、trend、gap 还会检查其结构字段。每个 ref 都按自己的 source_unit_id 解析到对应 unit_dir，再做逐字核验。
-- prepare 不产出 survey；verify 全部通过后只写 evidence-verified、`pending_user_confirmation` 的 YAML 与 summary.md。当前 survey 尚无独立 ConfirmationReceipt route，因此还会显式标 `governance_status: needs_agent_repair`，不得被报告当正式结论消费。
+- prepare 只接受当前、已确认且 ConfirmationReceipt/evidence bytes 仍有效的输入 unit；筛选后为零时返回 evidence-gap + composite handoff，不写零材料 scaffold。
+- prepare 不产出 survey；verify 全部通过后写 evidence-verified、`pending_user_confirmation` 的一等 survey JudgementArtifact。它进入统一 `kb review` 收件箱，经当前消息授权的 confirm/reject 闭环后，只有 current confirmed 版本可供正式报告消费。
 
 ## 两阶段流程
 
@@ -25,11 +26,13 @@ description: 负责跨 paper / repo / dataset / blog / idea 的 evidence-first s
 
 prepare 会：
 
-1. 用 metadata 过滤选择候选 unit。
+1. 用 metadata 过滤选择候选 unit，再机械校验每个 unit 的 current ConfirmationReceipt 与 evidence bytes；脚本不判断论文是否语义相关。
 2. 把 unit id、kind、title、规范化 record content digest、确认回执 digest 与 unit 内可引用 evidence artifact byte digests 写入 kb_anchor。
 3. 生成七段式 fillable scaffold、taxonomy grid frame 与 method × dimension comparison matrix frame。
 4. 发布 required-cell、claim field 与 evidence_ref field 合同。
 5. 保持所有 content 与 evidence_refs 为空，不替 runtime agent 写任何理解。
+
+若第 1 步没有合格输入，prepare 返回结构化 evidence gap，handoff 到 `search → selection → intake/analysis → synthesis → review/confirmation` 的 durable composite state；每阶段记录 inputs、outputs、blocker 与 resume action。候选选择和结论仍由 runtime agent 完成。
 
 runtime agent 随后阅读 kb_anchor 中的 unit 产物，填写所有 required cell，并为 claim 添加逐字 evidence_refs。
 
@@ -46,8 +49,11 @@ verify 会：
 5. 对 trend 与 gap 检查其 as_of 与 kb_anchor.as_of 一致。
 6. 任一结构、anchor、artifact、locator 或逐字 quote 校验失败即拒绝，且不写正式结果。
 7. 全部通过后标记 observed / inferred，保存含 selection filters、unit_ids、exact unit bindings 与 verified_at 的 consumer_binding，并渲染 comparison matrix。
+8. 同步生成 canonical `payload.claims`、current verification receipt、survey 全内容 digest、稳定 subject/owner/path 与 `ready_for_review` 状态；不得为新产物写 `needs_agent_repair`。
 
 读侧调用纯读 staleness helper 复算同一 binding：已有 unit 变化/删除、确认失效、evidence bytes 变化或出现新的 matching unit 都标 stale。它只返回原因，不改写 survey；runtime agent 重新 prepare、fill、verify 才能刷新绑定。
+
+统一 review snapshot 同时绑定 subject、canonical claims、survey substance、content digest 与 verification digests。confirm 要求非 AI actor、逐字保留当前用户授权、`authorization_source=user_message`、evidence 和 expected snapshot；成功后写 ConfirmationReceipt。reject 只写 rejected/rejection，不伪造 confirmation。内容、claims、verification 或 upstream unit/confirmation/evidence 任一变化都会令旧确认 stale，snapshot replay/CAS 失败时零写。
 
 ## 标准七段式骨架
 
@@ -138,5 +144,6 @@ comparison_matrix:
 ## 输出语义
 
 - YAML 保留 sections、comparison_matrix、kb_anchor、claim_type、evidence_refs，并在每个 cell 上增加 `epistemic_status: verified_pending_confirmation`；`evidence_verification_status: verified` 只表示逐字证据通过，不等于用户确认。
+- YAML 同时保存 `kind: survey_judgement`、canonical `payload.claims`、verification receipt、consumer binding 与 survey content digest；旧 `needs_agent_repair` 产物只可读取审计，必须重新 prepare/fill/verify 后才进入 review。
 - summary.md 按七段式渲染 evidence-verified content，显式显示 Pending / Unverified banner，并将 comparison matrix 输出为 method × dimension 表格。
 - metadata 只参与候选选择，不作为 survey conclusions。

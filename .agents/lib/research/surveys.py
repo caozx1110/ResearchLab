@@ -437,10 +437,10 @@ def survey_lifecycle_violations(payload: object, root: Path) -> list[str]:
     """Return why a survey judgement's own/upstream byte bindings are stale."""
     if not isinstance(payload, dict):
         return ["survey judgement must be a mapping"]
-    if payload.get("kind") != "survey_judgement" or payload.get("owner") != "literature-synthesizer":
-        return ["survey judgement owner identity is invalid"]
     if payload.get("governance_status") == "needs_agent_repair":
         return ["legacy survey requires agent repair and re-verification"]
+    if payload.get("kind") != "survey_judgement" or payload.get("owner") != "literature-synthesizer":
+        return ["survey judgement owner identity is invalid"]
     stored_digest = str(payload.get("survey_content_digest") or "")
     if len(stored_digest) != 64 or stored_digest != survey_content_digest(payload):
         return ["survey content digest is missing or stale"]
