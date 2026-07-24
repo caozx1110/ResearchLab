@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import sys
 from pathlib import Path
 from typing import Any
@@ -55,6 +56,10 @@ METRIC_DIRECTION_CHOICES = ["higher-better", "lower-better", "neutral", "unknown
 RUN_TAG_CHOICES = ["baseline", "milestone"]
 DEFAULT_RECENT_RUNS = 5
 RUN_EVIDENCE_ARTIFACT_RE = re.compile(r"^(?:run-log\.yaml|runs/run-\d{3}\.md)$")
+RUN_ALLOCATOR_ENTRY_RE = re.compile(r"^run-(\d{3,})\.md$")
+MAX_RUN_ALLOCATOR_ENTRIES = 10_000
+MAX_RUN_ALLOCATOR_FILE_BYTES = 16 * 1024 * 1024
+MAX_RUN_ALLOCATOR_TOTAL_BYTES = 128 * 1024 * 1024
 
 
 def _index_targets(root: Path) -> list[Path]:
@@ -255,6 +260,292 @@ def _canonical_record_digest(record: dict[str, Any]) -> str:
     return _sha256_payload(canonical)
 
 
+def _run_allocator_file_fact(directory_fd: int, name: str) -> dict[str, Any]:
+    """Hash one allocator entry through a no-follow directory descriptor."""
+    try:
+        expected = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except OSError as exc:
+        raise SystemExit("Experiment run allocator contains an unsafe entry; retry after repair.") from exc
+    if not stat.S_ISREG(expected.st_mode):
+        raise SystemExit("Experiment run allocator entries must be regular files.")
+    if expected.st_size > MAX_RUN_ALLOCATOR_FILE_BYTES:
+        raise SystemExit("Experiment run allocator entry exceeds the safe size limit.")
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    try:
+        descriptor = os.open(name, flags, dir_fd=directory_fd)
+    except OSError as exc:
+        raise SystemExit("Experiment run allocator contains an unsafe entry; retry after repair.") from exc
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise SystemExit("Experiment run allocator entries must be regular files.")
+        expected_identity = (
+            expected.st_dev,
+            expected.st_ino,
+            expected.st_mode,
+            expected.st_size,
+            expected.st_mtime_ns,
+            expected.st_ctime_ns,
+        )
+        opened_identity = (
+            before.st_dev,
+            before.st_ino,
+            before.st_mode,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        )
+        if expected_identity != opened_identity:
+            raise SystemExit("Experiment run allocator changed while it was inspected; retry.")
+        if before.st_size > MAX_RUN_ALLOCATOR_FILE_BYTES:
+            raise SystemExit("Experiment run allocator entry exceeds the safe size limit.")
+        digest = hashlib.sha256()
+        total = 0
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_RUN_ALLOCATOR_FILE_BYTES:
+                raise SystemExit("Experiment run allocator entry exceeds the safe size limit.")
+            digest.update(chunk)
+        after = os.fstat(descriptor)
+        identity_before = (
+            before.st_dev,
+            before.st_ino,
+            before.st_mode,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        )
+        identity_after = (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        )
+        if identity_before != identity_after:
+            raise SystemExit("Experiment run allocator changed while it was inspected; retry.")
+        return {
+            "name": name,
+            "device": before.st_dev,
+            "inode": before.st_ino,
+            "mode": stat.S_IMODE(before.st_mode),
+            "size": before.st_size,
+            "mtime_ns": before.st_mtime_ns,
+            "ctime_ns": before.st_ctime_ns,
+            "content_digest": digest.hexdigest(),
+        }
+    finally:
+        os.close(descriptor)
+
+
+def _run_allocator_snapshot_once(unit_root: Path) -> dict[str, Any]:
+    """Return the exact flat ``runs/`` allocator state without following links."""
+    runs_dir = unit_root / "runs"
+    try:
+        metadata = runs_dir.lstat()
+    except FileNotFoundError:
+        return {
+            "directory_state": "absent",
+            "directory_identity": {},
+            "directory_entry_digest": _sha256_payload(
+                {"directory_state": "absent", "logical_identity": "runs"}
+            ),
+            "proposed_run_id": "run-001",
+            "proposed_run_path": "runs/run-001.md",
+        }
+    if runs_dir.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
+        raise SystemExit("Experiment run allocator must be a safe directory.")
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        directory_fd = os.open(runs_dir, directory_flags)
+    except OSError as exc:
+        raise SystemExit("Experiment run allocator must be a safe directory.") from exc
+    try:
+        before = os.fstat(directory_fd)
+        names = sorted(os.listdir(directory_fd))
+        if len(names) > MAX_RUN_ALLOCATOR_ENTRIES:
+            raise SystemExit("Experiment run allocator contains too many entries.")
+        entries: list[dict[str, Any]] = []
+        total_bytes = 0
+        occupied: set[int] = set()
+        for name in names:
+            fact = _run_allocator_file_fact(directory_fd, name)
+            total_bytes += int(fact["size"])
+            if total_bytes > MAX_RUN_ALLOCATOR_TOTAL_BYTES:
+                raise SystemExit("Experiment run allocator exceeds the safe total size limit.")
+            entries.append(fact)
+            match = RUN_ALLOCATOR_ENTRY_RE.fullmatch(name)
+            if match:
+                occupied.add(int(match.group(1)))
+        after_names = sorted(os.listdir(directory_fd))
+        after = os.fstat(directory_fd)
+        directory_identity_before = (
+            before.st_dev,
+            before.st_ino,
+            before.st_mode,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        )
+        directory_identity_after = (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        )
+        if names != after_names or directory_identity_before != directory_identity_after:
+            raise SystemExit("Experiment run allocator changed while it was inspected; retry.")
+        next_index = 1
+        while next_index in occupied:
+            next_index += 1
+        proposed_run_id = f"run-{next_index:03d}"
+        digest_payload = {
+            "directory_state": "directory",
+            "logical_identity": "runs",
+            "device": before.st_dev,
+            "inode": before.st_ino,
+            "mode": stat.S_IMODE(before.st_mode),
+            "entries": entries,
+        }
+        return {
+            "directory_state": "directory",
+            "directory_identity": {
+                "device": before.st_dev,
+                "inode": before.st_ino,
+                "mode": stat.S_IMODE(before.st_mode),
+            },
+            "directory_entry_digest": _sha256_payload(digest_payload),
+            "proposed_run_id": proposed_run_id,
+            "proposed_run_path": f"runs/{proposed_run_id}.md",
+        }
+    finally:
+        os.close(directory_fd)
+
+
+def run_allocator_snapshot(unit_root: Path) -> dict[str, Any]:
+    """Take a stable two-pass allocator snapshot or fail before any business write."""
+    first = _run_allocator_snapshot_once(unit_root)
+    second = _run_allocator_snapshot_once(unit_root)
+    if first != second:
+        raise SystemExit("Experiment run allocator changed while it was inspected; retry.")
+    return second
+
+
+def _write_run_file_exclusive(
+    unit_root: Path,
+    expected_allocator: dict[str, Any],
+    text: str,
+) -> Path:
+    """Revalidate and create exactly the receipt-bound run path, never an alternate."""
+    current = run_allocator_snapshot(unit_root)
+    if current != expected_allocator:
+        raise SystemExit("Experiment run allocator changed after preference selection; retry.")
+
+    runs_dir = unit_root / "runs"
+    created_directory = False
+    if expected_allocator.get("directory_state") == "absent":
+        try:
+            runs_dir.mkdir(mode=0o755)
+            created_directory = True
+        except OSError as exc:
+            raise SystemExit("Experiment run allocator changed before run creation; retry.") from exc
+
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        directory_fd = os.open(runs_dir, directory_flags)
+    except OSError as exc:
+        if created_directory:
+            try:
+                runs_dir.rmdir()
+            except OSError:
+                pass
+        raise SystemExit("Experiment run allocator became unsafe before run creation; retry.") from exc
+
+    proposed_run_id = str(expected_allocator.get("proposed_run_id") or "")
+    proposed_run_path = str(expected_allocator.get("proposed_run_path") or "")
+    expected_relative_path = f"runs/{proposed_run_id}.md"
+    if not re.fullmatch(r"run-\d{3,}", proposed_run_id) or proposed_run_path != expected_relative_path:
+        os.close(directory_fd)
+        if created_directory:
+            try:
+                runs_dir.rmdir()
+            except OSError:
+                pass
+        raise SystemExit("Experiment run allocator receipt is invalid; retry selection.")
+
+    if expected_allocator.get("directory_state") == "directory":
+        opened_directory = os.fstat(directory_fd)
+        opened_identity = {
+            "device": opened_directory.st_dev,
+            "inode": opened_directory.st_ino,
+            "mode": stat.S_IMODE(opened_directory.st_mode),
+        }
+        if opened_identity != expected_allocator.get("directory_identity"):
+            os.close(directory_fd)
+            raise SystemExit("Experiment run allocator changed before exclusive creation; retry.")
+
+    leaf_name = f"{proposed_run_id}.md"
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(leaf_name, flags, 0o644, dir_fd=directory_fd)
+        payload = text.encode("utf-8")
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:  # pragma: no cover - defensive kernel contract
+                raise OSError("short write")
+            view = view[written:]
+        os.fsync(descriptor)
+    except OSError as exc:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+            descriptor = None
+            try:
+                os.unlink(leaf_name, dir_fd=directory_fd)
+            except OSError:
+                pass
+        if created_directory:
+            try:
+                runs_dir.rmdir()
+            except OSError:
+                pass
+        raise SystemExit("Experiment run path changed before exclusive creation; retry.") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        os.close(directory_fd)
+    return unit_root / proposed_run_path
+
+
 def experiment_preference_context(
     args: argparse.Namespace,
     record: dict[str, Any] | None = None,
@@ -277,6 +568,7 @@ def experiment_preference_context(
         "record_digest": _canonical_record_digest(record),
     }
     if command == "log-run":
+        allocator = prepared.get("run_allocator", {})
         base.update(
             {
                 "config_revision": _normalized_text(args.config_revision),
@@ -304,6 +596,17 @@ def experiment_preference_context(
                 ),
                 "prior_runs_digest": _sha256_payload(
                     {"runs": prepared.get("prior_runs", [])}
+                ),
+                "proposed_run_id": str(
+                    allocator.get("proposed_run_id", "") if isinstance(allocator, dict) else ""
+                ),
+                "proposed_run_path": str(
+                    allocator.get("proposed_run_path", "") if isinstance(allocator, dict) else ""
+                ),
+                "run_allocator_directory_digest": str(
+                    allocator.get("directory_entry_digest", "")
+                    if isinstance(allocator, dict)
+                    else ""
                 ),
             }
         )
@@ -357,6 +660,7 @@ def prepare_experiment_preference_inputs(
         claimed_artifacts = verify_artifacts(root, args.artifact)
         return {
             "run_log_document_path": run_log_document_path,
+            "run_allocator": run_allocator_snapshot(unit_root),
             "prior_runs": [item for item in prior_run_log.get("items", []) if isinstance(item, dict)],
             "metrics": parse_metrics(args.metric),
             "claimed_artifacts": claimed_artifacts,
@@ -728,15 +1032,6 @@ def list_document_path(unit_root: Path, name: str) -> Path:
     return unit_root / f"{name}.yaml"
 
 
-def next_numbered_path(root: Path, prefix: str, suffix: str) -> Path:
-    index = 1
-    while True:
-        path = root / f"{prefix}-{index:03d}{suffix}"
-        if not path.exists():
-            return path
-        index += 1
-
-
 def summarize_yaml_list(path: Path, *, title: str, rows: list[str]) -> None:
     lines = [f"# {title}", ""]
     lines.extend(rows or ["- 暂无条目"])
@@ -906,10 +1201,9 @@ def _dispatch(args, root: Path) -> int:
     if args.command == "log-run":
         if prepare_experiment_preference_inputs(root, args, record, unit_root) != prepared:
             raise SystemExit("Experiment run inputs changed while preparing the run; retry with current inputs.")
-        runs_dir = unit_root / "runs"
-        runs_dir.mkdir(parents=True, exist_ok=True)
-        run_path = next_numbered_path(runs_dir, "run", ".md")
-        run_id = run_path.stem
+        run_allocator = prepared["run_allocator"]
+        run_id = str(run_allocator["proposed_run_id"])
+        run_path = unit_root / str(run_allocator["proposed_run_path"])
         run_log_document_path = prepared["run_log_document_path"]
         prior_runs = prepared["prior_runs"]
         metrics = prepared["metrics"]
@@ -948,8 +1242,7 @@ def _dispatch(args, root: Path) -> int:
             generated_artifact(root, run_log_document_path),
             *claimed_artifacts,
         ]
-        write_text_if_changed(
-            run_path,
+        run_text = (
             "\n".join(
                 [
                     f"# Run for {record.get('title', '')}",
@@ -988,8 +1281,9 @@ def _dispatch(args, root: Path) -> int:
                     "",
                 ]
             ).strip()
-            + "\n",
+            + "\n"
         )
+        _write_run_file_exclusive(unit_root, run_allocator, run_text)
         run_log_path = append_list_item(
             run_log_document_path,
             f"{args.experiment_id}-run-log",
