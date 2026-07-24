@@ -484,6 +484,15 @@ def restore_before_snapshots(project_root: Path, op_id: str) -> list[Path]:
         snapshot = snapshots.get(key)
         if not isinstance(snapshot, dict):
             raise RuntimeError(f"Operation {op_id} is missing the before snapshot for {key}.")
+        target = _target_path(project_root, key)
+        # Restoration is defined by the journal's existing digest contract.  If
+        # the target never diverged from its before-state, replacing it would be
+        # needless churn and can invalidate consumers that bind regular-file or
+        # directory inode identity.  Keep returning every declared target so
+        # recovery checkpoint/reporting behavior remains unchanged.
+        if "digest" in snapshot and file_digest(target) == snapshot.get("digest"):
+            restored.append(target)
+            continue
         restored.append(_restore_target(project_root, key, snapshot))
     return restored
 
