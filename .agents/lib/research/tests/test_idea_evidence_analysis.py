@@ -9,6 +9,7 @@ import pytest
 from research.common import load_yaml, write_yaml_if_changed
 from research.core import default_record, ensure_workspace, record_path
 from research.evidence import verification_receipt_violations
+from research.git_ops import undo_last_operation
 
 
 def _load_idea_module():
@@ -346,26 +347,41 @@ def test_verify_rejects_immutable_scaffold_mutation(
         _run(idea, monkeypatch, "review", "--idea-id", idea_id, "--phase", "verify")
 
 
-def test_success_receipt_current_and_consumed_fill_starts_second_round(
-    tmp_path: Path, monkeypatch
+@pytest.mark.parametrize("mode", ["analyze", "review"])
+def test_success_receipt_consumes_anchor_and_starts_second_round(
+    tmp_path: Path, monkeypatch, mode: str
 ) -> None:
     idea = _load_idea_module()
     idea_id, source_id = _setup(tmp_path, idea)
-    assert _run(idea, monkeypatch, "analyze", "--idea-id", idea_id, "--phase", "prepare") == 0
+    assert _run(idea, monkeypatch, mode, "--idea-id", idea_id, "--phase", "prepare") == 0
     unit = record_path(tmp_path, "idea", idea_id).parent
-    fill_path = unit / "analyze-fill.yaml"
-    write_yaml_if_changed(fill_path, _fill(fill_path, source_id, "The baseline loses accuracy under unseen camera viewpoints."))
-    assert _run(idea, monkeypatch, "analyze", "--idea-id", idea_id, "--phase", "verify") == 0
+    fill_path = unit / f"{mode}-fill.yaml"
+    write_yaml_if_changed(
+        fill_path,
+        _fill(
+            fill_path,
+            source_id,
+            "The baseline loses accuracy under unseen camera viewpoints.",
+            selection_rank=1 if mode == "review" else None,
+        ),
+    )
+    assert _run(idea, monkeypatch, mode, "--idea-id", idea_id, "--phase", "verify") == 0
     record = load_yaml(unit / "record.yaml", default={})
+    assert mode not in record["payload"].get("idea_authoring_contracts", {})
+    result = load_yaml(unit / f"{mode}.yaml", default={})
+    assert result["authoring_provenance"]["mode"] == "owner-anchored/v1"
+    assert len(result["authoring_provenance"]["authoring_contract_digest"]) == 64
     assert verification_receipt_violations(
         record,
         unit,
         source_roots={source_id: record_path(tmp_path, "repo", source_id).parent},
     ) == []
-    assert _run(idea, monkeypatch, "analyze", "--idea-id", idea_id, "--phase", "prepare") == 0
+    assert _run(idea, monkeypatch, mode, "--idea-id", idea_id, "--phase", "prepare") == 0
     refreshed = load_yaml(fill_path, default={})
     assert refreshed["reviewer"] == ""
     assert all(claim["text"] == "" for claim in refreshed["claims"])
+    refreshed_record = load_yaml(unit / "record.yaml", default={})
+    assert refreshed_record["payload"]["idea_authoring_contracts"][mode]["operation"] == mode
 
 
 def test_discussion_consumed_fill_allows_second_conclusion(
@@ -379,8 +395,58 @@ def test_discussion_consumed_fill_allows_second_conclusion(
         fill_path = unit / "discussion-fill.yaml"
         write_yaml_if_changed(fill_path, _discussion_fill(fill_path, source_id))
         assert _run(idea, monkeypatch, "discuss", "--idea-id", idea_id, "--phase", "verify") == 0
+        record = load_yaml(unit / "record.yaml", default={})
+        assert "discuss" not in record["payload"].get("idea_authoring_contracts", {})
     sidecar = load_yaml(unit / "discussion-judgements.yaml", default={})
     assert len(sidecar["items"]) == 2
+    assert all(
+        item["authoring_provenance"]["mode"] == "owner-anchored/v1"
+        for item in sidecar["items"]
+    )
+
+
+def test_one_active_semantic_operation_blocks_another_until_consumed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    idea = _load_idea_module()
+    idea_id, source_id = _setup(tmp_path, idea)
+    unit = record_path(tmp_path, "idea", idea_id).parent
+    assert _run(
+        idea, monkeypatch, "analyze", "--idea-id", idea_id, "--phase", "prepare"
+    ) == 0
+    analyze_paths = [
+        unit / "record.yaml",
+        unit / "analyze-fill.yaml",
+        unit / "analyze-orientation.yaml",
+        unit / "analyze-evidence-corpus.yaml",
+    ]
+    before = _path_snapshot(analyze_paths)
+    with pytest.raises(SystemExit):
+        _run(
+            idea, monkeypatch, "review", "--idea-id", idea_id, "--phase", "prepare"
+        )
+    assert _path_snapshot(analyze_paths) == before
+    assert not (unit / "review-fill.yaml").exists()
+    assert not (unit / "review-orientation.yaml").exists()
+    assert not (unit / "review-evidence-corpus.yaml").exists()
+
+    fill_path = unit / "analyze-fill.yaml"
+    write_yaml_if_changed(
+        fill_path,
+        _fill(
+            fill_path,
+            source_id,
+            "The baseline loses accuracy under unseen camera viewpoints.",
+        ),
+    )
+    assert _run(
+        idea, monkeypatch, "analyze", "--idea-id", idea_id, "--phase", "verify"
+    ) == 0
+    assert _run(
+        idea, monkeypatch, "review", "--idea-id", idea_id, "--phase", "prepare"
+    ) == 0
+    record = load_yaml(unit / "record.yaml", default={})
+    assert set(record["payload"]["idea_authoring_contracts"]) == {"review"}
 
 
 @pytest.mark.parametrize("tamper", ["duplicate", "unsafe", "bad_digest", "extra_key"])
@@ -465,6 +531,11 @@ def test_legacy_v1_nonempty_fill_remains_verifiable(
             schema_version=1,
         ),
     )
+    record_file = unit / "record.yaml"
+    record = load_yaml(record_file, default={})
+    del record["payload"]["idea_authoring_contracts"]["analyze"]
+    record["payload"].pop("idea_authoring_contracts", None)
+    write_yaml_if_changed(record_file, record)
     context = idea.idea_preference_context(
         tmp_path,
         operation="analyze",
@@ -479,6 +550,14 @@ def test_legacy_v1_nonempty_fill_remains_verifiable(
     fill["preference_consumer"] = idea._preference_consumer_view("analyze", context)
     write_yaml_if_changed(fill_path, fill)
     assert _run(idea, monkeypatch, "analyze", "--idea-id", idea_id, "--phase", "verify") == 0
+    result = load_yaml(unit / "analyze.yaml", default={})
+    assert result["authoring_provenance"] == {"mode": "legacy-unanchored/v1"}
+    with pytest.raises(SystemExit):
+        _run(idea, monkeypatch, "analyze", "--idea-id", idea_id, "--phase", "verify")
+    assert _run(idea, monkeypatch, "analyze", "--idea-id", idea_id, "--phase", "prepare") == 0
+    refreshed_record = load_yaml(record_file, default={})
+    assert refreshed_record["payload"]["idea_authoring_contracts"]["analyze"]["schema"] == "idea-authoring-anchor/v1"
+    assert load_yaml(corpus_path, default={})["schema"] == "idea-evidence-corpus/v2"
 
 
 def test_receipt_time_evidence_mutation_is_rejected_before_first_write(
@@ -532,8 +611,9 @@ def test_hard_preference_change_is_rejected_at_final_boundary(
     assert not (unit / "analyze.yaml").exists()
 
 
+@pytest.mark.parametrize("round_index", [1, 2])
 def test_coherent_corpus_and_fill_view_tamper_cannot_replace_orientation_commitment(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, round_index: int
 ) -> None:
     idea = _load_idea_module()
     idea_id, source_id = _setup(tmp_path, idea)
@@ -557,6 +637,20 @@ def test_coherent_corpus_and_fill_view_tamper_cannot_replace_orientation_commitm
         for item in corpus["entries"]
     ])
     write_yaml_if_changed(corpus_path, corpus)
+    corpus_binding = idea.regular_file_binding(
+        corpus_path,
+        logical_identity=corpus_path.relative_to(tmp_path).as_posix(),
+        trusted_root=tmp_path,
+    )
+    orientation_path = unit / "analyze-orientation.yaml"
+    write_yaml_if_changed(
+        orientation_path,
+        idea.idea_preference_orientation(
+            "analyze",
+            canonical_id=idea_id,
+            corpus_commitment=idea._corpus_commitment(corpus, corpus_binding),
+        ),
+    )
     fill_path = unit / "analyze-fill.yaml"
     fill = _fill(fill_path, source_id, "Late evidence was not frozen by the owner.")
     for claim in fill["claims"]:
@@ -564,6 +658,13 @@ def test_coherent_corpus_and_fill_view_tamper_cannot_replace_orientation_commitm
     forged_context = dict(fill["preference_consumer"]["task_context"])
     forged_context["evidence_corpus_identity_digest"] = corpus["identity_digest"]
     forged_context["evidence_corpus_bytes_digest"] = corpus["bytes_digest"]
+    orientation_binding = idea.regular_file_binding(
+        orientation_path,
+        logical_identity=orientation_path.name,
+        trusted_root=tmp_path,
+    )
+    forged_context["immutable_orientation_identity_digest"] = orientation_binding["identity_digest"]
+    forged_context["immutable_orientation_bytes_digest"] = orientation_binding["bytes_digest"]
     fill["preference_consumer"] = idea._preference_consumer_view("analyze", forged_context)
     write_yaml_if_changed(fill_path, fill)
     record_before = (unit / "record.yaml").read_bytes()
@@ -571,6 +672,468 @@ def test_coherent_corpus_and_fill_view_tamper_cannot_replace_orientation_commitm
         _run(idea, monkeypatch, "analyze", "--idea-id", idea_id, "--phase", "verify")
     assert (unit / "record.yaml").read_bytes() == record_before
     assert not (unit / "analyze.yaml").exists()
+
+
+@pytest.mark.parametrize("round_index", [1, 2])
+def test_generation_coherent_three_file_rewrite_cannot_materialize(
+    tmp_path: Path, monkeypatch, round_index: int
+) -> None:
+    idea = _load_idea_module()
+    root = tmp_path / "workspace"
+    _idea_ids, source_id, _evidence_path = _multi_setup(root, idea, count=1)
+    common = (
+        "generate", "--title", "Anchored generation", "--count", "1",
+        "--bundle-id", "idea-bundle-anchor",
+    )
+    assert _run(idea, monkeypatch, *common, "--phase", "prepare") == 0
+    working = root / "kb/synthesis/idea-pools/idea-bundle-anchor"
+    index_path = working / "index.yaml"
+    prepared_before = index_path.read_bytes() if index_path.exists() else b""
+    source_unit = record_path(root, "repo", source_id).parent
+    late_path = source_unit / "generation-late.txt"
+    late_path.write_text("Late generation evidence.\n", encoding="utf-8")
+    relative = late_path.relative_to(root).as_posix()
+    binding = idea.regular_file_binding(late_path, logical_identity=relative, trusted_root=root)
+    corpus_path = working / "generation-evidence-corpus.yaml"
+    corpus = load_yaml(corpus_path, default={})
+    corpus["entries"].append({"path": relative, **binding, "size": late_path.stat().st_size})
+    corpus["entries"].sort(key=lambda item: item["path"])
+    corpus["identity_digest"] = idea.canonical_digest([
+        {"path": item["path"], "identity_digest": item["identity_digest"], "size": item["size"]}
+        for item in corpus["entries"]
+    ])
+    corpus["bytes_digest"] = idea.canonical_digest([
+        {"path": item["path"], "bytes_digest": item["bytes_digest"], "size": item["size"]}
+        for item in corpus["entries"]
+    ])
+    write_yaml_if_changed(corpus_path, corpus)
+    corpus_binding = idea.regular_file_binding(
+        corpus_path,
+        logical_identity=corpus_path.relative_to(root).as_posix(),
+        trusted_root=root,
+    )
+    fill_path = working / "generation-fill.yaml"
+    fill = load_yaml(fill_path, default={})
+    request_context = dict(fill["request_context"])
+    orientation_path = working / "generation-orientation.yaml"
+    write_yaml_if_changed(
+        orientation_path,
+        idea.idea_preference_orientation(
+            "generate",
+            canonical_id="idea-bundle-anchor",
+            corpus_commitment=idea._corpus_commitment(corpus, corpus_binding),
+            request_context=request_context,
+        ),
+    )
+    forged_context = dict(fill["preference_consumer"]["task_context"])
+    forged_context["evidence_corpus_identity_digest"] = corpus["identity_digest"]
+    forged_context["evidence_corpus_bytes_digest"] = corpus["bytes_digest"]
+    orientation_binding = idea.regular_file_binding(
+        orientation_path,
+        logical_identity=orientation_path.name,
+        trusted_root=root,
+    )
+    forged_context["immutable_orientation_identity_digest"] = orientation_binding["identity_digest"]
+    forged_context["immutable_orientation_bytes_digest"] = orientation_binding["bytes_digest"]
+    fill["preference_consumer"] = idea._preference_consumer_view("generate", forged_context)
+    fill["candidates"][0].update({
+        "title": f"Forged late candidate {round_index}",
+        "strategy": "Use post-prepare material",
+        "problem": "The frozen boundary was bypassed.",
+        "hypothesis": "A forged context would be accepted without an owner anchor.",
+        "next_actions": ["Reject the coherent rewrite"],
+    })
+    write_yaml_if_changed(fill_path, fill)
+    before_ids = {path.parent.name for path in (root / "kb/units/ideas").glob("*/record.yaml")}
+    with pytest.raises(SystemExit):
+        _run(idea, monkeypatch, *common, "--phase", "verify")
+    after_ids = {path.parent.name for path in (root / "kb/units/ideas").glob("*/record.yaml")}
+    assert after_ids == before_ids
+    assert index_path.read_bytes() == prepared_before
+
+
+@pytest.mark.parametrize("mutation", ["remove", "digest", "extra_key"])
+def test_semantic_owner_anchor_mutation_fails_closed(
+    tmp_path: Path, monkeypatch, mutation: str
+) -> None:
+    idea = _load_idea_module()
+    idea_id, source_id = _setup(tmp_path, idea)
+    assert _run(idea, monkeypatch, "review", "--idea-id", idea_id, "--phase", "prepare") == 0
+    unit = record_path(tmp_path, "idea", idea_id).parent
+    fill_path = unit / "review-fill.yaml"
+    write_yaml_if_changed(
+        fill_path,
+        _fill(
+            fill_path,
+            source_id,
+            "The baseline loses accuracy under unseen camera viewpoints.",
+            selection_rank=1,
+        ),
+    )
+    record_file = unit / "record.yaml"
+    record = load_yaml(record_file, default={})
+    anchor = record["payload"]["idea_authoring_contracts"]["review"]
+    if mutation == "remove":
+        del record["payload"]["idea_authoring_contracts"]["review"]
+    elif mutation == "digest":
+        anchor["request_context_digest"] = "0" * 64
+    else:
+        anchor["unexpected"] = True
+    write_yaml_if_changed(record_file, record)
+    mutated = record_file.read_bytes()
+    with pytest.raises(SystemExit):
+        _run(idea, monkeypatch, "review", "--idea-id", idea_id, "--phase", "verify")
+    assert record_file.read_bytes() == mutated
+    assert not (unit / "review.yaml").exists()
+    assert not (unit / "idea-card.md").exists()
+
+
+@pytest.mark.parametrize("round_index", [1, 2])
+def test_generation_prepared_index_drift_is_not_overwritten(
+    tmp_path: Path, monkeypatch, round_index: int
+) -> None:
+    idea = _load_idea_module()
+    root = tmp_path / "workspace"
+    _multi_setup(root, idea, count=1)
+    common = (
+        "generate", "--title", "Prepared sentinel", "--count", "1",
+        "--bundle-id", "idea-bundle-sentinel",
+    )
+    assert _run(idea, monkeypatch, *common, "--phase", "prepare") == 0
+    working = root / "kb/synthesis/idea-pools/idea-bundle-sentinel"
+    fill_path = working / "generation-fill.yaml"
+    fill = load_yaml(fill_path, default={})
+    fill["candidates"][0].update({
+        "title": f"Sentinel candidate {round_index}",
+        "strategy": "Respect prepared state",
+        "problem": "Verify must not overwrite drifted owner state.",
+        "hypothesis": "Exact prepared CAS rejects the drift.",
+        "next_actions": ["Keep the sentinel intact"],
+    })
+    write_yaml_if_changed(fill_path, fill)
+    index_path = working / "index.yaml"
+    prepared = load_yaml(index_path, default={})
+    prepared["sentinel"] = f"do-not-overwrite-{round_index}"
+    write_yaml_if_changed(index_path, prepared)
+    sentinel_bytes = index_path.read_bytes()
+    before_ids = {path.parent.name for path in (root / "kb/units/ideas").glob("*/record.yaml")}
+    with pytest.raises(SystemExit):
+        _run(idea, monkeypatch, *common, "--phase", "verify")
+    assert index_path.read_bytes() == sentinel_bytes
+    assert {path.parent.name for path in (root / "kb/units/ideas").glob("*/record.yaml")} == before_ids
+
+
+def test_generation_prepared_binding_rejects_same_bytes_atomic_replacement(
+    tmp_path: Path, monkeypatch
+) -> None:
+    idea = _load_idea_module()
+    root = tmp_path / "workspace"
+    _multi_setup(root, idea, count=1)
+    common = (
+        "generate", "--title", "Prepared CAS", "--count", "1",
+        "--bundle-id", "idea-bundle-cas",
+    )
+    assert _run(idea, monkeypatch, *common, "--phase", "prepare") == 0
+    working = root / "kb/synthesis/idea-pools/idea-bundle-cas"
+    fill_path = working / "generation-fill.yaml"
+    fill = load_yaml(fill_path, default={})
+    fill["candidates"][0].update({
+        "title": "CAS candidate",
+        "strategy": "Bind the prepared inode transiently",
+        "problem": "Same bytes can still replace the owner file.",
+        "hypothesis": "Transient identity comparison detects replacement.",
+        "next_actions": ["Reject before candidate write"],
+    })
+    write_yaml_if_changed(fill_path, fill)
+    index_path = working / "index.yaml"
+    original_preflight = idea._idea_transaction_preflight
+    swapped = {"done": False}
+
+    def replace_before_locked_preflight(args, project_root):
+        if not swapped["done"] and args.command == "generate" and args.phase == "verify":
+            replacement = index_path.with_name("index-replacement.yaml")
+            replacement.write_bytes(index_path.read_bytes())
+            replacement.replace(index_path)
+            swapped["done"] = True
+        return original_preflight(args, project_root)
+
+    monkeypatch.setattr(idea, "_idea_transaction_preflight", replace_before_locked_preflight)
+    before_ids = {path.parent.name for path in (root / "kb/units/ideas").glob("*/record.yaml")}
+    with pytest.raises(SystemExit):
+        _run(idea, monkeypatch, *common, "--phase", "verify")
+    assert {path.parent.name for path in (root / "kb/units/ideas").glob("*/record.yaml")} == before_ids
+
+
+def test_generation_prepared_state_retries_then_materializes_and_becomes_terminal(
+    tmp_path: Path, monkeypatch
+) -> None:
+    idea = _load_idea_module()
+    root = tmp_path / "workspace"
+    _multi_setup(root, idea, count=1)
+    common = (
+        "generate", "--title", "Prepared lifecycle", "--count", "1",
+        "--bundle-id", "idea-bundle-lifecycle",
+    )
+    assert _run(idea, monkeypatch, *common, "--phase", "prepare") == 0
+    working = root / "kb/synthesis/idea-pools/idea-bundle-lifecycle"
+    index_path = working / "index.yaml"
+    prepared_snapshot = _path_snapshot([index_path])
+    assert load_yaml(index_path, default={})["status"] == "prepared"
+    assert _run(idea, monkeypatch, *common, "--phase", "prepare") == 0
+    assert _path_snapshot([index_path]) == prepared_snapshot
+    fill_path = working / "generation-fill.yaml"
+    fill = load_yaml(fill_path, default={})
+    fill["candidates"][0].update({
+        "title": "Lifecycle candidate",
+        "strategy": "Resume the anchored prepared task",
+        "problem": "Prepared state must not be terminal.",
+        "hypothesis": "Exact CAS permits one materialization.",
+        "next_actions": ["Materialize once"],
+    })
+    write_yaml_if_changed(fill_path, fill)
+    assert _run(idea, monkeypatch, *common, "--phase", "verify") == 0
+    materialized = index_path.read_bytes()
+    active = load_yaml(index_path, default={})
+    assert active["status"] == "active"
+    assert active["authoring_provenance"]["mode"] == "owner-anchored/v1"
+    assert len(active["authoring_provenance"]["authoring_contract_digest"]) == 64
+    assert "authoring_contract" not in active
+    with pytest.raises(SystemExit):
+        _run(idea, monkeypatch, *common, "--phase", "prepare")
+    assert index_path.read_bytes() == materialized
+
+
+def test_prepared_generation_bundle_rejects_generic_bundle_entrypoints(
+    tmp_path: Path, monkeypatch
+) -> None:
+    idea = _load_idea_module()
+    root = tmp_path / "workspace"
+    _multi_setup(root, idea, count=1)
+    bundle_id = "idea-bundle-prepared-routing"
+    common = (
+        "generate", "--title", "Prepared routing", "--count", "1",
+        "--bundle-id", bundle_id,
+    )
+    assert _run(idea, monkeypatch, *common, "--phase", "prepare") == 0
+    index_path = root / "kb/synthesis/idea-pools" / bundle_id / "index.yaml"
+    before = _path_snapshot([index_path])
+
+    with pytest.raises(SystemExit):
+        _run(idea, monkeypatch, "review-assist", "--bundle-id", bundle_id)
+    assert _path_snapshot([index_path]) == before
+    with pytest.raises(SystemExit):
+        _run(
+            idea,
+            monkeypatch,
+            "select-best",
+            "--bundle-id",
+            bundle_id,
+            "--evidence",
+            "fixture",
+        )
+    assert _path_snapshot([index_path]) == before
+    with pytest.raises(ValueError):
+        idea.ensure_bundle(
+            root, bundle_id, title="x", source="", pool="", strategy="review"
+        )
+    with pytest.raises(ValueError):
+        idea.update_bundle(root, bundle_id, idea_ids=[])
+    assert _path_snapshot([index_path]) == before
+
+
+def test_legacy_v1_generation_is_one_time_and_records_value_free_provenance(
+    tmp_path: Path, monkeypatch
+) -> None:
+    idea = _load_idea_module()
+    root = tmp_path / "workspace"
+    _multi_setup(root, idea, count=1)
+    bundle_id = "idea-bundle-legacy"
+    common = (
+        "generate", "--title", "Legacy generation", "--count", "1",
+        "--bundle-id", bundle_id,
+    )
+    assert _run(idea, monkeypatch, *common, "--phase", "prepare") == 0
+    working = root / "kb/synthesis/idea-pools" / bundle_id
+    corpus_path = working / "generation-evidence-corpus.yaml"
+    corpus = load_yaml(corpus_path, default={})
+    corpus["schema"] = "idea-evidence-corpus/v1"
+    for entry in corpus["entries"]:
+        entry.pop("size")
+    corpus["identity_digest"] = idea.canonical_digest([
+        {"path": item["path"], "identity_digest": item["identity_digest"]}
+        for item in corpus["entries"]
+    ])
+    corpus["bytes_digest"] = idea.canonical_digest([
+        {"path": item["path"], "bytes_digest": item["bytes_digest"]}
+        for item in corpus["entries"]
+    ])
+    write_yaml_if_changed(corpus_path, corpus)
+    fill_path = working / "generation-fill.yaml"
+    fill = load_yaml(fill_path, default={})
+    request_context = dict(fill["request_context"])
+    orientation_path = working / "generation-orientation.yaml"
+    write_yaml_if_changed(
+        orientation_path,
+        idea.idea_preference_orientation(
+            "generate",
+            canonical_id=bundle_id,
+            corpus_commitment={},
+            request_context=request_context,
+            schema_version=1,
+        ),
+    )
+    index_path = working / "index.yaml"
+    index_path.unlink()
+    context = idea.idea_preference_context(
+        root,
+        operation="generate",
+        canonical_id=bundle_id,
+        orientation_path=orientation_path,
+        corpus_path=corpus_path,
+        excluded_paths=set(),
+        request_context=request_context,
+    )
+    fill["preference_consumer"] = idea._preference_consumer_view("generate", context)
+    fill["candidates"][0].update({
+        "title": "Legacy candidate",
+        "strategy": "Consume the legacy task once",
+        "problem": "Legacy tasks have no persisted owner anchor.",
+        "hypothesis": "A one-time compatibility path preserves old authored work.",
+        "next_actions": ["Record value-free provenance"],
+    })
+    write_yaml_if_changed(fill_path, fill)
+
+    assert _run(idea, monkeypatch, *common, "--phase", "verify") == 0
+    active = load_yaml(index_path, default={})
+    assert active["status"] == "active"
+    assert active["authoring_provenance"] == {"mode": "legacy-unanchored/v1"}
+    assert "authoring_contract" not in active
+    with pytest.raises(SystemExit):
+        _run(idea, monkeypatch, *common, "--phase", "verify")
+
+
+def test_generation_post_write_failure_restores_prepared_owner_and_retries(
+    tmp_path: Path, monkeypatch
+) -> None:
+    idea = _load_idea_module()
+    root = tmp_path / "workspace"
+    _multi_setup(root, idea, count=1)
+    bundle_id = "idea-bundle-rollback"
+    common = (
+        "generate", "--title", "Rollback generation", "--count", "1",
+        "--bundle-id", bundle_id,
+    )
+    assert _run(idea, monkeypatch, *common, "--phase", "prepare") == 0
+    working = root / "kb/synthesis/idea-pools" / bundle_id
+    index_path = working / "index.yaml"
+    fill_path = working / "generation-fill.yaml"
+    fill = load_yaml(fill_path, default={})
+    fill["candidates"][0].update({
+        "title": "Rollback candidate",
+        "strategy": "Retry the exact anchored task",
+        "problem": "A failure may occur after candidate writes.",
+        "hypothesis": "The transaction restores the prepared owner state exactly.",
+        "next_actions": ["Retry after rollback"],
+    })
+    write_yaml_if_changed(fill_path, fill)
+    prepared_bytes = index_path.read_bytes()
+    before_ids = {
+        path.parent.name
+        for path in (root / "kb/units/ideas").glob("*/record.yaml")
+    }
+    original_build_index = idea.build_index
+    monkeypatch.setattr(
+        idea,
+        "build_index",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("forced generation post-write failure")
+        ),
+    )
+    with pytest.raises(RuntimeError, match="forced generation post-write failure"):
+        _run(idea, monkeypatch, *common, "--phase", "verify")
+    assert index_path.read_bytes() == prepared_bytes
+    assert {
+        path.parent.name
+        for path in (root / "kb/units/ideas").glob("*/record.yaml")
+    } == before_ids
+    monkeypatch.setattr(idea, "build_index", original_build_index)
+    assert _run(idea, monkeypatch, *common, "--phase", "verify") == 0
+    assert load_yaml(index_path, default={})["status"] == "active"
+
+
+def test_undo_semantic_verify_restores_active_anchor_and_allows_same_verify(
+    tmp_path: Path, monkeypatch
+) -> None:
+    idea = _load_idea_module()
+    idea_id, source_id = _setup(tmp_path, idea)
+    unit = record_path(tmp_path, "idea", idea_id).parent
+    assert _run(
+        idea, monkeypatch, "analyze", "--idea-id", idea_id, "--phase", "prepare"
+    ) == 0
+    fill_path = unit / "analyze-fill.yaml"
+    write_yaml_if_changed(
+        fill_path,
+        _fill(
+            fill_path,
+            source_id,
+            "The baseline loses accuracy under unseen camera viewpoints.",
+        ),
+    )
+    prepared_record_bytes = (unit / "record.yaml").read_bytes()
+    assert _run(
+        idea, monkeypatch, "analyze", "--idea-id", idea_id, "--phase", "verify"
+    ) == 0
+    completed = load_yaml(unit / "record.yaml", default={})
+    assert "analyze" not in completed["payload"].get("idea_authoring_contracts", {})
+
+    undone = undo_last_operation(tmp_path)
+    assert undone["restored_paths"]
+    assert (unit / "record.yaml").read_bytes() == prepared_record_bytes
+    assert not (unit / "analyze.yaml").exists()
+    restored = load_yaml(unit / "record.yaml", default={})
+    assert restored["payload"]["idea_authoring_contracts"]["analyze"]["operation"] == "analyze"
+    assert _run(
+        idea, monkeypatch, "analyze", "--idea-id", idea_id, "--phase", "verify"
+    ) == 0
+
+
+def test_undo_generation_materialization_restores_prepared_bundle_and_retries(
+    tmp_path: Path, monkeypatch
+) -> None:
+    idea = _load_idea_module()
+    root = tmp_path / "workspace"
+    _multi_setup(root, idea, count=1)
+    bundle_id = "idea-bundle-undo"
+    common = (
+        "generate", "--title", "Undo generation", "--count", "1",
+        "--bundle-id", bundle_id,
+    )
+    assert _run(idea, monkeypatch, *common, "--phase", "prepare") == 0
+    working = root / "kb/synthesis/idea-pools" / bundle_id
+    index_path = working / "index.yaml"
+    fill_path = working / "generation-fill.yaml"
+    fill = load_yaml(fill_path, default={})
+    fill["candidates"][0].update({
+        "title": "Undo candidate",
+        "strategy": "Restore prepared ownership",
+        "problem": "Materialization may need to be undone.",
+        "hypothesis": "Undo restores the exact prepared bytes and removes candidates.",
+        "next_actions": ["Verify again from the same fill"],
+    })
+    write_yaml_if_changed(fill_path, fill)
+    prepared_bytes = index_path.read_bytes()
+    assert _run(idea, monkeypatch, *common, "--phase", "verify") == 0
+    active = load_yaml(index_path, default={})
+    candidate_path = record_path(root, "idea", active["idea_ids"][0])
+    assert candidate_path.exists()
+
+    undone = undo_last_operation(root)
+    assert undone["restored_paths"]
+    assert index_path.read_bytes() == prepared_bytes
+    assert load_yaml(index_path, default={})["status"] == "prepared"
+    assert not candidate_path.exists()
+    assert _run(idea, monkeypatch, *common, "--phase", "verify") == 0
+    assert load_yaml(index_path, default={})["status"] == "active"
 
 
 def test_post_write_failure_rolls_back_and_same_fill_can_retry(
@@ -582,13 +1145,19 @@ def test_post_write_failure_rolls_back_and_same_fill_can_retry(
     unit = record_path(tmp_path, "idea", idea_id).parent
     fill_path = unit / "analyze-fill.yaml"
     write_yaml_if_changed(fill_path, _fill(fill_path, source_id, "The baseline loses accuracy under unseen camera viewpoints."))
+    prepared_record_bytes = (unit / "record.yaml").read_bytes()
     original_build_index = idea.build_index
     monkeypatch.setattr(idea, "build_index", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("forced post-write failure")))
     with pytest.raises(RuntimeError, match="forced post-write failure"):
         _run(idea, monkeypatch, "analyze", "--idea-id", idea_id, "--phase", "verify")
     assert not (unit / "analyze.yaml").exists()
+    assert (unit / "record.yaml").read_bytes() == prepared_record_bytes
+    restored = load_yaml(unit / "record.yaml", default={})
+    assert restored["payload"]["idea_authoring_contracts"]["analyze"]["operation"] == "analyze"
     monkeypatch.setattr(idea, "build_index", original_build_index)
     assert _run(idea, monkeypatch, "analyze", "--idea-id", idea_id, "--phase", "verify") == 0
+    completed = load_yaml(unit / "record.yaml", default={})
+    assert "analyze" not in completed["payload"].get("idea_authoring_contracts", {})
 
 
 def test_locked_preflight_rejects_fuzzy_resolution_switch_without_writes(

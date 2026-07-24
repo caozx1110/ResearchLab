@@ -247,7 +247,10 @@ def test_generate_invalid_slot_has_no_partial_candidate_or_bundle_write(
         "idea-bundle-atomic",
     )
     _run(idea, monkeypatch, root, *common, "--phase", "prepare")
-    fill_path = root / "kb/synthesis/idea-pools/idea-bundle-atomic/generation-fill.yaml"
+    working = root / "kb/synthesis/idea-pools/idea-bundle-atomic"
+    fill_path = working / "generation-fill.yaml"
+    prepared_index = working / "index.yaml"
+    prepared_bytes = prepared_index.read_bytes()
     fill = load_yaml(fill_path)
     fill["candidates"][0].update(
         {
@@ -263,8 +266,26 @@ def test_generate_invalid_slot_has_no_partial_candidate_or_bundle_write(
     with pytest.raises(SystemExit, match="candidate-02.title"):
         _run(idea, monkeypatch, root, *common, "--phase", "verify")
 
-    assert not (root / "kb/synthesis/idea-pools/idea-bundle-atomic/index.yaml").exists()
+    assert prepared_index.read_bytes() == prepared_bytes
+    prepared = load_yaml(prepared_index)
+    assert prepared["status"] == "prepared"
+    assert prepared["authoring_contract"]["schema"] == "idea-authoring-anchor/v1"
     assert list((root / "kb/units/ideas").glob("*/record.yaml")) == []
+
+    retry_fill = load_yaml(fill_path)
+    retry_fill["candidates"][1].update(
+        {
+            "title": "Second valid candidate",
+            "strategy": "Retry the same anchored fill",
+            "problem": "The first verify was incomplete",
+            "hypothesis": "Prepared state remains retryable",
+            "next_actions": ["Materialize both candidates"],
+        }
+    )
+    write_yaml_if_changed(fill_path, retry_fill)
+    assert _run(idea, monkeypatch, root, *common, "--phase", "verify") == 0
+    assert load_yaml(prepared_index)["status"] == "active"
+    assert len(list((root / "kb/units/ideas").glob("*/record.yaml"))) == 2
 
 
 def test_generate_stale_preference_receipt_rejects_before_candidate_or_bundle_write(
@@ -284,6 +305,8 @@ def test_generate_stale_preference_receipt_rejects_before_candidate_or_bundle_wr
     )
     _run(idea, monkeypatch, root, *common, "--phase", "prepare")
     working = root / "kb/synthesis/idea-pools/idea-bundle-stale"
+    prepared_index = working / "index.yaml"
+    prepared_bytes = prepared_index.read_bytes()
     fill_path = working / "generation-fill.yaml"
     fill = load_yaml(fill_path)
     selection_id = _selection(
@@ -319,7 +342,10 @@ def test_generate_stale_preference_receipt_rejects_before_candidate_or_bundle_wr
             selection_id,
         )
 
-    assert not (working / "index.yaml").exists()
+    assert prepared_index.read_bytes() == prepared_bytes
+    prepared = load_yaml(prepared_index)
+    assert prepared["status"] == "prepared"
+    assert prepared["authoring_contract"]["schema"] == "idea-authoring-anchor/v1"
     assert list((root / "kb/units/ideas").glob("*/record.yaml")) == []
 
 
