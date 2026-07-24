@@ -101,6 +101,16 @@ def _canonical_digest(value: object) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _exact_digest(value: object) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _record_content_digest(record: dict[str, Any]) -> str:
     content = copy.deepcopy(record)
     for volatile in (
@@ -504,13 +514,6 @@ def _safe_component(value: object, *, label: str) -> str:
     return text
 
 
-def _sha256(value: object, *, label: str) -> str:
-    text = str(value or "").strip()
-    if len(text) != 64 or any(char not in "0123456789abcdef" for char in text):
-        raise ValueError(f"composite survey {label} is not lowercase sha256")
-    return text
-
-
 def _trusted_artifact(
     root: Path,
     path: Path,
@@ -518,7 +521,7 @@ def _trusted_artifact(
     role: str,
     artifact_kind: str,
     artifact_id: str,
-    content: object | None = None,
+    content: object,
 ) -> dict[str, str]:
     canonical = trusted_project_path(
         root,
@@ -531,9 +534,7 @@ def _trusted_artifact(
         "path": canonical.relative_to(root.resolve()).as_posix(),
         "artifact_kind": artifact_kind,
         "artifact_id": artifact_id,
-        "content_sha256": (
-            file_sha256(canonical) if content is None else _canonical_digest(content)
-        ),
+        "content_sha256": _exact_digest(content),
     }
 
 
@@ -550,14 +551,27 @@ def _search_candidate_snapshot(stage: dict[str, Any]) -> list[dict[str, Any]]:
     return snapshot
 
 
-def _materialized_unit_snapshot(record: dict[str, Any]) -> dict[str, Any]:
-    payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+def literature_candidate_identity_digest(candidate: dict[str, Any]) -> str:
+    """Bind provider-neutral staged identity without materialization bookkeeping."""
+    return _exact_digest(
+        {
+            key: candidate.get(key)
+            for key in ("candidate_id", "title", "url", "identities")
+        }
+    )
+
+
+def _materialized_unit_snapshot(
+    record: dict[str, Any],
+    *,
+    selection_receipt: dict[str, Any],
+) -> dict[str, Any]:
     return {
         "id": record.get("id"),
         "kind": record.get("kind"),
         "status": record.get("status"),
         "source": record.get("source"),
-        "source_search": payload.get("source_search"),
+        "selection_receipt": selection_receipt,
     }
 
 
@@ -626,53 +640,24 @@ def _search_stage(root: Path, stage_id: object) -> tuple[dict[str, Any], Path]:
     return payload, path
 
 
-def _selected_candidate_units(
-    root: Path,
-    *,
-    stage_id: str,
-    candidate_ids: list[str],
-) -> tuple[list[dict[str, str]], list[dict[str, Any]], list[dict[str, Any]]]:
-    stage, _path = _search_stage(root, stage_id)
+def _selected_candidates(stage: dict[str, Any], candidate_ids: list[str]) -> list[dict[str, Any]]:
     candidates = {
         str(item.get("candidate_id") or ""): item
         for item in stage.get("candidates", [])
         if isinstance(item, dict) and str(item.get("candidate_id") or "")
     }
-    units: list[dict[str, str]] = []
-    records: list[dict[str, Any]] = []
-    selections: list[dict[str, Any]] = []
+    selected: list[dict[str, Any]] = []
     for candidate_id in candidate_ids:
         candidate = candidates.get(candidate_id)
         if not candidate:
             raise ValueError(f"selected candidate is missing from literature stage: {candidate_id}")
-        if str(candidate.get("status") or "") not in {"materialized", "duplicate"}:
-            raise ValueError(f"selected candidate is not materialized: {candidate_id}")
-        unit = {
-            "kind": _safe_component(stage.get("source_kind"), label="selected unit kind"),
-            "id": _safe_component(candidate.get("record_id"), label="selected unit id"),
-        }
-        record, _record_path = _record_for_ref(root, unit)
-        source_search = record.get("payload", {}).get("source_search", {})
-        source_search = source_search if isinstance(source_search, dict) else {}
-        if stage_id not in source_search.get("stage_ids", []) or candidate_id not in source_search.get("candidate_ids", []):
-            raise ValueError("canonical unit does not bind the selected stage candidate")
-        authorization = source_search.get("user_selection")
-        authorization = authorization if isinstance(authorization, dict) else {}
-        if (
-            str(authorization.get("authorization_source") or "") != "user_message"
-            or not str(authorization.get("user_authorization") or "").strip()
-        ):
-            raise ValueError("selected literature candidate lacks current-user authorization")
-        units.append(unit)
-        records.append(record)
-        selections.append(
+        selected.append(
             {
                 "candidate_id": candidate_id,
-                "unit": unit,
-                "authorization_digest": _canonical_digest(authorization),
+                "identity_digest": literature_candidate_identity_digest(candidate),
             }
         )
-    return units, records, selections
+    return selected
 
 
 def _survey_for_ref(root: Path, ref: dict[str, Any]) -> tuple[dict[str, Any], Path]:
@@ -708,7 +693,7 @@ def _normalize_stage_refs(stage_id: str, refs: object) -> dict[str, Any]:
             raise ValueError("search completion ref is invalid")
         return {"kind": "literature-search-stage", "stage_id": _safe_component(ref.get("stage_id"), label="literature stage id")}
     if stage_id == "selection":
-        if set(ref) != {"kind", "stage_id", "candidate_ids"} or ref.get("kind") != "literature-search-selection":
+        if set(ref) != {"kind", "stage_id", "candidate_ids", "user_authorization", "authorization_source"} or ref.get("kind") != "literature-search-selection":
             raise ValueError("selection completion ref is invalid")
         raw_ids = ref.get("candidate_ids")
         if not isinstance(raw_ids, list) or not raw_ids:
@@ -716,7 +701,18 @@ def _normalize_stage_refs(stage_id: str, refs: object) -> dict[str, Any]:
         ids = [_safe_component(item, label="candidate id") for item in raw_ids]
         if ids != sorted(set(ids)):
             raise ValueError("selection candidate ids must be unique and sorted")
-        return {"kind": "literature-search-selection", "stage_id": _safe_component(ref.get("stage_id"), label="literature stage id"), "candidate_ids": ids}
+        authorization = str(ref.get("user_authorization") or "").strip()
+        if not authorization or len(authorization.encode("utf-8")) > 4096:
+            raise ValueError("selection completion requires bounded current-user authorization")
+        if ref.get("authorization_source") != "user_message":
+            raise ValueError("selection completion authorization must come from user_message")
+        return {
+            "kind": "literature-search-selection",
+            "stage_id": _safe_component(ref.get("stage_id"), label="literature stage id"),
+            "candidate_ids": ids,
+            "user_authorization": authorization,
+            "authorization_source": "user_message",
+        }
     if stage_id in {"source_intake", "unit_analysis"}:
         expected_kind = "materialized-units" if stage_id == "source_intake" else "confirmed-units"
         if set(ref) != {"kind", "stage_id", "units"} or ref.get("kind") != expected_kind:
@@ -731,15 +727,27 @@ def _normalize_stage_refs(stage_id: str, refs: object) -> dict[str, Any]:
             raise ValueError("survey mode is invalid")
         return {"kind": expected_kind, "slug": _safe_component(ref.get("slug"), label="survey slug"), "mode": mode}
     if stage_id == "report_consumption":
-        if set(ref) != {"kind", "program_id", "event_digest", "survey_slug", "survey_mode"} or ref.get("kind") != "program-reporting-event":
-            raise ValueError("report consumption ref is invalid")
-        return {
-            "kind": "program-reporting-event",
-            "program_id": _safe_component(ref.get("program_id"), label="program id"),
-            "event_digest": _sha256(ref.get("event_digest"), label="event digest"),
+        common = {
             "survey_slug": _safe_component(ref.get("survey_slug"), label="survey slug"),
             "survey_mode": str(ref.get("survey_mode") or "").strip(),
         }
+        if ref.get("kind") == "program-reporting-events":
+            if set(ref) != {"kind", "program_ids", "survey_slug", "survey_mode"}:
+                raise ValueError("report consumption ref is invalid")
+            raw_programs = ref.get("program_ids")
+            if not isinstance(raw_programs, list) or not raw_programs:
+                raise ValueError("report consumption requires linked program ids")
+            program_ids = [
+                _safe_component(item, label="program id") for item in raw_programs
+            ]
+            if program_ids != sorted(set(program_ids)):
+                raise ValueError("report consumption program ids must be unique and sorted")
+            return {"kind": "program-reporting-events", "program_ids": program_ids, **common}
+        if ref.get("kind") == "not-applicable-report-consumption":
+            if set(ref) != {"kind", "reason", "survey_slug", "survey_mode"} or ref.get("reason") != "no_linked_programs":
+                raise ValueError("not-applicable report consumption ref is invalid")
+            return {"kind": "not-applicable-report-consumption", "reason": "no_linked_programs", **common}
+        raise ValueError("report consumption ref is invalid")
     raise ValueError("unsupported composite survey stage")
 
 
@@ -773,25 +781,21 @@ def build_composite_stage_binding(root: Path, stage_id: str, *, refs: object) ->
             "partial": stage.get("partial"),
         }
         artifacts.append(_trusted_artifact(root, path, role="literature-search-stage", artifact_kind="source-search-stage", artifact_id=ref["stage_id"], content=terminal_snapshot))
-        facts = {"terminal_stop_reason": reason, "candidate_set_digest": _canonical_digest(_search_candidate_snapshot(stage))}
+        facts = {"terminal_stop_reason": reason, "candidate_set_digest": _exact_digest(_search_candidate_snapshot(stage))}
     elif stage_id == "selection":
         stage, path = _search_stage(root, ref["stage_id"])
-        units, _records, selections = _selected_candidate_units(root, stage_id=ref["stage_id"], candidate_ids=ref["candidate_ids"])
-        selection_stage_snapshot = [
-            {
-                "candidate_id": item.get("candidate_id"),
-                "status": item.get("status"),
-                "record_id": item.get("record_id"),
-            }
-            for item in stage.get("candidates", [])
-            if isinstance(item, dict) and str(item.get("candidate_id") or "") in ref["candidate_ids"]
-        ]
-        artifacts.append(_trusted_artifact(root, path, role="literature-search-stage", artifact_kind="source-search-stage", artifact_id=ref["stage_id"], content=selection_stage_snapshot))
-        for unit in units:
-            record, record_path = _record_for_ref(root, unit)
-            source_search = record.get("payload", {}).get("source_search", {})
-            artifacts.append(_trusted_artifact(root, record_path, role="selection-authorization", artifact_kind=unit["kind"], artifact_id=str(record.get("id") or ""), content=source_search.get("user_selection") if isinstance(source_search, dict) else {}))
-        facts = {"candidate_set_digest": _canonical_digest(_search_candidate_snapshot(stage)), "selected_candidates": selections}
+        selected = _selected_candidates(stage, ref["candidate_ids"])
+        artifacts.append(_trusted_artifact(root, path, role="literature-search-stage", artifact_kind="source-search-stage", artifact_id=ref["stage_id"], content=_search_candidate_snapshot(stage)))
+        facts = {
+            "candidate_set_digest": _exact_digest(_search_candidate_snapshot(stage)),
+            "selected_candidates": selected,
+            "authorization_digest": _exact_digest(
+                {
+                    "user_authorization": ref["user_authorization"],
+                    "authorization_source": ref["authorization_source"],
+                }
+            ),
+        }
     elif stage_id == "source_intake":
         stage, stage_path = _search_stage(root, ref["stage_id"])
         artifacts.append(_trusted_artifact(root, stage_path, role="literature-search-stage", artifact_kind="source-search-stage", artifact_id=ref["stage_id"], content=[{"candidate_id": item.get("candidate_id"), "status": item.get("status"), "record_id": item.get("record_id")} for item in stage.get("candidates", []) if isinstance(item, dict) and str(item.get("record_id") or "") in {unit["id"] for unit in ref["units"]}]))
@@ -804,8 +808,36 @@ def build_composite_stage_binding(root: Path, stage_id: str, *, refs: object) ->
             matching = [item for item in stage.get("candidates", []) if isinstance(item, dict) and str(item.get("record_id") or "") == unit["id"] and str(item.get("candidate_id") or "") in candidate_ids and str(item.get("status") or "") in {"materialized", "duplicate"}]
             if ref["stage_id"] not in source_search.get("stage_ids", []) or not matching or str(record.get("status") or "") != "active" or not isinstance(record.get("source"), dict) or not record.get("source"):
                 raise ValueError(f"canonical unit is not a current materialization: {unit['kind']}/{unit['id']}")
-            artifacts.append(_trusted_artifact(root, record_path, role="materialized-unit", artifact_kind=unit["kind"], artifact_id=unit["id"], content=_materialized_unit_snapshot(record)))
-            facts_units.append({**unit, "candidate_id": str(matching[0].get("candidate_id") or "")})
+            receipts = [
+                item
+                for item in source_search.get("selections", [])
+                if isinstance(item, dict)
+                and item.get("stage_id") == ref["stage_id"]
+                and item.get("candidate_id") == str(matching[0].get("candidate_id") or "")
+            ]
+            if len(receipts) != 1:
+                raise ValueError("materialized unit lacks an exact source-intake selection receipt")
+            receipt = receipts[0]
+            candidate = matching[0]
+            if receipt.get("candidate_identity_digest") != literature_candidate_identity_digest(candidate):
+                raise ValueError("materialized unit selection identity does not match the staged candidate")
+            authorization = {
+                "user_authorization": receipt.get("user_authorization"),
+                "authorization_source": receipt.get("authorization_source"),
+            }
+            if (
+                str(authorization.get("authorization_source") or "") != "user_message"
+                or not str(authorization.get("user_authorization") or "").strip()
+            ):
+                raise ValueError("materialized unit lacks current-user selection authorization")
+            artifacts.append(_trusted_artifact(root, record_path, role="materialized-unit", artifact_kind=unit["kind"], artifact_id=unit["id"], content=_materialized_unit_snapshot(record, selection_receipt=receipt)))
+            facts_units.append(
+                {
+                    **unit,
+                    "candidate_id": str(matching[0].get("candidate_id") or ""),
+                    "authorization_digest": _exact_digest(authorization),
+                }
+            )
         facts = {"units": facts_units}
     elif stage_id == "unit_analysis":
         _stage, stage_path = _search_stage(root, ref["stage_id"])
@@ -854,16 +886,53 @@ def build_composite_stage_binding(root: Path, stage_id: str, *, refs: object) ->
         survey, survey_path = _survey_for_ref(root, survey_ref)
         if not judgement_confirmation_is_current(root, survey, survey_path):
             raise ValueError("report consumption references a stale survey confirmation")
-        events_path = program_reporting_events_path(root, ref["program_id"])
-        events_path = trusted_project_path(root, events_path, allowed_root=root / "kb" / "programs", require="file")
-        event_doc = load_yaml(events_path, default={})
-        events = [item for item in event_doc.get("items", []) if isinstance(item, dict)] if isinstance(event_doc, dict) else []
-        matches = [item for item in events if _canonical_digest(item) == ref["event_digest"]]
         expected_confirmation = confirmation_binding(survey, owner="literature-synthesizer", path=survey_path.relative_to(root).as_posix())
-        if len(matches) != 1 or matches[0].get("event_type") != "survey-confirmed" or matches[0].get("confirmation_binding") != expected_confirmation:
-            raise ValueError("program reporting event does not consume the current survey confirmation")
-        artifacts.append(_trusted_artifact(root, events_path, role="program-reporting-events", artifact_kind="program-reporting-events", artifact_id=ref["program_id"], content=matches[0]))
-        facts = {"event_digest": ref["event_digest"], "confirmation_binding_digest": _canonical_digest(expected_confirmation)}
+        survey_program_ids = survey.get("program_ids")
+        survey_program_ids = survey_program_ids if isinstance(survey_program_ids, list) else []
+        if ref["kind"] == "not-applicable-report-consumption":
+            if survey_program_ids:
+                raise ValueError("report consumption is applicable to linked survey programs")
+            artifacts.append(
+                _trusted_artifact(
+                    root,
+                    survey_path,
+                    role="confirmed-global-survey",
+                    artifact_kind="survey_judgement",
+                    artifact_id=str(survey.get("id") or ""),
+                    content={
+                        "survey_content_digest": survey.get("survey_content_digest"),
+                        "confirmation": survey.get("confirmation"),
+                    },
+                )
+            )
+            facts = {
+                "outcome": "not_applicable",
+                "reason": "no_linked_programs",
+                "confirmation_binding_digest": _exact_digest(expected_confirmation),
+            }
+        else:
+            if ref["program_ids"] != survey_program_ids:
+                raise ValueError("report consumption must cover every linked survey program")
+            event_facts: list[dict[str, str]] = []
+            for program_id in ref["program_ids"]:
+                events_path = program_reporting_events_path(root, program_id)
+                events_path = trusted_project_path(root, events_path, allowed_root=root / "kb" / "programs", require="file")
+                event_doc = load_yaml(events_path, default={})
+                events = [item for item in event_doc.get("items", []) if isinstance(item, dict)] if isinstance(event_doc, dict) else []
+                matches = [
+                    item
+                    for item in events
+                    if item.get("event_type") == "survey-confirmed"
+                    and item.get("confirmation_binding") == expected_confirmation
+                ]
+                if len(matches) != 1:
+                    raise ValueError("program reporting event does not consume the current survey confirmation")
+                artifacts.append(_trusted_artifact(root, events_path, role="program-reporting-events", artifact_kind="program-reporting-events", artifact_id=program_id, content=matches[0]))
+                event_facts.append({"program_id": program_id, "event_digest": _exact_digest(matches[0])})
+            facts = {
+                "events": event_facts,
+                "confirmation_binding_digest": _exact_digest(expected_confirmation),
+            }
 
     binding: dict[str, Any] = {
         "schema_version": 1,
@@ -874,7 +943,7 @@ def build_composite_stage_binding(root: Path, stage_id: str, *, refs: object) ->
         "facts": facts,
         "binding_digest": "",
     }
-    binding["binding_digest"] = _canonical_digest({key: value for key, value in binding.items() if key != "binding_digest"})
+    binding["binding_digest"] = _exact_digest({key: value for key, value in binding.items() if key != "binding_digest"})
     return binding
 
 
@@ -900,7 +969,7 @@ def _completed_binding_violations(root: Path, stage: dict[str, Any]) -> list[str
         return [f"completed stage {stage_id} lacks a closed artifact binding"]
     if binding.get("stage_id") != stage_id:
         return [f"completed stage {stage_id} binding identity is invalid"]
-    expected_digest = _canonical_digest({key: value for key, value in binding.items() if key != "binding_digest"})
+    expected_digest = _exact_digest({key: value for key, value in binding.items() if key != "binding_digest"})
     if binding.get("binding_digest") != expected_digest:
         return [f"completed stage {stage_id} binding digest is stale"]
     try:
@@ -929,10 +998,19 @@ def _chain_violations(state: dict[str, Any]) -> list[str]:
     if search and selection and search["refs"][0]["stage_id"] != selection["refs"][0]["stage_id"]:
         violations.append("selection does not bind the completed literature search stage")
     if selection and intake:
-        selected_units = [item["unit"] for item in selection["facts"].get("selected_candidates", [])]
-        intake_units = [{"kind": item.get("kind"), "id": item.get("id")} for item in intake["facts"].get("units", [])]
-        if selection["refs"][0]["stage_id"] != intake["refs"][0]["stage_id"] or selected_units != intake_units:
-            violations.append("source intake does not bind the selected candidate units")
+        selected_ids = [
+            item.get("candidate_id")
+            for item in selection["facts"].get("selected_candidates", [])
+        ]
+        intake_items = intake["facts"].get("units", [])
+        intake_ids = sorted(item.get("candidate_id") for item in intake_items)
+        authorization_digest = selection["facts"].get("authorization_digest")
+        if (
+            selection["refs"][0]["stage_id"] != intake["refs"][0]["stage_id"]
+            or selected_ids != intake_ids
+            or any(item.get("authorization_digest") != authorization_digest for item in intake_items)
+        ):
+            violations.append("source intake does not bind the selected candidates and authorization")
     if intake and analysis:
         intake_units = [{"kind": item.get("kind"), "id": item.get("id")} for item in intake["facts"].get("units", [])]
         analysis_units = [{"kind": item.get("kind"), "id": item.get("id")} for item in analysis["refs"][0].get("units", [])]
@@ -1165,6 +1243,7 @@ __all__ = [
     "composite_survey_request_digest",
     "composite_survey_state_path",
     "evidence_gap_handoff",
+    "literature_candidate_identity_digest",
     "new_composite_survey_state",
     "pending_composite_survey_states",
     "select_current_confirmed_survey_records",

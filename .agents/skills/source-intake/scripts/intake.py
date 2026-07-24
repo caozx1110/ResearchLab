@@ -24,13 +24,14 @@ from research.bootstrap import ensure_managed_runtime
 if __name__ == "__main__":
     ensure_managed_runtime(PROJECT_ROOT)
 
-from research.common import add_project_root_argument, confirm_command as shared_confirm_command, extract_pdf_record, parse_arxiv_id, print_resolved_project_roots, skill_script_for_command, utc_now_iso, write_yaml_if_changed
+from research.common import add_project_root_argument, confirm_command as shared_confirm_command, extract_pdf_record, load_yaml, parse_arxiv_id, print_resolved_project_roots, skill_script_for_command, utc_now_iso, write_yaml_if_changed
 from research.confirm import require_user_authorization
 from research.journal import journal_subprocess_env, mutation_transaction
 from research.intake_cli import add_intake_add_arguments
 from research.preference_selection import operation_contract, resolve_task_preferences, selection_binding
 from research.core import (
     apply_record_governance,
+    append_history,
     backup_source,
     build_index,
     candidate_pools_path,
@@ -38,6 +39,7 @@ from research.core import (
     detect_duplicate,
     ensure_workspace,
     load_search_stage,
+    locate_record,
     mark_search_candidate,
     checkpoint_and_report,
     kb_root,
@@ -57,6 +59,7 @@ from research.core import (
     write_parse_cache,
     write_record,
 )
+from research.surveys import literature_candidate_identity_digest
 
 
 def infer_title(source: str) -> str:
@@ -387,6 +390,115 @@ def _intake_transaction_targets(
     return list(dict.fromkeys(targets))
 
 
+def _attach_source_search_selection(
+    record: dict,
+    *,
+    stage: dict,
+    candidate: dict,
+    stage_id: str,
+    candidate_id: str,
+    user_authorization: str,
+    authorization_source: str,
+) -> bool:
+    """Attach exact intake provenance without changing analysis or confirmation substance."""
+    source_search = record.setdefault("payload", {}).setdefault("source_search", {})
+    before = repr(source_search)
+    source_search["stage_ids"] = sorted(set(source_search.get("stage_ids", [])) | {stage_id})
+    source_search["candidate_ids"] = sorted(
+        set(source_search.get("candidate_ids", [])) | {candidate_id}
+    )
+    source_search["queries"] = sorted(
+        set(source_search.get("queries", [])) | {str(stage.get("query") or "")}
+    )
+    if stage.get("entry_skill") == "literature-search":
+        require_user_authorization(
+            user_authorization=user_authorization,
+            authorization_source=authorization_source,
+        )
+        receipt = {
+            "stage_id": stage_id,
+            "candidate_id": candidate_id,
+            "candidate_identity_digest": literature_candidate_identity_digest(candidate),
+            "user_authorization": user_authorization.strip(),
+            "authorization_source": "user_message",
+        }
+        selections = [
+            item for item in source_search.get("selections", []) if isinstance(item, dict)
+        ]
+        prior = [
+            item
+            for item in selections
+            if item.get("stage_id") == stage_id and item.get("candidate_id") == candidate_id
+        ]
+        if prior and (len(prior) != 1 or prior[0] != receipt):
+            raise SystemExit("A staged candidate selection cannot be rebound after intake.")
+        if not prior:
+            selections.append(receipt)
+        source_search["selections"] = sorted(
+            selections,
+            key=lambda item: (str(item.get("stage_id") or ""), str(item.get("candidate_id") or "")),
+        )
+        source_search["user_selection"] = {
+            "user_authorization": receipt["user_authorization"],
+            "authorization_source": receipt["authorization_source"],
+        }
+    return repr(source_search) != before
+
+
+def _attach_duplicate_selection_and_mark(
+    root: Path,
+    *,
+    args: argparse.Namespace,
+    duplicate: dict,
+) -> Path | None:
+    if not args.stage_id or not args.candidate_id:
+        return None
+    stage_path = search_stage_path(root, args.stage_id)
+    current, record_path = locate_record(
+        root,
+        str(duplicate.get("id") or ""),
+        kind=str(duplicate.get("kind") or args.kind),
+        fuzzy=False,
+    )
+    with mutation_transaction(
+        root,
+        "source-intake-attach-duplicate-selection",
+        [record_path, stage_path],
+    ):
+        current, _ = locate_record(
+            root,
+            str(duplicate.get("id") or ""),
+            kind=str(duplicate.get("kind") or args.kind),
+            fuzzy=False,
+        )
+        stage = load_search_stage(root, args.stage_id)
+        candidate = resolve_search_candidate(root, args.stage_id, args.candidate_id)
+        changed = _attach_source_search_selection(
+            current,
+            stage=stage,
+            candidate=candidate,
+            stage_id=args.stage_id,
+            candidate_id=args.candidate_id,
+            user_authorization=args.user_authorization,
+            authorization_source=args.authorization_source,
+        )
+        if changed:
+            append_history(
+                current,
+                action="source-search-duplicate-attached",
+                summary="Attached a selected staged source to this existing canonical unit.",
+                information_types=["fact"],
+            )
+            write_record(root, current)
+        return mark_search_candidate(
+            root,
+            args.stage_id,
+            args.candidate_id,
+            status="duplicate",
+            record_id=str(current.get("id") or ""),
+        )
+
+
 def _execute_intake_transaction(
     root: Path,
     *,
@@ -421,14 +533,11 @@ def _execute_intake_transaction(
             stage_dir=stage_dir,
         )
         if concurrent_duplicate:
-            if args.stage_id and args.candidate_id:
-                updated_stage_path = mark_search_candidate(
-                    root,
-                    args.stage_id,
-                    args.candidate_id,
-                    status="duplicate",
-                    record_id=str(concurrent_duplicate["id"]),
-                )
+            updated_stage_path = _attach_duplicate_selection_and_mark(
+                root,
+                args=args,
+                duplicate=concurrent_duplicate,
+            )
             return (
                 None,
                 concurrent_duplicate,
@@ -539,8 +648,7 @@ def main() -> int:
 
     duplicate = detect_duplicate(root, args.kind, source, title=title)
     if duplicate:
-        if args.stage_id and args.candidate_id:
-            mark_search_candidate(root, args.stage_id, args.candidate_id, status="duplicate", record_id=str(duplicate["id"]))
+        _attach_duplicate_selection_and_mark(root, args=args, duplicate=duplicate)
         print(f"[ok] duplicate detected: {duplicate['id']}")
         return 0
 
@@ -621,16 +729,16 @@ def main() -> int:
         source_label="source-intake",
     )
     if staged_candidate:
-        payload = record["payload"].setdefault("source_search", {})
-        payload["stage_ids"] = sorted(set(payload.get("stage_ids", [])) | {args.stage_id})
-        payload["candidate_ids"] = sorted(set(payload.get("candidate_ids", [])) | {args.candidate_id})
         stage_payload = load_search_stage(root, args.stage_id)
-        payload["queries"] = sorted(set(payload.get("queries", [])) | {str(stage_payload.get("query") or "")})
-        if stage_payload.get("entry_skill") == "literature-search":
-            payload["user_selection"] = {
-                "user_authorization": args.user_authorization,
-                "authorization_source": args.authorization_source,
-            }
+        _attach_source_search_selection(
+            record,
+            stage=stage_payload,
+            candidate=staged_candidate,
+            stage_id=args.stage_id,
+            candidate_id=args.candidate_id,
+            user_authorization=args.user_authorization,
+            authorization_source=args.authorization_source,
+        )
 
     if args.kind == "paper":
         canonical_arxiv_id = str(paper_metadata.get("arxiv_id") or parse_arxiv_id(source) or "").split("v", 1)[0]
