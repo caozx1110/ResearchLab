@@ -90,6 +90,10 @@ def _experiment_command_targets(args, root: Path) -> list[Path]:
     if program_id:
         targets.append(_program_event_path(root, program_id))
     if args.command == "log-run":
+        # Reject unsafe allocator shapes before the recovery journal tries to
+        # snapshot a special file or symlink as a mutation target.  The exact
+        # state is read again and receipt-bound inside the root transaction.
+        run_allocator_snapshot(unit)
         targets.extend(
             [
                 unit / "runs",

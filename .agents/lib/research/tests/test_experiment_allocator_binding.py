@@ -379,3 +379,56 @@ def test_transaction_recovery_removes_exclusive_run_after_later_failure(
     assert not (record_path.parent / "runs").exists()
     assert not (record_path.parent / "run-log.yaml").exists()
     assert load_yaml(record_path) == record
+
+
+@pytest.mark.parametrize("unsafe_shape", ["root-fifo", "root-symlink", "child-fifo", "child-symlink"])
+def test_cli_rejects_unsafe_allocator_before_journal_snapshot(
+    tmp_path: Path,
+    unsafe_shape: str,
+) -> None:
+    if "fifo" in unsafe_shape and not hasattr(os, "mkfifo"):
+        pytest.skip("FIFO creation is unavailable on this platform")
+    module = _experiment_module()
+    root, record_path, record = _new_experiment(tmp_path, module, f"cli-{unsafe_shape}")
+    runs_dir = record_path.parent / "runs"
+    outside = tmp_path / f"outside-{unsafe_shape}"
+    outside.mkdir()
+    if unsafe_shape == "root-fifo":
+        os.mkfifo(runs_dir)
+    elif unsafe_shape == "root-symlink":
+        runs_dir.symlink_to(outside, target_is_directory=True)
+    else:
+        runs_dir.mkdir()
+        child = runs_dir / "run-001.md"
+        if unsafe_shape == "child-fifo":
+            os.mkfifo(child)
+        else:
+            outside_file = outside / "run.md"
+            outside_file.write_text("outside bytes\n", encoding="utf-8")
+            child.symlink_to(outside_file)
+    before = _business_snapshot(record_path.parent)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(Path(module.__file__)),
+            "--root",
+            str(root),
+            "log-run",
+            "--experiment-id",
+            record["id"],
+            "--result-summary",
+            "unsafe allocator must fail",
+            "--config-revision",
+            "config-r12-unsafe",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode != 0
+    assert "run allocator" in result.stderr.lower()
+    assert _business_snapshot(record_path.parent) == before
+    assert not (record_path.parent / "run-log.yaml").exists()
+    assert load_yaml(record_path) == record
