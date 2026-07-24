@@ -306,12 +306,20 @@ def _assert_anchored_agents(root_fd: int, agents_fd: int) -> None:
 
 
 def _read_manifest_at(agents_fd: int) -> tuple[dict[str, Any], bytes, os.stat_result]:
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
     descriptor = -1
     try:
+        lexical_before = os.stat(MANIFEST_REL.name, dir_fd=agents_fd, follow_symlinks=False)
+        if not stat.S_ISREG(lexical_before.st_mode):
+            raise SourceRebindError("unsafe-manifest-leaf", "the install manifest is not a regular file")
         descriptor = os.open(MANIFEST_REL.name, flags, dir_fd=agents_fd)
         before = os.fstat(descriptor)
-        if not stat.S_ISREG(before.st_mode):
+        if not stat.S_ISREG(before.st_mode) or not _same_node(lexical_before, before):
             raise SourceRebindError("unsafe-manifest-leaf", "the install manifest is not a regular file")
         chunks: list[bytes] = []
         total = 0

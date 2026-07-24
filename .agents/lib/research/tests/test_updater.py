@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import json
 import hashlib
+import json
+import os
 import shutil
 import subprocess
 import sys
@@ -730,6 +731,19 @@ def test_legacy_manifest_choice_exposes_strategy_specific_minimal_field_sets(tmp
     assert alternatives["remote-branch"]["fields"] == ["source_origin", "source_branch"]
     assert alternatives["local-checkout"]["fields"] == ["source_checkout"]
 
+    updater.rebind_source(
+        install,
+        expected_manifest_digest=request["manifest_digest"],
+        source_origin="ssh://example.test/team/fork.git",
+        source_branch="release/legacy",
+        source_strategy="remote-branch",
+    )
+    provenance = updater.source_provenance(install)
+    assert provenance is not None
+    assert provenance.origin == "ssh://example.test/team/fork.git"
+    assert provenance.branch == "release/legacy"
+    assert provenance.strategy == "remote-branch"
+
 
 def test_local_checkout_rebind_verifies_origin_branch_and_preserves_manifest(tmp_path: Path) -> None:
     install = tmp_path / "install"
@@ -868,3 +882,22 @@ def test_rebind_rejects_manifest_symlink_and_symlinked_ancestor_without_touching
     assert ancestor.value.code == "unsafe-manifest-ancestor"
     assert (ancestor_install / ".agents").is_symlink()
     assert victim_manifest.read_bytes() == victim_before
+
+
+def test_rebind_rejects_nonregular_manifest_without_blocking(tmp_path: Path) -> None:
+    install = tmp_path / "fifo-install"
+    manifest = install / updater.MANIFEST_REL
+    manifest.parent.mkdir(parents=True)
+    os.mkfifo(manifest)
+
+    with pytest.raises(updater.SourceRebindError) as rejected:
+        updater.rebind_source(
+            install,
+            expected_manifest_digest="0" * 64,
+            source_origin="ssh://example.test/team/fork.git",
+            source_branch="release/r1",
+            source_strategy="remote-branch",
+        )
+
+    assert rejected.value.code == "unsafe-manifest-leaf"
+    assert manifest.exists()
