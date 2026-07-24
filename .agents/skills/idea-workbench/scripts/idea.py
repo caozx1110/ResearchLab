@@ -273,6 +273,8 @@ def _require_existing_semantic_anchor_if_v2(
         raise ValueError("another semantic idea authoring operation is already active")
     corpus_path = unit_root / f"{operation}-evidence-corpus.yaml"
     if not corpus_path.exists() and not corpus_path.is_symlink():
+        if contracts:
+            raise ValueError("active semantic idea owner anchor has no evidence corpus")
         return
     corpus, _binding = _validated_frozen_corpus(root, corpus_path)
     if corpus.get("schema") != "idea-evidence-corpus/v2":

@@ -450,8 +450,9 @@ def test_one_active_semantic_operation_blocks_another_until_consumed(
 
 
 @pytest.mark.parametrize("command", ["analyze", "review", "discuss"])
-def test_semantic_prepare_rejects_v1_corpus_with_v2_owner_before_journal(
-    tmp_path: Path, monkeypatch, command: str
+@pytest.mark.parametrize("corpus_state", ["v1", "missing"])
+def test_semantic_prepare_rejects_hybrid_owner_before_journal(
+    tmp_path: Path, monkeypatch, command: str, corpus_state: str
 ) -> None:
     idea = _load_idea_module()
     idea_id, _source_id = _setup(tmp_path, idea)
@@ -467,27 +468,37 @@ def test_semantic_prepare_rejects_v1_corpus_with_v2_owner_before_journal(
     )
     orientation_path = unit / f"{operation}-orientation.yaml"
     corpus_path = unit / f"{operation}-evidence-corpus.yaml"
-    corpus = load_yaml(corpus_path, default={})
-    corpus["schema"] = "idea-evidence-corpus/v1"
-    for entry in corpus["entries"]:
-        entry.pop("size")
-    corpus["identity_digest"] = idea.canonical_digest([
-        {"path": item["path"], "identity_digest": item["identity_digest"]}
-        for item in corpus["entries"]
-    ])
-    corpus["bytes_digest"] = idea.canonical_digest([
-        {"path": item["path"], "bytes_digest": item["bytes_digest"]}
-        for item in corpus["entries"]
-    ])
-    write_yaml_if_changed(corpus_path, corpus)
+    if corpus_state == "v1":
+        corpus = load_yaml(corpus_path, default={})
+        corpus["schema"] = "idea-evidence-corpus/v1"
+        for entry in corpus["entries"]:
+            entry.pop("size")
+        corpus["identity_digest"] = idea.canonical_digest([
+            {"path": item["path"], "identity_digest": item["identity_digest"]}
+            for item in corpus["entries"]
+        ])
+        corpus["bytes_digest"] = idea.canonical_digest([
+            {"path": item["path"], "bytes_digest": item["bytes_digest"]}
+            for item in corpus["entries"]
+        ])
+        write_yaml_if_changed(corpus_path, corpus)
+    else:
+        corpus_path.unlink()
     protected = [unit / "record.yaml", fill_path, orientation_path, corpus_path]
-    before = _path_snapshot(protected)
+    before = {
+        path: _path_snapshot([path])[path] if path.exists() else None
+        for path in protected
+    }
 
     with pytest.raises(SystemExit):
         _run(
             idea, monkeypatch, command, "--idea-id", idea_id, "--phase", "prepare"
         )
-    assert _path_snapshot(protected) == before
+    after = {
+        path: _path_snapshot([path])[path] if path.exists() else None
+        for path in protected
+    }
+    assert after == before
 
 
 @pytest.mark.parametrize("tamper", ["duplicate", "unsafe", "bad_digest", "extra_key"])
