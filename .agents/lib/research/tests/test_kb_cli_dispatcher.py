@@ -317,15 +317,33 @@ def _write_ready_review_subject(root: Path, owner_kind: str) -> tuple[str, Path]
                 "claims": claims,
             },
         }
+        preference_task_inputs = method.method_preference_task_inputs(
+            root,
+            idea,
+            program_id=program_id,
+            idea_id=idea_id,
+            state=method.default_program_state(program_id),
+            repo_ids=[],
+            interfaces=[],
+            baselines=[],
+            metrics=[],
+            risks=[],
+        )
         preference_context = method.method_preference_state(
             method.resolve_method_preferences(
                 root,
-                idea,
-                program_id=program_id,
-                idea_id=idea_id,
+                task_inputs=preference_task_inputs,
                 selection_id="",
             )
         )
+        choice["repo_choice_policy"] = {"pinned_repo_ids": []}
+        choice["preference_input_sources"] = {
+            "interfaces": "default",
+            "baselines": "default",
+            "metrics": "default",
+            "risks": "idea-derived",
+        }
+        choice["preference_task_inputs"] = preference_task_inputs
         choice["preference_context"] = preference_context
         choice_path = design_root / f"{idea_id}-repo-choice.yaml"
         build_verification_receipt(choice, design_root, source_roots={repo_id: repo_path.parent})
