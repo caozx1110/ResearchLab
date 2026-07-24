@@ -401,8 +401,6 @@ def resolve_blog_preferences(
     selection_id: str,
 ) -> dict[str, object]:
     """Validate an optional private receipt; empty selection is strictly neutral."""
-    if not str(selection_id or "").strip():
-        return {}
     context = blog_preference_context(root, record, unit_root)
     resolution = resolve_operation_preferences(
         root,
@@ -411,7 +409,7 @@ def resolve_blog_preferences(
         operation=PREFERENCE_OPERATION,
         canonical_inputs=context,
     )
-    return dict(resolution.get("binding") or {})
+    return resolution
 
 
 def _persist_preference_binding(record: dict, binding: Mapping[str, object]) -> None:
@@ -634,7 +632,7 @@ def build_parser() -> argparse.ArgumentParser:
         [
             unit_root / "record.yaml",
             unit_root / "blog-fill.yaml",
-            unit_root / PREFERENCE_ORIENTATION_NAME,
+            *([unit_root / PREFERENCE_ORIENTATION_NAME] if args.phase == "prepare" else []),
             unit_root / "blog-note.md",
             unit_root / "blog-claims.yaml",
             *([] if defer_post_actions else _index_targets(root)),
@@ -645,9 +643,9 @@ def _run_complete_note(args, root: Path, record: dict, unit_root: Path, defer_po
     fill_scaffold_path = unit_root / "blog-fill.yaml"
     note_path = unit_root / "blog-note.md"
     cache_path = _cache_path(unit_root)
-    source_chunks, _locator_kind = _load_cache_chunks(unit_root)
 
     if args.phase == "prepare":
+        source_chunks, _locator_kind = _load_cache_chunks(unit_root)
         payload = build_note_scaffold(
             record,
             source_chunks,
@@ -704,14 +702,15 @@ def _run_complete_note(args, root: Path, record: dict, unit_root: Path, defer_po
         raise SystemExit(f"complete-note --phase verify: {fill_path} is not a mapping")
     preference_selection_id = str(getattr(args, "preference_selection_id", "") or "")
     try:
-        preference_binding = resolve_blog_preferences(
+        preference_preferences = resolve_blog_preferences(
             root,
             record,
             unit_root,
             selection_id=preference_selection_id,
         )
     except ValueError as exc:
-        raise SystemExit(f"blog note preference receipt rejected: {exc}") from exc
+        print(f"[reject] blog note preference receipt: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
     violations, claims = verify_note_fill(fill, unit_root)
     if violations:
         print("[reject] blog note fill failed verification:", file=sys.stderr)
@@ -719,21 +718,26 @@ def _run_complete_note(args, root: Path, record: dict, unit_root: Path, defer_po
             print(f"  - {violation}", file=sys.stderr)
         raise SystemExit(1)
 
-    if preference_selection_id:
-        try:
-            rechecked_binding = resolve_blog_preferences(
-                root,
-                record,
-                unit_root,
-                selection_id=preference_selection_id,
-            )
-        except ValueError as exc:
-            raise SystemExit(f"blog note preference receipt rejected: {exc}") from exc
-        if rechecked_binding != preference_binding:
-            raise SystemExit("blog note preference receipt changed before write")
+    try:
+        rechecked_preferences = resolve_blog_preferences(
+            root,
+            record,
+            unit_root,
+            selection_id=preference_selection_id,
+        )
+    except ValueError as exc:
+        print(f"[reject] blog note preference receipt: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
+    if (
+        rechecked_preferences.get("task_context_digest")
+        != preference_preferences.get("task_context_digest")
+        or rechecked_preferences.get("binding") != preference_preferences.get("binding")
+    ):
+        print("[reject] blog note task context changed before write", file=sys.stderr)
+        raise SystemExit(1)
 
     _apply_note_fill_to_payload(record, claims)
-    _persist_preference_binding(record, preference_binding)
+    _persist_preference_binding(record, dict(preference_preferences.get("binding") or {}))
     attach_claims(record.setdefault("payload", {}), claims)
     build_verification_receipt(record, unit_root)
     write_text_if_changed(note_path, render_note_md(record, claims))

@@ -23,6 +23,12 @@ description: 为 repo unit 备料（扫描结构、产出三要素待填结构�
 4. `map-capability --phase verify`：逐要素校验（`validate_claims` 结构 + `verify_claim_evidence` 逐字据），全过才写 `repo-note.md` + `payload.capability`（过 `has_substantive_content`，可被确认）；任一要素空/无据/造据/引用文件不可达则拒绝并点名。
 5. AI judgement 默认保持 `pending_user_confirmation`；确认走已有空心门（`confirm`）。
 
+## Task-scoped preference consumer（Agent 私有协议）
+
+`map-capability` prepare 完成后，fill scaffold 的 `preference_consumer.task_context` 是本次 Agent authoring 的 canonical value-free mapping。Runtime Agent 在开始理解仓库前，只从 `repo-analyst:map-capability` eligible catalog 选择本任务相关子集；未选择 soft preference 时按 neutral 写作，不得直接读取总偏好补偿。verify 通过私有 selection id 重新绑定当前 record、immutable orientation、exact structure scan，以及 workspace 内 archived repo 的完整可引用 regular-file tree；Agent 正常填写 content/evidence 不属于前置输入。
+
+repo source tree 的 identity/bytes、任一非 README 源码、structure scan、record 或 orientation 变化都会使旧 receipt stale。symlink、special file、workspace 外 original path 不能作为持久 consumer source。成功只在 record 保存 value-free selection binding；偏好只能调整 Agent 的关注点/术语/表达，不能降低三要素、逐字 file:line evidence、substance 或人工确认门。
+
 ## 三要素填充契约（runtime agent 照此填）
 
 每个 required element = 一条 judgement-class claim，**必须**带 ≥1 条 `evidence_refs`。**证据 artifact = 仓库内真实文件（相对 repo_root），locator = `line=N`，quote = 该文件里的逐字片段**（如 README 一句、某入口文件一行）：

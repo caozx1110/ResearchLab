@@ -18,6 +18,12 @@ description: Analyze blog and technical article units with prepare/verify scaffo
 - `source/document.md` 中的图片是本地源材料，不因图片文件名、alt text 或 OCR 片段自动成为博客判断。
 - 博客来源为网页内容（HTML），locator 为 section/anchor，无页码。
 
+## Task-scoped preference consumer（Agent 私有协议）
+
+`complete-note` prepare 完成后，`blog-fill.yaml` 的 `preference_consumer.task_context` 是本次 Agent authoring 的 value-free canonical mapping。Runtime Agent 在阅读正文前从 `blog-analyst:complete-note` eligible catalog 选择相关子集；没有 selection 时保持 neutral，不得直接读取 soft 总偏好。verify 重新绑定当前 record、独立 immutable orientation、exact parse-cache identity/bytes 与完整 `source/` artifact tree；Agent 合法填写 elements 的 content/evidence_refs 不会使 receipt stale。
+
+record/orientation/parse-cache/source bytes 或 identity 变化，以及 leaf/ancestor symlink、non-regular replacement，均在业务写入前 fail closed。成功只在 record 保存 value-free selection binding；偏好只能影响 Agent 的关注点、术语和表达，不能放松四要素、逐字 evidence、source freshness、substance 或人工确认门。
+
 ## 四要素填充契约
 
 agent 填 `blog-fill.yaml` 的 `elements` 列表，每个 element 需含：

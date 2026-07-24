@@ -302,7 +302,8 @@ OPERATION_CANONICAL_INPUTS: dict[tuple[str, str], tuple[str, ...]] = {
         "immutable_orientation_digest",
         "structure_scan_identity_digest",
         "structure_scan_bytes_digest",
-        "repo_source_identity_digest",
+        "repo_source_tree_identity_digest",
+        "repo_source_tree_bytes_digest",
     ),
     ("dataset-analyst", "profile"): (
         "canonical_id",
@@ -478,30 +479,6 @@ def regular_file_binding(
         ),
         "bytes_digest": hashlib.sha256(data).hexdigest(),
     }
-
-
-def directory_identity_digest(
-    path: Path,
-    *,
-    logical_identity: str,
-    owner_identity: Mapping[str, object],
-) -> str:
-    """Bind a repo source directory without persisting its local path or source values."""
-    try:
-        metadata = path.lstat()
-    except (FileNotFoundError, OSError) as exc:
-        raise ValueError("canonical repo source is missing or unsafe") from exc
-    if path.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
-        raise ValueError("canonical repo source is not a safe directory")
-    return _digest(
-        {
-            "logical_identity": str(logical_identity),
-            "owner_identity_digest": _digest(dict(owner_identity)),
-            "device": metadata.st_dev,
-            "inode": metadata.st_ino,
-            "mode": stat.S_IMODE(metadata.st_mode),
-        }
-    )
 
 
 def regular_tree_binding(
@@ -1210,7 +1187,6 @@ __all__ = [
     "canonical_digest",
     "regular_file_binding",
     "regular_tree_binding",
-    "directory_identity_digest",
     "eligible_preferences",
     "operation_contract",
     "task_context_digest",

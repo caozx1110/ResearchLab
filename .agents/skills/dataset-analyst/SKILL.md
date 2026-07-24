@@ -17,6 +17,12 @@ description: 为 dataset unit 准备数据画像待填结构，并校验 runtime
 
 脚本只搬运、验证和写盘，绝不依据 URL、字段名、规模或平台自动判断“质量高”“适合训练”或“可直接复用”。
 
+## Task-scoped preference consumer（Agent 私有协议）
+
+`profile` prepare 完成后，`dataset-fill.yaml` 的 `preference_consumer.task_context` 提供本次 authoring 的 value-free canonical mapping。Runtime Agent 在阅读材料前从 `dataset-analyst:profile` eligible catalog 选择相关子集；无 selection 时保持 neutral，不得直接读取 soft 总偏好。verify 重新绑定当前 record、独立 immutable orientation、exact `parse-cache.yaml` identity/bytes 与完整 `source/` artifact tree；只修改 elements 的 content/evidence_refs 不会让 receipt stale。
+
+任何 record/orientation/parse-cache/source artifact 漂移，或 leaf/ancestor symlink、non-regular replacement，都在业务写入前拒绝。成功仅在 record 保存 value-free selection binding；偏好只能影响 Agent 的研究重点、术语与表达，不能放松四要素、逐字 evidence、source freshness、substance 或人工确认门。
+
 ## 四要素契约
 
 - `positioning`：数据集解决什么研究需要、覆盖边界是什么。

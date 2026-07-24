@@ -57,7 +57,6 @@ from research.core import (
     locate_record,
     project_root,
     rel,
-    resolve_local_reference,
     topic_taxonomy_path,
     write_record,
 )
@@ -70,8 +69,8 @@ from research.evidence import (
 )
 from research.preference_selection import (
     canonical_digest,
-    directory_identity_digest,
     regular_file_binding,
+    regular_tree_binding,
     resolve_operation_preferences,
     task_context_digest,
 )
@@ -183,13 +182,15 @@ def _candidate_repo_roots(root: Path, record: dict) -> list[Path]:
     if str(source.get("backup_kind") or "") in {"directory", "dir"}:
         for backup in source.get("backup_paths", []):
             path = root / str(backup)
-            if path.exists():
+            if path.exists() and not path.is_symlink():
                 paths.append(path if path.is_dir() else path.parent)
     original_uri = str(source.get("original_uri") or "")
     if original_uri and not original_uri.startswith("http"):
-        path = resolve_local_reference(root, original_uri) or Path(original_uri).expanduser()
-        if path.exists():
-            paths.append(path.resolve() if path.is_dir() else path.resolve().parent)
+        raw_path = Path(original_uri).expanduser()
+        path = raw_path if raw_path.is_absolute() else root / raw_path
+        if path.exists() and not path.is_symlink():
+            lexical = path.absolute()
+            paths.append(lexical if lexical.is_dir() else lexical.parent)
     deduped: list[Path] = []
     seen: set[str] = set()
     for path in paths:
@@ -399,6 +400,7 @@ def capability_preference_orientation(record: Mapping[str, object]) -> dict[str,
         "required_elements": list(CAP_ELEMENTS),
         "element_claim_types": dict(ELEMENT_CLAIM_TYPE),
         "evidence_locator_family": "repo-file-line",
+        "source_corpus": "entire-regular-repo-tree-with-no-ignored-paths",
     }
 
 
@@ -420,6 +422,12 @@ def repo_preference_context(
     if orientation != expected_orientation:
         raise ValueError("immutable analyzer orientation contract was modified")
 
+    repo_source_binding = regular_tree_binding(
+        repo_root,
+        logical_identity="repo-source-tree",
+        trusted_root=root,
+    )
+
     scan_path = unit_root / "structure-scan.yaml"
     scan_binding = regular_file_binding(
         scan_path, logical_identity="structure-scan.yaml", trusted_root=root
@@ -431,8 +439,6 @@ def repo_preference_context(
     record_binding = regular_file_binding(
         unit_root / "record.yaml", logical_identity="record.yaml", trusted_root=root
     )
-    source = record.get("source")
-    source = source if isinstance(source, Mapping) else {}
     return {
         "canonical_id": str(record.get("id") or ""),
         "canonical_kind": "repo",
@@ -442,11 +448,8 @@ def repo_preference_context(
         "immutable_orientation_digest": orientation_binding["bytes_digest"],
         "structure_scan_identity_digest": scan_binding["identity_digest"],
         "structure_scan_bytes_digest": scan_binding["bytes_digest"],
-        "repo_source_identity_digest": directory_identity_digest(
-            repo_root,
-            logical_identity="repo-source-root",
-            owner_identity={"source": dict(source)},
-        ),
+        "repo_source_tree_identity_digest": repo_source_binding["identity_digest"],
+        "repo_source_tree_bytes_digest": repo_source_binding["bytes_digest"],
     }
 
 
@@ -459,8 +462,6 @@ def resolve_repo_preferences(
     selection_id: str,
 ) -> dict[str, object]:
     """Validate an optional private receipt; neutral mode never reads soft preferences."""
-    if not str(selection_id or "").strip():
-        return {}
     context = repo_preference_context(root, record, unit_root, repo_root)
     resolution = resolve_operation_preferences(
         root,
@@ -469,7 +470,7 @@ def resolve_repo_preferences(
         operation=PREFERENCE_OPERATION,
         canonical_inputs=context,
     )
-    return dict(resolution.get("binding") or {})
+    return resolution
 
 
 def _persist_preference_binding(record: dict, binding: Mapping[str, object]) -> None:
@@ -762,9 +763,12 @@ def _run_scan_structure(args, root, record, unit_root, defer_post_actions) -> in
         root,
         [
             unit_root / "record.yaml",
-            unit_root / "structure-scan.yaml",
             unit_root / "capability-fill.yaml",
-            unit_root / PREFERENCE_ORIENTATION_NAME,
+            *(
+                [unit_root / "structure-scan.yaml", unit_root / PREFERENCE_ORIENTATION_NAME]
+                if args.phase == "prepare"
+                else []
+            ),
             unit_root / "repo-note.md",
             unit_root / "capability-claims.yaml",
             *([] if defer_post_actions else _index_targets(root)),
@@ -835,21 +839,20 @@ def _run_map_capability(args, root, record, unit_root, defer_post_actions) -> in
     if not isinstance(fill, dict):
         raise SystemExit(f"map-capability --phase verify: {input_path} is not a mapping")
 
-    # Resolve repo_root for evidence reachability (cited artifacts must exist under it).
-    structure_payload = scan_structure_payload(root, record)
-    repo_root_str = structure_payload.get("repo_root", "")
-    if not repo_root_str:
+    # Resolve repo_root without reading it; receipt validation happens before
+    # any source scan or evidence read.
+    repo_root_path = _pick_repo_root(root, record)
+    if repo_root_path is None:
         raise SystemExit(
             "map-capability --phase verify: cannot resolve repo_root — run scan-structure first "
             "or ensure the record has a local source path."
         )
-    repo_root_path = Path(repo_root_str)
     if not repo_root_path.is_dir():
-        raise SystemExit(f"map-capability --phase verify: repo_root '{repo_root_str}' is not a directory")
+        raise SystemExit("map-capability --phase verify: repo source is not a safe directory")
 
     preference_selection_id = str(getattr(args, "preference_selection_id", "") or "")
     try:
-        preference_binding = resolve_repo_preferences(
+        preference_preferences = resolve_repo_preferences(
             root,
             record,
             unit_root,
@@ -857,7 +860,8 @@ def _run_map_capability(args, root, record, unit_root, defer_post_actions) -> in
             selection_id=preference_selection_id,
         )
     except ValueError as exc:
-        raise SystemExit(f"map-capability preference receipt rejected: {exc}") from exc
+        print(f"[reject] map-capability preference receipt: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
 
     violations, claims = verify_capability_fill(fill, repo_root_path)
     if violations:
@@ -866,22 +870,27 @@ def _run_map_capability(args, root, record, unit_root, defer_post_actions) -> in
             print(f"  - {violation}", file=sys.stderr)
         raise SystemExit(1)
 
-    if preference_selection_id:
-        try:
-            rechecked_binding = resolve_repo_preferences(
-                root,
-                record,
-                unit_root,
-                repo_root_path,
-                selection_id=preference_selection_id,
-            )
-        except ValueError as exc:
-            raise SystemExit(f"map-capability preference receipt rejected: {exc}") from exc
-        if rechecked_binding != preference_binding:
-            raise SystemExit("map-capability preference receipt changed before write")
+    try:
+        rechecked_preferences = resolve_repo_preferences(
+            root,
+            record,
+            unit_root,
+            repo_root_path,
+            selection_id=preference_selection_id,
+        )
+    except ValueError as exc:
+        print(f"[reject] map-capability preference receipt: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
+    if (
+        rechecked_preferences.get("task_context_digest")
+        != preference_preferences.get("task_context_digest")
+        or rechecked_preferences.get("binding") != preference_preferences.get("binding")
+    ):
+        print("[reject] map-capability task context changed before write", file=sys.stderr)
+        raise SystemExit(1)
 
     _apply_capability_fill_to_payload(record, claims)
-    _persist_preference_binding(record, preference_binding)
+    _persist_preference_binding(record, dict(preference_preferences.get("binding") or {}))
     record["payload"].setdefault("structure", {})["repo_root"] = repo_root_path.resolve().as_posix()
     attach_claims(record.setdefault("payload", {}), claims)
     build_verification_receipt(

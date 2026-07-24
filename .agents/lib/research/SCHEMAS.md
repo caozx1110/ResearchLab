@@ -563,6 +563,30 @@ selection_digest: <sha256>
 
 `source-intake:add` 的 task context 绑定 kind/source/title/maturity/stage/candidate 与最终 canonical pools，并以单一 digest 绑定当前 `user_authorization + authorization_source`；授权原话、source/path 不得出现在 persisted effective-preference receipt。duplicate 快路径没有消费偏好时可以保持 neutral，但不能借 duplicate 绕过 literature selection authorization gate。
 
+#### Analyzer Agent-authoring preference consumers
+
+`repo-analyst:map-capability`、`dataset-analyst:profile`、`blog-analyst:complete-note` 是 runtime Agent 语义写作 consumer。prepare 在 canonical record/scaffold 已写入后，把 value-free `preference_consumer.task_context` 投影放入 fill scaffold，并另写 owner-controlled `*-orientation.yaml`。orientation 只含 phase contract、required elements、claim types 与 locator family；Agent 只能编辑 `elements[].content` / `elements[].evidence_refs`，所以合法填写不会让先前选择自行 stale。
+
+owner verify 在任何业务写入前重算闭合 registry：
+
+- common：canonical id/kind、operation、当前 `record.yaml` byte digest、phase-contract digest、immutable orientation exact byte digest；
+- repo：`structure-scan.yaml` 的 exact regular-file identity/byte digest，以及 workspace-contained archived repo source **整棵可引用 regular-file tree** 的 identity/byte manifest digest（无 ignore 旁路；symlink/special file 拒绝）；
+- dataset/blog：`parse-cache.yaml` 的 exact regular-file identity/byte digest，以及 `source/` 下完整 regular-file artifact tree 的 identity/byte manifest digest。
+
+workspace artifact 读取从 trusted workspace root 开始逐层使用 no-follow directory handle；leaf、ancestor symlink、non-regular replacement、路径逃逸都 fail closed。verify 在 evidence 校验后、首次业务 mutation 前再次重算同一 context/receipt，任一 concurrent drift 仍零业务写拒绝。无 receipt 也重算并验证这些 owner inputs，但不读取 soft canonical preference catalog，保持 neutral。
+
+成功结果只可在 unit record 的 `payload.preference_contexts.<operation>` 保存以下 binding；note、claims sidecar、history 与 protocol 不复制偏好值：
+
+```yaml
+selection_id: prefsel-...
+selection_digest: <sha256>
+task_context_digest: <sha256>
+skill: repo-analyst
+operation: map-capability
+```
+
+这份 binding 只影响 runtime Agent 的写作重点/风格，不得改变 evidence、substance、confirmation、containment、source freshness、transaction 或 recovery gate。
+
 ### research-settings.md / user-profile.yaml
 
 人面向偏好与背景；只读契约，由 navigator/orchestrator 在生成 user-facing 页面时引用。
