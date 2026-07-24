@@ -1009,6 +1009,7 @@ def test_generation_prepared_state_retries_then_materializes_and_becomes_termina
     assert active["authoring_provenance"]["mode"] == "owner-anchored/v1"
     assert len(active["authoring_provenance"]["authoring_contract_digest"]) == 64
     assert "authoring_contract" not in active
+    assert idea._is_prepared_generation_bundle(active) is False
     with pytest.raises(SystemExit):
         _run(idea, monkeypatch, *common, "--phase", "prepare")
     assert index_path.read_bytes() == materialized
@@ -1146,8 +1147,9 @@ def test_generation_exact_legacy_tuple_can_refresh_to_new_owner(
     assert fill_path.exists()
 
 
+@pytest.mark.parametrize("drift_schema_and_status", [False, True])
 def test_prepared_generation_bundle_rejects_generic_bundle_entrypoints(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, drift_schema_and_status: bool
 ) -> None:
     idea = _load_idea_module()
     root = tmp_path / "workspace"
@@ -1159,6 +1161,13 @@ def test_prepared_generation_bundle_rejects_generic_bundle_entrypoints(
     )
     assert _run(idea, monkeypatch, *common, "--phase", "prepare") == 0
     index_path = root / "kb/synthesis/idea-pools" / bundle_id / "index.yaml"
+    if drift_schema_and_status:
+        drifted = load_yaml(index_path, default={})
+        drifted["schema"] = "drifted-away-from-prepared-schema"
+        drifted["status"] = "drifted-away-from-prepared-status"
+        write_yaml_if_changed(index_path, drifted)
+        assert "authoring_contract" in drifted
+        assert "request_context_digest" in drifted
     before = _path_snapshot([index_path])
 
     with pytest.raises(SystemExit):

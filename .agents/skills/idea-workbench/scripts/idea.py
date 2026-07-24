@@ -1211,6 +1211,8 @@ def _is_prepared_generation_bundle(payload: object) -> bool:
     return isinstance(payload, Mapping) and (
         payload.get("schema") == PREPARED_BUNDLE_SCHEMA
         or payload.get("status") == "prepared"
+        or "authoring_contract" in payload
+        or "request_context_digest" in payload
     )
 
 
