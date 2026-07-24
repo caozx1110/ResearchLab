@@ -209,6 +209,7 @@ def test_catalog_change_stales_real_report_consumer_and_hard_resource_stays_elig
 
     resources = method.profile_resources(root)
     assert resources == {"gpu_count": 1}
+    assert method.profile_constraints(root) == ["no cloud upload"]
     assert method.resource_capacity(resources)["source"] == "profile.resources"
     hard = eligible_preferences(root, skill="method-designer", operation="design")
     assert {item["path"] for item in hard["items"] if item["strength"] == "hard"} == {

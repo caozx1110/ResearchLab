@@ -56,6 +56,17 @@ def profile_resources(root: Path) -> dict[str, Any]:
     return resources if isinstance(resources, dict) else {}
 
 
+def profile_constraints(root: Path) -> list[str]:
+    """Load only the canonical hard constraint field, never adjacent soft preferences."""
+    profile = load_yaml(root / "kb" / "config" / "user-profile.yaml", default={})
+    if not isinstance(profile, dict):
+        return []
+    constraints = profile.get("constraints", [])
+    if not isinstance(constraints, list):
+        return []
+    return [str(value).strip() for value in constraints if str(value).strip()]
+
+
 def _resource_text(resources: dict[str, Any]) -> str:
     parts: list[str] = []
     for key, value in resources.items():
@@ -467,6 +478,7 @@ def prepare_method(root: Path, record: dict[str, Any], args: argparse.Namespace)
     hypothesis = record.get("payload", {}).get("hypothesis", {})
     analysis = record.get("payload", {}).get("analysis", {})
     resources = profile_resources(root)
+    constraints = profile_constraints(root)
     scale_by_kind = experiment_scale(resources)
 
     def proposal_row(row: dict[str, Any], kind: str) -> dict[str, Any]:
@@ -604,6 +616,12 @@ def prepare_method(root: Path, record: dict[str, Any], args: argparse.Namespace)
         "proposed_repo_id": proposed_repo_id,
         "proposal_status": "pending_agent_evidence",
         "resource_profile": resource_capacity(resources),
+        "hard_constraints": constraints,
+        "preference_contract": {
+            "operation": "design",
+            "hard_fallback_paths": ["profile.resources", "profile.constraints"],
+            "soft_missing": "neutral-default",
+        },
         "resource_requests": resource_requests,
         "experiments": experiments,
         "baselines": baselines,
@@ -621,6 +639,8 @@ def prepare_method(root: Path, record: dict[str, Any], args: argparse.Namespace)
     }
     if resources:
         state["resource_constraints"] = resources
+    if constraints:
+        state["hard_constraints"] = constraints
 
     # A first prepare targets the absent directory so abort removes it entirely.
     # Once the directory exists, keep the target set exact and avoid checkpointing
@@ -644,7 +664,12 @@ def prepare_method(root: Path, record: dict[str, Any], args: argparse.Namespace)
             normalize_list(args.repo_id),
             normalize_list(state_before.get("active_unit_ids", [])) if isinstance(state_before, dict) else [],
         )
-        if current_rankings != repo_rankings or current_corpus != repo_corpus or profile_resources(root) != resources:
+        if (
+            current_rankings != repo_rankings
+            or current_corpus != repo_corpus
+            or profile_resources(root) != resources
+            or profile_constraints(root) != constraints
+        ):
             raise SystemExit("Method inputs changed while preparing the proposal; reload before retrying.")
         write_text_if_changed(
             paths["method"],
