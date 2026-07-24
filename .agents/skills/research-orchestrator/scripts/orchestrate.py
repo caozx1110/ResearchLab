@@ -53,6 +53,7 @@ from research.judgements import apply_judgement_rejection, confirmation_binding,
 from research.journal import mutation_transaction
 from research.monitoring import active_monitor_runs, due_subscriptions, unresolved_monitor_outcomes
 from research.preference_selection import resolve_task_preferences, selection_binding
+from research.sources import literature_search_continuations
 from research.surveys import pending_composite_survey_states
 
 OPEN_QUESTION_OPEN_STATUSES = {"open"}
@@ -1490,6 +1491,69 @@ def _composite_survey_candidate(
     )
 
 
+def _composite_literature_stage_ids(entries: list[dict[str, Any]]) -> set[str]:
+    """Collect literature stage identities already owned by composite surveys."""
+    owned: set[str] = set()
+
+    def visit(value: object) -> None:
+        if isinstance(value, dict):
+            kind = str(value.get("kind") or "")
+            stage_id = str(value.get("stage_id") or "")
+            if stage_id and kind in {
+                "literature-search-stage",
+                "literature-search-selection",
+                "materialized-units",
+                "confirmed-units",
+            }:
+                owned.add(stage_id)
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(entries)
+    return owned
+
+
+def _standalone_literature_candidate(entry: dict[str, Any]) -> dict[str, Any]:
+    stage_id = str(entry.get("stage_id") or "")
+    continuation = str(entry.get("continuation") or "")
+    selecting = continuation == "select"
+    return _candidate(
+        program_id=f"literature:{stage_id}",
+        action_type="select-literature-candidates" if selecting else "resume-literature-search",
+        subject_id=stage_id,
+        discriminator=continuation,
+        owner_skill="literature-search",
+        stage="literature-selection" if selecting else "literature-search",
+        goal="Continue a durable standalone literature search.",
+        question="",
+        reason=(
+            "A completed standalone literature search has screened candidates awaiting the user's selection."
+            if selecting
+            else "A saved standalone literature search is ready for Agent-led continuation or recovery."
+        ),
+        title="",
+        subject_kind="literature-search-stage",
+        dependencies=[
+            {
+                "kind": "literature-search-stage",
+                "id": stage_id,
+                "path": str(entry.get("path") or ""),
+                "stage_byte_sha256": str(entry.get("stage_byte_sha256") or ""),
+                "stop_reason": str(entry.get("stop_reason") or ""),
+                "stop_digest": str(entry.get("stop_digest") or ""),
+                "candidates": entry.get("candidates")
+                if isinstance(entry.get("candidates"), list)
+                else [],
+            }
+        ],
+        governance_gate="human-decision" if selecting else "none",
+        safe_execute_capability=False,
+    )
+
+
 def portfolio_candidates(root: Path, *, selected_program_id: str = "") -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Enumerate all legal actions and factual context without ranking them."""
     records = iter_records(root)
@@ -1717,13 +1781,21 @@ def portfolio_candidates(root: Path, *, selected_program_id: str = "") -> tuple[
             )
             attached_judgements.add(key)
 
-    for entry in pending_composite_survey_states(root):
+    composite_entries = pending_composite_survey_states(root)
+    for entry in composite_entries:
         candidate = _composite_survey_candidate(
             entry,
             selected_program_id=selected_program_id,
         )
         if candidate is not None:
             candidates.append(candidate)
+
+    if not selected_program_id:
+        for entry in literature_search_continuations(
+            root,
+            excluded_stage_ids=_composite_literature_stage_ids(composite_entries),
+        ):
+            candidates.append(_standalone_literature_candidate(entry))
 
     for active_run in active_monitor_runs(root):
         linked_program_ids = [

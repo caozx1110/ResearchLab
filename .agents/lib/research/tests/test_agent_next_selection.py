@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import sys
@@ -21,6 +22,7 @@ from research.monitoring import (
 from research.paths import runtime_preferences_path
 from research.preference_selection import eligible_preferences, record_effective_selection
 from research.prefs import default_runtime_preferences
+from research.sources import mark_search_candidate, stage_search_results
 
 
 def _project_root() -> Path:
@@ -147,6 +149,106 @@ def _active_monitor(root: Path) -> tuple[dict, dict]:
     )
     subscription = load_subscription(root, "monitor-active")
     return subscription, load_run(root, subscription["active_run_id"])
+
+
+def _literature_candidate(candidate_id: str, decision: str = "include") -> dict[str, object]:
+    return {
+        "candidate_id": candidate_id,
+        "title": f"Private title for {candidate_id}",
+        "url": f"https://example.test/{candidate_id}",
+        "identities": {"doi": f"10.1234/{candidate_id}"},
+        "discovered_by": [
+            {
+                "query_id": "q1",
+                "edge_type": "direct",
+                "source_locator": "private provider result",
+                "channel": "web-search",
+                "tool": "runtime-search",
+                "discovered_at": "2026-07-24T00:00:00+00:00",
+            }
+        ],
+        "fetch": {"status": "fetched", "attempts": 1},
+        "evidence_level": "fulltext",
+        "screening": {
+            "decision": decision,
+            "basis": "fulltext",
+            "rationale": "Private screening rationale.",
+            "evidence": [{"quote": "private evidence", "locator": "results"}],
+            "reviewer": "runtime-agent",
+        },
+    }
+
+
+def _literature_state(stop_reason: str, *, monitor: bool = False) -> dict[str, object]:
+    state: dict[str, object] = {
+        "entry_skill": "literature-search",
+        "mode": "exploratory",
+        "scope": {"facets": ["private facet"], "target_count": 1},
+        "budget": {
+            "max_queries": 2,
+            "max_candidates": 10,
+            "max_full_reads": 2,
+            "max_citation_hops": 1,
+        },
+        "usage": {
+            "queries": 1,
+            "candidates_seen": 1,
+            "full_reads": 1,
+            "citation_hops": 0,
+            "retryable_failures": 0,
+        },
+        "queries": [
+            {
+                "query_id": "q1",
+                "text": "private original query",
+                "intent": "seed",
+                "facet": "private facet",
+                "channel": "web-search",
+                "tool": "runtime-search",
+                "selection_reason": "private tool rationale",
+                "searched_at": "2026-07-24T00:00:00+00:00",
+                "result_depth": "first page",
+                "result_count": 1,
+                "outcome": "success",
+                "reproducible": False,
+            }
+        ],
+        "coverage": {
+            "round": 1,
+            "covered_facets": ["private facet"],
+            "uncovered_facets": [],
+            "new_candidates": 1,
+            "deduplicated": 0,
+            "new_relevant": 1,
+        },
+        "frontier": [],
+        "stop": {"reason": stop_reason},
+        "partial": stop_reason not in {"target_met", "saturated", "budget_exhausted", "user_stop"},
+    }
+    if stop_reason != "in_progress":
+        state["stop"] = {"reason": stop_reason, "rationale": "Private stopping rationale."}
+    if monitor:
+        state["run_id"] = "monitor-run-1"
+        state["monitor_binding"] = {"run_id": "monitor-run-1", "task_digest": "a" * 64}
+    return state
+
+
+def _stage_literature_search(
+    root: Path,
+    *,
+    query: str,
+    stop_reason: str,
+    candidate_id: str = "candidate-a",
+    monitor: bool = False,
+) -> Path:
+    return stage_search_results(
+        root,
+        kind="paper",
+        query=query,
+        candidates=[_literature_candidate(candidate_id)],
+        note="private operator note",
+        search_state=_literature_state(stop_reason, monitor=monitor),
+    )
 
 
 def test_candidate_snapshot_is_deterministic_complete_and_has_no_winner_score(tmp_path: Path) -> None:
@@ -344,6 +446,181 @@ def test_terminal_monitor_run_is_excluded_and_bad_active_link_fails_closed(tmp_p
     broken["active_run_id"] = "missing-run"
     write_yaml_if_changed(subscription_path_value, broken)
     with pytest.raises(SystemExit, match="does not exist|invalid active run link"):
+        orchestrate.portfolio_candidate_snapshot(root)
+
+
+def test_standalone_literature_search_resume_and_selection_are_portfolio_candidates(
+    tmp_path: Path,
+) -> None:
+    orchestrate = _load_orchestrator("orchestrator_standalone_literature")
+    root = _workspace(tmp_path)
+    running = _stage_literature_search(
+        root,
+        query="private running question",
+        stop_reason="in_progress",
+        candidate_id="running-a",
+    )
+    terminal = _stage_literature_search(
+        root,
+        query="private terminal question",
+        stop_reason="target_met",
+        candidate_id="terminal-a",
+    )
+
+    snapshot = orchestrate.portfolio_candidate_snapshot(root)
+    resume = next(item for item in snapshot["candidates"] if item["action_type"] == "resume-literature-search")
+    select = next(item for item in snapshot["candidates"] if item["action_type"] == "select-literature-candidates")
+
+    assert resume["subject"] == {"kind": "literature-search-stage", "id": running.stem}
+    assert resume["owner_skill"] == "literature-search"
+    assert resume["governance_gate"] == "none"
+    assert select["subject"] == {"kind": "literature-search-stage", "id": terminal.stem}
+    assert select["owner_skill"] == "literature-search"
+    assert select["governance_gate"] == "human-decision"
+    dependency = select["dependencies"][0]
+    assert dependency["stage_byte_sha256"] == hashlib.sha256(terminal.read_bytes()).hexdigest()
+    assert dependency["stop_reason"] == "target_met"
+    assert dependency["candidates"][0]["candidate_id"] == "terminal-a"
+    assert len(dependency["candidates"][0]["identity_digest"]) == 64
+    assert len(dependency["candidates"][0]["screening_digest"]) == 64
+    private_dump = json.dumps(snapshot, ensure_ascii=False, sort_keys=True)
+    for secret in (
+        "private running question",
+        "private terminal question",
+        "Private title",
+        "https://example.test",
+        "private operator note",
+        "private evidence",
+    ):
+        assert secret not in private_dump
+
+
+def test_literature_stage_byte_or_materialization_change_updates_portfolio_exactly(
+    tmp_path: Path,
+) -> None:
+    orchestrate = _load_orchestrator("orchestrator_literature_binding")
+    root = _workspace(tmp_path)
+    stage_path = _stage_literature_search(
+        root,
+        query="binding question",
+        stop_reason="target_met",
+        candidate_id="binding-a",
+    )
+    before = orchestrate.portfolio_candidate_snapshot(root)
+    before_action = next(
+        item for item in before["candidates"] if item["action_type"] == "select-literature-candidates"
+    )
+
+    stage_path.write_bytes(stage_path.read_bytes() + b"\n# byte-only drift\n")
+    after_bytes = orchestrate.portfolio_candidate_snapshot(root)
+    after_action = next(
+        item for item in after_bytes["candidates"] if item["action_type"] == "select-literature-candidates"
+    )
+    assert after_bytes["candidate_snapshot_digest"] != before["candidate_snapshot_digest"]
+    assert after_action["dependencies"][0]["stage_byte_sha256"] != before_action["dependencies"][0]["stage_byte_sha256"]
+    assert after_action["binding_digest"] != before_action["binding_digest"]
+
+    mark_search_candidate(root, stage_path.stem, "binding-a", status="materialized", record_id="p-binding")
+    materialized = orchestrate.portfolio_candidate_snapshot(root)
+    assert all(item["action_type"] != "select-literature-candidates" for item in materialized["candidates"])
+
+
+def test_monitor_and_composite_owned_literature_stages_are_not_double_counted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orchestrate = _load_orchestrator("orchestrator_literature_owner_exclusion")
+    root = _workspace(tmp_path)
+    monitor_path = _stage_literature_search(
+        root,
+        query="monitor-owned question",
+        stop_reason="in_progress",
+        candidate_id="monitor-a",
+        monitor=True,
+    )
+    composite_path = _stage_literature_search(
+        root,
+        query="composite-owned question",
+        stop_reason="target_met",
+        candidate_id="composite-a",
+    )
+    standalone_path = _stage_literature_search(
+        root,
+        query="standalone question",
+        stop_reason="in_progress",
+        candidate_id="standalone-a",
+    )
+    monkeypatch.setattr(
+        orchestrate,
+        "pending_composite_survey_states",
+        lambda _root: [
+            {
+                "path": "kb/synthesis/composite-surveys/survey-a.yaml",
+                "state_digest": "b" * 64,
+                "state": {
+                    "id": "survey-a",
+                    "status": "in_progress",
+                    "current_stage": "selection",
+                    "revision": 2,
+                    "selection_filters": {"query": "private composite query"},
+                    "stages": [
+                        {
+                            "id": "search",
+                            "status": "completed",
+                            "outputs": [
+                                {
+                                    "kind": "composite-stage-binding",
+                                    "stage_id": "search",
+                                    "refs": [
+                                        {
+                                            "kind": "literature-search-stage",
+                                            "stage_id": composite_path.stem,
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                        {
+                            "id": "selection",
+                            "status": "in_progress",
+                            "outputs": [],
+                            "blocker": {},
+                            "resume_action": "select candidates",
+                        },
+                    ],
+                },
+            }
+        ],
+    )
+
+    snapshot = orchestrate.portfolio_candidate_snapshot(root)
+
+    assert all(item["subject"]["id"] != monitor_path.stem for item in snapshot["candidates"])
+    assert any(
+        item["action_type"] == "resume-literature-search"
+        and item["subject"]["id"] == standalone_path.stem
+        for item in snapshot["candidates"]
+    )
+    assert [item["action_type"] for item in snapshot["candidates"]].count("resume-composite-survey") == 1
+    assert all(
+        not (
+            item["action_type"] in {"resume-literature-search", "select-literature-candidates"}
+            and item["subject"]["id"] == composite_path.stem
+        )
+        for item in snapshot["candidates"]
+    )
+
+
+def test_literature_stage_enumeration_rejects_symlink_leaf(tmp_path: Path) -> None:
+    orchestrate = _load_orchestrator("orchestrator_literature_symlink")
+    root = _workspace(tmp_path)
+    stage_root = root / "kb/synthesis/source-search"
+    stage_root.mkdir(parents=True)
+    outside = tmp_path / "outside.yaml"
+    outside.write_text("id: escaped\n", encoding="utf-8")
+    (stage_root / "escaped.yaml").symlink_to(outside)
+
+    with pytest.raises(SystemExit, match="unsafe|regular|symlink"):
         orchestrate.portfolio_candidate_snapshot(root)
 
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -21,6 +22,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+
+import yaml
 
 from .common import (
     FETCH_MAX_BYTES,
@@ -422,6 +425,14 @@ SEARCH_USAGE_FIELDS = {
     "citation_hops",
     "retryable_failures",
 }
+
+_LITERATURE_TERMINAL_STOP_REASONS = {
+    "target_met",
+    "saturated",
+    "budget_exhausted",
+    "user_stop",
+}
+_SEARCH_STAGE_ENUMERATION_MAX_BYTES = 8 * 1024 * 1024
 SEARCH_FLOW_COUNT_FIELDS = {
     "identified",
     "duplicates_removed",
@@ -1848,6 +1859,259 @@ def load_search_stage(project_root: Path, stage_id: str) -> dict[str, Any]:
     if not isinstance(payload, dict) or not payload.get("id"):
         raise SystemExit(f"Search stage not found: {stage_id}")
     return payload
+
+
+def _exact_search_binding_digest(value: object) -> str:
+    serialized = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(serialized).hexdigest()
+
+
+def _unchanged_stat_identity(metadata: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _anchored_search_stage_bytes(project_root: Path) -> list[tuple[str, bytes]]:
+    """Read canonical stage leaves without following any workspace symlink.
+
+    This is a portfolio/status read path, so it deliberately avoids directory
+    creation and ordinary path reopenings.  Every accepted leaf is bounded,
+    regular, and stable across the descriptor read and lexical re-check.
+    """
+    root = project_root.resolve()
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    file_flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptors: list[int] = []
+    try:
+        try:
+            current_fd = os.open(root, directory_flags)
+        except OSError as exc:
+            raise SystemExit("Literature search workspace root is unsafe or unavailable.") from exc
+        descriptors.append(current_fd)
+        for component in ("kb", "synthesis", "source-search"):
+            try:
+                next_fd = os.open(component, directory_flags, dir_fd=current_fd)
+            except FileNotFoundError:
+                return []
+            except OSError as exc:
+                raise SystemExit("Literature search stage directory contains an unsafe component.") from exc
+            descriptors.append(next_fd)
+            current_fd = next_fd
+
+        results: list[tuple[str, bytes]] = []
+        try:
+            names = sorted(os.listdir(current_fd))
+        except OSError as exc:
+            raise SystemExit("Literature search stage directory cannot be enumerated safely.") from exc
+        for name in names:
+            if not name.endswith(".yaml"):
+                continue
+            stage_id = name[:-5]
+            try:
+                if _safe_search_stage_id(stage_id) != stage_id:
+                    raise SystemExit("Literature search stage filename is not canonical.")
+                lexical_before = os.stat(name, dir_fd=current_fd, follow_symlinks=False)
+            except (OSError, ValueError) as exc:
+                raise SystemExit("Literature search stage leaf is unsafe.") from exc
+            if not stat.S_ISREG(lexical_before.st_mode):
+                raise SystemExit("Literature search stage leaf must be a regular file, not a symlink or special file.")
+            if lexical_before.st_size > _SEARCH_STAGE_ENUMERATION_MAX_BYTES:
+                raise SystemExit("Literature search stage exceeds the safe read limit.")
+            try:
+                leaf_fd = os.open(name, file_flags, dir_fd=current_fd)
+            except OSError as exc:
+                raise SystemExit("Literature search stage leaf cannot be opened safely.") from exc
+            try:
+                opened_before = os.fstat(leaf_fd)
+                if (
+                    not stat.S_ISREG(opened_before.st_mode)
+                    or _unchanged_stat_identity(opened_before) != _unchanged_stat_identity(lexical_before)
+                ):
+                    raise SystemExit("Literature search stage leaf changed before reading.")
+                chunks: list[bytes] = []
+                total = 0
+                while True:
+                    chunk = os.read(leaf_fd, min(1024 * 1024, _SEARCH_STAGE_ENUMERATION_MAX_BYTES + 1 - total))
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > _SEARCH_STAGE_ENUMERATION_MAX_BYTES:
+                        raise SystemExit("Literature search stage exceeds the safe read limit.")
+                    chunks.append(chunk)
+                opened_after = os.fstat(leaf_fd)
+            finally:
+                os.close(leaf_fd)
+            try:
+                lexical_after = os.stat(name, dir_fd=current_fd, follow_symlinks=False)
+            except OSError as exc:
+                raise SystemExit("Literature search stage leaf changed while reading.") from exc
+            expected = _unchanged_stat_identity(opened_before)
+            if (
+                _unchanged_stat_identity(opened_after) != expected
+                or _unchanged_stat_identity(lexical_after) != expected
+                or total != opened_after.st_size
+            ):
+                raise SystemExit("Literature search stage leaf changed while reading.")
+            results.append((stage_id, b"".join(chunks)))
+        return results
+    finally:
+        for descriptor in reversed(descriptors):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def _canonical_literature_stage(
+    stage_id: str,
+    raw_bytes: bytes,
+) -> dict[str, Any] | None:
+    try:
+        decoded = raw_bytes.decode("utf-8")
+        payload = yaml.safe_load(decoded)
+    except (UnicodeDecodeError, yaml.YAMLError) as exc:
+        raise SystemExit("Literature search stage is not valid UTF-8 YAML.") from exc
+    if not isinstance(payload, dict):
+        raise SystemExit("Literature search stage must be a mapping.")
+    if (
+        payload.get("id") != stage_id
+        or payload.get("kind") != "source-search-stage"
+        or not str(payload.get("source_kind") or "").strip()
+    ):
+        raise SystemExit("Literature search stage identity is not canonical.")
+    if payload.get("entry_skill") != "literature-search":
+        return None
+    if payload.get("source_kind") != "paper":
+        raise SystemExit("A literature-search stage must contain paper candidates.")
+
+    persisted_state = {
+        key: copy.deepcopy(payload[key])
+        for key in (
+            "entry_skill",
+            "mode",
+            "run_id",
+            "monitor_binding",
+            "scope",
+            "review_protocol",
+            "reviewers",
+            "preference_context",
+        )
+        if key in payload
+    }
+    if _sanitize_search_state(persisted_state) != persisted_state:
+        raise SystemExit("Literature search stage state is not canonical.")
+    stop = payload.get("stop")
+    if not isinstance(stop, dict):
+        raise SystemExit("Literature search stage has no canonical stop state.")
+    stop_reason = str(stop.get("reason") or "")
+    if stop_reason not in SEARCH_STOP_REASONS or _sanitize_search_stop(stop) != stop:
+        raise SystemExit("Literature search stage stop state is not canonical.")
+    candidates = payload.get("candidates")
+    if not isinstance(candidates, list) or any(not isinstance(item, dict) for item in candidates):
+        raise SystemExit("Literature search stage candidates are not canonical.")
+    candidate_ids: set[str] = set()
+    for candidate in candidates:
+        candidate_id = _safe_search_id(candidate.get("candidate_id"), field="candidate_id")
+        if candidate_id in candidate_ids:
+            raise SystemExit("Literature search stage candidate ids must be unique.")
+        candidate_ids.add(candidate_id)
+        identities = candidate.get("identities") if isinstance(candidate.get("identities"), dict) else {}
+        if _candidate_search_identities(candidate) != identities:
+            raise SystemExit("Literature search stage candidate identity is not canonical.")
+        status_value = str(candidate.get("status") or "")
+        if re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", status_value) is None:
+            raise SystemExit("Literature search stage candidate status is not canonical.")
+        record_id = str(candidate.get("record_id") or "")
+        if record_id:
+            _safe_search_id(record_id, field="record_id")
+
+    multi_reviewer = int((payload.get("scope") or {}).get("screeners") or 1) > 1
+    if multi_reviewer:
+        effective_before = [copy.deepcopy(item.get("effective_screening")) for item in candidates]
+        derived = copy.deepcopy(payload)
+        _validate_persisted_multi_reviewer_ledgers(derived)
+        _validate_multi_reviewer_stage(derived)
+        effective_after = [copy.deepcopy(item.get("effective_screening")) for item in derived["candidates"]]
+        if effective_after != effective_before:
+            raise SystemExit("Literature search effective screening is stale or invalid.")
+    else:
+        for candidate in candidates:
+            screening = candidate.get("screening")
+            if not isinstance(screening, dict) or _sanitize_search_screening(screening) != screening:
+                raise SystemExit("Literature search candidate screening is not canonical.")
+    return payload
+
+
+def literature_search_continuations(
+    project_root: Path,
+    *,
+    excluded_stage_ids: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Return safe, content-bound standalone literature continuation facts.
+
+    The projection intentionally omits query text, titles, URLs, notes,
+    rationales, and evidence quotes.  Exact bytes and semantic components are
+    represented by digests so Agent planning stales on every relevant change.
+    """
+    excluded = set(excluded_stage_ids or set())
+    continuations: list[dict[str, Any]] = []
+    for stage_id, raw_bytes in _anchored_search_stage_bytes(project_root):
+        payload = _canonical_literature_stage(stage_id, raw_bytes)
+        if payload is None or stage_id in excluded or payload.get("monitor_binding"):
+            continue
+        stop = payload["stop"]
+        stop_reason = str(stop.get("reason") or "")
+        terminal = stop_reason in _LITERATURE_TERMINAL_STOP_REASONS
+        selectable: list[dict[str, Any]] = []
+        for candidate in payload["candidates"]:
+            multi = int((payload.get("scope") or {}).get("screeners") or 1) > 1
+            screening = candidate.get("effective_screening" if multi else "screening")
+            screening = screening if isinstance(screening, dict) else {}
+            decision = str(screening.get("decision") or "unassessed")
+            candidate_status = str(candidate.get("status") or "")
+            if decision not in {"include", "maybe"} or candidate_status in {"materialized", "duplicate"}:
+                continue
+            identity = {
+                key: candidate.get(key)
+                for key in ("candidate_id", "title", "url", "identities")
+            }
+            exact_candidate = {
+                "candidate_id": str(candidate.get("candidate_id") or ""),
+                "identity_digest": _exact_search_binding_digest(identity),
+                "screening_decision": decision,
+                "screening_status": str(screening.get("status") or ""),
+                "screening_phase": str(screening.get("phase") or ""),
+                "screening_digest": _exact_search_binding_digest(screening),
+                "candidate_status": candidate_status,
+                "record_id": str(candidate.get("record_id") or ""),
+            }
+            exact_candidate["candidate_binding_digest"] = _exact_search_binding_digest(exact_candidate)
+            selectable.append(exact_candidate)
+        if terminal and not selectable:
+            continue
+        continuations.append(
+            {
+                "stage_id": stage_id,
+                "path": f"kb/synthesis/source-search/{stage_id}.yaml",
+                "stage_byte_sha256": hashlib.sha256(raw_bytes).hexdigest(),
+                "stop_reason": stop_reason,
+                "stop_digest": _exact_search_binding_digest(stop),
+                "continuation": "select" if terminal else "resume",
+                "candidates": sorted(selectable, key=lambda item: item["candidate_id"]),
+            }
+        )
+    return continuations
 
 
 def stage_search_results(
