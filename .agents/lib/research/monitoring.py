@@ -20,6 +20,14 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from .common import file_sha256, load_list_document, program_reporting_events_path, utc_now_iso
 from .journal import mutation_transaction
 from .paths import kb_root, search_stage_path, source_search_root, synthesis_root, units_root
+from .preference_selection import (
+    canonical_digest,
+    operation_contract,
+    regular_file_binding,
+    regular_tree_binding,
+    resolve_task_preferences,
+    selection_binding,
+)
 from .yaml_io import load_yaml, write_yaml_if_changed, yaml_duplicate_key_issues
 
 
@@ -87,6 +95,15 @@ OUTCOME_DISPOSITIONS_BY_CLASSIFICATION = {
 REFERENCE_KINDS = {"literature-candidate", "survey-output", "artifact"}
 MAX_TEXT = 4000
 MAX_COLLECTION = 500
+PREFERENCE_SKILL = "research-monitor"
+PREFERENCE_OPERATION = "create-subscription"
+PREFERENCE_BINDING_FIELDS = {
+    "selection_id",
+    "selection_digest",
+    "task_context_digest",
+    "skill",
+    "operation",
+}
 SUBSCRIPTION_FIELDS = {
     "schema_version",
     "id",
@@ -97,6 +114,7 @@ SUBSCRIPTION_FIELDS = {
     "target",
     "scope_snapshot",
     "scope_digest",
+    "preference_binding",
     "budget",
     "cadence",
     "next_due_at",
@@ -127,12 +145,19 @@ RUN_FIELDS = {
 }
 FROZEN_SUBSCRIPTION_FIELDS = {
     "subscription_revision",
+    "subscription_content_digest",
     "kind",
     "target",
     "scope_snapshot",
     "scope_digest",
     "budget",
     "cadence",
+    "preference_binding",
+}
+LEGACY_SUBSCRIPTION_FIELDS = SUBSCRIPTION_FIELDS - {"preference_binding"}
+LEGACY_FROZEN_SUBSCRIPTION_FIELDS = FROZEN_SUBSCRIPTION_FIELDS - {
+    "subscription_content_digest",
+    "preference_binding",
 }
 HISTORY_FIELDS = {"at", "action", "revision", "status"}
 
@@ -299,6 +324,22 @@ def value_digest(value: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _sanitize_preference_binding(value: Any) -> dict[str, str]:
+    if value in (None, {}):
+        return {}
+    if not isinstance(value, dict) or set(value) != PREFERENCE_BINDING_FIELDS:
+        raise SystemExit("Research monitor preference binding is invalid.")
+    result = {key: str(value.get(key) or "").strip() for key in PREFERENCE_BINDING_FIELDS}
+    if not result["selection_id"].startswith("prefsel-"):
+        raise SystemExit("Research monitor preference selection id is invalid.")
+    for field in ("selection_digest", "task_context_digest"):
+        if SHA256_RE.fullmatch(result[field]) is None:
+            raise SystemExit("Research monitor preference binding digest is invalid.")
+    if result["skill"] != PREFERENCE_SKILL or result["operation"] != PREFERENCE_OPERATION:
+        raise SystemExit("Research monitor preference binding belongs to another consumer.")
+    return result
+
+
 def _run_content_digest(document: dict[str, Any]) -> str:
     return value_digest({key: value for key, value in document.items() if key != "content_digest"})
 
@@ -319,6 +360,11 @@ def monitor_task_binding(document: dict[str, Any]) -> dict[str, str]:
         "scope_digest": str(frozen.get("scope_digest") or ""),
         "budget": frozen.get("budget") or {},
     }
+    # Preserve the exact legacy v1 task digest for receipts frozen before R11.
+    # New receipts bind the current subscription bytes and value-free selection.
+    if "subscription_content_digest" in frozen:
+        task["subscription_content_digest"] = str(frozen["subscription_content_digest"])
+        task["preference_binding"] = frozen.get("preference_binding") or {}
     return {"run_id": run_id, "task_digest": value_digest(task)}
 
 
@@ -558,7 +604,10 @@ def _sanitize_history(value: Any, *, statuses: set[str]) -> list[dict[str, Any]]
 
 
 def _validate_subscription_document(document: dict[str, Any]) -> None:
-    if set(document) != SUBSCRIPTION_FIELDS:
+    if frozenset(document) not in {
+        frozenset(SUBSCRIPTION_FIELDS),
+        frozenset(LEGACY_SUBSCRIPTION_FIELDS),
+    }:
         raise SystemExit("Research monitor subscription contains unsupported or missing fields.")
     if type(document.get("schema_version")) is not int or document.get("schema_version") != SCHEMA_VERSION:
         raise SystemExit("Research monitor subscription schema version is unsupported.")
@@ -585,6 +634,9 @@ def _validate_subscription_document(document: dict[str, Any]) -> None:
         or document.get("scope_digest") != value_digest(scope)
     ):
         raise SystemExit("Research monitor subscription scope binding is stale or invalid.")
+    preference_binding = _sanitize_preference_binding(document.get("preference_binding"))
+    if "preference_binding" in document and preference_binding != document.get("preference_binding"):
+        raise SystemExit("Research monitor subscription preference binding is not canonical.")
     cadence = _sanitize_cadence(document.get("cadence"))
     if cadence != document.get("cadence"):
         raise SystemExit("Research monitor subscription cadence is not canonical.")
@@ -630,7 +682,10 @@ def _validate_run_document(project_root: Path, document: dict[str, Any]) -> None
     if _canonical_timestamp(document.get("scheduled_for"), field="scheduled_for") != document.get("scheduled_for"):
         raise SystemExit("Research monitor scheduled_for is not canonical.")
     frozen = document.get("frozen_subscription")
-    if not isinstance(frozen, dict) or set(frozen) != FROZEN_SUBSCRIPTION_FIELDS:
+    if not isinstance(frozen, dict) or frozenset(frozen) not in {
+        frozenset(FROZEN_SUBSCRIPTION_FIELDS),
+        frozenset(LEGACY_FROZEN_SUBSCRIPTION_FIELDS),
+    }:
         raise SystemExit("Research monitor run lacks a frozen subscription.")
     if frozen.get("kind") not in SUBSCRIPTION_KINDS:
         raise SystemExit("Research monitor frozen subscription kind is unsupported.")
@@ -639,6 +694,10 @@ def _validate_run_document(project_root: Path, document: dict[str, Any]) -> None
     )
     if frozen.get("subscription_revision") != frozen_revision:
         raise SystemExit("Research monitor frozen subscription revision is not canonical.")
+    if "subscription_content_digest" in frozen and SHA256_RE.fullmatch(
+        str(frozen.get("subscription_content_digest") or "")
+    ) is None:
+        raise SystemExit("Research monitor frozen subscription content binding is invalid.")
     target = _sanitize_target(str(frozen["kind"]), frozen.get("target"))
     if target != frozen.get("target"):
         raise SystemExit("Research monitor frozen target is not canonical.")
@@ -656,6 +715,9 @@ def _validate_run_document(project_root: Path, document: dict[str, Any]) -> None
     cadence = _sanitize_cadence(frozen.get("cadence"))
     if cadence != frozen.get("cadence"):
         raise SystemExit("Research monitor frozen cadence is not canonical.")
+    preference_binding = _sanitize_preference_binding(frozen.get("preference_binding"))
+    if "preference_binding" in frozen and preference_binding != frozen.get("preference_binding"):
+        raise SystemExit("Research monitor frozen preference binding is not canonical.")
     stop = _sanitize_stop(document.get("stop"), state=state)
     if stop != document.get("stop"):
         raise SystemExit("Research monitor run stop is not canonical.")
@@ -699,12 +761,85 @@ def build_subscription_id(kind: str, target: dict[str, Any], cadence: dict[str, 
     return f"monitor-{prefix}-{value_digest({'target': target, 'cadence': cadence})[:16]}"
 
 
-def create_subscription(
+def _canonical_unit_record_path(project_root: Path, unit_id: str) -> Path:
+    matches: list[Path] = []
+    root = units_root(project_root)
+    if root.exists() and (root.is_symlink() or not root.is_dir()):
+        raise SystemExit("Research monitor unit root is unsafe.")
+    for kind_root in sorted(root.iterdir(), key=lambda item: item.name) if root.exists() else []:
+        if kind_root.is_symlink() or not kind_root.is_dir():
+            raise SystemExit("Research monitor unit root contains an unsafe entry.")
+        candidate = kind_root / unit_id / "record.yaml"
+        if not candidate.exists() and not candidate.is_symlink():
+            continue
+        _assert_safe_business_path(project_root, candidate, allowed_root=root)
+        if candidate.is_file():
+            record = load_yaml(candidate, default={})
+            if isinstance(record, dict) and str(record.get("id") or "") == unit_id:
+                matches.append(candidate)
+    if len(matches) != 1:
+        raise SystemExit("Research monitor unit target must resolve to one canonical record.")
+    return matches[0]
+
+
+def _subscription_reference_bindings(
+    project_root: Path,
+    *,
+    kind: str,
+    target: dict[str, Any],
+    program_ids: list[str],
+) -> dict[str, str]:
+    bindings: list[dict[str, str]] = []
+    for program_id in program_ids:
+        program = kb_root(project_root) / "programs" / program_id
+        binding = regular_tree_binding(
+            program,
+            logical_identity=f"program:{program_id}",
+            trusted_root=project_root,
+        )
+        bindings.append({"kind": "program", "id": program_id, **binding})
+    if kind == "survey-freshness":
+        survey_path = _trusted_referenced_file(
+            project_root,
+            str(target.get("survey_path") or ""),
+            allowed_roots=(synthesis_root(project_root),),
+        )
+        binding = regular_file_binding(
+            survey_path,
+            logical_identity=f"survey:{target.get('survey_path')}",
+            trusted_root=project_root,
+        )
+        bindings.append({"kind": "survey", "id": str(target.get("survey_path") or ""), **binding})
+    elif kind == "unit-recheck":
+        for unit_id in target.get("unit_ids") or []:
+            record = _canonical_unit_record_path(project_root, str(unit_id))
+            binding = regular_file_binding(
+                record,
+                logical_identity=f"unit:{unit_id}:record.yaml",
+                trusted_root=project_root,
+            )
+            bindings.append({"kind": "unit", "id": str(unit_id), **binding})
+    bindings.sort(key=lambda item: (item["kind"], item["id"]))
+    return {
+        "identity_digest": canonical_digest(
+            [
+                {"kind": item["kind"], "id": item["id"], "identity_digest": item["identity_digest"]}
+                for item in bindings
+            ]
+        ),
+        "bytes_digest": canonical_digest(
+            [
+                {"kind": item["kind"], "id": item["id"], "bytes_digest": item["bytes_digest"]}
+                for item in bindings
+            ]
+        ),
+    }
+
+
+def _normalize_subscription_request(
     project_root: Path,
     payload: dict[str, Any],
-    *,
-    now: datetime | str | None = None,
-) -> Path:
+) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise SystemExit("Research monitor subscription input must be a mapping.")
     allowed = {
@@ -729,10 +864,6 @@ def create_subscription(
         if payload.get("subscription_id")
         else build_subscription_id(kind, target, cadence)
     )
-    path = subscription_path(project_root, subscription_id)
-    _assert_safe_business_path(project_root, path, allowed_root=subscriptions_root(project_root))
-    _validate_new_subscription_target(project_root, kind, target)
-    created_at = _utc_iso(_now(now))
     raw_scope = payload.get("scope")
     if raw_scope is None:
         raw_scope = {}
@@ -744,17 +875,104 @@ def create_subscription(
         for item in _safe_string_list(payload.get("program_ids"), field="program_ids")
     ]
     _program_reporting_paths(project_root, program_ids)
+    _validate_new_subscription_target(project_root, kind, target)
+    return {
+        "subscription_id": subscription_id,
+        "kind": kind,
+        "title": _bounded_text(payload.get("title"), field="title", limit=500),
+        "program_ids": program_ids,
+        "target": target,
+        "scope": scope,
+        "budget": _sanitize_budget(payload.get("budget")),
+        "cadence": cadence,
+    }
+
+
+def monitor_subscription_preference_context(
+    project_root: Path,
+    payload: dict[str, Any],
+) -> dict[str, object]:
+    """Return exact finalized request/reference inputs for Agent selection."""
+    request = _normalize_subscription_request(project_root, payload)
+    references = _subscription_reference_bindings(
+        project_root,
+        kind=str(request["kind"]),
+        target=dict(request["target"]),
+        program_ids=list(request["program_ids"]),
+    )
+    return {
+        "canonical_id": str(request["subscription_id"]),
+        "canonical_kind": "research-monitor-subscription",
+        "operation": PREFERENCE_OPERATION,
+        "request_digest": canonical_digest(request),
+        "subscription_id": str(request["subscription_id"]),
+        "target_digest": canonical_digest(request["target"]),
+        "cadence_digest": canonical_digest(request["cadence"]),
+        "scope_digest": canonical_digest(request["scope"]),
+        "budget_digest": canonical_digest(request["budget"]),
+        "program_ids_digest": canonical_digest(request["program_ids"]),
+        "reference_bindings_identity_digest": references["identity_digest"],
+        "reference_bindings_bytes_digest": references["bytes_digest"],
+        "operation_contract_digest": canonical_digest(
+            operation_contract(skill=PREFERENCE_SKILL, operation=PREFERENCE_OPERATION)
+        ),
+    }
+
+
+def _resolve_subscription_preference_binding(
+    project_root: Path,
+    *,
+    selection_id: str,
+    context: dict[str, object],
+) -> dict[str, str]:
+    if not str(selection_id or "").strip():
+        return {}
+    try:
+        effective = resolve_task_preferences(
+            project_root,
+            selection_id=str(selection_id).strip(),
+            skill=PREFERENCE_SKILL,
+            operation=PREFERENCE_OPERATION,
+            canonical_inputs=context,
+        )
+    except ValueError as exc:
+        raise SystemExit(f"Research monitor preference receipt is stale or invalid: {exc}") from exc
+    return _sanitize_preference_binding(selection_binding(effective))
+
+
+def create_subscription(
+    project_root: Path,
+    payload: dict[str, Any],
+    *,
+    now: datetime | str | None = None,
+    preference_selection_id: str = "",
+) -> Path:
+    request = _normalize_subscription_request(project_root, payload)
+    context = monitor_subscription_preference_context(project_root, payload)
+    preference_binding = _resolve_subscription_preference_binding(
+        project_root,
+        selection_id=preference_selection_id,
+        context=context,
+    )
+    kind = str(request["kind"])
+    target = dict(request["target"])
+    cadence = dict(request["cadence"])
+    subscription_id = str(request["subscription_id"])
+    path = subscription_path(project_root, subscription_id)
+    _assert_safe_business_path(project_root, path, allowed_root=subscriptions_root(project_root))
+    created_at = _utc_iso(_now(now))
     document = {
         "schema_version": SCHEMA_VERSION,
         "id": subscription_id,
         "kind": kind,
         "status": "active",
-        "title": _bounded_text(payload.get("title"), field="title", limit=500),
-        "program_ids": program_ids,
+        "title": request["title"],
+        "program_ids": list(request["program_ids"]),
         "target": target,
-        "scope_snapshot": scope,
-        "scope_digest": value_digest(scope),
-        "budget": _sanitize_budget(payload.get("budget")),
+        "scope_snapshot": dict(request["scope"]),
+        "scope_digest": value_digest(request["scope"]),
+        "preference_binding": preference_binding,
+        "budget": dict(request["budget"]),
         "cadence": cadence,
         "next_due_at": cadence["anchor_at"],
         "active_run_id": "",
@@ -769,6 +987,15 @@ def create_subscription(
         _assert_safe_business_path(project_root, path, allowed_root=subscriptions_root(project_root))
         if path.exists() or path.is_symlink():
             raise SystemExit(f"Research monitor subscription already exists: {subscription_id}")
+        current_request = _normalize_subscription_request(project_root, payload)
+        current_context = monitor_subscription_preference_context(project_root, payload)
+        current_binding = _resolve_subscription_preference_binding(
+            project_root,
+            selection_id=preference_selection_id,
+            context=current_context,
+        )
+        if current_request != request or current_context != context or current_binding != preference_binding:
+            raise SystemExit("Research monitor subscription inputs changed before write.")
 
     with mutation_transaction(
         project_root,
@@ -776,6 +1003,14 @@ def create_subscription(
         [path],
         preflight=preflight,
     ):
+        current_context = monitor_subscription_preference_context(project_root, payload)
+        current_binding = _resolve_subscription_preference_binding(
+            project_root,
+            selection_id=preference_selection_id,
+            context=current_context,
+        )
+        if current_context != context or current_binding != preference_binding:
+            raise SystemExit("Research monitor subscription inputs changed before write.")
         write_yaml_if_changed(path, document)
     return path
 
@@ -882,6 +1117,44 @@ def due_subscriptions(
     return sorted(due, key=lambda item: (item["due_at"], item["subscription_id"]))
 
 
+def active_monitor_runs(project_root: Path) -> list[dict[str, Any]]:
+    """Pure projection of every valid non-terminal subscription-owned run."""
+    active: list[dict[str, Any]] = []
+    for path in _iter_documents(subscriptions_root(project_root), label="subscriptions"):
+        subscription_id = path.stem
+        subscription = load_subscription(project_root, subscription_id)
+        run_id = str(subscription.get("active_run_id") or "")
+        if not run_id:
+            continue
+        run = load_run(project_root, run_id)
+        state = str(run.get("state") or "")
+        if (
+            str(run.get("subscription_id") or "") != subscription_id
+            or state in TERMINAL_RUN_STATES
+            or state not in RUN_STATES - TERMINAL_RUN_STATES
+        ):
+            raise SystemExit("Research monitor subscription has an invalid active run link.")
+        active.append(
+            {
+                "subscription_id": subscription_id,
+                "subscription_title": str(subscription.get("title") or subscription_id),
+                "subscription_status": str(subscription.get("status") or ""),
+                "subscription_revision": int(subscription.get("revision") or 0),
+                "subscription_content_digest": value_digest(subscription),
+                "subscription_scope_digest": str(subscription.get("scope_digest") or ""),
+                "preference_binding": deepcopy(subscription.get("preference_binding") or {}),
+                "program_ids": list(subscription.get("program_ids") or []),
+                "run_id": run_id,
+                "run_state": state,
+                "run_revision": int(run.get("revision") or 0),
+                "run_content_digest": str(run.get("content_digest") or ""),
+                "scheduled_for": str(run.get("scheduled_for") or ""),
+                "stop": deepcopy(run.get("stop") or {}),
+            }
+        )
+    return sorted(active, key=lambda item: (item["subscription_id"], item["run_id"]))
+
+
 def _run_id(subscription_id: str, scheduled_for: str) -> str:
     suffix = value_digest({"subscription_id": subscription_id, "scheduled_for": scheduled_for})[:16]
     return f"monitor-run-{suffix}"
@@ -931,12 +1204,14 @@ def create_due_run(
         created_at = _utc_iso(current_time)
         frozen = {
             "subscription_revision": int(subscription["revision"]),
+            "subscription_content_digest": value_digest(subscription),
             "kind": subscription["kind"],
             "target": deepcopy(subscription["target"]),
             "scope_snapshot": deepcopy(subscription["scope_snapshot"]),
             "scope_digest": subscription["scope_digest"],
             "budget": deepcopy(subscription.get("budget") or {}),
             "cadence": deepcopy(subscription["cadence"]),
+            "preference_binding": deepcopy(subscription.get("preference_binding") or {}),
         }
         receipt = {
             "schema_version": SCHEMA_VERSION,
@@ -964,6 +1239,10 @@ def create_due_run(
         subscription.setdefault("history", []).append(
             _history_snapshot(subscription, at=created_at, action=f"run-created:{run_id}")
         )
+        # A legacy neutral v1 subscription graduates to the closed R11 shape
+        # on its next mutation; the frozen digest above still names the exact
+        # pre-mutation subscription that this run consumed.
+        subscription.setdefault("preference_binding", {})
         subscription["active_run_id"] = run_id
         subscription["updated_at"] = created_at
         subscription["revision"] = int(subscription["revision"]) + 1
@@ -1116,23 +1395,7 @@ def _validate_new_subscription_target(
     if kind != "unit-recheck":
         return
     for unit_id in target.get("unit_ids") or []:
-        matches: list[Path] = []
-        root = units_root(project_root)
-        if root.exists() and (root.is_symlink() or not root.is_dir()):
-            raise SystemExit("Research monitor unit root is unsafe.")
-        for kind_root in sorted(root.iterdir(), key=lambda item: item.name) if root.exists() else []:
-            if kind_root.is_symlink() or not kind_root.is_dir():
-                raise SystemExit("Research monitor unit root contains an unsafe entry.")
-            candidate = kind_root / unit_id / "record.yaml"
-            if not candidate.exists() and not candidate.is_symlink():
-                continue
-            _assert_safe_business_path(project_root, candidate, allowed_root=root)
-            if candidate.is_file():
-                record = load_yaml(candidate, default={})
-                if isinstance(record, dict) and str(record.get("id") or "") == unit_id:
-                    matches.append(candidate)
-        if len(matches) != 1:
-            raise SystemExit("Research monitor unit target must resolve to one canonical record.")
+        _canonical_unit_record_path(project_root, str(unit_id))
 
 
 def _sanitize_outputs(
@@ -1513,7 +1776,15 @@ def finish_run(
             frozen.get("scope_snapshot") or {}
         ):
             raise SystemExit("Research monitor frozen run scope is invalid.")
-        for field in ("kind", "target", "scope_snapshot", "scope_digest", "budget", "cadence"):
+        for field in (
+            "kind",
+            "target",
+            "scope_snapshot",
+            "scope_digest",
+            "budget",
+            "cadence",
+            "preference_binding",
+        ):
             if current_subscription.get(field) != frozen.get(field):
                 raise SystemExit(
                     "Research monitor subscription changed after this run was frozen."
@@ -1721,6 +1992,7 @@ def set_outcome_disposition(
 
 
 __all__ = [
+    "active_monitor_runs",
     "OUTCOME_DISPOSITION_STATES",
     "RUN_STATES",
     "SUBSCRIPTION_KINDS",
@@ -1733,6 +2005,7 @@ __all__ = [
     "load_run",
     "load_subscription",
     "monitor_task_binding",
+    "monitor_subscription_preference_context",
     "monitoring_root",
     "run_path",
     "runs_root",

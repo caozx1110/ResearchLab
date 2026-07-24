@@ -51,7 +51,7 @@ from research.core import apply_confirmation, append_history, ensure_workspace, 
 from research.evidence import attach_claims, build_verification_receipt, validate_claims, verify_claim_evidence
 from research.judgements import apply_judgement_rejection, confirmation_binding, discover_pending_judgements, judgement_confirmation_is_current, judgement_snapshot_binding, readiness_violations, require_judgement_snapshot
 from research.journal import mutation_transaction
-from research.monitoring import due_subscriptions, unresolved_monitor_outcomes
+from research.monitoring import active_monitor_runs, due_subscriptions, unresolved_monitor_outcomes
 from research.preference_selection import resolve_task_preferences, selection_binding
 from research.surveys import pending_composite_survey_states
 
@@ -1724,6 +1724,57 @@ def portfolio_candidates(root: Path, *, selected_program_id: str = "") -> tuple[
         )
         if candidate is not None:
             candidates.append(candidate)
+
+    for active_run in active_monitor_runs(root):
+        linked_program_ids = [
+            str(item) for item in active_run.get("program_ids") or [] if str(item)
+        ]
+        if selected_program_id and selected_program_id not in linked_program_ids:
+            continue
+        subscription_id = str(active_run.get("subscription_id") or "")
+        run_id = str(active_run.get("run_id") or "")
+        candidates.append(
+            _candidate(
+                program_id=f"monitor:{subscription_id}",
+                action_type="resume-monitor-run",
+                subject_id=run_id,
+                owner_skill="research-monitor",
+                stage="monitor-active",
+                goal=str(active_run.get("subscription_title") or subscription_id),
+                question="",
+                reason="A saved non-terminal monitoring run is ready for Agent-led recovery.",
+                title=str(active_run.get("subscription_title") or run_id),
+                subject_kind="research-monitor-run",
+                dependencies=[
+                    {
+                        "kind": "monitor-active-run",
+                        "id": run_id,
+                        "subscription_id": subscription_id,
+                        "subscription_status": str(active_run.get("subscription_status") or ""),
+                        "subscription_revision": int(
+                            active_run.get("subscription_revision") or 0
+                        ),
+                        "subscription_content_digest": str(
+                            active_run.get("subscription_content_digest") or ""
+                        ),
+                        "subscription_scope_digest": str(
+                            active_run.get("subscription_scope_digest") or ""
+                        ),
+                        "run_state": str(active_run.get("run_state") or ""),
+                        "run_revision": int(active_run.get("run_revision") or 0),
+                        "run_content_digest": str(
+                            active_run.get("run_content_digest") or ""
+                        ),
+                        "scheduled_for": str(active_run.get("scheduled_for") or ""),
+                        "stop": active_run.get("stop")
+                        if isinstance(active_run.get("stop"), dict)
+                        else {},
+                        "program_ids": linked_program_ids,
+                    }
+                ],
+                safe_execute_capability=False,
+            )
+        )
 
     for due in due_subscriptions(root):
         linked_program_ids = [str(item) for item in due.get("program_ids") or [] if str(item)]

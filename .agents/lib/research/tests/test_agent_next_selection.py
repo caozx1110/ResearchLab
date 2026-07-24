@@ -8,7 +8,16 @@ from pathlib import Path
 import pytest
 
 from research.common import append_list_item, load_yaml, write_yaml_if_changed
-from research.monitoring import create_subscription
+from research.monitoring import (
+    create_due_run,
+    create_subscription,
+    finish_run,
+    load_run,
+    load_subscription,
+    run_path,
+    transition_run,
+    value_digest,
+)
 from research.paths import runtime_preferences_path
 from research.preference_selection import eligible_preferences, record_effective_selection
 from research.prefs import default_runtime_preferences
@@ -109,6 +118,35 @@ def _contains_key(value: object, forbidden: str) -> bool:
     if isinstance(value, list):
         return any(_contains_key(item, forbidden) for item in value)
     return False
+
+
+def _active_monitor(root: Path) -> tuple[dict, dict]:
+    create_subscription(
+        root,
+        {
+            "subscription_id": "monitor-active",
+            "kind": "literature",
+            "title": "Track active monitor",
+            "target": {"question": "What changed in active monitoring?"},
+            "scope": {"facets": ["recovery"]},
+            "cadence": {
+                "every_days": 7,
+                "timezone": "UTC",
+                "anchor_at": "2026-07-01T00:00:00Z",
+            },
+            "budget": {"max_queries": 2},
+            "program_ids": [],
+        },
+        now="2026-07-01T00:00:00Z",
+    )
+    create_due_run(
+        root,
+        "monitor-active",
+        expected_subscription_revision=1,
+        now="2026-07-01T00:00:00Z",
+    )
+    subscription = load_subscription(root, "monitor-active")
+    return subscription, load_run(root, subscription["active_run_id"])
 
 
 def test_candidate_snapshot_is_deterministic_complete_and_has_no_winner_score(tmp_path: Path) -> None:
@@ -239,6 +277,119 @@ def test_due_monitor_is_a_factual_candidate_not_an_automatic_winner(tmp_path: Pa
     assert monitor["safe_execute_capability"] is False
     assert "score" not in monitor
     assert monitor["dependencies"][0]["due_at"] == "2026-07-01T01:00:00+00:00"
+
+
+@pytest.mark.parametrize("state", ["planned", "running", "blocked", "failed_retryable"])
+def test_active_monitor_run_is_a_resume_candidate_in_every_nonterminal_state(
+    tmp_path: Path,
+    state: str,
+) -> None:
+    orchestrate = _load_orchestrator(f"orchestrator_active_monitor_{state}")
+    root = _workspace(tmp_path)
+    subscription, run = _active_monitor(root)
+    if state != "planned":
+        transition_run(
+            root,
+            run["id"],
+            expected_revision=run["revision"],
+            state="running",
+            now="2026-07-01T00:01:00Z",
+        )
+        run = load_run(root, run["id"])
+    if state in {"blocked", "failed_retryable"}:
+        transition_run(
+            root,
+            run["id"],
+            expected_revision=run["revision"],
+            state=state,
+            stop={"reason": state, "rationale": f"The run is {state}."},
+            now="2026-07-01T00:02:00Z",
+        )
+        run = load_run(root, run["id"])
+
+    snapshot = orchestrate.portfolio_candidate_snapshot(root)
+    resume = next(
+        item for item in snapshot["candidates"] if item["action_type"] == "resume-monitor-run"
+    )
+    dependency = resume["dependencies"][0]
+
+    assert all(item["action_type"] != "run-due-monitor" for item in snapshot["candidates"])
+    assert resume["subject"] == {"kind": "research-monitor-run", "id": run["id"]}
+    assert dependency["subscription_status"] == subscription["status"]
+    assert dependency["subscription_revision"] == subscription["revision"]
+    assert dependency["run_state"] == state
+    assert dependency["run_revision"] == run["revision"]
+    assert dependency["run_content_digest"] == run["content_digest"]
+    assert dependency["stop"] == run["stop"]
+
+
+def test_terminal_monitor_run_is_excluded_and_bad_active_link_fails_closed(tmp_path: Path) -> None:
+    orchestrate = _load_orchestrator("orchestrator_terminal_monitor")
+    root = _workspace(tmp_path)
+    subscription, run = _active_monitor(root)
+    finish_run(
+        root,
+        run["id"],
+        expected_run_revision=run["revision"],
+        expected_subscription_revision=subscription["revision"],
+        state="cancelled",
+        stop={"reason": "cancelled", "rationale": "The user cancelled the run."},
+        now="2026-07-01T00:03:00Z",
+    )
+    snapshot = orchestrate.portfolio_candidate_snapshot(root)
+    assert all(item["action_type"] != "resume-monitor-run" for item in snapshot["candidates"])
+
+    subscription_path_value = root / "kb/monitoring/subscriptions/monitor-active.yaml"
+    broken = load_yaml(subscription_path_value)
+    broken["active_run_id"] = "missing-run"
+    write_yaml_if_changed(subscription_path_value, broken)
+    with pytest.raises(SystemExit, match="does not exist|invalid active run link"):
+        orchestrate.portfolio_candidate_snapshot(root)
+
+
+@pytest.mark.parametrize("mutation", ["content", "revision", "state"])
+def test_active_monitor_binding_change_stales_existing_portfolio_decision(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    orchestrate = _load_orchestrator(f"orchestrator_monitor_stale_{mutation}")
+    root = _workspace(tmp_path)
+    _subscription, run = _active_monitor(root)
+    snapshot = orchestrate.portfolio_candidate_snapshot(root)
+    action_id = next(
+        item["action_id"]
+        for item in snapshot["candidates"]
+        if item["action_type"] == "resume-monitor-run"
+    )
+    orchestrate.record_portfolio_decision(root, _decision(root, snapshot, [action_id]))
+
+    if mutation == "state":
+        transition_run(
+            root,
+            run["id"],
+            expected_revision=run["revision"],
+            state="running",
+            now="2026-07-01T00:04:00Z",
+        )
+    else:
+        path = run_path(root, run["id"])
+        changed = load_yaml(path)
+        if mutation == "content":
+            changed["stop"]["rationale"] = "Additional mechanical recovery context."
+        else:
+            changed["revision"] = int(changed["revision"]) + 1
+        changed["content_digest"] = value_digest(
+            {key: value for key, value in changed.items() if key != "content_digest"}
+        )
+        write_yaml_if_changed(path, changed)
+
+    current_snapshot = orchestrate.portfolio_candidate_snapshot(root)
+    current = orchestrate.current_portfolio_decision(root, current_snapshot)
+
+    assert current_snapshot["candidate_snapshot_digest"] != snapshot["candidate_snapshot_digest"]
+    assert current is not None
+    assert current["effective_status"] == "stale"
+    assert current["safe_to_continue"] is False
 
 
 def test_side_judgement_and_monitor_outcome_are_complete_factual_candidates(

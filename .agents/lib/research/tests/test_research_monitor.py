@@ -19,8 +19,9 @@ MONITOR_SCRIPT = REPO_ROOT / ".agents" / "skills" / "research-monitor" / "script
 if str(LIB_ROOT) not in sys.path:
     sys.path.insert(0, str(LIB_ROOT))
 
-from research.common import file_sha256
+from research.common import file_sha256, write_yaml_if_changed
 from research.monitoring import (
+    active_monitor_runs,
     create_due_run,
     create_subscription,
     due_subscriptions,
@@ -28,6 +29,7 @@ from research.monitoring import (
     load_run,
     load_subscription,
     monitor_task_binding,
+    monitor_subscription_preference_context,
     run_path,
     set_outcome_disposition,
     set_subscription_status,
@@ -35,6 +37,13 @@ from research.monitoring import (
     transition_run,
     unresolved_monitor_outcomes,
     value_digest,
+)
+from research.paths import config_root
+from research.preference_selection import (
+    OPERATION_CANONICAL_INPUTS,
+    eligible_preferences,
+    record_effective_selection,
+    task_context_digest,
 )
 from research.skill_validator import validate_skill
 
@@ -81,6 +90,44 @@ def _literature_subscription(
             "anchor_at": anchor,
         },
     }
+
+
+def _monitor_selection(
+    root: Path,
+    payload: dict,
+    *,
+    selection_id: str = "prefsel-monitor01",
+) -> str:
+    context = monitor_subscription_preference_context(root, payload)
+    eligible = eligible_preferences(
+        root,
+        skill="research-monitor",
+        operation="create-subscription",
+    )
+    selected = []
+    excluded = []
+    for item in eligible["items"]:
+        row = {
+            "preference_id": item["preference_id"],
+            "reason": "relevant to the bounded subscription request",
+        }
+        if item["strength"] == "hard" or item["path"] == "profile.personalization.research_focus":
+            selected.append({**row, "application": "help the Agent author missing soft expression"})
+        else:
+            excluded.append(row)
+    record_effective_selection(
+        root,
+        {
+            "selection_id": selection_id,
+            "skill": "research-monitor",
+            "operation": "create-subscription",
+            "catalog_digest": eligible["catalog_digest"],
+            "task_context": context,
+            "selected": selected,
+            "excluded": excluded,
+        },
+    )
+    return selection_id
 
 
 def _survey_subscription(tmp_path: Path, *, subscription_id: str = "monitor-survey") -> dict:
@@ -289,6 +336,275 @@ def test_subscription_due_facts_are_read_only_and_anchored(tmp_path: Path) -> No
         }
     ]
     assert path.read_bytes() == before
+
+
+def test_create_subscription_consumes_task_bound_preferences_and_due_run_inherits_binding(
+    tmp_path: Path,
+) -> None:
+    write_yaml_if_changed(
+        config_root(tmp_path) / "user-profile.yaml",
+        {
+            "preferences": {"language_preference": "zh-CN"},
+            "personalization": {"research_focus": "embodied agents"},
+            "constraints": ["local only"],
+        },
+    )
+    payload = _literature_subscription(subscription_id="monitor-preference")
+    selection_id = _monitor_selection(tmp_path, payload)
+
+    result = _load_monitor_script()._apply(
+        tmp_path,
+        {
+            "action": "create-subscription",
+            "subscription": payload,
+            "preference_selection_id": selection_id,
+            "now": _time(1),
+        },
+    )
+    subscription = load_subscription(tmp_path, "monitor-preference")
+
+    assert result["subscription_id"] == "monitor-preference"
+    assert subscription["preference_binding"]["selection_id"] == selection_id
+    assert subscription["scope_snapshot"] == payload["scope"]
+    assert subscription["budget"] == payload["budget"]
+    create_due_run(
+        tmp_path,
+        "monitor-preference",
+        expected_subscription_revision=1,
+        now=_time(15),
+    )
+    current = load_subscription(tmp_path, "monitor-preference")
+    run = load_run(tmp_path, current["active_run_id"])
+    assert run["frozen_subscription"]["preference_binding"] == subscription["preference_binding"]
+    assert run["frozen_subscription"]["subscription_content_digest"] == value_digest(subscription)
+    assert monitor_task_binding(run)["task_digest"] == value_digest(
+        {
+            "run_id": run["id"],
+            "subscription_id": "monitor-preference",
+            "scheduled_for": run["scheduled_for"],
+            "kind": run["frozen_subscription"]["kind"],
+            "target": run["frozen_subscription"]["target"],
+            "scope_digest": run["frozen_subscription"]["scope_digest"],
+            "budget": run["frozen_subscription"]["budget"],
+            "subscription_content_digest": run["frozen_subscription"]["subscription_content_digest"],
+            "preference_binding": run["frozen_subscription"]["preference_binding"],
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "mutation"),
+    [
+        ("subscription_id", "monitor-mutated-id"),
+        ("title", "Mutated title"),
+        ("target", {"question": "A different explicit question"}),
+        ("scope", {"languages": ["zh"], "facets": ["changed"]}),
+        ("budget", {"max_queries": 1}),
+        (
+            "cadence",
+            {"every_days": 30, "timezone": "UTC", "anchor_at": "2026-07-01T00:00:00Z"},
+        ),
+        ("program_ids", ["program-other"]),
+    ],
+)
+def test_monitor_request_field_mutation_rejects_stale_receipt_with_zero_subscription_write(
+    tmp_path: Path,
+    field: str,
+    mutation: object,
+) -> None:
+    (tmp_path / "kb/programs/program-other").mkdir(parents=True, exist_ok=True)
+    write_yaml_if_changed(
+        config_root(tmp_path) / "user-profile.yaml",
+        {"personalization": {"research_focus": "robot learning"}},
+    )
+    payload = _literature_subscription(subscription_id="monitor-request-matrix")
+    selection_id = _monitor_selection(
+        tmp_path,
+        payload,
+        selection_id=f"prefsel-monitor-{field.replace('_', '-')}",
+    )
+    mutated = {**payload, field: mutation}
+
+    with pytest.raises(SystemExit, match="preference receipt"):
+        create_subscription(
+            tmp_path,
+            mutated,
+            now=_time(1),
+            preference_selection_id=selection_id,
+        )
+
+    assert list((tmp_path / "kb/monitoring/subscriptions").glob("*.yaml")) == []
+
+
+def test_monitor_reference_and_canonical_preference_mutations_are_zero_write_stale_paths(
+    tmp_path: Path,
+) -> None:
+    program_state = tmp_path / "kb/programs/program-vla/state.yaml"
+    write_yaml_if_changed(program_state, {"program_id": "program-vla", "status": "active"})
+    profile_path = config_root(tmp_path) / "user-profile.yaml"
+    write_yaml_if_changed(
+        profile_path,
+        {"personalization": {"research_focus": "robot learning"}},
+    )
+    payload = _literature_subscription(subscription_id="monitor-reference-stale")
+    selection_id = _monitor_selection(
+        tmp_path,
+        payload,
+        selection_id="prefsel-monitor-reference",
+    )
+    write_yaml_if_changed(program_state, {"program_id": "program-vla", "status": "changed"})
+    with pytest.raises(SystemExit, match="another task"):
+        create_subscription(
+            tmp_path,
+            payload,
+            now=_time(1),
+            preference_selection_id=selection_id,
+        )
+    assert not subscription_path(tmp_path, "monitor-reference-stale").exists()
+
+    write_yaml_if_changed(program_state, {"program_id": "program-vla", "status": "active"})
+    second_payload = _literature_subscription(subscription_id="monitor-catalog-stale")
+    second_id = _monitor_selection(
+        tmp_path,
+        second_payload,
+        selection_id="prefsel-monitor-catalog",
+    )
+    write_yaml_if_changed(
+        profile_path,
+        {"personalization": {"research_focus": "changed after selection"}},
+    )
+    with pytest.raises(SystemExit, match="stale catalog"):
+        create_subscription(
+            tmp_path,
+            second_payload,
+            now=_time(1),
+            preference_selection_id=second_id,
+        )
+    assert not subscription_path(tmp_path, "monitor-catalog-stale").exists()
+
+
+def test_monitor_create_rejects_receipt_from_another_skill_before_write(tmp_path: Path) -> None:
+    payload = _literature_subscription(subscription_id="monitor-wrong-skill")
+    eligible = eligible_preferences(tmp_path, skill="report-author", operation="weekly")
+    record_effective_selection(
+        tmp_path,
+        {
+            "selection_id": "prefsel-monitor-wrong-skill",
+            "skill": "report-author",
+            "operation": "weekly",
+            "catalog_digest": eligible["catalog_digest"],
+            "task_context": {"report": "weekly"},
+            "selected": [],
+            "excluded": [],
+        },
+    )
+
+    with pytest.raises(SystemExit, match="another skill"):
+        create_subscription(
+            tmp_path,
+            payload,
+            now=_time(1),
+            preference_selection_id="prefsel-monitor-wrong-skill",
+        )
+
+    assert not subscription_path(tmp_path, "monitor-wrong-skill").exists()
+
+
+def test_monitor_consumed_input_registry_mutation_matrix() -> None:
+    fields = OPERATION_CANONICAL_INPUTS[("research-monitor", "create-subscription")]
+    context: dict[str, object] = {field: f"value-{field}" for field in fields}
+    baseline = task_context_digest(
+        skill="research-monitor",
+        operation="create-subscription",
+        canonical_inputs=context,
+    )
+    for field in fields:
+        mutated = dict(context)
+        mutated[field] = f"changed-{field}"
+        assert task_context_digest(
+            skill="research-monitor",
+            operation="create-subscription",
+            canonical_inputs=mutated,
+        ) != baseline
+
+
+@pytest.mark.parametrize("state", ["planned", "running", "blocked", "failed_retryable"])
+def test_active_monitor_runs_projects_every_resumable_state(tmp_path: Path, state: str) -> None:
+    create_subscription(tmp_path, _literature_subscription(), now=_time(1))
+    create_due_run(tmp_path, "monitor-vla", expected_subscription_revision=1, now=_time(15))
+    subscription = load_subscription(tmp_path, "monitor-vla")
+    run = load_run(tmp_path, subscription["active_run_id"])
+    if state != "planned":
+        transition_run(
+            tmp_path,
+            run["id"],
+            expected_revision=run["revision"],
+            state="running",
+            now=_time(15, 1),
+        )
+        run = load_run(tmp_path, run["id"])
+    if state in {"blocked", "failed_retryable"}:
+        transition_run(
+            tmp_path,
+            run["id"],
+            expected_revision=run["revision"],
+            state=state,
+            stop={"reason": state, "rationale": f"The run is {state}."},
+            now=_time(15, 2),
+        )
+        run = load_run(tmp_path, run["id"])
+
+    subscription_bytes = subscription_path(tmp_path, "monitor-vla").read_bytes()
+    run_bytes = run_path(tmp_path, run["id"]).read_bytes()
+    projection = active_monitor_runs(tmp_path)
+
+    assert len(projection) == 1
+    assert projection[0]["run_state"] == state
+    assert projection[0]["run_revision"] == run["revision"]
+    assert projection[0]["run_content_digest"] == run["content_digest"]
+    assert projection[0]["subscription_revision"] == subscription["revision"]
+    assert projection[0]["program_ids"] == ["program-vla"]
+    assert subscription_path(tmp_path, "monitor-vla").read_bytes() == subscription_bytes
+    assert run_path(tmp_path, run["id"]).read_bytes() == run_bytes
+
+
+def test_pre_r11_active_run_remains_discoverable_with_legacy_task_digest(tmp_path: Path) -> None:
+    create_subscription(tmp_path, _literature_subscription(), now=_time(1))
+    create_due_run(tmp_path, "monitor-vla", expected_subscription_revision=1, now=_time(15))
+    subscription = load_subscription(tmp_path, "monitor-vla")
+    run = load_run(tmp_path, subscription["active_run_id"])
+
+    subscription_file = subscription_path(tmp_path, "monitor-vla")
+    legacy_subscription = yaml.safe_load(subscription_file.read_text(encoding="utf-8"))
+    legacy_subscription.pop("preference_binding")
+    subscription_file.write_text(
+        yaml.safe_dump(legacy_subscription, sort_keys=False),
+        encoding="utf-8",
+    )
+    run_file = run_path(tmp_path, run["id"])
+    legacy_run = yaml.safe_load(run_file.read_text(encoding="utf-8"))
+    legacy_run["frozen_subscription"].pop("preference_binding")
+    legacy_run["frozen_subscription"].pop("subscription_content_digest")
+    legacy_run["content_digest"] = value_digest(
+        {key: value for key, value in legacy_run.items() if key != "content_digest"}
+    )
+    run_file.write_text(yaml.safe_dump(legacy_run, sort_keys=False), encoding="utf-8")
+
+    loaded = load_run(tmp_path, run["id"])
+    expected_legacy_task = value_digest(
+        {
+            "run_id": run["id"],
+            "subscription_id": "monitor-vla",
+            "scheduled_for": run["scheduled_for"],
+            "kind": run["frozen_subscription"]["kind"],
+            "target": run["frozen_subscription"]["target"],
+            "scope_digest": run["frozen_subscription"]["scope_digest"],
+            "budget": run["frozen_subscription"]["budget"],
+        }
+    )
+
+    assert monitor_task_binding(loaded)["task_digest"] == expected_legacy_task
+    assert active_monitor_runs(tmp_path)[0]["run_id"] == run["id"]
 
 
 def test_subscription_rejects_a_nonexistent_program_binding(tmp_path: Path) -> None:

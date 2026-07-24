@@ -861,6 +861,12 @@ target:                           # 与 kind 精确对应；不得出现 provide
   # unit_ids: [paper-...]                            # unit-recheck
 scope_snapshot: {}               # 有界 JSON mapping；创建后冻结
 scope_digest: <sha256>
+preference_binding:              # 可为空；只保存 value-free create-subscription receipt binding
+  selection_id: prefsel-...
+  selection_digest: <sha256>
+  task_context_digest: <sha256>
+  skill: research-monitor
+  operation: create-subscription
 budget:                           # 只允许以下正整数，可为空
   max_queries: 8
   max_candidates: 50
@@ -890,12 +896,14 @@ scheduled_for: <UTC ISO-8601>
 state: planned | running | blocked | failed_retryable | completed | cancelled
 frozen_subscription:
   subscription_revision: 1
+  subscription_content_digest: <sha256>
   kind: literature | survey-freshness | unit-recheck
   target: {}
   scope_snapshot: {}
   scope_digest: <sha256>
   budget: {}
   cadence: {}
+  preference_binding: {}
 outputs:
   literature_stage_ids: []
   literature_stage_bindings: [{stage_id: source-search-..., byte_sha256: <sha256>}]
@@ -929,7 +937,13 @@ history:
 content_digest: <sha256>
 ```
 
-subscription、run、frozen_subscription、history、outputs、review outcome/reference 都是闭合 schema：未知或缺失字段、非 canonical 时间/ID/列表、任意 `provider` 字段即使重算 `content_digest` 也 fail closed。错过多个 anchored window 合并成一次 due run，不补建任务风暴；completed/cancelled 不可重开，blocked/retryable 可恢复。run 的 task binding 固定 `run/subscription/schedule/kind/target/scope/budget`，content digest 覆盖整个 receipt。文献输出必须绑定同一 task 的 terminal `literature-search` stage 及其实际 bytes；survey 输出绑定冻结 survey 的实际 bytes；unit recheck 完成态必须精确覆盖全部冻结 unit id。任一已绑定产物或 receipt 被改写后加载 fail closed。`contradiction_candidate` 必须挂两个不同的、新旧两侧 evidence，不能自动覆盖 confirmed claim。outcome 初始为 `unresolved`；后续处置通过 run revision + content digest CAS 原子更新。`materialized` 必须携带当前用户授权，`sent_to_review` 必须绑定合法 review target；旧 receipt 未含 disposition 时只读兼容为 unresolved，不静默重写历史。subscription 只能绑定已存在的 canonical program；completed run 与 run/subscription 更新在同一 root transaction 内向每个 program 写一条 `epistemic_type=operational` 的完成事实事件，事件不携带或确认 outcome 判断。
+subscription、run、frozen_subscription、history、outputs、review outcome/reference 都是闭合 schema：未知或缺失字段、非 canonical 时间/ID/列表、任意 `provider` 字段即使重算 `content_digest` 也 fail closed。`create-subscription` 是 task-scoped preference consumer：canonical context 覆盖 finalized subscription id/kind/title/target/cadence/timezone/scope/budget/program bindings、current referenced program/unit/survey identity+bytes 与 operation contract。Runtime Agent 只能用已选 soft preference 补充尚缺表达；当前用户明确 target/scope/budget 始终逐字优先。脚本不选 query/priority；无 receipt 时不读 soft profile。错误 skill/op/task、canonical preference 或 referenced object/request mutation 在 subscription 写入前零写拒绝，成功只保存 value-free binding。
+
+唯一兼容例外是 R11 之前已存在的 schema v1 subscription/frozen run：它们可以只读加载为 neutral preference binding，并保持原 monitor task digest，避免已在 `planned/running/blocked/failed_retryable` 的 run 因升级消失；不得接受只缺一部分 R11 字段的混合形态。legacy subscription 下一次创建 due run 时升级为完整 R11 shape，新写一律包含全部字段。
+
+错过多个 anchored window 合并成一次 due run，不补建任务风暴；completed/cancelled 不可重开，blocked/retryable 可恢复。run 冻结创建时 current subscription revision、整份 subscription content digest 与 preference binding；run task binding 固定 `run/subscription/schedule/kind/target/scope/budget/subscription-content/preference-binding`，content digest 覆盖整个 receipt。文献输出必须绑定同一 task 的 terminal `literature-search` stage 及其实际 bytes；survey 输出绑定冻结 survey 的实际 bytes；unit recheck 完成态必须精确覆盖全部冻结 unit id。任一已绑定产物或 receipt 被改写后加载 fail closed。`contradiction_candidate` 必须挂两个不同的、新旧两侧 evidence，不能自动覆盖 confirmed claim。outcome 初始为 `unresolved`；后续处置通过 run revision + content digest CAS 原子更新。`materialized` 必须携带当前用户授权，`sent_to_review` 必须绑定合法 review target；旧 receipt 未含 disposition 时只读兼容为 unresolved，不静默重写历史。subscription 只能绑定已存在的 canonical program；completed run 与 run/subscription 更新在同一 root transaction 内向每个 program 写一条 `epistemic_type=operational` 的完成事实事件，事件不携带或确认 outcome 判断。
+
+纯读 `active_monitor_runs` 枚举每个 subscription 以 `active_run_id` 绑定的 `planned/running/blocked/failed_retryable` run，投影 exact subscription status/revision/content digest、run state/revision/content digest、stop、schedule、scope 与 program dependencies。`kb next` 将它们表示为 `resume-monitor-run`；due projection 不得掩盖 active run。terminal run 不出现，missing/cross-subscription/terminal active link 整体 fail closed。任一绑定变化都会改变 portfolio candidate snapshot，使旧 `PortfolioDecision` stale。
 
 ### Passage cache
 

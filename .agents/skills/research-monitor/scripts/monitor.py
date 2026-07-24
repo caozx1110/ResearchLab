@@ -82,9 +82,14 @@ def _apply(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
         raise SystemExit("Research monitor action is unsupported.")
     now = payload.get("now")
     if action == "create-subscription":
-        if set(payload) - {"action", "subscription", "now"}:
+        if set(payload) - {"action", "subscription", "now", "preference_selection_id"}:
             raise SystemExit("Research monitor request contains unsupported fields.")
-        path = create_subscription(root, payload.get("subscription"), now=now)
+        path = create_subscription(
+            root,
+            payload.get("subscription"),
+            now=now,
+            preference_selection_id=str(payload.get("preference_selection_id") or ""),
+        )
         document = load_subscription(root, path.stem)
         return {"action": action, "subscription_id": document["id"], "revision": document["revision"]}
     if action == "set-subscription-status":
