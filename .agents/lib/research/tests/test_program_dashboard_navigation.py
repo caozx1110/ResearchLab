@@ -882,6 +882,44 @@ def test_orchestrator_auto_execute_passes_root_env_and_arg_to_child(tmp_path: Pa
     assert kwargs["env"]["RESEARCH_PROJECT_ROOT"] == str(root)
 
 
+@pytest.mark.parametrize("invalid_preferences", [ValueError("broken config"), {"autonomy": {"auto_execute_scope": "screen"}}])
+def test_orchestrator_auto_execute_fails_closed_when_autonomy_preferences_are_invalid(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    invalid_preferences: object,
+) -> None:
+    orchestrate = _load_script(
+        "research-orchestrator",
+        "orchestrate.py",
+        "orchestrator_script_for_invalid_autonomy",
+    )
+    root = _make_workspace(tmp_path)
+
+    if isinstance(invalid_preferences, Exception):
+        def invalid_loader(_root: Path):
+            raise invalid_preferences
+        monkeypatch.setattr(orchestrate, "load_runtime_preferences", invalid_loader)
+    else:
+        monkeypatch.setattr(orchestrate, "load_runtime_preferences", lambda _root: invalid_preferences)
+    monkeypatch.setattr(
+        orchestrate.subprocess,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("child must not execute")),
+    )
+    plan = {
+        "safe_execute": True,
+        "step_type": "screen",
+        "reason": "bounded automatic screening",
+        "command_parts": [orchestrate.COMMAND_PREFIX, "owner.py", "screen"],
+    }
+
+    assert orchestrate.execute_auto_plan(root, plan) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "could not be validated" in captured.err
+
+
 def test_orchestrator_auto_execute_passes_root_to_child_under_symlinked_agents(tmp_path: Path) -> None:
     orchestrate = _load_script("research-orchestrator", "orchestrate.py", "orchestrator_script_for_auto_child_root")
     sandbox_root = tmp_path / "sandbox"

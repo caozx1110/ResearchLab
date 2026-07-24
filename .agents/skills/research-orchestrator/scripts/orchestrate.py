@@ -730,10 +730,12 @@ def execute_auto_plan(root: Path, plan: dict[str, Any]) -> int:
     try:
         configured_scope = load_runtime_preferences(root).get("autonomy", {}).get("auto_execute_scope", [])
     except Exception:  # noqa: BLE001
-        configured_scope = sorted(GOVERNANCE_MAX_AUTO_STEPS)
-    if not isinstance(configured_scope, list):
-        configured_scope = sorted(GOVERNANCE_MAX_AUTO_STEPS)
-    effective_scope = {str(item).strip() for item in configured_scope if str(item).strip()} & GOVERNANCE_MAX_AUTO_STEPS
+        print("[stop] runtime autonomy preferences could not be validated", file=sys.stderr)
+        return 2
+    if not isinstance(configured_scope, list) or any(not isinstance(item, str) for item in configured_scope):
+        print("[stop] runtime autonomy preferences could not be validated", file=sys.stderr)
+        return 2
+    effective_scope = {item.strip() for item in configured_scope if item.strip()} & GOVERNANCE_MAX_AUTO_STEPS
     if step_type not in effective_scope:
         print(format_auto_plan(plan))
         print("[stop] step is not in the safe auto-execute allowlist")
