@@ -401,6 +401,32 @@ def method_preference_state(resolution: dict[str, object]) -> dict[str, object]:
     }
 
 
+def require_current_method_preferences(
+    root: Path,
+    choice: dict[str, Any],
+    *,
+    program_id: str,
+    idea_id: str,
+) -> dict[str, object]:
+    """Revalidate the prepare-time binding before verify or confirmation."""
+    stored = choice.get("preference_context")
+    if not isinstance(stored, dict):
+        raise SystemExit("Method preference context is missing; prepare the method again.")
+    binding = stored.get("selection_binding")
+    binding = binding if isinstance(binding, dict) else {}
+    idea_record, _idea_path = locate_record(root, idea_id, kind="idea", fuzzy=False)
+    current = resolve_method_preferences(
+        root,
+        idea_record,
+        program_id=program_id,
+        idea_id=idea_id,
+        selection_id=str(binding.get("selection_id") or ""),
+    )
+    if method_preference_state(current) != stored:
+        raise SystemExit("Method preferences changed after prepare; prepare the method again.")
+    return stored
+
+
 def selected_method_research_focus(resolution: dict[str, object]) -> str:
     values = resolution.get("values_by_path")
     values = values if isinstance(values, dict) else {}
@@ -827,21 +853,12 @@ def verify_method(root: Path, args: argparse.Namespace) -> int:
     with mutation_transaction(root, "method:verify", targets):
         choice = load_method_artifact(paths["choice"], label="selection artifact")
         require_current_method_subject(choice, args.program_id, args.idea_id)
-        idea_record, _idea_path = locate_record(root, args.idea_id, kind="idea", fuzzy=False)
-        stored_preference_context = choice.get("preference_context")
-        if not isinstance(stored_preference_context, dict):
-            raise SystemExit("Method preference context is missing; prepare the method again.")
-        stored_selection = stored_preference_context.get("selection_binding")
-        stored_selection = stored_selection if isinstance(stored_selection, dict) else {}
-        current_preferences = resolve_method_preferences(
+        stored_preference_context = require_current_method_preferences(
             root,
-            idea_record,
             program_id=args.program_id,
             idea_id=args.idea_id,
-            selection_id=str(stored_selection.get("selection_id") or ""),
+            choice=choice,
         )
-        if method_preference_state(current_preferences) != stored_preference_context:
-            raise SystemExit("Method preferences changed after prepare; prepare the method again.")
         if "selected_repo_id" in choice:
             raise SystemExit("Unconfirmed method artifacts must not contain selected_repo_id.")
         proposed_repo_id = str(choice.get("proposed_repo_id") or "").strip()
@@ -867,6 +884,11 @@ def verify_method(root: Path, args: argparse.Namespace) -> int:
         choice["payload"]["method_selection"]["agent_fill_status"] = "verified"
         interfaces = load_method_artifact(paths["interfaces"], label="interface artifact")
         matrix = load_method_artifact(paths["matrix"], label="experiment matrix")
+        if (
+            interfaces.get("preference_context") != stored_preference_context
+            or matrix.get("preference_context") != stored_preference_context
+        ):
+            raise SystemExit("Method artifacts disagree on preference context; prepare the method again.")
         interfaces["proposal_status"] = "ready_for_review"
         matrix["proposal_status"] = "ready_for_review"
         write_yaml_if_changed(paths["choice"], choice)
@@ -899,6 +921,12 @@ def confirm_method(
             raise SystemExit("The idea is no longer selected; refusing to confirm this method proposal.")
         choice = load_method_artifact(paths["choice"], label="selection artifact")
         require_current_method_subject(choice, args.program_id, args.idea_id)
+        require_current_method_preferences(
+            root,
+            choice,
+            program_id=args.program_id,
+            idea_id=args.idea_id,
+        )
         if str(choice.get("status") or "") != "ready_for_review":
             raise SystemExit("Method selection is not ready for review; complete evidence verification first.")
         if "selected_repo_id" in choice:

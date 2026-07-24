@@ -15,6 +15,7 @@ from research.judgements import (
     judgement_confirmation_is_current,
     judgement_snapshot_binding,
 )
+from research.paths import config_root
 
 
 IDEA_ID = "i-r2-method-123456"
@@ -289,6 +290,29 @@ def test_confirm_rejects_claim_changes_after_verification_without_side_effects(t
     assert "selected_repo_id" not in state
     assert "selected_repo_id" not in choice
     assert state["stage"] == "idea-review"
+    assert not paths["events"].exists()
+
+
+def test_confirm_rejects_hard_preference_change_after_verification_without_side_effects(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    method = _load_method_module()
+    root = _workspace(tmp_path)
+    paths = _paths(root)
+    assert _prepare(method, monkeypatch, root) == 0
+    _fill_method_claims(root)
+    assert _verify(method, monkeypatch, root) == 0
+    write_yaml_if_changed(
+        config_root(root) / "user-profile.yaml",
+        {"constraints": ["new local-only boundary"]},
+    )
+
+    with pytest.raises(SystemExit, match="preferences changed"):
+        _confirm(method, monkeypatch, root)
+
+    assert "selected_repo_id" not in load_yaml(paths["choice"], default={})
+    assert "selected_repo_id" not in load_yaml(paths["state"], default={})
     assert not paths["events"].exists()
 
 
