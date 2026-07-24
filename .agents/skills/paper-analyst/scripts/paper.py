@@ -331,6 +331,7 @@ def _load_or_refresh_cache(
 ) -> tuple[list[dict], Path]:
     preferences = preferences or {}
     cache_path = _cache_path(unit_root)
+    _assert_safe_paper_input_path(root, cache_path)
     if cache_path.exists():
         if force:
             raise SystemExit(
@@ -926,6 +927,7 @@ def _run_refresh_structure(
     dispatch and the auto-post-note step."""
     structure_path = unit_root / "structure.yaml"
     note_path = unit_root / "note.md"
+    _assert_safe_paper_input_path(root, note_path)
     payload = detect_structure(source_chunks, note_path)
     write_yaml_if_changed(structure_path, payload)
     record["payload"]["structure"]["refresh_status"] = "pending_user_confirmation"
@@ -1062,6 +1064,7 @@ def _prepare_note_scaffold(
 ) -> Path:
     """Create the type-specific fillable note after paper_type is verified."""
     fill_scaffold_path = unit_root / "note-fill.yaml"
+    _assert_safe_paper_input_path(root, fill_scaffold_path)
     raw_selected_type = str(record.get("payload", {}).get("quick_screen", {}).get("paper_type") or "").strip()
     selected_type = raw_selected_type if raw_selected_type in ELEMENT_SETS else "method_system"
     if fill_scaffold_path.exists():
@@ -1386,6 +1389,7 @@ def _run_screen(args, root, record, unit_root, cache_path, source_chunks, paper_
 
     # verify
     fill_path = _resolve_fill_input(unit_root, "screening.yaml", args.input)
+    _assert_safe_paper_input_path(root, fill_path)
     if not fill_path.exists():
         raise SystemExit(f"screen --phase verify: fill input not found: {fill_path}")
     payload = load_yaml(fill_path, default={})
@@ -1495,6 +1499,9 @@ def _run_complete_note(args, root, record, unit_root, cache_path, source_chunks,
 
     if args.phase == "prepare":
         screening_path = unit_root / "screening.yaml"
+        _assert_safe_paper_input_path(root, screening_path)
+        _assert_safe_paper_input_path(root, fill_scaffold_path)
+        _assert_safe_paper_input_path(root, note_path)
         screening = load_yaml(screening_path, default={}) if screening_path.exists() else {}
         screening_status = str(screening.get("status") or "").strip() if isinstance(screening, dict) else ""
         verified_type = str(record.get("payload", {}).get("quick_screen", {}).get("paper_type") or "").strip()
@@ -1529,6 +1536,7 @@ def _run_complete_note(args, root, record, unit_root, cache_path, source_chunks,
 
     # verify
     fill_path = _resolve_fill_input(unit_root, "note-fill.yaml", args.input)
+    _assert_safe_paper_input_path(root, fill_path)
     if not fill_path.exists():
         raise SystemExit(f"complete-note --phase verify: fill input not found: {fill_path}")
     fill = load_yaml(fill_path, default={})

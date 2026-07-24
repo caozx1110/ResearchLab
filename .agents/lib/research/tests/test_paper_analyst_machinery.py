@@ -678,6 +678,53 @@ def test_prepare_fill_verify_requires_fresh_phase_receipt_and_then_succeeds(
     assert verified["worth_deep_reading"] == "yes"
 
 
+@pytest.mark.parametrize("artifact", ("source", "parse-cache", "fill"))
+def test_cli_rejects_symlinked_paper_inputs_without_a_preference_selection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    artifact: str,
+) -> None:
+    paper = _load_paper_module()
+    ensure_workspace(tmp_path)
+    paper_id = f"p-symlink-{artifact}"
+    record = _paper_record(paper_id)
+    unit_dir = record_path(tmp_path, "paper", paper_id).parent
+    unit_dir.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / f"outside-{artifact}.yaml"
+    outside.write_text("chunks: []\n", encoding="utf-8")
+    argv = ["screen", "--paper-id", paper_id, "--phase", "prepare", "--defer-post-actions"]
+    if artifact == "source":
+        source_path = unit_dir / "source.txt"
+        source_path.symlink_to(outside)
+        record["source"]["original_uri"] = str(source_path.relative_to(tmp_path))
+    elif artifact == "parse-cache":
+        (unit_dir / "parse-cache.yaml").symlink_to(outside)
+    else:
+        _write_parse_cache(unit_dir, paper_id)
+        fill_path = unit_dir / "agent-fill.yaml"
+        fill_path.symlink_to(outside)
+        argv = [
+            "screen",
+            "--paper-id",
+            paper_id,
+            "--phase",
+            "verify",
+            "--input",
+            fill_path.name,
+            "--defer-post-actions",
+        ]
+    write_record(tmp_path, record)
+    canonical_record = record_path(tmp_path, "paper", paper_id)
+    record_before = canonical_record.read_bytes()
+    cache_path = unit_dir / "parse-cache.yaml"
+    cache_before = cache_path.read_bytes() if cache_path.exists() else None
+
+    with pytest.raises(ValueError, match="symlink"):
+        _run_cli(paper, monkeypatch, tmp_path, *argv)
+    assert canonical_record.read_bytes() == record_before
+    assert (cache_path.read_bytes() if cache_path.exists() else None) == cache_before
+
+
 def test_verified_unclassified_screen_uses_method_system_fallback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
