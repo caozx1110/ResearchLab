@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import shutil
 import subprocess
 import sys
@@ -9,6 +10,24 @@ from pathlib import Path
 import pytest
 
 from research import updater
+
+
+def _write_copy_manifest(root: Path, **overrides: object) -> Path:
+    manifest_path = root / updater.MANIFEST_REL
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, object] = {
+        "schema": 1,
+        "install_name": "workspace-oss",
+        "install_mode": "copy-project",
+        "version": "0.1.0",
+        "files": {".agents/VERSION": "version-digest"},
+        "agents_md": "managed-block",
+        "unrelated": {"keep": [1, "two"]},
+    }
+    payload.update(overrides)
+    manifest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=3) + "\n", encoding="utf-8")
+    (root / ".agents" / "VERSION").write_text("0.1.0\n", encoding="utf-8")
+    return manifest_path
 
 
 def test_compare_semver_honors_stable_and_prerelease_precedence() -> None:
@@ -634,3 +653,218 @@ def test_linked_worktree_marker_is_accepted_for_local_checkout(tmp_path: Path) -
     assert provenance is not None
     assert provenance.checkout == source
     assert provenance.strategy == "local-checkout"
+
+
+def test_detached_copy_manifest_choice_requests_only_branch_and_remote_rebind_is_offline(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    install = tmp_path / "install"
+    detached = tmp_path / "detached"
+    (detached / ".git").mkdir(parents=True)
+    (detached / ".agents").mkdir()
+    (detached / ".agents" / "VERSION").write_text("0.2.0\n", encoding="utf-8")
+    (detached / "install-lib").mkdir()
+    (detached / "install-lib" / "ws_sync.py").write_text("", encoding="utf-8")
+    manifest_path = _write_copy_manifest(
+        install,
+        source_origin="ssh://example.test/team/fork.git",
+        source_checkout=str(detached),
+        source_repo=str(detached),
+        source_branch="",
+        source_strategy="local-checkout",
+        source_commit="old",
+    )
+    monkeypatch.setattr(updater, "_checkout_origin", lambda _checkout: "ssh://example.test/team/fork.git")
+    monkeypatch.setattr(updater, "_checkout_branch", lambda _checkout: "")
+
+    request = updater.source_choice_request(install)
+
+    assert request["fields"] == ["source_branch"]
+    assert request["current"]["source_origin"] == "ssh://example.test/team/fork.git"
+    assert request["apply"] == {
+        "verb": "update",
+        "expected_manifest_digest": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+        "source_origin": "ssh://example.test/team/fork.git",
+        "source_strategy": "remote-branch",
+        "provide": ["source_branch"],
+    }
+    for name in ("_fetch_checkout", "_pull_checkout", "_clone_checkout", "_invoke_ws_sync"):
+        monkeypatch.setattr(
+            updater,
+            name,
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("rebind must stay offline")),
+        )
+
+    rebound = updater.rebind_source(
+        install,
+        expected_manifest_digest=request["manifest_digest"],
+        source_origin="ssh://example.test/team/fork.git",
+        source_branch="release/r2",
+        source_strategy="remote-branch",
+    )
+
+    assert rebound["status"] == "rebound"
+    assert rebound["source_checkout"] == ""
+    assert rebound["source_commit"] == ""
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["source_origin"] == "ssh://example.test/team/fork.git"
+    assert manifest["source_branch"] == "release/r2"
+    assert manifest["source_strategy"] == "remote-branch"
+    assert manifest["source_checkout"] == manifest["source_repo"] == ""
+    assert manifest["source_commit"] == ""
+    assert manifest["files"] == {".agents/VERSION": "version-digest"}
+    assert manifest["unrelated"] == {"keep": [1, "two"]}
+
+
+def test_legacy_manifest_choice_exposes_strategy_specific_minimal_field_sets(tmp_path: Path) -> None:
+    install = tmp_path / "install"
+    manifest = _write_copy_manifest(install, source_repo="")
+
+    request = updater.source_choice_request(install)
+
+    assert request["fields"] == ["source_strategy"]
+    assert request["current"] == {}
+    assert request["manifest_digest"] == hashlib.sha256(manifest.read_bytes()).hexdigest()
+    alternatives = {item["source_strategy"]: item for item in request["alternatives"]}
+    assert alternatives["remote-branch"]["fields"] == ["source_origin", "source_branch"]
+    assert alternatives["local-checkout"]["fields"] == ["source_checkout"]
+
+
+def test_local_checkout_rebind_verifies_origin_branch_and_preserves_manifest(tmp_path: Path) -> None:
+    install = tmp_path / "install"
+    manifest_path = _write_copy_manifest(install, source_repo="")
+    source = tmp_path / "source"
+    (source / ".agents").mkdir(parents=True)
+    (source / ".agents" / "VERSION").write_text("0.2.0\n", encoding="utf-8")
+    (source / "install-lib").mkdir()
+    (source / "install-lib" / "ws_sync.py").write_text("", encoding="utf-8")
+    subprocess.run(["git", "init", str(source)], check=True, capture_output=True, text=True)
+    _git(source, "config", "user.name", "Updater Rebind")
+    _git(source, "config", "user.email", "updater-rebind@example.test")
+    _git(source, "checkout", "-b", "feature/local")
+    _git(source, "add", ".agents", "install-lib")
+    _git(source, "commit", "-m", "source")
+    remote = tmp_path / "source.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True, text=True)
+    _git(source, "remote", "add", "origin", str(remote))
+    before = json.loads(manifest_path.read_text(encoding="utf-8"))
+    digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+
+    rebound = updater.rebind_source(
+        install,
+        expected_manifest_digest=digest,
+        source_origin=str(remote),
+        source_checkout=str(source),
+        source_branch="feature/local",
+        source_strategy="local-checkout",
+    )
+
+    after = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert rebound["source_commit"] == _git(source, "rev-parse", "HEAD")
+    assert after["source_checkout"] == after["source_repo"] == str(source)
+    assert after["source_origin"] == str(remote)
+    assert after["source_branch"] == "feature/local"
+    assert after["source_strategy"] == "local-checkout"
+    for key in ("schema", "install_name", "install_mode", "version", "files", "agents_md", "unrelated"):
+        assert after[key] == before[key]
+
+
+@pytest.mark.parametrize(
+    ("choice", "code"),
+    [
+        ({"source_origin": "ssh://example.test/team/fork.git", "source_branch": "../bad"}, "invalid-source-branch"),
+        ({"source_origin": "local", "source_branch": "release/r1"}, "invalid-source-origin"),
+    ],
+)
+def test_remote_rebind_rejects_invalid_choice_without_byte_change(
+    tmp_path: Path,
+    choice: dict[str, str],
+    code: str,
+) -> None:
+    install = tmp_path / "install"
+    manifest = _write_copy_manifest(install, source_repo="")
+    before = manifest.read_bytes()
+
+    with pytest.raises(updater.SourceRebindError) as rejected:
+        updater.rebind_source(
+            install,
+            expected_manifest_digest=hashlib.sha256(before).hexdigest(),
+            source_strategy="remote-branch",
+            **choice,
+        )
+
+    assert rejected.value.code == code
+    assert manifest.read_bytes() == before
+
+
+def test_rebind_rejects_stale_digest_and_local_mismatch_without_byte_change(monkeypatch, tmp_path: Path) -> None:
+    install = tmp_path / "install"
+    manifest = _write_copy_manifest(install, source_repo="")
+    before = manifest.read_bytes()
+    with pytest.raises(updater.SourceRebindError) as stale:
+        updater.rebind_source(
+            install,
+            expected_manifest_digest="0" * 64,
+            source_origin="ssh://example.test/team/fork.git",
+            source_branch="release/r1",
+            source_strategy="remote-branch",
+        )
+    assert stale.value.code == "stale-manifest"
+    assert manifest.read_bytes() == before
+
+    source = tmp_path / "source"
+    (source / ".git").mkdir(parents=True)
+    (source / ".agents").mkdir()
+    (source / ".agents" / "VERSION").write_text("0.2.0\n", encoding="utf-8")
+    (source / "install-lib").mkdir()
+    (source / "install-lib" / "ws_sync.py").write_text("", encoding="utf-8")
+    monkeypatch.setattr(updater, "_checkout_origin", lambda _checkout: "ssh://example.test/actual.git")
+    monkeypatch.setattr(updater, "_checkout_branch", lambda _checkout: "actual")
+    with pytest.raises(updater.SourceRebindError) as mismatch:
+        updater.rebind_source(
+            install,
+            expected_manifest_digest=hashlib.sha256(before).hexdigest(),
+            source_origin="ssh://example.test/selected.git",
+            source_checkout=str(source),
+            source_branch="selected",
+            source_strategy="local-checkout",
+        )
+    assert mismatch.value.code == "source-origin-mismatch"
+    assert manifest.read_bytes() == before
+
+
+def test_rebind_rejects_manifest_symlink_and_symlinked_ancestor_without_touching_target(tmp_path: Path) -> None:
+    victim_root = tmp_path / "victim-root"
+    victim_manifest = _write_copy_manifest(victim_root, source_repo="")
+    victim_before = victim_manifest.read_bytes()
+
+    leaf_install = tmp_path / "leaf-install"
+    (leaf_install / ".agents").mkdir(parents=True)
+    (leaf_install / updater.MANIFEST_REL).symlink_to(victim_manifest)
+    with pytest.raises(updater.SourceRebindError) as leaf:
+        updater.rebind_source(
+            leaf_install,
+            expected_manifest_digest=hashlib.sha256(victim_before).hexdigest(),
+            source_origin="ssh://example.test/team/fork.git",
+            source_branch="release/r1",
+            source_strategy="remote-branch",
+        )
+    assert leaf.value.code == "unsafe-manifest-leaf"
+    assert (leaf_install / updater.MANIFEST_REL).is_symlink()
+    assert victim_manifest.read_bytes() == victim_before
+
+    ancestor_install = tmp_path / "ancestor-install"
+    ancestor_install.mkdir()
+    (ancestor_install / ".agents").symlink_to(victim_root / ".agents", target_is_directory=True)
+    with pytest.raises(updater.SourceRebindError) as ancestor:
+        updater.rebind_source(
+            ancestor_install,
+            expected_manifest_digest=hashlib.sha256(victim_before).hexdigest(),
+            source_origin="ssh://example.test/team/fork.git",
+            source_branch="release/r1",
+            source_strategy="remote-branch",
+        )
+    assert ancestor.value.code == "unsafe-manifest-ancestor"
+    assert (ancestor_install / ".agents").is_symlink()
+    assert victim_manifest.read_bytes() == victim_before

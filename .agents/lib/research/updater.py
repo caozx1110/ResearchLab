@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
+import os
 import re
+import stat
 import subprocess
 import sys
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Iterator, Sequence
+
+import fcntl
 
 
 MANIFEST_REL = Path(".agents/.install-manifest.json")
@@ -16,6 +22,10 @@ LOCAL_ORIGIN = "local"
 LOCAL_CHECKOUT_STRATEGY = "local-checkout"
 REMOTE_BRANCH_STRATEGY = "remote-branch"
 SOURCE_STRATEGIES = {LOCAL_CHECKOUT_STRATEGY, REMOTE_BRANCH_STRATEGY}
+INSTALL_MANIFEST_SCHEMA = 1
+INSTALL_NAME = "workspace-oss"
+INSTALL_MODE = "copy-project"
+_MAX_MANIFEST_BYTES = 16 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -38,6 +48,14 @@ class SourceProvenance:
 
 class SourceChoiceRequired(RuntimeError):
     pass
+
+
+class SourceRebindError(ValueError):
+    """A stable private failure raised before an update-source rebind writes."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 def _run_process(argv: Sequence[str], *, capture_output: bool = True) -> subprocess.CompletedProcess[str]:
@@ -225,12 +243,387 @@ def is_source_checkout(path: Path) -> bool:
     return candidate.is_dir() and (candidate / "install-lib" / "ws_sync.py").is_file()
 
 
+def _manifest_digest(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
+
+
+def _same_node(left: os.stat_result, right: os.stat_result) -> bool:
+    return left.st_dev == right.st_dev and left.st_ino == right.st_ino
+
+
+def _directory_open_flags() -> int:
+    return (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+
+
+@contextmanager
+def _locked_manifest_directory(install_root: Path) -> Iterator[tuple[Path, int, int]]:
+    """Anchor and lock ``.agents`` without traversing a symlink component."""
+    root = Path(install_root).expanduser().resolve(strict=False)
+    root_fd = -1
+    agents_fd = -1
+    try:
+        root_fd = os.open(str(root), _directory_open_flags())
+        root_status = os.fstat(root_fd)
+        if not stat.S_ISDIR(root_status.st_mode):
+            raise SourceRebindError("unsafe-install-root", "the install root is not a regular directory")
+        agents_status = os.stat(".agents", dir_fd=root_fd, follow_symlinks=False)
+        if not stat.S_ISDIR(agents_status.st_mode):
+            raise SourceRebindError("unsafe-manifest-ancestor", "the manifest ancestor is not a directory")
+        agents_fd = os.open(".agents", _directory_open_flags(), dir_fd=root_fd)
+        if not _same_node(agents_status, os.fstat(agents_fd)):
+            raise SourceRebindError("unsafe-manifest-ancestor", "the manifest ancestor changed during validation")
+        fcntl.flock(agents_fd, fcntl.LOCK_EX)
+        current_agents = os.stat(".agents", dir_fd=root_fd, follow_symlinks=False)
+        if not _same_node(current_agents, os.fstat(agents_fd)):
+            raise SourceRebindError("unsafe-manifest-ancestor", "the manifest ancestor changed before locking")
+        yield root, root_fd, agents_fd
+    except SourceRebindError:
+        raise
+    except (FileNotFoundError, NotADirectoryError, OSError) as exc:
+        raise SourceRebindError("unsafe-manifest-path", "the install manifest path cannot be safely opened") from exc
+    finally:
+        if agents_fd >= 0:
+            try:
+                fcntl.flock(agents_fd, fcntl.LOCK_UN)
+            finally:
+                os.close(agents_fd)
+        if root_fd >= 0:
+            os.close(root_fd)
+
+
+def _assert_anchored_agents(root_fd: int, agents_fd: int) -> None:
+    try:
+        current = os.stat(".agents", dir_fd=root_fd, follow_symlinks=False)
+    except OSError as exc:
+        raise SourceRebindError("unsafe-manifest-ancestor", "the manifest ancestor is no longer available") from exc
+    if not stat.S_ISDIR(current.st_mode) or not _same_node(current, os.fstat(agents_fd)):
+        raise SourceRebindError("unsafe-manifest-ancestor", "the manifest ancestor changed during rebind")
+
+
+def _read_manifest_at(agents_fd: int) -> tuple[dict[str, Any], bytes, os.stat_result]:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = -1
+    try:
+        descriptor = os.open(MANIFEST_REL.name, flags, dir_fd=agents_fd)
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise SourceRebindError("unsafe-manifest-leaf", "the install manifest is not a regular file")
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, min(1024 * 1024, _MAX_MANIFEST_BYTES + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > _MAX_MANIFEST_BYTES:
+                raise SourceRebindError("manifest-too-large", "the install manifest is too large")
+        after = os.fstat(descriptor)
+        lexical = os.stat(MANIFEST_REL.name, dir_fd=agents_fd, follow_symlinks=False)
+        if not stat.S_ISREG(lexical.st_mode) or not _same_node(before, after) or not _same_node(after, lexical):
+            raise SourceRebindError("manifest-raced", "the install manifest changed while it was read")
+        content = b"".join(chunks)
+    except SourceRebindError:
+        raise
+    except (FileNotFoundError, OSError) as exc:
+        raise SourceRebindError("unsafe-manifest-leaf", "the install manifest cannot be safely read") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    try:
+        payload = json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SourceRebindError("invalid-manifest-json", "the install manifest is not valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise SourceRebindError("invalid-manifest-shape", "the install manifest is not an object")
+    return payload, content, after
+
+
+def _validate_install_manifest(payload: dict[str, Any]) -> None:
+    if (
+        payload.get("schema") != INSTALL_MANIFEST_SCHEMA
+        or payload.get("install_name") != INSTALL_NAME
+        or payload.get("install_mode") != INSTALL_MODE
+    ):
+        raise SourceRebindError("unrecognized-manifest", "the manifest does not describe a copy install")
+    files = payload.get("files")
+    if not isinstance(files, dict) or not all(isinstance(key, str) and isinstance(value, str) for key, value in files.items()):
+        raise SourceRebindError("invalid-manifest-files", "the manifest files map is invalid")
+
+
+def _valid_origin(origin: str) -> bool:
+    return bool(origin and len(origin) <= 4096 and not any(ord(character) < 32 for character in origin))
+
+
+def _strict_source_checkout(path: Path) -> bool:
+    if path.is_symlink() or not path.is_dir():
+        return False
+    helper = path / "install-lib" / "ws_sync.py"
+    version = path / ".agents" / "VERSION"
+    return helper.is_file() and not helper.is_symlink() and version.is_file() and not version.is_symlink()
+
+
+def _write_manifest_at(
+    root_fd: int,
+    agents_fd: int,
+    *,
+    expected_content: bytes,
+    replacement: bytes,
+    mode: int,
+) -> None:
+    """CAS and atomically replace the manifest through the anchored directory."""
+    _assert_anchored_agents(root_fd, agents_fd)
+    _payload, current, _status = _read_manifest_at(agents_fd)
+    if not hmac.compare_digest(_manifest_digest(current), _manifest_digest(expected_content)):
+        raise SourceRebindError("stale-manifest", "the install manifest changed before rebind")
+    temporary_name = f".{MANIFEST_REL.name}.{os.urandom(12).hex()}.tmp"
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            mode & 0o777,
+            dir_fd=agents_fd,
+        )
+        view = memoryview(replacement)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("short manifest write")
+            view = view[written:]
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+        _assert_anchored_agents(root_fd, agents_fd)
+        _payload, current, _status = _read_manifest_at(agents_fd)
+        if not hmac.compare_digest(_manifest_digest(current), _manifest_digest(expected_content)):
+            raise SourceRebindError("stale-manifest", "the install manifest changed before commit")
+        os.replace(
+            temporary_name,
+            MANIFEST_REL.name,
+            src_dir_fd=agents_fd,
+            dst_dir_fd=agents_fd,
+        )
+        os.fsync(agents_fd)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            os.unlink(temporary_name, dir_fd=agents_fd)
+        except FileNotFoundError:
+            pass
+
+
 def _load_manifest(install_root: Path) -> dict[str, Any] | None:
     try:
         payload = json.loads((Path(install_root) / MANIFEST_REL).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def source_choice_request(install_root: Path) -> dict[str, Any]:
+    """Build a private, digest-bound Agent contract for one source choice."""
+    with _locked_manifest_directory(install_root) as (_root, root_fd, agents_fd):
+        _assert_anchored_agents(root_fd, agents_fd)
+        manifest, content, _status = _read_manifest_at(agents_fd)
+        _validate_install_manifest(manifest)
+
+        recorded_origin = str(manifest.get("source_origin") or "").strip()
+        recorded_branch = str(manifest.get("source_branch") or "").strip()
+        recorded_strategy = str(manifest.get("source_strategy") or "").strip()
+        checkout_text = str(manifest.get("source_checkout") or manifest.get("source_repo") or "").strip()
+        checkout = Path(checkout_text).expanduser().resolve(strict=False) if checkout_text else None
+        checkout_valid = checkout is not None and _strict_source_checkout(checkout)
+
+        actual_origin = _checkout_origin(checkout) if checkout_valid and is_git_checkout(checkout) else ""
+        actual_branch = _checkout_branch(checkout) if checkout_valid and is_git_checkout(checkout) else ""
+        origin = recorded_origin if _valid_origin(recorded_origin) else (actual_origin or "")
+        branch = recorded_branch if _valid_branch_name(recorded_branch) else (
+            actual_branch if _valid_branch_name(actual_branch) else ""
+        )
+
+        current: dict[str, str] = {}
+        if origin:
+            current["source_origin"] = origin
+        if branch:
+            current["source_branch"] = branch
+        if recorded_strategy in SOURCE_STRATEGIES:
+            current["source_strategy"] = recorded_strategy
+        if checkout_valid:
+            current["source_checkout"] = str(checkout)
+
+        digest = _manifest_digest(content)
+        base_apply: dict[str, Any] = {
+            "verb": "update",
+            "expected_manifest_digest": digest,
+        }
+
+        # A detached checkout with a validated non-local origin has one safe
+        # non-mutating route: bind an explicit remote branch.  The checkout is
+        # deliberately omitted from the apply contract.
+        if origin and origin != LOCAL_ORIGIN and not branch:
+            apply = {
+                **base_apply,
+                "source_origin": origin,
+                "source_strategy": REMOTE_BRANCH_STRATEGY,
+                "provide": ["source_branch"],
+            }
+            return {
+                "fields": ["source_branch"],
+                "current": current,
+                "manifest_digest": digest,
+                "apply": apply,
+            }
+
+        alternatives: list[dict[str, Any]] = []
+        remote_fields: list[str] = []
+        remote_template = {**base_apply, "source_strategy": REMOTE_BRANCH_STRATEGY}
+        if origin and origin != LOCAL_ORIGIN:
+            remote_template["source_origin"] = origin
+        else:
+            remote_fields.append("source_origin")
+        if branch:
+            remote_template["source_branch"] = branch
+        else:
+            remote_fields.append("source_branch")
+        remote_template["provide"] = remote_fields
+        alternatives.append(
+            {
+                "source_strategy": REMOTE_BRANCH_STRATEGY,
+                "fields": remote_fields,
+                "apply": remote_template,
+            }
+        )
+
+        local_fields: list[str] = []
+        local_template = {**base_apply, "source_strategy": LOCAL_CHECKOUT_STRATEGY}
+        if checkout_valid and checkout is not None:
+            local_template["source_checkout"] = str(checkout)
+            if origin:
+                local_template["source_origin"] = origin
+            if branch:
+                local_template["source_branch"] = branch
+        else:
+            local_fields.append("source_checkout")
+        local_template["provide"] = local_fields
+        alternatives.append(
+            {
+                "source_strategy": LOCAL_CHECKOUT_STRATEGY,
+                "fields": local_fields,
+                "apply": local_template,
+            }
+        )
+        return {
+            "fields": ["source_strategy"],
+            "current": current,
+            "manifest_digest": digest,
+            "alternatives": alternatives,
+        }
+
+
+def rebind_source(
+    install_root: Path,
+    *,
+    expected_manifest_digest: str,
+    source_origin: str = "",
+    source_checkout: str = "",
+    source_branch: str = "",
+    source_strategy: str = "",
+) -> dict[str, Any]:
+    """CAS-rebind copy-install provenance without fetching or applying code."""
+    expected = str(expected_manifest_digest or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", expected):
+        raise SourceRebindError("invalid-manifest-digest", "the expected manifest digest is invalid")
+    strategy = str(source_strategy or "").strip()
+    if strategy not in SOURCE_STRATEGIES:
+        raise SourceRebindError("invalid-source-strategy", "the selected source strategy is invalid")
+
+    with _locked_manifest_directory(install_root) as (_root, root_fd, agents_fd):
+        _assert_anchored_agents(root_fd, agents_fd)
+        manifest, content, status = _read_manifest_at(agents_fd)
+        _validate_install_manifest(manifest)
+        if not hmac.compare_digest(_manifest_digest(content), expected):
+            raise SourceRebindError("stale-manifest", "the install manifest changed after source selection")
+
+        origin = str(source_origin or "").strip()
+        branch = str(source_branch or "").strip()
+        checkout_value = ""
+        commit = ""
+
+        if strategy == REMOTE_BRANCH_STRATEGY:
+            if not _valid_origin(origin) or origin == LOCAL_ORIGIN:
+                raise SourceRebindError("invalid-source-origin", "remote-branch requires a non-local source origin")
+            if not _valid_branch_name(branch):
+                raise SourceRebindError("invalid-source-branch", "remote-branch requires a valid explicit branch")
+        else:
+            checkout_text = str(source_checkout or "").strip()
+            if not checkout_text or any(ord(character) < 32 for character in checkout_text):
+                raise SourceRebindError("invalid-source-checkout", "local-checkout requires a source checkout")
+            checkout = Path(checkout_text).expanduser().resolve(strict=False)
+            if not _strict_source_checkout(checkout):
+                raise SourceRebindError("invalid-source-checkout", "the selected checkout is not a bundle source")
+            checkout_value = str(checkout)
+            actual_origin = _checkout_origin(checkout) if is_git_checkout(checkout) else ""
+            actual_branch = _checkout_branch(checkout) if is_git_checkout(checkout) else ""
+            if not origin:
+                origin = actual_origin or LOCAL_ORIGIN
+            if not _valid_origin(origin):
+                raise SourceRebindError("invalid-source-origin", "the selected source origin is invalid")
+            if origin != LOCAL_ORIGIN:
+                if not actual_origin or not hmac.compare_digest(actual_origin, origin):
+                    raise SourceRebindError("source-origin-mismatch", "the checkout origin does not match the selection")
+                if not _valid_branch_name(branch) or not actual_branch or not hmac.compare_digest(actual_branch, branch):
+                    raise SourceRebindError("source-branch-mismatch", "the checkout branch does not match the selection")
+            else:
+                if actual_origin:
+                    raise SourceRebindError("source-origin-mismatch", "the checkout has a different verifiable origin")
+                if branch:
+                    if not _valid_branch_name(branch):
+                        raise SourceRebindError("invalid-source-branch", "the selected source branch is invalid")
+                    if actual_branch and not hmac.compare_digest(actual_branch, branch):
+                        raise SourceRebindError("source-branch-mismatch", "the checkout branch does not match the selection")
+                elif _valid_branch_name(actual_branch):
+                    branch = actual_branch
+            try:
+                commit = _source_commit(checkout)
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise SourceRebindError("invalid-source-commit", "the selected checkout commit cannot be verified") from exc
+
+        replacement = dict(manifest)
+        replacement.update(
+            {
+                "source_repo": checkout_value,
+                "source_origin": origin,
+                "source_checkout": checkout_value,
+                "source_branch": branch,
+                "source_strategy": strategy,
+                "source_commit": commit,
+            }
+        )
+        rendered = (json.dumps(replacement, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        if rendered != content:
+            _write_manifest_at(
+                root_fd,
+                agents_fd,
+                expected_content=content,
+                replacement=rendered,
+                mode=status.st_mode,
+            )
+        return {
+            "status": "rebound",
+            "source_origin": origin,
+            "source_checkout": checkout_value,
+            "source_branch": branch,
+            "source_strategy": strategy,
+            "source_commit": commit,
+            "manifest_digest": _manifest_digest(rendered),
+        }
 
 
 def source_provenance(install_root: Path) -> SourceProvenance | None:
