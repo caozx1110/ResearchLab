@@ -18,7 +18,9 @@ an exception during commit restores every touched managed path and manifest.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -27,9 +29,10 @@ import stat
 import subprocess
 import sys
 import tempfile
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
 
 PLAN_JSONL = False
@@ -82,6 +85,8 @@ RELEASE_PREFIXES = (
 EXCLUDED_DIRS = {"__pycache__", ".venv", "tests"}
 EXCLUDED_SUFFIXES = {".pyc", ".pyo"}
 EXCLUDED_NAMES = {".DS_Store", MANIFEST_NAME, "eval_research_value.py", "skill_validator.py"}
+MAX_MANIFEST_BYTES = 16 * 1024 * 1024
+_EXPECTED_MANIFEST_UNSET = object()
 
 
 class SyncError(RuntimeError):
@@ -216,23 +221,239 @@ def source_agents_actual_nonempty(repo: Path, source: Path | None) -> bool:
     return False
 
 
-def load_manifest(path: Path, *, required: bool = True) -> dict[str, Any] | None:
-    if not path.exists():
-        if required:
-            die(f"manifest not found: {path}")
-        return None
+class ManifestSnapshot:
+    __slots__ = ("payload", "content", "device", "inode")
+
+    def __init__(self, payload: dict[str, Any], content: bytes, device: int, inode: int) -> None:
+        self.payload = payload
+        self.content = content
+        self.device = device
+        self.inode = inode
+
+
+class ManifestExpectation:
+    __slots__ = ("kind", "device", "inode", "byte_sha256")
+
+    def __init__(self, kind: str, device: int = 0, inode: int = 0, byte_sha256: str = "") -> None:
+        self.kind = kind
+        self.device = device
+        self.inode = inode
+        self.byte_sha256 = byte_sha256
+
+
+def _same_node(left: os.stat_result, right: os.stat_result) -> bool:
+    return left.st_dev == right.st_dev and left.st_ino == right.st_ino
+
+
+def _directory_open_flags() -> int:
+    return (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+
+
+@contextmanager
+def workspace_lease(dst_root: Path) -> Iterator[int]:
+    """Take the shared lifecycle/rebind lease on the stable workspace root."""
+
+    root = Path(dst_root).expanduser().resolve(strict=False)
+    root_fd = -1
+    entered = False
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        die(f"manifest is unreadable or invalid JSON: {path}: {exc}")
+        root_fd = os.open(str(root), _directory_open_flags())
+        before = os.fstat(root_fd)
+        if not stat.S_ISDIR(before.st_mode):
+            die("workspace root is not a real directory")
+        fcntl.flock(root_fd, fcntl.LOCK_EX)
+        current = os.stat(str(root), follow_symlinks=False)
+        if not _same_node(before, current):
+            die("workspace root changed before lifecycle lease")
+        entered = True
+        yield root_fd
+    except SyncError:
+        raise
+    except (FileNotFoundError, NotADirectoryError, OSError) as exc:
+        if entered:
+            raise
+        die(f"workspace root cannot be safely locked: {exc}")
+    finally:
+        if root_fd >= 0:
+            try:
+                fcntl.flock(root_fd, fcntl.LOCK_UN)
+            finally:
+                os.close(root_fd)
+
+
+def _open_agents_at(root_fd: int, *, required: bool) -> int:
+    try:
+        lexical = os.stat(".agents", dir_fd=root_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        if required:
+            die("managed .agents root is missing")
+        return -1
+    except OSError as exc:
+        die(f"managed .agents root cannot be verified: {exc}")
+    if not stat.S_ISDIR(lexical.st_mode):
+        die("managed .agents root is not a real directory")
+    try:
+        descriptor = os.open(".agents", _directory_open_flags(), dir_fd=root_fd)
+    except OSError as exc:
+        die(f"managed .agents root cannot be safely opened: {exc}")
+    if not _same_node(lexical, os.fstat(descriptor)):
+        os.close(descriptor)
+        die("managed .agents root changed while it was opened")
+    return descriptor
+
+
+def _parse_manifest(content: bytes) -> dict[str, Any]:
+    try:
+        data = json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        die(f"manifest is unreadable or invalid JSON: {exc}")
     if not isinstance(data, dict):
-        die(f"manifest has invalid schema: {path}")
+        die("manifest has invalid schema")
     if data.get("schema") != SCHEMA or data.get("install_name") != INSTALL_NAME or data.get("install_mode") != INSTALL_MODE:
-        die(f"manifest is not a {INSTALL_NAME} {INSTALL_MODE} manifest: {path}")
+        die(f"manifest is not a {INSTALL_NAME} {INSTALL_MODE} manifest")
     files = data.get("files")
     if not isinstance(files, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in files.items()):
-        die(f"manifest files map is invalid: {path}")
+        die("manifest files map is invalid")
     return data
+
+
+def _manifest_snapshot_at(root_fd: int, *, required: bool) -> ManifestSnapshot | None:
+    agents_fd = _open_agents_at(root_fd, required=required)
+    if agents_fd < 0:
+        return None
+    descriptor = -1
+    try:
+        try:
+            lexical_before = os.stat(MANIFEST_NAME, dir_fd=agents_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            if required:
+                die("install manifest is missing")
+            return None
+        except OSError as exc:
+            die(f"install manifest cannot be verified: {exc}")
+        if not stat.S_ISREG(lexical_before.st_mode):
+            die("install manifest is not a regular file")
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        try:
+            descriptor = os.open(MANIFEST_NAME, flags, dir_fd=agents_fd)
+        except OSError as exc:
+            die(f"install manifest cannot be safely opened: {exc}")
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or not _same_node(lexical_before, before):
+            die("install manifest is not a stable regular file")
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, min(1024 * 1024, MAX_MANIFEST_BYTES + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > MAX_MANIFEST_BYTES:
+                die("install manifest is too large")
+        after = os.fstat(descriptor)
+        lexical_after = os.stat(MANIFEST_NAME, dir_fd=agents_fd, follow_symlinks=False)
+        if not _same_node(before, after) or not _same_node(after, lexical_after):
+            die("install manifest changed while it was read")
+        content = b"".join(chunks)
+        return ManifestSnapshot(_parse_manifest(content), content, after.st_dev, after.st_ino)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(agents_fd)
+
+
+def load_manifest_snapshot(dst_root: Path, *, required: bool = True) -> ManifestSnapshot | None:
+    with workspace_lease(dst_root) as root_fd:
+        return _manifest_snapshot_at(root_fd, required=required)
+
+
+def load_manifest(path: Path, *, required: bool = True) -> dict[str, Any] | None:
+    snapshot = load_manifest_snapshot(path.parent.parent, required=required)
+    return snapshot.payload if snapshot is not None else None
+
+
+def _manifest_expectation(value: str) -> ManifestExpectation | object:
+    text = str(value or "").strip()
+    if not text:
+        return _EXPECTED_MANIFEST_UNSET
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        die(f"expected manifest state is invalid JSON: {exc}")
+    if not isinstance(payload, dict):
+        die("expected manifest state is invalid")
+    kind = str(payload.get("type") or "")
+    if kind == "absent":
+        return ManifestExpectation("absent")
+    digest = str(payload.get("byte_sha256") or "")
+    device = payload.get("device")
+    inode = payload.get("inode")
+    if (
+        kind != "regular"
+        or not isinstance(device, int)
+        or device < 0
+        or not isinstance(inode, int)
+        or inode <= 0
+        or not re.fullmatch(r"[0-9a-f]{64}", digest)
+    ):
+        die("expected manifest state is invalid")
+    return ManifestExpectation("regular", device, inode, digest)
+
+
+def _snapshot_matches_expectation(current: ManifestSnapshot | None, expected: ManifestExpectation) -> bool:
+    if expected.kind == "absent":
+        return current is None
+    if current is None:
+        return False
+    return bool(
+        current.device == expected.device
+        and current.inode == expected.inode
+        and hmac.compare_digest(hashlib.sha256(current.content).hexdigest(), expected.byte_sha256)
+    )
+
+
+def _validate_planned_snapshot(
+    current: ManifestSnapshot | None,
+    planned: ManifestExpectation | object,
+) -> ManifestSnapshot | ManifestExpectation | None:
+    if planned is _EXPECTED_MANIFEST_UNSET:
+        return current
+    assert isinstance(planned, ManifestExpectation)
+    if not _snapshot_matches_expectation(current, planned):
+        die("install manifest changed after Agent plan verification; replan before writing")
+    return planned
+
+
+def _validate_expected_manifest_at(
+    root_fd: int,
+    expected: ManifestSnapshot | ManifestExpectation | None,
+) -> None:
+    current = _manifest_snapshot_at(root_fd, required=False)
+    if isinstance(expected, ManifestExpectation):
+        if not _snapshot_matches_expectation(current, expected):
+            die("install manifest changed after planning; replan before writing")
+        return
+    if expected is None:
+        if current is not None:
+            die("install manifest changed after planning; replan before writing")
+        return
+    if current is None:
+        die("install manifest changed after planning; replan before writing")
+    same_identity = current.device == expected.device and current.inode == expected.inode
+    same_digest = hmac.compare_digest(hashlib.sha256(current.content).digest(), hashlib.sha256(expected.content).digest())
+    if not same_identity or not same_digest:
+        die("install manifest changed after planning; replan before writing")
 
 
 def path_for_rel(dst_root: Path, rel: str) -> Path:
@@ -577,6 +798,30 @@ def path_mode(path: Path, default: int = 0o644) -> int:
         return default
 
 
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(str(path), _directory_open_flags())
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _restore_backup(backup: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = backup.with_name(f".{backup.name}.restore-{os.urandom(6).hex()}")
+    try:
+        shutil.copy2(backup, temporary)
+        with temporary.open("rb") as handle:
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+        _fsync_directory(destination.parent)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def transactional_apply(
     dst_root: Path,
     writes: dict[str, tuple[bytes, int]],
@@ -585,7 +830,13 @@ def transactional_apply(
     *,
     dry_run: bool,
     preserve: set[Path] | None = None,
+    delete_manifest: bool = False,
+    expected_manifest: ManifestSnapshot | ManifestExpectation | None | object = _EXPECTED_MANIFEST_UNSET,
+    _lease_root_fd: int | None = None,
+    _root_preexisting: bool | None = None,
 ) -> bool:
+    if manifest is not None and delete_manifest:
+        die("transaction cannot both replace and delete the install manifest")
     changed_writes: dict[str, tuple[bytes, int]] = {}
     for rel, (content, mode) in sorted(writes.items()):
         path = path_for_rel(dst_root, rel)
@@ -608,6 +859,7 @@ def transactional_apply(
             changed_removals.append(rel)
 
     manifest_changed = False
+    manifest_deleted = False
     manifest_bytes = b""
     if manifest is not None:
         manifest_bytes = (json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
@@ -615,6 +867,12 @@ def transactional_apply(
         if target_manifest.exists() and (target_manifest.is_symlink() or not target_manifest.is_file()):
             die(f"manifest target is not a regular file: {target_manifest}")
         manifest_changed = not target_manifest.exists() or read_bytes(target_manifest) != manifest_bytes
+    elif delete_manifest:
+        target_manifest = manifest_path(dst_root)
+        if target_manifest.exists() or target_manifest.is_symlink():
+            if target_manifest.is_symlink() or not target_manifest.is_file():
+                die("manifest target is not a regular file")
+            manifest_deleted = True
 
     if dry_run:
         write_targets = [path_for_rel(dst_root, rel) for rel in changed_writes]
@@ -635,34 +893,79 @@ def transactional_apply(
             dry_run_info("delete", path_for_rel(dst_root, rel))
         if manifest_changed:
             dry_run_info("write-manifest", manifest_path(dst_root), content=manifest_bytes)
-        return bool(changed_writes or changed_removals or manifest_changed)
-    if not changed_writes and not changed_removals and not manifest_changed:
-        return False
+        if manifest_deleted:
+            dry_run_info("delete", manifest_path(dst_root))
+        return bool(changed_writes or changed_removals or manifest_changed or manifest_deleted)
 
     root = agents_root(dst_root)
-    root_preexisting = root.exists()
-    root.mkdir(parents=True, exist_ok=True)
+    if _lease_root_fd is None:
+        with workspace_lease(dst_root) as lease_root_fd:
+            try:
+                root_mode = root.lstat().st_mode
+                root_preexisting = True
+            except FileNotFoundError:
+                root_preexisting = False
+                root_mode = 0
+            if root_preexisting and (stat.S_ISLNK(root_mode) or not stat.S_ISDIR(root_mode)):
+                die("managed .agents root is not a real directory")
+            root.mkdir(parents=True, exist_ok=True)
+            try:
+                return transactional_apply(
+                    dst_root,
+                    writes,
+                    removals,
+                    manifest,
+                    dry_run=False,
+                    preserve=preserve,
+                    delete_manifest=delete_manifest,
+                    expected_manifest=expected_manifest,
+                    _lease_root_fd=lease_root_fd,
+                    _root_preexisting=root_preexisting,
+                )
+            except BaseException:
+                if not root_preexisting and root.is_dir():
+                    try:
+                        root.rmdir()
+                    except OSError:
+                        pass
+                raise
+
+    if expected_manifest is not _EXPECTED_MANIFEST_UNSET:
+        assert expected_manifest is None or isinstance(expected_manifest, (ManifestSnapshot, ManifestExpectation))
+        _validate_expected_manifest_at(_lease_root_fd, expected_manifest)
+    if not changed_writes and not changed_removals and not manifest_changed and not manifest_deleted:
+        return False
+
+    root_preexisting = bool(_root_preexisting)
     stage = Path(tempfile.mkdtemp(prefix=".workspace-oss-stage-", dir=root))
     staged_files = stage / "files"
     backups = stage / "backups"
-    touched: list[tuple[Path, Path | None]] = []
+    backups_by_path: dict[Path, Path | None] = {}
+    committed: list[Path] = []
     failed = False
+    rollback_complete = True
     try:
         for rel, (content, mode) in changed_writes.items():
             staged = staged_files / rel
             staged.parent.mkdir(parents=True, exist_ok=True)
             staged.write_bytes(content)
             staged.chmod(mode)
+            with staged.open("rb") as handle:
+                os.fsync(handle.fileno())
+            _fsync_directory(staged.parent)
             if hashlib.sha256(staged.read_bytes()).digest() != hashlib.sha256(content).digest():
                 die(f"staged file validation failed: {rel}")
         if manifest_changed:
             staged_manifest = staged_files / MANIFEST_REL
             staged_manifest.parent.mkdir(parents=True, exist_ok=True)
             staged_manifest.write_bytes(manifest_bytes)
+            with staged_manifest.open("rb") as handle:
+                os.fsync(handle.fileno())
+            _fsync_directory(staged_manifest.parent)
 
         ordered_paths = [path_for_rel(dst_root, rel) for rel in changed_writes]
         ordered_paths.extend(path_for_rel(dst_root, rel) for rel in changed_removals)
-        if manifest_changed:
+        if manifest_changed or manifest_deleted:
             ordered_paths.append(manifest_path(dst_root))
         for index, path in enumerate(ordered_paths):
             backup = None
@@ -670,34 +973,68 @@ def transactional_apply(
                 backup = backups / str(index)
                 backup.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(path, backup)
-            touched.append((path, backup))
+                with backup.open("rb") as handle:
+                    os.fsync(handle.fileno())
+                _fsync_directory(backup.parent)
+            backups_by_path[path] = backup
 
         for rel in changed_writes:
             destination = path_for_rel(dst_root, rel)
             destination.parent.mkdir(parents=True, exist_ok=True)
             os.replace(staged_files / rel, destination)
+            committed.append(destination)
+            _fsync_directory(destination.parent)
         for rel in changed_removals:
-            path_for_rel(dst_root, rel).unlink()
+            destination = path_for_rel(dst_root, rel)
+            destination.unlink()
+            committed.append(destination)
+            _fsync_directory(destination.parent)
         if manifest_changed:
             target_manifest = manifest_path(dst_root)
             target_manifest.parent.mkdir(parents=True, exist_ok=True)
             os.replace(staged_files / MANIFEST_REL, target_manifest)
+            committed.append(target_manifest)
+            _fsync_directory(target_manifest.parent)
+        elif manifest_deleted:
+            target_manifest = manifest_path(dst_root)
+            target_manifest.unlink()
+            committed.append(target_manifest)
+            _fsync_directory(target_manifest.parent)
     except BaseException:
         failed = True
-        for path, backup in reversed(touched):
+        manifest_target = manifest_path(dst_root)
+        if manifest_target in committed:
+            backup = backups_by_path[manifest_target]
+            try:
+                if backup is None:
+                    if manifest_target.exists() or manifest_target.is_symlink():
+                        manifest_target.unlink()
+                    _fsync_directory(manifest_target.parent)
+                else:
+                    _restore_backup(backup, manifest_target)
+            except OSError as rollback_exc:
+                rollback_complete = False
+                warn(f"rollback could not restore {manifest_target}: {rollback_exc}")
+        rollback_order = [path for path in reversed(committed) if path != manifest_target]
+        for path in rollback_order:
+            backup = backups_by_path[path]
             try:
                 if backup is None:
                     if path.exists() or path.is_symlink():
                         path.unlink()
+                    _fsync_directory(path.parent)
                 else:
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    os.replace(backup, path)
+                    _restore_backup(backup, path)
             except OSError as rollback_exc:
+                rollback_complete = False
                 warn(f"rollback could not restore {path}: {rollback_exc}")
         prune_empty_dirs(dst_root, dry_run=False, preserve=preserve)
         raise
     finally:
-        shutil.rmtree(stage, ignore_errors=True)
+        if not failed or rollback_complete:
+            shutil.rmtree(stage, ignore_errors=True)
+        else:
+            warn("rollback was incomplete; recovery material was preserved")
         if failed and not root_preexisting and root.is_dir():
             try:
                 root.rmdir()
@@ -735,6 +1072,7 @@ def remove_file(path: Path, dst_root: Path, *, dry_run: bool) -> bool:
         dry_run_info("delete", path)
         return True
     path.unlink()
+    _fsync_directory(path.parent)
     return True
 
 
@@ -1006,7 +1344,12 @@ def install(args: argparse.Namespace) -> int:
     files = current_files_from_items(items)
     agents = parse_agents(args.agents)
     installed_at = operation_timestamp(args.operation_time)
-    existing_manifest = load_manifest(manifest_path(dst_root), required=False)
+    existing_snapshot = load_manifest_snapshot(dst_root, required=False)
+    expected_manifest = _validate_planned_snapshot(
+        existing_snapshot,
+        _manifest_expectation(args.expected_manifest_state),
+    )
+    existing_manifest = existing_snapshot.payload if existing_snapshot is not None else None
     if existing_manifest is not None:
         die("copy-project install already exists; use update or reinstall")
     if manifest_path(dst_root).exists():
@@ -1047,7 +1390,14 @@ def install(args: argparse.Namespace) -> int:
         agents_md_sha=agents_md_sha,
         updated_at=installed_at,
     )
-    changed = transactional_apply(dst_root, writes, [], manifest, dry_run=args.dry_run)
+    changed = transactional_apply(
+        dst_root,
+        writes,
+        [],
+        manifest,
+        dry_run=args.dry_run,
+        expected_manifest=expected_manifest,
+    )
     if changed:
         info(f"copy-project install complete: {dst_root}")
     else:
@@ -1061,8 +1411,13 @@ def update(args: argparse.Namespace) -> int:
     source = resolve_dir(args.source, "source") if args.source else None
     if not agents_root(dst_root).is_dir() or agents_root(dst_root).is_symlink():
         die(f"copy-project update requires a real .agents directory: {agents_root(dst_root)}")
-    manifest = load_manifest(manifest_path(dst_root), required=True)
-    assert manifest is not None
+    manifest_snapshot = load_manifest_snapshot(dst_root, required=True)
+    assert manifest_snapshot is not None
+    expected_manifest = _validate_planned_snapshot(
+        manifest_snapshot,
+        _manifest_expectation(args.expected_manifest_state),
+    )
+    manifest = manifest_snapshot.payload
     assert_no_symlinked_agent_subdirs(dst_root)
 
     items = source_items(repo, source)
@@ -1140,8 +1495,17 @@ def update(args: argparse.Namespace) -> int:
             agents_md_sha=agents_md_sha,
             updated_at=updated_at,
         )
-        transactional_apply(dst_root, writes, removed, new_manifest, dry_run=args.dry_run)
+        transactional_apply(
+            dst_root,
+            writes,
+            removed,
+            new_manifest,
+            dry_run=args.dry_run,
+            expected_manifest=expected_manifest,
+        )
     else:
+        with workspace_lease(dst_root) as lease_root_fd:
+            _validate_expected_manifest_at(lease_root_fd, expected_manifest)
         info("clean-sync: no changes; manifest unchanged")
     return 0
 
@@ -1150,8 +1514,13 @@ def reinstall(args: argparse.Namespace) -> int:
     repo = resolve_dir(args.repo, "repo")
     dst_root = resolve_dir(args.dir, "dir")
     source = resolve_dir(args.source, "source") if args.source else None
-    manifest = load_manifest(manifest_path(dst_root), required=True)
-    assert manifest is not None
+    manifest_snapshot = load_manifest_snapshot(dst_root, required=True)
+    assert manifest_snapshot is not None
+    expected_manifest = _validate_planned_snapshot(
+        manifest_snapshot,
+        _manifest_expectation(args.expected_manifest_state),
+    )
+    manifest = manifest_snapshot.payload
     assert_no_symlinked_agent_subdirs(dst_root)
     items = source_items(repo, source)
     old_files = dict(manifest["files"])
@@ -1191,20 +1560,30 @@ def reinstall(args: argparse.Namespace) -> int:
         agents_md_sha=agents_md_sha,
         updated_at=operation_time,
     )
-    transactional_apply(dst_root, writes, removed, new_manifest, dry_run=args.dry_run)
+    transactional_apply(
+        dst_root,
+        writes,
+        removed,
+        new_manifest,
+        dry_run=args.dry_run,
+        expected_manifest=expected_manifest,
+    )
     info(f"copy-project reinstall complete: {dst_root}")
     return 0
 
 
-def uninstall(args: argparse.Namespace) -> int:
-    _repo = resolve_dir(args.repo, "repo")
-    dst_root = resolve_dir(args.dir, "dir")
-    assert_uninstall_manifest_boundary(dst_root)
-    manifest = load_manifest(manifest_path(dst_root), required=True)
-    assert manifest is not None
+def _uninstall_locked(
+    args: argparse.Namespace,
+    dst_root: Path,
+    manifest_snapshot: ManifestSnapshot,
+    expected_manifest: ManifestSnapshot | ManifestExpectation,
+    lease_root_fd: int,
+) -> int:
+    manifest = manifest_snapshot.payload
     files = dict(manifest["files"])
     preserved_paths: set[Path] = set()
-    removable_paths: list[Path] = []
+    transaction_removals: list[str] = []
+    transaction_writes: dict[str, tuple[bytes, int]] = {}
     planned_removals: set[Path] = set()
     for rel in sorted(files, reverse=True):
         if rel == "AGENTS.md":
@@ -1224,7 +1603,8 @@ def uninstall(args: argparse.Namespace) -> int:
             )
             preserved_paths.add(path)
             continue
-        removable_paths.append(path)
+        transaction_removals.append(rel)
+        planned_removals.add(path)
 
     preserve_changed_bytecode_cache_types(files, dst_root, preserved_paths)
 
@@ -1236,27 +1616,23 @@ def uninstall(args: argparse.Namespace) -> int:
     elif agents_path.exists():
         remaining = remove_managed_agents(read_bytes(agents_path), manifest)
         if remaining is None:
-            transactional_apply(
-                dst_root,
-                {},
-                ["AGENTS.md"],
-                None,
-                dry_run=args.dry_run,
-                preserve=preserved_paths,
-            )
+            transaction_removals.append("AGENTS.md")
+            planned_removals.add(agents_path)
         elif remaining != read_bytes(agents_path):
-            transactional_apply(
-                dst_root,
-                {"AGENTS.md": (remaining, path_mode(agents_path))},
-                [],
-                None,
-                dry_run=args.dry_run,
-                preserve=preserved_paths,
-            )
-    removed_any = False
-    for path in removable_paths:
-        planned_removals.add(path)
-        removed_any = remove_file(path, dst_root, dry_run=args.dry_run) or removed_any
+            transaction_writes["AGENTS.md"] = (remaining, path_mode(agents_path))
+
+    removed_any = transactional_apply(
+        dst_root,
+        transaction_writes,
+        transaction_removals,
+        None,
+        dry_run=args.dry_run,
+        preserve=preserved_paths,
+        delete_manifest=True,
+        expected_manifest=expected_manifest,
+        _lease_root_fd=lease_root_fd,
+        _root_preexisting=True,
+    )
     removed_any = remove_managed_bytecode_caches(
         files,
         dst_root,
@@ -1264,13 +1640,7 @@ def uninstall(args: argparse.Namespace) -> int:
         preserve=preserved_paths,
         planned_removals=planned_removals,
     ) or removed_any
-    if manifest_path(dst_root).exists() or manifest_path(dst_root).is_symlink():
-        planned_removals.add(manifest_path(dst_root))
-        if args.dry_run:
-            dry_run_info("delete", manifest_path(dst_root))
-        else:
-            manifest_path(dst_root).unlink()
-        removed_any = True
+    planned_removals.add(manifest_path(dst_root))
     root = agents_root(dst_root)
     if args.dry_run:
         for directory in planned_empty_directories_after_removals(dst_root, planned_removals):
@@ -1283,11 +1653,27 @@ def uninstall(args: argparse.Namespace) -> int:
             warn(f".agents not empty after uninstall; preserving user files: {root}")
         except StopIteration:
             root.rmdir()
+            os.fsync(lease_root_fd)
     if removed_any:
         info(f"copy-project uninstall complete: {dst_root}")
     else:
         info(f"copy-project uninstall found no managed files: {dst_root}")
     return 0
+
+
+def uninstall(args: argparse.Namespace) -> int:
+    _repo = resolve_dir(args.repo, "repo")
+    dst_root = resolve_dir(args.dir, "dir")
+    assert_uninstall_manifest_boundary(dst_root)
+    with workspace_lease(dst_root) as lease_root_fd:
+        manifest_snapshot = _manifest_snapshot_at(lease_root_fd, required=True)
+        assert manifest_snapshot is not None
+        expected_manifest = _validate_planned_snapshot(
+            manifest_snapshot,
+            _manifest_expectation(args.expected_manifest_state),
+        )
+        assert isinstance(expected_manifest, (ManifestSnapshot, ManifestExpectation))
+        return _uninstall_locked(args, dst_root, manifest_snapshot, expected_manifest, lease_root_fd)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1306,6 +1692,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--plan-jsonl", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--expected-manifest-state", default="", help=argparse.SUPPRESS)
     return parser
 
 

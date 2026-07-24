@@ -3,12 +3,15 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import multiprocessing
 import os
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
+from types import SimpleNamespace
 
 import pytest
 
@@ -66,6 +69,217 @@ def _load_ws_sync() -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _load_updater(project: str) -> ModuleType:
+    library = str(Path(project) / ".agents" / "lib")
+    if library not in sys.path:
+        sys.path.insert(0, library)
+    from research import updater as updater_module
+
+    return updater_module
+
+
+def _rebind_worker(
+    project: str,
+    workspace: str,
+    expected_digest: str,
+    pause_ready: object | None,
+    pause_release: object | None,
+    lock_attempted: object | None,
+    result_queue: object,
+) -> None:
+    updater_module = _load_updater(project)
+    if lock_attempted is not None:
+        real_flock = updater_module.fcntl.flock
+
+        def observed_flock(descriptor: int, operation: int) -> None:
+            if operation == updater_module.fcntl.LOCK_EX:
+                lock_attempted.set()
+            real_flock(descriptor, operation)
+
+        updater_module.fcntl.flock = observed_flock
+    if pause_ready is not None and pause_release is not None:
+        real_read = updater_module._read_manifest_at
+        reads = 0
+
+        def paused_read(agents_fd: int):
+            nonlocal reads
+            result = real_read(agents_fd)
+            reads += 1
+            if reads == 1:
+                pause_ready.set()
+                if not pause_release.wait(10):
+                    raise RuntimeError("rebind test barrier timed out")
+            return result
+
+        updater_module._read_manifest_at = paused_read
+    try:
+        result = updater_module.rebind_source(
+            Path(workspace),
+            expected_manifest_digest=expected_digest,
+            source_origin="ssh://example.test/team/rebound.git",
+            source_branch="release/r17",
+            source_strategy="remote-branch",
+        )
+        result_queue.put(("ok", result))
+    except updater_module.SourceRebindError as exc:
+        result_queue.put(("error", exc.code))
+    except BaseException as exc:
+        result_queue.put(("exception", repr(exc)))
+
+
+def _installer_transaction_worker(
+    project: str,
+    workspace: str,
+    planned: object,
+    start_write: object,
+    lock_attempted: object | None,
+    pause_after_validation: object | None,
+    validation_release: object | None,
+    result_queue: object,
+) -> None:
+    del project
+    ws_sync = _load_ws_sync()
+    root = Path(workspace)
+    try:
+        snapshot = ws_sync.load_manifest_snapshot(root)
+        assert snapshot is not None
+        replacement = dict(snapshot.payload)
+        replacement["marker"] = "installer-won"
+        replacement["files"] = {".agents/VERSION": hashlib.sha256(b"0.3.0\n").hexdigest()}
+        planned.set()
+        if not start_write.wait(10):
+            raise RuntimeError("installer start barrier timed out")
+        if lock_attempted is not None:
+            real_flock = ws_sync.fcntl.flock
+
+            def observed_flock(descriptor: int, operation: int) -> None:
+                if operation == ws_sync.fcntl.LOCK_EX:
+                    lock_attempted.set()
+                real_flock(descriptor, operation)
+
+            ws_sync.fcntl.flock = observed_flock
+        if pause_after_validation is not None and validation_release is not None:
+            real_validate = ws_sync._validate_expected_manifest_at
+
+            def paused_validate(root_fd: int, expected: object) -> None:
+                real_validate(root_fd, expected)
+                pause_after_validation.set()
+                if not validation_release.wait(10):
+                    raise RuntimeError("installer validation barrier timed out")
+
+            ws_sync._validate_expected_manifest_at = paused_validate
+        ws_sync.transactional_apply(
+            root,
+            {".agents/VERSION": (b"0.3.0\n", 0o644)},
+            [],
+            replacement,
+            dry_run=False,
+            expected_manifest=snapshot,
+        )
+        result_queue.put(("ok", "installer"))
+    except ws_sync.SyncError as exc:
+        result_queue.put(("error", str(exc)))
+    except BaseException as exc:
+        result_queue.put(("exception", repr(exc)))
+
+
+def _fresh_transaction_worker(
+    workspace: str,
+    marker: str,
+    planned: object,
+    start_write: object,
+    lock_attempted: object | None,
+    pause_after_validation: object | None,
+    validation_release: object | None,
+    result_queue: object,
+) -> None:
+    ws_sync = _load_ws_sync()
+    root = Path(workspace)
+    try:
+        snapshot = ws_sync.load_manifest_snapshot(root, required=False)
+        assert snapshot is None
+        planned.set()
+        if not start_write.wait(10):
+            raise RuntimeError("fresh installer start barrier timed out")
+        if lock_attempted is not None:
+            real_flock = ws_sync.fcntl.flock
+
+            def observed_flock(descriptor: int, operation: int) -> None:
+                if operation == ws_sync.fcntl.LOCK_EX:
+                    lock_attempted.set()
+                real_flock(descriptor, operation)
+
+            ws_sync.fcntl.flock = observed_flock
+        if pause_after_validation is not None and validation_release is not None:
+            real_validate = ws_sync._validate_expected_manifest_at
+
+            def paused_validate(root_fd: int, expected: object) -> None:
+                real_validate(root_fd, expected)
+                pause_after_validation.set()
+                if not validation_release.wait(10):
+                    raise RuntimeError("fresh installer validation barrier timed out")
+
+            ws_sync._validate_expected_manifest_at = paused_validate
+        content = f"{marker}\n".encode("utf-8")
+        manifest = {
+            "schema": 1,
+            "install_name": "workspace-oss",
+            "install_mode": "copy-project",
+            "files": {".agents/VERSION": hashlib.sha256(content).hexdigest()},
+            "marker": marker,
+        }
+        ws_sync.transactional_apply(
+            root,
+            {".agents/VERSION": (content, 0o644)},
+            [],
+            manifest,
+            dry_run=False,
+            expected_manifest=None,
+        )
+        result_queue.put(("ok", marker))
+    except ws_sync.SyncError as exc:
+        result_queue.put(("error", str(exc)))
+    except BaseException as exc:
+        result_queue.put(("exception", repr(exc)))
+
+
+def _uninstall_worker(
+    project: str,
+    workspace: str,
+    lock_attempted: object,
+    pause_after_snapshot: object | None,
+    snapshot_release: object | None,
+    result_queue: object,
+) -> None:
+    ws_sync = _load_ws_sync()
+    real_flock = ws_sync.fcntl.flock
+
+    def observed_flock(descriptor: int, operation: int) -> None:
+        if operation == ws_sync.fcntl.LOCK_EX:
+            lock_attempted.set()
+        real_flock(descriptor, operation)
+
+    ws_sync.fcntl.flock = observed_flock
+    if pause_after_snapshot is not None and snapshot_release is not None:
+        real_validate = ws_sync._validate_planned_snapshot
+
+        def paused_validate(current: object, planned: object):
+            result = real_validate(current, planned)
+            pause_after_snapshot.set()
+            if not snapshot_release.wait(10):
+                raise RuntimeError("uninstall snapshot barrier timed out")
+            return result
+
+        ws_sync._validate_planned_snapshot = paused_validate
+    try:
+        result = ws_sync.uninstall(
+            SimpleNamespace(repo=project, dir=workspace, dry_run=False, expected_manifest_state="")
+        )
+        result_queue.put(("ok", result))
+    except BaseException as exc:
+        result_queue.put(("exception", repr(exc)))
 
 
 def test_clean_install_ships_only_runtime_allowlist(tmp_path: Path) -> None:
@@ -582,3 +796,684 @@ def test_fresh_transaction_rolls_back_all_managed_files(monkeypatch: pytest.Monk
 
     assert not (workspace / ".agents").exists()
     assert not (workspace / "AGENTS.md").exists()
+
+
+@pytest.mark.parametrize("replacement_kind", ["atomic-replace", "in-place"])
+def test_transaction_rejects_manifest_changed_after_planning_without_managed_writes(
+    tmp_path: Path,
+    replacement_kind: str,
+) -> None:
+    ws_sync = _load_ws_sync()
+    workspace = tmp_path / "workspace"
+    managed = workspace / ".agents" / "managed.txt"
+    managed.parent.mkdir(parents=True)
+    managed.write_bytes(b"before\n")
+    manifest_path = workspace / ".agents" / ".install-manifest.json"
+    payload = {
+        "schema": 1,
+        "install_name": "workspace-oss",
+        "install_mode": "copy-project",
+        "files": {".agents/managed.txt": hashlib.sha256(b"before\n").hexdigest()},
+        "marker": "planned",
+    }
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    snapshot = ws_sync.load_manifest_snapshot(workspace)
+    assert snapshot is not None
+
+    payload["marker"] = "concurrent-writer"
+    replacement = (json.dumps(payload) + "\n").encode("utf-8")
+    if replacement_kind == "atomic-replace":
+        temporary = manifest_path.with_suffix(".replacement")
+        temporary.write_bytes(replacement)
+        os.replace(temporary, manifest_path)
+    else:
+        manifest_path.write_bytes(replacement)
+    concurrent_manifest = manifest_path.read_bytes()
+
+    with pytest.raises(ws_sync.SyncError, match="changed after planning"):
+        ws_sync.transactional_apply(
+            workspace,
+            {".agents/managed.txt": (b"after\n", 0o644)},
+            [],
+            {**payload, "files": {".agents/managed.txt": hashlib.sha256(b"after\n").hexdigest()}},
+            dry_run=False,
+            expected_manifest=snapshot,
+        )
+
+    assert managed.read_bytes() == b"before\n"
+    assert manifest_path.read_bytes() == concurrent_manifest
+    assert not list((workspace / ".agents").glob(".workspace-oss-stage-*"))
+
+
+def test_noop_update_revalidates_manifest_under_lease_before_reporting_clean(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace-noop-race"
+    workspace.mkdir()
+    installed = _run_installer(workspace, "install", "--codex")
+    assert installed.returncode == 0, installed.stdout + installed.stderr
+    ws_sync = _load_ws_sync()
+    manifest_path = workspace / ".agents" / ".install-manifest.json"
+    before = manifest_path.read_bytes()
+    inode_before = manifest_path.stat().st_ino
+    payload = json.loads(before)
+    version = workspace / ".agents" / "VERSION"
+    version_before = version.read_bytes()
+    real_source_items = ws_sync.source_items
+
+    def raced_source_items(repo: Path, source: Path | None):
+        items = real_source_items(repo, source)
+        replacement = manifest_path.with_name(".same-manifest-new-inode")
+        replacement.write_bytes(before)
+        os.replace(replacement, manifest_path)
+        return items
+
+    monkeypatch.setattr(ws_sync, "source_items", raced_source_items)
+    args = SimpleNamespace(
+        repo=str(_project_root()),
+        dir=str(workspace),
+        source="",
+        source_commit=str(payload.get("source_commit") or ""),
+        source_origin=str(payload.get("source_origin") or ""),
+        source_checkout=str(payload.get("source_checkout") or ""),
+        source_branch=str(payload.get("source_branch") or ""),
+        source_strategy=str(payload.get("source_strategy") or ""),
+        operation_time="",
+        force=False,
+        dry_run=False,
+        expected_manifest_state="",
+    )
+
+    with pytest.raises(ws_sync.SyncError, match="changed after planning"):
+        ws_sync.update(args)
+
+    assert manifest_path.read_bytes() == before
+    assert manifest_path.stat().st_ino != inode_before
+    assert version.read_bytes() == version_before
+
+
+@pytest.mark.parametrize("leaf_kind", ["fifo", "symlink"])
+def test_update_plan_rejects_nonregular_manifest_without_following_or_blocking(
+    tmp_path: Path,
+    leaf_kind: str,
+) -> None:
+    workspace = tmp_path / "workspace"
+    manifest = workspace / ".agents" / ".install-manifest.json"
+    manifest.parent.mkdir(parents=True)
+    victim = tmp_path / "victim.json"
+    victim.write_text('{"keep": true}\n', encoding="utf-8")
+    if leaf_kind == "fifo":
+        os.mkfifo(manifest)
+    else:
+        manifest.symlink_to(victim)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(_project_root() / "install-lib" / "ws_sync.py"),
+            "update",
+            "--repo",
+            str(_project_root()),
+            "--dir",
+            str(workspace),
+        ],
+        cwd=_project_root(),
+        text=True,
+        capture_output=True,
+        timeout=3,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "manifest is not a regular file" in result.stderr
+    if leaf_kind == "fifo":
+        assert stat.S_ISFIFO(manifest.lstat().st_mode)
+    else:
+        assert manifest.is_symlink()
+        assert victim.read_text(encoding="utf-8") == '{"keep": true}\n'
+
+
+def _write_concurrency_workspace(tmp_path: Path) -> tuple[Path, Path, bytes]:
+    workspace = tmp_path / "concurrent-workspace"
+    version = workspace / ".agents" / "VERSION"
+    version.parent.mkdir(parents=True)
+    version.write_bytes(b"0.2.0\n")
+    manifest = workspace / ".agents" / ".install-manifest.json"
+    payload = {
+        "schema": 1,
+        "install_name": "workspace-oss",
+        "install_mode": "copy-project",
+        "source_origin": "ssh://example.test/team/original.git",
+        "source_checkout": "",
+        "source_repo": "",
+        "source_branch": "release/original",
+        "source_strategy": "remote-branch",
+        "source_commit": "old",
+        "files": {".agents/VERSION": hashlib.sha256(version.read_bytes()).hexdigest()},
+        "marker": "before",
+    }
+    content = (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8")
+    manifest.write_bytes(content)
+    return workspace, manifest, content
+
+
+def test_rebind_lease_serializes_installer_and_stale_plan_cannot_overwrite(tmp_path: Path) -> None:
+    workspace, manifest, initial = _write_concurrency_workspace(tmp_path)
+    project = str(_project_root())
+    context = multiprocessing.get_context("fork")
+    planned = context.Event()
+    start_installer = context.Event()
+    installer_attempted = context.Event()
+    rebind_paused = context.Event()
+    release_rebind = context.Event()
+    installer_queue = context.Queue()
+    rebind_queue = context.Queue()
+    installer_process = context.Process(
+        target=_installer_transaction_worker,
+        args=(
+            project,
+            str(workspace),
+            planned,
+            start_installer,
+            installer_attempted,
+            None,
+            None,
+            installer_queue,
+        ),
+    )
+    installer_process.start()
+    assert planned.wait(5)
+    rebind_process = context.Process(
+        target=_rebind_worker,
+        args=(
+            project,
+            str(workspace),
+            hashlib.sha256(initial).hexdigest(),
+            rebind_paused,
+            release_rebind,
+            None,
+            rebind_queue,
+        ),
+    )
+    rebind_process.start()
+    assert rebind_paused.wait(5)
+    start_installer.set()
+    assert installer_attempted.wait(5)
+    release_rebind.set()
+    rebind_process.join(10)
+    installer_process.join(10)
+
+    assert rebind_process.exitcode == 0
+    assert installer_process.exitcode == 0
+    assert rebind_queue.get(timeout=1)[0] == "ok"
+    installer_result = installer_queue.get(timeout=1)
+    assert installer_result[0] == "error"
+    assert "changed after planning" in installer_result[1]
+    final = json.loads(manifest.read_text(encoding="utf-8"))
+    assert final["source_origin"] == "ssh://example.test/team/rebound.git"
+    assert final["source_branch"] == "release/r17"
+    assert final["marker"] == "before"
+    assert (workspace / ".agents" / "VERSION").read_bytes() == b"0.2.0\n"
+
+
+def test_installer_lease_serializes_rebind_and_stale_rebind_cannot_overwrite(tmp_path: Path) -> None:
+    workspace, manifest, initial = _write_concurrency_workspace(tmp_path)
+    project = str(_project_root())
+    context = multiprocessing.get_context("fork")
+    planned = context.Event()
+    start_installer = context.Event()
+    installer_validated = context.Event()
+    release_installer = context.Event()
+    rebind_attempted = context.Event()
+    installer_queue = context.Queue()
+    rebind_queue = context.Queue()
+    installer_process = context.Process(
+        target=_installer_transaction_worker,
+        args=(
+            project,
+            str(workspace),
+            planned,
+            start_installer,
+            None,
+            installer_validated,
+            release_installer,
+            installer_queue,
+        ),
+    )
+    installer_process.start()
+    assert planned.wait(5)
+    start_installer.set()
+    assert installer_validated.wait(5)
+    rebind_process = context.Process(
+        target=_rebind_worker,
+        args=(
+            project,
+            str(workspace),
+            hashlib.sha256(initial).hexdigest(),
+            None,
+            None,
+            rebind_attempted,
+            rebind_queue,
+        ),
+    )
+    rebind_process.start()
+    assert rebind_attempted.wait(5)
+    release_installer.set()
+    installer_process.join(10)
+    rebind_process.join(10)
+
+    assert installer_process.exitcode == 0
+    assert rebind_process.exitcode == 0
+    assert installer_queue.get(timeout=1) == ("ok", "installer")
+    assert rebind_queue.get(timeout=1) == ("error", "stale-manifest")
+    final = json.loads(manifest.read_text(encoding="utf-8"))
+    assert final["marker"] == "installer-won"
+    assert final["source_origin"] == "ssh://example.test/team/original.git"
+    assert (workspace / ".agents" / "VERSION").read_bytes() == b"0.3.0\n"
+
+
+def test_rebind_and_uninstall_share_root_lease_without_manifest_resurrection(tmp_path: Path) -> None:
+    workspace, manifest, initial = _write_concurrency_workspace(tmp_path)
+    project = str(_project_root())
+    context = multiprocessing.get_context("fork")
+    rebind_paused = context.Event()
+    release_rebind = context.Event()
+    uninstall_attempted = context.Event()
+    rebind_queue = context.Queue()
+    uninstall_queue = context.Queue()
+    rebind_process = context.Process(
+        target=_rebind_worker,
+        args=(
+            project,
+            str(workspace),
+            hashlib.sha256(initial).hexdigest(),
+            rebind_paused,
+            release_rebind,
+            None,
+            rebind_queue,
+        ),
+    )
+    rebind_process.start()
+    assert rebind_paused.wait(5)
+    uninstall_process = context.Process(
+        target=_uninstall_worker,
+        args=(project, str(workspace), uninstall_attempted, None, None, uninstall_queue),
+    )
+    uninstall_process.start()
+    assert uninstall_attempted.wait(5)
+    release_rebind.set()
+    rebind_process.join(10)
+    uninstall_process.join(10)
+
+    assert rebind_process.exitcode == 0
+    assert uninstall_process.exitcode == 0
+    assert rebind_queue.get(timeout=1)[0] == "ok"
+    assert uninstall_queue.get(timeout=1) == ("ok", 0)
+    assert not manifest.exists()
+    assert not (workspace / ".agents" / "VERSION").exists()
+
+
+def test_uninstall_lease_finishes_before_waiting_rebind_without_manifest_resurrection(tmp_path: Path) -> None:
+    workspace, manifest, initial = _write_concurrency_workspace(tmp_path)
+    project = str(_project_root())
+    context = multiprocessing.get_context("fork")
+    uninstall_attempted = context.Event()
+    uninstall_paused = context.Event()
+    release_uninstall = context.Event()
+    rebind_attempted = context.Event()
+    uninstall_queue = context.Queue()
+    rebind_queue = context.Queue()
+    uninstall_process = context.Process(
+        target=_uninstall_worker,
+        args=(
+            project,
+            str(workspace),
+            uninstall_attempted,
+            uninstall_paused,
+            release_uninstall,
+            uninstall_queue,
+        ),
+    )
+    uninstall_process.start()
+    assert uninstall_attempted.wait(5)
+    assert uninstall_paused.wait(5)
+    rebind_process = context.Process(
+        target=_rebind_worker,
+        args=(
+            project,
+            str(workspace),
+            hashlib.sha256(initial).hexdigest(),
+            None,
+            None,
+            rebind_attempted,
+            rebind_queue,
+        ),
+    )
+    rebind_process.start()
+    assert rebind_attempted.wait(5)
+    release_uninstall.set()
+    uninstall_process.join(10)
+    rebind_process.join(10)
+
+    assert uninstall_process.exitcode == 0
+    assert rebind_process.exitcode == 0
+    assert uninstall_queue.get(timeout=1) == ("ok", 0)
+    rebind_result = rebind_queue.get(timeout=1)
+    assert rebind_result[0] == "error"
+    assert rebind_result[1] in {"unsafe-manifest-path", "unsafe-manifest-ancestor", "unsafe-manifest-leaf"}
+    assert not manifest.exists()
+    assert not (workspace / ".agents").exists()
+
+
+def test_two_fresh_installs_and_symlink_alias_share_one_expected_absent_boundary(tmp_path: Path) -> None:
+    workspace = tmp_path / "fresh-workspace"
+    workspace.mkdir()
+    alias = tmp_path / "fresh-workspace-alias"
+    alias.symlink_to(workspace, target_is_directory=True)
+    context = multiprocessing.get_context("fork")
+    first_planned = context.Event()
+    second_planned = context.Event()
+    start_first = context.Event()
+    start_second = context.Event()
+    first_validated = context.Event()
+    release_first = context.Event()
+    second_attempted = context.Event()
+    first_queue = context.Queue()
+    second_queue = context.Queue()
+    first = context.Process(
+        target=_fresh_transaction_worker,
+        args=(
+            str(workspace),
+            "first",
+            first_planned,
+            start_first,
+            None,
+            first_validated,
+            release_first,
+            first_queue,
+        ),
+    )
+    second = context.Process(
+        target=_fresh_transaction_worker,
+        args=(
+            str(alias),
+            "second",
+            second_planned,
+            start_second,
+            second_attempted,
+            None,
+            None,
+            second_queue,
+        ),
+    )
+    first.start()
+    second.start()
+    assert first_planned.wait(5)
+    assert second_planned.wait(5)
+    start_first.set()
+    assert first_validated.wait(5)
+    start_second.set()
+    assert second_attempted.wait(5)
+    release_first.set()
+    first.join(10)
+    second.join(10)
+
+    assert first.exitcode == 0
+    assert second.exitcode == 0
+    assert first_queue.get(timeout=1) == ("ok", "first")
+    second_result = second_queue.get(timeout=1)
+    assert second_result[0] == "error"
+    assert "changed after planning" in second_result[1]
+    manifest = json.loads((workspace / ".agents" / ".install-manifest.json").read_text(encoding="utf-8"))
+    assert manifest["marker"] == "first"
+    assert (workspace / ".agents" / "VERSION").read_bytes() == b"first\n"
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "staged-payload-fsync",
+        "staged-manifest-fsync",
+        "payload-replace",
+        "payload-parent-fsync",
+        "manifest-replace",
+        "manifest-parent-fsync",
+    ],
+)
+def test_transaction_fault_matrix_rolls_back_and_releases_lease(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fault: str,
+) -> None:
+    ws_sync = _load_ws_sync()
+    workspace, manifest_path, manifest_before = _write_concurrency_workspace(tmp_path)
+    version = workspace / ".agents" / "VERSION"
+    snapshot = ws_sync.load_manifest_snapshot(workspace)
+    assert snapshot is not None
+    replacement = dict(snapshot.payload)
+    replacement["marker"] = "after"
+    replacement["files"] = {".agents/VERSION": hashlib.sha256(b"0.3.0\n").hexdigest()}
+
+    if fault.startswith("staged-"):
+        real_fsync = ws_sync.os.fsync
+        calls = 0
+        failure_call = 1 if fault == "staged-payload-fsync" else 3
+
+        def failed_fsync(descriptor: int) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == failure_call:
+                raise OSError(f"injected {fault}")
+            real_fsync(descriptor)
+
+        monkeypatch.setattr(ws_sync.os, "fsync", failed_fsync)
+    elif fault.endswith("replace"):
+        real_replace = ws_sync.os.replace
+        replace_failed = False
+
+        def failed_replace(source: object, destination: object, *args: object, **kwargs: object) -> None:
+            nonlocal replace_failed
+            target = Path(destination)
+            should_fail = (
+                (fault == "payload-replace" and target == version)
+                or (fault == "manifest-replace" and target == manifest_path)
+            )
+            if should_fail and not replace_failed:
+                replace_failed = True
+                raise OSError(f"injected {fault}")
+            real_replace(source, destination, *args, **kwargs)
+
+        monkeypatch.setattr(ws_sync.os, "replace", failed_replace)
+    else:
+        real_fsync_directory = ws_sync._fsync_directory
+        agents_calls = 0
+        failure_call = 1 if fault == "payload-parent-fsync" else 2
+
+        def failed_directory(path: Path) -> None:
+            nonlocal agents_calls
+            if Path(path) == workspace / ".agents":
+                agents_calls += 1
+                if agents_calls == failure_call:
+                    raise OSError(f"injected {fault}")
+            real_fsync_directory(path)
+
+        monkeypatch.setattr(ws_sync, "_fsync_directory", failed_directory)
+
+    with pytest.raises(OSError, match=fault):
+        ws_sync.transactional_apply(
+            workspace,
+            {".agents/VERSION": (b"0.3.0\n", 0o644)},
+            [],
+            replacement,
+            dry_run=False,
+            expected_manifest=snapshot,
+        )
+
+    assert version.read_bytes() == b"0.2.0\n"
+    assert manifest_path.read_bytes() == manifest_before
+    assert not list((workspace / ".agents").glob(".workspace-oss-stage-*"))
+    retry_snapshot = ws_sync.load_manifest_snapshot(workspace)
+    assert retry_snapshot is not None
+    assert ws_sync.transactional_apply(
+        workspace,
+        {".agents/VERSION": (b"0.3.0\n", 0o644)},
+        [],
+        replacement,
+        dry_run=False,
+        expected_manifest=retry_snapshot,
+    )
+    assert version.read_bytes() == b"0.3.0\n"
+    assert json.loads(manifest_path.read_text(encoding="utf-8"))["marker"] == "after"
+
+
+@pytest.mark.parametrize("fault", ["manifest-delete", "manifest-delete-fsync"])
+def test_uninstall_manifest_fault_rolls_back_payload_before_releasing_lease(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fault: str,
+) -> None:
+    ws_sync = _load_ws_sync()
+    workspace, manifest_path, manifest_before = _write_concurrency_workspace(tmp_path)
+    version = workspace / ".agents" / "VERSION"
+    snapshot = ws_sync.load_manifest_snapshot(workspace)
+    assert snapshot is not None
+    if fault == "manifest-delete":
+        real_unlink = ws_sync.Path.unlink
+        failed = False
+
+        def failed_unlink(path: Path, *args: object, **kwargs: object) -> None:
+            nonlocal failed
+            if path == manifest_path and not failed:
+                failed = True
+                raise OSError("injected manifest-delete")
+            real_unlink(path, *args, **kwargs)
+
+        monkeypatch.setattr(ws_sync.Path, "unlink", failed_unlink)
+    else:
+        real_fsync_directory = ws_sync._fsync_directory
+        agents_calls = 0
+
+        def failed_directory(path: Path) -> None:
+            nonlocal agents_calls
+            if Path(path) == workspace / ".agents":
+                agents_calls += 1
+                if agents_calls == 2:
+                    raise OSError("injected manifest-delete-fsync")
+            real_fsync_directory(path)
+
+        monkeypatch.setattr(ws_sync, "_fsync_directory", failed_directory)
+
+    with pytest.raises(OSError, match=fault):
+        ws_sync.transactional_apply(
+            workspace,
+            {},
+            [".agents/VERSION"],
+            None,
+            dry_run=False,
+            delete_manifest=True,
+            expected_manifest=snapshot,
+        )
+
+    assert version.read_bytes() == b"0.2.0\n"
+    assert manifest_path.read_bytes() == manifest_before
+    assert not list((workspace / ".agents").glob(".workspace-oss-stage-*"))
+    retry_snapshot = ws_sync.load_manifest_snapshot(workspace)
+    assert retry_snapshot is not None
+    assert ws_sync.transactional_apply(
+        workspace,
+        {},
+        [".agents/VERSION"],
+        None,
+        dry_run=False,
+        delete_manifest=True,
+        expected_manifest=retry_snapshot,
+    )
+    assert not version.exists()
+    assert not manifest_path.exists()
+
+
+def test_incomplete_rollback_preserves_stage_and_original_backup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    ws_sync = _load_ws_sync()
+    workspace, manifest_path, manifest_before = _write_concurrency_workspace(tmp_path)
+    version = workspace / ".agents" / "VERSION"
+    snapshot = ws_sync.load_manifest_snapshot(workspace)
+    assert snapshot is not None
+    replacement = dict(snapshot.payload)
+    replacement["marker"] = "after"
+    replacement["files"] = {".agents/VERSION": hashlib.sha256(b"0.3.0\n").hexdigest()}
+    real_fsync_directory = ws_sync._fsync_directory
+    agents_calls = 0
+
+    def failed_manifest_fsync(path: Path) -> None:
+        nonlocal agents_calls
+        if Path(path) == workspace / ".agents":
+            agents_calls += 1
+            if agents_calls == 2:
+                raise OSError("injected manifest-parent-fsync")
+        real_fsync_directory(path)
+
+    real_restore = ws_sync._restore_backup
+
+    def failed_payload_restore(backup: Path, destination: Path) -> None:
+        if destination == version:
+            raise OSError("injected payload rollback failure")
+        real_restore(backup, destination)
+
+    monkeypatch.setattr(ws_sync, "_fsync_directory", failed_manifest_fsync)
+    monkeypatch.setattr(ws_sync, "_restore_backup", failed_payload_restore)
+
+    with pytest.raises(OSError, match="manifest-parent-fsync"):
+        ws_sync.transactional_apply(
+            workspace,
+            {".agents/VERSION": (b"0.3.0\n", 0o644)},
+            [],
+            replacement,
+            dry_run=False,
+            expected_manifest=snapshot,
+        )
+
+    assert manifest_path.read_bytes() == manifest_before
+    assert version.read_bytes() == b"0.3.0\n"
+    stages = list((workspace / ".agents").glob(".workspace-oss-stage-*"))
+    assert len(stages) == 1
+    backup_bytes = [path.read_bytes() for path in (stages[0] / "backups").iterdir() if path.is_file()]
+    assert b"0.2.0\n" in backup_bytes
+
+
+def test_uninstall_root_fsync_failure_releases_root_lease_after_manifest_last(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    ws_sync = _load_ws_sync()
+    workspace, manifest_path, _manifest_before = _write_concurrency_workspace(tmp_path)
+    root_status = workspace.stat()
+    real_fsync = ws_sync.os.fsync
+    failed = False
+
+    def failed_root_fsync(descriptor: int) -> None:
+        nonlocal failed
+        current = os.fstat(descriptor)
+        if not failed and current.st_dev == root_status.st_dev and current.st_ino == root_status.st_ino:
+            failed = True
+            raise OSError("injected root-fsync")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(ws_sync.os, "fsync", failed_root_fsync)
+    args = SimpleNamespace(
+        repo=str(_project_root()),
+        dir=str(workspace),
+        dry_run=False,
+        expected_manifest_state="",
+    )
+
+    with pytest.raises(OSError, match="root-fsync"):
+        ws_sync.uninstall(args)
+
+    assert not manifest_path.exists()
+    assert not (workspace / ".agents").exists()
+    with ws_sync.workspace_lease(workspace):
+        pass
