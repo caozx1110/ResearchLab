@@ -384,6 +384,9 @@ OPERATION_CANONICAL_INPUTS: dict[tuple[str, str], tuple[str, ...]] = {
         "run_input_digest",
         "artifact_facts_digest",
         "prior_runs_digest",
+        "proposed_run_id",
+        "proposed_run_path",
+        "run_allocator_directory_digest",
     ),
     ("experiment-workbench", "follow-up"): (
         "experiment_id",
