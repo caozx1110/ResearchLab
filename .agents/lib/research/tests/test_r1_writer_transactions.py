@@ -91,6 +91,9 @@ def test_core_init_checkpoints_every_created_product_file(tmp_path: Path, monkey
     assert (root / "kb/config/research-settings.md").is_file()
     assert (root / "kb/user/current-state.md").is_file()
     assert (root / "kb/user/navigation.md").is_file()
+    navigation = (root / "kb/user/navigation.md").read_text(encoding="utf-8")
+    assert "research-navigator" not in navigation
+    assert "Agent 可在需要时生成研究入口" in navigation
 
 
 def test_archive_fault_restores_note_and_reporting_event(tmp_path: Path, monkeypatch) -> None:

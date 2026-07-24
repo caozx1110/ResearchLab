@@ -369,7 +369,10 @@ def ensure_workspace(project_root: Path) -> None:
         write_text_if_changed(settings, DEFAULT_SETTINGS_MARKDOWN)
     navigation = user_root(project_root) / "navigation.md"
     if not navigation.exists():
-        write_text_if_changed(navigation, "# Research Navigation\n\n- 运行 `research-navigator` 刷新当前入口页。\n")
+        write_text_if_changed(
+            navigation,
+            "# Research Navigation\n\n- Agent 可在需要时生成研究入口；这里暂时没有内容。\n",
+        )
     current_state = user_root(project_root) / "current-state.md"
     if not current_state.exists():
         write_text_if_changed(current_state, "# Current State\n\n尚未生成。\n")
