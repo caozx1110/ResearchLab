@@ -4,6 +4,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 
 def _project_root() -> Path:
     return Path(__file__).resolve().parents[4]
@@ -64,6 +66,64 @@ def test_literature_discovery_routes_to_literature_search_not_single_paper_analy
     module = _load_orchestrator_module()
     for task in ("找论文", "补相关工作", "literature search for VLA", "find papers on robot learning"):
         assert module.route_task(task) == "literature-search"
+
+
+def test_ambiguous_composed_and_negated_tasks_require_agent_routing() -> None:
+    module = _load_orchestrator_module()
+    cases = {
+        "找论文，然后逐篇分析并写综述": {
+            "literature-search",
+            "paper-analyst",
+            "literature-synthesizer",
+        },
+        "不要检索，直接分析这篇论文": {"paper-analyst"},
+        "把新论文入库并分析": {"source-intake", "paper-analyst"},
+        "每两周检查一次这个 survey 是否过时": {"research-monitor", "literature-synthesizer"},
+    }
+    for task, expected_owners in cases.items():
+        snapshot = module.route_candidate_snapshot(task)
+        assert module.route_task(task) == "research-orchestrator"
+        assert snapshot["planning_required"] is True
+        assert expected_owners <= set(snapshot["candidate_skills"])
+        assert "score" not in snapshot
+
+
+def test_agent_route_decision_must_follow_snapshot_and_dependency_order() -> None:
+    module = _load_orchestrator_module()
+    snapshot = module.route_candidate_snapshot("找论文，然后分析论文")
+    decision = {
+        "route_snapshot_digest": snapshot["route_snapshot_digest"],
+        "rationale": "Discovery must produce the bounded set consumed by analysis.",
+        "steps": [
+            {
+                "step_id": "search",
+                "owner_skill": "literature-search",
+                "instruction": "Find a bounded candidate set.",
+                "depends_on": [],
+                "governance_gate": "agent-verification",
+            },
+            {
+                "step_id": "analyze",
+                "owner_skill": "paper-analyst",
+                "instruction": "Analyze the selected papers with evidence.",
+                "depends_on": ["search"],
+                "governance_gate": "human-decision",
+            },
+        ],
+    }
+
+    normalized = module.validate_route_decision(decision, snapshot)
+    assert [item["order"] for item in normalized["steps"]] == [1, 2]
+
+    stale = {**decision, "route_snapshot_digest": "0" * 64}
+    with pytest.raises(SystemExit, match="stale"):
+        module.validate_route_decision(stale, snapshot)
+    invalid_dependency = {
+        **decision,
+        "steps": [{**decision["steps"][0], "depends_on": ["analyze"]}],
+    }
+    with pytest.raises(SystemExit, match="earlier"):
+        module.validate_route_decision(invalid_dependency, snapshot)
 
 
 def test_orchestrator_confirm_command_uses_shared_helper() -> None:

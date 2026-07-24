@@ -185,6 +185,74 @@ def test_due_monitor_is_a_factual_candidate_not_an_automatic_winner(tmp_path: Pa
     assert monitor["dependencies"][0]["due_at"] == "2026-07-01T01:00:00+00:00"
 
 
+def test_side_judgement_and_monitor_outcome_are_complete_factual_candidates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orchestrate = _load_orchestrator("orchestrator_complete_candidate_sources")
+    root = _workspace(tmp_path)
+    _program(orchestrate, root, "program-a")
+    judgement_binding = {
+        "subject": {
+            "kind": "program_decision",
+            "id": "decision-1",
+            "owner": "research-orchestrator",
+            "path": "kb/programs/program-a/workflow/decisions.yaml",
+        },
+        "confirmation_status": "pending_user_confirmation",
+        "content_digest": "a" * 64,
+        "verification": {
+            "verified_at": "2026-07-24T00:00:00+00:00",
+            "claims_digest": "b" * 64,
+            "evidence_digest": "c" * 64,
+        },
+    }
+    monkeypatch.setattr(
+        orchestrate,
+        "discover_pending_judgements",
+        lambda _root: [
+            {
+                "subject": judgement_binding["subject"],
+                "snapshot_binding": judgement_binding,
+                "priority": "high",
+                "confirm_route": {"program_id": "program-a"},
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        orchestrate,
+        "unresolved_monitor_outcomes",
+        lambda _root: [
+            {
+                "run_id": "run-1",
+                "outcome_id": "outcome-1",
+                "classification": "new",
+                "subject_ref": "candidate-paper",
+                "rationale": "A new paper may change the current conclusion.",
+                "subscription_id": "subscription-1",
+                "subscription_title": "Track VLA papers",
+                "program_ids": ["program-a"],
+                "run_revision": 3,
+                "run_content_digest": "d" * 64,
+                "outcome_binding_digest": "e" * 64,
+            }
+        ],
+    )
+
+    snapshot = orchestrate.portfolio_candidate_snapshot(root, selected_program_id="program-a")
+    side = next(item for item in snapshot["candidates"] if item["action_type"] == "review-judgement")
+    outcome = next(
+        item for item in snapshot["candidates"] if item["action_type"] == "resolve-monitor-outcome"
+    )
+
+    assert side["dependencies"][0]["snapshot_binding"] == judgement_binding
+    assert side["governance_gate"] == "human-decision"
+    assert outcome["dependencies"][0]["run_revision"] == 3
+    assert outcome["governance_gate"] == "human-decision"
+    assert outcome["safe_execute_capability"] is False
+    assert not _contains_key(snapshot, "score")
+
+
 def test_fill_template_contains_locked_agent_authored_fields(tmp_path: Path) -> None:
     orchestrate = _load_orchestrator("orchestrator_agent_template")
     root = _workspace(tmp_path)
@@ -304,6 +372,46 @@ def test_research_judgement_cannot_hide_in_procedural_selection(tmp_path: Path) 
         orchestrate.validate_portfolio_decision(root, decision, snapshot)
 
 
+def test_program_decision_binding_change_stales_agent_portfolio_decision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orchestrate = _load_orchestrator("orchestrator_agent_program_binding")
+    root = _workspace(tmp_path)
+    _program(orchestrate, root, "program-a", actions=["Choose a grounded baseline"])
+    snapshot = orchestrate.portfolio_candidate_snapshot(root)
+    decision = _decision(root, snapshot, [snapshot["candidates"][0]["action_id"]])
+    decision["decision_scope"] = "research_judgement"
+    decision["program_decision_ids"] = ["program-a:decision-1"]
+    binding = {
+        "subject": {"kind": "program_decision", "id": "decision-1"},
+        "confirmation_status": "pending_user_confirmation",
+        "content_digest": "a" * 64,
+        "verification": {"claims_digest": "b" * 64, "evidence_digest": "c" * 64},
+        "confirmation_digest": "d" * 64,
+    }
+    monkeypatch.setattr(
+        orchestrate,
+        "_validate_program_decision_references",
+        lambda _root, _ids, _selected: {"program-a:decision-1": binding},
+    )
+    stored, _changed = orchestrate.record_portfolio_decision(root, decision)
+    assert stored["program_decision_bindings"] == {"program-a:decision-1": binding}
+
+    changed_binding = {**binding, "content_digest": "f" * 64}
+    monkeypatch.setattr(
+        orchestrate,
+        "_validate_program_decision_references",
+        lambda _root, _ids, _selected: {"program-a:decision-1": changed_binding},
+    )
+    current = orchestrate.current_portfolio_decision(root, snapshot)
+
+    assert current is not None
+    assert current["effective_status"] == "stale"
+    assert "program_decision_changed" in current["stale_reasons"]
+    assert current["safe_to_continue"] is False
+
+
 def test_missing_preference_receipt_fails_closed(tmp_path: Path) -> None:
     orchestrate = _load_orchestrator("orchestrator_agent_preference_gate")
     root = _workspace(tmp_path)
@@ -381,8 +489,8 @@ def test_next_json_is_pure_read_and_requests_agent_planning(tmp_path: Path, monk
     after = sorted(path.relative_to(root).as_posix() for path in root.rglob("*"))
 
     assert payload["planning_required"] is True
-    assert payload["legacy_items_are_not_a_decision"] is True
-    assert payload["items"]  # compatibility only; new adapters consume candidate_snapshot
+    assert payload["items"] == []
+    assert "legacy_items_are_not_a_decision" not in payload
     assert payload["candidate_snapshot"]["candidate_count"] >= 1
     assert payload["portfolio_decision_fill"]["candidate_snapshot_digest"] == payload["candidate_snapshot"]["candidate_snapshot_digest"]
     assert payload["portfolio_decision"] is None

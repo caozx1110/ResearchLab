@@ -49,9 +49,9 @@ from research.common import (
 )
 from research.core import apply_confirmation, append_history, ensure_workspace, is_ready_for_human_review, iter_records, kb_root, load_runtime_preferences, locate_record, checkpoint_and_report, project_root, record_workflow_state, write_record
 from research.evidence import attach_claims, build_verification_receipt, validate_claims, verify_claim_evidence
-from research.judgements import apply_judgement_rejection, confirmation_binding, readiness_violations, require_judgement_snapshot
+from research.judgements import apply_judgement_rejection, confirmation_binding, discover_pending_judgements, judgement_confirmation_is_current, judgement_snapshot_binding, readiness_violations, require_judgement_snapshot
 from research.journal import mutation_transaction
-from research.monitoring import due_subscriptions
+from research.monitoring import due_subscriptions, unresolved_monitor_outcomes
 from research.preference_selection import load_effective_selection
 
 OPEN_QUESTION_OPEN_STATUSES = {"open"}
@@ -97,6 +97,8 @@ ROUTE_HINTS = {
     "find papers": "literature-search",
     "search papers": "literature-search",
     "related papers": "literature-search",
+    "分析论文": "paper-analyst",
+    "analyze paper": "paper-analyst",
     "论文": "paper-analyst",
     "paper": "paper-analyst",
     "仓库": "repo-analyst",
@@ -160,21 +162,164 @@ ROUTE_HINTS = {
     "监控": "research-monitor",
     "定期追踪": "research-monitor",
     "定期关注": "research-monitor",
+    "每周": "research-monitor",
+    "每两周": "research-monitor",
+    "每月": "research-monitor",
     "monitor": "research-monitor",
     "subscription": "research-monitor",
     "wiki": "wiki-adapter",
     "知识库": "wiki-adapter",
 }
 
+ROUTE_COMPOSITION_MARKERS = (
+    "然后",
+    "之后",
+    "同时",
+    "并且",
+    "以及",
+    "并做",
+    "并分析",
+    "后再",
+    " and ",
+    "and then",
+    " then ",
+    " after ",
+)
+ROUTE_NEGATION_MARKERS = ("不要", "不需要", "无需", "跳过", "别用", "without ", "skip ")
+ROUTE_GENERIC_ENTITY_HINTS = {"论文", "paper", "仓库", "repo", "数据集", "dataset", "博客", "blog"}
+
 COMMAND_PREFIX = "${RESEARCH_PYTHON:-python3}"
 
 
+def route_candidate_snapshot(task: str) -> dict[str, Any]:
+    """Expose factual route hints; leave ambiguous or composed routing to the Agent."""
+    text = str(task or "").strip()
+    lower = text.casefold()
+    composition_markers = [marker for marker in ROUTE_COMPOSITION_MARKERS if marker in lower]
+    negation_markers = [marker for marker in ROUTE_NEGATION_MARKERS if marker in lower]
+    if re.search(r"\b(?:not|don't|do not|never)\b", lower):
+        negation_markers.append("english-negation")
+    raw_hits = [
+        {"hint": hint, "owner_skill": skill, "start": lower.find(hint)}
+        for hint, skill in ROUTE_HINTS.items()
+        if hint in lower
+    ]
+    effective_hits: list[dict[str, Any]] = []
+    for hit in raw_hits:
+        hint = str(hit["hint"])
+        suppressed = not composition_markers and any(
+            hint != str(other["hint"])
+            and (
+                (hint in str(other["hint"]) and len(str(other["hint"])) > len(hint))
+                or (
+                    hint in ROUTE_GENERIC_ENTITY_HINTS
+                    and str(other["owner_skill"]) != str(hit["owner_skill"])
+                )
+            )
+            for other in raw_hits
+        )
+        effective_hits.append({**hit, "suppressed_by_specific_hint": suppressed})
+    candidate_skills = sorted(
+        {
+            str(hit["owner_skill"])
+            for hit in effective_hits
+            if not bool(hit["suppressed_by_specific_hint"])
+        }
+    )
+    planning_required = (
+        len(candidate_skills) != 1
+        or bool(composition_markers)
+        or bool(negation_markers)
+    )
+    direct_owner = candidate_skills[0] if not planning_required else "research-orchestrator"
+    digest_input = {
+        "schema_version": 1,
+        "task": text,
+        "matched_hints": sorted(
+            effective_hits,
+            key=lambda item: (int(item["start"]), -len(str(item["hint"])), str(item["hint"])),
+        ),
+        "candidate_skills": candidate_skills,
+        "composition_markers": sorted(set(composition_markers)),
+        "negation_markers": sorted(set(negation_markers)),
+    }
+    return {
+        **digest_input,
+        "route_snapshot_digest": _canonical_digest(digest_input),
+        "planning_required": planning_required,
+        "direct_owner": direct_owner,
+    }
+
+
+def route_decision_fill_template(snapshot: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "route_snapshot_digest": str(snapshot.get("route_snapshot_digest") or ""),
+        "steps": [],
+        "rationale": "",
+    }
+
+
+def validate_route_decision(decision: object, snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Validate an Agent-authored ordered route without judging its semantics."""
+    if not isinstance(decision, dict):
+        raise SystemExit("Route decision fill must be a mapping")
+    if str(decision.get("route_snapshot_digest") or "") != str(
+        snapshot.get("route_snapshot_digest") or ""
+    ):
+        raise SystemExit("Route decision is stale: task snapshot changed")
+    rationale = str(decision.get("rationale") or "").strip()
+    if not rationale:
+        raise SystemExit("Route decision requires a rationale")
+    raw_steps = decision.get("steps")
+    if not isinstance(raw_steps, list) or not raw_steps or len(raw_steps) > 12:
+        raise SystemExit("Route decision requires one to twelve ordered steps")
+    allowed_owners = set(snapshot.get("candidate_skills") or [])
+    if not allowed_owners:
+        allowed_owners = {"research-orchestrator"}
+    normalized_steps: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, raw_step in enumerate(raw_steps, start=1):
+        if not isinstance(raw_step, dict):
+            raise SystemExit("Route decision steps must be mappings")
+        step_id = str(raw_step.get("step_id") or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", step_id) or step_id in seen:
+            raise SystemExit("Route decision step ids must be unique safe identifiers")
+        owner = str(raw_step.get("owner_skill") or "").strip()
+        if owner not in allowed_owners:
+            raise SystemExit("Route decision selected an owner outside the task snapshot")
+        instruction = str(raw_step.get("instruction") or "").strip()
+        if not instruction:
+            raise SystemExit("Route decision steps require an instruction")
+        dependencies = raw_step.get("depends_on", [])
+        if not isinstance(dependencies, list):
+            raise SystemExit("Route decision depends_on must be a list")
+        depends_on = [str(item or "").strip() for item in dependencies]
+        if any(not item or item not in seen for item in depends_on) or len(set(depends_on)) != len(depends_on):
+            raise SystemExit("Route decision dependencies must name unique earlier steps")
+        gate = str(raw_step.get("governance_gate") or "none").strip()
+        if gate not in {"none", "human-decision", "agent-verification"}:
+            raise SystemExit("Route decision governance_gate is invalid")
+        seen.add(step_id)
+        normalized_steps.append(
+            {
+                "order": index,
+                "step_id": step_id,
+                "owner_skill": owner,
+                "instruction": instruction,
+                "depends_on": depends_on,
+                "governance_gate": gate,
+            }
+        )
+    return {
+        "route_snapshot_digest": str(snapshot.get("route_snapshot_digest") or ""),
+        "steps": normalized_steps,
+        "rationale": rationale,
+        "generated_by": "runtime-agent",
+    }
+
+
 def route_task(task: str) -> str:
-    lower = str(task or "").lower()
-    for key, skill in sorted(ROUTE_HINTS.items(), key=lambda item: (-len(item[0]), item[0])):
-        if key in lower:
-            return skill
-    return "research-orchestrator"
+    return str(route_candidate_snapshot(task).get("direct_owner") or "research-orchestrator")
 # Governance cap: runtime preferences may narrow this scope, but cannot add steps
 # beyond this set.
 GOVERNANCE_MAX_AUTO_STEPS = {"screen", "build-index", "refresh", "generate-note"}
@@ -1110,6 +1255,66 @@ def _candidate(
     return payload
 
 
+def _judgement_card_program_ids(
+    card: dict[str, Any],
+    record_by_id: dict[str, dict[str, Any]],
+) -> list[str]:
+    subject = card.get("subject") if isinstance(card.get("subject"), dict) else {}
+    route = card.get("confirm_route") if isinstance(card.get("confirm_route"), dict) else {}
+    result: set[str] = set()
+    if str(route.get("program_id") or ""):
+        result.add(str(route["program_id"]))
+    subject_id = str(subject.get("id") or "")
+    idea_id = str(route.get("idea_id") or "")
+    for record_id in (subject_id, idea_id):
+        record = record_by_id.get(record_id)
+        if record is not None:
+            result.update(str(item) for item in normalize_list(record.get("program_ids")) if str(item))
+    path_parts = Path(str(subject.get("path") or "")).parts
+    if len(path_parts) >= 3 and path_parts[:2] == ("kb", "programs"):
+        result.add(path_parts[2])
+    return sorted(result)
+
+
+def _judgement_candidate(
+    card: dict[str, Any],
+    *,
+    program_id: str,
+    stage: str,
+    goal: str,
+    question: str,
+    record_by_id: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    subject = card.get("subject") if isinstance(card.get("subject"), dict) else {}
+    subject_id = str(subject.get("id") or "")
+    subject_kind = str(subject.get("kind") or "")
+    record = record_by_id.get(subject_id, {})
+    return _candidate(
+        program_id=program_id,
+        action_type="review-judgement",
+        subject_id=subject_id,
+        discriminator=subject_kind,
+        owner_skill=str(subject.get("owner") or "knowledge-base-manager"),
+        stage=stage,
+        goal=goal,
+        question=question,
+        reason="A verified judgement is waiting for the user's decision.",
+        title=str(record.get("title") or subject_id),
+        subject_kind=subject_kind,
+        priority=str(card.get("priority") or "normal"),
+        dependencies=[
+            {
+                "kind": "judgement-snapshot",
+                "id": f"{subject_kind}:{subject_id}",
+                "snapshot_binding": card.get("snapshot_binding")
+                if isinstance(card.get("snapshot_binding"), dict)
+                else {},
+            }
+        ],
+        governance_gate="human-decision",
+    )
+
+
 def portfolio_candidates(root: Path, *, selected_program_id: str = "") -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Enumerate all legal actions and factual context without ranking them."""
     records = iter_records(root)
@@ -1117,6 +1322,15 @@ def portfolio_candidates(root: Path, *, selected_program_id: str = "") -> tuple[
     candidates: list[dict[str, Any]] = []
     program_contexts: list[dict[str, Any]] = []
     attached_unit_ids: set[str] = set()
+    judgement_cards = discover_pending_judgements(root)
+    judgement_programs = {
+        (str(card.get("subject", {}).get("kind") or ""), str(card.get("subject", {}).get("id") or "")):
+        _judgement_card_program_ids(card, record_by_id)
+        for card in judgement_cards
+        if isinstance(card.get("subject"), dict)
+    }
+    judgement_keys = set(judgement_programs)
+    attached_judgements: set[tuple[str, str]] = set()
 
     selected_ids = [selected_program_id] if selected_program_id else program_ids(root)
     for program_id in selected_ids:
@@ -1224,35 +1438,22 @@ def portfolio_candidates(root: Path, *, selected_program_id: str = "") -> tuple[
                 )
             )
 
-        for unit_id in sorted(unit_ids):
-            record = record_by_id.get(unit_id)
-            if record is None or not is_user_confirmable(record):
+        for card in judgement_cards:
+            subject = card.get("subject") if isinstance(card.get("subject"), dict) else {}
+            key = (str(subject.get("kind") or ""), str(subject.get("id") or ""))
+            if program_id not in judgement_programs.get(key, []) and key[1] not in unit_ids:
                 continue
-            kind = str(record.get("kind") or "")
             candidates.append(
-                _candidate(
+                _judgement_candidate(
+                    card,
                     program_id=program_id,
-                    action_type="human-decision",
-                    subject_id=unit_id,
-                    owner_skill=_unit_owner_skill(kind),
                     stage=stage,
                     goal=context["goal"],
                     question=context["question"],
-                    reason="A verified judgement is waiting for the user's decision.",
-                    title=str(record.get("title") or ""),
-                    subject_kind=kind,
-                    dependencies=[
-                        {
-                            "kind": "unit-state",
-                            "id": unit_id,
-                            "workflow_state": record_workflow_state(record),
-                            "record_digest": _canonical_digest(record),
-                        }
-                    ],
-                    governance_gate="human-decision",
-                    recommended_command=confirm_command_for_record(record),
+                    record_by_id=record_by_id,
                 )
             )
+            attached_judgements.add(key)
 
         for action in normalize_list(state.get("next_actions")):
             candidates.append(
@@ -1295,6 +1496,8 @@ def portfolio_candidates(root: Path, *, selected_program_id: str = "") -> tuple[
                 continue
             kind = str(record.get("kind") or "")
             governance_gate = "human-decision" if str(step.get("kind") or "") == "human-gate" else "none"
+            if governance_gate == "human-decision" and (kind, unit_id) in judgement_keys:
+                continue
             candidates.append(
                 _candidate(
                     program_id=f"loose:{unit_id}",
@@ -1321,6 +1524,23 @@ def portfolio_candidates(root: Path, *, selected_program_id: str = "") -> tuple[
                     recommended_command=str(step.get("recommended_command") or ""),
                 )
             )
+
+        for card in judgement_cards:
+            subject = card.get("subject") if isinstance(card.get("subject"), dict) else {}
+            key = (str(subject.get("kind") or ""), str(subject.get("id") or ""))
+            if key in attached_judgements:
+                continue
+            candidates.append(
+                _judgement_candidate(
+                    card,
+                    program_id=f"review:{key[0]}:{key[1]}",
+                    stage="pending-review",
+                    goal="Review a verified research judgement.",
+                    question="",
+                    record_by_id=record_by_id,
+                )
+            )
+            attached_judgements.add(key)
 
     for due in due_subscriptions(root):
         linked_program_ids = [str(item) for item in due.get("program_ids") or [] if str(item)]
@@ -1350,6 +1570,44 @@ def portfolio_candidates(root: Path, *, selected_program_id: str = "") -> tuple[
                         "program_ids": linked_program_ids,
                     }
                 ],
+                safe_execute_capability=False,
+            )
+        )
+
+    for outcome in unresolved_monitor_outcomes(root):
+        linked_program_ids = [str(item) for item in outcome.get("program_ids") or [] if str(item)]
+        if selected_program_id and selected_program_id not in linked_program_ids:
+            continue
+        run_id = str(outcome.get("run_id") or "")
+        outcome_id = str(outcome.get("outcome_id") or "")
+        classification = str(outcome.get("classification") or "")
+        candidates.append(
+            _candidate(
+                program_id=f"monitor:{outcome.get('subscription_id') or run_id}",
+                action_type="resolve-monitor-outcome",
+                subject_id=f"{run_id}:{outcome_id}",
+                discriminator=classification,
+                owner_skill="research-monitor",
+                stage="monitor-outcome",
+                goal=str(outcome.get("subscription_title") or "Resolve a monitoring result."),
+                question="",
+                reason=str(outcome.get("rationale") or "A completed monitor result needs disposition."),
+                title=str(outcome.get("subject_ref") or outcome_id),
+                subject_kind="research-monitor-outcome",
+                dependencies=[
+                    {
+                        "kind": "monitor-outcome-binding",
+                        "id": f"{run_id}:{outcome_id}",
+                        "run_revision": int(outcome.get("run_revision") or 0),
+                        "run_content_digest": str(outcome.get("run_content_digest") or ""),
+                        "outcome_binding_digest": str(outcome.get("outcome_binding_digest") or ""),
+                        "classification": classification,
+                        "program_ids": linked_program_ids,
+                    }
+                ],
+                governance_gate="human-decision"
+                if classification in {"new", "worth_reviewing", "contradiction_candidate"}
+                else "none",
                 safe_execute_capability=False,
             )
         )
@@ -1425,7 +1683,11 @@ def _validate_preference_selection_reference(root: Path, selection_id: str, task
         raise SystemExit("Referenced preference selection is unavailable, invalid, or stale") from exc
 
 
-def _validate_program_decision_references(root: Path, decision_ids: list[str], selected: list[dict[str, Any]]) -> None:
+def _validate_program_decision_references(
+    root: Path,
+    decision_ids: list[str],
+    selected: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
     if not decision_ids:
         raise SystemExit("Research-judgement planning requires a program decision reference")
     selected_programs = {
@@ -1433,6 +1695,7 @@ def _validate_program_decision_references(root: Path, decision_ids: list[str], s
         for item in selected
         if str(item.get("program_id") or "") and not str(item.get("program_id") or "").startswith("loose:")
     }
+    bindings: dict[str, dict[str, Any]] = {}
     for reference in decision_ids:
         program_id, separator, decision_id = str(reference).partition(":")
         if not separator or program_id not in selected_programs or not decision_id:
@@ -1444,11 +1707,27 @@ def _validate_program_decision_references(root: Path, decision_ids: list[str], s
         ]
         if len(matches) != 1:
             raise SystemExit("Program decision reference is unavailable or unverified")
-        if str(matches[0].get("confirmation_status") or "") not in {
+        record = matches[0]
+        confirmation_status = str(record.get("confirmation_status") or "")
+        if confirmation_status not in {
             "pending_user_confirmation",
             "confirmed",
         }:
             raise SystemExit("Program decision reference has an invalid confirmation state")
+        artifact_path = decisions_path(root, program_id)
+        if confirmation_status == "pending_user_confirmation":
+            if readiness_violations(root, record, artifact_path):
+                raise SystemExit("Program decision reference is unavailable or unverified")
+        elif not judgement_confirmation_is_current(root, record, artifact_path):
+            raise SystemExit("Program decision confirmation is unavailable or stale")
+        binding = judgement_snapshot_binding(
+            record,
+            owner="research-orchestrator",
+            path=artifact_path.relative_to(root).as_posix(),
+        )
+        binding["confirmation_digest"] = _canonical_digest(record.get("confirmation") or {})
+        bindings[reference] = binding
+    return bindings
 
 
 def _aware_iso_timestamp(value: object) -> str:
@@ -1502,8 +1781,15 @@ def validate_portfolio_decision(
     if not isinstance(raw_program_decision_ids, list):
         raise SystemExit("Portfolio decision program_decision_ids must be a list")
     program_decision_ids = [str(item or "").strip() for item in raw_program_decision_ids if str(item or "").strip()]
+    if len(set(program_decision_ids)) != len(program_decision_ids):
+        raise SystemExit("Portfolio decision program_decision_ids must be unique")
+    program_decision_bindings: dict[str, dict[str, Any]] = {}
     if decision_scope == "research_judgement":
-        _validate_program_decision_references(root, program_decision_ids, selected)
+        program_decision_bindings = _validate_program_decision_references(
+            root,
+            program_decision_ids,
+            selected,
+        )
     elif program_decision_ids:
         raise SystemExit("Procedural planning cannot attach research decision references")
     decided_at = _aware_iso_timestamp(decision.get("decided_at"))
@@ -1535,6 +1821,7 @@ def validate_portfolio_decision(
         "preference_selection_id": preference_selection_id,
         "decision_scope": decision_scope,
         "program_decision_ids": program_decision_ids,
+        "program_decision_bindings": program_decision_bindings,
         "decided_at": decided_at,
         "generated_by": "runtime-agent",
         "status": "recorded",
@@ -1580,6 +1867,24 @@ def current_portfolio_decision(root: Path, snapshot: dict[str, Any]) -> dict[str
             continue
         if str(bindings.get(str(action_id)) or "") != str(candidate.get("binding_digest") or ""):
             stale_reasons.append("selected_action_changed")
+    if str(current.get("decision_scope") or "") == "research_judgement":
+        selected = [
+            current_candidates[str(action_id)]
+            for action_id in current.get("selected_action_ids", [])
+            if str(action_id) in current_candidates
+        ]
+        try:
+            current_program_bindings = _validate_program_decision_references(
+                root,
+                [str(item) for item in current.get("program_decision_ids", [])],
+                selected,
+            )
+        except SystemExit:
+            stale_reasons.append("program_decision_stale")
+        else:
+            stored_program_bindings = current.get("program_decision_bindings")
+            if not isinstance(stored_program_bindings, dict) or stored_program_bindings != current_program_bindings:
+                stale_reasons.append("program_decision_changed")
     try:
         _validate_preference_selection_reference(
             root,
@@ -2048,6 +2353,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     route = subparsers.add_parser("route", help="Suggest the right skill for a task")
     route.add_argument("--task", required=True)
+    route.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
+    route.add_argument("--decision-file", help=argparse.SUPPRESS)
 
     attach = subparsers.add_parser("attach-unit", help="Attach a unit id to a program")
     attach.add_argument("--program-id", required=True)
@@ -2485,13 +2792,7 @@ def main() -> int:
                     item["safe_execute"] = False
                     item["action_kind"] = "human-gate"
         else:
-            # Transitional owner-protocol compatibility for callers released
-            # before PortfolioDecision existed.  New callers MUST branch on
-            # planning_required and consume candidate_snapshot; these legacy
-            # items are not a decision and are never used by the plain renderer.
-            items = program_dashboard_items(root)
-            if selected_program_id:
-                items = [item for item in items if item.get("program_id") == selected_program_id]
+            items = []
         if args.json:
             print(
                 json.dumps(
@@ -2502,7 +2803,6 @@ def main() -> int:
                         "portfolio_decision_fill": portfolio_decision_fill_template(snapshot),
                         "portfolio_decision": current,
                         "planning_required": planning_required,
-                        "legacy_items_are_not_a_decision": planning_required,
                     },
                     ensure_ascii=False,
                     sort_keys=True,
@@ -2529,7 +2829,27 @@ def main() -> int:
                 print("[stop] human decision required; not executing")
         return exit_code
     if args.command == "route":
-        print(route_task(args.task))
+        snapshot = route_candidate_snapshot(args.task)
+        decision = None
+        if args.decision_file:
+            fill_path = Path(args.decision_file).expanduser()
+            if not fill_path.is_absolute():
+                fill_path = root / fill_path
+            decision = validate_route_decision(load_portfolio_decision_file(fill_path), snapshot)
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "route_snapshot": snapshot,
+                        "route_decision_fill": route_decision_fill_template(snapshot),
+                        "route_decision": decision,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(str(snapshot.get("direct_owner") or "research-orchestrator"))
         return 0
     if args.command == "attach-unit":
         warning = ""
