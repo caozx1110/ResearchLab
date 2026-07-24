@@ -22,6 +22,14 @@
 
 ---
 
+## 安装更新源选择 <a id="update-source-choice"></a>
+
+copy install 的 `.agents/.install-manifest.json` 以 `source_origin/source_checkout/source_branch/source_strategy/source_commit` 记录更新 provenance。`kb update` 返回 `needs_source_choice` 时，私有 Agent protocol 必须包含当前可验证 provenance、真正缺失的用户字段、manifest byte digest 与 headless apply contract；不得只返回无法执行的 `choose_update_source` 名称。
+
+Agent 在当前对话取得选择后才可重绑。重绑以 manifest byte digest 做 CAS，要求 manifest leaf/ancestor 均为受控普通路径，并只原子更新 provenance 字段：`local-checkout` 要求 checkout 是真实 bundle source，且非 local origin 时 actual origin 与当前 branch 精确匹配；`remote-branch` 要求非 local origin + 合法 branch，并清空 checkout，后续在隔离 cache fetch/clone。detached checkout 的 branch 选择不能替用户切换其工作树，只能显式转为 remote-branch 或绑定另一个已经位于所选 branch 的有效 checkout。重绑后自动重跑 check，但不得自动 apply；代码更新仍需另一条当前用户授权。公开输出只含自然语言和 `kb update`，source path、digest、flags 与裸 git 只留在私有 Agent protocol。
+
+---
+
 ## 共享枚举 <a id="enums"></a>
 
 | 名称 | 取值 | 含义 |
