@@ -23,7 +23,7 @@ description: Generate self-contained weekly reports, stage summaries, PPT or wri
 4. 将 claim 文本与 evidence ref 的 `source_unit_id`、`locator`、逐字 `quote`、可选 `summary` 一起写入材料；不把 essential evidence 留给读者自行打开。
 5. 聚合固定 H2 decision blocks 与筛选后的 events。最终叙事由 agent 基于这些输入填写，不允许脚本生成判断。
 6. 任一输入缺失时保留明确的 `missing: X`；禁止静默省略、补写或推测。
-7. 按 workspace 统一偏好合同为本次 report operation 记录并加载 task-bound effective selection；只有被 Agent 选中的 `profile.personalization.reporting_style` 才控制展示量。包含“简洁”/`concise`/`brief` 时压缩 decisions、claims 与 events；包含“详细”/`detailed`/`full` 时保留完整输入；未选中、缺失或不可解析时维持默认。旧顶层 `reporting_style` 只兼容历史 profile 读取，不是新写入目标。精简模式仍保留 decisions、claims + evidence、events 三部分及全部适用的 `missing:` 标记。
+7. 按 workspace 统一偏好合同为本次 report operation 记录并加载 task-bound effective selection；task digest 由 owner 按 program、operation、stage、limit 重算，不能由调用方传入。只有被 Agent 选中的 `profile.personalization.reporting_style` 才控制展示量。包含“简洁”/`concise`/`brief` 时压缩 decisions、claims 与 events；包含“详细”/`detailed`/`full` 时保留完整输入；未选中、缺失或不可解析时维持 neutral default。旧顶层及 canonical profile 中未选中的 `reporting_style` 都不得作为兼容直读旁路。报告持久化 selection/task/receipt digest 绑定，不复制偏好原值。精简模式仍保留 decisions、claims + evidence、events 三部分及全部适用的 `missing:` 标记。
 8. Reporting events 默认 fail-closed：显式 factual/operational 事件可进普通区；decision/diagnosis/discussion conclusion/survey inference/novelty/evaluation 与未知未分型事件均视为 judgement。只有能经无 symlink canonical containment 解析 subject、binding 完全一致且 verification artifact 当前 bytes 仍匹配的 ConfirmationReceipt 才进入普通区；pending/rejected/stale 全部隔离到 `Pending / Unverified judgements`。
 9. Survey inference 还必须通过 `consumer_binding` 的纯读 freshness 检查；新增匹配 unit、上游 content/evidence 变化、删除或 confirmation 失效时只进入 pending/stale 区，不得自动改写 survey 或继续当正式结论。
 

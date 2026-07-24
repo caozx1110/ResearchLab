@@ -41,9 +41,9 @@ from research.core import (
 from research.prefs import DIAGNOSTIC_MODES, DIAGNOSTIC_SKILL_MODES
 from research.preference_selection import (
     eligible_preferences,
-    load_effective_selection,
     record_effective_selection,
-    resolve_effective_preferences,
+    resolve_task_preferences,
+    task_context_digest,
 )
 
 
@@ -306,6 +306,7 @@ def build_parser() -> argparse.ArgumentParser:
     eligible = subparsers.add_parser("eligible-preferences", help="Return the task-scoped eligible preference view")
     eligible.add_argument("--skill", required=True)
     eligible.add_argument("--operation", default="")
+    eligible.add_argument("--task-context-json", default="")
 
     record_effective = subparsers.add_parser("record-effective", help="Validate and persist an Agent preference selection")
     record_effective.add_argument("--selection-json", required=True)
@@ -314,7 +315,7 @@ def build_parser() -> argparse.ArgumentParser:
     load_effective.add_argument("--selection-id", required=True)
     load_effective.add_argument("--skill", required=True)
     load_effective.add_argument("--operation", default="")
-    load_effective.add_argument("--task-context-digest", required=True)
+    load_effective.add_argument("--task-context-json", required=True)
     return parser
 
 
@@ -326,7 +327,20 @@ def main() -> int:
         ensure_workspace(root)
 
     if args.command == "eligible-preferences":
-        print(json.dumps(eligible_preferences(root, skill=args.skill, operation=args.operation), ensure_ascii=False, sort_keys=True))
+        result = eligible_preferences(root, skill=args.skill, operation=args.operation)
+        if args.task_context_json:
+            try:
+                task_context = json.loads(args.task_context_json)
+            except json.JSONDecodeError as exc:
+                raise SystemExit("Invalid canonical task context JSON") from exc
+            if not isinstance(task_context, dict):
+                raise SystemExit("Canonical task context must be an object")
+            result["task_context_digest"] = task_context_digest(
+                skill=args.skill,
+                operation=args.operation,
+                canonical_inputs=task_context,
+            )
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return 0
     if args.command == "record-effective":
         try:
@@ -345,12 +359,18 @@ def main() -> int:
         print(json.dumps(receipt, ensure_ascii=False, sort_keys=True))
         return 0
     if args.command == "load-effective":
-        effective = resolve_effective_preferences(
+        try:
+            task_context = json.loads(args.task_context_json)
+        except json.JSONDecodeError as exc:
+            raise SystemExit("Invalid canonical task context JSON") from exc
+        if not isinstance(task_context, dict):
+            raise SystemExit("Canonical task context must be an object")
+        effective = resolve_task_preferences(
             root,
             selection_id=args.selection_id,
             skill=args.skill,
             operation=args.operation,
-            expected_task_context_digest=args.task_context_digest,
+            canonical_inputs=task_context,
         )
         print(json.dumps(effective, ensure_ascii=False, sort_keys=True))
         return 0

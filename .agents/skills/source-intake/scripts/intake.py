@@ -28,6 +28,7 @@ from research.common import add_project_root_argument, confirm_command as shared
 from research.confirm import require_user_authorization
 from research.journal import journal_subprocess_env, mutation_transaction
 from research.intake_cli import add_intake_add_arguments
+from research.preference_selection import resolve_task_preferences, selection_binding
 from research.core import (
     apply_record_governance,
     backup_source,
@@ -36,7 +37,6 @@ from research.core import (
     default_record,
     detect_duplicate,
     ensure_workspace,
-    load_runtime_preferences,
     load_search_stage,
     mark_search_candidate,
     checkpoint_and_report,
@@ -198,6 +198,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_intake_add_arguments(add, include_stage_options=True)
     add.add_argument("--user-authorization", default="")
     add.add_argument("--authorization-source", default="")
+    add.add_argument("--preference-selection-id", default="")
 
     for search_name in ("search", "stage-search"):
         stage = subparsers.add_parser(search_name, help="Record search candidates before canonical intake")
@@ -211,6 +212,41 @@ def build_parser() -> argparse.ArgumentParser:
     show = subparsers.add_parser("show-stage", help="Inspect a recorded search stage")
     show.add_argument("--stage-id", required=True)
     return parser
+
+
+def intake_preference_context(args: argparse.Namespace, *, source: str, title: str) -> dict[str, object]:
+    """Canonical source-intake inputs used to bind an effective selection."""
+    return {
+        "kind": str(args.kind),
+        "source": str(source),
+        "title": str(title),
+        "maturity": str(args.maturity),
+        "stage_id": str(args.stage_id or ""),
+        "candidate_id": str(args.candidate_id or ""),
+    }
+
+
+def resolve_intake_preferences(
+    root: Path, args: argparse.Namespace, *, source: str, title: str
+) -> tuple[dict[str, object], dict[str, object]]:
+    """Return selected runtime.paper values plus a value-free persistence binding."""
+    selection_id = str(getattr(args, "preference_selection_id", "") or "")
+    if str(args.kind) != "paper" or not selection_id:
+        return {}, {}
+    effective = resolve_task_preferences(
+        root,
+        selection_id=selection_id,
+        skill="source-intake",
+        operation="add",
+        canonical_inputs=intake_preference_context(args, source=source, title=title),
+    )
+    selected = {
+        str(item.get("path") or ""): item.get("value")
+        for item in effective.get("effective_items", [])
+        if isinstance(item, dict)
+    }
+    raw = selected.get("runtime.paper")
+    return (dict(raw) if isinstance(raw, dict) else {}), selection_binding(effective)
 
 
 def stage_candidates(args: argparse.Namespace) -> list[dict]:
@@ -623,7 +659,17 @@ def main() -> int:
     else:
         record["payload"]["basic_info"]["title"] = title
         record["payload"]["basic_info"]["url"] = source if source.startswith("http") else ""
-    paper_preferences = load_runtime_preferences(root).get("paper", {}) if args.kind == "paper" else {}
+    paper_preferences, preference_binding = resolve_intake_preferences(
+        root, args, source=source, title=title
+    )
+    record["payload"]["preference_contract"] = {
+        "skill": "source-intake",
+        "operation": "add",
+        "soft_missing": "neutral-default",
+        "hard_fallback_paths": ["profile.constraints"],
+    }
+    if preference_binding:
+        record["payload"]["preference_binding"] = preference_binding
     path, concurrent_duplicate, source_info, auto_outputs, note_created, updated_stage_path = (
         _execute_intake_transaction(
             root,

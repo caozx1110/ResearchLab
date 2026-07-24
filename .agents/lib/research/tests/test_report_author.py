@@ -7,6 +7,7 @@ from pathlib import Path
 from research.common import write_yaml_if_changed
 from research.confirm import apply_confirmation
 from research.evidence import build_verification_receipt
+from research.preference_selection import eligible_preferences, record_effective_selection
 
 
 def _write_confirmed_record(root: Path, unit_id: str, claims: list[dict]) -> None:
@@ -359,15 +360,51 @@ def test_reporting_style_controls_verbosity_and_preserves_missing_markers(tmp_pa
     )
     profile_path = root / "kb" / "config" / "user-profile.yaml"
 
+    def selected_style(selection_id: str) -> str:
+        eligible = eligible_preferences(root, skill="report-author", operation="weekly")
+        record_effective_selection(
+            root,
+            {
+                "selection_id": selection_id,
+                "skill": "report-author",
+                "operation": "weekly",
+                "catalog_digest": eligible["catalog_digest"],
+                "task_context": report.report_preference_context(
+                    program_id, operation="weekly", stage="", limit=20
+                ),
+                "selected": [
+                    {
+                        "preference_id": item["preference_id"],
+                        "reason": "controls requested report density",
+                        "application": "apply to report presentation only",
+                    }
+                    for item in eligible["items"]
+                ],
+                "excluded": [],
+            },
+        )
+        return selection_id
+
     write_yaml_if_changed(profile_path, {"personalization": {"reporting_style": "详细 / detailed"}})
-    detailed_inputs = report.load_report_inputs(root, program_id)
+    detailed_inputs = report.load_report_inputs(
+        root,
+        program_id,
+        preference_selection_id=selected_style("prefsel-report-detailed"),
+        preference_operation="weekly",
+    )
     detailed = report.render_report(f"Weekly Report: {program_id}", detailed_inputs, report_kind="weekly")
 
     write_yaml_if_changed(profile_path, {"personalization": {"reporting_style": "简洁 concise"}})
-    concise_inputs = report.load_report_inputs(root, program_id)
+    concise_inputs = report.load_report_inputs(
+        root,
+        program_id,
+        preference_selection_id=selected_style("prefsel-report-concise"),
+        preference_operation="weekly",
+    )
     concise = report.render_report(f"Weekly Report: {program_id}", concise_inputs, report_kind="weekly")
 
-    profile_path.unlink()
+    # Canonical soft preference remains configured, but without a selection it
+    # must not affect the consumer.
     default_inputs = report.load_report_inputs(root, program_id)
     default = report.render_report(f"Weekly Report: {program_id}", default_inputs, report_kind="weekly")
 

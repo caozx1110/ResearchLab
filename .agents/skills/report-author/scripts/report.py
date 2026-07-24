@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 from dataclasses import dataclass, field
@@ -27,7 +28,7 @@ from research.common import add_project_root_argument, load_program_reporting_ev
 from research.core import command_mutation, ensure_workspace, checkpoint_and_report, project_root, user_root
 from research.evidence import read_claims, validate_claims
 from research.judgements import judgement_confirmation_is_current, load_bound_judgement
-from research.preference_selection import resolve_effective_preferences
+from research.preference_selection import resolve_task_preferences, selection_binding
 from research.records import trusted_unit_record_path
 from research.surveys import survey_staleness
 
@@ -82,6 +83,7 @@ class ReportInputs:
     decisions: list[dict[str, str]] = field(default_factory=list)
     missing_units: list[str] = field(default_factory=list)
     reporting_style: str = "default"
+    preference_binding: dict[str, object] = field(default_factory=dict)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -94,7 +96,6 @@ def build_parser() -> argparse.ArgumentParser:
         cmd.add_argument("--stage", default="")
         cmd.add_argument("--limit", type=int, default=20)
         cmd.add_argument("--preference-selection-id", default="")
-        cmd.add_argument("--preference-task-digest", default="")
     return parser
 
 
@@ -264,16 +265,16 @@ def load_reporting_style(
     root: Path,
     *,
     preference_selection_id: str = "",
-    preference_task_digest: str = "",
     operation: str = "",
+    canonical_inputs: dict[str, object] | None = None,
 ) -> str:
     if preference_selection_id:
-        effective = resolve_effective_preferences(
+        effective = resolve_task_preferences(
             root,
             selection_id=preference_selection_id,
             skill="report-author",
             operation=operation,
-            expected_task_context_digest=preference_task_digest,
+            canonical_inputs=canonical_inputs or {},
         )
         selected = {
             str(item.get("path") or ""): item.get("value")
@@ -281,16 +282,21 @@ def load_reporting_style(
             if isinstance(item, dict)
         }
         return _normalize_reporting_style(selected.get("profile.personalization.reporting_style"))
-    try:
-        profile = load_yaml(root / "kb" / "config" / "user-profile.yaml", default={})
-    except Exception:
-        return "default"
-    if not isinstance(profile, dict):
-        return "default"
-    personalization = profile.get("personalization") if isinstance(profile.get("personalization"), dict) else {}
-    # Top-level reporting_style is a read-only compatibility fallback for old
-    # profiles; current setup writes personalization.reporting_style.
-    return _normalize_reporting_style(personalization.get("reporting_style") or profile.get("reporting_style"))
+    # A canonical profile is only a catalog.  Unselected soft style must be
+    # neutral, including legacy top-level reporting_style values.
+    return "default"
+
+
+def report_preference_context(
+    program_id: str, *, operation: str, stage: str = "", limit: int = 20
+) -> dict[str, object]:
+    """Canonical owner inputs for report preference binding."""
+    return {
+        "program_id": str(program_id),
+        "operation": str(operation),
+        "stage": str(stage),
+        "limit": int(limit),
+    }
 
 
 def _text_items(value: Any) -> list[str]:
@@ -453,25 +459,45 @@ def load_report_inputs(
     stage: str = "",
     limit: int = 20,
     preference_selection_id: str = "",
-    preference_task_digest: str = "",
     preference_operation: str = "",
 ) -> ReportInputs:
     loaded_events = normalize_events(load_program_reporting_events(root, program_id), stage=stage, limit=limit)
     events, pending_judgement_events = partition_reporting_events(root, loaded_events)
     unit_ids = program_unit_ids(root, program_id, loaded_events)
     claim_sources, missing_units = load_confirmed_claim_sources(root, unit_ids)
+    canonical_inputs = report_preference_context(
+        program_id,
+        operation=preference_operation,
+        stage=stage,
+        limit=limit,
+    )
+    binding: dict[str, object] = {}
+    reporting_style = "default"
+    if preference_selection_id:
+        effective = resolve_task_preferences(
+            root,
+            selection_id=preference_selection_id,
+            skill="report-author",
+            operation=preference_operation,
+            canonical_inputs=canonical_inputs,
+        )
+        selected = {
+            str(item.get("path") or ""): item.get("value")
+            for item in effective.get("effective_items", [])
+            if isinstance(item, dict)
+        }
+        reporting_style = _normalize_reporting_style(
+            selected.get("profile.personalization.reporting_style")
+        )
+        binding = selection_binding(effective)
     return ReportInputs(
         events=events,
         pending_judgement_events=pending_judgement_events,
         claim_sources=claim_sources,
         decisions=load_decisions(root, program_id),
         missing_units=missing_units,
-        reporting_style=load_reporting_style(
-            root,
-            preference_selection_id=preference_selection_id,
-            preference_task_digest=preference_task_digest,
-            operation=preference_operation,
-        ),
+        reporting_style=reporting_style,
+        preference_binding=binding,
     )
 
 
@@ -495,6 +521,7 @@ def concise_report_inputs(inputs: ReportInputs) -> ReportInputs:
         decisions=inputs.decisions[-CONCISE_DECISION_LIMIT:],
         missing_units=inputs.missing_units,
         reporting_style=inputs.reporting_style,
+        preference_binding=inputs.preference_binding,
     )
 
 
@@ -728,7 +755,6 @@ def main() -> int:
         stage=args.stage,
         limit=args.limit,
         preference_selection_id=args.preference_selection_id,
-        preference_task_digest=args.preference_task_digest,
         preference_operation=args.command,
     )
     if args.command == "weekly":
@@ -747,6 +773,9 @@ def main() -> int:
         path = reports_root / "stage-summary.md"
         title = f"Stage Summary: {args.program_id}"
     text = render_outline(args.program_id, inputs) if args.command == "outline" else render_report(title, inputs, report_kind=args.command)
+    if inputs.preference_binding:
+        binding_text = json.dumps(inputs.preference_binding, ensure_ascii=False, sort_keys=True)
+        text = f"<!-- effective-preferences: {binding_text} -->\n" + text
     with command_mutation(root, f"report-author:{args.command}", [path]):
         write_text_if_changed(path, text)
     print(path.relative_to(root))

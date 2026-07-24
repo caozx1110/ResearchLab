@@ -170,12 +170,122 @@ SKILL_ELIGIBILITY: dict[str, tuple[str, ...]] = {
 }
 
 
+# Consumer operations are an enforcement boundary, rather than descriptive
+# metadata.  A receipt may disclose only paths allowed for the exact operation
+# that will consume it.  Integration-owned skills are listed here as well so
+# the shared contract can fail closed even before their consumer wiring lands.
+SKILL_OPERATIONS: dict[str, tuple[str, ...]] = {
+    "knowledge-base-manager": ("review-display",),
+    "research-config-manager": ("configure",),
+    "source-intake": ("add",),
+    "research-orchestrator": ("plan",),
+    "literature-search": ("search", "stage"),
+    "literature-synthesizer": ("synthesize",),
+    "report-author": ("weekly", "ppt-materials", "stage-summary", "writing-materials", "outline"),
+    "method-designer": ("design",),
+    "experiment-workbench": ("plan", "log-run", "follow-up", "diagnose"),
+    "idea-workbench": ("ideate",),
+    "discussion-archivist": ("archive",),
+    "kb-cli": ("review-display",),
+    "paper-analyst": ("prewarm-cache", "screen", "complete-note", "extract-figures", "refresh-structure"),
+    "repo-analyst": ("scan-structure", "map-capability"),
+    "dataset-analyst": ("profile",),
+    "blog-analyst": ("complete-note",),
+    "research-monitor": ("due", "apply"),
+    "research-navigator": ("render",),
+    "wiki-adapter": ("query",),
+    "skill-evolution-advisor": ("capture",),
+}
+
+
+# Narrow an operation where the owner script has a smaller real consumer than
+# the skill-wide disclosure catalog.  Unlisted pairs retain the skill allowlist
+# for runtime-Agent consumers, but still require a declared operation above.
+OPERATION_ELIGIBILITY: dict[tuple[str, str], tuple[str, ...]] = {
+    ("source-intake", "add"): ("profile.constraints", "runtime.paper", "runtime.pdf", "learned.*"),
+    ("report-author", "weekly"): ("profile.personalization.reporting_style", "learned.*"),
+    ("report-author", "ppt-materials"): ("profile.personalization.reporting_style", "learned.*"),
+    ("report-author", "stage-summary"): ("profile.personalization.reporting_style", "learned.*"),
+    ("report-author", "writing-materials"): ("profile.personalization.reporting_style", "learned.*"),
+    ("report-author", "outline"): ("profile.personalization.reporting_style", "learned.*"),
+    ("method-designer", "design"): (
+        "profile.personalization.research_focus",
+        "profile.resources",
+        "profile.constraints",
+        "learned.*",
+    ),
+    ("paper-analyst", "prewarm-cache"): ("runtime.paper", "learned.*"),
+    ("paper-analyst", "screen"): ("runtime.paper", "learned.*"),
+    ("paper-analyst", "complete-note"): ("runtime.paper", "learned.*"),
+    ("paper-analyst", "extract-figures"): ("runtime.pdf", "learned.*"),
+    ("paper-analyst", "refresh-structure"): ("learned.*",),
+}
+
+
+OPERATION_POLICIES: dict[tuple[str, str], dict[str, object]] = {
+    pair: {
+        "soft_missing": "neutral-default",
+        "hard_fallback_paths": [
+            path
+            for path in OPERATION_ELIGIBILITY.get(pair, SKILL_ELIGIBILITY[pair[0]])
+            if path in {
+                "profile.resources",
+                "profile.constraints",
+                "runtime.autonomy.auto_execute_scope",
+                "runtime.diagnostics",
+            }
+        ],
+    }
+    for skill, operations in SKILL_OPERATIONS.items()
+    for pair in ((skill, operation) for operation in operations)
+}
+
+
 def _canonical_json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
 
 
 def _digest(value: object) -> str:
     return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def _consumer_pair(skill: str, operation: str) -> tuple[str, str]:
+    normalized_skill = str(skill or "").strip().casefold()
+    normalized_operation = str(operation or "").strip().casefold()
+    if normalized_skill not in SKILL_ELIGIBILITY:
+        raise ValueError(f"unknown preference consumer skill: {skill}")
+    if not normalized_operation or normalized_operation not in SKILL_OPERATIONS.get(normalized_skill, ()):
+        raise ValueError(
+            f"unknown preference consumer operation: {normalized_skill}:{normalized_operation or '<missing>'}"
+        )
+    return normalized_skill, normalized_operation
+
+
+def task_context_digest(*, skill: str, operation: str, canonical_inputs: Mapping[str, object]) -> str:
+    """Digest owner-supplied canonical inputs for one declared consumer operation."""
+    normalized_skill, normalized_operation = _consumer_pair(skill, operation)
+    if not isinstance(canonical_inputs, Mapping):
+        raise ValueError("canonical task inputs must be an object")
+    return _digest(
+        {
+            "skill": normalized_skill,
+            "operation": normalized_operation,
+            "canonical_inputs": dict(canonical_inputs),
+        }
+    )
+
+
+def operation_contract(*, skill: str, operation: str) -> dict[str, object]:
+    normalized_skill, normalized_operation = _consumer_pair(skill, operation)
+    patterns = OPERATION_ELIGIBILITY.get(
+        (normalized_skill, normalized_operation), SKILL_ELIGIBILITY[normalized_skill]
+    )
+    return {
+        "skill": normalized_skill,
+        "operation": normalized_operation,
+        "eligible_paths": list(patterns),
+        **OPERATION_POLICIES[(normalized_skill, normalized_operation)],
+    }
 
 
 def _profile_path(project_root: Path) -> Path:
@@ -301,6 +411,14 @@ def _base_catalog(project_root: Path) -> list[dict[str, object]]:
             if not raw_id or not text:
                 continue
             skill = str(raw.get("skill") or "").strip()
+            operations = raw.get("operations")
+            if isinstance(operations, str):
+                operation_hints = [operations.strip().casefold()] if operations.strip() else []
+            elif isinstance(operations, list):
+                operation_hints = [str(value).strip().casefold() for value in operations if str(value).strip()]
+            else:
+                operation = str(raw.get("operation") or "").strip().casefold()
+                operation_hints = [operation] if operation else []
             path = f"learned.{raw_id}"
             item = _catalog_item(
                 preference_id=f"pref-learned-{hashlib.sha256(raw_id.encode('utf-8')).hexdigest()[:16]}",
@@ -310,6 +428,7 @@ def _base_catalog(project_root: Path) -> list[dict[str, object]]:
                 source_type="confirmed-learning",
             )
             item["skill_hint"] = skill
+            item["operation_hints"] = operation_hints
             entries.append(item)
     return sorted(entries, key=lambda item: str(item["preference_id"]))
 
@@ -320,22 +439,27 @@ def _path_eligible(path: str, patterns: Sequence[str]) -> bool:
 
 def eligible_preferences(project_root: Path, *, skill: str, operation: str = "") -> dict[str, object]:
     """Return the mechanically eligible preference view for an Agent task."""
-    normalized_skill = str(skill or "").strip().casefold()
-    if normalized_skill not in SKILL_ELIGIBILITY:
-        raise ValueError(f"unknown preference consumer skill: {skill}")
-    patterns = SKILL_ELIGIBILITY[normalized_skill]
+    normalized_skill, normalized_operation = _consumer_pair(skill, operation)
+    patterns = OPERATION_ELIGIBILITY.get(
+        (normalized_skill, normalized_operation), SKILL_ELIGIBILITY[normalized_skill]
+    )
     selected: list[dict[str, object]] = []
     for item in _base_catalog(project_root):
         path = str(item.get("path") or "")
         if not _path_eligible(path, patterns):
             continue
         skill_hint = str(item.get("skill_hint") or "").strip().casefold()
-        if skill_hint and skill_hint != normalized_skill:
-            continue
+        if path.startswith("learned."):
+            operation_hints = item.get("operation_hints")
+            operation_hints = operation_hints if isinstance(operation_hints, list) else []
+            # Learned preferences are intentionally dark unless both hints bind
+            # them to this exact consumer.  Missing hints must never broadcast.
+            if skill_hint != normalized_skill or normalized_operation not in operation_hints:
+                continue
         selected.append(item)
     source_view = {
         "skill": normalized_skill,
-        "operation": str(operation or "").strip().casefold(),
+        "operation": normalized_operation,
         "items": [
             {
                 "preference_id": item["preference_id"],
@@ -350,6 +474,7 @@ def eligible_preferences(project_root: Path, *, skill: str, operation: str = "")
     return {
         **source_view,
         "catalog_digest": _digest(source_view),
+        "consumer_contract": operation_contract(skill=normalized_skill, operation=normalized_operation),
         "items": selected,
     }
 
@@ -446,9 +571,24 @@ def validate_effective_selection(
     }
     if not hard_ids.issubset(selected_ids):
         raise ValueError("hard preferences cannot be omitted from an effective selection")
-    task_context_digest = str(payload.get("task_context_digest") or "").strip()
-    if HEX_DIGEST_RE.fullmatch(task_context_digest) is None:
-        raise ValueError("task_context_digest must be a sha256 digest")
+    canonical_inputs = payload.get("task_context")
+    if isinstance(canonical_inputs, Mapping):
+        computed_task_digest = task_context_digest(
+            skill=skill,
+            operation=operation,
+            canonical_inputs=canonical_inputs,
+        )
+    elif str(payload.get("schema") or "") == SELECTION_SCHEMA and HEX_DIGEST_RE.fullmatch(
+        str(payload.get("task_context_digest") or "").strip()
+    ):
+        # A persisted receipt intentionally omits raw task context.  Consumers
+        # still recompute and compare this digest from owner canonical inputs.
+        computed_task_digest = str(payload.get("task_context_digest") or "").strip()
+    else:
+        raise ValueError("effective selection requires canonical task_context inputs")
+    supplied_task_digest = str(payload.get("task_context_digest") or "").strip()
+    if supplied_task_digest and supplied_task_digest != computed_task_digest:
+        raise ValueError("task_context_digest does not match canonical task inputs")
     created_at = str(payload.get("created_at") or utc_now_iso())
     receipt = {
         "id": selection_id,
@@ -462,7 +602,7 @@ def validate_effective_selection(
         "skill": skill,
         "operation": operation,
         "catalog_digest": eligible["catalog_digest"],
-        "task_context_digest": task_context_digest,
+        "task_context_digest": computed_task_digest,
         "selected": [
             {
                 **row,
@@ -573,12 +713,54 @@ def resolve_effective_preferences(
     }
 
 
+def resolve_task_preferences(
+    project_root: Path,
+    *,
+    selection_id: str,
+    skill: str,
+    operation: str,
+    canonical_inputs: Mapping[str, object],
+) -> dict[str, object]:
+    """Owner consumer API: bind a receipt to recomputed canonical inputs."""
+    expected = task_context_digest(
+        skill=skill,
+        operation=operation,
+        canonical_inputs=canonical_inputs,
+    )
+    effective = resolve_effective_preferences(
+        project_root,
+        selection_id=selection_id,
+        skill=skill,
+        operation=operation,
+        expected_task_context_digest=expected,
+    )
+    effective["task_context_digest"] = expected
+    return effective
+
+
+def selection_binding(effective: Mapping[str, object]) -> dict[str, object]:
+    """Stable persistence binding; intentionally excludes preference values."""
+    return {
+        "selection_id": str(effective.get("selection_id") or ""),
+        "selection_digest": str(effective.get("selection_digest") or ""),
+        "task_context_digest": str(effective.get("task_context_digest") or ""),
+        "skill": str(effective.get("skill") or ""),
+        "operation": str(effective.get("operation") or ""),
+    }
+
+
 __all__ = [
     "SELECTION_SCHEMA",
     "SKILL_ELIGIBILITY",
+    "SKILL_OPERATIONS",
+    "OPERATION_ELIGIBILITY",
     "eligible_preferences",
+    "operation_contract",
+    "task_context_digest",
     "validate_effective_selection",
     "record_effective_selection",
     "load_effective_selection",
     "resolve_effective_preferences",
+    "resolve_task_preferences",
+    "selection_binding",
 ]

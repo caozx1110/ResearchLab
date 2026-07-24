@@ -13,6 +13,8 @@ from research.preference_selection import (
     load_effective_selection,
     record_effective_selection,
     resolve_effective_preferences,
+    resolve_task_preferences,
+    task_context_digest,
 )
 
 
@@ -37,7 +39,7 @@ def test_bound_consumer_resolves_selected_values_without_copying_them_into_recei
             "skill": "report-author",
             "operation": "weekly",
             "catalog_digest": eligible["catalog_digest"],
-            "task_context_digest": "b" * 64,
+            "task_context": {"program_id": "p1", "operation": "weekly", "stage": "", "limit": 20},
             "selected": [
                 {
                     "preference_id": item["preference_id"],
@@ -59,7 +61,11 @@ def test_bound_consumer_resolves_selected_values_without_copying_them_into_recei
         selection_id=selection_id,
         skill="report-author",
         operation="weekly",
-        expected_task_context_digest="b" * 64,
+        expected_task_context_digest=task_context_digest(
+            skill="report-author",
+            operation="weekly",
+            canonical_inputs={"program_id": "p1", "operation": "weekly", "stage": "", "limit": 20},
+        ),
     )
 
     assert effective["effective_items"][0]["value"] == selected[0]["value"]
@@ -88,7 +94,7 @@ def _configured_workspace(tmp_path: Path) -> Path:
     return root
 
 
-def _selection(root: Path, skill: str, operation: str = "plan") -> dict[str, object]:
+def _selection(root: Path, skill: str, operation: str = "design") -> dict[str, object]:
     eligible = eligible_preferences(root, skill=skill, operation=operation)
     selected = []
     excluded = []
@@ -107,7 +113,7 @@ def _selection(root: Path, skill: str, operation: str = "plan") -> dict[str, obj
         "skill": skill,
         "operation": operation,
         "catalog_digest": eligible["catalog_digest"],
-        "task_context_digest": "a" * 64,
+        "task_context": {"subject_id": "subject-1"},
         "selected": selected,
         "excluded": excluded,
     }
@@ -140,8 +146,10 @@ def test_agent_selection_receipt_keeps_only_ids_digests_and_reasons(tmp_path: Pa
         root,
         selection_id="prefsel-abcdef01",
         skill="method-designer",
-        operation="plan",
-        expected_task_context_digest="a" * 64,
+        operation="design",
+        expected_task_context_digest=task_context_digest(
+            skill="method-designer", operation="design", canonical_inputs={"subject_id": "subject-1"}
+        ),
     )
 
     assert path.is_file()
@@ -186,8 +194,10 @@ def test_profile_change_makes_existing_selection_stale(tmp_path: Path) -> None:
             root,
             selection_id="prefsel-abcdef01",
             skill="method-designer",
-            operation="plan",
-            expected_task_context_digest="a" * 64,
+            operation="design",
+            expected_task_context_digest=task_context_digest(
+                skill="method-designer", operation="design", canonical_inputs={"subject_id": "subject-1"}
+            ),
         )
 
 
@@ -200,13 +210,14 @@ def test_confirmed_learned_preferences_follow_their_skill_hint(tmp_path: Path) -
             "text": "show a compact comparison first",
             "source": "user",
             "skill": "report-author",
+            "operation": "weekly",
             "context": "",
         }
     ]
     write_yaml_if_changed(runtime_preferences_path(root), runtime)
 
-    report_paths = {str(item["path"]) for item in eligible_preferences(root, skill="report-author")["items"]}
-    method_paths = {str(item["path"]) for item in eligible_preferences(root, skill="method-designer")["items"]}
+    report_paths = {str(item["path"]) for item in eligible_preferences(root, skill="report-author", operation="weekly")["items"]}
+    method_paths = {str(item["path"]) for item in eligible_preferences(root, skill="method-designer", operation="design")["items"]}
 
     assert "learned.learning-1" in report_paths
     assert "learned.learning-1" not in method_paths
@@ -234,7 +245,7 @@ def test_kb_ancestor_symlink_cannot_read_or_write_preferences_outside_workspace(
     (root / "kb").symlink_to(outside, target_is_directory=True)
 
     with pytest.raises(ValueError, match="symlink"):
-        eligible_preferences(root, skill="method-designer", operation="plan")
+        eligible_preferences(root, skill="method-designer", operation="design")
     assert not (outside / "config/effective-preferences").exists()
 
 
@@ -251,7 +262,7 @@ def test_receipt_is_task_bound_private_and_idempotent(tmp_path: Path) -> None:
             root,
             selection_id="prefsel-abcdef01",
             skill="method-designer",
-            operation="plan",
+            operation="design",
             expected_task_context_digest="b" * 64,
         )
     unsafe = _selection(root, "report-author", operation="weekly")

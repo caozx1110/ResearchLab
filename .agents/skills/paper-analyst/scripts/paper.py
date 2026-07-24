@@ -19,7 +19,7 @@ from contextvars import ContextVar
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 SCRIPT_PATH = Path(__file__).resolve()
 for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
@@ -68,6 +68,7 @@ from research.evidence import (
     validate_claims,
     verify_claim_evidence,
 )
+from research.preference_selection import resolve_task_preferences, selection_binding
 
 SECTION_PATTERNS = (
     "abstract",
@@ -281,12 +282,15 @@ def _cache_path(unit_root: Path) -> Path:
     return unit_root / "parse-cache.yaml"
 
 
-def _paper_preferences(root: Path) -> dict[str, Any]:
-    return load_runtime_preferences(root).get("paper", {})
-
-
-def _load_or_refresh_cache(root: Path, record: dict, unit_root: Path, *, force: bool = False) -> tuple[list[dict], Path]:
-    preferences = _paper_preferences(root)
+def _load_or_refresh_cache(
+    root: Path,
+    record: dict,
+    unit_root: Path,
+    *,
+    force: bool = False,
+    preferences: Mapping[str, object] | None = None,
+) -> tuple[list[dict], Path]:
+    preferences = preferences or {}
     cache_path = _cache_path(unit_root)
     if cache_path.exists():
         if force:
@@ -758,11 +762,17 @@ def extract_figure_mentions(source_chunks: list[dict], *, extracted_assets: list
     }
 
 
-def _extract_pdf_images(root: Path, record: dict, unit_root: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+def _extract_pdf_images(
+    root: Path,
+    record: dict,
+    unit_root: Path,
+    *,
+    preferences: Mapping[str, object] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     pdf_path = next((path for path in _source_paths(root, record) if path.suffix.lower() == ".pdf"), None)
     if pdf_path is None:
         return [], [{"status": "missing-pdf", "reason": "No PDF source found"}], {"mode": "none", "captions_detected": 0}
-    preferences = load_runtime_preferences(root).get("pdf", {})
+    preferences = preferences or {}
     include_tables = bool(preferences.get("figure_include_tables", True))
     filter_blank_and_mask = bool(preferences.get("filter_blank_and_mask_images", True))
     render_scale = float(preferences.get("figure_render_scale") or LAYOUT_DEFAULT_RENDER_SCALE)
@@ -849,18 +859,26 @@ def _run_refresh_structure(
 
 @_transactional(
     "extract-figures",
-    lambda root, record, unit_root, source_chunks, *, defer_post_actions: (
+    lambda root, record, unit_root, source_chunks, *, defer_post_actions, pdf_preferences=None: (
         root,
         [unit_root / "record.yaml", unit_root / "figures.yaml", unit_root / "figures", *([] if defer_post_actions else _index_targets(root))],
     ),
 )
 def _run_extract_figures(
-    root: Path, record: dict, unit_root: Path, source_chunks: list[dict], *, defer_post_actions: bool
+    root: Path,
+    record: dict,
+    unit_root: Path,
+    source_chunks: list[dict],
+    *,
+    defer_post_actions: bool,
+    pdf_preferences: Mapping[str, object] | None = None,
 ) -> int:
     """Extract figure assets (best-effort; empty when no PDF backend / no figures)
     and index figure mentions. Shared by the CLI dispatch and the auto-post-note step."""
     figures_path = unit_root / "figures.yaml"
-    extracted_assets, filtered_assets, extraction_meta = _extract_pdf_images(root, record, unit_root)
+    extracted_assets, filtered_assets, extraction_meta = _extract_pdf_images(
+        root, record, unit_root, preferences=pdf_preferences
+    )
     payload = extract_figure_mentions(source_chunks, extracted_assets=extracted_assets)
     payload["filtered_assets"] = filtered_assets
     payload["asset_counts"] = {"kept": len(extracted_assets), "filtered": len(filtered_assets)}
@@ -1043,6 +1061,7 @@ def build_parser() -> argparse.ArgumentParser:
     prewarm.add_argument("--paper-id", required=True)
     prewarm.add_argument("--force", action="store_true")
     prewarm.add_argument("--defer-post-actions", action="store_true")
+    prewarm.add_argument("--preference-selection-id", default="")
 
     screen = subparsers.add_parser("screen")
     screen.add_argument("--paper-id", required=True)
@@ -1050,6 +1069,7 @@ def build_parser() -> argparse.ArgumentParser:
     screen.add_argument("--input", default="")
     screen.add_argument("--mode", default="auto")
     screen.add_argument("--defer-post-actions", action="store_true")
+    screen.add_argument("--preference-selection-id", default="")
 
     note = subparsers.add_parser("complete-note")
     note.add_argument("--paper-id", required=True)
@@ -1057,14 +1077,17 @@ def build_parser() -> argparse.ArgumentParser:
     note.add_argument("--input", default="")
     note.add_argument("--mode", default="auto")
     note.add_argument("--defer-post-actions", action="store_true")
+    note.add_argument("--preference-selection-id", default="")
 
     figures = subparsers.add_parser("extract-figures")
     figures.add_argument("--paper-id", required=True)
     figures.add_argument("--defer-post-actions", action="store_true")
+    figures.add_argument("--preference-selection-id", default="")
 
     structure = subparsers.add_parser("refresh-structure")
     structure.add_argument("--paper-id", required=True)
     structure.add_argument("--defer-post-actions", action="store_true")
+    structure.add_argument("--preference-selection-id", default="")
 
     confirm = subparsers.add_parser("confirm")
     confirm.add_argument("--paper-id", required=True)
@@ -1075,6 +1098,49 @@ def build_parser() -> argparse.ArgumentParser:
     reject.add_argument("--paper-id", required=True)
     reject.add_argument("--defer-post-actions", action="store_true")
     return parser
+
+
+def paper_preference_context(args: argparse.Namespace, record: Mapping[str, object]) -> dict[str, object]:
+    """Canonical owner inputs; consumers never accept a caller-supplied digest."""
+    payload = record.get("payload")
+    payload = payload if isinstance(payload, Mapping) else {}
+    return {
+        "paper_id": str(record.get("id") or ""),
+        "operation": str(args.command),
+        "phase": str(getattr(args, "phase", "") or ""),
+        "mode": str(getattr(args, "mode", "") or ""),
+        "force": bool(getattr(args, "force", False)),
+        "sources": record.get("sources") if isinstance(record.get("sources"), list) else [],
+        "basic_info": payload.get("basic_info") if isinstance(payload.get("basic_info"), Mapping) else {},
+    }
+
+
+def resolve_paper_preferences(
+    root: Path, args: argparse.Namespace, record: Mapping[str, object]
+) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
+    """Resolve only selected soft values for the bound paper operation."""
+    selection_id = str(getattr(args, "preference_selection_id", "") or "")
+    if not selection_id:
+        return {}, {}, {}
+    effective = resolve_task_preferences(
+        root,
+        selection_id=selection_id,
+        skill="paper-analyst",
+        operation=args.command,
+        canonical_inputs=paper_preference_context(args, record),
+    )
+    selected = {
+        str(item.get("path") or ""): item.get("value")
+        for item in effective.get("effective_items", [])
+        if isinstance(item, dict)
+    }
+    paper = selected.get("runtime.paper")
+    pdf = selected.get("runtime.pdf")
+    return (
+        dict(paper) if isinstance(paper, dict) else {},
+        dict(pdf) if isinstance(pdf, dict) else {},
+        selection_binding(effective),
+    )
 
 
 @_transactional(
@@ -1357,13 +1423,22 @@ def main() -> int:
     args = build_parser().parse_args()
     root = project_root(PROJECT_ROOT, explicit_root=args.root)
     print_resolved_project_roots(root)
-    runtime_preferences = load_runtime_preferences(root)
-    paper_preferences = runtime_preferences.get("paper", {})
     record, path = locate_record(root, args.paper_id, kind="paper")
     if record.get("kind") != "paper":
         raise SystemExit(f"{args.paper_id} is not a paper record")
     unit_root = path.parent
     defer_post_actions = bool(getattr(args, "defer_post_actions", False))
+    paper_preferences, pdf_preferences, preference_binding = resolve_paper_preferences(
+        root, args, record
+    )
+    record.setdefault("payload", {})["preference_contract"] = {
+        "skill": "paper-analyst",
+        "operation": args.command,
+        "soft_missing": "neutral-default",
+        "hard_fallback_paths": ["runtime.autonomy.auto_execute_scope"],
+    }
+    if preference_binding:
+        record["payload"]["preference_binding"] = preference_binding
 
     source_chunks: list[dict] = []
     cache_path = _cache_path(unit_root)
@@ -1381,6 +1456,7 @@ def main() -> int:
                     record,
                     unit_root,
                     force=force_cache,
+                    preferences=paper_preferences,
                 )
         else:
             source_chunks, cache_path = _load_or_refresh_cache(
@@ -1388,6 +1464,7 @@ def main() -> int:
                 record,
                 unit_root,
                 force=False,
+                preferences=paper_preferences,
             )
 
     if args.command == "prewarm-cache":
@@ -1402,7 +1479,14 @@ def main() -> int:
         return _run_complete_note(args, root, record, unit_root, cache_path, source_chunks, paper_preferences, defer_post_actions)
 
     if args.command == "extract-figures":
-        return _run_extract_figures(root, record, unit_root, source_chunks, defer_post_actions=defer_post_actions)
+        return _run_extract_figures(
+            root,
+            record,
+            unit_root,
+            source_chunks,
+            defer_post_actions=defer_post_actions,
+            pdf_preferences=pdf_preferences,
+        )
 
     if args.command == "refresh-structure":
         return _run_refresh_structure(root, record, unit_root, source_chunks, cache_path, defer_post_actions=defer_post_actions)

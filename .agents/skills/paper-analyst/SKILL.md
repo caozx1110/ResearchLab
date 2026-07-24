@@ -13,6 +13,8 @@ description: 为 core paper unit 备料（解析源、产出待填结构）并�
 
 **理解来自 agent，脚本只做搬运 + 验证。** 脚本负责：解析源、产出「待填结构」、逐字校验 agent 填入的每条判断带合法 evidence、过实质门、落盘。脚本**绝不**产出「这篇论文说了什么 / 值不值得读 / novelty 强不强」这类判断——那是 runtime agent 的活。初筛与笔记都是**两阶段**：脚本 `prepare` 出待填骨架 → agent 在会话里填理解+挂证据 → 脚本 `verify` 校验后落盘。
 
+`runtime.paper` / `runtime.pdf` 是 soft preference catalog：只有与 paper id、operation、phase/mode、source/basic-info canonical inputs 绑定且 current 的 effective selection 才可改变对应操作；无 receipt 使用 neutral defaults，禁止直读 runtime soft 字段。写入 record 的 preference binding 只含 selection/task/receipt digest；`runtime.autonomy.auto_execute_scope` 作为 hard governance fallback 仍直接执行，且不能关闭 evidence、confirmation、containment 或 recovery。
+
 ## 负责范围
 
 1. 从 `source-intake` 创建的 paper unit（已带完整 `source/document.md` 阅读层和兼容 parse-cache）出发。Agent 先读 Markdown 形成整体理解；需要核验逐字引用与既有 locator 时读 parse-cache，转换降级或细节缺失时回退原 PDF/HTML。
