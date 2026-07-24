@@ -267,6 +267,7 @@ APPLY_AGENT_PLAN=""
 EXPECTED_PLAN_DIGEST=""
 EXPECTED_PLAN_BYTE_SHA256=""
 EXPECTED_SOURCE_TREE_DIGEST=""
+VERIFIED_MANIFEST_STATE=""
 OPERATION_TIME=""
 ASSUME_YES=0
 WIZARD_MODE=0
@@ -1124,7 +1125,7 @@ source_branch() {
 }
 
 verify_agent_apply_contract() {
-  local distribution_root args=()
+  local distribution_root verified_state args=()
   [ -n "$APPLY_AGENT_PLAN" ] || return 0
   distribution_root=${SYNC_SOURCE:-$REPO_ROOT}
   args=(
@@ -1149,8 +1150,12 @@ verify_agent_apply_contract() {
   [ "$CONFIG_CODEX" -eq 0 ] || args+=("--current-tool" "codex")
   [ "$FORCE" -eq 0 ] || args+=("--current-force")
   [ "$KB_ON_PATH" -eq 0 ] || args+=("--current-kb-on-path")
-  python3 "$REPO_ROOT/install-lib/agent_plan.py" "${args[@]}" >/dev/null 2>&1 || \
+  if ! verified_state=$(python3 "$REPO_ROOT/install-lib/agent_plan.py" "${args[@]}" 2>/dev/null); then
     die "Agent 安装计划、源码或目标状态已变化；未写入任何内容，请重新生成并审阅计划"
+  fi
+  [ -n "$verified_state" ] || \
+    die "Agent 安装计划缺少安装记录前置条件；未写入任何内容，请重新生成并审阅计划"
+  VERIFIED_MANIFEST_STATE=$verified_state
 }
 
 record_agent_plan_target() {
@@ -1345,6 +1350,9 @@ ws_sync() {
   fi
   if [ "$FORCE" -eq 1 ]; then
     args+=("--force")
+  fi
+  if [ -n "$VERIFIED_MANIFEST_STATE" ]; then
+    args+=("--expected-manifest-state" "$VERIFIED_MANIFEST_STATE")
   fi
   if output=$(python3 "$REPO_ROOT/install-lib/ws_sync.py" "${args[@]}" "$@" 2>&1); then
     if [ "$action" = "update" ]; then

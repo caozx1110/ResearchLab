@@ -192,15 +192,49 @@ def _managed_block_digest(content: bytes) -> str | None:
 
 def target_precondition(path: Path, *, managed_block: bool) -> dict[str, Any]:
     try:
-        mode = path.lstat().st_mode
+        lexical_before = path.lstat()
+        mode = lexical_before.st_mode
     except FileNotFoundError:
         return {"type": "absent"}
     if stat.S_ISREG(mode):
-        content = path.read_bytes()
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        descriptor = -1
+        try:
+            descriptor = os.open(str(path), flags)
+            before = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or before.st_dev != lexical_before.st_dev
+                or before.st_ino != lexical_before.st_ino
+            ):
+                raise ValueError("plan target changed while it was opened")
+            chunks: list[bytes] = []
+            while True:
+                chunk = os.read(descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            after = os.fstat(descriptor)
+            lexical_after = path.lstat()
+            if (
+                before.st_dev != after.st_dev
+                or before.st_ino != after.st_ino
+                or after.st_dev != lexical_after.st_dev
+                or after.st_ino != lexical_after.st_ino
+            ):
+                raise ValueError("plan target changed while it was read")
+            content = b"".join(chunks)
+        except OSError as exc:
+            raise ValueError("plan target must remain a regular file") from exc
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
         state: dict[str, Any] = {
             "type": "regular",
-            "mode": f"{stat.S_IMODE(mode):04o}",
+            "mode": f"{stat.S_IMODE(after.st_mode):04o}",
             "byte_sha256": sha256_bytes(content),
+            "device": after.st_dev,
+            "inode": after.st_ino,
         }
         if managed_block:
             block_digest = _managed_block_digest(content)
@@ -211,6 +245,72 @@ def target_precondition(path: Path, *, managed_block: bool) -> dict[str, Any]:
     if stat.S_ISDIR(mode):
         return {"type": "directory", "mode": f"{stat.S_IMODE(mode):04o}"}
     return {"type": "other", "mode": stat.S_IFMT(mode)}
+
+
+def workspace_manifest_precondition(workspace: Path) -> dict[str, Any]:
+    """Inspect the copy manifest through no-follow workspace/.agents anchors."""
+
+    root = workspace.expanduser().resolve(strict=False)
+    directory_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    file_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    root_fd = agents_fd = manifest_fd = -1
+    try:
+        root_fd = os.open(str(root), directory_flags)
+        try:
+            agents_lexical = os.stat(".agents", dir_fd=root_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return {"type": "absent"}
+        if not stat.S_ISDIR(agents_lexical.st_mode):
+            raise ValueError("workspace manifest ancestor is not a real directory")
+        agents_fd = os.open(".agents", directory_flags, dir_fd=root_fd)
+        agents_open = os.fstat(agents_fd)
+        if agents_open.st_dev != agents_lexical.st_dev or agents_open.st_ino != agents_lexical.st_ino:
+            raise ValueError("workspace manifest ancestor changed while it was opened")
+        try:
+            lexical = os.stat(".install-manifest.json", dir_fd=agents_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return {"type": "absent"}
+        if not stat.S_ISREG(lexical.st_mode):
+            raise ValueError("workspace manifest is not a regular file")
+        manifest_fd = os.open(".install-manifest.json", file_flags, dir_fd=agents_fd)
+        before = os.fstat(manifest_fd)
+        if before.st_dev != lexical.st_dev or before.st_ino != lexical.st_ino or not stat.S_ISREG(before.st_mode):
+            raise ValueError("workspace manifest changed while it was opened")
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(manifest_fd, min(1024 * 1024, MAX_PLAN_BYTES + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > MAX_PLAN_BYTES:
+                raise ValueError("workspace manifest exceeds the maximum supported size")
+        after = os.fstat(manifest_fd)
+        lexical_after = os.stat(".install-manifest.json", dir_fd=agents_fd, follow_symlinks=False)
+        if (
+            before.st_dev != after.st_dev
+            or before.st_ino != after.st_ino
+            or after.st_dev != lexical_after.st_dev
+            or after.st_ino != lexical_after.st_ino
+        ):
+            raise ValueError("workspace manifest changed while it was read")
+        return {
+            "type": "regular",
+            "mode": f"{stat.S_IMODE(after.st_mode):04o}",
+            "byte_sha256": sha256_bytes(b"".join(chunks)),
+            "device": after.st_dev,
+            "inode": after.st_ino,
+        }
+    except OSError as exc:
+        raise ValueError("workspace manifest path is not safely readable") from exc
+    finally:
+        if manifest_fd >= 0:
+            os.close(manifest_fd)
+        if agents_fd >= 0:
+            os.close(agents_fd)
+        if root_fd >= 0:
+            os.close(root_fd)
 
 
 def normalize_target(raw: dict[str, Any]) -> dict[str, Any]:
@@ -419,6 +519,12 @@ def verify_plan(args: argparse.Namespace) -> int:
     if options != {"force": args.current_force, "kb_on_path": args.current_kb_on_path}:
         raise ValueError("current install options differ from the reviewed Agent plan")
 
+    planned_manifest = payload.get("workspace_manifest_precondition")
+    if not isinstance(planned_manifest, dict) or planned_manifest.get("type") not in {"absent", "regular"}:
+        raise ValueError("Agent plan manifest precondition is missing or unsafe")
+    if workspace_manifest_precondition(Path(args.current_workspace)) != planned_manifest:
+        raise ValueError("install manifest changed after plan review")
+
     targets = payload.get("targets")
     if not isinstance(targets, list) or payload.get("target_count") != len(targets):
         raise ValueError("Agent plan target list is invalid")
@@ -452,7 +558,7 @@ def verify_plan(args: argparse.Namespace) -> int:
     byte_index = contract_argv.index("--expected-plan-byte-sha256")
     if byte_index + 1 >= len(contract_argv) or contract_argv[byte_index + 1] != PLAN_BYTE_SHA256_PLACEHOLDER:
         raise ValueError("Agent plan byte-review contract is invalid")
-    print(actual_digest)
+    print(json.dumps(planned_manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
     return 0
 
 
@@ -514,6 +620,7 @@ def generate_plan(args: argparse.Namespace) -> int:
         "workspace": str(Path(args.workspace).resolve()),
         "home": str(Path(args.home).resolve()),
         "operation_time": args.operation_time,
+        "workspace_manifest_precondition": workspace_manifest_precondition(Path(args.workspace)),
         "options": {
             "force": "--force" in args.apply_arg,
             "kb_on_path": "--kb-on-path" in args.apply_arg,
