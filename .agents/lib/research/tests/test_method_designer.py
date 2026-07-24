@@ -209,10 +209,25 @@ def test_selected_research_focus_changes_only_bound_design_and_persists_receipt(
     args = method.build_parser().parse_args(
         ["design", "--idea-id", idea_id, "--program-id", "p-method"]
     )
+    idea_record = load_yaml(record_path(root, "idea", idea_id))
     context = method.method_preference_context(
-        load_yaml(record_path(root, "idea", idea_id)),
-        program_id="p-method",
-        idea_id=idea_id,
+        method.method_preference_task_inputs(
+            root,
+            idea_record,
+            program_id="p-method",
+            idea_id=idea_id,
+            state=method.load_program_state(
+                root / "kb/programs/p-method/state.yaml", "p-method"
+            ),
+            repo_ids=[],
+            interfaces=[
+                {"name": "interface-1", "detail": "", "status": "pending_agent_fill"},
+                {"name": "interface-2", "detail": "", "status": "pending_agent_fill"},
+            ],
+            baselines=["closest-unmodified-repo-baseline", "current-best-manual-baseline"],
+            metrics=["success_rate", "recovery_rate", "runtime_cost"],
+            risks=idea_record["payload"]["analysis"].get("risks", []),
+        )
     )
     eligible = eligible_preferences(root, skill="method-designer", operation="design")
     selected = []

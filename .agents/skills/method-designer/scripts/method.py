@@ -346,35 +346,112 @@ def _canonical_digest(value: object) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def method_preference_context(
-    record: dict[str, Any],
-    *,
-    program_id: str,
-    idea_id: str,
-) -> dict[str, object]:
+def _normalized_method_values(values: object) -> list[str]:
+    return [" ".join(item.split()) for item in normalize_list(values)]
+
+
+def _repo_preference_corpus(root: Path, active_unit_ids: list[str]) -> dict[str, object]:
+    """Describe the exact canonical repository corpus consumed by ranking."""
+    all_repo_records = iter_records(root, kind="repo")
+    repo_by_id = {str(repo.get("id") or ""): repo for repo in all_repo_records}
+    active_repo_ids = [unit_id for unit_id in active_unit_ids if unit_id in repo_by_id]
+    if active_repo_ids:
+        scope = "program-active-units"
+        repo_records = [repo_by_id[repo_id] for repo_id in active_repo_ids]
+    else:
+        scope = "kb-wide-fallback"
+        repo_records = all_repo_records
+
+    def consumed_repo_fields(repo: dict[str, Any]) -> dict[str, object]:
+        payload = repo.get("payload") if isinstance(repo.get("payload"), dict) else {}
+        capability = payload.get("capability") if isinstance(payload.get("capability"), dict) else {}
+        structure = payload.get("structure") if isinstance(payload.get("structure"), dict) else {}
+        return {
+            "id": str(repo.get("id") or ""),
+            "title": str(repo.get("title") or ""),
+            "summary": str(repo.get("summary") or ""),
+            "tags": normalize_list(repo.get("tags")),
+            "topics": normalize_list(repo.get("topics")),
+            "supported_tasks": normalize_list(capability.get("supported_tasks")),
+            "entrypoints": normalize_list(structure.get("entrypoints")),
+        }
+
+    canonical_rows = sorted(
+        (consumed_repo_fields(repo) for repo in repo_records),
+        key=lambda item: str(item.get("id") or ""),
+    )
     return {
-        "program_id": str(program_id or ""),
-        "idea_id": str(idea_id or ""),
-        "idea_digest": _canonical_digest(
-            {
-                "id": record.get("id"),
-                "status": record.get("status"),
-                "title": record.get("title"),
-                "hypothesis": record.get("payload", {}).get("hypothesis"),
-                "analysis": record.get("payload", {}).get("analysis"),
-                "topics": record.get("topics"),
-                "tags": record.get("tags"),
-            }
-        ),
+        "scope": scope,
+        "repo_ids": [str(item.get("id") or "") for item in canonical_rows],
+        "corpus_digest": _canonical_digest(canonical_rows),
     }
 
 
-def resolve_method_preferences(
+def method_preference_task_inputs(
     root: Path,
     record: dict[str, Any],
     *,
     program_id: str,
     idea_id: str,
+    state: dict[str, Any],
+    repo_ids: object,
+    interfaces: object,
+    baselines: object,
+    metrics: object,
+    risks: object,
+) -> dict[str, object]:
+    """Build a value-free snapshot of every design input consumed by ranking."""
+    canonical_idea = copy.deepcopy(record)
+    # locate_record supplies the legacy-compatible default revision in memory;
+    # absence and revision zero represent the same canonical record content.
+    if canonical_idea.get("revision") in (None, 0):
+        canonical_idea.pop("revision", None)
+    active_unit_ids = _normalized_method_values(state.get("active_unit_ids", []))
+    normalized_repo_ids = _normalized_method_values(repo_ids)
+    normalized_interfaces = [
+        {
+            "name": " ".join(str(item.get("name") or "").split()),
+            "detail": " ".join(str(item.get("detail") or "").split()),
+        }
+        for item in (interfaces if isinstance(interfaces, list) else [])
+        if isinstance(item, dict)
+    ]
+    explicit_values = {
+        "interfaces": normalized_interfaces,
+        "baselines": _normalized_method_values(baselines),
+        "metrics": _normalized_method_values(metrics),
+        "risks": _normalized_method_values(risks),
+    }
+    return {
+        "schema_version": 1,
+        "program_id": str(program_id or ""),
+        "idea_id": str(idea_id or ""),
+        "idea_digest": _canonical_digest(canonical_idea),
+        "explicit_repo_ids": normalized_repo_ids,
+        "explicit_values_digest": _canonical_digest(explicit_values),
+        "program_state_digest": _canonical_digest(
+            {
+                "program_id": str(state.get("program_id") or program_id or ""),
+                "active_unit_ids": active_unit_ids,
+            }
+        ),
+        "repo_corpus": _repo_preference_corpus(root, active_unit_ids),
+    }
+
+
+def method_preference_context(
+    task_inputs: dict[str, object],
+) -> dict[str, object]:
+    return {
+        "preference_task_inputs": task_inputs,
+        "preference_task_inputs_digest": _canonical_digest(task_inputs),
+    }
+
+
+def resolve_method_preferences(
+    root: Path,
+    *,
+    task_inputs: dict[str, object],
     selection_id: str,
 ) -> dict[str, object]:
     try:
@@ -383,11 +460,7 @@ def resolve_method_preferences(
             selection_id=selection_id,
             skill="method-designer",
             operation="design",
-            canonical_inputs=method_preference_context(
-                record,
-                program_id=program_id,
-                idea_id=idea_id,
-            ),
+            canonical_inputs=method_preference_context(task_inputs),
         )
     except ValueError as exc:
         raise SystemExit(f"Method preference selection is invalid: {exc}") from exc
@@ -414,12 +487,33 @@ def require_current_method_preferences(
         raise SystemExit("Method preference context is missing; prepare the method again.")
     binding = stored.get("selection_binding")
     binding = binding if isinstance(binding, dict) else {}
+    stored_task_inputs = choice.get("preference_task_inputs")
+    if not isinstance(stored_task_inputs, dict):
+        raise SystemExit("Method preference task inputs are missing; prepare the method again.")
+    paths = method_paths(root, program_id, idea_id)
+    interfaces_payload = load_method_artifact(paths["interfaces"], label="interface artifact")
+    matrix_payload = load_method_artifact(paths["matrix"], label="experiment matrix")
     idea_record, _idea_path = locate_record(root, idea_id, kind="idea", fuzzy=False)
-    current = resolve_method_preferences(
+    state = load_program_state(paths["state"], program_id)
+    repo_policy = choice.get("repo_choice_policy")
+    repo_policy = repo_policy if isinstance(repo_policy, dict) else {}
+    current_task_inputs = method_preference_task_inputs(
         root,
         idea_record,
         program_id=program_id,
         idea_id=idea_id,
+        state=state,
+        repo_ids=repo_policy.get("pinned_repo_ids", []),
+        interfaces=interfaces_payload.get("interfaces", []),
+        baselines=matrix_payload.get("baselines", []),
+        metrics=interfaces_payload.get("metrics", []),
+        risks=matrix_payload.get("risks", []),
+    )
+    if current_task_inputs != stored_task_inputs:
+        raise SystemExit("Method inputs changed after prepare; prepare the method again.")
+    current = resolve_method_preferences(
+        root,
+        task_inputs=current_task_inputs,
         selection_id=str(binding.get("selection_id") or ""),
     )
     if method_preference_state(current) != stored:
@@ -553,11 +647,38 @@ def prepare_method(root: Path, record: dict[str, Any], args: argparse.Namespace)
     if str(state.get("selected_repo_id") or "").strip():
         raise SystemExit("The program already has a selected repository; a proposal cannot replace it implicitly.")
 
-    preferences = resolve_method_preferences(
+    interfaces = parse_name_detail(args.interface, "interface")
+    if not interfaces:
+        interfaces = [
+            {"name": "interface-1", "detail": "", "status": "pending_agent_fill"},
+            {"name": "interface-2", "detail": "", "status": "pending_agent_fill"},
+        ]
+    else:
+        interfaces = [{**item, "status": "provided_pending_verification"} for item in interfaces]
+    baselines = normalize_list(args.baseline) or ["closest-unmodified-repo-baseline", "current-best-manual-baseline"]
+    metrics = normalize_list(args.metric) or ["success_rate", "recovery_rate", "runtime_cost"]
+    risks = normalize_list(args.risk) or normalize_list(record.get("payload", {}).get("analysis", {}).get("risks", []))
+    problem = record.get("payload", {}).get("problem", {})
+    hypothesis = record.get("payload", {}).get("hypothesis", {})
+    analysis = record.get("payload", {}).get("analysis", {})
+    resources = profile_resources(root)
+    constraints = profile_constraints(root)
+    scale_by_kind = experiment_scale(resources)
+    preference_task_inputs = method_preference_task_inputs(
         root,
         record,
         program_id=args.program_id,
         idea_id=args.idea_id,
+        state=state,
+        repo_ids=args.repo_id,
+        interfaces=interfaces,
+        baselines=baselines,
+        metrics=metrics,
+        risks=risks,
+    )
+    preferences = resolve_method_preferences(
+        root,
+        task_inputs=preference_task_inputs,
         selection_id=str(getattr(args, "preference_selection_id", "") or ""),
     )
     preference_context = method_preference_state(preferences)
@@ -582,23 +703,6 @@ def prepare_method(root: Path, record: dict[str, Any], args: argparse.Namespace)
     }
     proposed_repo_id = str(proposed_repo.get("id") or "").strip()
     candidate_repos = repo_rankings if repo_rankings else ([proposed_repo] if proposed_repo_id else [])
-    interfaces = parse_name_detail(args.interface, "interface")
-    if not interfaces:
-        interfaces = [
-            {"name": "interface-1", "detail": "", "status": "pending_agent_fill"},
-            {"name": "interface-2", "detail": "", "status": "pending_agent_fill"},
-        ]
-    else:
-        interfaces = [{**item, "status": "provided_pending_verification"} for item in interfaces]
-    baselines = normalize_list(args.baseline) or ["closest-unmodified-repo-baseline", "current-best-manual-baseline"]
-    metrics = normalize_list(args.metric) or ["success_rate", "recovery_rate", "runtime_cost"]
-    risks = normalize_list(args.risk) or normalize_list(record.get("payload", {}).get("analysis", {}).get("risks", []))
-    problem = record.get("payload", {}).get("problem", {})
-    hypothesis = record.get("payload", {}).get("hypothesis", {})
-    analysis = record.get("payload", {}).get("analysis", {})
-    resources = profile_resources(root)
-    constraints = profile_constraints(root)
-    scale_by_kind = experiment_scale(resources)
 
     def proposal_row(row: dict[str, Any], kind: str) -> dict[str, Any]:
         row["repo_candidate_dependency"] = proposed_repo_id
@@ -702,6 +806,7 @@ def prepare_method(root: Path, record: dict[str, Any], args: argparse.Namespace)
         ],
         "repo_choice_policy": {
             "prefer_user_pinned_repo": bool(normalize_list(args.repo_id)),
+            "pinned_repo_ids": normalize_list(args.repo_id),
             "prefer_program_active_unit_ids": True,
             "prefer_existing_repo_units": True,
             "fallback": "manual-selection-required",
@@ -714,6 +819,7 @@ def prepare_method(root: Path, record: dict[str, Any], args: argparse.Namespace)
             "idea_id": args.idea_id,
             "subject_id": subject_id,
         },
+        "preference_task_inputs": copy.deepcopy(preference_task_inputs),
         "preference_context": copy.deepcopy(preference_context),
     }
     interfaces_payload = {
@@ -790,9 +896,18 @@ def prepare_method(root: Path, record: dict[str, Any], args: argparse.Namespace)
         )
         current_preferences = resolve_method_preferences(
             root,
-            current_record,
-            program_id=args.program_id,
-            idea_id=args.idea_id,
+            task_inputs=method_preference_task_inputs(
+                root,
+                current_record,
+                program_id=args.program_id,
+                idea_id=args.idea_id,
+                state=load_program_state(paths["state"], args.program_id),
+                repo_ids=args.repo_id,
+                interfaces=interfaces,
+                baselines=baselines,
+                metrics=metrics,
+                risks=risks,
+            ),
             selection_id=str(getattr(args, "preference_selection_id", "") or ""),
         )
         if (
@@ -800,6 +915,19 @@ def prepare_method(root: Path, record: dict[str, Any], args: argparse.Namespace)
             or current_corpus != repo_corpus
             or profile_resources(root) != resources
             or profile_constraints(root) != constraints
+            or method_preference_task_inputs(
+                root,
+                current_record,
+                program_id=args.program_id,
+                idea_id=args.idea_id,
+                state=load_program_state(paths["state"], args.program_id),
+                repo_ids=args.repo_id,
+                interfaces=interfaces,
+                baselines=baselines,
+                metrics=metrics,
+                risks=risks,
+            )
+            != preference_task_inputs
             or method_preference_state(current_preferences) != preference_context
         ):
             raise SystemExit("Method inputs changed while preparing the proposal; reload before retrying.")
