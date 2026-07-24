@@ -62,7 +62,7 @@ from research.core import (
     write_record,
 )
 from research.git_ops import dirty_kb_paths
-from research.journal import abort_op, incomplete_ops, mutation_transaction
+from research.journal import incomplete_ops, mutation_transaction
 from research.judgements import apply_judgement_rejection, require_judgement_snapshot
 from research.paths import (
     KB_GITIGNORE_LINES,
@@ -713,7 +713,6 @@ def main() -> int:
         for entry in entries:
             op_id = str(entry["op_id"])
             payload = restore_operation(root, op_id, recovery_type="resume")
-            abort_op(root, op_id)
             print(f"已回滚未完成操作 {op_id} 涉及的 {len(payload['restored_paths'])} 个目标。")
         return 0
     if args.command == "undo":

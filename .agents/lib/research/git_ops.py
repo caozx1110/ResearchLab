@@ -1,7 +1,6 @@
 """KB git repository management, checkpoints, and versioning state."""
 from __future__ import annotations
 
-import hashlib
 import subprocess
 from contextlib import ExitStack
 from datetime import datetime, timezone
@@ -25,15 +24,24 @@ from .paths import (
 )
 from .journal import (
     JOURNAL_DIRNAME,
+    _assert_no_incomplete_root,
+    _preflight_journal_envelopes,
+    _recovery_journaled_op,
+    _recovery_workspace_scope,
+    _target_key,
+    incomplete_ops,
     journal_root,
     journaled_op,
-    file_digest,
     latest_committed_op,
     load_op,
+    load_op_view,
     mark_op_undone,
     operation_lock_path,
     restore_before_snapshots,
     target_path,
+    target_digest,
+    terminalize_resumed_op,
+    validated_recovery_target_keys,
     workspace_transaction_lock_path,
 )
 from .prefs import (
@@ -83,6 +91,22 @@ def _git_head_exists(project_root: Path) -> bool:
 
 
 def ensure_kb_git_repo(project_root: Path, *, create_initial_commit: bool = True, initial_message: str = "chore: initialize kb repo") -> dict[str, Any]:
+    _preflight_journal_envelopes(project_root)
+    with exclusive_file_lock(workspace_transaction_lock_path(project_root)):
+        _assert_no_incomplete_root(project_root)
+        return _ensure_kb_git_repo_locked(
+            project_root,
+            create_initial_commit=create_initial_commit,
+            initial_message=initial_message,
+        )
+
+
+def _ensure_kb_git_repo_locked(
+    project_root: Path,
+    *,
+    create_initial_commit: bool,
+    initial_message: str,
+) -> dict[str, Any]:
     ensure_workspace(project_root)
     created = False
     if not kb_repo_exists(project_root):
@@ -135,6 +159,26 @@ def git_checkpoint(
     target_paths: Sequence[Path | str] | None = None,
 ) -> dict[str, Any]:
     scoped_paths = _normalize_git_paths(project_root, target_paths)
+    _preflight_journal_envelopes(project_root)
+    with exclusive_file_lock(workspace_transaction_lock_path(project_root)):
+        _assert_no_incomplete_root(project_root)
+        return _git_checkpoint_locked(
+            project_root,
+            message,
+            trigger=trigger,
+            auto_init=auto_init,
+            scoped_paths=scoped_paths,
+        )
+
+
+def _git_checkpoint_locked(
+    project_root: Path,
+    message: str,
+    *,
+    trigger: str,
+    auto_init: bool,
+    scoped_paths: Sequence[str],
+) -> dict[str, Any]:
     ensure_workspace(project_root)
     if not kb_repo_exists(project_root):
         if auto_init:
@@ -194,6 +238,7 @@ def maybe_auto_checkpoint(
     if not should_commit:
         return {"committed": False, "status": "skipped", "reason": f"trigger `{trigger}` disabled for mode `{mode}`"}
 
+    _preflight_journal_envelopes(project_root)
     if not kb_repo_exists(project_root):
         if versioning.get("auto_init_repo", True):
             ensure_kb_git_repo(project_root, create_initial_commit=False)
@@ -202,6 +247,7 @@ def maybe_auto_checkpoint(
 
     state_path = versioning_state_path(project_root)
     with exclusive_file_lock(workspace_transaction_lock_path(project_root)):
+        _assert_no_incomplete_root(project_root)
         with exclusive_file_lock(operation_lock_path(project_root, state_path)):
             if trigger == "browser-save":
                 state = load_versioning_state(project_root)
@@ -282,15 +328,11 @@ def _normalize_git_paths(
             raise SystemExit("Checkpoint target paths cannot contain empty values.")
         path = Path(raw_path)
         if not path.is_absolute():
-            project_candidate = (project_root / path).resolve()
-            repo_candidate = (repo / path).resolve()
-            path = project_candidate if project_candidate.is_relative_to(repo) else repo_candidate
-        else:
-            path = path.resolve()
+            path = (project_root / path) if path.parts[:1] == ("kb",) else (repo / path)
         try:
-            relative_path = path.relative_to(repo).as_posix()
-        except ValueError as exc:
-            raise SystemExit(f"Checkpoint target must be inside kb/: {raw_path}") from exc
+            relative_path = _target_key(project_root, path)
+        except SystemExit as exc:
+            raise SystemExit("Checkpoint target must be a safe lexical path inside kb/.") from exc
         if relative_path in {"", "."}:
             raise SystemExit("Checkpoint target cannot be the whole kb/ repository.")
         if relative_path == JOURNAL_DIRNAME or relative_path.startswith(f"{JOURNAL_DIRNAME}/"):
@@ -394,92 +436,84 @@ def _checkpointable_git_paths(
     return checkpointable, addable
 
 
-def _git_digest_at_revision(project_root: Path, revision: str, relative_path: str) -> str | None:
-    result = _run_git(project_root, "show", f"{revision}:{relative_path}", check=False)
-    if result.returncode != 0:
-        return None
-    return hashlib.sha256(result.stdout.encode("utf-8")).hexdigest()
-
-
-def _find_revision_for_digests(project_root: Path, digests: dict[str, Any]) -> str:
-    revisions = _run_git(project_root, "rev-list", "HEAD", check=False)
-    for revision in [line.strip() for line in revisions.stdout.splitlines() if line.strip()]:
-        if all(_git_digest_at_revision(project_root, revision, path) == digest for path, digest in digests.items()):
-            return revision
-    raise SystemExit("无法在知识库版本历史中找到该操作之前的状态。")
-
-
-def _restore_paths_from_revision(
-    project_root: Path,
-    revision: str,
-    before_digests: dict[str, Any],
-) -> list[Path]:
-    restored: list[Path] = []
-    for relative_path, digest in before_digests.items():
-        target = target_path(project_root, relative_path)
-        if digest is None:
-            if target.exists():
-                target.unlink()
-        else:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            _run_git(project_root, "restore", f"--source={revision}", "--worktree", "--", relative_path, check=True)
-        restored.append(target)
-    return restored
-
-
 def restore_operation(project_root: Path, op_id: str, *, recovery_type: str = "restore") -> dict[str, Any]:
-    entry = load_op(project_root, op_id)
-    state = str(entry.get("state") or "")
-    if state != "commit" and not (state == "begin" and recovery_type == "resume"):
-        raise SystemExit("只有已完成的操作可恢复；未完成操作只能通过 kb resume 自愈。")
-    before_digests = entry.get("before_digests", {})
-    if not isinstance(before_digests, dict) or not before_digests:
-        raise SystemExit(f"操作 {op_id} 没有可恢复的目标。")
-    target_paths = [target_path(project_root, path) for path in before_digests]
-    has_snapshots = isinstance(entry.get("before_snapshots"), dict) and bool(entry.get("before_snapshots"))
     with exclusive_file_lock(workspace_transaction_lock_path(project_root)):
+        # The source journal is mutable runtime state.  Load and validate its
+        # authoritative bytes only after obtaining the workspace lease; every
+        # target lock and the recovery journal derive from this one view.
+        entry, source_digest = load_op_view(project_root, op_id)
+        state = str(entry.get("state") or "")
+        if state == "abort" and recovery_type == "resume" and entry.get("resumed_by"):
+            return {
+                "op_id": op_id,
+                "recovery_op_id": str(entry.get("resumed_by") or ""),
+                "restored_paths": [],
+                "checkpoint": {"committed": False, "status": "already-resumed"},
+                "status": "already-resumed",
+            }
+        if state != "commit" and not (state == "begin" and recovery_type == "resume"):
+            raise SystemExit("只有已完成的操作可恢复；未完成操作只能通过 kb resume 自愈。")
+        keys = validated_recovery_target_keys(
+            project_root,
+            entry,
+            require_after=state == "commit",
+        )
+        target_paths = [target_path(project_root, key) for key in keys]
+        incomplete_roots = incomplete_ops(project_root)
+        newest_incomplete_id = (
+            str(incomplete_roots[0].get("op_id") or "")
+            if incomplete_roots
+            else ""
+        )
+        if state == "begin" and op_id != newest_incomplete_id:
+            raise SystemExit("未完成操作必须按从新到旧的顺序恢复；已停止恢复。")
+        if state == "commit" and incomplete_roots:
+            raise SystemExit("检测到未完成的知识库操作；请先使用 kb resume 完成恢复。")
         with ExitStack() as locks:
             for path in sorted(target_paths, key=lambda item: item.as_posix()):
                 locks.enter_context(exclusive_file_lock(operation_lock_path(project_root, path)))
             if state == "commit":
-                after_digests = entry.get("after_digests")
-                expected_keys = {str(key) for key in before_digests}
-                if not isinstance(after_digests, dict) or set(after_digests) != expected_keys:
-                    raise SystemExit("该操作缺少完整的恢复后状态记录；为避免覆盖后续改动，已停止恢复。")
+                after_digests = entry["after_digests"]
                 changed_after_operation = [
                     key
-                    for key in sorted(expected_keys)
-                    if file_digest(target_path(project_root, key)) != after_digests.get(key)
+                    for key in keys
+                    if target_digest(project_root, key) != after_digests.get(key)
                 ]
                 if changed_after_operation:
                     raise SystemExit("目标在该操作完成后又被修改；为避免覆盖后续改动，已停止恢复。")
-            with journaled_op(
+            _, locked_source_digest = load_op_view(project_root, op_id)
+            if locked_source_digest != source_digest:
+                raise SystemExit("恢复来源操作日志在执行前发生变化；已停止恢复。")
+            with _recovery_journaled_op(
                 project_root,
                 f"{recovery_type}:{op_id}",
                 target_paths,
-                undoable=False,
-                operation_role="recovery",
-                coordination_scope="workspace-exclusive",
-                attach_to_active=False,
             ) as recovery_op_id:
-                if has_snapshots:
-                    restored = restore_before_snapshots(project_root, op_id)
-                else:
-                    if not kb_repo_exists(project_root) or not _git_head_exists(project_root):
-                        raise SystemExit("知识库版本历史尚未初始化，且旧操作没有字节快照，无法恢复。")
-                    revision = _find_revision_for_digests(project_root, before_digests)
-                    restored = _restore_paths_from_revision(project_root, revision, before_digests)
+                restored = restore_before_snapshots(
+                    project_root,
+                    op_id,
+                    source_entry=entry,
+                )
             # Journal commit must succeed before Git advances.  If commit_op fails,
             # journaled_op restores the pre-recovery bytes and no checkpoint exists.
-            checkpoint = git_checkpoint(
-                project_root,
-                f"recovery: {recovery_type} {op_id}",
-                trigger="manual",
-                auto_init=False,
-                target_paths=restored,
-            )
-    if recovery_type == "undo":
-        mark_op_undone(project_root, op_id, recovery_op_id)
+            with _recovery_workspace_scope():
+                checkpoint = git_checkpoint(
+                    project_root,
+                    f"recovery: {recovery_type} {op_id}",
+                    trigger="manual",
+                    auto_init=False,
+                    target_paths=restored,
+                )
+            if state == "begin":
+                terminalize_resumed_op(
+                    project_root,
+                    op_id,
+                    source_entry=entry,
+                    source_digest=source_digest,
+                    recovery_op_id=recovery_op_id,
+                )
+            if recovery_type == "undo":
+                mark_op_undone(project_root, op_id, recovery_op_id)
     return {
         "op_id": op_id,
         "recovery_op_id": recovery_op_id,
