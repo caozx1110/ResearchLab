@@ -1286,6 +1286,51 @@ def test_search_resume_omissions_reuse_the_persisted_frozen_preference_context(
     assert module.stage_payload(tmp_path, resume) == path
 
 
+def test_search_context_rehydrates_every_omitted_frozen_contract_field() -> None:
+    module = _search_module()
+    initial = {
+        "request": "multi-review frozen search",
+        "mode": "bounded-systematic",
+        "run_id": "run-reviewed",
+        "scope": {"facets": ["robot"], "screeners": 2},
+        "budget": {
+            "max_queries": 4,
+            "max_candidates": 20,
+            "max_full_reads": 6,
+            "max_citation_hops": 3,
+        },
+        "review_protocol": {
+            "required_reviewer_ids": ["reviewer-a", "reviewer-b"],
+            "mode": "assisted",
+            "phases": ["title_abstract", "fulltext"],
+            "adjudication_mode": "user",
+        },
+        "reviewers": [
+            {"reviewer_id": "reviewer-a", "actor_type": "agent", "role": "screener"},
+            {"reviewer_id": "reviewer-b", "actor_type": "agent", "role": "screener"},
+        ],
+        "monitor_binding": {
+            "run_id": "monitor-run-reviewed",
+            "task_digest": "a" * 64,
+        },
+    }
+    existing = {
+        "id": "source-search-reviewed",
+        "entry_skill": "literature-search",
+        **copy.deepcopy(initial),
+    }
+    resume = {"request": initial["request"], "stage_id": existing["id"]}
+
+    assert module.literature_search_preference_context(
+        resume,
+        stage_id=existing["id"],
+        existing=existing,
+    ) == module.literature_search_preference_context(
+        initial,
+        stage_id=existing["id"],
+    )
+
+
 @pytest.mark.parametrize("url", ["javascript:alert(1)", "file:///private/paper", "https://u:p@example.test/a"])
 def test_unsafe_candidate_urls_fail_before_workspace_write(tmp_path: Path, url: str) -> None:
     with pytest.raises(SystemExit, match="safe http"):

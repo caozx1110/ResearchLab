@@ -606,6 +606,61 @@ def test_synthesis_prepare_rejects_old_receipt_when_current_unit_snapshot_change
     } if synthesis_dir.exists() else {}) == before
 
 
+def test_synthesis_prepare_persists_the_exact_validated_preference_binding(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    module = load_synthesizer()
+    source = write_confirmed_source(module, tmp_path)
+    bindings = module.synthesis_input_unit_bindings(tmp_path, [source])
+    context = {
+        "query": "robot learning",
+        "kind": "",
+        "topic": "",
+        "tag": "",
+        "pool": "",
+        "mode": "survey",
+        "as_of": "2026-07-25",
+        "program_ids": [],
+        "discovery_mode": "kb_only",
+        "search_protocol_digest": module._canonical_digest({}),
+        "input_unit_bindings": bindings,
+    }
+    selection_id = "prefsel-synth-current-binding"
+    record_synthesis_selection(
+        tmp_path,
+        module,
+        selection_id=selection_id,
+        context=context,
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(SCRIPT),
+            "--root",
+            str(tmp_path),
+            "survey",
+            "prepare",
+            "--query",
+            "robot learning",
+            "--as-of",
+            "2026-07-25",
+            "--preference-selection-id",
+            selection_id,
+        ],
+    )
+
+    assert module.main() == 0
+    fill_path = tmp_path / capsys.readouterr().out.strip().splitlines()[-1]
+    scaffold = load_yaml(fill_path)
+    assert scaffold["preference_context"]["selection_binding"]["selection_id"] == selection_id
+    assert scaffold["kb_anchor"]["units"] == bindings
+    assert scaffold["discovery_mode"] == "kb_only"
+    assert scaffold["search_protocol_digest"] == module._canonical_digest({})
+
+
 def test_synthesis_prepare_binds_frozen_protocol_bytes_not_its_path(
     tmp_path: Path,
     monkeypatch,
