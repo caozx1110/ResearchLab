@@ -265,6 +265,7 @@ SYNC_SOURCE=""
 EXPECTED_SOURCE_COMMIT=""
 APPLY_AGENT_PLAN=""
 EXPECTED_PLAN_DIGEST=""
+EXPECTED_PLAN_BYTE_SHA256=""
 EXPECTED_SOURCE_TREE_DIGEST=""
 OPERATION_TIME=""
 ASSUME_YES=0
@@ -389,6 +390,16 @@ while [ "$#" -gt 0 ]; do
       [ -n "$EXPECTED_PLAN_DIGEST" ] || die "--expected-plan-digest 需要一个 digest"
       shift
       ;;
+    --expected-plan-byte-sha256)
+      [ "${2:-}" != "" ] && [[ ${2:-} != --* ]] || die "--expected-plan-byte-sha256 需要一个 digest"
+      EXPECTED_PLAN_BYTE_SHA256=$2
+      shift 2
+      ;;
+    --expected-plan-byte-sha256=*)
+      EXPECTED_PLAN_BYTE_SHA256=${1#--expected-plan-byte-sha256=}
+      [ -n "$EXPECTED_PLAN_BYTE_SHA256" ] || die "--expected-plan-byte-sha256 需要一个 digest"
+      shift
+      ;;
     --expected-source-tree-digest)
       [ "${2:-}" != "" ] && [[ ${2:-} != --* ]] || die "--expected-source-tree-digest 需要一个 digest"
       EXPECTED_SOURCE_TREE_DIGEST=$2
@@ -460,9 +471,9 @@ done
 if [ "$AGENT_PLAN" -eq 1 ] && [ -z "$AGENT_PLAN_JSON" ]; then
   die "--agent-plan 需要配合 --agent-plan-json FILE，以免把大量内部路径输出到终端"
 fi
-if [ -n "$APPLY_AGENT_PLAN$EXPECTED_PLAN_DIGEST$EXPECTED_SOURCE_TREE_DIGEST" ]; then
-  [ -n "$APPLY_AGENT_PLAN" ] && [ -n "$EXPECTED_PLAN_DIGEST" ] && [ -n "$EXPECTED_SOURCE_TREE_DIGEST" ] && [ -n "$EXPECTED_SOURCE_COMMIT" ] || \
-    die "应用 Agent 计划时必须同时提供计划、计划 digest、源码树 digest 和源码 commit"
+if [ -n "$APPLY_AGENT_PLAN$EXPECTED_PLAN_DIGEST$EXPECTED_PLAN_BYTE_SHA256$EXPECTED_SOURCE_TREE_DIGEST" ]; then
+  [ -n "$APPLY_AGENT_PLAN" ] && [ -n "$EXPECTED_PLAN_DIGEST" ] && [ -n "$EXPECTED_PLAN_BYTE_SHA256" ] && [ -n "$EXPECTED_SOURCE_TREE_DIGEST" ] && [ -n "$EXPECTED_SOURCE_COMMIT" ] || \
+    die "应用 Agent 计划时必须同时提供已审阅计划及其绑定信息"
   [ "$AGENT_PLAN" -eq 0 ] || die "不能同时生成并应用 Agent 计划"
 fi
 if [ "$AGENT_PLAN" -eq 1 ] && [ -z "$OPERATION_TIME" ]; then
@@ -1119,6 +1130,7 @@ verify_agent_apply_contract() {
   args=(
     "--verify-plan" "$APPLY_AGENT_PLAN"
     "--expected-plan-digest" "$EXPECTED_PLAN_DIGEST"
+    "--expected-plan-byte-sha256" "$EXPECTED_PLAN_BYTE_SHA256"
     "--expected-source-tree-digest" "$EXPECTED_SOURCE_TREE_DIGEST"
     "--expected-source-commit" "$EXPECTED_SOURCE_COMMIT"
     "--current-action" "$ACTION"

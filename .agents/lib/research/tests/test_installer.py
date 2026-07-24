@@ -14,6 +14,9 @@ import time
 from pathlib import Path
 
 
+PLAN_BYTE_SHA256_PLACEHOLDER = "COMPUTE_AFTER_REVIEW"
+
+
 def _project_root() -> Path:
     return Path(__file__).resolve().parents[4]
 
@@ -127,9 +130,12 @@ def test_agent_plan_lists_exact_targets_and_writes_nothing(tmp_path: Path) -> No
     assert plan["apply_contract"]["headless"] is True
     assert plan["apply_contract"]["requires_same_source_commit"] == plan["source"]["commit"]
     assert plan["apply_contract"]["requires_plan_digest"] == plan["plan_digest"]
+    assert plan["apply_contract"]["requires_plan_byte_sha256"] == PLAN_BYTE_SHA256_PLACEHOLDER
     assert plan["apply_contract"]["requires_source_tree_digest"] == tree["digest"]
     assert plan["apply_contract"]["plan_path"] == str(plan_path)
     assert "--agent-plan-json" not in plan["apply_contract"]["argv"]
+    byte_index = plan["apply_contract"]["argv"].index("--expected-plan-byte-sha256")
+    assert plan["apply_contract"]["argv"][byte_index + 1] == PLAN_BYTE_SHA256_PLACEHOLDER
     expected_index = plan["apply_contract"]["argv"].index("--expected-source-commit")
     assert plan["apply_contract"]["argv"][expected_index + 1] == plan["source"]["commit"]
     summary = re.search(r"预计受管目标：(\d+) 项", result.stdout)
@@ -258,16 +264,20 @@ def test_agent_plan_apply_contract_installs_headlessly_with_bound_provenance(tmp
     assert planned.returncode == 0, planned.stdout + planned.stderr
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
 
-    applied = subprocess.run(
+    unreviewed = subprocess.run(
         [plan["apply_contract"]["executable"], *plan["apply_contract"]["argv"]],
         cwd=_project_root(),
         env=env,
         stdin=subprocess.DEVNULL,
         text=True,
         capture_output=True,
-        timeout=30,
         check=False,
     )
+    assert unreviewed.returncode == 1
+    assert not any(workspace.iterdir())
+    assert not any(home.iterdir())
+
+    applied = _apply_reviewed_plan(_project_root(), plan, env=env, timeout=30)
 
     assert applied.returncode == 0, applied.stdout + applied.stderr
     manifest = json.loads((workspace / ".agents/.install-manifest.json").read_text(encoding="utf-8"))
@@ -326,12 +336,21 @@ def _apply_reviewed_plan(
     plan: dict[str, object],
     *,
     env: dict[str, str],
+    reviewed_byte_sha256: str | None = None,
+    timeout: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
     contract = plan["apply_contract"]
     assert isinstance(contract, dict)
     executable = contract["executable"]
     argv = contract["argv"]
     assert isinstance(executable, str) and isinstance(argv, list)
+    argv = list(argv)
+    plan_path = Path(str(contract["plan_path"]))
+    if reviewed_byte_sha256 is None:
+        reviewed_byte_sha256 = hashlib.sha256(plan_path.read_bytes()).hexdigest()
+    byte_index = argv.index("--expected-plan-byte-sha256")
+    assert argv[byte_index + 1] == PLAN_BYTE_SHA256_PLACEHOLDER
+    argv[byte_index + 1] = reviewed_byte_sha256
     return subprocess.run(
         [executable, *argv],
         cwd=source,
@@ -339,6 +358,7 @@ def _apply_reviewed_plan(
         stdin=subprocess.DEVNULL,
         text=True,
         capture_output=True,
+        timeout=timeout,
         check=False,
     )
 
@@ -431,7 +451,7 @@ def test_agent_apply_rejects_same_commit_branch_drift_without_writes(tmp_path: P
     assert not any(home.iterdir())
 
 
-def test_agent_apply_rejects_plan_tampering_without_writes(tmp_path: Path) -> None:
+def test_agent_apply_rejects_semantic_edit_even_with_recomputed_external_byte_sha(tmp_path: Path) -> None:
     source = _make_linked_source(tmp_path)
     workspace = tmp_path / "tampered-plan-workspace"
     workspace.mkdir()
@@ -448,16 +468,126 @@ def test_agent_apply_rejects_plan_tampering_without_writes(tmp_path: Path) -> No
     }
     planned, plan = _plan_from_source(source, workspace, plan_path, env=env)
     assert planned.returncode == 0, planned.stdout + planned.stderr
+    reviewed_byte_sha256 = hashlib.sha256(plan_path.read_bytes()).hexdigest()
     tampered = json.loads(plan_path.read_text(encoding="utf-8"))
     tampered["conflicts"].append("tampered after review")
     plan_path.write_text(json.dumps(tampered, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-    applied = _apply_reviewed_plan(source, plan, env=env)
+    recomputed_byte_sha256 = hashlib.sha256(plan_path.read_bytes()).hexdigest()
+    assert recomputed_byte_sha256 != reviewed_byte_sha256
+    applied = _apply_reviewed_plan(source, plan, env=env, reviewed_byte_sha256=recomputed_byte_sha256)
 
     assert applied.returncode == 1
     assert "计划、源码或目标状态已变化" in applied.stderr
     assert not any(workspace.iterdir())
     assert not any(home.iterdir())
+
+
+def test_agent_apply_binds_exact_reviewed_plan_bytes_before_any_write(tmp_path: Path) -> None:
+    source = _project_root()
+    mutations = ("append-newline", "reindent-and-reorder", "utf8-bom", "replacement-inode")
+
+    for mutation in mutations:
+        case_root = tmp_path / mutation
+        case_root.mkdir()
+        workspace = case_root / "workspace"
+        home = case_root / "home"
+        workspace.mkdir()
+        home.mkdir()
+        plan_path = case_root / "plan.json"
+        outside_sentinel = case_root / "outside-sentinel.txt"
+        outside_sentinel.write_text("unchanged\n", encoding="utf-8")
+        env = {
+            **os.environ,
+            "HOME": str(home),
+            "RESEARCH_PYTHON": sys.executable,
+            "RESEARCH_NO_MANAGED_VENV": "1",
+            "RESEARCH_NO_PDF_BACKEND": "1",
+            "NO_COLOR": "1",
+        }
+        planned, plan = _plan_from_source(source, workspace, plan_path, env=env)
+        assert planned.returncode == 0, planned.stdout + planned.stderr
+        reviewed_bytes = plan_path.read_bytes()
+        reviewed_byte_sha256 = hashlib.sha256(reviewed_bytes).hexdigest()
+
+        if mutation == "append-newline":
+            plan_path.write_bytes(reviewed_bytes + b"\n")
+        elif mutation == "reindent-and-reorder":
+            payload = json.loads(reviewed_bytes)
+            reordered = dict(reversed(list(payload.items())))
+            plan_path.write_text(
+                json.dumps(reordered, ensure_ascii=False, indent=4, sort_keys=False) + "\n",
+                encoding="utf-8",
+            )
+        elif mutation == "utf8-bom":
+            plan_path.write_bytes(b"\xef\xbb\xbf" + reviewed_bytes)
+        else:
+            replacement = case_root / "replacement.json"
+            replacement.write_bytes(reviewed_bytes + b"\n")
+            os.replace(replacement, plan_path)
+
+        applied = _apply_reviewed_plan(
+            source,
+            plan,
+            env=env,
+            reviewed_byte_sha256=reviewed_byte_sha256,
+        )
+
+        assert applied.returncode == 1
+        assert "计划、源码或目标状态已变化" in applied.stderr
+        assert not any(workspace.iterdir())
+        assert not any(home.iterdir())
+        assert outside_sentinel.read_text(encoding="utf-8") == "unchanged\n"
+
+
+def test_agent_apply_rejects_leaf_and_ancestor_plan_symlinks_without_writes(tmp_path: Path) -> None:
+    source = _project_root()
+
+    for link_kind in ("leaf", "ancestor"):
+        case_root = tmp_path / link_kind
+        case_root.mkdir()
+        workspace = case_root / "workspace"
+        home = case_root / "home"
+        plan_parent = case_root / "plan-parent"
+        workspace.mkdir()
+        home.mkdir()
+        plan_parent.mkdir()
+        plan_path = plan_parent / "plan.json"
+        outside_sentinel = case_root / "outside-sentinel.txt"
+        outside_sentinel.write_text("unchanged\n", encoding="utf-8")
+        env = {
+            **os.environ,
+            "HOME": str(home),
+            "RESEARCH_PYTHON": sys.executable,
+            "RESEARCH_NO_MANAGED_VENV": "1",
+            "RESEARCH_NO_PDF_BACKEND": "1",
+            "NO_COLOR": "1",
+        }
+        planned, plan = _plan_from_source(source, workspace, plan_path, env=env)
+        assert planned.returncode == 0, planned.stdout + planned.stderr
+        reviewed_byte_sha256 = hashlib.sha256(plan_path.read_bytes()).hexdigest()
+
+        if link_kind == "leaf":
+            real_plan = case_root / "real-plan.json"
+            plan_path.replace(real_plan)
+            plan_path.symlink_to(real_plan)
+        else:
+            real_parent = case_root / "real-plan-parent"
+            plan_parent.replace(real_parent)
+            plan_parent.symlink_to(real_parent, target_is_directory=True)
+
+        applied = _apply_reviewed_plan(
+            source,
+            plan,
+            env=env,
+            reviewed_byte_sha256=reviewed_byte_sha256,
+        )
+
+        assert applied.returncode == 1
+        assert "计划、源码或目标状态已变化" in applied.stderr
+        assert not any(workspace.iterdir())
+        assert not any(home.iterdir())
+        assert outside_sentinel.read_text(encoding="utf-8") == "unchanged\n"
 
 
 def test_agent_apply_rejects_target_concurrency_without_writes(tmp_path: Path) -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -15,6 +16,7 @@ import pytest
 BEGIN_MARKER = "# >>> workspace-oss managed >>>"
 END_MARKER = "# <<< workspace-oss managed <<<"
 PUBLIC_PRESERVATION_WARNING = "检测到用户修改并按安全策略保留，请让 Agent 检查。"
+PLAN_BYTE_SHA256_PLACEHOLDER = "COMPUTE_AFTER_REVIEW"
 
 
 def _project_root() -> Path:
@@ -245,8 +247,12 @@ def test_reviewed_uninstall_plan_preserves_runtime_and_kb_lifecycle(tmp_path: Pa
     assert plan["conditional_runtime_changes"][0]["path"] == str(workspace / ".venv")
 
     contract = plan["apply_contract"]
+    argv = list(contract["argv"])
+    byte_index = argv.index("--expected-plan-byte-sha256")
+    assert argv[byte_index + 1] == PLAN_BYTE_SHA256_PLACEHOLDER
+    argv[byte_index + 1] = hashlib.sha256(plan_path.read_bytes()).hexdigest()
     applied = subprocess.run(
-        [contract["executable"], *contract["argv"]],
+        [contract["executable"], *argv],
         cwd=_project_root(),
         env=env,
         stdin=subprocess.DEVNULL,

@@ -21,6 +21,8 @@ BEGIN_MARKER = b"# >>> workspace-oss managed >>>"
 END_MARKER = b"# <<< workspace-oss managed <<<"
 SOURCE_BOUND_OPERATIONS = {"copy", "overwrite", "write", "write-manifest", "write-managed-block"}
 PLAN_DIGEST_PLACEHOLDER = "<PLAN_DIGEST>"
+PLAN_BYTE_SHA256_PLACEHOLDER = "COMPUTE_AFTER_REVIEW"
+MAX_PLAN_BYTES = 16 * 1024 * 1024
 
 
 def sha256_bytes(content: bytes) -> str:
@@ -43,6 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--verify-plan", default="")
     parser.add_argument("--expected-plan-digest", default="")
+    parser.add_argument("--expected-plan-byte-sha256", default="")
     parser.add_argument("--expected-source-tree-digest", default="")
     parser.add_argument("--expected-source-commit", default="")
     parser.add_argument("--current-action", default="")
@@ -264,22 +267,97 @@ def plan_digest(payload: dict[str, Any]) -> str:
     return sha256_bytes(canonical_json(_payload_for_digest(payload)))
 
 
-def _read_plan(path: Path) -> dict[str, Any]:
-    if path.is_symlink() or not path.is_file():
-        raise ValueError("Agent plan must be a regular file")
+def _absolute_lexical_path(path: Path) -> Path:
+    expanded = path.expanduser()
+    if not expanded.is_absolute():
+        expanded = Path.cwd() / expanded
+    return Path(os.path.abspath(os.fspath(expanded)))
+
+
+def _read_regular_bytes_no_follow(path: Path) -> tuple[Path, bytes]:
+    """Read one bounded regular-file inode without following any path symlink."""
+    if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
+        raise ValueError("this platform cannot safely open an Agent plan")
+    absolute = _absolute_lexical_path(path)
+    if not absolute.is_absolute() or absolute.name in {"", ".", ".."} or ".." in absolute.parts:
+        raise ValueError("Agent plan path is invalid")
+
+    directory_fd: int | None = None
+    plan_fd: int | None = None
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    file_flags = os.O_RDONLY | os.O_NOFOLLOW
+    if hasattr(os, "O_CLOEXEC"):
+        directory_flags |= os.O_CLOEXEC
+        file_flags |= os.O_CLOEXEC
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        directory_fd = os.open(os.sep, directory_flags)
+        for component in absolute.parts[1:-1]:
+            next_fd = os.open(component, directory_flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+        plan_fd = os.open(absolute.name, file_flags, dir_fd=directory_fd)
+        before = os.fstat(plan_fd)
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError("Agent plan must be a regular file")
+        if before.st_size > MAX_PLAN_BYTES:
+            raise ValueError("Agent plan exceeds the maximum supported size")
+
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(plan_fd, min(1024 * 1024, MAX_PLAN_BYTES + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > MAX_PLAN_BYTES:
+                raise ValueError("Agent plan exceeds the maximum supported size")
+        content = b"".join(chunks)
+        after = os.fstat(plan_fd)
+        before_identity = (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        )
+        after_identity = (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        )
+        if before_identity != after_identity or len(content) != after.st_size:
+            raise ValueError("Agent plan changed while it was being read")
+        return absolute, content
+    except OSError as exc:
+        raise ValueError("Agent plan must be a regular file with no symlink path components") from exc
+    finally:
+        if plan_fd is not None:
+            os.close(plan_fd)
+        if directory_fd is not None:
+            os.close(directory_fd)
+
+
+def _read_plan(path: Path, expected_byte_sha256: str) -> tuple[Path, dict[str, Any]]:
+    if len(expected_byte_sha256) != 64 or any(char not in "0123456789abcdef" for char in expected_byte_sha256):
+        raise ValueError("reviewed Agent plan byte digest is missing or invalid")
+    absolute, content = _read_regular_bytes_no_follow(path)
+    if sha256_bytes(content) != expected_byte_sha256:
+        raise ValueError("Agent plan bytes no longer match the reviewed file")
+    try:
+        payload = json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError("Agent plan is unreadable or invalid JSON") from exc
     if not isinstance(payload, dict) or payload.get("schema") != 2:
         raise ValueError("Agent plan has an unsupported schema")
-    return payload
+    return absolute, payload
 
 
 def verify_plan(args: argparse.Namespace) -> int:
     plan_input = Path(args.verify_plan).expanduser()
-    payload = _read_plan(plan_input)
-    plan_path = plan_input.resolve(strict=False)
+    plan_path, payload = _read_plan(plan_input, args.expected_plan_byte_sha256)
     actual_digest = plan_digest(payload)
     recorded_digest = str(payload.get("plan_digest") or "")
     if not args.expected_plan_digest or actual_digest != recorded_digest or actual_digest != args.expected_plan_digest:
@@ -364,6 +442,16 @@ def verify_plan(args: argparse.Namespace) -> int:
     contract = payload.get("apply_contract")
     if not isinstance(contract, dict) or contract.get("plan_path") != str(plan_path):
         raise ValueError("Agent plan path differs from its reviewed apply contract")
+    contract_argv = contract.get("argv")
+    if (
+        contract.get("requires_plan_byte_sha256") != PLAN_BYTE_SHA256_PLACEHOLDER
+        or not isinstance(contract_argv, list)
+        or "--expected-plan-byte-sha256" not in contract_argv
+    ):
+        raise ValueError("Agent plan byte-review contract is missing")
+    byte_index = contract_argv.index("--expected-plan-byte-sha256")
+    if byte_index + 1 >= len(contract_argv) or contract_argv[byte_index + 1] != PLAN_BYTE_SHA256_PLACEHOLDER:
+        raise ValueError("Agent plan byte-review contract is invalid")
     print(actual_digest)
     return 0
 
@@ -408,6 +496,8 @@ def generate_plan(args: argparse.Namespace) -> int:
             str(output),
             "--expected-plan-digest",
             PLAN_DIGEST_PLACEHOLDER,
+            "--expected-plan-byte-sha256",
+            PLAN_BYTE_SHA256_PLACEHOLDER,
             "--expected-source-tree-digest",
             tree["digest"],
         ]
@@ -446,6 +536,7 @@ def generate_plan(args: argparse.Namespace) -> int:
             "argv": apply_argv,
             "plan_path": str(output),
             "requires_same_source_commit": args.source_commit,
+            "requires_plan_byte_sha256": PLAN_BYTE_SHA256_PLACEHOLDER,
             "requires_source_tree_digest": tree["digest"],
             "requires_explicit_install_request": True,
             "requires_plan_review": True,
