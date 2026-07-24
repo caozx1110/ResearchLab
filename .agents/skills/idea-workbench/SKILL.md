@@ -11,7 +11,7 @@ description: 负责 core idea unit 的生成、evidence-first analysis、陪练�
 
 ## 负责范围
 
-1. 捕获单个 idea，或围绕一个主题生成多个候选 idea。
+1. 捕获单个 idea，或围绕一个主题以两阶段 Agent authoring 生成多个候选 idea。
 2. 用 prepare / verify 做 evidence-first novelty、feasibility、recommendation 与 killer-question 分析；判断由 runtime agent 产出，脚本只建空结构并验证逐字证据。
 3. 提供 idea 内建的「陪练 / sparring」模式：以领域专家 / reviewer 身份 challenge、probe、从 KB 拉 counter-example、追踪论证链，并给 constructive suggestion。
 4. 生成 evidence-backed review-ready idea card 与 review-assist。
@@ -25,6 +25,17 @@ description: 负责 core idea unit 的生成、evidence-first analysis、陪练�
 - verify 对每条 judgement claim 运行 `validate_claims`，再按 `source_unit_id` 定位 canonical KB unit，并用 `verify_claim_evidence` 对该 unit 内 artifact 做逐字 quote 校验。
 - retrieval 使用 agent 原生检索能力；本 skill 不建 semantic index。
 - 判断仍是 `pending_user_confirmation`。证据校验通过只代表 grounded，不等于用户确认判断。
+- `generate / analyze / review / discuss` 是真实 task-scoped preference consumer。prepare 暴露 value-free canonical task context；runtime Agent 可选择相关 soft preference，verify 重算 current record/request、immutable orientation 与冻结 evidence corpus 后再接受 receipt。无 receipt 时不读取 soft profile。
+- 产物只保存 `selection_id / selection_digest / task_context_digest / skill / operation`；不复制 preference value。偏好不能覆盖当前用户明确给出的题目、scope、资源边界，也不能削弱 evidence/confirmation。
+
+## Agent-authored generation
+
+`generate` 采用 `prepare|verify` 两阶段合同：
+
+1. `prepare` 只保存用户原始 title/problem/hypothesis/source/pool context、不可变 orientation、冻结的 canonical KB corpus binding 与指定数量的空候选槽位。
+2. runtime Agent 为每个槽位撰写 title、strategy、problem、hypothesis 与非空 next actions；脚本没有固定策略、语义默认或 winner 规则。
+3. `verify` 先重算 request/orientation/corpus 与可选 preference receipt，再完整验证所有槽位、唯一 identity、边界和 distinctness；全部通过后在一个 transaction 内创建所有 idea records 与 bundle。任一候选失败都零 candidate/bundle 写入。
+4. 用户明确提供的 title/problem/hypothesis 会逐字保留为 generation context；它们不会被脚本扩写成研究判断。
 
 ## Evidence-first analysis
 
@@ -80,7 +91,8 @@ payload:
 
 ```bash
 ${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py capture --title "retrieval-aware code assistant"
-${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py generate --title "adaptive retrieval policy" --count 4 --pool current-ideas
+${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py generate --title "adaptive retrieval policy" --count 4 --pool current-ideas --phase prepare
+${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py generate --title "adaptive retrieval policy" --count 4 --pool current-ideas --phase verify
 ${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py analyze --idea-id i-example-f7e91d86 --phase prepare
 ${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py analyze --idea-id i-example-f7e91d86 --phase verify
 ${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py review --idea-id i-example-f7e91d86 --phase prepare

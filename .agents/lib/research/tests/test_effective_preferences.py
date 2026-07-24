@@ -10,6 +10,7 @@ from research.paths import config_root, runtime_preferences_path
 from research.preference_selection import (
     OPERATION_CANONICAL_INPUTS,
     SKILL_ELIGIBILITY,
+    SKILL_NEUTRALITY,
     SKILL_OPERATIONS,
     eligible_preferences,
     load_effective_selection,
@@ -25,6 +26,12 @@ def test_every_shipping_skill_has_an_explicit_preference_eligibility_rule() -> N
     shipping = {path.name for path in skills_root.iterdir() if (path / "SKILL.md").is_file()}
 
     assert set(SKILL_ELIGIBILITY) == shipping
+    consumers = set(SKILL_OPERATIONS)
+    neutral = set(SKILL_NEUTRALITY)
+    assert consumers | neutral == shipping
+    assert consumers.isdisjoint(neutral)
+    assert all(SKILL_ELIGIBILITY[skill] for skill in consumers)
+    assert all(not SKILL_ELIGIBILITY[skill] and SKILL_NEUTRALITY[skill].strip() for skill in neutral)
 
 
 def test_declared_consumer_operations_are_real_not_aspirational() -> None:
@@ -47,10 +54,12 @@ def test_declared_consumer_operations_are_real_not_aspirational() -> None:
         "repo-analyst": ("map-capability",),
         "dataset-analyst": ("profile",),
         "blog-analyst": ("complete-note",),
+        "idea-workbench": ("generate", "analyze", "review", "discuss"),
+        "research-monitor": ("create-subscription",),
     }
 
 
-def test_analyzer_consumers_have_closed_canonical_input_registries() -> None:
+def test_semantic_consumers_have_closed_canonical_input_registries() -> None:
     common = {
         "canonical_id",
         "canonical_kind",
@@ -59,13 +68,22 @@ def test_analyzer_consumers_have_closed_canonical_input_registries() -> None:
         "phase_contract_digest",
         "immutable_orientation_digest",
     }
-    assert set(OPERATION_CANONICAL_INPUTS) == {
+    analyzer_pairs = {
         ("repo-analyst", "map-capability"),
         ("dataset-analyst", "profile"),
         ("blog-analyst", "complete-note"),
     }
-    for fields in OPERATION_CANONICAL_INPUTS.values():
+    assert analyzer_pairs.issubset(OPERATION_CANONICAL_INPUTS)
+    for pair in analyzer_pairs:
+        fields = OPERATION_CANONICAL_INPUTS[pair]
         assert common.issubset(fields)
+    assert {
+        ("idea-workbench", "generate"),
+        ("idea-workbench", "analyze"),
+        ("idea-workbench", "review"),
+        ("idea-workbench", "discuss"),
+        ("research-monitor", "create-subscription"),
+    }.issubset(OPERATION_CANONICAL_INPUTS)
 
 
 def test_bound_consumer_resolves_selected_values_without_copying_them_into_receipt(

@@ -4,9 +4,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import stat
 import sys
 from contextvars import ContextVar
 from pathlib import Path
+from typing import Any, Mapping
 
 SCRIPT_PATH = Path(__file__).resolve()
 for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
@@ -49,13 +51,19 @@ from research.core import (
 )
 from research.evidence import attach_claims, build_verification_receipt, validate_claims, verify_claim_evidence
 from research.judgements import apply_judgement_rejection, readiness_violations, require_judgement_snapshot
+from research.preference_selection import (
+    canonical_digest,
+    regular_file_binding,
+    resolve_operation_preferences,
+    task_context_digest,
+)
 
-STRATEGIES = [
-    ("narrow-scope", "把问题边界收窄到一个最小可证伪切口。"),
-    ("repo-first", "优先复用现有 repo，只改动一个关键模块。"),
-    ("evaluation-first", "先围绕评测与 failure probe 定义 idea。"),
-    ("mechanism-first", "优先提出清晰机制假设与 kill test。"),
-]
+PREFERENCE_SKILL = "idea-workbench"
+PREFERENCE_OPERATIONS = {"generate", "analyze", "review", "discuss"}
+GENERATION_FILL_NAME = "generation-fill.yaml"
+GENERATION_ORIENTATION_NAME = "generation-orientation.yaml"
+GENERATION_CORPUS_NAME = "generation-evidence-corpus.yaml"
+MAX_GENERATED_CANDIDATES = 12
 
 DISCUSSION_CLAIMS = (
     ("challenge", "evaluation"),
@@ -108,12 +116,19 @@ def _idea_command_targets(args, root: Path) -> list[Path]:
         idea_id = build_unit_id("idea", args.title, args.source)
         return [record_path(root, "idea", idea_id), *targets]
     if args.command == "generate":
-        bundle_id = args.bundle_id or f"idea-bundle-{slugify(args.title, max_words=6) or 'ideas'}-{hashlib.sha1(args.title.encode('utf-8')).hexdigest()[:6]}"
-        idea_paths = [
-            record_path(root, "idea", build_unit_id("idea", variant["title"], args.source))
-            for variant in generated_variants(args.title, args.problem, args.hypothesis, max(1, args.count))
+        bundle_id = generation_bundle_id(args)
+        working_root = bundle_root(root, bundle_id)
+        private_targets = [
+            working_root / GENERATION_FILL_NAME,
+            working_root / GENERATION_ORIENTATION_NAME,
+            working_root / GENERATION_CORPUS_NAME,
         ]
-        return [bundle_index_path(root, bundle_id), *idea_paths, *targets]
+        if args.phase == "prepare":
+            return private_targets
+        plan = generation_materialization_plan(root, args, bundle_id=bundle_id)
+        args._generation_plan = plan
+        idea_paths = [record_path(root, "idea", item["idea_id"]) for item in plan["candidates"]]
+        return [bundle_index_path(root, bundle_id), *idea_paths, *private_targets, *targets]
     if args.command in {"review-assist", "select-best"}:
         idea_ids = list(args.idea_id)
         bundle_id = args.bundle_id
@@ -135,9 +150,24 @@ def _idea_command_targets(args, root: Path) -> list[Path]:
     record, path = locate_record(root, args.idea_id, kind="idea")
     unit = path.parent
     if args.command in {"analyze", "review"}:
-        return [path, unit / f"{args.command}-fill.yaml", unit / f"{args.command}.yaml", unit / "idea-card.md", *targets]
+        return [
+            path,
+            unit / f"{args.command}-fill.yaml",
+            unit / f"{args.command}-orientation.yaml",
+            unit / f"{args.command}-evidence-corpus.yaml",
+            unit / f"{args.command}.yaml",
+            unit / "idea-card.md",
+            *targets,
+        ]
     if args.command in {"discuss", "spar"}:
-        return [path, unit / "discussion-fill.yaml", unit / "discussion-judgements.yaml", *targets]
+        return [
+            path,
+            unit / "discussion-fill.yaml",
+            unit / "discuss-orientation.yaml",
+            unit / "discuss-evidence-corpus.yaml",
+            unit / "discussion-judgements.yaml",
+            *targets,
+        ]
     return [path, *targets]
 
 
@@ -366,6 +396,397 @@ def bundle_index_path(root: Path, bundle_id: str) -> Path:
     return bundle_root(root, bundle_id) / "index.yaml"
 
 
+def generation_bundle_id(args) -> str:
+    return args.bundle_id or (
+        f"idea-bundle-{slugify(args.title, max_words=6) or 'ideas'}-"
+        f"{hashlib.sha1(args.title.encode('utf-8')).hexdigest()[:6]}"
+    )
+
+
+def _idea_phase_contract(operation: str) -> dict[str, object]:
+    if operation == "generate":
+        fillable = [
+            "candidates[].title",
+            "candidates[].strategy",
+            "candidates[].problem",
+            "candidates[].hypothesis",
+            "candidates[].next_actions",
+        ]
+        verify = "validate-all-slots-then-atomically-materialize-records-and-bundle"
+    elif operation == "discuss":
+        fillable = ["reviewer", "conclusion", "claims[].text", "claims[].evidence_refs"]
+        verify = "validate-evidence-and-persist-one-agent-authored-conclusion"
+    else:
+        fillable = ["reviewer", "selection_rank", "claims[].text", "claims[].evidence_refs"]
+        verify = "validate-evidence-and-persist-agent-authored-judgements"
+    return {
+        "prepare": "owner-writes-empty-scaffold-and-immutable-orientation",
+        "author": "runtime-agent",
+        "verify": verify,
+        "fillable_fields": fillable,
+    }
+
+
+def generation_request_context(args, *, bundle_id: str) -> dict[str, object]:
+    return {
+        "title": str(args.title),
+        "problem": str(args.problem),
+        "hypothesis": str(args.hypothesis),
+        "source": str(args.source),
+        "count": int(args.count),
+        "pool": str(args.pool),
+        "bundle_id": bundle_id,
+    }
+
+
+def idea_preference_orientation(
+    operation: str,
+    *,
+    canonical_id: str,
+    request_context: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    if operation not in PREFERENCE_OPERATIONS:
+        raise ValueError("unsupported idea preference operation")
+    payload: dict[str, object] = {
+        "schema": "idea-preference-orientation/v1",
+        "canonical_id": canonical_id,
+        "canonical_kind": "idea-generation-bundle" if operation == "generate" else "idea",
+        "skill": PREFERENCE_SKILL,
+        "operation": operation,
+        "phase_contract": _idea_phase_contract(operation),
+        "evidence_corpus": "frozen-pre-authoring-canonical-unit-artifacts",
+    }
+    if operation == "generate":
+        if request_context is None:
+            raise ValueError("idea generation orientation requires exact request context")
+        payload.update(
+            {
+                "request_context_digest": canonical_digest(dict(request_context)),
+                "candidate_count": int(request_context["count"]),
+                "slot_ids": [
+                    f"candidate-{index:02d}"
+                    for index in range(1, int(request_context["count"]) + 1)
+                ],
+            }
+        )
+    return payload
+
+
+def _evidence_corpus_snapshot(
+    root: Path,
+    *,
+    excluded_paths: set[Path] | None = None,
+) -> dict[str, object]:
+    """Freeze value-free identity/byte bindings for pre-authoring KB artifacts."""
+    excluded = {path.absolute() for path in excluded_paths or set()}
+    units = kb_root(root) / "units"
+    entries: list[dict[str, str]] = []
+    if units.exists():
+        if units.is_symlink() or not units.is_dir():
+            raise ValueError("canonical unit corpus is unsafe")
+        for path in sorted(units.rglob("*"), key=lambda item: item.as_posix()):
+            metadata = path.lstat()
+            if stat.S_ISLNK(metadata.st_mode):
+                raise ValueError("canonical unit corpus contains a symlink")
+            if stat.S_ISDIR(metadata.st_mode):
+                continue
+            if not stat.S_ISREG(metadata.st_mode):
+                raise ValueError("canonical unit corpus contains a non-regular artifact")
+            if path.absolute() in excluded:
+                continue
+            binding = regular_file_binding(
+                path,
+                logical_identity=path.relative_to(root).as_posix(),
+                trusted_root=root,
+            )
+            entries.append(
+                {
+                    "path": path.relative_to(root).as_posix(),
+                    "identity_digest": binding["identity_digest"],
+                    "bytes_digest": binding["bytes_digest"],
+                }
+            )
+    return {
+        "schema": "idea-evidence-corpus/v1",
+        "entries": entries,
+        "identity_digest": canonical_digest(
+            [{"path": item["path"], "identity_digest": item["identity_digest"]} for item in entries]
+        ),
+        "bytes_digest": canonical_digest(
+            [{"path": item["path"], "bytes_digest": item["bytes_digest"]} for item in entries]
+        ),
+    }
+
+
+def _corpus_exclusions(unit_root: Path, operation: str) -> set[Path]:
+    if operation == "discuss":
+        return {
+            unit_root / "discussion-fill.yaml",
+            unit_root / "discuss-orientation.yaml",
+            unit_root / "discuss-evidence-corpus.yaml",
+        }
+    return {
+        unit_root / f"{operation}-fill.yaml",
+        unit_root / f"{operation}-orientation.yaml",
+        unit_root / f"{operation}-evidence-corpus.yaml",
+    }
+
+
+def _load_current_corpus(
+    root: Path,
+    corpus_path: Path,
+    *,
+    excluded_paths: set[Path],
+) -> dict[str, object]:
+    frozen = load_yaml(corpus_path, default={})
+    current = _evidence_corpus_snapshot(root, excluded_paths=excluded_paths)
+    if frozen != current:
+        raise ValueError("frozen pre-authoring evidence corpus is stale or modified")
+    return current
+
+
+def idea_preference_context(
+    root: Path,
+    *,
+    operation: str,
+    canonical_id: str,
+    orientation_path: Path,
+    corpus_path: Path,
+    excluded_paths: set[Path],
+    record_path_value: Path | None = None,
+    request_context: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    expected_orientation = idea_preference_orientation(
+        operation,
+        canonical_id=canonical_id,
+        request_context=request_context,
+    )
+    orientation = load_yaml(orientation_path, default={})
+    if orientation != expected_orientation:
+        raise ValueError("immutable idea authoring orientation was modified")
+    orientation_binding = regular_file_binding(
+        orientation_path,
+        logical_identity=orientation_path.name,
+        trusted_root=root,
+    )
+    corpus = _load_current_corpus(
+        root,
+        corpus_path,
+        excluded_paths=excluded_paths,
+    )
+    common = {
+        "canonical_id": canonical_id,
+        "canonical_kind": "idea-generation-bundle" if operation == "generate" else "idea",
+        "operation": operation,
+        "phase_contract_digest": canonical_digest(expected_orientation["phase_contract"]),
+        "immutable_orientation_identity_digest": orientation_binding["identity_digest"],
+        "immutable_orientation_bytes_digest": orientation_binding["bytes_digest"],
+        "evidence_corpus_identity_digest": str(corpus["identity_digest"]),
+        "evidence_corpus_bytes_digest": str(corpus["bytes_digest"]),
+    }
+    if operation == "generate":
+        if request_context is None:
+            raise ValueError("idea generation preference context requires exact request context")
+        return {
+            **common,
+            "request_context_digest": canonical_digest(dict(request_context)),
+            "candidate_count": int(request_context["count"]),
+            "bundle_id_digest": canonical_digest(request_context["bundle_id"]),
+            "pool_digest": canonical_digest(request_context["pool"]),
+            "source_digest": canonical_digest(request_context["source"]),
+        }
+    if record_path_value is None:
+        raise ValueError("semantic idea preference context requires the canonical record")
+    record_binding = regular_file_binding(
+        record_path_value,
+        logical_identity="record.yaml",
+        trusted_root=root,
+    )
+    return {
+        **common,
+        "record_identity_digest": record_binding["identity_digest"],
+        "record_bytes_digest": record_binding["bytes_digest"],
+    }
+
+
+def _preference_consumer_view(operation: str, context: Mapping[str, object]) -> dict[str, object]:
+    return {
+        "skill": PREFERENCE_SKILL,
+        "operation": operation,
+        "task_context": dict(context),
+        "task_context_digest": task_context_digest(
+            skill=PREFERENCE_SKILL,
+            operation=operation,
+            canonical_inputs=context,
+        ),
+    }
+
+
+def _validate_preference_consumer_view(
+    fill: Mapping[str, object],
+    *,
+    operation: str,
+    context: Mapping[str, object],
+) -> None:
+    if fill.get("preference_consumer") != _preference_consumer_view(operation, context):
+        raise ValueError("idea preference consumer binding is stale or modified")
+
+
+def resolve_idea_preferences(
+    root: Path,
+    *,
+    operation: str,
+    context: Mapping[str, object],
+    selection_id: str,
+) -> dict[str, object]:
+    return resolve_operation_preferences(
+        root,
+        selection_id=selection_id,
+        skill=PREFERENCE_SKILL,
+        operation=operation,
+        canonical_inputs=context,
+    )
+
+
+def generation_scaffold(
+    request_context: Mapping[str, object],
+    preference_context: Mapping[str, object],
+) -> dict[str, object]:
+    count = int(request_context["count"])
+    return {
+        "schema": "idea-generation-fill/v1",
+        "bundle_id": str(request_context["bundle_id"]),
+        "request_context": dict(request_context),
+        "preference_consumer": _preference_consumer_view("generate", preference_context),
+        "agent_instructions": {
+            "task": "Author genuinely distinct research candidates from the supplied context and selected task preferences.",
+            "semantic_boundary": "The script supplies empty slots only; every title, strategy, problem, hypothesis, and next action is authored by the runtime Agent.",
+            "selection_boundary": "Do not choose a winner; candidate selection remains a separate user-governed step.",
+        },
+        "candidates": [
+            {
+                "slot_id": f"candidate-{index:02d}",
+                "title": "",
+                "strategy": "",
+                "problem": "",
+                "hypothesis": "",
+                "next_actions": [],
+            }
+            for index in range(1, count + 1)
+        ],
+    }
+
+
+def _bounded_agent_text(value: object, *, field: str, limit: int = 4000) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be text")
+    text = value.strip()
+    if not text:
+        raise ValueError(f"{field} must be filled by the runtime Agent")
+    if len(text) > limit:
+        raise ValueError(f"{field} is too long")
+    return text
+
+
+def _generation_fill_path(root: Path, args, *, bundle_id: str) -> Path:
+    candidate = Path(args.input) if str(args.input or "") else bundle_root(root, bundle_id) / GENERATION_FILL_NAME
+    if not candidate.is_absolute():
+        candidate = bundle_root(root, bundle_id) / candidate
+    try:
+        candidate.absolute().relative_to(root.absolute())
+    except ValueError as exc:
+        raise ValueError("idea generation fill must remain inside the workspace") from exc
+    return candidate
+
+
+def generation_materialization_plan(root: Path, args, *, bundle_id: str) -> dict[str, object]:
+    request_context = generation_request_context(args, bundle_id=bundle_id)
+    if int(request_context["count"]) < 1 or int(request_context["count"]) > MAX_GENERATED_CANDIDATES:
+        raise ValueError(f"idea generation count must be between 1 and {MAX_GENERATED_CANDIDATES}")
+    working_root = bundle_root(root, bundle_id)
+    orientation_path = working_root / GENERATION_ORIENTATION_NAME
+    corpus_path = working_root / GENERATION_CORPUS_NAME
+    context = idea_preference_context(
+        root,
+        operation="generate",
+        canonical_id=bundle_id,
+        orientation_path=orientation_path,
+        corpus_path=corpus_path,
+        excluded_paths=set(),
+        request_context=request_context,
+    )
+    fill_path = _generation_fill_path(root, args, bundle_id=bundle_id)
+    fill_binding = regular_file_binding(
+        fill_path,
+        logical_identity=f"{bundle_id}/{GENERATION_FILL_NAME}",
+        trusted_root=root,
+    )
+    fill = load_yaml(fill_path, default={})
+    if not isinstance(fill, dict):
+        raise ValueError("idea generation fill must be a mapping")
+    expected_keys = {
+        "schema",
+        "bundle_id",
+        "request_context",
+        "preference_consumer",
+        "agent_instructions",
+        "candidates",
+    }
+    if set(fill) != expected_keys or fill.get("schema") != "idea-generation-fill/v1":
+        raise ValueError("idea generation fill shape is invalid")
+    if fill.get("bundle_id") != bundle_id or fill.get("request_context") != request_context:
+        raise ValueError("idea generation request context was modified")
+    _validate_preference_consumer_view(fill, operation="generate", context=context)
+    raw_candidates = fill.get("candidates")
+    if not isinstance(raw_candidates, list) or len(raw_candidates) != int(request_context["count"]):
+        raise ValueError("idea generation fill must contain every requested candidate slot")
+    candidates: list[dict[str, object]] = []
+    semantic_digests: set[str] = set()
+    idea_ids: set[str] = set()
+    exact_fields = {"slot_id", "title", "strategy", "problem", "hypothesis", "next_actions"}
+    for index, raw in enumerate(raw_candidates, start=1):
+        if not isinstance(raw, dict) or set(raw) != exact_fields:
+            raise ValueError("idea generation candidate shape is invalid")
+        slot_id = f"candidate-{index:02d}"
+        if raw.get("slot_id") != slot_id:
+            raise ValueError("idea generation candidate slots are missing or reordered")
+        title = _bounded_agent_text(raw.get("title"), field=f"{slot_id}.title", limit=500)
+        strategy = _bounded_agent_text(raw.get("strategy"), field=f"{slot_id}.strategy", limit=1000)
+        problem = _bounded_agent_text(raw.get("problem"), field=f"{slot_id}.problem")
+        hypothesis = _bounded_agent_text(raw.get("hypothesis"), field=f"{slot_id}.hypothesis")
+        raw_actions = raw.get("next_actions")
+        if not isinstance(raw_actions, list) or not raw_actions or len(raw_actions) > 20:
+            raise ValueError(f"{slot_id}.next_actions must be a nonempty bounded list")
+        next_actions = [
+            _bounded_agent_text(item, field=f"{slot_id}.next_actions", limit=1000)
+            for item in raw_actions
+        ]
+        semantic = {
+            "title": title,
+            "strategy": strategy,
+            "problem": problem,
+            "hypothesis": hypothesis,
+            "next_actions": next_actions,
+        }
+        semantic_digest = canonical_digest(semantic)
+        if semantic_digest in semantic_digests:
+            raise ValueError("idea generation candidates must be genuinely distinct")
+        semantic_digests.add(semantic_digest)
+        idea_id = build_unit_id("idea", title, str(request_context["source"]))
+        if idea_id in idea_ids:
+            raise ValueError("idea generation candidate identities must be unique")
+        idea_ids.add(idea_id)
+        candidates.append({"slot_id": slot_id, "idea_id": idea_id, **semantic})
+    return {
+        "bundle_id": bundle_id,
+        "request_context": request_context,
+        "preference_context": context,
+        "fill_path": fill_path,
+        "fill_binding": fill_binding,
+        "candidates": candidates,
+    }
+
+
 def ensure_bundle(root: Path, bundle_id: str, *, title: str, source: str, pool: str, strategy: str = "generated") -> dict:
     ensure_dir(bundle_root(root, bundle_id))
     existing = load_yaml(bundle_index_path(root, bundle_id), default={})
@@ -392,23 +813,6 @@ def update_bundle(root: Path, bundle_id: str, *, idea_ids: list[str] | None = No
         payload["selected_id"] = selected_id
     write_yaml_if_changed(bundle_index_path(root, bundle_id), payload)
     return bundle_index_path(root, bundle_id)
-
-
-def generated_variants(title: str, problem: str, hypothesis: str, count: int) -> list[dict]:
-    variants = []
-    for index in range(count):
-        strategy_id, strategy_text = STRATEGIES[index % len(STRATEGIES)]
-        variant_title = f"{title} / {strategy_id}"
-        variants.append(
-            {
-                "title": variant_title,
-                "strategy": strategy_id,
-                "problem": problem or f"{title} 的研究问题，优先考虑：{strategy_text}",
-                "hypothesis": hypothesis or f"假设通过 `{strategy_id}` 的切口，可以更快验证 `{title}` 是否值得继续推进。",
-                "next_actions": ["补一条最小验证路径", "补一组 paper / repo 对照", f"围绕 `{strategy_id}` 定义 kill test"],
-            }
-        )
-    return variants
 
 
 def resolve_idea_records(root: Path, *, idea_ids: list[str], pool: str, bundle_id: str) -> tuple[list[dict], str]:
@@ -513,8 +917,12 @@ def mark_idea_selected(
     return record
 
 
-def discussion_scaffold(record: dict) -> dict:
-    return {
+def discussion_scaffold(
+    record: dict,
+    *,
+    preference_context: Mapping[str, object] | None = None,
+) -> dict:
+    payload = {
         "idea_id": record["id"],
         "mode": "sparring",
         "idea_context": {
@@ -543,9 +951,19 @@ def discussion_scaffold(record: dict) -> dict:
             for role, claim_type in DISCUSSION_CLAIMS
         ],
     }
+    if preference_context is not None:
+        payload["preference_consumer"] = _preference_consumer_view(
+            "discuss", preference_context
+        )
+    return payload
 
 
-def analysis_scaffold(record: dict, *, mode: str) -> dict:
+def analysis_scaffold(
+    record: dict,
+    *,
+    mode: str,
+    preference_context: Mapping[str, object] | None = None,
+) -> dict:
     payload = {
         "idea_id": record["id"],
         "mode": mode,
@@ -579,6 +997,8 @@ def analysis_scaffold(record: dict, *, mode: str) -> dict:
     }
     if mode != "review":
         payload.pop("selection_rank")
+    if preference_context is not None:
+        payload["preference_consumer"] = _preference_consumer_view(mode, preference_context)
     return payload
 
 
@@ -625,6 +1045,47 @@ def _trusted_claim_source_roots(root: Path, claims: list[dict]) -> dict[str, Pat
                 _source_record, source_path = locate_record(root, source_unit_id, fuzzy=False)
                 source_roots[source_unit_id] = source_path.parent
     return source_roots
+
+
+def _claims_corpus_violations(root: Path, claims: list[dict], corpus: Mapping[str, object]) -> list[str]:
+    frozen_paths = {
+        str(item.get("path") or "")
+        for item in corpus.get("entries", [])
+        if isinstance(item, Mapping)
+    }
+    violations: list[str] = []
+    for claim_index, claim in enumerate(claims):
+        for ref_index, evidence_ref in enumerate(claim.get("evidence_refs") or []):
+            if not isinstance(evidence_ref, dict):
+                continue
+            source_unit_id = str(evidence_ref.get("source_unit_id") or "").strip()
+            artifact = str(evidence_ref.get("artifact") or "").strip()
+            if not source_unit_id or not artifact:
+                continue
+            try:
+                _source_record, source_path = locate_record(root, source_unit_id, fuzzy=False)
+                relative = (source_path.parent / artifact).absolute().relative_to(root.absolute()).as_posix()
+            except (SystemExit, ValueError):
+                continue
+            if relative not in frozen_paths:
+                violations.append(
+                    f"claims[{claim_index}].evidence_refs[{ref_index}]: "
+                    "artifact was not present in the frozen pre-authoring evidence corpus"
+                )
+    return violations
+
+
+def _persist_idea_preference_binding(
+    record: dict,
+    *,
+    operation: str,
+    binding: Mapping[str, object],
+) -> None:
+    if not binding:
+        return
+    record.setdefault("payload", {}).setdefault("preference_selections", {})[operation] = dict(
+        binding
+    )
 
 
 def verify_discussion_fill(root: Path, fill: object, idea_id: str) -> tuple[list[str], list[dict]]:
@@ -712,9 +1173,11 @@ def persist_analysis(record: dict, fill: dict, claims: list[dict], *, mode: str)
 
 def run_analysis_phase(args, root: Path, record: dict, unit_root: Path, *, mode: str) -> int:
     fill_path = unit_root / f"{mode}-fill.yaml"
+    orientation_path = unit_root / f"{mode}-orientation.yaml"
+    corpus_path = unit_root / f"{mode}-evidence-corpus.yaml"
+    exclusions = _corpus_exclusions(unit_root, mode)
     result_path = unit_root / f"{mode}.yaml"
     if args.phase == "prepare":
-        write_yaml_if_changed(fill_path, analysis_scaffold(record, mode=mode))
         record["confirmation_status"] = "pending_user_confirmation"
         record["needs_human_confirmation"] = True
         if mode == "analyze":
@@ -729,27 +1192,114 @@ def run_analysis_phase(args, root: Path, record: dict, unit_root: Path, *, mode:
             artifacts=[rel(root, fill_path)],
         )
         write_record(root, record)
+        write_yaml_if_changed(
+            orientation_path,
+            idea_preference_orientation(mode, canonical_id=str(record["id"])),
+        )
+        write_yaml_if_changed(
+            corpus_path,
+            _evidence_corpus_snapshot(root, excluded_paths=exclusions),
+        )
+        preference_context = idea_preference_context(
+            root,
+            operation=mode,
+            canonical_id=str(record["id"]),
+            orientation_path=orientation_path,
+            corpus_path=corpus_path,
+            excluded_paths=exclusions,
+            record_path_value=unit_root / "record.yaml",
+        )
+        write_yaml_if_changed(
+            fill_path,
+            analysis_scaffold(
+                record,
+                mode=mode,
+                preference_context=preference_context,
+            ),
+        )
         print(f"[ok] prepared evidence-first {mode} scaffold")
         _queue_checkpoint(
             root, trigger="milestone", message=f"milestone: prepare idea {mode} {record['id']}",
-            target_paths=[unit_root / "record.yaml", fill_path],
+            target_paths=[unit_root / "record.yaml", fill_path, orientation_path, corpus_path],
         )
         return 0
 
+    try:
+        preference_context = idea_preference_context(
+            root,
+            operation=mode,
+            canonical_id=str(record["id"]),
+            orientation_path=orientation_path,
+            corpus_path=corpus_path,
+            excluded_paths=exclusions,
+            record_path_value=unit_root / "record.yaml",
+        )
+        preference_resolution = resolve_idea_preferences(
+            root,
+            operation=mode,
+            context=preference_context,
+            selection_id=str(getattr(args, "preference_selection_id", "") or ""),
+        )
+    except ValueError as exc:
+        print(f"[reject] {mode} preference receipt: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
     candidate_path = Path(args.input) if args.input else fill_path
     if not candidate_path.is_absolute():
         candidate_path = unit_root / candidate_path
     if not candidate_path.exists():
         raise SystemExit(f"{mode} verify input not found")
     fill = load_yaml(candidate_path, default={})
+    try:
+        if not isinstance(fill, Mapping):
+            raise ValueError(f"{mode} fill must be a mapping")
+        _validate_preference_consumer_view(fill, operation=mode, context=preference_context)
+    except ValueError as exc:
+        print(f"[reject] {mode} preference binding: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
     violations, claims = verify_analysis_fill(root, fill, record["id"], mode=mode)
+    corpus = load_yaml(corpus_path, default={})
+    if isinstance(corpus, Mapping):
+        violations.extend(_claims_corpus_violations(root, claims, corpus))
     if violations:
         print(f"[reject] {mode} failed evidence verification:", file=sys.stderr)
         for violation in violations:
             print(f"  - {violation}", file=sys.stderr)
         raise SystemExit(1)
 
+    try:
+        rechecked_context = idea_preference_context(
+            root,
+            operation=mode,
+            canonical_id=str(record["id"]),
+            orientation_path=orientation_path,
+            corpus_path=corpus_path,
+            excluded_paths=exclusions,
+            record_path_value=unit_root / "record.yaml",
+        )
+        rechecked_resolution = resolve_idea_preferences(
+            root,
+            operation=mode,
+            context=rechecked_context,
+            selection_id=str(getattr(args, "preference_selection_id", "") or ""),
+        )
+        if (
+            rechecked_context != preference_context
+            or rechecked_resolution.get("task_context_digest")
+            != preference_resolution.get("task_context_digest")
+            or rechecked_resolution.get("binding") != preference_resolution.get("binding")
+        ):
+            raise ValueError("idea authoring inputs changed before write")
+    except ValueError as exc:
+        print(f"[reject] {mode} write-boundary preference check: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
+
     persist_analysis(record, fill, claims, mode=mode)
+    preference_binding = dict(preference_resolution.get("binding") or {})
+    _persist_idea_preference_binding(
+        record,
+        operation=mode,
+        binding=preference_binding,
+    )
     attach_claims(record.setdefault("payload", {}), claims)
     build_verification_receipt(
         record,
@@ -773,6 +1323,8 @@ def run_analysis_phase(args, root: Path, record: dict, unit_root: Path, *, mode:
         "claims": claims,
         "descriptive_counts": descriptive_counts(record),
     }
+    if preference_binding:
+        payload["preference_selection"] = preference_binding
     if mode == "review" and fill.get("selection_rank") not in (None, ""):
         payload["selection_rank"] = int(fill["selection_rank"])
     write_yaml_if_changed(result_path, payload)
@@ -793,7 +1345,7 @@ def run_analysis_phase(args, root: Path, record: dict, unit_root: Path, *, mode:
     print(f"[ok] verified evidence and persisted {mode} judgements")
     _queue_checkpoint(
         root, trigger="milestone", message=f"milestone: verify idea {mode} {record['id']}",
-        target_paths=[unit_root / "record.yaml", result_path, *([unit_root / "idea-card.md"] if mode == "review" else []), *_index_checkpoint_paths(root)],
+        target_paths=[unit_root / "record.yaml", result_path, orientation_path, corpus_path, *([unit_root / "idea-card.md"] if mode == "review" else []), *_index_checkpoint_paths(root)],
     )
     return 0
 
@@ -829,6 +1381,8 @@ def persist_discussion_conclusion(
     record: dict,
     fill: dict,
     claims: list[dict],
+    *,
+    preference_binding: Mapping[str, object] | None = None,
 ) -> tuple[dict, dict]:
     verified_at = utc_now_iso()
     digest_source = f"{record['id']}\n{fill['reviewer']}\n{fill['conclusion']}\n{verified_at}"
@@ -865,6 +1419,8 @@ def persist_discussion_conclusion(
             "conclusion_id": conclusion["id"],
         },
     }
+    if preference_binding:
+        judgement["preference_selection"] = dict(preference_binding)
     attach_claims(judgement["payload"], claims)
     build_verification_receipt(
         judgement,
@@ -877,6 +1433,13 @@ def persist_discussion_conclusion(
     write_discussion_judgements(unit_root, record["id"], items)
     conclusion["judgement_id"] = judgement["id"]
     conclusion["confirmation_status"] = "pending_user_confirmation"
+    if preference_binding:
+        conclusion["preference_selection"] = dict(preference_binding)
+        _persist_idea_preference_binding(
+            record,
+            operation="discuss",
+            binding=preference_binding,
+        )
     discussion = record.setdefault("payload", {}).setdefault("discussion", {})
     discussion.setdefault("conclusions", []).append(conclusion)
     return conclusion, judgement
@@ -902,6 +1465,9 @@ def build_parser() -> argparse.ArgumentParser:
     generate.add_argument("--count", type=int, default=4)
     generate.add_argument("--pool", default="")
     generate.add_argument("--bundle-id", default="")
+    generate.add_argument("--phase", choices=["prepare", "verify"], default="prepare")
+    generate.add_argument("--input", default="")
+    generate.add_argument("--preference-selection-id", default="")
 
     for name in ("analyze", "review", "select", "archive"):
         cmd = subparsers.add_parser(name)
@@ -909,6 +1475,7 @@ def build_parser() -> argparse.ArgumentParser:
         if name in {"analyze", "review"}:
             cmd.add_argument("--phase", choices=["prepare", "verify"], default="prepare")
             cmd.add_argument("--input", default="")
+            cmd.add_argument("--preference-selection-id", default="")
         if name == "select":
             add_confirmation_arguments(cmd)
 
@@ -923,6 +1490,7 @@ def build_parser() -> argparse.ArgumentParser:
     discuss.add_argument("--authorization-source", default="")
     discuss.add_argument("--reason", default="")
     discuss.add_argument("--expected-snapshot", default="")
+    discuss.add_argument("--preference-selection-id", default="")
 
     assist = subparsers.add_parser("review-assist")
     assist.add_argument("--idea-id", action="append", default=[])
@@ -965,23 +1533,100 @@ def _dispatch(args, root: Path) -> int:
         return 0
 
     if args.command == "generate":
-        bundle_id = args.bundle_id or f"idea-bundle-{slugify(args.title, max_words=6) or 'ideas'}-{hashlib.sha1(args.title.encode('utf-8')).hexdigest()[:6]}"
-        ensure_bundle(root, bundle_id, title=args.title, source=args.source, pool=args.pool, strategy="generated")
-        created: list[str] = []
-        for variant in generated_variants(args.title, args.problem, args.hypothesis, max(1, args.count)):
-            record = default_record("idea", title=variant["title"], maturity="lightweight", source={"original_uri": args.source})
+        bundle_id = generation_bundle_id(args)
+        if args.count < 1 or args.count > MAX_GENERATED_CANDIDATES:
+            raise SystemExit(
+                f"Idea generation count must be between 1 and {MAX_GENERATED_CANDIDATES}."
+            )
+        working_root = bundle_root(root, bundle_id)
+        orientation_path = working_root / GENERATION_ORIENTATION_NAME
+        corpus_path = working_root / GENERATION_CORPUS_NAME
+        fill_path = working_root / GENERATION_FILL_NAME
+        request_context = generation_request_context(args, bundle_id=bundle_id)
+        if args.phase == "prepare":
+            if bundle_index_path(root, bundle_id).exists() or bundle_index_path(root, bundle_id).is_symlink():
+                raise SystemExit("This idea generation bundle has already been materialized.")
+            write_yaml_if_changed(
+                orientation_path,
+                idea_preference_orientation(
+                    "generate",
+                    canonical_id=bundle_id,
+                    request_context=request_context,
+                ),
+            )
+            write_yaml_if_changed(corpus_path, _evidence_corpus_snapshot(root))
+            preference_context = idea_preference_context(
+                root,
+                operation="generate",
+                canonical_id=bundle_id,
+                orientation_path=orientation_path,
+                corpus_path=corpus_path,
+                excluded_paths=set(),
+                request_context=request_context,
+            )
+            write_yaml_if_changed(
+                fill_path,
+                generation_scaffold(request_context, preference_context),
+            )
+            print("已准备空白候选槽位；runtime agent 填写后可继续校验并一次性生成 idea。")
+            _queue_checkpoint(
+                root,
+                trigger="milestone",
+                message=f"milestone: prepare idea generation {bundle_id}",
+                target_paths=[orientation_path, corpus_path, fill_path],
+            )
+            return 0
+
+        try:
+            planned = getattr(args, "_generation_plan", None)
+            current_plan = generation_materialization_plan(root, args, bundle_id=bundle_id)
+            if not isinstance(planned, dict) or (
+                planned.get("fill_binding") != current_plan.get("fill_binding")
+                or planned.get("candidates") != current_plan.get("candidates")
+                or planned.get("preference_context") != current_plan.get("preference_context")
+            ):
+                raise ValueError("idea generation fill changed after transaction target discovery")
+            preference_resolution = resolve_idea_preferences(
+                root,
+                operation="generate",
+                context=current_plan["preference_context"],
+                selection_id=str(args.preference_selection_id or ""),
+            )
+        except ValueError as exc:
+            print(f"[reject] idea generation: {exc}", file=sys.stderr)
+            raise SystemExit(1) from exc
+
+        candidate_records: list[tuple[dict, Path]] = []
+        for candidate in current_plan["candidates"]:
+            path = record_path(root, "idea", str(candidate["idea_id"]))
+            if path.exists() or path.is_symlink():
+                raise SystemExit("Idea generation would overwrite an existing candidate record.")
+            record = default_record(
+                "idea",
+                title=str(candidate["title"]),
+                maturity="lightweight",
+                source={"original_uri": args.source},
+            )
             record["status"] = "draft"
             record["confirmation_status"] = "pending_user_confirmation"
             record["needs_human_confirmation"] = True
             record["information_types"] = ["user_opinion", "inference", "unverified"]
             record["payload"]["origin"]["source"] = args.source
             record["payload"]["candidate"]["bundle_id"] = bundle_id
-            record["payload"]["candidate"]["strategy"] = variant["strategy"]
+            record["payload"]["candidate"]["slot_id"] = candidate["slot_id"]
+            record["payload"]["candidate"]["strategy"] = candidate["strategy"]
             record["payload"]["candidate"]["pool"] = args.pool
-            record["payload"]["problem"]["problem_definition"] = variant["problem"]
-            record["payload"]["hypothesis"]["core_hypothesis"] = variant["hypothesis"]
-            record["payload"]["analysis"]["next_actions"] = variant["next_actions"]
-            record["summary"] = variant["problem"]
+            record["payload"]["candidate"]["generation_context"] = dict(request_context)
+            record["payload"]["problem"]["problem_definition"] = candidate["problem"]
+            record["payload"]["hypothesis"]["core_hypothesis"] = candidate["hypothesis"]
+            record["payload"]["analysis"]["next_actions"] = list(candidate["next_actions"])
+            record["summary"] = candidate["problem"]
+            preference_binding = dict(preference_resolution.get("binding") or {})
+            _persist_idea_preference_binding(
+                record,
+                operation="generate",
+                binding=preference_binding,
+            )
             record = apply_record_governance(
                 root,
                 record,
@@ -989,12 +1634,53 @@ def _dispatch(args, root: Path) -> int:
                 infer_missing=True,
                 source_label="idea-workbench",
             )
-            path = write_record(root, record)
+            if str(record.get("id") or "") != str(candidate["idea_id"]):
+                raise SystemExit("Idea generation candidate identity changed during normalization.")
+            candidate_records.append((record, path))
+
+        preference_binding = dict(preference_resolution.get("binding") or {})
+        bundle_payload = {
+            **yaml_default(bundle_id, "idea-workbench", status="active", confidence=0.7),
+            "title": args.title,
+            "source": args.source,
+            "pool": args.pool,
+            "strategy": "runtime-agent-authored",
+            "generation_context": dict(request_context),
+            "idea_ids": [str(record["id"]) for record, _path in candidate_records],
+            "selected_id": "",
+        }
+        if preference_binding:
+            bundle_payload["preference_selection"] = preference_binding
+
+        try:
+            final_plan = generation_materialization_plan(root, args, bundle_id=bundle_id)
+            final_resolution = resolve_idea_preferences(
+                root,
+                operation="generate",
+                context=final_plan["preference_context"],
+                selection_id=str(args.preference_selection_id or ""),
+            )
+            if (
+                final_plan.get("fill_binding") != current_plan.get("fill_binding")
+                or final_plan.get("candidates") != current_plan.get("candidates")
+                or final_plan.get("preference_context") != current_plan.get("preference_context")
+                or final_resolution.get("task_context_digest")
+                != preference_resolution.get("task_context_digest")
+                or final_resolution.get("binding") != preference_resolution.get("binding")
+            ):
+                raise ValueError("idea generation inputs changed before write")
+        except ValueError as exc:
+            print(f"[reject] idea generation write-boundary check: {exc}", file=sys.stderr)
+            raise SystemExit(1) from exc
+
+        created: list[str] = []
+        for record, path in candidate_records:
+            write_record(root, record)
             created.append(str(record["id"]))
-            print_created_idea(root, record, path)
-        index_path = update_bundle(root, bundle_id, idea_ids=created)
+        index_path = bundle_index_path(root, bundle_id)
+        write_yaml_if_changed(index_path, bundle_payload)
         build_index(root)
-        print(f"[ok] wrote {index_path.relative_to(root)}")
+        print(f"已校验并一次性生成 {len(created)} 个 Agent 撰写的 idea 候选。")
         checkpoint = _queue_checkpoint(
             root, trigger="milestone", message=f"milestone: generate idea bundle {bundle_id}",
             target_paths=[index_path, *[record_path(root, "idea", idea_id) for idea_id in created], *_index_checkpoint_paths(root)],
@@ -1077,8 +1763,10 @@ def _dispatch(args, root: Path) -> int:
 
     if args.command in {"discuss", "spar"}:
         scaffold_path = unit_root / "discussion-fill.yaml"
+        orientation_path = unit_root / "discuss-orientation.yaml"
+        corpus_path = unit_root / "discuss-evidence-corpus.yaml"
+        exclusions = _corpus_exclusions(unit_root, "discuss")
         if args.phase == "prepare":
-            write_yaml_if_changed(scaffold_path, discussion_scaffold(record))
             append_history(
                 record,
                 action="idea-discussion-scaffolded",
@@ -1087,10 +1775,31 @@ def _dispatch(args, root: Path) -> int:
                 artifacts=[rel(root, scaffold_path)],
             )
             write_record(root, record)
+            write_yaml_if_changed(
+                orientation_path,
+                idea_preference_orientation("discuss", canonical_id=str(record["id"])),
+            )
+            write_yaml_if_changed(
+                corpus_path,
+                _evidence_corpus_snapshot(root, excluded_paths=exclusions),
+            )
+            preference_context = idea_preference_context(
+                root,
+                operation="discuss",
+                canonical_id=str(record["id"]),
+                orientation_path=orientation_path,
+                corpus_path=corpus_path,
+                excluded_paths=exclusions,
+                record_path_value=unit_root / "record.yaml",
+            )
+            write_yaml_if_changed(
+                scaffold_path,
+                discussion_scaffold(record, preference_context=preference_context),
+            )
             print("[ok] prepared an empty evidence-first sparring conclusion")
             _queue_checkpoint(
                 root, trigger="milestone", message=f"milestone: prepare idea discussion {record['id']}",
-                target_paths=[unit_root / "record.yaml", scaffold_path],
+                target_paths=[unit_root / "record.yaml", scaffold_path, orientation_path, corpus_path],
             )
             return 0
 
@@ -1131,19 +1840,85 @@ def _dispatch(args, root: Path) -> int:
             )
             return 0
 
+        try:
+            preference_context = idea_preference_context(
+                root,
+                operation="discuss",
+                canonical_id=str(record["id"]),
+                orientation_path=orientation_path,
+                corpus_path=corpus_path,
+                excluded_paths=exclusions,
+                record_path_value=unit_root / "record.yaml",
+            )
+            preference_resolution = resolve_idea_preferences(
+                root,
+                operation="discuss",
+                context=preference_context,
+                selection_id=str(args.preference_selection_id or ""),
+            )
+        except ValueError as exc:
+            print(f"[reject] discuss preference receipt: {exc}", file=sys.stderr)
+            raise SystemExit(1) from exc
         fill_path = Path(args.input) if args.input else scaffold_path
         if not fill_path.is_absolute():
             fill_path = unit_root / fill_path
         if not fill_path.exists():
             raise SystemExit("Discussion fill is missing; prepare or provide the agent-filled conclusion first.")
         fill = load_yaml(fill_path, default={})
+        try:
+            if not isinstance(fill, Mapping):
+                raise ValueError("discussion fill must be a mapping")
+            _validate_preference_consumer_view(
+                fill,
+                operation="discuss",
+                context=preference_context,
+            )
+        except ValueError as exc:
+            print(f"[reject] discuss preference binding: {exc}", file=sys.stderr)
+            raise SystemExit(1) from exc
         violations, claims = verify_discussion_fill(root, fill, record["id"])
+        corpus = load_yaml(corpus_path, default={})
+        if isinstance(corpus, Mapping):
+            violations.extend(_claims_corpus_violations(root, claims, corpus))
         if violations:
             print("[reject] discussion conclusion failed verification:", file=sys.stderr)
             for violation in violations:
                 print(f"  - {violation}", file=sys.stderr)
             raise SystemExit(1)
-        conclusion, _judgement = persist_discussion_conclusion(root, unit_root, record, fill, claims)
+        try:
+            rechecked_context = idea_preference_context(
+                root,
+                operation="discuss",
+                canonical_id=str(record["id"]),
+                orientation_path=orientation_path,
+                corpus_path=corpus_path,
+                excluded_paths=exclusions,
+                record_path_value=unit_root / "record.yaml",
+            )
+            rechecked_resolution = resolve_idea_preferences(
+                root,
+                operation="discuss",
+                context=rechecked_context,
+                selection_id=str(args.preference_selection_id or ""),
+            )
+            if (
+                rechecked_context != preference_context
+                or rechecked_resolution.get("task_context_digest")
+                != preference_resolution.get("task_context_digest")
+                or rechecked_resolution.get("binding") != preference_resolution.get("binding")
+            ):
+                raise ValueError("idea discussion inputs changed before write")
+        except ValueError as exc:
+            print(f"[reject] discuss write-boundary preference check: {exc}", file=sys.stderr)
+            raise SystemExit(1) from exc
+        conclusion, _judgement = persist_discussion_conclusion(
+            root,
+            unit_root,
+            record,
+            fill,
+            claims,
+            preference_binding=dict(preference_resolution.get("binding") or {}),
+        )
         append_history(
             record,
             action="idea-discussion-verified",
@@ -1156,7 +1931,7 @@ def _dispatch(args, root: Path) -> int:
         print(f"[ok] verified + persisted discussion conclusion {conclusion['id']}")
         _queue_checkpoint(
             root, trigger="milestone", message=f"milestone: verify idea discussion {record['id']}",
-            target_paths=[unit_root / "record.yaml", discussion_judgements_path(unit_root), *_index_checkpoint_paths(root)],
+            target_paths=[unit_root / "record.yaml", discussion_judgements_path(unit_root), orientation_path, corpus_path, *_index_checkpoint_paths(root)],
         )
         return 0
 
@@ -1211,7 +1986,10 @@ def main() -> int:
     root = project_root(PROJECT_ROOT, explicit_root=args.root)
     print_resolved_project_roots(root)
     ensure_workspace(root)
-    targets = _idea_command_targets(args, root)
+    try:
+        targets = _idea_command_targets(args, root)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     active_token = _ACTIVE_MUTATION.set(True)
     checkpoint_token = _PENDING_CHECKPOINT.set(None)
     try:

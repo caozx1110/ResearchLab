@@ -5,6 +5,8 @@ description: 管理 core 研究系统配置，包括资源画像、语言偏好�
 
 # Research Config Manager
 
+偏好合同：本 owner 是 canonical preference fact owner，因此不消费自己的 soft profile；eligible catalog 为空。它只为真实下游 consumer 生成 task-scoped view/receipt。
+
 > 协议参考：`.agents/lib/research/SCHEMAS.md#config-files` · `#ownership` · `#runtime`
 >
 > 治理边界：本 skill 写入 `kb/config/runtime-preferences.yaml` 与 markdown settings，并向 `knowledge-base-manager` 提交 taxonomy seed / pool policy 输入。`candidate-pools.yaml` 与 `topic-taxonomy.yaml` 的实际结构归 `knowledge-base-manager` 治理。

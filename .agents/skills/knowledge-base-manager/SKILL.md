@@ -5,6 +5,8 @@ description: 管理 knowledge base 的统一 schema、passage 索引、链接、
 
 # Knowledge Base Manager
 
+偏好合同：本 owner 对 soft preference 显式 neutral；它只执行机械 schema、索引、lifecycle 与治理约束，eligible catalog 为空。hard governance 继续由对应 owner 强制。
+
 > 协议参考：`.agents/lib/research/SCHEMAS.md#discovery-retrieval` · `#ownership` · `#confirmation-gate`
 
 当任务是在维护知识单元协议、索引、治理目录、链接或 lifecycle，而不是深读某一篇 paper / repo / dataset / blog 时，使用这个 skill。

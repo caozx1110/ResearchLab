@@ -37,16 +37,8 @@ _OPAQUE_SECRET_RE = re.compile(r"(?=[A-Za-z0-9_+/=-]{32,})(?=.*[A-Za-z])(?=.*\d)
 # This table is a disclosure allowlist, not a relevance model.  Runtime Agents
 # select the task-relevant subset and explain that choice in a receipt.
 SKILL_ELIGIBILITY: dict[str, tuple[str, ...]] = {
-    "knowledge-base-manager": (
-        "profile.preferences.language_preference",
-        "profile.personalization.term_style",
-        "learned.*",
-    ),
-    "research-config-manager": (
-        "profile.preferences.language_preference",
-        "profile.personalization.term_style",
-        "learned.*",
-    ),
+    "knowledge-base-manager": (),
+    "research-config-manager": (),
     "source-intake": (
         "profile.preferences.language_preference",
         "profile.personalization.research_focus",
@@ -105,13 +97,7 @@ SKILL_ELIGIBILITY: dict[str, tuple[str, ...]] = {
         "profile.constraints",
         "learned.*",
     ),
-    "discussion-archivist": (
-        "profile.preferences.language_preference",
-        "profile.personalization.research_focus",
-        "profile.personalization.reporting_style",
-        "profile.personalization.term_style",
-        "learned.*",
-    ),
+    "discussion-archivist": (),
     "kb-cli": (
         "profile.preferences.language_preference",
         "profile.personalization.reporting_style",
@@ -151,26 +137,22 @@ SKILL_ELIGIBILITY: dict[str, tuple[str, ...]] = {
         "runtime.autonomy.auto_execute_scope",
         "learned.*",
     ),
-    "research-navigator": (
-        "profile.preferences.language_preference",
-        "profile.personalization.reporting_style",
-        "profile.personalization.term_style",
-        "profile.personalization.collaboration_boundaries",
-        "runtime.browser",
-        "learned.*",
-    ),
-    "wiki-adapter": (
-        "profile.preferences.language_preference",
-        "profile.personalization.reporting_style",
-        "profile.personalization.term_style",
-        "learned.*",
-    ),
-    "skill-evolution-advisor": (
-        "profile.preferences.language_preference",
-        "profile.personalization.collaboration_boundaries",
-        "runtime.diagnostics",
-        "learned.*",
-    ),
+    "research-navigator": (),
+    "wiki-adapter": (),
+    "skill-evolution-advisor": (),
+}
+
+
+# Preference-neutral shipping skills are an explicit product decision, not an
+# implicit absence of implementation.  Reasons must describe the shipped owner
+# boundary and must never be used to bypass hard governance enforced elsewhere.
+SKILL_NEUTRALITY: dict[str, str] = {
+    "knowledge-base-manager": "Mechanical schema, lifecycle, indexing, and governance owner.",
+    "research-config-manager": "Canonical preference fact owner; it does not consume its own soft profile.",
+    "discussion-archivist": "Transports caller-authored discussion content without rewriting its meaning.",
+    "research-navigator": "Development-only derived projection with no canonical research judgement.",
+    "wiki-adapter": "Thin router that delegates semantic work to the selected canonical owner.",
+    "skill-evolution-advisor": "Governance and redacted diagnostics owner, not a soft research consumer.",
 }
 
 
@@ -192,6 +174,8 @@ SKILL_OPERATIONS: dict[str, tuple[str, ...]] = {
     "repo-analyst": ("map-capability",),
     "dataset-analyst": ("profile",),
     "blog-analyst": ("complete-note",),
+    "idea-workbench": ("generate", "analyze", "review", "discuss"),
+    "research-monitor": ("create-subscription",),
 }
 
 
@@ -285,6 +269,45 @@ OPERATION_ELIGIBILITY: dict[tuple[str, str], tuple[str, ...]] = {
         "profile.personalization.term_style",
         "learned.*",
     ),
+    ("idea-workbench", "generate"): (
+        "profile.preferences.language_preference",
+        "profile.personalization.research_focus",
+        "profile.personalization.term_style",
+        "profile.resources",
+        "profile.constraints",
+        "learned.*",
+    ),
+    ("idea-workbench", "analyze"): (
+        "profile.preferences.language_preference",
+        "profile.personalization.research_focus",
+        "profile.personalization.term_style",
+        "profile.resources",
+        "profile.constraints",
+        "learned.*",
+    ),
+    ("idea-workbench", "review"): (
+        "profile.preferences.language_preference",
+        "profile.personalization.research_focus",
+        "profile.personalization.term_style",
+        "profile.resources",
+        "profile.constraints",
+        "learned.*",
+    ),
+    ("idea-workbench", "discuss"): (
+        "profile.preferences.language_preference",
+        "profile.personalization.research_focus",
+        "profile.personalization.term_style",
+        "profile.resources",
+        "profile.constraints",
+        "learned.*",
+    ),
+    ("research-monitor", "create-subscription"): (
+        "profile.preferences.language_preference",
+        "profile.personalization.research_focus",
+        "profile.constraints",
+        "runtime.autonomy.auto_execute_scope",
+        "learned.*",
+    ),
 }
 
 
@@ -329,7 +352,99 @@ OPERATION_CANONICAL_INPUTS: dict[tuple[str, str], tuple[str, ...]] = {
         "source_artifacts_identity_digest",
         "source_artifacts_bytes_digest",
     ),
+    ("idea-workbench", "generate"): (
+        "canonical_id",
+        "canonical_kind",
+        "operation",
+        "request_context_digest",
+        "candidate_count",
+        "bundle_id_digest",
+        "pool_digest",
+        "source_digest",
+        "phase_contract_digest",
+        "immutable_orientation_identity_digest",
+        "immutable_orientation_bytes_digest",
+        "evidence_corpus_identity_digest",
+        "evidence_corpus_bytes_digest",
+    ),
+    ("idea-workbench", "analyze"): (
+        "canonical_id",
+        "canonical_kind",
+        "operation",
+        "record_identity_digest",
+        "record_bytes_digest",
+        "phase_contract_digest",
+        "immutable_orientation_identity_digest",
+        "immutable_orientation_bytes_digest",
+        "evidence_corpus_identity_digest",
+        "evidence_corpus_bytes_digest",
+    ),
+    ("idea-workbench", "review"): (
+        "canonical_id",
+        "canonical_kind",
+        "operation",
+        "record_identity_digest",
+        "record_bytes_digest",
+        "phase_contract_digest",
+        "immutable_orientation_identity_digest",
+        "immutable_orientation_bytes_digest",
+        "evidence_corpus_identity_digest",
+        "evidence_corpus_bytes_digest",
+    ),
+    ("idea-workbench", "discuss"): (
+        "canonical_id",
+        "canonical_kind",
+        "operation",
+        "record_identity_digest",
+        "record_bytes_digest",
+        "phase_contract_digest",
+        "immutable_orientation_identity_digest",
+        "immutable_orientation_bytes_digest",
+        "evidence_corpus_identity_digest",
+        "evidence_corpus_bytes_digest",
+    ),
+    ("research-monitor", "create-subscription"): (
+        "canonical_id",
+        "canonical_kind",
+        "operation",
+        "request_digest",
+        "subscription_id",
+        "target_digest",
+        "cadence_digest",
+        "scope_digest",
+        "budget_digest",
+        "program_ids_digest",
+        "reference_bindings_identity_digest",
+        "reference_bindings_bytes_digest",
+        "operation_contract_digest",
+    ),
 }
+
+
+def validate_preference_registry() -> None:
+    """Fail closed when a shipping entry is neither a real consumer nor neutral."""
+    known = set(SKILL_ELIGIBILITY)
+    consumers = {skill for skill, operations in SKILL_OPERATIONS.items() if operations}
+    neutral = set(SKILL_NEUTRALITY)
+    if consumers | neutral != known or consumers & neutral:
+        raise RuntimeError("preference registry must partition every known skill exactly once")
+    if set(SKILL_OPERATIONS) != consumers:
+        raise RuntimeError("preference consumers must declare at least one real operation")
+    for skill in consumers:
+        if not SKILL_ELIGIBILITY[skill]:
+            raise RuntimeError(f"preference consumer has an empty eligible catalog: {skill}")
+    for skill, reason in SKILL_NEUTRALITY.items():
+        if SKILL_ELIGIBILITY[skill]:
+            raise RuntimeError(f"preference-neutral skill has a nonempty catalog: {skill}")
+        if not str(reason).strip():
+            raise RuntimeError(f"preference-neutral skill lacks a product reason: {skill}")
+    for pair, paths in OPERATION_ELIGIBILITY.items():
+        skill, operation = pair
+        if operation not in SKILL_OPERATIONS.get(skill, ()) or not paths:
+            raise RuntimeError(f"operation preference registry contains a dead entry: {pair}")
+
+
+validate_preference_registry()
 
 
 OPERATION_POLICIES: dict[tuple[str, str], dict[str, object]] = {
@@ -1181,6 +1296,7 @@ def selection_binding(effective: Mapping[str, object]) -> dict[str, object]:
 __all__ = [
     "SELECTION_SCHEMA",
     "SKILL_ELIGIBILITY",
+    "SKILL_NEUTRALITY",
     "SKILL_OPERATIONS",
     "OPERATION_ELIGIBILITY",
     "OPERATION_CANONICAL_INPUTS",
@@ -1197,4 +1313,5 @@ __all__ = [
     "resolve_task_preferences",
     "resolve_operation_preferences",
     "selection_binding",
+    "validate_preference_registry",
 ]

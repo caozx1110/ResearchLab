@@ -5,6 +5,8 @@ description: Optional maintainer/development projection helper for generated pag
 
 # Research Navigator
 
+Preference contract: explicitly neutral with an empty eligible catalog because this is a development-only derived projection, not a canonical research consumer.
+
 > 协议参考：`.agents/lib/research/SCHEMAS.md#program-files` · `#evidence-first-outputs` · `#ownership` · `#runtime`
 
 This is an optional maintainer/development helper for rebuilding derived pages or a local browser snapshot. Normal users start from `kb init`, `kb status`, `kb next`, and `kb obsidian`; generic navigation requests must not route here automatically. Nothing generated here is canonical or a formal selling point.

@@ -561,6 +561,8 @@ selection_digest: <sha256>
 
 回执只保存 ID、digest 与有界单行理由，不复制偏好正文、任务原文、secret、URL 或绝对路径。`task_context_digest` 必填；consumer 加载时必须同时提交期望 task digest，因此不能跨 task/skill/operation 复用。它必须完整交代全部 eligible 项；任一 canonical source 变化都会令旧回执 stale。偏好不能关闭 evidence、confirmation、containment、journal、lock、CAS 或 recovery。
 
+中央 registry 把每个 shipping skill 精确分到互斥两类：真实 consumer 必须同时具有非空 eligible catalog 与至少一个会重算 task context、加载 receipt、保存 value-free binding 的 operation；neutral owner 必须 eligible 为空且有非空产品原因。`knowledge-base-manager`（机械 schema/lifecycle）、`research-config-manager`（canonical preference owner）、`discussion-archivist`（搬运 caller-authored content）、`research-navigator`（dev-only projection）、`wiki-adapter`（thin router）、`skill-evolution-advisor`（governance/diagnostics）属于 neutral。禁止第三种“有 allowlist、无消费点”的 dead entry；hard governance 仍由各 owner 直接强制。
+
 `source-intake:add` 的 task context 绑定 kind/source/title/maturity/stage/candidate 与最终 canonical pools，并以单一 digest 绑定当前 `user_authorization + authorization_source`；授权原话、source/path 不得出现在 persisted effective-preference receipt。duplicate 快路径没有消费偏好时可以保持 neutral，但不能借 duplicate 绕过 literature selection authorization gate。
 
 #### Analyzer Agent-authoring preference consumers
@@ -1157,8 +1159,10 @@ Wave3（2026-07-17）把 3.6/3.10/3.7 三个产出侧子系统从"一次性算�
 
 ### idea-workbench — 陪练 discussion + evidence-first analysis
 
+- `generate` 是 `prepare → runtime Agent fill → verify/materialize` 两阶段合同。prepare 逐字保留 user title/problem/hypothesis/source/pool 作为 context，只创建有界空槽位、immutable orientation 与冻结的 pre-authoring canonical unit corpus；脚本不再提供固定策略、问题、假设或 next action。verify 先验证 exact request/context、slot identity/shape/limit/distinctness 与可选 preference receipt，再在单一 transaction 内创建全部 records + bundle；任一槽失败零 candidate/bundle 写。
 - `discuss`（别名 `spar`）prepare/verify/confirm：陪练身份=领域专家/审稿人，五类空白 judgement claim（challenge/probe/counter-example/constructive-suggestion/conclusion）；verify 对引用的 KB unit 逐字校验，并按 conclusion 持久化为独立 `discussion-judgements.yaml` subject。`payload.discussion.conclusions[]` 只是 projection，不能覆盖 idea analysis/review claims；confirm 对指定 subject 生成版本绑定 receipt。
 - `analyze`/`review` 改 prepare/verify：novelty/feasibility/recommendation/killer-question 由 agent 填 + 挂证据；字段计数仅 descriptive hint，不再是 score/verdict 来源。
+- `generate/analyze/review/discuss` 均为真实 preference consumer：task context 绑定 exact user request 或 current idea record、immutable orientation exact bytes，以及冻结 corpus 中所有可引用 artifact 的 identity/byte manifest。Agent 填写的 mutable content 是输出，不属于前置 input；verify 还要求每条引用 artifact 已存在于冻结 corpus。无 receipt 时保持 soft-neutral；成功只保存 value-free selection binding。
 - `select` 仍写 `pending_user_confirmation`（工作流态，不自签 confirmed）。
 
 ---

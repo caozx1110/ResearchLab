@@ -5,6 +5,8 @@ description: Archive important technical route discussions into durable per-prog
 
 # Discussion Archivist
 
+Preference contract: explicitly neutral with an empty eligible catalog. This owner transports caller-authored discussion content and must not rewrite its meaning from a soft profile.
+
 > 协议参考：`.agents/lib/research/SCHEMAS.md#program-files` · `#ownership` · `#runtime`
 
 Use this skill when an important research discussion should become a durable note instead of staying only in chat. 产出落在 `kb/programs/<program-id>/discussions/<slug>.md`。

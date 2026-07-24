@@ -5,6 +5,8 @@ description: 经验 + skill 演化记忆：capture lightweight learnings, local 
 
 # Skill Evolution Advisor
 
+Preference contract: explicitly neutral with an empty eligible catalog. Governance and redacted diagnostics remain deterministic owner constraints rather than soft research preferences.
+
 Use this skill when a real workflow exposes friction in the research system, when the user corrects the agent, or when lightweight memory should capture a confirmed habit, recurring issue, or skill defect.
 
 ## Workflow
