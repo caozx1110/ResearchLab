@@ -345,9 +345,16 @@ def test_attached_stale_unit_is_visible_and_prioritized_between_blocker_and_revi
     )
     assert orchestrator.main() == 0
     owner_payload = json.loads(capsys.readouterr().out)
-    assert owner_payload["items"][0]["record_id"] == stale["id"]
-    assert owner_payload["items"][0]["step_type"] == "agent-verify"
-    assert owner_payload["items"][0]["recommended_command"] == ""
+    assert owner_payload["planning_required"] is True
+    assert owner_payload["items"] == []
+    stale_candidates = [
+        item
+        for item in owner_payload["candidate_snapshot"]["candidates"]
+        if item["subject"]["id"] == stale["id"]
+    ]
+    assert len(stale_candidates) == 1
+    assert stale_candidates[0]["action_type"] == "agent-verify"
+    assert stale_candidates[0]["recommended_command"] == ""
 
 
 def test_orchestrator_transaction_uses_complete_checkpoint_scope(

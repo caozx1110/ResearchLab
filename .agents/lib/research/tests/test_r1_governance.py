@@ -425,7 +425,14 @@ def test_r1_paper_figure_tree_rolls_back_as_one_command_scope(
     before_record = path.read_bytes()
     checkpoint_calls: list[object] = []
 
-    def fake_extract(_root: Path, _record: dict, unit_root: Path):
+    def fake_extract(
+        _root: Path,
+        _record: dict,
+        unit_root: Path,
+        *,
+        preferences: object | None = None,
+    ):
+        assert preferences is None
         new_asset = unit_root / "figures" / "new.png"
         new_asset.parent.mkdir(parents=True, exist_ok=True)
         new_asset.write_bytes(b"partial-new-asset")
