@@ -351,6 +351,63 @@ def _run_allocator_file_fact(directory_fd: int, name: str) -> dict[str, Any]:
         os.close(descriptor)
 
 
+def _run_allocator_directory_fact(directory_fd: int) -> dict[str, Any]:
+    """Freeze one stable, bounded view of an already-open ``runs/`` directory."""
+    before = os.fstat(directory_fd)
+    if not stat.S_ISDIR(before.st_mode):
+        raise SystemExit("Experiment run allocator must be a safe directory.")
+    names = sorted(os.listdir(directory_fd))
+    if len(names) > MAX_RUN_ALLOCATOR_ENTRIES:
+        raise SystemExit("Experiment run allocator contains too many entries.")
+    entries: list[dict[str, Any]] = []
+    total_bytes = 0
+    occupied: set[int] = set()
+    for name in names:
+        fact = _run_allocator_file_fact(directory_fd, name)
+        total_bytes += int(fact["size"])
+        if total_bytes > MAX_RUN_ALLOCATOR_TOTAL_BYTES:
+            raise SystemExit("Experiment run allocator exceeds the safe total size limit.")
+        entries.append(fact)
+        match = RUN_ALLOCATOR_ENTRY_RE.fullmatch(name)
+        if match:
+            occupied.add(int(match.group(1)))
+    after_names = sorted(os.listdir(directory_fd))
+    after = os.fstat(directory_fd)
+    directory_identity_before = (
+        before.st_dev,
+        before.st_ino,
+        before.st_mode,
+        before.st_mtime_ns,
+        before.st_ctime_ns,
+    )
+    directory_identity_after = (
+        after.st_dev,
+        after.st_ino,
+        after.st_mode,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+    )
+    if names != after_names or directory_identity_before != directory_identity_after:
+        raise SystemExit("Experiment run allocator changed while it was inspected; retry.")
+    directory_identity = {
+        "device": before.st_dev,
+        "inode": before.st_ino,
+        "mode": stat.S_IMODE(before.st_mode),
+    }
+    digest_payload = {
+        "directory_state": "directory",
+        "logical_identity": "runs",
+        **directory_identity,
+        "entries": entries,
+    }
+    return {
+        "directory_identity": directory_identity,
+        "directory_entry_digest": _sha256_payload(digest_payload),
+        "entries": entries,
+        "occupied": occupied,
+    }
+
+
 def _run_allocator_snapshot_once(unit_root: Path) -> dict[str, Any]:
     """Return the exact flat ``runs/`` allocator state without following links."""
     runs_dir = unit_root / "runs"
@@ -379,60 +436,16 @@ def _run_allocator_snapshot_once(unit_root: Path) -> dict[str, Any]:
     except OSError as exc:
         raise SystemExit("Experiment run allocator must be a safe directory.") from exc
     try:
-        before = os.fstat(directory_fd)
-        names = sorted(os.listdir(directory_fd))
-        if len(names) > MAX_RUN_ALLOCATOR_ENTRIES:
-            raise SystemExit("Experiment run allocator contains too many entries.")
-        entries: list[dict[str, Any]] = []
-        total_bytes = 0
-        occupied: set[int] = set()
-        for name in names:
-            fact = _run_allocator_file_fact(directory_fd, name)
-            total_bytes += int(fact["size"])
-            if total_bytes > MAX_RUN_ALLOCATOR_TOTAL_BYTES:
-                raise SystemExit("Experiment run allocator exceeds the safe total size limit.")
-            entries.append(fact)
-            match = RUN_ALLOCATOR_ENTRY_RE.fullmatch(name)
-            if match:
-                occupied.add(int(match.group(1)))
-        after_names = sorted(os.listdir(directory_fd))
-        after = os.fstat(directory_fd)
-        directory_identity_before = (
-            before.st_dev,
-            before.st_ino,
-            before.st_mode,
-            before.st_mtime_ns,
-            before.st_ctime_ns,
-        )
-        directory_identity_after = (
-            after.st_dev,
-            after.st_ino,
-            after.st_mode,
-            after.st_mtime_ns,
-            after.st_ctime_ns,
-        )
-        if names != after_names or directory_identity_before != directory_identity_after:
-            raise SystemExit("Experiment run allocator changed while it was inspected; retry.")
+        directory_fact = _run_allocator_directory_fact(directory_fd)
+        occupied = directory_fact["occupied"]
         next_index = 1
         while next_index in occupied:
             next_index += 1
         proposed_run_id = f"run-{next_index:03d}"
-        digest_payload = {
-            "directory_state": "directory",
-            "logical_identity": "runs",
-            "device": before.st_dev,
-            "inode": before.st_ino,
-            "mode": stat.S_IMODE(before.st_mode),
-            "entries": entries,
-        }
         return {
             "directory_state": "directory",
-            "directory_identity": {
-                "device": before.st_dev,
-                "inode": before.st_ino,
-                "mode": stat.S_IMODE(before.st_mode),
-            },
-            "directory_entry_digest": _sha256_payload(digest_payload),
+            "directory_identity": directory_fact["directory_identity"],
+            "directory_entry_digest": directory_fact["directory_entry_digest"],
             "proposed_run_id": proposed_run_id,
             "proposed_run_path": f"runs/{proposed_run_id}.md",
         }
@@ -453,8 +466,8 @@ def _write_run_file_exclusive(
     unit_root: Path,
     expected_allocator: dict[str, Any],
     text: str,
-) -> Path:
-    """Revalidate and create exactly the receipt-bound run path, never an alternate."""
+) -> dict[str, Any]:
+    """Create the receipt-bound run path and return its frozen post-create fact."""
     current = run_allocator_snapshot(unit_root)
     if current != expected_allocator:
         raise SystemExit("Experiment run allocator changed after preference selection; retry.")
@@ -509,13 +522,14 @@ def _write_run_file_exclusive(
 
     leaf_name = f"{proposed_run_id}.md"
     flags = (
-        os.O_WRONLY
+        os.O_RDWR
         | os.O_CREAT
         | os.O_EXCL
         | getattr(os, "O_CLOEXEC", 0)
         | getattr(os, "O_NOFOLLOW", 0)
     )
     descriptor: int | None = None
+    created_run_fact: dict[str, Any] | None = None
     try:
         descriptor = os.open(leaf_name, flags, 0o644, dir_fd=directory_fd)
         payload = text.encode("utf-8")
@@ -526,6 +540,34 @@ def _write_run_file_exclusive(
                 raise OSError("short write")
             view = view[written:]
         os.fsync(descriptor)
+        os.fsync(directory_fd)
+        created_leaf = _run_allocator_file_fact(directory_fd, leaf_name)
+        opened_leaf = os.fstat(descriptor)
+        opened_identity = {
+            "device": opened_leaf.st_dev,
+            "inode": opened_leaf.st_ino,
+            "mode": stat.S_IMODE(opened_leaf.st_mode),
+            "size": opened_leaf.st_size,
+            "mtime_ns": opened_leaf.st_mtime_ns,
+            "ctime_ns": opened_leaf.st_ctime_ns,
+        }
+        if (
+            not stat.S_ISREG(opened_leaf.st_mode)
+            or any(created_leaf[key] != value for key, value in opened_identity.items())
+            or created_leaf["content_digest"] != hashlib.sha256(payload).hexdigest()
+        ):
+            raise SystemExit("Experiment run changed during exclusive creation; transaction aborted.")
+        directory_fact = _run_allocator_directory_fact(directory_fd)
+        matching_entries = [item for item in directory_fact["entries"] if item["name"] == leaf_name]
+        if matching_entries != [created_leaf]:
+            raise SystemExit("Experiment run changed during exclusive creation; transaction aborted.")
+        created_run_fact = {
+            "relative_path": proposed_run_path,
+            "runs_root_identity": directory_fact["directory_identity"],
+            "directory_entry_digest": directory_fact["directory_entry_digest"],
+            "entries": directory_fact["entries"],
+            "leaf": created_leaf,
+        }
     except OSError as exc:
         if descriptor is not None:
             try:
@@ -547,7 +589,76 @@ def _write_run_file_exclusive(
         if descriptor is not None:
             os.close(descriptor)
         os.close(directory_fd)
-    return unit_root / proposed_run_path
+    if created_run_fact is None:  # pragma: no cover - defensive control-flow contract
+        raise SystemExit("Experiment run creation did not produce a frozen fact; transaction aborted.")
+    return created_run_fact
+
+
+def _remove_replaced_runs_symlink(unit_root: Path) -> None:
+    """Detach only a local replacement link so journal rollback cannot escape."""
+    parent_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        parent_fd = os.open(unit_root, parent_flags)
+    except OSError:
+        return
+    try:
+        try:
+            metadata = os.stat("runs", dir_fd=parent_fd, follow_symlinks=False)
+        except OSError:
+            return
+        if stat.S_ISLNK(metadata.st_mode):
+            try:
+                os.unlink("runs", dir_fd=parent_fd)
+            except OSError:
+                pass
+    finally:
+        os.close(parent_fd)
+
+
+def _validate_created_run_fact(unit_root: Path, expected: dict[str, Any]) -> Path:
+    """Reopen and verify the created root, complete entry set, and leaf without following links."""
+    relative_path = str(expected.get("relative_path") or "")
+    leaf = expected.get("leaf")
+    if (
+        not isinstance(leaf, dict)
+        or relative_path != f"runs/{leaf.get('name', '')}"
+        or not RUN_ALLOCATOR_ENTRY_RE.fullmatch(str(leaf.get("name") or ""))
+    ):
+        raise SystemExit("Experiment created-run fact is invalid; transaction aborted.")
+    runs_dir = unit_root / "runs"
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        directory_fd = os.open(runs_dir, directory_flags)
+    except OSError as exc:
+        _remove_replaced_runs_symlink(unit_root)
+        raise SystemExit("Experiment created run root changed; transaction aborted.") from exc
+    try:
+        try:
+            current = _run_allocator_directory_fact(directory_fd)
+        except SystemExit as exc:
+            raise SystemExit("Experiment created run changed; transaction aborted.") from exc
+    finally:
+        os.close(directory_fd)
+    if (
+        current["directory_identity"] != expected.get("runs_root_identity")
+        or current["directory_entry_digest"] != expected.get("directory_entry_digest")
+        or current["entries"] != expected.get("entries")
+    ):
+        raise SystemExit("Experiment created run changed; transaction aborted.")
+    current_leaf = [item for item in current["entries"] if item["name"] == leaf["name"]]
+    if current_leaf != [leaf]:
+        raise SystemExit("Experiment created run changed; transaction aborted.")
+    return unit_root / relative_path
 
 
 def experiment_preference_context(
@@ -1241,9 +1352,13 @@ def _dispatch(args, root: Path) -> int:
         repeat_index = len(repeated_runs) + 1
         repeats_run_ids = [*repeated_runs, run_id]
         comparison = build_run_comparison(metrics, prior_runs, max(args.recent_runs, 0))
+        run_artifact = generated_artifact(root, run_path)
+        run_log_artifact = generated_artifact(root, run_log_document_path)
+        run_artifact_path = str(run_artifact["path"])
+        run_log_artifact_path = str(run_log_artifact["path"])
         logged_artifacts = [
-            generated_artifact(root, run_path),
-            generated_artifact(root, run_log_document_path),
+            run_artifact,
+            run_log_artifact,
             *claimed_artifacts,
         ]
         run_text = (
@@ -1287,7 +1402,8 @@ def _dispatch(args, root: Path) -> int:
             ).strip()
             + "\n"
         )
-        _write_run_file_exclusive(unit_root, run_allocator, run_text)
+        created_run_fact = _write_run_file_exclusive(unit_root, run_allocator, run_text)
+        _validate_created_run_fact(unit_root, created_run_fact)
         run_log_path = append_list_item(
             run_log_document_path,
             f"{args.experiment_id}-run-log",
@@ -1330,10 +1446,10 @@ def _dispatch(args, root: Path) -> int:
         record["summary"] = args.result_summary
         _record_experiment_preference_state(record, preferences)
         record.setdefault("artifacts", [])
-        for artifact in [rel(root, run_path), rel(root, run_log_path)]:
+        for artifact in [run_artifact_path, run_log_artifact_path]:
             if artifact not in record["artifacts"]:
                 record["artifacts"].append(artifact)
-        append_history(record, action="experiment-run-logged", summary=args.result_summary, information_types=["fact"], artifacts=[rel(root, run_path), rel(root, run_log_path)])
+        append_history(record, action="experiment-run-logged", summary=args.result_summary, information_types=["fact"], artifacts=[run_artifact_path, run_log_artifact_path])
         write_record(root, record)
         build_index(root)
         program_id = str(record.get("payload", {}).get("basic_info", {}).get("program_id") or "").strip()
@@ -1347,12 +1463,13 @@ def _dispatch(args, root: Path) -> int:
                     "title": record.get("title", args.experiment_id),
                     "summary": args.result_summary,
                     "stage": "experiment-running",
-                    "artifacts": [rel(root, run_path), rel(root, run_log_path)],
+                    "artifacts": [run_artifact_path, run_log_artifact_path],
                     "tags": ["experiment", "run", args.outcome, *(normalize_list(args.classification) or ["unknown"])],
                 },
                 generated_by="experiment-workbench",
             )
-        print(run_path.relative_to(root))
+        _validate_created_run_fact(unit_root, created_run_fact)
+        print(run_artifact_path)
         return 0
 
     if args.command == "follow-up":
