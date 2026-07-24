@@ -43,6 +43,7 @@
 - **恢复 after-state CAS**：已 commit operation 的 undo/restore 在 workspace + exact-target locks 内、创建 recovery journal 前，要求 `after_digests` 完整覆盖 target set 且每个当前 digest 完全匹配；缺失或后续人工修改均零业务写 fail-closed。`state=begin` 的 crash resume 仍按 root before snapshot 自愈，不适用 commit after-state CAS。
 - **Abort zero-churn**：abort/resume 对每个 target 先比较 current digest 与 before digest；相等时不得调用 restore/atomic replace，必须保留原 bytes、mode 与 inode identity。只有实际偏离 before-state 的 target 才恢复。可预期的验证拒绝优先放在 lock 下、journal snapshot 前的 preflight；只读 fill/orientation/corpus 等 input 不进入 mutation target set。
 - **Canonical recovery projection**：journal/restore/undo/resume 的内部 target 与返回路径必须统一相对于 `kb_root(project_root).resolve()` 投影；调用者传入 macOS `/var/...` 等等价 alias 时，不能在恢复已执行后因 resolved target 对未 resolve root 的 `relative_to` 抛错。alias 与 canonical path 的结果、journal state 和可重试性必须等价。
+- **Special-file nonblocking**：journal digest/snapshot/abort/restore 必须以 `lstat` 分类且有界处理 filesystem node。普通文件才可读取 bytes；symlink 只读 link target；目录递归时遇 FIFO/socket/device 等特殊 child 只能记录类型/identity sentinel，绝不 `open`。begin snapshot 的既存特殊 target fail-closed；transaction 中途被替换成特殊类型时，abort 必须无需读取该节点即可识别偏离、移除替换物并恢复 before-image，不能挂死或留下 `abort_failed`。
 - **claim 语义下限**：canonical claim 的类型不能被 record 级 `information_types` / `source` 降级；`inference` / `evaluation` / `user_opinion` 都强制 judgement track，`unverified` claim 在解决或替换前不得 `confirmed`。纯事实元数据且无 canonical claims 仍允许轻确认。
 
 ---
