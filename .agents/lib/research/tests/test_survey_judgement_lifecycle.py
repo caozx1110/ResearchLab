@@ -183,6 +183,32 @@ def test_prepare_zero_current_inputs_returns_structured_gap_without_scaffold(tmp
     assert resumable[0]["stage"] == "search"
     assert resumable[0]["dependencies"][0]["revision"] == binding["revision"]
 
+    # Simulate a fresh process that only has the installed public entrypoint,
+    # rather than retaining the prepare handoff in chat context.
+    kb = load_kb_cli()
+    capsys.readouterr()
+    assert kb.main(
+        [
+            "--root",
+            str(tmp_path),
+            "--agent-protocol",
+            "next-after-restart.json",
+            "next",
+        ]
+    ) == 0
+    public = capsys.readouterr().out
+    assert "Agent 需要比较当前" in public
+    assert "知识库还是空的" not in public
+    protocol = json.loads(
+        (tmp_path / "kb/.runtime/next-after-restart.json").read_text(encoding="utf-8")
+    )
+    assert protocol["status"] == "agent_action_required"
+    assert protocol["details"]["candidate_count"] >= 1
+    assert any(
+        item["action_type"] == "resume-composite-survey"
+        for item in protocol["next_actions"][0]["candidate_snapshot"]["candidates"]
+    )
+
 
 def test_composite_cli_updates_with_revision_cas_and_is_resumable(
     tmp_path: Path,
