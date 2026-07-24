@@ -1072,8 +1072,92 @@ def update_cache_dir() -> Path:
     return Path.home() / ".cache" / "research-skills"
 
 
+def _record_update_source_choice(root: Path, result: Mapping[str, object]) -> None:
+    try:
+        choice = updater.source_choice_request(root)
+    except updater.SourceRebindError as exc:
+        set_protocol_status(
+            "attention_required",
+            update=result,
+            source_choice_error={"code": exc.code, "message": str(exc)},
+        )
+        add_agent_action("inspect_update_installation", reason=exc.code)
+        return
+    set_protocol_status("needs_user_input", update=result, source_choice=choice)
+    add_agent_action(
+        "choose_update_source",
+        reason=str(result.get("message") or "missing update provenance"),
+        **choice,
+    )
+
+
+def _render_update_check(root: Path, result: Mapping[str, object], *, rebound: Mapping[str, object] | None = None) -> int:
+    local = _public_display_text(result.get("local") or "0.0.0", root, "未知", 64)
+    remote = _public_display_text(result.get("remote") or "unknown", root, "未知", 64)
+    print(f"当前研究能力包版本：{local}。")
+    if result.get("status") == "needs_source_choice":
+        print("更新源尚未确认；请告诉我应继续使用哪个源码仓或本地检出。")
+        _record_update_source_choice(root, result)
+        return 0
+    details: dict[str, object] = {"update": dict(result)}
+    if rebound is not None:
+        details["source_rebind"] = dict(rebound)
+    set_protocol_status("completed", **details)
+    if result.get("status") == "unknown":
+        print("更新源中的研究能力包版本：未知。")
+        print("暂时无法从更新源检查更新；当前安装未做任何改动。")
+        return 0
+    print(f"更新源中的研究能力包版本：{remote}。")
+    if result.get("status") == "update_available":
+        print("发现可用更新；确认前不会修改当前安装。")
+        print("如果你同意，我可以继续完成更新。")
+        set_protocol_status("needs_user_authorization", **details)
+        add_agent_action("request_update_authorization", then={"verb": "update", "apply": True})
+    else:
+        print("当前研究能力包已是最新版本。")
+    return 0
+
+
 def handle_update(args: argparse.Namespace, root: Path) -> int:
     cache_dir = update_cache_dir()
+    source_inputs = any(
+        str(value or "").strip()
+        for value in (
+            args.expected_manifest_digest,
+            args.source_origin,
+            args.source_checkout,
+            args.source_branch,
+            args.source_strategy,
+        )
+    )
+    if source_inputs:
+        if args.apply:
+            print("更新源选择未生效；请重新运行 kb update 后告诉我希望使用的更新源。")
+            set_protocol_status(
+                "error",
+                source_rebind={"status": "error", "code": "rebind-cannot-authorize-update"},
+            )
+            return 2
+        try:
+            rebound = updater.rebind_source(
+                root,
+                expected_manifest_digest=args.expected_manifest_digest,
+                source_origin=args.source_origin,
+                source_checkout=args.source_checkout,
+                source_branch=args.source_branch,
+                source_strategy=args.source_strategy,
+            )
+        except updater.SourceRebindError as exc:
+            print("更新源选择未生效；请重新运行 kb update 后告诉我希望使用的更新源。")
+            set_protocol_status(
+                "error",
+                source_rebind={"status": "error", "code": exc.code, "message": str(exc)},
+            )
+            return 2
+        print("更新源选择已保存；现在只重新检查可用更新，不会直接安装。")
+        result = updater.check(root, cache_dir)
+        return _render_update_check(root, result, rebound=rebound)
+
     if args.apply:
         result = updater.apply(root, cache_dir)
         if result.get("status") == "updated":
@@ -1088,44 +1172,14 @@ def handle_update(args: argparse.Namespace, root: Path) -> int:
             return 0
         if result.get("status") == "needs_source_choice":
             print("更新源尚未确认；请告诉我应继续使用哪个源码仓或本地检出。")
-            set_protocol_status("needs_user_input", update=result)
-            add_agent_action(
-                "choose_update_source",
-                fields=["source_origin", "source_checkout"],
-                reason=str(result.get("message") or "missing update provenance"),
-            )
+            _record_update_source_choice(root, result)
             return 2
         print("研究能力包更新未完成；详细诊断已保留给 Agent。")
         set_protocol_status("error", update=result)
         return 1
 
     result = updater.check(root, cache_dir)
-    set_protocol_status("completed", update=result)
-    local = _public_display_text(result.get("local") or "0.0.0", root, "未知", 64)
-    remote = _public_display_text(result.get("remote") or "unknown", root, "未知", 64)
-    print(f"当前研究能力包版本：{local}。")
-    if result.get("status") == "needs_source_choice":
-        print("更新源尚未确认；请告诉我应继续使用哪个源码仓或本地检出。")
-        set_protocol_status("needs_user_input", update=result)
-        add_agent_action(
-            "choose_update_source",
-            fields=["source_origin", "source_checkout"],
-            reason=str(result.get("message") or "missing update provenance"),
-        )
-        return 0
-    if result.get("status") == "unknown":
-        print("更新源中的研究能力包版本：未知。")
-        print("暂时无法从更新源检查更新；当前安装未做任何改动。")
-        return 0
-    print(f"更新源中的研究能力包版本：{remote}。")
-    if result.get("status") == "update_available":
-        print("发现可用更新；确认前不会修改当前安装。")
-        print("如果你同意，我可以继续完成更新。")
-        set_protocol_status("needs_user_authorization", update=result)
-        add_agent_action("request_update_authorization", then={"verb": "update", "apply": True})
-    else:
-        print("当前研究能力包已是最新版本。")
-    return 0
+    return _render_update_check(root, result)
 
 
 def handle_obsidian(args: argparse.Namespace, root: Path) -> int:
@@ -4324,6 +4378,11 @@ def register_undo(subparsers: argparse._SubParsersAction[argparse.ArgumentParser
 def register_update(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     parser = subparsers.add_parser("update", help="检查并在确认后更新研究能力包")
     parser.add_argument("--apply", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--source-origin", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--source-checkout", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--source-branch", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--source-strategy", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--expected-manifest-digest", default="", help=argparse.SUPPRESS)
     parser.set_defaults(handler=handle_update)
 
 

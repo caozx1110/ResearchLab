@@ -678,6 +678,168 @@ def test_kb_update_offline_reports_unknown_without_changes(monkeypatch, tmp_path
     assert "NEXT FOR AGENT:" not in output
 
 
+def test_kb_update_detached_source_choice_rebinds_headlessly_then_only_rechecks(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    kb = _load_kb_cli()
+    detached = tmp_path / "detached-source"
+    (detached / ".git").mkdir(parents=True)
+    (detached / ".agents").mkdir()
+    (detached / ".agents" / "VERSION").write_text("0.2.0\n", encoding="utf-8")
+    (detached / "install-lib").mkdir()
+    (detached / "install-lib" / "ws_sync.py").write_text("", encoding="utf-8")
+    manifest_path = tmp_path / kb.updater.MANIFEST_REL
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "install_name": "workspace-oss",
+                "install_mode": "copy-project",
+                "version": "0.1.0",
+                "files": {".agents/VERSION": "digest"},
+                "source_origin": "ssh://example.test/team/fork.git",
+                "source_checkout": str(detached),
+                "source_repo": str(detached),
+                "source_branch": "",
+                "source_strategy": "local-checkout",
+                "source_commit": "detached-commit",
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".agents" / "VERSION").write_text("0.1.0\n", encoding="utf-8")
+    monkeypatch.setattr(kb.updater, "_checkout_origin", lambda _checkout: "ssh://example.test/team/fork.git")
+    monkeypatch.setattr(kb.updater, "_checkout_branch", lambda _checkout: "")
+    monkeypatch.setattr(
+        kb.updater,
+        "_clone_checkout",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("choice discovery must not clone")),
+    )
+
+    assert kb.main(["--root", str(tmp_path), "--agent-protocol", "choice.json", "update"]) == 0
+
+    first_output = capsys.readouterr().out
+    choice_protocol = json.loads((tmp_path / "kb/.runtime/choice.json").read_text(encoding="utf-8"))
+    action = choice_protocol["next_actions"][0]
+    assert choice_protocol["status"] == "needs_user_input"
+    assert action["action"] == "choose_update_source"
+    assert action["fields"] == ["source_branch"]
+    assert action["apply"]["source_strategy"] == "remote-branch"
+    assert action["apply"]["source_origin"] == "ssh://example.test/team/fork.git"
+    digest = action["manifest_digest"]
+    assert digest == hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    assert str(detached) not in first_output
+    assert digest not in first_output
+
+    seen: list[tuple[str, str]] = []
+
+    def fake_fetch(provenance, _cache):
+        seen.append((provenance.origin, provenance.branch))
+        return "0.2.0"
+
+    monkeypatch.setattr(kb.updater, "fetch_remote_version", fake_fetch)
+    monkeypatch.setattr(
+        kb.updater,
+        "apply",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("rebind must not apply an update")),
+    )
+    assert kb.main(
+        [
+            "--root",
+            str(tmp_path),
+            "--agent-protocol",
+            "rebound.json",
+            "update",
+            "--expected-manifest-digest",
+            digest,
+            "--source-origin",
+            action["apply"]["source_origin"],
+            "--source-branch",
+            "release/r2",
+            "--source-strategy",
+            action["apply"]["source_strategy"],
+        ]
+    ) == 0
+
+    second_output = capsys.readouterr().out
+    assert seen == [("ssh://example.test/team/fork.git", "release/r2")]
+    rebound_protocol = json.loads((tmp_path / "kb/.runtime/rebound.json").read_text(encoding="utf-8"))
+    assert rebound_protocol["status"] == "needs_user_authorization"
+    assert rebound_protocol["next_actions"] == [
+        {"action": "request_update_authorization", "then": {"apply": True, "verb": "update"}}
+    ]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["source_strategy"] == "remote-branch"
+    assert manifest["source_branch"] == "release/r2"
+    assert manifest["source_checkout"] == manifest["source_repo"] == ""
+    assert manifest["source_commit"] == ""
+    for forbidden in (
+        str(detached),
+        digest,
+        "--source",
+        "--expected",
+        "${",
+        "NEXT FOR AGENT",
+        ".agents/",
+    ):
+        assert forbidden not in second_output
+
+
+def test_kb_update_invalid_rebind_is_private_generic_and_zero_apply(monkeypatch, tmp_path: Path, capsys) -> None:
+    kb = _load_kb_cli()
+    monkeypatch.setattr(
+        kb.updater,
+        "rebind_source",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            kb.updater.SourceRebindError("stale-manifest", "private /tmp/source --branch secret")
+        ),
+    )
+    monkeypatch.setattr(
+        kb.updater,
+        "check",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("failed rebind must not check")),
+    )
+    monkeypatch.setattr(
+        kb.updater,
+        "apply",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("failed rebind must not apply")),
+    )
+
+    assert kb.main(
+        [
+            "--root",
+            str(tmp_path),
+            "--agent-protocol",
+            "failed.json",
+            "update",
+            "--expected-manifest-digest",
+            "0" * 64,
+            "--source-origin",
+            "ssh://example.test/team/fork.git",
+            "--source-branch",
+            "release/r1",
+            "--source-strategy",
+            "remote-branch",
+        ]
+    ) == 2
+
+    output = capsys.readouterr().out
+    assert output == "更新源选择未生效；请重新运行 kb update 后告诉我希望使用的更新源。\n"
+    for forbidden in ("/tmp/source", "--branch", "secret", "ssh://", "0" * 64):
+        assert forbidden not in output
+    protocol = json.loads((tmp_path / "kb/.runtime/failed.json").read_text(encoding="utf-8"))
+    assert protocol["details"]["source_rebind"] == {
+        "status": "error",
+        "code": "stale-manifest",
+        "message": "private /tmp/source --branch secret",
+    }
+
+
 def test_kb_init_has_identical_no_tty_semantics_and_never_reads_input(monkeypatch, tmp_path: Path, capsys) -> None:
     kb = _load_kb_cli()
     calls: list[list[tuple[str, tuple[str, ...]]]] = []
