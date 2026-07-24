@@ -1124,9 +1124,14 @@ verify_agent_apply_contract() {
     "--current-action" "$ACTION"
     "--current-scope" "$SCOPE"
     "--current-workspace" "$WORKSPACE_ROOT"
+    "--current-home" "$HOME"
     "--current-distributable-root" "$distribution_root"
     "--current-runtime-root" "$(managed_runtime_root)"
     "--current-operation-time" "$OPERATION_TIME"
+    "--current-source-strategy" "local-checkout"
+    "--current-source-checkout" "$REPO_ROOT"
+    "--current-source-origin" "$(source_origin)"
+    "--current-source-branch" "$(source_branch)"
   )
   [ "$CONFIG_CLAUDE" -eq 0 ] || args+=("--current-tool" "claude")
   [ "$CONFIG_CODEX" -eq 0 ] || args+=("--current-tool" "codex")
@@ -1182,6 +1187,7 @@ write_agent_plan_json() {
     "--action" "$ACTION"
     "--scope" "$SCOPE"
     "--workspace" "$WORKSPACE_ROOT"
+    "--home" "$HOME"
     "--source-strategy" "local-checkout"
     "--source-checkout" "$REPO_ROOT"
     "--source-origin" "$origin"

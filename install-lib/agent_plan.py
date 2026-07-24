@@ -54,11 +54,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--current-operation-time", default="")
     parser.add_argument("--current-force", action="store_true")
     parser.add_argument("--current-kb-on-path", action="store_true")
+    parser.add_argument("--current-home", default="")
+    parser.add_argument("--current-source-strategy", default="")
+    parser.add_argument("--current-source-checkout", default="")
+    parser.add_argument("--current-source-origin", default="")
+    parser.add_argument("--current-source-branch", default="")
 
     parser.add_argument("--output")
     parser.add_argument("--action")
     parser.add_argument("--scope")
     parser.add_argument("--workspace")
+    parser.add_argument("--home")
     parser.add_argument("--tool", action="append", default=[])
     parser.add_argument("--source-strategy")
     parser.add_argument("--source-checkout")
@@ -85,6 +91,7 @@ def _require_generation_args(args: argparse.Namespace) -> None:
         "action",
         "scope",
         "workspace",
+        "home",
         "source_strategy",
         "source_checkout",
         "source_origin",
@@ -296,11 +303,26 @@ def verify_plan(args: argparse.Namespace) -> int:
         raise ValueError("source distributable tree no longer matches the reviewed plan")
     if str(source.get("commit") or "") != args.expected_source_commit:
         raise ValueError("source commit binding no longer matches the reviewed plan")
+    current_source_identity = {
+        "strategy": args.current_source_strategy,
+        "checkout": str(Path(args.current_source_checkout).resolve()),
+        "origin": args.current_source_origin,
+        "branch": args.current_source_branch,
+    }
+    planned_source_identity = {
+        "strategy": source.get("strategy"),
+        "checkout": source.get("checkout"),
+        "origin": source.get("origin"),
+        "branch": source.get("branch"),
+    }
+    if current_source_identity != planned_source_identity:
+        raise ValueError("source provenance differs from the reviewed Agent plan")
 
     expected_identity = {
         "action": args.current_action,
         "scope": args.current_scope,
         "workspace": str(Path(args.current_workspace).resolve()),
+        "home": str(Path(args.current_home).resolve()),
         "tools": sorted(set(args.current_tool)),
         "operation_time": args.current_operation_time,
     }
@@ -308,6 +330,7 @@ def verify_plan(args: argparse.Namespace) -> int:
         "action": payload.get("action"),
         "scope": payload.get("scope"),
         "workspace": payload.get("workspace"),
+        "home": payload.get("home"),
         "tools": payload.get("tools"),
         "operation_time": payload.get("operation_time"),
     }
@@ -398,6 +421,7 @@ def generate_plan(args: argparse.Namespace) -> int:
         "scope": args.scope,
         "tools": sorted(set(args.tool)),
         "workspace": str(Path(args.workspace).resolve()),
+        "home": str(Path(args.home).resolve()),
         "operation_time": args.operation_time,
         "options": {
             "force": "--force" in args.apply_arg,
