@@ -344,7 +344,15 @@ def _stream_regular_file(descriptor: int) -> tuple[dict[str, object], str]:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     after = os.fstat(descriptor)
-    stable_fields = ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns")
+    stable_fields = (
+        "st_dev",
+        "st_ino",
+        "st_mode",
+        "st_uid",
+        "st_gid",
+        "st_size",
+        "st_mtime_ns",
+    )
     if any(getattr(before, name) != getattr(after, name) for name in stable_fields):
         raise ValueError("prepared intake source changed while it was read")
     return (
@@ -352,6 +360,8 @@ def _stream_regular_file(descriptor: int) -> tuple[dict[str, object], str]:
             "device": before.st_dev,
             "inode": before.st_ino,
             "mode": stat.S_IMODE(before.st_mode),
+            "uid": before.st_uid,
+            "gid": before.st_gid,
             "size": before.st_size,
             "mtime_ns": before.st_mtime_ns,
         },
@@ -404,6 +414,8 @@ def _directory_snapshot(
                         "device": opened.st_dev,
                         "inode": opened.st_ino,
                         "mode": stat.S_IMODE(opened.st_mode),
+                        "uid": opened.st_uid,
+                        "gid": opened.st_gid,
                     }
                 )
                 _directory_snapshot(child_descriptor, child_relative, rows, budget)
@@ -480,6 +492,8 @@ def _path_snapshot_digest(path: Path) -> str:
                 "device": opened.st_dev,
                 "inode": opened.st_ino,
                 "mode": stat.S_IMODE(opened.st_mode),
+                "uid": opened.st_uid,
+                "gid": opened.st_gid,
             }
         ]
         _directory_snapshot(descriptor, Path(), rows, {"entries": 0, "bytes": 0})
