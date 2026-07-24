@@ -13,6 +13,8 @@ class judgement must come from an agent, never from Python.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import re
 import sys
 from contextvars import ContextVar
@@ -1168,23 +1170,130 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def paper_preference_context(args: argparse.Namespace, record: Mapping[str, object]) -> dict[str, object]:
-    """Canonical owner inputs; consumers never accept a caller-supplied digest."""
-    payload = record.get("payload")
-    payload = payload if isinstance(payload, Mapping) else {}
+def _preference_digest(value: object) -> str:
+    payload = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _record_content_digest(record: Mapping[str, object]) -> str:
+    """Bind current record content without self-binding prior preference receipts."""
+    snapshot = dict(record)
+    payload = snapshot.get("payload")
+    if isinstance(payload, Mapping):
+        payload = dict(payload)
+        payload.pop("preference_binding", None)
+        payload.pop("preference_contract", None)
+        snapshot["payload"] = payload
+    return _preference_digest(snapshot)
+
+
+def _artifact_fingerprint(path: Path) -> dict[str, object]:
+    """Content-bind an input without exposing its raw path in a receipt context."""
+    identity = hashlib.sha256(str(path.absolute()).encode("utf-8")).hexdigest()
+    fingerprint: dict[str, object] = {"path_identity_digest": identity}
+    if path.is_symlink():
+        try:
+            target = path.readlink()
+        except OSError:
+            target = Path("<unreadable>")
+        fingerprint["symlink_target_digest"] = hashlib.sha256(
+            str(target).encode("utf-8")
+        ).hexdigest()
+    if not path.exists():
+        fingerprint["state"] = "missing"
+        return fingerprint
+    if not path.is_file():
+        fingerprint["state"] = "non-file"
+        return fingerprint
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        with path.open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                digest.update(chunk)
+                size += len(chunk)
+    except OSError:
+        fingerprint["state"] = "unreadable"
+        return fingerprint
+    fingerprint.update(
+        {
+            "state": "regular-file",
+            "size": size,
+            "byte_sha256": digest.hexdigest(),
+        }
+    )
+    return fingerprint
+
+
+def paper_preference_context(
+    root: Path,
+    args: argparse.Namespace,
+    record: Mapping[str, object],
+    *,
+    unit_root: Path | None = None,
+) -> dict[str, object]:
+    """Owner-recomputed content binding for one paper preference operation."""
+    canonical_unit_root = unit_root or (
+        root / "kb" / "units" / "papers" / str(record.get("id") or "")
+    )
+    cache_path = _cache_path(canonical_unit_root)
+    operation = str(args.command)
+    phase = str(getattr(args, "phase", "") or "")
+    source_identity = {
+        "source": record.get("source"),
+        "sources": record.get("sources"),
+    }
+    auxiliary: dict[str, dict[str, object]] = {}
+    if operation == "complete-note" and phase == "prepare":
+        for name in ("screening.yaml", "note-fill.yaml", "note.md"):
+            auxiliary[name] = _artifact_fingerprint(canonical_unit_root / name)
+    elif operation == "screen" and phase == "verify":
+        auxiliary["note-fill.yaml"] = _artifact_fingerprint(
+            canonical_unit_root / "note-fill.yaml"
+        )
+    elif operation == "refresh-structure":
+        auxiliary["note.md"] = _artifact_fingerprint(canonical_unit_root / "note.md")
+
+    fill_input: dict[str, object] | None = None
+    if operation in {"screen", "complete-note"} and phase == "verify":
+        default_name = "screening.yaml" if operation == "screen" else "note-fill.yaml"
+        fill_path = _resolve_fill_input(
+            canonical_unit_root,
+            default_name,
+            str(getattr(args, "input", "") or ""),
+        )
+        fill_input = _artifact_fingerprint(fill_path)
+
     return {
         "paper_id": str(record.get("id") or ""),
-        "operation": str(args.command),
-        "phase": str(getattr(args, "phase", "") or ""),
+        "operation": operation,
+        "phase": phase,
         "mode": str(getattr(args, "mode", "") or ""),
         "force": bool(getattr(args, "force", False)),
-        "sources": record.get("sources") if isinstance(record.get("sources"), list) else [],
-        "basic_info": payload.get("basic_info") if isinstance(payload.get("basic_info"), Mapping) else {},
+        "defer_post_actions": bool(getattr(args, "defer_post_actions", False)),
+        "record_content_digest": _record_content_digest(record),
+        "source_identity_digest": _preference_digest(source_identity),
+        "parse_cache": _artifact_fingerprint(cache_path),
+        "source_artifacts": [
+            _artifact_fingerprint(path) for path in _source_paths(root, dict(record))
+        ],
+        "auxiliary_artifacts": auxiliary,
+        "fill_input": fill_input,
     }
 
 
 def resolve_paper_preferences(
-    root: Path, args: argparse.Namespace, record: Mapping[str, object]
+    root: Path,
+    args: argparse.Namespace,
+    record: Mapping[str, object],
+    *,
+    unit_root: Path | None = None,
 ) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
     """Resolve only selected soft values for the bound paper operation."""
     selection_id = str(getattr(args, "preference_selection_id", "") or "")
@@ -1195,7 +1304,7 @@ def resolve_paper_preferences(
         selection_id=selection_id,
         skill="paper-analyst",
         operation=args.command,
-        canonical_inputs=paper_preference_context(args, record),
+        canonical_inputs=paper_preference_context(root, args, record, unit_root=unit_root),
     )
     selected = {
         str(item.get("path") or ""): item.get("value")
@@ -1513,7 +1622,7 @@ def main() -> int:
     pdf_preferences: dict[str, object] = {}
     if args.command in SKILL_OPERATIONS["paper-analyst"]:
         paper_preferences, pdf_preferences, preference_binding = resolve_paper_preferences(
-            root, args, record
+            root, args, record, unit_root=unit_root
         )
         record.setdefault("payload", {})["preference_contract"] = operation_contract(
             skill="paper-analyst", operation=args.command

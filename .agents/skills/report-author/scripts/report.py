@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -73,6 +74,7 @@ class ClaimSource:
     kind: str
     claims: list[dict[str, Any]] = field(default_factory=list)
     issues: list[str] = field(default_factory=list)
+    binding_digest: str = ""
 
 
 @dataclass
@@ -287,15 +289,66 @@ def load_reporting_style(
     return "default"
 
 
+def _canonical_digest(value: object) -> str:
+    payload = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def report_input_snapshot(inputs: ReportInputs) -> dict[str, object]:
+    """Return the exact pure-read input view consumed by report rendering.
+
+    The caller places only this view's digest and bounded counts in the
+    preference task context.  Raw event text, claims, and decisions therefore
+    never get copied into the durable preference receipt.
+    """
+    return {
+        "accepted_events": inputs.events,
+        "pending_judgement_events": inputs.pending_judgement_events,
+        "claim_sources": [
+            {
+                "unit_id": source.unit_id,
+                "title": source.title,
+                "kind": source.kind,
+                "claims": source.claims,
+                "issues": source.issues,
+                "binding_digest": source.binding_digest,
+            }
+            for source in inputs.claim_sources
+        ],
+        "decisions": inputs.decisions,
+        "missing_units": sorted(inputs.missing_units),
+    }
+
+
 def report_preference_context(
-    program_id: str, *, operation: str, stage: str = "", limit: int = 20
+    program_id: str,
+    *,
+    operation: str,
+    stage: str = "",
+    limit: int = 20,
+    inputs: ReportInputs,
 ) -> dict[str, object]:
-    """Canonical owner inputs for report preference binding."""
+    """Canonical owner inputs for one report preference binding."""
+    snapshot = report_input_snapshot(inputs)
     return {
         "program_id": str(program_id),
         "operation": str(operation),
         "stage": str(stage),
         "limit": int(limit),
+        "input_snapshot": {
+            "digest": _canonical_digest(snapshot),
+            "accepted_event_count": len(inputs.events),
+            "pending_judgement_event_count": len(inputs.pending_judgement_events),
+            "claim_source_count": len(inputs.claim_sources),
+            "decision_count": len(inputs.decisions),
+            "missing_unit_count": len(inputs.missing_units),
+        },
     }
 
 
@@ -377,6 +430,18 @@ def load_confirmed_claim_sources(root: Path, unit_ids: list[str]) -> tuple[list[
                 kind=str(record.get("kind") or "unit"),
                 claims=valid_claims,
                 issues=issues,
+                binding_digest=_canonical_digest(
+                    {
+                        "source": record.get("source"),
+                        "sources": record.get("sources"),
+                        "confirmation": receipt,
+                        "verification": (
+                            record.get("payload", {}).get("verification")
+                            if isinstance(record.get("payload"), dict)
+                            else None
+                        ),
+                    }
+                ),
             )
         )
     return sources, missing_units
@@ -427,6 +492,16 @@ def load_decisions(root: Path, program_id: str) -> list[dict[str, str]]:
                 "rationale": str(decision.get("rationale") or ""),
                 "alternatives": ", ".join(str(value) for value in decision.get("alternatives", [])),
                 "confirmation": "confirmed",
+                "_binding_digest": _canonical_digest(
+                    {
+                        "confirmation": item.get("confirmation"),
+                        "verification": (
+                            item.get("payload", {}).get("verification")
+                            if isinstance(item.get("payload"), dict)
+                            else None
+                        ),
+                    }
+                ),
             }
         )
     legacy_path = root / "kb" / "programs" / program_id / "workflow" / "decision-log.md"
@@ -465,14 +540,20 @@ def load_report_inputs(
     events, pending_judgement_events = partition_reporting_events(root, loaded_events)
     unit_ids = program_unit_ids(root, program_id, loaded_events)
     claim_sources, missing_units = load_confirmed_claim_sources(root, unit_ids)
+    inputs = ReportInputs(
+        events=events,
+        pending_judgement_events=pending_judgement_events,
+        claim_sources=claim_sources,
+        decisions=load_decisions(root, program_id),
+        missing_units=missing_units,
+    )
     canonical_inputs = report_preference_context(
         program_id,
         operation=preference_operation,
         stage=stage,
         limit=limit,
+        inputs=inputs,
     )
-    binding: dict[str, object] = {}
-    reporting_style = "default"
     if preference_selection_id:
         effective = resolve_task_preferences(
             root,
@@ -486,19 +567,11 @@ def load_report_inputs(
             for item in effective.get("effective_items", [])
             if isinstance(item, dict)
         }
-        reporting_style = _normalize_reporting_style(
+        inputs.reporting_style = _normalize_reporting_style(
             selected.get("profile.personalization.reporting_style")
         )
-        binding = selection_binding(effective)
-    return ReportInputs(
-        events=events,
-        pending_judgement_events=pending_judgement_events,
-        claim_sources=claim_sources,
-        decisions=load_decisions(root, program_id),
-        missing_units=missing_units,
-        reporting_style=reporting_style,
-        preference_binding=binding,
-    )
+        inputs.preference_binding = selection_binding(effective)
+    return inputs
 
 
 def concise_report_inputs(inputs: ReportInputs) -> ReportInputs:
@@ -511,6 +584,7 @@ def concise_report_inputs(inputs: ReportInputs) -> ReportInputs:
             kind=source.kind,
             claims=source.claims[:CONCISE_CLAIM_LIMIT],
             issues=source.issues,
+            binding_digest=source.binding_digest,
         )
         for source in inputs.claim_sources[:CONCISE_SOURCE_LIMIT]
     ]
@@ -748,7 +822,6 @@ def main() -> int:
     print_resolved_project_roots(root)
     ensure_workspace(root)
     reports_root = root / "kb" / "programs" / args.program_id / "reports"
-    reports_root.mkdir(parents=True, exist_ok=True)
     inputs = load_report_inputs(
         root,
         args.program_id,
