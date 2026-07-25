@@ -1431,6 +1431,128 @@ def test_generated_documents_do_not_leak_raw_commands(tmp_path: Path) -> None:
         assert not any(token in document for token in forbidden)
 
 
+def _assert_aggregate_pending_report(report, inputs, *, absent: list[str]) -> None:
+    text = report.render_report("Stage Summary: aggregate-gate", inputs, report_kind="stage-summary")
+    assert inputs.formal_lane_pending is True
+    assert "待确认 / 未核验" in text
+    assert "报告生成期间正式判断来源已变化" in text
+    for sentinel in absent:
+        assert sentinel not in text
+
+
+def test_aggregate_gate_rejects_survey_replaced_after_attach(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = _load_report_module()
+    program_id = "program-survey"
+    survey_path, _events_path = _write_confirmed_program_survey(tmp_path, program_id=program_id)
+    original_attach = report.attach_confirmed_survey_claim_sources
+
+    def replace_after_attach(*args, **kwargs):
+        result = original_attach(*args, **kwargs)
+        payload = load_yaml(survey_path)
+        payload["slug"] = "replacement-survey"
+        write_yaml_if_changed(survey_path, payload)
+        return result
+
+    monkeypatch.setattr(report, "attach_confirmed_survey_claim_sources", replace_after_attach)
+
+    inputs = report.load_report_inputs(tmp_path, program_id, stage="survey")
+
+    _assert_aggregate_pending_report(
+        report,
+        inputs,
+        absent=["Agent-authored survey judgement", SURVEY_QUOTE],
+    )
+
+
+def test_aggregate_gate_rejects_unit_replaced_after_source_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = _load_report_module()
+    root, program_id, unit_id = _make_workspace(tmp_path)
+    record_path = root / "kb" / "units" / "papers" / unit_id / "record.yaml"
+    original_load = report.load_confirmed_claim_sources
+
+    def replace_after_source_load(*args, **kwargs):
+        result = original_load(*args, **kwargs)
+        payload = load_yaml(record_path)
+        payload["title"] = "REPLACEMENT UNIT TITLE"
+        write_yaml_if_changed(record_path, payload)
+        return result
+
+    monkeypatch.setattr(report, "load_confirmed_claim_sources", replace_after_source_load)
+
+    inputs = report.load_report_inputs(root, program_id)
+
+    _assert_aggregate_pending_report(
+        report,
+        inputs,
+        absent=["Grounded Paper", "The method improves benchmark success rate."],
+    )
+
+
+def test_aggregate_gate_rejects_direct_decision_replaced_after_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = _load_report_module()
+    root, program_id, _unit_id = _make_workspace(tmp_path)
+    decisions_path = root / "kb" / "programs" / program_id / "workflow" / "decisions.yaml"
+    original_load = report.load_decisions
+
+    def replace_after_decision_load(*args, **kwargs):
+        result = original_load(*args, **kwargs)
+        payload = load_yaml(decisions_path)
+        payload["items"][0]["payload"]["decision"]["text"] = "REPLACEMENT DECISION"
+        write_yaml_if_changed(decisions_path, payload)
+        return result
+
+    monkeypatch.setattr(report, "load_decisions", replace_after_decision_load)
+
+    inputs = report.load_report_inputs(root, program_id)
+
+    _assert_aggregate_pending_report(
+        report,
+        inputs,
+        absent=["Use the grounded baseline", "The method improves benchmark success rate."],
+    )
+
+
+def test_final_gate_discards_text_built_before_source_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = _load_report_module()
+    root, program_id, unit_id = _make_workspace(tmp_path)
+    inputs = report.load_report_inputs(root, program_id)
+    record_path = root / "kb" / "units" / "papers" / unit_id / "record.yaml"
+    original_render = report._render_report_document
+    swapped = False
+
+    def replace_after_text_construction(*args, **kwargs):
+        nonlocal swapped
+        text = original_render(*args, **kwargs)
+        if not swapped:
+            swapped = True
+            payload = load_yaml(record_path)
+            payload["title"] = "REPLACEMENT AFTER RENDER"
+            write_yaml_if_changed(record_path, payload)
+        return text
+
+    monkeypatch.setattr(report, "_render_report_document", replace_after_text_construction)
+
+    text = report.render_report("Stage Summary: aggregate-gate", inputs, report_kind="stage-summary")
+
+    assert swapped
+    assert "报告生成期间正式判断来源已变化" in text
+    assert "Grounded Paper" not in text
+    assert "The method improves benchmark success rate." not in text
+    assert "Use the grounded baseline" not in text
+
+
 def test_outline_cli_writes_report_without_raw_command_stdout(tmp_path: Path, monkeypatch, capsys) -> None:
     report = _load_report_module()
     root, program_id, _ = _make_workspace(tmp_path)

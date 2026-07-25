@@ -9,6 +9,7 @@ from research.common import write_yaml_if_changed
 from research.evidence import build_verification_receipt
 from research.judgements import (
     load_bound_judgement,
+    load_bound_judgement_batch_snapshot,
     load_bound_judgement_snapshot,
     pending_judgement_card,
 )
@@ -122,6 +123,71 @@ def test_side_snapshot_rejects_duplicate_added_after_capture(tmp_path: Path) -> 
     assert not bound.is_current()
     with pytest.raises(ValueError, match="not globally unique"):
         load_bound_judgement_snapshot(tmp_path, subject)
+
+
+@pytest.mark.parametrize("container_count", [4, 8, 16])
+def test_side_judgement_batch_capture_is_linear(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    container_count: int,
+) -> None:
+    subjects: list[dict[str, str]] = []
+    for index in range(container_count):
+        program_id = f"p-batch-{index}"
+        decision_id = f"decision-batch-{index}"
+        path = tmp_path / f"kb/programs/{program_id}/workflow/decisions.yaml"
+        path.parent.mkdir(parents=True)
+        write_yaml_if_changed(
+            path,
+            {
+                "items": [
+                    {
+                        "id": decision_id,
+                        "kind": "program_decision",
+                        "owner": "research-orchestrator",
+                        "program_id": program_id,
+                    }
+                ]
+            },
+        )
+        subjects.append({"kind": "program_decision", "id": decision_id})
+
+    original_snapshot = judgement_module.snapshot_project_file
+    captures = 0
+
+    def count_snapshot(*args, **kwargs):
+        nonlocal captures
+        captures += 1
+        return original_snapshot(*args, **kwargs)
+
+    monkeypatch.setattr(judgement_module, "snapshot_project_file", count_snapshot)
+
+    batch = load_bound_judgement_batch_snapshot(tmp_path, subjects)
+
+    assert captures == container_count
+    assert [batch.resolve(subject).record["id"] for subject in subjects] == [
+        subject["id"] for subject in subjects
+    ]
+    assert batch.is_current()
+    assert captures == container_count
+
+
+@pytest.mark.skipif(not Path("/private/var").exists(), reason="macOS /var alias contract")
+@pytest.mark.parametrize("kind", ["program_decision", "survey_judgement"])
+def test_side_snapshot_alias_root_matches_canonical_root(tmp_path: Path, kind: str) -> None:
+    canonical_root = tmp_path.resolve()
+    if not str(canonical_root).startswith("/private/var/"):
+        pytest.skip("temporary directory is not under the macOS /var alias")
+    alias_root = Path("/var") / canonical_root.relative_to("/private/var")
+    path, record, subject = _side_case(canonical_root, kind)
+
+    canonical = load_bound_judgement_snapshot(canonical_root, subject)
+    alias = load_bound_judgement_snapshot(alias_root, subject)
+
+    assert alias.path == path
+    assert alias.record == record == canonical.record
+    assert alias.is_current()
+    assert canonical.is_current()
 
 
 @pytest.mark.parametrize("fault", ["malformed", "duplicate-key", "symlink"])
