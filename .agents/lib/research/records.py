@@ -79,6 +79,7 @@ _UNIT_ARTIFACT_TOTAL_MAX_BYTES = 64 * 1024 * 1024
 _UNIT_TREE_MAX_ENTRIES = 4096
 _UNIT_TREE_MAX_DEPTH = 16
 _SAFE_UNIT_DIRECTORY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,254}")
+_SAFE_EVIDENCE_SOURCE_KIND = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}")
 
 
 @dataclass(frozen=True)
@@ -478,7 +479,7 @@ def snapshot_project_file(
         directory_capabilities = _directory_capability_chain(chain)
 
         def validate_current() -> bool:
-            current = _open_project_directory_chain(project_root, parts[:-1])
+            current = _open_project_directory_chain(root_path, parts[:-1])
             if current is None:
                 return False
             current_root, current_chain = current
@@ -586,6 +587,23 @@ def snapshot_project_evidence_source(
     artifacts: Sequence[str],
 ) -> EvidenceSourceSnapshot | None:
     """Capture selected artifacts beneath one shared anchored project directory."""
+    if (
+        not isinstance(source_unit_id, str)
+        or not source_unit_id
+        or source_unit_id != source_unit_id.strip()
+        or not isinstance(kind, str)
+        or _SAFE_EVIDENCE_SOURCE_KIND.fullmatch(kind) is None
+        or isinstance(artifacts, (str, bytes, bytearray))
+        or not isinstance(artifacts, Sequence)
+        or not artifacts
+        or any(not isinstance(item, str) for item in artifacts)
+    ):
+        return None
+    identity_parts = source_unit_id.split(":")
+    if not 1 <= len(identity_parts) <= 2 or any(
+        _SAFE_UNIT_DIRECTORY.fullmatch(part) is None for part in identity_parts
+    ):
+        return None
     try:
         canonical_base, base_parts = _canonical_project_parts(base_relative_path)
         requested = sorted({_canonical_artifact_parts(item)[0] for item in artifacts})
@@ -616,21 +634,68 @@ def snapshot_project_evidence_source(
                 return None
             snapshots.append(snapshot)
         captured = tuple(snapshots)
-        if not all(_artifact_snapshot_is_current(root_path, chain, item) for item in captured):
+
+        def recapture_artifacts(
+            current_root: Path,
+            current_chain: Sequence[_AnchoredDirectory],
+        ) -> tuple[EvidenceArtifactSnapshot, ...] | None:
+            current_snapshots: list[EvidenceArtifactSnapshot] = []
+            for item in captured:
+                current_snapshot = _read_project_artifact_from_chain(
+                    current_root,
+                    current_chain,
+                    base_parts=base_parts,
+                    source_unit_id=source_unit_id,
+                    artifact=item.artifact,
+                )
+                if current_snapshot is None:
+                    return None
+                current_snapshots.append(current_snapshot)
+            return tuple(current_snapshots)
+
+        def artifacts_match(
+            current: tuple[EvidenceArtifactSnapshot, ...] | None,
+        ) -> bool:
+            if current is None or len(current) != len(captured):
+                return False
+            return all(
+                (
+                    current_item.source_unit_id,
+                    current_item.artifact,
+                    current_item.raw_bytes,
+                    current_item.byte_sha256,
+                    current_item.path,
+                    tuple(identity[:3] for identity in current_item.directory_identities),
+                    current_item.file_identity,
+                )
+                == (
+                    captured_item.source_unit_id,
+                    captured_item.artifact,
+                    captured_item.raw_bytes,
+                    captured_item.byte_sha256,
+                    captured_item.path,
+                    tuple(identity[:3] for identity in captured_item.directory_identities),
+                    captured_item.file_identity,
+                )
+                for current_item, captured_item in zip(current, captured)
+            )
+
+        if (
+            not artifacts_match(recapture_artifacts(root_path, chain))
+            or not _anchored_chain_is_current(root_path, chain)
+        ):
             return None
 
         def validate_current() -> bool:
-            current = _open_project_directory_chain(project_root, base_parts)
+            current = _open_project_directory_chain(root_path, base_parts)
             if current is None:
                 return False
             current_root, current_chain = current
             try:
                 return (
                     _directory_capability_chain(current_chain) == base_capabilities
-                    and all(
-                        _artifact_snapshot_is_current(current_root, current_chain, item)
-                        for item in captured
-                    )
+                    and artifacts_match(recapture_artifacts(current_root, current_chain))
+                    and _anchored_chain_is_current(current_root, current_chain)
                 )
             finally:
                 _close_anchored_chain(current_chain)
@@ -1431,10 +1496,19 @@ def trusted_claim_source_roots(
             )
             continue
         if source_unit_id.startswith("program:"):
-            roots[source_unit_id] = trusted_program_root(
+            program_id = source_unit_id.split(":", 1)[1]
+            if _SAFE_UNIT_DIRECTORY.fullmatch(program_id) is None:
+                raise ValueError("program evidence source id is not canonical")
+            program_snapshot = snapshot_project_evidence_source(
                 project_root,
-                source_unit_id.split(":", 1)[1],
+                Path("kb") / "programs" / program_id,
+                source_unit_id=source_unit_id,
+                kind="program",
+                artifacts=requested_artifacts,
             )
+            if program_snapshot is None:
+                raise ValueError("program evidence cannot be captured canonically")
+            roots[source_unit_id] = program_snapshot
             continue
         matches: list[CanonicalUnitSnapshot] = []
         for source_kind in UNIT_KIND_DIRS:

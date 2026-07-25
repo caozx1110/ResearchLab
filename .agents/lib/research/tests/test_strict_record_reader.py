@@ -16,7 +16,11 @@ from pathlib import Path
 import pytest
 
 from research.common import write_yaml_if_changed
-from research.evidence import build_verification_receipt, verification_receipt_violations
+from research.evidence import (
+    EvidenceSourceSnapshot,
+    build_verification_receipt,
+    verification_receipt_violations,
+)
 from research.judgements import discover_pending_judgements
 from research.index import search_records
 from research.paths import record_path
@@ -221,6 +225,217 @@ def test_project_evidence_source_uses_one_base_capability(tmp_path: Path) -> Non
     program.rename(parked)
     shutil.copytree(parked, program)
     assert not snapshot.is_current()
+
+
+def test_project_snapshots_keep_capture_root_after_chdir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture_parent = tmp_path / "capture-parent"
+    root = capture_parent / "workspace"
+    program = root / "kb" / "programs" / "program-a"
+    artifact = program / "evidence" / "first.md"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("stable evidence\n", encoding="utf-8")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+
+    monkeypatch.chdir(capture_parent)
+    file_snapshot = records_module.snapshot_project_file(
+        Path("workspace"),
+        "kb/programs/program-a/evidence/first.md",
+    )
+    source_snapshot = records_module.snapshot_project_evidence_source(
+        Path("workspace"),
+        "kb/programs/program-a",
+        source_unit_id="program:program-a",
+        kind="program",
+        artifacts=["evidence/first.md"],
+    )
+
+    assert file_snapshot is not None
+    assert source_snapshot is not None
+    monkeypatch.chdir(elsewhere)
+    assert file_snapshot.is_current()
+    assert source_snapshot.is_current()
+    artifact.write_text("changed evidence\n", encoding="utf-8")
+    assert not file_snapshot.is_current()
+    assert not source_snapshot.is_current()
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"artifacts": "evidence/first.md"},
+        {"artifacts": b"evidence/first.md"},
+        {"artifacts": []},
+        {"artifacts": [123]},
+        {"source_unit_id": ""},
+        {"source_unit_id": " program:program-a"},
+        {"source_unit_id": "program::program-a"},
+        {"source_unit_id": "program:program/a"},
+        {"kind": ""},
+        {"kind": " program"},
+        {"kind": "program/other"},
+    ],
+)
+def test_project_evidence_source_rejects_noncanonical_inputs(
+    tmp_path: Path,
+    overrides: dict[str, object],
+) -> None:
+    root = tmp_path / "workspace"
+    artifact = root / "kb" / "programs" / "program-a" / "evidence" / "first.md"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("stable evidence\n", encoding="utf-8")
+    arguments: dict[str, object] = {
+        "source_unit_id": "program:program-a",
+        "kind": "program",
+        "artifacts": ["evidence/first.md"],
+    }
+    arguments.update(overrides)
+
+    assert records_module.snapshot_project_evidence_source(
+        root,
+        "kb/programs/program-a",
+        **arguments,
+    ) is None
+
+
+def _program_evidence_consumer(
+    source_unit_id: str,
+    artifacts: list[tuple[str, str]],
+) -> dict[str, object]:
+    return {
+        "id": "program-decision-consumer",
+        "kind": "program_decision",
+        "payload": {
+            "claims": [
+                {
+                    "id": f"claim-{index}",
+                    "text": quote,
+                    "claim_type": "evaluation",
+                    "evidence_refs": [
+                        {
+                            "source_unit_id": source_unit_id,
+                            "artifact": artifact,
+                            "locator": "line:1",
+                            "quote": quote,
+                        }
+                    ],
+                }
+                for index, (artifact, quote) in enumerate(artifacts, start=1)
+            ]
+        },
+    }
+
+
+def test_trusted_program_evidence_captures_all_requested_artifacts_once(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "workspace"
+    program = root / "kb" / "programs" / "program-a"
+    first = program / "evidence" / "first.md"
+    second = program / "workflow" / "second.yaml"
+    first.parent.mkdir(parents=True)
+    second.parent.mkdir(parents=True)
+    first.write_text("first stable evidence\n", encoding="utf-8")
+    second.write_text("text: second stable evidence\n", encoding="utf-8")
+    consumer = _program_evidence_consumer(
+        "program:program-a",
+        [
+            ("workflow/second.yaml", "second stable evidence"),
+            ("evidence/first.md", "first stable evidence"),
+        ],
+    )
+
+    roots = trusted_claim_source_roots(root, consumer)
+
+    assert set(roots) == {"program:program-a"}
+    snapshot = roots["program:program-a"]
+    assert isinstance(snapshot, EvidenceSourceSnapshot)
+    assert snapshot.path == program
+    assert [item.artifact for item in snapshot.artifacts] == [
+        "evidence/first.md",
+        "workflow/second.yaml",
+    ]
+    assert [item.raw_bytes for item in snapshot.artifacts] == [
+        b"first stable evidence\n",
+        b"text: second stable evidence\n",
+    ]
+    assert snapshot.is_current()
+    (program / "workflow" / "unrelated.yaml").write_text("status: new\n", encoding="utf-8")
+    assert snapshot.is_current()
+
+
+@pytest.mark.parametrize(
+    ("source_unit_id", "artifact"),
+    [
+        ("program:program-a", "../program-b/evidence/secret.md"),
+        ("program:program-a/../program-b", "evidence/secret.md"),
+    ],
+)
+def test_trusted_program_evidence_rejects_cross_program_paths(
+    tmp_path: Path,
+    source_unit_id: str,
+    artifact: str,
+) -> None:
+    root = tmp_path / "workspace"
+    first = root / "kb" / "programs" / "program-a" / "evidence" / "first.md"
+    secret = root / "kb" / "programs" / "program-b" / "evidence" / "secret.md"
+    first.parent.mkdir(parents=True)
+    secret.parent.mkdir(parents=True)
+    first.write_text("program A evidence\n", encoding="utf-8")
+    secret.write_text("program B secret\n", encoding="utf-8")
+    consumer = _program_evidence_consumer(
+        source_unit_id,
+        [(artifact, "program B secret")],
+    )
+
+    with pytest.raises(ValueError, match="program evidence"):
+        trusted_claim_source_roots(root, consumer)
+
+
+def test_trusted_program_evidence_directory_swap_cannot_mix_versions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "workspace"
+    program = root / "kb" / "programs" / "program-a"
+    evidence = program / "evidence"
+    evidence.mkdir(parents=True)
+    (evidence / "first.md").write_text("version A first\n", encoding="utf-8")
+    (evidence / "second.md").write_text("version A second\n", encoding="utf-8")
+    replacement = tmp_path / "replacement-program"
+    replacement_evidence = replacement / "evidence"
+    replacement_evidence.mkdir(parents=True)
+    (replacement_evidence / "first.md").write_text("version B first\n", encoding="utf-8")
+    (replacement_evidence / "second.md").write_text("version B second\n", encoding="utf-8")
+    parked = tmp_path / "parked-program"
+    consumer = _program_evidence_consumer(
+        "program:program-a",
+        [
+            ("evidence/first.md", "version A first"),
+            ("evidence/second.md", "version A second"),
+        ],
+    )
+    original_open = records_module.os.open
+    swapped = False
+
+    def racing_open(name, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        if name == "second.md" and dir_fd is not None and not swapped:
+            swapped = True
+            program.rename(parked)
+            replacement.rename(program)
+        return original_open(name, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(records_module.os, "open", racing_open)
+
+    with pytest.raises(ValueError, match="program evidence cannot be captured canonically"):
+        trusted_claim_source_roots(root, consumer)
+    assert swapped
+    assert (parked / "evidence" / "first.md").read_text(encoding="utf-8") == "version A first\n"
+    assert (program / "evidence" / "second.md").read_text(encoding="utf-8") == "version B second\n"
 
 
 def test_project_file_snapshot_rejects_unsafe_special_and_oversize_inputs(
