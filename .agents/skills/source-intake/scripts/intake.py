@@ -32,7 +32,7 @@ if __name__ == "__main__":
 
 from research.common import add_project_root_argument, confirm_command as shared_confirm_command, extract_pdf_record, load_yaml, parse_arxiv_id, print_resolved_project_roots, skill_script_for_command
 from research.confirm import require_user_authorization
-from research.journal import journal_subprocess_env, mutation_transaction, target_digest
+from research.journal import journal_subprocess_env, mutation_transaction
 from research.intake_cli import add_intake_add_arguments
 from research.preference_selection import operation_contract, resolve_operation_preferences
 from research.core import (
@@ -66,6 +66,7 @@ from research.core import (
     write_record,
 )
 from research.surveys import literature_candidate_identity_digest
+from research.sources import literature_stage_snapshot
 
 
 def infer_title(source: str) -> str:
@@ -614,26 +615,37 @@ def _candidate_binding_digest(
     )
 
 
-def _assert_expected_literature_stage_digest(root: Path, args: argparse.Namespace) -> None:
+def _strict_literature_stage_candidate(
+    root: Path,
+    args: argparse.Namespace,
+) -> tuple[dict, dict, str]:
     expected = str(getattr(args, "expected_literature_stage_digest", "") or "")
-    if not expected:
-        return
     if re.fullmatch(r"[0-9a-f]{64}", expected) is None:
         raise SystemExit("Expected literature stage digest is invalid.")
     stage_id = str(getattr(args, "stage_id", "") or "")
     candidate_id = str(getattr(args, "candidate_id", "") or "")
     if not stage_id or not candidate_id:
         raise SystemExit("Expected literature stage digest requires an exact staged candidate.")
-    stage = load_search_stage(root, stage_id)
+    snapshot = literature_stage_snapshot(root, stage_id)
+    stage = dict(snapshot["payload"])
     if stage.get("entry_skill") != "literature-search" or stage.get("source_kind") != "paper":
         raise SystemExit("Expected literature stage digest requires a literature-search paper stage.")
-    path = search_stage_path(root, stage_id)
-    try:
-        key = path.relative_to(root / "kb").as_posix()
-    except ValueError as exc:
-        raise SystemExit("Selected literature stage escaped the workspace.") from exc
-    if target_digest(root, key) != expected:
+    if str(snapshot["byte_sha256"]) != expected:
         raise SystemExit("Selected literature stage changed before canonical intake.")
+    matches = [
+        dict(item)
+        for item in stage.get("candidates", [])
+        if isinstance(item, dict) and item.get("candidate_id") == candidate_id
+    ]
+    if len(matches) != 1:
+        raise SystemExit("Selected literature candidate is missing or ambiguous.")
+    return stage, matches[0], str(snapshot["byte_sha256"])
+
+
+def _assert_expected_literature_stage_digest(root: Path, args: argparse.Namespace) -> None:
+    expected = str(getattr(args, "expected_literature_stage_digest", "") or "")
+    if expected:
+        _strict_literature_stage_candidate(root, args)
 
 
 def _prepared_record_binding_digest(
@@ -815,8 +827,13 @@ def _resolve_intake_request(
     if str(getattr(args, "stage_id", "") or "") and str(
         getattr(args, "candidate_id", "") or ""
     ):
-        staged_candidate = resolve_search_candidate(root, args.stage_id, args.candidate_id)
-        staged_search = load_search_stage(root, args.stage_id)
+        if str(getattr(args, "expected_literature_stage_digest", "") or ""):
+            staged_search, staged_candidate, _digest = _strict_literature_stage_candidate(
+                root, args
+            )
+        else:
+            staged_candidate = resolve_search_candidate(root, args.stage_id, args.candidate_id)
+            staged_search = load_search_stage(root, args.stage_id)
         if args.kind != str(staged_search.get("source_kind") or ""):
             raise SystemExit("A staged candidate must be materialized with its recorded source kind.")
         if staged_search.get("entry_skill") == "literature-search":
@@ -1015,8 +1032,13 @@ def _prepare_intake_snapshot(root: Path, args: argparse.Namespace) -> dict[str, 
     token, prepared_root = _new_prepared_dir(root)
     try:
         if staged_candidate is not None and staged_search is not None:
-            current_stage = load_search_stage(root, args.stage_id)
-            current_candidate = resolve_search_candidate(root, args.stage_id, args.candidate_id)
+            if str(getattr(args, "expected_literature_stage_digest", "") or ""):
+                current_stage, current_candidate, _digest = _strict_literature_stage_candidate(
+                    root, args
+                )
+            else:
+                current_stage = load_search_stage(root, args.stage_id)
+                current_candidate = resolve_search_candidate(root, args.stage_id, args.candidate_id)
             if _candidate_binding_digest(stage=current_stage, candidate=current_candidate) != candidate_digest:
                 raise RuntimeError("The selected staged candidate changed while intake was prepared.")
         preliminary_record = default_record(
@@ -1470,15 +1492,17 @@ def _attach_duplicate_selection_and_mark(
         "source-intake-attach-duplicate-selection",
         [record_path, stage_path],
     ):
-        _assert_expected_literature_stage_digest(root, args)
+        if str(getattr(args, "expected_literature_stage_digest", "") or ""):
+            stage, candidate, _digest = _strict_literature_stage_candidate(root, args)
+        else:
+            stage = load_search_stage(root, args.stage_id)
+            candidate = resolve_search_candidate(root, args.stage_id, args.candidate_id)
         current, _ = locate_record(
             root,
             str(duplicate.get("id") or ""),
             kind=str(duplicate.get("kind") or args.kind),
             fuzzy=False,
         )
-        stage = load_search_stage(root, args.stage_id)
-        candidate = resolve_search_candidate(root, args.stage_id, args.candidate_id)
         current_binding_digest = _path_snapshot_digest(record_path)
         if (
             not expected_record_binding_digest

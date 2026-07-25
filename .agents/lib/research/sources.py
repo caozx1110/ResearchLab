@@ -2216,9 +2216,15 @@ def _canonical_literature_stage(
             result.append({"replaced_at": replaced_at, value_key: canonical})
         return result
 
+    def exact_frontier_history_action(value: object) -> dict[str, Any]:
+        canonical = _sanitize_search_frontier([value])
+        if len(canonical) != 1:
+            raise SystemExit("Literature search frontier_history is not canonical.")
+        return canonical[0]
+
     for history_field, value_key, sanitizer in (
         ("coverage_history", "coverage", _sanitize_search_coverage),
-        ("frontier_history", "action", lambda value: _sanitize_search_frontier([value])[0]),
+        ("frontier_history", "action", exact_frontier_history_action),
         ("stop_history", "stop", _sanitize_search_stop),
     ):
         if history_field in payload and exact_replacement_history(
@@ -2446,6 +2452,17 @@ def literature_stage_snapshot(project_root: Path, stage_id: str) -> dict[str, An
     }
 
 
+def literature_candidate_semantic_digest(candidate: Mapping[str, object]) -> str:
+    """Bind every candidate field except the mutable materialization marker."""
+    return _exact_search_binding_digest(
+        {
+            key: value
+            for key, value in candidate.items()
+            if key not in {"status", "record_id"}
+        }
+    )
+
+
 def literature_search_continuations(
     project_root: Path,
     *,
@@ -2482,6 +2499,7 @@ def literature_search_continuations(
             exact_candidate = {
                 "candidate_id": str(candidate.get("candidate_id") or ""),
                 "identity_digest": _exact_search_binding_digest(identity),
+                "semantic_digest": literature_candidate_semantic_digest(candidate),
                 "screening_decision": decision,
                 "screening_status": str(screening.get("status") or ""),
                 "screening_phase": str(screening.get("phase") or ""),
@@ -4766,6 +4784,7 @@ __all__ = [
     "build_search_stage_id",
     "load_search_stage",
     "literature_stage_snapshot",
+    "literature_candidate_semantic_digest",
     "literature_search_continuations",
     "stage_search_results",
     "resolve_search_candidate",

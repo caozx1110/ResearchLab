@@ -769,6 +769,26 @@ def test_literature_stage_enumeration_rejects_unknown_top_level_field(
         orchestrate.portfolio_candidate_snapshot(root)
 
 
+def test_literature_stage_enumeration_rejects_invalid_frontier_history_without_crashing(
+    tmp_path: Path,
+) -> None:
+    orchestrate = _load_orchestrator("orchestrator_literature_bad_frontier_history")
+    root = _workspace(tmp_path)
+    stage_path = _stage_literature_search(
+        root,
+        query="invalid frontier replacement history",
+        stop_reason="in_progress",
+    )
+    malformed = load_yaml(stage_path)
+    malformed["frontier_history"] = [
+        {"replaced_at": "2025-01-01T00:00:00+00:00", "action": {}}
+    ]
+    write_yaml_if_changed(stage_path, malformed)
+
+    with pytest.raises(SystemExit, match="frontier|history|canonical"):
+        orchestrate.portfolio_candidate_snapshot(root)
+
+
 @pytest.mark.parametrize("mutation", ["content", "revision", "state"])
 def test_active_monitor_binding_change_stales_existing_portfolio_decision(
     tmp_path: Path,

@@ -83,13 +83,46 @@ def _terminal_stage(root: Path, candidate_ids: tuple[str, ...] = ("paper-a",)) -
 
 
 def _selection(stage: Path, candidate_ids: tuple[str, ...] = ("paper-a",)) -> dict[str, object]:
+    stage_payload = load_yaml(stage)
+    candidates = {
+        str(item["candidate_id"]): item
+        for item in stage_payload["candidates"]
+        if item["candidate_id"] in candidate_ids
+    }
+
+    def semantic_digest(candidate: dict[str, object]) -> str:
+        projection = {
+            key: value for key, value in candidate.items() if key not in {"status", "record_id"}
+        }
+        return hashlib.sha256(
+            json.dumps(
+                projection,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
     return {
-        "schema": "literature-selection/v1",
+        "schema": "literature-selection/v2",
         "stage_id": stage.stem,
         "candidate_ids": list(candidate_ids),
         "user_authorization": "保留我刚才选中的这些论文。",
         "authorization_source": "user_message",
         "preference_selection_ids": {},
+        "display_binding": {
+            "stage_byte_sha256": hashlib.sha256(stage.read_bytes()).hexdigest(),
+            "candidate_bindings": [
+                {
+                    "candidate_id": candidate_id,
+                    "identity_digest": literature_candidate_identity_digest(
+                        candidates[candidate_id]
+                    ),
+                    "semantic_digest": semantic_digest(candidates[candidate_id]),
+                }
+                for candidate_id in candidate_ids
+            ],
+        },
     }
 
 
@@ -428,6 +461,161 @@ def test_stage_change_between_adapter_binding_and_owner_use_fails_closed(tmp_pat
     assert _snapshot(tmp_path / "kb/units") == before_units
 
 
+def test_display_binding_rejects_candidate_change_before_adapter_starts(
+    tmp_path: Path,
+) -> None:
+    module = _search_module()
+    stage = _terminal_stage(tmp_path)
+    payload = _selection(stage)
+    changed = load_yaml(stage)
+    changed["candidates"][0]["title"] = "Different paper after display"
+    changed["candidates"][0]["url"] = "https://example.test/rebound-after-display"
+    write_yaml_if_changed(stage, changed)
+    calls: list[object] = []
+
+    with pytest.raises(SystemExit, match="display|shown|changed|stale"):
+        module.materialize_selection(
+            tmp_path,
+            payload,
+            protocol_name="display-stale.json",
+            owner_runner=lambda *args, **kwargs: calls.append((args, kwargs)),
+        )
+
+    assert calls == []
+    assert not (tmp_path / "kb/.runtime/literature-selection/display-stale.json").exists()
+
+
+def test_stale_mixed_retry_cannot_use_one_old_receipt_to_bypass_display_binding(
+    tmp_path: Path,
+) -> None:
+    module = _search_module()
+    stage = _terminal_stage(tmp_path, ("paper-a", "paper-b"))
+    stale_payload = _selection(stage, ("paper-a", "paper-b"))
+    _write_owner_record(
+        tmp_path,
+        stage_id=stage.stem,
+        candidate_id="paper-a",
+        user_authorization=str(stale_payload["user_authorization"]),
+        record_id="p-only-first-candidate",
+    )
+    calls: list[object] = []
+
+    with pytest.raises(SystemExit, match="display|shown|changed|stale"):
+        module.materialize_selection(
+            tmp_path,
+            stale_payload,
+            protocol_name="mixed-stale.json",
+            owner_runner=lambda *args, **kwargs: calls.append((args, kwargs)),
+        )
+
+    assert calls == []
+    assert not (tmp_path / "kb/.runtime/literature-selection/mixed-stale.json").exists()
+
+
+@pytest.mark.parametrize("returncode", [23, 124])
+def test_canonical_owner_commit_is_success_even_when_process_outcome_fails(
+    tmp_path: Path,
+    returncode: int,
+) -> None:
+    module = _search_module()
+    stage = _terminal_stage(tmp_path)
+    payload = _selection(stage)
+
+    def commit_then_fail(argv, *, env):
+        del env
+        _write_owner_record(
+            tmp_path,
+            stage_id=stage.stem,
+            candidate_id="paper-a",
+            user_authorization=str(payload["user_authorization"]),
+            record_id="p-committed-despite-process",
+        )
+        return subprocess.CompletedProcess(argv, returncode, stdout=b"", stderr=b"post-commit")
+
+    result = module.materialize_selection(
+        tmp_path,
+        payload,
+        protocol_name=f"committed-{returncode}.json",
+        owner_runner=commit_then_fail,
+    )
+
+    assert result["exit_code"] == 0
+    assert result["counts"]["newly_materialized"] == 1
+    assert result["counts"]["failed"] == 0
+
+
+def test_canonical_owner_commit_is_success_even_when_runner_raises(tmp_path: Path) -> None:
+    module = _search_module()
+    stage = _terminal_stage(tmp_path)
+    payload = _selection(stage)
+
+    def commit_then_raise(argv, *, env):
+        del argv, env
+        _write_owner_record(
+            tmp_path,
+            stage_id=stage.stem,
+            candidate_id="paper-a",
+            user_authorization=str(payload["user_authorization"]),
+            record_id="p-committed-before-exception",
+        )
+        raise subprocess.TimeoutExpired(("owner",), 900)
+
+    result = module.materialize_selection(
+        tmp_path,
+        payload,
+        protocol_name="committed-exception.json",
+        owner_runner=commit_then_raise,
+    )
+
+    assert result["exit_code"] == 0
+    assert result["counts"]["newly_materialized"] == 1
+    assert result["counts"]["failed"] == 0
+
+
+def test_old_append_only_selection_receipt_survives_later_display_update(
+    tmp_path: Path,
+) -> None:
+    module = _search_module()
+    stage = _terminal_stage(tmp_path)
+    authorization = "保留我刚才选中的这些论文。"
+    _write_owner_record(
+        tmp_path,
+        stage_id=stage.stem,
+        candidate_id="paper-a",
+        user_authorization=authorization,
+        record_id="p-shared-selection-history",
+    )
+    payload = _selection(stage)
+    record_path = tmp_path / "kb/units/papers/p-shared-selection-history/record.yaml"
+    record = load_yaml(record_path)
+    record["payload"]["source_search"]["selections"].append(
+        {
+            "stage_id": "another-stage",
+            "candidate_id": "paper-z",
+            "candidate_identity_digest": "a" * 64,
+            "user_authorization": "第二次选择另一篇论文。",
+            "authorization_source": "user_message",
+        }
+    )
+    record["payload"]["source_search"]["user_selection"] = {
+        "user_authorization": "第二次选择另一篇论文。",
+        "authorization_source": "user_message",
+    }
+    write_yaml_if_changed(record_path, record)
+
+    result = module.materialize_selection(
+        tmp_path,
+        payload,
+        protocol_name="old-receipt.json",
+        owner_runner=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("an exact old receipt must skip the owner")
+        ),
+    )
+
+    assert result["exit_code"] == 0
+    assert result["counts"]["already_materialized"] == 1
+
+
 def test_source_intake_owner_rejects_adapter_stage_digest_before_fetch_or_mutation(
     tmp_path: Path,
 ) -> None:
@@ -555,6 +743,57 @@ def test_selection_payload_loader_rejects_symlink_oversize_malformed_and_unknown
     with pytest.raises(SystemExit, match="unsupported"):
         module._load_selection_payload(unknown)
 
+    duplicate = tmp_path / "duplicate.json"
+    duplicate.write_text('{"schema":"one","schema":"two"}', encoding="utf-8")
+    with pytest.raises(SystemExit, match="valid JSON"):
+        module._load_selection_payload(duplicate)
+
+
+def test_adapter_rejects_duplicate_yaml_keys_before_owner_or_protocol(tmp_path: Path) -> None:
+    module = _search_module()
+    stage = _terminal_stage(tmp_path)
+    payload = _selection(stage)
+    stage.write_text(stage.read_text(encoding="utf-8") + "status: staged\n", encoding="utf-8")
+    calls: list[object] = []
+
+    with pytest.raises(SystemExit, match="stage|unsafe|canonical"):
+        module.materialize_selection(
+            tmp_path,
+            payload,
+            protocol_name="duplicate-yaml.json",
+            owner_runner=lambda *args, **kwargs: calls.append((args, kwargs)),
+        )
+
+    assert calls == []
+    assert not (tmp_path / "kb/.runtime/literature-selection/duplicate-yaml.json").exists()
+
+
+@pytest.mark.parametrize("replacement", ["symlink", "fifo"])
+def test_adapter_rejects_unsafe_stage_leaf_before_owner(
+    tmp_path: Path,
+    replacement: str,
+) -> None:
+    module = _search_module()
+    stage = _terminal_stage(tmp_path)
+    payload = _selection(stage)
+    original = tmp_path / "original-stage.yaml"
+    stage.replace(original)
+    if replacement == "symlink":
+        stage.symlink_to(original)
+    else:
+        os.mkfifo(stage)
+    calls: list[object] = []
+
+    with pytest.raises(SystemExit, match="stage|unsafe|regular"):
+        module.materialize_selection(
+            tmp_path,
+            payload,
+            protocol_name=f"unsafe-{replacement}.json",
+            owner_runner=lambda *args, **kwargs: calls.append((args, kwargs)),
+        )
+
+    assert calls == []
+
 
 def test_multi_selection_partial_failure_reports_exact_counts_and_retries_safely(
     tmp_path: Path,
@@ -599,7 +838,7 @@ def test_multi_selection_partial_failure_reports_exact_counts_and_retries_safely
     retry_runner, calls = _success_runner(tmp_path)
     second = module.materialize_selection(
         tmp_path,
-        payload,
+        _selection(stage, ("paper-a", "paper-b")),
         protocol_name="retry.json",
         owner_runner=retry_runner,
     )

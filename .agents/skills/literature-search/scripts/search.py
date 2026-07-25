@@ -33,12 +33,14 @@ if __name__ == "__main__":
 from research.common import add_project_root_argument, load_yaml
 from research.confirm import require_user_authorization
 from research.core import locate_record, project_root
-from research.journal import journal_subprocess_env, target_digest
+from research.journal import journal_subprocess_env
 from research.paths import search_stage_path
 from research.preference_selection import resolve_operation_preferences
 from research.sources import (
     _validate_search_stage_target,
     build_literature_search_stage_id,
+    literature_candidate_semantic_digest,
+    literature_stage_snapshot,
     load_search_stage,
     resolve_search_candidate,
     stage_search_results,
@@ -59,6 +61,7 @@ SELECTION_PAYLOAD_KEYS = {
     "user_authorization",
     "authorization_source",
     "preference_selection_ids",
+    "display_binding",
 }
 SAFE_SELECTION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 SAFE_PROTOCOL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,126}\.json")
@@ -297,9 +300,17 @@ def _read_bounded_regular_json(path: Path, *, limit: int, label: str) -> dict[st
             raise SystemExit(f"{label} changed while it was read.")
     finally:
         os.close(descriptor)
+    def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate JSON object key")
+            result[key] = value
+        return result
+
     try:
-        payload = json.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
+        payload = json.loads(data.decode("utf-8"), object_pairs_hook=unique_object)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
         raise SystemExit(f"{label} is not valid JSON.") from None
     if not isinstance(payload, dict):
         raise SystemExit(f"{label} must be a JSON object.")
@@ -318,22 +329,11 @@ def _load_selection_payload(path: Path) -> dict[str, Any]:
 
 
 def _literature_stage_digest(root: Path, stage_id: str) -> str:
-    path = search_stage_path(root, stage_id)
-    _validate_search_stage_target(root, path)
-    try:
-        key = path.relative_to(root / "kb").as_posix()
-    except ValueError as exc:
-        raise SystemExit("Literature selection stage escaped the workspace.") from exc
-    digest = target_digest(root, key)
-    if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
-        raise SystemExit("Literature selection stage is unavailable or unsafe.")
-    return digest
+    return str(literature_stage_snapshot(root, stage_id)["byte_sha256"])
 
 
 def _candidate_semantic_digest(candidate: Mapping[str, object]) -> str:
-    return _canonical_digest(
-        {key: value for key, value in candidate.items() if key not in {"status", "record_id"}}
-    )
+    return literature_candidate_semantic_digest(candidate)
 
 
 def _valid_candidate_update_event(
@@ -441,12 +441,6 @@ def _selection_receipt_record_id(
     selections = source_search.get("selections")
     if not isinstance(selections, list) or expected not in selections:
         return ""
-    user_selection = source_search.get("user_selection")
-    if not isinstance(user_selection, dict) or user_selection != {
-        "user_authorization": user_authorization,
-        "authorization_source": "user_message",
-    }:
-        return ""
     if preference_selection_id:
         direct = payload.get("preference_binding")
         direct_id = (
@@ -466,10 +460,9 @@ def _selection_receipt_record_id(
 
 
 def _validate_selection_payload(root: Path, payload: Mapping[str, object]) -> dict[str, object]:
-    unknown = set(payload) - SELECTION_PAYLOAD_KEYS
-    if unknown:
+    if set(payload) != SELECTION_PAYLOAD_KEYS:
         raise SystemExit("Literature selection input contains unsupported fields.")
-    if payload.get("schema") != "literature-selection/v1":
+    if payload.get("schema") != "literature-selection/v2":
         raise SystemExit("Literature selection input has an unsupported schema.")
     stage_id = payload.get("stage_id")
     if not isinstance(stage_id, str) or SAFE_SELECTION_ID.fullmatch(stage_id) is None:
@@ -514,24 +507,70 @@ def _validate_selection_payload(root: Path, payload: Mapping[str, object]) -> di
             raise SystemExit("Literature selection preference binding is invalid.")
         preferences[str(candidate_id)] = selection_id
 
+    display_binding = payload.get("display_binding")
+    if not isinstance(display_binding, dict) or set(display_binding) != {
+        "stage_byte_sha256",
+        "candidate_bindings",
+    }:
+        raise SystemExit("Literature selection display binding is invalid.")
+    displayed_stage_digest = display_binding.get("stage_byte_sha256")
+    displayed_candidates = display_binding.get("candidate_bindings")
+    if (
+        not isinstance(displayed_stage_digest, str)
+        or re.fullmatch(r"[0-9a-f]{64}", displayed_stage_digest) is None
+        or not isinstance(displayed_candidates, list)
+        or len(displayed_candidates) != len(candidate_ids)
+    ):
+        raise SystemExit("Literature selection display binding is invalid.")
+    normalized_displayed: list[dict[str, str]] = []
+    for index, raw_binding in enumerate(displayed_candidates):
+        if not isinstance(raw_binding, dict) or set(raw_binding) != {
+            "candidate_id",
+            "identity_digest",
+            "semantic_digest",
+        }:
+            raise SystemExit("Literature selection display candidate binding is invalid.")
+        normalized = {key: str(raw_binding.get(key) or "") for key in raw_binding}
+        if (
+            normalized["candidate_id"] != candidate_ids[index]
+            or re.fullmatch(r"[0-9a-f]{64}", normalized["identity_digest"]) is None
+            or re.fullmatch(r"[0-9a-f]{64}", normalized["semantic_digest"]) is None
+        ):
+            raise SystemExit("Literature selection display candidate binding is invalid.")
+        normalized_displayed.append(normalized)
+
     try:
-        stage = load_search_stage(root, stage_id)
+        snapshot = literature_stage_snapshot(root, stage_id)
     except SystemExit as exc:
         raise SystemExit("Literature selection stage does not exist or is unsafe.") from exc
+    stage = dict(snapshot["payload"])
+    stage_digest = str(snapshot["byte_sha256"])
     if stage.get("entry_skill") != "literature-search" or stage.get("source_kind") != "paper":
         raise SystemExit("Literature selection stage is not owned by literature-search.")
     stop = stage.get("stop") if isinstance(stage.get("stop"), dict) else {}
     if str(stop.get("reason") or "") in {"", "in_progress", "blocked", "blocked_no_search_tool"}:
         raise SystemExit("Literature selection stage is not ready for a user choice.")
 
-    stage_digest = _literature_stage_digest(root, stage_id)
     candidates: list[dict[str, object]] = []
     already_materialized: dict[str, str] = {}
-    for candidate_id in candidate_ids:
-        try:
-            candidate = resolve_search_candidate(root, stage_id, candidate_id)
-        except SystemExit as exc:
-            raise SystemExit("Literature selection candidate does not exist in this stage.") from exc
+    stage_candidates = stage.get("candidates")
+    if not isinstance(stage_candidates, list):
+        raise SystemExit("Literature selection stage is invalid.")
+    for index, candidate_id in enumerate(candidate_ids):
+        matches = [
+            dict(item)
+            for item in stage_candidates
+            if isinstance(item, dict) and item.get("candidate_id") == candidate_id
+        ]
+        if len(matches) != 1:
+            raise SystemExit("Literature selection candidate does not exist in this stage.")
+        candidate = matches[0]
+        displayed = normalized_displayed[index]
+        if (
+            literature_candidate_identity_digest(candidate) != displayed["identity_digest"]
+            or literature_candidate_semantic_digest(candidate) != displayed["semantic_digest"]
+        ):
+            raise SystemExit("Literature selection display candidate changed after it was shown.")
         if _candidate_screening_decision(candidate) not in {"include", "maybe"}:
             raise SystemExit("Literature selection candidate is not eligible for materialization.")
         status = str(candidate.get("status") or "")
@@ -550,9 +589,11 @@ def _validate_selection_payload(root: Path, payload: Mapping[str, object]) -> di
             {
                 "candidate_id": candidate_id,
                 "identity_digest": literature_candidate_identity_digest(candidate),
-                "semantic_digest": _candidate_semantic_digest(candidate),
+                "semantic_digest": literature_candidate_semantic_digest(candidate),
             }
         )
+    if stage_digest != displayed_stage_digest and len(already_materialized) != len(candidate_ids):
+        raise SystemExit("Literature selection display changed after it was shown to the user.")
     authorization_digest = _canonical_digest(
         {"user_authorization": authorization, "authorization_source": source}
     )
@@ -744,8 +785,8 @@ def materialize_selection(
     protocol_name: str,
     owner_runner: Callable[..., subprocess.CompletedProcess[bytes]] | None = None,
 ) -> dict[str, object]:
-    bound = _validate_selection_payload(root, payload)
     protocol_name = _protocol_path_preflight(root, protocol_name)
+    bound = _validate_selection_payload(root, payload)
     runner = owner_runner or _default_owner_runner
     stage_id = str(bound["stage_id"])
     authorization = str(bound["user_authorization"])
@@ -796,8 +837,9 @@ def materialize_selection(
             )
             continue
         try:
-            current_stage = load_search_stage(root, stage_id)
-            before_stage_digest = _literature_stage_digest(root, stage_id)
+            current_snapshot = literature_stage_snapshot(root, stage_id)
+            current_stage = dict(current_snapshot["payload"])
+            before_stage_digest = str(current_snapshot["byte_sha256"])
             if (
                 before_stage_digest != expected_stage_digest
                 or current_stage != expected_stage_snapshot
@@ -901,76 +943,74 @@ def materialize_selection(
             "before_stage_digest": before_stage_digest,
             "after_stage_digest": "",
         }
-        if returncode == 0:
-            try:
-                after_stage = load_search_stage(root, stage_id)
-                after_stage_digest = _literature_stage_digest(root, stage_id)
-                matches = [
-                    item
-                    for item in after_stage.get("candidates", [])
-                    if isinstance(item, dict) and item.get("candidate_id") == candidate_id
-                ]
-                if len(matches) != 1:
-                    raise RuntimeError("owner candidate result is ambiguous")
-                after_candidate = dict(matches[0])
-                if (
-                    literature_candidate_identity_digest(after_candidate)
-                    != expected_binding["identity_digest"]
-                    or _candidate_semantic_digest(after_candidate) != expected_binding["semantic_digest"]
-                ):
-                    raise RuntimeError("candidate changed")
-                record_id = _selection_receipt_record_id(
-                    root,
-                    stage_id=stage_id,
-                    candidate=after_candidate,
-                    user_authorization=authorization,
-                    preference_selection_id=str(preferences.get(candidate_id) or ""),
-                )
-                state = str(after_candidate.get("status") or "")
-                if not record_id or state not in {"materialized", "duplicate"}:
-                    raise RuntimeError("owner result is not bound")
-                result["after_stage_digest"] = after_stage_digest
-                result["state"] = state
-                result["record_id"] = record_id
-                counts["newly_materialized" if state == "materialized" else "duplicate"] += 1
-                if _valid_owner_stage_transition(
+        try:
+            after_snapshot = literature_stage_snapshot(root, stage_id)
+            after_stage = dict(after_snapshot["payload"])
+            after_stage_digest = str(after_snapshot["byte_sha256"])
+            result["after_stage_digest"] = after_stage_digest
+            matches = [
+                item
+                for item in after_stage.get("candidates", [])
+                if isinstance(item, dict) and item.get("candidate_id") == candidate_id
+            ]
+            if len(matches) != 1:
+                raise RuntimeError("owner candidate result is ambiguous")
+            after_candidate = dict(matches[0])
+            state = str(after_candidate.get("status") or "")
+            record_id = _selection_receipt_record_id(
+                root,
+                stage_id=stage_id,
+                candidate=after_candidate,
+                user_authorization=authorization,
+                preference_selection_id=str(preferences.get(candidate_id) or ""),
+            )
+            canonical_commit = (
+                state in {"materialized", "duplicate"}
+                and bool(record_id)
+                and literature_candidate_identity_digest(after_candidate)
+                == expected_binding["identity_digest"]
+                and _candidate_semantic_digest(after_candidate)
+                == expected_binding["semantic_digest"]
+                and _valid_owner_stage_transition(
                     current_stage,
                     after_stage,
                     candidate_id=candidate_id,
                     status=state,
                     record_id=record_id,
-                ):
-                    expected_stage_digest = after_stage_digest
-                    expected_stage_snapshot = copy.deepcopy(after_stage)
-                else:
-                    result["state"] = f"{state}_stage_binding_changed"
-                    integrity_failure = True
-                    stop_remaining = True
-            except (OSError, RuntimeError, SystemExit, ValueError):
-                counts["failed"] += 1
-                result["state"] = "owner_result_invalid"
-                stop_remaining = True
+                )
+            )
+            if canonical_commit:
+                result["state"] = state
+                result["record_id"] = record_id
+                counts["newly_materialized" if state == "materialized" else "duplicate"] += 1
+                expected_stage_digest = after_stage_digest
+                expected_stage_snapshot = copy.deepcopy(after_stage)
+            elif (
+                state in {"materialized", "duplicate"}
+                and bool(record_id)
+                and literature_candidate_identity_digest(after_candidate)
+                == expected_binding["identity_digest"]
+                and _candidate_semantic_digest(after_candidate)
+                == expected_binding["semantic_digest"]
+            ):
+                result["state"] = f"{state}_stage_binding_changed"
+                result["record_id"] = record_id
+                counts["newly_materialized" if state == "materialized" else "duplicate"] += 1
                 integrity_failure = True
-                try:
-                    result["after_stage_digest"] = _literature_stage_digest(root, stage_id)
-                except (OSError, SystemExit, ValueError):
-                    pass
-        else:
-            counts["failed"] += 1
-            try:
-                result["after_stage_digest"] = _literature_stage_digest(root, stage_id)
-                after_stage = load_search_stage(root, stage_id)
-                if (
-                    result["after_stage_digest"] != expected_stage_digest
-                    or after_stage != expected_stage_snapshot
-                ):
-                    result["state"] = "stage_binding_changed"
-                    integrity_failure = True
-                    stop_remaining = True
-            except (OSError, SystemExit, ValueError):
+                stop_remaining = True
+            elif after_stage_digest == before_stage_digest and after_stage == current_stage:
+                counts["failed"] += 1
+                result["state"] = "owner_failed" if returncode else "owner_result_invalid"
+            else:
+                counts["failed"] += 1
                 result["state"] = "stage_binding_changed"
                 integrity_failure = True
                 stop_remaining = True
+        except (OSError, RuntimeError, SystemExit, ValueError):
+            counts["failed"] += 1
+            result["state"] = "owner_result_invalid"
+            integrity_failure = True
+            stop_remaining = True
         owner_results.append(result)
 
     successful = (
