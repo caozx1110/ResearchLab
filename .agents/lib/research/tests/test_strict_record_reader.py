@@ -736,3 +736,44 @@ def test_cross_unit_artifact_parent_swap_during_open_is_rejected(
     with pytest.raises(ValueError, match="artifact snapshot"):
         trusted_claim_source_roots(root, consumer, verification_root=consumer_path.parent)
     assert swapped
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO creation is unavailable")
+def test_cross_unit_evidence_fifo_is_rejected_without_blocking(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    source_id = "p-source-fifo-123456"
+    source_path = _write_record(root, "paper", source_id, title="FIFO source")
+    fifo = source_path.parent / "raw" / "source.txt"
+    fifo.parent.mkdir()
+    os.mkfifo(fifo)
+    code = """
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from research.records import trusted_claim_source_roots
+record = {
+    'id': 'b-consumer-fifo-123456',
+    'kind': 'blog',
+    'payload': {'claims': [{
+        'evidence_refs': [{
+            'source_unit_id': 'p-source-fifo-123456',
+            'artifact': 'raw/source.txt',
+        }],
+    }]},
+}
+try:
+    trusted_claim_source_roots(Path(sys.argv[2]), record)
+except ValueError:
+    pass
+else:
+    raise AssertionError('FIFO evidence was accepted')
+"""
+
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(ROOT / ".agents" / "lib"), str(root)],
+        capture_output=True,
+        text=True,
+        timeout=3,
+    )
+
+    assert result.returncode == 0, result.stderr
