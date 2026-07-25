@@ -92,6 +92,7 @@ class CanonicalRecordSnapshot:
     modified_time_ns: int
     record: dict[str, Any]
     file_identity: tuple[int, int, int, int, int, int]
+    directory_capabilities: tuple[tuple[int, int, int], ...]
 
 
 @dataclass(frozen=True)
@@ -263,6 +264,7 @@ def _read_record_snapshot(
         modified_time_ns=opened_after.st_mtime_ns,
         record=payload,
         file_identity=expected,
+        directory_capabilities=_directory_capability_chain(chain),
     )
 
 
@@ -881,6 +883,128 @@ def iter_canonical_record_snapshots(
     finally:
         for directory in reversed(base_chain):
             os.close(directory.fd)
+
+
+def _canonical_record_slot_exists(project_root: Path, kind: str, unit_id: str) -> bool:
+    """Return whether the exact record slot exists or cannot be proven absent."""
+    candidate = record_path(project_root, kind, unit_id)
+    try:
+        candidate.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def _snapshot_matches_detached_record(
+    project_root: Path,
+    snapshot: CanonicalRecordSnapshot,
+    record: dict[str, Any],
+) -> bool:
+    normalized = normalize_record_snapshot(snapshot, project_root)
+    return normalized is not None and normalized == record
+
+
+def canonical_record_snapshot_if_present(
+    project_root: Path,
+    record: dict[str, Any],
+) -> CanonicalRecordSnapshot | None:
+    """Bind a detached unit record to its one safe persisted canonical object.
+
+    ``None`` means the record slot is genuinely absent and may be used by a
+    pre-write flow.  An unsafe, malformed, duplicate, or different detached
+    record is an error rather than being confused with absence.
+    """
+    kind = str(record.get("kind") or "").strip()
+    unit_id = str(record.get("id") or "").strip()
+    if kind not in UNIT_KIND_DIRS or _SAFE_UNIT_DIRECTORY.fullmatch(unit_id) is None:
+        raise ValueError("record has no canonical unit identity")
+    snapshot = canonical_record_snapshot_for_identity(
+        project_root,
+        kind,
+        unit_id,
+        allow_absent=True,
+    )
+    if snapshot is None:
+        return None
+    if not _snapshot_matches_detached_record(project_root, snapshot, record):
+        raise ValueError("detached record does not match the current canonical snapshot")
+    return snapshot
+
+
+def canonical_record_snapshot_for_identity(
+    project_root: Path,
+    kind: str,
+    unit_id: str,
+    *,
+    allow_absent: bool = False,
+) -> CanonicalRecordSnapshot | None:
+    """Resolve one identity without accepting malformed or duplicate slots."""
+    if kind not in UNIT_KIND_DIRS or _SAFE_UNIT_DIRECTORY.fullmatch(unit_id) is None:
+        raise ValueError("record has no canonical unit identity")
+    matches = [
+        snapshot
+        for snapshot in iter_canonical_record_snapshots(project_root)
+        if snapshot.unit_id == unit_id
+    ]
+    occupied_slots = [
+        candidate_kind
+        for candidate_kind in UNIT_KIND_DIRS
+        if _canonical_record_slot_exists(project_root, candidate_kind, unit_id)
+    ]
+    if not matches:
+        if occupied_slots:
+            raise ValueError("canonical record slot exists but is not safely readable")
+        if allow_absent:
+            return None
+        raise ValueError("record has no persisted canonical snapshot")
+    if len(matches) != 1 or occupied_slots != [matches[0].kind]:
+        raise ValueError("record id does not resolve to one unique canonical record")
+    snapshot = matches[0]
+    if snapshot.kind != kind:
+        raise ValueError("canonical record kind does not match requested identity")
+    return snapshot
+
+
+def canonical_record_snapshot_for_record(
+    project_root: Path,
+    record: dict[str, Any],
+) -> CanonicalRecordSnapshot:
+    """Return the exact persisted snapshot represented by a detached record."""
+    snapshot = canonical_record_snapshot_if_present(project_root, record)
+    if snapshot is None:
+        raise ValueError("record has no persisted canonical snapshot")
+    return snapshot
+
+
+def require_current_record_snapshot(
+    project_root: Path,
+    expected: CanonicalRecordSnapshot,
+) -> CanonicalRecordSnapshot:
+    """Fail unless the exact record object and all of its ancestors are current."""
+    matches = [
+        snapshot
+        for snapshot in iter_canonical_record_snapshots(project_root)
+        if snapshot.unit_id == expected.unit_id
+    ]
+    occupied_slots = [
+        candidate_kind
+        for candidate_kind in UNIT_KIND_DIRS
+        if _canonical_record_slot_exists(project_root, candidate_kind, expected.unit_id)
+    ]
+    if len(matches) != 1 or occupied_slots != [expected.kind]:
+        raise ValueError("expected record snapshot is no longer uniquely current")
+    current = matches[0]
+    if (
+        current.kind != expected.kind
+        or current.path != expected.path
+        or current.raw_bytes != expected.raw_bytes
+        or current.file_identity != expected.file_identity
+        or current.directory_capabilities != expected.directory_capabilities
+    ):
+        raise ValueError("expected record snapshot changed before commit")
+    return current
 
 
 @contextmanager

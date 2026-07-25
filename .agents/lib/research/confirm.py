@@ -32,11 +32,16 @@ from .paths import (
     unit_root,
 )
 from .records import (
+    CanonicalRecordSnapshot,
     _record_needs_gate,
     append_history,
+    canonical_record_snapshot_if_present,
+    canonical_record_snapshot_for_identity,
     kind_payload_skeleton,
     locate_record,
     normalize_record_schema,
+    normalize_record_snapshot,
+    require_current_record_snapshot,
     trusted_claim_source_roots,
 )
 from .prefs import (
@@ -261,7 +266,26 @@ def apply_confirmation(
     project_root: Path | None = None,
     verification_root: Path | None = None,
     trusted_source_roots: dict[str, Path] | None = None,
+    expected_record_snapshot: CanonicalRecordSnapshot | None = None,
 ) -> dict[str, Any]:
+    record_kind = str(record.get("kind") or "").strip()
+    if expected_record_snapshot is not None and project_root is None:
+        raise SystemExit("expected_record_snapshot requires project_root.")
+    if project_root is not None and record_kind in UNIT_KIND_DIRS:
+        try:
+            if expected_record_snapshot is None:
+                persisted = canonical_record_snapshot_if_present(project_root, record)
+                if persisted is not None:
+                    raise SystemExit(
+                        "Persisted unit confirmation requires expected_record_snapshot."
+                    )
+            else:
+                current = require_current_record_snapshot(project_root, expected_record_snapshot)
+                normalized_current = normalize_record_snapshot(current, project_root)
+                if normalized_current is None or normalized_current != record:
+                    raise ValueError("record content differs from expected canonical snapshot")
+        except ValueError as exc:
+            raise SystemExit("Persisted unit confirmation snapshot is not current.") from exc
     _require_confirmable_claim_types(record)
     actor, evidence_items = require_confirmation_provenance(
         confirmed_by=confirmed_by,
@@ -300,6 +324,7 @@ def apply_confirmation(
                 project_root,
                 record,
                 verification_root=evidence_root,
+                expected_record_snapshot=expected_record_snapshot,
             )
         except ValueError as exc:
             raise SystemExit("Confirmation evidence source is not a canonical safe unit or program.") from exc
@@ -456,6 +481,7 @@ def confirm_unit(
     authorization_source: str = "",
     method: str = "cli",
     project_root: Path | None = None,
+    expected_record_snapshot: CanonicalRecordSnapshot | None = None,
 ) -> dict[str, Any]:
     unit_kind = str(kind or record.get("kind") or "")
     if unit_kind not in UNIT_KIND_DIRS:
@@ -482,6 +508,7 @@ def confirm_unit(
         authorization_source=authorization_source,
         method=method,
         project_root=project_root,
+        expected_record_snapshot=expected_record_snapshot,
     )
     if unit_kind in CONFIRM_UNIT_STATUS_BY_KIND:
         record["status"] = CONFIRM_UNIT_STATUS_BY_KIND[unit_kind]
@@ -546,22 +573,105 @@ def validate_write(record: dict[str, Any], *, strict: bool | None = None) -> lis
     return violations
 
 
+def _require_expected_confirmation_delta(
+    project_root: Path,
+    record: dict[str, Any],
+    expected: CanonicalRecordSnapshot,
+) -> None:
+    """Prove confirmation changed governance fields, not the authorized content."""
+    baseline = normalize_record_snapshot(expected, project_root)
+    if baseline is None:
+        raise SystemExit("Expected record snapshot cannot be normalized for confirmation.")
+    mutable_fields = {
+        "confirmation_status",
+        "needs_human_confirmation",
+        "last_human_confirmed_at",
+        "confirmation",
+        "status",
+        "history",
+    }
+    for key in set(baseline) | set(record):
+        if key not in mutable_fields and baseline.get(key) != record.get(key):
+            raise SystemExit(
+                f"Record content changed after authorization: field {key!r} is not a confirmation mutation."
+            )
+    baseline_history = baseline.get("history") if isinstance(baseline.get("history"), list) else []
+    record_history = record.get("history") if isinstance(record.get("history"), list) else []
+    if record_history[: len(baseline_history)] != baseline_history or len(record_history) > len(baseline_history) + 1:
+        raise SystemExit("Record history changed outside the authorized confirmation step.")
+    if len(record_history) == len(baseline_history) + 1:
+        action = str(record_history[-1].get("action") or "") if isinstance(record_history[-1], dict) else ""
+        if action not in {"paper-confirmed", "repo-confirmed", "dataset-confirmed", "blog-confirmed", "idea-confirmed", "experiment-confirmed", "promoted"}:
+            raise SystemExit("Record history contains an unauthorized post-confirmation mutation.")
+
+
 def write_record(
     project_root: Path,
     record: dict[str, Any],
     *,
     expected_revision: int | None = None,
+    expected_record_snapshot: CanonicalRecordSnapshot | None = None,
 ) -> Path:
     supplied_revision = record.get("revision") if "revision" in record else None
     supplied_has_revision = "revision" in record
-    normalized = normalize_record_schema(record, project_root=project_root)
+    requested_confirmed = str(record.get("confirmation_status") or "") == "confirmed"
+    if expected_record_snapshot is not None:
+        if (
+            str(record.get("kind") or "") != expected_record_snapshot.kind
+            or str(record.get("id") or "") != expected_record_snapshot.unit_id
+        ):
+            raise SystemExit("Record subject differs from expected_record_snapshot.")
+        try:
+            require_current_record_snapshot(project_root, expected_record_snapshot)
+        except ValueError as exc:
+            raise SystemExit("Expected record snapshot is not current.") from exc
+        if requested_confirmed:
+            _require_expected_confirmation_delta(project_root, record, expected_record_snapshot)
+    normalized = normalize_record_schema(
+        record,
+        project_root=project_root,
+        canonical_snapshot=expected_record_snapshot,
+    )
+    if requested_confirmed and str(normalized.get("confirmation_status") or "") != "confirmed":
+        raise SystemExit("Confirmed record verification changed before write.")
     validate_write(normalized)
     root = unit_root(project_root, str(normalized["kind"]), str(normalized["id"]))
     path = root / "record.yaml"
     with mutation_transaction(project_root, "write_record", [path]):
-        ensure_dir(root)
         current_revision = 0
-        if path.exists():
+        current_snapshot: CanonicalRecordSnapshot | None = None
+        if expected_record_snapshot is not None:
+            try:
+                current_snapshot = require_current_record_snapshot(
+                    project_root,
+                    expected_record_snapshot,
+                )
+            except ValueError as exc:
+                raise SystemExit("Expected record snapshot changed before write.") from exc
+            current = current_snapshot.record
+            try:
+                current_revision = max(0, int(current.get("revision", 0)))
+            except (TypeError, ValueError) as exc:
+                raise SystemExit(f"Invalid on-disk record revision: {path}") from exc
+        elif path.exists():
+            if requested_confirmed:
+                try:
+                    current_bound = canonical_record_snapshot_for_identity(
+                        project_root,
+                        str(normalized["kind"]),
+                        str(normalized["id"]),
+                    )
+                except ValueError as exc:
+                    raise SystemExit("Current confirmed-write subject is not canonical.") from exc
+                assert current_bound is not None
+                current_normalized = normalize_record_snapshot(current_bound, project_root)
+                if (
+                    current_normalized is None
+                    or str(current_normalized.get("confirmation_status") or "") != "confirmed"
+                ):
+                    raise SystemExit(
+                        "Persisted transition to confirmed requires expected_record_snapshot."
+                    )
             current = load_yaml(path, default={})
             if not isinstance(current, dict):
                 raise SystemExit(f"Invalid on-disk record payload: {path}")
@@ -595,6 +705,23 @@ def write_record(
             )
         normalized["revision"] = current_revision + 1
         normalized["updated_at"] = utc_now_iso()
+        if expected_record_snapshot is not None:
+            # Revalidate both persisted identity and evidence at the final publish
+            # boundary.  Normalization consumes the same snapshot for self evidence.
+            normalized = normalize_record_schema(
+                normalized,
+                project_root=project_root,
+                canonical_snapshot=expected_record_snapshot,
+            )
+            if requested_confirmed and str(normalized.get("confirmation_status") or "") != "confirmed":
+                raise SystemExit("Confirmed record verification changed before publish.")
+            validate_write(normalized)
+            try:
+                require_current_record_snapshot(project_root, expected_record_snapshot)
+            except ValueError as exc:
+                raise SystemExit("Expected record snapshot changed before publish.") from exc
+        else:
+            ensure_dir(root)
         write_yaml_if_changed(path, normalized)
         record["revision"] = normalized["revision"]
         record["updated_at"] = normalized["updated_at"]
@@ -655,10 +782,14 @@ def promote_record(
     confirmation_method: str = "kb.py promote",
 ) -> Path:
     record, _ = locate_record(project_root, unit_id)
-    if status:
-        record["status"] = status
-    if maturity:
-        record["maturity"] = maturity
+    expected_record_snapshot: CanonicalRecordSnapshot | None = None
+    if confirmation_status == "confirmed":
+        try:
+            expected_record_snapshot = canonical_record_snapshot_if_present(project_root, record)
+        except ValueError as exc:
+            raise SystemExit("Cannot bind the record selected for confirmation.") from exc
+        if expected_record_snapshot is None:
+            raise SystemExit("Cannot confirm a unit that is not persistently bound.")
     if confirmation_status:
         if confirmation_status == "confirmed":
             _require_confirmable_claim_types(record)
@@ -683,11 +814,20 @@ def promote_record(
                 authorization_source=authorization_source,
                 method=confirmation_method,
                 project_root=project_root,
+                expected_record_snapshot=expected_record_snapshot,
             )
         else:
             record["confirmation_status"] = confirmation_status
+    if status:
+        record["status"] = status
+    if maturity:
+        record["maturity"] = maturity
     append_history(record, action="promoted", summary="Updated record lifecycle state.")
-    return write_record(project_root, record)
+    return write_record(
+        project_root,
+        record,
+        expected_record_snapshot=expected_record_snapshot,
+    )
 
 
 __all__ = [

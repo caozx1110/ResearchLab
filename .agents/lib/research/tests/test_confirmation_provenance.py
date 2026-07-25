@@ -5,9 +5,22 @@ from pathlib import Path
 
 import pytest
 
+import research.records as records
 from research.common import load_yaml, write_yaml_if_changed
-from research.core import ensure_workspace, promote_record, record_path, runtime_preferences_path
-from research.evidence import confirmation_content_digest, confirmation_evidence_digest
+from research.core import (
+    confirm_unit,
+    ensure_workspace,
+    locate_record,
+    promote_record,
+    record_path,
+    runtime_preferences_path,
+    write_record,
+)
+from research.evidence import (
+    build_verification_receipt,
+    confirmation_content_digest,
+    confirmation_evidence_digest,
+)
 
 
 def _project_root() -> Path:
@@ -64,6 +77,203 @@ def _record(unit_id: str = "p-confirm-123456") -> dict:
         "source": {"original_uri": "", "file_hash": ""},
         "payload": {},
     }
+
+
+def _verified_judgement_record(root: Path, *, title: str) -> dict:
+    unit_id = "p-confirm-snapshot-123456"
+    record = _record(unit_id)
+    record["title"] = title
+    record["information_types"] = ["fact", "evaluation", "unverified"]
+    record["payload"] = {
+        "core_content": {"method": f"{title} grounded method"},
+        "claims": [
+            {
+                "id": "claim-confirm-snapshot",
+                "text": f"{title} is the record under review.",
+                "claim_type": "evaluation",
+                "confirmation_status": "pending_user_confirmation",
+                "evidence_refs": [
+                    {
+                        "source_unit_id": unit_id,
+                        "artifact": "parse-cache.yaml",
+                        "locator": "section=analysis",
+                        "quote": f"{title} evidence bytes",
+                    }
+                ],
+            }
+        ],
+    }
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "parse-cache.yaml").write_text(f"{title} evidence bytes", encoding="utf-8")
+    build_verification_receipt(record, root)
+    return record
+
+
+def test_detached_same_revision_record_cannot_confirm_replacement(tmp_path: Path) -> None:
+    ensure_workspace(tmp_path)
+    path = record_path(tmp_path, "paper", "p-confirm-snapshot-123456")
+    old = _verified_judgement_record(path.parent, title="OLD RECORD")
+    write_record(tmp_path, old)
+    detached, _ = locate_record(tmp_path, old["id"], kind="paper", fuzzy=False)
+    expected = records.canonical_record_snapshot_for_record(tmp_path, detached)
+    original_dir = tmp_path / "old-detached-unit"
+    replacement_dir = tmp_path / "new-replacement-unit"
+    new = _verified_judgement_record(replacement_dir, title="NEW RECORD")
+    new["revision"] = detached["revision"]
+    write_yaml_if_changed(replacement_dir / "record.yaml", new)
+    path.parent.rename(original_dir)
+    replacement_dir.rename(path.parent)
+    before = path.read_bytes()
+
+    with pytest.raises(SystemExit, match="snapshot|changed|current"):
+        confirm_unit(
+            detached,
+            "paper",
+            confirmed_by="Human Reviewer",
+            evidence=["Reviewed OLD RECORD."],
+            user_authorization="I confirm OLD RECORD.",
+            authorization_source="user_message",
+            project_root=tmp_path,
+            expected_record_snapshot=expected,
+        )
+
+    assert path.read_bytes() == before
+    assert load_yaml(path)["title"] == "NEW RECORD"
+    assert load_yaml(path)["confirmation_status"] == "pending_user_confirmation"
+    assert detached["confirmation_status"] == "pending_user_confirmation"
+    assert "confirmation" not in detached
+
+
+def test_same_bytes_new_inode_rejects_persisted_confirmation(tmp_path: Path) -> None:
+    ensure_workspace(tmp_path)
+    unit_id = "p-confirm-same-bytes-123456"
+    path = record_path(tmp_path, "paper", unit_id)
+    write_yaml_if_changed(path, _record(unit_id))
+    detached, _ = locate_record(tmp_path, unit_id, kind="paper", fuzzy=False)
+    expected = records.canonical_record_snapshot_for_record(tmp_path, detached)
+    copied = path.parent / "record-copy.yaml"
+    copied.write_bytes(path.read_bytes())
+    copied.replace(path)
+    before = path.read_bytes()
+
+    with pytest.raises(SystemExit, match="snapshot|changed|current"):
+        confirm_unit(
+            detached,
+            "paper",
+            confirmed_by="Human Reviewer",
+            evidence=["Reviewed exact record."],
+            project_root=tmp_path,
+            expected_record_snapshot=expected,
+        )
+
+    assert path.read_bytes() == before
+    assert load_yaml(path).get("revision", 0) == detached["revision"]
+    assert "confirmation" not in load_yaml(path)
+
+
+def test_artifact_change_after_confirmation_before_write_is_zero_write(tmp_path: Path) -> None:
+    ensure_workspace(tmp_path)
+    path = record_path(tmp_path, "paper", "p-confirm-snapshot-123456")
+    record = _verified_judgement_record(path.parent, title="STABLE RECORD")
+    write_record(tmp_path, record)
+    detached, _ = locate_record(tmp_path, record["id"], kind="paper", fuzzy=False)
+    expected = records.canonical_record_snapshot_for_record(tmp_path, detached)
+    confirmed = confirm_unit(
+        detached,
+        "paper",
+        confirmed_by="Human Reviewer",
+        evidence=["Reviewed stable evidence."],
+        user_authorization="I confirm the stable record.",
+        authorization_source="user_message",
+        project_root=tmp_path,
+        expected_record_snapshot=expected,
+    )
+    (path.parent / "parse-cache.yaml").write_text("replacement evidence bytes", encoding="utf-8")
+    before = path.read_bytes()
+
+    with pytest.raises(SystemExit, match="verification|snapshot|changed|current"):
+        write_record(
+            tmp_path,
+            confirmed,
+            expected_record_snapshot=expected,
+        )
+
+    assert path.read_bytes() == before
+    on_disk = load_yaml(path)
+    assert on_disk["revision"] == 1
+    assert on_disk["confirmation_status"] == "pending_user_confirmation"
+    assert "confirmation" not in on_disk
+
+
+def test_persisted_unit_confirmation_cannot_omit_snapshot(tmp_path: Path) -> None:
+    ensure_workspace(tmp_path)
+    unit_id = "p-confirm-missing-snapshot-123456"
+    path = record_path(tmp_path, "paper", unit_id)
+    write_yaml_if_changed(path, _record(unit_id))
+    detached, _ = locate_record(tmp_path, unit_id, kind="paper", fuzzy=False)
+    before = path.read_bytes()
+
+    with pytest.raises(SystemExit, match="expected_record_snapshot"):
+        confirm_unit(
+            detached,
+            "paper",
+            confirmed_by="Human Reviewer",
+            evidence=["Reviewed current record."],
+            project_root=tmp_path,
+        )
+
+    assert path.read_bytes() == before
+    assert detached["confirmation_status"] == "pending_user_confirmation"
+    assert "confirmation" not in detached
+
+
+def test_authorized_content_change_before_write_is_rejected(tmp_path: Path) -> None:
+    ensure_workspace(tmp_path)
+    path = record_path(tmp_path, "paper", "p-confirm-snapshot-123456")
+    record = _verified_judgement_record(path.parent, title="AUTHORIZED RECORD")
+    write_record(tmp_path, record)
+    detached, _ = locate_record(tmp_path, record["id"], kind="paper", fuzzy=False)
+    expected = records.canonical_record_snapshot_for_record(tmp_path, detached)
+    confirmed = confirm_unit(
+        detached,
+        "paper",
+        confirmed_by="Human Reviewer",
+        evidence=["Reviewed authorized content."],
+        user_authorization="I confirm the authorized record.",
+        authorization_source="user_message",
+        project_root=tmp_path,
+        expected_record_snapshot=expected,
+    )
+    confirmed["title"] = "CHANGED AFTER AUTHORIZATION"
+    before = path.read_bytes()
+
+    with pytest.raises(SystemExit, match="changed after authorization"):
+        write_record(tmp_path, confirmed, expected_record_snapshot=expected)
+
+    assert path.read_bytes() == before
+
+
+def test_confirmed_receipt_cannot_bypass_missing_snapshot_at_write(tmp_path: Path) -> None:
+    ensure_workspace(tmp_path)
+    unit_id = "p-confirm-write-bypass-123456"
+    path = record_path(tmp_path, "paper", unit_id)
+    pending = _record(unit_id)
+    write_record(tmp_path, pending)
+    detached, _ = locate_record(tmp_path, unit_id, kind="paper", fuzzy=False)
+    # Pure in-memory confirmation remains compatible, but cannot be written over
+    # the persisted pending subject without carrying its explicit snapshot.
+    confirmed = confirm_unit(
+        detached,
+        "paper",
+        confirmed_by="Human Reviewer",
+        evidence=["Reviewed detached record."],
+    )
+    before = path.read_bytes()
+
+    with pytest.raises(SystemExit, match="expected_record_snapshot"):
+        write_record(tmp_path, confirmed)
+
+    assert path.read_bytes() == before
 
 
 def test_promote_to_confirmed_requires_human_provenance(tmp_path: Path) -> None:
