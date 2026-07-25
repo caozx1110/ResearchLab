@@ -577,6 +577,34 @@ def test_passage_capture_rejects_real_unit_replacement_after_record_snapshot(
     assert swapped
 
 
+def test_record_search_rejects_unit_replacement_after_initial_record_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ensure_workspace(tmp_path)
+    unit_id = "p-record-search-race-123456"
+    _write_record(tmp_path, _record(unit_id, "Snapshot-only title"))
+    unit = unit_root(tmp_path, "paper", unit_id)
+    replacement = tmp_path / "replacement-search-unit"
+    shutil.copytree(unit, replacement)
+    parked = tmp_path / "parked-search-unit"
+    original_capture = index_mod.snapshot_canonical_unit_artifacts
+    swapped = False
+
+    def racing_capture(project_root, kind, captured_id, artifacts):
+        nonlocal swapped
+        if captured_id == unit_id and not swapped:
+            swapped = True
+            unit.rename(parked)
+            replacement.rename(unit)
+        return original_capture(project_root, kind, captured_id, artifacts)
+
+    monkeypatch.setattr(index_mod, "snapshot_canonical_unit_artifacts", racing_capture)
+
+    assert search_records(tmp_path, "Snapshot-only title") == []
+    assert swapped
+
+
 def test_passage_leaf_open_rejects_unit_symlink_swap_without_external_bytes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

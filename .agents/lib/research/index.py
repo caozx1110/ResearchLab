@@ -1592,17 +1592,36 @@ def search_records(
         if confirmation_status and str(record.get("confirmation_status") or "") != confirmation_status:
             continue
         filtered.append(record)
-    return rank_records(
-        filtered,
-        query,
-        markdown_paths_for=lambda record: _unit_markdown_snapshots(
+    content_by_identity = {}
+    current_records: list[dict[str, Any]] = []
+    for record in filtered:
+        identity = (str(record.get("kind") or ""), str(record.get("id") or ""))
+        content = _unit_content_snapshot(
             project_root,
             record,
-            expected_record_snapshot=snapshot_by_identity.get(
+            include_parse_cache=False,
+            expected_record_snapshot=snapshot_by_identity.get(identity),
+        )
+        if content is None:
+            continue
+        content_by_identity[identity] = content
+        current_records.append(record)
+    ranked = rank_records(
+        current_records,
+        query,
+        markdown_paths_for=lambda record: list(
+            content_by_identity[
                 (str(record.get("kind") or ""), str(record.get("id") or ""))
-            ),
+            ].artifacts
         ),
     )
+    return [
+        record
+        for record in ranked
+        if content_by_identity[
+            (str(record.get("kind") or ""), str(record.get("id") or ""))
+        ].is_current()
+    ]
 
 
 def search_passages(
