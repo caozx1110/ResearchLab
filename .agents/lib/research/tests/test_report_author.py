@@ -1997,6 +1997,29 @@ def test_cli_commit_boundary_gate_rolls_back_report_when_source_changes_after_bo
     assert checkpoints == []
 
 
+def test_cli_guarded_report_rejects_nested_outer_transaction_before_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = _load_report_module()
+    root, program_id, _unit_id = _make_workspace(tmp_path)
+    output = _report_output_path(root, program_id, "weekly")
+    checkpoints: list[object] = []
+    monkeypatch.setattr(report, "checkpoint_and_report", lambda *args, **kwargs: checkpoints.append(kwargs))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["report.py", "--root", str(root), "weekly", "--program-id", program_id],
+    )
+
+    with report.command_mutation(root, "outer-report-publication", [output]):
+        with pytest.raises(SystemExit, match="不能嵌套"):
+            report.main()
+
+    assert not output.exists()
+    assert checkpoints == []
+
+
 @pytest.mark.parametrize("unit_count", [4, 8, 16])
 def test_unit_claim_source_snapshot_enumeration_is_linear(
     tmp_path: Path,

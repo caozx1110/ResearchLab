@@ -446,6 +446,61 @@ with mutation_transaction(root, sys.argv[4], [target]):
     assert child_entries[0]["coordination_scope"] == "inherited"
 
 
+def test_subprocess_nested_commit_guard_rejects_preflight_and_body(tmp_path: Path) -> None:
+    unit_dir = tmp_path / "kb" / "units" / "blogs" / "b-guarded-subprocess"
+    record_path = unit_dir / "record.yaml"
+    preflight_marker = unit_dir / "preflight-ran"
+    lib_root = _project_root() / ".agents" / "lib"
+    child_code = """
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from research.journal import mutation_transaction
+root = Path(sys.argv[2])
+target = Path(sys.argv[3])
+preflight_marker = Path(sys.argv[4])
+def preflight():
+    preflight_marker.parent.mkdir(parents=True, exist_ok=True)
+    preflight_marker.write_text('preflight ran\\n', encoding='utf-8')
+with mutation_transaction(
+    root,
+    'subprocess-guarded-child',
+    [target],
+    preflight=preflight,
+    commit_guard=lambda: None,
+):
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text('child body ran\\n', encoding='utf-8')
+"""
+
+    with mutation_transaction(tmp_path, "subprocess-guard-root", [unit_dir]):
+        child = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                child_code,
+                lib_root.as_posix(),
+                tmp_path.as_posix(),
+                record_path.as_posix(),
+                preflight_marker.as_posix(),
+            ],
+            env=journal_subprocess_env(tmp_path),
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
+        )
+        assert child.returncode != 0
+        assert "不能嵌套" in child.stderr
+
+    assert not preflight_marker.exists()
+    assert not record_path.exists()
+    assert not any(
+        load_op(tmp_path, path.stem).get("op_type") == "subprocess-guarded-child"
+        for path in (tmp_path / "kb" / ".journal").glob("*.yaml")
+    )
+
+
 def test_auto_checkpoint_bookkeeping_never_hides_latest_user_transaction(tmp_path: Path) -> None:
     _configure_kb_git(tmp_path)
     path = tmp_path / "kb" / "notes" / "undoable.md"

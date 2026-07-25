@@ -241,23 +241,87 @@ def test_nested_commit_guard_is_rejected_before_child_body_can_outlive_root(
     target.parent.mkdir(parents=True)
     target.write_bytes(b"authoritative root before-image\n")
     body_ran = False
+    preflight_ran = False
 
     def child_guard() -> None:
         return None
 
-    with pytest.raises(SystemExit, match="authoritative root"):
+    def child_preflight() -> None:
+        nonlocal preflight_ran
+        preflight_ran = True
+
+    with pytest.raises(SystemExit, match="不能嵌套"):
         with mutation_transaction(tmp_path, "outer-publication", [target]):
             with mutation_transaction(
                 tmp_path,
                 "nested-publication",
                 [target],
+                preflight=child_preflight,
                 commit_guard=child_guard,
             ):
                 body_ran = True
                 target.write_bytes(b"formal output whose guard would expire at child commit\n")
 
+    assert preflight_ran is False
     assert body_ran is False
     assert target.read_bytes() == b"authoritative root before-image\n"
+    entries = [load_op(tmp_path, path.stem) for path in (tmp_path / "kb" / ".journal").glob("*.yaml")]
+    assert [entry["op_type"] for entry in entries] == ["outer-publication"]
+    assert entries[0]["state"] == "abort"
+
+
+def test_nested_commit_guard_preserves_target_validation_precedence(tmp_path: Path) -> None:
+    covered = tmp_path / "kb" / "reports" / "covered.md"
+    outside = tmp_path / "kb" / "notes" / "outside.md"
+    preflight_ran = False
+
+    def child_preflight() -> None:
+        nonlocal preflight_ran
+        preflight_ran = True
+
+    with mutation_transaction(tmp_path, "guard-coverage-root", [covered]):
+        with pytest.raises(SystemExit, match="must be covered"):
+            with mutation_transaction(
+                tmp_path,
+                "guard-coverage-child",
+                [outside],
+                preflight=child_preflight,
+                commit_guard=lambda: None,
+            ):
+                outside.parent.mkdir(parents=True, exist_ok=True)
+                outside.write_bytes(b"must not run\n")
+
+    assert preflight_ran is False
+    assert not outside.exists()
+
+
+@pytest.mark.parametrize("explicit_parent", [False, True])
+def test_direct_journaled_child_commit_guard_is_rejected_before_begin_or_body(
+    tmp_path: Path,
+    explicit_parent: bool,
+) -> None:
+    target = tmp_path / "kb" / "reports" / "direct-child-guarded.md"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"direct root before-image\n")
+    body_ran = False
+
+    with mutation_transaction(tmp_path, "direct-guard-root", [target]) as root_id:
+        parent_kwargs = {"parent_op_id": root_id} if explicit_parent else {}
+        with pytest.raises(SystemExit, match="不能嵌套"):
+            with journaled_op(
+                tmp_path,
+                "direct-guard-child",
+                [target],
+                commit_guard=lambda: None,
+                **parent_kwargs,
+            ):
+                body_ran = True
+                target.write_bytes(b"direct child body\n")
+
+    assert body_ran is False
+    assert target.read_bytes() == b"direct root before-image\n"
+    entries = list((tmp_path / "kb" / ".journal").glob("*.yaml"))
+    assert [entry.stem for entry in entries] == [root_id]
 
 
 def test_journaled_abort_mixed_targets_skips_unchanged_and_restores_only_divergence(

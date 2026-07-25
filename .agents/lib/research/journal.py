@@ -25,6 +25,10 @@ JOURNAL_PARENT_OP_ENV = "RESEARCH_JOURNAL_PARENT_OP"
 JOURNAL_PARENT_ROOT_ENV = "RESEARCH_JOURNAL_PARENT_ROOT"
 MAX_JOURNAL_ENTRY_BYTES = 8 * 1024 * 1024
 KNOWN_JOURNAL_STATES = {"begin", "commit", "abort", "abort_failed"}
+ROOT_COMMIT_GUARD_ERROR = (
+    "带提交校验的正式发布不能嵌套在另一项写操作中；"
+    "请等外层操作完成后重试。"
+)
 
 # Each entry is (resolved project root, operation id).  ContextVar keeps nested
 # transactions correct across async contexts while the environment bridge below
@@ -2219,13 +2223,21 @@ def journaled_op(
 ) -> Iterator[str]:
     """Journal one mutation and optionally validate at its commit boundary.
 
-    ``commit_guard`` is an in-process, side-effect-free validator.  It runs as
-    the final validation after the context body returns and immediately before
+    ``commit_guard`` is an in-process, side-effect-free validator for an
+    authoritative root operation only.  Guarded child operations are rejected
+    before their journal or body begins because a child callback cannot stay
+    authoritative through the root lifetime.  A root guard runs as the final
+    validation after the context body returns and immediately before
     ``commit_op``.  A failure follows the ordinary abort/restore path and is
     propagated unchanged.  The guard executes while any coordinating locks
     owned by ``mutation_transaction`` are still held; this is cooperative
     locking, not atomic exclusion of arbitrary external filesystem writers.
     """
+    if commit_guard is not None and (
+        str(parent_op_id or "").strip()
+        or (attach_to_active and current_operation_id(project_root))
+    ):
+        raise SystemExit(ROOT_COMMIT_GUARD_ERROR)
     op_id = begin_op(
         project_root,
         op_type,
@@ -2305,6 +2317,8 @@ def mutation_transaction(
             raise SystemExit(
                 "Nested mutation requires a root mutation_transaction with workspace coordination."
             )
+        if commit_guard is not None:
+            raise SystemExit(ROOT_COMMIT_GUARD_ERROR)
         if preflight is not None:
             preflight()
         with journaled_op(

@@ -1414,6 +1414,34 @@ def test_portfolio_history_commit_boundary_gate_rolls_back_source_change_after_b
     assert checkpoints == []
 
 
+def test_portfolio_guard_rejects_nested_outer_transaction_before_history_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orchestrate = _load_orchestrator("orchestrator_portfolio_nested_guard")
+    root = _workspace(tmp_path)
+    _record, _decisions_file = _verified_program_decision(orchestrate, root)
+    _program(orchestrate, root, "program-a", actions=["Choose a grounded baseline"])
+    snapshot = orchestrate.portfolio_candidate_snapshot(root)
+    decision = _decision(root, snapshot, [snapshot["candidates"][0]["action_id"]])
+    decision["decision_scope"] = "research_judgement"
+    decision["program_decision_ids"] = ["program-a:decision-1"]
+    history_file = orchestrate.portfolio_history_path(root)
+    checkpoints: list[object] = []
+    monkeypatch.setattr(
+        orchestrate,
+        "checkpoint_and_report",
+        lambda project_root, **kwargs: checkpoints.append(kwargs),
+    )
+
+    with orchestrate.mutation_transaction(root, "outer-portfolio-publication", [history_file]):
+        with pytest.raises(SystemExit, match="不能嵌套"):
+            orchestrate.record_portfolio_decision(root, decision)
+
+    assert not history_file.exists()
+    assert checkpoints == []
+
+
 @pytest.mark.parametrize("replacement", ["content", "same-bytes"])
 def test_portfolio_history_replay_revalidates_after_transaction(
     tmp_path: Path,
