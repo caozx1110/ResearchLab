@@ -1013,6 +1013,8 @@ __all__ = [
     "EvidenceRef",
     "Claim",
     "ResolvedEvidenceArtifact",
+    "EvidenceArtifactSnapshot",
+    "EvidenceSourceSnapshot",
     "normalize_ws",
     "confirmation_claims",
     "confirmation_claim_ids",

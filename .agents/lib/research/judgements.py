@@ -255,7 +255,13 @@ def readiness_violations(
     return violations
 
 
-def judgement_confirmation_is_current(root: Path, record: dict[str, Any], artifact_path: Path) -> bool:
+def judgement_confirmation_is_current(
+    root: Path,
+    record: dict[str, Any],
+    artifact_path: Path,
+    *,
+    record_snapshot: CanonicalRecordSnapshot | None = None,
+) -> bool:
     """Validate a judgement receipt against canonical identity and current evidence bytes."""
     root = root.resolve()
     artifact_path = artifact_path.resolve()
@@ -263,7 +269,12 @@ def judgement_confirmation_is_current(root: Path, record: dict[str, Any], artifa
         return False
     try:
         verification_root = _verification_root(root, record, artifact_path)
-        source_roots = _source_roots(root, record, artifact_path)
+        source_roots = _source_roots(
+            root,
+            record,
+            artifact_path,
+            record_snapshot=record_snapshot,
+        )
     except ValueError:
         return False
     return has_complete_confirmation_receipt(
