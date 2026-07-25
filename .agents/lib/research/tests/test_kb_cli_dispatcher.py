@@ -3410,6 +3410,53 @@ def test_review_owner_loader_registers_module_during_execution_and_retains_cache
             sys.modules.pop(observed[0][0], None)
 
 
+def test_review_owner_loader_module_name_is_stable_and_path_scoped(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kb = _load_kb_cli()
+    loaded_names: list[str] = []
+
+    class CompleteLoader:
+        @staticmethod
+        def create_module(spec):
+            return None
+
+        @staticmethod
+        def exec_module(module) -> None:
+            module.prepare_review_batch_decision = lambda *args, **kwargs: None
+            module.apply_review_batch_decision = lambda *args, **kwargs: None
+
+    loader = CompleteLoader()
+
+    def owner_spec(name, path):
+        loaded_names.append(name)
+        return importlib.machinery.ModuleSpec(name, loader)
+
+    monkeypatch.setattr(kb.importlib.util, "spec_from_file_location", owner_spec)
+    owner = "knowledge-base-manager"
+
+    first = kb._review_owner_module(tmp_path, owner)
+    kb._REVIEW_OWNER_MODULES.clear()
+    sys.modules.pop(first.__name__, None)
+    second = kb._review_owner_module(tmp_path, owner)
+    kb._REVIEW_OWNER_MODULES.clear()
+    sys.modules.pop(second.__name__, None)
+
+    monkeypatch.setitem(
+        kb.REVIEW_OWNER_SCRIPTS,
+        owner,
+        kb.owner_script("research-orchestrator", "orchestrate"),
+    )
+    third = kb._review_owner_module(tmp_path, owner)
+    try:
+        assert loaded_names[0] == loaded_names[1]
+        assert loaded_names[2] != loaded_names[0]
+    finally:
+        kb._REVIEW_OWNER_MODULES.clear()
+        sys.modules.pop(third.__name__, None)
+
+
 def test_review_owner_loader_removes_partial_module_after_execution_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
