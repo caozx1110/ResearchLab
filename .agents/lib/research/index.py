@@ -1333,7 +1333,16 @@ def _binding_findings(
 
 def _recovery_findings(project_root: Path) -> list[dict[str, str]]:
     findings: list[dict[str, str]] = []
-    for entry in incomplete_ops(project_root):
+    try:
+        incomplete = incomplete_ops(project_root)
+    except (SystemExit, RuntimeError, OSError):
+        incomplete = []
+        findings.append(_audit_finding(
+            "RECOVERY_INCOMPLETE_OPERATION", "recovery", "error",
+            "kb/.journal",
+            "The operation journal cannot be enumerated safely and requires recovery.",
+        ))
+    for entry in incomplete:
         op_id = str(entry.get("op_id") or "")
         safe_op_id = op_id if re.fullmatch(r"[A-Za-z0-9._-]+", op_id) else "incomplete-operation"
         findings.append(_audit_finding(

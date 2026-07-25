@@ -498,6 +498,7 @@ def test_monitor_create_rejects_receipt_from_another_skill_before_write(tmp_path
                 "operation": "weekly",
                 "stage": "",
                 "limit": 20,
+                "presentation_contract": "report-presentation/v2",
                 "input_snapshot": {
                     "digest": "0" * 64,
                     "accepted_event_count": 0,

@@ -237,6 +237,29 @@ def test_audit_detects_incomplete_journal_and_symlink_escape_without_following(t
     assert _snapshot(root) == before
 
 
+def test_audit_reports_malformed_journal_without_exposing_parser_details_or_writing(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "malformed-journal"
+    journal = root / "kb/.journal"
+    journal.mkdir(parents=True)
+    entry = journal / "unsafe-detail.yaml"
+    entry.write_text("op_id: unsafe-detail\nstate: begin\nsecret: outside-secret-token\n", encoding="utf-8")
+    before = _snapshot(root)
+
+    report = audit_workspace(root)
+
+    recovery = [
+        item for item in report["findings"]
+        if item["code"] == "RECOVERY_INCOMPLETE_OPERATION"
+    ]
+    assert report["status"] == "FAIL"
+    assert len(recovery) == 1
+    assert recovery[0]["subject"] == "kb/.journal"
+    assert "outside-secret-token" not in repr(report)
+    assert _snapshot(root) == before
+
+
 def test_audit_rejects_symlinked_kb_root_even_when_target_is_in_workspace(tmp_path: Path) -> None:
     root = tmp_path / "linked-root"
     target = root / "alternate-kb"

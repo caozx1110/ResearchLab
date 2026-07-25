@@ -412,13 +412,13 @@ def test_reports_isolate_pending_diagnoses_and_require_current_receipt_for_judge
     _run_report(tmp_path, "weekly", "--program-id", program_id)
     report_path = tmp_path / "kb" / "programs" / program_id / "reports" / "weekly.md"
     pending_report = report_path.read_text(encoding="utf-8")
-    ordinary_section = _markdown_section(pending_report, "## Reporting Events")
-    pending_section = _markdown_section(pending_report, "## Pending / Unverified judgements")
+    ordinary_section = _markdown_section(pending_report, "## 报告事件")
+    pending_section = _markdown_section(pending_report, "## 待确认 / 未核验的判断")
     assert run_summary in ordinary_section
     assert pending_summary not in ordinary_section
-    assert "PENDING / UNVERIFIED JUDGEMENT" in pending_section
+    assert "待确认 / 未核验的判断" in pending_section
     assert pending_summary in pending_section
-    assert "missing: current ConfirmationReceipt" in pending_section
+    assert "当前缺少有效的确认回执或证据绑定" in pending_section
 
     events_path = tmp_path / "kb" / "programs" / program_id / "workflow" / "reporting-events.yaml"
     diagnosis_events = [
@@ -481,15 +481,15 @@ def test_reports_isolate_pending_diagnoses_and_require_current_receipt_for_judge
     )
     _run_report(tmp_path, "weekly", "--program-id", program_id)
     confirmed_report = report_path.read_text(encoding="utf-8")
-    claims_section = _markdown_section(confirmed_report, "## Confirmed Claims & Evidence")
-    ordinary_section = _markdown_section(confirmed_report, "## Reporting Events")
-    pending_section = _markdown_section(confirmed_report, "## Pending / Unverified judgements")
+    claims_section = _markdown_section(confirmed_report, "## 已确认判断与证据")
+    ordinary_section = _markdown_section(confirmed_report, "## 报告事件")
+    pending_section = _markdown_section(confirmed_report, "## 待确认 / 未核验的判断")
     assert confirmed_summary in claims_section
     assert run_summary in claims_section
     assert run_summary in ordinary_section
     assert confirmed_summary not in ordinary_section
-    assert "Confirmed judgement" in ordinary_section
-    assert "confirmation: current receipt" in ordinary_section
+    assert "已确认判断" in ordinary_section
+    assert "确认：当前回执" in ordinary_section
     assert confirmed_summary not in pending_section
     assert pending_summary in pending_section
 
