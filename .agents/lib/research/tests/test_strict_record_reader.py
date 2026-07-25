@@ -18,6 +18,7 @@ import pytest
 from research.common import write_yaml_if_changed
 from research.evidence import build_verification_receipt
 from research.judgements import discover_pending_judgements
+from research.index import search_records
 from research.paths import record_path
 from research.records import default_record, iter_records, locate_record
 from research.sources import detect_duplicate
@@ -490,7 +491,11 @@ def test_legacy_snapshot_normalization_is_stable_across_runtime_clock(
     assert current == prepared
 
 
-def test_wrong_field_type_quarantines_only_that_record_across_bulk_consumers(tmp_path: Path) -> None:
+def test_wrong_field_type_quarantines_only_that_record_across_bulk_consumers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     root = tmp_path / "workspace"
     _write_record(root, "paper", "p-good-123456", title="Usable sibling")
     malformed = default_record("paper", title="Malformed", maturity="lightweight")
@@ -501,9 +506,29 @@ def test_wrong_field_type_quarantines_only_that_record_across_bulk_consumers(tmp
     records = iter_records(root)
 
     assert [record["id"] for record in records] == ["p-good-123456"]
+    assert [record["id"] for record in search_records(root, "Usable sibling")] == ["p-good-123456"]
     eligible, excluded = select_current_confirmed_survey_records(root, records)
     assert {item["id"] for item in eligible} | {item["id"] for item in excluded} == {"p-good-123456"}
     assert detect_duplicate(root, "paper", "https://example.test/new-paper.pdf") is None
+
+    kb = _load_kb_cli()
+
+    def fake_forward(_root, _script, args, *, stream):
+        assert stream is False
+        stdout = ""
+        if "prepare-next-selection" in args:
+            stdout = json.dumps(
+                {"candidate_snapshot": {"candidates": [], "program_contexts": []}},
+                ensure_ascii=False,
+            )
+        return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(kb, "forward_command", fake_forward)
+    assert kb.handle_status(argparse.Namespace(program=""), root) == 0
+    output = capsys.readouterr().out
+    assert "知识库目前收录 1 条资料" in output
+    assert "Malformed" not in output
+    assert "TypeError" not in output
 
 
 def test_review_discovery_quarantines_malformed_record_without_hiding_ready_sibling(tmp_path: Path) -> None:
