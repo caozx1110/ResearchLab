@@ -7,10 +7,11 @@ from pathlib import Path
 import pytest
 
 from research.common import load_yaml, write_yaml_if_changed
-from research.confirm import apply_confirmation
+from research.confirm import apply_confirmation, write_record
 from research.evidence import build_verification_receipt
 from research.judgements import confirmation_binding
 from research.preference_selection import eligible_preferences, record_effective_selection
+from research.records import canonical_record_snapshot_for_record, normalize_record_snapshot
 
 
 def _write_confirmed_record(root: Path, unit_id: str, claims: list[dict]) -> None:
@@ -23,13 +24,20 @@ def _write_confirmed_record(root: Path, unit_id: str, claims: list[dict]) -> Non
         "information_types": ["fact"],
         "payload": {"claims": claims},
     }
+    record_path = root / "kb" / "units" / "papers" / unit_id / "record.yaml"
+    write_yaml_if_changed(record_path, record)
+    expected_record_snapshot = canonical_record_snapshot_for_record(root, record)
+    normalized = normalize_record_snapshot(expected_record_snapshot, root)
+    assert normalized is not None
+    record = normalized
     apply_confirmation(
         record,
         confirmed_by="Human Reviewer",
         evidence=["kb/programs/grounded-report/workflow/decision-log.md"],
         project_root=root,
+        expected_record_snapshot=expected_record_snapshot,
     )
-    write_yaml_if_changed(root / "kb" / "units" / "papers" / unit_id / "record.yaml", record)
+    write_record(root, record, expected_record_snapshot=expected_record_snapshot)
 
 
 def _write_confirmed_decision(root: Path, program_id: str) -> None:

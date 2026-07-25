@@ -249,7 +249,7 @@ def test_cross_unit_symlink_evidence_root_is_never_trusted(tmp_path: Path) -> No
     link.symlink_to(outside, target_is_directory=True)
 
     assert discover_pending_judgements(tmp_path) == []
-    with pytest.raises(SystemExit, match="canonical safe unit or program"):
+    with pytest.raises(SystemExit, match="Persisted unit confirmation snapshot is not current"):
         apply_confirmation(
             record,
             confirmed_by="Human Reviewer",

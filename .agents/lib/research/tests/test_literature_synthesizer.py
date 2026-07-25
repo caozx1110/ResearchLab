@@ -193,10 +193,15 @@ def test_unit_binding_rejects_ambiguous_canonical_unit_id(tmp_path: Path) -> Non
         tmp_path,
         {"id": "shared-unit-id", "kind": "paper", "title": "Paper", "payload": {}},
     )
+    isolated = tmp_path.parent / f"{tmp_path.name}-repo-fixture"
     write_confirmed_unit(
         module,
-        tmp_path,
+        isolated,
         {"id": "shared-unit-id", "kind": "repo", "title": "Repo", "payload": {}},
+    )
+    shutil.copytree(
+        isolated / "kb" / "units" / "repos" / "shared-unit-id",
+        tmp_path / "kb" / "units" / "repos" / "shared-unit-id",
     )
     canonical = yaml.safe_load((paper_dir / "record.yaml").read_text(encoding="utf-8"))
 
