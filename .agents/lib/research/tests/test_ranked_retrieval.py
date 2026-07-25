@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import sqlite3
 from pathlib import Path
 
@@ -542,6 +543,38 @@ def test_long_markdown_block_uses_fixed_overlapping_windows(tmp_path: Path) -> N
     assert all(len(item["text"]) <= PASSAGE_MAX_CHARS for item in note_passages)
     assert note_passages[0]["text"][-PASSAGE_OVERLAP_CHARS:] in note_passages[1]["text"]
     assert all(item["heading"] == "Long block" for item in note_passages)
+
+
+def test_passage_capture_rejects_real_unit_replacement_after_record_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ensure_workspace(tmp_path)
+    unit_id = "p-passage-race-123456"
+    _write_record(tmp_path, _record(unit_id, "Snapshot-bound paper"))
+    unit = unit_root(tmp_path, "paper", unit_id)
+    write_text_if_changed(unit / "paper-note.md", "Benign original passage.\n")
+    replacement = tmp_path / "replacement-unit"
+    shutil.copytree(unit, replacement)
+    write_text_if_changed(replacement / "paper-note.md", "TOPSECRET_PUBLIC_TOKEN\n")
+    parked = tmp_path / "parked-unit"
+    original_capture = index_mod.snapshot_canonical_unit_artifacts
+    swapped = False
+
+    def racing_capture(project_root, kind, captured_id, artifacts):
+        nonlocal swapped
+        if captured_id == unit_id and not swapped:
+            swapped = True
+            unit.rename(parked)
+            replacement.rename(unit)
+        return original_capture(project_root, kind, captured_id, artifacts)
+
+    monkeypatch.setattr(index_mod, "snapshot_canonical_unit_artifacts", racing_capture)
+
+    payload = search_passages(tmp_path, "TOPSECRET_PUBLIC_TOKEN")
+
+    assert payload["results"] == []
+    assert swapped
 
 
 def test_failed_atomic_replace_preserves_prior_passage_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

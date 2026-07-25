@@ -6,6 +6,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -19,7 +20,10 @@ from research.evidence import build_verification_receipt
 from research.judgements import discover_pending_judgements
 from research.paths import record_path
 from research.records import default_record, iter_records, locate_record
+from research.sources import detect_duplicate
+from research.surveys import select_current_confirmed_survey_records
 import research.records as records_module
+import research.judgements as judgements_module
 
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -484,3 +488,145 @@ def test_legacy_snapshot_normalization_is_stable_across_runtime_clock(
     current, _ = locate_record(root, "p-legacy-123456", kind="paper", fuzzy=False)
 
     assert current == prepared
+
+
+def test_wrong_field_type_quarantines_only_that_record_across_bulk_consumers(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    _write_record(root, "paper", "p-good-123456", title="Usable sibling")
+    malformed = default_record("paper", title="Malformed", maturity="lightweight")
+    malformed["id"] = "p-bad-123456"
+    malformed["information_types"] = 7
+    write_yaml_if_changed(record_path(root, "paper", malformed["id"]), malformed)
+
+    records = iter_records(root)
+
+    assert [record["id"] for record in records] == ["p-good-123456"]
+    eligible, excluded = select_current_confirmed_survey_records(root, records)
+    assert {item["id"] for item in eligible} | {item["id"] for item in excluded} == {"p-good-123456"}
+    assert detect_duplicate(root, "paper", "https://example.test/new-paper.pdf") is None
+
+
+def test_review_discovery_quarantines_malformed_record_without_hiding_ready_sibling(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    _write_ready_unit(root, "blog", "b-ready-sibling-123456")
+    malformed = default_record("paper", title="Malformed review candidate", maturity="lightweight")
+    malformed["id"] = "p-bad-review-123456"
+    malformed["information_types"] = 7
+    write_yaml_if_changed(record_path(root, "paper", malformed["id"]), malformed)
+
+    cards = discover_pending_judgements(root)
+
+    assert [card["subject"]["id"] for card in cards] == ["b-ready-sibling-123456"]
+
+
+@pytest.mark.parametrize("interrupt", [MemoryError("oom"), KeyboardInterrupt(), GeneratorExit()])
+def test_record_quarantine_does_not_swallow_process_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    interrupt: BaseException,
+) -> None:
+    root = tmp_path / "workspace"
+    _write_record(root, "paper", "p-interrupt-123456", title="Interrupt")
+
+    def fail_normalization(*args, **kwargs):
+        raise interrupt
+
+    monkeypatch.setattr(records_module, "normalize_record_schema", fail_normalization)
+
+    with pytest.raises(type(interrupt)):
+        iter_records(root)
+
+
+def test_locate_last_preserves_one_nanosecond_mtime_order(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    older = _write_record(root, "paper", "p-zolder-123456", title="Older")
+    newer = _write_record(root, "paper", "p-anewer-123456", title="Newer")
+    for path in (older, newer):
+        record = records_module.load_yaml(path)
+        record["created_at"] = "2026-01-01T00:00:00+00:00"
+        record["first_ingested_at"] = "2026-01-01T00:00:00+00:00"
+        record["updated_at"] = "2026-01-01T00:00:00+00:00"
+        write_yaml_if_changed(path, record)
+    older_ns = 1_800_000_000_000_000_000
+    newer_ns = older_ns + 1
+    os.utime(older, ns=(older_ns, older_ns))
+    os.utime(newer, ns=(newer_ns, newer_ns))
+
+    record, _path = locate_record(root, "last")
+
+    assert record["id"] == "p-anewer-123456"
+
+
+def test_same_unit_record_replacement_between_discovery_and_evidence_capture_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "workspace"
+    path = _write_ready_unit(root, "paper", "p-self-race-123456")
+    unit = path.parent
+    parked = tmp_path / "parked-self-unit"
+    replacement = tmp_path / "replacement-self-unit"
+    shutil.copytree(unit, replacement)
+    original_capture = records_module.snapshot_canonical_unit_artifacts
+    swapped = False
+
+    def racing_capture(project_root, kind, unit_id, artifacts):
+        nonlocal swapped
+        if unit_id == "p-self-race-123456" and not swapped:
+            swapped = True
+            unit.rename(parked)
+            replacement.rename(unit)
+        return original_capture(project_root, kind, unit_id, artifacts)
+
+    monkeypatch.setattr(records_module, "snapshot_canonical_unit_artifacts", racing_capture)
+
+    assert discover_pending_judgements(root) == []
+    assert swapped
+
+
+def test_cross_unit_evidence_rejects_source_symlink_swap_after_candidate_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "workspace"
+    source_id = "p-source-race-123456"
+    source_path = _write_record(root, "paper", source_id, title="Source")
+    source_artifact = source_path.parent / "raw" / "source.txt"
+    source_artifact.parent.mkdir()
+    source_artifact.write_text("Stable cross-unit evidence.", encoding="utf-8")
+    consumer_id = "b-consumer-race-123456"
+    consumer_path = _write_ready_unit(root, "blog", consumer_id)
+    consumer = records_module.load_yaml(consumer_path)
+    consumer["payload"]["claims"][0]["evidence_refs"] = [
+        {
+            "source_unit_id": source_id,
+            "artifact": "raw/source.txt",
+            "locator": "line:1",
+            "quote": "Stable cross-unit evidence.",
+        }
+    ]
+    build_verification_receipt(
+        consumer,
+        consumer_path.parent,
+        source_roots={source_id: source_path.parent},
+    )
+    write_yaml_if_changed(consumer_path, consumer)
+    outside = tmp_path / "outside-source-unit"
+    shutil.copytree(source_path.parent, outside)
+    parked = tmp_path / "parked-source-unit"
+    original_iter = judgements_module.iter_canonical_record_snapshots
+    swapped = False
+
+    def racing_iter(project_root, *, kind=None):
+        nonlocal swapped
+        snapshots = original_iter(project_root, kind=kind)
+        if not swapped:
+            swapped = True
+            source_path.parent.rename(parked)
+            source_path.parent.symlink_to(outside, target_is_directory=True)
+        return snapshots
+
+    monkeypatch.setattr(judgements_module, "iter_canonical_record_snapshots", racing_iter)
+
+    assert discover_pending_judgements(root) == []
+    assert swapped
