@@ -31,7 +31,7 @@ import json
 import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 
@@ -394,6 +394,71 @@ class ResolvedEvidenceArtifact:
         return entry
 
 
+@dataclass(frozen=True)
+class EvidenceArtifactSnapshot:
+    """Immutable bytes captured through a canonical unit directory capability.
+
+    ``path`` is informational only.  Verification consumes ``raw_bytes`` and
+    ``byte_sha256`` directly, so a later rename or symlink replacement of the
+    lexical workspace path cannot redirect the read.
+    """
+
+    source_unit_id: str
+    artifact: str
+    raw_bytes: bytes
+    byte_sha256: str
+    path: Path
+    directory_identities: tuple[tuple[int, int, int, int, int, int], ...] = ()
+    file_identity: tuple[int, int, int, int, int, int] = (0, 0, 0, 0, 0, 0)
+
+    @property
+    def identity(self) -> str:
+        return f"unit:{self.source_unit_id or '<unspecified>'}:{self.artifact}"
+
+    def receipt_entry(self) -> dict[str, Any]:
+        digest = hashlib.sha256(self.raw_bytes).hexdigest()
+        if digest != self.byte_sha256:
+            raise ValueError("anchored artifact snapshot digest mismatch")
+        return {
+            "identity": self.identity,
+            "source_kind": "unit",
+            "artifact": self.artifact,
+            "source_unit_id": self.source_unit_id,
+            "byte_sha256": digest,
+        }
+
+    def read_text(self, encoding: str = "utf-8") -> str:
+        return self.raw_bytes.decode(encoding)
+
+
+@dataclass(frozen=True)
+class EvidenceSourceSnapshot:
+    """All requested evidence artifacts from one anchored canonical unit."""
+
+    source_unit_id: str
+    kind: str
+    artifacts: tuple[EvidenceArtifactSnapshot, ...]
+    path: Path
+    validate_current: Callable[[], bool] = field(repr=False, compare=False)
+
+    def is_current(self) -> bool:
+        try:
+            return bool(self.validate_current())
+        except (OSError, ValueError):
+            return False
+
+    def artifact_snapshot(self, artifact: str) -> EvidenceArtifactSnapshot:
+        if not self.is_current():
+            raise ValueError("anchored source snapshot is no longer current")
+        requested = Path(str(artifact or "")).as_posix()
+        matches = [item for item in self.artifacts if item.artifact == requested]
+        if len(matches) != 1:
+            raise ValueError(
+                f"artifact {artifact!r} is absent from the anchored source snapshot"
+            )
+        return matches[0]
+
+
 def record_external_source_contract(record: Any) -> dict[str, str] | None:
     """Return the trusted repo-root contract persisted by the repo analyzer."""
     if not isinstance(record, dict) or str(record.get("kind") or "") != "repo":
@@ -483,15 +548,13 @@ def resolve_evidence_artifact(
     )
 
 
-def _load_artifact_path(path: Path) -> _LoadedArtifact | None:
-    """Load a containment-checked artifact's searchable text."""
-    if not path.is_file():
-        return None
+def _load_artifact_bytes(raw_bytes: bytes, *, suffix: str) -> _LoadedArtifact | None:
+    """Decode one immutable artifact snapshot into searchable views."""
     try:
-        raw = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+        raw = raw_bytes.decode("utf-8")
+    except UnicodeDecodeError:
         return None
-    if path.suffix.lower() in {".yaml", ".yml"}:
+    if suffix.lower() in {".yaml", ".yml"}:
         try:
             data = yaml.safe_load(raw)
         except yaml.YAMLError:
@@ -505,11 +568,42 @@ def _load_artifact_path(path: Path) -> _LoadedArtifact | None:
     return _LoadedArtifact(full_text=raw)
 
 
+def _load_artifact_path(path: Path) -> _LoadedArtifact | None:
+    """Load a containment-checked artifact's searchable text."""
+    if not path.is_file():
+        return None
+    try:
+        raw_bytes = path.read_bytes()
+    except OSError:
+        return None
+    return _load_artifact_bytes(raw_bytes, suffix=path.suffix)
+
+
+def _resolved_evidence_input(
+    ref: dict[str, Any],
+    unit_source: str | Path | EvidenceSourceSnapshot | None,
+    *,
+    external_source: dict[str, Any] | None,
+) -> ResolvedEvidenceArtifact | EvidenceArtifactSnapshot:
+    """Resolve an evidence ref to either anchored bytes or a legacy safe path."""
+    if isinstance(unit_source, EvidenceSourceSnapshot) and not isinstance(ref.get("external_source"), dict):
+        source_unit_id = str(ref.get("source_unit_id") or "").strip()
+        if source_unit_id != unit_source.source_unit_id:
+            raise ValueError(
+                f"source_unit_id {source_unit_id or '<missing>'!r} does not match anchored source snapshot"
+            )
+        artifact = str(ref.get("artifact") or "").strip()
+        if not artifact or "\x00" in artifact or _has_absolute_syntax(artifact) or ".." in Path(artifact).parts:
+            raise ValueError(f"artifact is not a canonical relative path: {artifact!r}")
+        return unit_source.artifact_snapshot(artifact)
+    return resolve_evidence_artifact(ref, unit_source, external_source=external_source)
+
+
 def _ref_unit_dir(
     ref: dict[str, Any],
-    unit_dir: str | Path | None,
-    source_roots: dict[str, str | Path] | None,
-) -> str | Path | None:
+    unit_dir: str | Path | EvidenceSourceSnapshot | None,
+    source_roots: dict[str, str | Path | EvidenceSourceSnapshot] | None,
+) -> str | Path | EvidenceSourceSnapshot | None:
     if isinstance(ref.get("external_source"), dict):
         # The trusted external_source contract supplies this ref's byte root;
         # cross-unit source_roots apply only to canonical KB artifacts.
@@ -522,12 +616,24 @@ def _ref_unit_dir(
     return source_roots[source_unit_id]
 
 
+def _stale_source_snapshot_violations(
+    source_roots: dict[str, str | Path | EvidenceSourceSnapshot] | None,
+) -> list[str]:
+    if source_roots is None:
+        return []
+    return [
+        f"source unit {source_unit_id!r}: anchored evidence snapshot is no longer current"
+        for source_unit_id, source in source_roots.items()
+        if isinstance(source, EvidenceSourceSnapshot) and not source.is_current()
+    ]
+
+
 def verify_claim_evidence(
     claim: Any,
-    unit_dir: str | Path | None,
+    unit_dir: str | Path | EvidenceSourceSnapshot | None,
     *,
     external_source: dict[str, Any] | None = None,
-    source_roots: dict[str, str | Path] | None = None,
+    source_roots: dict[str, str | Path | EvidenceSourceSnapshot] | None = None,
 ) -> list[str]:
     """Return a list of evidence violations for `claim` (empty == fully grounded).
 
@@ -547,7 +653,7 @@ def verify_claim_evidence(
     if not isinstance(refs, (list, tuple)):
         return [f"claim {claim.get('id') or '<no-id>'}: evidence_refs must be a list"]
     claim_id = str(claim.get("id") or "<no-id>")
-    base = Path(unit_dir) if unit_dir is not None else None
+    base = unit_dir
 
     for idx, ref in enumerate(refs):
         where = f"claim {claim_id} evidence_refs[{idx}]"
@@ -565,14 +671,19 @@ def verify_claim_evidence(
             continue
         try:
             ref_base = _ref_unit_dir(ref, base, source_roots)
-            resolved = resolve_evidence_artifact(ref, ref_base, external_source=external_source)
+            resolved = _resolved_evidence_input(ref, ref_base, external_source=external_source)
         except ValueError as exc:
             violations.append(f"{where}: {exc} for quote '{_quote_digest(quote)}'")
             continue
-        loaded = _load_artifact_path(resolved.path)
+        if isinstance(resolved, EvidenceArtifactSnapshot):
+            loaded = _load_artifact_bytes(resolved.raw_bytes, suffix=Path(resolved.artifact).suffix)
+            location = resolved.path.parent
+        else:
+            loaded = _load_artifact_path(resolved.path)
+            location = resolved.base_root
         if loaded is None:
             violations.append(
-                f"{where}: artifact '{artifact}' not found/readable under {resolved.base_root} "
+                f"{where}: artifact '{artifact}' not found/readable under {location} "
                 f"for quote '{_quote_digest(quote)}'"
             )
             continue
@@ -595,15 +706,16 @@ def verify_claim_evidence(
                     f"{where}: quote '{_quote_digest(quote)}' grounded but locator page={page} "
                     f"is wrong (found on {found_desc})"
                 )
+    violations.extend(_stale_source_snapshot_violations(source_roots))
     return violations
 
 
 def evidence_artifact_entries(
     claims: Any,
-    unit_dir: str | Path | None,
+    unit_dir: str | Path | EvidenceSourceSnapshot | None,
     *,
     external_source: dict[str, Any] | None = None,
-    source_roots: dict[str, str | Path] | None = None,
+    source_roots: dict[str, str | Path | EvidenceSourceSnapshot] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Collect byte-bound canonical artifact identities for verified claims."""
     entries: dict[str, dict[str, Any]] = {}
@@ -620,8 +732,8 @@ def evidence_artifact_entries(
             where = f"claims[{claim_index}].evidence_refs[{ref_index}]"
             try:
                 ref_base = _ref_unit_dir(ref, unit_dir, source_roots)
-                resolved = resolve_evidence_artifact(ref, ref_base, external_source=external_source)
-                if not resolved.path.is_file():
+                resolved = _resolved_evidence_input(ref, ref_base, external_source=external_source)
+                if isinstance(resolved, ResolvedEvidenceArtifact) and not resolved.path.is_file():
                     raise ValueError(
                         f"artifact {str(ref.get('artifact') or '')!r} not found/readable under {resolved.base_root}"
                     )
@@ -630,6 +742,7 @@ def evidence_artifact_entries(
                 violations.append(f"{where}: {exc}")
                 continue
             entries[resolved.identity] = entry
+    violations.extend(_stale_source_snapshot_violations(source_roots))
     return [entries[key] for key in sorted(entries)], violations
 
 
@@ -655,10 +768,10 @@ def verification_evidence_digest(claims: Any, artifacts: Any) -> str:
 
 def build_verification_receipt(
     record: dict[str, Any],
-    unit_dir: str | Path,
+    unit_dir: str | Path | EvidenceSourceSnapshot,
     *,
     external_source: dict[str, Any] | None = None,
-    source_roots: dict[str, str | Path] | None = None,
+    source_roots: dict[str, str | Path | EvidenceSourceSnapshot] | None = None,
     verified_at: str = "",
 ) -> dict[str, Any]:
     """Validate canonical claims and persist their byte-bound verification receipt."""
@@ -700,10 +813,10 @@ def build_verification_receipt(
 
 def verification_receipt_violations(
     record: Any,
-    unit_dir: str | Path | None,
+    unit_dir: str | Path | EvidenceSourceSnapshot | None,
     *,
     external_source: dict[str, Any] | None = None,
-    source_roots: dict[str, str | Path] | None = None,
+    source_roots: dict[str, str | Path | EvidenceSourceSnapshot] | None = None,
     check_artifacts: bool = True,
 ) -> list[str]:
     """Return why the stored analyzer verification is not current."""

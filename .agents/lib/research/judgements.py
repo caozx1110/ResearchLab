@@ -30,7 +30,9 @@ from .evidence import (
     verification_receipt_violations,
 )
 from .records import (
+    CanonicalRecordSnapshot,
     iter_canonical_record_snapshots,
+    normalize_record_snapshot,
     trusted_claim_source_roots,
     trusted_program_root,
     trusted_project_path,
@@ -177,13 +179,20 @@ def _identity_violations(root: Path, record: dict[str, Any], owner: str, artifac
     return violations
 
 
-def _source_roots(root: Path, record: dict[str, Any], artifact_path: Path) -> dict[str, Path]:
+def _source_roots(
+    root: Path,
+    record: dict[str, Any],
+    artifact_path: Path,
+    *,
+    record_snapshot: CanonicalRecordSnapshot | None = None,
+) -> dict[str, Any]:
     if _text(record.get("kind")) == "survey_judgement":
         return survey_source_roots(root, record, artifact_path)
     return trusted_claim_source_roots(
         root,
         record,
         verification_root=_verification_root(root, record, artifact_path),
+        expected_record_snapshot=record_snapshot,
     )
 
 
@@ -199,7 +208,13 @@ def _verification_root(root: Path, record: dict[str, Any], artifact_path: Path) 
     )
 
 
-def readiness_violations(root: Path, record: Any, artifact_path: Path) -> list[str]:
+def readiness_violations(
+    root: Path,
+    record: Any,
+    artifact_path: Path,
+    *,
+    record_snapshot: CanonicalRecordSnapshot | None = None,
+) -> list[str]:
     """Return why a judgement must not appear in the human review inbox."""
     if not isinstance(record, dict):
         return ["judgement artifact must be a mapping"]
@@ -220,7 +235,12 @@ def readiness_violations(root: Path, record: Any, artifact_path: Path) -> list[s
         violations.extend(survey_lifecycle_violations(record, root))
     try:
         verification_root = _verification_root(root, record, artifact_path)
-        source_roots = _source_roots(root, record, artifact_path)
+        source_roots = _source_roots(
+            root,
+            record,
+            artifact_path,
+            record_snapshot=record_snapshot,
+        )
     except ValueError:
         violations.append("judgement evidence source is not canonically contained")
     else:
@@ -295,11 +315,17 @@ def pending_judgement_card(
     *,
     owner: str,
     artifact_path: Path,
+    record_snapshot: CanonicalRecordSnapshot | None = None,
 ) -> dict[str, Any] | None:
     """Build one internal review card, or ``None`` unless it is truly ready."""
     if not isinstance(record, dict):
         return None
-    if _identity_violations(root, record, owner, artifact_path) or readiness_violations(root, record, artifact_path):
+    if _identity_violations(root, record, owner, artifact_path) or readiness_violations(
+        root,
+        record,
+        artifact_path,
+        record_snapshot=record_snapshot,
+    ):
         return None
     route = _default_route(record, owner)
     payload = record.get("payload")
@@ -393,23 +419,27 @@ def _list_items(root: Path, path: Path) -> Iterable[dict[str, Any]]:
     return [item for item in items if isinstance(item, dict)]
 
 
-def _candidate_artifacts(root: Path) -> Iterable[tuple[dict[str, Any], str, Path]]:
+def _candidate_artifacts(
+    root: Path,
+) -> Iterable[tuple[dict[str, Any], str, Path, CanonicalRecordSnapshot | None]]:
     for snapshot in iter_canonical_record_snapshots(root):
-        record = snapshot.record
+        record = normalize_record_snapshot(snapshot, root)
+        if record is None:
+            continue
         owner = UNIT_OWNER_BY_KIND.get(_text(record.get("kind")), _text(record.get("owner")) or "unknown")
-        yield record, owner, snapshot.path
+        yield record, owner, snapshot.path, snapshot
     for path in sorted((root / "kb" / "programs").glob("*/workflow/decisions.yaml")):
         safe_path = _safe_candidate_file(root, path)
         if safe_path is None:
             continue
         for item in _list_items(root, safe_path):
-            yield item, "research-orchestrator", safe_path
+            yield item, "research-orchestrator", safe_path, None
     for path in sorted((root / "kb" / "units" / "ideas").glob("*/discussion-judgements.yaml")):
         safe_path = _safe_candidate_file(root, path)
         if safe_path is None:
             continue
         for item in _list_items(root, safe_path):
-            yield item, "idea-workbench", safe_path
+            yield item, "idea-workbench", safe_path, None
     for path in sorted((root / "kb" / "programs").glob("*/design/*-repo-choice.yaml")):
         safe_path = _safe_candidate_file(root, path)
         if safe_path is None:
@@ -419,7 +449,7 @@ def _candidate_artifacts(root: Path) -> Iterable[tuple[dict[str, Any], str, Path
         except (OSError, UnicodeError, yaml.YAMLError):
             continue
         if isinstance(payload, dict):
-            yield payload, "method-designer", safe_path
+            yield payload, "method-designer", safe_path, None
     for path in sorted((root / "kb" / "synthesis").glob("*/*.yaml")):
         if path.name.endswith("-fill.yaml"):
             continue
@@ -431,7 +461,7 @@ def _candidate_artifacts(root: Path) -> Iterable[tuple[dict[str, Any], str, Path
         except (OSError, UnicodeError, yaml.YAMLError):
             continue
         if isinstance(payload, dict) and _text(payload.get("kind")) == "survey_judgement":
-            yield payload, "literature-synthesizer", safe_path
+            yield payload, "literature-synthesizer", safe_path, None
 
 
 def discover_pending_judgements(root: str | Path) -> list[dict[str, Any]]:
@@ -439,15 +469,24 @@ def discover_pending_judgements(root: str | Path) -> list[dict[str, Any]]:
     project_root = Path(root).absolute()
     raw_candidates = list(_candidate_artifacts(project_root))
     subject_counts: dict[tuple[str, str], int] = {}
-    for record, owner, path in raw_candidates:
+    for record, owner, path, _snapshot in raw_candidates:
         if _identity_violations(project_root, record, owner, path):
             continue
         key = (_text(record.get("kind")), _text(record.get("id")))
         subject_counts[key] = subject_counts.get(key, 0) + 1
     candidates = [
         card
-        for record, owner, path in raw_candidates
-        if (card := pending_judgement_card(project_root, record, owner=owner, artifact_path=path)) is not None
+        for record, owner, path, snapshot in raw_candidates
+        if (
+            card := pending_judgement_card(
+                project_root,
+                record,
+                owner=owner,
+                artifact_path=path,
+                record_snapshot=snapshot,
+            )
+        )
+        is not None
     ]
     cards = [
         card

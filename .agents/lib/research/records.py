@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import os
 import re
 import stat
@@ -9,7 +10,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator, Sequence
+from typing import Any, Callable, Iterator, Sequence
 
 from .common import (
     load_yaml,
@@ -17,6 +18,8 @@ from .common import (
     utc_now_iso,
 )
 from .evidence import (
+    EvidenceArtifactSnapshot,
+    EvidenceSourceSnapshot,
     JUDGEMENT_CLAIM_TYPES,
     UNCONFIRMABLE_CLAIM_TYPES,
     confirmation_claims,
@@ -71,6 +74,8 @@ WORKFLOW_STATES = {
 }
 
 _RECORD_MAX_BYTES = 8 * 1024 * 1024
+_ARTIFACT_MAX_BYTES = 50 * 1024 * 1024
+_UNIT_ARTIFACT_TOTAL_MAX_BYTES = 64 * 1024 * 1024
 _SAFE_UNIT_DIRECTORY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,254}")
 
 
@@ -84,6 +89,22 @@ class CanonicalRecordSnapshot:
     raw_bytes: bytes
     modified_time_ns: int
     record: dict[str, Any]
+    file_identity: tuple[int, int, int, int, int, int]
+
+
+@dataclass(frozen=True)
+class CanonicalUnitSnapshot:
+    """One record and selected artifacts captured under the same unit dirfd."""
+
+    record: CanonicalRecordSnapshot
+    artifacts: tuple[EvidenceArtifactSnapshot, ...]
+    validate_current: Callable[[], bool]
+
+    def is_current(self) -> bool:
+        try:
+            return bool(self.validate_current())
+        except (OSError, ValueError):
+            return False
 
 
 @dataclass(frozen=True)
@@ -239,7 +260,266 @@ def _read_record_snapshot(
         raw_bytes=raw_bytes,
         modified_time_ns=opened_after.st_mtime_ns,
         record=payload,
+        file_identity=expected,
     )
+
+
+def _canonical_artifact_parts(artifact: str) -> tuple[str, tuple[str, ...]]:
+    value = str(artifact or "").strip()
+    if (
+        not value
+        or "\x00" in value
+        or Path(value).is_absolute()
+        or value.startswith(("/", "\\"))
+        or re.match(r"^[A-Za-z]:[\\/]", value) is not None
+    ):
+        raise ValueError("artifact is not a canonical relative path")
+    parts = Path(value).parts
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        raise ValueError("artifact is not a canonical relative path")
+    return Path(*parts).as_posix(), tuple(parts)
+
+
+def _read_anchored_leaf(
+    root_path: Path,
+    chain: Sequence[_AnchoredDirectory],
+    name: str,
+    *,
+    max_bytes: int,
+) -> tuple[bytes, tuple[int, int, int, int, int, int]] | None:
+    directory = chain[-1]
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        lexical_before = os.stat(name, dir_fd=directory.fd, follow_symlinks=False)
+        if not stat.S_ISREG(lexical_before.st_mode) or lexical_before.st_size > max_bytes:
+            return None
+        leaf_fd = os.open(name, flags, dir_fd=directory.fd)
+    except OSError:
+        return None
+    expected = _record_stat_identity(lexical_before)
+    try:
+        opened_before = os.fstat(leaf_fd)
+        if not stat.S_ISREG(opened_before.st_mode) or _record_stat_identity(opened_before) != expected:
+            return None
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            remaining = max_bytes + 1 - total
+            if remaining <= 0:
+                return None
+            chunk = os.read(leaf_fd, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > max_bytes:
+                return None
+        opened_after = os.fstat(leaf_fd)
+    except OSError:
+        return None
+    finally:
+        os.close(leaf_fd)
+    try:
+        lexical_after = os.stat(name, dir_fd=directory.fd, follow_symlinks=False)
+    except OSError:
+        return None
+    if (
+        _record_stat_identity(opened_after) != expected
+        or _record_stat_identity(lexical_after) != expected
+        or total != opened_after.st_size
+        or not _anchored_chain_is_current(root_path, chain)
+    ):
+        return None
+    return b"".join(chunks), expected
+
+
+def _open_exact_unit_chain(
+    project_root: Path,
+    kind: str,
+    unit_id: str,
+) -> tuple[Path, list[_AnchoredDirectory]] | None:
+    if kind not in UNIT_KIND_DIRS or _SAFE_UNIT_DIRECTORY.fullmatch(unit_id) is None:
+        return None
+    root_path = project_root.absolute()
+    root_directory = _open_root_directory(root_path)
+    if root_directory is None:
+        return None
+    chain = [root_directory]
+    for component in ("kb", "units", UNIT_KIND_DIRS[kind], unit_id):
+        child = _open_child_directory(chain[-1], component)
+        if child is None:
+            for directory in reversed(chain):
+                os.close(directory.fd)
+            return None
+        chain.append(child)
+    return root_path, chain
+
+
+def _close_anchored_chain(chain: Sequence[_AnchoredDirectory]) -> None:
+    for directory in reversed(chain):
+        os.close(directory.fd)
+
+
+def _record_snapshot_is_current(
+    root_path: Path,
+    chain: Sequence[_AnchoredDirectory],
+    snapshot: CanonicalRecordSnapshot,
+) -> bool:
+    try:
+        visible = os.stat("record.yaml", dir_fd=chain[-1].fd, follow_symlinks=False)
+    except OSError:
+        return False
+    return (
+        _record_stat_identity(visible) == snapshot.file_identity
+        and _anchored_chain_is_current(root_path, chain)
+    )
+
+
+def _read_artifact_from_unit_chain(
+    root_path: Path,
+    unit_chain: Sequence[_AnchoredDirectory],
+    *,
+    kind: str,
+    unit_id: str,
+    artifact: str,
+) -> EvidenceArtifactSnapshot | None:
+    try:
+        canonical, parts = _canonical_artifact_parts(artifact)
+    except ValueError:
+        return None
+    chain = list(unit_chain)
+    opened_children: list[_AnchoredDirectory] = []
+    try:
+        for component in parts[:-1]:
+            child = _open_child_directory(chain[-1], component)
+            if child is None:
+                return None
+            opened_children.append(child)
+            chain.append(child)
+        payload = _read_anchored_leaf(
+            root_path,
+            chain,
+            parts[-1],
+            max_bytes=_ARTIFACT_MAX_BYTES,
+        )
+        if payload is None:
+            return None
+        raw_bytes, file_identity = payload
+        return EvidenceArtifactSnapshot(
+            source_unit_id=unit_id,
+            artifact=canonical,
+            raw_bytes=raw_bytes,
+            byte_sha256=hashlib.sha256(raw_bytes).hexdigest(),
+            path=(root_path / "kb" / "units" / UNIT_KIND_DIRS[kind] / unit_id / canonical),
+            directory_identities=tuple(item.identity for item in opened_children),
+            file_identity=file_identity,
+        )
+    finally:
+        for directory in reversed(opened_children):
+            os.close(directory.fd)
+
+
+def _artifact_snapshot_is_current(
+    root_path: Path,
+    unit_chain: Sequence[_AnchoredDirectory],
+    snapshot: EvidenceArtifactSnapshot,
+) -> bool:
+    try:
+        _canonical, parts = _canonical_artifact_parts(snapshot.artifact)
+    except ValueError:
+        return False
+    chain = list(unit_chain)
+    opened_children: list[_AnchoredDirectory] = []
+    try:
+        for index, component in enumerate(parts[:-1]):
+            child = _open_child_directory(chain[-1], component)
+            if child is None:
+                return False
+            opened_children.append(child)
+            chain.append(child)
+            if index >= len(snapshot.directory_identities) or child.identity != snapshot.directory_identities[index]:
+                return False
+        if len(opened_children) != len(snapshot.directory_identities):
+            return False
+        try:
+            visible = os.stat(parts[-1], dir_fd=chain[-1].fd, follow_symlinks=False)
+        except OSError:
+            return False
+        return (
+            _record_stat_identity(visible) == snapshot.file_identity
+            and _anchored_chain_is_current(root_path, chain)
+        )
+    finally:
+        for directory in reversed(opened_children):
+            os.close(directory.fd)
+
+
+def snapshot_canonical_unit_artifacts(
+    project_root: Path,
+    kind: str,
+    unit_id: str,
+    artifacts: Sequence[str],
+) -> CanonicalUnitSnapshot | None:
+    """Capture requested artifacts and their record through one anchored unit fd."""
+    opened = _open_exact_unit_chain(project_root, kind, unit_id)
+    if opened is None:
+        return None
+    root_path, chain = opened
+    try:
+        record = _read_record_snapshot(root_path, chain, kind=kind, unit_id=unit_id)
+        if record is None:
+            return None
+        canonical_artifacts: list[str] = []
+        try:
+            canonical_artifacts = sorted({_canonical_artifact_parts(item)[0] for item in artifacts})
+        except ValueError:
+            return None
+        snapshots: list[EvidenceArtifactSnapshot] = []
+        total = 0
+        for artifact in canonical_artifacts:
+            snapshot = _read_artifact_from_unit_chain(
+                root_path,
+                chain,
+                kind=kind,
+                unit_id=unit_id,
+                artifact=artifact,
+            )
+            if snapshot is None:
+                return None
+            total += len(snapshot.raw_bytes)
+            if total > _UNIT_ARTIFACT_TOTAL_MAX_BYTES:
+                return None
+            snapshots.append(snapshot)
+        if (
+            not _record_snapshot_is_current(root_path, chain, record)
+            or not all(_artifact_snapshot_is_current(root_path, chain, item) for item in snapshots)
+        ):
+            return None
+        captured_artifacts = tuple(snapshots)
+
+        def validate_current() -> bool:
+            current = _open_exact_unit_chain(project_root, kind, unit_id)
+            if current is None:
+                return False
+            current_root, current_chain = current
+            try:
+                return (
+                    _record_snapshot_is_current(current_root, current_chain, record)
+                    and all(
+                        _artifact_snapshot_is_current(current_root, current_chain, item)
+                        for item in captured_artifacts
+                    )
+                )
+            finally:
+                _close_anchored_chain(current_chain)
+
+        return CanonicalUnitSnapshot(
+            record=record,
+            artifacts=captured_artifacts,
+            validate_current=validate_current,
+        )
+    finally:
+        _close_anchored_chain(chain)
 
 
 def iter_canonical_record_snapshots(
@@ -345,7 +625,11 @@ def trusted_project_path(
 
 
 def trusted_unit_record_path(project_root: Path, unit_id: str) -> Path:
-    """Resolve one exact canonical unit record without aliases or symlink traversal."""
+    """Return an informational path after proving one canonical record exists.
+
+    Callers that need bytes must use a canonical snapshot API; the returned
+    lexical path is deliberately not a trusted read capability.
+    """
     identifier = str(unit_id or "").strip()
     if not identifier or Path(identifier).name != identifier or identifier in {".", ".."}:
         raise ValueError("source unit id is not a canonical path component")
@@ -377,11 +661,13 @@ def trusted_claim_source_roots(
     record: dict[str, Any],
     *,
     verification_root: Path | None = None,
-) -> dict[str, Path]:
-    """Resolve evidence roots from canonical identity, rejecting every unsafe source."""
-    roots: dict[str, Path] = {}
+    expected_record_snapshot: CanonicalRecordSnapshot | None = None,
+) -> dict[str, Path | EvidenceSourceSnapshot]:
+    """Capture canonical unit evidence bytes and resolve non-unit roots safely."""
+    roots: dict[str, Path | EvidenceSourceSnapshot] = {}
     record_id = str(record.get("id") or "").strip()
     record_kind = str(record.get("kind") or "").strip()
+    artifacts_by_source: dict[str, set[str]] = {}
     for claim in confirmation_claims(record):
         for ref in claim.get("evidence_refs") or []:
             if not isinstance(ref, dict):
@@ -391,24 +677,62 @@ def trusted_claim_source_roots(
                 # contract; the canonical unit directory is not its byte root.
                 continue
             source_unit_id = str(ref.get("source_unit_id") or "").strip()
-            if not source_unit_id or source_unit_id in roots:
+            if not source_unit_id:
                 continue
-            if source_unit_id == record_id and record_kind in UNIT_KIND_DIRS:
-                candidate = verification_root or unit_root(project_root, record_kind, record_id)
-                roots[source_unit_id] = trusted_project_path(
-                    project_root,
-                    candidate,
-                    allowed_root=units_root(project_root),
-                    require="dir",
-                )
-                continue
-            if source_unit_id.startswith("program:"):
-                roots[source_unit_id] = trusted_program_root(
-                    project_root,
-                    source_unit_id.split(":", 1)[1],
-                )
-                continue
-            roots[source_unit_id] = trusted_unit_record_path(project_root, source_unit_id).parent
+            artifacts_by_source.setdefault(source_unit_id, set()).add(str(ref.get("artifact") or ""))
+
+    for source_unit_id in sorted(artifacts_by_source):
+        requested_artifacts = sorted(artifacts_by_source[source_unit_id])
+        if source_unit_id in roots:
+            continue
+        if source_unit_id == record_id and record_kind in UNIT_KIND_DIRS:
+            unit_snapshot = snapshot_canonical_unit_artifacts(
+                project_root,
+                record_kind,
+                record_id,
+                requested_artifacts,
+            )
+            if unit_snapshot is None:
+                raise ValueError("source unit evidence cannot be captured canonically")
+            if expected_record_snapshot is not None and (
+                unit_snapshot.record.raw_bytes != expected_record_snapshot.raw_bytes
+                or unit_snapshot.record.file_identity != expected_record_snapshot.file_identity
+            ):
+                raise ValueError("source unit record changed before evidence capture")
+            roots[source_unit_id] = EvidenceSourceSnapshot(
+                source_unit_id=source_unit_id,
+                kind=record_kind,
+                artifacts=unit_snapshot.artifacts,
+                path=unit_snapshot.record.path.parent,
+                validate_current=unit_snapshot.is_current,
+            )
+            continue
+        if source_unit_id.startswith("program:"):
+            roots[source_unit_id] = trusted_program_root(
+                project_root,
+                source_unit_id.split(":", 1)[1],
+            )
+            continue
+        matches: list[CanonicalUnitSnapshot] = []
+        for source_kind in UNIT_KIND_DIRS:
+            unit_snapshot = snapshot_canonical_unit_artifacts(
+                project_root,
+                source_kind,
+                source_unit_id,
+                requested_artifacts,
+            )
+            if unit_snapshot is not None:
+                matches.append(unit_snapshot)
+        if len(matches) != 1:
+            raise ValueError("source unit does not resolve to one canonical artifact snapshot")
+        unit_snapshot = matches[0]
+        roots[source_unit_id] = EvidenceSourceSnapshot(
+            source_unit_id=source_unit_id,
+            kind=unit_snapshot.record.kind,
+            artifacts=unit_snapshot.artifacts,
+            path=unit_snapshot.record.path.parent,
+            validate_current=unit_snapshot.is_current,
+        )
     return roots
 
 
@@ -842,7 +1166,12 @@ def default_record(kind: str, *, title: str, maturity: str, source: dict[str, An
     return record
 
 
-def normalize_record_schema(record: dict[str, Any], *, project_root: Path | None = None) -> dict[str, Any]:
+def normalize_record_schema(
+    record: dict[str, Any],
+    *,
+    project_root: Path | None = None,
+    canonical_snapshot: CanonicalRecordSnapshot | None = None,
+) -> dict[str, Any]:
     if not isinstance(record, dict):
         raise SystemExit("Invalid record payload")
     kind = str(record.get("kind") or "")
@@ -891,6 +1220,7 @@ def normalize_record_schema(record: dict[str, Any], *, project_root: Path | None
                     project_root,
                     normalized,
                     verification_root=evidence_root,
+                    expected_record_snapshot=canonical_snapshot,
                 )
             except ValueError:
                 source_root_violations.append("verification evidence source is not canonically contained")
@@ -1133,14 +1463,16 @@ def is_ready_for_human_review(record: dict[str, Any]) -> bool:
 def iter_records(project_root: Path, *, kind: str | None = None) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for snapshot in iter_canonical_record_snapshots(project_root, kind=kind):
-        items.append(_normalized_snapshot_record(snapshot, project_root))
+        record = normalize_record_snapshot(snapshot, project_root)
+        if record is not None:
+            items.append(record)
     return items
 
 
 def _normalized_snapshot_record(
     snapshot: CanonicalRecordSnapshot,
     project_root: Path,
-) -> dict[str, Any]:
+) -> dict[str, Any] | None:
     payload = copy.deepcopy(snapshot.record)
     try:
         stable_timestamp = datetime.fromtimestamp(
@@ -1169,9 +1501,33 @@ def _normalized_snapshot_record(
             }
         ]
     try:
-        return normalize_record_schema(payload, project_root=project_root)
-    except SystemExit:
-        return payload
+        return normalize_record_schema(
+            payload,
+            project_root=project_root,
+            canonical_snapshot=snapshot,
+        )
+    except (
+        SystemExit,
+        TypeError,
+        ValueError,
+        AttributeError,
+        KeyError,
+        IndexError,
+        RecursionError,
+        OverflowError,
+    ):
+        # This is the per-record quarantine boundary.  Strict YAML establishes
+        # only a mapping shape; arbitrary legacy field types must not abort the
+        # valid siblings in a bulk status/find/survey/intake scan.
+        return None
+
+
+def normalize_record_snapshot(
+    snapshot: CanonicalRecordSnapshot,
+    project_root: Path,
+) -> dict[str, Any] | None:
+    """Normalize one strict snapshot, quarantining only that malformed record."""
+    return _normalized_snapshot_record(snapshot, project_root)
 
 
 def _record_lookup_path(project_root: Path, record: dict[str, Any]) -> Path | None:
@@ -1210,11 +1566,11 @@ def _record_modified_sort_key(
     record: dict[str, Any],
     *,
     safe_modified_time_ns: int = 0,
-) -> tuple[float, float, str]:
+) -> tuple[int, float, str]:
     timestamp = str(record.get("updated_at") or record.get("created_at") or record.get("first_ingested_at") or "")
     parsed = parse_iso_datetime(timestamp)
     return (
-        safe_modified_time_ns / 1_000_000_000,
+        safe_modified_time_ns,
         parsed.timestamp() if parsed else 0.0,
         str(record.get("id") or ""),
     )
@@ -1228,7 +1584,11 @@ def locate_record(project_root: Path, unit_id: str, *, kind: str | None = None, 
         if search_kind not in UNIT_KIND_DIRS:
             raise SystemExit(f"Unsupported unit kind: {search_kind}")
     snapshots = iter_canonical_record_snapshots(project_root, kind=kind)
-    records = [_normalized_snapshot_record(snapshot, project_root) for snapshot in snapshots]
+    records = [
+        record
+        for snapshot in snapshots
+        if (record := normalize_record_snapshot(snapshot, project_root)) is not None
+    ]
     safe_mtime_by_identity = {
         (snapshot.kind, snapshot.unit_id): snapshot.modified_time_ns
         for snapshot in snapshots
@@ -1297,7 +1657,10 @@ __all__ = [
     "AI_INFORMATION_TYPES",
     "WORKFLOW_STATES",
     "CanonicalRecordSnapshot",
+    "CanonicalUnitSnapshot",
     "iter_canonical_record_snapshots",
+    "normalize_record_snapshot",
+    "snapshot_canonical_unit_artifacts",
     "command_mutation",
     "trusted_project_path",
     "trusted_unit_record_path",

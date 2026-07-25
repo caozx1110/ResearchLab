@@ -64,10 +64,13 @@ from .records import (
     _extract_unit_id_hash,
     append_history,
     default_record,
+    iter_canonical_record_snapshots,
     iter_records,
     locate_record,
+    normalize_record_snapshot,
     normalize_record_schema,
     record_summary,
+    snapshot_canonical_unit_artifacts,
     trusted_claim_source_roots,
 )
 from .evidence import (
@@ -312,6 +315,66 @@ def _unit_markdown_paths(project_root: Path, record: dict[str, Any]) -> list[Pat
     return readable
 
 
+def _unit_content_snapshot(
+    project_root: Path,
+    record: dict[str, Any],
+    *,
+    include_parse_cache: bool,
+    expected_record_snapshot: Any = None,
+):
+    """Capture searchable unit bytes after lexical discovery, never by those paths."""
+    kind = str(record.get("kind") or "")
+    unit_id = str(record.get("id") or "")
+    if kind not in UNIT_KIND_DIRS or not unit_id:
+        return None
+    root = unit_root(project_root, kind, unit_id)
+    artifacts: list[str] = []
+    for path in _unit_markdown_paths(project_root, record):
+        try:
+            artifacts.append(path.relative_to(root).as_posix())
+        except ValueError:
+            return None
+    if include_parse_cache:
+        for name in ("parse-cache.yaml", "parse-cache.yml"):
+            candidate = root / name
+            try:
+                metadata = candidate.lstat()
+            except OSError:
+                continue
+            if stat.S_ISREG(metadata.st_mode):
+                artifacts.append(name)
+    snapshot = snapshot_canonical_unit_artifacts(project_root, kind, unit_id, artifacts)
+    if snapshot is None:
+        return None
+    if expected_record_snapshot is not None and (
+        snapshot.record.raw_bytes != expected_record_snapshot.raw_bytes
+        or snapshot.record.file_identity != expected_record_snapshot.file_identity
+    ):
+        return None
+    return snapshot
+
+
+def _unit_markdown_snapshots(
+    project_root: Path,
+    record: dict[str, Any],
+    *,
+    expected_record_snapshot: Any = None,
+) -> list[Any]:
+    snapshot = _unit_content_snapshot(
+        project_root,
+        record,
+        include_parse_cache=False,
+        expected_record_snapshot=expected_record_snapshot,
+    )
+    if snapshot is None:
+        return []
+    return [
+        artifact
+        for artifact in snapshot.artifacts
+        if Path(artifact.artifact).suffix.lower() in {".md", ".markdown"}
+    ]
+
+
 def _wikilink_target_exists(project_root: Path, target: str, ref_keys: set[str]) -> bool:
     candidates = [target.strip(), normalize_ref_key(target)]
     for candidate in candidates:
@@ -538,32 +601,6 @@ def _safe_files_below(base: Path, *, suffixes: set[str] | None = None) -> list[P
     return sorted(paths, key=lambda path: path.as_posix())
 
 
-def _read_regular_bytes(path: Path) -> bytes | None:
-    """Read one regular file without following a final-component symlink."""
-    flags = os.O_RDONLY
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    try:
-        descriptor = os.open(path, flags)
-    except OSError:
-        return None
-    try:
-        metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(metadata.st_mode):
-            return None
-        chunks: list[bytes] = []
-        while True:
-            chunk = os.read(descriptor, 1024 * 1024)
-            if not chunk:
-                break
-            chunks.append(chunk)
-        return b"".join(chunks)
-    except OSError:
-        return None
-    finally:
-        os.close(descriptor)
-
-
 def _path_has_symlink_component(project_root: Path, path: Path) -> bool:
     root = Path(os.path.abspath(project_root))
     candidate = Path(os.path.abspath(path))
@@ -594,9 +631,24 @@ def passage_corpus(
     project_root: Path,
     *,
     records: list[dict[str, Any]] | None = None,
+    record_snapshots: list[Any] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]], str]:
     """Extract passages plus the exact source manifest they were derived from."""
-    record_list = list(records) if records is not None else list(iter_records(project_root))
+    snapshots = list(record_snapshots) if record_snapshots is not None else []
+    if records is None:
+        if not snapshots:
+            snapshots = list(iter_canonical_record_snapshots(project_root))
+        record_list = [
+            record
+            for snapshot in snapshots
+            if (record := normalize_record_snapshot(snapshot, project_root)) is not None
+        ]
+    else:
+        record_list = list(records)
+    snapshot_by_identity = {
+        (snapshot.kind, snapshot.unit_id): snapshot
+        for snapshot in snapshots
+    }
     passages: list[dict[str, Any]] = []
     manifest_by_artifact: dict[str, str] = {}
     for record in sorted(
@@ -607,27 +659,44 @@ def passage_corpus(
         unit_id = str(record.get("id") or "")
         if kind not in UNIT_KIND_DIRS or not unit_id:
             continue
-        canonical_record_path = record_path(project_root, kind, unit_id)
-        if _path_has_symlink_component(project_root, canonical_record_path):
+        expected_record_snapshot = snapshot_by_identity.get((kind, unit_id))
+        unit_snapshot = _unit_content_snapshot(
+            project_root,
+            record,
+            include_parse_cache=True,
+            expected_record_snapshot=expected_record_snapshot,
+        )
+        if unit_snapshot is None:
             continue
-        record_bytes = _read_regular_bytes(canonical_record_path)
-        if record_bytes is None:
-            continue
-        record_artifact = _project_relative_artifact(project_root, canonical_record_path)
+        passage_start = len(passages)
+        unit_manifest_artifacts: list[str] = []
+        if expected_record_snapshot is None:
+            current_record = normalize_record_snapshot(unit_snapshot.record, project_root)
+            if current_record is None:
+                continue
+            record = current_record
+        record_bytes = unit_snapshot.record.raw_bytes
+        record_artifact = _project_relative_artifact(project_root, unit_snapshot.record.path)
         record_digest = hashlib.sha256(record_bytes).hexdigest()
         manifest_by_artifact[record_artifact] = record_digest
+        unit_manifest_artifacts.append(record_artifact)
         documents: list[dict[str, str]] = []
-        for markdown_path in _unit_markdown_paths(project_root, record):
-            markdown_bytes = _read_regular_bytes(markdown_path)
-            if markdown_bytes is None:
+        parse_cache_snapshots: list[Any] = []
+        for artifact_snapshot in unit_snapshot.artifacts:
+            suffix = Path(artifact_snapshot.artifact).suffix.lower()
+            if artifact_snapshot.artifact in {"parse-cache.yaml", "parse-cache.yml"}:
+                parse_cache_snapshots.append(artifact_snapshot)
+                continue
+            if suffix not in {".md", ".markdown"}:
                 continue
             try:
-                markdown_text = markdown_bytes.decode("utf-8")
+                markdown_text = artifact_snapshot.raw_bytes.decode("utf-8")
             except UnicodeDecodeError:
                 continue
-            artifact = _project_relative_artifact(project_root, markdown_path)
-            digest = hashlib.sha256(markdown_bytes).hexdigest()
+            artifact = _project_relative_artifact(project_root, artifact_snapshot.path)
+            digest = artifact_snapshot.byte_sha256
             manifest_by_artifact[artifact] = digest
+            unit_manifest_artifacts.append(artifact)
             documents.append({"artifact": artifact, "text": markdown_text, "source_digest": digest})
         passage_record = copy.deepcopy(record)
         passage_record["summary"] = record_summary(record)
@@ -639,14 +708,8 @@ def passage_corpus(
                 markdown_documents=documents,
             )
         )
-        unit_directory = unit_root(project_root, kind, unit_id)
-        for cache_name in ("parse-cache.yaml", "parse-cache.yml"):
-            parse_cache_path = unit_directory / cache_name
-            if _path_has_symlink_component(project_root, parse_cache_path):
-                continue
-            parse_cache_bytes = _read_regular_bytes(parse_cache_path)
-            if parse_cache_bytes is None:
-                continue
+        for parse_cache_snapshot in parse_cache_snapshots:
+            parse_cache_bytes = parse_cache_snapshot.raw_bytes
             try:
                 parse_cache = yaml.safe_load(parse_cache_bytes.decode("utf-8"))
             except (UnicodeDecodeError, yaml.YAMLError):
@@ -656,9 +719,10 @@ def passage_corpus(
             chunks = [item for item in parse_cache["chunks"] if isinstance(item, dict)]
             if not any(str(item.get("text") or "").strip() for item in chunks):
                 continue
-            artifact = _project_relative_artifact(project_root, parse_cache_path)
-            digest = hashlib.sha256(parse_cache_bytes).hexdigest()
+            artifact = _project_relative_artifact(project_root, parse_cache_snapshot.path)
+            digest = parse_cache_snapshot.byte_sha256
             manifest_by_artifact[artifact] = digest
+            unit_manifest_artifacts.append(artifact)
             passages.extend(
                 extract_parse_cache_passages(
                     passage_record,
@@ -667,6 +731,10 @@ def passage_corpus(
                     source_digest=digest,
                 )
             )
+        if not unit_snapshot.is_current():
+            del passages[passage_start:]
+            for artifact in unit_manifest_artifacts:
+                manifest_by_artifact.pop(artifact, None)
     manifest = [
         {"artifact": artifact, "digest": manifest_by_artifact[artifact]}
         for artifact in sorted(manifest_by_artifact)
@@ -1075,14 +1143,14 @@ def lint_workspace_integrity(project_root: Path, *, records: list[dict[str, Any]
     for record in records:
         wikilink_ref_keys.update(_record_wikilink_ref_keys(record))
     for record in records:
-        for path in _unit_markdown_paths(project_root, record):
+        for snapshot in _unit_markdown_snapshots(project_root, record):
             try:
-                markdown = path.read_text(encoding="utf-8")
+                markdown = snapshot.read_text(encoding="utf-8")
             except UnicodeDecodeError:
                 continue
             for target in parse_wikilinks(markdown):
                 if normalize_ref_key(target) not in wikilink_ref_keys:
-                    issues.append(f"{rel(project_root, path)}: broken wikilink `{target}`")
+                    issues.append(f"{rel(project_root, snapshot.path)}: broken wikilink `{target}`")
 
     programs_root = kb_root(project_root) / "programs"
     if programs_root.is_symlink() or not programs_root.is_dir():
@@ -1513,13 +1581,28 @@ def search_records(
 ) -> list[dict[str, Any]]:
     normalized_pool = slugify(str(pool), max_words=12) if pool else ""
     filtered: list[dict[str, Any]] = []
-    for record in iter_records(project_root, kind=kind):
+    snapshots = list(iter_canonical_record_snapshots(project_root, kind=kind))
+    snapshot_by_identity = {(snapshot.kind, snapshot.unit_id): snapshot for snapshot in snapshots}
+    for snapshot in snapshots:
+        record = normalize_record_snapshot(snapshot, project_root)
+        if record is None:
+            continue
         if normalized_pool and normalized_pool not in record.get("candidate_pools", []):
             continue
         if confirmation_status and str(record.get("confirmation_status") or "") != confirmation_status:
             continue
         filtered.append(record)
-    return rank_records(filtered, query, markdown_paths_for=lambda record: _unit_markdown_paths(project_root, record))
+    return rank_records(
+        filtered,
+        query,
+        markdown_paths_for=lambda record: _unit_markdown_snapshots(
+            project_root,
+            record,
+            expected_record_snapshot=snapshot_by_identity.get(
+                (str(record.get("kind") or ""), str(record.get("id") or ""))
+            ),
+        ),
+    )
 
 
 def search_passages(
@@ -1532,7 +1615,12 @@ def search_passages(
     limit: int = PASSAGE_SEARCH_LIMIT,
 ) -> dict[str, Any]:
     """Return passage hits and derived-index health without mutating the workspace."""
-    all_records = list(iter_records(project_root))
+    record_snapshots = list(iter_canonical_record_snapshots(project_root))
+    all_records = [
+        record
+        for snapshot in record_snapshots
+        if (record := normalize_record_snapshot(snapshot, project_root)) is not None
+    ]
     normalized_pool = slugify(str(pool), max_words=12) if pool else ""
     filtered: list[dict[str, Any]] = []
     for record in all_records:
@@ -1543,7 +1631,11 @@ def search_passages(
         if confirmation_status and str(record.get("confirmation_status") or "") != confirmation_status:
             continue
         filtered.append(record)
-    passages, manifest, corpus_digest = passage_corpus(project_root, records=all_records)
+    passages, manifest, corpus_digest = passage_corpus(
+        project_root,
+        records=all_records,
+        record_snapshots=record_snapshots,
+    )
     passages_digest = _passages_digest(passages)
     health = passage_cache_health(
         project_root,
