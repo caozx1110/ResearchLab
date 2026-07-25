@@ -1971,11 +1971,25 @@ def test_unit_claim_source_snapshot_enumeration_is_linear(
 
     monkeypatch.setattr(report, "iter_canonical_record_snapshots", count_yields)
 
-    sources, missing = report.load_confirmed_claim_sources(tmp_path, [*unit_ids, unit_ids[0]])
+    sources, missing = report.load_confirmed_claim_sources(tmp_path, unit_ids)
 
     assert [source.unit_id for source in sources] == unit_ids
     assert missing == []
     assert yields == unit_count
+
+
+def test_unit_claim_source_requested_ids_are_deduplicated(tmp_path: Path) -> None:
+    report = _load_report_module()
+    unit_id = "p-requested-twice"
+    write_yaml_if_changed(
+        tmp_path / "kb" / "units" / "papers" / unit_id / "record.yaml",
+        {"id": unit_id, "kind": "paper", "title": unit_id, "payload": {"claims": []}},
+    )
+
+    sources, missing = report.load_confirmed_claim_sources(tmp_path, [unit_id, unit_id])
+
+    assert [source.unit_id for source in sources] == [unit_id]
+    assert missing == []
 
 
 def test_unit_claim_source_duplicate_identity_fails_closed(tmp_path: Path) -> None:
