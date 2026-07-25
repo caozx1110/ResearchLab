@@ -11,6 +11,7 @@ from research.common import load_yaml, write_yaml_if_changed
 from research.core import default_record, ensure_workspace, record_path
 from research.evidence import EvidenceSourceSnapshot, verification_receipt_violations
 from research.git_ops import undo_last_operation
+from research.records import canonical_record_snapshot_for_record
 
 
 def _load_idea_module():
@@ -762,6 +763,8 @@ def test_stable_cross_unit_snapshot_supports_validation_and_confirmation(
         idea_path.parent,
         source_roots=source_roots,
     )
+    idea.write_record(tmp_path, record, expected_revision=0)
+    expected_record_snapshot = canonical_record_snapshot_for_record(tmp_path, record)
 
     idea.apply_confirmation(
         record,
@@ -772,6 +775,7 @@ def test_stable_cross_unit_snapshot_supports_validation_and_confirmation(
         project_root=tmp_path,
         verification_root=idea_path.parent,
         trusted_source_roots=source_roots,
+        expected_record_snapshot=expected_record_snapshot,
     )
     assert record["confirmation_status"] == "confirmed"
 
@@ -803,6 +807,8 @@ def test_replaced_source_ancestor_cannot_ground_outside_bytes_or_confirm(
         idea_path.parent,
         source_roots=source_roots,
     )
+    idea.write_record(tmp_path, record, expected_revision=0)
+    expected_record_snapshot = canonical_record_snapshot_for_record(tmp_path, record)
 
     source_dir = record_path(tmp_path, "repo", source_id).parent
     parked_dir = tmp_path / "parked-source-unit"
@@ -824,7 +830,10 @@ def test_replaced_source_ancestor_cannot_ground_outside_bytes_or_confirm(
     assert violations
     assert any("no longer current" in violation for violation in violations)
 
-    with pytest.raises(SystemExit, match="Confirmation evidence violations"):
+    with pytest.raises(
+        SystemExit,
+        match="Confirmation evidence source is not a canonical safe unit or program",
+    ):
         idea.apply_confirmation(
             record,
             confirmed_by="Human Reviewer",
@@ -834,6 +843,7 @@ def test_replaced_source_ancestor_cannot_ground_outside_bytes_or_confirm(
             project_root=tmp_path,
             verification_root=idea_path.parent,
             trusted_source_roots=source_roots,
+            expected_record_snapshot=expected_record_snapshot,
         )
     assert record["confirmation_status"] == "pending_user_confirmation"
 
