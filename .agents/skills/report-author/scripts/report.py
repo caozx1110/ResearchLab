@@ -610,9 +610,6 @@ def load_confirmed_claim_sources(root: Path, unit_ids: list[str]) -> tuple[list[
                 record_snapshot=snapshot,
             )
         )
-        if not _record_snapshot_is_current(root, snapshot):
-            missing_units.append(unit_id)
-            continue
         confirmed_claims = [
             claim
             for claim in canonical_claims
@@ -628,27 +625,29 @@ def load_confirmed_claim_sources(root: Path, unit_ids: list[str]) -> tuple[list[
                 issues.extend(violations)
             else:
                 valid_claims.append({**claim, "confirmation_status": "confirmed"})
-        sources.append(
-            ClaimSource(
-                unit_id=str(record.get("id") or unit_id),
-                title=str(record.get("title") or unit_id),
-                kind=str(record.get("kind") or "unit"),
-                claims=valid_claims,
-                issues=issues,
-                binding_digest=_canonical_digest(
-                    {
-                        "source": record.get("source"),
-                        "sources": record.get("sources"),
-                        "confirmation": receipt,
-                        "verification": (
-                            record.get("payload", {}).get("verification")
-                            if isinstance(record.get("payload"), dict)
-                            else None
-                        ),
-                    }
-                ),
-            )
+        source = ClaimSource(
+            unit_id=str(record.get("id") or unit_id),
+            title=str(record.get("title") or unit_id),
+            kind=str(record.get("kind") or "unit"),
+            claims=valid_claims,
+            issues=issues,
+            binding_digest=_canonical_digest(
+                {
+                    "source": record.get("source"),
+                    "sources": record.get("sources"),
+                    "confirmation": receipt,
+                    "verification": (
+                        record.get("payload", {}).get("verification")
+                        if isinstance(record.get("payload"), dict)
+                        else None
+                    ),
+                }
+            ),
         )
+        if not _record_snapshot_is_current(root, snapshot):
+            missing_units.append(unit_id)
+            continue
+        sources.append(source)
     return sources, missing_units
 
 

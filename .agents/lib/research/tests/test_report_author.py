@@ -824,6 +824,47 @@ def test_report_rejects_unit_replaced_after_snapshot_selection(
     assert "OUTSIDE SENTINEL CLAIM" not in rendered
 
 
+def test_report_revalidates_unit_after_claim_source_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = _load_report_module()
+    root, program_id, unit_id = _make_workspace(tmp_path)
+    unit_dir = root / "kb" / "units" / "papers" / unit_id
+    displaced = tmp_path / "displaced-after-binding"
+    replacement = tmp_path / "replacement-after-binding"
+    replacement.mkdir()
+    replacement_record = load_yaml(unit_dir / "record.yaml")
+    replacement_record["title"] = "POST-BINDING REPLACEMENT SENTINEL"
+    write_yaml_if_changed(replacement / "record.yaml", replacement_record)
+    (replacement / "parse-cache.yaml").write_bytes((unit_dir / "parse-cache.yaml").read_bytes())
+    original_digest = report._canonical_digest
+    swapped = False
+
+    def replace_while_binding(value):
+        nonlocal swapped
+        digest = original_digest(value)
+        if isinstance(value, dict) and "source" in value and not swapped:
+            swapped = True
+            unit_dir.rename(displaced)
+            replacement.rename(unit_dir)
+        return digest
+
+    monkeypatch.setattr(report, "_canonical_digest", replace_while_binding)
+
+    inputs = report.load_report_inputs(root, program_id)
+    rendered = report.render_report(
+        f"Stage Summary: {program_id}",
+        inputs,
+        report_kind="stage-summary",
+    )
+
+    assert swapped
+    assert inputs.claim_sources == []
+    assert inputs.missing_units == [unit_id]
+    assert "POST-BINDING REPLACEMENT SENTINEL" not in rendered
+
+
 def test_load_decisions_captures_container_once_and_isolates_bad_sibling(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
