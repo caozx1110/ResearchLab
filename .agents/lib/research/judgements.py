@@ -33,12 +33,13 @@ from .evidence import (
 )
 from .records import (
     CanonicalRecordSnapshot,
+    ProjectFileSnapshot,
     ProjectYamlMappingSnapshot,
     canonical_record_snapshot_for_identity,
     iter_canonical_record_snapshots,
     normalize_record_snapshot,
     require_current_record_snapshot,
-    snapshot_project_yaml_mapping,
+    snapshot_project_file,
     trusted_claim_source_roots,
     trusted_program_root,
     trusted_project_path,
@@ -50,6 +51,7 @@ from .surveys import (
     survey_lifecycle_violations,
     survey_source_roots,
 )
+from .yaml_io import StrictYamlError, load_yaml_mapping_bytes_strict
 
 
 UNIT_OWNER_BY_KIND = {
@@ -501,13 +503,20 @@ class _SideJudgementDiscoverySnapshot:
     root: Path
     candidates: tuple[_SideJudgementCandidate, ...]
     containers: tuple[ProjectYamlMappingSnapshot, ...]
+    files: tuple[ProjectFileSnapshot, ...]
+    uncaptured_paths: tuple[str, ...]
     container_paths: tuple[Path, ...]
 
     def is_current(self) -> bool:
         try:
             current_paths = tuple(path.absolute() for path, _owner, _is_list in _side_container_specs(self.root))
-            return current_paths == self.container_paths and all(
-                container.is_current() for container in self.containers
+            return (
+                current_paths == self.container_paths
+                and all(snapshot.is_current() for snapshot in self.files)
+                and all(
+                    snapshot_project_file(self.root, relative) is None
+                    for relative in self.uncaptured_paths
+                )
             )
         except (OSError, ValueError):
             return False
@@ -536,17 +545,25 @@ def _capture_side_judgement_discovery(
 ) -> _SideJudgementDiscoverySnapshot:
     candidates: list[_SideJudgementCandidate] = []
     containers: list[ProjectYamlMappingSnapshot] = []
+    files: list[ProjectFileSnapshot] = []
+    uncaptured_paths: list[str] = []
     specs = list(_side_container_specs(root))
     for path, owner, is_list in specs:
         try:
             relative = path.absolute().relative_to(root).as_posix()
         except ValueError:
             continue
-        container = snapshot_project_yaml_mapping(root, relative)
-        if container is None:
+        file_snapshot = snapshot_project_file(root, relative)
+        if file_snapshot is None:
+            uncaptured_paths.append(relative)
             continue
+        files.append(file_snapshot)
+        try:
+            payload = load_yaml_mapping_bytes_strict(file_snapshot.raw_bytes)
+        except (RuntimeError, StrictYamlError):
+            continue
+        container = ProjectYamlMappingSnapshot(file=file_snapshot, payload=payload)
         containers.append(container)
-        payload = container.payload
         if is_list:
             items = payload.get("items")
             if not isinstance(items, list):
@@ -562,6 +579,8 @@ def _capture_side_judgement_discovery(
         root=root,
         candidates=tuple(candidates),
         containers=tuple(containers),
+        files=tuple(files),
+        uncaptured_paths=tuple(uncaptured_paths),
         container_paths=tuple(path.absolute() for path, _owner, _is_list in specs),
     )
 

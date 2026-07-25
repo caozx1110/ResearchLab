@@ -124,7 +124,7 @@ def test_side_discovery_captures_each_container_once(
                 ]
             },
         )
-    original_snapshot = judgements_module.snapshot_project_yaml_mapping
+    original_snapshot = judgements_module.snapshot_project_file
     captures = 0
 
     def count_snapshot(*args, **kwargs):
@@ -132,10 +132,79 @@ def test_side_discovery_captures_each_container_once(
         captures += 1
         return original_snapshot(*args, **kwargs)
 
-    monkeypatch.setattr(judgements_module, "snapshot_project_yaml_mapping", count_snapshot)
+    monkeypatch.setattr(judgements_module, "snapshot_project_file", count_snapshot)
 
     assert discover_pending_judgements(tmp_path) == []
     assert captures == 8
+
+
+def test_side_discovery_rejects_malformed_container_replaced_by_duplicate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    program_a = tmp_path / "kb/programs/p-malformed-a"
+    workflow_a = program_a / "workflow"
+    workflow_a.mkdir(parents=True)
+    evidence = program_a / "evidence.md"
+    evidence.write_text("route A is grounded", encoding="utf-8")
+    decision = {
+        "id": "decision-malformed-race",
+        "kind": "program_decision",
+        "owner": "research-orchestrator",
+        "program_id": "p-malformed-a",
+        "confirmation_status": "pending_user_confirmation",
+        "needs_human_confirmation": True,
+        "payload": {
+            "decision": {"text": "Use route A"},
+            "claims": [
+                {
+                    "id": "claim-malformed-race",
+                    "text": "Route A is grounded.",
+                    "claim_type": "evaluation",
+                    "confirmation_status": "pending_user_confirmation",
+                    "evidence_refs": [
+                        {
+                            "source_unit_id": "program:p-malformed-a",
+                            "artifact": "evidence.md",
+                            "locator": "line:1",
+                            "quote": "route A is grounded",
+                        }
+                    ],
+                }
+            ],
+        },
+    }
+    build_verification_receipt(
+        decision,
+        program_a,
+        source_roots={"program:p-malformed-a": program_a},
+    )
+    decisions_a = workflow_a / "decisions.yaml"
+    write_yaml_if_changed(decisions_a, {"items": [decision]})
+    decisions_z = tmp_path / "kb/programs/p-malformed-z/workflow/decisions.yaml"
+    decisions_z.parent.mkdir(parents=True)
+    decisions_z.write_text("items: [\n", encoding="utf-8")
+    replacement = tmp_path / "replacement-duplicate.yaml"
+    duplicate = dict(decision)
+    duplicate["program_id"] = "p-malformed-z"
+    write_yaml_if_changed(replacement, {"items": [duplicate]})
+    displaced = tmp_path / "displaced-malformed.yaml"
+    snapshot_type = judgements_module.ProjectFileSnapshot
+    original_is_current = snapshot_type.is_current
+    swapped = False
+
+    def replace_malformed_before_batch_final(snapshot) -> bool:
+        nonlocal swapped
+        if snapshot.path == decisions_a and not swapped:
+            swapped = True
+            decisions_z.rename(displaced)
+            replacement.rename(decisions_z)
+        return original_is_current(snapshot)
+
+    monkeypatch.setattr(snapshot_type, "is_current", replace_malformed_before_batch_final)
+
+    assert discover_pending_judgements(tmp_path) == []
+    assert swapped
 
 
 def _run(script: str, root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
