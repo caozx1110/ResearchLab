@@ -298,6 +298,71 @@ def test_program_survey_claims_and_verbatim_evidence_survive_reload(tmp_path: Pa
     assert first == second
 
 
+def test_confirmed_survey_report_captures_bound_subject_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = _load_report_module()
+    program_id = "program-survey"
+    _write_confirmed_program_survey(tmp_path, program_id=program_id)
+    original_load = report.load_bound_judgement_snapshot
+    captures = 0
+
+    def count_bound_capture(*args, **kwargs):
+        nonlocal captures
+        captures += 1
+        return original_load(*args, **kwargs)
+
+    monkeypatch.setattr(report, "load_bound_judgement_snapshot", count_bound_capture)
+
+    inputs = report.load_report_inputs(tmp_path, program_id, stage="survey")
+
+    assert captures == 1
+    assert [source.kind for source in inputs.claim_sources].count("survey_judgement") == 1
+
+
+def test_survey_replacement_after_event_binding_is_pending_without_sentinel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = _load_report_module()
+    program_id = "program-survey"
+    survey_path, _events_path = _write_confirmed_program_survey(tmp_path, program_id=program_id)
+    survey_dir = survey_path.parent
+    displaced = tmp_path / "displaced-survey"
+    replacement = tmp_path / "replacement-survey"
+    replacement.mkdir()
+    replacement_payload = load_yaml(survey_path)
+    replacement_payload["payload"]["claims"][0]["text"] = "REPLACEMENT SURVEY SENTINEL"
+    write_yaml_if_changed(replacement / "survey.yaml", replacement_payload)
+    original_binding = report.confirmation_binding
+    swapped = False
+
+    def swap_after_binding(*args, **kwargs):
+        nonlocal swapped
+        result = original_binding(*args, **kwargs)
+        if not swapped and str(args[0].get("kind") or "") == "survey_judgement":
+            swapped = True
+            survey_dir.rename(displaced)
+            replacement.rename(survey_dir)
+        return result
+
+    monkeypatch.setattr(report, "confirmation_binding", swap_after_binding)
+
+    inputs = report.load_report_inputs(tmp_path, program_id, stage="survey")
+    rendered = report.render_report(
+        f"Stage Summary: {program_id}",
+        inputs,
+        report_kind="stage-summary",
+    )
+
+    assert swapped
+    assert inputs.claim_sources == []
+    assert len(inputs.pending_judgement_events) == 1
+    assert "exact current judgement binding" in inputs.pending_judgement_events[0]["_epistemic_reason"]
+    assert "REPLACEMENT SURVEY SENTINEL" not in rendered
+
+
 def test_unit_discovery_uses_only_exact_unit_identity_namespaces() -> None:
     report = _load_report_module()
     discovered = report._collect_unit_ids(
