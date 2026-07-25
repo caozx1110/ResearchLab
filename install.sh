@@ -279,6 +279,7 @@ KB_SHORTCUT_AVAILABLE=0
 UPDATE_NO_CHANGES=0
 DRY_RUN_CHANGE_COUNT=0
 RUNTIME_BOOTSTRAP_NEEDED=0
+DISCOVERED_RUNTIME_PYTHON=""
 AGENT_PLAN_TARGET_ARGS=()
 AGENT_PLAN_TARGET_JSON=()
 AGENT_PLAN_TARGET_SEQUENCE=()
@@ -1086,11 +1087,90 @@ preflight_yaml() {
   if [ -z "${RESEARCH_VENV:-}" ] && managed_workspace_venv_has_core_runtime; then
     return 0
   fi
+  if [ -z "${RESEARCH_PYTHON:-}" ]; then
+    DISCOVERED_RUNTIME_PYTHON=$(path_python_with_core_runtime || true)
+    if [ -n "$DISCOVERED_RUNTIME_PYTHON" ]; then
+      return 0
+    fi
+  fi
   if [ "${RESEARCH_NO_MANAGED_VENV:-}" = "1" ]; then
     die "已关闭自动运行环境，但所选 Python 缺少完整核心依赖；请先安装 requirements.txt 中的依赖"
   fi
   RUNTIME_BOOTSTRAP_NEEDED=1
   note "Python 依赖尚未就绪；首次使用时会自动准备，无需手动处理。" >&2
+}
+
+path_python_with_core_runtime() {
+  python3 - "$WORKSPACE_ROOT" <<'PY' 2>/dev/null
+import os
+import stat
+import subprocess
+import sys
+from pathlib import Path
+
+workspace = Path(sys.argv[1]).resolve()
+seen = set()
+for raw_directory in os.environ.get("PATH", "").split(os.pathsep):
+    if not raw_directory:
+        continue
+    directory = Path(raw_directory).expanduser()
+    if not directory.is_absolute():
+        continue
+    for name in ("python3", "python"):
+        candidate = directory / name
+        try:
+            resolved = candidate.resolve(strict=True)
+            before = resolved.stat()
+        except OSError:
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if not stat.S_ISREG(before.st_mode) or before.st_mode & 0o111 == 0:
+            continue
+        try:
+            resolved.relative_to(workspace)
+        except ValueError:
+            pass
+        else:
+            continue
+        identity = (
+            before.st_dev,
+            before.st_ino,
+            before.st_mode,
+            before.st_uid,
+            before.st_gid,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        )
+        try:
+            completed = subprocess.run(
+                [str(resolved), "-I", "-c", "import yaml, markdownify, bs4"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=5,
+            )
+            after = resolved.stat()
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if completed.returncode != 0 or identity != (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_uid,
+            after.st_gid,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        ):
+            continue
+        print(resolved)
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
 }
 
 python_has_core_runtime() {
@@ -2076,6 +2156,9 @@ run_smoke() {
   fi
   section "安装检查"
   info "正在检查 kb 基础功能..."
+  if [ -n "$DISCOVERED_RUNTIME_PYTHON" ] && [ -z "${RESEARCH_PYTHON:-}" ]; then
+    export RESEARCH_PYTHON="$DISCOVERED_RUNTIME_PYTHON"
+  fi
   # Child diagnostics can contain tracebacks and internal paths; keep them private.
   if ! smoke_output=$("$WS_KB_SCRIPT" help 2>&1); then
     warn "kb 安装检查未通过，请让 Agent 检查后重试。"

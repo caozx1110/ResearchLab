@@ -61,6 +61,51 @@ def test_existing_managed_runtime_is_preferred_silently(monkeypatch, tmp_path, c
     assert capsys.readouterr().err == ""
 
 
+def test_missing_current_runtime_reexecs_later_path_python_without_bootstrap(
+    monkeypatch,
+    tmp_path,
+    capsys,
+) -> None:
+    compatible = tmp_path.parent / "compatible-python"
+    compatible.write_text("", encoding="utf-8")
+    reexec: list[object] = []
+    monkeypatch.delenv(bootstrap.READY_FLAG, raising=False)
+    monkeypatch.delenv("RESEARCH_PYTHON", raising=False)
+    monkeypatch.delenv("RESEARCH_NO_MANAGED_VENV", raising=False)
+    monkeypatch.setattr(bootstrap, "managed_venv_python", lambda _home=None: tmp_path / ".venv/bin/python")
+    monkeypatch.setattr(bootstrap, "_current_has_yaml", lambda: False)
+    monkeypatch.setattr(bootstrap, "_path_runtime_python", lambda _home=None: compatible)
+    monkeypatch.setattr(bootstrap, "_reexec", lambda python: reexec.append(python))
+    monkeypatch.setattr(
+        bootstrap,
+        "_ensure_venv_has_yaml",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("managed venv should not be prepared")),
+    )
+
+    bootstrap.ensure_managed_runtime(tmp_path)
+
+    assert reexec == [compatible]
+    assert capsys.readouterr().err == ""
+
+
+def test_path_runtime_discovery_skips_relative_and_workspace_candidates(monkeypatch, tmp_path) -> None:
+    workspace_bin = tmp_path / "bin"
+    workspace_bin.mkdir()
+    workspace_python = workspace_bin / "python3"
+    workspace_python.write_text("workspace", encoding="utf-8")
+    workspace_python.chmod(0o755)
+    external_bin = tmp_path.parent / f"external-{tmp_path.name}"
+    external_bin.mkdir()
+    external_python = external_bin / "python3"
+    external_python.write_text("external", encoding="utf-8")
+    external_python.chmod(0o755)
+    monkeypatch.setenv("PATH", f"relative-bin{bootstrap.os.pathsep}{workspace_bin}{bootstrap.os.pathsep}{external_bin}")
+    monkeypatch.setattr(bootstrap, "is_current_python", lambda _python: False)
+    monkeypatch.setattr(bootstrap, "_python_can_import_yaml", lambda python: python == external_python)
+
+    assert bootstrap._path_runtime_python(tmp_path) == external_python
+
+
 def test_first_time_runtime_preparation_has_one_natural_progress_line(monkeypatch, tmp_path, capsys) -> None:
     managed_python = tmp_path / ".venv" / "bin" / "python"
     reexec: list[object] = []
@@ -70,6 +115,7 @@ def test_first_time_runtime_preparation_has_one_natural_progress_line(monkeypatc
     monkeypatch.setattr(bootstrap, "managed_venv_dir", lambda _home=None: tmp_path / ".venv")
     monkeypatch.setattr(bootstrap, "managed_venv_python", lambda _home=None: managed_python)
     monkeypatch.setattr(bootstrap, "_current_has_yaml", lambda: False)
+    monkeypatch.setattr(bootstrap, "_path_runtime_python", lambda _home=None: None)
     monkeypatch.setattr(bootstrap, "_ensure_venv_has_yaml", lambda *_args: None)
     monkeypatch.setattr(bootstrap, "is_current_python", lambda _python: False)
     monkeypatch.setattr(bootstrap, "_reexec", lambda python: reexec.append(python))

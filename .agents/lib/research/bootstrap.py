@@ -6,6 +6,7 @@ import importlib
 import importlib.util
 import os
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -97,6 +98,76 @@ def _python_can_import_yaml(python_exe: str | Path) -> bool:
     except (OSError, subprocess.SubprocessError):
         return False
     return completed.returncode == 0
+
+
+def _path_runtime_python(home: Path | None = None) -> Path | None:
+    """Return a stable, core-ready Python from a later absolute PATH entry."""
+    workspace = _resolve_path(home) if home is not None else None
+    seen: set[Path] = set()
+    for raw_directory in os.environ.get("PATH", "").split(os.pathsep):
+        if not raw_directory:
+            continue
+        directory = Path(raw_directory).expanduser()
+        if not directory.is_absolute():
+            continue
+        for name in ("python3", "python"):
+            candidate = directory / name
+            try:
+                resolved = candidate.resolve(strict=True)
+                metadata = resolved.stat()
+            except OSError:
+                continue
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o111 == 0:
+                continue
+            if workspace is not None:
+                try:
+                    resolved.relative_to(workspace)
+                except ValueError:
+                    pass
+                else:
+                    continue
+            if is_current_python(resolved):
+                continue
+            identity = (
+                metadata.st_dev,
+                metadata.st_ino,
+                metadata.st_mode,
+                metadata.st_uid,
+                metadata.st_gid,
+                metadata.st_size,
+                metadata.st_mtime_ns,
+                metadata.st_ctime_ns,
+            )
+            if not _python_can_import_yaml(resolved):
+                continue
+            try:
+                current = resolved.stat()
+            except OSError:
+                continue
+            if identity != (
+                current.st_dev,
+                current.st_ino,
+                current.st_mode,
+                current.st_uid,
+                current.st_gid,
+                current.st_size,
+                current.st_mtime_ns,
+                current.st_ctime_ns,
+            ):
+                continue
+            return resolved
+    return None
+
+
+def _use_path_runtime_if_available(home: Path | None = None) -> bool:
+    candidate = _path_runtime_python(home)
+    if candidate is None:
+        return False
+    _reexec(candidate)
+    return True
 
 
 def _python_can_import(python_exe: str | Path, module: str) -> bool:
@@ -256,6 +327,8 @@ def ensure_managed_runtime(home: Path | None = None) -> None:
         if _current_has_yaml():
             _mark_ready()
             return
+        if not configured_python and _use_path_runtime_if_available(home):
+            return
         raise SystemExit(
             "当前环境缺少知识库运行或材料转换支持，且自动准备运行环境已关闭；请让 Agent 运行 kb doctor 协助处理。"
         )
@@ -278,6 +351,9 @@ def ensure_managed_runtime(home: Path | None = None) -> None:
         # normal kb invocation. A missing optional PDF backend remains observable in
         # doctor; dependency installation is confined to the managed venv path.
         _mark_ready()
+        return
+
+    if not configured_python and _use_path_runtime_if_available(home):
         return
 
     try:

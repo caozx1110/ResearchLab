@@ -46,6 +46,31 @@ exec {sys.executable!s} "$@"
     return wrapper
 
 
+def _offline_path_runtime_environment(tmp_path: Path) -> dict[str, str]:
+    """Put a deficient Python before a later core-ready runtime on PATH."""
+    env = _environment(tmp_path)
+    env.pop("RESEARCH_PYTHON", None)
+    env.pop("RESEARCH_NO_MANAGED_VENV", None)
+    deficient_bin = tmp_path / "deficient-bin"
+    compatible_bin = tmp_path / "compatible-bin"
+    deficient_bin.mkdir()
+    compatible_bin.mkdir()
+    deficient = deficient_bin / "python3"
+    deficient.write_text(
+        f'#!/bin/sh\nexec {sys.executable!s} -S "$@"\n',
+        encoding="utf-8",
+    )
+    deficient.chmod(0o755)
+    (compatible_bin / "python3").symlink_to(sys.executable)
+    env.update(
+        {
+            "PATH": os.pathsep.join((str(deficient_bin), str(compatible_bin), "/usr/bin", "/bin")),
+            "PIP_NO_INDEX": "1",
+        }
+    )
+    return env
+
+
 def _plan(workspace: Path, plan_path: Path, env: dict[str, str], *, action: str = "install") -> dict[str, object]:
     argv = ["bash", str(_project_root() / "install.sh")]
     if action != "install":
@@ -165,6 +190,32 @@ def _verify(plan: dict[str, object]) -> subprocess.CompletedProcess[str]:
     if options["kb_on_path"]:
         argv.append("--current-kb-on-path")
     return subprocess.run(argv, text=True, capture_output=True, check=False)
+
+
+def test_agent_plan_apply_reuses_later_path_runtime_strictly_offline(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    env = _offline_path_runtime_environment(tmp_path)
+
+    plan = _plan(workspace, tmp_path / "offline-plan.json", env)
+
+    assert plan["conditional_runtime_changes"] == []
+    applied = _apply(plan, env)
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    assert not (workspace / ".venv").exists()
+
+    help_result = subprocess.run(
+        [str(workspace / ".agents/skills/kb-cli/scripts/kb"), "help"],
+        cwd=workspace,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert help_result.returncode == 0, help_result.stdout + help_result.stderr
+    assert "kb help" in help_result.stdout
 
 
 def _race_python_wrapper(tmp_path: Path, env: dict[str, str], *, mode: str, manifest: Path) -> dict[str, str]:
