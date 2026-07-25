@@ -1441,6 +1441,7 @@ def _next_item_record_id(item: Mapping[str, object]) -> str:
 
 def _next_synthetic_family(item: Mapping[str, object]) -> str:
     program_id = str(item.get("program_id") or "").casefold()
+    record_id = str(item.get("record_id") or "").casefold()
     step_type = str(item.get("step_type") or "").casefold()
     stage = str(item.get("stage") or "").casefold()
     if program_id.startswith("literature:") or step_type in {
@@ -1455,7 +1456,23 @@ def _next_synthetic_family(item: Mapping[str, object]) -> str:
         "resume-monitor-run",
     } or stage.startswith("monitor-"):
         return "monitor"
-    if program_id.startswith("survey:") or step_type == "resume-composite-survey":
+    if (
+        program_id.startswith("survey:")
+        or step_type == "resume-composite-survey"
+        or (
+            record_id.startswith("survey-")
+            and stage
+            in {
+                "search",
+                "selection",
+                "source_intake",
+                "unit_analysis",
+                "synthesis",
+                "review_confirmation",
+                "report_consumption",
+            }
+        )
+    ):
         return "survey"
     return ""
 

@@ -2133,6 +2133,15 @@ def test_kb_next_humanizes_all_synthetic_families_without_internal_ids_or_reason
                 "stage": "synthesis",
                 "next_action": "Resume the durable survey workflow at synthesis.",
             },
+            {
+                "program_id": "real-linked-program",
+                "record_id": "survey-run-private-linked",
+                "title": "具身智能综述",
+                "step_type": "human-decision",
+                "action_kind": "human-gate",
+                "stage": "selection",
+                "next_action": "select candidates from kb/private --internal",
+            },
         ],
     }
     monkeypatch.setattr(
@@ -2151,6 +2160,7 @@ def test_kb_next_humanizes_all_synthetic_families_without_internal_ids_or_reason
     assert "待确认判断「候选方法判断」：已有经过核验的判断" in output
     assert "研究跟踪「视觉模型更新」：Agent 需要执行已到期或尚未完成的研究跟踪" in output
     assert "综述流程「机器人学习综述」：Agent 需要继续已保存的综述流程" in output
+    assert "综述流程「具身智能综述」：综述流程到了需要你确认的环节" in output
     for forbidden in (
         "literature:",
         "review:",
@@ -2159,6 +2169,7 @@ def test_kb_next_humanizes_all_synthetic_families_without_internal_ids_or_reason
         "private-stage",
         "private-subscription",
         "private-composite",
+        "survey-run-private-linked",
         "target_met",
         "blocked_no_search_tool",
         "failed_retryable",
