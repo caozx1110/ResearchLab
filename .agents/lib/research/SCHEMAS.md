@@ -30,6 +30,10 @@ Agent 在当前对话取得选择后才可重绑。重绑以 manifest byte diges
 
 copy manifest 的 rebind 与 installer install/update/reinstall/uninstall 共享同一个跨进程独占 lease，锚定不会被 lifecycle 删除的真实 workspace root directory，不创建 unowned lock file。Agent install plan 的 precondition 必须是 `ws_sync` dry-run 在 workspace lease 内计算 target 清单时所读取的同一 expected absent/ordinary-file identity + byte digest，经私有 dry-run→plan generator→verify→install.sh→ws_sync 通道原样传递；plan generator 只能 CAS 复核，不能在 dry-run 后另读新 manifest 给旧 targets 签名。dry-run 后发生 rebind/同 bytes 新 inode必须令计划生成 stale fail-closed，尤其 uninstall 不得审旧清单却按新 manifest 删除。双方在 lease 内重验该 manifest state，同 bytes 新 inode也视为 stale，不能在 shell verify 后重新接受竞态后的当前值。updater 的 check/apply/source provenance 等 manifest read surface 必须统一使用 anchored、no-follow、nonblocking、有界 ordinary-file snapshot，FIFO/symlink/special/过大或读中变化都 fail-closed。`kb update` apply 还必须从同一 snapshot 同时导出 provenance 与 expected identity+digest，准备 source 后把 expectation 传给 `ws_sync`；锁内 stale 必须零 managed write，版本 no-op 也重验，不能让并发 rebind 被旧 apply 覆盖或误报旧源已最新。lease 与同一回滚事务必须覆盖任何 `.agents` 创建、managed payload、installer-owned `CLAUDE.md` managed block、`.claude/skills` 链接、manifest-last 提交/删除及目录持久化；shell 不得在 helper 获取/CAS lease 之前或释放之后先行改这些配置。rebind 覆盖 checkout origin/HEAD/branch 二次验证、CAS、replace 与 fsync。rebind 在 post-replace fsync 失败时必须在 replacement inode 仍属于本 op 的前提下原子恢复旧 bytes/mode并再次 fsync；恢复不完整保留唯一材料且准确分类。rollback 不完整时保留唯一恢复材料，不能只保护最终 rename。
 
+Agent plan / dry-run 是零写预览，不得输出任何 lifecycle 已完成态；“已卸载/不再由安装器管理”等断言只允许在 apply 成功且 manifest/配置实际移除后出现。根 `AGENTS.md` 的 managed block 合同还要求 lifecycle 往返字节保真：若文件安装前已存在，受管 span 外的全部 bytes（包括结尾换行与空行）在卸载后必须与 before-image 完全相同，重复 install/uninstall 不得累积 separator。安装边界或 manifest 必须保存足以精确移除本次插入分隔符的信息。
+
+runtime readiness 先检查显式 `RESEARCH_PYTHON`，再检查当前 workspace 已存在且受管的 `.venv` 解释器；任一可信解释器能导入核心依赖即为 ready。venv 祖先必须 anchored/no-follow，leaf 拒绝 FIFO/特殊节点和换链，但允许标准 venv 的稳定解释器 symlink。doctor 已证明可用的 managed venv 存在时，no-op update/reinstall 的 plan 与 apply 都不得再报告“依赖未就绪”或列虚假的 conditional bootstrap。import probe 使用有界超时；确实缺失时 Agent plan 只声明条件性 runtime tree，不执行安装。
+
 ---
 
 ## 共享枚举 <a id="enums"></a>
