@@ -32,7 +32,7 @@ copy manifest 的 rebind 与 installer install/update/reinstall/uninstall 共享
 
 Agent plan / dry-run 是零写预览，不得输出任何 lifecycle 已完成态；“已卸载/不再由安装器管理”等断言只允许在 apply 成功且 manifest/配置实际移除后出现。根 `AGENTS.md` 的 managed block 合同还要求 lifecycle 往返字节保真：若文件安装前已存在，受管 span 外的全部 bytes（包括结尾换行与空行）在卸载后必须与 before-image 完全相同，重复 install/uninstall 不得累积 separator。安装边界或 manifest 必须保存足以精确移除本次插入分隔符的信息。
 
-runtime readiness 先检查显式 `RESEARCH_PYTHON`，再检查当前 workspace 已存在且受管的 `.venv` 解释器；任一可信解释器能导入核心依赖即为 ready。venv 祖先必须 anchored/no-follow，leaf 拒绝 FIFO/特殊节点和换链，但允许标准 venv 的稳定解释器 symlink。doctor 已证明可用的 managed venv 存在时，no-op update/reinstall 的 plan 与 apply 都不得再报告“依赖未就绪”或列虚假的 conditional bootstrap。import probe 使用有界超时；确实缺失时 Agent plan 只声明条件性 runtime tree，不执行安装。
+runtime readiness 先检查显式 `RESEARCH_PYTHON`，再检查当前 workspace 已存在且受管的 `.venv` 解释器；任一可信解释器能导入核心依赖即为 ready。自动 workspace-venv probe 必须保持 Agent plan `zero_write_scope`：venv 祖先 anchored/no-follow，leaf 拒绝 FIFO/特殊节点、换链与 workspace 内普通 executable，只允许标准 venv 的稳定 symlink chain，且最终 executable 必须位于 workspace 外；不能执行一个可在预览阶段改写 workspace 的伪解释器再靠事后 identity check 报警。copy-style interpreter 无法静态证明可信时保守视为未就绪并保留 conditional bootstrap。doctor 已证明可用的标准 managed venv 存在时，no-op update/reinstall 的 plan 与 apply 都不得再报告“依赖未就绪”或列虚假的 conditional bootstrap。import probe 使用有界超时；确实缺失时 Agent plan 只声明条件性 runtime tree，不执行安装。
 
 ---
 
