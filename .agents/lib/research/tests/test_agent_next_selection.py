@@ -670,6 +670,71 @@ def test_literature_stage_enumeration_rejects_candidate_extra_field(tmp_path: Pa
 
 
 @pytest.mark.parametrize(
+    "openalex",
+    (
+        {"doi": "10.1234/legacy-read-only"},
+        {"work_id": "W12345", "doi": "10.1234/legacy-read-only"},
+    ),
+)
+def test_literature_stage_enumeration_accepts_documented_legacy_openalex_doi_migration(
+    tmp_path: Path,
+    openalex: dict[str, str],
+) -> None:
+    orchestrate = _load_orchestrator("orchestrator_literature_legacy_doi")
+    root = _workspace(tmp_path)
+    stage_path = _stage_literature_search(
+        root,
+        query="legacy identity migration",
+        stop_reason="target_met",
+    )
+    legacy = load_yaml(stage_path)
+    legacy["candidates"][0]["identities"] = {}
+    legacy["candidates"][0]["provenance"] = {"openalex": openalex}
+    write_yaml_if_changed(stage_path, legacy)
+
+    snapshot = orchestrate.portfolio_candidate_snapshot(root)
+
+    selection = next(
+        item
+        for item in snapshot["candidates"]
+        if item["action_type"] == "select-literature-candidates"
+    )
+    binding = selection["dependencies"][0]["candidates"][0]
+    assert len(binding["identity_digest"]) == 64
+    assert len(binding["semantic_digest"]) == 64
+    assert load_yaml(stage_path)["candidates"][0]["identities"] == {}
+
+
+@pytest.mark.parametrize(
+    "openalex",
+    (
+        {"work_id": "https://openalex.org/W1", "doi": "10.1234/legacy"},
+        {"work_id": "w1", "doi": "10.1234/legacy"},
+        {"work_id": "Wabc", "doi": "10.1234/legacy"},
+        {"work_id": "W1", "doi": "10.1234/legacy", "provider": "OpenAlex"},
+    ),
+)
+def test_literature_stage_enumeration_rejects_noncanonical_legacy_openalex_shape(
+    tmp_path: Path,
+    openalex: dict[str, str],
+) -> None:
+    orchestrate = _load_orchestrator("orchestrator_literature_bad_legacy_openalex")
+    root = _workspace(tmp_path)
+    stage_path = _stage_literature_search(
+        root,
+        query="bad legacy identity migration",
+        stop_reason="target_met",
+    )
+    malformed = load_yaml(stage_path)
+    malformed["candidates"][0]["identities"] = {}
+    malformed["candidates"][0]["provenance"] = {"openalex": openalex}
+    write_yaml_if_changed(stage_path, malformed)
+
+    with pytest.raises(SystemExit, match="legacy|provenance|work id|canonical"):
+        orchestrate.portfolio_candidate_snapshot(root)
+
+
+@pytest.mark.parametrize(
     "mutation",
     (
         lambda payload: payload.update(status="completed"),

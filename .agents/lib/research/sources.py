@@ -2314,8 +2314,6 @@ def _canonical_literature_stage(
             raise SystemExit("Literature search stage candidate ids must be unique.")
         candidate_ids.add(candidate_id)
         identities = candidate.get("identities") if isinstance(candidate.get("identities"), dict) else {}
-        if _candidate_search_identities(candidate) != identities:
-            raise SystemExit("Literature search stage candidate identity is not canonical.")
         status_value = str(candidate.get("status") or "")
         if status_value not in {"staged", "materialized", "duplicate"}:
             raise SystemExit("Literature search stage candidate status is not canonical.")
@@ -2327,28 +2325,46 @@ def _canonical_literature_stage(
         if record_id:
             _safe_search_id(record_id, field="record_id")
         provenance = candidate.get("provenance")
+        legacy_identity_migration = False
         if provenance not in (None, {}):
             if not isinstance(provenance, dict) or set(provenance) != {"openalex"}:
                 raise SystemExit("Literature search legacy provenance is not canonical.")
             openalex = provenance.get("openalex")
-            if not isinstance(openalex, dict) or set(openalex) != {"doi"}:
+            if not isinstance(openalex, dict) or set(openalex) not in (
+                {"doi"},
+                {"work_id", "doi"},
+            ):
                 raise SystemExit("Literature search legacy provenance is not canonical.")
+            if "work_id" in openalex and re.fullmatch(
+                r"W[0-9]+", str(openalex.get("work_id") or "")
+            ) is None:
+                raise SystemExit("Literature search legacy provenance work id is invalid.")
             if not _canonical_search_doi(openalex.get("doi")):
                 raise SystemExit("Literature search legacy provenance DOI is invalid.")
+            migrated_identities = _candidate_search_identities(candidate)
+            legacy_identity_migration = (
+                "doi" not in identities
+                and migrated_identities
+                == {**identities, "doi": _canonical_search_doi(openalex.get("doi"))}
+            )
+        if _candidate_search_identities(candidate) != identities and not legacy_identity_migration:
+            raise SystemExit("Literature search stage candidate identity is not canonical.")
         persisted_candidate = {
             key: copy.deepcopy(value)
             for key, value in candidate.items()
             if key in candidate_input_fields
         }
-        if (
-            _sanitize_search_candidate(
-                persisted_candidate,
-                stage_id=stage_id,
-                index=index,
-                allow_local_reference=False,
+        sanitized_candidate = _sanitize_search_candidate(
+            persisted_candidate,
+            stage_id=stage_id,
+            index=index,
+            allow_local_reference=False,
+        )
+        if legacy_identity_migration:
+            sanitized_candidate["identities"] = copy.deepcopy(
+                persisted_candidate.get("identities", {})
             )
-            != persisted_candidate
-        ):
+        if sanitized_candidate != persisted_candidate:
             raise SystemExit("Literature search stage candidate is not canonical.")
         if not candidate.get("discovered_by"):
             raise SystemExit("Literature search stage candidate has no discovery edge.")
