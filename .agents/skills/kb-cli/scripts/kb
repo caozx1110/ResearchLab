@@ -3825,15 +3825,24 @@ def _review_owner_module(root: Path, owner: str) -> object:
         script_path.relative_to(expected_root)
     except ValueError as exc:
         raise ValueError("review owner script escaped the skill tree") from exc
-    spec = importlib.util.spec_from_file_location(f"kb_review_owner_{owner.replace('-', '_')}", script_path)
+    path_digest = hashlib.sha256(os.fsencode(script_path)).hexdigest()
+    module_name = f"kb_review_owner_{owner.replace('-', '_')}_{path_digest}"
+    spec = importlib.util.spec_from_file_location(module_name, script_path)
     if spec is None or spec.loader is None:
         raise ValueError("review owner integration is unavailable")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    if not callable(getattr(module, "prepare_review_batch_decision", None)) or not callable(
-        getattr(module, "apply_review_batch_decision", None)
-    ):
-        raise ValueError("review owner integration is incomplete")
+    registered_name = spec.name
+    sys.modules[registered_name] = module
+    try:
+        spec.loader.exec_module(module)
+        if not callable(getattr(module, "prepare_review_batch_decision", None)) or not callable(
+            getattr(module, "apply_review_batch_decision", None)
+        ):
+            raise ValueError("review owner integration is incomplete")
+    except BaseException:
+        if sys.modules.get(registered_name) is module:
+            del sys.modules[registered_name]
+        raise
     _REVIEW_OWNER_MODULES[owner] = module
     return module
 
