@@ -243,15 +243,27 @@ def readiness_violations(
     artifact_path: Path,
     *,
     record_snapshot: CanonicalRecordSnapshot | None = None,
+    bound_snapshot: BoundJudgementSnapshot | None = None,
 ) -> list[str]:
     """Return why a judgement must not appear in the human review inbox."""
+    def finish(violations: list[str]) -> list[str]:
+        if bound_snapshot is not None and not bound_snapshot.is_current():
+            violations.append("judgement bound snapshot is no longer current")
+        return violations
+
+    if bound_snapshot is not None:
+        if bound_snapshot.record != record or bound_snapshot.path != artifact_path.absolute():
+            return finish(["judgement does not match its bound canonical snapshot"])
+        if record_snapshot is not None and record_snapshot != bound_snapshot.unit_record_snapshot:
+            return finish(["judgement record snapshot conflicts with its bound snapshot"])
+        record_snapshot = bound_snapshot.unit_record_snapshot
     if not isinstance(record, dict):
-        return ["judgement artifact must be a mapping"]
+        return finish(["judgement artifact must be a mapping"])
     if _text(record.get("confirmation_status")) != "pending_user_confirmation":
-        return ["confirmation_status is not pending_user_confirmation"]
+        return finish(["confirmation_status is not pending_user_confirmation"])
     claims = confirmation_claims(record)
     if not claims:
-        return ["canonical payload.claims must be non-empty"]
+        return finish(["canonical payload.claims must be non-empty"])
     violations = validate_claims(claims)
     claim_types = {_text(claim.get("claim_type")) for claim in claims}
     if claim_types & UNCONFIRMABLE_CLAIM_TYPES:
@@ -281,7 +293,7 @@ def readiness_violations(
                 source_roots=source_roots,
             )
         )
-    return violations
+    return finish(violations)
 
 
 def judgement_confirmation_is_current(
@@ -290,12 +302,20 @@ def judgement_confirmation_is_current(
     artifact_path: Path,
     *,
     record_snapshot: CanonicalRecordSnapshot | None = None,
+    bound_snapshot: BoundJudgementSnapshot | None = None,
 ) -> bool:
     """Validate a judgement receipt against canonical identity and current evidence bytes."""
-    root = root.resolve()
-    artifact_path = artifact_path.resolve()
+    root = root.absolute()
+    artifact_path = artifact_path.absolute()
+    valid = True
+    if bound_snapshot is not None:
+        if bound_snapshot.record != record or bound_snapshot.path != artifact_path:
+            valid = False
+        if record_snapshot is not None and record_snapshot != bound_snapshot.unit_record_snapshot:
+            valid = False
+        record_snapshot = bound_snapshot.unit_record_snapshot
     if _text(record.get("kind")) == "survey_judgement" and survey_lifecycle_violations(record, root):
-        return False
+        valid = False
     try:
         verification_root = _verification_root(root, record, artifact_path)
         source_roots = _source_roots(
@@ -305,13 +325,17 @@ def judgement_confirmation_is_current(
             record_snapshot=record_snapshot,
         )
     except ValueError:
-        return False
-    return has_complete_confirmation_receipt(
-        record,
-        verification_root=verification_root,
-        source_roots=source_roots,
-        external_source=record_external_source_contract(record),
-    )
+        valid = False
+    else:
+        receipt_current = has_complete_confirmation_receipt(
+            record,
+            verification_root=verification_root,
+            source_roots=source_roots,
+            external_source=record_external_source_contract(record),
+        )
+        valid = valid and receipt_current
+    snapshot_current = bound_snapshot is None or bound_snapshot.is_current()
+    return valid and snapshot_current
 
 
 def _default_route(record: dict[str, Any], owner: str) -> dict[str, str]:
@@ -356,6 +380,7 @@ def pending_judgement_card(
     owner: str,
     artifact_path: Path,
     record_snapshot: CanonicalRecordSnapshot | None = None,
+    bound_snapshot: BoundJudgementSnapshot | None = None,
 ) -> dict[str, Any] | None:
     """Build one internal review card, or ``None`` unless it is truly ready."""
     if not isinstance(record, dict):
@@ -365,6 +390,7 @@ def pending_judgement_card(
         record,
         artifact_path,
         record_snapshot=record_snapshot,
+        bound_snapshot=bound_snapshot,
     ):
         return None
     route = _default_route(record, owner)
@@ -430,6 +456,8 @@ def pending_judgement_card(
         card["program_ids"] = [
             _text(item) for item in record.get("program_ids", []) if _text(item)
         ]
+    if bound_snapshot is not None and not bound_snapshot.is_current():
+        return None
     return card
 
 
@@ -507,85 +535,67 @@ def _side_judgement_candidates(
 
 def _candidate_artifacts(
     root: Path,
-) -> Iterable[tuple[dict[str, Any], str, Path, CanonicalRecordSnapshot | None]]:
+) -> Iterable[BoundJudgementSnapshot]:
     for snapshot in iter_canonical_record_snapshots(root):
         record = normalize_record_snapshot(snapshot, root)
         if record is None:
             continue
-        owner = UNIT_OWNER_BY_KIND.get(_text(record.get("kind")), _text(record.get("owner")) or "unknown")
-        yield record, owner, snapshot.path, snapshot
-    for path in sorted((root / "kb" / "programs").glob("*/workflow/decisions.yaml")):
-        safe_path = _safe_candidate_file(root, path)
-        if safe_path is None:
+        try:
+            yield _bound_unit_from_snapshot(
+                root,
+                snapshot,
+                check_current=False,
+            )
+        except ValueError:
             continue
-        for item in _list_items(root, safe_path):
-            yield item, "research-orchestrator", safe_path, None
-    for path in sorted((root / "kb" / "units" / "ideas").glob("*/discussion-judgements.yaml")):
-        safe_path = _safe_candidate_file(root, path)
-        if safe_path is None:
-            continue
-        for item in _list_items(root, safe_path):
-            yield item, "idea-workbench", safe_path, None
-    for path in sorted((root / "kb" / "programs").glob("*/design/*-repo-choice.yaml")):
-        safe_path = _safe_candidate_file(root, path)
-        if safe_path is None:
+
+    side_candidates = _side_judgement_candidates(root)
+    valid_candidates = [
+        candidate
+        for candidate in side_candidates
+        if _text(candidate.record.get("kind")) in SIDE_OWNER_BY_KIND
+        and not _identity_violations(root, candidate.record, candidate.owner, candidate.container.path)
+    ]
+    subject_counts: dict[tuple[str, str], int] = {}
+    for candidate in valid_candidates:
+        key = (_text(candidate.record.get("kind")), _text(candidate.record.get("id")))
+        subject_counts[key] = subject_counts.get(key, 0) + 1
+    for candidate in valid_candidates:
+        kind = _text(candidate.record.get("kind"))
+        subject_id = _text(candidate.record.get("id"))
+        if subject_counts.get((kind, subject_id)) != 1:
             continue
         try:
-            payload = load_yaml(safe_path, default={})
-        except (OSError, UnicodeError, yaml.YAMLError):
+            yield _bound_side_from_candidate(
+                root,
+                candidate,
+                check_current=False,
+            )
+        except ValueError:
             continue
-        if isinstance(payload, dict):
-            yield payload, "method-designer", safe_path, None
-    for path in sorted((root / "kb" / "synthesis").glob("*/*.yaml")):
-        if path.name.endswith("-fill.yaml"):
-            continue
-        safe_path = _safe_candidate_file(root, path)
-        if safe_path is None:
-            continue
-        try:
-            payload = load_yaml(safe_path, default={})
-        except (OSError, UnicodeError, yaml.YAMLError):
-            continue
-        if isinstance(payload, dict) and _text(payload.get("kind")) == "survey_judgement":
-            yield payload, "literature-synthesizer", safe_path, None
 
 
 def discover_pending_judgements(root: str | Path) -> list[dict[str, Any]]:
     """Return all cross-owner ``ready_for_review`` cards in deterministic order."""
     project_root = Path(root).absolute()
-    raw_candidates = list(_candidate_artifacts(project_root))
-    subject_counts: dict[tuple[str, str], int] = {}
-    for record, owner, path, _snapshot in raw_candidates:
-        if _identity_violations(project_root, record, owner, path):
-            continue
-        key = (_text(record.get("kind")), _text(record.get("id")))
-        subject_counts[key] = subject_counts.get(key, 0) + 1
     candidates = [
         card
-        for record, owner, path, snapshot in raw_candidates
+        for bound in _candidate_artifacts(project_root)
         if (
             card := pending_judgement_card(
                 project_root,
-                record,
-                owner=owner,
-                artifact_path=path,
-                record_snapshot=snapshot,
+                bound.record,
+                owner=bound.owner,
+                artifact_path=bound.path,
+                record_snapshot=bound.unit_record_snapshot,
+                bound_snapshot=bound,
             )
         )
         is not None
     ]
-    cards = [
-        card
-        for card in candidates
-        if subject_counts.get(
-            (_text(card.get("subject", {}).get("kind")), _text(card.get("subject", {}).get("id"))),
-            0,
-        )
-        == 1
-    ]
     priority = {"critical": 4, "high": 3, "normal": 2, "low": 1}
     return sorted(
-        cards,
+        candidates,
         key=lambda card: (
             -priority.get(_text(card.get("priority")).casefold(), 2),
             _text(card.get("updated_at")),
@@ -724,6 +734,107 @@ def require_judgement_snapshot(
         raise ValueError("review snapshot is stale; show the current judgement before applying a decision")
 
 
+def _bound_unit_from_snapshot(
+    project_root: Path,
+    snapshot: CanonicalRecordSnapshot,
+    *,
+    subject: dict[str, Any] | None = None,
+    check_current: bool,
+) -> BoundJudgementSnapshot:
+    subject_kind = snapshot.kind
+    subject_id = snapshot.unit_id
+    record = normalize_record_snapshot(snapshot, project_root)
+    if record is None:
+        raise ValueError(f"bound judgement is not a valid canonical record: {subject_kind}:{subject_id}")
+    owner = UNIT_OWNER_BY_KIND[subject_kind]
+    relative_path = snapshot.path.relative_to(project_root).as_posix()
+    supplied_owner = _text(subject.get("owner")) if subject is not None else ""
+    supplied_path = _text(subject.get("path")) if subject is not None else ""
+    if supplied_owner and supplied_owner != owner:
+        raise ValueError("confirmation subject owner does not match canonical owner")
+    if supplied_path and supplied_path != relative_path:
+        raise ValueError("confirmation subject path does not match canonical record")
+    if _identity_violations(project_root, record, owner, snapshot.path):
+        raise ValueError(f"bound judgement has invalid canonical identity: {subject_kind}:{subject_id}")
+
+    def validate_unique_current() -> bool:
+        current = require_current_record_snapshot(project_root, snapshot)
+        current_record = normalize_record_snapshot(current, project_root)
+        return current_record is not None and current_record == record
+
+    bound = BoundJudgementSnapshot(
+        record=record,
+        path=snapshot.path,
+        owner=owner,
+        unit_record_snapshot=snapshot,
+        validate_unique_current=validate_unique_current,
+    )
+    if check_current and not bound.is_current():
+        raise ValueError("bound judgement changed while it was being captured")
+    return bound
+
+
+def _bound_side_from_candidate(
+    project_root: Path,
+    selected: _SideJudgementCandidate,
+    *,
+    subject: dict[str, Any] | None = None,
+    check_current: bool,
+) -> BoundJudgementSnapshot:
+    record = selected.record
+    subject_kind = _text(record.get("kind"))
+    subject_id = _text(record.get("id"))
+    owner = SIDE_OWNER_BY_KIND[subject_kind]
+    container = selected.container
+    relative_path = container.path.relative_to(project_root).as_posix()
+    supplied_owner = _text(subject.get("owner")) if subject is not None else ""
+    supplied_path = _text(subject.get("path")) if subject is not None else ""
+    if supplied_owner and supplied_owner != owner:
+        raise ValueError("confirmation subject owner does not match canonical owner")
+    if supplied_path and supplied_path != relative_path:
+        raise ValueError("confirmation subject path does not match canonical container")
+    if _identity_violations(project_root, record, owner, container.path):
+        raise ValueError(f"bound judgement has invalid canonical identity: {subject_kind}:{subject_id}")
+
+    def validate_side_unique_current() -> bool:
+        current_matches = [
+            candidate
+            for candidate in _side_judgement_candidates(project_root)
+            if _text(candidate.record.get("kind")) == subject_kind
+            and _text(candidate.record.get("id")) == subject_id
+            and not _identity_violations(
+                project_root,
+                candidate.record,
+                candidate.owner,
+                candidate.container.path,
+            )
+        ]
+        if len(current_matches) != 1:
+            return False
+        current = current_matches[0]
+        expected_file = container.file
+        current_file = current.container.file
+        return (
+            current.record == record
+            and current.owner == owner
+            and current_file.path == expected_file.path
+            and current_file.raw_bytes == expected_file.raw_bytes
+            and current_file.file_identity == expected_file.file_identity
+            and current_file.directory_capabilities == expected_file.directory_capabilities
+        )
+
+    bound = BoundJudgementSnapshot(
+        record=record,
+        path=container.path,
+        owner=owner,
+        project_yaml_snapshot=container,
+        validate_unique_current=validate_side_unique_current,
+    )
+    if check_current and not bound.is_current():
+        raise ValueError("bound judgement changed while it was being captured")
+    return bound
+
+
 def load_bound_judgement_snapshot(root: str | Path, subject: Any) -> BoundJudgementSnapshot:
     """Bind one judgement to its exact, globally unique canonical container."""
     project_root = Path(root).absolute()
@@ -747,97 +858,23 @@ def load_bound_judgement_snapshot(root: str | Path, subject: Any) -> BoundJudgem
             )
         ]
         if len(matches) != 1:
-            raise ValueError(
-                f"bound judgement is not globally unique: {subject_kind}:{subject_id}"
-            )
-        selected = matches[0]
-        record = selected.record
-        owner = SIDE_OWNER_BY_KIND[subject_kind]
-        container = selected.container
-        relative_path = container.path.relative_to(project_root).as_posix()
-        supplied_owner = _text(subject.get("owner"))
-        supplied_path = _text(subject.get("path"))
-        if supplied_owner and supplied_owner != owner:
-            raise ValueError("confirmation subject owner does not match canonical owner")
-        if supplied_path and supplied_path != relative_path:
-            raise ValueError("confirmation subject path does not match canonical container")
-        if _identity_violations(project_root, record, owner, container.path):
-            raise ValueError(
-                f"bound judgement has invalid canonical identity: {subject_kind}:{subject_id}"
-            )
-
-        def validate_side_unique_current() -> bool:
-            current_matches = [
-                candidate
-                for candidate in _side_judgement_candidates(project_root)
-                if _text(candidate.record.get("kind")) == subject_kind
-                and _text(candidate.record.get("id")) == subject_id
-                and not _identity_violations(
-                    project_root,
-                    candidate.record,
-                    candidate.owner,
-                    candidate.container.path,
-                )
-            ]
-            if len(current_matches) != 1:
-                return False
-            current = current_matches[0]
-            expected_file = container.file
-            current_file = current.container.file
-            return (
-                current.record == record
-                and current.owner == owner
-                and not _identity_violations(project_root, current.record, owner, current.container.path)
-                and current_file.path == expected_file.path
-                and current_file.raw_bytes == expected_file.raw_bytes
-                and current_file.file_identity == expected_file.file_identity
-                and current_file.directory_capabilities == expected_file.directory_capabilities
-                and container.is_current()
-            )
-
-        bound = BoundJudgementSnapshot(
-            record=record,
-            path=container.path,
-            owner=owner,
-            project_yaml_snapshot=container,
-            validate_unique_current=validate_side_unique_current,
+            raise ValueError(f"bound judgement is not globally unique: {subject_kind}:{subject_id}")
+        return _bound_side_from_candidate(
+            project_root,
+            matches[0],
+            subject=subject,
+            check_current=True,
         )
-        if not bound.is_current():
-            raise ValueError("bound judgement changed while it was being captured")
-        return bound
 
     snapshot = canonical_record_snapshot_for_identity(project_root, subject_kind, subject_id)
     if snapshot is None:  # pragma: no cover - allow_absent is false
         raise ValueError(f"bound judgement not found: {subject_kind}:{subject_id}")
-    record = normalize_record_snapshot(snapshot, project_root)
-    if record is None:
-        raise ValueError(f"bound judgement is not a valid canonical record: {subject_kind}:{subject_id}")
-    owner = UNIT_OWNER_BY_KIND[subject_kind]
-    relative_path = snapshot.path.relative_to(project_root).as_posix()
-    supplied_owner = _text(subject.get("owner"))
-    supplied_path = _text(subject.get("path"))
-    if supplied_owner and supplied_owner != owner:
-        raise ValueError("confirmation subject owner does not match canonical owner")
-    if supplied_path and supplied_path != relative_path:
-        raise ValueError("confirmation subject path does not match canonical record")
-    if _identity_violations(project_root, record, owner, snapshot.path):
-        raise ValueError(f"bound judgement has invalid canonical identity: {subject_kind}:{subject_id}")
-
-    def validate_unique_current() -> bool:
-        current = require_current_record_snapshot(project_root, snapshot)
-        current_record = normalize_record_snapshot(current, project_root)
-        return current_record is not None and current_record == record
-
-    bound = BoundJudgementSnapshot(
-        record=record,
-        path=snapshot.path,
-        owner=owner,
-        unit_record_snapshot=snapshot,
-        validate_unique_current=validate_unique_current,
+    return _bound_unit_from_snapshot(
+        project_root,
+        snapshot,
+        subject=subject,
+        check_current=True,
     )
-    if not bound.is_current():
-        raise ValueError("bound judgement changed while it was being captured")
-    return bound
 
 
 def load_bound_judgement(root: str | Path, subject: Any) -> tuple[dict[str, Any], Path]:
