@@ -2356,6 +2356,10 @@ def record_portfolio_decision(
             message=f"milestone: record portfolio decision {stored['decision_id']}",
             target_paths=[path],
         )
+    else:
+        # Replay has no history mutation to roll back, so retain a second gate
+        # at the final return boundary as defense against post-commit staleness.
+        validation_plan.require_program_decisions_current()
     return stored, changed
 
 

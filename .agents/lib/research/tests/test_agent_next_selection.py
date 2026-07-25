@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -1359,6 +1360,63 @@ def test_portfolio_history_postwrite_gate_rolls_back_stale_decision(
         assert history_file.stat().st_mode & 0o7777 == before_mode
     else:
         assert not history_file.exists()
+    assert checkpoints == []
+
+
+@pytest.mark.parametrize("replacement", ["content", "same-bytes"])
+def test_portfolio_history_replay_revalidates_after_transaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement: str,
+) -> None:
+    orchestrate = _load_orchestrator(f"orchestrator_portfolio_replay_gate_{replacement}")
+    root = _workspace(tmp_path)
+    _record, decisions_file = _verified_program_decision(orchestrate, root)
+    _program(orchestrate, root, "program-a", actions=["Choose a grounded baseline"])
+    snapshot = orchestrate.portfolio_candidate_snapshot(root)
+    decision = _decision(root, snapshot, [snapshot["candidates"][0]["action_id"]])
+    decision["decision_scope"] = "research_judgement"
+    decision["program_decision_ids"] = ["program-a:decision-1"]
+    orchestrate.record_portfolio_decision(root, decision)
+    history_file = orchestrate.portfolio_history_path(root)
+    before_history = history_file.read_bytes()
+    before_history_inode = history_file.stat().st_ino
+    source_inode = decisions_file.stat().st_ino
+    original_transaction = orchestrate.mutation_transaction
+    replaced = False
+
+    @contextmanager
+    def replace_decisions_after_transaction(*args, **kwargs):
+        nonlocal replaced
+        with original_transaction(*args, **kwargs) as op_id:
+            yield op_id
+        if replaced:
+            return
+        replacement_file = decisions_file.with_name("decisions-replay-replacement.yaml")
+        if replacement == "same-bytes":
+            replacement_file.write_bytes(decisions_file.read_bytes())
+        else:
+            container = load_yaml(decisions_file)
+            container["items"][0]["payload"]["decision"]["text"] = "REPLAY_SENTINEL route B"
+            write_yaml_if_changed(replacement_file, container)
+        os.replace(replacement_file, decisions_file)
+        replaced = True
+
+    checkpoints: list[list[Path]] = []
+    monkeypatch.setattr(orchestrate, "mutation_transaction", replace_decisions_after_transaction)
+    monkeypatch.setattr(
+        orchestrate,
+        "checkpoint_and_report",
+        lambda project_root, **kwargs: checkpoints.append(kwargs["target_paths"]) or {"committed": False},
+    )
+
+    with pytest.raises(SystemExit, match="unavailable or unverified"):
+        orchestrate.record_portfolio_decision(root, decision)
+
+    assert replaced is True
+    assert decisions_file.stat().st_ino != source_inode
+    assert history_file.read_bytes() == before_history
+    assert history_file.stat().st_ino == before_history_inode
     assert checkpoints == []
 
 
