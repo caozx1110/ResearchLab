@@ -234,6 +234,32 @@ def test_mutation_commit_guard_failure_restores_before_image_and_aborts_journal(
     assert "commit_guard" not in entry
 
 
+def test_nested_commit_guard_is_rejected_before_child_body_can_outlive_root(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "kb" / "reports" / "nested-guarded.md"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"authoritative root before-image\n")
+    body_ran = False
+
+    def child_guard() -> None:
+        return None
+
+    with pytest.raises(SystemExit, match="authoritative root"):
+        with mutation_transaction(tmp_path, "outer-publication", [target]):
+            with mutation_transaction(
+                tmp_path,
+                "nested-publication",
+                [target],
+                commit_guard=child_guard,
+            ):
+                body_ran = True
+                target.write_bytes(b"formal output whose guard would expire at child commit\n")
+
+    assert body_ran is False
+    assert target.read_bytes() == b"authoritative root before-image\n"
+
+
 def test_journaled_abort_mixed_targets_skips_unchanged_and_restores_only_divergence(
     tmp_path: Path,
 ) -> None:
