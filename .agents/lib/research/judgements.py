@@ -180,11 +180,15 @@ def _canonical_project_root(root: str | Path) -> Path:
     try:
         canonical_root = lexical_root.resolve(strict=True)
         canonical_stat = canonical_root.lstat()
+        final_lexical_stat = lexical_root.lstat()
     except OSError as exc:
         raise ValueError("project root cannot be canonicalized safely") from exc
     if (
         not stat.S_ISDIR(canonical_stat.st_mode)
+        or not stat.S_ISDIR(final_lexical_stat.st_mode)
         or (canonical_stat.st_dev, canonical_stat.st_ino)
+        != (lexical_stat.st_dev, lexical_stat.st_ino)
+        or (final_lexical_stat.st_dev, final_lexical_stat.st_ino)
         != (lexical_stat.st_dev, lexical_stat.st_ino)
     ):
         raise ValueError("project root changed while it was being canonicalized")

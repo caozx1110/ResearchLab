@@ -8,7 +8,7 @@ import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 
@@ -31,10 +31,13 @@ from research.common import add_project_root_argument, load_program_reporting_ev
 from research.core import command_mutation, ensure_workspace, checkpoint_and_report, project_root, user_root
 from research.evidence import read_claims, validate_claims
 from research.judgements import (
+    BoundJudgementBatchSnapshot,
+    BoundJudgementContainerSnapshot,
     BoundJudgementSnapshot,
     confirmation_binding,
     judgement_confirmation_matches_bound,
     judgement_confirmation_is_current,
+    load_bound_judgement_batch_snapshot,
     load_bound_judgement_container_snapshot,
     load_bound_judgement_snapshot,
 )
@@ -122,6 +125,15 @@ class ClaimSource:
     claims: list[dict[str, Any]] = field(default_factory=list)
     issues: list[str] = field(default_factory=list)
     binding_digest: str = ""
+    validate_current: Callable[[], bool] | None = field(default=None, repr=False, compare=False)
+
+    def is_current(self) -> bool:
+        if self.validate_current is None:
+            return False
+        try:
+            return bool(self.validate_current())
+        except (OSError, RuntimeError, ValueError):
+            return False
 
 
 @dataclass
@@ -134,6 +146,16 @@ class ReportInputs:
     reporting_style: str = "default"
     language: str = DEFAULT_REPORT_LANGUAGE
     preference_binding: dict[str, object] = field(default_factory=dict)
+    formal_validators: tuple[Callable[[], bool], ...] = field(default_factory=tuple, repr=False)
+    formal_lane_pending: bool = False
+
+    def formal_inputs_are_current(self) -> bool:
+        if self.formal_lane_pending:
+            return False
+        try:
+            return all(bool(validator()) for validator in self.formal_validators)
+        except (OSError, RuntimeError, ValueError):
+            return False
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -202,6 +224,19 @@ def _event_bound_snapshot(root: Path, event: dict[str, Any]) -> BoundJudgementSn
             "id": str(subject.get("id") or "").strip(),
         },
     )
+
+
+def _event_subject(event: dict[str, Any]) -> dict[str, str]:
+    binding = event.get("confirmation_binding")
+    binding = binding if isinstance(binding, dict) else {}
+    subject = binding.get("subject")
+    subject = subject if isinstance(subject, dict) else {}
+    return {
+        "kind": str(subject.get("kind") or "").strip(),
+        "id": str(subject.get("id") or "").strip(),
+        "owner": str(subject.get("owner") or "").strip(),
+        "path": str(subject.get("path") or "").strip(),
+    }
 
 
 def _confirmed_judgement_event(
@@ -307,11 +342,18 @@ def _survey_event_staleness(
 def _partition_reporting_events_with_snapshots(
     root: Path,
     events: list[dict[str, Any]],
+    *,
+    snapshot_batch: BoundJudgementBatchSnapshot | None = None,
 ) -> tuple[
     list[dict[str, Any]],
     list[dict[str, Any]],
     dict[int, BoundJudgementSnapshot],
+    BoundJudgementBatchSnapshot,
 ]:
+    batch = snapshot_batch or load_bound_judgement_batch_snapshot(
+        root,
+        [_event_subject(event) for event in events if _event_is_judgement(event)],
+    )
     ordinary: list[dict[str, Any]] = []
     pending: list[dict[str, Any]] = []
     bound_by_event: dict[int, BoundJudgementSnapshot] = {}
@@ -320,10 +362,10 @@ def _partition_reporting_events_with_snapshots(
         if not _event_is_judgement(normalized):
             ordinary.append(normalized)
             continue
-        try:
-            bound = _event_bound_snapshot(root, normalized)
-        except (OSError, RuntimeError, UnicodeError, ValueError, yaml.YAMLError):
-            bound = None
+        event_subject = _event_subject(normalized)
+        bound = batch.resolve(
+            {"kind": event_subject["kind"], "id": event_subject["id"]}
+        )
         freshness = _survey_event_staleness(root, normalized, bound_snapshot=bound)
         if isinstance(freshness, dict) and freshness.get("stale"):
             reasons = freshness.get("reasons")
@@ -346,14 +388,14 @@ def _partition_reporting_events_with_snapshots(
                 bound_by_event[id(normalized)] = bound
         else:
             pending.append(normalized)
-    return ordinary, pending, bound_by_event
+    return ordinary, pending, bound_by_event, batch
 
 
 def partition_reporting_events(
     root: Path,
     events: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    ordinary, pending, _bound_by_event = _partition_reporting_events_with_snapshots(root, events)
+    ordinary, pending, _bound_by_event, _batch = _partition_reporting_events_with_snapshots(root, events)
     return ordinary, pending
 
 
@@ -643,6 +685,7 @@ def load_confirmed_claim_sources(root: Path, unit_ids: list[str]) -> tuple[list[
                     ),
                 }
             ),
+            validate_current=lambda snapshot=snapshot: _record_snapshot_is_current(root, snapshot),
         )
         if not _record_snapshot_is_current(root, snapshot):
             missing_units.append(unit_id)
@@ -727,6 +770,7 @@ def load_confirmed_survey_claim_source(
                 ),
             }
         ),
+        validate_current=bound.is_current,
     )
     if not bound.is_current():
         return None, "confirmation_status=stale; missing: exact current judgement binding"
@@ -776,7 +820,13 @@ def _decision_value(lines: list[str], label: str) -> str:
     return ""
 
 
-def load_decisions(root: Path, program_id: str) -> list[dict[str, str]]:
+def load_decisions(
+    root: Path,
+    program_id: str,
+    *,
+    snapshot_batch: BoundJudgementBatchSnapshot | None = None,
+    validators: list[Callable[[], bool]] | None = None,
+) -> list[dict[str, str]]:
     clean_program_id = str(program_id or "").strip()
     if (
         not clean_program_id
@@ -788,15 +838,37 @@ def load_decisions(root: Path, program_id: str) -> list[dict[str, str]]:
     decisions: list[dict[str, str]] = []
     current_container_decisions: list[dict[str, str]] = []
     known_ids: set[str] = set()
-    try:
-        batch = load_bound_judgement_container_snapshot(
-            root,
-            decisions_relative,
-            owner="research-orchestrator",
-            expected_kind="program_decision",
-        )
-    except (OSError, RuntimeError, UnicodeError, ValueError, yaml.YAMLError):
-        batch = None
+    if snapshot_batch is not None:
+        target_path = root.resolve() / decisions_relative
+        matching_containers = [
+            container
+            for container in snapshot_batch.side_containers
+            if container.path == target_path
+        ]
+        if len(matching_containers) == 1:
+            batch = BoundJudgementContainerSnapshot(
+                container=matching_containers[0],
+                judgements=tuple(
+                    bound
+                    for bound in snapshot_batch.judgements
+                    if bound.project_yaml_snapshot is not None
+                    and bound.path == target_path
+                    and str(bound.record.get("kind") or "") == "program_decision"
+                ),
+                validate_current=snapshot_batch.is_current,
+            )
+        else:
+            batch = None
+    else:
+        try:
+            batch = load_bound_judgement_container_snapshot(
+                root,
+                decisions_relative,
+                owner="research-orchestrator",
+                expected_kind="program_decision",
+            )
+        except (OSError, RuntimeError, UnicodeError, ValueError, yaml.YAMLError):
+            batch = None
     if batch is not None:
         raw_items = batch.container.payload.get("items")
         if isinstance(raw_items, list):
@@ -885,13 +957,18 @@ def load_decisions(root: Path, program_id: str) -> list[dict[str, str]]:
     container_current = batch is not None and batch.is_current()
     if container_current:
         decisions.extend(current_container_decisions)
+        if current_container_decisions and validators is not None and batch is not None:
+            validators.append(batch.is_current)
     if legacy_current:
         effective_known_ids = known_ids if container_current else set()
-        decisions.extend(
+        accepted_legacy = [
             item
             for decision_id, item in legacy_decisions
             if not decision_id or decision_id not in effective_known_ids
-        )
+        ]
+        decisions.extend(accepted_legacy)
+        if accepted_legacy and validators is not None and legacy_snapshot is not None:
+            validators.append(legacy_snapshot.is_current)
     return decisions
 
 
@@ -905,9 +982,14 @@ def load_report_inputs(
     preference_operation: str = "",
 ) -> ReportInputs:
     loaded_events = normalize_events(load_program_reporting_events(root, program_id), stage=stage, limit=limit)
-    events, pending_judgement_events, bound_event_snapshots = _partition_reporting_events_with_snapshots(
+    judgement_batch = load_bound_judgement_batch_snapshot(
+        root,
+        [_event_subject(event) for event in loaded_events if _event_is_judgement(event)],
+    )
+    events, pending_judgement_events, bound_event_snapshots, _batch = _partition_reporting_events_with_snapshots(
         root,
         loaded_events,
+        snapshot_batch=judgement_batch,
     )
     events, pending_judgement_events, survey_claim_sources = attach_confirmed_survey_claim_sources(
         root,
@@ -918,12 +1000,25 @@ def load_report_inputs(
     )
     unit_ids = program_unit_ids(root, program_id, loaded_events)
     claim_sources, missing_units = load_confirmed_claim_sources(root, unit_ids)
+    formal_validators: list[Callable[[], bool]] = [
+        source.is_current
+        for source in [*claim_sources, *survey_claim_sources]
+    ]
+    if any(_event_is_judgement(event) for event in events):
+        formal_validators.append(judgement_batch.is_current)
+    decisions = load_decisions(
+        root,
+        program_id,
+        snapshot_batch=judgement_batch,
+        validators=formal_validators,
+    )
     inputs = ReportInputs(
         events=events,
         pending_judgement_events=pending_judgement_events,
         claim_sources=[*claim_sources, *survey_claim_sources],
-        decisions=load_decisions(root, program_id),
+        decisions=decisions,
         missing_units=missing_units,
+        formal_validators=tuple(formal_validators),
     )
     canonical_inputs = report_preference_context(
         program_id,
@@ -946,6 +1041,18 @@ def load_report_inputs(
             selected.get("profile.preferences.language_preference")
         )
         inputs.preference_binding = binding
+    if not inputs.formal_inputs_are_current():
+        _mark_formal_lane_pending(inputs)
+    return inputs
+
+
+def _mark_formal_lane_pending(inputs: ReportInputs) -> ReportInputs:
+    inputs.events = [event for event in inputs.events if not _event_is_judgement(event)]
+    inputs.pending_judgement_events = []
+    inputs.claim_sources = []
+    inputs.decisions = []
+    inputs.missing_units = []
+    inputs.formal_lane_pending = True
     return inputs
 
 
@@ -960,6 +1067,7 @@ def concise_report_inputs(inputs: ReportInputs) -> ReportInputs:
             claims=source.claims[:CONCISE_CLAIM_LIMIT],
             issues=source.issues,
             binding_digest=source.binding_digest,
+            validate_current=source.validate_current,
         )
         for source in inputs.claim_sources[:CONCISE_SOURCE_LIMIT]
     ]
@@ -972,6 +1080,8 @@ def concise_report_inputs(inputs: ReportInputs) -> ReportInputs:
         reporting_style=inputs.reporting_style,
         language=inputs.language,
         preference_binding=inputs.preference_binding,
+        formal_validators=inputs.formal_validators,
+        formal_lane_pending=inputs.formal_lane_pending,
     )
 
 
@@ -1184,7 +1294,39 @@ def report_headings(report_kind: str, *, language: str = "en-US") -> tuple[str, 
     return "Confirmed Claims & Evidence", "Reporting Events"
 
 
-def render_report(title: str, inputs: ReportInputs, *, report_kind: str) -> str:
+def _render_aggregate_pending_document(
+    title: str,
+    inputs: ReportInputs,
+    *,
+    report_kind: str,
+) -> str:
+    language = inputs.language
+    _claims_heading, events_heading = report_headings(report_kind, language=language)
+    pending_heading = (
+        "## Pending / Unverified judgements"
+        if _is_english(language)
+        else "## 待确认 / 未核验的判断"
+    )
+    pending_line = (
+        "- Formal judgement inputs changed during report generation; refresh them before publishing."
+        if _is_english(language)
+        else "- 报告生成期间正式判断来源已变化；刷新后才能发布。"
+    )
+    factual_events = [event for event in inputs.events if not _event_is_judgement(event)]
+    sections = [
+        [f"# {title}", ""],
+        [pending_heading, "", pending_line],
+        render_events(factual_events, heading=events_heading, language=language),
+    ]
+    lines: list[str] = []
+    for section in sections:
+        if lines and lines[-1] != "":
+            lines.append("")
+        lines.extend(section)
+    return "\n".join(lines).strip() + "\n"
+
+
+def _render_report_document(title: str, inputs: ReportInputs, *, report_kind: str) -> str:
     inputs = concise_report_inputs(inputs)
     language = inputs.language
     claims_heading, events_heading = report_headings(report_kind, language=language)
@@ -1201,6 +1343,15 @@ def render_report(title: str, inputs: ReportInputs, *, report_kind: str) -> str:
             lines.append("")
         lines.extend(section)
     return "\n".join(lines).strip() + "\n"
+
+
+def render_report(title: str, inputs: ReportInputs, *, report_kind: str) -> str:
+    if not inputs.formal_inputs_are_current():
+        return _render_aggregate_pending_document(title, inputs, report_kind=report_kind)
+    rendered = _render_report_document(title, inputs, report_kind=report_kind)
+    if not inputs.formal_inputs_are_current():
+        return _render_aggregate_pending_document(title, inputs, report_kind=report_kind)
+    return rendered
 
 
 def _event_matches(event: dict[str, Any], terms: set[str]) -> bool:
@@ -1245,7 +1396,7 @@ def render_outline_event_inputs(
     return lines
 
 
-def render_outline(program_id: str, inputs: ReportInputs) -> str:
+def _render_outline_document(program_id: str, inputs: ReportInputs) -> str:
     inputs = concise_report_inputs(inputs)
     language = inputs.language
     english = _is_english(language)
@@ -1356,6 +1507,20 @@ def render_outline(program_id: str, inputs: ReportInputs) -> str:
             lines.append("")
         lines.extend(section)
     return "\n".join(lines).strip() + "\n"
+
+
+def render_outline(program_id: str, inputs: ReportInputs) -> str:
+    title = (
+        f"Paper Outline: {program_id}"
+        if _is_english(inputs.language)
+        else f"论文大纲：{program_id}"
+    )
+    if not inputs.formal_inputs_are_current():
+        return _render_aggregate_pending_document(title, inputs, report_kind="outline")
+    rendered = _render_outline_document(program_id, inputs)
+    if not inputs.formal_inputs_are_current():
+        return _render_aggregate_pending_document(title, inputs, report_kind="outline")
+    return rendered
 
 
 def main() -> int:

@@ -308,7 +308,7 @@ def test_confirmed_survey_report_captures_bound_subject_once(
     report = _load_report_module()
     program_id = "program-survey"
     _write_confirmed_program_survey(tmp_path, program_id=program_id)
-    original_load = report.load_bound_judgement_snapshot
+    original_load = report.load_bound_judgement_batch_snapshot
     captures = 0
 
     def count_bound_capture(*args, **kwargs):
@@ -316,7 +316,7 @@ def test_confirmed_survey_report_captures_bound_subject_once(
         captures += 1
         return original_load(*args, **kwargs)
 
-    monkeypatch.setattr(report, "load_bound_judgement_snapshot", count_bound_capture)
+    monkeypatch.setattr(report, "load_bound_judgement_batch_snapshot", count_bound_capture)
 
     inputs = report.load_report_inputs(tmp_path, program_id, stage="survey")
 
@@ -1551,6 +1551,147 @@ def test_final_gate_discards_text_built_before_source_replacement(
     assert "Grounded Paper" not in text
     assert "The method improves benchmark success rate." not in text
     assert "Use the grounded baseline" not in text
+
+
+@pytest.mark.parametrize("event_count", [4, 8, 16])
+def test_report_side_event_batch_capture_and_resolution_are_linear(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    event_count: int,
+) -> None:
+    report = _load_report_module()
+    report_program_id = "aggregate-events"
+    report_workflow = tmp_path / "kb" / "programs" / report_program_id / "workflow"
+    report_workflow.mkdir(parents=True)
+    write_yaml_if_changed(
+        tmp_path / "kb" / "programs" / report_program_id / "state.yaml",
+        {"program_id": report_program_id, "active_unit_ids": []},
+    )
+    events = []
+    for index in range(event_count):
+        program_id = f"side-event-{index}"
+        program_root = tmp_path / "kb" / "programs" / program_id
+        workflow = program_root / "workflow"
+        workflow.mkdir(parents=True)
+        evidence_path = workflow / "evidence.md"
+        evidence_path.write_text(f"grounded evidence {index}", encoding="utf-8")
+        decision = {
+            "id": f"decision-side-event-{index}",
+            "kind": "program_decision",
+            "owner": "research-orchestrator",
+            "program_id": program_id,
+            "confirmation_status": "pending_user_confirmation",
+            "needs_human_confirmation": True,
+            "information_types": ["evaluation", "unverified"],
+            "payload": {
+                "decision": {"text": f"Choose route {index}"},
+                "claims": [
+                    {
+                        "id": f"claim-side-event-{index}",
+                        "text": f"Route {index} is grounded.",
+                        "claim_type": "evaluation",
+                        "confirmation_status": "pending_user_confirmation",
+                        "evidence_refs": [
+                            {
+                                "source_unit_id": f"program:{program_id}",
+                                "artifact": "workflow/evidence.md",
+                                "locator": "line:1",
+                                "quote": f"grounded evidence {index}",
+                            }
+                        ],
+                    }
+                ],
+            },
+        }
+        roots = {f"program:{program_id}": program_root}
+        build_verification_receipt(decision, program_root, source_roots=roots)
+        apply_confirmation(
+            decision,
+            confirmed_by="Human Reviewer",
+            evidence=[f"Reviewed side event {index}."],
+            user_authorization=f"Confirm side event {index}.",
+            authorization_source="user_message",
+            project_root=tmp_path,
+            verification_root=program_root,
+            trusted_source_roots=roots,
+        )
+        decisions_path = workflow / "decisions.yaml"
+        write_yaml_if_changed(decisions_path, {"items": [decision]})
+        events.append(
+            {
+                "event_type": "decision-confirmed",
+                "confirmation_status": "confirmed",
+                "confirmation_binding": confirmation_binding(
+                    decision,
+                    owner="research-orchestrator",
+                    path=decisions_path.relative_to(tmp_path).as_posix(),
+                ),
+            }
+        )
+    write_yaml_if_changed(report_workflow / "reporting-events.yaml", {"items": events})
+
+    original_snapshot = judgements_module.snapshot_project_file
+    captures = 0
+
+    def count_snapshot(*args, **kwargs):
+        nonlocal captures
+        captures += 1
+        return original_snapshot(*args, **kwargs)
+
+    monkeypatch.setattr(judgements_module, "snapshot_project_file", count_snapshot)
+
+    inputs = report.load_report_inputs(tmp_path, report_program_id)
+
+    assert captures == event_count
+    assert len(inputs.events) == event_count
+    assert all(event["_effective_confirmation_status"] == "confirmed" for event in inputs.events)
+    assert inputs.formal_lane_pending is False
+    assert inputs.formal_inputs_are_current()
+    assert captures == event_count
+
+
+@pytest.mark.skipif(not Path("/private/var").exists(), reason="macOS /var alias contract")
+def test_confirmed_survey_report_accepts_var_alias_root(tmp_path: Path) -> None:
+    canonical_root = tmp_path.resolve()
+    if not str(canonical_root).startswith("/private/var/"):
+        pytest.skip("temporary directory is not under the macOS /var alias")
+    alias_root = Path("/var") / canonical_root.relative_to("/private/var")
+    report = _load_report_module()
+    program_id = "program-survey"
+    _write_confirmed_program_survey(canonical_root, program_id=program_id)
+
+    inputs = report.load_report_inputs(alias_root, program_id, stage="survey")
+    text = report.render_report(
+        f"Stage Summary: {program_id}",
+        inputs,
+        report_kind="stage-summary",
+    )
+
+    assert inputs.formal_lane_pending is False
+    assert "Agent-authored survey judgement for background_terms-1." in text
+    assert SURVEY_QUOTE in text
+    assert "Pending / Unverified" not in text
+
+
+def test_report_input_snapshot_never_serializes_validators(tmp_path: Path) -> None:
+    report = _load_report_module()
+    root, program_id, _unit_id = _make_workspace(tmp_path)
+    inputs = report.load_report_inputs(root, program_id)
+    snapshot = report.report_input_snapshot(inputs)
+
+    def assert_no_callable(value) -> None:
+        assert not callable(value)
+        if isinstance(value, dict):
+            for child in value.values():
+                assert_no_callable(child)
+        elif isinstance(value, list):
+            for child in value:
+                assert_no_callable(child)
+
+    assert_no_callable(snapshot)
+    serialized = report.json.dumps(snapshot, sort_keys=True, default=str)
+
+    assert "validator" not in serialized
 
 
 def test_outline_cli_writes_report_without_raw_command_stdout(tmp_path: Path, monkeypatch, capsys) -> None:
