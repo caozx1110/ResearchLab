@@ -1631,7 +1631,18 @@ def main() -> int:
         path = reports_root / "paper-outline.md"
     else:
         path = reports_root / "stage-summary.md"
-    with command_mutation(root, f"report-author:{args.command}", [path]):
+    publishes_formal_lane = False
+
+    def require_formal_inputs_current_at_commit() -> None:
+        if publishes_formal_lane and not inputs.formal_inputs_are_current():
+            raise RuntimeError("formal report inputs changed during publication")
+
+    with command_mutation(
+        root,
+        f"report-author:{args.command}",
+        [path],
+        commit_guard=require_formal_inputs_current_at_commit,
+    ):
         title = report_title(args.command, args.program_id, language=inputs.language)
         text = render_outline(args.program_id, inputs) if args.command == "outline" else render_report(title, inputs, report_kind=args.command)
         publishes_formal_lane = inputs.formal_inputs_are_current()

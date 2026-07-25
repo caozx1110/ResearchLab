@@ -201,6 +201,39 @@ def test_journaled_abort_without_target_writes_preserves_file_and_tree_identitie
     } == entry["before_digests"]
 
 
+def test_mutation_commit_guard_failure_restores_before_image_and_aborts_journal(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "kb" / "notes" / "guarded.md"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"before commit guard\n")
+    os.chmod(target, 0o640)
+    operation_id = ""
+
+    def reject_commit() -> None:
+        assert target.read_bytes() == b"after transaction body\n"
+        raise RuntimeError("commit guard rejected mutation")
+
+    with pytest.raises(RuntimeError, match="commit guard rejected mutation"):
+        with mutation_transaction(
+            tmp_path,
+            "commit-guard-rejection",
+            [target],
+            commit_guard=reject_commit,
+        ) as operation_id:
+            target.write_bytes(b"after transaction body\n")
+            os.chmod(target, 0o600)
+
+    assert operation_id
+    assert target.read_bytes() == b"before commit guard\n"
+    assert target.stat().st_mode & 0o777 == 0o640
+    entry = load_op(tmp_path, operation_id)
+    assert entry["state"] == "abort"
+    assert entry["operation_error"] == "commit guard rejected mutation"
+    assert entry["after_digests"] == {}
+    assert "commit_guard" not in entry
+
+
 def test_journaled_abort_mixed_targets_skips_unchanged_and_restores_only_divergence(
     tmp_path: Path,
 ) -> None:

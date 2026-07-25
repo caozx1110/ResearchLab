@@ -1359,9 +1359,16 @@ def command_mutation(
     project_root: Path,
     op_type: str,
     target_paths: Sequence[Path],
+    *,
+    commit_guard: Callable[[], None] | None = None,
 ) -> Iterator[None]:
     """Delegate command-scoped recovery and locking to the canonical transaction."""
-    with mutation_transaction(project_root, op_type, target_paths):
+    with mutation_transaction(
+        project_root,
+        op_type,
+        target_paths,
+        commit_guard=commit_guard,
+    ):
         yield
 
 

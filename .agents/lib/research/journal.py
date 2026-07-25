@@ -2215,7 +2215,17 @@ def journaled_op(
     coordination_scope: str = "none",
     parent_op_id: str | None = None,
     attach_to_active: bool = True,
+    commit_guard: Callable[[], None] | None = None,
 ) -> Iterator[str]:
+    """Journal one mutation and optionally validate at its commit boundary.
+
+    ``commit_guard`` is an in-process, side-effect-free validator.  It runs as
+    the final validation after the context body returns and immediately before
+    ``commit_op``.  A failure follows the ordinary abort/restore path and is
+    propagated unchanged.  The guard executes while any coordinating locks
+    owned by ``mutation_transaction`` are still held; this is cooperative
+    locking, not atomic exclusion of arbitrary external filesystem writers.
+    """
     op_id = begin_op(
         project_root,
         op_type,
@@ -2230,6 +2240,8 @@ def journaled_op(
     token = _ACTIVE_OP_STACK.set((*stack, (_project_context_key(project_root), op_id)))
     try:
         yield op_id
+        if commit_guard is not None:
+            commit_guard()
         commit_op(project_root, op_id)
     except BaseException as exc:
         abort_op(project_root, op_id, restore=True, error=str(exc))
@@ -2272,6 +2284,7 @@ def mutation_transaction(
     undoable: bool = True,
     operation_role: str = "user",
     preflight: Callable[[], None] | None = None,
+    commit_guard: Callable[[], None] | None = None,
 ) -> Iterator[str]:
     """Coordinate and journal one command-level mutation transaction.
 
@@ -2301,6 +2314,7 @@ def mutation_transaction(
             undoable=undoable,
             operation_role=operation_role,
             coordination_scope="inherited",
+            commit_guard=commit_guard,
         ) as op_id:
             yield op_id
         return
@@ -2324,5 +2338,6 @@ def mutation_transaction(
                 undoable=undoable,
                 operation_role=operation_role,
                 coordination_scope="workspace-exclusive",
+                commit_guard=commit_guard,
             ) as op_id:
                 yield op_id

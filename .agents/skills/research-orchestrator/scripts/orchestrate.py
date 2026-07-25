@@ -2322,7 +2322,21 @@ def record_portfolio_decision(
     path = _validate_portfolio_history_target(root)
     changed = False
     stored: dict[str, Any] = {}
-    with mutation_transaction(root, "research-orchestrator:record-next-selection", [path]):
+    commit_validation_plan: _PortfolioDecisionValidationPlan | None = None
+
+    def require_new_write_sources_current_at_commit() -> None:
+        if not changed:
+            return
+        if commit_validation_plan is None:
+            raise RuntimeError("Portfolio decision commit validation plan is unavailable")
+        commit_validation_plan.require_program_decisions_current()
+
+    with mutation_transaction(
+        root,
+        "research-orchestrator:record-next-selection",
+        [path],
+        commit_guard=require_new_write_sources_current_at_commit,
+    ):
         current_snapshot = portfolio_candidate_snapshot(root, selected_program_id=selected_program_id)
         validation_plan = _portfolio_decision_validation_plan(root, decision, current_snapshot)
         normalized = validation_plan.normalized
@@ -2339,6 +2353,7 @@ def record_portfolio_decision(
                 raise SystemExit("Portfolio decision id is already bound to different content")
             stored = existing[0]
         else:
+            commit_validation_plan = validation_plan
             stored = {**normalized, "recorded_at": utc_now_iso()}
             history.setdefault("items", []).append(stored)
             history["generated_at"] = utc_now_iso()
