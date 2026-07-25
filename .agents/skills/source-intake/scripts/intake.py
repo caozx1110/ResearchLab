@@ -32,7 +32,7 @@ if __name__ == "__main__":
 
 from research.common import add_project_root_argument, confirm_command as shared_confirm_command, extract_pdf_record, load_yaml, parse_arxiv_id, print_resolved_project_roots, skill_script_for_command
 from research.confirm import require_user_authorization
-from research.journal import journal_subprocess_env, mutation_transaction
+from research.journal import journal_subprocess_env, mutation_transaction, target_digest
 from research.intake_cli import add_intake_add_arguments
 from research.preference_selection import operation_contract, resolve_operation_preferences
 from research.core import (
@@ -209,6 +209,7 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("--authorization-source", default="")
     add.add_argument("--preference-selection-id", default="")
     add.add_argument("--prepared-intake-token", default="")
+    add.add_argument("--expected-literature-stage-digest", default="", help=argparse.SUPPRESS)
 
     prepare = subparsers.add_parser(
         "prepare-add",
@@ -217,6 +218,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_intake_add_arguments(prepare, include_stage_options=True)
     prepare.add_argument("--user-authorization", default="")
     prepare.add_argument("--authorization-source", default="")
+    prepare.add_argument("--expected-literature-stage-digest", default="", help=argparse.SUPPRESS)
 
     for search_name in ("search", "stage-search"):
         stage = subparsers.add_parser(search_name, help="Record search candidates before canonical intake")
@@ -612,6 +614,28 @@ def _candidate_binding_digest(
     )
 
 
+def _assert_expected_literature_stage_digest(root: Path, args: argparse.Namespace) -> None:
+    expected = str(getattr(args, "expected_literature_stage_digest", "") or "")
+    if not expected:
+        return
+    if re.fullmatch(r"[0-9a-f]{64}", expected) is None:
+        raise SystemExit("Expected literature stage digest is invalid.")
+    stage_id = str(getattr(args, "stage_id", "") or "")
+    candidate_id = str(getattr(args, "candidate_id", "") or "")
+    if not stage_id or not candidate_id:
+        raise SystemExit("Expected literature stage digest requires an exact staged candidate.")
+    stage = load_search_stage(root, stage_id)
+    if stage.get("entry_skill") != "literature-search" or stage.get("source_kind") != "paper":
+        raise SystemExit("Expected literature stage digest requires a literature-search paper stage.")
+    path = search_stage_path(root, stage_id)
+    try:
+        key = path.relative_to(root / "kb").as_posix()
+    except ValueError as exc:
+        raise SystemExit("Selected literature stage escaped the workspace.") from exc
+    if target_digest(root, key) != expected:
+        raise SystemExit("Selected literature stage changed before canonical intake.")
+
+
 def _prepared_record_binding_digest(
     record: dict,
     *,
@@ -855,6 +879,9 @@ def _request_binding_digest(
             ),
             "source_input_digest": source_input_digest,
             "candidate_binding_digest": candidate_binding_digest,
+            "expected_literature_stage_digest": str(
+                getattr(args, "expected_literature_stage_digest", "") or ""
+            ),
         }
     )
 
@@ -979,6 +1006,7 @@ def _prepare_intake_snapshot(root: Path, args: argparse.Namespace) -> dict[str, 
     source, initial_title, paper_metadata, staged_candidate, staged_search = _resolve_intake_request(
         root, args
     )
+    _assert_expected_literature_stage_digest(root, args)
     candidate_digest = _candidate_binding_digest(
         stage=staged_search,
         candidate=staged_candidate,
@@ -1063,6 +1091,7 @@ def _prepare_intake_snapshot(root: Path, args: argparse.Namespace) -> dict[str, 
                 )
         if _source_input_digest(root, source) != source_input_digest:
             raise RuntimeError("The intake source changed while its snapshot was prepared.")
+        _assert_expected_literature_stage_digest(root, args)
         _harden_prepared_tree(stage_dir)
         source_content_digest = _path_snapshot_digest(stage_dir)
         prepared_record_digest = _prepared_record_binding_digest(
@@ -1163,6 +1192,7 @@ def _load_prepared_intake(
     stage_dir = prepared_root / stage_relative
 
     source, initial_title, _metadata, candidate, stage = _resolve_intake_request(root, args)
+    _assert_expected_literature_stage_digest(root, args)
     candidate_digest = _candidate_binding_digest(stage=stage, candidate=candidate)
     source_input_digest = _source_input_digest(root, source)
     if payload.get("request_binding_digest") != _request_binding_digest(
@@ -1440,6 +1470,7 @@ def _attach_duplicate_selection_and_mark(
         "source-intake-attach-duplicate-selection",
         [record_path, stage_path],
     ):
+        _assert_expected_literature_stage_digest(root, args)
         current, _ = locate_record(
             root,
             str(duplicate.get("id") or ""),
@@ -1513,6 +1544,7 @@ def _execute_intake_transaction(
     note_created = False
     updated_stage_path: Path | None = None
     with mutation_transaction(root, "source-intake-add", targets):
+        _assert_expected_literature_stage_digest(root, args)
         path, concurrent_duplicate, canonical_source_info = _materialize_staged_source(
             root,
             kind=args.kind,
