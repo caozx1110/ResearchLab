@@ -642,6 +642,47 @@ def _make_workspace(tmp_path: Path, *, with_claim: bool = True) -> tuple[Path, s
     return root, program_id, unit_id
 
 
+@pytest.mark.parametrize("event_type", ["fact", "factual", "operational"])
+def test_literal_factual_and_operational_event_types_enter_ordinary_lane(
+    tmp_path: Path,
+    event_type: str,
+) -> None:
+    report = _load_report_module()
+    event = {
+        "event_type": event_type,
+        "title": f"Explicit {event_type} event",
+        "summary": "A mechanically recorded reporting fact.",
+    }
+
+    ordinary, pending = report.partition_reporting_events(tmp_path, [event])
+
+    assert ordinary == [event]
+    assert pending == []
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        {
+            "event_type": "factual",
+            "information_types": ["evaluation"],
+        },
+        {
+            "event_type": "decision-factual",
+            "epistemic_type": "factual",
+        },
+        {
+            "event_type": "operational",
+            "confirmation_binding": {"subject": {"kind": "program_decision", "id": "d-1"}},
+        },
+    ],
+)
+def test_factual_labels_cannot_downgrade_judgement_signals(event: dict) -> None:
+    report = _load_report_module()
+
+    assert report._event_is_judgement(event) is True
+
+
 def test_report_rejects_unit_replaced_after_snapshot_selection(
     tmp_path: Path,
     monkeypatch,

@@ -174,6 +174,8 @@ def _event_is_judgement(event: dict[str, Any]) -> bool:
         return True
     if epistemic_type in {"fact", "factual", "operational"}:
         return False
+    if event_type in {"fact", "factual", "operational"}:
+        return False
     if event_type in OPERATIONAL_EVENT_TYPES:
         return False
     # Unknown/untyped report events are not entitled to the factual lane.

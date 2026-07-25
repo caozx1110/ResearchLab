@@ -1433,7 +1433,13 @@ def main() -> int:
     candidates = [item for item in persisted.get("candidates", []) if isinstance(item, dict)]
     stop = persisted.get("stop") if isinstance(persisted.get("stop"), dict) else {}
     if stop.get("reason") == "blocked_no_search_tool":
-        print("当前没有可用的文献检索工具；已记录阻塞原因，没有把空结果当作成功。")
+        print(
+            "当前会话没有可用的文献检索能力；检索进度已保存，没有把空结果当作成功。\n"
+            "你可以：1）稍后在宿主已有搜索或浏览能力的会话中继续同一检索；"
+            "2）现在提供 URL、DOI、PDF、本地论文或候选清单；"
+            "3）保留进度，之后使用 `kb next` 恢复。\n"
+            "不需要配置 API Key、购买付费服务或安装插件。"
+        )
         return 0
     screening_counts = {"include": 0, "maybe": 0, "exclude": 0, "unassessed": 0}
     multi_reviewer = int((persisted.get("scope") or {}).get("screeners") or 1) > 1

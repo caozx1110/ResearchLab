@@ -966,9 +966,16 @@ def test_blocked_no_search_tool_is_recorded_without_empty_success(
 
     assert module.main() == 0
     output = capsys.readouterr().out
-    assert output == "当前没有可用的文献检索工具；已记录阻塞原因，没有把空结果当作成功。\n"
+    assert "检索进度已保存" in output
+    assert "没有把空结果当作成功" in output
+    assert "搜索或浏览能力" in output
+    assert "URL、DOI、PDF、本地论文或候选清单" in output
+    assert "kb next" in output
+    assert "不需要配置 API Key、购买付费服务或安装插件" in output
     assert "--" not in output
     assert str(tmp_path) not in output
+    assert "http://" not in output
+    assert "https://" not in output
     stages = list((tmp_path / "kb/synthesis/source-search").glob("*.yaml"))
     assert len(stages) == 1
     assert load_yaml(stages[0])["stop"]["reason"] == "blocked_no_search_tool"
