@@ -600,6 +600,16 @@ def test_release_metadata_is_honest_rc_and_ci_is_cross_platform() -> None:
     assert "private vulnerability reporting" in security
     assert "/security/advisories/new" in security
 
+    for relative in (
+        "README.md",
+        "docs/USER_GUIDE.md",
+        "docs/DESIGN.md",
+        "SECURITY.md",
+        "CHANGELOG.md",
+    ):
+        text = (root / relative).read_text(encoding="utf-8")
+        assert version in text, f"{relative} does not declare the current candidate {version}"
+
     ci = (root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     assert "ubuntu-latest" in ci
     assert "macos-latest" in ci

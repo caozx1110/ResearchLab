@@ -4,7 +4,31 @@ All notable changes to this project will be documented here. The format follows 
 
 ## [Unreleased]
 
-The bundle currently declares **`0.2.0-rc.6`**. Its complete local suite, targeted R6 regression suites, and current 20-skill installed-copy lifecycle pass. The candidate is not a stable release or GA, has not been tagged or published, and carries no compatibility or response-time SLA. Real-source/Obsidian acceptance and a green hosted Linux/macOS CI matrix remain prerequisites for a release tag.
+The bundle currently declares **`0.2.0-rc.7`**. Its complete local suite, targeted R17–R26 regression suites, all 20 skill validators, and current installed-copy lifecycle pass. Installation and core workflows require no external API Key, paid search quota, commercial database subscription, or paid plugin. The candidate is not a stable release or GA, has not been tagged or published, and carries no compatibility or response-time SLA. Real-source/Obsidian acceptance and a green hosted Linux/macOS CI matrix remain prerequisites for a release tag.
+
+## [0.2.0-rc.7] - Unreleased
+
+### Changed
+
+- Canonical record, evidence, judgement, survey, program-decision, portfolio, and report consumers now retain exact snapshot bindings through their final trusted use; stale content or same-bytes replacement fails closed.
+- Formal report and portfolio publication uses aggregate post-write and authoritative-root commit guards. Guarded publication cannot be nested under another write transaction; the Agent retries it after the outer operation completes.
+- `literature-search` remains provider-neutral and Agent-led, with resumable no-search recovery; OpenAlex remains read-only legacy identity input and is never a runtime retrieval source.
+- Survey routing covers external discovery through selection, intake, owner analysis, synthesis, review confirmation, and report consumption; repo evidence follows the same external-source contract as the other unit kinds.
+- Agent installation plans use schema 3 runtime preconditions. Stable compatible PATH interpreters work strictly offline, while interpreter selection or capability drift rejects before the first workspace/runtime write.
+- Public review owner modules follow the normal Python import lifecycle, including stable path-scoped names, execution-time registration, and identity-protected cleanup after failed loads.
+
+### Security
+
+- Recovery, update, manifest lifecycle, confirmation, review batches, source intake, and report publication use anchored/no-follow snapshots, exact target journals, compare-and-set checks, and root-level rollback gates.
+- Review and Obsidian batches remain confirmation-gated, preview-bound, and atomic across owners; editable checkboxes are intent drafts and never self-authorize canonical changes.
+- Installation and core workflows have no external API Key, paid search quota, commercial database, or paid-plugin prerequisite; missing discovery tools produce a resumable local state instead of a credential prompt.
+
+### Fixed
+
+- Closed report render/write/commit and portfolio write/replay races, including content replacement and same-bytes/new-inode replacement.
+- Replaced repeated judgement and unit scans with canonical batch indexes, preserving duplicate-subject fail-closed behavior while restoring linear enumeration.
+- Kept unresolved issues and literal factual events out of formal judgement lanes without hiding them from pending/factual report sections.
+- Made blocked literature discovery return concrete no-Key recovery choices and kept user-visible output limited to natural language plus `kb <verb>`.
 
 ## [0.2.0-rc.6] - Unreleased
 

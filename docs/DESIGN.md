@@ -239,4 +239,4 @@ Install manifest 记录 `source_origin` 与 `source_branch`，本地安装还可
 10. 在 Linux 与 macOS 支持的 Python 版本上验证；
 11. 发布前由冷 acceptance agent 端到端复现关键路径。
 
-当前标识为 `0.2.0-rc.6`。Agent-led portfolio、任务绑定偏好、无插件多项 review、research-monitor、多 reviewer ledger 与 Agent 安装计划已经通过完整本地套件、R6 定向回归和当前 20-skill installed-copy 生命周期。SQLite 官方 HTML 真实入库与 Obsidian 1.12.7 Reading-view 尚未针对 rc.6 重跑，仍属于发布门。它不是 stable/GA，也尚未 tag 或 publish；真实来源/Obsidian 验收与 hosted Linux/macOS CI matrix 全绿仍是 release tag 的前置。文档、tag 与 changelog 不得把本地 RC 验收外推为稳定兼容或 SLA 承诺。
+当前标识为 `0.2.0-rc.7`。快照绑定确认与 judgement consumer、root-commit publication guard、恢复/更新完整性、provider-neutral literature/survey/monitor、无插件多项 review 与严格离线 Agent-plan runtime binding 已通过完整本地套件、R17–R26 定向回归、20-skill validator 和 installed-copy 生命周期。安装与核心流程不要求外部 API Key、付费检索额度、商业数据库或付费插件。真实外部来源与 Obsidian 1.12.7 Reading-view 尚未针对 rc.7 重跑，仍属于发布门。它不是 stable/GA，也尚未 tag 或 publish；真实来源/Obsidian 验收与 hosted Linux/macOS CI matrix 全绿仍是 release tag 的前置。文档、tag 与 changelog 不得把本地 RC 验收外推为稳定兼容或 SLA 承诺。

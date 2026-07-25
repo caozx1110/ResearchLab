@@ -4,7 +4,7 @@
 
 它不是预装好的知识库。安装后，能力包与研究数据分开保存。AI 负责提取、整理、追踪和汇总；你负责判断、确认和拍板。
 
-当前候选版本是 **`0.2.0-rc.6`**。Agent-led portfolio、任务绑定偏好、无插件多项 review、research-monitor、多 reviewer ledger 与 Agent 安装计划已经通过完整本地套件、R6 定向回归和当前 20-skill 安装副本生命周期。SQLite 官方 HTML 真实入库和 Obsidian 1.12.7 阅读视图尚未针对 rc.6 重跑，仍在发布门中。它不是 stable 或 GA，也尚未 tag/publish。正式打发布 tag 前，仍须完成真实来源/Obsidian 验收并让 hosted Linux/macOS CI matrix 全绿；当前不承诺兼容性或响应时限 SLA。
+当前候选版本是 **`0.2.0-rc.7`**。它加固了快照绑定确认与报告、最外层事务提交门、恢复/更新完整性、provider-neutral 研究流程、无插件多项 review 和严格离线的 Agent 安装计划。完整本地套件、R17–R26 定向回归、20 个 skill validator 与安装副本生命周期均通过；安装和核心流程不要求外部 API Key、付费检索额度、商业数据库或付费插件。真实外部来源和 Obsidian 1.12.7 阅读视图尚未针对 rc.7 重跑，仍在发布门中。它不是 stable 或 GA，也尚未 tag/publish。正式打发布 tag 前，仍须完成真实来源/Obsidian 验收并让 hosted Linux/macOS CI matrix 全绿；当前不承诺兼容性或响应时限 SLA。
 
 ## 能力成熟度（按组件）
 

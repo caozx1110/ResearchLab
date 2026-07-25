@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-The current candidate identifier is `0.2.0-rc.1`. It has passed the local release-candidate gate, but it has not been tagged or published and is not a stable or GA release. Hosted Linux/macOS CI remains a release-tag prerequisite. There is no stable supported release yet; security fixes target the current default branch and, when applicable, the current candidate line, while older snapshots may not receive backports.
+The current candidate identifier is `0.2.0-rc.7`. It has passed the local release-candidate gate, but it has not been tagged or published and is not a stable or GA release. Hosted Linux/macOS CI and real-source/Obsidian acceptance remain release-tag prerequisites. Installation and core workflows do not require an external API Key, paid search quota, commercial database subscription, or paid plugin. There is no stable supported release yet; security fixes target the current default branch and, when applicable, the current candidate line, while older snapshots may not receive backports.
 
 ## Report a vulnerability privately
 
