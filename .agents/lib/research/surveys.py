@@ -235,32 +235,24 @@ def select_current_confirmed_survey_records(
     selected = select_survey_records(records, **filters)
     eligible: list[dict[str, Any]] = []
     excluded: list[dict[str, Any]] = []
-    checked: list[
-        tuple[
-            dict[str, Any],
-            CanonicalUnitSnapshot | None,
-            dict[str, Any] | None,
-            list[str],
-        ]
-    ] = []
     for record in selected:
         unit_id = str(record.get("id") or "").strip()
         unit_kind = str(record.get("kind") or "").strip()
         if not unit_id or not unit_kind:
-            checked.append((record, None, None, ["missing canonical unit identity"]))
-            continue
-        snapshot = snapshot_unique_canonical_unit_tree(
-            root,
-            unit_id,
-            expected_kind=unit_kind,
-        )
-        if snapshot is None:
-            checked.append((record, None, None, ["canonical unit is missing or unreadable"]))
-            continue
-        current, violations = _survey_snapshot_eligibility(root, snapshot)
-        checked.append((record, snapshot, current, violations))
-
-    for record, snapshot, current, violations in checked:
+            snapshot = None
+            current = None
+            violations = ["missing canonical unit identity"]
+        else:
+            snapshot = snapshot_unique_canonical_unit_tree(
+                root,
+                unit_id,
+                expected_kind=unit_kind,
+            )
+            if snapshot is None:
+                current = None
+                violations = ["canonical unit is missing or unreadable"]
+            else:
+                current, violations = _survey_snapshot_eligibility(root, snapshot)
         if not violations and (
             snapshot is None
             or current is None
@@ -277,6 +269,7 @@ def select_current_confirmed_survey_records(
                     "reasons": violations,
                 }
             )
+        del snapshot
     return eligible, excluded
 
 

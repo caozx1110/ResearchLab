@@ -17,6 +17,7 @@ from research.judgements import discover_pending_judgements, judgement_confirmat
 from research.paths import config_root, runtime_preferences_path
 from research.preference_selection import eligible_preferences, record_effective_selection
 from research.prefs import default_runtime_preferences
+import research.surveys as surveys_module
 from research.surveys import (
     COMPOSITE_SURVEY_STAGES,
     build_composite_stage_binding,
@@ -385,14 +386,29 @@ def test_prepare_zero_current_inputs_returns_structured_gap_without_scaffold(tmp
 
 def test_current_survey_selection_replaces_stale_caller_record_with_snapshot_record(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = load_synthesizer()
     current = write_confirmed_source(module, tmp_path)
+    current_second = write_confirmed_source(module, tmp_path, unit_id="p-beta")
     stale_caller = {**current, "title": "Old caller title"}
+    stale_second = {**current_second, "title": "Another old caller title"}
+    capture_calls: list[str] = []
+    original_capture = surveys_module.snapshot_unique_canonical_unit_tree
+
+    def counting_capture(root, unit_id, *, expected_kind=None):
+        capture_calls.append(unit_id)
+        return original_capture(root, unit_id, expected_kind=expected_kind)
+
+    monkeypatch.setattr(
+        surveys_module,
+        "snapshot_unique_canonical_unit_tree",
+        counting_capture,
+    )
 
     eligible, excluded = select_current_confirmed_survey_records(
         tmp_path,
-        [stale_caller],
+        [stale_caller, stale_second],
         query="",
         kind="",
         topic="",
@@ -401,8 +417,11 @@ def test_current_survey_selection_replaces_stale_caller_record_with_snapshot_rec
     )
 
     assert excluded == []
-    assert [item["title"] for item in eligible] == ["Alpha Method"]
+    assert [item["id"] for item in eligible] == ["p-alpha", "p-beta"]
+    assert [item["title"] for item in eligible] == ["Alpha Method", "Alpha Method"]
     assert eligible[0] is not stale_caller
+    assert eligible[1] is not stale_second
+    assert capture_calls == ["p-alpha", "p-beta"]
 
 
 def test_systematic_prepare_with_matching_unit_still_starts_frozen_search_composite(
