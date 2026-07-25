@@ -9,6 +9,7 @@ import pytest
 
 from research.common import load_yaml, write_yaml_if_changed
 from research.core import default_record, ensure_workspace, record_path
+from research.evidence import EvidenceSourceSnapshot, verify_claim_evidence
 from research.journal import committed_ops
 from research.judgements import (
     discover_pending_judgements,
@@ -16,6 +17,7 @@ from research.judgements import (
     judgement_snapshot_binding,
 )
 from research.paths import config_root
+from research.records import trusted_claim_source_roots as shared_source_roots
 
 
 IDEA_ID = "i-r2-method-123456"
@@ -216,8 +218,20 @@ def test_prepare_verify_confirm_promotes_state_and_event_only_at_confirmation(tm
     assert state["stage"] == "idea-review"
     assert not paths["events"].exists()
 
+    repo_locates_after_prepare = 0
+    original_locate = method.locate_record
+
+    def count_repo_locates(*args, **kwargs):
+        nonlocal repo_locates_after_prepare
+        identifier = str(args[1] if len(args) > 1 else kwargs.get("identifier") or "")
+        if identifier == REPO_ID:
+            repo_locates_after_prepare += 1
+        return original_locate(*args, **kwargs)
+
+    monkeypatch.setattr(method, "locate_record", count_repo_locates)
     _fill_method_claims(root)
     assert _verify(method, monkeypatch, root) == 0
+    assert repo_locates_after_prepare == 0
     choice = load_yaml(paths["choice"], default={})
     state = load_yaml(paths["state"], default={})
     assert choice["status"] == "ready_for_review"
@@ -229,6 +243,7 @@ def test_prepare_verify_confirm_promotes_state_and_event_only_at_confirmation(tm
     assert not paths["events"].exists()
 
     assert _confirm(method, monkeypatch, root) == 0
+    assert repo_locates_after_prepare == 0
     choice = load_yaml(paths["choice"], default={})
     state = load_yaml(paths["state"], default={})
     interfaces = load_yaml(paths["interfaces"], default={})
@@ -269,6 +284,88 @@ def test_prepare_verify_confirm_promotes_state_and_event_only_at_confirmation(tm
         load_yaml(paths["choice"], default={}),
         paths["choice"],
     )
+
+
+def test_method_cross_unit_evidence_uses_anchored_snapshot(tmp_path: Path) -> None:
+    method = _load_method_module()
+    root = _workspace(tmp_path)
+    claim = _claim(
+        "method-repo-selection",
+        f"Repository {REPO_ID} is the grounded proposal.",
+        REPO_ID,
+        "Adapter recovery baseline implementation.",
+    )
+
+    roots = method.method_source_roots(root, PROGRAM_ID, [claim])
+
+    assert isinstance(roots[REPO_ID], EvidenceSourceSnapshot)
+    assert verify_claim_evidence(
+        claim,
+        _paths(root)["design"],
+        source_roots=roots,
+    ) == []
+
+
+def test_method_rejects_source_replaced_after_snapshot_capture(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    method = _load_method_module()
+    root = _workspace(tmp_path)
+    repo_record = record_path(root, "repo", REPO_ID)
+    replacement = tmp_path / "outside-method-source"
+    replacement.mkdir()
+    outside_repo = default_record("repo", title="OUTSIDE METHOD SENTINEL", maturity="lightweight")
+    outside_repo["id"] = REPO_ID
+    outside_repo["summary"] = "OUTSIDE METHOD SENTINEL"
+    write_yaml_if_changed(replacement / "record.yaml", outside_repo)
+    original_dir = tmp_path / "original-method-source"
+    original_locate = method.locate_record
+
+    swapped = False
+
+    def replace_source_once() -> None:
+        nonlocal swapped
+        if swapped:
+            return
+        repo_record.parent.rename(original_dir)
+        replacement.rename(repo_record.parent)
+        swapped = True
+
+    def locate_then_replace(*args, **kwargs):
+        result = original_locate(*args, **kwargs)
+        if str(args[1] if len(args) > 1 else kwargs.get("identifier") or "") == REPO_ID:
+            replace_source_once()
+        return result
+
+    def snapshot_then_replace(*args, **kwargs):
+        roots = shared_source_roots(*args, **kwargs)
+        replace_source_once()
+        return roots
+
+    monkeypatch.setattr(method, "locate_record", locate_then_replace)
+    monkeypatch.setattr(
+        method,
+        "trusted_claim_source_roots",
+        snapshot_then_replace,
+        raising=False,
+    )
+    claim = _claim(
+        "method-repo-selection",
+        f"Repository {REPO_ID} is the grounded proposal.",
+        REPO_ID,
+        "OUTSIDE METHOD SENTINEL",
+    )
+
+    roots = method.method_source_roots(root, PROGRAM_ID, [claim])
+    violations = verify_claim_evidence(
+        claim,
+        _paths(root)["design"],
+        source_roots=roots,
+    )
+
+    assert isinstance(roots[REPO_ID], EvidenceSourceSnapshot)
+    assert any("anchored evidence snapshot is no longer current" in item for item in violations)
 
 
 def test_method_input_change_after_prepare_stales_receipt_before_verify_writes(

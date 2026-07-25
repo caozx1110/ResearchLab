@@ -29,10 +29,11 @@ if __name__ == "__main__":
 from research.common import add_project_root_argument, append_program_reporting_event, load_yaml, normalize_list, program_reporting_events_path, utc_now_iso, write_text_if_changed, write_yaml_if_changed, yaml_default
 from research.confirm import apply_confirmation
 from research.core import checkpoint_and_report, iter_records, locate_record, project_root, rel
-from research.evidence import JUDGEMENT_CLAIM_TYPES, build_verification_receipt, validate_claims
+from research.evidence import EvidenceSourceSnapshot, JUDGEMENT_CLAIM_TYPES, build_verification_receipt, validate_claims
 from research.journal import mutation_transaction
 from research.judgements import apply_judgement_rejection, readiness_violations, require_judgement_snapshot
 from research.preference_selection import resolve_operation_preferences
+from research.records import trusted_claim_source_roots
 
 
 DEFAULT_EXPERIMENT_SCALE = {
@@ -600,22 +601,40 @@ def method_source_roots(
     root: Path,
     program_id: str,
     claims: list[dict[str, Any]],
-) -> dict[str, Path]:
-    roots: dict[str, Path] = {}
-    program_source_id = f"program:{program_id}"
+) -> dict[str, Path | EvidenceSourceSnapshot]:
+    expected_program_source = f"program:{program_id}"
     for claim in claims:
         for evidence_ref in claim.get("evidence_refs") or []:
-            if not isinstance(evidence_ref, dict):
+            if not isinstance(evidence_ref, dict) or isinstance(evidence_ref.get("external_source"), dict):
                 continue
             source_unit_id = str(evidence_ref.get("source_unit_id") or "").strip()
-            if not source_unit_id or source_unit_id in roots:
-                continue
-            if source_unit_id == program_source_id:
-                roots[source_unit_id] = root / "kb" / "programs" / program_id
-                continue
-            _record, source_path = locate_record(root, source_unit_id, fuzzy=False)
-            roots[source_unit_id] = source_path.parent
-    return roots
+            if source_unit_id.startswith("program:") and source_unit_id != expected_program_source:
+                raise SystemExit("Method evidence must belong to the current program.")
+    subject = {
+        "id": f"method-selection:{program_id}",
+        "kind": "method_selection",
+        "program_id": program_id,
+        "payload": {"claims": claims},
+    }
+    try:
+        return trusted_claim_source_roots(
+            root,
+            subject,
+            verification_root=root / "kb" / "programs" / program_id / "design",
+        )
+    except ValueError as exc:
+        raise SystemExit(
+            "Method evidence source is not a canonical safe unit or program."
+        ) from exc
+
+
+def require_proposed_repo_snapshot(
+    source_roots: dict[str, Path | EvidenceSourceSnapshot],
+    proposed_repo_id: str,
+) -> None:
+    proposed_repo = source_roots.get(proposed_repo_id)
+    if not isinstance(proposed_repo, EvidenceSourceSnapshot) or proposed_repo.kind != "repo":
+        raise SystemExit("The proposed repository is not a canonical evidence source.")
 
 
 def validate_method_claims(choice: dict[str, Any], proposed_repo_id: str) -> tuple[list[dict[str, Any]], list[str]]:
@@ -1018,7 +1037,6 @@ def verify_method(root: Path, args: argparse.Namespace) -> int:
         proposed_repo_id = str(choice.get("proposed_repo_id") or "").strip()
         if not proposed_repo_id:
             raise SystemExit("Method proposal has no proposed repository candidate.")
-        _repo_record, _repo_path = locate_record(root, proposed_repo_id, kind="repo", fuzzy=False)
         candidate_ids = {
             str(item.get("repo_id") or "").strip()
             for item in choice.get("candidate_repos") or []
@@ -1030,6 +1048,7 @@ def verify_method(root: Path, args: argparse.Namespace) -> int:
         if violations:
             raise SystemExit("Method judgement verification failed:\n  - " + "\n  - ".join(violations))
         source_roots = method_source_roots(root, args.program_id, claims)
+        require_proposed_repo_snapshot(source_roots, proposed_repo_id)
         build_verification_receipt(choice, paths["design_root"], source_roots=source_roots)
         choice["updated_at"] = utc_now_iso()
         choice["status"] = "ready_for_review"
@@ -1103,7 +1122,7 @@ def confirm_method(
         if violations:
             raise SystemExit("Method judgement confirmation failed:\n  - " + "\n  - ".join(violations))
         source_roots = method_source_roots(root, args.program_id, claims)
-        locate_record(root, proposed_repo_id, kind="repo", fuzzy=False)
+        require_proposed_repo_snapshot(source_roots, proposed_repo_id)
 
         # Final selection fields are set before receipt creation, so the receipt
         # represents the exact state promoted by this transaction.
@@ -1354,10 +1373,11 @@ def prepare_review_batch_decision(
         claims, claim_violations = validate_method_claims(choice, proposed_repo_id)
         if claim_violations:
             raise ValueError("method selection claims are invalid")
-        locate_record(root, proposed_repo_id, kind="repo", fuzzy=False)
         existing_repo_id = str(state.get("selected_repo_id") or "").strip()
         if existing_repo_id and existing_repo_id != proposed_repo_id:
             raise ValueError("program already selected another repository")
+        source_roots = method_source_roots(root, program_id, claims)
+        require_proposed_repo_snapshot(source_roots, proposed_repo_id)
         candidate = copy.deepcopy(choice)
         candidate["selected_repo_id"] = proposed_repo_id
         candidate["selection_status"] = "confirmed"
@@ -1373,7 +1393,7 @@ def prepare_review_batch_decision(
             method="method-designer confirm-selection",
             project_root=root,
             verification_root=paths["design_root"],
-            trusted_source_roots=method_source_roots(root, program_id, claims),
+            trusted_source_roots=source_roots,
         )
         targets = [paths["method"], paths["choice"], paths["interfaces"], paths["matrix"], paths["state"], paths["events"]]
     elif decision == "reject":
