@@ -145,6 +145,95 @@ def _tree_digest(root: Path) -> str:
     return digest.hexdigest()
 
 
+def test_canonical_unit_tree_snapshot_hashes_recursive_artifacts_in_name_order(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "workspace"
+    record = _write_record(root, "paper", "p-tree-123456", title="Tree snapshot")
+    unit = record.parent
+    nested = unit / "a"
+    nested.mkdir()
+    expected = {
+        "a/deep.md": b"nested evidence\n",
+        "a.txt": b"root evidence a\n",
+        "z.txt": b"root evidence z\n",
+    }
+    for artifact, raw_bytes in expected.items():
+        path = unit / artifact
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(raw_bytes)
+
+    snapshot = records_module.snapshot_unique_canonical_unit_tree(
+        root,
+        "p-tree-123456",
+        expected_kind="paper",
+    )
+
+    assert snapshot is not None
+    assert [item.artifact for item in snapshot.artifacts] == sorted(expected)
+    assert {
+        item.artifact: item.byte_sha256 for item in snapshot.artifacts
+    } == {
+        artifact: hashlib.sha256(raw_bytes).hexdigest()
+        for artifact, raw_bytes in expected.items()
+    }
+    assert snapshot.is_current()
+    (unit / "new-after-capture.md").write_text("new evidence\n", encoding="utf-8")
+    assert not snapshot.is_current()
+
+
+@pytest.mark.parametrize(
+    "unsafe_case",
+    ["symlink", "per_file_limit", "total_limit", "entry_limit", "depth_limit"],
+)
+def test_canonical_unit_tree_snapshot_fails_closed_on_unsafe_or_over_limit_nodes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unsafe_case: str,
+) -> None:
+    root = tmp_path / "workspace"
+    record = _write_record(root, "paper", "p-tree-unsafe-123456", title="Unsafe tree")
+    unit = record.parent
+    if unsafe_case == "symlink":
+        outside = tmp_path / "outside-only.md"
+        outside.write_text("outside bytes\n", encoding="utf-8")
+        (unit / "linked.md").symlink_to(outside)
+    elif unsafe_case == "per_file_limit":
+        monkeypatch.setattr(records_module, "_ARTIFACT_MAX_BYTES", 4)
+        (unit / "large.md").write_bytes(b"12345")
+    elif unsafe_case == "total_limit":
+        monkeypatch.setattr(records_module, "_UNIT_ARTIFACT_TOTAL_MAX_BYTES", 5)
+        (unit / "one.md").write_bytes(b"123")
+        (unit / "two.md").write_bytes(b"456")
+    elif unsafe_case == "entry_limit":
+        monkeypatch.setattr(records_module, "_UNIT_TREE_MAX_ENTRIES", 1)
+        (unit / "extra.md").write_text("entry\n", encoding="utf-8")
+    else:
+        monkeypatch.setattr(records_module, "_UNIT_TREE_MAX_DEPTH", 1)
+        nested = unit / "nested"
+        nested.mkdir()
+        (nested / "too-deep.md").write_text("deep\n", encoding="utf-8")
+
+    assert records_module.snapshot_canonical_unit_tree(
+        root,
+        "paper",
+        "p-tree-unsafe-123456",
+    ) is None
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO creation is unavailable")
+def test_canonical_unit_tree_snapshot_rejects_fifo_without_opening_it(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    record = _write_record(root, "paper", "p-tree-fifo-123456", title="FIFO tree")
+    os.mkfifo(record.parent / "blocked.pipe")
+
+    assert records_module.snapshot_canonical_unit_tree(
+        root,
+        "paper",
+        "p-tree-fifo-123456",
+    ) is None
+
+
 def test_iter_records_rejects_external_record_symlink(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
     outside = tmp_path / "outside-record.yaml"

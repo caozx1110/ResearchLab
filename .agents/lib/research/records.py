@@ -76,6 +76,8 @@ WORKFLOW_STATES = {
 _RECORD_MAX_BYTES = 8 * 1024 * 1024
 _ARTIFACT_MAX_BYTES = 50 * 1024 * 1024
 _UNIT_ARTIFACT_TOTAL_MAX_BYTES = 64 * 1024 * 1024
+_UNIT_TREE_MAX_ENTRIES = 4096
+_UNIT_TREE_MAX_DEPTH = 16
 _SAFE_UNIT_DIRECTORY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,254}")
 
 
@@ -360,6 +362,16 @@ def _close_anchored_chain(chain: Sequence[_AnchoredDirectory]) -> None:
         os.close(directory.fd)
 
 
+def _directory_capability_chain(
+    chain: Sequence[_AnchoredDirectory],
+) -> tuple[tuple[int, int, int], ...]:
+    """Bind directory objects without making sibling mtime changes semantic."""
+    return tuple(
+        (directory.identity[0], directory.identity[1], directory.identity[2])
+        for directory in chain
+    )
+
+
 def _record_snapshot_is_current(
     root_path: Path,
     chain: Sequence[_AnchoredDirectory],
@@ -454,6 +466,100 @@ def _artifact_snapshot_is_current(
             os.close(directory.fd)
 
 
+def _snapshot_unit_tree_artifacts(
+    root_path: Path,
+    unit_chain: Sequence[_AnchoredDirectory],
+    *,
+    kind: str,
+    unit_id: str,
+) -> tuple[EvidenceArtifactSnapshot, ...] | None:
+    """Recursively capture one closed ordinary-file tree through anchored dirfds."""
+    snapshots: list[EvidenceArtifactSnapshot] = []
+    entries_seen = 0
+    total_bytes = 0
+
+    def walk(
+        chain: list[_AnchoredDirectory],
+        relative_parts: tuple[str, ...],
+    ) -> bool:
+        nonlocal entries_seen, total_bytes
+        names: list[str] = []
+        try:
+            with os.scandir(chain[-1].fd) as entries:
+                for entry in entries:
+                    entries_seen += 1
+                    if entries_seen > _UNIT_TREE_MAX_ENTRIES:
+                        return False
+                    names.append(entry.name)
+        except OSError:
+            return False
+
+        for name in sorted(names):
+            if not name or name in {".", ".."} or Path(name).name != name:
+                return False
+            artifact_parts = (*relative_parts, name)
+            if len(artifact_parts) > _UNIT_TREE_MAX_DEPTH:
+                return False
+            try:
+                metadata = os.stat(name, dir_fd=chain[-1].fd, follow_symlinks=False)
+            except OSError:
+                return False
+            if stat.S_ISDIR(metadata.st_mode):
+                child = _open_child_directory(chain[-1], name)
+                if child is None:
+                    return False
+                try:
+                    if not walk([*chain, child], artifact_parts):
+                        return False
+                finally:
+                    os.close(child.fd)
+                continue
+            if not stat.S_ISREG(metadata.st_mode):
+                return False
+            if not relative_parts and name == "record.yaml":
+                continue
+            if metadata.st_size > _ARTIFACT_MAX_BYTES:
+                return False
+            artifact = Path(*artifact_parts).as_posix()
+            payload = _read_anchored_leaf(
+                root_path,
+                chain,
+                name,
+                max_bytes=_ARTIFACT_MAX_BYTES,
+            )
+            if payload is None:
+                return False
+            raw_bytes, file_identity = payload
+            total_bytes += len(raw_bytes)
+            if total_bytes > _UNIT_ARTIFACT_TOTAL_MAX_BYTES:
+                return False
+            snapshots.append(
+                EvidenceArtifactSnapshot(
+                    source_unit_id=unit_id,
+                    artifact=artifact,
+                    raw_bytes=raw_bytes,
+                    byte_sha256=hashlib.sha256(raw_bytes).hexdigest(),
+                    path=(
+                        root_path
+                        / "kb"
+                        / "units"
+                        / UNIT_KIND_DIRS[kind]
+                        / unit_id
+                        / artifact
+                    ),
+                    directory_identities=tuple(
+                        item.identity for item in chain[len(unit_chain) :]
+                    ),
+                    file_identity=file_identity,
+                )
+            )
+        return _anchored_chain_is_current(root_path, chain)
+
+    if not walk(list(unit_chain), ()):
+        return None
+    return tuple(sorted(snapshots, key=lambda item: item.artifact))
+
+
 def snapshot_canonical_unit_artifacts(
     project_root: Path,
     kind: str,
@@ -520,6 +626,123 @@ def snapshot_canonical_unit_artifacts(
         )
     finally:
         _close_anchored_chain(chain)
+
+
+def snapshot_canonical_unit_tree(
+    project_root: Path,
+    kind: str,
+    unit_id: str,
+) -> CanonicalUnitSnapshot | None:
+    """Capture a canonical record and every ordinary artifact under one dirfd tree.
+
+    The artifact tree is closed: symlinks, special nodes, unsafe depth/count, and
+    byte-budget overflow reject the whole snapshot instead of being skipped.
+    """
+    opened = _open_exact_unit_chain(project_root, kind, unit_id)
+    if opened is None:
+        return None
+    root_path, chain = opened
+    try:
+        record = _read_record_snapshot(root_path, chain, kind=kind, unit_id=unit_id)
+        if record is None:
+            return None
+        artifacts = _snapshot_unit_tree_artifacts(
+            root_path,
+            chain,
+            kind=kind,
+            unit_id=unit_id,
+        )
+        if artifacts is None or not _record_snapshot_is_current(root_path, chain, record):
+            return None
+        directory_capabilities = _directory_capability_chain(chain)
+        captured_artifacts = artifacts
+
+        def validate_current() -> bool:
+            current = _open_exact_unit_chain(project_root, kind, unit_id)
+            if current is None:
+                return False
+            current_root, current_chain = current
+            try:
+                if _directory_capability_chain(current_chain) != directory_capabilities:
+                    return False
+                current_artifacts = _snapshot_unit_tree_artifacts(
+                    current_root,
+                    current_chain,
+                    kind=kind,
+                    unit_id=unit_id,
+                )
+                return (
+                    _record_snapshot_is_current(current_root, current_chain, record)
+                    and current_artifacts is not None
+                    and current_artifacts == captured_artifacts
+                )
+            finally:
+                _close_anchored_chain(current_chain)
+
+        return CanonicalUnitSnapshot(
+            record=record,
+            artifacts=captured_artifacts,
+            validate_current=validate_current,
+        )
+    finally:
+        _close_anchored_chain(chain)
+
+
+def snapshot_unique_canonical_unit_tree(
+    project_root: Path,
+    unit_id: str,
+    *,
+    expected_kind: str | None = None,
+) -> CanonicalUnitSnapshot | None:
+    """Return one safe canonical tree only when its unit id is globally unique."""
+    identifier = str(unit_id or "").strip()
+    if (
+        not identifier
+        or Path(identifier).name != identifier
+        or identifier in {".", ".."}
+        or (expected_kind is not None and expected_kind not in UNIT_KIND_DIRS)
+    ):
+        return None
+    record_matches = [
+        snapshot
+        for snapshot in iter_canonical_record_snapshots(project_root)
+        if snapshot.unit_id == identifier
+    ]
+    if len(record_matches) != 1:
+        return None
+    selected_record = record_matches[0]
+    if expected_kind is not None and selected_record.kind != expected_kind:
+        return None
+    snapshot = snapshot_canonical_unit_tree(
+        project_root,
+        selected_record.kind,
+        identifier,
+    )
+    if snapshot is None or (
+        snapshot.record.raw_bytes != selected_record.raw_bytes
+        or snapshot.record.file_identity != selected_record.file_identity
+    ):
+        return None
+
+    def validate_unique_current() -> bool:
+        if not snapshot.is_current():
+            return False
+        current_matches = [
+            current
+            for current in iter_canonical_record_snapshots(project_root)
+            if current.unit_id == identifier
+        ]
+        return len(current_matches) == 1 and (
+            current_matches[0].kind == snapshot.record.kind
+            and current_matches[0].raw_bytes == snapshot.record.raw_bytes
+            and current_matches[0].file_identity == snapshot.record.file_identity
+        )
+
+    return CanonicalUnitSnapshot(
+        record=snapshot.record,
+        artifacts=snapshot.artifacts,
+        validate_current=validate_unique_current,
+    )
 
 
 def _snapshot_precanonical_unit_evidence(
@@ -1755,6 +1978,8 @@ __all__ = [
     "iter_canonical_record_snapshots",
     "normalize_record_snapshot",
     "snapshot_canonical_unit_artifacts",
+    "snapshot_canonical_unit_tree",
+    "snapshot_unique_canonical_unit_tree",
     "command_mutation",
     "trusted_project_path",
     "trusted_unit_record_path",
