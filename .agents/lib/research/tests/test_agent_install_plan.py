@@ -71,6 +71,48 @@ def _offline_path_runtime_environment(tmp_path: Path) -> dict[str, str]:
     return env
 
 
+def _offline_regular_path_runtime_environment(tmp_path: Path) -> tuple[dict[str, str], Path]:
+    """Expose a mutable, core-ready regular interpreter after a deficient one."""
+    env = _offline_path_runtime_environment(tmp_path)
+    compatible = tmp_path / "compatible-bin" / "python3"
+    compatible.unlink()
+    compatible.write_text(
+        f"""#!/bin/sh
+probe=""
+if [ "${{1:-}}" = "-I" ] && [ "${{2:-}}" = "-c" ]; then
+  probe=${{3:-}}
+elif [ "${{1:-}}" = "-c" ]; then
+  probe=${{2:-}}
+fi
+if [ "$probe" = "import yaml, markdownify, bs4" ]; then
+  [ "${{R25_RUNTIME_CORE_READY:-1}}" = "1" ] && exit 0
+  exit 1
+fi
+exec {sys.executable!s} "$@"
+""",
+        encoding="utf-8",
+    )
+    compatible.chmod(0o755)
+    return env, compatible
+
+
+def _tree_byte_type_mode_snapshot(root: Path) -> dict[str, tuple[object, ...]]:
+    snapshot: dict[str, tuple[object, ...]] = {}
+    for path in (root, *sorted(root.rglob("*"))):
+        metadata = path.lstat()
+        relative = "." if path == root else path.relative_to(root).as_posix()
+        mode = stat.S_IMODE(metadata.st_mode)
+        if stat.S_ISREG(metadata.st_mode):
+            snapshot[relative] = ("regular", mode, hashlib.sha256(path.read_bytes()).hexdigest())
+        elif stat.S_ISDIR(metadata.st_mode):
+            snapshot[relative] = ("directory", mode)
+        elif stat.S_ISLNK(metadata.st_mode):
+            snapshot[relative] = ("symlink", mode, os.readlink(path))
+        else:
+            snapshot[relative] = ("special", mode, stat.S_IFMT(metadata.st_mode))
+    return snapshot
+
+
 def _plan(workspace: Path, plan_path: Path, env: dict[str, str], *, action: str = "install") -> dict[str, object]:
     argv = ["bash", str(_project_root() / "install.sh")]
     if action != "install":
@@ -200,14 +242,35 @@ def test_agent_plan_apply_reuses_later_path_runtime_strictly_offline(tmp_path: P
     plan = _plan(workspace, tmp_path / "offline-plan.json", env)
 
     assert plan["conditional_runtime_changes"] == []
-    applied = _apply(plan, env)
+    apply_env = dict(env)
+    apply_env["PATH"] = os.pathsep.join((str(tmp_path / "deficient-bin"), "/usr/bin", "/bin"))
+    applied = _apply(plan, apply_env)
     assert applied.returncode == 0, applied.stdout + applied.stderr
     assert not (workspace / ".venv").exists()
+    runtime_precondition = plan["runtime_precondition"]
+    assert isinstance(runtime_precondition, dict)
+    assert runtime_precondition["kind"] == "bound-path-interpreter"
+    assert runtime_precondition["canonical_path"] == str(Path(sys.executable).resolve())
+    assert runtime_precondition["core_runtime"] == {
+        "modules": ["yaml", "markdownify", "bs4"],
+        "probe": "isolated-import",
+        "ready": True,
+    }
+    assert set(runtime_precondition["identity"]) == {
+        "device",
+        "inode",
+        "mode",
+        "uid",
+        "gid",
+        "size",
+        "mtime_ns",
+        "ctime_ns",
+    }
 
     help_result = subprocess.run(
         [str(workspace / ".agents/skills/kb-cli/scripts/kb"), "help"],
         cwd=workspace,
-        env=env,
+        env=apply_env,
         stdin=subprocess.DEVNULL,
         text=True,
         capture_output=True,
@@ -216,6 +279,44 @@ def test_agent_plan_apply_reuses_later_path_runtime_strictly_offline(tmp_path: P
     )
     assert help_result.returncode == 0, help_result.stdout + help_result.stderr
     assert "kb help" in help_result.stdout
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["missing", "same-bytes-new-inode", "mode", "core-runtime"],
+)
+def test_agent_plan_rejects_bound_path_runtime_drift_before_first_write(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    workspace = tmp_path / f"workspace-{mutation}"
+    workspace.mkdir()
+    env, compatible = _offline_regular_path_runtime_environment(tmp_path)
+    plan = _plan(workspace, tmp_path / f"{mutation}-plan.json", env)
+    assert plan["conditional_runtime_changes"] == []
+    before = _tree_byte_type_mode_snapshot(workspace)
+    apply_env = dict(env)
+
+    if mutation == "missing":
+        compatible.unlink()
+    elif mutation == "same-bytes-new-inode":
+        replacement = compatible.with_name("replacement-python")
+        replacement.write_bytes(compatible.read_bytes())
+        replacement.chmod(stat.S_IMODE(compatible.stat().st_mode))
+        original_inode = compatible.stat().st_ino
+        os.replace(replacement, compatible)
+        assert compatible.stat().st_ino != original_inode
+    elif mutation == "mode":
+        compatible.chmod(0o744)
+    else:
+        apply_env["R25_RUNTIME_CORE_READY"] = "0"
+
+    applied = _apply(plan, apply_env)
+
+    assert applied.returncode == 1
+    assert "重新生成并审阅计划" in applied.stderr
+    assert _tree_byte_type_mode_snapshot(workspace) == before
+    assert not any(workspace.iterdir())
 
 
 def _race_python_wrapper(tmp_path: Path, env: dict[str, str], *, mode: str, manifest: Path) -> dict[str, str]:
