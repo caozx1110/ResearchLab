@@ -340,6 +340,22 @@ def _survey_event_staleness(
     return freshness
 
 
+def _accepted_judgement_event_is_current(
+    root: Path,
+    event: dict[str, Any],
+    bound: BoundJudgementSnapshot,
+) -> bool:
+    freshness = _survey_event_staleness(root, event, bound_snapshot=bound)
+    if isinstance(freshness, dict) and freshness.get("stale"):
+        return False
+    confirmed, _reason = _confirmed_judgement_event(
+        root,
+        event,
+        bound_snapshot=bound,
+    )
+    return bool(confirmed and bound.is_current())
+
+
 def _partition_reporting_events_with_snapshots(
     root: Path,
     events: list[dict[str, Any]],
@@ -813,7 +829,7 @@ def load_confirmed_survey_claim_source(
                 ),
             }
         ),
-        validate_current=bound.is_current,
+        validate_current=lambda: _accepted_judgement_event_is_current(root, event, bound),
     )
     if not bound.is_current():
         return None, "confirmation_status=stale; missing: exact current judgement binding"
@@ -880,6 +896,7 @@ def load_decisions(
     decisions_relative = Path("kb") / "programs" / clean_program_id / "workflow" / "decisions.yaml"
     decisions: list[dict[str, str]] = []
     current_container_decisions: list[dict[str, str]] = []
+    current_container_validators: list[Callable[[], bool]] = []
     known_ids: set[str] = set()
     if snapshot_batch is not None:
         target_path = root.resolve() / decisions_relative
@@ -970,6 +987,10 @@ def load_decisions(
                 ),
             }
         )
+        current_container_validators.append(
+            lambda bound=bound: judgement_confirmation_matches_bound(root, bound)
+            and bound.is_current()
+        )
     legacy_relative = Path("kb") / "programs" / clean_program_id / "workflow" / "decision-log.md"
     legacy_snapshot = snapshot_project_file(root, legacy_relative)
     legacy_decisions: list[tuple[str, dict[str, str]]] = []
@@ -1002,6 +1023,7 @@ def load_decisions(
         decisions.extend(current_container_decisions)
         if current_container_decisions and validators is not None and batch is not None:
             validators.append(batch.is_current)
+            validators.extend(current_container_validators)
     if legacy_current:
         effective_known_ids = known_ids if container_current else set()
         accepted_legacy = [
@@ -1048,6 +1070,20 @@ def load_report_inputs(
         for source in [*claim_sources, *survey_claim_sources]
         if source.claims or source.issues
     ]
+    for event in events:
+        if not _event_is_judgement(event):
+            continue
+        bound = bound_event_snapshots.get(id(event))
+        if bound is None:
+            formal_validators.append(lambda: False)
+            continue
+        formal_validators.append(
+            lambda event=event, bound=bound: _accepted_judgement_event_is_current(
+                root,
+                event,
+                bound,
+            )
+        )
     if any(_event_is_judgement(event) for event in events):
         formal_validators.append(judgement_batch.is_current)
     decisions = load_decisions(
