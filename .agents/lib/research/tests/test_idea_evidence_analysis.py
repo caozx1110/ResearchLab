@@ -9,7 +9,7 @@ import pytest
 
 from research.common import load_yaml, write_yaml_if_changed
 from research.core import default_record, ensure_workspace, record_path
-from research.evidence import verification_receipt_violations
+from research.evidence import EvidenceSourceSnapshot, verification_receipt_violations
 from research.git_ops import undo_last_operation
 
 
@@ -75,6 +75,24 @@ def _fill(path: Path, source_id: str, quote: str, *, selection_rank: int | None 
             }
         ]
     return payload
+
+
+def _cross_unit_claim(source_id: str, quote: str) -> dict:
+    return {
+        "id": "cross-unit-evaluation",
+        "text": "The cited baseline motivates a bounded viewpoint-shift test.",
+        "claim_type": "evaluation",
+        "confirmation_status": "pending_user_confirmation",
+        "evidence_refs": [
+            {
+                "source_unit_id": source_id,
+                "artifact": "evidence.txt",
+                "locator": "section:fixture",
+                "quote": quote,
+                "summary": "Grounds the bounded evaluation.",
+            }
+        ],
+    }
 
 
 def _multi_setup(root: Path, idea, *, count: int = 3) -> tuple[list[str], str, Path]:
@@ -711,6 +729,113 @@ def test_receipt_time_evidence_mutation_is_rejected_before_first_write(
     assert (unit / "record.yaml").read_bytes() == record_before
     assert not (unit / "review.yaml").exists()
     assert not (unit / "idea-card.md").exists()
+
+
+def test_stable_cross_unit_snapshot_supports_validation_and_confirmation(
+    tmp_path: Path,
+) -> None:
+    idea = _load_idea_module()
+    idea_id, source_id = _setup(tmp_path, idea)
+    quote = "The baseline loses accuracy under unseen camera viewpoints."
+    claims = [_cross_unit_claim(source_id, quote)]
+    source_roots = idea._trusted_claim_source_roots(
+        tmp_path,
+        claims,
+        consumer_id=idea_id,
+    )
+
+    assert isinstance(source_roots[source_id], EvidenceSourceSnapshot)
+    assert idea._verify_cross_unit_claims(
+        tmp_path,
+        claims,
+        source_roots=source_roots,
+    ) == []
+
+    idea_path = record_path(tmp_path, "idea", idea_id)
+    record = load_yaml(idea_path, default={})
+    record["confirmation_status"] = "pending_user_confirmation"
+    record["needs_human_confirmation"] = True
+    record["information_types"] = ["evaluation", "unverified"]
+    record["payload"]["claims"] = claims
+    idea.build_verification_receipt(
+        record,
+        idea_path.parent,
+        source_roots=source_roots,
+    )
+
+    idea.apply_confirmation(
+        record,
+        confirmed_by="Human Reviewer",
+        evidence=["review conversation"],
+        user_authorization="I confirm this evidence-grounded evaluation.",
+        authorization_source="user_message",
+        project_root=tmp_path,
+        verification_root=idea_path.parent,
+        trusted_source_roots=source_roots,
+    )
+    assert record["confirmation_status"] == "confirmed"
+
+
+def test_replaced_source_ancestor_cannot_ground_outside_bytes_or_confirm(
+    tmp_path: Path,
+) -> None:
+    idea = _load_idea_module()
+    idea_id, source_id = _setup(tmp_path, idea)
+    original_quote = "The baseline loses accuracy under unseen camera viewpoints."
+    outside_sentinel = "OUTSIDE-ONLY-SENTINEL must never become canonical evidence."
+    claims = [_cross_unit_claim(source_id, original_quote)]
+    source_roots = idea._trusted_claim_source_roots(
+        tmp_path,
+        claims,
+        consumer_id=idea_id,
+    )
+    source_snapshot = source_roots[source_id]
+    assert isinstance(source_snapshot, EvidenceSourceSnapshot)
+
+    idea_path = record_path(tmp_path, "idea", idea_id)
+    record = load_yaml(idea_path, default={})
+    record["confirmation_status"] = "pending_user_confirmation"
+    record["needs_human_confirmation"] = True
+    record["information_types"] = ["evaluation", "unverified"]
+    record["payload"]["claims"] = claims
+    idea.build_verification_receipt(
+        record,
+        idea_path.parent,
+        source_roots=source_roots,
+    )
+
+    source_dir = record_path(tmp_path, "repo", source_id).parent
+    parked_dir = tmp_path / "parked-source-unit"
+    outside_dir = tmp_path / "outside-canonical-units"
+    source_dir.rename(parked_dir)
+    outside_dir.mkdir()
+    (outside_dir / "record.yaml").write_bytes((parked_dir / "record.yaml").read_bytes())
+    (outside_dir / "evidence.txt").write_text(outside_sentinel + "\n", encoding="utf-8")
+    source_dir.symlink_to(outside_dir, target_is_directory=True)
+
+    assert not source_snapshot.is_current()
+    assert outside_sentinel.encode("utf-8") not in source_snapshot.artifacts[0].raw_bytes
+    sentinel_claims = [_cross_unit_claim(source_id, outside_sentinel)]
+    violations = idea._verify_cross_unit_claims(
+        tmp_path,
+        sentinel_claims,
+        source_roots=source_roots,
+    )
+    assert violations
+    assert any("no longer current" in violation for violation in violations)
+
+    with pytest.raises(SystemExit, match="Confirmation evidence violations"):
+        idea.apply_confirmation(
+            record,
+            confirmed_by="Human Reviewer",
+            evidence=["review conversation"],
+            user_authorization="I confirm this evidence-grounded evaluation.",
+            authorization_source="user_message",
+            project_root=tmp_path,
+            verification_root=idea_path.parent,
+            trusted_source_roots=source_roots,
+        )
+    assert record["confirmation_status"] == "pending_user_confirmation"
 
 
 def test_hard_preference_change_is_rejected_at_final_boundary(
