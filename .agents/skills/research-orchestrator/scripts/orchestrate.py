@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -49,7 +50,7 @@ from research.common import (
 )
 from research.core import apply_confirmation, append_history, ensure_workspace, is_ready_for_human_review, iter_records, kb_root, load_runtime_preferences, locate_record, checkpoint_and_report, project_root, record_workflow_state, write_record
 from research.evidence import EvidenceSourceSnapshot, attach_claims, build_verification_receipt, validate_claims, verify_claim_evidence
-from research.judgements import apply_judgement_rejection, confirmation_binding, discover_pending_judgements, judgement_confirmation_is_current, judgement_snapshot_binding, load_bound_judgement_snapshot, readiness_violations, require_judgement_snapshot
+from research.judgements import BoundJudgementSnapshot, apply_judgement_rejection, confirmation_binding, discover_pending_judgements, judgement_confirmation_is_current, judgement_snapshot_binding, load_bound_judgement_snapshot, readiness_violations, require_judgement_snapshot
 from research.journal import mutation_transaction
 from research.monitoring import active_monitor_runs, due_subscriptions, unresolved_monitor_outcomes
 from research.preference_selection import resolve_task_preferences, selection_binding
@@ -72,6 +73,18 @@ SEMANTIC_READ_COMMANDS = {
 PORTFOLIO_HISTORY_ID = "portfolio-next-selections"
 PORTFOLIO_DECISION_KIND = "portfolio_decision"
 PORTFOLIO_DECISION_SCOPES = {"procedural_planning", "research_judgement"}
+
+
+@dataclass(frozen=True)
+class _PortfolioDecisionValidationPlan:
+    normalized: dict[str, Any]
+    selected: tuple[dict[str, Any], ...]
+    program_decision_snapshots: tuple[BoundJudgementSnapshot, ...]
+
+    def require_program_decisions_current(self) -> None:
+        if any(not snapshot.is_current() for snapshot in self.program_decision_snapshots):
+            raise SystemExit("Program decision reference is unavailable or unverified")
+
 
 ROUTE_HINTS = {
     "source": "source-intake",
@@ -2007,11 +2020,11 @@ def _validate_preference_selection_reference(
         raise SystemExit("Referenced preference selection is unavailable, invalid, or stale") from exc
 
 
-def _validate_program_decision_references(
+def _program_decision_reference_plan(
     root: Path,
     decision_ids: list[str],
     selected: list[dict[str, Any]],
-) -> dict[str, dict[str, Any]]:
+) -> tuple[dict[str, dict[str, Any]], tuple[BoundJudgementSnapshot, ...]]:
     if not decision_ids:
         raise SystemExit("Research-judgement planning requires a program decision reference")
     selected_programs = {
@@ -2020,6 +2033,7 @@ def _validate_program_decision_references(
         if str(item.get("program_id") or "") and not str(item.get("program_id") or "").startswith("loose:")
     }
     bindings: dict[str, dict[str, Any]] = {}
+    snapshots: list[BoundJudgementSnapshot] = []
     for reference in decision_ids:
         program_id, separator, decision_id = str(reference).partition(":")
         if not separator or program_id not in selected_programs or not decision_id:
@@ -2066,6 +2080,16 @@ def _validate_program_decision_references(
         if not bound.is_current():
             raise SystemExit("Program decision reference is unavailable or unverified")
         bindings[reference] = binding
+        snapshots.append(bound)
+    return bindings, tuple(snapshots)
+
+
+def _validate_program_decision_references(
+    root: Path,
+    decision_ids: list[str],
+    selected: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    bindings, _snapshots = _program_decision_reference_plan(root, decision_ids, selected)
     return bindings
 
 
@@ -2080,11 +2104,11 @@ def _aware_iso_timestamp(value: object) -> str:
     return text
 
 
-def validate_portfolio_decision(
+def _portfolio_decision_validation_plan(
     root: Path,
     decision: object,
     snapshot: dict[str, Any],
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+) -> _PortfolioDecisionValidationPlan:
     if not isinstance(decision, dict):
         raise SystemExit("Portfolio decision fill must be a mapping")
     decision_id = str(decision.get("decision_id") or "").strip()
@@ -2127,8 +2151,9 @@ def validate_portfolio_decision(
     if len(set(program_decision_ids)) != len(program_decision_ids):
         raise SystemExit("Portfolio decision program_decision_ids must be unique")
     program_decision_bindings: dict[str, dict[str, Any]] = {}
+    program_decision_snapshots: tuple[BoundJudgementSnapshot, ...] = ()
     if decision_scope == "research_judgement":
-        program_decision_bindings = _validate_program_decision_references(
+        program_decision_bindings, program_decision_snapshots = _program_decision_reference_plan(
             root,
             program_decision_ids,
             selected,
@@ -2173,7 +2198,20 @@ def validate_portfolio_decision(
         and decision_scope == "procedural_planning"
         and all(bool(item.get("safe_execute_capability")) and item.get("governance_gate") == "none" for item in selected),
     }
-    return normalized, selected
+    return _PortfolioDecisionValidationPlan(
+        normalized=normalized,
+        selected=tuple(selected),
+        program_decision_snapshots=program_decision_snapshots,
+    )
+
+
+def validate_portfolio_decision(
+    root: Path,
+    decision: object,
+    snapshot: dict[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    plan = _portfolio_decision_validation_plan(root, decision, snapshot)
+    return plan.normalized, list(plan.selected)
 
 
 def load_portfolio_decision_file(path: Path) -> dict[str, Any]:
@@ -2280,13 +2318,15 @@ def record_portfolio_decision(
     # Validate once before a mutation is opened, then recompute and validate
     # under the workspace/exact-target transaction to close the stale-write gap.
     initial_snapshot = portfolio_candidate_snapshot(root, selected_program_id=selected_program_id)
-    validate_portfolio_decision(root, decision, initial_snapshot)
+    _portfolio_decision_validation_plan(root, decision, initial_snapshot)
     path = _validate_portfolio_history_target(root)
     changed = False
     stored: dict[str, Any] = {}
+    validation_plan: _PortfolioDecisionValidationPlan | None = None
     with mutation_transaction(root, "research-orchestrator:record-next-selection", [path]):
         current_snapshot = portfolio_candidate_snapshot(root, selected_program_id=selected_program_id)
-        normalized, selected = validate_portfolio_decision(root, decision, current_snapshot)
+        validation_plan = _portfolio_decision_validation_plan(root, decision, current_snapshot)
+        normalized = validation_plan.normalized
         history = _load_portfolio_history(root)
         existing = [
             item
@@ -2298,11 +2338,13 @@ def record_portfolio_decision(
             comparable.pop("recorded_at", None)
             if comparable != normalized:
                 raise SystemExit("Portfolio decision id is already bound to different content")
+            validation_plan.require_program_decisions_current()
             stored = existing[0]
         else:
             stored = {**normalized, "recorded_at": utc_now_iso()}
             history.setdefault("items", []).append(stored)
             history["generated_at"] = utc_now_iso()
+            validation_plan.require_program_decisions_current()
             write_yaml_if_changed(path, history)
             changed = True
     if changed:
@@ -2312,6 +2354,8 @@ def record_portfolio_decision(
             message=f"milestone: record portfolio decision {stored['decision_id']}",
             target_paths=[path],
         )
+    elif validation_plan is not None:
+        validation_plan.require_program_decisions_current()
     return stored, changed
 
 

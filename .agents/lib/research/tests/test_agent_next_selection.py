@@ -1153,25 +1153,14 @@ def test_program_decision_binding_change_stales_agent_portfolio_decision(
 ) -> None:
     orchestrate = _load_orchestrator("orchestrator_agent_program_binding")
     root = _workspace(tmp_path)
+    _verified_program_decision(orchestrate, root)
     _program(orchestrate, root, "program-a", actions=["Choose a grounded baseline"])
     snapshot = orchestrate.portfolio_candidate_snapshot(root)
     decision = _decision(root, snapshot, [snapshot["candidates"][0]["action_id"]])
     decision["decision_scope"] = "research_judgement"
     decision["program_decision_ids"] = ["program-a:decision-1"]
-    binding = {
-        "subject": {"kind": "program_decision", "id": "decision-1"},
-        "confirmation_status": "pending_user_confirmation",
-        "content_digest": "a" * 64,
-        "verification": {"claims_digest": "b" * 64, "evidence_digest": "c" * 64},
-        "confirmation_digest": "d" * 64,
-    }
-    monkeypatch.setattr(
-        orchestrate,
-        "_validate_program_decision_references",
-        lambda _root, _ids, _selected: {"program-a:decision-1": binding},
-    )
     stored, _changed = orchestrate.record_portfolio_decision(root, decision)
-    assert stored["program_decision_bindings"] == {"program-a:decision-1": binding}
+    binding = stored["program_decision_bindings"]["program-a:decision-1"]
 
     changed_binding = {**binding, "content_digest": "f" * 64}
     monkeypatch.setattr(
@@ -1317,12 +1306,18 @@ def test_stable_research_judgement_record_and_replay_are_safe(
         lambda project_root, **kwargs: checkpoints.append(kwargs["target_paths"]) or {"committed": False},
     )
 
+    plan = orchestrate._portfolio_decision_validation_plan(root, decision, snapshot)
+    normalized, selected = orchestrate.validate_portfolio_decision(root, decision, snapshot)
     stored, changed = orchestrate.record_portfolio_decision(root, decision)
     history_file = orchestrate.portfolio_history_path(root)
     before_replay = history_file.read_bytes()
     before_replay_inode = history_file.stat().st_ino
     replayed, replay_changed = orchestrate.record_portfolio_decision(root, decision)
 
+    assert len(plan.program_decision_snapshots) == 1
+    assert plan.program_decision_snapshots[0].record["id"] == "decision-1"
+    assert normalized == plan.normalized
+    assert selected == list(plan.selected)
     assert changed is True
     assert replay_changed is False
     assert replayed == stored
