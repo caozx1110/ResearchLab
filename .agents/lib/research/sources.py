@@ -81,6 +81,8 @@ from .source_materials import (
     materialize_html,
     materialize_pdf,
     materialize_text,
+    publish_source_candidate,
+    rebase_materialization_result,
     source_fields as materialization_source_fields,
 )
 from .yaml_io import write_bytes_atomic
@@ -3132,6 +3134,80 @@ def _store_bytes(root: Path, name: str, data: bytes) -> Path:
     return dst
 
 
+def _source_selection_attempt(edition: str, rationale: str) -> str:
+    """Return one bounded, de-sensitive source-selection audit line."""
+    safe_edition = re.sub(r"[^a-z0-9-]+", "-", str(edition).strip().lower()).strip("-")[:40]
+    safe_rationale = clean_text(str(rationale or "selection failed"))
+    safe_rationale = re.sub(r"(?i)https?://\S+", "[source]", safe_rationale)
+    safe_rationale = safe_rationale.replace("\x00", "")[:220].rstrip()
+    return f"{safe_edition or 'source'}: {safe_rationale or 'selection failed'}"
+
+
+def _source_selection_error_rationale(prefix: str, exc: Exception) -> str:
+    error_class = re.sub(r"[^A-Za-z0-9]+", "-", exc.__class__.__name__).strip("-").lower()
+    return f"{prefix} ({error_class or 'error'})"
+
+
+def _html_media_counts(materialized: dict[str, Any]) -> tuple[int, int, int]:
+    quality = materialized.get("quality") if isinstance(materialized.get("quality"), dict) else {}
+    output = quality.get("output") if isinstance(quality.get("output"), dict) else {}
+
+    def count(key: str) -> int:
+        value = output.get(key, 0)
+        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+    return (
+        count("source_image_count"),
+        count("localized_image_count"),
+        count("image_localization_failure_count"),
+    )
+
+
+def _arxiv_html_media_rejection(materialized: dict[str, Any]) -> str:
+    source_count, localized_count, failure_count = _html_media_counts(materialized)
+    if source_count >= 4 and failure_count * 2 >= source_count:
+        return (
+            "media localization rejected "
+            f"({failure_count}/{source_count} failed; {localized_count} localized)"
+        )
+    return ""
+
+
+def _rebase_candidate_source_info(
+    project_root: Path,
+    source_info: dict[str, Any],
+    *,
+    staged_root: Path,
+    source_root: Path,
+) -> dict[str, Any]:
+    """Rebase project-relative paths owned by one chosen scratch candidate."""
+    rebased = dict(source_info)
+    staged_root_resolved = staged_root.resolve()
+
+    def rebase_path(value: Any) -> str:
+        absolute = (project_root / str(value)).resolve()
+        try:
+            relative = absolute.relative_to(staged_root_resolved)
+        except ValueError:
+            return str(value)
+        return rel(project_root, source_root / relative)
+
+    rebased["backup_paths"] = [rebase_path(item) for item in source_info.get("backup_paths", [])]
+    if str(source_info.get("markdown_path") or "").strip():
+        rebased["markdown_path"] = rebase_path(source_info["markdown_path"])
+    materialization = source_info.get("materialization")
+    if isinstance(materialization, dict):
+        rebound = dict(materialization)
+        for key in ("source_map_path", "conversion_path", "archive_path"):
+            if str(materialization.get(key) or "").strip():
+                rebound[key] = rebase_path(materialization[key])
+        rebound["asset_paths"] = [
+            rebase_path(item) for item in materialization.get("asset_paths", [])
+        ]
+        rebased["materialization"] = rebound
+    return rebased
+
+
 def _backup_arxiv_html(project_root: Path, root: Path, arxiv_id: str, original_source: str) -> dict[str, Any]:
     """Download quality-gated HTML, then PDF, then an abstract-only page."""
     txt = root / "source-url.txt"
@@ -3144,7 +3220,11 @@ def _backup_arxiv_html(project_root: Path, root: Path, arxiv_id: str, original_s
         try:
             content, content_type = fetch_url(url, binary=True, max_bytes=SOURCE_DOWNLOAD_MAX_BYTES)
         except Exception as exc:  # noqa: BLE001
-            attempts.append(f"{candidate['edition']}({url}): {exc}")
+            attempts.append(
+                _source_selection_attempt(
+                    candidate["edition"], _source_selection_error_rationale("fetch failed", exc)
+                )
+            )
             continue
         raw_bytes = content if isinstance(content, bytes) else str(content).encode("utf-8")
         if isinstance(content, bytes):
@@ -3152,24 +3232,61 @@ def _backup_arxiv_html(project_root: Path, root: Path, arxiv_id: str, original_s
         else:
             html, source_encoding, decode_warning = str(content), "utf-8", ""
         if not _is_html_response(content_type, html):
-            attempts.append(f"{candidate['edition']}({url}): non-HTML content_type={content_type or 'unknown'}")
+            attempts.append(
+                _source_selection_attempt(candidate["edition"], "response was not HTML")
+            )
             continue
         quality = inspect_html_quality(html, require_full_text=True)
         if decode_warning:
             quality["warnings"] = [*quality.get("warnings", []), decode_warning]
         if not quality["accepted"]:
             reason = "; ".join(str(item) for item in quality["rejection_reasons"])
-            attempts.append(f"{candidate['edition']}({url}): quality gate rejected: {reason}")
+            attempts.append(
+                _source_selection_attempt(
+                    candidate["edition"], f"quality gate rejected: {reason}"
+                )
+            )
             continue
         chunks = _html_to_section_chunks(html)
         if not chunks:
-            attempts.append(f"{candidate['edition']}({url}): parsed to zero section chunks")
+            attempts.append(
+                _source_selection_attempt(candidate["edition"], "parsed to zero section chunks")
+            )
             continue
-        raw = _store_bytes(root, "source.html", raw_bytes)
-        backup_paths.append(rel(project_root, raw))
+        with tempfile.TemporaryDirectory(
+            prefix=f".{root.name}-{candidate['edition']}-", dir=root.parent
+        ) as temporary:
+            staged_root = Path(temporary)
+            staged_raw = _store_bytes(staged_root, "source.html", raw_bytes)
+            materialized = _materialize_safely(
+                lambda: materialize_html(
+                    staged_root,
+                    staged_raw,
+                    html,
+                    source_uri=abs_uri,
+                    resolved_url=url,
+                    fetch_image=fetch_url,
+                    initial_quality=quality,
+                ),
+                source_root=staged_root,
+                raw_path=staged_raw,
+                source_type="html",
+                source_uri=abs_uri,
+            )
+            media_rejection = _arxiv_html_media_rejection(materialized)
+            if media_rejection:
+                attempts.append(
+                    _source_selection_attempt(candidate["edition"], media_rejection)
+                )
+                continue
+            publish_source_candidate(staged_root, root)
+            materialized = rebase_materialization_result(
+                materialized, staged_root, root
+            )
+        raw = root / "source.html"
         result: dict[str, Any] = {
             "original_uri": abs_uri,
-            "backup_paths": backup_paths,
+            "backup_paths": [*backup_paths, rel(project_root, raw)],
             "backup_kind": "url",
             "file_hash": file_sha256(raw),
             "backup_status": "ok",
@@ -3184,21 +3301,6 @@ def _backup_arxiv_html(project_root: Path, root: Path, arxiv_id: str, original_s
                 "source_encoding": source_encoding,
             },
         }
-        materialized = _materialize_safely(
-            lambda: materialize_html(
-                root,
-                raw,
-                html,
-                source_uri=abs_uri,
-                resolved_url=url,
-                fetch_image=fetch_url,
-                initial_quality=quality,
-            ),
-            source_root=root,
-            raw_path=raw,
-            source_type="html",
-            source_uri=abs_uri,
-        )
         _attach_materialization(project_root, result, materialized)
         if result.get("backup_warning"):
             _warn(result["backup_warning"], abs_uri)
@@ -3208,34 +3310,60 @@ def _backup_arxiv_html(project_root: Path, root: Path, arxiv_id: str, original_s
     pdf_url = f"https://arxiv.org/pdf/{arxiv_id}"
     try:
         pdf_content, pdf_content_type = fetch_url(pdf_url, binary=True, max_bytes=SOURCE_DOWNLOAD_MAX_BYTES)
+    except Exception as exc:  # noqa: BLE001
+        attempts.append(
+            _source_selection_attempt(
+                "arxiv-pdf", _source_selection_error_rationale("fetch failed", exc)
+            )
+        )
+    else:
         pdf_bytes = pdf_content if isinstance(pdf_content, bytes) else str(pdf_content).encode("utf-8")
         if not _looks_like_pdf(pdf_url, pdf_content_type, pdf_bytes):
-            attempts.append(f"arxiv-pdf({pdf_url}): non-PDF content_type={pdf_content_type or 'unknown'}")
+            attempts.append(_source_selection_attempt("arxiv-pdf", "response was not PDF"))
         else:
-            result = _backup_pdf_bytes(
-                project_root,
-                root,
-                pdf_bytes,
-                abs_uri,
-                backup_kind="url",
-                extra_backup_paths=backup_paths,
-            )
+            with tempfile.TemporaryDirectory(
+                prefix=f".{root.name}-arxiv-pdf-", dir=root.parent
+            ) as temporary:
+                staged_root = Path(temporary)
+                result = _backup_pdf_bytes(
+                    project_root,
+                    staged_root,
+                    pdf_bytes,
+                    abs_uri,
+                    backup_kind="url",
+                    extra_backup_paths=backup_paths,
+                )
+                publish_source_candidate(staged_root, root)
+                result = _rebase_candidate_source_info(
+                    project_root,
+                    result,
+                    staged_root=staged_root,
+                    source_root=root,
+                )
             result["resolved_url"] = pdf_url
             result["source_selection_attempts"] = attempts
             return result
-    except Exception as exc:  # noqa: BLE001
-        attempts.append(f"arxiv-pdf({pdf_url}): {exc}")
 
     abstract_url = abs_uri
     try:
-        content, content_type = fetch_url(abstract_url, binary=True, max_bytes=SOURCE_DOWNLOAD_MAX_BYTES)
+        abstract_response = fetch_url(
+            abstract_url, binary=True, max_bytes=SOURCE_DOWNLOAD_MAX_BYTES
+        )
+    except Exception as exc:  # noqa: BLE001
+        attempts.append(
+            _source_selection_attempt(
+                "arxiv-abs", _source_selection_error_rationale("fetch failed", exc)
+            )
+        )
+    else:
+        content, content_type = abstract_response
         raw_bytes = content if isinstance(content, bytes) else str(content).encode("utf-8")
         if isinstance(content, bytes):
             html, source_encoding, decode_warning = _decode_source_text(content, content_type)
         else:
             html, source_encoding, decode_warning = str(content), "utf-8", ""
         if not _is_html_response(content_type, html):
-            attempts.append(f"arxiv-abs({abstract_url}): non-HTML content_type={content_type or 'unknown'}")
+            attempts.append(_source_selection_attempt("arxiv-abs", "response was not HTML"))
         else:
             quality = inspect_html_quality(html)
             if quality["accepted"]:
@@ -3244,12 +3372,35 @@ def _backup_arxiv_html(project_root: Path, root: Path, arxiv_id: str, original_s
                     *([decode_warning] if decode_warning else []),
                     "Full-text HTML and PDF were unavailable; archived abstract page only",
                 ]
-                raw = _store_bytes(root, "source.html", raw_bytes)
-                fallback_paths = [*backup_paths, rel(project_root, raw)]
                 chunks = _html_to_section_chunks(html)
+                with tempfile.TemporaryDirectory(
+                    prefix=f".{root.name}-arxiv-abs-", dir=root.parent
+                ) as temporary:
+                    staged_root = Path(temporary)
+                    staged_raw = _store_bytes(staged_root, "source.html", raw_bytes)
+                    materialized = _materialize_safely(
+                        lambda: materialize_html(
+                            staged_root,
+                            staged_raw,
+                            html,
+                            source_uri=abs_uri,
+                            resolved_url=abstract_url,
+                            fetch_image=fetch_url,
+                            initial_quality=quality,
+                        ),
+                        source_root=staged_root,
+                        raw_path=staged_raw,
+                        source_type="html",
+                        source_uri=abs_uri,
+                    )
+                    publish_source_candidate(staged_root, root)
+                    materialized = rebase_materialization_result(
+                        materialized, staged_root, root
+                    )
+                raw = root / "source.html"
                 result = {
                     "original_uri": abs_uri,
-                    "backup_paths": fallback_paths,
+                    "backup_paths": [*backup_paths, rel(project_root, raw)],
                     "backup_kind": "url",
                     "file_hash": file_sha256(raw),
                     "backup_status": "degraded",
@@ -3265,30 +3416,16 @@ def _backup_arxiv_html(project_root: Path, root: Path, arxiv_id: str, original_s
                     },
                     "source_selection_attempts": attempts,
                 }
-                materialized = _materialize_safely(
-                    lambda: materialize_html(
-                        root,
-                        raw,
-                        html,
-                        source_uri=abs_uri,
-                        resolved_url=abstract_url,
-                        fetch_image=fetch_url,
-                        initial_quality=quality,
-                    ),
-                    source_root=root,
-                    raw_path=raw,
-                    source_type="html",
-                    source_uri=abs_uri,
-                )
                 _attach_materialization(project_root, result, materialized)
                 _warn(result["backup_warning"], abs_uri)
                 return result
             attempts.append(
-                f"arxiv-abs({abstract_url}): quality gate rejected: "
-                + "; ".join(str(item) for item in quality["rejection_reasons"])
+                _source_selection_attempt(
+                    "arxiv-abs",
+                    "quality gate rejected: "
+                    + "; ".join(str(item) for item in quality["rejection_reasons"]),
+                )
             )
-    except Exception as exc:  # noqa: BLE001
-        attempts.append(f"arxiv-abs({abstract_url}): {exc}")
 
     warning = "arxiv source resolution failed for HTML, PDF, and abstract editions: " + "; ".join(attempts)
     result = {

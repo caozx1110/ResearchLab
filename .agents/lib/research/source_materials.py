@@ -13,6 +13,7 @@ import importlib.metadata
 import mimetypes
 import os
 import re
+import stat
 import tempfile
 from html import escape
 from pathlib import Path, PurePosixPath
@@ -1113,6 +1114,11 @@ def materialize_html(
     warnings = [str(item) for item in quality.get("warnings", []) if str(item)]
     for error_node in root.select(".ltx_ERROR, .ltx_error"):
         error_node.decompose()
+    source_svg_nodes = list(root.find_all("svg"))
+    source_image_nodes = list(root.find_all("img"))
+    source_image_count = len(source_svg_nodes) + len(source_image_nodes)
+    localized_image_count = 0
+    image_localization_failure_count = 0
     assets: list[dict[str, Any]] = []
     assets_root = source_root / ASSETS_DIR_NAME
     total_asset_bytes = 0
@@ -1139,27 +1145,26 @@ def materialize_html(
             assets.append(entry)
         return relative
 
-    for index, svg in enumerate(list(root.find_all("svg")), start=1):
+    for index, svg in enumerate(source_svg_nodes, start=1):
         try:
             relative = persist_asset(str(svg).encode("utf-8"), "image/svg+xml", f"inline-svg-{index}", kind="inline-svg")
         except Exception as exc:  # noqa: BLE001
             warnings.append(f"inline SVG {index} was not localized: {exc}")
+            image_localization_failure_count += 1
             continue
         replacement = soup.new_tag("img")
         replacement["src"] = relative
         replacement["alt"] = _safe_image_alt(
             svg.get("aria-label") or svg.get("title"), f"Inline SVG {index}"
         )
-        replacement["data-kb-localized"] = "1"
         svg.replace_with(replacement)
+        localized_image_count += 1
 
-    for index, image in enumerate(root.find_all("img"), start=1):
-        if str(image.get("data-kb-localized") or "") == "1":
-            image.attrs.pop("data-kb-localized", None)
-            continue
+    for index, image in enumerate(source_image_nodes, start=1):
         source = str(image.get("data-src") or image.get("data-original") or image.get("src") or _srcset_choice(str(image.get("srcset") or ""))).strip()
         if not source:
             warnings.append(f"image {index} has no source")
+            image_localization_failure_count += 1
             continue
         figcaption = image.find_parent("figure")
         caption_node = figcaption.find("figcaption") if figcaption else None
@@ -1190,11 +1195,13 @@ def materialize_html(
             image["src"] = relative
             for attribute in ("srcset", "data-src", "data-original", "loading"):
                 image.attrs.pop(attribute, None)
+            localized_image_count += 1
         except Exception as exc:  # noqa: BLE001
             absolute_source = urljoin(document_base, source) if document_base else source
             if absolute_source.lower().startswith(("http://", "https://")):
                 image["src"] = absolute_source
             warnings.append(f"image {index} was not localized: {exc}")
+            image_localization_failure_count += 1
 
     for link in root.find_all("a"):
         href = str(link.get("href") or "").strip()
@@ -1369,6 +1376,9 @@ def materialize_html(
         "complex_table_count": len(table_tokens),
         "layout_table_count": len(layout_tables),
         "multi_image_figure_count": len(figure_tokens),
+        "source_image_count": source_image_count,
+        "localized_image_count": localized_image_count,
+        "image_localization_failure_count": image_localization_failure_count,
     }
     quality["output"] = output_quality
     document = _source_header(raw_path.name, "html", source_uri, archive_name=ARCHIVE_NAME) + converted
@@ -1914,7 +1924,7 @@ def materialize_fallback(
     )
 
 
-def _rebase_materialization_result(
+def rebase_materialization_result(
     result: dict[str, Any], staged_root: Path, source_root: Path
 ) -> dict[str, Any]:
     """Point staged result paths at their committed immutable destinations."""
@@ -1979,6 +1989,95 @@ def _publish_immutable_bytes(target: Path, data: bytes, *, relative: Path) -> bo
     finally:
         if temporary is not None and temporary.exists():
             temporary.unlink()
+
+
+def publish_source_candidate(staged_root: Path, source_root: Path) -> None:
+    """Publish one fully built raw+derived candidate without partial residue.
+
+    ``staged_root`` must be a same-filesystem scratch directory containing only
+    ordinary directories and files.  Every destination is collision-checked
+    before the first write.  Files created by a failed attempt are removed by
+    inode identity, while any pre-existing immutable bundle is left untouched.
+    ``conversion.yaml`` is linked last as the bundle commit marker.
+    """
+    if staged_root.is_symlink() or not staged_root.is_dir():
+        raise ValueError("source candidate staging root must be a real directory")
+    if source_root.is_symlink():
+        raise ValueError("immutable source bundle collision: symlinked source root")
+    source_root.mkdir(parents=True, exist_ok=True)
+    if source_root.is_symlink() or not source_root.is_dir():
+        raise ValueError("immutable source bundle collision: invalid source root")
+
+    staged_files: list[Path] = []
+    for staged in sorted(staged_root.rglob("*")):
+        staged_stat = staged.lstat()
+        if stat.S_ISLNK(staged_stat.st_mode):
+            raise ValueError("source candidate staging tree contains a symlink")
+        if stat.S_ISDIR(staged_stat.st_mode):
+            continue
+        if not stat.S_ISREG(staged_stat.st_mode):
+            raise ValueError("source candidate staging tree contains a special file")
+        staged_files.append(staged)
+    if not staged_files:
+        raise ValueError("source candidate staging tree is empty")
+
+    publish: list[tuple[Path, Path, Path]] = []
+    for staged in staged_files:
+        relative = staged.relative_to(staged_root)
+        target = _bundle_target(source_root, relative)
+        data = staged.read_bytes()
+        if target.exists() or target.is_symlink():
+            if target.is_symlink() or not target.is_file() or target.read_bytes() != data:
+                raise ValueError(
+                    f"immutable source bundle collision: {relative.as_posix()}"
+                )
+            continue
+        publish.append((staged, target, relative))
+
+    publish.sort(
+        key=lambda item: (
+            item[2].name == CONVERSION_NAME,
+            item[2].as_posix(),
+        )
+    )
+    created_files: list[tuple[Path, tuple[int, int]]] = []
+    created_dirs: list[Path] = []
+    try:
+        for staged, target, relative in publish:
+            current = source_root
+            for part in relative.parts[:-1]:
+                current = current / part
+                if current.exists() or current.is_symlink():
+                    if current.is_symlink() or not current.is_dir():
+                        raise ValueError(
+                            f"immutable source bundle collision: {relative.as_posix()}"
+                        )
+                    continue
+                current.mkdir()
+                created_dirs.append(current)
+            target = _bundle_target(source_root, relative)
+            if _publish_immutable_bytes(target, staged.read_bytes(), relative=relative):
+                published_stat = target.lstat()
+                created_files.append(
+                    (target, (int(published_stat.st_dev), int(published_stat.st_ino)))
+                )
+    except Exception:
+        for target, identity in reversed(created_files):
+            try:
+                current_stat = target.lstat()
+            except FileNotFoundError:
+                continue
+            if (
+                stat.S_ISREG(current_stat.st_mode)
+                and (int(current_stat.st_dev), int(current_stat.st_ino)) == identity
+            ):
+                target.unlink()
+        for directory in reversed(created_dirs):
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
+        raise
 
 
 def _materialize_transactionally(
@@ -2056,7 +2155,7 @@ def _materialize_transactionally(
             if assets_root.is_dir() and not assets_root.is_symlink() and not any(assets_root.iterdir()):
                 assets_root.rmdir()
             raise
-        return _rebase_materialization_result(result, staged_root, source_root)
+        return rebase_materialization_result(result, staged_root, source_root)
 
 
 # Keep converters individually testable while making every public materializer
@@ -2203,5 +2302,7 @@ __all__ = [
     "materialize_html",
     "materialize_pdf",
     "materialize_text",
+    "publish_source_candidate",
+    "rebase_materialization_result",
     "source_fields",
 ]

@@ -10,6 +10,7 @@ import research.core as core
 # backup_source lives in research.sources after the god-file split; its fetch_url
 # lookup resolves in that module's namespace, so patch it there.
 import research.sources as sources
+import research.source_materials as source_materials
 
 
 def _minimal_pdf_bytes(text: str = "Dual Source Test\nBody paragraph on page one.") -> bytes:
@@ -60,6 +61,25 @@ _ARXIV_HTML = (
 )
 
 _PNG_BYTES = _valid_png_bytes()
+
+
+def _substantive_arxiv_html(*, title: str, image_count: int = 0, image_prefix: str = "figure") -> bytes:
+    images = "".join(
+        f"<figure><img src='/{image_prefix}-{index}.png' alt='Figure {index}'>"
+        f"<figcaption>Figure {index}. Grounded result.</figcaption></figure>"
+        for index in range(1, image_count + 1)
+    )
+    return (
+        "<!doctype html><html><head><title>"
+        + title
+        + "</title></head><body><article class='ltx_document'>"
+        "<h1 id='overview'>Overview</h1>"
+        "<p>This full paper body contains enough grounded prose for deterministic quality checks.</p>"
+        "<p>It preserves the method, evaluation setting, limitations, and reproducible evidence.</p>"
+        "<p>A third substantive paragraph prevents an image-only shell from passing as full text.</p>"
+        + images
+        + "</article></body></html>"
+    ).encode("utf-8")
 
 
 def test_backup_source_non_html_non_pdf_url_archives_bytes_as_stored_unparsed(
@@ -351,6 +371,228 @@ def test_backup_source_arxiv_falls_back_when_html_missing(
     assert payload["backup_status"] == "ok"
     assert payload["resolved_url"] == "https://ar5iv.labs.arxiv.org/html/1301.3781"
     assert payload["locator_kind"] == "section"
+
+
+@pytest.mark.parametrize("image_count", [4, 22])
+def test_arxiv_html_with_majority_image_localization_failure_falls_back_to_pdf_without_residue(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    image_count: int,
+) -> None:
+    html = _substantive_arxiv_html(title="Incomplete media paper", image_count=image_count)
+    pdf = _minimal_pdf_bytes("Media-complete PDF fallback with grounded text.")
+
+    def fake_fetch_url(url: str, **kwargs) -> tuple[bytes, str]:
+        if "/html/" in url:
+            return html, "text/html"
+        if url.endswith(".png"):
+            raise RuntimeError("image unavailable")
+        if "/pdf/" in url:
+            return pdf, "application/pdf"
+        raise AssertionError(url)
+
+    monkeypatch.setattr(sources, "fetch_url", fake_fetch_url)
+    unit_id = f"p-media-missing-{image_count}"
+    payload = sources.backup_source(tmp_path, "paper", unit_id, "2605.12090")
+
+    source_root = core.unit_root(tmp_path, "paper", unit_id) / "source"
+    assert payload["source_type"] == "pdf"
+    assert payload["resolved_url"] == "https://arxiv.org/pdf/2605.12090"
+    assert (source_root / "source.pdf").read_bytes() == pdf
+    assert not (source_root / "source.html").exists()
+    assert not (source_root / "assets").exists()
+    assert sum("media localization rejected" in item for item in payload["source_selection_attempts"]) == 2
+    assert all("http://" not in item and "https://" not in item for item in payload["source_selection_attempts"])
+    assert all(len(item) <= 261 for item in payload["source_selection_attempts"])
+
+
+def test_arxiv_html_with_one_of_three_images_missing_remains_degraded_html(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    html = _substantive_arxiv_html(title="Mostly localized paper", image_count=3)
+    requested: list[str] = []
+
+    def fake_fetch_url(url: str, **kwargs) -> tuple[bytes, str]:
+        requested.append(url)
+        if "/html/" in url:
+            return html, "text/html"
+        if url.endswith("figure-1.png"):
+            raise RuntimeError("image unavailable")
+        if url.endswith(".png"):
+            return _PNG_BYTES, "image/png"
+        raise AssertionError(url)
+
+    monkeypatch.setattr(sources, "fetch_url", fake_fetch_url)
+    payload = sources.backup_source(tmp_path, "paper", "p-media-degraded-123456", "2605.12090")
+
+    source_root = core.unit_root(tmp_path, "paper", "p-media-degraded-123456") / "source"
+    conversion = core.load_yaml(source_root / "conversion.yaml", default={})
+    output = conversion["quality"]["output"]
+    assert payload["source_type"] == "arxiv-html"
+    assert payload["backup_status"] == "degraded"
+    assert output["source_image_count"] == 3
+    assert output["localized_image_count"] == 2
+    assert output["image_localization_failure_count"] == 1
+    assert not any("/pdf/" in url for url in requested)
+
+
+def test_arxiv_media_rejection_tries_second_html_and_publishes_only_selected_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = _substantive_arxiv_html(title="Native incomplete", image_count=4, image_prefix="native")
+    second = _substantive_arxiv_html(title="Labs complete", image_count=4, image_prefix="labs")
+    native_asset = b"native-candidate-asset"
+
+    def fake_fetch_url(url: str, **kwargs) -> tuple[bytes, str]:
+        if url.startswith("https://arxiv.org/html/"):
+            return first, "text/html"
+        if url.startswith("https://ar5iv.labs.arxiv.org/html/"):
+            return second, "text/html"
+        if "native-" in url:
+            if url.endswith(("native-1.png", "native-2.png")):
+                return native_asset, "image/png"
+            raise RuntimeError("native image unavailable")
+        if "labs-" in url:
+            return _PNG_BYTES, "image/png"
+        raise AssertionError(url)
+
+    monkeypatch.setattr(sources, "fetch_url", fake_fetch_url)
+    payload = sources.backup_source(tmp_path, "paper", "p-media-second-123456", "2605.12090")
+
+    source_root = core.unit_root(tmp_path, "paper", "p-media-second-123456") / "source"
+    assert payload["source_type"] == "arxiv-html"
+    assert payload["resolved_url"] == "https://ar5iv.labs.arxiv.org/html/2605.12090"
+    assert (source_root / "source.html").read_bytes() == second
+    assert all(path.read_bytes() != native_asset for path in (source_root / "assets").iterdir())
+    assert any("arxiv-html: media localization rejected" in item for item in payload["source_selection_attempts"])
+
+
+def test_arxiv_media_rejection_and_pdf_failure_falls_back_to_same_explicit_version_abstract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    full_html = _substantive_arxiv_html(title="Rejected full text", image_count=4)
+    abstract_html = _substantive_arxiv_html(title="Versioned abstract fallback")
+    requested: list[str] = []
+
+    def fake_fetch_url(url: str, **kwargs) -> tuple[bytes, str]:
+        requested.append(url)
+        if "/html/" in url:
+            return full_html, "text/html"
+        if url.endswith(".png"):
+            raise RuntimeError("image unavailable")
+        if "/pdf/" in url:
+            raise RuntimeError("pdf unavailable")
+        if "/abs/" in url:
+            return abstract_html, "text/html"
+        raise AssertionError(url)
+
+    monkeypatch.setattr(sources, "fetch_url", fake_fetch_url)
+    payload = sources.backup_source(
+        tmp_path,
+        "paper",
+        "p-media-abstract-123456",
+        "https://arxiv.org/abs/2605.12090v3",
+    )
+
+    source_root = core.unit_root(tmp_path, "paper", "p-media-abstract-123456") / "source"
+    assert payload["source_type"] == "arxiv-abs"
+    assert payload["resolved_url"] == "https://arxiv.org/abs/2605.12090v3"
+    source_candidates = [
+        url
+        for url in requested
+        if "/html/" in url or "/pdf/" in url or "/abs/" in url
+    ]
+    assert source_candidates == [
+        "https://arxiv.org/html/2605.12090v3",
+        "https://ar5iv.labs.arxiv.org/html/2605.12090v3",
+        "https://arxiv.org/pdf/2605.12090v3",
+        "https://arxiv.org/abs/2605.12090v3",
+    ]
+    assert (source_root / "source.html").read_bytes() == abstract_html
+    assert not (source_root / "source.pdf").exists()
+    assert not (source_root / "assets").exists()
+
+
+def test_generic_html_with_all_images_missing_stays_degraded_without_source_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    html = _substantive_arxiv_html(title="Ordinary blog", image_count=4)
+    requested: list[str] = []
+
+    def fake_fetch_url(url: str, **kwargs) -> tuple[bytes, str]:
+        requested.append(url)
+        if url == "https://example.com/post":
+            return html, "text/html"
+        if url.endswith(".png"):
+            raise RuntimeError("image unavailable")
+        raise AssertionError(url)
+
+    monkeypatch.setattr(sources, "fetch_url", fake_fetch_url)
+    payload = sources.backup_source(tmp_path, "blog", "b-media-blog-123456", "https://example.com/post")
+
+    source_root = core.unit_root(tmp_path, "blog", "b-media-blog-123456") / "source"
+    conversion = core.load_yaml(source_root / "conversion.yaml", default={})
+    assert payload["source_type"] == "html"
+    assert payload["backup_status"] == "degraded"
+    assert conversion["quality"]["output"]["image_localization_failure_count"] == 4
+    assert requested[0] == "https://example.com/post"
+    assert (source_root / "source.html").read_bytes() == html
+
+
+def test_arxiv_candidate_publish_failure_restores_original_source_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    html = _substantive_arxiv_html(title="Publish failure paper", image_count=4)
+    unit_id = "p-media-publish-failure"
+    source_root = core.unit_root(tmp_path, "paper", unit_id) / "source"
+    source_root.mkdir(parents=True)
+    (source_root / "source-url.txt").write_text("2605.12090\n", encoding="utf-8")
+    (source_root / "preexisting.marker").write_bytes(b"must survive\n")
+    before = {
+        path.relative_to(source_root).as_posix(): path.read_bytes()
+        for path in source_root.rglob("*")
+        if path.is_file()
+    }
+
+    def fake_fetch_url(url: str, **kwargs) -> tuple[bytes, str]:
+        if "/html/" in url:
+            return html, "text/html"
+        if url.endswith(".png"):
+            return _PNG_BYTES, "image/png"
+        raise AssertionError(url)
+
+    original_publish_candidate = sources.publish_source_candidate
+    original_publish_bytes = source_materials._publish_immutable_bytes
+
+    def fail_during_candidate_publish(staged_root: Path, destination: Path) -> None:
+        published = 0
+
+        def fail_after_two(target: Path, data: bytes, *, relative: Path) -> bool:
+            nonlocal published
+            published += 1
+            if published == 3:
+                raise OSError("injected publish failure")
+            return original_publish_bytes(target, data, relative=relative)
+
+        monkeypatch.setattr(source_materials, "_publish_immutable_bytes", fail_after_two)
+        try:
+            original_publish_candidate(staged_root, destination)
+        finally:
+            monkeypatch.setattr(source_materials, "_publish_immutable_bytes", original_publish_bytes)
+
+    monkeypatch.setattr(sources, "fetch_url", fake_fetch_url)
+    monkeypatch.setattr(sources, "publish_source_candidate", fail_during_candidate_publish)
+
+    with pytest.raises(OSError, match="injected publish failure"):
+        sources.backup_source(tmp_path, "paper", unit_id, "2605.12090")
+
+    after = {
+        path.relative_to(source_root).as_posix(): path.read_bytes()
+        for path in source_root.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+    assert not (source_root / "assets").exists()
 
 
 def test_backup_source_html_localizes_images_and_preserves_structured_markdown(
