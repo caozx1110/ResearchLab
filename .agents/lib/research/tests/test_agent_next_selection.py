@@ -1287,6 +1287,81 @@ def test_portfolio_history_write_revalidates_bound_program_decision(
     assert checkpoints == []
 
 
+@pytest.mark.parametrize("replacement", ["content", "same-bytes"])
+@pytest.mark.parametrize("history_state", ["existing", "fresh"])
+def test_portfolio_history_postwrite_gate_rolls_back_stale_decision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement: str,
+    history_state: str,
+) -> None:
+    orchestrate = _load_orchestrator(
+        f"orchestrator_portfolio_postwrite_{replacement}_{history_state}"
+    )
+    root = _workspace(tmp_path)
+    _record, decisions_file = _verified_program_decision(orchestrate, root)
+    _program(orchestrate, root, "program-a", actions=["Choose a grounded baseline"])
+    snapshot = orchestrate.portfolio_candidate_snapshot(root)
+    decision = _decision(root, snapshot, [snapshot["candidates"][0]["action_id"]])
+    decision["decision_scope"] = "research_judgement"
+    decision["program_decision_ids"] = ["program-a:decision-1"]
+    history_file = orchestrate.portfolio_history_path(root)
+    before_history: bytes | None = None
+    before_mode: int | None = None
+    if history_state == "existing":
+        write_yaml_if_changed(
+            history_file,
+            {
+                "id": orchestrate.PORTFOLIO_HISTORY_ID,
+                "generated_by": "research-orchestrator",
+                "generated_at": "2026-07-24T00:00:00+00:00",
+                "items": [{"decision_id": "existing-sentinel"}],
+            },
+        )
+        history_file.chmod(0o640)
+        before_history = history_file.read_bytes()
+        before_mode = history_file.stat().st_mode & 0o7777
+
+    original_write_yaml = orchestrate.write_yaml_if_changed
+    source_inode = decisions_file.stat().st_ino
+    replaced = False
+
+    def replace_decisions_after_history_write(path: Path, value: object) -> None:
+        nonlocal replaced
+        original_write_yaml(path, value)
+        if Path(path) != history_file or replaced:
+            return
+        replacement_file = decisions_file.with_name("decisions-postwrite-replacement.yaml")
+        if replacement == "same-bytes":
+            replacement_file.write_bytes(decisions_file.read_bytes())
+        else:
+            container = load_yaml(decisions_file)
+            container["items"][0]["payload"]["decision"]["text"] = "POSTWRITE_SENTINEL route B"
+            write_yaml_if_changed(replacement_file, container)
+        os.replace(replacement_file, decisions_file)
+        replaced = True
+
+    checkpoints: list[list[Path]] = []
+    monkeypatch.setattr(orchestrate, "write_yaml_if_changed", replace_decisions_after_history_write)
+    monkeypatch.setattr(
+        orchestrate,
+        "checkpoint_and_report",
+        lambda project_root, **kwargs: checkpoints.append(kwargs["target_paths"]) or {"committed": False},
+    )
+
+    with pytest.raises(SystemExit, match="unavailable or unverified"):
+        orchestrate.record_portfolio_decision(root, decision)
+
+    assert replaced is True
+    assert decisions_file.stat().st_ino != source_inode
+    if history_state == "existing":
+        assert history_file.read_bytes() == before_history
+        assert history_file.stat().st_mode & 0o7777 == before_mode
+    else:
+        assert not history_file.exists()
+    assert checkpoints == []
+
+
 def test_stable_research_judgement_record_and_replay_are_safe(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
