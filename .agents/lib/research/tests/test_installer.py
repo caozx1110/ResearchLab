@@ -8,6 +8,7 @@ import pty
 import re
 import select
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -19,6 +20,23 @@ PLAN_BYTE_SHA256_PLACEHOLDER = "COMPUTE_AFTER_REVIEW"
 
 def _project_root() -> Path:
     return Path(__file__).resolve().parents[4]
+
+
+def _workspace_snapshot(root: Path) -> dict[str, tuple[str, object, int]]:
+    snapshot: dict[str, tuple[str, object, int]] = {}
+    for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
+        relative = path.relative_to(root).as_posix()
+        metadata = path.lstat()
+        mode = stat.S_IMODE(metadata.st_mode)
+        if path.is_symlink():
+            snapshot[relative] = ("symlink", os.readlink(path), mode)
+        elif path.is_file():
+            snapshot[relative] = ("file", path.read_bytes(), mode)
+        elif path.is_dir():
+            snapshot[relative] = ("directory", None, mode)
+        else:
+            snapshot[relative] = ("special", metadata.st_mode, mode)
+    return snapshot
 
 
 def _run_dry_install(tmp_path: Path, *, no_managed_venv: bool = False) -> subprocess.CompletedProcess[str]:
@@ -660,6 +678,14 @@ def test_agent_uninstall_plan_reports_managed_block_and_exact_count(tmp_path: Pa
     )
     assert installed.returncode == 0, installed.stdout + installed.stderr
     plan_path = tmp_path / "uninstall-plan.json"
+    before = _workspace_snapshot(workspace)
+    env = {
+        **os.environ,
+        "HOME": str(tmp_path / "home"),
+        "RESEARCH_PYTHON": sys.executable,
+        "RESEARCH_NO_MANAGED_VENV": "1",
+        "NO_COLOR": "1",
+    }
 
     result = subprocess.run(
         [
@@ -673,13 +699,7 @@ def test_agent_uninstall_plan_reports_managed_block_and_exact_count(tmp_path: Pa
             "--yes",
         ],
         cwd=_project_root(),
-        env={
-            **os.environ,
-            "HOME": str(tmp_path / "home"),
-            "RESEARCH_PYTHON": sys.executable,
-            "RESEARCH_NO_MANAGED_VENV": "1",
-            "NO_COLOR": "1",
-        },
+        env=env,
         text=True,
         capture_output=True,
         check=False,
@@ -692,6 +712,131 @@ def test_agent_uninstall_plan_reports_managed_block_and_exact_count(tmp_path: Pa
     summary = re.search(r"预计受管目标：(\d+) 项", result.stdout)
     assert summary is not None
     assert int(summary.group(1)) == plan["target_count"] == len(plan["targets"])
+    assert "这个工作区现在不再由安装器管理" not in result.stdout
+    assert "安装器管理的工作区文件已移除" not in result.stdout
+    assert _workspace_snapshot(workspace) == before
+
+    applied = _apply_reviewed_plan(_project_root(), plan, env=env, timeout=30)
+
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    assert "这个工作区现在不再由安装器管理" in applied.stdout
+    assert "安装器管理的工作区文件已移除" in applied.stdout
+    assert not (workspace / ".agents/.install-manifest.json").exists()
+
+
+def test_user_agents_managed_block_round_trip_is_byte_exact_across_two_lifecycles(
+    tmp_path: Path,
+) -> None:
+    samples = {
+        "no-newline": "用户规则".encode(),
+        "one-newline": "用户规则\n".encode(),
+        "multiple-newlines": "用户规则\n\n\n".encode(),
+        "crlf": "用户规则\r\n第二行\r\n".encode(),
+        "empty": b"",
+    }
+    for name, original in samples.items():
+        workspace = tmp_path / f"agents-roundtrip-{name}"
+        workspace.mkdir()
+        target = workspace / "AGENTS.md"
+        target.write_bytes(original)
+        for _cycle in range(2):
+            for action in ("install", "update", "reinstall"):
+                result = _run_copy_action(tmp_path, workspace, action=action)
+                assert result.returncode == 0, result.stdout + result.stderr
+            manifest = json.loads(
+                (workspace / ".agents/.install-manifest.json").read_text(encoding="utf-8")
+            )
+            assert manifest["agents_md_roundtrip"]["before_sha256"] == hashlib.sha256(
+                original
+            ).hexdigest()
+            uninstalled = _run_copy_action(tmp_path, workspace, action="uninstall")
+            assert uninstalled.returncode == 0, uninstalled.stdout + uninstalled.stderr
+            assert target.is_file()
+            assert target.read_bytes() == original
+
+
+def test_user_agents_suffix_after_managed_block_survives_exact_uninstall(tmp_path: Path) -> None:
+    workspace = tmp_path / "agents-roundtrip-suffix"
+    workspace.mkdir()
+    target = workspace / "AGENTS.md"
+    original = "前置用户规则\r\n".encode()
+    suffix = "后置用户规则\n".encode()
+    target.write_bytes(original)
+    installed = _run_copy_action(tmp_path, workspace, action="install")
+    assert installed.returncode == 0, installed.stdout + installed.stderr
+    target.write_bytes(target.read_bytes() + suffix)
+
+    for action in ("update", "reinstall"):
+        result = _run_copy_action(tmp_path, workspace, action=action)
+        assert result.returncode == 0, result.stdout + result.stderr
+    uninstalled = _run_copy_action(tmp_path, workspace, action="uninstall")
+
+    assert uninstalled.returncode == 0, uninstalled.stdout + uninstalled.stderr
+    assert target.read_bytes() == original + suffix
+
+
+def test_ready_managed_venv_suppresses_update_warning_and_conditional_target(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "ready-managed-venv"
+    installed = _run_copy_action(tmp_path, workspace, action="install")
+    assert installed.returncode == 0, installed.stdout + installed.stderr
+    managed_bin = workspace / ".venv/bin"
+    managed_bin.mkdir(parents=True)
+    (managed_bin / "python").symlink_to(sys.executable)
+    home = tmp_path / "ready-managed-home"
+    home.mkdir()
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "NO_COLOR": "1",
+        "PATH": "/usr/bin:/bin",
+        "RESEARCH_PYTHON": "/bin/false",
+        "RESEARCH_NO_PDF_BACKEND": "1",
+    }
+    doctor = subprocess.run(
+        [str(workspace / ".agents/skills/kb-cli/scripts/kb"), "--root", str(workspace), "doctor"],
+        cwd=workspace,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert doctor.returncode == 0, doctor.stdout + doctor.stderr
+    assert "受管项目运行环境可用" in doctor.stdout
+
+    plan_path = tmp_path / "ready-managed-update.json"
+    planned = subprocess.run(
+        [
+            "bash",
+            str(_project_root() / "install.sh"),
+            "update",
+            "--agent-plan-json",
+            str(plan_path),
+            "--project",
+            str(workspace),
+            "--yes",
+        ],
+        cwd=_project_root(),
+        env=env,
+        stdin=subprocess.DEVNULL,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert planned.returncode == 0, planned.stdout + planned.stderr
+    assert "Python 依赖尚未就绪" not in planned.stdout + planned.stderr
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    assert plan["conditional_runtime_changes"] == []
+
+    applied = _apply_reviewed_plan(_project_root(), plan, env=env, timeout=30)
+
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    assert "Python 依赖尚未就绪" not in applied.stdout + applied.stderr
+    assert "skills 已是最新版本" in applied.stdout
 
 
 def test_installer_smoke_does_not_create_unplanned_bytecode(tmp_path: Path) -> None:
