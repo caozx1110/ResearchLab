@@ -1245,6 +1245,92 @@ def test_program_decision_reference_rejects_replacement_after_validation(
     assert replaced is True
 
 
+@pytest.mark.parametrize("replacement", ["same-bytes", "changed", "duplicate-subject"])
+def test_portfolio_history_write_revalidates_bound_program_decision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement: str,
+) -> None:
+    orchestrate = _load_orchestrator(f"orchestrator_portfolio_final_gate_{replacement}")
+    root = _workspace(tmp_path)
+    _record, decisions_file = _verified_program_decision(orchestrate, root)
+    _program(orchestrate, root, "program-a", actions=["Choose a grounded baseline"])
+    snapshot = orchestrate.portfolio_candidate_snapshot(root)
+    decision = _decision(root, snapshot, [snapshot["candidates"][0]["action_id"]])
+    decision["decision_scope"] = "research_judgement"
+    decision["program_decision_ids"] = ["program-a:decision-1"]
+    history_file = orchestrate.portfolio_history_path(root)
+    checkpoints: list[list[Path]] = []
+    original_load_history = orchestrate._load_portfolio_history
+    replaced = False
+
+    def replace_decisions_during_history_load(project_root: Path) -> dict:
+        nonlocal replaced
+        history = original_load_history(project_root)
+        if replaced:
+            return history
+        replacement_file = decisions_file.with_name("decisions-replacement.yaml")
+        if replacement == "same-bytes":
+            replacement_file.write_bytes(decisions_file.read_bytes())
+        else:
+            container = load_yaml(decisions_file)
+            if replacement == "changed":
+                container["items"][0]["payload"]["decision"]["text"] = "NEW_SENTINEL route B"
+            else:
+                container["items"].append(dict(container["items"][0]))
+            write_yaml_if_changed(replacement_file, container)
+        os.replace(replacement_file, decisions_file)
+        replaced = True
+        return history
+
+    monkeypatch.setattr(orchestrate, "_load_portfolio_history", replace_decisions_during_history_load)
+    monkeypatch.setattr(
+        orchestrate,
+        "checkpoint_and_report",
+        lambda project_root, **kwargs: checkpoints.append(kwargs["target_paths"]) or {"committed": False},
+    )
+
+    with pytest.raises(SystemExit, match="unavailable or unverified"):
+        orchestrate.record_portfolio_decision(root, decision)
+
+    assert replaced is True
+    assert not history_file.exists()
+    assert checkpoints == []
+
+
+def test_stable_research_judgement_record_and_replay_are_safe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orchestrate = _load_orchestrator("orchestrator_portfolio_stable_final_gate")
+    root = _workspace(tmp_path)
+    _verified_program_decision(orchestrate, root)
+    _program(orchestrate, root, "program-a", actions=["Choose a grounded baseline"])
+    snapshot = orchestrate.portfolio_candidate_snapshot(root)
+    decision = _decision(root, snapshot, [snapshot["candidates"][0]["action_id"]])
+    decision["decision_scope"] = "research_judgement"
+    decision["program_decision_ids"] = ["program-a:decision-1"]
+    checkpoints: list[list[Path]] = []
+    monkeypatch.setattr(
+        orchestrate,
+        "checkpoint_and_report",
+        lambda project_root, **kwargs: checkpoints.append(kwargs["target_paths"]) or {"committed": False},
+    )
+
+    stored, changed = orchestrate.record_portfolio_decision(root, decision)
+    history_file = orchestrate.portfolio_history_path(root)
+    before_replay = history_file.read_bytes()
+    before_replay_inode = history_file.stat().st_ino
+    replayed, replay_changed = orchestrate.record_portfolio_decision(root, decision)
+
+    assert changed is True
+    assert replay_changed is False
+    assert replayed == stored
+    assert history_file.read_bytes() == before_replay
+    assert history_file.stat().st_ino == before_replay_inode
+    assert checkpoints == [[history_file]]
+
+
 def test_missing_preference_receipt_fails_closed(tmp_path: Path) -> None:
     orchestrate = _load_orchestrator("orchestrator_agent_preference_gate")
     root = _workspace(tmp_path)
