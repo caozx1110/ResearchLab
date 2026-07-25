@@ -15,7 +15,7 @@ from research.paths import record_path, unit_root
 from research.records import normalize_record_schema, trusted_claim_source_roots as shared_source_roots
 from research.core import default_record, locate_record, write_record
 from research.common import load_yaml, write_yaml_if_changed
-from research.judgements import judgement_snapshot_binding
+from research.judgements import discover_pending_judgements
 
 
 def _load_skill_script(skill: str, script_name: str):
@@ -349,11 +349,14 @@ def test_r1_program_decision_requires_two_stage_confirmation(tmp_path: Path, mon
     decision_id = decisions[0]["id"]
     assert decisions[0]["confirmation_status"] == "pending_user_confirmation"
     assert decisions[0]["payload"]["verification"]["artifacts"]
-    expected = judgement_snapshot_binding(
-        decisions[0],
-        owner="research-orchestrator",
-        path=orchestrate.decisions_path(tmp_path, program_id).relative_to(tmp_path).as_posix(),
-    )
+    cards = [
+        card
+        for card in discover_pending_judgements(tmp_path)
+        if card["subject"]["kind"] == "program_decision"
+        and card["subject"]["id"] == decision_id
+    ]
+    assert len(cards) == 1
+    expected = cards[0]["snapshot_binding"]
 
     monkeypatch.setattr(
         sys,

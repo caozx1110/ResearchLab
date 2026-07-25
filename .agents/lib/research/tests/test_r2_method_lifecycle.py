@@ -14,7 +14,6 @@ from research.journal import committed_ops
 from research.judgements import (
     discover_pending_judgements,
     judgement_confirmation_is_current,
-    judgement_snapshot_binding,
 )
 from research.paths import config_root
 from research.records import trusted_claim_source_roots as shared_source_roots
@@ -152,13 +151,20 @@ def _verify(method, monkeypatch, root: Path) -> int:
     )
 
 
+def _review_snapshot(root: Path) -> dict:
+    choice_id = str(load_yaml(_paths(root)["choice"], default={}).get("id") or "")
+    matches = [
+        card
+        for card in discover_pending_judgements(root)
+        if card["subject"]["kind"] == "method_selection"
+        and card["subject"]["id"] == choice_id
+    ]
+    assert len(matches) == 1
+    return matches[0]["snapshot_binding"]
+
+
 def _confirm(method, monkeypatch, root: Path, *, expected: dict | None = None) -> int:
-    choice_path = _paths(root)["choice"]
-    expected = expected or judgement_snapshot_binding(
-            load_yaml(choice_path),
-            owner="method-designer",
-            path=choice_path.relative_to(root).as_posix(),
-        )
+    expected = expected or _review_snapshot(root)
     return _run(
         method,
         monkeypatch,
@@ -181,13 +187,8 @@ def _confirm(method, monkeypatch, root: Path, *, expected: dict | None = None) -
     )
 
 
-def _reject(method, monkeypatch, root: Path) -> int:
-    choice_path = _paths(root)["choice"]
-    expected = judgement_snapshot_binding(
-        load_yaml(choice_path),
-        owner="method-designer",
-        path=choice_path.relative_to(root).as_posix(),
-    )
+def _reject(method, monkeypatch, root: Path, *, expected: dict | None = None) -> int:
+    expected = expected or _review_snapshot(root)
     return _run(
         method,
         monkeypatch,
@@ -242,7 +243,8 @@ def test_prepare_verify_confirm_promotes_state_and_event_only_at_confirmation(tm
     assert state["stage"] == "idea-review"
     assert not paths["events"].exists()
 
-    assert _confirm(method, monkeypatch, root) == 0
+    expected = _review_snapshot(root)
+    assert _confirm(method, monkeypatch, root, expected=expected) == 0
     assert repo_locates_after_prepare == 0
     choice = load_yaml(paths["choice"], default={})
     state = load_yaml(paths["state"], default={})
@@ -272,9 +274,9 @@ def test_prepare_verify_confirm_promotes_state_and_event_only_at_confirmation(tm
     assert {"method:prepare", "method:verify", "method:confirm"} <= op_types
 
     with pytest.raises(SystemExit, match="not ready for review|already finalized"):
-        _confirm(method, monkeypatch, root)
+        _confirm(method, monkeypatch, root, expected=expected)
     with pytest.raises(SystemExit, match="not ready for rejection"):
-        _reject(method, monkeypatch, root)
+        _reject(method, monkeypatch, root, expected=expected)
     assert len(load_yaml(paths["events"], default={})["items"]) == 1
 
     choice["payload"]["claims"][0]["text"] += " Changed after confirmation."
@@ -403,12 +405,13 @@ def test_confirm_rejects_claim_changes_after_verification_without_side_effects(t
     assert _prepare(method, monkeypatch, root) == 0
     _fill_method_claims(root)
     assert _verify(method, monkeypatch, root) == 0
+    expected = _review_snapshot(root)
     choice = load_yaml(paths["choice"], default={})
     choice["payload"]["claims"][0]["text"] += " Stale edit."
     write_yaml_if_changed(paths["choice"], choice)
 
     with pytest.raises(SystemExit, match="not ready for confirmation"):
-        _confirm(method, monkeypatch, root)
+        _confirm(method, monkeypatch, root, expected=expected)
 
     state = load_yaml(paths["state"], default={})
     choice = load_yaml(paths["choice"], default={})
@@ -477,11 +480,7 @@ def test_method_old_review_snapshot_cannot_confirm_changed_selection_reason(tmp_
     _fill_method_claims(root)
     assert _verify(method, monkeypatch, root) == 0
     choice = load_yaml(paths["choice"], default={})
-    expected = judgement_snapshot_binding(
-        choice,
-        owner="method-designer",
-        path=paths["choice"].relative_to(root).as_posix(),
-    )
+    expected = _review_snapshot(root)
     choice["payload"]["method_selection"]["selection_reason"] = "Changed after the user saw the review card."
     write_yaml_if_changed(paths["choice"], choice)
 
@@ -500,13 +499,14 @@ def test_method_review_blocks_mismatched_operative_repo_field(tmp_path: Path, mo
     assert _prepare(method, monkeypatch, root) == 0
     _fill_method_claims(root)
     assert _verify(method, monkeypatch, root) == 0
+    expected = _review_snapshot(root)
     choice = load_yaml(paths["choice"], default={})
     choice["proposed_repo_id"] = "r-different-operative-value"
     write_yaml_if_changed(paths["choice"], choice)
 
     assert discover_pending_judgements(root) == []
     with pytest.raises(SystemExit, match="divergent operative"):
-        _confirm(method, monkeypatch, root)
+        _confirm(method, monkeypatch, root, expected=expected)
 
     assert "selected_repo_id" not in load_yaml(paths["choice"], default={})
     assert "selected_repo_id" not in load_yaml(paths["state"], default={})

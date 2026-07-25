@@ -9,7 +9,7 @@ import pytest
 
 from research.common import load_yaml, write_yaml_if_changed
 from research.core import default_record, ensure_workspace, record_path
-from research.judgements import judgement_snapshot_binding
+from research.judgements import discover_pending_judgements
 
 
 def _project_root() -> Path:
@@ -55,6 +55,17 @@ def _setup_records(tmp_path: Path, idea) -> tuple[str, str]:
 def _run(idea, monkeypatch, *argv: str) -> int:
     monkeypatch.setattr(sys, "argv", ["idea.py", *argv])
     return idea.main()
+
+
+def _review_snapshot(root: Path, judgement_id: str) -> dict:
+    matches = [
+        card
+        for card in discover_pending_judgements(root)
+        if card["subject"]["kind"] == "idea_discussion_conclusion"
+        and card["subject"]["id"] == judgement_id
+    ]
+    assert len(matches) == 1
+    return matches[0]["snapshot_binding"]
 
 
 def _filled_scaffold(path: Path, source_id: str, quote: str) -> dict:
@@ -116,11 +127,7 @@ def test_discuss_verify_accepts_verbatim_evidence_and_persists_one_conclusion(tm
     assert judgement["payload"]["claims"][-1]["text"] == fill["conclusion"]
     assert judgement["payload"]["verification"]["verified_at"]
     assert judgement["confirmation_status"] == "pending_user_confirmation"
-    expected = judgement_snapshot_binding(
-        judgement,
-        owner="idea-workbench",
-        path=(record_path(tmp_path, "idea", idea_id).parent / "discussion-judgements.yaml").relative_to(tmp_path).as_posix(),
-    )
+    expected = _review_snapshot(tmp_path, judgement["id"])
 
     assert _run(
         idea,
@@ -200,11 +207,7 @@ def test_discuss_confirm_cannot_forge_missing_authorization_source(tmp_path: Pat
     assert _run(idea, monkeypatch, "discuss", "--id", idea_id, "--phase", "verify") == 0
     sidecar_path = unit_root / "discussion-judgements.yaml"
     judgement = load_yaml(sidecar_path)["items"][0]
-    expected = judgement_snapshot_binding(
-        judgement,
-        owner="idea-workbench",
-        path=sidecar_path.relative_to(tmp_path).as_posix(),
-    )
+    expected = _review_snapshot(tmp_path, judgement["id"])
 
     with pytest.raises(SystemExit, match="authorization_source=user_message"):
         _run(
@@ -239,11 +242,7 @@ def test_discuss_reject_closes_verified_side_judgement_without_human_signature(t
     write_yaml_if_changed(fill_path, fill)
     assert _run(idea, monkeypatch, "discuss", "--id", idea_id, "--phase", "verify") == 0
     judgement_id = load_yaml(unit_root / "discussion-judgements.yaml")["items"][0]["id"]
-    expected = judgement_snapshot_binding(
-        load_yaml(unit_root / "discussion-judgements.yaml")["items"][0],
-        owner="idea-workbench",
-        path=(unit_root / "discussion-judgements.yaml").relative_to(tmp_path).as_posix(),
-    )
+    expected = _review_snapshot(tmp_path, judgement_id)
 
     assert _run(
         idea,
@@ -283,11 +282,7 @@ def test_discussion_old_review_snapshot_cannot_confirm_changed_conclusion(tmp_pa
     sidecar_path = unit_root / "discussion-judgements.yaml"
     sidecar = load_yaml(sidecar_path)
     judgement = sidecar["items"][0]
-    expected = judgement_snapshot_binding(
-        judgement,
-        owner="idea-workbench",
-        path=sidecar_path.relative_to(tmp_path).as_posix(),
-    )
+    expected = _review_snapshot(tmp_path, judgement["id"])
     judgement["payload"]["discussion_conclusion"]["text"] = "Changed after the user saw the review card."
     write_yaml_if_changed(sidecar_path, sidecar)
 
