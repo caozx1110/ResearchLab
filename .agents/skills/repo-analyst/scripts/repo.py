@@ -50,6 +50,7 @@ from research.core import (
     apply_record_governance,
     build_index,
     candidate_pools_path,
+    canonical_record_snapshot_for_record,
     command_mutation,
     checkpoint_and_report,
     confirm_unit,
@@ -935,6 +936,7 @@ def _run_map_capability(args, root, record, unit_root, defer_post_actions) -> in
     ),
 )
 def _run_confirm(args, root: Path, record: dict, unit_root: Path, defer_post_actions: bool) -> int:
+    expected_record_snapshot = canonical_record_snapshot_for_record(root, record)
     record = confirm_unit(
         record,
         "repo",
@@ -943,8 +945,9 @@ def _run_confirm(args, root: Path, record: dict, unit_root: Path, defer_post_act
         user_authorization=args.user_authorization,
         authorization_source=args.authorization_source,
         project_root=root,
+        expected_record_snapshot=expected_record_snapshot,
     )
-    write_record(root, record)
+    write_record(root, record, expected_record_snapshot=expected_record_snapshot)
     print(f"[ok] confirmed {args.repo_id}")
     _finalize_post_actions(root, trigger="milestone", message=f"milestone: confirm repo {args.repo_id}",
                            defer_post_actions=defer_post_actions,

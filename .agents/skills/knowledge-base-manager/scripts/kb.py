@@ -27,6 +27,7 @@ from research.core import (
     build_index,
     audit_workspace,
     candidate_pools_path,
+    canonical_record_snapshot_for_record,
     compact_unit_ids,
     dataset_migration_plan,
     dataset_migration_targets,
@@ -42,6 +43,7 @@ from research.core import (
     link_records,
     lint_records,
     locate_record,
+    normalize_record_snapshot,
     iter_records,
     is_ready_for_human_review,
     checkpoint_and_report,
@@ -310,6 +312,11 @@ def apply_batch_confirmation(
             print(f"[skip] {unit_id}: confirmation_status={confirmation_status or '-'}")
             continue
         kind = str(record.get("kind") or "")
+        expected_record_snapshot = canonical_record_snapshot_for_record(root, record)
+        current_record = normalize_record_snapshot(expected_record_snapshot, root)
+        if current_record is None:
+            raise SystemExit(f"Cannot normalize current record for confirmation: {unit_id}")
+        record = current_record
         updated = confirm_unit(
             record,
             kind,
@@ -319,12 +326,15 @@ def apply_batch_confirmation(
             project_root=root,
             user_authorization=user_authorization,
             authorization_source=authorization_source,
+            expected_record_snapshot=expected_record_snapshot,
         )
-        written.append(write_record(root, updated))
+        written.append(
+            write_record(root, updated, expected_record_snapshot=expected_record_snapshot)
+        )
     return written
 
 
-def prepare_review_batch_decision(
+def _prepare_review_batch_decision_bound(
     root: Path,
     item: dict,
     decision: str,
@@ -334,7 +344,7 @@ def prepare_review_batch_decision(
     user_authorization: str,
     authorization_source: str,
     rejection_reason: str,
-) -> dict:
+) -> tuple[dict, dict, object | None]:
     """Pure-read validation and exact target planning for a root review batch."""
     route_key = "confirm_route" if decision == "confirm" else "reject_route"
     route = item.get(route_key) if isinstance(item, dict) else None
@@ -357,7 +367,9 @@ def prepare_review_batch_decision(
         root=root,
     )
     candidate = copy.deepcopy(record)
+    expected_record_snapshot = None
     if decision == "confirm":
+        expected_record_snapshot = canonical_record_snapshot_for_record(root, record)
         confirm_unit(
             candidate,
             str(candidate.get("kind") or ""),
@@ -367,6 +379,7 @@ def prepare_review_batch_decision(
             project_root=root,
             user_authorization=user_authorization,
             authorization_source=authorization_source,
+            expected_record_snapshot=expected_record_snapshot,
         )
     elif decision == "reject":
         if confirmation_track(candidate) == "judgement":
@@ -376,12 +389,38 @@ def prepare_review_batch_decision(
     else:
         raise ValueError("knowledge review decision is invalid")
     targets = _unique_paths(record_targets([record], root) + index_mutation_targets(root))
-    return {
+    plan = {
         "owner": "knowledge-base-manager",
         "decision": decision,
         "unit_id": unit_id,
         "target_paths": targets,
     }
+    return plan, record, expected_record_snapshot
+
+
+def prepare_review_batch_decision(
+    root: Path,
+    item: dict,
+    decision: str,
+    *,
+    actor: str,
+    evidence: list[str],
+    user_authorization: str,
+    authorization_source: str,
+    rejection_reason: str,
+) -> dict:
+    """Pure-read public plan without exposing runtime record capabilities."""
+    plan, _record, _expected = _prepare_review_batch_decision_bound(
+        root,
+        item,
+        decision,
+        actor=actor,
+        evidence=evidence,
+        user_authorization=user_authorization,
+        authorization_source=authorization_source,
+        rejection_reason=rejection_reason,
+    )
+    return plan
 
 
 def apply_review_batch_decision(
@@ -396,7 +435,7 @@ def apply_review_batch_decision(
     rejection_reason: str,
 ) -> list[Path]:
     """Apply one already-root-journaled decision without a nested transaction."""
-    prepare_review_batch_decision(
+    _plan, record, expected_record_snapshot = _prepare_review_batch_decision_bound(
         root,
         item,
         decision,
@@ -406,9 +445,8 @@ def apply_review_batch_decision(
         authorization_source=authorization_source,
         rejection_reason=rejection_reason,
     )
-    route = item["confirm_route" if decision == "confirm" else "reject_route"]
-    record, _path = locate_record(root, str(route["id"]))
     if decision == "confirm":
+        assert expected_record_snapshot is not None
         updated = confirm_unit(
             record,
             str(record.get("kind") or ""),
@@ -418,6 +456,7 @@ def apply_review_batch_decision(
             project_root=root,
             user_authorization=user_authorization,
             authorization_source=authorization_source,
+            expected_record_snapshot=expected_record_snapshot,
         )
     elif confirmation_track(record) == "judgement":
         apply_judgement_rejection(record, reason=rejection_reason)
@@ -428,7 +467,11 @@ def apply_review_batch_decision(
         record.pop("confirmation", None)
         record["rejection"] = {"at": utc_now_iso(), "reason": rejection_reason}
         updated = record
-    written = write_record(root, updated)
+    written = write_record(
+        root,
+        updated,
+        expected_record_snapshot=expected_record_snapshot if decision == "confirm" else None,
+    )
     build_index(root)
     return [written]
 

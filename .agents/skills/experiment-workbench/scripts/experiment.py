@@ -38,7 +38,7 @@ from research.common import (
     write_text_if_changed,
     write_yaml_if_changed,
 )
-from research.core import append_history, build_index, build_unit_id, candidate_pools_path, command_mutation, confirm_unit, default_record, ensure_workspace, kb_root, locate_record, project_root, record_path, rel, topic_taxonomy_path, write_record
+from research.core import append_history, build_index, build_unit_id, candidate_pools_path, canonical_record_snapshot_for_record, command_mutation, confirm_unit, default_record, ensure_workspace, kb_root, locate_record, project_root, record_path, rel, topic_taxonomy_path, write_record
 from research.evidence import attach_claims, build_verification_receipt, validate_claims, verify_claim_evidence
 from research.judgements import confirmation_binding
 from research.preference_selection import (
@@ -1605,6 +1605,7 @@ def _dispatch(args, root: Path) -> int:
             record,
             operation="diagnose",
         )
+        expected_record_snapshot = canonical_record_snapshot_for_record(root, record)
         record = confirm_unit(
             record,
             "experiment",
@@ -1614,8 +1615,9 @@ def _dispatch(args, root: Path) -> int:
             authorization_source=args.authorization_source,
             method="experiment.py confirm",
             project_root=root,
+            expected_record_snapshot=expected_record_snapshot,
         )
-        write_record(root, record)
+        write_record(root, record, expected_record_snapshot=expected_record_snapshot)
         build_index(root)
         program_id = str(record.get("payload", {}).get("basic_info", {}).get("program_id") or "").strip()
         if program_id:

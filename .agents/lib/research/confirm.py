@@ -281,8 +281,12 @@ def apply_confirmation(
                     )
             else:
                 current = require_current_record_snapshot(project_root, expected_record_snapshot)
-                normalized_current = normalize_record_snapshot(current, project_root)
-                if normalized_current is None or normalized_current != record:
+                supplied_snapshot = canonical_record_snapshot_if_present(project_root, record)
+                if supplied_snapshot is None or (
+                    supplied_snapshot.raw_bytes != current.raw_bytes
+                    or supplied_snapshot.file_identity != current.file_identity
+                    or supplied_snapshot.directory_capabilities != current.directory_capabilities
+                ):
                     raise ValueError("record content differs from expected canonical snapshot")
         except ValueError as exc:
             raise SystemExit("Persisted unit confirmation snapshot is not current.") from exc
@@ -318,7 +322,9 @@ def apply_confirmation(
             str(record.get("kind") or ""),
             str(record.get("id") or ""),
         )
-    if project_root is not None and source_roots is None:
+    if project_root is not None and (
+        source_roots is None or expected_record_snapshot is not None
+    ):
         try:
             source_roots = trusted_claim_source_roots(
                 project_root,
@@ -588,7 +594,9 @@ def _require_expected_confirmation_delta(
         "last_human_confirmed_at",
         "confirmation",
         "status",
+        "maturity",
         "history",
+        "updated_at",
     }
     for key in set(baseline) | set(record):
         if key not in mutable_fields and baseline.get(key) != record.get(key):

@@ -36,7 +36,7 @@ from research.judgements import (
     judgement_confirmation_is_current,
     readiness_violations,
 )
-from research.records import kind_payload_skeleton
+from research.records import canonical_record_snapshot_for_record, kind_payload_skeleton
 
 
 def _project_root() -> Path:
@@ -243,10 +243,12 @@ def test_capability_fill_legit_evidence_validates_and_clears_substance_gate(tmp_
     assert "[README.md:line=2]" in note_md
 
     # Substance gate now passes: a real human can confirm the judgement-track repo.
+    expected_record_snapshot = canonical_record_snapshot_for_record(tmp_path, record)
     confirmed = confirm_unit(record, "repo", confirmed_by="czx",
                              evidence=["kb/units/repos/r-fill-legit-1/repo-note.md"],
                              user_authorization="I confirm this repo analysis.",
-                             authorization_source="user_message", project_root=tmp_path)
+                             authorization_source="user_message", project_root=tmp_path,
+                             expected_record_snapshot=expected_record_snapshot)
     assert confirmed["confirmation_status"] == "confirmed"
     canonical_path = record_path(tmp_path, "repo", record["id"])
     write_yaml_if_changed(canonical_path, confirmed)

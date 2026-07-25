@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import research.confirm as confirmation
 import research.records as records
 from research.common import load_yaml, write_yaml_if_changed
 from research.core import (
@@ -205,6 +206,35 @@ def test_artifact_change_after_confirmation_before_write_is_zero_write(tmp_path:
     assert "confirmation" not in on_disk
 
 
+def test_ancestor_replacement_after_confirmation_before_write_is_zero_write(tmp_path: Path) -> None:
+    ensure_workspace(tmp_path)
+    unit_id = "p-confirm-ancestor-123456"
+    path = record_path(tmp_path, "paper", unit_id)
+    write_record(tmp_path, _record(unit_id))
+    detached, _ = locate_record(tmp_path, unit_id, kind="paper", fuzzy=False)
+    expected = records.canonical_record_snapshot_for_record(tmp_path, detached)
+    confirmed = confirm_unit(
+        detached,
+        "paper",
+        confirmed_by="Human Reviewer",
+        evidence=["Reviewed ancestor-bound record."],
+        project_root=tmp_path,
+        expected_record_snapshot=expected,
+    )
+    papers_root = path.parent.parent
+    displaced_root = papers_root.parent / "papers-displaced"
+    papers_root.rename(displaced_root)
+    papers_root.mkdir()
+    (displaced_root / unit_id).rename(papers_root / unit_id)
+    before = path.read_bytes()
+
+    with pytest.raises(SystemExit, match="snapshot|changed|current"):
+        write_record(tmp_path, confirmed, expected_record_snapshot=expected)
+
+    assert path.read_bytes() == before
+    assert load_yaml(path)["confirmation_status"] == "pending_user_confirmation"
+
+
 def test_persisted_unit_confirmation_cannot_omit_snapshot(tmp_path: Path) -> None:
     ensure_workspace(tmp_path)
     unit_id = "p-confirm-missing-snapshot-123456"
@@ -225,6 +255,34 @@ def test_persisted_unit_confirmation_cannot_omit_snapshot(tmp_path: Path) -> Non
     assert path.read_bytes() == before
     assert detached["confirmation_status"] == "pending_user_confirmation"
     assert "confirmation" not in detached
+
+
+def test_persisted_confirmation_forces_snapshot_bound_source_capture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ensure_workspace(tmp_path)
+    unit_id = "p-confirm-roots-123456"
+    write_record(tmp_path, _record(unit_id))
+    detached, _ = locate_record(tmp_path, unit_id, kind="paper", fuzzy=False)
+    expected = records.canonical_record_snapshot_for_record(tmp_path, detached)
+    seen: list[object] = []
+
+    def capture_roots(_root, _record_value, **kwargs):
+        seen.append(kwargs.get("expected_record_snapshot"))
+        return {}
+
+    monkeypatch.setattr(confirmation, "trusted_claim_source_roots", capture_roots)
+    confirmation.apply_confirmation(
+        detached,
+        confirmed_by="Human Reviewer",
+        evidence=["Reviewed canonical source roots."],
+        project_root=tmp_path,
+        trusted_source_roots={"untrusted": tmp_path},
+        expected_record_snapshot=expected,
+    )
+
+    assert seen == [expected]
 
 
 def test_authorized_content_change_before_write_is_rejected(tmp_path: Path) -> None:
@@ -274,6 +332,27 @@ def test_confirmed_receipt_cannot_bypass_missing_snapshot_at_write(tmp_path: Pat
         write_record(tmp_path, confirmed)
 
     assert path.read_bytes() == before
+
+
+def test_promote_can_confirm_with_explicit_lifecycle_updates(tmp_path: Path) -> None:
+    ensure_workspace(tmp_path)
+    unit_id = "p-confirm-lifecycle-123456"
+    write_record(tmp_path, _record(unit_id))
+
+    path = promote_record(
+        tmp_path,
+        unit_id,
+        status="active",
+        maturity="complete",
+        confirmation_status="confirmed",
+        confirmed_by="Human Reviewer",
+        evidence=["Reviewed lifecycle promotion."],
+    )
+
+    persisted = load_yaml(path)
+    assert persisted["confirmation_status"] == "confirmed"
+    assert persisted["status"] == "active"
+    assert persisted["maturity"] == "complete"
 
 
 def test_promote_to_confirmed_requires_human_provenance(tmp_path: Path) -> None:

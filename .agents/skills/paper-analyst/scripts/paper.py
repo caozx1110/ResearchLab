@@ -56,6 +56,7 @@ from research.core import (
     apply_record_governance,
     build_index,
     command_mutation,
+    canonical_record_snapshot_for_record,
     confirm_unit,
     load_runtime_preferences,
     locate_record,
@@ -2003,6 +2004,7 @@ def _run_complete_note(args, root, record, unit_root, cache_path, source_chunks,
     ),
 )
 def _run_confirm(args, root: Path, record: dict, unit_root: Path, defer_post_actions: bool) -> int:
+    expected_record_snapshot = canonical_record_snapshot_for_record(root, record)
     record = confirm_unit(
         record,
         "paper",
@@ -2012,8 +2014,9 @@ def _run_confirm(args, root: Path, record: dict, unit_root: Path, defer_post_act
         authorization_source=args.authorization_source,
         method="paper.py confirm",
         project_root=root,
+        expected_record_snapshot=expected_record_snapshot,
     )
-    write_record(root, record)
+    write_record(root, record, expected_record_snapshot=expected_record_snapshot)
     print(f"[ok] confirmed {args.paper_id}")
     _finalize_post_actions(
         root,

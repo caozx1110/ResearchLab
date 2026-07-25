@@ -654,7 +654,18 @@ def test_batch_confirmation_transmits_final_user_authorization_signature(monkeyp
     kb = _load_kb_module()
     captured: dict[str, object] = {}
 
-    def fake_confirm(record, kind, *, confirmed_by, evidence, method, project_root, user_authorization, authorization_source):
+    def fake_confirm(
+        record,
+        kind,
+        *,
+        confirmed_by,
+        evidence,
+        method,
+        project_root,
+        user_authorization,
+        authorization_source,
+        expected_record_snapshot,
+    ):
         captured.update(
             record=record,
             kind=kind,
@@ -664,13 +675,20 @@ def test_batch_confirmation_transmits_final_user_authorization_signature(monkeyp
             project_root=project_root,
             user_authorization=user_authorization,
             authorization_source=authorization_source,
+            expected_record_snapshot=expected_record_snapshot,
         )
         return record
 
     monkeypatch.setattr(kb, "confirm_unit", fake_confirm)
     written_path = tmp_path / "kb" / "units" / "papers" / "p-auth-12345678" / "record.yaml"
-    monkeypatch.setattr(kb, "write_record", lambda _root, _record: written_path)
+    monkeypatch.setattr(
+        kb,
+        "write_record",
+        lambda _root, _record, *, expected_record_snapshot: written_path,
+    )
     record = _paper("p-auth-12345678", full_note_status="ready_for_review")
+    ensure_workspace(tmp_path)
+    _write_record(tmp_path, record)
 
     assert kb.apply_batch_confirmation(
         tmp_path,
@@ -683,6 +701,7 @@ def test_batch_confirmation_transmits_final_user_authorization_signature(monkeyp
     ) == [written_path]
     assert captured["user_authorization"] == "I confirm this judgement"
     assert captured["authorization_source"] == "user_message"
+    assert captured["expected_record_snapshot"].unit_id == record["id"]
 
 
 def test_manual_checkpoint_resolves_literal_dirty_paths_and_clean_is_noop(monkeypatch, tmp_path: Path, capsys) -> None:

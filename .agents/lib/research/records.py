@@ -902,8 +902,18 @@ def _snapshot_matches_detached_record(
     snapshot: CanonicalRecordSnapshot,
     record: dict[str, Any],
 ) -> bool:
+    if snapshot.record == record:
+        return True
     normalized = normalize_record_snapshot(snapshot, project_root)
-    return normalized is not None and normalized == record
+    try:
+        supplied = normalize_record_schema(
+            record,
+            project_root=project_root,
+            canonical_snapshot=snapshot,
+        )
+    except (SystemExit, TypeError, ValueError, AttributeError, KeyError, IndexError):
+        return False
+    return normalized is not None and normalized == supplied
 
 
 def canonical_record_snapshot_if_present(
@@ -2100,6 +2110,10 @@ __all__ = [
     "CanonicalRecordSnapshot",
     "CanonicalUnitSnapshot",
     "iter_canonical_record_snapshots",
+    "canonical_record_snapshot_if_present",
+    "canonical_record_snapshot_for_identity",
+    "canonical_record_snapshot_for_record",
+    "require_current_record_snapshot",
     "normalize_record_snapshot",
     "snapshot_canonical_unit_artifacts",
     "snapshot_canonical_unit_tree",

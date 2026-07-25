@@ -50,6 +50,7 @@ from research.core import (
     append_history,
     build_index,
     candidate_pools_path,
+    canonical_record_snapshot_for_record,
     command_mutation,
     checkpoint_and_report,
     confirm_unit,
@@ -778,6 +779,7 @@ def _run_complete_note(args, root: Path, record: dict, unit_root: Path, defer_po
     ),
 )
 def _run_confirm(args, root: Path, record: dict, unit_root: Path, defer_post_actions: bool) -> int:
+    expected_record_snapshot = canonical_record_snapshot_for_record(root, record)
     record = confirm_unit(
         record,
         "dataset",
@@ -787,8 +789,9 @@ def _run_confirm(args, root: Path, record: dict, unit_root: Path, defer_post_act
         authorization_source=args.authorization_source,
         method="dataset.py confirm",
         project_root=root,
+        expected_record_snapshot=expected_record_snapshot,
     )
-    write_record(root, record)
+    write_record(root, record, expected_record_snapshot=expected_record_snapshot)
     print(f"[ok] confirmed {args.dataset_id}")
     _finalize_post_actions(
         root,
