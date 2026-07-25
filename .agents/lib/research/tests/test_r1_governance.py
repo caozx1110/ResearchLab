@@ -9,10 +9,10 @@ from types import SimpleNamespace
 import pytest
 
 from research.confirm import apply_confirmation, is_ai_signer
-from research.evidence import build_verification_receipt, verify_claim_evidence
+from research.evidence import EvidenceSourceSnapshot, build_verification_receipt, verify_claim_evidence
 from research import journal
 from research.paths import record_path, unit_root
-from research.records import normalize_record_schema
+from research.records import normalize_record_schema, trusted_claim_source_roots as shared_source_roots
 from research.core import default_record, locate_record, write_record
 from research.common import load_yaml, write_yaml_if_changed
 from research.judgements import judgement_snapshot_binding
@@ -324,6 +324,15 @@ def test_r1_program_decision_requires_two_stage_confirmation(tmp_path: Path, mon
     with pytest.raises(SystemExit, match="cannot be created confirmed"):
         orchestrate.main()
 
+    source_root_captures = 0
+    original_source_roots = orchestrate._decision_source_roots
+
+    def capture_source_roots_once(*args, **kwargs):
+        nonlocal source_root_captures
+        source_root_captures += 1
+        return original_source_roots(*args, **kwargs)
+
+    monkeypatch.setattr(orchestrate, "_decision_source_roots", capture_source_roots_once)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -334,6 +343,7 @@ def test_r1_program_decision_requires_two_stage_confirmation(tmp_path: Path, mon
         ],
     )
     assert orchestrate.main() == 0
+    assert source_root_captures == 1
     decisions = load_yaml(orchestrate.decisions_path(tmp_path, program_id))["items"]
     assert len(decisions) == 1
     decision_id = decisions[0]["id"]
@@ -357,6 +367,7 @@ def test_r1_program_decision_requires_two_stage_confirmation(tmp_path: Path, mon
         ],
     )
     assert orchestrate.main() == 0
+    assert source_root_captures == 2
     confirmed = load_yaml(orchestrate.decisions_path(tmp_path, program_id))["items"][0]
     assert confirmed["confirmation_status"] == "confirmed"
     assert confirmed["information_types"] == ["inference", "evaluation", "unverified"]
@@ -364,6 +375,120 @@ def test_r1_program_decision_requires_two_stage_confirmation(tmp_path: Path, mon
     assert confirmed["confirmation"]["user_authorization"] == "I confirm baseline A."
     with pytest.raises(SystemExit, match="not ready for confirmation"):
         orchestrate.main()
+
+
+def test_program_decision_cross_unit_evidence_uses_anchored_snapshot(tmp_path: Path) -> None:
+    orchestrate = _load_skill_script("research-orchestrator", "orchestrate.py")
+    program_id = "decision-cross-unit"
+    source_id = "p-decision-source-123456"
+    (tmp_path / "kb" / "programs" / program_id).mkdir(parents=True)
+    source = default_record("paper", title="Decision source", maturity="lightweight")
+    source["id"] = source_id
+    source["summary"] = "stable decision evidence"
+    write_yaml_if_changed(record_path(tmp_path, "paper", source_id), source)
+    claim = {
+        "id": "claim-cross-unit-decision",
+        "text": "Use the grounded cross-unit source.",
+        "claim_type": "evaluation",
+        "confirmation_status": "pending_user_confirmation",
+        "evidence_refs": [
+            {
+                "source_unit_id": source_id,
+                "artifact": "record.yaml",
+                "locator": "record",
+                "quote": "stable decision evidence",
+            }
+        ],
+    }
+
+    roots = orchestrate._decision_source_roots(tmp_path, program_id, [claim])
+
+    assert isinstance(roots[source_id], EvidenceSourceSnapshot)
+    assert verify_claim_evidence(
+        claim,
+        orchestrate.program_root(tmp_path, program_id),
+        source_roots=roots,
+    ) == []
+
+
+def test_program_decision_rejects_source_replaced_after_snapshot_capture(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    orchestrate = _load_skill_script("research-orchestrator", "orchestrate.py")
+    program_id = "decision-replaced-source"
+    source_id = "p-decision-replaced-123456"
+    workflow = tmp_path / "kb" / "programs" / program_id / "workflow"
+    workflow.mkdir(parents=True)
+    source = default_record("paper", title="Original decision source", maturity="lightweight")
+    source["id"] = source_id
+    source["summary"] = "original bytes only"
+    source_record = record_path(tmp_path, "paper", source_id)
+    write_yaml_if_changed(source_record, source)
+    replacement = tmp_path / "outside-decision-source"
+    replacement.mkdir()
+    outside_source = default_record("paper", title="OUTSIDE DECISION SENTINEL", maturity="lightweight")
+    outside_source["id"] = source_id
+    outside_source["summary"] = "OUTSIDE DECISION SENTINEL"
+    write_yaml_if_changed(replacement / "record.yaml", outside_source)
+    claims_path = workflow / "decision-claims.yaml"
+    write_yaml_if_changed(
+        claims_path,
+        {
+            "claims": [
+                {
+                    "id": "claim-replaced-decision-source",
+                    "text": "The replacement must not become evidence.",
+                    "claim_type": "evaluation",
+                    "confirmation_status": "pending_user_confirmation",
+                    "evidence_refs": [
+                        {
+                            "source_unit_id": source_id,
+                            "artifact": "record.yaml",
+                            "locator": "record",
+                            "quote": "OUTSIDE DECISION SENTINEL",
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    original_dir = tmp_path / "original-decision-source"
+    original_locate = orchestrate.locate_record
+
+    swapped = False
+
+    def replace_source_once() -> None:
+        nonlocal swapped
+        if swapped:
+            return
+        source_record.parent.rename(original_dir)
+        replacement.rename(source_record.parent)
+        swapped = True
+
+    def locate_then_replace(*args, **kwargs):
+        result = original_locate(*args, **kwargs)
+        if str(args[1] if len(args) > 1 else kwargs.get("identifier") or "") == source_id:
+            replace_source_once()
+        return result
+
+    def snapshot_then_replace(*args, **kwargs):
+        roots = shared_source_roots(*args, **kwargs)
+        replace_source_once()
+        return roots
+
+    monkeypatch.setattr(orchestrate, "locate_record", locate_then_replace)
+    monkeypatch.setattr(
+        orchestrate,
+        "trusted_claim_source_roots",
+        snapshot_then_replace,
+        raising=False,
+    )
+
+    with pytest.raises(SystemExit) as rejected:
+        orchestrate.load_decision_claims(tmp_path, program_id, str(claims_path))
+
+    assert "anchored evidence snapshot is no longer current" in str(rejected.value)
 
 
 @pytest.mark.parametrize("skill", ["paper", "blog", "repo"])

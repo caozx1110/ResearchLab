@@ -48,11 +48,12 @@ from research.common import (
     yaml_default,
 )
 from research.core import apply_confirmation, append_history, ensure_workspace, is_ready_for_human_review, iter_records, kb_root, load_runtime_preferences, locate_record, checkpoint_and_report, project_root, record_workflow_state, write_record
-from research.evidence import attach_claims, build_verification_receipt, validate_claims, verify_claim_evidence
+from research.evidence import EvidenceSourceSnapshot, attach_claims, build_verification_receipt, validate_claims, verify_claim_evidence
 from research.judgements import apply_judgement_rejection, confirmation_binding, discover_pending_judgements, judgement_confirmation_is_current, judgement_snapshot_binding, readiness_violations, require_judgement_snapshot
 from research.journal import mutation_transaction
 from research.monitoring import active_monitor_runs, due_subscriptions, unresolved_monitor_outcomes
 from research.preference_selection import resolve_task_preferences, selection_binding
+from research.records import trusted_claim_source_roots
 from research.sources import literature_search_continuations
 from research.surveys import pending_composite_survey_states
 
@@ -2494,27 +2495,44 @@ def refresh_state_counts(root: Path, program_id: str, payload: dict, *, material
     return payload
 
 
-def _decision_source_roots(root: Path, program_id: str, claims: list[dict[str, Any]]) -> dict[str, Path]:
-    roots: dict[str, Path] = {}
-    program_source_id = f"program:{program_id}"
+def _decision_source_roots(
+    root: Path,
+    program_id: str,
+    claims: list[dict[str, Any]],
+) -> dict[str, Path | EvidenceSourceSnapshot]:
+    expected_program_source = f"program:{program_id}"
     for claim in claims:
         for evidence_ref in claim.get("evidence_refs") or []:
-            if not isinstance(evidence_ref, dict):
+            if not isinstance(evidence_ref, dict) or isinstance(evidence_ref.get("external_source"), dict):
                 continue
             source_unit_id = str(evidence_ref.get("source_unit_id") or "").strip()
-            if not source_unit_id or source_unit_id in roots:
-                continue
-            if source_unit_id == program_source_id:
-                roots[source_unit_id] = program_root(root, program_id)
-                continue
-            _source_record, source_path = locate_record(root, source_unit_id, fuzzy=False)
-            roots[source_unit_id] = source_path.parent
-    return roots
+            if source_unit_id.startswith("program:") and source_unit_id != expected_program_source:
+                raise SystemExit("Program decision evidence must belong to the current program.")
+    subject = {
+        "id": f"program-decision:{program_id}",
+        "kind": "program_decision",
+        "program_id": program_id,
+        "payload": {"claims": claims},
+    }
+    try:
+        return trusted_claim_source_roots(
+            root,
+            subject,
+            verification_root=program_root(root, program_id),
+        )
+    except ValueError as exc:
+        raise SystemExit(
+            "Program decision evidence source is not a canonical safe unit or program."
+        ) from exc
 
 
-def load_decision_claims(root: Path, program_id: str, claims_file: str) -> list[dict[str, Any]]:
+def _load_decision_claims_boundary(
+    root: Path,
+    program_id: str,
+    claims_file: str,
+) -> tuple[list[dict[str, Any]], dict[str, Path | EvidenceSourceSnapshot]]:
     if not claims_file:
-        return []
+        return [], {}
     path = Path(claims_file).expanduser()
     if not path.is_absolute():
         path = root / path
@@ -2522,7 +2540,7 @@ def load_decision_claims(root: Path, program_id: str, claims_file: str) -> list[
     claims = payload.get("claims") if isinstance(payload, dict) else payload
     violations = validate_claims(claims)
     normalized = [dict(claim) for claim in claims if isinstance(claim, dict)] if isinstance(claims, list) else []
-    source_roots: dict[str, Path] = {}
+    source_roots: dict[str, Path | EvidenceSourceSnapshot] = {}
     if normalized:
         try:
             source_roots = _decision_source_roots(root, program_id, normalized)
@@ -2534,7 +2552,12 @@ def load_decision_claims(root: Path, program_id: str, claims_file: str) -> list[
         violations.extend(verify_claim_evidence(claim, program_root(root, program_id), source_roots=source_roots))
     if violations:
         raise SystemExit("Program decision claims failed verification:\n  - " + "\n  - ".join(violations))
-    return normalized
+    return normalized, source_roots
+
+
+def load_decision_claims(root: Path, program_id: str, claims_file: str) -> list[dict[str, Any]]:
+    claims, _source_roots = _load_decision_claims_boundary(root, program_id, claims_file)
+    return claims
 
 
 def write_decision_fill_scaffold(
@@ -3436,7 +3459,11 @@ def main() -> int:
                 "Program decisions cannot be created confirmed/auto_confirmed; "
                 "log a pending decision, then use confirm-decision."
             )
-        claims = load_decision_claims(root, args.program_id, args.claims_file)
+        claims, decision_source_roots = _load_decision_claims_boundary(
+            root,
+            args.program_id,
+            args.claims_file,
+        )
         if not claims:
             with program_mutation(root, args.program_id, args.command):
                 ensure_program_files(root, args.program_id)
@@ -3489,7 +3516,7 @@ def main() -> int:
                 build_verification_receipt(
                     item,
                     program_root(root, args.program_id),
-                    source_roots=_decision_source_roots(root, args.program_id, claims),
+                    source_roots=decision_source_roots,
                 )
             decisions_yaml, path = append_decision(root, args.program_id, item)
             append_program_reporting_event(
