@@ -1865,6 +1865,7 @@ def test_cli_rechecks_after_render_before_publishing_any_report_kind(
     root, program_id, unit_id = _make_workspace(tmp_path)
     record_path = root / "kb" / "units" / "papers" / unit_id / "record.yaml"
     original_render = getattr(report, renderer)
+    original_load = report.load_report_inputs
     replaced = False
 
     def replace_after_render(*args, **kwargs):
@@ -1875,7 +1876,13 @@ def test_cli_rechecks_after_render_before_publishing_any_report_kind(
             _replace_report_source(record_path, mutation)
         return text
 
+    def load_with_preference_binding(*args, **kwargs):
+        inputs = original_load(*args, **kwargs)
+        inputs.preference_binding = {"selection_id": "test-publication-preference"}
+        return inputs
+
     monkeypatch.setattr(report, renderer, replace_after_render)
+    monkeypatch.setattr(report, "load_report_inputs", load_with_preference_binding)
     monkeypatch.setattr(report, "checkpoint_and_report", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         sys,
@@ -1887,6 +1894,7 @@ def test_cli_rechecks_after_render_before_publishing_any_report_kind(
 
     text = _report_output_path(root, program_id, command).read_text(encoding="utf-8")
     assert replaced
+    assert text.startswith("<!-- effective-preferences:")
     assert "报告生成期间正式判断来源已变化" in text
     assert "Grounded Paper" not in text
     assert "The method improves benchmark success rate." not in text
@@ -1987,6 +1995,41 @@ def test_unit_claim_source_duplicate_identity_fails_closed(tmp_path: Path) -> No
 
     assert sources == []
     assert missing == [unit_id]
+
+
+def test_pending_issue_and_factual_lanes_survive_without_formal_claims() -> None:
+    report = _load_report_module()
+    inputs = report.ReportInputs(
+        events=[
+            {
+                "event_type": "operational",
+                "title": "Factual milestone",
+                "summary": "The local run completed.",
+            }
+        ],
+        pending_judgement_events=[
+            {
+                "event_type": "decision",
+                "title": "Pending route",
+                "summary": "Awaiting a user choice.",
+            }
+        ],
+        claim_sources=[
+            report.ClaimSource(
+                unit_id="p-issues-only",
+                title="Issues-only source",
+                kind="paper",
+                issues=["canonical claims are not bound to a current ConfirmationReceipt"],
+            )
+        ],
+    )
+
+    text = report.render_report("Stage Summary: lanes", inputs, report_kind="stage-summary")
+
+    assert "The local run completed." in text
+    assert "Awaiting a user choice." in text
+    assert "Issues-only source" in text
+    assert "结构或证据核验未通过" in text
 
 
 def test_outline_cli_writes_report_without_raw_command_stdout(tmp_path: Path, monkeypatch, capsys) -> None:

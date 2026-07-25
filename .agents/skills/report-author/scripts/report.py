@@ -651,15 +651,11 @@ def _confirmed_record_source_is_current(
 def _load_exact_record_snapshot(
     root: Path,
     unit_id: str,
+    snapshot_index: dict[str, CanonicalRecordSnapshot | None],
 ) -> tuple[CanonicalRecordSnapshot, dict[str, Any]] | None:
-    matches = [
-        snapshot
-        for snapshot in iter_canonical_record_snapshots(root)
-        if snapshot.unit_id == unit_id
-    ]
-    if len(matches) != 1:
+    snapshot = snapshot_index.get(unit_id)
+    if snapshot is None:
         return None
-    snapshot = matches[0]
     record = normalize_record_snapshot(snapshot, root)
     if record is None or not _record_snapshot_is_current(root, snapshot):
         return None
@@ -669,8 +665,14 @@ def _load_exact_record_snapshot(
 def load_confirmed_claim_sources(root: Path, unit_ids: list[str]) -> tuple[list[ClaimSource], list[str]]:
     sources: list[ClaimSource] = []
     missing_units: list[str] = []
-    for unit_id in unit_ids:
-        selected = _load_exact_record_snapshot(root, unit_id)
+    snapshot_index: dict[str, CanonicalRecordSnapshot | None] = {}
+    for snapshot in iter_canonical_record_snapshots(root):
+        if snapshot.unit_id in snapshot_index:
+            snapshot_index[snapshot.unit_id] = None
+        else:
+            snapshot_index[snapshot.unit_id] = snapshot
+    for unit_id in dict.fromkeys(unit_ids):
+        selected = _load_exact_record_snapshot(root, unit_id, snapshot_index)
         if selected is None:
             missing_units.append(unit_id)
             continue
@@ -1629,13 +1631,29 @@ def main() -> int:
         path = reports_root / "paper-outline.md"
     else:
         path = reports_root / "stage-summary.md"
-    title = report_title(args.command, args.program_id, language=inputs.language)
-    text = render_outline(args.program_id, inputs) if args.command == "outline" else render_report(title, inputs, report_kind=args.command)
-    if inputs.preference_binding:
-        binding_text = json.dumps(inputs.preference_binding, ensure_ascii=False, sort_keys=True)
-        text = f"<!-- effective-preferences: {binding_text} -->\n" + text
     with command_mutation(root, f"report-author:{args.command}", [path]):
+        title = report_title(args.command, args.program_id, language=inputs.language)
+        text = render_outline(args.program_id, inputs) if args.command == "outline" else render_report(title, inputs, report_kind=args.command)
+        publishes_formal_lane = inputs.formal_inputs_are_current()
+        if not publishes_formal_lane:
+            pending_title = (
+                f"Paper Outline: {args.program_id}"
+                if args.command == "outline" and _is_english(inputs.language)
+                else f"论文大纲：{args.program_id}"
+                if args.command == "outline"
+                else title
+            )
+            text = _render_aggregate_pending_document(
+                pending_title,
+                inputs,
+                report_kind=args.command,
+            )
+        if inputs.preference_binding:
+            binding_text = json.dumps(inputs.preference_binding, ensure_ascii=False, sort_keys=True)
+            text = f"<!-- effective-preferences: {binding_text} -->\n" + text
         write_text_if_changed(path, text)
+        if publishes_formal_lane and not inputs.formal_inputs_are_current():
+            raise RuntimeError("formal report inputs changed during publication")
     print(path.relative_to(root))
     checkpoint_and_report(
         root,
