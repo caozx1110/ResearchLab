@@ -2322,7 +2322,6 @@ def record_portfolio_decision(
     path = _validate_portfolio_history_target(root)
     changed = False
     stored: dict[str, Any] = {}
-    validation_plan: _PortfolioDecisionValidationPlan | None = None
     with mutation_transaction(root, "research-orchestrator:record-next-selection", [path]):
         current_snapshot = portfolio_candidate_snapshot(root, selected_program_id=selected_program_id)
         validation_plan = _portfolio_decision_validation_plan(root, decision, current_snapshot)
@@ -2338,7 +2337,6 @@ def record_portfolio_decision(
             comparable.pop("recorded_at", None)
             if comparable != normalized:
                 raise SystemExit("Portfolio decision id is already bound to different content")
-            validation_plan.require_program_decisions_current()
             stored = existing[0]
         else:
             stored = {**normalized, "recorded_at": utc_now_iso()}
@@ -2347,6 +2345,10 @@ def record_portfolio_decision(
             validation_plan.require_program_decisions_current()
             write_yaml_if_changed(path, history)
             changed = True
+        # Keep the bound snapshots alive through the canonical history write.
+        # Raising here is still inside the transaction, so a stale source rolls
+        # the exact history target back before the operation can commit.
+        validation_plan.require_program_decisions_current()
     if changed:
         checkpoint_and_report(
             root,
@@ -2354,8 +2356,6 @@ def record_portfolio_decision(
             message=f"milestone: record portfolio decision {stored['decision_id']}",
             target_paths=[path],
         )
-    elif validation_plan is not None:
-        validation_plan.require_program_decisions_current()
     return stored, changed
 
 
