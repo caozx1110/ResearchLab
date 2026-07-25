@@ -327,7 +327,8 @@ def test_kb_status_is_byte_identical_for_every_workspace_file(tmp_path: Path) ->
         "知识库尚未收录资料。\n"
         "目前没有研究计划。\n"
         "待处理事项：0 条待确认判断、0 个到期监控、0 组文献候选待选择、"
-        "0 个可继续文献检索、0 个可恢复综述流程、0 个失败后可重试事项。\n"
+        "0 个可继续文献检索、0 个可恢复综述流程、0 个失败后可重试事项、"
+        "0 个可由 Agent 继续推进的事项。\n"
     )
     assert before == after
 
@@ -624,3 +625,25 @@ def test_runtime_and_test_dependencies_are_exactly_locked_in_both_ci_jobs() -> N
                 "run": "python -m pip install -r requirements-dev.txt",
             }
         ]
+
+
+def test_core_release_has_no_paid_provider_or_api_key_prerequisite() -> None:
+    root = _project_root()
+    runtime_packages = set(_parse_exact_pins(_active_requirement_lines(root / "requirements.txt")))
+    assert runtime_packages.isdisjoint(
+        {
+            "anthropic",
+            "google-cloud-discoveryengine",
+            "openai",
+            "openalex",
+            "semanticscholar",
+            "serpapi",
+        }
+    )
+
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    guide = (root / "docs" / "USER_GUIDE.md").read_text(encoding="utf-8")
+    for document in (readme, guide):
+        assert "API Key" in document
+        assert "paid" in document or "付费" in document
+        assert "prerequisite" in document or "前置条件" in document
