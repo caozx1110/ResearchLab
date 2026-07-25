@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import importlib.util
+import shutil
 import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 from research.confirm import apply_confirmation
+import research.surveys as surveys_module
 
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -150,6 +153,57 @@ def test_prepare_emits_seven_section_evidence_first_scaffold(tmp_path: Path) -> 
     assert "当前结果仍偏索引级综合" not in serialized
 
 
+def test_unit_binding_passes_tree_record_snapshot_into_confirmation_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_synthesizer()
+    unit_dir = write_confirmed_unit(
+        module,
+        tmp_path,
+        {"id": "p-alpha", "kind": "paper", "title": "Alpha", "payload": {}},
+        "stable evidence\n",
+    )
+    canonical = yaml.safe_load((unit_dir / "record.yaml").read_text(encoding="utf-8"))
+    expected_snapshots = []
+    original_roots = surveys_module.trusted_claim_source_roots
+
+    def checking_roots(*args, expected_record_snapshot=None, **kwargs):
+        expected_snapshots.append(expected_record_snapshot)
+        return original_roots(
+            *args,
+            expected_record_snapshot=expected_record_snapshot,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(surveys_module, "trusted_claim_source_roots", checking_roots)
+
+    binding = surveys_module.build_unit_binding(tmp_path, canonical)
+
+    assert binding["title"] == "Alpha"
+    assert expected_snapshots
+    assert all(snapshot is not None for snapshot in expected_snapshots)
+    assert all(snapshot.raw_bytes == (unit_dir / "record.yaml").read_bytes() for snapshot in expected_snapshots)
+
+
+def test_unit_binding_rejects_ambiguous_canonical_unit_id(tmp_path: Path) -> None:
+    module = load_synthesizer()
+    paper_dir = write_confirmed_unit(
+        module,
+        tmp_path,
+        {"id": "shared-unit-id", "kind": "paper", "title": "Paper", "payload": {}},
+    )
+    write_confirmed_unit(
+        module,
+        tmp_path,
+        {"id": "shared-unit-id", "kind": "repo", "title": "Repo", "payload": {}},
+    )
+    canonical = yaml.safe_load((paper_dir / "record.yaml").read_text(encoding="utf-8"))
+
+    with pytest.raises(SystemExit, match="missing, ambiguous, or unsafe"):
+        surveys_module.build_unit_binding(tmp_path, canonical)
+
+
 def test_verify_accepts_verbatim_cross_unit_evidence(tmp_path: Path) -> None:
     module, scaffold = build_filled_survey(tmp_path)
 
@@ -204,7 +258,7 @@ def test_verify_cli_persists_only_verified_survey(tmp_path: Path, monkeypatch) -
     assert "## Comparison Matrix" in summary_path.read_text(encoding="utf-8")
 
 
-def test_prepare_skips_symlink_artifact_without_weakening_reference_gate(tmp_path: Path) -> None:
+def test_prepare_rejects_unit_with_symlink_artifact(tmp_path: Path) -> None:
     module = load_synthesizer()
     outside = tmp_path / "outside.txt"
     outside.write_text("outside evidence", encoding="utf-8")
@@ -215,19 +269,62 @@ def test_prepare_skips_symlink_artifact_without_weakening_reference_gate(tmp_pat
     )
     (unit_dir / "linked.txt").symlink_to(outside)
 
-    scaffold = module.build_survey_scaffold(
-        [{"id": "p-alpha", "kind": "paper", "title": "Alpha"}],
-        root=tmp_path,
-        query="alpha",
-        kind="",
-        topic="",
-        tag="",
-        pool="",
-        mode="survey",
-        as_of="2026-07-17T00:00:00Z",
+    with pytest.raises(SystemExit, match="missing, ambiguous, or unsafe"):
+        module.build_survey_scaffold(
+            [{"id": "p-alpha", "kind": "paper", "title": "Alpha"}],
+            root=tmp_path,
+            query="alpha",
+            kind="",
+            topic="",
+            tag="",
+            pool="",
+            mode="survey",
+            as_of="2026-07-17T00:00:00Z",
+        )
+
+    assert outside.read_text(encoding="utf-8") == "outside evidence"
+
+
+def test_build_unit_binding_rejects_source_ancestor_replaced_after_tree_capture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_synthesizer()
+    unit_dir = write_confirmed_unit(
+        module,
+        tmp_path,
+        {"id": "p-alpha", "kind": "paper", "title": "Alpha", "payload": {}},
+        "stable canonical evidence\n",
+    )
+    canonical = yaml.safe_load((unit_dir / "record.yaml").read_text(encoding="utf-8"))
+    outside_dir = tmp_path / "outside-canonical-units"
+    shutil.copytree(unit_dir, outside_dir)
+    (outside_dir / "outside-only.md").write_text(
+        "OUTSIDE-ONLY-SURVEY-SENTINEL\n",
+        encoding="utf-8",
+    )
+    parked_dir = tmp_path / "parked-canonical-unit"
+    captured_artifacts: list[str] = []
+    original_capture = surveys_module.snapshot_unique_canonical_unit_tree
+
+    def capture_then_replace(*args, **kwargs):
+        snapshot = original_capture(*args, **kwargs)
+        assert snapshot is not None
+        captured_artifacts.extend(item.artifact for item in snapshot.artifacts)
+        unit_dir.rename(parked_dir)
+        outside_dir.rename(unit_dir)
+        return snapshot
+
+    monkeypatch.setattr(
+        surveys_module,
+        "snapshot_unique_canonical_unit_tree",
+        capture_then_replace,
     )
 
-    assert scaffold["kb_anchor"]["units"][0]["evidence_artifacts"] == []
+    with pytest.raises(SystemExit, match="not currently confirmed|changed while anchoring"):
+        surveys_module.build_unit_binding(tmp_path, canonical)
+    assert "outside-only.md" not in captured_artifacts
+    assert "note.md" in captured_artifacts
 
 
 def test_verify_rejects_changed_bound_record_or_evidence(tmp_path: Path) -> None:

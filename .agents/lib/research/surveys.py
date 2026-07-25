@@ -12,11 +12,14 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .common import file_sha256, load_yaml, utc_now_iso
+from .common import load_yaml, utc_now_iso
 from .confirm import has_complete_confirmation_receipt
 from .records import (
+    CanonicalUnitSnapshot,
     iter_records,
     locate_record,
+    normalize_record_snapshot,
+    snapshot_unique_canonical_unit_tree,
     trusted_claim_source_roots,
     trusted_project_path,
 )
@@ -179,27 +182,48 @@ def survey_input_eligibility_violations(root: Path, record: dict[str, Any]) -> l
     unit_kind = str(record.get("kind") or "").strip()
     if not unit_id or not unit_kind:
         return ["missing canonical unit identity"]
-    try:
-        current, record_file = locate_record(root, unit_id, kind=unit_kind, fuzzy=False)
-    except (OSError, SystemExit):
+    snapshot = snapshot_unique_canonical_unit_tree(
+        root,
+        unit_id,
+        expected_kind=unit_kind,
+    )
+    if snapshot is None:
         return ["canonical unit is missing or unreadable"]
+    _current, violations = _survey_snapshot_eligibility(root, snapshot)
+    return violations
+
+
+def _survey_snapshot_eligibility(
+    root: Path,
+    snapshot: CanonicalUnitSnapshot,
+) -> tuple[dict[str, Any] | None, list[str]]:
+    current = normalize_record_snapshot(snapshot.record, root)
+    if current is None:
+        return None, ["canonical unit is malformed"]
+    unit_id = snapshot.record.unit_id
+    unit_kind = snapshot.record.kind
+    if str(current.get("id") or "") != unit_id or str(current.get("kind") or "") != unit_kind:
+        return None, ["canonical unit identity changed"]
     if str(current.get("confirmation_status") or "") != "confirmed":
-        return ["unit is not confirmed"]
+        return current, ["unit is not confirmed"]
     try:
         source_roots = trusted_claim_source_roots(
             root,
             current,
-            verification_root=record_file.parent,
+            verification_root=snapshot.record.path.parent,
+            expected_record_snapshot=snapshot.record,
         )
     except ValueError:
-        return ["unit evidence source is not canonically contained"]
+        return current, ["unit evidence source is not canonically contained"]
     if not has_complete_confirmation_receipt(
         current,
-        verification_root=record_file.parent,
+        verification_root=snapshot.record.path.parent,
         source_roots=source_roots,
     ):
-        return ["unit confirmation receipt is missing or stale"]
-    return []
+        return current, ["unit confirmation receipt is missing or stale"]
+    if not snapshot.is_current():
+        return current, ["canonical unit changed while it was checked"]
+    return current, []
 
 
 def select_current_confirmed_survey_records(
@@ -1111,31 +1135,25 @@ def composite_survey_repair_projection(root: Path, state: dict[str, Any]) -> dic
     return projected
 
 
-def _evidence_artifact_bindings(unit_dir: Path) -> list[dict[str, str]]:
-    if not unit_dir.is_dir() or unit_dir.is_symlink():
-        raise SystemExit(f"Survey source unit is not a safe directory: {unit_dir.name}")
-    bindings: list[dict[str, str]] = []
-    for path in sorted(unit_dir.rglob("*"), key=lambda item: item.relative_to(unit_dir).as_posix()):
-        artifact = path.relative_to(unit_dir).as_posix()
-        if path.is_symlink() or not path.is_file() or artifact == "record.yaml":
-            continue
-        bindings.append({"artifact": artifact, "byte_sha256": file_sha256(path)})
-    return bindings
-
-
 def build_unit_binding(root: Path, record: dict[str, Any]) -> dict[str, Any]:
     unit_id = str(record.get("id") or "").strip()
     unit_kind = str(record.get("kind") or "").strip()
     if not unit_id or not unit_kind:
         raise SystemExit("Survey source unit requires canonical id and kind.")
-    current, record_file = locate_record(root, unit_id, kind=unit_kind, fuzzy=False)
-    if str(current.get("id") or "") != unit_id or str(current.get("kind") or "") != unit_kind:
-        raise SystemExit(f"Survey source identity changed while anchoring: {unit_kind}/{unit_id}")
-    eligibility = survey_input_eligibility_violations(root, current)
+    snapshot = snapshot_unique_canonical_unit_tree(
+        root,
+        unit_id,
+        expected_kind=unit_kind,
+    )
+    if snapshot is None:
+        raise SystemExit(f"Survey source unit is missing, ambiguous, or unsafe: {unit_id}")
+    current, eligibility = _survey_snapshot_eligibility(root, snapshot)
     if eligibility:
         raise SystemExit(f"Survey source unit is not currently confirmed: {unit_id}")
+    if current is None:
+        raise SystemExit(f"Survey source unit is malformed: {unit_id}")
     confirmation = current.get("confirmation")
-    return {
+    binding = {
         "id": unit_id,
         "kind": unit_kind,
         "title": str(current.get("title") or ""),
@@ -1143,8 +1161,17 @@ def build_unit_binding(root: Path, record: dict[str, Any]) -> dict[str, Any]:
         "confirmation_receipt_digest": (
             _canonical_digest(confirmation) if isinstance(confirmation, dict) and confirmation else ""
         ),
-        "evidence_artifacts": _evidence_artifact_bindings(record_file.parent),
+        "evidence_artifacts": [
+            {
+                "artifact": artifact.artifact,
+                "byte_sha256": artifact.byte_sha256,
+            }
+            for artifact in snapshot.artifacts
+        ],
     }
+    if not snapshot.is_current():
+        raise SystemExit(f"Survey source unit changed while anchoring: {unit_id}")
+    return binding
 
 
 def unit_bindings_equal(left: object, right: object) -> bool:
