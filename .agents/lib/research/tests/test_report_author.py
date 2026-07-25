@@ -42,6 +42,67 @@ def _write_confirmed_record(root: Path, unit_id: str, claims: list[dict]) -> Non
     write_record(root, record, expected_record_snapshot=expected_record_snapshot)
 
 
+def _write_confirmed_repo_record(root: Path, unit_id: str) -> Path:
+    repo_root = root / "repo-fixtures" / unit_id
+    repo_root.mkdir(parents=True)
+    evidence_path = repo_root / "README.md"
+    evidence_path.write_text("External repo evidence remains current.", encoding="utf-8")
+    unit_root = root / "kb" / "units" / "repos" / unit_id
+    unit_root.mkdir(parents=True)
+    record = {
+        "id": unit_id,
+        "kind": "repo",
+        "title": "External Evidence Repo",
+        "source": {"original_uri": repo_root.as_posix()},
+        "confirmation_status": "pending_user_confirmation",
+        "needs_human_confirmation": True,
+        "information_types": ["evaluation", "unverified"],
+        "payload": {
+            "structure": {"repo_root": repo_root.resolve().as_posix()},
+            "claims": [
+                {
+                    "id": "claim-external-repo",
+                    "text": "The external repository supports the selected route.",
+                    "claim_type": "evaluation",
+                    "confirmation_status": "pending_user_confirmation",
+                    "evidence_refs": [
+                        {
+                            "source_unit_id": unit_id,
+                            "artifact": "README.md",
+                            "locator": "line=1",
+                            "quote": "External repo evidence remains current.",
+                            "external_source": {"kind": "repo"},
+                        }
+                    ],
+                }
+            ],
+        },
+    }
+    build_verification_receipt(
+        record,
+        unit_root,
+        external_source={"kind": "repo", "base_root": repo_root.resolve().as_posix()},
+        source_roots={unit_id: unit_root},
+    )
+    record_path = unit_root / "record.yaml"
+    write_yaml_if_changed(record_path, record)
+    expected_record_snapshot = canonical_record_snapshot_for_record(root, record)
+    normalized = normalize_record_snapshot(expected_record_snapshot, root)
+    assert normalized is not None
+    apply_confirmation(
+        normalized,
+        confirmed_by="Human Reviewer",
+        evidence=["Reviewed the external repository evidence."],
+        user_authorization="Confirm this repository judgement.",
+        authorization_source="user_message",
+        project_root=root,
+        verification_root=unit_root,
+        expected_record_snapshot=expected_record_snapshot,
+    )
+    write_record(root, normalized, expected_record_snapshot=expected_record_snapshot)
+    return evidence_path
+
+
 def _write_confirmed_decision(root: Path, program_id: str) -> None:
     program_root = root / "kb" / "programs" / program_id
     evidence_path = program_root / "workflow" / "decision-evidence.md"
@@ -1491,6 +1552,69 @@ def test_aggregate_gate_rejects_unit_replaced_after_source_load(
         report,
         inputs,
         absent=["Grounded Paper", "The method improves benchmark success rate."],
+    )
+
+
+def test_aggregate_gate_rejects_local_evidence_replaced_after_source_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = _load_report_module()
+    root, program_id, unit_id = _make_workspace(tmp_path)
+    evidence_path = root / "kb" / "units" / "papers" / unit_id / "parse-cache.yaml"
+    original_load = report.load_confirmed_claim_sources
+
+    def replace_evidence_after_source_load(*args, **kwargs):
+        result = original_load(*args, **kwargs)
+        write_yaml_if_changed(evidence_path, {"chunks": [{"label": "page-3", "text": "Changed evidence."}]})
+        return result
+
+    monkeypatch.setattr(report, "load_confirmed_claim_sources", replace_evidence_after_source_load)
+
+    inputs = report.load_report_inputs(root, program_id)
+
+    _assert_aggregate_pending_report(
+        report,
+        inputs,
+        absent=["Grounded Paper", "The method improves benchmark success rate."],
+    )
+
+
+def test_aggregate_gate_rejects_external_repo_evidence_replaced_after_source_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = _load_report_module()
+    root = tmp_path / "workspace"
+    program_id = "external-evidence-report"
+    unit_id = "r-external-evidence-123456"
+    workflow = root / "kb" / "programs" / program_id / "workflow"
+    workflow.mkdir(parents=True)
+    write_yaml_if_changed(
+        root / "kb" / "programs" / program_id / "state.yaml",
+        {"program_id": program_id, "active_unit_ids": [unit_id]},
+    )
+    write_yaml_if_changed(workflow / "reporting-events.yaml", {"items": []})
+    evidence_path = _write_confirmed_repo_record(root, unit_id)
+    original_load = report.load_confirmed_claim_sources
+
+    def replace_external_evidence_after_source_load(*args, **kwargs):
+        result = original_load(*args, **kwargs)
+        evidence_path.write_text("Replacement external repo bytes.", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(
+        report,
+        "load_confirmed_claim_sources",
+        replace_external_evidence_after_source_load,
+    )
+
+    inputs = report.load_report_inputs(root, program_id)
+
+    _assert_aggregate_pending_report(
+        report,
+        inputs,
+        absent=["External Evidence Repo", "external repository supports the selected route"],
     )
 
 

@@ -48,6 +48,7 @@ from research.records import (
     normalize_record_snapshot,
     snapshot_canonical_unit_artifacts,
     snapshot_project_file,
+    trusted_claim_source_roots,
 )
 from research.surveys import survey_staleness
 
@@ -609,6 +610,28 @@ def _record_snapshot_is_current(root: Path, snapshot: CanonicalRecordSnapshot) -
     )
 
 
+def _confirmed_record_source_is_current(
+    root: Path,
+    snapshot: CanonicalRecordSnapshot,
+    record: dict[str, Any],
+    evidence_validators: tuple[Callable[[], bool], ...],
+) -> bool:
+    try:
+        captured_evidence_current = all(
+            bool(validator()) for validator in evidence_validators
+        )
+        evidence_current = judgement_confirmation_is_current(
+            root,
+            record,
+            snapshot.path,
+            record_snapshot=snapshot,
+        )
+        record_current = _record_snapshot_is_current(root, snapshot)
+        return bool(captured_evidence_current and evidence_current and record_current)
+    except (OSError, RuntimeError, UnicodeError, ValueError, yaml.YAMLError):
+        return False
+
+
 def _load_exact_record_snapshot(
     root: Path,
     unit_id: str,
@@ -652,6 +675,21 @@ def load_confirmed_claim_sources(root: Path, unit_ids: list[str]) -> tuple[list[
                 record_snapshot=snapshot,
             )
         )
+        try:
+            evidence_roots = trusted_claim_source_roots(
+                root,
+                record,
+                verification_root=snapshot.path.parent,
+                expected_record_snapshot=snapshot,
+            )
+        except ValueError:
+            evidence_roots = {}
+            receipt_current = False
+        evidence_validators = tuple(
+            source.is_current
+            for source in evidence_roots.values()
+            if callable(getattr(source, "is_current", None))
+        )
         confirmed_claims = [
             claim
             for claim in canonical_claims
@@ -685,7 +723,12 @@ def load_confirmed_claim_sources(root: Path, unit_ids: list[str]) -> tuple[list[
                     ),
                 }
             ),
-            validate_current=lambda snapshot=snapshot: _record_snapshot_is_current(root, snapshot),
+            validate_current=lambda snapshot=snapshot, record=record, evidence_validators=evidence_validators: _confirmed_record_source_is_current(
+                root,
+                snapshot,
+                record,
+                evidence_validators,
+            ),
         )
         if not _record_snapshot_is_current(root, snapshot):
             missing_units.append(unit_id)
@@ -1003,6 +1046,7 @@ def load_report_inputs(
     formal_validators: list[Callable[[], bool]] = [
         source.is_current
         for source in [*claim_sources, *survey_claim_sources]
+        if source.claims or source.issues
     ]
     if any(_event_is_judgement(event) for event in events):
         formal_validators.append(judgement_batch.is_current)

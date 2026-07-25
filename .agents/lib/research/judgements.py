@@ -746,6 +746,9 @@ def _candidate_artifacts(
 
 def discover_pending_judgements(root: str | Path) -> list[dict[str, Any]]:
     """Return all cross-owner ``ready_for_review`` cards in deterministic order."""
+    lexical_root = Path(root).absolute()
+    if not lexical_root.exists() and not lexical_root.is_symlink():
+        return []
     project_root = _canonical_project_root(root)
     unit_candidates: list[dict[str, Any]] = []
     for snapshot in iter_canonical_record_snapshots(project_root):
