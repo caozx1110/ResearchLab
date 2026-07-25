@@ -732,6 +732,36 @@ def _survey_for_ref(root: Path, ref: dict[str, Any]) -> tuple[dict[str, Any], Pa
     return payload, path
 
 
+def _bound_survey_for_ref(root: Path, ref: dict[str, Any]):
+    """Capture one formal survey consumer's canonical judgement exactly once."""
+    from .judgements import load_bound_judgement_snapshot
+
+    slug = _safe_component(ref.get("slug"), label="survey slug")
+    mode = str(ref.get("mode") or "survey").strip()
+    expected_path = survey_artifact_path(root, slug, mode)
+    try:
+        bound = load_bound_judgement_snapshot(
+            root,
+            {
+                "kind": "survey_judgement",
+                "id": f"survey:{mode}:{slug}",
+                "owner": "literature-synthesizer",
+                "path": expected_path.relative_to(root).as_posix(),
+            },
+        )
+    except (OSError, ValueError) as exc:
+        raise ValueError("survey judgement is missing or unsafe") from exc
+    payload = bound.record
+    if (
+        payload.get("kind") != "survey_judgement"
+        or payload.get("owner") != "literature-synthesizer"
+        or str(payload.get("slug") or "") != slug
+        or str(payload.get("mode") or "") != mode
+    ):
+        raise ValueError("survey judgement identity is invalid")
+    return bound
+
+
 def _normalize_stage_refs(stage_id: str, refs: object) -> dict[str, Any]:
     if not isinstance(refs, list) or len(refs) != 1 or not isinstance(refs[0], dict):
         raise ValueError("completed composite survey stage requires exactly one canonical ref")
@@ -807,6 +837,7 @@ def build_composite_stage_binding(root: Path, stage_id: str, *, refs: object) ->
     ref = _normalize_stage_refs(stage_id, refs)
     artifacts: list[dict[str, str]] = []
     facts: dict[str, Any]
+    formal_bound = None
     if stage_id == "search":
         stage, path = _search_stage(root, ref["stage_id"])
         stop = stage.get("stop") if isinstance(stage.get("stop"), dict) else {}
@@ -898,7 +929,11 @@ def build_composite_stage_binding(root: Path, stage_id: str, *, refs: object) ->
             bindings.append(binding)
         facts = {"unit_bindings": bindings}
     elif stage_id in {"synthesis", "review_confirmation"}:
-        survey, path = _survey_for_ref(root, ref)
+        if stage_id == "review_confirmation":
+            formal_bound = _bound_survey_for_ref(root, ref)
+            survey, path = formal_bound.record, formal_bound.path
+        else:
+            survey, path = _survey_for_ref(root, ref)
         violations = survey_lifecycle_violations(survey, root)
         if violations:
             raise ValueError("survey judgement is stale: " + "; ".join(violations))
@@ -912,7 +947,12 @@ def build_composite_stage_binding(root: Path, stage_id: str, *, refs: object) ->
             role = "verified-survey"
         else:
             from .judgements import judgement_confirmation_is_current
-            if not judgement_confirmation_is_current(root, survey, path):
+            if not judgement_confirmation_is_current(
+                root,
+                survey,
+                path,
+                bound_snapshot=formal_bound,
+            ):
                 raise ValueError("survey judgement confirmation is missing or stale")
             facts = {"survey_content_digest": str(survey.get("survey_content_digest") or ""), "confirmation_receipt_digest": _canonical_digest(survey.get("confirmation", {}))}
             role = "confirmed-survey"
@@ -931,8 +971,14 @@ def build_composite_stage_binding(root: Path, stage_id: str, *, refs: object) ->
         if ref["survey_mode"] not in {"survey", "review", "taxonomy"}:
             raise ValueError("report consumption survey mode is invalid")
         survey_ref = {"slug": ref["survey_slug"], "mode": ref["survey_mode"]}
-        survey, survey_path = _survey_for_ref(root, survey_ref)
-        if not judgement_confirmation_is_current(root, survey, survey_path):
+        formal_bound = _bound_survey_for_ref(root, survey_ref)
+        survey, survey_path = formal_bound.record, formal_bound.path
+        if not judgement_confirmation_is_current(
+            root,
+            survey,
+            survey_path,
+            bound_snapshot=formal_bound,
+        ):
             raise ValueError("report consumption references a stale survey confirmation")
         expected_confirmation = confirmation_binding(survey, owner="literature-synthesizer", path=survey_path.relative_to(root).as_posix())
         survey_program_ids = survey.get("program_ids")
@@ -982,6 +1028,8 @@ def build_composite_stage_binding(root: Path, stage_id: str, *, refs: object) ->
                 "confirmation_binding_digest": _exact_digest(expected_confirmation),
             }
 
+    if formal_bound is not None and not formal_bound.is_current():
+        raise ValueError("survey judgement changed while its formal binding was built")
     binding: dict[str, Any] = {
         "schema_version": 1,
         "kind": COMPOSITE_BINDING_KIND,

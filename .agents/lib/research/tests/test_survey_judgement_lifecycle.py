@@ -5,6 +5,7 @@ import hashlib
 import importlib.machinery
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -13,6 +14,7 @@ import yaml
 
 from research.common import load_yaml, write_yaml_if_changed
 from research.confirm import apply_confirmation
+import research.judgements as judgements_module
 from research.judgements import discover_pending_judgements, judgement_confirmation_is_current
 from research.paths import config_root, runtime_preferences_path
 from research.preference_selection import eligible_preferences, record_effective_selection
@@ -303,6 +305,22 @@ def build_verified_survey(root: Path, *, program_id: str = "", source: dict | No
     survey_path.parent.mkdir(parents=True, exist_ok=True)
     write_yaml_if_changed(survey_path, verified)
     (survey_path.parent / "summary.md").write_text(module.render_verified_summary(verified), encoding="utf-8")
+    return module, survey_path, verified
+
+
+def build_confirmed_survey(root: Path) -> tuple[object, Path, dict]:
+    module, survey_path, verified = build_verified_survey(root)
+    card = discover_pending_judgements(root)[0]
+    module.apply_review_batch_decision(
+        root,
+        card,
+        "confirm",
+        actor="Alice Researcher",
+        evidence=["Reviewed the survey."],
+        user_authorization="I confirm this survey.",
+        authorization_source="user_message",
+        rejection_reason="",
+    )
     return module, survey_path, verified
 
 
@@ -1516,6 +1534,81 @@ def test_reject_is_terminal_without_fabricating_confirmation(tmp_path: Path) -> 
     assert "confirmation" not in rejected
     assert rejected["rejection"]["reason"] == "Taxonomy needs revision."
     assert discover_pending_judgements(tmp_path) == []
+
+
+@pytest.mark.parametrize("stage_id", ["review_confirmation", "report_consumption"])
+def test_formal_survey_stage_accepts_stable_bound_snapshot(
+    tmp_path: Path,
+    stage_id: str,
+) -> None:
+    _module, _survey_path, _verified = build_confirmed_survey(tmp_path)
+    refs = (
+        [{"kind": "confirmed-survey", "slug": "robot-learning", "mode": "survey"}]
+        if stage_id == "review_confirmation"
+        else [
+            {
+                "kind": "not-applicable-report-consumption",
+                "reason": "no_linked_programs",
+                "survey_slug": "robot-learning",
+                "survey_mode": "survey",
+            }
+        ]
+    )
+
+    binding = build_composite_stage_binding(tmp_path, stage_id, refs=refs)
+
+    assert binding["stage_id"] == stage_id
+    assert binding["artifacts"][0]["artifact_kind"] == "survey_judgement"
+
+
+@pytest.mark.parametrize("stage_id", ["review_confirmation", "report_consumption"])
+@pytest.mark.parametrize("replacement", ["changed", "same-bytes"])
+def test_formal_survey_stage_rejects_replacement_after_receipt_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stage_id: str,
+    replacement: str,
+) -> None:
+    _module, survey_path, _verified = build_confirmed_survey(tmp_path)
+    refs = (
+        [{"kind": "confirmed-survey", "slug": "robot-learning", "mode": "survey"}]
+        if stage_id == "review_confirmation"
+        else [
+            {
+                "kind": "not-applicable-report-consumption",
+                "reason": "no_linked_programs",
+                "survey_slug": "robot-learning",
+                "survey_mode": "survey",
+            }
+        ]
+    )
+    original = judgements_module.judgement_confirmation_is_current
+    replaced = False
+
+    def replace_after_receipt_validation(*args, **kwargs):
+        nonlocal replaced
+        valid = original(*args, **kwargs)
+        if not replaced:
+            old_bytes = survey_path.read_bytes()
+            replacement_path = survey_path.with_name("survey-replacement.yaml")
+            if replacement == "same-bytes":
+                replacement_path.write_bytes(old_bytes)
+            else:
+                changed = load_yaml(survey_path)
+                changed["race_sentinel"] = "NEW_SENTINEL"
+                write_yaml_if_changed(replacement_path, changed)
+            os.replace(replacement_path, survey_path)
+            replaced = True
+        return valid
+
+    monkeypatch.setattr(
+        judgements_module,
+        "judgement_confirmation_is_current",
+        replace_after_receipt_validation,
+    )
+    with pytest.raises(ValueError, match="stale|changed"):
+        build_composite_stage_binding(tmp_path, stage_id, refs=refs)
+    assert replaced is True
 
 
 @pytest.mark.parametrize(
