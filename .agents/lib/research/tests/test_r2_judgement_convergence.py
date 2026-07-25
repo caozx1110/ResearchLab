@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+import research.judgements as judgements_module
 from research.common import load_yaml, write_yaml_if_changed
 from research.confirm import apply_confirmation
 from research.core import default_record, record_path
@@ -99,6 +100,42 @@ def test_bound_side_judgement_revalidates_current_candidate_after_rediscovery(
 
     assert not bound.is_current()
     assert swapped
+
+
+def test_side_discovery_captures_each_container_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for index in range(8):
+        path = tmp_path / f"kb/programs/p-scan-{index}/workflow/decisions.yaml"
+        path.parent.mkdir(parents=True)
+        write_yaml_if_changed(
+            path,
+            {
+                "items": [
+                    {
+                        "id": f"decision-scan-{index}",
+                        "kind": "program_decision",
+                        "owner": "research-orchestrator",
+                        "program_id": f"p-scan-{index}",
+                        "confirmation_status": "pending_user_confirmation",
+                        "payload": {},
+                    }
+                ]
+            },
+        )
+    original_snapshot = judgements_module.snapshot_project_yaml_mapping
+    captures = 0
+
+    def count_snapshot(*args, **kwargs):
+        nonlocal captures
+        captures += 1
+        return original_snapshot(*args, **kwargs)
+
+    monkeypatch.setattr(judgements_module, "snapshot_project_yaml_mapping", count_snapshot)
+
+    assert discover_pending_judgements(tmp_path) == []
+    assert captures == 8
 
 
 def _run(script: str, root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:

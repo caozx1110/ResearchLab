@@ -496,6 +496,23 @@ class _SideJudgementCandidate:
     container: ProjectYamlMappingSnapshot
 
 
+@dataclass(frozen=True)
+class _SideJudgementDiscoverySnapshot:
+    root: Path
+    candidates: tuple[_SideJudgementCandidate, ...]
+    containers: tuple[ProjectYamlMappingSnapshot, ...]
+    container_paths: tuple[Path, ...]
+
+    def is_current(self) -> bool:
+        try:
+            current_paths = tuple(path.absolute() for path, _owner, _is_list in _side_container_specs(self.root))
+            return current_paths == self.container_paths and all(
+                container.is_current() for container in self.containers
+            )
+        except (OSError, ValueError):
+            return False
+
+
 def _side_container_specs(root: Path) -> Iterable[tuple[Path, str, bool]]:
     for path in sorted((root / "kb" / "programs").glob("*/workflow/decisions.yaml")):
         yield path, "research-orchestrator", True
@@ -511,8 +528,16 @@ def _side_container_specs(root: Path) -> Iterable[tuple[Path, str, bool]]:
 def _side_judgement_candidates(
     root: Path,
 ) -> list[_SideJudgementCandidate]:
+    return list(_capture_side_judgement_discovery(root).candidates)
+
+
+def _capture_side_judgement_discovery(
+    root: Path,
+) -> _SideJudgementDiscoverySnapshot:
     candidates: list[_SideJudgementCandidate] = []
-    for path, owner, is_list in _side_container_specs(root):
+    containers: list[ProjectYamlMappingSnapshot] = []
+    specs = list(_side_container_specs(root))
+    for path, owner, is_list in specs:
         try:
             relative = path.absolute().relative_to(root).as_posix()
         except ValueError:
@@ -520,6 +545,7 @@ def _side_judgement_candidates(
         container = snapshot_project_yaml_mapping(root, relative)
         if container is None:
             continue
+        containers.append(container)
         payload = container.payload
         if is_list:
             items = payload.get("items")
@@ -532,7 +558,12 @@ def _side_judgement_candidates(
             _SideJudgementCandidate(record=record, owner=owner, container=container)
             for record in records
         )
-    return candidates
+    return _SideJudgementDiscoverySnapshot(
+        root=root,
+        candidates=tuple(candidates),
+        containers=tuple(containers),
+        container_paths=tuple(path.absolute() for path, _owner, _is_list in specs),
+    )
 
 
 def _candidate_artifacts(
@@ -580,21 +611,64 @@ def _candidate_artifacts(
 def discover_pending_judgements(root: str | Path) -> list[dict[str, Any]]:
     """Return all cross-owner ``ready_for_review`` cards in deterministic order."""
     project_root = Path(root).absolute()
-    candidates = [
-        card
-        for bound in _candidate_artifacts(project_root)
-        if (
-            card := pending_judgement_card(
-                project_root,
-                bound.record,
-                owner=bound.owner,
-                artifact_path=bound.path,
-                record_snapshot=bound.unit_record_snapshot,
-                bound_snapshot=bound,
-            )
+    unit_candidates: list[dict[str, Any]] = []
+    for snapshot in iter_canonical_record_snapshots(project_root):
+        try:
+            bound = _bound_unit_from_snapshot(project_root, snapshot, check_current=False)
+        except ValueError:
+            continue
+        card = pending_judgement_card(
+            project_root,
+            bound.record,
+            owner=bound.owner,
+            artifact_path=bound.path,
+            record_snapshot=bound.unit_record_snapshot,
+            bound_snapshot=bound,
         )
-        is not None
+        if card is not None:
+            unit_candidates.append(card)
+    side_discovery = _capture_side_judgement_discovery(project_root)
+    valid_side_candidates = [
+        candidate
+        for candidate in side_discovery.candidates
+        if _text(candidate.record.get("kind")) in SIDE_OWNER_BY_KIND
+        and not _identity_violations(
+            project_root,
+            candidate.record,
+            candidate.owner,
+            candidate.container.path,
+        )
     ]
+    subject_counts: dict[tuple[str, str], int] = {}
+    for candidate in valid_side_candidates:
+        key = (_text(candidate.record.get("kind")), _text(candidate.record.get("id")))
+        subject_counts[key] = subject_counts.get(key, 0) + 1
+    side_cards: list[dict[str, Any]] = []
+    for candidate in valid_side_candidates:
+        key = (_text(candidate.record.get("kind")), _text(candidate.record.get("id")))
+        if subject_counts.get(key) != 1:
+            continue
+        try:
+            bound = _bound_side_from_candidate(
+                project_root,
+                candidate,
+                check_current=False,
+                validate_current=lambda: True,
+            )
+        except ValueError:
+            continue
+        card = pending_judgement_card(
+            project_root,
+            bound.record,
+            owner=bound.owner,
+            artifact_path=bound.path,
+            bound_snapshot=bound,
+        )
+        if card is not None:
+            side_cards.append(card)
+    if not side_discovery.is_current():
+        side_cards = []
+    candidates = [*unit_candidates, *side_cards]
     priority = {"critical": 4, "high": 3, "normal": 2, "low": 1}
     return sorted(
         candidates,
@@ -805,6 +879,7 @@ def _bound_side_from_candidate(
     *,
     subject: dict[str, Any] | None = None,
     check_current: bool,
+    validate_current: Callable[[], bool] | None = None,
 ) -> BoundJudgementSnapshot:
     record = selected.record
     subject_kind = _text(record.get("kind"))
@@ -854,7 +929,7 @@ def _bound_side_from_candidate(
         path=container.path,
         owner=owner,
         project_yaml_snapshot=container,
-        validate_unique_current=validate_side_unique_current,
+        validate_unique_current=validate_current or validate_side_unique_current,
     )
     if check_current and not bound.is_current():
         raise ValueError("bound judgement changed while it was being captured")
