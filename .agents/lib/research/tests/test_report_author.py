@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+import research.judgements as judgements_module
+import research.records as records_module
 from research.common import load_yaml, write_yaml_if_changed
 from research.confirm import apply_confirmation, write_record
 from research.evidence import build_verification_receipt
@@ -47,6 +49,7 @@ def _write_confirmed_decision(root: Path, program_id: str) -> None:
     decision = {
         "id": "decision-grounded-baseline",
         "kind": "program_decision",
+        "owner": "research-orchestrator",
         "program_id": program_id,
         "confirmation_status": "pending_user_confirmation",
         "needs_human_confirmation": True,
@@ -819,6 +822,166 @@ def test_report_rejects_unit_replaced_after_snapshot_selection(
     assert inputs.missing_units == [unit_id]
     assert "OUTSIDE SENTINEL TITLE" not in rendered
     assert "OUTSIDE SENTINEL CLAIM" not in rendered
+
+
+def test_load_decisions_captures_container_once_and_isolates_bad_sibling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = _load_report_module()
+    root, program_id, _unit_id = _make_workspace(tmp_path)
+    path = root / "kb" / "programs" / program_id / "workflow" / "decisions.yaml"
+    payload = load_yaml(path)
+    payload["items"].append({"id": "bad-sibling", "kind": "not-a-judgement"})
+    write_yaml_if_changed(path, payload)
+    original_snapshot = judgements_module.snapshot_project_file
+    target_captures = 0
+
+    def count_target_capture(project_root, relative_path, **kwargs):
+        nonlocal target_captures
+        if Path(relative_path).as_posix() == path.relative_to(root).as_posix():
+            target_captures += 1
+        return original_snapshot(project_root, relative_path, **kwargs)
+
+    monkeypatch.setattr(judgements_module, "snapshot_project_file", count_target_capture)
+
+    decisions = report.load_decisions(root, program_id)
+
+    assert target_captures == 1
+    assert [item["title"] for item in decisions] == ["Use the grounded baseline"]
+
+
+def test_load_decisions_rejects_container_replacement_without_sentinel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = _load_report_module()
+    root, program_id, _unit_id = _make_workspace(tmp_path)
+    path = root / "kb" / "programs" / program_id / "workflow" / "decisions.yaml"
+    displaced = tmp_path / "displaced-decisions.yaml"
+    replacement = tmp_path / "replacement-decisions.yaml"
+    replacement_payload = load_yaml(path)
+    replacement_payload["items"][0]["payload"]["decision"]["text"] = "REPLACEMENT DECISION SENTINEL"
+    write_yaml_if_changed(replacement, replacement_payload)
+    original_match = report.judgement_confirmation_matches_bound
+    swapped = False
+
+    def replace_after_item_capture(*args, **kwargs):
+        nonlocal swapped
+        result = original_match(*args, **kwargs)
+        if not swapped:
+            swapped = True
+            path.rename(displaced)
+            replacement.rename(path)
+        return result
+
+    monkeypatch.setattr(report, "judgement_confirmation_matches_bound", replace_after_item_capture)
+
+    decisions = report.load_decisions(root, program_id)
+
+    assert swapped
+    assert decisions
+    assert all(item["confirmation"] != "confirmed" for item in decisions)
+    assert all("REPLACEMENT DECISION SENTINEL" not in item.get("title", "") for item in decisions)
+
+
+def test_load_decisions_revalidates_container_after_legacy_parse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = _load_report_module()
+    root, program_id, _unit_id = _make_workspace(tmp_path)
+    path = root / "kb" / "programs" / program_id / "workflow" / "decisions.yaml"
+    displaced = tmp_path / "displaced-during-legacy.yaml"
+    replacement = tmp_path / "replacement-during-legacy.yaml"
+    replacement_payload = load_yaml(path)
+    replacement_payload["items"][0]["payload"]["decision"]["text"] = "LEGACY-PARSE SENTINEL"
+    write_yaml_if_changed(replacement, replacement_payload)
+    original_value = report._decision_value
+    swapped = False
+
+    def replace_during_legacy(lines, label):
+        nonlocal swapped
+        result = original_value(lines, label)
+        if label == "Decision ID" and not swapped:
+            swapped = True
+            path.rename(displaced)
+            replacement.rename(path)
+        return result
+
+    monkeypatch.setattr(report, "_decision_value", replace_during_legacy)
+
+    decisions = report.load_decisions(root, program_id)
+
+    assert swapped
+    assert decisions
+    assert all(item["confirmation"] != "confirmed" for item in decisions)
+    assert all("LEGACY-PARSE SENTINEL" not in item.get("title", "") for item in decisions)
+
+
+def test_load_decisions_invalid_same_id_sibling_still_suppresses_legacy_duplicate(
+    tmp_path: Path,
+) -> None:
+    report = _load_report_module()
+    root = tmp_path / "workspace"
+    program_id = "compat-known-ids"
+    workflow = root / "kb" / "programs" / program_id / "workflow"
+    workflow.mkdir(parents=True)
+    write_yaml_if_changed(
+        workflow / "decisions.yaml",
+        {"items": [{"id": "legacy-duplicate", "kind": "not-a-judgement"}]},
+    )
+    (workflow / "decision-log.md").write_text(
+        "# Decision Log\n\n"
+        "## 2026-07-25 · Must stay deduplicated\n\n"
+        "- Decision ID: `legacy-duplicate`\n",
+        encoding="utf-8",
+    )
+
+    assert report.load_decisions(root, program_id) == []
+
+
+def test_legacy_decision_log_replacement_is_not_rendered(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = _load_report_module()
+    root = tmp_path / "workspace"
+    program_id = "legacy-snapshot"
+    workflow = root / "kb" / "programs" / program_id / "workflow"
+    workflow.mkdir(parents=True)
+    legacy_path = workflow / "decision-log.md"
+    legacy_path.write_text(
+        "# Decision Log\n\n## 2026-07-25 · Stable legacy decision\n\n- Decision ID: `legacy-1`\n",
+        encoding="utf-8",
+    )
+    replacement = tmp_path / "replacement-decision-log.md"
+    replacement.write_text(
+        "# Decision Log\n\n## 2026-07-25 · REPLACEMENT LEGACY SENTINEL\n",
+        encoding="utf-8",
+    )
+    displaced = tmp_path / "displaced-decision-log.md"
+    original_is_current = records_module.ProjectFileSnapshot.is_current
+    swapped = False
+
+    def replace_before_legacy_final(snapshot) -> bool:
+        nonlocal swapped
+        if snapshot.path == legacy_path and not swapped:
+            swapped = True
+            legacy_path.rename(displaced)
+            replacement.rename(legacy_path)
+        return original_is_current(snapshot)
+
+    monkeypatch.setattr(
+        records_module.ProjectFileSnapshot,
+        "is_current",
+        replace_before_legacy_final,
+    )
+
+    decisions = report.load_decisions(root, program_id)
+
+    assert swapped
+    assert decisions == []
 
 
 def test_weekly_and_stage_reports_include_claims_evidence_events_and_decisions(tmp_path: Path) -> None:

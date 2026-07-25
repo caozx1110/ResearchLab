@@ -104,6 +104,21 @@ class BoundJudgementSnapshot:
             return False
 
 
+@dataclass(frozen=True)
+class BoundJudgementContainerSnapshot:
+    """Side judgements selected from one exact strict-YAML container capture."""
+
+    container: ProjectYamlMappingSnapshot
+    judgements: tuple[BoundJudgementSnapshot, ...]
+    validate_current: Callable[[], bool] = field(repr=False, compare=False)
+
+    def is_current(self) -> bool:
+        try:
+            return bool(self.validate_current())
+        except (OSError, ValueError):
+            return False
+
+
 def _text(value: Any) -> str:
     return str(value or "").strip()
 
@@ -299,7 +314,7 @@ def readiness_violations(
     return finish(violations)
 
 
-def judgement_confirmation_is_current(
+def _judgement_confirmation_matches(
     root: Path,
     record: dict[str, Any],
     artifact_path: Path,
@@ -307,7 +322,6 @@ def judgement_confirmation_is_current(
     record_snapshot: CanonicalRecordSnapshot | None = None,
     bound_snapshot: BoundJudgementSnapshot | None = None,
 ) -> bool:
-    """Validate a judgement receipt against canonical identity and current evidence bytes."""
     root = root.absolute()
     artifact_path = artifact_path.absolute()
     valid = True
@@ -337,8 +351,39 @@ def judgement_confirmation_is_current(
             external_source=record_external_source_contract(record),
         )
         valid = valid and receipt_current
-    snapshot_current = bound_snapshot is None or bound_snapshot.is_current()
-    return valid and snapshot_current
+    return valid
+
+
+def judgement_confirmation_is_current(
+    root: Path,
+    record: dict[str, Any],
+    artifact_path: Path,
+    *,
+    record_snapshot: CanonicalRecordSnapshot | None = None,
+    bound_snapshot: BoundJudgementSnapshot | None = None,
+) -> bool:
+    """Validate a judgement receipt and finish on its exact source snapshot."""
+    return _judgement_confirmation_matches(
+        root,
+        record,
+        artifact_path,
+        record_snapshot=record_snapshot,
+        bound_snapshot=bound_snapshot,
+    ) and (bound_snapshot is None or bound_snapshot.is_current())
+
+
+def judgement_confirmation_matches_bound(
+    root: Path,
+    bound_snapshot: BoundJudgementSnapshot,
+) -> bool:
+    """Validate receipt/evidence from a bound item before its batch final-current gate."""
+    return _judgement_confirmation_matches(
+        root,
+        bound_snapshot.record,
+        bound_snapshot.path,
+        record_snapshot=bound_snapshot.unit_record_snapshot,
+        bound_snapshot=bound_snapshot,
+    )
 
 
 def _default_route(record: dict[str, Any], owner: str) -> dict[str, str]:
@@ -955,6 +1000,71 @@ def _bound_side_from_candidate(
     return bound
 
 
+def load_bound_judgement_container_snapshot(
+    root: str | Path,
+    relative_path: str | Path,
+    *,
+    owner: str,
+    expected_kind: str,
+) -> BoundJudgementContainerSnapshot:
+    """Capture one canonical side container and index its globally unique items."""
+    project_root = Path(root).absolute()
+    relative = Path(relative_path)
+    if relative.is_absolute() or not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+        raise ValueError("side judgement container path is not canonical")
+    target_path = project_root / relative
+    matching_specs = [
+        spec
+        for spec in _side_container_specs(project_root)
+        if spec[0].absolute() == target_path.absolute() and spec[1] == owner
+    ]
+    if len(matching_specs) != 1 or SIDE_OWNER_BY_KIND.get(expected_kind) != owner:
+        raise ValueError("side judgement container is not canonical for its owner")
+    discovery = _capture_side_judgement_discovery(project_root)
+    target_containers = [
+        container for container in discovery.containers if container.path == target_path.absolute()
+    ]
+    if len(target_containers) != 1:
+        raise ValueError("side judgement container is not a strict YAML mapping")
+    valid_candidates = [
+        candidate
+        for candidate in discovery.candidates
+        if _text(candidate.record.get("kind")) in SIDE_OWNER_BY_KIND
+        and not _identity_violations(
+            project_root,
+            candidate.record,
+            candidate.owner,
+            candidate.container.path,
+        )
+    ]
+    subject_counts: dict[tuple[str, str], int] = {}
+    for candidate in valid_candidates:
+        key = (_text(candidate.record.get("kind")), _text(candidate.record.get("id")))
+        subject_counts[key] = subject_counts.get(key, 0) + 1
+    bound_items: list[BoundJudgementSnapshot] = []
+    for candidate in valid_candidates:
+        key = (_text(candidate.record.get("kind")), _text(candidate.record.get("id")))
+        if (
+            candidate.container.path != target_path.absolute()
+            or key[0] != expected_kind
+            or subject_counts.get(key) != 1
+        ):
+            continue
+        bound_items.append(
+            _bound_side_from_candidate(
+                project_root,
+                candidate,
+                check_current=False,
+                validate_current=discovery.is_current,
+            )
+        )
+    return BoundJudgementContainerSnapshot(
+        container=target_containers[0],
+        judgements=tuple(bound_items),
+        validate_current=discovery.is_current,
+    )
+
+
 def load_bound_judgement_snapshot(root: str | Path, subject: Any) -> BoundJudgementSnapshot:
     """Bind one judgement to its exact, globally unique canonical container."""
     project_root = Path(root).absolute()
@@ -1055,13 +1165,16 @@ def load_bound_judgement(root: str | Path, subject: Any) -> tuple[dict[str, Any]
 
 
 __all__ = [
+    "BoundJudgementContainerSnapshot",
     "BoundJudgementSnapshot",
     "apply_judgement_rejection",
     "confirmation_binding",
     "discover_pending_judgements",
     "judgement_snapshot_binding",
     "judgement_confirmation_is_current",
+    "judgement_confirmation_matches_bound",
     "load_bound_judgement",
+    "load_bound_judgement_container_snapshot",
     "load_bound_judgement_snapshot",
     "pending_judgement_card",
     "require_judgement_snapshot",

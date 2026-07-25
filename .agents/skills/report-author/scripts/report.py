@@ -33,7 +33,9 @@ from research.evidence import read_claims, validate_claims
 from research.judgements import (
     BoundJudgementSnapshot,
     confirmation_binding,
+    judgement_confirmation_matches_bound,
     judgement_confirmation_is_current,
+    load_bound_judgement_container_snapshot,
     load_bound_judgement_snapshot,
 )
 from research.preference_selection import resolve_task_preferences, selection_binding
@@ -42,6 +44,7 @@ from research.records import (
     iter_canonical_record_snapshots,
     normalize_record_snapshot,
     snapshot_canonical_unit_artifacts,
+    snapshot_project_file,
 )
 from research.surveys import survey_staleness
 
@@ -775,19 +778,40 @@ def _decision_value(lines: list[str], label: str) -> str:
 
 
 def load_decisions(root: Path, program_id: str) -> list[dict[str, str]]:
-    path = root / "kb" / "programs" / program_id / "workflow" / "decisions.yaml"
-    payload = load_yaml(path, default={})
-    items = payload.get("items") if isinstance(payload, dict) else None
-    items = items if isinstance(items, list) else []
+    clean_program_id = str(program_id or "").strip()
+    if (
+        not clean_program_id
+        or Path(clean_program_id).name != clean_program_id
+        or clean_program_id in {".", ".."}
+    ):
+        return []
+    decisions_relative = Path("kb") / "programs" / clean_program_id / "workflow" / "decisions.yaml"
     decisions: list[dict[str, str]] = []
-    known_ids = {str(item.get("id") or "") for item in items if isinstance(item, dict)}
-    for item in items:
-        if not isinstance(item, dict):
-            continue
+    current_container_decisions: list[dict[str, str]] = []
+    known_ids: set[str] = set()
+    try:
+        batch = load_bound_judgement_container_snapshot(
+            root,
+            decisions_relative,
+            owner="research-orchestrator",
+            expected_kind="program_decision",
+        )
+    except (OSError, RuntimeError, UnicodeError, ValueError, yaml.YAMLError):
+        batch = None
+    if batch is not None:
+        raw_items = batch.container.payload.get("items")
+        if isinstance(raw_items, list):
+            known_ids = {
+                str(item.get("id") or "")
+                for item in raw_items
+                if isinstance(item, dict) and str(item.get("id") or "")
+            }
+    for bound in batch.judgements if batch is not None else ():
+        item = bound.record
         decision = item.get("payload", {}).get("decision", {})
         decision = decision if isinstance(decision, dict) else {}
         if isinstance(item.get("legacy_import"), dict) and str(item.get("confirmation_status") or "") != "confirmed":
-            decisions.append(
+            current_container_decisions.append(
                 {
                     "title": str(decision.get("text") or item.get("id") or "legacy decision"),
                     "stage": str(decision.get("stage") or ""),
@@ -800,11 +824,11 @@ def load_decisions(root: Path, program_id: str) -> list[dict[str, str]]:
             continue
         if str(item.get("confirmation_status") or "") != "confirmed":
             continue
-        if not judgement_confirmation_is_current(root, item, path):
+        if not judgement_confirmation_matches_bound(root, bound):
             continue
         if not decision:
             continue
-        decisions.append(
+        current_container_decisions.append(
             {
                 "title": str(decision.get("text") or ""),
                 "stage": str(decision.get("stage") or ""),
@@ -823,26 +847,43 @@ def load_decisions(root: Path, program_id: str) -> list[dict[str, str]]:
                 ),
             }
         )
-    legacy_path = root / "kb" / "programs" / program_id / "workflow" / "decision-log.md"
-    if legacy_path.is_file():
-        text = legacy_path.read_text(encoding="utf-8")
+    legacy_relative = Path("kb") / "programs" / clean_program_id / "workflow" / "decision-log.md"
+    legacy_snapshot = snapshot_project_file(root, legacy_relative)
+    legacy_decisions: list[tuple[str, dict[str, str]]] = []
+    if legacy_snapshot is not None:
+        try:
+            text = legacy_snapshot.raw_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            text = ""
         headings = list(re.finditer(r"(?m)^##\s+(.+?)\s+·\s+(.+?)\s*$", text))
         for index, heading in enumerate(headings):
             block_end = headings[index + 1].start() if index + 1 < len(headings) else len(text)
             lines = [line.strip() for line in text[heading.end() : block_end].splitlines()]
             decision_id = _decision_value(lines, "Decision ID")
-            if decision_id and decision_id in known_ids:
-                continue
-            decisions.append(
-                {
-                    "title": heading.group(2).strip(),
-                    "stage": _decision_value(lines, "Stage"),
-                    "rationale": _decision_value(lines, "Rationale"),
-                    "alternatives": _decision_value(lines, "Alternatives"),
-                    "confirmation": "pending_user_confirmation",
-                    "legacy_pending": "true",
-                }
+            legacy_decisions.append(
+                (
+                    decision_id,
+                    {
+                        "title": heading.group(2).strip(),
+                        "stage": _decision_value(lines, "Stage"),
+                        "rationale": _decision_value(lines, "Rationale"),
+                        "alternatives": _decision_value(lines, "Alternatives"),
+                        "confirmation": "pending_user_confirmation",
+                        "legacy_pending": "true",
+                    },
+                )
             )
+    legacy_current = legacy_snapshot is not None and legacy_snapshot.is_current()
+    container_current = batch is not None and batch.is_current()
+    if container_current:
+        decisions.extend(current_container_decisions)
+    if legacy_current:
+        effective_known_ids = known_ids if container_current else set()
+        decisions.extend(
+            item
+            for decision_id, item in legacy_decisions
+            if not decision_id or decision_id not in effective_known_ids
+        )
     return decisions
 
 
