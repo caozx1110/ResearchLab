@@ -1133,6 +1133,14 @@ def identity(metadata):
     )
 
 
+def is_within(path, parent):
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
 root = Path(sys.argv[1])
 directory_flags = (
     os.O_RDONLY
@@ -1164,17 +1172,35 @@ try:
         parent_fd = child_fd
 
     bin_fd = parent_fd
-    leaf = os.stat("python", dir_fd=bin_fd, follow_symlinks=False)
-    if not (stat.S_ISREG(leaf.st_mode) or stat.S_ISLNK(leaf.st_mode)):
-        raise OSError("managed runtime interpreter is unsafe")
-    target = os.stat("python", dir_fd=bin_fd, follow_symlinks=True)
+    bin_path = root / ".venv" / "bin"
+    link_name = "python"
+    link_bindings = []
+    target_path = None
+    for _ in range(16):
+        link_metadata = os.stat(link_name, dir_fd=bin_fd, follow_symlinks=False)
+        if not stat.S_ISLNK(link_metadata.st_mode):
+            raise OSError("managed runtime interpreter must be a standard symlink chain")
+        link_target = os.readlink(link_name, dir_fd=bin_fd)
+        link_bindings.append((link_name, link_target, identity(link_metadata)))
+        candidate = Path(link_target)
+        if not candidate.is_absolute() and len(candidate.parts) == 1 and candidate.name not in {"", ".", ".."}:
+            link_name = candidate.name
+            continue
+        if not candidate.is_absolute():
+            candidate = Path(os.path.abspath(os.fspath(bin_path / candidate)))
+        resolved = candidate.resolve(strict=True)
+        if is_within(resolved, root):
+            raise OSError("managed runtime interpreter resolves inside the workspace")
+        target_path = resolved
+        break
+    if target_path is None:
+        raise OSError("managed runtime interpreter symlink chain is too deep")
+    target = target_path.stat()
     if not stat.S_ISREG(target.st_mode) or target.st_mode & 0o111 == 0:
         raise OSError("managed runtime interpreter target is unsafe")
 
     completed = subprocess.run(
-        ["./python", "-c", "import yaml, markdownify, bs4"],
-        preexec_fn=lambda: os.fchdir(bin_fd),
-        pass_fds=(bin_fd,),
+        [str(target_path), "-c", "import yaml, markdownify, bs4"],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -1189,9 +1215,16 @@ try:
         current = os.stat(component, dir_fd=parent, follow_symlinks=False)
         if identity(current) != expected:
             raise OSError("managed runtime ancestor changed during probe")
-    current_leaf = os.stat("python", dir_fd=bin_fd, follow_symlinks=False)
-    if identity(current_leaf) != identity(leaf):
-        raise OSError("managed runtime interpreter changed during probe")
+    for name, expected_target, expected_identity in link_bindings:
+        current_link = os.stat(name, dir_fd=bin_fd, follow_symlinks=False)
+        if (
+            identity(current_link) != expected_identity
+            or not stat.S_ISLNK(current_link.st_mode)
+            or os.readlink(name, dir_fd=bin_fd) != expected_target
+        ):
+            raise OSError("managed runtime interpreter changed during probe")
+    if identity(target_path.stat()) != identity(target):
+        raise OSError("managed runtime interpreter target changed during probe")
 except (OSError, subprocess.SubprocessError):
     raise SystemExit(1)
 finally:

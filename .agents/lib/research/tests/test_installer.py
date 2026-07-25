@@ -921,11 +921,13 @@ def test_unsafe_managed_venv_nodes_warn_without_execution_or_plan_writes(tmp_pat
             elif unsafe_kind == "fifo-leaf":
                 os.mkfifo(managed_python)
             else:
-                managed_python.write_text(
+                slow_python = case_root / "slow-python"
+                slow_python.write_text(
                     f"#!{sys.executable!s}\nimport time\ntime.sleep(30)\n",
                     encoding="utf-8",
                 )
-                managed_python.chmod(0o755)
+                slow_python.chmod(0o755)
+                managed_python.symlink_to(slow_python)
         before = _workspace_snapshot(workspace)
         plan_path = case_root / "plan.json"
         started = time.monotonic()
@@ -967,7 +969,7 @@ def test_unsafe_managed_venv_nodes_warn_without_execution_or_plan_writes(tmp_pat
         assert not marker.exists()
 
 
-def test_managed_venv_ancestor_swap_is_detected_without_executing_rebound_target(
+def test_managed_venv_regular_interpreter_cannot_attempt_an_ancestor_swap(
     tmp_path: Path,
 ) -> None:
     workspace = tmp_path / "swapped-venv-workspace"
@@ -1026,8 +1028,10 @@ def test_managed_venv_ancestor_swap_is_detected_without_executing_rebound_target
     runtime = plan["conditional_runtime_changes"]
     assert len(runtime) == 1
     assert runtime[0]["path"] == str(workspace / ".venv")
-    assert (workspace / ".venv").is_symlink()
-    assert (workspace / ".venv-original/bin/python").is_file()
+    assert (workspace / ".venv").is_dir()
+    assert not (workspace / ".venv").is_symlink()
+    assert not (workspace / ".venv-original").exists()
+    assert managed_python.is_file()
     assert not marker.exists()
 
 
