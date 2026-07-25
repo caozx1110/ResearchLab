@@ -72,7 +72,7 @@ runtime readiness 先检查显式 `RESEARCH_PYTHON`，再检查当前 workspace 
 
 适用：paper / repo / dataset / blog / idea / experiment 六种 unit 共享的 record 顶层结构。
 
-所有 canonical unit 读者共用同一 strict record snapshot 合同：从 workspace root 逐级 anchored/no-follow 打开 `kb/units/<kind-dir>/<unit-id>/record.yaml`，目录名与 record `kind/id` 必须互相一致；leaf 只接受有界 ordinary file，并以 nonblocking fd 读取，读取前后重验完整 stat identity、长度与祖先目录链。YAML loader 拒绝任意层重复 mapping key。symlink、FIFO/socket/device、过大/变化中的文件、重复 key、目录身份漂移或 schema/路径不一致均不得产出 record。批量 discovery 可隔离单个坏候选并返回安全 audit finding，但 status/portfolio/review/find 不得跟随、阻塞或使用 last-wins 值。任何 owner 若需要精确 bytes/digest，必须消费这个 reader 返回的同一 snapshot，不能再次按路径打开。
+所有 canonical unit 读者共用同一 strict record snapshot 合同：从 workspace root 逐级 anchored/no-follow 打开 `kb/units/<kind-dir>/<unit-id>/record.yaml`，目录名与 record `kind/id` 必须互相一致；leaf 只接受有界 ordinary file，并以 nonblocking fd 读取，读取前后重验完整 stat identity、长度与祖先目录链。YAML loader 拒绝任意层重复 mapping key。symlink、FIFO/socket/device、过大/变化中的文件、重复 key、目录身份漂移或 schema/路径不一致均不得产出 record。批量 discovery 必须隔离单个坏候选并返回安全 audit finding：normalization 对任意 YAML mapping 是 total boundary，schema/type 错误不得返回 raw payload或抛出普通异常拖垮 status/portfolio/review/find/survey/intake；`KeyboardInterrupt/GeneratorExit` 不吞。任何 owner 若需要精确 bytes/digest，必须消费这个 reader 返回的同一 snapshot，不能再次按路径打开。严格 snapshot 也不得降级成普通 `Path/.parent` 交给 evidence/passage consumer：source-unit evidence、Markdown 与 parse-cache 从同一 anchored unit directory capability 读取为 bytes+digest+artifact identity，并在判断/公开展示前重验整条祖先链；leaf-only no-follow 或先检查后按路径重开不构成能力绑定。`last/current` 的修改时间排序直接使用 snapshot 整数纳秒，禁止转 epoch float 丢精度。
 
 ```yaml
 id: <kind-prefix>-<slug>-<8hex>      # 必填；canonical_unit_id() 生成
