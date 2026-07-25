@@ -16,11 +16,11 @@ from pathlib import Path
 import pytest
 
 from research.common import write_yaml_if_changed
-from research.evidence import build_verification_receipt
+from research.evidence import build_verification_receipt, verification_receipt_violations
 from research.judgements import discover_pending_judgements
 from research.index import search_records
 from research.paths import record_path
-from research.records import default_record, iter_records, locate_record
+from research.records import default_record, iter_records, locate_record, trusted_claim_source_roots
 from research.sources import detect_duplicate
 from research.surveys import select_current_confirmed_survey_records
 import research.records as records_module
@@ -654,4 +654,85 @@ def test_cross_unit_evidence_rejects_source_symlink_swap_after_candidate_snapsho
     monkeypatch.setattr(judgements_module, "iter_canonical_record_snapshots", racing_iter)
 
     assert discover_pending_judgements(root) == []
+    assert swapped
+
+
+def test_cross_unit_snapshot_detects_source_replacement_before_verifier_returns(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    source_id = "p-source-current-123456"
+    source_path = _write_record(root, "paper", source_id, title="Source")
+    source_artifact = source_path.parent / "raw" / "source.txt"
+    source_artifact.parent.mkdir()
+    source_artifact.write_text("Bound evidence bytes.", encoding="utf-8")
+    consumer_id = "b-consumer-current-123456"
+    consumer_path = _write_ready_unit(root, "blog", consumer_id)
+    consumer = records_module.load_yaml(consumer_path)
+    consumer["payload"]["claims"][0]["evidence_refs"] = [
+        {
+            "source_unit_id": source_id,
+            "artifact": "raw/source.txt",
+            "locator": "line:1",
+            "quote": "Bound evidence bytes.",
+        }
+    ]
+    build_verification_receipt(
+        consumer,
+        consumer_path.parent,
+        source_roots={source_id: source_path.parent},
+    )
+    source_roots = trusted_claim_source_roots(root, consumer, verification_root=consumer_path.parent)
+    outside = tmp_path / "outside-current-source"
+    shutil.copytree(source_path.parent, outside)
+    parked = tmp_path / "parked-current-source"
+    source_path.parent.rename(parked)
+    source_path.parent.symlink_to(outside, target_is_directory=True)
+
+    violations = verification_receipt_violations(
+        consumer,
+        consumer_path.parent,
+        source_roots=source_roots,
+    )
+
+    assert any("no longer current" in violation for violation in violations)
+
+
+def test_cross_unit_artifact_parent_swap_during_open_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "workspace"
+    source_id = "p-source-parent-race-123456"
+    source_path = _write_record(root, "paper", source_id, title="Source")
+    raw = source_path.parent / "raw"
+    raw.mkdir()
+    (raw / "source.txt").write_text("Original anchored evidence.", encoding="utf-8")
+    consumer_path = _write_ready_unit(root, "blog", "b-consumer-parent-race-123456")
+    consumer = records_module.load_yaml(consumer_path)
+    consumer["payload"]["claims"][0]["evidence_refs"] = [
+        {
+            "source_unit_id": source_id,
+            "artifact": "raw/source.txt",
+            "locator": "line:1",
+            "quote": "Original anchored evidence.",
+        }
+    ]
+    outside = tmp_path / "outside-raw"
+    outside.mkdir()
+    (outside / "source.txt").write_text("EXTERNAL_SECRET", encoding="utf-8")
+    parked = source_path.parent / "raw-parked"
+    original_open = records_module.os.open
+    swapped = False
+
+    def racing_open(name, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        if name == "source.txt" and dir_fd is not None and not swapped:
+            swapped = True
+            raw.rename(parked)
+            raw.symlink_to(outside, target_is_directory=True)
+        return original_open(name, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(records_module.os, "open", racing_open)
+
+    with pytest.raises(ValueError, match="artifact snapshot"):
+        trusted_claim_source_roots(root, consumer, verification_root=consumer_path.parent)
     assert swapped

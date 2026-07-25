@@ -577,6 +577,40 @@ def test_passage_capture_rejects_real_unit_replacement_after_record_snapshot(
     assert swapped
 
 
+def test_passage_leaf_open_rejects_unit_symlink_swap_without_external_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ensure_workspace(tmp_path)
+    unit_id = "p-passage-open-race-123456"
+    _write_record(tmp_path, _record(unit_id, "Open-race paper"))
+    unit = unit_root(tmp_path, "paper", unit_id)
+    write_text_if_changed(unit / "paper-note.md", "Original anchored passage.\n")
+    outside = tmp_path / "outside-passage-unit"
+    shutil.copytree(unit, outside)
+    write_text_if_changed(outside / "paper-note.md", "TOPSECRET_EXTERNAL_PASSAGE\n")
+    parked = tmp_path / "parked-passage-unit"
+    import research.records as records_mod
+
+    original_open = records_mod.os.open
+    swapped = False
+
+    def racing_open(name, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        if name == "paper-note.md" and dir_fd is not None and not swapped:
+            swapped = True
+            unit.rename(parked)
+            unit.symlink_to(outside, target_is_directory=True)
+        return original_open(name, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(records_mod.os, "open", racing_open)
+
+    payload = search_passages(tmp_path, "TOPSECRET_EXTERNAL_PASSAGE")
+
+    assert payload["results"] == []
+    assert swapped
+
+
 def test_failed_atomic_replace_preserves_prior_passage_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     ensure_workspace(tmp_path)
     _write_record(tmp_path, _record("p-atomic-123456", "Atomic Cache"))
