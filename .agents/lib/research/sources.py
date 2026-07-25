@@ -2011,6 +2011,25 @@ def _canonical_literature_stage(
     }
     if _sanitize_search_state(persisted_state) != persisted_state:
         raise SystemExit("Literature search stage state is not canonical.")
+    for field, sanitizer in (
+        ("budget", _sanitize_search_budget),
+        ("usage", _sanitize_search_usage),
+        ("coverage", _sanitize_search_coverage),
+        ("frontier", _sanitize_search_frontier),
+    ):
+        if field in payload and sanitizer(payload[field]) != payload[field]:
+            raise SystemExit(f"Literature search stage {field} is not canonical.")
+    raw_queries = payload.get("queries", [])
+    if not isinstance(raw_queries, list):
+        raise SystemExit("Literature search stage queries must be a list.")
+    canonical_queries = [_sanitize_search_query(item) for item in raw_queries]
+    if canonical_queries != raw_queries:
+        raise SystemExit("Literature search stage query ledger is not canonical.")
+    query_ids = [str(item.get("query_id") or "") for item in canonical_queries]
+    if len(query_ids) != len(set(query_ids)):
+        raise SystemExit("Literature search stage query ids must be unique.")
+    if "partial" in payload and not isinstance(payload.get("partial"), bool):
+        raise SystemExit("Literature search stage partial flag must be true or false.")
     stop = payload.get("stop")
     if not isinstance(stop, dict):
         raise SystemExit("Literature search stage has no canonical stop state.")
@@ -2021,7 +2040,26 @@ def _canonical_literature_stage(
     if not isinstance(candidates, list) or any(not isinstance(item, dict) for item in candidates):
         raise SystemExit("Literature search stage candidates are not canonical.")
     candidate_ids: set[str] = set()
-    for candidate in candidates:
+    candidate_input_fields = {
+        "candidate_id",
+        "title",
+        "url",
+        "note",
+        "topics",
+        "tags",
+        "pool_hints",
+        "identities",
+        "discovered_by",
+        "fetch",
+        "evidence_level",
+        "screening",
+        "screening_decisions",
+        "adjudications",
+        "metadata",
+    }
+    fulltext_count = 0
+    citation_hops = 0
+    for index, candidate in enumerate(candidates, start=1):
         candidate_id = _safe_search_id(candidate.get("candidate_id"), field="candidate_id")
         if candidate_id in candidate_ids:
             raise SystemExit("Literature search stage candidate ids must be unique.")
@@ -2035,6 +2073,56 @@ def _canonical_literature_stage(
         record_id = str(candidate.get("record_id") or "")
         if record_id:
             _safe_search_id(record_id, field="record_id")
+        persisted_candidate = {
+            key: copy.deepcopy(value)
+            for key, value in candidate.items()
+            if key in candidate_input_fields
+        }
+        if (
+            _sanitize_search_candidate(
+                persisted_candidate,
+                stage_id=stage_id,
+                index=index,
+                allow_local_reference=False,
+            )
+            != persisted_candidate
+        ):
+            raise SystemExit("Literature search stage candidate is not canonical.")
+        if not candidate.get("discovered_by"):
+            raise SystemExit("Literature search stage candidate has no discovery edge.")
+        if str(candidate.get("evidence_level") or "") == "fulltext":
+            fulltext_count += 1
+        for discovery in candidate.get("discovered_by", []):
+            if str(discovery.get("query_id") or "") not in set(query_ids):
+                raise SystemExit("Literature search discovery references an unknown query event.")
+            if discovery.get("edge_type") in {"reference", "cited_by"}:
+                citation_hops += 1
+
+    frontier = payload.get("frontier") if isinstance(payload.get("frontier"), list) else []
+    for action in frontier:
+        if str(action.get("candidate_id") or "") not in candidate_ids:
+            raise SystemExit("Literature search frontier references an unknown candidate.")
+        parent_id = str(action.get("parent_candidate_id") or "")
+        if parent_id and parent_id not in candidate_ids:
+            raise SystemExit("Literature search frontier references an unknown parent candidate.")
+    usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+    budget = payload.get("budget") if isinstance(payload.get("budget"), dict) else {}
+    if int(usage.get("queries", 0)) < len(raw_queries):
+        raise SystemExit("Literature search usage is below the persisted query ledger.")
+    if int(usage.get("candidates_seen", 0)) < len(candidates):
+        raise SystemExit("Literature search usage is below the persisted candidate ledger.")
+    if int(usage.get("full_reads", 0)) < fulltext_count:
+        raise SystemExit("Literature search usage is below the persisted fulltext ledger.")
+    if int(usage.get("citation_hops", 0)) < citation_hops:
+        raise SystemExit("Literature search usage is below the persisted citation ledger.")
+    for budget_field, actual in (
+        ("max_queries", len(raw_queries)),
+        ("max_candidates", len(candidates)),
+        ("max_full_reads", fulltext_count),
+        ("max_citation_hops", citation_hops),
+    ):
+        if budget_field in budget and actual > int(budget[budget_field]):
+            raise SystemExit("Literature search stage exceeds its persisted hard budget.")
 
     multi_reviewer = int((payload.get("scope") or {}).get("screeners") or 1) > 1
     if multi_reviewer:

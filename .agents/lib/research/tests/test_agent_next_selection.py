@@ -624,6 +624,22 @@ def test_literature_stage_enumeration_rejects_symlink_leaf(tmp_path: Path) -> No
         orchestrate.portfolio_candidate_snapshot(root)
 
 
+def test_literature_stage_enumeration_rejects_malformed_persisted_state(tmp_path: Path) -> None:
+    orchestrate = _load_orchestrator("orchestrator_literature_malformed")
+    root = _workspace(tmp_path)
+    stage_path = _stage_literature_search(
+        root,
+        query="malformed persisted state",
+        stop_reason="in_progress",
+    )
+    malformed = load_yaml(stage_path)
+    malformed["queries"][0]["outcome"] = "invented-success"
+    write_yaml_if_changed(stage_path, malformed)
+
+    with pytest.raises(SystemExit, match="query|canonical|supported"):
+        orchestrate.portfolio_candidate_snapshot(root)
+
+
 @pytest.mark.parametrize("mutation", ["content", "revision", "state"])
 def test_active_monitor_binding_change_stales_existing_portfolio_decision(
     tmp_path: Path,
