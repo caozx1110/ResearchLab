@@ -454,3 +454,33 @@ def test_locate_last_uses_safe_snapshot_mtime_for_legacy_records(tmp_path: Path)
 
     assert record["id"] == "p-newer-123456"
     assert path.name == "record.yaml"
+
+
+def test_legacy_snapshot_normalization_is_stable_across_runtime_clock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "workspace"
+    path = record_path(root, "paper", "p-legacy-123456")
+    write_yaml_if_changed(
+        path,
+        {
+            "id": "p-legacy-123456",
+            "kind": "paper",
+            "title": "Legacy prepared duplicate",
+            "status": "active",
+            "source": {"original_uri": "https://example.test/legacy"},
+            "confirmation_status": "pending_user_confirmation",
+            "needs_human_confirmation": True,
+            "information_types": ["fact"],
+            "payload": {},
+        },
+    )
+    stable_seconds = 1_700_000_000
+    os.utime(path, ns=(stable_seconds * 1_000_000_000, stable_seconds * 1_000_000_000))
+    monkeypatch.setattr(records_module, "utc_now_iso", lambda: "2026-01-01T00:00:00+00:00")
+    prepared, _ = locate_record(root, "p-legacy-123456", kind="paper", fuzzy=False)
+    monkeypatch.setattr(records_module, "utc_now_iso", lambda: "2026-01-01T00:00:01+00:00")
+    current, _ = locate_record(root, "p-legacy-123456", kind="paper", fuzzy=False)
+
+    assert current == prepared

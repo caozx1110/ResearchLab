@@ -1,11 +1,13 @@
 """Record schema: templates, payload skeletons, normalization, history, and store access (iter/locate)."""
 from __future__ import annotations
 
+import copy
 import os
 import re
 import stat
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Sequence
 
@@ -1139,7 +1141,33 @@ def _normalized_snapshot_record(
     snapshot: CanonicalRecordSnapshot,
     project_root: Path,
 ) -> dict[str, Any]:
-    payload = snapshot.record
+    payload = copy.deepcopy(snapshot.record)
+    try:
+        stable_timestamp = datetime.fromtimestamp(
+            snapshot.modified_time_ns / 1_000_000_000,
+            timezone.utc,
+        ).replace(microsecond=0).isoformat()
+    except (OSError, OverflowError, ValueError):
+        stable_timestamp = "1970-01-01T00:00:00+00:00"
+    for field in ("created_at", "first_ingested_at", "updated_at"):
+        if field not in payload:
+            payload[field] = stable_timestamp
+    raw_history = payload.get("history")
+    valid_history = (
+        [item for item in raw_history if isinstance(item, dict)]
+        if isinstance(raw_history, list)
+        else []
+    )
+    if not valid_history:
+        payload["history"] = [
+            {
+                "timestamp": stable_timestamp,
+                "action": "created",
+                "summary": f"Backfilled history for {snapshot.kind} record.",
+                "information_types": ["fact"],
+                "artifacts": [],
+            }
+        ]
     try:
         return normalize_record_schema(payload, project_root=project_root)
     except SystemExit:
