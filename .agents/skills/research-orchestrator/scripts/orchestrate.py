@@ -49,7 +49,7 @@ from research.common import (
 )
 from research.core import apply_confirmation, append_history, ensure_workspace, is_ready_for_human_review, iter_records, kb_root, load_runtime_preferences, locate_record, checkpoint_and_report, project_root, record_workflow_state, write_record
 from research.evidence import EvidenceSourceSnapshot, attach_claims, build_verification_receipt, validate_claims, verify_claim_evidence
-from research.judgements import apply_judgement_rejection, confirmation_binding, discover_pending_judgements, judgement_confirmation_is_current, judgement_snapshot_binding, readiness_violations, require_judgement_snapshot
+from research.judgements import apply_judgement_rejection, confirmation_binding, discover_pending_judgements, judgement_confirmation_is_current, judgement_snapshot_binding, load_bound_judgement_snapshot, readiness_violations, require_judgement_snapshot
 from research.journal import mutation_transaction
 from research.monitoring import active_monitor_runs, due_subscriptions, unresolved_monitor_outcomes
 from research.preference_selection import resolve_task_preferences, selection_binding
@@ -2024,32 +2024,47 @@ def _validate_program_decision_references(
         program_id, separator, decision_id = str(reference).partition(":")
         if not separator or program_id not in selected_programs or not decision_id:
             raise SystemExit("Program decision reference is not bound to a selected program")
-        matches = [
-            item
-            for item in decision_items_with_legacy(root, program_id)
-            if str(item.get("id") or "") == decision_id and not item.get("legacy_import")
-        ]
-        if len(matches) != 1:
+        artifact_path = decisions_path(root, program_id)
+        try:
+            bound = load_bound_judgement_snapshot(
+                root,
+                {
+                    "kind": "program_decision",
+                    "id": decision_id,
+                    "owner": "research-orchestrator",
+                    "path": artifact_path.relative_to(root).as_posix(),
+                },
+            )
+        except (OSError, ValueError) as exc:
+            raise SystemExit("Program decision reference is unavailable or unverified") from exc
+        record = bound.record
+        if str(record.get("program_id") or "") != program_id:
             raise SystemExit("Program decision reference is unavailable or unverified")
-        record = matches[0]
         confirmation_status = str(record.get("confirmation_status") or "")
         if confirmation_status not in {
             "pending_user_confirmation",
             "confirmed",
         }:
             raise SystemExit("Program decision reference has an invalid confirmation state")
-        artifact_path = decisions_path(root, program_id)
         if confirmation_status == "pending_user_confirmation":
-            if readiness_violations(root, record, artifact_path):
+            if readiness_violations(root, record, bound.path, bound_snapshot=bound):
                 raise SystemExit("Program decision reference is unavailable or unverified")
-        elif not judgement_confirmation_is_current(root, record, artifact_path):
+        elif not judgement_confirmation_is_current(
+            root,
+            record,
+            bound.path,
+            bound_snapshot=bound,
+        ):
             raise SystemExit("Program decision confirmation is unavailable or stale")
         binding = judgement_snapshot_binding(
             record,
-            owner="research-orchestrator",
-            path=artifact_path.relative_to(root).as_posix(),
+            owner=bound.owner,
+            path=bound.path.relative_to(root).as_posix(),
+            bound_snapshot=bound,
         )
         binding["confirmation_digest"] = _canonical_digest(record.get("confirmation") or {})
+        if not bound.is_current():
+            raise SystemExit("Program decision reference is unavailable or unverified")
         bindings[reference] = binding
     return bindings
 

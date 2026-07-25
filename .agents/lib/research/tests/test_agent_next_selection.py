@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -116,6 +117,66 @@ def _decision(root: Path, snapshot: dict, action_ids: list[str], *, decision_id:
         "program_decision_ids": [],
         "decided_at": "2026-07-24T12:00:00+08:00",
     }
+
+
+def _verified_program_decision(orchestrate, root: Path, *, confirmed: bool = False) -> tuple[dict, Path]:
+    _program(orchestrate, root, "program-a")
+    evidence_path = root / "kb" / "programs" / "program-a" / "decision-evidence.md"
+    evidence_path.write_text("The benchmark supports route A.\n", encoding="utf-8")
+    claims = [
+        {
+            "id": "claim-route-a",
+            "text": "Route A is the preferred baseline.",
+            "claim_type": "evaluation",
+            "confirmation_status": "pending_user_confirmation",
+            "evidence_refs": [
+                {
+                    "source_unit_id": "program:program-a",
+                    "artifact": "decision-evidence.md",
+                    "locator": "benchmark",
+                    "quote": "The benchmark supports route A.",
+                }
+            ],
+        }
+    ]
+    record = {
+        "id": "decision-1",
+        "kind": "program_decision",
+        "owner": "research-orchestrator",
+        "timestamp": "2026-07-24T00:00:00+00:00",
+        "program_id": "program-a",
+        "confirmation_status": "pending_user_confirmation",
+        "needs_human_confirmation": True,
+        "information_types": ["inference", "evaluation", "unverified"],
+        "payload": {
+            "decision": {
+                "text": "OLD_SENTINEL route A",
+                "rationale": "The benchmark is decisive.",
+                "stage": "literature-review",
+                "alternatives": ["route B"],
+            },
+            "claims": claims,
+        },
+    }
+    source_roots = orchestrate._decision_source_roots(root, "program-a", claims)
+    orchestrate.build_verification_receipt(
+        record,
+        orchestrate.program_root(root, "program-a"),
+        source_roots=source_roots,
+    )
+    if confirmed:
+        orchestrate.apply_confirmation(
+            record,
+            confirmed_by="Alice Researcher",
+            evidence=["Reviewed the decision."],
+            user_authorization="I confirm route A.",
+            authorization_source="user_message",
+            project_root=root,
+            verification_root=orchestrate.program_root(root, "program-a"),
+            trusted_source_roots=source_roots,
+        )
+    path, _projection = orchestrate.write_decisions(root, "program-a", [record])
+    return record, path
 
 
 def _contains_key(value: object, forbidden: str) -> bool:
@@ -1124,6 +1185,64 @@ def test_program_decision_binding_change_stales_agent_portfolio_decision(
     assert current["effective_status"] == "stale"
     assert "program_decision_changed" in current["stale_reasons"]
     assert current["safe_to_continue"] is False
+
+
+@pytest.mark.parametrize("confirmed", [False, True])
+def test_program_decision_reference_accepts_stable_bound_snapshot(
+    tmp_path: Path,
+    confirmed: bool,
+) -> None:
+    orchestrate = _load_orchestrator(f"orchestrator_bound_program_stable_{confirmed}")
+    root = _workspace(tmp_path)
+    record, _path = _verified_program_decision(orchestrate, root, confirmed=confirmed)
+
+    bindings = orchestrate._validate_program_decision_references(
+        root,
+        ["program-a:decision-1"],
+        [{"program_id": "program-a"}],
+    )
+
+    binding = bindings["program-a:decision-1"]
+    assert binding["subject"]["id"] == record["id"]
+    assert binding["confirmation_status"] == record["confirmation_status"]
+
+
+@pytest.mark.parametrize("replacement", ["changed", "same-bytes"])
+def test_program_decision_reference_rejects_replacement_after_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement: str,
+) -> None:
+    orchestrate = _load_orchestrator(f"orchestrator_bound_program_replace_{replacement}")
+    root = _workspace(tmp_path)
+    _record, path = _verified_program_decision(orchestrate, root)
+    original = orchestrate.readiness_violations
+    replaced = False
+
+    def replace_after_validation(*args, **kwargs):
+        nonlocal replaced
+        violations = original(*args, **kwargs)
+        if not replaced:
+            old_bytes = path.read_bytes()
+            replacement_path = path.with_name("decisions-replacement.yaml")
+            if replacement == "same-bytes":
+                replacement_path.write_bytes(old_bytes)
+            else:
+                container = load_yaml(path)
+                container["items"][0]["payload"]["decision"]["text"] = "NEW_SENTINEL route B"
+                write_yaml_if_changed(replacement_path, container)
+            os.replace(replacement_path, path)
+            replaced = True
+        return violations
+
+    monkeypatch.setattr(orchestrate, "readiness_violations", replace_after_validation)
+    with pytest.raises(SystemExit, match="unavailable or unverified"):
+        orchestrate._validate_program_decision_references(
+            root,
+            ["program-a:decision-1"],
+            [{"program_id": "program-a"}],
+        )
+    assert replaced is True
 
 
 def test_missing_preference_receipt_fails_closed(tmp_path: Path) -> None:
