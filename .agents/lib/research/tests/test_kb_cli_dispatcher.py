@@ -3374,6 +3374,145 @@ def test_invalid_double_decision_keeps_snapshot_retriable_then_single_retry_succ
     assert json.loads(token_path.read_text(encoding="utf-8"))["status"] == "consumed"
 
 
+def test_review_owner_loader_registers_module_during_execution_and_retains_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kb = _load_kb_cli()
+    observed: list[tuple[str, object, bool]] = []
+
+    class RegistrationCheckingLoader:
+        @staticmethod
+        def create_module(spec):
+            return None
+
+        @staticmethod
+        def exec_module(module) -> None:
+            observed.append((module.__name__, module, sys.modules.get(module.__name__) is module))
+            module.prepare_review_batch_decision = lambda *args, **kwargs: None
+            module.apply_review_batch_decision = lambda *args, **kwargs: None
+
+    loader = RegistrationCheckingLoader()
+    monkeypatch.setattr(
+        kb.importlib.util,
+        "spec_from_file_location",
+        lambda name, path: importlib.machinery.ModuleSpec(name, loader),
+    )
+
+    loaded = kb._review_owner_module(tmp_path, "knowledge-base-manager")
+    try:
+        assert observed == [(loaded.__name__, loaded, True)]
+        assert sys.modules[loaded.__name__] is loaded
+        assert kb._review_owner_module(tmp_path, "knowledge-base-manager") is loaded
+        assert len(observed) == 1
+    finally:
+        if observed:
+            sys.modules.pop(observed[0][0], None)
+
+
+def test_review_owner_loader_removes_partial_module_after_execution_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kb = _load_kb_cli()
+    observed: dict[str, object] = {}
+
+    class FailingLoader:
+        @staticmethod
+        def create_module(spec):
+            return None
+
+        @staticmethod
+        def exec_module(module) -> None:
+            observed["name"] = module.__name__
+            observed["module"] = module
+            assert sys.modules.get(module.__name__) is module
+            raise RuntimeError("injected owner import failure")
+
+    loader = FailingLoader()
+    monkeypatch.setattr(
+        kb.importlib.util,
+        "spec_from_file_location",
+        lambda name, path: importlib.machinery.ModuleSpec(name, loader),
+    )
+
+    with pytest.raises(RuntimeError, match="injected owner import failure"):
+        kb._review_owner_module(tmp_path, "knowledge-base-manager")
+
+    assert sys.modules.get(str(observed["name"])) is not observed["module"]
+    assert "knowledge-base-manager" not in kb._REVIEW_OWNER_MODULES
+
+
+def test_review_owner_loader_preserves_replacement_module_after_execution_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kb = _load_kb_cli()
+    observed: dict[str, object] = {}
+    replacement = object()
+
+    class ReplacingFailingLoader:
+        @staticmethod
+        def create_module(spec):
+            return None
+
+        @staticmethod
+        def exec_module(module) -> None:
+            observed["name"] = module.__name__
+            assert sys.modules.get(module.__name__) is module
+            sys.modules[module.__name__] = replacement
+            raise RuntimeError("injected owner replacement failure")
+
+    loader = ReplacingFailingLoader()
+    monkeypatch.setattr(
+        kb.importlib.util,
+        "spec_from_file_location",
+        lambda name, path: importlib.machinery.ModuleSpec(name, loader),
+    )
+
+    with pytest.raises(RuntimeError, match="injected owner replacement failure"):
+        kb._review_owner_module(tmp_path, "knowledge-base-manager")
+
+    module_name = str(observed["name"])
+    try:
+        assert sys.modules[module_name] is replacement
+        assert "knowledge-base-manager" not in kb._REVIEW_OWNER_MODULES
+    finally:
+        sys.modules.pop(module_name, None)
+
+
+def test_review_owner_loader_removes_module_after_interface_validation_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kb = _load_kb_cli()
+    observed: dict[str, object] = {}
+
+    class IncompleteLoader:
+        @staticmethod
+        def create_module(spec):
+            return None
+
+        @staticmethod
+        def exec_module(module) -> None:
+            observed["name"] = module.__name__
+            observed["module"] = module
+            assert sys.modules.get(module.__name__) is module
+
+    loader = IncompleteLoader()
+    monkeypatch.setattr(
+        kb.importlib.util,
+        "spec_from_file_location",
+        lambda name, path: importlib.machinery.ModuleSpec(name, loader),
+    )
+
+    with pytest.raises(ValueError, match="review owner integration is incomplete"):
+        kb._review_owner_module(tmp_path, "knowledge-base-manager")
+
+    assert sys.modules.get(str(observed["name"])) is not observed["module"]
+    assert "knowledge-base-manager" not in kb._REVIEW_OWNER_MODULES
+
+
 def test_dialogue_owner_failure_rolls_back_all_owners_and_keeps_snapshot_unused(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
