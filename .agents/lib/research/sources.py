@@ -1952,7 +1952,52 @@ def _unchanged_stat_identity(metadata: os.stat_result) -> tuple[int, int, int, i
     )
 
 
-def _anchored_search_stage_bytes(project_root: Path) -> list[tuple[str, bytes]]:
+def _directory_node_identity(metadata: os.stat_result) -> tuple[int, int, int]:
+    return (metadata.st_dev, metadata.st_ino, metadata.st_mode)
+
+
+def _revalidate_search_stage_ancestor_chain(
+    root: Path,
+    expected: list[tuple[int, int, int]],
+) -> None:
+    """Prove the lexical root still names the descriptor chain we read."""
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptors: list[int] = []
+    try:
+        try:
+            current = os.open(root, flags)
+        except OSError as exc:
+            raise SystemExit("Literature search stage ancestor chain changed.") from exc
+        descriptors.append(current)
+        if _directory_node_identity(os.fstat(current)) != expected[0]:
+            raise SystemExit("Literature search stage ancestor chain changed.")
+        for index, component in enumerate(("kb", "synthesis", "source-search"), start=1):
+            try:
+                metadata = os.stat(component, dir_fd=current, follow_symlinks=False)
+                child = os.open(component, flags, dir_fd=current)
+            except OSError as exc:
+                raise SystemExit("Literature search stage ancestor chain changed.") from exc
+            descriptors.append(child)
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or _directory_node_identity(metadata) != expected[index]
+                or _directory_node_identity(os.fstat(child)) != expected[index]
+            ):
+                raise SystemExit("Literature search stage ancestor chain changed.")
+            current = child
+    finally:
+        for descriptor in reversed(descriptors):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def _anchored_search_stage_bytes(
+    project_root: Path,
+    *,
+    only_stage_id: str = "",
+) -> list[tuple[str, bytes]]:
     """Read canonical stage leaves without following any workspace symlink.
 
     This is a portfolio/status read path, so it deliberately avoids directory
@@ -1966,6 +2011,7 @@ def _anchored_search_stage_bytes(project_root: Path) -> list[tuple[str, bytes]]:
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     file_flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptors: list[int] = []
+    ancestor_identities: list[tuple[int, int, int]] = []
     try:
         try:
             current_fd = os.open(root, directory_flags)
@@ -1974,6 +2020,7 @@ def _anchored_search_stage_bytes(project_root: Path) -> list[tuple[str, bytes]]:
         except OSError as exc:
             raise SystemExit("Literature search workspace root is unsafe or unavailable.") from exc
         descriptors.append(current_fd)
+        ancestor_identities.append(_directory_node_identity(os.fstat(current_fd)))
         for component in ("kb", "synthesis", "source-search"):
             try:
                 next_fd = os.open(component, directory_flags, dir_fd=current_fd)
@@ -1982,11 +2029,16 @@ def _anchored_search_stage_bytes(project_root: Path) -> list[tuple[str, bytes]]:
             except OSError as exc:
                 raise SystemExit("Literature search stage directory contains an unsafe component.") from exc
             descriptors.append(next_fd)
+            ancestor_identities.append(_directory_node_identity(os.fstat(next_fd)))
             current_fd = next_fd
 
         results: list[tuple[str, bytes]] = []
         try:
-            names = sorted(os.listdir(current_fd))
+            names = (
+                [f"{_safe_search_stage_id(only_stage_id)}.yaml"]
+                if only_stage_id
+                else sorted(os.listdir(current_fd))
+            )
         except OSError as exc:
             raise SystemExit("Literature search stage directory cannot be enumerated safely.") from exc
         for name in names:
@@ -1997,6 +2049,10 @@ def _anchored_search_stage_bytes(project_root: Path) -> list[tuple[str, bytes]]:
                 if _safe_search_stage_id(stage_id) != stage_id:
                     raise SystemExit("Literature search stage filename is not canonical.")
                 lexical_before = os.stat(name, dir_fd=current_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                if only_stage_id:
+                    return []
+                raise SystemExit("Literature search stage leaf changed while enumerating.") from None
             except (OSError, ValueError) as exc:
                 raise SystemExit("Literature search stage leaf is unsafe.") from exc
             if not stat.S_ISREG(lexical_before.st_mode):
@@ -2039,6 +2095,10 @@ def _anchored_search_stage_bytes(project_root: Path) -> list[tuple[str, bytes]]:
             ):
                 raise SystemExit("Literature search stage leaf changed while reading.")
             results.append((stage_id, b"".join(chunks)))
+        for descriptor, expected in zip(descriptors, ancestor_identities):
+            if _directory_node_identity(os.fstat(descriptor)) != expected:
+                raise SystemExit("Literature search stage ancestor chain changed while reading.")
+        _revalidate_search_stage_ancestor_chain(root, ancestor_identities)
         return results
     finally:
         for descriptor in reversed(descriptors):
@@ -2074,6 +2134,100 @@ def _canonical_literature_stage(
     unknown_fields = set(payload) - _LITERATURE_SEARCH_STAGE_TOP_LEVEL_FIELDS
     if unknown_fields:
         raise SystemExit("Literature search stage contains an unknown top-level field.")
+    required_fields = {
+        "id",
+        "kind",
+        "status",
+        "source_kind",
+        "query",
+        "note",
+        "generated_by",
+        "generated_at",
+        "entry_skill",
+        "mode",
+        "budget",
+        "usage",
+        "queries",
+        "candidates",
+        "stop",
+        "partial",
+        "history",
+    }
+    if required_fields - set(payload):
+        raise SystemExit("Literature search stage is missing required canonical fields.")
+    if payload.get("status") != "staged" or payload.get("generated_by") != "literature-search":
+        raise SystemExit("Literature search stage status or generator is not canonical.")
+    query = payload.get("query")
+    note = payload.get("note")
+    if (
+        not isinstance(query, str)
+        or not query.strip()
+        or " ".join(query.split()) != query
+        or len(query) > 4000
+        or not isinstance(note, str)
+        or _bounded_search_text(note, 2000) != note
+    ):
+        raise SystemExit("Literature search stage query or note is not canonical.")
+    if _validate_search_timestamp(payload.get("generated_at"), field="stage generated_at") != payload.get(
+        "generated_at"
+    ):
+        raise SystemExit("Literature search stage generated_at is not canonical.")
+
+    def exact_history(raw: object, *, label: str) -> list[dict[str, Any]]:
+        if not isinstance(raw, list):
+            raise SystemExit(f"Literature search {label} must be a list.")
+        result: list[dict[str, Any]] = []
+        for item in raw:
+            if not isinstance(item, dict) or set(item) != {"timestamp", "action", "summary"}:
+                raise SystemExit(f"Literature search {label} is not canonical.")
+            timestamp = _validate_search_timestamp(item.get("timestamp"), field=f"{label} timestamp")
+            action = _bounded_search_text(item.get("action"), 64)
+            summary = _bounded_search_text(item.get("summary"), 2000)
+            if action not in {"staged", "candidate-updated"} or not summary:
+                raise SystemExit(f"Literature search {label} is not canonical.")
+            result.append({"timestamp": timestamp, "action": action, "summary": summary})
+        return result
+
+    if exact_history(payload.get("history"), label="stage history") != payload.get("history"):
+        raise SystemExit("Literature search stage history is not canonical.")
+
+    def exact_replacement_history(
+        raw: object,
+        *,
+        label: str,
+        value_key: str,
+        sanitizer,
+    ) -> list[dict[str, Any]]:
+        if raw in (None, []):
+            return []
+        if not isinstance(raw, list):
+            raise SystemExit(f"Literature search {label} must be a list.")
+        result: list[dict[str, Any]] = []
+        for item in raw:
+            if not isinstance(item, dict) or set(item) != {"replaced_at", value_key}:
+                raise SystemExit(f"Literature search {label} is not canonical.")
+            replaced_at = _validate_search_timestamp(
+                item.get("replaced_at"), field=f"{label} replaced_at"
+            )
+            value = item.get(value_key)
+            canonical = sanitizer(value)
+            if canonical != value:
+                raise SystemExit(f"Literature search {label} is not canonical.")
+            result.append({"replaced_at": replaced_at, value_key: canonical})
+        return result
+
+    for history_field, value_key, sanitizer in (
+        ("coverage_history", "coverage", _sanitize_search_coverage),
+        ("frontier_history", "action", lambda value: _sanitize_search_frontier([value])[0]),
+        ("stop_history", "stop", _sanitize_search_stop),
+    ):
+        if history_field in payload and exact_replacement_history(
+            payload[history_field],
+            label=history_field,
+            value_key=value_key,
+            sanitizer=sanitizer,
+        ) != payload[history_field]:
+            raise SystemExit(f"Literature search {history_field} is not canonical.")
 
     persisted_state = {
         key: copy.deepcopy(payload[key])
@@ -2137,9 +2291,18 @@ def _canonical_literature_stage(
         "adjudications",
         "metadata",
     }
+    candidate_allowed_fields = candidate_input_fields | {
+        "status",
+        "record_id",
+        "screening_history",
+        "effective_screening",
+        "provenance",
+    }
     fulltext_count = 0
     citation_hops = 0
     for index, candidate in enumerate(candidates, start=1):
+        if set(candidate) - candidate_allowed_fields:
+            raise SystemExit("Literature search candidate contains an unknown field.")
         candidate_id = _safe_search_id(candidate.get("candidate_id"), field="candidate_id")
         if candidate_id in candidate_ids:
             raise SystemExit("Literature search stage candidate ids must be unique.")
@@ -2148,11 +2311,24 @@ def _canonical_literature_stage(
         if _candidate_search_identities(candidate) != identities:
             raise SystemExit("Literature search stage candidate identity is not canonical.")
         status_value = str(candidate.get("status") or "")
-        if re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", status_value) is None:
+        if status_value not in {"staged", "materialized", "duplicate"}:
             raise SystemExit("Literature search stage candidate status is not canonical.")
         record_id = str(candidate.get("record_id") or "")
+        if status_value in {"materialized", "duplicate"} and not record_id:
+            raise SystemExit("A materialized literature candidate requires a record binding.")
+        if status_value == "staged" and record_id:
+            raise SystemExit("A staged literature candidate cannot carry a record binding.")
         if record_id:
             _safe_search_id(record_id, field="record_id")
+        provenance = candidate.get("provenance")
+        if provenance not in (None, {}):
+            if not isinstance(provenance, dict) or set(provenance) != {"openalex"}:
+                raise SystemExit("Literature search legacy provenance is not canonical.")
+            openalex = provenance.get("openalex")
+            if not isinstance(openalex, dict) or set(openalex) != {"doi"}:
+                raise SystemExit("Literature search legacy provenance is not canonical.")
+            if not _canonical_search_doi(openalex.get("doi")):
+                raise SystemExit("Literature search legacy provenance DOI is invalid.")
         persisted_candidate = {
             key: copy.deepcopy(value)
             for key, value in candidate.items()
@@ -2170,6 +2346,37 @@ def _canonical_literature_stage(
             raise SystemExit("Literature search stage candidate is not canonical.")
         if not candidate.get("discovered_by"):
             raise SystemExit("Literature search stage candidate has no discovery edge.")
+        for discovery in candidate.get("discovered_by", []):
+            required_discovery = {
+                "query_id",
+                "edge_type",
+                "source_locator",
+                "channel",
+                "tool",
+                "discovered_at",
+            }
+            if discovery.get("edge_type") != "direct":
+                required_discovery.add("parent_candidate_id")
+            if set(discovery) != required_discovery:
+                raise SystemExit("Literature search discovery edge is not canonical.")
+            if not all(str(discovery.get(key) or "").strip() for key in required_discovery):
+                raise SystemExit("Literature search discovery edge is incomplete.")
+            _validate_search_timestamp(
+                discovery.get("discovered_at"), field="candidate discovery discovered_at"
+            )
+        fetch = candidate.get("fetch")
+        if not isinstance(fetch, dict) or _sanitize_search_fetch(fetch) != fetch:
+            raise SystemExit("Literature search candidate fetch is not canonical.")
+        if fetch.get("updated_at"):
+            _validate_search_timestamp(fetch.get("updated_at"), field="candidate fetch updated_at")
+        screening_history = candidate.get("screening_history", [])
+        if exact_replacement_history(
+            screening_history,
+            label="candidate screening_history",
+            value_key="screening",
+            sanitizer=_sanitize_search_screening,
+        ) != screening_history:
+            raise SystemExit("Literature search candidate screening history is not canonical.")
         if str(candidate.get("evidence_level") or "") == "fulltext":
             fulltext_count += 1
         for discovery in candidate.get("discovered_by", []):
@@ -2219,6 +2426,24 @@ def _canonical_literature_stage(
             if not isinstance(screening, dict) or _sanitize_search_screening(screening) != screening:
                 raise SystemExit("Literature search candidate screening is not canonical.")
     return payload
+
+
+def literature_stage_snapshot(project_root: Path, stage_id: str) -> dict[str, Any]:
+    """Return one strict stage payload and exact-byte digest from one anchored read."""
+    safe_stage_id = _safe_search_stage_id(stage_id)
+    rows = _anchored_search_stage_bytes(project_root, only_stage_id=safe_stage_id)
+    if len(rows) != 1 or rows[0][0] != safe_stage_id:
+        raise SystemExit("Literature search stage does not exist or is unsafe.")
+    raw_bytes = rows[0][1]
+    payload = _canonical_literature_stage(safe_stage_id, raw_bytes)
+    if payload is None:
+        raise SystemExit("The selected stage is not owned by literature-search.")
+    return {
+        "stage_id": safe_stage_id,
+        "raw_bytes": raw_bytes,
+        "byte_sha256": hashlib.sha256(raw_bytes).hexdigest(),
+        "payload": payload,
+    }
 
 
 def literature_search_continuations(
@@ -4540,6 +4765,8 @@ __all__ = [
     "sync_storage_layout",
     "build_search_stage_id",
     "load_search_stage",
+    "literature_stage_snapshot",
+    "literature_search_continuations",
     "stage_search_results",
     "resolve_search_candidate",
     "mark_search_candidate",

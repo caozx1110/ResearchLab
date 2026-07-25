@@ -653,6 +653,85 @@ def test_literature_stage_enumeration_rejects_malformed_persisted_state(tmp_path
         orchestrate.portfolio_candidate_snapshot(root)
 
 
+def test_literature_stage_enumeration_rejects_candidate_extra_field(tmp_path: Path) -> None:
+    orchestrate = _load_orchestrator("orchestrator_literature_candidate_extra")
+    root = _workspace(tmp_path)
+    stage_path = _stage_literature_search(
+        root,
+        query="candidate exact schema",
+        stop_reason="in_progress",
+    )
+    malformed = load_yaml(stage_path)
+    malformed["candidates"][0]["provider_raw_payload"] = {"secret": "must reject"}
+    write_yaml_if_changed(stage_path, malformed)
+
+    with pytest.raises(SystemExit, match="candidate|unknown|canonical"):
+        orchestrate.portfolio_candidate_snapshot(root)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        lambda payload: payload.update(status="completed"),
+        lambda payload: payload.update(query=17),
+        lambda payload: payload.update(generated_by="runtime-agent"),
+        lambda payload: payload.update(generated_at="not-a-time"),
+        lambda payload: payload["history"].append(
+            {"timestamp": "not-a-time", "action": "staged", "summary": "bad"}
+        ),
+    ),
+)
+def test_literature_stage_enumeration_rejects_illegal_top_level_contract(
+    tmp_path: Path,
+    mutation,
+) -> None:
+    orchestrate = _load_orchestrator("orchestrator_literature_top_contract")
+    root = _workspace(tmp_path)
+    stage_path = _stage_literature_search(
+        root,
+        query="top-level exact schema",
+        stop_reason="in_progress",
+    )
+    malformed = load_yaml(stage_path)
+    mutation(malformed)
+    write_yaml_if_changed(stage_path, malformed)
+
+    with pytest.raises(SystemExit, match="stage|status|query|generated|history|timestamp|canonical"):
+        orchestrate.portfolio_candidate_snapshot(root)
+
+
+def test_literature_stage_enumeration_revalidates_ancestor_chain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orchestrate = _load_orchestrator("orchestrator_literature_ancestor_race")
+    root = _workspace(tmp_path)
+    _stage_literature_search(
+        root,
+        query="ancestor race",
+        stop_reason="in_progress",
+    )
+    stage_root = root / "kb/synthesis/source-search"
+    displaced = root / "kb/synthesis/source-search-displaced"
+    replacement = tmp_path / "replacement-source-search"
+    replacement.mkdir()
+    original_listdir = orchestrate.os.listdir
+    raced = False
+
+    def listdir_then_replace(descriptor):
+        nonlocal raced
+        names = original_listdir(descriptor)
+        if not raced:
+            raced = True
+            stage_root.rename(displaced)
+            stage_root.symlink_to(replacement, target_is_directory=True)
+        return names
+
+    monkeypatch.setattr(orchestrate.os, "listdir", listdir_then_replace)
+    with pytest.raises(SystemExit, match="ancestor|directory|changed|unsafe"):
+        orchestrate.portfolio_candidate_snapshot(root)
+
+
 def test_literature_stage_enumeration_rejects_duplicate_yaml_mapping_key(
     tmp_path: Path,
 ) -> None:
