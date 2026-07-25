@@ -30,6 +30,7 @@ from .evidence import (
     verification_receipt_violations,
 )
 from .records import (
+    iter_canonical_record_snapshots,
     trusted_claim_source_roots,
     trusted_program_root,
     trusted_project_path,
@@ -393,17 +394,10 @@ def _list_items(root: Path, path: Path) -> Iterable[dict[str, Any]]:
 
 
 def _candidate_artifacts(root: Path) -> Iterable[tuple[dict[str, Any], str, Path]]:
-    for path in sorted((root / "kb" / "units").glob("*/*/record.yaml")):
-        safe_path = _safe_candidate_file(root, path)
-        if safe_path is None:
-            continue
-        try:
-            record = load_yaml(safe_path, default={})
-        except (OSError, UnicodeError, yaml.YAMLError):
-            continue
-        if isinstance(record, dict):
-            owner = UNIT_OWNER_BY_KIND.get(_text(record.get("kind")), _text(record.get("owner")) or "unknown")
-            yield record, owner, safe_path
+    for snapshot in iter_canonical_record_snapshots(root):
+        record = snapshot.record
+        owner = UNIT_OWNER_BY_KIND.get(_text(record.get("kind")), _text(record.get("owner")) or "unknown")
+        yield record, owner, snapshot.path
     for path in sorted((root / "kb" / "programs").glob("*/workflow/decisions.yaml")):
         safe_path = _safe_candidate_file(root, path)
         if safe_path is None:
@@ -442,7 +436,7 @@ def _candidate_artifacts(root: Path) -> Iterable[tuple[dict[str, Any], str, Path
 
 def discover_pending_judgements(root: str | Path) -> list[dict[str, Any]]:
     """Return all cross-owner ``ready_for_review`` cards in deterministic order."""
-    project_root = Path(root).resolve()
+    project_root = Path(root).absolute()
     raw_candidates = list(_candidate_artifacts(project_root))
     subject_counts: dict[tuple[str, str], int] = {}
     for record, owner, path in raw_candidates:

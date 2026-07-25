@@ -1,8 +1,11 @@
 """Record schema: templates, payload skeletons, normalization, history, and store access (iter/locate)."""
 from __future__ import annotations
 
+import os
 import re
+import stat
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator, Sequence
 
@@ -37,6 +40,7 @@ from .paths import (
     unit_root,
     units_root,
 )
+from .yaml_io import StrictYamlError, load_yaml_mapping_bytes_strict
 
 INFORMATION_TYPES = {"fact", "inference", "evaluation", "user_opinion", "unverified"}
 
@@ -63,6 +67,232 @@ WORKFLOW_STATES = {
     "done",
     "failed_retryable",
 }
+
+_RECORD_MAX_BYTES = 8 * 1024 * 1024
+_SAFE_UNIT_DIRECTORY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,254}")
+
+
+@dataclass(frozen=True)
+class CanonicalRecordSnapshot:
+    """One record parsed from the same anchored, immutable byte snapshot."""
+
+    kind: str
+    unit_id: str
+    path: Path
+    raw_bytes: bytes
+    modified_time_ns: int
+    record: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _AnchoredDirectory:
+    fd: int
+    identity: tuple[int, int, int, int, int, int]
+    parent_fd: int | None
+    name: str | None
+
+
+def _record_stat_identity(metadata: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _open_root_directory(path: Path) -> _AnchoredDirectory | None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        lexical = os.lstat(path)
+        if not stat.S_ISDIR(lexical.st_mode):
+            return None
+        fd = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        opened = os.fstat(fd)
+    except OSError:
+        os.close(fd)
+        return None
+    if _record_stat_identity(opened) != _record_stat_identity(lexical):
+        os.close(fd)
+        return None
+    return _AnchoredDirectory(fd, _record_stat_identity(opened), None, None)
+
+
+def _open_child_directory(parent: _AnchoredDirectory, name: str) -> _AnchoredDirectory | None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        lexical = os.stat(name, dir_fd=parent.fd, follow_symlinks=False)
+        if not stat.S_ISDIR(lexical.st_mode):
+            return None
+        fd = os.open(name, flags, dir_fd=parent.fd)
+    except OSError:
+        return None
+    try:
+        opened = os.fstat(fd)
+    except OSError:
+        os.close(fd)
+        return None
+    if _record_stat_identity(opened) != _record_stat_identity(lexical):
+        os.close(fd)
+        return None
+    return _AnchoredDirectory(fd, _record_stat_identity(opened), parent.fd, name)
+
+
+def _anchored_chain_is_current(root_path: Path, chain: Sequence[_AnchoredDirectory]) -> bool:
+    for index, directory in enumerate(chain):
+        try:
+            opened = os.fstat(directory.fd)
+            if _record_stat_identity(opened) != directory.identity:
+                return False
+            if index == 0:
+                visible = os.lstat(root_path)
+            else:
+                if directory.parent_fd is None or directory.name is None:
+                    return False
+                visible = os.stat(
+                    directory.name,
+                    dir_fd=directory.parent_fd,
+                    follow_symlinks=False,
+                )
+        except OSError:
+            return False
+        if _record_stat_identity(visible) != directory.identity:
+            return False
+    return True
+
+
+def _read_record_snapshot(
+    root_path: Path,
+    chain: Sequence[_AnchoredDirectory],
+    *,
+    kind: str,
+    unit_id: str,
+) -> CanonicalRecordSnapshot | None:
+    unit_directory = chain[-1]
+    file_flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        lexical_before = os.stat("record.yaml", dir_fd=unit_directory.fd, follow_symlinks=False)
+        if not stat.S_ISREG(lexical_before.st_mode) or lexical_before.st_size > _RECORD_MAX_BYTES:
+            return None
+        leaf_fd = os.open("record.yaml", file_flags, dir_fd=unit_directory.fd)
+    except OSError:
+        return None
+    try:
+        opened_before = os.fstat(leaf_fd)
+        expected = _record_stat_identity(lexical_before)
+        if not stat.S_ISREG(opened_before.st_mode) or _record_stat_identity(opened_before) != expected:
+            return None
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            remaining = _RECORD_MAX_BYTES + 1 - total
+            if remaining <= 0:
+                return None
+            chunk = os.read(leaf_fd, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > _RECORD_MAX_BYTES:
+                return None
+        opened_after = os.fstat(leaf_fd)
+    except OSError:
+        return None
+    finally:
+        os.close(leaf_fd)
+    try:
+        lexical_after = os.stat("record.yaml", dir_fd=unit_directory.fd, follow_symlinks=False)
+    except OSError:
+        return None
+    if (
+        _record_stat_identity(opened_after) != expected
+        or _record_stat_identity(lexical_after) != expected
+        or total != opened_after.st_size
+        or not _anchored_chain_is_current(root_path, chain)
+    ):
+        return None
+    raw_bytes = b"".join(chunks)
+    try:
+        payload = load_yaml_mapping_bytes_strict(raw_bytes)
+    except (RuntimeError, StrictYamlError):
+        return None
+    if (
+        not isinstance(payload.get("kind"), str)
+        or not isinstance(payload.get("id"), str)
+        or payload["kind"] != kind
+        or payload["id"] != unit_id
+    ):
+        return None
+    if not _anchored_chain_is_current(root_path, chain):
+        return None
+    return CanonicalRecordSnapshot(
+        kind=kind,
+        unit_id=unit_id,
+        path=root_path / "kb" / "units" / UNIT_KIND_DIRS[kind] / unit_id / "record.yaml",
+        raw_bytes=raw_bytes,
+        modified_time_ns=opened_after.st_mtime_ns,
+        record=payload,
+    )
+
+
+def iter_canonical_record_snapshots(
+    project_root: Path,
+    *,
+    kind: str | None = None,
+) -> list[CanonicalRecordSnapshot]:
+    """Return only canonical records proven safe from one anchored read."""
+    kinds = [kind] if kind else list(UNIT_KIND_DIRS)
+    if any(item_kind not in UNIT_KIND_DIRS for item_kind in kinds):
+        raise SystemExit(f"Unsupported unit kind: {kind}")
+    root_path = project_root.absolute()
+    root_directory = _open_root_directory(root_path)
+    if root_directory is None:
+        return []
+    base_chain = [root_directory]
+    try:
+        for component in ("kb", "units"):
+            child = _open_child_directory(base_chain[-1], component)
+            if child is None:
+                return []
+            base_chain.append(child)
+        snapshots: list[CanonicalRecordSnapshot] = []
+        for item_kind in kinds:
+            kind_directory = _open_child_directory(base_chain[-1], UNIT_KIND_DIRS[item_kind])
+            if kind_directory is None:
+                continue
+            try:
+                try:
+                    names = sorted(os.listdir(kind_directory.fd))
+                except OSError:
+                    continue
+                for unit_id in names:
+                    if _SAFE_UNIT_DIRECTORY.fullmatch(unit_id) is None:
+                        continue
+                    unit_directory = _open_child_directory(kind_directory, unit_id)
+                    if unit_directory is None:
+                        continue
+                    try:
+                        snapshot = _read_record_snapshot(
+                            root_path,
+                            [*base_chain, kind_directory, unit_directory],
+                            kind=item_kind,
+                            unit_id=unit_id,
+                        )
+                        if snapshot is not None:
+                            snapshots.append(snapshot)
+                    finally:
+                        os.close(unit_directory.fd)
+            finally:
+                os.close(kind_directory.fd)
+        return snapshots
+    finally:
+        for directory in reversed(base_chain):
+            os.close(directory.fd)
 
 
 @contextmanager
@@ -117,31 +347,12 @@ def trusted_unit_record_path(project_root: Path, unit_id: str) -> Path:
     identifier = str(unit_id or "").strip()
     if not identifier or Path(identifier).name != identifier or identifier in {".", ".."}:
         raise ValueError("source unit id is not a canonical path component")
-    matches: list[Path] = []
-    unsafe = False
-    for source_kind, directory in UNIT_KIND_DIRS.items():
-        candidate = units_root(project_root) / directory / identifier / "record.yaml"
-        try:
-            resolved = trusted_project_path(
-                project_root,
-                candidate,
-                allowed_root=units_root(project_root),
-                require="file",
-            )
-        except ValueError as exc:
-            if candidate.exists() or candidate.is_symlink() or candidate.parent.is_symlink():
-                unsafe = True
-            continue
-        payload = load_yaml(resolved, default={})
-        if (
-            not isinstance(payload, dict)
-            or str(payload.get("id") or "").strip() != identifier
-            or str(payload.get("kind") or "").strip() != source_kind
-        ):
-            unsafe = True
-            continue
-        matches.append(resolved)
-    if unsafe or len(matches) != 1:
+    matches = [
+        snapshot.path
+        for snapshot in iter_canonical_record_snapshots(project_root)
+        if snapshot.unit_id == identifier
+    ]
+    if len(matches) != 1:
         raise ValueError("source unit does not resolve to one canonical safe record")
     return matches[0]
 
@@ -918,20 +1129,21 @@ def is_ready_for_human_review(record: dict[str, Any]) -> bool:
 
 
 def iter_records(project_root: Path, *, kind: str | None = None) -> list[dict[str, Any]]:
-    kinds = [kind] if kind else list(UNIT_KIND_DIRS)
     items: list[dict[str, Any]] = []
-    for item_kind in kinds:
-        root = units_root(project_root) / kind_dir(item_kind)
-        if not root.exists():
-            continue
-        for path in sorted(root.glob("*/record.yaml")):
-            payload = load_yaml(path, default={})
-            if isinstance(payload, dict):
-                try:
-                    items.append(normalize_record_schema(payload, project_root=project_root))
-                except SystemExit:
-                    items.append(payload)
+    for snapshot in iter_canonical_record_snapshots(project_root, kind=kind):
+        items.append(_normalized_snapshot_record(snapshot, project_root))
     return items
+
+
+def _normalized_snapshot_record(
+    snapshot: CanonicalRecordSnapshot,
+    project_root: Path,
+) -> dict[str, Any]:
+    payload = snapshot.record
+    try:
+        return normalize_record_schema(payload, project_root=project_root)
+    except SystemExit:
+        return payload
 
 
 def _record_lookup_path(project_root: Path, record: dict[str, Any]) -> Path | None:
@@ -965,12 +1177,19 @@ def _resolve_unique_record_reference(reference: str, records: list[dict[str, Any
     return None
 
 
-def _record_modified_sort_key(project_root: Path, record: dict[str, Any]) -> tuple[float, float, str]:
-    path = _record_lookup_path(project_root, record)
-    mtime = path.stat().st_mtime if path and path.exists() else 0.0
+def _record_modified_sort_key(
+    project_root: Path,
+    record: dict[str, Any],
+    *,
+    safe_modified_time_ns: int = 0,
+) -> tuple[float, float, str]:
     timestamp = str(record.get("updated_at") or record.get("created_at") or record.get("first_ingested_at") or "")
     parsed = parse_iso_datetime(timestamp)
-    return (mtime, parsed.timestamp() if parsed else 0.0, str(record.get("id") or ""))
+    return (
+        safe_modified_time_ns / 1_000_000_000,
+        parsed.timestamp() if parsed else 0.0,
+        str(record.get("id") or ""),
+    )
 
 
 def locate_record(project_root: Path, unit_id: str, *, kind: str | None = None, fuzzy: bool = True) -> tuple[dict[str, Any], Path]:
@@ -980,13 +1199,17 @@ def locate_record(project_root: Path, unit_id: str, *, kind: str | None = None, 
     for search_kind in search_kinds:
         if search_kind not in UNIT_KIND_DIRS:
             raise SystemExit(f"Unsupported unit kind: {search_kind}")
-    for search_kind in search_kinds:
-        path = record_path(project_root, search_kind, exact_reference)
-        if path.exists():
-            payload = load_yaml(path, default={})
-            if isinstance(payload, dict):
-                return normalize_record_schema(payload, project_root=project_root), path
-    records = iter_records(project_root, kind=kind) if kind else iter_records(project_root)
+    snapshots = iter_canonical_record_snapshots(project_root, kind=kind)
+    records = [_normalized_snapshot_record(snapshot, project_root) for snapshot in snapshots]
+    safe_mtime_by_identity = {
+        (snapshot.kind, snapshot.unit_id): snapshot.modified_time_ns
+        for snapshot in snapshots
+    }
+    exact_matches = [record for record in records if str(record.get("id") or "") == exact_reference]
+    resolved_exact = _resolve_unique_record_reference(exact_reference, exact_matches)
+    if resolved_exact:
+        resolved_kind = str(resolved_exact.get("kind") or "")
+        return resolved_exact, record_path(project_root, resolved_kind, exact_reference)
     for record in records:
         if exact_reference in _unique_text_list(record.get("legacy_ids")):
             current_kind = str(record.get("kind") or "")
@@ -999,7 +1222,17 @@ def locate_record(project_root: Path, unit_id: str, *, kind: str | None = None, 
     if folded in {"last", "current"}:
         modified_records = [record for record in records if _record_lookup_path(project_root, record)]
         if modified_records:
-            resolved = max(modified_records, key=lambda record: _record_modified_sort_key(project_root, record))
+            resolved = max(
+                modified_records,
+                key=lambda record: _record_modified_sort_key(
+                    project_root,
+                    record,
+                    safe_modified_time_ns=safe_mtime_by_identity.get(
+                        (str(record.get("kind") or ""), str(record.get("id") or "")),
+                        0,
+                    ),
+                ),
+            )
             path = _record_lookup_path(project_root, resolved)
             if path:
                 return resolved, path
@@ -1035,6 +1268,8 @@ __all__ = [
     "DEFAULT_REUSE_FLAGS",
     "AI_INFORMATION_TYPES",
     "WORKFLOW_STATES",
+    "CanonicalRecordSnapshot",
+    "iter_canonical_record_snapshots",
     "command_mutation",
     "trusted_project_path",
     "trusted_unit_record_path",
