@@ -642,6 +642,71 @@ def _make_workspace(tmp_path: Path, *, with_claim: bool = True) -> tuple[Path, s
     return root, program_id, unit_id
 
 
+def test_report_rejects_unit_replaced_after_snapshot_selection(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    report = _load_report_module()
+    root, program_id, unit_id = _make_workspace(tmp_path)
+    unit_dir = root / "kb" / "units" / "papers" / unit_id
+    original_dir = tmp_path / "original-unit"
+    replacement_dir = tmp_path / "outside-replacement"
+    replacement_dir.mkdir()
+    write_yaml_if_changed(
+        replacement_dir / "record.yaml",
+        {
+            "id": unit_id,
+            "kind": "paper",
+            "title": "OUTSIDE SENTINEL TITLE",
+            "confirmation_status": "confirmed",
+            "payload": {
+                "claims": [
+                    {
+                        "id": "outside-claim",
+                        "text": "OUTSIDE SENTINEL CLAIM",
+                        "claim_type": "fact",
+                        "confirmation_status": "confirmed",
+                        "evidence_refs": [],
+                    }
+                ]
+            },
+        },
+    )
+    original_current_check = report.judgement_confirmation_is_current
+    swapped = False
+
+    def replace_before_current_check(*args, **kwargs):
+        nonlocal swapped
+        record = args[1]
+        if record.get("id") == unit_id:
+            selected_snapshot = kwargs.get("record_snapshot")
+            assert selected_snapshot is not None
+            assert selected_snapshot.unit_id == unit_id
+            if not swapped:
+                unit_dir.rename(original_dir)
+                replacement_dir.rename(unit_dir)
+                swapped = True
+        return original_current_check(*args, **kwargs)
+
+    monkeypatch.setattr(
+        report,
+        "judgement_confirmation_is_current",
+        replace_before_current_check,
+    )
+
+    inputs = report.load_report_inputs(root, program_id)
+    rendered = report.render_report(
+        f"Stage Summary: {program_id}",
+        inputs,
+        report_kind="stage-summary",
+    )
+
+    assert inputs.claim_sources == []
+    assert inputs.missing_units == [unit_id]
+    assert "OUTSIDE SENTINEL TITLE" not in rendered
+    assert "OUTSIDE SENTINEL CLAIM" not in rendered
+
+
 def test_weekly_and_stage_reports_include_claims_evidence_events_and_decisions(tmp_path: Path) -> None:
     report = _load_report_module()
     root, program_id, _ = _make_workspace(tmp_path)

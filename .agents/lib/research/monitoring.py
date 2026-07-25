@@ -28,6 +28,13 @@ from .preference_selection import (
     resolve_task_preferences,
     selection_binding,
 )
+from .records import (
+    CanonicalRecordSnapshot,
+    CanonicalUnitSnapshot,
+    iter_canonical_record_snapshots,
+    normalize_record_snapshot,
+    snapshot_canonical_unit_artifacts,
+)
 from .yaml_io import load_yaml, write_yaml_if_changed, yaml_duplicate_key_issues
 
 
@@ -780,6 +787,48 @@ def _canonical_unit_record_path(project_root: Path, unit_id: str) -> Path:
     if len(matches) != 1:
         raise SystemExit("Research monitor unit target must resolve to one canonical record.")
     return matches[0]
+
+
+def _same_record_snapshot(
+    left: CanonicalRecordSnapshot,
+    right: CanonicalRecordSnapshot,
+) -> bool:
+    return (
+        left.kind == right.kind
+        and left.unit_id == right.unit_id
+        and left.path == right.path
+        and left.raw_bytes == right.raw_bytes
+        and left.file_identity == right.file_identity
+    )
+
+
+def _materialized_unit_snapshot(
+    project_root: Path,
+    unit_id: str,
+) -> CanonicalUnitSnapshot:
+    matches = [
+        snapshot
+        for snapshot in iter_canonical_record_snapshots(project_root)
+        if snapshot.unit_id == unit_id
+    ]
+    if len(matches) != 1:
+        raise SystemExit("Materialized monitor outcome target is not a canonical unit.")
+    selected = matches[0]
+    if normalize_record_snapshot(selected, project_root) is None:
+        raise SystemExit("Materialized monitor outcome target is not a canonical unit.")
+    current = snapshot_canonical_unit_artifacts(
+        project_root,
+        selected.kind,
+        selected.unit_id,
+        (),
+    )
+    if (
+        current is None
+        or not _same_record_snapshot(selected, current.record)
+        or not current.is_current()
+    ):
+        raise SystemExit("Materialized monitor outcome target is not a canonical unit.")
+    return current
 
 
 def _subscription_reference_bindings(
@@ -1946,12 +1995,7 @@ def set_outcome_disposition(
             classification=str(outcomes[index].get("classification") or ""),
         )
         if state == "materialized":
-            from .records import trusted_unit_record_path
-
-            try:
-                trusted_unit_record_path(project_root, str(target_ref or ""))
-            except ValueError as exc:
-                raise SystemExit("Materialized monitor outcome target is not a canonical unit.") from exc
+            _materialized_unit_snapshot(project_root, str(target_ref or ""))
         if state == "sent_to_review":
             from .judgements import discover_pending_judgements
 

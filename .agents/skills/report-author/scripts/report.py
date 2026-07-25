@@ -32,7 +32,12 @@ from research.core import command_mutation, ensure_workspace, checkpoint_and_rep
 from research.evidence import read_claims, validate_claims
 from research.judgements import confirmation_binding, judgement_confirmation_is_current, load_bound_judgement
 from research.preference_selection import resolve_task_preferences, selection_binding
-from research.records import trusted_unit_record_path
+from research.records import (
+    CanonicalRecordSnapshot,
+    iter_canonical_record_snapshots,
+    normalize_record_snapshot,
+    snapshot_canonical_unit_artifacts,
+)
 from research.surveys import survey_staleness
 
 
@@ -492,18 +497,60 @@ def program_unit_ids(root: Path, program_id: str, events: list[dict[str, Any]]) 
     return sorted(unit_ids)
 
 
+def _same_record_snapshot(
+    left: CanonicalRecordSnapshot,
+    right: CanonicalRecordSnapshot,
+) -> bool:
+    return (
+        left.kind == right.kind
+        and left.unit_id == right.unit_id
+        and left.path == right.path
+        and left.raw_bytes == right.raw_bytes
+        and left.file_identity == right.file_identity
+    )
+
+
+def _record_snapshot_is_current(root: Path, snapshot: CanonicalRecordSnapshot) -> bool:
+    current = snapshot_canonical_unit_artifacts(
+        root,
+        snapshot.kind,
+        snapshot.unit_id,
+        (),
+    )
+    return bool(
+        current is not None
+        and _same_record_snapshot(snapshot, current.record)
+        and current.is_current()
+    )
+
+
+def _load_exact_record_snapshot(
+    root: Path,
+    unit_id: str,
+) -> tuple[CanonicalRecordSnapshot, dict[str, Any]] | None:
+    matches = [
+        snapshot
+        for snapshot in iter_canonical_record_snapshots(root)
+        if snapshot.unit_id == unit_id
+    ]
+    if len(matches) != 1:
+        return None
+    snapshot = matches[0]
+    record = normalize_record_snapshot(snapshot, root)
+    if record is None or not _record_snapshot_is_current(root, snapshot):
+        return None
+    return snapshot, record
+
+
 def load_confirmed_claim_sources(root: Path, unit_ids: list[str]) -> tuple[list[ClaimSource], list[str]]:
     sources: list[ClaimSource] = []
     missing_units: list[str] = []
     for unit_id in unit_ids:
-        try:
-            path = trusted_unit_record_path(root, unit_id)
-            record = load_yaml(path, default={})
-            if not isinstance(record, dict):
-                raise ValueError("canonical record is not a mapping")
-        except ValueError:
+        selected = _load_exact_record_snapshot(root, unit_id)
+        if selected is None:
             missing_units.append(unit_id)
             continue
+        snapshot, record = selected
         canonical_claims = read_claims(record.get("payload"))
         receipt = record.get("confirmation") if isinstance(record.get("confirmation"), dict) else {}
         receipt_claim_ids = {
@@ -513,8 +560,16 @@ def load_confirmed_claim_sources(root: Path, unit_ids: list[str]) -> tuple[list[
         }
         receipt_current = (
             str(record.get("confirmation_status") or "") == "confirmed"
-            and judgement_confirmation_is_current(root, record, path)
+            and judgement_confirmation_is_current(
+                root,
+                record,
+                snapshot.path,
+                record_snapshot=snapshot,
+            )
         )
+        if not _record_snapshot_is_current(root, snapshot):
+            missing_units.append(unit_id)
+            continue
         confirmed_claims = [
             claim
             for claim in canonical_claims

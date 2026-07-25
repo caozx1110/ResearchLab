@@ -19,6 +19,7 @@ MONITOR_SCRIPT = REPO_ROOT / ".agents" / "skills" / "research-monitor" / "script
 if str(LIB_ROOT) not in sys.path:
     sys.path.insert(0, str(LIB_ROOT))
 
+import research.monitoring as monitoring
 from research.common import file_sha256, write_yaml_if_changed
 from research.monitoring import (
     active_monitor_runs,
@@ -794,6 +795,68 @@ def test_completed_outcome_stays_visible_until_a_bound_disposition(tmp_path: Pat
     assert resolved["revision"] == completed["revision"] + 1
     assert resolved["review_outcomes"][0]["disposition"]["state"] == "materialized"
     assert resolved["review_outcomes"][0]["disposition"]["target_ref"] == "p-materialized"
+
+
+@pytest.mark.parametrize("failure", ["malformed", "ambiguous"])
+def test_materialized_target_requires_one_normalized_strict_snapshot(
+    tmp_path: Path,
+    failure: str,
+) -> None:
+    unit_id = "p-materialized"
+    paper_record = tmp_path / "kb" / "units" / "papers" / unit_id / "record.yaml"
+    paper_record.parent.mkdir(parents=True)
+    if failure == "malformed":
+        paper_record.write_text(
+            "id: p-materialized\nkind: paper\nrevision: []\n",
+            encoding="utf-8",
+        )
+    else:
+        paper_record.write_text("id: p-materialized\nkind: paper\n", encoding="utf-8")
+        repo_record = tmp_path / "kb" / "units" / "repos" / unit_id / "record.yaml"
+        repo_record.parent.mkdir(parents=True)
+        repo_record.write_text("id: p-materialized\nkind: repo\n", encoding="utf-8")
+
+    with pytest.raises(SystemExit, match="canonical unit"):
+        monitoring._materialized_unit_snapshot(tmp_path, unit_id)
+
+
+def test_materialized_target_rejects_replaced_unit_ancestor(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    unit_id = "p-materialized"
+    unit_dir = tmp_path / "kb" / "units" / "papers" / unit_id
+    unit_dir.mkdir(parents=True)
+    (unit_dir / "record.yaml").write_text(
+        "id: p-materialized\nkind: paper\ntitle: Safe title\n",
+        encoding="utf-8",
+    )
+    original_dir = tmp_path / "original-materialized-unit"
+    replacement_dir = tmp_path / "outside-materialized-unit"
+    replacement_dir.mkdir()
+    (replacement_dir / "record.yaml").write_text(
+        "id: p-materialized\nkind: paper\ntitle: OUTSIDE SENTINEL TITLE\n",
+        encoding="utf-8",
+    )
+    original_snapshot = monitoring.snapshot_canonical_unit_artifacts
+    swapped = False
+
+    def replace_before_current_check(*args, **kwargs):
+        nonlocal swapped
+        if not swapped:
+            unit_dir.rename(original_dir)
+            replacement_dir.rename(unit_dir)
+            swapped = True
+        return original_snapshot(*args, **kwargs)
+
+    monkeypatch.setattr(
+        monitoring,
+        "snapshot_canonical_unit_artifacts",
+        replace_before_current_check,
+    )
+
+    with pytest.raises(SystemExit, match="canonical unit"):
+        monitoring._materialized_unit_snapshot(tmp_path, unit_id)
 
 
 def test_legacy_completed_outcome_is_read_as_unresolved_without_rewrite(tmp_path: Path) -> None:
