@@ -56,6 +56,51 @@ def test_bound_unit_judgement_snapshot_rejects_same_bytes_directory_replacement(
     assert load_bound_judgement_snapshot(tmp_path, subject).is_current()
 
 
+def test_bound_side_judgement_revalidates_current_candidate_after_rediscovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    decisions_path = tmp_path / "kb/programs/p-side-final/workflow/decisions.yaml"
+    decisions_path.parent.mkdir(parents=True)
+    write_yaml_if_changed(
+        decisions_path,
+        {
+            "items": [
+                {
+                    "id": "decision-side-final",
+                    "kind": "program_decision",
+                    "owner": "research-orchestrator",
+                    "program_id": "p-side-final",
+                }
+            ]
+        },
+    )
+    bound = load_bound_judgement_snapshot(
+        tmp_path,
+        {"kind": "program_decision", "id": "decision-side-final"},
+    )
+    assert bound.project_yaml_snapshot is not None
+    replacement = tmp_path / "replacement-decisions.yaml"
+    replacement.write_bytes(decisions_path.read_bytes())
+    displaced = tmp_path / "displaced-decisions.yaml"
+    snapshot_type = type(bound.project_yaml_snapshot)
+    original_is_current = snapshot_type.is_current
+    swapped = False
+
+    def swap_before_final_current(candidate) -> bool:
+        nonlocal swapped
+        if candidate.path == decisions_path and not swapped:
+            swapped = True
+            decisions_path.rename(displaced)
+            replacement.rename(decisions_path)
+        return original_is_current(candidate)
+
+    monkeypatch.setattr(snapshot_type, "is_current", swap_before_final_current)
+
+    assert not bound.is_current()
+    assert swapped
+
+
 def _run(script: str, root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(ROOT / script), "--root", str(root), *args],

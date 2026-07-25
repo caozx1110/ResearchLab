@@ -846,6 +846,7 @@ def _bound_side_from_candidate(
             and current_file.raw_bytes == expected_file.raw_bytes
             and current_file.file_identity == expected_file.file_identity
             and current_file.directory_capabilities == expected_file.directory_capabilities
+            and current.container.is_current()
         )
 
     bound = BoundJudgementSnapshot(
