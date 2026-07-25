@@ -1818,6 +1818,177 @@ def test_report_input_snapshot_never_serializes_validators(tmp_path: Path) -> No
     assert "validator" not in serialized
 
 
+def _report_output_path(root: Path, program_id: str, command: str) -> Path:
+    if command == "weekly":
+        return root / "kb" / "programs" / program_id / "reports" / "weekly.md"
+    if command == "stage-summary":
+        return root / "kb" / "programs" / program_id / "reports" / "stage-summary.md"
+    if command == "outline":
+        return root / "kb" / "programs" / program_id / "reports" / "paper-outline.md"
+    suffix = "ppt-materials" if command == "ppt-materials" else "writing-materials"
+    return root / "kb" / "user" / "report-materials" / f"{program_id}-{suffix}.md"
+
+
+def _replace_report_source(record_path: Path, mutation: str) -> None:
+    if mutation == "content":
+        payload = load_yaml(record_path)
+        payload["title"] = "REPLACEMENT DURING PUBLICATION"
+        write_yaml_if_changed(record_path, payload)
+        return
+    before = record_path.stat()
+    replacement = record_path.with_name(".record-publication-replacement.yaml")
+    replacement.write_bytes(record_path.read_bytes())
+    replacement.replace(record_path)
+    after = record_path.stat()
+    assert (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+
+
+@pytest.mark.parametrize(
+    ("command", "renderer"),
+    [
+        ("weekly", "render_report"),
+        ("stage-summary", "render_report"),
+        ("ppt-materials", "render_report"),
+        ("writing-materials", "render_report"),
+        ("outline", "render_outline"),
+    ],
+)
+@pytest.mark.parametrize("mutation", ["content", "same-bytes-new-inode"])
+def test_cli_rechecks_after_render_before_publishing_any_report_kind(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+    renderer: str,
+    mutation: str,
+) -> None:
+    report = _load_report_module()
+    root, program_id, unit_id = _make_workspace(tmp_path)
+    record_path = root / "kb" / "units" / "papers" / unit_id / "record.yaml"
+    original_render = getattr(report, renderer)
+    replaced = False
+
+    def replace_after_render(*args, **kwargs):
+        nonlocal replaced
+        text = original_render(*args, **kwargs)
+        if not replaced:
+            replaced = True
+            _replace_report_source(record_path, mutation)
+        return text
+
+    monkeypatch.setattr(report, renderer, replace_after_render)
+    monkeypatch.setattr(report, "checkpoint_and_report", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["report.py", "--root", str(root), command, "--program-id", program_id],
+    )
+
+    assert report.main() == 0
+
+    text = _report_output_path(root, program_id, command).read_text(encoding="utf-8")
+    assert replaced
+    assert "报告生成期间正式判断来源已变化" in text
+    assert "Grounded Paper" not in text
+    assert "The method improves benchmark success rate." not in text
+    assert "Use the grounded baseline" not in text
+    assert "The paper analysis is ready for reporting." in text
+
+
+@pytest.mark.parametrize("mutation", ["content", "same-bytes-new-inode"])
+@pytest.mark.parametrize("preexisting", [False, True])
+def test_cli_post_write_gate_rolls_back_exact_report_before_image(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+    preexisting: bool,
+) -> None:
+    report = _load_report_module()
+    root, program_id, unit_id = _make_workspace(tmp_path)
+    record_path = root / "kb" / "units" / "papers" / unit_id / "record.yaml"
+    output = _report_output_path(root, program_id, "weekly")
+    if preexisting:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"exact report before-image\n")
+        output.chmod(0o640)
+    original_write = report.write_text_if_changed
+    replaced = False
+
+    def replace_after_write(path: Path, text: str) -> None:
+        nonlocal replaced
+        original_write(path, text)
+        if not replaced:
+            replaced = True
+            _replace_report_source(record_path, mutation)
+
+    monkeypatch.setattr(report, "write_text_if_changed", replace_after_write)
+    monkeypatch.setattr(report, "checkpoint_and_report", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["report.py", "--root", str(root), "weekly", "--program-id", program_id],
+    )
+
+    with pytest.raises(RuntimeError, match="formal report inputs changed during publication"):
+        report.main()
+
+    assert replaced
+    if preexisting:
+        assert output.read_bytes() == b"exact report before-image\n"
+        assert output.stat().st_mode & 0o777 == 0o640
+    else:
+        assert not output.exists()
+
+
+@pytest.mark.parametrize("unit_count", [4, 8, 16])
+def test_unit_claim_source_snapshot_enumeration_is_linear(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unit_count: int,
+) -> None:
+    report = _load_report_module()
+    unit_ids = [f"p-linear-{index:02d}" for index in range(unit_count)]
+    for unit_id in unit_ids:
+        write_yaml_if_changed(
+            tmp_path / "kb" / "units" / "papers" / unit_id / "record.yaml",
+            {"id": unit_id, "kind": "paper", "title": unit_id, "payload": {"claims": []}},
+        )
+    original_iter = report.iter_canonical_record_snapshots
+    yields = 0
+
+    def count_yields(*args, **kwargs):
+        nonlocal yields
+        for snapshot in original_iter(*args, **kwargs):
+            yields += 1
+            yield snapshot
+
+    monkeypatch.setattr(report, "iter_canonical_record_snapshots", count_yields)
+
+    sources, missing = report.load_confirmed_claim_sources(tmp_path, [*unit_ids, unit_ids[0]])
+
+    assert [source.unit_id for source in sources] == unit_ids
+    assert missing == []
+    assert yields == unit_count
+
+
+def test_unit_claim_source_duplicate_identity_fails_closed(tmp_path: Path) -> None:
+    report = _load_report_module()
+    unit_id = "duplicate-unit"
+    record = {"id": unit_id, "title": "Ambiguous", "payload": {"claims": []}}
+    write_yaml_if_changed(
+        tmp_path / "kb" / "units" / "papers" / unit_id / "record.yaml",
+        {**record, "kind": "paper"},
+    )
+    write_yaml_if_changed(
+        tmp_path / "kb" / "units" / "repos" / unit_id / "record.yaml",
+        {**record, "kind": "repo"},
+    )
+
+    sources, missing = report.load_confirmed_claim_sources(tmp_path, [unit_id, unit_id])
+
+    assert sources == []
+    assert missing == [unit_id]
+
+
 def test_outline_cli_writes_report_without_raw_command_stdout(tmp_path: Path, monkeypatch, capsys) -> None:
     report = _load_report_module()
     root, program_id, _ = _make_workspace(tmp_path)
