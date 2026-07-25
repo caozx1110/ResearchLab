@@ -119,8 +119,58 @@ class BoundJudgementContainerSnapshot:
             return False
 
 
+@dataclass(frozen=True)
+class BoundJudgementBatchSnapshot:
+    """One globally indexed capture shared by many judgement consumers."""
+
+    root: Path
+    judgements: tuple[BoundJudgementSnapshot, ...]
+    side_containers: tuple[ProjectYamlMappingSnapshot, ...]
+    unit_judgements: tuple[BoundJudgementSnapshot, ...]
+    validate_side_current: Callable[[], bool] = field(repr=False, compare=False)
+
+    def resolve(self, subject: Any) -> BoundJudgementSnapshot | None:
+        if not isinstance(subject, dict):
+            return None
+        subject_kind = _text(subject.get("kind"))
+        subject_id = _text(subject.get("id"))
+        matches = [
+            bound
+            for bound in self.judgements
+            if _text(bound.record.get("kind")) == subject_kind
+            and _text(bound.record.get("id")) == subject_id
+        ]
+        if len(matches) != 1:
+            return None
+        bound = matches[0]
+        supplied_owner = _text(subject.get("owner"))
+        supplied_path = _text(subject.get("path"))
+        if supplied_owner and supplied_owner != bound.owner:
+            return None
+        if supplied_path:
+            try:
+                canonical_path = bound.path.relative_to(self.root).as_posix()
+            except ValueError:
+                return None
+            if supplied_path != canonical_path:
+                return None
+        return bound
+
+    def is_current(self) -> bool:
+        try:
+            return bool(self.validate_side_current()) and all(
+                bound.is_current() for bound in self.unit_judgements
+            )
+        except (OSError, ValueError):
+            return False
+
+
 def _text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _canonical_project_root(root: str | Path) -> Path:
+    return Path(root).resolve()
 
 
 def _safe_relative_path(root: Path, path: Path) -> str:
@@ -674,7 +724,7 @@ def _candidate_artifacts(
 
 def discover_pending_judgements(root: str | Path) -> list[dict[str, Any]]:
     """Return all cross-owner ``ready_for_review`` cards in deterministic order."""
-    project_root = Path(root).absolute()
+    project_root = _canonical_project_root(root)
     unit_candidates: list[dict[str, Any]] = []
     for snapshot in iter_canonical_record_snapshots(project_root):
         try:
@@ -1008,7 +1058,7 @@ def load_bound_judgement_container_snapshot(
     expected_kind: str,
 ) -> BoundJudgementContainerSnapshot:
     """Capture one canonical side container and index its globally unique items."""
-    project_root = Path(root).absolute()
+    project_root = _canonical_project_root(root)
     relative = Path(relative_path)
     if relative.is_absolute() or not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
         raise ValueError("side judgement container path is not canonical")
@@ -1067,7 +1117,7 @@ def load_bound_judgement_container_snapshot(
 
 def load_bound_judgement_snapshot(root: str | Path, subject: Any) -> BoundJudgementSnapshot:
     """Bind one judgement to its exact, globally unique canonical container."""
-    project_root = Path(root).absolute()
+    project_root = _canonical_project_root(root)
     if not isinstance(subject, dict):
         raise ValueError("confirmation subject must be a mapping")
     subject_id = _text(subject.get("id"))
@@ -1104,6 +1154,87 @@ def load_bound_judgement_snapshot(root: str | Path, subject: Any) -> BoundJudgem
         snapshot,
         subject=subject,
         check_current=True,
+    )
+
+
+def load_bound_judgement_batch_snapshot(
+    root: str | Path,
+    subjects: Iterable[Any] = (),
+) -> BoundJudgementBatchSnapshot:
+    """Capture side containers once and index all globally unique subjects.
+
+    Side candidates share their exact container validator while the aggregate
+    validator rechecks the complete discovery capture once. Requested unit
+    subjects retain their own canonical record validators.
+    """
+    project_root = _canonical_project_root(root)
+    side_discovery = _capture_side_judgement_discovery(project_root)
+    valid_side_candidates = [
+        candidate
+        for candidate in side_discovery.candidates
+        if _text(candidate.record.get("kind")) in SIDE_OWNER_BY_KIND
+        and not _identity_violations(
+            project_root,
+            candidate.record,
+            candidate.owner,
+            candidate.container.path,
+        )
+    ]
+    subject_counts: dict[tuple[str, str], int] = {}
+    for candidate in valid_side_candidates:
+        key = (_text(candidate.record.get("kind")), _text(candidate.record.get("id")))
+        subject_counts[key] = subject_counts.get(key, 0) + 1
+    side_bounds: list[BoundJudgementSnapshot] = []
+    for candidate in valid_side_candidates:
+        key = (_text(candidate.record.get("kind")), _text(candidate.record.get("id")))
+        if subject_counts.get(key) != 1:
+            continue
+        try:
+            side_bounds.append(
+                _bound_side_from_candidate(
+                    project_root,
+                    candidate,
+                    check_current=False,
+                    validate_current=candidate.container.is_current,
+                )
+            )
+        except ValueError:
+            continue
+
+    requested_units: dict[tuple[str, str], dict[str, Any]] = {}
+    for subject in subjects:
+        if not isinstance(subject, dict):
+            continue
+        subject_kind = _text(subject.get("kind"))
+        subject_id = _text(subject.get("id"))
+        if subject_kind in UNIT_OWNER_BY_KIND and subject_id:
+            requested_units[(subject_kind, subject_id)] = subject
+    unit_bounds: list[BoundJudgementSnapshot] = []
+    for (subject_kind, subject_id), subject in sorted(requested_units.items()):
+        try:
+            snapshot = canonical_record_snapshot_for_identity(
+                project_root,
+                subject_kind,
+                subject_id,
+            )
+            if snapshot is None:
+                continue
+            unit_bounds.append(
+                _bound_unit_from_snapshot(
+                    project_root,
+                    snapshot,
+                    subject=subject,
+                    check_current=True,
+                )
+            )
+        except (OSError, RuntimeError, UnicodeError, ValueError, yaml.YAMLError):
+            continue
+    return BoundJudgementBatchSnapshot(
+        root=project_root,
+        judgements=tuple([*side_bounds, *unit_bounds]),
+        side_containers=side_discovery.containers,
+        unit_judgements=tuple(unit_bounds),
+        validate_side_current=side_discovery.is_current,
     )
 
 
@@ -1165,6 +1296,7 @@ def load_bound_judgement(root: str | Path, subject: Any) -> tuple[dict[str, Any]
 
 
 __all__ = [
+    "BoundJudgementBatchSnapshot",
     "BoundJudgementContainerSnapshot",
     "BoundJudgementSnapshot",
     "apply_judgement_rejection",
@@ -1174,6 +1306,7 @@ __all__ = [
     "judgement_confirmation_is_current",
     "judgement_confirmation_matches_bound",
     "load_bound_judgement",
+    "load_bound_judgement_batch_snapshot",
     "load_bound_judgement_container_snapshot",
     "load_bound_judgement_snapshot",
     "pending_judgement_card",
