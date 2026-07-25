@@ -93,6 +93,21 @@ def _journal_operation_count(root: Path) -> int:
     return len(list(journal.glob("*.yaml"))) if journal.is_dir() else 0
 
 
+def _empty_portfolio_stdout(program_ids: list[str] | None = None) -> str:
+    return json.dumps(
+        {
+            "candidate_snapshot": {
+                "program_contexts": [
+                    {"program_id": program_id, "status": "active"}
+                    for program_id in (program_ids or [])
+                ],
+                "candidates": [],
+            }
+        },
+        ensure_ascii=False,
+    )
+
+
 class TTYStringIO(io.StringIO):
     def isatty(self) -> bool:
         return True
@@ -124,6 +139,45 @@ def _pending_record(unit_id: str, kind: str, title: str, summary: str = "AI summ
             ]
         },
     }
+
+
+def _mock_canonical_review(kb, monkeypatch, records: list[dict]) -> None:
+    """Route adapter unit tests through the same canonical card interface as production."""
+    cards = []
+    owner_by_kind = {
+        "paper": "paper-analyst",
+        "repo": "repo-analyst",
+        "dataset": "dataset-analyst",
+        "blog": "blog-analyst",
+        "idea": "idea-workbench",
+        "experiment": "experiment-workbench",
+    }
+    for record in records:
+        payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+        claims = payload.get("claims") if isinstance(payload.get("claims"), list) else []
+        substance = {
+            key: value
+            for key, value in payload.items()
+            if key not in {"claims", "verification"}
+        }
+        cards.append(
+            {
+                "subject": {
+                    "kind": str(record.get("kind") or ""),
+                    "id": str(record.get("id") or ""),
+                    "owner": owner_by_kind.get(str(record.get("kind") or ""), "knowledge-base-manager"),
+                    "path": f"fixture/{record.get('id')}",
+                },
+                "claims": claims,
+                "substance": substance,
+                "verification": payload.get("verification") if isinstance(payload.get("verification"), dict) else {},
+                "priority": str(record.get("priority") or "normal"),
+                "updated_at": str(record.get("updated_at") or ""),
+                "snapshot_binding": {"content_digest": f"fixture-{record.get('id')}"},
+            }
+        )
+    monkeypatch.setattr(kb, "iter_records", lambda root: records)
+    monkeypatch.setattr(kb, "discover_pending_judgements", lambda root: cards)
 
 
 def _prepare_review_workspace(root: Path) -> None:
@@ -364,6 +418,84 @@ def _write_ready_review_subject(root: Path, owner_kind: str) -> tuple[str, Path]
         return f"method_selection:{subject_id}", choice_path
 
     raise AssertionError(f"unsupported fixture owner: {owner_kind}")
+
+
+def _write_ready_unit_kind(
+    root: Path,
+    kind: str,
+    *,
+    suffix: str,
+    title: str,
+    claim_text: str,
+) -> tuple[str, Path]:
+    """Create one canonical ready unit, including repo external file:line evidence."""
+    _prepare_review_workspace(root)
+    prefixes = {"paper": "p", "repo": "r", "dataset": "d", "blog": "b", "idea": "i", "experiment": "e"}
+    unit_id = f"{prefixes[kind]}-{suffix}-123456"
+    path = record_path(root, kind, unit_id)
+    unit_root = path.parent
+    record = default_record(kind, title=title, maturity="complete", source={"original_uri": "fixture"})
+    record.update(
+        id=unit_id,
+        status="screened",
+        confirmation_status="pending_user_confirmation",
+        needs_human_confirmation=True,
+        information_types=["evaluation", "unverified"],
+    )
+    if kind == "paper":
+        record["payload"]["core_content"]["research_problem"] = claim_text
+    elif kind == "repo":
+        record["payload"]["capability"]["core_capabilities"] = [claim_text]
+    elif kind == "dataset":
+        record["payload"]["profile"]["positioning"] = claim_text
+    elif kind == "blog":
+        record["payload"]["content"]["key_points"] = [claim_text]
+    elif kind == "idea":
+        record["payload"]["hypothesis"]["core_hypothesis"] = claim_text
+    elif kind == "experiment":
+        record["payload"]["results"]["summary"] = claim_text
+    quote = f"Verified evidence for {kind} {suffix}."
+    external_source = None
+    if kind == "repo":
+        repo_root = root / "repo-fixtures" / unit_id
+        repo_root.mkdir(parents=True, exist_ok=True)
+        (repo_root / "README.md").write_text(quote, encoding="utf-8")
+        record["source"]["original_uri"] = repo_root.as_posix()
+        record["payload"]["structure"]["repo_root"] = repo_root.resolve().as_posix()
+        ref = {
+            "source_unit_id": unit_id,
+            "artifact": "README.md",
+            "locator": "line=1",
+            "quote": quote,
+            "external_source": {"kind": "repo"},
+        }
+        external_source = {"kind": "repo", "base_root": repo_root.resolve().as_posix()}
+    else:
+        (unit_root / "raw").mkdir(parents=True, exist_ok=True)
+        (unit_root / "raw/source.txt").write_text(quote, encoding="utf-8")
+        ref = {
+            "source_unit_id": unit_id,
+            "artifact": "raw/source.txt",
+            "locator": "line:1",
+            "quote": quote,
+        }
+    record["payload"]["claims"] = [
+        {
+            "id": f"claim-{unit_id}",
+            "text": claim_text,
+            "claim_type": "evaluation",
+            "confirmation_status": "pending_user_confirmation",
+            "evidence_refs": [ref],
+        }
+    ]
+    build_verification_receipt(
+        record,
+        unit_root,
+        external_source=external_source,
+        source_roots={unit_id: unit_root},
+    )
+    write_yaml_if_changed(path, record)
+    return f"{kind}:{unit_id}", path
 
 
 def _review_protocol_item(root: Path, kb, protocol_name: str = "review.json") -> tuple[dict, str]:
@@ -1459,7 +1591,8 @@ def test_kb_status_forwards_current_state_and_program(monkeypatch, tmp_path: Pat
     def fake_forward(root: Path, relative_script: str, args: list[str], *, stream: bool = True) -> kb.CommandResult:
         calls.append((relative_script, tuple(args)))
         stream_values.append(stream)
-        return kb.CommandResult((relative_script, *args), 0)
+        stdout = _empty_portfolio_stdout(["p-demo"]) if args[:1] == ["prepare-next-selection"] else ""
+        return kb.CommandResult((relative_script, *args), 0, stdout)
 
     monkeypatch.setattr(kb, "forward_command", fake_forward)
 
@@ -1468,8 +1601,9 @@ def test_kb_status_forwards_current_state_and_program(monkeypatch, tmp_path: Pat
     assert calls == [
         (".agents/skills/knowledge-base-manager/scripts/kb.py", ("current-state",)),
         (".agents/skills/research-orchestrator/scripts/orchestrate.py", ("status", "--program-id", "p-demo")),
+        (".agents/skills/research-orchestrator/scripts/orchestrate.py", ("prepare-next-selection", "--json", "--program-id", "p-demo")),
     ]
-    assert stream_values == [False, False]
+    assert stream_values == [False, False, False]
 
 
 def test_kb_status_stops_when_first_forward_fails(monkeypatch, tmp_path: Path) -> None:
@@ -1499,7 +1633,11 @@ def test_kb_status_uses_read_only_core_owner_without_navigator(tmp_path: Path, c
 
     assert kb.main(["--root", str(tmp_path), "status"]) == 0
 
-    assert capsys.readouterr().out == "知识库尚未收录资料。\n"
+    assert capsys.readouterr().out == (
+        "知识库尚未收录资料。\n"
+        "目前没有研究计划。\n"
+        "待处理事项：0 条待确认判断、0 个到期监控、0 组文献候选待选择、0 个可继续文献检索、0 个可恢复综述流程、0 个失败后可重试事项。\n"
+    )
     assert _tree_metadata_digest(tmp_path) == before
 
 
@@ -1516,7 +1654,7 @@ def test_kb_status_public_output_hides_owner_machine_lines(
         lambda root, relative_script, args, *, stream=True: kb.CommandResult(
             (relative_script, *args),
             0,
-            "p-demo | status=source_ready | score=40 | pools=reading\n",
+            _empty_portfolio_stdout() if args[:1] == ["prepare-next-selection"] else "p-demo | status=source_ready | score=40 | pools=reading\n",
         ),
     )
     monkeypatch.setattr(
@@ -1524,14 +1662,15 @@ def test_kb_status_public_output_hides_owner_machine_lines(
         "iter_records",
         lambda root: [{"id": "p-demo", "kind": "paper", "title": "Demo"}],
     )
-    monkeypatch.setattr(kb, "is_ready_for_human_review", lambda record: False)
+    monkeypatch.setattr(kb, "discover_pending_judgements", lambda root: [])
 
     assert kb.main(
         ["--root", str(tmp_path), "--agent-protocol", "status.json", "status"]
     ) == 0
 
     output = capsys.readouterr().out
-    assert output == "知识库目前收录 1 条资料：1 篇论文。\n"
+    assert output.startswith("知识库目前收录 1 条资料：1 篇论文。\n")
+    assert "目前没有研究计划" in output
     _assert_public_governance_safe(output)
     protocol = json.loads((tmp_path / "kb" / ".runtime" / "status.json").read_text(encoding="utf-8"))
     assert protocol["details"]["record_count"] == 1
@@ -1544,7 +1683,8 @@ def test_kb_status_excludes_rejected_records_and_audits_count(monkeypatch, tmp_p
         kb,
         "forward_command",
         lambda root, relative_script, args, *, stream=True: kb.CommandResult(
-            (relative_script, *args), 0, "owner status\n"
+            (relative_script, *args), 0,
+            _empty_portfolio_stdout() if args[:1] == ["prepare-next-selection"] else "owner status\n"
         ),
     )
     monkeypatch.setattr(
@@ -1555,11 +1695,11 @@ def test_kb_status_excludes_rejected_records_and_audits_count(monkeypatch, tmp_p
             {"id": "b-rejected", "kind": "blog", "title": "Rejected", "confirmation_status": "rejected"},
         ],
     )
-    monkeypatch.setattr(kb, "is_ready_for_human_review", lambda record: False)
+    monkeypatch.setattr(kb, "discover_pending_judgements", lambda root: [])
 
     assert kb.main(["--root", str(tmp_path), "--agent-protocol", "status-rejected.json", "status"]) == 0
 
-    assert capsys.readouterr().out == "知识库目前收录 1 条资料：1 篇论文。\n"
+    assert capsys.readouterr().out.startswith("知识库目前收录 1 条资料：1 篇论文。\n")
     protocol = json.loads((tmp_path / "kb" / ".runtime" / "status-rejected.json").read_text(encoding="utf-8"))
     assert protocol["details"]["record_count"] == 1
     assert protocol["details"]["rejected_count"] == 1
@@ -1575,7 +1715,11 @@ def test_kb_status_sanitizes_program_name_and_focus(monkeypatch, tmp_path: Path,
     monkeypatch.setattr(
         kb,
         "forward_command",
-        lambda root, relative_script, args, *, stream=True: kb.CommandResult((relative_script, *args), 0),
+        lambda root, relative_script, args, *, stream=True: kb.CommandResult(
+            (relative_script, *args),
+            0,
+            _empty_portfolio_stdout([program]) if args[:1] == ["prepare-next-selection"] else "",
+        ),
     )
     monkeypatch.setattr(kb, "iter_records", lambda root: [])
 
@@ -1596,7 +1740,11 @@ def test_kb_status_hides_loose_prefixed_live_program_id(monkeypatch, tmp_path: P
     monkeypatch.setattr(
         kb,
         "forward_command",
-        lambda root, relative_script, args, *, stream=True: kb.CommandResult((relative_script, *args), 0),
+        lambda root, relative_script, args, *, stream=True: kb.CommandResult(
+            (relative_script, *args),
+            0,
+            _empty_portfolio_stdout([program]) if args[:1] == ["prepare-next-selection"] else "",
+        ),
     )
     monkeypatch.setattr(kb, "iter_records", lambda root: [])
 
@@ -1606,6 +1754,63 @@ def test_kb_status_hides_loose_prefixed_live_program_id(monkeypatch, tmp_path: P
     assert "研究计划「名称需由 Agent 安全解释」当前围绕“验证确认流程是否清晰”推进" in output
     assert "loose:" not in output
     _assert_public_governance_safe(output)
+
+
+def test_kb_status_summarizes_programs_and_canonical_portfolio_without_writing(
+    monkeypatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    kb = _load_kb_cli()
+    snapshot = {
+        "program_contexts": [
+            {"program_id": "program-alpha", "status": "active"},
+            {"program_id": "program-beta", "status": "active"},
+        ],
+        "candidates": [
+            {"action_type": "review-judgement", "dependencies": []},
+            {"action_type": "run-due-monitor", "dependencies": []},
+            {"action_type": "select-literature-candidates", "dependencies": []},
+            {"action_type": "resume-literature-search", "dependencies": []},
+            {"action_type": "resume-composite-survey", "dependencies": []},
+            {
+                "action_type": "resume-monitor-run",
+                "dependencies": [{"run_state": "failed_retryable"}],
+            },
+        ],
+    }
+
+    def fake_forward(root: Path, relative_script: str, args: list[str], *, stream: bool = True):
+        if args[:1] == ["prepare-next-selection"]:
+            return kb.CommandResult(
+                (relative_script, *args),
+                0,
+                json.dumps({"candidate_snapshot": snapshot}, ensure_ascii=False),
+            )
+        return kb.CommandResult((relative_script, *args), 0)
+
+    monkeypatch.setattr(kb, "forward_command", fake_forward)
+    monkeypatch.setattr(kb, "iter_records", lambda root: [])
+    monkeypatch.setattr(
+        kb,
+        "discover_pending_judgements",
+        lambda root: [{"subject": {"id": "one"}}, {"subject": {"id": "two"}}],
+    )
+    before = _tree_metadata_digest(tmp_path)
+
+    assert kb.main(["--root", str(tmp_path), "status"]) == 0
+
+    output = capsys.readouterr().out
+    assert "2 个研究计划" in output
+    assert "program-alpha" in output and "program-beta" in output
+    assert "2 条待确认判断" in output
+    assert "1 个到期监控" in output
+    assert "1 组文献候选待选择" in output
+    assert "1 个可继续文献检索" in output
+    assert "1 个可恢复综述流程" in output
+    assert "1 个失败后可重试事项" in output
+    _assert_public_governance_safe(output)
+    assert _tree_metadata_digest(tmp_path) == before
 
 
 def test_kb_recovery_verbs_forward_without_raw_git_commands(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -2594,18 +2799,14 @@ def test_kb_review_tty_and_pipe_are_identical_and_emit_private_protocol(monkeypa
         payload={"state": {"full_note_status": "awaiting_agent_fill"}},
     )
 
+    records = [
+        _pending_record("p-one-123456", "paper", "One"),
+        _pending_record("r-two-123456", "repo", "Two"),
+        _pending_record("b-three-123456", "blog", "Three"),
+        _pending_record("i-four-123456", "idea", "Four"),
+    ]
     monkeypatch.setattr(kb, "forward_command", fake_forward)
-    monkeypatch.setattr(
-        kb,
-        "load_review_records",
-        lambda root, fuzzy: [
-            _pending_record("p-one-123456", "paper", "One"),
-            _pending_record("r-two-123456", "repo", "Two"),
-            _pending_record("b-three-123456", "blog", "Three"),
-            _pending_record("i-four-123456", "idea", "Four"),
-            hollow,
-        ],
-    )
+    _mock_canonical_review(kb, monkeypatch, records)
     monkeypatch.setattr("builtins.input", lambda prompt="": (_ for _ in ()).throw(AssertionError("must not prompt")))
     monkeypatch.setattr(sys, "stdin", TTYStringIO("ignored\n"))
 
@@ -2704,6 +2905,7 @@ def test_kb_review_applies_only_selected_reporting_density_without_hiding_primar
         lambda root, relative_script, args, *, stream=True: kb.CommandResult((relative_script, *args), 0),
     )
     monkeypatch.setattr(kb, "load_review_records", lambda root, fuzzy: [record])
+    _mock_canonical_review(kb, monkeypatch, [record])
 
     assert kb.main(["--root", str(tmp_path), "--agent-protocol", "neutral.json", "review"]) == 0
     neutral_output = capsys.readouterr().out
@@ -2772,6 +2974,7 @@ def test_kb_review_rejects_wrong_task_preference_before_snapshot_write(
         lambda root, relative_script, args, *, stream=True: kb.CommandResult((relative_script, *args), 0),
     )
     monkeypatch.setattr(kb, "load_review_records", lambda root, fuzzy: [record])
+    _mock_canonical_review(kb, monkeypatch, [record])
     eligible = eligible_preferences(tmp_path, skill="kb-cli", operation="review-display")
     reporting_item = next(
         item for item in eligible["items"] if item["path"] == "profile.personalization.reporting_style"
@@ -2843,17 +3046,14 @@ def test_kb_review_rejects_protocol_tampering_that_injects_an_unshown_subject(
         calls.append((script, tuple(args)))
         return kb.CommandResult((script, *args), 0, "# review queue\n")
 
+    records = [
+        _pending_record("p-one-123456", "paper", "One"),
+        _pending_record("r-two-123456", "repo", "Two"),
+        _pending_record("b-three-123456", "blog", "Three"),
+        _pending_record("i-four-123456", "idea", "Four"),
+    ]
     monkeypatch.setattr(kb, "forward_command", fake_forward)
-    monkeypatch.setattr(
-        kb,
-        "load_review_records",
-        lambda root, fuzzy: [
-            _pending_record("p-one-123456", "paper", "One"),
-            _pending_record("r-two-123456", "repo", "Two"),
-            _pending_record("b-three-123456", "blog", "Three"),
-            _pending_record("i-four-123456", "idea", "Four"),
-        ],
-    )
+    _mock_canonical_review(kb, monkeypatch, records)
 
     assert kb.main(["--root", str(tmp_path), "--agent-protocol", "tampered-review.json", "review"]) == 0
     protocol_path = tmp_path / "kb/.runtime/tampered-review.json"
@@ -3246,6 +3446,165 @@ def test_public_review_real_owner_tty_and_pipe_display_are_identical(
     _assert_public_governance_safe(tty_output)
 
 
+@pytest.mark.parametrize("decision", ["confirm", "reject"])
+def test_repo_external_evidence_review_snapshot_real_owner_e2e(
+    decision: str,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    kb = _load_kb_cli()
+    ref, artifact_path = _write_ready_unit_kind(
+        tmp_path,
+        "repo",
+        suffix=f"repo-e2e-{decision}",
+        title="External evidence repository",
+        claim_text="The repository exposes the verified adapter seam.",
+    )
+    item, displayed_ref = _review_protocol_item(tmp_path, kb)
+    assert displayed_ref == ref
+    assert item["subject"]["kind"] == "repo"
+    capsys.readouterr()
+
+    assert _apply_review_protocol(tmp_path, kb, displayed_ref, decision) == 0
+    assert load_yaml(artifact_path)["confirmation_status"] == (
+        "confirmed" if decision == "confirm" else "rejected"
+    )
+
+
+def test_review_chinese_kind_alias_precedes_keyword_and_reports_match_reason(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    kb = _load_kb_cli()
+    _write_ready_unit_kind(
+        tmp_path,
+        "paper",
+        suffix="alias-paper",
+        title="标题里提到代码仓但它是论文",
+        claim_text="Visible paper judgement.",
+    )
+    _write_ready_unit_kind(
+        tmp_path,
+        "repo",
+        suffix="alias-repo",
+        title="Canonical repository",
+        claim_text="Visible repository judgement.",
+    )
+
+    assert kb.main(["--root", str(tmp_path), "review", "代码仓"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Canonical repository" in output
+    assert "标题里提到代码仓但它是论文" not in output
+    assert "匹配依据：资料类型" in output
+
+
+@pytest.mark.parametrize(
+    ("alias", "kind"),
+    [
+        ("论文", "paper"),
+        ("代码仓", "repo"),
+        ("数据集", "dataset"),
+        ("博客", "blog"),
+        ("想法", "idea"),
+        ("实验", "experiment"),
+    ],
+)
+def test_review_chinese_kind_aliases_route_before_keyword_search(alias: str, kind: str) -> None:
+    kb = _load_kb_cli()
+
+    assert kb.build_review_list_args(alias) == ["review-queue", "--kind", kind]
+
+
+def test_review_keyword_uses_only_public_title_id_and_confirmable_claims(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    kb = _load_kb_cli()
+    _ref, path = _write_ready_unit_kind(
+        tmp_path,
+        "blog",
+        suffix="keyword-blog",
+        title="Public systems note",
+        claim_text="Visible claim needle supports the route.",
+    )
+    record = load_yaml(path)
+    record["payload"]["private_internal_note"] = "hidden-payload-needle"
+    write_yaml_if_changed(path, record)
+
+    assert kb.main(["--root", str(tmp_path), "review", "hidden-payload-needle"]) == 0
+    hidden_output = capsys.readouterr().out
+    assert "目前没有需要你确认的判断" in hidden_output
+    assert "Public systems note" not in hidden_output
+
+    assert kb.main(["--root", str(tmp_path), "review", "visible claim needle"]) == 0
+    claim_output = capsys.readouterr().out
+    assert "Public systems note" in claim_output
+    assert "匹配依据：可确认判断正文" in claim_output
+    assert "hidden-payload-needle" not in claim_output
+
+
+def test_repo_blog_dataset_obsidian_batch_uses_same_canonical_ready_set_on_apply(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    kb = _load_kb_cli()
+    paths: list[Path] = []
+    for kind in ("repo", "blog", "dataset"):
+        _ref, path = _write_ready_unit_kind(
+            tmp_path,
+            kind,
+            suffix=f"obsidian-{kind}",
+            title=f"Canonical {kind}",
+            claim_text=f"The canonical {kind} judgement is ready.",
+        )
+        paths.append(path)
+
+    assert kb.main(
+        [
+            "--root",
+            str(tmp_path),
+            "--agent-protocol",
+            "obsidian-export.json",
+            "review",
+            "--obsidian-export",
+        ]
+    ) == 0
+    capsys.readouterr()
+    protocol = json.loads((tmp_path / "kb/.runtime/obsidian-export.json").read_text(encoding="utf-8"))
+    review_items = protocol["next_actions"][0]["review_items"]
+    assert {item["subject"]["kind"] for item in review_items} == {"repo", "blog", "dataset"}
+    action = next(
+        item
+        for item in protocol["next_actions"]
+        if item["action"] == "open_obsidian_review_sheet"
+    )
+    batch_ref = action["batch_ref"]
+    sheet = tmp_path / action["sheet_path"]
+    sheet.write_text(
+        sheet.read_text(encoding="utf-8").replace("- [ ] 确认", "- [x] 确认"),
+        encoding="utf-8",
+    )
+    expected_digest = kb.preview_obsidian_review_batch(tmp_path, batch_ref).decision_digest
+
+    assert kb.main(
+        [
+            "--root",
+            str(tmp_path),
+            "review",
+            "--apply-obsidian-batch",
+            batch_ref,
+            "--expected-preview-digest",
+            expected_digest,
+            "--user-authorization",
+            "我确认刚才预览的三项判断。",
+            "--decision-evidence",
+            "I reviewed every displayed judgement.",
+        ]
+    ) == 0
+    assert all(load_yaml(path)["confirmation_status"] == "confirmed" for path in paths)
+
+
 def test_public_review_stale_snapshot_requires_redisplay_and_shows_only_new_content(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -3507,7 +3866,7 @@ def test_kb_review_shows_each_verified_claim_and_verbatim_evidence_not_scaffold_
         lambda root, relative_script, args, *, stream=True: kb.CommandResult((relative_script, *args), 0),
     )
     monkeypatch.setattr(kb, "load_review_records", lambda root, fuzzy: [record])
-    monkeypatch.setattr(kb, "is_ready_for_human_review", lambda candidate: True)
+    _mock_canonical_review(kb, monkeypatch, [record])
 
     assert kb.main(["--root", str(tmp_path), "--agent-protocol", "claim-review.json", "review"]) == 0
 
@@ -3523,7 +3882,11 @@ def test_kb_review_shows_each_verified_claim_and_verbatim_evidence_not_scaffold_
     assert "以上待确认内容已经过当前流程核验" in output
     assert "证据摘录（安全显示）" in output
     protocol = json.loads((tmp_path / "kb" / ".runtime" / "claim-review.json").read_text(encoding="utf-8"))
-    assert protocol["next_actions"][0]["records"] == [record]
+    projected = protocol["next_actions"][0]["records"][0]
+    assert (projected["kind"], projected["id"], projected["title"]) == (
+        record["kind"], record["id"], record["title"]
+    )
+    assert projected["payload"]["claims"] == claims
 
 
 def test_public_review_projection_keeps_same_prefix_claim_tails_distinguishable(tmp_path: Path) -> None:
@@ -3600,7 +3963,7 @@ def test_over_cap_review_claim_routes_to_safe_explanation_without_truncating_rea
         lambda root, relative_script, args, *, stream=True: kb.CommandResult((relative_script, *args), 0),
     )
     monkeypatch.setattr(kb, "load_review_records", lambda root, fuzzy: [record])
-    monkeypatch.setattr(kb, "is_ready_for_human_review", lambda candidate: True)
+    _mock_canonical_review(kb, monkeypatch, [record])
 
     assert kb.main(["--root", str(tmp_path), "--agent-protocol", "over-cap-review.json", "review"]) == 0
 
@@ -3612,10 +3975,8 @@ def test_over_cap_review_claim_routes_to_safe_explanation_without_truncating_rea
     assert protocol["next_actions"][0]["action"] == "explain_review_items_safely"
 
 
-def test_kb_review_keeps_ready_fact_tracks_without_claims_or_evidence(
-    monkeypatch,
+def test_public_review_projection_keeps_fact_tracks_without_claims_or_evidence(
     tmp_path: Path,
-    capsys,
 ) -> None:
     kb = _load_kb_cli()
     metadata_fact = {
@@ -3648,23 +4009,13 @@ def test_kb_review_keeps_ready_fact_tracks_without_claims_or_evidence(
             ]
         },
     }
-    monkeypatch.setattr(
-        kb,
-        "forward_command",
-        lambda root, relative_script, args, *, stream=True: kb.CommandResult((relative_script, *args), 0),
-    )
-    monkeypatch.setattr(kb, "load_review_records", lambda root, fuzzy: [metadata_fact, claim_fact])
+    metadata_projection = kb.public_review_projection(metadata_fact, tmp_path)
+    claim_projection = kb.public_review_projection(claim_fact, tmp_path)
 
-    assert kb.main(["--root", str(tmp_path), "--agent-protocol", "fact-review.json", "review"]) == 0
-
-    output = capsys.readouterr().out
-    assert "有 2 条待确认内容已经准备好" in output
-    assert "待确认的事实信息：发表于 2026 年的公开论文。" in output
-    assert "事实：文章发布日期为 2026 年。" in output
-    assert "Agent 需要先补全" not in output
-    protocol = json.loads((tmp_path / "kb" / ".runtime" / "fact-review.json").read_text(encoding="utf-8"))
-    assert protocol["details"]["review_count"] == 2
-    assert protocol["details"]["blocked_review_count"] == 0
+    assert metadata_projection["status"] == "ready"
+    assert metadata_projection["fact_summary"] == "发表于 2026 年的公开论文。"
+    assert claim_projection["status"] == "ready"
+    assert claim_projection["claims"][0]["text"] == "文章发布日期为 2026 年。"
 
 
 def test_public_review_projection_uses_canonical_ai_source_track(tmp_path: Path) -> None:
@@ -3729,7 +4080,7 @@ def test_kb_review_malformed_claim_fails_closed_without_crashing(
         lambda root, relative_script, args, *, stream=True: kb.CommandResult((relative_script, *args), 0),
     )
     monkeypatch.setattr(kb, "load_review_records", lambda root, fuzzy: [record])
-    monkeypatch.setattr(kb, "is_ready_for_human_review", lambda candidate: True)
+    _mock_canonical_review(kb, monkeypatch, [record])
 
     assert kb.main(["--root", str(tmp_path), "--agent-protocol", "malformed-review.json", "review"]) == 0
 
@@ -3740,7 +4091,9 @@ def test_kb_review_malformed_claim_fails_closed_without_crashing(
     assert protocol["status"] == "agent_action_required"
     assert protocol["details"]["review_count"] == 0
     assert protocol["details"]["blocked_review_count"] == 1
-    assert protocol["details"]["blocked_review_records"] == [record]
+    blocked_record = protocol["details"]["blocked_review_records"][0]
+    assert (blocked_record["kind"], blocked_record["id"]) == (record["kind"], record["id"])
+    assert blocked_record["payload"]["claims"] == record["payload"]["claims"]
     assert protocol["next_actions"][0]["action"] == "repair_review_claims"
 
 
@@ -3758,7 +4111,7 @@ def test_kb_review_dangerous_claim_text_fails_closed_and_stays_private(
         lambda root, relative_script, args, *, stream=True: kb.CommandResult((relative_script, *args), 0),
     )
     monkeypatch.setattr(kb, "load_review_records", lambda root, fuzzy: [record])
-    monkeypatch.setattr(kb, "is_ready_for_human_review", lambda candidate: True)
+    _mock_canonical_review(kb, monkeypatch, [record])
 
     assert kb.main(["--root", str(tmp_path), "--agent-protocol", "injected-review.json", "review"]) == 0
 
@@ -3786,7 +4139,8 @@ def test_kb_review_excludes_rejected_records_even_if_owner_returns_them(
         lambda root, relative_script, args, *, stream=True: kb.CommandResult((relative_script, *args), 0),
     )
     monkeypatch.setattr(kb, "load_review_records", lambda root, fuzzy: [rejected])
-    monkeypatch.setattr(kb, "is_ready_for_human_review", lambda candidate: True)
+    monkeypatch.setattr(kb, "iter_records", lambda root: [rejected])
+    monkeypatch.setattr(kb, "discover_pending_judgements", lambda root: [])
 
     assert kb.main(["--root", str(tmp_path), "review"]) == 0
 
@@ -3809,7 +4163,8 @@ def test_kb_review_blocks_duplicate_unit_subjects_before_display(
         lambda root, relative_script, args, *, stream=True: kb.CommandResult((relative_script, *args), 0),
     )
     monkeypatch.setattr(kb, "load_review_records", lambda root, fuzzy: [first, second])
-    monkeypatch.setattr(kb, "is_ready_for_human_review", lambda candidate: True)
+    monkeypatch.setattr(kb, "iter_records", lambda root: [first, second])
+    monkeypatch.setattr(kb, "discover_pending_judgements", lambda root: [])
 
     assert kb.main(
         ["--root", str(tmp_path), "--agent-protocol", "duplicate-review.json", "review"]
@@ -3818,10 +4173,10 @@ def test_kb_review_blocks_duplicate_unit_subjects_before_display(
     output = capsys.readouterr().out
     assert "First copy" not in output
     assert "Second copy" not in output
-    assert "Agent 需要先补全判断文本或证据" in output
+    assert output == "目前没有需要你确认的判断。\n"
     protocol = json.loads((tmp_path / "kb/.runtime/duplicate-review.json").read_text(encoding="utf-8"))
     assert protocol["details"]["review_count"] == 0
-    assert protocol["details"]["blocked_review_count"] == 2
+    assert protocol["details"]["blocked_review_count"] == 0
 
 
 def test_kb_review_apply_builder_transmits_user_authorization(monkeypatch, tmp_path: Path) -> None:
@@ -4296,7 +4651,7 @@ def test_shell_command_in_review_claim_routes_to_safe_explanation(
         lambda root, relative_script, args, *, stream=True: kb.CommandResult((relative_script, *args), 0),
     )
     monkeypatch.setattr(kb, "load_review_records", lambda root, fuzzy: [record])
-    monkeypatch.setattr(kb, "is_ready_for_human_review", lambda candidate: True)
+    _mock_canonical_review(kb, monkeypatch, [record])
 
     assert kb.main(["--root", str(tmp_path), "--agent-protocol", "shell-review.json", "review"]) == 0
 

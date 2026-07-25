@@ -46,7 +46,6 @@ from research.core import (
     default_confirmed_by,
     default_runtime_preferences,
     is_ai_signer,
-    is_ready_for_human_review,
     iter_records,
     kb_root,
     load_runtime_preferences,
@@ -205,6 +204,20 @@ _RUNTIME_FAILURE_PUBLIC_SUMMARY = "知识库操作未完成。"
 
 Handler = Callable[[argparse.Namespace, Path], int]
 REVIEW_KIND_CHOICES = ("paper", "repo", "dataset", "blog", "idea", "experiment")
+REVIEW_KIND_ALIASES = {
+    "paper": "paper",
+    "论文": "paper",
+    "repo": "repo",
+    "代码仓": "repo",
+    "dataset": "dataset",
+    "数据集": "dataset",
+    "blog": "blog",
+    "博客": "blog",
+    "idea": "idea",
+    "想法": "idea",
+    "experiment": "experiment",
+    "实验": "experiment",
+}
 LANG_CHOICES = ("zh", "en")
 AUTO_COMMIT_CHOICES = ("manual", "milestone", "aggressive")
 AUTO_SCREEN_CHOICES = ("true", "false")
@@ -1232,6 +1245,37 @@ def _public_program_label(program_id: object, root: Path) -> str:
     return _public_display_text(raw_program_id, root, "名称需由 Agent 安全解释", 100)
 
 
+def _portfolio_candidate_failed_retryable(candidate: Mapping[str, object]) -> bool:
+    def contains(value: object) -> bool:
+        if isinstance(value, Mapping):
+            for key, child in value.items():
+                retry_fields = {"status", "state", "run_state", "workflow_state", "reason"}
+                if str(key) in retry_fields and str(child) == "failed_retryable":
+                    return True
+                if contains(child):
+                    return True
+        elif isinstance(value, list):
+            return any(contains(item) for item in value)
+        return False
+
+    return contains(candidate)
+
+
+def _status_portfolio_counts(candidates: Sequence[Mapping[str, object]]) -> dict[str, int]:
+    action_counts: dict[str, int] = {}
+    for candidate in candidates:
+        action_type = str(candidate.get("action_type") or "")
+        action_counts[action_type] = action_counts.get(action_type, 0) + 1
+    return {
+        "pending_review": action_counts.get("review-judgement", 0),
+        "due_monitor": action_counts.get("run-due-monitor", 0),
+        "awaiting_literature_selection": action_counts.get("select-literature-candidates", 0),
+        "resumable_literature": action_counts.get("resume-literature-search", 0),
+        "resumable_composite": action_counts.get("resume-composite-survey", 0),
+        "failed_retryable": sum(1 for candidate in candidates if _portfolio_candidate_failed_retryable(candidate)),
+    }
+
+
 def handle_status(args: argparse.Namespace, root: Path) -> int:
     public_program = _public_program_label(args.program, root)
     current = forward_command(
@@ -1258,6 +1302,35 @@ def handle_status(args: argparse.Namespace, root: Path) -> int:
         loaded_state = load_yaml(kb_root(root) / "programs" / args.program / "state.yaml", default={})
         program_state = loaded_state if isinstance(loaded_state, dict) else {}
 
+    portfolio_args = ["prepare-next-selection", "--json"]
+    if args.program:
+        portfolio_args.extend(["--program-id", args.program])
+    portfolio_result = forward_command(
+        root,
+        SCRIPT_BY_VERB["next"],
+        portfolio_args,
+        stream=False,
+    )
+    if portfolio_result.returncode != 0:
+        print("研究事项摘要暂时无法读取；详细诊断已保留给 Agent。", file=sys.stderr)
+        return portfolio_result.returncode
+    try:
+        portfolio_lines = [line for line in portfolio_result.stdout.splitlines() if line.strip()]
+        if not portfolio_lines:
+            raise json.JSONDecodeError("missing portfolio payload", "", 0)
+        portfolio_payload = json.loads(portfolio_lines[-1])
+        candidate_snapshot = portfolio_payload["candidate_snapshot"]
+        raw_candidates = candidate_snapshot["candidates"]
+        raw_program_contexts = candidate_snapshot["program_contexts"]
+        if not isinstance(raw_candidates, list) or not isinstance(raw_program_contexts, list):
+            raise TypeError
+        portfolio_candidates = [item for item in raw_candidates if isinstance(item, Mapping)]
+        program_contexts = [item for item in raw_program_contexts if isinstance(item, Mapping)]
+    except (json.JSONDecodeError, KeyError, TypeError):
+        print("研究事项摘要暂时无法读取；详细诊断已保留给 Agent。", file=sys.stderr)
+        set_protocol_status("error", reason="invalid portfolio status snapshot")
+        return 1
+
     all_records = iter_records(root)
     rejected_records = [record for record in all_records if _record_is_rejected(record)]
     records = [record for record in all_records if not _record_is_rejected(record)]
@@ -1274,9 +1347,34 @@ def handle_status(args: argparse.Namespace, root: Path) -> int:
         print(f"知识库目前收录 {len(records)} 条资料：{'、'.join(count_parts)}。")
     else:
         print("知识库尚未收录资料。")
-    ready_count = len([record for record in records if is_ready_for_human_review(record)])
-    if ready_count:
-        print(f"其中有 {ready_count} 条经过核验的判断等待你确认，可使用 kb review 查看。")
+    ready_count = len(discover_pending_judgements(root))
+
+    program_ids = [
+        str(item.get("program_id") or "")
+        for item in program_contexts
+        if str(item.get("program_id") or "")
+    ]
+    public_programs = [_public_program_label(program_id, root) for program_id in program_ids[:3]]
+    if program_ids:
+        remainder = len(program_ids) - len(public_programs)
+        suffix = f"，另有 {remainder} 个" if remainder else ""
+        print(f"目前有 {len(program_ids)} 个研究计划：{'、'.join(public_programs)}{suffix}。")
+    else:
+        print("目前没有研究计划。")
+
+    portfolio_counts = _status_portfolio_counts(portfolio_candidates)
+    # Canonical discovery is the only authority for the public review count;
+    # the portfolio projection is retained for all other factual work classes.
+    portfolio_counts["pending_review"] = ready_count
+    print(
+        "待处理事项："
+        f"{portfolio_counts['pending_review']} 条待确认判断、"
+        f"{portfolio_counts['due_monitor']} 个到期监控、"
+        f"{portfolio_counts['awaiting_literature_selection']} 组文献候选待选择、"
+        f"{portfolio_counts['resumable_literature']} 个可继续文献检索、"
+        f"{portfolio_counts['resumable_composite']} 个可恢复综述流程、"
+        f"{portfolio_counts['failed_retryable']} 个失败后可重试事项。"
+    )
 
     if args.program:
         raw_focus = str(program_state.get("goal") or program_state.get("question") or "").strip()
@@ -1291,7 +1389,6 @@ def handle_status(args: argparse.Namespace, root: Path) -> int:
         if open_questions or evidence_requests:
             print(f"目前还有 {open_questions} 个待处理问题和 {evidence_requests} 项待补证据。")
 
-    program_ids = [path.parent.name for path in sorted((kb_root(root) / "programs").glob("*/state.yaml"))]
     set_protocol_status(
         "completed",
         record_count=len(records),
@@ -1301,6 +1398,8 @@ def handle_status(args: argparse.Namespace, root: Path) -> int:
         kind_counts=kind_counts,
         program_ids=program_ids,
         selected_program=program_state,
+        portfolio_counts=portfolio_counts,
+        candidate_snapshot=candidate_snapshot,
     )
     return 0
 
@@ -2584,20 +2683,52 @@ def handle_init(args: argparse.Namespace, root: Path) -> int:
 
 def build_review_list_args(fuzzy: str | None) -> list[str]:
     fuzzy_text = (fuzzy or "").strip()
-    fuzzy_kind = fuzzy_text.lower()
+    fuzzy_kind = REVIEW_KIND_ALIASES.get(fuzzy_text.casefold(), "")
     if not fuzzy_text:
         return ["review-queue"]
-    if fuzzy_kind in REVIEW_KIND_CHOICES:
+    if fuzzy_kind:
         return ["review-queue", "--kind", fuzzy_kind]
     return ["query", "--query", fuzzy_text, "--confirmation-status", "pending_user_confirmation"]
 
 
+def _review_unit_records(root: Path) -> dict[tuple[str, str], dict]:
+    records: dict[tuple[str, str], dict] = {}
+    duplicates: set[tuple[str, str]] = set()
+    for record in iter_records(root):
+        key = (str(record.get("kind") or ""), str(record.get("id") or ""))
+        if not all(key):
+            continue
+        if key in records:
+            duplicates.add(key)
+            continue
+        records[key] = record
+    for key in duplicates:
+        records.pop(key, None)
+    return records
+
+
+def _review_unit_titles(root: Path) -> dict[tuple[str, str], str]:
+    return {
+        key: str(record.get("title") or "")
+        for key, record in _review_unit_records(root).items()
+    }
+
+
 def load_review_records(root: Path, fuzzy: str | None) -> list[dict]:
-    fuzzy_text = (fuzzy or "").strip()
-    fuzzy_kind = fuzzy_text.lower()
-    if fuzzy_kind in REVIEW_KIND_CHOICES:
-        return search_records(root, "", kind=fuzzy_kind, confirmation_status="pending_user_confirmation")
-    return search_records(root, fuzzy_text, confirmation_status="pending_user_confirmation")
+    """Compatibility projection of only the canonical ready unit-card set."""
+    titles = _review_unit_titles(root)
+    records: list[dict] = []
+    for card in discover_pending_judgements(root):
+        subject = card.get("subject") if isinstance(card.get("subject"), Mapping) else {}
+        kind = str(subject.get("kind") or "")
+        subject_id = str(subject.get("id") or "")
+        if kind not in PUBLIC_KIND_LABELS:
+            continue
+        title = titles.get((kind, subject_id), "")
+        matched, _reason = _review_card_match(card, fuzzy, title=title)
+        if matched:
+            records.append(_review_card_record(card, title=title))
+    return records
 
 
 _PUBLIC_CLAIM_TYPE_LABELS = {
@@ -2640,7 +2771,7 @@ class ReviewSnapshotLease:
     registry_path: Path
 
 
-def _review_card_record(card: Mapping[str, object]) -> dict[str, object]:
+def _review_card_record(card: Mapping[str, object], *, title: str = "") -> dict[str, object]:
     """Project an internal side-artifact card into the existing review renderer."""
     subject = card.get("subject")
     subject = subject if isinstance(subject, Mapping) else {}
@@ -2659,7 +2790,7 @@ def _review_card_record(card: Mapping[str, object]) -> dict[str, object]:
     return {
         "id": str(subject.get("id") or ""),
         "kind": kind,
-        "title": _SIDE_JUDGEMENT_KIND_LABELS.get(kind, "跨流程判断"),
+        "title": title or _SIDE_JUDGEMENT_KIND_LABELS.get(kind, "跨流程判断"),
         "priority": str(card.get("priority") or "normal"),
         "updated_at": str(card.get("updated_at") or ""),
         "confirmation_status": "pending_user_confirmation",
@@ -2670,24 +2801,43 @@ def _review_card_record(card: Mapping[str, object]) -> dict[str, object]:
     }
 
 
-def _review_card_matches(card: Mapping[str, object], fuzzy: str | None) -> bool:
+def _review_card_match(
+    card: Mapping[str, object],
+    fuzzy: str | None,
+    *,
+    title: str = "",
+) -> tuple[bool, str]:
     query = str(fuzzy or "").strip().casefold()
     if not query:
-        return True
+        return True, ""
     subject = card.get("subject")
     subject = subject if isinstance(subject, Mapping) else {}
     kind = str(subject.get("kind") or "").casefold()
-    if query in REVIEW_KIND_CHOICES:
-        return kind == query
+    kind_filter = REVIEW_KIND_ALIASES.get(query)
+    if kind_filter:
+        return kind == kind_filter, "kind_alias" if kind == kind_filter else ""
+    if query in str(title or "").casefold():
+        return True, "title"
+    if query in str(subject.get("id") or "").casefold():
+        return True, "public_id"
     claims = card.get("claims")
     claims = claims if isinstance(claims, list) else []
-    searchable = [kind, str(subject.get("id") or "").casefold()]
-    searchable.extend(
-        str(claim.get("text") or "").casefold()
+    if any(
+        query in str(claim.get("text") or "").casefold()
         for claim in claims
         if isinstance(claim, Mapping)
-    )
-    return any(query in value for value in searchable)
+    ):
+        return True, "confirmable_claim"
+    return False, ""
+
+
+def _review_match_public_reason(reason: str) -> str:
+    return {
+        "kind_alias": "资料类型",
+        "title": "标题",
+        "public_id": "公开编号",
+        "confirmable_claim": "可确认判断正文",
+    }.get(reason, "")
 
 
 def _review_sort_key(record: Mapping[str, object]) -> tuple[object, ...]:
@@ -2976,6 +3126,7 @@ def print_review_item(
     root: Path,
     *,
     density: str = "standard",
+    match_reason: str = "",
 ) -> None:
     raw_unit_id = str(record.get("id") or "-")
     unit_id = _public_display_text(raw_unit_id, root, "编号已隐藏", 100)
@@ -2983,6 +3134,9 @@ def print_review_item(
     kind = PUBLIC_KIND_LABELS.get(raw_kind, _SIDE_JUDGEMENT_KIND_LABELS.get(raw_kind, "知识条目"))
     title = _public_display_text(record.get("title") or "-", root, "标题需由 Agent 安全解释", 160)
     print(f"- {kind}「{title}」（{unit_id}）")
+    public_match_reason = _review_match_public_reason(match_reason)
+    if public_match_reason:
+        print(f"  匹配依据：{public_match_reason}。")
     fact_summary = str(projection.get("fact_summary") or "")
     if fact_summary:
         print(f"  待确认的事实信息：{fact_summary}")
@@ -3369,19 +3523,6 @@ def _consume_review_snapshot(root: Path, lease: ReviewSnapshotLease) -> Path:
 def _current_review_item(root: Path, subject: Mapping[str, object]) -> dict[str, object]:
     kind = str(subject.get("kind") or "")
     subject_id = str(subject.get("id") or "")
-    if kind in PUBLIC_KIND_LABELS:
-        matches = [
-            record
-            for record in load_review_records(root, kind)
-            if str(record.get("kind") or "") == kind
-            and str(record.get("id") or "") == subject_id
-            and not _record_is_rejected(record)
-        ]
-        if len(matches) != 1 or not is_ready_for_human_review(matches[0]):
-            raise ValueError("displayed knowledge judgement is no longer uniquely ready")
-        if public_review_projection(matches[0], root).get("status") != "ready":
-            raise ValueError("displayed knowledge judgement is no longer safe to confirm")
-        return _review_decision_routes(matches[0], None)
     matches = [
         card
         for card in discover_pending_judgements(root)
@@ -3389,11 +3530,16 @@ def _current_review_item(root: Path, subject: Mapping[str, object]) -> dict[str,
         and str(card.get("subject", {}).get("id") or "") == subject_id
     ]
     if len(matches) != 1:
-        raise ValueError("displayed side judgement is no longer uniquely ready")
-    record = _review_card_record(matches[0])
-    if public_review_projection(record, root).get("status") != "ready":
-        raise ValueError("displayed side judgement is no longer safe to confirm")
-    return _review_decision_routes(record, matches[0])
+        raise ValueError("displayed judgement is no longer uniquely ready")
+    canonical_units = _review_unit_records(root) if kind in PUBLIC_KIND_LABELS else {}
+    canonical = canonical_units.get((kind, subject_id))
+    if kind in PUBLIC_KIND_LABELS and canonical is None:
+        raise ValueError("displayed knowledge judgement is no longer uniquely ready")
+    title = str(canonical.get("title") or "") if isinstance(canonical, Mapping) else ""
+    display_record = _review_card_record(matches[0], title=title)
+    if public_review_projection(display_record, root).get("status") != "ready":
+        raise ValueError("displayed judgement is no longer safe to confirm")
+    return _review_decision_routes(canonical or display_record, matches[0])
 
 
 def _review_owner_command(
@@ -4010,51 +4156,39 @@ def handle_review(args: argparse.Namespace, root: Path) -> int:
     if result.returncode != 0:
         print("确认收件箱暂时无法读取；详细诊断已保留给 Agent。", file=sys.stderr)
         return result.returncode
-    raw_records = [record for record in load_review_records(root, args.fuzzy) if not _record_is_rejected(record)]
-    unit_subject_counts: dict[tuple[str, str], int] = {}
-    for record in raw_records:
-        key = (str(record.get("kind") or ""), str(record.get("id") or ""))
-        unit_subject_counts[key] = unit_subject_counts.get(key, 0) + 1
-    duplicate_unit_subjects = {key for key, count in unit_subject_counts.items() if count != 1}
-    duplicate_records = [
-        record
-        for record in raw_records
-        if (str(record.get("kind") or ""), str(record.get("id") or "")) in duplicate_unit_subjects
-    ]
-    records = [
-        record
-        for record in raw_records
-        if (str(record.get("kind") or ""), str(record.get("id") or "")) not in duplicate_unit_subjects
-    ]
-    cards = [card for card in discover_pending_judgements(root) if _review_card_matches(card, args.fuzzy)]
+    canonical_units = _review_unit_records(root)
+    cards: list[dict[str, object]] = []
+    match_reason_by_subject: dict[tuple[str, str], str] = {}
+    for card in discover_pending_judgements(root):
+        subject = card.get("subject") if isinstance(card.get("subject"), Mapping) else {}
+        key = (str(subject.get("kind") or ""), str(subject.get("id") or ""))
+        canonical = canonical_units.get(key)
+        title = str(canonical.get("title") or "") if isinstance(canonical, Mapping) else ""
+        matched, match_reason = _review_card_match(card, args.fuzzy, title=title)
+        if matched:
+            cards.append(card)
+            match_reason_by_subject[key] = match_reason
     card_by_subject: dict[tuple[str, str], dict[str, object]] = {}
     for card in cards:
         subject = card.get("subject")
         subject = subject if isinstance(subject, Mapping) else {}
         card_by_subject[(str(subject.get("kind") or ""), str(subject.get("id") or ""))] = card
-    existing_subjects = {
-        (str(record.get("kind") or ""), str(record.get("id") or ""))
-        for record in records
-    }
-    discovered_only_subjects = {key for key in card_by_subject if key not in existing_subjects}
-    records.extend(
-        _review_card_record(card)
-        for key, card in card_by_subject.items()
-        if key in discovered_only_subjects
-    )
-    ready_candidates = [
-        record
-        for record in records
-        if (
-            (str(record.get("kind") or ""), str(record.get("id") or "")) in discovered_only_subjects
-            or is_ready_for_human_review(record)
+    records = [
+        _review_card_record(
+            card,
+            title=str(canonical_units.get(key, {}).get("title") or ""),
         )
+        for key, card in card_by_subject.items()
     ]
     pending: list[dict] = []
     projection_by_subject: dict[tuple[str, str], dict[str, object]] = {}
-    structurally_blocked: list[dict] = list(duplicate_records)
+    structurally_blocked: list[dict] = []
     unsafe_blocked: list[dict] = []
-    for record in ready_candidates:
+    for record in records:
+        key = (str(record.get("kind") or ""), str(record.get("id") or ""))
+        if key[0] in PUBLIC_KIND_LABELS and key not in canonical_units:
+            structurally_blocked.append(record)
+            continue
         projection = public_review_projection(record, root)
         if projection.get("status") == "invalid":
             structurally_blocked.append(record)
@@ -4063,7 +4197,7 @@ def handle_review(args: argparse.Namespace, root: Path) -> int:
             unsafe_blocked.append(record)
             continue
         pending.append(record)
-        projection_by_subject[(str(record.get("kind") or ""), str(record.get("id") or ""))] = projection
+        projection_by_subject[key] = projection
     blocked = [*structurally_blocked, *unsafe_blocked]
     if pending:
         pending.sort(key=_review_sort_key)
@@ -4074,7 +4208,10 @@ def handle_review(args: argparse.Namespace, root: Path) -> int:
         confirmation_identity_required = not configured_actor or is_ai_signer(configured_actor)
         review_items = [
             _review_decision_routes(
-                record,
+                canonical_units.get(
+                    (str(record.get("kind") or ""), str(record.get("id") or "")),
+                    record,
+                ),
                 card_by_subject.get((str(record.get("kind") or ""), str(record.get("id") or ""))),
             )
             for record in displayed
@@ -4204,6 +4341,10 @@ def handle_review(args: argparse.Namespace, root: Path) -> int:
                 projection_by_subject[(str(record.get("kind") or ""), str(record.get("id") or ""))],
                 root,
                 density=density,
+                match_reason=match_reason_by_subject.get(
+                    (str(record.get("kind") or ""), str(record.get("id") or "")),
+                    "",
+                ),
             )
         if remaining_count:
             print(f"另有 {remaining_count} 条已准备好的内容暂未展开；处理这批后可继续查看。")
