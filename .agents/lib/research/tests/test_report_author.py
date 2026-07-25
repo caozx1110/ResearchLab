@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -1945,6 +1946,50 @@ def test_cli_post_write_gate_rolls_back_exact_report_before_image(
         assert output.stat().st_mode & 0o777 == 0o640
     else:
         assert not output.exists()
+
+
+@pytest.mark.parametrize("mutation", ["content", "same-bytes-new-inode"])
+def test_cli_commit_boundary_gate_rolls_back_report_when_source_changes_after_body(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    report = _load_report_module()
+    root, program_id, unit_id = _make_workspace(tmp_path)
+    record_path = root / "kb" / "units" / "papers" / unit_id / "record.yaml"
+    output = _report_output_path(root, program_id, "weekly")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_bytes(b"exact report before commit-gap\n")
+    output.chmod(0o640)
+    original_transaction = report.command_mutation
+    replaced = False
+
+    @contextmanager
+    def replace_source_before_transaction_commit(*args, **kwargs):
+        nonlocal replaced
+        with original_transaction(*args, **kwargs) as op_id:
+            try:
+                yield op_id
+            finally:
+                _replace_report_source(record_path, mutation)
+                replaced = True
+
+    checkpoints: list[object] = []
+    monkeypatch.setattr(report, "command_mutation", replace_source_before_transaction_commit)
+    monkeypatch.setattr(report, "checkpoint_and_report", lambda *args, **kwargs: checkpoints.append(kwargs))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["report.py", "--root", str(root), "weekly", "--program-id", program_id],
+    )
+
+    with pytest.raises(RuntimeError, match="formal report inputs changed during publication"):
+        report.main()
+
+    assert replaced
+    assert output.read_bytes() == b"exact report before commit-gap\n"
+    assert output.stat().st_mode & 0o777 == 0o640
+    assert checkpoints == []
 
 
 @pytest.mark.parametrize("unit_count", [4, 8, 16])
