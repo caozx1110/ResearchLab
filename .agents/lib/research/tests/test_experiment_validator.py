@@ -419,6 +419,7 @@ def test_reports_isolate_pending_diagnoses_and_require_current_receipt_for_judge
     assert "待确认 / 未核验的判断" in pending_section
     assert pending_summary in pending_section
     assert "当前缺少有效的确认回执或证据绑定" in pending_section
+    assert "报告生成期间正式判断来源已变化" not in pending_report
 
     events_path = tmp_path / "kb" / "programs" / program_id / "workflow" / "reporting-events.yaml"
     diagnosis_events = [

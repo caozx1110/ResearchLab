@@ -1068,7 +1068,9 @@ def load_report_inputs(
     formal_validators: list[Callable[[], bool]] = [
         source.is_current
         for source in [*claim_sources, *survey_claim_sources]
-        if source.claims or source.issues
+        # Issues-only sources are projected in the pending lane.  They do not
+        # publish formal claims and therefore must not gate the formal lane.
+        if source.claims
     ]
     for event in events:
         if not _event_is_judgement(event):
