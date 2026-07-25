@@ -814,7 +814,6 @@ def _finalize_selection_protocol(
                 os.close(published_fd)
         os.fsync(directory_fd)
     finally:
-        os.close(claim_fd)
         if descriptor >= 0:
             os.close(descriptor)
         try:
@@ -979,6 +978,30 @@ def materialize_selection(
         protocol_name,
         selection_digest=str(bound["selection_binding"]["selection_digest"]),
     )
+    try:
+        return _materialize_claimed_selection(
+            root,
+            bound,
+            protocol_name=protocol_name,
+            claim_token=claim_token,
+            claim_bytes=claim_bytes,
+            claim_fd=claim_fd,
+            owner_runner=owner_runner,
+        )
+    finally:
+        os.close(claim_fd)
+
+
+def _materialize_claimed_selection(
+    root: Path,
+    bound: Mapping[str, object],
+    *,
+    protocol_name: str,
+    claim_token: str,
+    claim_bytes: bytes,
+    claim_fd: int,
+    owner_runner: Callable[..., subprocess.CompletedProcess[bytes]] | None = None,
+) -> dict[str, object]:
     runner = owner_runner or _default_owner_runner
     stage_id = str(bound["stage_id"])
     authorization = str(bound["user_authorization"])

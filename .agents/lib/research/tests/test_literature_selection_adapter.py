@@ -429,6 +429,54 @@ def test_owner_exception_is_sanitized_without_false_success(tmp_path: Path) -> N
         assert forbidden not in result["public_message"]
 
 
+@pytest.mark.parametrize("failure_point", ["interrupt", "pre_runner"])
+def test_unexpected_failure_closes_claim_fd_but_preserves_recovery_claim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_point: str,
+) -> None:
+    module = _search_module()
+    stage = _terminal_stage(tmp_path)
+    payload = _selection(stage)
+    claimed: dict[str, int] = {}
+    original_claim = module._claim_selection_protocol
+
+    def observed_claim(*args, **kwargs):
+        token, data, descriptor = original_claim(*args, **kwargs)
+        claimed["descriptor"] = descriptor
+        return token, data, descriptor
+
+    monkeypatch.setattr(module, "_claim_selection_protocol", observed_claim)
+    if failure_point == "pre_runner":
+        monkeypatch.setattr(
+            module,
+            "journal_subprocess_env",
+            lambda _root: (_ for _ in ()).throw(RuntimeError("pre-run failure")),
+        )
+        expected_exception = RuntimeError
+        runner = lambda *_args, **_kwargs: pytest.fail("runner must not be reached")
+    else:
+        expected_exception = KeyboardInterrupt
+
+        def runner(*_args, **_kwargs):
+            raise KeyboardInterrupt
+
+    with pytest.raises(expected_exception):
+        module.materialize_selection(
+            tmp_path,
+            payload,
+            protocol_name=f"recover-{failure_point}.json",
+            owner_runner=runner,
+        )
+
+    with pytest.raises(OSError):
+        os.fstat(claimed["descriptor"])
+    claim_path = tmp_path / f"kb/.runtime/literature-selection/recover-{failure_point}.json"
+    claim = json.loads(claim_path.read_text(encoding="utf-8"))
+    assert claim["status"] == "in_progress"
+    assert len(claim["claim_token"]) == 64
+
+
 def test_stage_change_between_adapter_binding_and_owner_use_fails_closed(tmp_path: Path) -> None:
     module = _search_module()
     intake = module.INTAKE_SCRIPT
