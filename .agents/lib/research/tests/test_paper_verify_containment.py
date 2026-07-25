@@ -378,21 +378,41 @@ def test_verify_fill_rejects_link_attacks_in_two_rounds(
         write_yaml_if_changed(parked / "agent-screen.yaml", _screen_fill(paper, paper_id))
     before = _workspace_snapshot(root)
 
-    match = "symlink" if attack != "hardlink" else "unique managed file identity"
-    with pytest.raises(ValueError, match=match):
-        _run_cli(
-            paper,
-            monkeypatch,
-            root,
-            "screen",
-            "--paper-id",
-            paper_id,
-            "--phase",
-            "verify",
-            "--input",
-            fill_path.name,
-            "--defer-post-actions",
-        )
+    if attack == "ancestor-symlink":
+        # The strict canonical-record reader may quarantine the whole unit before
+        # the later fill-path guard runs.  Both boundaries are fail-closed; do not
+        # require the unsafe ancestor to remain discoverable just to name it.
+        with pytest.raises((ValueError, SystemExit)) as exc_info:
+            _run_cli(
+                paper,
+                monkeypatch,
+                root,
+                "screen",
+                "--paper-id",
+                paper_id,
+                "--phase",
+                "verify",
+                "--input",
+                fill_path.name,
+                "--defer-post-actions",
+            )
+        assert "symlink" in str(exc_info.value) or "Record not found" in str(exc_info.value)
+    else:
+        match = "symlink" if attack == "leaf-symlink" else "unique managed file identity"
+        with pytest.raises(ValueError, match=match):
+            _run_cli(
+                paper,
+                monkeypatch,
+                root,
+                "screen",
+                "--paper-id",
+                paper_id,
+                "--phase",
+                "verify",
+                "--input",
+                fill_path.name,
+                "--defer-post-actions",
+            )
 
     assert _workspace_snapshot(root) == before
 
