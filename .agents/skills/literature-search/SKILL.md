@@ -24,7 +24,7 @@ description: 由 runtime Agent 使用当前可用的搜索、浏览或 connector
 7. 每轮检查未覆盖 facet、反例/负结果、奠基工作、最新后续和 benchmark 缺口。需要时生成 `gap-followup`；同时观察本轮新增候选、去重数、新增 relevant 与来源集中风险。
 8. Agent 在 `target_met`、`saturated`、`budget_exhausted`、`blocked` 或 `user_stop` 中选择停止理由并写 rationale、uncovered facets 和 partial 状态。只有硬预算由脚本决定越界；脚本不得自行宣称饱和或完整。
 9. 结束时向用户展示一小批候选，逐项说明题名、初筛结论、依据和取舍，再明确询问用户要接受哪些。`include`/`maybe` 只是 Agent 初筛，不能代替用户批准；只有用户在当前对话中明确选中的候选才可进入正式入库。
-10. 用户选定后，runtime Agent 必须把当前消息原话、同一 stage 和精确 candidate ID 写入有界 selection payload，再通过本 skill 的私有 owner adapter 交给 `source-intake`。adapter 捕获 owner 的全部输出，只把成功/失败计数和安全的 `kb next` 提示给用户；不得直接展示或转述 `source-intake` 的 stdout/stderr、内部路径、参数或下一步协议。多选顺序处理；部分成功时保留已提交的 canonical 结果，只重试失败项。
+10. 用户选定后，runtime Agent 必须把当前消息原话、同一 stage、精确 candidate ID，以及刚才展示给用户的 stage 字节摘要和逐候选 identity/semantic 摘要写入有界 selection payload，再通过本 skill 的私有 owner adapter 交给 `source-intake`。adapter 并发流式排空 owner 输出，只保留字节数、行数和摘要，只把成功/失败计数和安全的 `kb next` 提示给用户；不得直接展示或转述 `source-intake` 的 stdout/stderr、内部路径、参数或下一步协议。多选顺序处理；部分成功时保留已提交的 canonical 结果，重试未完成项前用当前 stage 重新生成 display binding。
 
 ## 恢复与更新
 
@@ -42,4 +42,4 @@ description: 由 runtime Agent 使用当前可用的搜索、浏览或 connector
 
 私下调用 `scripts/search.py stage`，输入 JSON 结构见 [stage contract](references/stage-contract.md)。这是 Agent 内部操作，不是公开命令。每个批次只声明该 stage 文件作为 transaction target；失败时保留 before-image，成功后再继续下一批。
 
-用户在当前消息中完成候选选择后，私下使用同一脚本的 `materialize-selection` adapter，并提供位于 `kb/.runtime/` 语义下的全新私有 Agent protocol 名称；selection payload 见同一 [stage contract](references/stage-contract.md)。adapter 会绑定 stage 的 whole-stage digest/snapshot 链、每个 candidate 的 identity/semantic digest、用户授权摘要和 owner 结果。它只用 argv 调用 owner、关闭 stdin、捕获 stdout/stderr，不依赖 TTY 或 shell。source-intake 仍独占 canonical unit、duplicate、selection receipt 与 candidate status；adapter 不自行写这些事实。每项 owner 返回后，只允许该 candidate 的 canonical marker 与一条 canonical history 追加；query、stop、其他 candidate 或任意其他 stage 漂移都 fail closed，并停止派发剩余项。已完成且能由 canonical receipt 证明的结果仍如实保留。protocol 名称单次使用并以 absent-only 方式原子发布，绝不覆盖已有或并发结果。没有合法授权、stage/candidate 漂移或 owner 结果无法与 exact selection 对上时必须失败，不得用 owner 输出中的文字冒充成功。
+用户在当前消息中完成候选选择后，私下使用同一脚本的 `materialize-selection` adapter，并提供位于 `kb/.runtime/` 语义下的全新私有 Agent protocol 名称；selection payload 见同一 [stage contract](references/stage-contract.md)。adapter 会先核对用户所见 stage 精确字节和每个 candidate 的 identity/semantic 摘要，再绑定用户授权与 owner 结果。它只用 argv 调用 owner、关闭 stdin、并发流式排空 stdout/stderr，不依赖 TTY 或 shell。source-intake 仍独占 canonical unit、duplicate、selection receipt 与 candidate status；adapter 不自行写这些事实。每项 owner 结束后，无论返回码、超时或捕获异常，都先检查 canonical stage 和 append-only receipt；只有可证明的唯一 marker/history 变化才算成功，query、stop、其他 candidate 或任意其他 stage 漂移都 fail closed，并停止派发剩余项。protocol 名称在 owner 前以 durable `O_EXCL` claim 占用，最终只替换本次操作自己的 claim，绝不覆盖已有或并发结果。没有合法授权、display/stage/candidate 漂移或 owner 结果无法与 exact selection 对上时必须失败，不得用 owner 输出中的文字冒充成功。
