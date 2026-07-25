@@ -7,9 +7,12 @@ import hashlib
 import json
 import os
 import re
+import selectors
+import signal
 import stat
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -53,6 +56,7 @@ MAX_SELECTION_PAYLOAD_BYTES = 64 * 1024
 MAX_SELECTION_CANDIDATES = 50
 MAX_USER_AUTHORIZATION_BYTES = 8 * 1024
 MAX_PREFERENCE_SELECTION_ID_BYTES = 256
+OWNER_TIMEOUT_SECONDS = 15 * 60
 INTAKE_SCRIPT = PROJECT_ROOT / ".agents" / "skills" / "source-intake" / "scripts" / "intake.py"
 SELECTION_PAYLOAD_KEYS = {
     "schema",
@@ -655,6 +659,7 @@ def _open_protocol_directory(root: Path) -> int:
                 metadata = os.stat(component, dir_fd=descriptor, follow_symlinks=False)
             except FileNotFoundError:
                 os.mkdir(component, mode=0o700, dir_fd=descriptor)
+                os.fsync(descriptor)
                 metadata = os.stat(component, dir_fd=descriptor, follow_symlinks=False)
             if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
                 raise SystemExit("Literature selection protocol destination is unsafe.")
@@ -670,11 +675,8 @@ def _open_protocol_directory(root: Path) -> int:
         raise
 
 
-def _write_selection_protocol(root: Path, name: str, payload: Mapping[str, object]) -> None:
-    name = _protocol_path_preflight(root, name)
-    data = (json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
+def _write_protocol_bytes_exclusive(root: Path, name: str, data: bytes) -> int:
     directory_fd = _open_protocol_directory(root)
-    temporary = f".{name}.{os.getpid()}.{os.urandom(8).hex()}.tmp"
     flags = (
         os.O_WRONLY
         | os.O_CREAT
@@ -684,7 +686,10 @@ def _write_selection_protocol(root: Path, name: str, payload: Mapping[str, objec
     )
     descriptor = -1
     try:
-        descriptor = os.open(temporary, flags, 0o600, dir_fd=directory_fd)
+        try:
+            descriptor = os.open(name, flags, 0o600, dir_fd=directory_fd)
+        except FileExistsError as exc:
+            raise SystemExit("Literature selection protocol name has already been used.") from exc
         view = memoryview(data)
         while view:
             written = os.write(descriptor, view)
@@ -692,21 +697,124 @@ def _write_selection_protocol(root: Path, name: str, payload: Mapping[str, objec
                 raise OSError("short protocol write")
             view = view[written:]
         os.fsync(descriptor)
-        os.close(descriptor)
+        os.fsync(directory_fd)
+        claimed_descriptor = descriptor
         descriptor = -1
+        return claimed_descriptor
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(directory_fd)
+
+
+def _claim_selection_protocol(
+    root: Path,
+    name: str,
+    *,
+    selection_digest: str,
+) -> tuple[str, bytes, int]:
+    name = _protocol_path_preflight(root, name)
+    claim_token = os.urandom(32).hex()
+    claim = {
+        "schema": "literature-selection-owner-adapter/v1",
+        "status": "in_progress",
+        "claim_token": claim_token,
+        "selection_digest": selection_digest,
+    }
+    data = (json.dumps(claim, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode(
+        "utf-8"
+    )
+    claim_fd = _write_protocol_bytes_exclusive(root, name, data)
+    return claim_token, data, claim_fd
+
+
+def _finalize_selection_protocol(
+    root: Path,
+    name: str,
+    payload: Mapping[str, object],
+    *,
+    claim_token: str,
+    claim_bytes: bytes,
+    claim_fd: int,
+) -> None:
+    if not re.fullmatch(r"[0-9a-f]{64}", claim_token):
+        raise SystemExit("Literature selection protocol claim is invalid.")
+    data = (json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode(
+        "utf-8"
+    )
+    directory_fd = _open_protocol_directory(root)
+    temporary = f".{name}.{os.getpid()}.{os.urandom(8).hex()}.tmp"
+    read_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    write_flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = -1
+    try:
+        claim_metadata = os.fstat(claim_fd)
+        if (
+            not stat.S_ISREG(claim_metadata.st_mode)
+            or claim_metadata.st_size != len(claim_bytes)
+        ):
+            raise SystemExit("Literature selection protocol claim changed before completion.")
+        descriptor = os.open(temporary, write_flags, 0o600, dir_fd=directory_fd)
+        view = memoryview(data)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("short protocol write")
+            view = view[written:]
+        os.fsync(descriptor)
+        # POSIX has no portable compare-and-swap rename.  Keep both inode
+        # descriptors open and make the cooperative single-name contract
+        # explicit: revalidate the visible claim immediately before rename,
+        # then prove the published name is the fsynced temp inode immediately
+        # afterwards.  A hostile writer with unlink permission can still race
+        # inside that final syscall-sized window; detection remains fail-closed.
+        visible_fd = -1
         try:
-            os.link(
-                temporary,
-                name,
-                src_dir_fd=directory_fd,
-                dst_dir_fd=directory_fd,
-                follow_symlinks=False,
+            visible_fd = os.open(name, read_flags, dir_fd=directory_fd)
+            visible_metadata = os.fstat(visible_fd)
+            visible_bytes = os.read(visible_fd, len(claim_bytes) + 1)
+            current_claim_metadata = os.fstat(claim_fd)
+            identity = lambda item: (
+                item.st_dev,
+                item.st_ino,
+                item.st_mode,
+                item.st_size,
+                item.st_mtime_ns,
+                item.st_ctime_ns,
             )
-        except FileExistsError as exc:
-            raise SystemExit("Literature selection protocol name has already been used.") from exc
-        os.unlink(temporary, dir_fd=directory_fd)
+            if (
+                identity(visible_metadata) != identity(claim_metadata)
+                or identity(current_claim_metadata) != identity(claim_metadata)
+                or visible_bytes != claim_bytes
+            ):
+                raise SystemExit("Literature selection protocol claim changed before completion.")
+        except OSError as exc:
+            raise SystemExit("Literature selection protocol claim changed before completion.") from exc
+        finally:
+            if visible_fd >= 0:
+                os.close(visible_fd)
+        os.replace(temporary, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        published_fd = -1
+        try:
+            published_fd = os.open(name, read_flags, dir_fd=directory_fd)
+            published_metadata = os.fstat(published_fd)
+            temp_metadata = os.fstat(descriptor)
+            if identity(published_metadata) != identity(temp_metadata):
+                raise SystemExit("Literature selection protocol publication changed unexpectedly.")
+        except OSError as exc:
+            raise SystemExit("Literature selection protocol publication changed unexpectedly.") from exc
+        finally:
+            if published_fd >= 0:
+                os.close(published_fd)
         os.fsync(directory_fd)
     finally:
+        os.close(claim_fd)
         if descriptor >= 0:
             os.close(descriptor)
         try:
@@ -717,6 +825,19 @@ def _write_selection_protocol(root: Path, name: str, payload: Mapping[str, objec
 
 
 def _owner_stream_metadata(value: object) -> dict[str, object]:
+    if isinstance(value, Mapping) and set(value) == {"bytes", "lines", "sha256"}:
+        total = value.get("bytes")
+        lines = value.get("lines")
+        digest = value.get("sha256")
+        if (
+            isinstance(total, int)
+            and total >= 0
+            and isinstance(lines, int)
+            and lines >= 0
+            and isinstance(digest, str)
+            and re.fullmatch(r"[0-9a-f]{64}", digest)
+        ):
+            return {"bytes": total, "lines": lines, "sha256": digest}
     if isinstance(value, bytes):
         data = value
     elif isinstance(value, str):
@@ -735,13 +856,79 @@ def _default_owner_runner(
     *,
     env: Mapping[str, str],
 ) -> subprocess.CompletedProcess[bytes]:
-    return subprocess.run(
+    process = subprocess.Popen(
         list(argv),
         stdin=subprocess.DEVNULL,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         env=dict(env),
-        timeout=15 * 60,
-        check=False,
+        start_new_session=True,
+    )
+    streams = {
+        process.stdout: {
+            "bytes": 0,
+            "lines": 0,
+            "sha256": hashlib.sha256(),
+            "last": b"",
+        },
+        process.stderr: {
+            "bytes": 0,
+            "lines": 0,
+            "sha256": hashlib.sha256(),
+            "last": b"",
+        },
+    }
+    selector = selectors.DefaultSelector()
+    for stream in streams:
+        if stream is not None:
+            selector.register(stream, selectors.EVENT_READ)
+    deadline = time.monotonic() + OWNER_TIMEOUT_SECONDS
+    timed_out = False
+    try:
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 and not timed_out:
+                timed_out = True
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except (OSError, ProcessLookupError):
+                    process.kill()
+            events = selector.select(0.25 if timed_out else min(0.25, max(remaining, 0.0)))
+            for key, _mask in events:
+                stream = key.fileobj
+                chunk = os.read(stream.fileno(), 64 * 1024)
+                if not chunk:
+                    selector.unregister(stream)
+                    stream.close()
+                    continue
+                state = streams[stream]
+                state["bytes"] = int(state["bytes"]) + len(chunk)
+                state["lines"] = int(state["lines"]) + chunk.count(b"\n")
+                state["sha256"].update(chunk)
+                state["last"] = chunk[-1:]
+        returncode = process.wait()
+    finally:
+        selector.close()
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+
+    def finalized(stream: object) -> dict[str, object]:
+        state = streams[stream]
+        line_count = int(state["lines"])
+        if int(state["bytes"]) and state["last"] != b"\n":
+            line_count += 1
+        return {
+            "bytes": int(state["bytes"]),
+            "lines": line_count,
+            "sha256": state["sha256"].hexdigest(),
+        }
+
+    return subprocess.CompletedProcess(
+        list(argv),
+        124 if timed_out else returncode,
+        stdout=finalized(process.stdout),
+        stderr=finalized(process.stderr),
     )
 
 
@@ -787,6 +974,11 @@ def materialize_selection(
 ) -> dict[str, object]:
     protocol_name = _protocol_path_preflight(root, protocol_name)
     bound = _validate_selection_payload(root, payload)
+    claim_token, claim_bytes, claim_fd = _claim_selection_protocol(
+        root,
+        protocol_name,
+        selection_digest=str(bound["selection_binding"]["selection_digest"]),
+    )
     runner = owner_runner or _default_owner_runner
     stage_id = str(bound["stage_id"])
     authorization = str(bound["user_authorization"])
@@ -1057,7 +1249,14 @@ def materialize_selection(
         },
     }
     try:
-        _write_selection_protocol(root, protocol_name, protocol)
+        _finalize_selection_protocol(
+            root,
+            protocol_name,
+            protocol,
+            claim_token=claim_token,
+            claim_bytes=claim_bytes,
+            claim_fd=claim_fd,
+        )
     except SystemExit:
         raise
     except Exception as exc:

@@ -2078,6 +2078,99 @@ def test_kb_next_projects_attached_stale_verification_as_natural_agent_work(
     assert protocol["next_actions"][0]["item"]["record_id"] == "p-stale-12345678"
 
 
+def test_kb_next_humanizes_all_synthetic_families_without_internal_ids_or_reasons(
+    monkeypatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    kb = _load_kb_cli()
+    payload = {
+        "has_records": True,
+        "planning_required": False,
+        "items": [
+            {
+                "program_id": "literature:private-stage-123",
+                "record_id": "private-stage-123",
+                "title": "",
+                "step_type": "human-decision",
+                "action_kind": "human-gate",
+                "stage": "literature-selection",
+                "next_action": "target_met at kb/synthesis/source-search/private-stage-123.yaml",
+            },
+            {
+                "program_id": "literature:private-stage-456",
+                "record_id": "private-stage-456",
+                "title": "",
+                "step_type": "resume-literature-search",
+                "action_kind": "agent-work",
+                "stage": "literature-search",
+                "next_action": "blocked_no_search_tool --internal",
+            },
+            {
+                "program_id": "review:paper:p-secret-review",
+                "record_id": "p-secret-review",
+                "title": "候选方法判断",
+                "step_type": "human-decision",
+                "action_kind": "human-gate",
+                "stage": "analysis",
+                "next_action": "A verified judgement is waiting for the user's decision.",
+            },
+            {
+                "program_id": "monitor:private-subscription",
+                "record_id": "private-subscription",
+                "title": "视觉模型更新",
+                "step_type": "run-due-monitor",
+                "action_kind": "agent-work",
+                "stage": "monitor-due",
+                "next_action": "failed_retryable from .agents/private.py",
+            },
+            {
+                "program_id": "survey:private-composite",
+                "record_id": "private-composite",
+                "title": "机器人学习综述",
+                "step_type": "resume-composite-survey",
+                "action_kind": "agent-work",
+                "stage": "synthesis",
+                "next_action": "Resume the durable survey workflow at synthesis.",
+            },
+        ],
+    }
+    monkeypatch.setattr(
+        kb,
+        "forward_command",
+        lambda root, relative_script, args, *, stream=True: kb.CommandResult(
+            (relative_script, *args), 0, json.dumps(payload, ensure_ascii=False)
+        ),
+    )
+
+    assert kb.main(["--root", str(tmp_path), "next"]) == 0
+
+    output = capsys.readouterr().out
+    assert "文献候选选择：检索和筛选已经完成" in output
+    assert "文献检索：Agent 需要继续已保存的文献检索" in output
+    assert "待确认判断「候选方法判断」：已有经过核验的判断" in output
+    assert "研究跟踪「视觉模型更新」：Agent 需要执行已到期或尚未完成的研究跟踪" in output
+    assert "综述流程「机器人学习综述」：Agent 需要继续已保存的综述流程" in output
+    for forbidden in (
+        "literature:",
+        "review:",
+        "monitor:",
+        "survey:",
+        "private-stage",
+        "private-subscription",
+        "private-composite",
+        "target_met",
+        "blocked_no_search_tool",
+        "failed_retryable",
+        "Resume the durable",
+        "kb/synthesis",
+        ".agents",
+        "--internal",
+    ):
+        assert forbidden not in output
+    _assert_public_governance_safe(output)
+
+
 def test_kb_next_blocker_with_pending_count_stays_agent_work_and_sanitizes_suffix(
     monkeypatch,
     tmp_path: Path,

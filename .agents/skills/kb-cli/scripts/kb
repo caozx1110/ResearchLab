@@ -1439,9 +1439,63 @@ def _next_item_record_id(item: Mapping[str, object]) -> str:
     return ""
 
 
+def _next_synthetic_family(item: Mapping[str, object]) -> str:
+    program_id = str(item.get("program_id") or "").casefold()
+    step_type = str(item.get("step_type") or "").casefold()
+    stage = str(item.get("stage") or "").casefold()
+    if program_id.startswith("literature:") or step_type in {
+        "select-literature-candidates",
+        "resume-literature-search",
+    } or stage in {"literature-selection", "literature-search"}:
+        return "literature"
+    if program_id.startswith("review:"):
+        return "review"
+    if program_id.startswith("monitor:") or step_type in {
+        "run-due-monitor",
+        "resume-monitor-run",
+    } or stage.startswith("monitor-"):
+        return "monitor"
+    if program_id.startswith("survey:") or step_type == "resume-composite-survey":
+        return "survey"
+    return ""
+
+
+def _next_public_subject(item: Mapping[str, object], root: Path) -> str:
+    family = _next_synthetic_family(item)
+    title = str(item.get("title") or item.get("goal") or "").strip()
+    public_title = (
+        _public_display_text(title, root, "", 120)
+        if title and _public_line_is_safe(title, root)
+        else ""
+    )
+    if family == "literature":
+        return "文献候选选择" if str(item.get("stage") or "") == "literature-selection" else "文献检索"
+    if family == "review":
+        return f"待确认判断「{public_title}」" if public_title else "待确认判断"
+    if family == "monitor":
+        return f"研究跟踪「{public_title}」" if public_title else "研究跟踪"
+    if family == "survey":
+        return f"综述流程「{public_title}」" if public_title else "综述流程"
+    return ""
+
+
 def _next_public_reason(item: dict[str, object], root: Path) -> str:
     step_type = str(item.get("step_type") or "")
     action_kind = str(item.get("action_kind") or "")
+    family = _next_synthetic_family(item)
+    stage = str(item.get("stage") or "")
+    if family == "literature":
+        if stage == "literature-selection" or _next_item_needs_human(item):
+            return "检索和筛选已经完成，等待你选择要保留的文献候选。"
+        return "Agent 需要继续已保存的文献检索。"
+    if family == "review":
+        return "已有经过核验的判断，等待你确认。"
+    if family == "monitor":
+        return "Agent 需要执行已到期或尚未完成的研究跟踪。"
+    if family == "survey":
+        if _next_item_needs_human(item):
+            return "综述流程到了需要你确认的环节。"
+        return "Agent 需要继续已保存的综述流程。"
     if _next_item_needs_human(item):
         return "已有经过核验的判断，等待你确认。"
     if step_type == "agent-fill":
@@ -1494,7 +1548,10 @@ def _print_next_items(items: list[dict[str, object]], *, has_records: bool, root
     for item in items:
         program_id = str(item.get("program_id") or "")
         record_id = _next_item_record_id(item)
-        if record_id:
+        synthetic_subject = _next_public_subject(item, root)
+        if synthetic_subject:
+            subject = synthetic_subject
+        elif record_id:
             title = str(item.get("title") or item.get("goal") or record_id)
             public_record_id = _public_display_text(record_id, root, "编号已隐藏", 100)
             public_title = _public_display_text(title, root, "标题需由 Agent 安全解释", 160)

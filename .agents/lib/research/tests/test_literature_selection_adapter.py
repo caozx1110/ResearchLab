@@ -857,20 +857,52 @@ def test_multi_selection_partial_failure_reports_exact_counts_and_retries_safely
 def test_default_owner_runner_is_headless_and_never_uses_shell(monkeypatch: pytest.MonkeyPatch) -> None:
     module = _search_module()
     seen: dict[str, object] = {}
+    original_popen = module.subprocess.Popen
 
-    def fake_run(argv, **kwargs):
+    def observed_popen(argv, **kwargs):
         seen["argv"] = argv
         seen.update(kwargs)
-        return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=b"")
+        return original_popen(argv, **kwargs)
 
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
-    result = module._default_owner_runner(("python", "owner.py"), env={"SAFE": "1"})
+    monkeypatch.setattr(module.subprocess, "Popen", observed_popen)
+    result = module._default_owner_runner(
+        (sys.executable, "-c", "import sys; sys.exit(0)"),
+        env={"SAFE": "1"},
+    )
 
     assert result.returncode == 0
     assert seen["stdin"] is subprocess.DEVNULL
-    assert seen["capture_output"] is True
+    assert seen["stdout"] is subprocess.PIPE
+    assert seen["stderr"] is subprocess.PIPE
     assert seen["env"] == {"SAFE": "1"}
+    assert seen["start_new_session"] is True
     assert "shell" not in seen or seen["shell"] is False
+
+
+def test_default_owner_runner_streams_large_stdout_and_stderr_as_metadata_only() -> None:
+    module = _search_module()
+    size = 8 * 1024 * 1024
+    result = module._default_owner_runner(
+        (
+            sys.executable,
+            "-c",
+            (
+                "import os; "
+                f"data=b'x'*{size}; "
+                "os.write(1,data); os.write(2,data)"
+            ),
+        ),
+        env=dict(os.environ),
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == {
+        "bytes": size,
+        "lines": 1,
+        "sha256": hashlib.sha256(b"x" * size).hexdigest(),
+    }
+    assert result.stderr == result.stdout
+    assert len(json.dumps(result.stdout)) < 256
 
 
 def test_stage_digest_is_bound_as_exact_anchored_target_digest(tmp_path: Path) -> None:
@@ -1057,24 +1089,122 @@ def test_protocol_name_is_single_use_and_rejected_before_owner_rerun(tmp_path: P
     assert _snapshot(tmp_path / "kb/units") == before_units
 
 
-def test_protocol_publish_race_never_overwrites_competing_result(
+def test_protocol_is_durably_claimed_before_owner_dispatch(tmp_path: Path) -> None:
+    module = _search_module()
+    stage = _terminal_stage(tmp_path)
+    payload = _selection(stage)
+    protocol_path = tmp_path / "kb/.runtime/literature-selection/preclaimed.json"
+
+    def owner(argv, *, env):
+        del env
+        claim = json.loads(protocol_path.read_text(encoding="utf-8"))
+        assert claim["status"] == "in_progress"
+        assert len(claim["claim_token"]) == 64
+        assert len(claim["selection_digest"]) == 64
+        _write_owner_record(
+            tmp_path,
+            stage_id=stage.stem,
+            candidate_id="paper-a",
+            user_authorization=str(payload["user_authorization"]),
+            record_id="p-preclaimed-owner",
+        )
+        return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=b"")
+
+    result = module.materialize_selection(
+        tmp_path,
+        payload,
+        protocol_name="preclaimed.json",
+        owner_runner=owner,
+    )
+
+    assert result["exit_code"] == 0
+    assert json.loads(protocol_path.read_text(encoding="utf-8"))["status"] == "completed"
+
+
+def test_protocol_directory_creation_fsyncs_each_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _search_module()
+    events: list[tuple[str, object]] = []
+    original_mkdir = module.os.mkdir
+    original_fsync = module.os.fsync
+
+    def observed_mkdir(path, mode=0o777, *, dir_fd=None):
+        events.append(("mkdir", (path, dir_fd)))
+        return original_mkdir(path, mode=mode, dir_fd=dir_fd)
+
+    def observed_fsync(descriptor):
+        events.append(("fsync", descriptor))
+        return original_fsync(descriptor)
+
+    monkeypatch.setattr(module.os, "mkdir", observed_mkdir)
+    monkeypatch.setattr(module.os, "fsync", observed_fsync)
+    descriptor = module._open_protocol_directory(tmp_path)
+    module.os.close(descriptor)
+
+    for index, event in enumerate(events):
+        if event[0] != "mkdir":
+            continue
+        assert events[index + 1] == ("fsync", event[1][1])
+
+
+def test_protocol_finalization_rejects_same_bytes_replacement_of_owned_claim(
+    tmp_path: Path,
+) -> None:
+    module = _search_module()
+    stage = _terminal_stage(tmp_path)
+    payload = _selection(stage)
+    protocol_path = tmp_path / "kb/.runtime/literature-selection/swapped-claim.json"
+
+    def owner(argv, *, env):
+        del env
+        same_bytes = protocol_path.read_bytes()
+        protocol_path.unlink()
+        protocol_path.write_bytes(same_bytes)
+        _write_owner_record(
+            tmp_path,
+            stage_id=stage.stem,
+            candidate_id="paper-a",
+            user_authorization=str(payload["user_authorization"]),
+            record_id="p-before-claim-swap-detection",
+        )
+        return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=b"")
+
+    with pytest.raises(SystemExit, match="claim changed"):
+        module.materialize_selection(
+            tmp_path,
+            payload,
+            protocol_name="swapped-claim.json",
+            owner_runner=owner,
+        )
+
+    assert json.loads(protocol_path.read_text(encoding="utf-8"))["status"] == "in_progress"
+
+
+def test_protocol_claim_race_never_overwrites_competing_result(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = _search_module()
     destination = tmp_path / "kb/.runtime/literature-selection/raced.json"
     competing = '{"writer":"competing"}\n'
+    original_open = module.os.open
+    raced = False
 
-    def competing_publish(*_args, **_kwargs):
-        destination.write_text(competing, encoding="utf-8")
-        raise FileExistsError(destination)
+    def competing_open(path, flags, *args, **kwargs):
+        nonlocal raced
+        if path == "raced.json" and flags & module.os.O_EXCL and not raced:
+            raced = True
+            destination.write_text(competing, encoding="utf-8")
+        return original_open(path, flags, *args, **kwargs)
 
-    monkeypatch.setattr(module.os, "link", competing_publish)
+    monkeypatch.setattr(module.os, "open", competing_open)
     with pytest.raises(SystemExit, match="already been used"):
-        module._write_selection_protocol(
+        module._claim_selection_protocol(
             tmp_path,
             "raced.json",
-            {"schema": "literature-selection-owner-adapter/v1"},
+            selection_digest="a" * 64,
         )
 
     assert destination.read_text(encoding="utf-8") == competing
