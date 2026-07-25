@@ -50,7 +50,7 @@ from research.core import (
     topic_taxonomy_path,
     write_record,
 )
-from research.evidence import attach_claims, build_verification_receipt, validate_claims, verify_claim_evidence
+from research.evidence import EvidenceSourceSnapshot, attach_claims, build_verification_receipt, validate_claims, verify_claim_evidence
 from research.judgements import apply_judgement_rejection, readiness_violations, require_judgement_snapshot
 from research.journal import mutation_transaction
 from research.preference_selection import (
@@ -59,6 +59,7 @@ from research.preference_selection import (
     resolve_operation_preferences,
     task_context_digest,
 )
+from research.records import trusted_claim_source_roots
 
 PREFERENCE_SKILL = "idea-workbench"
 PREFERENCE_OPERATIONS = {"generate", "analyze", "review", "discuss"}
@@ -529,7 +530,14 @@ def _idea_verify_preflight(args, root: Path) -> None:
             else verify_analysis_fill(root, fill, str(record["id"]), mode=operation)
         )
         corpus, _corpus_binding = _validated_frozen_corpus(root, corpus_path)
-        violations.extend(_claim_input_violations(root, claims, corpus))
+        violations.extend(
+            _claim_input_violations(
+                root,
+                claims,
+                corpus,
+                consumer_id=str(record["id"]),
+            )
+        )
         if violations:
             raise ValueError("idea fill or cited evidence failed verification: " + "; ".join(violations))
     except ValueError as exc:
@@ -644,7 +652,11 @@ def prepare_review_batch_decision(
             method="idea.py discuss confirm",
             project_root=root,
             verification_root=unit_root,
-            trusted_source_roots=_trusted_claim_source_roots(root, claims),
+            trusted_source_roots=_trusted_claim_source_roots(
+                root,
+                claims,
+                consumer_id=str(record["id"]),
+            ),
         )
     elif decision == "reject":
         apply_judgement_rejection(candidate, reason=rejection_reason)
@@ -708,7 +720,11 @@ def apply_review_batch_decision(
             method="idea.py discuss confirm",
             project_root=root,
             verification_root=unit_root,
-            trusted_source_roots=_trusted_claim_source_roots(root, claims),
+            trusted_source_roots=_trusted_claim_source_roots(
+                root,
+                claims,
+                consumer_id=str(record["id"]),
+            ),
         )
         selected["updated_at"] = utc_now_iso()
         for projection in record.setdefault("payload", {}).setdefault("discussion", {}).setdefault("conclusions", []):
@@ -1517,7 +1533,12 @@ def _assert_semantic_write_boundary(
     corpus, corpus_binding = _validated_frozen_corpus(root, corpus_path)
     if corpus != initial_corpus or corpus_binding != initial_corpus_binding:
         raise ValueError("frozen idea evidence corpus changed before write")
-    if _claim_input_violations(root, claims, corpus):
+    if _claim_input_violations(
+        root,
+        claims,
+        corpus,
+        consumer_id=canonical_id,
+    ):
         raise ValueError("cited idea evidence changed before write")
 
 
@@ -2117,10 +2138,51 @@ def analysis_scaffold(
     return payload
 
 
-def _verify_cross_unit_claims(root: Path, claims: object) -> list[str]:
+def _claim_source_record(
+    claims: list[dict],
+    *,
+    consumer_id: str = "",
+    consumer_kind: str = "idea",
+) -> dict[str, object]:
+    return {
+        "id": consumer_id,
+        "kind": consumer_kind,
+        "payload": {"claims": claims},
+    }
+
+
+def _trusted_claim_source_roots(
+    root: Path,
+    claims: list[dict],
+    *,
+    consumer_id: str = "",
+    consumer_kind: str = "idea",
+) -> dict[str, Path | EvidenceSourceSnapshot]:
+    return trusted_claim_source_roots(
+        root,
+        _claim_source_record(
+            claims,
+            consumer_id=consumer_id,
+            consumer_kind=consumer_kind,
+        ),
+    )
+
+
+def _verify_cross_unit_claims(
+    root: Path,
+    claims: object,
+    *,
+    source_roots: dict[str, Path | EvidenceSourceSnapshot] | None = None,
+) -> list[str]:
     violations = validate_claims(claims)
     if not isinstance(claims, list):
         return violations
+    if source_roots is None:
+        try:
+            source_roots = _trusted_claim_source_roots(root, claims)
+        except ValueError:
+            violations.append("cross-unit evidence sources are missing, ambiguous, or unsafe")
+            return violations
     for claim_index, claim in enumerate(claims):
         if not isinstance(claim, dict):
             continue
@@ -2135,34 +2197,23 @@ def _verify_cross_unit_claims(root: Path, claims: object) -> list[str]:
             if not source_unit_id:
                 violations.append(f"{where}: missing source_unit_id")
                 continue
-            try:
-                source_record, source_path = locate_record(root, source_unit_id, fuzzy=False)
-            except SystemExit:
-                violations.append(f"{where}: source unit not found: {source_unit_id}")
-                continue
-            if str(source_record.get("id") or "") != source_unit_id:
-                violations.append(f"{where}: source_unit_id must be canonical: {source_unit_id}")
-                continue
             single_ref_claim = {**claim, "evidence_refs": [evidence_ref]}
-            for violation in verify_claim_evidence(single_ref_claim, source_path.parent):
+            for violation in verify_claim_evidence(
+                single_ref_claim,
+                None,
+                source_roots=source_roots,
+            ):
                 violations.append(f"{where}: {violation}")
     return violations
 
 
-def _trusted_claim_source_roots(root: Path, claims: list[dict]) -> dict[str, Path]:
-    source_roots: dict[str, Path] = {}
-    for claim in claims:
-        for evidence_ref in claim.get("evidence_refs") or []:
-            if not isinstance(evidence_ref, dict):
-                continue
-            source_unit_id = str(evidence_ref.get("source_unit_id") or "").strip()
-            if source_unit_id and source_unit_id not in source_roots:
-                _source_record, source_path = locate_record(root, source_unit_id, fuzzy=False)
-                source_roots[source_unit_id] = source_path.parent
-    return source_roots
-
-
-def _claims_corpus_violations(root: Path, claims: list[dict], corpus: Mapping[str, object]) -> list[str]:
+def _claims_corpus_violations(
+    root: Path,
+    claims: list[dict],
+    corpus: Mapping[str, object],
+    *,
+    source_roots: Mapping[str, Path | EvidenceSourceSnapshot],
+) -> list[str]:
     frozen_entries = {
         str(item.get("path") or ""): item
         for item in corpus.get("entries", [])
@@ -2183,10 +2234,17 @@ def _claims_corpus_violations(root: Path, claims: list[dict], corpus: Mapping[st
                     "Agent authoring control artifacts cannot be cited"
                 )
                 continue
+            source = source_roots.get(source_unit_id)
+            if not isinstance(source, EvidenceSourceSnapshot):
+                continue
             try:
-                _source_record, source_path = locate_record(root, source_unit_id, fuzzy=False)
-                relative = (source_path.parent / artifact).absolute().relative_to(root.absolute()).as_posix()
-            except (SystemExit, ValueError):
+                snapshot = source.artifact_snapshot(artifact)
+                relative = snapshot.path.relative_to(root.absolute()).as_posix()
+            except ValueError:
+                violations.append(
+                    f"claims[{claim_index}].evidence_refs[{ref_index}]: "
+                    "frozen evidence artifact is missing or unsafe"
+                )
                 continue
             frozen = frozen_entries.get(relative)
             if not isinstance(frozen, Mapping):
@@ -2195,28 +2253,31 @@ def _claims_corpus_violations(root: Path, claims: list[dict], corpus: Mapping[st
                     "artifact was not present in the frozen pre-authoring evidence corpus"
                 )
                 continue
-            try:
-                metadata = (root / relative).lstat()
-                if (
-                    not stat.S_ISREG(metadata.st_mode)
-                    or metadata.st_size > MAX_CORPUS_FILE_BYTES
-                    or (
-                        corpus.get("schema") == "idea-evidence-corpus/v2"
-                        and metadata.st_size != frozen.get("size")
-                    )
-                ):
-                    raise ValueError("frozen evidence artifact size or type changed")
-                current = regular_file_binding(
-                    root / relative,
-                    logical_identity=relative,
-                    trusted_root=root,
+            device, inode, mode, size, _modified, _changed = snapshot.file_identity
+            if (
+                not stat.S_ISREG(mode)
+                or size > MAX_CORPUS_FILE_BYTES
+                or (
+                    corpus.get("schema") == "idea-evidence-corpus/v2"
+                    and size != frozen.get("size")
                 )
-            except ValueError:
+            ):
                 violations.append(
                     f"claims[{claim_index}].evidence_refs[{ref_index}]: "
                     "frozen evidence artifact is missing or unsafe"
                 )
                 continue
+            current = {
+                "identity_digest": canonical_digest(
+                    {
+                        "logical_identity": relative,
+                        "device": device,
+                        "inode": inode,
+                        "mode": stat.S_IMODE(mode),
+                    }
+                ),
+                "bytes_digest": snapshot.byte_sha256,
+            }
             if current != {
                 "identity_digest": str(frozen.get("identity_digest") or ""),
                 "bytes_digest": str(frozen.get("bytes_digest") or ""),
@@ -2232,12 +2293,34 @@ def _claim_input_violations(
     root: Path,
     claims: list[dict],
     corpus: Mapping[str, object],
+    *,
+    consumer_id: str = "",
+    consumer_kind: str = "idea",
 ) -> list[str]:
-    before = _claims_corpus_violations(root, claims, corpus)
+    try:
+        source_roots = _trusted_claim_source_roots(
+            root,
+            claims,
+            consumer_id=consumer_id,
+            consumer_kind=consumer_kind,
+        )
+    except ValueError:
+        return ["cross-unit evidence sources are missing, ambiguous, or unsafe"]
+    before = _claims_corpus_violations(
+        root,
+        claims,
+        corpus,
+        source_roots=source_roots,
+    )
     if before:
         return before
-    evidence = _verify_cross_unit_claims(root, claims)
-    after = _claims_corpus_violations(root, claims, corpus)
+    evidence = _verify_cross_unit_claims(root, claims, source_roots=source_roots)
+    after = _claims_corpus_violations(
+        root,
+        claims,
+        corpus,
+        source_roots=source_roots,
+    )
     return [*evidence, *after]
 
 
@@ -2497,7 +2580,14 @@ def run_analysis_phase(args, root: Path, record: dict, unit_root: Path, *, mode:
         else None
     )
     authoring_provenance = _authoring_provenance(active_anchor)
-    violations.extend(_claim_input_violations(root, claims, corpus))
+    violations.extend(
+        _claim_input_violations(
+            root,
+            claims,
+            corpus,
+            consumer_id=str(record["id"]),
+        )
+    )
     if violations:
         print(f"[reject] {mode} failed evidence verification:", file=sys.stderr)
         for violation in violations:
@@ -2540,7 +2630,11 @@ def run_analysis_phase(args, root: Path, record: dict, unit_root: Path, *, mode:
     build_verification_receipt(
         record,
         unit_root,
-        source_roots=_trusted_claim_source_roots(root, claims),
+        source_roots=_trusted_claim_source_roots(
+            root,
+            claims,
+            consumer_id=str(record["id"]),
+        ),
     )
     try:
         _assert_semantic_write_boundary(
@@ -2694,7 +2788,11 @@ def persist_discussion_conclusion(
     build_verification_receipt(
         judgement,
         unit_root,
-        source_roots=_trusted_claim_source_roots(root, claims),
+        source_roots=_trusted_claim_source_roots(
+            root,
+            claims,
+            consumer_id=str(record["id"]),
+        ),
         verified_at=verified_at,
     )
     items = load_discussion_judgements(unit_root, record["id"])
@@ -3296,7 +3394,14 @@ def _dispatch(args, root: Path) -> int:
             else None
         )
         authoring_provenance = _authoring_provenance(active_anchor)
-        violations.extend(_claim_input_violations(root, claims, corpus))
+        violations.extend(
+            _claim_input_violations(
+                root,
+                claims,
+                corpus,
+                consumer_id=str(record["id"]),
+            )
+        )
         if violations:
             print("[reject] discussion conclusion failed verification:", file=sys.stderr)
             for violation in violations:
