@@ -9,7 +9,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import stat
 import subprocess
 import tempfile
@@ -47,7 +46,6 @@ BOUND_RUNTIME_KIND = "bound-runtime-interpreter"
 BOUND_RUNTIME_SOURCES = {
     "current-python",
     "explicit-override",
-    "managed-venv-external-target",
     "path-discovery",
 }
 PLAN_SCHEMA = 3
@@ -93,6 +91,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--current-source-checkout", default="")
     parser.add_argument("--current-source-origin", default="")
     parser.add_argument("--current-source-branch", default="")
+    parser.add_argument("--current-runtime-interpreter", default="")
+    parser.add_argument("--current-runtime-selection-source", default="")
+    parser.add_argument("--current-runtime-explicit-override", default="")
+    parser.add_argument("--current-runtime-isolated-probe", action="store_true")
 
     parser.add_argument("--output")
     parser.add_argument("--action")
@@ -469,16 +471,6 @@ def _runtime_identity(metadata: os.stat_result) -> dict[str, int]:
     }
 
 
-def _resolve_runtime_command(value: str) -> Path:
-    candidate = Path(value).expanduser()
-    if not candidate.is_absolute() and len(candidate.parts) == 1:
-        located = shutil.which(value)
-        if not located:
-            raise ValueError("selected runtime command is unavailable")
-        candidate = Path(located)
-    return candidate.resolve(strict=True)
-
-
 def _capture_bound_runtime(
     path: Path,
     workspace: Path,
@@ -504,7 +496,7 @@ def _capture_bound_runtime(
     if selection_source == "explicit-override":
         if not explicit_override:
             raise ValueError("explicit runtime selection must bind the override value")
-    elif selection_source in {"current-python", "path-discovery"} and explicit_override is not None:
+    elif explicit_override is not None:
         raise ValueError("non-explicit runtime selection cannot bind an override value")
 
     before = canonical.stat()
@@ -583,7 +575,7 @@ def _validate_bound_runtime(value: Any) -> dict[str, Any]:
         selection_source not in BOUND_RUNTIME_SOURCES
         or (explicit_override is not None and not isinstance(explicit_override, str))
         or (selection_source == "explicit-override" and not explicit_override)
-        or (selection_source in {"current-python", "path-discovery"} and explicit_override is not None)
+        or (selection_source != "explicit-override" and explicit_override is not None)
     ):
         raise ValueError("Agent plan bound runtime selection is invalid")
     core_runtime = value.get("core_runtime")
@@ -805,25 +797,14 @@ def verify_plan(args: argparse.Namespace) -> int:
         if conditional_runtime_targets:
             raise ValueError("Agent plan cannot bind PATH and managed runtimes together")
         planned_runtime = _validate_bound_runtime(planned_runtime)
-        selection = planned_runtime["selection"]
-        selection_source = selection["source"]
-        planned_explicit = selection["explicit_override"]
-        current_explicit = os.environ.get("RESEARCH_PYTHON")
-        if current_explicit != planned_explicit:
-            raise ValueError("explicit runtime override differs from the reviewed Agent plan")
-        if selection_source == "explicit-override":
-            try:
-                explicit_canonical = _resolve_runtime_command(current_explicit)
-            except (OSError, ValueError) as exc:
-                raise ValueError("explicit runtime override conflicts with the reviewed Agent plan") from exc
-            if str(explicit_canonical) != planned_runtime["canonical_path"]:
-                raise ValueError("explicit runtime override conflicts with the reviewed Agent plan")
+        if not args.current_runtime_interpreter:
+            raise ValueError("current runtime selection differs from the reviewed Agent plan")
         current_runtime = _capture_bound_runtime(
-            Path(planned_runtime["canonical_path"]),
+            Path(args.current_runtime_interpreter),
             Path(args.current_workspace),
-            selection_source=selection_source,
-            explicit_override=planned_explicit,
-            isolated_probe=planned_runtime["core_runtime"]["probe"] == "isolated-import",
+            selection_source=args.current_runtime_selection_source,
+            explicit_override=args.current_runtime_explicit_override or None,
+            isolated_probe=args.current_runtime_isolated_probe,
         )
         if current_runtime != planned_runtime:
             raise ValueError("bound runtime changed after plan review")
@@ -844,7 +825,6 @@ def verify_plan(args: argparse.Namespace) -> int:
         raise ValueError("Agent plan byte-review contract is invalid")
     verified_state = {
         "manifest_precondition": planned_manifest,
-        "bound_runtime_python": planned_runtime["canonical_path"] if planned_runtime is not None else "",
     }
     print(json.dumps(verified_state, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
     return 0

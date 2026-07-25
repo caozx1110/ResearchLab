@@ -885,15 +885,14 @@ def test_ready_managed_venv_suppresses_update_warning_and_conditional_target(
     assert planned.returncode == 0, planned.stdout + planned.stderr
     assert "Python 依赖尚未就绪" not in planned.stdout + planned.stderr
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
-    assert plan["conditional_runtime_changes"] == []
-    assert plan["runtime_precondition"]["selection"] == {
-        "explicit_override": "/bin/false",
-        "source": "managed-venv-external-target",
-    }
+    assert len(plan["conditional_runtime_changes"]) == 1
+    assert plan["runtime_precondition"] is None
+    venv_before = _workspace_snapshot(workspace / ".venv")
 
     applied = _apply_reviewed_plan(_project_root(), plan, env=env, timeout=30)
 
     assert applied.returncode == 0, applied.stdout + applied.stderr
+    assert _workspace_snapshot(workspace / ".venv") == venv_before
     assert "Python 依赖尚未就绪" not in applied.stdout + applied.stderr
     assert "skills 已是最新版本" in applied.stdout
 

@@ -232,6 +232,21 @@ def _verify(plan: dict[str, object]) -> subprocess.CompletedProcess[str]:
         argv.append("--current-force")
     if options["kb_on_path"]:
         argv.append("--current-kb-on-path")
+    runtime_precondition = plan.get("runtime_precondition")
+    if isinstance(runtime_precondition, dict):
+        selection = runtime_precondition["selection"]
+        argv.extend(
+            [
+                "--current-runtime-interpreter",
+                str(runtime_precondition["canonical_path"]),
+                "--current-runtime-selection-source",
+                str(selection["source"]),
+            ]
+        )
+        if selection["explicit_override"] is not None:
+            argv.extend(["--current-runtime-explicit-override", str(selection["explicit_override"])])
+        if runtime_precondition["core_runtime"]["probe"] == "isolated-import":
+            argv.append("--current-runtime-isolated-probe")
     verify_env = dict(os.environ)
     verify_env.pop("RESEARCH_PYTHON", None)
     runtime_precondition = plan.get("runtime_precondition")
@@ -242,19 +257,15 @@ def _verify(plan: dict[str, object]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(argv, env=verify_env, text=True, capture_output=True, check=False)
 
 
-def test_agent_plan_apply_reuses_later_path_runtime_strictly_offline(tmp_path: Path) -> None:
+def test_agent_plan_rejects_missing_later_path_runtime_before_first_write(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     env = _offline_path_runtime_environment(tmp_path)
 
     plan = _plan(workspace, tmp_path / "offline-plan.json", env)
 
+    assert plan["schema"] == 3
     assert plan["conditional_runtime_changes"] == []
-    apply_env = dict(env)
-    apply_env["PATH"] = os.pathsep.join((str(tmp_path / "deficient-bin"), "/usr/bin", "/bin"))
-    applied = _apply(plan, apply_env)
-    assert applied.returncode == 0, applied.stdout + applied.stderr
-    assert not (workspace / ".venv").exists()
     runtime_precondition = plan["runtime_precondition"]
     assert isinstance(runtime_precondition, dict)
     assert runtime_precondition["kind"] == "bound-runtime-interpreter"
@@ -278,6 +289,28 @@ def test_agent_plan_apply_reuses_later_path_runtime_strictly_offline(tmp_path: P
         "mtime_ns",
         "ctime_ns",
     }
+    before = _tree_byte_type_mode_snapshot(workspace)
+    apply_env = dict(env)
+    apply_env["PATH"] = os.pathsep.join((str(tmp_path / "deficient-bin"), "/usr/bin", "/bin"))
+
+    applied = _apply(plan, apply_env)
+
+    assert applied.returncode == 1
+    assert "重新生成并审阅计划" in applied.stderr
+    assert _tree_byte_type_mode_snapshot(workspace) == before
+    assert not any(workspace.iterdir())
+
+
+def test_agent_plan_stable_path_runtime_installs_without_managed_venv(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace-stable-path"
+    workspace.mkdir()
+    env = _offline_path_runtime_environment(tmp_path)
+    plan = _plan(workspace, tmp_path / "stable-path-plan.json", env)
+
+    applied = _apply(plan, env)
+
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    assert not (workspace / ".venv").exists()
 
     help_result = subprocess.run(
         [str(workspace / ".agents/skills/kb-cli/scripts/kb"), "help"],
@@ -293,7 +326,7 @@ def test_agent_plan_apply_reuses_later_path_runtime_strictly_offline(tmp_path: P
     assert "kb help" in help_result.stdout
 
 
-def test_agent_plan_reuses_bound_current_python_when_apply_path_turns_deficient(tmp_path: Path) -> None:
+def test_agent_plan_rejects_current_python_selection_drift_before_first_write(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace-current"
     workspace.mkdir()
     home = tmp_path / "home-current"
@@ -320,13 +353,15 @@ def test_agent_plan_reuses_bound_current_python_when_apply_path_turns_deficient(
     runtime_precondition = plan["runtime_precondition"]
     assert isinstance(runtime_precondition, dict)
     assert runtime_precondition["selection"]["source"] == "current-python"
+    before = _tree_byte_type_mode_snapshot(workspace)
 
     apply_env = dict(env)
     apply_env["PATH"] = os.pathsep.join((str(deficient_bin), "/usr/bin", "/bin"))
     applied = _apply(plan, apply_env)
 
-    assert applied.returncode == 0, applied.stdout + applied.stderr
-    assert not (workspace / ".venv").exists()
+    assert applied.returncode == 1
+    assert "重新生成并审阅计划" in applied.stderr
+    assert _tree_byte_type_mode_snapshot(workspace) == before
 
 
 @pytest.mark.parametrize("mutation", ["missing", "changed"])
@@ -358,7 +393,7 @@ def test_agent_plan_rejects_explicit_runtime_override_drift_before_first_write(
     assert _tree_byte_type_mode_snapshot(workspace) == before
 
 
-def test_agent_plan_can_explicitly_reuse_ready_managed_venv_external_target(tmp_path: Path) -> None:
+def test_agent_plan_conservatively_declares_ready_managed_venv_runtime_tree(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace-managed-external"
     managed_bin = workspace / ".venv/bin"
     managed_bin.mkdir(parents=True)
@@ -367,12 +402,15 @@ def test_agent_plan_can_explicitly_reuse_ready_managed_venv_external_target(tmp_
     env = _offline_path_runtime_environment(tmp_path)
     env["PATH"] = os.pathsep.join((str(tmp_path / "deficient-bin"), "/usr/bin", "/bin"))
     plan = _plan(workspace, tmp_path / "managed-external-plan.json", env)
-    runtime_precondition = plan["runtime_precondition"]
-    assert isinstance(runtime_precondition, dict)
-    assert runtime_precondition["selection"]["source"] == "managed-venv-external-target"
-    assert runtime_precondition["canonical_path"] == str(Path(sys.executable).resolve())
+    runtime_targets = [
+        target for target in plan["targets"] if target["operation"] == "conditional-runtime-tree"
+    ]
+    assert plan["conditional_runtime_changes"] == runtime_targets
+    assert len(runtime_targets) == 1
+    assert plan["target_count"] == len(plan["targets"])
+    assert runtime_targets[0]["path"] == str(workspace / ".venv")
+    assert plan["runtime_precondition"] is None
 
-    managed_python.unlink()
     venv_before = _tree_byte_type_mode_snapshot(workspace / ".venv")
     applied = _apply(plan, env)
 

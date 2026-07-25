@@ -268,7 +268,6 @@ EXPECTED_PLAN_DIGEST=""
 EXPECTED_PLAN_BYTE_SHA256=""
 EXPECTED_SOURCE_TREE_DIGEST=""
 VERIFIED_MANIFEST_STATE=""
-VERIFIED_RUNTIME_PYTHON=""
 AGENT_PLAN_MANIFEST_STATE=""
 OPERATION_TIME=""
 ASSUME_YES=0
@@ -1084,10 +1083,6 @@ print_done() {
 
 preflight_yaml() {
   local py managed_python
-  if [ -n "$VERIFIED_RUNTIME_PYTHON" ]; then
-    DISCOVERED_RUNTIME_PYTHON=$VERIFIED_RUNTIME_PYTHON
-    return 0
-  fi
   py=${RESEARCH_PYTHON:-python3}
   if python_has_core_runtime "$py"; then
     SELECTED_RUNTIME_PYTHON=$(canonical_runtime_python "$py") || \
@@ -1102,8 +1097,11 @@ preflight_yaml() {
   if [ -z "${RESEARCH_VENV:-}" ]; then
     managed_python=$(managed_workspace_venv_has_core_runtime || true)
     if [ -n "$managed_python" ]; then
-      SELECTED_RUNTIME_PYTHON=$managed_python
-      SELECTED_RUNTIME_SOURCE="managed-venv-external-target"
+      # The current safe probe proves readiness, but Agent plan schema 3 does
+      # not yet serialize the complete managed invocation chain. Keep the
+      # resolver-owned tree conservative instead of signing the external base
+      # executable as though installed kb would invoke it directly.
+      [ "$AGENT_PLAN" -eq 0 ] || RUNTIME_BOOTSTRAP_NEEDED=1
       return 0
     fi
   fi
@@ -1419,6 +1417,16 @@ verify_agent_apply_contract() {
   [ "$CONFIG_CODEX" -eq 0 ] || args+=("--current-tool" "codex")
   [ "$FORCE" -eq 0 ] || args+=("--current-force")
   [ "$KB_ON_PATH" -eq 0 ] || args+=("--current-kb-on-path")
+  if [ -n "$SELECTED_RUNTIME_PYTHON" ]; then
+    args+=(
+      "--current-runtime-interpreter" "$SELECTED_RUNTIME_PYTHON"
+      "--current-runtime-selection-source" "$SELECTED_RUNTIME_SOURCE"
+    )
+    if [ -n "${RESEARCH_PYTHON:-}" ]; then
+      args+=("--current-runtime-explicit-override" "$RESEARCH_PYTHON")
+    fi
+    [ "$SELECTED_RUNTIME_ISOLATED" -eq 0 ] || args+=("--current-runtime-isolated-probe")
+  fi
   if ! verified_state=$(python3 "$REPO_ROOT/install-lib/agent_plan.py" "${args[@]}" 2>/dev/null); then
     die "Agent 安装计划、源码或目标状态已变化；未写入任何内容，请重新生成并审阅计划"
   fi
@@ -1426,10 +1434,6 @@ verify_agent_apply_contract() {
     die "Agent 安装计划缺少安装记录前置条件；未写入任何内容，请重新生成并审阅计划"
   VERIFIED_MANIFEST_STATE=$(python3 -c \
     'import json,sys; payload=json.loads(sys.argv[1]); print(json.dumps(payload["manifest_precondition"], sort_keys=True, separators=(",", ":")))' \
-    "$verified_state") || \
-    die "Agent 安装计划验证结果无效；未写入任何内容，请重新生成并审阅计划"
-  VERIFIED_RUNTIME_PYTHON=$(python3 -c \
-    'import json,sys; payload=json.loads(sys.argv[1]); value=payload["bound_runtime_python"]; assert isinstance(value, str); print(value)' \
     "$verified_state") || \
     die "Agent 安装计划验证结果无效；未写入任何内容，请重新生成并审阅计划"
 }
@@ -2214,9 +2218,7 @@ run_smoke() {
   fi
   section "安装检查"
   info "正在检查 kb 基础功能..."
-  if [ -n "$VERIFIED_RUNTIME_PYTHON" ]; then
-    export RESEARCH_PYTHON="$VERIFIED_RUNTIME_PYTHON"
-  elif [ -n "$DISCOVERED_RUNTIME_PYTHON" ] && [ -z "${RESEARCH_PYTHON:-}" ]; then
+  if [ -n "$DISCOVERED_RUNTIME_PYTHON" ] && [ -z "${RESEARCH_PYTHON:-}" ]; then
     export RESEARCH_PYTHON="$DISCOVERED_RUNTIME_PYTHON"
   fi
   # Child diagnostics can contain tracebacks and internal paths; keep them private.
@@ -2249,11 +2251,13 @@ validate_agent_plan_output
 if [ -n "$EXPECTED_SOURCE_COMMIT" ] && [ "$(source_commit)" != "$EXPECTED_SOURCE_COMMIT" ]; then
   die "源码版本已不同于审阅过的 Agent 计划；请重新生成计划"
 fi
+if [ "$ACTION" != "uninstall" ]; then
+  preflight_yaml
+fi
 verify_agent_apply_contract
 confirm_plan
 
 if [ "$ACTION" != "uninstall" ]; then
-  preflight_yaml
   if [ "$COPY_PROJECT" -eq 0 ]; then
     guard_claude_project_target
   fi
