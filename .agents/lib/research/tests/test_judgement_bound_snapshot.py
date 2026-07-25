@@ -116,3 +116,47 @@ def test_side_snapshot_rejects_duplicate_added_after_capture(tmp_path: Path) -> 
     assert not bound.is_current()
     with pytest.raises(ValueError, match="not globally unique"):
         load_bound_judgement_snapshot(tmp_path, subject)
+
+
+@pytest.mark.parametrize("fault", ["malformed", "duplicate-key", "symlink"])
+def test_bad_side_container_is_isolated_from_valid_sibling(
+    tmp_path: Path,
+    fault: str,
+) -> None:
+    _path, _record, valid_subject = _side_case(tmp_path, "program_decision")
+    bad_path = tmp_path / "kb/synthesis/bad/survey.yaml"
+    bad_path.parent.mkdir(parents=True)
+    if fault == "malformed":
+        bad_path.write_text("id: survey:survey:bad\nsections: [\n", encoding="utf-8")
+    elif fault == "duplicate-key":
+        bad_path.write_text(
+            "id: survey:survey:bad\nid: survey:survey:bad\nkind: survey_judgement\n",
+            encoding="utf-8",
+        )
+    else:
+        outside = tmp_path / "outside-survey.yaml"
+        write_yaml_if_changed(
+            outside,
+            {
+                "id": "survey:survey:bad",
+                "kind": "survey_judgement",
+                "owner": "literature-synthesizer",
+                "slug": "bad",
+                "mode": "survey",
+            },
+        )
+        bad_path.symlink_to(outside)
+
+    valid = load_bound_judgement_snapshot(tmp_path, valid_subject)
+    assert valid.is_current()
+    with pytest.raises(ValueError, match="not globally unique"):
+        load_bound_judgement_snapshot(
+            tmp_path,
+            {
+                "kind": "survey_judgement",
+                "id": "survey:survey:bad",
+                "owner": "literature-synthesizer",
+                "path": "kb/synthesis/bad/survey.yaml",
+            },
+        )
+    assert valid.is_current()

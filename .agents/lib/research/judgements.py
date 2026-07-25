@@ -480,32 +480,22 @@ def _side_container_specs(root: Path) -> Iterable[tuple[Path, str, bool]]:
 
 def _side_judgement_candidates(
     root: Path,
-    *,
-    fail_closed: bool,
 ) -> list[_SideJudgementCandidate]:
     candidates: list[_SideJudgementCandidate] = []
     for path, owner, is_list in _side_container_specs(root):
         try:
             relative = path.absolute().relative_to(root).as_posix()
         except ValueError:
-            if fail_closed:
-                raise ValueError("canonical side judgement container escapes the project root")
             continue
         container = snapshot_project_yaml_mapping(root, relative)
         if container is None:
-            if fail_closed:
-                raise ValueError("canonical side judgement container is not safely readable")
             continue
         payload = container.payload
         if is_list:
             items = payload.get("items")
             if not isinstance(items, list):
-                if fail_closed:
-                    raise ValueError("canonical side judgement list has no items sequence")
                 continue
             records = [item for item in items if isinstance(item, dict)]
-            if fail_closed and len(records) != len(items):
-                raise ValueError("canonical side judgement list contains a non-mapping item")
         else:
             records = [payload]
         candidates.extend(
@@ -746,9 +736,15 @@ def load_bound_judgement_snapshot(root: str | Path, subject: Any) -> BoundJudgem
     if subject_kind in SIDE_OWNER_BY_KIND:
         matches = [
             candidate
-            for candidate in _side_judgement_candidates(project_root, fail_closed=True)
+            for candidate in _side_judgement_candidates(project_root)
             if _text(candidate.record.get("kind")) == subject_kind
             and _text(candidate.record.get("id")) == subject_id
+            and not _identity_violations(
+                project_root,
+                candidate.record,
+                candidate.owner,
+                candidate.container.path,
+            )
         ]
         if len(matches) != 1:
             raise ValueError(
@@ -773,9 +769,15 @@ def load_bound_judgement_snapshot(root: str | Path, subject: Any) -> BoundJudgem
         def validate_side_unique_current() -> bool:
             current_matches = [
                 candidate
-                for candidate in _side_judgement_candidates(project_root, fail_closed=True)
+                for candidate in _side_judgement_candidates(project_root)
                 if _text(candidate.record.get("kind")) == subject_kind
                 and _text(candidate.record.get("id")) == subject_id
+                and not _identity_violations(
+                    project_root,
+                    candidate.record,
+                    candidate.owner,
+                    candidate.container.path,
+                )
             ]
             if len(current_matches) != 1:
                 return False
