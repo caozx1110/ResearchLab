@@ -522,6 +522,89 @@ def snapshot_canonical_unit_artifacts(
         _close_anchored_chain(chain)
 
 
+def _snapshot_precanonical_unit_evidence(
+    project_root: Path,
+    kind: str,
+    unit_id: str,
+    artifacts: Sequence[str],
+) -> EvidenceSourceSnapshot | None:
+    """Capture self-unit evidence while an in-memory record is not yet written."""
+    opened = _open_exact_unit_chain(project_root, kind, unit_id)
+    if opened is None:
+        return None
+    root_path, chain = opened
+    try:
+        try:
+            os.stat("record.yaml", dir_fd=chain[-1].fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return None
+        else:
+            return None
+        try:
+            requested = sorted({_canonical_artifact_parts(item)[0] for item in artifacts})
+        except ValueError:
+            return None
+        snapshots: list[EvidenceArtifactSnapshot] = []
+        total = 0
+        for artifact in requested:
+            snapshot = _read_artifact_from_unit_chain(
+                root_path,
+                chain,
+                kind=kind,
+                unit_id=unit_id,
+                artifact=artifact,
+            )
+            if snapshot is None:
+                return None
+            total += len(snapshot.raw_bytes)
+            if total > _UNIT_ARTIFACT_TOTAL_MAX_BYTES:
+                return None
+            snapshots.append(snapshot)
+        captured_artifacts = tuple(snapshots)
+        if (
+            not _anchored_chain_is_current(root_path, chain)
+            or not all(_artifact_snapshot_is_current(root_path, chain, item) for item in captured_artifacts)
+        ):
+            return None
+
+        def validate_current() -> bool:
+            current = _open_exact_unit_chain(project_root, kind, unit_id)
+            if current is None:
+                return False
+            current_root, current_chain = current
+            try:
+                try:
+                    os.stat("record.yaml", dir_fd=current_chain[-1].fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    record_absent = True
+                except OSError:
+                    record_absent = False
+                else:
+                    record_absent = False
+                return (
+                    record_absent
+                    and _anchored_chain_is_current(current_root, current_chain)
+                    and all(
+                        _artifact_snapshot_is_current(current_root, current_chain, item)
+                        for item in captured_artifacts
+                    )
+                )
+            finally:
+                _close_anchored_chain(current_chain)
+
+        return EvidenceSourceSnapshot(
+            source_unit_id=unit_id,
+            kind=kind,
+            artifacts=captured_artifacts,
+            path=root_path / "kb" / "units" / UNIT_KIND_DIRS[kind] / unit_id,
+            validate_current=validate_current,
+        )
+    finally:
+        _close_anchored_chain(chain)
+
+
 def iter_canonical_record_snapshots(
     project_root: Path,
     *,
@@ -693,7 +776,18 @@ def trusted_claim_source_roots(
                 requested_artifacts,
             )
             if unit_snapshot is None:
-                raise ValueError("source unit evidence cannot be captured canonically")
+                if expected_record_snapshot is not None:
+                    raise ValueError("source unit evidence cannot be captured canonically")
+                precanonical = _snapshot_precanonical_unit_evidence(
+                    project_root,
+                    record_kind,
+                    record_id,
+                    requested_artifacts,
+                )
+                if precanonical is None:
+                    raise ValueError("source unit evidence cannot be captured canonically")
+                roots[source_unit_id] = precanonical
+                continue
             if expected_record_snapshot is not None and (
                 unit_snapshot.record.raw_bytes != expected_record_snapshot.raw_bytes
                 or unit_snapshot.record.file_identity != expected_record_snapshot.file_identity
