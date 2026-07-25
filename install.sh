@@ -1080,9 +1080,10 @@ print_done() {
 preflight_yaml() {
   local py
   py=${RESEARCH_PYTHON:-python3}
-  if PYTHONPATH="$REPO_ROOT/.agents/lib${PYTHONPATH:+:$PYTHONPATH}" \
-    "$py" -c 'from research.bootstrap import _current_has_yaml; raise SystemExit(0 if _current_has_yaml() else 1)' \
-    >/dev/null 2>&1; then
+  if python_has_core_runtime "$py"; then
+    return 0
+  fi
+  if [ -z "${RESEARCH_VENV:-}" ] && managed_workspace_venv_has_core_runtime; then
     return 0
   fi
   if [ "${RESEARCH_NO_MANAGED_VENV:-}" = "1" ]; then
@@ -1092,20 +1093,133 @@ preflight_yaml() {
   note "Python 依赖尚未就绪；首次使用时会自动准备，无需手动处理。" >&2
 }
 
+python_has_core_runtime() {
+  python3 - "$1" <<'PY' >/dev/null 2>&1
+import subprocess
+import sys
+
+candidate = sys.argv[1]
+try:
+    completed = subprocess.run(
+        [candidate, "-c", "import yaml, markdownify, bs4"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+        timeout=5,
+    )
+except (OSError, subprocess.SubprocessError):
+    raise SystemExit(1)
+raise SystemExit(0 if completed.returncode == 0 else 1)
+PY
+}
+
+managed_workspace_venv_has_core_runtime() {
+  python3 - "$WORKSPACE_ROOT" <<'PY' >/dev/null 2>&1
+import os
+import stat
+import subprocess
+import sys
+from pathlib import Path
+
+
+def identity(metadata):
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_uid,
+        metadata.st_gid,
+    )
+
+
+root = Path(sys.argv[1])
+directory_flags = (
+    os.O_RDONLY
+    | os.O_DIRECTORY
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+)
+descriptors = []
+try:
+    root_metadata = os.lstat(root)
+    if not stat.S_ISDIR(root_metadata.st_mode) or root_metadata.st_uid != os.getuid():
+        raise OSError("uncontrolled workspace root")
+    root_fd = os.open(root, directory_flags)
+    descriptors.append(root_fd)
+    if identity(os.fstat(root_fd)) != identity(root_metadata):
+        raise OSError("workspace root changed")
+
+    parent_fd = root_fd
+    directory_bindings = []
+    for component in (".venv", "bin"):
+        metadata = os.stat(component, dir_fd=parent_fd, follow_symlinks=False)
+        if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid():
+            raise OSError("managed runtime ancestor is unsafe")
+        child_fd = os.open(component, directory_flags, dir_fd=parent_fd)
+        descriptors.append(child_fd)
+        if identity(os.fstat(child_fd)) != identity(metadata):
+            raise OSError("managed runtime ancestor changed")
+        directory_bindings.append((parent_fd, component, identity(metadata)))
+        parent_fd = child_fd
+
+    bin_fd = parent_fd
+    leaf = os.stat("python", dir_fd=bin_fd, follow_symlinks=False)
+    if not (stat.S_ISREG(leaf.st_mode) or stat.S_ISLNK(leaf.st_mode)):
+        raise OSError("managed runtime interpreter is unsafe")
+    target = os.stat("python", dir_fd=bin_fd, follow_symlinks=True)
+    if not stat.S_ISREG(target.st_mode) or target.st_mode & 0o111 == 0:
+        raise OSError("managed runtime interpreter target is unsafe")
+
+    completed = subprocess.run(
+        ["./python", "-c", "import yaml, markdownify, bs4"],
+        preexec_fn=lambda: os.fchdir(bin_fd),
+        pass_fds=(bin_fd,),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+        timeout=5,
+    )
+    if completed.returncode != 0:
+        raise OSError("managed runtime imports are incomplete")
+    if identity(os.lstat(root)) != identity(root_metadata):
+        raise OSError("workspace root changed during runtime probe")
+    for parent, component, expected in directory_bindings:
+        current = os.stat(component, dir_fd=parent, follow_symlinks=False)
+        if identity(current) != expected:
+            raise OSError("managed runtime ancestor changed during probe")
+    current_leaf = os.stat("python", dir_fd=bin_fd, follow_symlinks=False)
+    if identity(current_leaf) != identity(leaf):
+        raise OSError("managed runtime interpreter changed during probe")
+except (OSError, subprocess.SubprocessError):
+    raise SystemExit(1)
+finally:
+    for descriptor in reversed(descriptors):
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+raise SystemExit(0)
+PY
+}
+
 managed_runtime_root() {
   python3 - "$WORKSPACE_ROOT" "${RESEARCH_VENV:-}" <<'PY'
+import os
 import sys
 from pathlib import Path
 
 workspace = Path(sys.argv[1])
 configured = sys.argv[2].strip()
 root = Path(configured).expanduser() if configured else workspace / ".venv"
-print(root.resolve(strict=False))
+print(os.path.abspath(os.fspath(root)))
 PY
 }
 
 record_agent_runtime_target() {
   [ "$AGENT_PLAN" -eq 1 ] || return 0
+  [ "$RUNTIME_BOOTSTRAP_NEEDED" -eq 1 ] || return 0
   record_agent_plan_target \
     "conditional-runtime-tree" \
     "$(managed_runtime_root)" \
@@ -1221,28 +1335,32 @@ write_agent_plan_json() {
   fi
   [ "$CONFIG_CLAUDE" -eq 0 ] || args+=("--tool" "claude")
   [ "$CONFIG_CODEX" -eq 0 ] || args+=("--tool" "codex")
-  for sequence in "${AGENT_PLAN_TARGET_SEQUENCE[@]}"; do
-    target_index=${sequence#*:}
-    case "$sequence" in
-      args:*)
-        args+=(
-          "--target-record"
-          "fields"
-          "${AGENT_PLAN_TARGET_ARGS[target_index]}"
-          "${AGENT_PLAN_TARGET_ARGS[target_index + 1]}"
-          "${AGENT_PLAN_TARGET_ARGS[target_index + 2]}"
-          "${AGENT_PLAN_TARGET_ARGS[target_index + 3]}"
-          "${AGENT_PLAN_TARGET_ARGS[target_index + 4]}"
-        )
-        ;;
-      json:*)
-        args+=("--target-record" "json" "${AGENT_PLAN_TARGET_JSON[target_index]}" "" "" "" "")
-        ;;
-    esac
-  done
-  for index in "${!AGENT_PLAN_CONFLICTS[@]}"; do
-    args+=("--conflict" "${AGENT_PLAN_CONFLICTS[index]}")
-  done
+  if [ "${#AGENT_PLAN_TARGET_SEQUENCE[@]}" -gt 0 ]; then
+    for sequence in "${AGENT_PLAN_TARGET_SEQUENCE[@]}"; do
+      target_index=${sequence#*:}
+      case "$sequence" in
+        args:*)
+          args+=(
+            "--target-record"
+            "fields"
+            "${AGENT_PLAN_TARGET_ARGS[target_index]}"
+            "${AGENT_PLAN_TARGET_ARGS[target_index + 1]}"
+            "${AGENT_PLAN_TARGET_ARGS[target_index + 2]}"
+            "${AGENT_PLAN_TARGET_ARGS[target_index + 3]}"
+            "${AGENT_PLAN_TARGET_ARGS[target_index + 4]}"
+          )
+          ;;
+        json:*)
+          args+=("--target-record" "json" "${AGENT_PLAN_TARGET_JSON[target_index]}" "" "" "" "")
+          ;;
+      esac
+    done
+  fi
+  if [ "${#AGENT_PLAN_CONFLICTS[@]}" -gt 0 ]; then
+    for index in "${!AGENT_PLAN_CONFLICTS[@]}"; do
+      args+=("--conflict" "${AGENT_PLAN_CONFLICTS[index]}")
+    done
+  fi
 
   apply_args=("$REPO_ROOT/install.sh")
   [ "$ACTION" = "install" ] || apply_args+=("$ACTION")
@@ -1470,7 +1588,9 @@ uninstall_workspace_copy() {
   had_manifest=1
   ws_sync uninstall
   uninstall_kb_on_path
-  [ "$had_manifest" -eq 1 ] && info "研究资料和本地运行环境已保留；这个工作区现在不再由安装器管理。"
+  if [ "$had_manifest" -eq 1 ] && [ "$DRY_RUN" -eq 0 ]; then
+    info "研究资料和本地运行环境已保留；这个工作区现在不再由安装器管理。"
+  fi
 }
 
 guard_managed_directory_chain() {
@@ -1964,8 +2084,7 @@ if [ "$ACTION" != "uninstall" ]; then
   guard_selected_managed_parents
 fi
 
-# Every Agent plan exposes the possible resolver-owned runtime tree, even when
-# the planning interpreter is currently ready or this action will not smoke it.
+# A plan exposes the resolver-owned runtime tree only when this run may need it.
 record_agent_runtime_target
 
 case "$ACTION" in

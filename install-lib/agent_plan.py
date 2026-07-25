@@ -21,6 +21,25 @@ from ws_sync import release_destination
 BEGIN_MARKER = b"# >>> workspace-oss managed >>>"
 END_MARKER = b"# <<< workspace-oss managed <<<"
 SOURCE_BOUND_OPERATIONS = {"copy", "overwrite", "write", "write-manifest", "write-managed-block"}
+ALLOWED_TARGET_OPERATIONS = SOURCE_BOUND_OPERATIONS | {
+    "conditional-runtime-tree",
+    "delete",
+    "mkdir",
+    "remove-managed-block",
+    "remove-symlink",
+    "rmdir",
+    "symlink",
+}
+CONDITIONAL_RUNTIME_OPERATION = "conditional-runtime-tree"
+CONDITIONAL_RUNTIME_SOURCE = "research.bootstrap.CORE_RUNTIME_MODULES / managed dependency resolver"
+CONDITIONAL_RUNTIME_CONDITION = (
+    "only when managed runtime is enabled and the selected Python lacks yaml, markdownify, or bs4"
+)
+CONDITIONAL_RUNTIME_METADATA = {
+    "owner": "workspace-oss project Python dependency resolver",
+    "cleanup": "preserved by update, reinstall, and uninstall; remove only by explicit user request",
+    "boundary": "project .venv root; resolver-managed descendants are intentionally not enumerated",
+}
 PLAN_DIGEST_PLACEHOLDER = "<PLAN_DIGEST>"
 PLAN_BYTE_SHA256_PLACEHOLDER = "COMPUTE_AFTER_REVIEW"
 MAX_PLAN_BYTES = 16 * 1024 * 1024
@@ -368,6 +387,8 @@ def normalize_target(raw: dict[str, Any]) -> dict[str, Any]:
     path_text = str(raw.get("path") or "").strip()
     if not operation or not path_text:
         raise ValueError("plan target requires operation and path")
+    if operation not in ALLOWED_TARGET_OPERATIONS:
+        raise ValueError(f"plan target operation is unknown: {operation}")
     path = Path(path_text)
     if not path.is_absolute():
         raise ValueError("plan target paths must be absolute")
@@ -387,14 +408,10 @@ def normalize_target(raw: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"source-bound plan target lacks a content digest: {path_text}")
     elif operation == "symlink":
         target["source_content_sha256"] = sha256_bytes(source.encode("utf-8"))
-    if operation == "conditional-runtime-tree":
-        target.update(
-            {
-                "owner": "workspace-oss project Python dependency resolver",
-                "cleanup": "preserved by update, reinstall, and uninstall; remove only by explicit user request",
-                "boundary": "project .venv root; resolver-managed descendants are intentionally not enumerated",
-            }
-        )
+    if operation == CONDITIONAL_RUNTIME_OPERATION:
+        if source != CONDITIONAL_RUNTIME_SOURCE or condition != CONDITIONAL_RUNTIME_CONDITION:
+            raise ValueError("conditional runtime target has an unknown resolver contract")
+        target.update(CONDITIONAL_RUNTIME_METADATA)
     target["precondition"] = target_precondition(path, managed_block="managed-block" in operation)
     return target
 
@@ -578,12 +595,14 @@ def verify_plan(args: argparse.Namespace) -> int:
     targets = payload.get("targets")
     if not isinstance(targets, list) or payload.get("target_count") != len(targets):
         raise ValueError("Agent plan target list is invalid")
-    conditional_runtime_targets = []
+    conditional_runtime_targets: list[dict[str, Any]] = []
     for target in targets:
         if not isinstance(target, dict):
             raise ValueError("Agent plan target is invalid")
         operation = str(target.get("operation") or "")
-        if operation == "conditional-runtime-tree":
+        if operation not in ALLOWED_TARGET_OPERATIONS:
+            raise ValueError(f"Agent plan target operation is unknown: {operation}")
+        if operation == CONDITIONAL_RUNTIME_OPERATION:
             conditional_runtime_targets.append(target)
         path = Path(str(target.get("path") or ""))
         if operation in SOURCE_BOUND_OPERATIONS and not target.get("source_content_sha256"):
@@ -591,10 +610,37 @@ def verify_plan(args: argparse.Namespace) -> int:
         current = target_precondition(path, managed_block="managed-block" in operation)
         if current != target.get("precondition"):
             raise ValueError(f"install target changed after plan review: {path}")
-    if len(conditional_runtime_targets) != 1:
-        raise ValueError("Agent plan must declare exactly one conditional runtime tree")
-    if Path(str(conditional_runtime_targets[0]["path"])).resolve() != Path(args.current_runtime_root).resolve():
-        raise ValueError("current managed runtime root differs from the reviewed Agent plan")
+    if payload.get("conditional_runtime_changes") != conditional_runtime_targets:
+        raise ValueError("Agent plan conditional runtime projection is invalid")
+    if len(conditional_runtime_targets) > 1:
+        raise ValueError("Agent plan must declare at most one conditional runtime tree")
+    if conditional_runtime_targets:
+        runtime_target = conditional_runtime_targets[0]
+        expected_runtime_fields = {
+            "operation",
+            "path",
+            "source",
+            "condition",
+            "precondition",
+            *CONDITIONAL_RUNTIME_METADATA,
+        }
+        if (
+            set(runtime_target) != expected_runtime_fields
+            or runtime_target.get("source") != CONDITIONAL_RUNTIME_SOURCE
+            or runtime_target.get("condition") != CONDITIONAL_RUNTIME_CONDITION
+            or any(runtime_target.get(key) != value for key, value in CONDITIONAL_RUNTIME_METADATA.items())
+        ):
+            raise ValueError("Agent plan conditional runtime target has an unknown contract")
+        planned_runtime_root = Path(str(runtime_target.get("path") or ""))
+        current_runtime_root = Path(str(args.current_runtime_root or ""))
+        if (
+            not planned_runtime_root.is_absolute()
+            or not current_runtime_root.is_absolute()
+            or planned_runtime_root != _absolute_lexical_path(planned_runtime_root)
+            or current_runtime_root != _absolute_lexical_path(current_runtime_root)
+            or planned_runtime_root != current_runtime_root
+        ):
+            raise ValueError("current managed runtime root differs from the reviewed Agent plan")
     contract = payload.get("apply_contract")
     if not isinstance(contract, dict) or contract.get("plan_path") != str(plan_path):
         raise ValueError("Agent plan path differs from its reviewed apply contract")
@@ -663,7 +709,7 @@ def generate_plan(args: argparse.Namespace) -> int:
             tree["digest"],
         ]
     )
-    conditional = [target for target in targets if target.get("operation") == "conditional-runtime-tree"]
+    conditional = [target for target in targets if target.get("operation") == CONDITIONAL_RUNTIME_OPERATION]
     payload: dict[str, Any] = {
         "schema": 2,
         "install_name": "workspace-oss",

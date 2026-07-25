@@ -600,6 +600,23 @@ def managed_agents_block(source: Path) -> bytes:
     return rendered.encode("utf-8")
 
 
+def managed_agents_separator(existing: bytes | None) -> bytes:
+    if not existing:
+        return b""
+    return b"\n" if existing.endswith(b"\n") else b"\n\n"
+
+
+def agents_md_roundtrip_metadata(existing: bytes | None, separator: bytes) -> dict[str, Any]:
+    before = existing if existing is not None else b""
+    return {
+        "schema": 1,
+        "before_existed": existing is not None,
+        "before_size": len(before),
+        "before_sha256": hashlib.sha256(before).hexdigest(),
+        "separator_hex": separator.hex(),
+    }
+
+
 def managed_block_span(content: bytes) -> tuple[int, int] | None:
     text = content.decode("utf-8")
     lines = text.splitlines(keepends=True)
@@ -629,8 +646,54 @@ def merge_managed_agents(existing: bytes | None, block: bytes, *, legacy_digest:
     span = managed_block_span(existing)
     if span is not None:
         return existing[: span[0]] + block + existing[span[1] :]
-    separator = b"" if not existing else (b"\n" if existing.endswith(b"\n") else b"\n\n")
+    separator = managed_agents_separator(existing)
     return existing + separator + block
+
+
+def _restore_agents_md_roundtrip(
+    existing: bytes,
+    span: tuple[int, int],
+    metadata: object,
+) -> object:
+    if not isinstance(metadata, dict) or set(metadata) != {
+        "schema",
+        "before_existed",
+        "before_size",
+        "before_sha256",
+        "separator_hex",
+    }:
+        return NotImplemented
+    before_existed = metadata.get("before_existed")
+    before_size = metadata.get("before_size")
+    before_sha256 = metadata.get("before_sha256")
+    separator_hex = metadata.get("separator_hex")
+    if (
+        metadata.get("schema") != 1
+        or not isinstance(before_existed, bool)
+        or not isinstance(before_size, int)
+        or isinstance(before_size, bool)
+        or before_size < 0
+        or not isinstance(before_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", before_sha256) is None
+        or not isinstance(separator_hex, str)
+        or separator_hex not in {"", "0a", "0a0a"}
+    ):
+        return NotImplemented
+    separator = bytes.fromhex(separator_hex)
+    start, end = span
+    if start != before_size + len(separator):
+        return NotImplemented
+    prefix = existing[:before_size]
+    if (
+        existing[before_size:start] != separator
+        or hashlib.sha256(prefix).hexdigest() != before_sha256
+    ):
+        return NotImplemented
+    suffix = existing[end:]
+    restored = prefix + suffix
+    if before_existed or restored:
+        return restored
+    return None
 
 
 def remove_managed_agents(existing: bytes, manifest: dict[str, Any]) -> bytes | None:
@@ -648,6 +711,18 @@ def remove_managed_agents(existing: bytes, manifest: dict[str, Any]) -> bytes | 
                 f"expected={expected or '<missing>'} actual={actual}"
             )
             return existing
+        if "agents_md_roundtrip" in manifest:
+            restored = _restore_agents_md_roundtrip(
+                existing,
+                span,
+                manifest.get("agents_md_roundtrip"),
+            )
+            if restored is not NotImplemented:
+                return restored
+            warn(
+                "preserving AGENTS.md separator because managed-block round-trip metadata "
+                "is invalid or no longer matches"
+            )
         remaining = existing[: span[0]] + existing[span[1] :]
         return remaining if remaining.strip() else None
     if manifest.get("agents_md") == "managed":
@@ -1645,7 +1720,8 @@ def build_writes(
     items: dict[str, tuple[Path, str]],
     *,
     legacy_agents_digest: str = "",
-) -> tuple[dict[str, tuple[bytes, int]], str]:
+    existing_roundtrip: object = None,
+) -> tuple[dict[str, tuple[bytes, int]], str, dict[str, Any] | None]:
     writes: dict[str, tuple[bytes, int]] = {}
     for rel, (source, _digest) in items.items():
         if rel == "AGENTS.md":
@@ -1655,11 +1731,18 @@ def build_writes(
     block = managed_agents_block(agents_source)
     agents_path = dst_root / "AGENTS.md"
     existing = read_bytes(agents_path) if agents_path.exists() and agents_path.is_file() and not agents_path.is_symlink() else None
+    roundtrip = existing_roundtrip if isinstance(existing_roundtrip, dict) else None
+    if existing is None:
+        roundtrip = agents_md_roundtrip_metadata(None, b"")
+    elif legacy_agents_digest and hashlib.sha256(existing).hexdigest() == legacy_agents_digest:
+        roundtrip = agents_md_roundtrip_metadata(None, b"")
+    elif managed_block_span(existing) is None:
+        roundtrip = agents_md_roundtrip_metadata(existing, managed_agents_separator(existing))
     writes["AGENTS.md"] = (
         merge_managed_agents(existing, block, legacy_digest=legacy_agents_digest),
         path_mode(agents_path),
     )
-    return writes, hashlib.sha256(block).hexdigest()
+    return writes, hashlib.sha256(block).hexdigest(), roundtrip
 
 
 def read_source_version(repo: Path, source: Path | None) -> str:
@@ -1684,11 +1767,12 @@ def build_manifest(
     agents: dict[str, bool],
     files: dict[str, str],
     agents_md_sha: str,
+    agents_md_roundtrip: dict[str, Any] | None,
     updated_at: str,
 ) -> dict[str, Any]:
     if source_strategy not in SOURCE_STRATEGIES:
         die(f"invalid source strategy: {source_strategy}")
-    return {
+    payload = {
         "schema": SCHEMA,
         "install_name": INSTALL_NAME,
         "install_mode": INSTALL_MODE,
@@ -1709,6 +1793,9 @@ def build_manifest(
         "files": files,
         "tree_checksum": tree_checksum(files),
     }
+    if agents_md_roundtrip is not None:
+        payload["agents_md_roundtrip"] = agents_md_roundtrip
+    return payload
 
 
 def preserved_source_strategy(
@@ -1772,7 +1859,7 @@ def install(args: argparse.Namespace) -> int:
         for rel, expected_hash, actual_hash, reason in drift:
             warn(f"  MODIFIED {rel} reason={reason} expected={expected_hash} actual={actual_hash}")
         die("copy-project install collides with local files; rerun with --force only if they may be replaced", code=3)
-    writes, agents_md_sha = build_writes(dst_root, items)
+    writes, agents_md_sha, agents_md_roundtrip = build_writes(dst_root, items)
     install_origin = str(args.source_origin or "local").strip()
     install_checkout = str(args.source_checkout or "")
     install_strategy = preserved_source_strategy(
@@ -1792,6 +1879,7 @@ def install(args: argparse.Namespace) -> int:
         agents=agents,
         files=files,
         agents_md_sha=agents_md_sha,
+        agents_md_roundtrip=agents_md_roundtrip,
         updated_at=installed_at,
     )
     changed = transactional_apply(
@@ -1859,7 +1947,12 @@ def update(args: argparse.Namespace) -> int:
     legacy_agents_digest = ""
     if manifest.get("agents_md") != "managed-block":
         legacy_agents_digest = str(manifest.get("agents_md_sha") or old_files.get("AGENTS.md") or "")
-    writes, agents_md_sha = build_writes(dst_root, items, legacy_agents_digest=legacy_agents_digest)
+    writes, agents_md_sha, agents_md_roundtrip = build_writes(
+        dst_root,
+        items,
+        legacy_agents_digest=legacy_agents_digest,
+        existing_roundtrip=manifest.get("agents_md_roundtrip"),
+    )
     manifest_agents = normalize_manifest_agents(manifest.get("agents"))
     effective_origin = str(args.source_origin or manifest.get("source_origin") or "local").strip()
     effective_checkout = str(
@@ -1901,6 +1994,7 @@ def update(args: argparse.Namespace) -> int:
             agents=agents,
             files=new_files,
             agents_md_sha=agents_md_sha,
+            agents_md_roundtrip=agents_md_roundtrip,
             updated_at=updated_at,
         )
     transaction_changed = transactional_apply(
@@ -1945,7 +2039,12 @@ def reinstall(args: argparse.Namespace) -> int:
     legacy_agents_digest = ""
     if manifest.get("agents_md") != "managed-block":
         legacy_agents_digest = str(manifest.get("agents_md_sha") or old_files.get("AGENTS.md") or "")
-    writes, agents_md_sha = build_writes(dst_root, items, legacy_agents_digest=legacy_agents_digest)
+    writes, agents_md_sha, agents_md_roundtrip = build_writes(
+        dst_root,
+        items,
+        legacy_agents_digest=legacy_agents_digest,
+        existing_roundtrip=manifest.get("agents_md_roundtrip"),
+    )
     manifest_agents = normalize_manifest_agents(manifest.get("agents"))
     removed = sorted(rel for rel in set(old_files) - set(new_files) if rel != "AGENTS.md" and rel.startswith(".agents/"))
     effective_origin = str(args.source_origin or manifest.get("source_origin") or "local").strip()
@@ -1967,6 +2066,7 @@ def reinstall(args: argparse.Namespace) -> int:
         agents=manifest_agents,
         files=new_files,
         agents_md_sha=agents_md_sha,
+        agents_md_roundtrip=agents_md_roundtrip,
         updated_at=operation_time,
     )
     transactional_apply(
