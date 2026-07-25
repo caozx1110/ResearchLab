@@ -1152,7 +1152,12 @@ def test_replace_staged_preserves_previous_when_rollback_fails(
     monkeypatch.setattr(journal.os, "replace", fail_publish_and_rollback)
     try:
         with pytest.raises(RuntimeError, match="backup preserved"):
-            journal._replace_staged_at(parent_fd, staged.name, target.name)
+            journal._replace_staged_at(
+                parent_fd,
+                staged.name,
+                target.name,
+                expected_digest=str(journal._anchored_node_digest_at(parent_fd, staged.name)),
+            )
     finally:
         os.close(parent_fd)
 
@@ -1161,6 +1166,278 @@ def test_replace_staged_preserves_previous_when_rollback_fails(
     assert not staged.exists()
     assert len(backups) == 1
     assert backups[0].read_text(encoding="utf-8") == "old\n"
+
+
+def _restore_fixture(tmp_path: Path, target_kind: str) -> tuple[Path, str, dict, Path | None]:
+    target = tmp_path / "kb" / "notes" / "durable-target"
+    target.parent.mkdir(parents=True)
+    outside: Path | None = None
+    if target_kind == "file":
+        target.write_bytes(b"old file bytes\n")
+        os.chmod(target, 0o640)
+    elif target_kind == "directory":
+        outside = tmp_path / "outside-tree-referent.txt"
+        outside.write_bytes(b"outside tree bytes\n")
+        target.mkdir()
+        os.chmod(target, 0o750)
+        (target / "child.txt").write_bytes(b"old tree bytes\n")
+        os.chmod(target / "child.txt", 0o600)
+        (target / "child-link").symlink_to("child.txt")
+        (target / "outside-link").symlink_to(outside)
+    elif target_kind == "symlink":
+        outside = tmp_path / "outside-referent.txt"
+        outside.write_bytes(b"outside bytes\n")
+        target.symlink_to(outside)
+    elif target_kind != "absent":
+        raise AssertionError(target_kind)
+
+    operation_id = begin_op(tmp_path, f"durable-{target_kind}", [target])
+    entry = load_op(tmp_path, operation_id)
+    if target_kind == "file":
+        target.write_bytes(b"new file bytes\n")
+        os.chmod(target, 0o600)
+    elif target_kind == "directory":
+        parent_fd = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            journal._remove_at(parent_fd, target.name)
+        finally:
+            os.close(parent_fd)
+        target.mkdir()
+        (target / "replacement.txt").write_bytes(b"new tree bytes\n")
+    elif target_kind == "symlink":
+        target.unlink()
+        target.symlink_to("concurrent-link-target")
+    else:
+        target.write_bytes(b"created after absent snapshot\n")
+    return target, operation_id, entry, outside
+
+
+@pytest.mark.parametrize("target_kind", ["file", "directory", "symlink", "absent"])
+def test_restore_fsyncs_anchored_parent_for_every_snapshot_kind(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target_kind: str,
+) -> None:
+    target, operation_id, entry, outside = _restore_fixture(tmp_path, target_kind)
+    parent_identity = target.parent.stat()
+    original_fsync = journal.os.fsync
+    parent_fsyncs = 0
+
+    def record_parent_fsync(descriptor: int) -> None:
+        nonlocal parent_fsyncs
+        if journal._same_node(parent_identity, os.fstat(descriptor)):
+            parent_fsyncs += 1
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(journal.os, "fsync", record_parent_fsync)
+    journal.restore_before_snapshots(tmp_path, operation_id, source_entry=entry)
+
+    assert parent_fsyncs >= 1
+    if target_kind == "file":
+        assert target.read_bytes() == b"old file bytes\n"
+        assert stat.S_IMODE(target.stat().st_mode) == 0o640
+    elif target_kind == "directory":
+        assert (target / "child.txt").read_bytes() == b"old tree bytes\n"
+        assert stat.S_IMODE(target.stat().st_mode) == 0o750
+        assert os.readlink(target / "child-link") == "child.txt"
+        assert outside is not None
+        assert Path(os.readlink(target / "outside-link")) == outside
+        assert outside.read_bytes() == b"outside tree bytes\n"
+    elif target_kind == "symlink":
+        assert outside is not None
+        assert target.is_symlink()
+        assert Path(os.readlink(target)) == outside
+        assert outside.read_bytes() == b"outside bytes\n"
+    else:
+        assert not target.exists()
+
+
+@pytest.mark.parametrize("target_kind", ["file", "directory", "symlink"])
+def test_post_publish_parent_fsync_failure_rolls_back_exact_old_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target_kind: str,
+) -> None:
+    target, operation_id, entry, outside = _restore_fixture(tmp_path, target_kind)
+    state_before_restore = _tree_lstat_state(target) if target_kind == "directory" else None
+    current_before_restore = _lstat_state(target) if target_kind != "directory" else None
+    parent_identity = target.parent.stat()
+    original_fsync = journal.os.fsync
+    failed = False
+
+    def fail_first_parent_fsync(descriptor: int) -> None:
+        nonlocal failed
+        if not failed and journal._same_node(parent_identity, os.fstat(descriptor)):
+            failed = True
+            raise OSError("post-publish parent fsync failed")
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(journal.os, "fsync", fail_first_parent_fsync)
+    with pytest.raises(OSError, match="post-publish parent fsync failed"):
+        journal.restore_before_snapshots(tmp_path, operation_id, source_entry=entry)
+
+    assert failed is True
+    if target_kind == "directory":
+        assert _tree_lstat_state(target) != state_before_restore
+        assert (target / "replacement.txt").read_bytes() == b"new tree bytes\n"
+        assert not (target / "child.txt").exists()
+        assert stat.S_IMODE(target.stat().st_mode) == 0o755
+        assert outside is not None and outside.read_bytes() == b"outside tree bytes\n"
+    elif target_kind == "file":
+        assert current_before_restore is not None
+        assert target.read_bytes() == b"new file bytes\n"
+        assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    else:
+        assert current_before_restore is not None
+        assert os.readlink(target) == "concurrent-link-target"
+        assert outside is not None and outside.read_bytes() == b"outside bytes\n"
+    assert list(target.parent.glob(f".{target.name}.restore-*")) == []
+    assert list(target.parent.glob(f".{target.name}.rollback-*")) == []
+    assert list(target.parent.glob(f".{target.name}.previous-*")) == []
+
+
+def test_post_publish_fsync_failure_restores_original_absence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target, operation_id, entry, _ = _restore_fixture(tmp_path, "file")
+    target.unlink()
+    parent_identity = target.parent.stat()
+    original_fsync = journal.os.fsync
+    failed = False
+
+    def fail_first_parent_fsync(descriptor: int) -> None:
+        nonlocal failed
+        if not failed and journal._same_node(parent_identity, os.fstat(descriptor)):
+            failed = True
+            raise OSError("post-publish parent fsync failed")
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(journal.os, "fsync", fail_first_parent_fsync)
+    with pytest.raises(OSError, match="post-publish parent fsync failed"):
+        journal.restore_before_snapshots(tmp_path, operation_id, source_entry=entry)
+
+    assert failed is True
+    assert not target.exists()
+    assert list(target.parent.glob(f".{target.name}.restore-*")) == []
+    assert list(target.parent.glob(f".{target.name}.failed-*")) == []
+
+
+def test_absent_snapshot_parent_fsync_failure_restores_removed_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target, operation_id, entry, _ = _restore_fixture(tmp_path, "absent")
+    os.chmod(target, 0o640)
+    expected_bytes = target.read_bytes()
+    parent_identity = target.parent.stat()
+    original_fsync = journal.os.fsync
+    failed = False
+
+    def fail_first_parent_fsync(descriptor: int) -> None:
+        nonlocal failed
+        if not failed and journal._same_node(parent_identity, os.fstat(descriptor)):
+            failed = True
+            raise OSError("absent removal parent fsync failed")
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(journal.os, "fsync", fail_first_parent_fsync)
+    with pytest.raises(OSError, match="absent removal parent fsync failed"):
+        journal.restore_before_snapshots(tmp_path, operation_id, source_entry=entry)
+
+    assert failed is True
+    assert target.read_bytes() == expected_bytes
+    assert stat.S_IMODE(target.stat().st_mode) == 0o640
+    assert list(target.parent.glob(f".{target.name}.previous-*")) == []
+    assert list(target.parent.glob(f".{target.name}.rollback-*")) == []
+
+
+def test_verification_mismatch_after_replace_rolls_back_previous_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target, operation_id, entry, _ = _restore_fixture(tmp_path, "file")
+    original_replace = journal.os.replace
+
+    def corrupt_after_publish(source, destination, *args, **kwargs):
+        result = original_replace(source, destination, *args, **kwargs)
+        if str(source).startswith(f".{target.name}.restore-file-") and destination == target.name:
+            descriptor = os.open(
+                target.name,
+                os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=kwargs["dst_dir_fd"],
+            )
+            try:
+                os.write(descriptor, b"corrupt after publication\n")
+            finally:
+                os.close(descriptor)
+        return result
+
+    monkeypatch.setattr(journal.os, "replace", corrupt_after_publish)
+    with pytest.raises(RuntimeError, match="digest verification"):
+        journal.restore_before_snapshots(tmp_path, operation_id, source_entry=entry)
+
+    assert target.read_bytes() == b"new file bytes\n"
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert list(target.parent.glob(f".{target.name}.previous-*")) == []
+
+
+def test_concurrent_replacement_before_rollback_is_not_overwritten(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target, operation_id, entry, _ = _restore_fixture(tmp_path, "file")
+    parent_identity = target.parent.stat()
+    original_fsync = journal.os.fsync
+    replaced = False
+
+    def replace_target_then_fail(descriptor: int) -> None:
+        nonlocal replaced
+        if not replaced and journal._same_node(parent_identity, os.fstat(descriptor)):
+            concurrent = target.parent / ".concurrent-target"
+            concurrent.write_bytes(b"concurrent bytes\n")
+            os.replace(concurrent, target)
+            replaced = True
+            raise OSError("post-publish parent fsync failed")
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(journal.os, "fsync", replace_target_then_fail)
+    with pytest.raises(RuntimeError, match="backup preserved"):
+        journal.restore_before_snapshots(tmp_path, operation_id, source_entry=entry)
+
+    assert replaced is True
+    assert target.read_bytes() == b"concurrent bytes\n"
+    backups = list(target.parent.glob(f".{target.name}.previous-*"))
+    assert len(backups) == 1
+    assert backups[0].read_bytes() == b"new file bytes\n"
+
+
+def test_rollback_parent_fsync_failure_preserves_unique_backup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target, operation_id, entry, _ = _restore_fixture(tmp_path, "file")
+    parent_identity = target.parent.stat()
+    original_fsync = journal.os.fsync
+    parent_calls = 0
+
+    def fail_publish_and_rollback_fsync(descriptor: int) -> None:
+        nonlocal parent_calls
+        if journal._same_node(parent_identity, os.fstat(descriptor)):
+            parent_calls += 1
+            if parent_calls <= 2:
+                raise OSError(f"parent fsync failure {parent_calls}")
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(journal.os, "fsync", fail_publish_and_rollback_fsync)
+    with pytest.raises(RuntimeError, match="backup preserved"):
+        journal.restore_before_snapshots(tmp_path, operation_id, source_entry=entry)
+
+    assert parent_calls == 2
+    backups = list(target.parent.glob(f".{target.name}.previous-*"))
+    assert len(backups) == 1
+    assert backups[0].read_bytes() == b"new file bytes\n"
+    assert target.read_bytes() == b"new file bytes\n"
 
 
 @pytest.mark.parametrize("reader", ("single", "enumeration"))

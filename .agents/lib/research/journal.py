@@ -1147,33 +1147,386 @@ def _remove_journal_relative(project_root: Path, relative_path: str) -> None:
         _remove_at(parent_fd, leaf)
 
 
-def _replace_staged_at(parent_fd: int, staged: str, target: str) -> None:
-    previous = f".{target}.previous-{uuid.uuid4().hex}"
-    moved_previous = False
-    remove_previous = False
+def _stable_node_digest_at(
+    parent_fd: int,
+    name: str,
+    *,
+    expected_identity: os.stat_result | None = None,
+) -> tuple[str, os.stat_result]:
+    before = _lstat_at(parent_fd, name)
+    if before is None or (
+        expected_identity is not None and not _same_read_identity(expected_identity, before)
+    ):
+        raise RuntimeError("Journal restore target changed during verification.")
+    digest = _anchored_node_digest_at(parent_fd, name)
+    after = _lstat_at(parent_fd, name)
+    if digest is None or after is None or not _same_read_identity(before, after):
+        raise RuntimeError("Journal restore target changed during verification.")
+    return digest, after
+
+
+def _remove_owned_at(parent_fd: int, name: str, identity: os.stat_result) -> None:
+    current = _lstat_at(parent_fd, name)
+    if current is None:
+        return
+    if not _same_read_identity(identity, current):
+        raise RuntimeError("Journal restore cleanup refused a concurrently replaced node.")
+    _remove_at(parent_fd, name)
+
+
+def _clone_node_at(
+    parent_fd: int,
+    source: str,
+    destination: str,
+    *,
+    source_identity: os.stat_result,
+    source_digest: str,
+) -> os.stat_result:
+    current = _lstat_at(parent_fd, source)
+    if current is None or not _same_read_identity(source_identity, current):
+        raise RuntimeError("Journal restore backup changed before rollback.")
+    kind = _node_kind(current)
+    mode = stat.S_IMODE(current.st_mode)
+    clone: os.stat_result | None = None
+    try:
+        if kind == "file":
+            data = _read_anchored_regular(parent_fd, source, current)
+            _write_new_regular_at(parent_fd, destination, data, mode)
+        elif kind == "directory":
+            source_fd = os.open(source, _directory_open_flags(), dir_fd=parent_fd)
+            try:
+                if not _same_node(current, os.fstat(source_fd)):
+                    raise RuntimeError("Journal restore backup changed before rollback.")
+                _copy_anchored_tree_to_fd(source_fd, parent_fd, destination)
+                if not _same_read_identity(current, os.fstat(source_fd)):
+                    raise RuntimeError("Journal restore backup changed during rollback.")
+            finally:
+                os.close(source_fd)
+        elif kind == "symlink":
+            link_target = os.readlink(source, dir_fd=parent_fd)
+            after_read = _lstat_at(parent_fd, source)
+            if after_read is None or not _same_read_identity(current, after_read):
+                raise RuntimeError("Journal restore backup changed during rollback.")
+            os.symlink(link_target, destination, dir_fd=parent_fd)
+        else:
+            raise RuntimeError("Journal restore refuses a special-node rollback backup.")
+
+        clone = _lstat_at(parent_fd, destination)
+        if clone is None:
+            raise RuntimeError("Journal restore rollback staging disappeared.")
+        clone_digest, clone = _stable_node_digest_at(parent_fd, destination, expected_identity=clone)
+        current_after = _lstat_at(parent_fd, source)
+        if (
+            clone_digest != source_digest
+            or current_after is None
+            or not _same_read_identity(source_identity, current_after)
+        ):
+            raise RuntimeError("Journal restore rollback staging failed verification.")
+        return clone
+    except BaseException:
+        current_clone = _lstat_at(parent_fd, destination)
+        if clone is not None and current_clone is not None and _same_read_identity(clone, current_clone):
+            _remove_at(parent_fd, destination)
+        raise
+
+
+def _rollback_from_previous_at(
+    parent_fd: int,
+    target: str,
+    previous: str,
+    *,
+    previous_identity: os.stat_result,
+    previous_digest: str,
+    installed_identity: os.stat_result | None,
+) -> None:
+    current = _lstat_at(parent_fd, target)
+    if installed_identity is None:
+        if current is not None:
+            raise RuntimeError(
+                "Journal restore rollback refused to overwrite a concurrent target; "
+                f"backup preserved as {previous}."
+            )
+    elif current is None or not _same_read_identity(installed_identity, current):
+        raise RuntimeError(
+            "Journal restore rollback refused to overwrite a concurrent target; "
+            f"backup preserved as {previous}."
+        )
+
+    rollback_staged = f".{target}.rollback-{uuid.uuid4().hex}"
+    rollback_identity: os.stat_result | None = None
+    displaced = f".{target}.displaced-{uuid.uuid4().hex}"
+    displaced_identity: os.stat_result | None = None
+    try:
+        rollback_identity = _clone_node_at(
+            parent_fd,
+            previous,
+            rollback_staged,
+            source_identity=previous_identity,
+            source_digest=previous_digest,
+        )
+        current = _lstat_at(parent_fd, target)
+        if installed_identity is None:
+            if current is not None:
+                raise RuntimeError("Journal restore target changed before rollback publication.")
+        elif current is None or not _same_read_identity(installed_identity, current):
+            raise RuntimeError("Journal restore target changed before rollback publication.")
+        else:
+            displaced_digest, current = _stable_node_digest_at(
+                parent_fd,
+                target,
+                expected_identity=current,
+            )
+            os.replace(target, displaced, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+            displaced_identity = _lstat_at(parent_fd, displaced)
+            if displaced_identity is None or not _same_node(installed_identity, displaced_identity):
+                raise RuntimeError("Journal restore could not retain its displaced target.")
+            stable_displaced_digest, displaced_identity = _stable_node_digest_at(
+                parent_fd,
+                displaced,
+                expected_identity=displaced_identity,
+            )
+            if stable_displaced_digest != displaced_digest:
+                raise RuntimeError("Journal restore displaced target changed identity.")
+        if _lstat_at(parent_fd, target) is not None:
+            raise RuntimeError("Journal restore target was concurrently recreated before rollback.")
+        os.replace(rollback_staged, target, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        restored = _lstat_at(parent_fd, target)
+        if restored is None or not _same_node(rollback_identity, restored):
+            raise RuntimeError("Journal restore rollback publication changed identity.")
+        restored_digest, restored = _stable_node_digest_at(
+            parent_fd,
+            target,
+            expected_identity=restored,
+        )
+        if restored_digest != previous_digest:
+            raise RuntimeError("Journal restore rollback publication failed verification.")
+        os.fsync(parent_fd)
+        durable_digest, durable = _stable_node_digest_at(
+            parent_fd,
+            target,
+            expected_identity=restored,
+        )
+        if durable_digest != previous_digest:
+            raise RuntimeError("Journal restore rollback target changed after parent fsync.")
+        current_previous = _lstat_at(parent_fd, previous)
+        if current_previous is None or not _same_read_identity(previous_identity, current_previous):
+            raise RuntimeError("Journal restore rollback backup changed before cleanup.")
+        if displaced_identity is not None:
+            _remove_owned_at(parent_fd, displaced, displaced_identity)
+        _remove_owned_at(parent_fd, previous, previous_identity)
+    except BaseException as rollback_error:
+        if rollback_identity is not None:
+            current_staged = _lstat_at(parent_fd, rollback_staged)
+            if current_staged is not None and _same_read_identity(rollback_identity, current_staged):
+                _remove_at(parent_fd, rollback_staged)
+        raise RuntimeError(
+            f"Journal restore rollback failed; backup preserved as {previous}."
+        ) from rollback_error
+
+
+def _rollback_to_absent_at(
+    parent_fd: int,
+    target: str,
+    *,
+    installed_identity: os.stat_result,
+) -> None:
+    current = _lstat_at(parent_fd, target)
+    if current is None or not _same_read_identity(installed_identity, current):
+        raise RuntimeError("Journal restore rollback refused to remove a concurrent target.")
+    installed_digest, current = _stable_node_digest_at(
+        parent_fd,
+        target,
+        expected_identity=current,
+    )
+    recovery_name = f".{target}.failed-{uuid.uuid4().hex}"
+    os.replace(target, recovery_name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+    recovery_identity = _lstat_at(parent_fd, recovery_name)
+    if recovery_identity is None or not _same_node(installed_identity, recovery_identity):
+        raise RuntimeError("Journal restore rollback could not retain its installed node.")
+    recovery_digest, recovery_identity = _stable_node_digest_at(
+        parent_fd,
+        recovery_name,
+        expected_identity=recovery_identity,
+    )
+    if recovery_digest != installed_digest:
+        raise RuntimeError("Journal restore rollback recovery material changed identity.")
     try:
         if _lstat_at(parent_fd, target) is not None:
+            raise RuntimeError("Journal restore target was concurrently recreated during rollback.")
+        os.fsync(parent_fd)
+        if _lstat_at(parent_fd, target) is not None:
+            raise RuntimeError("Journal restore target was concurrently recreated after rollback fsync.")
+        _remove_owned_at(parent_fd, recovery_name, recovery_identity)
+    except BaseException as rollback_error:
+        raise RuntimeError(
+            f"Journal restore rollback failed; recovery material preserved as {recovery_name}."
+        ) from rollback_error
+
+
+def _replace_staged_at(
+    parent_fd: int,
+    staged: str,
+    target: str,
+    *,
+    expected_digest: str,
+) -> None:
+    staged_identity = _lstat_at(parent_fd, staged)
+    if staged_identity is None:
+        raise RuntimeError("Journal restore staging disappeared before publication.")
+    staged_digest, staged_identity = _stable_node_digest_at(
+        parent_fd,
+        staged,
+        expected_identity=staged_identity,
+    )
+    if staged_digest != expected_digest:
+        _remove_owned_at(parent_fd, staged, staged_identity)
+        raise RuntimeError("Journal restore staging does not match the expected snapshot digest.")
+
+    previous = f".{target}.previous-{uuid.uuid4().hex}"
+    original_identity = _lstat_at(parent_fd, target)
+    original_digest: str | None = None
+    if original_identity is not None:
+        original_digest, original_identity = _stable_node_digest_at(
+            parent_fd,
+            target,
+            expected_identity=original_identity,
+        )
+    previous_identity: os.stat_result | None = None
+    installed_identity: os.stat_result | None = None
+    try:
+        if original_identity is not None:
             os.replace(target, previous, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
-            moved_previous = True
+            previous_identity = _lstat_at(parent_fd, previous)
+            if previous_identity is None or not _same_node(original_identity, previous_identity):
+                raise RuntimeError("Journal restore could not anchor the previous target backup.")
+            stable_previous_digest, previous_identity = _stable_node_digest_at(
+                parent_fd,
+                previous,
+                expected_identity=previous_identity,
+            )
+            if stable_previous_digest != original_digest:
+                raise RuntimeError("Journal restore previous target backup changed identity.")
+        current_staged = _lstat_at(parent_fd, staged)
+        if current_staged is None or not _same_read_identity(staged_identity, current_staged):
+            raise RuntimeError("Journal restore staging changed before publication.")
         os.replace(staged, target, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
-        remove_previous = True
+        installed_identity = _lstat_at(parent_fd, target)
+        if installed_identity is None or not _same_node(staged_identity, installed_identity):
+            raise RuntimeError("Journal restore publication changed identity.")
+        actual_digest, installed_identity = _stable_node_digest_at(
+            parent_fd,
+            target,
+            expected_identity=installed_identity,
+        )
+        if actual_digest != expected_digest:
+            raise RuntimeError("Journal restore publication failed expected digest verification.")
+        os.fsync(parent_fd)
+        durable_digest, durable_identity = _stable_node_digest_at(
+            parent_fd,
+            target,
+            expected_identity=installed_identity,
+        )
+        if durable_digest != expected_digest:
+            raise RuntimeError("Journal restore target changed after parent fsync.")
+        installed_identity = durable_identity
     except BaseException as publish_error:
-        if moved_previous and _lstat_at(parent_fd, target) is None:
+        current_previous = _lstat_at(parent_fd, previous)
+        if previous_identity is None and original_identity is not None and current_previous is not None:
+            if _same_node(original_identity, current_previous):
+                previous_identity = current_previous
+        current_target = _lstat_at(parent_fd, target)
+        if installed_identity is None and current_target is not None:
+            if _same_node(staged_identity, current_target) and _lstat_at(parent_fd, staged) is None:
+                installed_identity = current_target
+        try:
+            if previous_identity is not None:
+                assert original_digest is not None
+                _rollback_from_previous_at(
+                    parent_fd,
+                    target,
+                    previous,
+                    previous_identity=previous_identity,
+                    previous_digest=original_digest,
+                    installed_identity=installed_identity,
+                )
+            elif installed_identity is not None:
+                _rollback_to_absent_at(
+                    parent_fd,
+                    target,
+                    installed_identity=installed_identity,
+                )
+            elif original_identity is not None:
+                current_target = _lstat_at(parent_fd, target)
+                if current_target is None or not _same_read_identity(original_identity, current_target):
+                    raise RuntimeError("Journal restore target changed during failed publication.")
+        except BaseException as rollback_error:
+            suffix = f"; backup preserved as {previous}." if previous_identity is not None else "."
+            raise RuntimeError(f"Journal restore publish and rollback failed{suffix}") from rollback_error
+        finally:
+            current_staged = _lstat_at(parent_fd, staged)
+            if current_staged is not None and _same_read_identity(staged_identity, current_staged):
+                _remove_at(parent_fd, staged)
+        raise publish_error
+
+    if previous_identity is not None:
+        _remove_owned_at(parent_fd, previous, previous_identity)
+
+
+def _remove_target_durably_at(parent_fd: int, target: str) -> None:
+    original_identity = _lstat_at(parent_fd, target)
+    if original_identity is None:
+        return
+    original_digest, original_identity = _stable_node_digest_at(
+        parent_fd,
+        target,
+        expected_identity=original_identity,
+    )
+    previous = f".{target}.previous-{uuid.uuid4().hex}"
+    previous_identity: os.stat_result | None = None
+    try:
+        os.replace(target, previous, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        previous_identity = _lstat_at(parent_fd, previous)
+        if previous_identity is None or not _same_node(original_identity, previous_identity):
+            raise RuntimeError("Journal restore could not anchor the removed target backup.")
+        stable_previous_digest, previous_identity = _stable_node_digest_at(
+            parent_fd,
+            previous,
+            expected_identity=previous_identity,
+        )
+        if stable_previous_digest != original_digest:
+            raise RuntimeError("Journal restore removed target backup changed identity.")
+        if _lstat_at(parent_fd, target) is not None:
+            raise RuntimeError("Journal restore target was concurrently recreated before removal fsync.")
+        os.fsync(parent_fd)
+        if _lstat_at(parent_fd, target) is not None:
+            raise RuntimeError("Journal restore target was concurrently recreated after removal fsync.")
+    except BaseException as remove_error:
+        current_previous = _lstat_at(parent_fd, previous)
+        if previous_identity is None and current_previous is not None:
+            if _same_node(original_identity, current_previous):
+                previous_identity = current_previous
+        if previous_identity is not None:
             try:
-                os.replace(previous, target, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+                _rollback_from_previous_at(
+                    parent_fd,
+                    target,
+                    previous,
+                    previous_identity=previous_identity,
+                    previous_digest=original_digest,
+                    installed_identity=None,
+                )
             except BaseException as rollback_error:
                 raise RuntimeError(
-                    f"Journal restore publish and rollback failed; backup preserved as {previous}."
+                    f"Journal restore removal and rollback failed; backup preserved as {previous}."
                 ) from rollback_error
-            remove_previous = True
-        elif not moved_previous:
-            remove_previous = True
-        raise
-    finally:
-        if _lstat_at(parent_fd, staged) is not None:
-            _remove_at(parent_fd, staged)
-        if remove_previous and _lstat_at(parent_fd, previous) is not None:
-            _remove_at(parent_fd, previous)
+        else:
+            current_target = _lstat_at(parent_fd, target)
+            if current_target is None or not _same_read_identity(original_identity, current_target):
+                raise RuntimeError("Journal restore target changed during failed removal.") from remove_error
+        raise remove_error
+
+    assert previous_identity is not None
+    _remove_owned_at(parent_fd, previous, previous_identity)
 
 
 def _restore_target(project_root: Path, key: str, snapshot: dict) -> Path:
@@ -1217,7 +1570,7 @@ def _restore_target(project_root: Path, key: str, snapshot: dict) -> Path:
                     return target
                 raise RuntimeError(f"Missing anchored target parent for {key}")
             if kind == "absent":
-                _remove_at(parent_fd, leaf)
+                _remove_target_durably_at(parent_fd, leaf)
             elif kind == "file":
                 assert file_data is not None
                 staged = f".{leaf}.restore-file-{uuid.uuid4().hex}"
@@ -1233,27 +1586,36 @@ def _restore_target(project_root: Path, key: str, snapshot: dict) -> Path:
                     os.fsync(descriptor)
                 finally:
                     os.close(descriptor)
-                _replace_staged_at(parent_fd, staged, leaf)
+                _replace_staged_at(
+                    parent_fd,
+                    staged,
+                    leaf,
+                    expected_digest=str(snapshot.get("digest") or ""),
+                )
             elif kind == "directory":
                 assert payload_fd >= 0 and payload_metadata is not None
                 staged = f".{leaf}.restore-tree-{uuid.uuid4().hex}"
                 _copy_anchored_tree_to_fd(payload_fd, parent_fd, staged)
                 if not _same_read_identity(payload_metadata, os.fstat(payload_fd)):
                     raise RuntimeError(f"Journal directory snapshot changed for {key}")
-                _replace_staged_at(parent_fd, staged, leaf)
+                _replace_staged_at(
+                    parent_fd,
+                    staged,
+                    leaf,
+                    expected_digest=str(snapshot.get("digest") or ""),
+                )
             elif kind == "symlink":
                 staged = f".{leaf}.restore-link-{uuid.uuid4().hex}"
                 os.symlink(str(snapshot.get("link_target") or ""), staged, dir_fd=parent_fd)
-                _replace_staged_at(parent_fd, staged, leaf)
+                _replace_staged_at(
+                    parent_fd,
+                    staged,
+                    leaf,
+                    expected_digest=str(snapshot.get("digest") or ""),
+                )
             else:
                 raise RuntimeError(f"Unsupported journal snapshot kind for {key}: {kind or '<empty>'}")
 
-    expected_digest = snapshot.get("digest")
-    actual_digest = _anchored_target_digest(project_root, key)
-    if actual_digest != expected_digest:
-        raise RuntimeError(
-            f"Journal restore verification failed for {key}: expected {expected_digest}, found {actual_digest}"
-        )
     return target
 
 
