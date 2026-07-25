@@ -887,9 +887,11 @@ def test_default_owner_runner_streams_large_stdout_and_stderr_as_metadata_only()
             sys.executable,
             "-c",
             (
-                "import os; "
+                "import os,threading; "
                 f"data=b'x'*{size}; "
-                "os.write(1,data); os.write(2,data)"
+                "threads=[threading.Thread(target=os.write,args=(fd,data)) for fd in (1,2)]; "
+                "[thread.start() for thread in threads]; "
+                "[thread.join() for thread in threads]"
             ),
         ),
         env=dict(os.environ),
