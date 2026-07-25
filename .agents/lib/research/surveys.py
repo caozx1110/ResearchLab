@@ -14,6 +14,7 @@ from typing import Any
 
 from .common import load_yaml, utc_now_iso
 from .confirm import has_complete_confirmation_receipt
+from .evidence import record_external_source_contract
 from .records import (
     CanonicalUnitSnapshot,
     iter_records,
@@ -218,6 +219,7 @@ def _survey_snapshot_eligibility(
     if not has_complete_confirmation_receipt(
         current,
         verification_root=snapshot.record.path.parent,
+        external_source=record_external_source_contract(current),
         source_roots=source_roots,
     ):
         return current, ["unit confirmation receipt is missing or stale"]

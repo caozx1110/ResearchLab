@@ -8,7 +8,19 @@ from pathlib import Path
 import pytest
 import yaml
 
-from research.confirm import apply_confirmation
+from research.common import write_yaml_if_changed
+from research.confirm import apply_confirmation, confirm_unit
+from research.core import record_path, write_record
+from research.evidence import (
+    attach_claims,
+    build_verification_receipt,
+    record_external_source_contract,
+)
+from research.records import (
+    canonical_record_snapshot_for_record,
+    kind_payload_skeleton,
+    normalize_record_snapshot,
+)
 import research.surveys as surveys_module
 
 
@@ -47,6 +59,75 @@ def write_confirmed_unit(module, root: Path, record: dict, evidence_text: str = 
         encoding="utf-8",
     )
     return unit_dir
+
+
+def write_confirmed_external_repo_unit(root: Path) -> tuple[dict, Path]:
+    repo_root = root / "mini-repo"
+    repo_root.mkdir()
+    source_path = repo_root / "README.md"
+    source_path.write_text(
+        "# MiniSurveyRepo\n"
+        "This repository exposes a reusable survey integration entrypoint.\n",
+        encoding="utf-8",
+    )
+    unit_id = "r-survey-external"
+    payload = kind_payload_skeleton("repo", "MiniSurveyRepo")
+    payload["structure"]["repo_root"] = repo_root.resolve().as_posix()
+    payload["capability"]["core_capabilities"] = [
+        "Provides a reusable survey integration entrypoint."
+    ]
+    claims = [
+        {
+            "id": "claim-repo-survey-entrypoint",
+            "text": "The repository exposes a reusable survey integration entrypoint.",
+            "claim_type": "evaluation",
+            "confirmation_status": "pending_user_confirmation",
+            "evidence_refs": [
+                {
+                    "source_unit_id": unit_id,
+                    "artifact": "README.md",
+                    "locator": "line=2",
+                    "quote": "This repository exposes a reusable survey integration entrypoint.",
+                    "external_source": {"kind": "repo"},
+                }
+            ],
+        }
+    ]
+    attach_claims(payload, claims)
+    record = {
+        "id": unit_id,
+        "kind": "repo",
+        "title": "MiniSurveyRepo",
+        "status": "screened",
+        "maturity": "complete",
+        "confirmation_status": "pending_user_confirmation",
+        "needs_human_confirmation": True,
+        "information_types": ["evaluation"],
+        "summary": "robot learning survey integration",
+        "source": {"original_uri": repo_root.resolve().as_posix()},
+        "payload": payload,
+    }
+    build_verification_receipt(
+        record,
+        record_path(root, "repo", unit_id).parent,
+        external_source=record_external_source_contract(record),
+    )
+    canonical_path = write_record(root, record)
+    snapshot = canonical_record_snapshot_for_record(root, record)
+    persisted = normalize_record_snapshot(snapshot, root)
+    assert persisted is not None
+    confirmed = confirm_unit(
+        persisted,
+        "repo",
+        confirmed_by="Alice Researcher",
+        evidence=["Reviewed external repository evidence"],
+        user_authorization="I confirm this repository analysis.",
+        authorization_source="user_message",
+        project_root=root,
+        expected_record_snapshot=snapshot,
+    )
+    write_yaml_if_changed(canonical_path, confirmed)
+    return confirmed, source_path
 
 
 def build_filled_survey(tmp_path: Path):
@@ -184,6 +265,72 @@ def test_unit_binding_passes_tree_record_snapshot_into_confirmation_check(
     assert expected_snapshots
     assert all(snapshot is not None for snapshot in expected_snapshots)
     assert all(snapshot.raw_bytes == (unit_dir / "record.yaml").read_bytes() for snapshot in expected_snapshots)
+
+
+def test_external_repo_evidence_is_survey_eligible_and_contract_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_synthesizer()
+    record, source_path = write_confirmed_external_repo_unit(tmp_path)
+
+    eligible, excluded = surveys_module.select_current_confirmed_survey_records(
+        tmp_path,
+        [record],
+        query="robot learning",
+    )
+    assert [item["id"] for item in eligible] == [record["id"]]
+    assert excluded == []
+    scaffold = module.build_survey_scaffold(
+        [record],
+        root=tmp_path,
+        query="robot learning",
+        kind="",
+        topic="",
+        tag="",
+        pool="",
+        mode="survey",
+        as_of="2026-07-25T00:00:00Z",
+    )
+    assert scaffold["kb_anchor"]["unit_ids"] == [record["id"]]
+
+    source_path.write_text("# MiniSurveyRepo\nTampered external bytes.\n", encoding="utf-8")
+    eligible, excluded = surveys_module.select_current_confirmed_survey_records(
+        tmp_path,
+        [record],
+        query="robot learning",
+    )
+    assert eligible == []
+    assert excluded[0]["reasons"]
+    with pytest.raises(SystemExit, match="not currently confirmed"):
+        surveys_module.build_unit_binding(tmp_path, record)
+
+    source_path.write_text(
+        "# MiniSurveyRepo\n"
+        "This repository exposes a reusable survey integration entrypoint.\n",
+        encoding="utf-8",
+    )
+    forged_root = tmp_path / "forged-repo"
+    forged_root.mkdir()
+    (forged_root / "README.md").write_text("forged bytes\n", encoding="utf-8")
+    for contract in (
+        None,
+        {"kind": "repo", "base_root": forged_root.resolve().as_posix()},
+    ):
+        monkeypatch.setattr(
+            surveys_module,
+            "record_external_source_contract",
+            lambda _record, current_contract=contract: current_contract,
+        )
+        eligible, excluded = surveys_module.select_current_confirmed_survey_records(
+            tmp_path,
+            [record],
+            query="robot learning",
+        )
+        assert eligible == []
+        assert excluded[0]["reasons"]
+        with pytest.raises(SystemExit, match="not currently confirmed"):
+            surveys_module.build_unit_binding(tmp_path, record)
 
 
 def test_unit_binding_rejects_ambiguous_canonical_unit_id(tmp_path: Path) -> None:
