@@ -805,21 +805,30 @@ def load_decisions(root: Path, program_id: str) -> list[dict[str, str]]:
                 for item in raw_items
                 if isinstance(item, dict) and str(item.get("id") or "")
             }
+            for item in raw_items:
+                if (
+                    not isinstance(item, dict)
+                    or not isinstance(item.get("legacy_import"), dict)
+                    or str(item.get("confirmation_status") or "") == "confirmed"
+                ):
+                    continue
+                decision = item.get("payload", {}).get("decision", {})
+                decision = decision if isinstance(decision, dict) else {}
+                current_container_decisions.append(
+                    {
+                        "title": str(decision.get("text") or item.get("id") or "legacy decision"),
+                        "stage": str(decision.get("stage") or ""),
+                        "rationale": str(decision.get("rationale") or ""),
+                        "alternatives": "",
+                        "confirmation": "pending_user_confirmation",
+                        "legacy_pending": "true",
+                    }
+                )
     for bound in batch.judgements if batch is not None else ():
         item = bound.record
         decision = item.get("payload", {}).get("decision", {})
         decision = decision if isinstance(decision, dict) else {}
         if isinstance(item.get("legacy_import"), dict) and str(item.get("confirmation_status") or "") != "confirmed":
-            current_container_decisions.append(
-                {
-                    "title": str(decision.get("text") or item.get("id") or "legacy decision"),
-                    "stage": str(decision.get("stage") or ""),
-                    "rationale": str(decision.get("rationale") or ""),
-                    "alternatives": "",
-                    "confirmation": "pending_user_confirmation",
-                    "legacy_pending": "true",
-                }
-            )
             continue
         if str(item.get("confirmation_status") or "") != "confirmed":
             continue
