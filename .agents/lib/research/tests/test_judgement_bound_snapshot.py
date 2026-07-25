@@ -165,9 +165,24 @@ def test_side_judgement_batch_capture_is_linear(
     batch = load_bound_judgement_batch_snapshot(tmp_path, subjects)
 
     assert captures == container_count
+    class LookupSpy(dict):
+        def __init__(self, values):
+            super().__init__(values)
+            self.get_calls = 0
+
+        def get(self, key, default=None):
+            self.get_calls += 1
+            return super().get(key, default)
+
+        def __iter__(self):
+            raise AssertionError("resolve must not scan the subject index")
+
+    lookup_spy = LookupSpy(batch.subject_index)
+    object.__setattr__(batch, "subject_index", lookup_spy)
     assert [batch.resolve(subject).record["id"] for subject in subjects] == [
         subject["id"] for subject in subjects
     ]
+    assert lookup_spy.get_calls == container_count
     assert batch.is_current()
     assert captures == container_count
 
@@ -188,6 +203,17 @@ def test_side_snapshot_alias_root_matches_canonical_root(tmp_path: Path, kind: s
     assert alias.record == record == canonical.record
     assert alias.is_current()
     assert canonical.is_current()
+
+
+def test_snapshot_bearing_entry_rejects_symlink_workspace_root(tmp_path: Path) -> None:
+    canonical_root = tmp_path / "canonical-workspace"
+    canonical_root.mkdir()
+    _path, _record, subject = _side_case(canonical_root, "program_decision")
+    alias_root = tmp_path / "workspace-link"
+    alias_root.symlink_to(canonical_root, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="project root itself must be a real directory"):
+        load_bound_judgement_snapshot(alias_root, subject)
 
 
 @pytest.mark.parametrize("fault", ["malformed", "duplicate-key", "symlink"])

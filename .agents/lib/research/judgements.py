@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -128,21 +129,20 @@ class BoundJudgementBatchSnapshot:
     side_containers: tuple[ProjectYamlMappingSnapshot, ...]
     unit_judgements: tuple[BoundJudgementSnapshot, ...]
     validate_side_current: Callable[[], bool] = field(repr=False, compare=False)
+    subject_index: dict[tuple[str, str], BoundJudgementSnapshot | None] = field(
+        repr=False,
+        compare=False,
+        default_factory=dict,
+    )
 
     def resolve(self, subject: Any) -> BoundJudgementSnapshot | None:
         if not isinstance(subject, dict):
             return None
         subject_kind = _text(subject.get("kind"))
         subject_id = _text(subject.get("id"))
-        matches = [
-            bound
-            for bound in self.judgements
-            if _text(bound.record.get("kind")) == subject_kind
-            and _text(bound.record.get("id")) == subject_id
-        ]
-        if len(matches) != 1:
+        bound = self.subject_index.get((subject_kind, subject_id))
+        if bound is None:
             return None
-        bound = matches[0]
         supplied_owner = _text(subject.get("owner"))
         supplied_path = _text(subject.get("path"))
         if supplied_owner and supplied_owner != bound.owner:
@@ -170,7 +170,25 @@ def _text(value: Any) -> str:
 
 
 def _canonical_project_root(root: str | Path) -> Path:
-    return Path(root).resolve()
+    lexical_root = Path(root).absolute()
+    try:
+        lexical_stat = lexical_root.lstat()
+    except OSError as exc:
+        raise ValueError("project root is not an existing ordinary directory") from exc
+    if stat.S_ISLNK(lexical_stat.st_mode) or not stat.S_ISDIR(lexical_stat.st_mode):
+        raise ValueError("project root itself must be a real directory, not a symlink")
+    try:
+        canonical_root = lexical_root.resolve(strict=True)
+        canonical_stat = canonical_root.lstat()
+    except OSError as exc:
+        raise ValueError("project root cannot be canonicalized safely") from exc
+    if (
+        not stat.S_ISDIR(canonical_stat.st_mode)
+        or (canonical_stat.st_dev, canonical_stat.st_ino)
+        != (lexical_stat.st_dev, lexical_stat.st_ino)
+    ):
+        raise ValueError("project root changed while it was being canonicalized")
+    return canonical_root
 
 
 def _safe_relative_path(root: Path, path: Path) -> str:
@@ -1229,12 +1247,22 @@ def load_bound_judgement_batch_snapshot(
             )
         except (OSError, RuntimeError, UnicodeError, ValueError, yaml.YAMLError):
             continue
+    all_bounds = tuple([*side_bounds, *unit_bounds])
+    subject_index: dict[tuple[str, str], BoundJudgementSnapshot | None] = {
+        key: None
+        for key, count in subject_counts.items()
+        if count != 1
+    }
+    for bound in all_bounds:
+        key = (_text(bound.record.get("kind")), _text(bound.record.get("id")))
+        subject_index[key] = bound if key not in subject_index else None
     return BoundJudgementBatchSnapshot(
         root=project_root,
-        judgements=tuple([*side_bounds, *unit_bounds]),
+        judgements=all_bounds,
         side_containers=side_discovery.containers,
         unit_judgements=tuple(unit_bounds),
         validate_side_current=side_discovery.is_current,
+        subject_index=subject_index,
     )
 
 
