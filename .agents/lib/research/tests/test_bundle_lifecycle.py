@@ -484,8 +484,7 @@ def test_reviewed_uninstall_plan_preserves_runtime_and_kb_lifecycle(tmp_path: Pa
     )
     assert planned.returncode == 0, planned.stdout + planned.stderr
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
-    assert len(plan["conditional_runtime_changes"]) == 1
-    assert plan["conditional_runtime_changes"][0]["path"] == str(workspace / ".venv")
+    assert plan["conditional_runtime_changes"] == []
 
     contract = plan["apply_contract"]
     argv = list(contract["argv"])

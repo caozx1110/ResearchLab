@@ -775,6 +775,61 @@ def test_user_agents_suffix_after_managed_block_survives_exact_uninstall(tmp_pat
     assert target.read_bytes() == original + suffix
 
 
+def test_legacy_manifests_remove_managed_agents_without_deleting_user_content(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "legacy-managed-block-workspace"
+    workspace.mkdir()
+    target = workspace / "AGENTS.md"
+    original = b"legacy user rule\n"
+    target.write_bytes(original)
+    installed = _run_copy_action(tmp_path, workspace, action="install")
+    assert installed.returncode == 0, installed.stdout + installed.stderr
+    manifest_path = workspace / ".agents/.install-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.pop("agents_md_roundtrip")
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    uninstalled = _run_copy_action(tmp_path, workspace, action="uninstall")
+
+    assert uninstalled.returncode == 0, uninstalled.stdout + uninstalled.stderr
+    assert target.read_bytes().startswith(original)
+    assert b"workspace-oss managed" not in target.read_bytes()
+
+    legacy_workspace = tmp_path / "legacy-whole-file-workspace"
+    installed = _run_copy_action(tmp_path, legacy_workspace, action="install")
+    assert installed.returncode == 0, installed.stdout + installed.stderr
+    legacy_target = legacy_workspace / "AGENTS.md"
+    legacy_content = b"legacy installer owned file\n"
+    legacy_target.write_bytes(legacy_content)
+    manifest_path = legacy_workspace / ".agents/.install-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    legacy_digest = hashlib.sha256(legacy_content).hexdigest()
+    manifest.pop("agents_md_roundtrip")
+    manifest["agents_md"] = "managed"
+    manifest["agents_md_sha"] = legacy_digest
+    manifest["files"]["AGENTS.md"] = legacy_digest
+    checksum = hashlib.sha256()
+    for relative in sorted(manifest["files"]):
+        checksum.update(relative.encode("utf-8"))
+        checksum.update(b"\0")
+        checksum.update(manifest["files"][relative].encode("ascii"))
+        checksum.update(b"\0")
+    manifest["tree_checksum"] = checksum.hexdigest()
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    uninstalled = _run_copy_action(tmp_path, legacy_workspace, action="uninstall")
+
+    assert uninstalled.returncode == 0, uninstalled.stdout + uninstalled.stderr
+    assert not legacy_target.exists()
+
+
 def test_ready_managed_venv_suppresses_update_warning_and_conditional_target(
     tmp_path: Path,
 ) -> None:
@@ -837,6 +892,143 @@ def test_ready_managed_venv_suppresses_update_warning_and_conditional_target(
     assert applied.returncode == 0, applied.stdout + applied.stderr
     assert "Python 依赖尚未就绪" not in applied.stdout + applied.stderr
     assert "skills 已是最新版本" in applied.stdout
+
+
+def test_unsafe_managed_venv_nodes_warn_without_execution_or_plan_writes(tmp_path: Path) -> None:
+    for unsafe_kind in ("broken-leaf", "fifo-leaf", "venv-symlink", "bin-symlink", "slow-leaf"):
+        case_root = tmp_path / unsafe_kind
+        workspace = case_root / "workspace"
+        home = case_root / "home"
+        victim = case_root / "victim"
+        marker = case_root / "unsafe-executed"
+        workspace.mkdir(parents=True)
+        home.mkdir()
+        (victim / "bin").mkdir(parents=True)
+        victim_python = victim / "bin/python"
+        victim_python.write_text(f"#!/bin/sh\ntouch {marker!s}\nexit 0\n", encoding="utf-8")
+        victim_python.chmod(0o755)
+        managed_bin = workspace / ".venv/bin"
+        if unsafe_kind == "venv-symlink":
+            (workspace / ".venv").symlink_to(victim, target_is_directory=True)
+        elif unsafe_kind == "bin-symlink":
+            (workspace / ".venv").mkdir()
+            managed_bin.symlink_to(victim / "bin", target_is_directory=True)
+        else:
+            managed_bin.mkdir(parents=True)
+            managed_python = managed_bin / "python"
+            if unsafe_kind == "broken-leaf":
+                managed_python.symlink_to(case_root / "missing-python")
+            elif unsafe_kind == "fifo-leaf":
+                os.mkfifo(managed_python)
+            else:
+                managed_python.write_text(
+                    f"#!{sys.executable!s}\nimport time\ntime.sleep(30)\n",
+                    encoding="utf-8",
+                )
+                managed_python.chmod(0o755)
+        before = _workspace_snapshot(workspace)
+        plan_path = case_root / "plan.json"
+        started = time.monotonic()
+        result = subprocess.run(
+            [
+                "bash",
+                str(_project_root() / "install.sh"),
+                "--agent-plan-json",
+                str(plan_path),
+                "--codex",
+                "--project",
+                str(workspace),
+                "--yes",
+            ],
+            cwd=_project_root(),
+            env={
+                **os.environ,
+                "HOME": str(home),
+                "NO_COLOR": "1",
+                "RESEARCH_PYTHON": "/bin/false",
+                "RESEARCH_NO_PDF_BACKEND": "1",
+            },
+            stdin=subprocess.DEVNULL,
+            text=True,
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+        elapsed = time.monotonic() - started
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert elapsed < 12
+        assert "Python 依赖尚未就绪" in result.stdout + result.stderr
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        runtime = plan["conditional_runtime_changes"]
+        assert len(runtime) == 1
+        assert runtime[0]["path"] == str(workspace / ".venv")
+        assert _workspace_snapshot(workspace) == before
+        assert not marker.exists()
+
+
+def test_managed_venv_ancestor_swap_is_detected_without_executing_rebound_target(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "swapped-venv-workspace"
+    home = tmp_path / "swapped-venv-home"
+    victim = tmp_path / "swapped-venv-victim"
+    marker = tmp_path / "rebound-python-executed"
+    managed_bin = workspace / ".venv/bin"
+    managed_bin.mkdir(parents=True)
+    home.mkdir()
+    (victim / "bin").mkdir(parents=True)
+    victim_python = victim / "bin/python"
+    victim_python.write_text(f"#!/bin/sh\ntouch {marker!s}\nexit 0\n", encoding="utf-8")
+    victim_python.chmod(0o755)
+    managed_python = managed_bin / "python"
+    managed_python.write_text(
+        "#!/bin/sh\n"
+        'mv "$PROBE_WORKSPACE/.venv" "$PROBE_WORKSPACE/.venv-original"\n'
+        'ln -s "$PROBE_VICTIM" "$PROBE_WORKSPACE/.venv"\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    managed_python.chmod(0o755)
+    plan_path = tmp_path / "swapped-venv-plan.json"
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(_project_root() / "install.sh"),
+            "--agent-plan-json",
+            str(plan_path),
+            "--codex",
+            "--project",
+            str(workspace),
+            "--yes",
+        ],
+        cwd=_project_root(),
+        env={
+            **os.environ,
+            "HOME": str(home),
+            "NO_COLOR": "1",
+            "RESEARCH_PYTHON": "/bin/false",
+            "RESEARCH_NO_PDF_BACKEND": "1",
+            "PROBE_WORKSPACE": str(workspace),
+            "PROBE_VICTIM": str(victim),
+        },
+        stdin=subprocess.DEVNULL,
+        text=True,
+        capture_output=True,
+        timeout=15,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Python 依赖尚未就绪" in result.stdout + result.stderr
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    runtime = plan["conditional_runtime_changes"]
+    assert len(runtime) == 1
+    assert runtime[0]["path"] == str(workspace / ".venv")
+    assert (workspace / ".venv").is_symlink()
+    assert (workspace / ".venv-original/bin/python").is_file()
+    assert not marker.exists()
 
 
 def test_installer_smoke_does_not_create_unplanned_bytecode(tmp_path: Path) -> None:

@@ -31,6 +31,21 @@ def _environment(tmp_path: Path) -> dict[str, str]:
     }
 
 
+def _core_ready_python(tmp_path: Path) -> Path:
+    wrapper = tmp_path / "core-ready-python"
+    wrapper.write_text(
+        f"""#!/bin/sh
+if [ "${{1:-}}" = "-c" ] && [ "${{2:-}}" = "import yaml, markdownify, bs4" ]; then
+  exit 0
+fi
+exec {sys.executable!s} "$@"
+""",
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+    return wrapper
+
+
 def _plan(workspace: Path, plan_path: Path, env: dict[str, str], *, action: str = "install") -> dict[str, object]:
     argv = ["bash", str(_project_root() / "install.sh")]
     if action != "install":
@@ -69,6 +84,87 @@ def _apply(plan: dict[str, object], env: dict[str, str]) -> subprocess.Completed
         timeout=30,
         check=False,
     )
+
+
+def _rewrite_plan_integrity(plan: dict[str, object]) -> None:
+    install_lib = str(_project_root() / "install-lib")
+    if install_lib not in sys.path:
+        sys.path.insert(0, install_lib)
+    import agent_plan
+
+    contract = plan["apply_contract"]
+    assert isinstance(contract, dict)
+    argv = contract["argv"]
+    assert isinstance(argv, list)
+    digest = agent_plan.plan_digest(plan)
+    plan["plan_digest"] = digest
+    contract["requires_plan_digest"] = digest
+    argv[argv.index("--expected-plan-digest") + 1] = digest
+    Path(str(contract["plan_path"])).write_text(
+        json.dumps(plan, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _verify(plan: dict[str, object]) -> subprocess.CompletedProcess[str]:
+    source = plan["source"]
+    options = plan["options"]
+    assert isinstance(source, dict) and isinstance(options, dict)
+    source_tree = source["distributable_tree"]
+    assert isinstance(source_tree, dict)
+    contract = plan["apply_contract"]
+    assert isinstance(contract, dict)
+    plan_path = Path(str(contract["plan_path"]))
+    conditional = plan["conditional_runtime_changes"]
+    assert isinstance(conditional, list)
+    runtime_root = (
+        conditional[0]["path"]
+        if conditional and isinstance(conditional[0], dict)
+        else str(Path(str(plan["workspace"])) / ".venv")
+    )
+    argv = [
+        sys.executable,
+        str(_project_root() / "install-lib/agent_plan.py"),
+        "--verify-plan",
+        str(plan_path),
+        "--expected-plan-digest",
+        str(plan["plan_digest"]),
+        "--expected-plan-byte-sha256",
+        hashlib.sha256(plan_path.read_bytes()).hexdigest(),
+        "--expected-source-tree-digest",
+        str(source_tree["digest"]),
+        "--expected-source-commit",
+        str(source["commit"]),
+        "--current-action",
+        str(plan["action"]),
+        "--current-scope",
+        str(plan["scope"]),
+        "--current-workspace",
+        str(plan["workspace"]),
+        "--current-home",
+        str(plan["home"]),
+        "--current-distributable-root",
+        str(source["distributable_root"]),
+        "--current-runtime-root",
+        str(runtime_root),
+        "--current-operation-time",
+        str(plan["operation_time"]),
+        "--current-source-strategy",
+        str(source["strategy"]),
+        "--current-source-checkout",
+        str(source["checkout"]),
+        "--current-source-origin",
+        str(source["origin"]),
+        "--current-source-branch",
+        str(source["branch"]),
+    ]
+    for tool in plan["tools"]:
+        argv.extend(["--current-tool", str(tool)])
+    if options["force"]:
+        argv.append("--current-force")
+    if options["kb_on_path"]:
+        argv.append("--current-kb-on-path")
+    return subprocess.run(argv, text=True, capture_output=True, check=False)
 
 
 def _race_python_wrapper(tmp_path: Path, env: dict[str, str], *, mode: str, manifest: Path) -> dict[str, str]:
@@ -183,6 +279,78 @@ def test_agent_plan_same_bytes_new_manifest_inode_is_stale_at_ws_sync_boundary(t
     assert manifest.read_bytes() == before
     assert manifest.stat().st_ino != inode_before
     assert version.read_bytes() == version_before
+
+
+def test_agent_plan_verifier_accepts_zero_conditional_runtime_targets(tmp_path: Path) -> None:
+    workspace = tmp_path / "zero-runtime-workspace"
+    workspace.mkdir()
+    env = _environment(tmp_path)
+    env["RESEARCH_PYTHON"] = str(_core_ready_python(tmp_path))
+    plan = _plan(workspace, tmp_path / "zero-runtime-plan.json", env)
+
+    assert plan["conditional_runtime_changes"] == []
+    verified = _verify(plan)
+
+    assert verified.returncode == 0, verified.stdout + verified.stderr
+    assert not any(workspace.iterdir())
+    assert not (workspace / ".venv").exists()
+
+
+def test_agent_plan_verifier_accepts_one_known_conditional_runtime_target(tmp_path: Path) -> None:
+    workspace = tmp_path / "one-runtime-workspace"
+    workspace.mkdir()
+    planning_env = _environment(tmp_path)
+    planning_env.pop("RESEARCH_NO_MANAGED_VENV")
+    planning_env["RESEARCH_PYTHON"] = "/bin/false"
+    plan = _plan(workspace, tmp_path / "one-runtime-plan.json", planning_env)
+
+    assert len(plan["conditional_runtime_changes"]) == 1
+    verified = _verify(plan)
+
+    assert verified.returncode == 0, verified.stdout + verified.stderr
+    assert not any(workspace.iterdir())
+    assert not (workspace / ".venv").exists()
+
+
+@pytest.mark.parametrize("mutation", ["duplicate", "operation", "condition", "projection"])
+def test_agent_plan_verifier_rejects_unknown_or_multiple_conditional_runtime_targets(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    workspace = tmp_path / f"invalid-runtime-{mutation}"
+    workspace.mkdir()
+    planning_env = _environment(tmp_path)
+    planning_env.pop("RESEARCH_NO_MANAGED_VENV")
+    planning_env["RESEARCH_PYTHON"] = "/bin/false"
+    plan = _plan(workspace, tmp_path / f"invalid-runtime-{mutation}.json", planning_env)
+    targets = plan["targets"]
+    conditional = plan["conditional_runtime_changes"]
+    assert isinstance(targets, list) and isinstance(conditional, list) and len(conditional) == 1
+    if mutation == "duplicate":
+        duplicate = dict(conditional[0])
+        targets.append(duplicate)
+        conditional.append(duplicate)
+        plan["target_count"] = len(targets)
+    elif mutation in {"operation", "condition"}:
+        runtime_target = next(
+            target
+            for target in targets
+            if isinstance(target, dict) and target.get("operation") == "conditional-runtime-tree"
+        )
+        if mutation == "operation":
+            runtime_target["operation"] = "unknown-runtime-tree"
+            conditional[0]["operation"] = "unknown-runtime-tree"
+        else:
+            runtime_target["condition"] = "unknown resolver condition"
+            conditional[0]["condition"] = "unknown resolver condition"
+    else:
+        plan["conditional_runtime_changes"] = []
+    _rewrite_plan_integrity(plan)
+
+    verified = _verify(plan)
+
+    assert verified.returncode == 1
+    assert not any(workspace.iterdir())
 
 
 @pytest.mark.parametrize("unsafe_kind", ["ancestor-symlink", "leaf-fifo"])
