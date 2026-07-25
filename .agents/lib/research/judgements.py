@@ -9,6 +9,7 @@ become public review cards.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -428,6 +429,7 @@ def pending_judgement_card(
         record,
         owner=owner,
         path=_safe_relative_path(root, artifact_path),
+        bound_snapshot=bound_snapshot,
     )
     card = {
         "subject": {
@@ -654,6 +656,7 @@ def judgement_snapshot_binding(
     *,
     owner: str = "",
     path: str = "",
+    bound_snapshot: BoundJudgementSnapshot | None = None,
 ) -> dict[str, Any]:
     payload = record.get("payload")
     payload = payload if isinstance(payload, dict) else {}
@@ -664,7 +667,7 @@ def judgement_snapshot_binding(
         if _text(record.get("kind")) == "survey_judgement"
         else confirmation_content_digest(record)
     )
-    return {
+    binding = {
         "subject": {
             "kind": _text(record.get("kind")),
             "id": _text(record.get("id")),
@@ -678,6 +681,17 @@ def judgement_snapshot_binding(
             for key in ("verified_at", "claims_digest", "evidence_digest")
         },
     }
+    if bound_snapshot is not None:
+        if bound_snapshot.record != record:
+            raise ValueError("judgement does not match its bound source snapshot")
+        if bound_snapshot.unit_record_snapshot is not None:
+            raw_bytes = bound_snapshot.unit_record_snapshot.raw_bytes
+        elif bound_snapshot.project_yaml_snapshot is not None:
+            raw_bytes = bound_snapshot.project_yaml_snapshot.raw_bytes
+        else:
+            raise ValueError("judgement bound source snapshot is incomplete")
+        binding["source_digest"] = hashlib.sha256(raw_bytes).hexdigest()
+    return binding
 
 
 def require_judgement_snapshot(
@@ -699,6 +713,8 @@ def require_judgement_snapshot(
         raise ValueError("review snapshot binding is incomplete")
     subject = expected.get("subject")
     verification = expected.get("verification")
+    expected_subject_kind = _text(subject.get("kind")) if isinstance(subject, dict) else ""
+    source_digest_required = root is not None and expected_subject_kind in SIDE_OWNER_BY_KIND
     judgement_claim_present = any(
         _text(claim.get("claim_type")) in JUDGEMENT_CLAIM_TYPES
         for claim in confirmation_claims(record)
@@ -708,6 +724,7 @@ def require_judgement_snapshot(
         or not isinstance(verification, dict)
         or _text(expected.get("confirmation_status")) != "pending_user_confirmation"
         or not _text(expected.get("content_digest"))
+        or (source_digest_required and not _text(expected.get("source_digest")))
         or (
             judgement_claim_present
             and any(not _text(verification.get(key)) for key in ("verified_at", "claims_digest", "evidence_digest"))
@@ -730,7 +747,15 @@ def require_judgement_snapshot(
         ]
         if len(matches) != 1:
             raise ValueError("review subject is no longer uniquely ready under its canonical owner")
-    if judgement_snapshot_binding(record, owner=owner, path=path) != expected:
+        if source_digest_required or "source_digest" in expected:
+            current_binding = matches[0].get("snapshot_binding")
+            current_binding = dict(current_binding) if isinstance(current_binding, dict) else {}
+            if current_binding != expected:
+                raise ValueError("review snapshot is stale; show the current judgement before applying a decision")
+    record_binding = judgement_snapshot_binding(record, owner=owner, path=path)
+    expected_record_binding = dict(expected)
+    expected_record_binding.pop("source_digest", None)
+    if record_binding != expected_record_binding:
         raise ValueError("review snapshot is stale; show the current judgement before applying a decision")
 
 

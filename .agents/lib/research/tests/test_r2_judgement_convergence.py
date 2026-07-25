@@ -463,12 +463,34 @@ def test_program_decision_reject_is_owner_owned_and_closes_pending_claims(tmp_pa
     )
     decisions_path = program_root / "workflow/decisions.yaml"
     decision_id = load_yaml(decisions_path)["items"][0]["id"]
-    assert [card["subject"]["id"] for card in discover_pending_judgements(tmp_path)] == [decision_id]
-    expected = judgement_snapshot_binding(
-        load_yaml(decisions_path)["items"][0],
-        owner="research-orchestrator",
-        path=decisions_path.relative_to(tmp_path).as_posix(),
+    cards = discover_pending_judgements(tmp_path)
+    assert [card["subject"]["id"] for card in cards] == [decision_id]
+    expected = cards[0]["snapshot_binding"]
+    assert len(expected["source_digest"]) == 64
+
+    changed_container = load_yaml(decisions_path)
+    changed_container["items"].append({"id": "unrelated-bookkeeping", "kind": "not-a-judgement"})
+    write_yaml_if_changed(decisions_path, changed_container)
+    stale = _run(
+        ".agents/skills/research-orchestrator/scripts/orchestrate.py",
+        tmp_path,
+        "reject-decision",
+        "--program-id",
+        "p-reject",
+        "--decision-id",
+        decision_id,
+        "--reason",
+        "Prefer a smaller first experiment.",
+        "--expected-snapshot",
+        json.dumps(expected),
+        check=False,
     )
+    assert stale.returncode != 0
+    assert load_yaml(decisions_path)["items"][0]["confirmation_status"] == "pending_user_confirmation"
+    refreshed_cards = discover_pending_judgements(tmp_path)
+    assert len(refreshed_cards) == 1
+    refreshed = refreshed_cards[0]["snapshot_binding"]
+    assert refreshed["source_digest"] != expected["source_digest"]
 
     _run(
         ".agents/skills/research-orchestrator/scripts/orchestrate.py",
@@ -481,7 +503,7 @@ def test_program_decision_reject_is_owner_owned_and_closes_pending_claims(tmp_pa
         "--reason",
         "Prefer a smaller first experiment.",
         "--expected-snapshot",
-        json.dumps(expected),
+        json.dumps(refreshed),
     )
 
     rejected = load_yaml(decisions_path)["items"][0]
