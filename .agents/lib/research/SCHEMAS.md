@@ -424,7 +424,7 @@ items:
     recorded_at: <UTC ISO-8601>
 ```
 
-候选包含 persisted `next_actions`、open evidence requests、open questions、可执行 Agent work、human gates、loose unit work，以及已到期的 research-monitor subscription；`blocking`、priority、due time 都只是事实上下文。状态、候选成员、unit/decision binding 或 effective preference 变化后，旧选择只读判定为 stale，不能继续执行。Human gate 永不自动执行；涉及 baseline、idea、因果或研究赢家的选择必须引用现有 program judgement 并继续走用户确认门。
+候选包含 persisted `next_actions`、open evidence requests、open questions、可执行 Agent work、human gates、loose unit work，以及已到期的 research-monitor subscription；`blocking`、priority、due time 都只是事实上下文。状态、候选成员、unit/decision binding 或 effective preference 变化后，旧选择只读判定为 stale，不能继续执行。Human gate 永不自动执行；涉及 baseline、idea、因果或研究赢家的选择必须引用现有 program judgement 并继续走用户确认门。`kb status` 和 `kb next` 必须消费同一 candidate snapshot：status 的公开分类除命名治理/恢复类别外，还要给出未被这些类别覆盖的“可由 Agent 继续推进”数量；分类应覆盖全部 candidate 且不重复计数，不能在同一 snapshot 上先报全部待办为 0、随后又报告存在可行行动。
 
 ### open-questions.yaml
 
