@@ -145,6 +145,124 @@ def _tree_digest(root: Path) -> str:
     return digest.hexdigest()
 
 
+def test_project_file_snapshot_binds_bytes_inode_and_ancestor_chain(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    artifact = root / "kb" / "programs" / "program-a" / "workflow" / "decisions.yaml"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("schema: decisions/v1\nitems: []\n", encoding="utf-8")
+
+    snapshot = records_module.snapshot_project_file(
+        root,
+        "kb/programs/program-a/workflow/decisions.yaml",
+    )
+
+    assert snapshot is not None
+    assert snapshot.raw_bytes == artifact.read_bytes()
+    assert snapshot.is_current()
+    replacement = artifact.parent / "replacement.yaml"
+    replacement.write_bytes(artifact.read_bytes())
+    replacement.replace(artifact)
+    assert not snapshot.is_current()
+
+    rebound = records_module.snapshot_project_file(root, snapshot.relative_path)
+    assert rebound is not None and rebound.is_current()
+    programs = root / "kb" / "programs"
+    parked = root / "kb" / "programs-parked"
+    programs.rename(parked)
+    programs.mkdir()
+    (parked / "program-a").rename(programs / "program-a")
+    assert not rebound.is_current()
+
+
+def test_project_yaml_snapshot_is_strict_and_current(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    artifact = root / "kb" / "programs" / "program-a" / "workflow" / "decisions.yaml"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("schema: decisions/v1\nitems: []\n", encoding="utf-8")
+
+    snapshot = records_module.snapshot_project_yaml_mapping(
+        root,
+        "kb/programs/program-a/workflow/decisions.yaml",
+    )
+
+    assert snapshot is not None
+    assert snapshot.payload == {"schema": "decisions/v1", "items": []}
+    assert snapshot.is_current()
+    artifact.write_text("schema: one\nschema: two\n", encoding="utf-8")
+    assert records_module.snapshot_project_yaml_mapping(root, snapshot.file.relative_path) is None
+    assert not snapshot.is_current()
+
+
+def test_project_evidence_source_uses_one_base_capability(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    program = root / "kb" / "programs" / "program-a"
+    first = program / "evidence" / "first.md"
+    second = program / "workflow" / "second.yaml"
+    first.parent.mkdir(parents=True)
+    second.parent.mkdir(parents=True)
+    first.write_text("first evidence\n", encoding="utf-8")
+    second.write_text("text: second evidence\n", encoding="utf-8")
+
+    snapshot = records_module.snapshot_project_evidence_source(
+        root,
+        "kb/programs/program-a",
+        source_unit_id="program:program-a",
+        kind="program",
+        artifacts=["workflow/second.yaml", "evidence/first.md"],
+    )
+
+    assert snapshot is not None
+    assert [item.artifact for item in snapshot.artifacts] == [
+        "evidence/first.md",
+        "workflow/second.yaml",
+    ]
+    assert snapshot.is_current()
+    parked = root / "kb" / "program-a-parked"
+    program.rename(parked)
+    shutil.copytree(parked, program)
+    assert not snapshot.is_current()
+
+
+def test_project_file_snapshot_rejects_unsafe_special_and_oversize_inputs(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "workspace"
+    parent = root / "kb" / "programs" / "program-a"
+    parent.mkdir(parents=True)
+    outside = tmp_path / "outside.yaml"
+    outside.write_text("sentinel: outside\n", encoding="utf-8")
+    (parent / "link.yaml").symlink_to(outside)
+    (parent / "oversize.yaml").write_bytes(b"x" * 33)
+    assert records_module.snapshot_project_file(root, "../outside.yaml") is None
+    assert records_module.snapshot_project_file(root, "kb/programs/program-a/link.yaml") is None
+    assert records_module.snapshot_project_file(
+        root,
+        "kb/programs/program-a/oversize.yaml",
+        max_bytes=32,
+    ) is None
+
+    if hasattr(os, "mkfifo"):
+        os.mkfifo(parent / "fifo.yaml")
+        assert records_module.snapshot_project_file(
+            root,
+            "kb/programs/program-a/fifo.yaml",
+        ) is None
+    socket_root = Path(tempfile.mkdtemp(prefix="r23-socket-", dir="/tmp"))
+    socket_parent = socket_root / "kb" / "p"
+    socket_parent.mkdir(parents=True)
+    socket_path = socket_parent / "socket"
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        server.bind(str(socket_path))
+        assert records_module.snapshot_project_file(
+            socket_root,
+            "kb/p/socket",
+        ) is None
+    finally:
+        server.close()
+        shutil.rmtree(socket_root)
+
+
 def test_canonical_unit_tree_snapshot_hashes_recursive_artifacts_in_name_order(
     tmp_path: Path,
 ) -> None:

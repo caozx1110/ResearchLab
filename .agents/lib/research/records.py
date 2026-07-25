@@ -7,7 +7,7 @@ import os
 import re
 import stat
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Sequence
@@ -108,6 +108,46 @@ class CanonicalUnitSnapshot:
             return bool(self.validate_current())
         except (OSError, ValueError):
             return False
+
+
+@dataclass(frozen=True)
+class ProjectFileSnapshot:
+    """Immutable bytes read through one anchored workspace-relative path."""
+
+    project_root: Path
+    relative_path: str
+    path: Path
+    raw_bytes: bytes
+    byte_sha256: str
+    modified_time_ns: int
+    file_identity: tuple[int, int, int, int, int, int]
+    directory_capabilities: tuple[tuple[int, int, int], ...]
+    validate_current: Callable[[], bool] = field(repr=False, compare=False)
+
+    def is_current(self) -> bool:
+        try:
+            return bool(self.validate_current())
+        except (OSError, ValueError):
+            return False
+
+
+@dataclass(frozen=True)
+class ProjectYamlMappingSnapshot:
+    """A strict YAML mapping parsed from one exact project-file snapshot."""
+
+    file: ProjectFileSnapshot
+    payload: dict[str, Any]
+
+    @property
+    def path(self) -> Path:
+        return self.file.path
+
+    @property
+    def raw_bytes(self) -> bytes:
+        return self.file.raw_bytes
+
+    def is_current(self) -> bool:
+        return self.file.is_current()
 
 
 @dataclass(frozen=True)
@@ -372,6 +412,238 @@ def _directory_capability_chain(
         (directory.identity[0], directory.identity[1], directory.identity[2])
         for directory in chain
     )
+
+
+def _canonical_project_parts(relative_path: str | Path) -> tuple[str, tuple[str, ...]]:
+    value = str(relative_path or "").strip()
+    if (
+        not value
+        or "\x00" in value
+        or Path(value).is_absolute()
+        or value.startswith(("/", "\\"))
+        or re.match(r"^[A-Za-z]:[\\/]", value) is not None
+    ):
+        raise ValueError("project path is not canonical and relative")
+    parts = Path(value).parts
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        raise ValueError("project path contains an unsafe component")
+    return Path(*parts).as_posix(), tuple(parts)
+
+
+def _open_project_directory_chain(
+    project_root: Path,
+    relative_parts: Sequence[str],
+) -> tuple[Path, list[_AnchoredDirectory]] | None:
+    root_path = project_root.absolute()
+    root_directory = _open_root_directory(root_path)
+    if root_directory is None:
+        return None
+    chain = [root_directory]
+    for component in relative_parts:
+        child = _open_child_directory(chain[-1], component)
+        if child is None:
+            _close_anchored_chain(chain)
+            return None
+        chain.append(child)
+    return root_path, chain
+
+
+def snapshot_project_file(
+    project_root: Path,
+    relative_path: str | Path,
+    *,
+    max_bytes: int = _RECORD_MAX_BYTES,
+) -> ProjectFileSnapshot | None:
+    """Capture one bounded ordinary file without reopening a validated path."""
+    if not isinstance(max_bytes, int) or max_bytes < 0 or max_bytes > _ARTIFACT_MAX_BYTES:
+        raise ValueError("project file byte ceiling is outside the supported bound")
+    try:
+        canonical, parts = _canonical_project_parts(relative_path)
+    except ValueError:
+        return None
+    opened = _open_project_directory_chain(project_root, parts[:-1])
+    if opened is None:
+        return None
+    root_path, chain = opened
+    try:
+        payload = _read_anchored_leaf(
+            root_path,
+            chain,
+            parts[-1],
+            max_bytes=max_bytes,
+        )
+        if payload is None:
+            return None
+        raw_bytes, file_identity = payload
+        directory_capabilities = _directory_capability_chain(chain)
+
+        def validate_current() -> bool:
+            current = _open_project_directory_chain(project_root, parts[:-1])
+            if current is None:
+                return False
+            current_root, current_chain = current
+            try:
+                if _directory_capability_chain(current_chain) != directory_capabilities:
+                    return False
+                current_payload = _read_anchored_leaf(
+                    current_root,
+                    current_chain,
+                    parts[-1],
+                    max_bytes=max_bytes,
+                )
+                return current_payload == (raw_bytes, file_identity)
+            finally:
+                _close_anchored_chain(current_chain)
+
+        return ProjectFileSnapshot(
+            project_root=root_path,
+            relative_path=canonical,
+            path=root_path / canonical,
+            raw_bytes=raw_bytes,
+            byte_sha256=hashlib.sha256(raw_bytes).hexdigest(),
+            modified_time_ns=file_identity[4],
+            file_identity=file_identity,
+            directory_capabilities=directory_capabilities,
+            validate_current=validate_current,
+        )
+    finally:
+        _close_anchored_chain(chain)
+
+
+def snapshot_project_yaml_mapping(
+    project_root: Path,
+    relative_path: str | Path,
+    *,
+    max_bytes: int = _RECORD_MAX_BYTES,
+) -> ProjectYamlMappingSnapshot | None:
+    """Capture and strict-parse one bounded project-local YAML mapping."""
+    snapshot = snapshot_project_file(
+        project_root,
+        relative_path,
+        max_bytes=max_bytes,
+    )
+    if snapshot is None:
+        return None
+    try:
+        payload = load_yaml_mapping_bytes_strict(snapshot.raw_bytes)
+    except (RuntimeError, StrictYamlError):
+        return None
+    if not snapshot.is_current():
+        return None
+    return ProjectYamlMappingSnapshot(file=snapshot, payload=payload)
+
+
+def _read_project_artifact_from_chain(
+    root_path: Path,
+    base_chain: Sequence[_AnchoredDirectory],
+    *,
+    base_parts: Sequence[str],
+    source_unit_id: str,
+    artifact: str,
+) -> EvidenceArtifactSnapshot | None:
+    try:
+        canonical, parts = _canonical_artifact_parts(artifact)
+    except ValueError:
+        return None
+    chain = list(base_chain)
+    opened_children: list[_AnchoredDirectory] = []
+    try:
+        for component in parts[:-1]:
+            child = _open_child_directory(chain[-1], component)
+            if child is None:
+                return None
+            opened_children.append(child)
+            chain.append(child)
+        payload = _read_anchored_leaf(
+            root_path,
+            chain,
+            parts[-1],
+            max_bytes=_ARTIFACT_MAX_BYTES,
+        )
+        if payload is None:
+            return None
+        raw_bytes, file_identity = payload
+        return EvidenceArtifactSnapshot(
+            source_unit_id=source_unit_id,
+            artifact=canonical,
+            raw_bytes=raw_bytes,
+            byte_sha256=hashlib.sha256(raw_bytes).hexdigest(),
+            path=root_path / Path(*base_parts) / canonical,
+            directory_identities=tuple(item.identity for item in opened_children),
+            file_identity=file_identity,
+        )
+    finally:
+        for directory in reversed(opened_children):
+            os.close(directory.fd)
+
+
+def snapshot_project_evidence_source(
+    project_root: Path,
+    base_relative_path: str | Path,
+    *,
+    source_unit_id: str,
+    kind: str,
+    artifacts: Sequence[str],
+) -> EvidenceSourceSnapshot | None:
+    """Capture selected artifacts beneath one shared anchored project directory."""
+    try:
+        canonical_base, base_parts = _canonical_project_parts(base_relative_path)
+        requested = sorted({_canonical_artifact_parts(item)[0] for item in artifacts})
+    except ValueError:
+        return None
+    if len(requested) > _UNIT_TREE_MAX_ENTRIES:
+        return None
+    opened = _open_project_directory_chain(project_root, base_parts)
+    if opened is None:
+        return None
+    root_path, chain = opened
+    try:
+        base_capabilities = _directory_capability_chain(chain)
+        snapshots: list[EvidenceArtifactSnapshot] = []
+        total = 0
+        for artifact in requested:
+            snapshot = _read_project_artifact_from_chain(
+                root_path,
+                chain,
+                base_parts=base_parts,
+                source_unit_id=source_unit_id,
+                artifact=artifact,
+            )
+            if snapshot is None:
+                return None
+            total += len(snapshot.raw_bytes)
+            if total > _UNIT_ARTIFACT_TOTAL_MAX_BYTES:
+                return None
+            snapshots.append(snapshot)
+        captured = tuple(snapshots)
+        if not all(_artifact_snapshot_is_current(root_path, chain, item) for item in captured):
+            return None
+
+        def validate_current() -> bool:
+            current = _open_project_directory_chain(project_root, base_parts)
+            if current is None:
+                return False
+            current_root, current_chain = current
+            try:
+                return (
+                    _directory_capability_chain(current_chain) == base_capabilities
+                    and all(
+                        _artifact_snapshot_is_current(current_root, current_chain, item)
+                        for item in captured
+                    )
+                )
+            finally:
+                _close_anchored_chain(current_chain)
+
+        return EvidenceSourceSnapshot(
+            source_unit_id=source_unit_id,
+            kind=kind,
+            artifacts=captured,
+            path=root_path / canonical_base,
+            validate_current=validate_current,
+        )
+    finally:
+        _close_anchored_chain(chain)
 
 
 def _record_snapshot_is_current(
@@ -2109,6 +2381,8 @@ __all__ = [
     "WORKFLOW_STATES",
     "CanonicalRecordSnapshot",
     "CanonicalUnitSnapshot",
+    "ProjectFileSnapshot",
+    "ProjectYamlMappingSnapshot",
     "iter_canonical_record_snapshots",
     "canonical_record_snapshot_if_present",
     "canonical_record_snapshot_for_identity",
@@ -2118,6 +2392,9 @@ __all__ = [
     "snapshot_canonical_unit_artifacts",
     "snapshot_canonical_unit_tree",
     "snapshot_unique_canonical_unit_tree",
+    "snapshot_project_file",
+    "snapshot_project_yaml_mapping",
+    "snapshot_project_evidence_source",
     "command_mutation",
     "trusted_project_path",
     "trusted_unit_record_path",
