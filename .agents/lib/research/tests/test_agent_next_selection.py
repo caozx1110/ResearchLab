@@ -22,7 +22,11 @@ from research.monitoring import (
 from research.paths import runtime_preferences_path
 from research.preference_selection import eligible_preferences, record_effective_selection
 from research.prefs import default_runtime_preferences
-from research.sources import mark_search_candidate, stage_search_results
+from research.sources import (
+    literature_search_continuations,
+    mark_search_candidate,
+    stage_search_results,
+)
 
 
 def _project_root() -> Path:
@@ -624,6 +628,15 @@ def test_literature_stage_enumeration_rejects_symlink_leaf(tmp_path: Path) -> No
         orchestrate.portfolio_candidate_snapshot(root)
 
 
+def test_literature_stage_enumeration_is_a_pure_empty_read_for_missing_workspace(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "workspace-that-does-not-exist"
+
+    assert literature_search_continuations(root) == []
+    assert not root.exists()
+
+
 def test_literature_stage_enumeration_rejects_malformed_persisted_state(tmp_path: Path) -> None:
     orchestrate = _load_orchestrator("orchestrator_literature_malformed")
     root = _workspace(tmp_path)
@@ -637,6 +650,43 @@ def test_literature_stage_enumeration_rejects_malformed_persisted_state(tmp_path
     write_yaml_if_changed(stage_path, malformed)
 
     with pytest.raises(SystemExit, match="query|canonical|supported"):
+        orchestrate.portfolio_candidate_snapshot(root)
+
+
+def test_literature_stage_enumeration_rejects_duplicate_yaml_mapping_key(
+    tmp_path: Path,
+) -> None:
+    orchestrate = _load_orchestrator("orchestrator_literature_duplicate_key")
+    root = _workspace(tmp_path)
+    stage_path = _stage_literature_search(
+        root,
+        query="duplicate mapping key",
+        stop_reason="in_progress",
+    )
+    stage_path.write_text(
+        stage_path.read_text(encoding="utf-8") + "status: staged\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit, match="duplicate|mapping key|canonical"):
+        orchestrate.portfolio_candidate_snapshot(root)
+
+
+def test_literature_stage_enumeration_rejects_unknown_top_level_field(
+    tmp_path: Path,
+) -> None:
+    orchestrate = _load_orchestrator("orchestrator_literature_unknown_field")
+    root = _workspace(tmp_path)
+    stage_path = _stage_literature_search(
+        root,
+        query="unknown top level field",
+        stop_reason="in_progress",
+    )
+    malformed = load_yaml(stage_path)
+    malformed["provider_raw_payload"] = {"private": "must not enter portfolio reads"}
+    write_yaml_if_changed(stage_path, malformed)
+
+    with pytest.raises(SystemExit, match="unknown|top-level|canonical"):
         orchestrate.portfolio_candidate_snapshot(root)
 
 

@@ -1316,9 +1316,19 @@ def handle_status(args: argparse.Namespace, root: Path) -> int:
         return portfolio_result.returncode
     try:
         portfolio_lines = [line for line in portfolio_result.stdout.splitlines() if line.strip()]
-        if not portfolio_lines:
-            raise json.JSONDecodeError("missing portfolio payload", "", 0)
-        portfolio_payload = json.loads(portfolio_lines[-1])
+        # A successful legacy/test owner may have no portfolio projection yet.
+        # Treat only *empty* output as an empty factual snapshot; any non-empty
+        # malformed payload still fails closed instead of hiding corruption.
+        portfolio_payload = (
+            json.loads(portfolio_lines[-1])
+            if portfolio_lines
+            else {
+                "candidate_snapshot": {
+                    "candidates": [],
+                    "program_contexts": [],
+                }
+            }
+        )
         candidate_snapshot = portfolio_payload["candidate_snapshot"]
         raw_candidates = candidate_snapshot["candidates"]
         raw_program_contexts = candidate_snapshot["program_contexts"]

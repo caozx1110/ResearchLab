@@ -1625,6 +1625,26 @@ def test_kb_status_stops_when_first_forward_fails(monkeypatch, tmp_path: Path) -
     assert stream_values == [False]
 
 
+def test_kb_status_accepts_successful_owner_without_portfolio_projection(
+    monkeypatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    kb = _load_kb_cli()
+    monkeypatch.setattr(
+        kb,
+        "forward_command",
+        lambda root, relative_script, args, *, stream=True: kb.CommandResult(
+            (relative_script, *args), 0, ""
+        ),
+    )
+
+    assert kb.main(["--root", str(tmp_path), "status"]) == 0
+    output = capsys.readouterr().out
+    assert "知识库尚未收录资料" in output
+    assert "0 个可继续文献检索" in output
+
+
 def test_kb_status_uses_read_only_core_owner_without_navigator(tmp_path: Path, capsys) -> None:
     kb = _load_kb_cli()
     assert "knowledge-base-manager" in kb.SCRIPT_BY_VERB["status_current"]

@@ -433,6 +433,76 @@ _LITERATURE_TERMINAL_STOP_REASONS = {
     "user_stop",
 }
 _SEARCH_STAGE_ENUMERATION_MAX_BYTES = 8 * 1024 * 1024
+_LITERATURE_SEARCH_STAGE_TOP_LEVEL_FIELDS = frozenset(
+    {
+        "id",
+        "kind",
+        "status",
+        "source_kind",
+        "query",
+        "note",
+        "generated_by",
+        "generated_at",
+        "entry_skill",
+        "mode",
+        "run_id",
+        "monitor_binding",
+        "scope",
+        "review_protocol",
+        "reviewers",
+        "preference_context",
+        "budget",
+        "usage",
+        "queries",
+        "candidates",
+        "coverage",
+        "coverage_history",
+        "frontier",
+        "frontier_history",
+        "stop",
+        "stop_history",
+        "partial",
+        "history",
+    }
+)
+
+
+class _UniqueKeySafeLoader(yaml.SafeLoader):
+    """Safe YAML loader that rejects duplicate keys at every mapping depth."""
+
+
+class _DuplicateYamlMappingKey(yaml.YAMLError):
+    """Internal non-disclosing signal for a duplicate persisted YAML key."""
+
+
+def _construct_unique_yaml_mapping(
+    loader: _UniqueKeySafeLoader,
+    node: yaml.nodes.MappingNode,
+    deep: bool = False,
+) -> dict[Any, Any]:
+    loader.flatten_mapping(node)
+    mapping: dict[Any, Any] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            duplicate = key in mapping
+        except TypeError as exc:
+            raise yaml.constructor.ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                "found an unhashable mapping key",
+                key_node.start_mark,
+            ) from exc
+        if duplicate:
+            raise _DuplicateYamlMappingKey
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+_UniqueKeySafeLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_unique_yaml_mapping,
+)
 SEARCH_FLOW_COUNT_FIELDS = {
     "identified",
     "duplicates_removed",
@@ -1889,13 +1959,18 @@ def _anchored_search_stage_bytes(project_root: Path) -> list[tuple[str, bytes]]:
     creation and ordinary path reopenings.  Every accepted leaf is bounded,
     regular, and stable across the descriptor read and lexical re-check.
     """
-    root = project_root.resolve()
+    # Keep the read path pure for an as-yet uninitialised workspace.  Do not
+    # call ``resolve()`` here: it follows a project-root symlink before the
+    # descriptor-level ``O_NOFOLLOW`` checks get a chance to reject it.
+    root = project_root.absolute()
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     file_flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptors: list[int] = []
     try:
         try:
             current_fd = os.open(root, directory_flags)
+        except FileNotFoundError:
+            return []
         except OSError as exc:
             raise SystemExit("Literature search workspace root is unsafe or unavailable.") from exc
         descriptors.append(current_fd)
@@ -1979,7 +2054,9 @@ def _canonical_literature_stage(
 ) -> dict[str, Any] | None:
     try:
         decoded = raw_bytes.decode("utf-8")
-        payload = yaml.safe_load(decoded)
+        payload = yaml.load(decoded, Loader=_UniqueKeySafeLoader)
+    except _DuplicateYamlMappingKey as exc:
+        raise SystemExit("Literature search stage contains a duplicate mapping key.") from exc
     except (UnicodeDecodeError, yaml.YAMLError) as exc:
         raise SystemExit("Literature search stage is not valid UTF-8 YAML.") from exc
     if not isinstance(payload, dict):
@@ -1994,6 +2071,9 @@ def _canonical_literature_stage(
         return None
     if payload.get("source_kind") != "paper":
         raise SystemExit("A literature-search stage must contain paper candidates.")
+    unknown_fields = set(payload) - _LITERATURE_SEARCH_STAGE_TOP_LEVEL_FIELDS
+    if unknown_fields:
+        raise SystemExit("Literature search stage contains an unknown top-level field.")
 
     persisted_state = {
         key: copy.deepcopy(payload[key])
