@@ -1656,7 +1656,8 @@ def test_kb_status_uses_read_only_core_owner_without_navigator(tmp_path: Path, c
     assert capsys.readouterr().out == (
         "知识库尚未收录资料。\n"
         "目前没有研究计划。\n"
-        "待处理事项：0 条待确认判断、0 个到期监控、0 组文献候选待选择、0 个可继续文献检索、0 个可恢复综述流程、0 个失败后可重试事项。\n"
+        "待处理事项：0 条待确认判断、0 个到期监控、0 组文献候选待选择、0 个可继续文献检索、"
+        "0 个可恢复综述流程、0 个失败后可重试事项、0 个可由 Agent 继续推进的事项。\n"
     )
     assert _tree_metadata_digest(tmp_path) == before
 
@@ -1794,8 +1795,12 @@ def test_kb_status_summarizes_programs_and_canonical_portfolio_without_writing(
             {"action_type": "resume-literature-search", "dependencies": []},
             {"action_type": "resume-composite-survey", "dependencies": []},
             {
-                "action_type": "resume-monitor-run",
+                "action_type": "resume-literature-search",
                 "dependencies": [{"run_state": "failed_retryable"}],
+            },
+            {
+                "action_type": "persisted-program-action",
+                "dependencies": [],
             },
         ],
     }
@@ -1817,6 +1822,15 @@ def test_kb_status_summarizes_programs_and_canonical_portfolio_without_writing(
         lambda root: [{"subject": {"id": "one"}}, {"subject": {"id": "two"}}],
     )
     before = _tree_metadata_digest(tmp_path)
+    assert kb._status_portfolio_counts(snapshot["candidates"]) == {
+        "pending_review": 1,
+        "due_monitor": 1,
+        "awaiting_literature_selection": 1,
+        "resumable_literature": 1,
+        "resumable_composite": 1,
+        "failed_retryable": 1,
+        "agent_progress": 1,
+    }
 
     assert kb.main(["--root", str(tmp_path), "status"]) == 0
 
@@ -1829,8 +1843,73 @@ def test_kb_status_summarizes_programs_and_canonical_portfolio_without_writing(
     assert "1 个可继续文献检索" in output
     assert "1 个可恢复综述流程" in output
     assert "1 个失败后可重试事项" in output
+    assert "1 个可由 Agent 继续推进的事项" in output
     _assert_public_governance_safe(output)
     assert _tree_metadata_digest(tmp_path) == before
+
+
+def test_kb_status_and_next_report_the_same_single_agent_progress_candidate(
+    monkeypatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    kb = _load_kb_cli()
+    candidate = {
+        "action_id": "private-action-id",
+        "program_id": "loose:p-source-ready-123456",
+        "record_id": "p-source-ready-123456",
+        "action_type": "loose-unit-work",
+        "step_type": "agent-fill",
+        "stage": "loose-unit",
+        "reason": "internal source_ready reason",
+        "dependencies": [],
+    }
+    snapshot = {
+        "candidate_snapshot_digest": "a" * 64,
+        "candidate_count": 1,
+        "candidates": [candidate],
+        "program_contexts": [],
+        "scope": {"program_ids": [], "include_loose_units": True},
+    }
+
+    def fake_forward(root: Path, relative_script: str, args: list[str], *, stream: bool = True):
+        if args[:1] == ["prepare-next-selection"]:
+            payload = {"candidate_snapshot": snapshot}
+        elif args[:2] == ["next", "--json"]:
+            payload = {
+                "has_records": True,
+                "planning_required": True,
+                "candidate_snapshot": snapshot,
+            }
+        else:
+            return kb.CommandResult((relative_script, *args), 0, "")
+        return kb.CommandResult(
+            (relative_script, *args),
+            0,
+            json.dumps(payload, ensure_ascii=False),
+        )
+
+    monkeypatch.setattr(kb, "forward_command", fake_forward)
+    monkeypatch.setattr(
+        kb,
+        "iter_records",
+        lambda root: [{"id": "p-source-ready-123456", "kind": "paper", "title": "Source Ready"}],
+    )
+    monkeypatch.setattr(kb, "discover_pending_judgements", lambda root: [])
+
+    assert kb.main(["--root", str(tmp_path), "status"]) == 0
+    status_output = capsys.readouterr().out
+    assert "1 个可由 Agent 继续推进的事项" in status_output
+    assert "0 条待确认判断" in status_output
+    assert "0 个失败后可重试事项" in status_output
+    assert "private-action-id" not in status_output
+    assert "loose:" not in status_output
+    assert "source_ready" not in status_output
+
+    assert kb.main(["--root", str(tmp_path), "next"]) == 0
+    next_output = capsys.readouterr().out
+    assert next_output == "Agent 需要比较当前 1 项可行行动，再说明为什么选择下一步。\n"
+    _assert_public_governance_safe(status_output + next_output)
 
 
 def test_kb_recovery_verbs_forward_without_raw_git_commands(monkeypatch, tmp_path: Path, capsys) -> None:

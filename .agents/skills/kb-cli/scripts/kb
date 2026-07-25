@@ -1262,18 +1262,30 @@ def _portfolio_candidate_failed_retryable(candidate: Mapping[str, object]) -> bo
 
 
 def _status_portfolio_counts(candidates: Sequence[Mapping[str, object]]) -> dict[str, int]:
-    action_counts: dict[str, int] = {}
-    for candidate in candidates:
-        action_type = str(candidate.get("action_type") or "")
-        action_counts[action_type] = action_counts.get(action_type, 0) + 1
-    return {
-        "pending_review": action_counts.get("review-judgement", 0),
-        "due_monitor": action_counts.get("run-due-monitor", 0),
-        "awaiting_literature_selection": action_counts.get("select-literature-candidates", 0),
-        "resumable_literature": action_counts.get("resume-literature-search", 0),
-        "resumable_composite": action_counts.get("resume-composite-survey", 0),
-        "failed_retryable": sum(1 for candidate in candidates if _portfolio_candidate_failed_retryable(candidate)),
+    action_buckets = {
+        "review-judgement": "pending_review",
+        "run-due-monitor": "due_monitor",
+        "select-literature-candidates": "awaiting_literature_selection",
+        "resume-literature-search": "resumable_literature",
+        "resume-composite-survey": "resumable_composite",
     }
+    counts = {
+        "pending_review": 0,
+        "due_monitor": 0,
+        "awaiting_literature_selection": 0,
+        "resumable_literature": 0,
+        "resumable_composite": 0,
+        "failed_retryable": 0,
+        "agent_progress": 0,
+    }
+    for candidate in candidates:
+        if _portfolio_candidate_failed_retryable(candidate):
+            counts["failed_retryable"] += 1
+            continue
+        action_type = str(candidate.get("action_type") or "")
+        bucket = action_buckets.get(action_type, "agent_progress")
+        counts[bucket] += 1
+    return counts
 
 
 def handle_status(args: argparse.Namespace, root: Path) -> int:
@@ -1383,7 +1395,8 @@ def handle_status(args: argparse.Namespace, root: Path) -> int:
         f"{portfolio_counts['awaiting_literature_selection']} 组文献候选待选择、"
         f"{portfolio_counts['resumable_literature']} 个可继续文献检索、"
         f"{portfolio_counts['resumable_composite']} 个可恢复综述流程、"
-        f"{portfolio_counts['failed_retryable']} 个失败后可重试事项。"
+        f"{portfolio_counts['failed_retryable']} 个失败后可重试事项、"
+        f"{portfolio_counts['agent_progress']} 个可由 Agent 继续推进的事项。"
     )
 
     if args.program:
