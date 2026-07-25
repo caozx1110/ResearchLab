@@ -383,6 +383,28 @@ def test_prepare_zero_current_inputs_returns_structured_gap_without_scaffold(tmp
     )
 
 
+def test_current_survey_selection_replaces_stale_caller_record_with_snapshot_record(
+    tmp_path: Path,
+) -> None:
+    module = load_synthesizer()
+    current = write_confirmed_source(module, tmp_path)
+    stale_caller = {**current, "title": "Old caller title"}
+
+    eligible, excluded = select_current_confirmed_survey_records(
+        tmp_path,
+        [stale_caller],
+        query="",
+        kind="",
+        topic="",
+        tag="",
+        pool="",
+    )
+
+    assert excluded == []
+    assert [item["title"] for item in eligible] == ["Alpha Method"]
+    assert eligible[0] is not stale_caller
+
+
 def test_systematic_prepare_with_matching_unit_still_starts_frozen_search_composite(
     tmp_path: Path,
     monkeypatch,
