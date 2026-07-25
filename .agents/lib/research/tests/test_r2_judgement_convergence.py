@@ -16,12 +16,44 @@ from research.judgements import (
     confirmation_binding,
     discover_pending_judgements,
     judgement_snapshot_binding,
+    load_bound_judgement_snapshot,
     require_judgement_snapshot,
 )
 from research.paths import runtime_preferences_path
 
 
 ROOT = Path(__file__).resolve().parents[4]
+
+
+def test_bound_unit_judgement_snapshot_rejects_same_bytes_directory_replacement(
+    tmp_path: Path,
+) -> None:
+    unit_id = "p-bound-directory-replacement"
+    path = record_path(tmp_path, "paper", unit_id)
+    path.parent.mkdir(parents=True)
+    record = default_record("paper", title="Bound paper", maturity="complete")
+    record["id"] = unit_id
+    write_yaml_if_changed(path, record)
+
+    subject = {
+        "kind": "paper",
+        "id": unit_id,
+        "owner": "paper-analyst",
+        "path": f"kb/units/papers/{unit_id}/record.yaml",
+    }
+    bound = load_bound_judgement_snapshot(tmp_path, subject)
+    assert bound.unit_record_snapshot is not None
+    assert bound.record["id"] == unit_id
+    assert bound.is_current()
+
+    original_bytes = path.read_bytes()
+    displaced = tmp_path / "displaced-unit"
+    path.parent.rename(displaced)
+    path.parent.mkdir()
+    path.write_bytes(original_bytes)
+
+    assert not bound.is_current()
+    assert load_bound_judgement_snapshot(tmp_path, subject).is_current()
 
 
 def _run(script: str, root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:

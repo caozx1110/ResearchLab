@@ -10,8 +10,9 @@ become public review cards.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 import yaml
 
@@ -31,8 +32,10 @@ from .evidence import (
 )
 from .records import (
     CanonicalRecordSnapshot,
+    canonical_record_snapshot_for_identity,
     iter_canonical_record_snapshots,
     normalize_record_snapshot,
+    require_current_record_snapshot,
     trusted_claim_source_roots,
     trusted_program_root,
     trusted_project_path,
@@ -70,6 +73,23 @@ REQUIRED_SIDE_SUBSTANCE_FIELDS: dict[str, tuple[tuple[str, str], ...]] = {
         ("method_selection", "selection_reason"),
     ),
 }
+
+
+@dataclass(frozen=True)
+class BoundJudgementSnapshot:
+    """One judgement bound to the exact canonical bytes that produced it."""
+
+    record: dict[str, Any]
+    path: Path
+    owner: str
+    unit_record_snapshot: CanonicalRecordSnapshot | None = None
+    validate_unique_current: Callable[[], bool] = field(repr=False, compare=False, default=lambda: False)
+
+    def is_current(self) -> bool:
+        try:
+            return bool(self.validate_unique_current())
+        except (OSError, ValueError):
+            return False
 
 
 def _text(value: Any) -> str:
@@ -649,8 +669,54 @@ def require_judgement_snapshot(
         raise ValueError("review snapshot is stale; show the current judgement before applying a decision")
 
 
+def load_bound_judgement_snapshot(root: str | Path, subject: Any) -> BoundJudgementSnapshot:
+    """Bind one canonical unit judgement to its exact, globally unique record."""
+    project_root = Path(root).absolute()
+    if not isinstance(subject, dict):
+        raise ValueError("confirmation subject must be a mapping")
+    subject_id = _text(subject.get("id"))
+    subject_kind = _text(subject.get("kind"))
+    if subject_kind not in UNIT_OWNER_BY_KIND:
+        raise ValueError(f"snapshot-bearing judgement kind is not supported: {subject_kind or '<empty>'}")
+    snapshot = canonical_record_snapshot_for_identity(project_root, subject_kind, subject_id)
+    if snapshot is None:  # pragma: no cover - allow_absent is false
+        raise ValueError(f"bound judgement not found: {subject_kind}:{subject_id}")
+    record = normalize_record_snapshot(snapshot, project_root)
+    if record is None:
+        raise ValueError(f"bound judgement is not a valid canonical record: {subject_kind}:{subject_id}")
+    owner = UNIT_OWNER_BY_KIND[subject_kind]
+    relative_path = snapshot.path.relative_to(project_root).as_posix()
+    supplied_owner = _text(subject.get("owner"))
+    supplied_path = _text(subject.get("path"))
+    if supplied_owner and supplied_owner != owner:
+        raise ValueError("confirmation subject owner does not match canonical owner")
+    if supplied_path and supplied_path != relative_path:
+        raise ValueError("confirmation subject path does not match canonical record")
+    if _identity_violations(project_root, record, owner, snapshot.path):
+        raise ValueError(f"bound judgement has invalid canonical identity: {subject_kind}:{subject_id}")
+
+    def validate_unique_current() -> bool:
+        current = require_current_record_snapshot(project_root, snapshot)
+        current_record = normalize_record_snapshot(current, project_root)
+        return current_record is not None and current_record == record
+
+    bound = BoundJudgementSnapshot(
+        record=record,
+        path=snapshot.path,
+        owner=owner,
+        unit_record_snapshot=snapshot,
+        validate_unique_current=validate_unique_current,
+    )
+    if not bound.is_current():
+        raise ValueError("bound judgement changed while it was being captured")
+    return bound
+
+
 def load_bound_judgement(root: str | Path, subject: Any) -> tuple[dict[str, Any], Path]:
     """Resolve a report binding without trusting an escaping path from the event."""
+    if isinstance(subject, dict) and _text(subject.get("kind")) in UNIT_OWNER_BY_KIND:
+        bound = load_bound_judgement_snapshot(root, subject)
+        return bound.record, bound.path
     project_root = Path(root).resolve()
     if not isinstance(subject, dict):
         raise ValueError("confirmation subject must be a mapping")
@@ -701,12 +767,14 @@ def load_bound_judgement(root: str | Path, subject: Any) -> tuple[dict[str, Any]
 
 
 __all__ = [
+    "BoundJudgementSnapshot",
     "apply_judgement_rejection",
     "confirmation_binding",
     "discover_pending_judgements",
     "judgement_snapshot_binding",
     "judgement_confirmation_is_current",
     "load_bound_judgement",
+    "load_bound_judgement_snapshot",
     "pending_judgement_card",
     "require_judgement_snapshot",
     "readiness_violations",
