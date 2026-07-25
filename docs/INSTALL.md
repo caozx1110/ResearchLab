@@ -96,13 +96,13 @@ bash install.sh --claude --project /path/to/workspace
 bash install.sh --dry-run --claude --project /path/to/workspace
 ```
 
-Agent 安装前的可审计计划把终端输出限制为短预览，并把每个最终目标写入显式 JSON 文件；平台相关依赖解析所管理的 `.venv` 总会被标成条件性、边界明确的 runtime tree，并写清 owner/cleanup 合同，不展开其平台相关内部依赖文件。除指定 JSON 文件外，它不会写 workspace、HOME、runtime 或 Python bytecode cache。计划文件应放在目标 workspace 与 HOME 之外：
+Agent 安装前的可审计计划把终端输出限制为短预览，并把每个最终目标写入显式 JSON 文件；确实可能需要依赖解析时，`.venv` 会被标成条件性、边界明确的 runtime tree，并写清 owner/cleanup 合同，不展开其平台相关内部依赖文件。除指定 JSON 文件外，它不会写 workspace、HOME、runtime 或 Python bytecode cache。计划文件应放在目标 workspace 与 HOME 之外：
 
 ```bash
 bash install.sh --agent-plan-json /tmp/workspace-oss-plan.json --claude --project /path/to/workspace --yes
 ```
 
-JSON 中的 `targets` 是完整、按执行顺序排列的精确清单，并为所有 copy/write/managed-block 目标保存来源内容 digest、为每个目标保存 `absent | regular | symlink | directory` 前置状态；`source.distributable_tree` 绑定受管 payload、安装器输入的相对路径、类型、mode、字节（或 symlink target）与总 digest；`conflicts` 列出会被保留或跳过的冲突；`conditional_runtime_changes` 单独暴露条件性运行环境树；`apply_contract` 携带计划路径、semantic plan digest、source tree digest、source commit 与无交互应用参数，并以 `COMPUTE_AFTER_REVIEW` 明示最终文件 byte SHA 必须在审阅后由 Agent 外部计算。该 byte SHA 不写回同一 JSON，避免伪造不可能成立的自引用文件哈希。Agent 必须核对这些字段、自动填入最终 byte SHA 后再执行应用合同，不能把计划模式换成网络下载或隐藏脚本执行；计划路径任一 leaf/ancestor symlink、非普通文件或超出有界大小都会在解析前被拒绝。
+schema 3 JSON 中的 `targets` 是完整、按执行顺序排列的精确清单，并为所有 copy/write/managed-block 目标保存来源内容 digest、为每个目标保存 `absent | regular | symlink | directory` 前置状态；`source.distributable_tree` 绑定受管 payload、安装器输入的相对路径、类型、mode、字节（或 symlink target）与总 digest；`conflicts` 列出会被保留或跳过的冲突；`conditional_runtime_changes` 单独暴露条件性运行环境树。若该数组为空且操作仍需 Python，`runtime_precondition` 会绑定实际选中的 canonical 解释器、完整文件 identity、core import probe 及选择来源；apply 在任何 workspace/HOME/runtime 写入前重验，并直接复用该绝对解释器，因此新 shell 的 PATH 不再包含原 entry 也不会临时改建 `.venv`。解释器或显式 override 漂移则要求重新生成计划。`apply_contract` 携带计划路径、semantic plan digest、source tree digest、source commit 与无交互应用参数，并以 `COMPUTE_AFTER_REVIEW` 明示最终文件 byte SHA 必须在审阅后由 Agent 外部计算。该 byte SHA 不写回同一 JSON，避免伪造不可能成立的自引用文件哈希。Agent 必须核对这些字段、自动填入最终 byte SHA 后再执行应用合同，不能把计划模式换成网络下载或隐藏脚本执行；计划路径任一 leaf/ancestor symlink、非普通文件或超出有界大小都会在解析前被拒绝。
 
 同时配置 Claude 和 Codex：
 

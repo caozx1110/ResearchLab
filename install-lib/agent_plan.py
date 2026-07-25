@@ -9,11 +9,12 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from ws_sync import release_destination
 
@@ -40,6 +41,16 @@ CONDITIONAL_RUNTIME_METADATA = {
     "cleanup": "preserved by update, reinstall, and uninstall; remove only by explicit user request",
     "boundary": "project .venv root; resolver-managed descendants are intentionally not enumerated",
 }
+CORE_RUNTIME_MODULES = ["yaml", "markdownify", "bs4"]
+CORE_RUNTIME_PROBE = "import yaml, markdownify, bs4"
+BOUND_RUNTIME_KIND = "bound-runtime-interpreter"
+BOUND_RUNTIME_SOURCES = {
+    "current-python",
+    "explicit-override",
+    "managed-venv-external-target",
+    "path-discovery",
+}
+PLAN_SCHEMA = 3
 PLAN_DIGEST_PLACEHOLDER = "<PLAN_DIGEST>"
 PLAN_BYTE_SHA256_PLACEHOLDER = "COMPUTE_AFTER_REVIEW"
 MAX_PLAN_BYTES = 16 * 1024 * 1024
@@ -97,6 +108,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--distributable-root")
     parser.add_argument("--operation-time")
     parser.add_argument("--manifest-precondition-json", default="")
+    parser.add_argument("--runtime-interpreter", default="")
+    parser.add_argument("--runtime-selection-source", default="")
+    parser.add_argument("--runtime-explicit-override", default="")
+    parser.add_argument("--runtime-isolated-probe", action="store_true")
     parser.add_argument(
         "--target-record",
         nargs=6,
@@ -441,6 +456,148 @@ def _absolute_lexical_path(path: Path) -> Path:
     return Path(os.path.abspath(os.fspath(expanded)))
 
 
+def _runtime_identity(metadata: os.stat_result) -> dict[str, int]:
+    return {
+        "device": metadata.st_dev,
+        "inode": metadata.st_ino,
+        "mode": metadata.st_mode,
+        "uid": metadata.st_uid,
+        "gid": metadata.st_gid,
+        "size": metadata.st_size,
+        "mtime_ns": metadata.st_mtime_ns,
+        "ctime_ns": metadata.st_ctime_ns,
+    }
+
+
+def _resolve_runtime_command(value: str) -> Path:
+    candidate = Path(value).expanduser()
+    if not candidate.is_absolute() and len(candidate.parts) == 1:
+        located = shutil.which(value)
+        if not located:
+            raise ValueError("selected runtime command is unavailable")
+        candidate = Path(located)
+    return candidate.resolve(strict=True)
+
+
+def _capture_bound_runtime(
+    path: Path,
+    workspace: Path,
+    *,
+    selection_source: str,
+    explicit_override: Optional[str],
+    isolated_probe: bool,
+) -> dict[str, Any]:
+    """Capture one canonical regular interpreter and prove core imports are ready."""
+    canonical = path.expanduser().resolve(strict=True)
+    if canonical != _absolute_lexical_path(canonical):
+        raise ValueError("bound runtime must have a canonical absolute path")
+    workspace_root = workspace.expanduser().resolve(strict=True)
+    try:
+        canonical.relative_to(workspace_root)
+    except ValueError:
+        pass
+    else:
+        raise ValueError("bound runtime must be outside the target workspace")
+
+    if selection_source not in BOUND_RUNTIME_SOURCES:
+        raise ValueError("bound runtime selection source is invalid")
+    if selection_source == "explicit-override":
+        if not explicit_override:
+            raise ValueError("explicit runtime selection must bind the override value")
+    elif selection_source in {"current-python", "path-discovery"} and explicit_override is not None:
+        raise ValueError("non-explicit runtime selection cannot bind an override value")
+
+    before = canonical.stat()
+    before_identity = _runtime_identity(before)
+    if not stat.S_ISREG(before.st_mode) or before.st_mode & 0o111 == 0:
+        raise ValueError("bound runtime must be a regular executable")
+    probe_args = [str(canonical)]
+    if isolated_probe:
+        probe_args.append("-I")
+    probe_args.extend(["-c", CORE_RUNTIME_PROBE])
+    try:
+        completed = subprocess.run(
+            probe_args,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError("bound runtime core probe failed") from exc
+    after = canonical.stat()
+    if completed.returncode != 0:
+        raise ValueError("bound runtime no longer provides the core modules")
+    if _runtime_identity(after) != before_identity:
+        raise ValueError("bound runtime changed during the core probe")
+    return {
+        "kind": BOUND_RUNTIME_KIND,
+        "canonical_path": str(canonical),
+        "identity": before_identity,
+        "selection": {
+            "source": selection_source,
+            "explicit_override": explicit_override,
+        },
+        "core_runtime": {
+            "modules": CORE_RUNTIME_MODULES,
+            "probe": "isolated-import" if isolated_probe else "import",
+            "ready": True,
+        },
+    }
+
+
+def _validate_bound_runtime(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {
+        "kind",
+        "canonical_path",
+        "identity",
+        "selection",
+        "core_runtime",
+    }:
+        raise ValueError("Agent plan bound runtime precondition is invalid")
+    path = Path(str(value.get("canonical_path") or ""))
+    if (
+        value.get("kind") != BOUND_RUNTIME_KIND
+        or not path.is_absolute()
+        or path != _absolute_lexical_path(path)
+    ):
+        raise ValueError("Agent plan bound runtime path is invalid")
+    identity = value.get("identity")
+    identity_fields = {"device", "inode", "mode", "uid", "gid", "size", "mtime_ns", "ctime_ns"}
+    if (
+        not isinstance(identity, dict)
+        or set(identity) != identity_fields
+        or any(type(identity.get(field)) is not int or identity[field] < 0 for field in identity_fields)
+        or identity["inode"] <= 0
+        or not stat.S_ISREG(identity["mode"])
+        or identity["mode"] & 0o111 == 0
+    ):
+        raise ValueError("Agent plan bound runtime identity is invalid")
+    selection = value.get("selection")
+    if not isinstance(selection, dict) or set(selection) != {"source", "explicit_override"}:
+        raise ValueError("Agent plan bound runtime selection is invalid")
+    selection_source = selection.get("source")
+    explicit_override = selection.get("explicit_override")
+    if (
+        selection_source not in BOUND_RUNTIME_SOURCES
+        or (explicit_override is not None and not isinstance(explicit_override, str))
+        or (selection_source == "explicit-override" and not explicit_override)
+        or (selection_source in {"current-python", "path-discovery"} and explicit_override is not None)
+    ):
+        raise ValueError("Agent plan bound runtime selection is invalid")
+    core_runtime = value.get("core_runtime")
+    if (
+        not isinstance(core_runtime, dict)
+        or core_runtime.get("modules") != CORE_RUNTIME_MODULES
+        or core_runtime.get("probe") not in {"import", "isolated-import"}
+        or core_runtime.get("ready") is not True
+        or set(core_runtime) != {"modules", "probe", "ready"}
+    ):
+        raise ValueError("Agent plan bound runtime capability is invalid")
+    return value
+
+
 def _read_regular_bytes_no_follow(path: Path) -> tuple[Path, bytes]:
     """Read one bounded regular-file inode without following any path symlink."""
     if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
@@ -517,7 +674,7 @@ def _read_plan(path: Path, expected_byte_sha256: str) -> tuple[Path, dict[str, A
         payload = json.loads(content.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError("Agent plan is unreadable or invalid JSON") from exc
-    if not isinstance(payload, dict) or payload.get("schema") != 2:
+    if not isinstance(payload, dict) or payload.get("schema") != PLAN_SCHEMA:
         raise ValueError("Agent plan has an unsupported schema")
     return absolute, payload
 
@@ -641,6 +798,37 @@ def verify_plan(args: argparse.Namespace) -> int:
             or planned_runtime_root != current_runtime_root
         ):
             raise ValueError("current managed runtime root differs from the reviewed Agent plan")
+    if "runtime_precondition" not in payload:
+        raise ValueError("Agent plan runtime precondition field is missing")
+    planned_runtime = payload.get("runtime_precondition")
+    if planned_runtime is not None:
+        if conditional_runtime_targets:
+            raise ValueError("Agent plan cannot bind PATH and managed runtimes together")
+        planned_runtime = _validate_bound_runtime(planned_runtime)
+        selection = planned_runtime["selection"]
+        selection_source = selection["source"]
+        planned_explicit = selection["explicit_override"]
+        current_explicit = os.environ.get("RESEARCH_PYTHON")
+        if current_explicit != planned_explicit:
+            raise ValueError("explicit runtime override differs from the reviewed Agent plan")
+        if selection_source == "explicit-override":
+            try:
+                explicit_canonical = _resolve_runtime_command(current_explicit)
+            except (OSError, ValueError) as exc:
+                raise ValueError("explicit runtime override conflicts with the reviewed Agent plan") from exc
+            if str(explicit_canonical) != planned_runtime["canonical_path"]:
+                raise ValueError("explicit runtime override conflicts with the reviewed Agent plan")
+        current_runtime = _capture_bound_runtime(
+            Path(planned_runtime["canonical_path"]),
+            Path(args.current_workspace),
+            selection_source=selection_source,
+            explicit_override=planned_explicit,
+            isolated_probe=planned_runtime["core_runtime"]["probe"] == "isolated-import",
+        )
+        if current_runtime != planned_runtime:
+            raise ValueError("bound runtime changed after plan review")
+    elif not conditional_runtime_targets and payload.get("action") != "uninstall":
+        raise ValueError("Agent plan does not bind why managed runtime changes are unnecessary")
     contract = payload.get("apply_contract")
     if not isinstance(contract, dict) or contract.get("plan_path") != str(plan_path):
         raise ValueError("Agent plan path differs from its reviewed apply contract")
@@ -654,7 +842,11 @@ def verify_plan(args: argparse.Namespace) -> int:
     byte_index = contract_argv.index("--expected-plan-byte-sha256")
     if byte_index + 1 >= len(contract_argv) or contract_argv[byte_index + 1] != PLAN_BYTE_SHA256_PLACEHOLDER:
         raise ValueError("Agent plan byte-review contract is invalid")
-    print(json.dumps(planned_manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+    verified_state = {
+        "manifest_precondition": planned_manifest,
+        "bound_runtime_python": planned_runtime["canonical_path"] if planned_runtime is not None else "",
+    }
+    print(json.dumps(verified_state, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
     return 0
 
 
@@ -710,8 +902,23 @@ def generate_plan(args: argparse.Namespace) -> int:
         ]
     )
     conditional = [target for target in targets if target.get("operation") == CONDITIONAL_RUNTIME_OPERATION]
+    runtime_precondition = (
+        _capture_bound_runtime(
+            Path(args.runtime_interpreter),
+            Path(args.workspace),
+            selection_source=args.runtime_selection_source,
+            explicit_override=args.runtime_explicit_override or None,
+            isolated_probe=args.runtime_isolated_probe,
+        )
+        if args.runtime_interpreter
+        else None
+    )
+    if conditional and runtime_precondition is not None:
+        raise ValueError("Agent plan cannot bind PATH and managed runtimes together")
+    if not conditional and args.action != "uninstall" and runtime_precondition is None:
+        raise ValueError("Agent plan must bind the runtime that makes managed bootstrap unnecessary")
     payload: dict[str, Any] = {
-        "schema": 2,
+        "schema": PLAN_SCHEMA,
         "install_name": "workspace-oss",
         "mode": "agent-plan",
         "zero_write_scope": "workspace-home-and-runtime",
@@ -739,6 +946,7 @@ def generate_plan(args: argparse.Namespace) -> int:
         "targets": targets,
         "conflicts": sorted(set(str(item) for item in args.conflict if str(item).strip())),
         "conditional_runtime_changes": conditional,
+        "runtime_precondition": runtime_precondition,
         "apply_contract": {
             "executable": "bash",
             "argv": apply_argv,

@@ -886,6 +886,10 @@ def test_ready_managed_venv_suppresses_update_warning_and_conditional_target(
     assert "Python 依赖尚未就绪" not in planned.stdout + planned.stderr
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
     assert plan["conditional_runtime_changes"] == []
+    assert plan["runtime_precondition"]["selection"] == {
+        "explicit_override": "/bin/false",
+        "source": "managed-venv-external-target",
+    }
 
     applied = _apply_reviewed_plan(_project_root(), plan, env=env, timeout=30)
 

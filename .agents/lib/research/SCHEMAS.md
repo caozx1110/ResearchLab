@@ -34,6 +34,12 @@ Agent plan / dry-run 是零写预览，不得输出任何 lifecycle 已完成态
 
 runtime readiness 先检查显式 `RESEARCH_PYTHON`，再检查当前 workspace 已存在且受管的 `.venv` 解释器；任一可信解释器能导入核心依赖即为 ready。自动 workspace-venv probe 必须保持 Agent plan `zero_write_scope`：venv 祖先 anchored/no-follow，leaf 拒绝 FIFO/特殊节点、换链与 workspace 内普通 executable，只允许标准 venv 的稳定 symlink chain，且最终 executable 必须位于 workspace 外；不能执行一个可在预览阶段改写 workspace 的伪解释器再靠事后 identity check 报警。copy-style interpreter 无法静态证明可信时保守视为未就绪并保留 conditional bootstrap。doctor 已证明可用的标准 managed venv 存在时，no-op update/reinstall 的 plan 与 apply 都不得再报告“依赖未就绪”或列虚假的 conditional bootstrap。import probe 使用有界超时；确实缺失时 Agent plan 只声明条件性 runtime tree，不执行安装。
 
+Agent install plan 当前 schema 为 `3`，顶层必须同时包含 `conditional_runtime_changes` 与 `runtime_precondition`。若前者含唯一的受管 runtime tree，后者必须为 `null`；若 install/update/reinstall 的前者为空，后者必须是 exact object，不能用 `null` 隐去“为什么不需要 bootstrap”。uninstall 不消费 Python runtime，可同时为空/`null`。
+
+`runtime_precondition` exact shape 为 `kind: bound-runtime-interpreter`、`canonical_path`、`identity`、`selection`、`core_runtime`。`identity` 固定绑定 regular/executable 的 `device/inode/mode/uid/gid/size/mtime_ns/ctime_ns`；`core_runtime` 固定记录 `modules: [yaml, markdownify, bs4]`、`probe: import|isolated-import`、`ready: true`；`selection.source` 只能是 `explicit-override|current-python|path-discovery|managed-venv-external-target`。`selection.explicit_override` 逐字记录计划时 `RESEARCH_PYTHON`（未设置则为 `null`）：explicit source 必须非空，current/path source 必须为 `null`，managed fallback 可保留一个已探测为 deficient 的非空 override。ready managed venv 只有在安全 symlink-chain probe 已独立证明 workspace 外 canonical target 自身能导入 core modules 时，才可明确选择 `managed-venv-external-target`；若能力只存在于 venv invocation 或无法无写证明，必须保守保留 conditional runtime tree，不得把 base target 伪装成 ready。
+
+apply 在首个 workspace/HOME/runtime 写入前重验 plan/source/targets 后，再从 canonical path 重读完整 identity、执行同类有界 core probe，并将精确绑定的 absolute interpreter 交给本次 smoke。current/path source 不要求新 PATH 仍含旧 entry；bound file 消失、same-bytes 新 inode、mode/owner/时间/capability 漂移均 fail closed。当前 `RESEARCH_PYTHON` 必须与 selection 中的原文（含未设置状态）完全一致；explicit source 还要重验当前解析仍指向 bound canonical file，任何新增、移除或变化都拒绝。失败必须发生在任何受管写入前，不能先复制 manifest/payload 再把未列入计划的 `.venv` 当 fallback。该对象属于 private machine JSON并进入 semantic/byte-bound digest，不投影到普通完成输出。
+
 ---
 
 ## 共享枚举 <a id="enums"></a>

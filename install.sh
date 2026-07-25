@@ -268,6 +268,7 @@ EXPECTED_PLAN_DIGEST=""
 EXPECTED_PLAN_BYTE_SHA256=""
 EXPECTED_SOURCE_TREE_DIGEST=""
 VERIFIED_MANIFEST_STATE=""
+VERIFIED_RUNTIME_PYTHON=""
 AGENT_PLAN_MANIFEST_STATE=""
 OPERATION_TIME=""
 ASSUME_YES=0
@@ -280,6 +281,9 @@ UPDATE_NO_CHANGES=0
 DRY_RUN_CHANGE_COUNT=0
 RUNTIME_BOOTSTRAP_NEEDED=0
 DISCOVERED_RUNTIME_PYTHON=""
+SELECTED_RUNTIME_PYTHON=""
+SELECTED_RUNTIME_SOURCE=""
+SELECTED_RUNTIME_ISOLATED=0
 AGENT_PLAN_TARGET_ARGS=()
 AGENT_PLAN_TARGET_JSON=()
 AGENT_PLAN_TARGET_SEQUENCE=()
@@ -1079,17 +1083,36 @@ print_done() {
 }
 
 preflight_yaml() {
-  local py
-  py=${RESEARCH_PYTHON:-python3}
-  if python_has_core_runtime "$py"; then
+  local py managed_python
+  if [ -n "$VERIFIED_RUNTIME_PYTHON" ]; then
+    DISCOVERED_RUNTIME_PYTHON=$VERIFIED_RUNTIME_PYTHON
     return 0
   fi
-  if [ -z "${RESEARCH_VENV:-}" ] && managed_workspace_venv_has_core_runtime; then
+  py=${RESEARCH_PYTHON:-python3}
+  if python_has_core_runtime "$py"; then
+    SELECTED_RUNTIME_PYTHON=$(canonical_runtime_python "$py") || \
+      die "所选 Python 无法稳定解析；请让 Agent 检查后重试"
+    if [ -n "${RESEARCH_PYTHON:-}" ]; then
+      SELECTED_RUNTIME_SOURCE="explicit-override"
+    else
+      SELECTED_RUNTIME_SOURCE="current-python"
+    fi
     return 0
+  fi
+  if [ -z "${RESEARCH_VENV:-}" ]; then
+    managed_python=$(managed_workspace_venv_has_core_runtime || true)
+    if [ -n "$managed_python" ]; then
+      SELECTED_RUNTIME_PYTHON=$managed_python
+      SELECTED_RUNTIME_SOURCE="managed-venv-external-target"
+      return 0
+    fi
   fi
   if [ -z "${RESEARCH_PYTHON:-}" ]; then
     DISCOVERED_RUNTIME_PYTHON=$(path_python_with_core_runtime || true)
     if [ -n "$DISCOVERED_RUNTIME_PYTHON" ]; then
+      SELECTED_RUNTIME_PYTHON=$DISCOVERED_RUNTIME_PYTHON
+      SELECTED_RUNTIME_SOURCE="path-discovery"
+      SELECTED_RUNTIME_ISOLATED=1
       return 0
     fi
   fi
@@ -1098,6 +1121,23 @@ preflight_yaml() {
   fi
   RUNTIME_BOOTSTRAP_NEEDED=1
   note "Python 依赖尚未就绪；首次使用时会自动准备，无需手动处理。" >&2
+}
+
+canonical_runtime_python() {
+  python3 - "$1" <<'PY' 2>/dev/null
+import shutil
+import sys
+from pathlib import Path
+
+value = sys.argv[1]
+candidate = Path(value).expanduser()
+if not candidate.is_absolute() and len(candidate.parts) == 1:
+    located = shutil.which(value)
+    if not located:
+        raise SystemExit(1)
+    candidate = Path(located)
+print(candidate.resolve(strict=True))
+PY
 }
 
 path_python_with_core_runtime() {
@@ -1195,7 +1235,7 @@ PY
 }
 
 managed_workspace_venv_has_core_runtime() {
-  python3 - "$WORKSPACE_ROOT" <<'PY' >/dev/null 2>&1
+  python3 - "$WORKSPACE_ROOT" <<'PY' 2>/dev/null
 import os
 import stat
 import subprocess
@@ -1313,6 +1353,7 @@ finally:
             os.close(descriptor)
         except OSError:
             pass
+print(target_path)
 raise SystemExit(0)
 PY
 }
@@ -1383,7 +1424,14 @@ verify_agent_apply_contract() {
   fi
   [ -n "$verified_state" ] || \
     die "Agent 安装计划缺少安装记录前置条件；未写入任何内容，请重新生成并审阅计划"
-  VERIFIED_MANIFEST_STATE=$verified_state
+  VERIFIED_MANIFEST_STATE=$(python3 -c \
+    'import json,sys; payload=json.loads(sys.argv[1]); print(json.dumps(payload["manifest_precondition"], sort_keys=True, separators=(",", ":")))' \
+    "$verified_state") || \
+    die "Agent 安装计划验证结果无效；未写入任何内容，请重新生成并审阅计划"
+  VERIFIED_RUNTIME_PYTHON=$(python3 -c \
+    'import json,sys; payload=json.loads(sys.argv[1]); value=payload["bound_runtime_python"]; assert isinstance(value, str); print(value)' \
+    "$verified_state") || \
+    die "Agent 安装计划验证结果无效；未写入任何内容，请重新生成并审阅计划"
 }
 
 record_agent_plan_target() {
@@ -1445,6 +1493,16 @@ write_agent_plan_json() {
     [ -n "$AGENT_PLAN_MANIFEST_STATE" ] || \
       die "Agent 安装计划缺少同步器提供的安装记录快照；未生成计划"
     args+=("--manifest-precondition-json" "$AGENT_PLAN_MANIFEST_STATE")
+  fi
+  if [ -n "$SELECTED_RUNTIME_PYTHON" ]; then
+    args+=(
+      "--runtime-interpreter" "$SELECTED_RUNTIME_PYTHON"
+      "--runtime-selection-source" "$SELECTED_RUNTIME_SOURCE"
+    )
+    if [ -n "${RESEARCH_PYTHON:-}" ]; then
+      args+=("--runtime-explicit-override" "$RESEARCH_PYTHON")
+    fi
+    [ "$SELECTED_RUNTIME_ISOLATED" -eq 0 ] || args+=("--runtime-isolated-probe")
   fi
   [ "$CONFIG_CLAUDE" -eq 0 ] || args+=("--tool" "claude")
   [ "$CONFIG_CODEX" -eq 0 ] || args+=("--tool" "codex")
@@ -2156,7 +2214,9 @@ run_smoke() {
   fi
   section "安装检查"
   info "正在检查 kb 基础功能..."
-  if [ -n "$DISCOVERED_RUNTIME_PYTHON" ] && [ -z "${RESEARCH_PYTHON:-}" ]; then
+  if [ -n "$VERIFIED_RUNTIME_PYTHON" ]; then
+    export RESEARCH_PYTHON="$VERIFIED_RUNTIME_PYTHON"
+  elif [ -n "$DISCOVERED_RUNTIME_PYTHON" ] && [ -z "${RESEARCH_PYTHON:-}" ]; then
     export RESEARCH_PYTHON="$DISCOVERED_RUNTIME_PYTHON"
   fi
   # Child diagnostics can contain tracebacks and internal paths; keep them private.

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -231,7 +232,14 @@ def _verify(plan: dict[str, object]) -> subprocess.CompletedProcess[str]:
         argv.append("--current-force")
     if options["kb_on_path"]:
         argv.append("--current-kb-on-path")
-    return subprocess.run(argv, text=True, capture_output=True, check=False)
+    verify_env = dict(os.environ)
+    verify_env.pop("RESEARCH_PYTHON", None)
+    runtime_precondition = plan.get("runtime_precondition")
+    if isinstance(runtime_precondition, dict):
+        selection = runtime_precondition.get("selection")
+        if isinstance(selection, dict) and isinstance(selection.get("explicit_override"), str):
+            verify_env["RESEARCH_PYTHON"] = str(selection["explicit_override"])
+    return subprocess.run(argv, env=verify_env, text=True, capture_output=True, check=False)
 
 
 def test_agent_plan_apply_reuses_later_path_runtime_strictly_offline(tmp_path: Path) -> None:
@@ -249,8 +257,12 @@ def test_agent_plan_apply_reuses_later_path_runtime_strictly_offline(tmp_path: P
     assert not (workspace / ".venv").exists()
     runtime_precondition = plan["runtime_precondition"]
     assert isinstance(runtime_precondition, dict)
-    assert runtime_precondition["kind"] == "bound-path-interpreter"
+    assert runtime_precondition["kind"] == "bound-runtime-interpreter"
     assert runtime_precondition["canonical_path"] == str(Path(sys.executable).resolve())
+    assert runtime_precondition["selection"] == {
+        "explicit_override": None,
+        "source": "path-discovery",
+    }
     assert runtime_precondition["core_runtime"] == {
         "modules": ["yaml", "markdownify", "bs4"],
         "probe": "isolated-import",
@@ -270,7 +282,7 @@ def test_agent_plan_apply_reuses_later_path_runtime_strictly_offline(tmp_path: P
     help_result = subprocess.run(
         [str(workspace / ".agents/skills/kb-cli/scripts/kb"), "help"],
         cwd=workspace,
-        env=apply_env,
+        env=env,
         stdin=subprocess.DEVNULL,
         text=True,
         capture_output=True,
@@ -281,9 +293,177 @@ def test_agent_plan_apply_reuses_later_path_runtime_strictly_offline(tmp_path: P
     assert "kb help" in help_result.stdout
 
 
+def test_agent_plan_reuses_bound_current_python_when_apply_path_turns_deficient(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace-current"
+    workspace.mkdir()
+    home = tmp_path / "home-current"
+    home.mkdir()
+    ready_bin = tmp_path / "ready-first-bin"
+    deficient_bin = tmp_path / "deficient-apply-bin"
+    ready_bin.mkdir()
+    deficient_bin.mkdir()
+    (ready_bin / "python3").symlink_to(sys.executable)
+    deficient = deficient_bin / "python3"
+    deficient.write_text(f'#!/bin/sh\nexec {sys.executable!s} -S "$@"\n', encoding="utf-8")
+    deficient.chmod(0o755)
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "PATH": os.pathsep.join((str(ready_bin), "/usr/bin", "/bin")),
+        "PIP_NO_INDEX": "1",
+        "RESEARCH_NO_PDF_BACKEND": "1",
+        "NO_COLOR": "1",
+    }
+    env.pop("RESEARCH_PYTHON", None)
+    env.pop("RESEARCH_NO_MANAGED_VENV", None)
+    plan = _plan(workspace, tmp_path / "current-plan.json", env)
+    runtime_precondition = plan["runtime_precondition"]
+    assert isinstance(runtime_precondition, dict)
+    assert runtime_precondition["selection"]["source"] == "current-python"
+
+    apply_env = dict(env)
+    apply_env["PATH"] = os.pathsep.join((str(deficient_bin), "/usr/bin", "/bin"))
+    applied = _apply(plan, apply_env)
+
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    assert not (workspace / ".venv").exists()
+
+
+@pytest.mark.parametrize("mutation", ["missing", "changed"])
+def test_agent_plan_rejects_explicit_runtime_override_drift_before_first_write(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    workspace = tmp_path / f"workspace-explicit-{mutation}"
+    workspace.mkdir()
+    env = _environment(tmp_path)
+    plan = _plan(workspace, tmp_path / f"explicit-{mutation}-plan.json", env)
+    runtime_precondition = plan["runtime_precondition"]
+    assert isinstance(runtime_precondition, dict)
+    assert runtime_precondition["selection"] == {
+        "explicit_override": sys.executable,
+        "source": "explicit-override",
+    }
+    before = _tree_byte_type_mode_snapshot(workspace)
+    apply_env = dict(env)
+    if mutation == "missing":
+        apply_env.pop("RESEARCH_PYTHON")
+    else:
+        apply_env["RESEARCH_PYTHON"] = str(_core_ready_python(tmp_path))
+
+    applied = _apply(plan, apply_env)
+
+    assert applied.returncode == 1
+    assert "重新生成并审阅计划" in applied.stderr
+    assert _tree_byte_type_mode_snapshot(workspace) == before
+
+
+def test_agent_plan_can_explicitly_reuse_ready_managed_venv_external_target(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace-managed-external"
+    managed_bin = workspace / ".venv/bin"
+    managed_bin.mkdir(parents=True)
+    managed_python = managed_bin / "python"
+    managed_python.symlink_to(sys.executable)
+    env = _offline_path_runtime_environment(tmp_path)
+    env["PATH"] = os.pathsep.join((str(tmp_path / "deficient-bin"), "/usr/bin", "/bin"))
+    plan = _plan(workspace, tmp_path / "managed-external-plan.json", env)
+    runtime_precondition = plan["runtime_precondition"]
+    assert isinstance(runtime_precondition, dict)
+    assert runtime_precondition["selection"]["source"] == "managed-venv-external-target"
+    assert runtime_precondition["canonical_path"] == str(Path(sys.executable).resolve())
+
+    managed_python.unlink()
+    venv_before = _tree_byte_type_mode_snapshot(workspace / ".venv")
+    applied = _apply(plan, env)
+
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    assert _tree_byte_type_mode_snapshot(workspace / ".venv") == venv_before
+
+
+def test_agent_plan_does_not_bind_venv_only_capability_as_ready_external_target(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace-venv-only"
+    managed_bin = workspace / ".venv/bin"
+    managed_bin.mkdir(parents=True)
+    external = tmp_path / "external-base-python"
+    managed_python = managed_bin / "python"
+    managed_python.symlink_to(external)
+    external.write_text(
+        f"""#!/bin/sh
+probe=""
+if [ "${{1:-}}" = "-c" ]; then
+  probe=${{2:-}}
+fi
+if [ "$probe" = "import yaml, markdownify, bs4" ]; then
+  [ "$0" = "$VENV_INVOCATION" ] && exit 0
+  exit 1
+fi
+exec {sys.executable!s} "$@"
+""",
+        encoding="utf-8",
+    )
+    external.chmod(0o755)
+    deficient_bin = tmp_path / "venv-only-deficient-bin"
+    tool_bin = tmp_path / "installer-tool-bin"
+    deficient_bin.mkdir()
+    tool_bin.mkdir()
+    for name in ("python3", "python"):
+        wrapper = deficient_bin / name
+        wrapper.write_text(f'#!/bin/sh\nexec {sys.executable!s} -S "$@"\n', encoding="utf-8")
+        wrapper.chmod(0o755)
+    for command in (
+        "awk",
+        "bash",
+        "cmp",
+        "date",
+        "dirname",
+        "git",
+        "ln",
+        "mkdir",
+        "mktemp",
+        "pwd",
+        "readlink",
+        "rm",
+        "rmdir",
+        "sed",
+        "shasum",
+        "tr",
+    ):
+        located = shutil.which(command)
+        if located:
+            (tool_bin / command).symlink_to(located)
+    env = {
+        **os.environ,
+        "HOME": str(tmp_path / "venv-only-home"),
+        "PATH": os.pathsep.join((str(deficient_bin), str(tool_bin))),
+        "VENV_INVOCATION": str(managed_python),
+        "PIP_NO_INDEX": "1",
+        "NO_COLOR": "1",
+    }
+    Path(env["HOME"]).mkdir()
+    env.pop("RESEARCH_PYTHON", None)
+    env.pop("RESEARCH_NO_MANAGED_VENV", None)
+    venv_probe = subprocess.run(
+        [str(managed_python), "-c", "import yaml, markdownify, bs4"],
+        env=env,
+        check=False,
+    )
+    base_probe = subprocess.run(
+        [str(external), "-c", "import yaml, markdownify, bs4"],
+        env=env,
+        check=False,
+    )
+    assert venv_probe.returncode == 0
+    assert base_probe.returncode == 1
+
+    plan = _plan(workspace, tmp_path / "venv-only-plan.json", env)
+
+    assert len(plan["conditional_runtime_changes"]) == 1
+    assert plan["runtime_precondition"] is None
+
+
 @pytest.mark.parametrize(
     "mutation",
-    ["missing", "same-bytes-new-inode", "mode", "core-runtime"],
+    ["missing", "same-bytes-new-inode", "mode", "core-runtime", "conflicting-explicit"],
 )
 def test_agent_plan_rejects_bound_path_runtime_drift_before_first_write(
     tmp_path: Path,
@@ -308,8 +488,10 @@ def test_agent_plan_rejects_bound_path_runtime_drift_before_first_write(
         assert compatible.stat().st_ino != original_inode
     elif mutation == "mode":
         compatible.chmod(0o744)
-    else:
+    elif mutation == "core-runtime":
         apply_env["R25_RUNTIME_CORE_READY"] = "0"
+    else:
+        apply_env["RESEARCH_PYTHON"] = sys.executable
 
     applied = _apply(plan, apply_env)
 
@@ -622,6 +804,12 @@ def test_plan_generation_records_exact_supplied_sync_snapshot(tmp_path: Path) ->
             "2026-07-25T00:00:00Z",
             "--manifest-precondition-json",
             json.dumps(planned),
+            "--runtime-interpreter",
+            sys.executable,
+            "--runtime-selection-source",
+            "explicit-override",
+            "--runtime-explicit-override",
+            sys.executable,
         ]
     )
 
