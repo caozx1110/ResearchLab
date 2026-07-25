@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -9,6 +10,7 @@ import re
 import stat
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -334,6 +336,65 @@ def _candidate_semantic_digest(candidate: Mapping[str, object]) -> str:
     )
 
 
+def _valid_candidate_update_event(
+    event: object,
+    *,
+    candidate_id: str,
+    status: str,
+) -> bool:
+    if not isinstance(event, dict) or set(event) != {"timestamp", "action", "summary"}:
+        return False
+    if event.get("action") != "candidate-updated" or event.get("summary") != f"{candidate_id} -> {status}":
+        return False
+    timestamp = str(event.get("timestamp") or "")
+    try:
+        parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None
+
+
+def _valid_owner_stage_transition(
+    before: Mapping[str, object],
+    after: Mapping[str, object],
+    *,
+    candidate_id: str,
+    status: str,
+    record_id: str,
+) -> bool:
+    """Allow exactly source-intake's marker update and one canonical history event."""
+    expected = copy.deepcopy(dict(before))
+    candidates = expected.get("candidates")
+    if not isinstance(candidates, list):
+        return False
+    matches = [
+        candidate
+        for candidate in candidates
+        if isinstance(candidate, dict) and candidate.get("candidate_id") == candidate_id
+    ]
+    if len(matches) != 1:
+        return False
+    matches[0]["status"] = status
+    matches[0]["record_id"] = record_id
+    before_history = expected.get("history")
+    if not isinstance(before_history, list):
+        return False
+    after_history = after.get("history")
+    if (
+        not isinstance(after_history, list)
+        or len(after_history) != len(before_history) + 1
+        or after_history[:-1] != before_history
+        or not _valid_candidate_update_event(
+            after_history[-1],
+            candidate_id=candidate_id,
+            status=status,
+        )
+    ):
+        return False
+    expected["history"] = copy.deepcopy(after_history)
+    return expected == dict(after)
+
+
 def _candidate_screening_decision(candidate: Mapping[str, object]) -> str:
     effective = candidate.get("effective_screening")
     screening = effective if isinstance(effective, dict) else candidate.get("screening")
@@ -511,6 +572,7 @@ def _validate_selection_payload(root: Path, payload: Mapping[str, object]) -> di
         "preference_selection_ids": preferences,
         "selection_binding": selection_binding,
         "already_materialized": already_materialized,
+        "_initial_stage_snapshot": copy.deepcopy(stage),
     }
 
 
@@ -537,7 +599,7 @@ def _protocol_path_preflight(root: Path, requested: str) -> str:
         raise SystemExit("Literature selection protocol destination is unsafe.") from exc
     if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
         raise SystemExit("Literature selection protocol destination is unsafe.")
-    return requested
+    raise SystemExit("Literature selection protocol name has already been used.")
 
 
 def _open_protocol_directory(root: Path) -> int:
@@ -581,12 +643,6 @@ def _write_selection_protocol(root: Path, name: str, payload: Mapping[str, objec
     )
     descriptor = -1
     try:
-        try:
-            existing = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-        except FileNotFoundError:
-            existing = None
-        if existing is not None and (stat.S_ISLNK(existing.st_mode) or not stat.S_ISREG(existing.st_mode)):
-            raise SystemExit("Literature selection protocol destination is unsafe.")
         descriptor = os.open(temporary, flags, 0o600, dir_fd=directory_fd)
         view = memoryview(data)
         while view:
@@ -597,7 +653,17 @@ def _write_selection_protocol(root: Path, name: str, payload: Mapping[str, objec
         os.fsync(descriptor)
         os.close(descriptor)
         descriptor = -1
-        os.replace(temporary, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        try:
+            os.link(
+                temporary,
+                name,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+        except FileExistsError as exc:
+            raise SystemExit("Literature selection protocol name has already been used.") from exc
+        os.unlink(temporary, dir_fd=directory_fd)
         os.fsync(directory_fd)
     finally:
         if descriptor >= 0:
@@ -697,11 +763,90 @@ def materialize_selection(
     }
     owner_results: list[dict[str, object]] = []
     stop_remaining = False
+    integrity_failure = False
+    expected_stage_digest = str(bound["selection_binding"]["initial_stage_digest"])
+    expected_stage_snapshot = copy.deepcopy(bound["_initial_stage_snapshot"])
     for candidate_id in bound["candidate_ids"]:
         candidate_id = str(candidate_id)
         existing_record_id = dict(bound["already_materialized"]).get(candidate_id, "")
+        if stop_remaining:
+            state = "not_attempted_after_binding_change"
+            record_id = ""
+            if existing_record_id:
+                state = "already_materialized_before_binding_change"
+                record_id = existing_record_id
+                counts["already_materialized"] += 1
+            else:
+                counts["failed"] += 1
+            owner_results.append(
+                {
+                    "candidate_id": candidate_id,
+                    "state": state,
+                    "record_id": record_id,
+                    "returncode": 0 if existing_record_id else 1,
+                    "stdout_bytes": 0,
+                    "stdout_lines": 0,
+                    "stdout_sha256": hashlib.sha256(b"").hexdigest(),
+                    "stderr_bytes": 0,
+                    "stderr_lines": 0,
+                    "stderr_sha256": hashlib.sha256(b"").hexdigest(),
+                    "before_stage_digest": "",
+                    "after_stage_digest": "",
+                }
+            )
+            continue
+        try:
+            current_stage = load_search_stage(root, stage_id)
+            before_stage_digest = _literature_stage_digest(root, stage_id)
+            if (
+                before_stage_digest != expected_stage_digest
+                or current_stage != expected_stage_snapshot
+            ):
+                raise RuntimeError("whole stage binding changed")
+            matches = [
+                item
+                for item in current_stage.get("candidates", [])
+                if isinstance(item, dict) and item.get("candidate_id") == candidate_id
+            ]
+            if len(matches) != 1:
+                raise RuntimeError("candidate identity is ambiguous")
+            current_candidate = dict(matches[0])
+            expected_binding = candidate_bindings[candidate_id]
+            if (
+                literature_candidate_identity_digest(current_candidate)
+                != expected_binding["identity_digest"]
+                or _candidate_semantic_digest(current_candidate) != expected_binding["semantic_digest"]
+            ):
+                raise RuntimeError("selection binding changed")
+        except (OSError, RuntimeError, SystemExit, ValueError):
+            state = "selection_binding_changed"
+            record_id = ""
+            if existing_record_id:
+                state = "already_materialized_stage_binding_changed"
+                record_id = existing_record_id
+                counts["already_materialized"] += 1
+            else:
+                counts["failed"] += 1
+            integrity_failure = True
+            stop_remaining = True
+            owner_results.append(
+                {
+                    "candidate_id": candidate_id,
+                    "state": state,
+                    "record_id": record_id,
+                    "returncode": 0 if existing_record_id else 1,
+                    "stdout_bytes": 0,
+                    "stdout_lines": 0,
+                    "stdout_sha256": hashlib.sha256(b"").hexdigest(),
+                    "stderr_bytes": 0,
+                    "stderr_lines": 0,
+                    "stderr_sha256": hashlib.sha256(b"").hexdigest(),
+                    "before_stage_digest": "",
+                    "after_stage_digest": "",
+                }
+            )
+            continue
         if existing_record_id:
-            current_stage_digest = _literature_stage_digest(root, stage_id)
             counts["already_materialized"] += 1
             owner_results.append(
                 {
@@ -715,57 +860,8 @@ def materialize_selection(
                     "stderr_bytes": 0,
                     "stderr_lines": 0,
                     "stderr_sha256": hashlib.sha256(b"").hexdigest(),
-                    "before_stage_digest": current_stage_digest,
-                    "after_stage_digest": current_stage_digest,
-                }
-            )
-            continue
-        if stop_remaining:
-            counts["failed"] += 1
-            owner_results.append(
-                {
-                    "candidate_id": candidate_id,
-                    "state": "not_attempted_after_binding_change",
-                    "record_id": "",
-                    "returncode": 1,
-                    "stdout_bytes": 0,
-                    "stdout_lines": 0,
-                    "stdout_sha256": hashlib.sha256(b"").hexdigest(),
-                    "stderr_bytes": 0,
-                    "stderr_lines": 0,
-                    "stderr_sha256": hashlib.sha256(b"").hexdigest(),
-                    "before_stage_digest": "",
-                    "after_stage_digest": "",
-                }
-            )
-            continue
-        try:
-            current_candidate = resolve_search_candidate(root, stage_id, candidate_id)
-            expected_binding = candidate_bindings[candidate_id]
-            if (
-                literature_candidate_identity_digest(current_candidate)
-                != expected_binding["identity_digest"]
-                or _candidate_semantic_digest(current_candidate) != expected_binding["semantic_digest"]
-            ):
-                raise RuntimeError("selection binding changed")
-            before_stage_digest = _literature_stage_digest(root, stage_id)
-        except (OSError, RuntimeError, SystemExit, ValueError):
-            counts["failed"] += 1
-            stop_remaining = True
-            owner_results.append(
-                {
-                    "candidate_id": candidate_id,
-                    "state": "selection_binding_changed",
-                    "record_id": "",
-                    "returncode": 1,
-                    "stdout_bytes": 0,
-                    "stdout_lines": 0,
-                    "stdout_sha256": hashlib.sha256(b"").hexdigest(),
-                    "stderr_bytes": 0,
-                    "stderr_lines": 0,
-                    "stderr_sha256": hashlib.sha256(b"").hexdigest(),
-                    "before_stage_digest": "",
-                    "after_stage_digest": "",
+                    "before_stage_digest": before_stage_digest,
+                    "after_stage_digest": before_stage_digest,
                 }
             )
             continue
@@ -807,7 +903,16 @@ def materialize_selection(
         }
         if returncode == 0:
             try:
-                after_candidate = resolve_search_candidate(root, stage_id, candidate_id)
+                after_stage = load_search_stage(root, stage_id)
+                after_stage_digest = _literature_stage_digest(root, stage_id)
+                matches = [
+                    item
+                    for item in after_stage.get("candidates", [])
+                    if isinstance(item, dict) and item.get("candidate_id") == candidate_id
+                ]
+                if len(matches) != 1:
+                    raise RuntimeError("owner candidate result is ambiguous")
+                after_candidate = dict(matches[0])
                 if (
                     literature_candidate_identity_digest(after_candidate)
                     != expected_binding["identity_digest"]
@@ -824,14 +929,28 @@ def materialize_selection(
                 state = str(after_candidate.get("status") or "")
                 if not record_id or state not in {"materialized", "duplicate"}:
                     raise RuntimeError("owner result is not bound")
-                result["after_stage_digest"] = _literature_stage_digest(root, stage_id)
+                result["after_stage_digest"] = after_stage_digest
                 result["state"] = state
                 result["record_id"] = record_id
                 counts["newly_materialized" if state == "materialized" else "duplicate"] += 1
+                if _valid_owner_stage_transition(
+                    current_stage,
+                    after_stage,
+                    candidate_id=candidate_id,
+                    status=state,
+                    record_id=record_id,
+                ):
+                    expected_stage_digest = after_stage_digest
+                    expected_stage_snapshot = copy.deepcopy(after_stage)
+                else:
+                    result["state"] = f"{state}_stage_binding_changed"
+                    integrity_failure = True
+                    stop_remaining = True
             except (OSError, RuntimeError, SystemExit, ValueError):
                 counts["failed"] += 1
                 result["state"] = "owner_result_invalid"
                 stop_remaining = True
+                integrity_failure = True
                 try:
                     result["after_stage_digest"] = _literature_stage_digest(root, stage_id)
                 except (OSError, SystemExit, ValueError):
@@ -840,18 +959,24 @@ def materialize_selection(
             counts["failed"] += 1
             try:
                 result["after_stage_digest"] = _literature_stage_digest(root, stage_id)
-                if result["after_stage_digest"] != before_stage_digest:
+                after_stage = load_search_stage(root, stage_id)
+                if (
+                    result["after_stage_digest"] != expected_stage_digest
+                    or after_stage != expected_stage_snapshot
+                ):
                     result["state"] = "stage_binding_changed"
+                    integrity_failure = True
                     stop_remaining = True
             except (OSError, SystemExit, ValueError):
                 result["state"] = "stage_binding_changed"
+                integrity_failure = True
                 stop_remaining = True
         owner_results.append(result)
 
     successful = (
         counts["newly_materialized"] + counts["duplicate"] + counts["already_materialized"]
     )
-    exit_code = 0 if counts["failed"] == 0 else 1
+    exit_code = 0 if counts["failed"] == 0 and not integrity_failure else 1
     if exit_code == 0:
         public_message = (
             f"已按你的选择处理 {counts['selected']} 个文献候选：新入库 {counts['newly_materialized']} 个、"
@@ -859,6 +984,12 @@ def materialize_selection(
             "接下来可用 kb next 继续分析。"
         )
         status = "completed"
+    elif integrity_failure:
+        public_message = (
+            f"本次共处理 {counts['selected']} 个文献候选：成功 {successful} 个，失败 {counts['failed']} 个。"
+            "处理中检测到检索结果已发生变化；已完成的结果保持有效，其余项目请让 Agent 重新核对后继续。"
+        )
+        status = "partial_failure" if successful else "failed"
     else:
         public_message = (
             f"本次共处理 {counts['selected']} 个文献候选：成功 {successful} 个，失败 {counts['failed']} 个。"
@@ -869,6 +1000,7 @@ def materialize_selection(
         "schema": "literature-selection-owner-adapter/v1",
         "status": status,
         "exit_code": exit_code,
+        "integrity_failure": integrity_failure,
         "selection_binding": bound["selection_binding"],
         "counts": counts,
         "owner_results": owner_results,

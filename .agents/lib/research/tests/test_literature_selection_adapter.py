@@ -237,6 +237,7 @@ def test_selected_candidate_materializes_with_sanitized_public_and_private_resul
     protocol = json.loads(protocol_text)
     assert protocol["schema"] == "literature-selection-owner-adapter/v1"
     assert protocol["status"] == "completed"
+    assert protocol["integrity_failure"] is False
     assert protocol["selection_binding"]["stage_id"] == stage.stem
     assert len(protocol["selection_binding"]["initial_stage_digest"]) == 64
     assert protocol["owner_results"][0]["record_id"] == "p-paper-a-materialized"
@@ -646,3 +647,196 @@ def test_stage_digest_is_bound_as_exact_anchored_target_digest(tmp_path: Path) -
     assert len(second) == 64
     assert first != second
     assert first != hashlib.sha256(stage.read_bytes()).hexdigest()
+
+
+def test_initial_whole_stage_race_fails_before_owner_use(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _search_module()
+    stage = _terminal_stage(tmp_path)
+    original_validate = module._validate_selection_payload
+
+    def racing_validate(root, payload):
+        bound = original_validate(root, payload)
+        changed = load_yaml(stage)
+        changed["query"] = "concurrently replaced query"
+        write_yaml_if_changed(stage, changed)
+        return bound
+
+    monkeypatch.setattr(module, "_validate_selection_payload", racing_validate)
+
+    def forbidden_owner(*_args, **_kwargs):
+        raise AssertionError("owner must not receive a selection whose whole stage changed")
+
+    result = module.materialize_selection(
+        tmp_path,
+        _selection(stage),
+        protocol_name="initial-race.json",
+        owner_runner=forbidden_owner,
+    )
+
+    assert result["exit_code"] == 1
+    assert result["counts"]["failed"] == 1
+    protocol = json.loads(
+        (tmp_path / "kb/.runtime/literature-selection/initial-race.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert protocol["integrity_failure"] is True
+    assert protocol["owner_results"][0]["state"] == "selection_binding_changed"
+
+
+@pytest.mark.parametrize("external_mutation", ["stop", "query", "other-candidate"])
+def test_owner_success_with_unrelated_stage_rewrite_preserves_success_and_stops(
+    tmp_path: Path,
+    external_mutation: str,
+) -> None:
+    module = _search_module()
+    stage = _terminal_stage(tmp_path, ("paper-a", "paper-b"))
+    payload = _selection(stage, ("paper-a", "paper-b"))
+    calls: list[str] = []
+
+    def owner_then_rewrite(argv, *, env):
+        del env
+        candidate_id = argv[argv.index("--candidate-id") + 1]
+        calls.append(candidate_id)
+        _write_owner_record(
+            tmp_path,
+            stage_id=stage.stem,
+            candidate_id=candidate_id,
+            user_authorization=str(payload["user_authorization"]),
+            record_id=f"p-{candidate_id}-materialized",
+        )
+        changed = load_yaml(stage)
+        if external_mutation == "stop":
+            changed["stop"]["rationale"] = "concurrent stop rewrite"
+        elif external_mutation == "query":
+            changed["query"] = "concurrent query rewrite"
+        else:
+            changed["candidates"][1]["title"] = "Concurrent paper B rewrite"
+        write_yaml_if_changed(stage, changed)
+        return subprocess.CompletedProcess(argv, 0, stdout=b"ok", stderr=b"")
+
+    result = module.materialize_selection(
+        tmp_path,
+        payload,
+        protocol_name=f"owner-rewrite-{external_mutation}.json",
+        owner_runner=owner_then_rewrite,
+    )
+
+    assert calls == ["paper-a"]
+    assert result["exit_code"] == 1
+    assert result["counts"] == {
+        "selected": 2,
+        "newly_materialized": 1,
+        "duplicate": 0,
+        "already_materialized": 0,
+        "failed": 1,
+    }
+    assert (tmp_path / "kb/units/papers/p-paper-a-materialized/record.yaml").is_file()
+    protocol = json.loads(
+        (
+            tmp_path
+            / f"kb/.runtime/literature-selection/owner-rewrite-{external_mutation}.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert protocol["integrity_failure"] is True
+    assert protocol["owner_results"][0]["state"] == "materialized_stage_binding_changed"
+    assert protocol["owner_results"][0]["record_id"] == "p-paper-a-materialized"
+    assert protocol["owner_results"][1]["state"] == "not_attempted_after_binding_change"
+
+
+def test_whole_stage_change_between_items_breaks_expected_snapshot_chain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _search_module()
+    stage = _terminal_stage(tmp_path, ("paper-a", "paper-b"))
+    payload = _selection(stage, ("paper-a", "paper-b"))
+    runner, calls = _success_runner(tmp_path)
+    original_transition = module._valid_owner_stage_transition
+    injected = False
+
+    def transition_then_external_rewrite(*args, **kwargs):
+        nonlocal injected
+        valid = original_transition(*args, **kwargs)
+        if valid and not injected:
+            injected = True
+            changed = load_yaml(stage)
+            changed["note"] = "concurrent change after the accepted owner transition"
+            write_yaml_if_changed(stage, changed)
+        return valid
+
+    monkeypatch.setattr(module, "_valid_owner_stage_transition", transition_then_external_rewrite)
+    result = module.materialize_selection(
+        tmp_path,
+        payload,
+        protocol_name="between-items.json",
+        owner_runner=runner,
+    )
+
+    assert len(calls) == 1
+    assert "paper-a" in calls[0][0]
+    assert result["exit_code"] == 1
+    assert result["counts"]["newly_materialized"] == 1
+    assert result["counts"]["failed"] == 1
+    protocol = json.loads(
+        (tmp_path / "kb/.runtime/literature-selection/between-items.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert protocol["integrity_failure"] is True
+    assert protocol["owner_results"][0]["state"] == "materialized"
+    assert protocol["owner_results"][1]["state"] == "selection_binding_changed"
+
+
+def test_protocol_name_is_single_use_and_rejected_before_owner_rerun(tmp_path: Path) -> None:
+    module = _search_module()
+    stage = _terminal_stage(tmp_path)
+    payload = _selection(stage)
+    runner, _calls = _success_runner(tmp_path)
+    module.materialize_selection(
+        tmp_path,
+        payload,
+        protocol_name="single-use.json",
+        owner_runner=runner,
+    )
+    before_units = _snapshot(tmp_path / "kb/units")
+
+    def forbidden_owner(*_args, **_kwargs):
+        raise AssertionError("used protocol name must fail before owner dispatch")
+
+    with pytest.raises(SystemExit, match="already been used"):
+        module.materialize_selection(
+            tmp_path,
+            payload,
+            protocol_name="single-use.json",
+            owner_runner=forbidden_owner,
+        )
+
+    assert _snapshot(tmp_path / "kb/units") == before_units
+
+
+def test_protocol_publish_race_never_overwrites_competing_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _search_module()
+    destination = tmp_path / "kb/.runtime/literature-selection/raced.json"
+    competing = '{"writer":"competing"}\n'
+
+    def competing_publish(*_args, **_kwargs):
+        destination.write_text(competing, encoding="utf-8")
+        raise FileExistsError(destination)
+
+    monkeypatch.setattr(module.os, "link", competing_publish)
+    with pytest.raises(SystemExit, match="already been used"):
+        module._write_selection_protocol(
+            tmp_path,
+            "raced.json",
+            {"schema": "literature-selection-owner-adapter/v1"},
+        )
+
+    assert destination.read_text(encoding="utf-8") == competing
+    assert not list(destination.parent.glob(".raced.json.*.tmp"))
