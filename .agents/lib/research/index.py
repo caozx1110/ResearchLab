@@ -37,6 +37,7 @@ from .ids import (
 from .retrieval import (
     code_identifier_terms,
     code_passages,
+    extract_figure_index_passages,
     extract_parse_cache_passages,
     extract_record_passages,
     is_code_passage,
@@ -45,6 +46,7 @@ from .retrieval import (
     rank_records,
     tokenize_query,
 )
+from .figures import FigureIndexError, load_current_figure_index
 from .paths import (
     TEXT_REWRITE_SUFFIXES,
     UNIT_KIND_DIRS,
@@ -823,12 +825,40 @@ def passage_corpus(
         if warnings is not None:
             warnings.extend(code_warnings)
         code_by_artifact = {entry["artifact"]: entry["code_path"] for entry in code_entries}
+        figure_index: dict[str, Any] | None = None
+        figure_artifacts: set[str] = set()
+        if kind == "paper":
+            payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+            projection = payload.get("figures") if isinstance(payload.get("figures"), dict) else {}
+            index_artifact = str(projection.get("index_artifact") or "").strip()
+            expected_digest = str(projection.get("index_digest") or "").strip()
+            if projection.get("schema") == "figure-index/v1" and index_artifact == "figures.yaml" and expected_digest:
+                root = unit_root(project_root, kind, unit_id)
+                try:
+                    figure_index = load_current_figure_index(
+                        root / index_artifact,
+                        unit_root=root,
+                        project_root=project_root,
+                        expected_index_digest=expected_digest,
+                    )
+                    figure_artifacts.add(index_artifact)
+                    for entry in figure_index.get("entries", []):
+                        if not isinstance(entry, dict):
+                            continue
+                        for asset in entry.get("assets", []):
+                            if isinstance(asset, dict) and str(asset.get("path") or "").strip():
+                                figure_artifacts.add(str(asset["path"]).strip())
+                except FigureIndexError as exc:
+                    figure_index = None
+                    figure_artifacts.clear()
+                    if warnings is not None:
+                        warnings.append(f"插图索引 {unit_id}：当前性校验未通过，未进入检索（{exc}）。")
         unit_snapshot = _unit_content_snapshot(
             project_root,
             record,
             include_parse_cache=True,
             expected_record_snapshot=expected_record_snapshot,
-            extra_artifacts=sorted(code_by_artifact),
+            extra_artifacts=sorted(set(code_by_artifact) | figure_artifacts),
         )
         if unit_snapshot is None:
             continue
@@ -847,8 +877,16 @@ def passage_corpus(
         documents: list[dict[str, str]] = []
         code_documents: list[dict[str, str]] = []
         parse_cache_snapshots: list[Any] = []
+        figure_index_snapshot: Any = None
         undecodable_code = 0
         for artifact_snapshot in unit_snapshot.artifacts:
+            if artifact_snapshot.artifact in figure_artifacts:
+                artifact = _project_relative_artifact(project_root, artifact_snapshot.path)
+                manifest_by_artifact[artifact] = artifact_snapshot.byte_sha256
+                unit_manifest_artifacts.append(artifact)
+                if artifact_snapshot.artifact == "figures.yaml":
+                    figure_index_snapshot = artifact_snapshot
+                continue
             suffix = Path(artifact_snapshot.artifact).suffix.lower()
             if artifact_snapshot.artifact in {"parse-cache.yaml", "parse-cache.yml"}:
                 parse_cache_snapshots.append(artifact_snapshot)
@@ -923,6 +961,30 @@ def passage_corpus(
                     source_digest=digest,
                 )
             )
+        if figure_index is not None and figure_index_snapshot is not None:
+            root = unit_root(project_root, kind, unit_id)
+            expected_digest = str(figure_index.get("index_digest") or "")
+            try:
+                current_figure_index = load_current_figure_index(
+                    root / "figures.yaml",
+                    unit_root=root,
+                    project_root=project_root,
+                    expected_index_digest=expected_digest,
+                    expected_index_byte_sha256=figure_index_snapshot.byte_sha256,
+                )
+            except FigureIndexError as exc:
+                if warnings is not None:
+                    warnings.append(f"插图索引 {unit_id}：构建检索时发生变化，本次跳过（{exc}）。")
+            else:
+                artifact = _project_relative_artifact(project_root, figure_index_snapshot.path)
+                passages.extend(
+                    extract_figure_index_passages(
+                        passage_record,
+                        artifact=artifact,
+                        index=current_figure_index,
+                        source_digest=figure_index_snapshot.byte_sha256,
+                    )
+                )
         for document in sorted(code_documents, key=lambda item: item["artifact"]):
             passages.extend(
                 code_passages(

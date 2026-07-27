@@ -1591,9 +1591,12 @@ def kind_payload_skeleton(kind: str, title: str = "") -> dict[str, Any]:
                 "open_questions": [],
             },
             "figures": {
+                "schema": "figure-index/v1",
                 "extraction_status": "not_started",
-                "candidate_figures": [],
-                "key_figures": [],
+                "index_artifact": "",
+                "index_digest": "",
+                "available_ref_keys": [],
+                "key_figure_refs": [],
             },
             "critique": {
                 "assumptions": [],

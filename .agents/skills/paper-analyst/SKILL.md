@@ -21,10 +21,12 @@ description: 为 core paper unit 备料（解析源、产出待填结构）并�
 2. `complete-note --phase prepare`：不经过 quick screen，直接产出统一 deep-read scaffold。`paper_type / paper_type_reason / paper_type_evidence_refs` 留空，三套五要素分支全部存在且内容留空。
 3. Runtime Agent 依据材料选择 `paper_type ∈ {method_system, benchmark, survey}`，填写分类理由与逐字 evidence，只填写对应分支的五要素；未选分支保持空白。
 4. `complete-note --phase verify`：同时校验类型 evidence、所选五要素与未选分支为空。全过才生成独立 `claim-paper-type` + 五条要素 claims，将类型写入 `payload.deep_read.paper_type`，并写 `note.md` + `core_content`；任一类型/理由/要素空、无据、造据或跨分支混填都拒绝。
-5. `prewarm-cache` / `extract-figures` / `refresh-structure`：纯机械搬运（解析、裁图、结构提示）。
+5. `prewarm-cache` / `extract-figures` / `refresh-structure`：纯机械搬运（解析、裁图、结构提示）。`extract-figures` 按 caption 编号产生稳定 ref key、按 PNG 内容哈希发布 asset 并写 `figure-index/v1`；它不得自选关键图，不得因机械提取而改写判断或降级整篇确认。
 6. AI judgement 默认保持 `pending_user_confirmation`；类型与五要素作为同一份 deep-read 判断一起确认。
 
 Markdown 阅读层中的图片只提供本地、可引用的源材料。脚本不得从图片文件名、alt text 或 OCR 片段自动生成论文判断；runtime agent 若使用图表内容，仍需在会话中实际阅读并挂可核验 evidence。
+
+`figures.yaml` 的 caption/编号/页码/字节哈希都是机械事实，不是对图意义或重要性的判断。Agent 只在实际写作 claim/草稿中显式选择 ref key，该选择随所属 judgement 的 ConfirmationReceipt 一起确认。find、Obsidian 与写作消费端只使用通过 source/index/asset 字节重验的 current entry；缺失或篡改时不回退到遍历文件名。
 
 ## 按论文类型的五要素契约（runtime agent 照此填）
 

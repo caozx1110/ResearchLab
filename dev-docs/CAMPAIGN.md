@@ -71,6 +71,8 @@
 - 已完成 bibliography / figure reference / section draft 三条现状的独立只读审计；未调用 shipping skills、未修改真实 `kb/`。确认当前缺口包括：paper intake 丢部分 citation metadata；caption crop 依遍历序号命名且自动把全部图设为 key figure；outline 只有机械 Markdown 骨架，没有分节 judgement/receipt/publication 合同。
 - 设计门已锁：citation key 绑定 canonical paper id，DOI/arXiv/source URL 强身份去重，raw BibTeX 永不进入渲染面；program `.bib` 绑定完整选择集与 paper snapshots，纯事实导出不错误依赖 deep-read judgement receipt。
 - figure index 锁为 `figure-index/v1`：ref key 绑定 paper + 规范化 caption 编号，PNG 资产按内容哈希落盘；机械提取不再选择“关键图”或降级整篇确认，Agent 的图引用选择随实际写作 judgement 确认。
+- figure index 已实现：caption 编号规范化、panel/continued 逻辑合并、无编号 fallback、冲突 fail closed、PNG sha256 地址化、source/index/asset 字节 currentness 重验。`extract-figures` 不再自选 key figure，不改 paper claim/顶层 confirmation；重跑保持 ref/index/asset 稳定。caption/ref key 已进 find，Obsidian 投影 current 图与图注；source/index/asset 任一篡改时两端都撤下陈旧条目。
+- figure 定向质量门：真实构造 PDF 端到端提取+重跑+篡改验收，find/Obsidian 与 recovery/governance/preferences/report 联合回归 `349 passed`；Python 3.9 compile、skill validator `Validated 20 skills.`、`git diff --check` 通过，仓库根 `kb/` 零改动。
 - section draft 锁为 `paper_draft_section` side judgement：七节各自 prepare/fill/verify/confirm，段落逐一绑定 current confirmed source claims/evidence、citation keys 和可选 figure refs；全节 current confirmed 后才将 MD/LaTeX/bib/publication manifest 原子发布到 `kb/output/<program-id>/`。
 - 下一步：先提交本设计 gate；随后按 bibliography → figure index → section draft 三个小里程碑施工，每片定向测试，R3 末跑 Python 3.9/skill validator/全套回归和 A9/A10 冷安装验收。
 

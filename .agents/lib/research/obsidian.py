@@ -16,8 +16,9 @@ from urllib.parse import quote as url_quote
 
 from .common import utc_now_iso
 from .journal import mutation_transaction
-from .paths import UNIT_KIND_DIRS, ensure_kb_gitignore, kb_gitignore_path, kb_root, topic_taxonomy_path, units_root
+from .paths import UNIT_KIND_DIRS, ensure_kb_gitignore, kb_gitignore_path, kb_root, topic_taxonomy_path, unit_root, units_root
 from .records import normalize_record_schema
+from .figures import FigureIndexError, load_current_figure_index
 from .relations import (
     BLOCK_ID_RE,
     inverse_relation,
@@ -28,13 +29,13 @@ from .yaml_io import dump_yaml, load_yaml, write_text_if_changed, write_yaml_if_
 
 
 OBSIDIAN_PROJECTION_SCHEMA = "research-kb-obsidian/v1"
-OBSIDIAN_RENDERER_REVISION = 8
+OBSIDIAN_RENDERER_REVISION = 9
 MANIFEST_NAME = "manifest.yaml"
 HUMAN_DIRS = ("inbox", "annotations")
 UNIT_HEADINGS = frozenset(
     {
-        "Overview", "Definition", "Associations", "Metadata", "Relationships", "Claims",
-        "概览", "定义", "关联清单", "元数据", "关系", "判断",
+        "Overview", "Definition", "Associations", "Metadata", "Relationships", "Claims", "Figures",
+        "概览", "定义", "关联清单", "元数据", "关系", "判断", "插图",
     }
 )
 _MARKDOWN_INLINE_RE = re.compile(r"([\\`*_{}\[\]()<>~$|^&=#!])")
@@ -670,6 +671,7 @@ def _render_unit_page(
     incoming: dict[str, list[dict[str, Any]]],
     records_by_id: dict[str, dict[str, Any]],
     *,
+    figure_index: dict[str, Any] | None = None,
     zh: bool = False,
 ) -> str:
     unit_id = str(record.get("id") or "")
@@ -743,15 +745,46 @@ def _render_unit_page(
         f"## {_t(zh, 'Claims', '判断')}",
         "",
         *_render_claims(project_root, record, records_by_id, zh=zh),
-        "",
-        f"## {_t(zh, 'Metadata', '元数据')}",
-        "",
-        f"- {_t(zh, 'Unit', '单元')}: {_inline_code(unit_id)}",
-        f"- {_t(zh, 'Kind', '类型')}: {_inline_code(properties['kind'])}",
-        f"- {_t(zh, 'Status', '状态')}: {_inline_code(properties['status'])}",
-        f"- {_t(zh, 'Maturity', '成熟度')}: {_inline_code(properties['maturity'])}",
-        f"- {_t(zh, 'Confirmation', '确认状态')}: {_inline_code(properties['confirmation_status'])}",
     ]
+    entries = figure_index.get("entries") if isinstance(figure_index, dict) else []
+    entries = entries if isinstance(entries, list) else []
+    if entries:
+        lines.extend(["", f"## {_t(zh, 'Figures', '插图')}", ""])
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            ref_key = _single_line(entry.get("ref_key"))
+            caption = _single_line(entry.get("caption"))
+            page = entry.get("page")
+            if not ref_key or not caption:
+                continue
+            lines.extend(
+                [
+                    f"### {_inline_code(ref_key)}",
+                    "",
+                    _markdown_text(caption),
+                    "",
+                    f"- {_t(zh, 'Page', '页码')}: {_inline_code(page)}",
+                ]
+            )
+            assets = entry.get("assets") if isinstance(entry.get("assets"), list) else []
+            for asset in assets:
+                asset_path = _single_line(asset.get("path")) if isinstance(asset, dict) else ""
+                if asset_path:
+                    lines.extend(["", f"![[units/papers/{unit_id}/{asset_path}]]"])
+            lines.append("")
+    lines.extend(
+        [
+            "",
+            f"## {_t(zh, 'Metadata', '元数据')}",
+            "",
+            f"- {_t(zh, 'Unit', '单元')}: {_inline_code(unit_id)}",
+            f"- {_t(zh, 'Kind', '类型')}: {_inline_code(properties['kind'])}",
+            f"- {_t(zh, 'Status', '状态')}: {_inline_code(properties['status'])}",
+            f"- {_t(zh, 'Maturity', '成熟度')}: {_inline_code(properties['maturity'])}",
+            f"- {_t(zh, 'Confirmation', '确认状态')}: {_inline_code(properties['confirmation_status'])}",
+        ]
+    )
     if source_uri:
         lines.append(f"- {_t(zh, 'Source', '来源')}: {_source_markdown(source_uri, zh=zh)}")
     if source_document:
@@ -913,6 +946,27 @@ def _projection_inputs(project_root: Path) -> dict[str, Any]:
     programs = sorted(programs, key=lambda state: str(state.get("program_id") or ""))
     taxonomy, taxonomy_issues = _safe_taxonomy(project_root)
     locale, locale_issues = _safe_projection_locale(project_root)
+    figures: dict[str, dict[str, Any]] = {}
+    for record in records:
+        if record.get("kind") != "paper":
+            continue
+        unit_id = str(record.get("id") or "")
+        payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+        projection = payload.get("figures") if isinstance(payload.get("figures"), dict) else {}
+        index_artifact = str(projection.get("index_artifact") or "").strip()
+        expected_digest = str(projection.get("index_digest") or "").strip()
+        if not unit_id or projection.get("schema") != "figure-index/v1" or index_artifact != "figures.yaml" or not expected_digest:
+            continue
+        root = unit_root(project_root, "paper", unit_id)
+        try:
+            figures[unit_id] = load_current_figure_index(
+                root / index_artifact,
+                unit_root=root,
+                project_root=project_root,
+                expected_index_digest=expected_digest,
+            )
+        except FigureIndexError:
+            continue
     digest_payload = {
         "schema": OBSIDIAN_PROJECTION_SCHEMA,
         "renderer_revision": OBSIDIAN_RENDERER_REVISION,
@@ -920,12 +974,14 @@ def _projection_inputs(project_root: Path) -> dict[str, Any]:
         "programs": programs,
         "taxonomy": taxonomy,
         "locale": locale,
+        "figures": figures,
     }
     return {
         "records": records,
         "programs": programs,
         "taxonomy": taxonomy,
         "locale": locale,
+        "figures": figures,
         "input_issues": [*record_issues, *program_issues, *taxonomy_issues, *locale_issues],
         "input_digest": _sha256_text(_canonical_json(digest_payload)),
     }
@@ -1220,6 +1276,7 @@ def _projection_files(project_root: Path, inputs: dict[str, Any], *, generated_a
     programs = inputs["programs"]
     taxonomy = inputs["taxonomy"]
     zh = str(inputs.get("locale") or "en") == "zh"
+    figures = inputs.get("figures") if isinstance(inputs.get("figures"), dict) else {}
     records_by_id = {str(record.get("id") or ""): record for record in records if str(record.get("id") or "")}
     edges = project_relation_edges(records)
     outgoing: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -1234,7 +1291,13 @@ def _projection_files(project_root: Path, inputs: dict[str, Any], *, generated_a
         if not unit_id:
             continue
         files[f"units/{_safe_component(unit_id, fallback='unit')}.md"] = _render_unit_page(
-            project_root, record, outgoing, incoming, records_by_id, zh=zh
+            project_root,
+            record,
+            outgoing,
+            incoming,
+            records_by_id,
+            figure_index=figures.get(unit_id) if isinstance(figures.get(unit_id), dict) else None,
+            zh=zh,
         )
     for state in programs:
         program_id = str(state.get("program_id") or "")

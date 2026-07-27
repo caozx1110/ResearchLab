@@ -218,7 +218,7 @@ kb/obsidian/
 └── annotations/    # 人工区，投影器不遍历/覆盖
 ```
 
-unit 页 frontmatter 是扁平 Obsidian Properties：`id/kind/title/aliases/status/maturity/confirmation_status/topics/programs/tags/managed_by/source_path`，并按实际关系增加 `rel_<relation>` 列表。所有 Properties 中的内部链接都是带引号的 wikilink。正文固定提供 `Overview/Metadata/Relationships/Claims` 标题；canonical claim 与 evidence quote 带稳定 block ID。
+unit 页 frontmatter 是扁平 Obsidian Properties：`id/kind/title/aliases/status/maturity/confirmation_status/topics/programs/tags/managed_by/source_path`，并按实际关系增加 `rel_<relation>` 列表。所有 Properties 中的内部链接都是带引号的 wikilink。正文固定提供 `Overview/Metadata/Relationships/Claims`；paper 有 current figure index 时还提供 `Figures`。canonical claim 与 evidence quote 带稳定 block ID。
 
 `manifest.yaml`：
 
@@ -250,6 +250,10 @@ files:
 | concept | `concept{canonical_name, aliases, definition, scope_note}`, `associations`, `anchor`, `claims`, `verification`, `state{concept_status}` | literature-synthesizer（prepare/verify）、knowledge-base-manager（公共确认/拒绝） |
 
 paper `payload.basic_info` 的引用事实合同：`doi` 保存去 prefix/scheme 的小写 DOI；`arxiv_id` 保存 versionless work identity（精确 `vN` 仍由 `source.original_uri`/归档材料保存）；`citation_key` 必须等于 canonical unit id 的确定性投影 `cite_<sanitized-unit-id>`。`bibtex` 只允许补充 `entry_type/venue_field/volume/number/pages/publisher/primary_class`，不得复制 title/authors/year/DOI 或保存 provider raw BibTeX。intake 只从已归档 HTML/PDF、staged identity 和 source URI 机械合并，强 identity 冲突 fail closed，不联网补元数据。缺具体 publication type 时 `misc` 只是 BibTeX 中性序列化容器，不声称 journal/conference 类型。
+
+paper 插图合同：`figures.yaml` 是 `figure-index/v1` SSOT，顶层固定为 `schema/paper_id/source/extraction/entries/index_digest`。`source` 绑定已归档 PDF artifact 与 sha256；每个 entry 保存 `ref_key/kind/number/caption/caption_digest/page/pages/assets`；每个 asset 保存内容地址 `figures/assets/<png-sha256>.png`、sha256、page 和可选 bbox/source mode。有编号 key 固定为 `fig:<paper-id>:fig|tbl:<normalized-number>`，无编号才用 page + caption digest fallback；panel/continued 只合并为同一逻辑 entry，同 key 冲突 fail closed。
+
+`payload.figures` 只是机械投影：`schema/extraction_status/index_artifact/index_digest/available_ref_keys/key_figure_refs`，不复制 caption。`extract-figures` 不得自选关键图、改写 paper claims 或降级整篇 confirmation；`key_figure_refs` 只保留 Agent 已选且仍 current 的 key。find/Obsidian/report/draft 消费前必须重验 source/index/asset bytes 与 record 绑定；任一漂移则该 figure entry fail closed，不回退 traversal filename。
 
 ### concept unit <a id="concept-unit"></a>
 

@@ -338,6 +338,46 @@ def extract_parse_cache_passages(
     return passages
 
 
+def extract_figure_index_passages(
+    record: dict[str, Any],
+    *,
+    artifact: str,
+    index: dict[str, Any],
+    source_digest: str,
+) -> list[dict[str, Any]]:
+    """Project already-validated figure refs and captions into search passages.
+
+    Currentness and byte bindings are deliberately checked by the caller.  This
+    helper only performs a mechanical, stable projection of canonical entries.
+    """
+    passages: list[dict[str, Any]] = []
+    entries = index.get("entries")
+    if not isinstance(entries, list):
+        return passages
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        ref_key = str(entry.get("ref_key") or "").strip()
+        caption = str(entry.get("caption") or "").strip()
+        if not ref_key or not caption:
+            continue
+        page = entry.get("page")
+        page_label = f"page {page}" if isinstance(page, int) and page > 0 else ""
+        heading = " · ".join(item for item in (ref_key, page_label) if item)
+        _append_passage(
+            passages,
+            record=record,
+            artifact=artifact,
+            locator=f"{artifact}#{ref_key}",
+            heading=heading,
+            line_start=0,
+            line_end=0,
+            text=f"{ref_key}\n{caption}",
+            source_digest=source_digest,
+        )
+    return passages
+
+
 def is_code_passage(passage: dict[str, Any]) -> bool:
     """A repo source passage carries a repository-relative artifact path.
 

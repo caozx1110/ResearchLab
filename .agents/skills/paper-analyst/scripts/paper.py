@@ -42,7 +42,14 @@ if __name__ == "__main__":
 
 import yaml
 
-from research.common import add_project_root_argument, clean_text, extract_pdf_context_pages, load_yaml, print_resolved_project_roots, read_text_excerpt, write_text_if_changed, write_yaml_if_changed
+from research.common import add_project_root_argument, clean_text, extract_pdf_context_pages, file_sha256, load_yaml, print_resolved_project_roots, read_text_excerpt, write_text_if_changed, write_yaml_if_changed
+from research.figures import (
+    FigureIndexError,
+    build_asset_binding,
+    build_figure_entry,
+    build_figure_index,
+    load_current_figure_index,
+)
 from research.pdf_layout import (
     GRAY_RATIO_THRESHOLD,
     LAYOUT_DEFAULT_CROP_PADDING_PT,
@@ -1074,10 +1081,10 @@ def extract_figure_mentions(source_chunks: list[dict], *, extracted_assets: list
                     }
                 )
     return {
-        "status": "pending_user_confirmation",
-        "information_types": ["fact", "inference", "unverified"],
+        "status": "mechanically_indexed",
+        "information_types": ["fact"],
         "candidate_figures": mentions,
-        "key_figures": extracted_assets or [],
+        "key_figures": [],
         "open_questions": [
             "caption 裁剪是否已经覆盖了论文里真正需要复用的整张 Figure / Table？",
             "是否仍有极少数跨栏或无 caption 的对象需要人工补裁？",
@@ -1102,8 +1109,8 @@ def _extract_pdf_images(
     crop_padding_pt = float(preferences.get("figure_crop_padding_pt") or LAYOUT_DEFAULT_CROP_PADDING_PT)
     figures_root = unit_root / "figures"
 
-    return extract_caption_region_assets(
-        lambda path: rel(root, path),
+    assets, filtered, metadata = extract_caption_region_assets(
+        lambda path: path.relative_to(unit_root).as_posix(),
         pdf_path,
         figures_root,
         include_tables=include_tables,
@@ -1111,6 +1118,29 @@ def _extract_pdf_images(
         crop_padding_pt=crop_padding_pt,
         filter_blank_and_mask=filter_blank_and_mask,
     )
+    try:
+        source_artifact = pdf_path.relative_to(unit_root).as_posix()
+    except ValueError:
+        source_artifact = rel(root, pdf_path)
+        if not source_artifact.startswith("kb/"):
+            raise RuntimeError("Paper figure source must be archived inside the workspace.")
+    metadata.update(
+        {
+            "source_artifact": source_artifact,
+            "source_sha256": file_sha256(pdf_path),
+            "settings": {
+                "mode": metadata.get("mode"),
+                "include_tables": include_tables,
+                "render_scale": render_scale,
+                "crop_padding_pt": crop_padding_pt,
+                "filter_blank_and_mask": filter_blank_and_mask,
+                "white_ratio_threshold": WHITE_RATIO_THRESHOLD,
+                "gray_ratio_threshold": GRAY_RATIO_THRESHOLD,
+                "low_color_threshold": LOW_COLOR_THRESHOLD,
+            },
+        }
+    )
+    return assets, filtered, metadata
 
 
 def _finalize_post_actions(
@@ -1203,34 +1233,94 @@ def _run_extract_figures(
     extracted_assets, filtered_assets, extraction_meta = _extract_pdf_images(
         root, record, unit_root, preferences=pdf_preferences
     )
-    payload = extract_figure_mentions(source_chunks, extracted_assets=extracted_assets)
-    payload["filtered_assets"] = filtered_assets
-    payload["asset_counts"] = {"kept": len(extracted_assets), "filtered": len(filtered_assets)}
-    payload["filter_policy"] = {
-        "mode": extraction_meta.get("mode"),
-        "captions_detected": extraction_meta.get("captions_detected", 0),
-        "fallback_used": extraction_meta.get("fallback_used", False),
-        "white_ratio_threshold": WHITE_RATIO_THRESHOLD,
-        "gray_ratio_threshold": GRAY_RATIO_THRESHOLD,
-        "low_color_threshold": LOW_COLOR_THRESHOLD,
-        "discard_filtered_files": True,
+    current_projection = record.get("payload", {}).get("figures", {})
+    current_projection = current_projection if isinstance(current_projection, dict) else {}
+    prior_selected = {
+        str(item).strip()
+        for item in current_projection.get("key_figure_refs", [])
+        if str(item).strip()
     }
-    write_yaml_if_changed(figures_path, payload)
-    record["payload"]["figures"]["extraction_status"] = "pending_user_confirmation"
-    record["payload"]["figures"]["candidate_figures"] = payload["candidate_figures"]
-    record["payload"]["figures"]["key_figures"] = payload["key_figures"]
-    record["confirmation_status"] = "pending_user_confirmation"
-    record["needs_human_confirmation"] = True
-    record["information_types"] = sorted(set(record.get("information_types", [])) | {"fact", "inference", "unverified"})
+    if not extraction_meta.get("source_artifact"):
+        unavailable = {
+            "schema": "figure-index-unavailable/v1",
+            "paper_id": str(record.get("id") or ""),
+            "status": "unavailable",
+            "reason": "no-archived-pdf-source",
+            "entries": [],
+        }
+        write_yaml_if_changed(figures_path, unavailable)
+        record["payload"]["figures"] = {
+            "schema": "figure-index/v1",
+            "extraction_status": "unavailable",
+            "index_artifact": "",
+            "index_digest": "",
+            "available_ref_keys": [],
+            "key_figure_refs": [],
+        }
+        available_refs: set[str] = set()
+    else:
+        entries: list[dict[str, Any]] = []
+        try:
+            for asset in extracted_assets:
+                relative_asset = Path(str(asset.get("path") or ""))
+                asset_path = unit_root / relative_asset
+                binding = build_asset_binding(
+                    asset_path,
+                    page=asset.get("page"),
+                    caption_bbox=asset.get("caption_bbox"),
+                    crop_bbox=asset.get("crop_bbox"),
+                    source_mode=asset.get("source_mode"),
+                )
+                if binding["path"] != relative_asset.as_posix():
+                    raise FigureIndexError("extracted asset path is not content-addressed")
+                entries.append(
+                    build_figure_entry(
+                        str(record.get("id") or ""),
+                        kind=asset.get("kind"),
+                        number=asset.get("label"),
+                        caption=asset.get("caption"),
+                        page=asset.get("page"),
+                        assets=[binding],
+                    )
+                )
+            figure_index = build_figure_index(
+                str(record.get("id") or ""),
+                source_artifact=extraction_meta["source_artifact"],
+                source_sha256=extraction_meta["source_sha256"],
+                extraction_settings=extraction_meta.get("settings", {}),
+                entries=entries,
+            )
+        except FigureIndexError as exc:
+            raise SystemExit(f"图表编号或 caption 存在冲突，未更新引用索引：{exc}") from exc
+        write_yaml_if_changed(figures_path, figure_index)
+        load_current_figure_index(
+            figures_path,
+            unit_root=unit_root,
+            project_root=root,
+            expected_index_digest=figure_index["index_digest"],
+            expected_source_sha256=extraction_meta["source_sha256"],
+        )
+        available_refs = {str(item["ref_key"]) for item in figure_index["entries"]}
+        record["payload"]["figures"] = {
+            "schema": "figure-index/v1",
+            "extraction_status": "indexed" if available_refs else "indexed_empty",
+            "index_artifact": "figures.yaml",
+            "index_digest": figure_index["index_digest"],
+            "available_ref_keys": sorted(available_refs),
+            "key_figure_refs": sorted(prior_selected & available_refs),
+        }
     append_history(
         record,
         action="paper-figures-extracted",
-        summary="Extracted figure assets when possible and indexed figure mentions.",
-        information_types=["fact", "inference", "unverified"],
+        summary=(
+            f"Mechanically indexed {len(available_refs)} stable figure references; "
+            f"filtered {len(filtered_assets)} crop candidates."
+        ),
+        information_types=["fact"],
         artifacts=[rel(root, figures_path)],
     )
     write_record(root, record)
-    print(f"[ok] wrote {figures_path.relative_to(root)}")
+    print(f"图表引用索引已更新：{len(available_refs)} 个稳定引用。")
     _finalize_post_actions(
         root, trigger="milestone", message=f"milestone: extract paper figures {record['id']}", defer_post_actions=defer_post_actions,
         target_paths=[unit_root / "record.yaml", figures_path, unit_root / "figures"],
