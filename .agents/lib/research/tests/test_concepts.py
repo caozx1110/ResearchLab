@@ -191,6 +191,9 @@ def test_concept_confirm_index_find_and_obsidian_page(tmp_path: Path) -> None:
     assert "## Definition" in text
     assert "Action chunking predicts temporally consistent blocks of actions." in text
     assert "## Associations" in text
+    assert "Analysis · Evidence-backed analysis available" in text
+    assert "Confirmation: Confirmed" in text
+    assert "Awaiting human confirmation" not in text
     for _kind, unit_id, title, _quote in SOURCE_ROWS:
         assert unit_id in text or title in text
 

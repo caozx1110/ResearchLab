@@ -28,7 +28,7 @@ from .yaml_io import dump_yaml, load_yaml, write_text_if_changed, write_yaml_if_
 
 
 OBSIDIAN_PROJECTION_SCHEMA = "research-kb-obsidian/v1"
-OBSIDIAN_RENDERER_REVISION = 7
+OBSIDIAN_RENDERER_REVISION = 8
 MANIFEST_NAME = "manifest.yaml"
 HUMAN_DIRS = ("inbox", "annotations")
 UNIT_HEADINGS = frozenset(
@@ -315,6 +315,13 @@ def _record_claims(record: dict[str, Any]) -> list[dict[str, Any]]:
 def _analysis_stage(record: dict[str, Any]) -> str:
     claims = _record_claims(record)
     confirmation = _single_line(record.get("confirmation_status"))
+    # Canonical claim rows intentionally preserve their pre-decision epistemic
+    # status so the ConfirmationReceipt digest remains stable.  A normalized
+    # record is top-level confirmed only while that receipt is current, so the
+    # projection must treat its covered claims as confirmed instead of showing
+    # a contradictory pending banner.
+    if claims and confirmation == "confirmed":
+        return "evidence_recorded"
     claim_pending = any(
         _single_line(claim.get("confirmation_status")) == "pending_user_confirmation"
         for claim in claims
@@ -324,6 +331,19 @@ def _analysis_stage(record: dict[str, Any]) -> str:
     if claims:
         return "evidence_recorded"
     return "awaiting_analysis"
+
+
+def _projected_claim_confirmation(record: dict[str, Any], claim: dict[str, Any]) -> str:
+    status = _single_line(claim.get("confirmation_status"))
+    if _single_line(record.get("confirmation_status")) != "confirmed":
+        return status
+    receipt = record.get("confirmation")
+    receipt = receipt if isinstance(receipt, dict) else {}
+    claim_ids = receipt.get("claim_ids")
+    claim_ids = claim_ids if isinstance(claim_ids, list) else []
+    if _single_line(claim.get("id")) in {_single_line(item) for item in claim_ids}:
+        return "confirmed"
+    return status
 
 
 def _analysis_stage_label(stage: str, *, zh: bool = False) -> str:
@@ -612,7 +632,7 @@ def _render_claims(
                 f"{text} ^{block_id}",
                 "",
                 f"- {_t(zh, 'Type', '类型')}: {_human_label(claim.get('claim_type'), _CLAIM_TYPE_LABELS_ZH if zh else _CLAIM_TYPE_LABELS)}",
-                f"- {_t(zh, 'Confirmation', '确认状态')}: {_human_label(claim.get('confirmation_status'), _CONFIRMATION_LABELS_ZH if zh else _CONFIRMATION_LABELS)}",
+                f"- {_t(zh, 'Confirmation', '确认状态')}: {_human_label(_projected_claim_confirmation(record, claim), _CONFIRMATION_LABELS_ZH if zh else _CONFIRMATION_LABELS)}",
             ]
         )
         refs = claim.get("evidence_refs", [])
