@@ -334,7 +334,7 @@ def test_profile_change_makes_existing_selection_stale(tmp_path: Path) -> None:
         )
 
 
-def test_confirmed_learned_preferences_follow_their_skill_hint(tmp_path: Path) -> None:
+def test_legacy_learned_preferences_without_receipt_are_not_eligible(tmp_path: Path) -> None:
     root = _configured_workspace(tmp_path)
     runtime = default_runtime_preferences()
     runtime["learned_preferences"]["items"] = [
@@ -352,7 +352,7 @@ def test_confirmed_learned_preferences_follow_their_skill_hint(tmp_path: Path) -
     report_paths = {str(item["path"]) for item in eligible_preferences(root, skill="report-author", operation="weekly")["items"]}
     experiment_paths = {str(item["path"]) for item in eligible_preferences(root, skill="experiment-workbench", operation="plan")["items"]}
 
-    assert "learned.learning-1" in report_paths
+    assert "learned.learning-1" not in report_paths
     assert "learned.learning-1" not in experiment_paths
 
 

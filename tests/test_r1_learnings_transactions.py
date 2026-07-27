@@ -137,7 +137,7 @@ def test_review_is_a_root_transaction_covering_the_learning_file(tmp_path: Path)
     assert operations[0]["target_paths"] == ["memory/learnings.yaml"]
 
 
-def test_promote_fault_restores_both_files_byte_for_byte(tmp_path: Path, monkeypatch) -> None:
+def test_retired_direct_promote_is_zero_write(tmp_path: Path) -> None:
     root = _workspace(tmp_path)
     write_runtime_preferences(root, {"identity": {"default_confirmed_by": "research-lead"}})
     entry, _ = log_learning(
@@ -145,47 +145,21 @@ def test_promote_fault_restores_both_files_byte_for_byte(tmp_path: Path, monkeyp
         category="user-preference",
         text="Prefer byte-for-byte rollback checks.",
         source="user",
+        skill="report-author",
+        operation="weekly",
+        observation="Please verify rollback byte for byte.",
         now=NOW,
     )
     memory_path = learnings_path(root)
     preferences_path = runtime_preferences_path(root)
     before_memory = memory_path.read_bytes()
     before_preferences = preferences_path.read_bytes()
-    original_write = prefs_module.write_yaml_if_changed
-
-    def fail_after_preferences_write(path: Path, payload: object) -> bool:
-        changed = original_write(path, payload)
-        if Path(path).resolve() == preferences_path.resolve():
-            raise OSError("simulated preference write failure")
-        return changed
-
-    monkeypatch.setattr(prefs_module, "write_yaml_if_changed", fail_after_preferences_write)
-
-    with pytest.raises(OSError, match="simulated preference write failure"):
+    with pytest.raises(ValueError, match="unified kb review snapshot"):
         promote_learning(root, learning_id=entry["id"])
 
     assert memory_path.read_bytes() == before_memory
     assert preferences_path.read_bytes() == before_preferences
-    operations = _journal_entries(root, "promote-learning")
-    assert len(operations) == 1
-    assert operations[0]["state"] == "abort"
-    assert operations[0]["target_paths"] == [
-        "config/runtime-preferences.yaml",
-        "memory/learnings.yaml",
-    ]
-    root_operation = load_op(root, operations[0]["op_id"])
-    assert root_operation["state"] == "abort"
-    descendants = [
-        entry
-        for op_type in ("write-learnings", "write-runtime-preferences")
-        for entry in _journal_entries(root, op_type)
-        if entry.get("root_op_id") == root_operation["op_id"]
-    ]
-    assert {entry["op_type"] for entry in descendants} == {
-        "write-learnings",
-        "write-runtime-preferences",
-    }
-    assert all(entry["parent_op_id"] == root_operation["op_id"] for entry in descendants)
+    assert _journal_entries(root, "promote-learning") == []
 
 
 def test_standalone_preference_write_rolls_back_after_fault(tmp_path: Path, monkeypatch) -> None:

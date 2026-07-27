@@ -18,6 +18,7 @@ from typing import Any, Mapping, Sequence
 
 from .common import load_yaml, utc_now_iso, write_yaml_if_changed
 from .journal import mutation_transaction
+from .learnings import current_learned_preference_items
 from .paths import config_root, runtime_preferences_path
 from .prefs import load_runtime_preferences
 
@@ -1107,7 +1108,10 @@ def _base_catalog(project_root: Path) -> list[dict[str, object]]:
         )
 
     learned = runtime.get("learned_preferences", {})
-    learned_items = learned.get("items", []) if isinstance(learned, Mapping) else []
+    learned_items = current_learned_preference_items(
+        project_root,
+        learned.get("items", []) if isinstance(learned, Mapping) else [],
+    )
     if isinstance(learned_items, list):
         for raw in learned_items:
             if not isinstance(raw, Mapping):

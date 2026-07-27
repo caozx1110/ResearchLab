@@ -572,6 +572,41 @@ def test_config_runtime_command_is_one_scoped_undoable_transaction(
     assert path.read_bytes() == before
 
 
+@pytest.mark.parametrize("placeholder", ["我", "本人", "用户", "human", "source=user", "Codex Agent"])
+def test_config_runtime_command_rejects_placeholder_confirmation_identity_without_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    placeholder: str,
+) -> None:
+    config = _load_config_module()
+    config.ensure_workspace(tmp_path)
+    path = config.runtime_preferences_path(tmp_path)
+    before = path.read_bytes()
+    journal_before = sorted((tmp_path / "kb/.journal").glob("*.yaml"))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "config.py",
+            "--root",
+            str(tmp_path),
+            "set-runtime-pref",
+            "--section",
+            "identity",
+            "--key",
+            "default_confirmed_by",
+            "--value",
+            placeholder,
+        ],
+    )
+
+    with pytest.raises(SystemExit, match="real human name"):
+        config.main()
+
+    assert path.read_bytes() == before
+    assert sorted((tmp_path / "kb/.journal").glob("*.yaml")) == journal_before
+
+
 def test_nested_crash_resume_restores_only_root_before_image_and_aborts_descendants(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

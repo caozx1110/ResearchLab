@@ -11,13 +11,14 @@ Use this skill when a real workflow exposes friction in the research system, whe
 
 ## Workflow
 
-1. For lightweight memory, log one short learning and leave it `pending` until user review.
-2. Do not recall or broadcast the full memory at session start. Confirmed habits that should affect work are promoted to the canonical preference profile; each routed consumer then receives only its task-eligible selected subset. Recall recurring issues only for an explicit memory/diagnostic task.
-3. Keep `skill-defect` entries record-only; do not auto-edit skills or roadmap files from them.
-4. For deeper retrospectives, record which skills were used, separate observed friction from inferred causes, and generate an AI-ready patch prompt.
-5. When the user explicitly asks to remember a failure, record one local redacted diagnostic issue even if automatic diagnostics are off.
-6. For automatic failures, read the effective workspace/per-skill policy first. `errors-only` is deterministic capture only; `developer` may add a short Agent retrospective only within the configured task budget.
-7. Never store raw stdout/stderr, traceback, user message, secret, environment value, absolute path, paper/raw/evidence text, or upload anything. A defect remains record-only until a developer separately changes code.
+1. For a user preference, capture only an explicit correction or repeated same-shape edit. Store one short normalized preference, the short verbatim observation, and its exact target skill and operation; leave it `pending`.
+2. Accumulate no more than two pending preference observations at task close and ask naturally whether to remember them. Confirmation or dismissal must use the one-time public `kb review` snapshot; direct learning review/promotion is retired. `source=user` never counts as confirmation.
+3. Do not recall or broadcast the full memory at session start. A preference affects work only while its human-signed, current-message confirmation receipt and runtime binding remain current; each routed consumer receives only its exact task-eligible selected subset. Recall recurring issues only for an explicit memory/diagnostic task.
+4. Keep `skill-defect` entries record-only; do not auto-edit skills or roadmap files from them.
+5. For deeper retrospectives, record which skills were used, separate observed friction from inferred causes, and generate an AI-ready patch prompt.
+6. When the user explicitly asks to remember a failure, record one local redacted diagnostic issue even if automatic diagnostics are off.
+7. For automatic failures, read the effective workspace/per-skill policy first. `errors-only` is deterministic capture only; `developer` may add a short Agent retrospective only within the configured task budget.
+8. Never store raw stdout/stderr, traceback, secret, environment value, absolute path, paper/raw/evidence text, or upload anything. The only allowed user-message excerpt is the bounded verbatim preference observation. A defect remains record-only until a developer separately changes code.
 
 ## Natural-language interaction
 
@@ -31,11 +32,12 @@ Lightweight learnings:
 
 ```bash
 python3 .agents/skills/skill-evolution-advisor/scripts/learnings.py log --category recurring-issue --text "..." --source agent
+python3 .agents/skills/skill-evolution-advisor/scripts/learnings.py log --category user-preference --text "..." --observation "<short verbatim correction>" --source user --skill report-author --operation weekly
 python3 .agents/skills/skill-evolution-advisor/scripts/learnings.py recall --kind all --limit 5
 python3 .agents/skills/skill-evolution-advisor/scripts/learnings.py recall --kind defects
-python3 .agents/skills/skill-evolution-advisor/scripts/learnings.py review --id lrn-20260705-001 --status confirmed
-python3 .agents/skills/skill-evolution-advisor/scripts/learnings.py promote --id lrn-20260705-001
 ```
+
+The compatibility `review` and `promote` subcommands reject `user-preference` entries without writing. Use the unified `kb review` snapshot for both confirmation and dismissal.
 
 Deep retrospective:
 

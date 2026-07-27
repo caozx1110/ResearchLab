@@ -705,7 +705,7 @@ operation: map-capability
 
 ### learnings.yaml <a id="learnings-yaml"></a>
 
-落在 `kb/memory/learnings.yaml`，由 `skill-evolution-advisor` 追加和复审。捕获条目默认 `pending`，因为它是对用户习惯、复发问题或 skill 缺陷的 AI 推断；只有用户 `review` / `promote` 后才进入可遵守的 confirmed 状态。`skill-defect` 只记录供用户审阅，不得自动修改 skill 或 `OPTIMIZATION_PLAN.md`。
+落在 `kb/memory/learnings.yaml`，由 `skill-evolution-advisor` 追加和复审。捕获条目默认 `pending`，因为它是对用户习惯、复发问题或 skill 缺陷的 AI 推断。`user-preference` 必须带逐字 observation 与精确 skill/operation scope，任务尾每批最多展示 2 条；只有统一 `kb review` 的一次性快照、真实人签名和当前消息授权可以确认或忽略。旧 `review_learning` / `promote_learning` 对偏好零写拒绝。`skill-defect` 只记录供用户审阅，不得自动修改 skill 或 `OPTIMIZATION_PLAN.md`。
 
 ```yaml
 - id: lrn-<YYYYMMDD>-NNN
@@ -713,14 +713,29 @@ operation: map-capability
   category: skill-defect | user-preference | recurring-issue
   text: ""                       # 一句话自由文本
   source: agent | user
-  skill: ""                      # 可选，涉及的 skill
+  skill: ""                      # user-preference 必填，精确 consumer skill
+  operations: []                 # user-preference 必填，精确 consumer operation 集
+  observation: ""                # user-preference 必填，短的逐字用户纠正
   context: ""                    # 可选
   status: pending | confirmed | dismissed
   occurrences: 1                 # 相似条目命中则 +1，不新增行
   last_seen_at: ""               # UTC iso
+  confirmation:                  # 仅统一 review 确认后存在
+    by: ""                       # 真实人类署名；“我”/user/human 等角色占位拒绝
+    at: ""
+    evidence: []
+    method: kb review
+    decision: confirmed
+    subject: {kind: user_preference, id: lrn-...}
+    content_digest: ""           # 绑定 learning observation payload
+    observation_digest: ""
+    scope_digest: ""             # 绑定 skill + operations
+    prior_information_types: [user_opinion]
+    user_authorization: ""
+    authorization_source: user_message
 ```
 
-确认后的 `user-preference` 可通过 `promote` 写入 `kb/config/runtime-preferences.yaml` 的 `learned_preferences.items`；确认后的 `recurring-issue` 仅出现在 recall 摘要中。
+确认 `user-preference` 时，learning receipt 与 `runtime-preferences.yaml` 的 `learned_preferences.items[]` 在同一 root transaction 写入。runtime item 保存 `id/text/source/skill/operations/context` 与 `learning_binding.{learning_digest,observation_digest,scope_digest,receipt_digest}`；eligible view 每次重读 learning 并 exact 验证 receipt/binding，缺失、旧式、伪签、重复 ID 或任一内容漂移时仅保留历史 bytes，不进入 soft catalog。相同文本只与 pending 条目去重；已确认观察不会被后续观察静默 bump。确认后的 `recurring-issue` 仅出现在 recall 摘要中。
 
 ### skill-evolution/issues.yaml <a id="diagnostic-issues-yaml"></a>
 

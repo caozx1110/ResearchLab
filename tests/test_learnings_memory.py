@@ -12,6 +12,7 @@ from research.learnings import (
     promote_learning,
     render_recall_digest,
     review_learning,
+    write_learnings,
 )
 from research.core import load_runtime_preferences, write_runtime_preferences
 
@@ -64,6 +65,9 @@ def test_recall_prints_confirmed_habits_gotchas_and_pending_defects(tmp_path: Pa
         category="user-preference",
         text="Prefer Chinese human-facing markdown.",
         source="user",
+        skill="report-author",
+        operation="weekly",
+        observation="Please keep the human-facing report in Chinese.",
         now=_now(),
     )
     gotcha, _ = log_learning(
@@ -81,21 +85,24 @@ def test_recall_prints_confirmed_habits_gotchas_and_pending_defects(tmp_path: Pa
         skill="paper-analyst",
         now=_now(2),
     )
-    review_learning(root, learning_id=pref["id"], status="confirmed")
+    # A legacy status string without an anchored receipt is historical only.
+    entries = load_learnings(root)
+    entries[0]["status"] = "confirmed"
+    write_learnings(root, entries)
     review_learning(root, learning_id=gotcha["id"], status="confirmed")
 
     digest = render_recall_digest(load_learnings(root), kind="all", limit=5)
     defects = render_recall_digest(load_learnings(root), kind="defects", limit=5)
 
     assert "Known habits" in digest
-    assert "Prefer Chinese human-facing markdown." in digest
+    assert "Prefer Chinese human-facing markdown." not in digest
     assert "Do not treat AI evaluation as fact." in digest
     assert "Pending skill defects: 1" in digest
     assert defect["id"] in defects
     assert "paper-analyst handoff omitted confirmation status." in defects
 
 
-def test_promote_writes_runtime_preferences_and_confirms_learning(tmp_path: Path) -> None:
+def test_direct_preference_promotion_is_retired_without_writes(tmp_path: Path) -> None:
     root = _workspace(tmp_path)
     entry, _ = log_learning(
         root,
@@ -103,25 +110,19 @@ def test_promote_writes_runtime_preferences_and_confirms_learning(tmp_path: Path
         text="Prefer concise Chinese summaries.",
         source="user",
         skill="report-author",
+        operation="weekly",
+        observation="Keep the weekly summary concise and in Chinese.",
         context="weekly report",
         now=_now(),
     )
+    before_memory = learnings_path(root).read_bytes()
+    before_preferences = load_runtime_preferences(root)
 
-    promoted, path = promote_learning(root, learning_id=entry["id"])
-    preferences = load_runtime_preferences(root)
+    with pytest.raises(ValueError, match="unified kb review snapshot"):
+        promote_learning(root, learning_id=entry["id"])
 
-    assert path.relative_to(root).as_posix() == "kb/config/runtime-preferences.yaml"
-    assert promoted["status"] == "confirmed"
-    assert load_learnings(root)[0]["status"] == "confirmed"
-    assert preferences["learned_preferences"]["items"] == [
-        {
-            "id": entry["id"],
-            "text": "Prefer concise Chinese summaries.",
-            "source": "user",
-            "skill": "report-author",
-            "context": "weekly report",
-        }
-    ]
+    assert learnings_path(root).read_bytes() == before_memory
+    assert load_runtime_preferences(root) == before_preferences
 
 
 @pytest.mark.parametrize("category", ["skill-defect", "recurring-issue"])
@@ -139,39 +140,55 @@ def test_promote_rejects_non_user_preference_learnings(tmp_path: Path, category:
         promote_learning(root, learning_id=entry["id"])
 
 
-def test_promote_rejects_dismissed_user_preference(tmp_path: Path) -> None:
+def test_direct_review_rejects_user_preference(tmp_path: Path) -> None:
     root = _workspace(tmp_path)
     entry, _ = log_learning(
         root,
         category="user-preference",
         text="Prefer brief status updates.",
         source="user",
+        skill="kb-cli",
+        operation="review-display",
+        observation="Keep status updates brief.",
         now=_now(),
     )
-    review_learning(root, learning_id=entry["id"], status="dismissed")
 
-    with pytest.raises(ValueError):
-        promote_learning(root, learning_id=entry["id"])
+    with pytest.raises(ValueError, match="unified kb review snapshot"):
+        review_learning(root, learning_id=entry["id"], status="dismissed")
 
 
-def test_promote_learning_is_idempotent_for_same_id(tmp_path: Path) -> None:
+def test_confirmed_preference_is_not_bumped_by_a_new_observation(tmp_path: Path) -> None:
     root = _workspace(tmp_path)
     entry, _ = log_learning(
         root,
         category="user-preference",
         text="Prefer concise commit messages.",
         source="user",
+        skill="knowledge-base-manager",
+        operation="query",
+        observation="Please keep commit messages concise.",
         now=_now(),
     )
+    entries = load_learnings(root)
+    entries[0]["status"] = "confirmed"
+    write_learnings(root, entries)
 
-    promote_learning(root, learning_id=entry["id"])
-    promote_learning(root, learning_id=entry["id"])
+    repeated, created = log_learning(
+        root,
+        category="user-preference",
+        text="Prefer concise commit messages.",
+        source="user",
+        skill="knowledge-base-manager",
+        operation="query",
+        observation="Please keep future commit messages concise too.",
+        now=_now(1),
+    )
 
-    items = load_runtime_preferences(root)["learned_preferences"]["items"]
-    assert [item["id"] for item in items].count(entry["id"]) == 1
+    assert created is True
+    assert repeated["id"] != entry["id"]
 
 
-def test_promote_preserves_existing_runtime_preferences_sections(tmp_path: Path) -> None:
+def test_direct_promotion_preserves_existing_runtime_preferences_sections(tmp_path: Path) -> None:
     root = _workspace(tmp_path)
     write_runtime_preferences(root, {"identity": {"default_confirmed_by": "czx"}})
     entry, _ = log_learning(
@@ -179,14 +196,18 @@ def test_promote_preserves_existing_runtime_preferences_sections(tmp_path: Path)
         category="user-preference",
         text="Prefer Chinese human-facing markdown.",
         source="user",
+        skill="report-author",
+        operation="weekly",
+        observation="Please keep human-facing markdown in Chinese.",
         now=_now(),
     )
 
-    promote_learning(root, learning_id=entry["id"])
+    with pytest.raises(ValueError, match="unified kb review snapshot"):
+        promote_learning(root, learning_id=entry["id"])
 
     preferences = load_runtime_preferences(root)
     assert preferences["identity"]["default_confirmed_by"] == "czx"
-    assert preferences["learned_preferences"]["items"][0]["id"] == entry["id"]
+    assert preferences["learned_preferences"]["items"] == []
 
 
 def test_review_sets_confirmed_or_dismissed(tmp_path: Path) -> None:

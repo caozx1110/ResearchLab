@@ -107,6 +107,9 @@ def test_navigator_current_state_includes_recall_digest_without_writing(tmp_path
         category="user-preference",
         text="Prefer compact Chinese status pages.",
         source="user",
+        skill="kb-cli",
+        operation="review-display",
+        observation="Please keep status pages compact and in Chinese.",
     )
     gotcha, _ = log_learning(
         root,
@@ -121,7 +124,8 @@ def test_navigator_current_state_includes_recall_digest_without_writing(tmp_path
         source="agent",
         skill="research-navigator",
     )
-    review_learning(root, learning_id=pref["id"], status="confirmed")
+    with pytest.raises(ValueError, match="unified kb review snapshot"):
+        review_learning(root, learning_id=pref["id"], status="confirmed")
     review_learning(root, learning_id=gotcha["id"], status="confirmed")
     monkeypatch.setattr(sys, "argv", ["navigate.py", "--root", str(root), "current-state"])
 
@@ -129,7 +133,7 @@ def test_navigator_current_state_includes_recall_digest_without_writing(tmp_path
     text = capsys.readouterr().out
 
     assert "## Recall Digest" in text
-    assert "Prefer compact Chinese status pages." in text
+    assert "Prefer compact Chinese status pages." not in text
     assert "Do not skip confirmation gates." in text
     assert "Pending skill defects: 1" in text
     assert not (root / "kb" / "user" / "current-state.md").exists()

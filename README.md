@@ -37,7 +37,7 @@ These labels describe the current scope of each component, not the release statu
 | `method-designer` | beta | Repo-grounded design handoff and experiment matrices are implemented; generated methods still require expert review. |
 | `experiment-workbench` | beta | Typed plans, atomic W&B/CSV batch import, fingerprinted repeat-aware run logs, follow-ups, and confirmation-gated diagnoses are implemented; diagnosis quality remains agent-dependent. |
 | `report-author` | beta | Agent-filled weekly/PPT editorial chains, outlines, stable bibliography export, and seven-section paper drafts consume version-bound claims, evidence, decisions, citations, and figures; composition quality and coverage still require review. |
-| `skill-evolution-advisor` | scaffold | Local learning and diagnostic-issue capture/review exist; automatic skill evolution is intentionally not a supported promise. |
+| `skill-evolution-advisor` | scaffold | Observed preferences can be confirmed at task close and scoped to matching future work; local diagnostic capture/review exists, while automatic skill evolution is intentionally unsupported. |
 
 A score or successful run for one component is evidence only for that component. It must not be extrapolated to a different workflow or the bundle as a whole. In particular, the scoped **stable** rows above do not make this release candidate a stable release.
 

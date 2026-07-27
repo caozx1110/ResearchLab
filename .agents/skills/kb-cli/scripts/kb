@@ -64,6 +64,7 @@ from research.core import (
 )
 from research.sources import UnsafeLocalSourceError, validate_local_source
 from research.judgements import discover_pending_judgements, judgement_snapshot_binding
+from research.learnings import discover_pending_preference_review_cards
 from research.review_batches import (
     ReviewBatchError,
     consume_obsidian_review_batch,
@@ -150,6 +151,7 @@ REVIEW_OWNER_SCRIPTS = {
     "method-designer": owner_script("method-designer", "method"),
     "literature-synthesizer": owner_script("literature-synthesizer", "synthesize"),
     "report-author": owner_script("report-author", "report"),
+    "skill-evolution-advisor": owner_script("skill-evolution-advisor", "learnings"),
 }
 _REVIEW_OWNER_MODULES: dict[str, object] = {}
 
@@ -1414,7 +1416,7 @@ def handle_status(args: argparse.Namespace, root: Path) -> int:
         print(f"知识库目前收录 {len(records)} 条资料：{'、'.join(count_parts)}。")
     else:
         print("知识库尚未收录资料。")
-    ready_count = len(discover_pending_judgements(root))
+    ready_count = len(_discover_pending_review_cards(root))
 
     program_ids = [
         str(item.get("program_id") or "")
@@ -3354,6 +3356,7 @@ _SIDE_JUDGEMENT_KIND_LABELS = {
     "method_selection": "方法仓库选择",
     "survey_judgement": "文献综述",
     "paper_draft_section": "论文分节草稿",
+    "user_preference": "表达偏好",
 }
 _REVIEW_PRIORITY = {"critical": 4, "high": 3, "normal": 2, "low": 1}
 
@@ -3495,7 +3498,11 @@ def _review_decision_routes(
     raw_confirm = card.get("confirm_route") if isinstance(card, Mapping) else {}
     raw_confirm = raw_confirm if isinstance(raw_confirm, Mapping) else {}
     owner = str(raw_confirm.get("owner") or subject.get("owner") or "")
-    if kind == "program_decision":
+    if kind == "user_preference":
+        raw_reject = card.get("reject_route") if isinstance(card, Mapping) else {}
+        confirm_route = dict(raw_confirm)
+        reject_route = dict(raw_reject) if isinstance(raw_reject, Mapping) else {}
+    elif kind == "program_decision":
         program_id = str(raw_confirm.get("program_id") or "")
         confirm_route = {
             "owner": owner or "research-orchestrator",
@@ -3572,6 +3579,12 @@ def _review_decision_routes(
 
 
 _SIDE_SUBSTANCE_FIELDS = {
+    "user_preference": (
+        ("preference", "text", "希望记住"),
+        ("preference", "skill", "适用能力"),
+        ("preference", "operations", "适用操作"),
+        ("preference", "observation", "原话依据"),
+    ),
     "program_decision": (
         ("decision", "text", "决策内容"),
         ("decision", "rationale", "决策理由"),
@@ -4277,12 +4290,19 @@ def _consume_review_snapshot(root: Path, lease: ReviewSnapshotLease) -> Path:
     return stored_path
 
 
+def _discover_pending_review_cards(root: Path) -> list[dict[str, object]]:
+    return [
+        *discover_pending_judgements(root),
+        *discover_pending_preference_review_cards(root),
+    ]
+
+
 def _current_review_item(root: Path, subject: Mapping[str, object]) -> dict[str, object]:
     kind = str(subject.get("kind") or "")
     subject_id = str(subject.get("id") or "")
     matches = [
         card
-        for card in discover_pending_judgements(root)
+        for card in _discover_pending_review_cards(root)
         if str(card.get("subject", {}).get("kind") or "") == kind
         and str(card.get("subject", {}).get("id") or "") == subject_id
     ]
@@ -5083,7 +5103,7 @@ def handle_review(args: argparse.Namespace, root: Path) -> int:
     canonical_units = _review_unit_records(root)
     cards: list[dict[str, object]] = []
     match_reason_by_subject: dict[tuple[str, str], str] = {}
-    for card in discover_pending_judgements(root):
+    for card in _discover_pending_review_cards(root):
         subject = card.get("subject") if isinstance(card.get("subject"), Mapping) else {}
         key = (str(subject.get("kind") or ""), str(subject.get("id") or ""))
         canonical = canonical_units.get(key)

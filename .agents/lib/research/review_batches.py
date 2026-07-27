@@ -53,6 +53,7 @@ _ALLOWED_OWNER_ACTIONS = {
     "method-designer": {"confirm-selection", "reject-selection"},
     "literature-synthesizer": {"confirm", "reject"},
     "report-author": {"confirm-section", "reject-section"},
+    "skill-evolution-advisor": {"confirm-preference", "dismiss-preference"},
 }
 
 

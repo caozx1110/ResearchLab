@@ -23,6 +23,7 @@ if __name__ == "__main__":
     ensure_managed_runtime(PROJECT_ROOT)
 
 from research.common import add_project_root_argument, load_yaml, print_resolved_project_roots, slugify, warn_if_cwd_differs_from_project_root, write_text_if_changed, write_yaml_if_changed, yaml_default
+from research.confirm import is_ai_signer
 from research.journal import mutation_transaction
 from research.core import (
     candidate_pools_path,
@@ -632,9 +633,14 @@ def main() -> int:
         return 0
     if args.command == "set-runtime-pref":
         path = runtime_preferences_path(root)
+        value = parse_value(args.value)
+        if args.section == "identity" and args.key == "default_confirmed_by":
+            signer = str(value or "").strip()
+            if not signer or is_ai_signer(signer):
+                raise SystemExit("default confirmation identity must be a real human name")
         with mutation_transaction(root, "set-runtime-pref", [path]):
             payload = load_runtime_preferences(root)
-            _apply_runtime_pref(payload, args.section, args.key, parse_value(args.value))
+            _apply_runtime_pref(payload, args.section, args.key, value)
             write_runtime_preferences(root, payload)
         print(f"[ok] updated {path.relative_to(root)}")
         checkpoint = checkpoint_and_report(

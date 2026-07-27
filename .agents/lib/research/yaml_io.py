@@ -45,8 +45,8 @@ if _yaml is not None:
     )
 
 
-def load_yaml_mapping_bytes_strict(data: bytes) -> dict[Any, Any]:
-    """Decode one canonical UTF-8 YAML mapping, rejecting ambiguity at any depth."""
+def load_yaml_bytes_strict(data: bytes) -> Any:
+    """Decode canonical UTF-8 YAML, rejecting duplicate mapping keys at any depth."""
     if _yaml is None:
         raise RuntimeError("PyYAML is required to read canonical research records safely.")
     try:
@@ -61,6 +61,12 @@ def load_yaml_mapping_bytes_strict(data: bytes) -> dict[Any, Any]:
         raise
     except Exception as exc:  # noqa: BLE001 - every malformed canonical record is isolated
         raise StrictYamlError("canonical YAML cannot be parsed") from exc
+    return payload
+
+
+def load_yaml_mapping_bytes_strict(data: bytes) -> dict[Any, Any]:
+    """Decode one canonical UTF-8 YAML mapping, rejecting ambiguity at any depth."""
+    payload = load_yaml_bytes_strict(data)
     if not isinstance(payload, dict):
         raise StrictYamlError("canonical YAML must contain one mapping")
     return payload

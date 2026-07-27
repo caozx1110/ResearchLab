@@ -70,6 +70,16 @@ AI_SIGNER_TOKENS = {
 }
 AI_MODEL_NAME_TOKENS = {"claude", "sonnet", "opus", "haiku", "fable"}
 AI_MODEL_CONTEXT_TOKENS = {"code", "assistant", "agent", "ai", "model", "anthropic"}
+SIGNER_ROLE_PLACEHOLDERS = {
+    "我",
+    "本人",
+    "用户",
+    "人类",
+    "me",
+    "user",
+    "human",
+    "source=user",
+}
 
 
 CONFIRM_UNIT_STATUS_BY_KIND = {
@@ -94,7 +104,7 @@ CONFIRM_UNIT_SUMMARY_BY_KIND = {
 
 def is_ai_signer(actor: str) -> bool:
     normalized = str(actor or "").strip().casefold()
-    if normalized in AI_SIGNER_NAMES:
+    if normalized in AI_SIGNER_NAMES or normalized in SIGNER_ROLE_PLACEHOLDERS:
         return True
     tokens = re.findall(r"[a-z0-9]+", normalized)
     token_set = set(tokens)

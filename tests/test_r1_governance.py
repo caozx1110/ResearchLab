@@ -178,7 +178,21 @@ def test_r1_artifact_byte_change_invalidates_confirmation(tmp_path: Path) -> Non
 
 @pytest.mark.parametrize(
     "actor",
-    ["Codex Agent", "OpenAI Codex", "assistant-1", "GPT-5.6", "Claude Code"],
+    [
+        "Codex Agent",
+        "OpenAI Codex",
+        "assistant-1",
+        "GPT-5.6",
+        "Claude Code",
+        "我",
+        "本人",
+        "用户",
+        "人类",
+        "me",
+        "user",
+        "human",
+        "source=user",
+    ],
 )
 def test_r1_compound_ai_actor_is_rejected(actor: str) -> None:
     assert is_ai_signer(actor) is True

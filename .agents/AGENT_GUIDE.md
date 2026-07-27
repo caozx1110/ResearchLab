@@ -23,7 +23,7 @@ kb --agent-protocol r2.json review \
 ```
 
 - `--apply-snapshot` 传**展示轮协议文件名**（相对 kb/.runtime/），不是 snapshot_token。
-- ref 必须 `kind:id`（paper/repo/dataset/blog/idea/experiment/concept 等）；只能引用展示轮列出的项。
+- ref 必须 `kind:id`（paper/repo/dataset/blog/idea/experiment/concept/user_preference 等）；只能引用展示轮列出的项。
 - `--reject-ref` / `--defer-ref` 同格式，可与 confirm 混批；reject 可附 `--rejection-reason`。
 - confirm 要求：真实人类署名已配置（AI 署名拒绝；缺署名先走 headless `init --name`）、当前消息授权、非空 `--decision-evidence`。
 - 整批原子：任一项 stale 则零写入。
@@ -86,7 +86,7 @@ kb --agent-protocol r2.json review \
 
 1. **启动澄清**：每个 skill 开工前按其 SKILL.md「启动澄清」节问 2-4 个高价值问题，每问带默认值，"默认即可"合法；选择题优于开放问答。
 2. **先复述再讨论**：进入讨论的前三句话复述你对问题的理解，关键术语先对齐再展开。
-3. **观察式偏好**：从执行中观察偏好，攒到任务收尾一批问，每批 ≤2 个；绝不开局问卷。
+3. **观察式偏好**：用户明确纠正或连续做同形修改时，私下记录短的逐字原话、目标 skill 和 operation 为 pending；攒到任务收尾自然问“这两点要记住吗”，每批 ≤2 个，绝不开局问卷。确认/忽略都只消费本轮 `kb review` 展示快照；不得直调 learning review/promote。
 4. **大活先报量级**：批量任务先报预计规模/耗时，小样试做 1-2 个确认口径后再全量。
 5. **伴读三段式**：新材料先给结构地图 → 答疑必带 locator 可回溯 → 落库前先询问。
 6. **口头信息分型**：回答时区分「库内证据（带出处）/ 我的推断 / 需验证」，不混说。
