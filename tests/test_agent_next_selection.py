@@ -351,10 +351,23 @@ def test_candidate_snapshot_is_deterministic_complete_and_has_no_winner_score(tm
     blockers = [item for item in first["candidates"] if item["blocking"]]
     assert len(blockers) == 1
     assert blockers[0]["reason"] == "Resolve evidence request: Parity logs"
-    # Deterministic order is identity-only and carries no semantic winner claim.
-    assert [item["action_id"] for item in first["candidates"]] == sorted(
-        item["action_id"] for item in first["candidates"]
+    # Blocking work precedes other pending work; identity is only the stable tie-break.
+    assert first["candidates"][0]["blocking"] is True
+    assert [item["action_id"] for item in first["candidates"][1:]] == sorted(
+        item["action_id"] for item in first["candidates"][1:]
     )
+
+
+def test_portfolio_decision_rejects_more_than_three_next_steps(tmp_path: Path) -> None:
+    orchestrate = _load_orchestrator("orchestrator_three_step_limit")
+    root = _workspace(tmp_path)
+    _program(orchestrate, root, "program-a", actions=["One", "Two", "Three", "Four"])
+    snapshot = orchestrate.portfolio_candidate_snapshot(root)
+    action_ids = [item["action_id"] for item in snapshot["candidates"][:4]]
+    decision = _decision(root, snapshot, action_ids)
+
+    with pytest.raises(SystemExit, match="at most three"):
+        orchestrate.validate_portfolio_decision(root, decision, snapshot)
 
 
 def test_terminal_program_has_context_but_no_candidate(tmp_path: Path) -> None:
@@ -561,6 +574,73 @@ def test_standalone_literature_search_resume_and_selection_are_portfolio_candida
         "private evidence",
     ):
         assert secret not in private_dump
+
+
+def test_stale_confirmed_survey_is_a_nonexecuting_portfolio_rebuild_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orchestrate = _load_orchestrator("orchestrator_stale_survey_gardening")
+    root = _workspace(tmp_path)
+    monkeypatch.setattr(
+        orchestrate,
+        "discover_stale_confirmed_surveys",
+        lambda _root: [
+            {
+                "subject": {
+                    "kind": "survey_judgement",
+                    "id": "survey:survey:robot-learning",
+                    "owner": "literature-synthesizer",
+                    "path": "kb/synthesis/robot-learning/survey.yaml",
+                },
+                "slug": "robot-learning",
+                "mode": "survey",
+                "program_ids": ["program-a"],
+                "stale_reasons": ["new matching unit: p-gamma"],
+                "new_unit_ids": ["p-gamma"],
+                "container_digest": "a" * 64,
+                "survey_content_digest": "b" * 64,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        orchestrate,
+        "discover_pending_judgements",
+        lambda _root: [
+            {
+                "subject": {
+                    "kind": "program_decision",
+                    "id": "decision-pending",
+                    "owner": "research-orchestrator",
+                    "path": "kb/programs/program-a/workflow/decisions.yaml",
+                },
+                "snapshot_binding": {"content_digest": "c" * 64},
+                "priority": "critical",
+                "confirm_route": {},
+            }
+        ],
+    )
+
+    snapshot = orchestrate.portfolio_candidate_snapshot(root)
+    candidate = next(
+        item for item in snapshot["candidates"] if item["action_type"] == "rebuild-stale-survey"
+    )
+
+    assert candidate["owner_skill"] == "literature-synthesizer"
+    assert candidate["governance_gate"] == "none"
+    assert candidate["safe_execute_capability"] is False
+    assert candidate["subject"] == {
+        "kind": "survey_judgement",
+        "id": "survey:survey:robot-learning",
+    }
+    assert candidate["dependencies"][0]["new_unit_ids"] == ["p-gamma"]
+    stale_position = snapshot["candidates"].index(candidate)
+    pending_position = next(
+        index
+        for index, item in enumerate(snapshot["candidates"])
+        if item["action_type"] == "review-judgement"
+    )
+    assert stale_position < pending_position
 
 
 def test_literature_stage_byte_or_materialization_change_updates_portfolio_exactly(

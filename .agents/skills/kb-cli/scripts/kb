@@ -1309,6 +1309,8 @@ def _status_portfolio_counts(candidates: Sequence[Mapping[str, object]]) -> dict
         "select-literature-candidates": "awaiting_literature_selection",
         "resume-literature-search": "resumable_literature",
         "resume-composite-survey": "resumable_composite",
+        "rebuild-stale-survey": "stale_survey",
+        "rebuild-taxonomy": "taxonomy_rebuild",
     }
     counts = {
         "pending_review": 0,
@@ -1316,6 +1318,8 @@ def _status_portfolio_counts(candidates: Sequence[Mapping[str, object]]) -> dict
         "awaiting_literature_selection": 0,
         "resumable_literature": 0,
         "resumable_composite": 0,
+        "stale_survey": 0,
+        "taxonomy_rebuild": 0,
         "failed_retryable": 0,
         "agent_progress": 0,
     }
@@ -1436,6 +1440,8 @@ def handle_status(args: argparse.Namespace, root: Path) -> int:
         f"{portfolio_counts['awaiting_literature_selection']} 组文献候选待选择、"
         f"{portfolio_counts['resumable_literature']} 个可继续文献检索、"
         f"{portfolio_counts['resumable_composite']} 个可恢复综述流程、"
+        f"{portfolio_counts['stale_survey']} 个过期综述待重建、"
+        f"{portfolio_counts['taxonomy_rebuild']} 个知识分类目录待刷新、"
         f"{portfolio_counts['failed_retryable']} 个失败后可重试事项、"
         f"{portfolio_counts['agent_progress']} 个可由 Agent 继续推进的事项。"
     )
@@ -1528,6 +1534,8 @@ def _next_synthetic_family(item: Mapping[str, object]) -> str:
         )
     ):
         return "survey"
+    if step_type == "rebuild-taxonomy" or stage == "gardening":
+        return "taxonomy"
     return ""
 
 
@@ -1547,6 +1555,8 @@ def _next_public_subject(item: Mapping[str, object], root: Path) -> str:
         return f"研究跟踪「{public_title}」" if public_title else "研究跟踪"
     if family == "survey":
         return f"综述流程「{public_title}」" if public_title else "综述流程"
+    if family == "taxonomy":
+        return "知识分类目录"
     return ""
 
 
@@ -1564,9 +1574,13 @@ def _next_public_reason(item: dict[str, object], root: Path) -> str:
     if family == "monitor":
         return "Agent 需要执行已到期或尚未完成的研究跟踪。"
     if family == "survey":
+        if step_type == "rebuild-stale-survey" or stage == "stale-survey":
+            return "已确认综述的上游证据发生变化，需要重新准备、核验并再次确认。"
         if _next_item_needs_human(item):
             return "综述流程到了需要你确认的环节。"
         return "Agent 需要继续已保存的综述流程。"
+    if family == "taxonomy":
+        return "知识分类目录与当前资料不一致，需要机械刷新；不会删除资料或确认判断。"
     if _next_item_needs_human(item):
         return "已有经过核验的判断，等待你确认。"
     if step_type == "agent-fill":
@@ -2356,42 +2370,209 @@ def _remote_repo_snapshot_result(source: str, kind: str, *, verb: str) -> int | 
     return 1
 
 
+def _validated_batch_intake_result(
+    payload: object,
+    *,
+    expected_item_count: int,
+) -> tuple[list[dict[str, object]], int, int]:
+    if not isinstance(payload, Mapping):
+        raise ValueError("batch intake protocol must be a mapping")
+    raw_results = payload.get("results")
+    if not isinstance(raw_results, list) or len(raw_results) != expected_item_count:
+        raise ValueError("batch intake result count is invalid")
+
+    def nonnegative_integer(field: str) -> int:
+        value = payload.get(field)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"batch intake {field} is invalid")
+        return value
+
+    item_count = nonnegative_integer("item_count")
+    created_count = nonnegative_integer("created_count")
+    duplicate_count = nonnegative_integer("duplicate_count")
+    if item_count != expected_item_count or created_count + duplicate_count != item_count:
+        raise ValueError("batch intake totals are inconsistent")
+    rows: list[dict[str, object]] = []
+    for raw in raw_results:
+        if not isinstance(raw, Mapping):
+            raise ValueError("batch intake result item is invalid")
+        row = dict(raw)
+        if str(row.get("status") or "") not in {"created", "duplicate", "merged"}:
+            raise ValueError("batch intake result status is invalid")
+        if str(row.get("kind") or "") not in {"paper", "repo", "dataset", "blog"}:
+            raise ValueError("batch intake result kind is invalid")
+        if not str(row.get("unit_id") or "").strip():
+            raise ValueError("batch intake result unit id is missing")
+        rows.append(row)
+    if sum(1 for row in rows if row["status"] == "created") != created_count:
+        raise ValueError("batch intake created total is inconsistent")
+    if sum(1 for row in rows if row["status"] != "created") != duplicate_count:
+        raise ValueError("batch intake duplicate total is inconsistent")
+    return rows, created_count, duplicate_count
+
+
 def handle_add(args: argparse.Namespace, root: Path) -> int:
-    unsafe_result = _unsafe_local_source_result(args.source, root)
-    if unsafe_result is not None:
-        return unsafe_result
-    kind = args.kind or infer_add_kind(args.source, root)
+    raw_sources = args.source if isinstance(args.source, list) else [args.source]
+    sources = [str(source) for source in raw_sources if str(source).strip()]
+    if not 1 <= len(sources) <= 20:
+        print("一次可以加入 1 到 20 项资料；请调整数量后重试。", file=sys.stderr)
+        set_protocol_status("invalid_batch_size", item_count=len(sources))
+        return 2
+    kinds = [args.kind or infer_add_kind(source, root) for source in sources]
+    for source in sources:
+        unsafe_result = _unsafe_local_source_result(source, root)
+        if unsafe_result is not None:
+            return unsafe_result
+    remote_repos = [
+        source
+        for source, kind in zip(sources, kinds)
+        if kind == "repo" and source.strip().lower().startswith(("http://", "https://", "git@"))
+    ]
+    if len(sources) > 1 and remote_repos:
+        print(
+            "这批资料中的远程代码仓需要先建立安全的本地只读快照；整批尚未创建知识条目。"
+            "请让 AI 继续，它会先备好全部快照再重试。",
+            file=sys.stderr,
+        )
+        set_protocol_status(
+            "needs_local_repo_snapshot",
+            source_kind="repo",
+            sources=remote_repos,
+            batch_item_count=len(sources),
+        )
+        add_agent_action(
+            "localize_repo_sources",
+            sources=remote_repos,
+            retry_verb="add",
+        )
+        return 1
     try:
         autonomy = load_runtime_preferences(root).get("autonomy", {})
     except Exception:  # noqa: BLE001
         autonomy = {}
     link_autodrive = str(autonomy.get("link_autodrive") or "ask_first").strip().lower() if isinstance(autonomy, Mapping) else "ask_first"
-    if link_autodrive == "auto_deep_read":
-        return handle_ingest(args, root)
-    snapshot_result = _remote_repo_snapshot_result(args.source, kind, verb="add")
-    if snapshot_result is not None:
-        return snapshot_result
+    if len(sources) == 1:
+        single_args = argparse.Namespace(**vars(args))
+        single_args.source = sources[0]
+        if link_autodrive == "auto_deep_read":
+            return handle_ingest(single_args, root)
+        kind = kinds[0]
+        snapshot_result = _remote_repo_snapshot_result(sources[0], kind, verb="add")
+        if snapshot_result is not None:
+            return snapshot_result
+        result = forward_command(
+            root,
+            SCRIPT_BY_VERB["add"],
+            ["add", "--kind", kind, "--source", sources[0]],
+            stream=False,
+        )
+        if result.returncode != 0:
+            print("资料未能加入知识库；详细诊断已保留给 Agent。", file=sys.stderr)
+            return result.returncode
+        unit_id, _status = _extract_ingest_unit_id(result.stdout)
+        public_unit_id = _public_display_text(unit_id, root, "编号已隐藏", 100) if unit_id else ""
+        suffix = f"，条目编号是 {public_unit_id}" if public_unit_id else ""
+        print(f"资料已轻量加入知识库{suffix}。需要我现在继续深读吗？")
+        set_protocol_status("needs_user_input", unit_id=unit_id, source_kind=kind, link_autodrive="ask_first")
+        add_agent_action(
+            "ask_once_to_deep_read",
+            unit_id=unit_id,
+            source_kind=kind,
+            source=sources[0],
+            next_verb="ingest",
+        )
+        return 0
+
+    scope = effective_ingest_scope(root) if link_autodrive == "auto_deep_read" else set()
+    if link_autodrive == "auto_deep_read" and "ingest" not in scope:
+        print("当前自动化偏好暂停了这批入库；如果你愿意，我可以整批继续。")
+        set_protocol_status("paused_by_autonomy", batch_item_count=len(sources))
+        add_agent_action("run_batch_after_authorization", sources=sources, source_kinds=kinds)
+        return 0
+    batch_arguments = ["batch-add"]
+    for source, kind in zip(sources, kinds):
+        batch_arguments.extend(
+            [
+                "--item",
+                json.dumps(
+                    {"kind": kind, "source": source, "maturity": "lightweight"},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            ]
+        )
     result = forward_command(
         root,
         SCRIPT_BY_VERB["add"],
-        ["add", "--kind", kind, "--source", args.source],
+        batch_arguments,
         stream=False,
+        extra_env={"RESEARCH_INGEST_CHAIN": "1"},
     )
     if result.returncode != 0:
-        print("资料未能加入知识库；详细诊断已保留给 Agent。", file=sys.stderr)
+        print("这批资料未能完整加入知识库；详细诊断已保留给 Agent。", file=sys.stderr)
         return result.returncode
-    unit_id, _status = _extract_ingest_unit_id(result.stdout)
-    public_unit_id = _public_display_text(unit_id, root, "编号已隐藏", 100) if unit_id else ""
-    suffix = f"，条目编号是 {public_unit_id}" if public_unit_id else ""
-    print(f"资料已轻量加入知识库{suffix}。需要我现在继续深读吗？")
-    set_protocol_status("needs_user_input", unit_id=unit_id, source_kind=kind, link_autodrive="ask_first")
-    add_agent_action(
-        "ask_once_to_deep_read",
-        unit_id=unit_id,
-        source_kind=kind,
-        source=args.source,
-        next_verb="ingest",
+    try:
+        batch_payload = next(
+            json.loads(line)
+            for line in reversed(result.stdout.splitlines())
+            if line.lstrip().startswith("{")
+        )
+        rows, created_count, duplicate_count = _validated_batch_intake_result(
+            batch_payload,
+            expected_item_count=len(sources),
+        )
+    except (StopIteration, json.JSONDecodeError, TypeError, ValueError):
+        print("这批资料已交给入库流程，但结果清单不完整；Agent 会检查详细记录。", file=sys.stderr)
+        set_protocol_status("error", reason="invalid batch intake protocol")
+        return 1
+    created = [item for item in rows if item.get("status") == "created"]
+    prepared_count = 0
+    prepare_failures: list[dict[str, str]] = []
+    if link_autodrive == "auto_deep_read" and "generate-note" in scope:
+        for item in created:
+            kind = str(item.get("kind") or "")
+            unit_id = str(item.get("unit_id") or "")
+            if kind not in INGEST_ANALYZER or not unit_id:
+                continue
+            relative_script, verb, id_flag = INGEST_ANALYZER[kind]
+            prepare = forward_command(
+                root,
+                relative_script,
+                [verb, id_flag, unit_id, "--phase", "prepare"],
+                stream=False,
+            )
+            if prepare.returncode == 0:
+                prepared_count += 1
+            else:
+                prepare_failures.append({"kind": kind, "unit_id": unit_id})
+    print(
+        f"整批入库已完成：共 {len(sources)} 项，新增 {created_count} 项，"
+        f"已有或合并 {duplicate_count} 项。"
     )
+    if link_autodrive == "auto_deep_read":
+        if prepare_failures:
+            print(f"已为 {prepared_count} 个新条目备好深读骨架；其余条目由 Agent 检查后继续。")
+        else:
+            print(f"已为 {prepared_count} 个新条目备好深读骨架，Agent 接下来会逐项补全并核验。")
+        set_protocol_status(
+            "agent_action_required",
+            batch_item_count=len(sources),
+            created_count=created_count,
+            duplicate_count=duplicate_count,
+            prepared_count=prepared_count,
+            prepare_failures=prepare_failures,
+        )
+        add_agent_action("complete_grounded_batch", units=created)
+    else:
+        print("需要我现在继续深读这批新资料吗？")
+        set_protocol_status(
+            "needs_user_input",
+            batch_item_count=len(sources),
+            created_count=created_count,
+            duplicate_count=duplicate_count,
+            link_autodrive="ask_first",
+        )
+        add_agent_action("ask_once_to_deep_read_batch", units=created)
     return 0
 
 
@@ -5182,7 +5363,7 @@ def register_obsidian(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
 
 def register_add(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     parser = subparsers.add_parser("add", help="轻量入库 source")
-    parser.add_argument("source", metavar="<链接或路径>", help="论文、代码仓、数据集、博客链接或本地文件路径")
+    parser.add_argument("source", nargs="+", metavar="<链接或路径>", help="一次加入 1 到 20 个论文、代码仓、数据集、博客链接或本地文件路径")
     parser.add_argument("--kind", choices=["paper", "repo", "dataset", "blog"], help=argparse.SUPPRESS)
     parser.set_defaults(handler=handle_add)
 

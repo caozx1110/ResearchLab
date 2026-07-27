@@ -1698,7 +1698,8 @@ def test_kb_status_uses_read_only_core_owner_without_navigator(tmp_path: Path, c
         "知识库尚未收录资料。\n"
         "目前没有研究计划。\n"
         "待处理事项：0 条待确认判断、0 个到期监控、0 组文献候选待选择、0 个可继续文献检索、"
-        "0 个可恢复综述流程、0 个失败后可重试事项、0 个可由 Agent 继续推进的事项。\n"
+        "0 个可恢复综述流程、0 个过期综述待重建、0 个知识分类目录待刷新、"
+        "0 个失败后可重试事项、0 个可由 Agent 继续推进的事项。\n"
     )
     assert _tree_metadata_digest(tmp_path) == before
 
@@ -1835,6 +1836,8 @@ def test_kb_status_summarizes_programs_and_canonical_portfolio_without_writing(
             {"action_type": "select-literature-candidates", "dependencies": []},
             {"action_type": "resume-literature-search", "dependencies": []},
             {"action_type": "resume-composite-survey", "dependencies": []},
+            {"action_type": "rebuild-stale-survey", "dependencies": []},
+            {"action_type": "rebuild-taxonomy", "dependencies": []},
             {
                 "action_type": "resume-literature-search",
                 "dependencies": [{"run_state": "failed_retryable"}],
@@ -1869,6 +1872,8 @@ def test_kb_status_summarizes_programs_and_canonical_portfolio_without_writing(
         "awaiting_literature_selection": 1,
         "resumable_literature": 1,
         "resumable_composite": 1,
+        "stale_survey": 1,
+        "taxonomy_rebuild": 1,
         "failed_retryable": 1,
         "agent_progress": 1,
     }
@@ -1883,6 +1888,8 @@ def test_kb_status_summarizes_programs_and_canonical_portfolio_without_writing(
     assert "1 组文献候选待选择" in output
     assert "1 个可继续文献检索" in output
     assert "1 个可恢复综述流程" in output
+    assert "1 个过期综述待重建" in output
+    assert "1 个知识分类目录待刷新" in output
     assert "1 个失败后可重试事项" in output
     assert "1 个可由 Agent 继续推进的事项" in output
     _assert_public_governance_safe(output)
@@ -2843,6 +2850,231 @@ def test_kb_add_ask_first_does_not_prepare_deep_read(monkeypatch, tmp_path: Path
         )
     ]
     assert capsys.readouterr().out.count("需要我现在继续深读吗") == 1
+
+
+def test_kb_add_batches_multiple_sources_with_independent_kind_inference(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    kb = _load_kb_cli()
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        kb,
+        "load_runtime_preferences",
+        lambda root: {"autonomy": {"link_autodrive": "ask_first"}},
+    )
+
+    def fake_forward(root, relative_script, args, *, stream=True, extra_env=None):
+        calls.append(
+            {
+                "script": relative_script,
+                "args": tuple(args),
+                "extra_env": extra_env,
+            }
+        )
+        payload = {
+            "item_count": 2,
+            "created_count": 2,
+            "duplicate_count": 0,
+            "results": [
+                {"status": "created", "kind": "paper", "unit_id": "p-batch-one"},
+                {"status": "created", "kind": "blog", "unit_id": "b-batch-two"},
+            ],
+        }
+        return kb.CommandResult((relative_script, *args), 0, json.dumps(payload) + "\n")
+
+    monkeypatch.setattr(kb, "forward_command", fake_forward)
+
+    assert kb.main(
+        [
+            "--root",
+            str(tmp_path),
+            "--agent-protocol",
+            "batch.json",
+            "add",
+            "https://example.com/one.pdf",
+            "https://example.com/two",
+        ]
+    ) == 0
+
+    assert len(calls) == 1
+    assert calls[0]["script"] == ".agents/skills/source-intake/scripts/intake.py"
+    assert calls[0]["args"][0] == "batch-add"
+    encoded_items = [
+        json.loads(calls[0]["args"][index + 1])
+        for index, value in enumerate(calls[0]["args"])
+        if value == "--item"
+    ]
+    assert [item["kind"] for item in encoded_items] == ["paper", "blog"]
+    assert calls[0]["extra_env"] == {"RESEARCH_INGEST_CHAIN": "1"}
+    output = capsys.readouterr().out
+    assert output.count("整批入库已完成") == 1
+    assert output.count("需要我现在继续深读这批新资料吗") == 1
+    protocol = json.loads((tmp_path / "kb/.runtime/batch.json").read_text(encoding="utf-8"))
+    assert protocol["status"] == "needs_user_input"
+    assert protocol["next_actions"][0]["action"] == "ask_once_to_deep_read_batch"
+
+
+def test_kb_add_batch_auto_deep_read_prepares_after_one_atomic_owner_call(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    kb = _load_kb_cli()
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        kb,
+        "load_runtime_preferences",
+        lambda root: {"autonomy": {"link_autodrive": "auto_deep_read"}},
+    )
+    monkeypatch.setattr(kb, "effective_ingest_scope", lambda root: {"ingest", "generate-note"})
+
+    def fake_forward(root, relative_script, args, *, stream=True, extra_env=None):
+        calls.append(
+            {
+                "script": relative_script,
+                "args": tuple(args),
+                "extra_env": extra_env,
+            }
+        )
+        if args[0] == "batch-add":
+            payload = {
+                "item_count": 2,
+                "created_count": 2,
+                "duplicate_count": 0,
+                "results": [
+                    {"status": "created", "kind": "paper", "unit_id": "p-auto-batch"},
+                    {"status": "created", "kind": "blog", "unit_id": "b-auto-batch"},
+                ],
+            }
+            return kb.CommandResult((relative_script, *args), 0, json.dumps(payload) + "\n")
+        return kb.CommandResult((relative_script, *args), 0, "prepared\n")
+
+    monkeypatch.setattr(kb, "forward_command", fake_forward)
+
+    assert kb.main(
+        [
+            "--root",
+            str(tmp_path),
+            "--agent-protocol",
+            "auto-batch.json",
+            "add",
+            "https://example.com/one.pdf",
+            "https://example.com/two",
+        ]
+    ) == 0
+
+    assert len(calls) == 3
+    assert calls[0]["args"][0] == "batch-add"
+    assert calls[0]["extra_env"] == {"RESEARCH_INGEST_CHAIN": "1"}
+    assert [call["args"][-2:] for call in calls[1:]] == [
+        ("--phase", "prepare"),
+        ("--phase", "prepare"),
+    ]
+    assert all("verify" not in call["args"] for call in calls)
+    output = capsys.readouterr().out
+    assert output.count("整批入库已完成") == 1
+    assert "已为 2 个新条目备好深读骨架" in output
+    protocol = json.loads((tmp_path / "kb/.runtime/auto-batch.json").read_text(encoding="utf-8"))
+    assert protocol["status"] == "agent_action_required"
+    assert protocol["next_actions"][0]["action"] == "complete_grounded_batch"
+
+
+def test_kb_add_batch_rejects_malformed_owner_protocol_without_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    kb = _load_kb_cli()
+    monkeypatch.setattr(
+        kb,
+        "load_runtime_preferences",
+        lambda root: {"autonomy": {"link_autodrive": "ask_first"}},
+    )
+    malformed = {
+        "item_count": 2,
+        "created_count": 2,
+        "duplicate_count": 0,
+        "results": [{"status": "created", "kind": "paper", "unit_id": "p-only-one"}],
+    }
+    monkeypatch.setattr(
+        kb,
+        "forward_command",
+        lambda root, relative_script, args, **kwargs: kb.CommandResult(
+            (relative_script, *args),
+            0,
+            json.dumps(malformed) + "\n",
+        ),
+    )
+
+    assert kb.main(
+        [
+            "--root",
+            str(tmp_path),
+            "--agent-protocol",
+            "malformed-batch.json",
+            "add",
+            "https://example.com/one.pdf",
+            "https://example.com/two",
+        ]
+    ) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "这批资料已交给入库流程，但结果清单不完整；Agent 会检查详细记录。\n"
+    assert "Traceback" not in captured.err
+    protocol = json.loads(
+        (tmp_path / "kb/.runtime/malformed-batch.json").read_text(encoding="utf-8")
+    )
+    assert protocol["status"] == "error"
+
+
+def test_kb_add_batch_remote_repo_stops_whole_batch_before_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    kb = _load_kb_cli()
+    calls: list[object] = []
+    monkeypatch.setattr(kb, "forward_command", lambda *args, **kwargs: calls.append(args))
+
+    assert kb.main(
+        [
+            "--root",
+            str(tmp_path),
+            "--agent-protocol",
+            "batch-repo.json",
+            "add",
+            "https://example.com/one.pdf",
+            "https://github.com/org/repo",
+        ]
+    ) == 1
+
+    assert calls == []
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "整批尚未创建知识条目" in captured.err
+    protocol = json.loads((tmp_path / "kb/.runtime/batch-repo.json").read_text(encoding="utf-8"))
+    assert protocol["status"] == "needs_local_repo_snapshot"
+    assert protocol["next_actions"][0]["action"] == "localize_repo_sources"
+
+
+def test_kb_add_rejects_twenty_one_sources_before_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    kb = _load_kb_cli()
+    calls: list[object] = []
+    monkeypatch.setattr(kb, "forward_command", lambda *args, **kwargs: calls.append(args))
+
+    assert kb.main(
+        ["--root", str(tmp_path), "add", *[f"https://example.com/{index}" for index in range(21)]]
+    ) == 2
+
+    assert calls == []
+    assert "1 到 20 项" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("verb", ["add", "ingest"])

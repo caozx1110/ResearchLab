@@ -51,7 +51,8 @@ from research.common import (
 )
 from research.core import apply_confirmation, append_history, ensure_workspace, is_ready_for_human_review, iter_records, kb_root, kb_runtime_root, load_runtime_preferences, locate_record, checkpoint_and_report, project_root, record_workflow_state, write_record
 from research.evidence import EvidenceSourceSnapshot, attach_claims, build_verification_receipt, validate_claims, verify_claim_evidence
-from research.judgements import BoundJudgementSnapshot, apply_judgement_rejection, confirmation_binding, discover_pending_judgements, judgement_confirmation_is_current, judgement_snapshot_binding, load_bound_judgement_snapshot, readiness_violations, require_judgement_snapshot
+from research.index import governance_catalog_drift
+from research.judgements import BoundJudgementSnapshot, apply_judgement_rejection, confirmation_binding, discover_pending_judgements, discover_stale_confirmed_surveys, judgement_confirmation_is_current, judgement_snapshot_binding, load_bound_judgement_snapshot, readiness_violations, require_judgement_snapshot
 from research.journal import mutation_transaction
 from research.monitoring import active_monitor_runs, due_subscriptions, unresolved_monitor_outcomes
 from research.preference_selection import (
@@ -1512,6 +1513,57 @@ def _composite_survey_candidate(
     )
 
 
+def _stale_survey_candidate(
+    entry: dict[str, Any],
+    *,
+    selected_program_id: str = "",
+) -> dict[str, Any] | None:
+    subject = entry.get("subject") if isinstance(entry.get("subject"), dict) else {}
+    linked_program_ids = [
+        str(item) for item in entry.get("program_ids", []) if str(item)
+    ]
+    if selected_program_id and selected_program_id not in linked_program_ids:
+        return None
+    subject_id = str(subject.get("id") or "")
+    if not subject_id:
+        return None
+    return _candidate(
+        program_id=selected_program_id
+        or (linked_program_ids[0] if len(linked_program_ids) == 1 else f"survey:{subject_id}"),
+        action_type="rebuild-stale-survey",
+        subject_id=subject_id,
+        discriminator=str(entry.get("container_digest") or ""),
+        owner_skill="literature-synthesizer",
+        stage="stale-survey",
+        goal="Rebuild a confirmed survey against its current source selection.",
+        question="",
+        reason="A previously confirmed survey has stale upstream evidence and needs a new Agent fill and confirmation.",
+        title=str(entry.get("slug") or subject_id),
+        subject_kind="survey_judgement",
+        priority="high",
+        dependencies=[
+            {
+                "kind": "stale-survey-binding",
+                "id": subject_id,
+                "owner": str(subject.get("owner") or ""),
+                "path": str(subject.get("path") or ""),
+                "mode": str(entry.get("mode") or ""),
+                "slug": str(entry.get("slug") or ""),
+                "program_ids": linked_program_ids,
+                "stale_reasons": [
+                    str(item) for item in entry.get("stale_reasons", []) if str(item)
+                ],
+                "new_unit_ids": [
+                    str(item) for item in entry.get("new_unit_ids", []) if str(item)
+                ],
+                "container_digest": str(entry.get("container_digest") or ""),
+                "survey_content_digest": str(entry.get("survey_content_digest") or ""),
+            }
+        ],
+        safe_execute_capability=False,
+    )
+
+
 def _composite_literature_stage_ids(entries: list[dict[str, Any]]) -> set[str]:
     """Collect literature stage identities already owned by composite surveys."""
     owned: set[str] = set()
@@ -1802,6 +1854,14 @@ def portfolio_candidates(root: Path, *, selected_program_id: str = "") -> tuple[
             )
             attached_judgements.add(key)
 
+    for entry in discover_stale_confirmed_surveys(root):
+        candidate = _stale_survey_candidate(
+            entry,
+            selected_program_id=selected_program_id,
+        )
+        if candidate is not None:
+            candidates.append(candidate)
+
     composite_entries = pending_composite_survey_states(root)
     for entry in composite_entries:
         candidate = _composite_survey_candidate(
@@ -1812,6 +1872,35 @@ def portfolio_candidates(root: Path, *, selected_program_id: str = "") -> tuple[
             candidates.append(candidate)
 
     if not selected_program_id:
+        governance_drift = governance_catalog_drift(root, records=records)
+        if governance_drift.get("stale"):
+            candidates.append(
+                _candidate(
+                    program_id="maintenance:governance",
+                    action_type="rebuild-taxonomy",
+                    subject_id="governance-catalogs",
+                    discriminator=str(governance_drift.get("binding_digest") or ""),
+                    owner_skill="knowledge-base-manager",
+                    stage="gardening",
+                    goal="Refresh the derived topic and candidate-pool catalogs.",
+                    question="",
+                    reason="The derived taxonomy or candidate-pool catalog no longer matches current records.",
+                    title="Knowledge taxonomy",
+                    subject_kind="governance-catalogs",
+                    dependencies=[
+                        {
+                            "kind": "governance-catalog-binding",
+                            "id": "governance-catalogs",
+                            "binding_digest": str(governance_drift.get("binding_digest") or ""),
+                            "taxonomy_stale": bool(governance_drift.get("taxonomy_stale")),
+                            "candidate_pools_stale": bool(
+                                governance_drift.get("candidate_pools_stale")
+                            ),
+                        }
+                    ],
+                    safe_execute_capability=False,
+                )
+            )
         for entry in literature_search_continuations(
             root,
             excluded_stage_ids=_composite_literature_stage_ids(composite_entries),
@@ -1942,7 +2031,23 @@ def portfolio_candidates(root: Path, *, selected_program_id: str = "") -> tuple[
     action_ids = [str(item.get("action_id") or "") for item in candidates]
     if len(action_ids) != len(set(action_ids)):
         raise SystemExit("Portfolio candidate identities are not unique")
-    candidates.sort(key=lambda item: str(item.get("action_id") or ""))
+    stale_actions = {"rebuild-stale-survey", "rebuild-taxonomy"}
+    priority_order = {"critical": 0, "high": 1, "normal": 2, "low": 3}
+
+    def candidate_order(item: dict[str, Any]) -> tuple[int, int, str]:
+        if bool(item.get("blocking")):
+            gardening_order = 0
+        elif str(item.get("action_type") or "") in stale_actions:
+            gardening_order = 1
+        else:
+            gardening_order = 2
+        return (
+            gardening_order,
+            priority_order.get(str(item.get("priority") or "normal"), 2),
+            str(item.get("action_id") or ""),
+        )
+
+    candidates.sort(key=candidate_order)
     program_contexts.sort(key=lambda item: str(item.get("program_id") or ""))
     return candidates, program_contexts
 
@@ -2161,7 +2266,7 @@ def render_portfolio_selection_draft(snapshot: dict[str, Any], *, profile: str) 
         "下一步选择草稿（由 prepare-next-selection 生成，可直接编辑本文件）。",
         "填写步骤：",
         "  1. 阅读文末 candidate_reference 候选清单（含 binding_digest 与事实摘要）；",
-        "  2. 把选中的 action_id 填入 selected_action_ids（至少一项，可多选）；",
+        "  2. 把选中的 action_id 填入 selected_action_ids（1 至 3 项）；",
         "  3. 填写 rationale / expected_information_gain / cost_and_risk 三个字段；",
         "  4. strict 治理档还需填 preference_selection_id（偏好回执 id）；",
         "     回执的 canonical 任务输入（skill=research-orchestrator, operation=plan，",
@@ -2318,6 +2423,8 @@ def _portfolio_decision_validation_plan(
     selected_ids = [str(item or "").strip() for item in raw_selected]
     if any(not item for item in selected_ids) or len(set(selected_ids)) != len(selected_ids):
         raise SystemExit("Portfolio decision selected_action_ids must be unique non-empty ids")
+    if len(selected_ids) > 3:
+        raise SystemExit("Portfolio decision may select at most three actions")
     candidate_by_id = {
         str(item.get("action_id") or ""): item
         for item in snapshot.get("candidates", [])
@@ -2624,6 +2731,8 @@ def _portfolio_public_action_label(candidate: dict[str, Any]) -> str:
         "generate-note": "整理一项资料的完整分析",
         "refresh": "刷新一项资料的结构或分析",
         "run-due-monitor": "执行一项已到期的研究跟踪",
+        "rebuild-stale-survey": "按当前证据重建一份过期综述",
+        "rebuild-taxonomy": "刷新知识分类与候选池目录",
     }.get(str(candidate.get("action_type") or ""), "继续一项当前可行的研究工作")
 
 

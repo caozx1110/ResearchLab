@@ -57,6 +57,7 @@ from .surveys import (
     survey_content_digest,
     survey_lifecycle_violations,
     survey_source_roots,
+    survey_staleness,
 )
 from .yaml_io import StrictYamlError, load_yaml_mapping_bytes_strict
 
@@ -876,6 +877,89 @@ def discover_pending_judgements(root: str | Path) -> list[dict[str, Any]]:
     )
 
 
+def discover_stale_confirmed_surveys(root: str | Path) -> list[dict[str, Any]]:
+    """Pure-read gardening queue for ordinary confirmed surveys that went stale."""
+    lexical_root = Path(root).absolute()
+    if not lexical_root.exists() and not lexical_root.is_symlink():
+        return []
+    project_root = _canonical_project_root(root)
+    discovery = _capture_side_judgement_discovery(project_root)
+    survey_candidates = [
+        candidate
+        for candidate in discovery.candidates
+        if _text(candidate.record.get("kind")) == "survey_judgement"
+        and not _identity_violations(
+            project_root,
+            candidate.record,
+            candidate.owner,
+            candidate.container.path,
+        )
+    ]
+    subject_counts: dict[tuple[str, str], int] = {}
+    for candidate in survey_candidates:
+        key = (_text(candidate.record.get("kind")), _text(candidate.record.get("id")))
+        subject_counts[key] = subject_counts.get(key, 0) + 1
+
+    stale: list[dict[str, Any]] = []
+    for candidate in survey_candidates:
+        record = candidate.record
+        subject_id = _text(record.get("id"))
+        if subject_counts.get(("survey_judgement", subject_id)) != 1:
+            continue
+        if _text(record.get("confirmation_status")) != "confirmed":
+            continue
+        stored_content_digest = _text(record.get("survey_content_digest"))
+        if len(stored_content_digest) != 64 or stored_content_digest != survey_content_digest(record):
+            continue
+        raw_program_ids = record.get("program_ids", [])
+        if not isinstance(raw_program_ids, list) or any(
+            not isinstance(item, str) for item in raw_program_ids
+        ):
+            continue
+        try:
+            freshness = survey_staleness(record, project_root)
+        except (OSError, RuntimeError, SystemExit, TypeError, ValueError):
+            continue
+        reasons = [str(reason) for reason in freshness.get("reasons", []) if str(reason)]
+        if not freshness.get("stale") or not reasons:
+            continue
+        try:
+            bound = _bound_side_from_candidate(
+                project_root,
+                candidate,
+                check_current=False,
+                validate_current=discovery.is_current,
+            )
+        except ValueError:
+            continue
+        if not bound.is_current():
+            return []
+        stale.append(
+            {
+                "subject": {
+                    "kind": "survey_judgement",
+                    "id": subject_id,
+                    "owner": bound.owner,
+                    "path": bound.path.relative_to(project_root).as_posix(),
+                },
+                "slug": _text(record.get("slug")),
+                "mode": _text(record.get("mode")),
+                "program_ids": sorted(
+                    {_text(item) for item in raw_program_ids if _text(item)}
+                ),
+                "stale_reasons": reasons,
+                "new_unit_ids": [
+                    _text(item) for item in freshness.get("new_unit_ids", []) if _text(item)
+                ],
+                "container_digest": candidate.container.file.byte_sha256,
+                "survey_content_digest": stored_content_digest,
+            }
+        )
+    if not discovery.is_current():
+        return []
+    return sorted(stale, key=lambda item: str(item["subject"]["id"]))
+
+
 def confirmation_binding(record: dict[str, Any], *, owner: str = "", path: str = "") -> dict[str, Any]:
     """Build the event binding for a verified or confirmed judgement subject."""
     verification = record.get("payload", {}).get("verification", {})
@@ -1398,6 +1482,7 @@ __all__ = [
     "apply_judgement_rejection",
     "confirmation_binding",
     "discover_pending_judgements",
+    "discover_stale_confirmed_surveys",
     "judgement_snapshot_binding",
     "judgement_confirmation_is_current",
     "judgement_confirmation_matches_bound",

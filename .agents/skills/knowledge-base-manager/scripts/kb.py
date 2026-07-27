@@ -999,12 +999,34 @@ def main() -> int:
         print(f"[ok] migrated {payload['old_id']} -> {payload['new_id']}")
         return 0
     if args.command == "rebuild-governance":
-        governance_paths = mutation_targets(root, [topic_taxonomy_path(root), candidate_pools_path(root)])
-        with mutation_transaction(root, "rebuild_governance", governance_paths):
+        governance_paths = mutation_targets(
+            root,
+            [
+                topic_taxonomy_path(root),
+                candidate_pools_path(root),
+                kb_root(root) / "index.yaml",
+                kb_root(root) / "index.md",
+            ],
+        )
+        transaction_paths = mutation_targets(
+            root,
+            [*governance_paths, passage_search_cache_path(root)],
+        )
+        with mutation_transaction(root, "rebuild_governance", transaction_paths):
             ensure_workspace(root)
-            taxonomy_path, pools_path = rebuild_governance_catalogs(root)
+            index_yaml_path, index_md_path = build_index(root)
+            taxonomy_path = topic_taxonomy_path(root)
+            pools_path = candidate_pools_path(root)
+        checkpoint_and_report(
+            root,
+            trigger="milestone",
+            message="milestone: rebuild knowledge taxonomy",
+            target_paths=governance_paths,
+        )
         print(f"[ok] rebuilt {taxonomy_path.relative_to(root)}")
         print(f"[ok] rebuilt {pools_path.relative_to(root)}")
+        print(f"[ok] rebuilt {index_yaml_path.relative_to(root)}")
+        print(f"[ok] rebuilt {index_md_path.relative_to(root)}")
         return 0
     if args.command == "query":
         if str(args.query or "").strip():

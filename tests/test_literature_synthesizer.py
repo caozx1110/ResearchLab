@@ -18,6 +18,7 @@ from research.evidence import (
     build_verification_receipt,
     record_external_source_contract,
 )
+from research.judgements import discover_stale_confirmed_surveys
 from research.records import (
     canonical_record_snapshot_for_record,
     kind_payload_skeleton,
@@ -518,3 +519,126 @@ def test_survey_staleness_detects_changed_deleted_and_new_matching_units(tmp_pat
     assert "changed unit: p-alpha" in stale["reasons"]
     assert "deleted or unreadable unit: r-beta" in stale["reasons"]
     assert "new matching unit: p-gamma" in stale["reasons"]
+
+
+def test_confirmed_stale_survey_is_discovered_without_mutating_old_judgement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, scaffold = build_filled_survey(tmp_path)
+    violations, verified = module.verify_survey_fill(scaffold, tmp_path)
+    assert violations == []
+    survey_path = tmp_path / "kb" / "synthesis" / "robot-learning" / "survey.yaml"
+    survey_path.parent.mkdir(parents=True, exist_ok=True)
+    source_roots = {
+        item["id"]: module.unit_root(tmp_path, item["kind"], item["id"])
+        for item in verified["consumer_binding"]["units"]
+    }
+    module.apply_confirmation(
+        verified,
+        confirmed_by="Alice Researcher",
+        evidence=["Reviewed the verified survey."],
+        user_authorization="I confirm this survey.",
+        authorization_source="user_message",
+        project_root=tmp_path,
+        verification_root=survey_path.parent,
+        trusted_source_roots=source_roots,
+    )
+    write_yaml_if_changed(survey_path, verified)
+    before = survey_path.read_bytes()
+    write_confirmed_unit(
+        module,
+        tmp_path,
+        {
+            "id": "p-gamma",
+            "kind": "paper",
+            "title": "Gamma Method",
+            "summary": "robot learning",
+            "payload": {},
+        },
+        "# Evidence\n\nGamma adds a new matching result.\n",
+    )
+
+    stale = discover_stale_confirmed_surveys(tmp_path)
+
+    assert len(stale) == 1
+    assert stale[0]["subject"]["id"] == verified["id"]
+    assert stale[0]["slug"] == "robot-learning"
+    assert stale[0]["new_unit_ids"] == ["p-gamma"]
+    assert "new matching unit: p-gamma" in stale[0]["stale_reasons"]
+    assert survey_path.read_bytes() == before
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(SCRIPT),
+            "--root",
+            str(tmp_path),
+            "survey",
+            "prepare",
+            "--query",
+            "robot learning",
+            "--as-of",
+            "2026-07-27T00:00:00Z",
+        ],
+    )
+    assert module.main() == 0
+    fill_path = survey_path.parent / "survey-fill.yaml"
+    fill = yaml.safe_load(fill_path.read_text(encoding="utf-8"))
+    assert fill["status"] == "awaiting_agent_fill"
+    assert fill["kb_anchor"]["unit_ids"] == ["p-alpha", "p-gamma", "r-beta"]
+    assert "confirmation_receipt" not in fill
+    assert survey_path.read_bytes() == before
+
+
+def test_stale_survey_discovery_ignores_malformed_symlink_and_noncanonical_duplicate(
+    tmp_path: Path,
+) -> None:
+    module, scaffold = build_filled_survey(tmp_path)
+    violations, verified = module.verify_survey_fill(scaffold, tmp_path)
+    assert violations == []
+    survey_path = tmp_path / "kb" / "synthesis" / "robot-learning" / "survey.yaml"
+    survey_path.parent.mkdir(parents=True, exist_ok=True)
+    source_roots = {
+        item["id"]: module.unit_root(tmp_path, item["kind"], item["id"])
+        for item in verified["consumer_binding"]["units"]
+    }
+    module.apply_confirmation(
+        verified,
+        confirmed_by="Alice Researcher",
+        evidence=["Reviewed the verified survey."],
+        user_authorization="I confirm this survey.",
+        authorization_source="user_message",
+        project_root=tmp_path,
+        verification_root=survey_path.parent,
+        trusted_source_roots=source_roots,
+    )
+    write_yaml_if_changed(survey_path, verified)
+    write_confirmed_unit(
+        module,
+        tmp_path,
+        {
+            "id": "p-gamma",
+            "kind": "paper",
+            "title": "Gamma Method",
+            "summary": "robot learning",
+            "payload": {},
+        },
+        "# Evidence\n\nGamma adds a new matching result.\n",
+    )
+
+    malformed = tmp_path / "kb" / "synthesis" / "malformed" / "survey.yaml"
+    malformed.parent.mkdir(parents=True)
+    malformed.write_text("kind: survey_judgement\nid: [unterminated\n", encoding="utf-8")
+    duplicate = tmp_path / "kb" / "synthesis" / "duplicate" / "survey.yaml"
+    duplicate.parent.mkdir(parents=True)
+    duplicate.write_bytes(survey_path.read_bytes())
+    linked = tmp_path / "kb" / "synthesis" / "linked"
+    linked.symlink_to(survey_path.parent, target_is_directory=True)
+
+    stale = discover_stale_confirmed_surveys(tmp_path)
+
+    assert len(stale) == 1
+    assert stale[0]["subject"]["path"] == "kb/synthesis/robot-learning/survey.yaml"
+    assert stale[0]["new_unit_ids"] == ["p-gamma"]

@@ -324,7 +324,8 @@ def test_kb_status_is_byte_identical_for_every_workspace_file(tmp_path: Path) ->
         "知识库尚未收录资料。\n"
         "目前没有研究计划。\n"
         "待处理事项：0 条待确认判断、0 个到期监控、0 组文献候选待选择、"
-        "0 个可继续文献检索、0 个可恢复综述流程、0 个失败后可重试事项、"
+        "0 个可继续文献检索、0 个可恢复综述流程、0 个过期综述待重建、"
+        "0 个知识分类目录待刷新、0 个失败后可重试事项、"
         "0 个可由 Agent 继续推进的事项。\n"
     )
     assert before == after

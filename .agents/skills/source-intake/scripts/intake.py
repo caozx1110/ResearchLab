@@ -66,6 +66,7 @@ from research.core import (
     write_record,
 )
 from research.surveys import literature_candidate_identity_digest
+from research.paths import passage_search_cache_path
 from research.sources import literature_stage_snapshot
 
 
@@ -181,6 +182,17 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("--preference-selection-id", default="")
     add.add_argument("--prepared-intake-token", default="")
     add.add_argument("--expected-literature-stage-digest", default="", help=argparse.SUPPRESS)
+
+    batch_add = subparsers.add_parser(
+        "batch-add",
+        help="Privately preflight and atomically materialize one intake batch",
+    )
+    batch_add.add_argument("--item", action="append", required=True)
+
+    subparsers.add_parser(
+        "garden-prepared",
+        help="Privately remove only provably safe expired intake snapshots",
+    )
 
     prepare = subparsers.add_parser(
         "prepare-add",
@@ -303,6 +315,7 @@ def stage_candidates(args: argparse.Namespace) -> list[dict]:
 PREPARED_INTAKE_SCHEMA = 1
 PREPARED_TOKEN_PATTERN = re.compile(r"[0-9a-f]{32}")
 PREPARED_INTAKE_TTL_SECONDS = 60 * 60
+BATCH_INTAKE_MAX_ITEMS = 20
 PREPARED_MAX_FILE_BYTES = 64 * 1024 * 1024
 PREPARED_MAX_ENTRIES = 20_000
 PREPARED_MAX_TOTAL_BYTES = 512 * 1024 * 1024
@@ -733,6 +746,166 @@ def _safe_remove_prepared(root: Path, token: str) -> None:
         return
     _assert_owned_private_directory(prepared)
     shutil.rmtree(prepared)
+
+
+def _prepared_gc_candidate(
+    root: Path,
+    path: Path,
+    token: str,
+    *,
+    now_epoch: int,
+) -> tuple[str, str]:
+    """Classify one prepared tree without following links or guessing intent."""
+    try:
+        _assert_owned_private_directory(path)
+    except SystemExit:
+        return "retained", "unsafe-root"
+
+    entry_count = 0
+    try:
+        for current, directories, files in os.walk(path, topdown=True, followlinks=False):
+            current_path = Path(current)
+            current_stat = current_path.lstat()
+            if (
+                current_stat.st_uid != os.getuid()
+                or stat.S_ISLNK(current_stat.st_mode)
+                or not stat.S_ISDIR(current_stat.st_mode)
+            ):
+                return "retained", "unsafe-tree"
+            for name in [*directories, *files]:
+                entry_count += 1
+                if entry_count > PREPARED_MAX_ENTRIES * 2 + 32:
+                    return "retained", "unbounded-tree"
+                child = current_path / name
+                metadata = child.lstat()
+                if metadata.st_uid != os.getuid() or stat.S_ISLNK(metadata.st_mode):
+                    return "retained", "unsafe-tree"
+                if name in directories:
+                    if not stat.S_ISDIR(metadata.st_mode):
+                        return "retained", "unsafe-tree"
+                elif not stat.S_ISREG(metadata.st_mode):
+                    return "retained", "unsafe-tree"
+    except OSError:
+        return "retained", "unreadable-tree"
+
+    claimed = path / "claimed"
+    try:
+        claimed_stat = claimed.lstat()
+    except FileNotFoundError:
+        claimed_stat = None
+    except OSError:
+        return "retained", "unknown-claim-state"
+    if claimed_stat is not None:
+        if (
+            claimed_stat.st_uid == os.getuid()
+            and stat.S_ISREG(claimed_stat.st_mode)
+            and stat.S_IMODE(claimed_stat.st_mode) == 0o600
+        ):
+            return "active", "claimed"
+        return "retained", "unsafe-claim-state"
+
+    try:
+        payload = _read_prepared_manifest(path / "prepared.json")
+    except SystemExit:
+        return "retained", "invalid-manifest"
+    required = {
+        "schema",
+        "token",
+        "created_at_epoch",
+        "workspace_digest",
+        "manifest_digest",
+    }
+    if not required <= set(payload):
+        return "retained", "invalid-manifest"
+    manifest_digest = str(payload.get("manifest_digest") or "")
+    digest_payload = dict(payload)
+    digest_payload.pop("manifest_digest", None)
+    if manifest_digest != _canonical_digest(digest_payload):
+        return "retained", "invalid-manifest"
+    if (
+        payload.get("schema") != PREPARED_INTAKE_SCHEMA
+        or payload.get("token") != token
+        or payload.get("workspace_digest")
+        != _canonical_digest(root.resolve(strict=False).as_posix())
+    ):
+        return "retained", "foreign-or-invalid-manifest"
+    try:
+        created_at_epoch = int(payload.get("created_at_epoch"))
+    except (TypeError, ValueError):
+        return "retained", "invalid-manifest"
+    age = now_epoch - created_at_epoch
+    if age < -60:
+        return "retained", "future-timestamp"
+    if age <= PREPARED_INTAKE_TTL_SECONDS:
+        return "active", "within-ttl"
+    return "expired", "ttl-elapsed"
+
+
+def _garden_prepared_intakes(
+    root: Path,
+    *,
+    now_epoch: int | None = None,
+) -> dict[str, object]:
+    """Remove only expired private trees whose complete safety proof succeeds."""
+    root = root.resolve(strict=False)
+    parent = root.parent
+    prefix = f".research-intake-{_prepared_scope(root)}-"
+    pattern = re.compile(rf"{re.escape(prefix)}(?P<token>[0-9a-f]{{32}})\Z")
+    removed: list[str] = []
+    active: list[str] = []
+    retained: list[dict[str, str]] = []
+    now = int(time.time()) if now_epoch is None else int(now_epoch)
+    try:
+        with os.scandir(parent) as iterator:
+            entry_names = sorted(entry.name for entry in iterator)
+    except OSError:
+        return {
+            "removed_count": 0,
+            "active_count": 0,
+            "retained_count": 1,
+            "removed_tokens": [],
+            "active_tokens": [],
+            "retained": [{"name": prefix + "*", "reason": "unreadable-parent"}],
+        }
+    for entry_name in entry_names:
+        if not entry_name.startswith(prefix):
+            continue
+        match = pattern.fullmatch(entry_name)
+        if match is None:
+            retained.append({"name": entry_name, "reason": "unknown-name"})
+            continue
+        token = str(match.group("token") or "")
+        path = parent / entry_name
+        state, reason = _prepared_gc_candidate(root, path, token, now_epoch=now)
+        if state == "active":
+            active.append(token)
+            continue
+        if state != "expired":
+            retained.append({"name": entry_name, "reason": reason})
+            continue
+        if not bool(getattr(shutil.rmtree, "avoids_symlink_attacks", False)):
+            retained.append({"name": entry_name, "reason": "unsafe-platform-delete"})
+            continue
+        try:
+            before = path.lstat()
+            _assert_owned_private_directory(path)
+            current = path.lstat()
+            if (before.st_dev, before.st_ino) != (current.st_dev, current.st_ino):
+                retained.append({"name": entry_name, "reason": "root-changed"})
+                continue
+            shutil.rmtree(path)
+        except (OSError, SystemExit):
+            retained.append({"name": entry_name, "reason": "delete-race-or-error"})
+            continue
+        removed.append(token)
+    return {
+        "removed_count": len(removed),
+        "active_count": len(active),
+        "retained_count": len(retained),
+        "removed_tokens": removed,
+        "active_tokens": active,
+        "retained": retained,
+    }
 
 
 def _write_prepared_manifest(path: Path, payload: dict[str, object]) -> None:
@@ -1362,6 +1535,251 @@ def _index_target_paths(root: Path) -> list[Path]:
     ]
 
 
+def _index_transaction_target_paths(root: Path) -> list[Path]:
+    """Canonical indexes plus the disposable cache written by build_index()."""
+    return [*_index_target_paths(root), passage_search_cache_path(root)]
+
+
+def _batch_item_args(raw: str) -> argparse.Namespace:
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SystemExit("Batch intake item is not valid JSON.") from exc
+    if not isinstance(payload, dict) or set(payload) - {
+        "kind",
+        "source",
+        "title",
+        "maturity",
+        "pool",
+        "preference_selection_id",
+    }:
+        raise SystemExit("Batch intake item has unsupported fields.")
+    kind = str(payload.get("kind") or "")
+    source = str(payload.get("source") or "")
+    maturity = str(payload.get("maturity") or "lightweight")
+    pools = payload.get("pool", [])
+    if kind not in {"paper", "repo", "dataset", "blog"}:
+        raise SystemExit("Batch intake item has an unsupported source kind.")
+    if not source.strip():
+        raise SystemExit("Batch intake item requires a source.")
+    if maturity not in {"lightweight", "complete"}:
+        raise SystemExit("Batch intake item has an unsupported maturity.")
+    if not isinstance(pools, list) or any(not isinstance(item, str) for item in pools):
+        raise SystemExit("Batch intake item pools must be a list of strings.")
+    return argparse.Namespace(
+        command="batch-add",
+        kind=kind,
+        source=source,
+        maturity=maturity,
+        title=str(payload.get("title") or ""),
+        stage_id="",
+        candidate_id="",
+        pool=list(pools),
+        user_authorization="",
+        authorization_source="",
+        preference_selection_id=str(payload.get("preference_selection_id") or ""),
+        prepared_intake_token="",
+        expected_literature_stage_digest="",
+    )
+
+
+def _batch_commit_guard(root: Path, prepared_items: list[dict[str, object]]) -> None:
+    """Revalidate every external source at the final publication boundary."""
+    for item in prepared_items:
+        source = str(item.get("source") or "")
+        if _source_input_digest(root, source) != str(item.get("source_input_digest") or ""):
+            raise RuntimeError("A batch intake source changed before commit.")
+
+
+def _batch_dedup_key(
+    item_args: argparse.Namespace,
+    prepared: dict[str, object],
+) -> tuple[str, str]:
+    source_info = prepared.get("source_info")
+    file_hash = (
+        str(source_info.get("file_hash") or "")
+        if isinstance(source_info, dict)
+        else ""
+    )
+    identity = file_hash or str(prepared.get("source_input_digest") or "")
+    return str(item_args.kind), identity
+
+
+def _run_batch_add(root: Path, raw_items: list[str]) -> dict[str, object]:
+    if not 1 <= len(raw_items) <= BATCH_INTAKE_MAX_ITEMS:
+        raise SystemExit(f"Batch intake requires 1..{BATCH_INTAKE_MAX_ITEMS} items.")
+    args_items = [_batch_item_args(raw) for raw in raw_items]
+    prepared_rows: list[tuple[argparse.Namespace, dict[str, object], str]] = []
+    prepared_tokens: list[str] = []
+    try:
+        # Finish all external snapshot/parse work before the first canonical write.
+        for item_args in args_items:
+            prepared = _prepare_intake_snapshot(root, item_args)
+            token = str(prepared["token"])
+            prepared_tokens.append(token)
+            prepared_rows.append((item_args, prepared, token))
+
+        unique_rows: list[tuple[argparse.Namespace, dict[str, object], str]] = []
+        request_keys: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for item_args, prepared, token in prepared_rows:
+            key = _batch_dedup_key(item_args, prepared)
+            request_keys.append(key)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_rows.append((item_args, prepared, token))
+
+        ready: list[dict[str, object]] = []
+        outcomes: dict[tuple[str, str], dict[str, object]] = {}
+        for item_args, _prepared, token in unique_rows:
+            _claim_prepared_intake(root, token)
+            prepared, stage_dir = _load_prepared_intake(root, item_args, token)
+            record = prepared.get("record")
+            source_info = prepared.get("source_info")
+            canonical_inputs = prepared.get("canonical_inputs")
+            if not isinstance(record, dict) or not isinstance(source_info, dict) or not isinstance(
+                canonical_inputs, dict
+            ):
+                raise SystemExit("Prepared batch intake snapshot is incomplete.")
+            source = str(prepared.get("source") or "")
+            title = str(prepared.get("title") or "")
+            _paper_preferences, preference_state = resolve_intake_preferences(
+                root,
+                item_args,
+                source=source,
+                title=title,
+                canonical_pools=list(record.get("candidate_pools") or []),
+                canonical_inputs=canonical_inputs,
+            )
+            _load_prepared_intake(root, item_args, token)
+            record["payload"]["preference_contract"] = operation_contract(
+                skill="source-intake", operation="add"
+            )
+            record["payload"]["preference_context"] = preference_state
+            selection = dict(preference_state.get("selection_binding") or {})
+            if selection:
+                record["payload"]["preference_binding"] = selection
+            else:
+                record["payload"].pop("preference_binding", None)
+            key = _batch_dedup_key(item_args, prepared)
+            duplicate = detect_duplicate(
+                root,
+                item_args.kind,
+                source,
+                title=title,
+                candidate_file_hash=str(source_info.get("file_hash") or ""),
+            )
+            if duplicate is not None:
+                if not str(prepared.get("duplicate_record_binding_digest") or ""):
+                    raise SystemExit(
+                        "A duplicate appeared after batch preparation; retry with fresh snapshots."
+                    )
+                outcomes[key] = {
+                    "status": "duplicate",
+                    "kind": str(duplicate.get("kind") or item_args.kind),
+                    "unit_id": str(duplicate.get("id") or ""),
+                }
+                continue
+            ready.append(
+                {
+                    "args": item_args,
+                    "prepared": prepared,
+                    "stage_dir": stage_dir,
+                    "record": record,
+                    "source_info": source_info,
+                    "key": key,
+                }
+            )
+
+        if ready:
+            seed_targets = [path for path in _workspace_seed_paths(root) if not path.exists()]
+            checkpoint_targets = [*seed_targets, *_index_target_paths(root)]
+            for item in ready:
+                item_args = item["args"]
+                record = item["record"]
+                assert isinstance(item_args, argparse.Namespace) and isinstance(record, dict)
+                checkpoint_targets.extend(
+                    [
+                        unit_root(root, item_args.kind, str(record["id"])),
+                        kb_root(root)
+                        / ".runtime"
+                        / "intake-staging"
+                        / "legacy-failed-units"
+                        / str(record["id"]),
+                    ]
+                )
+            checkpoint_targets = list(dict.fromkeys(checkpoint_targets))
+            transaction_targets = list(
+                dict.fromkeys([*checkpoint_targets, passage_search_cache_path(root)])
+            )
+            prepared_for_guard = [
+                dict(item["prepared"])
+                for item in ready
+                if isinstance(item.get("prepared"), dict)
+            ]
+            with mutation_transaction(
+                root,
+                "source-intake-batch-add",
+                transaction_targets,
+                commit_guard=lambda: _batch_commit_guard(root, prepared_for_guard),
+            ):
+                ensure_workspace(root)
+                for item in ready:
+                    item_args = item["args"]
+                    prepared = item["prepared"]
+                    record = item["record"]
+                    source_info = item["source_info"]
+                    stage_dir = item["stage_dir"]
+                    assert isinstance(item_args, argparse.Namespace)
+                    assert isinstance(prepared, dict) and isinstance(record, dict)
+                    assert isinstance(source_info, dict) and isinstance(stage_dir, Path)
+                    _load_prepared_intake(root, item_args, str(prepared["token"]))
+                    path, duplicate, _canonical_source_info = _materialize_staged_source(
+                        root,
+                        kind=item_args.kind,
+                        source=str(prepared.get("source") or ""),
+                        title=str(prepared.get("title") or ""),
+                        record=record,
+                        source_info=source_info,
+                        stage_dir=stage_dir,
+                    )
+                    if duplicate is not None or path is None:
+                        raise SystemExit(
+                            "A duplicate appeared during batch publication; the batch was rolled back."
+                        )
+                    outcomes[item["key"]] = {
+                        "status": "created",
+                        "kind": item_args.kind,
+                        "unit_id": str(record["id"]),
+                    }
+                _build_index_transaction(root)
+            checkpoint_and_report(
+                root,
+                trigger="milestone",
+                message=f"milestone: intake batch ({len(ready)})",
+                target_paths=checkpoint_targets,
+            )
+
+        results: list[dict[str, object]] = []
+        emitted: set[tuple[str, str]] = set()
+        for key in request_keys:
+            outcome = dict(outcomes[key])
+            if key in emitted:
+                outcome["status"] = "merged"
+            emitted.add(key)
+            results.append(outcome)
+        return {
+            "item_count": len(raw_items),
+            "created_count": sum(1 for item in outcomes.values() if item["status"] == "created"),
+            "duplicate_count": sum(1 for item in results if item["status"] != "created"),
+            "results": results,
+        }
+    finally:
+        for token in prepared_tokens:
+            _safe_remove_prepared(root, token)
+
+
 def _materialize_staged_source(
     root: Path,
     *,
@@ -1409,7 +1827,7 @@ def _materialize_staged_source(
 
 
 def _build_index_transaction(root: Path) -> tuple[Path, Path]:
-    targets = _index_target_paths(root)
+    targets = _index_transaction_target_paths(root)
     with mutation_transaction(root, "source-intake-build-index", targets):
         return build_index(root)
 
@@ -1423,7 +1841,7 @@ def _intake_transaction_targets(
 ) -> list[Path]:
     targets = [
         unit_dir,
-        *_index_target_paths(root),
+        *_index_transaction_target_paths(root),
         # A rejected legacy unit may be quarantined during materialization.  The
         # command-level snapshot must remove/restore that KB-local move as one op.
         kb_root(root) / ".runtime" / "intake-staging" / "legacy-failed-units" / unit_id,
@@ -1691,6 +2109,19 @@ def main() -> int:
                 f"- {candidate.get('candidate_id')} | {candidate.get('status')} | "
                 f"{candidate.get('title') or '-'} | {candidate.get('url')}"
             )
+        return 0
+
+    if args.command == "batch-add":
+        try:
+            payload = _run_batch_add(root, list(args.item or []))
+        except (Exception, SystemExit) as exc:
+            error = str(exc).strip() or exc.__class__.__name__
+            raise SystemExit(f"Batch source intake failed; retry is safe: {error}") from exc
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        return 0
+
+    if args.command == "garden-prepared":
+        print(json.dumps(_garden_prepared_intakes(root), ensure_ascii=False, sort_keys=True))
         return 0
 
     if args.command == "prepare-add":

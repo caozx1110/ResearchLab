@@ -606,8 +606,12 @@ def _preserve_empty_governance_seeds(taxonomy: dict[str, Any], pools: dict[str, 
         }
 
 
-def rebuild_governance_catalogs(project_root: Path, *, records: list[dict[str, Any]] | None = None) -> tuple[Path, Path]:
-    ensure_workspace(project_root)
+def governance_catalog_payloads(
+    project_root: Path,
+    *,
+    records: list[dict[str, Any]] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return the deterministic governance catalogs without writing them."""
     records = records if records is not None else iter_records(project_root)
     existing_taxonomy = load_topic_taxonomy(project_root)
     existing_pools = load_candidate_pools(project_root)
@@ -680,6 +684,47 @@ def rebuild_governance_catalogs(project_root: Path, *, records: list[dict[str, A
     taxonomy["topics"] = {key: taxonomy["topics"][key] for key in sorted(taxonomy["topics"])}
     taxonomy["tags"] = {key: taxonomy["tags"][key] for key in sorted(taxonomy["tags"])}
     pools["pools"] = {key: pools["pools"][key] for key in sorted(pools["pools"])}
+
+    return taxonomy, pools
+
+
+def governance_catalog_drift(
+    project_root: Path,
+    *,
+    records: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Pure-read classifier for taxonomy/pool gardening work."""
+    current_taxonomy = load_topic_taxonomy(project_root)
+    current_pools = load_candidate_pools(project_root)
+    expected_taxonomy, expected_pools = governance_catalog_payloads(
+        project_root,
+        records=records,
+    )
+    taxonomy_stale = current_taxonomy != expected_taxonomy
+    pools_stale = current_pools != expected_pools
+    return {
+        "stale": taxonomy_stale or pools_stale,
+        "taxonomy_stale": taxonomy_stale,
+        "candidate_pools_stale": pools_stale,
+        "binding_digest": hashlib.sha256(
+            json.dumps(
+                {
+                    "current_taxonomy": current_taxonomy,
+                    "current_pools": current_pools,
+                    "expected_taxonomy": expected_taxonomy,
+                    "expected_pools": expected_pools,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest(),
+    }
+
+
+def rebuild_governance_catalogs(project_root: Path, *, records: list[dict[str, Any]] | None = None) -> tuple[Path, Path]:
+    ensure_workspace(project_root)
+    taxonomy, pools = governance_catalog_payloads(project_root, records=records)
 
     taxonomy_path = write_topic_taxonomy(project_root, taxonomy)
     pools_path = write_candidate_pools(project_root, pools)
@@ -2366,6 +2411,8 @@ __all__ = [
     "refresh_record_schemas",
     "_has_declared_members",
     "_preserve_empty_governance_seeds",
+    "governance_catalog_payloads",
+    "governance_catalog_drift",
     "rebuild_governance_catalogs",
     "build_index",
     "passage_corpus",
