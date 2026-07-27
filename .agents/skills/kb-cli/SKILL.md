@@ -63,7 +63,7 @@ description: kb 快捷命令入口（伪 CLI），用于把常用 research 操�
 - `doctor`：只读说明 runtime、YAML 与 PDF 能力；详细解释只进私有 protocol。
 - `update`：只读检查版本；发现更新后先请求用户授权。更新只使用 manifest 记录的来源，不把 fork/local 安装切回默认上游。
 - `obsidian update|status`：生成或纯读检查 `kb/obsidian/managed/` 派生视图；不得改 canonical record、人工 `inbox/annotations` 或 `.obsidian/` 配置。详细 finding 只进私有 protocol。
-- `status` / `find` / `recall`：转发 owner 后过滤内部命令、路径与 flags。
+- `status` / `find` / `recall`：转发 owner 后过滤内部命令、路径与 flags。`find` 的私有 protocol 同时给 Agent 一个有界 `context-pack/v1`；formal 只含 current confirmed claims，navigation 摘要/段落不得当成确认结论。
 - `next`：读取 durable program 与 canonical unit 状态；完成态不因机械刷新重新打开。program 中持久化的 `next_actions` 与 loose-unit 维护都是完整候选集里的事实，不带固定优先级；Agent 按本次信息增益、成本风险、阻塞与有效偏好比较。不得从聊天承诺猜下一步。
 - `add`：按 `link_autodrive` 路由。`ask_first` 只轻量入库并一次询问是否深读；`auto_deep_read` 复用 ingest 管线。Hugging Face `/datasets/` 链接推断为 dataset，本地目录推断为 repo，本地 PDF 推断为 paper，其余本地文件推断为 blog。
 - `ingest`：自动执行 intake 与当前安全的 prepare；paper 直接生成统一 deep-read scaffold，由 Agent 在同一份 fill 中填写 `paper_type`、类型理由/逐字证据与对应五要素，再一次 verify。若同源条目来自先前 `kb add`，从 canonical workflow 继续；已有 Agent fill 或已核验内容绝不重铺，只在私有 protocol 给出当前阶段的续接动作。repo/dataset/blog 仍按各自单个分析骨架续跑。判断确认始终停在用户闸口。

@@ -1,6 +1,6 @@
 ---
 name: literature-synthesizer
-description: 负责跨 paper / repo / dataset / blog / idea 的 evidence-first survey、review 与 taxonomy 综合。
+description: 负责跨 paper / repo / dataset / blog / idea 的 evidence-first survey、review、taxonomy 与一等概念单元综合。
 ---
 
 # Literature Synthesizer
@@ -8,6 +8,8 @@ description: 负责跨 paper / repo / dataset / blog / idea 的 evidence-first s
 开始 survey/review/taxonomy 前遵循 workspace 统一 task-scoped preference 合同：`literature-synthesizer + synthesize` 只接收 allowlist 中由 Agent 选中的 effective subset，并绑定 mode、selection filters、as_of 与 program ids 构成的 canonical task digest。未选中的软偏好不得静默改变 selection、taxonomy 或写作口径；无 receipt 时软行为中性，hard constraints 仍必须执行。
 
 当任务是在多个知识单元之间形成综述、趋势、taxonomy、topic map 或 pool review，而不是分析单个 source 时，使用这个 skill。
+
+核心概念也由本 skill 管理：自然语言“提取/对齐这个概念”走 `concept prepare → Agent fill → concept verify`，不新增公开 `kb` 动词。
 
 ## 核心边界
 
@@ -17,6 +19,7 @@ description: 负责跨 paper / repo / dataset / blog / idea 的 evidence-first s
 - 每个正式 claim cell 都必须有 evidence_refs；taxonomy cell、comparison-matrix cell、trend、gap 还会检查其结构字段。每个 ref 都按自己的 source_unit_id 解析到对应 unit_dir，再做逐字核验。
 - prepare 只接受当前、已确认且 ConfirmationReceipt/evidence bytes 仍有效的输入 unit；筛选后为零时返回 evidence-gap + composite handoff，不写零材料 scaffold。
 - prepare 不产出 survey；verify 全部通过后写 evidence-verified、`pending_user_confirmation` 的一等 survey JudgementArtifact。它进入统一 `kb review` 收件箱，经当前消息授权的 confirm/reject 闭环后，只有 current confirmed 版本可供正式报告消费。
+- concept prepare 至少冻结 3 个 current confirmed、非 concept unit；脚本只预填身份与空 claim cell。verify 要求 definition、每个 association role 与非空 scope 都有逐字 evidence，写 `kb/units/concepts/<id>/record.yaml` pending unit；上游 record/receipt/evidence 或 association→links 投影变化都令其 stale。
 
 ## 两阶段流程
 
@@ -159,7 +162,7 @@ comparison_matrix:
 - summary.md 按七段式渲染 evidence-verified content，显式显示 Pending / Unverified banner，并将 comparison matrix 输出为 method × dimension 表格。
 - metadata 只参与候选选择，不作为 survey conclusions。
 
-脚本入口：`scripts/synthesize.py`（survey|review|taxonomy × prepare|verify，survey 另有 confirm|reject；composite status|update）。
+脚本入口：`scripts/synthesize.py`（survey|review|taxonomy × prepare|verify，survey 另有 confirm|reject；concept prepare|verify；composite status|update）。
 
 ## 启动澄清（Agent 用）
 

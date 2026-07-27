@@ -86,7 +86,7 @@ PREPARED_BUNDLE_KEYS = {
     "authoring_contract",
 }
 HEX_DIGEST_RE = re.compile(r"[0-9a-f]{64}")
-CANONICAL_UNIT_DIRECTORIES = {"papers", "repos", "datasets", "blogs", "ideas", "experiments"}
+CANONICAL_UNIT_DIRECTORIES = {"papers", "repos", "datasets", "blogs", "ideas", "experiments", "concepts"}
 MAX_CORPUS_FILE_BYTES = 16 * 1024 * 1024
 MAX_CORPUS_TOTAL_BYTES = 256 * 1024 * 1024
 MAX_CORPUS_ENTRIES = 20_000

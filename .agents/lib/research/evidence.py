@@ -74,6 +74,7 @@ CONFIRMABLE_CONTENT_SECTIONS: dict[str, tuple[str, ...]] = {
     "blog": ("content",),
     "idea": ("problem", "hypothesis"),
     "experiment": ("results", "diagnosis"),
+    "concept": ("concept", "associations", "anchor"),
     "program_decision": ("decision",),
     "idea_discussion_conclusion": ("discussion_conclusion",),
     "method_selection": ("method_selection",),

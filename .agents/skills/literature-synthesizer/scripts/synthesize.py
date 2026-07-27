@@ -24,7 +24,8 @@ if __name__ == "__main__":
     ensure_managed_runtime(PROJECT_ROOT)
 
 from research.common import add_project_root_argument, ensure_dir, file_sha256, load_list_document, load_yaml, print_resolved_project_roots, program_reporting_events_path, slugify, utc_now_iso, write_text_if_changed, write_yaml_if_changed
-from research.core import iter_records, project_root, rel, synthesis_root, unit_root
+from research.concepts import build_concept_scaffold, verify_concept_fill
+from research.core import iter_records, locate_record, project_root, record_path, rel, synthesis_root, trusted_project_path, unit_root, write_record
 from research.confirm import apply_confirmation
 from research.evidence import (
     build_verification_receipt,
@@ -1212,7 +1213,78 @@ def build_parser() -> argparse.ArgumentParser:
     composite.add_argument("--composite-id", required=True)
     composite.add_argument("--expected-revision", type=int, default=0)
     composite.add_argument("--input", default="")
+    concept = subparsers.add_parser("concept")
+    concept.add_argument("action", choices=("prepare", "verify"))
+    concept.add_argument("--name", default="")
+    concept.add_argument("--unit-id", action="append", default=[])
+    concept.add_argument("--as-of", default="")
+    concept.add_argument("--input", default="")
     return parser
+
+
+def handle_concept_command(root: Path, args: argparse.Namespace) -> int:
+    if args.action == "prepare":
+        if not str(args.name or "").strip():
+            raise SystemExit("概念 prepare 需要一个概念名称。")
+        if not str(args.as_of or "").strip():
+            raise SystemExit("概念 prepare 需要 as-of 时间锚点。")
+        records: list[dict] = []
+        seen: set[str] = set()
+        for unit_id in args.unit_id:
+            clean_id = str(unit_id or "").strip()
+            if not clean_id or clean_id in seen:
+                raise SystemExit("概念 prepare 的来源编号必须非空且互不重复。")
+            seen.add(clean_id)
+            try:
+                record, _path = locate_record(root, clean_id, fuzzy=False)
+            except (SystemExit, ValueError) as exc:
+                raise SystemExit(f"概念来源不可用：{clean_id}") from exc
+            records.append(record)
+        try:
+            scaffold = build_concept_scaffold(
+                root,
+                canonical_name=args.name,
+                records=records,
+                as_of=args.as_of,
+            )
+        except ValueError as exc:
+            raise SystemExit(f"概念骨架未生成：{exc}") from exc
+        concept_slug = slugify(str(scaffold["concept"]["canonical_name"]), max_words=8) or "concept"
+        fill_path = synthesis_root(root) / "concepts" / concept_slug / "concept-fill.yaml"
+        with mutation_transaction(root, "prepare-concept", [fill_path]):
+            ensure_dir(fill_path.parent)
+            write_yaml_if_changed(fill_path, scaffold)
+        print(rel(root, fill_path))
+        return 0
+
+    if not str(args.input or "").strip():
+        raise SystemExit("概念 verify 需要 Agent 填好的 input。")
+    fill_path = Path(args.input)
+    if not fill_path.is_absolute():
+        fill_path = root / fill_path
+    try:
+        fill_path = trusted_project_path(
+            root,
+            fill_path,
+            allowed_root=synthesis_root(root) / "concepts",
+            require="file",
+        )
+        fill = load_yaml(fill_path, default={})
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise SystemExit("概念 fill 无法安全读取。") from exc
+    violations, record = verify_concept_fill(root, fill)
+    if violations or record is None:
+        print("[reject] 概念 fill 未通过机械校验：", file=sys.stderr)
+        for violation in violations:
+            print(f"  - {violation}", file=sys.stderr)
+        return 1
+    target = record_path(root, "concept", str(record["id"]))
+    if target.exists() or target.is_symlink():
+        raise SystemExit("同一概念编号已存在；请先显式 review/refresh，系统不会静默覆盖。")
+    with mutation_transaction(root, "verify-concept", [target]):
+        written = write_record(root, record, expected_revision=0)
+    print(rel(root, written))
+    return 0
 
 
 def main() -> int:
@@ -1220,6 +1292,8 @@ def main() -> int:
     root = project_root(PROJECT_ROOT, explicit_root=args.root)
     print_resolved_project_roots(root)
     mode = args.command
+    if mode == "concept":
+        return handle_concept_command(root, args)
     if mode == "composite":
         if args.action == "update" and (not args.input or int(args.expected_revision or 0) < 1):
             raise SystemExit("Composite survey update requires input and expected revision.")

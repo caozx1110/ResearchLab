@@ -25,6 +25,7 @@ UNIT_KIND_DIRS = {
     "blog": "blogs",
     "idea": "ideas",
     "experiment": "experiments",
+    "concept": "concepts",
 }
 
 

@@ -4,6 +4,11 @@ All notable changes to this project will be documented here. The format follows 
 
 ## [Unreleased]
 
+### Added (R2, 2026-07-27)
+
+- Added canonical `concept` knowledge units with a literature-synthesizer prepare/fill/verify flow. A concept requires at least three current confirmed source units; its Agent-authored definition and association roles require verbatim evidence, remain human-confirmation-gated, bind their upstream snapshots, and project into unified search and no-plugin Obsidian pages.
+- Added a read-only bounded `context-pack/v1` to the private `kb find` protocol. Only claims covered by a current ConfirmationReceipt enter the formal lane; summaries and passages remain navigation-only. Deterministic whole-object trimming enforces 5 units × 3 claims × 2 references and a 6000-byte aggregate budget.
+
 ### Changed (R1, 2026-07-27)
 
 - Paper intake no longer creates a quick-screen judgement. New papers go directly to one unified deep-read scaffold where the runtime Agent supplies an evidence-backed `paper_type` and the corresponding five elements; the complete note is verified and confirmed once. Legacy quick-screen records remain read-only compatible.

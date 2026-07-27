@@ -120,7 +120,7 @@ The same `kb init` and `kb review` semantics apply in a terminal, a pipe, or an 
 ```text
 kb/
 ├── raw/          # immutable external source bytes
-├── units/        # papers, repos, datasets, blogs, ideas, experiments
+├── units/        # papers, repos, datasets, blogs, ideas, experiments, concepts
 ├── programs/     # research state, decisions, designs, runs, reports
 ├── synthesis/    # surveys, taxonomy, trends, gaps
 ├── config/       # user and runtime policy
@@ -130,6 +130,8 @@ kb/
 ```
 
 Convertible paper, HTML, Markdown, and text units preserve the original material and add a complete `source/document.md` reading view, a source map, a conversion manifest, and locally stored image assets. HTML units also add a passive normalized offline `source/archive.html`; the raw server response remains untouched. arXiv/ar5iv HTML must pass a structural quality gate before it is selected, otherwise intake falls back to PDF and finally an explicitly degraded abstract page; an explicitly requested arXiv version is preserved through every candidate. Markdown conversion preserves code, source front matter, formulae, complex tables, headings, and local image references, and the complete derived bundle is collision-checked before publication. Human readers and agents use Markdown first, while the offline page and original format remain fallbacks. Repository source stays in its native files; generated Obsidian pages can link to verified local code files without making machine-local URIs canonical evidence.
+
+Concepts are first-class knowledge units. The runtime Agent can synthesize one from at least three current confirmed source units, but the definition and every association must carry verbatim evidence and remain pending until you confirm them. Confirmed concept pages participate in the same search index and no-plugin Obsidian projection as other units. The private result of `kb find` also contains a bounded context pack for discussion and writing: only current confirmation-receipt-bound claims enter its formal lane, while summaries and matching passages remain explicitly navigation-only.
 
 The core rules are:
 

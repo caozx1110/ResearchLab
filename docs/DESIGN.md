@@ -7,7 +7,7 @@
 Open Research Workspace Skills 是 knowledge-unit-first 的 research operating system。聊天是交互界面，不是状态存储：
 
 1. 外部材料进入不可变 source 与完整 parse cache；
-2. paper、repo、dataset、blog、idea 和 experiment 成为 typed knowledge unit；
+2. paper、repo、dataset、blog、idea、experiment 和 concept 成为 typed knowledge unit；
 3. program 保存问题、证据请求、决策、设计、实验和报告事件；
 4. synthesis 保存跨 unit 的 survey、taxonomy、trend 和 gap；
 5. `kb/user/` 从 canonical 数据生成，供人复开。
@@ -100,7 +100,11 @@ Release bundle 不包含任何私有 `kb/`。安装、更新、storage sync 和�
 - organization：`tags`, `topics`, `candidate_pools`, `links`, `reuse_flags`；
 - trace：`source`, `evidence`, `history`。
 
-Unit 类型为 `paper`, `repo`, `dataset`, `blog`, `idea`, `experiment`。Program 位于 `kb/programs/<program-id>/`，包含 state、open questions、evidence requests、decision log、reporting events、design、experiments、reports 和 discussions。
+Unit 类型为 `paper`, `repo`, `dataset`, `blog`, `idea`, `experiment`, `concept`。Program 位于 `kb/programs/<program-id>/`，包含 state、open questions、evidence requests、decision log、reporting events、design、experiments、reports 和 discussions。
+
+`concept` 是 canonical knowledge unit，不是额外的 side cache。`literature-synthesizer` 从至少三个 current confirmed 非 concept unit 生成待填骨架；runtime Agent 填定义、可选 scope 与每条关联角色，全部判断携带逐字 evidence。verify 冻结上游 record/content/confirmation/evidence binding，并把关联机械投影到 top-level `links`；任何上游或 anchor 变化都会使旧确认失效。概念在真人确认后进入统一索引与 Obsidian 页面。
+
+`kb find` 的私有 Agent 协议附带瞬时 `context-pack/v1`，不新增公开动词，也不落 canonical 文件。它最多保留 5 个 unit、每个 3 条 claim、每条 2 个 evidence ref，总体不超过 6000 UTF-8 bytes；正式 lane 只接纳当前 ConfirmationReceipt 覆盖且再次校验通过的 confirmed claims。summary 与命中 passage 永远标记为 navigation-only，聚合末尾再做一次 currentness 检查，预算裁剪按完整对象删除而不截断 quote。
 
 `kb/raw/` 保存原始材料。可转换材料在 unit 的 `source/` 下拥有完整 `document.md`、`source-map.yaml`、`conversion.yaml`、原格式文件与可选的 hash-addressed `assets/`；HTML 另有带内联阅读样式、只引用本地 asset 的被动 `archive.html`。原始 HTML 响应、离线阅读页和 Markdown 分别承担证据、浏览器阅读与 Obsidian/AI 阅读职责，均不可原地覆盖。arXiv/ar5iv 全文 HTML 在写盘前检查 fatal/Untitled/LaTeXML error 与正文结构，不合格则先回退 PDF、再回退显式 degraded 的 abstract；显式 `vN` 不得被候选解析静默丢弃。HTML 规范化服从最终 URL 与 `<base href>`，公式通过占位保护避免 Markdown 转义，内部 fragment 映射到稳定 source block，图片 alt 与多图 figure 生成 Obsidian-safe 结构；复杂表格保留为安全 raw HTML。已有 Markdown 只在非代码语境转换图片和标题，保留 front matter、fenced/跨行 inline code 与 Setext 标题；所有非代码 raw HTML 与离线页服从相同被动化边界。纯文本按 literal 显示，HTML meta、HTTP charset 与 XML declaration 共同参与无损解码。四类输出共用结构 lint，完整派生 bundle 先在同盘 staging 生成和预检，`conversion.yaml` 最后发布，冲突或失败不得留下半套文件。`document.md` 是人和 Agent 的首选完整阅读层，parse cache 继续承担兼容的逐字 quote/locator 协议，转换降级或细节缺失时回退 `archive.html` 或原格式。Repository 源码保持原格式与目录身份，不批量 Markdown 化；目录重试按归档合同一致忽略 VCS metadata。`kb/user/` 是生成视图，`kb/output/` 是导出，不得成为唯一 source of truth。
 

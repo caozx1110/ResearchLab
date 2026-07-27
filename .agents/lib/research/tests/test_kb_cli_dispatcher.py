@@ -4871,6 +4871,30 @@ def test_kb_find_forwards_joined_keywords(monkeypatch, tmp_path: Path) -> None:
     assert stream_values == [False]
 
 
+def test_concept_public_review_uses_generic_knowledge_writer() -> None:
+    kb = _load_kb_cli()
+    concept = {
+        "id": "c-action-chunking-12345678",
+        "kind": "concept",
+        "title": "Action Chunking",
+    }
+
+    routes = kb._review_decision_routes(concept, None)
+
+    assert kb.PUBLIC_KIND_LABELS["concept"] == "概念"
+    assert routes["subject"] == {
+        "kind": "concept",
+        "id": concept["id"],
+        "owner": "knowledge-base-manager",
+    }
+    assert routes["confirm_route"] == {
+        "owner": "knowledge-base-manager",
+        "action": "confirm",
+        "id": concept["id"],
+    }
+    assert routes["reject_route"]["action"] == "promote"
+
+
 def test_kb_find_public_output_is_natural_and_protocol_remains_structured(
     monkeypatch,
     tmp_path: Path,
@@ -4947,6 +4971,9 @@ def test_kb_find_public_output_is_natural_and_protocol_remains_structured(
     assert protocol["details"]["search_index_health"] == "current"
     assert protocol["details"]["passages"][0]["artifact"].endswith("source/document.md")
     assert "_search_score" not in protocol["details"]["passages"][0]
+    assert protocol["details"]["context_pack"]["schema"] == "context-pack/v1"
+    assert protocol["details"]["context_pack"]["units"] == []
+    assert str(tmp_path) not in json.dumps(protocol["details"]["context_pack"], ensure_ascii=False)
 
 
 def test_kb_find_excludes_rejected_matches_and_audits_count(monkeypatch, tmp_path: Path, capsys) -> None:

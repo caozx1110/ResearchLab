@@ -43,6 +43,7 @@ if __name__ == "__main__":
     ensure_managed_runtime(DEFAULT_PROJECT_ROOT)
 
 from research.common import current_runtime_capabilities, exclusive_file_lock, find_project_root, load_yaml
+from research.context_pack import build_context_pack
 from research.core import (
     CLAIM_CONFIRMATION_VALUES,
     confirmation_track,
@@ -210,7 +211,7 @@ _RUNTIME_FAILURE_PUBLIC_SUMMARY = "知识库操作未完成。"
 
 
 Handler = Callable[[argparse.Namespace, Path], int]
-REVIEW_KIND_CHOICES = ("paper", "repo", "dataset", "blog", "idea", "experiment")
+REVIEW_KIND_CHOICES = ("paper", "repo", "dataset", "blog", "idea", "experiment", "concept")
 REVIEW_KIND_ALIASES = {
     "paper": "paper",
     "论文": "paper",
@@ -224,6 +225,8 @@ REVIEW_KIND_ALIASES = {
     "想法": "idea",
     "experiment": "experiment",
     "实验": "experiment",
+    "concept": "concept",
+    "概念": "concept",
 }
 LANG_CHOICES = ("zh", "en")
 AUTO_COMMIT_CHOICES = ("manual", "milestone", "aggressive")
@@ -508,6 +511,7 @@ PUBLIC_KIND_LABELS = {
     "blog": "博客",
     "idea": "研究想法",
     "experiment": "实验",
+    "concept": "概念",
 }
 
 PUBLIC_KIND_COUNT_PHRASES = {
@@ -517,6 +521,7 @@ PUBLIC_KIND_COUNT_PHRASES = {
     "blog": "篇博客",
     "idea": "个研究想法",
     "experiment": "个实验",
+    "concept": "个概念",
 }
 
 _NEXT_INTERNAL_MARKERS = (
@@ -1804,13 +1809,20 @@ def handle_find(args: argparse.Namespace, root: Path) -> int:
         for record in [*rejected_records, *iter_records(root)]
         if _record_is_rejected(record)
     }
-    passages = [
+    eligible_passages = [
         dict(item)
         for item in raw_passages
         if isinstance(item, Mapping) and str(item.get("unit_id") or "") not in rejected_ids
-    ][:5]
+    ]
+    passages = eligible_passages[:5]
     passage_summaries = [_protocol_passage_summary(item) for item in passages]
     summaries = [_protocol_record_summary(record) for record in records]
+    context_pack = build_context_pack(
+        root,
+        query=query,
+        matched_records=records,
+        passages=eligible_passages,
+    )
     set_protocol_status(
         "completed",
         query=query,
@@ -1818,6 +1830,7 @@ def handle_find(args: argparse.Namespace, root: Path) -> int:
         rejected_count=len(rejected_records),
         records=summaries,
         passages=passage_summaries,
+        context_pack=context_pack,
         search_index_health=str(passage_payload.get("health") or "unknown")
         if isinstance(passage_payload, Mapping)
         else "unknown",
@@ -2910,7 +2923,7 @@ def workspace_init_complete(root: Path) -> bool:
     kb = kb_root(root)
     required_directories = [
         kb / "units" / unit_dir
-        for unit_dir in ("papers", "repos", "datasets", "blogs", "ideas", "experiments")
+        for unit_dir in ("papers", "repos", "datasets", "blogs", "ideas", "experiments", "concepts")
     ] + [
         kb / "programs",
         kb / "user" / "reading-lists",

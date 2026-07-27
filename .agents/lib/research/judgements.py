@@ -19,6 +19,7 @@ from typing import Any, Callable, Iterable
 import yaml
 
 from .common import load_yaml, utc_now_iso
+from .concepts import concept_lifecycle_violations
 from .confirm import has_complete_confirmation_receipt
 from .evidence import (
     CONFIRMABLE_CONTENT_FIELDS,
@@ -62,6 +63,7 @@ UNIT_OWNER_BY_KIND = {
     "blog": "blog-analyst",
     "idea": "idea-workbench",
     "experiment": "experiment-workbench",
+    "concept": "literature-synthesizer",
 }
 UNIT_DIR_BY_KIND = {
     "paper": "papers",
@@ -70,6 +72,7 @@ UNIT_DIR_BY_KIND = {
     "blog": "blogs",
     "idea": "ideas",
     "experiment": "experiments",
+    "concept": "concepts",
 }
 SIDE_OWNER_BY_KIND = {
     "program_decision": "research-orchestrator",
@@ -364,6 +367,8 @@ def readiness_violations(
         violations.append("canonical claim confirmation status is not pending_user_confirmation")
     if _text(record.get("kind")) == "survey_judgement":
         violations.extend(survey_lifecycle_violations(record, root))
+    if _text(record.get("kind")) == "concept":
+        violations.extend(concept_lifecycle_violations(root, record))
     try:
         verification_root = _verification_root(root, record, artifact_path)
         source_roots = _source_roots(
@@ -404,6 +409,8 @@ def _judgement_confirmation_matches(
             valid = False
         record_snapshot = bound_snapshot.unit_record_snapshot
     if _text(record.get("kind")) == "survey_judgement" and survey_lifecycle_violations(record, root):
+        valid = False
+    if _text(record.get("kind")) == "concept" and concept_lifecycle_violations(root, record):
         valid = False
     try:
         verification_root = _verification_root(root, record, artifact_path)

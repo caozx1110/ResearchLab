@@ -28,11 +28,14 @@ from .yaml_io import dump_yaml, load_yaml, write_text_if_changed, write_yaml_if_
 
 
 OBSIDIAN_PROJECTION_SCHEMA = "research-kb-obsidian/v1"
-OBSIDIAN_RENDERER_REVISION = 6
+OBSIDIAN_RENDERER_REVISION = 7
 MANIFEST_NAME = "manifest.yaml"
 HUMAN_DIRS = ("inbox", "annotations")
 UNIT_HEADINGS = frozenset(
-    {"Overview", "Metadata", "Relationships", "Claims", "概览", "元数据", "关系", "判断"}
+    {
+        "Overview", "Definition", "Associations", "Metadata", "Relationships", "Claims",
+        "概览", "定义", "关联清单", "元数据", "关系", "判断",
+    }
 )
 _MARKDOWN_INLINE_RE = re.compile(r"([\\`*_{}\[\]()<>~$|^&=#!])")
 _LEADING_MARKDOWN_RE = re.compile(r"^(?P<prefix>(?:[+-])|(?:\d+[.)]))(?=\s)")
@@ -537,6 +540,56 @@ def _render_relations(
     return lines[:-1]
 
 
+def _render_concept_sections(
+    record: dict[str, Any],
+    records_by_id: dict[str, dict[str, Any]],
+    *,
+    zh: bool = False,
+) -> list[str]:
+    if str(record.get("kind") or "") != "concept":
+        return []
+    payload = record.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    concept = payload.get("concept")
+    concept = concept if isinstance(concept, dict) else {}
+    definition = _single_line(concept.get("definition")) or _t(
+        zh, "No verified definition is available.", "尚无已核验的定义。"
+    )
+    aliases = [str(item) for item in concept.get("aliases", []) if str(item).strip()]
+    raw_associations = payload.get("associations")
+    associations = raw_associations if isinstance(raw_associations, list) else []
+    lines = [
+        f"## {_t(zh, 'Definition', '定义')}",
+        "",
+        _markdown_text(definition),
+    ]
+    if aliases:
+        lines.extend(
+            [
+                "",
+                f"- {_t(zh, 'Aliases', '别名')}: " + ", ".join(_markdown_text(item) for item in aliases),
+            ]
+        )
+    lines.extend(["", f"## {_t(zh, 'Associations', '关联清单')}", ""])
+    rendered = 0
+    for association in associations:
+        if not isinstance(association, dict):
+            continue
+        target_id = _single_line(association.get("target_id"))
+        if not target_id:
+            continue
+        relation = _single_line(association.get("relation")) or "related_to"
+        role = _single_line(association.get("role"))
+        suffix = f" — {_markdown_text(role)}" if role else ""
+        lines.append(
+            f"- {_unit_link(target_id, records_by_id)} · {_inline_code(relation)}{suffix}"
+        )
+        rendered += 1
+    if not rendered:
+        lines.append(_t(zh, "- No associated units.", "- 暂无关联单元。"))
+    return lines
+
+
 def _render_claims(
     project_root: Path,
     record: dict[str, Any],
@@ -626,6 +679,7 @@ def _render_unit_page(
     }
     properties.update(_flat_relation_properties(unit_id, outgoing, incoming, records_by_id))
     summary = _display_summary(record, zh=zh)
+    concept_sections = _render_concept_sections(record, records_by_id, zh=zh)
     source_uri = _single_line(source.get("original_uri"))
     source_document = _source_document_link(project_root, source, zh=zh)
     repo_links = _local_repo_quick_links(project_root, record, zh=zh)
@@ -638,6 +692,7 @@ def _render_unit_page(
         f"## {_t(zh, 'Overview', '概览')}",
         "",
         summary,
+        *(["", *concept_sections] if concept_sections else []),
         "",
         f"> [!info] {_t(zh, 'Quick access', '快速入口')}",
         "> " + (primary_access if primary_access else _t(zh, "No reading entry is available yet.", "暂时没有可用的阅读入口。")),

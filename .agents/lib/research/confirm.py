@@ -77,6 +77,7 @@ CONFIRM_UNIT_STATUS_BY_KIND = {
     "repo": "active",
     "dataset": "active",
     "blog": "active",
+    "concept": "active",
 }
 
 
@@ -87,6 +88,7 @@ CONFIRM_UNIT_SUMMARY_BY_KIND = {
     "blog": "Blog analysis confirmed by user.",
     "idea": "Idea content confirmed by user.",
     "experiment": "Experiment findings confirmed by user.",
+    "concept": "Concept definition and associations confirmed by user.",
 }
 
 
@@ -116,6 +118,7 @@ SUBSTANCE_CONTENT_SECTIONS: dict[str, tuple[str, ...]] = {
     "blog": ("content",),
     "idea": ("problem", "hypothesis"),
     "experiment": ("results", "diagnosis"),
+    "concept": ("concept", "associations"),
 }
 
 
@@ -492,6 +495,17 @@ def confirm_unit(
     unit_kind = str(kind or record.get("kind") or "")
     if unit_kind not in UNIT_KIND_DIRS:
         raise SystemExit(f"Unsupported unit kind: {unit_kind}")
+    if unit_kind == "concept":
+        if project_root is None:
+            raise SystemExit("Concept confirmation requires a canonical project root.")
+        from .concepts import concept_lifecycle_violations
+
+        lifecycle_violations = concept_lifecycle_violations(project_root, record)
+        if lifecycle_violations:
+            raise SystemExit(
+                "Refusing to confirm a stale concept unit:\n  - "
+                + "\n  - ".join(lifecycle_violations)
+            )
     _require_confirmable_claim_types(record)
     # Substance gate (SSOT §3.11 / Principle 3). This is the PRIMARY user confirm path
     # (paper.py confirm / kb.py confirm / interactive kb review), so the hollow-gate
@@ -609,7 +623,7 @@ def _require_expected_confirmation_delta(
         raise SystemExit("Record history changed outside the authorized confirmation step.")
     if len(record_history) == len(baseline_history) + 1:
         action = str(record_history[-1].get("action") or "") if isinstance(record_history[-1], dict) else ""
-        if action not in {"paper-confirmed", "repo-confirmed", "dataset-confirmed", "blog-confirmed", "idea-confirmed", "experiment-confirmed", "promoted"}:
+        if action not in {"paper-confirmed", "repo-confirmed", "dataset-confirmed", "blog-confirmed", "idea-confirmed", "experiment-confirmed", "concept-confirmed", "promoted"}:
             raise SystemExit("Record history contains an unauthorized post-confirmation mutation.")
 
 

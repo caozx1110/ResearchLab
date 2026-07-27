@@ -40,6 +40,7 @@ Knowledge Base Manager 负责 knowledge-unit classifier；公共 `kb review` 还
 - `find` 是只读消费者。cache 先验内部 table/digest 自洽，再判 canonical stale；内部篡改归 `corrupt`，canonical 合法变化归 `stale`。cache 缺失、损坏或 stale 时调用同一 extractor 做内存 fallback，绝不在 query path 重建或修改 KB。
 - 公开结果最多五段，只显示短原文、unit 和可复开 locator；BM25/internal score、绝对路径与 cache 诊断只留在私有 protocol。
 - lexical search 支持同语种与 CJK/ASCII 混合 token，但不承诺翻译、embedding 或跨语言同义召回。
+- canonical concept 与其它 unit 一起进入 passage/index/Obsidian；公开 find 可显示 pending 状态。私有 `context-pack/v1` 只搬运 current ConfirmationReceipt 覆盖的 formal claims，summary/passage 明确是 navigation-only；本 owner 不生成答案或综合判断。
 
 ## 分层机械审计
 

@@ -50,7 +50,7 @@ apply 在首个 workspace/HOME/runtime 写入前先执行与 plan generation 相
 | `CONFIRMATION_VALUES` | `auto_confirmed, pending_user_confirmation, confirmed, rejected` | 用户确认门控 |
 | `INFORMATION_TYPES` | `fact, inference, evaluation, user_opinion, unverified` | 信息性质 |
 | `MATURITY_LEVELS` | `lightweight, complete` | unit 完备度 |
-| `UNIT_KIND_DIRS` | `paper→kb/units/papers, repo→kb/units/repos, dataset→kb/units/datasets, blog→kb/units/blogs, idea→kb/units/ideas, experiment→kb/units/experiments` | unit 落盘目录 |
+| `UNIT_KIND_DIRS` | `paper→kb/units/papers, repo→kb/units/repos, dataset→kb/units/datasets, blog→kb/units/blogs, idea→kb/units/ideas, experiment→kb/units/experiments, concept→kb/units/concepts` | unit 落盘目录 |
 | `WORKFLOW_STATES` | `source_ready, awaiting_agent_fill, ready_to_verify, ready_for_review, done, failed_retryable` | `record_workflow_state()` 的唯一纯分类，供 next/review/status/auto 共用 |
 
 **确认门控规则**（见 [`confirmation gate`](#confirmation-gate)）：
@@ -77,14 +77,14 @@ apply 在首个 workspace/HOME/runtime 写入前先执行与 plan generation 相
 
 ## unit/record.yaml <a id="unit-record"></a>
 
-适用：paper / repo / dataset / blog / idea / experiment 六种 unit 共享的 record 顶层结构。
+适用：paper / repo / dataset / blog / idea / experiment / concept 七种 unit 共享的 record 顶层结构。
 
 所有 canonical unit 读者共用同一 strict record snapshot 合同：从 workspace root 逐级 anchored/no-follow 打开 `kb/units/<kind-dir>/<unit-id>/record.yaml`，目录名与 record `kind/id` 必须互相一致；leaf 只接受有界 ordinary file，并以 nonblocking fd 读取，读取前后重验完整 stat identity、长度与祖先目录链。YAML loader 拒绝任意层重复 mapping key。symlink、FIFO/socket/device、过大/变化中的文件、重复 key、目录身份漂移或 schema/路径不一致均不得产出 record。批量 discovery 必须隔离单个坏候选并返回安全 audit finding：normalization 对任意 YAML mapping 是 total boundary，schema/type 错误不得返回 raw payload或抛出普通异常拖垮 status/portfolio/review/find/survey/intake；`KeyboardInterrupt/GeneratorExit` 不吞。任何 owner 若需要精确 bytes/digest，必须消费这个 reader 返回的同一 snapshot，不能再次按路径打开。严格 snapshot 也不得降级成普通 `Path/.parent` 交给 evidence/passage consumer：source-unit evidence、Markdown 与 parse-cache 从同一 anchored unit directory capability 读取为 bytes+digest+artifact identity，并在判断/公开展示前重验整条祖先链；leaf-only no-follow 或先检查后按路径重开不构成能力绑定。`trusted_unit_record_path` 是 informational/existence compatibility API，`report-author`、`idea-workbench`、monitor 或其它 consumer 不得拿其结果再 `load_yaml/read_text/read_bytes`；它们必须使用 strict record / evidence snapshot 并把初始 binding 传入 confirmation/readiness current-check。program-decision 与 method-selection 的跨 unit claim roots 必须是 `EvidenceSourceSnapshot`，不得缓存 `locate_record(...)[1].parent`；`program:<id>` 的本地 evidence 也必须在一个 ancestor-bound snapshot 中一次捕获本判断引用的全部 artifacts，不能让多条 ref 各自从 bare program `Path` 重开后拼接不同目录版本。survey unit binding 的 record、confirmation receipt与 evidence artifact list 必须来自同一个 current `CanonicalUnitSnapshot`；若保留全部 artifact 绑定，递归枚举和 byte hash 也必须由 records 层的 anchored/no-follow/bounded API完成，不能在 survey 层 `rglob/read_bytes/file_sha256`。persisted unit confirmation 必须携带与用户所见/owner 所载 dict 对应的 `CanonicalRecordSnapshot`：evidence capture 消费它，最终 `write_record` 同时比较 expected exact bytes、file identity/current ancestor binding 与 revision；相同 revision 的不同内容或新 inode不得覆盖。judgement report/current consumer 还必须把 subject record、canonical path/owner、verification、ConfirmationReceipt 与 event binding 绑定到同一个 `BoundJudgementSnapshot`：unit 从唯一 record snapshot 读取；side judgement artifact 从 root 逐级 anchored/no-follow、nonblocking、有界 strict-YAML snapshot 读取。consumer 不得在一个判断内重复调用 path loader；正式接纳前重验 leaf 与祖先 identity/current，任何 replacement 或重复 canonical subject 只可降级到 `Pending / Unverified`。review snapshot binding 还必须包含产生卡片的完整 canonical container byte digest；side container 的 sibling 或顶层字段变化同样令旧卡片失效。portfolio 对 program-decision 的引用、survey review-confirmation 与 report-consumption provenance 均属正式 consumer，禁止回退到 dict + path 的二元 current-check。report 必须把所有 accepted source 的 snapshot validator 保留到整批 inputs 装配完成与最终文本返回前；任一失效时整条 formal judgement lane 统一降级，禁止返回已经渲染的旧文本；weekly、stage-summary、ppt-materials、writing-materials、outline 五类 formal publication 还须把同一 current gate 注册到 transaction commit boundary，失败回滚 publication 且不 checkpoint。portfolio validation plan 也必须把 program-decision bound snapshots 保留到 mutation lock 内 history 写入后的 transaction commit boundary；new-write guard 只能引用 lock 内重建的 plan，不能引用 initial/outer plan，replay 保留 final-return gate。report event 的 side subjects 使用一次 batch capture/唯一性索引，捕获复杂度必须为 O(containers + events)。所有 judgement snapshot 入口先 canonicalize project root；macOS `/var` 与 `/private/var` 等价路径必须映射到同一 canonical path identity。`last/current` 的修改时间排序直接使用 snapshot 整数纳秒，禁止转 epoch float 丢精度。
 
 ```yaml
 id: <kind-prefix>-<slug>-<8hex>      # 必填；canonical_unit_id() 生成
 legacy_ids: []                       # 旧版 id，不再使用
-kind: paper|repo|dataset|blog|idea|experiment
+kind: paper|repo|dataset|blog|idea|experiment|concept
 title: ""
 status: draft                        # STATUS_VALUES 之一
 maturity: lightweight                # MATURITY_LEVELS 之一
@@ -247,6 +247,41 @@ files:
 | blog | `basic_info`, `source_search`, `positioning`, `content`, `credibility` | blog-analyst |
 | idea | `problem{problem_definition}`, `hypothesis{core_hypothesis}`, `review` | idea-workbench |
 | experiment | `basic_info{goal}`, `setup`, `process`, `results`, `diagnosis`（另见 run-log/diagnoses/follow-ups 旁路文件） | experiment-workbench |
+| concept | `concept{canonical_name, aliases, definition, scope_note}`, `associations`, `anchor`, `claims`, `verification`, `state{concept_status}` | literature-synthesizer（prepare/verify）、knowledge-base-manager（公共确认/拒绝） |
+
+### concept unit <a id="concept-unit"></a>
+
+概念是一等 canonical unit，不是外部 source，也不是 `kb/synthesis/` 下的 side judgement。`source-intake` 仍只创建 paper/repo/dataset/blog；`literature-synthesizer concept prepare` 仅在 `kb/synthesis/concepts/<slug>/concept-fill.yaml` 生成待填结构，至少冻结 3 个当前、唯一、已确认且非 concept 的 canonical unit。脚本不得填写定义、scope 或关联角色；这些内容由 runtime Agent 写入，每项判断都带逐字 evidence ref。
+
+```yaml
+kind: concept
+id: c-<compact-slug>-<8hex>
+source: {kind: ai, generated_by: literature-synthesizer}
+confirmation_status: pending_user_confirmation
+needs_human_confirmation: true
+payload:
+  concept:
+    canonical_name: ""
+    aliases: []
+    definition: ""
+    scope_note: ""
+  associations:
+    - target_id: p-...
+      target_kind: paper
+      relation: related_to
+      role: ""                 # Agent 判断；对应 claim_id
+      claim_id: claim-concept-association-...
+  anchor:
+    as_of: <UTC ISO-8601>
+    unit_ids: []
+    units: []                  # exact record/confirmation/evidence bindings
+  claims: []                   # definition + optional scope + 每个 association role
+  verification: {}
+  state: {concept_status: pending_user_confirmation}
+links: []                     # associations 的确定性机械投影，不是第二 SSOT
+```
+
+`concept verify` 要求 association 与 anchor 一一覆盖、`payload.associations` 与 top-level `links` 精确等价，并重新验证每个上游 unit 的 record content digest、ConfirmationReceipt digest、evidence artifact bytes 与逐字 quote/locator。verify 成功只写 pending concept；公共 `kb review` 走 knowledge-base-manager 的 generic unit snapshot/CAS/当前消息真人授权。定义、scope、associations 与 claims 都进入 ConfirmationReceipt content digest。上游 record 内容、确认 receipt 或 evidence 变化会使 concept lifecycle fail-closed 并降回 pending；AI 不可自签。FTS/Obsidian 复用 canonical unit 基建，Obsidian 页显式显示 Definition、Associations、Claims/Evidence。
 
 `dataset` 的 confirmable 四要素固定映射为：`positioning → profile.positioning`、`composition → composition.summary`、`schema_access → access.schema_access`、`suitability_risks → quality.suitability_risks`。四者均由 runtime agent 填写并带 `parse-cache.yaml` / dataset card 的逐字 evidence；脚本不得依据 URL、字段名或规模自动生成判断。`state.profile_status` 使用 analyzer marker（`not_started|awaiting_agent_fill|ready_to_verify|pending_user_confirmation`）。
 
@@ -1021,7 +1056,7 @@ passages_digest: sha256           # passage rows 的确定性摘要
 passage:
   passage_id: sha256
   unit_id: ""
-  kind: paper|repo|dataset|blog|idea|experiment
+  kind: paper|repo|dataset|blog|idea|experiment|concept
   title: ""
   artifact: project-relative-path
   locator: ""                     # heading/paragraph/window 的可复开定位
@@ -1035,6 +1070,31 @@ passage:
 
 Extractor 只遍历 canonical unit containment 内允许的 record、Markdown 与 parse-cache 文本（以及上述 repo 源码树），跳过 raw/output/runtime/Obsidian/journal，拒绝 symlink escape。Markdown 以 heading + paragraph 切分，长段用固定窗口与 overlap；fenced code 外的 standalone Obsidian block ID（`^...`）仅是 locator metadata，跳过该 anchor 行但保留相邻正文与真实行号。显式 build 在同目录完成全新数据库后原子 replace，任何失败保留旧 cache；不得用 external-content/trigger 双表。
 
+### context-pack/v1 <a id="context-pack"></a>
+
+`kb find` 在 private Agent protocol 的 `details.context_pack` 附带只读临时上下文包；不新增公开动词、不重跑检索、不写 canonical KB。候选顺序为同轮 passage 首次命中后补 record 命中，最多 5 unit。每个 unit 分两条 lane：`formal.claims` 只接受唯一 canonical snapshot、顶层 confirmed、当前 ConfirmationReceipt 覆盖的 claim id、当前 evidence snapshot 与完整 locator/quote；`navigation.summary/passages` 必须显式 `confirmation_bound: false`，只供定位，不能作为正式断言。pending/rejected/forged/stale、重复 unit/claim id、缺 locator、绝对路径或控制字符均 fail-closed 排除并记 omission。
+
+```yaml
+schema: context-pack/v1
+query: ""
+limits: {units: 5, claims_per_unit: 3, evidence_refs_per_claim: 2, utf8_bytes: 6000}
+units:
+  - unit_id: p-...
+    kind: paper
+    title: ""
+    formal:
+      confirmation_bound: true
+      claims:
+        - {id: claim-..., text: "", claim_type: evaluation, confirmation_bound: true, evidence_refs: []}
+    navigation:
+      confirmation_bound: false
+      summary: {confirmation_bound: false, text: ""}
+      passages: []
+omissions: {}
+```
+
+总预算按 pretty JSON 的 UTF-8 bytes 保守计算为 6000；每 unit 最多 3 claim、每 claim 2 refs。超预算先删导航 passage/summary，再整条删 claim/quote，绝不截断一条 claim 或逐字 quote。输出前聚合重验 record/evidence/current receipt；context-pack 不能充当 idea/report 的 verification 或 ConfirmationReceipt，下游正式写入仍走各自 owner gate。
+
 Read path 先校验 cache 内部 metadata/source table/passage rows/digests/schema 自洽，再与当前 canonical digest 比较：source artifact 必须是 `kb/units/**` 下规范 project-relative path，digest 必须是 64 位小写 SHA-256，count/line 等数值必须可解析；非法 schema、SQLite/内部表或摘要被改均为 `corrupt`，只有 index revision/canonical corpus 合法变化为 `stale`。cache missing/corrupt/stale 时，使用同一 extractor 做纯内存 lexical fallback，查询绝不写盘。结果至多五条，返回 unit、短原文与 project-relative locator；public projection 不显示 BM25/internal score 或绝对路径。`unicode61` 与共享 CJK/ASCII tokenizer 只承诺 lexical matching，不承诺翻译或 embedding。
 
 ---
@@ -1043,7 +1103,7 @@ Read path 先校验 cache 内部 metadata/source table/passage rows/digests/sche
 
 | artifact | 写入 skill | 读取 skill | 备注 |
 |---|---|---|---|
-| `kb/units/<kind>s/<id>/record.yaml` | source-intake (创建)、`<kind>`-analyst（精修）、knowledge-base-manager（合并/治理） | 全部 | judgement confirmation gate 默认 fail-closed；仅显式 fail-open 诊断模式降级 warning |
+| `kb/units/<kind>s/<id>/record.yaml` | source-intake（四类外部 source 创建）、各 domain owner（精修/综合）、knowledge-base-manager（合并/治理/公共确认） | 全部 | concept 只由 literature-synthesizer verify 创建；judgement confirmation gate 默认 fail-closed |
 | experiment run-log/diagnoses/follow-ups | experiment-workbench | report-author, research-orchestrator | 三文件职责严格分离 |
 | `kb/synthesis/source-search/*.yaml` | source-intake、literature-search | source-intake、research-orchestrator、runtime Agent | staging only；不得冒充 canonical unit |
 | `kb/.runtime/search/passages.sqlite3` | knowledge-base-manager/index builder | kb-cli、runtime Agent | disposable FTS5 cache；query read-only |

@@ -14,6 +14,7 @@ UNIT_KIND_PREFIXES = {
     "blog": "b",
     "idea": "i",
     "experiment": "x",
+    "concept": "c",
 }
 COMPACT_UNIT_ID_MAX_WORDS = 3
 COMPACT_UNIT_ID_MAX_CHARS = 18

@@ -23,7 +23,7 @@ kb --agent-protocol r2.json review \
 ```
 
 - `--apply-snapshot` 传**展示轮协议文件名**（相对 kb/.runtime/），不是 snapshot_token。
-- ref 必须 `kind:id`（paper/repo/dataset/blog/idea/experiment 等）；只能引用展示轮列出的项。
+- ref 必须 `kind:id`（paper/repo/dataset/blog/idea/experiment/concept 等）；只能引用展示轮列出的项。
 - `--reject-ref` / `--defer-ref` 同格式，可与 confirm 混批；reject 可附 `--rejection-reason`。
 - confirm 要求：真实人类署名已配置（AI 署名拒绝；缺署名先走 headless `init --name`）、当前消息授权、非空 `--decision-evidence`。
 - 整批原子：任一项 stale 则零写入。
@@ -42,6 +42,7 @@ kb --agent-protocol r2.json review \
 - evidence_refs 元素：`{source_unit_id, artifact, locator, quote}`（可选 summary）。artifact 为 unit 内相对路径（repo 证据为 repo-root 相对源码文件）。
 - quote 必须**逐字**：双方做 whitespace 归一化（连续空白折一个空格）后子串匹配，大小写敏感；伪造即拒。PDF `page=N` 会窄化到该页——逐字但页错也是 violation。
 - locator：PDF `page=N`/section/para；HTML `section`/`section:<anchor>`；repo 文件 `line=N`。
+- concept：`synthesize.py concept prepare` 冻结至少 3 个 current confirmed unit，生成 `kb/synthesis/concepts/<slug>/concept-fill.yaml`；Agent 填 definition、可选 scope 与每个 association role 的逐字 evidence 后，用 `concept verify --input ...` 写 pending canonical concept。不得让脚本提炼定义或让 AI 自签。
 
 ## 5. idea 证据 corpus
 
@@ -55,14 +56,16 @@ kb --agent-protocol r2.json review \
 | init | knowledge-base-manager/scripts/kb.py + research-config-manager/scripts/config.py | init |
 | status | kb.py + research-orchestrator/scripts/orchestrate.py | current-state；status / prepare-next-selection |
 | next | orchestrate.py | next --json；prepare-/verify-/record-next-selection |
-| find | kb.py | query（公开 ≤5 段带 locator） |
+| find | kb.py | query（公开 ≤5 段带 locator；私有 protocol 附 current-claim context-pack） |
 | add / ingest | source-intake/scripts/intake.py（ingest 自动续接 analyst prepare） | add --kind … --source … |
 | review | kb.py（confirm / promote / review-queue）+ 跨 owner 路由 orchestrate.py / idea.py / method.py / synthesize.py | 见 §2 §3 |
 | reject | kb.py | promote --confirmation-status rejected |
 | recall | skill-evolution-advisor/scripts/learnings.py | recall |
 | resume / undo / restore | kb.py | resume / undo / restore |
 
-无公开动词、自然语言路由的 owner：paper.py（prewarm-cache/complete-note/extract-figures/confirm；screen 仅兼容旧 record）、repo.py（scan-structure/map-capability/confirm）、dataset.py（profile/confirm）、blog.py（complete-note/confirm）、search.py（stage/materialize-selection）、synthesize.py（survey|review|taxonomy prepare|verify、survey confirm|reject、composite）、idea.py（capture/generate/analyze/review/discuss/select/select-best/archive）、method.py（design/confirm-selection/reject-selection）、experiment.py（plan/log-run/follow-up/diagnose/confirm）、report.py（weekly/stage-summary/ppt-materials/writing-materials/outline）、orchestrate.py（init-program/attach-unit/log-decision/add-reporting-event…）、config.py（show/set/eligible-preferences/record-effective/load-effective…）、monitor.py、archive.py、wiki.py、learnings.py/diagnostics.py。
+无公开动词、自然语言路由的 owner：paper.py（prewarm-cache/complete-note/extract-figures/confirm；screen 仅兼容旧 record）、repo.py（scan-structure/map-capability/confirm）、dataset.py（profile/confirm）、blog.py（complete-note/confirm）、search.py（stage/materialize-selection）、synthesize.py（survey|review|taxonomy prepare|verify、survey confirm|reject、concept prepare|verify、composite）、idea.py（capture/generate/analyze/review/discuss/select/select-best/archive）、method.py（design/confirm-selection/reject-selection）、experiment.py（plan/log-run/follow-up/diagnose/confirm）、report.py（weekly/stage-summary/ppt-materials/writing-materials/outline）、orchestrate.py（init-program/attach-unit/log-decision/add-reporting-event…）、config.py（show/set/eligible-preferences/record-effective/load-effective…）、monitor.py、archive.py、wiki.py、learnings.py/diagnostics.py。
+
+`details.context_pack` 是给 Agent 的有界检索材料：只把 `formal.claims` 当库内已确认判断；`navigation.summary/passages` 只能帮助定位原材料。讨论/写作若要落盘，仍由 idea/report/survey owner 重新绑定证据并走各自确认门。
 
 ## 7. 常见失败恢复
 

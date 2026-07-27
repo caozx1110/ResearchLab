@@ -71,7 +71,7 @@ UNIT_ID_FIELDS = {
     "repo_id",
     "repo_ids",
 }
-UNIT_PATH_RE = re.compile(r"(?:^|/)kb/units/(?:papers|repos|datasets|blogs|ideas|experiments)/([^/]+)(?:/|$)")
+UNIT_PATH_RE = re.compile(r"(?:^|/)kb/units/(?:papers|repos|datasets|blogs|ideas|experiments|concepts)/([^/]+)(?:/|$)")
 DECISION_HEADING_RE = re.compile(r"^##\s+(.+)$", flags=re.MULTILINE)
 CONCISE_STYLE_SIGNALS = ("简洁", "concise", "brief")
 DETAILED_STYLE_SIGNALS = ("详细", "detailed", "full")

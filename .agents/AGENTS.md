@@ -82,6 +82,8 @@ For a dropped link, consume `runtime.autonomy.link_autodrive`: `ask_first` means
 - Natural-language requests to keep watching a topic, survey, or existing unit route to `research-monitor`. It stores provider-neutral subscriptions and due facts but installs no daemon, scheduler, cron job, watcher, or plugin. Creating a host automation requires explicit authorization from the current user message. When due, actual discovery still routes through `literature-search`, and research outcomes are Agent-authored with bound evidence.
 - `kb find` returns up to five relevant passages with unit identity and a project-relative locator. Treat its on-disk FTS5 database as disposable runtime cache, never canonical evidence.
 - Querying is read-only. If the cache is missing, corrupt, or stale, use the deterministic in-memory fallback and privately report cache health; do not rebuild during a find request.
+- The private `kb find` protocol may include `context-pack/v1`. Its formal lane contains only current human-confirmed receipt-bound claims with verbatim locators; summaries and passage excerpts are explicitly unconfirmed navigation hints. Never treat the pack itself as a verification or confirmation receipt, and never expose its private structure to the user.
+- Core concepts are canonical `concept` units created only through literature-synthesizer prepare → Agent fill → verify. A concept needs at least three current confirmed source units; definition and association roles carry verbatim evidence and remain pending until the user confirms them through normal `kb review`.
 - Lexical retrieval supports same-language and mixed CJK/ASCII tokens. Do not claim cross-language semantic equivalence; use native Agent reading for semantic or cross-language questions.
 
 ## Recovery and versioning
@@ -118,7 +120,7 @@ Diagnostics are an optional local quality loop, not a governance bypass. Schema,
 ## Layout
 
 - `kb/raw/`: immutable external source bytes; never rewrite them in place.
-- `kb/units/{papers,repos,datasets,blogs,ideas,experiments}/<unit-id>/`: canonical knowledge units.
+- `kb/units/{papers,repos,datasets,blogs,ideas,experiments,concepts}/<unit-id>/`: canonical knowledge units.
 - `kb/units/<kind>/<unit-id>/source/`: immutable source bundle. For paper, HTML, Markdown, and text material it contains `document.md`, `source-map.yaml`, `conversion.yaml`, original material, and optional hash-addressed `assets/`; HTML also contains a normalized offline `archive.html` while raw `source.html` stays byte-preserved.
 - `kb/programs/<program-id>/`: program state, design, experiments, decisions, and reports.
 - `kb/synthesis/`: cross-unit surveys, taxonomy, trends, and gaps.
@@ -146,7 +148,7 @@ Diagnostics are an optional local quality loop, not a governance bypass. Schema,
 - Governance and routing: `knowledge-base-manager`, `research-config-manager`, `source-intake`, `research-orchestrator`
 - Discovery: `literature-search`
 - Ongoing tracking: `research-monitor`
-- Analysis: `paper-analyst`, `repo-analyst`, `dataset-analyst`, `blog-analyst`, `literature-synthesizer`
+- Analysis: `paper-analyst`, `repo-analyst`, `dataset-analyst`, `blog-analyst`, `literature-synthesizer`（survey + concept）
 - Creation and execution: `idea-workbench`, `method-designer`, `experiment-workbench`, `report-author`
 - Navigation and meta: `discussion-archivist`, `wiki-adapter`, `skill-evolution-advisor`; `research-navigator` is an optional projection helper, not a formal product entrypoint
 - Conversational shortcut: `kb-cli`

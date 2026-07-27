@@ -1841,6 +1841,26 @@ def kind_payload_skeleton(kind: str, title: str = "") -> dict[str, Any]:
                 "comparison_context": {},
             },
         }
+    if kind == "concept":
+        return {
+            "concept": {
+                "canonical_name": title,
+                "aliases": [],
+                "definition": "",
+                "scope_note": "",
+            },
+            "associations": [],
+            "anchor": {
+                "as_of": "",
+                "unit_ids": [],
+                "units": [],
+            },
+            "claims": [],
+            "verification": {},
+            "state": {
+                "concept_status": "not_started",
+            },
+        }
     raise SystemExit(f"Unsupported unit kind: {kind}")
 
 
@@ -1933,6 +1953,12 @@ def record_summary(record: dict[str, Any]) -> str:
         goal = payload.get("basic_info", {}).get("goal")
         if goal:
             return str(goal)
+    if record.get("kind") == "concept":
+        concept = payload.get("concept", {})
+        if isinstance(concept, dict):
+            definition = str(concept.get("definition") or "").strip()
+            if definition:
+                return definition
     return ""
 
 
@@ -2100,6 +2126,20 @@ def normalize_record_schema(
     if not isinstance(payload, dict):
         payload = {}
     normalized["payload"] = _deep_fill_missing(payload, kind_payload_skeleton(kind, normalized["title"]))
+    if kind == "concept" and project_root is not None:
+        from .concepts import concept_lifecycle_violations
+
+        lifecycle_violations = concept_lifecycle_violations(project_root, normalized)
+        if lifecycle_violations:
+            verification = normalized["payload"].get("verification")
+            if isinstance(verification, dict):
+                verification["invalidation"] = {
+                    "reason": "concept_anchor_stale",
+                    "violations": lifecycle_violations,
+                }
+            if normalized.get("confirmation_status") == "confirmed":
+                normalized["confirmation_status"] = "pending_user_confirmation"
+            normalized["needs_human_confirmation"] = True
     return normalized
 
 
@@ -2133,6 +2173,8 @@ def _workflow_marker(record: dict[str, Any]) -> str:
         diagnosis = payload.get("diagnosis")
         diagnosis = diagnosis if isinstance(diagnosis, dict) else {}
         return str(diagnosis.get("verification_status") or state.get("diagnosis_status") or "")
+    if kind == "concept":
+        return str(state.get("concept_status") or "")
     return ""
 
 
@@ -2255,7 +2297,7 @@ def record_workflow_state(record: dict[str, Any]) -> str:
             return "awaiting_agent_fill" if needs_gate else "ready_for_review"
         if marker == "not_started":
             return "source_ready" if needs_gate else "ready_for_review"
-        if not marker and str(record.get("kind") or "") in {"paper", "blog", "repo", "dataset", "idea"}:
+        if not marker and str(record.get("kind") or "") in {"paper", "blog", "repo", "dataset", "idea", "concept"}:
             return "source_ready" if needs_gate else "ready_for_review"
         if needs_gate or marker:
             return "awaiting_agent_fill"

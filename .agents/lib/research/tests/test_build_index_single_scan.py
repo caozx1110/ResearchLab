@@ -99,6 +99,7 @@ def test_build_index_output_stays_byte_stable(tmp_path: Path, monkeypatch) -> No
             "  blog: 0\n"
         "  idea: 0\n"
         "  experiment: 0\n"
+        "  concept: 0\n"
     )
     assert md_path.read_text(encoding="utf-8") == (
         "# Research KB Index\n\n"
@@ -113,8 +114,18 @@ def test_build_index_output_stays_byte_stable(tmp_path: Path, monkeypatch) -> No
         "## Ideas\n\n"
         "- 暂无条目\n\n"
         "## Experiments\n\n"
+        "- 暂无条目\n\n"
+        "## Concepts\n\n"
         "- 暂无条目\n"
     )
 
     index = load_yaml(yaml_path, default={})
-    assert index["counts"] == {"paper": 1, "repo": 1, "dataset": 0, "blog": 0, "idea": 0, "experiment": 0}
+    assert index["counts"] == {
+        "paper": 1,
+        "repo": 1,
+        "dataset": 0,
+        "blog": 0,
+        "idea": 0,
+        "experiment": 0,
+        "concept": 0,
+    }
