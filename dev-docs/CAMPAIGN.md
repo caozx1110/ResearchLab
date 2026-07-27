@@ -56,6 +56,12 @@
 - A11 本轮只闭环 init 两问与 `link_autodrive` 消费；“观察纠正→任务尾询问→确认后跨任务生效”仍待后续轮实现/验收，因此 A11 不提前勾选。
 - 运行时/测试/随包契约提交：`ba39491 feat(research): remove paper screening and bind review governance`；公开文档与本台账另作 R1 文档提交。
 
+### R2 知识层（施工中，2026-07-27）
+- 已完成只读架构审计，未调用 shipping skills、未修改真实 `kb/`。概念层确定为 canonical `concept` unit（不是特殊 side YAML），从而复用统一 record snapshot、evidence/ConfirmationReceipt、FTS 与 Obsidian 关系图；source-intake 仍只处理 paper/repo/dataset/blog。
+- 已在蓝图锁定 concept prepare/fill/verify、至少 3 个 current unit、定义/关联判断全部逐字证据并待真人确认，以及 `payload.concept` 与 top-level links 一致性。
+- context-pack 确定附着现有 `kb find` 私有协议，不增加公开动词、不落 canonical 产物；正式 lane 只含 current receipt 覆盖的 confirmed claims，summary/passage 只作未确认导航提示，并实行 5 unit × 3 claims × 2 refs + 6000-byte 原子预算。
+- 下一步：先提交设计 gate，再实现 concept schema/owner/索引/Obsidian/CLI 与 context-pack，跑定向/全量/安装态 A3 验收。
+
 ## 决定记录（含偏离蓝图的理由）
 
 | # | 日期 | 决定 | 理由 |

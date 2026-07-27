@@ -54,6 +54,8 @@
 - **G1 引用管理（缺口，你清单里有）**：paper unit metadata 补 DOI/arXiv id/bibtex 字段（intake 时抓取）；report-author 增加 `bib` 输出（从 program 引用的 paper units 生成去重 .bib，citation key 稳定）；自然语言"把本文引用导出 bib"路由之。约 2–3 天。
 - **G4 实验导入**：`experiment.py import-runs` 接受 wandb export JSON / CSV / 目录约定，批量生成 log-run（fingerprint 机制沿用，来源标 imported）。没有它，实验归档必然退化为手工口述。约 2–3 天。
 - **G3 检索升级**：保 FTS5 词法为底座；新增 **context-pack**：给定问题 → find 检索 + 相关 unit 的 confirmed claims/摘要组装成一个带 locator 的上下文包（喂给 Agent 讨论/写作，直接服务"AI 基于库讨论 idea"与省 token 目标）。跨语言语义检索列为可选后续（不做硬依赖，守零付费承诺）。约 3–5 天。
+
+  **R2 实现锁定（2026-07-27）**：不新增公开动词；现有 `kb find` 在私有 Agent protocol 中附带只读、临时的 `context-pack/v1`。候选顺序复用同一轮 FTS5 / deterministic fallback 检索，不做 query 改写、embedding、总结或相关性判断。正式内容 lane 只搬运 `confirmation_status=confirmed`、当前 ConfirmationReceipt 覆盖且 evidence/record snapshot 仍 current 的 canonical claims，并保留逐字 quote 与 locator；不能把顶层状态字符串当可信证明。摘要与 passage excerpt 因不在 ConfirmationReceipt 的 claim scope 内，只能作为明确标注 `confirmation_bound=false` 的导航提示，绝不冒充已确认结论。固定上限为 5 个 unit、每 unit 3 条 claim、每 claim 2 个 evidence ref，并用 6000 UTF-8 bytes 的保守预算做原子裁剪（claim/quote 不截断）；超限、stale、pending、rejected、重复 id 或不完整 locator 均 fail-closed 排除并计数。输出前聚合重验 snapshot；包不落 canonical KB、不进入 Git/Obsidian/确认门，idea/report 等下游正式产物仍走各自 verify/confirm/current gate。
 - **G5 批量与园艺**：`kb add` 多目标；review 个人档支持一次 >3 条（治理档保 Top-3）；"园艺"自然语言路由（清 pending 积压、重建 stale survey、taxonomy 重整），不加新动词。约 3 天。
 - **G2 论文成稿**：outline → 分节草稿工作流：每节绑定 claims/evidence，Agent 起草、节级确认，导出 LaTeX/Markdown 到 output/（引用 key 与 G1 联动）。约 1 周。
 - **G6 批注回流**：Obsidian inbox/annotations 的人写笔记 → 结构化 pending 条目（signer=你本人，走同一确认门），人写的知识不该比 AI 写的更难入库。约 2–3 天。
@@ -121,6 +123,8 @@ temp/what_i_need.md 已确认过时，原 v1.1 增补整体撤回。以下以用
 ## 11. 四项当面决定（2026-07-26）
 
 1. **概念层 = 一等公民**（G13，≈1 周）：每个核心概念一页——定义（带逐字出处）+ 涉及它的论文/repo/blog + 关联 idea；进入 kb find 索引与 Obsidian 图谱，成为知识库的横向索引。落库 `kb/synthesis/concepts/`（或 units 新 kind，施工时定）；概念判断类内容仍走确认门。
+
+   **R2 实现锁定（2026-07-27）**：选择 canonical unit 新 kind `concept`，落 `kb/units/concepts/<c-id>/record.yaml`，由 `literature-synthesizer` 生成，但不进入只接外部来源的 source-intake。ID 使用 `c-<compact-slug>-<digest>`；`payload.concept` 绑定定义、边界/别名与关联清单，顶层 `links` 仅作它的机械关系投影，两者在 verify 时必须一致。`concept prepare` 只创建 Agent 待填 scaffold，要求显式选择至少 3 个当前、唯一、非 rejected canonical unit；脚本不提炼概念。Agent 填定义/边界/每个关联的角色说明与逐字 evidence；`concept verify` 逐项校验来源 snapshot、quote+locator、关联目标和填充实质，生成 canonical claims + verification receipt，并以 `pending_user_confirmation` 写入 concept unit。定义及关联判断都纳入 ConfirmationReceipt 内容摘要，AI 不可自签；公共 `kb review` 复用 generic unit snapshot/CAS/真人授权合同，内容或证据变化自动失效。只有确认后才作为可信概念判断供 context-pack/正式报告消费；`kb find` 可检索 pending 页但必须显示待确认状态。通用 passage 索引、关系投影与 Obsidian unit page 复用 canonical unit 基建；概念页额外把定义和关联清单显式渲染出来。旧库不迁移。
 2. **代码检索入索引**（G14，≈3–4 天）：repo 源码进 FTS5（文件/符号级），`kb find` 一个入口同时召回论文段落与代码位置，结果带 file:line；与概念页联动（概念→代码实现位置）。
 3. **移除论文快筛**：入库即深读。quick_screen 的"值得细读"判断及其确认整体砍掉；`paper_type`（决定笔记要素集）并入深读 prepare 由 Agent 填写。paper 流程缩短一段，少一次确认打断——本身就是减法项（≈1 天改造）。
 
