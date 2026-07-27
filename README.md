@@ -91,9 +91,9 @@ These are the complete public shortcut surface. Internal script arguments are in
 | `kb doctor` | Check whether the local runtime can support the workspace. |
 | `kb update` | Check for an update and apply it only after explicit authorization. |
 | `kb obsidian update` / `kb obsidian status` | Rebuild or audit the no-plugin Obsidian knowledge-network projection. |
-| `kb add <链接或路径>` | Add a paper, repository, article, or local file as a lightweight source. |
+| `kb add <链接或路径>` | Add lightly and ask once about deep reading, or continue automatically when `link_autodrive` is enabled. |
 | `kb ingest <链接或路径>` | Add a source and prepare its evidence-backed analysis workflow. |
-| `kb review` | Show up to three review-ready judgements; decide in conversation or export a no-plugin Obsidian checkbox sheet and confirm the batch later. |
+| `kb review` | Show the governance-bound review batch (strict 3; personal defaults to 10); decide in conversation or export a no-plugin Obsidian checkbox sheet and confirm the batch later. |
 | `kb status` | Refresh and summarize the current workspace or research program. |
 | `kb next` | Show the current Agent-selected action, or ask the Agent to compare all current candidates when the previous choice is absent or stale. |
 | `kb find <关键词>` | Find relevant passages with their knowledge unit and reopenable locator. |

@@ -9,7 +9,7 @@
 
 ### 功能验收
 - [ ] A1 四类真实来源一链入库+深读骨架，≤2 次交互；5 链批量不逐个盘问
-- [ ] A2 快筛已移除，auto_screen 退役
+- [x] A2 快筛已移除，auto_screen 退役
 - [ ] A3 概念页（提取→确认→定义带逐字出处+关联清单；find/Obsidian 可达）
 - [ ] A4 检索三类（中/英/代码符号带 file:line），常规库 <3s
 - [ ] A5 综述 ≥5 单元（taxonomy/trends/gaps，claim 带证据绑上游，确认后可被报告消费）
@@ -23,7 +23,7 @@
 - [ ] A13 交互章程冷验收（三场景 10 条逐条打分）
 
 ### 质量验收
-- [x] Q1 pytest 全套绿（scratch `.venv`；`2113 passed, 18 skipped`；不得回退新行为凑绿）
+- [x] Q1 pytest 全套绿（scratch `.venv`；R1 `2132 passed, 18 skipped`；不得回退新行为凑绿）
 - [x] Q2 skill_validator 20/20；冷装约 2s；install.sh install+update+uninstall 三态正常
 - [ ] Q3 GOLDEN_SUITE 8 条全过且零机制摸索失败
 - [ ] Q4 单任务规则文本 ≤8k tokens；kb next ≤3 步
@@ -44,10 +44,17 @@
 - 冷启动冒烟：`install.sh --claude` 约 2s；`kb init/help/doctor` 通过，PDF 深读能力诚实报告就绪；update 命中 no-change；uninstall 移除安装器管理文件并保留 scratch `kb/`。
 - 红线检查：仓库根 `kb/` 未修改；未 push/tag/merge。
 
-### R1 流程减法与治理分档（进行中，2026-07-27）
+### R1 流程减法与治理分档（完成，2026-07-27）
 - 已完成三条只读定位：论文 quick-screen/link_autodrive、review/TTL/D1 治理分档、公开根路径/安装器错误尾部；未调用 shipping skills，未修改真实 `kb/`。
 - 已先回写设计 SSOT：paper 统一 deep-read scaffold（类型+类型证据+三分支）、新 workspace personal/旧 workspace 缺省 strict、personal review 默认 10 条且 TTL 1..168h、D1 personal 仅放开四个机械字段、公开输出不显示绝对根路径或原始错误尾部。
-- 施工顺序：paper schema/owner → intake/kb-cli/autodrive/init → governance prefs/review/D1 → public path/installer → 定向与全量回归 → scratch 行为验收 → 分组提交。
+- 论文链：新 paper skeleton 改为 `deep_read.paper_type`；`complete-note prepare` 一次生成类型理由/类型 evidence + 三套五要素分支，verify 拒绝空类型、错误 claim type、未选分支内容和逐字证据不匹配，写 `claim-paper-type` + 所选五条 claim。`kb ingest`、`kb next`、query 提示和 orchestrator 新 unit 路由全部直达 `complete-note`；`screen` 仅供已有 `quick_screen` record 兼容，source-intake 不再准备 analyzer scaffold。
+- 对话链：`kb add` 已消费 `link_autodrive`；`ask_first` 轻量入库并在私有 action 绑定原 source 后只问一次，`auto_deep_read` 复用完整 ingest prepare。init/default/runtime config 中 `auto_screen` 与 screening 配置均退役，旧配置加载/写回会清理。
+- 治理链：新 workspace 明确 `personal`，已有缺失/非法 profile 的 workspace 保持 `strict`；strict 固定 3 条/24h，personal 默认 10 条、可配 4..20 条与 1..168h。profile/limit/TTL 同时冻结进对话 snapshot 与 Obsidian batch，apply 不重读配置；两档都保留真实 signer、当前消息授权、逐字 evidence、content binding、CAS 与跨 owner 原子批量。新增对抗测试证明 personal 可一次应用 4 条，strict 无法把上限抬高。
+- D1/公开面：personal local-only 自动错误记录仅额外保存规范化 category/owner/operation/return_code，自由文本仍脱敏；strict 与所有 export 保持强脱敏。公共 `[root]` banner、cwd 绝对路径、git-init/复盘绝对路径、安装计划/快捷入口路径与同步器原始错误尾部均已移除；R5 将删除的 navigator 仍作为最终 Q6 遗留，不在本轮虚报完成。
+- 回归：Python 3.9 `py_compile`、`bash -n install.sh`、`Validated 20 skills.`；承重定向 `747 passed`，review/prefs/D1 `323 passed`，最终全套 `2132 passed, 18 skipped, 7 warnings`（8m05s）。
+- 安装态 scratch：冷装约 2s；paper ingest 生成统一 `note-fill.yaml` 且无 `screening.yaml`；Agent 填类型+5 要素后 verify 成功并生成 6 条 pending claims；ask-first 只入库一次，auto-deep-read 直接备好同一深读 scaffold。scratch 位于 `/private/tmp/workspace-oss-r1-scratch.PSFm8r`，仓库根 `kb/` 未触碰。
+- A11 本轮只闭环 init 两问与 `link_autodrive` 消费；“观察纠正→任务尾询问→确认后跨任务生效”仍待后续轮实现/验收，因此 A11 不提前勾选。
+- 运行时/测试/随包契约提交：`ba39491 feat(research): remove paper screening and bind review governance`；公开文档与本台账另作 R1 文档提交。
 
 ## 决定记录（含偏离蓝图的理由）
 

@@ -4,9 +4,16 @@ All notable changes to this project will be documented here. The format follows 
 
 ## [Unreleased]
 
+### Changed (R1, 2026-07-27)
+
+- Paper intake no longer creates a quick-screen judgement. New papers go directly to one unified deep-read scaffold where the runtime Agent supplies an evidence-backed `paper_type` and the corresponding five elements; the complete note is verified and confirmed once. Legacy quick-screen records remain read-only compatible.
+- `link_autodrive` now controls `kb add`: `ask_first` performs lightweight intake and asks once whether to continue, while `auto_deep_read` reuses the full `kb ingest` prepare pipeline. The `auto_screen` preference and init option are retired.
+- Fresh workspaces explicitly use the personal governance profile; profile-less existing workspaces remain strict. Strict review stays at 3 items/24 hours, while personal review defaults to 10 items with bounded configurable expiry. The effective review policy is frozen into each one-time snapshot and Obsidian batch without weakening human signatures or evidence.
+- Public owner root banners and installer path/error-tail leaks are removed. Exact owner output remains private to Agent diagnostics; user-visible failures use bounded Chinese classifications and recovery guidance.
+
 ### Added (Wave 1, 2026-07-26)
 
-- 安装与依赖（A1）：ws_sync 失败保留中文首行并透传子进程输出末 8 行；非 git 源给出稳定 token `source-not-git-worktree` 与三条出路指引，`--allow-snapshot-source`（install.sh `--from-snapshot`）支持确定性快照打包；bootstrap 兼容性探测纳入 pymupdf4llm+fitz，缺失时准备 managed venv、pip 失败优雅降级并按 1 小时节流；doctor 公开话术诚实播报 PDF 深读就绪状态，私有协议新增 `pdf_deep_read_ready`。
+- 安装与依赖（A1）：ws_sync 失败保留中文首行；底层尾部只留私有诊断，公开面使用固定中文分类；非 git 源给出三条自然语言出路，内部稳定 token `source-not-git-worktree` 不进入用户面；`--allow-snapshot-source`（install.sh `--from-snapshot`）支持确定性快照打包；bootstrap 兼容性探测纳入 pymupdf4llm+fitz，缺失时准备 managed venv、pip 失败优雅降级并按 1 小时节流；doctor 公开话术诚实播报 PDF 深读就绪状态，私有协议新增 `pdf_deep_read_ready`。
 - 对话面（A2）：`kb help` 每行带动词本名；`kb undo` 点名撤销对象；`kb restore` 无参列出最近 10 个操作（编号可直接恢复）；review apply 失败协议携带 `review_apply_failure`（原因码/合法 confirm-ref 清单/语法建议）；`kb init` 新增自动化档位（`--auto-ingest-mode`）与讨论风格（`--discussion-style`）两问，落 canonical 配置且重复 init 零 churn；config 新增 `set-interaction`，`record-effective` 接受 JSON 文件路径。
 - owner 脚本（A3）：idea verify 静默失败清零（失败带一行中文原因）；`--input` 三级路径解析；corpus 违规列出全部可引用 unit 与扩语料方法；orchestrator `prepare-next-selection` 产出预填决策草稿 `kb/.runtime/portfolio-selection-draft.yaml`；新增 `governance_profile: personal|strict`（缺省 strict 行为逐字不变，personal 档 procedural 决策免偏好回执、脚本兜底硬约束）；monitor 新增只读 `template` 子命令，apply 兼容 YAML。
 - 校验强度（A4）：evidence locator 位置校验（line=N 与 quote 实际行核对、section anchor 存在性与 chunk 内包含校验，失败附实际位置；未知形态告警放行）；`kb reject` 后 `record.status=rejected`；audit 修 INTEGRITY_PROGRAM_LINK 误报；experiment plan/log-run 中文结果行与 checkpoint。
