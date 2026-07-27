@@ -34,7 +34,7 @@ def research_python() -> str:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Thin wiki adapter for core.")
+    parser = argparse.ArgumentParser(description="Private kb-cli wiki helper for core.")
     add_project_root_argument(parser)
     subparsers = parser.add_subparsers(dest="command", required=True)
     query = subparsers.add_parser("query")

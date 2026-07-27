@@ -1,4 +1,0 @@
-interface:
-  display_name: "Blog Analyst"
-  short_description: "Analyze blogs with grounded prepare/verify workflows"
-  default_prompt: "Use $blog-analyst to summarize a blog, judge how trustworthy and reusable it is, and keep judgement artifacts confirmation-gated."

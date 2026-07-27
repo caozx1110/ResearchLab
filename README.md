@@ -10,7 +10,7 @@ workspace/
 └── kb/        # your local research data
 ```
 
-The current candidate is **`0.2.0-rc.7`**. It hardens snapshot-bound confirmation and reporting, root-commit publication guards, recovery/update integrity, provider-neutral research workflows, no-plugin multi-item Obsidian review, and the strictly offline Agent-auditable install path. The complete local suite, focused R17–R26 regressions, all 20 skill validators, and the installed-copy lifecycle pass. Installation and core workflows require no external API Key, paid search quota, commercial database, or paid plugin. Real external-source and Obsidian 1.12.7 Reading-view acceptance remain part of the release gate and have not been rerun for rc.7. The candidate is not stable or GA, has not been tagged or published, and makes no compatibility or support-time SLA promise. Real-source/Obsidian acceptance plus a green hosted Linux/macOS CI matrix remain required before a release tag. See [CHANGELOG.md](CHANGELOG.md) for the current release state.
+The current candidate is **`0.2.0-rc.7`**. It hardens snapshot-bound confirmation and reporting, root-commit publication guards, recovery/update integrity, provider-neutral research workflows, no-plugin multi-item Obsidian review, and the strictly offline Agent-auditable install path. The complete local suite, focused R17–R26 regressions, all 15 discoverable skill validators, and the installed-copy lifecycle pass. Installation and core workflows require no external API Key, paid search quota, commercial database, or paid plugin. Real external-source and Obsidian 1.12.7 Reading-view acceptance remain part of the release gate and have not been rerun for rc.7. The candidate is not stable or GA, has not been tagged or published, and makes no compatibility or support-time SLA promise. Real-source/Obsidian acceptance plus a green hosted Linux/macOS CI matrix remain required before a release tag. See [CHANGELOG.md](CHANGELOG.md) for the current release state.
 
 ## Capability maturity
 
@@ -28,10 +28,7 @@ These labels describe the current scope of each component, not the release statu
 | `source-intake` | beta | Staging, deduplication, immutable source capture, full Markdown reading views with local assets, and retryable failures across heterogeneous sources. |
 | `literature-search` | beta | Agent-led, provider-neutral literature discovery with durable queries, provenance, screening evidence, coverage, budgets, and stop reasons; it does not create canonical units. |
 | `research-monitor` | beta | Provider-neutral subscriptions, due facts, frozen run receipts, retries, and evidence-bound outcomes; no daemon, scheduler, provider, or plugin is bundled. |
-| `paper-analyst` | beta | Evidence-backed prepare and verify gates; the runtime agent supplies the substantive reading. |
-| `repo-analyst` | beta | File-oriented capability-map preparation and evidence verification; the runtime agent supplies code understanding. |
-| `dataset-analyst` | beta | Dataset-card profile preparation and verbatim evidence verification; suitability judgements remain agent-authored and confirmation-gated. |
-| `blog-analyst` | beta | Article preparation and claim verification; the runtime agent supplies interpretation and credibility judgement. |
+| `unit-analyst` | beta | One discoverable entrypoint routes paper, repository, dataset, and blog units to their evidence-bound prepare/verify implementations; the runtime agent supplies substantive understanding and historical owner identities remain stable. |
 | `research-config-manager` | beta | One canonical preference profile is filtered by per-skill disclosure rules, then the Agent selects the task-relevant subset and stores a digest-bound receipt. |
 | `discussion-archivist` | beta | Durable conclusion-level discussion archives with explicit evidence and open questions. |
 | `research-orchestrator` | beta | Program spine, complete survey routing, dashboards and event flow; cross-program next-step choice is Agent-authored over a complete factual snapshot and becomes stale when inputs change. |
@@ -41,8 +38,6 @@ These labels describe the current scope of each component, not the release statu
 | `experiment-workbench` | beta | Typed plans, atomic W&B/CSV batch import, fingerprinted repeat-aware run logs, follow-ups, and confirmation-gated diagnoses are implemented; diagnosis quality remains agent-dependent. |
 | `report-author` | beta | Agent-filled weekly/PPT editorial chains, outlines, stable bibliography export, and seven-section paper drafts consume version-bound claims, evidence, decisions, citations, and figures; composition quality and coverage still require review. |
 | `skill-evolution-advisor` | scaffold | Local learning and diagnostic-issue capture/review exist; automatic skill evolution is intentionally not a supported promise. |
-| `wiki-adapter` | scaffold | A thin compatibility and routing layer, not an independent analysis engine. |
-| `research-navigator` | dev-only | Optional projection helper only; it is not marketed as a formal product entrypoint or a source of truth. |
 
 A score or successful run for one component is evidence only for that component. It must not be extrapolated to a different workflow or the bundle as a whole. In particular, the scoped **stable** rows above do not make this release candidate a stable release.
 

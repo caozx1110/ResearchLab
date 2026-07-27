@@ -118,16 +118,16 @@ ROUTE_HINTS = {
     "find papers": "literature-search",
     "search papers": "literature-search",
     "related papers": "literature-search",
-    "分析论文": "paper-analyst",
-    "analyze paper": "paper-analyst",
-    "论文": "paper-analyst",
-    "paper": "paper-analyst",
-    "仓库": "repo-analyst",
-    "repo": "repo-analyst",
-    "数据集": "dataset-analyst",
-    "dataset": "dataset-analyst",
-    "博客": "blog-analyst",
-    "blog": "blog-analyst",
+    "分析论文": "unit-analyst",
+    "analyze paper": "unit-analyst",
+    "论文": "unit-analyst",
+    "paper": "unit-analyst",
+    "仓库": "unit-analyst",
+    "repo": "unit-analyst",
+    "数据集": "unit-analyst",
+    "dataset": "unit-analyst",
+    "博客": "unit-analyst",
+    "blog": "unit-analyst",
     "文献综述": "literature-synthesizer",
     "系统综述": "literature-synthesizer",
     "横向综述": "literature-synthesizer",
@@ -188,8 +188,8 @@ ROUTE_HINTS = {
     "每月": "research-monitor",
     "monitor": "research-monitor",
     "subscription": "research-monitor",
-    "wiki": "wiki-adapter",
-    "知识库": "wiki-adapter",
+    "wiki": "knowledge-base-manager",
+    "知识库": "knowledge-base-manager",
 }
 
 ROUTE_COMPOSITION_MARKERS = (
@@ -236,8 +236,6 @@ ROUTE_KB_ONLY_SURVEY_MARKERS = (
     "kb only",
 )
 ROUTABLE_OWNER_SKILLS = (
-    "blog-analyst",
-    "dataset-analyst",
     "discussion-archivist",
     "experiment-workbench",
     "idea-workbench",
@@ -245,15 +243,13 @@ ROUTABLE_OWNER_SKILLS = (
     "literature-search",
     "literature-synthesizer",
     "method-designer",
-    "paper-analyst",
-    "repo-analyst",
     "report-author",
     "research-config-manager",
     "research-monitor",
     "research-orchestrator",
     "skill-evolution-advisor",
     "source-intake",
-    "wiki-adapter",
+    "unit-analyst",
 )
 
 COMMAND_PREFIX = "${RESEARCH_PYTHON:-python3}"
@@ -456,10 +452,9 @@ ROOT_AWARE_AUTO_SCRIPTS = {
     ".agents/skills/paper-analyst/scripts/paper.py",
     ".agents/skills/repo-analyst/scripts/repo.py",
     ".agents/skills/research-config-manager/scripts/config.py",
-    ".agents/skills/research-navigator/scripts/navigate.py",
     ".agents/skills/research-orchestrator/scripts/orchestrate.py",
     ".agents/skills/source-intake/scripts/intake.py",
-    ".agents/skills/wiki-adapter/scripts/wiki.py",
+    ".agents/skills/kb-cli/scripts/wiki.py",
 }
 
 
@@ -1318,10 +1313,10 @@ def _portfolio_action_id(*, program_id: str, action_type: str, subject_id: str, 
 
 def _unit_owner_skill(kind: str) -> str:
     return {
-        "paper": "paper-analyst",
-        "repo": "repo-analyst",
-        "dataset": "dataset-analyst",
-        "blog": "blog-analyst",
+        "paper": "unit-analyst",
+        "repo": "unit-analyst",
+        "dataset": "unit-analyst",
+        "blog": "unit-analyst",
         "idea": "idea-workbench",
         "experiment": "experiment-workbench",
     }.get(kind, "knowledge-base-manager")

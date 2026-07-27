@@ -11,6 +11,7 @@ from research.paths import config_root, runtime_preferences_path
 from research.preference_selection import (
     OPERATION_CANONICAL_INPUTS,
     SKILL_ELIGIBILITY,
+    SKILL_IMPLEMENTATION_ALIASES,
     SKILL_NEUTRALITY,
     SKILL_OPERATIONS,
     eligible_preferences,
@@ -25,12 +26,19 @@ from research.preference_selection import (
 def test_every_shipping_skill_has_an_explicit_preference_eligibility_rule() -> None:
     skills_root = SKILLS_ROOT
     shipping = {path.name for path in skills_root.iterdir() if (path / "SKILL.md").is_file()}
+    implementation_identities = {
+        implementation
+        for implementations in SKILL_IMPLEMENTATION_ALIASES.values()
+        for implementation in implementations
+    }
 
-    assert set(SKILL_ELIGIBILITY) == shipping
+    assert set(SKILL_IMPLEMENTATION_ALIASES) <= shipping
+    assert set(SKILL_ELIGIBILITY) == shipping | implementation_identities
     consumers = set(SKILL_OPERATIONS)
     neutral = set(SKILL_NEUTRALITY)
-    assert consumers | neutral == shipping
+    assert consumers | neutral == shipping | implementation_identities
     assert consumers.isdisjoint(neutral)
+    assert implementation_identities <= consumers
     assert all(SKILL_ELIGIBILITY[skill] for skill in consumers)
     assert all(not SKILL_ELIGIBILITY[skill] and SKILL_NEUTRALITY[skill].strip() for skill in neutral)
 

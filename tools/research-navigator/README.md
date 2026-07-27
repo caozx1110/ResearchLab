@@ -1,11 +1,7 @@
----
-name: research-navigator
-description: Optional maintainer/development projection helper for generated pages under `kb/user/`; not a formal product entrypoint, routing target, or source of truth.
----
-
 # Research Navigator
 
-Preference contract: explicitly neutral with an empty eligible catalog because this is a development-only derived projection, not a canonical research consumer.
+Repository-only maintainer/development projection tool. It is not installed,
+discoverable, routable, or represented in the runtime preference registry.
 
 > 协议参考：`.agents/lib/research/SCHEMAS.md#program-files` · `#evidence-first-outputs` · `#ownership` · `#runtime`
 
@@ -26,16 +22,16 @@ This is an optional maintainer/development helper for rebuilding derived pages o
 The following implementation commands are for Agent execution, maintenance, and isolated tests only. Never copy them into user-visible guidance or stdout.
 
 ```bash
-python3 .agents/skills/research-navigator/scripts/navigate.py refresh
-python3 .agents/skills/research-navigator/scripts/navigate.py current-state
-python3 .agents/skills/research-navigator/scripts/navigate.py reading-list
+python3 tools/research-navigator/scripts/navigate.py refresh
+python3 tools/research-navigator/scripts/navigate.py current-state
+python3 tools/research-navigator/scripts/navigate.py reading-list
 
-python3 .agents/skills/research-navigator/scripts/build_kb_browser.py
-python3 .agents/skills/research-navigator/scripts/open_kb_browser.py
-python3 .agents/skills/research-navigator/scripts/open_user_hub.py   # compatibility alias
-python3 .agents/skills/research-navigator/scripts/status_kb_browser.py
-python3 .agents/skills/research-navigator/scripts/stop_kb_browser.py
-python3 .agents/skills/research-navigator/scripts/serve_kb_browser.py
+python3 tools/research-navigator/scripts/build_kb_browser.py
+python3 tools/research-navigator/scripts/open_kb_browser.py
+python3 tools/research-navigator/scripts/open_user_hub.py   # compatibility alias
+python3 tools/research-navigator/scripts/status_kb_browser.py
+python3 tools/research-navigator/scripts/stop_kb_browser.py
+python3 tools/research-navigator/scripts/serve_kb_browser.py
 ```
 
 ## 启动澄清（Agent 用）

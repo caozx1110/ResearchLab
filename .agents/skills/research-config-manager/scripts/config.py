@@ -52,6 +52,7 @@ from research.prefs import (
     effective_review_policy,
 )
 from research.preference_selection import (
+    SKILL_IMPLEMENTATION_ALIASES,
     eligible_preferences,
     record_effective_selection,
     resolve_task_preferences,
@@ -706,7 +707,12 @@ def main() -> int:
                 overrides = diagnostics.get("per_skill", {})
                 if not isinstance(overrides, dict):
                     overrides = {}
-                overrides[str(args.skill).strip().lower()] = args.skill_mode
+                requested_skill = str(args.skill).strip().lower()
+                overrides[requested_skill] = args.skill_mode
+                for implementation_skill in SKILL_IMPLEMENTATION_ALIASES.get(
+                    requested_skill, ()
+                ):
+                    overrides[implementation_skill] = args.skill_mode
                 diagnostics["per_skill"] = overrides
             for argument, key in (
                 (args.token_budget_per_task, "token_budget_per_task"),

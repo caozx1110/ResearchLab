@@ -4,7 +4,7 @@
 
 它不是预装好的知识库。安装后，能力包与研究数据分开保存。AI 负责提取、整理、追踪和汇总；你负责判断、确认和拍板。
 
-当前候选版本是 **`0.2.0-rc.7`**。它加固了快照绑定确认与报告、最外层事务提交门、恢复/更新完整性、provider-neutral 研究流程、无插件多项 review 和严格离线的 Agent 安装计划。完整本地套件、R17–R26 定向回归、20 个 skill validator 与安装副本生命周期均通过；安装和核心流程不要求外部 API Key、付费检索额度、商业数据库或付费插件。真实外部来源和 Obsidian 1.12.7 阅读视图尚未针对 rc.7 重跑，仍在发布门中。它不是 stable 或 GA，也尚未 tag/publish。正式打发布 tag 前，仍须完成真实来源/Obsidian 验收并让 hosted Linux/macOS CI matrix 全绿；当前不承诺兼容性或响应时限 SLA。
+当前候选版本是 **`0.2.0-rc.7`**。它加固了快照绑定确认与报告、最外层事务提交门、恢复/更新完整性、provider-neutral 研究流程、无插件多项 review 和严格离线的 Agent 安装计划。完整本地套件、R17–R26 定向回归、15 个可发现 skill validator 与安装副本生命周期均通过；安装和核心流程不要求外部 API Key、付费检索额度、商业数据库或付费插件。真实外部来源和 Obsidian 1.12.7 阅读视图尚未针对 rc.7 重跑，仍在发布门中。它不是 stable 或 GA，也尚未 tag/publish。正式打发布 tag 前，仍须完成真实来源/Obsidian 验收并让 hosted Linux/macOS CI matrix 全绿；当前不承诺兼容性或响应时限 SLA。
 
 ## 能力成熟度（按组件）
 
@@ -22,10 +22,7 @@
 | `source-intake` | beta | 异构来源的暂存、去重、原始材料留存、完整 Markdown 阅读层和可重试失败。 |
 | `literature-search` | beta | Agent 使用当前可用检索能力做 provider-neutral 文献发现，持久保存查询、来源路径、初筛证据、覆盖、预算和停止依据；会先给你候选清单，只有你明确选中的文献才会入库。 |
 | `research-monitor` | beta | 保存定期关注目标、到期事实、冻结运行与有证据结果；不内置检索源、后台 daemon、定时器或插件。 |
-| `paper-analyst` | beta | 带证据的准备与验证是真实流程；实质阅读由 Agent 完成。 |
-| `repo-analyst` | beta | 能力地图准备与代码证据验证是真实流程；代码理解由 Agent 完成。 |
-| `dataset-analyst` | beta | 数据画像骨架与数据卡逐字证据校验是真实流程；适用性判断由 Agent 完成并等待确认。 |
-| `blog-analyst` | beta | 文章准备与观点证据验证是真实流程；解释和可信度判断由 Agent 完成。 |
+| `unit-analyst` | beta | 一个可发现入口按 paper、repo、dataset、blog 路由到各自 evidence-bound prepare/verify 实现；实质理解仍由 runtime Agent 完成，历史 owner identity 保持不变。 |
 | `research-config-manager` | beta | 总偏好只有一份；规则先限定每个能力可见的最小范围，Agent 再按当前任务选取真正相关的偏好并保存回执。 |
 | `discussion-archivist` | beta | 按结论保存讨论、证据和开放问题。 |
 | `research-orchestrator` | beta | 研究计划主线、完整 survey 路由、看板和事件流已存在；跨计划下一步由 Agent 比较全部事实候选，输入变化后自动要求重选。 |
@@ -35,8 +32,6 @@
 | `experiment-workbench` | beta | 强类型计划、带 fingerprint 的可重复运行记录、follow-up 和确认门控诊断已实现；诊断质量仍依赖 Agent。 |
 | `report-author` | beta | 报告、大纲、稳定引用库与七节论文初稿会消费版本绑定的 claim、evidence、citation 和 figure；成文质量与覆盖仍需复核。 |
 | `skill-evolution-advisor` | scaffold | 本地学习与诊断问题的记录、复核已存在，不承诺自动修改 skill。 |
-| `wiki-adapter` | scaffold | 仅提供轻量兼容与路由，不是独立分析引擎。 |
-| `research-navigator` | dev-only | 仅作为可选投影辅助，不作为正式产品入口或事实源宣传。 |
 
 某个组件的一次成功运行，只能说明对应流程的表现，不能外推到其他流程或整个 bundle。上面范围受限的 **stable** 组件，也不代表当前 release candidate 已成为稳定发布。
 

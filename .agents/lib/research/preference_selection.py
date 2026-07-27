@@ -134,6 +134,9 @@ SKILL_ELIGIBILITY: dict[str, tuple[str, ...]] = {
         "profile.personalization.term_style",
         "learned.*",
     ),
+    # Discoverable facade only. Runtime selection remains bound to the four
+    # historical implementation identities below via explicit alias metadata.
+    "unit-analyst": (),
     "research-monitor": (
         "profile.preferences.language_preference",
         "profile.personalization.research_focus",
@@ -141,9 +144,20 @@ SKILL_ELIGIBILITY: dict[str, tuple[str, ...]] = {
         "runtime.autonomy.auto_execute_scope",
         "learned.*",
     ),
-    "research-navigator": (),
-    "wiki-adapter": (),
     "skill-evolution-advisor": (),
+}
+
+
+# Discoverable facade-to-implementation map. These implementation names are
+# persistent receipt/provenance identities and therefore remain consumer keys
+# even though their directories are no longer discoverable skills.
+SKILL_IMPLEMENTATION_ALIASES: dict[str, tuple[str, ...]] = {
+    "unit-analyst": (
+        "paper-analyst",
+        "repo-analyst",
+        "dataset-analyst",
+        "blog-analyst",
+    ),
 }
 
 
@@ -154,8 +168,7 @@ SKILL_NEUTRALITY: dict[str, str] = {
     "knowledge-base-manager": "Mechanical schema, lifecycle, indexing, and governance owner.",
     "research-config-manager": "Canonical preference fact owner; it does not consume its own soft profile.",
     "discussion-archivist": "Transports caller-authored discussion content without rewriting its meaning.",
-    "research-navigator": "Development-only derived projection with no canonical research judgement.",
-    "wiki-adapter": "Thin router that delegates semantic work to the selected canonical owner.",
+    "unit-analyst": "Discovery facade; preferences are consumed by its kind-specific historical implementation identity.",
     "skill-evolution-advisor": "Governance and redacted diagnostics owner, not a soft research consumer.",
 }
 
@@ -536,7 +549,7 @@ OPERATION_CANONICAL_INPUTS: dict[tuple[str, str], tuple[str, ...]] = {
 
 
 def validate_preference_registry() -> None:
-    """Fail closed when a shipping entry is neither a real consumer nor neutral."""
+    """Fail closed when a discoverable or implementation identity is unclassified."""
     known = set(SKILL_ELIGIBILITY)
     consumers = {skill for skill, operations in SKILL_OPERATIONS.items() if operations}
     neutral = set(SKILL_NEUTRALITY)
@@ -544,6 +557,15 @@ def validate_preference_registry() -> None:
         raise RuntimeError("preference registry must partition every known skill exactly once")
     if set(SKILL_OPERATIONS) != consumers:
         raise RuntimeError("preference consumers must declare at least one real operation")
+    for facade, implementations in SKILL_IMPLEMENTATION_ALIASES.items():
+        if facade not in neutral or not implementations:
+            raise RuntimeError(f"preference facade alias is invalid: {facade}")
+        if any(implementation not in consumers for implementation in implementations):
+            raise RuntimeError(
+                f"preference facade aliases must target real consumer identities: {facade}"
+            )
+        if len(implementations) != len(set(implementations)):
+            raise RuntimeError(f"preference facade aliases must be unique: {facade}")
     for skill in consumers:
         if not SKILL_ELIGIBILITY[skill]:
             raise RuntimeError(f"preference consumer has an empty eligible catalog: {skill}")
@@ -1524,6 +1546,7 @@ def selection_binding(effective: Mapping[str, object]) -> dict[str, object]:
 __all__ = [
     "SELECTION_SCHEMA",
     "SKILL_ELIGIBILITY",
+    "SKILL_IMPLEMENTATION_ALIASES",
     "SKILL_NEUTRALITY",
     "SKILL_OPERATIONS",
     "OPERATION_ELIGIBILITY",

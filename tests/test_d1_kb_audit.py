@@ -315,7 +315,7 @@ def test_owner_audit_commands_are_agent_only_json_and_warn_is_success(
     assert str(root) not in kb_output
 
     wiki_owner = _load_script(
-        ".agents/skills/wiki-adapter/scripts/wiki.py",
+        ".agents/skills/kb-cli/scripts/wiki.py",
         "d1_wiki_owner",
     )
     monkeypatch.setattr(sys, "argv", ["wiki.py", "--root", str(root), "audit"])

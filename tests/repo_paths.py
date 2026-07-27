@@ -20,3 +20,4 @@ REPO_ROOT = _discover_repo_root(Path(__file__).resolve().parent)
 AGENTS_ROOT = REPO_ROOT / ".agents"
 RESEARCH_LIB_ROOT = AGENTS_ROOT / "lib" / "research"
 SKILLS_ROOT = AGENTS_ROOT / "skills"
+MAINTAINER_NAVIGATOR_ROOT = REPO_ROOT / "tools" / "research-navigator"

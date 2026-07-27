@@ -1,4 +1,0 @@
-interface:
-  display_name: "Dataset Analyst"
-  short_description: "Analyze datasets with evidence-backed profiles"
-  default_prompt: "Use $dataset-analyst to profile a dataset, verify its card evidence, and keep judgements confirmation-gated."

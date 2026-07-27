@@ -6,7 +6,7 @@ import sys
 from contextlib import contextmanager
 from pathlib import Path
 
-from repo_paths import REPO_ROOT
+from repo_paths import MAINTAINER_NAVIGATOR_ROOT, REPO_ROOT
 
 import pytest
 
@@ -21,7 +21,11 @@ def _project_root() -> Path:
 
 def _load_script(skill: str, script_name: str, module_name: str):
     root = _project_root()
-    script = root / ".agents" / "skills" / skill / "scripts" / script_name
+    script = (
+        MAINTAINER_NAVIGATOR_ROOT / "scripts" / script_name
+        if skill == "research-navigator"
+        else root / ".agents" / "skills" / skill / "scripts" / script_name
+    )
     spec = importlib.util.spec_from_file_location(module_name, script)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)

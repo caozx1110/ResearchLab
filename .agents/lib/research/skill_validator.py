@@ -1,8 +1,9 @@
-"""Quick structural validation for bundled research skills.
+"""Structural validation for discoverable bundled research skills.
 
 The OpenAI skill metadata specification defines ``short_description`` as a
 25–64 character UI blurb. This validator enforces that range along with the
-required skill frontmatter, interface fields, and discoverable script paths.
+required skill frontmatter, interface fields, discoverable script paths, and
+the generated-metadata contract rooted at ``skills/metadata.yaml``.
 """
 
 from __future__ import annotations
@@ -22,6 +23,9 @@ REQUIRED_INTERFACE_FIELDS = (
     "short_description",
     "default_prompt",
 )
+METADATA_SCHEMA = "research-skill-metadata/v1"
+METADATA_FILENAME = "metadata.yaml"
+SKILL_NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]*")
 SCRIPT_REFERENCE_RE = re.compile(
     r"(?:(?:\.agents/skills/)?(?P<skill>[a-z0-9-]+)/)?"
     r"(?P<path>scripts/(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+)"
@@ -74,7 +78,75 @@ def _required_string(
     return value
 
 
-def validate_skill(skill_dir: Path) -> list[str]:
+def render_openai_metadata(payload: dict[str, object]) -> str:
+    """Render one generated ``agents/openai.yaml`` deterministically."""
+    return yaml.safe_dump(
+        payload,
+        allow_unicode=True,
+        default_flow_style=False,
+        sort_keys=False,
+        width=120,
+    )
+
+
+def load_metadata_catalog(
+    skills_root: Path, errors: list[str]
+) -> dict[str, dict[str, object]]:
+    """Load and minimally validate the checked-in metadata SSOT."""
+    path = skills_root / METADATA_FILENAME
+    if not path.is_file():
+        errors.append(f"{path}: missing metadata SSOT")
+        return {}
+    parsed = _load_yaml(path, str(path), errors)
+    if not isinstance(parsed, dict):
+        if parsed is not None:
+            errors.append(f"{path}: top level must be a mapping")
+        return {}
+    if parsed.get("schema") != METADATA_SCHEMA:
+        errors.append(f"{path}: schema must be {METADATA_SCHEMA!r}")
+    raw_skills = parsed.get("skills")
+    if not isinstance(raw_skills, dict):
+        errors.append(f"{path}: skills must be a mapping")
+        return {}
+    catalog: dict[str, dict[str, object]] = {}
+    for raw_name, raw_payload in raw_skills.items():
+        name = str(raw_name or "")
+        if not SKILL_NAME_RE.fullmatch(name):
+            errors.append(f"{path}: invalid skill name in catalog: {raw_name!r}")
+            continue
+        if not isinstance(raw_payload, dict):
+            errors.append(f"{path}: skills.{name} must be a mapping")
+            continue
+        catalog[name] = raw_payload
+    return catalog
+
+
+def generated_metadata_outputs(
+    skills_root: Path, errors: list[str]
+) -> dict[Path, str]:
+    """Return the exact generated files after closing catalog/discovery sets."""
+    catalog = load_metadata_catalog(skills_root, errors)
+    discoverable = {path.name for path in skill_directories(skills_root)}
+    configured = set(catalog)
+    missing = sorted(discoverable - configured)
+    extra = sorted(configured - discoverable)
+    if missing:
+        errors.append(
+            f"{skills_root / METADATA_FILENAME}: missing discoverable skill metadata: {missing}"
+        )
+    if extra:
+        errors.append(
+            f"{skills_root / METADATA_FILENAME}: metadata exists for non-discoverable skills: {extra}"
+        )
+    return {
+        skills_root / name / "agents" / "openai.yaml": render_openai_metadata(catalog[name])
+        for name in sorted(discoverable & configured)
+    }
+
+
+def validate_skill(
+    skill_dir: Path, *, expected_openai_text: Optional[str] = None
+) -> list[str]:
     errors: list[str] = []
     skill_md = skill_dir / "SKILL.md"
     openai_yaml = skill_dir / "agents" / "openai.yaml"
@@ -90,6 +162,17 @@ def validate_skill(skill_dir: Path) -> list[str]:
     if not openai_yaml.is_file():
         errors.append(f"{openai_yaml}: missing agents/openai.yaml")
     else:
+        if expected_openai_text is not None:
+            try:
+                actual_openai_text = openai_yaml.read_text(encoding="utf-8")
+            except OSError as exc:
+                errors.append(f"{openai_yaml}: cannot read file: {exc}")
+            else:
+                if actual_openai_text != expected_openai_text:
+                    errors.append(
+                        f"{openai_yaml}: generated metadata drift; "
+                        "run tools/generate_skill_metadata.py"
+                    )
         parsed = _load_yaml(openai_yaml, str(openai_yaml), errors)
         if parsed is not None:
             if not isinstance(parsed, dict):
@@ -134,14 +217,30 @@ def validate_skill(skill_dir: Path) -> list[str]:
 
 def skill_directories(skills_root: Path) -> list[Path]:
     return sorted(
-        path for path in skills_root.iterdir() if path.is_dir() and not path.name.startswith(".")
+        path
+        for path in skills_root.iterdir()
+        if path.is_dir()
+        and not path.name.startswith(".")
+        and (path / "SKILL.md").is_file()
     )
 
 
 def validate_skills(skills_root: Path) -> list[str]:
     errors: list[str] = []
+    generated = generated_metadata_outputs(skills_root, errors)
+    discoverable = {path.resolve() for path in skill_directories(skills_root)}
+    for openai_yaml in sorted(skills_root.glob("*/agents/openai.yaml")):
+        if openai_yaml.parent.parent.resolve() not in discoverable:
+            errors.append(
+                f"{openai_yaml}: orphan metadata for a non-discoverable skill directory"
+            )
     for skill_dir in skill_directories(skills_root):
-        errors.extend(validate_skill(skill_dir))
+        errors.extend(
+            validate_skill(
+                skill_dir,
+                expected_openai_text=generated.get(skill_dir / "agents" / "openai.yaml"),
+            )
+        )
     return errors
 
 

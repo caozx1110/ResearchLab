@@ -6,7 +6,7 @@ import importlib.util
 import json
 from pathlib import Path
 
-from repo_paths import REPO_ROOT
+from repo_paths import MAINTAINER_NAVIGATOR_ROOT, REPO_ROOT
 import sys
 
 import pytest
@@ -24,7 +24,11 @@ def _project_root() -> Path:
 
 
 def _load_script(skill: str, script_name: str, module_name: str):
-    script = _project_root() / ".agents" / "skills" / skill / "scripts" / script_name
+    script = (
+        MAINTAINER_NAVIGATOR_ROOT / "scripts" / script_name
+        if skill == "research-navigator"
+        else _project_root() / ".agents" / "skills" / skill / "scripts" / script_name
+    )
     spec = importlib.util.spec_from_file_location(module_name, script)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -60,7 +64,7 @@ def test_cross_track_compatibility_shims_are_absent() -> None:
             "except ImportError",
             "def mutation_transaction",
         ),
-        root / ".agents" / "skills" / "research-navigator" / "scripts" / "navigate.py": (
+        MAINTAINER_NAVIGATOR_ROOT / "scripts" / "navigate.py": (
             "getattr(",
             "journaled_op",
             "navigation_transaction",

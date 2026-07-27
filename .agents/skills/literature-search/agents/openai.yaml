@@ -1,4 +1,5 @@
 interface:
-  display_name: "Literature Search"
-  short_description: "Agent-led, reviewable literature discovery"
-  default_prompt: "Use $literature-search to search for relevant papers with the tools currently available, preserve query and candidate provenance, and stage the bounded results for review."
+  display_name: Literature Search
+  short_description: Agent-led, reviewable literature discovery
+  default_prompt: Use $literature-search to search for relevant papers with the tools currently available, preserve query
+    and candidate provenance, and stage the bounded results for review.

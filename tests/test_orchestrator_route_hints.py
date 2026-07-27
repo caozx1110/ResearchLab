@@ -90,11 +90,11 @@ def test_ambiguous_composed_and_negated_tasks_require_agent_routing() -> None:
     cases = {
         "找论文，然后逐篇分析并写综述": {
             "literature-search",
-            "paper-analyst",
+            "unit-analyst",
             "literature-synthesizer",
         },
-        "不要检索，直接分析这篇论文": {"paper-analyst"},
-        "把新论文入库并分析": {"source-intake", "paper-analyst"},
+        "不要检索，直接分析这篇论文": {"unit-analyst"},
+        "把新论文入库并分析": {"source-intake", "unit-analyst"},
         "每两周检查一次这个 survey 是否过时": {"research-monitor", "literature-synthesizer"},
     }
     for task, expected_owners in cases.items():
@@ -123,7 +123,7 @@ def test_agent_route_decision_must_follow_snapshot_and_dependency_order() -> Non
             },
             {
                 "step_id": "analyze",
-                "owner_skill": "paper-analyst",
+                "owner_skill": "unit-analyst",
                 "instruction": "Analyze the selected papers with evidence.",
                 "depends_on": ["search"],
                 "governance_gate": "human-decision",
@@ -133,7 +133,7 @@ def test_agent_route_decision_must_follow_snapshot_and_dependency_order() -> Non
 
     normalized = module.validate_route_decision(decision, snapshot)
     assert [item["order"] for item in normalized["ordered_steps"]] == [1, 2]
-    assert normalized["owner_skills"] == ["literature-search", "paper-analyst"]
+    assert normalized["owner_skills"] == ["literature-search", "unit-analyst"]
 
     stale = {**decision, "task_digest": "0" * 64}
     with pytest.raises(SystemExit, match="stale"):
@@ -154,7 +154,7 @@ def test_agent_route_decision_can_recover_owners_missed_by_keyword_hints() -> No
             ["research-monitor", "literature-search", "literature-synthesizer"],
         ),
         ("不要综述，只找三篇", ["literature-search"]),
-        ("基于 repo 写周报", ["repo-analyst", "report-author"]),
+        ("基于 repo 写周报", ["unit-analyst", "report-author"]),
     )
     for task, owners in cases:
         snapshot = module.route_candidate_snapshot(task)

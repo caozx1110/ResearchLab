@@ -167,7 +167,7 @@ def test_method_fault_restores_all_command_outputs(tmp_path: Path, monkeypatch) 
 
 
 def test_wiki_fault_restores_query_note(tmp_path: Path, monkeypatch) -> None:
-    module = _load(".agents/skills/wiki-adapter/scripts/wiki.py", "r1_wiki_fault")
+    module = _load(".agents/skills/kb-cli/scripts/wiki.py", "r1_wiki_fault")
     root = tmp_path / "workspace"
     _workspace(root)
     _argv(monkeypatch, "wiki.py", "--root", str(root), "query", "--question", "What is recovery?")
@@ -178,7 +178,7 @@ def test_wiki_fault_restores_query_note(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_wiki_lint_is_byte_identical_on_fresh_root(tmp_path: Path, monkeypatch) -> None:
-    module = _load(".agents/skills/wiki-adapter/scripts/wiki.py", "r1_wiki_read")
+    module = _load(".agents/skills/kb-cli/scripts/wiki.py", "r1_wiki_read")
     root = tmp_path / "fresh"
     before = _tree_snapshot(root)
     _argv(monkeypatch, "wiki.py", "--root", str(root), "lint")

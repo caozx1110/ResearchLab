@@ -14,7 +14,7 @@ Use this skill to anchor work to a concrete research program.
 1. Create or reopen a program under `kb/programs/<program-id>/`.
 2. Keep `state.yaml` aligned with workflow counts and selected context.
 3. Persist `workflow/open-questions.yaml`, `workflow/evidence-requests.yaml`, `workflow/decision-log.md`, and `workflow/reporting-events.yaml`.
-4. Treat route keywords as factual hints only. For ambiguous, negated, or multi-step requests, the runtime Agent authors an ordered route over the complete formal owner catalog; the script validates formal membership and dependency order but never limits the Agent to keyword hits or decides the workflow semantically. Maintainer-only `research-navigator` and the `kb-cli` adapter are not routable owners.
+4. Treat route keywords as factual hints only. For ambiguous, negated, or multi-step requests, the runtime Agent authors an ordered route over the complete formal owner catalog; the script validates formal membership and dependency order but never limits the Agent to keyword hits or decides the workflow semantically. The `kb-cli` adapter is not a routable owner; source-unit analysis routes to the `unit-analyst` facade while its internal implementation keeps the historical owner identity.
 5. Keep user constraints and resource boundaries visible in the program state.
 6. Program writes are serialized per program; `attach-unit` also backfills the unit-side `program_ids`.
 7. Treat cross-program planning as an Agent judgement over a complete factual candidate snapshot. Scripts enumerate and validate; they never assign semantic value scores or choose a winner.

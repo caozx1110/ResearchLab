@@ -15,7 +15,7 @@ description: 把 paper / repo / dataset / blog source 先做 staging，再做去
 2. review 已有 source-search staging，并只把用户在当前对话中明确接受的候选 materialize 为 canonical unit。
 3. 去重、轻量 record 创建、topic / tag / pool 初始归档。
    paper 同时从已归档 HTML/PDF、staged DOI/arXiv identity 与 source URI 机械合并 citation metadata，并写稳定 citation key；不联网补全、不保存 raw BibTeX，强 identity 冲突零写入拒绝。
-4. 把深分析路由给 `paper-analyst`、`repo-analyst`、`dataset-analyst`、`blog-analyst`。
+4. 把 paper / repo / dataset / blog 的深分析统一路由给 `unit-analyst`；facade 再按 kind 调用保持历史身份的内部 implementation。
 5. 新建 unit 默认使用紧凑型 id，例如 `p-example-bf86ee46`、`r-example-dadda683`。
 6. 所有 kind 的 add 都先冻结 workspace 外的 exact source/parse snapshot，再解析当前 `source-intake:add` preference。需要 soft preference 时，Agent 先通过私有 `prepare-add` 取得 opaque token 与闭合 canonical context，生成 receipt 后用同一 token 提升；没有 receipt 时自动只执行 hard-only fallback。token、JSON、flags 和内部路径绝不展示给用户。只有明确选入的 `runtime.paper` 才能改变 paper 解析预热等机械行为；record 只保存 task/selection/hard-value digests，不复制偏好原值。receipt、授权、containment 或解析失败对 workspace 零写入，外部 snapshot 必须清理。source-intake 不准备或判断论文内容；`kb ingest` 在 intake 提交后直接进入 paper 的统一 deep-read prepare，由 runtime Agent 填 `paper_type`、类型证据和对应五要素后一次 verify。
 

@@ -11,7 +11,7 @@ description: 由 runtime Agent 使用当前可用的搜索、浏览或 connector
 
 - “找几篇相关论文”“补相关工作”“围绕问题搜文献”默认走 `exploratory`，明确这是有界发现，不声称完整。
 - 只有用户明确要求系统综述、系统检索或可复现检索时才进入系统模式。当前工具不能固定来源、查询式、日期、结果深度和筛选流程时标 `bounded-systematic`；全部可复现时才标 `systematic`。
-- 本 skill 只生成和筛选候选。用户接受的候选交 `source-intake`；单篇全文理解交 `paper-analyst`；跨论文 survey/taxonomy/trend/gap 交 `literature-synthesizer`。
+- 本 skill 只生成和筛选候选。用户接受的候选交 `source-intake`；单篇全文理解交 `unit-analyst`；跨论文 survey/taxonomy/trend/gap 交 `literature-synthesizer`。
 
 ## 工作流
 

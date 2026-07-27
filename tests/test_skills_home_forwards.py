@@ -24,7 +24,7 @@ def _load_script_module(skill: str, script_name: str, module_name: str):
 
 
 def test_wiki_add_forward_uses_skills_home_without_workspace_agents(tmp_path: Path, monkeypatch) -> None:
-    wiki = _load_script_module("wiki-adapter", "wiki.py", "wiki_adapter_script_for_skills_home_forward_test")
+    wiki = _load_script_module("kb-cli", "wiki.py", "wiki_adapter_script_for_skills_home_forward_test")
     captured_argv: list[str] = []
     kb_workspace = tmp_path / "kb-workspace"
     kb_workspace.mkdir()

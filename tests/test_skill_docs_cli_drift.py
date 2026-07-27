@@ -9,15 +9,18 @@ from repo_paths import REPO_ROOT
 
 SKILL_SCRIPTS = {
     "discussion-archivist": "archive.py",
-    "dataset-analyst": "dataset.py",
     "experiment-workbench": "experiment.py",
     "idea-workbench": "idea.py",
     "knowledge-base-manager": "kb.py",
     "method-designer": "method.py",
-    "paper-analyst": "paper.py",
     "research-config-manager": "config.py",
     "research-orchestrator": "orchestrate.py",
     "skill-evolution-advisor": "create_retrospective.py",
+}
+
+IMPLEMENTATION_DOCS = {
+    "dataset-analyst": ("dataset.py", "unit-analyst"),
+    "paper-analyst": ("paper.py", "unit-analyst"),
 }
 
 
@@ -57,8 +60,8 @@ def _argparse_subcommands(skill: str, script_name: str) -> set[str]:
     return subcommands
 
 
-def _documented_subcommands(skill: str, script_name: str) -> set[str]:
-    text = (_project_root() / ".agents" / "skills" / skill / "SKILL.md").read_text(encoding="utf-8")
+def _documented_subcommands(skill: str, script_name: str, *, doc_skill: str | None = None) -> set[str]:
+    text = (_project_root() / ".agents" / "skills" / (doc_skill or skill) / "SKILL.md").read_text(encoding="utf-8")
     pattern = re.compile(rf"scripts/{re.escape(script_name)}\s+([^\s\\]+)")
     return {match.group(1) for match in pattern.finditer(text) if not match.group(1).startswith("-")}
 
@@ -66,5 +69,9 @@ def _documented_subcommands(skill: str, script_name: str) -> set[str]:
 def test_skill_docs_only_reference_argparse_subcommands() -> None:
     for skill, script_name in SKILL_SCRIPTS.items():
         documented = _documented_subcommands(skill, script_name)
+        argparse_subcommands = _argparse_subcommands(skill, script_name)
+        assert documented <= argparse_subcommands, f"{skill}: {sorted(documented - argparse_subcommands)}"
+    for skill, (script_name, doc_skill) in IMPLEMENTATION_DOCS.items():
+        documented = _documented_subcommands(skill, script_name, doc_skill=doc_skill)
         argparse_subcommands = _argparse_subcommands(skill, script_name)
         assert documented <= argparse_subcommands, f"{skill}: {sorted(documented - argparse_subcommands)}"

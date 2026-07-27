@@ -64,10 +64,7 @@ CAPABILITY_MATURITY = {
     "source-intake": "beta",
     "literature-search": "beta",
     "research-monitor": "beta",
-    "paper-analyst": "beta",
-    "repo-analyst": "beta",
-    "dataset-analyst": "beta",
-    "blog-analyst": "beta",
+    "unit-analyst": "beta",
     "research-config-manager": "beta",
     "discussion-archivist": "beta",
     "research-orchestrator": "beta",
@@ -77,8 +74,6 @@ CAPABILITY_MATURITY = {
     "experiment-workbench": "beta",
     "report-author": "beta",
     "skill-evolution-advisor": "scaffold",
-    "wiki-adapter": "scaffold",
-    "research-navigator": "dev-only",
 }
 
 

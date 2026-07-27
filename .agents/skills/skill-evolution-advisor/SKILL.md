@@ -40,7 +40,7 @@ python3 .agents/skills/skill-evolution-advisor/scripts/learnings.py promote --id
 Deep retrospective:
 
 ```bash
-python3 .agents/skills/skill-evolution-advisor/scripts/create_retrospective.py --slug routing-gap --skill paper-analyst --target-skill research-orchestrator --task-summary "..." --observed-issue "..." --suggestion "..." --stdout-prompt --root kb/memory/skill-evolution
+python3 .agents/skills/skill-evolution-advisor/scripts/create_retrospective.py --slug routing-gap --skill unit-analyst --target-skill research-orchestrator --task-summary "..." --observed-issue "..." --suggestion "..." --stdout-prompt --root kb/memory/skill-evolution
 ```
 
 默认落盘路径为 `kb/memory/skill-evolution/retrospectives/<timestamp>-<slug>.md`；`--stdout-prompt` 会在写入后同时打印可交给后续 agent 的改进 prompt。
@@ -48,8 +48,8 @@ python3 .agents/skills/skill-evolution-advisor/scripts/create_retrospective.py -
 Local diagnostics (owner-only; never paste these commands into user-visible output):
 
 ```bash
-${RESEARCH_PYTHON:-python3} .agents/skills/skill-evolution-advisor/scripts/diagnostics.py policy --skill paper-analyst
-${RESEARCH_PYTHON:-python3} .agents/skills/skill-evolution-advisor/scripts/diagnostics.py record --category skill-defect --severity medium --skill paper-analyst --summary "short safe summary" --source user
+${RESEARCH_PYTHON:-python3} .agents/skills/skill-evolution-advisor/scripts/diagnostics.py policy --skill unit-analyst
+${RESEARCH_PYTHON:-python3} .agents/skills/skill-evolution-advisor/scripts/diagnostics.py record --category skill-defect --severity medium --skill unit-analyst --summary "short safe summary" --source user
 ${RESEARCH_PYTHON:-python3} .agents/skills/skill-evolution-advisor/scripts/diagnostics.py list --status pending
 ${RESEARCH_PYTHON:-python3} .agents/skills/skill-evolution-advisor/scripts/diagnostics.py review --id diag-... --status resolved
 ${RESEARCH_PYTHON:-python3} .agents/skills/skill-evolution-advisor/scripts/diagnostics.py export-preview --authorized

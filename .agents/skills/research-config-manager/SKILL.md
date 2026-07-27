@@ -47,7 +47,7 @@ Agent 必须遵循 init private protocol 的逐字段 input mapping，不自行�
 
 ## 诊断配置交互
 
-普通用户无需记命令。Agent 接到“开启开发者诊断”“只在出错时记录”“关闭 paper-analyst 诊断”等自然语言请求后，私下写 runtime preference，再用自然语言确认 effective mode。诊断只控制额外记录与复盘，绝不能关闭 evidence、confirmation、schema、containment 或 recovery 门。
+普通用户无需记命令。Agent 接到“开启开发者诊断”“只在出错时记录”“关闭 unit-analyst 诊断”等自然语言请求后，私下写 runtime preference，再用自然语言确认 effective mode。`unit-analyst` 的设置会机械同步到四个历史 implementation identity；诊断只控制额外记录与复盘，绝不能关闭 evidence、confirmation、schema、containment 或 recovery 门。
 
 - `off`：不自动记录、不做 Agent 复盘；用户明确要求“记下这个问题”时仍记录。
 - `errors-only`：只做确定性失败捕获，不调用 LLM。
@@ -72,7 +72,7 @@ ${RESEARCH_PYTHON:-python3} .agents/skills/research-config-manager/scripts/confi
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-config-manager/scripts/config.py set-runtime-pref --section versioning --key auto_commit_mode --value milestone
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-config-manager/scripts/config.py set-diagnostics --mode errors-only
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-config-manager/scripts/config.py set-diagnostics --mode developer --token-budget-per-task 2000 --max-issues-per-task 20
-${RESEARCH_PYTHON:-python3} .agents/skills/research-config-manager/scripts/config.py set-diagnostics --skill paper-analyst --skill-mode off
+${RESEARCH_PYTHON:-python3} .agents/skills/research-config-manager/scripts/config.py set-diagnostics --skill unit-analyst --skill-mode off
 ```
 
 ## 启动澄清（Agent 用）

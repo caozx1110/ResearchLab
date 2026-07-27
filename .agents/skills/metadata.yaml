@@ -1,0 +1,79 @@
+schema: research-skill-metadata/v1
+skills:
+  discussion-archivist:
+    interface:
+      display_name: Discussion Archivist
+      short_description: Archive route discussions into durable program notes in core
+      default_prompt: Use $discussion-archivist to turn an important research discussion into a durable note with conclusion, tradeoffs, open questions, and next actions.
+  experiment-workbench:
+    interface:
+      display_name: Experiment Workbench
+      short_description: Manage experiment plans, runs, follow-ups, and diagnoses
+      default_prompt: Use $experiment-workbench to create an experiment plan, log classified runs, track follow-ups, analyze failures by category, and keep diagnoses pending confirmation by default.
+  idea-workbench:
+    interface:
+      display_name: Idea Workbench
+      short_description: 负责 idea generate、review、review-assist、select-best 与多候选管理
+      default_prompt: 使用 $idea-workbench 捕获或生成多个候选 idea，做 novelty/feasibility/review-assist，并只在显式要求时执行 select-best。
+  kb-cli:
+    interface:
+      display_name: kb CLI
+      short_description: 统一入口转发 core 研究系统的高频命令与查询请求
+      default_prompt: 使用 $kb-cli 运行 kb help/init/doctor/status/next/find/recall 等快捷命令，并把请求转发到对应 skill 脚本。
+  knowledge-base-manager:
+    interface:
+      display_name: Knowledge Base Manager
+      short_description: 维护 core schema、index、taxonomy/topic/pool 与 links
+      default_prompt: 使用 $knowledge-base-manager 初始化或刷新 core knowledge-unit schema，重建索引，并治理 topics、tags、candidate pools 与 links。
+  literature-search:
+    interface:
+      display_name: Literature Search
+      short_description: Agent-led, reviewable literature discovery
+      default_prompt: Use $literature-search to search for relevant papers with the tools currently available, preserve query and candidate provenance, and stage the bounded results for review.
+  literature-synthesizer:
+    interface:
+      display_name: Literature Synthesizer
+      short_description: 负责 survey、taxonomy、topic/pool 级综合整理
+      default_prompt: 使用 $literature-synthesizer 基于当前 units 按 query、topic、tag 或 candidate pool 生成 survey、review 与 taxonomy 视图。
+  method-designer:
+    interface:
+      display_name: Method Designer
+      short_description: Design selected ideas into methods and experiment matrices
+      default_prompt: Use $method-designer to convert a selected idea unit into a concrete method note, repo-choice record, interface contract, and expanded experiment matrix without starting execution yet.
+  report-author:
+    interface:
+      display_name: Report Author
+      short_description: Create grounded reports, summaries, and presentation materials
+      default_prompt: Use $report-author to turn a program's reporting-events and linked evidence into standalone advisor-facing weekly reports, stage summaries, and PPT-ready material.
+  research-config-manager:
+    interface:
+      display_name: Research Config Manager
+      short_description: 维护 core 配置、资源画像、taxonomy seed 与 pool policy
+      default_prompt: 使用 $research-config-manager 初始化或更新 kb/config 下的研究设置、用户 profile、taxonomy seed、candidate pool policy 与资源约束。
+  research-monitor:
+    interface:
+      display_name: Research Monitor
+      short_description: Track due research reviews without choosing conclusions
+      default_prompt: Use $research-monitor to maintain an authorized research subscription, surface mechanical due facts, and let the runtime Agent perform and assess each review.
+  research-orchestrator:
+    interface:
+      display_name: Research Orchestrator
+      short_description: Manage program state, workflow logs, and research skill routing
+      default_prompt: Use $research-orchestrator to create or update a program, manage state/open questions/evidence requests/decision logs/reporting events, and route work to the right research skill.
+  skill-evolution-advisor:
+    interface:
+      display_name: Skill Evolution Advisor
+      short_description: Capture learnings and skill-evolution memory
+      default_prompt: Use $skill-evolution-advisor after a research workflow to log lightweight habits/gotchas/skill defects or to turn deeper routing, schema, script, or handoff friction into a small improvement prompt.
+    policy:
+      allow_implicit_invocation: true
+  source-intake:
+    interface:
+      display_name: Source Intake
+      short_description: 负责 source search staging、去重与轻量 canonical 入库
+      default_prompt: 使用 $source-intake 先把 paper / repo / dataset / blog 的外部候选结果写进 staging，再做去重、raw 备份和轻量 record 入库。
+  unit-analyst:
+    interface:
+      display_name: Unit Analyst
+      short_description: Analyze paper, repo, dataset, and blog units with evidence
+      default_prompt: Use $unit-analyst to analyze a paper, repository, dataset, blog, or technical note through its evidence-bound prepare, Agent-fill, verify, and confirmation workflow.

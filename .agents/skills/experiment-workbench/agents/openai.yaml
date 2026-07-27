@@ -1,4 +1,5 @@
 interface:
-  display_name: "Experiment Workbench"
-  short_description: "Manage experiment plans, runs, follow-ups, and diagnoses"
-  default_prompt: "Use $experiment-workbench to create an experiment plan, log classified runs, track follow-ups, analyze failures by category, and keep diagnoses pending confirmation by default."
+  display_name: Experiment Workbench
+  short_description: Manage experiment plans, runs, follow-ups, and diagnoses
+  default_prompt: Use $experiment-workbench to create an experiment plan, log classified runs, track follow-ups, analyze failures
+    by category, and keep diagnoses pending confirmation by default.

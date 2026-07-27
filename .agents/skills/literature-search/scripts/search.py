@@ -1260,7 +1260,7 @@ def _materialize_claimed_selection(
         "counts": counts,
         "owner_results": owner_results,
         "next_route": {
-            "owner": "paper-analyst",
+            "owner": "unit-analyst",
             "action": "analyze-materialized-records",
             "record_ids": sorted(
                 {
