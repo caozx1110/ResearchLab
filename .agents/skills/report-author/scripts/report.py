@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 import yaml
 
@@ -28,19 +29,45 @@ if __name__ == "__main__":
     ensure_managed_runtime(PROJECT_ROOT)
 
 from research.bibliography import BibliographyError, bibliography_from_records
-from research.common import add_project_root_argument, load_program_reporting_events, load_yaml, print_resolved_project_roots, write_text_if_changed
+from research.common import add_project_root_argument, load_program_reporting_events, load_yaml, print_resolved_project_roots, utc_now_iso, write_text_if_changed, write_yaml_if_changed
+from research.confirm import apply_confirmation
 from research.core import command_mutation, ensure_workspace, checkpoint_and_report, project_root, user_root
-from research.evidence import read_claims, validate_claims
+from research.evidence import build_verification_receipt, read_claims, validate_claims
 from research.judgements import (
     BoundJudgementBatchSnapshot,
     BoundJudgementContainerSnapshot,
     BoundJudgementSnapshot,
     confirmation_binding,
+    apply_judgement_rejection,
     judgement_confirmation_matches_bound,
     judgement_confirmation_is_current,
     load_bound_judgement_batch_snapshot,
     load_bound_judgement_container_snapshot,
     load_bound_judgement_snapshot,
+    readiness_violations,
+    require_judgement_snapshot,
+)
+from research.paper_drafts import (
+    SECTION_IDENTITIES,
+    build_draft_manifest,
+    build_publication_manifest,
+    build_section_fill_scaffold,
+    paper_draft_section_lifecycle_violations,
+    render_paper_draft_latex,
+    render_paper_draft_markdown,
+    validate_publication_sections,
+    verify_section_fill,
+)
+from research.paper_draft_runtime import (
+    PaperDraftInputs,
+    PaperDraftRuntimeError,
+    load_current_draft_manifest,
+    load_paper_draft_inputs,
+    paper_draft_fill_path,
+    paper_draft_manifest_path,
+    paper_draft_root,
+    paper_draft_section_currentness_violations,
+    paper_draft_section_path,
 )
 from research.preference_selection import resolve_task_preferences, selection_binding
 from research.records import (
@@ -217,6 +244,13 @@ def build_parser() -> argparse.ArgumentParser:
         cmd.add_argument("--stage", default="")
         cmd.add_argument("--limit", type=int, default=20)
         cmd.add_argument("--preference-selection-id", default="")
+    prepare = subparsers.add_parser("draft-prepare")
+    prepare.add_argument("--program-id", required=True)
+    verify = subparsers.add_parser("draft-verify")
+    verify.add_argument("--program-id", required=True)
+    verify.add_argument("--section-id", required=True, choices=SECTION_IDENTITIES)
+    export = subparsers.add_parser("draft-export")
+    export.add_argument("--program-id", required=True)
     return parser
 
 
@@ -1710,11 +1744,453 @@ def render_outline(program_id: str, inputs: ReportInputs) -> str:
     return rendered
 
 
+def _strict_project_mapping(
+    root: Path,
+    path: Path,
+    *,
+    label: str,
+) -> tuple[dict[str, Any], ProjectFileSnapshot]:
+    try:
+        relative = path.absolute().relative_to(root.absolute()).as_posix()
+    except ValueError as exc:
+        raise PaperDraftRuntimeError(f"{label} escaped the workspace") from exc
+    snapshot = snapshot_project_file(root, relative)
+    if snapshot is None:
+        raise PaperDraftRuntimeError(f"{label} is missing or unsafe")
+    try:
+        payload = load_yaml_mapping_bytes_strict(snapshot.raw_bytes)
+    except (RuntimeError, StrictYamlError) as exc:
+        raise PaperDraftRuntimeError(f"{label} is not a strict YAML mapping") from exc
+    return payload, snapshot
+
+
+def prepare_paper_draft(root: Path, program_id: str) -> int:
+    inputs = load_paper_draft_inputs(root, program_id)
+    manifest_path = paper_draft_manifest_path(root, program_id)
+    if manifest_path.exists() or manifest_path.is_symlink():
+        manifest, manifest_snapshot, inputs = load_current_draft_manifest(
+            root, program_id, inputs
+        )
+        manifest_target: list[Path] = []
+    else:
+        manifest = build_draft_manifest(
+            program_id=program_id,
+            outline_bytes=inputs.outline_snapshot.raw_bytes,
+            claim_catalog=inputs.claim_catalog,
+            bibliography_catalog=inputs.bibliography_catalog,
+            figure_catalog=inputs.figure_catalog,
+            as_of=utc_now_iso(),
+        )
+        manifest_snapshot = None
+        manifest_target = [manifest_path]
+    fill_paths = [
+        paper_draft_fill_path(root, program_id, section_id)
+        for section_id in SECTION_IDENTITIES
+    ]
+    unsafe_fills: list[Path] = []
+    for fill_path in fill_paths:
+        if not (fill_path.exists() or fill_path.is_symlink()):
+            continue
+        relative = fill_path.absolute().relative_to(root.absolute()).as_posix()
+        if snapshot_project_file(root, relative) is None:
+            unsafe_fills.append(fill_path)
+    if unsafe_fills:
+        names = "、".join(path.name for path in unsafe_fills)
+        raise PaperDraftRuntimeError(f"分节待填路径不安全或不是普通文件：{names}")
+    missing_fills = [fill_path for fill_path in fill_paths if not fill_path.exists()]
+    targets = [*manifest_target, *missing_fills]
+    if not targets:
+        print("七个分节的写作待填结构已是当前版本。")
+        return 0
+
+    def require_current() -> None:
+        if not inputs.is_current() or (
+            manifest_snapshot is not None and not manifest_snapshot.is_current()
+        ):
+            raise RuntimeError("paper draft inputs changed during preparation")
+
+    with command_mutation(
+        root,
+        "report-author:draft-prepare",
+        targets,
+        commit_guard=require_current,
+    ):
+        require_current()
+        if manifest_target:
+            write_yaml_if_changed(manifest_path, manifest)
+        for fill_path in missing_fills:
+            section_id = fill_path.name.removesuffix("-fill.yaml")
+            write_yaml_if_changed(
+                fill_path,
+                build_section_fill_scaffold(manifest, section_id),
+            )
+        require_current()
+        load_current_draft_manifest(root, program_id, inputs)
+    print(f"已准备 {len(missing_fills)} 个分节待填结构；正文仍需由 Agent 依据已确认判断填写。")
+    checkpoint_and_report(
+        root,
+        trigger="milestone",
+        message=f"milestone: prepare paper draft for {program_id}",
+        target_paths=targets,
+    )
+    return 0
+
+
+def verify_paper_draft_section(root: Path, program_id: str, section_id: str) -> int:
+    inputs = load_paper_draft_inputs(root, program_id)
+    manifest, manifest_snapshot, inputs = load_current_draft_manifest(
+        root, program_id, inputs
+    )
+    fill_path = paper_draft_fill_path(root, program_id, section_id)
+    fill, fill_snapshot = _strict_project_mapping(
+        root, fill_path, label="paper draft section fill"
+    )
+    violations, record = verify_section_fill(
+        fill,
+        manifest,
+        resolve_support=inputs.claim_catalog.get,
+        resolve_citation=inputs.bibliography_catalog.get,
+        resolve_figure=inputs.figure_catalog.get,
+        verified_at=utc_now_iso(),
+    )
+    if violations or record is None:
+        raise PaperDraftRuntimeError("分节草稿未通过核验：" + "；".join(violations))
+    try:
+        build_verification_receipt(
+            record,
+            paper_draft_root(root, program_id),
+            source_roots=inputs.source_roots,
+        )
+    except SystemExit as exc:
+        raise PaperDraftRuntimeError(
+            f"分节草稿的逐字证据字节无法核验：{exc}"
+        ) from exc
+    record["status"] = "ready_for_review"
+    record["updated_at"] = utc_now_iso()
+    section_path = paper_draft_section_path(root, program_id, section_id)
+    if section_path.exists() or section_path.is_symlink():
+        current, _current_snapshot = _strict_project_mapping(
+            root, section_path, label="paper draft section"
+        )
+        if str(current.get("confirmation_status") or "") == "confirmed":
+            raise PaperDraftRuntimeError("该分节已确认；未明确要求重填时保留原内容。")
+
+    def require_current() -> None:
+        if (
+            not inputs.is_current()
+            or not manifest_snapshot.is_current()
+            or not fill_snapshot.is_current()
+        ):
+            raise RuntimeError("paper draft inputs changed during section verification")
+
+    with command_mutation(
+        root,
+        "report-author:draft-verify",
+        [section_path],
+        commit_guard=require_current,
+    ):
+        require_current()
+        write_yaml_if_changed(section_path, record)
+        require_current()
+        currentness = paper_draft_section_currentness_violations(
+            root, record, section_path
+        )
+        if currentness:
+            raise RuntimeError("paper draft section became stale during verification")
+    print("分节草稿已通过证据与引用绑定校验，现等待你确认。")
+    checkpoint_and_report(
+        root,
+        trigger="milestone",
+        message=f"milestone: verify paper draft section {program_id}:{section_id}",
+        target_paths=[section_path],
+    )
+    return 0
+
+
+def _paper_draft_review_context(
+    root: Path,
+    item: Mapping[str, Any],
+    decision: str,
+) -> tuple[dict[str, Any], Path, PaperDraftInputs]:
+    route_key = "confirm_route" if decision == "confirm" else "reject_route"
+    route = item.get(route_key) if isinstance(item, Mapping) else None
+    route = route if isinstance(route, Mapping) else {}
+    expected_action = "confirm-section" if decision == "confirm" else "reject-section"
+    if route.get("owner") != "report-author" or route.get("action") != expected_action:
+        raise ValueError("paper draft review route is invalid")
+    program_id = str(route.get("program_id") or "")
+    section_id = str(route.get("section_id") or "")
+    subject_id = str(route.get("subject_id") or "")
+    if subject_id != f"paper-draft-section:{program_id}:{section_id}":
+        raise ValueError("paper draft review identity is invalid")
+    bound = load_bound_judgement_snapshot(
+        root, {"kind": "paper_draft_section", "id": subject_id}
+    )
+    record = bound.record
+    path = bound.path
+    if readiness_violations(
+        root,
+        record,
+        path,
+        bound_snapshot=bound,
+    ):
+        raise ValueError("paper draft section is no longer ready for review")
+    snapshot = item.get("snapshot_binding")
+    if not isinstance(snapshot, Mapping):
+        raise ValueError("paper draft review snapshot is missing")
+    require_judgement_snapshot(
+        record,
+        expected_snapshot=dict(snapshot),
+        owner="report-author",
+        path=path.relative_to(root.absolute()).as_posix(),
+        root=root,
+    )
+    inputs = load_paper_draft_inputs(root, program_id)
+    return record, path, inputs
+
+
+def prepare_review_batch_decision(
+    root: Path,
+    item: dict,
+    decision: str,
+    *,
+    actor: str,
+    evidence: list[str],
+    user_authorization: str,
+    authorization_source: str,
+    rejection_reason: str,
+) -> dict:
+    """Pure-read preflight for section confirmation in the public coordinator."""
+    record, path, inputs = _paper_draft_review_context(root, item, decision)
+    candidate = copy.deepcopy(record)
+    if decision == "confirm":
+        apply_confirmation(
+            candidate,
+            confirmed_by=actor,
+            evidence=evidence,
+            user_authorization=user_authorization,
+            authorization_source=authorization_source,
+            method="report-author confirm-section",
+            project_root=root,
+            verification_root=path.parent,
+            trusted_source_roots=inputs.source_roots,
+        )
+    elif decision == "reject":
+        apply_judgement_rejection(candidate, reason=rejection_reason)
+    else:
+        raise ValueError("paper draft review decision is invalid")
+    return {
+        "owner": "report-author",
+        "decision": decision,
+        "program_id": str(record.get("program_id") or ""),
+        "section_id": str(record.get("section_id") or ""),
+        "target_paths": [path],
+    }
+
+
+def apply_review_batch_decision(
+    root: Path,
+    item: dict,
+    decision: str,
+    *,
+    actor: str,
+    evidence: list[str],
+    user_authorization: str,
+    authorization_source: str,
+    rejection_reason: str,
+) -> list[Path]:
+    """Apply one section decision inside the coordinator's root transaction."""
+    plan = prepare_review_batch_decision(
+        root,
+        item,
+        decision,
+        actor=actor,
+        evidence=evidence,
+        user_authorization=user_authorization,
+        authorization_source=authorization_source,
+        rejection_reason=rejection_reason,
+    )
+    record, path, inputs = _paper_draft_review_context(root, item, decision)
+    if decision == "confirm":
+        apply_confirmation(
+            record,
+            confirmed_by=actor,
+            evidence=evidence,
+            user_authorization=user_authorization,
+            authorization_source=authorization_source,
+            method="report-author confirm-section",
+            project_root=root,
+            verification_root=path.parent,
+            trusted_source_roots=inputs.source_roots,
+        )
+        record["status"] = "confirmed"
+    else:
+        apply_judgement_rejection(record, reason=rejection_reason)
+        record["status"] = "rejected"
+    record["updated_at"] = utc_now_iso()
+    write_yaml_if_changed(path, record)
+    if paper_draft_section_currentness_violations(root, record, path):
+        raise ValueError("paper draft section became stale while applying review")
+    if decision == "confirm" and not judgement_confirmation_is_current(root, record, path):
+        raise ValueError("paper draft section confirmation receipt is not current")
+    return list(plan["target_paths"])
+
+
+def _load_publication_sections(
+    root: Path,
+    program_id: str,
+    inputs: PaperDraftInputs,
+    manifest: Mapping[str, Any],
+    manifest_snapshot: ProjectFileSnapshot,
+) -> tuple[
+    list[dict[str, Any]],
+    Callable[[Mapping[str, Any]], bool],
+    Callable[[Mapping[str, Any]], bool],
+]:
+    records: list[dict[str, Any]] = []
+    snapshots: dict[str, ProjectFileSnapshot] = {}
+    paths: dict[str, Path] = {}
+    for section_id in SECTION_IDENTITIES:
+        path = paper_draft_section_path(root, program_id, section_id)
+        record, snapshot = _strict_project_mapping(
+            root, path, label=f"paper draft section {section_id}"
+        )
+        records.append(record)
+        snapshots[str(record.get("id") or "")] = snapshot
+        paths[str(record.get("id") or "")] = path
+
+    def section_is_current(record: Mapping[str, Any]) -> bool:
+        record_id = str(record.get("id") or "")
+        snapshot = snapshots.get(record_id)
+        if snapshot is None or not snapshot.is_current():
+            return False
+        violations = paper_draft_section_lifecycle_violations(
+            record,
+            manifest,
+            resolve_support=inputs.claim_catalog.get,
+            resolve_citation=inputs.bibliography_catalog.get,
+            resolve_figure=inputs.figure_catalog.get,
+            manifest_is_current=lambda _manifest: bool(
+                manifest_snapshot.is_current() and inputs.is_current()
+            ),
+        )
+        return not violations and manifest_snapshot.is_current() and inputs.is_current()
+
+    def confirmation_is_current(record: Mapping[str, Any]) -> bool:
+        path = paths.get(str(record.get("id") or ""))
+        return bool(
+            path is not None
+            and judgement_confirmation_is_current(root, dict(record), path)
+        )
+
+    return records, section_is_current, confirmation_is_current
+
+
+def export_paper_draft(root: Path, program_id: str) -> int:
+    inputs = load_paper_draft_inputs(root, program_id)
+    manifest, manifest_snapshot, inputs = load_current_draft_manifest(
+        root, program_id, inputs
+    )
+    records, section_is_current, confirmation_is_current = _load_publication_sections(
+        root, program_id, inputs, manifest, manifest_snapshot
+    )
+
+    def publication_is_current() -> bool:
+        return bool(
+            inputs.is_current()
+            and manifest_snapshot.is_current()
+            and not validate_publication_sections(
+                manifest,
+                records,
+                section_is_current=section_is_current,
+                confirmation_is_current=confirmation_is_current,
+            )
+        )
+
+    if not publication_is_current():
+        raise PaperDraftRuntimeError("发布需要七节全部唯一、当前且已确认。")
+    output_root = root / "kb" / "output" / program_id
+    markdown_path = output_root / "paper-draft.md"
+    latex_path = output_root / "paper-draft.tex"
+    bibliography_path = output_root / "references.bib"
+    publication_path = output_root / "publication-manifest.yaml"
+    targets = [markdown_path, latex_path, bibliography_path, publication_path]
+
+    def require_publication_current() -> None:
+        if not publication_is_current():
+            raise RuntimeError("paper draft inputs changed during publication")
+
+    with command_mutation(
+        root,
+        "report-author:draft-export",
+        targets,
+        commit_guard=require_publication_current,
+    ):
+        if not publication_is_current():
+            raise RuntimeError("paper draft inputs changed before rendering")
+        markdown = render_paper_draft_markdown(
+            manifest,
+            records,
+            title=program_id,
+            section_is_current=section_is_current,
+            confirmation_is_current=confirmation_is_current,
+        )
+        latex = render_paper_draft_latex(
+            manifest,
+            records,
+            title=program_id,
+            section_is_current=section_is_current,
+            confirmation_is_current=confirmation_is_current,
+        )
+        bibliography = inputs.bibliography_text
+        if not publication_is_current():
+            raise RuntimeError("paper draft inputs changed after rendering")
+        publication = build_publication_manifest(
+            manifest,
+            records,
+            markdown_bytes=markdown.encode("utf-8"),
+            latex_bytes=latex.encode("utf-8"),
+            bibliography_bytes=bibliography.encode("utf-8"),
+            published_at=utc_now_iso(),
+            section_is_current=section_is_current,
+            confirmation_is_current=confirmation_is_current,
+        )
+        write_text_if_changed(markdown_path, markdown)
+        write_text_if_changed(latex_path, latex)
+        write_text_if_changed(bibliography_path, bibliography)
+        write_yaml_if_changed(publication_path, publication)
+        if not publication_is_current():
+            raise RuntimeError("paper draft inputs changed during publication")
+    print("七节草稿已原子发布为 Markdown、LaTeX、引用库和发布回执。")
+    checkpoint_and_report(
+        root,
+        trigger="milestone",
+        message=f"milestone: export paper draft for {program_id}",
+        target_paths=targets,
+    )
+    return 0
+
+
 def main() -> int:
     args = build_parser().parse_args()
     root = project_root(PROJECT_ROOT, explicit_root=args.root)
     print_resolved_project_roots(root)
     ensure_workspace(root)
+    if args.command in {"draft-prepare", "draft-verify", "draft-export"}:
+        try:
+            if args.command == "draft-prepare":
+                return prepare_paper_draft(root, args.program_id)
+            if args.command == "draft-verify":
+                return verify_paper_draft_section(
+                    root, args.program_id, args.section_id
+                )
+            return export_paper_draft(root, args.program_id)
+        except PaperDraftRuntimeError as exc:
+            raise SystemExit(f"论文草稿操作未完成：{exc}") from exc
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise SystemExit(
+                "论文草稿操作未完成：输入在操作期间发生变化或工作区不安全，请重新准备后重试。"
+            ) from exc
     if args.command == "bib":
         try:
             bibliography = load_bibliography_inputs(root, args.program_id)

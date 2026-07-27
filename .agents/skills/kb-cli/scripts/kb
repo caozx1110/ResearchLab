@@ -149,6 +149,7 @@ REVIEW_OWNER_SCRIPTS = {
     "idea-workbench": owner_script("idea-workbench", "idea"),
     "method-designer": owner_script("method-designer", "method"),
     "literature-synthesizer": owner_script("literature-synthesizer", "synthesize"),
+    "report-author": owner_script("report-author", "report"),
 }
 _REVIEW_OWNER_MODULES: dict[str, object] = {}
 
@@ -3161,6 +3162,7 @@ _SIDE_JUDGEMENT_KIND_LABELS = {
     "idea_discussion_conclusion": "想法讨论结论",
     "method_selection": "方法仓库选择",
     "survey_judgement": "文献综述",
+    "paper_draft_section": "论文分节草稿",
 }
 _REVIEW_PRIORITY = {"critical": 4, "high": 3, "normal": 2, "low": 1}
 
@@ -3347,6 +3349,23 @@ def _review_decision_routes(
             "program_id": program_id,
             "idea_id": idea_id,
         }
+    elif kind == "paper_draft_section":
+        program_id = str(raw_confirm.get("program_id") or "")
+        section_id = str(raw_confirm.get("section_id") or "")
+        confirm_route = {
+            "owner": owner or "report-author",
+            "action": "confirm-section",
+            "program_id": program_id,
+            "section_id": section_id,
+            "subject_id": subject_id,
+        }
+        reject_route = {
+            "owner": owner or "report-author",
+            "action": "reject-section",
+            "program_id": program_id,
+            "section_id": section_id,
+            "subject_id": subject_id,
+        }
     else:
         confirm_route = dict(raw_confirm)
         reject_route = {**confirm_route, "action": "reject"}
@@ -3382,6 +3401,51 @@ _SIDE_SUBSTANCE_FIELDS = {
 
 def _public_side_substance(record: Mapping[str, object], root: Path) -> tuple[str, list[dict[str, str]]]:
     kind = str(record.get("kind") or "")
+    if kind == "paper_draft_section":
+        payload = record.get("payload")
+        payload = payload if isinstance(payload, Mapping) else {}
+        section = payload.get("paper_draft_section")
+        section = section if isinstance(section, Mapping) else {}
+        paragraphs = section.get("paragraphs")
+        if not isinstance(paragraphs, list) or not paragraphs:
+            return "invalid", []
+        rows: list[dict[str, str]] = []
+        title = _render_public_claim_text(str(section.get("title") or ""), root)
+        if title is None or not title:
+            return "unsafe", []
+        rows.append({"label": "分节", "text": title})
+        for index, paragraph in enumerate(paragraphs, start=1):
+            if not isinstance(paragraph, Mapping):
+                return "unsafe", []
+            prose = _render_public_claim_text(str(paragraph.get("prose") or ""), root)
+            supports = paragraph.get("support_claim_refs")
+            citations = paragraph.get("citation_keys")
+            figures = paragraph.get("figure_refs")
+            if (
+                prose is None
+                or not prose
+                or len(prose) > _PUBLIC_CLAIM_TEXT_HARD_CAP
+                or not isinstance(supports, list)
+                or not supports
+                or not isinstance(citations, list)
+                or not citations
+                or not isinstance(figures, list)
+            ):
+                return "unsafe", []
+            refs = "支撑 " + ", ".join(str(item) for item in supports)
+            refs += "；引用 " + ", ".join(str(item) for item in citations)
+            if figures:
+                refs += "；图 " + ", ".join(str(item) for item in figures)
+            public_refs = _render_public_claim_text(refs, root)
+            if public_refs is None or len(public_refs) > _PUBLIC_CLAIM_TEXT_HARD_CAP:
+                return "unsafe", []
+            rows.extend(
+                [
+                    {"label": f"段落 {index}", "text": prose},
+                    {"label": f"段落 {index} 绑定", "text": public_refs},
+                ]
+            )
+        return "ready", rows
     fields = _SIDE_SUBSTANCE_FIELDS.get(kind)
     if fields is None:
         return "ready", []

@@ -78,6 +78,7 @@ CONFIRMABLE_CONTENT_SECTIONS: dict[str, tuple[str, ...]] = {
     "program_decision": ("decision",),
     "idea_discussion_conclusion": ("discussion_conclusion",),
     "method_selection": ("method_selection",),
+    "paper_draft_section": ("paper_draft_section", "anchor"),
 }
 
 # Side judgements often keep workflow bookkeeping beside the decision

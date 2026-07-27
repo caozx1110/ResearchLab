@@ -74,7 +74,10 @@
 - figure index 已实现：caption 编号规范化、panel/continued 逻辑合并、无编号 fallback、冲突 fail closed、PNG sha256 地址化、source/index/asset 字节 currentness 重验。`extract-figures` 不再自选 key figure，不改 paper claim/顶层 confirmation；重跑保持 ref/index/asset 稳定。caption/ref key 已进 find，Obsidian 投影 current 图与图注；source/index/asset 任一篡改时两端都撤下陈旧条目。
 - figure 定向质量门：真实构造 PDF 端到端提取+重跑+篡改验收，find/Obsidian 与 recovery/governance/preferences/report 联合回归 `349 passed`；Python 3.9 compile、skill validator `Validated 20 skills.`、`git diff --check` 通过，仓库根 `kb/` 零改动。
 - section draft 锁为 `paper_draft_section` side judgement：七节各自 prepare/fill/verify/confirm，段落逐一绑定 current confirmed source claims/evidence、citation keys 和可选 figure refs；全节 current confirmed 后才将 MD/LaTeX/bib/publication manifest 原子发布到 `kb/output/<program-id>/`。
-- 下一步：先提交本设计 gate；随后按 bibliography → figure index → section draft 三个小里程碑施工，每片定向测试，R3 末跑 Python 3.9/skill validator/全套回归和 A9/A10 冷安装验收。
+- section draft 已实现：新增纯合同层与 read-only snapshot runtime，manifest 冻结 exact outline、program selection、current confirmed claim/evidence、citation 和 figure bindings；prepare 只建七节空 fill，verify 机械搬运逐字 evidence 并生成 pending section。`paper_draft_section` 已接入统一 dialogue/Obsidian review batch、真人签字/当前消息授权/实质门/版本锚定确认；public card 展示完整正文与 support/citation/figure refs。
+- 发布门要求固定顺序七节全部 current confirmed；Markdown、LaTeX、`references.bib`、byte-bound publication manifest 在单一 recovery transaction 原子写入。outline、selected unit（含 capture 时缺失后出现）、record/receipt/evidence、citation、figure index/assets 或 section bytes 任一漂移均 fail closed，并保留旧发布字节；非法 section id、fill leaf/ancestor symlink 与非普通文件均在业务写前拒绝。
+- section draft 质量门：纯合同/实质门与真实七节集成全部通过；集成覆盖 5 篇 current paper、7 节逐节核验/统一 review owner/真人确认、确认前零输出、outline stale 撤卡、bib ≥5、稳定 figure ref、figure asset 篡改后拒绝且旧四件套不变、缺失 selection 后出现与 fill symlink 对抗。与 confirmation/judgement/review/report/kb-cli/bib/figure/find/Obsidian 联合回归 `624 passed`；Python 3.9.6 compile、skill validator `Validated 20 skills.`、`git diff --check` 通过，仓库根 `kb/` 零改动。
+- 下一步：提交 section draft 小里程碑；随后跑 R3 全套 pytest 与固定 commit 冷装 A9/A10，补齐公开文档/CHANGELOG 并关闭 R3。
 
 ## 决定记录（含偏离蓝图的理由）
 

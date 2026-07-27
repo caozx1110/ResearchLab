@@ -119,6 +119,7 @@ SUBSTANCE_CONTENT_SECTIONS: dict[str, tuple[str, ...]] = {
     "idea": ("problem", "hypothesis"),
     "experiment": ("results", "diagnosis"),
     "concept": ("concept", "associations"),
+    "paper_draft_section": ("paper_draft_section",),
 }
 
 
@@ -154,6 +155,22 @@ def has_substantive_content(record: dict[str, Any], kind: str | None = None) -> 
     payload = record.get("payload")
     if not isinstance(payload, dict):
         payload = {}
+    if unit_kind == "paper_draft_section":
+        section = payload.get("paper_draft_section")
+        paragraphs = section.get("paragraphs") if isinstance(section, dict) else None
+        return bool(
+            isinstance(paragraphs, list)
+            and paragraphs
+            and all(
+                isinstance(paragraph, dict)
+                and str(paragraph.get("prose") or "").strip()
+                and isinstance(paragraph.get("support_claim_refs"), list)
+                and bool(paragraph.get("support_claim_refs"))
+                and isinstance(paragraph.get("citation_keys"), list)
+                and bool(paragraph.get("citation_keys"))
+                for paragraph in paragraphs
+            )
+        )
     skeleton = kind_payload_skeleton(unit_kind)
     for section_key in sections:
         canonical_fields = skeleton.get(section_key) or {}

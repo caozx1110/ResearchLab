@@ -52,6 +52,7 @@ _ALLOWED_OWNER_ACTIONS = {
     "idea-workbench": {"discuss"},
     "method-designer": {"confirm-selection", "reject-selection"},
     "literature-synthesizer": {"confirm", "reject"},
+    "report-author": {"confirm-section", "reject-section"},
 }
 
 

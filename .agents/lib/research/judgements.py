@@ -20,6 +20,11 @@ import yaml
 
 from .common import load_yaml, utc_now_iso
 from .concepts import concept_lifecycle_violations
+from .paper_drafts import SECTION_IDENTITIES
+from .paper_draft_runtime import (
+    paper_draft_section_currentness_violations,
+    paper_draft_section_path,
+)
 from .confirm import has_complete_confirmation_receipt
 from .evidence import (
     CONFIRMABLE_CONTENT_FIELDS,
@@ -79,6 +84,7 @@ SIDE_OWNER_BY_KIND = {
     "idea_discussion_conclusion": "idea-workbench",
     "method_selection": "method-designer",
     "survey_judgement": "literature-synthesizer",
+    "paper_draft_section": "report-author",
 }
 REQUIRED_SIDE_SUBSTANCE_FIELDS: dict[str, tuple[tuple[str, str], ...]] = {
     "program_decision": (("decision", "text"),),
@@ -87,6 +93,7 @@ REQUIRED_SIDE_SUBSTANCE_FIELDS: dict[str, tuple[tuple[str, str], ...]] = {
         ("method_selection", "proposed_repo_id"),
         ("method_selection", "selection_reason"),
     ),
+    "paper_draft_section": (("paper_draft_section", "paragraphs"),),
 }
 
 
@@ -273,6 +280,24 @@ def _identity_violations(root: Path, record: dict[str, Any], owner: str, artifac
             expected_path = survey_artifact_path(root, slug, mode)
         except ValueError:
             violations.append("survey judgement has no canonical mode/slug")
+    elif kind == "paper_draft_section":
+        expected_owner = "report-author"
+        program_id = _text(record.get("program_id"))
+        section_id = _text(record.get("section_id"))
+        if section_id not in SECTION_IDENTITIES:
+            violations.append("paper draft section has an unknown section_id")
+        if subject_id != f"paper-draft-section:{program_id}:{section_id}":
+            violations.append("paper draft section id does not match program_id/section_id")
+        payload = record.get("payload")
+        payload = payload if isinstance(payload, dict) else {}
+        substance = payload.get("paper_draft_section")
+        substance = substance if isinstance(substance, dict) else {}
+        if _text(substance.get("section_id")) != section_id:
+            violations.append("paper draft section payload identity differs from its subject")
+        try:
+            expected_path = paper_draft_section_path(root, program_id, section_id)
+        except ValueError:
+            violations.append("paper draft section has no canonical program/section identity")
     else:
         violations.append(f"unsupported judgement kind: {kind or '<empty>'}")
     if expected_owner and owner != expected_owner:
@@ -369,6 +394,8 @@ def readiness_violations(
         violations.extend(survey_lifecycle_violations(record, root))
     if _text(record.get("kind")) == "concept":
         violations.extend(concept_lifecycle_violations(root, record))
+    if _text(record.get("kind")) == "paper_draft_section":
+        violations.extend(paper_draft_section_currentness_violations(root, record, artifact_path))
     try:
         verification_root = _verification_root(root, record, artifact_path)
         source_roots = _source_roots(
@@ -411,6 +438,11 @@ def _judgement_confirmation_matches(
     if _text(record.get("kind")) == "survey_judgement" and survey_lifecycle_violations(record, root):
         valid = False
     if _text(record.get("kind")) == "concept" and concept_lifecycle_violations(root, record):
+        valid = False
+    if (
+        _text(record.get("kind")) == "paper_draft_section"
+        and paper_draft_section_currentness_violations(root, record, artifact_path)
+    ):
         valid = False
     try:
         verification_root = _verification_root(root, record, artifact_path)
@@ -496,6 +528,14 @@ def _default_route(record: dict[str, Any], owner: str) -> dict[str, str]:
             "action": "confirm",
             "slug": _text(record.get("slug")),
             "mode": _text(record.get("mode")),
+        }
+    if kind == "paper_draft_section":
+        return {
+            "owner": owner,
+            "action": "confirm-section",
+            "program_id": _text(record.get("program_id")),
+            "section_id": _text(record.get("section_id")),
+            "subject_id": subject_id,
         }
     return {"owner": owner, "action": "confirm", "subject_id": subject_id}
 
@@ -584,6 +624,14 @@ def pending_judgement_card(
         card["program_ids"] = [
             _text(item) for item in record.get("program_ids", []) if _text(item)
         ]
+    if _text(record.get("kind")) == "paper_draft_section":
+        card["reject_route"] = {
+            "owner": owner,
+            "action": "reject-section",
+            "program_id": _text(record.get("program_id")),
+            "section_id": _text(record.get("section_id")),
+            "subject_id": _text(record.get("id")),
+        }
     if bound_snapshot is not None and not bound_snapshot.is_current():
         return None
     return card
@@ -656,6 +704,8 @@ def _side_container_specs(root: Path) -> Iterable[tuple[Path, str, bool]]:
     for path in sorted((root / "kb" / "synthesis").glob("*/*.yaml")):
         if not path.name.endswith("-fill.yaml"):
             yield path, "literature-synthesizer", False
+    for path in sorted((root / "kb" / "programs").glob("*/reports/paper-draft/sections/*.yaml")):
+        yield path, "report-author", False
 
 
 def _side_judgement_candidates(
@@ -1314,6 +1364,10 @@ def load_bound_judgement(root: str | Path, subject: Any) -> tuple[dict[str, Any]
         candidates.extend((project_root / "kb" / "units" / "ideas").glob("*/discussion-judgements.yaml"))
     if subject_kind == "survey_judgement":
         candidates.extend((project_root / "kb" / "synthesis").glob("*/*.yaml"))
+    if subject_kind == "paper_draft_section":
+        candidates.extend(
+            (project_root / "kb" / "programs").glob("*/reports/paper-draft/sections/*.yaml")
+        )
     for path in candidates:
         try:
             safe_path = trusted_project_path(
