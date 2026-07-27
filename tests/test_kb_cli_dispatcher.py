@@ -2916,6 +2916,55 @@ def test_kb_add_batches_multiple_sources_with_independent_kind_inference(
     assert protocol["next_actions"][0]["action"] == "ask_once_to_deep_read_batch"
 
 
+def test_kb_add_all_duplicate_batch_finishes_without_empty_deep_read_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    kb = _load_kb_cli()
+    monkeypatch.setattr(
+        kb,
+        "load_runtime_preferences",
+        lambda root: {"autonomy": {"link_autodrive": "ask_first"}},
+    )
+    payload = {
+        "item_count": 2,
+        "created_count": 0,
+        "duplicate_count": 2,
+        "results": [
+            {"status": "duplicate", "kind": "paper", "unit_id": "p-current-one"},
+            {"status": "duplicate", "kind": "blog", "unit_id": "b-current-two"},
+        ],
+    }
+    monkeypatch.setattr(
+        kb,
+        "forward_command",
+        lambda root, relative_script, args, **kwargs: kb.CommandResult(
+            (relative_script, *args), 0, json.dumps(payload) + "\n"
+        ),
+    )
+
+    assert kb.main(
+        [
+            "--root",
+            str(tmp_path),
+            "--agent-protocol",
+            "replay.json",
+            "add",
+            "https://example.com/one.pdf",
+            "https://example.com/two",
+        ]
+    ) == 0
+
+    output = capsys.readouterr().out
+    assert "没有新资料需要继续深读" in output
+    assert "需要我现在继续深读" not in output
+    protocol = json.loads((tmp_path / "kb/.runtime/replay.json").read_text(encoding="utf-8"))
+    assert protocol["status"] == "completed"
+    assert protocol["details"]["created_count"] == 0
+    assert protocol["next_actions"] == []
+
+
 def test_kb_add_batch_auto_deep_read_prepares_after_one_atomic_owner_call(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

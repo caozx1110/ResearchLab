@@ -2549,6 +2549,16 @@ def handle_add(args: argparse.Namespace, root: Path) -> int:
         f"整批入库已完成：共 {len(sources)} 项，新增 {created_count} 项，"
         f"已有或合并 {duplicate_count} 项。"
     )
+    if not created:
+        print("这批来源都已存在，本次没有新资料需要继续深读。")
+        set_protocol_status(
+            "completed",
+            batch_item_count=len(sources),
+            created_count=created_count,
+            duplicate_count=duplicate_count,
+            prepared_count=0,
+        )
+        return 0
     if link_autodrive == "auto_deep_read":
         if prepare_failures:
             print(f"已为 {prepared_count} 个新条目备好深读骨架；其余条目由 Agent 检查后继续。")
