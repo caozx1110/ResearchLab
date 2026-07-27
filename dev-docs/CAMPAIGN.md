@@ -10,7 +10,7 @@
 ### 功能验收
 - [ ] A1 四类真实来源一链入库+深读骨架，≤2 次交互；5 链批量不逐个盘问
 - [x] A2 快筛已移除，auto_screen 退役
-- [ ] A3 概念页（提取→确认→定义带逐字出处+关联清单；find/Obsidian 可达）
+- [x] A3 概念页（提取→确认→定义带逐字出处+关联清单；find/Obsidian 可达）
 - [ ] A4 检索三类（中/英/代码符号带 file:line），常规库 <3s
 - [ ] A5 综述 ≥5 单元（taxonomy/trends/gaps，claim 带证据绑上游，确认后可被报告消费）
 - [ ] A6 idea 全链（捕获→分析→讨论归档→选中→method handoff）
@@ -23,7 +23,7 @@
 - [ ] A13 交互章程冷验收（三场景 10 条逐条打分）
 
 ### 质量验收
-- [x] Q1 pytest 全套绿（scratch `.venv`；R1 `2132 passed, 18 skipped`；不得回退新行为凑绿）
+- [x] Q1 pytest 全套绿（scratch `.venv`；R2 `2147 passed, 18 skipped`；不得回退新行为凑绿）
 - [x] Q2 skill_validator 20/20；冷装约 2s；install.sh install+update+uninstall 三态正常
 - [ ] Q3 GOLDEN_SUITE 8 条全过且零机制摸索失败
 - [ ] Q4 单任务规则文本 ≤8k tokens；kb next ≤3 步
@@ -56,17 +56,23 @@
 - A11 本轮只闭环 init 两问与 `link_autodrive` 消费；“观察纠正→任务尾询问→确认后跨任务生效”仍待后续轮实现/验收，因此 A11 不提前勾选。
 - 运行时/测试/随包契约提交：`ba39491 feat(research): remove paper screening and bind review governance`；公开文档与本台账另作 R1 文档提交。
 
-### R2 知识层（施工中，2026-07-27）
+### R2 知识层（完成，2026-07-27）
 - 已完成只读架构审计，未调用 shipping skills、未修改真实 `kb/`。概念层确定为 canonical `concept` unit（不是特殊 side YAML），从而复用统一 record snapshot、evidence/ConfirmationReceipt、FTS 与 Obsidian 关系图；source-intake 仍只处理 paper/repo/dataset/blog。
 - 已在蓝图锁定 concept prepare/fill/verify、至少 3 个 current unit、定义/关联判断全部逐字证据并待真人确认，以及 `payload.concept` 与 top-level links 一致性。
 - context-pack 确定附着现有 `kb find` 私有协议，不增加公开动词、不落 canonical 产物；正式 lane 只含 current receipt 覆盖的 confirmed claims，summary/passage 只作未确认导航提示，并实行 5 unit × 3 claims × 2 refs + 6000-byte 原子预算。
-- 下一步：先提交设计 gate，再实现 concept schema/owner/索引/Obsidian/CLI 与 context-pack，跑定向/全量/安装态 A3 验收。
+- 概念实现：新增 canonical `concept` kind 与 `c-` ID，`literature-synthesizer` 提供 prepare/fill/verify；至少 3 个 current confirmed 非 concept 单元，定义、可选 scope 和每条关联角色都必须由 runtime Agent 填写并带逐字 evidence。verify 冻结上游 record/receipt/evidence，写 pending concept；公共 `kb review` 通过 generic knowledge writer 做 snapshot/CAS/真人授权确认。上游、anchor 或关联→links 投影变化都会使旧确认失效。
+- 检索/投影：concept 进入统一 index/FTS 与 Obsidian unit 图谱，页面显式渲染定义和关联清单。冷验收发现“顶层已确认但 claim/分析 banner 仍显示 pending”，修为只在 normalized top-level current confirmed 且 receipt 覆盖 claim id 时投影为已确认，不改 canonical claim bytes 或 ConfirmationReceipt digest。
+- context-pack：`kb find` 私有 protocol 新增只读 `context-pack/v1`；formal 只搬运唯一 canonical snapshot 中 current receipt 覆盖且 evidence current 的 claims，navigation summary/passage 明确不绑定确认。重复 ID、pending/rejected/forged/stale、不完整 locator 与路径泄漏均 fail-closed；限制 5×3×2 和 6000 UTF-8 bytes，超预算整对象删除，末尾聚合重验，全程不写 canonical KB。
+- 安装态 A3：固定 commit 冷装到 `/private/tmp/workspace-oss-r2-a3.pIuuAM`；构造 current confirmed paper/repo/idea 后，真实跑 concept prepare→Agent fill→verify→公共 `kb review`（5 条 grounded claim）→真人署名确认。`kb find` 命中 concept，私有 pack 含 3 条 receipt-bound formal claim、总 5843 bytes、无绝对路径；Obsidian 页显示定义、3 条关联和 5 条已确认 claim。仓库根 `kb/` 零改动。
+- 质量门：概念/context 定向 `298 passed`；Obsidian 修复定向 `39 passed`；Python 3.9.6 `py_compile`、skill validator `Validated 20 skills.`；最终全套 `2147 passed, 18 skipped, 7 warnings`（9m17s）。安装器从已提交 release allowlist 冷装成功，后续 update 保留 scratch `kb/`。
+- 提交：`4aa35aa feat(research): add concepts and bounded context packs`；`acda252 fix(obsidian): project receipt-bound claims as confirmed`。
 
 ## 决定记录（含偏离蓝图的理由）
 
 | # | 日期 | 决定 | 理由 |
 |---|---|---|---|
 | D1 | 07-26 | campaign 分支基线取 codex/review-remediation-integration@dfcc0b5 而非 main | Wave 1 改动叠在该分支之上且 HANDOFF 以此为前提；main（cd40859）落后 26 轮 remediation |
+| D2 | 07-27 | 概念采用 canonical `concept` unit，而不是 `kb/synthesis/concepts` side YAML | 统一复用 record snapshot、ConfirmationReceipt、索引、review、关系和 Obsidian 基建；代价是把第七类 unit 全面接入 schema/枚举并补全生命周期测试 |
 
 ## 遗留清单
 
