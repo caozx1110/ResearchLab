@@ -615,6 +615,42 @@ def test_complete_local_paper_revision_archives_degraded_unconfirmed_unit_withou
     assert intake.detect_duplicate(root, "paper", str(replacement), title=title)["id"] == current["id"]
 
 
+def test_degraded_pdf_with_substantive_page_parse_is_safe_source_revision_material() -> None:
+    intake = _load_intake_module()
+    source_info = {
+        "backup_status": "degraded",
+        "source_type": "pdf",
+        "locator_kind": "page",
+        "file_hash": "a" * 64,
+        "markdown_hash": "b" * 64,
+        "backup_warning": (
+            "PDF page 3 had low converted-text coverage; used native PDF text recovery "
+            "Markdown contains 8 malformed pipe table(s)"
+        ),
+        "materialization": {
+            "status": "degraded",
+            "source_map_path": "kb/units/papers/p-new/source/source-map.yaml",
+            "conversion_path": "kb/units/papers/p-new/source/conversion.yaml",
+        },
+        "parse_chunks": [
+            {"page": 1, "text": "a" * 2_000},
+            {"page": 2, "text": "b" * 2_000},
+        ],
+    }
+
+    assert intake._source_upgrade_is_complete(source_info)
+    assert source_info["backup_status"] == "degraded"
+    assert source_info["materialization"]["status"] == "degraded"
+
+    source_info["parse_chunks"] = [{"page": 1, "text": "a" * 8_000}]
+    assert not intake._source_upgrade_is_complete(source_info)
+    source_info["parse_chunks"] = [
+        {"page": 1, "text": "a" * 1_900},
+        {"page": 2, "text": "b" * 1_900},
+    ]
+    assert not intake._source_upgrade_is_complete(source_info)
+
+
 def test_verified_degraded_paper_requires_decision_before_source_revision(
     tmp_path: Path,
     monkeypatch,

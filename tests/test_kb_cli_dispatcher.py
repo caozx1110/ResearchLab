@@ -4318,6 +4318,10 @@ def test_public_review_snapshot_adapter_real_owner_e2e(
     item, displayed_ref = _review_protocol_item(tmp_path, kb)
     assert displayed_ref == ref
     capsys.readouterr()
+    if owner_kind == "method":
+        import research.evidence as evidence_module
+
+        evidence_module._LOCATOR_WARNING_SEEN.clear()
 
     assert _apply_review_protocol(tmp_path, kb, displayed_ref, decision) == 0
     public = capsys.readouterr()
@@ -4331,6 +4335,12 @@ def test_public_review_snapshot_adapter_real_owner_e2e(
     assert stored["confirmation_status"] == ("confirmed" if decision == "confirm" else "rejected")
 
     protocol = json.loads((tmp_path / "kb/.runtime/review.json").read_text(encoding="utf-8"))
+    applied_protocol = json.loads((tmp_path / "kb/.runtime/apply.json").read_text(encoding="utf-8"))
+    if owner_kind == "method" and decision == "confirm":
+        assert any(
+            line.startswith("[warn] claim method-")
+            for line in applied_protocol["details"]["review_owner_diagnostics"]
+        )
     token = protocol["next_actions"][0]["apply"]["snapshot_token"]
     tombstone = json.loads((tmp_path / f"kb/.runtime/review-snapshots/{token}.json").read_text(encoding="utf-8"))
     assert tombstone["schema"] == "kb-review-snapshot/v2"

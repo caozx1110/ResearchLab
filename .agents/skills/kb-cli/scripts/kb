@@ -4952,6 +4952,14 @@ def _apply_review_atomic_batch(
     return sorted(set(canonical_targets), key=lambda path: path.as_posix()), len(planned)
 
 
+def _bounded_review_owner_diagnostics(value: str) -> list[str]:
+    """Keep owner warnings in the private protocol, never on the public stderr."""
+    lines = [line.strip()[:1_000] for line in value.splitlines() if line.strip()]
+    if len(lines) > 20:
+        return [*lines[:20], "<additional owner diagnostics omitted>"]
+    return lines
+
+
 def handle_obsidian_review_apply(args: argparse.Namespace, root: Path) -> int:
     actor = default_confirmed_by(root)
     authorization = str(args.user_authorization or "").strip()
@@ -5005,30 +5013,43 @@ def handle_obsidian_review_apply(args: argparse.Namespace, root: Path) -> int:
             raise ReviewBatchError("authorization_stale", "review decisions changed after authorization")
         return locked.current_items, locked.preview.decisions
 
+    owner_stderr = io.StringIO()
     try:
-        canonical_targets, applied_count = _apply_review_atomic_batch(
-            root,
-            op_type="kb-cli:obsidian-review-batch",
-            current_items=preflight.current_items,
-            decisions=preflight.preview.decisions,
-            runtime_targets=runtime_targets,
-            actor=actor,
-            evidence=evidence,
-            user_authorization=authorization,
-            rejection_reason=rejection_reason,
-            locked_preflight=locked_preflight,
-            consume=lambda: consume_obsidian_review_batch(root, preflight.preview.batch_ref),
-        )
+        with contextlib.redirect_stderr(owner_stderr):
+            canonical_targets, applied_count = _apply_review_atomic_batch(
+                root,
+                op_type="kb-cli:obsidian-review-batch",
+                current_items=preflight.current_items,
+                decisions=preflight.preview.decisions,
+                runtime_targets=runtime_targets,
+                actor=actor,
+                evidence=evidence,
+                user_authorization=authorization,
+                rejection_reason=rejection_reason,
+                locked_preflight=locked_preflight,
+                consume=lambda: consume_obsidian_review_batch(root, preflight.preview.batch_ref),
+            )
     except ReviewBatchError as exc:
-        set_protocol_status("agent_action_required", review_apply_error=exc.code)
+        set_protocol_status(
+            "agent_action_required",
+            review_apply_error=exc.code,
+            review_owner_diagnostics=_bounded_review_owner_diagnostics(owner_stderr.getvalue()),
+        )
         print(_review_apply_failure_message(exc.code), file=sys.stderr)
         return 2
     except (OSError, RuntimeError, SystemExit, TypeError, ValueError):
-        set_protocol_status("agent_action_required", review_apply_error="stale_content")
+        set_protocol_status(
+            "agent_action_required",
+            review_apply_error="stale_content",
+            review_owner_diagnostics=_bounded_review_owner_diagnostics(owner_stderr.getvalue()),
+        )
         print(_review_apply_failure_message("stale_content"), file=sys.stderr)
         return 2
 
-    exact_checkpoint_targets = sorted(set(canonical_targets), key=lambda path: path.as_posix())
+    exact_checkpoint_targets = sorted(
+        set([*canonical_targets, runtime_targets[-1]]),
+        key=lambda path: path.as_posix(),
+    )
     if exact_checkpoint_targets:
         # The commit id is an internal recovery detail.  This public owner path
         # reports only the atomic batch result.
@@ -5052,6 +5073,7 @@ def handle_obsidian_review_apply(args: argparse.Namespace, root: Path) -> int:
         "completed",
         obsidian_review_applied_count=applied_count,
         obsidian_review_deferred_count=sum(item["decision"] == "defer" for item in summaries),
+        review_owner_diagnostics=_bounded_review_owner_diagnostics(owner_stderr.getvalue()),
     )
     print("Obsidian 中的决定已作为一个整体同步；所有项目均成功，待确认表已安全消费。")
     return 0
@@ -5135,26 +5157,36 @@ def handle_review_apply(args: argparse.Namespace, root: Path) -> int:
             raise ReviewSnapshotError("stale_content", "review snapshot changed while applying")
         return current_selection(locked_lease, selected_decisions)
 
+    owner_stderr = io.StringIO()
     try:
-        canonical_targets, applied_count = _apply_review_atomic_batch(
-            root,
-            op_type="kb-cli:dialogue-review-batch",
-            current_items=current_items,
-            decisions=decisions,
-            runtime_targets=[lease.registry_path],
-            actor=actor,
-            evidence=evidence,
-            user_authorization=user_authorization,
-            rejection_reason=str(args.rejection_reason or "").strip(),
-            locked_preflight=locked_preflight,
-            consume=lambda: _consume_review_snapshot(root, _load_review_snapshot(root, args.apply_snapshot)),
-        )
+        with contextlib.redirect_stderr(owner_stderr):
+            canonical_targets, applied_count = _apply_review_atomic_batch(
+                root,
+                op_type="kb-cli:dialogue-review-batch",
+                current_items=current_items,
+                decisions=decisions,
+                runtime_targets=[lease.registry_path],
+                actor=actor,
+                evidence=evidence,
+                user_authorization=user_authorization,
+                rejection_reason=str(args.rejection_reason or "").strip(),
+                locked_preflight=locked_preflight,
+                consume=lambda: _consume_review_snapshot(root, _load_review_snapshot(root, args.apply_snapshot)),
+            )
     except (ReviewBatchError, ReviewSnapshotError) as exc:
         _record_review_apply_failure(root, args, exc.code, lease=lease, reason_detail=str(exc))
+        set_protocol_status(
+            "agent_action_required",
+            review_owner_diagnostics=_bounded_review_owner_diagnostics(owner_stderr.getvalue()),
+        )
         print(_review_apply_failure_message(exc.code), file=sys.stderr)
         return 2
     except (OSError, RuntimeError, SystemExit, TypeError, ValueError):
         _record_review_apply_failure(root, args, "stale_content", lease=lease)
+        set_protocol_status(
+            "agent_action_required",
+            review_owner_diagnostics=_bounded_review_owner_diagnostics(owner_stderr.getvalue()),
+        )
         print(_review_apply_failure_message("stale_content"), file=sys.stderr)
         return 2
 
@@ -5180,6 +5212,7 @@ def handle_review_apply(args: argparse.Namespace, root: Path) -> int:
         applied_review_count=applied_count,
         deferred_review_count=len(defer_refs),
         decided_review_count=len(requested),
+        review_owner_diagnostics=_bounded_review_owner_diagnostics(owner_stderr.getvalue()),
     )
     print(f"已应用 {len(requested)} 条拍板结果（原子批量）：")
     for current_item, decision in zip(current_items, decisions):

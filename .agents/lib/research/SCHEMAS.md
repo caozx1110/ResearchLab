@@ -136,6 +136,8 @@ links:                               # 关联其它 unit
   note: ""
 # degraded 且尚未 verify/confirm 的来源升级不覆盖本 unit：旧 unit status=archived，
 # 旧→新 relation=superseded_by，新→旧 relation=supersedes；两边原 source bytes 均保留。
+# 新 PDF 可继续诚实保留 materialization.status=degraded 与 converter warnings；若 raw bytes、
+# page locator 和 ≥2 页/≥4000 字符的实质 parse 均在，仍可作为完整 source revision。
 reuse_flags:                         # 是否已被下游 skill 复用
   review: false
   idea: false

@@ -139,11 +139,49 @@ def _source_upgrade_identity_matches(record: dict, source: str, title: str) -> b
 
 def _source_upgrade_is_complete(source_info: dict) -> bool:
     materialization = source_info.get("materialization")
+    if not isinstance(materialization, dict):
+        return False
+    backup_status = str(source_info.get("backup_status") or "").strip().lower()
+    materialization_status = str(materialization.get("status") or "").strip().lower()
+    source_type = str(source_info.get("source_type") or "").strip().lower()
+    if (
+        backup_status == "ok"
+        and materialization_status == "complete"
+        and source_type in {"pdf", "html"}
+    ):
+        return True
+    # Converter warnings are not proof that the raw PDF is an abstract shell.
+    # Preserve the degraded label and warnings, but accept a byte-bound,
+    # page-located, substantive multi-page parse as a complete replacement
+    # source.  This does not relax ordinary backup quality reporting.
+    if backup_status != "degraded" or materialization_status != "degraded" or source_type != "pdf":
+        return False
+    if (
+        str(source_info.get("locator_kind") or "") != "page"
+        or not str(source_info.get("file_hash") or "")
+        or not str(source_info.get("markdown_hash") or "")
+        or not str(materialization.get("source_map_path") or "")
+        or not str(materialization.get("conversion_path") or "")
+    ):
+        return False
+    pages: set[int] = set()
+    parsed_characters = 0
+    for chunk in source_info.get("parse_chunks") or []:
+        if not isinstance(chunk, dict):
+            continue
+        try:
+            page = int(chunk.get("page"))
+        except (TypeError, ValueError):
+            continue
+        text = str(chunk.get("text") or "").strip()
+        if page < 1 or not text:
+            continue
+        pages.add(page)
+        parsed_characters += len(text)
     return bool(
-        str(source_info.get("backup_status") or "").strip().lower() == "ok"
-        and isinstance(materialization, dict)
-        and str(materialization.get("status") or "").strip().lower() == "complete"
-        and str(source_info.get("source_type") or "").strip().lower() in {"pdf", "html"}
+        len(pages) >= 2
+        and pages == set(range(1, max(pages) + 1))
+        and parsed_characters >= 4_000
     )
 
 

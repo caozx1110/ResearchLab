@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import stat
+import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -696,6 +697,12 @@ def test_kb_cli_exports_previews_and_atomically_applies_once(
 ) -> None:
     kb = _load_kb_cli()
     record = _write_ready_unit(tmp_path)
+    repo = tmp_path / "kb"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test User"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "baseline"], check=True)
     assert kb.main(
         [
             "--root",
@@ -773,6 +780,12 @@ def test_kb_cli_exports_previews_and_atomically_applies_once(
     assert "# 已处理判断" in applied_sheet
     assert "作为一个整体应用" in applied_sheet
     assert "- [x] 确认" in applied_sheet
+    assert subprocess.run(
+        ["git", "-C", str(tmp_path / "kb"), "status", "--short"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout == ""
     applied = record.read_bytes()
     assert kb.main(
         [
