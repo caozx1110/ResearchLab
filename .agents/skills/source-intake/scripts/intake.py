@@ -29,6 +29,7 @@ from research.bootstrap import ensure_managed_runtime
 if __name__ == "__main__":
     ensure_managed_runtime(PROJECT_ROOT)
 
+from research.bibliography import citation_key_for_unit_id, normalize_arxiv_id, normalize_doi
 from research.common import add_project_root_argument, confirm_command as shared_confirm_command, extract_pdf_record, load_yaml, parse_arxiv_id, print_resolved_project_roots, skill_script_for_command
 from research.confirm import require_user_authorization
 from research.journal import mutation_transaction
@@ -872,6 +873,98 @@ def _request_binding_digest(
     )
 
 
+def _paper_metadata_values(*values):
+    for value in values:
+        if value not in (None, "", [], {}):
+            return value
+    return ""
+
+
+def _merge_paper_citation_metadata(
+    *,
+    source: str,
+    local_metadata: dict,
+    parse_metadata: dict,
+    staged_candidate: dict | None,
+) -> dict:
+    """Merge already-archived factual metadata without querying or guessing."""
+    local = local_metadata if isinstance(local_metadata, dict) else {}
+    parsed = parse_metadata if isinstance(parse_metadata, dict) else {}
+    candidate = staged_candidate if isinstance(staged_candidate, dict) else {}
+    candidate_metadata = candidate.get("metadata")
+    candidate_metadata = candidate_metadata if isinstance(candidate_metadata, dict) else {}
+    identities = candidate.get("identities")
+    identities = identities if isinstance(identities, dict) else {}
+
+    doi_inputs = [local.get("doi"), parsed.get("doi"), identities.get("doi")]
+    dois = {normalize_doi(value) for value in doi_inputs if normalize_doi(value)}
+    if len(dois) > 1:
+        raise RuntimeError("Paper citation metadata contains conflicting DOI identities.")
+    arxiv_inputs = [
+        local.get("arxiv_id"),
+        parsed.get("arxiv_id"),
+        identities.get("arxiv_id"),
+        parse_arxiv_id(source),
+    ]
+    arxiv_ids = {
+        normalize_arxiv_id(value) for value in arxiv_inputs if normalize_arxiv_id(value)
+    }
+    if len(arxiv_ids) > 1:
+        raise RuntimeError("Paper citation metadata contains conflicting arXiv identities.")
+
+    bibtex = {
+        "entry_type": "misc",
+        "venue_field": "",
+        "volume": "",
+        "number": "",
+        "pages": "",
+        "publisher": "",
+        "primary_class": "",
+    }
+    for metadata in (local, parsed):
+        supplement = metadata.get("bibtex")
+        if not isinstance(supplement, dict):
+            continue
+        for key in tuple(bibtex):
+            value = str(supplement.get(key) or "").strip()
+            if not value:
+                continue
+            current = str(bibtex.get(key) or "").strip()
+            if key == "entry_type" and current == "misc" and value != "misc":
+                bibtex[key] = value
+            elif current in {"", value}:
+                bibtex[key] = value
+            elif value != "misc":
+                raise RuntimeError(f"Paper citation metadata conflicts for BibTeX field {key}.")
+
+    authors = _paper_metadata_values(
+        local.get("authors"),
+        parsed.get("authors"),
+        candidate_metadata.get("authors"),
+    )
+    return {
+        "title": str(_paper_metadata_values(local.get("title"), parsed.get("title")) or ""),
+        "abstract": str(_paper_metadata_values(local.get("abstract"), parsed.get("abstract")) or ""),
+        "year": _paper_metadata_values(
+            local.get("year"),
+            parsed.get("year"),
+            candidate_metadata.get("publication_year"),
+        ),
+        "arxiv_id": next(iter(arxiv_ids), ""),
+        "authors": [str(item).strip() for item in authors] if isinstance(authors, list) else [],
+        "topics": list(local.get("topics", [])) if isinstance(local.get("topics"), list) else [],
+        "tags": list(local.get("tags", [])) if isinstance(local.get("tags"), list) else [],
+        "doi": next(iter(dois), ""),
+        "venue": str(
+            _paper_metadata_values(
+                local.get("venue"), parsed.get("venue"), candidate_metadata.get("venue")
+            )
+            or ""
+        ),
+        "bibtex": bibtex,
+    }
+
+
 def _finish_prepared_record(
     root: Path,
     args: argparse.Namespace,
@@ -887,18 +980,14 @@ def _finish_prepared_record(
 ) -> tuple[dict, dict, str]:
     parse_metadata = source_info.get("parse_metadata") or {}
     title = initial_title
-    if args.kind == "paper" and not paper_metadata and parse_metadata:
-        better_title = str(parse_metadata.get("title") or "").strip()
-        paper_metadata = {
-            "title": better_title,
-            "abstract": str(parse_metadata.get("abstract") or ""),
-            "year": parse_metadata.get("year"),
-            "arxiv_id": str(parse_metadata.get("arxiv_id") or ""),
-            "authors": [],
-            "topics": [],
-            "tags": [],
-            "doi": "",
-        }
+    if args.kind == "paper":
+        paper_metadata = _merge_paper_citation_metadata(
+            source=source,
+            local_metadata=paper_metadata,
+            parse_metadata=parse_metadata,
+            staged_candidate=staged_candidate,
+        )
+        better_title = str(paper_metadata.get("title") or "").strip()
         if better_title and not args.title and not (staged_candidate and staged_candidate.get("title")):
             title = better_title
     elif parse_metadata:
@@ -966,7 +1055,10 @@ def _finish_prepared_record(
         )
         record["payload"]["basic_info"]["abstract"] = str(paper_metadata.get("abstract") or "")
         record["payload"]["basic_info"]["arxiv_id"] = canonical_arxiv_id
-        record["payload"]["basic_info"]["doi"] = str(paper_metadata.get("doi") or "")
+        record["payload"]["basic_info"]["doi"] = normalize_doi(paper_metadata.get("doi"))
+        record["payload"]["basic_info"]["venue"] = str(paper_metadata.get("venue") or "")
+        record["payload"]["basic_info"]["citation_key"] = citation_key_for_unit_id(record["id"])
+        record["payload"]["basic_info"]["bibtex"] = dict(paper_metadata.get("bibtex") or {})
     elif args.kind == "repo":
         record["payload"]["basic_info"]["name"] = title
         record["payload"]["basic_info"]["url"] = source if source.startswith("http") else ""

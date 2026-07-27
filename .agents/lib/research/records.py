@@ -1555,6 +1555,16 @@ def kind_payload_skeleton(kind: str, title: str = "") -> dict[str, Any]:
                 "abstract": "",
                 "arxiv_id": "",
                 "doi": "",
+                "citation_key": "",
+                "bibtex": {
+                    "entry_type": "misc",
+                    "venue_field": "",
+                    "volume": "",
+                    "number": "",
+                    "pages": "",
+                    "publisher": "",
+                    "primary_class": "",
+                },
             },
             "source_search": {
                 "stage_ids": [],

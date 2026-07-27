@@ -396,8 +396,56 @@ def test_no_receipt_uses_only_hard_fallback_and_persists_value_free_digests(
     serialized = records[0].read_text(encoding="utf-8")
     assert hard_text not in serialized
     assert "auto_screen_on_intake" not in serialized
+    basic = record["payload"]["basic_info"]
+    assert basic["citation_key"] == intake.citation_key_for_unit_id(record["id"])
+    assert basic["bibtex"]["entry_type"] == "misc"
     # Source intake is mechanical only; neither hard fallback nor a soft
     # preference may resurrect the retired quick-screen analyzer.
+
+
+def test_archived_and_staged_paper_citation_metadata_merge_without_network() -> None:
+    intake = _load_intake_module()
+    merged = intake._merge_paper_citation_metadata(
+        source="https://arxiv.org/abs/2603.12263v1",
+        local_metadata={},
+        parse_metadata={
+            "title": "Archived Citation Metadata",
+            "authors": ["Ada Example", "Bo Researcher"],
+            "abstract": "Archived abstract.",
+            "doi": "doi:10.1234/EXAMPLE",
+            "venue": "Robotics Test Conference",
+            "bibtex": {
+                "entry_type": "inproceedings",
+                "venue_field": "booktitle",
+                "pages": "10--20",
+            },
+        },
+        staged_candidate={
+            "identities": {
+                "doi": "https://doi.org/10.1234/example",
+                "arxiv_id": "2603.12263",
+            },
+            "metadata": {"publication_year": 2026},
+        },
+    )
+
+    assert merged["doi"] == "10.1234/example"
+    assert merged["arxiv_id"] == "2603.12263"
+    assert merged["authors"] == ["Ada Example", "Bo Researcher"]
+    assert merged["year"] == 2026
+    assert merged["bibtex"]["entry_type"] == "inproceedings"
+    assert merged["bibtex"]["venue_field"] == "booktitle"
+
+
+def test_conflicting_archived_and_staged_strong_citation_identity_fails_closed() -> None:
+    intake = _load_intake_module()
+    with pytest.raises(RuntimeError, match="conflicting DOI"):
+        intake._merge_paper_citation_metadata(
+            source="https://example.test/paper",
+            local_metadata={"doi": "10.1234/one"},
+            parse_metadata={},
+            staged_candidate={"identities": {"doi": "10.1234/two"}},
+        )
 
 
 @pytest.mark.parametrize("mutation", ["input", "authorization", "source-bytes"])

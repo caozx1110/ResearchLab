@@ -19,6 +19,7 @@ import stat
 import sys
 import tempfile
 from datetime import datetime, timezone
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -30,6 +31,7 @@ from .common import (
     FetchTooLarge,
     clean_text,
     ensure_dir,
+    extract_pdf_record,
     fetch_url,
     file_sha256,
     html_to_text,
@@ -3560,7 +3562,29 @@ def _pdf_metadata(pdf_path: Path, chunks: list[dict[str, Any]]) -> dict[str, Any
     arxiv_id = _arxiv_id_from_source(pdf_path.name) or parse_arxiv_id("\n".join(c["text"] for c in chunks[:2]))
     if arxiv_id and year is None:
         year = 2000 + int(arxiv_id[:2])
-    return {"title": title, "abstract": _abstract_from_text(first_page), "year": year, "arxiv_id": arxiv_id}
+    richer: dict[str, Any] = {}
+    try:
+        richer = extract_pdf_record(pdf_path)
+    except (OSError, RuntimeError, UnicodeError, ValueError):
+        richer = {}
+    return {
+        "title": str(richer.get("title") or title),
+        "authors": [str(item) for item in richer.get("authors", []) if str(item).strip()],
+        "abstract": str(richer.get("abstract") or _abstract_from_text(first_page)),
+        "year": richer.get("year") or year,
+        "arxiv_id": str(richer.get("arxiv_id") or arxiv_id or ""),
+        "doi": str(richer.get("doi") or ""),
+        "venue": "",
+        "bibtex": {
+            "entry_type": "misc",
+            "venue_field": "",
+            "volume": "",
+            "number": "",
+            "pages": "",
+            "publisher": "",
+            "primary_class": "",
+        },
+    }
 
 
 # --- HTML section parsing (SSOT B4: section/anchor locators, no page nums) --
@@ -3697,7 +3721,37 @@ def _text_to_section_chunks(
     return chunks
 
 
+class _CitationMetaParser(HTMLParser):
+    """Collect repeated scholarly ``<meta>`` facts without interpreting prose."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.values: dict[str, list[str]] = {}
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.casefold() != "meta":
+            return
+        fields = {str(key).casefold(): str(value or "") for key, value in attrs}
+        name = (fields.get("name") or fields.get("property") or "").strip().casefold()
+        content = clean_text(fields.get("content") or "")
+        if name and content:
+            self.values.setdefault(name, []).append(content)
+
+
 def _html_metadata(html: str) -> dict[str, Any]:
+    parser = _CitationMetaParser()
+    try:
+        parser.feed(html)
+    except (UnicodeError, ValueError):
+        parser = _CitationMetaParser()
+
+    def first(*names: str) -> str:
+        for name in names:
+            values = parser.values.get(name.casefold(), [])
+            if values:
+                return values[0]
+        return ""
+
     title = ""
     title_match = re.search(r"(?is)<title\b[^>]*>(.*?)</title>", html)
     if title_match:
@@ -3706,7 +3760,44 @@ def _html_metadata(html: str) -> dict[str, Any]:
     abs_match = re.search(r"""(?is)<blockquote[^>]*class=["'][^"']*abstract[^"']*["'][^>]*>(.*?)</blockquote>""", html)
     if abs_match:
         abstract = re.sub(r"(?i)^abstract[:.\-\s]*", "", clean_text(html_to_text(abs_match.group(1))))[:2000]
-    return {"title": title, "abstract": abstract}
+    title = first("citation_title", "dc.title") or title
+    abstract = first("citation_abstract", "description", "dc.description") or abstract
+    publication = first("citation_publication_date", "citation_date", "dc.date")
+    year_match = re.search(r"\b(19|20)\d{2}\b", publication)
+    venue = first("citation_journal_title", "citation_conference_title")
+    entry_type = (
+        "article"
+        if first("citation_journal_title")
+        else "inproceedings"
+        if first("citation_conference_title")
+        else "misc"
+    )
+    first_page = first("citation_firstpage")
+    last_page = first("citation_lastpage")
+    pages = f"{first_page}--{last_page}" if first_page and last_page else first_page or last_page
+    return {
+        "title": title,
+        "authors": list(parser.values.get("citation_author", [])),
+        "abstract": abstract[:2000],
+        "year": int(year_match.group(0)) if year_match else None,
+        "arxiv_id": first("citation_arxiv_id"),
+        "doi": first("citation_doi"),
+        "venue": venue,
+        "bibtex": {
+            "entry_type": entry_type,
+            "venue_field": (
+                "journal"
+                if entry_type == "article"
+                else "booktitle"
+                if entry_type == "inproceedings"
+                else ""
+            ),
+            "volume": first("citation_volume"),
+            "number": first("citation_issue"),
+            "pages": pages,
+            "publisher": first("citation_publisher"),
+        },
+    }
 
 
 # --- parse-cache writer + source-record projection --------------------------

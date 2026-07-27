@@ -352,7 +352,14 @@ def test_pdf_missing_converter_page_is_recovered_from_native_text(
 def test_arxiv_explicit_version_is_preserved_in_every_candidate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    html = b"""<!doctype html><html><head><title>Versioned paper</title></head><body>
+    html = b"""<!doctype html><html><head><title>Versioned paper</title>
+    <meta name="citation_title" content="Versioned Citation Paper">
+    <meta name="citation_author" content="Ada Example">
+    <meta name="citation_author" content="Bo Researcher">
+    <meta name="citation_doi" content="10.1234/Versioned.Example">
+    <meta name="citation_publication_date" content="2026/03/18">
+    <meta name="citation_conference_title" content="Robotics Test Conference">
+    </head><body>
     <article class="ltx_document"><h1>Paper</h1>
     <p>This is a sufficiently structured versioned paper body with stable evidence text.</p>
     <p>Second paragraph ensures the quality gate sees a complete source.</p>
@@ -369,6 +376,12 @@ def test_arxiv_explicit_version_is_preserved_in_every_candidate(
     assert requested[0] == "https://arxiv.org/html/2603.12263v1"
     assert payload["original_uri"] == "https://arxiv.org/abs/2603.12263v1"
     assert payload["parse_metadata"]["arxiv_id"] == "2603.12263v1"
+    assert payload["parse_metadata"]["title"] == "Versioned Citation Paper"
+    assert payload["parse_metadata"]["authors"] == ["Ada Example", "Bo Researcher"]
+    assert payload["parse_metadata"]["doi"] == "10.1234/Versioned.Example"
+    assert payload["parse_metadata"]["year"] == 2026
+    assert payload["parse_metadata"]["venue"] == "Robotics Test Conference"
+    assert payload["parse_metadata"]["bibtex"]["entry_type"] == "inproceedings"
 
 
 def test_remote_markdown_and_plain_text_are_archived_and_materialized(

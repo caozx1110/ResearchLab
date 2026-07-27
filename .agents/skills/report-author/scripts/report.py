@@ -27,6 +27,7 @@ from research.bootstrap import ensure_managed_runtime
 if __name__ == "__main__":
     ensure_managed_runtime(PROJECT_ROOT)
 
+from research.bibliography import BibliographyError, bibliography_from_records
 from research.common import add_project_root_argument, load_program_reporting_events, load_yaml, print_resolved_project_roots, write_text_if_changed
 from research.core import command_mutation, ensure_workspace, checkpoint_and_report, project_root, user_root
 from research.evidence import read_claims, validate_claims
@@ -44,12 +45,15 @@ from research.judgements import (
 from research.preference_selection import resolve_task_preferences, selection_binding
 from research.records import (
     CanonicalRecordSnapshot,
+    ProjectFileSnapshot,
+    canonical_record_snapshot_for_identity,
     iter_canonical_record_snapshots,
     normalize_record_snapshot,
     snapshot_canonical_unit_artifacts,
     snapshot_project_file,
     trusted_claim_source_roots,
 )
+from research.yaml_io import StrictYamlError, load_yaml_mapping_bytes_strict
 from research.surveys import survey_staleness
 
 
@@ -159,11 +163,55 @@ class ReportInputs:
             return False
 
 
+@dataclass
+class BibliographyInputs:
+    program_id: str
+    selected_unit_ids: tuple[str, ...]
+    paper_snapshots: tuple[CanonicalRecordSnapshot, ...]
+    entries: list[dict[str, Any]]
+    rendered: str
+    state_snapshot: ProjectFileSnapshot
+    events_snapshot: ProjectFileSnapshot | None
+
+    def is_current(self) -> bool:
+        try:
+            if not self.state_snapshot.is_current():
+                return False
+            if self.events_snapshot is None:
+                events_relative = (
+                    f"kb/programs/{self.program_id}/workflow/reporting-events.yaml"
+                )
+                if snapshot_project_file(self.state_snapshot.project_root, events_relative) is not None:
+                    return False
+            elif not self.events_snapshot.is_current():
+                return False
+            captured = {snapshot.unit_id: snapshot for snapshot in self.paper_snapshots}
+            for unit_id in self.selected_unit_ids:
+                current = canonical_record_snapshot_for_identity(
+                    self.state_snapshot.project_root, "paper", unit_id
+                )
+                expected = captured.get(unit_id)
+                if expected is None:
+                    if current is not None:
+                        return False
+                    continue
+                if current is None or not (
+                    current.path == expected.path
+                    and current.raw_bytes == expected.raw_bytes
+                    and current.file_identity == expected.file_identity
+                    and current.directory_capabilities == expected.directory_capabilities
+                ):
+                    return False
+            return True
+        except (OSError, RuntimeError, UnicodeError, ValueError):
+            return False
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Generate evidence-backed reports.")
     add_project_root_argument(parser)
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for name in ("weekly", "ppt-materials", "stage-summary", "writing-materials", "outline"):
+    for name in ("weekly", "ppt-materials", "stage-summary", "writing-materials", "outline", "bib"):
         cmd = subparsers.add_parser(name)
         cmd.add_argument("--program-id", required=True)
         cmd.add_argument("--stage", default="")
@@ -597,6 +645,61 @@ def program_unit_ids(root: Path, program_id: str, events: list[dict[str, Any]]) 
     unit_ids = _collect_unit_ids(state)
     unit_ids.update(_collect_unit_ids(events))
     return sorted(unit_ids)
+
+
+def _strict_snapshot_mapping(snapshot: ProjectFileSnapshot, *, label: str) -> dict[str, Any]:
+    try:
+        payload = load_yaml_mapping_bytes_strict(snapshot.raw_bytes)
+    except (RuntimeError, StrictYamlError) as exc:
+        raise BibliographyError(f"{label} is not a strict YAML mapping") from exc
+    return payload
+
+
+def load_bibliography_inputs(root: Path, program_id: str) -> BibliographyInputs:
+    """Capture the exact factual program/paper selection used by one .bib export."""
+    state_relative = f"kb/programs/{program_id}/state.yaml"
+    events_relative = f"kb/programs/{program_id}/workflow/reporting-events.yaml"
+    state_snapshot = snapshot_project_file(root, state_relative)
+    if state_snapshot is None:
+        raise BibliographyError("program state is missing or unsafe")
+    state = _strict_snapshot_mapping(state_snapshot, label="program state")
+    if str(state.get("program_id") or program_id) != program_id:
+        raise BibliographyError("program state identity does not match the requested program")
+    events_snapshot = snapshot_project_file(root, events_relative)
+    event_document: dict[str, Any] = {}
+    if events_snapshot is not None:
+        event_document = _strict_snapshot_mapping(events_snapshot, label="reporting events")
+        recorded_program = str(event_document.get("program_id") or program_id)
+        if recorded_program != program_id:
+            raise BibliographyError("reporting events identity does not match the requested program")
+    events = event_document.get("items", []) if isinstance(event_document, dict) else []
+    if not isinstance(events, list) or any(not isinstance(item, dict) for item in events):
+        raise BibliographyError("reporting events items must be a list of mappings")
+    selected_unit_ids = tuple(sorted(_collect_unit_ids(state) | _collect_unit_ids(events)))
+    snapshots: list[CanonicalRecordSnapshot] = []
+    records: list[dict[str, Any]] = []
+    for unit_id in selected_unit_ids:
+        snapshot = canonical_record_snapshot_for_identity(root, "paper", unit_id)
+        if snapshot is None:
+            continue
+        record = normalize_record_snapshot(snapshot, root)
+        if record is None or str(record.get("kind") or "") != "paper":
+            raise BibliographyError("selected paper record is not a current canonical snapshot")
+        snapshots.append(snapshot)
+        records.append(record)
+    entries, rendered = bibliography_from_records(records)
+    inputs = BibliographyInputs(
+        program_id=program_id,
+        selected_unit_ids=selected_unit_ids,
+        paper_snapshots=tuple(snapshots),
+        entries=entries,
+        rendered=rendered,
+        state_snapshot=state_snapshot,
+        events_snapshot=events_snapshot,
+    )
+    if not inputs.is_current():
+        raise BibliographyError("bibliography inputs changed while they were captured")
+    return inputs
 
 
 def _same_record_snapshot(
@@ -1612,6 +1715,42 @@ def main() -> int:
     root = project_root(PROJECT_ROOT, explicit_root=args.root)
     print_resolved_project_roots(root)
     ensure_workspace(root)
+    if args.command == "bib":
+        try:
+            bibliography = load_bibliography_inputs(root, args.program_id)
+        except BibliographyError as exc:
+            raise SystemExit(f"无法导出引用：{exc}") from exc
+        path = root / "kb" / "output" / args.program_id / "references.bib"
+
+        def require_bibliography_current_at_commit() -> None:
+            if not bibliography.is_current():
+                raise RuntimeError("bibliography inputs changed during publication")
+
+        with command_mutation(
+            root,
+            "report-author:bib",
+            [path],
+            commit_guard=require_bibliography_current_at_commit,
+        ):
+            if not bibliography.is_current():
+                raise RuntimeError("bibliography inputs changed before publication")
+            rendered = bibliography.rendered
+            if not bibliography.is_current():
+                raise RuntimeError("bibliography inputs changed after rendering")
+            write_text_if_changed(path, rendered)
+            if not bibliography.is_current():
+                raise RuntimeError("bibliography inputs changed during publication")
+        missing_year = sum(
+            1 for entry in bibliography.entries if not str(entry.get("fields", {}).get("year") or "")
+        )
+        print(f"已导出 {len(bibliography.entries)} 条去重引用，其中 {missing_year} 条缺少年份。")
+        checkpoint_and_report(
+            root,
+            trigger="milestone",
+            message=f"milestone: export bibliography for {args.program_id}",
+            target_paths=[path],
+        )
+        return 0
     reports_root = root / "kb" / "programs" / args.program_id / "reports"
     inputs = load_report_inputs(
         root,

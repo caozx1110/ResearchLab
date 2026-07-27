@@ -249,6 +249,8 @@ files:
 | experiment | `basic_info{goal}`, `setup`, `process`, `results`, `diagnosis`（另见 run-log/diagnoses/follow-ups 旁路文件） | experiment-workbench |
 | concept | `concept{canonical_name, aliases, definition, scope_note}`, `associations`, `anchor`, `claims`, `verification`, `state{concept_status}` | literature-synthesizer（prepare/verify）、knowledge-base-manager（公共确认/拒绝） |
 
+paper `payload.basic_info` 的引用事实合同：`doi` 保存去 prefix/scheme 的小写 DOI；`arxiv_id` 保存 versionless work identity（精确 `vN` 仍由 `source.original_uri`/归档材料保存）；`citation_key` 必须等于 canonical unit id 的确定性投影 `cite_<sanitized-unit-id>`。`bibtex` 只允许补充 `entry_type/venue_field/volume/number/pages/publisher/primary_class`，不得复制 title/authors/year/DOI 或保存 provider raw BibTeX。intake 只从已归档 HTML/PDF、staged identity 和 source URI 机械合并，强 identity 冲突 fail closed，不联网补元数据。缺具体 publication type 时 `misc` 只是 BibTeX 中性序列化容器，不声称 journal/conference 类型。
+
 ### concept unit <a id="concept-unit"></a>
 
 概念是一等 canonical unit，不是外部 source，也不是 `kb/synthesis/` 下的 side judgement。`source-intake` 仍只创建 paper/repo/dataset/blog；`literature-synthesizer concept prepare` 仅在 `kb/synthesis/concepts/<slug>/concept-fill.yaml` 生成待填结构，至少冻结 3 个当前、唯一、已确认且非 concept 的 canonical unit。脚本不得填写定义、scope 或关联角色；这些内容由 runtime Agent 写入，每项判断都带逐字 evidence ref。
@@ -1296,6 +1298,7 @@ Wave3（2026-07-17）把 3.6/3.10/3.7 三个产出侧子系统从"一次性算�
 
 - 报告**自包含**：聚合 `reporting-events.yaml` + program 关联 unit 的 **confirmed claims + evidence**（`read_claims`/`validate_claims`），不再只 dump 事件。
 - 新增 `outline` verb（论文大纲 owner，非新 skill）：Introduction/Related Work/Method/Experiments/Results/Discussion/Conclusion 骨架，Related Work 挂 confirmed claims+evidence。
+- 私有 `bib` operation 从 program state 与**全量** reporting events 的 exact paper ids 生成 `kb/output/<program-id>/references.bib`；不新增公开 `kb` verb。选择集不受 report stage/limit 截断，输出按 stable citation key 排序并用白名单字段安全转义。去重只认 DOI/versionless arXiv/canonical URL（无强 identity 才退 unit id），强 identity/key/metadata 冲突 fail closed；render/write/transaction commit boundary 都重验 program bytes、选择集与 paper snapshots。bibliography 是 factual metadata，不要求 deep-read judgement 已确认。
 - **缺输入显式标 `missing: X`**（缺 decisions/events/confirmed claims/evidence 都如实标），绝不脑补。用户可见输出无裸命令（原则8）。
 - 报告模板是用户产物，不是内部 scaffold：neutral/default 使用中文标题、章节与“缺少：X”标记；只有当前 `report-author` operation 的 task-bound effective-preference receipt 明确选择 `profile.preferences.language_preference` 且值为英文时才切英文。operation allowlist 同时声明 language 与 reporting style；两者都只控制展示，不能改变、过滤或翻译逐字 evidence，也不能改变 epistemic/confirmation 类型。
 

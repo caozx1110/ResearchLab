@@ -13,6 +13,7 @@ description: Generate self-contained weekly reports, stage summaries, PPT or wri
 
 - 周报、阶段总结、PPT 素材、写作素材。
 - 论文提纲：本 skill 拥有 `outline` verb，不另建 paper-outline skill。
+- 论文引用：自然语言请求导出当前 program 的 BibTeX，内部走 `bib`，不增加公开 `kb` 动词。
 - 面向导师或合作者的报告必须脱离本地对话和知识库导航也能理解。
 
 ## Agent Workflow
@@ -34,6 +35,7 @@ description: Generate self-contained weekly reports, stage summaries, PPT or wri
 - `ppt-materials`：生成 evidence-backed slide inputs，而不是 event dump。
 - `writing-materials`：生成真实的 Writing Claims & Evidence 与 program context。
 - `outline`：生成 Introduction / Related Work / Method / Experiments / Results / Discussion / Conclusion 骨架；Related Work 必须携带 confirmed claims + evidence。
+- `bib`：从 program 全量关联的 canonical paper citation metadata 导出去重、稳定 key、确定性排序的 `references.bib`；只搬运事实，不要求 deep-read judgement receipt，也不接受 raw BibTeX。
 
 这些 verbs 由 agent 内部执行。用户只需用自然语言提出报告需求；用户可见回复不得包含脚本路径、裸命令、flags、变量占位符或内部 next-step 指令。
 
@@ -56,7 +58,7 @@ description: Generate self-contained weekly reports, stage summaries, PPT or wri
 - 核对缺失项明确、无 fabricated prose、无 raw command 泄漏。
 - 最终提交前由 agent 把结构化底稿改写为自然、紧凑、面向目标读者的叙事。
 
-脚本入口：`scripts/report.py`（weekly / stage-summary / ppt-materials / writing-materials / outline，均 --program-id）。
+脚本入口：`scripts/report.py`（weekly / stage-summary / ppt-materials / writing-materials / outline / bib，均使用 program identity）。
 
 ## 启动澄清（Agent 用）
 
