@@ -20,7 +20,7 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements-dev.txt
       - name: Compile Python files
-        run: python -m compileall .agents/skills .agents/lib
+        run: python -m compileall .agents/skills .agents/lib tests
       - name: Validate installer scripts
         run: |
           bash -n install.sh
@@ -32,12 +32,12 @@ jobs:
           git config --global user.name "ci"
           git config --global user.email "ci@example.com"
       - name: Run conversational release gate
-        run: python -m pytest .agents/lib/research/tests/test_r1_conversational_release.py -q
+        run: python -m pytest tests/test_r1_conversational_release.py -q
       - name: Run tests
         # Unset CI for this step only: the installer PTY tests drive a simulated
         # interactive terminal, and install.sh's is_interactive_input() correctly
         # refuses to prompt when $CI is set (a real-CI safety guard we keep intact).
-        run: env -u CI python -m pytest .agents/lib/research/tests -q
+        run: env -u CI python -m pytest tests -q
 
   macos-release-gate:
     runs-on: macos-latest
@@ -56,7 +56,7 @@ jobs:
       - name: Validate scripts and metadata
         run: |
           bash -n install.sh
-          PYTHONPYCACHEPREFIX="$RUNNER_TEMP/pycache" python -m compileall -q .agents/skills .agents/lib install-lib/ws_sync.py
+          PYTHONPYCACHEPREFIX="$RUNNER_TEMP/pycache" python -m compileall -q .agents/skills .agents/lib tests install-lib/ws_sync.py
           python .agents/lib/research/skill_validator.py .agents/skills
       - name: Configure git identity for installer and recovery tests
         run: |
@@ -65,9 +65,9 @@ jobs:
       - name: Run macOS release and installer smoke tests
         run: |
           env -u CI python -m pytest \
-            .agents/lib/research/tests/test_r1_conversational_release.py \
-            .agents/lib/research/tests/test_bootstrap.py \
-            .agents/lib/research/tests/test_updater.py \
-            .agents/lib/research/tests/test_installer.py \
-            .agents/lib/research/tests/test_bundle_lifecycle.py \
+            tests/test_r1_conversational_release.py \
+            tests/test_bootstrap.py \
+            tests/test_updater.py \
+            tests/test_installer.py \
+            tests/test_bundle_lifecycle.py \
             -q
