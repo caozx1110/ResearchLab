@@ -36,11 +36,13 @@ from research.common import (
     load_yaml,
     normalize_list,
     print_resolved_project_roots,
+    utc_now_iso,
     write_text_if_changed,
     write_yaml_if_changed,
 )
 from research.core import append_history, build_index, build_unit_id, candidate_pools_path, canonical_record_snapshot_for_record, checkpoint_and_report, command_mutation, confirm_unit, default_record, ensure_workspace, kb_root, locate_record, project_root, record_path, rel, topic_taxonomy_path, write_record
 from research.evidence import attach_claims, build_verification_receipt, validate_claims, verify_claim_evidence
+from research.experiment_imports import load_import_batch, require_current_import_batch
 from research.journal import workspace_transaction_lock
 from research.judgements import confirmation_binding
 from research.preference_selection import (
@@ -84,6 +86,9 @@ _PENDING_CHECKPOINT: ContextVar["tuple[Path, str, str, list[Path]] | None"] = Co
 _CREATED_RUN_COMMIT_GUARD: ContextVar["tuple[Path, dict[str, Any]] | None"] = ContextVar(
     "experiment_created_run_commit_guard", default=None
 )
+_BATCH_IMPORT_COMMIT_GUARD: ContextVar["dict[str, Any] | None"] = ContextVar(
+    "experiment_batch_import_commit_guard", default=None
+)
 
 
 def _validate_created_run_at_commit() -> None:
@@ -91,6 +96,28 @@ def _validate_created_run_at_commit() -> None:
     if pending is None:
         raise SystemExit("Experiment created run commit guard is unavailable.")
     _validate_created_run_fact(pending[0], pending[1])
+
+
+def _validate_batch_import_at_commit() -> None:
+    pending = _BATCH_IMPORT_COMMIT_GUARD.get()
+    if not isinstance(pending, dict):
+        raise SystemExit("Experiment batch import commit guard is unavailable.")
+    try:
+        require_current_import_batch(pending["root"], pending["source"], pending["source_batch"])
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    if batch_run_allocator_snapshot(pending["unit_root"], 0) != pending["runs_fact"]:
+        raise SystemExit("Experiment imported runs changed before commit; transaction aborted.")
+    if _flat_directory_fact(pending["unit_root"] / "imports") != pending["imports_fact"]:
+        raise SystemExit("Experiment import archive changed before commit; transaction aborted.")
+    for expected in pending.get("file_facts", []):
+        path = pending["root"] / expected["path"]
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError as exc:
+            raise SystemExit("Experiment batch output disappeared before commit; transaction aborted.") from exc
+        if not stat.S_ISREG(metadata.st_mode) or path.is_symlink() or _hash_file(path) != expected["sha256"]:
+            raise SystemExit("Experiment batch output changed before commit; transaction aborted.")
 
 
 def _queue_checkpoint(root: Path, *, trigger: str, message: str, target_paths: list[Path]) -> dict:
@@ -118,7 +145,7 @@ def _experiment_command_targets(args, root: Path) -> list[Path]:
     targets = [path, *_index_targets(root)]
     if program_id:
         targets.append(_program_event_path(root, program_id))
-    if args.command == "log-run":
+    if args.command in {"log-run", "import-runs"}:
         # Reject unsafe allocator shapes before the recovery journal tries to
         # snapshot a special file or symlink as a mutation target.  The exact
         # state is read again and receipt-bound inside the root transaction.
@@ -130,6 +157,8 @@ def _experiment_command_targets(args, root: Path) -> list[Path]:
                 unit / "run-log.md",
             ]
         )
+        if args.command == "import-runs":
+            targets.append(unit / "imports")
     elif args.command == "follow-up":
         targets.extend([list_document_path(unit, "follow-ups"), unit / "follow-ups.md"])
     elif args.command == "diagnose":
@@ -489,6 +518,234 @@ def run_allocator_snapshot(unit_root: Path) -> dict[str, Any]:
     if first != second:
         raise SystemExit("Experiment run allocator changed while it was inspected; retry.")
     return second
+
+
+def _batch_run_allocator_snapshot_once(unit_root: Path, count: int) -> dict[str, Any]:
+    if count < 0 or count > 1000:
+        raise SystemExit("Experiment batch allocator count is outside the safe range.")
+    runs_dir = unit_root / "runs"
+    try:
+        metadata = runs_dir.lstat()
+    except FileNotFoundError:
+        proposed = [f"run-{index:03d}" for index in range(1, count + 1)]
+        return {
+            "directory_state": "absent",
+            "directory_identity": {},
+            "directory_entry_digest": _sha256_payload(
+                {"directory_state": "absent", "logical_identity": "runs"}
+            ),
+            "entries": [],
+            "proposed_run_ids": proposed,
+            "proposed_run_paths": [f"runs/{item}.md" for item in proposed],
+        }
+    if runs_dir.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
+        raise SystemExit("Experiment run allocator must be a safe directory.")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(runs_dir, flags)
+    except OSError as exc:
+        raise SystemExit("Experiment run allocator must be a safe directory.") from exc
+    try:
+        fact = _run_allocator_directory_fact(descriptor)
+    finally:
+        os.close(descriptor)
+    occupied = set(fact["occupied"])
+    proposed: list[str] = []
+    index = 1
+    while len(proposed) < count:
+        if index not in occupied:
+            proposed.append(f"run-{index:03d}")
+        index += 1
+    return {
+        "directory_state": "directory",
+        "directory_identity": fact["directory_identity"],
+        "directory_entry_digest": fact["directory_entry_digest"],
+        "entries": fact["entries"],
+        "proposed_run_ids": proposed,
+        "proposed_run_paths": [f"runs/{item}.md" for item in proposed],
+    }
+
+
+def batch_run_allocator_snapshot(unit_root: Path, count: int) -> dict[str, Any]:
+    first = _batch_run_allocator_snapshot_once(unit_root, count)
+    second = _batch_run_allocator_snapshot_once(unit_root, count)
+    if first != second:
+        raise SystemExit("Experiment run allocator changed while the batch was inspected; retry.")
+    return second
+
+
+def _flat_directory_fact_once(path: Path) -> dict[str, Any]:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return {
+            "directory_state": "absent",
+            "directory_identity": {},
+            "directory_entry_digest": _sha256_payload(
+                {"directory_state": "absent", "logical_identity": path.name}
+            ),
+            "entries": [],
+        }
+    if path.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
+        raise SystemExit(f"Experiment {path.name} root must be a safe directory.")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise SystemExit(f"Experiment {path.name} root must be a safe directory.") from exc
+    try:
+        fact = _run_allocator_directory_fact(descriptor)
+    finally:
+        os.close(descriptor)
+    return {
+        "directory_state": "directory",
+        "directory_identity": fact["directory_identity"],
+        "directory_entry_digest": fact["directory_entry_digest"],
+        "entries": fact["entries"],
+    }
+
+
+def _flat_directory_fact(path: Path) -> dict[str, Any]:
+    first = _flat_directory_fact_once(path)
+    second = _flat_directory_fact_once(path)
+    if first != second:
+        raise SystemExit(f"Experiment {path.name} root changed while it was inspected; retry.")
+    return second
+
+
+def _write_run_files_exclusive_batch(
+    unit_root: Path,
+    expected_allocator: dict[str, Any],
+    texts: list[str],
+) -> list[Path]:
+    if batch_run_allocator_snapshot(unit_root, len(texts)) != expected_allocator:
+        raise SystemExit("Experiment run allocator changed before batch creation; retry.")
+    run_ids = expected_allocator.get("proposed_run_ids", [])
+    if len(run_ids) != len(texts) or any(not re.fullmatch(r"run-\d{3,}", str(item)) for item in run_ids):
+        raise SystemExit("Experiment batch allocator receipt is invalid; retry.")
+    runs_dir = unit_root / "runs"
+    created_directory = False
+    if expected_allocator.get("directory_state") == "absent":
+        try:
+            runs_dir.mkdir(mode=0o755)
+            created_directory = True
+        except OSError as exc:
+            raise SystemExit("Experiment run allocator changed before batch creation; retry.") from exc
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        directory_fd = os.open(runs_dir, flags)
+    except OSError as exc:
+        raise SystemExit("Experiment run allocator became unsafe before batch creation; retry.") from exc
+    created: list[str] = []
+    try:
+        if expected_allocator.get("directory_state") == "directory":
+            opened = os.fstat(directory_fd)
+            identity = {"device": opened.st_dev, "inode": opened.st_ino, "mode": stat.S_IMODE(opened.st_mode)}
+            if identity != expected_allocator.get("directory_identity"):
+                raise SystemExit("Experiment run allocator changed before batch creation; retry.")
+        for run_id, text in zip(run_ids, texts):
+            name = f"{run_id}.md"
+            create_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            try:
+                descriptor = os.open(name, create_flags, 0o644, dir_fd=directory_fd)
+            except OSError as exc:
+                raise SystemExit("Experiment run path changed during batch creation; transaction aborted.") from exc
+            created.append(name)
+            try:
+                payload = text.encode("utf-8")
+                view = memoryview(payload)
+                while view:
+                    written = os.write(descriptor, view)
+                    if written <= 0:
+                        raise OSError("short write")
+                    view = view[written:]
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        os.fsync(directory_fd)
+        final = _run_allocator_directory_fact(directory_fd)
+        for name, text in zip(created, texts):
+            matching = [item for item in final["entries"] if item["name"] == name]
+            if len(matching) != 1 or matching[0]["content_digest"] != hashlib.sha256(text.encode("utf-8")).hexdigest():
+                raise SystemExit("Experiment imported run changed during batch creation; transaction aborted.")
+    except BaseException:
+        for name in reversed(created):
+            try:
+                os.unlink(name, dir_fd=directory_fd)
+            except OSError:
+                pass
+        raise
+    finally:
+        os.close(directory_fd)
+        if created_directory and not created:
+            try:
+                runs_dir.rmdir()
+            except OSError:
+                pass
+    return [runs_dir / name for name in created]
+
+
+def _archive_import_sources(unit_root: Path, batch: dict[str, Any]) -> dict[str, Path]:
+    imports_dir = unit_root / "imports"
+    prior = _flat_directory_fact(imports_dir)
+    created_directory = False
+    if prior["directory_state"] == "absent":
+        try:
+            imports_dir.mkdir(mode=0o755)
+            created_directory = True
+        except OSError as exc:
+            raise SystemExit("Experiment import archive changed before creation; retry.") from exc
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        directory_fd = os.open(imports_dir, flags)
+    except OSError as exc:
+        raise SystemExit("Experiment import archive became unsafe; retry.") from exc
+    created: list[str] = []
+    archived: dict[str, Path] = {}
+    try:
+        digest = str(batch["batch_digest"])
+        for index, item in enumerate(batch["source_files"], start=1):
+            suffix = Path(str(item["name"])).suffix.lower()
+            name = f"{digest}-source-{index:03d}{suffix}"
+            payload = item["bytes"]
+            create_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            try:
+                descriptor = os.open(name, create_flags, 0o444, dir_fd=directory_fd)
+            except FileExistsError:
+                existing = _run_allocator_file_fact(directory_fd, name)
+                if existing["content_digest"] != hashlib.sha256(payload).hexdigest():
+                    raise SystemExit("Experiment import archive digest path contains different bytes.")
+            except OSError as exc:
+                raise SystemExit("Experiment import archive path changed during creation; transaction aborted.") from exc
+            else:
+                created.append(name)
+                try:
+                    view = memoryview(payload)
+                    while view:
+                        written = os.write(descriptor, view)
+                        if written <= 0:
+                            raise OSError("short write")
+                        view = view[written:]
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+            archived[str(item["name"])] = imports_dir / name
+        os.fsync(directory_fd)
+    except BaseException:
+        for name in reversed(created):
+            try:
+                os.unlink(name, dir_fd=directory_fd)
+            except OSError:
+                pass
+        raise
+    finally:
+        os.close(directory_fd)
+        if created_directory and not created:
+            try:
+                imports_dir.rmdir()
+            except OSError:
+                pass
+    return archived
 
 
 def _write_run_file_exclusive(
@@ -957,6 +1214,218 @@ def generated_artifact(root: Path, path: Path) -> dict[str, Any]:
     return {"path": rel(root, path), "status": "present", "generated": True, "kind": "file"}
 
 
+def _import_archive_paths(unit_root: Path, batch: dict[str, Any]) -> dict[str, Path]:
+    digest = str(batch["batch_digest"])
+    return {
+        str(item["name"]): unit_root / "imports" / f"{digest}-source-{index:03d}{Path(str(item['name'])).suffix.lower()}"
+        for index, item in enumerate(batch["source_files"], start=1)
+    }
+
+
+def _render_run_document(record: dict[str, Any], entry: dict[str, Any]) -> str:
+    provenance = entry.get("import_provenance") if isinstance(entry.get("import_provenance"), dict) else {}
+    source_rows = []
+    if provenance:
+        source_rows = [
+            "",
+            "## Import Provenance",
+            "- Source: imported",
+            f"- External run ID: {provenance.get('external_run_id') or 'unspecified'}",
+            f"- Batch digest: {provenance.get('batch_digest', '')}",
+            f"- Item digest: {provenance.get('item_digest', '')}",
+            f"- Source locator: {provenance.get('source_locator', '')}",
+            f"- Raw artifact: {provenance.get('source_artifact', '')}",
+        ]
+    return (
+        "\n".join(
+            [
+                f"# Run for {record.get('title', '')}",
+                "",
+                "## Run Identity",
+                f"- Run ID: {entry['id']}",
+                f"- Fingerprint: {entry['fingerprint']}",
+                f"- Repeat group: {entry['repeat_group_id']}",
+                f"- Repeat index: {entry['repeat_index']}",
+                f"- Seed: {entry['seed'] if entry.get('seed') is not None else 'unspecified'}",
+                f"- Config revision: {entry.get('config_revision', '')}",
+                f"- Rerun reason: {entry.get('rerun_reason') or 'none'}",
+                *source_rows,
+                "",
+                "## Changes",
+                *([f"- {item}" for item in entry.get("changes", [])] or ["- none declared"]),
+                "",
+                "## Result Summary",
+                f"- {entry.get('result_summary', '')}",
+                "",
+                "## Classification",
+                f"- Outcome: {entry.get('outcome', 'inconclusive')}",
+                *[f"- {item}" for item in entry.get("classifications", [])],
+                "",
+                "## Metrics",
+                *(
+                    [
+                        f"- {metric['name']}={metric['value']} [{metric.get('unit') or 'unitless'}] "
+                        f"direction={metric.get('direction') or 'unknown'}"
+                        for metric in entry.get("metrics", {}).values()
+                    ]
+                    or ["- none declared"]
+                ),
+                "",
+                "## Artifacts",
+                *[f"- {item['path']} · {item['status']}" for item in entry.get("artifacts", [])],
+                "",
+                "## Next Actions",
+                *([f"- {item}" for item in entry.get("next_actions", [])] or ["- none declared"]),
+                "",
+            ]
+        ).strip()
+        + "\n"
+    )
+
+
+def _prepare_import_plan(
+    root: Path,
+    record: dict[str, Any],
+    unit_root: Path,
+    batch: dict[str, Any],
+    recent_runs: int,
+) -> dict[str, Any]:
+    run_log_path = list_document_path(unit_root, "run-log")
+    run_log = load_list_document(run_log_path, f"{record['id']}-run-log", "experiment-workbench")
+    prior_runs = [item for item in run_log.get("items", []) if isinstance(item, dict)]
+    existing_items: dict[str, list[str]] = {}
+    existing_external: dict[str, list[tuple[str, str]]] = {}
+    existing_identity: dict[tuple[str, Any, str], list[tuple[str, str]]] = {}
+    for item in prior_runs:
+        provenance = item.get("import_provenance") if isinstance(item.get("import_provenance"), dict) else {}
+        item_digest = str(provenance.get("item_digest") or "")
+        external_id = str(provenance.get("external_run_id") or "")
+        run_id = str(item.get("id") or "")
+        if item_digest:
+            existing_items.setdefault(item_digest, []).append(run_id)
+        if external_id:
+            existing_external.setdefault(external_id, []).append((item_digest, run_id))
+        fingerprint = str(item.get("fingerprint") or "")
+        if fingerprint:
+            key = (fingerprint, item.get("seed"), _normalized_text(item.get("config_revision")))
+            existing_identity.setdefault(key, []).append((item_digest, run_id))
+    if any(len(ids) != 1 for ids in existing_items.values()):
+        raise SystemExit("Existing imported run provenance contains duplicate item identities; repair before import.")
+
+    skipped = 0
+    candidates: list[dict[str, Any]] = []
+    seen_items: set[str] = set()
+    seen_external: dict[str, str] = {}
+    seen_identity: dict[tuple[str, Any, str], str] = {}
+    for source_run in batch["runs"]:
+        item_digest = str(source_run["item_digest"])
+        external_id = str(source_run.get("external_id") or "")
+        if item_digest in existing_items or item_digest in seen_items:
+            skipped += 1
+            continue
+        claimed_artifacts = verify_artifacts(root, source_run.get("artifacts", []))
+        fingerprint, repeat_group_id = build_run_identity(
+            record["id"],
+            tested_hypothesis=source_run.get("tested_hypothesis", ""),
+            changes=source_run.get("changes", []),
+            metrics=source_run.get("metrics", {}),
+            artifacts=claimed_artifacts,
+            config_revision=source_run["config_revision"],
+            seed=source_run.get("seed"),
+        )
+        identity = (fingerprint, source_run.get("seed"), _normalized_text(source_run["config_revision"]))
+        if external_id:
+            conflicts = [item for item in existing_external.get(external_id, []) if item[0] != item_digest]
+            if conflicts or (external_id in seen_external and seen_external[external_id] != item_digest):
+                raise SystemExit(f"Experiment import conflict: external run id {external_id} has different source bytes.")
+        conflicts = [item for item in existing_identity.get(identity, []) if item[0] != item_digest]
+        if conflicts or (identity in seen_identity and seen_identity[identity] != item_digest):
+            raise SystemExit("Experiment import conflict: fingerprint, seed, and config revision identify different source bytes.")
+        candidate = dict(source_run)
+        candidate["claimed_artifacts"] = claimed_artifacts
+        candidate["fingerprint"] = fingerprint
+        candidate["repeat_group_id"] = repeat_group_id
+        candidates.append(candidate)
+        seen_items.add(item_digest)
+        if external_id:
+            seen_external[external_id] = item_digest
+        seen_identity[identity] = item_digest
+
+    allocator = batch_run_allocator_snapshot(unit_root, len(candidates))
+    archive_paths = _import_archive_paths(unit_root, batch)
+    planned_runs = list(prior_runs)
+    entries: list[dict[str, Any]] = []
+    texts: list[str] = []
+    run_paths: list[Path] = []
+    run_log_artifact = generated_artifact(root, run_log_path)
+    for candidate, run_id, relative_path in zip(
+        candidates,
+        allocator["proposed_run_ids"],
+        allocator["proposed_run_paths"],
+    ):
+        run_path = unit_root / relative_path
+        repeated = [
+            str(item.get("id") or "")
+            for item in planned_runs
+            if str(item.get("repeat_group_id") or "") == candidate["repeat_group_id"]
+        ]
+        source_path = archive_paths[candidate["source_file"]]
+        source_artifact = generated_artifact(root, source_path)
+        logged_artifacts = [
+            generated_artifact(root, run_path),
+            run_log_artifact,
+            source_artifact,
+            *candidate["claimed_artifacts"],
+        ]
+        entry = {
+            "id": run_id,
+            "source": "imported",
+            "fingerprint": candidate["fingerprint"],
+            "repeat_group_id": candidate["repeat_group_id"],
+            "repeat_index": len(repeated) + 1,
+            "repeats_run_ids": [*repeated, run_id],
+            "seed": candidate.get("seed"),
+            "config_revision": candidate["config_revision"],
+            "rerun_reason": "",
+            "result_summary": candidate["result_summary"],
+            "outcome": candidate["outcome"],
+            "classifications": candidate["classifications"],
+            "changes": candidate["changes"],
+            "metrics": candidate["metrics"],
+            "why_this_run": candidate["why_this_run"],
+            "tested_hypothesis": candidate["tested_hypothesis"],
+            "tags": candidate["tags"],
+            "artifacts": logged_artifacts,
+            "comparison": build_run_comparison(candidate["metrics"], planned_runs, max(recent_runs, 0)),
+            "next_actions": candidate["next_actions"],
+            "information_types": ["fact"],
+            "preference_context": {},
+            "import_provenance": {
+                "format": batch["format"],
+                "batch_digest": batch["batch_digest"],
+                "item_digest": candidate["item_digest"],
+                "source_locator": candidate["source_locator"],
+                "source_file": candidate["source_file"],
+                "source_artifact": rel(root, source_path),
+                "external_run_id": candidate["external_id"],
+            },
+        }
+        entries.append(entry)
+        planned_runs.append(entry)
+        texts.append(_render_run_document(record, entry))
+        run_paths.append(run_path)
+    return {
+        "run_log_path": run_log_path,
+        "prior_runs": prior_runs,
+        "entries": entries,
+        "texts": texts,
+        "run_paths": run_paths,
+        "archive_paths": archive_paths,
+        "allocator": allocator,
+        "skipped": skipped,
+    }
+
+
 def typed_metric_map(raw_metrics: Any) -> dict[str, dict[str, Any]]:
     if isinstance(raw_metrics, list):
         candidates = {str(item.get("name") or ""): item for item in raw_metrics if isinstance(item, dict)}
@@ -1274,6 +1743,11 @@ def build_parser() -> argparse.ArgumentParser:
     log_run.add_argument("--rerun-reason", default="")
     log_run.add_argument("--preference-selection-id", default="", help=argparse.SUPPRESS)
 
+    import_runs = subparsers.add_parser("import-runs", help=argparse.SUPPRESS)
+    import_runs.add_argument("--experiment-id", required=True)
+    import_runs.add_argument("--source", required=True)
+    import_runs.add_argument("--recent-runs", type=int, default=DEFAULT_RECENT_RUNS)
+
     follow_up = subparsers.add_parser("follow-up")
     follow_up.add_argument("--experiment-id", required=True)
     follow_up.add_argument("--action", required=True)
@@ -1352,6 +1826,155 @@ def _dispatch(args, root: Path) -> int:
 
     prepared = prepare_experiment_preference_inputs(root, args, record, unit_root)
     preferences = resolve_experiment_preferences(root, args, record, prepared)
+
+    if args.command == "import-runs":
+        try:
+            batch = load_import_batch(root, args.source)
+        except ValueError as exc:
+            raise SystemExit(f"Experiment import rejected: {exc}") from exc
+        plan = _prepare_import_plan(root, record, unit_root, batch, args.recent_runs)
+        entries = plan["entries"]
+        if not entries:
+            try:
+                require_current_import_batch(root, args.source, batch)
+            except ValueError as exc:
+                raise SystemExit(str(exc)) from exc
+            _BATCH_IMPORT_COMMIT_GUARD.set(
+                {
+                    "root": root,
+                    "unit_root": unit_root,
+                    "source": args.source,
+                    "source_batch": batch,
+                    "runs_fact": batch_run_allocator_snapshot(unit_root, 0),
+                    "imports_fact": _flat_directory_fact(unit_root / "imports"),
+                    "file_facts": [],
+                }
+            )
+            print(f"批量实验导入完成：导入 0 条，跳过 {plan['skipped']} 条，冲突 0 条。")
+            return 0
+        try:
+            require_current_import_batch(root, args.source, batch)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        archived = _archive_import_sources(unit_root, batch)
+        if archived != plan["archive_paths"]:
+            raise SystemExit("Experiment import archive plan changed before write; transaction aborted.")
+        created_paths = _write_run_files_exclusive_batch(unit_root, plan["allocator"], plan["texts"])
+        if created_paths != plan["run_paths"]:
+            raise SystemExit("Experiment imported run allocation changed before write; transaction aborted.")
+        run_log_payload = load_list_document(
+            plan["run_log_path"],
+            f"{args.experiment_id}-run-log",
+            "experiment-workbench",
+        )
+        created_at = utc_now_iso()
+        durable_entries = []
+        for entry in entries:
+            durable = dict(entry)
+            durable.setdefault("created_at", created_at)
+            durable_entries.append(durable)
+        run_log_payload["items"] = [*plan["prior_runs"], *durable_entries]
+        run_log_payload["generated_by"] = "experiment-workbench"
+        run_log_payload["generated_at"] = created_at
+        write_yaml_if_changed(plan["run_log_path"], run_log_payload)
+        sync_run_log_summary(unit_root)
+        latest = entries[-1]
+        record["status"] = "running"
+        record["payload"]["process"]["change_summary"] = latest["changes"]
+        record["payload"]["process"]["why_this_run"] = latest["why_this_run"]
+        record["payload"]["process"]["tested_hypothesis"] = latest["tested_hypothesis"]
+        record["payload"]["results"]["metrics"] = latest["metrics"]
+        record["payload"]["results"]["comparison"] = latest["comparison"]
+        record["payload"]["results"]["artifacts"] = latest["artifacts"]
+        record["payload"]["results"]["met_expectation"] = (
+            "yes" if latest["outcome"] == "success" else
+            ("no" if latest["outcome"] in {"failed", "blocked"} else "unknown")
+        )
+        record["payload"]["results"]["abnormalities"] = latest["classifications"]
+        record["payload"]["diagnosis"]["next_actions"] = latest["next_actions"]
+        record["summary"] = latest["result_summary"]
+        run_log_artifact_path = rel(root, plan["run_log_path"])
+        batch_artifacts = [
+            run_log_artifact_path,
+            *[rel(root, item) for item in plan["run_paths"]],
+            *[rel(root, item) for item in archived.values()],
+        ]
+        record.setdefault("artifacts", [])
+        for artifact in batch_artifacts:
+            if artifact not in record["artifacts"]:
+                record["artifacts"].append(artifact)
+        append_history(
+            record,
+            action="experiment-runs-imported",
+            summary=f"Imported {len(entries)} experiment runs from a bounded export batch.",
+            information_types=["fact"],
+            artifacts=batch_artifacts,
+        )
+        write_record(root, record)
+        build_index(root)
+        program_id = str(record.get("payload", {}).get("basic_info", {}).get("program_id") or "").strip()
+        event_path: Path | None = None
+        if program_id:
+            event_path = _program_event_path(root, program_id)
+            append_program_reporting_event(
+                root,
+                program_id,
+                {
+                    "source_skill": "experiment-workbench",
+                    "event_type": "experiment-run-import",
+                    "title": record.get("title", args.experiment_id),
+                    "summary": f"Imported {len(entries)} runs; skipped {plan['skipped']} identical items.",
+                    "stage": "experiment-running",
+                    "artifacts": [run_log_artifact_path, *[rel(root, item) for item in archived.values()]],
+                    "tags": ["experiment", "run", "imported"],
+                },
+                generated_by="experiment-workbench",
+            )
+        try:
+            require_current_import_batch(root, args.source, batch)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        guarded_files = [
+            path,
+            plan["run_log_path"],
+            unit_root / "run-log.md",
+            *_index_targets(root),
+            *([event_path] if event_path is not None else []),
+        ]
+        file_facts = []
+        for guarded in guarded_files:
+            if not guarded.exists() or guarded.is_symlink() or not guarded.is_file():
+                raise SystemExit("Experiment batch output is missing or unsafe before commit.")
+            file_facts.append({"path": rel(root, guarded), "sha256": _hash_file(guarded)})
+        _BATCH_IMPORT_COMMIT_GUARD.set(
+            {
+                "root": root,
+                "unit_root": unit_root,
+                "source": args.source,
+                "source_batch": batch,
+                "runs_fact": batch_run_allocator_snapshot(unit_root, 0),
+                "imports_fact": _flat_directory_fact(unit_root / "imports"),
+                "file_facts": file_facts,
+            }
+        )
+        checkpoint_targets = [
+            path,
+            *plan["run_paths"],
+            *archived.values(),
+            plan["run_log_path"],
+            unit_root / "run-log.md",
+            *_index_targets(root),
+        ]
+        if event_path is not None:
+            checkpoint_targets.append(event_path)
+        _queue_checkpoint(
+            root,
+            trigger="milestone",
+            message=f"milestone: import {len(entries)} experiment runs ({record['id']})",
+            target_paths=checkpoint_targets,
+        )
+        print(f"批量实验导入完成：导入 {len(entries)} 条，跳过 {plan['skipped']} 条，冲突 0 条。")
+        return 0
 
     if args.command == "log-run":
         if prepare_experiment_preference_inputs(root, args, record, unit_root) != prepared:
@@ -1713,6 +2336,7 @@ def main() -> int:
     active_token = _ACTIVE_MUTATION.set(True)
     checkpoint_token = _PENDING_CHECKPOINT.set(None)
     created_run_guard_token = _CREATED_RUN_COMMIT_GUARD.set(None)
+    batch_import_guard_token = _BATCH_IMPORT_COMMIT_GUARD.set(None)
     try:
         # Target discovery reads the canonical experiment record.  Hold the
         # same workspace lease used by the root mutation so a concurrent
@@ -1723,11 +2347,15 @@ def main() -> int:
                 root,
                 f"experiment-workbench:{args.command}",
                 _experiment_command_targets(args, root),
-                commit_guard=_validate_created_run_at_commit if args.command == "log-run" else None,
+                commit_guard=(
+                    _validate_created_run_at_commit if args.command == "log-run" else
+                    (_validate_batch_import_at_commit if args.command == "import-runs" else None)
+                ),
             ):
                 result = _dispatch(args, root)
         pending = _PENDING_CHECKPOINT.get()
     finally:
+        _BATCH_IMPORT_COMMIT_GUARD.reset(batch_import_guard_token)
         _CREATED_RUN_COMMIT_GUARD.reset(created_run_guard_token)
         _PENDING_CHECKPOINT.reset(checkpoint_token)
         _ACTIVE_MUTATION.reset(active_token)

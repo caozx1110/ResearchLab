@@ -334,6 +334,7 @@ Agent 只填写所选分支，未选分支必须保持空白。verify 同时验�
 experiment unit 除 record.yaml 外有三个职责分离的旁路文件。**职责分工**：
 
 - `run-log.yaml` = **客观记录**（fact-only），单次跑/一组跑的设置、改动、指标、产物
+- `imports/` = 批量导入的只读 raw bytes 归档；文件名由 batch digest 与稳定序号决定，不保存机器绝对路径
 - `diagnoses.yaml` = **AI 推断/评估**（inference, evaluation），机制猜想、因果归类、待澄清项 → 一律 `pending_user_confirmation`
 - `follow-ups.yaml` = 行动列表（fact + unverified），下一步动作、优先级、完成证据
 
@@ -349,6 +350,7 @@ confidence: 1.0
 items:
 - id: <experiment-id>-run-log-001
   created_at: ''
+  source: imported|manual             # 批量入口固定 imported；旧/逐条记录可省略
   fingerprint: sha256             # 仅绑定配置身份，不绑定观测结果或时间
   repeat_group_id: sha256         # seed-independent；当前与 fingerprint 相同
   seed: null                       # 可选；不同 seed 是同 fingerprint 的合法 repeat
@@ -361,15 +363,24 @@ items:
   changes: []                   # 相对上一跑的变更
   metrics: {}                   # 量化结果。轻度强类型（2026-07-17）：值为 {name,value:float,unit,direction} 的对象；裸 key=value 仍兼容（value 尽量转 float，否则留字符串+warn）。方向 higher-better/lower-better，用于跨轮次自动比较
   artifacts: []                 # 每项 {path,status:present|missing,generated:bool}；claimed artifact 落盘前 stat 校验存在性（2026-07-17）
-  outcome: success|partial|failure
+  outcome: success|partial|failed|blocked|inconclusive
   classifications: [method|data|resource|evaluation|...]
   result_summary: ""
   next_actions: []
-  artifacts: []                 # 输出文件 kb-path
   information_types: [fact]     # run-log 必须只含 fact，否则迁到 diagnoses
+  import_provenance:             # source=imported 时必有；全部 project-relative / digest-bound
+    format: wandb-json|csv|json-directory
+    batch_digest: sha256
+    item_digest: sha256
+    source_locator: item:1|row:2|run-a.json
+    source_file: wandb.json
+    source_artifact: kb/units/experiments/<id>/imports/<digest>-source-001.json
+    external_run_id: ''
 ```
 
 `fingerprint` 的 canonical 输入是 experiment id、`tested_hypothesis`、规范化 `changes`、typed metric schema（name/unit/direction，不含 value）、声明 artifact identities 与 config/input revision。`created_at`、`result_summary`、outcome 与 observed metric values 不参与。完全相同 fingerprint + seed/config revision 的第二次写入默认拒绝；只有显式 rerun/retry 且 `rerun_reason` 非空才允许。不同 seed 进入同一 repeat group。run id 分配、fingerprint 计算、duplicate check 与 run-log/record/event 写入必须在同一 exact-target lock + journal transaction 内完成。
+
+批量导入只接受 project-contained 的 W&B JSON、稳定 header CSV 或单层 `run-*.json` 目录。单文件至多 16 MiB、整批至多 128 MiB/1000 runs；symlink、special file、嵌套目录、重复字段/列、非 UTF-8 与非有限数一律拒绝。显式事实直接映射，W&B numeric summary 机械成为 typed metrics，缺失 config revision 时使用 canonical config digest；固定 state mapping 之外一律 `inconclusive`，不得推断诊断。所有 item identity/conflict 与 N 个 run id 在写前完成，raw archive、N 个 run Markdown、单一 run-log/record/event/index 更新属于一个 transaction 和一个 checkpoint。相同 item digest 重放为 skip；相同 external id 或 fingerprint+seed/config 指向不同 item digest 时整批零写失败。
 
 ### diagnoses.yaml
 

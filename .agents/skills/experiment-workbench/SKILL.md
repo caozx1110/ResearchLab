@@ -14,7 +14,7 @@ Use this skill for structured experiment memory rather than one-off chat summari
 ## Workflow
 
 1. Create the experiment record with program and idea context.
-2. Log each run into a durable `run-log` with outcome and classification tags.
+2. Log each run into a durable `run-log` with outcome and classification tags, or import a bounded export batch when the user provides one.
 3. Track follow-up actions separately from diagnosis so execution debt does not disappear into prose.
 4. Keep diagnosis categories explicit and `pending_user_confirmation` by default.
 5. Emit reporting events when a plan, run, follow-up, or diagnosis matters to program reporting.
@@ -31,6 +31,9 @@ Use this skill for structured experiment memory rather than one-off chat summari
 - Every run requires an explicit config/input revision. Its canonical fingerprint binds experiment id, normalized tested hypothesis, sorted normalized changes, metric schema (`name/unit/direction`, never observed values), contained artifact identities, and the config revision. Result prose, timestamps, observed values, and seed do not alter this configuration identity.
 - Different seeds share the same fingerprint and increment one repeat group. A second run with the same fingerprint and seed is rejected unless the runtime agent explicitly records rerun mode with a non-empty reason. Persist `fingerprint`, `repeat_group_id`, `repeat_index`, `repeats_run_ids`, `seed`, `config_revision`, and `rerun_reason` in both the structured log and run Markdown.
 - Allocate the monotonic run id, check duplicates, and write the Markdown/run-log only after acquiring the workspace transaction lock. Artifact identities must remain project-contained; absolute machine paths never become durable identity.
+- Batch import is a private Agent workflow for project-contained W&B JSON, stable-header CSV, or a flat `run-*.json` directory. Preserve exact source bytes in the experiment's digest-addressed import archive, but persist only project-relative provenance, byte/item/batch digests, source row/file, and optional external run id.
+- Import parsing is factual ETL only: explicit fields map directly, numeric summary fields become typed metrics, missing config revision becomes a canonical config digest, and a fixed external-state map produces the observed outcome. It must never infer a diagnosis, winner, cause, significance, or recommendation.
+- Preflight the complete batch before any business write. Identical item digests are idempotent skips; an external id or fingerprint+seed/config collision with different source bytes rejects the whole batch. Raw archive, all run files, the shared log/record/event/index updates, and the one checkpoint are all-or-nothing.
 - Diagnosis remains agent judgement. The script only attaches factual `comparison_context` containing recent runs plus all baseline/milestone anchors; it never generates a diagnosis from those facts.
 - A diagnosis requires agent-authored canonical `claims`. Every claim must pass the shared claim-structure gate and every evidence quote must be verified verbatim against this experiment unit's own `run-log.yaml` or `runs/run-NNN.md`; cross-unit, missing, or fabricated evidence is rejected before any diagnosis write. Claims remain `pending_user_confirmation`.
 - If diagnosis is requested without claims, the script writes an explicit `diagnosis-fill.yaml` with `status: awaiting_agent_fill` and does not append a diagnosis, mutate the canonical diagnosis, or emit a judgement event. The Agent fills that scaffold and repeats verification.
@@ -79,9 +82,9 @@ Per shared contract, all AI judgements stay `pending_user_confirmation`. Phase e
 
 ## Private Execution Boundary
 
-The runtime Agent uses the implementation's private plan, log-run, follow-up, diagnose, and confirm routes. Never expose script paths, flags, environment variables, or internal artifact paths to the user. User-facing responses summarize what was recorded, what remains uncertain, and which human decision is needed; the only command-like next action they may offer is a public `kb <verb>` action.
+The runtime Agent uses the implementation's private plan, log-run, import-runs, follow-up, diagnose, and confirm routes. Never expose script paths, flags, environment variables, or internal artifact paths to the user. User-facing responses summarize imported/skipped/conflict counts, what was recorded, what remains uncertain, and which human decision is needed; the only command-like next action they may offer is a public `kb <verb>` action.
 
-脚本入口：`scripts/experiment.py`（plan / log-run / follow-up / diagnose / confirm）。
+脚本入口：`scripts/experiment.py`（plan / log-run / import-runs / follow-up / diagnose / confirm）。
 
 ## 启动澄清（Agent 用）
 

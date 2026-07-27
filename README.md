@@ -38,7 +38,7 @@ These labels describe the current scope of each component, not the release statu
 | `literature-synthesizer` | beta | Evidence-first survey, taxonomy, trend, contradiction, and gap artifacts are durable and bound to upstream versions; synthesis quality still depends on the agent and source coverage. |
 | `idea-workbench` | beta | Candidate, evidence-first review, discussion, and explicit selection are implemented; novelty claims still require human or expert judgement. |
 | `method-designer` | beta | Repo-grounded design handoff and experiment matrices are implemented; generated methods still require expert review. |
-| `experiment-workbench` | beta | Typed plans, fingerprinted repeat-aware run logs, follow-ups, and confirmation-gated diagnoses are implemented; diagnosis quality remains agent-dependent. |
+| `experiment-workbench` | beta | Typed plans, atomic W&B/CSV batch import, fingerprinted repeat-aware run logs, follow-ups, and confirmation-gated diagnoses are implemented; diagnosis quality remains agent-dependent. |
 | `report-author` | beta | Reports, outlines, stable bibliography export, and seven-section paper drafts consume version-bound claims, evidence, citations, and figures; composition quality and coverage still require review. |
 | `skill-evolution-advisor` | scaffold | Local learning and diagnostic-issue capture/review exist; automatic skill evolution is intentionally not a supported promise. |
 | `wiki-adapter` | scaffold | A thin compatibility and routing layer, not an independent analysis engine. |
