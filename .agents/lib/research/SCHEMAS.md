@@ -563,7 +563,8 @@ generated_at: ''
 inputs: []
 confidence: 1.0
 items:
-- source_skill: research-orchestrator   # 发起 skill
+- id: event-<16 hex>                    # append 时持久生成；稳定、引用安全、同文档唯一
+  source_skill: research-orchestrator   # 发起 skill
   event_type: program-created|stage-changed|evidence-requested|evidence-fulfilled|
               decision-made|unit-attached|unit-detached|phase-completed|
               user-confirmation|report-published|...
@@ -580,7 +581,7 @@ items:
   # confirmation_status, information_types
 ```
 
-`event_type` 规范由 research-orchestrator 维护；非 orchestrator skill emit 事件时**必须**把自身 skill 名写入 `source_skill`。
+`event_type` 规范由 research-orchestrator 维护；非 orchestrator skill emit 事件时**必须**把自身 skill 名写入 `source_skill`。调用方未提供 `id` 时，共享 append helper 以 program + 规范化事件内容（含 timestamp）生成 `event-<16 hex>` 并拒绝重复或不安全 id；`report-author` 只把带该稳定 identity 的 factual event 放入 formal support catalog。
 
 ---
 
@@ -1316,7 +1317,7 @@ Wave3（2026-07-17）把 3.6/3.10/3.7 三个产出侧子系统从"一次性算�
 - 周报/PPT 编辑控制面固定为 `kb/programs/<program-id>/reports/editorial/{weekly,ppt-materials}/{manifest.yaml,fill.yaml}`。manifest 为 `report-editorial/v1`，exact 绑定 output kind、request、state/events bytes、派生 report snapshot、task-bound preference binding，以及 sorted `support/risks/figures` catalogs 和自身 anchor digest。support 只含 current confirmed claims+逐字 evidence、stable-id factual events、current confirmed decisions；pending/stale judgement 与缺失输入只能进 `risks` 且 `formal_support=false`。figure catalog 只含 current stable ref/caption 与 index/source/caption/assets digest binding，不复制或信任 traversal path。
 - `weekly` fill 为 `report-editorial-fill/v1`，固定有序 `executive_summary/progress/problems_and_risks/next_steps` 四区；每条 `{text,refs,epistemic_label}` 都必须非空、引用 current catalog。risk ref 只能用于 `problems_and_risks` 且 label=`risk`。成品默认中文“本周摘要 / 进展 / 问题与风险 / 下周计划”，并机械附完整 evidence appendix。
 - `ppt-materials` fill 同 schema，固定 1–12 个有序 slide；每页 exact 包含 `title/conclusion/evidence_refs/figure_refs/speaker_note/transition`，恰一条结论文本且至少一个 formal evidence ref。figure catalog 非空时 deck 至少引用一个 current figure 并标 `cited`；为空时必须标 `missing` 且不伪造 ref。成品逐页按“结论 → 证据 → 图示 → 讲述 → 过渡”，不得复用 weekly 或 outline 结构。
-- 两类正文仅来自 runtime Agent fill，不形成新 canonical claim、judgement 或自签。prepare 仅在 manifest current 时保留旧 fill；raw markup/LaTeX、绝对/内部路径、裸 flag/模板 token、空白/未知/重复 ref、超限文本一律拒绝。verify 在 render 前、write 后与 transaction commit boundary 重建 exact manifest 并重验 fill snapshot；stale/tamper 失败必须保持旧成品字节且不 checkpoint。
+- 两类正文仅来自 runtime Agent fill，不形成新 canonical claim、judgement 或自签。prepare 仅在 manifest current 时保留旧 fill；raw markup/LaTeX、绝对/内部路径、裸 flag/模板 token、空白/未知/重复 ref、超限文本一律拒绝。figure/bib catalog 从混合 program selection 中按 canonical kind 取 paper，安全跳过 current 非 paper unit，缺失/歧义/不安全 identity 仍 fail closed。verify 在 render 前、write 后与 transaction commit boundary 重建 exact manifest 并重验 fill snapshot；成功时 fill 与 output 同属精确 checkpoint，stale/tamper 失败必须保持旧成品字节且不 checkpoint。
 - 新增 `outline` verb（论文大纲 owner，非新 skill）：Introduction/Related Work/Method/Experiments/Results/Discussion/Conclusion 骨架，Related Work 挂 confirmed claims+evidence。
 - 私有 `bib` operation 从 program state 与**全量** reporting events 的 exact paper ids 生成 `kb/output/<program-id>/references.bib`；不新增公开 `kb` verb。选择集不受 report stage/limit 截断，输出按 stable citation key 排序并用白名单字段安全转义。去重只认 DOI/versionless arXiv/canonical URL（无强 identity 才退 unit id），强 identity/key/metadata 冲突 fail closed；render/write/transaction commit boundary 都重验 program bytes、选择集与 paper snapshots。bibliography 是 factual metadata，不要求 deep-read judgement 已确认。
 - 论文初稿是 program-scoped 的七节 side judgement，不新增公开 `kb` verb。固定 section identity/order 为 `introduction / related-work / method / experiments / results / discussion / conclusion`；owner 为 `report-author`，canonical id 为 `paper-draft-section:<program-id>:<section-id>`。控制面固定落在 `kb/programs/<program-id>/reports/paper-draft/`：`manifest.yaml`、`fills/<section-id>-fill.yaml`、`sections/<section-id>.yaml`；公共发布固定落在 `kb/output/<program-id>/paper-draft.md`、`paper-draft.tex`、`references.bib`、`publication-manifest.yaml`。

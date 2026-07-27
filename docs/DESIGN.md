@@ -160,6 +160,10 @@ Receipt 不改变原 epistemic type。内容或 evidence 改变时，旧 receipt
 
 Experiment run 的 fingerprint 绑定 experiment id、tested hypothesis、规范化 changes、typed metric schema、artifact identities 与 config/input revision，但不绑定时间、结果摘要或 observed metric values。run id 仍单调递增；相同 fingerprint 的不同 seed 组成 repeat group，完全相同 fingerprint + seed/config revision 的再次写入必须显式声明 rerun/retry 并给 reason。编号、fingerprint、重复检查和相关文件写入都在同一锁与事务内完成；脚本不从重复数据推断显著性或因果。
 
+批量实验导入接受 project-contained 的 W&B JSON、stable-header CSV 或单层 `run-*.json` 目录，单批最多 1000 run。prepare 会冻结每个 source item 的 exact bytes 与整批 digest；materialize 只做白名单事实归一化、fingerprint/repeat 计算和 raw archive，不生成原因、显著性或诊断。相同 item digest 幂等跳过，external id 或 fingerprint+seed/config 相同但 bytes 不同则 conflict fail closed；全部 run、run log、record、imports、index 与 reporting event 在一个 root transaction/checkpoint 中发布，任一 late malformed item 或 commit-currentness 变化均为零业务写。
+
+周报与 PPT 由 `report-editorial/v1` manifest 冻结 program state/events、current confirmed claim/evidence、current confirmed decisions、stable-id factual events、task-bound preference 和 current figure bindings。runtime Agent 填 `report-editorial-fill/v1`，脚本只验证引用与渲染：weekly 固定四区叙事加 evidence appendix；PPT 固定每页一结论、formal evidence、可选 current figure、speaker note 与 transition；outline 保持七节论文结构。figure catalog 只从混合 program 中的 paper unit 读取，非 paper unit 安全跳过，缺失/歧义/不安全 identity 仍 fail closed。verify 将 Agent fill 与 output 一并纳入精确 checkpoint，并在 render/write/commit boundary 重建 manifest；stale/tamper 不覆盖旧成品。
+
 ## 对话层与 Agent 协议
 
 公开表面只有自然语言与 16 个 `kb <verb>` 伪 CLI。内部 owner 参数、解释器、环境变量、脚本路径和 next-step markers 不能进入 human stdout。

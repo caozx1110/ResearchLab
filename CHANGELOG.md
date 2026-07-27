@@ -4,6 +4,17 @@ All notable changes to this project will be documented here. The format follows 
 
 ## [Unreleased]
 
+### Added (R4, 2026-07-27)
+
+- Added bounded all-or-nothing experiment import for W&B JSON, stable-header CSV, and flat JSON directories. Exact raw bytes are archived, identical items replay idempotently, conflicts fail closed, and imported run facts do not manufacture diagnoses.
+- Added Agent-filled, evidence-bound editorial workflows for weekly reports and PPT materials. Weekly output uses four narrative sections plus an evidence appendix; PPT output uses one conclusion, evidence, optional stable figure references, speaker notes, and a transition per slide; both remain structurally distinct from the paper outline.
+- Reporting events now receive persisted reference-safe IDs, and report/bibliography figure selection safely handles mixed-kind program unit sets.
+
+### Fixed (R4 cold acceptance, 2026-07-27)
+
+- Diagnosis prepare/verify/direct-confirm and editorial verify now checkpoint the exact Agent-filled and generated artifacts, preventing successful workflows from leaving product-owned dirty files.
+- Weekly/PPT preparation no longer treats experiment or other non-paper unit IDs as papers when collecting current figures. Stale input or figure tampering still fails closed without overwriting the previous output.
+
 ### Added (R3, 2026-07-27)
 
 - Added deterministic bibliography export for a program's complete canonical paper selection. Citation keys derive from unit identity; DOI/arXiv/source identities deduplicate fail-closed; raw provider BibTeX is never rendered.

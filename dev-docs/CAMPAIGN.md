@@ -14,8 +14,8 @@
 - [ ] A4 检索三类（中/英/代码符号带 file:line），常规库 <3s
 - [ ] A5 综述 ≥5 单元（taxonomy/trends/gaps，claim 带证据绑上游，确认后可被报告消费）
 - [ ] A6 idea 全链（捕获→分析→讨论归档→选中→method handoff）
-- [ ] A7 实验导入 ≥10 run；diagnose 确认门；audit 零 error 零 dirty
-- [ ] A8 周报一句话可交差；PPT 素材差异化；与 outline 三者明显不同
+- [x] A7 实验导入 ≥10 run；diagnose 确认门；audit 零 error 零 dirty
+- [x] A8 周报一句话可交差；PPT 素材差异化；与 outline 三者明显不同
 - [x] A9 论文 outline→分节草稿→bib 导出→LaTeX/MD 落 output/
 - [x] A10 图表 caption/编号索引，稳定引用键
 - [ ] A11 偏好观察式记录+确认后生效；init 两问落盘且被消费
@@ -23,7 +23,7 @@
 - [ ] A13 交互章程冷验收（三场景 10 条逐条打分）
 
 ### 质量验收
-- [x] Q1 pytest 全套绿（普通文件型 scratch `.venv`；R3 `2200 passed, 18 skipped`；不得回退新行为凑绿）
+- [x] Q1 pytest 全套绿（普通文件型 scratch `.venv`；R4 `2216 passed, 18 skipped`；不得回退新行为凑绿）
 - [x] Q2 skill_validator 20/20；冷装约 2s；install.sh install+update+uninstall 三态正常
 - [ ] Q3 GOLDEN_SUITE 8 条全过且零机制摸索失败
 - [ ] Q4 单任务规则文本 ≤8k tokens；kb next ≤3 步
@@ -83,11 +83,19 @@
 - R3 提交：`ac86d1b`（设计 gate）、`5e0badb`（bibliography）、`2e425ab`（figure index）、`6fcdf44`（section draft）、`9bdcb24`（公开/运行文档）。未 push/tag/merge。
 - 下一步：进入 R4 实验导入与周报/PPT/outline 三模板差异化。
 
-### R4 实验与报告（施工中，2026-07-27）
+### R4 实验与报告（完成，2026-07-27）
 - 只读审计完成，未调用 shipping skills、未修改真实 `kb/`。实验单 run 已有 fingerprint/repeat/seed/config、原子 allocator、comparison 和诊断确认门，但无批量入口；逐条调用会产生部分成功。报告的 weekly/PPT 除标题/小节名外仍共用同一 decisions/claims/events dump，未达到编辑层与 slide card 差异化。
 - 设计 gate 已锁：`import-runs` 私有、project-contained staging、W&B JSON/CSV/单层 JSON 目录、raw byte provenance、1000-run 有界、同 item 幂等、conflict fail closed、整批单事务/单 checkpoint；不新增公开 verb，不让 importer 生成诊断。
 - 报告编辑层锁为私有 prepare/fill/verify：weekly 四区叙事 + evidence appendix；PPT 每页一结论+证据+current figure+speaker/transition；正文由 runtime Agent 填，脚本只冻结 current catalog、校验 refs 和原子发布，stale 不覆盖旧成品。outline 七节保持独立。
-- 下一步：先提交本设计 gate，再按 experiment import → weekly/PPT editorial 两个小里程碑施工与冷验收。
+- 实验导入已实现：W&B JSON、CSV 与单层 JSON 目录均先全批 preflight；最大 1000 run / 16 MiB 单文件 / 128 MiB 整批，拒绝重复字段、非 UTF-8、非有限数、symlink/special/nested entry。normalized run 只含机械事实与 `source=imported`，raw bytes 按 batch digest 归档；同 item 幂等 skip，external id 或 fingerprint+seed/config 冲突整批拒绝。10-run、重放、late malformed、write fault、race 与 audit 回归均覆盖。
+- 编辑层已实现：manifest exact 绑定 state/events、current confirmed claims/evidence/decisions、stable-id factual events、task-bound preference 与 current figures。weekly 固定四区+证据附录；PPT 固定每页一结论/evidence/figure/speaker/transition；outline 保持七节。unknown/duplicate/empty ref、raw markup、内部/绝对路径、stale/tamper 均 fail closed 且旧输出不覆盖。
+- 首轮固定 `9f9c81f` 冷验收诚实报 FAIL：diagnose 与 editorial verify 没把 Agent fill/诊断产物纳入 checkpoint；writer factual event 无 stable id；混合 paper+experiment program 的 figure loader 把 experiment 强按 paper 读取。主任务分别在独立 scratch/源码复现后修复，未按报告话术盲改。
+- 冷修复 `b511aa1`：diagnose prepare/verify/direct-confirm 精确 checkpoint；editorial verify 同时 checkpoint fill+output；reporting event append 持久生成唯一 `event-<16 hex>`；新增 kind-neutral unique record snapshot，figure/bib 只消费混合选择中的 current paper，非 paper 安全跳过而缺失/歧义/unsafe 仍 fail closed。联合回归 `250 passed, 2 skipped`。
+- 固定 `b511aa1` 全新 snapshot-source 冷装复验 PASS，scratch `/private/tmp/workspace-oss-r4-retest.WUAP48/workspace`：A7 导入 10、重放 0/10、diagnose Agent fill→public review 测试身份/current-message 授权确认后 Git clean，audit `error=0, warning=0, total=0`；A8 混合 program 含 confirmed experiment、真实本地 PDF figure `fig:p-figure-2-r4-bdc37e8d:fig:2`、confirmed decision 与 writer event `event-b2d7840e909326d8`，weekly/PPT manifests 各 6 formal support、1 current figure、0 unidentified-event risk。
+- A8 输出验收：周报五区+逐字 evidence，PPT 2 页且每页 conclusion/speaker/transition 并引用稳定 figure，outline 七节；三份字节数 `1485 / 854 / 3056` 且内容/结构不同。figure asset tamper 与新增 event stale 都 exit 1，旧 output SHA 不变；被测 fill/manifest/output 均 Git clean。
+- 质量门：R4 定向/联合 `250 passed, 2 skipped`，文档/metadata `35 passed`，Python 3.9 compile、`Validated 20 skills.`、`git diff --check`；最终全套 `2216 passed, 18 skipped, 7 warnings`（10m12s），warnings 均为既有 SWIG deprecation。仓库根 `kb/` 零改动。
+- 提交：`519849b`（设计 gate）、`3c7f0c8`（批量实验导入）、`9f9c81f`（周报/PPT 编辑层）、`b511aa1`（冷验收缺口修复）；公开文档与本台账另作 R4 closure commit。未 push/tag/merge。
+- 下一步：进入 R5 结构减法、G5 批量园艺与 G6 批注回流。
 
 ## 决定记录（含偏离蓝图的理由）
 

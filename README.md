@@ -159,6 +159,10 @@ Natural-language requests such as “每两周关注这个方向的新论文” 
 
 `kb find` is passage-oriented lexical retrieval. It returns up to five short excerpts with unit identities and project-relative locators. A missing, stale, or damaged local search cache falls back to an in-memory read-only search, so querying never mutates the KB. It supports same-language and mixed CJK/ASCII tokens but does not pretend to provide cross-language semantic search.
 
+Experiment exports can be imported in one bounded batch from W&B JSON, CSV, or a flat JSON directory. The batch is all-or-nothing, preserves exact raw provenance, replays identical items without duplication, and never turns mechanical run facts into a diagnosis. A diagnosis remains an Agent-authored, evidence-backed judgement that requires human confirmation.
+
+Natural-language weekly-report and PPT requests use separate Agent-filled editorial contracts over current confirmed claims, decisions, factual events, and stable figures. Weekly reports render summary, progress, risks, next steps, and an evidence appendix; PPT materials render one conclusion with evidence, optional figure references, speaker notes, and a transition per slide. Both differ from the seven-section paper outline, and stale inputs cannot overwrite the previous complete output.
+
 ## Optional local developer diagnostics
 
 D1 adds an optional, local-only quality loop without adding a diagnostics verb. Its automatic mode is off by default. The later sixteenth verb is the unrelated no-plugin Obsidian projection entrypoint. You can ask the Agent in natural language to “开启开发者诊断”, “仅在出错时记录”, “关闭 paper-analyst 诊断”, “对刚才失败做脱敏复盘”, or “检查知识库健康”.

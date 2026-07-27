@@ -217,6 +217,10 @@ Paper、repo 和 blog 使用同一套 review readiness 规则。事实型 metada
 
 Run log 是事实；diagnosis 是推断，默认待确认。报告系统从 program events、confirmed artifacts 和明确标注的 pending material 汇总，不会把未确认判断伪装成定论。
 
+已有 W&B export JSON、CSV 或单层 JSON 目录时，可以直接说“把这批实验结果导入到这个 experiment”。系统会在一次操作中预检整批，保留原始字节与来源摘要；相同条目重放只报告跳过，身份相同但内容冲突会整批拒绝，任何一条失败都不会留下半批 run。导入只记录事实，不自动诊断。
+
+说“为这个 program 生成本周周报”时，Agent 会基于当前已确认 claim/decision、稳定事实事件和可用图表先填写编辑层，再发布“本周摘要 / 进展 / 问题与风险 / 下周计划 / 证据附录”。PPT 素材则逐页给出一条结论、证据、图引用、讲述备注和过渡。二者与七节论文 outline 是三种不同产物；program 同时包含 paper、experiment 等多类单元也可正常工作。上游内容、事件或图资产变化时，旧填充会判过期，上一版完整输出保持不变。
+
 需要论文初稿时，可以直接说“基于当前 program 的大纲和已确认材料，逐节起草论文并让我确认”。系统先冻结当前 outline、已确认 claim/evidence、稳定 citation key 与可用 figure ref，只准备七节待填结构；正文由 Agent 基于这些材料逐段填写，每节都在 `kb review` 中单独展示和确认。只有七节都仍是当前已确认版本时，才会一起发布 Markdown、LaTeX、去重 BibTeX 和发布回执；上游证据、引用元数据、图片资产或正文变化后，旧确认不会继续生效，也不会覆盖上一版完整输出。
 
 ## 恢复、撤销与版本
