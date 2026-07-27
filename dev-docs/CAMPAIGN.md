@@ -16,14 +16,14 @@
 - [ ] A6 idea 全链（捕获→分析→讨论归档→选中→method handoff）
 - [ ] A7 实验导入 ≥10 run；diagnose 确认门；audit 零 error 零 dirty
 - [ ] A8 周报一句话可交差；PPT 素材差异化；与 outline 三者明显不同
-- [ ] A9 论文 outline→分节草稿→bib 导出→LaTeX/MD 落 output/
-- [ ] A10 图表 caption/编号索引，稳定引用键
+- [x] A9 论文 outline→分节草稿→bib 导出→LaTeX/MD 落 output/
+- [x] A10 图表 caption/编号索引，稳定引用键
 - [ ] A11 偏好观察式记录+确认后生效；init 两问落盘且被消费
 - [ ] A12 undo 点名；restore 无参列清单可按编号恢复；中断 resume 成功
 - [ ] A13 交互章程冷验收（三场景 10 条逐条打分）
 
 ### 质量验收
-- [x] Q1 pytest 全套绿（scratch `.venv`；R2 `2147 passed, 18 skipped`；不得回退新行为凑绿）
+- [x] Q1 pytest 全套绿（普通文件型 scratch `.venv`；R3 `2200 passed, 18 skipped`；不得回退新行为凑绿）
 - [x] Q2 skill_validator 20/20；冷装约 2s；install.sh install+update+uninstall 三态正常
 - [ ] Q3 GOLDEN_SUITE 8 条全过且零机制摸索失败
 - [ ] Q4 单任务规则文本 ≤8k tokens；kb next ≤3 步
@@ -67,7 +67,7 @@
 - 质量门：概念/context 定向 `298 passed`；Obsidian 修复定向 `39 passed`；Python 3.9.6 `py_compile`、skill validator `Validated 20 skills.`；最终全套 `2147 passed, 18 skipped, 7 warnings`（9m17s）。安装器从已提交 release allowlist 冷装成功，后续 update 保留 scratch `kb/`。
 - 提交：`4aa35aa feat(research): add concepts and bounded context packs`；`acda252 fix(obsidian): project receipt-bound claims as confirmed`。
 
-### R3 论文链（施工中，2026-07-27）
+### R3 论文链（完成，2026-07-27）
 - 已完成 bibliography / figure reference / section draft 三条现状的独立只读审计；未调用 shipping skills、未修改真实 `kb/`。确认当前缺口包括：paper intake 丢部分 citation metadata；caption crop 依遍历序号命名且自动把全部图设为 key figure；outline 只有机械 Markdown 骨架，没有分节 judgement/receipt/publication 合同。
 - 设计门已锁：citation key 绑定 canonical paper id，DOI/arXiv/source URL 强身份去重，raw BibTeX 永不进入渲染面；program `.bib` 绑定完整选择集与 paper snapshots，纯事实导出不错误依赖 deep-read judgement receipt。
 - figure index 锁为 `figure-index/v1`：ref key 绑定 paper + 规范化 caption 编号，PNG 资产按内容哈希落盘；机械提取不再选择“关键图”或降级整篇确认，Agent 的图引用选择随实际写作 judgement 确认。
@@ -76,8 +76,12 @@
 - section draft 锁为 `paper_draft_section` side judgement：七节各自 prepare/fill/verify/confirm，段落逐一绑定 current confirmed source claims/evidence、citation keys 和可选 figure refs；全节 current confirmed 后才将 MD/LaTeX/bib/publication manifest 原子发布到 `kb/output/<program-id>/`。
 - section draft 已实现：新增纯合同层与 read-only snapshot runtime，manifest 冻结 exact outline、program selection、current confirmed claim/evidence、citation 和 figure bindings；prepare 只建七节空 fill，verify 机械搬运逐字 evidence 并生成 pending section。`paper_draft_section` 已接入统一 dialogue/Obsidian review batch、真人签字/当前消息授权/实质门/版本锚定确认；public card 展示完整正文与 support/citation/figure refs。
 - 发布门要求固定顺序七节全部 current confirmed；Markdown、LaTeX、`references.bib`、byte-bound publication manifest 在单一 recovery transaction 原子写入。outline、selected unit（含 capture 时缺失后出现）、record/receipt/evidence、citation、figure index/assets 或 section bytes 任一漂移均 fail closed，并保留旧发布字节；非法 section id、fill leaf/ancestor symlink 与非普通文件均在业务写前拒绝。
-- section draft 质量门：纯合同/实质门与真实七节集成全部通过；集成覆盖 5 篇 current paper、7 节逐节核验/统一 review owner/真人确认、确认前零输出、outline stale 撤卡、bib ≥5、稳定 figure ref、figure asset 篡改后拒绝且旧四件套不变、缺失 selection 后出现与 fill symlink 对抗。与 confirmation/judgement/review/report/kb-cli/bib/figure/find/Obsidian 联合回归 `624 passed`；Python 3.9.6 compile、skill validator `Validated 20 skills.`、`git diff --check` 通过，仓库根 `kb/` 零改动。
-- 下一步：提交 section draft 小里程碑；随后跑 R3 全套 pytest 与固定 commit 冷装 A9/A10，补齐公开文档/CHANGELOG 并关闭 R3。
+- section draft 质量门：纯合同/实质门与真实七节集成全部通过；集成覆盖 5 篇 current paper、7 节逐节核验/统一 review owner/测试署名确认、确认前零输出、outline stale 撤卡、bib ≥5、稳定 figure ref、figure asset 篡改后拒绝且旧四件套不变、缺失 selection 后出现与 fill symlink 对抗。与 confirmation/judgement/review/report/kb-cli/bib/figure/find/Obsidian 联合回归 `624 passed`；Python 3.9.6 compile、skill validator `Validated 20 skills.`、`git diff --check` 通过，仓库根 `kb/` 零改动。
+- R3 全套：仓库 `.venv` 的 symlink interpreter 会让安装计划隔离探测看不到 venv modules，沿用 R0 已记录的方法，用普通文件型 Miniconda 3.13 scratch venv `/private/tmp/workspace-oss-r3-full-py313` 终验；`2200 passed, 18 skipped, 7 warnings`（9m54s），warnings 均为既有 SWIG deprecation。未改产品门或测试断言来规避环境问题。
+- 固定提交冷装 A9/A10：从 `9bdcb24` 直接 `git archive`，以安装器正式 snapshot-source 模式装入 `/private/tmp/workspace-oss-r3-a9a10.0rzwII/workspace2`（约 2s）。测试专用 researcher fixture 建 5 篇 current confirmed paper（不代表真实研究确认），真实生成 PDF 并两次运行 figure extraction，稳定得到 `fig:p-cold-r3-1-abcdef:fig:1` 与 sha256-addressed PNG；find 与 Obsidian note 均命中 caption/ref。
+- 冷装随后真实跑中文 outline（含 5 条 confirmed claim + 逐字 evidence）→七节 Agent fill/verify→公共 review owner 预检→七节测试署名确认→原子发布。`references.bib` 恰 5 条去重 entry，MD/LaTeX 各 7 节，MD 与 Obsidian note 均保留稳定 figure ref，output 四件套为 `paper-draft.md / paper-draft.tex / references.bib / publication-manifest.yaml`；篡改 figure asset 后再次发布被拒且旧四件套 bytes 不变。仓库根 `kb/` 全程零改动。
+- R3 提交：`ac86d1b`（设计 gate）、`5e0badb`（bibliography）、`2e425ab`（figure index）、`6fcdf44`（section draft）、`9bdcb24`（公开/运行文档）。未 push/tag/merge。
+- 下一步：进入 R4 实验导入与周报/PPT/outline 三模板差异化。
 
 ## 决定记录（含偏离蓝图的理由）
 
