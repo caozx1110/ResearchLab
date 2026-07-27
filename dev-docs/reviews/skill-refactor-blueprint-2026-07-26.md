@@ -65,12 +65,20 @@
 
   **R2 实现锁定（2026-07-27）**：不新增公开动词；现有 `kb find` 在私有 Agent protocol 中附带只读、临时的 `context-pack/v1`。候选顺序复用同一轮 FTS5 / deterministic fallback 检索，不做 query 改写、embedding、总结或相关性判断。正式内容 lane 只搬运 `confirmation_status=confirmed`、当前 ConfirmationReceipt 覆盖且 evidence/record snapshot 仍 current 的 canonical claims，并保留逐字 quote 与 locator；不能把顶层状态字符串当可信证明。摘要与 passage excerpt 因不在 ConfirmationReceipt 的 claim scope 内，只能作为明确标注 `confirmation_bound=false` 的导航提示，绝不冒充已确认结论。固定上限为 5 个 unit、每 unit 3 条 claim、每 claim 2 个 evidence ref，并用 6000 UTF-8 bytes 的保守预算做原子裁剪（claim/quote 不截断）；超限、stale、pending、rejected、重复 id 或不完整 locator 均 fail-closed 排除并计数。输出前聚合重验 snapshot；包不落 canonical KB、不进入 Git/Obsidian/确认门，idea/report 等下游正式产物仍走各自 verify/confirm/current gate。
 - **G5 批量与园艺**：`kb add` 多目标；review 个人档支持一次 >3 条（治理档保 Top-3）；"园艺"自然语言路由（清 pending 积压、重建 stale survey、taxonomy 重整），不加新动词。约 3 天。
+
+  **R5 实现锁定（2026-07-27）**：现有 `kb add` 扩展为 `1..20` 个 source positional，不新增 verb。每项独立推断 kind，先在 workspace 外完成 bounded/no-follow source snapshot、解析、duplicate/preference preflight；整批只允许一次 workspace lease、一次 root transaction、一个 exact target set 和一个 checkpoint。批内相同 identity/bytes 合并，同 current canonical source 幂等 skip；任一不安全项、冲突、stale prepared token、late drift 或 fault 必须零 canonical 写。远程 repo 尚无本地安全快照时整批返回一个 Agent localize 清单，不能先落其它项；用户面只报 imported/skipped/needs-localization 总计，并在 `ask_first` 下只问一次是否继续深读。`auto_deep_read` 只在整批 materialize 成功后逐项 prepare scaffold，理解仍由 Agent 填写。
+
+  园艺不删除、不 defer、不自签。统一 portfolio classifier 同时发现 ready-for-review、awaiting Agent fill/verify、普通 stale survey、resumable op、due monitor 与 taxonomy rebuild，按 blocking > stale > pending 排序；`kb next` 最多给 3 步。ordinary stale survey 必须由 strict snapshot 生成 `rebuild-stale-survey` candidate，私有 rebuild prepare 产生新的 pending judgement/receipt 链，旧 confirmation 永不复用。taxonomy/governance rebuild 只做机械派生并 checkpoint exact taxonomy/pool/index 路径。仅对 owner、0700 mode、TTL、普通无链接树均可证明的过期 `.research-intake-*` 做安全 GC。
 - **G2 论文成稿**：outline → 分节草稿工作流：每节绑定 claims/evidence，Agent 起草、节级确认，导出 LaTeX/Markdown 到 output/（引用 key 与 G1 联动）。约 1 周。
 
   **R3 实现锁定（2026-07-27，section draft）**：`report-author` 拥有 side judgement kind `paper_draft_section`；固定 canonical 目录为 `kb/programs/<program-id>/reports/paper-draft/`，其中 manifest 绑定 exact `paper-outline.md` bytes、固定七节有序 identity、可引用的 current confirmed source claim catalog、G1 bibliography catalog 与 G7 figure catalog；`fills/<section-id>-fill.yaml` 是 Agent authoring scaffold，`sections/<section-id>.yaml` 是独立待确认 judgement。prepare 只搭空段落结构；Agent 为每段填写 prose、epistemic claim type、source claim refs、citation keys 和可选 figure refs。verify 不判断文意，只机械验证段落非空、每段至少一条 current confirmed support claim、逐字 evidence、引用/图 key 存在且 current，并从支持 claim 搬运 evidence refs，生成 canonical pending claims、verification receipt 与上游 anchor。不得让脚本据 outline/claims 自动写论述，亦不得接受 raw Agent LaTeX。
 
   每节通过统一 `kb review` 单独真人确认，ConfirmationReceipt 绑定 prose、support/citation/figure refs、verification 与 exact 上游 digests；outline/source record/receipt/evidence/bib/figure 任一变化使该节 stale。最终 export 只接受七节全都唯一、current、verified、receipt-confirmed，按 manifest 顺序机械渲染 UTF-8 Markdown 与安全转义 LaTeX，并连同当前 `references.bib` 和 publication manifest 在同一 recovery transaction 原子发布到 `kb/output/<program-id>/paper-draft.{md,tex}`；render 后、write 后、commit boundary 均聚合重验，缺节、pending/rejected/stale 时零 publication write。每节可以独立重填/重验/重签，不能用 context-pack 或整篇顶层状态替代 receipt 验证。
 - **G6 批注回流**：Obsidian inbox/annotations 的人写笔记 → 结构化 pending 条目（signer=你本人，走同一确认门），人写的知识不该比 AI 写的更难入库。约 2–3 天。
+
+  **R5 实现锁定（2026-07-27）**：批注回流只由用户自然语言明确选择触发，不藏进 `kb obsidian update`。source-intake 私有 human-note intake 只接受 `obsidian/inbox|annotations` 下一层被点名的 UTF-8 普通 `.md`，拒绝 symlink/special/nested/oversize 与 review sheet；freeze exact bytes 到 canonical source bundle，原人工文件逐字不改，落为 `source_origin=human-note` 的 blog unit。`unit-analyst` 再路由到既有 blog implementation 的 prepare/fill/verify；Agent 结构化内容必须引用 frozen copy 并保持 pending。source=user 只是 provenance，不能替代 ConfirmationReceipt；signer 使用已配置真人姓名或当前对话收集的姓名，永不接受字面量“我”或 Agent。
+
+  A11 的偏好观察复用 `skill-evolution-advisor` 但封死旧旁路：Agent 仅在明确纠正或重复同形修改时记录短逐字 observation，任务尾最多攒 2 条询问是否记住。`review_learning(...confirmed)` 与 pending 直达 `promote_learning()` 退役；`preference_learning` 进入统一 public review snapshot，确认要求真实 signer、当前消息授权、content/evidence digest、CAS 和 ConfirmationReceipt，并在同一 root transaction 原子更新 learning 与 `runtime-preferences.learned_preferences`。下次任务 eligible view 只消费 current receipt-bound item；旧无 receipt item不自动生效。
 
 ## 5. 治理分档（复杂度税的核心减法）
 
@@ -97,6 +105,10 @@
 5. navigator/wiki-adapter 按 §3 摘除；20 份 openai.yaml 改构建生成；
 6. 新 kb 存储策略：raw/ 不入 git（单独备份）或 LFS；repo 类 unit 浅克隆/引用式存储（发现 32）；
 7. 文档去重：rc 状态与成熟度表单一事实源（发现 35）。
+
+**R5 实现锁定（2026-07-27）**：蓝图“20→14”指 14 个 L1 owner，不含 `kb-cli`，所以 validator 的最终 discoverable 总数是 15。`unit-analyst` 只合并 SKILL/metadata/Agent 路由，四套脚本目录及其历史 owner/preference/receipt/provenance identity 原样保留为内部 implementation namespace；其目录不含 `SKILL.md`/`agents/openai.yaml`。`wiki-adapter` 私有 helper 并入 `kb-cli` 后删除发现面，navigator 整体移到 `tools/research-navigator/` 且不 ship。测试机械移到根 `tests/` 并统一通过 `tests/repo_paths.py` 定位，不留 `parents[N]` 偶合。
+
+20 份手写 metadata 收敛为 `.agents/skills/metadata.yaml` SSOT + `tools/generate_skill_metadata.py`，生成的每 skill `agents/openai.yaml` 继续 tracked；validator/CI check 拒绝 metadata 缺失、额外、漂移或孤儿目录。Q4 使用 dev-only `tiktoken` 的固定 `cl100k_base` 统计 `.agents/AGENTS.md + .agents/AGENT_GUIDE.md + 单个 discoverable SKILL.md` 的完整文本，最坏组合 `<=8000`；规则瘦身只删重复和已由代码强制的机制细节，不删 Agent authoring、证据、确认、停止/交接或交互章程。
 
 ## 7. 行为级回归（重构的方向盘，先于一切大改）
 

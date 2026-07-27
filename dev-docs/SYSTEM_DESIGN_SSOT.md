@@ -692,6 +692,12 @@
   - **幂等不变量（2026-07-19 冷验收补洞；2026-07-27 同步）**：无参数重复 init 只补目录/缺失 schema 字段，已保存的 human name、language、commit cadence、link_autodrive、discussion_style、autonomy/persona 必须原样保留；只有用户在当前对话明确给出某字段的新值时才覆盖。已完整 workspace 上的无参数 init 是严格 no-churn：不得刷新 index/taxonomy `generated_at`、不得新增 operation journal/checkpoint，也不得改任何已有 bytes；partial/malformed workspace 仍须进入 repair 而不是误判完整。子 owner 的进度行与机器字段一律只进私有 protocol，public stdout 最多一条最终自然语言总结。
   - **验收**：agent 会话里首次 `kb init` → 触发 agent 逐项问偏好 → headless 写入 `user-profile.yaml`（persona/autonomy 非空）；`config.py show` 可见；非 TTY 下不再空跑返回 0；随后无参数 `kb init` 的全树 metadata digest、journal 数与配置 bytes/语义均不变，stdout 无重复/机器行。
 
+#### R5 观察式偏好与人工笔记回流（2026-07-27 锁定）
+
+- **偏好不是 Agent 自签的配置写入**：Agent 只在用户明确纠正，或同类产出连续被改成同一形态时，追加一条 `user-preference` observation；任务收尾最多攒 2 条，用自然语言询问“要记住吗”。observation 必须保存短的逐字用户表述、适用 skill/operation 与内容 digest，初始为 `pending`。`review_learning(..., confirmed)` 与允许 pending 直达配置的 `promote_learning()` 旧旁路退役；确认必须进入统一 public review snapshot，要求真实 signer、当前用户消息授权、一次性 snapshot/CAS 与 ConfirmationReceipt。确认和写入 `runtime-preferences.learned_preferences` 在同一 root transaction 完成，receipt 绑定 preference text、逐字 observation、scope 和原 learning bytes；任一变化自动失效。`dismissed` 也只能消费当前展示集，不能由 Agent 静默决定。
+- **“我写的”只表来源，不代表已确认**：用户自然语言指定 `obsidian/inbox/` 或 `obsidian/annotations/` 中的笔记后，source-intake 私有 human-note intake 只读取一个目录层级内、明确选中的 UTF-8 普通 `.md` 文件；拒绝 symlink/special/nested/过大文件和 review sheet。输入 exact bytes 冻结到 canonical source bundle，原人工文件逐字不改。它落为 `blog` unit（`source_origin=human-note`），再由统一 `unit-analyst` 路由到既有 blog implementation 的 prepare/fill/verify；Agent 结构化理解必须逐字引用冻结副本并保持 pending。后续仍走 public review；signer 从 `identity.default_confirmed_by` 或当前对话取得真实姓名，绝不能把字面量“我”、`Agent` 或 source=user 当签字。
+- **跨任务生效门**：eligible preference view 只接纳 `runtime-preferences` 中同时带 current learning/receipt binding 的 learned item；旧式无 receipt item 仅作未确认历史提示，不进入 soft preference catalog。任务开始只披露本 owner/operation allowlist 内的 confirmed item；用户当前消息仍可临时覆盖本任务。
+
 ### 3.15 分发 / 版本 / 自更新（新，2026-07-17 锁定）
 
 - 目标行为：`kb update` 从 GitHub 拉最新 skill 集，更新当前工作区 + 系统路径两处的 kb skill；skill 集带**版本号**用于标明版本 + 检查更新。
@@ -744,6 +750,19 @@
   - **B3 修复**：validator 本身 dev-only 却随 lib/research 整目录 ship → 加 EXCLUDED_NAMES（updater.py 是 runtime 保留）。
   - **whole-bundle 验收**：fresh install → 17 skill ship、tests/eval/validator 排除、VERSION+LICENSE ship、装好的 workspace 里 `kb doctor`(skill_version 0.1.0)+`kb init` 可跑、uninstall 保 kb。撤销点 tag `pre-bundleB1/B2-merge-20260717`。
   - **残留风险**：① eval_research_value.py 仍有一处 `temp/` docstring 引用——但该文件 allowlist 排除、不 ship，无用户面影响。（② manifest `version` 字段已于 dbbce03 补齐，见 3.15。）
+
+#### R5 bundle 收敛与 token 门（2026-07-27 锁定）
+
+- **发现面 15、L1 owner 14**：最终 `.agents/skills/` 只发现 `kb-cli` + 14 个 owner skill。四个来源 analyzer 在用户发现/路由层合并成 `unit-analyst`；原 `paper/repo/dataset/blog-analyst` 目录仅保留 script implementation namespace，不再有 `SKILL.md` 或 `agents/openai.yaml`。底层 record owner、ConfirmationReceipt、preference operation 与脚本路径身份不迁移；`unit-analyst` 是 facade，按 kind 显式映射旧 implementation identity，避免破坏 currentness、receipt 与诊断历史。`skill_directories()` 只枚举含 `SKILL.md` 的目录。
+- **wiki/navigator 边界**：`wiki-adapter` 的薄路由与脚本并入 `kb-cli` 私有实现后从发现面删除；不新增 public verb。`research-navigator` 整体移到仓库根 `tools/research-navigator/`，保留 maintainer 测试但不在 `.agents/` 发布 allowlist、运行路由、偏好 registry 或安装产物中出现。
+- **tests 与 metadata 单一来源**：测试树机械迁到仓库根 `tests/`，用 `tests/repo_paths.py` 解析 repo/runtime/skill 路径，禁止继续依赖 `parents[N]`；pytest、CI、CONTRIBUTING 与 installer exclusion 同步。discoverable skill metadata 的 SSOT 为 `.agents/skills/metadata.yaml`，`tools/generate_skill_metadata.py` 机械生成并保持 tracked 的每个 `agents/openai.yaml`；CI/validator `--check` 同时拒绝缺失、额外、漂移与孤儿 metadata。
+- **Q4 token gate**：固定用 dev-only、零付费的 `tiktoken` `cl100k_base` 对 UTF-8 文本计数；每个任务组合为 `.agents/AGENTS.md + .agents/AGENT_GUIDE.md + 当次唯一 discoverable SKILL.md`，任一组合必须 `<=8000` tokens。全局两文先去除重复机制细节，skill 只保留触发、Agent authoring contract、停止/交接与场景澄清；可由 parser/validator 强制的 schema、flag、枚举和错误规则移入代码/SCHEMAS，不靠提示词重复。gate 报出逐文件与最坏组合，禁止用忽略 frontmatter/代码块等方式少算。
+
+#### R5 G5 批量园艺（2026-07-27 锁定）
+
+- `kb add <source> [more...]` 是唯一公开变化的原动词扩展，接受 `1..20` 个目标；每项独立 kind inference，但整批在 workspace 外完成安全 snapshot/parse/preference preflight，再在一个 root lease、一个 journal、一个 exact target set 和一个 checkpoint 内 all-or-nothing 提升。输入顺序决定稳定结果顺序；同源 current duplicate 是 idempotent skip；批内 identity/byte duplicate 合并为一个结果；任一 unsafe/malformed/conflict、stale token、late source drift 或写故障使零 canonical 写。远程 repo 缺安全本地快照时整批只返回待 Agent 本地化清单，不部分入库、不逐项询问。`auto_deep_read` 可在批量 materialize 后为每个新 unit 准备 scaffold，但 Agent fill/verify 仍逐 unit 且只在整批落地后执行；用户面只给总计与一次后续询问。
+- “园艺/整理积压”仍是自然语言路由，不新增 verb。`kb next/status` 的同一 candidate snapshot 必须覆盖：已 verify 待人确认、等待 Agent fill/verify、普通 confirmed survey 的 stale rebuild、可恢复中断、到期 monitor 和安全的 taxonomy rebuild。候选按 blocking > stale > pending，公开 `kb next` 最多 3 步；所谓清 pending 只可分类/继续/展示，绝不删除、defer、自签或把判断降成事实。
+- ordinary survey stale 由 anchored/no-follow snapshot 扫描产生 `rebuild-stale-survey` Agent candidate，保存旧 judgement identity、stale reasons 与 exact current binding；私有 prepare 创建新的 fill/verification/pending judgement，绝不复用旧 ConfirmationReceipt 或在查询时改写。taxonomy/governance rebuild 只机械重建派生 catalog，事务结束必须 checkpoint exact taxonomy/pool/index 路径。过期 `.research-intake-*` 只在 ownership/mode/TTL/ordinary-tree 全部可证明时回收；活动 token、symlink/special/未知目录保持不动并报告。
 
 ---
 

@@ -97,6 +97,11 @@
 - 提交：`519849b`（设计 gate）、`3c7f0c8`（批量实验导入）、`9f9c81f`（周报/PPT 编辑层）、`b511aa1`（冷验收缺口修复）；公开文档与本台账另作 R4 closure commit。未 push/tag/merge。
 - 下一步：进入 R5 结构减法、G5 批量园艺与 G6 批注回流。
 
+### R5 结构减法、批量园艺与批注回流（施工中，2026-07-27）
+- R5 施工前完成两条独立只读审计：结构审计确认目标为 **15 个 discoverable skill = 14 个 L1 owner + kb-cli**，四 analyzer 只应合并发现/路由而保留内部脚本及 owner identity；园艺/批注审计确认当前 `kb add` 仍是单目标、ordinary stale survey 未进 `kb next`、taxonomy rebuild 缺 checkpoint，且旧 `review_learning/promote_learning` 可绕过统一确认门。
+- 设计 gate 已锁：测试迁根、unit-analyst facade、wiki 并入 kb-cli、navigator 移出 bundle、metadata 构建生成、固定 tokenizer 的 8k gate；`kb add` 1..20 整批原子；园艺只分类/继续不删除或自签；人工 Markdown freeze 后走 blog 分析 pending；偏好 observation 走统一 snapshot/真人 signer/当前消息授权/ConfirmationReceipt 后才跨任务生效。
+- 施工顺序：设计/hand-off → tests 迁根 → bundle/metadata/skill facade → G5 → G6/A11 → token 瘦身与全量/冷验收。每个 piece 独立提交；测试只用 `/private/tmp`，真实根 `kb/` 保持只读。
+
 ## 决定记录（含偏离蓝图的理由）
 
 | # | 日期 | 决定 | 理由 |
@@ -105,6 +110,7 @@
 | D2 | 07-27 | 概念采用 canonical `concept` unit，而不是 `kb/synthesis/concepts` side YAML | 统一复用 record snapshot、ConfirmationReceipt、索引、review、关系和 Obsidian 基建；代价是把第七类 unit 全面接入 schema/枚举并补全生命周期测试 |
 | D3 | 07-27 | 论文分节采用 program-scoped side judgement；citation/figure key 均绑定 canonical identity | 草稿不是新的来源 unit，但每节必须独立确认；稳定 key 不能随作者/题名修订、集合顺序或 crop 遍历顺序漂移 |
 | D4 | 07-27 | 批量实验导入整批原子；周报/PPT 使用 Agent editorial fill 而非脚本自动写叙事 | 避免半批 run、重复导入和把机械模板冒充可交付叙事，同时保持用户一句话触发与判断来源透明 |
+| D5 | 07-27 | R5 的 20→14 按 L1 owner 计，最终发现面为 15；四 analyzer 只并发现层；human-note/偏好均不因 source=user 自动确认 | 保持既有 receipt/owner/schema identity 与开源兼容，同时消除重复提示词；“用户写过”与“用户确认该结构化判断”是两个不同事实 |
 
 ## 遗留清单
 
