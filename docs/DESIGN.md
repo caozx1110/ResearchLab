@@ -146,7 +146,7 @@ confirmed or rejected
 6. receipt 绑定当前 content digest 与 evidence digest；
 7. 写入瞬间重新验证授权和版本，失败时 fail closed。
 
-Receipt 不改变原 epistemic type。内容或 evidence 改变时，旧 receipt 失效；公开层引导 Agent 基于当前材料重新核验，只有核验通过的新版判断才重新进入人类确认，不向用户暴露内部状态名。事实批量确认与判断逐项确认可以有不同 UX，但都不得自签。
+Receipt 不改变原 epistemic type，也不回写 canonical claim 的 verify-time pending 字段：确认权威是 top-level current receipt，consumer 只把其覆盖且证据仍 current 的 claim 投影为已确认。若为显示状态而改 claim bytes，会让 verification/content digest 与 receipt 立即失效。内容或 evidence 改变时，旧 receipt 失效；公开层引导 Agent 基于当前材料重新核验，只有核验通过的新版判断才重新进入人类确认，不向用户暴露内部状态名。事实批量确认与判断逐项确认可以有不同 UX，但都不得自签。
 
 公开 review 将治理档允许的可确认对象复制到私有一次性 token registry。strict 固定 3 条/24 小时；personal 默认 10 条且有效期可在 1..168 小时配置。profile、item limit 与 expiry 在展示时冻结，apply 不重读配置；读取与应用时在锁内清理超过宽限期的已过期/已消费普通文件，并拒绝 symlink 或越界对象。对话内可以逐项处理；无插件 Obsidian 往返使用同一冻结批次，checkbox 只是意图草稿。Agent 必须复述完整批次并用当前消息授权绑定 preview decision digest；confirm 另需真实 signer 与 evidence，reject/defer 也不能仅凭文件变化自动执行。跨 owner apply 在一个 root transaction 中全量预检、复验、应用和消费，任何失败整批回滚。registry/sheet 读写逐层使用 no-follow directory descriptor，防止中间目录 swap 将访问重定向到 workspace 外。失败分为已处理、已过期、正文变化、授权预览过时、未知或被篡改等自然语言恢复路径。
 
@@ -170,7 +170,9 @@ Experiment run 的 fingerprint 绑定 experiment id、tested hypothesis、规范
 
 批量实验导入接受 project-contained 的 W&B JSON、stable-header CSV 或单层 `run-*.json` 目录，单批最多 1000 run。prepare 会冻结每个 source item 的 exact bytes 与整批 digest；materialize 只做白名单事实归一化、fingerprint/repeat 计算和 raw archive，不生成原因、显著性或诊断。相同 item digest 幂等跳过，external id 或 fingerprint+seed/config 相同但 bytes 不同则 conflict fail closed；全部 run、run log、record、imports、index 与 reporting event 在一个 root transaction/checkpoint 中发布，任一 late malformed item 或 commit-currentness 变化均为零业务写。
 
-周报与 PPT 由 `report-editorial/v1` manifest 冻结 program state/events、current confirmed claim/evidence、current confirmed decisions、stable-id factual events、task-bound preference 和 current figure bindings。runtime Agent 填 `report-editorial-fill/v1`，脚本只验证引用与渲染：weekly 固定四区叙事加 evidence appendix；PPT 固定每页一结论、formal evidence、可选 current figure、speaker note 与 transition；outline 保持七节论文结构。figure catalog 只从混合 program 中的 paper unit 读取，非 paper unit 安全跳过，缺失/歧义/不安全 identity 仍 fail closed。verify 将 Agent fill 与 output 一并纳入精确 checkpoint，并在 render/write/commit boundary 重建 manifest；stale/tamper 不覆盖旧成品。
+周报与 PPT 由 `report-editorial/v1` manifest 冻结 program state/events、current confirmed claim/evidence、current confirmed decisions、stable-id factual events、task-bound preference 和 current figure bindings。runtime Agent 填 `report-editorial-fill/v1`，owner 固定 lifecycle status 与合法 label，Agent 只填写语义正文和引用；脚本只验证引用与渲染。weekly 固定四区叙事，以 program title/question 为标题、显示自然语言判断类别与编号来源，并把已确认决策、研究结论与证据、事实进展分组列入 evidence appendix，空组显式说明缺失；内部 ref、schema 和 receipt 术语不进入读者成品。PPT 固定每页一结论、formal evidence、可选 current figure、speaker note 与 transition；outline 保持七节论文结构。figure catalog 只从混合 program 中的 paper unit 读取，非 paper unit 安全跳过，缺失/歧义/不安全 identity 仍 fail closed。verify 将 Agent fill 与 output 一并纳入精确 checkpoint，并在 render/write/commit boundary 重建 manifest；stale/tamper 不覆盖旧成品。
+
+Idea analyze/review 的 frozen corpus 若因新关联材料而不足，普通 prepare 仍保护 nonempty Agent fill；显式 refresh 会先验证旧 owner anchor 和 immutable scaffold，再只保留白名单语义字段，原子重建 corpus、orientation、anchor 与 preference binding。它不能接纳未知字段、篡改 immutable claim shape 或自动改写判断，只解决“新增证据已入库但旧 fill 无法引用”的闭环。
 
 ## 对话层与 Agent 协议
 

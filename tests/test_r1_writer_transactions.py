@@ -112,6 +112,28 @@ def test_archive_fault_restores_note_and_reporting_event(tmp_path: Path, monkeyp
     assert not (root / "kb/programs/p-a/workflow/reporting-events.yaml").exists()
 
 
+def test_archive_success_checkpoints_note_and_event(tmp_path: Path, monkeypatch) -> None:
+    module = _load(".agents/skills/discussion-archivist/scripts/archive.py", "r1_archive_checkpoint")
+    root = tmp_path / "workspace"
+    _workspace(root)
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(module, "checkpoint_and_report", lambda *args, **kwargs: calls.append(kwargs) or {})
+    _argv(monkeypatch, "archive.py", "--root", str(root), "archive", "--program-id", "p-a", "--title", "Route", "--summary", "Summary")
+
+    assert module.main() == 0
+
+    assert calls == [
+        {
+            "trigger": "milestone",
+            "message": "milestone: archive discussion for p-a",
+            "target_paths": [
+                root / "kb/programs/p-a/discussions/route.md",
+                root / "kb/programs/p-a/workflow/reporting-events.yaml",
+            ],
+        }
+    ]
+
+
 def test_synthesizer_fault_restores_single_prepare_output(tmp_path: Path, monkeypatch) -> None:
     module = _load(".agents/skills/literature-synthesizer/scripts/synthesize.py", "r1_synth_fault")
     root = tmp_path / "workspace"

@@ -2551,6 +2551,7 @@ def _load_editorial_runtime(
             "stage": str(stage or ""),
             "limit": int(limit),
             "preference_selection_id": str(preference_selection_id or ""),
+            "program_title": str(state.get("title") or state.get("question") or clean_program),
         },
         input_bindings={
             "state": {"byte_sha256": state_snapshot.byte_sha256, "byte_count": len(state_snapshot.raw_bytes)},
@@ -2751,7 +2752,15 @@ def main() -> int:
                 )
             return verify_editorial_report(root, args.program_id, output_kind)
         except EditorialError as exc:
-            raise SystemExit(f"报告编辑操作未完成：{exc}") from exc
+            kind_label = "周报" if output_kind == "weekly" else "PPT 素材"
+            if args.command.endswith("-verify"):
+                raise SystemExit(
+                    f"{kind_label}尚未发布：请让 Agent 补齐准备材料中的正文与依据；"
+                    "问题与风险使用风险标记，下周计划使用计划标记，然后重试。"
+                ) from exc
+            raise SystemExit(
+                f"{kind_label}准备未完成：研究材料可能已变化，请重新发起本次报告。"
+            ) from exc
         except (OSError, RuntimeError, ValueError) as exc:
             raise SystemExit("报告编辑操作未完成：输入已变化或工作区不安全，请重新准备后重试。") from exc
     if args.command in {"draft-prepare", "draft-verify", "draft-export"}:

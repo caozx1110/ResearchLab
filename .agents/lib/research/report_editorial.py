@@ -173,11 +173,19 @@ def build_editorial_fill_scaffold(manifest: Mapping[str, Any]) -> dict[str, Any]
         "program_id": str(manifest["program_id"]),
         "output_kind": str(manifest["output_kind"]),
         "manifest_anchor": str(manifest["anchor_digest"]),
-        "status": "awaiting_agent_fill",
+        # Lifecycle is owner-controlled: the Agent only fills semantic leaves.
+        # Empty prose/refs still fail the substantive verifier.
+        "status": "ready_for_verify",
     }
     if manifest["output_kind"] == "weekly":
+        labels = {
+            "executive_summary": "synthesis",
+            "progress": "fact",
+            "problems_and_risks": "risk",
+            "next_steps": "plan",
+        }
         base["sections"] = {
-            section: [{"text": "", "refs": [], "epistemic_label": "synthesis"}]
+            section: [{"text": "", "refs": [], "epistemic_label": labels[section]}]
             for section in WEEKLY_SECTIONS
         }
     else:
@@ -340,15 +348,29 @@ def validate_editorial_fill(fill: Any, manifest: Mapping[str, Any]) -> list[str]
 def _plain(value: Any) -> str:
     text = str(value or "").replace("<", "&lt;").replace(">", "&gt;").replace("\x00", "")
     text = _ABSOLUTE_PATH_RE.sub(" [path omitted]", text)
-    return _INTERNAL_TOKEN_RE.sub(" [internal detail omitted]", text)
+    text = _INTERNAL_TOKEN_RE.sub(" [internal detail omitted]", text)
+    replacements = {
+        "current ConfirmationReceipt": "当前人工确认",
+        "ConfirmationReceipt": "人工确认记录",
+        "canonical claims": "结构化研究结论",
+    }
+    for internal, public in replacements.items():
+        text = text.replace(internal, public)
+    return text
 
 
-def _ref_line(entry: Mapping[str, Any], *, language: str) -> str:
-    ref = _plain(entry.get("ref"))
+def _ref_line(entry: Mapping[str, Any], *, language: str, number: int, risk: bool = False) -> str:
     title = _plain(entry.get("title") or entry.get("source_title") or entry.get("kind") or "source")
-    text = _plain(entry.get("text") or entry.get("summary") or entry.get("rationale") or "")
+    text = (
+        "This source is not yet eligible as formal evidence and is shown only as a risk."
+        if risk and language.lower().startswith("en")
+        else "该来源尚未满足正式证据条件，暂仅作为风险提示。"
+        if risk
+        else _plain(entry.get("text") or entry.get("summary") or entry.get("rationale") or "")
+    )
     prefix = "来源" if not language.lower().startswith("en") else "Source"
-    return f"- `{ref}` · {prefix}：{title} · {text}"
+    marker = f"[{number}]" if language.lower().startswith("en") else f"〔{number}〕"
+    return f"- {marker} {prefix}：{title} · {text}"
 
 
 def render_weekly_editorial(fill: Mapping[str, Any], manifest: Mapping[str, Any], *, language: str) -> str:
@@ -362,8 +384,19 @@ def render_weekly_editorial(fill: Mapping[str, Any], manifest: Mapping[str, Any]
         "problems_and_risks": "Problems and Risks" if english else "问题与风险",
         "next_steps": "Next Steps" if english else "下周计划",
     }
+    label_names = (
+        {"fact": "Fact", "synthesis": "Synthesis", "risk": "Risk", "plan": "Plan"}
+        if english
+        else {"fact": "事实", "synthesis": "综合判断", "risk": "风险", "plan": "计划"}
+    )
+    support_entries = list(manifest["catalogs"]["support"])
+    risk_entries = list(manifest["catalogs"]["risks"])
+    all_entries = support_entries + risk_entries
+    ref_numbers = {str(entry.get("ref") or ""): index for index, entry in enumerate(all_entries, start=1)}
+    request = manifest.get("request") if isinstance(manifest.get("request"), Mapping) else {}
+    display_title = _plain(request.get("program_title") or manifest["program_id"])
     lines = [
-        f"# {'Weekly Report' if english else '周报'}：{_plain(manifest['program_id'])}",
+        f"# {'Weekly Report' if english else '周报'}：{display_title}",
         "",
         f"> {'As of' if english else '截至'}：{_plain(manifest['as_of'])}",
         "",
@@ -371,18 +404,42 @@ def render_weekly_editorial(fill: Mapping[str, Any], manifest: Mapping[str, Any]
     for section in WEEKLY_SECTIONS:
         lines.extend([f"## {headings[section]}", ""])
         for item in fill["sections"][section]:
-            refs = "；".join(f"`{_plain(ref)}`" for ref in item["refs"])
-            lines.append(f"- [{_plain(item['epistemic_label'])}] {_plain(item['text'])} （{'依据' if not english else 'refs'}：{refs}）")
+            refs = " ".join(
+                f"[{ref_numbers[ref]}]" if english else f"〔{ref_numbers[ref]}〕"
+                for ref in item["refs"]
+            )
+            label = label_names[str(item["epistemic_label"])]
+            lines.append(
+                f"- **{label}**：{_plain(item['text'])} "
+                f"（{'依据' if not english else 'Sources'}：{refs}）"
+            )
         lines.append("")
     lines.extend([f"## {'Evidence Appendix' if english else '证据附录'}", ""])
-    for entry in manifest["catalogs"]["support"]:
-        lines.append(_ref_line(entry, language=language))
-        for evidence in entry.get("evidence_refs", []) if isinstance(entry.get("evidence_refs"), list) else []:
-            if isinstance(evidence, Mapping) and str(evidence.get("quote") or "").strip():
-                lines.append(f"  - {'Quote' if english else '逐字证据'}：{_plain(evidence.get('quote'))}")
-    if manifest["catalogs"]["risks"]:
-        lines.extend(["", f"### {'Unverified Risk Hints' if english else '未验证风险提示'}", ""])
-        lines.extend(_ref_line(entry, language=language) for entry in manifest["catalogs"]["risks"])
+    groups = (
+        (("Confirmed Decisions", "已确认决策", "decision"), ("Claims and Evidence", "研究结论与证据", "claim"), ("Events", "事实进展", "event"))
+    )
+    for english_heading, chinese_heading, kind in groups:
+        lines.extend([f"### {english_heading if english else chinese_heading}", ""])
+        entries = [entry for entry in support_entries if entry.get("kind") == kind]
+        if not entries:
+            missing = {
+                "decision": "No confirmed decision is available for this period." if english else "缺少：本期没有可引用的已确认决策。",
+                "claim": "No confirmed research claim is available for this period." if english else "缺少：本期没有可引用的已确认研究结论。",
+                "event": "No factual event is available for this period." if english else "缺少：本期没有可引用的事实进展。",
+            }[kind]
+            lines.append(f"- {missing}")
+        for entry in entries:
+            lines.append(_ref_line(entry, language=language, number=ref_numbers[str(entry["ref"])]))
+            for evidence in entry.get("evidence_refs", []) if isinstance(entry.get("evidence_refs"), list) else []:
+                if isinstance(evidence, Mapping) and str(evidence.get("quote") or "").strip():
+                    lines.append(f"  - {'Quote' if english else '逐字证据'}：{_plain(evidence.get('quote'))}")
+        lines.append("")
+    if risk_entries:
+        lines.extend([f"### {'Unverified Risk Hints' if english else '未验证风险提示'}", ""])
+        lines.extend(
+            _ref_line(entry, language=language, number=ref_numbers[str(entry["ref"])], risk=True)
+            for entry in risk_entries
+        )
     return "\n".join(lines).strip() + "\n"
 
 

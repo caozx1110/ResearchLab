@@ -1997,6 +1997,28 @@ def test_kb_recovery_verbs_forward_without_raw_git_commands(monkeypatch, tmp_pat
     )
 
 
+def test_undo_operation_label_names_method_selection_subject(monkeypatch, tmp_path: Path) -> None:
+    kb = _load_kb_cli()
+    monkeypatch.setattr(
+        kb,
+        "committed_ops",
+        lambda root: [
+            {
+                "op_id": "op-method",
+                "op_type": "kb-cli:dialogue-review-batch",
+                "target_paths": [
+                    "programs/vla-memory/method-design/i-memory-123456/selection.yaml",
+                    "programs/vla-memory/state.yaml",
+                ],
+            }
+        ],
+    )
+
+    label = kb._journal_operation_label(tmp_path, "op-method")
+
+    assert label == "对话拍板批量应用（对象：研究计划 vla-memory 中想法 i-memory-123456 的方法选择）"
+
+
 def test_kb_next_forwards_to_orchestrator(monkeypatch, tmp_path: Path) -> None:
     kb = _load_kb_cli()
     calls: list[tuple[str, tuple[str, ...]]] = []
@@ -3152,7 +3174,10 @@ def test_kb_intake_owner_failure_is_fixed_chinese_and_private(
 
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert captured.err == "资料未能加入知识库；详细诊断已保留给 Agent。\n"
+    assert captured.err == (
+        "资料未能加入知识库；请让 Agent 查看诊断后重试。"
+        "若是网页链接，也可以上传 PDF 或 HTML，或改用本地文件。\n"
+    )
     for private in ("Source intake failed", "/etc/", "伪造标题", "伪造引用", "---"):
         assert private not in captured.err
     protocol = json.loads((tmp_path / "kb" / ".runtime" / protocol_name).read_text(encoding="utf-8"))
@@ -4803,6 +4828,54 @@ def test_public_review_projection_escapes_claims_injectively_and_rejects_hidden_
     assert folded_whitespace["claims"][0]["text"] == "a b"
     assert zero_width["status"] == "unsafe"
     assert ansi["status"] == "unsafe"
+
+
+def test_public_review_projection_safely_projects_canonical_paper_type_claim(tmp_path: Path) -> None:
+    kb = _load_kb_cli()
+    record = _pending_record("p-paper-type-123456", "paper", "Typed Paper")
+    claim = record["payload"]["claims"][0]
+    claim.update(
+        {
+            "id": "claim-paper-type",
+            "paper_type": "method_system",
+            "text": "paper_type=method_system; 论文提出了一个具身控制系统。",
+        }
+    )
+
+    projection = kb.public_review_projection(record, tmp_path)
+
+    assert projection["status"] == "ready"
+    assert projection["claims"][0]["text"] == "论文类型：方法或系统；论文提出了一个具身控制系统。"
+
+
+@pytest.mark.parametrize(
+    ("paper_type", "text"),
+    [
+        ("survey", "paper_type=benchmark; 类型字段与正文不一致。"),
+        ("unknown", "paper_type=unknown; 未知类型。"),
+        ("method_system", "paper_type=method_system; foo=bar"),
+    ],
+)
+def test_public_review_projection_rejects_tampered_paper_type_projection(
+    tmp_path: Path,
+    paper_type: str,
+    text: str,
+) -> None:
+    kb = _load_kb_cli()
+    record = _pending_record("p-paper-type-bad-123456", "paper", "Bad Type")
+    record["payload"]["claims"][0].update(
+        {"id": "claim-paper-type", "paper_type": paper_type, "text": text}
+    )
+
+    assert kb.public_review_projection(record, tmp_path)["status"] == "unsafe"
+
+
+def test_public_review_projection_still_rejects_generic_assignment_text(tmp_path: Path) -> None:
+    kb = _load_kb_cli()
+    record = _pending_record("p-assignment-123456", "paper", "Assignment")
+    record["payload"]["claims"][0]["text"] = "foo=bar"
+
+    assert kb.public_review_projection(record, tmp_path)["status"] == "unsafe"
 
 
 def test_over_cap_review_claim_routes_to_safe_explanation_without_truncating_ready_text(

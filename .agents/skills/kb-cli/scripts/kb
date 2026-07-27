@@ -862,6 +862,27 @@ def _render_public_claim_text(value: object, root: Path) -> str | None:
     return text or None
 
 
+_PAPER_TYPE_PUBLIC_LABELS = {
+    "method_system": "方法或系统",
+    "benchmark": "基准",
+    "survey": "综述",
+}
+
+
+def _render_public_review_claim_text(claim: Mapping[str, object], root: Path) -> str | None:
+    """Render canonical review text, projecting the paper-type wire format safely."""
+    raw_text = str(claim.get("text") or "").strip()
+    if str(claim.get("id") or "") != "claim-paper-type":
+        return _render_public_claim_text(raw_text, root)
+    paper_type = str(claim.get("paper_type") or "").strip().lower()
+    label = _PAPER_TYPE_PUBLIC_LABELS.get(paper_type)
+    prefix = f"paper_type={paper_type};"
+    if label is None or not raw_text.startswith(prefix):
+        return None
+    reason = _render_public_claim_text(raw_text[len(prefix) :].strip(), root)
+    return f"论文类型：{label}；{reason}" if reason else None
+
+
 def _bounded_public_text(text: str, limit: int) -> str:
     bounded_limit = max(1, int(limit))
     if len(text) > bounded_limit:
@@ -2116,7 +2137,30 @@ def _journal_operation_label(root: Path, op_id: str) -> str:
     try:
         for entry in committed_ops(root):
             if str(entry.get("op_id") or "") == op_id:
-                return _public_operation_label(str(entry.get("op_type") or ""))
+                label = _public_operation_label(str(entry.get("op_type") or ""))
+                subjects: list[str] = []
+                for raw in entry.get("target_paths", []):
+                    parts = Path(str(raw or "")).parts
+                    subject = ""
+                    if len(parts) >= 4 and parts[0] == "units" and parts[-1] == "record.yaml":
+                        subject = parts[2]
+                    elif (
+                        len(parts) >= 5
+                        and parts[0] == "programs"
+                        and parts[2] == "method-design"
+                        and parts[-1] == "selection.yaml"
+                    ):
+                        subject = f"研究计划 {parts[1]} 中想法 {parts[3]} 的方法选择"
+                    elif len(parts) >= 4 and parts[0] == "programs" and parts[2] == "discussions":
+                        subject = f"研究计划 {parts[1]} 的讨论 {Path(parts[-1]).stem}"
+                    if subject and re.fullmatch(r"[\w.\-\u4e00-\u9fff ]+", subject) and subject not in subjects:
+                        subjects.append(subject)
+                if subjects:
+                    shown = "、".join(subjects[:3])
+                    if len(subjects) > 3:
+                        shown += f"等 {len(subjects)} 项"
+                    return f"{label}（对象：{shown}）"
+                return label
     except (SystemExit, OSError, RuntimeError, TypeError, ValueError):
         return ""
     return ""
@@ -2469,7 +2513,11 @@ def handle_add(args: argparse.Namespace, root: Path) -> int:
             stream=False,
         )
         if result.returncode != 0:
-            print("资料未能加入知识库；详细诊断已保留给 Agent。", file=sys.stderr)
+            print(
+                "资料未能加入知识库；请让 Agent 查看诊断后重试。"
+                "若是网页链接，也可以上传 PDF 或 HTML，或改用本地文件。",
+                file=sys.stderr,
+            )
             return result.returncode
         unit_id, _status = _extract_ingest_unit_id(result.stdout)
         public_unit_id = _public_display_text(unit_id, root, "编号已隐藏", 100) if unit_id else ""
@@ -2770,7 +2818,11 @@ def handle_ingest(args: argparse.Namespace, root: Path) -> int:
         extra_env={"RESEARCH_INGEST_CHAIN": "1"},
     )
     if intake.returncode != 0:
-        print("资料未能加入知识库；详细诊断已保留给 Agent。", file=sys.stderr)
+        print(
+            "资料未能加入知识库；请让 Agent 查看诊断后重试。"
+            "若是网页链接，也可以上传 PDF 或 HTML，或改用本地文件。",
+            file=sys.stderr,
+        )
         return intake.returncode
 
     unit_id, status = _extract_ingest_unit_id(intake.stdout)
@@ -3771,7 +3823,7 @@ def public_review_projection(record: dict, root: Path) -> dict[str, object]:
         if (judgement_track and not quotes) or any(not quote for quote in quotes):
             structurally_invalid = True
             continue
-        text = _render_public_claim_text(raw_text, root)
+        text = _render_public_review_claim_text(claim, root)
         evidence_text = _sanitize_public_text(quotes[0], root) if quotes else ""
         if (
             text is None

@@ -196,6 +196,24 @@ def test_discuss_verify_accepts_verbatim_evidence_and_persists_one_conclusion(tm
         )
 
 
+def test_discussion_verify_checkpoint_includes_agent_fill(tmp_path: Path, monkeypatch) -> None:
+    idea = _load_idea_module()
+    idea_id, source_id = _setup_records(tmp_path, idea)
+    assert _run(idea, monkeypatch, "discuss", "--id", idea_id, "--phase", "prepare") == 0
+    fill_path = record_path(tmp_path, "idea", idea_id).parent / "discussion-fill.yaml"
+    write_yaml_if_changed(
+        fill_path,
+        _filled_scaffold(fill_path, source_id, "Transfer failed when the visual domain changed abruptly."),
+    )
+    checkpoints: list[dict[str, object]] = []
+    idea.checkpoint_and_report = lambda *args, **kwargs: checkpoints.append(kwargs) or {}
+
+    assert _run(idea, monkeypatch, "discuss", "--id", idea_id, "--phase", "verify") == 0
+
+    assert len(checkpoints) == 1
+    assert fill_path in checkpoints[0]["target_paths"]
+
+
 def test_discuss_confirm_cannot_forge_missing_authorization_source(tmp_path: Path, monkeypatch) -> None:
     idea = _load_idea_module()
     idea_id, source_id = _setup_records(tmp_path, idea)

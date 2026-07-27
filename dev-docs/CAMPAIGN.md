@@ -23,10 +23,10 @@
 - [ ] A13 交互章程冷验收（三场景 10 条逐条打分）
 
 ### 质量验收
-- [x] Q1 pytest 全套绿（普通文件型 scratch `.venv`；R4 `2216 passed, 18 skipped`；不得回退新行为凑绿）
+- [x] Q1 pytest 全套绿（普通文件型 scratch runtime；R6 冷修复 `2301 passed, 18 skipped`；不得回退新行为凑绿）
 - [x] Q2 skill_validator 15/15；冷装约 2s；install.sh install+update+uninstall 三态正常
 - [ ] Q3 GOLDEN_SUITE 8 条全过且零机制摸索失败
-- [ ] Q4 单任务规则文本 ≤8k tokens；kb next ≤3 步
+- [x] Q4 单任务规则文本 ≤8k tokens；kb next ≤3 步
 - [ ] Q5 静默失败为零（非零退出带一行可行动中文原因；私有协议含期望格式）
 - [ ] Q6 公开输出零 traceback/零绝对路径（含 [root] 行治理）
 - [ ] Q7 SCHEMAS/DESIGN/USER_GUIDE/README/CHANGELOG 与实现一致（rc 状态单一事实源）
@@ -97,7 +97,7 @@
 - 提交：`519849b`（设计 gate）、`3c7f0c8`（批量实验导入）、`9f9c81f`（周报/PPT 编辑层）、`b511aa1`（冷验收缺口修复）；公开文档与本台账另作 R4 closure commit。未 push/tag/merge。
 - 下一步：进入 R5 结构减法、G5 批量园艺与 G6 批注回流。
 
-### R5 结构减法、批量园艺与批注回流（施工中，2026-07-27）
+### R5 结构减法、批量园艺与批注回流（完成，2026-07-27）
 - R5 施工前完成两条独立只读审计：结构审计确认目标为 **15 个 discoverable skill = 14 个 L1 owner + kb-cli**，四 analyzer 只应合并发现/路由而保留内部脚本及 owner identity；园艺/批注审计确认当前 `kb add` 仍是单目标、ordinary stale survey 未进 `kb next`、taxonomy rebuild 缺 checkpoint，且旧 `review_learning/promote_learning` 可绕过统一确认门。
 - 设计 gate 已锁：测试迁根、unit-analyst facade、wiki 并入 kb-cli、navigator 移出 bundle、metadata 构建生成、固定 tokenizer 的 8k gate；`kb add` 1..20 整批原子；园艺只分类/继续不删除或自签；人工 Markdown freeze 后走 blog 分析 pending；偏好 observation 走统一 snapshot/真人 signer/当前消息授权/ConfirmationReceipt 后才跨任务生效。
 - 施工顺序：设计/hand-off → tests 迁根 → bundle/metadata/skill facade → G5 → G6/A11 → token 瘦身与全量/冷验收。每个 piece 独立提交；测试只用 `/private/tmp`，真实根 `kb/` 保持只读。
@@ -105,7 +105,13 @@
 - G5 已提交并冷验收：`kb add` 支持 1..20 项整批 preflight、单 root transaction/checkpoint、late failure 零部分写，duplicate-only 不产生空深读提示；portfolio classifier 覆盖 ready review、awaiting fill/verify、ordinary stale survey、resumable op、due monitor 与 taxonomy rebuild，公开最多三步。stale survey 重走新 pending 链，taxonomy/governance 只机械重建并精确 checkpoint，园艺不删除/defer/自签。
 - A11 已提交：用户纠正只形成带逐字 observation 与精确 scope 的 pending preference，任务尾最多两条；统一 `kb review` snapshot + 真人 signer + 当前消息授权在同一 root transaction 写 learning receipt 与 runtime binding。旧 direct promote/review 零写，legacy/伪签/stale/tamper item 不进入 eligible view；init 的 `link_autodrive` 与 `discussion_style` 仍落盘并被消费。
 - G6 固定提交 `7d22344` 冷装验收 PASS：安装副本显式包含 byte-identical `AGENT_GUIDE.md`；点名 human note 后 exact bytes 冻结为 `source_origin=human-note` 的 blog，四槽 Agent fill/逐字 evidence/verify 后保持 pending。nested、symlink、FIFO、non-UTF8、oversize、review-sheet basename/schema/marker、late drift 与事务故障均 fail closed；重复 human note 幂等、与 generic 同 bytes 不跨 provenance 合并；原 note 不进入任何 checkpoint。scratch 前后源码根真实 `kb/` tree digest 同为 `86953d91e901b6f77b31ca392588a90fd3ea5ae199be14b1fb45742ca6d3b30a`。
-- Q4 施工中：固定 `tiktoken==0.13.0` / `cl100k_base` 对完整 `AGENTS + AGENT_GUIDE + 单个 discoverable SKILL` 组合逐份计数；规则瘦身后 global 由 8020 降至 3943，当前最坏组合 7668/8000。最终 full suite、冷 installed-copy A13/GOLDEN 与 release gate 尚未完成，因此 Q3–Q7 不提前勾选。
+- Q4 完成：固定 `tiktoken==0.13.0` / `cl100k_base` 对完整 `AGENTS + AGENT_GUIDE + 单个 discoverable SKILL` 组合逐份计数；规则瘦身后 global 由 8020 降至 4059，当前最坏组合 `kb-cli=7784/8000`。G5 冷验收已证明 `kb next`/园艺公开候选最多三步。
+
+### R6 终验与冷验收修复（施工中，2026-07-27）
+- 第一轮固定 `216f401` 三路冷验收如实报告：A13 交互章程 30/30，但 paper 类型 wire text 使公开 review fail closed、周报 fill 要 Agent 手改 owner status/label 且成品泄漏 slug/internal refs/receipt 术语；GOLDEN 的 G3 repo root 规则不清、G5 新关联材料无法安全刷新 corpus、G6 缺 decisions 明示与读者化投影；功能线 A1/A4/A5 通过，A6 因讨论归档未 checkpoint、A12 因 undo 未点名对象而 partial。长网页的一次超时发生在宿主工具执行边界，另有较小真实 blog 正常完成，暂不冒充产品非零退出。
+- 冷修复已在源码独立复现后完成：paper 类型仅对 exact canonical claim 做安全中文投影；repo 根从 fill orientation 读取；idea analyze/review 增加 anchor-bound 显式 corpus refresh 并保留白名单 Agent 字段；weekly owner 预填 status/labels，以计划标题、自然语言类别、编号来源和分组缺失项交付；discussion/idea fill 与讨论 note 进入精确 checkpoint；undo 从 journal target 派生安全对象名；source intake 失败给上传或本地文件恢复路径。canonical claim bytes 的 pending 字段不回写，current top-level ConfirmationReceipt 仍是唯一确认权威。
+- 修复后质量门：定向/联合 `515 passed`，规则/metadata/公开文档 `47 passed`，Python 3.9.6 compile、`Validated 15 skills.`、`git diff --check` 通过；完整套件 `2301 passed, 18 skipped, 7 warnings`（10m25s），warning 均为既有 SWIG deprecation。规则 global `4059`，最坏组合 `7784/8000`。仓库根真实 `kb/` 六个既有 dirty 文件哈希与施工前完全一致。
+- 当前下一步：固定提交本轮冷修复，再从该提交全新安装复跑 A13、G3/G5/G6、A6/A12 与安装生命周期；复跑前不提前勾 Q3/Q5/Q6/Q7。
 
 ## 决定记录（含偏离蓝图的理由）
 

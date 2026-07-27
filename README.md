@@ -146,6 +146,8 @@ The agent can safely extract metadata, deduplicate sources, build evidence-backe
 
 You decide whether a judgement is accepted, which idea or baseline to pursue, whether an experiment conclusion is sound, and when a research program changes stage. A confirmation must come from the current user interaction and retain evidence; remembered authorization is not enough.
 
+Canonical claim bytes retain their verified epistemic fields after confirmation. A current top-level confirmation receipt is the authority that lets consumers project its covered, evidence-current claims as confirmed; rewriting claim fields merely for display would invalidate the verified content binding.
+
 `kb review` includes only material whose agent fill and verification are complete. Items still awaiting analysis, verification, or retry remain out of the human decision queue.
 
 Review cards are one-time, version-bound snapshots. They expire after 24 hours; a used, expired, changed, or invalid card is rejected with a distinct recovery message. If the underlying content changes, run `kb review` again to see the new text before deciding. For an Obsidian round-trip, the generated Bases stay read-only and a separate human-owned annotation sheet exposes only confirm/reject/defer checkboxes. The Agent must restate the checked batch in the current conversation before applying it; checkboxes alone are not authorization. Cross-owner application is all-or-none.
@@ -160,7 +162,9 @@ Natural-language “整理一下知识库” requests use the same bounded portf
 
 Experiment exports can be imported in one bounded batch from W&B JSON, CSV, or a flat JSON directory. The batch is all-or-nothing, preserves exact raw provenance, replays identical items without duplication, and never turns mechanical run facts into a diagnosis. A diagnosis remains an Agent-authored, evidence-backed judgement that requires human confirmation.
 
-Natural-language weekly-report and PPT requests use separate Agent-filled editorial contracts over current confirmed claims, decisions, factual events, and stable figures. Weekly reports render summary, progress, risks, next steps, and an evidence appendix; PPT materials render one conclusion with evidence, optional figure references, speaker notes, and a transition per slide. Both differ from the seven-section paper outline, and stale inputs cannot overwrite the previous complete output.
+Natural-language weekly-report and PPT requests use separate Agent-filled editorial contracts over current confirmed claims, decisions, factual events, and stable figures. Weekly reports use the program title or research question, reader-facing epistemic labels and numbered sources; their evidence appendix separately lists confirmed decisions, research claims with evidence, and factual progress, including an explicit missing statement for an empty group. Internal catalog IDs, schema fields, and receipt mechanics stay out of the delivered report. PPT materials render one conclusion with evidence, optional figure references, speaker notes, and a transition per slide. Both differ from the seven-section paper outline, and stale inputs cannot overwrite the previous complete output.
+
+When newly linked material is needed by an in-progress idea analysis or review, the Agent can explicitly refresh that operation's frozen evidence corpus. The refresh preserves only the owner-approved semantic fields, rebuilds every corpus/orientation/anchor binding, and refuses immutable-field tampering or unsafe paths without overwriting the existing work.
 
 ## Optional local developer diagnostics
 

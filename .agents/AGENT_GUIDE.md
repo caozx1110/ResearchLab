@@ -47,9 +47,9 @@ kb --agent-protocol o3.json review --apply-obsidian-batch <batch_ref> \
 
 - 默认 fill：paper `note-fill.yaml`；repo `capability-fill.yaml`；dataset `dataset-fill.yaml`；blog `blog-fill.yaml`。`--input` 只接 unit 根下 basename。
 - evidence ref：`{source_unit_id, artifact, locator, quote}`，可选 summary。quote 经 whitespace 归一化后仍须大小写/标点敏感地逐字存在；artifact/identity/current bytes 都会复验。
-- locator：PDF `page=N`/section/para；HTML/Markdown `section:<anchor>`；repo `line=N`。repo artifact 为冻结 repo-root 相对源码文件。
+- locator：PDF `page=N`/section/para；HTML/Markdown `section:<anchor>`；repo `line=N`。repo 真正根目录读 `capability-fill.yaml` 的 `agent_orientation.repo_root`，basename 不固定；artifact 相对该根。
 - concept：至少 3 个 current confirmed unit；prepare 冻结语料，Agent 填 definition/associations + evidence，verify 后走普通 review。
-- idea analyze/review/discuss/generate 只能引用本次 prepare 的 evidence-corpus；要扩语料，先入库/链接 unit，再重新 prepare。
+- idea analyze/review/discuss/generate 只能引用本次 prepare 的 evidence-corpus；要扩语料，先入库/链接 unit，再以同一 analyze/review prepare 加 `--refresh-corpus`，它保留 Agent 可填字段并刷新 corpus/context，随后改正引用再 verify。
 
 人工笔记只在用户明确点名一份时调用：
 

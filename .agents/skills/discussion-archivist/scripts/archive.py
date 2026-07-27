@@ -21,7 +21,7 @@ if __name__ == "__main__":
     ensure_managed_runtime(PROJECT_ROOT)
 
 from research.common import add_project_root_argument, append_program_reporting_event, ensure_dir, print_resolved_project_roots, program_reporting_events_path, simple_slug, write_text_if_changed
-from research.core import project_root
+from research.core import checkpoint_and_report, project_root
 from research.journal import mutation_transaction
 
 
@@ -108,6 +108,12 @@ def main() -> int:
             },
             generated_by="discussion-archivist",
         )
+    checkpoint_and_report(
+        root,
+        trigger="milestone",
+        message=f"milestone: archive discussion for {args.program_id}",
+        target_paths=[path, event_path],
+    )
     print(path.relative_to(root))
     return 0
 

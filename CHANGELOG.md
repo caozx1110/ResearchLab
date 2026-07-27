@@ -4,6 +4,13 @@ All notable changes to this project will be documented here. The format follows 
 
 ## [Unreleased]
 
+### Fixed (R6 cold acceptance, 2026-07-27)
+
+- Public paper review translates the exact canonical paper-type claim into reader-facing language while keeping generic assignment-like payloads fail-closed.
+- Idea analysis and review can explicitly refresh a frozen evidence corpus after new material is linked, preserving only owner-approved Agent fields and rejecting immutable-field tampering or unsafe paths before any write.
+- Weekly-report delivery now uses the program title or question, owner-provided lifecycle fields and labels, natural epistemic wording, numbered sources, and a grouped evidence appendix with explicit missing categories; internal catalog, schema, and receipt mechanics no longer leak into the reader artifact.
+- Discussion verification/archive and idea analysis/review verification checkpoint their Agent fill and durable discussion note exactly. Recovery output names safe research subjects, and failed source intake gives a natural recovery option for uploaded or local material.
+
 ### Added (R5, 2026-07-27)
 
 - Added atomic 1–20 source intake through the existing `kb add` surface. The full batch is preflighted and published in one root transaction/checkpoint, duplicate-only batches finish cleanly, and deep-read continuation is asked once per batch.

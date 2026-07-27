@@ -78,7 +78,6 @@ def _base_manifest(output_kind: str) -> dict:
 
 def _ready_weekly(manifest: dict, *, text: str = "Grounded editorial sentence.") -> dict:
     fill = build_editorial_fill_scaffold(manifest)
-    fill["status"] = "ready_for_verify"
     support = manifest["catalogs"]["support"][0]["ref"]
     fill["sections"] = {
         "executive_summary": [{"text": text, "refs": [support], "epistemic_label": "synthesis"}],
@@ -91,7 +90,6 @@ def _ready_weekly(manifest: dict, *, text: str = "Grounded editorial sentence.")
 
 def _ready_ppt(manifest: dict) -> dict:
     fill = build_editorial_fill_scaffold(manifest)
-    fill["status"] = "ready_for_verify"
     fill["figure_status"] = "cited"
     fill["slides"] = [
         {
@@ -132,6 +130,10 @@ def test_weekly_and_ppt_render_distinct_editorial_structures() -> None:
 
     assert "## 本周摘要" in weekly and "## 证据附录" in weekly
     assert "逐字证据：exact evidence" in weekly
+    assert "### 已确认决策" in weekly and "缺少：本期没有可引用的已确认决策" in weekly
+    assert "### 研究结论与证据" in weekly and "### 事实进展" in weekly
+    assert "claim:p-one:c-one" not in weekly and "risk:event:r-one" not in weekly
+    assert "[synthesis]" not in weekly and "ConfirmationReceipt" not in weekly
     assert "## Slide 1" not in weekly
     assert "## Slide 1" in ppt and "- 结论：" in ppt and "- 讲述：" in ppt and "- 过渡：" in ppt
     assert "figure:fig:p-one:fig:1" in ppt
@@ -151,7 +153,6 @@ def test_ppt_without_current_figures_requires_and_renders_explicit_missing_state
         figure_catalog={},
     )
     fill = build_editorial_fill_scaffold(manifest)
-    fill["status"] = "ready_for_verify"
     fill["figure_status"] = "missing"
     fill["slides"] = [
         {
@@ -167,6 +168,61 @@ def test_ppt_without_current_figures_requires_and_renders_explicit_missing_state
 
     assert validate_editorial_fill(fill, manifest) == []
     assert "缺少：当前没有可引用图示" in render_ppt_editorial(fill, manifest, language="zh-CN")
+
+
+def test_weekly_scaffold_owns_status_and_prefills_section_labels() -> None:
+    fill = build_editorial_fill_scaffold(_base_manifest("weekly"))
+
+    assert fill["status"] == "ready_for_verify"
+    assert {
+        section: items[0]["epistemic_label"]
+        for section, items in fill["sections"].items()
+    } == {
+        "executive_summary": "synthesis",
+        "progress": "fact",
+        "problems_and_risks": "risk",
+        "next_steps": "plan",
+    }
+
+
+def test_weekly_uses_reader_title_and_hides_internal_catalog_terms() -> None:
+    manifest = _base_manifest("weekly")
+    manifest["request"]["program_title"] = "可验证记忆对长时操作的帮助"
+    manifest["anchor_digest"] = ""
+    from research.report_editorial import manifest_anchor_digest
+
+    manifest["anchor_digest"] = manifest_anchor_digest(manifest)
+    fill = _ready_weekly(manifest, text="当前判断尚无 current ConfirmationReceipt。")
+
+    rendered = render_weekly_editorial(fill, manifest, language="zh-CN")
+
+    assert rendered.startswith("# 周报：可验证记忆对长时操作的帮助\n")
+    assert "ConfirmationReceipt" not in rendered
+    assert "canonical claims" not in rendered
+    assert "risk:" not in rendered and "claim:" not in rendered and "event:" not in rendered
+
+
+def test_report_main_verify_failure_is_actionable_without_schema_terms(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = _report_module()
+    root, program_id, _unit_id, _figure_ref = _workspace(tmp_path)
+    report.prepare_editorial_report(root, program_id, "weekly", stage="", limit=20, preference_selection_id="")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["report.py", "--root", str(root), "weekly-verify", "--program-id", program_id],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        report.main()
+
+    message = str(exc.value)
+    assert "请让 Agent 补齐准备材料中的正文与依据" in message
+    assert "ready_for_verify" not in message
+    assert "sections." not in message
+    assert "editorial fill" not in message
 
 
 def _write_confirmed_paper_with_figure(root: Path, program_id: str, unit_id: str) -> str:
@@ -320,7 +376,12 @@ def _workspace(tmp_path: Path) -> tuple[Path, str, str, str]:
     workflow.mkdir(parents=True)
     write_yaml_if_changed(
         root / "kb" / "programs" / program_id / "state.yaml",
-        {"program_id": program_id, "stage": "evaluation", "active_unit_ids": [unit_id, experiment_id]},
+        {
+            "program_id": program_id,
+            "question": "证据约束的评估是否达到预期？",
+            "stage": "evaluation",
+            "active_unit_ids": [unit_id, experiment_id],
+        },
     )
     append_program_reporting_event(
         root,
@@ -441,6 +502,7 @@ def test_prepare_preserves_fill_and_verify_publishes_distinct_direct_outputs(
     outline = report.render_outline(program_id, report.load_report_inputs(root, program_id))
 
     assert all(heading in weekly_text for heading in ("## 本周摘要", "## 进展", "## 问题与风险", "## 下周计划", "## 证据附录"))
+    assert weekly_text.startswith("# 周报：证据约束的评估是否达到预期？\n")
     assert "Success rate improves by 8 points." in weekly_text
     assert weekly_text.count("## Slide") == 0
     assert ppt_text.count("## Slide") == 2

@@ -230,6 +230,25 @@ def test_review_verify_persists_agent_judgements_without_heuristic_score(tmp_pat
     assert len(updated["payload"]["review"]["claims"]) == 4
 
 
+def test_analysis_verify_checkpoint_includes_agent_fill(tmp_path: Path, monkeypatch) -> None:
+    idea = _load_idea_module()
+    idea_id, source_id = _setup(tmp_path, idea)
+    assert _run(idea, monkeypatch, "analyze", "--idea-id", idea_id, "--phase", "prepare") == 0
+    unit = record_path(tmp_path, "idea", idea_id).parent
+    fill_path = unit / "analyze-fill.yaml"
+    write_yaml_if_changed(
+        fill_path,
+        _fill(fill_path, source_id, "The baseline loses accuracy under unseen camera viewpoints."),
+    )
+    checkpoints: list[dict[str, object]] = []
+    idea.checkpoint_and_report = lambda *args, **kwargs: checkpoints.append(kwargs) or {}
+
+    assert _run(idea, monkeypatch, "analyze", "--idea-id", idea_id, "--phase", "verify") == 0
+
+    assert len(checkpoints) == 1
+    assert fill_path in checkpoints[0]["target_paths"]
+
+
 def test_analyze_verify_rejects_fabricated_evidence(tmp_path: Path, monkeypatch) -> None:
     idea = _load_idea_module()
     idea_id, source_id = _setup(tmp_path, idea)
@@ -351,6 +370,102 @@ def test_nonempty_prepare_retry_preserves_bytes_and_inodes(
     with pytest.raises(SystemExit):
         _run(idea, monkeypatch, operation, "--idea-id", idea_id, "--phase", "prepare")
     assert _path_snapshot(watched) == before
+
+
+@pytest.mark.parametrize("mode", ["analyze", "review"])
+def test_explicit_corpus_refresh_preserves_agent_fields_and_admits_new_unit(
+    tmp_path: Path, monkeypatch, mode: str
+) -> None:
+    idea = _load_idea_module()
+    idea_id, _source_id = _setup(tmp_path, idea)
+    assert _run(idea, monkeypatch, mode, "--idea-id", idea_id, "--phase", "prepare") == 0
+    unit = record_path(tmp_path, "idea", idea_id).parent
+    fill_path = unit / f"{mode}-fill.yaml"
+
+    new_source_id = "r-new-corpus-123456"
+    new_source = default_record("repo", title="New Corpus", maturity="complete", source={"original_uri": "fixture-new"})
+    new_source["id"] = new_source_id
+    new_source_path = record_path(tmp_path, "repo", new_source_id)
+    write_yaml_if_changed(new_source_path, new_source)
+    quote = "The new linked unit supplies the missing comparison evidence."
+    (new_source_path.parent / "new-evidence.txt").write_text(quote + "\n", encoding="utf-8")
+
+    record_file = unit / "record.yaml"
+    record = load_yaml(record_file, default={})
+    record["links"] = [{"target_id": new_source_id, "relation": "related"}]
+    write_yaml_if_changed(record_file, record)
+    filled = _fill(fill_path, new_source_id, quote, selection_rank=2 if mode == "review" else None)
+    for claim in filled["claims"]:
+        claim["evidence_refs"][0]["artifact"] = "new-evidence.txt"
+    write_yaml_if_changed(fill_path, filled)
+
+    with pytest.raises(SystemExit):
+        _run(idea, monkeypatch, mode, "--idea-id", idea_id, "--phase", "verify")
+    assert _run(
+        idea,
+        monkeypatch,
+        mode,
+        "--idea-id",
+        idea_id,
+        "--phase",
+        "prepare",
+        "--refresh-corpus",
+    ) == 0
+
+    refreshed = load_yaml(fill_path, default={})
+    assert refreshed["reviewer"] == filled["reviewer"]
+    assert refreshed["claims"] == filled["claims"]
+    if mode == "review":
+        assert refreshed["selection_rank"] == 2
+    corpus = load_yaml(unit / f"{mode}-evidence-corpus.yaml", default={})
+    assert any(item["path"].endswith("/new-evidence.txt") for item in corpus["entries"])
+    assert _run(idea, monkeypatch, mode, "--idea-id", idea_id, "--phase", "verify") == 0
+
+
+@pytest.mark.parametrize("tamper", ["extra_key", "claim_type", "symlink"])
+def test_explicit_corpus_refresh_rejects_unsafe_fill_without_writes(
+    tmp_path: Path, monkeypatch, tamper: str
+) -> None:
+    idea = _load_idea_module()
+    idea_id, source_id = _setup(tmp_path, idea)
+    assert _run(idea, monkeypatch, "analyze", "--idea-id", idea_id, "--phase", "prepare") == 0
+    unit = record_path(tmp_path, "idea", idea_id).parent
+    fill_path = unit / "analyze-fill.yaml"
+    filled = _fill(fill_path, source_id, "The baseline loses accuracy under unseen camera viewpoints.")
+    if tamper == "extra_key":
+        filled["unexpected"] = True
+        write_yaml_if_changed(fill_path, filled)
+    elif tamper == "claim_type":
+        filled["claims"][0]["claim_type"] = "fact"
+        write_yaml_if_changed(fill_path, filled)
+    else:
+        victim = tmp_path / "victim-fill.yaml"
+        write_yaml_if_changed(victim, filled)
+        fill_path.unlink()
+        fill_path.symlink_to(victim)
+    watched = [
+        unit / "record.yaml",
+        fill_path,
+        unit / "analyze-orientation.yaml",
+        unit / "analyze-evidence-corpus.yaml",
+    ]
+    before = _optional_path_snapshot(watched)
+    journal_before = _journal_entry_snapshot(tmp_path)
+
+    with pytest.raises(SystemExit):
+        _run(
+            idea,
+            monkeypatch,
+            "analyze",
+            "--idea-id",
+            idea_id,
+            "--phase",
+            "prepare",
+            "--refresh-corpus",
+        )
+
+    assert _optional_path_snapshot(watched) == before
+    assert _journal_entry_snapshot(tmp_path) == journal_before
 
 
 def test_empty_prepare_retry_is_exact_no_churn(tmp_path: Path, monkeypatch) -> None:

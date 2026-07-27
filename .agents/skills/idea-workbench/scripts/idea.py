@@ -298,17 +298,23 @@ def _prepare_contract_tuple_state(
         raise ValueError("idea authoring contract tuple is incomplete")
     corpus, corpus_binding = _validated_frozen_corpus(root, corpus_path)
     schema_version = 1 if corpus.get("schema") == "idea-evidence-corpus/v1" else 2
+    orientation, _orientation_binding = _bound_yaml(
+        orientation_path,
+        logical_identity=orientation_path.name,
+        trusted_root=root,
+    )
+    static_digest = (
+        str(orientation.get("static_scaffold_digest") or "")
+        if schema_version == 2 and isinstance(orientation, Mapping)
+        else ""
+    )
     expected_orientation = idea_preference_orientation(
         operation,
         canonical_id=canonical_id,
         corpus_commitment=_corpus_commitment(corpus, corpus_binding),
         request_context=request_context,
         schema_version=schema_version,
-    )
-    orientation, _orientation_binding = _bound_yaml(
-        orientation_path,
-        logical_identity=orientation_path.name,
-        trusted_root=root,
+        static_scaffold_digest=static_digest,
     )
     if orientation != expected_orientation:
         raise ValueError("idea authoring contract tuple is mixed or stale")
@@ -451,12 +457,21 @@ def _idea_prepare_preflight(args, root: Path) -> None:
         )
     except ValueError as exc:
         raise SystemExit("Existing idea authoring contract is stale or unanchored.") from exc
-    _guard_existing_empty_fill(
-        root,
-        unit_root / f"{args.command}-fill.yaml",
-        analysis_scaffold(record, mode=args.command, preference_context=None),
-        consumed_bindings=consumed_bindings,
-    )
+    fill_path = unit_root / f"{args.command}-fill.yaml"
+    if getattr(args, "refresh_corpus", False):
+        _load_refreshable_analysis_fill(
+            root,
+            record,
+            unit_root,
+            mode=args.command,
+        )
+    else:
+        _guard_existing_empty_fill(
+            root,
+            fill_path,
+            analysis_scaffold(record, mode=args.command, preference_context=None),
+            consumed_bindings=consumed_bindings,
+        )
     _guard_existing_contract_target(root, unit_root / f"{args.command}-orientation.yaml")
     _guard_existing_contract_target(root, unit_root / f"{args.command}-evidence-corpus.yaml")
 
@@ -551,6 +566,8 @@ def _idea_verify_preflight(args, root: Path) -> None:
 
 
 def _idea_transaction_preflight(args, root: Path) -> None:
+    if getattr(args, "refresh_corpus", False) and getattr(args, "phase", "") != "prepare":
+        raise SystemExit("证据集刷新只适用于准备阶段；未做修改。")
     if args.command in {"review-assist", "select-best"}:
         _generic_bundle_preflight(args, root)
         return
@@ -841,6 +858,7 @@ def idea_preference_orientation(
     corpus_commitment: Mapping[str, str],
     request_context: Mapping[str, object] | None = None,
     schema_version: int = 2,
+    static_scaffold_digest: str = "",
 ) -> dict[str, object]:
     if operation not in PREFERENCE_OPERATIONS:
         raise ValueError("unsupported idea preference operation")
@@ -854,7 +872,11 @@ def idea_preference_orientation(
         "evidence_corpus": "frozen-pre-authoring-canonical-unit-artifacts",
     }
     if schema_version == 2:
+        static_scaffold_digest = static_scaffold_digest or canonical_digest({})
+        if not HEX_DIGEST_RE.fullmatch(static_scaffold_digest):
+            raise ValueError("idea orientation requires a static scaffold digest")
         payload["evidence_corpus_commitment"] = dict(corpus_commitment)
+        payload["static_scaffold_digest"] = static_scaffold_digest
     elif schema_version != 1:
         raise ValueError("unsupported idea orientation schema")
     if operation == "generate":
@@ -1366,6 +1388,7 @@ def _write_authoring_contract(
     corpus_path: Path,
     excluded_paths: set[Path],
     request_context: Mapping[str, object] | None = None,
+    static_scaffold: Mapping[str, object],
 ) -> dict[str, object]:
     write_yaml_if_changed(
         corpus_path,
@@ -1379,6 +1402,7 @@ def _write_authoring_contract(
             canonical_id=canonical_id,
             corpus_commitment=_corpus_commitment(corpus, binding),
             request_context=request_context,
+            static_scaffold_digest=canonical_digest(dict(static_scaffold)),
         ),
     )
     orientation_binding = regular_file_binding(
@@ -1489,12 +1513,11 @@ def _guard_existing_contract_target(root: Path, path: Path) -> None:
         raise SystemExit("已有准备契约不安全；为避免误写，准备操作已停止。") from exc
 
 
-def _validate_owner_static_fill(
+def _owner_static_fill_projection(
     fill: Mapping[str, object],
-    expected: Mapping[str, object],
     *,
     operation: str,
-) -> None:
+) -> dict[str, object]:
     projection = copy.deepcopy(dict(fill))
     if operation == "generate":
         candidates = projection.get("candidates")
@@ -1525,8 +1548,92 @@ def _validate_owner_static_fill(
                 raise ValueError("idea fill claim is malformed")
             claim["text"] = ""
             claim["evidence_refs"] = []
+    return projection
+
+
+def _validate_owner_static_fill(
+    fill: Mapping[str, object],
+    expected: Mapping[str, object],
+    *,
+    operation: str,
+) -> None:
+    projection = _owner_static_fill_projection(fill, operation=operation)
     if projection != dict(expected):
         raise ValueError("immutable idea fill scaffold was modified")
+
+
+def _load_refreshable_analysis_fill(
+    root: Path,
+    record: Mapping[str, object],
+    unit_root: Path,
+    *,
+    mode: str,
+) -> dict[str, object]:
+    """Load a safe nonempty analysis fill while tolerating only record-byte drift."""
+    fill_path = unit_root / f"{mode}-fill.yaml"
+    try:
+        fill, _binding = _bound_yaml(
+            fill_path,
+            logical_identity=fill_path.relative_to(root).as_posix(),
+            trusted_root=root,
+        )
+        if not isinstance(fill, Mapping):
+            raise ValueError("fill is not a mapping")
+        static_fill = copy.deepcopy(dict(fill))
+        consumer = static_fill.pop("preference_consumer", None)
+        orientation, _orientation_binding = _bound_yaml(
+            unit_root / f"{mode}-orientation.yaml",
+            logical_identity=f"{mode}-orientation.yaml",
+            trusted_root=root,
+        )
+        if (
+            not isinstance(orientation, Mapping)
+            or orientation.get("schema") != "idea-preference-orientation/v2"
+            or canonical_digest(_owner_static_fill_projection(static_fill, operation=mode))
+            != orientation.get("static_scaffold_digest")
+        ):
+            raise ValueError("immutable fill does not match its owner orientation")
+        if not isinstance(consumer, Mapping) or not isinstance(consumer.get("task_context"), Mapping):
+            raise ValueError("missing preference consumer")
+        old_context = dict(consumer["task_context"])
+        if dict(consumer) != _preference_consumer_view(mode, old_context):
+            raise ValueError("modified preference consumer")
+        current_context = idea_preference_context(
+            root,
+            operation=mode,
+            canonical_id=str(record["id"]),
+            orientation_path=unit_root / f"{mode}-orientation.yaml",
+            corpus_path=unit_root / f"{mode}-evidence-corpus.yaml",
+            excluded_paths=_corpus_exclusions(unit_root, mode),
+            record_path_value=unit_root / "record.yaml",
+        )
+        old_context.pop("record_bytes_digest", None)
+        current_context.pop("record_bytes_digest", None)
+        if old_context != current_context:
+            raise ValueError("stale authoring context")
+    except (KeyError, TypeError, ValueError) as exc:
+        raise SystemExit("已有填写内容或准备契约已变化，无法安全刷新；未做修改。") from exc
+    return copy.deepcopy(dict(fill))
+
+
+def _restore_analysis_mutable_fields(
+    scaffold: dict[str, object],
+    preserved: Mapping[str, object],
+    *,
+    mode: str,
+) -> dict[str, object]:
+    scaffold["reviewer"] = copy.deepcopy(preserved["reviewer"])
+    if mode == "review":
+        scaffold["selection_rank"] = copy.deepcopy(preserved["selection_rank"])
+    source_claims = preserved["claims"]
+    target_claims = scaffold["claims"]
+    assert isinstance(source_claims, list) and isinstance(target_claims, list)
+    assert len(source_claims) == len(target_claims)
+    for source, target in zip(source_claims, target_claims):
+        assert isinstance(source, Mapping) and isinstance(target, dict)
+        target["text"] = copy.deepcopy(source["text"])
+        target["evidence_refs"] = copy.deepcopy(source["evidence_refs"])
+    return scaffold
 
 
 def _assert_bound_fill_unchanged(
@@ -1642,17 +1749,23 @@ def idea_preference_context(
     )
     commitment = _corpus_commitment(corpus, corpus_binding)
     schema_version = 1 if corpus.get("schema") == "idea-evidence-corpus/v1" else 2
+    orientation, orientation_binding = _bound_yaml(
+        orientation_path,
+        logical_identity=orientation_path.name,
+        trusted_root=root,
+    )
+    static_digest = (
+        str(orientation.get("static_scaffold_digest") or "")
+        if schema_version == 2 and isinstance(orientation, Mapping)
+        else ""
+    )
     expected_orientation = idea_preference_orientation(
         operation,
         canonical_id=canonical_id,
         corpus_commitment=commitment,
         request_context=request_context,
         schema_version=schema_version,
-    )
-    orientation, orientation_binding = _bound_yaml(
-        orientation_path,
-        logical_identity=orientation_path.name,
-        trusted_root=root,
+        static_scaffold_digest=static_digest,
     )
     if orientation != expected_orientation:
         raise ValueError("immutable idea authoring orientation was modified")
@@ -1895,6 +2008,11 @@ def generation_materialization_plan(root: Path, args, *, bundle_id: str) -> dict
             canonical_id=bundle_id,
             corpus_commitment=_corpus_commitment(corpus, corpus_binding),
             request_context=request_context,
+            static_scaffold_digest=str(
+                orientation.get("static_scaffold_digest")
+                if isinstance(orientation, Mapping)
+                else ""
+            ),
         )
         if orientation != expected_orientation:
             raise ValueError("immutable idea generation orientation was modified")
@@ -2551,6 +2669,7 @@ def run_analysis_phase(args, root: Path, record: dict, unit_root: Path, *, mode:
     exclusions = _corpus_exclusions(unit_root, mode)
     result_path = unit_root / f"{mode}.yaml"
     if args.phase == "prepare":
+        refresh_corpus = bool(getattr(args, "refresh_corpus", False))
         consumed_bindings = _consumed_fill_bindings(root, record, unit_root, mode)
         try:
             _require_existing_semantic_anchor_if_v2(
@@ -2564,11 +2683,15 @@ def run_analysis_phase(args, root: Path, record: dict, unit_root: Path, *, mode:
             raise SystemExit(
                 "Existing idea authoring contract is stale, unanchored, or conflicts with another active operation."
             ) from exc
-        existing_fill = _guard_existing_empty_fill(
-            root,
-            fill_path,
-            analysis_scaffold(record, mode=mode, preference_context=None),
-            consumed_bindings=consumed_bindings,
+        existing_fill = (
+            _load_refreshable_analysis_fill(root, record, unit_root, mode=mode)
+            if refresh_corpus
+            else _guard_existing_empty_fill(
+                root,
+                fill_path,
+                analysis_scaffold(record, mode=mode, preference_context=None),
+                consumed_bindings=consumed_bindings,
+            )
         )
         if existing_fill is not None:
             try:
@@ -2615,6 +2738,7 @@ def run_analysis_phase(args, root: Path, record: dict, unit_root: Path, *, mode:
             orientation_path=orientation_path,
             corpus_path=corpus_path,
             excluded_paths=exclusions,
+            static_scaffold=analysis_scaffold(record, mode=mode, preference_context=None),
         )
         _persist_record_authoring_anchor(record, mode, anchor)
         write_record(root, record)
@@ -2627,15 +2751,22 @@ def run_analysis_phase(args, root: Path, record: dict, unit_root: Path, *, mode:
             excluded_paths=exclusions,
             record_path_value=unit_root / "record.yaml",
         )
-        write_yaml_if_changed(
-            fill_path,
-            analysis_scaffold(
-                record,
-                mode=mode,
-                preference_context=preference_context,
-            ),
+        refreshed_scaffold = analysis_scaffold(
+            record,
+            mode=mode,
+            preference_context=preference_context,
         )
-        print(f"[ok] prepared evidence-first {mode} scaffold")
+        if refresh_corpus:
+            assert existing_fill is not None
+            refreshed_scaffold = _restore_analysis_mutable_fields(
+                refreshed_scaffold,
+                existing_fill,
+                mode=mode,
+            )
+        write_yaml_if_changed(fill_path, refreshed_scaffold)
+        print(
+            f"[ok] {'refreshed evidence corpus and preserved Agent fill' if refresh_corpus else f'prepared evidence-first {mode} scaffold'}"
+        )
         _queue_checkpoint(
             root, trigger="milestone", message=f"milestone: prepare idea {mode} {record['id']}",
             target_paths=[unit_root / "record.yaml", fill_path, orientation_path, corpus_path],
@@ -2828,7 +2959,7 @@ def run_analysis_phase(args, root: Path, record: dict, unit_root: Path, *, mode:
     print(f"[ok] verified evidence and persisted {mode} judgements")
     _queue_checkpoint(
         root, trigger="milestone", message=f"milestone: verify idea {mode} {record['id']}",
-        target_paths=[unit_root / "record.yaml", result_path, orientation_path, corpus_path, *([unit_root / "idea-card.md"] if mode == "review" else []), *_index_checkpoint_paths(root)],
+        target_paths=[unit_root / "record.yaml", fill_path, result_path, orientation_path, corpus_path, *([unit_root / "idea-card.md"] if mode == "review" else []), *_index_checkpoint_paths(root)],
     )
     return 0
 
@@ -2971,6 +3102,7 @@ def build_parser() -> argparse.ArgumentParser:
             cmd.add_argument("--phase", choices=["prepare", "verify"], default="prepare")
             cmd.add_argument("--input", default="")
             cmd.add_argument("--preference-selection-id", default="")
+            cmd.add_argument("--refresh-corpus", action="store_true")
         if name == "select":
             add_confirmation_arguments(cmd)
 
@@ -3104,6 +3236,7 @@ def _dispatch(args, root: Path) -> int:
                 corpus_path=corpus_path,
                 excluded_paths=set(),
                 request_context=request_context,
+                static_scaffold=generation_scaffold(request_context, None),
             )
             write_yaml_if_changed(
                 bundle_index_path(root, bundle_id),
@@ -3394,6 +3527,7 @@ def _dispatch(args, root: Path) -> int:
                 orientation_path=orientation_path,
                 corpus_path=corpus_path,
                 excluded_paths=exclusions,
+                static_scaffold=discussion_scaffold(record, preference_context=None),
             )
             _persist_record_authoring_anchor(record, "discuss", anchor)
             write_record(root, record)
@@ -3606,7 +3740,7 @@ def _dispatch(args, root: Path) -> int:
         print(f"[ok] verified + persisted discussion conclusion {conclusion['id']}")
         _queue_checkpoint(
             root, trigger="milestone", message=f"milestone: verify idea discussion {record['id']}",
-            target_paths=[unit_root / "record.yaml", discussion_judgements_path(unit_root), orientation_path, corpus_path, *_index_checkpoint_paths(root)],
+            target_paths=[unit_root / "record.yaml", scaffold_path, discussion_judgements_path(unit_root), orientation_path, corpus_path, *_index_checkpoint_paths(root)],
         )
         return 0
 
