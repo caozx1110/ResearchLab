@@ -1300,6 +1300,23 @@ def append_program_reporting_event(
                 normalized[key] = []
         if "stage" in normalized:
             normalized["stage"] = str(normalized.get("stage") or "").strip()
+        event_id = str(normalized.get("id") or "").strip()
+        if not event_id:
+            identity_payload = {"program_id": program_id, **normalized}
+            identity_digest = hashlib.sha256(
+                json.dumps(
+                    identity_payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            event_id = f"event-{identity_digest[:16]}"
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}", event_id) is None:
+            raise ValueError("reporting event id is not a stable reference-safe identity")
+        if any(str(item.get("id") or "").strip() == event_id for item in items):
+            raise ValueError("reporting event id already exists")
+        normalized["id"] = event_id
         items.append(normalized)
         payload["items"] = items
         write_yaml_if_changed(path, payload)

@@ -1280,15 +1280,14 @@ def canonical_record_snapshot_if_present(
     return snapshot
 
 
-def canonical_record_snapshot_for_identity(
+def canonical_record_snapshot_for_unit_id(
     project_root: Path,
-    kind: str,
     unit_id: str,
     *,
     allow_absent: bool = False,
 ) -> CanonicalRecordSnapshot | None:
-    """Resolve one identity without accepting malformed or duplicate slots."""
-    if kind not in UNIT_KIND_DIRS or _SAFE_UNIT_DIRECTORY.fullmatch(unit_id) is None:
+    """Resolve one globally unique unit id without assuming its kind."""
+    if _SAFE_UNIT_DIRECTORY.fullmatch(unit_id) is None:
         raise ValueError("record has no canonical unit identity")
     matches = [
         snapshot
@@ -1308,7 +1307,26 @@ def canonical_record_snapshot_for_identity(
         raise ValueError("record has no persisted canonical snapshot")
     if len(matches) != 1 or occupied_slots != [matches[0].kind]:
         raise ValueError("record id does not resolve to one unique canonical record")
-    snapshot = matches[0]
+    return matches[0]
+
+
+def canonical_record_snapshot_for_identity(
+    project_root: Path,
+    kind: str,
+    unit_id: str,
+    *,
+    allow_absent: bool = False,
+) -> CanonicalRecordSnapshot | None:
+    """Resolve one identity without accepting malformed or duplicate slots."""
+    if kind not in UNIT_KIND_DIRS:
+        raise ValueError("record has no canonical unit identity")
+    snapshot = canonical_record_snapshot_for_unit_id(
+        project_root,
+        unit_id,
+        allow_absent=allow_absent,
+    )
+    if snapshot is None:
+        return None
     if snapshot.kind != kind:
         raise ValueError("canonical record kind does not match requested identity")
     return snapshot
@@ -2524,6 +2542,7 @@ __all__ = [
     "ProjectYamlMappingSnapshot",
     "iter_canonical_record_snapshots",
     "canonical_record_snapshot_if_present",
+    "canonical_record_snapshot_for_unit_id",
     "canonical_record_snapshot_for_identity",
     "canonical_record_snapshot_for_record",
     "require_current_record_snapshot",

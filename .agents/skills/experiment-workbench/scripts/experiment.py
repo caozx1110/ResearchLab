@@ -2213,6 +2213,12 @@ def _dispatch(args, root: Path) -> int:
                 preference_context=experiment_preference_state(preferences),
             )
             print(fill_path.relative_to(root))
+            _queue_checkpoint(
+                root,
+                trigger="milestone",
+                message=f"milestone: prepare experiment diagnosis {record['id']}",
+                target_paths=[fill_path],
+            )
             return 0
         diagnosis_path = append_list_item(
             list_document_path(unit_root, "diagnoses"),
@@ -2253,7 +2259,9 @@ def _dispatch(args, root: Path) -> int:
         write_record(root, record)
         build_index(root)
         program_id = str(record.get("payload", {}).get("basic_info", {}).get("program_id") or "").strip()
+        event_path: Path | None = None
         if program_id:
+            event_path = _program_event_path(root, program_id)
             append_program_reporting_event(
                 root,
                 program_id,
@@ -2278,6 +2286,23 @@ def _dispatch(args, root: Path) -> int:
                 generated_by="experiment-workbench",
             )
         print(diagnosis_path.relative_to(root))
+        checkpoint_targets = [
+            path,
+            diagnosis_path,
+            unit_root / "diagnosis.md",
+            *_index_targets(root),
+        ]
+        fill_path = unit_root / "diagnosis-fill.yaml"
+        if fill_path.exists():
+            checkpoint_targets.append(fill_path)
+        if event_path is not None:
+            checkpoint_targets.append(event_path)
+        _queue_checkpoint(
+            root,
+            trigger="milestone",
+            message=f"milestone: diagnose experiment {record['id']}",
+            target_paths=checkpoint_targets,
+        )
         return 0
 
     if args.command == "confirm":
@@ -2301,7 +2326,9 @@ def _dispatch(args, root: Path) -> int:
         write_record(root, record, expected_record_snapshot=expected_record_snapshot)
         build_index(root)
         program_id = str(record.get("payload", {}).get("basic_info", {}).get("program_id") or "").strip()
+        event_path: Path | None = None
         if program_id:
+            event_path = _program_event_path(root, program_id)
             binding = confirmation_binding(
                 record,
                 owner="experiment-workbench",
@@ -2326,6 +2353,15 @@ def _dispatch(args, root: Path) -> int:
                 generated_by="experiment-workbench",
             )
         print(f"[ok] confirmed {args.experiment_id}")
+        checkpoint_targets = [path, *_index_targets(root)]
+        if event_path is not None:
+            checkpoint_targets.append(event_path)
+        _queue_checkpoint(
+            root,
+            trigger="milestone",
+            message=f"confirm: experiment diagnosis {record['id']}",
+            target_paths=checkpoint_targets,
+        )
         return 0
     return 1
 

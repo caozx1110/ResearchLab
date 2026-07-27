@@ -85,6 +85,7 @@ from research.records import (
     CanonicalRecordSnapshot,
     ProjectFileSnapshot,
     canonical_record_snapshot_for_identity,
+    canonical_record_snapshot_for_unit_id,
     iter_canonical_record_snapshots,
     normalize_record_snapshot,
     snapshot_canonical_unit_artifacts,
@@ -734,8 +735,8 @@ def load_bibliography_inputs(root: Path, program_id: str) -> BibliographyInputs:
     snapshots: list[CanonicalRecordSnapshot] = []
     records: list[dict[str, Any]] = []
     for unit_id in selected_unit_ids:
-        snapshot = canonical_record_snapshot_for_identity(root, "paper", unit_id)
-        if snapshot is None:
+        snapshot = canonical_record_snapshot_for_unit_id(root, unit_id)
+        if snapshot is None or snapshot.kind != "paper":
             continue
         record = normalize_record_snapshot(snapshot, root)
         if record is None or str(record.get("kind") or "") != "paper":
@@ -2409,8 +2410,8 @@ def _load_editorial_figures(
     catalog: dict[str, dict[str, Any]] = {}
     validators: list[Callable[[], bool]] = []
     for unit_id in unit_ids:
-        snapshot = canonical_record_snapshot_for_identity(root, "paper", unit_id)
-        if snapshot is None:
+        snapshot = canonical_record_snapshot_for_unit_id(root, unit_id)
+        if snapshot is None or snapshot.kind != "paper":
             continue
         record = normalize_record_snapshot(snapshot, root)
         if record is None:
@@ -2715,7 +2716,7 @@ def verify_editorial_report(root: Path, program_id: str, output_kind: str) -> in
     with command_mutation(
         root,
         f"report-author:{output_kind}-verify",
-        [output_path],
+        [fill_path, output_path],
         commit_guard=require_current,
     ):
         require_current()
@@ -2725,7 +2726,7 @@ def verify_editorial_report(root: Path, program_id: str, output_kind: str) -> in
         root,
         trigger="milestone",
         message=f"milestone: publish {output_kind} editorial report for {program_id}",
-        target_paths=[output_path],
+        target_paths=[fill_path, output_path],
     )
     print("周报已通过引用校验并发布。" if output_kind == "weekly" else "PPT 素材已通过引用校验并发布。")
     return 0

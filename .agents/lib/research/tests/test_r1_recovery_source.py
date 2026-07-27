@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 import importlib.util
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import threading
@@ -222,6 +223,8 @@ def test_two_hundred_concurrent_reporting_appends_are_lossless_and_parseable(tmp
     items = payload["items"]
     assert len(items) == 200
     assert {item["title"] for item in items} == {f"event-{index:03d}" for index in range(200)}
+    assert len({item["id"] for item in items}) == 200
+    assert all(re.fullmatch(r"event-[0-9a-f]{16}", item["id"]) for item in items)
     assert ".journal/" in (tmp_path / "kb" / ".gitignore").read_text(encoding="utf-8")
 
 

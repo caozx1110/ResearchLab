@@ -2,16 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-from research.common import load_yaml, write_yaml_if_changed
+from research.common import append_program_reporting_event, load_yaml, write_yaml_if_changed
 from research.confirm import apply_confirmation, write_record
 from research.evidence import build_verification_receipt
 from research.figures import build_asset_binding, build_figure_entry, build_figure_index
-from research.records import canonical_record_snapshot_for_record, normalize_record_snapshot
+from research.records import canonical_record_snapshot_for_record, default_record, normalize_record_snapshot
 from research.report_editorial import (
     build_editorial_fill_scaffold,
     build_editorial_manifest,
@@ -312,35 +313,51 @@ def _workspace(tmp_path: Path) -> tuple[Path, str, str, str]:
     (root / "AGENTS.md").write_text("# Test\n", encoding="utf-8")
     program_id = "program-editorial"
     unit_id = "p-editorial-123456"
+    experiment_id = "x-editorial-123456"
     workflow = root / "kb" / "programs" / program_id / "workflow"
     workflow.mkdir(parents=True)
     write_yaml_if_changed(
         root / "kb" / "programs" / program_id / "state.yaml",
-        {"program_id": program_id, "stage": "evaluation", "active_unit_ids": [unit_id]},
+        {"program_id": program_id, "stage": "evaluation", "active_unit_ids": [unit_id, experiment_id]},
     )
-    write_yaml_if_changed(
-        workflow / "reporting-events.yaml",
+    append_program_reporting_event(
+        root,
+        program_id,
         {
-            "id": f"{program_id}-reporting-events",
-            "program_id": program_id,
-            "items": [
-                {
-                    "id": "event-editorial-progress",
-                    "source_skill": "experiment-workbench",
-                    "event_type": "phase-completed",
-                    "title": "Evaluation completed",
-                    "summary": "The bounded evaluation run completed.",
-                    "stage": "evaluation",
-                    "paper_ids": [unit_id],
-                    "epistemic_type": "factual",
-                    "information_types": ["fact"],
-                }
-            ],
+            "source_skill": "experiment-workbench",
+            "event_type": "phase-completed",
+            "title": "Evaluation completed",
+            "summary": "The bounded evaluation run completed.",
+            "stage": "evaluation",
+            "paper_ids": [unit_id],
+            "epistemic_type": "factual",
+            "information_types": ["fact"],
         },
+        generated_by="experiment-workbench",
     )
     figure_ref = _write_confirmed_paper_with_figure(root, program_id, unit_id)
+    experiment = default_record("experiment", title="Editorial experiment", maturity="lightweight")
+    experiment["id"] = experiment_id
+    experiment["status"] = "active"
+    experiment["confirmation_status"] = "auto_confirmed"
+    experiment["program_ids"] = [program_id]
+    write_record(root, experiment)
     _write_confirmed_decision(root, program_id)
     return root, program_id, unit_id, figure_ref
+
+
+def _commit_kb_fixture(root: Path) -> None:
+    kb = root / "kb"
+    subprocess.run(["git", "init", str(kb)], check=True, capture_output=True, text=True)
+    subprocess.run(["git", "-C", str(kb), "config", "user.email", "editorial@example.invalid"], check=True)
+    subprocess.run(["git", "-C", str(kb), "config", "user.name", "Editorial Test"], check=True)
+    subprocess.run(["git", "-C", str(kb), "add", "--all"], check=True)
+    subprocess.run(
+        ["git", "-C", str(kb), "commit", "-m", "fixture baseline"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
 
 def _fill_real_weekly(manifest: dict) -> dict:
@@ -433,6 +450,31 @@ def test_prepare_preserves_fill_and_verify_publishes_distinct_direct_outputs(
     assert "## 引言" in outline and "## 本周摘要" not in outline and "## Slide" not in outline
     assert weekly_text != ppt_text != outline
     assert len(checkpoints) == 5
+
+
+@pytest.mark.parametrize("output_kind", ["weekly", "ppt-materials"])
+def test_verify_checkpoints_agent_fill_in_mixed_program(tmp_path: Path, output_kind: str) -> None:
+    report = _report_module()
+    root, program_id, _unit_id, _figure_ref = _workspace(tmp_path)
+    report.prepare_editorial_report(root, program_id, output_kind, stage="", limit=20, preference_selection_id="")
+    manifest_path, fill_path, _output_path = report._editorial_paths(root, program_id, output_kind)
+    _commit_kb_fixture(root)
+    fill = (
+        _fill_real_weekly(load_yaml(manifest_path))
+        if output_kind == "weekly"
+        else _fill_real_ppt(load_yaml(manifest_path))
+    )
+    write_yaml_if_changed(fill_path, fill)
+
+    report.verify_editorial_report(root, program_id, output_kind)
+
+    status = subprocess.run(
+        ["git", "-C", str(root / "kb"), "status", "--short"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert status == ""
 
 
 def test_stale_figure_or_input_race_never_overwrites_previous_output(

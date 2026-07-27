@@ -41,6 +41,27 @@ def _run_report(root: Path, *args: str, check: bool = True) -> subprocess.Comple
     )
 
 
+def _kb_git_status(root: Path) -> str:
+    return subprocess.run(
+        ["git", "-C", str(root / "kb"), "status", "--short"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _commit_kb_fixture(root: Path) -> None:
+    subprocess.run(["git", "-C", str(root / "kb"), "config", "user.email", "experiment@example.invalid"], check=True)
+    subprocess.run(["git", "-C", str(root / "kb"), "config", "user.name", "Experiment Test"], check=True)
+    subprocess.run(["git", "-C", str(root / "kb"), "add", "--all"], check=True)
+    subprocess.run(
+        ["git", "-C", str(root / "kb"), "commit", "-m", "fixture baseline"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
 def _markdown_section(text: str, heading: str) -> str:
     start = text.index(heading)
     next_heading = text.find("\n## ", start + len(heading))
@@ -356,6 +377,92 @@ def test_diagnosis_claim_verifies_verbatim_run_evidence_and_rejects_fabrication(
     assert rejected.returncode != 0
     assert "not verbatim in artifact 'runs/run-001.md'" in rejected.stderr
     assert len(load_yaml(record_path.parent / "diagnoses.yaml")["items"]) == 1
+
+
+def test_diagnosis_prepare_verify_and_direct_confirm_checkpoint_exact_outputs(tmp_path: Path) -> None:
+    _run_experiment(tmp_path, "plan", "--title", "checkpointed diagnosis", "--program-id", "program-checkpoint")
+    record_path = next((tmp_path / "kb" / "units" / "experiments").glob("*/record.yaml"))
+    experiment_id = load_yaml(record_path)["id"]
+    run_summary = "Observed a reproducible validation loss spike."
+    _run_experiment(
+        tmp_path,
+        "log-run",
+        "--experiment-id",
+        experiment_id,
+        "--result-summary",
+        run_summary,
+        "--outcome",
+        "failed",
+        "--classification",
+        "data",
+        "--config-revision",
+        "config-v1",
+    )
+    _commit_kb_fixture(tmp_path)
+    assert _kb_git_status(tmp_path) == ""
+
+    _run_experiment(
+        tmp_path,
+        "diagnose",
+        "--experiment-id",
+        experiment_id,
+        "--summary",
+        "Prepare a grounded diagnosis.",
+        "--category",
+        "data",
+    )
+    assert _kb_git_status(tmp_path) == ""
+
+    fill_path = record_path.parent / "diagnosis-fill.yaml"
+    fill = load_yaml(fill_path)
+    fill["status"] = "agent_filled"
+    fill["claims"] = [
+        {
+            "id": "claim-checkpointed-diagnosis",
+            "text": "The recorded data change likely caused the validation regression.",
+            "claim_type": "inference",
+            "confirmation_status": "pending_user_confirmation",
+            "evidence_refs": [
+                {
+                    "source_unit_id": experiment_id,
+                    "artifact": "runs/run-001.md",
+                    "locator": "Result Summary",
+                    "quote": run_summary,
+                }
+            ],
+        }
+    ]
+    write_yaml_if_changed(fill_path, fill)
+
+    _run_experiment(
+        tmp_path,
+        "diagnose",
+        "--experiment-id",
+        experiment_id,
+        "--summary",
+        "Grounded diagnosis ready for review.",
+        "--category",
+        "data",
+        "--claims-file",
+        str(fill_path),
+    )
+    assert _kb_git_status(tmp_path) == ""
+
+    _run_experiment(
+        tmp_path,
+        "confirm",
+        "--experiment-id",
+        experiment_id,
+        "--confirmed-by",
+        "human-reviewer",
+        "--evidence",
+        str((record_path.parent / "run-log.yaml").relative_to(tmp_path)),
+        "--user-authorization",
+        "I confirm this experiment diagnosis.",
+        "--authorization-source",
+        "user_message",
+    )
+    assert _kb_git_status(tmp_path) == ""
 
 
 def test_reports_isolate_pending_diagnoses_and_require_current_receipt_for_judgement_progress(tmp_path: Path) -> None:
