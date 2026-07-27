@@ -40,3 +40,9 @@ description: 维护研究订阅、机械到期事实与冻结运行回执；当�
 ## 内部接口
 
 Agent 私下使用 `scripts/monitor.py` 读取一个有界 JSON payload，执行 create-subscription、set-subscription-status、create-due-run、transition-run、finish-run 或 set-outcome-disposition；只读 due 与 unresolved-outcomes 检查也通过同一 helper。该接口不是用户命令，不得原样转发到对话。
+
+## 启动澄清（Agent 用）
+
+- 监测目标与周期？默认每两周。
+- 到期后直接执行检索还是先提醒？默认先提醒再执行。
+- 每轮预算沿用文献检索默认上限？默认是。

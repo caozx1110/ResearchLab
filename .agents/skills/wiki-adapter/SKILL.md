@@ -42,3 +42,8 @@ ${RESEARCH_PYTHON:-python3} .agents/skills/wiki-adapter/scripts/wiki.py lint
 ```
 
 `audit` 是 Agent-only 的只读路由：wiki-adapter 只转发同一份分层机械报告，不理解研究材料，不刷新索引，也不做网络/依赖或 LLM 语义扫描。不得把 owner JSON、绝对路径或内部命令直接展示给普通用户。
+
+## 启动澄清（Agent 用）
+
+- 意图：查询、入库还是治理？默认按路由表转对应 owner。
+- 查询结果要留成复用笔记吗？默认要，落 kb/synthesis/wiki/。

@@ -32,3 +32,9 @@ ${RESEARCH_PYTHON:-python3} .agents/skills/source-intake/scripts/intake.py add -
 ${RESEARCH_PYTHON:-python3} .agents/skills/source-intake/scripts/intake.py add --kind paper --source kb/raw/paper.pdf --maturity complete
 ${RESEARCH_PYTHON:-python3} .agents/skills/source-intake/scripts/intake.py add --kind repo --stage-id repo-search-example-xxxxxxx --candidate-id repo-search-example-xxxxxxx-ab12cd --pool candidate-tools
 ```
+
+## 启动澄清（Agent 用）
+
+- 资料类型不明时问 kind（论文/代码仓/数据集/文章）；默认按 URL/目录推断。
+- 轻量 add 还是完整 ingest？默认 ingest 链到可确认笔记。
+- 批量来源逐条深读吗？默认全部轻量入库+汇总，再挑重点深读。

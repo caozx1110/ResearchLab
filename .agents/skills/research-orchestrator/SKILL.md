@@ -65,3 +65,9 @@ ${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchest
 ## Optional experiment-heavy programs
 
 When a program actually involves phased experiments, route experiment planning, run logs, diagnosis, and conclusion gates to `experiment-workbench`. The Agent may persist phase-specific inputs, outputs, resource budgets, evaluation criteria, failure handling, and artifact inventories as program actions or design notes. GPU allocation, training schedules, simulation environments, ablations, and executor-agent feedback formats are domain-specific options—not mandatory requirements for ordinary research programs. Any winner, causal conclusion, or phase-advance judgement still needs evidence and the existing user-confirmation gate.
+
+## 启动澄清（Agent 用）
+
+- 新建 program 还是续接已有？默认续接同题 program。
+- 研究问题与本阶段目标一句话？默认从当前对话提炼后复述确认。
+- 现在要挂接哪些 unit？默认稍后随分析逐步 attach。

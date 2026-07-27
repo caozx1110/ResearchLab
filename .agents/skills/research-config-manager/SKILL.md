@@ -74,3 +74,8 @@ ${RESEARCH_PYTHON:-python3} .agents/skills/research-config-manager/scripts/confi
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-config-manager/scripts/config.py set-diagnostics --mode developer --token-budget-per-task 2000 --max-issues-per-task 20
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-config-manager/scripts/config.py set-diagnostics --skill paper-analyst --skill-mode off
 ```
+
+## 启动澄清（Agent 用）
+
+- 现在设置还是先跳过？默认可跳过，不阻塞入库与检索。
+- 这是长期偏好还是仅本次任务生效？默认仅本次；长期偏好经确认后落 profile。

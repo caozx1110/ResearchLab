@@ -4,6 +4,15 @@ All notable changes to this project will be documented here. The format follows 
 
 ## [Unreleased]
 
+### Added (Wave 1, 2026-07-26)
+
+- 安装与依赖（A1）：ws_sync 失败保留中文首行并透传子进程输出末 8 行；非 git 源给出稳定 token `source-not-git-worktree` 与三条出路指引，`--allow-snapshot-source`（install.sh `--from-snapshot`）支持确定性快照打包；bootstrap 兼容性探测纳入 pymupdf4llm+fitz，缺失时准备 managed venv、pip 失败优雅降级并按 1 小时节流；doctor 公开话术诚实播报 PDF 深读就绪状态，私有协议新增 `pdf_deep_read_ready`。
+- 对话面（A2）：`kb help` 每行带动词本名；`kb undo` 点名撤销对象；`kb restore` 无参列出最近 10 个操作（编号可直接恢复）；review apply 失败协议携带 `review_apply_failure`（原因码/合法 confirm-ref 清单/语法建议）；`kb init` 新增自动化档位（`--auto-ingest-mode`）与讨论风格（`--discussion-style`）两问，落 canonical 配置且重复 init 零 churn；config 新增 `set-interaction`，`record-effective` 接受 JSON 文件路径。
+- owner 脚本（A3）：idea verify 静默失败清零（失败带一行中文原因）；`--input` 三级路径解析；corpus 违规列出全部可引用 unit 与扩语料方法；orchestrator `prepare-next-selection` 产出预填决策草稿 `kb/.runtime/portfolio-selection-draft.yaml`；新增 `governance_profile: personal|strict`（缺省 strict 行为逐字不变，personal 档 procedural 决策免偏好回执、脚本兜底硬约束）；monitor 新增只读 `template` 子命令，apply 兼容 YAML。
+- 校验强度（A4）：evidence locator 位置校验（line=N 与 quote 实际行核对、section anchor 存在性与 chunk 内包含校验，失败附实际位置；未知形态告警放行）；`kb reject` 后 `record.status=rejected`；audit 修 INTEGRITY_PROGRAM_LINK 误报；experiment plan/log-run 中文结果行与 checkpoint。
+- 代码检索（A5/G14）：repo 源码进 FTS5（`.py` 按 def/class 符号切块带限定名，其余 40 行窗/8 行重叠；跳二进制/超大/VCS 目录，预算超限显式告警）；FTS 新增 `code_terms` 拆词辅助列；`PASSAGE_INDEX_REVISION=passages-v3`（旧缓存判 stale 自动回退内存检索）。
+- 接口层文档（A6）：新增 `.agents/AGENT_GUIDE.md`（机制速查+交互章程 10 条）；19 份 SKILL.md 增"启动澄清（Agent 用）"；新增 `docs/GOLDEN_SUITE.md`（8 条黄金对话规格与基线指标）。
+
 The bundle currently declares **`0.2.0-rc.7`**. Its complete local suite, targeted R17–R26 regression suites, all 20 skill validators, and current installed-copy lifecycle pass. Installation and core workflows require no external API Key, paid search quota, commercial database subscription, or paid plugin. The candidate is not a stable release or GA, has not been tagged or published, and carries no compatibility or response-time SLA. Real-source/Obsidian acceptance and a green hosted Linux/macOS CI matrix remain prerequisites for a release tag.
 
 ## [0.2.0-rc.7] - Unreleased

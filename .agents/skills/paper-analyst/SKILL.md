@@ -73,3 +73,9 @@ ${RESEARCH_PYTHON:-python3} .agents/skills/paper-analyst/scripts/paper.py refres
 ${RESEARCH_PYTHON:-python3} .agents/skills/paper-analyst/scripts/paper.py confirm --paper-id p-example-bf86ee46 --confirmed-by research-lead --evidence kb/units/papers/p-example-bf86ee46/note.md
 ${RESEARCH_PYTHON:-python3} .agents/skills/paper-analyst/scripts/paper.py reject --paper-id p-example-bf86ee46
 ```
+
+## 启动澄清（Agent 用）
+
+- 只做初筛还是直到完整笔记？默认初筛通过后按 paper_type 出五要素笔记。
+- 侧重方法、实验还是局限？默认全面均衡。
+- 深度：默认读 document.md 并用 parse-cache 核对引用；需图表细节再回 PDF。

@@ -104,3 +104,9 @@ ${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py select
 ${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py select-best --pool current-ideas --confirmed-by research-lead --evidence kb/programs/example-program/decision-log.md
 ${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py archive --idea-id i-example-f7e91d86
 ```
+
+## 启动澄清（Agent 用）
+
+- 目标：捕获、批量生成、分析还是陪练讨论？默认按用户措辞路由。
+- 挑战强度：温和梳理还是高强度 reviewer 式挑战？默认中等。
+- 证据只用当前库内（冻结 corpus）？默认是；不足先明说再议扩语料。

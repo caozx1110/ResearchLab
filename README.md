@@ -181,4 +181,4 @@ The release bundle contains no private `kb/`. Storage migration and updates are 
 - [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
 
-The on-disk schema is documented in [`.agents/lib/research/SCHEMAS.md`](.agents/lib/research/SCHEMAS.md). The root [AGENTS.md](AGENTS.md) is for contributors developing this skill system; the distributed [`.agents/AGENTS.md`](.agents/AGENTS.md) governs agents using an installed workspace.
+The on-disk schema is documented in [`.agents/lib/research/SCHEMAS.md`](.agents/lib/research/SCHEMAS.md). The root [AGENTS.md](AGENTS.md) is for contributors developing this skill system; the distributed [`.agents/AGENTS.md`](.agents/AGENTS.md) governs agents using an installed workspace. The distributed [`.agents/AGENT_GUIDE.md`](.agents/AGENT_GUIDE.md) is the runtime agent's session-start quick reference: dispatcher calling conventions, confirmation syntax, failure recovery, and the interaction charter.

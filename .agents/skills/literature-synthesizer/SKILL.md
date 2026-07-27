@@ -158,3 +158,11 @@ comparison_matrix:
 - YAML 同时保存 `kind: survey_judgement`、canonical `payload.claims`、verification receipt、consumer binding 与 survey content digest；旧 `needs_agent_repair` 产物只可读取审计，必须重新 prepare/fill/verify 后才进入 review。
 - summary.md 按七段式渲染 evidence-verified content，显式显示 Pending / Unverified banner，并将 comparison matrix 输出为 method × dimension 表格。
 - metadata 只参与候选选择，不作为 survey conclusions。
+
+脚本入口：`scripts/synthesize.py`（survey|review|taxonomy × prepare|verify，survey 另有 confirm|reject；composite status|update）。
+
+## 启动澄清（Agent 用）
+
+- 时间窗？默认近两年（as_of=今天）。
+- 只用库内已确认 unit 还是先补检索？默认库内；不足报 evidence-gap 走 composite。
+- 深度：全套七段+对比矩阵还是精简 review？默认全套。

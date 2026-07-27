@@ -11,6 +11,7 @@ Default preference order:
 
 ## Runtime basics
 
+- 机制速查与交互章程见 `.agents/AGENT_GUIDE.md`，会话开始时应加载：kb 调度器与 `--agent-protocol` 调用、review/Obsidian 确认精确语法、fill/verify 惯例、16 动词 owner 对照、失败恢复表与交互十条。本文件不重复其内容。
 - Human-facing Markdown and conversation default to Chinese.
 - Preserve original English paper titles, repository names, benchmark names, and technical terms on first mention.
 - YAML keys, IDs, slugs, and folder names stay ASCII-safe.

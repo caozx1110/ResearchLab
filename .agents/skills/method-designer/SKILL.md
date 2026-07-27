@@ -103,3 +103,11 @@ Empty claims, missing required claim ids, fact/unverified types in a required ju
 ## Private Execution Boundary
 
 The runtime agent uses the implementation's private prepare, verify, and confirm-selection routes. Never expose their script paths, flags, environment variables, or artifact paths to the user. User-facing responses explain the proposal and review state in natural language and may offer only a public `kb <verb>` next action.
+
+脚本入口：`scripts/method.py`（design --phase prepare|verify / confirm-selection / reject-selection）。
+
+## 启动澄清（Agent 用）
+
+- 目标 program 与已显式选中的 idea 是哪个？未选先回 idea 选择。
+- 资源边界有变化吗？默认读 profile 的 resources。
+- 候选 repo 有人工倾向吗？默认按 program 附挂 repo 排序提案。

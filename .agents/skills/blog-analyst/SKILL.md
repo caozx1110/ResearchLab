@@ -83,3 +83,8 @@ ${RESEARCH_PYTHON:-python3} .agents/skills/blog-analyst/scripts/blog.py \
   --confirmed-by research-lead \
   --evidence kb/units/blogs/b-example-12345678/blog-note.md
 ```
+
+## 启动澄清（Agent 用）
+
+- 这篇偏原理分析还是工程实践？默认由内容判断并写入 positioning。
+- 需要提炼可复用解释/直觉素材吗？默认要，落 reusable_explanation。

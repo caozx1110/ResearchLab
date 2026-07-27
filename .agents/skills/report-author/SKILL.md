@@ -55,3 +55,11 @@ description: Generate self-contained weekly reports, stage summaries, PPT or wri
 - 核对 judgement 仍保留原 epistemic type 与 confirmation status。
 - 核对缺失项明确、无 fabricated prose、无 raw command 泄漏。
 - 最终提交前由 agent 把结构化底稿改写为自然、紧凑、面向目标读者的叙事。
+
+脚本入口：`scripts/report.py`（weekly / stage-summary / ppt-materials / writing-materials / outline，均 --program-id）。
+
+## 启动澄清（Agent 用）
+
+- 读者与场合：导师周会、合作者还是自存档？默认导师周会。
+- 周期与 stage 范围？默认最近一周、全部 stage。
+- 体裁：周报、阶段总结、PPT 素材还是 outline？默认按用户措辞。

@@ -80,3 +80,11 @@ Per shared contract, all AI judgements stay `pending_user_confirmation`. Phase e
 ## Private Execution Boundary
 
 The runtime Agent uses the implementation's private plan, log-run, follow-up, diagnose, and confirm routes. Never expose script paths, flags, environment variables, or internal artifact paths to the user. User-facing responses summarize what was recorded, what remains uncertain, and which human decision is needed; the only command-like next action they may offer is a public `kb <verb>` action.
+
+脚本入口：`scripts/experiment.py`（plan / log-run / follow-up / diagnose / confirm）。
+
+## 启动澄清（Agent 用）
+
+- 本轮验证什么假设？必答，逐字写入 plan。
+- 对比哪个 baseline、主指标是什么？默认沿用 program 既定设定。
+- 预算与种子数？默认按资源画像与既有实验矩阵。

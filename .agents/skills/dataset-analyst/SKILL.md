@@ -46,3 +46,8 @@ ${RESEARCH_PYTHON:-python3} .agents/skills/dataset-analyst/scripts/dataset.py pr
 ${RESEARCH_PYTHON:-python3} .agents/skills/dataset-analyst/scripts/dataset.py profile --dataset-id d-example-12345678 --phase verify --input dataset-fill.yaml
 ${RESEARCH_PYTHON:-python3} .agents/skills/dataset-analyst/scripts/dataset.py confirm --dataset-id d-example-12345678 --confirmed-by research-lead --evidence kb/units/datasets/d-example-12345678/dataset-note.md
 ```
+
+## 启动澄清（Agent 用）
+
+- 侧重组成、schema/接入还是许可与风险？默认四要素全填。
+- 要评估对当前研究任务的适用性吗？默认要，落 suitability_risks。

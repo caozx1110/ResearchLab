@@ -43,3 +43,9 @@ description: 由 runtime Agent 使用当前可用的搜索、浏览或 connector
 私下调用 `scripts/search.py stage`，输入 JSON 结构见 [stage contract](references/stage-contract.md)。这是 Agent 内部操作，不是公开命令。每个批次只声明该 stage 文件作为 transaction target；失败时保留 before-image，成功后再继续下一批。
 
 用户在当前消息中完成候选选择后，私下使用同一脚本的 `materialize-selection` adapter，并提供位于 `kb/.runtime/` 语义下的全新私有 Agent protocol 名称；selection payload 见同一 [stage contract](references/stage-contract.md)。adapter 会先核对用户所见 stage 精确字节和每个 candidate 的 identity/semantic 摘要，再绑定用户授权与 owner 结果。它只用 argv 调用 owner、关闭 stdin、并发流式排空 stdout/stderr，不依赖 TTY 或 shell。source-intake 仍独占 canonical unit、duplicate、selection receipt 与 candidate status；adapter 不自行写这些事实。每项 owner 结束后，无论返回码、超时或捕获异常，都先检查 canonical stage 和 append-only receipt；只有可证明的唯一 marker/history 变化才算成功，query、stop、其他 candidate 或任意其他 stage 漂移都 fail closed，并停止派发剩余项。protocol 名称在 owner 前以 durable `O_EXCL` claim 占用，最终只替换本次操作自己的 claim，绝不覆盖已有或并发结果。没有合法授权、display/stage/candidate 漂移或 owner 结果无法与 exact selection 对上时必须失败，不得用 owner 输出中的文字冒充成功。
+
+## 启动澄清（Agent 用）
+
+- 检索范围与年限？默认近两年为主、追补奠基工作。
+- 模式：探索还是系统检索？默认 exploratory 有界发现，不声称完整。
+- 预算 8 查询/50 候选/8 全文可以吗？默认可以。

@@ -41,3 +41,8 @@ ${RESEARCH_PYTHON:-python3} .agents/skills/discussion-archivist/scripts/archive.
   --open-question "Latent interface 接 controller 的 sim2real 损失能否容忍" \
   --next-action "用一周 lite-smoke 实测两条路径在 tracking RMSE 上的差距"
 ```
+
+## 启动澄清（Agent 用）
+
+- 归档哪段讨论、给谁看？默认本次对话最近一段、给未来的自己。
+- 未决分歧要同时登记为 open-question 吗？默认要。

@@ -35,12 +35,26 @@ description: kb 快捷命令入口（伪 CLI），用于把常用 research 操�
 - 普通调用只打印 human stdout，并保持只读 verb 真正只读。
 - Runtime Agent 调用 dispatcher 时，应显式请求一个位于 `kb/.runtime/` 的私有 JSON protocol 目标；读取 `kb-agent-protocol/v1` 后继续 owner 步骤。该文件是 gitignored runtime state，不进入 checkpoint。
 - Protocol 的 `child_results` 保存 owner 的原始 stdout/stderr 与结构化 arguments；`next_actions` 保存待填字段、后续 owner step 和治理闸口。不得把其中的 raw 内容转述给用户。
-- `init` 与 `review` 永远不读 TTY、不调用交互式输入。standalone terminal 只展示清单并明确要求回到 Agent 对话继续，不能暗示 shell 会自行收集决定。`init` protocol 为 `ready_with_optional_setup` 时，先向用户呈现“现在设置”（推荐）/“先跳过”，不得越过选择直接追问姓名；defer 不产生额外偏好写入并允许立即工作。configure 时在一个紧凑问题里收集真实署名、语言与术语风格、研究方向、资源与重要约束，展示当前版本记录与论文初筛默认值并允许“默认即可”，再以既有 headless 写入落盘。
+- `init` 与 `review` 永远不读 TTY、不调用交互式输入。standalone terminal 只展示清单并明确要求回到 Agent 对话继续，不能暗示 shell 会自行收集决定。`init` protocol 为 `ready_with_optional_setup` 时，先向用户呈现“现在设置”（推荐）/“先跳过”，不得越过选择直接追问姓名；defer 不产生额外偏好写入并允许立即工作。configure 时在一个紧凑问题里收集真实署名、语言与术语风格、研究方向、资源与重要约束，并在同一回合合并询问丢链接后的自动化档位（`link_autodrive`：先询问再深读 / 自动深读到待确认笔记）与讨论风格（`discussion_style`：挑战 / 打磨 / 自适应）；展示当前默认值并允许“默认即可”整体保留，再以既有 headless 写入落盘。
 - 快速设置必须逐项执行 `apply.field_inputs`，不得自行猜 dotted key。资源使用 protocol 指定的 canonical input，保留已有 resource keys；约束 input 可重复，按 append + deduplicate 合并，不覆盖旧约束。旧 persona resource input 仅为兼容，不是 I1 canonical 路径。
 - 缺真实署名不阻塞查看 `review` 列表。用户选择确认时，按 protocol 先自然语言询问署名、只 headless 保存该字段且保留其余偏好，再通过 snapshot-bound review adapter 应用确认；拒绝不要求署名。不得绕过 adapter 直接拼 owner 调用。
 - judgement 确认必须忠实透传用户原话、`authorization_source=user_message` 和 evidence；不得自签。
 - 用户要求在 Obsidian 批量查看时，Agent 可把当前 Top 3 snapshot 投影成 `annotations/` 中的一次性可编辑待确认表。表内 `确认 / 拒绝 / 暂缓` checkbox 只表示意图草稿；不得监听文件或因勾选自动写 canonical KB。用户回到对话要求同步后，先纯读解析并完整复述 diff，再等待当前消息明确授权。除 checkbox 外的任意 sheet 改动、重复/冲突/漏选、过期、重放、symlink 或 current binding 变化都必须整批拒绝。
 - 普通对话与 Obsidian batch 的 confirm/reject/defer 共享同一个跨 owner coordinator：先完整纯读预检并合并精确 target scope，再在一个 root transaction 中锁内复验授权、snapshot、current owner plan 与 CAS，并通过无嵌套 lock/checkpoint 的 owner child API 原子应用；所有 canonical 写入成功后才在同一事务内消费 snapshot。任一 validation/owner failure 必须整批零业务写且 snapshot 保持可修正重试；成功后全批只建一个精确 checkpoint，绝不能退化成逐条转发。Obsidian 表须显示安全公共编号、来源/定位与有效期；成功后改成明显的已处理记录且保留人工勾选。
+
+## Agent 调用速查
+
+- `--agent-protocol` 是全局 flag，必须放在动词之前：`kb --agent-protocol r1.json review`。协议文件写在 `kb/.runtime/` 下，传文件名即可。
+- review 对话拍板（apply）精确语法：
+  `kb --agent-protocol r2.json review --apply-snapshot r1.json --confirm-ref <kind>:<id> --user-authorization "<用户原话>" --decision-evidence "<证据>"`
+  - `--apply-snapshot` 传展示这批判断时用的协议文件名（如 `r1.json`），不是 snapshot token。
+  - `--confirm-ref` / `--reject-ref` / `--defer-ref` 必须是 `kind:id`（如 `blog:blog-xxxx`），且只能取展示协议 `present_review_items.review_items[].subject`。
+  - apply 失败时读新协议 `details.review_apply_failure`：`reason_code`、`expected.valid_confirm_refs`（当前快照合法 confirm-ref 列表）、`expected.apply_snapshot`（正确文件名）与 `ref_suggestions`。
+- Obsidian 批次：
+  - 导出：`kb --agent-protocol o1.json review --obsidian-export`。
+  - 预览：`kb --agent-protocol o2.json review --preview-obsidian-batch <batch_ref>`；`batch_ref` 是 sheet 内 HTML 注释 `<!-- kb-review-batch:<64位hex> -->` 里的 64 位值。
+  - 应用：`kb --agent-protocol o3.json review --apply-obsidian-batch <batch_ref> --expected-preview-digest <digest> --user-authorization "<用户原话>" [--decision-evidence "<证据>"]`；digest 取自 preview 协议 `present_obsidian_review_diff.apply.expected_preview_digest`。
+- init headless flags：`--name`、`--lang {zh,en}`、`--auto-commit {manual,milestone,aggressive}`、`--auto-screen {true,false}`、`--auto-ingest-mode {ask_first,auto_deep_read}`、`--discussion-style {challenge,refine,adaptive}`、`--persona-term {keep-en,translate,bilingual}`、`--persona-focus`、`--persona-resources`、`--persona-report`、`--persona-boundaries`、`--quick-resource`、`--quick-constraint`（可重复）、`--git-init`。
 
 ## 动词语义
 
@@ -56,7 +70,7 @@ description: kb 快捷命令入口（伪 CLI），用于把常用 research 操�
 - `review`：聚合所有 owner 真正 ready-for-review 的判断，包括 knowledge unit、实验诊断、program decision、idea discussion conclusion 与 method selection；prepared shell、空 claims、stale verification、ready-to-verify 与 failed-retryable 不进人工 inbox。`priority` 是 owner 提供的 canonical impact 等级；默认先按 priority、同级再按最旧更新时间只展示 Top 3 并说明剩余数量，不另编 impact 分。私有 protocol 携带每项真实 confirm/reject owner route 与绑定 subject/status/content/verification 的 snapshot，并引用一次性 runtime snapshot token。Agent 只能把用户决策应用到该 token 中原样登记的已展示 subject；一次当前消息授权可提交其中 1–3 项确认、拒绝或暂缓。token 默认 24 小时有效且只能在整批成功后消费一次；validation failure、缺署名/授权/evidence 或 owner preflight/apply failure 都不得消费，用户可用同一有效清单修正重试。消费或过期后的 tombstone 再保留 24 小时，以便区分重复应用、过期、内容更新和无法验证。review/apply 只对已存在的受控 runtime registry 在直属层做有界清理；fresh empty review 严格零写，首次实际展示才创建 registry。拒绝 symlink、非普通文件与越界路径，不递归删除。内容、证据、owner/path 或状态变化后必须重新展示，未展示的剩余项不能捎带确认。成功反馈只回显经公开 sanitizer 清洗后的判断类型/标题与整批结果；失败按重复、过期、内容更新、无法验证分别给自然语言恢复动作，绝不回显 token、digest、owner 参数或内部路径。TTY 与 pipe 语义相同，缺真实署名时仍展示列表，只在确认应用前补署名。
 - `review` 展示前按私有 protocol 中的 task digest 记录并加载 `kb-cli + review-display` effective preferences。选中的 reporting style 只能调节 Agent 对同一 Top 3 卡片的解释密度，不能改变候选集合、priority 顺序、Top-3 安全上限、snapshot、owner route 或确认门；未选中的软偏好不生效。
 - `reject`：复用 knowledge-base-manager 的拒绝路径，不重实现治理逻辑。
-- `resume` / `undo` / `restore`：转发恢复合同并保持公开输出为自然语言。
+- `resume` / `undo` / `restore`：转发恢复合同并保持公开输出为自然语言。`undo` 成功后公开点名被撤销的对象（操作的安全中文描述，如“已撤销：Obsidian 视图更新”）；`restore` 不带编号时只读列出最近约 10 个可恢复操作（公开编号 + 时间 + 中文摘要，不含内部路径），编号可直接用于 `kb restore <编号>`，内部 op id 与编号映射只进私有 protocol。
 
 ## 约束
 

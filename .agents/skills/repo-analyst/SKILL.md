@@ -78,3 +78,9 @@ ${RESEARCH_PYTHON:-python3} .agents/skills/repo-analyst/scripts/repo.py map-capa
 ${RESEARCH_PYTHON:-python3} .agents/skills/repo-analyst/scripts/repo.py confirm --repo-id r-example-dadda683 --confirmed-by research-lead --evidence kb/units/repos/r-example-dadda683/repo-note.md
 ${RESEARCH_PYTHON:-python3} .agents/skills/repo-analyst/scripts/repo.py reject --repo-id r-example-dadda683
 ```
+
+## 启动澄清（Agent 用）
+
+- 目的：能力边界、复用改造还是找入口？默认三要素全填。
+- 需要符号级细读某条路径吗？默认文件级，符号级按需追加。
+- 本地源码树已就绪？默认用 record 已登记的快照根。

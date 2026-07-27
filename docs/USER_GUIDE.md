@@ -268,6 +268,8 @@ Run log 是事实；diagnosis 是推断，默认待确认。报告系统从 prog
 
 ## 进一步阅读
 
+系统随安装附带 Agent 机制速查与交互章程，runtime Agent 会话开始时会自动加载；它约定了 AI 如何调用内部能力、如何向你提问和收尾，普通使用无需阅读。
+
 - [安装与更新](INSTALL.md)
 - [设计与扩展](DESIGN.md)
 - [发布变化](../CHANGELOG.md)

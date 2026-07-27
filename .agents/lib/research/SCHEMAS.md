@@ -433,6 +433,10 @@ items:
 
 候选包含 persisted `next_actions`、open evidence requests、open questions、可执行 Agent work、human gates、loose unit work，以及已到期的 research-monitor subscription；`blocking`、priority、due time 都只是事实上下文。状态、候选成员、unit/decision binding 或 effective preference 变化后，旧选择只读判定为 stale，不能继续执行。Human gate 永不自动执行；涉及 baseline、idea、因果或研究赢家的选择必须引用现有 program judgement 并继续走用户确认门。`kb status` 和 `kb next` 必须消费同一 candidate snapshot：status 的公开分类除命名治理/恢复类别外，还要给出未被这些类别覆盖的“可由 Agent 继续推进”数量；分类应覆盖全部 candidate 且不重复计数，不能在同一 snapshot 上先报全部待办为 0、随后又报告存在可行行动。
 
+### kb/.runtime/portfolio-selection-draft.yaml（非 canonical 草稿）
+
+`prepare-next-selection` 产出的 Agent 填写草稿（注释式 YAML，含填写步骤），路径固定 `kb/.runtime/portfolio-selection-draft.yaml`。非 canonical、可丢弃：verify/record 只消费其中与 `PortfolioDecision` 同名的字段并忽略额外字段；文末 `candidate_reference`（候选清单含 binding_digest 与事实摘要）与 `preference_context`（skill/operation/canonical_inputs）为只读参考，无需删除。personal 治理档且唯一候选时 `selected_action_ids` 预填该候选，Agent 只需补三个理由字段。已被 Agent 编辑且绑定当前 `candidate_snapshot_digest` 的草稿不会被重复 prepare 覆盖；快照过期时旧草稿文本备份到 `portfolio-selection-draft.stale.yaml`（单槽覆盖）后重写新草稿。
+
 ### open-questions.yaml
 
 ```yaml
@@ -557,6 +561,7 @@ topics:
 
 由 `research-config-manager` 写入。schema 见 `core.py default_runtime_preferences()`，包含资源画像、语言偏好、自动化开关、versioning_commit_mode（`manual|milestone|aggressive`）等。
 
+- `governance_profile`: 可选顶层字段，`strict | personal`；缺失或任何非 `personal` 值一律按 `strict` 处理（缺省行为逐字不变）。personal 档只降仪式成本，不降证据与签字：research-orchestrator `plan` 的 `procedural_planning` 决策可不带 `preference_selection_id`，脚本以 canonical 硬约束（`profile.resources` / `profile.constraints` / `runtime.autonomy.auto_execute_scope`）兜底强制，`preference_selection_binding` 记 `{selection_id: "", governance_profile: "personal", task_context_digest, hard_value_digests}`；任一硬约束 canonical 值变化即令已存决策 stale。确认门语义（AI 不可自签、判断须人签）在两档完全一致。
 - `identity.default_confirmed_by`: 可选的人类确认身份默认值。只用于补齐 `--confirmed-by`；`--evidence` 仍必须由调用方显式提供，系统不得默认使用 AI 写出的单元笔记作为 evidence。
 - `diagnostics.mode`: `off | errors-only | developer`，默认 `off`。只控制额外诊断，不控制 schema/evidence/confirmation/recovery 等强制门。
 - `diagnostics.per_skill.<skill>`: `inherit | off | errors-only | developer`。逐 skill 覆盖 workspace 总模式。
@@ -890,7 +895,7 @@ protocol name 在 owner dispatch 前以 anchored `O_EXCL` claim 预留并保存 
 
 ### Research monitor subscriptions and runs
 
-`research-monitor` 在 `kb/monitoring/subscriptions/*.yaml` 保存用户明确要求持续关注的目标，在 `kb/monitoring/runs/*.yaml` 保存冻结 run receipt。它没有 provider、scheduler、daemon、cron 或插件；脚本只计算 due、维护状态/CAS/事务并验证绑定，runtime Agent 执行实际搜索和研究判断。宿主 automation 只有当前用户明确授权后才可创建；没有 automation 时，到期事实仍可在后续 Agent 会话或 `kb next` 中被发现。
+`research-monitor` 在 `kb/monitoring/subscriptions/*.yaml` 保存用户明确要求持续关注的目标，在 `kb/monitoring/runs/*.yaml` 保存冻结 run receipt。它没有 provider、scheduler、daemon、cron 或插件；脚本只计算 due、维护状态/CAS/事务并验证绑定，runtime Agent 执行实际搜索和研究判断。宿主 automation 只有当前用户明确授权后才可创建；没有 automation 时，到期事实仍可在后续 Agent 会话或 `kb next` 中被发现。`apply --input` 同时接受 JSON 与 YAML 载荷；只读 `template` 子命令输出带注释的订阅模板（不写盘）。
 
 ```yaml
 # subscription
@@ -1012,7 +1017,9 @@ passage:
 
 `title` / record summary 是展示 metadata；只有各自独立的 `record.yaml#title` / `#summary` passage 把这些 bytes 放进可检索正文。不得因为 unit title 命中就把同一 unit 的无关正文 passage 全部提升为结果。
 
-Extractor 只遍历 canonical unit containment 内允许的 record、Markdown 与 parse-cache 文本，跳过 raw/output/runtime/Obsidian/journal，拒绝 symlink escape。Markdown 以 heading + paragraph 切分，长段用固定窗口与 overlap；fenced code 外的 standalone Obsidian block ID（`^...`）仅是 locator metadata，跳过该 anchor 行但保留相邻正文与真实行号。显式 build 在同目录完成全新数据库后原子 replace，任何失败保留旧 cache；不得用 external-content/trigger 双表。
+当前 `revision` 常量为 `passages-v3`（`index.py PASSAGE_INDEX_REVISION`）；旧 revision cache 判 stale，查询自动回退纯内存检索，首次显式 rebuild 后恢复。extractor 范围含 **repo unit 的源码树**（`<unit>/source/` 下除保留名 document.md / source-map.yaml / conversion.yaml / archive.html / assets 外的常规文件）：`.py` 按 lexical `def`/`class` 边界切块并带限定符号名，其余文本文件按 40 行窗口 / 8 行重叠；跳过二进制（含空字节 / 非 UTF-8）、>200KB 单文件、VCS 与依赖目录，单 unit 2000 文件 / 24MB 预算，超限在 rebuild 时显式告警而非静默截断。代码 passage 的 `artifact` 为**仓库相对路径**（区别于 Markdown passage 的 `kb/` 前缀 project-relative 路径，这也是 code passage 的判别依据），locator 形如 `path#L起-L止`，heading 带 `path · 符号名`，结果按 file:line 呈现。FTS 表新增派生辅助列 `code_terms`（标识符按驼峰/下划线拆词、保序、小写；Markdown/record/parse-cache passage 恒为空串），只服务标识符子词命中，健康检查会按 canonical 字段重算校验。
+
+Extractor 只遍历 canonical unit containment 内允许的 record、Markdown 与 parse-cache 文本（以及上述 repo 源码树），跳过 raw/output/runtime/Obsidian/journal，拒绝 symlink escape。Markdown 以 heading + paragraph 切分，长段用固定窗口与 overlap；fenced code 外的 standalone Obsidian block ID（`^...`）仅是 locator metadata，跳过该 anchor 行但保留相邻正文与真实行号。显式 build 在同目录完成全新数据库后原子 replace，任何失败保留旧 cache；不得用 external-content/trigger 双表。
 
 Read path 先校验 cache 内部 metadata/source table/passage rows/digests/schema 自洽，再与当前 canonical digest 比较：source artifact 必须是 `kb/units/**` 下规范 project-relative path，digest 必须是 64 位小写 SHA-256，count/line 等数值必须可解析；非法 schema、SQLite/内部表或摘要被改均为 `corrupt`，只有 index revision/canonical corpus 合法变化为 `stale`。cache missing/corrupt/stale 时，使用同一 extractor 做纯内存 lexical fallback，查询绝不写盘。结果至多五条，返回 unit、短原文与 project-relative locator；public projection 不显示 BM25/internal score 或绝对路径。`unicode61` 与共享 CJK/ASCII tokenizer 只承诺 lexical matching，不承诺翻译或 embedding。
 

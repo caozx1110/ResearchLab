@@ -54,3 +54,8 @@ ${RESEARCH_PYTHON:-python3} .agents/skills/skill-evolution-advisor/scripts/diagn
 ${RESEARCH_PYTHON:-python3} .agents/skills/skill-evolution-advisor/scripts/diagnostics.py review --id diag-... --status resolved
 ${RESEARCH_PYTHON:-python3} .agents/skills/skill-evolution-advisor/scripts/diagnostics.py export-preview --authorized
 ```
+
+## 启动澄清（Agent 用）
+
+- 记录类型：习惯、坑还是 skill 缺陷？默认按内容分类，skill 缺陷仅记录。
+- 只记录还是同时生成复盘 prompt？默认只记录为 pending 待复审。

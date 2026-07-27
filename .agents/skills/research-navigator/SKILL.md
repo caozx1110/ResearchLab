@@ -37,3 +37,8 @@ python3 .agents/skills/research-navigator/scripts/status_kb_browser.py
 python3 .agents/skills/research-navigator/scripts/stop_kb_browser.py
 python3 .agents/skills/research-navigator/scripts/serve_kb_browser.py
 ```
+
+## 启动澄清（Agent 用）
+
+- 刷新哪个投影：`kb/user/` 页面还是本地浏览器快照？默认仅 user 页面。
+- 确认这是维护/开发场景；普通导航默认回 `kb status` / `kb next`，不路由到此。

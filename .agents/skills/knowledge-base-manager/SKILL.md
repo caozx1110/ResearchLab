@@ -81,3 +81,10 @@ Owner script、Python 命令、环境变量、内部 flags、绝对路径与 Age
 - AI inference、evaluation 与 user opinion 在合法 confirmation receipt 生成前保持 pending。
 - topic/tag/pool/summary 属于可覆盖治理层；history、links 与确认记录保留变更痕迹。
 - storage-sync 只处理 KB 数据范围，不重写分发 skill 或工作区根规则。
+
+脚本入口：`scripts/kb.py`（init / query / review-queue / confirm / promote / link / govern / audit / lint / resume / undo / restore）。
+
+## 启动澄清（Agent 用）
+
+- 对象：索引、链接、taxonomy/pool 治理还是审计？默认按请求路由。
+- 涉及批量改写（迁移/治理）时先出 dry-run 计划？默认是，确认后 apply。
