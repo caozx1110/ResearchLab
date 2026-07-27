@@ -39,7 +39,7 @@ These labels describe the current scope of each component, not the release statu
 | `idea-workbench` | beta | Candidate, evidence-first review, discussion, and explicit selection are implemented; novelty claims still require human or expert judgement. |
 | `method-designer` | beta | Repo-grounded design handoff and experiment matrices are implemented; generated methods still require expert review. |
 | `experiment-workbench` | beta | Typed plans, atomic W&B/CSV batch import, fingerprinted repeat-aware run logs, follow-ups, and confirmation-gated diagnoses are implemented; diagnosis quality remains agent-dependent. |
-| `report-author` | beta | Reports, outlines, stable bibliography export, and seven-section paper drafts consume version-bound claims, evidence, citations, and figures; composition quality and coverage still require review. |
+| `report-author` | beta | Agent-filled weekly/PPT editorial chains, outlines, stable bibliography export, and seven-section paper drafts consume version-bound claims, evidence, decisions, citations, and figures; composition quality and coverage still require review. |
 | `skill-evolution-advisor` | scaffold | Local learning and diagnostic-issue capture/review exist; automatic skill evolution is intentionally not a supported promise. |
 | `wiki-adapter` | scaffold | A thin compatibility and routing layer, not an independent analysis engine. |
 | `research-navigator` | dev-only | Optional projection helper only; it is not marketed as a formal product entrypoint or a source of truth. |

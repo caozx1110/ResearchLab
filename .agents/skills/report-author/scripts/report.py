@@ -33,6 +33,7 @@ from research.common import add_project_root_argument, load_program_reporting_ev
 from research.confirm import apply_confirmation
 from research.core import command_mutation, ensure_workspace, checkpoint_and_report, project_root, user_root
 from research.evidence import build_verification_receipt, read_claims, validate_claims
+from research.figures import FigureIndexError, load_current_figure_index
 from research.judgements import (
     BoundJudgementBatchSnapshot,
     BoundJudgementContainerSnapshot,
@@ -70,6 +71,16 @@ from research.paper_draft_runtime import (
     paper_draft_section_path,
 )
 from research.preference_selection import resolve_task_preferences, selection_binding
+from research.report_editorial import (
+    EditorialError,
+    build_editorial_fill_scaffold,
+    build_editorial_manifest,
+    editorial_manifest_violations,
+    fill_matches_manifest,
+    render_ppt_editorial,
+    render_weekly_editorial,
+    validate_editorial_fill,
+)
 from research.records import (
     CanonicalRecordSnapshot,
     ProjectFileSnapshot,
@@ -144,6 +155,7 @@ OPERATIONAL_EVENT_TYPES = {
     "evidence-fulfilled",
     "experiment-planned",
     "experiment-run",
+    "experiment-run-import",
     "experiment-follow-up",
     "phase-completed",
 }
@@ -244,6 +256,15 @@ def build_parser() -> argparse.ArgumentParser:
         cmd.add_argument("--stage", default="")
         cmd.add_argument("--limit", type=int, default=20)
         cmd.add_argument("--preference-selection-id", default="")
+    for name in ("weekly-prepare", "ppt-prepare"):
+        cmd = subparsers.add_parser(name, help=argparse.SUPPRESS)
+        cmd.add_argument("--program-id", required=True)
+        cmd.add_argument("--stage", default="")
+        cmd.add_argument("--limit", type=int, default=20)
+        cmd.add_argument("--preference-selection-id", default="")
+    for name in ("weekly-verify", "ppt-verify"):
+        cmd = subparsers.add_parser(name, help=argparse.SUPPRESS)
+        cmd.add_argument("--program-id", required=True)
     prepare = subparsers.add_parser("draft-prepare")
     prepare.add_argument("--program-id", required=True)
     verify = subparsers.add_parser("draft-verify")
@@ -1109,6 +1130,7 @@ def load_decisions(
             continue
         current_container_decisions.append(
             {
+                "_ref_id": str(item.get("id") or ""),
                 "title": str(decision.get("text") or ""),
                 "stage": str(decision.get("stage") or ""),
                 "rationale": str(decision.get("rationale") or ""),
@@ -2171,11 +2193,566 @@ def export_paper_draft(root: Path, program_id: str) -> int:
     return 0
 
 
+def _safe_editorial_program_id(program_id: str) -> str:
+    clean = str(program_id or "").strip()
+    if not clean or Path(clean).name != clean or clean in {".", ".."}:
+        raise EditorialError("program id must be a safe single path component")
+    return clean
+
+
+def _editorial_root(root: Path, program_id: str, output_kind: str) -> Path:
+    clean = _safe_editorial_program_id(program_id)
+    if output_kind not in {"weekly", "ppt-materials"}:
+        raise EditorialError("unsupported editorial output kind")
+    return root / "kb" / "programs" / clean / "reports" / "editorial" / output_kind
+
+
+def _editorial_paths(root: Path, program_id: str, output_kind: str) -> tuple[Path, Path, Path]:
+    control_root = _editorial_root(root, program_id, output_kind)
+    manifest_path = control_root / "manifest.yaml"
+    fill_path = control_root / "fill.yaml"
+    output_path = (
+        root / "kb" / "programs" / _safe_editorial_program_id(program_id) / "reports" / "weekly.md"
+        if output_kind == "weekly"
+        else user_root(root) / "report-materials" / f"{program_id}-ppt-materials.md"
+    )
+    return manifest_path, fill_path, output_path
+
+
+def _same_project_snapshot(left: ProjectFileSnapshot | None, right: ProjectFileSnapshot | None) -> bool:
+    if left is None or right is None:
+        return left is right
+    return bool(
+        left.relative_path == right.relative_path
+        and left.raw_bytes == right.raw_bytes
+        and left.file_identity == right.file_identity
+        and left.directory_capabilities == right.directory_capabilities
+    )
+
+
+def _editorial_snapshot_mapping(snapshot: ProjectFileSnapshot | None, *, label: str) -> dict[str, Any]:
+    if snapshot is None:
+        raise EditorialError(f"{label} is missing or unsafe")
+    try:
+        return load_yaml_mapping_bytes_strict(snapshot.raw_bytes)
+    except (RuntimeError, StrictYamlError) as exc:
+        raise EditorialError(f"{label} must be a strict YAML mapping") from exc
+
+
+def _event_support_catalog(inputs: ReportInputs) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+    catalog: dict[str, dict[str, Any]] = {}
+    missing_identity: list[dict[str, Any]] = []
+    for event in inputs.events:
+        if _event_is_judgement(event):
+            continue
+        event_id = str(event.get("id") or "").strip()
+        if not event_id:
+            missing_identity.append(event)
+            continue
+        ref = f"event:{event_id}"
+        if ref in catalog:
+            raise EditorialError(f"duplicate factual event ref: {ref}")
+        catalog[ref] = {
+            "ref": ref,
+            "kind": "event",
+            "title": str(event.get("title") or event.get("event_type") or event_id),
+            "text": str(event.get("summary") or event.get("event_type") or ""),
+            "epistemic_label": "fact",
+            "event_type": str(event.get("event_type") or ""),
+            "binding_digest": _canonical_digest(event),
+        }
+    return catalog, missing_identity
+
+
+def _editorial_support_catalog(inputs: ReportInputs) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+    catalog: dict[str, dict[str, Any]] = {}
+    for source in inputs.claim_sources:
+        for claim in source.claims:
+            claim_id = str(claim.get("id") or "").strip()
+            if not claim_id:
+                raise EditorialError("confirmed report claim is missing a stable id")
+            ref = f"claim:{source.unit_id}:{claim_id}"
+            if ref in catalog:
+                raise EditorialError(f"duplicate confirmed claim ref: {ref}")
+            catalog[ref] = {
+                "ref": ref,
+                "kind": "claim",
+                "title": source.title,
+                "source_title": source.title,
+                "source_kind": source.kind,
+                "source_unit_id": source.unit_id,
+                "text": str(claim.get("text") or ""),
+                "epistemic_label": str(claim.get("claim_type") or "synthesis"),
+                "evidence_refs": copy.deepcopy(list(claim.get("evidence_refs") or [])),
+                "binding_digest": _canonical_digest(
+                    {"source_binding": source.binding_digest, "claim": claim}
+                ),
+            }
+    event_catalog, missing_identity = _event_support_catalog(inputs)
+    for ref, entry in event_catalog.items():
+        if ref in catalog:
+            raise EditorialError(f"duplicate support ref: {ref}")
+        catalog[ref] = entry
+    for decision in inputs.decisions:
+        if str(decision.get("confirmation") or "") != "confirmed":
+            continue
+        decision_id = str(decision.get("_ref_id") or "").strip()
+        if not decision_id:
+            raise EditorialError("confirmed program decision is missing a stable id")
+        ref = f"decision:{decision_id}"
+        if ref in catalog:
+            raise EditorialError(f"duplicate confirmed decision ref: {ref}")
+        catalog[ref] = {
+            "ref": ref,
+            "kind": "decision",
+            "title": str(decision.get("title") or decision_id),
+            "text": str(decision.get("title") or ""),
+            "rationale": str(decision.get("rationale") or ""),
+            "epistemic_label": "synthesis",
+            "binding_digest": str(decision.get("_binding_digest") or ""),
+        }
+    return catalog, missing_identity
+
+
+def _editorial_risk_catalog(
+    inputs: ReportInputs,
+    missing_factual_identity: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    catalog: dict[str, dict[str, Any]] = {}
+    for source in inputs.claim_sources:
+        for index, issue in enumerate(source.issues, start=1):
+            ref = f"risk:source:{source.unit_id}:{index}"
+            catalog[ref] = {
+                "ref": ref,
+                "kind": "risk_hint",
+                "title": source.title,
+                "text": str(issue),
+                "epistemic_label": "risk",
+                "formal_support": False,
+                "binding_digest": _canonical_digest(
+                    {"source_binding": source.binding_digest, "issue": issue, "index": index}
+                ),
+            }
+    for index, event in enumerate(inputs.pending_judgement_events, start=1):
+        event_id = str(event.get("id") or "").strip()
+        identity = event_id or _canonical_digest(
+            {"index": index, "event_type": event.get("event_type"), "reason": event.get("_epistemic_reason")}
+        )[:16]
+        ref = f"risk:event:{identity}"
+        if ref in catalog:
+            raise EditorialError(f"duplicate pending risk ref: {ref}")
+        catalog[ref] = {
+            "ref": ref,
+            "kind": "risk_hint",
+            "title": str(event.get("event_type") or "pending judgement"),
+            "text": str(event.get("_epistemic_reason") or "confirmation_status=pending_user_confirmation"),
+            "epistemic_label": "risk",
+            "formal_support": False,
+            "binding_digest": _canonical_digest(
+                {"id": event_id, "reason": event.get("_epistemic_reason"), "event_type": event.get("event_type")}
+            ),
+        }
+    for unit_id in sorted(set(inputs.missing_units)):
+        ref = f"risk:missing:{unit_id}"
+        catalog[ref] = {
+            "ref": ref,
+            "kind": "risk_hint",
+            "title": "missing unit",
+            "text": f"canonical unit is missing or not current: {unit_id}",
+            "epistemic_label": "risk",
+            "formal_support": False,
+            "binding_digest": _canonical_digest({"missing_unit_id": unit_id}),
+        }
+    if inputs.formal_lane_pending:
+        catalog["risk:formal-lane"] = {
+            "ref": "risk:formal-lane",
+            "kind": "risk_hint",
+            "title": "formal lane pending",
+            "text": "formal report inputs are stale or unavailable; no formal claim was admitted",
+            "epistemic_label": "risk",
+            "formal_support": False,
+            "binding_digest": _canonical_digest({"formal_lane_pending": True}),
+        }
+    for index, event in enumerate(missing_factual_identity, start=1):
+        ref = f"risk:unidentified-event:{_canonical_digest({'index': index, 'event': event})[:16]}"
+        catalog[ref] = {
+            "ref": ref,
+            "kind": "risk_hint",
+            "title": "unidentified factual event",
+            "text": "a factual event was excluded because it has no stable id",
+            "epistemic_label": "risk",
+            "formal_support": False,
+            "binding_digest": _canonical_digest(event),
+        }
+    return catalog
+
+
+def _figure_entry_binding(index: Mapping[str, Any], entry: Mapping[str, Any]) -> dict[str, Any]:
+    source = index.get("source") if isinstance(index.get("source"), Mapping) else {}
+    return {
+        "paper_id": str(index.get("paper_id") or ""),
+        "index_digest": str(index.get("index_digest") or ""),
+        "source_digest": str(source.get("sha256") or ""),
+        "caption_digest": str(entry.get("caption_digest") or ""),
+        "asset_digests": [
+            str(asset.get("sha256") or "")
+            for asset in list(entry.get("assets") or [])
+            if isinstance(asset, Mapping)
+        ],
+    }
+
+
+def _load_editorial_figures(
+    root: Path,
+    unit_ids: list[str],
+) -> tuple[dict[str, dict[str, Any]], tuple[Callable[[], bool], ...]]:
+    catalog: dict[str, dict[str, Any]] = {}
+    validators: list[Callable[[], bool]] = []
+    for unit_id in unit_ids:
+        snapshot = canonical_record_snapshot_for_identity(root, "paper", unit_id)
+        if snapshot is None:
+            continue
+        record = normalize_record_snapshot(snapshot, root)
+        if record is None:
+            continue
+        payload = record.get("payload") if isinstance(record.get("payload"), Mapping) else {}
+        projection = payload.get("figures") if isinstance(payload.get("figures"), Mapping) else {}
+        expected_digest = str(projection.get("index_digest") or "")
+        if (
+            projection.get("schema") != "figure-index/v1"
+            or projection.get("index_artifact") != "figures.yaml"
+            or not expected_digest
+        ):
+            continue
+        paper_root = snapshot.path.parent
+        index_path = paper_root / "figures.yaml"
+        try:
+            index = load_current_figure_index(
+                index_path,
+                unit_root=paper_root,
+                project_root=root,
+                expected_index_digest=expected_digest,
+            )
+        except FigureIndexError:
+            continue
+        frozen: dict[str, dict[str, Any]] = {}
+        for entry in index.get("entries", []):
+            if not isinstance(entry, Mapping):
+                continue
+            ref_key = str(entry.get("ref_key") or "")
+            ref = f"figure:{ref_key}"
+            if not ref_key or ref in catalog:
+                raise EditorialError(f"duplicate or empty current figure ref: {ref}")
+            binding = _figure_entry_binding(index, entry)
+            frozen[ref_key] = binding
+            catalog[ref] = {
+                "ref": ref,
+                "kind": "figure",
+                "ref_key": ref_key,
+                "paper_id": unit_id,
+                "title": str(record.get("title") or unit_id),
+                "caption": str(entry.get("caption") or ""),
+                "figure_kind": str(entry.get("kind") or "figure"),
+                "number": str(entry.get("number") or ""),
+                "page": entry.get("page"),
+                "binding_digest": _canonical_digest(binding),
+            }
+
+        def current(
+            snapshot: CanonicalRecordSnapshot = snapshot,
+            index_path: Path = index_path,
+            paper_root: Path = paper_root,
+            expected_digest: str = expected_digest,
+            frozen: dict[str, dict[str, Any]] = frozen,
+        ) -> bool:
+            try:
+                if not _record_snapshot_is_current(root, snapshot):
+                    return False
+                loaded = load_current_figure_index(
+                    index_path,
+                    unit_root=paper_root,
+                    project_root=root,
+                    expected_index_digest=expected_digest,
+                )
+                current_bindings = {
+                    str(entry.get("ref_key") or ""): _figure_entry_binding(loaded, entry)
+                    for entry in loaded.get("entries", [])
+                    if isinstance(entry, Mapping)
+                }
+                return current_bindings == frozen
+            except (FigureIndexError, OSError, RuntimeError, ValueError):
+                return False
+
+        validators.append(current)
+    return catalog, tuple(validators)
+
+
+def _load_editorial_runtime(
+    root: Path,
+    program_id: str,
+    output_kind: str,
+    *,
+    stage: str,
+    limit: int,
+    preference_selection_id: str,
+    as_of: str,
+) -> tuple[dict[str, Any], ReportInputs]:
+    clean_program = _safe_editorial_program_id(program_id)
+    state_relative = f"kb/programs/{clean_program}/state.yaml"
+    events_relative = f"kb/programs/{clean_program}/workflow/reporting-events.yaml"
+    state_snapshot = snapshot_project_file(root, state_relative)
+    state = _editorial_snapshot_mapping(state_snapshot, label="program state")
+    if str(state.get("program_id") or clean_program) != clean_program:
+        raise EditorialError("program state identity does not match the requested report")
+    events_snapshot = snapshot_project_file(root, events_relative)
+    events_payload: dict[str, Any] = {}
+    if events_snapshot is not None:
+        events_payload = _editorial_snapshot_mapping(events_snapshot, label="reporting events")
+        if str(events_payload.get("program_id") or clean_program) != clean_program:
+            raise EditorialError("reporting events identity does not match the requested report")
+        if not isinstance(events_payload.get("items", []), list):
+            raise EditorialError("reporting events items must be a list")
+    operation = output_kind
+    inputs = load_report_inputs(
+        root,
+        clean_program,
+        stage=stage,
+        limit=limit,
+        preference_selection_id=preference_selection_id,
+        preference_operation=operation,
+    )
+    state_after = snapshot_project_file(root, state_relative)
+    events_after = snapshot_project_file(root, events_relative)
+    if not _same_project_snapshot(state_snapshot, state_after) or not _same_project_snapshot(events_snapshot, events_after):
+        raise EditorialError("report state or events changed while editorial inputs were captured")
+    loaded_events = events_payload.get("items", []) if isinstance(events_payload, dict) else []
+    selected_unit_ids = sorted(_collect_unit_ids(state) | _collect_unit_ids(loaded_events))
+    support_catalog, missing_factual_identity = _editorial_support_catalog(inputs)
+    risk_catalog = _editorial_risk_catalog(inputs, missing_factual_identity)
+    figure_catalog, figure_validators = _load_editorial_figures(root, selected_unit_ids)
+    if state_snapshot is None or not state_snapshot.is_current():
+        raise EditorialError("program state changed while editorial inputs were captured")
+    if events_snapshot is None:
+        if snapshot_project_file(root, events_relative) is not None:
+            raise EditorialError("reporting events appeared while editorial inputs were captured")
+    elif not events_snapshot.is_current():
+        raise EditorialError("reporting events changed while editorial inputs were captured")
+    if not inputs.formal_lane_pending and not inputs.formal_inputs_are_current():
+        raise EditorialError("formal report inputs changed while editorial catalogs were built")
+    if not all(validator() for validator in figure_validators):
+        raise EditorialError("figure inputs changed while editorial catalogs were built")
+    report_snapshot = report_input_snapshot(inputs)
+    manifest = build_editorial_manifest(
+        program_id=clean_program,
+        output_kind=output_kind,
+        as_of=as_of,
+        request={
+            "stage": str(stage or ""),
+            "limit": int(limit),
+            "preference_selection_id": str(preference_selection_id or ""),
+        },
+        input_bindings={
+            "state": {"byte_sha256": state_snapshot.byte_sha256, "byte_count": len(state_snapshot.raw_bytes)},
+            "events": (
+                {"status": "present", "byte_sha256": events_snapshot.byte_sha256, "byte_count": len(events_snapshot.raw_bytes)}
+                if events_snapshot is not None
+                else {"status": "absent", "byte_sha256": "", "byte_count": 0}
+            ),
+            "report_snapshot_digest": _canonical_digest(report_snapshot),
+            "preference_binding": copy.deepcopy(inputs.preference_binding),
+            "presentation": {"language": inputs.language, "reporting_style": inputs.reporting_style},
+            "formal_lane_pending": bool(inputs.formal_lane_pending),
+        },
+        support_catalog=support_catalog,
+        risk_catalog=risk_catalog,
+        figure_catalog=figure_catalog,
+    )
+    return manifest, inputs
+
+
+def _reload_current_editorial_manifest(
+    root: Path,
+    expected: Mapping[str, Any],
+) -> tuple[dict[str, Any], ReportInputs]:
+    request = expected.get("request") if isinstance(expected.get("request"), Mapping) else {}
+    try:
+        current, inputs = _load_editorial_runtime(
+            root,
+            str(expected.get("program_id") or ""),
+            str(expected.get("output_kind") or ""),
+            stage=str(request.get("stage") or ""),
+            limit=int(request.get("limit", 20)),
+            preference_selection_id=str(request.get("preference_selection_id") or ""),
+            as_of=str(expected.get("as_of") or ""),
+        )
+    except (TypeError, ValueError) as exc:
+        raise EditorialError("editorial request binding is invalid or stale") from exc
+    if current != expected:
+        raise EditorialError("editorial manifest inputs changed; prepare a fresh fill")
+    return current, inputs
+
+
+def prepare_editorial_report(
+    root: Path,
+    program_id: str,
+    output_kind: str,
+    *,
+    stage: str,
+    limit: int,
+    preference_selection_id: str,
+) -> int:
+    manifest_path, fill_path, _output_path = _editorial_paths(root, program_id, output_kind)
+    manifest: dict[str, Any] | None = None
+    prior_manifest_snapshot = snapshot_project_file(root, manifest_path.relative_to(root).as_posix())
+    if prior_manifest_snapshot is not None:
+        try:
+            prior_manifest = _editorial_snapshot_mapping(prior_manifest_snapshot, label="editorial manifest")
+            prior_request = prior_manifest.get("request") if isinstance(prior_manifest.get("request"), Mapping) else {}
+            if (
+                not editorial_manifest_violations(prior_manifest)
+                and prior_manifest.get("program_id") == program_id
+                and prior_manifest.get("output_kind") == output_kind
+                and str(prior_request.get("stage") or "") == str(stage or "")
+                and int(prior_request.get("limit", 20)) == int(limit)
+                and str(prior_request.get("preference_selection_id") or "") == str(preference_selection_id or "")
+            ):
+                candidate, _candidate_inputs = _load_editorial_runtime(
+                    root,
+                    program_id,
+                    output_kind,
+                    stage=stage,
+                    limit=limit,
+                    preference_selection_id=preference_selection_id,
+                    as_of=str(prior_manifest.get("as_of") or ""),
+                )
+                if candidate == prior_manifest:
+                    manifest = candidate
+        except (EditorialError, TypeError, ValueError):
+            manifest = None
+    if manifest is None:
+        manifest, _inputs = _load_editorial_runtime(
+            root,
+            program_id,
+            output_kind,
+            stage=stage,
+            limit=limit,
+            preference_selection_id=preference_selection_id,
+            as_of=utc_now_iso(),
+        )
+
+    def require_current() -> None:
+        _reload_current_editorial_manifest(root, manifest)
+
+    preserved = False
+    with command_mutation(
+        root,
+        f"report-author:{output_kind}-prepare",
+        [manifest_path, fill_path],
+        commit_guard=require_current,
+    ):
+        require_current()
+        if prior_manifest_snapshot is not None and not prior_manifest_snapshot.is_current():
+            raise EditorialError("editorial manifest changed before prepare acquired the workspace lock")
+        existing_manifest_snapshot = snapshot_project_file(root, manifest_path.relative_to(root).as_posix())
+        if prior_manifest_snapshot is None and existing_manifest_snapshot is not None:
+            raise EditorialError("editorial manifest appeared before prepare acquired the workspace lock")
+        existing_manifest = None
+        if existing_manifest_snapshot is not None:
+            existing_manifest = _editorial_snapshot_mapping(existing_manifest_snapshot, label="editorial manifest")
+        existing_fill_snapshot = snapshot_project_file(root, fill_path.relative_to(root).as_posix())
+        if existing_manifest == manifest and existing_fill_snapshot is not None:
+            existing_fill = _editorial_snapshot_mapping(existing_fill_snapshot, label="editorial fill")
+            if not fill_matches_manifest(existing_fill, manifest):
+                raise EditorialError("current editorial fill is malformed; use recovery before preparing again")
+            preserved = True
+        write_yaml_if_changed(manifest_path, manifest)
+        if not preserved:
+            write_yaml_if_changed(fill_path, build_editorial_fill_scaffold(manifest))
+        require_current()
+    checkpoint_and_report(
+        root,
+        trigger="milestone",
+        message=f"milestone: prepare {output_kind} editorial fill for {program_id}",
+        target_paths=[manifest_path, fill_path],
+    )
+    kind_label = "周报" if output_kind == "weekly" else "PPT"
+    print(f"{kind_label}编辑材料已准备；{'保留了当前 Agent 填写内容' if preserved else '等待 Agent 填写'}。")
+    return 0
+
+
+def verify_editorial_report(root: Path, program_id: str, output_kind: str) -> int:
+    manifest_path, fill_path, output_path = _editorial_paths(root, program_id, output_kind)
+    manifest_snapshot = snapshot_project_file(root, manifest_path.relative_to(root).as_posix())
+    manifest = _editorial_snapshot_mapping(manifest_snapshot, label="editorial manifest")
+    violations = editorial_manifest_violations(manifest)
+    if violations:
+        raise EditorialError("editorial manifest is invalid: " + "; ".join(violations))
+    if manifest.get("program_id") != program_id or manifest.get("output_kind") != output_kind:
+        raise EditorialError("editorial manifest identity does not match this verification request")
+    _current, inputs = _reload_current_editorial_manifest(root, manifest)
+    fill_snapshot = snapshot_project_file(root, fill_path.relative_to(root).as_posix())
+    fill = _editorial_snapshot_mapping(fill_snapshot, label="editorial fill")
+    fill_violations = validate_editorial_fill(fill, manifest)
+    if fill_violations:
+        raise EditorialError("editorial fill failed verification: " + "; ".join(fill_violations))
+    text = (
+        render_weekly_editorial(fill, manifest, language=inputs.language)
+        if output_kind == "weekly"
+        else render_ppt_editorial(fill, manifest, language=inputs.language)
+    )
+
+    def require_current() -> None:
+        if manifest_snapshot is None or fill_snapshot is None:
+            raise EditorialError("editorial manifest or fill snapshot is unavailable")
+        if not manifest_snapshot.is_current() or not fill_snapshot.is_current():
+            raise EditorialError("editorial manifest or fill changed during verification")
+        _reload_current_editorial_manifest(root, manifest)
+        current_fill = _editorial_snapshot_mapping(fill_snapshot, label="editorial fill")
+        current_violations = validate_editorial_fill(current_fill, manifest)
+        if current_violations:
+            raise EditorialError("editorial fill changed or became invalid during publication")
+
+    with command_mutation(
+        root,
+        f"report-author:{output_kind}-verify",
+        [output_path],
+        commit_guard=require_current,
+    ):
+        require_current()
+        write_text_if_changed(output_path, text)
+        require_current()
+    checkpoint_and_report(
+        root,
+        trigger="milestone",
+        message=f"milestone: publish {output_kind} editorial report for {program_id}",
+        target_paths=[output_path],
+    )
+    print("周报已通过引用校验并发布。" if output_kind == "weekly" else "PPT 素材已通过引用校验并发布。")
+    return 0
+
+
 def main() -> int:
     args = build_parser().parse_args()
     root = project_root(PROJECT_ROOT, explicit_root=args.root)
     print_resolved_project_roots(root)
     ensure_workspace(root)
+    if args.command in {"weekly-prepare", "weekly-verify", "ppt-prepare", "ppt-verify"}:
+        output_kind = "weekly" if args.command.startswith("weekly-") else "ppt-materials"
+        try:
+            if args.command.endswith("-prepare"):
+                return prepare_editorial_report(
+                    root,
+                    args.program_id,
+                    output_kind,
+                    stage=args.stage,
+                    limit=args.limit,
+                    preference_selection_id=args.preference_selection_id,
+                )
+            return verify_editorial_report(root, args.program_id, output_kind)
+        except EditorialError as exc:
+            raise SystemExit(f"报告编辑操作未完成：{exc}") from exc
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise SystemExit("报告编辑操作未完成：输入已变化或工作区不安全，请重新准备后重试。") from exc
     if args.command in {"draft-prepare", "draft-verify", "draft-export"}:
         try:
             if args.command == "draft-prepare":

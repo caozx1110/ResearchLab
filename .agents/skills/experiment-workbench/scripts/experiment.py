@@ -1927,6 +1927,8 @@ def _dispatch(args, root: Path) -> int:
                     "stage": "experiment-running",
                     "artifacts": [run_log_artifact_path, *[rel(root, item) for item in archived.values()]],
                     "tags": ["experiment", "run", "imported"],
+                    "epistemic_type": "factual",
+                    "information_types": ["fact"],
                 },
                 generated_by="experiment-workbench",
             )
