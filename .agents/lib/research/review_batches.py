@@ -32,7 +32,12 @@ REVIEW_BATCH_REF_RE = re.compile(r"[0-9a-f]{64}")
 SOURCE_TOKEN_RE = re.compile(r"[0-9a-f]{32}")
 SLOT_REF_RE = re.compile(r"[0-9a-f]{24}")
 SHEET_SIZE_LIMIT = 256 * 1024
-MAX_BATCH_ITEMS = 3
+LEGACY_BATCH_ITEMS = 3
+MIN_PERSONAL_BATCH_ITEMS = 4
+MAX_BATCH_ITEMS = 20
+STRICT_TTL_SECONDS = 24 * 60 * 60
+MIN_TTL_SECONDS = 60 * 60
+MAX_TTL_SECONDS = 168 * 60 * 60
 _RUNTIME_BATCHES_DIR = "kb/.runtime/review-batches"
 _SOURCE_SNAPSHOTS_DIR = "kb/.runtime/review-snapshots"
 _ANNOTATIONS_DIR = "kb/obsidian/annotations"
@@ -567,7 +572,7 @@ def _render_sheet(
 
 
 def _immutable_batch_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
-    return {
+    immutable = {
         key: payload.get(key)
         for key in (
             "schema",
@@ -580,6 +585,14 @@ def _immutable_batch_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
             "display_items",
         )
     }
+    # v1 registries created before governance profiles did not bind this
+    # field.  Omitting it for those payloads preserves their historical hash;
+    # every newly-created registry includes and binds the effective limit.
+    if "item_limit" in payload:
+        immutable["item_limit"] = payload.get("item_limit")
+    if "governance_profile" in payload:
+        immutable["governance_profile"] = payload.get("governance_profile")
+    return immutable
 
 
 def _batch_ref(payload: Mapping[str, Any]) -> str:
@@ -595,17 +608,64 @@ def _load_source_snapshot(project_root: Path, token: str) -> dict[str, Any]:
     return payload
 
 
+def _bound_item_limit(value: object, *, legacy_default: bool = False) -> int:
+    if value is None and legacy_default:
+        return LEGACY_BATCH_ITEMS
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ReviewBatchError("invalid_batch", "review batch item limit is invalid")
+    limit = value
+    if limit < 1 or limit > MAX_BATCH_ITEMS:
+        raise ReviewBatchError("invalid_batch", "review batch item limit is out of bounds")
+    return limit
+
+
+def _validate_source_policy(profile: str, item_limit: int, ttl_seconds: object) -> None:
+    if profile == "strict" and item_limit != LEGACY_BATCH_ITEMS:
+        raise ReviewBatchError("tampered_or_unknown", "strict review snapshot item limit is invalid")
+    if profile == "personal" and item_limit < MIN_PERSONAL_BATCH_ITEMS:
+        raise ReviewBatchError("tampered_or_unknown", "personal review snapshot item limit is invalid")
+    # R1 dialogue snapshots always bind ttl_seconds. Older registries did not;
+    # their exact expires_at remains batch-bound and readable for compatibility.
+    if ttl_seconds is None:
+        return
+    if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int):
+        raise ReviewBatchError("tampered_or_unknown", "source review snapshot expiry is invalid")
+    if ttl_seconds < MIN_TTL_SECONDS or ttl_seconds > MAX_TTL_SECONDS:
+        raise ReviewBatchError("tampered_or_unknown", "source review snapshot expiry is invalid")
+    if profile == "strict" and ttl_seconds != STRICT_TTL_SECONDS:
+        raise ReviewBatchError("tampered_or_unknown", "strict review snapshot expiry is invalid")
+
+
 def create_obsidian_review_batch(
     project_root: Path,
     *,
     source_snapshot_token: str,
     review_items: Sequence[Mapping[str, Any]],
     display_items: Sequence[Mapping[str, Any]],
+    item_limit: int | None = None,
 ) -> dict[str, Any]:
     """Create one human-editable sheet bound to an existing public review snapshot."""
-    if not review_items or len(review_items) > MAX_BATCH_ITEMS or len(review_items) != len(display_items):
-        raise ReviewBatchError("invalid_batch", "review batch must contain one to three displayed items")
     source = _load_source_snapshot(project_root, source_snapshot_token)
+    source_limit_raw = source.get("item_limit")
+    source_profile = str(source.get("governance_profile") or "strict")
+    if source_profile not in {"personal", "strict"}:
+        raise ReviewBatchError("tampered_or_unknown", "source review snapshot governance profile is invalid")
+    if item_limit is None:
+        try:
+            effective_limit = _bound_item_limit(source_limit_raw, legacy_default=True)
+        except ReviewBatchError as exc:
+            raise ReviewBatchError("tampered_or_unknown", "source review snapshot item limit is invalid") from exc
+    else:
+        effective_limit = _bound_item_limit(item_limit)
+        try:
+            source_limit = _bound_item_limit(source_limit_raw, legacy_default=True)
+        except ReviewBatchError as exc:
+            raise ReviewBatchError("tampered_or_unknown", "source review snapshot item limit is invalid") from exc
+        if source_limit != effective_limit:
+            raise ReviewBatchError("tampered_or_unknown", "source review snapshot item limit does not match the batch")
+    _validate_source_policy(source_profile, effective_limit, source.get("ttl_seconds"))
+    if not review_items or len(review_items) > effective_limit or len(review_items) != len(display_items):
+        raise ReviewBatchError("invalid_batch", "review batch exceeds its bound displayed-item limit")
     normalized_items = [_validate_review_item(item) for item in review_items]
     if source.get("status") != "unused" or source.get("review_items") != normalized_items:
         raise ReviewBatchError("tampered_or_unknown", "source review snapshot does not match the displayed items")
@@ -623,6 +683,8 @@ def create_obsidian_review_batch(
         "review_items": normalized_items,
         "slots": slots,
         "display_items": normalized_displays,
+        "item_limit": effective_limit,
+        "governance_profile": source_profile,
         "status": "unused",
     }
     batch_ref = _batch_ref(payload)
@@ -662,6 +724,8 @@ def create_obsidian_review_batch(
         "sheet_relative_path": sheet_path.relative_to(project_root.resolve()).as_posix(),
         "expires_at": str(payload["expires_at"]),
         "item_count": len(normalized_items),
+        "item_limit": effective_limit,
+        "governance_profile": source_profile,
     }
 
 
@@ -686,12 +750,16 @@ def _load_batch(project_root: Path, batch_ref: str, *, now: float | None = None)
     items = payload.get("review_items")
     displays = payload.get("display_items")
     slots = payload.get("slots")
+    try:
+        item_limit = _bound_item_limit(payload.get("item_limit"), legacy_default=True)
+    except ReviewBatchError as exc:
+        raise ReviewBatchError("tampered_or_unknown", "review batch item limit is invalid") from exc
     if (
         not isinstance(items, list)
         or not isinstance(displays, list)
         or not isinstance(slots, list)
         or not items
-        or len(items) > MAX_BATCH_ITEMS
+        or len(items) > item_limit
         or len(items) != len(displays)
         or len(items) != len(slots)
     ):
@@ -702,6 +770,20 @@ def _load_batch(project_root: Path, batch_ref: str, *, now: float | None = None)
     if any(SLOT_REF_RE.fullmatch(ref) is None for ref in slot_refs) or len(set(slot_refs)) != len(slot_refs):
         raise ReviewBatchError("tampered_or_unknown", "review batch slots are invalid")
     source = _load_source_snapshot(project_root, str(payload.get("source_snapshot_token") or ""))
+    batch_profile = str(payload.get("governance_profile") or "strict")
+    source_profile = str(source.get("governance_profile") or "strict")
+    try:
+        source_item_limit = _bound_item_limit(source.get("item_limit"), legacy_default=True)
+    except ReviewBatchError as exc:
+        raise ReviewBatchError("tampered_or_unknown", "source review snapshot item limit is invalid") from exc
+    if (
+        batch_profile not in {"personal", "strict"}
+        or source_profile != batch_profile
+        or source_item_limit != item_limit
+        or str(source.get("expires_at") or "") != str(payload.get("expires_at") or "")
+    ):
+        raise ReviewBatchError("tampered_or_unknown", "source review snapshot policy no longer matches the batch")
+    _validate_source_policy(batch_profile, item_limit, source.get("ttl_seconds"))
     source_status = str(source.get("status") or "")
     if source_status == "consumed":
         raise ReviewBatchError("already_applied", "source review snapshot was already applied")

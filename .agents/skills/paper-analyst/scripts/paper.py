@@ -217,9 +217,9 @@ SCREENING_DIMENSION_RATINGS: dict[str, tuple[str, ...]] = {
 # --------------------------------------------------------------------------- #
 # Per-paper-type 5-element fill contracts (SSOT §3.2).                         #
 #                                                                             #
-# A runtime agent classifies the paper during screening and fills the selected #
-# five elements; every element is a judgement-class claim and MUST carry >=1   #
-# evidence_ref. The script only selects, verifies, and routes the structure.    #
+# A runtime agent classifies the paper inside the deep-read fill and fills the  #
+# selected five elements; the type and every element are judgement-class       #
+# claims and MUST carry >=1 evidence_ref. The script only validates and routes. #
 # --------------------------------------------------------------------------- #
 ELEMENT_SETS: dict[str, tuple[str, ...]] = {
     "method_system": ("motivation", "method", "experiment", "limitation", "insight"),
@@ -281,14 +281,43 @@ ELEMENT_HEADING: dict[str, str] = {
 }
 
 
+def _legacy_paper_type_from_record(record: dict) -> str:
+    payload = record.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    quick_screen = payload.get("quick_screen")
+    paper_type = quick_screen.get("paper_type") if isinstance(quick_screen, dict) else ""
+    normalized = str(paper_type or "").strip().lower()
+    return normalized if normalized in PAPER_TYPES else ""
+
+
+def _has_legacy_quick_screen(record: dict) -> bool:
+    payload = record.get("payload")
+    return isinstance(payload, dict) and isinstance(payload.get("quick_screen"), dict)
+
+
+def _paper_type_from_record(record: dict) -> str:
+    """Read the canonical deep-read type, then the pre-R1 legacy screening type."""
+    payload = record.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    deep_read = payload.get("deep_read")
+    paper_type = deep_read.get("paper_type") if isinstance(deep_read, dict) else ""
+    normalized = str(paper_type or "").strip().lower()
+    if normalized in PAPER_TYPES:
+        return normalized
+    # Read-only compatibility: never write a new paper type back to quick_screen.
+    legacy = _legacy_paper_type_from_record(record)
+    if legacy:
+        return legacy
+    top_level = str(record.get("paper_type") or "").strip().lower()
+    return top_level if top_level in PAPER_TYPES else ""
+
+
 def elements_for(record_or_type: dict | str) -> tuple[str, ...]:
-    """Select the agent-authored element set; missing/unknown type is method_system."""
+    """Select a persisted/legacy element set; missing type keeps legacy default."""
     if isinstance(record_or_type, str):
         paper_type = record_or_type
     elif isinstance(record_or_type, dict):
-        payload = record_or_type.get("payload")
-        quick_screen = payload.get("quick_screen") if isinstance(payload, dict) else None
-        paper_type = quick_screen.get("paper_type") if isinstance(quick_screen, dict) else record_or_type.get("paper_type")
+        paper_type = _paper_type_from_record(record_or_type)
     else:
         paper_type = ""
     normalized = str(paper_type or "").strip().lower()
@@ -686,41 +715,44 @@ def build_note_scaffold(
     digest_chunks: int,
     digest_chars: int,
 ) -> dict:
-    """Produce the selected type's fillable note skeleton; script authors nothing."""
+    """Produce one unified deep-read scaffold; the script authors no judgement."""
     digest = _evidence_digest(source_chunks, cache_locator_kind, chunk_limit=digest_chunks, excerpt_chars=digest_chars)
-    required_elements = elements_for(record)
-    paper_type = str(record.get("payload", {}).get("quick_screen", {}).get("paper_type") or "method_system")
-    if paper_type not in ELEMENT_SETS:
-        paper_type = "method_system"
-    elements = [
-        {
-            "element": name,
-            "claim_type": ELEMENT_CLAIM_TYPE[name],
-            "content": "",
-            "evidence_refs": [],
-        }
-        for name in required_elements
-    ]
+    element_sets = {
+        paper_type: [
+            {
+                "element": name,
+                "claim_type": ELEMENT_CLAIM_TYPE[name],
+                "content": "",
+                "evidence_refs": [],
+            }
+            for name in required_elements
+        ]
+        for paper_type, required_elements in ELEMENT_SETS.items()
+    }
     return {
         "paper_id": record["id"],
         "kind": "paper",
-        "paper_type": paper_type,
+        "paper_type": "",
+        "paper_type_reason": "",
+        "paper_type_evidence_refs": [],
         "status": "awaiting_agent_fill",
         "phase": "prepare",
         "fill_contract": {
             "description": (
-                "Agent fills all required_elements for the selected paper_type with its own understanding, each "
-                "backed by >=1 verbatim evidence_ref. Then run `complete-note --phase verify` "
-                "to validate + verbatim-check evidence + write note.md + core_content. Empty or "
-                "unevidenced elements are rejected; the script never authors content (SSOT §3.2)."
+                "Agent selects paper_type, explains it with verbatim evidence, and fills only that type's "
+                "five-element branch. Every selected element needs >=1 verbatim evidence_ref; all unselected "
+                "branches stay blank. Verification writes the canonical type and note only after every claim passes."
             ),
-            "required_elements": list(required_elements),
-            "element_claim_types": {name: ELEMENT_CLAIM_TYPE[name] for name in required_elements},
+            "paper_type": f"agent fills one of {'|'.join(PAPER_TYPES)}",
+            "paper_type_reason": "agent explains the evidence-grounded classification",
+            "paper_type_evidence_refs": "agent attaches >=1 verbatim evidence_ref",
+            "element_sets": {name: list(elements) for name, elements in ELEMENT_SETS.items()},
+            "element_claim_types": dict(ELEMENT_CLAIM_TYPE),
             "evidence_ref_format": EVIDENCE_REF_FORMAT,
         },
         "evidence_digest": digest,
-        # --- agent fills each element.content + element.evidence_refs below ---
-        "elements": elements,
+        # --- agent fills type fields + exactly one branch below ---
+        "element_sets": element_sets,
     }
 
 
@@ -735,6 +767,33 @@ def _elements_by_name(fill: Any) -> dict[str, dict]:
     return elements
 
 
+def _branch_elements(fill: Any, paper_type: str) -> dict[str, dict]:
+    if not isinstance(fill, dict):
+        return {}
+    branches = fill.get("element_sets")
+    if not isinstance(branches, dict):
+        return _elements_by_name(fill)
+    branch = branches.get(paper_type)
+    return _elements_by_name({"elements": branch})
+
+
+def _all_note_evidence_items(fill: Any) -> list[dict]:
+    """Return every evidence-bearing fill item for cross-unit containment checks."""
+    if not isinstance(fill, dict):
+        return []
+    items: list[dict] = [
+        {"evidence_refs": fill.get("paper_type_evidence_refs") or []}
+    ]
+    branches = fill.get("element_sets")
+    if isinstance(branches, dict):
+        for branch in branches.values():
+            if isinstance(branch, list):
+                items.extend(item for item in branch if isinstance(item, dict))
+    else:
+        items.extend(_elements_by_name(fill).values())
+    return items
+
+
 def _claim_from_element(name: str, element: dict) -> dict:
     return {
         "id": f"claim-{name}",
@@ -742,6 +801,20 @@ def _claim_from_element(name: str, element: dict) -> dict:
         "claim_type": str(element.get("claim_type") or ELEMENT_CLAIM_TYPE.get(name, "inference")),
         "confirmation_status": "pending_user_confirmation",
         "evidence_refs": element.get("evidence_refs") or [],
+    }
+
+
+def _claim_from_paper_type(paper_type: str, reason: str, evidence_refs: object) -> dict:
+    return {
+        "id": "claim-paper-type",
+        # Both semantic values are copied from the Agent fill. Deterministic
+        # serialization keeps the type visible in generic claim/review projection;
+        # the script still makes no classification judgement of its own.
+        "text": clean_text(f"paper_type={paper_type}; {reason}"),
+        "claim_type": "inference",
+        "confirmation_status": "pending_user_confirmation",
+        "evidence_refs": evidence_refs if isinstance(evidence_refs, list) else [],
+        "paper_type": paper_type,
     }
 
 
@@ -753,12 +826,83 @@ def verify_note_fill(fill: Any, unit_dir: Path, record: dict | None = None) -> t
     quote must verify verbatim against the artifact (verify_claim_evidence).
     """
     violations: list[str] = []
-    elements = _elements_by_name(fill)
-    required_elements = elements_for(record or "method_system")
+    is_unified = isinstance(fill, dict) and isinstance(fill.get("element_sets"), dict)
+    declared_type = str(fill.get("paper_type") or "").strip().lower() if isinstance(fill, dict) else ""
+    legacy_type = _legacy_paper_type_from_record(record) if isinstance(record, dict) else ""
+    legacy_record = _has_legacy_quick_screen(record) if isinstance(record, dict) else False
+    if is_unified:
+        if declared_type not in PAPER_TYPES:
+            violations.append(
+                f"paper_type: agent must fill one of {'|'.join(PAPER_TYPES)}"
+            )
+        selected_type = declared_type if declared_type in PAPER_TYPES else "method_system"
+        branches = fill.get("element_sets")
+        assert isinstance(branches, dict)
+        unknown_branches = sorted(set(str(key) for key in branches) - set(PAPER_TYPES))
+        for name in unknown_branches:
+            violations.append(f"element_sets.{name}: unknown paper type branch")
+        for paper_type in PAPER_TYPES:
+            if paper_type not in branches:
+                violations.append(f"element_sets.{paper_type}: missing branch")
+                continue
+            branch = branches.get(paper_type)
+            if not isinstance(branch, list):
+                violations.append(f"element_sets.{paper_type}: branch must be a list")
+                continue
+            names = [
+                str(element.get("element") or "").strip().lower()
+                for element in branch
+                if isinstance(element, dict)
+            ]
+            if len(names) != len(branch):
+                violations.append(f"element_sets.{paper_type}: every element must be a mapping")
+            duplicates = sorted({name for name in names if name and names.count(name) > 1})
+            for name in duplicates:
+                violations.append(f"element_sets.{paper_type}.{name}: duplicate element")
+            missing_names = sorted(set(ELEMENT_SETS[paper_type]) - set(names))
+            unexpected_names = sorted(set(names) - set(ELEMENT_SETS[paper_type]))
+            for name in missing_names:
+                violations.append(f"element_sets.{paper_type}.{name}: missing element slot")
+            for name in unexpected_names:
+                violations.append(f"element_sets.{paper_type}.{name}: unexpected element slot")
+        type_reason = clean_text(str(fill.get("paper_type_reason") or ""))
+        type_refs = fill.get("paper_type_evidence_refs") or []
+        if not type_reason:
+            violations.append("paper_type_reason: empty — the agent must explain the classification")
+        if not isinstance(type_refs, list) or not type_refs:
+            violations.append("paper_type_evidence_refs: paper type requires >=1 verbatim quote")
+        type_claim = _claim_from_paper_type(selected_type, type_reason, type_refs)
+        claims: list[dict] = [type_claim]
+        for violation in verify_claim_evidence(type_claim, unit_dir):
+            violations.append(f"paper_type: {violation}")
+        for paper_type in PAPER_TYPES:
+            if paper_type == selected_type:
+                continue
+            for name, element in _branch_elements(fill, paper_type).items():
+                if clean_text(str(element.get("content") or "")) or bool(element.get("evidence_refs")):
+                    violations.append(
+                        f"element_sets.{paper_type}.{name}: unselected branch must stay blank"
+                    )
+        elements = _branch_elements(fill, selected_type)
+        required_elements = ELEMENT_SETS[selected_type]
+    else:
+        # Read-only compatibility for pre-R1 flat note fills. A current paper without
+        # a legacy screening type cannot use this shape to bypass type evidence.
+        if isinstance(record, dict) and not legacy_record:
+            violations.append(
+                "note fill uses the retired flat shape; select paper_type in the unified deep-read scaffold"
+            )
+        selected_type = declared_type if declared_type in PAPER_TYPES else (legacy_type or "method_system")
+        if declared_type and declared_type not in PAPER_TYPES:
+            violations.append(f"paper_type: invalid legacy value {declared_type!r}")
+        if legacy_type and declared_type and declared_type != legacy_type:
+            violations.append("paper_type: legacy fill conflicts with the persisted paper type")
+        elements = _elements_by_name(fill)
+        required_elements = ELEMENT_SETS[selected_type]
+        claims = []
     unexpected = sorted(set(elements) - set(required_elements))
     for name in unexpected:
         violations.append(f"element '{name}': unexpected for selected paper type")
-    claims: list[dict] = []
     for name in required_elements:
         element = elements.get(name)
         if element is None:
@@ -770,6 +914,11 @@ def verify_note_fill(fill: Any, unit_dir: Path, record: dict | None = None) -> t
         refs = element.get("evidence_refs") or []
         if not refs:
             violations.append(f"element '{name}': no evidence_refs — every element must cite >=1 verbatim quote")
+        claim_type = str(element.get("claim_type") or "")
+        if claim_type != ELEMENT_CLAIM_TYPE[name]:
+            violations.append(
+                f"element '{name}': claim_type must be {ELEMENT_CLAIM_TYPE[name]}"
+            )
         claim = _claim_from_element(name, element)
         claims.append(claim)
         for violation in verify_claim_evidence(claim, unit_dir):
@@ -783,6 +932,15 @@ def verify_note_fill(fill: Any, unit_dir: Path, record: dict | None = None) -> t
 def _apply_note_fill_to_payload(record: dict, claims: list[dict]) -> None:
     """Route verified element content into canonical payload fields (in place)."""
     payload = record.setdefault("payload", {})
+    type_claim = next(
+        (claim for claim in claims if str(claim.get("id") or "") == "claim-paper-type"),
+        None,
+    )
+    if isinstance(type_claim, dict):
+        paper_type = str(type_claim.get("paper_type") or "").strip().lower()
+        if paper_type not in PAPER_TYPES:
+            raise ValueError("verified paper type claim is missing a valid paper_type")
+        payload.setdefault("deep_read", {})["paper_type"] = paper_type
     core = payload.setdefault("core_content", {})
     critique = payload.setdefault("critique", {})
     by_id = {str(claim.get("id") or ""): claim for claim in claims}
@@ -1133,29 +1291,25 @@ def _prepare_note_scaffold(
     *,
     mode: str,
 ) -> Path:
-    """Create the type-specific fillable note after paper_type is verified."""
+    """Create the unified deep-read fill without requiring a screening phase."""
     fill_scaffold_path = unit_root / "note-fill.yaml"
     _assert_safe_paper_input_path(root, fill_scaffold_path)
-    raw_selected_type = str(record.get("payload", {}).get("quick_screen", {}).get("paper_type") or "").strip()
-    selected_type = raw_selected_type if raw_selected_type in ELEMENT_SETS else "method_system"
     if fill_scaffold_path.exists():
         existing = load_yaml(fill_scaffold_path, default={})
-        existing_elements = existing.get("elements", []) if isinstance(existing, dict) else []
-        has_agent_fill = any(
-            isinstance(element, dict)
+        has_agent_fill = bool(
+            isinstance(existing, dict)
             and (
-                str(element.get("content") or "").strip()
-                or bool(element.get("evidence_refs"))
+                str(existing.get("paper_type") or "").strip()
+                or str(existing.get("paper_type_reason") or "").strip()
+                or bool(existing.get("paper_type_evidence_refs"))
+                or any(
+                    str(element.get("content") or "").strip()
+                    or bool(element.get("evidence_refs"))
+                    for element in _all_note_evidence_items(existing)[1:]
+                )
             )
-            for element in existing_elements
         )
         if has_agent_fill:
-            existing_type = str(existing.get("paper_type") or "").strip() if isinstance(existing, dict) else ""
-            if existing_type and existing_type != selected_type:
-                raise SystemExit(
-                    "Existing in-progress note fill targets a different paper_type; "
-                    "preserved it unchanged and stopped for user resolution."
-                )
             return fill_scaffold_path
     payload = build_note_scaffold(
         record,
@@ -1174,7 +1328,7 @@ def _prepare_note_scaffold(
     append_history(
         record,
         action="paper-note-scaffolded",
-        summary="Prepared type-specific fillable note skeleton (script authored nothing).",
+        summary="Prepared unified deep-read fill skeleton (script authored nothing).",
         information_types=["inference", "unverified"],
         artifacts=[rel(root, fill_scaffold_path), rel(root, cache_path)],
     )
@@ -1489,7 +1643,7 @@ def _prevalidate_bound_verify_fill(
         label = "screening"
     else:
         violations, verified_claims = verify_note_fill(payload, unit_root, record)
-        evidence_items = list(_elements_by_name(payload).values())
+        evidence_items = _all_note_evidence_items(payload)
         label = "note"
     for item in evidence_items:
         if not isinstance(item, Mapping):
@@ -1556,14 +1710,17 @@ def next_for_agent_note(root: Path, record: dict, cache_path: Path, fill_path: P
     (each needs a verbatim quote + locator), and the exact verify command to run after.
     It authors no judgement — the agent still fills the understanding.
     """
-    elements = ",".join(elements_for(record))
+    element_sets = ";".join(
+        f"{paper_type}={','.join(elements)}"
+        for paper_type, elements in ELEMENT_SETS.items()
+    )
     verify_cmd = (
         f"${{RESEARCH_PYTHON:-python3}} {SCRIPT_PATH} --root {root} "
         f"complete-note --paper-id {record['id']} --phase verify --input {fill_path.name}"
     )
     return (
         f"NEXT FOR AGENT: read {rel(root, cache_path)} (source quotes) then fill {rel(root, fill_path)} "
-        f"elements [{elements}] — each needs content + >=1 verbatim quote+locator "
+        f"paper_type + reason/evidence, then one branch [{element_sets}] — each selected element needs content + >=1 verbatim quote+locator "
         f"(PDF page=N / HTML section:<anchor>), then run: {verify_cmd}"
     )
 
@@ -1690,7 +1847,7 @@ def paper_preference_context(
     }
     auxiliary: dict[str, dict[str, object]] = {}
     if operation == "complete-note" and phase == "prepare":
-        for name in ("screening.yaml", "note-fill.yaml", "note.md"):
+        for name in ("note-fill.yaml", "note.md"):
             auxiliary[name] = _artifact_fingerprint(root, canonical_unit_root / name)
     elif operation == "screen" and phase == "verify":
         auxiliary["note-fill.yaml"] = _artifact_fingerprint(
@@ -1802,7 +1959,9 @@ def _run_screen(args, root, record, unit_root, cache_path, source_chunks, paper_
         record["confirmation_status"] = "pending_user_confirmation"
         record["needs_human_confirmation"] = True
         record["information_types"] = ["fact", "inference", "unverified"]
-        record["payload"]["quick_screen"]["recommended_next_action"] = "screen --phase verify (after agent fills)"
+        record["payload"].setdefault("quick_screen", {})["recommended_next_action"] = (
+            "screen --phase verify (legacy compatibility only)"
+        )
         append_history(
             record,
             action="paper-screen-prepared",
@@ -1834,7 +1993,7 @@ def _run_screen(args, root, record, unit_root, cache_path, source_chunks, paper_
     _revalidate_managed_verify_fill(root, bound_fill)
     write_yaml_if_changed(screen_path, payload)
     record = apply_record_governance(root, record, infer_missing=True, source_label="paper-analyst")
-    quick = record["payload"]["quick_screen"]
+    quick = record["payload"].setdefault("quick_screen", {})
     quick["paper_type"] = paper_type
     quick["worth_deep_reading"] = worth
     quick["judgement_reason"] = reasons
@@ -1920,25 +2079,8 @@ def _run_complete_note(args, root, record, unit_root, cache_path, source_chunks,
         mode = str(paper_preferences.get("complete_note_mode") or "scaffold")
 
     if args.phase == "prepare":
-        screening_path = unit_root / "screening.yaml"
-        _assert_safe_paper_input_path(root, screening_path)
         _assert_safe_paper_input_path(root, fill_scaffold_path)
         _assert_safe_paper_input_path(root, note_path)
-        screening = load_yaml(screening_path, default={}) if screening_path.exists() else {}
-        screening_status = str(screening.get("status") or "").strip() if isinstance(screening, dict) else ""
-        verified_type = str(record.get("payload", {}).get("quick_screen", {}).get("paper_type") or "").strip()
-        if screening_path.exists() and screening_status != "verified":
-            raise SystemExit(
-                "complete-note --phase prepare requires evidence-verified screening; "
-                "fill and verify screening first."
-            )
-        legacy_note_exists = fill_scaffold_path.exists() or note_path.exists()
-        screening_is_verified = screening_path.exists() and screening_status == "verified"
-        if not verified_type and not legacy_note_exists and not screening_is_verified:
-            raise SystemExit(
-                "complete-note --phase prepare requires evidence-verified paper_type; "
-                "prepare, fill, and verify screening first."
-            )
         fill_scaffold_path = _prepare_note_scaffold(
             root,
             record,
@@ -1949,8 +2091,7 @@ def _run_complete_note(args, root, record, unit_root, cache_path, source_chunks,
             mode=mode,
         )
         print(f"[ok] wrote {fill_scaffold_path.relative_to(root)}")
-        required = "/".join(elements_for(record))
-        print(f"下一步：runtime agent 为 5 要素({required})填内容+证据，再运行 complete-note --phase verify。")
+        print("下一步：runtime agent 先填写论文类型、分类理由与证据，再只填写对应五要素分支。")
         print(next_for_agent_note(root, record, cache_path, fill_scaffold_path))
         _finalize_post_actions(root, trigger="milestone", message=f"milestone: scaffold note {args.paper_id}", defer_post_actions=defer_post_actions,
                                target_paths=[unit_root / "record.yaml", fill_scaffold_path])
@@ -1985,7 +2126,10 @@ def _run_complete_note(args, root, record, unit_root, cache_path, source_chunks,
         artifacts=[rel(root, note_path), rel(root, cache_path)],
     )
     write_record(root, record)
-    print(f"[ok] verified + wrote {note_path.relative_to(root)} (core_content filled, {len(claims)} elements)")
+    print(
+        f"[ok] verified + wrote {note_path.relative_to(root)} "
+        f"(paper type + {max(0, len(claims) - 1)} elements)"
+    )
     _auto_post_note_steps(root, record, unit_root, source_chunks, cache_path, paper_preferences, defer_post_actions)
     note_targets = [unit_root / "record.yaml", note_path, unit_root / "note-claims.yaml", unit_root / "structure.yaml", unit_root / "figures.yaml", unit_root / "figures"]
     owned_fill = _unit_owned_fill_path(unit_root, fill_path)
@@ -2070,6 +2214,11 @@ def _dispatch_loaded_command(
         )
         if preference_binding:
             record["payload"]["preference_binding"] = preference_binding
+
+    if args.command == "screen" and not _has_legacy_quick_screen(record):
+        raise SystemExit(
+            "screen is retained only for paper records created with the legacy quick-screen schema"
+        )
 
     source_chunks: list[dict] = []
     cache_path = _cache_path(unit_root)

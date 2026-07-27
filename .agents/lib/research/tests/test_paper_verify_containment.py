@@ -32,7 +32,7 @@ def _load_paper_module():
 
 
 def _paper_record(paper_id: str) -> dict:
-    return {
+    record = {
         "id": paper_id,
         "kind": "paper",
         "title": "Containment paper",
@@ -46,6 +46,9 @@ def _paper_record(paper_id: str) -> dict:
         "source": {"original_uri": "", "file_hash": ""},
         "payload": kind_payload_skeleton("paper", "Containment paper"),
     }
+    # This module also exercises the retained owner-only screen containment path.
+    record["payload"]["quick_screen"] = {}
+    return record
 
 
 def _setup_paper(root: Path, paper_id: str) -> Path:
@@ -105,23 +108,44 @@ def _note_fill(paper, paper_id: str) -> dict:
     return {
         "paper_id": paper_id,
         "paper_type": "method_system",
-        "elements": [
+        "paper_type_reason": "The paper presents a method/system contribution.",
+        "paper_type_evidence_refs": [
             {
-                "element": name,
-                "claim_type": paper.ELEMENT_CLAIM_TYPE[name],
-                "content": f"Agent-authored {name} judgement.",
-                "evidence_refs": [
-                    {
-                        "source_unit_id": paper_id,
-                        "artifact": "parse-cache.yaml",
-                        "locator": "page=1",
-                        "quote": "vision language action policies for robot manipulation",
-                        "summary": f"{name} evidence",
-                    }
-                ],
+                "source_unit_id": paper_id,
+                "artifact": "parse-cache.yaml",
+                "locator": "page=1",
+                "quote": "vision language action policies for robot manipulation",
+                "summary": "type evidence",
             }
-            for name in paper.NOTE_ELEMENTS
         ],
+        "element_sets": {
+            branch_type: [
+                {
+                    "element": name,
+                    "claim_type": paper.ELEMENT_CLAIM_TYPE[name],
+                    "content": (
+                        f"Agent-authored {name} judgement."
+                        if branch_type == "method_system"
+                        else ""
+                    ),
+                    "evidence_refs": (
+                        [
+                            {
+                                "source_unit_id": paper_id,
+                                "artifact": "parse-cache.yaml",
+                                "locator": "page=1",
+                                "quote": "vision language action policies for robot manipulation",
+                                "summary": f"{name} evidence",
+                            }
+                        ]
+                        if branch_type == "method_system"
+                        else []
+                    ),
+                }
+                for name in elements
+            ]
+            for branch_type, elements in paper.ELEMENT_SETS.items()
+        },
     }
 
 

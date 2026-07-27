@@ -440,6 +440,9 @@ def route_task(task: str) -> str:
     return str(route_candidate_snapshot(task).get("direct_owner") or "research-orchestrator")
 # Governance cap: runtime preferences may narrow this scope, but cannot add steps
 # beyond this set.
+# ``screen`` remains only for a pre-R1 record that already carries the legacy
+# quick_screen schema. New paper units always take the generate-note route into
+# the unified deep-read scaffold.
 GOVERNANCE_MAX_AUTO_STEPS = {"screen", "build-index", "refresh", "generate-note"}
 ROOT_AWARE_AUTO_SCRIPTS = {
     ".agents/skills/blog-analyst/scripts/blog.py",
@@ -560,8 +563,12 @@ def safe_unit_step(record: dict[str, Any]) -> dict[str, Any] | None:
         }
     if kind == "paper":
         payload = record.get("payload", {})
-        quick = payload.get("quick_screen", {}) if isinstance(payload, dict) else {}
-        if not str(quick.get("screening_mode") or "").strip() and not quick.get("judgement_reason"):
+        quick = payload.get("quick_screen") if isinstance(payload, dict) else None
+        if (
+            isinstance(quick, dict)
+            and not str(quick.get("screening_mode") or "").strip()
+            and not quick.get("judgement_reason")
+        ):
             return {
                 "kind": kind,
                 "step_type": "screen",
@@ -583,7 +590,7 @@ def safe_unit_step(record: dict[str, Any]) -> dict[str, Any] | None:
                 "step_type": "generate-note",
                 "record_id": unit_id,
                 "title": str(record.get("title") or ""),
-                "reason": f"screened paper `{unit_id}` lacks a complete note",
+                "reason": f"paper `{unit_id}` needs a unified deep-read note",
                 "command_parts": [
                     COMMAND_PREFIX,
                     ".agents/skills/paper-analyst/scripts/paper.py",

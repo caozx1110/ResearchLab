@@ -10,7 +10,7 @@
 
 ## 2. review 确认应用（精确语法）
 
-展示轮：`kb --agent-protocol r1.json review` → `next_actions[0]`=`present_review_items`，含 `review_items`（subject=kind+id）与 `apply` 合同。快照一次性、24h 过期，最多展示 Top 3。
+展示轮：`kb --agent-protocol r1.json review` → `next_actions[0]`=`present_review_items`，含 `review_items`（subject=kind+id）与冻结的 `apply` 合同。快照一次性；`strict` 固定 Top-3 + 24h，`personal` 默认 10 条且批量上限/有效期可配置。应用时只消费展示轮冻结的 profile/limit/expiry，不重读后来变化的配置。
 
 应用轮（用户当前消息拍板后）：
 
@@ -38,7 +38,7 @@ kb --agent-protocol r2.json review \
 
 两阶段：`prepare` 出待填骨架 → Agent 读材料填理解+证据 → `verify` 校验落盘；判断保持 `pending_user_confirmation`。
 
-- `--input` 裸文件名按 unit 目录相对解析（必须直接位于 unit 根下）。默认名：paper `screening.yaml` / `note-fill.yaml`；repo `capability-fill.yaml`；dataset `dataset-fill.yaml`；blog `blog-fill.yaml`。
+- `--input` 裸文件名按 unit 目录相对解析（必须直接位于 unit 根下）。默认名：paper `note-fill.yaml`；repo `capability-fill.yaml`；dataset `dataset-fill.yaml`；blog `blog-fill.yaml`。`screening.yaml` 只用于读取和恢复 R1 前已有 paper record，不得用于新论文。
 - evidence_refs 元素：`{source_unit_id, artifact, locator, quote}`（可选 summary）。artifact 为 unit 内相对路径（repo 证据为 repo-root 相对源码文件）。
 - quote 必须**逐字**：双方做 whitespace 归一化（连续空白折一个空格）后子串匹配，大小写敏感；伪造即拒。PDF `page=N` 会窄化到该页——逐字但页错也是 violation。
 - locator：PDF `page=N`/section/para；HTML `section`/`section:<anchor>`；repo 文件 `line=N`。
@@ -62,13 +62,13 @@ kb --agent-protocol r2.json review \
 | recall | skill-evolution-advisor/scripts/learnings.py | recall |
 | resume / undo / restore | kb.py | resume / undo / restore |
 
-无公开动词、自然语言路由的 owner：paper.py（prewarm-cache/screen/complete-note/extract-figures/confirm）、repo.py（scan-structure/map-capability/confirm）、dataset.py（profile/confirm）、blog.py（complete-note/confirm）、search.py（stage/materialize-selection）、synthesize.py（survey|review|taxonomy prepare|verify、survey confirm|reject、composite）、idea.py（capture/generate/analyze/review/discuss/select/select-best/archive）、method.py（design/confirm-selection/reject-selection）、experiment.py（plan/log-run/follow-up/diagnose/confirm）、report.py（weekly/stage-summary/ppt-materials/writing-materials/outline）、orchestrate.py（init-program/attach-unit/log-decision/add-reporting-event…）、config.py（show/set/eligible-preferences/record-effective/load-effective…）、monitor.py、archive.py、wiki.py、learnings.py/diagnostics.py。
+无公开动词、自然语言路由的 owner：paper.py（prewarm-cache/complete-note/extract-figures/confirm；screen 仅兼容旧 record）、repo.py（scan-structure/map-capability/confirm）、dataset.py（profile/confirm）、blog.py（complete-note/confirm）、search.py（stage/materialize-selection）、synthesize.py（survey|review|taxonomy prepare|verify、survey confirm|reject、composite）、idea.py（capture/generate/analyze/review/discuss/select/select-best/archive）、method.py（design/confirm-selection/reject-selection）、experiment.py（plan/log-run/follow-up/diagnose/confirm）、report.py（weekly/stage-summary/ppt-materials/writing-materials/outline）、orchestrate.py（init-program/attach-unit/log-decision/add-reporting-event…）、config.py（show/set/eligible-preferences/record-effective/load-effective…）、monitor.py、archive.py、wiki.py、learnings.py/diagnostics.py。
 
 ## 7. 常见失败恢复
 
 | 错误码/症状 | 处置 |
 |---|---|
-| expired（卡片 24h 过期） | 重跑 `kb review` 取新快照再拍板 |
+| expired（卡片超过该展示轮冻结的有效期） | 重跑 `kb review` 取新快照再拍板 |
 | already_applied | 该批已应用；重跑 review 看剩余 |
 | stale_content | 内容已变；重跑 review，向用户展示新实质后再决定 |
 | tampered_or_unknown | 检查 ref 是否 `kind:id`、`--apply-snapshot` 是否传展示轮协议文件名；重跑 review |

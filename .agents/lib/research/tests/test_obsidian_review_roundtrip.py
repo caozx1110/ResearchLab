@@ -92,20 +92,29 @@ def _display_item(index: int) -> dict:
     }
 
 
-def _source_snapshot(root: Path, items: list[dict], *, token: str = "a" * 32) -> str:
+def _source_snapshot(
+    root: Path,
+    items: list[dict],
+    *,
+    token: str = "a" * 32,
+    item_limit: int | None = None,
+    governance_profile: str | None = None,
+) -> str:
     path = root / f"kb/.runtime/review-snapshots/{token}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema": "kb-review-snapshot/v2",
+        "created_at": "2026-07-24T00:00:00Z",
+        "expires_at": "2099-07-25T00:00:00Z",
+        "status": "unused",
+        "review_items": items,
+    }
+    if item_limit is not None:
+        payload["item_limit"] = item_limit
+    if governance_profile is not None:
+        payload["governance_profile"] = governance_profile
     path.write_text(
-        json.dumps(
-            {
-                "schema": "kb-review-snapshot/v2",
-                "created_at": "2026-07-24T00:00:00Z",
-                "expires_at": "2099-07-25T00:00:00Z",
-                "status": "unused",
-                "review_items": items,
-            },
-            ensure_ascii=False,
-        ),
+        json.dumps(payload, ensure_ascii=False),
         encoding="utf-8",
     )
     return token
@@ -182,6 +191,79 @@ def test_sheet_preview_is_checkbox_only_pure_read_and_preflights_all_items(tmp_p
     update_obsidian_projection(tmp_path)
     assert sheet.read_bytes() == sheet_before
     assert annotation.read_text(encoding="utf-8") == "keep this human note\n"
+
+
+def test_personal_batch_binds_a_limit_above_three_and_rejects_limit_mismatch(tmp_path: Path) -> None:
+    items = [_review_item(index) for index in range(1, 11)]
+    token = _source_snapshot(tmp_path, items, item_limit=10, governance_profile="personal")
+    created = create_obsidian_review_batch(
+        tmp_path,
+        source_snapshot_token=token,
+        review_items=items,
+        display_items=[_display_item(index) for index in range(1, 11)],
+        item_limit=10,
+    )
+
+    assert created["item_count"] == 10
+    assert created["item_limit"] == 10
+    registry = json.loads(
+        (tmp_path / f"kb/.runtime/review-batches/{created['batch_ref']}.json").read_text(encoding="utf-8")
+    )
+    assert registry["item_limit"] == 10
+    assert registry["governance_profile"] == "personal"
+
+    other_root = tmp_path / "mismatch"
+    other_token = _source_snapshot(other_root, items, item_limit=10, governance_profile="personal")
+    with pytest.raises(ReviewBatchError) as mismatch:
+        create_obsidian_review_batch(
+            other_root,
+            source_snapshot_token=other_token,
+            review_items=items,
+            display_items=[_display_item(index) for index in range(1, 11)],
+            item_limit=9,
+        )
+    assert mismatch.value.code == "tampered_or_unknown"
+
+
+def test_strict_obsidian_source_cannot_raise_the_three_item_limit(tmp_path: Path) -> None:
+    items = [_review_item(index) for index in range(1, 5)]
+    token = _source_snapshot(tmp_path, items, item_limit=10, governance_profile="strict")
+
+    with pytest.raises(ReviewBatchError) as weakened:
+        create_obsidian_review_batch(
+            tmp_path,
+            source_snapshot_token=token,
+            review_items=items,
+            display_items=[_display_item(index) for index in range(1, 5)],
+            item_limit=10,
+        )
+
+    assert weakened.value.code == "tampered_or_unknown"
+
+
+def test_legacy_batch_without_bound_limit_remains_readable_at_three_item_cap(tmp_path: Path) -> None:
+    created, _items = _create_batch(tmp_path, count=1)
+    old_ref = created["batch_ref"]
+    old_registry = tmp_path / f"kb/.runtime/review-batches/{old_ref}.json"
+    payload = json.loads(old_registry.read_text(encoding="utf-8"))
+    payload.pop("item_limit")
+    payload.pop("governance_profile")
+    payload.pop("batch_ref")
+    legacy_ref = review_batches_module._batch_ref(payload)
+    payload["batch_ref"] = legacy_ref
+    legacy_registry = old_registry.with_name(f"{legacy_ref}.json")
+    legacy_registry.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+    old_registry.unlink()
+
+    old_sheet = tmp_path / created["sheet_relative_path"]
+    legacy_sheet = old_sheet.with_name(f"Pending Review {legacy_ref[:12]}.md")
+    text = old_sheet.read_text(encoding="utf-8").replace(old_ref, legacy_ref)
+    text = text.replace("- [ ] 暂缓", "- [x] 暂缓", 1)
+    legacy_sheet.write_text(text, encoding="utf-8")
+    old_sheet.unlink()
+
+    preview = preview_obsidian_review_batch(tmp_path, legacy_ref)
+    assert [item["decision"] for item in preview.decisions] == ["defer"]
 
 
 @pytest.mark.parametrize(

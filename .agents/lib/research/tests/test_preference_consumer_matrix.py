@@ -58,7 +58,7 @@ def _workspace(tmp_path: Path) -> Path:
         },
     )
     runtime = default_runtime_preferences()
-    runtime["paper"]["screening_context_pages"] = 2
+    runtime["paper"]["parse_cache_front_limit"] = 2
     write_yaml_if_changed(runtime_preferences_path(root), runtime)
     return root
 
@@ -236,7 +236,7 @@ def test_real_source_and_paper_consumers_do_not_direct_read_runtime_soft_prefere
     selected_paper, binding = intake.resolve_intake_preferences(
         root, intake_args, source="paper.pdf", title="Paper"
     )
-    assert selected_paper["screening_context_pages"] == 2
+    assert selected_paper["parse_cache_front_limit"] == 2
     assert binding["selection_binding"]["selection_id"] == "prefsel-matrix-intake"
 
     record = {"id": "paper-1", "sources": [], "payload": {"basic_info": {"title": "Paper"}}}
@@ -257,7 +257,7 @@ def test_real_source_and_paper_consumers_do_not_direct_read_runtime_soft_prefere
         selected_paths={"runtime.paper"},
     )
     selected_paper, selected_pdf, binding = paper.resolve_paper_preferences(root, paper_args, record)
-    assert selected_paper["screening_context_pages"] == 2
+    assert selected_paper["parse_cache_front_limit"] == 2
     assert selected_pdf == {}
     assert binding["operation"] == "screen"
 
@@ -1101,7 +1101,6 @@ def test_paper_operation_argument_matrix_rejects_replay(
     ("operation", "phase", "artifact_name"),
     (
         ("screen", "verify", "note-fill.yaml"),
-        ("complete-note", "prepare", "screening.yaml"),
         ("complete-note", "prepare", "note-fill.yaml"),
         ("complete-note", "prepare", "note.md"),
         ("refresh-structure", "", "note.md"),

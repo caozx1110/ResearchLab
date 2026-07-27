@@ -241,7 +241,7 @@ files:
 
 | kind | payload 关键 section | 写入 skill |
 |---|---|---|
-| paper | `basic_info`, `source_search`, `quick_screen{paper_type, judgement_reason, takeaways}`, `core_content`, `structure`, `figures`, `critique`, `state` | paper-analyst |
+| paper | `basic_info`, `source_search`, `deep_read{paper_type}`, `core_content`, `structure`, `figures`, `critique`, `state` | paper-analyst |
 | repo | `basic_info`, `source_search`, `capability{boundary, core_capabilities}`, `structure`, `reuse`, `risk` | repo-analyst |
 | dataset | `basic_info`, `source_search`, `profile`, `composition`, `access`, `quality`, `reuse`, `state{profile_status}` | dataset-analyst |
 | blog | `basic_info`, `source_search`, `positioning`, `content`, `credibility` | blog-analyst |
@@ -254,15 +254,29 @@ repo 的 `structure.scan_applicability` 取 `unknown|applicable|not_applicable|u
 
 ### paper 类型与 note element set <a id="paper-element-sets"></a>
 
-`payload.quick_screen.paper_type` 由 runtime agent 在 screening 阶段依据证据填写，脚本只校验枚举并持久化，**不得用关键词或启发式自动分类**。
+新 paper 没有 quick screen。`payload.deep_read.paper_type` 由 runtime agent 在 deep-read 阶段依据证据填写，脚本只校验枚举并持久化，**不得用关键词或启发式自动分类**。
 
 ```yaml
 payload:
-  quick_screen:
-    paper_type: ""  # ""|method_system|benchmark|survey；空/未知下游回退 method_system
+  deep_read:
+    paper_type: ""  # prepare 时为空；verify 后为 method_system|benchmark|survey
 ```
 
-`complete-note` 的 `required_elements` 按类型选择；每个 element 都是 judgement-class claim，必须有逐字可验证的 `evidence_refs`：
+`complete-note prepare` 直接生成一个统一待填结构，不依赖 `screening.yaml`：
+
+```yaml
+paper_type: ""                 # agent 选择三类之一
+paper_type_reason: ""          # agent 给出分类理由
+paper_type_evidence_refs: []    # 至少一条逐字 evidence
+element_sets:
+  method_system: [...]          # 三套五要素同时存在
+  benchmark: [...]
+  survey: [...]
+```
+
+Agent 只填写所选分支，未选分支必须保持空白。verify 同时验证类型理由/证据、所选五要素及未选分支为空，生成 `claim-paper-type` + 五条 element claims，再写入 canonical `deep_read.paper_type`。任一类型、理由、逐字证据或要素缺失均 fail-closed；不存在“值不值得读”字段、screening 产物或独立确认步骤。
+
+每个 element 都是 judgement-class claim，必须有逐字可验证的 `evidence_refs`：
 
 | paper_type | required_elements | payload target |
 |---|---|---|
@@ -270,7 +284,7 @@ payload:
 | `benchmark` | `motivation`, `task_design`, `metrics`, `coverage_limitation`, `insight` | motivation→`core_content.motivation`; task_design→`core_content.method`; metrics / coverage_limitation→`core_content.changes_and_effects`; insight→`core_content.why_it_might_work` |
 | `survey` | `scope`, `taxonomy`, `trends`, `gaps`, `insight` | scope→`core_content.motivation`; taxonomy→`core_content.method`; trends / gaps→`core_content.changes_and_effects`; insight→`core_content.why_it_might_work` |
 
-缺少 `paper_type` 的旧 paper 必须保持 `method_system` 的原五要素行为。三种集合都至少写入一个 `core_content` 字段，不改变 confirmation substance gate。
+旧 paper 的 `quick_screen.paper_type` 与旧扁平 `elements` fill 只读兼容：已有类型继续选择原要素契约，兼容路径不得把类型写回 `quick_screen`，也不得让新 unit 绕过 deep-read 类型证据。三种集合都至少写入一个 `core_content` 字段，不改变 confirmation substance gate。
 
 ---
 
@@ -1123,13 +1137,13 @@ updated_at: ISO-8601
 confirm_route: {}                # internal owner route
 ```
 
-`priority` 是当前 schema 唯一的 impact 等级，不另行推断一个不可验证的 `impact_score`。公共 Top-3 先按 `critical → high → normal → low`，同级再按最旧 `updated_at` 排序，最后用 subject id 保证确定性。
+`priority` 是当前 schema 唯一的 impact 等级，不另行推断一个不可验证的 `impact_score`。公共批次先按 `critical → high → normal → low`，同级再按最旧 `updated_at` 排序，最后用 subject id 保证确定性；strict 截取 3 条，personal 按 snapshot 冻结的有界 item limit 截取（默认 10，绝对上限 20）。
 
-Discovery is fail-closed: empty/invalid claims, any canonical `unverified` claim, missing or byte-stale verification, rejected items, already confirmed items, non-canonical owner/path/id relationships, escaping symlinks, duplicate raw subjects, and malformed candidate YAML are excluded. Artifact-provided routes are never trusted; kind + canonical identity derive the route. Canonical unit/program records and evidence roots are resolved only from project root + canonical kind/id; every existing component must be non-symlink, the record must be a regular file with matching id/kind, and cross-unit ambiguity fails closed. Candidate containment is proven before YAML read; one unreadable/malformed unit, decision, discussion, or repo-choice artifact cannot abort discovery of other inbox items. Discovery, confirmation, survey eligibility and report consumption share this resolver and the same evidence context; repo `file:line` evidence always receives the canonical `record_external_source_contract(record)` alongside trusted source roots. Missing that caller context is fail-closed and must be fixed at the caller, never by weakening the evidence gate. The public review list, dialogue snapshot, Obsidian export/preview and apply revalidation may consume only this exact ready set; coarse `is_ready_for_human_review` state alone is insufficient. Displayed Top-3 items bind a one-time source snapshot; choosing an Obsidian round-trip additionally creates one human-owned Markdown sheet. The sheet permits only one of `确认 / 拒绝 / 暂缓` to be checked per item; any other byte change is rejected. Multi-item apply is all-or-nothing: if any displayed item no longer belongs to the same canonical ready set, the batch performs zero owner writes and requires a fresh review.
+Discovery is fail-closed: empty/invalid claims, any canonical `unverified` claim, missing or byte-stale verification, rejected items, already confirmed items, non-canonical owner/path/id relationships, escaping symlinks, duplicate raw subjects, and malformed candidate YAML are excluded. Artifact-provided routes are never trusted; kind + canonical identity derive the route. Canonical unit/program records and evidence roots are resolved only from project root + canonical kind/id; every existing component must be non-symlink, the record must be a regular file with matching id/kind, and cross-unit ambiguity fails closed. Candidate containment is proven before YAML read; one unreadable/malformed unit, decision, discussion, or repo-choice artifact cannot abort discovery of other inbox items. Discovery, confirmation, survey eligibility and report consumption share this resolver and the same evidence context; repo `file:line` evidence always receives the canonical `record_external_source_contract(record)` alongside trusted source roots. Missing that caller context is fail-closed and must be fixed at the caller, never by weakening the evidence gate. The public review list, dialogue snapshot, Obsidian export/preview and apply revalidation may consume only this exact ready set; coarse `is_ready_for_human_review` state alone is insufficient. Displayed items bind one effective governance profile, item limit and expiry into a one-time source snapshot; choosing an Obsidian round-trip additionally creates one human-owned Markdown sheet with the same immutable policy. The sheet permits only one of `确认 / 拒绝 / 暂缓` to be checked per item; any other byte change is rejected. Multi-item apply is all-or-nothing: if any displayed item no longer belongs to the same canonical ready set, the batch performs zero owner writes and requires a fresh review.
 
 Obsidian Base and the managed dashboard remain read-only. The editable sheet lives under `kb/obsidian/annotations/`, and projection rebuild never reads or overwrites it. A checkbox is only an intent draft, not durable authorization. In a later conversation the Agent reads the sheet and restates the whole batch in natural language; apply binds the exact preview decision digest and requires authorization from the current user message for the whole confirm/reject/defer batch. Confirmation additionally requires a real human signer and evidence; rejection does not require a signer, and defer writes no canonical state. Apply first obtains every owner's current binding and exact target set, then uses one root transaction for the whole batch. It revalidates preview digest and owner plans under lock, rolls the whole batch back when any child fails, consumes the batch and source snapshot only at the end of that same transaction, and creates one exact-path checkpoint. Per-item subprocess commits, nested child checkpoints, partial success, and replay by two concurrent callers are forbidden.
 
-Review token registry 位于私有 `kb/.runtime/review-snapshots/`；每个普通文件保存 `created_at`、`expires_at`、`status: unused|consumed|expired` 与完整 displayed snapshot，默认 24 小时有效。`consumed` / `expired` tombstone 再保留 24 小时以区分 replay 与 expiry。list/apply 在已有 registry lock 内执行有界、非递归 GC；fresh/empty review 在 registry 不存在时严格零写，不为 no-op 创建目录或 lock；首次真正展示卡片时才创建。symlink、非普通文件、越界路径一律拒绝且不遍历。公开失败分类固定为 `already_applied`、`expired`、`stale_content`、`tampered_or_unknown`，输出只提供自然语言恢复动作，不泄漏 token、digest 或路径。成功响应只显示经清洗的 subject type/title 与 decision。内容变化导致旧 token `stale_content`，新一轮 review 必须从 canonical bytes 重新生成卡片。
+Review token registry 位于私有 `kb/.runtime/review-snapshots/`；每个普通文件保存 `created_at`、`expires_at`、`status: unused|consumed|expired`、`governance_profile`、`item_limit`、`ttl_seconds` 与完整 displayed snapshot。strict 固定 3 条/24 小时；personal 默认 10 条，`review.card_ttl_hours` 归一到 1..168 小时（batch limit 4..20）。展示时冻结 policy，apply 不重读可变配置；旧 registry 缺 policy 字段按 strict/3/24h 兼容。`consumed` / `expired` tombstone 再保留 24 小时以区分 replay 与 expiry。list/apply 在已有 registry lock 内执行有界、非递归 GC；fresh/empty review 在 registry 不存在时严格零写，不为 no-op 创建目录或 lock；首次真正展示卡片时才创建。symlink、非普通文件、越界路径一律拒绝且不遍历。公开失败分类固定为 `already_applied`、`expired`、`stale_content`、`tampered_or_unknown`，输出只提供自然语言恢复动作，不泄漏 token、digest 或路径。成功响应只显示经清洗的 subject type/title 与 decision。内容变化导致旧 token `stale_content`，新一轮 review 必须从 canonical bytes 重新生成卡片。
 
 Obsidian batch registry 位于 `kb/.runtime/review-batches/`，同样绑定 created/expiry/status、source snapshot 与完整 display digest。Editable sheet 不含 owner route、canonical path、token、secret 或 authorization。Preview 严格 pure-read；expired、replay、registry/source tamper、sheet tamper、symlink 和 stale binding 全部 fail closed。registry 与 sheet 的每次读写都逐层使用 no-follow directory descriptor，并在操作前后复核当前目录 identity；中间目录 rename/symlink swap 不能把访问重定向到 workspace 外。
 

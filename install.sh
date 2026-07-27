@@ -739,7 +739,7 @@ prompt_scope() {
 }
 
 prompt_project_dir() {
-  local choice default_dir
+  local choice default_dir terminal_state=""
   if ! is_interactive_input; then
     return 0
   fi
@@ -747,8 +747,21 @@ prompt_project_dir() {
   wizard_step "研究工作区放在哪里？"
   info "知识库和运行环境会以这个目录为中心。"
   while true; do
-    ask "目录 [$default_dir]："
+    if terminal_state=$(stty -g <&0 2>/dev/null); then
+      stty -echo <&0
+      trap 'stty "$terminal_state" <&0 2>/dev/null || true; exit 130' INT
+      trap 'stty "$terminal_state" <&0 2>/dev/null || true; exit 129' HUP
+      trap 'stty "$terminal_state" <&0 2>/dev/null || true; exit 143' TERM
+    else
+      terminal_state=""
+    fi
+    ask "目录 [按回车使用当前目录]："
     read -r choice || choice=""
+    if [ -n "$terminal_state" ]; then
+      stty "$terminal_state" <&0
+      trap - INT HUP TERM
+    fi
+    printf '\n'
     choice=${choice:-$default_dir}
     if [ -d "$choice" ]; then
       PROJECT_DIR=$(abs_dir "$choice")
@@ -938,7 +951,7 @@ print_plan() {
   bullet "AI 工具：$(agent_label)"
   bullet "使用范围：$(scope_label)"
   if [ "$SCOPE" = "project" ]; then
-    bullet "工作区：$WORKSPACE_ROOT"
+    bullet "工作区：$(mode_label)"
   fi
   if [ "$ACTION" = "install" ]; then
     if [ "$KB_ON_PATH" -eq 1 ]; then
@@ -1036,7 +1049,7 @@ print_done() {
         ok "已为 $(agent_label) 完成配置。"
       fi
       if [ "$SCOPE" = "project" ]; then
-        bullet "工作区：${WORKSPACE_ROOT}（$(mode_label)）"
+        bullet "工作区：$(mode_label)"
       else
         bullet "使用范围：当前用户的所有工作区"
       fi
@@ -1047,7 +1060,7 @@ print_done() {
           printf '  %bkb init%b\n' "$C_BOLD$C_CYAN" "$C_RESET"
         elif [ "$KB_SHORTCUT_CREATED" -eq 1 ]; then
           note "已创建 kb 快捷入口，但它所在的目录还不在 PATH 中。"
-          info "请把上方提示的目录加入 PATH，重新打开终端后运行："
+          info "请让 Agent 将快捷入口目录加入 PATH，重新打开终端后运行："
           printf '  %bkb help%b\n' "$C_BOLD$C_CYAN" "$C_RESET"
           info "安装器不会自动修改 shell 配置。"
         fi
@@ -1604,8 +1617,8 @@ write_agent_plan_json() {
   done
 
   digest=$(python3 "$REPO_ROOT/install-lib/agent_plan.py" "${args[@]}") || die "无法写入 Agent 安装计划"
-  bullet "精确 JSON 计划：$AGENT_PLAN_JSON"
-  bullet "计划摘要：${digest:0:12} · $DRY_RUN_CHANGE_COUNT 个目标 · ${#AGENT_PLAN_CONFLICTS[@]} 个冲突"
+  bullet "精确 JSON 计划已保存到你指定的位置。"
+  bullet "计划摘要：$DRY_RUN_CHANGE_COUNT 个目标 · ${#AGENT_PLAN_CONFLICTS[@]} 个冲突"
 }
 
 file_sha256() {
@@ -1640,7 +1653,7 @@ guard_copy_install_target() {
     return 0
   fi
   if [ -e "$WORKSPACE_ROOT/.agents" ]; then
-    die "$WORKSPACE_ROOT/.agents 已存在，为避免覆盖已停止安装"
+    die "目标工作区已有同名配置，为避免覆盖已停止安装"
   fi
 }
 
@@ -1749,42 +1762,40 @@ ws_sync() {
   else
     status=$?
     fail "工作区文件操作失败。" >&2
-    case "$output" in
-      *"source-not-git-worktree"*|*"source must be a git worktree"*)
-        {
-          printf '%s\n' "  原因：源码目录不是 git 仓库。从 GitHub 下载的 ZIP 包不是 git 仓库。"
-          printf '%s\n' "  处理：请改用 git clone 获取源码，或在源码目录执行 git init && git add -A && git commit 后重试。"
-          printf '%s\n' "  备选：确认接受后，可加 --from-snapshot 按快照清单打包安装（快照模式无法区分未跟踪文件）。"
-        } >&2
-        ;;
-      *"collides with local files"*)
-        printf '%s\n' "  原因：目标工作区已有同名文件与本次操作冲突。请先备份或移除冲突文件；确认这些文件可以被替换时，可加 --force 重试。" >&2
-        ;;
-      *)
-        printf '%s\n' "  请让 Agent 结合以下输出检查后重试。" >&2
-        ;;
-    esac
     ws_sync_error_tail "$output" >&2 || true
     return "$status"
   fi
 }
 
 ws_sync_error_tail() {
-  # 管理员面 stderr 摘要：去掉终端控制符与 traceback 帧噪声，只保留子进程
-  # 输出的最后几行，帮助定位失败原因而不刷屏。
-  printf '%s\n' "$1" | LC_ALL=C sed -e $'s/\033\\[[0-9;]*[A-Za-z]//g' | awk '
-    /^Traceback \(most recent call last\):/ { in_traceback = 1; next }
-    in_traceback && /^[[:space:]]/ { next }
-    in_traceback { in_traceback = 0 }
-    NF { lines[count++] = $0 }
-    END {
-      if (count == 0) exit 0
-      start = count - 8
-      if (start < 0) start = 0
-      print "  同步器输出（最后 " (count - start) " 行）："
-      for (i = start; i < count; i++) print "  | " lines[i]
-    }
-  ' || true
+  # 子进程原文只用于进程内分类，绝不投影到公开面。未知错误也使用
+  # fail-closed 的稳定类别，不猜测、更不回显路径、token 或 traceback。
+  case "$1" in
+    *"source-not-git-worktree"*|*"source must be a git worktree"*)
+      printf '%s\n' "  原因：安装源码缺少可验证的版本信息。"
+      printf '%s\n' "  处理：请让 Agent 取得完整的版本化源码后重试；若只能使用快照，请先确认接受其来源边界。"
+      ;;
+    *"collides with local files"*)
+      printf '%s\n' "  原因：目标工作区存在文件冲突。"
+      printf '%s\n' "  处理：请先备份冲突文件，再让 Agent 检查并重试。"
+      ;;
+    *"managed drift"*|*"local modifications inside managed"*)
+      printf '%s\n' "  原因：检测到受管文件已被本地修改。"
+      printf '%s\n' "  处理：请先让 Agent 检查并备份本地修改，再决定是否替换。"
+      ;;
+    *"manifest"*"changed"*|*"manifest"*"expect"*|*"stale"*|*"lease"*)
+      printf '%s\n' "  原因：安装状态已变化，当前操作已安全停止。"
+      printf '%s\n' "  处理：请让 Agent 重新检查当前状态后再试。"
+      ;;
+    *"Permission denied"*|*"permission denied"*|*"Operation not permitted"*)
+      printf '%s\n' "  原因：当前权限不足，未能完成工作区文件操作。"
+      printf '%s\n' "  处理：请检查工作区权限后重试。"
+      ;;
+    *)
+      printf '%s\n' "  原因：同步过程遇到未分类错误，已安全停止。"
+      printf '%s\n' "  处理：请让 Agent 检查私有诊断后重试。"
+      ;;
+  esac
 }
 
 sync_workspace_copy() {
@@ -1953,7 +1964,7 @@ link_force() {
   local target=$1 link=$2 actual
   guard_managed_directory_chain "$(dirname -- "$link")"
   if [ -e "$link" ] && [ ! -L "$link" ]; then
-    warn "已有文件未覆盖：$link"
+    warn "检测到已有文件，未覆盖。"
     record_agent_plan_conflict "已有普通文件，保留：$link"
     INSTALL_INCOMPLETE=1
     return 0
@@ -1963,7 +1974,7 @@ link_force() {
     if [ "$actual" = "$target" ]; then
       return 0
     fi
-    warn "已有链接指向其他位置，已保留：$link"
+    warn "检测到已有链接指向其他位置，已保留。"
     record_agent_plan_conflict "已有链接指向其他位置，保留：$link"
     INSTALL_INCOMPLETE=1
     return 0
@@ -1996,7 +2007,7 @@ remove_symlink_if_matches() {
       rm "$link"
     fi
   else
-    warn "链接目标与安装记录不一致，已保留：$link"
+    warn "链接目标与安装记录不一致，已保留。"
     record_agent_plan_conflict "链接目标与安装记录不一致，保留：$link"
     INSTALL_INCOMPLETE=1
   fi
@@ -2269,7 +2280,7 @@ install_kb_on_path() {
   if [ "$KB_SHORTCUT_CREATED" -eq 1 ] && path_on_path "$dir"; then
     KB_SHORTCUT_AVAILABLE=1
   elif [ "$KB_SHORTCUT_CREATED" -eq 1 ]; then
-    warn "kb 快捷入口已创建，但终端尚未搜索该目录：$dir"
+    warn "kb 快捷入口已创建，但终端尚未搜索它所在的目录。"
   fi
 }
 
@@ -2282,7 +2293,7 @@ uninstall_kb_on_path() {
   fi
   link="$dir/kb"
   if [ -e "$link" ] && [ ! -L "$link" ]; then
-    warn "kb 快捷入口不是安装器创建的链接，已保留：$link"
+    warn "kb 快捷入口不是安装器创建的链接，已保留。"
     record_agent_plan_conflict "kb 快捷入口是普通文件，保留：$link"
     INSTALL_INCOMPLETE=1
     return 0

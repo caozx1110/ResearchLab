@@ -1,4 +1,4 @@
 interface:
   display_name: "Paper Analyst"
-  short_description: "负责论文筛选、完整笔记、figure 提取与结构刷新"
-  default_prompt: "使用 $paper-analyst 对已有 paper unit 做 quick-screen、完整笔记脚手架、figure mention 提取、结构刷新，并保持 AI judgement 默认待人工确认。"
+  short_description: "负责论文按类型深读、完整笔记、figure 提取与结构刷新"
+  default_prompt: "使用 $paper-analyst 对已有 paper unit 直接准备按类型深读的完整笔记、提取 figure mention、刷新结构，并保持 AI judgement 默认待人工确认。"

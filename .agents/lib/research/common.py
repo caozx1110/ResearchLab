@@ -163,17 +163,19 @@ def add_project_root_argument(parser: Any) -> None:
 
 
 def print_resolved_project_roots(project_root: Path) -> None:
-    print(f"[root] project: {project_root.resolve()}")
-    print(f"[root] kb: {research_root(project_root).resolve()}")
+    """Compatibility hook for callers that used to expose resolved roots.
+
+    Root resolution is an internal diagnostic fact.  Keep the hook so owner
+    scripts do not need a flag day, but deliberately leave the public stream
+    untouched.
+    """
 
 
 def warn_if_cwd_differs_from_project_root(project_root: Path, *, command: str) -> None:
     cwd = Path.cwd().resolve()
     root = project_root.resolve()
     if cwd != root:
-        print(f"[warn] {command}: cwd differs from resolved project root")
-        print(f"[warn] cwd: {cwd}")
-        print(f"[warn] project root: {root}")
+        print("提示：当前目录与目标工作区不同；操作仍按已选择的工作区执行。")
 
 
 def research_root(project_root: Path) -> Path:

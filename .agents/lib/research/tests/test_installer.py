@@ -102,6 +102,8 @@ def test_agent_plan_lists_exact_targets_and_writes_nothing(tmp_path: Path) -> No
     assert result.returncode == 0, result.stdout + result.stderr
     assert "[dry-run]" not in result.stdout
     assert ".agents/skills/kb-cli/scripts/kb" not in result.stdout
+    assert str(workspace) not in result.stdout + result.stderr
+    assert str(plan_path) not in result.stdout + result.stderr
     assert len(result.stdout.splitlines()) <= 20
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
     assert plan["mode"] == "agent-plan"
@@ -1486,6 +1488,7 @@ def test_guided_dry_run_retries_invalid_choice_without_claiming_success(tmp_path
     assert "预计文件变更：" in output
     assert ".agents/skills/kb-cli/scripts/kb" not in output
     assert "[dry-run]" not in output
+    assert str(workspace) not in output
     assert ".claude/skills" not in output
     assert "\x1b[" not in output
     assert len(output.splitlines()) < 60
@@ -1510,6 +1513,7 @@ def test_guided_cancel_writes_nothing(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stdout
     assert "已取消，没有写入任何文件" in result.stdout
+    assert str(workspace) not in result.stdout
     assert not any(workspace.iterdir())
 
 
@@ -1560,7 +1564,7 @@ def test_shortcut_completion_explains_path_setup_when_not_on_path(tmp_path: Path
     assert "重新打开终端" in terminal_guidance
     assert "kb help" in terminal_guidance
     assert "终端可直接运行" not in terminal_guidance
-    assert str(workspace / "bin") in output
+    assert str(workspace / "bin") not in output
     assert (workspace / "bin" / "kb").is_symlink()
     for shell_config in (".zshrc", ".bashrc", ".profile"):
         assert not (tmp_path / "home" / shell_config).exists()
@@ -1583,7 +1587,8 @@ def test_external_install_prints_completion_without_bash_variable_error(tmp_path
 
     assert result.returncode == 0, result.stdout
     assert "安装完成" in result.stdout
-    assert f"工作区：{workspace}（独立工作区）" in result.stdout
+    assert "工作区：独立工作区" in result.stdout
+    assert str(workspace) not in result.stdout
     assert "unbound variable" not in result.stdout
     assert "copy-project" not in result.stdout
     assert "工作区文件已准备" in result.stdout
@@ -1670,10 +1675,12 @@ def test_noninteractive_copy_lifecycle_hides_sync_engine_output_and_preserves_se
 
     assert failed_update.returncode == 3
     assert "工作区文件操作失败。" in failed_update.stderr
-    assert "请让 Agent 结合以下输出检查后重试。" in failed_update.stderr
-    assert "同步器输出（最后 " in failed_update.stderr
-    tail_lines = [line for line in failed_update.stderr.splitlines() if line.startswith("  | ")]
-    assert 1 <= len(tail_lines) <= 8
+    assert "受管文件已被本地修改" in failed_update.stderr
+    assert "同步器输出" not in failed_update.stderr
+    assert "Traceback" not in failed_update.stderr
+    assert "\x1b[" not in failed_update.stderr
+    assert not re.search(r"\b[0-9a-f]{40,64}\b", failed_update.stderr)
+    assert "--force" not in failed_update.stderr
     assert str(_project_root()) not in failed_update.stderr
     assert str(workspace / ".agents") not in failed_update.stderr
     assert version_path.read_text(encoding="utf-8") == "locally drifted\n"

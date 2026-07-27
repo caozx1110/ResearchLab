@@ -2302,8 +2302,7 @@ def test_paper_complete_note_verify_checkpoints_without_optional_figures(tmp_pat
     paper_id = "p-checkpoint-optional"
     record = default_record("paper", title="Optional figure regression", maturity="lightweight")
     record["id"] = paper_id
-    record["status"] = "screened"
-    record["payload"]["quick_screen"]["paper_type"] = "method_system"
+    record["status"] = "source_ready"
     record_path = write_record(tmp_path, record)
     unit = record_path.parent
     source_text = (
@@ -2351,28 +2350,31 @@ def test_paper_complete_note_verify_checkpoints_without_optional_figures(tmp_pat
         auto_init=False,
         target_paths=[record_path, cache, fill_path],
     )
-    yaml_io.write_yaml_if_changed(
-        fill_path,
+    filled = paper.build_note_scaffold(record, chunks, "page", digest_chunks=1, digest_chars=1200)
+    filled["paper_type"] = "method_system"
+    filled["paper_type_reason"] = "The paper introduces and evaluates a concrete method."
+    filled["paper_type_evidence_refs"] = [
         {
-            "elements": [
-                {
-                    "element": element,
-                    "claim_type": paper.ELEMENT_CLAIM_TYPE[element],
-                    "content": f"Agent-authored {element} synthesis.",
-                    "evidence_refs": [
-                        {
-                            "source_unit_id": paper_id,
-                            "artifact": "parse-cache.yaml",
-                            "locator": "page=1",
-                            "quote": quote,
-                            "summary": f"Evidence for {element}.",
-                        }
-                    ],
-                }
-                for element, quote in quotes.items()
-            ]
-        },
-    )
+            "source_unit_id": paper_id,
+            "artifact": "parse-cache.yaml",
+            "locator": "page=1",
+            "quote": quotes["method"],
+            "summary": "The source describes the proposed mechanism.",
+        }
+    ]
+    for element in filled["element_sets"]["method_system"]:
+        name = element["element"]
+        element["content"] = f"Agent-authored {name} synthesis."
+        element["evidence_refs"] = [
+            {
+                "source_unit_id": paper_id,
+                "artifact": "parse-cache.yaml",
+                "locator": "page=1",
+                "quote": quotes[name],
+                "summary": f"Evidence for {name}.",
+            }
+        ]
+    yaml_io.write_yaml_if_changed(fill_path, filled)
     loaded = load_yaml(record_path)
     args = SimpleNamespace(
         phase="verify",

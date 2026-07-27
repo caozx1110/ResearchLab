@@ -95,7 +95,7 @@ ID_ARG_BY_KIND = {
     "experiment": "--experiment-id",
 }
 NEXT_COMMAND_BY_KIND = {
-    "paper": "screen",
+    "paper": "complete-note",
     "repo": "scan-structure",
     "dataset": "profile",
     # blog's old-flow `summarize` verb was renamed to the fillable `complete-note`
@@ -893,9 +893,12 @@ def main() -> int:
                 )
                 payload["initial_commit"] = bool(checkpoint.get("committed"))
                 payload["checkpoint"] = checkpoint
-        print(f"repo_path: {payload['repo_path']}")
-        print(f"created: {payload['created']}")
-        print(f"initial_commit: {payload['initial_commit']}")
+        if payload["created"]:
+            print("知识库版本记录已初始化。")
+        else:
+            print("知识库版本记录已经存在。")
+        if payload["initial_commit"]:
+            print("已保存初始版本。")
         return 0
     if args.command == "git-status":
         payload = kb_git_status(root)

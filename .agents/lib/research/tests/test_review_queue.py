@@ -105,7 +105,7 @@ def test_query_output_helpers_emit_runnable_command_with_real_id() -> None:
     next_command = kb.next_unit_command(record)
     confirm_command = kb.confirm_command(record)
 
-    assert ".agents/skills/paper-analyst/scripts/paper.py screen --paper-id p-query-123456" in next_command
+    assert ".agents/skills/paper-analyst/scripts/paper.py complete-note --paper-id p-query-123456" in next_command
     assert ".agents/skills/paper-analyst/scripts/paper.py confirm --paper-id p-query-123456" in confirm_command
     assert "<id>" not in next_command
     assert "<id>" not in confirm_command

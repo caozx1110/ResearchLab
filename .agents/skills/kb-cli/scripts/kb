@@ -73,6 +73,7 @@ from research.review_batches import (
 )
 from research.journal import committed_ops, current_operation_id, mutation_transaction
 from research.preference_selection import resolve_operation_preferences
+from research.prefs import effective_review_policy
 from research import updater
 from research.obsidian import obsidian_projection_status, update_obsidian_projection
 
@@ -226,7 +227,6 @@ REVIEW_KIND_ALIASES = {
 }
 LANG_CHOICES = ("zh", "en")
 AUTO_COMMIT_CHOICES = ("manual", "milestone", "aggressive")
-AUTO_SCREEN_CHOICES = ("true", "false")
 LINK_AUTODRIVE_CHOICES = ("ask_first", "auto_deep_read")
 DISCUSSION_STYLE_CHOICES = ("challenge", "refine", "adaptive")
 PERSONA_TERM_CHOICES = ("keep-en", "translate", "bilingual")
@@ -2347,6 +2347,13 @@ def handle_add(args: argparse.Namespace, root: Path) -> int:
     if unsafe_result is not None:
         return unsafe_result
     kind = args.kind or infer_add_kind(args.source, root)
+    try:
+        autonomy = load_runtime_preferences(root).get("autonomy", {})
+    except Exception:  # noqa: BLE001
+        autonomy = {}
+    link_autodrive = str(autonomy.get("link_autodrive") or "ask_first").strip().lower() if isinstance(autonomy, Mapping) else "ask_first"
+    if link_autodrive == "auto_deep_read":
+        return handle_ingest(args, root)
     snapshot_result = _remote_repo_snapshot_result(args.source, kind, verb="add")
     if snapshot_result is not None:
         return snapshot_result
@@ -2359,10 +2366,18 @@ def handle_add(args: argparse.Namespace, root: Path) -> int:
     if result.returncode != 0:
         print("资料未能加入知识库；详细诊断已保留给 Agent。", file=sys.stderr)
         return result.returncode
-    emitted = emit_public_output(result.stdout, root)
-    emitted = emit_public_output(result.stderr, root, error=True) or emitted
-    if not emitted:
-        print("资料已加入知识库。")
+    unit_id, _status = _extract_ingest_unit_id(result.stdout)
+    public_unit_id = _public_display_text(unit_id, root, "编号已隐藏", 100) if unit_id else ""
+    suffix = f"，条目编号是 {public_unit_id}" if public_unit_id else ""
+    print(f"资料已轻量加入知识库{suffix}。需要我现在继续深读吗？")
+    set_protocol_status("needs_user_input", unit_id=unit_id, source_kind=kind, link_autodrive="ask_first")
+    add_agent_action(
+        "ask_once_to_deep_read",
+        unit_id=unit_id,
+        source_kind=kind,
+        source=args.source,
+        next_verb="ingest",
+    )
     return 0
 
 
@@ -2370,21 +2385,21 @@ def handle_add(args: argparse.Namespace, root: Path) -> int:
 # ingest: chain the scriptable prefix of the ingestion pipeline (SSOT §7).      #
 #                                                                              #
 # `kb ingest <src>` runs intake add -> first analyzer prepare and STOPS there.  #
-# For papers that first prepare is screening: the session agent must verify the #
-# agent-authored paper_type before preparing the type-specific note. Scripts     #
-# never auto-run verify because they cannot fill understanding.                  #
+# Papers use one deep-read scaffold containing the agent-authored paper_type and #
+# its selected element branch. Scripts never auto-run verify because they cannot #
+# fill understanding.                                                            #
 # --------------------------------------------------------------------------- #
 
 # Governance ceiling for ingest safe auto-steps, mirroring research-orchestrator's
 # GOVERNANCE_MAX_AUTO_STEPS. runtime-preferences.autonomy.auto_execute_scope may
 # NARROW this but can never widen it; verify/confirm are never in the set.
-INGEST_GOVERNANCE_MAX_AUTO_STEPS = frozenset({"screen", "build-index", "refresh", "generate-note"})
+INGEST_GOVERNANCE_MAX_AUTO_STEPS = frozenset({"ingest", "build-index", "refresh", "generate-note"})
 
 # Ordered ingest chain: (step, gating scope token). intake landing is a
-# "screen"-class safe step; prepare (fillable skeleton) is a "generate-note"-class
+# "ingest"-class safe step; prepare (fillable skeleton) is a "generate-note"-class
 # safe step. Walk in order; a narrowed scope stops the chain at the first gap.
 INGEST_ANALYZER: dict[str, tuple[str, str, str]] = {
-    "paper": (".agents/skills/paper-analyst/scripts/paper.py", "screen", "--paper-id"),
+    "paper": (".agents/skills/paper-analyst/scripts/paper.py", "complete-note", "--paper-id"),
     "repo": (".agents/skills/repo-analyst/scripts/repo.py", "map-capability", "--repo-id"),
     "dataset": (".agents/skills/dataset-analyst/scripts/dataset.py", "profile", "--dataset-id"),
     "blog": (".agents/skills/blog-analyst/scripts/blog.py", "complete-note", "--blog-id"),
@@ -2419,7 +2434,7 @@ def _extract_ingest_unit_id(stdout: str) -> tuple[str, str]:
 
 
 _INGEST_FILL_ARTIFACTS = {
-    "paper": "screening.yaml",
+    "paper": "note-fill.yaml",
     "repo": "capability-fill.yaml",
     "dataset": "dataset-fill.yaml",
     "blog": "blog-fill.yaml",
@@ -2435,11 +2450,6 @@ def _duplicate_ingest_state(root: Path, kind: str, unit_id: str) -> tuple[str, P
     state = record_workflow_state(record)
     unit_root = path.parent
     fill_path = unit_root / _INGEST_FILL_ARTIFACTS[kind]
-    if kind == "paper":
-        screening = load_yaml(fill_path, default={}) if fill_path.exists() else {}
-        screening_status = str(screening.get("status") or "").strip().lower() if isinstance(screening, dict) else ""
-        if screening_status == "verified":
-            fill_path = unit_root / "note-fill.yaml"
     return state, fill_path
 
 
@@ -2458,8 +2468,6 @@ def _resume_duplicate_ingest(
     state, fill_path = _duplicate_ingest_state(root, kind, unit_id)
     relative_script, verb, id_flag = INGEST_ANALYZER[kind]
     if state in {"source_ready", "awaiting_agent_fill"} and fill_path is not None and not fill_path.exists():
-        if kind == "paper" and fill_path.name == "note-fill.yaml":
-            return False, (relative_script, "complete-note", id_flag)
         return False, (relative_script, verb, id_flag)
 
     if state == "ready_for_review":
@@ -2478,7 +2486,6 @@ def _resume_duplicate_ingest(
         return True, None
 
     if fill_path is not None and fill_path.exists():
-        next_verb = "complete-note" if kind == "paper" and fill_path.name == "note-fill.yaml" else verb
         print(f"知识条目 {public_unit_id} 已有待补全或待核验内容，现有填写已保留；Agent 会从当前阶段继续。")
         set_protocol_status("agent_action_required", unit_id=unit_id, source_kind=kind, workflow_state=state)
         add_agent_action(
@@ -2486,7 +2493,7 @@ def _resume_duplicate_ingest(
             unit_id=unit_id,
             source_kind=kind,
             owner=relative_script,
-            arguments=[next_verb, id_flag, unit_id, "--phase", "verify"],
+            arguments=[verb, id_flag, unit_id, "--phase", "verify"],
         )
         return True, None
 
@@ -2511,9 +2518,9 @@ def handle_ingest(args: argparse.Namespace, root: Path) -> int:
         return 2
     scope = effective_ingest_scope(root)
 
-    # Step 1: intake add (safe step gated by "screen") — the scriptable half before
+    # Step 1: intake add (safe step gated by "ingest") — the scriptable half before
     # the agent fills. RESEARCH_INGEST_CHAIN tells intake the chain auto-continues.
-    if "screen" not in scope:
+    if "ingest" not in scope:
         print("当前自动化偏好暂停了这次入库；如果你愿意，我可以继续。")
         set_protocol_status("paused_by_autonomy", source_kind=kind)
         add_agent_action(
@@ -2554,8 +2561,7 @@ def handle_ingest(args: argparse.Namespace, root: Path) -> int:
     # Step 2: analyzer prepare (safe step gated by "generate-note") — produces the
     # fillable skeleton. NEVER verify (a script cannot fill understanding).
     if "generate-note" not in scope:
-        paused_stage = "初筛准备" if kind == "paper" else "深读准备"
-        print(f"资料已入库为 {public_unit_id}；当前自动化偏好暂停了{paused_stage}。")
+        print(f"资料已入库为 {public_unit_id}；当前自动化偏好暂停了深读准备。")
         relative_script, verb, id_flag = INGEST_ANALYZER[kind]
         set_protocol_status("paused_by_autonomy", unit_id=unit_id, source_kind=kind)
         add_agent_action(
@@ -2573,57 +2579,35 @@ def handle_ingest(args: argparse.Namespace, root: Path) -> int:
         stream=False,
     )
     if prepare.returncode != 0:
-        failed_stage = "初筛准备" if kind == "paper" else "深读准备"
-        print(f"资料已入库，但{failed_stage}未完成；详细诊断已保留给 Agent。")
+        print("资料已入库，但深读准备未完成；详细诊断已保留给 Agent。")
         set_protocol_status("error", unit_id=unit_id, source_kind=kind, stage="prepare")
         return prepare.returncode
 
-    if kind == "paper" and verb == "screen":
+    if kind == "paper":
         print(
-            f"资料已入库并备好初筛骨架，条目编号是 {public_unit_id}。"
-            "Agent 接下来会先用逐字证据确定论文类型，再生成对应的深读笔记；需要判断时再请你拍板。"
-        )
-    elif kind == "paper":
-        print(
-            f"已有资料已备好类型专属深读骨架，条目编号是 {public_unit_id}。"
-            "Agent 接下来会补全逐字证据并校验；需要判断时再请你拍板。"
+            f"资料已入库并备好统一深读骨架，条目编号是 {public_unit_id}。"
+            "Agent 接下来会用逐字证据填写论文类型及对应五要素并校验；整份判断只在最后请你拍板。"
         )
     else:
         print(f"资料已入库并备好深读骨架，条目编号是 {public_unit_id}。Agent 接下来会补全逐字证据并校验；需要判断时再请你拍板。")
     verify_arguments = [verb, id_flag, unit_id, "--phase", "verify"]
-    if kind == "paper" and verb == "screen":
-        note_prepare_arguments = ["complete-note", id_flag, unit_id, "--phase", "prepare"]
-        note_verify_arguments = ["complete-note", id_flag, unit_id, "--phase", "verify"]
+    if kind == "paper":
         remaining_steps: list[dict[str, object]] = [
             {
-                "step": "fill_grounded_screening",
+                "step": "fill_grounded_paper_note",
                 "source": "parse_cache",
                 "requirements": [
                     "paper_type",
-                    "worth_deep_reading",
-                    "judgement_reason",
-                    "relevance_to_current_research",
-                    "verbatim_quote",
-                    "locator",
+                    "paper_type_reason",
+                    "paper_type_evidence_refs",
+                    "selected_type_elements",
+                    "element_evidence_refs",
                 ],
-            },
-            {"step": "verify_screening", "owner": relative_script, "arguments": verify_arguments},
-            {
-                "step": "prepare_type_specific_note",
-                "owner": relative_script,
-                "arguments": note_prepare_arguments,
-                "requires": "verified_screening",
-            },
-            {
-                "step": "fill_grounded_elements",
-                "source": "parse_cache",
-                "element_set_source": "verified_screening.paper_type_or_method_system_fallback",
-                "requirements": ["verbatim_quote", "locator"],
             },
             {
                 "step": "verify_note",
                 "owner": relative_script,
-                "arguments": note_verify_arguments,
+                "arguments": verify_arguments,
                 "includes_configured_post_note_actions": True,
             },
         ]
@@ -2654,13 +2638,6 @@ def handle_ingest(args: argparse.Namespace, root: Path) -> int:
     return 0
 
 
-def bool_text(value: object, default: str = "true") -> str:
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    text = str(value or "").strip().lower()
-    return text if text in AUTO_SCREEN_CHOICES else default
-
-
 def language_text(value: object, default: str = "zh") -> str:
     text = str(value or "").strip().lower()
     if text.startswith("zh"):
@@ -2673,7 +2650,6 @@ def language_text(value: object, default: str = "zh") -> str:
 def runtime_pref_defaults(root: Path) -> dict[str, object]:
     preferences = load_runtime_preferences(root)
     identity = preferences.get("identity", {}) if isinstance(preferences.get("identity"), dict) else {}
-    paper = preferences.get("paper", {}) if isinstance(preferences.get("paper"), dict) else {}
     versioning = preferences.get("versioning", {}) if isinstance(preferences.get("versioning"), dict) else {}
     autonomy = preferences.get("autonomy", {}) if isinstance(preferences.get("autonomy"), dict) else {}
     profile = load_yaml(config_root(root) / "user-profile.yaml", default={})
@@ -2718,7 +2694,6 @@ def runtime_pref_defaults(root: Path) -> dict[str, object]:
             "constraints": constraints,
         },
         "auto_commit": str(versioning.get("auto_commit_mode") or "milestone").strip().lower(),
-        "auto_screen": bool_text(paper.get("auto_screen_on_intake", True)),
         "link_autodrive": link_autodrive,
         "discussion_style": discussion_style,
     }
@@ -2735,10 +2710,6 @@ def public_init_defaults_summary(defaults: Mapping[str, object]) -> str:
         "milestone": "里程碑版本记录",
         "aggressive": "高频版本记录",
     }.get(str(defaults.get("auto_commit") or "").strip().lower(), "保留现有版本记录设置")
-    screening_label = {
-        "true": "论文自动初筛开启",
-        "false": "论文自动初筛关闭",
-    }.get(str(defaults.get("auto_screen") or "").strip().lower(), "保留现有论文初筛设置")
     autodrive_label = {
         "ask_first": "丢链接后先轻量入库再询问是否深读",
         "auto_deep_read": "丢链接后自动深读到待确认笔记",
@@ -2750,7 +2721,7 @@ def public_init_defaults_summary(defaults: Mapping[str, object]) -> str:
     }.get(str(defaults.get("discussion_style") or "").strip().lower(), "保留现有讨论风格")
     return (
         "选择“默认即可”会保留当前设置："
-        f"{language_label}、{commit_label}、{screening_label}、{autodrive_label}、{discussion_label}。"
+        f"{language_label}、{commit_label}、{autodrive_label}、{discussion_label}。"
     )
 
 
@@ -2810,12 +2781,11 @@ def _append_runtime_update(
         commands.append(config_set_runtime_pref_command(section, key, str(value)))
 
 
-def build_init_pref_commands(*, name: str, lang: str, auto_commit: str, auto_screen: str) -> list[tuple[str, Sequence[str]]]:
+def build_init_pref_commands(*, name: str, lang: str, auto_commit: str) -> list[tuple[str, Sequence[str]]]:
     return [
         config_set_runtime_pref_command("identity", "default_confirmed_by", name),
         config_set_profile_command("preferences.language_preference", lang),
         config_set_runtime_pref_command("versioning", "auto_commit_mode", auto_commit),
-        config_set_runtime_pref_command("paper", "auto_screen_on_intake", auto_screen),
     ]
 
 
@@ -2834,7 +2804,6 @@ def build_headless_init_pref_commands(
         args.name is None
         and args.lang is None
         and args.auto_commit is None
-        and args.auto_screen is None
         and getattr(args, "auto_ingest_mode", None) is None
         and getattr(args, "discussion_style", None) is None
         and getattr(args, "quick_resource", None) is None
@@ -2856,8 +2825,6 @@ def build_headless_init_pref_commands(
         _append_profile_update(commands, profile, "preferences.language_preference", args.lang)
     if args.auto_commit is not None:
         _append_runtime_update(commands, preferences, "versioning", "auto_commit_mode", args.auto_commit)
-    if args.auto_screen is not None:
-        _append_runtime_update(commands, preferences, "paper", "auto_screen_on_intake", args.auto_screen)
     # Both interaction fields share research-config-manager's canonical
     # `set-interaction` write path (I4): autonomy.link_autodrive lives in the
     # runtime preferences, personalization.discussion_style in the profile.
@@ -3169,9 +3136,10 @@ _PUBLIC_CLAIM_TYPE_LABELS = {
     "user_opinion": "用户观点",
 }
 
-_PUBLIC_REVIEW_LIMIT = 3
+_LEGACY_PUBLIC_REVIEW_LIMIT = 3
+_PUBLIC_REVIEW_ABSOLUTE_MAX = 20
 _REVIEW_SNAPSHOT_SCHEMA = "kb-review-snapshot/v2"
-_REVIEW_SNAPSHOT_TTL_SECONDS = 24 * 60 * 60
+_LEGACY_REVIEW_SNAPSHOT_TTL_SECONDS = 24 * 60 * 60
 _REVIEW_SNAPSHOT_TOMBSTONE_GRACE_SECONDS = 24 * 60 * 60
 _REVIEW_SNAPSHOT_GC_SCAN_LIMIT = 256
 _REVIEW_SNAPSHOT_TOKEN_RE = re.compile(r"[0-9a-f]{32}")
@@ -3200,6 +3168,9 @@ class ReviewSnapshotLease:
     protocol_relative_path: str
     review_items: tuple[dict[str, object], ...]
     registry_path: Path
+    governance_profile: str
+    item_limit: int
+    ttl_seconds: int
 
 
 def _review_card_record(card: Mapping[str, object], *, title: str = "") -> dict[str, object]:
@@ -3524,7 +3495,11 @@ def public_review_projection(record: dict, root: Path) -> dict[str, object]:
     }
 
 
-def review_display_preference_context(review_items: Sequence[Mapping[str, object]]) -> dict[str, object]:
+def review_display_preference_context(
+    review_items: Sequence[Mapping[str, object]],
+    *,
+    hard_display_cap: int,
+) -> dict[str, object]:
     """Canonical, content-bound inputs for the optional review display receipt."""
     serialized = json.dumps(
         list(review_items),
@@ -3535,7 +3510,7 @@ def review_display_preference_context(review_items: Sequence[Mapping[str, object
     return {
         "review_snapshot_digest": hashlib.sha256(serialized).hexdigest(),
         "displayed_count": len(review_items),
-        "hard_display_cap": _PUBLIC_REVIEW_LIMIT,
+        "hard_display_cap": hard_display_cap,
     }
 
 
@@ -3829,6 +3804,8 @@ def _store_review_snapshot(
     root: Path,
     protocol_name: str,
     items: Sequence[Mapping[str, object]],
+    *,
+    policy: Mapping[str, object],
 ) -> str:
     protocol_path = agent_protocol_path(root, protocol_name)
     paths = _review_snapshot_paths(root)
@@ -3838,13 +3815,35 @@ def _store_review_snapshot(
     token = uuid.uuid4().hex
     path = snapshot_root / f"{token}.json"
     now = _review_now_epoch()
+    profile = str(policy.get("governance_profile") or "")
+    item_limit = int(policy.get("item_limit") or 0)
+    ttl_seconds = int(policy.get("ttl_seconds") or 0)
+    if (
+        profile not in {"personal", "strict"}
+        or item_limit < 1
+        or item_limit > _PUBLIC_REVIEW_ABSOLUTE_MAX
+        or ttl_seconds < 60 * 60
+        or ttl_seconds > 168 * 60 * 60
+        or not items
+        or len(items) > item_limit
+        or (profile == "personal" and item_limit < 4)
+    ):
+        raise ReviewSnapshotError("tampered_or_unknown", "effective review policy is invalid")
+    if profile == "strict" and (
+        item_limit != _LEGACY_PUBLIC_REVIEW_LIMIT
+        or ttl_seconds != _LEGACY_REVIEW_SNAPSHOT_TTL_SECONDS
+    ):
+        raise ReviewSnapshotError("tampered_or_unknown", "strict review policy was weakened")
     payload = {
         "schema": _REVIEW_SNAPSHOT_SCHEMA,
         "created_at": _review_timestamp(now),
-        "expires_at": _review_timestamp(now + _REVIEW_SNAPSHOT_TTL_SECONDS),
+        "expires_at": _review_timestamp(now + ttl_seconds),
         "status": "unused",
         "protocol_path": protocol_path.relative_to(runtime_root).as_posix(),
         "review_items": [dict(item) for item in items],
+        "governance_profile": profile,
+        "item_limit": item_limit,
+        "ttl_seconds": ttl_seconds,
     }
     with exclusive_file_lock(lock_path):
         _gc_review_snapshots_locked(snapshot_root, now=now)
@@ -3871,8 +3870,38 @@ def _load_review_snapshot(root: Path, requested: str) -> ReviewSnapshotLease:
     apply_contract = present.get("apply") if isinstance(present, dict) else None
     apply_contract = apply_contract if isinstance(apply_contract, dict) else {}
     token = str(apply_contract.get("snapshot_token") or "")
-    if not isinstance(items, list) or not items or len(items) > _PUBLIC_REVIEW_LIMIT:
+    protocol_profile = str(apply_contract.get("governance_profile") or "strict")
+    try:
+        protocol_item_limit = int(
+            apply_contract.get("max_decisions_per_apply")
+            if "max_decisions_per_apply" in apply_contract
+            else _LEGACY_PUBLIC_REVIEW_LIMIT
+        )
+        protocol_ttl_seconds = int(
+            apply_contract.get("ttl_seconds")
+            if "ttl_seconds" in apply_contract
+            else _LEGACY_REVIEW_SNAPSHOT_TTL_SECONDS
+        )
+    except (TypeError, ValueError) as exc:
+        raise ReviewSnapshotError("tampered_or_unknown", "review snapshot policy is invalid") from exc
+    if (
+        protocol_profile not in {"personal", "strict"}
+        or protocol_item_limit < 1
+        or protocol_item_limit > _PUBLIC_REVIEW_ABSOLUTE_MAX
+        or protocol_ttl_seconds < 60 * 60
+        or protocol_ttl_seconds > 168 * 60 * 60
+        or not isinstance(items, list)
+        or not items
+        or len(items) > protocol_item_limit
+    ):
         raise ReviewSnapshotError("tampered_or_unknown", "review snapshot has no displayed decision items")
+    if protocol_profile == "strict" and (
+        protocol_item_limit != _LEGACY_PUBLIC_REVIEW_LIMIT
+        or protocol_ttl_seconds != _LEGACY_REVIEW_SNAPSHOT_TTL_SECONDS
+    ):
+        raise ReviewSnapshotError("tampered_or_unknown", "strict review snapshot policy is invalid")
+    if protocol_profile == "personal" and protocol_item_limit < 4:
+        raise ReviewSnapshotError("tampered_or_unknown", "personal review snapshot item limit is invalid")
     normalized = [dict(item) for item in items if isinstance(item, dict)]
     refs = [_review_subject_ref(item.get("subject", {})) for item in normalized]
     if len(normalized) != len(items) or len(set(refs)) != len(refs) or any(ref == ":" for ref in refs):
@@ -3900,16 +3929,37 @@ def _load_review_snapshot(root: Path, requested: str) -> ReviewSnapshotLease:
         if now >= expires_at:
             raise ReviewSnapshotError("expired", "review snapshot token expired")
         protocol_relative_path = path.relative_to(runtime_root).as_posix()
+        stored_profile = str(stored.get("governance_profile") or "strict")
+        try:
+            stored_item_limit = int(stored.get("item_limit", _LEGACY_PUBLIC_REVIEW_LIMIT))
+            stored_ttl_seconds = int(stored.get("ttl_seconds", _LEGACY_REVIEW_SNAPSHOT_TTL_SECONDS))
+        except (TypeError, ValueError) as exc:
+            raise ReviewSnapshotError("tampered_or_unknown", "stored review policy is invalid") from exc
         if (
             stored.get("protocol_path") != protocol_relative_path
             or stored.get("review_items") != normalized
+            or stored_profile != protocol_profile
+            or stored_item_limit != protocol_item_limit
+            or stored_ttl_seconds != protocol_ttl_seconds
+            or stored_item_limit < len(normalized)
+            or stored_item_limit > _PUBLIC_REVIEW_ABSOLUTE_MAX
         ):
             raise ReviewSnapshotError("tampered_or_unknown", "review snapshot does not match the displayed one-time decision set")
+        if stored_profile == "strict" and (
+            stored_item_limit != _LEGACY_PUBLIC_REVIEW_LIMIT
+            or stored_ttl_seconds != _LEGACY_REVIEW_SNAPSHOT_TTL_SECONDS
+        ):
+            raise ReviewSnapshotError("tampered_or_unknown", "strict review snapshot policy is invalid")
+        if stored_profile == "personal" and stored_item_limit < 4:
+            raise ReviewSnapshotError("tampered_or_unknown", "personal review snapshot item limit is invalid")
     return ReviewSnapshotLease(
         token=token,
         protocol_relative_path=protocol_relative_path,
         review_items=tuple(normalized),
         registry_path=stored_path,
+        governance_profile=stored_profile,
+        item_limit=stored_item_limit,
+        ttl_seconds=stored_ttl_seconds,
     )
 
 
@@ -3939,9 +3989,17 @@ def _consume_review_snapshot(root: Path, lease: ReviewSnapshotLease) -> Path:
             raise ReviewSnapshotError("tampered_or_unknown", "review snapshot lifecycle is invalid")
         if now >= expires_at:
             raise ReviewSnapshotError("expired", "review snapshot token expired")
+        try:
+            stored_item_limit = int(stored.get("item_limit", _LEGACY_PUBLIC_REVIEW_LIMIT))
+            stored_ttl_seconds = int(stored.get("ttl_seconds", _LEGACY_REVIEW_SNAPSHOT_TTL_SECONDS))
+        except (TypeError, ValueError) as exc:
+            raise ReviewSnapshotError("tampered_or_unknown", "stored review policy is invalid") from exc
         if (
             stored.get("protocol_path") != lease.protocol_relative_path
             or stored.get("review_items") != list(lease.review_items)
+            or str(stored.get("governance_profile") or "strict") != lease.governance_profile
+            or stored_item_limit != lease.item_limit
+            or stored_ttl_seconds != lease.ttl_seconds
         ):
             raise ReviewSnapshotError("tampered_or_unknown", "review snapshot changed during apply")
         consumed = dict(stored)
@@ -4636,11 +4694,11 @@ def handle_review_apply(args: argparse.Namespace, root: Path) -> int:
         reject_refs = [str(item) for item in args.reject_ref]
         defer_refs = [str(item) for item in args.defer_ref]
         requested = [*confirm_refs, *reject_refs, *defer_refs]
-        if not requested or len(requested) > _PUBLIC_REVIEW_LIMIT or len(set(requested)) != len(requested):
+        if not requested or len(requested) > lease.item_limit or len(set(requested)) != len(requested):
             raise ReviewSnapshotError("invalid_decision", "review decisions are empty or duplicated")
         outside = sorted(set(requested) - set(snapshot_by_ref))
         if outside:
-            raise ReviewSnapshotError("invalid_decision", "review decision is outside the displayed Top 3 snapshot")
+            raise ReviewSnapshotError("invalid_decision", "review decision is outside the displayed snapshot")
         selected_decisions = {
             **{ref: "confirm" for ref in confirm_refs},
             **{ref: "reject" for ref in reject_refs},
@@ -4799,7 +4857,18 @@ def handle_review(args: argparse.Namespace, root: Path) -> int:
     blocked = [*structurally_blocked, *unsafe_blocked]
     if pending:
         pending.sort(key=_review_sort_key)
-        displayed = pending[:_PUBLIC_REVIEW_LIMIT]
+        try:
+            review_policy = effective_review_policy(root)
+        except (OSError, TypeError, ValueError):
+            review_policy = {
+                "governance_profile": "strict",
+                "item_limit": _LEGACY_PUBLIC_REVIEW_LIMIT,
+                "card_ttl_hours": 24,
+                "ttl_seconds": _LEGACY_REVIEW_SNAPSHOT_TTL_SECONDS,
+                "absolute_max_items": _PUBLIC_REVIEW_ABSOLUTE_MAX,
+            }
+        review_limit = int(review_policy["item_limit"])
+        displayed = pending[:review_limit]
         remaining_count = len(pending) - len(displayed)
         displayed_ids = [str(record.get("id") or "") for record in displayed]
         configured_actor = default_confirmed_by(root)
@@ -4814,7 +4883,10 @@ def handle_review(args: argparse.Namespace, root: Path) -> int:
             )
             for record in displayed
         ]
-        preference_task_context = review_display_preference_context(review_items)
+        preference_task_context = review_display_preference_context(
+            review_items,
+            hard_display_cap=review_limit,
+        )
         try:
             effective_preferences = resolve_operation_preferences(
                 root,
@@ -4854,6 +4926,7 @@ def handle_review(args: argparse.Namespace, root: Path) -> int:
             root,
             str(getattr(args, "agent_protocol", "") or ""),
             review_items,
+            policy=review_policy,
         ) if _ACTIVE_PROTOCOL is not None else ""
         obsidian_batch: dict[str, object] | None = None
         if bool(getattr(args, "obsidian_export", False)):
@@ -4874,6 +4947,7 @@ def handle_review(args: argparse.Namespace, root: Path) -> int:
                         )
                         for record in displayed
                     ],
+                    item_limit=review_limit,
                 )
             except ReviewBatchError as exc:
                 set_protocol_status("agent_action_required", review_apply_error=exc.code)
@@ -4896,14 +4970,16 @@ def handle_review(args: argparse.Namespace, root: Path) -> int:
                 "neutral_without_selection": True,
                 "display_density": density,
                 "allowed_effect": "explanation-density-only",
-                "hard_display_cap": _PUBLIC_REVIEW_LIMIT,
+                "hard_display_cap": review_limit,
             },
             apply={
                 "verb": "review",
                 "mode": "snapshot-bound",
                 "snapshot_protocol": str(getattr(args, "agent_protocol", "") or ""),
                 "scope": "displayed_review_items_only",
-                "max_decisions_per_apply": _PUBLIC_REVIEW_LIMIT,
+                "max_decisions_per_apply": review_limit,
+                "governance_profile": str(review_policy["governance_profile"]),
+                "ttl_seconds": int(review_policy["ttl_seconds"]),
                 "snapshot_token": snapshot_token,
             },
         )
@@ -4946,7 +5022,11 @@ def handle_review(args: argparse.Namespace, root: Path) -> int:
             )
         if remaining_count:
             print(f"另有 {remaining_count} 条已准备好的内容暂未展开；处理这批后可继续查看。")
-        print("以上待确认内容已经过当前流程核验；请回到 Agent 对话，用自然语言一次确认、拒绝或暂缓最多 3 项。在你拍板前不会写成已确认结论。")
+        print(
+            "以上待确认内容已经过当前流程核验；请回到 Agent 对话，"
+            f"用自然语言一次确认、拒绝或暂缓最多 {review_limit} 项。"
+            "在你拍板前不会写成已确认结论。"
+        )
         if obsidian_batch is not None:
             print("已在 Obsidian 的人工批注区生成可编辑待确认表；勾选后请回到对话中要求 Agent 同步。")
         if confirmation_identity_required:
@@ -5066,7 +5146,6 @@ def register_init(subparsers: argparse._SubParsersAction[argparse.ArgumentParser
     parser.add_argument("--name", help=argparse.SUPPRESS)
     parser.add_argument("--lang", choices=LANG_CHOICES, help=argparse.SUPPRESS)
     parser.add_argument("--auto-commit", choices=AUTO_COMMIT_CHOICES, help=argparse.SUPPRESS)
-    parser.add_argument("--auto-screen", choices=AUTO_SCREEN_CHOICES, help=argparse.SUPPRESS)
     parser.add_argument(
         "--auto-ingest-mode",
         dest="auto_ingest_mode",

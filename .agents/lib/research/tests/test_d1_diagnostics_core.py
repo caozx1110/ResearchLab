@@ -159,6 +159,67 @@ def test_automatic_capture_respects_off_but_explicit_capture_does_not(tmp_path: 
     assert automatic["source_commit"] == "9dcd1ad6134e7700fbfe641d938dae6958af71f4"
 
 
+def test_personal_automatic_capture_keeps_only_normalized_mechanical_fields_and_export_strips_them(
+    tmp_path: Path,
+) -> None:
+    root = _workspace(tmp_path)
+    write_runtime_preferences(
+        root,
+        {
+            "governance_profile": "personal",
+            "diagnostics": {"mode": "errors-only"},
+        },
+    )
+
+    automatic = capture_runtime_failure(
+        root,
+        skill="Paper Analyst /private/owner",
+        operation="VERIFY /Users/alice/private.pdf",
+        returncode=17,
+        public_summary="Failed at /Users/alice/private.pdf with token=top-secret",
+    )
+    assert automatic is not None
+    assert automatic["category"] == "runtime-failure"
+    assert automatic["owner"] == "unknown-skill"
+    assert automatic["operation"] == "unknown-operation"
+    assert automatic["return_code"] == 17
+    serialized = diagnostics_path(root).read_text(encoding="utf-8").lower()
+    assert "/users/alice" not in serialized
+    assert "alice" not in serialized
+    assert "top-secret" not in serialized
+
+    explicit, _created = _record(root, "Explicit issue remains fully redacted.")
+    assert "owner" not in explicit
+    assert "operation" not in explicit
+    assert "return_code" not in explicit
+
+    preview = export_diagnostic_preview(root, authorized=True)
+    assert all("owner" not in issue and "operation" not in issue and "return_code" not in issue for issue in preview["issues"])
+
+
+def test_strict_automatic_capture_preserves_existing_redacted_shape(tmp_path: Path) -> None:
+    root = _workspace(tmp_path)
+    write_runtime_preferences(
+        root,
+        {
+            "governance_profile": "strict",
+            "diagnostics": {"mode": "errors-only"},
+        },
+    )
+
+    issue = capture_runtime_failure(
+        root,
+        skill="paper-analyst",
+        operation="verify",
+        returncode=2,
+        public_summary="Knowledge operation failed.",
+    )
+    assert issue is not None
+    assert "owner" not in issue
+    assert "operation" not in issue
+    assert "return_code" not in issue
+
+
 def test_redaction_removes_paths_secrets_env_tracebacks_and_control_text(tmp_path: Path) -> None:
     root = _workspace(tmp_path)
     unsafe = (

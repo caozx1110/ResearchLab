@@ -25,11 +25,11 @@ The user interacts through exactly two surfaces: natural language and the sixtee
 
 - Never show raw interpreter commands, internal flags, environment substitutions, internal script paths, absolute workspace paths, or agent-only next-step markers.
 - Run internal owner steps yourself. Translate their result into a concise outcome and a natural-language next step.
-- Setup and choices are conversational. `kb init` first makes the KB usable, then offers “现在设置”（推荐）or “先跳过” when a real human signature is missing; never jump straight to asking for a name. Deferring adds or overwrites no preference or sentinel and does not block ingestion, search, or analysis. If the user configures now, ask once for human signature, language and terminology style, research focus, and resources or important constraints; show the current versioning and paper-screening defaults, accept “默认即可”, then persist headlessly. Low-frequency preferences remain progressive, and a missing signature is requested again only before the first confirmation is applied.
+- Setup and choices are conversational. `kb init` first makes the KB usable, then offers “现在设置”（推荐）or “先跳过” when a real human signature is missing; never jump straight to asking for a name. Deferring adds or overwrites no preference or sentinel and does not block ingestion, search, or analysis. If the user configures now, ask once for human signature, language and terminology style, research focus, and resources or important constraints; show the current versioning, link-autodrive, and discussion-style defaults, accept “默认即可”, then persist headlessly. Low-frequency preferences remain progressive, and a missing signature is requested again only before the first confirmation is applied.
 - For quick setup, execute the private protocol's `apply.field_inputs` mapping exactly; never invent a dotted profile key. The canonical resource input preserves existing resource keys, and the repeatable constraint input appends and deduplicates rather than replacing prior constraints. Keep legacy inputs compatible, but do not use them in place of the canonical quick-setup mapping.
 - `kb review` behaves identically from a terminal, pipe, or agent call. Ask the user to confirm or reject in natural language; never solicit input from a script.
-- A review card is a one-time snapshot of the displayed content and expires after 24 hours. If it is already applied, expired, stale, or invalid, explain the matching recovery action in natural language. After content changes, run review again and show the new substance before accepting a decision; after success, name the sanitized subject and whether it was confirmed or rejected.
-- When the user wants to decide several review items in Obsidian, export the current Top-3 to the human-owned annotations sheet. Managed Bases remain read-only. Treat checked boxes only as a draft: in the later conversation, restate all confirm/reject/defer choices and obtain current-message authorization before applying confirmations. Apply the whole cross-owner batch atomically; any stale item or owner failure leaves every item and both one-time snapshots unused.
+- A review card is a one-time snapshot of the displayed content. Strict workspaces use 3 items and 24 hours; personal workspaces default to 10 items and use their bounded configured expiry. The effective profile, limit, and expiry are frozen into the snapshot. If it is already applied, expired, stale, or invalid, explain the matching recovery action in natural language. After content changes, run review again and show the new substance before accepting a decision; after success, name the sanitized subject and whether it was confirmed or rejected.
+- When the user wants to decide several review items in Obsidian, export the current governance-bound batch to the human-owned annotations sheet. Managed Bases remain read-only. Treat checked boxes only as a draft: in the later conversation, restate all confirm/reject/defer choices and obtain current-message authorization before applying confirmations. Apply the whole cross-owner batch atomically; any stale item or owner failure leaves every item and both one-time snapshots unused.
 - Empty and edge states stay natural. When there is no material yet, invite the user to send a paper, repository, dataset, article, or local file.
 - Structured owner output is an agent-only protocol. Request it explicitly, keep it under `kb/.runtime/`, and never relay its command arguments or diagnostics to the user.
 
@@ -48,16 +48,18 @@ The user interacts through exactly two surfaces: natural language and the sixtee
 When the user asks to ingest a paper, repository, dataset, or article—or accepts an ingestion suggestion—drive the safe pipeline to a grounded knowledge unit in the same turn:
 
 1. create the lightweight unit, preserve the original bytes, and materialize the full Markdown reading view plus its source map and local assets;
-2. for a paper, prepare and fill the screening structure, then verify the agent-authored `paper_type` before any full-note scaffold is created;
-3. prepare the analysis structure selected by that verified type;
-4. read the derived evidence and fill each required element with a short verbatim quote plus locator;
-5. verify every quote and substantive field, correcting only from source evidence;
+2. for a paper, prepare one unified deep-read scaffold containing blank `paper_type`, classification evidence, and all three type branches;
+3. read the derived evidence and fill the explicit paper type plus only its corresponding five-element branch;
+4. attach a short verbatim quote plus locator to the type judgement and every required element;
+5. verify the type and selected branch together, correcting only from source evidence;
 6. run safe paper refresh steps when the configured runtime supports them;
-7. present the resulting judgements for human confirmation.
+7. present the complete resulting judgement once for human confirmation.
 
 Scripts move material, create fillable structures, and verify evidence. Understanding comes from the runtime agent. Never invent a judgement from an unfilled scaffold, and never fabricate a quote to pass verification.
 
 Stop only at the two governance gates: confirmation of an AI judgement and a genuine user decision such as choosing an idea, approving a baseline, or resolving ambiguity. Respect the configured autonomy ceiling; everything permitted below it should continue without making the user drive the pipeline step by step.
+
+For a dropped link, consume `runtime.autonomy.link_autodrive`: `ask_first` means lightweight intake plus one batched question about deep reading; `auto_deep_read` means continue the same pipeline automatically to the final confirmation gate. Never recreate a quick-screen or “worth reading” confirmation step.
 
 ## Confirmation and review
 

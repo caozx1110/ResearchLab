@@ -20,7 +20,7 @@ description: 管理 core 研究系统配置，包括资源画像、语言偏好�
 3. 显式维护 topic / tag taxonomy seed 与 candidate pool policy。
 4. 让其他 skills 可以稳定读取统一配置。
 5. 管理 `kb` 独立仓库的 versioning 策略，例如 `manual | milestone | aggressive`。
-6. 给用户解释 paper intake 的默认模式，并提供可直接复制的配置修改命令。
+6. 管理链接自动化档位与讨论风格；论文 quick-screen 配置已经退役。
 7. 管理本地可选诊断策略：workspace `off|errors-only|developer`、逐 skill override、任务 token/issue 上限与 dedup/cooldown；`local_only=true` 不可关闭。
 8. 为具体任务生成分层偏好视图：本 skill 保持总偏好唯一事实源，规则只筛出目标 skill/operation 有资格看到的字段，runtime Agent 再选择本次真正相关的子集并记录理由。
 
@@ -39,7 +39,7 @@ description: 管理 core 研究系统配置，包括资源画像、语言偏好�
 
 `kb init` 先完成可立即使用的 KB 结构，再由 Agent 提供“现在设置”（推荐）或“先跳过”。选择先跳过后不追加或覆盖任何偏好（不产生额外偏好写入），不写 sentinel，不把 Agent 名称当署名，也不制造确认记录；后续用户说“补充我的研究偏好”或再次使用 `kb init` 时继续即可。
 
-用户选择现在设置时，只在一个紧凑回合收集四类高价值信息：真实署名、语言与术语风格、研究方向、资源与重要约束。显示当前版本记录节奏与论文自动初筛值，并允许用户回答“默认即可”。报告风格、协作边界、开发者诊断等低频项按需渐进补充，不塞进首次问卷。
+用户选择现在设置时，只在一个紧凑回合收集真实署名、语言与术语风格、研究方向、资源与重要约束，并显示当前版本记录节奏、链接自动化档位与讨论风格，允许用户回答“默认即可”。报告风格、协作边界、开发者诊断等低频项按需渐进补充，不塞进首次问卷。
 
 Agent 必须遵循 init private protocol 的逐字段 input mapping，不自行选择 dotted key。I1 的自然语言资源保存到 profile 顶层 `resources.quick_setup`，保留 `resources` 下已有键，让 method design 等既有消费者可直接读取；重要约束追加并去重到顶层 `constraints` 列表，不覆盖已有项。研究方向与术语风格继续写 canonical personalization 字段；旧 alternate/persona resource 路径只兼容读取或旧调用，不作为新快速设置写入目标。
 

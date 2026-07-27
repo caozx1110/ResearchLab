@@ -455,8 +455,8 @@ def test_installed_copy_repeated_init_preserves_preferences_and_tree(tmp_path: P
             "en",
             "--auto-commit",
             "manual",
-            "--auto-screen",
-            "false",
+            "--auto-ingest-mode",
+            "auto_deep_read",
             "--persona-focus",
             "VLA",
             "--persona-term",
@@ -508,7 +508,7 @@ def test_installed_copy_repeated_init_preserves_preferences_and_tree(tmp_path: P
 
     runtime_path = workspace / "kb" / "config" / "runtime-preferences.yaml"
     runtime = yaml.safe_load(runtime_path.read_text(encoding="utf-8"))
-    runtime["autonomy"]["auto_execute_scope"] = ["screen"]
+    runtime["autonomy"]["auto_execute_scope"] = ["ingest"]
     runtime_path.write_text(
         yaml.safe_dump(runtime, allow_unicode=True, sort_keys=False),
         encoding="utf-8",
@@ -534,9 +534,10 @@ def test_installed_copy_repeated_init_preserves_preferences_and_tree(tmp_path: P
         (workspace / "kb" / "config" / "user-profile.yaml").read_text(encoding="utf-8")
     )
     assert runtime_after["identity"]["default_confirmed_by"] == "Installed Researcher"
-    assert runtime_after["paper"]["auto_screen_on_intake"] is False
+    assert "auto_screen_on_intake" not in runtime_after["paper"]
+    assert runtime_after["autonomy"]["link_autodrive"] == "auto_deep_read"
     assert runtime_after["versioning"]["auto_commit_mode"] == "manual"
-    assert runtime_after["autonomy"]["auto_execute_scope"] == ["screen"]
+    assert runtime_after["autonomy"]["auto_execute_scope"] == ["ingest"]
     assert profile_after["preferences"]["language_preference"] == "en"
     assert profile_after["personalization"]["research_focus"] == "VLA"
     assert profile_after["personalization"]["term_style"] == "bilingual"

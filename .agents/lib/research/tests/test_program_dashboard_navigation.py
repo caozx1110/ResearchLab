@@ -764,6 +764,40 @@ def test_orchestrator_dashboard_detects_loose_unscreened_unit(tmp_path: Path) ->
     assert "--paper-id" not in dashboard
 
 
+def test_orchestrator_routes_new_paper_directly_to_unified_deep_read(tmp_path: Path) -> None:
+    orchestrate = _load_script("research-orchestrator", "orchestrate.py", "orchestrator_direct_deep_read")
+    root = _make_workspace(tmp_path)
+    write_yaml_if_changed(
+        record_path(root, "paper", "p-direct-123456"),
+        {
+            "id": "p-direct-123456",
+            "kind": "paper",
+            "title": "Direct Deep Read",
+            "status": "source_ready",
+            "maturity": "lightweight",
+            "confirmation_status": "auto_confirmed",
+            "needs_human_confirmation": False,
+            "information_types": ["fact"],
+            "summary": "",
+            "tags": [],
+            "topics": [],
+            "candidate_pools": [],
+            "source": {"original_uri": "", "file_hash": ""},
+            "payload": {
+                "deep_read": {"paper_type": ""},
+                "state": {"full_note_status": "not_started"},
+            },
+        },
+    )
+
+    step = orchestrate.safe_unit_step(load_yaml(record_path(root, "paper", "p-direct-123456")))
+
+    assert step is not None
+    assert step["step_type"] == "generate-note"
+    assert step["command_parts"][2] == "complete-note"
+    assert "screen" not in step["command_parts"]
+
+
 def test_orchestrator_auto_requires_agent_portfolio_decision_for_loose_unit(tmp_path: Path) -> None:
     orchestrate = _load_script("research-orchestrator", "orchestrate.py", "orchestrator_script_for_auto_plan")
     root = _make_workspace(tmp_path)

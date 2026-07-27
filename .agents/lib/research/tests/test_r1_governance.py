@@ -515,9 +515,6 @@ def test_r1_analyzer_command_failure_rolls_back_record_and_artifacts(
     if skill == "paper":
         cache = path.parent / "parse-cache.yaml"
         write_yaml_if_changed(cache, {"paper_id": record["id"], "chunks": [{"label": "page-1", "text": "source"}]})
-        # This test targets rollback after an injected index failure, so satisfy
-        # the independent screening-first gate before entering note prepare.
-        loaded["payload"]["quick_screen"]["paper_type"] = "method_system"
         args = SimpleNamespace(phase="prepare", mode="scaffold", input="", paper_id=record["id"])
         call = lambda: module._run_complete_note(args, tmp_path, loaded, path.parent, cache, [{"label": "page-1", "text": "source"}], {}, False)
         artifact = path.parent / "note-fill.yaml"

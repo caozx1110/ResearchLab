@@ -43,7 +43,13 @@ from research.prefs import (
     DIAGNOSTIC_MODES,
     DIAGNOSTIC_SKILL_MODES,
     DISCUSSION_STYLES,
+    GOVERNANCE_PROFILES,
     LINK_AUTODRIVE_MODES,
+    MAX_REVIEW_CARD_TTL_HOURS,
+    MAX_REVIEW_ITEM_LIMIT,
+    MIN_PERSONAL_REVIEW_ITEM_LIMIT,
+    MIN_REVIEW_CARD_TTL_HOURS,
+    effective_review_policy,
 )
 from research.preference_selection import (
     eligible_preferences,
@@ -62,7 +68,6 @@ def settings_path(root: Path) -> Path:
 
 
 TOGGLE_RUNTIME_PREFS = {
-    "新论文入库后自动快速筛选": [("paper", "auto_screen_on_intake", lambda on: on)],
     "intake 阶段预热 PDF 解析缓存": [("paper", "parse_cache_prewarm_on_intake", lambda on: on)],
     "自动生成详细论文笔记": [("paper", "auto_complete_note", lambda on: on)],
     "完整笔记后自动提取 Figure / Table": [("paper", "auto_extract_figures_after_note", lambda on: on)],
@@ -180,10 +185,8 @@ def print_guide(root: Path, *, focus: str) -> None:
     versioning = runtime.get("versioning", {})
     if focus in {"all", "paper-intake"}:
         print("[paper-intake]")
-        print(f"- 自动快速筛选: {_onoff(bool(paper.get('auto_screen_on_intake', True)))}")
         print(f"- intake 预热解析缓存: {_onoff(bool(paper.get('parse_cache_prewarm_on_intake', True)))}")
         print(f"- 自动完整笔记: {_onoff(bool(paper.get('auto_complete_note')))}")
-        print(f"- 完整笔记触发条件: {paper.get('auto_complete_note_condition')}")
         print(f"- 完整笔记模式: {paper.get('complete_note_mode')}")
         print(f"- 完整笔记后自动提图: {_onoff(bool(paper.get('auto_extract_figures_after_note')))}")
         print(f"- 完整笔记后自动刷新结构: {_onoff(bool(paper.get('auto_refresh_structure_after_note', True)))}")
@@ -208,6 +211,14 @@ def print_guide(root: Path, *, focus: str) -> None:
         if str(versioning.get("auto_commit_mode") or "milestone") == "aggressive":
             print("- 当前 Git 自动提交较激进；如果你想少一点碎提交，可改回 milestone。")
         print("- 用 toggle 管布尔开关，用 set-runtime-pref 管模式类选项。")
+    if focus in {"all", "governance"}:
+        policy = effective_review_policy(root)
+        if focus == "all":
+            print("")
+        print("[governance]")
+        print(f"- 治理档位: {policy['governance_profile']}")
+        print(f"- 每批待确认上限: {policy['item_limit']}")
+        print(f"- 待确认卡片有效期: {policy['card_ttl_hours']} 小时")
 
 
 def upsert_taxonomy_seed(root: Path, *, topic: str, aliases: list[str], tags: list[str], note: str, status: str) -> Path:
@@ -296,7 +307,7 @@ def build_parser() -> argparse.ArgumentParser:
     pool.add_argument("--status", default="active")
 
     guide = subparsers.add_parser("guide", help="Show practical guidance for current runtime modes")
-    guide.add_argument("--focus", choices=["all", "paper-intake"], default="all")
+    guide.add_argument("--focus", choices=["all", "paper-intake", "governance"], default="all")
 
     interaction = subparsers.add_parser(
         "set-interaction",
@@ -315,10 +326,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Canonical write path for personalization.discussion_style (user profile)",
     )
 
-    runtime = subparsers.add_parser("set-runtime-pref", help="Persist browser / identity / autonomy / paper / pdf / versioning runtime preferences")
-    runtime.add_argument("--section", required=True, choices=["browser", "identity", "autonomy", "paper", "pdf", "versioning", "diagnostics"])
+    runtime = subparsers.add_parser("set-runtime-pref", help="Persist browser / identity / autonomy / paper / pdf / review / versioning runtime preferences")
+    runtime.add_argument("--section", required=True, choices=["browser", "identity", "autonomy", "paper", "pdf", "review", "versioning", "diagnostics"])
     runtime.add_argument("--key", required=True)
     runtime.add_argument("--value", required=True)
+
+    governance = subparsers.add_parser("set-governance", help="Set the workspace governance profile and personal review policy")
+    governance.add_argument("--profile", choices=sorted(GOVERNANCE_PROFILES))
+    governance.add_argument("--review-item-limit", type=int)
+    governance.add_argument("--card-ttl-hours", type=int)
 
     diagnostics = subparsers.add_parser("set-diagnostics", help="Configure optional local-only diagnostics")
     diagnostics.add_argument("--mode", choices=sorted(DIAGNOSTIC_MODES))
@@ -626,6 +642,42 @@ def main() -> int:
             message=f"milestone: update runtime pref {args.section}.{args.key}",
             target_paths=[path],
         )
+        return 0
+    if args.command == "set-governance":
+        if args.profile is None and args.review_item_limit is None and args.card_ttl_hours is None:
+            raise SystemExit("set-governance requires at least one policy change")
+        if args.review_item_limit is not None and not (
+            MIN_PERSONAL_REVIEW_ITEM_LIMIT <= args.review_item_limit <= MAX_REVIEW_ITEM_LIMIT
+        ):
+            raise SystemExit(
+                f"review item limit must be between {MIN_PERSONAL_REVIEW_ITEM_LIMIT} and {MAX_REVIEW_ITEM_LIMIT}"
+            )
+        if args.card_ttl_hours is not None and not (
+            MIN_REVIEW_CARD_TTL_HOURS <= args.card_ttl_hours <= MAX_REVIEW_CARD_TTL_HOURS
+        ):
+            raise SystemExit(
+                f"card TTL must be between {MIN_REVIEW_CARD_TTL_HOURS} and {MAX_REVIEW_CARD_TTL_HOURS} hours"
+            )
+        path = runtime_preferences_path(root)
+        with mutation_transaction(root, "set-governance", [path]):
+            update: dict[str, object] = {}
+            if args.profile is not None:
+                update["governance_profile"] = args.profile
+            review: dict[str, int] = {}
+            if args.review_item_limit is not None:
+                review["batch_item_limit"] = args.review_item_limit
+            if args.card_ttl_hours is not None:
+                review["card_ttl_hours"] = args.card_ttl_hours
+            if review:
+                update["review"] = review
+            write_runtime_preferences(root, update)
+        checkpoint_and_report(
+            root,
+            trigger="milestone",
+            message="milestone: update governance policy",
+            target_paths=[path],
+        )
+        print("[ok] updated workspace governance policy")
         return 0
     if args.command == "set-diagnostics":
         if bool(args.skill) != bool(args.skill_mode):

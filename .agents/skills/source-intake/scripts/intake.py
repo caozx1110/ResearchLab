@@ -8,7 +8,6 @@ import os
 import re
 import shutil
 import stat
-import subprocess
 import sys
 import tempfile
 import time
@@ -32,7 +31,7 @@ if __name__ == "__main__":
 
 from research.common import add_project_root_argument, confirm_command as shared_confirm_command, extract_pdf_record, load_yaml, parse_arxiv_id, print_resolved_project_roots, skill_script_for_command
 from research.confirm import require_user_authorization
-from research.journal import journal_subprocess_env, mutation_transaction
+from research.journal import mutation_transaction
 from research.intake_cli import add_intake_add_arguments
 from research.preference_selection import operation_contract, resolve_operation_preferences
 from research.core import (
@@ -104,35 +103,9 @@ def canonical_paper_source_url(source: str, metadata: dict) -> str:
     return source if source.startswith("http") else ""
 
 
-def run_paper_command(root: Path, *args: str) -> list[str]:
-    cmd = [
-        research_python(),
-        skill_script_for_command(".agents/skills/paper-analyst/scripts/paper.py", cwd=root),
-        "--root",
-        str(root),
-        *args,
-    ]
-    result = subprocess.run(
-        cmd,
-        cwd=root,
-        env=journal_subprocess_env(root),
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    output = [
-        line.strip()
-        for line in (result.stdout.splitlines() + result.stderr.splitlines())
-        if line.strip()
-    ]
-    if result.returncode != 0:
-        raise SystemExit("\n".join(output) or f"paper command failed: {' '.join(cmd)}")
-    return output
-
-
 def guidance_hints(kind: str, preferences: dict, *, has_pdf: bool, note_created: bool) -> list[str]:
     if kind == "paper":
-        next_step = "已入库并备好初筛，下一步：运行 kb next，或让 AI 用逐字证据完成类型与深读判断。"
+        next_step = "已轻量入库；可运行 kb ingest 继续深读，或运行 kb next 查看主线建议。"
     elif kind == "repo":
         next_step = "已入库，下一步：运行 kb next，或让 AI 扫描结构并判断复用价值。"
     elif kind == "blog":
@@ -147,10 +120,6 @@ def guidance_hints(kind: str, preferences: dict, *, has_pdf: bool, note_created:
     optional_hints = [
         "可选：如需查看当前文献入库默认模式，可直接询问 AI。",
     ]
-    if not bool(preferences.get("auto_complete_note")):
-        optional_hints.append(
-            "可选：如需让值得读的论文默认自动生成完整笔记，可告诉 AI 调整该偏好。"
-        )
     if note_created and str(preferences.get("complete_note_mode") or "scaffold") != "draft":
         optional_hints.append(
             "可选：如需默认直接生成更饱满的 draft，可告诉 AI 调整完整笔记模式。"
@@ -166,7 +135,7 @@ def guidance_hints(kind: str, preferences: dict, *, has_pdf: bool, note_created:
 # kind -> (analyzer skill script, prepare verb, id flag). Used only to build the
 # machine-readable NEXT FOR AGENT navigation line (SSOT §7); no judgement here.
 ANALYZER_PREPARE: dict[str, tuple[str, str, str]] = {
-    "paper": (".agents/skills/paper-analyst/scripts/paper.py", "screen", "--paper-id"),
+    "paper": (".agents/skills/paper-analyst/scripts/paper.py", "complete-note", "--paper-id"),
     "repo": (".agents/skills/repo-analyst/scripts/repo.py", "map-capability", "--repo-id"),
     "dataset": (".agents/skills/dataset-analyst/scripts/dataset.py", "profile", "--dataset-id"),
     "blog": (".agents/skills/blog-analyst/scripts/blog.py", "complete-note", "--blog-id"),
@@ -1585,24 +1554,9 @@ def _execute_intake_transaction(
         if path is None:
             raise RuntimeError("Source materialization completed without a canonical record path.")
 
-        # Standalone add keeps its preference-driven preparation.  kb ingest owns
-        # the stricter paper order (screen verify before type-specific note prepare),
-        # so intake must not create competing analyzer scaffolds inside that chain.
-        if args.kind == "paper" and not ingest_chain_active():
-            if bool(paper_preferences.get("parse_cache_prewarm_on_intake", True)) and not bool(
-                paper_preferences.get("auto_screen_on_intake", True)
-            ):
-                auto_outputs.extend(
-                    run_paper_command(root, "prewarm-cache", "--paper-id", record["id"], "--defer-post-actions")
-                )
-            should_screen = bool(paper_preferences.get("auto_screen_on_intake", True)) or args.maturity == "complete"
-            if should_screen:
-                auto_outputs.extend(
-                    run_paper_command(root, "screen", "--paper-id", record["id"], "--mode", "auto", "--defer-post-actions")
-                )
-            # Complete-note preparation is deliberately deferred until the runtime
-            # agent fills and verifies screening.paper_type.  No preference or
-            # maturity shortcut may create a method-shaped scaffold before that.
+        # Source intake never authors or prepares research understanding.  The
+        # public wrapper consumes link_autodrive and, when requested, starts the
+        # analyzer's unified deep-read prepare after this transaction commits.
 
         _build_index_transaction(root)
         if args.stage_id and args.candidate_id:

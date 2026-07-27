@@ -110,9 +110,10 @@ def test_kb_init_warns_when_cwd_differs_from_explicit_root(tmp_path: Path, monke
     assert kb.main() == 0
 
     captured = capsys.readouterr()
-    assert "[root] project:" in captured.out
-    assert "[root] kb:" in captured.out
-    assert "[warn] kb.py init: cwd differs from resolved project root" in captured.out
+    assert "当前目录与目标工作区不同" in captured.out
+    assert "[root]" not in captured.out
+    assert str(root) not in captured.out
+    assert str(cwd) not in captured.out
 
 
 def test_config_init_warns_when_cwd_differs_from_explicit_root(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -127,6 +128,85 @@ def test_config_init_warns_when_cwd_differs_from_explicit_root(tmp_path: Path, m
     assert config.main() == 0
 
     captured = capsys.readouterr()
-    assert "[root] project:" in captured.out
-    assert "[root] kb:" in captured.out
-    assert "[warn] config.py init: cwd differs from resolved project root" in captured.out
+    assert "当前目录与目标工作区不同" in captured.out
+    assert "[root]" not in captured.out
+    assert str(root) not in captured.out
+    assert str(cwd) not in captured.out
+
+
+def test_owner_json_and_write_success_hide_resolved_paths(tmp_path: Path) -> None:
+    real_root = _project_root()
+    env = {**os.environ, "PYTHONPATH": str(real_root / ".agents" / "lib")}
+
+    eval_script = (
+        real_root
+        / ".agents"
+        / "skills"
+        / "skill-evolution-advisor"
+        / "scripts"
+        / "eval_research_value.py"
+    )
+    eval_root = tmp_path / "eval-workspace"
+    dataset = eval_root / "kb" / "eval" / "research-value" / "dataset" / "smoke.yaml"
+    dataset.parent.mkdir(parents=True)
+    dataset.write_text("program_id: smoke\nquestions: []\n", encoding="utf-8")
+    evaluation = subprocess.run(
+        [sys.executable, str(eval_script), "--root", str(eval_root), "--json", "--no-write"],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert evaluation.returncode == 0, evaluation.stderr
+    assert evaluation.stderr == ""
+    assert "[root]" not in evaluation.stdout
+    assert str(eval_root) not in evaluation.stdout
+
+    retrospective_script = (
+        real_root
+        / ".agents"
+        / "skills"
+        / "skill-evolution-advisor"
+        / "scripts"
+        / "create_retrospective.py"
+    )
+    project = tmp_path / "retrospective-workspace"
+    retrospective = subprocess.run(
+        [
+            sys.executable,
+            str(retrospective_script),
+            "--root",
+            str(project / "kb" / "memory" / "skill-evolution"),
+            "--slug",
+            "public-output",
+            "--task-summary",
+            "test",
+        ],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert retrospective.returncode == 0, retrospective.stderr
+    assert retrospective.stdout.strip() == "复盘已记录。"
+    assert str(project) not in retrospective.stdout + retrospective.stderr
+
+
+def test_kb_git_init_reports_state_without_repository_path(tmp_path: Path) -> None:
+    real_root = _project_root()
+    script = real_root / ".agents" / "skills" / "knowledge-base-manager" / "scripts" / "kb.py"
+    root = tmp_path / "git-workspace"
+    root.mkdir()
+    result = subprocess.run(
+        [sys.executable, str(script), "--root", str(root), "git-init", "--no-initial-commit"],
+        cwd=root,
+        env={**os.environ, "PYTHONPATH": str(real_root / ".agents" / "lib")},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "知识库版本记录" in result.stdout
+    assert "repo_path" not in result.stdout
+    assert "[root]" not in result.stdout
+    assert str(root) not in result.stdout + result.stderr

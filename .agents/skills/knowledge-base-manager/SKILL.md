@@ -31,7 +31,7 @@ Knowledge Base Manager 负责 knowledge-unit classifier；公共 `kb review` 还
 - paper/repo/dataset/blog 的 `source_ready`、`awaiting_agent_fill`、`ready_to_verify`、`failed_retryable` 一律不进入人工 inbox。
 - 旧记录没有 classifier 字段时保持兼容，但 prepared shell 仍排除；paper 的 `not_started` 可能承载有效 screening 判断，不能误删。
 - `find`、public `kb review` 与 batch confirm 对 knowledge unit 必须消费同一筛选结果。
-- experiment diagnosis、program decision、idea discussion conclusion 与 method selection 仍由各自 owner 持有和写入；shared discovery 只接收 non-empty canonical claims + current verification 的 side artifact，并把 owner-specific confirm/reject route 交给 kb-cli 私有 protocol。公共 inbox 默认只展示优先级与陈旧度排序后的 Top 3，并说明剩余数量。
+- experiment diagnosis、program decision、idea discussion conclusion 与 method selection 仍由各自 owner 持有和写入；shared discovery 只接收 non-empty canonical claims + current verification 的 side artifact，并把 owner-specific confirm/reject route 交给 kb-cli 私有 protocol。公共 inbox 按优先级与陈旧度排序，再按当前治理档冻结的批量上限展示并说明剩余数量（strict 3 条；personal 默认 10 条）。
 
 ## Passage retrieval
 

@@ -1561,22 +1561,8 @@ def kind_payload_skeleton(kind: str, title: str = "") -> dict[str, Any]:
                 "candidate_ids": [],
                 "queries": [],
             },
-            "quick_screen": {
+            "deep_read": {
                 "paper_type": "",
-                "worth_deep_reading": "unknown",
-                "judgement_reason": [],
-                "backing_strength": "",
-                "result_strength": "",
-                "experiment_quality": "",
-                "reliability": "",
-                "novelty": "",
-                "relevance_to_current_research": "",
-                "screening_mode": "",
-                "screening_evidence_pages": [],
-                "risks": [],
-                "keyword_hits": {},
-                "takeaways": [],
-                "recommended_next_action": "",
             },
             "core_content": {
                 "research_problem": "",
@@ -1910,6 +1896,12 @@ def record_summary(record: dict[str, Any]) -> str:
         return summary
     payload = record.get("payload", {})
     if record.get("kind") == "paper":
+        deep_read = payload.get("deep_read", {})
+        if isinstance(deep_read, dict):
+            summary = str(deep_read.get("summary") or "").strip()
+            if summary:
+                return summary
+        # Read-only compatibility for paper records created before direct deep read.
         reason = payload.get("quick_screen", {}).get("judgement_reason", [])
         if reason:
             return str(reason[0])

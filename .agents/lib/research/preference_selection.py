@@ -174,6 +174,8 @@ SKILL_OPERATIONS: dict[str, tuple[str, ...]] = {
     "method-designer": ("design",),
     "experiment-workbench": ("plan", "log-run", "follow-up", "diagnose"),
     "kb-cli": ("review-display",),
+    # ``screen`` remains a legacy owner-only compatibility operation for old
+    # units.  New intake and public routing never select it.
     "paper-analyst": ("prewarm-cache", "screen", "complete-note", "extract-figures", "refresh-structure"),
     "repo-analyst": ("map-capability",),
     "dataset-analyst": ("profile",),

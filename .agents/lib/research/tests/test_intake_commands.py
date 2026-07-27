@@ -377,18 +377,10 @@ def test_no_receipt_uses_only_hard_fallback_and_persists_value_free_digests(
         config_root(root) / "user-profile.yaml",
         {"constraints": [hard_text]},
     )
-    runtime = default_runtime_preferences()
-    runtime["paper"]["auto_screen_on_intake"] = False
-    write_yaml_if_changed(runtime_preferences_path(root), runtime)
+    write_yaml_if_changed(runtime_preferences_path(root), default_runtime_preferences())
     source = root / "paper.md"
     source.write_text("# Paper\n\nEvidence.\n", encoding="utf-8")
     args = _prepared_args(root, "paper", source)
-    analyzer_calls: list[tuple[str, ...]] = []
-    monkeypatch.setattr(
-        intake,
-        "run_paper_command",
-        lambda _root, *items: analyzer_calls.append(tuple(items)) or [],
-    )
     monkeypatch.setattr(intake, "checkpoint_and_report", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(sys, "argv", _add_argv(root, args))
 
@@ -404,8 +396,8 @@ def test_no_receipt_uses_only_hard_fallback_and_persists_value_free_digests(
     serialized = records[0].read_text(encoding="utf-8")
     assert hard_text not in serialized
     assert "auto_screen_on_intake" not in serialized
-    # The configured soft false value was not read: neutral behavior still prepares screening.
-    assert any(call and call[0] == "screen" for call in analyzer_calls)
+    # Source intake is mechanical only; neither hard fallback nor a soft
+    # preference may resurrect the retired quick-screen analyzer.
 
 
 @pytest.mark.parametrize("mutation", ["input", "authorization", "source-bytes"])

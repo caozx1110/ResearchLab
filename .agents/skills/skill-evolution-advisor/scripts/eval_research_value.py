@@ -643,12 +643,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
     root = project_root(PROJECT_ROOT, explicit_root=args.root)
-    # In --json mode keep stdout pure JSON; route the resolved-root banner to stderr.
-    if args.json:
-        print(f"[root] project: {root.resolve()}", file=sys.stderr)
-        print(f"[root] kb: {(root / 'kb').resolve()}", file=sys.stderr)
-    else:
-        print_resolved_project_roots(root)
+    print_resolved_project_roots(root)
 
     program = args.program.strip() or None
     result = evaluate(root, program)
@@ -684,8 +679,8 @@ def main() -> int:
         with mutation_transaction(root, "write-research-value-report", [report_dir]):
             report_path = next_available_report_path(report_dir, stamp)
             write_text_if_changed(report_path, report)
-        print(f"[ok] wrote report: {report_path.relative_to(root)}",
-              file=sys.stderr if args.json else sys.stdout)
+        if not args.json:
+            print(f"[ok] wrote report: {report_path.relative_to(root)}")
 
     if args.json:
         print(json.dumps({"meta": meta, "result": result}, ensure_ascii=False, indent=2))

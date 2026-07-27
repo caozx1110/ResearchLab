@@ -3,8 +3,9 @@
 We cannot headless-test "an agent filled *good* understanding" (that needs a real
 agent). So these test the MACHINERY the script owns:
 
-  * screen --phase prepare emits a fillable structure with NO keyword-driven grading;
-  * complete-note --phase prepare emits the 5-element fillable skeleton;
+  * complete-note --phase prepare directly emits a type selector and three branches;
+  * type selection and the selected 5-element branch require verbatim evidence;
+  * unselected branches must remain blank, while old screening records stay readable;
   * feeding synthetic filled content with legit verbatim evidence -> validates,
     clears the substance gate, and persists (core_content non-empty, note.md written);
   * feeding fabricated evidence -> rejected, with the offending element named;
@@ -150,6 +151,9 @@ def _legit_note_fill() -> dict:
 def _typed_note_fill(paper, paper_type: str) -> dict:
     quote_by_element = {
         "motivation": "fail to generalize to unseen objects",
+        "method": "predicts short action chunks with a flow matching head",
+        "experiment": "higher success rate than the baseline",
+        "limitation": "brittle behaviour under heavy occlusion",
         "task_design": "real robot benchmark",
         "metrics": "higher success rate than the baseline",
         "coverage_limitation": "brittle behaviour under heavy occlusion",
@@ -159,25 +163,33 @@ def _typed_note_fill(paper, paper_type: str) -> dict:
         "gaps": "brittle behaviour under heavy occlusion",
         "insight": "flow matching head",
     }
-    return {
-        "elements": [
+    fill = paper.build_note_scaffold(
+        _paper_record("p-x"), [], "page", digest_chunks=1, digest_chars=10
+    )
+    fill["paper_type"] = paper_type
+    fill["paper_type_reason"] = "The paper's contribution structure matches this type."
+    fill["paper_type_evidence_refs"] = [
+        {
+            "source_unit_id": "p-x",
+            "artifact": "parse-cache.yaml",
+            "locator": "page=1",
+            "quote": "vision language action policies for robot manipulation",
+            "summary": "classification evidence",
+        }
+    ]
+    for element in fill["element_sets"][paper_type]:
+        name = element["element"]
+        element["content"] = f"Agent-authored {name.replace('_', ' ')} synthesis."
+        element["evidence_refs"] = [
             {
-                "element": name,
-                "claim_type": paper.ELEMENT_CLAIM_TYPE[name],
-                "content": f"Agent-authored {name.replace('_', ' ')} synthesis.",
-                "evidence_refs": [
-                    {
-                        "source_unit_id": "p-x",
-                        "artifact": "parse-cache.yaml",
-                        "locator": "page=1" if name in {"motivation", "scope"} else "page=2",
-                        "quote": quote_by_element[name],
-                        "summary": name,
-                    }
-                ],
+                "source_unit_id": "p-x",
+                "artifact": "parse-cache.yaml",
+                "locator": "page=1" if name in {"motivation", "scope"} else "page=2",
+                "quote": quote_by_element[name],
+                "summary": name,
             }
-            for name in paper.ELEMENT_SETS[paper_type]
         ]
-    }
+    return fill
 
 
 def _not_applicable_screening_dimensions(paper) -> dict:
@@ -190,6 +202,12 @@ def _not_applicable_screening_dimensions(paper) -> dict:
         }
         for name in paper.SCREENING_DIMENSION_RATINGS
     }
+
+
+def test_new_paper_payload_has_deep_read_type_without_quick_screen() -> None:
+    payload = kind_payload_skeleton("paper", "New paper")
+    assert payload["deep_read"] == {"paper_type": ""}
+    assert "quick_screen" not in payload
 
 
 # --------------------------------------------------------------------------- #
@@ -232,21 +250,26 @@ def test_paper_source_has_no_count_grading_symbols() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 2. complete-note --phase prepare produces the 5-element fillable skeleton.
+# 2. complete-note prepare produces one type selector plus three blank branches.
 # --------------------------------------------------------------------------- #
-def test_note_scaffold_has_five_blank_elements(tmp_path: Path) -> None:
+def test_note_scaffold_has_type_evidence_and_three_blank_branches(tmp_path: Path) -> None:
     paper = _load_paper_module()
     record = _paper_record("p-note-000001")
     chunks = [{"label": "source.pdf:page-1", "text": PAGE1, "page": 1}]
 
     scaffold = paper.build_note_scaffold(record, chunks, "page", digest_chunks=8, digest_chars=800)
 
-    names = [el["element"] for el in scaffold["elements"]]
-    assert names == ["motivation", "method", "experiment", "limitation", "insight"]
-    for el in scaffold["elements"]:
-        assert el["content"] == ""          # script authors nothing
-        assert el["evidence_refs"] == []     # agent must attach evidence
-    assert scaffold["fill_contract"]["required_elements"] == names
+    assert scaffold["paper_type"] == ""
+    assert scaffold["paper_type_reason"] == ""
+    assert scaffold["paper_type_evidence_refs"] == []
+    assert set(scaffold["element_sets"]) == set(paper.PAPER_TYPES)
+    for paper_type, expected in paper.ELEMENT_SETS.items():
+        branch = scaffold["element_sets"][paper_type]
+        assert [element["element"] for element in branch] == list(expected)
+        assert len(branch) == 5
+        for element in branch:
+            assert element["content"] == ""       # script authors nothing
+            assert element["evidence_refs"] == []  # agent must attach evidence
     assert "evidence_ref_format" in scaffold["fill_contract"]
 
 
@@ -265,34 +288,105 @@ def test_note_scaffold_and_verify_follow_paper_type(
     unit_dir.mkdir()
     _write_parse_cache(unit_dir, "p-x")
     record = _paper_record(f"p-{paper_type}")
-    record["payload"]["quick_screen"]["paper_type"] = paper_type
 
     scaffold = paper.build_note_scaffold(record, [], "page", digest_chunks=1, digest_chars=10)
-    assert scaffold["paper_type"] == paper_type
-    assert scaffold["fill_contract"]["required_elements"] == expected
-    assert [element["element"] for element in scaffold["elements"]] == expected
+    assert scaffold["paper_type"] == ""
+    assert [element["element"] for element in scaffold["element_sets"][paper_type]] == expected
 
-    violations, claims = paper.verify_note_fill(_typed_note_fill(paper, paper_type), unit_dir, record)
+    fill = _typed_note_fill(paper, paper_type)
+    violations, claims = paper.verify_note_fill(fill, unit_dir, record)
     assert violations == [], violations
+    assert [claim["id"] for claim in claims] == [
+        "claim-paper-type",
+        *[f"claim-{name}" for name in expected],
+    ]
+    assert claims[0]["text"].startswith(f"paper_type={paper_type}; ")
+    assert claims[0]["paper_type"] == paper_type
     paper._apply_note_fill_to_payload(record, claims)
+    assert record["payload"]["deep_read"]["paper_type"] == paper_type
     assert has_substantive_content(record, "paper") is True
     note_md = paper.render_note_md(record, claims)
     for name in expected:
         assert f"## {paper.ELEMENT_HEADING[name]}" in note_md
 
-    method_fill = _legit_note_fill()
-    violations, _ = paper.verify_note_fill(method_fill, unit_dir, record)
-    assert violations
-    assert any("unexpected for selected paper type" in violation for violation in violations)
-    assert any("missing" in violation for violation in violations)
+    unselected = "survey" if paper_type != "survey" else "benchmark"
+    fill["element_sets"][unselected][0]["content"] = "Must not be mixed in."
+    violations, _ = paper.verify_note_fill(fill, unit_dir, record)
+    assert any("unselected branch must stay blank" in violation for violation in violations)
 
 
-def test_missing_paper_type_keeps_method_system_contract(tmp_path: Path) -> None:
+def test_missing_paper_type_is_rejected_but_legacy_reader_keeps_method_default(tmp_path: Path) -> None:
     paper = _load_paper_module()
     record = _paper_record("p-default")
     assert paper.elements_for(record) == paper.NOTE_ELEMENTS
     scaffold = paper.build_note_scaffold(record, [], "page", digest_chunks=1, digest_chars=10)
-    assert [element["element"] for element in scaffold["elements"]] == list(paper.NOTE_ELEMENTS)
+    unit_dir = tmp_path / "unit"
+    unit_dir.mkdir()
+    _write_parse_cache(unit_dir, "p-x")
+    violations, _claims = paper.verify_note_fill(scaffold, unit_dir, record)
+    assert any("paper_type" in violation for violation in violations)
+    assert any("paper_type_reason" in violation for violation in violations)
+
+
+def test_deep_read_type_and_unselected_branches_are_evidence_bound(tmp_path: Path) -> None:
+    paper = _load_paper_module()
+    unit_dir = tmp_path / "unit"
+    unit_dir.mkdir()
+    _write_parse_cache(unit_dir, "p-x")
+    record = _paper_record("p-x")
+
+    fabricated_type = _typed_note_fill(paper, "method_system")
+    fabricated_type["paper_type_evidence_refs"][0]["quote"] = "a type claim absent from source"
+    violations, _claims = paper.verify_note_fill(fabricated_type, unit_dir, record)
+    assert any("paper_type" in violation and "not verbatim" in violation for violation in violations)
+
+    mixed = _typed_note_fill(paper, "method_system")
+    mixed["element_sets"]["survey"][0]["evidence_refs"] = [
+        {
+            "source_unit_id": "p-x",
+            "artifact": "parse-cache.yaml",
+            "locator": "page=1",
+            "quote": "vision language action policies for robot manipulation",
+            "summary": "must remain absent from an unselected branch",
+        }
+    ]
+    violations, _claims = paper.verify_note_fill(mixed, unit_dir, record)
+    assert any("unselected branch must stay blank" in violation for violation in violations)
+
+
+def test_deep_read_rejects_duplicate_slots_and_claim_type_downgrade(tmp_path: Path) -> None:
+    paper = _load_paper_module()
+    unit_dir = tmp_path / "unit"
+    unit_dir.mkdir()
+    _write_parse_cache(unit_dir, "p-x")
+    fill = _typed_note_fill(paper, "method_system")
+    fill["element_sets"]["survey"].append(dict(fill["element_sets"]["survey"][0]))
+    fill["element_sets"]["method_system"][2]["claim_type"] = "fact"
+
+    violations, _claims = paper.verify_note_fill(fill, unit_dir, _paper_record("p-x"))
+    assert any("duplicate element" in violation for violation in violations)
+    assert any("claim_type must be evaluation" in violation for violation in violations)
+
+
+def test_legacy_quick_screen_type_can_verify_old_flat_fill_without_writeback(tmp_path: Path) -> None:
+    paper = _load_paper_module()
+    unit_dir = tmp_path / "unit"
+    unit_dir.mkdir()
+    _write_parse_cache(unit_dir, "p-x")
+    record = _paper_record("p-x")
+    record["payload"]["quick_screen"] = {"paper_type": "method_system"}
+
+    violations, claims = paper.verify_note_fill(_legit_note_fill(), unit_dir, record)
+    assert violations == []
+    assert len(claims) == 5
+    paper._apply_note_fill_to_payload(record, claims)
+    assert record["payload"]["deep_read"]["paper_type"] == ""
+    assert record["payload"]["quick_screen"]["paper_type"] == "method_system"
+
+    new_record = _paper_record("p-x")
+    new_record["payload"]["deep_read"]["paper_type"] = "method_system"
+    violations, _claims = paper.verify_note_fill(_legit_note_fill(), unit_dir, new_record)
+    assert any("retired flat shape" in violation for violation in violations)
 
 
 # --------------------------------------------------------------------------- #
@@ -578,7 +672,7 @@ def test_prepare_fill_verify_requires_fresh_phase_receipt_and_then_succeeds(
     _write_parse_cache(unit_dir, paper_id)
 
     prepare_args = paper.build_parser().parse_args(
-        ["screen", "--paper-id", paper_id, "--phase", "prepare", "--defer-post-actions"]
+        ["complete-note", "--paper-id", paper_id, "--phase", "prepare", "--defer-post-actions"]
     )
     prepare_selection = _select_paper_preferences(
         tmp_path,
@@ -592,7 +686,7 @@ def test_prepare_fill_verify_requires_fresh_phase_receipt_and_then_succeeds(
         paper,
         monkeypatch,
         tmp_path,
-        "screen",
+        "complete-note",
         "--paper-id",
         paper_id,
         "--phase",
@@ -602,42 +696,21 @@ def test_prepare_fill_verify_requires_fresh_phase_receipt_and_then_succeeds(
         "--defer-post-actions",
     ) == 0
 
-    screening_path = unit_dir / "screening.yaml"
-    screening = load_yaml(screening_path)
-    screening.update(
-        {
-            "paper_type": "method_system",
-            "worth_deep_reading": "yes",
-            "judgement_reason": ["The method directly addresses the target setting."],
-            "claims": [
-                {
-                    "id": "claim-phase-receipt",
-                    "text": "The paper studies VLA policies for robot manipulation.",
-                    "claim_type": "evaluation",
-                    "confirmation_status": "pending_user_confirmation",
-                    "evidence_refs": [
-                        {
-                            "source_unit_id": paper_id,
-                            "artifact": "parse-cache.yaml",
-                            "locator": "page=1",
-                            "quote": "vision language action policies for robot manipulation",
-                            "summary": "direct scope evidence",
-                        }
-                    ],
-                }
-            ],
-            **_not_applicable_screening_dimensions(paper),
-        }
-    )
-    write_yaml_if_changed(screening_path, screening)
+    fill_path = unit_dir / "note-fill.yaml"
+    fill = _typed_note_fill(paper, "method_system")
+    fill["paper_id"] = paper_id
+    for item in paper._all_note_evidence_items(fill):
+        for evidence_ref in item.get("evidence_refs") or []:
+            evidence_ref["source_unit_id"] = paper_id
+    write_yaml_if_changed(fill_path, fill)
     record_before_stale_attempt = record_path(tmp_path, "paper", paper_id).read_bytes()
-    fill_before_stale_attempt = screening_path.read_bytes()
+    fill_before_stale_attempt = fill_path.read_bytes()
     with pytest.raises(ValueError, match="another task"):
         _run_cli(
             paper,
             monkeypatch,
             tmp_path,
-            "screen",
+            "complete-note",
             "--paper-id",
             paper_id,
             "--phase",
@@ -647,10 +720,10 @@ def test_prepare_fill_verify_requires_fresh_phase_receipt_and_then_succeeds(
             "--defer-post-actions",
         )
     assert record_path(tmp_path, "paper", paper_id).read_bytes() == record_before_stale_attempt
-    assert screening_path.read_bytes() == fill_before_stale_attempt
+    assert fill_path.read_bytes() == fill_before_stale_attempt
 
     verify_args = paper.build_parser().parse_args(
-        ["screen", "--paper-id", paper_id, "--phase", "verify", "--defer-post-actions"]
+        ["complete-note", "--paper-id", paper_id, "--phase", "verify", "--defer-post-actions"]
     )
     verify_selection = _select_paper_preferences(
         tmp_path,
@@ -664,7 +737,7 @@ def test_prepare_fill_verify_requires_fresh_phase_receipt_and_then_succeeds(
         paper,
         monkeypatch,
         tmp_path,
-        "screen",
+        "complete-note",
         "--paper-id",
         paper_id,
         "--phase",
@@ -673,9 +746,9 @@ def test_prepare_fill_verify_requires_fresh_phase_receipt_and_then_succeeds(
         verify_selection,
         "--defer-post-actions",
     ) == 0
-    verified = load_yaml(screening_path)
-    assert verified["status"] == "verified"
-    assert verified["worth_deep_reading"] == "yes"
+    verified = load_yaml(record_path(tmp_path, "paper", paper_id))
+    assert verified["payload"]["deep_read"]["paper_type"] == "method_system"
+    assert len(verified["payload"]["claims"]) == 6
 
 
 @pytest.mark.parametrize("artifact", ("source", "parse-cache", "fill"))
@@ -688,6 +761,7 @@ def test_cli_rejects_symlinked_paper_inputs_without_a_preference_selection(
     ensure_workspace(tmp_path)
     paper_id = f"p-symlink-{artifact}"
     record = _paper_record(paper_id)
+    record["payload"]["quick_screen"] = {}
     unit_dir = record_path(tmp_path, "paper", paper_id).parent
     unit_dir.mkdir(parents=True, exist_ok=True)
     outside = tmp_path / f"outside-{artifact}.yaml"
@@ -725,7 +799,7 @@ def test_cli_rejects_symlinked_paper_inputs_without_a_preference_selection(
     assert (cache_path.read_bytes() if cache_path.exists() else None) == cache_before
 
 
-def test_verified_unclassified_screen_uses_method_system_fallback(
+def test_complete_note_prepare_needs_no_screening_and_does_not_guess_type(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     paper = _load_paper_module()
@@ -734,8 +808,6 @@ def test_verified_unclassified_screen_uses_method_system_fallback(
     write_record(tmp_path, _paper_record(paper_id))
     unit_dir = record_path(tmp_path, "paper", paper_id).parent
     _write_parse_cache(unit_dir, paper_id)
-    write_yaml_if_changed(unit_dir / "screening.yaml", {"status": "verified", "paper_type": ""})
-
     assert _run_cli(
         paper,
         monkeypatch,
@@ -748,8 +820,36 @@ def test_verified_unclassified_screen_uses_method_system_fallback(
         "--defer-post-actions",
     ) == 0
     scaffold = load_yaml(unit_dir / "note-fill.yaml")
-    assert scaffold["paper_type"] == "method_system"
-    assert [element["element"] for element in scaffold["elements"]] == list(paper.NOTE_ELEMENTS)
+    assert scaffold["paper_type"] == ""
+    assert set(scaffold["element_sets"]) == set(paper.PAPER_TYPES)
+    assert not (unit_dir / "screening.yaml").exists()
+
+
+def test_new_paper_rejects_legacy_screen_without_creating_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paper = _load_paper_module()
+    ensure_workspace(tmp_path)
+    paper_id = "p-no-legacy-screen"
+    write_record(tmp_path, _paper_record(paper_id))
+    unit_dir = record_path(tmp_path, "paper", paper_id).parent
+    before = record_path(tmp_path, "paper", paper_id).read_bytes()
+
+    with pytest.raises(SystemExit, match="legacy quick-screen schema"):
+        _run_cli(
+            paper,
+            monkeypatch,
+            tmp_path,
+            "screen",
+            "--phase",
+            "prepare",
+            "--paper-id",
+            paper_id,
+            "--defer-post-actions",
+        )
+    assert record_path(tmp_path, "paper", paper_id).read_bytes() == before
+    assert not (unit_dir / "screening.yaml").exists()
+    assert not (unit_dir / "parse-cache.yaml").exists()
 
 
 def test_cli_end_to_end_prepare_fill_verify_persist(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -761,65 +861,22 @@ def test_cli_end_to_end_prepare_fill_verify_persist(tmp_path: Path, monkeypatch:
     unit_dir = record_path(tmp_path, "paper", paper_id).parent
     _write_parse_cache(unit_dir, paper_id)
 
-    # prepare screen -> fillable screening.yaml, no grading, record stays hollow.
-    assert _run_cli(paper, monkeypatch, tmp_path, "screen", "--phase", "prepare",
-                    "--paper-id", paper_id, "--defer-post-actions") == 0
-    screening = load_yaml(unit_dir / "screening.yaml")
-    assert screening["worth_deep_reading"] == "" and screening["evidence_digest"]
-
-    # A prepared-but-unverified screen must never yield a method-shaped note by
-    # fallback; paper_type has to be agent-filled and evidence-verified first.
-    with pytest.raises(SystemExit, match="evidence-verified screening"):
-        _run_cli(paper, monkeypatch, tmp_path, "complete-note", "--phase", "prepare",
-                 "--paper-id", paper_id, "--defer-post-actions")
-    assert not (unit_dir / "note-fill.yaml").exists()
-
-    screening["paper_type"] = "method_system"
-    screening["worth_deep_reading"] = "yes"
-    screening["judgement_reason"] = ["method/system paper is in scope"]
-    screening.update(_not_applicable_screening_dimensions(paper))
-    screening["claims"] = [
-        {
-            "id": "claim-screen-type",
-            "text": "The paper proposes an action prediction method.",
-            "claim_type": "inference",
-            "confirmation_status": "pending_user_confirmation",
-            "evidence_refs": [
-                {
-                    "source_unit_id": paper_id,
-                    "artifact": "parse-cache.yaml",
-                    "locator": "page=2",
-                    "quote": "Our method predicts short action chunks",
-                    "summary": "method/system classification",
-                }
-            ],
-        }
-    ]
-    write_yaml_if_changed(unit_dir / "screening.yaml", screening)
-    screening_path = unit_dir / "screening.yaml"
-    serialized = screening_path.read_text(encoding="utf-8")
-    yaml_11_bare = serialized.replace("worth_deep_reading: 'yes'", "worth_deep_reading: yes")
-    assert yaml_11_bare != serialized
-    screening_path.write_text(yaml_11_bare, encoding="utf-8")
-    assert load_yaml(screening_path)["worth_deep_reading"] is True
-    assert _run_cli(paper, monkeypatch, tmp_path, "screen", "--phase", "verify",
-                    "--paper-id", paper_id, "--defer-post-actions") == 0
-    assert load_yaml(screening_path)["worth_deep_reading"] == "yes"
-    screened = load_yaml(record_path(tmp_path, "paper", paper_id))
-    assert screened["payload"]["quick_screen"]["paper_type"] == "method_system"
-
-    # prepare note -> 5-element skeleton; record marked complete but still hollow.
+    # Direct deep-read prepare -> type selector + three branches; no screening artifact.
     assert _run_cli(paper, monkeypatch, tmp_path, "complete-note", "--phase", "prepare",
                     "--paper-id", paper_id, "--defer-post-actions") == 0
     fill_path = unit_dir / "note-fill.yaml"
-    assert [el["element"] for el in load_yaml(fill_path)["elements"]] == list(paper.NOTE_ELEMENTS)
+    scaffold = load_yaml(fill_path)
+    assert scaffold["paper_type"] == ""
+    assert set(scaffold["element_sets"]) == set(paper.PAPER_TYPES)
+    assert not (unit_dir / "screening.yaml").exists()
     reloaded = load_yaml(record_path(tmp_path, "paper", paper_id))
     assert has_substantive_content(reloaded, "paper") is False  # scaffold is not content
 
-    # Agent fills the scaffold; verify persists note.md + core_content.
-    legit_fill = _legit_note_fill()
-    for element in legit_fill["elements"]:
-        for evidence_ref in element["evidence_refs"]:
+    # Agent selects a type and fills only that branch; verify persists type + note.
+    legit_fill = _typed_note_fill(paper, "method_system")
+    legit_fill["paper_id"] = paper_id
+    for item in paper._all_note_evidence_items(legit_fill):
+        for evidence_ref in item.get("evidence_refs") or []:
             evidence_ref["source_unit_id"] = paper_id
     write_yaml_if_changed(fill_path, legit_fill)
     assert _run_cli(paper, monkeypatch, tmp_path, "complete-note", "--phase", "verify",
@@ -827,13 +884,21 @@ def test_cli_end_to_end_prepare_fill_verify_persist(tmp_path: Path, monkeypatch:
     assert (unit_dir / "note.md").exists()
     filled = load_yaml(record_path(tmp_path, "paper", paper_id))
     assert has_substantive_content(filled, "paper") is True
+    assert filled["payload"]["deep_read"]["paper_type"] == "method_system"
+    assert len(filled["payload"]["claims"]) == 6
     assert filled["payload"]["claims"] == load_yaml(unit_dir / "note-claims.yaml")["claims"]
     assert filled["payload"]["verification"]["artifacts"]
     assert len(filled["payload"]["verification"]["claims_digest"]) == 64
 
     # Fabricated fill through the CLI is rejected (non-zero exit).
-    bad = _legit_note_fill()
-    bad["elements"][0]["evidence_refs"][0]["quote"] = "fabricated claim not in source"
+    bad = _typed_note_fill(paper, "method_system")
+    bad["paper_id"] = paper_id
+    for item in paper._all_note_evidence_items(bad):
+        for evidence_ref in item.get("evidence_refs") or []:
+            evidence_ref["source_unit_id"] = paper_id
+    bad["element_sets"]["method_system"][0]["evidence_refs"][0]["quote"] = (
+        "fabricated claim not in source"
+    )
     write_yaml_if_changed(fill_path, bad)
     with pytest.raises(SystemExit):
         _run_cli(paper, monkeypatch, tmp_path, "complete-note", "--phase", "verify",

@@ -11,21 +11,18 @@ description: 为 core paper unit 备料（解析源、产出待填结构）并�
 
 ## 第一性原理（SSOT 原则1 / §3.2）
 
-**理解来自 agent，脚本只做搬运 + 验证。** 脚本负责：解析源、产出「待填结构」、逐字校验 agent 填入的每条判断带合法 evidence、过实质门、落盘。脚本**绝不**产出「这篇论文说了什么 / 值不值得读 / novelty 强不强」这类判断——那是 runtime agent 的活。初筛与笔记都是**两阶段**：脚本 `prepare` 出待填骨架 → agent 在会话里填理解+挂证据 → 脚本 `verify` 校验后落盘。
+**理解来自 agent，脚本只做搬运 + 验证。** 脚本负责：解析源、产出「待填结构」、逐字校验 agent 填入的每条判断带合法 evidence、过实质门、落盘。脚本**绝不**产出「这篇论文说了什么 / 属于哪类 / novelty 强不强」这类判断——那是 runtime agent 的活。deep read 是**两阶段**：脚本 `prepare` 出统一待填骨架 → agent 在会话里选择论文类型、填写理由与对应五要素并挂证据 → 脚本 `verify` 校验后落盘。
 
 `runtime.paper` / `runtime.pdf` 是 soft preference catalog：只有与 paper id、operation、phase/mode、source/basic-info canonical inputs 绑定且 current 的 effective selection 才可改变对应操作；无 receipt 使用 neutral defaults，禁止直读 runtime soft 字段。写入 record 的 preference binding 只含 selection/task/receipt digest；`runtime.autonomy.auto_execute_scope` 作为 hard governance fallback 仍直接执行，且不能关闭 evidence、confirmation、containment 或 recovery。
-
-Quick screening 的 `institutions / backing_strength / result_strength / experiment_quality / reliability / novelty` 是 runtime Agent 填写的结构化判断。每项要么填 `assessed + rating + reason + claim_ids`，且 claim 必须挂逐字 evidence；要么填 `not_applicable + reason`。`institutions` 只记录论文披露的 affiliation，不评价声望；作者身份、机构声望、venue、citation count 等元数据一律不得作为任何强弱评级的启发式替代。
 
 ## 负责范围
 
 1. 从 `source-intake` 创建的 paper unit（已带完整 `source/document.md` 阅读层和兼容 parse-cache）出发。Agent 先读 Markdown 形成整体理解；需要核验逐字引用与既有 locator 时读 parse-cache，转换降级或细节缺失时回退原 PDF/HTML。
-2. `screen --phase prepare`：从 parse-cache 抽初筛证据摘要（带 page/section locator），产出 `screening.yaml` 待填结构（`paper_type` / `worth_deep_reading` / `judgement_reason` / `relevance_to_current_research` / `claims` 留空待 agent 填）。`paper_type` 是 agent 判断，脚本不做关键词推断；`keyword_mentions` 仅作定位线索，**不是评分**。
-3. `screen --phase verify`：校验 agent 填入的判断（含 `paper_type ∈ {method_system, benchmark, survey}`、`validate_claims` 结构 + `verify_claim_evidence` 逐字证据）后落盘；不合法则拒绝并指出问题。
-4. `complete-note --phase prepare`：新 intake 必须先有 evidence-verified screening，再按 `quick_screen.paper_type` 产出对应的**五要素待填骨架**；prepared/unverified screening 一律 fail-closed。已验证初筛仍无法分类，或旧单元已有 note 产物但没有类型时，才按 `method_system` 兼容；每要素留空、需 agent 填内容 + ≥1 条 `evidence_refs`。
-5. `complete-note --phase verify`：逐要素校验（结构 + 逐字证据），全过才写 `note.md` + `core_content`（过 `has_substantive_content`，可被确认）；任一要素空/无据/造据则拒绝并点名。
-6. `prewarm-cache` / `extract-figures` / `refresh-structure`：纯机械搬运（解析、裁图、结构提示）。
-7. AI judgement 默认保持 `pending_user_confirmation`；确认走已有空心门（`confirm`）。
+2. `complete-note --phase prepare`：不经过 quick screen，直接产出统一 deep-read scaffold。`paper_type / paper_type_reason / paper_type_evidence_refs` 留空，三套五要素分支全部存在且内容留空。
+3. Runtime Agent 依据材料选择 `paper_type ∈ {method_system, benchmark, survey}`，填写分类理由与逐字 evidence，只填写对应分支的五要素；未选分支保持空白。
+4. `complete-note --phase verify`：同时校验类型 evidence、所选五要素与未选分支为空。全过才生成独立 `claim-paper-type` + 五条要素 claims，将类型写入 `payload.deep_read.paper_type`，并写 `note.md` + `core_content`；任一类型/理由/要素空、无据、造据或跨分支混填都拒绝。
+5. `prewarm-cache` / `extract-figures` / `refresh-structure`：纯机械搬运（解析、裁图、结构提示）。
+6. AI judgement 默认保持 `pending_user_confirmation`；类型与五要素作为同一份 deep-read 判断一起确认。
 
 Markdown 阅读层中的图片只提供本地、可引用的源材料。脚本不得从图片文件名、alt text 或 OCR 片段自动生成论文判断；runtime agent 若使用图表内容，仍需在会话中实际阅读并挂可核验 evidence。
 
@@ -35,22 +32,11 @@ Markdown 阅读层中的图片只提供本地、可引用的源材料。脚本�
 - `benchmark`：motivation / task_design / metrics / coverage_limitation / insight
 - `survey`：scope / taxonomy / trends / gaps / insight
 
-若初筛已验证但无法归入三类，或旧 record 已有 note 产物但没有 `quick_screen.paper_type`，按 `method_system` 处理，保持原五要素行为；新单元不得借此兜底绕过初筛验证。类型分类来自 runtime agent 的初筛判断；脚本只提供槽位、校验枚举并选择结构。
+类型分类来自 runtime agent 的 deep-read 判断；脚本只提供槽位、校验枚举并选择结构，绝不根据关键词猜类型。旧 record 可只读 `quick_screen.paper_type` 并继续旧扁平 note fill，但不得写回该字段；新 unit 必须提供类型理由与 evidence，不得借兼容路径兜底。
 
 每个 required element = 一条 judgement-class claim，**必须**带 ≥1 条 `evidence_refs`：
 
-```yaml
-elements:
-  - element: motivation      # 必须属于该 paper_type 的 required_elements，五个全填
-    claim_type: inference    # experiment/limitation 为 evaluation，其余 inference
-    content: "agent 用自己的话写这一要素的理解"
-    evidence_refs:
-      - source_unit_id: p-...
-        artifact: parse-cache.yaml
-        locator: "page=3"          # PDF: page=N ; HTML: section 或 section:<anchor>（B4）
-        quote: "短逐字片段"          # 脚本校验它逐字存在于 artifact（归一化空白后子串）
-        summary: "可选一句转述"
-```
+统一 fill 顶层先填写 `paper_type`、`paper_type_reason` 与至少一条 `paper_type_evidence_refs`；随后只填写 `element_sets.<paper_type>` 下的五个 element。每个 element 包含 `claim_type / content / evidence_refs`，其中 evidence 必须含当前 paper id、`parse-cache.yaml`、page/section locator 与短逐字 quote。
 
 落盘映射：
 
@@ -60,22 +46,13 @@ elements:
 
 所选五要素同时渲染进 `note.md`；每种类型都写入 `core_content`，因此实质门仍按原规则工作。
 
-## 常用命令
+## 用户入口
 
-```bash
-${RESEARCH_PYTHON:-python3} .agents/skills/paper-analyst/scripts/paper.py prewarm-cache --paper-id p-example-bf86ee46
-${RESEARCH_PYTHON:-python3} .agents/skills/paper-analyst/scripts/paper.py screen --paper-id p-example-bf86ee46 --phase prepare
-${RESEARCH_PYTHON:-python3} .agents/skills/paper-analyst/scripts/paper.py screen --paper-id p-example-bf86ee46 --phase verify
-${RESEARCH_PYTHON:-python3} .agents/skills/paper-analyst/scripts/paper.py complete-note --paper-id p-example-bf86ee46 --phase prepare
-${RESEARCH_PYTHON:-python3} .agents/skills/paper-analyst/scripts/paper.py complete-note --paper-id p-example-bf86ee46 --phase verify --input note-fill.yaml
-${RESEARCH_PYTHON:-python3} .agents/skills/paper-analyst/scripts/paper.py extract-figures --paper-id p-example-bf86ee46
-${RESEARCH_PYTHON:-python3} .agents/skills/paper-analyst/scripts/paper.py refresh-structure --paper-id p-example-bf86ee46
-${RESEARCH_PYTHON:-python3} .agents/skills/paper-analyst/scripts/paper.py confirm --paper-id p-example-bf86ee46 --confirmed-by research-lead --evidence kb/units/papers/p-example-bf86ee46/note.md
-${RESEARCH_PYTHON:-python3} .agents/skills/paper-analyst/scripts/paper.py reject --paper-id p-example-bf86ee46
-```
+- `kb ingest <论文来源>`：入库并直接进入 deep-read prepare；Agent 在同一流程完成类型与五要素填写/核验。
+- `kb review`：展示待用户确认的类型与完整笔记判断。
 
 ## 启动澄清（Agent 用）
 
-- 只做初筛还是直到完整笔记？默认初筛通过后按 paper_type 出五要素笔记。
+- 是否现在深读？`ask_first` 配置下先问；一旦选择深读就完成类型适配的五要素笔记。
 - 侧重方法、实验还是局限？默认全面均衡。
 - 深度：默认读 document.md 并用 parse-cache 核对引用；需图表细节再回 PDF。
