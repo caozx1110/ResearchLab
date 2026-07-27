@@ -475,6 +475,7 @@ def _idea_verify_preflight(args, root: Path) -> None:
                 selection_id=str(args.preference_selection_id or ""),
             )
         except ValueError as exc:
+            print(f"[reject] idea generate 验证失败：{exc}", file=sys.stderr)
             raise SystemExit(1) from exc
         return
     if args.command not in {"analyze", "review", "discuss", "spar"}:
@@ -491,6 +492,13 @@ def _idea_verify_preflight(args, root: Path) -> None:
     orientation_path = unit_root / f"{operation}-orientation.yaml"
     corpus_path = unit_root / f"{operation}-evidence-corpus.yaml"
     exclusions = _corpus_exclusions(unit_root, operation)
+    candidate_path = _resolve_verify_input(
+        root,
+        unit_root,
+        fill_path.name,
+        args.input,
+        operation=operation,
+    )
     try:
         context = idea_preference_context(
             root,
@@ -507,9 +515,6 @@ def _idea_verify_preflight(args, root: Path) -> None:
             context=context,
             selection_id=str(getattr(args, "preference_selection_id", "") or ""),
         )
-        candidate_path = Path(args.input) if str(args.input or "") else fill_path
-        if not candidate_path.is_absolute():
-            candidate_path = unit_root / candidate_path
         fill, _binding = _bound_yaml(
             candidate_path,
             logical_identity=candidate_path.relative_to(root).as_posix(),
@@ -541,6 +546,7 @@ def _idea_verify_preflight(args, root: Path) -> None:
         if violations:
             raise ValueError("idea fill or cited evidence failed verification: " + "; ".join(violations))
     except ValueError as exc:
+        print(f"[reject] idea {operation} 验证失败：{exc}", file=sys.stderr)
         raise SystemExit(1) from exc
 
 
@@ -974,6 +980,70 @@ def _is_citable_text_artifact(path: Path) -> bool:
         return True
     stem = path.name.lower().split(".", 1)[0]
     return stem in CITABLE_TEXT_NAMES
+
+
+def _describe_probe_path(root: Path, candidate: Path) -> str:
+    try:
+        return candidate.absolute().relative_to(root.absolute()).as_posix()
+    except ValueError:
+        return str(candidate)
+
+
+def _resolve_verify_input(
+    root: Path,
+    unit_root: Path,
+    default_name: str,
+    explicit: object,
+    *,
+    operation: str,
+) -> Path:
+    """Resolve a verify ``--input`` the same way blog/repo analysts do.
+
+    A bare filename or relative path is probed against the unit directory
+    first, then against the project root; an absolute path is used as given.
+    A missing input always fails loudly with every probed location instead of
+    exiting silently.
+    """
+    text = str(explicit or "").strip()
+    if not text:
+        default_path = unit_root / default_name
+        if default_path.exists() or default_path.is_symlink():
+            return default_path
+        print(
+            f"[reject] idea {operation} verify input not found：默认填写文件 "
+            f"{_describe_probe_path(root, default_path)} 不存在；"
+            f"请先运行 --phase prepare 生成骨架，或用 --input 指定已填写的文件。",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    raw = Path(text).expanduser()
+    candidates = [raw] if raw.is_absolute() else [unit_root / raw, root / raw]
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = candidate.absolute().as_posix()
+        if key not in seen:
+            seen.add(key)
+            deduped.append(candidate)
+    for candidate in deduped:
+        if candidate.exists() or candidate.is_symlink():
+            try:
+                candidate.absolute().relative_to(root.absolute())
+            except ValueError:
+                print(
+                    f"[reject] idea {operation} 验证输入必须位于工作区内；"
+                    f"请把文件放到工作区后改用仓库相对路径或裸文件名。",
+                    file=sys.stderr,
+                )
+                raise SystemExit(1) from None
+            return candidate
+    tried = "、".join(_describe_probe_path(root, candidate) for candidate in deduped)
+    print(
+        f"[reject] idea {operation} verify input not found：找不到验证输入 {text}；"
+        f"尝试过 {tried}。裸文件名按 unit 目录解析，也接受仓库相对路径或绝对路径。",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
 
 
 def _bound_yaml(
@@ -1767,9 +1837,23 @@ def _bounded_agent_text(value: object, *, field: str, limit: int = 4000) -> str:
 
 
 def _generation_fill_path(root: Path, args, *, bundle_id: str) -> Path:
-    candidate = Path(args.input) if str(args.input or "") else bundle_root(root, bundle_id) / GENERATION_FILL_NAME
-    if not candidate.is_absolute():
-        candidate = bundle_root(root, bundle_id) / candidate
+    text = str(args.input or "").strip()
+    if not text:
+        candidate = bundle_root(root, bundle_id) / GENERATION_FILL_NAME
+    else:
+        raw = Path(text).expanduser()
+        if raw.is_absolute():
+            candidate = raw
+        else:
+            # Align with the other verify inputs: bundle-relative first, then
+            # project-root relative when only the latter exists.
+            bundle_candidate = bundle_root(root, bundle_id) / raw
+            root_candidate = root / raw
+            candidate = bundle_candidate
+            if not (bundle_candidate.exists() or bundle_candidate.is_symlink()) and (
+                root_candidate.exists() or root_candidate.is_symlink()
+            ):
+                candidate = root_candidate
     try:
         candidate.absolute().relative_to(root.absolute())
     except ValueError as exc:
@@ -2289,6 +2373,32 @@ def _claims_corpus_violations(
     return violations
 
 
+def _corpus_source_unit_ids(corpus: Mapping[str, object]) -> list[str]:
+    """List every unit id whose artifacts are citable inside the frozen corpus."""
+    entries = corpus.get("entries") if isinstance(corpus, Mapping) else None
+    unit_ids: set[str] = set()
+    for item in entries if isinstance(entries, list) else []:
+        if not isinstance(item, Mapping):
+            continue
+        parts = Path(str(item.get("path") or "")).parts
+        if len(parts) >= 4 and parts[:2] == ("kb", "units"):
+            unit_ids.add(parts[3])
+    return sorted(unit_ids)
+
+
+def _corpus_scope_hint(corpus: Mapping[str, object]) -> str:
+    allowed = _corpus_source_unit_ids(corpus)
+    if allowed:
+        listing = f"共 {len(allowed)} 个：{', '.join(allowed)}"
+    else:
+        listing = "0 个（当前冻结语料为空）"
+    return (
+        f"冻结证据语料内可引用的 source_unit_id {listing}；"
+        "如需引用清单外的 unit：先将其入库并链接到本 idea（kb link），"
+        "再重新运行 --phase prepare 重新冻结证据语料后重填"
+    )
+
+
 def _claim_input_violations(
     root: Path,
     claims: list[dict],
@@ -2305,7 +2415,10 @@ def _claim_input_violations(
             consumer_kind=consumer_kind,
         )
     except ValueError:
-        return ["cross-unit evidence sources are missing, ambiguous, or unsafe"]
+        return [
+            "cross-unit evidence sources are missing, ambiguous, or unsafe；"
+            + _corpus_scope_hint(corpus)
+        ]
     before = _claims_corpus_violations(
         root,
         claims,
@@ -2313,7 +2426,7 @@ def _claim_input_violations(
         source_roots=source_roots,
     )
     if before:
-        return before
+        return _with_corpus_scope_hint(before, corpus)
     evidence = _verify_cross_unit_claims(root, claims, source_roots=source_roots)
     after = _claims_corpus_violations(
         root,
@@ -2321,7 +2434,18 @@ def _claim_input_violations(
         corpus,
         source_roots=source_roots,
     )
-    return [*evidence, *after]
+    return _with_corpus_scope_hint([*evidence, *after], corpus)
+
+
+def _with_corpus_scope_hint(violations: list[str], corpus: Mapping[str, object]) -> list[str]:
+    """Append the citable-unit inventory once when a corpus-scope violation exists."""
+    if any(
+        "frozen pre-authoring evidence corpus" in violation
+        or "cross-unit evidence sources are missing" in violation
+        for violation in violations
+    ):
+        violations = [*violations, _corpus_scope_hint(corpus)]
+    return violations
 
 
 def _persist_idea_preference_binding(
@@ -2542,11 +2666,13 @@ def run_analysis_phase(args, root: Path, record: dict, unit_root: Path, *, mode:
     except ValueError as exc:
         print(f"[reject] {mode} preference receipt: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
-    candidate_path = Path(args.input) if args.input else fill_path
-    if not candidate_path.is_absolute():
-        candidate_path = unit_root / candidate_path
-    if not candidate_path.exists():
-        raise SystemExit(f"{mode} verify input not found")
+    candidate_path = _resolve_verify_input(
+        root,
+        unit_root,
+        fill_path.name,
+        args.input,
+        operation=mode,
+    )
     try:
         fill, fill_binding = _bound_yaml(
             candidate_path,
@@ -3352,11 +3478,13 @@ def _dispatch(args, root: Path) -> int:
         except ValueError as exc:
             print(f"[reject] discuss preference receipt: {exc}", file=sys.stderr)
             raise SystemExit(1) from exc
-        fill_path = Path(args.input) if args.input else scaffold_path
-        if not fill_path.is_absolute():
-            fill_path = unit_root / fill_path
-        if not fill_path.exists():
-            raise SystemExit("Discussion fill is missing; prepare or provide the agent-filled conclusion first.")
+        fill_path = _resolve_verify_input(
+            root,
+            unit_root,
+            scaffold_path.name,
+            args.input,
+            operation="discuss",
+        )
         try:
             fill, fill_binding = _bound_yaml(
                 fill_path,
@@ -3525,6 +3653,7 @@ def _dispatch(args, root: Path) -> int:
             target_paths=[unit_root / "record.yaml", *_index_checkpoint_paths(root)],
         )
         return 0
+    print(f"[reject] idea 命令 {args.command} 未被任何处理分支接受，没有做出任何修改。", file=sys.stderr)
     return 1
 
 

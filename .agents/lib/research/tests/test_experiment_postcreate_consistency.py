@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import errno
 import os
 import shutil
 import socket
@@ -159,7 +160,17 @@ def _mutate_created_run(unit_root: Path, mutation: str, outside: Path) -> None:
         endpoint = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
             os.chdir(runs_dir)
-            endpoint.bind(run_path.name)
+            try:
+                endpoint.bind(run_path.name)
+            except OSError as exc:
+                if exc.errno in {
+                    errno.EPERM,
+                    errno.EACCES,
+                    errno.EAFNOSUPPORT,
+                    errno.EPROTONOSUPPORT,
+                }:
+                    pytest.skip("Unix-domain socket bind is unavailable in this environment")
+                raise
         finally:
             os.chdir(previous_cwd)
             endpoint.close()
@@ -171,8 +182,27 @@ def _mutate_created_run(unit_root: Path, mutation: str, outside: Path) -> None:
 
 def _run_log_transaction(module, root: Path, args) -> int:
     targets = module._experiment_command_targets(args, root)
-    with module.command_mutation(root, "experiment-workbench:log-run", targets):
-        return module._dispatch(args, root)
+    active_token = module._ACTIVE_MUTATION.set(True)
+    checkpoint_token = module._PENDING_CHECKPOINT.set(None)
+    created_run_guard_token = module._CREATED_RUN_COMMIT_GUARD.set(None)
+    try:
+        with module.command_mutation(
+            root,
+            "experiment-workbench:log-run",
+            targets,
+            commit_guard=module._validate_created_run_at_commit,
+        ):
+            result = module._dispatch(args, root)
+        pending = module._PENDING_CHECKPOINT.get()
+    finally:
+        module._CREATED_RUN_COMMIT_GUARD.reset(created_run_guard_token)
+        module._PENDING_CHECKPOINT.reset(checkpoint_token)
+        module._ACTIVE_MUTATION.reset(active_token)
+    if pending is not None:
+        module.checkpoint_and_report(
+            pending[0], trigger=pending[1], message=pending[2], target_paths=pending[3]
+        )
+    return result
 
 
 @pytest.mark.parametrize("validation_round", ("before-business-write", "precommit"))
@@ -237,6 +267,39 @@ def test_postcreate_mutation_matrix_fails_closed_in_both_validation_rounds(
     assert mutated
     assert _business_snapshot(root) == before
     assert outside.read_bytes() == b"outside sentinel\n"
+    assert not (record_path.parent / "runs").exists()
+    assert not (record_path.parent / "run-log.yaml").exists()
+    assert load_yaml(record_path) == record
+
+
+def test_postdispatch_run_replacement_fails_at_root_transaction_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _experiment_module()
+    root, record_path, record = _new_experiment(tmp_path, module, "root-precommit")
+    args = _log_args(module, record["id"], seed=79)
+    original_dispatch = module._dispatch
+    mutated = False
+
+    def dispatch_then_replace(*call_args, **call_kwargs):
+        nonlocal mutated
+        result = original_dispatch(*call_args, **call_kwargs)
+        run_path = record_path.parent / "runs" / "run-001.md"
+        replacement = run_path.with_name(".late-postdispatch-replacement")
+        replacement.write_bytes(b"late post-dispatch replacement\n")
+        os.replace(replacement, run_path)
+        mutated = True
+        return result
+
+    monkeypatch.setattr(module, "_dispatch", dispatch_then_replace)
+    before = _business_snapshot(root)
+
+    with pytest.raises(SystemExit, match="created run"):
+        _run_log_transaction(module, root, args)
+
+    assert mutated
+    assert _business_snapshot(root) == before
     assert not (record_path.parent / "runs").exists()
     assert not (record_path.parent / "run-log.yaml").exists()
     assert load_yaml(record_path) == record
@@ -328,7 +391,12 @@ def test_concurrent_no_receipt_allocations_remain_unique(tmp_path: Path) -> None
     ]
     results = [process.communicate(timeout=30) + (process.returncode,) for process in processes]
 
-    assert [returncode for _, _, returncode in results] == [0, 0, 0, 0], results
+    failures = [
+        f"process {index}: rc={returncode}\nstdout={stdout!r}\nstderr={stderr!r}"
+        for index, (stdout, stderr, returncode) in enumerate(results)
+        if returncode != 0
+    ]
+    assert not failures, "\n\n".join(failures)
     assert sorted(path.name for path in (record_path.parent / "runs").iterdir()) == [
         "run-001.md",
         "run-002.md",

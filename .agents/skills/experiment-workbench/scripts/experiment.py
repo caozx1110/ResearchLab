@@ -9,6 +9,7 @@ import os
 import re
 import stat
 import sys
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
@@ -38,8 +39,9 @@ from research.common import (
     write_text_if_changed,
     write_yaml_if_changed,
 )
-from research.core import append_history, build_index, build_unit_id, candidate_pools_path, canonical_record_snapshot_for_record, command_mutation, confirm_unit, default_record, ensure_workspace, kb_root, locate_record, project_root, record_path, rel, topic_taxonomy_path, write_record
+from research.core import append_history, build_index, build_unit_id, candidate_pools_path, canonical_record_snapshot_for_record, checkpoint_and_report, command_mutation, confirm_unit, default_record, ensure_workspace, kb_root, locate_record, project_root, record_path, rel, topic_taxonomy_path, write_record
 from research.evidence import attach_claims, build_verification_receipt, validate_claims, verify_claim_evidence
+from research.journal import workspace_transaction_lock
 from research.judgements import confirmation_binding
 from research.preference_selection import (
     eligible_preferences,
@@ -69,6 +71,33 @@ def _index_targets(root: Path) -> list[Path]:
         topic_taxonomy_path(root),
         candidate_pools_path(root),
     ]
+
+
+# Checkpoint queue (same owner pattern as idea.py's _queue_checkpoint /
+# blog.py's pending-checkpoint): business writes inside the root mutation
+# transaction only QUEUE the git checkpoint; main() flushes it after the
+# transaction commits, so the checkpoint never runs against a half-open journal.
+_ACTIVE_MUTATION: ContextVar[bool] = ContextVar("experiment_active_mutation", default=False)
+_PENDING_CHECKPOINT: ContextVar["tuple[Path, str, str, list[Path]] | None"] = ContextVar(
+    "experiment_pending_checkpoint", default=None
+)
+_CREATED_RUN_COMMIT_GUARD: ContextVar["tuple[Path, dict[str, Any]] | None"] = ContextVar(
+    "experiment_created_run_commit_guard", default=None
+)
+
+
+def _validate_created_run_at_commit() -> None:
+    pending = _CREATED_RUN_COMMIT_GUARD.get()
+    if pending is None:
+        raise SystemExit("Experiment created run commit guard is unavailable.")
+    _validate_created_run_fact(pending[0], pending[1])
+
+
+def _queue_checkpoint(root: Path, *, trigger: str, message: str, target_paths: list[Path]) -> dict:
+    if _ACTIVE_MUTATION.get():
+        _PENDING_CHECKPOINT.set((root, trigger, message, target_paths))
+        return {"committed": False, "status": "pending-transaction-commit"}
+    return checkpoint_and_report(root, trigger=trigger, message=message, target_paths=target_paths)
 
 
 def _program_event_path(root: Path, program_id: str) -> Path:
@@ -1302,7 +1331,18 @@ def _dispatch(args, root: Path) -> int:
             },
             generated_by="experiment-workbench",
         )
+        print(f"已记录实验计划《{args.title}》（编号 {record['id']}，program {args.program_id}）。")
         print(path.relative_to(root))
+        _queue_checkpoint(
+            root,
+            trigger="milestone",
+            message=f"milestone: plan experiment {record['id']}",
+            target_paths=[
+                path,
+                _program_event_path(root, args.program_id),
+                *_index_targets(root),
+            ],
+        )
         return 0
 
     record, path = locate_record(root, args.experiment_id, kind="experiment")
@@ -1404,6 +1444,7 @@ def _dispatch(args, root: Path) -> int:
         )
         created_run_fact = _write_run_file_exclusive(unit_root, run_allocator, run_text)
         _validate_created_run_fact(unit_root, created_run_fact)
+        _CREATED_RUN_COMMIT_GUARD.set((unit_root, created_run_fact))
         run_log_path = append_list_item(
             run_log_document_path,
             f"{args.experiment_id}-run-log",
@@ -1468,8 +1509,23 @@ def _dispatch(args, root: Path) -> int:
                 },
                 generated_by="experiment-workbench",
             )
-        _validate_created_run_fact(unit_root, created_run_fact)
+        print(f"已记录实验运行 {run_id}（实验 {record['id']}，结果：{args.outcome}）：{args.result_summary}")
         print(run_artifact_path)
+        checkpoint_targets = [
+            path,
+            run_path,
+            run_log_document_path,
+            unit_root / "run-log.md",
+            *_index_targets(root),
+        ]
+        if program_id:
+            checkpoint_targets.append(_program_event_path(root, program_id))
+        _queue_checkpoint(
+            root,
+            trigger="milestone",
+            message=f"milestone: log experiment run {run_id} ({record['id']})",
+            target_paths=checkpoint_targets,
+        )
         return 0
 
     if args.command == "follow-up":
@@ -1654,12 +1710,32 @@ def main() -> int:
     root = project_root(PROJECT_ROOT, explicit_root=args.root)
     print_resolved_project_roots(root)
     ensure_workspace(root)
-    with command_mutation(
-        root,
-        f"experiment-workbench:{args.command}",
-        _experiment_command_targets(args, root),
-    ):
-        return _dispatch(args, root)
+    active_token = _ACTIVE_MUTATION.set(True)
+    checkpoint_token = _PENDING_CHECKPOINT.set(None)
+    created_run_guard_token = _CREATED_RUN_COMMIT_GUARD.set(None)
+    try:
+        # Target discovery reads the canonical experiment record.  Hold the
+        # same workspace lease used by the root mutation so a concurrent
+        # atomic record replacement cannot be misreported as "Record not
+        # found" between target discovery and transaction entry.
+        with workspace_transaction_lock(root):
+            with command_mutation(
+                root,
+                f"experiment-workbench:{args.command}",
+                _experiment_command_targets(args, root),
+                commit_guard=_validate_created_run_at_commit if args.command == "log-run" else None,
+            ):
+                result = _dispatch(args, root)
+        pending = _PENDING_CHECKPOINT.get()
+    finally:
+        _CREATED_RUN_COMMIT_GUARD.reset(created_run_guard_token)
+        _PENDING_CHECKPOINT.reset(checkpoint_token)
+        _ACTIVE_MUTATION.reset(active_token)
+    if pending is not None:
+        checkpoint_and_report(
+            pending[0], trigger=pending[1], message=pending[2], target_paths=pending[3]
+        )
+    return result
 
 
 if __name__ == "__main__":

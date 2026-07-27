@@ -36,6 +36,7 @@ from research.common import (
     blank_list_document,
     blank_reporting_events,
     confirm_command as confirm_command_for_record,
+    dump_yaml,
     ensure_dir,
     load_list_document,
     load_yaml,
@@ -48,12 +49,16 @@ from research.common import (
     write_yaml_if_changed,
     yaml_default,
 )
-from research.core import apply_confirmation, append_history, ensure_workspace, is_ready_for_human_review, iter_records, kb_root, load_runtime_preferences, locate_record, checkpoint_and_report, project_root, record_workflow_state, write_record
+from research.core import apply_confirmation, append_history, ensure_workspace, is_ready_for_human_review, iter_records, kb_root, kb_runtime_root, load_runtime_preferences, locate_record, checkpoint_and_report, project_root, record_workflow_state, write_record
 from research.evidence import EvidenceSourceSnapshot, attach_claims, build_verification_receipt, validate_claims, verify_claim_evidence
 from research.judgements import BoundJudgementSnapshot, apply_judgement_rejection, confirmation_binding, discover_pending_judgements, judgement_confirmation_is_current, judgement_snapshot_binding, load_bound_judgement_snapshot, readiness_violations, require_judgement_snapshot
 from research.journal import mutation_transaction
 from research.monitoring import active_monitor_runs, due_subscriptions, unresolved_monitor_outcomes
-from research.preference_selection import resolve_task_preferences, selection_binding
+from research.preference_selection import (
+    resolve_operation_preferences,
+    resolve_task_preferences,
+    selection_binding,
+)
 from research.records import trusted_claim_source_roots
 from research.sources import literature_search_continuations
 from research.surveys import pending_composite_survey_states
@@ -1987,6 +1992,194 @@ def portfolio_preference_context(snapshot: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+PORTFOLIO_SELECTION_DRAFT_NAME = "portfolio-selection-draft.yaml"
+
+
+def portfolio_selection_draft_path(root: Path) -> Path:
+    return kb_runtime_root(root) / PORTFOLIO_SELECTION_DRAFT_NAME
+
+
+def _governance_profile(root: Path) -> str:
+    """Read the workspace governance profile; anything but ``personal`` is strict."""
+    profile = str(load_runtime_preferences(root).get("governance_profile") or "").strip().lower()
+    return "personal" if profile == "personal" else "strict"
+
+
+def _personal_fallback_preference_binding(root: Path, snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Script-side hard-constraint fallback for the personal governance profile.
+
+    No preference receipt is consumed; the canonical hard constraints
+    (profile.resources / profile.constraints / runtime.autonomy) still apply
+    through the operation contract, and their digests are persisted so the
+    stored decision goes stale when the canonical config changes.
+    """
+    try:
+        resolved = resolve_operation_preferences(
+            root,
+            selection_id="",
+            skill="research-orchestrator",
+            operation="plan",
+            canonical_inputs=portfolio_preference_context(snapshot),
+        )
+    except ValueError as exc:
+        raise SystemExit(
+            "Personal-profile hard-constraint fallback is unavailable; canonical preference config is unsafe"
+        ) from exc
+    return {
+        "selection_id": "",
+        "selection_digest": "",
+        "task_context_digest": str(resolved.get("task_context_digest") or ""),
+        "skill": "research-orchestrator",
+        "operation": "plan",
+        "governance_profile": "personal",
+        "hard_value_digests": {
+            str(path): str(digest)
+            for path, digest in (resolved.get("hard_value_digests") or {}).items()
+        },
+    }
+
+
+def _resolve_portfolio_preference_binding(
+    root: Path,
+    selection_id: str,
+    snapshot: dict[str, Any],
+    *,
+    decision_scope: str,
+) -> dict[str, Any]:
+    if selection_id:
+        return dict(
+            selection_binding(
+                _validate_preference_selection_reference(root, selection_id, snapshot)
+            )
+        )
+    if _governance_profile(root) == "personal" and decision_scope == "procedural_planning":
+        return _personal_fallback_preference_binding(root, snapshot)
+    # Strict default: unchanged failure with the established message.
+    _validate_preference_selection_reference(root, "", snapshot)
+    raise SystemExit("Portfolio decision requires an effective preference selection")
+
+
+def _draft_default_decision_id() -> str:
+    stamp = re.sub(r"[^0-9TZ]", "", utc_now_iso().replace("+00:00", "Z"))
+    return f"portfolio-{stamp}"
+
+
+def _candidate_reference_entry(candidate: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "action_id": str(candidate.get("action_id") or ""),
+        "program_id": str(candidate.get("program_id") or ""),
+        "action_type": str(candidate.get("action_type") or ""),
+        "owner_skill": str(candidate.get("owner_skill") or ""),
+        "governance_gate": str(candidate.get("governance_gate") or "none"),
+        "safe_execute_capability": bool(candidate.get("safe_execute_capability")),
+        "binding_digest": str(candidate.get("binding_digest") or ""),
+        "title": str(candidate.get("title") or ""),
+        "reason": str(candidate.get("reason") or ""),
+    }
+
+
+def _draft_has_agent_edits(existing: object, snapshot: dict[str, Any]) -> bool:
+    """True when the on-disk draft already carries Agent-authored content."""
+    if not isinstance(existing, dict):
+        return False
+    if any(
+        str(existing.get(field) or "").strip()
+        for field in ("rationale", "expected_information_gain", "cost_and_risk", "preference_selection_id")
+    ):
+        return True
+    selected = existing.get("selected_action_ids")
+    if isinstance(selected, list) and [str(item) for item in selected if str(item or "").strip()]:
+        candidates = [item for item in snapshot.get("candidates", []) if isinstance(item, dict)]
+        prefill = [str(candidates[0].get("action_id") or "")] if len(candidates) == 1 else []
+        return [str(item) for item in selected] != prefill
+    return False
+
+
+def _write_selection_draft(
+    root: Path,
+    draft_path: Path,
+    snapshot: dict[str, Any],
+    *,
+    profile: str,
+) -> bool:
+    """Write the fill-in draft; keep an in-progress draft for the same snapshot.
+
+    Returns True when a fresh draft was written, False when an Agent-edited
+    draft bound to the current snapshot digest was left untouched.
+    """
+    ensure_dir(draft_path.parent)
+    if draft_path.is_file() and not draft_path.is_symlink():
+        existing = load_yaml(draft_path, default={})
+        if isinstance(existing, dict) and _draft_has_agent_edits(existing, snapshot):
+            if str(existing.get("candidate_snapshot_digest") or "") == str(
+                snapshot.get("candidate_snapshot_digest") or ""
+            ):
+                return False
+            # The edited draft is stale; keep its text next to the fresh one.
+            backup = draft_path.with_name(draft_path.stem + ".stale.yaml")
+            write_text_if_changed(backup, draft_path.read_text(encoding="utf-8"))
+    write_text_if_changed(
+        draft_path,
+        render_portfolio_selection_draft(snapshot, profile=profile),
+    )
+    return True
+
+
+def render_portfolio_selection_draft(snapshot: dict[str, Any], *, profile: str) -> str:
+    """Render the Agent-fillable portfolio decision draft as commented YAML."""
+    candidates = [item for item in snapshot.get("candidates", []) if isinstance(item, dict)]
+    selected_action_ids: list[str] = []
+    if profile == "personal" and len(candidates) == 1:
+        action_id = str(candidates[0].get("action_id") or "")
+        if action_id:
+            selected_action_ids = [action_id]
+    body = {
+        "decision_id": _draft_default_decision_id(),
+        "kind": PORTFOLIO_DECISION_KIND,
+        "candidate_snapshot_digest": str(snapshot.get("candidate_snapshot_digest") or ""),
+        "scope": snapshot.get("scope") if isinstance(snapshot.get("scope"), dict) else {},
+        "selected_action_ids": selected_action_ids,
+        "rationale": "",
+        "expected_information_gain": "",
+        "cost_and_risk": "",
+        "preference_selection_id": "",
+        "decision_scope": "procedural_planning",
+        "program_decision_ids": [],
+        "decided_at": utc_now_iso(),
+    }
+    reference = {
+        "candidate_reference": [_candidate_reference_entry(item) for item in candidates],
+        "preference_context": {
+            "skill": "research-orchestrator",
+            "operation": "plan",
+            "canonical_inputs": portfolio_preference_context(snapshot),
+        },
+    }
+    header = [
+        "下一步选择草稿（由 prepare-next-selection 生成，可直接编辑本文件）。",
+        "填写步骤：",
+        "  1. 阅读文末 candidate_reference 候选清单（含 binding_digest 与事实摘要）；",
+        "  2. 把选中的 action_id 填入 selected_action_ids（至少一项，可多选）；",
+        "  3. 填写 rationale / expected_information_gain / cost_and_risk 三个字段；",
+        "  4. strict 治理档还需填 preference_selection_id（偏好回执 id）；",
+        "     回执的 canonical 任务输入（skill=research-orchestrator, operation=plan，",
+        "     含逐字节 scope）已在文末 preference_context 给出，直接复用即可；",
+        "     personal 治理档可留空，脚本会按 canonical 配置兜底应用硬约束；",
+        "  5. 运行 verify-next-selection / record-next-selection，",
+        "     参数 --selection-file kb/.runtime/portfolio-selection-draft.yaml。",
+        "字段说明：decision_id 可保留默认；candidate_snapshot_digest 与 scope 来自当前快照，",
+        "请勿修改；decision_scope 涉及研究判断时改为 research_judgement 并附 program_decision_ids。",
+    ]
+    if selected_action_ids:
+        header.append("当前仅有一个候选行动，selected_action_ids 已预填，只需补齐三个理由字段。")
+    return (
+        "".join(f"# {line}\n" for line in header)
+        + dump_yaml(body)
+        + "\n# ---- 以下为只读参考信息（verify/record 会忽略这些字段，无需删除） ----\n"
+        + dump_yaml(reference)
+    )
+
+
 def _load_portfolio_history(root: Path) -> dict[str, Any]:
     path = portfolio_history_path(root)
     if path.parent.is_symlink() or path.is_symlink() or (path.exists() and not path.is_file()):
@@ -2135,15 +2328,16 @@ def _portfolio_decision_validation_plan(
     for field in ("rationale", "expected_information_gain", "cost_and_risk"):
         if not str(decision.get(field) or "").strip():
             raise SystemExit(f"Portfolio decision requires non-empty {field}")
-    preference_selection_id = str(decision.get("preference_selection_id") or "").strip()
-    effective_preferences = _validate_preference_selection_reference(
-        root,
-        preference_selection_id,
-        snapshot,
-    )
     decision_scope = str(decision.get("decision_scope") or "procedural_planning").strip()
     if decision_scope not in PORTFOLIO_DECISION_SCOPES:
         raise SystemExit("Portfolio decision_scope is invalid")
+    preference_selection_id = str(decision.get("preference_selection_id") or "").strip()
+    preference_selection_binding = _resolve_portfolio_preference_binding(
+        root,
+        preference_selection_id,
+        snapshot,
+        decision_scope=decision_scope,
+    )
     raw_program_decision_ids = decision.get("program_decision_ids", [])
     if not isinstance(raw_program_decision_ids, list):
         raise SystemExit("Portfolio decision program_decision_ids must be a list")
@@ -2187,7 +2381,7 @@ def _portfolio_decision_validation_plan(
         "expected_information_gain": str(decision.get("expected_information_gain") or "").strip(),
         "cost_and_risk": str(decision.get("cost_and_risk") or "").strip(),
         "preference_selection_id": preference_selection_id,
-        "preference_selection_binding": selection_binding(effective_preferences),
+        "preference_selection_binding": preference_selection_binding,
         "decision_scope": decision_scope,
         "program_decision_ids": program_decision_ids,
         "program_decision_bindings": program_decision_bindings,
@@ -2267,21 +2461,41 @@ def current_portfolio_decision(root: Path, snapshot: dict[str, Any]) -> dict[str
             stored_program_bindings = current.get("program_decision_bindings")
             if not isinstance(stored_program_bindings, dict) or stored_program_bindings != current_program_bindings:
                 stale_reasons.append("program_decision_changed")
-    try:
-        effective_preferences = _validate_preference_selection_reference(
-            root,
-            str(current.get("preference_selection_id") or ""),
-            snapshot,
-        )
-    except SystemExit:
-        stale_reasons.append("preference_selection_stale")
+    stored_selection_id = str(current.get("preference_selection_id") or "")
+    if stored_selection_id:
+        try:
+            effective_preferences = _validate_preference_selection_reference(
+                root,
+                stored_selection_id,
+                snapshot,
+            )
+        except SystemExit:
+            stale_reasons.append("preference_selection_stale")
+        else:
+            stored_preference_binding = current.get("preference_selection_binding")
+            if (
+                not isinstance(stored_preference_binding, dict)
+                or stored_preference_binding != selection_binding(effective_preferences)
+            ):
+                stale_reasons.append("preference_selection_changed")
+    elif (
+        _governance_profile(root) == "personal"
+        and str(current.get("decision_scope") or "") == "procedural_planning"
+    ):
+        try:
+            recomputed_binding = _personal_fallback_preference_binding(root, snapshot)
+        except SystemExit:
+            stale_reasons.append("preference_selection_stale")
+        else:
+            stored_preference_binding = current.get("preference_selection_binding")
+            if (
+                not isinstance(stored_preference_binding, dict)
+                or stored_preference_binding != recomputed_binding
+            ):
+                stale_reasons.append("preference_selection_changed")
     else:
-        stored_preference_binding = current.get("preference_selection_binding")
-        if (
-            not isinstance(stored_preference_binding, dict)
-            or stored_preference_binding != selection_binding(effective_preferences)
-        ):
-            stale_reasons.append("preference_selection_changed")
+        # Strict default keeps the historical outcome for receipt-less items.
+        stale_reasons.append("preference_selection_stale")
     current["effective_status"] = "stale" if stale_reasons else "current"
     current["stale_reasons"] = sorted(set(stale_reasons))
     if not stale_reasons:
@@ -3186,17 +3400,63 @@ def main() -> int:
         snapshot = portfolio_candidate_snapshot(root, selected_program_id=selected_program_id)
         has_records = bool(iter_records(root))
         if args.command == "prepare-next-selection":
+            profile = _governance_profile(root)
+            draft_path = portfolio_selection_draft_path(root)
+            draft_relative = ""
+            kept_existing_draft = False
+            if args.json:
+                # Programmatic callers (e.g. the kb status dispatcher) stay
+                # read-only; they already receive the snapshot and template.
+                if draft_path.is_file() and not draft_path.is_symlink():
+                    draft_relative = draft_path.relative_to(root).as_posix()
+            elif snapshot["candidate_count"] > 0:
+                draft_relative = draft_path.relative_to(root).as_posix()
+                kept_existing_draft = not _write_selection_draft(
+                    root, draft_path, snapshot, profile=profile
+                )
             payload = {
                 "candidate_snapshot": snapshot,
                 "portfolio_decision_fill": portfolio_decision_fill_template(snapshot),
+                "selection_draft_path": draft_relative,
+                "governance_profile": profile,
             }
             if args.json:
                 print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
-            else:
+            elif not draft_relative:
+                print("当前没有待比较的研究行动，未生成选择草稿。")
+            elif kept_existing_draft:
                 print(
-                    f"Agent 可以从当前 {snapshot['candidate_count']} 项可行行动中进行比较；"
-                    "脚本尚未选择任何下一步。"
+                    f"检测到正在填写的选择草稿：{draft_relative}（与当前快照一致，未覆盖）。\n"
+                    f"继续补齐后运行 verify-next-selection --selection-file {draft_relative} 校验，"
+                    "再用 record-next-selection 记录。"
                 )
+            else:
+                single_prefilled = profile == "personal" and snapshot["candidate_count"] == 1
+                if single_prefilled:
+                    lines = [
+                        f"已生成可填写的下一步选择草稿：{draft_relative}（唯一候选已预填）。",
+                        "当前为 personal 治理档且只有一个候选：在草稿中补齐 rationale、"
+                        "expected_information_gain、cost_and_risk 三个字段即可，无需偏好回执。",
+                    ]
+                else:
+                    lines = [
+                        f"已生成可填写的下一步选择草稿：{draft_relative}"
+                        f"（共 {snapshot['candidate_count']} 项候选行动；脚本未替 Agent 做选择）。",
+                        "请编辑草稿：从 candidate_reference 里挑选 action_id 填入 selected_action_ids，"
+                        "并填写 rationale、expected_information_gain、cost_and_risk。",
+                    ]
+                    if profile == "personal":
+                        lines.append("当前为 personal 治理档：无需偏好回执，脚本会按 canonical 配置兜底应用硬约束。")
+                    else:
+                        lines.append(
+                            "当前为 strict 治理档：记录前还需提供 preference_selection_id 偏好回执，"
+                            "回执所需 canonical 任务输入已写入草稿的 preference_context 段。"
+                        )
+                lines.append(
+                    f"填写完成后运行 verify-next-selection --selection-file {draft_relative} 校验，"
+                    "再用 record-next-selection 记录。"
+                )
+                print("\n".join(lines))
             return 0
         if args.command in {"verify-next-selection", "record-next-selection"}:
             fill_path = Path(args.selection_file).expanduser()
