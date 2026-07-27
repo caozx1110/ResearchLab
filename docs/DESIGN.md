@@ -156,6 +156,8 @@ Receipt 不改变原 epistemic type。内容或 evidence 改变时，旧 receipt
 
 已验证 survey 的 `consumer_binding` 保存 selection、unit、canonical content、confirmation receipt 与 evidence artifact digests。verify 发布前重新核对 anchor；任一上游变化即 fail closed。Navigator、report 等消费者以纯读方式判断：已有输入变化/删除、confirmation 失效或同一 selection 出现新 unit，都会把 survey 标为 stale，且不得把旧 judgement 混入正式报告。
 
+论文链由 `report-author` 拥有，不新增公开动词。bibliography 以 canonical paper id 派生稳定 citation key，并只从结构化 citation metadata 确定性渲染；figure index 以 paper + 规范化 caption 编号派生稳定 ref key，PNG 资产按内容 hash 地址化，source/index/asset 任一字节漂移即从消费面撤下。论文初稿固定七节，各节是独立 `paper_draft_section` side judgement：prepare 只冻结 outline、program selection、current confirmed claim/evidence、citation 与 figure catalog 并创建空 fill，Agent 写正文后 verify 机械搬运逐字 evidence，再经统一 review 由真人逐节确认。section receipt 同时绑定正文与实际使用的上游 anchor；只有七节全部 current confirmed 时，Markdown、LaTeX、BibTeX 和 publication manifest 才在一个 root transaction 中原子发布，stale 或 tamper 失败保留旧四件套。
+
 Experiment run 的 fingerprint 绑定 experiment id、tested hypothesis、规范化 changes、typed metric schema、artifact identities 与 config/input revision，但不绑定时间、结果摘要或 observed metric values。run id 仍单调递增；相同 fingerprint 的不同 seed 组成 repeat group，完全相同 fingerprint + seed/config revision 的再次写入必须显式声明 rerun/retry 并给 reason。编号、fingerprint、重复检查和相关文件写入都在同一锁与事务内完成；脚本不从重复数据推断显著性或因果。
 
 ## 对话层与 Agent 协议

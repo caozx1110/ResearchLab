@@ -33,7 +33,7 @@
 | `idea-workbench` | beta | 候选、evidence-first 评审、讨论和显式选择已实现；创新性判断仍需用户或专家拍板。 |
 | `method-designer` | beta | 基于仓库证据的方法交接和实验矩阵已实现；生成设计仍需专家复核。 |
 | `experiment-workbench` | beta | 强类型计划、带 fingerprint 的可重复运行记录、follow-up 和确认门控诊断已实现；诊断质量仍依赖 Agent。 |
-| `report-author` | beta | 报告与大纲会消费持久 claim、event、evidence 和 decision；成文质量与覆盖仍需复核。 |
+| `report-author` | beta | 报告、大纲、稳定引用库与七节论文初稿会消费版本绑定的 claim、evidence、citation 和 figure；成文质量与覆盖仍需复核。 |
 | `skill-evolution-advisor` | scaffold | 本地学习与诊断问题的记录、复核已存在，不承诺自动修改 skill。 |
 | `wiki-adapter` | scaffold | 仅提供轻量兼容与路由，不是独立分析引擎。 |
 | `research-navigator` | dev-only | 仅作为可选投影辅助，不作为正式产品入口或事实源宣传。 |
@@ -216,6 +216,8 @@ Paper、repo 和 blog 使用同一套 review readiness 规则。事实型 metada
 ```
 
 Run log 是事实；diagnosis 是推断，默认待确认。报告系统从 program events、confirmed artifacts 和明确标注的 pending material 汇总，不会把未确认判断伪装成定论。
+
+需要论文初稿时，可以直接说“基于当前 program 的大纲和已确认材料，逐节起草论文并让我确认”。系统先冻结当前 outline、已确认 claim/evidence、稳定 citation key 与可用 figure ref，只准备七节待填结构；正文由 Agent 基于这些材料逐段填写，每节都在 `kb review` 中单独展示和确认。只有七节都仍是当前已确认版本时，才会一起发布 Markdown、LaTeX、去重 BibTeX 和发布回执；上游证据、引用元数据、图片资产或正文变化后，旧确认不会继续生效，也不会覆盖上一版完整输出。
 
 ## 恢复、撤销与版本
 

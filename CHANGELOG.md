@@ -4,6 +4,12 @@ All notable changes to this project will be documented here. The format follows 
 
 ## [Unreleased]
 
+### Added (R3, 2026-07-27)
+
+- Added deterministic bibliography export for a program's complete canonical paper selection. Citation keys derive from unit identity; DOI/arXiv/source identities deduplicate fail-closed; raw provider BibTeX is never rendered.
+- Added `figure-index/v1` with normalized caption numbering, stable paper-bound reference keys, hash-addressed PNG assets, and source/index/asset byte-currentness checks. Figure captions and keys are available to search, Obsidian, reports, and drafts without mechanically selecting “key figures”.
+- Added an evidence-bound seven-section paper-draft workflow owned by `report-author`. Runtime-Agent prose binds current confirmed claims, citations, and optional figures; each section uses the unified human-confirmation gate, and only seven current confirmed sections can atomically publish Markdown, LaTeX, BibTeX, and a byte-bound publication manifest.
+
 ### Added (R2, 2026-07-27)
 
 - Added canonical `concept` knowledge units with a literature-synthesizer prepare/fill/verify flow. A concept requires at least three current confirmed source units; its Agent-authored definition and association roles require verbatim evidence, remain human-confirmation-gated, bind their upstream snapshots, and project into unified search and no-plugin Obsidian pages.
