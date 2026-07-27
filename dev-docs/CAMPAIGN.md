@@ -8,28 +8,28 @@
 ## 验收清单（Definition of Done）
 
 ### 功能验收
-- [ ] A1 四类真实来源一链入库+深读骨架，≤2 次交互；5 链批量不逐个盘问
+- [x] A1 四类真实来源一链入库+深读骨架，≤2 次交互；5 链批量不逐个盘问
 - [x] A2 快筛已移除，auto_screen 退役
 - [x] A3 概念页（提取→确认→定义带逐字出处+关联清单；find/Obsidian 可达）
-- [ ] A4 检索三类（中/英/代码符号带 file:line），常规库 <3s
-- [ ] A5 综述 ≥5 单元（taxonomy/trends/gaps，claim 带证据绑上游，确认后可被报告消费）
-- [ ] A6 idea 全链（捕获→分析→讨论归档→选中→method handoff）
+- [x] A4 检索三类（中/英/代码符号带 file:line），常规库 <3s
+- [x] A5 综述 ≥5 单元（taxonomy/trends/gaps，claim 带证据绑上游，确认后可被报告消费）
+- [x] A6 idea 全链（捕获→分析→讨论归档→选中→method handoff）
 - [x] A7 实验导入 ≥10 run；diagnose 确认门；audit 零 error 零 dirty
 - [x] A8 周报一句话可交差；PPT 素材差异化；与 outline 三者明显不同
 - [x] A9 论文 outline→分节草稿→bib 导出→LaTeX/MD 落 output/
 - [x] A10 图表 caption/编号索引，稳定引用键
 - [x] A11 偏好观察式记录+确认后生效；init 两问落盘且被消费
-- [ ] A12 undo 点名；restore 无参列清单可按编号恢复；中断 resume 成功
-- [ ] A13 交互章程冷验收（三场景 10 条逐条打分）
+- [x] A12 undo 点名；restore 无参列清单可按编号恢复；中断 resume 成功
+- [x] A13 交互章程冷验收（三场景 10 条逐条打分）
 
 ### 质量验收
-- [x] Q1 pytest 全套绿（普通文件型 scratch runtime；R6 冷修复 `2301 passed, 18 skipped`；不得回退新行为凑绿）
-- [x] Q2 skill_validator 15/15；冷装约 2s；install.sh install+update+uninstall 三态正常
-- [ ] Q3 GOLDEN_SUITE 8 条全过且零机制摸索失败
+- [x] Q1 pytest 全套绿（普通文件型 scratch runtime；最终 `2313 passed, 18 skipped`；不得回退新行为凑绿）
+- [x] Q2 skill_validator 15/15；冷装 2.15s；install.sh install+update+uninstall 三态正常
+- [x] Q3 GOLDEN_SUITE 8 条全过且零机制摸索失败
 - [x] Q4 单任务规则文本 ≤8k tokens；kb next ≤3 步
-- [ ] Q5 静默失败为零（非零退出带一行可行动中文原因；私有协议含期望格式）
-- [ ] Q6 公开输出零 traceback/零绝对路径（含 [root] 行治理）
-- [ ] Q7 SCHEMAS/DESIGN/USER_GUIDE/README/CHANGELOG 与实现一致（rc 状态单一事实源）
+- [x] Q5 静默失败为零（非零退出带一行可行动中文原因；私有协议含期望格式）
+- [x] Q6 公开输出零 traceback/零绝对路径（含 [root] 行治理）
+- [x] Q7 SCHEMAS/DESIGN/USER_GUIDE/README/CHANGELOG 与实现一致（rc 状态单一事实源）
 
 ## 轮次记录
 
@@ -107,11 +107,17 @@
 - G6 固定提交 `7d22344` 冷装验收 PASS：安装副本显式包含 byte-identical `AGENT_GUIDE.md`；点名 human note 后 exact bytes 冻结为 `source_origin=human-note` 的 blog，四槽 Agent fill/逐字 evidence/verify 后保持 pending。nested、symlink、FIFO、non-UTF8、oversize、review-sheet basename/schema/marker、late drift 与事务故障均 fail closed；重复 human note 幂等、与 generic 同 bytes 不跨 provenance 合并；原 note 不进入任何 checkpoint。scratch 前后源码根真实 `kb/` tree digest 同为 `86953d91e901b6f77b31ca392588a90fd3ea5ae199be14b1fb45742ca6d3b30a`。
 - Q4 完成：固定 `tiktoken==0.13.0` / `cl100k_base` 对完整 `AGENTS + AGENT_GUIDE + 单个 discoverable SKILL` 组合逐份计数；规则瘦身后 global 由 8020 降至 4059，当前最坏组合 `kb-cli=7784/8000`。G5 冷验收已证明 `kb next`/园艺公开候选最多三步。
 
-### R6 终验与冷验收修复（施工中，2026-07-27）
+### R6 终验与冷验收修复（完成，2026-07-27）
 - 第一轮固定 `216f401` 三路冷验收如实报告：A13 交互章程 30/30，但 paper 类型 wire text 使公开 review fail closed、周报 fill 要 Agent 手改 owner status/label 且成品泄漏 slug/internal refs/receipt 术语；GOLDEN 的 G3 repo root 规则不清、G5 新关联材料无法安全刷新 corpus、G6 缺 decisions 明示与读者化投影；功能线 A1/A4/A5 通过，A6 因讨论归档未 checkpoint、A12 因 undo 未点名对象而 partial。长网页的一次超时发生在宿主工具执行边界，另有较小真实 blog 正常完成，暂不冒充产品非零退出。
 - 冷修复已在源码独立复现后完成：paper 类型仅对 exact canonical claim 做安全中文投影；repo 根从 fill orientation 读取；idea analyze/review 增加 anchor-bound 显式 corpus refresh 并保留白名单 Agent 字段；weekly owner 预填 status/labels，以计划标题、自然语言类别、编号来源和分组缺失项交付；discussion/idea fill 与讨论 note 进入精确 checkpoint；undo 从 journal target 派生安全对象名；source intake 失败给上传或本地文件恢复路径。canonical claim bytes 的 pending 字段不回写，current top-level ConfirmationReceipt 仍是唯一确认权威。
 - 修复后质量门：定向/联合 `515 passed`，规则/metadata/公开文档 `47 passed`，Python 3.9.6 compile、`Validated 15 skills.`、`git diff --check` 通过；完整套件 `2301 passed, 18 skipped, 7 warnings`（10m25s），warning 均为既有 SWIG deprecation。规则 global `4059`，最坏组合 `7784/8000`。仓库根真实 `kb/` 六个既有 dirty 文件哈希与施工前完全一致。
-- 当前下一步：固定提交本轮冷修复，再从该提交全新安装复跑 A13、G3/G5/G6、A6/A12 与安装生命周期；复跑前不提前勾 Q3/Q5/Q6/Q7。
+- 固定 `780fe4c` 后三路全新冷复验：A1/A4/A5/A6/A12 主链通过，A13 章程 30/30；G1–G4 通过。冷验收另抓到真实 degraded arXiv→本地 PDF 被 duplicate 吞掉、周报 wire/event 文案、G5/G6 私有机制文档、良性 inline code、Obsidian frontmatter/export clean、历史 restore shared-target CAS、survey fill checkpoint 和 undo 对象名等缺口。主线程逐条独立复现后才修改。
+- `f2dc231` 修复：来源 revision 保留旧 raw/derived bytes并写双向 lineage；已 verify/confirm 旧判断请求用户决策；周报 reader projection；G5/G6 最小调用合同；Obsidian 自然 sheet/export checkpoint；historical restore 区间语义；survey fill exact checkpoint；public undo 当前 repo-choice 名称。定向 `86/450/227` 级联回归与完整套件 `2312 passed, 18 skipped` 通过。
+- 固定 `f2dc231` 的新冷验收确认 G1–G8、A12、survey checkpoint 和章程主链通过，又诚实报告三项尾缺：完整 45 页 PDF 因少量 converter warning 被 revision 门误拒、processed Obsidian sheet 未进 apply checkpoint、method confirmation 的 in-process owner stderr 泄漏英文 `[warn]`。三项均在独立 reproduction 后修复。
+- `1f211ad` 最终修复：PDF revision 资格使用 raw bytes + 连续逐页 locator + ≥2 页/≥4000 字符实质 parse，继续诚实保留 degraded/warnings；processed sheet 与 canonical targets 同一 exact checkpoint，private runtime registry 不入 Git；owner stderr 有界留在 private protocol。完整套件 `2313 passed, 18 skipped, 7 warnings`（10m32s），Python 3.9 compile、15/15 validator、diff check 通过。
+- 两条全新聚焦 cold closure 均 PASS：真实联网下载 `2607.21670`（7,772,945 bytes、45 页、SHA `172ce8…16c`）升级 exit 0，新 revision active、旧 archived、双向 lineage、旧 5 项 evidence SHA 不变、parse 1..45/142110 chars、Git clean；review public stderr 0B、4 条 warning 只在 private protocol，Obsidian apply commit 同含 processed sheet/canonical record/派生索引，`.runtime` 零 tracked、最终 Git clean。
+- 最终安装生命周期：snapshot cold install 2.15s，`kb init/help` 正常；no-change update 0.51s；uninstall 移除受管文件并保留 `kb/`。真实根 `kb/` 六个保护文件 SHA 与施工前基线完全一致。
+- 最终报告：`dev-docs/reviews/campaign-final-report.md`。未 push、tag、publish 或 merge；hosted Linux/macOS CI 仍是未来 release tag 外部门，不属于本地 campaign DoD 的虚假通过项。
 
 ## 决定记录（含偏离蓝图的理由）
 
@@ -122,7 +128,10 @@
 | D3 | 07-27 | 论文分节采用 program-scoped side judgement；citation/figure key 均绑定 canonical identity | 草稿不是新的来源 unit，但每节必须独立确认；稳定 key 不能随作者/题名修订、集合顺序或 crop 遍历顺序漂移 |
 | D4 | 07-27 | 批量实验导入整批原子；周报/PPT 使用 Agent editorial fill 而非脚本自动写叙事 | 避免半批 run、重复导入和把机械模板冒充可交付叙事，同时保持用户一句话触发与判断来源透明 |
 | D5 | 07-27 | R5 的 20→14 按 L1 owner 计，最终发现面为 15；四 analyzer 只并发现层；human-note/偏好均不因 source=user 自动确认 | 保持既有 receipt/owner/schema identity 与开源兼容，同时消除重复提示词；“用户写过”与“用户确认该结构化判断”是两个不同事实 |
+| D6 | 07-27 | historical restore 定义为 X 到最新尚未恢复 root operations 的单事务区间恢复 | 只恢复旧 X 会与后续共享 index targets 产生不可避免 CAS；完整虚拟 digest 链可在零写时证明回到 X 前且避免逐条半恢复 |
+| D7 | 07-27 | degraded source upgrade 另建 canonical revision；PDF warning 与来源完整性分开判断 | 保住旧 evidence immutable 与确认语义；少量 native recovery/table 格式告警不应把 45 页完整 raw PDF 等同摘要壳，也不得伪报 warning-free complete |
 
 ## 遗留清单
 
-（随轮次滚动更新）
+- Campaign DoD：无遗留。
+- Release tag 外部门：等待 push 后 hosted Linux/macOS CI matrix 实际全绿；本任务按约定不 push/tag，因此不伪造该证据。

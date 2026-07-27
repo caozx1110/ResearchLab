@@ -10,6 +10,9 @@ All notable changes to this project will be documented here. The format follows 
 - Idea analysis and review can explicitly refresh a frozen evidence corpus after new material is linked, preserving only owner-approved Agent fields and rejecting immutable-field tampering or unsafe paths before any write.
 - Weekly-report delivery now uses the program title or question, owner-provided lifecycle fields and labels, natural epistemic wording, numbered sources, and a grouped evidence appendix with explicit missing categories; internal catalog, schema, and receipt mechanics no longer leak into the reader artifact.
 - Discussion verification/archive and idea analysis/review verification checkpoint their Agent fill and durable discussion note exactly. Recovery output names safe research subjects, and failed source intake gives a natural recovery option for uploaded or local material.
+- A complete local PDF can safely supersede an unverified degraded paper shell without overwriting evidence: the old unit is archived, both revisions retain immutable source bytes, and bidirectional lineage records the replacement. Warning-bearing PDFs remain honestly degraded while continuous multi-page substantive parsing distinguishes a complete paper from an abstract shell; existing verified or confirmed judgement still requires an explicit user decision.
+- Historical restore now atomically rewinds the selected root operation and every newer un-restored root operation after proving the complete digest chain, so shared index/config targets do not create a false conflict or a partial rollback.
+- Obsidian review export and apply checkpoint the human sheet at both lifecycle boundaries; processed sheets and canonical decisions finish Git-clean while private runtime registries stay untracked. In-process owner warnings are bounded in the private Agent protocol and never leak into public success stderr.
 
 ### Added (R5, 2026-07-27)
 
@@ -67,7 +70,7 @@ All notable changes to this project will be documented here. The format follows 
 - 代码检索（A5/G14）：repo 源码进 FTS5（`.py` 按 def/class 符号切块带限定名，其余 40 行窗/8 行重叠；跳二进制/超大/VCS 目录，预算超限显式告警）；FTS 新增 `code_terms` 拆词辅助列；`PASSAGE_INDEX_REVISION=passages-v3`（旧缓存判 stale 自动回退内存检索）。
 - 接口层文档（A6）：新增 `.agents/AGENT_GUIDE.md`（机制速查+交互章程 10 条）；19 份 SKILL.md 增"启动澄清（Agent 用）"；新增 `docs/GOLDEN_SUITE.md`（8 条黄金对话规格与基线指标）。
 
-The bundle currently declares **`0.2.0-rc.7`**. Its complete local suite, targeted R17–R26 regression suites, all 15 discoverable skill validators, and current installed-copy lifecycle pass. Installation and core workflows require no external API Key, paid search quota, commercial database subscription, or paid plugin. The candidate is not a stable release or GA, has not been tagged or published, and carries no compatibility or response-time SLA. Real-source/Obsidian acceptance and a green hosted Linux/macOS CI matrix remain prerequisites for a release tag.
+The bundle currently declares **`0.2.0-rc.7`**. The final local campaign gate passes with 2,313 tests (18 environment-gated skips), all 15 discoverable skill validators, Python 3.9 compilation, snapshot install/update/uninstall lifecycle, and fresh real-source, GOLDEN, interaction-charter, recovery, and no-plugin Obsidian acceptance. Installation and core workflows require no external API Key, paid search quota, commercial database subscription, or paid plugin. The candidate is not a stable release or GA, has not been tagged or published, and carries no compatibility or response-time SLA. A green hosted Linux/macOS CI matrix remains a prerequisite for a release tag.
 
 ## [0.2.0-rc.7] - Unreleased
 
