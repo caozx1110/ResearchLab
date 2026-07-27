@@ -657,11 +657,17 @@ def test_kb_doctor_prints_runtime_capabilities(monkeypatch, tmp_path: Path, caps
         lambda: {
             "python": "/usr/bin/python3",
             "version": "3.11.0",
-            "modules": {"yaml": True, "PyPDF2": False, "pypdf": True},
+            "modules": {
+                "yaml": True,
+                "PyPDF2": False,
+                "pypdf": True,
+                "pymupdf4llm": True,
+                "fitz": True,
+            },
             "yaml_support": True,
             "markdown_support": True,
             "pdf_support": True,
-            "pdf_backend": "pypdf",
+            "pdf_backend": "pymupdf4llm",
         },
     )
 
@@ -671,13 +677,14 @@ def test_kb_doctor_prints_runtime_capabilities(monkeypatch, tmp_path: Path, caps
     assert "研究能力包版本为 0.2.0-rc.7" in captured.out
     assert "配置读写能力正常" in captured.out
     assert "材料 Markdown 阅读层转换能力已就绪" in captured.out
-    assert "论文解析能力已就绪" in captured.out
+    assert "论文 PDF 深读能力已就绪" in captured.out
     assert "/usr/bin/python3" not in captured.out
-    for implementation_term in ("Python", "YAML", "PDF", "pypdf", "research skill"):
+    for implementation_term in ("Python", "YAML", "pypdf", "research skill"):
         assert implementation_term not in captured.out
     protocol = json.loads((tmp_path / "kb" / ".runtime" / "doctor.json").read_text(encoding="utf-8"))
     assert protocol["details"]["runtime"]["python"] == "/usr/bin/python3"
     assert protocol["details"]["runtime"]["modules"]["PyPDF2"] is False
+    assert protocol["details"]["runtime"]["pdf_deep_read_ready"] is True
 
 
 def test_kb_doctor_sanitizes_untrusted_version_text(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -1002,6 +1009,8 @@ def test_kb_init_has_identical_no_tty_semantics_and_never_reads_input(monkeypatc
             },
             "auto_commit": "milestone",
             "auto_screen": "true",
+            "link_autodrive": "ask_first",
+            "discussion_style": "adaptive",
         },
     )
 
@@ -1065,6 +1074,8 @@ def test_kb_init_non_tty_scaffolds_and_guides_agent(monkeypatch, tmp_path: Path,
             },
             "auto_commit": "milestone",
             "auto_screen": "true",
+            "link_autodrive": "ask_first",
+            "discussion_style": "adaptive",
         },
     )
     monkeypatch.setattr("builtins.input", lambda prompt="": (_ for _ in ()).throw(AssertionError("should not prompt")))
@@ -1095,6 +1106,8 @@ def test_kb_init_non_tty_scaffolds_and_guides_agent(monkeypatch, tmp_path: Path,
         "language_and_terminology",
         "research_focus",
         "resources_and_constraints",
+        "link_autodrive",
+        "discussion_style",
     ]
     assert action["required_before"] == {"judgement_confirmation": ["human_name"]}
     assert action["apply"] == {
@@ -1113,6 +1126,28 @@ def test_kb_init_non_tty_scaffolds_and_guides_agent(monkeypatch, tmp_path: Path,
                 "input": "--quick-constraint",
                 "repeatable": True,
                 "merge": "append_deduplicate",
+            },
+            "link_autodrive": {
+                "input": "--auto-ingest-mode",
+                "choices": ["ask_first", "auto_deep_read"],
+                "default": "ask_first",
+                "canonical": {
+                    "owner": "research-config-manager",
+                    "command": "set-interaction",
+                    "store": "runtime-preferences",
+                    "key": "autonomy.link_autodrive",
+                },
+            },
+            "discussion_style": {
+                "input": "--discussion-style",
+                "choices": ["challenge", "refine", "adaptive"],
+                "default": "adaptive",
+                "canonical": {
+                    "owner": "research-config-manager",
+                    "command": "set-interaction",
+                    "store": "user-profile",
+                    "key": "personalization.discussion_style",
+                },
             },
         },
     }
@@ -1136,6 +1171,8 @@ def test_kb_init_non_tty_scaffolds_and_guides_agent(monkeypatch, tmp_path: Path,
         },
         "auto_commit": "milestone",
         "auto_screen": "true",
+        "link_autodrive": "ask_first",
+        "discussion_style": "adaptive",
     }
     assert calls == [
         [
@@ -1486,6 +1523,7 @@ def test_kb_init_is_idempotent_and_emits_one_public_summary(tmp_path: Path, caps
         "reporting_style": "concise",
         "collaboration_boundaries": "no-cloud",
         "term_style": "bilingual",
+        "discussion_style": "adaptive",
     }
     assert _tree_metadata_digest(tmp_path) == before_digest
     assert _journal_operation_count(tmp_path) == before_journal_count

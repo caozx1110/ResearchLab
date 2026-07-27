@@ -38,7 +38,13 @@ from research.core import (
     topic_taxonomy_path,
     write_runtime_preferences,
 )
-from research.prefs import DIAGNOSTIC_MODES, DIAGNOSTIC_SKILL_MODES
+from research.prefs import (
+    DEFAULT_DISCUSSION_STYLE,
+    DIAGNOSTIC_MODES,
+    DIAGNOSTIC_SKILL_MODES,
+    DISCUSSION_STYLES,
+    LINK_AUTODRIVE_MODES,
+)
 from research.preference_selection import (
     eligible_preferences,
     record_effective_selection,
@@ -69,6 +75,9 @@ def _default_profile() -> dict:
         **yaml_default("research-user-profile", "research-config-manager", status="active"),
         "preferences": {
             "language_preference": "zh-CN",
+        },
+        "personalization": {
+            "discussion_style": DEFAULT_DISCUSSION_STYLE,
         },
         "resources": {},
         "constraints": [],
@@ -158,7 +167,7 @@ def print_personalization(root: Path) -> None:
     if not isinstance(personalization, dict) or not personalization:
         print("  未设置，可在 kb init 时填写。")
         return
-    for key in ("research_focus", "resources", "reporting_style", "collaboration_boundaries", "term_style"):
+    for key in ("research_focus", "resources", "reporting_style", "collaboration_boundaries", "term_style", "discussion_style"):
         value = personalization.get(key)
         if value not in (None, ""):
             print(f"  {key}: {value}")
@@ -289,6 +298,23 @@ def build_parser() -> argparse.ArgumentParser:
     guide = subparsers.add_parser("guide", help="Show practical guidance for current runtime modes")
     guide.add_argument("--focus", choices=["all", "paper-intake"], default="all")
 
+    interaction = subparsers.add_parser(
+        "set-interaction",
+        help="Persist the canonical interaction preferences: link automation tier and discussion style",
+    )
+    interaction.add_argument(
+        "--auto-ingest-mode",
+        dest="auto_ingest_mode",
+        choices=sorted(LINK_AUTODRIVE_MODES),
+        help="Canonical write path for autonomy.link_autodrive (runtime preferences)",
+    )
+    interaction.add_argument(
+        "--discussion-style",
+        dest="discussion_style",
+        choices=sorted(DISCUSSION_STYLES),
+        help="Canonical write path for personalization.discussion_style (user profile)",
+    )
+
     runtime = subparsers.add_parser("set-runtime-pref", help="Persist browser / identity / autonomy / paper / pdf / versioning runtime preferences")
     runtime.add_argument("--section", required=True, choices=["browser", "identity", "autonomy", "paper", "pdf", "versioning", "diagnostics"])
     runtime.add_argument("--key", required=True)
@@ -327,7 +353,13 @@ def main() -> int:
         ensure_workspace(root)
 
     if args.command == "eligible-preferences":
-        result = eligible_preferences(root, skill=args.skill, operation=args.operation)
+        # Both known input mistakes (an unregistered consumer operation, and
+        # canonical task inputs that miss/exceed the registered field set) must
+        # fail as one readable line, never as a raw traceback.
+        try:
+            result = eligible_preferences(root, skill=args.skill, operation=args.operation)
+        except ValueError as exc:
+            raise SystemExit(f"eligible-preferences 输入无效（invalid consumer）：{exc}") from exc
         if args.task_context_json:
             try:
                 task_context = json.loads(args.task_context_json)
@@ -335,21 +367,42 @@ def main() -> int:
                 raise SystemExit("Invalid canonical task context JSON") from exc
             if not isinstance(task_context, dict):
                 raise SystemExit("Canonical task context must be an object")
-            result["task_context_digest"] = task_context_digest(
-                skill=args.skill,
-                operation=args.operation,
-                canonical_inputs=task_context,
-            )
+            try:
+                result["task_context_digest"] = task_context_digest(
+                    skill=args.skill,
+                    operation=args.operation,
+                    canonical_inputs=task_context,
+                )
+            except ValueError as exc:
+                raise SystemExit(f"eligible-preferences 输入无效（canonical task inputs）：{exc}") from exc
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return 0
     if args.command == "record-effective":
+        selection_text = str(args.selection_json or "")
+        selection_reference = selection_text.strip()
+        # --selection-json accepts either the inline JSON object or the path of
+        # a JSON file; a value naming an existing file is read from disk.
+        if selection_reference:
+            try:
+                selection_file = Path(selection_reference).expanduser()
+                selection_is_file = selection_file.is_file()
+            except OSError:
+                selection_is_file = False
+            if selection_is_file:
+                try:
+                    selection_text = selection_file.read_text(encoding="utf-8")
+                except (OSError, UnicodeError) as exc:
+                    raise SystemExit(f"无法读取 selection JSON 文件：{selection_reference}") from exc
         try:
-            selection = json.loads(args.selection_json)
+            selection = json.loads(selection_text)
         except json.JSONDecodeError as exc:
             raise SystemExit("Invalid effective preference selection JSON") from exc
         if not isinstance(selection, dict):
             raise SystemExit("Effective preference selection must be an object")
-        path, receipt = record_effective_selection(root, selection)
+        try:
+            path, receipt = record_effective_selection(root, selection)
+        except ValueError as exc:
+            raise SystemExit(f"record-effective selection 被拒绝：{exc}") from exc
         checkpoint_and_report(
             root,
             trigger="milestone",
@@ -519,6 +572,46 @@ def main() -> int:
         return 0
     if args.command == "guide":
         print_guide(root, focus=args.focus)
+        return 0
+    if args.command == "set-interaction":
+        auto_ingest_mode = getattr(args, "auto_ingest_mode", None)
+        discussion_style = getattr(args, "discussion_style", None)
+        if auto_ingest_mode is None and discussion_style is None:
+            raise SystemExit("set-interaction requires --auto-ingest-mode and/or --discussion-style")
+        targets = []
+        if auto_ingest_mode is not None:
+            targets.append(runtime_preferences_path(root))
+        if discussion_style is not None:
+            targets.append(profile_path(root))
+        touched: list[str] = []
+        with mutation_transaction(root, "set-interaction", targets):
+            if auto_ingest_mode is not None:
+                payload = load_runtime_preferences(root)
+                _apply_runtime_pref(payload, "autonomy", "link_autodrive", auto_ingest_mode)
+                write_runtime_preferences(root, payload)
+                touched.append("autonomy.link_autodrive")
+            if discussion_style is not None:
+                profile = load_profile(root)
+                previous = profile.get("personalization", {})
+                previous = previous.get("discussion_style") if isinstance(previous, dict) else None
+                set_nested(profile, "personalization.discussion_style", discussion_style)
+                if previous != discussion_style:
+                    profile.setdefault("history", []).append(
+                        {
+                            "action": "set-interaction",
+                            "key": "personalization.discussion_style",
+                            "value": discussion_style,
+                        }
+                    )
+                write_yaml_if_changed(profile_path(root), profile)
+                touched.append("personalization.discussion_style")
+        checkpoint_and_report(
+            root,
+            trigger="milestone",
+            message="milestone: update interaction preferences",
+            target_paths=targets,
+        )
+        print(f"[ok] updated interaction preferences: {', '.join(touched)}")
         return 0
     if args.command == "set-runtime-pref":
         path = runtime_preferences_path(root)

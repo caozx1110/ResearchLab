@@ -93,6 +93,19 @@ DEFAULT_CANDIDATE_POOLS = {
 VERSIONING_COMMIT_MODES = {"manual", "milestone", "aggressive"}
 
 
+# Automation tier for a user-dropped link: either come back and ask before the
+# deep read, or run the deep read automatically up to (never past) the
+# user-confirmation gate.
+LINK_AUTODRIVE_MODES = {"ask_first", "auto_deep_read"}
+
+DEFAULT_LINK_AUTODRIVE = "ask_first"
+
+# Conversational stance the user prefers when discussing research judgements.
+DISCUSSION_STYLES = {"challenge", "refine", "adaptive"}
+
+DEFAULT_DISCUSSION_STYLE = "adaptive"
+
+
 DIAGNOSTIC_MODES = {"off", "errors-only", "developer"}
 
 
@@ -134,6 +147,7 @@ def default_runtime_preferences() -> dict[str, Any]:
         },
         "autonomy": {
             "auto_execute_scope": ["screen", "build-index", "refresh", "generate-note"],
+            "link_autodrive": DEFAULT_LINK_AUTODRIVE,
         },
         "paper": {
             "auto_screen_on_intake": True,
@@ -243,6 +257,8 @@ def load_runtime_preferences(project_root: Path) -> dict[str, Any]:
     if not isinstance(scope, list):
         scope = copy.deepcopy(default_runtime_preferences()["autonomy"]["auto_execute_scope"])
     autonomy["auto_execute_scope"] = [str(item).strip() for item in scope if str(item).strip()]
+    autodrive = str(autonomy.get("link_autodrive") or DEFAULT_LINK_AUTODRIVE).strip().lower()
+    autonomy["link_autodrive"] = autodrive if autodrive in LINK_AUTODRIVE_MODES else DEFAULT_LINK_AUTODRIVE
     normalized["autonomy"] = autonomy
 
     paper = normalized.get("paper", {})
@@ -389,6 +405,10 @@ __all__ = [
     "DEFAULT_TOPIC_TAXONOMY",
     "DEFAULT_CANDIDATE_POOLS",
     "VERSIONING_COMMIT_MODES",
+    "LINK_AUTODRIVE_MODES",
+    "DEFAULT_LINK_AUTODRIVE",
+    "DISCUSSION_STYLES",
+    "DEFAULT_DISCUSSION_STYLE",
     "DIAGNOSTIC_MODES",
     "DIAGNOSTIC_SKILL_MODES",
     "PAPER_AUTO_COMPLETE_CONDITIONS",

@@ -22,7 +22,8 @@ from research.bootstrap import ensure_managed_runtime
 if __name__ == "__main__":
     ensure_managed_runtime(PROJECT_ROOT)
 
-from research.common import add_project_root_argument, confirm_command, parse_iso_datetime, print_resolved_project_roots, shell_command, skill_script_for_command, utc_now_iso, warn_if_cwd_differs_from_project_root
+from research.common import add_project_root_argument, confirm_command, load_yaml, parse_iso_datetime, print_resolved_project_roots, shell_command, skill_script_for_command, utc_now_iso, warn_if_cwd_differs_from_project_root
+from research.index import AUDIT_CATEGORIES, AUDIT_SEVERITIES
 from research.core import (
     build_index,
     audit_workspace,
@@ -568,6 +569,174 @@ def print_non_unit_review_notice() -> None:
     )
 
 
+# --------------------------------------------------------------------------- #
+# audit: program-link policy (fix INTEGRITY_PROGRAM_LINK false positives)      #
+#                                                                              #
+# Canonical link design: only the FORWARD edge is stored                       #
+# (program.state.active_unit_ids -> unit); the unit-side back-link is derived  #
+# at read time. A program referencing an existing, non-rejected unit whose own #
+# links/program_ids are empty is therefore NOT an integrity error. Real errors #
+# are only: (1) a program references a unit that does not exist, (2) a program #
+# references a rejected unit, (3) a unit claims membership in a program that   #
+# does not exist (or whose state payload is unreadable). The shared lint layer #
+# still reports symmetric back-link gaps, so the audit surface recomputes the  #
+# program-link findings here with the canonical semantics.                     #
+# --------------------------------------------------------------------------- #
+
+
+def _program_link_finding(subject: str, message: str) -> dict:
+    return {
+        "code": "INTEGRITY_PROGRAM_LINK",
+        "category": "integrity",
+        "severity": "error",
+        "subject": str(subject or "kb"),
+        "message": " ".join(str(message).split()),
+    }
+
+
+def _record_is_rejected_for_audit(record: dict) -> bool:
+    return (
+        str(record.get("confirmation_status") or "").strip().lower() == "rejected"
+        or str(record.get("status") or "").strip().lower() == "rejected"
+    )
+
+
+def _audit_program_state_files(root: Path) -> list[tuple[str, Path]]:
+    """Enumerate kb/programs/<id>/state.yaml without following symlinks."""
+    programs_root = kb_root(root) / "programs"
+    if programs_root.is_symlink() or not programs_root.is_dir():
+        return []
+    entries: list[tuple[str, Path]] = []
+    for child in sorted(programs_root.iterdir()):
+        if child.is_symlink() or not child.is_dir():
+            continue
+        state_file = child / "state.yaml"
+        if state_file.is_symlink() or not state_file.is_file():
+            continue
+        entries.append((child.name, state_file))
+    return entries
+
+
+def _audit_unit_records(root: Path) -> dict[str, tuple[dict, str]]:
+    """Tolerantly read every unit record.yaml as {unit_id: (payload, subject)}."""
+    units_root = kb_root(root) / "units"
+    records: dict[str, tuple[dict, str]] = {}
+    if units_root.is_symlink() or not units_root.is_dir():
+        return records
+    for kind_dir in sorted(units_root.iterdir()):
+        if kind_dir.is_symlink() or not kind_dir.is_dir():
+            continue
+        for unit_dir in sorted(kind_dir.iterdir()):
+            if unit_dir.is_symlink() or not unit_dir.is_dir():
+                continue
+            record_file = unit_dir / "record.yaml"
+            if record_file.is_symlink() or not record_file.is_file():
+                continue
+            payload = load_yaml(record_file, default={})
+            if not isinstance(payload, dict):
+                continue
+            unit_id = str(payload.get("id") or "")
+            if not unit_id:
+                continue
+            try:
+                subject = record_file.relative_to(root).as_posix()
+            except ValueError:
+                subject = "kb"
+            records[unit_id] = (payload, subject)
+    return records
+
+
+def _text_id_list(value) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _recomputed_program_link_findings(root: Path) -> list[dict]:
+    """Program-link findings under the canonical forward-edge-only semantics."""
+    findings: list[dict] = []
+    records = _audit_unit_records(root)
+    state_by_program: dict[str, dict | None] = {}
+    for program_id, state_file in _audit_program_state_files(root):
+        try:
+            subject = state_file.relative_to(root).as_posix()
+        except ValueError:
+            subject = "kb"
+        payload = load_yaml(state_file, default={})
+        if not isinstance(payload, dict):
+            state_by_program[program_id] = None
+            findings.append(_program_link_finding(
+                subject, f"Program `{program_id}` state payload is not a valid mapping."
+            ))
+            continue
+        state_by_program[program_id] = payload
+        for unit_id in _text_id_list(payload.get("active_unit_ids")):
+            entry = records.get(unit_id)
+            if entry is None:
+                findings.append(_program_link_finding(
+                    subject, f"Program `{program_id}` references missing unit `{unit_id}`."
+                ))
+            elif _record_is_rejected_for_audit(entry[0]):
+                findings.append(_program_link_finding(
+                    subject, f"Program `{program_id}` references rejected unit `{unit_id}`."
+                ))
+    for unit_id in sorted(records):
+        record, subject = records[unit_id]
+        for program_id in _text_id_list(record.get("program_ids")):
+            if program_id not in state_by_program:
+                findings.append(_program_link_finding(
+                    subject,
+                    f"Unit `{unit_id}` claims membership in nonexistent program `{program_id}`.",
+                ))
+            elif state_by_program[program_id] is None:
+                findings.append(_program_link_finding(
+                    subject,
+                    f"Unit `{unit_id}` references program `{program_id}` with an invalid state payload.",
+                ))
+    return findings
+
+
+def _apply_program_link_audit_policy(root: Path, report: dict) -> dict:
+    """Replace lint-derived INTEGRITY_PROGRAM_LINK findings with canonical ones.
+
+    Identity transform for workspaces without program-link findings or programs:
+    kept findings, ordering, counts and status all reproduce audit_workspace's
+    exact deterministic output shape.
+    """
+    findings = [item for item in report.get("findings", []) if isinstance(item, dict)]
+    kept = [item for item in findings if str(item.get("code")) != "INTEGRITY_PROGRAM_LINK"]
+    research = kb_root(root)
+    recomputed: list[dict] = []
+    if research.is_dir() and not research.is_symlink():
+        recomputed = _recomputed_program_link_findings(root)
+    unique = {
+        (item["code"], item["category"], item["severity"], item["subject"], item["message"]): item
+        for item in [*kept, *recomputed]
+    }
+
+    def _order_index(values: tuple, value: str) -> int:
+        return values.index(value) if value in values else len(values)
+
+    stable = sorted(
+        unique.values(),
+        key=lambda item: (
+            _order_index(AUDIT_CATEGORIES, item["category"]),
+            _order_index(AUDIT_SEVERITIES, item["severity"]),
+            item["code"],
+            item["subject"],
+            item["message"],
+        ),
+    )
+    counts = {"total": len(stable)}
+    counts.update({severity: 0 for severity in AUDIT_SEVERITIES})
+    counts.update({category: 0 for category in AUDIT_CATEGORIES})
+    for finding in stable:
+        counts[finding["severity"]] = counts.get(finding["severity"], 0) + 1
+        counts[finding["category"]] = counts.get(finding["category"], 0) + 1
+    status = "FAIL" if counts.get("error") else ("WARN" if stable else "PASS")
+    return {"status": status, "counts": counts, "findings": stable}
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Manage the research knowledge base.")
     add_project_root_argument(parser)
@@ -775,7 +944,7 @@ def main() -> int:
             print(f"- {issue}")
         return 0 if status == "PASS" else 1
     if args.command == "audit":
-        report = audit_workspace(root)
+        report = _apply_program_link_audit_policy(root, audit_workspace(root))
         print(json.dumps(report, ensure_ascii=False, sort_keys=True))
         return 1 if report["status"] == "FAIL" else 0
     if args.command == "index":

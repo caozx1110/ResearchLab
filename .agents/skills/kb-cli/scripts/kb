@@ -31,7 +31,13 @@ for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
 else:
     raise SystemExit("Could not locate .agents/lib")
 
-from research.bootstrap import ensure_managed_runtime, is_current_python, managed_venv_dir, managed_venv_python
+from research.bootstrap import (
+    NO_PDF_BACKEND_ENV,
+    ensure_managed_runtime,
+    is_current_python,
+    managed_venv_dir,
+    managed_venv_python,
+)
 
 if __name__ == "__main__":
     ensure_managed_runtime(DEFAULT_PROJECT_ROOT)
@@ -65,7 +71,7 @@ from research.review_batches import (
     preflight_obsidian_review_batch,
     preview_obsidian_review_batch,
 )
-from research.journal import current_operation_id, mutation_transaction
+from research.journal import committed_ops, current_operation_id, mutation_transaction
 from research.preference_selection import resolve_operation_preferences
 from research import updater
 from research.obsidian import obsidian_projection_status, update_obsidian_projection
@@ -102,7 +108,7 @@ HELP_MENU: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("回忆已确认习惯、已知坑和待审能力问题。", "kb recall"),
             ("恢复崩溃后未完成的知识库操作。", "kb resume"),
             ("撤销最近一次已提交的知识库操作。", "kb undo"),
-            ("恢复到指定操作之前的状态。", "kb restore <操作编号>"),
+            ("恢复到指定操作之前的状态；不带编号时先列出最近可恢复的操作。", "kb restore <操作编号>"),
         ),
     ),
     (
@@ -221,6 +227,8 @@ REVIEW_KIND_ALIASES = {
 LANG_CHOICES = ("zh", "en")
 AUTO_COMMIT_CHOICES = ("manual", "milestone", "aggressive")
 AUTO_SCREEN_CHOICES = ("true", "false")
+LINK_AUTODRIVE_CHOICES = ("ask_first", "auto_deep_read")
+DISCUSSION_STYLE_CHOICES = ("challenge", "refine", "adaptive")
 PERSONA_TERM_CHOICES = ("keep-en", "translate", "bilingual")
 PERSONA_FIELDS = (
     ("research_focus", "研究方向 / 关注领域（逗号分隔，回车跳过）"),
@@ -466,7 +474,7 @@ _PUBLIC_KB_VERB_ARITY: dict[str, tuple[int, int | None]] = {
     "next": (0, 1),
     "recall": (0, 1),
     "reject": (1, 1),
-    "restore": (1, 1),
+    "restore": (0, 1),
     "resume": (0, 0),
     "review": (0, 1),
     "status": (0, 1),
@@ -910,12 +918,24 @@ def emit_public_output(text: str, root: Path, *, error: bool = False) -> bool:
     return emitted
 
 
+def _help_verb_label(ai_phrase: str) -> str:
+    """Derive the verb's own name (e.g. ``kb init``) from its example phrase."""
+    tokens = ai_phrase.split()
+    if len(tokens) >= 2 and tokens[0] == "kb" and re.fullmatch(r"[a-z][a-z-]*", tokens[1]):
+        return f"kb {tokens[1]}"
+    return ""
+
+
 def render_help_menu() -> str:
     lines = ["# kb 快捷命令", ""]
     for group, items in HELP_MENU:
         lines.append(f"## {group}")
         for sentence, ai_phrase in items:
-            lines.append(f"- {sentence} 也可以直接对 AI 说：\"{ai_phrase}\"。")
+            verb = _help_verb_label(ai_phrase)
+            if verb:
+                lines.append(f"- {verb} — {sentence} 也可以直接对 AI 说：\"{ai_phrase}\"。")
+            else:
+                lines.append(f"- {sentence} 也可以直接对 AI 说：\"{ai_phrase}\"。")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
@@ -1038,11 +1058,23 @@ def handle_doctor(args: argparse.Namespace, root: Path) -> int:
     del args
     capabilities = current_runtime_capabilities()
     modules = capabilities.get("modules", {})
+    if not isinstance(modules, dict):
+        modules = {}
     venv_dir = managed_venv_dir(DEFAULT_PROJECT_ROOT)
     venv_py = managed_venv_python(DEFAULT_PROJECT_ROOT)
     yaml_ready = bool(capabilities.get("yaml_support"))
     markdown_ready = bool(capabilities.get("markdown_support"))
     pdf_backend = str(capabilities.get("pdf_backend") or "").strip()
+    # Paper deep reading (intake page=N parsing) hard-requires pymupdf4llm+fitz;
+    # a fallback metadata backend such as pypdf must not be reported as ready.
+    pdf_deep_read_ready = bool(modules.get("pymupdf4llm")) and bool(modules.get("fitz"))
+    # An explicit RESEARCH_PYTHON override also disables managed-venv provisioning
+    # in research.bootstrap, so the auto-prepare promise would be false there.
+    auto_prepare_off = (
+        os.environ.get(NO_PDF_BACKEND_ENV) == "1"
+        or os.environ.get("RESEARCH_NO_MANAGED_VENV") == "1"
+        or bool(str(os.environ.get("RESEARCH_PYTHON") or "").strip())
+    )
     runtime_kind = "受管项目运行环境" if is_current_python(venv_py) else "当前已配置运行环境"
     raw_package_version = updater.read_local_version(DEFAULT_PROJECT_ROOT)
     public_version = _public_display_text(
@@ -1054,18 +1086,21 @@ def handle_doctor(args: argparse.Namespace, root: Path) -> int:
     print(f"研究能力包版本为 {public_version}。")
     print(f"{runtime_kind}可用；配置读写能力{'正常' if yaml_ready else '缺失'}。")
     print(f"材料 Markdown 阅读层转换能力{'已就绪' if markdown_ready else '尚未就绪'}。")
-    if pdf_backend:
-        print("论文解析能力已就绪。")
+    if pdf_deep_read_ready:
+        print("论文 PDF 深读能力已就绪。")
+    elif auto_prepare_off:
+        print("论文 PDF 深读能力未就绪，且自动准备运行环境已关闭；文本和网页资料仍可正常使用。")
     else:
-        print("论文解析能力尚未就绪；文本和网页资料仍可正常使用。")
+        print("论文 PDF 深读能力未就绪，首次需要时将自动准备运行环境；文本和网页资料仍可正常使用。")
     protocol_details: dict[str, object] = {
         "runtime": {
             "python": capabilities.get("python") or "",
             "version": capabilities.get("version") or "",
-            "modules": modules if isinstance(modules, dict) else {},
+            "modules": modules,
             "yaml_support": yaml_ready,
             "markdown_support": markdown_ready,
             "pdf_backend": pdf_backend,
+            "pdf_deep_read_ready": pdf_deep_read_ready,
             "package_version": raw_package_version,
             "managed_runtime": {
                 "directory": str(venv_dir),
@@ -1924,6 +1959,153 @@ def render_public_recall(owner_text: str, kind: str, root: Path) -> str:
     return "\n".join(lines) + "\n"
 
 
+_RESTORE_CATALOG_LIMIT = 10
+
+_OP_TYPE_PUBLIC_LABELS = {
+    "rebuild_obsidian_projection": "Obsidian 视图更新",
+    "kb-cli:dialogue-review-batch": "对话拍板批量应用",
+    "kb-cli:obsidian-review-batch": "Obsidian 批量拍板应用",
+    "batch_confirm": "批量确认",
+    "batch_confirm_review_queue": "确认收件箱批量处理",
+    "source-intake-add": "资料轻量入库",
+    "source-intake-materialize": "资料内容整理",
+    "source-intake-build-index": "资料索引重建",
+    "source-intake-attach-duplicate-selection": "重复资料并入",
+    "promote_record": "知识条目状态变更",
+    "write_record": "知识记录更新",
+    "link_records": "知识关联更新",
+    "govern_records": "知识记录治理",
+    "migrate_repo_to_dataset": "记录类型调整",
+    "compact_unit_ids": "知识编号整理",
+    "rebuild_index": "知识索引重建",
+    "rebuild_governance": "治理目录重建",
+    "refresh_reading_list": "阅读清单刷新",
+    "refresh_record_schemas": "记录结构刷新",
+    "refresh_user_navigation": "研究导航刷新",
+    "initialize_workspace": "知识库初始化",
+    "ensure_workspace": "知识库结构准备",
+    "config-init": "配置初始化",
+    "config-set": "配置更新",
+    "config-toggle": "配置开关切换",
+    "config-capture-resources": "资源信息记录",
+    "config-set-taxonomy-seed": "主题目录配置更新",
+    "config-set-pool": "候选池配置更新",
+    "set-interaction": "交互偏好更新",
+    "set-runtime-pref": "运行偏好更新",
+    "set-diagnostics": "诊断策略更新",
+    "write-runtime-preferences": "运行偏好更新",
+    "record-effective-preferences": "任务偏好选择记录",
+    "write-learnings": "经验记录更新",
+    "log-learning": "经验记录更新",
+    "review-learning": "经验记录复核",
+    "promote-learning": "经验记录晋升",
+    "create-skill-retrospective": "能力回顾记录",
+    "record-diagnostic-issue": "诊断问题记录",
+    "review-diagnostic-issue": "诊断问题复核",
+    "archive-discussion": "讨论归档",
+    "wiki-query-note": "百科查询笔记",
+    "write-research-value-report": "研究价值报告更新",
+    "update-composite-survey": "综述内容更新",
+    "prepare-composite-survey-gap": "综述缺口准备",
+    "stage_search_results": "检索结果暂存",
+    "mark_search_candidate": "检索候选标记",
+    "append_list_item": "清单条目更新",
+    "append_program_reporting_event": "研究计划事件记录",
+    "storage-sync": "存储同步",
+    "storage_sync": "存储同步",
+    "browser-save": "浏览器编辑保存",
+}
+
+_OP_TYPE_PREFIX_LABELS = (
+    ("research-monitor:", "研究监控更新"),
+    ("research-orchestrator:", "研究计划推进记录"),
+    ("method:", "方法设计操作"),
+    ("paper-analyst:", "论文分析笔记更新"),
+    ("blog-analyst:", "博客分析笔记更新"),
+    ("repo-analyst:", "代码仓分析笔记更新"),
+    ("dataset-analyst:", "数据集分析笔记更新"),
+    ("idea-workbench:", "研究想法推进"),
+    ("experiment-workbench:", "实验记录更新"),
+    ("prepare-", "分析骨架准备"),
+    ("verify-", "笔记核验"),
+)
+
+
+def _public_operation_label(op_type: str) -> str:
+    """Safe Chinese description of one journaled operation (never a path)."""
+    normalized = str(op_type or "").strip()
+    label = _OP_TYPE_PUBLIC_LABELS.get(normalized)
+    if label:
+        return label
+    for prefix, prefix_label in _OP_TYPE_PREFIX_LABELS:
+        if normalized.startswith(prefix):
+            return prefix_label
+    if normalized.endswith("-survey"):
+        return "综述整理"
+    return "知识库操作"
+
+
+def _restorable_journal_entry(entry: Mapping[str, object]) -> bool:
+    """Public projection of the journal's own root-business-operation rule."""
+    op_id = str(entry.get("op_id") or "")
+    if not op_id or str(entry.get("parent_op_id") or "") or str(entry.get("undone_by") or ""):
+        return False
+    if str(entry.get("root_op_id") or op_id) != op_id:
+        return False
+    if "undoable" in entry:
+        return entry.get("undoable") is True
+    targets = {str(path) for path in entry.get("target_paths", []) if str(path)}
+    if targets and targets <= {".runtime/versioning-state.yaml"}:
+        return False
+    op_type = str(entry.get("op_type") or "")
+    if op_type == "write_versioning_state" or op_type.startswith(("undo:", "restore:", "resume:")):
+        return False
+    return bool(entry.get("before_snapshots")) or bool(entry.get("before_digests"))
+
+
+def _restore_catalog_entries(root: Path) -> list[dict]:
+    entries = [entry for entry in committed_ops(root) if _restorable_journal_entry(entry)]
+    entries.reverse()
+    return entries[:_RESTORE_CATALOG_LIMIT]
+
+
+def _public_operation_time(entry: Mapping[str, object]) -> str:
+    try:
+        epoch = int(entry.get("sequence_ns") or 0) / 1_000_000_000
+    except (TypeError, ValueError):
+        epoch = 0.0
+    if epoch <= 0:
+        return "时间未知"
+    return time.strftime("%m-%d %H:%M", time.localtime(epoch))
+
+
+def _journal_operation_label(root: Path, op_id: str) -> str:
+    """Best-effort label lookup; never let a diagnostics read break recovery."""
+    if not op_id:
+        return ""
+    try:
+        for entry in committed_ops(root):
+            if str(entry.get("op_id") or "") == op_id:
+                return _public_operation_label(str(entry.get("op_type") or ""))
+    except (SystemExit, OSError, RuntimeError, TypeError, ValueError):
+        return ""
+    return ""
+
+
+_UNDO_OWNER_STDOUT_RE = re.compile(r"已撤销最近一次操作\s+(\S+)。")
+_RESTORE_OWNER_STDOUT_RE = re.compile(r"已恢复到操作\s+(\S+)\s+之前的状态。")
+
+# Owner recovery refusals that are already safe public Chinese one-liners
+# (no paths, no ids, no flags). Anything else stays private.
+_RECOVERY_SAFE_REFUSALS = (
+    "目标在该操作完成后又被修改；为避免覆盖后续改动，已停止恢复。",
+    "检测到未完成的知识库操作；请先使用 kb resume 完成恢复。",
+    "只有已完成的操作可恢复；未完成操作只能通过 kb resume 自愈。",
+    "未完成操作必须按从新到旧的顺序恢复；已停止恢复。",
+    "恢复来源操作日志在执行前发生变化；已停止恢复。",
+)
+
+
 def _run_public_recovery(root: Path, action: str, action_args: Sequence[str]) -> int:
     result = forward_command(
         root,
@@ -1933,10 +2115,18 @@ def _run_public_recovery(root: Path, action: str, action_args: Sequence[str]) ->
     )
     if result.returncode != 0:
         private_diagnostic = f"{result.stdout}\n{result.stderr}"
-        if action == "restore" and "Unknown operation:" in private_diagnostic:
+        safe_refusal = next(
+            (line for line in _RECOVERY_SAFE_REFUSALS if line in private_diagnostic),
+            "",
+        )
+        if action == "restore" and (
+            "Unknown operation:" in private_diagnostic or "找不到指定的操作日志" in private_diagnostic
+        ):
             message = "没有找到对应的知识库操作；请检查编号后重试。"
         elif action == "undo" and "没有可撤销的已提交操作" in private_diagnostic:
             message = "目前没有可撤销的知识库操作。"
+        elif safe_refusal:
+            message = safe_refusal
         elif action == "undo":
             message = "知识库撤销未完成；详细诊断已保留给 Agent。"
         else:
@@ -1950,9 +2140,31 @@ def _run_public_recovery(root: Path, action: str, action_args: Sequence[str]) ->
         else:
             print("未完成的知识库操作已安全恢复。")
     elif action == "undo":
-        print("最近一次知识库操作已撤销。若还需要，可再次使用 kb undo 撤销更早的操作。")
+        matched = _UNDO_OWNER_STDOUT_RE.search(result.stdout)
+        undone_op_id = matched.group(1) if matched else ""
+        label = _journal_operation_label(root, undone_op_id)
+        set_protocol_status(
+            "completed",
+            undone_op_id=undone_op_id,
+            undone_operation_label=label or "知识库操作",
+        )
+        if label:
+            print(f"已撤销：{label}。若还需要，可再次使用 kb undo 撤销更早的操作。")
+        else:
+            print("最近一次知识库操作已撤销。若还需要，可再次使用 kb undo 撤销更早的操作。")
     else:
-        print("知识库已恢复到指定操作之前的状态。")
+        matched = _RESTORE_OWNER_STDOUT_RE.search(result.stdout)
+        restored_op_id = matched.group(1) if matched else ""
+        label = _journal_operation_label(root, restored_op_id)
+        set_protocol_status(
+            "completed",
+            restored_op_id=restored_op_id,
+            restored_operation_label=label or "知识库操作",
+        )
+        if label:
+            print(f"知识库已恢复到「{label}」这次操作之前的状态。")
+        else:
+            print("知识库已恢复到指定操作之前的状态。")
     return 0
 
 
@@ -1966,8 +2178,65 @@ def handle_resume(args: argparse.Namespace, root: Path) -> int:
     return _run_public_recovery(root, "resume", [])
 
 
+def _print_restore_catalog(root: Path) -> int:
+    """Read-only public listing of recent restorable operations."""
+    try:
+        entries = _restore_catalog_entries(root)
+    except SystemExit as exc:
+        set_protocol_status("agent_action_required", restore_catalog_error=str(exc.code or "unavailable"))
+        print("知识库操作清单暂时无法读取；详细诊断已保留给 Agent。", file=sys.stderr)
+        return 1
+    if not entries:
+        set_protocol_status("completed", restorable_operation_count=0)
+        print("目前没有可恢复的知识库操作。")
+        return 0
+    catalog: list[dict[str, object]] = []
+    print("最近可恢复的知识库操作（最新在前）：")
+    for index, entry in enumerate(entries, start=1):
+        label = _public_operation_label(str(entry.get("op_type") or ""))
+        moment = _public_operation_time(entry)
+        print(f"{index}. {moment} · {label}")
+        catalog.append(
+            {
+                "public_index": index,
+                "op_id": str(entry.get("op_id") or ""),
+                "op_type": str(entry.get("op_type") or ""),
+                "label": label,
+                "started_at": str(entry.get("started_at") or ""),
+            }
+        )
+    print("需要恢复时请说：kb restore <编号>，会回到该操作之前的状态；编号以本清单为准。")
+    set_protocol_status("completed", restorable_operation_count=len(catalog))
+    add_agent_action(
+        "present_restore_catalog",
+        operations=catalog,
+        apply={"verb": "restore", "input": "public_index_or_op_id"},
+    )
+    return 0
+
+
 def handle_restore(args: argparse.Namespace, root: Path) -> int:
-    return _run_public_recovery(root, "restore", [args.op_id])
+    requested = str(getattr(args, "op_id", "") or "").strip()
+    if not requested:
+        return _print_restore_catalog(root)
+    if re.fullmatch(r"\d{1,3}", requested):
+        try:
+            entries = _restore_catalog_entries(root)
+        except SystemExit as exc:
+            set_protocol_status("agent_action_required", restore_catalog_error=str(exc.code or "unavailable"))
+            print("知识库操作清单暂时无法读取；详细诊断已保留给 Agent。", file=sys.stderr)
+            return 1
+        index = int(requested)
+        if index < 1 or index > len(entries):
+            set_protocol_status(
+                "agent_action_required",
+                restore_index_error="out_of_range",
+                restorable_operation_count=len(entries),
+            )
+            print("没有找到对应的知识库操作；可先运行不带编号的 kb restore 查看当前清单。", file=sys.stderr)
+            return 1
+        requested = str(entries[index - 1].get("op_id") or "")
+    return _run_public_recovery(root, "restore", [requested])
 
 
 def handle_reject(args: argparse.Namespace, root: Path) -> int:
@@ -2406,6 +2675,7 @@ def runtime_pref_defaults(root: Path) -> dict[str, object]:
     identity = preferences.get("identity", {}) if isinstance(preferences.get("identity"), dict) else {}
     paper = preferences.get("paper", {}) if isinstance(preferences.get("paper"), dict) else {}
     versioning = preferences.get("versioning", {}) if isinstance(preferences.get("versioning"), dict) else {}
+    autonomy = preferences.get("autonomy", {}) if isinstance(preferences.get("autonomy"), dict) else {}
     profile = load_yaml(config_root(root) / "user-profile.yaml", default={})
     profile_preferences = profile.get("preferences", {}) if isinstance(profile, dict) and isinstance(profile.get("preferences"), dict) else {}
     personalization = profile.get("personalization", {}) if isinstance(profile, dict) and isinstance(profile.get("personalization"), dict) else {}
@@ -2428,6 +2698,12 @@ def runtime_pref_defaults(root: Path) -> dict[str, object]:
         or personalization.get("resources")
         or ""
     ).strip()
+    link_autodrive = str(autonomy.get("link_autodrive") or "ask_first").strip().lower()
+    if link_autodrive not in LINK_AUTODRIVE_CHOICES:
+        link_autodrive = "ask_first"
+    discussion_style = str(personalization.get("discussion_style") or "adaptive").strip().lower()
+    if discussion_style not in DISCUSSION_STYLE_CHOICES:
+        discussion_style = "adaptive"
     return {
         "name": str(identity.get("default_confirmed_by") or "").strip(),
         "lang": language_text(profile_preferences.get("language_preference", "zh")),
@@ -2443,6 +2719,8 @@ def runtime_pref_defaults(root: Path) -> dict[str, object]:
         },
         "auto_commit": str(versioning.get("auto_commit_mode") or "milestone").strip().lower(),
         "auto_screen": bool_text(paper.get("auto_screen_on_intake", True)),
+        "link_autodrive": link_autodrive,
+        "discussion_style": discussion_style,
     }
 
 
@@ -2461,7 +2739,19 @@ def public_init_defaults_summary(defaults: Mapping[str, object]) -> str:
         "true": "论文自动初筛开启",
         "false": "论文自动初筛关闭",
     }.get(str(defaults.get("auto_screen") or "").strip().lower(), "保留现有论文初筛设置")
-    return f"选择“默认即可”会保留当前设置：{language_label}、{commit_label}、{screening_label}。"
+    autodrive_label = {
+        "ask_first": "丢链接后先轻量入库再询问是否深读",
+        "auto_deep_read": "丢链接后自动深读到待确认笔记",
+    }.get(str(defaults.get("link_autodrive") or "").strip().lower(), "保留现有链接处理档位")
+    discussion_label = {
+        "challenge": "讨论风格偏挑战",
+        "refine": "讨论风格偏打磨",
+        "adaptive": "讨论风格自适应",
+    }.get(str(defaults.get("discussion_style") or "").strip().lower(), "保留现有讨论风格")
+    return (
+        "选择“默认即可”会保留当前设置："
+        f"{language_label}、{commit_label}、{screening_label}、{autodrive_label}、{discussion_label}。"
+    )
 
 
 def config_set_profile_command(key: str, value: str) -> tuple[str, Sequence[str]]:
@@ -2545,6 +2835,8 @@ def build_headless_init_pref_commands(
         and args.lang is None
         and args.auto_commit is None
         and args.auto_screen is None
+        and getattr(args, "auto_ingest_mode", None) is None
+        and getattr(args, "discussion_style", None) is None
         and getattr(args, "quick_resource", None) is None
         and getattr(args, "quick_constraints", None) is None
         and all(value is None for _, value in persona_values)
@@ -2566,6 +2858,22 @@ def build_headless_init_pref_commands(
         _append_runtime_update(commands, preferences, "versioning", "auto_commit_mode", args.auto_commit)
     if args.auto_screen is not None:
         _append_runtime_update(commands, preferences, "paper", "auto_screen_on_intake", args.auto_screen)
+    # Both interaction fields share research-config-manager's canonical
+    # `set-interaction` write path (I4): autonomy.link_autodrive lives in the
+    # runtime preferences, personalization.discussion_style in the profile.
+    interaction_flags: list[str] = []
+    auto_ingest_mode = getattr(args, "auto_ingest_mode", None)
+    if auto_ingest_mode is not None and _nested_config_value(
+        preferences, "autonomy.link_autodrive"
+    ) != _parsed_config_value(auto_ingest_mode):
+        interaction_flags.extend(["--auto-ingest-mode", str(auto_ingest_mode)])
+    discussion_style = getattr(args, "discussion_style", None)
+    if discussion_style is not None and _nested_config_value(
+        profile, "personalization.discussion_style"
+    ) != _parsed_config_value(discussion_style):
+        interaction_flags.extend(["--discussion-style", str(discussion_style)])
+    if interaction_flags:
+        commands.append((SCRIPT_BY_VERB["init_config"], ["set-interaction", *interaction_flags]))
     if getattr(args, "quick_resource", None) is not None:
         resource_statement = str(args.quick_resource or "").strip()
         if not resource_statement:
@@ -2726,6 +3034,8 @@ def handle_init(args: argparse.Namespace, root: Path) -> int:
     if not defaults["name"] or is_ai_signer(defaults["name"]):
         print(
             "知识库基础结构已准备好，现在可以开始使用。是否花约 1 分钟完成快速设置？"
+            "选“现在设置”会在同一回合一起确认：真实署名、语言与术语、研究方向、资源与约束，"
+            "以及丢链接后的处理档位（先询问再深读 / 自动深读）和讨论风格（挑战 / 打磨 / 自适应）。"
             "请回复“现在设置”（推荐）或“先跳过”；以后也可以直接说“补充我的研究偏好”。"
             f"{public_init_defaults_summary(defaults)}"
             "第一次确认研究判断前仍会询问真实署名。"
@@ -2742,6 +3052,8 @@ def handle_init(args: argparse.Namespace, root: Path) -> int:
                 "language_and_terminology",
                 "research_focus",
                 "resources_and_constraints",
+                "link_autodrive",
+                "discussion_style",
             ],
             defaults=defaults,
             required_before={"judgement_confirmation": ["human_name"]},
@@ -2761,6 +3073,28 @@ def handle_init(args: argparse.Namespace, root: Path) -> int:
                         "input": "--quick-constraint",
                         "repeatable": True,
                         "merge": "append_deduplicate",
+                    },
+                    "link_autodrive": {
+                        "input": "--auto-ingest-mode",
+                        "choices": list(LINK_AUTODRIVE_CHOICES),
+                        "default": "ask_first",
+                        "canonical": {
+                            "owner": "research-config-manager",
+                            "command": "set-interaction",
+                            "store": "runtime-preferences",
+                            "key": "autonomy.link_autodrive",
+                        },
+                    },
+                    "discussion_style": {
+                        "input": "--discussion-style",
+                        "choices": list(DISCUSSION_STYLE_CHOICES),
+                        "default": "adaptive",
+                        "canonical": {
+                            "owner": "research-config-manager",
+                            "command": "set-interaction",
+                            "store": "user-profile",
+                            "key": "personalization.discussion_style",
+                        },
                     },
                 },
             },
@@ -3742,6 +4076,163 @@ def _review_apply_failure_message(code: str) -> str:
     return messages.get(code, "这次拍板没有完整应用；请重新运行 kb review 查看当前状态。")
 
 
+_REVIEW_APPLY_SNAPSHOT_HINT = (
+    "--apply-snapshot expects the protocol FILE NAME used with --agent-protocol when "
+    "kb review displayed these items (e.g. r1.json under kb/.runtime/), NOT the snapshot token."
+)
+_REVIEW_APPLY_SYNTAX = (
+    "kb --agent-protocol <new>.json review --apply-snapshot <display-protocol>.json "
+    "--confirm-ref <kind>:<id> [--reject-ref <kind>:<id>] [--defer-ref <kind>:<id>] "
+    "--user-authorization <用户原话> --decision-evidence <证据>"
+)
+
+
+def _review_registry_expected_snapshots(root: Path) -> list[dict[str, object]]:
+    """Best-effort read-only view of currently valid displayed review snapshots.
+
+    Used only to enrich the private protocol after an apply failure, so the
+    runtime agent can self-correct instead of guessing. Never raises.
+    """
+    try:
+        paths = _review_snapshot_paths(root, create=False)
+    except (ReviewSnapshotError, OSError):
+        return []
+    if paths is None:
+        return []
+    _runtime_root, snapshot_root, _lock_path = paths
+    now = _review_now_epoch()
+    expected: list[dict[str, object]] = []
+    try:
+        children = sorted(snapshot_root.iterdir())
+    except OSError:
+        return []
+    for path in children[:_REVIEW_SNAPSHOT_GC_SCAN_LIMIT]:
+        if _REVIEW_SNAPSHOT_TOKEN_RE.fullmatch(path.stem) is None or path.suffix != ".json":
+            continue
+        payload = _regular_review_snapshot_payload(path)
+        if payload is None or str(payload.get("status") or "") != "unused":
+            continue
+        expires_at = _review_timestamp_epoch(payload.get("expires_at"))
+        if expires_at is None or now >= expires_at:
+            continue
+        items = payload.get("review_items")
+        items = items if isinstance(items, list) else []
+        refs = [
+            _review_subject_ref(item.get("subject", {}))
+            for item in items
+            if isinstance(item, Mapping)
+        ]
+        expected.append(
+            {
+                "apply_snapshot": str(payload.get("protocol_path") or ""),
+                "valid_confirm_refs": refs,
+                "expires_at": str(payload.get("expires_at") or ""),
+            }
+        )
+    return expected
+
+
+def _review_apply_failure_details(
+    root: Path,
+    args: argparse.Namespace,
+    code: str,
+    *,
+    lease: "ReviewSnapshotLease | None",
+    reason_detail: str = "",
+) -> dict[str, object]:
+    """Structured, private-only expectations for a failed review apply."""
+    requested_refs = [
+        str(item)
+        for item in [
+            *getattr(args, "confirm_ref", []),
+            *getattr(args, "reject_ref", []),
+            *getattr(args, "defer_ref", []),
+        ]
+    ]
+    malformed_refs = [
+        ref
+        for ref in requested_refs
+        if ":" not in ref or not ref.split(":", 1)[0] or not ref.split(":", 1)[1]
+    ]
+    valid_refs: list[str] = []
+    snapshot_name = ""
+    displayed_snapshots: list[dict[str, object]] = []
+    if lease is not None:
+        valid_refs = [_review_subject_ref(item.get("subject", {})) for item in lease.review_items]
+        snapshot_name = lease.protocol_relative_path
+    else:
+        displayed_snapshots = _review_registry_expected_snapshots(root)
+        if len(displayed_snapshots) == 1:
+            only = displayed_snapshots[0]
+            refs = only.get("valid_confirm_refs")
+            valid_refs = [str(ref) for ref in refs] if isinstance(refs, list) else []
+            snapshot_name = str(only.get("apply_snapshot") or "")
+    outside_refs = sorted(set(requested_refs) - set(valid_refs)) if valid_refs else []
+    ref_suggestions: dict[str, str] = {}
+    by_bare_id = {ref.split(":", 1)[1]: ref for ref in valid_refs if ":" in ref}
+    for ref in requested_refs:
+        if ref in valid_refs:
+            continue
+        bare = ref.split(":", 1)[1] if ":" in ref else ref
+        suggestion = by_bare_id.get(bare)
+        if suggestion:
+            ref_suggestions[ref] = suggestion
+    requested_snapshot = str(getattr(args, "apply_snapshot", "") or "").strip()
+    reason_code = code
+    if code == "tampered_or_unknown" and _REVIEW_SNAPSHOT_TOKEN_RE.fullmatch(requested_snapshot):
+        reason_code = "apply_snapshot_looks_like_token"
+    elif code == "invalid_decision" and malformed_refs:
+        reason_code = "confirm_ref_format_invalid"
+    elif code == "invalid_decision":
+        reason_code = "outside_displayed_snapshot"
+    expected: dict[str, object] = {
+        "confirm_ref_format": "<kind>:<id>",
+        "valid_confirm_refs": valid_refs,
+        "apply_snapshot": snapshot_name,
+        "apply_snapshot_expects": _REVIEW_APPLY_SNAPSHOT_HINT,
+        "apply_syntax": _REVIEW_APPLY_SYNTAX,
+    }
+    if displayed_snapshots:
+        expected["displayed_snapshots"] = displayed_snapshots
+    failure: dict[str, object] = {
+        "code": code,
+        "reason_code": reason_code,
+        "requested_apply_snapshot": requested_snapshot,
+        "requested_refs": requested_refs,
+        "expected": expected,
+    }
+    if reason_detail:
+        failure["reason_detail"] = reason_detail
+    if malformed_refs:
+        failure["malformed_refs"] = malformed_refs
+    if outside_refs:
+        failure["outside_snapshot_refs"] = outside_refs
+    if ref_suggestions:
+        failure["ref_suggestions"] = ref_suggestions
+    return failure
+
+
+def _record_review_apply_failure(
+    root: Path,
+    args: argparse.Namespace,
+    code: str,
+    *,
+    lease: "ReviewSnapshotLease | None",
+    reason_detail: str = "",
+) -> None:
+    set_protocol_status(
+        "agent_action_required",
+        review_apply_error=code,
+        review_apply_failure=_review_apply_failure_details(
+            root,
+            args,
+            code,
+            lease=lease,
+            reason_detail=reason_detail,
+        ),
+    )
+
+
 def _obsidian_batch_decision_summary(
     root: Path,
     review_items: Sequence[Mapping[str, object]],
@@ -4134,6 +4625,7 @@ def handle_review_apply(args: argparse.Namespace, root: Path) -> int:
             )
         return current_items, decisions
 
+    lease: ReviewSnapshotLease | None = None
     try:
         lease = _load_review_snapshot(root, args.apply_snapshot)
         snapshot_by_ref = {
@@ -4166,11 +4658,11 @@ def handle_review_apply(args: argparse.Namespace, root: Path) -> int:
             )
         current_items, decisions = current_selection(lease, selected_decisions)
     except ReviewSnapshotError as exc:
-        set_protocol_status("agent_action_required", review_apply_error=exc.code)
+        _record_review_apply_failure(root, args, exc.code, lease=lease, reason_detail=str(exc))
         print(_review_apply_failure_message(exc.code), file=sys.stderr)
         return 2
-    except ValueError:
-        set_protocol_status("agent_action_required", review_apply_error="tampered_or_unknown")
+    except ValueError as exc:
+        _record_review_apply_failure(root, args, "tampered_or_unknown", lease=lease, reason_detail=str(exc))
         print(_review_apply_failure_message("tampered_or_unknown"), file=sys.stderr)
         return 2
 
@@ -4195,11 +4687,11 @@ def handle_review_apply(args: argparse.Namespace, root: Path) -> int:
             consume=lambda: _consume_review_snapshot(root, _load_review_snapshot(root, args.apply_snapshot)),
         )
     except (ReviewBatchError, ReviewSnapshotError) as exc:
-        set_protocol_status("agent_action_required", review_apply_error=exc.code)
+        _record_review_apply_failure(root, args, exc.code, lease=lease, reason_detail=str(exc))
         print(_review_apply_failure_message(exc.code), file=sys.stderr)
         return 2
     except (OSError, RuntimeError, SystemExit, TypeError, ValueError):
-        set_protocol_status("agent_action_required", review_apply_error="stale_content")
+        _record_review_apply_failure(root, args, "stale_content", lease=lease)
         print(_review_apply_failure_message("stale_content"), file=sys.stderr)
         return 2
 
@@ -4575,6 +5067,18 @@ def register_init(subparsers: argparse._SubParsersAction[argparse.ArgumentParser
     parser.add_argument("--lang", choices=LANG_CHOICES, help=argparse.SUPPRESS)
     parser.add_argument("--auto-commit", choices=AUTO_COMMIT_CHOICES, help=argparse.SUPPRESS)
     parser.add_argument("--auto-screen", choices=AUTO_SCREEN_CHOICES, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--auto-ingest-mode",
+        dest="auto_ingest_mode",
+        choices=LINK_AUTODRIVE_CHOICES,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--discussion-style",
+        dest="discussion_style",
+        choices=DISCUSSION_STYLE_CHOICES,
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument("--persona-focus", help=argparse.SUPPRESS)
     parser.add_argument("--persona-resources", help=argparse.SUPPRESS)
     parser.add_argument("--persona-report", help=argparse.SUPPRESS)
@@ -4639,8 +5143,14 @@ def register_resume(subparsers: argparse._SubParsersAction[argparse.ArgumentPars
 
 
 def register_restore(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    parser = subparsers.add_parser("restore", help="恢复到指定操作之前的状态")
-    parser.add_argument("op_id", metavar="<操作编号>", help="希望回到其之前状态的操作编号")
+    parser = subparsers.add_parser("restore", help="恢复到指定操作之前的状态；不带编号时列出最近可恢复的操作")
+    parser.add_argument(
+        "op_id",
+        nargs="?",
+        default="",
+        metavar="<操作编号>",
+        help="希望回到其之前状态的操作编号；省略时列出最近可恢复的操作清单",
+    )
     parser.set_defaults(handler=handle_restore)
 
 
@@ -4730,6 +5240,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     if stopped is not None:
         raise stopped
     if raised is not None:
+        if isinstance(raised, BrokenPipeError):
+            # A closed public reader (e.g. `kb restore | head`) must never turn
+            # into a traceback on the user surface. Detach stdout so interpreter
+            # shutdown flushing stays quiet, then fail with a plain exit code.
+            try:
+                devnull = os.open(os.devnull, os.O_WRONLY)
+                os.dup2(devnull, sys.stdout.fileno())
+            except OSError:
+                pass
+            return 1
         raise raised
     return exit_code
 
