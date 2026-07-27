@@ -150,7 +150,7 @@
 | #   | 能力                                                                   | 现状 | 一句话现实                                              |
 | --- | ---------------------------------------------------------------------- | ---- | ------------------------------------------------------- |
 | C1  | 统一知识库：paper/repo/dataset/blog/idea/experiment 标准化入库         | ✅   | dataset 是一等 unit；文件协议 + confirmation 词汇是真地基 |
-| C2  | 论文初筛（值不值得读）+ 详细笔记（motivation/method/ablation/insight） | ✅   | method/benchmark/survey 三类 prepare/verify；claims 回执闭环本轮加固 |
+| C2  | 论文直接深读（类型判断 + 五要素，逐字 evidence）                  | ✅   | method/benchmark/survey 三类统一 prepare/verify；整份 claims 一次确认 |
 | C3  | 仓库能力地图（核心模块/训练流程/复用点/边界）                          | ✅   | agent 填 capability/reuse/entry-map，脚本校验 file:line evidence |
 | C4  | 博客核心内容 + 可信度 + 可复用解释                                     | ✅   | 四要素 agent 填写 + section evidence；本轮修本地源与失败恢复 |
 | C5  | 检索关键信息/代码/论文（passage 级）                                   | ✅   | `kb find` 已返回 passage + unit + locator；语义/跨语言理解仍由 agent 完成 |
@@ -285,15 +285,16 @@
 
 - **病根**：新范式给入库加了"agent 填理解"这步（原则1）。若不自动触发，入库退化成"用户手动 prompt 每一步"——那不是自动化，是更繁琐。
 - **目标**：用户说一句"入库这篇 <src></src>"，**当前会话的 agent 自动跑完整条链**：
-  `intake（双源抓取）→ screen prepare → agent 填 paper_type/初筛判断+逐字证据 → screen verify → 按已验证 screening 的类型做 note prepare（无法分类才 method_system 兜底）→ agent 填类型专属要素+逐字证据 → note verify → extract-figures/refresh-structure → 呈现判断待确认`
-  paper 的 `screen verify` 必须先于 `note prepare`：`paper_type` 是 agent 判断，只有初筛校验落盘后才能选择 method_system / benchmark / survey 的要素集或采用既有兜底；禁止先按 method_system 生成深读骨架、随后再补类型。
+  `intake（双源抓取）→ note prepare（同一待填结构含 paper_type、类型证据与三套要素分支）→ agent 选择类型并只填对应五要素+逐字证据 → note verify（同时验证类型与所选分支）→ extract-figures/refresh-structure → 呈现整份判断待确认`
+  **2026-07-27 R1 减法决策覆盖此前 screening-first 编排**：新 paper 不再生成、填写或确认“值不值得细读”的 quick screen；`paper_type` 是深读内的 agent 判断，必须有逐字 evidence，并与五要素 claims 在同一最终确认闸口由人签字。脚本不得猜类型；新 unit 未填类型时 fail closed，不得再以 `method_system` 静默兜底。旧 unit 的已落盘 `quick_screen.paper_type` 只可作为兼容读取来源，不得让新流程复活快筛。
   全程无需用户逐步 prompt。
-- **只在两类闸口停**（治理红线，人必须介入）：① 需要**确认 AI 判断**时（初筛结论、关键 insight——原则3 判断轨）；② 需要**用户抉择**时（选 idea、批 baseline、模糊指令歧义）。其余安全步骤自动做。
+- **只在两类闸口停**（治理红线，人必须介入）：① 需要**确认 AI 判断**时（论文类型/深读要素、关键 insight——原则3 判断轨）；② 需要**用户抉择**时（选 idea、批 baseline、模糊指令歧义）。其余安全步骤自动做。
 - **落地三件**（非新启发式，是编排+导航）：
   1. **AGENTS.md 会话规则**：明确"入库后自动完成 grounded 笔记直到确认闸口"，且受 `runtime-preferences.autonomy` 阀门（已有 auto_execute_scope + GOVERNANCE_MAX_AUTO_STEPS 封顶）约束。
   2. **结构化 agent protocol**：intake / prepare 把下一步写入内部 JSON/返回对象（该读哪个 parse-cache、填哪些要素、填完跑哪条 verify）；public stdout 不承载机读导航，让会话 agent 无歧义接手且用户看不到内部协议。
   3. **`kb ingest <src>` 链式命令**：把"能脚本化的段"（intake→prepare→post-actions）串成一条命令，agent 只在中间做"填理解"和末尾"呈现判断待确认"。
 - **成本诚实**：自动深读花 token（B2 已定：入库必深读不省）。自动化省的是**你的操作步数和注意力**（原则5），不是 token。
+- **链接自动化档位（2026-07-27 R1 锁定）**：`runtime.autonomy.link_autodrive=ask_first` 时 `kb add` 只做轻量入库，一次性汇总并询问是否深读；`auto_deep_read` 时，同一个公开入口转入与 `kb ingest` 完全相同的 prepare→fill→verify 链，直到最终确认闸口。批量链接只汇总问一次，绝不逐条盘问。已退役的 `paper.auto_screen_on_intake` / `auto_screen` 不再进入默认值、init、配置展示或任何新 unit 路由。
 
 ### 原则 8：用户契约 —— 只有自然语言 + 伪 CLI，绝无裸命令 / TTY 依赖（2026-07-16 锁定）
 
@@ -350,6 +351,19 @@
 
 **R1 黑盒 gates**：installed copy 全 verb forbidden-token scan；paper/blog/repo 各跑 ingest→prepare→agent fill→verify→confirm→report 并断言 receipt claim_ids 非空；absolute/`..`/symlink evidence 拒绝；artifact 改字节后 confirmation 失效；失败 source 可重试且不 poisoned dedup；200 并发 events 零丢失；无关 dirty draft 永不被 checkpoint；TTY/非 TTY 语义相同；全量 tests + macOS installer smoke 绿。
 
+### 治理分档 G0（2026-07-27 R1 锁定）
+
+- 新初始化 workspace 显式写 `governance_profile: personal`；升级前已存在的 runtime preferences 若字段缺失或非法，一律解释为 `strict`，不能由默认值回填把旧工作区静默降档。用户显式切换才改变治理档。
+- `strict` 保留既有行为：公开 review 每批最多 3 条、卡片固定 24 小时；eligible preference receipt、PortfolioDecision 与 D1 强脱敏语义逐字不变。
+- `personal` 的公开 review 默认每批 10 条（必须实际大于 3），`review.card_ttl_hours` 可配且归一到 `1..168` 小时。一次 snapshot 必须冻结 effective profile、batch limit 和 expiry；apply 只消费该 snapshot 内的界限，不重读可变配置。两档都继续要求当前用户消息授权、真人 signer、逐字 evidence、content digest/CAS 与原子批量。
+- D1 只在 `personal` 的 local-only canonical issue 中保留稳定的 `category / owner(skill) / operation / return_code` 明文字段，仍禁止原 stdout/stderr、绝对路径、用户原文、raw/evidence、环境变量、secret、邮箱与 traceback。`strict` 本地 issue 继续走现有强脱敏；任何导出无论档位都重新走强脱敏，workspace 字节不得原样透传。
+- 治理分档只降低仪式成本，不影响 schema/evidence/confirmation/containment/journal/lock/CAS 等承重墙；AI 在两档都不可自签。
+
+### 公开根路径与错误尾部 P1（2026-07-27 R1 锁定）
+
+- 正常用户面和 owner 直连都不得打印 `[root]` 加绝对 project/KB 路径；解析到哪个根属于私有 AgentProtocol/诊断事实。需要消歧时只说“当前工作区/独立工作区”等不含路径的自然语言。
+- 安装器和 dispatcher 不得把底层 stderr tail 原样投影到公开面。公开失败只给稳定中文类别与恢复动作；绝对路径、token、环境变量、内部相对路径、traceback 与底层命令只留私有诊断，并在记录/导出边界继续执行相应治理档的脱敏合同。
+
 ### 开发者诊断 D1（2026-07-19 用户实测后锁定）
 
 目标不是遥测用户，而是给本地 workspace 增加一条**显式可选、低 token、可复现、可脱敏导出**的 skill 演化闭环。它复用 `skill-evolution-advisor` 的记录/复盘所有权与 `knowledge-base-manager` 的结构检查所有权，不新建会理解研究材料的脚本。
@@ -357,10 +371,10 @@
 1. **强制安全门与可选诊断分离**：schema、evidence、confirmation、containment、journal/lock/CAS 等正确性门始终强制，任何用户配置都不能关闭。可关闭的是“额外记录、复盘与质量审计”。诊断关闭时，显式说“记下这个问题”的用户请求仍必须记录；关闭不等于拒绝用户写入。
 2. **三档模式 + 逐 skill 覆盖**：`off` 不自动记录、不做 Agent 复盘；`errors-only` 只用确定性代码捕获 owner 非零退出、rollback/recovery、重复失败与显式用户纠正，不调用 LLM；`developer` 在前者上允许触发式短复盘与 patch handoff。workspace 有总模式，skill 可 `inherit|off|errors-only|developer` 覆盖；配置包含 `token_budget_per_task`、`max_issues_per_task`、dedup/cooldown 与 `local_only=true`。默认普通 workspace 为 `off`，开发者可自然语言开启；不允许后台无限复盘。
 3. **结构化 issue 真源**：问题落 `kb/memory/skill-evolution/issues.yaml`，字段至少含稳定 id、category、severity、status、skill、summary、expected/actual、trigger、source(user|agent|runtime)、reproducible、occurrences、first/last seen、环境版本（bundle version/source commit）、脱敏 evidence/context 与 privacy classification。相似问题确定性合并并累加次数；新问题默认 `pending`，可 confirmed/dismissed/resolved；skill defect 永不自动改代码或 roadmap。
-4. **捕获边界**：公开 dispatcher 在 owner 非零退出且策略允许时写一条脱敏 runtime issue；禁止保存原 stdout/stderr、绝对路径、环境变量、用户原文、raw/evidence 内容、secret、邮箱或 traceback，只保存稳定错误分类和公开安全摘要。确定性 redactor 必须同时覆盖键值型 secret、URL credential、环境变量赋值、邮箱，以及常见独立 credential 形状（例如 `sk-` / GitHub token / Slack token / AWS access-key 前缀），不能要求 secret 前面恰好出现 `token=` 才脱敏。Agent 遇用户纠正、可复用摩擦或 sanitizer fallback 时按 workspace 规则写 issue；深复盘只在 `developer` 且仍有预算时执行。一次失败不能反过来掩盖原业务 exit code，诊断写失败也不能改变主命令结果。
+4. **捕获边界**：公开 dispatcher 在 owner 非零退出且策略允许时写一条 runtime issue；两档都禁止保存原 stdout/stderr、绝对路径、环境变量、用户原文、raw/evidence 内容、secret、邮箱或 traceback。strict 只保存经强脱敏的稳定错误分类和公开安全摘要；personal 可额外明文保留稳定的 category、owner(skill)、operation 与 return code，绝不放宽自由文本边界。确定性 redactor 必须同时覆盖键值型 secret、URL credential、环境变量赋值、邮箱，以及常见独立 credential 形状（例如 `sk-` / GitHub token / Slack token / AWS access-key 前缀），不能要求 secret 前面恰好出现 `token=` 才脱敏。Agent 遇用户纠正、可复用摩擦或 sanitizer fallback 时按 workspace 规则写 issue；深复盘只在 `developer` 且仍有预算时执行。一次失败不能反过来掩盖原业务 exit code，诊断写失败也不能改变主命令结果。
 5. **分层、只读 audit**：保留现有 schema lint；新增机械 audit report，至少分为 `schema`、`integrity`、`recovery`、`security`、`quality`。第一版必须检测：现有 schema/link/program 双向问题；confirmed judgement 的 current receipt/artifact binding；未完成 journal；KB Git dirty 的产品拥有文件；paper 基础 metadata/taxonomy 明显空缺；figure 候选重复/可疑多字母标签；KB 内 symlink 越界。每条 finding 带 code/severity/path-safe subject/message，audit 自身字节级只读。journal 截断、旧 envelope、重复 key、symlink/special node 等“无法安全枚举 incomplete op”的情况也必须收敛成 path-safe recovery finding，不能让 audit 自己 `SystemExit`；错误详情与不可信 op id 不进入公开报告。语义矛盾、taxonomy 好坏、研究结论质量属于可选 Agent audit，不得由脚本拍脑袋判断。
 6. **公开交互不增新伪 CLI**：继续只有 15 个 `kb <verb>`。用户说“检查知识库健康”时 Agent 私下跑 owner audit；`kb doctor` 可在私有 protocol 暴露机械 KB health 摘要，但公开面只给中文结果，不泄内部路径。用户说“开启开发者诊断”“关闭 paper-analyst 诊断”“仅在出错时记录”“对刚才失败做脱敏复盘”时由 Agent 写配置/issue；`kb recall` 可概述待审 skill defects，不把内部复现数据直接回显。
-7. **隐私与导出**：所有诊断默认 local-only，无网络上传、无隐式 telemetry。导出必须由用户当前消息显式授权，生成一个脱敏 issue pack；默认不含论文原文、逐字 evidence、用户消息、绝对路径、环境变量、secret 与完整 traceback。D1 只实现本地记录/审计/脱敏预览；第三方 issue tracker 上传属于未来独立授权面。
+7. **隐私与导出**：所有诊断默认 local-only，无网络上传、无隐式 telemetry。导出必须由用户当前消息显式授权，并无条件用 strict 强脱敏重新生成 issue pack；personal 本地允许的四个稳定明文字段不构成绕过导出红线的授权。默认不含论文原文、逐字 evidence、用户消息、绝对路径、环境变量、secret 与完整 traceback。D1 只实现本地记录/审计/脱敏预览；第三方 issue tracker 上传属于未来独立授权面。
 8. **恢复与版本合同**：issue 写入使用 workspace transaction、原子写、journal、树作用域 lock 与精确 checkpoint target；并发 50 次独立问题不得丢，近重复必须确定性合并 occurrence。audit 和 policy read 在未初始化 workspace 上零写；诊断失败不得创建半条 issue 或污染原操作 journal。
 
 **D1 黑盒 gates**：默认 off 的失败命令零诊断写；errors-only 的真实 owner failure 生成一条脱敏 issue 且保留原 exit；同一失败重复触发 occurrence 增长而非刷屏；per-skill off 覆盖 developer 总开关；50 并发记录零丢；audit 对干净 KB PASS，对故意制造的 metadata 空缺、dirty owned fill、重复/伪 figure、stale receipt、incomplete journal、symlink escape 给稳定 finding，前后 tree digest 相同；public stdout forbidden-token scan 仍绿；全量现有 tests 绿。
@@ -373,11 +387,11 @@
 
 1. **结构先就绪，偏好不阻塞**：`kb init` 先幂等创建/修复 KB 骨架；成功后 workspace 可立即用于入库、检索和分析。确认人真实署名只在第一次 judgement confirmation 前强制，不能再用“初始化还差一项必填”暗示整个 KB 不可用；任何缺失偏好都不得伪造默认用户身份。
 2. **明确二选一**：首次或仍缺确认人时，公开结果必须明确提供“现在设置（推荐）”与“先跳过”两条自然语言选择，并说明约 1 分钟、跳过后仍可开始使用、后续可直接说“补充我的研究偏好”。不得要求用户理解内部字段、flags、paths 或 owner。
-3. **快速设置只问高价值信息**：用户选择现在设置后，Agent 在一个紧凑回合询问真实署名、输出语言/术语风格、研究方向、资源与重要约束；同时展示版本记录节奏与论文自动初筛的当前默认值，允许一句“默认即可”。报告风格、协作边界、开发者诊断等高级/低频项按需后补，不在首次问卷里堆满。
+3. **快速设置只问高价值信息**：用户选择现在设置后，Agent 在一个紧凑回合询问真实署名、输出语言/术语风格、研究方向、资源与重要约束，并展示版本记录节奏、链接自动化档位与讨论风格的当前默认值，允许一句“默认即可”。报告风格、协作边界、开发者诊断等高级/低频项按需后补，不在首次问卷里堆满。
 4. **跳过是零偏好写入**：用户选择先跳过时，Agent 不写 sentinel、不把 Agent 名称当署名、不制造“已确认”记录；只确认 KB 可用，并在第一次真正需要用户确认判断时再询问真实署名。重复 `kb init` 或自然语言“补充我的研究偏好”都可继续设置，已存在值必须保留。
 5. **Agent protocol 显式表达可延后**：缺署名时 protocol 状态表达“KB ready + optional setup choice”，而不是单纯 `needs_user_input`；next action 同时给出 configure/defer choices、快速字段、默认值、`human_name` 的 `required_before=judgement_confirmation` 约束及 headless apply 入口。Runtime Agent 必须先呈现选择，不能看到 `human_name` 就越过“先跳过”直接追问。
 6. **TTY/pipe 完全一致**：脚本永远不 `input()`、不读 stdin；终端、pipe、Agent 调用得到同一公开语义。Agent 自然语言收集后私下 headless 落盘。公开输出仍只含自然语言与现有 `kb <verb>`，不得泄漏参数、内部路径或 machine status。
-7. **完成态诚实且幂等**：已有真实署名时，纯 `kb init` 保持严格 no-churn，并简洁说明结构与基础偏好已就绪；显式补充任一偏好只更新该字段，不重置姓名、画像、auto-screen、auto-commit、诊断或其他已存值。
+7. **完成态诚实且幂等**：已有真实署名时，纯 `kb init` 保持严格 no-churn，并简洁说明结构与基础偏好已就绪；显式补充任一偏好只更新该字段，不重置姓名、画像、link_autodrive、discussion_style、auto-commit、诊断或其他已存值。
 8. **快速字段只写 canonical consumer path（2026-07-20 冷验收补强）**：公开问题仍把“资源与重要约束”作为一类，但 private protocol 必须给出可执行的逐字段 headless 映射，Runtime Agent 不得自行猜配置路径。真实署名写 `runtime-preferences.identity.default_confirmed_by`；语言写 `user-profile.preferences.language_preference`；术语与研究方向分别写 `user-profile.personalization.term_style/research_focus`；自然语言资源写 `user-profile.resources.quick_setup`，供 method-designer 现有 `profile.resources` consumer 直接读取；重要约束追加去重到 `user-profile.constraints`，不得覆盖已有约束。protocol defaults 同时读取这些 canonical 字段，并对已存在的旧 `personalization.resources`、`preferences.terminology_style/research_focus` 只做兼容读取。旧隐藏参数继续兼容，但 I1 快速设置不得再把下游需要的资源仅写进 `personalization.resources`。
 
 **I1 黑盒 gates**：空 workspace 的普通/TTY/pipe/installed-copy `kb init` 均先创建结构再显示“现在设置/先跳过/后续补充”，且不出现“还差必填”、裸命令、flag、内部路径或 TTY 读取；protocol 明确 `ready_with_optional_setup`、configure/defer、逐字段 canonical headless 映射与 confirmation-time identity gate；选择跳过前后偏好文件 byte digest 不变；选择现在设置可在一个 headless apply 中保存四类快速信息并保留其他值；保存后的 resource statement 必须真实落在 method-designer 会消费的 `profile.resources`，constraints 追加去重且保留旧值，第二次 init protocol 必须回显非空 focus/resource/constraint 快照；重复 init 零 churn；首次 judgement confirmation 缺署名仍 fail-closed；全量 tests、17 skill validator、compileall、installer syntax 与 diff check 全绿，真实 `kb/` 零改动。
@@ -443,32 +457,32 @@
 
 ### 3.2 论文分析（paper-analyst）
 
-- 目标行为：初筛（值不值得读，带理由+证据）+ 详细笔记（C2 九要素，每条带 evidence）。
+- 目标行为：论文入库直接生成类型适配的详细笔记；类型与每个要素都带 evidence，整份判断一次确认。
 - 边界：脚本 prewarm/解析/裁图/**验 evidence**；agent 产出理解。
 - ✅ **决策（已定）**：
-  - 初筛判断**完全交 agent**（不用关键词启发式）。
+  - **2026-07-27 R1 覆盖决定**：论文 quick screen 整体退役；新流程不存在“值不值得读”的字段、产物或独立确认步骤。下列 2026-07-17 screening-first 细节仅保留为历史背景，凡与本覆盖决定冲突者均失效。
   - **双入库模式**：① 我手动 add 的 = 默认我想读（可配置）；② 我给主题让你检索时 = 你列**待选 + 推荐入库项及理由**，我确认后入库。
   - **确认入库 / 我要求入库的论文 → 一律自动深读**（B2：这份 token 不省），产出**必含五要素**的完整笔记：**motivation / method / experiment / limitation / insight**（每条带 evidence）。
-  - **成本原则**：轻量优先只作用于"初筛"（便宜、筛掉不读的）；一旦进入"入库"，深读是无条件的。不滑回"什么都自动深读"，也不因省 token 而给出空壳笔记。
-  - **⚠️ 已知缺口（Wave3 施工 agent 发现，2026-07-10）**：五要素是**方法/系统类论文**形状。**纯 benchmark 论文无单一 method、survey 论文无 experiment** → 不适配。当前机器强制五要素；遇 benchmark/survey 应停下与用户确认，勿硬套。
-  - **✅ 决策（2026-07-17 锁定）—— per-paper-type element sets（修上述缺口，用户拍板：初筛分类 + 3 套要素）**：
-    - **类型来自 agent（原则1），不硬编启发式**：`screen` 阶段除"值不值得读"外，agent 额外产出 `paper_type ∈ {method_system, benchmark, survey}`（带 evidence，走判断轨确认门）。落 `quick_screen.paper_type`（records.py 的 quick_screen skeleton 加此字段，默认空）。未分类/其他 → **method_system 兜底**（贯彻"轻量优先、不阻塞"）。
+  - **成本原则**：`ask_first` 的轻量阶段只完成来源冻结与可续接状态，用户选择深读或 `auto_deep_read` 后才花理解 token；一旦进入深读，必须完成类型适配的五要素，不因省 token 给空壳笔记。
+  - **类型适配**：纯 benchmark 不硬套单一 method，survey 不硬套 experiment；三套五要素由同一个 deep-read scaffold 表达，Agent 明确选择后脚本据此验证。
+  - **✅ 决策（2026-07-17 锁定，2026-07-27 改为 deep-read 内分类）—— per-paper-type element sets**：
+    - **类型来自 agent（原则1），不硬编启发式**：`complete-note prepare` 生成统一待填结构，agent 产出 `paper_type ∈ {method_system, benchmark, survey}`、分类理由与逐字 evidence，再只填写对应分支。verify 同时校验类型证据、所选五要素及未选分支为空，把 canonical 类型落 `deep_read.paper_type` 并生成独立 paper-type claim；无类型/非法类型/无证据均 fail closed。
     - **3 套要素集**（`NOTE_ELEMENTS` 从扁平 tuple 改为 `ELEMENT_SETS: dict[paper_type -> tuple]`）：
       - `method_system` = 现五要素 `motivation / method / experiment / limitation / insight`（不变，向后兼容）。
       - `benchmark` = `motivation / task_design / metrics / coverage_limitation / insight`（无单一 method）。
       - `survey` = `scope / taxonomy / trends / gaps / insight`（无 experiment）。
     - **要素路由 + claim_type + heading 同步按类型分**（`ELEMENT_TARGET`/`ELEMENT_CLAIM_TYPE`/`ELEMENT_HEADING` 也变 per-type）。新要素落 `core_content` 的合适字段（保证过实质门：`has_substantive_content` 是 section 级、不认 element key，故只需新要素至少一条落 `core_content` 即可；**注意 limitation/coverage_limitation 若落 `critique` 不算实质内容**——每套至少保证 motivation/insight 类落 core_content）。
-    - **build/verify 按选中的类型集迭代**：`build_note_scaffold`/`verify_note_fill` 从 `NOTE_ELEMENTS` 改为读该 unit 的 `paper_type` 选 `ELEMENT_SETS[type]`；verify 的"all required present"按该套判定。scaffold 的 `required_elements`/`element_claim_types` 契约字段照选中集写。
-    - **向后兼容**：老 paper 已有 note 产物但无 `paper_type` → 视作 `method_system`，现有五要素笔记与 verify 不受影响；新 intake 不得用此兜底跳过 screen verify。schema 规格补进 SCHEMAS.md。
+    - **build/verify 按 agent 填写的类型迭代**：统一 scaffold 同时列出三套可填分支；verify 只接受 agent 显式选择的类型，按 `ELEMENT_SETS[type]` 验证 required elements/evidence/claim types，并拒绝未选分支混入内容。
+    - **向后兼容**：老 paper 可从已有 `quick_screen.paper_type` 或既有 note 契约读取类型并继续验证；兼容读取不得写回或驱动新 unit 的 screening。新 paper 一律写 `deep_read.paper_type`。
     - **红线**：类型是 agent 判断（带 evidence、可确认），脚本只据类型选结构 + 验证，绝不自己"猜"论文类型（反模式 litmus：给一篇论文+无 agent 就吐 paper_type 的函数，删掉）。
-    - **✅ 编排补强（2026-07-21 锁定）**：paper 的 agent protocol 固定为 `screen fill → screen verify → note prepare → note fill → note verify → 安全后续步 → 用户确认`。`kb ingest` 的机械前缀只跑到 `screen prepare`；后续动作进入私有 protocol，由当前会话 agent 连续完成。`note prepare` 不得出现在 `screen verify` 之前，protocol 也不得遗漏 screen fill/verify。note verify 已按 runtime preference 自动执行 refresh/figures 时，protocol 不重复列同一步，避免双跑和绕过 preference。
+    - **✅ 编排补强（2026-07-21 锁定，2026-07-27 覆盖）**：paper 的 agent protocol 固定为 `note prepare → note fill（type+对应五要素）→ note verify → 安全后续步 → 用户确认`。`kb ingest` 的机械前缀直接到 note prepare；protocol 不得再出现 screen fill/verify。note verify 已按 runtime preference 自动执行 refresh/figures 时，protocol 不重复列同一步，避免双跑和绕过 preference。
   - **✅ 已落地并端到端验证（2026-07-10，Wave3）**：paper.py 改成 `prepare`(空白待填结构，无关键词打分)+`verify`(逐字校验 agent 填的五要素证据后落盘)。demo 实证（AR-FB，temp 副本）：core_content 空→填、has_substantive_content False→True、编造 quote 被拒、G5 empty 64/65→63/65 & confirmed 0→1。
   - **✅ 决策（自动化打磨，2026-07-11）——note verify 后自动跑安全后续步**：`complete-note --phase verify` 成功持久化后，按 runtime pref 自动执行安全后续步，不再让 agent 手敲（自动化验收从 6.5 的根因）：
     - `auto_refresh_structure_after_note`（默认 **true**）→ 自动 `refresh-structure`（F-a 修好后只读 cache、安全）。
     - `auto_extract_figures_after_note`（默认 **false**）→ 自动 `extract-figures`（需 PDF backend；缺则跳过并提示，不报错；HTML 源无 figure 亦跳过）。
     - 受 `autonomy.auto_execute_scope`（GOVERNANCE_MAX_AUTO_STEPS 封顶）约束：refresh/generate 属安全自动步；配置收窄则相应不自动、改为在 stdout 给 NEXT FOR AGENT 导航。
     - **仍不自动**：verify（需 agent 先填）、confirm（治理闸口）——原则3/7 不变。
-    - 效果：paper 入库链的手敲步从 4 降到 2（note verify + screen verify 仍需 agent 填），呼应原则7"安全步自动、只在闸口停"。
+    - 效果：paper 入库链移除独立 screen 往返，仅保留一次 note fill/verify 和最终用户确认，呼应原则7“安全步自动、只在闸口停”。
     - **✅ 已落地并验证（2026-07-11，main f88206f/46d3b01）**：抽 refresh/figures 为共享 helper（复用不复制）；verify 后 `_auto_post_note_steps` 按 pref+autonomy gate 跑；真跑 AR-FB 实测：verify 后自动 refresh、**parse-cache 38→38 页不变**（F-a）、default 不跑 figures、autonomy 去掉 refresh 则改出 NEXT 导航。回归测试 test_auto_post_note.py 锁定。287 测试绿。
 
 ### 3.3 仓库分析（repo-analyst）
@@ -671,8 +685,8 @@
 - ✅ **决策（已定）**：第一批接下游：**① autonomy（自动化程度，直接影响体验）② reporting_style（接报告）③ resources（接 3.8 方法设计）**；term_style 次之。**并且**：**记忆模块主动记忆并更新用户偏好**——不只被动读 config，而是在交互中观察到我的习惯/偏好时**主动记一笔并更新**（走确认门控：偏好类默认 pending，我确认后生效；接现有 skill-evolution-advisor 的 learnings 机制）。
 - ✅ **决策（2026-07-16 锁定）—— `kb init` 偏好/画像设置必须在 agent 对话里真发生**：
   - **病根（审查坐实）**：偏好/画像问答内联在 `kb` wrapper 的 `handle_init`，却被 `sys.stdin.isatty()`（`kb:654`）门控——agent 无 TTY → 静默走脚手架分支 `return 0`，交互分支永不进入；且 `forward_command` 用 `capture_output=True`，子进程 `input()` 也无法与用户交互。结果：伪 CLI `kb init` 从不问偏好。
-  - **目标（遵原则8：agent 中介，不依赖 TTY）**：`kb init` 在缺配置时不静默成功；public stdout 只给自然语言说明，内部 protocol 列出待收集字段。会话 agent **对话式**逐项问用户（human name / language / commit cadence / auto-screen / autonomy scope / persona 四项），收齐后 headless 落盘。终端有无 TTY 不改变语义，删除 `input()` 分支。
-  - **幂等不变量（2026-07-19 冷验收补洞）**：无参数重复 init 只补目录/缺失 schema 字段，已保存的 human name、language、commit cadence、auto-screen、autonomy/persona 必须原样保留；只有用户在当前对话明确给出某字段的新值时才覆盖。已完整 workspace 上的无参数 init 是严格 no-churn：不得刷新 index/taxonomy `generated_at`、不得新增 operation journal/checkpoint，也不得改任何已有 bytes；partial/malformed workspace 仍须进入 repair 而不是误判完整。子 owner 的进度行与机器字段一律只进私有 protocol，public stdout 最多一条最终自然语言总结。
+  - **目标（遵原则8：agent 中介，不依赖 TTY）**：`kb init` 在缺配置时不静默成功；public stdout 只给自然语言说明，内部 protocol 列出待收集字段。会话 agent **对话式**逐项问用户（human name / language / commit cadence / link_autodrive / discussion_style / autonomy scope / persona），收齐后 headless 落盘；`auto_screen` 已退役。终端有无 TTY 不改变语义，删除 `input()` 分支。
+  - **幂等不变量（2026-07-19 冷验收补洞；2026-07-27 同步）**：无参数重复 init 只补目录/缺失 schema 字段，已保存的 human name、language、commit cadence、link_autodrive、discussion_style、autonomy/persona 必须原样保留；只有用户在当前对话明确给出某字段的新值时才覆盖。已完整 workspace 上的无参数 init 是严格 no-churn：不得刷新 index/taxonomy `generated_at`、不得新增 operation journal/checkpoint，也不得改任何已有 bytes；partial/malformed workspace 仍须进入 repair 而不是误判完整。子 owner 的进度行与机器字段一律只进私有 protocol，public stdout 最多一条最终自然语言总结。
   - **验收**：agent 会话里首次 `kb init` → 触发 agent 逐项问偏好 → headless 写入 `user-profile.yaml`（persona/autonomy 非空）；`config.py show` 可见；非 TTY 下不再空跑返回 0；随后无参数 `kb init` 的全树 metadata digest、journal 数与配置 bytes/语义均不变，stdout 无重复/机器行。
 
 ### 3.15 分发 / 版本 / 自更新（新，2026-07-17 锁定）
@@ -756,7 +770,7 @@
 | #    | 子系统      | 当前实测                                                                                              | 差距                                                                                    | 量          | 依赖                            |
 | ---- | ----------- | ----------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- | ----------- | ------------------------------- |
 | 3.1  | 入库/源     | PDF 不归档、无 HTML 优先、backend 默认缺                                                              | → 见地基「双源管线」                                                                   | L           | —                              |
-| 3.2  | 论文分析    | 初筛=关键词计数(`_grade(len(hits))`)；note=模板；`core_content` 8字段全空                         | agent 产五要素+挂据；脚本只解析/裁图/验据                                               | L           | 证据层+双源+两阶段              |
+| 3.2  | 论文分析    | 初筛=关键词计数(`_grade(len(hits))`)；note=模板；`core_content` 8字段全空                         | 入库直达 deep-read；agent 产类型+对应五要素并挂据；脚本只解析/裁图/验据                   | L           | 证据层+双源+统一深读            |
 | 3.3  | 仓库分析    | README+目录名启发式，无符号索引                                                                       | 入库文件级(能力边界)+按需符号级细读                                                     | M           | 证据层                          |
 | 3.4  | 博客分析    | 107行占位符，字段全「待确认」                                                                         | agent 产 claim/可信度(仅网页)；脚本取文切段                                             | M(scope小)  | 证据层+两阶段                   |
 | 3.5  | 检索        | 词级 substring`rank_records`                                                                        | **agent 答题走原生能力**(Grep/Read+parse-cache locator)；`kb find` 脚本保留现状 | **S** | parse-cache 有页码即可(来自3.1) |

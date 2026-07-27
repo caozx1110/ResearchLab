@@ -72,6 +72,8 @@
 
 原则：分档只降"仪式成本"，不降"证据与签字"。
 
+**R1 实现锁定（2026-07-27）**：新 workspace 显式落 `personal`；已有 runtime preferences 缺失/非法 profile 仍解释为 `strict`，避免升级静默降档。strict 固定 Top-3 + 24h；personal 默认每批 10 条、`review.card_ttl_hours` 可配 `1..168` 小时。effective profile/limit/expiry 必须冻结在一次性 snapshot，apply 不重读可变配置；真人 signer、当前消息授权、逐字 evidence、content binding/CAS 与原子批量两档相同。personal 的 local-only D1 只额外保留规范化 category/owner/operation/return_code，所有自由文本仍脱敏；strict 保持现状，任何导出始终强脱敏。
+
 ## 6. 结构清理（一次性，半天）
 
 1. `temp/` 高价值文档（SSOT、what_i_need、BACKLOG、OPTIMIZATION_PLAN、审计与验收报告、codex_prompt 全集）→ 入库为 `dev-docs/`（git 追踪；发现 29）；
@@ -121,6 +123,8 @@ temp/what_i_need.md 已确认过时，原 v1.1 增补整体撤回。以下以用
 1. **概念层 = 一等公民**（G13，≈1 周）：每个核心概念一页——定义（带逐字出处）+ 涉及它的论文/repo/blog + 关联 idea；进入 kb find 索引与 Obsidian 图谱，成为知识库的横向索引。落库 `kb/synthesis/concepts/`（或 units 新 kind，施工时定）；概念判断类内容仍走确认门。
 2. **代码检索入索引**（G14，≈3–4 天）：repo 源码进 FTS5（文件/符号级），`kb find` 一个入口同时召回论文段落与代码位置，结果带 file:line；与概念页联动（概念→代码实现位置）。
 3. **移除论文快筛**：入库即深读。quick_screen 的"值得细读"判断及其确认整体砍掉；`paper_type`（决定笔记要素集）并入深读 prepare 由 Agent 填写。paper 流程缩短一段，少一次确认打断——本身就是减法项（≈1 天改造）。
+
+   **R1 实现锁定（2026-07-27）**：`complete-note prepare` 生成一个统一待填结构，包含空 `paper_type`、分类理由/逐字 evidence 与 method_system/benchmark/survey 三个要素分支；Agent 只填所选分支。verify 同时验证类型与对应五要素、拒绝未选分支内容，并把类型落 `payload.deep_read.paper_type`、生成独立 paper-type claim；新 unit 无类型不得 method_system 兜底。旧 `quick_screen.paper_type` 仅兼容读取。`kb ingest` 直接到 note prepare；`kb add` 按 `link_autodrive` 选择轻量入库+一次询问或复用完整 ingest 链。`auto_screen` 从默认值、init、配置展示与新路由中删除。
 4. **报告与产出全量投入**：周报/工作报告编辑层（"进展/问题/下一步"叙事，≈2–3 天）+ 论文大纲→初稿+引用（G1+G2，≈1.5 周）+ PPT 素材差异化（每页一结论+证据+讲述顺序，≈2 天）+ 图表提取可引用化（G7，caption/编号索引，≈3 天）。
 
 ## 12. 对 v1 蓝图的修订

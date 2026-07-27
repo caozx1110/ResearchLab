@@ -44,6 +44,11 @@
 - 冷启动冒烟：`install.sh --claude` 约 2s；`kb init/help/doctor` 通过，PDF 深读能力诚实报告就绪；update 命中 no-change；uninstall 移除安装器管理文件并保留 scratch `kb/`。
 - 红线检查：仓库根 `kb/` 未修改；未 push/tag/merge。
 
+### R1 流程减法与治理分档（进行中，2026-07-27）
+- 已完成三条只读定位：论文 quick-screen/link_autodrive、review/TTL/D1 治理分档、公开根路径/安装器错误尾部；未调用 shipping skills，未修改真实 `kb/`。
+- 已先回写设计 SSOT：paper 统一 deep-read scaffold（类型+类型证据+三分支）、新 workspace personal/旧 workspace 缺省 strict、personal review 默认 10 条且 TTL 1..168h、D1 personal 仅放开四个机械字段、公开输出不显示绝对根路径或原始错误尾部。
+- 施工顺序：paper schema/owner → intake/kb-cli/autodrive/init → governance prefs/review/D1 → public path/installer → 定向与全量回归 → scratch 行为验收 → 分组提交。
+
 ## 决定记录（含偏离蓝图的理由）
 
 | # | 日期 | 决定 | 理由 |
