@@ -9,7 +9,7 @@
 | 操作步数 | Agent 实际发起的脚本/工具调用次数（含重试） |
 | 失败次数 | 非零返回或需要更换调用方式的次数；单列"机制摸索"（因不知道语法/flag 而失败或翻源码的次数） |
 | 耗时 | 从用户消息到最终回复的墙钟时间 |
-| 加载规则 token 估算 | 本条对话为掌握机制而加载的文档 token（AGENT_GUIDE ≈2.4k；对照：翻散落源码摸索 ≥8k） |
+| 加载规则 token 估算 | 本条对话为掌握机制而加载的完整规则组合 token（固定 `cl100k_base`；AGENT_GUIDE 当前约 2.0k；对照：翻散落源码摸索 ≥8k） |
 
 **基线口径**：改进前实测一次完整链路（安装→ingest→确认）约 **20 次调用，其中 9 次为机制摸索**（协议文件名 vs token、flag 位置、ref 格式等）。引入 AGENT_GUIDE 后的目标：机制摸索 →0，总步数逼近"最小必要步数"列。下表各条未单测项标"待采集"。
 
@@ -26,6 +26,7 @@
 
 - **步骤**：①用户丢一个本地 md 文件"帮我入库并整理"；②`kb ingest <路径>`（intake+prepare 自动）；③Agent 读 document.md 填 fill（逐字 evidence）；④owner verify；⑤`kb --agent-protocol r1.json review` 展示；⑥用户说"第一条确认"；⑦按 AGENT_GUIDE §2 语法 apply。
 - **期望**：unit 落库、judgement 经逐字校验、确认带用户原话与 evidence，一次 apply 成功。
+- **人工笔记变体**：若用户明确点名 Obsidian `inbox`/`annotations` 中的一份 Markdown，Agent 使用指南中的私有 human-note 模式；原笔记 bytes 不变，冻结副本进入同一 blog fill/verify/review 链，review sheet 必须被拒。
 - **最小必要步数**：约 6-7 次调用。
 - **基线**：全链首测约 20 次调用、其中 9 次机制摸索（本条为主要来源）。目标 ≤8 次、摸索 0。
 

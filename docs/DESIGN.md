@@ -20,6 +20,7 @@ Open Research Workspace Skills 是 knowledge-unit-first 的 research operating s
 release bundle                 installed workspace
 ├── .agents/                   ├── .agents/
 │   ├── AGENTS.md              │   ├── AGENTS.md
+│   ├── AGENT_GUIDE.md         │   ├── AGENT_GUIDE.md
 │   ├── lib/research/          │   ├── lib/research/
 │   └── skills/                │   └── skills/
 ├── AGENTS.md                  ├── AGENTS.md
@@ -35,16 +36,16 @@ Release bundle 不包含任何私有 `kb/`。安装、更新、storage sync 和�
 
 ## Skill 路由
 
-系统包含 20 个本地 skill：
+发布树包含 **15 个可发现 skill：14 个 L1 owner + `kb-cli`**。四类 unit analyzer 合并的是发现与路由面，历史 owner module、脚本、canonical artifact identity 与数据模型保持不变：
 
 | 分组 | Skills |
 |---|---|
 | Governance and routing | `knowledge-base-manager`, `research-config-manager`, `source-intake`, `research-orchestrator` |
 | Discovery | `literature-search` |
 | Ongoing tracking | `research-monitor` |
-| Analysis | `paper-analyst`, `repo-analyst`, `dataset-analyst`, `blog-analyst`, `literature-synthesizer` |
+| Analysis | `unit-analyst`（路由 paper/repo/dataset/blog 的既有 owner implementation）, `literature-synthesizer` |
 | Creation and execution | `idea-workbench`, `method-designer`, `experiment-workbench`, `report-author` |
-| Navigation and meta | `discussion-archivist`, `wiki-adapter`, `skill-evolution-advisor`; optional dev-only projection helper: `research-navigator` |
+| Navigation and meta | `discussion-archivist`, `skill-evolution-advisor` |
 | Conversational shortcut | `kb-cli` |
 
 路由原则：
@@ -53,8 +54,9 @@ Release bundle 不包含任何私有 `kb/`。安装、更新、storage sync 和�
 2. canonical artifact 只有一个 owner，薄入口不复制业务逻辑；
 3. `research-orchestrator` 管 program state、open question、evidence request、decision 和 reporting event；
 4. `kb-cli` 只暴露 16 个公开动词；业务 owner 继续拥有 canonical 写入，`obsidian` 只调用可重建的派生投影；
-5. `wiki-adapter` 只路由泛化 wiki 意图；
-6. 确定性的共同行为下沉到共享库，Agent 理解留在 runtime。
+5. 泛化 wiki 意图由 `kb-cli` 薄路由；maintainer-only navigator 位于 `tools/`，不进入安装包或产品路由；
+6. 确定性的共同行为下沉到共享库，Agent 理解留在 runtime；
+7. 每个可发现 skill 的 metadata 由单一 manifest 确定性生成并在 CI 检查，无手工漂移副本。
 
 跨 program 规划也遵循这条边界：脚本枚举全部合法 action、依赖、治理门、阻塞事实和已到期订阅，runtime Agent 比较信息增益、成本风险与用户约束。Agent 选择必须保存 `PortfolioDecision`，绑定当前候选快照与 effective preference receipt；不存在或已 stale 时，`kb next` 只请求重新规划，绝不把 legacy 固定排序冒充智能选择。
 
@@ -88,6 +90,8 @@ Release bundle 不包含任何私有 `kb/`。安装、更新、storage sync 和�
 
 `kb/` 可直接作为无需社区插件的 Obsidian Vault；canonical record、program state、taxonomy 与 evidence 仍是唯一事实源。系统只管理 `kb/obsidian/managed/`，人工内容放在 `inbox/` 与 `annotations/`，不得生成或改写 `.obsidian/`。生成页以 Reading view 为消费合同；编辑/Live Preview 显示 wikilink、code span 与 block ID 源码是 Obsidian 原生行为。Paper、文章与本地文档页回链 canonical `source/document.md`，source map 能把 page/section evidence locator 投影到稳定 source block；repo evidence 可以渲染为经过路径 containment 和文件存在性检查的本地文件链接，但 canonical 身份始终是 unit id 与仓库相对路径，机器本地 URI 不写回证据。动态 canonical 文本必须经 Markdown-safe 字面渲染，frontmatter wikilink 必须保持物理单行；manifest 的 renderer revision 变化会令旧投影 stale 并触发可恢复重建。
 
+人工笔记回流是显式选择，不是目录扫描：只接收当前消息点名的 `inbox/` 或 `annotations/` 下一层 UTF-8 普通 Markdown basename，拒绝 nested path、symlink、special、oversize 与 review sheet。source-intake 将选择时 exact bytes 冻结成 provenance 隔离的 `blog` unit（`source_origin=human-note`），原件不进入 transaction 或 checkpoint；blog owner 只从冻结 parse cache 接受 Agent fill/verify，结构化判断仍进入普通 pending review。
+
 原生 Bases 面板仍然只读。批量审核需要时，`kb review` 把当前治理档允许的一批（strict 3 条；personal 默认 10 条）导出为 `annotations/` 下 human-owned sheet，用户只改确认/拒绝/暂缓 checkbox。下一次对话由 Agent 读取并复述整批选择，当前消息授权后再用一个跨 owner root transaction 全量应用；任一 stale/tamper/owner failure 都整批回滚。Checkbox 本身从不等于授权，projection rebuild 也从不读取或覆盖这份 sheet。
 
 ## 数据模型
@@ -106,7 +110,7 @@ Unit 类型为 `paper`, `repo`, `dataset`, `blog`, `idea`, `experiment`, `concep
 
 `kb find` 的私有 Agent 协议附带瞬时 `context-pack/v1`，不新增公开动词，也不落 canonical 文件。它最多保留 5 个 unit、每个 3 条 claim、每条 2 个 evidence ref，总体不超过 6000 UTF-8 bytes；正式 lane 只接纳当前 ConfirmationReceipt 覆盖且再次校验通过的 confirmed claims。summary 与命中 passage 永远标记为 navigation-only，聚合末尾再做一次 currentness 检查，预算裁剪按完整对象删除而不截断 quote。
 
-`kb/raw/` 保存原始材料。可转换材料在 unit 的 `source/` 下拥有完整 `document.md`、`source-map.yaml`、`conversion.yaml`、原格式文件与可选的 hash-addressed `assets/`；HTML 另有带内联阅读样式、只引用本地 asset 的被动 `archive.html`。原始 HTML 响应、离线阅读页和 Markdown 分别承担证据、浏览器阅读与 Obsidian/AI 阅读职责，均不可原地覆盖。arXiv/ar5iv 全文 HTML 在写盘前检查 fatal/Untitled/LaTeXML error 与正文结构，不合格则先回退 PDF、再回退显式 degraded 的 abstract；显式 `vN` 不得被候选解析静默丢弃。HTML 规范化服从最终 URL 与 `<base href>`，公式通过占位保护避免 Markdown 转义，内部 fragment 映射到稳定 source block，图片 alt 与多图 figure 生成 Obsidian-safe 结构；复杂表格保留为安全 raw HTML。已有 Markdown 只在非代码语境转换图片和标题，保留 front matter、fenced/跨行 inline code 与 Setext 标题；所有非代码 raw HTML 与离线页服从相同被动化边界。纯文本按 literal 显示，HTML meta、HTTP charset 与 XML declaration 共同参与无损解码。四类输出共用结构 lint，完整派生 bundle 先在同盘 staging 生成和预检，`conversion.yaml` 最后发布，冲突或失败不得留下半套文件。`document.md` 是人和 Agent 的首选完整阅读层，parse cache 继续承担兼容的逐字 quote/locator 协议，转换降级或细节缺失时回退 `archive.html` 或原格式。Repository 源码保持原格式与目录身份，不批量 Markdown 化；目录重试按归档合同一致忽略 VCS metadata。`kb/user/` 是生成视图，`kb/output/` 是导出，不得成为唯一 source of truth。
+`kb/raw/` 保存原始材料。可转换材料在 unit 的 `source/` 下拥有完整 `document.md`、`source-map.yaml`、`conversion.yaml`、原格式文件与可选的 hash-addressed `assets/`；HTML 另有带内联阅读样式、只引用本地 asset 的被动 `archive.html`。原始 HTML 响应、离线阅读页和 Markdown 分别承担证据、浏览器阅读与 Obsidian/AI 阅读职责，均不可原地覆盖。arXiv/ar5iv 全文 HTML 在写盘前检查 fatal/Untitled/LaTeXML error 与正文结构，不合格则先回退 PDF、再回退显式 degraded 的 abstract；显式 `vN` 不得被候选解析静默丢弃。HTML 规范化服从最终 URL 与 `<base href>`，公式通过占位保护避免 Markdown 转义，内部 fragment 映射到稳定 source block，图片 alt 与多图 figure 生成 Obsidian-safe 结构；复杂表格保留为安全 raw HTML。已有 Markdown 只在非代码语境转换图片和标题，保留 front matter、fenced/跨行 inline code 与 Setext 标题；所有非代码 raw HTML 与离线页服从相同被动化边界。纯文本按 literal 显示，HTML meta、HTTP charset 与 XML declaration 共同参与无损解码。四类输出共用结构 lint，完整派生 bundle 先在同盘 staging 生成和预检，`conversion.yaml` 最后发布，冲突或失败不得留下半套文件。人工笔记使用更严格的单文件 UTF-8/no-follow 上限与 commit-boundary currentness guard；同 bytes 的 generic source 不会吞并其 provenance。`document.md` 是人和 Agent 的首选完整阅读层，parse cache 继续承担兼容的逐字 quote/locator 协议，转换降级或细节缺失时回退 `archive.html` 或原格式。Repository 源码保持原格式与目录身份，不批量 Markdown 化；目录重试按归档合同一致忽略 VCS metadata。`kb/user/` 是生成视图，`kb/output/` 是导出，不得成为唯一 source of truth。
 
 ## Prepare / fill / verify
 
@@ -136,7 +140,7 @@ confirmed or rejected
 
 1. 内容通过实质门，不是空壳或模板；
 2. judgement evidence 完整且可机器校验；
-3. signer 不是 AI；
+3. signer 是可识别的真实人名；AI 名称以及“我”、`user`、`human`、`source=user` 等角色占位均拒绝；
 4. `user_authorization` 来自当前用户消息；
 5. `authorization_source` 可追溯；
 6. receipt 绑定当前 content digest 与 evidence digest；
@@ -146,11 +150,15 @@ Receipt 不改变原 epistemic type。内容或 evidence 改变时，旧 receipt
 
 公开 review 将治理档允许的可确认对象复制到私有一次性 token registry。strict 固定 3 条/24 小时；personal 默认 10 条且有效期可在 1..168 小时配置。profile、item limit 与 expiry 在展示时冻结，apply 不重读配置；读取与应用时在锁内清理超过宽限期的已过期/已消费普通文件，并拒绝 symlink 或越界对象。对话内可以逐项处理；无插件 Obsidian 往返使用同一冻结批次，checkbox 只是意图草稿。Agent 必须复述完整批次并用当前消息授权绑定 preview decision digest；confirm 另需真实 signer 与 evidence，reject/defer 也不能仅凭文件变化自动执行。跨 owner apply 在一个 root transaction 中全量预检、复验、应用和消费，任何失败整批回滚。registry/sheet 读写逐层使用 no-follow directory descriptor，防止中间目录 swap 将访问重定向到 workspace 外。失败分为已处理、已过期、正文变化、授权预览过时、未知或被篡改等自然语言恢复路径。
 
+观察式偏好也是这个统一 review 的对象。Agent 只记录带逐字用户纠正和精确 skill/operation scope 的 pending observation，任务尾最多展示两条；旧的 direct review/promotion API 对偏好零写拒绝。确认时 learning receipt 与 derived runtime item 在一个 root transaction 写入，receipt 绑定正文、observation、scope 与原 learning bytes；eligible view 每次重验 current learning/receipt/runtime binding，legacy、伪签、重复或漂移项只保留历史，不跨任务生效。
+
 ## 外部发现、检索与新鲜度
 
 `literature-search` 是 source intake 之前的 provider-neutral 发现层。runtime Agent 根据当前真正可用的 search/browser/connector 能力选择工具，将原始研究问题拆成互补查询，按批次持久化 query event、候选 identity/discovery edge、fetch/retry 状态、基于 title/abstract/fulltext 证据的初筛、coverage/frontier 及其 history、硬预算和停止依据。run identity 同时绑定问题、模式、范围摘要和可选 fresh-run ID。脚本不联网、不选 provider、不理解论文，只守 schema、identity、引用完整性、journal/lock/atomic write 和实际用量 budget；Agent 决定下一条查询、引用展开、gap-followup 与 semantic saturation。默认 exploratory 不宣称完整；系统请求在来源、查询式、结果深度和筛选不能完全复现时诚实标为 bounded-systematic，且 bounded 永远标 partial。多 reviewer 以 append-only ledger 保存各自决定与冲突；阶段只能按 title/abstract 到 fulltext 的 canonical 顺序，旧决定由 evidence/decision digest 重验，pending 裁决保留、resolved 追加并绑定输入决定。只有不同 execution/context 可称 independent，同一 Agent 多角色明确标 assisted。外部内容视为不可信数据；初筛 include/maybe 不是用户批准，只有当前对话明确选择的候选才进入 source-intake。stage 不创建 paper unit、不生成 survey，也不把 citation count、venue、作者声誉或排名当 relevance/quality。
 
 `research-monitor` 是 provider-neutral 持续跟踪层。它保存带时区 anchored cadence、到期事实、冻结 scope/budget/run receipt、pause/resume/retry 与 evidence-bound outcome，不内置检索源，也不安装 daemon、cron、watcher 或插件。run task digest 绑定 subscription、schedule、target、scope 和 budget，receipt content digest 防止事后改写。实际文献跟踪仍由 Agent 调用 `literature-search`，stage 从创建起携带同一 monitor binding，完成时再绑定 stage bytes；survey freshness 绑定冻结 survey bytes，unit recheck 必须覆盖全部冻结 unit。宿主 automation 只在当前用户明确授权后建立；没有 automation 时，下一次 Agent 会话或 `kb next` 仍能发现 due subscription。矛盾只能形成有两侧不同 evidence 的 candidate，不能自动改 confirmed claim。
+
+`kb add` 的多目标形式接受 1–20 项，先完成整批安全 preflight，再由 source-intake 在一个 root transaction/checkpoint 发布；late failure 不留下部分 canonical unit。`ask_first` 对整批只问一次，`auto_deep_read` 只为新增项准备 owner scaffold，重复项不制造空提示。园艺请求与 `kb next` 共用 portfolio classifier，覆盖 ready review、awaiting fill/verify、ordinary stale survey、resumable operation、due monitor 与 taxonomy rebuild，并最多公开三步。stale survey 只能重走 prepare→Agent fill→verify→pending receipt 链；taxonomy/governance rebuild 只改机械派生路径并精确 checkpoint，园艺永不删除、defer 或自签。
 
 终端 `kb find` 使用 deterministic passage extractor。Markdown 以 heading/段落切分，长段用固定重叠窗口；每段保留 unit、artifact、locator、text 和 source digest。显式索引构建把完整临时 SQLite FTS5 数据库原子替换到 runtime cache，不使用 external-content 双表。查询最多返回五段摘要；cache 缺失、损坏或 digest stale 时，以同一抽取器做内存只读 fallback。缓存不是 canonical evidence，不进入 checkpoint，检索也不宣称 embedding 或跨语言语义能力。
 
@@ -249,4 +257,4 @@ Install manifest 记录 `source_origin` 与 `source_branch`，本地安装还可
 10. 在 Linux 与 macOS 支持的 Python 版本上验证；
 11. 发布前由冷 acceptance agent 端到端复现关键路径。
 
-当前标识为 `0.2.0-rc.7`。快照绑定确认与 judgement consumer、root-commit publication guard、恢复/更新完整性、provider-neutral literature/survey/monitor、无插件多项 review 与严格离线 Agent-plan runtime binding 已通过完整本地套件、R17–R26 定向回归、20-skill validator 和 installed-copy 生命周期。安装与核心流程不要求外部 API Key、付费检索额度、商业数据库或付费插件。真实外部来源与 Obsidian 1.12.7 Reading-view 尚未针对 rc.7 重跑，仍属于发布门。它不是 stable/GA，也尚未 tag 或 publish；真实来源/Obsidian 验收与 hosted Linux/macOS CI matrix 全绿仍是 release tag 的前置。文档、tag 与 changelog 不得把本地 RC 验收外推为稳定兼容或 SLA 承诺。
+当前标识为 `0.2.0-rc.7`。快照绑定确认与 judgement consumer、root-commit publication guard、恢复/更新完整性、provider-neutral literature/survey/monitor、无插件多项 review 与严格离线 Agent-plan runtime binding 已通过完整本地套件、R17–R26 定向回归、15-skill validator 和 installed-copy 生命周期。安装与核心流程不要求外部 API Key、付费检索额度、商业数据库或付费插件。真实外部来源与 Obsidian 1.12.7 Reading-view 尚未针对 rc.7 重跑，仍属于发布门。它不是 stable/GA，也尚未 tag 或 publish；真实来源/Obsidian 验收与 hosted Linux/macOS CI matrix 全绿仍是 release tag 的前置。文档、tag 与 changelog 不得把本地 RC 验收外推为稳定兼容或 SLA 承诺。

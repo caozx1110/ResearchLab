@@ -18,13 +18,13 @@
 - [x] A8 周报一句话可交差；PPT 素材差异化；与 outline 三者明显不同
 - [x] A9 论文 outline→分节草稿→bib 导出→LaTeX/MD 落 output/
 - [x] A10 图表 caption/编号索引，稳定引用键
-- [ ] A11 偏好观察式记录+确认后生效；init 两问落盘且被消费
+- [x] A11 偏好观察式记录+确认后生效；init 两问落盘且被消费
 - [ ] A12 undo 点名；restore 无参列清单可按编号恢复；中断 resume 成功
 - [ ] A13 交互章程冷验收（三场景 10 条逐条打分）
 
 ### 质量验收
 - [x] Q1 pytest 全套绿（普通文件型 scratch `.venv`；R4 `2216 passed, 18 skipped`；不得回退新行为凑绿）
-- [x] Q2 skill_validator 20/20；冷装约 2s；install.sh install+update+uninstall 三态正常
+- [x] Q2 skill_validator 15/15；冷装约 2s；install.sh install+update+uninstall 三态正常
 - [ ] Q3 GOLDEN_SUITE 8 条全过且零机制摸索失败
 - [ ] Q4 单任务规则文本 ≤8k tokens；kb next ≤3 步
 - [ ] Q5 静默失败为零（非零退出带一行可行动中文原因；私有协议含期望格式）
@@ -101,6 +101,11 @@
 - R5 施工前完成两条独立只读审计：结构审计确认目标为 **15 个 discoverable skill = 14 个 L1 owner + kb-cli**，四 analyzer 只应合并发现/路由而保留内部脚本及 owner identity；园艺/批注审计确认当前 `kb add` 仍是单目标、ordinary stale survey 未进 `kb next`、taxonomy rebuild 缺 checkpoint，且旧 `review_learning/promote_learning` 可绕过统一确认门。
 - 设计 gate 已锁：测试迁根、unit-analyst facade、wiki 并入 kb-cli、navigator 移出 bundle、metadata 构建生成、固定 tokenizer 的 8k gate；`kb add` 1..20 整批原子；园艺只分类/继续不删除或自签；人工 Markdown freeze 后走 blog 分析 pending；偏好 observation 走统一 snapshot/真人 signer/当前消息授权/ConfirmationReceipt 后才跨任务生效。
 - 施工顺序：设计/hand-off → tests 迁根 → bundle/metadata/skill facade → G5 → G6/A11 → token 瘦身与全量/冷验收。每个 piece 独立提交；测试只用 `/private/tmp`，真实根 `kb/` 保持只读。
+- 结构 piece 已提交：测试从 shipping lib 迁到仓库根 `tests/`；discoverable 面收敛到 15，`unit-analyst` 只合并发现/路由，wiki 薄路由并入 `kb-cli`，navigator 移到 `tools/`，metadata 由单一 manifest 生成并校验。历史 owner script/schema identity 未改。
+- G5 已提交并冷验收：`kb add` 支持 1..20 项整批 preflight、单 root transaction/checkpoint、late failure 零部分写，duplicate-only 不产生空深读提示；portfolio classifier 覆盖 ready review、awaiting fill/verify、ordinary stale survey、resumable op、due monitor 与 taxonomy rebuild，公开最多三步。stale survey 重走新 pending 链，taxonomy/governance 只机械重建并精确 checkpoint，园艺不删除/defer/自签。
+- A11 已提交：用户纠正只形成带逐字 observation 与精确 scope 的 pending preference，任务尾最多两条；统一 `kb review` snapshot + 真人 signer + 当前消息授权在同一 root transaction 写 learning receipt 与 runtime binding。旧 direct promote/review 零写，legacy/伪签/stale/tamper item 不进入 eligible view；init 的 `link_autodrive` 与 `discussion_style` 仍落盘并被消费。
+- G6 固定提交 `7d22344` 冷装验收 PASS：安装副本显式包含 byte-identical `AGENT_GUIDE.md`；点名 human note 后 exact bytes 冻结为 `source_origin=human-note` 的 blog，四槽 Agent fill/逐字 evidence/verify 后保持 pending。nested、symlink、FIFO、non-UTF8、oversize、review-sheet basename/schema/marker、late drift 与事务故障均 fail closed；重复 human note 幂等、与 generic 同 bytes 不跨 provenance 合并；原 note 不进入任何 checkpoint。scratch 前后源码根真实 `kb/` tree digest 同为 `86953d91e901b6f77b31ca392588a90fd3ea5ae199be14b1fb45742ca6d3b30a`。
+- Q4 施工中：固定 `tiktoken==0.13.0` / `cl100k_base` 对完整 `AGENTS + AGENT_GUIDE + 单个 discoverable SKILL` 组合逐份计数；规则瘦身后 global 由 8020 降至 3943，当前最坏组合 7668/8000。最终 full suite、冷 installed-copy A13/GOLDEN 与 release gate 尚未完成，因此 Q3–Q7 不提前勾选。
 
 ## 决定记录（含偏离蓝图的理由）
 

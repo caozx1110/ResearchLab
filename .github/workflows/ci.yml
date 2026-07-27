@@ -26,7 +26,9 @@ jobs:
           bash -n install.sh
           python -m py_compile install-lib/ws_sync.py
       - name: Validate skill metadata
-        run: python .agents/lib/research/skill_validator.py .agents/skills
+        run: |
+          python .agents/lib/research/skill_validator.py .agents/skills
+          python tools/check_rule_tokens.py
       - name: Configure git identity for checkpoint tests
         run: |
           git config --global user.name "ci"
@@ -58,6 +60,7 @@ jobs:
           bash -n install.sh
           PYTHONPYCACHEPREFIX="$RUNNER_TEMP/pycache" python -m compileall -q .agents/skills .agents/lib tests install-lib/ws_sync.py
           python .agents/lib/research/skill_validator.py .agents/skills
+          python tools/check_rule_tokens.py
       - name: Configure git identity for installer and recovery tests
         run: |
           git config --global user.name "ci"

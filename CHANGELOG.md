@@ -4,6 +4,24 @@ All notable changes to this project will be documented here. The format follows 
 
 ## [Unreleased]
 
+### Added (R5, 2026-07-27)
+
+- Added atomic 1–20 source intake through the existing `kb add` surface. The full batch is preflighted and published in one root transaction/checkpoint, duplicate-only batches finish cleanly, and deep-read continuation is asked once per batch.
+- Added bounded knowledge gardening to the portfolio candidate model: ready reviews, unfinished Agent work, stale surveys, resumable operations, due monitors, and mechanical taxonomy rebuilds share one classifier and produce at most three next steps. Gardening never silently deletes, defers, confirms, or reuses a stale survey receipt.
+- Added explicit Obsidian human-note intake. One selected UTF-8 Markdown basename is frozen byte-for-byte as a provenance-isolated blog source; review sheets, nested paths, symlinks, special files, oversized input, and commit-time drift fail closed while the human-owned original remains outside transactions and checkpoints.
+- Added observation-based preference memory to unified review. A preference becomes eligible for later tasks only after a one-time current snapshot, real human signer, current-message authorization, and content/evidence/scope-bound receipt are atomically written with its derived runtime item.
+- Added a fixed `cl100k_base` rule-budget gate for the complete installed `AGENTS.md + AGENT_GUIDE.md + one discoverable SKILL.md` combination. CI rejects any combination above 8,000 tokens.
+
+### Changed (R5 structure reduction, 2026-07-27)
+
+- Reduced the installed discovery surface from 20 skills to 15: `unit-analyst` now routes the four existing analyzer implementations, generic wiki routing lives in `kb-cli`, and the optional maintainer navigator moved out of the release bundle. Historical owner identities and on-disk schemas remain compatible.
+- Skill metadata is generated from one manifest and checked for drift. The repository test suite now lives at top-level `tests/`, and the installed distribution explicitly includes the runtime `AGENT_GUIDE.md`.
+
+### Security (R5, 2026-07-27)
+
+- Human-note intake uses anchored no-follow bounded snapshots, strict UTF-8, exact byte/currentness binding, origin-aware deduplication, root-transaction rollback, and exact checkpoint containment.
+- Preference confirmation rejects AI and role-placeholder signers such as “我”, `user`, `human`, and `source=user`; legacy direct promotion is fail-closed, and legacy or tampered unbound runtime items remain inactive.
+
 ### Added (R4, 2026-07-27)
 
 - Added bounded all-or-nothing experiment import for W&B JSON, stable-header CSV, and flat JSON directories. Exact raw bytes are archived, identical items replay idempotently, conflicts fail closed, and imported run facts do not manufacture diagnoses.
@@ -42,7 +60,7 @@ All notable changes to this project will be documented here. The format follows 
 - 代码检索（A5/G14）：repo 源码进 FTS5（`.py` 按 def/class 符号切块带限定名，其余 40 行窗/8 行重叠；跳二进制/超大/VCS 目录，预算超限显式告警）；FTS 新增 `code_terms` 拆词辅助列；`PASSAGE_INDEX_REVISION=passages-v3`（旧缓存判 stale 自动回退内存检索）。
 - 接口层文档（A6）：新增 `.agents/AGENT_GUIDE.md`（机制速查+交互章程 10 条）；19 份 SKILL.md 增"启动澄清（Agent 用）"；新增 `docs/GOLDEN_SUITE.md`（8 条黄金对话规格与基线指标）。
 
-The bundle currently declares **`0.2.0-rc.7`**. Its complete local suite, targeted R17–R26 regression suites, all 20 skill validators, and current installed-copy lifecycle pass. Installation and core workflows require no external API Key, paid search quota, commercial database subscription, or paid plugin. The candidate is not a stable release or GA, has not been tagged or published, and carries no compatibility or response-time SLA. Real-source/Obsidian acceptance and a green hosted Linux/macOS CI matrix remain prerequisites for a release tag.
+The bundle currently declares **`0.2.0-rc.7`**. Its complete local suite, targeted R17–R26 regression suites, all 15 discoverable skill validators, and current installed-copy lifecycle pass. Installation and core workflows require no external API Key, paid search quota, commercial database subscription, or paid plugin. The candidate is not a stable release or GA, has not been tagged or published, and carries no compatibility or response-time SLA. Real-source/Obsidian acceptance and a green hosted Linux/macOS CI matrix remain prerequisites for a release tag.
 
 ## [0.2.0-rc.7] - Unreleased
 

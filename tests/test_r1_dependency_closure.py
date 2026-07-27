@@ -20,11 +20,10 @@ class DistributionMetadata:
     requires_dist: tuple[str, ...] = ()
 
 
-# Offline snapshot of the runtime metadata for the exact pytest lock. Keeping
-# dependency edges here makes the gate recursive: a pin for pytest's direct
-# dependency is not enough when that distribution has a selected dependency of
-# its own (exceptiongroup -> typing-extensions on Python 3.9/3.10).
-PYTEST_CLOSURE_METADATA = {
+# Offline snapshot of the runtime metadata for the exact dev-tool lock. Keeping
+# dependency edges here makes the gate recursive: a pin for a direct dependency
+# is not enough when that distribution has a selected dependency of its own.
+DEV_CLOSURE_METADATA = {
     "pytest": DistributionMetadata(
         version="8.4.2",
         requires_python=">=3.9",
@@ -50,6 +49,28 @@ PYTEST_CLOSURE_METADATA = {
     "pygments": DistributionMetadata(version="2.20.0", requires_python=">=3.9"),
     "tomli": DistributionMetadata(version="2.4.1", requires_python=">=3.8"),
     "typing-extensions": DistributionMetadata(version="4.16.0", requires_python=">=3.9"),
+    "tiktoken": DistributionMetadata(
+        version="0.13.0",
+        requires_python=">=3.9",
+        requires_dist=("regex", "requests"),
+    ),
+    # regex 2026.7.19 raised its Python floor to 3.10. Pin a compatible
+    # release for the project's Python 3.9 floor.
+    "regex": DistributionMetadata(version="2025.11.3", requires_python=">=3.9"),
+    "requests": DistributionMetadata(
+        version="2.32.5",
+        requires_python=">=3.9",
+        requires_dist=(
+            "charset_normalizer<4,>=2",
+            "idna<4,>=2.5",
+            "urllib3<3,>=1.21.1",
+            "certifi>=2017.4.17",
+        ),
+    ),
+    "charset-normalizer": DistributionMetadata(version="3.4.4", requires_python=">=3.7"),
+    "idna": DistributionMetadata(version="3.11", requires_python=">=3.8"),
+    "urllib3": DistributionMetadata(version="2.6.1", requires_python=">=3.9"),
+    "certifi": DistributionMetadata(version="2025.11.12", requires_python=">=3.7"),
 }
 
 EXPECTED_LOCK_MARKERS = {
@@ -62,7 +83,16 @@ EXPECTED_LOCK_MARKERS = {
     "tomli": 'python_version < "3.11"',
     "typing-extensions": 'python_version < "3.11"',
     "colorama": 'sys_platform == "win32"',
+    "tiktoken": None,
+    "regex": None,
+    "requests": None,
+    "charset-normalizer": None,
+    "idna": None,
+    "urllib3": None,
+    "certifi": None,
 }
+
+DEV_ROOTS = ("pytest", "tiktoken")
 
 TARGET_ENVIRONMENTS = tuple(
     (python_version, sys_platform)
@@ -133,7 +163,7 @@ def _selected(requirement: Requirement, environment: dict[str, str]) -> bool:
     return requirement.marker is None or requirement.marker.evaluate(environment=environment)
 
 
-def _assert_recursive_pytest_closure(lock: dict[str, Requirement]) -> None:
+def _assert_recursive_dev_closure(lock: dict[str, Requirement]) -> None:
     reached_in_any_environment: set[str] = set()
     for python_version, sys_platform in TARGET_ENVIRONMENTS:
         environment = _target_environment(python_version, sys_platform)
@@ -142,16 +172,16 @@ def _assert_recursive_pytest_closure(lock: dict[str, Requirement]) -> None:
             for name, requirement in lock.items()
             if _selected(requirement, environment)
         }
-        assert "pytest" in selected_lock
+        assert all(root in selected_lock for root in DEV_ROOTS)
 
         reached: set[str] = set()
-        pending = ["pytest"]
+        pending = list(DEV_ROOTS)
         while pending:
             name = pending.pop()
             if name in reached:
                 continue
             reached.add(name)
-            metadata = PYTEST_CLOSURE_METADATA.get(name)
+            metadata = DEV_CLOSURE_METADATA.get(name)
             assert metadata is not None, f"missing offline metadata for selected pin: {name}"
             locked = selected_lock.get(name)
             assert locked is not None, (
@@ -180,7 +210,7 @@ def _assert_recursive_pytest_closure(lock: dict[str, Requirement]) -> None:
                 pending.append(dependency_name)
 
         assert reached == set(selected_lock), (
-            f"lock selects packages outside pytest's runtime closure on "
+            f"lock selects packages outside the dev tools' runtime closure on "
             f"Python {python_version}/{sys_platform}: {sorted(set(selected_lock) - reached)}"
         )
         reached_in_any_environment.update(reached)
@@ -191,7 +221,7 @@ def _assert_recursive_pytest_closure(lock: dict[str, Requirement]) -> None:
     )
 
 
-def test_requirements_dev_locks_complete_recursive_pytest_closure() -> None:
+def test_requirements_dev_locks_complete_recursive_dev_tool_closure() -> None:
     lines = _active_requirement_lines(_project_root() / "requirements-dev.txt")
     includes = tuple(
         line for line in lines if line.startswith(("-r ", "--requirement "))
@@ -202,17 +232,17 @@ def test_requirements_dev_locks_complete_recursive_pytest_closure() -> None:
     assert {
         name: _locked_version(requirement) for name, requirement in lock.items()
     } == {
-        name: metadata.version for name, metadata in PYTEST_CLOSURE_METADATA.items()
+        name: metadata.version for name, metadata in DEV_CLOSURE_METADATA.items()
     }
     assert {
         name: str(requirement.marker) if requirement.marker is not None else None
         for name, requirement in lock.items()
     } == EXPECTED_LOCK_MARKERS
-    _assert_recursive_pytest_closure(lock)
+    _assert_recursive_dev_closure(lock)
 
 
-def test_every_locked_pytest_distribution_supports_python_3_9() -> None:
-    for name, metadata in PYTEST_CLOSURE_METADATA.items():
+def test_every_locked_dev_distribution_supports_python_3_9() -> None:
+    for name, metadata in DEV_CLOSURE_METADATA.items():
         assert Version("3.9") in SpecifierSet(metadata.requires_python), (
             f"{name}=={metadata.version} has incompatible Requires-Python "
             f"{metadata.requires_python}"
@@ -225,7 +255,7 @@ def test_recursive_gate_rejects_a_missing_second_order_pin() -> None:
     lock.pop("typing-extensions")
 
     with pytest.raises(AssertionError, match="missing exact pin for typing-extensions"):
-        _assert_recursive_pytest_closure(lock)
+        _assert_recursive_dev_closure(lock)
 
 
 def test_lock_parser_rejects_range_resolution() -> None:
