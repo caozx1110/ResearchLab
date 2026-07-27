@@ -132,7 +132,7 @@ def test_agent_plan_lists_exact_targets_and_writes_nothing(tmp_path: Path) -> No
     assert len(runtime) == 1
     assert runtime[0]["path"] == str(workspace / ".venv")
     assert runtime[0]["precondition"] == {"type": "absent"}
-    assert "yaml, markdownify, or bs4" in runtime[0]["condition"]
+    assert "yaml, markdownify, bs4, or the pymupdf4llm PDF backend" in runtime[0]["condition"]
     assert "intentionally not enumerated" in runtime[0]["boundary"]
     assert "preserved" in runtime[0]["cleanup"]
     tree = plan["source"]["distributable_tree"]
@@ -162,7 +162,14 @@ def test_agent_plan_lists_exact_targets_and_writes_nothing(tmp_path: Path) -> No
     assert not any(workspace.iterdir())
     assert not any(home.iterdir())
     assert not any(cache.iterdir())
-    assert not any(scratch.iterdir())
+    scratch_entries = {path.name for path in scratch.iterdir()}
+    # macOS may let xcrun create its own TMPDIR cache while resolving the
+    # developer-tool git binary.  That OS-owned cache is not an installer
+    # mutation; no product-owned scratch artifact is allowed.
+    if sys.platform == "darwin":
+        assert scratch_entries <= {"xcrun_db"}
+    else:
+        assert not scratch_entries
 
 
 def test_agent_plan_requires_explicit_json_result_path(tmp_path: Path) -> None:
@@ -665,7 +672,7 @@ def test_agent_plan_core_runtime_probe_catches_yaml_only_environment(tmp_path: P
     runtime = plan["conditional_runtime_changes"]
     assert len(runtime) == 1
     assert runtime[0]["path"] == str(workspace / ".venv")
-    assert "yaml, markdownify, or bs4" in runtime[0]["condition"]
+    assert "yaml, markdownify, bs4, or the pymupdf4llm PDF backend" in runtime[0]["condition"]
 
 
 def test_agent_uninstall_plan_reports_managed_block_and_exact_count(tmp_path: Path) -> None:
@@ -1158,7 +1165,11 @@ def test_system_agent_plan_lists_missing_parent_directories(tmp_path: Path) -> N
     assert len(result.stdout.splitlines()) <= 20
     assert not any(home.iterdir())
     assert not any(cache.iterdir())
-    assert not any(scratch.iterdir())
+    scratch_entries = {path.name for path in scratch.iterdir()}
+    if sys.platform == "darwin":
+        assert scratch_entries <= {"xcrun_db"}
+    else:
+        assert not scratch_entries
 
 
 def _run_pty_dialog(
@@ -1658,8 +1669,13 @@ def test_noninteractive_copy_lifecycle_hides_sync_engine_output_and_preserves_se
     failed_update = _run_copy_action(tmp_path, workspace, action="update")
 
     assert failed_update.returncode == 3
-    assert "工作区文件操作失败，请让 Agent 检查后重试" in failed_update.stderr
-    _assert_private_sync_output_hidden(failed_update, _project_root(), workspace / ".agents")
+    assert "工作区文件操作失败。" in failed_update.stderr
+    assert "请让 Agent 结合以下输出检查后重试。" in failed_update.stderr
+    assert "同步器输出（最后 " in failed_update.stderr
+    tail_lines = [line for line in failed_update.stderr.splitlines() if line.startswith("  | ")]
+    assert 1 <= len(tail_lines) <= 8
+    assert str(_project_root()) not in failed_update.stderr
+    assert str(workspace / ".agents") not in failed_update.stderr
     assert version_path.read_text(encoding="utf-8") == "locally drifted\n"
     assert manifest_path.read_bytes() == manifest_before_failure
 

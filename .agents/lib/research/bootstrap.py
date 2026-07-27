@@ -9,6 +9,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 READY_FLAG = "_RESEARCH_RUNTIME_READY"
@@ -27,8 +28,13 @@ CORE_RUNTIME_PACKAGES = (
 # to an empty PDF parse. Heavy backends (MinerU/Docling) stay opt-in.
 PDF_BACKEND_PACKAGE = "pymupdf4llm"
 PDF_BACKEND_IMPORT = "pymupdf4llm"
+# The deep-read pipeline needs both the converter and its PyMuPDF (fitz) engine;
+# probing both keeps this gate aligned with sources._pymupdf4llm_available().
+PDF_BACKEND_PROBE_MODULES = ("pymupdf4llm", "fitz")
 # Opt out of auto-installing the PDF backend (the hard core runtime is unaffected).
 NO_PDF_BACKEND_ENV = "RESEARCH_NO_PDF_BACKEND"
+PDF_BACKEND_RETRY_SECONDS = 3600.0
+PDF_BACKEND_RETRY_MARKER = ".pdf-backend-prep-last-attempt"
 
 
 def _absolute_path(path: Path) -> Path:
@@ -83,10 +89,24 @@ def _current_has_yaml() -> bool:
     return all(importlib.util.find_spec(module) is not None for module in CORE_RUNTIME_MODULES)
 
 
+def _current_has_pdf_backend() -> bool:
+    """Probe the always-installed paper deep-read backend in this interpreter."""
+    importlib.invalidate_caches()
+    return all(importlib.util.find_spec(module) is not None for module in PDF_BACKEND_PROBE_MODULES)
+
+
+def _pdf_backend_opted_out() -> bool:
+    return os.environ.get(NO_PDF_BACKEND_ENV) == "1"
+
+
 def _python_can_import_yaml(python_exe: str | Path) -> bool:
     """Compatibility name: probe the complete hard runtime, not only PyYAML."""
-    if is_current_python(python_exe):
-        return _current_has_yaml()
+    # A wrapper may have launched this same executable with flags such as
+    # ``-S`` that hide site packages.  Accept the live process when it is
+    # already capable, otherwise probe a clean invocation of the bound binary
+    # before deciding that the runtime itself is deficient.
+    if is_current_python(python_exe) and _current_has_yaml():
+        return True
     try:
         completed = subprocess.run(
             [str(_python_path(python_exe)), "-c", "import yaml, markdownify, bs4"],
@@ -129,7 +149,7 @@ def _path_runtime_python(home: Path | None = None) -> Path | None:
                     pass
                 else:
                     continue
-            if is_current_python(resolved):
+            if is_current_python(resolved) and _current_has_yaml():
                 continue
             identity = (
                 metadata.st_dev,
@@ -184,17 +204,17 @@ def _python_can_import(python_exe: str | Path, module: str) -> bool:
     return completed.returncode == 0
 
 
-def _ensure_python_has_pdf_backend(python_exe: str | Path) -> None:
+def _ensure_python_has_pdf_backend(python_exe: str | Path) -> bool:
     """Best-effort install of the lightweight PDF backend into a Python runtime.
 
     Unlike the core YAML/Markdown runtime (which gates readiness), a missing PDF backend
     only degrades PDF parsing, so a failed/opted-out install warns to stderr and is
     non-fatal."""
-    if os.environ.get(NO_PDF_BACKEND_ENV) == "1":
-        return
+    if _pdf_backend_opted_out():
+        return True
     python_path = _python_path(python_exe)
-    if _python_can_import(python_path, PDF_BACKEND_IMPORT):
-        return
+    if all(_python_can_import(python_path, module) for module in PDF_BACKEND_PROBE_MODULES):
+        return True
     try:
         _run_checked(
             [str(python_path), "-m", "pip", "install", "--disable-pip-version-check", PDF_BACKEND_PACKAGE],
@@ -202,10 +222,53 @@ def _ensure_python_has_pdf_backend(python_exe: str | Path) -> None:
         )
     except RuntimeError:
         print(
-            "PDF 解析能力尚未就绪；请让 Agent 运行 kb doctor 查看状态。",
+            "论文 PDF 深读能力尚未就绪，下次使用时会自动重试；可让 Agent 运行 kb doctor 查看状态。",
             file=sys.stderr,
             flush=True,
         )
+        return False
+    if all(_python_can_import(python_path, module) for module in PDF_BACKEND_PROBE_MODULES):
+        return True
+    print(
+        "论文 PDF 深读能力尚未就绪，下次使用时会自动重试；可让 Agent 运行 kb doctor 查看状态。",
+        file=sys.stderr,
+        flush=True,
+    )
+    return False
+
+
+def _pdf_backend_retry_marker(venv_dir: Path) -> Path:
+    return venv_dir / PDF_BACKEND_RETRY_MARKER
+
+
+def _pdf_backend_retry_is_throttled(venv_dir: Path) -> bool:
+    try:
+        last_attempt = _pdf_backend_retry_marker(venv_dir).stat().st_mtime
+    except OSError:
+        return False
+    return time.time() - last_attempt < PDF_BACKEND_RETRY_SECONDS
+
+
+def _record_pdf_backend_failure(venv_dir: Path) -> None:
+    marker = _pdf_backend_retry_marker(venv_dir)
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(str(time.time()), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _prepare_managed_pdf_backend(venv_dir: Path, venv_py: Path) -> bool:
+    if _pdf_backend_opted_out():
+        return True
+    if all(_python_can_import(venv_py, module) for module in PDF_BACKEND_PROBE_MODULES):
+        return True
+    if _pdf_backend_retry_is_throttled(venv_dir):
+        return False
+    ready = _ensure_python_has_pdf_backend(venv_py)
+    if not ready:
+        _record_pdf_backend_failure(venv_dir)
+    return ready
 
 
 def _reexec(python_exe: Path) -> None:
@@ -272,7 +335,7 @@ def _venv_builder_python() -> str:
     return "python3"
 
 
-def _ensure_venv_has_yaml(venv_dir: Path, venv_py: Path) -> None:
+def _ensure_venv_has_yaml(venv_dir: Path, venv_py: Path) -> bool:
     if not venv_py.exists():
         _run_checked([_venv_builder_python(), "-m", "venv", str(venv_dir)], context="venv creation")
     if not _python_can_import_yaml(venv_py):
@@ -290,7 +353,7 @@ def _ensure_venv_has_yaml(venv_dir: Path, venv_py: Path) -> None:
     if not _python_can_import_yaml(venv_py):
         raise RuntimeError("managed venv still cannot import the core runtime after installation")
     # YAML + HTML-to-Markdown are the hard gate above; PDF remains best-effort.
-    _ensure_python_has_pdf_backend(venv_py)
+    return _prepare_managed_pdf_backend(venv_dir, venv_py)
 
 
 def _failure_message(venv_dir: Path, error: Exception) -> str:
@@ -316,10 +379,15 @@ def ensure_managed_runtime(home: Path | None = None) -> None:
     configured_python = str(os.environ.get("RESEARCH_PYTHON") or "").strip()
     if configured_python:
         configured_path = _python_path(configured_python)
+        configured_is_current = is_current_python(configured_path)
+        if configured_is_current and _current_has_yaml():
+            _mark_ready()
+            return
         if _python_can_import_yaml(configured_path):
-            if is_current_python(configured_path):
-                _mark_ready()
-                return
+            # The same executable may have reached us through a wrapper that
+            # injected ``-S`` or similar flags.  Re-exec the reviewed binary
+            # with a clean argv instead of marking that deficient live process
+            # ready merely because the underlying path matches.
             _reexec(configured_path)
             return
 
@@ -340,17 +408,50 @@ def ensure_managed_runtime(home: Path | None = None) -> None:
     # to the managed project environment.
     if venv_py.exists() and _python_can_import_yaml(venv_py):
         if is_current_python(venv_py):
-            _ensure_python_has_pdf_backend(venv_py)
+            _prepare_managed_pdf_backend(venv_dir, venv_py)
             _mark_ready()
             return
+        # Complete a partially provisioned runtime (PDF backend missing after an
+        # earlier offline install) before handing execution to it: the re-exec'd
+        # process starts with the ready flag set and would never retry on its own.
+        _prepare_managed_pdf_backend(venv_dir, venv_py)
         _reexec(venv_py)
         return
 
-    if _current_has_yaml():
+    if _current_has_yaml() and (_pdf_backend_opted_out() or _current_has_pdf_backend()):
         # Never pip-install into an arbitrary/shared launching interpreter during a
-        # normal kb invocation. A missing optional PDF backend remains observable in
-        # doctor; dependency installation is confined to the managed venv path.
+        # normal kb invocation; dependency installation is confined to the managed
+        # venv path. With the PDF deep-read backend also importable (or explicitly
+        # opted out) the current interpreter is fully usable as-is.
         _mark_ready()
+        return
+
+    if _current_has_yaml():
+        # Core imports are available but the always-installed paper deep-read
+        # backend (pymupdf4llm) is missing, so `kb ingest` of a PDF would fail
+        # while doctor used to claim readiness. Provision the managed venv (which
+        # installs the PDF backend); on failure degrade gracefully to the current
+        # interpreter so text/web workflows keep working.
+        if _pdf_backend_retry_is_throttled(venv_dir):
+            _mark_ready()
+            return
+        try:
+            print("论文 PDF 解析环境尚未就绪，正在自动准备，请稍候。", file=sys.stderr, flush=True)
+            _ensure_venv_has_yaml(venv_dir, venv_py)
+        except Exception:  # noqa: BLE001
+            _record_pdf_backend_failure(venv_dir)
+            print(
+                "自动准备运行环境未完成，先使用当前环境继续；论文 PDF 深读能力暂不可用，"
+                "约一小时后自动重试；也可以随时用 kb doctor 查看就绪状态。",
+                file=sys.stderr,
+                flush=True,
+            )
+            _mark_ready()
+            return
+        if is_current_python(venv_py):
+            _mark_ready()
+            return
+        _reexec(venv_py)
         return
 
     if not configured_python and _use_path_runtime_if_available(home):

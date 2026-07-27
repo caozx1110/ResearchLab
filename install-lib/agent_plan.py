@@ -33,7 +33,8 @@ ALLOWED_TARGET_OPERATIONS = SOURCE_BOUND_OPERATIONS | {
 CONDITIONAL_RUNTIME_OPERATION = "conditional-runtime-tree"
 CONDITIONAL_RUNTIME_SOURCE = "research.bootstrap.CORE_RUNTIME_MODULES / managed dependency resolver"
 CONDITIONAL_RUNTIME_CONDITION = (
-    "only when managed runtime is enabled and the selected Python lacks yaml, markdownify, or bs4"
+    "only when managed runtime is enabled and the selected Python lacks yaml, markdownify, bs4, "
+    "or the pymupdf4llm PDF backend"
 )
 CONDITIONAL_RUNTIME_METADATA = {
     "owner": "workspace-oss project Python dependency resolver",

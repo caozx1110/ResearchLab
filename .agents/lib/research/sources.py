@@ -4172,8 +4172,9 @@ def _backup_pdf_bytes(
     if not _pymupdf4llm_available():
         result["backup_status"] = "stored-unparsed"
         result["backup_warning"] = (
-            "PDF stored with real bytes+sha256 but not parsed: PyMuPDF4LLM backend unavailable "
-            "(install pymupdf4llm to enable page-level parsing)."
+            "PDF stored with real bytes+sha256 but not parsed: PyMuPDF4LLM backend unavailable. "
+            "The managed runtime prepares this backend automatically on the next kb command; "
+            "retry the same intake afterwards (retry is safe), or run kb doctor to check readiness."
         )
         _warn(result["backup_warning"], original_uri)
     elif not chunks:
@@ -4498,7 +4499,11 @@ def _backup_local(project_root: Path, root: Path, source: str) -> dict[str, Any]
         result["parse_chunks"] = chunks
         if not _pymupdf4llm_available():
             result["backup_status"] = "stored-unparsed"
-            result["backup_warning"] = "Local PDF stored with real sha256 but not parsed: PyMuPDF4LLM backend unavailable."
+            result["backup_warning"] = (
+                "Local PDF stored with real sha256 but not parsed: PyMuPDF4LLM backend unavailable. "
+                "The managed runtime prepares this backend automatically on the next kb command; "
+                "retry the same intake afterwards (retry is safe), or run kb doctor to check readiness."
+            )
             _warn(result["backup_warning"], src.as_posix())
         elif not chunks:
             result["backup_status"] = "stored-unparsed"

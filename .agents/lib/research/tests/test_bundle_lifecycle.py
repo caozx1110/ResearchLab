@@ -888,8 +888,8 @@ def test_noop_update_revalidates_manifest_under_lease_before_reporting_clean(
     version_before = version.read_bytes()
     real_source_items = ws_sync.source_items
 
-    def raced_source_items(repo: Path, source: Path | None):
-        items = real_source_items(repo, source)
+    def raced_source_items(repo: Path, source: Path | None, *, allow_snapshot: bool = False):
+        items = real_source_items(repo, source, allow_snapshot=allow_snapshot)
         replacement = manifest_path.with_name(".same-manifest-new-inode")
         replacement.write_bytes(before)
         os.replace(replacement, manifest_path)
@@ -908,6 +908,7 @@ def test_noop_update_revalidates_manifest_under_lease_before_reporting_clean(
         operation_time="",
         force=False,
         dry_run=False,
+        allow_snapshot_source=False,
         expected_manifest_state="",
     )
 
@@ -1564,6 +1565,7 @@ def test_uninstall_root_fsync_failure_restores_project_claude_and_payload(
         source_strategy="local-checkout",
         force=False,
         dry_run=False,
+        allow_snapshot_source=False,
     )
     assert ws_sync.install(install_args) == 0
     manifest = workspace / ".agents" / ".install-manifest.json"

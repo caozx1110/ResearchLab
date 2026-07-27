@@ -127,6 +127,7 @@ usage() {
   usage_option "--dry-run" "只预览，不写入文件"
   usage_option "--agent-plan-json FILE" "供 Agent 审阅：零写预览，并把精确计划保存为 JSON"
   usage_option "--force" "更新时覆盖已修改的受管文件"
+  usage_option "--from-snapshot" "源码不是 git 仓库时按快照清单打包（无法区分未跟踪文件）"
   usage_option "--source DIR" "从指定源码目录更新"
   usage_option "--expected-source-commit SHA" "应用 Agent 计划时锁定已审阅的源码版本"
   usage_option "--yes, --assume-yes" "交互运行时跳过执行前确认"
@@ -261,6 +262,7 @@ PROJECT_FLAG_SET=0
 KB_ON_PATH=0
 KB_ON_PATH_FLAG_SET=0
 FORCE=0
+FROM_SNAPSHOT=0
 SYNC_SOURCE=""
 EXPECTED_SOURCE_COMMIT=""
 APPLY_AGENT_PLAN=""
@@ -355,6 +357,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --force)
       FORCE=1
+      shift
+      ;;
+    --from-snapshot)
+      FROM_SNAPSHOT=1
       shift
       ;;
     --source)
@@ -1092,6 +1098,19 @@ preflight_yaml() {
     else
       SELECTED_RUNTIME_SOURCE="current-python"
     fi
+    # 与 runtime bootstrap 的判定保持一致：核心依赖可用但缺少论文 PDF 深读
+    # 后端时，首次使用会自动准备受管运行环境，这里如实预告。显式指定的
+    # RESEARCH_PYTHON 不会触发自动准备，因此保持原有绑定。Agent 计划
+    # （schema 3）要求“就绪运行环境”与“resolver 管理的 .venv 条件目标”
+    # 二选一，所以这种情况下不再签署当前解释器，改为暴露条件目标。
+    if [ -z "${RESEARCH_PYTHON:-}" ] && [ "${RESEARCH_NO_MANAGED_VENV:-}" != "1" ] \
+      && [ "${RESEARCH_NO_PDF_BACKEND:-}" != "1" ] \
+      && ! python_has_pdf_backend "$SELECTED_RUNTIME_PYTHON"; then
+      RUNTIME_BOOTSTRAP_NEEDED=1
+      SELECTED_RUNTIME_PYTHON=""
+      SELECTED_RUNTIME_SOURCE=""
+      note "论文 PDF 解析依赖尚未就绪；首次使用时会自动准备，无需手动处理。" >&2
+    fi
     return 0
   fi
   if [ -z "${RESEARCH_VENV:-}" ]; then
@@ -1225,6 +1244,27 @@ try:
         stderr=subprocess.DEVNULL,
         check=False,
         timeout=5,
+    )
+except (OSError, subprocess.SubprocessError):
+    raise SystemExit(1)
+raise SystemExit(0 if completed.returncode == 0 else 1)
+PY
+}
+
+python_has_pdf_backend() {
+  python3 - "$1" <<'PY' >/dev/null 2>&1
+import subprocess
+import sys
+
+candidate = sys.argv[1]
+try:
+    completed = subprocess.run(
+        [candidate, "-c", "import pymupdf4llm, fitz"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+        timeout=15,
     )
 except (OSError, subprocess.SubprocessError):
     raise SystemExit(1)
@@ -1376,7 +1416,7 @@ record_agent_runtime_target() {
     "conditional-runtime-tree" \
     "$(managed_runtime_root)" \
     "research.bootstrap.CORE_RUNTIME_MODULES / managed dependency resolver" \
-    "only when managed runtime is enabled and the selected Python lacks yaml, markdownify, or bs4"
+    "only when managed runtime is enabled and the selected Python lacks yaml, markdownify, bs4, or the pymupdf4llm PDF backend"
 }
 
 source_commit() {
@@ -1650,6 +1690,9 @@ ws_sync() {
   if [ "$FORCE" -eq 1 ]; then
     args+=("--force")
   fi
+  if [ "$FROM_SNAPSHOT" -eq 1 ]; then
+    args+=("--allow-snapshot-source")
+  fi
   if [ -n "$VERIFIED_MANIFEST_STATE" ]; then
     args+=("--expected-manifest-state" "$VERIFIED_MANIFEST_STATE")
   fi
@@ -1659,6 +1702,11 @@ ws_sync() {
         *"clean-sync: no changes; manifest unchanged"*) UPDATE_NO_CHANGES=1 ;;
       esac
     fi
+    case "$output" in
+      *"snapshot-source:"*)
+        note "快照模式：源码目录没有 git 版本信息，无法区分未跟踪文件；已按确定性文件清单打包（排除 .git/.venv/__pycache__/.DS_Store 等）。" >&2
+        ;;
+    esac
     case "$output" in
       *"warn:"*)
         warn "检测到用户修改并按安全策略保留，请让 Agent 检查。"
@@ -1700,9 +1748,43 @@ ws_sync() {
     return 0
   else
     status=$?
-    fail "工作区文件操作失败，请让 Agent 检查后重试。" >&2
+    fail "工作区文件操作失败。" >&2
+    case "$output" in
+      *"source-not-git-worktree"*|*"source must be a git worktree"*)
+        {
+          printf '%s\n' "  原因：源码目录不是 git 仓库。从 GitHub 下载的 ZIP 包不是 git 仓库。"
+          printf '%s\n' "  处理：请改用 git clone 获取源码，或在源码目录执行 git init && git add -A && git commit 后重试。"
+          printf '%s\n' "  备选：确认接受后，可加 --from-snapshot 按快照清单打包安装（快照模式无法区分未跟踪文件）。"
+        } >&2
+        ;;
+      *"collides with local files"*)
+        printf '%s\n' "  原因：目标工作区已有同名文件与本次操作冲突。请先备份或移除冲突文件；确认这些文件可以被替换时，可加 --force 重试。" >&2
+        ;;
+      *)
+        printf '%s\n' "  请让 Agent 结合以下输出检查后重试。" >&2
+        ;;
+    esac
+    ws_sync_error_tail "$output" >&2 || true
     return "$status"
   fi
+}
+
+ws_sync_error_tail() {
+  # 管理员面 stderr 摘要：去掉终端控制符与 traceback 帧噪声，只保留子进程
+  # 输出的最后几行，帮助定位失败原因而不刷屏。
+  printf '%s\n' "$1" | LC_ALL=C sed -e $'s/\033\\[[0-9;]*[A-Za-z]//g' | awk '
+    /^Traceback \(most recent call last\):/ { in_traceback = 1; next }
+    in_traceback && /^[[:space:]]/ { next }
+    in_traceback { in_traceback = 0 }
+    NF { lines[count++] = $0 }
+    END {
+      if (count == 0) exit 0
+      start = count - 8
+      if (start < 0) start = 0
+      print "  同步器输出（最后 " (count - start) " 行）："
+      for (i = start; i < count; i++) print "  | " lines[i]
+    }
+  ' || true
 }
 
 sync_workspace_copy() {

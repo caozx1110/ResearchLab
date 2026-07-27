@@ -93,6 +93,17 @@ RELEASE_PREFIXES = (
 EXCLUDED_DIRS = {"__pycache__", ".venv", "tests"}
 EXCLUDED_SUFFIXES = {".pyc", ".pyo"}
 EXCLUDED_NAMES = {".DS_Store", MANIFEST_NAME, "eval_research_value.py", "skill_validator.py"}
+# Snapshot enumeration must additionally prune VCS internals that git-based
+# enumeration never sees.
+SNAPSHOT_EXCLUDED_DIRS = EXCLUDED_DIRS | {".git"}
+# Stable machine token: install.sh keys its actionable Chinese guidance on it.
+NOT_GIT_WORKTREE_TOKEN = "source-not-git-worktree"
+NOT_GIT_WORKTREE_GUIDANCE = (
+    "从 GitHub 下载的 ZIP 包不是 git 仓库；请改用 git clone，"
+    "或在源码目录执行 git init && git add -A && git commit 后重试；"
+    "也可以在明确接受风险后使用 --allow-snapshot-source 按确定性文件清单打包"
+    "（快照模式无法区分未跟踪文件）。"
+)
 MAX_MANIFEST_BYTES = 16 * 1024 * 1024
 _EXPECTED_MANIFEST_UNSET = object()
 
@@ -165,16 +176,75 @@ def rel_text(path: Path) -> str:
     return path.as_posix()
 
 
-def tracked_release_files(source_root: Path) -> list[str]:
+def _source_is_git_worktree(source_root: Path) -> bool:
+    """Explicitly detect whether the source directory sits inside a git worktree."""
     try:
         result = subprocess.run(
-            ["git", "-C", str(source_root), "ls-files", "-z", "--", ".agents", "LICENSE"],
-            check=True,
+            ["git", "-C", str(source_root), "rev-parse", "--is-inside-work-tree"],
+            check=False,
             capture_output=True,
         )
-    except (OSError, subprocess.CalledProcessError) as exc:
-        die(f"source must be a git worktree so untracked files cannot be packaged: {source_root}: {exc}")
-    return sorted(path.decode("utf-8") for path in result.stdout.split(b"\0") if path)
+    except OSError:
+        return False
+    return result.returncode == 0 and result.stdout.strip() == b"true"
+
+
+def _snapshot_release_files(source_root: Path) -> list[str]:
+    """Deterministic non-git enumeration of the packageable release set.
+
+    Walks only the release roots (``.agents`` plus the top-level ``LICENSE``),
+    sorted for stable output, pruning VCS/runtime junk (.git/.venv/__pycache__/
+    tests/.DS_Store/*.pyc …). Unlike ``git ls-files`` this cannot distinguish
+    untracked files, which is why it stays behind the explicit
+    ``--allow-snapshot-source`` opt-in.
+    """
+    names: list[str] = []
+    license_path = source_root / "LICENSE"
+    if license_path.is_file() and not license_path.is_symlink():
+        names.append("LICENSE")
+    agents_dir = source_root / ".agents"
+    for current_root, dirs, files in os.walk(agents_dir, followlinks=False):
+        current = Path(current_root)
+        dirs[:] = sorted(
+            name
+            for name in dirs
+            if name not in SNAPSHOT_EXCLUDED_DIRS and not name.upper().startswith("RESEARCH_VALUE")
+        )
+        for name in sorted(files):
+            relative = (current / name).relative_to(source_root)
+            if should_exclude(relative):
+                continue
+            names.append(relative.as_posix())
+    return sorted(names)
+
+
+def tracked_release_files(source_root: Path, *, allow_snapshot: bool = False) -> list[str]:
+    if _source_is_git_worktree(source_root):
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(source_root), "ls-files", "-z", "--", ".agents", "LICENSE"],
+                check=True,
+                capture_output=True,
+            )
+        except (OSError, subprocess.CalledProcessError) as exc:
+            die(
+                f"{NOT_GIT_WORKTREE_TOKEN}: 无法枚举源码目录的 git 跟踪文件：{source_root}：{exc}。"
+                f"{NOT_GIT_WORKTREE_GUIDANCE}"
+            )
+        tracked = sorted(path.decode("utf-8") for path in result.stdout.split(b"\0") if path)
+        if any(rel == ".agents" or rel.startswith(".agents/") for rel in tracked):
+            return tracked
+        # Inside some git worktree, but the release tree itself is untracked
+        # (e.g. a ZIP unpacked into an unrelated repository) — same remediation.
+    if allow_snapshot:
+        print(
+            "snapshot-source: 快照模式无法区分未跟踪文件；已按确定性文件清单打包，"
+            "排除 .git、.venv、__pycache__、.DS_Store 等目录和文件。",
+            file=sys.stderr,
+        )
+        return _snapshot_release_files(source_root)
+    die(f"{NOT_GIT_WORKTREE_TOKEN}: 源码目录不是可打包的 git 仓库：{source_root}。{NOT_GIT_WORKTREE_GUIDANCE}")
+    return []  # unreachable; keeps the signature obviously total
 
 
 def release_destination(rel: str) -> str | None:
@@ -198,7 +268,12 @@ def assert_no_symlinked_source_subdirs(source_root: Path, rel: str) -> None:
             die(f"source release path contains a symlinked subdirectory: {parent}; refuse to package")
 
 
-def source_items(repo: Path, source: Path | None) -> dict[str, tuple[Path, str]]:
+def source_items(
+    repo: Path,
+    source: Path | None,
+    *,
+    allow_snapshot: bool = False,
+) -> dict[str, tuple[Path, str]]:
     source_root = (source or repo).resolve()
     agents_src = source_root / ".agents"
     agents_md_src = source_root / ".agents" / "AGENTS.md"
@@ -207,7 +282,7 @@ def source_items(repo: Path, source: Path | None) -> dict[str, tuple[Path, str]]
     if not agents_md_src.is_file():
         die(f"source AGENTS.md not found: {agents_md_src}")
     items: dict[str, tuple[Path, str]] = {}
-    for rel in tracked_release_files(source_root):
+    for rel in tracked_release_files(source_root, allow_snapshot=allow_snapshot):
         destination = release_destination(rel)
         if destination is None:
             continue
@@ -1830,7 +1905,7 @@ def install(args: argparse.Namespace) -> int:
     repo = resolve_dir(args.repo, "repo")
     dst_root = resolve_dir(args.dir, "dir")
     source = resolve_dir(args.source, "source") if args.source else None
-    items = source_items(repo, source)
+    items = source_items(repo, source, allow_snapshot=args.allow_snapshot_source)
     files = current_files_from_items(items)
     agents = parse_agents(args.agents)
     installed_at = operation_timestamp(args.operation_time)
@@ -1914,7 +1989,7 @@ def update(args: argparse.Namespace) -> int:
     manifest = manifest_snapshot.payload
     assert_no_symlinked_agent_subdirs(dst_root)
 
-    items = source_items(repo, source)
+    items = source_items(repo, source, allow_snapshot=args.allow_snapshot_source)
     new_files = current_files_from_items(items)
     old_files = dict(manifest["files"])
     old_commit = str(manifest.get("source_commit") or "")
@@ -2024,7 +2099,7 @@ def reinstall(args: argparse.Namespace) -> int:
     emit_plan_manifest_expectation(manifest_snapshot, dry_run=args.dry_run)
     manifest = manifest_snapshot.payload
     assert_no_symlinked_agent_subdirs(dst_root)
-    items = source_items(repo, source)
+    items = source_items(repo, source, allow_snapshot=args.allow_snapshot_source)
     old_files = dict(manifest["files"])
     new_files = current_files_from_items(items)
     collisions = [entry for entry in detect_drift(dst_root, old_files, new_files) if entry[3] == "collides-with-local"]
@@ -2203,6 +2278,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source", default="")
     parser.add_argument("--agents", default="")
     parser.add_argument("--force", action="store_true")
+    parser.add_argument(
+        "--allow-snapshot-source",
+        action="store_true",
+        help="源码不是 git 仓库时，明确接受按确定性文件清单打包（快照模式无法区分未跟踪文件）",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--plan-jsonl", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--expected-manifest-state", default="", help=argparse.SUPPRESS)

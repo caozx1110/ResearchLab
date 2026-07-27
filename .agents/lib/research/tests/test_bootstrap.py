@@ -27,6 +27,7 @@ def test_yaml_capable_shared_runtime_is_never_pip_mutated(monkeypatch, tmp_path)
     monkeypatch.delenv("RESEARCH_PYTHON", raising=False)
     monkeypatch.delenv("RESEARCH_NO_MANAGED_VENV", raising=False)
     monkeypatch.setattr(bootstrap, "_current_has_yaml", lambda: True)
+    monkeypatch.setattr(bootstrap, "_current_has_pdf_backend", lambda: True)
     monkeypatch.setattr(bootstrap, "managed_venv_python", lambda _home=None: tmp_path / "missing" / "python")
     monkeypatch.setattr(bootstrap, "managed_venv_dir", lambda _home=None: tmp_path / "missing")
     monkeypatch.setattr(
@@ -46,6 +47,7 @@ def test_existing_managed_runtime_is_preferred_silently(monkeypatch, tmp_path, c
     managed_python.parent.mkdir(parents=True)
     managed_python.write_text("", encoding="utf-8")
     reexec: list[object] = []
+    pdf_preparation: list[object] = []
     monkeypatch.delenv(bootstrap.READY_FLAG, raising=False)
     monkeypatch.delenv("RESEARCH_PYTHON", raising=False)
     monkeypatch.delenv("RESEARCH_NO_MANAGED_VENV", raising=False)
@@ -53,11 +55,17 @@ def test_existing_managed_runtime_is_preferred_silently(monkeypatch, tmp_path, c
     monkeypatch.setattr(bootstrap, "managed_venv_python", lambda _home=None: managed_python)
     monkeypatch.setattr(bootstrap, "_python_can_import_yaml", lambda python: python == managed_python)
     monkeypatch.setattr(bootstrap, "is_current_python", lambda _python: False)
+    monkeypatch.setattr(
+        bootstrap,
+        "_prepare_managed_pdf_backend",
+        lambda venv_dir, python: pdf_preparation.append((venv_dir, python)) or True,
+    )
     monkeypatch.setattr(bootstrap, "_reexec", lambda python: reexec.append(python))
 
     bootstrap.ensure_managed_runtime(tmp_path)
 
     assert reexec == [managed_python]
+    assert pdf_preparation == [(tmp_path / ".venv", managed_python)]
     assert capsys.readouterr().err == ""
 
 
@@ -106,6 +114,53 @@ def test_path_runtime_discovery_skips_relative_and_workspace_candidates(monkeypa
     assert bootstrap._path_runtime_python(tmp_path) == external_python
 
 
+def test_path_runtime_can_reselect_same_binary_when_live_process_hides_modules(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    executable = bootstrap._python_path(sys.executable).resolve()
+    monkeypatch.setenv("PATH", str(executable.parent))
+    monkeypatch.setattr(bootstrap, "is_current_python", lambda _python: True)
+    monkeypatch.setattr(bootstrap, "_current_has_yaml", lambda: False)
+    monkeypatch.setattr(bootstrap, "_python_can_import_yaml", lambda python: python == executable)
+
+    assert bootstrap._path_runtime_python(tmp_path) == executable
+
+
+def test_same_executable_reprobes_clean_invocation_when_current_flags_hide_modules(
+    monkeypatch,
+) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(bootstrap, "is_current_python", lambda _python: True)
+    monkeypatch.setattr(bootstrap, "_current_has_yaml", lambda: False)
+
+    def completed(argv, **_kwargs):
+        calls.append(argv)
+        return bootstrap.subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(bootstrap.subprocess, "run", completed)
+
+    assert bootstrap._python_can_import_yaml(sys.executable) is True
+    assert calls == [[sys.executable, "-c", "import yaml, markdownify, bs4"]]
+
+
+def test_configured_same_executable_reexecs_when_live_process_hides_modules(
+    monkeypatch,
+) -> None:
+    reexec: list[object] = []
+    monkeypatch.delenv(bootstrap.READY_FLAG, raising=False)
+    monkeypatch.setenv("RESEARCH_PYTHON", sys.executable)
+    monkeypatch.setattr(bootstrap, "is_current_python", lambda _python: True)
+    monkeypatch.setattr(bootstrap, "_current_has_yaml", lambda: False)
+    monkeypatch.setattr(bootstrap, "_python_can_import_yaml", lambda _python: True)
+    monkeypatch.setattr(bootstrap, "_reexec", lambda python: reexec.append(python))
+
+    bootstrap.ensure_managed_runtime()
+
+    assert reexec == [bootstrap._python_path(sys.executable)]
+    assert bootstrap.READY_FLAG not in bootstrap.os.environ
+
+
 def test_first_time_runtime_preparation_has_one_natural_progress_line(monkeypatch, tmp_path, capsys) -> None:
     managed_python = tmp_path / ".venv" / "bin" / "python"
     reexec: list[object] = []
@@ -150,4 +205,35 @@ def test_pdf_backend_opt_out_skips_import_check_and_install(monkeypatch) -> None
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("install should be skipped")),
     )
 
-    bootstrap._ensure_python_has_pdf_backend(sys.executable)
+    assert bootstrap._ensure_python_has_pdf_backend(sys.executable) is True
+
+
+def test_failed_pdf_preparation_is_throttled_for_existing_managed_runtime(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    managed_dir = tmp_path / ".venv"
+    managed_python = managed_dir / "bin" / "python"
+    managed_python.parent.mkdir(parents=True)
+    managed_python.write_text("", encoding="utf-8")
+    attempts: list[object] = []
+    monkeypatch.delenv(bootstrap.READY_FLAG, raising=False)
+    monkeypatch.delenv("RESEARCH_PYTHON", raising=False)
+    monkeypatch.delenv("RESEARCH_NO_MANAGED_VENV", raising=False)
+    monkeypatch.delenv(bootstrap.NO_PDF_BACKEND_ENV, raising=False)
+    monkeypatch.setattr(bootstrap, "managed_venv_dir", lambda _home=None: managed_dir)
+    monkeypatch.setattr(bootstrap, "managed_venv_python", lambda _home=None: managed_python)
+    monkeypatch.setattr(bootstrap, "_python_can_import_yaml", lambda python: python == managed_python)
+    monkeypatch.setattr(bootstrap, "is_current_python", lambda _python: True)
+    monkeypatch.setattr(
+        bootstrap,
+        "_ensure_python_has_pdf_backend",
+        lambda python: attempts.append(python) or False,
+    )
+
+    bootstrap.ensure_managed_runtime(tmp_path)
+    monkeypatch.delenv(bootstrap.READY_FLAG, raising=False)
+    bootstrap.ensure_managed_runtime(tmp_path)
+
+    assert attempts == [managed_python]
+    assert (managed_dir / ".pdf-backend-prep-last-attempt").is_file()
