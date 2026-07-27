@@ -860,6 +860,7 @@ def test_ready_managed_venv_suppresses_update_warning_and_conditional_target(
         "RESEARCH_PYTHON": "/bin/false",
         "RESEARCH_NO_PDF_BACKEND": "1",
     }
+    env.pop("PYTHONEXECUTABLE", None)
     doctor = subprocess.run(
         [str(workspace / ".agents/skills/kb-cli/scripts/kb"), "--root", str(workspace), "doctor"],
         cwd=workspace,

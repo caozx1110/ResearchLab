@@ -160,7 +160,7 @@ Natural-language weekly-report and PPT requests use separate Agent-filled editor
 
 ## Optional local developer diagnostics
 
-D1 adds an optional, local-only quality loop without adding a diagnostics verb. Its automatic mode is off by default. The later sixteenth verb is the unrelated no-plugin Obsidian projection entrypoint. You can ask the Agent in natural language to “开启开发者诊断”, “仅在出错时记录”, “关闭 paper-analyst 诊断”, “对刚才失败做脱敏复盘”, or “检查知识库健康”.
+D1 adds an optional, local-only quality loop without adding a diagnostics verb. Its automatic mode is off by default. The later sixteenth verb is the unrelated no-plugin Obsidian projection entrypoint. You can ask the Agent in natural language to “开启开发者诊断”, “仅在出错时记录”, “关闭 unit-analyst 诊断”, “对刚才失败做脱敏复盘”, or “检查知识库健康”.
 
 `errors-only` records deterministic operation failures without asking a model to diagnose them. `developer` may also run a short, triggered retrospective, bounded by per-task token and issue budgets; per-skill settings can narrow either mode. An explicit request to record a problem is honored even when automatic capture is off.
 

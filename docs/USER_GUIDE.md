@@ -253,7 +253,7 @@ Run log 是事实；diagnosis 是推断，默认待确认。报告系统从 prog
 ```
 
 ```text
-仅在出错时记录；关闭 paper-analyst 诊断。
+仅在出错时记录；关闭 unit-analyst 诊断。
 ```
 
 ```text

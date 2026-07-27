@@ -322,7 +322,7 @@ def test_d1_agent_rules_and_docs_keep_optional_diagnostics_honest() -> None:
     for phrase in (
         "开启开发者诊断",
         "仅在出错时记录",
-        "关闭 paper-analyst 诊断",
+        "关闭 unit-analyst 诊断",
         "检查知识库健康",
     ):
         assert phrase in agent_rules
