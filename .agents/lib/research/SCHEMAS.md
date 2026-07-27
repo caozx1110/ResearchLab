@@ -150,6 +150,7 @@ taxonomy:
 artifacts: []                        # kb-relative path 列表
 source:
   original_uri: ""                   # 原始链接或路径
+  source_origin: human-note           # 可选；仅私有人工笔记 intake 固定为 human-note，不代表内容已确认
   backup_paths: []                   # 仓内备份相对路径
   backup_kind: file|dir
   file_hash: ""                      # sha256（如有）

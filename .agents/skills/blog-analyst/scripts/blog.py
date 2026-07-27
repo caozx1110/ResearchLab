@@ -11,8 +11,10 @@ persisted. There is no keyword-count heuristic or Python-inferred positioning he
 any "this blog is a tutorial / this is fact not opinion" claim must come from an
 agent, never from Python.
 
-Blog sources are web pages only (no multimedia). The parse-cache uses
-section/anchor locators (HTML, no page numbers).
+Blog sources are web pages or explicitly selected human-authored Markdown notes
+(no multimedia). The parse-cache uses section/anchor locators. Human authorship
+is provenance only: every structured judgement still remains pending until the
+ordinary public confirmation gate succeeds.
 """
 from __future__ import annotations
 
@@ -160,11 +162,11 @@ ELEMENT_HEADING: dict[str, str] = {
 }
 
 # Reusable, machine-readable description of the evidence_ref shape an agent must fill.
-# Blog parse-cache uses section/anchor locators (HTML, no page numbers).
+# Blog parse-cache uses section/anchor locators (HTML or Markdown, no page numbers).
 EVIDENCE_REF_FORMAT: dict[str, str] = {
     "source_unit_id": "b-... (this blog unit id)",
     "artifact": "parse-cache.yaml (unit-relative artifact the quote lives in)",
-    "locator": "HTML: section or section:<anchor> (B4) — no page numbers for web sources",
+    "locator": "section or section:<anchor> (HTML/Markdown; no page numbers)",
     "quote": "short verbatim snippet — script checks it is a whitespace-normalized substring of the artifact",
     "summary": "optional one-line paraphrase",
 }
@@ -228,7 +230,7 @@ def _normalized_cache_payload(payload: dict) -> dict:
 
 
 def _chunk_locator(chunk: dict) -> str:
-    """Derive the evidence locator string for an HTML section chunk (B4).
+    """Derive the evidence locator string for an HTML or Markdown section chunk.
 
     Blog parse-caches use section/anchor locators. Labels are ``section:<anchor>``
     or ``section:document``. This is pure transport — it copies the locator the

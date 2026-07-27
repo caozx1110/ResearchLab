@@ -2711,13 +2711,38 @@ def _resume_duplicate_ingest(
 
 
 def handle_ingest(args: argparse.Namespace, root: Path) -> int:
-    unsafe_result = _unsafe_local_source_result(args.source, root)
-    if unsafe_result is not None:
-        return unsafe_result
-    kind = args.kind or infer_add_kind(args.source, root)
-    snapshot_result = _remote_repo_snapshot_result(args.source, kind, verb="ingest")
-    if snapshot_result is not None:
-        return snapshot_result
+    human_note_area = str(getattr(args, "human_note_area", "") or "")
+    human_note_filename = str(getattr(args, "human_note_filename", "") or "")
+    human_note = bool(human_note_area or human_note_filename)
+    source = str(getattr(args, "source", "") or "")
+    if human_note:
+        if not human_note_area or not human_note_filename or source or getattr(args, "kind", None):
+            print("人工笔记选择不完整；请重新明确指定笔记所在区域和文件名。")
+            set_protocol_status("needs_user_input", source_origin="human-note")
+            add_agent_action("select_human_note", choices=["inbox", "annotations"])
+            return 2
+        kind = "blog"
+        intake_arguments = [
+            "human-note",
+            "--area",
+            human_note_area,
+            "--filename",
+            human_note_filename,
+        ]
+    else:
+        if not source:
+            print("请告诉我需要入库的链接或本地资料。")
+            set_protocol_status("needs_user_input")
+            add_agent_action("provide_ingest_source")
+            return 2
+        unsafe_result = _unsafe_local_source_result(source, root)
+        if unsafe_result is not None:
+            return unsafe_result
+        kind = args.kind or infer_add_kind(source, root)
+        snapshot_result = _remote_repo_snapshot_result(source, kind, verb="ingest")
+        if snapshot_result is not None:
+            return snapshot_result
+        intake_arguments = ["add", "--kind", kind, "--source", source]
     if kind not in INGEST_ANALYZER:
         print("暂时无法判断资料类型；请告诉我是论文、代码仓还是技术文章。")
         set_protocol_status("needs_user_input", inferred_kind=kind)
@@ -2733,14 +2758,14 @@ def handle_ingest(args: argparse.Namespace, root: Path) -> int:
         add_agent_action(
             "run_owner_step_after_authorization",
             owner=SCRIPT_BY_VERB["add"],
-            arguments=["add", "--kind", kind, "--source", args.source],
+            arguments=intake_arguments,
         )
         return 0
 
     intake = forward_command(
         root,
         SCRIPT_BY_VERB["add"],
-        ["add", "--kind", kind, "--source", args.source],
+        intake_arguments,
         stream=False,
         extra_env={"RESEARCH_INGEST_CHAIN": "1"},
     )
@@ -2834,11 +2859,17 @@ def handle_ingest(args: argparse.Namespace, root: Path) -> int:
             "authorization_source": "user_message",
         }
     )
-    set_protocol_status("agent_action_required", unit_id=unit_id, source_kind=kind)
+    set_protocol_status(
+        "agent_action_required",
+        unit_id=unit_id,
+        source_kind=kind,
+        source_origin="human-note" if human_note else "external-source",
+    )
     add_agent_action(
         "complete_grounded_ingest",
         unit_id=unit_id,
         source_kind=kind,
+        source_origin="human-note" if human_note else "external-source",
         prepare_output=prepare.stdout,
         steps=remaining_steps,
     )
@@ -5404,8 +5435,10 @@ def register_ingest(subparsers: argparse._SubParsersAction[argparse.ArgumentPars
         help="入库资料并备好待补全的分析骨架",
         description="资料会先安全入库，再交给 Agent 补全有证据的理解。",
     )
-    parser.add_argument("source", metavar="<链接或路径>", help="论文、代码仓、数据集、博客链接或本地文件路径")
+    parser.add_argument("source", nargs="?", metavar="<链接或路径>", help="论文、代码仓、数据集、博客链接或本地文件路径")
     parser.add_argument("--kind", choices=["paper", "repo", "dataset", "blog"], help=argparse.SUPPRESS)
+    parser.add_argument("--human-note-area", choices=["inbox", "annotations"], default="", help=argparse.SUPPRESS)
+    parser.add_argument("--human-note-filename", default="", help=argparse.SUPPRESS)
     parser.set_defaults(handler=handle_ingest)
 
 

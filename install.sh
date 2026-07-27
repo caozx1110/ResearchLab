@@ -303,6 +303,7 @@ done
 [ -d "$REPO_ROOT/.agents/lib" ] || die "安装包不完整：缺少 .agents/lib"
 [ -d "$REPO_ROOT/.agents/skills" ] || die "安装包不完整：缺少 .agents/skills"
 [ -f "$REPO_ROOT/.agents/AGENTS.md" ] || die "安装包不完整：缺少 .agents/AGENTS.md"
+[ -f "$REPO_ROOT/.agents/AGENT_GUIDE.md" ] || die "安装包不完整：缺少 .agents/AGENT_GUIDE.md"
 [ -f "$REPO_ROOT/install-lib/ws_sync.py" ] || die "安装包不完整：缺少 install-lib/ws_sync.py"
 is_command python3 || die "需要 Python 3，请安装后重试"
 

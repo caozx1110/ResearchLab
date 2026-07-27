@@ -3806,6 +3806,7 @@ def _html_metadata(html: str) -> dict[str, Any]:
 # status/warning/locator metadata travel via the return value + stderr + parse-cache.
 SOURCE_RECORD_KEYS = (
     "original_uri",
+    "source_origin",
     "backup_paths",
     "backup_kind",
     "file_hash",
@@ -4842,6 +4843,7 @@ def detect_duplicate(
     *,
     title: str = "",
     candidate_file_hash: str = "",
+    source_origin: str = "",
 ) -> dict[str, Any] | None:
     local_path = None if is_url(source) else validate_local_source(project_root, source)
     normalized = normalize_remote_url(source) if is_url(source) else normalize_storage_reference(project_root, source)
@@ -4861,6 +4863,8 @@ def detect_duplicate(
         if not _record_blocks_source_retry(project_root, record):
             continue
         record_source = record.get("source", {})
+        if source_origin and str(record_source.get("source_origin") or "") != source_origin:
+            continue
         record_original_uri = str(record_source.get("original_uri") or "")
         record_normalized = normalize_remote_url(record_original_uri) if is_url(record_original_uri) else record_original_uri
         if normalized and normalized == record_normalized:

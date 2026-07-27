@@ -34,6 +34,7 @@ from research.common import add_project_root_argument, confirm_command as shared
 from research.confirm import require_user_authorization
 from research.journal import mutation_transaction
 from research.intake_cli import add_intake_add_arguments
+from research.ids import canonical_unit_id_with_hash
 from research.preference_selection import operation_contract, resolve_operation_preferences
 from research.core import (
     apply_record_governance,
@@ -67,7 +68,15 @@ from research.core import (
 )
 from research.surveys import literature_candidate_identity_digest
 from research.paths import passage_search_cache_path
+from research.records import snapshot_project_file
 from research.sources import literature_stage_snapshot
+
+
+HUMAN_NOTE_AREAS = frozenset({"inbox", "annotations"})
+HUMAN_NOTE_MAX_BYTES = 1024 * 1024
+HUMAN_NOTE_ORIGIN = "human-note"
+HUMAN_NOTE_REVIEW_SCHEMA = "kb-obsidian-review-sheet/v1"
+HUMAN_NOTE_REVIEW_MARKER = re.compile(r"<!--\s*kb-review-batch:[0-9a-f]{64}\s*-->", re.IGNORECASE)
 
 
 def infer_title(source: str) -> str:
@@ -203,6 +212,13 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--authorization-source", default="")
     prepare.add_argument("--expected-literature-stage-digest", default="", help=argparse.SUPPRESS)
 
+    human_note = subparsers.add_parser(
+        "human-note",
+        help="Privately freeze one selected human-authored Obsidian note",
+    )
+    human_note.add_argument("--area", required=True, choices=sorted(HUMAN_NOTE_AREAS))
+    human_note.add_argument("--filename", required=True)
+
     for search_name in ("search", "stage-search"):
         stage = subparsers.add_parser(search_name, help="Record search candidates before canonical intake")
         stage.add_argument("--kind", required=True, choices=["repo", "dataset", "blog"])
@@ -215,6 +231,68 @@ def build_parser() -> argparse.ArgumentParser:
     show = subparsers.add_parser("show-stage", help="Inspect a recorded search stage")
     show.add_argument("--stage-id", required=True)
     return parser
+
+
+def _human_note_relative_path(area: str, filename: str) -> str:
+    """Return the only accepted human-note source shape: one named Markdown leaf."""
+    if area not in HUMAN_NOTE_AREAS:
+        raise SystemExit("Human-note intake accepts only inbox or annotations.")
+    if (
+        not filename
+        or filename in {".", ".."}
+        or Path(filename).name != filename
+        or "/" in filename
+        or "\\" in filename
+        or Path(filename).suffix.lower() != ".md"
+    ):
+        raise SystemExit("Human-note intake requires one Markdown filename without directories.")
+    if filename.casefold().startswith("pending review "):
+        raise SystemExit("Obsidian review sheets cannot be ingested as human notes.")
+    return f"kb/obsidian/{area}/{filename}"
+
+
+def _snapshot_human_note(root: Path, area: str, filename: str):
+    relative = _human_note_relative_path(area, filename)
+    snapshot = snapshot_project_file(root, relative, max_bytes=HUMAN_NOTE_MAX_BYTES)
+    if snapshot is None:
+        raise SystemExit("The selected human note is unavailable or unsafe.")
+    try:
+        text = snapshot.raw_bytes.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise SystemExit("Human-note intake accepts only strict UTF-8 Markdown.") from exc
+    frontmatter = ""
+    if text.startswith("---\n") or text.startswith("---\r\n"):
+        match = re.match(r"\A---\r?\n(.*?)\r?\n---(?:\r?\n|\Z)", text, flags=re.DOTALL)
+        if match:
+            frontmatter = match.group(1)
+    if re.search(
+        rf"(?mi)^\s*schema\s*:\s*['\"]?{re.escape(HUMAN_NOTE_REVIEW_SCHEMA)}['\"]?\s*$",
+        frontmatter,
+    ) or HUMAN_NOTE_REVIEW_MARKER.search(text):
+        raise SystemExit("Obsidian review sheets cannot be ingested as human notes.")
+    return snapshot
+
+
+def _normalize_human_note_args(root: Path, args: argparse.Namespace) -> argparse.Namespace:
+    snapshot = _snapshot_human_note(root, str(args.area), str(args.filename))
+    return argparse.Namespace(
+        command="add",
+        kind="blog",
+        source=snapshot.relative_path,
+        maturity="lightweight",
+        title="",
+        stage_id="",
+        candidate_id="",
+        pool=[],
+        user_authorization="",
+        authorization_source="",
+        preference_selection_id="",
+        prepared_intake_token="",
+        expected_literature_stage_digest="",
+        human_note_area=str(args.area),
+        human_note_filename=str(args.filename),
+        source_origin=HUMAN_NOTE_ORIGIN,
+    )
 
 
 def _canonical_digest(value: object) -> str:
@@ -991,7 +1069,19 @@ def _resolve_intake_request(
         source = source or str(staged_candidate.get("url") or "")
     if not source:
         raise SystemExit("Provide a source or a selected staged candidate.")
-    if not source.startswith("http"):
+    source_origin = str(getattr(args, "source_origin", "") or "")
+    if source_origin == HUMAN_NOTE_ORIGIN:
+        snapshot = _snapshot_human_note(
+            root,
+            str(getattr(args, "human_note_area", "") or ""),
+            str(getattr(args, "human_note_filename", "") or ""),
+        )
+        if source != snapshot.relative_path:
+            raise SystemExit("Human-note intake source does not match the selected note.")
+        source = snapshot.path.as_posix()
+    elif source_origin:
+        raise SystemExit("Unsupported source origin.")
+    elif not source.startswith("http"):
         try:
             validate_local_source(root, source)
         except UnsafeLocalSourceError as exc:
@@ -1042,6 +1132,7 @@ def _request_binding_digest(
             "expected_literature_stage_digest": str(
                 getattr(args, "expected_literature_stage_digest", "") or ""
             ),
+            "source_origin": str(getattr(args, "source_origin", "") or ""),
         }
     )
 
@@ -1150,6 +1241,7 @@ def _finish_prepared_record(
     source_info: dict,
     stage_dir: Path,
     prepared_root: Path,
+    prepared_record_id: str = "",
 ) -> tuple[dict, dict, str]:
     parse_metadata = source_info.get("parse_metadata") or {}
     title = initial_title
@@ -1174,6 +1266,8 @@ def _finish_prepared_record(
         maturity=args.maturity,
         source={"original_uri": source},
     )
+    if prepared_record_id:
+        record["id"] = prepared_record_id
     if title != initial_title:
         record["title"] = title
     canonical_dir = unit_root(root, args.kind, str(record["id"]))
@@ -1281,10 +1375,29 @@ def _prepare_intake_snapshot(root: Path, args: argparse.Namespace) -> dict[str, 
             maturity=args.maturity,
             source={"original_uri": source},
         )
+        source_origin = str(getattr(args, "source_origin", "") or "")
+        if source_origin == HUMAN_NOTE_ORIGIN:
+            human_snapshot = _snapshot_human_note(
+                root,
+                str(getattr(args, "human_note_area", "") or ""),
+                str(getattr(args, "human_note_filename", "") or ""),
+            )
+            preliminary_record["id"] = canonical_unit_id_with_hash(
+                "blog",
+                title=initial_title,
+                source=source,
+                hash_value=human_snapshot.byte_sha256,
+            )
         stage_dir = prepared_root / "kb" / "intake-staging" / str(preliminary_record["id"])
         duplicate_record_relative = ""
         duplicate_record_binding_digest = ""
-        duplicate = detect_duplicate(root, args.kind, source, title=initial_title)
+        duplicate = detect_duplicate(
+            root,
+            args.kind,
+            source,
+            title=initial_title,
+            source_origin=source_origin,
+        )
         if duplicate is not None:
             record, duplicate_record_path = locate_record(
                 root,
@@ -1308,6 +1421,12 @@ def _prepare_intake_snapshot(root: Path, args: argparse.Namespace) -> dict[str, 
                 source,
                 unit_dir=stage_dir,
             )
+            if source_origin == HUMAN_NOTE_ORIGIN:
+                source_info["original_uri"] = _human_note_relative_path(
+                    str(getattr(args, "human_note_area", "") or ""),
+                    str(getattr(args, "human_note_filename", "") or ""),
+                )
+                source_info["source_origin"] = HUMAN_NOTE_ORIGIN
             write_parse_cache(stage_dir, str(preliminary_record["id"]), source_info)
             readiness_error = source_backup_error(prepared_root, args.kind, source_info)
             if readiness_error:
@@ -1318,6 +1437,7 @@ def _prepare_intake_snapshot(root: Path, args: argparse.Namespace) -> dict[str, 
                 source,
                 title=initial_title,
                 candidate_file_hash=str(source_info.get("file_hash") or ""),
+                source_origin=source_origin,
             )
             if byte_duplicate is not None:
                 record, duplicate_record_path = locate_record(
@@ -1344,6 +1464,7 @@ def _prepare_intake_snapshot(root: Path, args: argparse.Namespace) -> dict[str, 
                     source_info=source_info,
                     stage_dir=stage_dir,
                     prepared_root=prepared_root,
+                    prepared_record_id=str(preliminary_record["id"]),
                 )
         if _source_input_digest(root, source) != source_input_digest:
             raise RuntimeError("The intake source changed while its snapshot was prepared.")
@@ -1591,6 +1712,25 @@ def _batch_commit_guard(root: Path, prepared_items: list[dict[str, object]]) -> 
             raise RuntimeError("A batch intake source changed before commit.")
 
 
+def _single_commit_guard(
+    root: Path,
+    args: argparse.Namespace,
+    prepared: dict[str, object],
+) -> None:
+    """Revalidate the selected source at the final single-intake publication boundary."""
+    source = str(prepared.get("source") or "")
+    if str(getattr(args, "source_origin", "") or "") == HUMAN_NOTE_ORIGIN:
+        snapshot = _snapshot_human_note(
+            root,
+            str(getattr(args, "human_note_area", "") or ""),
+            str(getattr(args, "human_note_filename", "") or ""),
+        )
+        if snapshot.path.as_posix() != source:
+            raise RuntimeError("The selected human note changed before commit.")
+    if _source_input_digest(root, source) != str(prepared.get("source_input_digest") or ""):
+        raise RuntimeError("The intake source bytes changed before commit.")
+
+
 def _batch_dedup_key(
     item_args: argparse.Namespace,
     prepared: dict[str, object],
@@ -1789,6 +1929,7 @@ def _materialize_staged_source(
     record: dict,
     source_info: dict,
     stage_dir: Path,
+    source_origin: str = "",
 ) -> tuple[Path | None, dict | None, dict]:
     """Atomically move staged evidence into a canonical unit and write its record."""
     canonical_dir = unit_root(root, kind, str(record["id"]))
@@ -1809,6 +1950,7 @@ def _materialize_staged_source(
             source,
             title=title,
             candidate_file_hash=str(canonical_source_info.get("file_hash") or ""),
+            source_origin=source_origin,
         )
         if duplicate:
             shutil.rmtree(stage_dir)
@@ -2035,6 +2177,7 @@ def _execute_intake_transaction(
     stage_dir: Path,
     unit_dir: Path,
     paper_preferences: dict,
+    prepared: dict[str, object],
 ) -> tuple[Path | None, dict | None, dict, list[str], bool, Path | None]:
     """Materialize and derive one intake as one undoable command transaction."""
     targets = _intake_transaction_targets(
@@ -2046,7 +2189,12 @@ def _execute_intake_transaction(
     auto_outputs: list[str] = []
     note_created = False
     updated_stage_path: Path | None = None
-    with mutation_transaction(root, "source-intake-add", targets):
+    with mutation_transaction(
+        root,
+        "source-intake-add",
+        targets,
+        commit_guard=lambda: _single_commit_guard(root, args, prepared),
+    ):
         _assert_expected_literature_stage_digest(root, args)
         path, concurrent_duplicate, canonical_source_info = _materialize_staged_source(
             root,
@@ -2056,6 +2204,7 @@ def _execute_intake_transaction(
             record=record,
             source_info=source_info,
             stage_dir=stage_dir,
+            source_origin=str(getattr(args, "source_origin", "") or ""),
         )
         if concurrent_duplicate:
             raise SystemExit(
@@ -2084,6 +2233,9 @@ def main() -> int:
     args = build_parser().parse_args()
     root = project_root(PROJECT_ROOT, explicit_root=args.root)
     print_resolved_project_roots(root)
+
+    if args.command == "human-note":
+        args = _normalize_human_note_args(root, args)
 
     if args.command in {"search", "stage-search"}:
         ensure_workspace(root)
@@ -2196,6 +2348,7 @@ def main() -> int:
             source,
             title=title,
             candidate_file_hash=str(source_info.get("file_hash") or ""),
+            source_origin=str(getattr(args, "source_origin", "") or ""),
         )
         if duplicate:
             duplicate_record_binding_digest = str(
@@ -2238,6 +2391,7 @@ def main() -> int:
                 stage_dir=stage_dir,
                 unit_dir=unit_dir,
                 paper_preferences=paper_preferences,
+                prepared=prepared,
             )
         )
         if concurrent_duplicate:

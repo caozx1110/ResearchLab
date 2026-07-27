@@ -323,6 +323,8 @@ def test_clean_install_ships_only_runtime_allowlist(tmp_path: Path) -> None:
     installed = set(manifest["files"])
     assert (workspace / ".agents" / "VERSION").is_file()
     assert (workspace / ".agents" / "LICENSE").is_file()
+    assert (workspace / ".agents" / "AGENT_GUIDE.md").is_file()
+    assert ".agents/AGENT_GUIDE.md" in installed
     assert (workspace / ".agents" / "skills" / "kb-cli" / "SKILL.md").is_file()
     assert (workspace / ".agents" / "skills" / "research-monitor" / "SKILL.md").is_file()
     assert (workspace / ".agents" / "lib" / "research" / "common.py").is_file()

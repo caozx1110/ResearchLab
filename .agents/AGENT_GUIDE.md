@@ -44,6 +44,10 @@ kb --agent-protocol r2.json review \
 - locator：PDF `page=N`/section/para；HTML `section`/`section:<anchor>`；repo 文件 `line=N`。
 - concept：`synthesize.py concept prepare` 冻结至少 3 个 current confirmed unit，生成 `kb/synthesis/concepts/<slug>/concept-fill.yaml`；Agent 填 definition、可选 scope 与每个 association role 的逐字 evidence 后，用 `concept verify --input ...` 写 pending canonical concept。不得让脚本提炼定义或让 AI 自签。
 
+### 人工笔记回流
+
+只有用户当前消息明确点名 `obsidian/inbox/` 或 `obsidian/annotations/` 下的一份 Markdown 时，才使用现有 `ingest` 的私有模式：`kb --agent-protocol n.json ingest --human-note-area <inbox|annotations> --human-note-filename <basename.md>`。只传目录类别与 basename，不传任意路径，也不遍历目录。底层拒绝 nested、symlink、special、非 UTF-8、过大文件与 Obsidian review sheet；成功后原文件不改，exact bytes 冻结为 `source_origin=human-note` 的 blog source，`ingest` 自动续接 blog prepare。Agent 只从冻结副本/parse-cache 填四要素并逐字取证，再 verify；所得判断仍是 pending，来源为用户不等于用户已确认，签字仍须真人姓名与当前消息授权。
+
 ## 5. idea 证据 corpus
 
 `idea.py` 的 analyze/review/discuss/generate prepare 会冻结 `<操作>-evidence-corpus.yaml`（如 `analyze-evidence-corpus.yaml`）：kb/units 下可引用文本 artifact 的清单+digest。verify 时证据只能引用清单内 unit/artifact；prepare 之后新入库的材料引不了。扩语料 = 先入库/链接相关 unit，再**重新 prepare** 重建 corpus。
@@ -57,7 +61,7 @@ kb --agent-protocol r2.json review \
 | status | kb.py + research-orchestrator/scripts/orchestrate.py | current-state；status / prepare-next-selection |
 | next | orchestrate.py | next --json；prepare-/verify-/record-next-selection |
 | find | kb.py | query（公开 ≤5 段带 locator；私有 protocol 附 current-claim context-pack） |
-| add / ingest | source-intake/scripts/intake.py（ingest 自动续接 analyst prepare） | add --kind … --source … |
+| add / ingest | source-intake/scripts/intake.py（ingest 自动续接 analyst prepare） | add --kind … --source …；明确点名的人工笔记见 §4 私有模式 |
 | review | kb.py（confirm / promote / review-queue）+ 跨 owner 路由 orchestrate.py / idea.py / method.py / synthesize.py | 见 §2 §3 |
 | reject | kb.py | promote --confirmation-status rejected |
 | recall | skill-evolution-advisor/scripts/learnings.py | recall |
