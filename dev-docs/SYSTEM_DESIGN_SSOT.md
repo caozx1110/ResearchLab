@@ -614,6 +614,7 @@
 - **✅ R3 run fingerprint（2026-07-23 锁定）**：每次 run 的稳定 fingerprint 绑定 experiment id、tested hypothesis、规范化 change set、typed metrics schema（name/unit/direction，不含结果值）、声明 artifact identities 与显式 config/input revision；不绑定时间戳、result summary 或 metric observed values。相同 fingerprint 表示同一实验配置的重复试验，而不是重复写入错误。
 - `run_id` 继续单调分配；每条 run 保存 `fingerprint`、`repeat_index`、`repeats_run_ids` 与 optional `seed`。完全相同 fingerprint + 相同 seed/config revision 的第二次写入默认 fail-closed，除非 agent 明确声明这是 rerun/retry 并给 `rerun_reason`；不同 seed 允许并归为同 fingerprint repeat group。比较器按 fingerprint group 提供重复统计输入，但脚本不自行判断显著性或成功原因。
 - fingerprint 在持有 run-log/runs 目录事务锁后由 canonicalized fields 计算；编号分配、duplicate 检查、run Markdown、run-log、record、program event 在同一 transaction 内完成，禁止锁外 next-number race。artifact 仍先验存在性与 containment，fingerprint 不把绝对机器路径作为长期身份。
+- **✅ R4 批量导入（2026-07-27 锁定）**：私有 `import-runs` 支持 project-contained W&B JSON、CSV 和单层 `run-*.json` 目录；纯 parser 机械归一事实，raw bytes 以 digest 归档。每条保留 imported provenance 并复用现有 fingerprint/repeat/comparison，整批预检、分配和写入必须在一个 root transaction 中 all-or-nothing；相同 item digest 幂等 skip，external id 或 fingerprint+seed/config 冲突 fail closed。不得通过循环单 run 留下半批，也不得从 metric/state 推断诊断。
 
 ### 3.10 报告（report-author + 大纲/写作 C11）
 
@@ -624,6 +625,7 @@
 - ✅ **决策（2026-07-25 冷产品验收锁定）—— 报告 scaffold 也是用户产物**：默认用户可见 Markdown 用中文标题、section 与缺失提示；若当前 `report-author` task-bound preference receipt 明确选择 `profile.preferences.language_preference=en...`，才切英文模板。语言偏好与 reporting style 一样必须先在 operation allowlist 中披露、再由 Agent 对当前报告任务选择；未选择 language soft preference 时使用产品默认中文，不得偷偷直读 profile。所有语言只改变呈现，不改变 claims/events/evidence/confirmation 内容与 digest。
 - ✅ **决策（2026-07-25 对抗验收锁定）—— confirmed survey 是一等报告证据源**：program 的 `survey-confirmed` event 不是只供时间线展示的摘要；它必须携带 owner/path/ConfirmationReceipt 的 exact subject binding。`report-author` 在每次生成时从该 binding 安全解析 canonical `survey.yaml`，重验路径 containment、当前 survey content/upstream binding、verification bytes 与 ConfirmationReceipt，并只消费 receipt 所绑定、结构与逐字 evidence 均有效的 canonical claims。任一绑定 stale/tampered/missing 时 survey 只能进入 `Pending / Unverified`，不得进入正式 claims；报告 input snapshot 同时绑定其 canonical claims/evidence 与 receipt digest，保证 preference receipt 在 survey 改变后失效。
 - ✅ **决策（2026-07-25 对抗验收锁定）—— event prose 不是已确认 substance**：`reporting-events.yaml` 的 `title/summary/tags` 是可变投影，不在 subject ConfirmationReceipt 的确认范围内；判断类事件即使 receipt current，也不得把这些字段渲染成“已确认断言”。报告必须把 event binding 与从 canonical subject 重建的 exact `confirmation_binding` 全量比较，并从 canonical subject 加载已验证 claims/evidence；事件时间线只显示由 subject kind/status 派生的中性状态。event prose 被修改不能注入正式报告，binding 任一字段不同则整条 judgement event 进入 `Pending / Unverified`。
+- **✅ R4 编辑层（2026-07-27 锁定）**：周报和 PPT 不再只是同一 decisions/claims/events dump 换标题。私有 prepare 只冻结 current report inputs 并建 hollow Agent fill，verify 要求每条正文绑定 catalog ref。周报固定摘要/进展/问题风险/下周计划 + evidence appendix；PPT 固定 1–12 页、每页一个结论 + evidence + 可选 current figure + speaker/transition，且与 outline 七节明确不同。脚本不生成综合叙事，Agent 在同一自然语言任务内填充；任一上游或偏好 binding stale 时不覆盖旧成品。
 
 ### 3.11 确认 / 治理（knowledge-base-manager + 门控）
 

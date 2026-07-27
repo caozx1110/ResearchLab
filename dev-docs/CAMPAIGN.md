@@ -83,6 +83,12 @@
 - R3 提交：`ac86d1b`（设计 gate）、`5e0badb`（bibliography）、`2e425ab`（figure index）、`6fcdf44`（section draft）、`9bdcb24`（公开/运行文档）。未 push/tag/merge。
 - 下一步：进入 R4 实验导入与周报/PPT/outline 三模板差异化。
 
+### R4 实验与报告（施工中，2026-07-27）
+- 只读审计完成，未调用 shipping skills、未修改真实 `kb/`。实验单 run 已有 fingerprint/repeat/seed/config、原子 allocator、comparison 和诊断确认门，但无批量入口；逐条调用会产生部分成功。报告的 weekly/PPT 除标题/小节名外仍共用同一 decisions/claims/events dump，未达到编辑层与 slide card 差异化。
+- 设计 gate 已锁：`import-runs` 私有、project-contained staging、W&B JSON/CSV/单层 JSON 目录、raw byte provenance、1000-run 有界、同 item 幂等、conflict fail closed、整批单事务/单 checkpoint；不新增公开 verb，不让 importer 生成诊断。
+- 报告编辑层锁为私有 prepare/fill/verify：weekly 四区叙事 + evidence appendix；PPT 每页一结论+证据+current figure+speaker/transition；正文由 runtime Agent 填，脚本只冻结 current catalog、校验 refs 和原子发布，stale 不覆盖旧成品。outline 七节保持独立。
+- 下一步：先提交本设计 gate，再按 experiment import → weekly/PPT editorial 两个小里程碑施工与冷验收。
+
 ## 决定记录（含偏离蓝图的理由）
 
 | # | 日期 | 决定 | 理由 |
@@ -90,6 +96,7 @@
 | D1 | 07-26 | campaign 分支基线取 codex/review-remediation-integration@dfcc0b5 而非 main | Wave 1 改动叠在该分支之上且 HANDOFF 以此为前提；main（cd40859）落后 26 轮 remediation |
 | D2 | 07-27 | 概念采用 canonical `concept` unit，而不是 `kb/synthesis/concepts` side YAML | 统一复用 record snapshot、ConfirmationReceipt、索引、review、关系和 Obsidian 基建；代价是把第七类 unit 全面接入 schema/枚举并补全生命周期测试 |
 | D3 | 07-27 | 论文分节采用 program-scoped side judgement；citation/figure key 均绑定 canonical identity | 草稿不是新的来源 unit，但每节必须独立确认；稳定 key 不能随作者/题名修订、集合顺序或 crop 遍历顺序漂移 |
+| D4 | 07-27 | 批量实验导入整批原子；周报/PPT 使用 Agent editorial fill 而非脚本自动写叙事 | 避免半批 run、重复导入和把机械模板冒充可交付叙事，同时保持用户一句话触发与判断来源透明 |
 
 ## 遗留清单
 
