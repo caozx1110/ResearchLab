@@ -10,6 +10,7 @@ from repo_paths import REPO_ROOT
 import pytest
 
 from research.common import load_yaml, write_yaml_if_changed
+from research.core import default_record, record_path, write_record
 from research.paths import config_root, runtime_preferences_path
 from research.preference_selection import eligible_preferences, record_effective_selection
 from research.prefs import default_runtime_preferences, ensure_workspace
@@ -522,6 +523,153 @@ def test_ordinary_success_and_duplicate_keep_one_canonical_unit_and_cleanup(
     assert len(list((root / "kb/units/blogs").glob("*/record.yaml"))) == 1
     assert _workspace_snapshot(root) == before_duplicate
     assert not list(root.parent.glob(f".research-intake-{intake._prepared_scope(root)}-*"))
+
+
+def test_complete_local_paper_revision_archives_degraded_unconfirmed_unit_without_overwrite(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    intake = _load_intake_module()
+    root = tmp_path / "workspace"
+    root.mkdir()
+    ensure_workspace(root)
+    title = "Ordered Action Tokens for Robot Learning"
+    old = default_record(
+        "paper",
+        title=title,
+        maturity="lightweight",
+        source={"original_uri": "https://arxiv.org/abs/2607.21670"},
+    )
+    old["id"] = "p-2607-21670-degraded"
+    old["status"] = "active"
+    old["confirmation_status"] = "pending_user_confirmation"
+    old_source = record_path(root, "paper", old["id"]).parent / "source"
+    old_source.mkdir(parents=True)
+    old_document = old_source / "document.md"
+    old_document.write_text("# Abstract only\n\nShort degraded abstract.\n", encoding="utf-8")
+    old_original = old_source / "abstract.html"
+    old_original.write_text("<html><body>Short degraded abstract.</body></html>\n", encoding="utf-8")
+    old["source"].update(
+        {
+            "backup_kind": "file",
+            "backup_paths": [old_original.relative_to(root).as_posix()],
+            "file_hash": intake.hashlib.sha256(old_original.read_bytes()).hexdigest(),
+            "backup_status": "degraded",
+            "source_type": "arxiv-html",
+            "markdown_path": old_document.relative_to(root).as_posix(),
+            "materialization": {"status": "degraded"},
+        }
+    )
+    old_path = write_record(root, old)
+    old_record_bytes = old_path.read_bytes()
+    old_source_bytes = {path.name: path.read_bytes() for path in old_source.iterdir()}
+
+    fitz = pytest.importorskip("fitz")
+    replacement = root / "ordered-action-tokens.pdf"
+    document = fitz.open()
+    document.set_metadata({"title": title, "author": "Cold fixture"})
+    for heading in ("Method", "Experiments"):
+        page = document.new_page()
+        page.insert_textbox(
+            fitz.Rect(72, 72, 520, 760),
+            heading
+            + "\n\n"
+            + (
+                "Complete grounded evidence explains robot policy learning, observations, "
+                "action tokens, evaluation methods, controlled baselines, reproducible "
+                "measurements, limitations, and analysis. "
+                * 18
+            ),
+            fontsize=11,
+        )
+    document.save(replacement)
+    document.close()
+    args = argparse.Namespace(
+        command="prepare-add",
+        kind="paper",
+        source=str(replacement),
+        maturity="lightweight",
+        title=title,
+        stage_id="",
+        candidate_id="",
+        pool=[],
+        user_authorization="",
+        authorization_source="",
+    )
+    monkeypatch.setattr(intake, "checkpoint_and_report", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(sys, "argv", _add_argv(root, args))
+
+    assert intake.main() == 0
+
+    records = [load_yaml(path) for path in (root / "kb/units/papers").glob("*/record.yaml")]
+    assert len(records) == 2
+    archived = next(record for record in records if record["id"] == old["id"])
+    current = next(record for record in records if record["id"] != old["id"])
+    assert archived["status"] == "archived"
+    assert current["status"] == "active"
+    assert current["source"]["materialization"]["status"] == "complete"
+    assert any(link["target_id"] == current["id"] and link["relation"] == "superseded_by" for link in archived["links"])
+    assert any(link["target_id"] == archived["id"] and link["relation"] == "supersedes" for link in current["links"])
+    assert old_path.read_bytes() != old_record_bytes
+    assert {path.name: path.read_bytes() for path in old_source.iterdir()} == old_source_bytes
+    assert intake.detect_duplicate(root, "paper", str(replacement), title=title)["id"] == current["id"]
+
+
+def test_verified_degraded_paper_requires_decision_before_source_revision(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    intake = _load_intake_module()
+    root = tmp_path / "workspace"
+    root.mkdir()
+    ensure_workspace(root)
+    title = "Protected Degraded Paper"
+    old = default_record(
+        "paper",
+        title=title,
+        maturity="lightweight",
+        source={"original_uri": "https://arxiv.org/abs/2607.99999"},
+    )
+    old["id"] = "p-protected-degraded"
+    old["status"] = "active"
+    old["confirmation_status"] = "pending_user_confirmation"
+    old["payload"]["verification"] = {"verified_at": "2026-07-27T00:00:00Z"}
+    old_source = record_path(root, "paper", old["id"]).parent / "source"
+    old_source.mkdir(parents=True)
+    original = old_source / "abstract.html"
+    original.write_text("degraded abstract", encoding="utf-8")
+    old["source"].update(
+        {
+            "backup_kind": "file",
+            "backup_paths": [original.relative_to(root).as_posix()],
+            "file_hash": intake.hashlib.sha256(original.read_bytes()).hexdigest(),
+            "backup_status": "degraded",
+            "source_type": "arxiv-html",
+            "materialization": {"status": "degraded"},
+        }
+    )
+    old_path = write_record(root, old)
+    before = _workspace_snapshot(root)
+    replacement = root / "2607.99999.html"
+    replacement.write_text("<html><body><article>complete replacement</article></body></html>", encoding="utf-8")
+    args = argparse.Namespace(
+        command="prepare-add",
+        kind="paper",
+        source=str(replacement),
+        maturity="lightweight",
+        title=title,
+        stage_id="",
+        candidate_id="",
+        pool=[],
+        user_authorization="",
+        authorization_source="",
+    )
+
+    with pytest.raises(RuntimeError, match="explicit user migration approval"):
+        intake._prepare_intake_snapshot(root, args)
+
+    assert _workspace_snapshot(root) == {**before, replacement.relative_to(root).as_posix(): replacement.read_bytes()}
+    assert load_yaml(old_path)["status"] == "active"
 
 
 def test_external_stage_is_cleaned_when_post_validation_execution_raises(

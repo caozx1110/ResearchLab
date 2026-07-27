@@ -202,6 +202,59 @@ def test_weekly_uses_reader_title_and_hides_internal_catalog_terms() -> None:
     assert "risk:" not in rendered and "claim:" not in rendered and "event:" not in rendered
 
 
+def test_weekly_localizes_paper_type_wire_text_and_owner_event_titles() -> None:
+    manifest = build_editorial_manifest(
+        program_id="program-public-projection",
+        output_kind="weekly",
+        as_of="2026-07-27T00:00:00Z",
+        request={"program_title": "公开投影复验"},
+        input_bindings={"state": {"byte_sha256": "a" * 64}, "events": {"byte_sha256": "b" * 64}},
+        support_catalog={
+            "claim:p-one:claim-paper-type": {
+                "ref": "claim:p-one:claim-paper-type",
+                "kind": "claim",
+                "title": "Paper One",
+                "text": "paper_type=method_system; 这是一篇方法论文。",
+                "evidence_refs": [{"quote": "exact paper type evidence"}],
+                "binding_digest": "c" * 64,
+            },
+            "event:event-created": {
+                "ref": "event:event-created",
+                "kind": "event",
+                "event_type": "program-created",
+                "title": "Program initialized",
+                "text": "已建立研究计划。",
+                "binding_digest": "d" * 64,
+            },
+            "event:event-next": {
+                "ref": "event:event-next",
+                "kind": "event",
+                "event_type": "next-action-added",
+                "title": "Next action persisted",
+                "text": "已记录下一步。",
+                "binding_digest": "e" * 64,
+            },
+        },
+        risk_catalog={},
+        figure_catalog={},
+    )
+    fill = build_editorial_fill_scaffold(manifest)
+    fill["sections"] = {
+        "executive_summary": [{"text": "完成类型核验。", "refs": ["claim:p-one:claim-paper-type"], "epistemic_label": "synthesis"}],
+        "progress": [{"text": "计划已经建立。", "refs": ["event:event-created"], "epistemic_label": "fact"}],
+        "problems_and_risks": [{"text": "仍需验证。", "refs": ["claim:p-one:claim-paper-type"], "epistemic_label": "risk"}],
+        "next_steps": [{"text": "执行下一步。", "refs": ["event:event-next"], "epistemic_label": "plan"}],
+    }
+
+    rendered = render_weekly_editorial(fill, manifest, language="zh-CN")
+
+    assert "论文类型：方法或系统；这是一篇方法论文" in rendered
+    assert "研究计划已建立" in rendered and "下一步已记录" in rendered
+    assert "paper_type=" not in rendered
+    assert "Program initialized" not in rendered
+    assert "Next action persisted" not in rendered
+
+
 def test_report_main_verify_failure_is_actionable_without_schema_terms(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

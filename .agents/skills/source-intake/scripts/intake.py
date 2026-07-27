@@ -70,6 +70,7 @@ from research.surveys import literature_candidate_identity_digest
 from research.paths import passage_search_cache_path
 from research.records import snapshot_project_file
 from research.sources import literature_stage_snapshot
+from research.slugs import normalize_title
 
 
 HUMAN_NOTE_AREAS = frozenset({"inbox", "annotations"})
@@ -83,6 +84,85 @@ def infer_title(source: str) -> str:
     if source.startswith("http"):
         return source.rstrip("/").split("/")[-1] or source
     return Path(source).stem.replace("_", " ")
+
+
+def _source_material_is_degraded(record: dict) -> bool:
+    if str(record.get("status") or "").strip().lower() in {"archived", "rejected", "failed"}:
+        return False
+    source = record.get("source") if isinstance(record.get("source"), dict) else {}
+    materialization = source.get("materialization") if isinstance(source.get("materialization"), dict) else {}
+    return (
+        str(source.get("backup_status") or "").strip().lower() == "degraded"
+        or str(materialization.get("status") or "").strip().lower() == "degraded"
+    )
+
+
+def _degraded_unconfirmed_source(record: dict) -> bool:
+    if str(record.get("kind") or "") != "paper" or not _source_material_is_degraded(record):
+        return False
+    if str(record.get("confirmation_status") or "").strip().lower() in {"confirmed", "rejected"}:
+        return False
+    payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+    return not payload.get("claims") and not payload.get("verification")
+
+
+def _source_upgrade_candidate_identity_matches(record: dict, source: str, title: str) -> bool:
+    if str(record.get("kind") or "") != "paper" or source.startswith(("http://", "https://")):
+        return False
+    source_path = Path(source)
+    if source_path.suffix.lower() not in {".pdf", ".html", ".htm"}:
+        return False
+    record_source = record.get("source") if isinstance(record.get("source"), dict) else {}
+    payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+    basic = payload.get("basic_info") if isinstance(payload.get("basic_info"), dict) else {}
+    old_arxiv = parse_arxiv_id(
+        "\n".join(
+            (
+                str(record_source.get("original_uri") or ""),
+                str(basic.get("source_url") or ""),
+                str(basic.get("arxiv_id") or ""),
+                str(record.get("title") or ""),
+            )
+        )
+    )
+    new_arxiv = parse_arxiv_id("\n".join((source_path.name, title)))
+    if old_arxiv and new_arxiv:
+        return old_arxiv.split("v", 1)[0] == new_arxiv.split("v", 1)[0]
+    return bool(title and normalize_title(title) == normalize_title(str(record.get("title") or "")))
+
+
+def _source_upgrade_identity_matches(record: dict, source: str, title: str) -> bool:
+    return _degraded_unconfirmed_source(record) and _source_upgrade_candidate_identity_matches(
+        record, source, title
+    )
+
+
+def _source_upgrade_is_complete(source_info: dict) -> bool:
+    materialization = source_info.get("materialization")
+    return bool(
+        str(source_info.get("backup_status") or "").strip().lower() == "ok"
+        and isinstance(materialization, dict)
+        and str(materialization.get("status") or "").strip().lower() == "complete"
+        and str(source_info.get("source_type") or "").strip().lower() in {"pdf", "html"}
+    )
+
+
+def _ensure_source_revision_link(record: dict, target_id: str, relation: str) -> None:
+    links = record.setdefault("links", [])
+    if any(
+        isinstance(item, dict)
+        and str(item.get("target_id") or "") == target_id
+        and str(item.get("relation") or "") == relation
+        for item in links
+    ):
+        return
+    links.append(
+        {
+            "target_id": target_id,
+            "relation": relation,
+            "note": "Source revision lineage; canonical evidence bytes remain immutable.",
+        }
+    )
 
 
 def research_python() -> str:
@@ -713,11 +793,13 @@ def _prepared_record_binding_digest(
     record: dict,
     *,
     duplicate_record_binding_digest: str = "",
+    superseded_record_binding_digest: str = "",
 ) -> str:
     return _canonical_digest(
         {
             "record": record,
             "duplicate_record_binding_digest": str(duplicate_record_binding_digest or ""),
+            "superseded_record_binding_digest": str(superseded_record_binding_digest or ""),
         }
     )
 
@@ -1391,6 +1473,8 @@ def _prepare_intake_snapshot(root: Path, args: argparse.Namespace) -> dict[str, 
         stage_dir = prepared_root / "kb" / "intake-staging" / str(preliminary_record["id"])
         duplicate_record_relative = ""
         duplicate_record_binding_digest = ""
+        superseded_record_relative = ""
+        superseded_record_binding_digest = ""
         duplicate = detect_duplicate(
             root,
             args.kind,
@@ -1398,6 +1482,27 @@ def _prepare_intake_snapshot(root: Path, args: argparse.Namespace) -> dict[str, 
             title=initial_title,
             source_origin=source_origin,
         )
+        if (
+            duplicate is not None
+            and _source_material_is_degraded(duplicate)
+            and _source_upgrade_candidate_identity_matches(duplicate, source, initial_title)
+            and not _degraded_unconfirmed_source(duplicate)
+        ):
+            raise RuntimeError(
+                "The degraded unit already has verified or confirmed judgement; explicit user migration approval is required."
+            )
+        if duplicate is not None and _source_upgrade_identity_matches(
+            duplicate, source, initial_title
+        ):
+            _old_record, old_path = locate_record(
+                root,
+                str(duplicate.get("id") or ""),
+                kind=str(duplicate.get("kind") or args.kind),
+                fuzzy=False,
+            )
+            superseded_record_relative = old_path.relative_to(root).as_posix()
+            superseded_record_binding_digest = _path_snapshot_digest(old_path)
+            duplicate = None
         if duplicate is not None:
             record, duplicate_record_path = locate_record(
                 root,
@@ -1431,14 +1536,55 @@ def _prepare_intake_snapshot(root: Path, args: argparse.Namespace) -> dict[str, 
             readiness_error = source_backup_error(prepared_root, args.kind, source_info)
             if readiness_error:
                 raise RuntimeError(readiness_error)
+            parse_metadata = source_info.get("parse_metadata")
+            parsed_title = (
+                str(parse_metadata.get("title") or "").strip()
+                if isinstance(parse_metadata, dict)
+                else ""
+            )
+            duplicate_title = parsed_title or initial_title
             byte_duplicate = detect_duplicate(
                 root,
                 args.kind,
                 source,
-                title=initial_title,
+                title=duplicate_title,
                 candidate_file_hash=str(source_info.get("file_hash") or ""),
                 source_origin=source_origin,
             )
+            if (
+                byte_duplicate is not None
+                and _source_material_is_degraded(byte_duplicate)
+                and _source_upgrade_candidate_identity_matches(
+                    byte_duplicate, source, duplicate_title
+                )
+                and not _degraded_unconfirmed_source(byte_duplicate)
+            ):
+                raise RuntimeError(
+                    "The degraded unit already has verified or confirmed judgement; explicit user migration approval is required."
+                )
+            if byte_duplicate is not None and _source_upgrade_identity_matches(
+                byte_duplicate, source, duplicate_title
+            ):
+                if not _source_upgrade_is_complete(source_info):
+                    raise RuntimeError(
+                        "The replacement source did not pass the complete-material gate; the degraded unit was preserved."
+                    )
+                _old_record, old_path = locate_record(
+                    root,
+                    str(byte_duplicate.get("id") or ""),
+                    kind=str(byte_duplicate.get("kind") or args.kind),
+                    fuzzy=False,
+                )
+                current_relative = old_path.relative_to(root).as_posix()
+                current_digest = _path_snapshot_digest(old_path)
+                if superseded_record_relative and (
+                    current_relative != superseded_record_relative
+                    or current_digest != superseded_record_binding_digest
+                ):
+                    raise RuntimeError("The source upgrade matched more than one canonical unit.")
+                superseded_record_relative = current_relative
+                superseded_record_binding_digest = current_digest
+                byte_duplicate = None
             if byte_duplicate is not None:
                 record, duplicate_record_path = locate_record(
                     root,
@@ -1466,6 +1612,14 @@ def _prepare_intake_snapshot(root: Path, args: argparse.Namespace) -> dict[str, 
                     prepared_root=prepared_root,
                     prepared_record_id=str(preliminary_record["id"]),
                 )
+                if superseded_record_relative:
+                    if not _source_upgrade_is_complete(source_info):
+                        raise RuntimeError(
+                            "The replacement source did not pass the complete-material gate; the degraded unit was preserved."
+                        )
+                    old_id = Path(superseded_record_relative).parent.name
+                    if str(record.get("id") or "") == old_id:
+                        raise RuntimeError("A source upgrade must create a new canonical unit revision.")
         if _source_input_digest(root, source) != source_input_digest:
             raise RuntimeError("The intake source changed while its snapshot was prepared.")
         _assert_expected_literature_stage_digest(root, args)
@@ -1474,6 +1628,7 @@ def _prepare_intake_snapshot(root: Path, args: argparse.Namespace) -> dict[str, 
         prepared_record_digest = _prepared_record_binding_digest(
             record,
             duplicate_record_binding_digest=duplicate_record_binding_digest,
+            superseded_record_binding_digest=superseded_record_binding_digest,
         )
         context = intake_preference_context(
             args,
@@ -1506,6 +1661,8 @@ def _prepare_intake_snapshot(root: Path, args: argparse.Namespace) -> dict[str, 
             "prepared_record_digest": prepared_record_digest,
             "duplicate_record_relative": duplicate_record_relative,
             "duplicate_record_binding_digest": duplicate_record_binding_digest,
+            "superseded_record_relative": superseded_record_relative,
+            "superseded_record_binding_digest": superseded_record_binding_digest,
             "canonical_inputs": context,
             "record": record,
             "source_info": canonical_source_info,
@@ -1541,6 +1698,8 @@ def _load_prepared_intake(
         "prepared_record_digest",
         "duplicate_record_relative",
         "duplicate_record_binding_digest",
+        "superseded_record_relative",
+        "superseded_record_binding_digest",
         "canonical_inputs",
         "record",
         "source_info",
@@ -1615,9 +1774,35 @@ def _load_prepared_intake(
             raise SystemExit("Prepared intake duplicate record changed after preparation.")
         if current_duplicate != record:
             raise SystemExit("Prepared intake duplicate record content changed after preparation.")
+    superseded_record_relative = str(payload.get("superseded_record_relative") or "")
+    superseded_record_binding_digest = str(
+        payload.get("superseded_record_binding_digest") or ""
+    )
+    if bool(superseded_record_relative) != bool(superseded_record_binding_digest):
+        raise SystemExit("Prepared intake source-upgrade binding is incomplete.")
+    if superseded_record_relative:
+        superseded_relative = Path(superseded_record_relative)
+        if superseded_relative.is_absolute() or ".." in superseded_relative.parts:
+            raise SystemExit("Prepared intake source-upgrade record escaped the workspace.")
+        superseded_id = superseded_relative.parent.name
+        current_superseded, current_superseded_path = locate_record(
+            root,
+            superseded_id,
+            kind="paper",
+            fuzzy=False,
+        )
+        if current_superseded_path.relative_to(root).as_posix() != superseded_record_relative:
+            raise SystemExit("Prepared intake source-upgrade identity changed.")
+        if _path_snapshot_digest(current_superseded_path) != superseded_record_binding_digest:
+            raise SystemExit("Prepared intake source-upgrade record changed after preparation.")
+        if not _source_upgrade_identity_matches(
+            current_superseded, source, str(payload.get("title") or "")
+        ) or not _source_upgrade_is_complete(source_info):
+            raise SystemExit("Prepared intake source-upgrade eligibility changed after preparation.")
     if _prepared_record_binding_digest(
         record,
         duplicate_record_binding_digest=duplicate_record_binding_digest,
+        superseded_record_binding_digest=superseded_record_binding_digest,
     ) != payload.get("prepared_record_digest"):
         raise SystemExit("Prepared intake record changed after preparation.")
     recomputed_context = intake_preference_context(
@@ -1775,6 +1960,8 @@ def _run_batch_add(root: Path, raw_items: list[str]) -> dict[str, object]:
         for item_args, _prepared, token in unique_rows:
             _claim_prepared_intake(root, token)
             prepared, stage_dir = _load_prepared_intake(root, item_args, token)
+            if str(prepared.get("superseded_record_relative") or ""):
+                raise SystemExit("Source upgrades must be applied as a single-item intake.")
             record = prepared.get("record")
             source_info = prepared.get("source_info")
             canonical_inputs = prepared.get("canonical_inputs")
@@ -1930,6 +2117,7 @@ def _materialize_staged_source(
     source_info: dict,
     stage_dir: Path,
     source_origin: str = "",
+    superseded_record_id: str = "",
 ) -> tuple[Path | None, dict | None, dict]:
     """Atomically move staged evidence into a canonical unit and write its record."""
     canonical_dir = unit_root(root, kind, str(record["id"]))
@@ -1952,7 +2140,7 @@ def _materialize_staged_source(
             candidate_file_hash=str(canonical_source_info.get("file_hash") or ""),
             source_origin=source_origin,
         )
-        if duplicate:
+        if duplicate and str(duplicate.get("id") or "") != superseded_record_id:
             shutil.rmtree(stage_dir)
             return None, duplicate, canonical_source_info
 
@@ -1980,6 +2168,7 @@ def _intake_transaction_targets(
     unit_dir: Path,
     unit_id: str,
     stage_id: str = "",
+    superseded_record_path: Path | None = None,
 ) -> list[Path]:
     targets = [
         unit_dir,
@@ -1990,6 +2179,8 @@ def _intake_transaction_targets(
     ]
     if stage_id:
         targets.append(search_stage_path(root, stage_id))
+    if superseded_record_path is not None:
+        targets.append(superseded_record_path)
     return list(dict.fromkeys(targets))
 
 
@@ -2180,11 +2371,16 @@ def _execute_intake_transaction(
     prepared: dict[str, object],
 ) -> tuple[Path | None, dict | None, dict, list[str], bool, Path | None]:
     """Materialize and derive one intake as one undoable command transaction."""
+    superseded_relative = str(prepared.get("superseded_record_relative") or "")
+    superseded_digest = str(prepared.get("superseded_record_binding_digest") or "")
+    superseded_path = root / superseded_relative if superseded_relative else None
+    superseded_id = Path(superseded_relative).parent.name if superseded_relative else ""
     targets = _intake_transaction_targets(
         root,
         unit_dir=unit_dir,
         unit_id=str(record["id"]),
         stage_id=str(args.stage_id or ""),
+        superseded_record_path=superseded_path,
     )
     auto_outputs: list[str] = []
     note_created = False
@@ -2196,6 +2392,22 @@ def _execute_intake_transaction(
         commit_guard=lambda: _single_commit_guard(root, args, prepared),
     ):
         _assert_expected_literature_stage_digest(root, args)
+        superseded_record: dict | None = None
+        if superseded_path is not None:
+            superseded_record, current_path = locate_record(
+                root,
+                superseded_id,
+                kind="paper",
+                fuzzy=False,
+            )
+            if (
+                current_path != superseded_path
+                or _path_snapshot_digest(current_path) != superseded_digest
+                or not _source_upgrade_identity_matches(superseded_record, source, title)
+                or not _source_upgrade_is_complete(source_info)
+            ):
+                raise SystemExit("The source-upgrade binding changed before publication.")
+            _ensure_source_revision_link(record, superseded_id, "supersedes")
         path, concurrent_duplicate, canonical_source_info = _materialize_staged_source(
             root,
             kind=args.kind,
@@ -2205,6 +2417,7 @@ def _execute_intake_transaction(
             source_info=source_info,
             stage_dir=stage_dir,
             source_origin=str(getattr(args, "source_origin", "") or ""),
+            superseded_record_id=superseded_id,
         )
         if concurrent_duplicate:
             raise SystemExit(
@@ -2212,6 +2425,21 @@ def _execute_intake_transaction(
             )
         if path is None:
             raise RuntimeError("Source materialization completed without a canonical record path.")
+
+        if superseded_record is not None:
+            superseded_record["status"] = "archived"
+            _ensure_source_revision_link(
+                superseded_record,
+                str(record.get("id") or ""),
+                "superseded_by",
+            )
+            append_history(
+                superseded_record,
+                action="source-revision-superseded",
+                summary="Archived after a complete replacement source was materialized as a new unit.",
+                information_types=["fact"],
+            )
+            write_record(root, superseded_record)
 
         # Source intake never authors or prepares research understanding.  The
         # public wrapper consumes link_autodrive and, when requested, starts the
@@ -2350,6 +2578,10 @@ def main() -> int:
             candidate_file_hash=str(source_info.get("file_hash") or ""),
             source_origin=str(getattr(args, "source_origin", "") or ""),
         )
+        superseded_relative = str(prepared.get("superseded_record_relative") or "")
+        superseded_id = Path(superseded_relative).parent.name if superseded_relative else ""
+        if duplicate and str(duplicate.get("id") or "") == superseded_id:
+            duplicate = None
         if duplicate:
             duplicate_record_binding_digest = str(
                 prepared.get("duplicate_record_binding_digest") or ""
@@ -2421,6 +2653,8 @@ def main() -> int:
         for line in auto_outputs:
             print(f"[auto] {line}")
         checkpoint_targets = [unit_dir, *_index_target_paths(root), *created_seed_paths]
+        if superseded_relative:
+            checkpoint_targets.append(root / superseded_relative)
         if updated_stage_path is not None:
             checkpoint_targets.append(updated_stage_path)
         checkpoint_and_report(
@@ -2436,6 +2670,8 @@ def main() -> int:
             note_created=note_created,
         ):
             print(f"[hint] {hint}")
+        if superseded_id:
+            print(f"[source] upgraded_from={superseded_id}")
         print(next_for_agent_intake(root, args.kind, record["id"]))
         return 0
     finally:

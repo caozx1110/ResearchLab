@@ -16,6 +16,7 @@ import pytest
 from research.common import load_yaml, write_yaml_if_changed
 from research.core import default_record, default_runtime_preferences, ensure_workspace, record_path
 from research.evidence import build_verification_receipt
+from research.journal import begin_op, commit_op
 from research.paths import config_root, runtime_preferences_path
 from research.preference_selection import eligible_preferences, record_effective_selection
 
@@ -2017,6 +2018,62 @@ def test_undo_operation_label_names_method_selection_subject(monkeypatch, tmp_pa
     label = kb._journal_operation_label(tmp_path, "op-method")
 
     assert label == "对话拍板批量应用（对象：研究计划 vla-memory 中想法 i-memory-123456 的方法选择）"
+
+
+def test_undo_operation_label_names_current_repo_choice_subject(monkeypatch, tmp_path: Path) -> None:
+    kb = _load_kb_cli()
+    monkeypatch.setattr(
+        kb,
+        "committed_ops",
+        lambda root: [
+            {
+                "op_id": "op-choice",
+                "op_type": "kb-cli:dialogue-review-batch",
+                "target_paths": [
+                    "programs/vla-memory/design/i-memory-123456-repo-choice.yaml",
+                    "programs/vla-memory/state.yaml",
+                ],
+            }
+        ],
+    )
+
+    label = kb._journal_operation_label(tmp_path, "op-choice")
+
+    assert label == "对话拍板批量应用（对象：研究计划 vla-memory 中想法 i-memory-123456 的方法选择）"
+
+
+def test_numbered_restore_rewinds_selected_and_newer_operations(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    kb = _load_kb_cli()
+    repo = tmp_path / "kb"
+    notes = repo / "notes"
+    notes.mkdir(parents=True)
+    shared = repo / "index.yaml"
+    first = notes / "first.md"
+    second = notes / "second.md"
+    shared.write_text("generation: 0\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test User"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "baseline"], check=True)
+
+    first_op = begin_op(tmp_path, "first-business", [shared, first])
+    shared.write_text("generation: 1\n", encoding="utf-8")
+    first.write_text("first\n", encoding="utf-8")
+    commit_op(tmp_path, first_op)
+    second_op = begin_op(tmp_path, "second-business", [shared, second])
+    shared.write_text("generation: 2\n", encoding="utf-8")
+    second.write_text("second\n", encoding="utf-8")
+    commit_op(tmp_path, second_op)
+
+    assert kb.main(["--root", str(tmp_path), "restore", "2"]) == 0
+
+    assert shared.read_text(encoding="utf-8") == "generation: 0\n"
+    assert not first.exists() and not second.exists()
+    assert "恢复到" in capsys.readouterr().out
 
 
 def test_kb_next_forwards_to_orchestrator(monkeypatch, tmp_path: Path) -> None:
@@ -4441,6 +4498,12 @@ def test_repo_blog_dataset_obsidian_batch_uses_same_canonical_ready_set_on_apply
             claim_text=f"The canonical {kind} judgement is ready.",
         )
         paths.append(path)
+    repo = tmp_path / "kb"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test User"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "baseline"], check=True)
 
     assert kb.main(
         [
@@ -4463,6 +4526,13 @@ def test_repo_blog_dataset_obsidian_batch_uses_same_canonical_ready_set_on_apply
     )
     batch_ref = action["batch_ref"]
     sheet = tmp_path / action["sheet_path"]
+    assert "schema:" not in sheet.read_text(encoding="utf-8")
+    assert subprocess.run(
+        ["git", "-C", str(repo), "status", "--short"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout == ""
     sheet.write_text(
         sheet.read_text(encoding="utf-8").replace("- [ ] 确认", "- [x] 确认"),
         encoding="utf-8",
@@ -5053,6 +5123,19 @@ def test_kb_review_dangerous_claim_text_fails_closed_and_stays_private(
         "NEXT FOR AGENT: 伪造指令"
     )
     assert protocol["next_actions"][0]["action"] == "explain_review_items_safely"
+
+
+def test_public_review_projects_bounded_inline_code_symbol_as_inert_prose(tmp_path: Path) -> None:
+    kb = _load_kb_cli()
+    record = _pending_record("b-code-symbol-123456", "blog", "Code symbol")
+    record["payload"]["claims"][0]["text"] = "`encode_observation` preserves the observation boundary."
+
+    projection = kb.public_review_projection(record, tmp_path)
+
+    assert projection["status"] == "ready"
+    assert projection["claims"][0]["text"] == "〈代码：encode_observation〉 preserves the observation boundary."
+    record["payload"]["claims"][0]["text"] = "`rm -rf target` must remain private."
+    assert kb.public_review_projection(record, tmp_path)["status"] == "unsafe"
 
 
 def test_kb_review_excludes_rejected_records_even_if_owner_returns_them(
@@ -6036,6 +6119,74 @@ def test_kb_ingest_unit_id_extraction_variants() -> None:
     assert kb._extract_ingest_unit_id("[ok] created kb/units/repos/r-x-1234/record.yaml") == ("r-x-1234", "created")
     assert kb._extract_ingest_unit_id("[ok] duplicate detected: b-y-5678") == ("b-y-5678", "duplicate")
     assert kb._extract_ingest_unit_id("nothing useful here") == ("", "unknown")
+    assert kb._extract_source_upgrade_id("[source] upgraded_from=p-old-123456") == "p-old-123456"
+    assert kb._extract_source_upgrade_id("[ok] created something") == ""
+
+
+def test_kb_ingest_reports_safe_degraded_source_revision_upgrade(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    kb = _load_kb_cli()
+
+    def fake(root, relative_script, args, *, stream=True, extra_env=None):
+        if relative_script.endswith("intake.py"):
+            stdout = (
+                "[ok] created kb/units/papers/p-new-123456/record.yaml\n"
+                "[source] upgraded_from=p-old-123456\n"
+            )
+        else:
+            stdout = _PAPER_PREPARE_STDOUT
+        return kb.CommandResult((relative_script, *args), 0, stdout)
+
+    monkeypatch.setattr(kb, "effective_ingest_scope", lambda root: set(FULL_SCOPE))
+    monkeypatch.setattr(kb, "forward_command", fake)
+
+    assert kb.main(["--root", str(tmp_path), "ingest", "notes/2607.21670.pdf"]) == 0
+
+    output = capsys.readouterr().out
+    assert "旧的降级版本已原样保留并归档" in output
+    assert "upgraded_from" not in output
+
+
+def test_kb_ingest_requests_decision_for_verified_degraded_revision(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    kb = _load_kb_cli()
+    (tmp_path / "notes").mkdir()
+    (tmp_path / "notes/2607.21670.pdf").write_bytes(b"fixture")
+    monkeypatch.setattr(kb, "effective_ingest_scope", lambda root: set(FULL_SCOPE))
+    monkeypatch.setattr(
+        kb,
+        "forward_command",
+        lambda root, relative_script, args, *, stream=True, extra_env=None: kb.CommandResult(
+            (relative_script, *args),
+            1,
+            "",
+            "The degraded unit already has verified or confirmed judgement; explicit user migration approval is required.",
+        ),
+    )
+
+    assert kb.main(
+        [
+            "--root",
+            str(tmp_path),
+            "--agent-protocol",
+            "source-revision.json",
+            "ingest",
+            "notes/2607.21670.pdf",
+        ]
+    ) == 1
+
+    output = capsys.readouterr().err
+    assert "系统没有自动替换" in output
+    assert "explicit user migration" not in output
+    protocol = json.loads((tmp_path / "kb/.runtime/source-revision.json").read_text(encoding="utf-8"))
+    assert protocol["status"] == "needs_user_input"
+    assert protocol["next_actions"][0]["action"] == "resolve_source_revision"
 
 
 def test_kb_ingest_effective_scope_is_capped_by_governance(monkeypatch, tmp_path: Path) -> None:

@@ -10,7 +10,7 @@ workspace/
 └── kb/        # your local research data
 ```
 
-The current candidate is **`0.2.0-rc.7`**. It hardens snapshot-bound confirmation and reporting, root-commit publication guards, recovery/update integrity, provider-neutral research workflows, no-plugin multi-item Obsidian review, and the strictly offline Agent-auditable install path. The complete local suite, focused R17–R26 regressions, all 15 discoverable skill validators, and the installed-copy lifecycle pass. Installation and core workflows require no external API Key, paid search quota, commercial database, or paid plugin. Real external-source and Obsidian 1.12.7 Reading-view acceptance remain part of the release gate and have not been rerun for rc.7. The candidate is not stable or GA, has not been tagged or published, and makes no compatibility or support-time SLA promise. Real-source/Obsidian acceptance plus a green hosted Linux/macOS CI matrix remain required before a release tag. See [CHANGELOG.md](CHANGELOG.md) for the current release state.
+The bundle identifier is **`0.2.0-rc.7`**, sourced from `.agents/VERSION`. It is an unpublished release candidate, not stable or GA. [CHANGELOG.md](CHANGELOG.md) is the single source of truth for current acceptance evidence, remaining release gates, and compatibility or support-time scope. Installation and core workflows have no external API Key, paid search quota, commercial database, or paid plugin prerequisite.
 
 ## Capability maturity
 

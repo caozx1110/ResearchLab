@@ -157,6 +157,9 @@ def test_sheet_preview_is_checkbox_only_pure_read_and_preflights_all_items(tmp_p
     created, items = _create_batch(tmp_path)
     sheet = tmp_path / created["sheet_relative_path"]
     text = sheet.read_text(encoding="utf-8")
+    assert not text.startswith("---")
+    assert "schema:" not in text
+    assert "review_intent_draft" not in text
     assert "knowledge-base-manager" not in text
     assert "kb/units/" not in text
     assert "完整判断 1" in text and "逐字证据 2" in text

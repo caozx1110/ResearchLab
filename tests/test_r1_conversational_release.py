@@ -609,10 +609,42 @@ def test_release_metadata_is_honest_rc_and_ci_is_cross_platform() -> None:
         text = (root / relative).read_text(encoding="utf-8")
         assert version in text, f"{relative} does not declare the current candidate {version}"
 
+    for relative in ("README.md", "docs/USER_GUIDE.md", "docs/DESIGN.md"):
+        text = (root / relative).read_text(encoding="utf-8")
+        assert "CHANGELOG.md" in text
+        assert "R17–R26" not in text
+        assert "Obsidian 1.12.7" not in text
+
     ci = (root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     assert "ubuntu-latest" in ci
     assert "macos-latest" in ci
     assert "test_r1_conversational_release.py" in ci
+
+
+def test_idea_skill_documents_link_refresh_and_fill_names() -> None:
+    text = (_project_root() / ".agents" / "skills" / "idea-workbench" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    for token in (
+        "link --from-id <idea-id> --to-id <unit-id> --relation evidence-for",
+        "--refresh-corpus",
+        "analyze-fill.yaml",
+        "review-fill.yaml",
+        "discussion-fill.yaml",
+        "idea_context",
+        "只读",
+    ):
+        assert token in text
+
+
+def test_experiment_and_report_skills_document_private_minimum_invocations() -> None:
+    root = _project_root() / ".agents" / "skills"
+    experiment = (root / "experiment-workbench" / "SKILL.md").read_text(encoding="utf-8")
+    report = (root / "report-author" / "SKILL.md").read_text(encoding="utf-8")
+    for token in ("plan --title", "--program-id", "--hypothesis", "log-run --experiment-id", "--config-revision", "--seed"):
+        assert token in experiment
+    for token in ("weekly-prepare --program-id", "reports/editorial/weekly", "fill.yaml", "weekly-verify --program-id", "text", "refs"):
+        assert token in report
 
 
 def test_runtime_and_test_dependencies_are_exactly_locked_in_both_ci_jobs() -> None:

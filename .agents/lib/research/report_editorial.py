@@ -27,7 +27,31 @@ _LATEX_RE = re.compile(
     r"(?:\\(?:begin|end|input|include|documentclass|usepackage|write|catcode|newcommand|[A-Za-z]{2,})\b|\\[\[(]|\$\$)"
 )
 _ABSOLUTE_PATH_RE = re.compile(r"(?:^|[\s(])(?:/(?:Users|private|home|var|tmp)/|[A-Za-z]:[\\/])")
-_INTERNAL_TOKEN_RE = re.compile(r"(?:^|[\s(])(?:\.agents/|dev-docs/|scripts/|kb/(?:units|programs|config|\.runtime)/|--[A-Za-z]|\$\{)")
+_INTERNAL_TOKEN_RE = re.compile(r"(?:^|[\s(])(?:\.agents/|dev-docs/|scripts/|kb/(?:units|programs|config|\.runtime)/|--[A-Za-z]|\$\{|paper_type=)")
+_PAPER_TYPE_WIRE_RE = re.compile(r"^paper_type=(method_system|benchmark|survey);\s*(.*)$", re.DOTALL)
+_PAPER_TYPE_LABELS = {
+    "zh": {"method_system": "方法或系统", "benchmark": "基准", "survey": "综述"},
+    "en": {"method_system": "method or system", "benchmark": "benchmark", "survey": "survey"},
+}
+_EVENT_TITLES = {
+    "program-created": ("Program created", "研究计划已建立"),
+    "next-action-added": ("Next action recorded", "下一步已记录"),
+    "stage-changed": ("Research stage changed", "研究阶段已更新"),
+    "phase-completed": ("Research phase completed", "研究阶段已完成"),
+    "experiment-planned": ("Experiment planned", "实验计划已建立"),
+    "experiment-run-import": ("Experiment runs imported", "实验运行已导入"),
+    "experiment-run": ("Experiment run recorded", "实验运行已记录"),
+    "experiment-follow-up": ("Experiment follow-up recorded", "实验跟进已记录"),
+    "experiment-diagnosis": ("Experiment diagnosis prepared", "实验诊断已准备"),
+    "experiment-confirmed": ("Experiment conclusion confirmed", "实验结论已确认"),
+    "decision-confirmed": ("Decision confirmed", "决策已确认"),
+    "evidence-requested": ("Evidence requested", "证据请求已记录"),
+    "evidence-fulfilled": ("Evidence request fulfilled", "证据请求已完成"),
+    "discussion-conclusion": ("Discussion archived", "讨论已归档"),
+    "survey-confirmed": ("Survey confirmed", "综述已确认"),
+    "method-selected": ("Method selected", "方法已选择"),
+    "monitor-run-completed": ("Monitoring run completed", "跟踪任务已完成"),
+}
 
 
 class EditorialError(ValueError):
@@ -359,14 +383,35 @@ def _plain(value: Any) -> str:
     return text
 
 
+def _catalog_title(entry: Mapping[str, Any], *, language: str) -> str:
+    if entry.get("kind") == "event":
+        labels = _EVENT_TITLES.get(str(entry.get("event_type") or ""))
+        if labels is not None:
+            return labels[0] if language.lower().startswith("en") else labels[1]
+    return _plain(entry.get("title") or entry.get("source_title") or entry.get("kind") or "source")
+
+
+def _catalog_text(entry: Mapping[str, Any], *, language: str) -> str:
+    raw = str(entry.get("text") or entry.get("summary") or entry.get("rationale") or "")
+    if entry.get("kind") == "claim" and str(entry.get("ref") or "").endswith(":claim-paper-type"):
+        match = _PAPER_TYPE_WIRE_RE.fullmatch(raw.strip())
+        if match is not None:
+            english = language.lower().startswith("en")
+            label = _PAPER_TYPE_LABELS["en" if english else "zh"][match.group(1)]
+            reason = _plain(match.group(2))
+            prefix = f"Paper type: {label}" if english else f"论文类型：{label}"
+            return f"{prefix}; {reason}" if english and reason else f"{prefix}；{reason}" if reason else prefix
+    return _plain(raw)
+
+
 def _ref_line(entry: Mapping[str, Any], *, language: str, number: int, risk: bool = False) -> str:
-    title = _plain(entry.get("title") or entry.get("source_title") or entry.get("kind") or "source")
+    title = _catalog_title(entry, language=language)
     text = (
         "This source is not yet eligible as formal evidence and is shown only as a risk."
         if risk and language.lower().startswith("en")
         else "该来源尚未满足正式证据条件，暂仅作为风险提示。"
         if risk
-        else _plain(entry.get("text") or entry.get("summary") or entry.get("rationale") or "")
+        else _catalog_text(entry, language=language)
     )
     prefix = "来源" if not language.lower().startswith("en") else "Source"
     marker = f"[{number}]" if language.lower().startswith("en") else f"〔{number}〕"

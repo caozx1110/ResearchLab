@@ -54,6 +54,7 @@ from research.core import (
     default_runtime_preferences,
     is_ai_signer,
     iter_records,
+    git_checkpoint,
     kb_root,
     load_runtime_preferences,
     record_path,
@@ -73,7 +74,7 @@ from research.review_batches import (
     preflight_obsidian_review_batch,
     preview_obsidian_review_batch,
 )
-from research.journal import committed_ops, current_operation_id, mutation_transaction
+from research.journal import committed_ops, current_operation_id, mutation_transaction, restorable_committed_ops
 from research.preference_selection import resolve_operation_preferences
 from research.prefs import effective_review_policy
 from research import updater
@@ -853,7 +854,13 @@ def _render_public_claim_text(value: object, root: Path) -> str | None:
             continue
         if ord(character) in _BIDI_CONTROL_CODEPOINTS or category in {"Cc", "Cf", "Cs"}:
             return None
-    if not text.strip() or not _public_line_is_safe(text, root):
+    # A bounded inline code symbol is prose, not a shell instruction. Project
+    # it to visibly inert reader text before command-shape classification;
+    # fences, whitespace-bearing commands, substitutions and unmatched ticks
+    # still fail closed.
+    inline_code = re.compile(r"(?<!`)`([A-Za-z_][A-Za-z0-9_.]{0,127})`(?!`)")
+    text = inline_code.sub(lambda match: f"〈代码：{match.group(1)}〉", text)
+    if text.count("`") >= 2 or not text.strip() or not _public_line_is_safe(text, root):
         return None
     text = re.sub(r"\s+", " ", text).strip()
     text = text.replace("\\", "\\\\")
@@ -2096,26 +2103,8 @@ def _public_operation_label(op_type: str) -> str:
     return "知识库操作"
 
 
-def _restorable_journal_entry(entry: Mapping[str, object]) -> bool:
-    """Public projection of the journal's own root-business-operation rule."""
-    op_id = str(entry.get("op_id") or "")
-    if not op_id or str(entry.get("parent_op_id") or "") or str(entry.get("undone_by") or ""):
-        return False
-    if str(entry.get("root_op_id") or op_id) != op_id:
-        return False
-    if "undoable" in entry:
-        return entry.get("undoable") is True
-    targets = {str(path) for path in entry.get("target_paths", []) if str(path)}
-    if targets and targets <= {".runtime/versioning-state.yaml"}:
-        return False
-    op_type = str(entry.get("op_type") or "")
-    if op_type == "write_versioning_state" or op_type.startswith(("undo:", "restore:", "resume:")):
-        return False
-    return bool(entry.get("before_snapshots")) or bool(entry.get("before_digests"))
-
-
 def _restore_catalog_entries(root: Path) -> list[dict]:
-    entries = [entry for entry in committed_ops(root) if _restorable_journal_entry(entry)]
+    entries = restorable_committed_ops(root)
     entries.reverse()
     return entries[:_RESTORE_CATALOG_LIMIT]
 
@@ -2151,6 +2140,14 @@ def _journal_operation_label(root: Path, op_id: str) -> str:
                         and parts[-1] == "selection.yaml"
                     ):
                         subject = f"研究计划 {parts[1]} 中想法 {parts[3]} 的方法选择"
+                    elif (
+                        len(parts) == 4
+                        and parts[0] == "programs"
+                        and parts[2] == "design"
+                        and parts[-1].endswith("-repo-choice.yaml")
+                    ):
+                        idea_id = parts[-1][: -len("-repo-choice.yaml")]
+                        subject = f"研究计划 {parts[1]} 中想法 {idea_id} 的方法选择"
                     elif len(parts) >= 4 and parts[0] == "programs" and parts[2] == "discussions":
                         subject = f"研究计划 {parts[1]} 的讨论 {Path(parts[-1]).stem}"
                     if subject and re.fullmatch(r"[\w.\-\u4e00-\u9fff ]+", subject) and subject not in subjects:
@@ -2513,6 +2510,15 @@ def handle_add(args: argparse.Namespace, root: Path) -> int:
             stream=False,
         )
         if result.returncode != 0:
+            if _source_revision_decision_required(result):
+                print(
+                    "旧的降级条目已经包含核验或确认过的判断，系统没有自动替换。"
+                    "请告诉我你想保留两个版本，还是先复核旧判断后再迁移。",
+                    file=sys.stderr,
+                )
+                set_protocol_status("needs_user_input", source_kind=kind, decision="source-revision")
+                add_agent_action("resolve_source_revision", source=sources[0], source_kind=kind)
+                return result.returncode
             print(
                 "资料未能加入知识库；请让 Agent 查看诊断后重试。"
                 "若是网页链接，也可以上传 PDF 或 HTML，或改用本地文件。",
@@ -2520,10 +2526,18 @@ def handle_add(args: argparse.Namespace, root: Path) -> int:
             )
             return result.returncode
         unit_id, _status = _extract_ingest_unit_id(result.stdout)
+        upgraded_from = _extract_source_upgrade_id(result.stdout)
         public_unit_id = _public_display_text(unit_id, root, "编号已隐藏", 100) if unit_id else ""
         suffix = f"，条目编号是 {public_unit_id}" if public_unit_id else ""
-        print(f"资料已轻量加入知识库{suffix}。需要我现在继续深读吗？")
-        set_protocol_status("needs_user_input", unit_id=unit_id, source_kind=kind, link_autodrive="ask_first")
+        upgrade_note = "；旧的降级版本已原样保留并归档" if upgraded_from else ""
+        print(f"资料已轻量加入知识库{suffix}{upgrade_note}。需要我现在继续深读吗？")
+        set_protocol_status(
+            "needs_user_input",
+            unit_id=unit_id,
+            source_kind=kind,
+            link_autodrive="ask_first",
+            upgraded_from=upgraded_from,
+        )
         add_agent_action(
             "ask_once_to_deep_read",
             unit_id=unit_id,
@@ -2688,6 +2702,15 @@ def _extract_ingest_unit_id(stdout: str) -> tuple[str, str]:
     return "", "unknown"
 
 
+def _extract_source_upgrade_id(stdout: str) -> str:
+    matched = re.search(r"\[source\] upgraded_from=(\S+)", stdout)
+    return matched.group(1) if matched else ""
+
+
+def _source_revision_decision_required(result: CommandResult) -> bool:
+    return "explicit user migration approval is required" in f"{result.stdout}\n{result.stderr}"
+
+
 _INGEST_FILL_ARTIFACTS = {
     "paper": "note-fill.yaml",
     "repo": "capability-fill.yaml",
@@ -2818,6 +2841,15 @@ def handle_ingest(args: argparse.Namespace, root: Path) -> int:
         extra_env={"RESEARCH_INGEST_CHAIN": "1"},
     )
     if intake.returncode != 0:
+        if _source_revision_decision_required(intake):
+            print(
+                "旧的降级条目已经包含核验或确认过的判断，系统没有自动替换。"
+                "请告诉我你想保留两个版本，还是先复核旧判断后再迁移。",
+                file=sys.stderr,
+            )
+            set_protocol_status("needs_user_input", source_kind=kind, decision="source-revision")
+            add_agent_action("resolve_source_revision", source=source, source_kind=kind)
+            return intake.returncode
         print(
             "资料未能加入知识库；请让 Agent 查看诊断后重试。"
             "若是网页链接，也可以上传 PDF 或 HTML，或改用本地文件。",
@@ -2826,6 +2858,7 @@ def handle_ingest(args: argparse.Namespace, root: Path) -> int:
         return intake.returncode
 
     unit_id, status = _extract_ingest_unit_id(intake.stdout)
+    upgraded_from = _extract_source_upgrade_id(intake.stdout)
     public_unit_id = _public_display_text(unit_id, root, "编号已隐藏", 100) if unit_id else ""
     duplicate_prepare: tuple[str, str, str] | None = None
     if status == "duplicate":
@@ -2868,9 +2901,10 @@ def handle_ingest(args: argparse.Namespace, root: Path) -> int:
         return prepare.returncode
 
     if kind == "paper":
+        upgrade_note = "旧的降级版本已原样保留并归档；" if upgraded_from else ""
         print(
             f"资料已入库并备好统一深读骨架，条目编号是 {public_unit_id}。"
-            "Agent 接下来会用逐字证据填写论文类型及对应五要素并校验；整份判断只在最后请你拍板。"
+            f"{upgrade_note}Agent 接下来会用逐字证据填写论文类型及对应五要素并校验；整份判断只在最后请你拍板。"
         )
     else:
         print(f"资料已入库并备好深读骨架，条目编号是 {public_unit_id}。Agent 接下来会补全逐字证据并校验；需要判断时再请你拍板。")
@@ -5320,6 +5354,16 @@ def handle_review(args: argparse.Namespace, root: Path) -> int:
                     ],
                     item_limit=review_limit,
                 )
+                sheet_path = root / str(obsidian_batch["sheet_relative_path"])
+                checkpoint = git_checkpoint(
+                    root,
+                    "milestone: export Obsidian review sheet",
+                    trigger="manual",
+                    auto_init=True,
+                    target_paths=[sheet_path],
+                )
+                if not checkpoint.get("committed"):
+                    raise ReviewBatchError("checkpoint_failed", "review sheet checkpoint was not created")
             except ReviewBatchError as exc:
                 set_protocol_status("agent_action_required", review_apply_error=exc.code)
                 print(_review_apply_failure_message(exc.code), file=sys.stderr)

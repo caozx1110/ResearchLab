@@ -518,11 +518,6 @@ def _render_sheet(
     displays: Sequence[Mapping[str, Any]],
 ) -> str:
     lines = [
-        "---",
-        f"schema: {REVIEW_SHEET_SCHEMA}",
-        "kind: review_intent_draft",
-        "---",
-        "",
         "# 待确认判断",
         "",
         "> 这里的勾选只是决定草稿，不会自动修改知识库。勾选后请回到与 Agent 的对话中要求同步。",

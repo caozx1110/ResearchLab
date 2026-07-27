@@ -53,6 +53,7 @@ description: Generate self-contained weekly reports, stage summaries, PPT or wri
 这些 verbs 由 agent 内部执行。用户只需用自然语言提出报告需求；用户可见回复不得包含脚本路径、裸命令、flags、变量占位符或内部 next-step 指令。
 一次自然语言周报/PPT 请求中，Agent 应自动完成 prepare、填写与 verify；只有缺少可引用输入或确需用户选择读者/范围时才暂停，不能把内部 fill 位置或参数交给用户续跑。
 周报 fill 只改四区 `text`/`refs`；label 已按摘要=综合、进展=事实、问题=风险、计划=计划预填，status 由 owner 管理。成品不得出现 catalog ref、schema、receipt 或 claim/event 内部术语。
+私有最小调用形态：`weekly-prepare --program-id <计划编号>` 后编辑该计划 reports/editorial/weekly 下的 `fill.yaml`，只改四区 `text`/`refs`，再执行 `weekly-verify --program-id <计划编号>`；一次自然语言任务内自动完成，不把这些参数或位置交给用户。
 
 ## Output Contract
 

@@ -86,6 +86,8 @@ The runtime Agent uses the implementation's private plan, log-run, import-runs, 
 
 脚本入口：`scripts/experiment.py`（plan / log-run / import-runs / follow-up / diagnose / confirm）。
 
+私有最小调用形态：先以 `plan --title <标题> --program-id <计划编号> --idea-id <想法编号> --hypothesis <逐字假设>` 建实验，再以 `log-run --experiment-id <实验编号> --tested-hypothesis <同一假设> --config-revision <配置修订> --seed <种子> --outcome <结果> --result-summary <事实摘要> --metric <名称=值[单位]:方向>` 逐次记 run；不同 seed 保持同一配置修订与测试假设。
+
 ## 启动澄清（Agent 用）
 
 - 本轮验证什么假设？必答，逐字写入 plan。

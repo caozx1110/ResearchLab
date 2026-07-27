@@ -4814,7 +4814,7 @@ def backup_source(
 def _record_blocks_source_retry(project_root: Path, record: dict[str, Any]) -> bool:
     status = str(record.get("status") or "").strip().lower()
     confirmation_status = str(record.get("confirmation_status") or "").strip().lower()
-    if status in {"failed", "failed_retryable", "rejected"} or confirmation_status == "rejected":
+    if status in {"failed", "failed_retryable", "rejected", "archived"} or confirmation_status == "rejected":
         return False
     payload = record.get("payload", {})
     if isinstance(payload, dict):

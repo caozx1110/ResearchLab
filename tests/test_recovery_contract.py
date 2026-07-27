@@ -2581,6 +2581,36 @@ def test_undo_and_restore_use_journal_digests_and_kb_history(tmp_path: Path) -> 
     assert not path.exists()
 
 
+def test_restore_historical_operation_atomically_rewinds_the_newer_interval(tmp_path: Path) -> None:
+    _configure_kb_git(tmp_path)
+    shared = tmp_path / "kb" / "index.yaml"
+    first = tmp_path / "kb" / "notes" / "first.md"
+    second = tmp_path / "kb" / "notes" / "second.md"
+    first.parent.mkdir(parents=True)
+    shared.write_text("generation: 0\n", encoding="utf-8")
+
+    first_op = begin_op(tmp_path, "first-business", [shared, first])
+    shared.write_text("generation: 1\n", encoding="utf-8")
+    first.write_text("first\n", encoding="utf-8")
+    commit_op(tmp_path, first_op)
+
+    second_op = begin_op(tmp_path, "second-business", [shared, second])
+    shared.write_text("generation: 2\n", encoding="utf-8")
+    second.write_text("second\n", encoding="utf-8")
+    commit_op(tmp_path, second_op)
+
+    result = restore_operation(tmp_path, first_op)
+
+    assert result["restored_op_ids"] == [first_op, second_op]
+    assert shared.read_text(encoding="utf-8") == "generation: 0\n"
+    assert not first.exists()
+    assert not second.exists()
+    assert load_op(tmp_path, first_op)["undone_by"] == result["recovery_op_id"]
+    assert load_op(tmp_path, second_op)["undone_by"] == result["recovery_op_id"]
+    recovery = load_op(tmp_path, result["recovery_op_id"])
+    assert recovery["target_paths"] == ["index.yaml", "notes/first.md", "notes/second.md"]
+
+
 @pytest.mark.parametrize("journal_state", ["absent", "empty"])
 def test_undo_without_candidate_does_not_materialize_or_change_runtime_tree(
     tmp_path: Path,

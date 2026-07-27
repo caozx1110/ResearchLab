@@ -37,6 +37,7 @@ from .journal import (
     mark_op_undone,
     operation_lock,
     restore_before_snapshots,
+    restorable_committed_ops,
     target_path,
     target_digest,
     terminalize_resumed_op,
@@ -436,6 +437,8 @@ def _checkpointable_git_paths(
 
 
 def restore_operation(project_root: Path, op_id: str, *, recovery_type: str = "restore") -> dict[str, Any]:
+    if recovery_type == "restore":
+        return _restore_committed_range(project_root, op_id)
     with workspace_transaction_lock(project_root):
         # The source journal is mutable runtime state.  Load and validate its
         # authoritative bytes only after obtaining the workspace lease; every
@@ -517,6 +520,76 @@ def restore_operation(project_root: Path, op_id: str, *, recovery_type: str = "r
         "op_id": op_id,
         "recovery_op_id": recovery_op_id,
         "restored_paths": [path.relative_to(kb_repo_path(project_root).resolve()).as_posix() for path in restored],
+        "checkpoint": checkpoint,
+    }
+
+
+def _restore_committed_range(project_root: Path, op_id: str) -> dict[str, Any]:
+    """Atomically restore the selected business operation and every newer one."""
+    with workspace_transaction_lock(project_root):
+        if incomplete_ops(project_root):
+            raise SystemExit("检测到未完成的知识库操作；请先使用 kb resume 完成恢复。")
+        candidate_ids = [str(entry.get("op_id") or "") for entry in restorable_committed_ops(project_root)]
+        if op_id not in candidate_ids:
+            raise SystemExit(f"Operation is not undoable: {op_id}")
+        selected_ids = candidate_ids[candidate_ids.index(op_id) :]
+        source_views = [(source_id, *load_op_view(project_root, source_id)) for source_id in selected_ids]
+        keys_by_id: dict[str, list[str]] = {}
+        union_keys: set[str] = set()
+        for source_id, entry, _source_digest in source_views:
+            if str(entry.get("state") or "") != "commit" or str(entry.get("undone_by") or ""):
+                raise SystemExit("只有尚未恢复的已完成操作可恢复。")
+            keys = validated_recovery_target_keys(project_root, entry, require_after=True)
+            keys_by_id[source_id] = keys
+            union_keys.update(keys)
+        target_paths = [target_path(project_root, key) for key in sorted(union_keys)]
+        with ExitStack() as locks:
+            for path in sorted(target_paths, key=lambda item: item.as_posix()):
+                locks.enter_context(operation_lock(project_root, path))
+
+            # Prove the complete current→selected-before chain before creating a
+            # recovery journal or changing any business target.
+            virtual = {key: target_digest(project_root, key) for key in union_keys}
+            for source_id, entry, _source_digest in reversed(source_views):
+                keys = keys_by_id[source_id]
+                after_digests = entry["after_digests"]
+                if any(virtual[key] != after_digests.get(key) for key in keys):
+                    raise SystemExit("目标在该操作完成后又被修改；为避免覆盖后续改动，已停止恢复。")
+                before_digests = entry["before_digests"]
+                for key in keys:
+                    virtual[key] = before_digests.get(key)
+
+            for source_id, _entry, source_digest in source_views:
+                _, locked_digest = load_op_view(project_root, source_id)
+                if locked_digest != source_digest:
+                    raise SystemExit("恢复来源操作日志在执行前发生变化；已停止恢复。")
+
+            restored_by_key: dict[str, Path] = {}
+            with _recovery_journaled_op(project_root, f"restore:{op_id}", target_paths) as recovery_op_id:
+                for source_id, entry, _source_digest in reversed(source_views):
+                    for restored_path in restore_before_snapshots(
+                        project_root,
+                        source_id,
+                        source_entry=entry,
+                    ):
+                        restored_by_key[_target_key(project_root, restored_path)] = restored_path
+            restored = [restored_by_key[key] for key in sorted(restored_by_key)]
+            with _recovery_workspace_scope():
+                checkpoint = git_checkpoint(
+                    project_root,
+                    f"recovery: restore {op_id}",
+                    trigger="manual",
+                    auto_init=False,
+                    target_paths=restored,
+                )
+            for source_id in selected_ids:
+                mark_op_undone(project_root, source_id, recovery_op_id)
+    canonical_repo = kb_repo_path(project_root).resolve()
+    return {
+        "op_id": op_id,
+        "restored_op_ids": selected_ids,
+        "recovery_op_id": recovery_op_id,
+        "restored_paths": [path.relative_to(canonical_repo).as_posix() for path in restored],
         "checkpoint": checkpoint,
     }
 

@@ -1938,10 +1938,15 @@ def _entry_is_undo_candidate(entry: dict) -> bool:
 
 
 def latest_committed_op(project_root: Path) -> dict:
-    entries = [entry for entry in committed_ops(project_root) if _entry_is_undo_candidate(entry)]
+    entries = restorable_committed_ops(project_root)
     if not entries:
         raise SystemExit("没有可撤销的已提交操作。")
     return entries[-1]
+
+
+def restorable_committed_ops(project_root: Path) -> list[dict]:
+    """Chronological root business operations not already consumed by recovery."""
+    return [entry for entry in committed_ops(project_root) if _entry_is_undo_candidate(entry)]
 
 
 def begin_op(

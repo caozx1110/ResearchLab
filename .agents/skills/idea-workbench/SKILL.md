@@ -45,6 +45,10 @@ description: 负责 core idea unit 的生成、evidence-first analysis、陪练�
 2. runtime agent 从 KB 检索相关 paper / repo / dataset / blog / idea，填入 claim 文本与逐字 `evidence_refs`。
 3. `verify` 拒绝空证据、找不到的 source unit、不可读 artifact、伪造 quote 或错误 PDF page locator；全部通过才持久化。
 4. `review` 可由 agent 填正整数 `selection_rank`，供 `select-best` 消费。新 review 不生成 heuristic `score_breakdown`；旧记录中已持久化的 score 仅作兼容读取。
+5. 若新增材料不在本轮 frozen corpus，先用 knowledge-base-manager 的 `link --from-id <idea-id> --to-id <unit-id> --relation evidence-for` 建 canonical link，再在同一 analyze/review prepare 加 `--refresh-corpus`；它保留已填白名单字段并重建证据边界。
+
+默认待填文件：analyze=`analyze-fill.yaml`，review=`review-fill.yaml`，discuss=`discussion-fill.yaml`；`--input` 只传 unit 根下 basename。
+scaffold 中 `idea_context` 即使为空也由 owner 管理、只读；Agent 只填写 claim/reviewer/rank 等明确列入白名单的判断字段与 evidence。
 
 ## 陪练模式
 

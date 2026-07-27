@@ -25,7 +25,7 @@ if __name__ == "__main__":
 
 from research.common import add_project_root_argument, ensure_dir, file_sha256, load_list_document, load_yaml, print_resolved_project_roots, program_reporting_events_path, slugify, utc_now_iso, write_text_if_changed, write_yaml_if_changed
 from research.concepts import build_concept_scaffold, verify_concept_fill
-from research.core import iter_records, locate_record, project_root, record_path, rel, synthesis_root, trusted_project_path, unit_root, write_record
+from research.core import checkpoint_and_report, iter_records, kb_root, locate_record, project_root, record_path, rel, synthesis_root, trusted_project_path, unit_root, write_record
 from research.confirm import apply_confirmation
 from research.evidence import (
     build_verification_receipt,
@@ -1367,7 +1367,13 @@ def main() -> int:
         verified_root = synthesis_root(root) / output_slug
         yaml_path = verified_root / f"{mode}.yaml"
         md_path = verified_root / "summary.md"
-        with mutation_transaction(root, f"verify-{mode}", [yaml_path, md_path]):
+        try:
+            fill_path.relative_to(kb_root(root).resolve())
+            checkpointable_fill = [fill_path]
+        except ValueError:
+            checkpointable_fill = []
+        verify_targets = [*checkpointable_fill, yaml_path, md_path]
+        with mutation_transaction(root, f"verify-{mode}", verify_targets):
             violations, payload = verify_survey_fill(fill, root)
             if str(fill.get("mode") or "") != mode:
                 violations.append(f"mode mismatch: command is '{mode}' but scaffold mode is '{fill.get('mode')}'")
@@ -1379,6 +1385,12 @@ def main() -> int:
             ensure_dir(verified_root)
             write_yaml_if_changed(yaml_path, payload)
             write_text_if_changed(md_path, render_verified_summary(payload))
+        checkpoint_and_report(
+            root,
+            trigger="milestone",
+            message=f"milestone: verify {mode} {output_slug}",
+            target_paths=verify_targets,
+        )
         print(rel(root, yaml_path))
         print(rel(root, md_path))
         return 0

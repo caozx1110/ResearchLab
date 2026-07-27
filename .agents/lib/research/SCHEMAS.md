@@ -134,6 +134,8 @@ links:                               # 关联其它 unit
     kind: unit|heading|block
     value: <heading-or-stable-block-id>
   note: ""
+# degraded 且尚未 verify/confirm 的来源升级不覆盖本 unit：旧 unit status=archived，
+# 旧→新 relation=superseded_by，新→旧 relation=supersedes；两边原 source bytes 均保留。
 reuse_flags:                         # 是否已被下游 skill 复用
   review: false
   idea: false
