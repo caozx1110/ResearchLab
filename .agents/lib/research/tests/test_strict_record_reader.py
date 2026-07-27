@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import argparse
 import hashlib
 import importlib.machinery
@@ -468,7 +469,17 @@ def test_project_file_snapshot_rejects_unsafe_special_and_oversize_inputs(
     socket_path = socket_parent / "socket"
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
-        server.bind(str(socket_path))
+        try:
+            server.bind(str(socket_path))
+        except OSError as exc:
+            if exc.errno in {
+                errno.EPERM,
+                errno.EACCES,
+                errno.EAFNOSUPPORT,
+                errno.EPROTONOSUPPORT,
+            }:
+                pytest.skip("Unix-domain socket bind is unavailable in this environment")
+            raise
         assert records_module.snapshot_project_file(
             socket_root,
             "kb/p/socket",
@@ -736,7 +747,19 @@ def test_special_or_oversized_record_does_not_hide_valid_sibling(
         if not hasattr(socket, "AF_UNIX"):
             pytest.skip("Unix sockets are unavailable")
         bound_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        bound_socket.bind(str(unsafe))
+        try:
+            bound_socket.bind(str(unsafe))
+        except OSError as exc:
+            bound_socket.close()
+            bound_socket = None
+            if exc.errno in {
+                errno.EPERM,
+                errno.EACCES,
+                errno.EAFNOSUPPORT,
+                errno.EPROTONOSUPPORT,
+            }:
+                pytest.skip("Unix-domain socket bind is unavailable in this environment")
+            raise
     else:
         record = default_record("paper", title="Oversized", maturity="lightweight")
         record["id"] = "p-oversized-123456"

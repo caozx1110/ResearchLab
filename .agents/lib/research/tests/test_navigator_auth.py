@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 import sys
 import threading
@@ -36,15 +37,20 @@ class _TerminalManager:
 
 @contextmanager
 def _running_server(project_root: Path, token: str = "test-token", *, terminal_enabled: bool = False):
-    server = BrowserHTTPServer(
-        ("127.0.0.1", 0),
-        create_handler(project_root=project_root),
-        project_root=project_root,
-        coordinator=_Coordinator(),
-        terminal_manager=_TerminalManager() if terminal_enabled else None,
-        terminal_enabled=terminal_enabled,
-        auth_token=token,
-    )
+    try:
+        server = BrowserHTTPServer(
+            ("127.0.0.1", 0),
+            create_handler(project_root=project_root),
+            project_root=project_root,
+            coordinator=_Coordinator(),
+            terminal_manager=_TerminalManager() if terminal_enabled else None,
+            terminal_enabled=terminal_enabled,
+            auth_token=token,
+        )
+    except OSError as exc:
+        if exc.errno in {errno.EPERM, errno.EACCES, errno.EADDRNOTAVAIL, errno.EAFNOSUPPORT}:
+            pytest.skip("Loopback server bind is unavailable in this environment")
+        raise
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:

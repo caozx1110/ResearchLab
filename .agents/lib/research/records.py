@@ -2074,6 +2074,17 @@ def normalize_record_schema(
             and normalized["confirmation_status"] != "confirmed"
         )
     )
+    if (
+        str(normalized.get("confirmation_status") or "") == "rejected"
+        and str(normalized.get("status") or "") not in {"rejected", "archived"}
+    ):
+        # A rejected unit leaves the active lifecycle: align the canonical
+        # lifecycle status with the rejection decision (STATUS_VALUES already
+        # contains "rejected").  confirmation_status, the rejection payload and
+        # history are kept untouched; an explicit terminal "archived" status is
+        # preserved.  Counting/filter surfaces (status / review / next) key off
+        # confirmation_status and are unaffected by this alignment.
+        normalized["status"] = "rejected"
     normalized["tags"] = _slug_list(normalized.get("tags"))
     normalized["topics"] = _slug_list(normalized.get("topics"))
     normalized["candidate_pools"] = _slug_list(normalized.get("candidate_pools"))

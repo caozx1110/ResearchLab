@@ -23,6 +23,15 @@ PASSAGE_MAX_CHARS = 900
 PASSAGE_OVERLAP_CHARS = 160
 PASSAGE_EXCERPT_CHARS = 320
 
+# Repo source-code chunking: Python files split at def/class symbol boundaries,
+# every other text file uses fixed overlapping line windows.
+CODE_WINDOW_LINES = 40
+CODE_WINDOW_OVERLAP_LINES = 8
+CODE_SYMBOL_RE = re.compile(r"^([ \t]*)(?:async[ \t]+)?(def|class)[ \t]+([A-Za-z_][A-Za-z0-9_]*)")
+_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_IDENTIFIER_PART_RE = re.compile(r"[A-Z]{2,}(?=[A-Z][a-z0-9])|[A-Z]?[a-z0-9]+|[A-Z]{2,}|[0-9]+")
+CODE_IDENTIFIER_TERMS_MAX_CHARS = 2000
+
 FIELD_WEIGHTS = {
     "title": 8,
     "summary": 5,
@@ -326,6 +335,131 @@ def extract_parse_cache_passages(
                 text=window,
                 source_digest=source_digest,
             )
+    return passages
+
+
+def is_code_passage(passage: dict[str, Any]) -> bool:
+    """A repo source passage carries a repository-relative artifact path.
+
+    Every Markdown/record/parse-cache passage stores a project-relative artifact
+    below ``kb/``, so the artifact shape is a stable, structure-preserving
+    discriminator that needs no schema change.
+    """
+    artifact = str(passage.get("artifact") or "")
+    return bool(artifact) and not (artifact == "kb" or artifact.startswith("kb/"))
+
+
+def code_identifier_terms(*texts: str) -> str:
+    """Deterministic split-word helper text for identifier sub-word matching.
+
+    ``ConsistencyRefiner`` / ``train_dynamics`` index as single FTS tokens under
+    ``unicode61`` (underscores split, camel case does not), so part-word queries
+    like ``Refiner`` cannot match the body column.  This emits, per first-seen
+    multi-part identifier, its lowercase parts in order (`consistency refiner`),
+    preserving adjacency so phrase queries still work.  Single-part identifiers
+    are already body tokens and are skipped.
+    """
+    seen: set[str] = set()
+    terms: list[str] = []
+    for text in texts:
+        for identifier in _IDENTIFIER_RE.findall(str(text or "")):
+            if identifier in seen:
+                continue
+            seen.add(identifier)
+            parts = [part.lower() for part in _IDENTIFIER_PART_RE.findall(identifier) if len(part) >= 2]
+            if len(parts) < 2:
+                continue
+            terms.append(" ".join(parts))
+            if sum(len(term) + 1 for term in terms) > CODE_IDENTIFIER_TERMS_MAX_CHARS:
+                return " ".join(terms)[:CODE_IDENTIFIER_TERMS_MAX_CHARS]
+    return " ".join(terms)[:CODE_IDENTIFIER_TERMS_MAX_CHARS]
+
+
+def _python_symbol_segments(lines: list[str]) -> list[tuple[int, int, str]]:
+    """Split Python lines at lexical def/class boundaries with qualified names."""
+    boundaries: list[tuple[int, str]] = []
+    stack: list[tuple[int, str]] = []
+    for number, line in enumerate(lines, start=1):
+        match = CODE_SYMBOL_RE.match(line)
+        if not match:
+            continue
+        indent = len(match.group(1).expandtabs(4))
+        keyword, name = match.group(2), match.group(3)
+        while stack and stack[-1][0] >= indent:
+            stack.pop()
+        qualified = ".".join([item[1] for item in stack] + [name])
+        stack.append((indent, name))
+        boundaries.append((number, f"{keyword} {qualified}"))
+    if not boundaries:
+        return [(1, len(lines), "")]
+    segments: list[tuple[int, int, str]] = []
+    if boundaries[0][0] > 1:
+        segments.append((1, boundaries[0][0] - 1, ""))
+    for index, (line_number, label) in enumerate(boundaries):
+        end = boundaries[index + 1][0] - 1 if index + 1 < len(boundaries) else len(lines)
+        segments.append((line_number, end, label))
+    return segments
+
+
+def _line_windows(start: int, end: int) -> list[tuple[int, int]]:
+    if end - start + 1 <= CODE_WINDOW_LINES:
+        return [(start, end)]
+    step = CODE_WINDOW_LINES - CODE_WINDOW_OVERLAP_LINES
+    windows: list[tuple[int, int]] = []
+    cursor = start
+    while True:
+        window_end = min(end, cursor + CODE_WINDOW_LINES - 1)
+        windows.append((cursor, window_end))
+        if window_end >= end:
+            return windows
+        cursor += step
+
+
+def code_passages(
+    record: dict[str, Any],
+    *,
+    artifact: str,
+    text: str,
+    source_digest: str,
+) -> list[dict[str, Any]]:
+    """Chunk one repo source file into passages without interpreting the code.
+
+    ``artifact`` is the repository-relative path; the heading carries that path
+    (plus the enclosing symbol for Python) so results render as file:line.
+    """
+    lines = text.splitlines()
+    if not lines:
+        return []
+    passages: list[dict[str, Any]] = []
+    if artifact.lower().endswith(".py"):
+        segments = _python_symbol_segments(lines)
+    else:
+        segments = [(1, len(lines), "")]
+    for segment_start, segment_end, symbol in segments:
+        for window_start, window_end in _line_windows(segment_start, segment_end):
+            start, end = window_start, window_end
+            while start <= end and not lines[start - 1].strip():
+                start += 1
+            while end >= start and not lines[end - 1].strip():
+                end -= 1
+            if start > end:
+                continue
+            chunk = "\n".join(lines[start - 1 : end])
+            heading = f"{artifact} · {symbol}" if symbol else artifact
+            windows = _character_windows(chunk)
+            for index, window in enumerate(windows, start=1):
+                suffix = f":part-{index}" if len(windows) > 1 else ""
+                _append_passage(
+                    passages,
+                    record=record,
+                    artifact=artifact,
+                    locator=f"{artifact}#L{start}-L{end}{suffix}",
+                    heading=heading,
+                    line_start=start,
+                    line_end=end,
+                    text=window,
+                    source_digest=source_digest,
+                )
     return passages
 
 

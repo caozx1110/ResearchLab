@@ -18,17 +18,24 @@ Verification model (SSOT B3/B4):
     verbatim substring** (consecutive whitespace folded to one space + strip;
     case preserved). Hit => grounded; miss => a violation string.
   * `locator` has two families: PDF (`page=N` / `section` / `para`) and HTML
-    (`section` / `anchor`, no page numbers). When a parse-cache exposes per-page
-    chunks and the locator is `page=N`, verification additionally narrows to that
-    page: a quote that is verbatim in the document but on a *different* page is a
-    (distinct) locator-mismatch violation. The verbatim hit remains the hard
-    criterion; page narrowing is a precision bonus that degrades gracefully.
+    (`section` / `anchor`, no page numbers); repo evidence adds `line=N`.
+    Recognized locator shapes are position-checked against the artifact: a
+    `line=N`/`line=N-M` locator must contain the quote's starting line, a
+    `page=N` locator must name the page chunk holding the quote, and a
+    `section:<anchor>` locator must name an existing chunk whose own text
+    contains the quote. A verbatim hit at a *different* position is a
+    locator-mismatch violation whose message carries the scanned actual
+    position (line=K / section label) as a repair hint. Unrecognized locator
+    shapes (bare `section`/`page`, `file:line` prose, free text) are never
+    rejected — they keep the historical pass-through and only warn, so legacy
+    data and other analysts do not fail closed.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import re
+import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -285,6 +292,267 @@ def _page_of_label(label: Any) -> int | None:
     return int(match.group(1)) if match else None
 
 
+# Locator position validation (SSOT B4 hardening): a locator is not free text —
+# when its shape is recognized, the cited position must actually contain the
+# quote.  Recognized families (exactly the forms the analysts document):
+#   * ``line=N`` / ``line=N-M``   -> raw line positions inside the artifact file
+#     (repo-file evidence per repo-analyst's ``locator=line=N`` contract; the
+#     legacy colon form ``line:N`` deliberately stays unrecognized/warn-only).
+#   * ``page=N``                  -> parse-cache page chunks (existing narrowing).
+#   * ``section:<anchor>`` / ``anchor:<x>`` -> parse-cache section chunk labels,
+#     enforced only when the artifact actually exposes section-labeled chunks
+#     (a PDF ``section``-family citation on a page-only cache keeps passing).
+# Anything else (bare ``section``/``page``, idea-workbench ``file:line`` prose,
+# free text, URLs) keeps the pre-existing pass-through behavior and only emits a
+# warning, so legacy data and other analysts are never failed closed.
+_LINE_LOCATOR_RE = re.compile(
+    r"^\s*lines?\s*=\s*(\d+)\s*(?:[-–~]\s*(\d+))?\s*$",
+    flags=re.IGNORECASE,
+)
+_SECTION_LOCATOR_RE = re.compile(
+    r"^\s*(section|anchor)\s*:\s*(\S.*?)\s*$",
+    flags=re.IGNORECASE,
+)
+_BARE_LOCATOR_KINDS = {"section", "anchor", "page", "para"}
+
+
+def _line_range_of_locator(locator: Any) -> tuple[int, int] | None:
+    """Parse ``line=N`` / ``line=N-M`` into an inclusive 1-based range."""
+    if not locator:
+        return None
+    match = _LINE_LOCATOR_RE.fullmatch(str(locator))
+    if match is None:
+        return None
+    start = int(match.group(1))
+    end = int(match.group(2)) if match.group(2) else start
+    if start <= 0:
+        return None
+    if end < start:
+        start, end = end, start
+    return start, end
+
+
+def _section_anchor_of_locator(locator: Any) -> str | None:
+    """Extract ``<anchor>`` from a ``section:<anchor>`` / ``anchor:<x>`` locator."""
+    if not locator:
+        return None
+    match = _SECTION_LOCATOR_RE.fullmatch(str(locator))
+    return match.group(2).strip() if match else None
+
+
+def _quote_start_lines(raw_text: str, quote: str) -> list[int]:
+    """Return every 1-based line where the whitespace-normalized quote starts.
+
+    A quote "starts" at line K when its first normalized character falls inside
+    line K: either the quote's lines correspond to the file's lines from K on
+    (each quote line a normalized substring of its file line), or — for quotes
+    flattened across a wrap — the normalized quote occurs in the normalized
+    join of lines K.. at an offset inside line K's own contribution.
+    """
+    flat = normalize_ws(quote)
+    if not flat or not raw_text:
+        return []
+    norm_lines = [normalize_ws(line) for line in raw_text.splitlines()]
+    quote_lines = [part for part in (normalize_ws(item) for item in str(quote).splitlines()) if part]
+    candidates: list[int] = []
+    total = len(norm_lines)
+    for index, current in enumerate(norm_lines):
+        if not current:
+            continue
+        if index + len(quote_lines) <= total and all(
+            quote_line in norm_lines[index + offset]
+            for offset, quote_line in enumerate(quote_lines)
+        ):
+            candidates.append(index + 1)
+            continue
+        window = [current]
+        length = len(current)
+        cursor = index + 1
+        needed = len(current) + len(flat) + 1
+        while length < needed and cursor < total:
+            nxt = norm_lines[cursor]
+            if nxt:
+                window.append(nxt)
+                length += len(nxt) + 1
+            cursor += 1
+        position = " ".join(window).find(flat)
+        if 0 <= position < len(current):
+            candidates.append(index + 1)
+    return candidates
+
+
+def _chunk_labels_of_quote(
+    chunks: tuple[tuple[str, str, str], ...],
+    norm_quote: str,
+) -> list[str]:
+    """Labels of every chunk whose normalized text contains the quote."""
+    found: list[str] = []
+    for label, _anchor, text in chunks:
+        if norm_quote and norm_quote in normalize_ws(text):
+            found.append(label or "<unlabeled>")
+    return found
+
+
+def _line_hint(candidates: list[int]) -> str:
+    if not candidates:
+        return "could not anchor the quote to any artifact line"
+    rendered = ", ".join(f"line={item}" for item in candidates[:5])
+    if len(candidates) > 5:
+        rendered += ", …"
+    return f"quote actually starts at {rendered}"
+
+
+def _section_hint(found_labels: list[str]) -> str:
+    if not found_labels:
+        return "the quote is not inside any single chunk (it may span chunk boundaries — cite a shorter quote)"
+    rendered = ", ".join(found_labels[:5])
+    if len(found_labels) > 5:
+        rendered += ", …"
+    return f"quote actually in {rendered}"
+
+
+def _locator_position_check(
+    ref: dict[str, Any],
+    loaded: "_LoadedArtifact",
+    *,
+    where: str,
+    artifact: str,
+    quote: str,
+    norm_quote: str,
+) -> tuple[str | None, str | None]:
+    """Validate a recognized locator's position claim; returns (violation, warning).
+
+    The quote is already known to be verbatim somewhere in the artifact; this
+    only checks that the *cited position* is where it actually lives.  Position
+    mismatch => violation with a repair hint (the scanned actual position).
+    Unrecognized or unverifiable locator shapes => warning only (never reject),
+    so legacy locator vocabularies keep their existing behavior.
+    """
+    locator_raw = str(ref.get("locator") or "")
+    locator = normalize_ws(locator_raw)
+    if not locator:
+        return None, None
+
+    line_range = _line_range_of_locator(locator)
+    if line_range is not None:
+        if not loaded.full_text:
+            return None, (
+                f"{where}: locator '{locator}' could not be position-checked "
+                f"(artifact '{artifact}' has no raw text view); locator accepted as-is"
+            )
+        candidates = _quote_start_lines(loaded.full_text, quote)
+        if not candidates:
+            return None, (
+                f"{where}: locator '{locator}' could not be position-checked "
+                f"(the quote cannot be anchored to a line of artifact '{artifact}', "
+                f"e.g. it may only match after YAML decoding); locator accepted as-is"
+            )
+        start, end = line_range
+        if any(start <= item <= end for item in candidates):
+            return None, None
+        return (
+            f"{where}: quote '{_quote_digest(quote)}' is verbatim in artifact '{artifact}' "
+            f"but locator '{locator}' does not match its position ({_line_hint(candidates)})",
+            None,
+        )
+
+    page = _page_of_locator(locator)
+    if page is not None:
+        if loaded.pages:
+            cited = normalize_ws(loaded.pages.get(page, ""))
+            if norm_quote in cited:
+                return None, None
+            found_on = sorted(p for p, t in loaded.pages.items() if norm_quote in normalize_ws(t))
+            found_desc = f"page(s) {found_on}" if found_on else "outside indexed pages"
+            return (
+                f"{where}: quote '{_quote_digest(quote)}' grounded but locator page={page} "
+                f"is wrong (found on {found_desc})",
+                None,
+            )
+        if loaded.chunks:
+            found_labels = _chunk_labels_of_quote(loaded.chunks, norm_quote)
+            return (
+                f"{where}: locator '{locator}' cites a page but artifact '{artifact}' has no "
+                f"page-labeled chunks ({_section_hint(found_labels)})",
+                None,
+            )
+        return None, (
+            f"{where}: locator '{locator}' could not be position-checked "
+            f"(artifact '{artifact}' exposes no page or chunk structure); locator accepted as-is"
+        )
+
+    anchor = _section_anchor_of_locator(locator)
+    if anchor is not None:
+        if not loaded.chunks:
+            return None, (
+                f"{where}: locator '{locator}' could not be position-checked "
+                f"(artifact '{artifact}' exposes no parse-cache chunks); locator accepted as-is"
+            )
+        has_section_chunks = any(
+            label.casefold().startswith("section:") or chunk_anchor
+            for label, chunk_anchor, _text in loaded.chunks
+        )
+        if not has_section_chunks:
+            # Page-only caches (PDF): ``section``-family locators cite paper
+            # sections, not chunk labels — keep the historical pass-through.
+            return None, (
+                f"{where}: locator '{locator}' could not be position-checked "
+                f"(artifact '{artifact}' has no section-labeled chunks); locator accepted as-is"
+            )
+        anchor_fold = anchor.casefold()
+        locator_fold = locator.casefold()
+        matched = [
+            (label, chunk_anchor, text)
+            for label, chunk_anchor, text in loaded.chunks
+            if label.casefold() == locator_fold
+            or (chunk_anchor and chunk_anchor.casefold() == anchor_fold)
+            or label.casefold() == f"section:{anchor_fold}"
+        ]
+        found_labels = _chunk_labels_of_quote(loaded.chunks, norm_quote)
+        if not matched:
+            known = [label for label, _anchor, _text in loaded.chunks if label][:6]
+            known_desc = f"; known labels: {', '.join(known)}" if known else ""
+            return (
+                f"{where}: locator '{locator}' does not name any chunk label of artifact "
+                f"'{artifact}' ({_section_hint(found_labels)}{known_desc})",
+                None,
+            )
+        if any(norm_quote in normalize_ws(text) for _label, _anchor, text in matched):
+            return None, None
+        return (
+            f"{where}: quote '{_quote_digest(quote)}' is verbatim in artifact '{artifact}' "
+            f"but locator '{locator}' does not match its position ({_section_hint(found_labels)})",
+            None,
+        )
+
+    if locator.casefold() in _BARE_LOCATOR_KINDS:
+        return None, (
+            f"{where}: locator '{locator}' names a family but no position "
+            f"(cite e.g. section:<anchor>, page=N or line=N); locator accepted as-is"
+        )
+    return None, (
+        f"{where}: locator '{locator}' has an unrecognized shape and was not position-checked; "
+        f"locator accepted as-is"
+    )
+
+
+# One-line, deduplicated stderr fallback for locator warnings when the caller
+# supplies no warning sink (existing analysts).  Warnings never fail a verify.
+_LOCATOR_WARNING_SEEN: set[str] = set()
+_LOCATOR_WARNING_SEEN_MAX = 4096
+
+
+def _emit_locator_warning(message: str, sink: list[str] | None) -> None:
+    if sink is not None:
+        sink.append(message)
+        return
+    if message in _LOCATOR_WARNING_SEEN:
+        return
+    if len(_LOCATOR_WARNING_SEEN) < _LOCATOR_WARNING_SEEN_MAX:
+        _LOCATOR_WARNING_SEEN.add(message)
+    print(f"[warn] {message}", file=sys.stderr)
+
+
 def _page_of_locator(locator: Any) -> int | None:
     """Extract N from a `page=N` PDF locator, else None (section/anchor/etc.)."""
     if not locator:
@@ -310,6 +578,29 @@ def _artifact_pages(data: Any) -> dict[int, str]:
             continue
         pages.setdefault(page, []).append(str(chunk.get("text") or ""))
     return {page: "\n".join(parts) for page, parts in pages.items()}
+
+
+def _artifact_chunks(data: Any) -> tuple[tuple[str, str, str], ...]:
+    """Extract (label, anchor, text) triples from a parse-cache-style mapping.
+
+    Returns () when the artifact has no ``chunks`` structure, in which case
+    chunk-label locators (``section:<anchor>``) cannot be position-checked and
+    keep their pre-existing pass-through behavior.
+    """
+    if not isinstance(data, dict):
+        return ()
+    triples: list[tuple[str, str, str]] = []
+    for chunk in data.get("chunks") or []:
+        if not isinstance(chunk, dict):
+            continue
+        triples.append(
+            (
+                str(chunk.get("label") or ""),
+                str(chunk.get("anchor") or ""),
+                str(chunk.get("text") or ""),
+            )
+        )
+    return tuple(triples)
 
 
 def _yaml_text_blob(data: Any) -> str:
@@ -356,6 +647,7 @@ class _LoadedArtifact:
     full_text: str = ""
     structured_text: str = ""
     pages: dict[int, str] = field(default_factory=dict)
+    chunks: tuple[tuple[str, str, str], ...] = ()
 
     def searchable_texts(self) -> tuple[str, ...]:
         return tuple(text for text in (self.full_text, self.structured_text) if text)
@@ -564,6 +856,7 @@ def _load_artifact_bytes(raw_bytes: bytes, *, suffix: str) -> _LoadedArtifact | 
             full_text=raw,
             structured_text=_yaml_text_blob(data),
             pages=_artifact_pages(data),
+            chunks=_artifact_chunks(data),
         )
     return _LoadedArtifact(full_text=raw)
 
@@ -634,17 +927,22 @@ def verify_claim_evidence(
     *,
     external_source: dict[str, Any] | None = None,
     source_roots: dict[str, str | Path | EvidenceSourceSnapshot] | None = None,
+    locator_warnings: list[str] | None = None,
 ) -> list[str]:
     """Return a list of evidence violations for `claim` (empty == fully grounded).
 
     For each `evidence_ref` the referenced `artifact` is loaded under `unit_dir`
     and its `quote` is checked to be a whitespace-normalized verbatim substring
     (SSOT B3). Reported violations cover: missing/unverifiable quote, artifact
-    that cannot be read, quote-not-found, and — when the artifact exposes
-    per-page chunks and the locator is `page=N` — a quote present in the document
-    but on a different page (locator mismatch). Degenerate inputs (non-dict
-    claim, no refs, `unit_dir=None`) never raise; they yield [] or a precise
-    violation rather than crashing.
+    that cannot be read, quote-not-found, and — when the locator's shape is
+    recognized (`line=N`/`line=N-M`, `page=N`, `section:<anchor>`) — a quote
+    that is verbatim in the artifact but not at the cited position (locator
+    mismatch, reported with the scanned actual position as a repair hint).
+    Unrecognized locator shapes are never rejected: they keep the pre-existing
+    behavior and surface a warning (appended to `locator_warnings` when the
+    caller supplies a list, otherwise printed once to stderr). Degenerate
+    inputs (non-dict claim, no refs, `unit_dir=None`) never raise; they yield
+    [] or a precise violation rather than crashing.
     """
     violations: list[str] = []
     if not isinstance(claim, dict):
@@ -693,19 +991,23 @@ def verify_claim_evidence(
                 f"{where}: quote '{_quote_digest(quote)}' not verbatim in artifact '{artifact}'"
             )
             continue
-        # Grounded in the document. Optional locator narrowing (PDF page=N): if
-        # the artifact has per-page chunks, confirm the quote is on the cited
-        # page; a hit on a different page is a locator-mismatch violation.
-        page = _page_of_locator(ref.get("locator"))
-        if page is not None and loaded.pages:
-            cited = normalize_ws(loaded.pages.get(page, ""))
-            if norm_quote not in cited:
-                found_on = sorted(p for p, t in loaded.pages.items() if norm_quote in normalize_ws(t))
-                found_desc = f"page(s) {found_on}" if found_on else "outside indexed pages"
-                violations.append(
-                    f"{where}: quote '{_quote_digest(quote)}' grounded but locator page={page} "
-                    f"is wrong (found on {found_desc})"
-                )
+        # Grounded in the document. Locator position validation: a recognized
+        # locator (line=N / page=N / section:<anchor>) must actually contain the
+        # quote; a verbatim hit at a different position is a locator-mismatch
+        # violation carrying the scanned actual position as a repair hint.
+        # Unrecognized locator shapes only warn and keep the verbatim result.
+        violation, warning = _locator_position_check(
+            ref,
+            loaded,
+            where=where,
+            artifact=artifact,
+            quote=quote,
+            norm_quote=norm_quote,
+        )
+        if violation:
+            violations.append(violation)
+        elif warning:
+            _emit_locator_warning(warning, locator_warnings)
     violations.extend(_stale_source_snapshot_violations(source_roots))
     return violations
 
