@@ -67,12 +67,20 @@
 - 质量门：概念/context 定向 `298 passed`；Obsidian 修复定向 `39 passed`；Python 3.9.6 `py_compile`、skill validator `Validated 20 skills.`；最终全套 `2147 passed, 18 skipped, 7 warnings`（9m17s）。安装器从已提交 release allowlist 冷装成功，后续 update 保留 scratch `kb/`。
 - 提交：`4aa35aa feat(research): add concepts and bounded context packs`；`acda252 fix(obsidian): project receipt-bound claims as confirmed`。
 
+### R3 论文链（施工中，2026-07-27）
+- 已完成 bibliography / figure reference / section draft 三条现状的独立只读审计；未调用 shipping skills、未修改真实 `kb/`。确认当前缺口包括：paper intake 丢部分 citation metadata；caption crop 依遍历序号命名且自动把全部图设为 key figure；outline 只有机械 Markdown 骨架，没有分节 judgement/receipt/publication 合同。
+- 设计门已锁：citation key 绑定 canonical paper id，DOI/arXiv/source URL 强身份去重，raw BibTeX 永不进入渲染面；program `.bib` 绑定完整选择集与 paper snapshots，纯事实导出不错误依赖 deep-read judgement receipt。
+- figure index 锁为 `figure-index/v1`：ref key 绑定 paper + 规范化 caption 编号，PNG 资产按内容哈希落盘；机械提取不再选择“关键图”或降级整篇确认，Agent 的图引用选择随实际写作 judgement 确认。
+- section draft 锁为 `paper_draft_section` side judgement：七节各自 prepare/fill/verify/confirm，段落逐一绑定 current confirmed source claims/evidence、citation keys 和可选 figure refs；全节 current confirmed 后才将 MD/LaTeX/bib/publication manifest 原子发布到 `kb/output/<program-id>/`。
+- 下一步：先提交本设计 gate；随后按 bibliography → figure index → section draft 三个小里程碑施工，每片定向测试，R3 末跑 Python 3.9/skill validator/全套回归和 A9/A10 冷安装验收。
+
 ## 决定记录（含偏离蓝图的理由）
 
 | # | 日期 | 决定 | 理由 |
 |---|---|---|---|
 | D1 | 07-26 | campaign 分支基线取 codex/review-remediation-integration@dfcc0b5 而非 main | Wave 1 改动叠在该分支之上且 HANDOFF 以此为前提；main（cd40859）落后 26 轮 remediation |
 | D2 | 07-27 | 概念采用 canonical `concept` unit，而不是 `kb/synthesis/concepts` side YAML | 统一复用 record snapshot、ConfirmationReceipt、索引、review、关系和 Obsidian 基建；代价是把第七类 unit 全面接入 schema/枚举并补全生命周期测试 |
+| D3 | 07-27 | 论文分节采用 program-scoped side judgement；citation/figure key 均绑定 canonical identity | 草稿不是新的来源 unit，但每节必须独立确认；稳定 key 不能随作者/题名修订、集合顺序或 crop 遍历顺序漂移 |
 
 ## 遗留清单
 

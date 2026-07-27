@@ -52,12 +52,20 @@
 按建议优先级排序：
 
 - **G1 引用管理（缺口，你清单里有）**：paper unit metadata 补 DOI/arXiv id/bibtex 字段（intake 时抓取）；report-author 增加 `bib` 输出（从 program 引用的 paper units 生成去重 .bib，citation key 稳定）；自然语言"把本文引用导出 bib"路由之。约 2–3 天。
+
+  **R3 实现锁定（2026-07-27，bibliography）**：不新增公开 `kb` 动词；`report-author` 增加私有 `bib` operation，自然语言仍由 Agent 路由。paper `basic_info` 继续是 title/authors/year/venue/DOI/arXiv 的事实 SSOT，只增加由 canonical paper id 机械派生的 `citation_key` 与不重复上述字段的白名单 `bibtex` 补充元数据；旧 record 缺 key 时导出器只读派生，不迁移。DOI 规范化为无 scheme/prefix 的小写 identity，arXiv 去掉 `vN` 作为 work identity，精确版本仍只由 source URI/material binding 保存。key 固定为 `cite_<sanitized-unit-id>`，不依赖作者、题名、年份、program 顺序或库中碰撞顺序。intake 只从已归档 HTML/PDF bytes、staged candidate identity 和 canonical source URI 机械提取/合并；强 identity 冲突 fail closed，不请求 Crossref/OpenAlex/付费 API，也不接收 provider raw BibTeX。
+
+  `.bib` 由结构化白名单字段机械转义/渲染，拒绝换行、macro 或新 entry 注入；选择集来自 program state + 全量 reporting events 中的 canonical paper ids，不受周报 stage/limit 截断。去重仅按 DOI、versionless arXiv、canonical source URL 的传递闭包；无强 identity 时退到 unit id，绝不用 title+year 硬合并；同一连通组含冲突 DOI/arXiv 或 key 冲突即拒绝。导出绑定 program state/events exact bytes、完整选择集与每个 paper record snapshot，在 render 后、write 后和 transaction commit boundary 聚合重验；输出 `kb/output/<program-id>/references.bib`，排序/字段顺序固定、重复导出字节一致。bibliography 是 factual metadata，不错误依赖 deep-read judgement ConfirmationReceipt；缺失字段显式留空/报告，不伪造类型或 venue。
 - **G4 实验导入**：`experiment.py import-runs` 接受 wandb export JSON / CSV / 目录约定，批量生成 log-run（fingerprint 机制沿用，来源标 imported）。没有它，实验归档必然退化为手工口述。约 2–3 天。
 - **G3 检索升级**：保 FTS5 词法为底座；新增 **context-pack**：给定问题 → find 检索 + 相关 unit 的 confirmed claims/摘要组装成一个带 locator 的上下文包（喂给 Agent 讨论/写作，直接服务"AI 基于库讨论 idea"与省 token 目标）。跨语言语义检索列为可选后续（不做硬依赖，守零付费承诺）。约 3–5 天。
 
   **R2 实现锁定（2026-07-27）**：不新增公开动词；现有 `kb find` 在私有 Agent protocol 中附带只读、临时的 `context-pack/v1`。候选顺序复用同一轮 FTS5 / deterministic fallback 检索，不做 query 改写、embedding、总结或相关性判断。正式内容 lane 只搬运 `confirmation_status=confirmed`、当前 ConfirmationReceipt 覆盖且 evidence/record snapshot 仍 current 的 canonical claims，并保留逐字 quote 与 locator；不能把顶层状态字符串当可信证明。摘要与 passage excerpt 因不在 ConfirmationReceipt 的 claim scope 内，只能作为明确标注 `confirmation_bound=false` 的导航提示，绝不冒充已确认结论。固定上限为 5 个 unit、每 unit 3 条 claim、每 claim 2 个 evidence ref，并用 6000 UTF-8 bytes 的保守预算做原子裁剪（claim/quote 不截断）；超限、stale、pending、rejected、重复 id 或不完整 locator 均 fail-closed 排除并计数。输出前聚合重验 snapshot；包不落 canonical KB、不进入 Git/Obsidian/确认门，idea/report 等下游正式产物仍走各自 verify/confirm/current gate。
 - **G5 批量与园艺**：`kb add` 多目标；review 个人档支持一次 >3 条（治理档保 Top-3）；"园艺"自然语言路由（清 pending 积压、重建 stale survey、taxonomy 重整），不加新动词。约 3 天。
 - **G2 论文成稿**：outline → 分节草稿工作流：每节绑定 claims/evidence，Agent 起草、节级确认，导出 LaTeX/Markdown 到 output/（引用 key 与 G1 联动）。约 1 周。
+
+  **R3 实现锁定（2026-07-27，section draft）**：`report-author` 拥有 side judgement kind `paper_draft_section`；固定 canonical 目录为 `kb/programs/<program-id>/reports/paper-draft/`，其中 manifest 绑定 exact `paper-outline.md` bytes、固定七节有序 identity、可引用的 current confirmed source claim catalog、G1 bibliography catalog 与 G7 figure catalog；`fills/<section-id>-fill.yaml` 是 Agent authoring scaffold，`sections/<section-id>.yaml` 是独立待确认 judgement。prepare 只搭空段落结构；Agent 为每段填写 prose、epistemic claim type、source claim refs、citation keys 和可选 figure refs。verify 不判断文意，只机械验证段落非空、每段至少一条 current confirmed support claim、逐字 evidence、引用/图 key 存在且 current，并从支持 claim 搬运 evidence refs，生成 canonical pending claims、verification receipt 与上游 anchor。不得让脚本据 outline/claims 自动写论述，亦不得接受 raw Agent LaTeX。
+
+  每节通过统一 `kb review` 单独真人确认，ConfirmationReceipt 绑定 prose、support/citation/figure refs、verification 与 exact 上游 digests；outline/source record/receipt/evidence/bib/figure 任一变化使该节 stale。最终 export 只接受七节全都唯一、current、verified、receipt-confirmed，按 manifest 顺序机械渲染 UTF-8 Markdown 与安全转义 LaTeX，并连同当前 `references.bib` 和 publication manifest 在同一 recovery transaction 原子发布到 `kb/output/<program-id>/paper-draft.{md,tex}`；render 后、write 后、commit boundary 均聚合重验，缺节、pending/rejected/stale 时零 publication write。每节可以独立重填/重验/重签，不能用 context-pack 或整篇顶层状态替代 receipt 验证。
 - **G6 批注回流**：Obsidian inbox/annotations 的人写笔记 → 结构化 pending 条目（signer=你本人，走同一确认门），人写的知识不该比 AI 写的更难入库。约 2–3 天。
 
 ## 5. 治理分档（复杂度税的核心减法）
@@ -130,6 +138,10 @@ temp/what_i_need.md 已确认过时，原 v1.1 增补整体撤回。以下以用
 
    **R1 实现锁定（2026-07-27）**：`complete-note prepare` 生成一个统一待填结构，包含空 `paper_type`、分类理由/逐字 evidence 与 method_system/benchmark/survey 三个要素分支；Agent 只填所选分支。verify 同时验证类型与对应五要素、拒绝未选分支内容，并把类型落 `payload.deep_read.paper_type`、生成独立 paper-type claim；新 unit 无类型不得 method_system 兜底。旧 `quick_screen.paper_type` 仅兼容读取。`kb ingest` 直接到 note prepare；`kb add` 按 `link_autodrive` 选择轻量入库+一次询问或复用完整 ingest 链。`auto_screen` 从默认值、init、配置展示与新路由中删除。
 4. **报告与产出全量投入**：周报/工作报告编辑层（"进展/问题/下一步"叙事，≈2–3 天）+ 论文大纲→初稿+引用（G1+G2，≈1.5 周）+ PPT 素材差异化（每页一结论+证据+讲述顺序，≈2 天）+ 图表提取可引用化（G7，caption/编号索引，≈3 天）。
+
+   **R3 实现锁定（2026-07-27，G7 figure references）**：每个 paper 的 `figures.yaml` 是 `figure-index/v1` SSOT，保存 source artifact digest、extraction settings、逻辑 entry 与内容哈希 asset binding；paper `payload.figures` 只机械投影 index artifact/digest、available ref keys 和 Agent 选择的 `key_figure_refs`，不得复制另一套 caption 数据。稳定 key 优先绑定论文 id + 类型 + 规范化 caption 编号（`fig:<paper-id>:fig:<number>` / `...:tbl:<number>`）；确实无编号时使用 page + caption digest 的显式 fallback。重复 panel/continued caption 合并为一个逻辑 entry 并可挂多个 asset；同 key 不同 caption/类型冲突 fail closed。crop 文件按 PNG sha256 落 `figures/assets/<sha256>.png`，遍历顺序和重跑不改变 ref key 或 asset path。
+
+   caption/编号/页码/图像哈希是机械事实；提取本身不得把所有 asset 自选成“关键图”，不得改写已有判断 claim，也不得把整篇 paper confirmation 降为 pending。Agent 只在需要写作的 claim/草稿中显式选择 figure ref，该选择随相应 judgement ConfirmationReceipt 一起确认。所有消费端先重验 source/index/asset bytes：索引 caption/ref key 进入 find，Obsidian 和 report/draft 只展示 current entry；asset 缺失/篡改、source 或 index digest 漂移均 fail closed，不回退到 traversal filename。旧 figures shape 只可读为未绑定历史提示，重新 extract 后才获得正式稳定引用。
 
 ## 12. 对 v1 蓝图的修订
 
