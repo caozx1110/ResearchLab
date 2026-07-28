@@ -1,11 +1,5 @@
 from __future__ import annotations
 
-import ast
-import os
-import subprocess
-import sys
-from pathlib import Path
-
 from repo_paths import REPO_ROOT
 
 from research.analyzer_registry import UNIT_ANALYZER_ROUTES
@@ -37,16 +31,9 @@ def test_unit_analyzer_registry_owns_every_canonical_implementation() -> None:
         assert route.owner in implementation.read_text(encoding="utf-8")
 
 
-def test_old_analyzer_paths_are_thin_compatibility_launchers() -> None:
-    for kind, owner in LEGACY_OWNER_BY_KIND.items():
-        launcher = REPO_ROOT / ".agents" / "skills" / owner / "scripts" / f"{kind}.py"
-        text = launcher.read_text(encoding="utf-8")
-        tree = ast.parse(text)
-        functions = [node.name for node in tree.body if isinstance(node, ast.FunctionDef)]
-        assert functions == ["main"]
-        assert "runpy.run_path" in text
-        assert '"unit-analyst" / "scripts"' in text
-        assert len(text.splitlines()) <= 15
+def test_old_analyzer_resource_directories_are_removed() -> None:
+    for owner in LEGACY_OWNER_BY_KIND.values():
+        assert not (REPO_ROOT / ".agents" / "skills" / owner).exists()
 
 
 def test_runtime_routes_do_not_reintroduce_legacy_script_paths() -> None:
@@ -59,29 +46,3 @@ def test_runtime_routes_do_not_reintroduce_legacy_script_paths() -> None:
         assert legacy_paths.isdisjoint(text.split())
         for legacy_path in legacy_paths:
             assert legacy_path not in text
-
-
-def test_legacy_launchers_forward_to_the_same_cli() -> None:
-    environment = {
-        **os.environ,
-        "PYTHONDONTWRITEBYTECODE": "1",
-        "RESEARCH_NO_MANAGED_VENV": "1",
-        "RESEARCH_PYTHON": sys.executable,
-    }
-    for kind, owner in LEGACY_OWNER_BY_KIND.items():
-        canonical = REPO_ROOT / UNIT_ANALYZER_ROUTES[kind].script
-        legacy = REPO_ROOT / ".agents" / "skills" / owner / "scripts" / f"{kind}.py"
-        results = [
-            subprocess.run(
-                [sys.executable, str(script), "--help"],
-                cwd=REPO_ROOT,
-                env=environment,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            for script in (canonical, legacy)
-        ]
-        assert [result.returncode for result in results] == [0, 0]
-        assert results[0].stdout == results[1].stdout
-        assert results[0].stderr == results[1].stderr

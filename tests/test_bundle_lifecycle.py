@@ -338,9 +338,9 @@ def test_clean_install_ships_only_runtime_allowlist(tmp_path: Path) -> None:
         "dataset": "dataset-analyst",
         "blog": "blog-analyst",
     }.items():
-        compatibility_launcher = f".agents/skills/{owner}/scripts/{kind}.py"
-        assert compatibility_launcher in installed
-        assert "runpy.run_path" in (workspace / compatibility_launcher).read_text(encoding="utf-8")
+        legacy_path = f".agents/skills/{owner}/scripts/{kind}.py"
+        assert legacy_path not in installed
+        assert not (workspace / ".agents" / "skills" / owner).exists()
     assert not (workspace / ".agents" / "lib" / "research" / "tests").exists()
     assert not (workspace / ".agents" / "skills" / "skill-evolution-advisor" / "scripts" / "eval_research_value.py").exists()
     assert not any("/tests/" in rel for rel in installed)
@@ -354,7 +354,7 @@ def test_clean_install_ships_only_runtime_allowlist(tmp_path: Path) -> None:
     assert "更新”或“重装" in duplicate.stderr
 
 
-def test_update_replaces_legacy_analyzer_implementations_with_launchers(
+def test_update_removes_legacy_analyzer_resource_directories(
     tmp_path: Path,
 ) -> None:
     ws_sync = _load_ws_sync()
@@ -404,6 +404,8 @@ def test_update_replaces_legacy_analyzer_implementations_with_launchers(
         (workspace / ".agents" / ".install-manifest.json").read_text(encoding="utf-8")
     )
     assert not any("unit-analyst/scripts" in relative for relative in old_manifest["files"])
+    for kind, owner in owners.items():
+        assert f".agents/skills/{owner}/scripts/{kind}.py" in old_manifest["files"]
 
     update_args = SimpleNamespace(
         repo=str(_project_root()),
@@ -427,11 +429,11 @@ def test_update_replaces_legacy_analyzer_implementations_with_launchers(
     )
     for kind, owner in owners.items():
         canonical = f".agents/skills/unit-analyst/scripts/{kind}.py"
-        launcher = f".agents/skills/{owner}/scripts/{kind}.py"
+        legacy_path = f".agents/skills/{owner}/scripts/{kind}.py"
         assert canonical in updated_manifest["files"]
-        assert launcher in updated_manifest["files"]
+        assert legacy_path not in updated_manifest["files"]
         assert (workspace / canonical).read_bytes() == (_project_root() / canonical).read_bytes()
-        assert "runpy.run_path" in (workspace / launcher).read_text(encoding="utf-8")
+        assert not (workspace / ".agents" / "skills" / owner).exists()
 
 
 def test_fresh_install_rejects_unverified_existing_managed_block(tmp_path: Path) -> None:

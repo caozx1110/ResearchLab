@@ -24,7 +24,7 @@ description: 统一分析 paper、repo、dataset、blog 与技术笔记 unit；�
 | `dataset` | `.agents/skills/unit-analyst/scripts/dataset.py` | Agent 填 `positioning / composition / schema_access / suitability_risks`；每项引用冻结数据卡或 parse-cache。 |
 | `blog` / human note | `.agents/skills/unit-analyst/scripts/blog.py` | Agent 填 `positioning / key_points / credibility / reusable_explanation`；每项引用冻结 HTML、Markdown 或 parse-cache。 |
 
-四个 canonical implementation 都归属本 skill；其持久协议 owner 仍分别是 `paper-analyst`、`repo-analyst`、`dataset-analyst`、`blog-analyst`。不要迁名这些逻辑身份，也不要复制一层 facade receipt。旧目录中的同名文件只是在当前 RC 升级窗口兼容历史命令，不是新调用入口。
+四个 canonical implementation 都归属本 skill；其持久协议 owner 仍分别是 `paper-analyst`、`repo-analyst`、`dataset-analyst`、`blog-analyst`。不要迁名这些逻辑身份，也不要复制一层 facade receipt。旧四个 skill 资源目录已删除；这些 owner 名只作为 record、preference、journal、receipt、provenance 与 diagnostic 的持久协议身份保留。
 
 ## Agent 流程
 
