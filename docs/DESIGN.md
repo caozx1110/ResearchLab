@@ -32,6 +32,8 @@ release bundle                 installed workspace
 
 Release bundle 不包含任何私有 `kb/`。安装、更新、storage sync 和卸载必须保持数据边界：workspace 的 `kb/` 永不成为发布内容，storage sync 不改 `.agents/**` 或根 `AGENTS.md`。
 
+维护者本地 `dev-docs/` 同样不属于 Git 或 release bundle。它只保存 SSOT 草案、backlog、一次性施工 handoff 和历史审查原始记录；稳定设计必须同步到本文件、根开发规则、共享 schema 或 changelog 后才算进入公共合同。历史记录中的旧路径和旧测试数不代表当前布局。
+
 安装与管理员自动化是产品唯一的技术 bootstrap 面。安装完成后，普通用户的 runtime 合同只有自然语言与 16 个 `kb <verb>` 伪 CLI；内部 flags、scripts、环境变量和 paths 只属于 Agent 私有协议或管理员参考，不得变成日常使用前置。
 
 ## Skill 路由
