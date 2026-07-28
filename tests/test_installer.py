@@ -673,7 +673,7 @@ def test_agent_plan_core_runtime_probe_catches_yaml_only_environment(tmp_path: P
     planned, plan = _plan_from_source(_project_root(), workspace, plan_path, env=env)
 
     assert planned.returncode == 0, planned.stdout + planned.stderr
-    assert "首次使用时会自动准备" in planned.stderr
+    assert "安装检查会尝试准备" in planned.stderr
     runtime = plan["conditional_runtime_changes"]
     assert len(runtime) == 1
     assert runtime[0]["path"] == str(workspace / ".venv")
@@ -1415,7 +1415,7 @@ def test_missing_system_yaml_continues_to_managed_runtime_fallback(tmp_path: Pat
     result = _run_dry_install(tmp_path)
 
     assert result.returncode == 0, result.stderr
-    assert "首次使用时会自动准备" in result.stderr
+    assert "安装检查会尝试准备" in result.stderr
     assert "pip install" not in result.stderr
 
 
