@@ -65,7 +65,7 @@ kb --agent-protocol n.json ingest \
 
 | 动词 | owner / 语义 |
 |---|---|
-| help / doctor / update / obsidian | kb-cli 内置；doctor/update/status 类检查保持只读 |
+| help / doctor / update / obsidian | kb-cli 内置；help/doctor 在 core runtime 缺失时仍走 stdlib-only 只读救援，doctor/update/status 类检查保持只读 |
 | init | knowledge-base-manager + research-config-manager |
 | status / next | knowledge-base-manager + research-orchestrator；公开 next ≤3 步 |
 | find | knowledge-base-manager；公开 ≤5 段，私有 formal/navigation 分 lane |
@@ -78,7 +78,7 @@ kb --agent-protocol n.json ingest \
 
 ## 5. 恢复与偏好
 
-- `kb resume` 只恢复 journal 中断操作；`kb undo` 撤最近可逆操作并公开点名安全对象；`kb restore` 无编号只读列最近编号，有编号恢复到该操作前。随后用 `kb status` 核对。
+- `kb resume` 只恢复 journal 中断操作；`kb undo` 撤最近可逆操作并公开点名安全对象；`kb restore` 无编号只读列最近编号，有编号恢复到该操作前。内部不可单选的记账操作仍由完整恢复链自动处理，不要把它们展示给用户。随后用 `kb status` 核对。
 - 用户明确纠正或连续同形修改时，私下记录短逐字 observation + exact skill/operation 为 pending；任务尾最多问 2 条“要记住吗”。确认/忽略只走 §2 snapshot，禁止直调 learning review/promote。
 
 ## 6. 交互章程（10 条）

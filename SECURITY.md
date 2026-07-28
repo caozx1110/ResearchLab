@@ -14,7 +14,7 @@ Include the affected commit or release candidate, operating system, minimal repr
 
 ## Security and governance invariants
 
-- AI cannot confirm its own judgement.
+- AI cannot confirm its own judgement. Signer normalization rejects generic AI/tool identities, localized AI markers, and model-name/version-only compounds; this heuristic is defense in depth and does not replace current-message authorization.
 - Judgement confirmation requires substantive content, evidence, a non-AI signer, and authorization from the current user interaction.
 - Confirmation is bound to current content and evidence digests; mutation invalidates stale receipts.
 - Raw source and complete parse caches are immutable derived evidence.

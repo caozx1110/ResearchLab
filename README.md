@@ -71,7 +71,7 @@ For the one-time guided setup, from this repository:
 bash install.sh
 ```
 
-The guided installer recommends a project-scoped copy into a workspace root. It does not install into `kb/`, and updates or uninstalls preserve existing research data. A compatible Python runtime is reused when available; otherwise the workspace prepares an isolated managed runtime when first needed. Normal `kb` calls do not install packages into a shared interpreter.
+The guided installer recommends a project-scoped copy into a workspace root. It does not install into `kb/`, and updates or uninstalls preserve existing research data. A compatible Python runtime is reused when available; otherwise the workspace prepares an isolated managed runtime when first needed. Normal `kb` calls do not install packages into a shared interpreter. If an offline machine cannot prepare dependencies, the installed files are retained with an explicit warning; `kb help` and `kb doctor` remain read-only and available, and the installation guide documents mirror, wheelhouse, and shipped-requirements recovery.
 
 Read [docs/INSTALL.md](docs/INSTALL.md) for guided setup. Its flags, explicit paths, update, uninstall, and automation sections are administrator reference, not steps for everyday research use.
 

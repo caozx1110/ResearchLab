@@ -150,6 +150,8 @@ confirmed or rejected
 
 Receipt 不改变原 epistemic type，也不回写 canonical claim 的 verify-time pending 字段：确认权威是 top-level current receipt，consumer 只把其覆盖且证据仍 current 的 claim 投影为已确认。若为显示状态而改 claim bytes，会让 verification/content digest 与 receipt 立即失效。内容或 evidence 改变时，旧 receipt 失效；公开层引导 Agent 基于当前材料重新核验，只有核验通过的新版判断才重新进入人类确认，不向用户暴露内部状态名。事实批量确认与判断逐项确认可以有不同 UX，但都不得自签。
 
+AI signer 判定是 fail-closed 的 defense-in-depth heuristic，不是身份认证。输入先做 Unicode NFKC/casefold；通用 AI/tool token、中文 AI 产品/助手 marker、以及只由模型名、版本号和 release variant 组成的复合身份都拒绝，因此完整模型名不能借组合绕过 exact-name denylist。模型 token 后出现额外可能真人姓名时保留通过（如 `Claude Martin`），但仍必须同时满足当前消息授权、evidence、实质与 receipt currentness。`kb init` 的默认确认人和确认消费面使用同一 predicate。
+
 公开 review 将治理档允许的可确认对象复制到私有一次性 token registry。strict 固定 3 条/24 小时；personal 默认 10 条且有效期可在 1..168 小时配置。profile、item limit 与 expiry 在展示时冻结，apply 不重读配置；读取与应用时在锁内清理超过宽限期的已过期/已消费普通文件，并拒绝 symlink 或越界对象。对话内可以逐项处理；无插件 Obsidian 往返使用同一冻结批次，checkbox 只是意图草稿。Agent 必须复述完整批次并用当前消息授权绑定 preview decision digest；confirm 另需真实 signer 与 evidence，reject/defer 也不能仅凭文件变化自动执行。跨 owner apply 在一个 root transaction 中全量预检、复验、应用和消费，任何失败整批回滚。registry/sheet 读写逐层使用 no-follow directory descriptor，防止中间目录 swap 将访问重定向到 workspace 外。失败分为已处理、已过期、正文变化、授权预览过时、未知或被篡改等自然语言恢复路径。
 
 观察式偏好也是这个统一 review 的对象。Agent 只记录带逐字用户纠正和精确 skill/operation scope 的 pending observation，任务尾最多展示两条；旧的 direct review/promotion API 对偏好零写拒绝。确认时 learning receipt 与 derived runtime item 在一个 root transaction 写入，receipt 绑定正文、observation、scope 与原 learning bytes；eligible view 每次重验 current learning/receipt/runtime binding，legacy、伪签、重复或漂移项只保留历史，不跨任务生效。
@@ -220,7 +222,7 @@ Dispatcher 只在 owner 已返回非零结果之后尝试捕获，并且只交�
 4. 成功后提交 journal；失败留下可恢复状态；
 5. checkpoint 只接收本次 operation targets。
 
-禁止空 scope fallback，也禁止 `git add -A`。Manual checkpoint 先查询 dirty KB paths；clean state 是成功 no-op。Resume、undo、restore 只处理 journal 中记录的路径。
+禁止空 scope fallback，也禁止 `git add -A`。Manual checkpoint 先查询 dirty KB paths；clean state 是成功 no-op。Resume、undo、restore 只处理 journal 中记录的路径。公开 undo/restore 候选只包含未消费的 undoable business root，但真正 rewind 从选中 root 起遍历全部 changed committed roots，包括不可单选的内部记账、旧 recovery 和已经消费的 business root；child mutation 只由 authoritative root before-image 恢复。完整 target union 在任何写入前锁定并逆序证明 digest 链，链不连续时以未记账修改或日志损坏中性分类 fail closed。
 
 ## Runtime bootstrap
 
@@ -228,9 +230,10 @@ Bootstrap 的优先级是：
 
 1. 已激活并兼容的 managed workspace runtime；
 2. 当前兼容解释器；
-3. 需要时创建或修复 workspace-local managed environment。
+3. 安全 PATH 中 workspace 外、稳定且完整 core-ready 的解释器；
+4. 需要时创建或修复 workspace-local managed environment。
 
-普通调用不得向任意 shared interpreter 执行 package install。只有明确归属 workspace 的 managed environment 才能由 bootstrap 补齐依赖。Human-facing bootstrap error 仍遵守对话契约，不泄漏内部命令或绝对路径。
+普通调用不得向任意 shared interpreter 执行 package install。只有明确归属 workspace 的 managed environment 才能由 bootstrap 补齐依赖。核心 hard imports 是 `yaml`、`markdownify`、`bs4`，随安装分发的 `.agents/requirements.txt` 提供完整锁。`kb help` 与 `kb doctor` 是 stdlib-only、只读的冷启动救援面：没有任何兼容解释器时也不创建 venv、不调用 pip，doctor 如实说明 runtime incomplete 并把命令级恢复交给安装文档/Agent。installer 可显式尝试 provision；离线失败时保留已安装文件并给出诚实 warning，而不是让安装与 doctor 形成重试循环。Human-facing bootstrap error 仍遵守对话契约，不泄漏内部命令或绝对路径。
 
 ## 来源感知更新
 

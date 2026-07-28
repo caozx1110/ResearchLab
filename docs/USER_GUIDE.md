@@ -274,7 +274,7 @@ Run log 是事实；diagnosis 是推断，默认待确认。报告系统从 prog
 
 诊断资料只保存在本地，没有后台 telemetry 或自动上传。生成脱敏导出预览需要你在当前消息中明确授权；D1 不负责上传第三方 issue tracker。默认不会包含论文原文、逐字 evidence、用户消息、绝对路径、环境变量、secret 或完整 traceback，记录也不会自动修改 skill、roadmap 或研究结论。
 
-普通 `kb doctor` 仍只显示简短的运行能力结果。由 Agent 执行健康检查时，它可以私下读取当前诊断模式和机械 audit 计数，再用中文解释；公开面保持十六个动词，不增加 `lint` 或 `diagnostics` 入口。
+普通 `kb doctor` 仍只显示简短的运行能力结果。即使首次安装时因为无网或镜像不可用而缺少核心依赖，`kb help` 与 `kb doctor` 也保持只读可用，不会为了诊断再次创建环境或运行 pip；doctor 会如实说明 runtime 尚未就绪，由 Agent 按安装文档的离线恢复步骤处理。由 Agent 执行完整健康检查时，它可以私下读取当前诊断模式和机械 audit 计数，再用中文解释；公开面保持十六个动词，不增加 `lint` 或 `diagnostics` 入口。
 
 ## 进一步阅读
 

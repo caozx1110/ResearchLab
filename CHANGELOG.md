@@ -4,6 +4,12 @@ All notable changes to this project will be documented here. The format follows 
 
 ## [Unreleased]
 
+### Fixed (R27 adversarial closure, 2026-07-28)
+
+- Historical restore and repeated undo now separate public undoable business candidates from the complete committed-root rewind chain. Interleaved non-undoable bookkeeping, prior recovery roots, and already-consumed business roots are replayed internally while descendants remain covered by their authoritative root before-image; unjournaled changes still fail closed with a neutral chain-integrity error.
+- `kb help` and `kb doctor` remain dependency-free, read-only rescue surfaces when no core-ready Python exists. Offline installer bootstrap failure now preserves the installed files, reports runtime incompleteness honestly, and ships an exact `.agents/requirements.txt` lock with documented mirror/wheelhouse recovery instead of creating a doctor/install retry loop.
+- Confirmation signer normalization now rejects compound model-only identities, common localized AI identities, and Kimi/Devin/Cursor-style tool names both during `kb init` and default-signer fallback, while retaining the explicit human-name exception and all independent evidence/authorization/receipt gates.
+
 ### Changed (post-campaign resource consolidation, 2026-07-28)
 
 - `unit-analyst` now physically owns the canonical paper, repository, dataset, and blog analyzer scripts as well as the discoverable routing surface. All current runtime navigation uses one kind registry under the shared library.

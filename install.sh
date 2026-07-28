@@ -1148,10 +1148,10 @@ preflight_yaml() {
     fi
   fi
   if [ "${RESEARCH_NO_MANAGED_VENV:-}" = "1" ]; then
-    die "已关闭自动运行环境，但所选 Python 缺少完整核心依赖；请先安装 requirements.txt 中的依赖"
+    die "已关闭自动运行环境，但所选 Python 缺少完整核心依赖；请先让 Agent 按安装说明准备完整运行环境"
   fi
   RUNTIME_BOOTSTRAP_NEEDED=1
-  note "Python 依赖尚未就绪；首次使用时会自动准备，无需手动处理。" >&2
+  note "Python 依赖尚未就绪；安装检查会尝试准备，离线失败时将保留文件并给出恢复提示。" >&2
 }
 
 canonical_runtime_python() {
