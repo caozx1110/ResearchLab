@@ -3850,6 +3850,7 @@ def test_kb_review_apply_atomically_handles_three_decisions_across_owners(
     assert "已应用 3 条拍板结果（原子批量）" in public.out
     assert "已确认" in public.out and "已拒绝" in public.out and "已暂缓" in public.out
     assert load_yaml(unit_path)["confirmation_status"] == "confirmed"
+    assert load_yaml(unit_path)["confirmation"]["method"] == "kb review"
     assert load_yaml(program_path)["items"][0]["confirmation_status"] == "rejected"
     assert load_yaml(method_path)["confirmation_status"] == "pending_user_confirmation"
     token = protocol["next_actions"][0]["apply"]["snapshot_token"]

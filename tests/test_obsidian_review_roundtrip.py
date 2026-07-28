@@ -767,6 +767,7 @@ def test_kb_cli_exports_previews_and_atomically_applies_once(
     assert record.read_bytes() != canonical_before
     confirmed = load_yaml(record, default={})
     assert confirmed["confirmation_status"] == "confirmed"
+    assert confirmed["confirmation"]["method"] == "kb review"
     batch_registry = json.loads(
         (tmp_path / f"kb/.runtime/review-batches/{batch_ref}.json").read_text(encoding="utf-8")
     )

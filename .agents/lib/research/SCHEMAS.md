@@ -108,7 +108,7 @@ confirmation:                        # 仅在人工确认为 confirmed 时写入
   by: ''                             # 确认人（--confirmed-by 或 identity.default_confirmed_by，非空）
   at: ''                             # UTC iso
   evidence: []                       # 证据 kb-path / 用户原话（--evidence，至少一条）
-  method: cli                        # 确认渠道，如 'kb.py promote' / 'paper.py confirm'
+  method: cli                        # 确认入口/owner method；generic dialogue/Obsidian unit review 均为 'kb review'
   decision: confirmed                # 本 receipt 对应的用户决定
   subject:                           # 确认对象身份
     kind: paper

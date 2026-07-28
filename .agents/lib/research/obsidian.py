@@ -29,7 +29,7 @@ from .yaml_io import dump_yaml, load_yaml, write_text_if_changed, write_yaml_if_
 
 
 OBSIDIAN_PROJECTION_SCHEMA = "research-kb-obsidian/v1"
-OBSIDIAN_RENDERER_REVISION = 9
+OBSIDIAN_RENDERER_REVISION = 10
 MANIFEST_NAME = "manifest.yaml"
 HUMAN_DIRS = ("inbox", "annotations")
 UNIT_HEADINGS = frozenset(
@@ -356,9 +356,21 @@ def _analysis_stage_label(stage: str, *, zh: bool = False) -> str:
     return labels.get(stage, stage.replace("_", " ").capitalize())
 
 
-def _display_summary(record: dict[str, Any], *, zh: bool = False) -> str:
+def _display_summary(record: dict[str, Any], analysis_stage: str, *, zh: bool = False) -> str:
     summary = _single_line(record.get("summary"))
     if not summary or re.fullmatch(r"Lightweight \w+ intake for `?.+?`?\.", summary):
+        if analysis_stage == "awaiting_confirmation":
+            return _t(
+                zh,
+                "Evidence-backed claims are recorded below and await human confirmation.",
+                "下方已记录有逐字证据支持的判断，正在等待人工确认。",
+            )
+        if analysis_stage == "evidence_recorded":
+            return _t(
+                zh,
+                "Evidence-backed claims and their supporting quotes are available below.",
+                "下方已列出有逐字证据支持的判断及其证据。",
+            )
         return _t(
             zh,
             "The material is safely archived and readable. AI analysis has not been completed yet.",
@@ -700,7 +712,7 @@ def _render_unit_page(
         "source_path": f"units/{UNIT_KIND_DIRS.get(str(record.get('kind') or ''), '')}/{unit_id}/record.yaml",
     }
     properties.update(_flat_relation_properties(unit_id, outgoing, incoming, records_by_id))
-    summary = _display_summary(record, zh=zh)
+    summary = _display_summary(record, analysis_stage, zh=zh)
     concept_sections = _render_concept_sections(record, records_by_id, zh=zh)
     source_uri = _single_line(source.get("original_uri"))
     source_document = _source_document_link(project_root, source, zh=zh)

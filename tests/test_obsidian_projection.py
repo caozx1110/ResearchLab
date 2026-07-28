@@ -448,6 +448,70 @@ def test_pending_record_without_claims_is_awaiting_analysis_not_human_confirmati
     }
 
 
+@pytest.mark.parametrize(
+    ("record_status", "claim_status", "stage", "expected_summary"),
+    [
+        (
+            "pending_user_confirmation",
+            "pending_user_confirmation",
+            "awaiting_confirmation",
+            "下方已记录有逐字证据支持的判断，正在等待人工确认。",
+        ),
+        (
+            "confirmed",
+            "pending_user_confirmation",
+            "evidence_recorded",
+            "下方已列出有逐字证据支持的判断及其证据。",
+        ),
+    ],
+)
+def test_empty_summary_fallback_matches_analysis_stage(
+    tmp_path: Path,
+    record_status: str,
+    claim_status: str,
+    stage: str,
+    expected_summary: str,
+) -> None:
+    write_yaml_if_changed(
+        tmp_path / "kb/config/user-profile.yaml",
+        {"preferences": {"language_preference": "zh-CN"}},
+    )
+    record = default_record("repo", title="Stage-consistent summary", maturity="complete")
+    record["id"] = "r-summary-stage-12345678"
+    record["status"] = "active"
+    record["summary"] = ""
+    record["confirmation_status"] = record_status
+    record["needs_human_confirmation"] = record_status == "pending_user_confirmation"
+    record["payload"]["claims"] = [
+        {
+            "id": "claim-summary-stage",
+            "text": "This claim has a verbatim source quote.",
+            "claim_type": "fact",
+            "confirmation_status": claim_status,
+            "evidence_refs": [
+                {
+                    "source_unit_id": "r-summary-stage-12345678",
+                    "artifact": "record.yaml",
+                    "locator": "record",
+                    "quote": "Stage-consistent summary",
+                }
+            ],
+        }
+    ]
+    if record_status == "confirmed":
+        record["confirmation"] = {"claim_ids": ["claim-summary-stage"]}
+    write_yaml_if_changed(record_path(tmp_path, "repo", record["id"]), record)
+
+    update_obsidian_projection(tmp_path)
+
+    page = (
+        obsidian_managed_root(tmp_path) / "units/r-summary-stage-12345678.md"
+    ).read_text(encoding="utf-8")
+    assert f"analysis_stage: {stage}" in page
+    assert expected_summary in page
+    assert "AI 尚未完成内容分析" not in page
+
+
 def test_chinese_profile_localizes_projection_and_repo_quick_access(tmp_path: Path) -> None:
     write_yaml_if_changed(
         tmp_path / "kb/config/user-profile.yaml",
