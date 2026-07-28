@@ -19,8 +19,8 @@ SKILL_SCRIPTS = {
 }
 
 IMPLEMENTATION_DOCS = {
-    "dataset-analyst": ("dataset.py", "unit-analyst"),
-    "paper-analyst": ("paper.py", "unit-analyst"),
+    "unit-analyst": ("dataset.py", "unit-analyst"),
+    "unit-analyst-paper": ("paper.py", "unit-analyst"),
 }
 
 
@@ -71,7 +71,7 @@ def test_skill_docs_only_reference_argparse_subcommands() -> None:
         documented = _documented_subcommands(skill, script_name)
         argparse_subcommands = _argparse_subcommands(skill, script_name)
         assert documented <= argparse_subcommands, f"{skill}: {sorted(documented - argparse_subcommands)}"
-    for skill, (script_name, doc_skill) in IMPLEMENTATION_DOCS.items():
-        documented = _documented_subcommands(skill, script_name, doc_skill=doc_skill)
-        argparse_subcommands = _argparse_subcommands(skill, script_name)
-        assert documented <= argparse_subcommands, f"{skill}: {sorted(documented - argparse_subcommands)}"
+    for label, (script_name, doc_skill) in IMPLEMENTATION_DOCS.items():
+        documented = _documented_subcommands(label, script_name, doc_skill=doc_skill)
+        argparse_subcommands = _argparse_subcommands("unit-analyst", script_name)
+        assert documented <= argparse_subcommands, f"{label}: {sorted(documented - argparse_subcommands)}"

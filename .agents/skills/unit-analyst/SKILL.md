@@ -19,12 +19,12 @@ description: 统一分析 paper、repo、dataset、blog 与技术笔记 unit；�
 
 | kind | 内部 implementation | Agent 填写契约 |
 |---|---|---|
-| `paper` | `.agents/skills/paper-analyst/scripts/paper.py` | Agent 选择 `method_system / benchmark / survey`，填写类型理由与对应五要素；类型和每个要素都需逐字 evidence。未选分支保持空。 |
-| `repo` | `.agents/skills/repo-analyst/scripts/repo.py` | 机械 structure scan 后，Agent 填 `capability / reuse_points / entry_map`；每项引用本地冻结源码的真实 `file:line`。 |
-| `dataset` | `.agents/skills/dataset-analyst/scripts/dataset.py` | Agent 填 `positioning / composition / schema_access / suitability_risks`；每项引用冻结数据卡或 parse-cache。 |
-| `blog` / human note | `.agents/skills/blog-analyst/scripts/blog.py` | Agent 填 `positioning / key_points / credibility / reusable_explanation`；每项引用冻结 HTML、Markdown 或 parse-cache。 |
+| `paper` | `.agents/skills/unit-analyst/scripts/paper.py` | Agent 选择 `method_system / benchmark / survey`，填写类型理由与对应五要素；类型和每个要素都需逐字 evidence。未选分支保持空。 |
+| `repo` | `.agents/skills/unit-analyst/scripts/repo.py` | 机械 structure scan 后，Agent 填 `capability / reuse_points / entry_map`；每项引用本地冻结源码的真实 `file:line`。 |
+| `dataset` | `.agents/skills/unit-analyst/scripts/dataset.py` | Agent 填 `positioning / composition / schema_access / suitability_risks`；每项引用冻结数据卡或 parse-cache。 |
+| `blog` / human note | `.agents/skills/unit-analyst/scripts/blog.py` | Agent 填 `positioning / key_points / credibility / reusable_explanation`；每项引用冻结 HTML、Markdown 或 parse-cache。 |
 
-四个 implementation namespace 是持久协议身份，不是可发现 skill。不要把它们迁名为 `unit-analyst`，也不要复制一层 facade receipt。
+四个 canonical implementation 都归属本 skill；其持久协议 owner 仍分别是 `paper-analyst`、`repo-analyst`、`dataset-analyst`、`blog-analyst`。不要迁名这些逻辑身份，也不要复制一层 facade receipt。旧目录中的同名文件只是在当前 RC 升级窗口兼容历史命令，不是新调用入口。
 
 ## Agent 流程
 

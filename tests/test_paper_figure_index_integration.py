@@ -20,7 +20,7 @@ from research.records import kind_payload_skeleton
 
 def _paper_module():
     root = REPO_ROOT
-    path = root / ".agents" / "skills" / "paper-analyst" / "scripts" / "paper.py"
+    path = root / ".agents" / "skills" / "unit-analyst" / "scripts" / "paper.py"
     spec = importlib.util.spec_from_file_location("paper_figure_index_integration", path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)

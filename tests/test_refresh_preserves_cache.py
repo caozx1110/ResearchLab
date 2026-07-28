@@ -18,7 +18,7 @@ if str(LIB) not in sys.path:
 
 import yaml  # noqa: E402
 
-SKILL = SKILLS_ROOT / "paper-analyst" / "scripts"
+SKILL = SKILLS_ROOT / "unit-analyst" / "scripts"
 
 
 def _load(mod_path: Path, name: str):

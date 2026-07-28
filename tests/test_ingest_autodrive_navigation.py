@@ -30,7 +30,7 @@ def _load(skill: str, script_name: str, mod_name: str):
 
 
 def test_paper_next_for_agent_line_is_machine_readable(tmp_path: Path) -> None:
-    paper = _load("paper-analyst", "paper.py", "paper_nav_under_test")
+    paper = _load("unit-analyst", "paper.py", "paper_nav_under_test")
     cache = tmp_path / "kb" / "units" / "papers" / "p-demo-1234" / "parse-cache.yaml"
     fill = tmp_path / "kb" / "units" / "papers" / "p-demo-1234" / "note-fill.yaml"
     cache.parent.mkdir(parents=True, exist_ok=True)
@@ -51,7 +51,7 @@ def test_paper_next_for_agent_line_is_machine_readable(tmp_path: Path) -> None:
 
 
 def test_blog_next_for_agent_line_is_machine_readable(tmp_path: Path) -> None:
-    blog = _load("blog-analyst", "blog.py", "blog_nav_under_test")
+    blog = _load("unit-analyst", "blog.py", "blog_nav_under_test")
     cache = tmp_path / "kb" / "units" / "blogs" / "b-demo-1234" / "parse-cache.yaml"
     fill = tmp_path / "kb" / "units" / "blogs" / "b-demo-1234" / "blog-fill.yaml"
     cache.parent.mkdir(parents=True, exist_ok=True)
@@ -68,7 +68,7 @@ def test_blog_next_for_agent_line_is_machine_readable(tmp_path: Path) -> None:
 
 
 def test_repo_next_for_agent_line_is_machine_readable(tmp_path: Path) -> None:
-    repo = _load("repo-analyst", "repo.py", "repo_nav_under_test")
+    repo = _load("unit-analyst", "repo.py", "repo_nav_under_test")
     fill = tmp_path / "kb" / "units" / "repos" / "r-demo-1234" / "capability-fill.yaml"
     fill.parent.mkdir(parents=True, exist_ok=True)
 

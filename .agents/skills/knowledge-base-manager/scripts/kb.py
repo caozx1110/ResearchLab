@@ -22,6 +22,10 @@ from research.bootstrap import ensure_managed_runtime
 if __name__ == "__main__":
     ensure_managed_runtime(PROJECT_ROOT)
 
+from research.analyzer_registry import (
+    UNIT_ANALYZER_ID_ARG_BY_KIND,
+    UNIT_ANALYZER_SCRIPT_BY_KIND,
+)
 from research.common import add_project_root_argument, confirm_command, load_yaml, parse_iso_datetime, print_resolved_project_roots, shell_command, skill_script_for_command, utc_now_iso, warn_if_cwd_differs_from_project_root
 from research.index import AUDIT_CATEGORIES, AUDIT_SEVERITIES
 from research.core import (
@@ -79,18 +83,12 @@ from research.paths import (
 
 COMMAND_PREFIX = "${RESEARCH_PYTHON:-python3}"
 SCRIPT_BY_KIND = {
-    "paper": ".agents/skills/paper-analyst/scripts/paper.py",
-    "repo": ".agents/skills/repo-analyst/scripts/repo.py",
-    "dataset": ".agents/skills/dataset-analyst/scripts/dataset.py",
-    "blog": ".agents/skills/blog-analyst/scripts/blog.py",
+    **UNIT_ANALYZER_SCRIPT_BY_KIND,
     "idea": ".agents/skills/idea-workbench/scripts/idea.py",
     "experiment": ".agents/skills/experiment-workbench/scripts/experiment.py",
 }
 ID_ARG_BY_KIND = {
-    "paper": "--paper-id",
-    "repo": "--repo-id",
-    "dataset": "--dataset-id",
-    "blog": "--blog-id",
+    **UNIT_ANALYZER_ID_ARG_BY_KIND,
     "idea": "--idea-id",
     "experiment": "--experiment-id",
 }

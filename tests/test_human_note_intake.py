@@ -37,7 +37,7 @@ def _load_kb_cli():
 
 
 def _load_blog_module():
-    script = REPO_ROOT / ".agents" / "skills" / "blog-analyst" / "scripts" / "blog.py"
+    script = REPO_ROOT / ".agents" / "skills" / "unit-analyst" / "scripts" / "blog.py"
     spec = importlib.util.spec_from_file_location("blog_analyst_human_note_tests", script)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -330,7 +330,7 @@ def test_kb_ingest_private_human_note_route_prepares_blog_without_public_path_le
     ) == 0
 
     assert calls[0][1] == ("human-note", "--area", "inbox", "--filename", "My Note.md")
-    assert calls[1][0].endswith("blog-analyst/scripts/blog.py")
+    assert calls[1][0].endswith("unit-analyst/scripts/blog.py")
     assert calls[1][1] == ("complete-note", "--blog-id", "b-human-note-a1b2c3d4", "--phase", "prepare")
     public = capsys.readouterr().out
     assert "My Note.md" not in public

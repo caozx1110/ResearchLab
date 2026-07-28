@@ -464,17 +464,17 @@ def test_promote_to_confirmed_persists_confirmation_provenance(tmp_path: Path, m
 
 
 def test_confirm_scripts_require_provenance_arguments() -> None:
-    for skill, script_name in [
-        ("paper-analyst", "paper.py"),
-        ("repo-analyst", "repo.py"),
-        ("blog-analyst", "blog.py"),
-        ("experiment-workbench", "experiment.py"),
+    for owner, skill, script_name in [
+        ("paper-analyst", "unit-analyst", "paper.py"),
+        ("repo-analyst", "unit-analyst", "repo.py"),
+        ("blog-analyst", "unit-analyst", "blog.py"),
+        ("experiment-workbench", "experiment-workbench", "experiment.py"),
     ]:
         text = _script_text(skill, script_name)
         assert "confirm_unit" in text
         assert "apply_confirmation" not in text
-        assert _has_optional_arg(text, "--confirmed-by"), skill
-        assert _has_required_arg(text, "--evidence"), skill
+        assert _has_optional_arg(text, "--confirmed-by"), owner
+        assert _has_required_arg(text, "--evidence"), owner
 
     idea_text = _script_text("idea-workbench", "idea.py")
     assert "require_confirmation_provenance" in idea_text

@@ -46,9 +46,9 @@ def test_blog_next_hint_is_not_the_removed_summarize_verb() -> None:
 def test_every_next_verb_exists_on_its_analyzer() -> None:
     kb = _load_kb_module()
     verbs_by_kind = {
-        "paper": _analyzer_verbs("paper-analyst", "paper.py"),
-        "repo": _analyzer_verbs("repo-analyst", "repo.py"),
-        "blog": _analyzer_verbs("blog-analyst", "blog.py"),
+        "paper": _analyzer_verbs("unit-analyst", "paper.py"),
+        "repo": _analyzer_verbs("unit-analyst", "repo.py"),
+        "blog": _analyzer_verbs("unit-analyst", "blog.py"),
     }
     for kind, verbs in verbs_by_kind.items():
         next_verb = kb.NEXT_COMMAND_BY_KIND[kind]
@@ -59,5 +59,5 @@ def test_blog_next_command_renders_runnable_prepare() -> None:
     kb = _load_kb_module()
     record = {"id": "b-langwbc-123456", "kind": "blog"}
     command = kb.next_unit_command(record)
-    assert ".agents/skills/blog-analyst/scripts/blog.py complete-note --blog-id b-langwbc-123456" in command
+    assert ".agents/skills/unit-analyst/scripts/blog.py complete-note --blog-id b-langwbc-123456" in command
     assert "summarize" not in command

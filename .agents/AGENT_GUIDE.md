@@ -74,7 +74,7 @@ kb --agent-protocol n.json ingest \
 | recall | skill-evolution-advisor |
 | resume / undo / restore | knowledge-base-manager recovery |
 
-无新公开动词。深分析统一发现入口是 `unit-analyst`，内部仍调用 paper/repo/dataset/blog 历史 implementation；survey/concept 用 literature-synthesizer；idea/method/experiment/report/monitor/discussion 各归同名 owner。远程 repo 先在安全临时目录做只读 local snapshot；`needs_local_repo_snapshot` 后自动本地化并重试。`failed_retryable` 可安全重试；review 若还在 awaiting fill/ready-to-verify，则先 fill+verify。
+无新公开动词。深分析统一发现入口与脚本资源归属都是 `unit-analyst`；paper/repo/dataset/blog 仍保留各自历史持久 owner identity。survey/concept 用 literature-synthesizer；idea/method/experiment/report/monitor/discussion 各归同名 owner。远程 repo 先在安全临时目录做只读 local snapshot；`needs_local_repo_snapshot` 后自动本地化并重试。`failed_retryable` 可安全重试；review 若还在 awaiting fill/ready-to-verify，则先 fill+verify。
 
 ## 5. 恢复与偏好
 

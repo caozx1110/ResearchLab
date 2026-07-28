@@ -107,8 +107,8 @@ def test_query_output_helpers_emit_runnable_command_with_real_id() -> None:
     next_command = kb.next_unit_command(record)
     confirm_command = kb.confirm_command(record)
 
-    assert ".agents/skills/paper-analyst/scripts/paper.py complete-note --paper-id p-query-123456" in next_command
-    assert ".agents/skills/paper-analyst/scripts/paper.py confirm --paper-id p-query-123456" in confirm_command
+    assert ".agents/skills/unit-analyst/scripts/paper.py complete-note --paper-id p-query-123456" in next_command
+    assert ".agents/skills/unit-analyst/scripts/paper.py confirm --paper-id p-query-123456" in confirm_command
     assert "<id>" not in next_command
     assert "<id>" not in confirm_command
 
@@ -118,7 +118,7 @@ def test_kb_confirm_command_uses_shared_helper() -> None:
     record = _record("p-query-123456", "Queryable", "pending_user_confirmation", "2026-01-01T00:00:00+00:00")
 
     assert kb.confirm_command(record) == (
-        "${RESEARCH_PYTHON:-python3} .agents/skills/paper-analyst/scripts/paper.py confirm "
+        "${RESEARCH_PYTHON:-python3} .agents/skills/unit-analyst/scripts/paper.py confirm "
         "--paper-id p-query-123456 --confirmed-by ${RESEARCH_CONFIRMED_BY:?set-human-identity} "
         "--evidence ${RESEARCH_CONFIRM_EVIDENCE:?set-human-evidence}"
     )

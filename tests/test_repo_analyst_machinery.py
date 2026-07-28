@@ -46,7 +46,7 @@ def _project_root() -> Path:
 
 
 def _load_repo_module():
-    script = _project_root() / ".agents" / "skills" / "repo-analyst" / "scripts" / "repo.py"
+    script = _project_root() / ".agents" / "skills" / "unit-analyst" / "scripts" / "repo.py"
     spec = importlib.util.spec_from_file_location("repo_analyst_script_under_test", script)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -194,7 +194,7 @@ def test_scan_structure_is_mechanical_only(tmp_path: Path) -> None:
 
 def test_repo_source_has_no_capability_heuristic_symbols() -> None:
     """Anti-pattern guard: no infer_repo_roles / capability_map heuristic remains."""
-    src = (_project_root() / ".agents" / "skills" / "repo-analyst" / "scripts" / "repo.py").read_text("utf-8")
+    src = (_project_root() / ".agents" / "skills" / "unit-analyst" / "scripts" / "repo.py").read_text("utf-8")
     assert "infer_repo_roles" not in src
     assert "capability_map" not in src
 

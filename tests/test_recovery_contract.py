@@ -59,7 +59,7 @@ def _load_kb_module():
 
 
 def _load_paper_module():
-    script = _project_root() / ".agents" / "skills" / "paper-analyst" / "scripts" / "paper.py"
+    script = _project_root() / ".agents" / "skills" / "unit-analyst" / "scripts" / "paper.py"
     spec = importlib.util.spec_from_file_location("paper_script_for_checkpoint_recovery_test", script)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -87,20 +87,19 @@ def _tree_lstat_state(path: Path) -> dict[str, tuple[int, int, int, object]]:
 
 
 @pytest.mark.parametrize(
-    ("skill", "script_name"),
+    "script_name",
     [
-        ("paper-analyst", "paper.py"),
-        ("blog-analyst", "blog.py"),
-        ("dataset-analyst", "dataset.py"),
+        "paper.py",
+        "blog.py",
+        "dataset.py",
     ],
 )
 def test_analyzer_fill_checkpoint_scope_rejects_external_and_symlink_inputs(
     tmp_path: Path,
-    skill: str,
     script_name: str,
 ) -> None:
-    script = _project_root() / ".agents" / "skills" / skill / "scripts" / script_name
-    module_name = f"{skill.replace('-', '_')}_fill_scope_test"
+    script = _project_root() / ".agents" / "skills" / "unit-analyst" / "scripts" / script_name
+    module_name = f"unit_analyst_{script_name.removesuffix('.py')}_fill_scope_test"
     spec = importlib.util.spec_from_file_location(module_name, script)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)

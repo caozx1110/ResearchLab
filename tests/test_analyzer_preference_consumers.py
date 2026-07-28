@@ -165,7 +165,7 @@ def _run(case: dict[str, Any], monkeypatch: pytest.MonkeyPatch, phase: str, *, s
 def _case(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, skill: str) -> dict[str, Any]:
     root = _workspace(tmp_path)
     if skill == "repo-analyst":
-        module = _load_script(skill, "repo.py")
+        module = _load_script("unit-analyst", "repo.py")
         unit_id = "r-r11-consumer-0001"
         source_root = root / "archives" / "repo-source"
         (source_root / "src").mkdir(parents=True)
@@ -210,7 +210,7 @@ def _case(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, skill: str) -> dict[s
     else:
         kind = "dataset" if skill == "dataset-analyst" else "blog"
         filename = "dataset.py" if kind == "dataset" else "blog.py"
-        module = _load_script(skill, filename)
+        module = _load_script("unit-analyst", filename)
         unit_id = f"{'d' if kind == 'dataset' else 'b'}-r11-consumer-0001"
         record = _base_record(
             kind,

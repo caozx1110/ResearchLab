@@ -24,7 +24,7 @@ def _project_root() -> Path:
 
 
 def _load_paper_module():
-    script = _project_root() / ".agents" / "skills" / "paper-analyst" / "scripts" / "paper.py"
+    script = _project_root() / ".agents" / "skills" / "unit-analyst" / "scripts" / "paper.py"
     spec = importlib.util.spec_from_file_location("paper_containment_script_under_test", script)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)

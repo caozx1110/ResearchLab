@@ -21,7 +21,7 @@ import yaml  # noqa: E402
 
 from research.core import write_record, write_runtime_preferences, load_runtime_preferences  # noqa: E402
 
-SKILL = SKILLS_ROOT / "paper-analyst" / "scripts"
+SKILL = SKILLS_ROOT / "unit-analyst" / "scripts"
 
 
 def _paper_module():

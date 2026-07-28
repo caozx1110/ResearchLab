@@ -5964,7 +5964,7 @@ def test_kb_ingest_chains_intake_then_prepare_and_stops_before_verify(monkeypatc
     # Exactly two scriptable steps ran: intake add, then analyzer prepare. No verify.
     assert [c["script"] for c in calls] == [
         ".agents/skills/source-intake/scripts/intake.py",
-        ".agents/skills/paper-analyst/scripts/paper.py",
+        ".agents/skills/unit-analyst/scripts/paper.py",
     ]
     assert calls[0]["args"] == ("add", "--kind", "paper", "--source", "notes/demo.pdf")
     assert calls[0]["extra_env"] == {"RESEARCH_INGEST_CHAIN": "1"}
@@ -6058,7 +6058,7 @@ def test_kb_ingest_duplicate_source_ready_continues_safe_prepare(monkeypatch, tm
 
     assert [call[0] for call in calls] == [
         ".agents/skills/source-intake/scripts/intake.py",
-        ".agents/skills/paper-analyst/scripts/paper.py",
+        ".agents/skills/unit-analyst/scripts/paper.py",
     ]
     assert calls[1][1] == ("complete-note", "--paper-id", "p-demo-abcd1234", "--phase", "prepare")
     out = capsys.readouterr().out

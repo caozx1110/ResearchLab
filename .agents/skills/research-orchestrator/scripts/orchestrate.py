@@ -29,6 +29,7 @@ from research.bootstrap import ensure_managed_runtime
 if __name__ == "__main__":
     ensure_managed_runtime(PROJECT_ROOT)
 
+from research.analyzer_registry import UNIT_ANALYZER_SCRIPT_BY_KIND
 from research.common import (
     add_project_root_argument,
     append_list_item,
@@ -442,16 +443,13 @@ def route_task(task: str) -> str:
 # the unified deep-read scaffold.
 GOVERNANCE_MAX_AUTO_STEPS = {"screen", "build-index", "refresh", "generate-note"}
 ROOT_AWARE_AUTO_SCRIPTS = {
-    ".agents/skills/blog-analyst/scripts/blog.py",
-    ".agents/skills/dataset-analyst/scripts/dataset.py",
+    *UNIT_ANALYZER_SCRIPT_BY_KIND.values(),
     ".agents/skills/discussion-archivist/scripts/archive.py",
     ".agents/skills/experiment-workbench/scripts/experiment.py",
     ".agents/skills/idea-workbench/scripts/idea.py",
     ".agents/skills/knowledge-base-manager/scripts/kb.py",
     ".agents/skills/literature-synthesizer/scripts/synthesize.py",
     ".agents/skills/method-designer/scripts/method.py",
-    ".agents/skills/paper-analyst/scripts/paper.py",
-    ".agents/skills/repo-analyst/scripts/repo.py",
     ".agents/skills/research-config-manager/scripts/config.py",
     ".agents/skills/research-orchestrator/scripts/orchestrate.py",
     ".agents/skills/source-intake/scripts/intake.py",
@@ -573,7 +571,7 @@ def safe_unit_step(record: dict[str, Any]) -> dict[str, Any] | None:
                 "reason": f"unscreened paper `{unit_id}`",
                 "command_parts": [
                     COMMAND_PREFIX,
-                    ".agents/skills/paper-analyst/scripts/paper.py",
+                    UNIT_ANALYZER_SCRIPT_BY_KIND["paper"],
                     "screen",
                     "--paper-id",
                     unit_id,
@@ -589,7 +587,7 @@ def safe_unit_step(record: dict[str, Any]) -> dict[str, Any] | None:
                 "reason": f"paper `{unit_id}` needs a unified deep-read note",
                 "command_parts": [
                     COMMAND_PREFIX,
-                    ".agents/skills/paper-analyst/scripts/paper.py",
+                    UNIT_ANALYZER_SCRIPT_BY_KIND["paper"],
                     "complete-note",
                     "--paper-id",
                     unit_id,
@@ -613,7 +611,7 @@ def safe_unit_step(record: dict[str, Any]) -> dict[str, Any] | None:
                 "reason": f"repo `{unit_id}` lacks structure scan",
                 "command_parts": [
                     COMMAND_PREFIX,
-                    ".agents/skills/repo-analyst/scripts/repo.py",
+                    UNIT_ANALYZER_SCRIPT_BY_KIND["repo"],
                     "scan-structure",
                     "--repo-id",
                     unit_id,
@@ -630,7 +628,7 @@ def safe_unit_step(record: dict[str, Any]) -> dict[str, Any] | None:
                 "reason": f"repo `{unit_id}` needs an agent-filled capability map",
                 "command_parts": [
                     COMMAND_PREFIX,
-                    ".agents/skills/repo-analyst/scripts/repo.py",
+                    UNIT_ANALYZER_SCRIPT_BY_KIND["repo"],
                     "map-capability",
                     "--repo-id",
                     unit_id,
@@ -648,7 +646,7 @@ def safe_unit_step(record: dict[str, Any]) -> dict[str, Any] | None:
             "reason": f"数据集「{record.get('title') or unit_id}」（{unit_id}）已有数据卡，等待 Agent 整理有逐字证据支持的数据画像。",
             "command_parts": [
                 COMMAND_PREFIX,
-                ".agents/skills/dataset-analyst/scripts/dataset.py",
+                UNIT_ANALYZER_SCRIPT_BY_KIND["dataset"],
                 "profile",
                 "--dataset-id",
                 unit_id,
@@ -666,7 +664,7 @@ def safe_unit_step(record: dict[str, Any]) -> dict[str, Any] | None:
             "reason": f"博客「{record.get('title') or unit_id}」（{unit_id}）已有原始资料，等待 Agent 整理有逐字证据支持的摘要。",
             "command_parts": [
                 COMMAND_PREFIX,
-                ".agents/skills/blog-analyst/scripts/blog.py",
+                UNIT_ANALYZER_SCRIPT_BY_KIND["blog"],
                 "complete-note",
                 "--blog-id",
                 unit_id,

@@ -201,7 +201,7 @@ def test_real_report_consumer_is_neutral_until_selected_and_rejects_wrong_bindin
 
 def test_real_source_and_paper_consumers_do_not_direct_read_runtime_soft_preferences(tmp_path: Path) -> None:
     intake = _script("source-intake", "intake.py")
-    paper = _script("paper-analyst", "paper.py")
+    paper = _script("unit-analyst", "paper.py")
     root = _workspace(tmp_path)
     intake_args = argparse.Namespace(
         kind="paper",
@@ -1011,7 +1011,7 @@ def test_paper_operation_artifact_matrix_rejects_replay(
     operation: str,
     artifact: str,
 ) -> None:
-    paper = _script("paper-analyst", "paper.py")
+    paper = _script("unit-analyst", "paper.py")
     root, record, unit_root, source_path = _paper_workspace(tmp_path)
     args = _paper_args(operation, phase="prepare" if operation in {"screen", "complete-note"} else "")
     context = paper.paper_preference_context(root, args, record, unit_root=unit_root)
@@ -1080,7 +1080,7 @@ def test_paper_operation_argument_matrix_rejects_replay(
     field: str,
     changed_value: object,
 ) -> None:
-    paper = _script("paper-analyst", "paper.py")
+    paper = _script("unit-analyst", "paper.py")
     root, record, unit_root, _ = _paper_workspace(tmp_path)
     args = _paper_args(operation)
     context = paper.paper_preference_context(root, args, record, unit_root=unit_root)
@@ -1114,7 +1114,7 @@ def test_paper_auxiliary_input_matrix_rejects_replay(
     phase: str,
     artifact_name: str,
 ) -> None:
-    paper = _script("paper-analyst", "paper.py")
+    paper = _script("unit-analyst", "paper.py")
     root, record, unit_root, _ = _paper_workspace(tmp_path)
     artifact_path = unit_root / artifact_name
     artifact_path.write_text("original auxiliary bytes", encoding="utf-8")
@@ -1140,7 +1140,7 @@ def test_paper_verify_same_path_byte_change_fails_before_canonical_write(
     monkeypatch: pytest.MonkeyPatch,
     operation: str,
 ) -> None:
-    paper = _script("paper-analyst", "paper.py")
+    paper = _script("unit-analyst", "paper.py")
     root, record, unit_root, _ = _paper_workspace(tmp_path)
     fill_path = unit_root / "agent-fill.yaml"
     fill_path.write_text("status: original\n", encoding="utf-8")
@@ -1211,7 +1211,7 @@ def test_paper_preference_inputs_reject_symlinks(
     tmp_path: Path,
     artifact: str,
 ) -> None:
-    paper = _script("paper-analyst", "paper.py")
+    paper = _script("unit-analyst", "paper.py")
     root, record, unit_root, source_path = _paper_workspace(tmp_path)
     outside = tmp_path / f"outside-{artifact}.txt"
     outside.write_text("outside bytes", encoding="utf-8")

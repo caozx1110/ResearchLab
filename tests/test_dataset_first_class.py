@@ -48,7 +48,7 @@ def test_huggingface_dataset_url_infers_first_class_dataset() -> None:
 
 def test_dataset_profile_scaffold_and_verbatim_verification(tmp_path: Path) -> None:
     dataset = _load_script(
-        ".agents/skills/dataset-analyst/scripts/dataset.py",
+        ".agents/skills/unit-analyst/scripts/dataset.py",
         "dataset_analyst_first_class",
     )
     record = default_record(
@@ -114,7 +114,7 @@ def test_dataset_verify_checkpoints_dirty_unit_owned_fill(
     monkeypatch,
 ) -> None:
     dataset = _load_script(
-        ".agents/skills/dataset-analyst/scripts/dataset.py",
+        ".agents/skills/unit-analyst/scripts/dataset.py",
         "dataset_analyst_checkpoint_fill",
     )
     ensure_workspace(tmp_path)
@@ -255,7 +255,7 @@ def test_repo_dataset_migration_is_dry_run_then_journaled_and_undoable(tmp_path:
 
 def test_repo_html_snapshot_is_not_a_structure_scan_target(tmp_path: Path) -> None:
     repo_module = _load_script(
-        ".agents/skills/repo-analyst/scripts/repo.py",
+        ".agents/skills/unit-analyst/scripts/repo.py",
         "repo_scan_applicability_dataset_guard",
     )
     repo = default_record(

@@ -30,6 +30,7 @@ if __name__ == "__main__":
     ensure_managed_runtime(PROJECT_ROOT)
 
 from research.bibliography import citation_key_for_unit_id, normalize_arxiv_id, normalize_doi
+from research.analyzer_registry import UNIT_ANALYZER_PREPARE_BY_KIND
 from research.common import add_project_root_argument, confirm_command as shared_confirm_command, extract_pdf_record, load_yaml, parse_arxiv_id, print_resolved_project_roots, skill_script_for_command
 from research.confirm import require_user_authorization
 from research.journal import mutation_transaction
@@ -261,14 +262,9 @@ def guidance_hints(kind: str, preferences: dict, *, has_pdf: bool, note_created:
     return hints
 
 
-# kind -> (analyzer skill script, prepare verb, id flag). Used only to build the
+# kind -> (unit-analyst script, prepare verb, id flag). Used only to build the
 # machine-readable NEXT FOR AGENT navigation line (SSOT §7); no judgement here.
-ANALYZER_PREPARE: dict[str, tuple[str, str, str]] = {
-    "paper": (".agents/skills/paper-analyst/scripts/paper.py", "complete-note", "--paper-id"),
-    "repo": (".agents/skills/repo-analyst/scripts/repo.py", "map-capability", "--repo-id"),
-    "dataset": (".agents/skills/dataset-analyst/scripts/dataset.py", "profile", "--dataset-id"),
-    "blog": (".agents/skills/blog-analyst/scripts/blog.py", "complete-note", "--blog-id"),
-}
+ANALYZER_PREPARE: dict[str, tuple[str, str, str]] = dict(UNIT_ANALYZER_PREPARE_BY_KIND)
 
 
 def ingest_chain_active() -> bool:

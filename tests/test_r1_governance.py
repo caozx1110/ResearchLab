@@ -514,7 +514,7 @@ def test_program_decision_rejects_source_replaced_after_snapshot_capture(
 def test_r1_analyzer_command_failure_rolls_back_record_and_artifacts(
     tmp_path: Path, monkeypatch, skill: str
 ) -> None:
-    module = _load_skill_script(f"{skill}-analyst", f"{skill}.py")
+    module = _load_skill_script("unit-analyst", f"{skill}.py")
     record = default_record(skill, title=f"{skill} rollback", maturity="lightweight")
     if skill == "repo":
         source_repo = tmp_path / "source-repo"
@@ -554,7 +554,7 @@ def test_r1_analyzer_command_failure_rolls_back_record_and_artifacts(
 def test_r1_paper_figure_tree_rolls_back_as_one_command_scope(
     tmp_path: Path, monkeypatch
 ) -> None:
-    paper = _load_skill_script("paper-analyst", "paper.py")
+    paper = _load_skill_script("unit-analyst", "paper.py")
     record = default_record("paper", title="figure rollback", maturity="lightweight")
     path = write_record(tmp_path, record)
     loaded, located_path = locate_record(tmp_path, record["id"], kind="paper")
@@ -608,7 +608,7 @@ def test_r1_paper_figure_tree_rolls_back_as_one_command_scope(
 
 
 def test_r1_paper_parse_cache_force_never_overwrites_derived_evidence(tmp_path: Path) -> None:
-    paper = _load_skill_script("paper-analyst", "paper.py")
+    paper = _load_skill_script("unit-analyst", "paper.py")
     record = default_record("paper", title="immutable cache", maturity="lightweight")
     path = write_record(tmp_path, record)
     loaded, located_path = locate_record(tmp_path, record["id"], kind="paper")

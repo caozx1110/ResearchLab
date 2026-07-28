@@ -328,6 +328,19 @@ def test_clean_install_ships_only_runtime_allowlist(tmp_path: Path) -> None:
     assert (workspace / ".agents" / "skills" / "kb-cli" / "SKILL.md").is_file()
     assert (workspace / ".agents" / "skills" / "research-monitor" / "SKILL.md").is_file()
     assert (workspace / ".agents" / "lib" / "research" / "common.py").is_file()
+    for kind in ("paper", "repo", "dataset", "blog"):
+        canonical = f".agents/skills/unit-analyst/scripts/{kind}.py"
+        assert canonical in installed
+        assert (workspace / canonical).is_file()
+    for kind, owner in {
+        "paper": "paper-analyst",
+        "repo": "repo-analyst",
+        "dataset": "dataset-analyst",
+        "blog": "blog-analyst",
+    }.items():
+        compatibility_launcher = f".agents/skills/{owner}/scripts/{kind}.py"
+        assert compatibility_launcher in installed
+        assert "runpy.run_path" in (workspace / compatibility_launcher).read_text(encoding="utf-8")
     assert not (workspace / ".agents" / "lib" / "research" / "tests").exists()
     assert not (workspace / ".agents" / "skills" / "skill-evolution-advisor" / "scripts" / "eval_research_value.py").exists()
     assert not any("/tests/" in rel for rel in installed)

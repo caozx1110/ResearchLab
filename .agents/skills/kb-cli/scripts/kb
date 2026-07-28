@@ -42,6 +42,7 @@ from research.bootstrap import (
 if __name__ == "__main__":
     ensure_managed_runtime(DEFAULT_PROJECT_ROOT)
 
+from research.analyzer_registry import UNIT_ANALYZER_PREPARE_BY_KIND
 from research.common import current_runtime_capabilities, exclusive_file_lock, find_project_root, load_yaml
 from research.context_pack import build_context_pack
 from research.core import (
@@ -2667,12 +2668,7 @@ INGEST_GOVERNANCE_MAX_AUTO_STEPS = frozenset({"ingest", "build-index", "refresh"
 # Ordered ingest chain: (step, gating scope token). intake landing is a
 # "ingest"-class safe step; prepare (fillable skeleton) is a "generate-note"-class
 # safe step. Walk in order; a narrowed scope stops the chain at the first gap.
-INGEST_ANALYZER: dict[str, tuple[str, str, str]] = {
-    "paper": (".agents/skills/paper-analyst/scripts/paper.py", "complete-note", "--paper-id"),
-    "repo": (".agents/skills/repo-analyst/scripts/repo.py", "map-capability", "--repo-id"),
-    "dataset": (".agents/skills/dataset-analyst/scripts/dataset.py", "profile", "--dataset-id"),
-    "blog": (".agents/skills/blog-analyst/scripts/blog.py", "complete-note", "--blog-id"),
-}
+INGEST_ANALYZER: dict[str, tuple[str, str, str]] = dict(UNIT_ANALYZER_PREPARE_BY_KIND)
 
 
 def effective_ingest_scope(root: Path) -> set[str]:

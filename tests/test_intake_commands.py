@@ -163,7 +163,7 @@ def test_intake_confirm_command_contains_created_record_id() -> None:
 
     command = intake.confirm_command({"kind": "repo", "id": "r-openvla-12345678"})
 
-    assert ".agents/skills/repo-analyst/scripts/repo.py confirm --repo-id r-openvla-12345678" in command
+    assert ".agents/skills/unit-analyst/scripts/repo.py confirm --repo-id r-openvla-12345678" in command
     assert "<id>" not in command
     assert "${RESEARCH_CONFIRM_EVIDENCE:?set-human-evidence}" in command
 
@@ -173,7 +173,7 @@ def test_intake_confirm_command_uses_shared_helper_with_runtime_python() -> None
     record = {"kind": "repo", "id": "r-openvla-12345678"}
 
     assert intake.confirm_command(record) == (
-        f"{intake.research_python()} .agents/skills/repo-analyst/scripts/repo.py confirm "
+        f"{intake.research_python()} .agents/skills/unit-analyst/scripts/repo.py confirm "
         "--repo-id r-openvla-12345678 --confirmed-by "
         "${RESEARCH_CONFIRMED_BY:?set-human-identity} --evidence "
         "${RESEARCH_CONFIRM_EVIDENCE:?set-human-evidence}"

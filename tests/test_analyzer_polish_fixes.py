@@ -46,15 +46,15 @@ def _load_module(name: str, script_rel: str):
 
 
 def _load_blog():
-    return _load_module("blog_polish_under_test", ".agents/skills/blog-analyst/scripts/blog.py")
+    return _load_module("blog_polish_under_test", ".agents/skills/unit-analyst/scripts/blog.py")
 
 
 def _load_paper():
-    return _load_module("paper_polish_under_test", ".agents/skills/paper-analyst/scripts/paper.py")
+    return _load_module("paper_polish_under_test", ".agents/skills/unit-analyst/scripts/paper.py")
 
 
 def _load_repo():
-    return _load_module("repo_polish_under_test", ".agents/skills/repo-analyst/scripts/repo.py")
+    return _load_module("repo_polish_under_test", ".agents/skills/unit-analyst/scripts/repo.py")
 
 
 # --------------------------------------------------------------------------- #

@@ -24,6 +24,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
+from .analyzer_registry import UNIT_ANALYZER_SCRIPT_BY_KIND
 from .dedup import canonicalize_url, normalize_remote_url, parse_arxiv_id
 from .slugs import KEYWORD_BLACKLIST, STOPWORDS, normalize_list, normalize_person_name, normalize_ref_key, normalize_title, parse_wikilinks, simple_slug, slugify, slugify_tag
 from .yaml_io import dump_yaml, load_yaml, write_text_if_changed, write_yaml_if_changed, yaml_duplicate_key_issues
@@ -32,10 +33,7 @@ from .yaml_io import dump_yaml, load_yaml, write_text_if_changed, write_yaml_if_
 RUNTIME_MODULES = ("yaml", "markdownify", "bs4", "pymupdf4llm", "fitz", "PyPDF2", "pypdf")
 COMMAND_PREFIX = "${RESEARCH_PYTHON:-python3}"
 CONFIRM_SCRIPT_BY_KIND = {
-    "paper": ".agents/skills/paper-analyst/scripts/paper.py",
-    "repo": ".agents/skills/repo-analyst/scripts/repo.py",
-    "dataset": ".agents/skills/dataset-analyst/scripts/dataset.py",
-    "blog": ".agents/skills/blog-analyst/scripts/blog.py",
+    **UNIT_ANALYZER_SCRIPT_BY_KIND,
     "experiment": ".agents/skills/experiment-workbench/scripts/experiment.py",
 }
 CONFIRM_ID_ARG_BY_KIND = {
