@@ -673,7 +673,7 @@ selection_digest: <sha256>
 
 回执只保存 ID、digest 与有界单行理由，不复制偏好正文、任务原文、secret、URL 或绝对路径。`task_context_digest` 必填；consumer 加载时必须同时提交期望 task digest，因此不能跨 task/skill/operation 复用。它必须完整交代全部 eligible 项；任一 canonical source 变化都会令旧回执 stale。偏好不能关闭 evidence、confirmation、containment、journal、lock、CAS 或 recovery。
 
-中央 registry 把每个 shipping skill 精确分到互斥两类：真实 consumer 必须同时具有非空 eligible catalog 与至少一个会重算 task context、加载 receipt、保存 value-free binding 的 operation；neutral owner 必须 eligible 为空且有非空产品原因。`knowledge-base-manager`（机械 schema/lifecycle）、`research-config-manager`（canonical preference owner）、`discussion-archivist`（搬运 caller-authored content）、`research-navigator`（dev-only projection）、`wiki-adapter`（thin router）、`skill-evolution-advisor`（governance/diagnostics）属于 neutral。禁止第三种“有 allowlist、无消费点”的 dead entry；hard governance 仍由各 owner 直接强制。
+中央 registry 把每个 shipping skill 精确分到互斥两类：真实 consumer 必须同时具有非空 eligible catalog 与至少一个会重算 task context、加载 receipt、保存 value-free binding 的 operation；neutral owner 必须 eligible 为空且有非空产品原因。`knowledge-base-manager`（机械 schema/lifecycle）、`research-config-manager`（canonical preference owner）、`discussion-archivist`（搬运 caller-authored content）、`unit-analyst`（发现 facade；偏好由 kind-specific 持久 implementation identity 消费）、`skill-evolution-advisor`（governance/diagnostics）属于 neutral。禁止第三种“有 allowlist、无消费点”的 dead entry；hard governance 仍由各 owner 直接强制。
 
 `source-intake:add` 的 task context 绑定 kind/source/title/maturity/stage/candidate 与最终 canonical pools，并以单一 digest 绑定当前 `user_authorization + authorization_source`；授权原话、source/path 不得出现在 persisted effective-preference receipt。duplicate 快路径没有消费偏好时可以保持 neutral，但不能借 duplicate 绕过 literature selection authorization gate。
 
@@ -1149,20 +1149,19 @@ Read path 先校验 cache 内部 metadata/source table/passage rows/digests/sche
 | `kb/.runtime/search/passages.sqlite3` | knowledge-base-manager/index builder | kb-cli、runtime Agent | disposable FTS5 cache；query read-only |
 | `kb/.runtime/review-snapshots/*.json` | kb-cli public adapter | kb-cli | one-time expiring snapshots/tombstones；private runtime only |
 | `kb/.runtime/review-batches/*.json` | kb-cli public adapter | kb-cli | Obsidian human sheet 的 version/TTL/replay binding；private runtime only |
-| program state.yaml + workflow/* | research-orchestrator | report-author, navigator | 其它 skill emit reporting-event 让 orchestrator 写 |
+| program state.yaml + workflow/* | research-orchestrator | report-author、kb-cli、runtime Agent | 其它 skill emit reporting-event 让 orchestrator 写 |
 | `kb/programs/portfolio-next-selections.yaml` | research-orchestrator | kb-cli、runtime Agent | Agent-authored cross-program choice；append-only，stale 时不执行 |
 | program reporting-events.yaml | research-orchestrator（主要）、experiment-workbench / paper-analyst / method-designer / idea-workbench（事件附加） | report-author | 各 emit skill 必须填 `source_skill` |
-| program decisions.yaml + decision-log.md projection | research-orchestrator | navigator, report-author | judgement 两阶段；legacy Markdown 仅 pending/unverified 迁移 |
+| program decisions.yaml + decision-log.md projection | research-orchestrator | kb-cli、report-author、runtime Agent | judgement 两阶段；legacy Markdown 仅 pending/unverified 迁移 |
 | kb/config/candidate-pools.yaml | knowledge-base-manager | source-intake, literature-synthesizer, idea-workbench | research-config-manager 提供 seed/policy 输入 |
 | kb/config/topic-taxonomy.yaml | knowledge-base-manager | analyst skills, literature-synthesizer | 同上 |
 | kb/config/runtime-preferences.yaml | research-config-manager | 全部 | 唯一直接归 config-manager 的 artifact |
 | `kb/config/effective-preferences/*.yaml` | research-config-manager | bound consumer skill | rule-eligible → Agent-selected task receipt；不复制偏好正文 |
 | `kb/monitoring/subscriptions/*.yaml` | research-monitor | research-orchestrator、runtime Agent | provider-neutral cadence/due SSOT；无 scheduler/daemon |
 | `kb/monitoring/runs/*.yaml` | research-monitor | research-orchestrator、report consumers | frozen run receipt；Agent judgement 必须挂当前引用 |
-| kb/memory/learnings.yaml | skill-evolution-advisor | research-navigator, 全部（通过 recall 摘要） | 经验/习惯/skill 缺陷记忆；skill-defect record-only |
+| kb/memory/learnings.yaml | skill-evolution-advisor | kb-cli、runtime Agent（通过 recall 摘要） | 经验/习惯/skill 缺陷记忆；skill-defect record-only |
 | kb/memory/skill-evolution/issues.yaml | skill-evolution-advisor | dispatcher、research-config-manager、全部（通过私有摘要） | 本地脱敏诊断 issue；无 telemetry、无自动修 skill |
-| kb/synthesis/wiki/*.md | wiki-adapter | 全部（人面向） | 复用笔记/术语沉淀 |
-| kb/user/* | research-navigator | （只读） | 人面向入口，read-only |
+| kb/user/* | research-config-manager（初始化）、source-intake / knowledge-base-manager / report-author（各自投影） | 用户、runtime Agent | 人面向可重建入口；公共 status/find 保持只读，maintainer 工具不拥有 canonical 写入 |
 
 ---
 

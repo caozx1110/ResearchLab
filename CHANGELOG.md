@@ -9,6 +9,7 @@ All notable changes to this project will be documented here. The format follows 
 - `unit-analyst` now physically owns the canonical paper, repository, dataset, and blog analyzer scripts as well as the discoverable routing surface. All current runtime navigation uses one kind registry under the shared library.
 - The legacy `paper-analyst`, `repo-analyst`, `dataset-analyst`, and `blog-analyst` resource directories are removed from source and distribution. Their persisted preference, journal, receipt, provenance, and diagnostic owner identities remain unchanged inside the canonical implementations and registry.
 - Copy-install updates atomically remove pre-consolidation analyzer scripts and add the four canonical `unit-analyst` scripts to the managed manifest; managed drift remains fail-closed.
+- Current documentation now derives its skill inventory from the 15 discoverable directories and no longer presents retired analyzer, wiki, or navigator namespaces as shipping skills. Maintainer-only SSOT drafts, one-off handoffs, audit transcripts, and historical acceptance logs under `dev-docs/` remain local and are no longer Git-tracked or installed; stable contracts are graduated into the tracked public, contributor, runtime, schema, and release documents.
 
 ### Fixed (R6 cold acceptance, 2026-07-27)
 
