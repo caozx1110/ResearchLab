@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
+import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -186,10 +189,95 @@ def test_runtime_failure_message_is_natural_language_only(tmp_path) -> None:
 
     assert message == (
         "无法准备运行所需的环境。\n"
-        "请让 Agent 运行 kb doctor 查看私有诊断，并协助选择可用环境。"
+        "请让 Agent 按安装说明中的离线恢复步骤准备运行环境，完成后再使用 kb doctor 复查。"
     )
     assert "[research]" not in message
     assert "private detail" not in message
+
+
+def test_diagnostic_bootstrap_never_provisions_missing_core_runtime(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    managed_dir = tmp_path / ".venv"
+    monkeypatch.delenv(bootstrap.READY_FLAG, raising=False)
+    monkeypatch.delenv("RESEARCH_PYTHON", raising=False)
+    monkeypatch.delenv("RESEARCH_NO_MANAGED_VENV", raising=False)
+    monkeypatch.setattr(bootstrap, "managed_venv_dir", lambda _home=None: managed_dir)
+    monkeypatch.setattr(
+        bootstrap,
+        "managed_venv_python",
+        lambda _home=None: managed_dir / "bin" / "python",
+    )
+    monkeypatch.setattr(bootstrap, "_current_has_yaml", lambda: False)
+    monkeypatch.setattr(bootstrap, "_path_runtime_python", lambda _home=None: None)
+    monkeypatch.setattr(
+        bootstrap,
+        "_ensure_venv_has_yaml",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("diagnostics must not provision")),
+    )
+
+    with pytest.raises(SystemExit, match="离线恢复步骤"):
+        bootstrap.ensure_managed_runtime(tmp_path, allow_provision=False)
+
+    assert not managed_dir.exists()
+
+
+def test_entrypoint_public_verb_skips_private_global_options() -> None:
+    assert bootstrap.entrypoint_public_verb(["doctor"]) == "doctor"
+    assert bootstrap.entrypoint_public_verb(["--root", "/tmp/work", "help"]) == "help"
+    assert bootstrap.entrypoint_public_verb(["--agent-protocol=doctor.json", "doctor"]) == "doctor"
+    assert bootstrap.entrypoint_public_verb(["--unknown", "doctor"]) == ""
+
+
+def test_kb_help_and_doctor_remain_read_only_without_core_runtime(tmp_path: Path) -> None:
+    empty_bin = tmp_path / "empty-bin"
+    empty_bin.mkdir()
+    managed = tmp_path / "managed"
+    home = tmp_path / "home"
+    home.mkdir()
+    project_root = Path(__file__).resolve().parents[1]
+    kb_script = project_root / ".agents" / "skills" / "kb-cli" / "scripts" / "kb"
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "PATH": str(empty_bin),
+        "PIP_NO_INDEX": "1",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONNOUSERSITE": "1",
+        "RESEARCH_NO_PDF_BACKEND": "1",
+        "RESEARCH_VENV": str(managed),
+    }
+    env.pop(bootstrap.READY_FLAG, None)
+    env.pop("RESEARCH_PYTHON", None)
+    env.pop("RESEARCH_NO_MANAGED_VENV", None)
+
+    help_result = subprocess.run(
+        [sys.executable, "-S", str(kb_script), "help"],
+        cwd=project_root,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    doctor_result = subprocess.run(
+        [sys.executable, "-S", str(kb_script), "doctor"],
+        cwd=project_root,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert help_result.returncode == 0, help_result.stdout + help_result.stderr
+    assert "kb 动词（16 个）" in help_result.stdout
+    assert "核心运行环境尚未就绪" in help_result.stdout
+    assert doctor_result.returncode == 0, doctor_result.stdout + doctor_result.stderr
+    assert "核心运行环境尚未就绪" in doctor_result.stdout
+    assert "离线恢复步骤" in doctor_result.stdout
+    assert not managed.exists()
 
 
 def test_pdf_backend_opt_out_skips_import_check_and_install(monkeypatch) -> None:

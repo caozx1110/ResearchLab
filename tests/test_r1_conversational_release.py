@@ -650,8 +650,10 @@ def test_experiment_and_report_skills_document_private_minimum_invocations() -> 
 def test_runtime_and_test_dependencies_are_exactly_locked_in_both_ci_jobs() -> None:
     root = _project_root()
     runtime_lines = _active_requirement_lines(root / "requirements.txt")
+    shipped_runtime_lines = _active_requirement_lines(root / ".agents" / "requirements.txt")
 
     assert _parse_exact_pins(runtime_lines) == EXPECTED_RUNTIME_PINS
+    assert _parse_exact_pins(shipped_runtime_lines) == EXPECTED_RUNTIME_PINS
 
     ci = yaml.safe_load((root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
     for job_name in ("test", "macos-release-gate"):

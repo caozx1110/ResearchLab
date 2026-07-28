@@ -7,6 +7,7 @@ import os
 import pty
 import re
 import select
+import shlex
 import shutil
 import stat
 import subprocess
@@ -1794,6 +1795,80 @@ def test_noninteractive_smoke_failure_hides_child_diagnostics(tmp_path: Path) ->
     assert str(private_detail) not in result.stdout + result.stderr
     _assert_private_sync_output_hidden(result, source, workspace / ".agents")
     assert (workspace / ".agents" / ".install-manifest.json").is_file()
+
+
+def test_offline_install_keeps_files_and_exposes_dependency_free_rescue(
+    tmp_path: Path,
+) -> None:
+    launcher_bin = tmp_path / "launcher-bin"
+    launcher_bin.mkdir()
+    launcher_python = launcher_bin / "python3"
+    launcher_python.write_text(
+        f"#!/bin/sh\nexec {shlex.quote(sys.executable)} -S \"$@\"\n",
+        encoding="utf-8",
+    )
+    launcher_python.chmod(0o755)
+    workspace = tmp_path / "offline-workspace"
+    workspace.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    managed = workspace / ".venv"
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "NO_COLOR": "1",
+        "PATH": os.pathsep.join((str(launcher_bin), "/usr/bin", "/bin")),
+        "PIP_NO_INDEX": "1",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONNOUSERSITE": "1",
+        "RESEARCH_NO_PDF_BACKEND": "1",
+        "RESEARCH_VENV": str(managed),
+    }
+    for key in (
+        "_RESEARCH_RUNTIME_READY",
+        "_RESEARCH_BOOTSTRAP_ALLOW_PROVISION",
+        "RESEARCH_PYTHON",
+        "RESEARCH_NO_MANAGED_VENV",
+    ):
+        env.pop(key, None)
+
+    installed = subprocess.run(
+        [
+            "bash",
+            str(_project_root() / "install.sh"),
+            "install",
+            "--codex",
+            "--project",
+            str(workspace),
+            "--yes",
+        ],
+        cwd=_project_root(),
+        env=env,
+        stdin=subprocess.DEVNULL,
+        text=True,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert installed.returncode == 0, installed.stdout + installed.stderr
+    assert "工作区文件已安装，但核心运行环境尚未就绪" in installed.stderr
+    assert (workspace / ".agents" / ".install-manifest.json").is_file()
+    assert (workspace / ".agents" / "requirements.txt").is_file()
+
+    doctor = subprocess.run(
+        [str(workspace / ".agents/skills/kb-cli/scripts/kb"), "--root", str(workspace), "doctor"],
+        cwd=workspace,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert doctor.returncode == 0, doctor.stdout + doctor.stderr
+    assert "核心运行环境尚未就绪" in doctor.stdout
+    assert "离线恢复步骤" in doctor.stdout
 
 
 def test_project_install_from_linked_worktree_preserves_linked_checkout(tmp_path: Path) -> None:

@@ -70,11 +70,35 @@ project copy workspace 不需要 `RESEARCH_SKILLS_HOME`。若当前 Python 缺�
 
 ## 管理员参考：运行环境
 
-Python 3.9 或更高版本是安装器硬依赖。脚本首次运行会自动创建并使用项目内受管 `.venv`（含 PyYAML）。用户无需手动创建 venv、运行 pip 或导出 `RESEARCH_PYTHON`；安全更新会保留已有受管 venv，因此 shipping runtime 同样保持 Python 3.9 兼容。
+Python 3.9 或更高版本是安装器硬依赖。脚本首次运行通常会自动创建并使用项目内受管 `.venv`。核心运行时不是只有 PyYAML：硬 import 为 `yaml`、`markdownify`、`bs4`，对应 PyYAML、Markdownify、Beautiful Soup 4；默认 requirements 还包含可复现的轻量 PDF 深读后端。安全更新会保留已有受管 venv，因此 shipping runtime 同样保持 Python 3.9 兼容。
 
-高级用户仍可用 `RESEARCH_PYTHON` 覆盖解释器；也可用 `RESEARCH_VENV` 覆盖受管 venv 路径。设置 `RESEARCH_NO_MANAGED_VENV=1` 会关闭自动 venv，改用当前解释器，此时需要自备 PyYAML。
+高级用户仍可用 `RESEARCH_PYTHON` 覆盖解释器；也可用 `RESEARCH_VENV` 覆盖受管 venv 路径。设置 `RESEARCH_NO_MANAGED_VENV=1` 会关闭自动 venv，改用当前解释器，此时需要自备全部三个核心 import，而不只是 PyYAML。
 
-安装器仍会做一次 `import yaml` preflight；如果当前 Python 缺 PyYAML，只会提示首次使用时自动准备受管运行环境，不需要手动运行 pip。只有显式设置 `RESEARCH_NO_MANAGED_VENV=1` 时，缺少 PyYAML 才是硬错误。
+安装器会检查完整核心 runtime。当前 Python、既有受管 venv 和安全 PATH 候选都不满足时，业务动词会尝试自动准备；`kb help` 与 `kb doctor` 始终保留为只读救援面，不创建 venv、不运行 pip。无网络或没有可用镜像时，安装器会保留已经安装的工作区文件并明确报告 runtime 尚未就绪，而不是让安装和 `kb doctor` 互相要求重试。
+
+### 无网或受限网络恢复
+
+安装到普通工作区后，完整锁定位于 `.agents/requirements.txt`；源码 checkout 根目录的 `requirements.txt` 与它保持同一组精确版本。可让 Agent 在工作区根执行：
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r .agents/requirements.txt
+```
+
+使用企业或国内镜像时，先按组织策略配置 pip 镜像，再执行同一条 requirements 安装。完全离线时，可在一台联网且 Python/平台兼容的机器上预取 wheel：
+
+```bash
+python3 -m pip download -r .agents/requirements.txt -d wheelhouse
+```
+
+把 wheelhouse 带到目标机器后，在工作区根执行：
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install --no-index --find-links wheelhouse -r .agents/requirements.txt
+```
+
+准备完成后再运行 `kb doctor`；它会报告实际生效的运行环境与 Markdown/PDF 能力。不要把凭据写入 requirements 或工作区配置。
 
 ## 管理员参考：命令行与自动化
 

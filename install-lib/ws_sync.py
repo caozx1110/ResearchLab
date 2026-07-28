@@ -84,6 +84,7 @@ CLAUDE_SKILLS_TARGET = "../.agents/skills"
 RELEASE_FILE_MAP = {
     ".agents/AGENTS.md": ".agents/AGENTS.md",
     ".agents/AGENT_GUIDE.md": ".agents/AGENT_GUIDE.md",
+    ".agents/requirements.txt": ".agents/requirements.txt",
     ".agents/VERSION": ".agents/VERSION",
     "LICENSE": ".agents/LICENSE",
 }

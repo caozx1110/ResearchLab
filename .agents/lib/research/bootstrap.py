@@ -5,14 +5,17 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import os
+import re
 import shutil
 import stat
 import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Sequence
 
 READY_FLAG = "_RESEARCH_RUNTIME_READY"
+BOOTSTRAP_PROVISION_ENV = "_RESEARCH_BOOTSTRAP_ALLOW_PROVISION"
 CORE_RUNTIME_MODULES = ("yaml", "markdownify", "bs4")
 CORE_RUNTIME_PACKAGES = (
     "pyyaml==6.0.3",
@@ -361,12 +364,58 @@ def _failure_message(venv_dir: Path, error: Exception) -> str:
     return "\n".join(
         [
             "无法准备运行所需的环境。",
-            "请让 Agent 运行 kb doctor 查看私有诊断，并协助选择可用环境。",
+            "请让 Agent 按安装说明中的离线恢复步骤准备运行环境，完成后再使用 kb doctor 复查。",
         ]
     )
 
 
-def ensure_managed_runtime(home: Path | None = None) -> None:
+def entrypoint_public_verb(argv: Sequence[str]) -> str:
+    """Read the public verb without importing the full argparse-based CLI."""
+    index = 0
+    values = list(argv)
+    while index < len(values):
+        token = str(values[index])
+        if token in {"--root", "--agent-protocol"}:
+            index += 2
+            continue
+        if token.startswith(("--root=", "--agent-protocol=")):
+            index += 1
+            continue
+        if token.startswith("-"):
+            return ""
+        return token
+    return ""
+
+
+def _public_package_version(home: Path) -> str:
+    try:
+        version = (home / ".agents" / "VERSION").read_text(encoding="utf-8").strip()
+    except OSError:
+        return "未知"
+    return version if re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z.+-]{0,63}", version) else "未知"
+
+
+def render_runtime_unavailable_command(home: Path, verb: str) -> bool:
+    """Render stdlib-only help/doctor after core bootstrap cannot complete."""
+    if verb == "help":
+        from .cli_contract import render_help_menu
+
+        print(render_help_menu(), end="")
+        print("核心运行环境尚未就绪；kb help 和 kb doctor 仍可使用，其它操作会安全停止。")
+        return True
+    if verb == "doctor":
+        print(f"研究能力包版本为 {_public_package_version(home)}。")
+        print("核心运行环境尚未就绪；配置读写和材料转换依赖不完整。")
+        print("请让 Agent 按安装说明中的离线恢复步骤准备运行环境，然后再次使用 kb doctor 复查。")
+        return True
+    return False
+
+
+def ensure_managed_runtime(
+    home: Path | None = None,
+    *,
+    allow_provision: bool = True,
+) -> None:
     """Ensure the current skill entrypoint can import the core source runtime.
 
     This function is intentionally side-effectful and must only be called from
@@ -397,9 +446,7 @@ def ensure_managed_runtime(home: Path | None = None) -> None:
             return
         if not configured_python and _use_path_runtime_if_available(home):
             return
-        raise SystemExit(
-            "当前环境缺少知识库运行或材料转换支持，且自动准备运行环境已关闭；请让 Agent 运行 kb doctor 协助处理。"
-        )
+        raise SystemExit(_failure_message(managed_venv_dir(home), RuntimeError("provisioning disabled")))
 
     venv_dir = managed_venv_dir(home)
     venv_py = managed_venv_python(home)
@@ -408,13 +455,15 @@ def ensure_managed_runtime(home: Path | None = None) -> None:
     # to the managed project environment.
     if venv_py.exists() and _python_can_import_yaml(venv_py):
         if is_current_python(venv_py):
-            _prepare_managed_pdf_backend(venv_dir, venv_py)
+            if allow_provision:
+                _prepare_managed_pdf_backend(venv_dir, venv_py)
             _mark_ready()
             return
         # Complete a partially provisioned runtime (PDF backend missing after an
         # earlier offline install) before handing execution to it: the re-exec'd
         # process starts with the ready flag set and would never retry on its own.
-        _prepare_managed_pdf_backend(venv_dir, venv_py)
+        if allow_provision:
+            _prepare_managed_pdf_backend(venv_dir, venv_py)
         _reexec(venv_py)
         return
 
@@ -427,6 +476,9 @@ def ensure_managed_runtime(home: Path | None = None) -> None:
         return
 
     if _current_has_yaml():
+        if not allow_provision:
+            _mark_ready()
+            return
         # Core imports are available but the always-installed paper deep-read
         # backend (pymupdf4llm) is missing, so `kb ingest` of a PDF would fail
         # while doctor used to claim readiness. Provision the managed venv (which
@@ -456,6 +508,9 @@ def ensure_managed_runtime(home: Path | None = None) -> None:
 
     if not configured_python and _use_path_runtime_if_available(home):
         return
+
+    if not allow_provision:
+        raise SystemExit(_failure_message(venv_dir, RuntimeError("core runtime unavailable")))
 
     try:
         print("首次使用需要准备运行环境，请稍候。", file=sys.stderr, flush=True)

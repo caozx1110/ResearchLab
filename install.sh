@@ -2316,21 +2316,33 @@ run_smoke() {
     export RESEARCH_PYTHON="$DISCOVERED_RUNTIME_PYTHON"
   fi
   # Child diagnostics can contain tracebacks and internal paths; keep them private.
-  if ! smoke_output=$("$WS_KB_SCRIPT" help 2>&1); then
+  if ! smoke_output=$(_RESEARCH_BOOTSTRAP_ALLOW_PROVISION=1 "$WS_KB_SCRIPT" help 2>&1); then
     warn "kb 安装检查未通过，请让 Agent 检查后重试。"
     return 1
   fi
+  case "$smoke_output" in
+    *"核心运行环境尚未就绪"*)
+      warn "工作区文件已安装，但核心运行环境尚未就绪；请让 Agent 按安装说明准备依赖后再使用 kb doctor 复查。"
+      return 0
+      ;;
+  esac
   if [ "$COPY_PROJECT" -eq 1 ]; then
-    if ! smoke_output=$("$WS_KB_SCRIPT" --root "$WORKSPACE_ROOT" doctor 2>&1); then
+    if ! smoke_output=$(_RESEARCH_BOOTSTRAP_ALLOW_PROVISION=1 "$WS_KB_SCRIPT" --root "$WORKSPACE_ROOT" doctor 2>&1); then
       warn "kb 安装检查未通过，请让 Agent 检查后重试。"
       return 1
     fi
   else
-    if ! smoke_output=$(RESEARCH_SKILLS_HOME="$REPO_ROOT" "$WS_KB_SCRIPT" --root "$WORKSPACE_ROOT" doctor 2>&1); then
+    if ! smoke_output=$(RESEARCH_SKILLS_HOME="$REPO_ROOT" _RESEARCH_BOOTSTRAP_ALLOW_PROVISION=1 "$WS_KB_SCRIPT" --root "$WORKSPACE_ROOT" doctor 2>&1); then
       warn "kb 安装检查未通过，请让 Agent 检查后重试。"
       return 1
     fi
   fi
+  case "$smoke_output" in
+    *"核心运行环境尚未就绪"*)
+      warn "工作区文件已安装，但核心运行环境尚未就绪；请让 Agent 按安装说明准备依赖后再使用 kb doctor 复查。"
+      return 0
+      ;;
+  esac
   ok "kb 基础入口可用。"
 }
 
