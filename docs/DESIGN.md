@@ -36,7 +36,7 @@ Release bundle 不包含任何私有 `kb/`。安装、更新、storage sync 和�
 
 ## Skill 路由
 
-发布树包含 **15 个可发现 skill：14 个 L1 owner + `kb-cli`**。四类 unit analyzer 的发现、路由与 canonical 脚本资源统一归 `unit-analyst`；历史持久 owner identity、canonical artifact identity 与数据模型保持不变，旧脚本路径只在当前 RC 升级窗口作为薄兼容启动器：
+发布树包含 **15 个可发现 skill：14 个 L1 owner + `kb-cli`**。四类 unit analyzer 的发现、路由与 canonical 脚本资源统一归 `unit-analyst`；历史持久 owner identity、canonical artifact identity 与数据模型保持不变，四个旧 skill 资源目录不再分发：
 
 | 分组 | Skills |
 |---|---|

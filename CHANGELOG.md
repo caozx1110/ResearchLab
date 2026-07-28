@@ -7,8 +7,8 @@ All notable changes to this project will be documented here. The format follows 
 ### Changed (post-campaign resource consolidation, 2026-07-28)
 
 - `unit-analyst` now physically owns the canonical paper, repository, dataset, and blog analyzer scripts as well as the discoverable routing surface. All current runtime navigation uses one kind registry under the shared library.
-- Historical `paper-analyst`, `repo-analyst`, `dataset-analyst`, and `blog-analyst` script paths remain as thin compatibility launchers. Their persisted preference, journal, receipt, provenance, and diagnostic owner identities are unchanged.
-- Copy-install updates atomically replace pre-consolidation full scripts with compatibility launchers and add the four canonical `unit-analyst` scripts to the managed manifest; managed drift remains fail-closed.
+- The legacy `paper-analyst`, `repo-analyst`, `dataset-analyst`, and `blog-analyst` resource directories are removed from source and distribution. Their persisted preference, journal, receipt, provenance, and diagnostic owner identities remain unchanged inside the canonical implementations and registry.
+- Copy-install updates atomically remove pre-consolidation analyzer scripts and add the four canonical `unit-analyst` scripts to the managed manifest; managed drift remains fail-closed.
 
 ### Fixed (R6 cold acceptance, 2026-07-27)
 
@@ -76,7 +76,7 @@ All notable changes to this project will be documented here. The format follows 
 - 代码检索（A5/G14）：repo 源码进 FTS5（`.py` 按 def/class 符号切块带限定名，其余 40 行窗/8 行重叠；跳二进制/超大/VCS 目录，预算超限显式告警）；FTS 新增 `code_terms` 拆词辅助列；`PASSAGE_INDEX_REVISION=passages-v3`（旧缓存判 stale 自动回退内存检索）。
 - 接口层文档（A6）：新增 `.agents/AGENT_GUIDE.md`（机制速查+交互章程 10 条）；19 份 SKILL.md 增"启动澄清（Agent 用）"；新增 `docs/GOLDEN_SUITE.md`（8 条黄金对话规格与基线指标）。
 
-The bundle currently declares **`0.2.0-rc.7`**. The final local campaign gate passes with 2,313 tests (18 environment-gated skips), all 15 discoverable skill validators, Python 3.9 compilation, snapshot install/update/uninstall lifecycle, and fresh real-source, GOLDEN, interaction-charter, recovery, and no-plugin Obsidian acceptance. Installation and core workflows require no external API Key, paid search quota, commercial database subscription, or paid plugin. The candidate is not a stable release or GA, has not been tagged or published, and carries no compatibility or response-time SLA. A green hosted Linux/macOS CI matrix remains a prerequisite for a release tag.
+The bundle currently declares **`0.2.0-rc.7`**. The final local campaign gate passes with 2,317 tests (18 environment-gated skips), all 15 discoverable skill validators, Python 3.9 compatibility checks, snapshot install/update/uninstall lifecycle, and fresh real-source, GOLDEN, interaction-charter, recovery, and no-plugin Obsidian acceptance. Installation and core workflows require no external API Key, paid search quota, commercial database subscription, or paid plugin. The candidate is not a stable release or GA, has not been tagged or published, and carries no compatibility or response-time SLA. A green hosted Linux/macOS CI matrix remains a prerequisite for a release tag.
 
 ## [0.2.0-rc.7] - Unreleased
 

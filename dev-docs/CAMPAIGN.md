@@ -23,7 +23,7 @@
 - [x] A13 交互章程冷验收（三场景 10 条逐条打分）
 
 ### 质量验收
-- [x] Q1 pytest 全套绿（普通文件型 scratch runtime；post-campaign 归并后最终 `2318 passed, 18 skipped`；不得回退新行为凑绿）
+- [x] Q1 pytest 全套绿（普通文件型 scratch runtime；post-campaign 彻底归并后最终 `2317 passed, 18 skipped`；不得回退新行为凑绿）
 - [x] Q2 skill_validator 15/15；冷装 2.15s；install.sh install+update+uninstall 三态正常
 - [x] Q3 GOLDEN_SUITE 8 条全过且零机制摸索失败
 - [x] Q4 单任务规则文本 ≤8k tokens；kb next ≤3 步
@@ -122,9 +122,9 @@
 ### R7 post-campaign unit-analyst 资源归并（完成，2026-07-28）
 - 用户指出 discoverable `unit-analyst` 与四套业务脚本的物理归属不一致，并明确要求合并。先在 SSOT 锁定资源归属与兼容边界，再施工；没有把 shipping skill 当作自身设计依据。
 - `paper/repo/dataset/blog.py` 的唯一 canonical 实现已迁入 `.agents/skills/unit-analyst/scripts/`；共享 `analyzer_registry.py` 统一提供 kind→script/prepare/id-arg/持久 owner 映射，intake、kb-cli、knowledge-base-manager、orchestrator 与 confirmation navigation 不再各自硬编码旧路径。
-- 旧四目录只保留 14–15 行 `runpy` 兼容启动器，原可执行权限保持；`paper/repo/dataset/blog-analyst` 的 preference、journal、ConfirmationReceipt、provenance 与 diagnostic identity 均未迁名。新文档、测试和运行时命令只指向 canonical 路径。
-- fresh install 与模拟 pre-consolidation manifest update 均通过：旧 full script 被原子替换为 launcher，四个 canonical script 进入 manifest。最终完整套件 `2318 passed, 18 skipped, 7 warnings`（10m22s），Python 3.9 AST 66 文件、`Validated 15 skills.`、`bash -n install.sh` 与 diff check 全绿；真实 `kb/` 六个保护文件哈希保持施工前基线。
-- 提交：`d53b0d4`（设计 gate）、`5bda2bd`（实现与主体回归）；本段与公开文档、旧 manifest update 回归另作 closure commit。未 push、tag、publish 或合并主分支。
+- 用户进一步明确“合并”要求删除旧目录；设计随即收紧，四个旧 skill 资源目录已从源码与安装包彻底移除，不留 launcher 或空目录。`paper/repo/dataset/blog-analyst` 的 preference、journal、ConfirmationReceipt、provenance 与 diagnostic identity 仍作为持久逻辑身份保留，不等同于物理目录。
+- fresh install 与模拟 pre-consolidation manifest update 均通过：旧 full script 与旧空目录被受管删除，四个 canonical script 进入 manifest。最终完整套件 `2317 passed, 18 skipped, 7 warnings`，Python 3.9 AST 62 文件、`Validated 15 skills.`、`bash -n install.sh` 与 diff check 全绿；真实 `kb/` 六个保护文件哈希保持施工前基线。
+- 提交：`d53b0d4`、`5bda2bd`、`f99fa35`（首轮资源归并），`ff29c55`（删除设计 gate）、`6114973`（彻底删除旧目录）；本段最终文档另作 closure commit。未 push、tag、publish 或合并主分支。
 
 ## 决定记录（含偏离蓝图的理由）
 
@@ -137,7 +137,7 @@
 | D5 | 07-27 | R5 的 20→14 按 L1 owner 计，最终发现面为 15；四 analyzer 只并发现层；human-note/偏好均不因 source=user 自动确认 | 保持既有 receipt/owner/schema identity 与开源兼容，同时消除重复提示词；“用户写过”与“用户确认该结构化判断”是两个不同事实 |
 | D6 | 07-27 | historical restore 定义为 X 到最新尚未恢复 root operations 的单事务区间恢复 | 只恢复旧 X 会与后续共享 index targets 产生不可避免 CAS；完整虚拟 digest 链可在零写时证明回到 X 前且避免逐条半恢复 |
 | D7 | 07-27 | degraded source upgrade 另建 canonical revision；PDF warning 与来源完整性分开判断 | 保住旧 evidence immutable 与确认语义；少量 native recovery/table 格式告警不应把 45 页完整 raw PDF 等同摘要壳，也不得伪报 warning-free complete |
-| D8 | 07-28 | `unit-analyst` 同时统一发现、路由和四类 analyzer 的物理脚本资源；历史 owner identity 不迁名 | 让 skill 资源可发现、可打包且单点维护，同时避免使既有 preference、journal、receipt、provenance 与 diagnostics 失效；旧路径仅作当前 RC 的薄兼容入口 |
+| D8 | 07-28 | `unit-analyst` 同时统一发现、路由和四类 analyzer 的物理脚本资源；四个旧目录彻底删除，历史 owner identity 不迁名 | 让 skill 资源可发现、可打包且单点维护；逻辑 owner 与物理目录解耦即可保持 preference、journal、receipt、provenance 与 diagnostics，不需要为此保留第二套资源 namespace |
 
 ## 遗留清单
 

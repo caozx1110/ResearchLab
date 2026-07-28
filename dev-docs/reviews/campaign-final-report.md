@@ -1,13 +1,13 @@
 # v2-campaign 最终验收报告
 
 > 施工规格：`dev-docs/PROMPT-full-campaign-2026-07-26.md`
-> 代码验收基线：`5bda2bd`（`v2-campaign`，含 2026-07-28 post-campaign 资源归并）
+> 代码验收基线：`6114973`（`v2-campaign`，含 2026-07-28 post-campaign 资源彻底归并）
 > 日期：2026-07-28
 > 发布状态：未发布 RC；未 push、未 tag、未合并主分支
 
 ## 结论
 
-本 campaign 已完成规格 §2 的全部功能与质量验收；随后按用户要求完成 `unit-analyst` 资源物理归并。当前完整本地套件为 **2318 passed, 18 skipped**；15 个 discoverable skill 全部通过 validator；Python 3.9 AST 兼容检查通过；归档副本 cold install / no-change update / uninstall 与旧 analyzer layout update 生命周期通过。真实来源、GOLDEN、A13、恢复、Obsidian 往返与公开输出均在隔离 `/private/tmp` 工作区复验，仓库根真实 `kb/` 未被写入。
+本 campaign 已完成规格 §2 的全部功能与质量验收；随后按用户要求完成 `unit-analyst` 资源物理归并并彻底删除四个旧 skill 目录。当前完整本地套件为 **2317 passed, 18 skipped**；15 个 discoverable skill 全部通过 validator；Python 3.9 AST 兼容检查通过；归档副本 cold install / no-change update / uninstall 与旧 analyzer layout removal 生命周期通过。真实来源、GOLDEN、A13、恢复、Obsidian 往返与公开输出均在隔离 `/private/tmp` 工作区复验，仓库根真实 `kb/` 未被写入。
 
 本结论只表示当前 RC 的本地 campaign DoD 已满足，不表示 stable/GA，也不外推为平台兼容或响应时限 SLA。Hosted Linux/macOS CI 仍应在打 tag 前运行；本 campaign 没有 push、tag、publish 或 merge。
 
@@ -28,8 +28,8 @@
 | A11 | PASS | 纠正先形成 observation，任务尾询问；真人 snapshot-bound 确认后进入下次任务。init 两问落盘；`link_autodrive=auto_deep_read` 被实际消费。 |
 | A12 | PASS | undo 点名当前 repo-choice 方法选择对象；restore 无参列清单，选历史编号原子回退 X 及其后操作；resume 恢复崩溃前字节并终结 source op。 |
 | A13 | PASS | 三场景交互章程 10/10：入库并讨论跟进、idea 陪练、10 分钟周报；无条款系统性缺失。 |
-| Q1 | PASS | `/private/tmp/workspace-oss-r3-full-py313/bin/python -m pytest -q -p no:cacheprovider`：`2318 passed, 18 skipped, 7 warnings`，621.91 秒；warnings 为既有 SWIG deprecation。 |
-| Q2 | PASS | `Validated 15 skills.`；Python 3.9 AST 66 文件通过；snapshot cold install、pre-consolidation manifest update、no-change update 与 uninstall 保留 `kb/` 均通过。 |
+| Q1 | PASS | `/private/tmp/workspace-oss-r3-full-py313/bin/python -m pytest -q -p no:cacheprovider`：`2317 passed, 18 skipped, 7 warnings`，566.71 秒；warnings 为既有 SWIG deprecation。 |
+| Q2 | PASS | `Validated 15 skills.`；Python 3.9 AST 62 文件通过；snapshot cold install、pre-consolidation manifest removal update、no-change update 与 uninstall 保留 `kb/` 均通过。 |
 | Q3 | PASS | 冷 GOLDEN G1–G8 全通过；G5–G8 为 0 次 help、0 次源码翻查。一次 archive 与 Git-bound Agent plan 的测试夹具组合被正确零写拒绝，改走正式 snapshot 模式；不属于安装用户主路径。 |
 | Q4 | PASS | 固定 `cl100k_base`：公共规则 global 4059 tokens；最坏单任务 `AGENTS + GUIDE + kb-cli` 为 7784/8000；`kb next` 公开候选最多 3 步。 |
 | Q5 | PASS | 非零公开路径均有有界可行动中文；历史 restore 漂移、source revision 保护、stale review 均 fail closed。owner warnings 留在 private protocol，不再混入成功 stderr。 |
@@ -40,7 +40,7 @@
 
 | 指标 | campaign 前/首轮 | 最终 |
 |---|---:|---:|
-| 完整 pytest | 2105 passed / 18 skipped / 5 failed | 2318 passed / 18 skipped / 0 failed |
+| 完整 pytest | 2105 passed / 18 skipped / 5 failed | 2317 passed / 18 skipped / 0 failed |
 | discoverable skills | 20 | 15（14 owner + kb-cli） |
 | 最坏单任务规则预算 | 8020 tokens（超门） | 7784 / 8000 |
 | 公共固定规则文本 | 未单独约束 | 4059 tokens |
@@ -76,8 +76,8 @@
 ## Post-campaign 资源归并
 
 - 四类 analyzer canonical 脚本统一归 `.agents/skills/unit-analyst/scripts/`，运行时用一个 kind registry 路由。
-- 四个旧路径只保留薄兼容 launcher；历史 preference、journal、ConfirmationReceipt、provenance 与 diagnostic owner identity 保持不变。
-- 安装生命周期回归从旧 full-script manifest 更新到新布局，证明 launcher 替换与 canonical script 新增处于同一受管更新。
+- 四个旧 skill 资源目录彻底删除；历史 preference、journal、ConfirmationReceipt、provenance 与 diagnostic owner identity 保持不变。
+- 安装生命周期回归从旧 full-script manifest 更新到新布局，证明旧脚本/目录删除与 canonical script 新增处于同一受管更新。
 
 ## 遗留与发布边界
 
