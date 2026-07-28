@@ -2677,7 +2677,11 @@ def test_restore_replays_overlapping_directory_and_descendant_targets(
 
     assert result["restored_op_ids"] == [intake_op, analysis_op]
     assert not unit.exists()
-    assert cache.read_bytes() == b"cache-2"
+    assert not cache.exists()
+    assert ".runtime/search/passages.sqlite3" not in result["restored_paths"]
+    assert ".runtime/search/passages.sqlite3" in load_op(
+        tmp_path, result["recovery_op_id"]
+    )["target_paths"]
 
 
 def test_restore_ignores_legacy_unjournaled_passage_cache_refresh(
@@ -2704,7 +2708,7 @@ def test_restore_ignores_legacy_unjournaled_passage_cache_refresh(
 
     assert result["restored_op_ids"] == [intake_op, analysis_op]
     assert not unit.exists()
-    assert cache.read_bytes() == b"legacy-unjournaled-cache-2"
+    assert not cache.exists()
 
 
 def test_restore_rolls_back_atomically_when_deferred_parent_cas_fails(

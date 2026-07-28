@@ -2119,6 +2119,15 @@ def restore_before_snapshots(
     return restored
 
 
+def _invalidate_recovery_target(project_root: Path, key: str) -> Path:
+    """Durably remove a derived target inside an enclosing recovery journal."""
+    target = _target_path(project_root, key)
+    with _anchored_target_parent(project_root, key, create_missing=False) as (parent_fd, leaf):
+        if parent_fd is not None:
+            _remove_target_durably_at(parent_fd, leaf)
+    return target
+
+
 def _descendant_entries(project_root: Path, op_id: str) -> list[tuple[str, dict]]:
     entries = [(name, entry) for name, entry, _ in _anchored_journal_entries(project_root)]
     descendants: list[tuple[str, dict]] = []

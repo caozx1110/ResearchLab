@@ -25,6 +25,7 @@ from .paths import (
 from .journal import (
     JOURNAL_DIRNAME,
     _assert_no_incomplete_root,
+    _invalidate_recovery_target,
     _preflight_journal_envelopes,
     _recovery_journaled_op,
     _recovery_workspace_scope,
@@ -604,6 +605,7 @@ def _restore_committed_range(
         source_views = [(source_id, *load_op_view(project_root, source_id)) for source_id in rewind_ids]
         keys_by_id: dict[str, list[str]] = {}
         union_keys: set[str] = set()
+        disposable_union_keys: set[str] = set()
         disposable_recovery_keys = {
             _target_key(project_root, passage_search_cache_path(project_root))
         }
@@ -611,12 +613,14 @@ def _restore_committed_range(
             if str(entry.get("state") or "") != "commit":
                 raise SystemExit("只有已完成的根操作才能进入恢复链。")
             validated_keys = validated_recovery_target_keys(project_root, entry, require_after=True)
+            disposable_union_keys.update(set(validated_keys) & disposable_recovery_keys)
             keys = [key for key in validated_keys if key not in disposable_recovery_keys]
             keys_by_id[source_id] = keys
             union_keys.update(keys)
-        target_paths = [target_path(project_root, key) for key in sorted(union_keys)]
+        recovery_union_keys = union_keys | disposable_union_keys
+        target_paths = [target_path(project_root, key) for key in sorted(recovery_union_keys)]
         recovery_target_paths = [
-            target_path(project_root, key) for key in _recovery_envelope_keys(union_keys)
+            target_path(project_root, key) for key in _recovery_envelope_keys(recovery_union_keys)
         ]
         with ExitStack() as locks:
             for path in sorted(target_paths, key=lambda item: item.as_posix()):
@@ -678,6 +682,8 @@ def _restore_committed_range(
                         target_keys=keys_by_id[source_id],
                     ):
                         restored_by_key[_target_key(project_root, restored_path)] = restored_path
+                for key in sorted(disposable_union_keys):
+                    _invalidate_recovery_target(project_root, key)
             restored = [restored_by_key[key] for key in sorted(restored_by_key)]
             with _recovery_workspace_scope():
                 checkpoint = git_checkpoint(
