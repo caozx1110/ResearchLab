@@ -8,6 +8,7 @@
 - **设计状态**：`SYSTEM_DESIGN_SSOT.md` 已新增 R7.1–R7.6；任何实现不得退回规则选语义 winner、脚本理解材料、自动确认、裸命令用户面或非事务批量写。
 - **施工策略**：建立 disjoint worktree tracks；每个承重修复小步 commit。主代理负责 SCHEMAS/运行规则/公开文档/版本/集成，逐条独立复现后合并。每轮修完由未参与开发的冷 Agent 重新从用户任务驱动，发现新 P1/P2 就回到下一轮，不以测试数量代替完整性证明。
 - **版本策略**：R7 功能闭环完成并通过本地冷验收后从 `0.2.0-rc.6` 自动推进到下一 RC；若仍缺 hosted CI/真实 Obsidian 等外部门，保持 RC，不宣称 stable/GA。
+- **2026-07-28 post-campaign 资源归并已完成**：`unit-analyst` 现统一持有 paper/repo/dataset/blog 四个 canonical script，所有新路由由共享 registry 生成；旧 owner 路径缩为无业务逻辑的兼容 launcher，持久 owner identity 不变。fresh install、旧 manifest update、15-skill validator、Python 3.9 AST 与最终 `2318 passed, 18 skipped` 全绿；设计/实现提交为 `d53b0d4`、`5bda2bd`，closure 文档另提交。
 - **R8 冷审新增已复现**：route validator 把关键词命中误当 owner allowlist；零证据 survey 虽有 durable composite state，却未进入 `kb next`，重启后不可发现。设计已锁定为“完整正式 owner catalog + hints”和“composite state 一等 next candidate”，施工与回归进行中。
 - **R12 冷安装新增已复现（2026-07-25）**：program-bound confirmed survey 的 `confirmation_binding.claim_ids` 被 report 的通配 `_ids` 扫描误当 unit id，阶段报告只显示 survey event 摘要而未加载当前 confirmed survey claims + verbatim evidence。SSOT/SCHEMAS 已锁定 exact unit-id allow-list 与 survey 一等 report claim source；独立 worktree 正在施工，修完回到完整套件 + 最新安装副本冷验收。
 - **R12 report P1 已闭环**：survey claims/evidence 进入正式报告，事件 binding 全量重建比较，跨 program copy/decoy path/缺 owner/tampered receipt fail closed；mutable judgement title/summary/tags 不再冒充 confirmed substance。独立复验 122 项全绿，旧 experiment 断言已按 canonical claims + neutral timeline 更新。

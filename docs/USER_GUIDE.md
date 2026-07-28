@@ -22,7 +22,7 @@
 | `source-intake` | beta | 1–20 项整批原子入库、去重、原始材料留存、完整 Markdown 阅读层、人工笔记冻结和可重试失败。 |
 | `literature-search` | beta | Agent 使用当前可用检索能力做 provider-neutral 文献发现，持久保存查询、来源路径、初筛证据、覆盖、预算和停止依据；会先给你候选清单，只有你明确选中的文献才会入库。 |
 | `research-monitor` | beta | 保存定期关注目标、到期事实、冻结运行与有证据结果；不内置检索源、后台 daemon、定时器或插件。 |
-| `unit-analyst` | beta | 一个可发现入口按 paper、repo、dataset、blog 路由到各自 evidence-bound prepare/verify 实现；实质理解仍由 runtime Agent 完成，历史 owner identity 保持不变。 |
+| `unit-analyst` | beta | 一个可发现 skill 统一持有并路由 paper、repo、dataset、blog 的 evidence-bound prepare/verify 实现；实质理解仍由 runtime Agent 完成，历史持久 owner identity 保持不变。 |
 | `research-config-manager` | beta | 总偏好只有一份；规则先限定每个能力可见的最小范围，Agent 再按当前任务选取真正相关的偏好并保存回执。 |
 | `discussion-archivist` | beta | 按结论保存讨论、证据和开放问题。 |
 | `research-orchestrator` | beta | 研究计划主线、完整 survey 路由、看板和事件流已存在；跨计划下一步由 Agent 比较全部事实候选，输入变化后自动要求重选。 |

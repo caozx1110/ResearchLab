@@ -28,7 +28,7 @@ These labels describe the current scope of each component, not the release statu
 | `source-intake` | beta | Atomic 1–20 item intake, deduplication, immutable source capture, full Markdown reading views with local assets, explicit human-note freeze, and retryable failures across heterogeneous sources. |
 | `literature-search` | beta | Agent-led, provider-neutral literature discovery with durable queries, provenance, screening evidence, coverage, budgets, and stop reasons; it does not create canonical units. |
 | `research-monitor` | beta | Provider-neutral subscriptions, due facts, frozen run receipts, retries, and evidence-bound outcomes; no daemon, scheduler, provider, or plugin is bundled. |
-| `unit-analyst` | beta | One discoverable entrypoint routes paper, repository, dataset, and blog units to their evidence-bound prepare/verify implementations; the runtime agent supplies substantive understanding and historical owner identities remain stable. |
+| `unit-analyst` | beta | One discoverable skill owns and routes the bundled paper, repository, dataset, and blog prepare/verify implementations; the runtime agent supplies substantive understanding and historical persisted owner identities remain stable. |
 | `research-config-manager` | beta | One canonical preference profile is filtered by per-skill disclosure rules, then the Agent selects the task-relevant subset and stores a digest-bound receipt. |
 | `discussion-archivist` | beta | Durable conclusion-level discussion archives with explicit evidence and open questions. |
 | `research-orchestrator` | beta | Program spine, complete survey routing, dashboards and event flow; cross-program next-step choice is Agent-authored over a complete factual snapshot and becomes stale when inputs change. |

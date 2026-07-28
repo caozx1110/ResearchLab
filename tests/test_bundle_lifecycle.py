@@ -354,6 +354,86 @@ def test_clean_install_ships_only_runtime_allowlist(tmp_path: Path) -> None:
     assert "更新”或“重装" in duplicate.stderr
 
 
+def test_update_replaces_legacy_analyzer_implementations_with_launchers(
+    tmp_path: Path,
+) -> None:
+    ws_sync = _load_ws_sync()
+    old_source = tmp_path / "old-source"
+    old_agents = old_source / ".agents"
+    old_agents.mkdir(parents=True)
+    for relative_path in (".agents/AGENTS.md", ".agents/VERSION", "LICENSE"):
+        source = _project_root() / relative_path
+        destination = old_source / relative_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+
+    owners = {
+        "paper": "paper-analyst",
+        "repo": "repo-analyst",
+        "dataset": "dataset-analyst",
+        "blog": "blog-analyst",
+    }
+    for kind, owner in owners.items():
+        destination = old_agents / "skills" / owner / "scripts" / f"{kind}.py"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(
+            _project_root() / ".agents" / "skills" / "unit-analyst" / "scripts" / f"{kind}.py",
+            destination,
+        )
+
+    workspace = tmp_path / "workspace-from-old-layout"
+    workspace.mkdir()
+    install_args = SimpleNamespace(
+        repo=str(_project_root()),
+        dir=str(workspace),
+        source=str(old_source),
+        agents="codex",
+        operation_time="2026-07-28T00:00:00Z",
+        expected_manifest_state="",
+        source_commit="pre-consolidation",
+        source_origin="local",
+        source_checkout=str(old_source),
+        source_branch="",
+        source_strategy="local-checkout",
+        force=False,
+        dry_run=False,
+        allow_snapshot_source=True,
+    )
+    assert ws_sync.install(install_args) == 0
+    old_manifest = json.loads(
+        (workspace / ".agents" / ".install-manifest.json").read_text(encoding="utf-8")
+    )
+    assert not any("unit-analyst/scripts" in relative for relative in old_manifest["files"])
+
+    update_args = SimpleNamespace(
+        repo=str(_project_root()),
+        dir=str(workspace),
+        source="",
+        source_commit="post-consolidation",
+        source_origin="local",
+        source_checkout=str(_project_root()),
+        source_branch="",
+        source_strategy="local-checkout",
+        operation_time="2026-07-28T00:01:00Z",
+        force=False,
+        dry_run=False,
+        allow_snapshot_source=False,
+        expected_manifest_state="",
+    )
+    assert ws_sync.update(update_args) == 0
+
+    updated_manifest = json.loads(
+        (workspace / ".agents" / ".install-manifest.json").read_text(encoding="utf-8")
+    )
+    for kind, owner in owners.items():
+        canonical = f".agents/skills/unit-analyst/scripts/{kind}.py"
+        launcher = f".agents/skills/{owner}/scripts/{kind}.py"
+        assert canonical in updated_manifest["files"]
+        assert launcher in updated_manifest["files"]
+        assert (workspace / canonical).read_bytes() == (_project_root() / canonical).read_bytes()
+        assert "runpy.run_path" in (workspace / launcher).read_text(encoding="utf-8")
+
+
 def test_fresh_install_rejects_unverified_existing_managed_block(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace-unverified-block"
     workspace.mkdir()

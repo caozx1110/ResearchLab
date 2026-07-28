@@ -23,7 +23,7 @@
 - [x] A13 交互章程冷验收（三场景 10 条逐条打分）
 
 ### 质量验收
-- [x] Q1 pytest 全套绿（普通文件型 scratch runtime；最终 `2313 passed, 18 skipped`；不得回退新行为凑绿）
+- [x] Q1 pytest 全套绿（普通文件型 scratch runtime；post-campaign 归并后最终 `2318 passed, 18 skipped`；不得回退新行为凑绿）
 - [x] Q2 skill_validator 15/15；冷装 2.15s；install.sh install+update+uninstall 三态正常
 - [x] Q3 GOLDEN_SUITE 8 条全过且零机制摸索失败
 - [x] Q4 单任务规则文本 ≤8k tokens；kb next ≤3 步
@@ -119,6 +119,13 @@
 - 最终安装生命周期：snapshot cold install 2.15s，`kb init/help` 正常；no-change update 0.51s；uninstall 移除受管文件并保留 `kb/`。真实根 `kb/` 六个保护文件 SHA 与施工前基线完全一致。
 - 最终报告：`dev-docs/reviews/campaign-final-report.md`。未 push、tag、publish 或 merge；hosted Linux/macOS CI 仍是未来 release tag 外部门，不属于本地 campaign DoD 的虚假通过项。
 
+### R7 post-campaign unit-analyst 资源归并（完成，2026-07-28）
+- 用户指出 discoverable `unit-analyst` 与四套业务脚本的物理归属不一致，并明确要求合并。先在 SSOT 锁定资源归属与兼容边界，再施工；没有把 shipping skill 当作自身设计依据。
+- `paper/repo/dataset/blog.py` 的唯一 canonical 实现已迁入 `.agents/skills/unit-analyst/scripts/`；共享 `analyzer_registry.py` 统一提供 kind→script/prepare/id-arg/持久 owner 映射，intake、kb-cli、knowledge-base-manager、orchestrator 与 confirmation navigation 不再各自硬编码旧路径。
+- 旧四目录只保留 14–15 行 `runpy` 兼容启动器，原可执行权限保持；`paper/repo/dataset/blog-analyst` 的 preference、journal、ConfirmationReceipt、provenance 与 diagnostic identity 均未迁名。新文档、测试和运行时命令只指向 canonical 路径。
+- fresh install 与模拟 pre-consolidation manifest update 均通过：旧 full script 被原子替换为 launcher，四个 canonical script 进入 manifest。最终完整套件 `2318 passed, 18 skipped, 7 warnings`（10m22s），Python 3.9 AST 66 文件、`Validated 15 skills.`、`bash -n install.sh` 与 diff check 全绿；真实 `kb/` 六个保护文件哈希保持施工前基线。
+- 提交：`d53b0d4`（设计 gate）、`5bda2bd`（实现与主体回归）；本段与公开文档、旧 manifest update 回归另作 closure commit。未 push、tag、publish 或合并主分支。
+
 ## 决定记录（含偏离蓝图的理由）
 
 | # | 日期 | 决定 | 理由 |
@@ -130,6 +137,7 @@
 | D5 | 07-27 | R5 的 20→14 按 L1 owner 计，最终发现面为 15；四 analyzer 只并发现层；human-note/偏好均不因 source=user 自动确认 | 保持既有 receipt/owner/schema identity 与开源兼容，同时消除重复提示词；“用户写过”与“用户确认该结构化判断”是两个不同事实 |
 | D6 | 07-27 | historical restore 定义为 X 到最新尚未恢复 root operations 的单事务区间恢复 | 只恢复旧 X 会与后续共享 index targets 产生不可避免 CAS；完整虚拟 digest 链可在零写时证明回到 X 前且避免逐条半恢复 |
 | D7 | 07-27 | degraded source upgrade 另建 canonical revision；PDF warning 与来源完整性分开判断 | 保住旧 evidence immutable 与确认语义；少量 native recovery/table 格式告警不应把 45 页完整 raw PDF 等同摘要壳，也不得伪报 warning-free complete |
+| D8 | 07-28 | `unit-analyst` 同时统一发现、路由和四类 analyzer 的物理脚本资源；历史 owner identity 不迁名 | 让 skill 资源可发现、可打包且单点维护，同时避免使既有 preference、journal、receipt、provenance 与 diagnostics 失效；旧路径仅作当前 RC 的薄兼容入口 |
 
 ## 遗留清单
 

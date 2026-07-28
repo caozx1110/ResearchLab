@@ -4,6 +4,12 @@ All notable changes to this project will be documented here. The format follows 
 
 ## [Unreleased]
 
+### Changed (post-campaign resource consolidation, 2026-07-28)
+
+- `unit-analyst` now physically owns the canonical paper, repository, dataset, and blog analyzer scripts as well as the discoverable routing surface. All current runtime navigation uses one kind registry under the shared library.
+- Historical `paper-analyst`, `repo-analyst`, `dataset-analyst`, and `blog-analyst` script paths remain as thin compatibility launchers. Their persisted preference, journal, receipt, provenance, and diagnostic owner identities are unchanged.
+- Copy-install updates atomically replace pre-consolidation full scripts with compatibility launchers and add the four canonical `unit-analyst` scripts to the managed manifest; managed drift remains fail-closed.
+
 ### Fixed (R6 cold acceptance, 2026-07-27)
 
 - Public paper review translates the exact canonical paper-type claim into reader-facing language while keeping generic assignment-like payloads fail-closed.

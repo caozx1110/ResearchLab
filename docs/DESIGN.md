@@ -36,14 +36,14 @@ Release bundle 不包含任何私有 `kb/`。安装、更新、storage sync 和�
 
 ## Skill 路由
 
-发布树包含 **15 个可发现 skill：14 个 L1 owner + `kb-cli`**。四类 unit analyzer 合并的是发现与路由面，历史 owner module、脚本、canonical artifact identity 与数据模型保持不变：
+发布树包含 **15 个可发现 skill：14 个 L1 owner + `kb-cli`**。四类 unit analyzer 的发现、路由与 canonical 脚本资源统一归 `unit-analyst`；历史持久 owner identity、canonical artifact identity 与数据模型保持不变，旧脚本路径只在当前 RC 升级窗口作为薄兼容启动器：
 
 | 分组 | Skills |
 |---|---|
 | Governance and routing | `knowledge-base-manager`, `research-config-manager`, `source-intake`, `research-orchestrator` |
 | Discovery | `literature-search` |
 | Ongoing tracking | `research-monitor` |
-| Analysis | `unit-analyst`（路由 paper/repo/dataset/blog 的既有 owner implementation）, `literature-synthesizer` |
+| Analysis | `unit-analyst`（统一持有并路由 paper/repo/dataset/blog implementation）, `literature-synthesizer` |
 | Creation and execution | `idea-workbench`, `method-designer`, `experiment-workbench`, `report-author` |
 | Navigation and meta | `discussion-archivist`, `skill-evolution-advisor` |
 | Conversational shortcut | `kb-cli` |
