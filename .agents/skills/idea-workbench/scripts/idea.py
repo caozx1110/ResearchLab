@@ -40,6 +40,7 @@ from research.core import (
     iter_records,
     kb_root,
     locate_record,
+    passage_search_cache_path,
     checkpoint_and_report,
     project_root,
     record_path,
@@ -141,6 +142,10 @@ def _index_checkpoint_paths(root: Path) -> list[Path]:
     ]
 
 
+def _index_transaction_paths(root: Path) -> list[Path]:
+    return [*_index_checkpoint_paths(root), passage_search_cache_path(root)]
+
+
 def _generic_bundle_id(args) -> str:
     if str(args.bundle_id or ""):
         return str(args.bundle_id)
@@ -197,7 +202,7 @@ def _queue_checkpoint(root: Path, *, trigger: str, message: str, target_paths: l
 
 
 def _idea_command_targets(args, root: Path) -> list[Path]:
-    targets = list(_index_checkpoint_paths(root))
+    targets = list(_index_transaction_paths(root))
     if args.command == "capture":
         idea_id = build_unit_id("idea", args.title, args.source)
         return [record_path(root, "idea", idea_id), *targets]

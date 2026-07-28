@@ -40,7 +40,7 @@ from research.common import (
     write_text_if_changed,
     write_yaml_if_changed,
 )
-from research.core import append_history, build_index, build_unit_id, candidate_pools_path, canonical_record_snapshot_for_record, checkpoint_and_report, command_mutation, confirm_unit, default_record, ensure_workspace, kb_root, locate_record, project_root, record_path, rel, topic_taxonomy_path, write_record
+from research.core import append_history, build_index, build_unit_id, candidate_pools_path, canonical_record_snapshot_for_record, checkpoint_and_report, command_mutation, confirm_unit, default_record, ensure_workspace, kb_root, locate_record, passage_search_cache_path, project_root, record_path, rel, topic_taxonomy_path, write_record
 from research.evidence import attach_claims, build_verification_receipt, validate_claims, verify_claim_evidence
 from research.experiment_imports import load_import_batch, require_current_import_batch
 from research.journal import workspace_transaction_lock
@@ -73,6 +73,10 @@ def _index_targets(root: Path) -> list[Path]:
         topic_taxonomy_path(root),
         candidate_pools_path(root),
     ]
+
+
+def _index_transaction_targets(root: Path) -> list[Path]:
+    return [*_index_targets(root), passage_search_cache_path(root)]
 
 
 # Checkpoint queue (same owner pattern as idea.py's _queue_checkpoint /
@@ -137,12 +141,12 @@ def _experiment_command_targets(args, root: Path) -> list[Path]:
         return [
             record_path(root, "experiment", experiment_id),
             _program_event_path(root, args.program_id),
-            *_index_targets(root),
+            *_index_transaction_targets(root),
         ]
     record, path = locate_record(root, args.experiment_id, kind="experiment")
     unit = path.parent
     program_id = str(record.get("payload", {}).get("basic_info", {}).get("program_id") or "").strip()
-    targets = [path, *_index_targets(root)]
+    targets = [path, *_index_transaction_targets(root)]
     if program_id:
         targets.append(_program_event_path(root, program_id))
     if args.command in {"log-run", "import-runs"}:

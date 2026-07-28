@@ -4,7 +4,7 @@ from __future__ import annotations
 import subprocess
 from contextlib import ExitStack
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Sequence
 
 from .common import (
@@ -19,6 +19,7 @@ from .paths import (
     kb_gitignore_path,
     kb_root,
     kb_runtime_root,
+    passage_search_cache_path,
     versioning_state_path,
 )
 from .journal import (
@@ -544,6 +545,27 @@ def _committed_root_ops(project_root: Path) -> list[dict[str, Any]]:
     return roots
 
 
+_UNKNOWN_RECOVERY_DIGEST = object()
+
+
+def _target_keys_overlap(first: str, second: str) -> bool:
+    """Return whether two canonical journal keys have an ancestor relation."""
+    first_parts = PurePosixPath(first).parts
+    second_parts = PurePosixPath(second).parts
+    shorter = min(len(first_parts), len(second_parts))
+    return first_parts[:shorter] == second_parts[:shorter]
+
+
+def _recovery_envelope_keys(keys: set[str]) -> list[str]:
+    """Collapse an overlapping union to the topmost non-overlapping envelopes."""
+    envelopes: list[str] = []
+    for key in sorted(keys, key=lambda item: (len(PurePosixPath(item).parts), item)):
+        if any(_target_keys_overlap(envelope, key) for envelope in envelopes):
+            continue
+        envelopes.append(key)
+    return envelopes
+
+
 def _restore_committed_range(
     project_root: Path,
     op_id: str,
@@ -574,29 +596,48 @@ def _restore_committed_range(
         source_views = [(source_id, *load_op_view(project_root, source_id)) for source_id in rewind_ids]
         keys_by_id: dict[str, list[str]] = {}
         union_keys: set[str] = set()
+        disposable_recovery_keys = {
+            _target_key(project_root, passage_search_cache_path(project_root))
+        }
         for source_id, entry, _source_digest in source_views:
             if str(entry.get("state") or "") != "commit":
                 raise SystemExit("只有已完成的根操作才能进入恢复链。")
-            keys = validated_recovery_target_keys(project_root, entry, require_after=True)
+            validated_keys = validated_recovery_target_keys(project_root, entry, require_after=True)
+            keys = [key for key in validated_keys if key not in disposable_recovery_keys]
             keys_by_id[source_id] = keys
             union_keys.update(keys)
         target_paths = [target_path(project_root, key) for key in sorted(union_keys)]
+        recovery_target_paths = [
+            target_path(project_root, key) for key in _recovery_envelope_keys(union_keys)
+        ]
         with ExitStack() as locks:
             for path in sorted(target_paths, key=lambda item: item.as_posix()):
                 locks.enter_context(operation_lock(project_root, path))
 
-            # Prove the complete current→selected-before chain before creating a
-            # recovery journal or changing any business target.
-            virtual = {key: target_digest(project_root, key) for key in union_keys}
+            # Prove every exact-key segment before creating a recovery journal.
+            # A directory digest cannot be derived by assigning the recorded
+            # before digest of one descendant (and vice versa), so overlapping
+            # scopes become unknown until the real reverse replay below.
+            virtual: dict[str, str | None | object] = {
+                key: target_digest(project_root, key) for key in union_keys
+            }
             for source_id, entry, _source_digest in reversed(source_views):
                 keys = keys_by_id[source_id]
                 after_digests = entry["after_digests"]
-                if any(virtual[key] != after_digests.get(key) for key in keys):
+                if any(
+                    virtual[key] is not _UNKNOWN_RECOVERY_DIGEST
+                    and virtual[key] != after_digests.get(key)
+                    for key in keys
+                ):
                     raise SystemExit(
                         "当前状态与已记录的恢复链不一致；可能存在未记账修改或日志损坏，"
                         "为避免覆盖现有内容，已停止恢复。"
                     )
                 before_digests = entry["before_digests"]
+                key_set = set(keys)
+                for union_key in union_keys - key_set:
+                    if any(_target_keys_overlap(union_key, key) for key in keys):
+                        virtual[union_key] = _UNKNOWN_RECOVERY_DIGEST
                 for key in keys:
                     virtual[key] = before_digests.get(key)
 
@@ -609,13 +650,24 @@ def _restore_committed_range(
             with _recovery_journaled_op(
                 project_root,
                 f"{recovery_type}:{op_id}",
-                target_paths,
+                recovery_target_paths,
             ) as recovery_op_id:
                 for source_id, entry, _source_digest in reversed(source_views):
+                    keys = keys_by_id[source_id]
+                    after_digests = entry["after_digests"]
+                    if any(
+                        target_digest(project_root, key) != after_digests.get(key)
+                        for key in keys
+                    ):
+                        raise SystemExit(
+                            "当前状态与已记录的恢复链不一致；可能存在未记账修改或日志损坏，"
+                            "为避免覆盖现有内容，已停止恢复。"
+                        )
                     for restored_path in restore_before_snapshots(
                         project_root,
                         source_id,
                         source_entry=entry,
+                        target_keys=keys_by_id[source_id],
                     ):
                         restored_by_key[_target_key(project_root, restored_path)] = restored_path
             restored = [restored_by_key[key] for key in sorted(restored_by_key)]

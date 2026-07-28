@@ -2653,6 +2653,92 @@ def test_restore_rewinds_interleaved_non_undoable_root_without_exposing_it(
     assert "undone_by" not in load_op(tmp_path, internal_op)
 
 
+def test_restore_replays_overlapping_directory_and_descendant_targets(
+    tmp_path: Path,
+) -> None:
+    _configure_kb_git(tmp_path)
+    unit = tmp_path / "kb" / "units" / "blogs" / "b-overlap"
+    record = unit / "record.yaml"
+    cache = tmp_path / "kb" / ".runtime" / "search" / "passages.sqlite3"
+
+    intake_op = begin_op(tmp_path, "source-intake-add", [unit, cache])
+    unit.mkdir(parents=True)
+    cache.parent.mkdir(parents=True)
+    record.write_text("generation: 1\n", encoding="utf-8")
+    cache.write_bytes(b"cache-1")
+    commit_op(tmp_path, intake_op)
+
+    analysis_op = begin_op(tmp_path, "blog-analyst:complete-note", [record, cache])
+    record.write_text("generation: 2\n", encoding="utf-8")
+    cache.write_bytes(b"cache-2")
+    commit_op(tmp_path, analysis_op)
+
+    result = restore_operation(tmp_path, intake_op)
+
+    assert result["restored_op_ids"] == [intake_op, analysis_op]
+    assert not unit.exists()
+    assert cache.read_bytes() == b"cache-2"
+
+
+def test_restore_ignores_legacy_unjournaled_passage_cache_refresh(
+    tmp_path: Path,
+) -> None:
+    _configure_kb_git(tmp_path)
+    unit = tmp_path / "kb" / "units" / "blogs" / "b-legacy-cache"
+    record = unit / "record.yaml"
+    cache = tmp_path / "kb" / ".runtime" / "search" / "passages.sqlite3"
+
+    intake_op = begin_op(tmp_path, "source-intake-add", [unit, cache])
+    unit.mkdir(parents=True)
+    cache.parent.mkdir(parents=True)
+    record.write_text("generation: 1\n", encoding="utf-8")
+    cache.write_bytes(b"cache-1")
+    commit_op(tmp_path, intake_op)
+
+    analysis_op = begin_op(tmp_path, "blog-analyst:complete-note", [record])
+    record.write_text("generation: 2\n", encoding="utf-8")
+    cache.write_bytes(b"legacy-unjournaled-cache-2")
+    commit_op(tmp_path, analysis_op)
+
+    result = restore_operation(tmp_path, intake_op)
+
+    assert result["restored_op_ids"] == [intake_op, analysis_op]
+    assert not unit.exists()
+    assert cache.read_bytes() == b"legacy-unjournaled-cache-2"
+
+
+def test_restore_rolls_back_atomically_when_deferred_parent_cas_fails(
+    tmp_path: Path,
+) -> None:
+    _configure_kb_git(tmp_path)
+    unit = tmp_path / "kb" / "units" / "blogs" / "b-overlap"
+    record = unit / "record.yaml"
+    manual = unit / "manual.md"
+    cache = tmp_path / "kb" / ".runtime" / "search" / "passages.sqlite3"
+
+    intake_op = begin_op(tmp_path, "source-intake-add", [unit, cache])
+    unit.mkdir(parents=True)
+    cache.parent.mkdir(parents=True)
+    record.write_text("generation: 1\n", encoding="utf-8")
+    cache.write_bytes(b"cache-1")
+    commit_op(tmp_path, intake_op)
+
+    analysis_op = begin_op(tmp_path, "blog-analyst:complete-note", [record, cache])
+    record.write_text("generation: 2\n", encoding="utf-8")
+    cache.write_bytes(b"cache-2")
+    commit_op(tmp_path, analysis_op)
+    manual.write_text("unjournaled\n", encoding="utf-8")
+
+    with pytest.raises(SystemExit, match="恢复链不一致"):
+        restore_operation(tmp_path, intake_op)
+
+    assert record.read_text(encoding="utf-8") == "generation: 2\n"
+    assert cache.read_bytes() == b"cache-2"
+    assert manual.read_text(encoding="utf-8") == "unjournaled\n"
+    assert "undone_by" not in load_op(tmp_path, intake_op)
+    assert "undone_by" not in load_op(tmp_path, analysis_op)
+
+
 def test_repeated_undo_crosses_interleaved_non_undoable_root(
     tmp_path: Path,
 ) -> None:
@@ -2699,6 +2785,58 @@ def test_complete_restore_chain_still_rejects_unjournaled_current_change(
 
     assert target.read_text(encoding="utf-8") == "manual\n"
     assert "undone_by" not in load_op(tmp_path, op_id)
+
+
+@pytest.mark.parametrize("script_name", ["paper.py", "repo.py", "dataset.py", "blog.py"])
+def test_analyzer_index_transaction_targets_include_passage_cache(
+    tmp_path: Path,
+    script_name: str,
+) -> None:
+    script = _project_root() / ".agents" / "skills" / "unit-analyst" / "scripts" / script_name
+    module_name = f"unit_analyst_{script_name.removesuffix('.py')}_index_targets_test"
+    spec = importlib.util.spec_from_file_location(module_name, script)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+
+    assert tmp_path / "kb" / ".runtime" / "search" / "passages.sqlite3" in module._index_targets(
+        tmp_path
+    )
+
+
+@pytest.mark.parametrize(
+    ("relative_script", "transaction_builder", "checkpoint_builder"),
+    [
+        (
+            ".agents/skills/idea-workbench/scripts/idea.py",
+            "_index_transaction_paths",
+            "_index_checkpoint_paths",
+        ),
+        (
+            ".agents/skills/experiment-workbench/scripts/experiment.py",
+            "_index_transaction_targets",
+            "_index_targets",
+        ),
+    ],
+)
+def test_index_builders_separate_passage_cache_transaction_from_checkpoint(
+    tmp_path: Path,
+    relative_script: str,
+    transaction_builder: str,
+    checkpoint_builder: str,
+) -> None:
+    script = _project_root() / relative_script
+    module_name = f"{script.stem}_index_envelope_test_{transaction_builder}"
+    spec = importlib.util.spec_from_file_location(module_name, script)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    cache = tmp_path / "kb" / ".runtime" / "search" / "passages.sqlite3"
+
+    assert cache in getattr(module, transaction_builder)(tmp_path)
+    assert cache not in getattr(module, checkpoint_builder)(tmp_path)
 
 
 @pytest.mark.parametrize("journal_state", ["absent", "empty"])

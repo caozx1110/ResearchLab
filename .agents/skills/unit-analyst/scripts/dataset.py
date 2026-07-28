@@ -55,6 +55,7 @@ from research.core import (
     checkpoint_and_report,
     confirm_unit,
     locate_record,
+    passage_search_cache_path,
     project_root,
     rel,
     topic_taxonomy_path,
@@ -107,6 +108,7 @@ def _index_targets(root: Path) -> list[Path]:
         root / "kb" / "index.md",
         topic_taxonomy_path(root),
         candidate_pools_path(root),
+        passage_search_cache_path(root),
     ]
 
 

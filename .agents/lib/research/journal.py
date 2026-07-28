@@ -2084,11 +2084,20 @@ def restore_before_snapshots(
     op_id: str,
     *,
     source_entry: Mapping[str, object] | None = None,
+    target_keys: Sequence[str] | None = None,
 ) -> list[Path]:
     entry = dict(source_entry) if source_entry is not None else load_op(project_root, op_id)
     if str(entry.get("op_id") or "") != op_id:
         raise RuntimeError("Recovery source entry identity changed.")
-    keys = validated_recovery_target_keys(project_root, entry, require_after=False)
+    validated_keys = validated_recovery_target_keys(project_root, entry, require_after=False)
+    if target_keys is None:
+        keys = validated_keys
+    else:
+        requested = list(target_keys)
+        if len(requested) != len(set(requested)) or not set(requested).issubset(validated_keys):
+            raise RuntimeError(f"Operation {op_id} requested an invalid recovery target subset.")
+        requested_set = set(requested)
+        keys = [key for key in validated_keys if key in requested_set]
     snapshots = entry.get("before_snapshots", {})
     if not isinstance(snapshots, dict) or not snapshots:
         raise RuntimeError(f"Operation {op_id} has no before snapshots to restore.")
