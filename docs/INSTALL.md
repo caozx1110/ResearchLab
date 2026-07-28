@@ -60,11 +60,11 @@ kb init
 
 推荐把 bundle 以 project-scope copy 方式安装到外部 workspace 根：
 
-- `bash install.sh --all --project DIR` 把整棵 `.agents/`（含使用规则 `.agents/AGENTS.md`）复制到 `DIR`。
+- `bash install.sh --all --project DIR` 把 manifest 声明的完整受管运行子集（含使用规则 `.agents/AGENTS.md`）复制到 `DIR`。
 - 安装器把使用规则写到 workspace 根 `DIR/AGENTS.md`，并配置所选 agent 工具。
 - workspace 数据继续放在 `DIR/kb/`，受管 Python 环境放在 `DIR/.venv/`。
 
-整棵 `.agents` 一起复制是受支持的安装单元；不要只复制单个 skill，也不要把 bundle 指向或安装进 `DIR/kb/`。system scope 与 symlink 模式只保留兼容性，不作为新安装建议。
+完整受管运行子集是受支持的安装单元；源码树中的测试、validator、开发评估工具和 checkout 说明不属于该子集。不要只复制单个 skill，也不要把 bundle 指向或安装进 `DIR/kb/`。system scope 与 symlink 模式只保留兼容性，不作为新安装建议。
 
 project copy workspace 不需要 `RESEARCH_SKILLS_HOME`。若当前 Python 缺运行依赖，正式安装末尾的 smoke check 或首次运行会把受管 venv 建在 `DIR/.venv`；依赖已满足时不会无条件创建。
 

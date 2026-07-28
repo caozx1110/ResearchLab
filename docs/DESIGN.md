@@ -264,4 +264,4 @@ Install manifest 记录 `source_origin` 与 `source_branch`，本地安装还可
 10. 在 Linux 与 macOS 支持的 Python 版本上验证；
 11. 发布前由冷 acceptance agent 端到端复现关键路径。
 
-当前标识为 `0.2.0-rc.7`，由 `.agents/VERSION` 唯一控制；它仍是未发布的 RC，不代表 stable/GA。当前验收指标、剩余发布门、兼容性与 SLA 范围只在 `CHANGELOG.md` 维护，README、用户指南与本设计文档仅引用该事实源，不复制易漂移的测试数字或门状态。
+当前标识为 `0.2.0-rc.7`，由 `.agents/VERSION` 唯一控制；该标识表示 RC，不代表 stable/GA，某个精确 revision 的发布状态只由对应 Git tag 与 GitHub pre-release 证明。当前验收指标、剩余发布门、兼容性与 SLA 范围只在 `CHANGELOG.md` 维护，README、用户指南与本设计文档仅引用该事实源，不复制易漂移的测试数字或门状态。
