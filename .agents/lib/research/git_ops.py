@@ -159,6 +159,7 @@ def git_checkpoint(
     trigger: str = "manual",
     auto_init: bool = True,
     target_paths: Sequence[Path | str] | None = None,
+    prepare_workspace: bool = True,
 ) -> dict[str, Any]:
     scoped_paths = _normalize_git_paths(project_root, target_paths)
     _preflight_journal_envelopes(project_root)
@@ -170,6 +171,7 @@ def git_checkpoint(
             trigger=trigger,
             auto_init=auto_init,
             scoped_paths=scoped_paths,
+            prepare_workspace=prepare_workspace,
         )
 
 
@@ -180,13 +182,18 @@ def _git_checkpoint_locked(
     trigger: str,
     auto_init: bool,
     scoped_paths: Sequence[str],
+    prepare_workspace: bool,
 ) -> dict[str, Any]:
-    ensure_workspace(project_root)
+    if prepare_workspace:
+        ensure_workspace(project_root)
     if not kb_repo_exists(project_root):
         if auto_init:
             ensure_kb_git_repo(project_root, create_initial_commit=False)
         else:
             return {"committed": False, "status": "missing-repo", "message": "kb git repo is not initialized"}
+    # The retained repository and recovery journal still need their operational
+    # ignore rules even when undoing initial workspace materialization.  This is
+    # the only worktree infrastructure allowed on the non-materializing path.
     ensure_kb_gitignore(project_root)
     checkpointable_paths, addable_paths = _checkpointable_git_paths(project_root, scoped_paths)
     if not checkpointable_paths:
@@ -507,6 +514,7 @@ def restore_operation(project_root: Path, op_id: str, *, recovery_type: str = "r
                     trigger="manual",
                     auto_init=False,
                     target_paths=restored,
+                    prepare_workspace=False,
                 )
             if state == "begin":
                 terminalize_resumed_op(
@@ -678,6 +686,7 @@ def _restore_committed_range(
                     trigger="manual",
                     auto_init=False,
                     target_paths=restored,
+                    prepare_workspace=False,
                 )
             for source_id in selected_candidate_ids:
                 mark_op_undone(project_root, source_id, recovery_op_id)

@@ -222,7 +222,7 @@ Dispatcher 只在 owner 已返回非零结果之后尝试捕获，并且只交�
 4. 成功后提交 journal；失败留下可恢复状态；
 5. checkpoint 只接收本次 operation targets。
 
-禁止空 scope fallback，也禁止 `git add -A`。Manual checkpoint 先查询 dirty KB paths；clean state 是成功 no-op。Resume、undo、restore 只处理 journal 中记录的路径。公开 undo/restore 候选只包含未消费的 undoable business root，但真正 rewind 从选中 root 起遍历全部 changed committed roots，包括不可单选的内部记账、旧 recovery 和已经消费的 business root；child mutation 只由 authoritative root before-image 恢复。完整 canonical target union 先锁定并预证所有 exact-key digest 段；目录与 descendant target 重叠时，以折叠后的 topmost envelope 建一个外层 recovery journal，逆序每步按真实文件树重验 after-state，任一步失败都回滚到调用前 bytes、不 checkpoint、不消费操作。passage SQLite cache 是特殊的派生状态：所有 `build_index()` 命令必须把它纳入本命令事务以支持 abort，但历史 undo/restore 不用它阻断或回放，保留 cache 由查询健康门判 stale/corrupt 后只读回退。canonical 链不连续时仍以未记账修改或日志损坏中性分类 fail closed。
+禁止空 scope fallback，也禁止 `git add -A`。Manual checkpoint 先查询 dirty KB paths；clean state 是成功 no-op。Resume、undo、restore 只处理 journal 中记录的路径。公开 undo/restore 候选只包含未消费的 undoable business root，但真正 rewind 从选中 root 起遍历全部 changed committed roots，包括不可单选的内部记账、旧 recovery 和已经消费的 business root；child mutation 只由 authoritative root before-image 恢复。完整 canonical target union 先锁定并预证所有 exact-key digest 段；目录与 descendant target 重叠时，以折叠后的 topmost envelope 建一个外层 recovery journal，逆序每步按真实文件树重验 after-state，任一步失败都回滚到调用前 bytes、不 checkpoint、不消费操作。成功恢复的 checkpoint 使用 non-materializing 模式，只提交 exact restored paths，绝不调用 workspace 初始化或 auto-init repo，因此撤销 initialize 后不会把刚删除的 canonical 文件重新生成；因 `.git/.journal` 要保留恢复历史，`.gitignore` 是唯一允许保留/补齐的工作树基础设施。passage SQLite cache 是特殊的派生状态：所有 `build_index()` 命令必须把它纳入本命令事务以支持 abort，但历史 undo/restore 不用它阻断或回放，保留 cache 由查询健康门判 stale/corrupt 后只读回退。canonical 链不连续时仍以未记账修改或日志损坏中性分类 fail closed。
 
 ## Runtime bootstrap
 

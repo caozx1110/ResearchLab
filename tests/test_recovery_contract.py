@@ -2739,6 +2739,45 @@ def test_restore_rolls_back_atomically_when_deferred_parent_cas_fails(
     assert "undone_by" not in load_op(tmp_path, analysis_op)
 
 
+def test_restore_checkpoint_does_not_rematerialize_initial_workspace_files(
+    tmp_path: Path,
+) -> None:
+    kb = tmp_path / "kb"
+    kb.mkdir()
+    subprocess.run(["git", "-C", str(kb), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(kb), "config", "user.name", "Recovery Tests"], check=True)
+    subprocess.run(
+        ["git", "-C", str(kb), "config", "user.email", "recovery@example.com"],
+        check=True,
+    )
+    initialized = kb / "config" / "research-settings.md"
+    gitignore = kb / ".gitignore"
+    operation_id = begin_op(tmp_path, "initialize_workspace", [initialized, gitignore])
+    initialized.parent.mkdir(parents=True)
+    initialized.write_text("# initialized\n", encoding="utf-8")
+    git_ops.ensure_kb_gitignore(tmp_path)
+    commit_op(tmp_path, operation_id)
+    subprocess.run(
+        ["git", "-C", str(kb), "add", "--", ".gitignore", "config/research-settings.md"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(kb), "commit", "-q", "-m", "initialize"], check=True)
+
+    result = restore_operation(tmp_path, operation_id)
+
+    assert result["checkpoint"]["committed"] is True
+    assert not initialized.exists()
+    assert gitignore.exists()
+    assert not (kb / "config" / "topic-taxonomy.yaml").exists()
+    assert not (kb / "user" / "navigation.md").exists()
+    assert subprocess.run(
+        ["git", "-C", str(kb), "status", "--porcelain"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout == ""
+
+
 def test_repeated_undo_crosses_interleaved_non_undoable_root(
     tmp_path: Path,
 ) -> None:
