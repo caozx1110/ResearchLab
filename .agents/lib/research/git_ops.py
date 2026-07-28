@@ -28,6 +28,7 @@ from .journal import (
     _recovery_journaled_op,
     _recovery_workspace_scope,
     _target_key,
+    committed_ops,
     incomplete_ops,
     journal_runtime_lock,
     journaled_op,
@@ -437,8 +438,8 @@ def _checkpointable_git_paths(
 
 
 def restore_operation(project_root: Path, op_id: str, *, recovery_type: str = "restore") -> dict[str, Any]:
-    if recovery_type == "restore":
-        return _restore_committed_range(project_root, op_id)
+    if recovery_type in {"restore", "undo"}:
+        return _restore_committed_range(project_root, op_id, recovery_type=recovery_type)
     with workspace_transaction_lock(project_root):
         # The source journal is mutable runtime state.  Load and validate its
         # authoritative bytes only after obtaining the workspace lease; every
@@ -524,21 +525,58 @@ def restore_operation(project_root: Path, op_id: str, *, recovery_type: str = "r
     }
 
 
-def _restore_committed_range(project_root: Path, op_id: str) -> dict[str, Any]:
-    """Atomically restore the selected business operation and every newer one."""
+def _committed_root_ops(project_root: Path) -> list[dict[str, Any]]:
+    """Return changed committed roots, including internal and recovery roots.
+
+    Public recovery candidates intentionally exclude non-undoable bookkeeping,
+    previously consumed business operations, and recovery journals.  Those roots
+    still changed canonical targets, however, so a historical rewind must replay
+    them to prove a continuous after->before digest chain.  Descendants stay out:
+    their mutations are already covered by the authoritative root before-image.
+    """
+    roots: list[dict[str, Any]] = []
+    for entry in committed_ops(project_root):
+        op_id = str(entry.get("op_id") or "")
+        parent_op_id = str(entry.get("parent_op_id") or "")
+        root_op_id = str(entry.get("root_op_id") or op_id)
+        if op_id and not parent_op_id and root_op_id == op_id:
+            roots.append(entry)
+    return roots
+
+
+def _restore_committed_range(
+    project_root: Path,
+    op_id: str,
+    *,
+    recovery_type: str = "restore",
+) -> dict[str, Any]:
+    """Atomically rewind every committed root from a selectable operation onward."""
     with workspace_transaction_lock(project_root):
         if incomplete_ops(project_root):
             raise SystemExit("检测到未完成的知识库操作；请先使用 kb resume 完成恢复。")
-        candidate_ids = [str(entry.get("op_id") or "") for entry in restorable_committed_ops(project_root)]
+        if recovery_type == "undo" and not op_id:
+            # Re-select under the authoritative workspace lock.  The optimistic
+            # read in undo_last_operation exists only to keep the no-candidate
+            # path byte-identical and must not decide what a concurrent undo uses.
+            op_id = str(latest_committed_op(project_root).get("op_id") or "")
+        candidate_ids = [
+            str(entry.get("op_id") or "")
+            for entry in restorable_committed_ops(project_root)
+        ]
         if op_id not in candidate_ids:
             raise SystemExit(f"Operation is not undoable: {op_id}")
-        selected_ids = candidate_ids[candidate_ids.index(op_id) :]
-        source_views = [(source_id, *load_op_view(project_root, source_id)) for source_id in selected_ids]
+        selected_candidate_ids = candidate_ids[candidate_ids.index(op_id) :]
+
+        root_ids = [str(entry.get("op_id") or "") for entry in _committed_root_ops(project_root)]
+        if op_id not in root_ids:
+            raise SystemExit("指定操作缺少完整的根操作恢复记录；已停止恢复。")
+        rewind_ids = root_ids[root_ids.index(op_id) :]
+        source_views = [(source_id, *load_op_view(project_root, source_id)) for source_id in rewind_ids]
         keys_by_id: dict[str, list[str]] = {}
         union_keys: set[str] = set()
         for source_id, entry, _source_digest in source_views:
-            if str(entry.get("state") or "") != "commit" or str(entry.get("undone_by") or ""):
-                raise SystemExit("只有尚未恢复的已完成操作可恢复。")
+            if str(entry.get("state") or "") != "commit":
+                raise SystemExit("只有已完成的根操作才能进入恢复链。")
             keys = validated_recovery_target_keys(project_root, entry, require_after=True)
             keys_by_id[source_id] = keys
             union_keys.update(keys)
@@ -554,7 +592,10 @@ def _restore_committed_range(project_root: Path, op_id: str) -> dict[str, Any]:
                 keys = keys_by_id[source_id]
                 after_digests = entry["after_digests"]
                 if any(virtual[key] != after_digests.get(key) for key in keys):
-                    raise SystemExit("目标在该操作完成后又被修改；为避免覆盖后续改动，已停止恢复。")
+                    raise SystemExit(
+                        "当前状态与已记录的恢复链不一致；可能存在未记账修改或日志损坏，"
+                        "为避免覆盖现有内容，已停止恢复。"
+                    )
                 before_digests = entry["before_digests"]
                 for key in keys:
                     virtual[key] = before_digests.get(key)
@@ -565,7 +606,11 @@ def _restore_committed_range(project_root: Path, op_id: str) -> dict[str, Any]:
                     raise SystemExit("恢复来源操作日志在执行前发生变化；已停止恢复。")
 
             restored_by_key: dict[str, Path] = {}
-            with _recovery_journaled_op(project_root, f"restore:{op_id}", target_paths) as recovery_op_id:
+            with _recovery_journaled_op(
+                project_root,
+                f"{recovery_type}:{op_id}",
+                target_paths,
+            ) as recovery_op_id:
                 for source_id, entry, _source_digest in reversed(source_views):
                     for restored_path in restore_before_snapshots(
                         project_root,
@@ -577,17 +622,18 @@ def _restore_committed_range(project_root: Path, op_id: str) -> dict[str, Any]:
             with _recovery_workspace_scope():
                 checkpoint = git_checkpoint(
                     project_root,
-                    f"recovery: restore {op_id}",
+                    f"recovery: {recovery_type} {op_id}",
                     trigger="manual",
                     auto_init=False,
                     target_paths=restored,
                 )
-            for source_id in selected_ids:
+            for source_id in selected_candidate_ids:
                 mark_op_undone(project_root, source_id, recovery_op_id)
     canonical_repo = kb_repo_path(project_root).resolve()
     return {
         "op_id": op_id,
-        "restored_op_ids": selected_ids,
+        "restored_op_ids": selected_candidate_ids,
+        "rewound_op_ids": rewind_ids,
         "recovery_op_id": recovery_op_id,
         "restored_paths": [path.relative_to(canonical_repo).as_posix() for path in restored],
         "checkpoint": checkpoint,
@@ -602,8 +648,7 @@ def undo_last_operation(project_root: Path) -> dict[str, Any]:
     # against the latest remaining business operation.
     latest_committed_op(project_root)
     with journal_runtime_lock(project_root, ".undo.lock"):
-        entry = latest_committed_op(project_root)
-        return restore_operation(project_root, str(entry["op_id"]), recovery_type="undo")
+        return _restore_committed_range(project_root, "", recovery_type="undo")
 
 
 __all__ = [

@@ -597,7 +597,7 @@ def test_recovery_refuses_to_overwrite_changes_made_after_committed_operation(
     journal_files_before = {path.name: path.read_bytes() for path in (tmp_path / "kb/.journal").glob("*.yaml")}
 
     target.write_text("manual edit after operation\n", encoding="utf-8")
-    with pytest.raises(SystemExit, match="操作完成后又被修改"):
+    with pytest.raises(SystemExit, match="恢复链不一致"):
         if action == "restore":
             restore_operation(tmp_path, op_id)
         else:
@@ -2608,6 +2608,97 @@ def test_restore_historical_operation_atomically_rewinds_the_newer_interval(tmp_
     assert load_op(tmp_path, second_op)["undone_by"] == result["recovery_op_id"]
     recovery = load_op(tmp_path, result["recovery_op_id"])
     assert recovery["target_paths"] == ["index.yaml", "notes/first.md", "notes/second.md"]
+
+
+def test_restore_rewinds_interleaved_non_undoable_root_without_exposing_it(
+    tmp_path: Path,
+) -> None:
+    _configure_kb_git(tmp_path)
+    shared = tmp_path / "kb" / "index.yaml"
+    first = tmp_path / "kb" / "notes" / "first.md"
+    internal = tmp_path / "kb" / "notes" / "internal.md"
+    second = tmp_path / "kb" / "notes" / "second.md"
+    first.parent.mkdir(parents=True)
+    shared.write_text("generation: 0\n", encoding="utf-8")
+
+    first_op = begin_op(tmp_path, "first-business", [shared, first])
+    shared.write_text("generation: 1\n", encoding="utf-8")
+    first.write_text("first\n", encoding="utf-8")
+    commit_op(tmp_path, first_op)
+
+    internal_op = begin_op(
+        tmp_path,
+        "internal-materialize",
+        [shared, internal],
+        undoable=False,
+        operation_role="internal",
+    )
+    shared.write_text("generation: 2\n", encoding="utf-8")
+    internal.write_text("internal\n", encoding="utf-8")
+    commit_op(tmp_path, internal_op)
+
+    second_op = begin_op(tmp_path, "second-business", [shared, second])
+    shared.write_text("generation: 3\n", encoding="utf-8")
+    second.write_text("second\n", encoding="utf-8")
+    commit_op(tmp_path, second_op)
+
+    result = restore_operation(tmp_path, first_op)
+
+    assert result["restored_op_ids"] == [first_op, second_op]
+    assert result["rewound_op_ids"] == [first_op, internal_op, second_op]
+    assert shared.read_text(encoding="utf-8") == "generation: 0\n"
+    assert not first.exists() and not internal.exists() and not second.exists()
+    assert load_op(tmp_path, first_op)["undone_by"] == result["recovery_op_id"]
+    assert load_op(tmp_path, second_op)["undone_by"] == result["recovery_op_id"]
+    assert "undone_by" not in load_op(tmp_path, internal_op)
+
+
+def test_repeated_undo_crosses_interleaved_non_undoable_root(
+    tmp_path: Path,
+) -> None:
+    _configure_kb_git(tmp_path)
+    shared = tmp_path / "kb" / "index.yaml"
+    shared.parent.mkdir(parents=True, exist_ok=True)
+    shared.write_text("generation: 0\n", encoding="utf-8")
+
+    first_op = begin_op(tmp_path, "first-business", [shared])
+    shared.write_text("generation: 1\n", encoding="utf-8")
+    commit_op(tmp_path, first_op)
+    internal_op = begin_op(tmp_path, "internal-index", [shared], undoable=False)
+    shared.write_text("generation: 2\n", encoding="utf-8")
+    commit_op(tmp_path, internal_op)
+    second_op = begin_op(tmp_path, "second-business", [shared])
+    shared.write_text("generation: 3\n", encoding="utf-8")
+    commit_op(tmp_path, second_op)
+
+    first_undo = undo_last_operation(tmp_path)
+    assert first_undo["op_id"] == second_op
+    assert shared.read_text(encoding="utf-8") == "generation: 2\n"
+
+    second_undo = undo_last_operation(tmp_path)
+    assert second_undo["op_id"] == first_op
+    assert internal_op in second_undo["rewound_op_ids"]
+    assert first_undo["recovery_op_id"] in second_undo["rewound_op_ids"]
+    assert shared.read_text(encoding="utf-8") == "generation: 0\n"
+
+
+def test_complete_restore_chain_still_rejects_unjournaled_current_change(
+    tmp_path: Path,
+) -> None:
+    _configure_kb_git(tmp_path)
+    target = tmp_path / "kb" / "notes" / "manual-change.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("before\n", encoding="utf-8")
+    op_id = begin_op(tmp_path, "business-edit", [target])
+    target.write_text("after\n", encoding="utf-8")
+    commit_op(tmp_path, op_id)
+    target.write_text("manual\n", encoding="utf-8")
+
+    with pytest.raises(SystemExit, match="恢复链不一致"):
+        restore_operation(tmp_path, op_id)
+
+    assert target.read_text(encoding="utf-8") == "manual\n"
+    assert "undone_by" not in load_op(tmp_path, op_id)
 
 
 @pytest.mark.parametrize("journal_state", ["absent", "empty"])

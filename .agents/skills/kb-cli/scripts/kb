@@ -2171,6 +2171,7 @@ _RESTORE_OWNER_STDOUT_RE = re.compile(r"已恢复到操作\s+(\S+)\s+之前的�
 # (no paths, no ids, no flags). Anything else stays private.
 _RECOVERY_SAFE_REFUSALS = (
     "目标在该操作完成后又被修改；为避免覆盖后续改动，已停止恢复。",
+    "当前状态与已记录的恢复链不一致；可能存在未记账修改或日志损坏，为避免覆盖现有内容，已停止恢复。",
     "检测到未完成的知识库操作；请先使用 kb resume 完成恢复。",
     "只有已完成的操作可恢复；未完成操作只能通过 kb resume 自愈。",
     "未完成操作必须按从新到旧的顺序恢复；已停止恢复。",

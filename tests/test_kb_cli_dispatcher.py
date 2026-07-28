@@ -2064,6 +2064,9 @@ def test_numbered_restore_rewinds_selected_and_newer_operations(
     shared.write_text("generation: 1\n", encoding="utf-8")
     first.write_text("first\n", encoding="utf-8")
     commit_op(tmp_path, first_op)
+    internal_op = begin_op(tmp_path, "internal-index", [shared], undoable=False)
+    shared.write_text("generation: 1.5\n", encoding="utf-8")
+    commit_op(tmp_path, internal_op)
     second_op = begin_op(tmp_path, "second-business", [shared, second])
     shared.write_text("generation: 2\n", encoding="utf-8")
     second.write_text("second\n", encoding="utf-8")
@@ -2074,6 +2077,10 @@ def test_numbered_restore_rewinds_selected_and_newer_operations(
     assert shared.read_text(encoding="utf-8") == "generation: 0\n"
     assert not first.exists() and not second.exists()
     assert "恢复到" in capsys.readouterr().out
+    internal_entry = next(
+        entry for entry in kb.committed_ops(tmp_path) if entry["op_id"] == internal_op
+    )
+    assert "undone_by" not in internal_entry
 
 
 def test_kb_next_forwards_to_orchestrator(monkeypatch, tmp_path: Path) -> None:
