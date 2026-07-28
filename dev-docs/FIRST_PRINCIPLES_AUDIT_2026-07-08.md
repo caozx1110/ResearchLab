@@ -4,7 +4,7 @@
 视角：从 `temp/what_i_need.md` 的**需求第一性原理**出发，而非实现细节。
 与 `temp/ADVERSARIAL_SKILL_AUDIT_2026-07-08.md` 的关系：那份是**实现层**（证据 schema、检索、analyzer 深度、spine 断裂），本份是**需求层**（假设是否成立、需求本身是否有遗漏、价值重心是否放对）。两份互补，不重复。
 坐实方式：所有判断均用当前代码 / KB 真实数据核对，带 `file:line` 或数据证据。
-**2026-07-09 实证补充**：用户质疑「kb/ 可能是旧版遗留」。已在干净工作区用**当前版本**跑完整入库（install → kb init → ingest AR-FB paper），产物在 `tmp/codex-test-ws/`，报告 `tmp/codex-test-ws/INGEST_REPORT.md`。结论：审查的核心判断被当前版本产物**直接坐实**，且比预想更严重（见 §2 假设 1/2 的「实证」小节）。旧 kb/ 里那些高质量 note 确实是**人手写的**（头部标 `审查状态：REWRITTEN`），不代表当前 skill 能力——用户直觉正确。
+**2026-07-09 实证补充**：用户质疑「kb/ 可能是旧版遗留」。已在干净工作区用**当前版本**跑完整入库（install → kb init → ingest AR-FB paper）；原隔离产物已清理，报告归档于 `dev-docs/reviews/legacy-acceptance/ar-fb-ingest-acceptance-2026-07-08.md`。结论：审查的核心判断被当前版本产物**直接坐实**，且比预想更严重（见 §2 假设 1/2 的「实证」小节）。旧 kb/ 里那些高质量 note 确实是**人手写的**（头部标 `审查状态：REWRITTEN`），不代表当前 skill 能力——用户直觉正确。
 
 ---
 
@@ -162,4 +162,3 @@ discussion-archivist 只有 **1 个动词 `archive`**（`archive.py`）——事
 - **写 G1 缺失的 paper-outline owner 的 SKILL.md + 脚本骨架**。
 
 建议从**验收尺子**起步——最便宜、最能校准后面所有决策，做完就能一眼看清系统到底帮不帮得上忙。
-

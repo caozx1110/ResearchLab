@@ -368,7 +368,7 @@
 - **⬇️ 下一步 = 验收门**:用户新建空 kb,codex 跑小批入库端到端测试(paper+repo+blog 各一),按易用/聪明/自动化打分 → 迭代。这是 skill 是否达到用户要的样子的真实检验。
 
 ### [验收测试完成 + 修复批规划 2026-07-10] cold agent 端到端跑通 paper+repo+blog
-- **打分(我已核实)**:聪明 9/10(证据门真管用,故意植改写 quote 被 verify 拒)、易用 7/10、**自动化 5/10(最大短板)**。真实 kb 未动(红线守住)。报告 tmp/accept-test/ACCEPTANCE_REPORT.md。
+- **打分(我已核实)**:聪明 9/10(证据门真管用,故意植改写 quote 被 verify 拒)、易用 7/10、**自动化 5/10(最大短板)**。真实 kb 未动(红线守住)。报告归档于 `dev-docs/reviews/legacy-acceptance/kb-acceptance-2026-07-08.md`。
 - **⚠️ F4 是假警报(我复核推翻)**:验收 agent 报"blog/repo verify 拒绝却 exit 0"——我实测发现是**测试用例只污染了 scaffold 示例 quote 行、没污染真实填充 quote**,真正污染填充 quote 后 blog/repo verify **都正确 exit 1 并拒绝**。证据门三路全对。**不修 F4**(若照报告改会破坏正确的 exit-1)。→ 教训:codex/agent 的 finding 必须复现才动手。
 - **真 bug(已定位落点)**:
   - **A 自动化补全(最重要)**:`kb ingest` 只链前半(intake→prepare 停);paper complete-note verify 成功(paper.py:885)后不引导剩余安全自动步(extract-figures/refresh-structure)+ 初筛填充。→ verify 成功 stdout 接着吐 NEXT FOR AGENT 指向剩余步。
@@ -385,7 +385,7 @@
 - **⬇️ 下一步 = 用户重跑验收**:新建空 kb,codex cold agent 再跑一次 paper+repo+blog,看自动化是否从 5/10 上到"足够"。撤销点 tag `pre-refactor-merge-b401ab8`。
 
 ### [再验收 + F-a 修复 2026-07-10] 分数 9/8/6.5(↑ from 9/7/5),critical data bug 已修
-- **再验收(cold agent 重跑)**:聪明 9→9、易用 7→**8**(F1/F3/F5/F7 修生效)、自动化 5→**6.5**(kb ingest 现在告诉你整条链,但 figures/refresh 仍手敲)。真实 kb 未动。报告 tmp/accept-test-2/ACCEPTANCE_REPORT_2.md。
+- **再验收(cold agent 重跑)**:聪明 9→9、易用 7→**8**(F1/F3/F5/F7 修生效)、自动化 5→**6.5**(kb ingest 现在告诉你整条链,但 figures/refresh 仍手敲)。真实 kb 未动。报告归档于 `dev-docs/reviews/legacy-acceptance/kb-acceptance-2026-07-10.md`。
 - **F-a(新发现,critical,我复现+已修 commit 9e6e2a3)**:`refresh-structure` 之前 `force=True` 重解析→用截断 prefs 覆盖全量 parse-cache(38→16 页),破坏证据 idempotency(后页 quote 再验证失败)。修:refresh 从**现有全量 cache** 派生 structure.yaml,不再重解析(只 prewarm-cache --force 可重解析)。加回归测试锁定。285 测试绿。
 - **剩余(discretionary polish,待用户定)**:
   - **自动化 6.5 的根因**:figures/refresh 是安全机械步却仍手敲。设计里有 pref `auto_refresh_structure_after_note`(默认 true)/`auto_extract_figures_after_note`(默认 false),但 complete-note verify 没接线。F-a 修好后 refresh 已安全,可让 note verify 后自动跑 refresh(按 pref)→ 少一步手敲。
@@ -422,7 +422,7 @@
 - **[已落地 2026-07-09] G5 Tier-1 已实现 + 首份基线报告**：harness `.agents/skills/skill-evolution-advisor/scripts/eval_research_value.py`（只读，唯一写 kb/eval/research-value/reports/），数据集 33 题（physics-aware 18 + humanoid 15，7 轴全覆盖），TIER2_SPEC.md（规格 + 3 手工示范），smoke test `.agents/lib/research/tests/test_eval_research_value.py`（全 162 测试绿）。首份基线报告 `kb/eval/research-value/reports/20260709T091601Z-tier1.md`。关键数字（main HEAD 0f05fe9 / kb ecc8fd7）：**检索召回@5=80%、@10=90%**；**接地率 100%（15/15 客观 fact，覆盖率 0.67-1.00）**，来源分布=3 手工 REWRITTEN note vs 12 脚本产物；**humanoid 空-program 对照 10/11 题返回自信但错误的 top-1（幻觉风险面，最高 score 72）**；**H1 门控：confirmed=0（尚无人工确认），auto_confirmed=1 且空心=1；系统性 64/65 篇 paper 的结构化 core_content 全空**。最弱轴=F（program 状态，召回@5 仅 50%，因 program state 不在 unit 检索索引里）。
 
 ### [实证 2026-07-09] 当前版本入库实测 → 坐实审查，校正 G5
-用户质疑"kb/ 是旧版遗留"，遂用**当前版本**在干净工作区跑完整入库（install → kb init → ingest AR-FB paper）。产物 tmp/codex-test-ws/，报告 tmp/codex-test-ws/INGEST_REPORT.md。结论：
+用户质疑"kb/ 是旧版遗留"，遂用**当前版本**在干净工作区跑完整入库（install → kb init → ingest AR-FB paper）。原隔离产物已清理，报告归档于 `dev-docs/reviews/legacy-acceptance/ar-fb-ingest-acceptance-2026-07-08.md`。结论：
 - **审查被当前版本产物直接坐实，且更严重**：note.md 是空模板（record.yaml payload.core_content 8 字段全空，唯一有内容的节是 PDF 首页字节原样粘贴）；screen 评级=硬编码关键词命中数（novelty 因出现 'first'/'introduce' 评 strong）；screen 自带警告"未配 LLM backend 回退 heuristic"=作者明示占位。
 - **旧 kb/ 好 note 是人手写的**（头标"审查状态：REWRITTEN"），不代表当前 skill 能力——用户直觉对。
 - **空心确认门**（新发现，超出原审查）：core_content 全空的 note 被轻松 promote 成 confirmed/complete/fact，门只验人名+evidence 字符串存在，不验内容非空。

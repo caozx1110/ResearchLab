@@ -6,7 +6,7 @@
 
 【关键背景（先读，别重造）】
 - 方向文档：temp/RESEARCH_VALUE_EVAL_DESIGN.md —— 三个设计决策(A/B/C)、7 能力轴、§3.5 实证校正、数据集 schema、指标（含 H1 门控完整性）、护栏、交付物、验收，全在里面。本 prompt 只给施工落点，语义以方向文档为准。
-- **实证前提（2026-07-09 已跑当前版本验证，报告 tmp/codex-test-ws/INGEST_REPORT.md，务必先读它）**：当前 skill 入库产的 note.md 是**空模板**（core_content 8 字段全空、唯一有内容的节是 PDF 首页字节原样粘贴）；旧 kb/ 里的好 note 是**人手写**的（头标「审查状态：REWRITTEN」）。**因此：gold_facts 一律从 kb/raw 下真实 PDF + parse-cache 原文起草，绝不从 note.md 抄内容**（note 只能用来判断"系统当前能不能答"，不能当答案来源）。
+- **实证前提（2026-07-09 已跑当前版本验证，报告归档于 dev-docs/reviews/legacy-acceptance/ar-fb-ingest-acceptance-2026-07-08.md，务必先读它）**：当前 skill 入库产的 note.md 是**空模板**（core_content 8 字段全空、唯一有内容的节是 PDF 首页字节原样粘贴）；旧 kb/ 里的好 note 是**人手写**的（头标「审查状态：REWRITTEN」）。**因此：gold_facts 一律从 kb/raw 下真实 PDF + parse-cache 原文起草，绝不从 note.md 抄内容**（note 只能用来判断"系统当前能不能答"，不能当答案来源）。
 - 检索入口：.agents/lib/research/retrieval.py 的 rank_records（词级排序全文，已存在，直接复用，别改）；kb query 的实现在 knowledge-base-manager/scripts/kb.py。
 - 真实素材已核实存在：kb/raw/ 有 6639 文件含真 PDF（sirui-xu-main-papers-*/*.pdf、legacy-rebuild-papers/*.pdf）；64 个 parse-cache.yaml；65 个 note.md。note 头部可能有「审查状态：REWRITTEN」标记 → 用它区分手工重写 vs 脚本产物。
 - 两个 program：physics-aware-fb-z-space（active_unit_ids 有 7 个单元，见 state.yaml）；humanoid-table-tennis-control（active_unit_ids=[] 空，这是**故意的对照组**，F 轴问它应返回「无数据」）。

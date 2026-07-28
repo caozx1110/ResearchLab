@@ -54,7 +54,7 @@ gold answer 由 agent 从 PDF 起草 → 默认 `pending_user_confirmation` → 
 
 ## 3.5 实证校正（2026-07-09，跑完当前版本入库后必读）
 
-用户质疑「kb/ 是旧版遗留」→ 已在干净工作区用**当前版本**入库 AR-FB 一篇验证（`tmp/codex-test-ws/`，报告 `INGEST_REPORT.md`）。三个发现直接改 G5 设计：
+用户质疑「kb/ 是旧版遗留」→ 已在干净工作区用**当前版本**入库 AR-FB 一篇验证（原隔离工作区已清理，报告归档于 `dev-docs/reviews/legacy-acceptance/ar-fb-ingest-acceptance-2026-07-08.md`）。三个发现直接改 G5 设计：
 
 1. **gold answer 不能依赖 KB 现有 note**。当前版本产的 `note.md` 是空模板（`core_content` 8 字段全空，唯一有内容的节是 PDF 首页字节原样粘贴），旧 kb/ 里的好 note 是人手写的（头标 `REWRITTEN`）。→ **gold 一律从 PDF 原文起草，绝不从 note 抄**（Codex handoff 已如此要求，此处强化：把「note 可作起草依据」从选项里删掉，只保留 PDF/parse-cache 原文）。
 
@@ -153,4 +153,3 @@ Codex 的 harness 每次跑输出一份 `kb/eval/research-value/reports/<UTC>.md
 - 数据集里所有综合题 gold 标 `pending_user_confirmation`（不自签）。
 - 只读：跑 eval 不写任何 unit record、不动 program state（除写自己的 report 目录）。
 - import 面兼容、`--help` 通过、纳入 pytest（至少 harness 的 smoke）。
-
