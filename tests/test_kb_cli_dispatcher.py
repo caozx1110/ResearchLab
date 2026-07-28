@@ -1427,7 +1427,26 @@ def test_runtime_pref_defaults_reads_compatible_alternate_quick_setup_paths(tmp_
     assert canonical["resource_statement"] == "canonical 8xGPU"
 
 
-def test_kb_init_rejects_ai_signer_name_before_writing_prefs(monkeypatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "actor",
+    [
+        "codex",
+        "Claude Fable",
+        "claude-fable-5",
+        "Sonnet Opus",
+        "Opus 4.5",
+        "通义千问",
+        "豆包",
+        "Kimi",
+        "Devin",
+        "Cursor",
+    ],
+)
+def test_kb_init_rejects_ai_signer_name_before_writing_prefs(
+    monkeypatch,
+    tmp_path: Path,
+    actor: str,
+) -> None:
     kb = _load_kb_cli()
     calls: list[list[tuple[str, tuple[str, ...]]]] = []
 
@@ -1438,7 +1457,7 @@ def test_kb_init_rejects_ai_signer_name_before_writing_prefs(monkeypatch, tmp_pa
 
     monkeypatch.setattr(kb, "run_forwarded", fake_run_forwarded)
     with pytest.raises(SystemExit, match="不能使用 AI 工具名称"):
-        kb.main(["--root", str(tmp_path), "init", "--name", "codex"])
+        kb.main(["--root", str(tmp_path), "init", "--name", actor])
     assert calls == []
 
 

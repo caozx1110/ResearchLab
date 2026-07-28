@@ -404,6 +404,22 @@ def test_missing_evidence_is_rejected_even_with_default_confirmed_by(tmp_path: P
         promote_record(tmp_path, "p-confirm-123456", confirmation_status="confirmed")
 
 
+@pytest.mark.parametrize("actor", ["Claude Fable", "Opus 4.5", "通义千问", "豆包", "Kimi"])
+def test_configured_ai_default_signer_is_rejected(actor: str, tmp_path: Path) -> None:
+    ensure_workspace(tmp_path)
+    write_yaml_if_changed(
+        runtime_preferences_path(tmp_path),
+        {"identity": {"default_confirmed_by": actor}},
+    )
+
+    with pytest.raises(SystemExit, match="Self-signing is forbidden"):
+        confirmation.require_confirmation_provenance(
+            confirmed_by="",
+            evidence=["Reviewed current evidence."],
+            project_root=tmp_path,
+        )
+
+
 def test_promote_non_confirmed_does_not_require_provenance(tmp_path: Path) -> None:
     """Backward-compat guard: only confirmed transitions need provenance;
     auto_confirmed / pending / rejected must still work without --confirmed-by/--evidence."""

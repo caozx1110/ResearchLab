@@ -184,6 +184,21 @@ def test_r1_artifact_byte_change_invalidates_confirmation(tmp_path: Path) -> Non
         "assistant-1",
         "GPT-5.6",
         "Claude Code",
+        "Claude Fable",
+        "claude-fable-5",
+        "Claude Fable 5",
+        "Sonnet Opus",
+        "Opus 4.5",
+        "Haiku Opus",
+        "AI助手",
+        "克劳德",
+        "小助手",
+        "机器人助理",
+        "通义千问",
+        "豆包",
+        "Kimi",
+        "Devin",
+        "Cursor",
         "我",
         "本人",
         "用户",
@@ -200,6 +215,7 @@ def test_r1_compound_ai_actor_is_rejected(actor: str) -> None:
 
 def test_r1_common_human_name_is_not_rejected() -> None:
     assert is_ai_signer("Claude Martin") is False
+    assert is_ai_signer("Claude Dupont") is False
 
 
 def test_r1_orchestrator_status_is_byte_identical_read(tmp_path: Path, monkeypatch, capsys) -> None:

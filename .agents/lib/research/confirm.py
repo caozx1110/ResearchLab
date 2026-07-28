@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -61,15 +62,33 @@ AI_SIGNER_NAMES = {
     "claude", "anthropic", "sonnet", "opus", "haiku", "fable",
     "gemini", "bard", "google-ai",
     "llama", "mistral", "cohere", "grok", "copilot", "qwen", "deepseek",
+    "kimi", "devin", "cursor", "doubao", "tongyi",
 }
 
 AI_SIGNER_TOKENS = {
     "ai", "assistant", "agent", "bot", "llm", "codex", "chatgpt", "gpt",
     "openai", "anthropic", "gemini", "bard", "llama", "mistral", "cohere",
-    "grok", "copilot", "qwen", "deepseek",
+    "grok", "copilot", "qwen", "deepseek", "kimi", "devin", "cursor",
+    "doubao", "tongyi",
 }
 AI_MODEL_NAME_TOKENS = {"claude", "sonnet", "opus", "haiku", "fable"}
 AI_MODEL_CONTEXT_TOKENS = {"code", "assistant", "agent", "ai", "model", "anthropic"}
+AI_MODEL_VARIANT_TOKENS = {
+    "beta", "chat", "instant", "latest", "max", "mini", "preview", "pro",
+    "reasoning", "thinking", "turbo",
+}
+AI_SIGNER_CJK_MARKERS = (
+    "克劳德",
+    "小助手",
+    "机器人助理",
+    "通义千问",
+    "豆包",
+    "人工智能助手",
+    "智能助手",
+    "文心一言",
+    "讯飞星火",
+    "智谱清言",
+)
 SIGNER_ROLE_PLACEHOLDERS = {
     "我",
     "本人",
@@ -103,14 +122,31 @@ CONFIRM_UNIT_SUMMARY_BY_KIND = {
 
 
 def is_ai_signer(actor: str) -> bool:
-    normalized = str(actor or "").strip().casefold()
+    normalized = unicodedata.normalize("NFKC", str(actor or "")).strip().casefold()
     if normalized in AI_SIGNER_NAMES or normalized in SIGNER_ROLE_PLACEHOLDERS:
+        return True
+    if any(marker in normalized for marker in AI_SIGNER_CJK_MARKERS):
         return True
     tokens = re.findall(r"[a-z0-9]+", normalized)
     token_set = set(tokens)
     if token_set & AI_SIGNER_TOKENS:
         return True
-    return bool(token_set & AI_MODEL_NAME_TOKENS and token_set & AI_MODEL_CONTEXT_TOKENS)
+    model_tokens = token_set & AI_MODEL_NAME_TOKENS
+    if not model_tokens:
+        return False
+    if token_set & AI_MODEL_CONTEXT_TOKENS:
+        return True
+    possible_human_name_tokens = {
+        token
+        for token in token_set
+        if token not in AI_MODEL_NAME_TOKENS
+        and token not in AI_MODEL_VARIANT_TOKENS
+        and re.fullmatch(r"v?\d+", token) is None
+    }
+    # A signer made only from model names, release variants, and version numbers
+    # is an AI identity.  An additional unknown name token preserves intentional
+    # human names such as "Claude Martin"; this heuristic is not authentication.
+    return not possible_human_name_tokens
 
 
 # Substance-check (SSOT §3.11 / Principle 3 — plug the hollow confirmation gate).
