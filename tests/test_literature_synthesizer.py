@@ -10,9 +10,9 @@ from repo_paths import REPO_ROOT
 import pytest
 import yaml
 
-from research.common import write_yaml_if_changed
+from research.common import load_yaml, write_yaml_if_changed
 from research.confirm import apply_confirmation, confirm_unit
-from research.core import record_path, write_record
+from research.core import default_record, record_path, write_record
 from research.evidence import (
     attach_claims,
     build_verification_receipt,
@@ -97,25 +97,30 @@ def write_confirmed_external_repo_unit(root: Path) -> tuple[dict, Path]:
         }
     ]
     attach_claims(payload, claims)
-    record = {
-        "id": unit_id,
-        "kind": "repo",
-        "title": "MiniSurveyRepo",
-        "status": "screened",
-        "maturity": "complete",
-        "confirmation_status": "pending_user_confirmation",
-        "needs_human_confirmation": True,
-        "information_types": ["evaluation"],
-        "summary": "robot learning survey integration",
-        "source": {"original_uri": repo_root.resolve().as_posix()},
-        "payload": payload,
-    }
+    record = default_record(
+        "repo",
+        title="MiniSurveyRepo",
+        maturity="complete",
+        source={"original_uri": repo_root.resolve().as_posix()},
+    )
+    record.update(
+        {
+            "id": unit_id,
+            "status": "screened",
+            "confirmation_status": "pending_user_confirmation",
+            "needs_human_confirmation": True,
+            "information_types": ["evaluation"],
+            "summary": "robot learning survey integration",
+            "payload": payload,
+        }
+    )
     build_verification_receipt(
         record,
         record_path(root, "repo", unit_id).parent,
         external_source=record_external_source_contract(record),
     )
     canonical_path = write_record(root, record)
+    assert load_yaml(canonical_path) == record
     snapshot = canonical_record_snapshot_for_record(root, record)
     persisted = normalize_record_snapshot(snapshot, root)
     assert persisted is not None
