@@ -637,6 +637,8 @@ topics:
     tags: []                                # 该 topic 下的 canonical tag
 ```
 
+`topic-taxonomy.yaml` 与 `candidate-pools.yaml` 的顶层 `generated_at` 是写入 provenance：loader 必须逐字保留已持久化值，旧文件缺失时只返回稳定空串；仅显式 writer / rebuild 更新为当前 UTC。纯读 drift/candidate snapshot 不得调用时钟改写内存投影，否则同一 canonical bytes 跨秒读取会伪造 stale 与新的 portfolio candidate。
+
 ### runtime-preferences.yaml
 
 由 `research-config-manager` 写入。schema 见 `core.py default_runtime_preferences()`，包含资源画像、语言偏好、自动化开关、versioning_commit_mode（`manual|milestone|aggressive`）等。

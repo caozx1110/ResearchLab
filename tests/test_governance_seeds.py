@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+import importlib.util
+import sys
 from pathlib import Path
 
-from research.common import write_yaml_if_changed
+from repo_paths import REPO_ROOT
+
+import pytest
+
+import research.index as index_module
+from research.common import load_yaml, write_yaml_if_changed
 from research.core import (
     ensure_workspace,
     load_candidate_pools,
@@ -12,6 +19,16 @@ from research.core import (
     write_candidate_pools,
     write_topic_taxonomy,
 )
+
+
+def _load_config_module():
+    script = REPO_ROOT / ".agents" / "skills" / "research-config-manager" / "scripts" / "config.py"
+    spec = importlib.util.spec_from_file_location("governance_seed_config", script)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def _write_record(root: Path, record: dict) -> None:
@@ -54,6 +71,41 @@ def _seed_governance(root: Path) -> None:
         "status": "seed",
     }
     write_candidate_pools(root, pools)
+
+
+def test_config_seed_writers_advance_catalog_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _load_config_module()
+    ensure_workspace(tmp_path)
+    timestamps = iter(
+        [
+            "2026-07-29T01:00:00+00:00",
+            "2026-07-29T01:00:01+00:00",
+        ]
+    )
+    monkeypatch.setattr(index_module, "utc_now_iso", lambda: next(timestamps))
+
+    taxonomy_path = config.upsert_taxonomy_seed(
+        tmp_path,
+        topic="robot learning",
+        aliases=[],
+        tags=[],
+        note="",
+        status="active",
+    )
+    pools_path = config.upsert_pool(
+        tmp_path,
+        pool="reading",
+        topics=[],
+        tags=[],
+        description="",
+        status="active",
+    )
+
+    assert load_yaml(taxonomy_path)["generated_at"] == "2026-07-29T01:00:00+00:00"
+    assert load_yaml(pools_path)["generated_at"] == "2026-07-29T01:00:01+00:00"
 
 
 def test_rebuild_preserves_zero_member_seeds(tmp_path: Path) -> None:

@@ -37,7 +37,9 @@ from research.core import (
     project_root,
     runtime_preferences_path,
     topic_taxonomy_path,
+    write_candidate_pools,
     write_runtime_preferences,
+    write_topic_taxonomy,
 )
 from research.prefs import (
     DEFAULT_DISCUSSION_STYLE,
@@ -250,8 +252,7 @@ def upsert_taxonomy_seed(root: Path, *, topic: str, aliases: list[str], tags: li
         if note and not tag_item.get("note"):
             tag_item["note"] = note
         tag_item["status"] = status
-    write_yaml_if_changed(topic_taxonomy_path(root), payload)
-    return topic_taxonomy_path(root)
+    return write_topic_taxonomy(root, payload)
 
 
 def upsert_pool(root: Path, *, pool: str, topics: list[str], tags: list[str], description: str, status: str) -> Path:
@@ -268,8 +269,7 @@ def upsert_pool(root: Path, *, pool: str, topics: list[str], tags: list[str], de
     if description:
         item["summary"] = description
     item["status"] = status
-    write_yaml_if_changed(candidate_pools_path(root), payload)
-    return candidate_pools_path(root)
+    return write_candidate_pools(root, payload)
 
 
 def build_parser() -> argparse.ArgumentParser:

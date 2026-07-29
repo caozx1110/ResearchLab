@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import importlib.util
 import json
@@ -1538,7 +1539,14 @@ def test_portfolio_history_replay_revalidates_after_transaction(
     decision = _decision(root, snapshot, [snapshot["candidates"][0]["action_id"]])
     decision["decision_scope"] = "research_judgement"
     decision["program_decision_ids"] = ["program-a:decision-1"]
+    checkpoints: list[list[Path]] = []
+    monkeypatch.setattr(
+        orchestrate,
+        "checkpoint_and_report",
+        lambda project_root, **kwargs: checkpoints.append(kwargs["target_paths"]) or {"committed": False},
+    )
     orchestrate.record_portfolio_decision(root, decision)
+    checkpoints.clear()
     history_file = orchestrate.portfolio_history_path(root)
     before_history = history_file.read_bytes()
     before_history_inode = history_file.stat().st_ino
@@ -1563,13 +1571,16 @@ def test_portfolio_history_replay_revalidates_after_transaction(
         os.replace(replacement_file, decisions_file)
         replaced = True
 
-    checkpoints: list[list[Path]] = []
+    def fixed_candidate_snapshot(project_root: Path, *, selected_program_id: str = "") -> dict:
+        assert project_root == root
+        assert selected_program_id == ""
+        return copy.deepcopy(snapshot)
+
+    # This case owns the final source-currentness gate.  Candidate discovery
+    # has separate drift tests and must not short-circuit the source replacement
+    # being exercised here.
     monkeypatch.setattr(orchestrate, "mutation_transaction", replace_decisions_after_transaction)
-    monkeypatch.setattr(
-        orchestrate,
-        "checkpoint_and_report",
-        lambda project_root, **kwargs: checkpoints.append(kwargs["target_paths"]) or {"committed": False},
-    )
+    monkeypatch.setattr(orchestrate, "portfolio_candidate_snapshot", fixed_candidate_snapshot)
 
     with pytest.raises(SystemExit, match="unavailable or unverified"):
         orchestrate.record_portfolio_decision(root, decision)

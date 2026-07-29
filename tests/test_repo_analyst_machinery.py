@@ -31,14 +31,14 @@ import pytest
 
 from research.common import load_yaml, write_yaml_if_changed
 from research.confirm import confirm_unit, has_substantive_content
-from research.core import ensure_workspace, record_path, write_record
+from research.core import default_record, ensure_workspace, record_path, write_record
 from research.evidence import attach_claims, build_verification_receipt
 from research.judgements import (
     discover_pending_judgements,
     judgement_confirmation_is_current,
     readiness_violations,
 )
-from research.records import canonical_record_snapshot_for_record, kind_payload_skeleton, normalize_record_snapshot
+from research.records import canonical_record_snapshot_for_record, normalize_record_snapshot
 
 
 def _project_root() -> Path:
@@ -90,21 +90,29 @@ def _make_mini_repo(base: Path) -> Path:
 
 
 def _repo_record(repo_id: str, repo_root: Path) -> dict:
-    return {
-        "id": repo_id,
-        "kind": "repo",
-        "title": "MiniVLA",
-        "status": "screened",
-        "maturity": "lightweight",
-        "confirmation_status": "pending_user_confirmation",
-        "needs_human_confirmation": True,
-        "information_types": ["fact", "inference", "evaluation", "unverified"],
-        "topics": ["vision-language-action"],
-        "tags": ["manipulation"],
+    # Match the production constructor so the detached object already carries
+    # canonical timestamps/history.  A hand-written sparse record is normalized
+    # on write, but is not itself the exact persisted object required by the
+    # later strict snapshot-binding assertion.
+    record = default_record(
+        "repo",
+        title="MiniVLA",
+        maturity="lightweight",
         # A local repo checkout — verify resolves repo_root from here, no copy into kb/.
-        "source": {"original_uri": str(repo_root), "file_hash": ""},
-        "payload": kind_payload_skeleton("repo", "MiniVLA"),
-    }
+        source={"original_uri": str(repo_root), "file_hash": ""},
+    )
+    record.update(
+        {
+            "id": repo_id,
+            "status": "screened",
+            "confirmation_status": "pending_user_confirmation",
+            "needs_human_confirmation": True,
+            "information_types": ["evaluation", "fact", "inference", "unverified"],
+            "topics": ["vision-language-action"],
+            "tags": ["manipulation"],
+        }
+    )
+    return record
 
 
 def _legit_capability_fill(repo_id: str = "r-x") -> dict:
@@ -228,6 +236,7 @@ def test_capability_fill_legit_evidence_validates_and_clears_substance_gate(tmp_
     # contract as repo verification and confirmation.  A coarse workflow state
     # alone is not sufficient for the public inbox.
     canonical_path = write_record(tmp_path, record)
+    assert load_yaml(canonical_path) == record
     assert readiness_violations(tmp_path, record, canonical_path) == []
     cards = discover_pending_judgements(tmp_path)
     assert [card["subject"]["id"] for card in cards] == [record["id"]]

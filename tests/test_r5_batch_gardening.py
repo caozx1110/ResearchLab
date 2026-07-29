@@ -13,7 +13,13 @@ from repo_paths import REPO_ROOT
 import pytest
 import yaml
 
-from research.index import build_index, governance_catalog_drift
+import research.index as index_module
+from research.index import (
+    build_index,
+    governance_catalog_drift,
+    load_candidate_pools,
+    load_topic_taxonomy,
+)
 from research.prefs import ensure_workspace
 from research.core import default_record, write_record
 
@@ -414,6 +420,28 @@ def test_governance_drift_candidate_disappears_after_mechanical_rebuild(
     assert governance_catalog_drift(root)["stale"] is False
     current_snapshot = orchestrate.portfolio_candidate_snapshot(root)
     assert all(item["action_type"] != "rebuild-taxonomy" for item in current_snapshot["candidates"])
+
+
+def test_governance_drift_and_loaders_are_clock_independent_after_rebuild(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _workspace(tmp_path)
+    build_index(root)
+    expected_taxonomy = load_topic_taxonomy(root)
+    expected_pools = load_candidate_pools(root)
+    expected_drift = governance_catalog_drift(root)
+    assert expected_drift["stale"] is False
+
+    def reject_read_time_clock() -> str:
+        raise AssertionError("governance catalog readers must not consult the clock")
+
+    monkeypatch.setattr(index_module, "utc_now_iso", reject_read_time_clock)
+
+    assert load_topic_taxonomy(root) == expected_taxonomy
+    assert load_candidate_pools(root) == expected_pools
+    current_drift = governance_catalog_drift(root)
+    assert current_drift == expected_drift
 
 
 def test_rebuild_governance_checkpoints_exact_catalog_and_index_paths(

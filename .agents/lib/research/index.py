@@ -156,7 +156,12 @@ def load_topic_taxonomy(project_root: Path) -> dict[str, Any]:
     payload = load_yaml(topic_taxonomy_path(project_root), default={})
     if not isinstance(payload, dict):
         payload = {}
-    normalized = _deep_fill_missing(payload, {**DEFAULT_TOPIC_TAXONOMY, "generated_at": utc_now_iso()})
+    # Loading is a pure, deterministic projection.  A volatile default here
+    # makes two reads on opposite sides of a second disagree and can invent a
+    # false governance-drift candidate.  Only the write path advances this
+    # provenance timestamp; legacy/missing values normalize to the stable empty
+    # sentinel until the next real rebuild.
+    normalized = _deep_fill_missing(payload, {**DEFAULT_TOPIC_TAXONOMY, "generated_at": ""})
     topics: dict[str, Any] = {}
     for key, item in normalized.get("topics", {}).items():
         topic = slugify(str(item.get("id") or key), max_words=12)
@@ -189,7 +194,7 @@ def load_topic_taxonomy(project_root: Path) -> dict[str, Any]:
         }
     normalized["topics"] = {key: topics[key] for key in sorted(topics)}
     normalized["tags"] = {key: tags[key] for key in sorted(tags)}
-    normalized["generated_at"] = utc_now_iso()
+    normalized["generated_at"] = str(normalized.get("generated_at") or "")
     return normalized
 
 
@@ -203,7 +208,7 @@ def load_candidate_pools(project_root: Path) -> dict[str, Any]:
     payload = load_yaml(candidate_pools_path(project_root), default={})
     if not isinstance(payload, dict):
         payload = {}
-    normalized = _deep_fill_missing(payload, {**DEFAULT_CANDIDATE_POOLS, "generated_at": utc_now_iso()})
+    normalized = _deep_fill_missing(payload, {**DEFAULT_CANDIDATE_POOLS, "generated_at": ""})
     pools: dict[str, Any] = {}
     for key, item in normalized.get("pools", {}).items():
         pool = slugify(str(item.get("id") or key), max_words=12)
@@ -219,7 +224,7 @@ def load_candidate_pools(project_root: Path) -> dict[str, Any]:
             "status": str(item.get("status") or "active"),
         }
     normalized["pools"] = {key: pools[key] for key in sorted(pools)}
-    normalized["generated_at"] = utc_now_iso()
+    normalized["generated_at"] = str(normalized.get("generated_at") or "")
     return normalized
 
 
