@@ -208,6 +208,21 @@ def _workspace_snapshot_except(root: Path, excluded: Path) -> dict[str, bytes]:
     }
 
 
+def _replace_with_same_bytes_new_inode(path: Path) -> None:
+    original = path.lstat()
+    raw_bytes = path.read_bytes()
+    replacement = path.with_name(f".{path.name}.same-bytes-replacement")
+    replacement.write_bytes(raw_bytes)
+    replacement.chmod(original.st_mode)
+    replacement_identity = (replacement.lstat().st_dev, replacement.lstat().st_ino)
+    assert replacement_identity != (original.st_dev, original.st_ino)
+    replacement.replace(path)
+    current = path.lstat()
+    assert (current.st_dev, current.st_ino) == replacement_identity
+    assert path.read_bytes() == raw_bytes
+    assert current.st_mode == original.st_mode
+
+
 def test_screen_verify_rejects_workspace_external_absolute_fill_without_writes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -481,8 +496,7 @@ def test_verify_receipt_rejects_fill_drift_in_two_rounds_without_writes(
     if mutation == "bytes":
         fill_path.write_bytes(original_bytes + b"\nchanged: true\n")
     else:
-        fill_path.unlink()
-        fill_path.write_bytes(original_bytes)
+        _replace_with_same_bytes_new_inode(fill_path)
     before = _workspace_snapshot(root)
 
     with pytest.raises(ValueError, match="another task"):
@@ -527,8 +541,7 @@ def test_verify_revalidates_bound_fill_immediately_before_transaction(
         if mutation == "bytes":
             fill_path.write_bytes(original_bytes + b"\nraced: true\n")
         else:
-            fill_path.unlink()
-            fill_path.write_bytes(original_bytes)
+            _replace_with_same_bytes_new_inode(fill_path)
         return result
 
     monkeypatch.setattr(paper, "resolve_paper_preferences", mutate_after_preference_resolution)

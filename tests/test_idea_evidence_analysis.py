@@ -152,6 +152,21 @@ def _symlink_snapshot(path: Path) -> tuple[str, tuple[int, int, int]]:
     return os.readlink(path), (metadata.st_dev, metadata.st_ino, metadata.st_mode)
 
 
+def _replace_with_same_bytes_new_inode(path: Path) -> None:
+    original = path.lstat()
+    raw_bytes = path.read_bytes()
+    replacement = path.with_name(f".{path.name}.same-bytes-replacement")
+    replacement.write_bytes(raw_bytes)
+    replacement.chmod(original.st_mode)
+    replacement_identity = (replacement.lstat().st_dev, replacement.lstat().st_ino)
+    assert replacement_identity != (original.st_dev, original.st_ino)
+    replacement.replace(path)
+    current = path.lstat()
+    assert (current.st_dev, current.st_ino) == replacement_identity
+    assert path.read_bytes() == raw_bytes
+    assert current.st_mode == original.st_mode
+
+
 def _journal_entry_snapshot(root: Path) -> dict[str, bytes]:
     journal = root / "kb/.journal"
     if not journal.exists():
@@ -306,14 +321,13 @@ def test_cited_frozen_artifact_change_rejects_without_result_write(
     evidence_path = record_path(tmp_path, "repo", source_id).parent / "evidence.txt"
     if replacement == "mutate":
         evidence_path.write_text("The baseline now has different bytes.\n", encoding="utf-8")
+    elif replacement == "replace":
+        _replace_with_same_bytes_new_inode(evidence_path)
     else:
         evidence_path.unlink()
-        if replacement == "replace":
-            evidence_path.write_text("The baseline loses accuracy under unseen camera viewpoints.\n", encoding="utf-8")
-        else:
-            target = tmp_path / "outside.txt"
-            target.write_text("The baseline loses accuracy under unseen camera viewpoints.\n", encoding="utf-8")
-            evidence_path.symlink_to(target)
+        target = tmp_path / "outside.txt"
+        target.write_text("The baseline loses accuracy under unseen camera viewpoints.\n", encoding="utf-8")
+        evidence_path.symlink_to(target)
     record_before = record_path(tmp_path, "idea", idea_id).read_bytes()
     with pytest.raises(SystemExit):
         _run(idea, monkeypatch, "analyze", "--idea-id", idea_id, "--phase", "verify")
