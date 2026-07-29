@@ -1,4 +1,4 @@
-"""Confirmation gate: substance-check + two-track classification (SSOT §3.11 / Principle 3).
+"""Confirmation tests (`.agents/lib/research/SCHEMAS.md#confirmation-gate`).
 
 Covers the Wave-2 Track-Gate work that plugs the hollow confirmation gate:
   * substance-check on promote-to-confirmed (judgement track) — the core acceptance;
@@ -237,7 +237,7 @@ def test_has_substantive_content_unknown_kind_is_not_blocked() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Two-track classification (SSOT §3.11 decision ①).
+# Two-track classification (`.agents/lib/research/SCHEMAS.md#confirmation-gate`).
 # --------------------------------------------------------------------------- #
 def test_confirmation_track_fact_metadata_is_fact() -> None:
     record = _paper_record(information_types=["fact"])

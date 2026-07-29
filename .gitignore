@@ -2,7 +2,7 @@
 kb/
 raw/
 
-# Legacy private workspace trees
+# Non-authoritative local caches/legacy trees; development workflow must not depend on them
 output/
 .learnings/
 
@@ -21,5 +21,6 @@ temp/
 tmp/
 dev-docs/
 
+# Generated Claude integration tree, not development-agent memory
 .claude/
 _to_delete/

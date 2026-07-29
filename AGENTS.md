@@ -1,84 +1,124 @@
 # AGENTS.md — 开发本 skill 系统的工作流
 
-> 本文件面向**在本仓库开发/演进 skill 系统的 agent**（Codex 读 `AGENTS.md`，Claude 读 `CLAUDE.md`——它是指向本文件的软链，同一份内容）。
-> **不是**使用 kb 的 end user——那套工作区使用规则在 `.agents/AGENTS.md`（随 `.agents/` 分发树装到用户工作区根 `AGENTS.md`）。
-> 它固化一套已验证有效的循环：**定 SSOT → 写 plan/handoff → codex 施工 → 我 review → 回写 SSOT**。任何对 skill 功能/门控/架构的演进都走这个循环。
+> 本文件面向在本仓库开发/演进 skill 系统的 Agent。`CLAUDE.md` 是指向本文件的软链。
+> 安装后使用 kb 的运行规则在 `.agents/AGENTS.md`。
 
-## 文档所有权（改任何东西前先认清谁管什么）
+本仓库采用 GitHub-only 协作：**tracked 设计 → Epic（新蓝图才建）→ 原子 Issue → branch/worktree 施工并 push → 集成验证 → consolidated PR → 人类审查合并 → 远端收尾**。
 
-| 文档 | 管什么 | 铁律 |
-|---|---|---|
-| `dev-docs/SYSTEM_DESIGN_SSOT.md` | **意图 / 目标架构 / 功能设计**（维护者本地唯一可信设计源） | 改功能边界/确认门控/架构，**先改它再改代码**；它落后于代码=bug |
-| `dev-docs/BACKLOG.md` | 计划 / 待办 / 施工状态 / 时序 | 实时落地状态、逐条进度在这，**不进 SSOT** |
-| `.agents/lib/research/SCHEMAS.md` | on-disk 数据模型细节（字段/枚举） | SSOT 下挂；schema 规格写这 |
-| `.agents/AGENTS.md` | 工作区运行规则、写作偏好、路由、入库自动驱动（随 `.agents/` 分发给用户 kb 工作区） | SSOT 下挂；面向**用** kb 的 agent |
-| `AGENTS.md`（本文件）+ `CLAUDE.md`（软链→`AGENTS.md`） | 本仓库开发/演进 skill 的工作流 | 面向**开发** skill 的 agent（Codex 读 `AGENTS.md` / Claude 读 `CLAUDE.md`） |
-| `dev-docs/codex_prompt_*.md` | 单次施工 handoff | 一次性，本地留档，不作为当前产品文档 |
-| 记忆 `~/.claude/.../memory/` | 跨会话的项目事实/教训 | 里程碑 + 硬教训写这 |
+普通改动走下面的轻量流程；并发接管、安全事件、复杂迁移或高风险发布才按 [`docs/DEVELOPMENT_WORKFLOW.md`](docs/DEVELOPMENT_WORKFLOW.md) 升级控制。
 
-### Git 与发布边界
+## 权威源
 
-- `dev-docs/` 是维护者本地、Git-ignored 的设计/施工工作台：SSOT 草案、backlog、一次性 handoff、审查原始记录和历史验收快照都留在这里，不进入 Git 或安装包。
-- 稳定且对贡献者、用户或安装后 Agent 有约束力的结论，必须同步到 tracked 的 `AGENTS.md`、`CONTRIBUTING.md`、`docs/`、`CHANGELOG.md`、`.agents/*.md`、`SKILL.md` 或 `SCHEMAS.md`；公共 clone 不能依赖 `dev-docs/` 才能理解当前产品。
-- 历史 handoff/audit 是时间点证据，不机械改写旧 commit、旧路径或旧测试数。审查“所有文档”时只把当前文档当现状声明，同时检查历史材料没有被当前文档链接成运行前置。
-- 若本地 clone 没有 `dev-docs/`，先从维护者取得当前 SSOT/handoff；不要根据历史 Git 文档猜测未公开设计。
+| 内容 | 权威源 |
+|---|---|
+| 当前接受的设计、架构和边界 | `docs/DESIGN.md` |
+| 长期决策与取舍 | `docs/decisions/*.md` |
+| 当前实现与数据模型 | default branch 的代码、测试、`.agents/lib/research/SCHEMAS.md` |
+| 新蓝图的最终目标和 waves | GitHub Initiative/Epic |
+| 单项范围、方案、验收和接力状态 | GitHub Atomic Issue |
+| 候选、CI、review 与合并 | remote commits、PR、Actions |
+| 用户可见行为、迁移与发布 | `README.md`、用户文档、`CHANGELOG.md` |
+
+另一个没有聊天上下文的 Agent，只凭 fresh clone 与 GitHub，必须能确定当前设计、活动 Issue、last remote checkpoint、验证结果、blocker 和 next action。
+
+`dev-docs/`、`codex_prompt_*`、`~/.claude/.../memory/`、其他模型/工具私有记忆、聊天、本地 plan、stash、未 push commit 和本机日志均已弃用为协作权威。它们即使存在也不得被读取、创建、更新或引用来决定需求、范围、进度、验收或下一步；只存在于这些位置的信息按不存在处理。
+
+Issue/PR 是公开记录，只写脱敏事实。漏洞、凭据暴露、治理绕过、路径穿越、数据丢失或私有研究材料按 `SECURITY.md` 走 private reporting。
 
 ## 开发态禁止自调用 shipping skills
 
-在本仓库设计、开发、审查或修复 `.agents/skills/` 时，shipping skill 是**被开发/被审查的产品源码**，不是当前开发任务的执行规则：
+本仓库 `.agents/skills/*` 是被开发的产品源码，不是当前开发任务的执行规则：
 
-- 不得加载或调用本仓库 `.agents/skills/*/SKILL.md` 来指导其自身设计、施工、review 或外部调研；否则会形成循环依赖与确认偏差。
-- 可以把这些 `SKILL.md`、脚本和协议作为普通代码/设计材料直接阅读、检索和比较，但不得让被测 skill 反向决定自己的需求、架构或验收标准。
-- 开发态只服从本文件、`dev-docs/SYSTEM_DESIGN_SSOT.md`、`.agents/lib/research/SCHEMAS.md` 与当前 handoff；外部调研使用通用检索/浏览能力，不借用 shipping skill 编排。
-- 只有三类场景允许实际调用 shipping skill：在临时工作区执行明确的行为测试、使用全新上下文做冷 acceptance、或用户明确要求测试某个 skill。调用时必须显式说明这是**测试**而不是设计依据。
-- 测试调用必须与开发上下文和真实用户数据隔离：只操作临时目录，不触碰真实 `kb/`，不把被测 skill 的自述或输出当作独立验收证据。
-- 只有安装到用户工作区后，才由工作区根 `AGENTS.md` 与已安装 skills 接管正常运行态路由。简言之：**开发态把 skill 当产品源码，运行态才把 skill 当操作说明。**
+- 不得加载或调用 shipping `SKILL.md` 来决定其自身需求、设计或验收。
+- 可以把 `SKILL.md`、脚本和协议当普通代码阅读、检索和测试。
+- 只有明确的行为测试、全新上下文冷验收，或用户明确要求测试某个 skill 时，才可在隔离临时目录调用；不得触碰真实 `kb/`，也不得把 skill 自述当独立证据。
+- 开发态服从本文件、tracked design/ADR/schema、当前 Epic/Atomic Issue、remote commit、PR 和 Actions；安装后才由工作区根 `AGENTS.md` 与 installed skills 接管运行态。
 
-## 循环工作流（每个演进步骤走一遍）
+## 普通工作流
 
-### 1. 定 SSOT（设计是我的活，不外包）
-- 任何功能/门控/架构决策，**先在 `dev-docs/SYSTEM_DESIGN_SSOT.md` 落成锁定的设计**（原则/子系统决策/schema 规格）。这是最高杠杆的一步，别跳。
-- 有真开放决策才问用户（AskUserQuestion）；能从设计一致性推断的自己定并说明。
-- 需要外部事实（工具选型、领域惯例）先查证再写进 SSOT，别拍脑袋。
+### 1. 同步并读设计
 
-### 2. 写 plan / handoff（codex 的施工规格）
-每个 `dev-docs/codex_prompt_*.md` 必含：
-- **STEP 0 base sync**：worktree 常被开在过时旧 commit（历史上是 4 月的 `19b3dce`）。handoff 第一条永远是：核对 HEAD/关键模块是否在，不符则 `git reset --hard <当前 main HEAD>` 再核对，然后才动手。
-- **文件所有权**：明列"只动这些"。并行多 track 时**文件面必须 disjoint**（否则合并地狱）——这也是当初做 god-file 拆分的理由：拆开后各 track 各占一文件才能真并行。
-- **红线**：绝不碰真实 `kb/`（用户数据，测试用临时目录）；治理红线只加严不放松（禁自签、判断类必留 evidence）；**不 push**（维护者 merge）。
-- **反模式边界**（analyzer 类必写）：脚本**绝不理解材料**，只建可填结构+验证证据+过门；理解来自 runtime agent。litmus："给一篇材料+无 agent 就吐判断的函数，删掉"。
-- **commit-per-piece**：小步提交（基建常有瞬时 504/流断，大块编辑易掉线；小步提交+每步提交才不丢进度）。
-- **STOP-and-report 逃生口**：拿不准/不适配就停下报告，别硬编。
+- Fetch default branch，记录 exact baseline SHA。
+- 阅读 `docs/DESIGN.md`、相关 ADR、schema、代码和测试，区分 current fact 与 proposal。
+- 架构、兼容、安全、恢复或长期 ownership 变化要写 ADR；局部设计可与实现同 PR review，但合并前仍是 proposal。
 
-### 3. codex 施工
-- 用 Agent 工具 `isolation: "worktree"` 起后台 agent，指向 handoff 文件。
-- 并行 track 走各自 worktree，disjoint 文件。
-- 瞬时 API 故障（504/流断/看门狗）是基建问题不是代码问题：先看 worktree committed 了什么，再 resume（强调小步提交）；连挂多次考虑我自己接手小改。
+### 2. 建立管理起点
 
-### 4. 我 review（**绝不只信 agent 的总结**）
-这是最重要的纪律，已多次救场：
-- **独立复现每条承重声明**：自己跑测试套件、自己复现它说的 bug/exploit、diff fixture 改动——不看它的话术。
-- **复现每个 finding 再动手**：验收/审查报的问题，先自己复现证实。（历史：F4"verify 拒绝 exit 0"是**假警报**——测试只污染了 scaffold 示例行；若照报告改会破坏正确的 exit-1。）
-- **验红线**：`git status` 确认真实 `kb/` 未动；治理逻辑零削弱（确认仍强制 --confirmed-by+--evidence）。
-- **merge 带撤销点**：merge 前记下 pre-merge HEAD 或打 tag；merge 后跑全量测试确认绿。
-- review 曾抓到：过时 worktree base、`confirm_unit` 门漏洞（handoff 范围写窄了）、F4 假警报。
+- 新蓝图先搜索相同 `Blueprint ID` 的 open Epic；零个才创建，多个冲突时停止并请人类消歧。
+- Epic 写最终目标、成功指标、baseline/设计链接、scope/non-goals、waves、依赖、风险、回滚和全局 DoD。
+- 已有 Epic 能覆盖当前目标时直接复用，不为每次小改动重复建大 Issue。
 
-### 5. 回写 SSOT + BACKLOG + 记忆
-- **设计级事实回写 SSOT**（顶部状态、原则、子系统决策、新 invariant）。落后即 bug。
-- **状态/进度回写 BACKLOG**（里程碑、分数、待办）。
-- **里程碑 + 硬教训写记忆**（跨会话）。
-- 若这轮暴露出新架构 invariant（如 F-a → "派生证据不可变"），补进 SSOT 对应原则。
+### 3. 开原子 Issue，Ready 后再施工
 
-## 验收（UX/行为改动的 gate）
-- 用**冷 acceptance agent**（全新上下文、没参与开发）按系统自己的文档端到端驱动真实流程，按目标（易用/聪明/自动化）诚实打分。
-- 冷 agent 会跑出单元测试测不到的真实工作流 bug（F-a 就是这么被揪出来的）。
-- 它报的 finding 同样**先复现再动手**。
+一个 Atomic Issue 定义一个可独立 accept/reject/rollback 的 outcome。默认：
 
-## 不变量（贯穿所有循环）
-- 理解来自 agent，脚本只搬运+验证（原则1）。
-- 每条判断挂逐字 evidence，脚本机器校验（原则2）；`raw/`+全量 parse-cache 是**不可变派生证据**，再派生步骤只读不覆盖。
-- 确认门验实质（拒空壳）+ 禁自签 + 判断类必留 evidence（原则3）。
-- 自动驱动：入库后 agent 一回合跑完管线，只在两个治理闸口停（确认 AI 判断 / 用户抉择）（原则7）。
-- 用户契约（原则8）：skill 的**用户可见输出**只含自然语言 + `kb <verb>` 伪 CLI，绝无裸命令 / `--flag` / `${…}` / 内部路径 / `NEXT FOR AGENT:`；伪 CLI 交互绝不依赖 TTY（一律 agent 中介问答 + headless 落盘）。**改任何面向用户的输出/交互时，把"是否泄漏裸命令或依赖 TTY"当作必查评审项。**
-- 确认锚定版本（原则3 ConfirmationReceipt）：确认绑定内容/evidence digest，内容变更自动失效；判断轨写入门 fail-closed；保留原 epistemic 类型。
-- 恢复合同：原子写 + operation journal + 锁 + revision/CAS + resume/undo/restore；checkpoint 只收本 op 路径，绝不 `git add -A`。
+```text
+1 Atomic Issue = 1 delivery wave = 1 consolidated PR
+```
+
+开工前写全：问题与证据、outcome、scope/non-goals、设计依据、解决思路、依赖/owner、风险/迁移/回滚、验收 checklist、测试计划，以及 `stage / last remote SHA / blocker / next action`。
+
+问题、范围或验收不清，承重决策未解决，依赖未满足，或并行写集冲突时不得开工。施工中发生 scope/acceptance 实质变化，先暂停并更新 Issue；PR 已创建后通常使用 replacement Issue/PR，不让旧 PR 静默膨胀。
+
+### 4. Branch/worktree 施工并 push
+
+- 分支默认 `codex/issue-<number>-<short-name>`；内部并行 track 可追加 `-track-<id>`。
+- 从 Issue 记录的 baseline 建立干净 worktree，不覆盖来源不明的工作。
+- 小步 commit；每个需要接力的 checkpoint 都 non-force push，并在 Issue 更新 full SHA、验证、blocker 和 next action。
+- 没有 remote full SHA 就不算共享进度；本地 worktree 随时可以丢弃。
+- 绝不直推/force-push default branch，不自行 tag、release 或 publish。
+
+### 5. 集成并独立验证
+
+- 单分支直接验证；多 track 必须有 disjoint owned paths、明确接口和唯一 integrator。
+- 共享文件交唯一 owner，或抽成前置 Issue/串行处理；不要并行竞写。
+- internal tracks 都 push，按依赖顺序进入 delivery branch；人类不负责拼装分支。
+- 每合入一轨跑相关测试，全部集成后跑目标/完整门禁。
+- 不只信施工 Agent 总结：复现承重 claim、bug 和 review finding 后再修改。
+- 确认真实 `kb/` 零修改，确认/evidence/恢复/用户输出红线没有削弱。
+
+### 6. 提交 consolidated PR
+
+- PR 使用 `Refs #<atomic>` 和 `Refs #<epic>`，不使用自动关闭关键字。
+- 写清 outcome、scope/non-goals、实现摘要、candidate SHA、测试/Actions、风险、回滚、已知限制和后续项。
+- 有并行 track 时列出 `track → source SHA → integration commit → owned files → evidence`。
+- Branch push CI 验 candidate head，PR CI 验当前 base 上的 merge candidate；base 或候选变化后重跑。
+- PR ready 后 Agent 停在等待人类审查，不自行 approval/merge。
+
+### 7. 人类 review 后合并
+
+- 所有 CI、review thread 和 tracked 文档同步满足仓库规则后，由人类在 GitHub 合并。
+- 有独立 reviewer 身份时使用 native `APPROVED` 和 branch protection；个人仓库只有一个账号时不伪造第二身份，Agent 仍必须停止，由维护者手动检查并 merge。
+- 只有用户在当前消息明确要求代为点击 merge，且既有审查/保护已满足时，Agent 才可执行；该授权不替代人类审查。
+
+### 8. 合并后收尾
+
+- 确认 default branch actual merge SHA 的 smoke/Actions。
+- Atomic Issue 记录 merge SHA、结果、限制和后续；smoke 通过后由人类关闭。
+- 更新 Epic wave；全部 wave 和全局验收完成后关闭 Epic。
+- 设计级事实同步 `docs/DESIGN.md`，长期取舍同步 ADR，用户变化同步文档/CHANGELOG。
+- 回归走新的 recovery/fix-forward Issue 和 PR，不改写 default history。
+
+## 何时使用增强控制
+
+以下情况才在 Issue 增加 frozen ownership、固定 checkpoint 格式、takeover approval、replacement lineage、exact dependency digest 或发布审批：
+
+- 多 Agent 跨 session 并行；
+- claimant 失联、账号变化、orphan branch 或 takeover；
+- 数据/schema 迁移、不可逆外部副作用；
+- 安全修复、权限/ruleset 或供应链变更；
+- 多仓库 exact-version 依赖；
+- 高价值 release/publish。
+
+具体升级与恢复方法见 tracked protocol。普通改动不要求手写 digest chain、terminal ref、authority/assignment 状态机；如果未来需要机器仲裁，应先通过 ADR 和 validator 工具化。
+
+GitHub 不可可靠读写时，普通施工、claim、handoff、push、PR 和 merge 全部停止；只允许只读诊断和可丢弃草稿。若 GitHub 信任本身失守，停止所有写入，由人类通过可信的 out-of-band 渠道恢复 anchor。
+
+## 产品不变量
+
+- 理解来自 Agent；脚本只搬运、建结构、验证和过门。
+- 每条判断挂逐字 evidence；`raw/` 与全量 parse cache 是不可变派生证据。
+- 确认门拒绝空壳、禁止自签，判断类必须有 evidence；ConfirmationReceipt 绑定内容/evidence digest，内容变化自动失效。
+- 入库后 Agent 一回合自动驱动，只在确认 AI 判断和用户抉择两个治理闸口停。
+- 用户可见输出只含自然语言与 `kb <verb>` 伪 CLI，不泄漏裸命令、flags、环境变量、内部路径或 TTY 前置。
+- 恢复保持原子写、operation journal、锁、revision/CAS 和精确 checkpoint；绝不 `git add -A`。

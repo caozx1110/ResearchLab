@@ -2612,7 +2612,7 @@ def handle_add(args: argparse.Namespace, root: Path) -> int:
 
 
 # --------------------------------------------------------------------------- #
-# ingest: chain the scriptable prefix of the ingestion pipeline (SSOT §7).      #
+# ingest: chain the scriptable prefix (`docs/DESIGN.md`, "对话层与 Agent 协议"). #
 #                                                                              #
 # `kb ingest <src>` runs intake add -> first analyzer prepare and STOPS there.  #
 # Papers use one deep-read scaffold containing the agent-authored paper_type and #

@@ -49,5 +49,5 @@ def test_schemas_md_has_evidence_claims_section_matching_ssot_block() -> None:
     text = (project_root / ".agents/lib/research/SCHEMAS.md").read_text(encoding="utf-8")
     assert "## Evidence / Claims" in text
     assert '<a id="evidence-claims"></a>' in text
-    # The locked YAML block from SSOT Part 2 Principle 2 appears verbatim.
+    # The block from .agents/lib/research/SCHEMAS.md#evidence-claims is verbatim.
     assert EVIDENCE_SCHEMA.strip() in text

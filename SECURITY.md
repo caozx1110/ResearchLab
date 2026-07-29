@@ -8,6 +8,8 @@ The current candidate identifier is `0.2.0-rc.7`. The identifier denotes a relea
 
 Please use [GitHub private vulnerability reporting](https://github.com/caozx1110/ResearchLab/security/advisories/new) for vulnerabilities, governance bypasses, unsafe update or installer behavior, path traversal, data loss, credential exposure, or a way to read or modify private research material.
 
+If GitHub itself is unavailable or the account, repository, ruleset, or commit history may be compromised, do not push, merge, or disclose sensitive details through GitHub. Treat repository state after the suspected trust break as untrusted and stop. This is the explicit boundary of the GitHub-only collaboration protocol: only a human maintainer using a previously verified out-of-band channel may establish a new trusted anchor and authorize resumption.
+
 Do not put exploit details, private source data, local paths, tokens, logs containing secrets, or unpublished research into a public issue. A sanitized public issue is appropriate only for non-sensitive hardening or documentation questions.
 
 Include the affected commit or release candidate, operating system, minimal reproduction, expected boundary, and observed impact. Maintainers will acknowledge and triage reports on a best-effort basis; this release-candidate project does not promise a response-time SLA.

@@ -1,4 +1,4 @@
-"""Regression: complete-note verify auto-runs safe post-note steps (SSOT 3.2).
+"""Regression for post-note steps in `docs/DESIGN.md` "Prepare / fill / verify".
 
 - Default prefs (auto_refresh_structure_after_note=True) + full autonomy scope
   → refresh-structure runs (structure.yaml written) and the parse-cache is NOT

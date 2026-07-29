@@ -26,7 +26,7 @@ CORE_RUNTIME_PACKAGES = (
     "typing_extensions==4.16.0",
 )
 
-# Lightweight default PDF backend (SSOT 3.1 decision A): pure PyMuPDF, no torch,
+# Lightweight default PDF backend (docs/DESIGN.md, "Runtime bootstrap"): pure PyMuPDF, no torch,
 # always installed into the managed venv so a fresh user never silently degrades
 # to an empty PDF parse. Heavy backends (MinerU/Docling) stay opt-in.
 PDF_BACKEND_PACKAGE = "pymupdf4llm"

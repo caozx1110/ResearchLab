@@ -1,6 +1,8 @@
 # 设计说明
 
-本文面向想理解或扩展系统的开发者。具体 on-disk 字段和枚举以 [SCHEMAS.md](../.agents/lib/research/SCHEMAS.md) 为准；本文说明边界、数据流和不变量。
+本文面向想理解或扩展系统的开发者。它是 default branch 上当前设计意图、架构边界和系统不变量的 tracked SSOT；具体 on-disk 字段和枚举以 [SCHEMAS.md](../.agents/lib/research/SCHEMAS.md) 为准，长期设计取舍见 [决策记录](decisions/README.md)。
+
+拟议变更先进入 GitHub Epic/Atomic Issue；会影响长期架构、兼容、安全、恢复或 ownership 的取舍还须形成 tracked ADR。只有经人类 review 合入 default branch 的设计/ADR 才是 accepted contract，未合并分支上的内容仍是 proposal。活动范围、接力状态、候选 SHA、证据与 review 只存在于 GitHub Issue/PR/remote commits/Actions，不能由本机文件或聊天上下文补全；普通交付、按需增强控制与恢复规则见 [GitHub-only 开发工作流](DEVELOPMENT_WORKFLOW.md)。
 
 ## 目标与非目标
 
@@ -32,7 +34,7 @@ release bundle                 installed workspace
 
 Release bundle 不包含任何私有 `kb/`。安装、更新、storage sync 和卸载必须保持数据边界：workspace 的 `kb/` 永不成为发布内容，storage sync 不改 `.agents/**` 或根 `AGENTS.md`。
 
-维护者本地 `dev-docs/` 同样不属于 Git 或 release bundle。它只保存 SSOT 草案、backlog、一次性施工 handoff 和历史审查原始记录；稳定设计必须同步到本文件、根开发规则、共享 schema 或 changelog 后才算进入公共合同。历史记录中的旧路径和旧测试数不代表当前布局。
+任何本地 scratch、worktree、提示词或工具记忆都不属于 Git 或 release bundle，也不属于开发合同。另一个 Agent 必须能只凭 fresh clone 与 GitHub 上的 tracked contracts、Issue、PR、remote commits 和 Actions 恢复任务；未 push 或仅本机可见的状态按不存在处理。
 
 安装与管理员自动化是产品唯一的技术 bootstrap 面。安装完成后，普通用户的 runtime 合同只有自然语言与 16 个 `kb <verb>` 伪 CLI；内部 flags、scripts、环境变量和 paths 只属于 Agent 私有协议或管理员参考，不得变成日常使用前置。
 
@@ -252,16 +254,16 @@ Install manifest 记录 `source_origin` 与 `source_branch`，本地安装还可
 
 新增或修改能力时：
 
-1. 先确认 canonical owner 与设计 SSOT；
+1. 先确认 canonical owner，并读取 default branch 上本文件、相关 tracked ADR 与 schema；
 2. 复用 canonical schema、workflow state、review classifier 和 confirmation helper；
 3. analyzer 只 prepare/verify，不生成理解；
 4. judgement 逐条挂 evidence；
 5. mutation 预声明 exact targets，使用 journal/lock/CAS；
 6. human output 只含自然语言与 `kb <verb>`；
-7. structured Agent hand-off 保持私有；
+7. 产品 runtime 的 structured Agent hand-off 保持私有，不得与仓库开发用的脱敏 GitHub Issue checkpoint 混淆；
 8. 同步 skill metadata、用户文档和测试；
 9. 可选诊断只传脱敏稳定字段，audit 保持字节级只读，且不新增公开动词；
 10. 在 Linux 与 macOS 支持的 Python 版本上验证；
 11. 发布前由冷 acceptance agent 端到端复现关键路径。
 
-当前标识为 `0.2.0-rc.7`，由 `.agents/VERSION` 唯一控制；该标识表示 RC，不代表 stable/GA。精确发布 revision 由对应 Git tag 证明，GitHub Release 是可选分发入口而非必要条件。当前验收指标、剩余发布门、兼容性与 SLA 范围只在 `CHANGELOG.md` 维护，README、用户指南与本设计文档仅引用该事实源，不复制易漂移的测试数字或门状态。
+当前标识为 `0.2.0-rc.7`，由 `.agents/VERSION` 唯一控制；该标识表示 RC，不代表 stable/GA。精确发布 revision 由对应 Git tag 证明，GitHub Release 是可选分发入口而非必要条件。`CHANGELOG.md` 维护 durable candidate/release acceptance summary、兼容性与 SLA 范围；活动交付门、阻塞、精确候选和 live evidence 只在对应 GitHub Epic/Atomic Issue/PR/Actions 维护，README、用户指南与本设计文档不复制易漂移的运行状态。

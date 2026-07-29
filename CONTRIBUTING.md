@@ -1,19 +1,33 @@
 # Contributing
 
-人类可读 Markdown 默认中文优先。开发/编辑规则、ownership 边界与开发工作流以仓库根的 [AGENTS.md](AGENTS.md)（`CLAUDE.md` 为其软链）为准；面向使用 kb 的 agent 的运行规则（skill 路由、确认门控、写作偏好）见 [.agents/AGENTS.md](.agents/AGENTS.md)。
+人类可读 Markdown 默认中文优先。仓库开发规则见 [AGENTS.md](AGENTS.md)（`CLAUDE.md` 为其软链）；普通流程、并行与恢复细则见 [GitHub-only 开发工作流](docs/DEVELOPMENT_WORKFLOW.md)；安装后使用 kb 的规则见 [.agents/AGENTS.md](.agents/AGENTS.md)。
 
-## 文档边界
+## 文档与协作边界
 
-- 当前用户合同：`README.md`、`docs/`、`CHANGELOG.md`、`SECURITY.md`。
-- 当前开发合同：根 `AGENTS.md`、本文件、`.agents/lib/research/SCHEMAS.md`。
-- 安装后 Agent 合同：`.agents/AGENTS.md`、`.agents/AGENT_GUIDE.md`、各 `SKILL.md` 与必要 reference。
-- `dev-docs/` 是维护者本地、Git-ignored 的 SSOT 草案、backlog、一次性 handoff 与历史审查工作台，不进入提交或安装包。稳定结论必须先 graduate 到上述 tracked 文档，公共 clone 不得依赖本地工作台。
+- 当前设计：`docs/DESIGN.md`、`docs/decisions/`、schema、代码和测试。
+- 当前交付：GitHub Epic、Atomic Issue、remote commits、PR 和 Actions。
+- 用户合同：`README.md`、用户文档、`CHANGELOG.md`、`SECURITY.md`。
+- 安装后 Agent 合同：`.agents/AGENTS.md`、`.agents/AGENT_GUIDE.md`、各 `SKILL.md`。
 
-历史 handoff 和 audit 保留其时间点上的路径、commit 与测试数，不用于说明当前布局。审查文档漂移时，以实际 `.agents/skills/*/SKILL.md` inventory、当前 schema 和发布测试为准。
+GitHub 上的 tracked files、Issue、PR、remote refs/commits 和 Actions 是唯一协作与接力面。本地 scratch、提示词、聊天、模型 memory、worktree、stash、未 push commit 或本机日志都不能成为贡献前置或验收证据。
 
 Python floor: `python_requires >= 3.9`。本仓库保留 `PYTHONPATH=.agents/lib` 约定，不新增 `pyproject.toml`。
 
-提交前的测试门禁：
+## GitHub 交付流程
+
+1. Fetch default branch，阅读 tracked 设计/ADR/schema，记录 exact baseline。
+2. 新蓝图创建或复用一个 Epic；每个独立 outcome 在开工前建立一个 Atomic Issue，写清问题、方案、范围、依赖、风险、验收和测试。
+3. 从 Issue 建 branch/worktree，小步 commit；需要接力的 checkpoint 必须 push，并在 Issue 写 full SHA、验证、blocker 和 next action。
+4. 并行 track 的 owned paths 必须互斥，由唯一 integrator 合入 delivery branch；人类不负责拼装。
+5. 集成候选跑相关与完整门禁，复现承重 claim，确认真实 `kb/` 零修改。
+6. 创建一个 consolidated PR，使用 `Refs` 关联 Atomic Issue/Epic，记录 candidate SHA、测试/Actions、风险、回滚和限制。
+7. Agent 停止于等待人类审查；人类处理 review 后在 GitHub 合并。合并后确认 smoke，再关闭 Atomic Issue并更新 Epic。
+
+默认 `1 Atomic Issue = 1 wave = 1 consolidated PR`。普通改动不需要自定义 comment digest 或 receipt 状态机；跨 Agent 长期并行、takeover、安全、复杂迁移或发布时，按开发协议增加相应增强控制。
+
+Issue/PR 是公开记录。漏洞、治理绕过、路径穿越、数据丢失、凭据暴露或私有研究材料按 `SECURITY.md` 走 private reporting。GitHub 不可可靠读写时停止普通施工、handoff、push 和 merge。
+
+## 提交前门禁
 
 ```bash
 pip install -r requirements-dev.txt && python -m pytest tests -q

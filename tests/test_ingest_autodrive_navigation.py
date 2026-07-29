@@ -1,4 +1,4 @@
-"""Ingestion auto-drive navigation tests (SSOT Principle 7).
+"""Ingestion navigation tests for `docs/DESIGN.md` "对话层与 Agent 协议".
 
 These lock the machine-readable `NEXT FOR AGENT:` navigation lines emitted by the
 three analyzers' prepare commands and by intake add. The lines are pure navigation

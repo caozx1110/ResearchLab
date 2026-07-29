@@ -94,7 +94,7 @@ def test_fetch_url_enforces_size_cap(monkeypatch: pytest.MonkeyPatch) -> None:
         common.fetch_url("https://example.com/big", binary=True, max_bytes=1024)
 
 
-# --- HTML section chunking (B4: section/anchor, no page numbers) ------------
+# --- HTML chunks (.agents/lib/research/SCHEMAS.md#evidence-claims) -----------
 
 
 def test_html_section_chunks_carry_section_anchor() -> None:
@@ -134,7 +134,7 @@ def test_write_parse_cache_records_locator_kind(tmp_path: Path) -> None:
     assert sources.write_parse_cache(tmp_path, "p-x-2", {"parse_chunks": []}) is None
 
 
-# --- downstream evidence integration (B4 two locators, SSOT 原则2) ----------
+# --- evidence integration (.agents/lib/research/SCHEMAS.md#evidence-claims) --
 
 
 def test_evidence_grounds_pdf_page_locator(tmp_path: Path) -> None:

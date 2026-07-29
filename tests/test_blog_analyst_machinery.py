@@ -1,4 +1,4 @@
-"""Blog-analyst machinery tests (SSOT Principle 1 / §3.4).
+"""Blog analyzer tests for `docs/DESIGN.md` "Prepare / fill / verify".
 
 We cannot headless-test "an agent filled *good* understanding" (that needs a real
 agent). So these test the MACHINERY the script owns:

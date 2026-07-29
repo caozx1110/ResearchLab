@@ -6,6 +6,7 @@ on:
 
 jobs:
   test:
+    name: "${{ github.event_name == 'push' && 'candidate-head' || 'tested-merge' }} / linux / py${{ matrix.python-version }}"
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -42,6 +43,7 @@ jobs:
         run: env -u CI python -m pytest tests -q
 
   macos-release-gate:
+    name: "${{ github.event_name == 'push' && 'candidate-head' || 'tested-merge' }} / macos / py${{ matrix.python-version }}"
     runs-on: macos-latest
     strategy:
       fail-fast: false

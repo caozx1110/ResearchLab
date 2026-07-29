@@ -4,6 +4,11 @@ All notable changes to this project will be documented here. The format follows 
 
 ## [Unreleased]
 
+### Changed
+
+- Development collaboration is now GitHub-remote-complete: tracked design/ADR/schema contracts, Epic and Atomic Issues, pushed checkpoints, consolidated PRs, Actions evidence, and human review form the complete handoff chain. Ordinary changes use a lightweight path; frozen ownership, takeover approval, exact dependency binding, and release controls are added only when the risk requires them. Local workspaces, one-off prompts, tool memory, chats, stashes, and unpushed state are no longer workflow inputs or evidence.
+- Source comments and analyzer scaffold/note explanations no longer cite retired private design section numbers; current contracts are self-contained or point to tracked `docs/DESIGN.md` and `SCHEMAS.md` anchors, without changing the evidence or confirmation semantics.
+
 ## [0.2.0-rc.7] - 2026-07-29
 
 ### Fixed (R27 adversarial closure, 2026-07-28)
@@ -23,7 +28,7 @@ All notable changes to this project will be documented here. The format follows 
 - `unit-analyst` now physically owns the canonical paper, repository, dataset, and blog analyzer scripts as well as the discoverable routing surface. All current runtime navigation uses one kind registry under the shared library.
 - The legacy `paper-analyst`, `repo-analyst`, `dataset-analyst`, and `blog-analyst` resource directories are removed from source and distribution. Their persisted preference, journal, receipt, provenance, and diagnostic owner identities remain unchanged inside the canonical implementations and registry.
 - Copy-install updates atomically remove pre-consolidation analyzer scripts and add the four canonical `unit-analyst` scripts to the managed manifest; managed drift remains fail-closed.
-- Current documentation now derives its skill inventory from the 15 discoverable directories and no longer presents retired analyzer, wiki, or navigator namespaces as shipping skills. Maintainer-only SSOT drafts, one-off handoffs, audit transcripts, and historical acceptance logs under `dev-docs/` remain local and are no longer Git-tracked or installed; stable contracts are graduated into the tracked public, contributor, runtime, schema, and release documents.
+- Current documentation now derives its skill inventory from the 15 discoverable directories and no longer presents retired analyzer, wiki, or navigator namespaces as shipping skills. Legacy maintainer-only drafts, one-off handoffs, audit transcripts, and historical acceptance logs may still exist locally but have zero development authority; durable contracts live in tracked design, Issue/PR, remote commits and Actions.
 
 ### Fixed (R6 cold acceptance, 2026-07-27)
 

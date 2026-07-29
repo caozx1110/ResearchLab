@@ -1,6 +1,6 @@
 """Source backup/archival, duplicate detection, source-search staging, and storage layout sync.
 
-Dual-source ingestion (SSOT 3.1 decision A, B4): arxiv sources prefer quality-gated
+Dual-source ingestion (tracked in `docs/DESIGN.md`, "数据模型"): arxiv sources prefer quality-gated
 HTML (arxiv.org/html -> ar5iv Labs), then PDF, then an abstract-only fallback;
 non-arxiv PDFs are downloaded as real bytes and parsed
 with the always-available lightweight PyMuPDF4LLM backend with page=N locators.
@@ -94,7 +94,7 @@ from .yaml_io import write_bytes_atomic
 
 WEB_SNAPSHOT_MAX_CHARS = 120_000
 
-# Hard cap for downloaded PDF/source bytes (SSOT 3.1: "size cap, e.g. 50MB").
+# Hard cap for downloaded PDF/source bytes (docs/DESIGN.md, "数据模型").
 SOURCE_DOWNLOAD_MAX_BYTES = min(FETCH_MAX_BYTES, 50 * 1024 * 1024)
 
 # Parse-cache page budget: parse enough of the document to ground evidence
@@ -3414,7 +3414,7 @@ def _truncate_snapshot_text(text: str) -> str:
     return (trimmed or text[:WEB_SNAPSHOT_MAX_CHARS]).rstrip() + "\n\n[truncated]\n"
 
 
-# --- arxiv source resolution (SSOT 3.1: HTML-first) -----------------------
+# --- arxiv source resolution (docs/DESIGN.md, "数据模型": HTML-first) -----
 
 _ARXIV_HOST_RE = re.compile(r"(?:^|\.)arxiv\.org$|(?:^|\.)ar5iv\.", re.IGNORECASE)
 
@@ -3443,7 +3443,7 @@ def _arxiv_html_candidates(arxiv_id: str) -> list[dict[str, str]]:
     ]
 
 
-# --- PDF parsing (SSOT 3.1: lightweight PyMuPDF4LLM default) ----------------
+# --- PDF parsing (docs/DESIGN.md, "Runtime bootstrap": PyMuPDF4LLM) --------
 
 
 def _pymupdf4llm_available() -> bool:
@@ -3587,7 +3587,7 @@ def _pdf_metadata(pdf_path: Path, chunks: list[dict[str, Any]]) -> dict[str, Any
     }
 
 
-# --- HTML section parsing (SSOT B4: section/anchor locators, no page nums) --
+# --- HTML sections (.agents/lib/research/SCHEMAS.md#evidence-claims) ---------
 
 
 def _slug_anchor(text: str, fallback: str) -> str:
@@ -3610,7 +3610,8 @@ def _html_to_section_chunks(
     """Split HTML into section chunks keyed by heading anchor (no page numbers).
 
     Labels use ``section:<anchor>`` (never ``page-N``) so downstream evidence
-    verification treats them as HTML section/anchor locators per SSOT B4. Falls
+    verification treats them as HTML section/anchor locators per
+    `.agents/lib/research/SCHEMAS.md#evidence-claims`. Falls
     back to a single whole-document chunk when no headings are present."""
     reading_html, _root_info = html_reading_fragment(html)
     selected_html = reading_html or html
@@ -3877,8 +3878,9 @@ def write_parse_cache(unit_dir: Path, unit_id: str, source_info: dict[str, Any])
 
     Uses the canonical ``unit_id`` header while preserving the chunk shape that
     analyzer compatibility readers consume (no cold-start empty parse),
-    and adds ``source_type`` / ``locator_kind`` so downstream evidence (原则2/B4)
-    can tell PDF (page=N) from HTML (section/anchor). Returns None when nothing
+    and adds ``source_type`` / ``locator_kind`` so downstream evidence under
+    `.agents/lib/research/SCHEMAS.md#evidence-claims` can tell PDF (page=N) from HTML
+    (section/anchor). Returns None when nothing
     was parsed."""
     chunks = source_info.get("parse_chunks") or []
     if not chunks:
@@ -4769,7 +4771,8 @@ def backup_source(
 ) -> dict[str, Any]:
     """Archive a source as real bytes + real sha256, returning an explicit status.
 
-    Dispatch (SSOT 3.1 decision A / B4):
+    Dispatch (`docs/DESIGN.md`, "数据模型";
+    `.agents/lib/research/SCHEMAS.md#evidence-claims`):
       * arxiv URL or id  -> quality-gated HTML (arxiv.org/html -> ar5iv Labs), PDF, then abstract
       * other URL, PDF   -> real download + PyMuPDF4LLM page chunks, page=N locators
       * other URL, HTML  -> real download + section chunks, section/anchor locators

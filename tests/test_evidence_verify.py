@@ -1,6 +1,7 @@
 """Evidence layer: verbatim quote verification + claim validation + attach.
 
-Covers SSOT Part 2 Principle 2 (B3 short verbatim, B4 two locator families,
+Covers `.agents/lib/research/SCHEMAS.md#evidence-claims` (verbatim quotes,
+two locator families,
 judgement empty-evidence rejection). All fixtures are synthetic temp dirs — kb/
 is never touched.
 """
@@ -91,7 +92,7 @@ def test_fabricated_quote_returns_violation(tmp_path: Path) -> None:
 
 def test_case_difference_is_not_tolerated(tmp_path: Path) -> None:
     _write_parse_cache(tmp_path)
-    # source says 'widget encoder'; upper-cased quote must miss (case-sensitive B3)
+    # .agents/lib/research/SCHEMAS.md#evidence-claims keeps matching case-sensitive.
     claim = {"id": "c1", "claim_type": "fact",
              "evidence_refs": [_ref(quote="WIDGET ENCODER at 42 Hz")]}
     assert len(verify_claim_evidence(claim, tmp_path)) == 1
@@ -106,7 +107,7 @@ def test_punctuation_difference_is_not_tolerated(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# verify_claim_evidence — locator narrowing (B4 page=N)                         #
+# Locator narrowing (.agents/lib/research/SCHEMAS.md#evidence-claims)          #
 # --------------------------------------------------------------------------- #
 
 def test_locator_page_match_is_clean(tmp_path: Path) -> None:

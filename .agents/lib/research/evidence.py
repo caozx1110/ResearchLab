@@ -1,4 +1,6 @@
-"""Claim -> evidence binding + verbatim verification (SSOT Part 2, Principle 2).
+"""Claim -> evidence binding + verbatim verification.
+
+Tracked contract: `.agents/lib/research/SCHEMAS.md#evidence-claims`.
 
 This module is the Wave 2 **evidence layer**: it turns "有理有据" from a slogan
 into something a script can check. It is purely *additive* — it exposes callable,
@@ -9,10 +11,9 @@ and analyzers are untouched; gate interlock lands in the parallel Gate track,
 which will call `validate_claims()` / `verify_claim_evidence()` from here).
 
 The canonical schema is documented verbatim in
-`lib/research/SCHEMAS.md#evidence-claims` and locked in
-`.agents/lib/research/SCHEMAS.md`.
+`.agents/lib/research/SCHEMAS.md#evidence-claims`.
 
-Verification model (SSOT B3/B4):
+Verification model (`.agents/lib/research/SCHEMAS.md#evidence-claims`):
   * Every evidence_ref carries a **short verbatim `quote`**. The script loads the
     referenced `artifact` and checks the quote is a **whitespace-normalized
     verbatim substring** (consecutive whitespace folded to one space + strip;
@@ -47,7 +48,8 @@ from .common import utc_now_iso
 # Vocabulary (mirrors research-record information_types + confirmation values).
 CLAIM_TYPES = {"fact", "inference", "evaluation", "user_opinion", "unverified"}
 # Judgement-class claims must carry evidence before they may be promoted to
-# confirmed (SSOT Principle 2 / gate interlock). This module supplies the
+# confirmed (.agents/lib/research/SCHEMAS.md#evidence-claims gate interlock).
+# This module supplies the
 # criterion function; the parallel Gate track wires it into the gate.
 JUDGEMENT_CLAIM_TYPES = {"inference", "evaluation", "user_opinion"}
 UNCONFIRMABLE_CLAIM_TYPES = {"unverified"}
@@ -57,7 +59,8 @@ CLAIM_CONFIRMATION_VALUES = {
     "rejected",
     "auto_confirmed",
 }
-# Two locator families (SSOT B4): PDF sources use page/section/para; HTML
+# Two locator families (.agents/lib/research/SCHEMAS.md#evidence-claims):
+# PDF sources use page/section/para; HTML
 # sources use section/anchor (no page numbers).
 PDF_LOCATOR_KINDS = {"page", "section", "para"}
 HTML_LOCATOR_KINDS = {"section", "anchor"}
@@ -97,7 +100,7 @@ CONFIRMABLE_CONTENT_FIELDS: dict[str, dict[str, tuple[str, ...]]] = {
 }
 
 # Locked canonical schema — kept byte-identical to
-# SCHEMAS.md#evidence-claims / SSOT Part 2 Principle 2.
+# .agents/lib/research/SCHEMAS.md#evidence-claims.
 EVIDENCE_SCHEMA = """# 挂在每条 AI claim 上。落盘位置：note/screening 产物内的 claims 列表 + record 关联。
 claim:
   id: claim-001
@@ -108,8 +111,8 @@ claim:
   evidence_refs:
     - source_unit_id: p-...       # 证据所在 unit
       artifact: parse-cache.yaml  # unit 内相对路径，或 source(pdf/html)
-      locator: "page=3"           # PDF: page=N|section|para ; HTML: section|anchor（B4）
-      quote: ""                   # 短逐字片段（B3）——脚本校验它逐字存在于 artifact
+      locator: "page=3"           # PDF: page=N|section|para ; HTML: section|anchor
+      quote: ""                   # 短逐字片段——脚本校验它逐字存在于 artifact
       summary: ""                 # 可选转述
 """
 
@@ -138,7 +141,7 @@ class Claim:
 
 
 # --------------------------------------------------------------------------- #
-# Text normalization (SSOT B3: whitespace-normalized, case-sensitive verbatim) #
+# Text normalization (.agents/lib/research/SCHEMAS.md#evidence-claims)          #
 # --------------------------------------------------------------------------- #
 
 _WS_RE = re.compile(r"\s+")
@@ -294,7 +297,8 @@ def _page_of_label(label: Any) -> int | None:
     return int(match.group(1)) if match else None
 
 
-# Locator position validation (SSOT B4 hardening): a locator is not free text —
+# Locator position validation (.agents/lib/research/SCHEMAS.md#evidence-claims):
+# a locator is not free text —
 # when its shape is recognized, the cited position must actually contain the
 # quote.  Recognized families (exactly the forms the analysts document):
 #   * ``line=N`` / ``line=N-M``   -> raw line positions inside the artifact file
@@ -935,7 +939,8 @@ def verify_claim_evidence(
 
     For each `evidence_ref` the referenced `artifact` is loaded under `unit_dir`
     and its `quote` is checked to be a whitespace-normalized verbatim substring
-    (SSOT B3). Reported violations cover: missing/unverifiable quote, artifact
+    (`.agents/lib/research/SCHEMAS.md#evidence-claims`). Reported violations
+    cover: missing/unverifiable quote, artifact
     that cannot be read, quote-not-found, and — when the locator's shape is
     recognized (`line=N`/`line=N-M`, `page=N`, `section:<anchor>`) — a quote
     that is verbatim in the artifact but not at the cited position (locator
@@ -1172,8 +1177,9 @@ def validate_claims(claims: Any) -> list[str]:
     Returns a list of violation strings (empty == all claims well-formed). Checks
     per claim: required fields present (id/text/claim_type/confirmation_status/
     evidence_refs), `claim_type` in the enum, `confirmation_status` in the enum,
-    `evidence_refs` is a list, and — the gate interlock criterion (SSOT
-    Principle 2/3) — a judgement-class claim
+    `evidence_refs` is a list, and — the gate interlock criterion defined by
+    `.agents/lib/research/SCHEMAS.md#evidence-claims` and
+    `.agents/lib/research/SCHEMAS.md#confirmation-gate` — a judgement-class claim
     (`inference`/`evaluation`/`user_opinion`) must have a **non-empty**
     `evidence_refs` (empty => violation). Fact and unverified claims may carry an
     empty list, but every ref that is present must be a mapping with non-empty
@@ -1277,7 +1283,8 @@ def attach_claims(payload: Any, claims: Any) -> dict[str, Any]:
     """Write a `claims` list onto a note/screening payload dict, return payload.
 
     Claims may be `Claim` dataclasses or plain dicts; they are normalized to
-    dicts under `payload["claims"]` (SSOT: "note/screening 产物内的 claims 列表").
+    dicts under `payload["claims"]`
+    (`.agents/lib/research/SCHEMAS.md#evidence-claims`).
     Additive: it only sets one key and never removes existing payload fields.
     """
     if not isinstance(payload, dict):
