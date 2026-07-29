@@ -4,7 +4,7 @@
 
 它不是预装好的知识库。安装后，能力包与研究数据分开保存。AI 负责提取、整理、追踪和汇总；你负责判断、确认和拍板。
 
-能力包标识是 **`0.2.0-rc.7`**。这个标识表示 release candidate，不是 stable 或 GA；某个精确版本只有在 GitHub 上存在对应 tag 与 pre-release 时才算已经发布。当前验收证据、剩余发布门和兼容性/支持范围统一以 [CHANGELOG.md](../CHANGELOG.md) 为单一事实源。安装和核心流程没有外部 API Key、付费检索额度、商业数据库或付费插件前置条件。
+能力包标识是 **`0.2.0-rc.7`**。这个标识表示 release candidate，不是 stable 或 GA；精确发布 revision 由对应 Git tag 标识，GitHub Release 是可选分发入口，不是发布成立的必要条件。当前验收证据、剩余发布门和兼容性/支持范围统一以 [CHANGELOG.md](../CHANGELOG.md) 为单一事实源。安装和核心流程没有外部 API Key、付费检索额度、商业数据库或付费插件前置条件。
 
 ## 能力成熟度（按组件）
 

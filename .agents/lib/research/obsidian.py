@@ -29,7 +29,7 @@ from .yaml_io import dump_yaml, load_yaml, write_text_if_changed, write_yaml_if_
 
 
 OBSIDIAN_PROJECTION_SCHEMA = "research-kb-obsidian/v1"
-OBSIDIAN_RENDERER_REVISION = 10
+OBSIDIAN_RENDERER_REVISION = 11
 MANIFEST_NAME = "manifest.yaml"
 HUMAN_DIRS = ("inbox", "annotations")
 UNIT_HEADINGS = frozenset(
@@ -1102,21 +1102,24 @@ def _base_file(*, name: str, view_filter: str = "", group_by: str = "", zh: bool
     view: dict[str, Any] = {
         "type": "table",
         "name": name,
-        "order": [
-            "file.name",
-            "title",
-            "kind",
-            "analysis_stage",
-            "materialization_status",
-            "confirmation_status",
-            "topics",
-            "updated",
-        ],
     }
     if view_filter:
         view["filters"] = {"and": [view_filter]}
     if group_by:
         view["groupBy"] = {"property": group_by, "direction": "ASC"}
+    # Obsidian 1.12.7 saves filters/groupBy before order and indents block
+    # sequences.  Emit that byte-canonical form directly so merely opening a
+    # generated Base never looks like a human edit to the manifest guard.
+    view["order"] = [
+        "file.name",
+        "title",
+        "kind",
+        "analysis_stage",
+        "materialization_status",
+        "confirmation_status",
+        "topics",
+        "updated",
+    ]
     payload = {
         "filters": {
             "and": [
@@ -1138,7 +1141,7 @@ def _base_file(*, name: str, view_filter: str = "", group_by: str = "", zh: bool
         },
         "views": [view],
     }
-    return dump_yaml(payload, width=1_000_000)
+    return dump_yaml(payload, width=1_000_000, indent_sequences=True)
 
 
 def _legacy_obsidian_normalized_base(relative: str) -> dict[str, Any] | None:

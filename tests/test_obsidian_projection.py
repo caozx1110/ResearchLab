@@ -11,6 +11,7 @@ from pathlib import Path
 from repo_paths import REPO_ROOT
 
 import pytest
+import yaml
 
 from research.common import load_yaml, write_yaml_if_changed
 from research.core import default_record, link_records, record_path, undo_last_operation
@@ -22,6 +23,13 @@ from research.obsidian import (
 )
 from research.relations import project_relation_edges
 import research.obsidian as obsidian_module
+
+
+class _ObsidianBaseDumper(yaml.SafeDumper):
+    """Mirror the stable block-sequence indentation written by Obsidian 1.12.7."""
+
+    def increase_indent(self, flow: bool = False, indentless: bool = False):
+        return super().increase_indent(flow, False)
 
 
 def _load_kb_cli():
@@ -194,6 +202,28 @@ def test_projector_builds_native_pages_bases_and_precise_backlinks(tmp_path: Pat
     second = update_obsidian_projection(tmp_path)
     assert second["changed"] is False
     assert _journal_entries(tmp_path) == journals_before
+
+
+def test_bases_are_byte_stable_after_obsidian_1_12_save_normalization(tmp_path: Path) -> None:
+    _record(tmp_path, "p-alpha-12345678", "Alpha")
+    update_obsidian_projection(tmp_path)
+    managed = obsidian_managed_root(tmp_path)
+
+    for base_name in ("All Units.base", "Pending Review.base", "By Topic.base"):
+        path = managed / "dashboards" / base_name
+        original = path.read_text(encoding="utf-8")
+        payload = yaml.safe_load(original)
+        normalized = yaml.dump(
+            payload,
+            Dumper=_ObsidianBaseDumper,
+            allow_unicode=True,
+            sort_keys=False,
+            width=1_000_000,
+        )
+        assert normalized == original
+
+    assert obsidian_projection_status(tmp_path)["status"] == "PASS"
+    assert update_obsidian_projection(tmp_path)["changed"] is False
 
 
 def test_projection_links_markdown_reading_view_and_local_repo_file(tmp_path: Path) -> None:

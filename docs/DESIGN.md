@@ -90,7 +90,7 @@ Release bundle 不包含任何私有 `kb/`。安装、更新、storage sync 和�
 
 ### Obsidian 派生视图
 
-`kb/` 可直接作为无需社区插件的 Obsidian Vault；canonical record、program state、taxonomy 与 evidence 仍是唯一事实源。系统只管理 `kb/obsidian/managed/`，人工内容放在 `inbox/` 与 `annotations/`，不得生成或改写 `.obsidian/`。生成页以 Reading view 为消费合同；编辑/Live Preview 显示 wikilink、code span 与 block ID 源码是 Obsidian 原生行为。Paper、文章与本地文档页回链 canonical `source/document.md`，source map 能把 page/section evidence locator 投影到稳定 source block；repo evidence 可以渲染为经过路径 containment 和文件存在性检查的本地文件链接，但 canonical 身份始终是 unit id 与仓库相对路径，机器本地 URI 不写回证据。动态 canonical 文本必须经 Markdown-safe 字面渲染，frontmatter wikilink 必须保持物理单行；manifest 的 renderer revision 变化会令旧投影 stale 并触发可恢复重建。
+`kb/` 可直接作为无需社区插件的 Obsidian Vault；canonical record、program state、taxonomy 与 evidence 仍是唯一事实源。系统只管理 `kb/obsidian/managed/`，人工内容放在 `inbox/` 与 `annotations/`，不得生成或改写 `.obsidian/`。生成页以 Reading view 为消费合同；编辑/Live Preview 显示 wikilink、code span 与 block ID 源码是 Obsidian 原生行为。Paper、文章与本地文档页回链 canonical `source/document.md`，source map 能把 page/section evidence locator 投影到稳定 source block；repo evidence 可以渲染为经过路径 containment 和文件存在性检查的本地文件链接，但 canonical 身份始终是 unit id 与仓库相对路径，机器本地 URI 不写回证据。动态 canonical 文本必须经 Markdown-safe 字面渲染，frontmatter wikilink 必须保持物理单行；renderer 11 的 Bases 直接输出当前支持的 Obsidian 保存格式所采用的 byte-canonical YAML，实际打开面板不会制造 managed drift；manifest 的 renderer revision 变化会令旧投影 stale 并触发可恢复重建。
 
 人工笔记回流是显式选择，不是目录扫描：只接收当前消息点名的 `inbox/` 或 `annotations/` 下一层 UTF-8 普通 Markdown basename，拒绝 nested path、symlink、special、oversize 与 review sheet。source-intake 将选择时 exact bytes 冻结成 provenance 隔离的 `blog` unit（`source_origin=human-note`），原件不进入 transaction 或 checkpoint；blog owner 只从冻结 parse cache 接受 Agent fill/verify，结构化判断仍进入普通 pending review。
 
@@ -264,4 +264,4 @@ Install manifest 记录 `source_origin` 与 `source_branch`，本地安装还可
 10. 在 Linux 与 macOS 支持的 Python 版本上验证；
 11. 发布前由冷 acceptance agent 端到端复现关键路径。
 
-当前标识为 `0.2.0-rc.7`，由 `.agents/VERSION` 唯一控制；该标识表示 RC，不代表 stable/GA，某个精确 revision 的发布状态只由对应 Git tag 与 GitHub pre-release 证明。当前验收指标、剩余发布门、兼容性与 SLA 范围只在 `CHANGELOG.md` 维护，README、用户指南与本设计文档仅引用该事实源，不复制易漂移的测试数字或门状态。
+当前标识为 `0.2.0-rc.7`，由 `.agents/VERSION` 唯一控制；该标识表示 RC，不代表 stable/GA。精确发布 revision 由对应 Git tag 证明，GitHub Release 是可选分发入口而非必要条件。当前验收指标、剩余发布门、兼容性与 SLA 范围只在 `CHANGELOG.md` 维护，README、用户指南与本设计文档仅引用该事实源，不复制易漂移的测试数字或门状态。

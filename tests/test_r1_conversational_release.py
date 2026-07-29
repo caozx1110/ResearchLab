@@ -594,6 +594,7 @@ def test_release_metadata_is_honest_rc_and_ci_is_cross_platform() -> None:
     assert "## [Unreleased]" in changelog
     assert version in changelog
     assert "not a stable release" in changelog
+    assert re.search(rf"^## \[{re.escape(version)}\] - \d{{4}}-\d{{2}}-\d{{2}}$", changelog, re.MULTILINE)
 
     security = (root / "SECURITY.md").read_text(encoding="utf-8")
     assert "private vulnerability reporting" in security
@@ -608,6 +609,7 @@ def test_release_metadata_is_honest_rc_and_ci_is_cross_platform() -> None:
     ):
         text = (root / relative).read_text(encoding="utf-8")
         assert version in text, f"{relative} does not declare the current candidate {version}"
+        assert "GitHub Release" in text
 
     for relative in ("README.md", "docs/USER_GUIDE.md", "docs/DESIGN.md"):
         text = (root / relative).read_text(encoding="utf-8")

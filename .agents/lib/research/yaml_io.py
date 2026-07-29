@@ -22,6 +22,13 @@ if _yaml is not None:
         pass
 
 
+    class _IndentedSequenceSafeDumper(_yaml.SafeDumper):
+        """Emit block sequences in the form Obsidian writes back to Base files."""
+
+        def increase_indent(self, flow: bool = False, indentless: bool = False) -> Any:
+            return super().increase_indent(flow, False)
+
+
     def _construct_unique_mapping(loader: Any, node: Any, deep: bool = False) -> dict[Any, Any]:
         if not isinstance(node, _yaml.MappingNode):
             raise StrictYamlError("canonical YAML mapping is malformed")
@@ -86,9 +93,17 @@ def load_yaml(path: Path, default: Any | None = None) -> Any:
     )
 
 
-def dump_yaml(value: Any, *, width: int = 80) -> str:
+def dump_yaml(value: Any, *, width: int = 80, indent_sequences: bool = False) -> str:
     if _yaml is None:
         raise RuntimeError("PyYAML is required to write research workspace YAML safely.")
+    if indent_sequences:
+        return _yaml.dump(
+            value,
+            Dumper=_IndentedSequenceSafeDumper,
+            allow_unicode=True,
+            sort_keys=False,
+            width=width,
+        )
     return _yaml.safe_dump(value, allow_unicode=True, sort_keys=False, width=width)
 
 

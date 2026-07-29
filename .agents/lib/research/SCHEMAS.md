@@ -236,6 +236,7 @@ unit 页 frontmatter 是扁平 Obsidian Properties：`id/kind/title/aliases/stat
 
 ```yaml
 schema: research-kb-obsidian/v1
+renderer_revision: 11
 generated_at: <UTC ISO-8601>
 input_digest: <sha256 of canonical records + programs + taxonomy>
 record_count: 0
@@ -245,7 +246,7 @@ files:
   units/<unit-id>.md: <sha256>
 ```
 
-`files` 的 key 只能是 `managed/` 内相对路径且不得包含 absolute/`.`/`..`，manifest 不拥有自身。更新只覆盖 digest 仍匹配上一 manifest 的文件；过期清理只删除上一 manifest 明确拥有且 bytes 未漂移的普通文件。symlink、特殊类型、未登记文件与人工改动一律保留并报告。整个 managed 更新走 operation journal；manifest 最后写，意外中断后可重跑或通过恢复合同撤销。
+`files` 的 key 只能是 `managed/` 内相对路径且不得包含 absolute/`.`/`..`，manifest 不拥有自身。更新只覆盖 digest 仍匹配上一 manifest 的文件；过期清理只删除上一 manifest 明确拥有且 bytes 未漂移的普通文件。symlink、特殊类型、未登记文件与人工改动一律保留并报告。renderer 11 的三份 `.base` 直接使用 Obsidian 1.12.7 保存后的 block-sequence 缩进和 view 键序；打开面板不能再改变受管 bytes 或触发虚假 drift。整个 managed 更新走 operation journal；manifest 最后写，意外中断后可重跑或通过恢复合同撤销。
 
 ### per-kind payload <a id="unit-payload"></a>
 
