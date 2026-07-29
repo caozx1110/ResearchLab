@@ -1,0 +1,9 @@
+# Shipped runtime lock for offline or mirror-assisted workspace recovery.
+PyYAML==6.0.3
+pymupdf4llm==0.0.27
+PyMuPDF==1.26.5
+markdownify==1.2.3
+beautifulsoup4==4.15.0
+soupsieve==2.8.4
+six==1.17.0
+typing_extensions==4.16.0

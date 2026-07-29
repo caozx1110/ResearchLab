@@ -1,0 +1,5 @@
+interface:
+  display_name: Unit Analyst
+  short_description: Analyze paper, repo, dataset, and blog units with evidence
+  default_prompt: Use $unit-analyst to analyze a paper, repository, dataset, blog, or technical note through its evidence-bound
+    prepare, Agent-fill, verify, and confirmation workflow.

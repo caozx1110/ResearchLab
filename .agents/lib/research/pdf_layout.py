@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import re
 from pathlib import Path
@@ -319,8 +320,12 @@ def extract_caption_region_assets(
     assets: list[dict[str, Any]] = []
     filtered: list[dict[str, Any]] = []
     figures_root.mkdir(parents=True, exist_ok=True)
+    assets_root = figures_root / "assets"
+    assets_root.mkdir(parents=True, exist_ok=True)
     for old in list(figures_root.glob("figure-*.png")) + list(figures_root.glob("table-*.png")):
         old.unlink()
+    for temporary in figures_root.glob(".crop-*.png"):
+        temporary.unlink()
     asset_counter: dict[str, int] = {"figure": 0, "table": 0}
     captions_detected = 0
     for page_index, page in enumerate(document):
@@ -433,7 +438,7 @@ def extract_caption_region_assets(
                 )
                 continue
             asset_counter[caption["kind"]] += 1
-            target = figures_root / f"{caption['kind']}-{asset_counter[caption['kind']]:03d}.png"
+            target = figures_root / f".crop-{caption['kind']}-{asset_counter[caption['kind']]:03d}.png"
             _render_crop(page, selected_bbox, target, scale=render_scale)
             quality = image_quality(target) if filter_blank_and_mask else {"status": "unchecked", "keep": True}
             if not quality.get("keep", False):
@@ -450,16 +455,29 @@ def extract_caption_region_assets(
                 )
                 target.unlink(missing_ok=True)
                 continue
+            digest = hashlib.sha256(target.read_bytes()).hexdigest()
+            published = assets_root / f"{digest}.png"
+            if published.exists():
+                if published.is_symlink() or not published.is_file():
+                    target.unlink(missing_ok=True)
+                    raise RuntimeError("Content-addressed figure asset path is unsafe.")
+                if hashlib.sha256(published.read_bytes()).hexdigest() != digest:
+                    target.unlink(missing_ok=True)
+                    raise RuntimeError("Content-addressed figure asset bytes conflict.")
+                target.unlink()
+            else:
+                target.replace(published)
             assets.append(
                 {
-                    "id": target.stem,
+                    "id": digest,
                     "kind": caption["kind"],
                     "label": caption["label"],
                     "page": caption["page"],
                     "caption": caption["caption"],
                     "caption_bbox": _round_rect(caption["bbox"]),
                     "crop_bbox": _round_rect(selected_bbox),
-                    "path": rel_path(target),
+                    "path": rel_path(published),
+                    "sha256": digest,
                     "source_mode": source_mode,
                     "quality": quality,
                 }

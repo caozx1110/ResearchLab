@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import sys
 from pathlib import Path
@@ -21,11 +22,17 @@ from research.bootstrap import ensure_managed_runtime
 if __name__ == "__main__":
     ensure_managed_runtime(PROJECT_ROOT)
 
-from research.common import add_project_root_argument, confirm_command, parse_iso_datetime, print_resolved_project_roots, shell_command, skill_script_for_command, warn_if_cwd_differs_from_project_root
+from research.analyzer_registry import (
+    UNIT_ANALYZER_ID_ARG_BY_KIND,
+    UNIT_ANALYZER_SCRIPT_BY_KIND,
+)
+from research.common import add_project_root_argument, confirm_command, load_yaml, parse_iso_datetime, print_resolved_project_roots, shell_command, skill_script_for_command, utc_now_iso, warn_if_cwd_differs_from_project_root
+from research.index import AUDIT_CATEGORIES, AUDIT_SEVERITIES
 from research.core import (
     build_index,
     audit_workspace,
     candidate_pools_path,
+    canonical_record_snapshot_for_record,
     compact_unit_ids,
     dataset_migration_plan,
     dataset_migration_targets,
@@ -41,6 +48,7 @@ from research.core import (
     link_records,
     lint_records,
     locate_record,
+    normalize_record_snapshot,
     iter_records,
     is_ready_for_human_review,
     checkpoint_and_report,
@@ -53,6 +61,7 @@ from research.core import (
     restore_operation,
     migrate_repo_to_dataset,
     refresh_record_schemas,
+    search_passages,
     search_records,
     sync_storage_layout,
     topic_taxonomy_path,
@@ -60,28 +69,31 @@ from research.core import (
     write_record,
 )
 from research.git_ops import dirty_kb_paths
-from research.journal import abort_op, incomplete_ops, mutation_transaction
-from research.paths import KB_GITIGNORE_LINES, TEXT_REWRITE_SUFFIXES, kb_gitignore_path, kb_root, runtime_preferences_path, user_root
+from research.journal import incomplete_ops, mutation_transaction
+from research.judgements import apply_judgement_rejection, require_judgement_snapshot
+from research.paths import (
+    KB_GITIGNORE_LINES,
+    TEXT_REWRITE_SUFFIXES,
+    kb_gitignore_path,
+    kb_root,
+    passage_search_cache_path,
+    runtime_preferences_path,
+    user_root,
+)
 
 COMMAND_PREFIX = "${RESEARCH_PYTHON:-python3}"
 SCRIPT_BY_KIND = {
-    "paper": ".agents/skills/paper-analyst/scripts/paper.py",
-    "repo": ".agents/skills/repo-analyst/scripts/repo.py",
-    "dataset": ".agents/skills/dataset-analyst/scripts/dataset.py",
-    "blog": ".agents/skills/blog-analyst/scripts/blog.py",
+    **UNIT_ANALYZER_SCRIPT_BY_KIND,
     "idea": ".agents/skills/idea-workbench/scripts/idea.py",
     "experiment": ".agents/skills/experiment-workbench/scripts/experiment.py",
 }
 ID_ARG_BY_KIND = {
-    "paper": "--paper-id",
-    "repo": "--repo-id",
-    "dataset": "--dataset-id",
-    "blog": "--blog-id",
+    **UNIT_ANALYZER_ID_ARG_BY_KIND,
     "idea": "--idea-id",
     "experiment": "--experiment-id",
 }
 NEXT_COMMAND_BY_KIND = {
-    "paper": "screen",
+    "paper": "complete-note",
     "repo": "scan-structure",
     "dataset": "profile",
     # blog's old-flow `summarize` verb was renamed to the fillable `complete-note`
@@ -144,6 +156,7 @@ def index_mutation_targets(root: Path) -> list[Path]:
             candidate_pools_path(root),
             root / "kb" / "index.yaml",
             root / "kb" / "index.md",
+            passage_search_cache_path(root),
         ]
     )
 
@@ -298,6 +311,11 @@ def apply_batch_confirmation(
             print(f"[skip] {unit_id}: confirmation_status={confirmation_status or '-'}")
             continue
         kind = str(record.get("kind") or "")
+        expected_record_snapshot = canonical_record_snapshot_for_record(root, record)
+        current_record = normalize_record_snapshot(expected_record_snapshot, root)
+        if current_record is None:
+            raise SystemExit(f"Cannot normalize current record for confirmation: {unit_id}")
+        record = current_record
         updated = confirm_unit(
             record,
             kind,
@@ -307,9 +325,154 @@ def apply_batch_confirmation(
             project_root=root,
             user_authorization=user_authorization,
             authorization_source=authorization_source,
+            expected_record_snapshot=expected_record_snapshot,
         )
-        written.append(write_record(root, updated))
+        written.append(
+            write_record(root, updated, expected_record_snapshot=expected_record_snapshot)
+        )
     return written
+
+
+def _prepare_review_batch_decision_bound(
+    root: Path,
+    item: dict,
+    decision: str,
+    *,
+    actor: str,
+    evidence: list[str],
+    user_authorization: str,
+    authorization_source: str,
+    rejection_reason: str,
+) -> tuple[dict, dict, object | None]:
+    """Pure-read validation and exact target planning for a root review batch."""
+    route_key = "confirm_route" if decision == "confirm" else "reject_route"
+    route = item.get(route_key) if isinstance(item, dict) else None
+    route = route if isinstance(route, dict) else {}
+    expected_action = "confirm" if decision == "confirm" else "promote"
+    if route.get("owner") != "knowledge-base-manager" or route.get("action") != expected_action:
+        raise ValueError("knowledge review route is invalid")
+    unit_id = str(route.get("id") or "")
+    record, path = locate_record(root, unit_id)
+    if not is_ready_for_human_review(record):
+        raise ValueError("knowledge judgement is no longer ready")
+    snapshot = item.get("snapshot_binding")
+    if not isinstance(snapshot, dict):
+        raise ValueError("knowledge review snapshot is missing")
+    require_judgement_snapshot(
+        record,
+        expected_snapshot=json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        owner="knowledge-base-manager",
+        path=path.relative_to(root).as_posix(),
+        root=root,
+    )
+    candidate = copy.deepcopy(record)
+    expected_record_snapshot = None
+    if decision == "confirm":
+        expected_record_snapshot = canonical_record_snapshot_for_record(root, record)
+        confirm_unit(
+            candidate,
+            str(candidate.get("kind") or ""),
+            confirmed_by=actor,
+            evidence=evidence,
+            method="kb review",
+            project_root=root,
+            user_authorization=user_authorization,
+            authorization_source=authorization_source,
+            expected_record_snapshot=expected_record_snapshot,
+        )
+    elif decision == "reject":
+        if confirmation_track(candidate) == "judgement":
+            apply_judgement_rejection(candidate, reason=rejection_reason)
+        elif str(candidate.get("confirmation_status") or "") != "pending_user_confirmation":
+            raise ValueError("knowledge fact is no longer pending review")
+    else:
+        raise ValueError("knowledge review decision is invalid")
+    targets = _unique_paths(record_targets([record], root) + index_mutation_targets(root))
+    plan = {
+        "owner": "knowledge-base-manager",
+        "decision": decision,
+        "unit_id": unit_id,
+        "target_paths": targets,
+    }
+    return plan, record, expected_record_snapshot
+
+
+def prepare_review_batch_decision(
+    root: Path,
+    item: dict,
+    decision: str,
+    *,
+    actor: str,
+    evidence: list[str],
+    user_authorization: str,
+    authorization_source: str,
+    rejection_reason: str,
+) -> dict:
+    """Pure-read public plan without exposing runtime record capabilities."""
+    plan, _record, _expected = _prepare_review_batch_decision_bound(
+        root,
+        item,
+        decision,
+        actor=actor,
+        evidence=evidence,
+        user_authorization=user_authorization,
+        authorization_source=authorization_source,
+        rejection_reason=rejection_reason,
+    )
+    return plan
+
+
+def apply_review_batch_decision(
+    root: Path,
+    item: dict,
+    decision: str,
+    *,
+    actor: str,
+    evidence: list[str],
+    user_authorization: str,
+    authorization_source: str,
+    rejection_reason: str,
+) -> list[Path]:
+    """Apply one already-root-journaled decision without a nested transaction."""
+    _plan, record, expected_record_snapshot = _prepare_review_batch_decision_bound(
+        root,
+        item,
+        decision,
+        actor=actor,
+        evidence=evidence,
+        user_authorization=user_authorization,
+        authorization_source=authorization_source,
+        rejection_reason=rejection_reason,
+    )
+    if decision == "confirm":
+        assert expected_record_snapshot is not None
+        updated = confirm_unit(
+            record,
+            str(record.get("kind") or ""),
+            confirmed_by=actor,
+            evidence=evidence,
+            method="kb review",
+            project_root=root,
+            user_authorization=user_authorization,
+            authorization_source=authorization_source,
+            expected_record_snapshot=expected_record_snapshot,
+        )
+    elif confirmation_track(record) == "judgement":
+        apply_judgement_rejection(record, reason=rejection_reason)
+        updated = record
+    else:
+        record["confirmation_status"] = "rejected"
+        record["needs_human_confirmation"] = False
+        record.pop("confirmation", None)
+        record["rejection"] = {"at": utc_now_iso(), "reason": rejection_reason}
+        updated = record
+    written = write_record(
+        root,
+        updated,
+        expected_record_snapshot=expected_record_snapshot if decision == "confirm" else None,
+    )
+    build_index(root)
+    return [written]
 
 
 def partition_review_tracks(hits: list[dict]) -> tuple[list[dict], list[dict]]:
@@ -399,9 +562,177 @@ def render_review_queue(root: Path, hits: list[dict], *, kind: str | None = None
 
 def print_non_unit_review_notice() -> None:
     print(
-        "注意：确认收件箱当前只覆盖 knowledge unit；实验诊断子项 / decision-log 待决策 / "
-        "learnings 可能另有待确认，请分别查看。"
+        "注意：这个 owner 队列只列 knowledge unit；统一的公共 kb review 会另行聚合"
+        "实验诊断、program decision、idea discussion 与 method selection。"
     )
+
+
+# --------------------------------------------------------------------------- #
+# audit: program-link policy (fix INTEGRITY_PROGRAM_LINK false positives)      #
+#                                                                              #
+# Canonical link design: only the FORWARD edge is stored                       #
+# (program.state.active_unit_ids -> unit); the unit-side back-link is derived  #
+# at read time. A program referencing an existing, non-rejected unit whose own #
+# links/program_ids are empty is therefore NOT an integrity error. Real errors #
+# are only: (1) a program references a unit that does not exist, (2) a program #
+# references a rejected unit, (3) a unit claims membership in a program that   #
+# does not exist (or whose state payload is unreadable). The shared lint layer #
+# still reports symmetric back-link gaps, so the audit surface recomputes the  #
+# program-link findings here with the canonical semantics.                     #
+# --------------------------------------------------------------------------- #
+
+
+def _program_link_finding(subject: str, message: str) -> dict:
+    return {
+        "code": "INTEGRITY_PROGRAM_LINK",
+        "category": "integrity",
+        "severity": "error",
+        "subject": str(subject or "kb"),
+        "message": " ".join(str(message).split()),
+    }
+
+
+def _record_is_rejected_for_audit(record: dict) -> bool:
+    return (
+        str(record.get("confirmation_status") or "").strip().lower() == "rejected"
+        or str(record.get("status") or "").strip().lower() == "rejected"
+    )
+
+
+def _audit_program_state_files(root: Path) -> list[tuple[str, Path]]:
+    """Enumerate kb/programs/<id>/state.yaml without following symlinks."""
+    programs_root = kb_root(root) / "programs"
+    if programs_root.is_symlink() or not programs_root.is_dir():
+        return []
+    entries: list[tuple[str, Path]] = []
+    for child in sorted(programs_root.iterdir()):
+        if child.is_symlink() or not child.is_dir():
+            continue
+        state_file = child / "state.yaml"
+        if state_file.is_symlink() or not state_file.is_file():
+            continue
+        entries.append((child.name, state_file))
+    return entries
+
+
+def _audit_unit_records(root: Path) -> dict[str, tuple[dict, str]]:
+    """Tolerantly read every unit record.yaml as {unit_id: (payload, subject)}."""
+    units_root = kb_root(root) / "units"
+    records: dict[str, tuple[dict, str]] = {}
+    if units_root.is_symlink() or not units_root.is_dir():
+        return records
+    for kind_dir in sorted(units_root.iterdir()):
+        if kind_dir.is_symlink() or not kind_dir.is_dir():
+            continue
+        for unit_dir in sorted(kind_dir.iterdir()):
+            if unit_dir.is_symlink() or not unit_dir.is_dir():
+                continue
+            record_file = unit_dir / "record.yaml"
+            if record_file.is_symlink() or not record_file.is_file():
+                continue
+            payload = load_yaml(record_file, default={})
+            if not isinstance(payload, dict):
+                continue
+            unit_id = str(payload.get("id") or "")
+            if not unit_id:
+                continue
+            try:
+                subject = record_file.relative_to(root).as_posix()
+            except ValueError:
+                subject = "kb"
+            records[unit_id] = (payload, subject)
+    return records
+
+
+def _text_id_list(value) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _recomputed_program_link_findings(root: Path) -> list[dict]:
+    """Program-link findings under the canonical forward-edge-only semantics."""
+    findings: list[dict] = []
+    records = _audit_unit_records(root)
+    state_by_program: dict[str, dict | None] = {}
+    for program_id, state_file in _audit_program_state_files(root):
+        try:
+            subject = state_file.relative_to(root).as_posix()
+        except ValueError:
+            subject = "kb"
+        payload = load_yaml(state_file, default={})
+        if not isinstance(payload, dict):
+            state_by_program[program_id] = None
+            findings.append(_program_link_finding(
+                subject, f"Program `{program_id}` state payload is not a valid mapping."
+            ))
+            continue
+        state_by_program[program_id] = payload
+        for unit_id in _text_id_list(payload.get("active_unit_ids")):
+            entry = records.get(unit_id)
+            if entry is None:
+                findings.append(_program_link_finding(
+                    subject, f"Program `{program_id}` references missing unit `{unit_id}`."
+                ))
+            elif _record_is_rejected_for_audit(entry[0]):
+                findings.append(_program_link_finding(
+                    subject, f"Program `{program_id}` references rejected unit `{unit_id}`."
+                ))
+    for unit_id in sorted(records):
+        record, subject = records[unit_id]
+        for program_id in _text_id_list(record.get("program_ids")):
+            if program_id not in state_by_program:
+                findings.append(_program_link_finding(
+                    subject,
+                    f"Unit `{unit_id}` claims membership in nonexistent program `{program_id}`.",
+                ))
+            elif state_by_program[program_id] is None:
+                findings.append(_program_link_finding(
+                    subject,
+                    f"Unit `{unit_id}` references program `{program_id}` with an invalid state payload.",
+                ))
+    return findings
+
+
+def _apply_program_link_audit_policy(root: Path, report: dict) -> dict:
+    """Replace lint-derived INTEGRITY_PROGRAM_LINK findings with canonical ones.
+
+    Identity transform for workspaces without program-link findings or programs:
+    kept findings, ordering, counts and status all reproduce audit_workspace's
+    exact deterministic output shape.
+    """
+    findings = [item for item in report.get("findings", []) if isinstance(item, dict)]
+    kept = [item for item in findings if str(item.get("code")) != "INTEGRITY_PROGRAM_LINK"]
+    research = kb_root(root)
+    recomputed: list[dict] = []
+    if research.is_dir() and not research.is_symlink():
+        recomputed = _recomputed_program_link_findings(root)
+    unique = {
+        (item["code"], item["category"], item["severity"], item["subject"], item["message"]): item
+        for item in [*kept, *recomputed]
+    }
+
+    def _order_index(values: tuple, value: str) -> int:
+        return values.index(value) if value in values else len(values)
+
+    stable = sorted(
+        unique.values(),
+        key=lambda item: (
+            _order_index(AUDIT_CATEGORIES, item["category"]),
+            _order_index(AUDIT_SEVERITIES, item["severity"]),
+            item["code"],
+            item["subject"],
+            item["message"],
+        ),
+    )
+    counts = {"total": len(stable)}
+    counts.update({severity: 0 for severity in AUDIT_SEVERITIES})
+    counts.update({category: 0 for category in AUDIT_CATEGORIES})
+    for finding in stable:
+        counts[finding["severity"]] = counts.get(finding["severity"], 0) + 1
+        counts[finding["category"]] = counts.get(finding["category"], 0) + 1
+    status = "FAIL" if counts.get("error") else ("WARN" if stable else "PASS")
+    return {"status": status, "counts": counts, "findings": stable}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -412,6 +743,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("init", help="Initialize the knowledge base layout")
     subparsers.add_parser("lint", help="Validate record schemas and lifecycle fields")
     subparsers.add_parser("audit", help="Run layered, read-only KB health checks for the Agent")
+    subparsers.add_parser("current-state", help="Return a read-only core status snapshot for kb-cli")
     subparsers.add_parser("index", help="Rebuild kb/index.yaml and kb/index.md")
     subparsers.add_parser("storage-sync", help="Move legacy raw/output into kb and rewrite old storage references")
     git_init = subparsers.add_parser("git-init", help="Initialize kb as a nested Git repository")
@@ -427,7 +759,7 @@ def build_parser() -> argparse.ArgumentParser:
     restore = subparsers.add_parser("restore", help="恢复到指定操作之前的状态")
     restore.add_argument("op_id")
     compact_ids = subparsers.add_parser("compact-ids", help="Shorten and regularize knowledge-unit ids")
-    compact_ids.add_argument("--kind", choices=["paper", "repo", "dataset", "blog", "idea", "experiment"])
+    compact_ids.add_argument("--kind", choices=["paper", "repo", "dataset", "blog", "idea", "experiment", "concept"])
     compact_ids.add_argument("--apply", action="store_true", help="Actually rename ids and unit folders")
     migrate_dataset = subparsers.add_parser("migrate-dataset", help="Reclassify a recognized dataset stored as repo")
     migrate_dataset.add_argument("--repo-id", required=True)
@@ -436,12 +768,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     query = subparsers.add_parser("query", help="Search records by title, summary, tags, topics, or pools")
     query.add_argument("--query", required=True)
-    query.add_argument("--kind", choices=["paper", "repo", "dataset", "blog", "idea", "experiment"])
+    query.add_argument("--kind", choices=["paper", "repo", "dataset", "blog", "idea", "experiment", "concept"])
     query.add_argument("--pool", default="")
     query.add_argument("--confirmation-status", choices=["auto_confirmed", "pending_user_confirmation", "confirmed", "rejected"])
 
     review = subparsers.add_parser("review-queue", help="List records waiting for confirmation")
-    review.add_argument("--kind", choices=["paper", "repo", "dataset", "blog", "idea", "experiment"])
+    review.add_argument("--kind", choices=["paper", "repo", "dataset", "blog", "idea", "experiment", "concept"])
     review.add_argument("--confirmation-status", default="pending_user_confirmation", choices=["auto_confirmed", "pending_user_confirmation", "confirmed", "rejected"])
     review.add_argument("--limit", type=int, default=50)
     review.add_argument("--confirm", action="store_true", help="Confirm the listed records in place")
@@ -451,20 +783,21 @@ def build_parser() -> argparse.ArgumentParser:
     confirm = subparsers.add_parser("confirm", help="Confirm multiple records with one explicit evidence authorization")
     confirm.add_argument("--id", action="append", default=[])
     confirm.add_argument("--all-reviewed", action="store_true", help="Confirm the current review queue")
-    confirm.add_argument("--kind", choices=["paper", "repo", "dataset", "blog", "idea", "experiment"])
+    confirm.add_argument("--kind", choices=["paper", "repo", "dataset", "blog", "idea", "experiment", "concept"])
     confirm.add_argument("--limit", type=int, default=0)
     confirm.add_argument("--confirmed-by", default="")
     confirm.add_argument("--evidence", action="append", required=True)
     confirm.add_argument("--user-authorization", default="")
     confirm.add_argument("--authorization-source", default="")
+    confirm.add_argument("--expected-snapshot", default="")
 
     refresh = subparsers.add_parser("refresh-schema", help="Backfill the latest record schema")
     refresh.add_argument("--id", action="append", default=[])
-    refresh.add_argument("--kind", choices=["paper", "repo", "dataset", "blog", "idea", "experiment"])
+    refresh.add_argument("--kind", choices=["paper", "repo", "dataset", "blog", "idea", "experiment", "concept"])
 
     govern = subparsers.add_parser("govern", help="Apply topic / tag / candidate-pool governance")
     govern.add_argument("--id", action="append", default=[])
-    govern.add_argument("--kind", choices=["paper", "repo", "dataset", "blog", "idea", "experiment"])
+    govern.add_argument("--kind", choices=["paper", "repo", "dataset", "blog", "idea", "experiment", "concept"])
     govern.add_argument("--topic", action="append", default=[])
     govern.add_argument("--tag", action="append", default=[])
     govern.add_argument("--pool", action="append", default=[])
@@ -491,14 +824,31 @@ def build_parser() -> argparse.ArgumentParser:
     promote.add_argument("--evidence", action="append", default=[])
     promote.add_argument("--user-authorization", default="")
     promote.add_argument("--authorization-source", default="")
+    promote.add_argument("--expected-snapshot", default="")
     return parser
 
 
 def main() -> int:
     args = build_parser().parse_args()
     root = project_root(PROJECT_ROOT, explicit_root=args.root)
-    if args.command not in {"audit", "resume", "undo", "restore"}:
+    if args.command not in {"audit", "current-state", "resume", "undo", "restore"}:
         print_resolved_project_roots(root)
+
+    if args.command == "current-state":
+        records = iter_records(root)
+        program_ids = [path.parent.name for path in sorted((kb_root(root) / "programs").glob("*/state.yaml"))]
+        print(
+            json.dumps(
+                {
+                    "record_count": len(records),
+                    "ready_review_count": len([record for record in records if is_ready_for_human_review(record)]),
+                    "program_ids": program_ids,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+        return 0
 
     if args.command == "init":
         warn_if_cwd_differs_from_project_root(root, command="kb.py init")
@@ -541,9 +891,12 @@ def main() -> int:
                 )
                 payload["initial_commit"] = bool(checkpoint.get("committed"))
                 payload["checkpoint"] = checkpoint
-        print(f"repo_path: {payload['repo_path']}")
-        print(f"created: {payload['created']}")
-        print(f"initial_commit: {payload['initial_commit']}")
+        if payload["created"]:
+            print("知识库版本记录已初始化。")
+        else:
+            print("知识库版本记录已经存在。")
+        if payload["initial_commit"]:
+            print("已保存初始版本。")
         return 0
     if args.command == "git-status":
         payload = kb_git_status(root)
@@ -573,7 +926,6 @@ def main() -> int:
         for entry in entries:
             op_id = str(entry["op_id"])
             payload = restore_operation(root, op_id, recovery_type="resume")
-            abort_op(root, op_id)
             print(f"已回滚未完成操作 {op_id} 涉及的 {len(payload['restored_paths'])} 个目标。")
         return 0
     if args.command == "undo":
@@ -593,7 +945,7 @@ def main() -> int:
             print(f"- {issue}")
         return 0 if status == "PASS" else 1
     if args.command == "audit":
-        report = audit_workspace(root)
+        report = _apply_program_link_audit_policy(root, audit_workspace(root))
         print(json.dumps(report, ensure_ascii=False, sort_keys=True))
         return 1 if report["status"] == "FAIL" else 0
     if args.command == "index":
@@ -645,14 +997,54 @@ def main() -> int:
         print(f"[ok] migrated {payload['old_id']} -> {payload['new_id']}")
         return 0
     if args.command == "rebuild-governance":
-        governance_paths = mutation_targets(root, [topic_taxonomy_path(root), candidate_pools_path(root)])
-        with mutation_transaction(root, "rebuild_governance", governance_paths):
+        governance_paths = mutation_targets(
+            root,
+            [
+                topic_taxonomy_path(root),
+                candidate_pools_path(root),
+                kb_root(root) / "index.yaml",
+                kb_root(root) / "index.md",
+            ],
+        )
+        transaction_paths = mutation_targets(
+            root,
+            [*governance_paths, passage_search_cache_path(root)],
+        )
+        with mutation_transaction(root, "rebuild_governance", transaction_paths):
             ensure_workspace(root)
-            taxonomy_path, pools_path = rebuild_governance_catalogs(root)
+            index_yaml_path, index_md_path = build_index(root)
+            taxonomy_path = topic_taxonomy_path(root)
+            pools_path = candidate_pools_path(root)
+        checkpoint_and_report(
+            root,
+            trigger="milestone",
+            message="milestone: rebuild knowledge taxonomy",
+            target_paths=governance_paths,
+        )
         print(f"[ok] rebuilt {taxonomy_path.relative_to(root)}")
         print(f"[ok] rebuilt {pools_path.relative_to(root)}")
+        print(f"[ok] rebuilt {index_yaml_path.relative_to(root)}")
+        print(f"[ok] rebuilt {index_md_path.relative_to(root)}")
         return 0
     if args.command == "query":
+        if str(args.query or "").strip():
+            payload = search_passages(
+                root,
+                args.query,
+                kind=args.kind,
+                pool=args.pool or None,
+                confirmation_status=args.confirmation_status,
+            )
+            for item in payload["results"]:
+                print(f"- {item['unit_id']} | {item['kind']} | {item['title']}")
+                if item.get("heading"):
+                    print(f"  {item['heading']} · {item['locator']}")
+                else:
+                    print(f"  {item['locator']}")
+                print(f"  {item['excerpt']}")
+            if not payload["results"]:
+                print("[ok] no matches")
+            return 0
         hits = search_records(root, args.query, kind=args.kind, pool=args.pool or None, confirmation_status=args.confirmation_status)
         for item in hits:
             pools = ",".join(item.get("candidate_pools", []))
@@ -732,6 +1124,21 @@ def main() -> int:
         batch_paths = mutation_targets(root, record_targets(records, root), index_mutation_targets(root))
         with mutation_transaction(root, "batch_confirm", batch_paths):
             ensure_workspace(root)
+            if args.expected_snapshot:
+                if len(records) != 1:
+                    raise SystemExit("A review snapshot can apply to exactly one knowledge judgement.")
+                current, current_path = locate_record(root, str(records[0].get("id") or ""), kind=args.kind)
+                try:
+                    require_judgement_snapshot(
+                        current,
+                        expected_snapshot=args.expected_snapshot,
+                        owner="knowledge-base-manager",
+                        path=current_path.relative_to(root).as_posix(),
+                        root=root,
+                    )
+                except ValueError as exc:
+                    raise SystemExit(str(exc)) from exc
+                records = [current]
             written = apply_batch_confirmation(
                 root,
                 records,
@@ -838,17 +1245,44 @@ def main() -> int:
         operation_paths = mutation_targets(root, record_targets([record], root), index_mutation_targets(root))
         with mutation_transaction(root, "promote_record", operation_paths):
             ensure_workspace(root)
-            path = promote_record(
-                root,
-                args.id,
-                status=args.status,
-                maturity=args.maturity,
-                confirmation_status=args.confirmation_status,
-                confirmed_by=args.confirmed_by,
-                evidence=args.evidence,
-                user_authorization=args.user_authorization,
-                authorization_source=args.authorization_source,
-            )
+            if args.expected_snapshot:
+                current, current_path = locate_record(root, args.id)
+                try:
+                    require_judgement_snapshot(
+                        current,
+                        expected_snapshot=args.expected_snapshot,
+                        owner="knowledge-base-manager",
+                        path=current_path.relative_to(root).as_posix(),
+                        root=root,
+                    )
+                except ValueError as exc:
+                    raise SystemExit(str(exc)) from exc
+            if args.expected_snapshot and args.confirmation_status == "rejected":
+                # Public review rejection is a judgement decision, not a loose
+                # lifecycle label: keep record and canonical claim state aligned.
+                reason = "; ".join(str(item).strip() for item in args.evidence if str(item).strip())
+                if confirmation_track(current) == "judgement":
+                    apply_judgement_rejection(current, reason=reason)
+                else:
+                    if str(current.get("confirmation_status") or "") != "pending_user_confirmation":
+                        raise SystemExit("Only a currently pending fact can be rejected from review.")
+                    current["confirmation_status"] = "rejected"
+                    current["needs_human_confirmation"] = False
+                    current.pop("confirmation", None)
+                    current["rejection"] = {"at": utc_now_iso(), "reason": reason}
+                path = write_record(root, current)
+            else:
+                path = promote_record(
+                    root,
+                    args.id,
+                    status=args.status,
+                    maturity=args.maturity,
+                    confirmation_status=args.confirmation_status,
+                    confirmed_by=args.confirmed_by,
+                    evidence=args.evidence,
+                    user_authorization=args.user_authorization,
+                    authorization_source=args.authorization_source,
+                )
             build_index(root)
         checkpoint_and_report(
             root,

@@ -2,10 +2,18 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import os
 import re
+import sqlite3
+import stat
+import sys
+import tempfile
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 from .common import (
     ensure_dir,
@@ -26,7 +34,19 @@ from .ids import (
     canonical_unit_id_with_hash,
     is_canonical_unit_id,
 )
-from .retrieval import rank_records
+from .retrieval import (
+    code_identifier_terms,
+    code_passages,
+    extract_figure_index_passages,
+    extract_parse_cache_passages,
+    extract_record_passages,
+    is_code_passage,
+    passage_result,
+    rank_passages,
+    rank_records,
+    tokenize_query,
+)
+from .figures import FigureIndexError, load_current_figure_index
 from .paths import (
     TEXT_REWRITE_SUFFIXES,
     UNIT_KIND_DIRS,
@@ -37,6 +57,7 @@ from .paths import (
     candidate_pools_path,
     config_root,
     kb_root,
+    passage_search_cache_path,
     record_path,
     rel,
     synthesis_root,
@@ -49,10 +70,14 @@ from .records import (
     _extract_unit_id_hash,
     append_history,
     default_record,
+    iter_canonical_record_snapshots,
     iter_records,
     locate_record,
+    normalize_record_snapshot,
     normalize_record_schema,
     record_summary,
+    snapshot_canonical_unit_artifacts,
+    trusted_claim_source_roots,
 )
 from .evidence import (
     confirmation_claims,
@@ -90,6 +115,37 @@ STATUS_VALUES = {
 
 CONFIRMATION_VALUES = {"auto_confirmed", "pending_user_confirmation", "confirmed", "rejected"}
 
+PASSAGE_INDEX_REVISION = "passages-v3"
+PASSAGE_SEARCH_LIMIT = 5
+
+# Repo source-code indexing limits.  Skips are deterministic and re-derived on
+# every corpus build; cap overruns emit explicit warnings at rebuild time so the
+# truncation is never silent.
+CODE_FILE_MAX_BYTES = 200 * 1024
+CODE_UNIT_MAX_FILES = 2000
+CODE_UNIT_TOTAL_MAX_BYTES = 24 * 1024 * 1024
+CODE_UNIT_MAX_DEPTH = 14
+_CODE_SNIFF_BYTES = 8192
+_CODE_SKIP_DIRS = frozenset(
+    {
+        ".git", ".hg", ".svn", ".bzr",
+        "node_modules", "bower_components", "__pycache__",
+        ".venv", "venv", ".tox", ".nox", ".eggs",
+        ".mypy_cache", ".pytest_cache", ".ruff_cache", ".cache",
+        ".idea", ".vscode", ".ipynb_checkpoints",
+        "dist", "build", "target", ".next", ".gradle",
+        "site-packages",
+    }
+)
+# Product-generated names directly below <unit>/source/ (never repo content).
+_CODE_RESERVED_SOURCE_NAMES = frozenset(
+    {"document.md", "source-map.yaml", "conversion.yaml", "archive.html", "assets"}
+)
+
+
+class PassageCacheError(RuntimeError):
+    """A derived passage cache could not be rebuilt safely."""
+
 AUDIT_CATEGORIES = ("schema", "integrity", "recovery", "security", "quality")
 AUDIT_SEVERITIES = ("error", "warning", "info")
 _AUDIT_INTERNAL_DIRS = {".git", ".journal", ".runtime"}
@@ -100,7 +156,12 @@ def load_topic_taxonomy(project_root: Path) -> dict[str, Any]:
     payload = load_yaml(topic_taxonomy_path(project_root), default={})
     if not isinstance(payload, dict):
         payload = {}
-    normalized = _deep_fill_missing(payload, {**DEFAULT_TOPIC_TAXONOMY, "generated_at": utc_now_iso()})
+    # Loading is a pure, deterministic projection.  A volatile default here
+    # makes two reads on opposite sides of a second disagree and can invent a
+    # false governance-drift candidate.  Only the write path advances this
+    # provenance timestamp; legacy/missing values normalize to the stable empty
+    # sentinel until the next real rebuild.
+    normalized = _deep_fill_missing(payload, {**DEFAULT_TOPIC_TAXONOMY, "generated_at": ""})
     topics: dict[str, Any] = {}
     for key, item in normalized.get("topics", {}).items():
         topic = slugify(str(item.get("id") or key), max_words=12)
@@ -133,7 +194,7 @@ def load_topic_taxonomy(project_root: Path) -> dict[str, Any]:
         }
     normalized["topics"] = {key: topics[key] for key in sorted(topics)}
     normalized["tags"] = {key: tags[key] for key in sorted(tags)}
-    normalized["generated_at"] = utc_now_iso()
+    normalized["generated_at"] = str(normalized.get("generated_at") or "")
     return normalized
 
 
@@ -147,7 +208,7 @@ def load_candidate_pools(project_root: Path) -> dict[str, Any]:
     payload = load_yaml(candidate_pools_path(project_root), default={})
     if not isinstance(payload, dict):
         payload = {}
-    normalized = _deep_fill_missing(payload, {**DEFAULT_CANDIDATE_POOLS, "generated_at": utc_now_iso()})
+    normalized = _deep_fill_missing(payload, {**DEFAULT_CANDIDATE_POOLS, "generated_at": ""})
     pools: dict[str, Any] = {}
     for key, item in normalized.get("pools", {}).items():
         pool = slugify(str(item.get("id") or key), max_words=12)
@@ -163,7 +224,7 @@ def load_candidate_pools(project_root: Path) -> dict[str, Any]:
             "status": str(item.get("status") or "active"),
         }
     normalized["pools"] = {key: pools[key] for key in sorted(pools)}
-    normalized["generated_at"] = utc_now_iso()
+    normalized["generated_at"] = str(normalized.get("generated_at") or "")
     return normalized
 
 
@@ -273,10 +334,210 @@ def _unit_markdown_paths(project_root: Path, record: dict[str, Any]) -> list[Pat
     if kind not in UNIT_KIND_DIRS or not unit_id:
         return []
     root = unit_root(project_root, kind, unit_id)
-    if root.is_symlink() or not root.is_dir():
+    if _path_has_symlink_component(project_root, root) or not root.is_dir():
         return []
     paths = _safe_files_below(root, suffixes={".md", ".markdown"})
-    return [path for path in paths if "source" not in path.relative_to(root).parts]
+    excluded_parts = {"source", "raw", "output", "obsidian", ".runtime", ".journal", ".git"}
+    readable: list[Path] = []
+    for path in paths:
+        relative_parts = path.relative_to(root).parts
+        if relative_parts == ("source", "document.md"):
+            readable.append(path)
+            continue
+        if excluded_parts.intersection(relative_parts):
+            continue
+        readable.append(path)
+    return readable
+
+
+def _unit_content_snapshot(
+    project_root: Path,
+    record: dict[str, Any],
+    *,
+    include_parse_cache: bool,
+    expected_record_snapshot: Any = None,
+    extra_artifacts: list[str] | None = None,
+):
+    """Capture searchable unit bytes after lexical discovery, never by those paths."""
+    kind = str(record.get("kind") or "")
+    unit_id = str(record.get("id") or "")
+    if kind not in UNIT_KIND_DIRS or not unit_id:
+        return None
+    root = unit_root(project_root, kind, unit_id)
+    artifacts: list[str] = []
+    for path in _unit_markdown_paths(project_root, record):
+        try:
+            artifacts.append(path.relative_to(root).as_posix())
+        except ValueError:
+            return None
+    if include_parse_cache:
+        for name in ("parse-cache.yaml", "parse-cache.yml"):
+            candidate = root / name
+            try:
+                metadata = candidate.lstat()
+            except OSError:
+                continue
+            if stat.S_ISREG(metadata.st_mode):
+                artifacts.append(name)
+    for artifact in extra_artifacts or []:
+        artifacts.append(artifact)
+    snapshot = snapshot_canonical_unit_artifacts(project_root, kind, unit_id, artifacts)
+    if snapshot is None:
+        return None
+    if expected_record_snapshot is not None and (
+        snapshot.record.raw_bytes != expected_record_snapshot.raw_bytes
+        or snapshot.record.file_identity != expected_record_snapshot.file_identity
+    ):
+        return None
+    return snapshot
+
+
+def _unit_markdown_snapshots(
+    project_root: Path,
+    record: dict[str, Any],
+    *,
+    expected_record_snapshot: Any = None,
+) -> list[Any]:
+    snapshot = _unit_content_snapshot(
+        project_root,
+        record,
+        include_parse_cache=False,
+        expected_record_snapshot=expected_record_snapshot,
+    )
+    if snapshot is None:
+        return []
+    return [
+        artifact
+        for artifact in snapshot.artifacts
+        if Path(artifact.artifact).suffix.lower() in {".md", ".markdown"}
+    ]
+
+
+def _looks_binary(path: Path) -> bool:
+    """Null-byte sniff over the first bytes; unreadable files count as binary."""
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return True
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            return True
+        head = os.read(descriptor, _CODE_SNIFF_BYTES)
+    except OSError:
+        return True
+    finally:
+        os.close(descriptor)
+    return b"\x00" in head
+
+
+def _repo_source_code_entries(
+    project_root: Path,
+    record: dict[str, Any],
+) -> tuple[list[dict[str, str]], list[str]]:
+    """Discover indexable source files of one repo unit, with explicit warnings.
+
+    Returns ``(entries, warnings)``.  Each entry maps the unit-relative artifact
+    path (re-read later through the anchored unit snapshot) to the
+    repository-relative path stored on the passage.  The walk skips VCS and
+    dependency directories, binary files (null-byte sniff), oversized files, and
+    enforces per-unit file-count/byte budgets; any truncation is reported so it
+    is never silent.
+    """
+    kind = str(record.get("kind") or "")
+    unit_id = str(record.get("id") or "")
+    warnings: list[str] = []
+    if kind != "repo" or not unit_id:
+        return [], warnings
+    root = unit_root(project_root, kind, unit_id)
+    source_root = root / "source"
+    if _path_has_symlink_component(project_root, source_root) or not source_root.is_dir():
+        return [], warnings
+    try:
+        top_entries = sorted(os.scandir(source_root), key=lambda entry: entry.name)
+    except OSError:
+        return [], warnings
+    top_dirs: list[Path] = []
+    loose_files: list[Path] = []
+    for entry in top_entries:
+        if entry.name in _CODE_RESERVED_SOURCE_NAMES or entry.is_symlink():
+            continue
+        if entry.is_dir(follow_symlinks=False):
+            top_dirs.append(Path(entry.path))
+        elif entry.is_file(follow_symlinks=False):
+            loose_files.append(Path(entry.path))
+    # One archived tree and no loose files is the canonical local-dir ingest
+    # layout: repository-relative paths drop the archived directory name.
+    if len(top_dirs) == 1 and not loose_files:
+        repo_base = top_dirs[0]
+    else:
+        repo_base = source_root
+
+    files: list[Path] = list(loose_files)
+    for top in top_dirs:
+        for current, dirnames, filenames in os.walk(top, topdown=True, followlinks=False):
+            current_path = Path(current)
+            dirnames[:] = sorted(
+                name
+                for name in dirnames
+                if name not in _CODE_SKIP_DIRS and not (current_path / name).is_symlink()
+            )
+            for name in sorted(filenames):
+                files.append(current_path / name)
+
+    selected: list[dict[str, str]] = []
+    oversized: list[str] = []
+    binary_count = 0
+    skipped_other = 0
+    truncated = 0
+    total_bytes = 0
+    for path in sorted(files, key=lambda item: item.as_posix()):
+        try:
+            artifact = path.relative_to(root).as_posix()
+            repo_relative = path.relative_to(repo_base).as_posix()
+        except ValueError:
+            skipped_other += 1
+            continue
+        if len(Path(artifact).parts) > CODE_UNIT_MAX_DEPTH:
+            skipped_other += 1
+            continue
+        try:
+            metadata = path.lstat()
+        except OSError:
+            skipped_other += 1
+            continue
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size == 0:
+            continue
+        if metadata.st_size > CODE_FILE_MAX_BYTES:
+            oversized.append(repo_relative)
+            continue
+        # Selection stops at the first budget violation so the indexed set is a
+        # deterministic prefix of the sorted walk; later files are only counted.
+        if truncated or len(selected) >= CODE_UNIT_MAX_FILES or total_bytes + int(metadata.st_size) > CODE_UNIT_TOTAL_MAX_BYTES:
+            truncated += 1
+            continue
+        if _looks_binary(path):
+            binary_count += 1
+            continue
+        selected.append({"artifact": artifact, "code_path": repo_relative})
+        total_bytes += int(metadata.st_size)
+
+    if oversized:
+        examples = "、".join(oversized[:3])
+        warnings.append(
+            f"代码索引 {unit_id}：跳过 {len(oversized)} 个超过 {CODE_FILE_MAX_BYTES // 1024}KB 的源码文件（如 {examples}），这些文件不进入检索。"
+        )
+    if binary_count:
+        warnings.append(f"代码索引 {unit_id}：跳过 {binary_count} 个二进制文件（含空字节），不进入检索。")
+    if skipped_other:
+        warnings.append(f"代码索引 {unit_id}：跳过 {skipped_other} 个路径异常或过深的文件，不进入检索。")
+    if truncated:
+        warnings.append(
+            f"代码索引 {unit_id}：源码文件超出索引预算（上限 {CODE_UNIT_MAX_FILES} 个 / "
+            f"{CODE_UNIT_TOTAL_MAX_BYTES // (1024 * 1024)}MB），已索引前 {len(selected)} 个，"
+            f"另有 {truncated} 个未纳入检索；请精简仓库快照或拆分单元。"
+        )
+    return selected, warnings
 
 
 def _wikilink_target_exists(project_root: Path, target: str, ref_keys: set[str]) -> bool:
@@ -350,8 +611,12 @@ def _preserve_empty_governance_seeds(taxonomy: dict[str, Any], pools: dict[str, 
         }
 
 
-def rebuild_governance_catalogs(project_root: Path, *, records: list[dict[str, Any]] | None = None) -> tuple[Path, Path]:
-    ensure_workspace(project_root)
+def governance_catalog_payloads(
+    project_root: Path,
+    *,
+    records: list[dict[str, Any]] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return the deterministic governance catalogs without writing them."""
     records = records if records is not None else iter_records(project_root)
     existing_taxonomy = load_topic_taxonomy(project_root)
     existing_pools = load_candidate_pools(project_root)
@@ -425,6 +690,47 @@ def rebuild_governance_catalogs(project_root: Path, *, records: list[dict[str, A
     taxonomy["tags"] = {key: taxonomy["tags"][key] for key in sorted(taxonomy["tags"])}
     pools["pools"] = {key: pools["pools"][key] for key in sorted(pools["pools"])}
 
+    return taxonomy, pools
+
+
+def governance_catalog_drift(
+    project_root: Path,
+    *,
+    records: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Pure-read classifier for taxonomy/pool gardening work."""
+    current_taxonomy = load_topic_taxonomy(project_root)
+    current_pools = load_candidate_pools(project_root)
+    expected_taxonomy, expected_pools = governance_catalog_payloads(
+        project_root,
+        records=records,
+    )
+    taxonomy_stale = current_taxonomy != expected_taxonomy
+    pools_stale = current_pools != expected_pools
+    return {
+        "stale": taxonomy_stale or pools_stale,
+        "taxonomy_stale": taxonomy_stale,
+        "candidate_pools_stale": pools_stale,
+        "binding_digest": hashlib.sha256(
+            json.dumps(
+                {
+                    "current_taxonomy": current_taxonomy,
+                    "current_pools": current_pools,
+                    "expected_taxonomy": expected_taxonomy,
+                    "expected_pools": expected_pools,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest(),
+    }
+
+
+def rebuild_governance_catalogs(project_root: Path, *, records: list[dict[str, Any]] | None = None) -> tuple[Path, Path]:
+    ensure_workspace(project_root)
+    taxonomy, pools = governance_catalog_payloads(project_root, records=records)
+
     taxonomy_path = write_topic_taxonomy(project_root, taxonomy)
     pools_path = write_candidate_pools(project_root, pools)
     return taxonomy_path, pools_path
@@ -475,6 +781,12 @@ def build_index(project_root: Path) -> tuple[Path, Path]:
             )
         lines.append("")
     write_text_if_changed(md_path, "\n".join(lines).strip() + "\n")
+    try:
+        rebuild_passage_cache(project_root, records=records)
+    except (OSError, sqlite3.Error, PassageCacheError):
+        # The passage database is a derived acceleration cache.  A cache
+        # failure must never roll back or otherwise alter the canonical index.
+        pass
     return yaml_path, md_path
 
 
@@ -497,6 +809,611 @@ def _safe_files_below(base: Path, *, suffixes: set[str] | None = None) -> list[P
             if suffixes is None or path.suffix.lower() in suffixes:
                 paths.append(path)
     return sorted(paths, key=lambda path: path.as_posix())
+
+
+def _path_has_symlink_component(project_root: Path, path: Path) -> bool:
+    root = Path(os.path.abspath(project_root))
+    candidate = Path(os.path.abspath(path))
+    try:
+        relative = candidate.relative_to(root)
+    except ValueError:
+        return True
+    current = root
+    if current.is_symlink():
+        return True
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            return True
+    return False
+
+
+def _project_relative_artifact(project_root: Path, path: Path) -> str:
+    root = Path(os.path.abspath(project_root))
+    candidate = Path(os.path.abspath(path))
+    try:
+        return candidate.relative_to(root).as_posix()
+    except ValueError as exc:
+        raise PassageCacheError("passage artifact escapes the project root") from exc
+
+
+def passage_corpus(
+    project_root: Path,
+    *,
+    records: list[dict[str, Any]] | None = None,
+    record_snapshots: list[Any] | None = None,
+    warnings: list[str] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, str]], str]:
+    """Extract passages plus the exact source manifest they were derived from."""
+    snapshots = list(record_snapshots) if record_snapshots is not None else []
+    if records is None:
+        if not snapshots:
+            snapshots = list(iter_canonical_record_snapshots(project_root))
+        record_list = [
+            record
+            for snapshot in snapshots
+            if (record := normalize_record_snapshot(snapshot, project_root)) is not None
+        ]
+    else:
+        record_list = list(records)
+    snapshot_by_identity = {
+        (snapshot.kind, snapshot.unit_id): snapshot
+        for snapshot in snapshots
+    }
+    passages: list[dict[str, Any]] = []
+    manifest_by_artifact: dict[str, str] = {}
+    for record in sorted(
+        record_list,
+        key=lambda item: (str(item.get("kind") or ""), str(item.get("id") or "")),
+    ):
+        kind = str(record.get("kind") or "")
+        unit_id = str(record.get("id") or "")
+        if kind not in UNIT_KIND_DIRS or not unit_id:
+            continue
+        expected_record_snapshot = snapshot_by_identity.get((kind, unit_id))
+        code_entries, code_warnings = _repo_source_code_entries(project_root, record)
+        if warnings is not None:
+            warnings.extend(code_warnings)
+        code_by_artifact = {entry["artifact"]: entry["code_path"] for entry in code_entries}
+        figure_index: dict[str, Any] | None = None
+        figure_artifacts: set[str] = set()
+        if kind == "paper":
+            payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+            projection = payload.get("figures") if isinstance(payload.get("figures"), dict) else {}
+            index_artifact = str(projection.get("index_artifact") or "").strip()
+            expected_digest = str(projection.get("index_digest") or "").strip()
+            if projection.get("schema") == "figure-index/v1" and index_artifact == "figures.yaml" and expected_digest:
+                root = unit_root(project_root, kind, unit_id)
+                try:
+                    figure_index = load_current_figure_index(
+                        root / index_artifact,
+                        unit_root=root,
+                        project_root=project_root,
+                        expected_index_digest=expected_digest,
+                    )
+                    figure_artifacts.add(index_artifact)
+                    for entry in figure_index.get("entries", []):
+                        if not isinstance(entry, dict):
+                            continue
+                        for asset in entry.get("assets", []):
+                            if isinstance(asset, dict) and str(asset.get("path") or "").strip():
+                                figure_artifacts.add(str(asset["path"]).strip())
+                except FigureIndexError as exc:
+                    figure_index = None
+                    figure_artifacts.clear()
+                    if warnings is not None:
+                        warnings.append(f"插图索引 {unit_id}：当前性校验未通过，未进入检索（{exc}）。")
+        unit_snapshot = _unit_content_snapshot(
+            project_root,
+            record,
+            include_parse_cache=True,
+            expected_record_snapshot=expected_record_snapshot,
+            extra_artifacts=sorted(set(code_by_artifact) | figure_artifacts),
+        )
+        if unit_snapshot is None:
+            continue
+        passage_start = len(passages)
+        unit_manifest_artifacts: list[str] = []
+        if expected_record_snapshot is None:
+            current_record = normalize_record_snapshot(unit_snapshot.record, project_root)
+            if current_record is None:
+                continue
+            record = current_record
+        record_bytes = unit_snapshot.record.raw_bytes
+        record_artifact = _project_relative_artifact(project_root, unit_snapshot.record.path)
+        record_digest = hashlib.sha256(record_bytes).hexdigest()
+        manifest_by_artifact[record_artifact] = record_digest
+        unit_manifest_artifacts.append(record_artifact)
+        documents: list[dict[str, str]] = []
+        code_documents: list[dict[str, str]] = []
+        parse_cache_snapshots: list[Any] = []
+        figure_index_snapshot: Any = None
+        undecodable_code = 0
+        for artifact_snapshot in unit_snapshot.artifacts:
+            if artifact_snapshot.artifact in figure_artifacts:
+                artifact = _project_relative_artifact(project_root, artifact_snapshot.path)
+                manifest_by_artifact[artifact] = artifact_snapshot.byte_sha256
+                unit_manifest_artifacts.append(artifact)
+                if artifact_snapshot.artifact == "figures.yaml":
+                    figure_index_snapshot = artifact_snapshot
+                continue
+            suffix = Path(artifact_snapshot.artifact).suffix.lower()
+            if artifact_snapshot.artifact in {"parse-cache.yaml", "parse-cache.yml"}:
+                parse_cache_snapshots.append(artifact_snapshot)
+                continue
+            if artifact_snapshot.artifact in code_by_artifact:
+                raw_bytes = artifact_snapshot.raw_bytes
+                if b"\x00" in raw_bytes:
+                    undecodable_code += 1
+                    continue
+                try:
+                    code_text = raw_bytes.decode("utf-8")
+                except UnicodeDecodeError:
+                    undecodable_code += 1
+                    continue
+                artifact = _project_relative_artifact(project_root, artifact_snapshot.path)
+                digest = artifact_snapshot.byte_sha256
+                manifest_by_artifact[artifact] = digest
+                unit_manifest_artifacts.append(artifact)
+                code_documents.append(
+                    {
+                        "artifact": code_by_artifact[artifact_snapshot.artifact],
+                        "text": code_text,
+                        "source_digest": digest,
+                    }
+                )
+                continue
+            if suffix not in {".md", ".markdown"}:
+                continue
+            try:
+                markdown_text = artifact_snapshot.raw_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            artifact = _project_relative_artifact(project_root, artifact_snapshot.path)
+            digest = artifact_snapshot.byte_sha256
+            manifest_by_artifact[artifact] = digest
+            unit_manifest_artifacts.append(artifact)
+            documents.append({"artifact": artifact, "text": markdown_text, "source_digest": digest})
+        if undecodable_code and warnings is not None:
+            warnings.append(
+                f"代码索引 {unit_id}：跳过 {undecodable_code} 个含空字节或无法按 UTF-8 解码的文件，不进入检索。"
+            )
+        passage_record = copy.deepcopy(record)
+        passage_record["summary"] = record_summary(record)
+        passages.extend(
+            extract_record_passages(
+                passage_record,
+                record_artifact=record_artifact,
+                record_digest=record_digest,
+                markdown_documents=documents,
+            )
+        )
+        for parse_cache_snapshot in parse_cache_snapshots:
+            parse_cache_bytes = parse_cache_snapshot.raw_bytes
+            try:
+                parse_cache = yaml.safe_load(parse_cache_bytes.decode("utf-8"))
+            except (UnicodeDecodeError, yaml.YAMLError):
+                continue
+            if not isinstance(parse_cache, dict) or not isinstance(parse_cache.get("chunks"), list):
+                continue
+            chunks = [item for item in parse_cache["chunks"] if isinstance(item, dict)]
+            if not any(str(item.get("text") or "").strip() for item in chunks):
+                continue
+            artifact = _project_relative_artifact(project_root, parse_cache_snapshot.path)
+            digest = parse_cache_snapshot.byte_sha256
+            manifest_by_artifact[artifact] = digest
+            unit_manifest_artifacts.append(artifact)
+            passages.extend(
+                extract_parse_cache_passages(
+                    passage_record,
+                    artifact=artifact,
+                    chunks=chunks,
+                    source_digest=digest,
+                )
+            )
+        if figure_index is not None and figure_index_snapshot is not None:
+            root = unit_root(project_root, kind, unit_id)
+            expected_digest = str(figure_index.get("index_digest") or "")
+            try:
+                current_figure_index = load_current_figure_index(
+                    root / "figures.yaml",
+                    unit_root=root,
+                    project_root=project_root,
+                    expected_index_digest=expected_digest,
+                    expected_index_byte_sha256=figure_index_snapshot.byte_sha256,
+                )
+            except FigureIndexError as exc:
+                if warnings is not None:
+                    warnings.append(f"插图索引 {unit_id}：构建检索时发生变化，本次跳过（{exc}）。")
+            else:
+                artifact = _project_relative_artifact(project_root, figure_index_snapshot.path)
+                passages.extend(
+                    extract_figure_index_passages(
+                        passage_record,
+                        artifact=artifact,
+                        index=current_figure_index,
+                        source_digest=figure_index_snapshot.byte_sha256,
+                    )
+                )
+        for document in sorted(code_documents, key=lambda item: item["artifact"]):
+            passages.extend(
+                code_passages(
+                    passage_record,
+                    artifact=document["artifact"],
+                    text=document["text"],
+                    source_digest=document["source_digest"],
+                )
+            )
+        if not unit_snapshot.is_current():
+            del passages[passage_start:]
+            for artifact in unit_manifest_artifacts:
+                manifest_by_artifact.pop(artifact, None)
+    manifest = [
+        {"artifact": artifact, "digest": manifest_by_artifact[artifact]}
+        for artifact in sorted(manifest_by_artifact)
+    ]
+    corpus_digest = _passage_corpus_digest(manifest)
+    passages.sort(
+        key=lambda item: (
+            str(item.get("unit_id") or ""),
+            str(item.get("artifact") or ""),
+            str(item.get("locator") or ""),
+            str(item.get("passage_id") or ""),
+        )
+    )
+    return passages, manifest, corpus_digest
+
+
+_PASSAGE_DIGEST_FIELDS = (
+    "passage_id",
+    "unit_id",
+    "kind",
+    "title",
+    "summary",
+    "heading",
+    "text",
+    "artifact",
+    "locator",
+    "line_start",
+    "line_end",
+    "source_digest",
+)
+
+
+def _passage_corpus_digest(manifest: list[dict[str, str]]) -> str:
+    digest_payload = {
+        "revision": PASSAGE_INDEX_REVISION,
+        "sources": manifest,
+    }
+    return hashlib.sha256(
+        json.dumps(digest_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _valid_passage_source_manifest(manifest: list[dict[str, str]]) -> bool:
+    for item in manifest:
+        artifact = str(item.get("artifact") or "")
+        digest = str(item.get("digest") or "")
+        artifact_path = Path(artifact)
+        if (
+            not artifact
+            or "\\" in artifact
+            or artifact_path.is_absolute()
+            or artifact_path.as_posix() != artifact
+            or artifact_path.parts[:2] != ("kb", "units")
+            or any(part in {"", ".", ".."} for part in artifact_path.parts)
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+        ):
+            return False
+    return True
+
+
+def _passages_digest(passages: list[dict[str, Any]]) -> str:
+    normalized = [
+        {
+            field: (
+                int(item.get(field) or 0)
+                if field in {"line_start", "line_end"}
+                else str(item.get(field) or "")
+            )
+            for field in _PASSAGE_DIGEST_FIELDS
+        }
+        for item in passages
+    ]
+    normalized.sort(
+        key=lambda item: (
+            item["unit_id"],
+            item["artifact"],
+            item["locator"],
+            item["passage_id"],
+        )
+    )
+    return hashlib.sha256(
+        json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _ensure_cache_parent(cache_path: Path) -> None:
+    for directory in [cache_path.parent.parent, cache_path.parent]:
+        if directory.is_symlink():
+            raise PassageCacheError("passage cache parent is a symlink")
+        if directory.exists() and not directory.is_dir():
+            raise PassageCacheError("passage cache parent is not a directory")
+        directory.mkdir(parents=False, exist_ok=True)
+    if cache_path.is_symlink():
+        raise PassageCacheError("passage cache path is a symlink")
+    if cache_path.exists() and not cache_path.is_file():
+        raise PassageCacheError("passage cache path is not a regular file")
+
+
+def _fsync_directory(path: Path) -> None:
+    if not hasattr(os, "O_DIRECTORY"):
+        return
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _passage_code_terms(passage: dict[str, Any]) -> str:
+    """Derived FTS helper column: identifier split words for code passages only.
+
+    Markdown/record/parse-cache passages always get an empty string, so their
+    matching behavior is untouched.  The value is a pure function of the
+    passage's own canonical fields and is re-verified by the cache health check.
+    """
+    if not is_code_passage(passage):
+        return ""
+    return code_identifier_terms(str(passage.get("heading") or ""), str(passage.get("text") or ""))
+
+
+def rebuild_passage_cache(
+    project_root: Path,
+    *,
+    records: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Atomically replace the derived FTS5 database, preserving any prior cache on failure."""
+    corpus_warnings: list[str] = []
+    passages, manifest, corpus_digest = passage_corpus(
+        project_root, records=records, warnings=corpus_warnings
+    )
+    for warning in corpus_warnings:
+        print(f"[warn] {warning}", file=sys.stderr)
+    passages_digest = _passages_digest(passages)
+    cache_path = passage_search_cache_path(project_root)
+    if _path_has_symlink_component(project_root, cache_path.parent):
+        raise PassageCacheError("passage cache parent contains a symlink")
+    _ensure_cache_parent(cache_path)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".passages-", suffix=".sqlite3", dir=cache_path.parent)
+    os.close(descriptor)
+    temporary_path = Path(temporary_name)
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = sqlite3.connect(temporary_path)
+        connection.execute("PRAGMA journal_mode=DELETE")
+        connection.execute("PRAGMA synchronous=FULL")
+        connection.execute(
+            "CREATE TABLE metadata (revision TEXT NOT NULL, corpus_digest TEXT NOT NULL, "
+            "passages_digest TEXT NOT NULL, passage_count INTEGER NOT NULL, source_count INTEGER NOT NULL)"
+        )
+        connection.execute("CREATE TABLE sources (artifact TEXT PRIMARY KEY, digest TEXT NOT NULL)")
+        connection.execute(
+            "CREATE VIRTUAL TABLE passages USING fts5("
+            "passage_id UNINDEXED, unit_id UNINDEXED, kind UNINDEXED, "
+            "title UNINDEXED, summary UNINDEXED, heading, body, artifact UNINDEXED, locator UNINDEXED, "
+            "line_start UNINDEXED, line_end UNINDEXED, source_digest UNINDEXED, code_terms, "
+            "tokenize='unicode61')"
+        )
+        connection.execute(
+            "INSERT INTO metadata VALUES (?, ?, ?, ?, ?)",
+            (PASSAGE_INDEX_REVISION, corpus_digest, passages_digest, len(passages), len(manifest)),
+        )
+        connection.executemany(
+            "INSERT INTO sources (artifact, digest) VALUES (?, ?)",
+            [(item["artifact"], item["digest"]) for item in manifest],
+        )
+        connection.executemany(
+            "INSERT INTO passages VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    item["passage_id"],
+                    item["unit_id"],
+                    item["kind"],
+                    item["title"],
+                    item["summary"],
+                    item["heading"],
+                    item["text"],
+                    item["artifact"],
+                    item["locator"],
+                    item["line_start"],
+                    item["line_end"],
+                    item["source_digest"],
+                    _passage_code_terms(item),
+                )
+                for item in passages
+            ],
+        )
+        connection.commit()
+        connection.close()
+        connection = None
+        file_descriptor = os.open(temporary_path, os.O_RDONLY)
+        try:
+            os.fsync(file_descriptor)
+        finally:
+            os.close(file_descriptor)
+        os.replace(temporary_path, cache_path)
+        _fsync_directory(cache_path.parent)
+    except Exception:
+        if connection is not None:
+            connection.close()
+        try:
+            temporary_path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+    return {
+        "health": "current",
+        "revision": PASSAGE_INDEX_REVISION,
+        "corpus_digest": corpus_digest,
+        "passages_digest": passages_digest,
+        "passage_count": len(passages),
+        "source_count": len(manifest),
+        "warnings": corpus_warnings,
+    }
+
+
+def _read_only_cache_connection(cache_path: Path) -> sqlite3.Connection:
+    absolute_cache = Path(os.path.abspath(cache_path))
+    connection = sqlite3.connect(f"{absolute_cache.as_uri()}?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA query_only=ON")
+    return connection
+
+
+def _sqlite_health_for_error(exc: sqlite3.Error) -> str:
+    message = str(exc).lower()
+    if "fts5" in message or "no such module" in message:
+        return "unavailable"
+    return "corrupt"
+
+
+def passage_cache_health(
+    project_root: Path,
+    *,
+    manifest: list[dict[str, str]],
+    corpus_digest: str,
+    passages_digest: str,
+    passage_count: int,
+) -> str:
+    cache_path = passage_search_cache_path(project_root)
+    if _path_has_symlink_component(project_root, cache_path):
+        return "corrupt"
+    if not cache_path.exists():
+        return "missing"
+    if not cache_path.is_file():
+        return "corrupt"
+    try:
+        connection = _read_only_cache_connection(cache_path)
+        try:
+            metadata = connection.execute(
+                "SELECT revision, corpus_digest, passages_digest, passage_count, source_count FROM metadata"
+            ).fetchall()
+            if len(metadata) != 1:
+                return "corrupt"
+            row = metadata[0]
+            cached_manifest = [
+                {"artifact": item["artifact"], "digest": item["digest"]}
+                for item in connection.execute("SELECT artifact, digest FROM sources ORDER BY artifact")
+            ]
+            integrity = connection.execute("PRAGMA quick_check").fetchone()
+            if not integrity or str(integrity[0]).lower() != "ok":
+                return "corrupt"
+            # Check the revision before touching revision-specific columns so an
+            # older schema is classified as stale, not as a read failure.
+            if str(row["revision"]) != PASSAGE_INDEX_REVISION:
+                return "stale"
+            cached_passages = []
+            for item in connection.execute(
+                "SELECT passage_id, unit_id, kind, title, summary, heading, body, artifact, locator, "
+                "line_start, line_end, source_digest, code_terms FROM passages ORDER BY passage_id"
+            ):
+                passage = {
+                    "passage_id": item["passage_id"],
+                    "unit_id": item["unit_id"],
+                    "kind": item["kind"],
+                    "title": item["title"],
+                    "summary": item["summary"],
+                    "heading": item["heading"],
+                    "text": item["body"],
+                    "artifact": item["artifact"],
+                    "locator": item["locator"],
+                    "line_start": item["line_start"],
+                    "line_end": item["line_end"],
+                    "source_digest": item["source_digest"],
+                }
+                # code_terms is derived from the row's own canonical fields; a
+                # mismatch is a tampered or damaged cache, never staleness.
+                if str(item["code_terms"] or "") != _passage_code_terms(passage):
+                    return "corrupt"
+                cached_passages.append(passage)
+        finally:
+            connection.close()
+    except sqlite3.Error as exc:
+        return _sqlite_health_for_error(exc)
+    try:
+        cached_source_count = int(row["source_count"])
+        cached_passage_count = int(row["passage_count"])
+        cached_passages_digest = _passages_digest(cached_passages)
+    except (TypeError, ValueError):
+        return "corrupt"
+    if not _valid_passage_source_manifest(cached_manifest):
+        return "corrupt"
+    if cached_source_count != len(cached_manifest) or str(row["corpus_digest"]) != _passage_corpus_digest(cached_manifest):
+        return "corrupt"
+    if cached_passage_count != len(cached_passages) or str(row["passages_digest"]) != cached_passages_digest:
+        return "corrupt"
+    if (
+        str(row["corpus_digest"]) != corpus_digest
+        or cached_source_count != len(manifest)
+        or cached_manifest != manifest
+    ):
+        return "stale"
+    if str(row["passages_digest"]) != passages_digest or cached_passage_count != passage_count:
+        # With identical canonical sources, deterministic extraction must produce
+        # identical rows. A coherent but different cached row set is corruption,
+        # not canonical staleness.
+        return "corrupt"
+    return "current"
+
+
+def _fts_query_text(query: str) -> str:
+    tokens = tokenize_query(query)
+    return " OR ".join(f'"{token.replace(chr(34), chr(34) * 2)}"' for token in tokens)
+
+
+def _query_passage_cache(
+    project_root: Path,
+    query: str,
+    *,
+    allowed_unit_ids: set[str],
+    limit: int,
+) -> list[dict[str, Any]]:
+    if not allowed_unit_ids or limit <= 0:
+        return []
+    connection = _read_only_cache_connection(passage_search_cache_path(project_root))
+    try:
+        rows = connection.execute(
+            "SELECT passage_id, unit_id, kind, title, summary, heading, body, artifact, locator, "
+            "line_start, line_end, source_digest, "
+            "bm25(passages, 0.0, 0.0, 0.0, 0.0, 0.0, 4.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0) AS score "
+            "FROM passages WHERE passages MATCH ? ORDER BY score, unit_id, artifact, locator",
+            (_fts_query_text(query),),
+        )
+        query_tokens = tokenize_query(query)
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            if str(row["unit_id"]) not in allowed_unit_ids:
+                continue
+            passage = {
+                "unit_id": row["unit_id"],
+                "kind": row["kind"],
+                "title": row["title"],
+                "summary": row["summary"],
+                "heading": row["heading"],
+                "text": row["body"],
+                "artifact": row["artifact"],
+                "locator": row["locator"],
+                "line_start": row["line_start"],
+                "line_end": row["line_end"],
+                "source_digest": row["source_digest"],
+            }
+            results.append(passage_result(passage, query_tokens, score=-float(row["score"])))
+            if len(results) >= limit:
+                break
+        return results
+    finally:
+        connection.close()
 
 
 def _safe_record_files(project_root: Path) -> list[Path]:
@@ -564,14 +1481,14 @@ def lint_workspace_integrity(project_root: Path, *, records: list[dict[str, Any]
     for record in records:
         wikilink_ref_keys.update(_record_wikilink_ref_keys(record))
     for record in records:
-        for path in _unit_markdown_paths(project_root, record):
+        for snapshot in _unit_markdown_snapshots(project_root, record):
             try:
-                markdown = path.read_text(encoding="utf-8")
+                markdown = snapshot.read_text(encoding="utf-8")
             except UnicodeDecodeError:
                 continue
             for target in parse_wikilinks(markdown):
                 if normalize_ref_key(target) not in wikilink_ref_keys:
-                    issues.append(f"{rel(project_root, path)}: broken wikilink `{target}`")
+                    issues.append(f"{rel(project_root, snapshot.path)}: broken wikilink `{target}`")
 
     programs_root = kb_root(project_root) / "programs"
     if programs_root.is_symlink() or not programs_root.is_dir():
@@ -770,25 +1687,30 @@ def _binding_findings(
     entries: list[tuple[Path, dict[str, Any]]],
 ) -> list[dict[str, str]]:
     findings: list[dict[str, str]] = []
-    roots_by_id = {
-        str(record.get("id") or ""): path.parent
-        for path, record in entries
-        if str(record.get("id") or "")
-    }
     for path, record in entries:
         payload = record.get("payload")
         payload = payload if isinstance(payload, dict) else {}
         verification = payload.get("verification")
         has_verification = isinstance(verification, dict)
         violations: list[str] = []
-        if has_verification:
-            violations = verification_receipt_violations(
+        try:
+            source_roots = trusted_claim_source_roots(
+                project_root,
                 record,
-                path.parent,
-                external_source=record_external_source_contract(record),
-                source_roots=roots_by_id,
-                check_artifacts=True,
+                verification_root=path.parent,
             )
+        except ValueError:
+            source_roots = {}
+            violations = ["verification evidence source is not canonically contained"]
+        if has_verification:
+            if not violations:
+                violations = verification_receipt_violations(
+                    record,
+                    path.parent,
+                    external_source=record_external_source_contract(record),
+                    source_roots=source_roots,
+                    check_artifacts=True,
+                )
             if verification.get("invalidation") and not violations:
                 violations = ["verification receipt is marked invalid"]
             if violations:
@@ -798,7 +1720,12 @@ def _binding_findings(
                     "The stored verification receipt is missing, invalid, or stale.",
                 ))
         if str(record.get("confirmation_status") or "") == "confirmed":
-            confirmation_invalid = not has_complete_confirmation_receipt(record)
+            confirmation_invalid = not has_complete_confirmation_receipt(
+                record,
+                verification_root=path.parent,
+                external_source=record_external_source_contract(record),
+                source_roots=source_roots,
+            )
             if confirmation_track(record) == "judgement" and violations:
                 confirmation_invalid = True
             if confirmation_invalid:
@@ -812,7 +1739,16 @@ def _binding_findings(
 
 def _recovery_findings(project_root: Path) -> list[dict[str, str]]:
     findings: list[dict[str, str]] = []
-    for entry in incomplete_ops(project_root):
+    try:
+        incomplete = incomplete_ops(project_root)
+    except (SystemExit, RuntimeError, OSError):
+        incomplete = []
+        findings.append(_audit_finding(
+            "RECOVERY_INCOMPLETE_OPERATION", "recovery", "error",
+            "kb/.journal",
+            "The operation journal cannot be enumerated safely and requires recovery.",
+        ))
+    for entry in incomplete:
         op_id = str(entry.get("op_id") or "")
         safe_op_id = op_id if re.fullmatch(r"[A-Za-z0-9._-]+", op_id) else "incomplete-operation"
         findings.append(_audit_finding(
@@ -983,13 +1919,118 @@ def search_records(
 ) -> list[dict[str, Any]]:
     normalized_pool = slugify(str(pool), max_words=12) if pool else ""
     filtered: list[dict[str, Any]] = []
-    for record in iter_records(project_root, kind=kind):
+    snapshots = list(iter_canonical_record_snapshots(project_root, kind=kind))
+    snapshot_by_identity = {(snapshot.kind, snapshot.unit_id): snapshot for snapshot in snapshots}
+    for snapshot in snapshots:
+        record = normalize_record_snapshot(snapshot, project_root)
+        if record is None:
+            continue
         if normalized_pool and normalized_pool not in record.get("candidate_pools", []):
             continue
         if confirmation_status and str(record.get("confirmation_status") or "") != confirmation_status:
             continue
         filtered.append(record)
-    return rank_records(filtered, query, markdown_paths_for=lambda record: _unit_markdown_paths(project_root, record))
+    content_by_identity = {}
+    current_records: list[dict[str, Any]] = []
+    for record in filtered:
+        identity = (str(record.get("kind") or ""), str(record.get("id") or ""))
+        content = _unit_content_snapshot(
+            project_root,
+            record,
+            include_parse_cache=False,
+            expected_record_snapshot=snapshot_by_identity.get(identity),
+        )
+        if content is None:
+            continue
+        content_by_identity[identity] = content
+        current_records.append(record)
+    ranked = rank_records(
+        current_records,
+        query,
+        markdown_paths_for=lambda record: list(
+            content_by_identity[
+                (str(record.get("kind") or ""), str(record.get("id") or ""))
+            ].artifacts
+        ),
+    )
+    return [
+        record
+        for record in ranked
+        if content_by_identity[
+            (str(record.get("kind") or ""), str(record.get("id") or ""))
+        ].is_current()
+    ]
+
+
+def search_passages(
+    project_root: Path,
+    query: str,
+    *,
+    kind: str | None = None,
+    pool: str | None = None,
+    confirmation_status: str | None = None,
+    limit: int = PASSAGE_SEARCH_LIMIT,
+) -> dict[str, Any]:
+    """Return passage hits and derived-index health without mutating the workspace."""
+    record_snapshots = list(iter_canonical_record_snapshots(project_root))
+    all_records = [
+        record
+        for snapshot in record_snapshots
+        if (record := normalize_record_snapshot(snapshot, project_root)) is not None
+    ]
+    normalized_pool = slugify(str(pool), max_words=12) if pool else ""
+    filtered: list[dict[str, Any]] = []
+    for record in all_records:
+        if kind and str(record.get("kind") or "") != kind:
+            continue
+        if normalized_pool and normalized_pool not in record.get("candidate_pools", []):
+            continue
+        if confirmation_status and str(record.get("confirmation_status") or "") != confirmation_status:
+            continue
+        filtered.append(record)
+    passages, manifest, corpus_digest = passage_corpus(
+        project_root,
+        records=all_records,
+        record_snapshots=record_snapshots,
+    )
+    passages_digest = _passages_digest(passages)
+    health = passage_cache_health(
+        project_root,
+        manifest=manifest,
+        corpus_digest=corpus_digest,
+        passages_digest=passages_digest,
+        passage_count=len(passages),
+    )
+    if not tokenize_query(query) or limit <= 0:
+        return {"health": health, "results": []}
+    allowed_unit_ids = {str(record.get("id") or "") for record in filtered}
+    eligible_passages = [item for item in passages if str(item.get("unit_id") or "") in allowed_unit_ids]
+    if health != "current":
+        return {"health": health, "results": rank_passages(eligible_passages, query, limit=limit)}
+    try:
+        results = _query_passage_cache(
+            project_root,
+            query,
+            allowed_unit_ids=allowed_unit_ids,
+            limit=limit,
+        )
+    except sqlite3.Error as exc:
+        health = _sqlite_health_for_error(exc)
+        return {"health": health, "results": rank_passages(eligible_passages, query, limit=limit)}
+
+    # unicode61 and substring tokenization differ at some CJK/ASCII boundaries.
+    # Keep FTS/BM25 as the primary order, then deterministically fill any missed
+    # lexical passages so mixed queries cannot lose correct results.
+    seen = {(str(item["unit_id"]), str(item["locator"])) for item in results}
+    for fallback in rank_passages(eligible_passages, query, limit=limit):
+        key = (str(fallback["unit_id"]), str(fallback["locator"]))
+        if key in seen:
+            continue
+        results.append(fallback)
+        seen.add(key)
+        if len(results) >= limit:
+            break
+    return {"health": health, "results": results[:limit]}
 
 
 def govern_records(
@@ -1360,6 +2401,9 @@ def migrate_repo_to_dataset(project_root: Path, repo_id: str) -> dict[str, Any]:
 __all__ = [
     "STATUS_VALUES",
     "CONFIRMATION_VALUES",
+    "PASSAGE_INDEX_REVISION",
+    "PASSAGE_SEARCH_LIMIT",
+    "PassageCacheError",
     "load_topic_taxonomy",
     "write_topic_taxonomy",
     "load_candidate_pools",
@@ -1372,12 +2416,18 @@ __all__ = [
     "refresh_record_schemas",
     "_has_declared_members",
     "_preserve_empty_governance_seeds",
+    "governance_catalog_payloads",
+    "governance_catalog_drift",
     "rebuild_governance_catalogs",
     "build_index",
+    "passage_corpus",
+    "rebuild_passage_cache",
+    "passage_cache_health",
     "lint_workspace_integrity",
     "lint_records",
     "audit_workspace",
     "search_records",
+    "search_passages",
     "govern_records",
     "_sorted_id_pairs",
     "_replace_ids_in_text",

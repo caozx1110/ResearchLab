@@ -16,8 +16,9 @@ from urllib.parse import quote as url_quote
 
 from .common import utc_now_iso
 from .journal import mutation_transaction
-from .paths import UNIT_KIND_DIRS, ensure_kb_gitignore, kb_gitignore_path, kb_root, topic_taxonomy_path, units_root
+from .paths import UNIT_KIND_DIRS, ensure_kb_gitignore, kb_gitignore_path, kb_root, topic_taxonomy_path, unit_root, units_root
 from .records import normalize_record_schema
+from .figures import FigureIndexError, load_current_figure_index
 from .relations import (
     BLOCK_ID_RE,
     inverse_relation,
@@ -28,11 +29,14 @@ from .yaml_io import dump_yaml, load_yaml, write_text_if_changed, write_yaml_if_
 
 
 OBSIDIAN_PROJECTION_SCHEMA = "research-kb-obsidian/v1"
-OBSIDIAN_RENDERER_REVISION = 6
+OBSIDIAN_RENDERER_REVISION = 11
 MANIFEST_NAME = "manifest.yaml"
 HUMAN_DIRS = ("inbox", "annotations")
 UNIT_HEADINGS = frozenset(
-    {"Overview", "Metadata", "Relationships", "Claims", "概览", "元数据", "关系", "判断"}
+    {
+        "Overview", "Definition", "Associations", "Metadata", "Relationships", "Claims", "Figures",
+        "概览", "定义", "关联清单", "元数据", "关系", "判断", "插图",
+    }
 )
 _MARKDOWN_INLINE_RE = re.compile(r"([\\`*_{}\[\]()<>~$|^&=#!])")
 _LEADING_MARKDOWN_RE = re.compile(r"^(?P<prefix>(?:[+-])|(?:\d+[.)]))(?=\s)")
@@ -80,6 +84,16 @@ def obsidian_managed_root(project_root: Path) -> Path:
 
 def obsidian_manifest_path(project_root: Path) -> Path:
     return obsidian_managed_root(project_root) / MANIFEST_NAME
+
+
+def obsidian_review_annotations_root(project_root: Path) -> Path:
+    """Human-owned exchange area for explicit, no-plugin review handoffs.
+
+    Projection update/status code must never traverse this directory.  A review
+    sync may read one registry-bound regular file from it only after the user
+    explicitly asks the runtime Agent to do so.
+    """
+    return obsidian_root(project_root) / "annotations"
 
 
 def _sha256_bytes(data: bytes) -> str:
@@ -302,6 +316,13 @@ def _record_claims(record: dict[str, Any]) -> list[dict[str, Any]]:
 def _analysis_stage(record: dict[str, Any]) -> str:
     claims = _record_claims(record)
     confirmation = _single_line(record.get("confirmation_status"))
+    # Canonical claim rows intentionally preserve their pre-decision epistemic
+    # status so the ConfirmationReceipt digest remains stable.  A normalized
+    # record is top-level confirmed only while that receipt is current, so the
+    # projection must treat its covered claims as confirmed instead of showing
+    # a contradictory pending banner.
+    if claims and confirmation == "confirmed":
+        return "evidence_recorded"
     claim_pending = any(
         _single_line(claim.get("confirmation_status")) == "pending_user_confirmation"
         for claim in claims
@@ -313,6 +334,19 @@ def _analysis_stage(record: dict[str, Any]) -> str:
     return "awaiting_analysis"
 
 
+def _projected_claim_confirmation(record: dict[str, Any], claim: dict[str, Any]) -> str:
+    status = _single_line(claim.get("confirmation_status"))
+    if _single_line(record.get("confirmation_status")) != "confirmed":
+        return status
+    receipt = record.get("confirmation")
+    receipt = receipt if isinstance(receipt, dict) else {}
+    claim_ids = receipt.get("claim_ids")
+    claim_ids = claim_ids if isinstance(claim_ids, list) else []
+    if _single_line(claim.get("id")) in {_single_line(item) for item in claim_ids}:
+        return "confirmed"
+    return status
+
+
 def _analysis_stage_label(stage: str, *, zh: bool = False) -> str:
     labels = {
         "awaiting_analysis": _t(zh, "Awaiting AI analysis", "等待 AI 分析"),
@@ -322,9 +356,21 @@ def _analysis_stage_label(stage: str, *, zh: bool = False) -> str:
     return labels.get(stage, stage.replace("_", " ").capitalize())
 
 
-def _display_summary(record: dict[str, Any], *, zh: bool = False) -> str:
+def _display_summary(record: dict[str, Any], analysis_stage: str, *, zh: bool = False) -> str:
     summary = _single_line(record.get("summary"))
     if not summary or re.fullmatch(r"Lightweight \w+ intake for `?.+?`?\.", summary):
+        if analysis_stage == "awaiting_confirmation":
+            return _t(
+                zh,
+                "Evidence-backed claims are recorded below and await human confirmation.",
+                "下方已记录有逐字证据支持的判断，正在等待人工确认。",
+            )
+        if analysis_stage == "evidence_recorded":
+            return _t(
+                zh,
+                "Evidence-backed claims and their supporting quotes are available below.",
+                "下方已列出有逐字证据支持的判断及其证据。",
+            )
         return _t(
             zh,
             "The material is safely archived and readable. AI analysis has not been completed yet.",
@@ -527,6 +573,56 @@ def _render_relations(
     return lines[:-1]
 
 
+def _render_concept_sections(
+    record: dict[str, Any],
+    records_by_id: dict[str, dict[str, Any]],
+    *,
+    zh: bool = False,
+) -> list[str]:
+    if str(record.get("kind") or "") != "concept":
+        return []
+    payload = record.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    concept = payload.get("concept")
+    concept = concept if isinstance(concept, dict) else {}
+    definition = _single_line(concept.get("definition")) or _t(
+        zh, "No verified definition is available.", "尚无已核验的定义。"
+    )
+    aliases = [str(item) for item in concept.get("aliases", []) if str(item).strip()]
+    raw_associations = payload.get("associations")
+    associations = raw_associations if isinstance(raw_associations, list) else []
+    lines = [
+        f"## {_t(zh, 'Definition', '定义')}",
+        "",
+        _markdown_text(definition),
+    ]
+    if aliases:
+        lines.extend(
+            [
+                "",
+                f"- {_t(zh, 'Aliases', '别名')}: " + ", ".join(_markdown_text(item) for item in aliases),
+            ]
+        )
+    lines.extend(["", f"## {_t(zh, 'Associations', '关联清单')}", ""])
+    rendered = 0
+    for association in associations:
+        if not isinstance(association, dict):
+            continue
+        target_id = _single_line(association.get("target_id"))
+        if not target_id:
+            continue
+        relation = _single_line(association.get("relation")) or "related_to"
+        role = _single_line(association.get("role"))
+        suffix = f" — {_markdown_text(role)}" if role else ""
+        lines.append(
+            f"- {_unit_link(target_id, records_by_id)} · {_inline_code(relation)}{suffix}"
+        )
+        rendered += 1
+    if not rendered:
+        lines.append(_t(zh, "- No associated units.", "- 暂无关联单元。"))
+    return lines
+
+
 def _render_claims(
     project_root: Path,
     record: dict[str, Any],
@@ -549,7 +645,7 @@ def _render_claims(
                 f"{text} ^{block_id}",
                 "",
                 f"- {_t(zh, 'Type', '类型')}: {_human_label(claim.get('claim_type'), _CLAIM_TYPE_LABELS_ZH if zh else _CLAIM_TYPE_LABELS)}",
-                f"- {_t(zh, 'Confirmation', '确认状态')}: {_human_label(claim.get('confirmation_status'), _CONFIRMATION_LABELS_ZH if zh else _CONFIRMATION_LABELS)}",
+                f"- {_t(zh, 'Confirmation', '确认状态')}: {_human_label(_projected_claim_confirmation(record, claim), _CONFIRMATION_LABELS_ZH if zh else _CONFIRMATION_LABELS)}",
             ]
         )
         refs = claim.get("evidence_refs", [])
@@ -587,6 +683,7 @@ def _render_unit_page(
     incoming: dict[str, list[dict[str, Any]]],
     records_by_id: dict[str, dict[str, Any]],
     *,
+    figure_index: dict[str, Any] | None = None,
     zh: bool = False,
 ) -> str:
     unit_id = str(record.get("id") or "")
@@ -615,7 +712,8 @@ def _render_unit_page(
         "source_path": f"units/{UNIT_KIND_DIRS.get(str(record.get('kind') or ''), '')}/{unit_id}/record.yaml",
     }
     properties.update(_flat_relation_properties(unit_id, outgoing, incoming, records_by_id))
-    summary = _display_summary(record, zh=zh)
+    summary = _display_summary(record, analysis_stage, zh=zh)
+    concept_sections = _render_concept_sections(record, records_by_id, zh=zh)
     source_uri = _single_line(source.get("original_uri"))
     source_document = _source_document_link(project_root, source, zh=zh)
     repo_links = _local_repo_quick_links(project_root, record, zh=zh)
@@ -628,6 +726,7 @@ def _render_unit_page(
         f"## {_t(zh, 'Overview', '概览')}",
         "",
         summary,
+        *(["", *concept_sections] if concept_sections else []),
         "",
         f"> [!info] {_t(zh, 'Quick access', '快速入口')}",
         "> " + (primary_access if primary_access else _t(zh, "No reading entry is available yet.", "暂时没有可用的阅读入口。")),
@@ -658,15 +757,46 @@ def _render_unit_page(
         f"## {_t(zh, 'Claims', '判断')}",
         "",
         *_render_claims(project_root, record, records_by_id, zh=zh),
-        "",
-        f"## {_t(zh, 'Metadata', '元数据')}",
-        "",
-        f"- {_t(zh, 'Unit', '单元')}: {_inline_code(unit_id)}",
-        f"- {_t(zh, 'Kind', '类型')}: {_inline_code(properties['kind'])}",
-        f"- {_t(zh, 'Status', '状态')}: {_inline_code(properties['status'])}",
-        f"- {_t(zh, 'Maturity', '成熟度')}: {_inline_code(properties['maturity'])}",
-        f"- {_t(zh, 'Confirmation', '确认状态')}: {_inline_code(properties['confirmation_status'])}",
     ]
+    entries = figure_index.get("entries") if isinstance(figure_index, dict) else []
+    entries = entries if isinstance(entries, list) else []
+    if entries:
+        lines.extend(["", f"## {_t(zh, 'Figures', '插图')}", ""])
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            ref_key = _single_line(entry.get("ref_key"))
+            caption = _single_line(entry.get("caption"))
+            page = entry.get("page")
+            if not ref_key or not caption:
+                continue
+            lines.extend(
+                [
+                    f"### {_inline_code(ref_key)}",
+                    "",
+                    _markdown_text(caption),
+                    "",
+                    f"- {_t(zh, 'Page', '页码')}: {_inline_code(page)}",
+                ]
+            )
+            assets = entry.get("assets") if isinstance(entry.get("assets"), list) else []
+            for asset in assets:
+                asset_path = _single_line(asset.get("path")) if isinstance(asset, dict) else ""
+                if asset_path:
+                    lines.extend(["", f"![[units/papers/{unit_id}/{asset_path}]]"])
+            lines.append("")
+    lines.extend(
+        [
+            "",
+            f"## {_t(zh, 'Metadata', '元数据')}",
+            "",
+            f"- {_t(zh, 'Unit', '单元')}: {_inline_code(unit_id)}",
+            f"- {_t(zh, 'Kind', '类型')}: {_inline_code(properties['kind'])}",
+            f"- {_t(zh, 'Status', '状态')}: {_inline_code(properties['status'])}",
+            f"- {_t(zh, 'Maturity', '成熟度')}: {_inline_code(properties['maturity'])}",
+            f"- {_t(zh, 'Confirmation', '确认状态')}: {_inline_code(properties['confirmation_status'])}",
+        ]
+    )
     if source_uri:
         lines.append(f"- {_t(zh, 'Source', '来源')}: {_source_markdown(source_uri, zh=zh)}")
     if source_document:
@@ -828,6 +958,27 @@ def _projection_inputs(project_root: Path) -> dict[str, Any]:
     programs = sorted(programs, key=lambda state: str(state.get("program_id") or ""))
     taxonomy, taxonomy_issues = _safe_taxonomy(project_root)
     locale, locale_issues = _safe_projection_locale(project_root)
+    figures: dict[str, dict[str, Any]] = {}
+    for record in records:
+        if record.get("kind") != "paper":
+            continue
+        unit_id = str(record.get("id") or "")
+        payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+        projection = payload.get("figures") if isinstance(payload.get("figures"), dict) else {}
+        index_artifact = str(projection.get("index_artifact") or "").strip()
+        expected_digest = str(projection.get("index_digest") or "").strip()
+        if not unit_id or projection.get("schema") != "figure-index/v1" or index_artifact != "figures.yaml" or not expected_digest:
+            continue
+        root = unit_root(project_root, "paper", unit_id)
+        try:
+            figures[unit_id] = load_current_figure_index(
+                root / index_artifact,
+                unit_root=root,
+                project_root=project_root,
+                expected_index_digest=expected_digest,
+            )
+        except FigureIndexError:
+            continue
     digest_payload = {
         "schema": OBSIDIAN_PROJECTION_SCHEMA,
         "renderer_revision": OBSIDIAN_RENDERER_REVISION,
@@ -835,12 +986,14 @@ def _projection_inputs(project_root: Path) -> dict[str, Any]:
         "programs": programs,
         "taxonomy": taxonomy,
         "locale": locale,
+        "figures": figures,
     }
     return {
         "records": records,
         "programs": programs,
         "taxonomy": taxonomy,
         "locale": locale,
+        "figures": figures,
         "input_issues": [*record_issues, *program_issues, *taxonomy_issues, *locale_issues],
         "input_digest": _sha256_text(_canonical_json(digest_payload)),
     }
@@ -949,21 +1102,24 @@ def _base_file(*, name: str, view_filter: str = "", group_by: str = "", zh: bool
     view: dict[str, Any] = {
         "type": "table",
         "name": name,
-        "order": [
-            "file.name",
-            "title",
-            "kind",
-            "analysis_stage",
-            "materialization_status",
-            "confirmation_status",
-            "topics",
-            "updated",
-        ],
     }
     if view_filter:
         view["filters"] = {"and": [view_filter]}
     if group_by:
         view["groupBy"] = {"property": group_by, "direction": "ASC"}
+    # Obsidian 1.12.7 saves filters/groupBy before order and indents block
+    # sequences.  Emit that byte-canonical form directly so merely opening a
+    # generated Base never looks like a human edit to the manifest guard.
+    view["order"] = [
+        "file.name",
+        "title",
+        "kind",
+        "analysis_stage",
+        "materialization_status",
+        "confirmation_status",
+        "topics",
+        "updated",
+    ]
     payload = {
         "filters": {
             "and": [
@@ -985,7 +1141,7 @@ def _base_file(*, name: str, view_filter: str = "", group_by: str = "", zh: bool
         },
         "views": [view],
     }
-    return dump_yaml(payload, width=1_000_000)
+    return dump_yaml(payload, width=1_000_000, indent_sequences=True)
 
 
 def _legacy_obsidian_normalized_base(relative: str) -> dict[str, Any] | None:
@@ -1085,7 +1241,7 @@ def _render_home(
             f"## {_t(zh, 'Start here', '从这里开始')}",
             "",
             f"- [[obsidian/managed/dashboards/All Units.base|{_t(zh, 'Browse all units', '浏览全部单元')}]]",
-            f"- [[obsidian/managed/dashboards/Pending Review.base|{_t(zh, 'Review pending conclusions', '查看待确认判断')}]]",
+            f"- [[obsidian/managed/dashboards/Pending Review.base|{_t(zh, 'Browse pending conclusions (read-only overview)', '浏览待确认判断（只读总览）')}]]",
             f"- [[obsidian/managed/dashboards/By Topic.base|{_t(zh, 'Explore by topic', '按主题浏览')}]]",
             "",
             f"## {_t(zh, 'Library overview', '资料概览')}",
@@ -1114,6 +1270,11 @@ def _render_home(
             "",
             _t(zh, "- Put unprocessed notes in `obsidian/inbox/`.", "- 未整理笔记请放在 `obsidian/inbox/`。"),
             _t(zh, "- Put durable human commentary in `obsidian/annotations/`.", "- 需要长期保留的人工批注请放在 `obsidian/annotations/`。"),
+            _t(
+                zh,
+                "- Editable review sheets may appear in annotations after you ask the Agent; checkbox changes are drafts until you return to the conversation and explicitly authorize sync.",
+                "- 让 Agent 生成待确认表后，可直接在人工批注区勾选；勾选只是草稿，必须回到对话明确授权同步才会生效。",
+            ),
             "",
             f"> [!warning] {_t(zh, 'Managed projection', '受管投影')}",
             "> " + _t(zh, "Files below `obsidian/managed` are generated. Put human-authored notes in inbox or annotations.", "`obsidian/managed` 下的文件会自动生成；人工内容请写入 inbox 或 annotations。"),
@@ -1130,6 +1291,7 @@ def _projection_files(project_root: Path, inputs: dict[str, Any], *, generated_a
     programs = inputs["programs"]
     taxonomy = inputs["taxonomy"]
     zh = str(inputs.get("locale") or "en") == "zh"
+    figures = inputs.get("figures") if isinstance(inputs.get("figures"), dict) else {}
     records_by_id = {str(record.get("id") or ""): record for record in records if str(record.get("id") or "")}
     edges = project_relation_edges(records)
     outgoing: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -1144,7 +1306,13 @@ def _projection_files(project_root: Path, inputs: dict[str, Any], *, generated_a
         if not unit_id:
             continue
         files[f"units/{_safe_component(unit_id, fallback='unit')}.md"] = _render_unit_page(
-            project_root, record, outgoing, incoming, records_by_id, zh=zh
+            project_root,
+            record,
+            outgoing,
+            incoming,
+            records_by_id,
+            figure_index=figures.get(unit_id) if isinstance(figures.get(unit_id), dict) else None,
+            zh=zh,
         )
     for state in programs:
         program_id = str(state.get("program_id") or "")

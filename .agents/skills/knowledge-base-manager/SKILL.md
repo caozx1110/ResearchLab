@@ -1,9 +1,13 @@
 ---
 name: knowledge-base-manager
-description: 管理 knowledge base 的统一 schema、索引、链接、taxonomy/topic/pool 治理、review classifier 与生命周期推进。
+description: 管理 knowledge base 的统一 schema、passage 索引、链接、taxonomy/topic/pool 治理、review classifier 与生命周期推进。
 ---
 
 # Knowledge Base Manager
+
+偏好合同：本 owner 对 soft preference 显式 neutral；它只执行机械 schema、索引、lifecycle 与治理约束，eligible catalog 为空。hard governance 继续由对应 owner 强制。
+
+> 协议参考：`.agents/lib/research/SCHEMAS.md#discovery-retrieval` · `#ownership` · `#confirmation-gate`
 
 当任务是在维护知识单元协议、索引、治理目录、链接或 lifecycle，而不是深读某一篇 paper / repo / dataset / blog 时，使用这个 skill。
 
@@ -12,7 +16,9 @@ description: 管理 knowledge base 的统一 schema、索引、链接、taxonomy
 - `kb/units/<kind>/<id>/record.yaml`：canonical unit record。
 - `kb/config/candidate-pools.yaml` 与 `kb/config/topic-taxonomy.yaml`：治理 catalog。
 - `kb/index.yaml` / `kb/index.md`：派生索引。
-- `kb/user/` 由 research-navigator 主写；`kb/raw/` 是不可变 source evidence；本 skill 不做材料理解。
+- `kb/.runtime/search/passages.sqlite3`：可丢弃的 passage FTS5 cache；不是 canonical evidence。
+- `kb/user/` 是可重建的人读投影；`kb/raw/` 是不可变 source evidence；本 skill 不做材料理解。
+- 公共 `kb status` 的 core current-state 读取由本 owner 提供，只读返回资料、待确认项与 program 编号；它不依赖任何 maintainer-only 投影工具，也不刷新 `kb/user/` 投影视图。
 
 任何判断必须保留原 epistemic type。脚本只搬运、验证和过门，不替 Agent 生成结论。
 
@@ -20,12 +26,21 @@ description: 管理 knowledge base 的统一 schema、索引、链接、taxonomy
 
 ## Review classifier
 
-Public review inbox 只包含真正 `ready_for_review` 且仍待用户确认的 knowledge-unit 判断：
+Knowledge Base Manager 负责 knowledge-unit classifier；公共 `kb review` 还通过 shared judgement discovery 聚合其它 owner 的 ready judgement：
 
 - paper/repo/dataset/blog 的 `source_ready`、`awaiting_agent_fill`、`ready_to_verify`、`failed_retryable` 一律不进入人工 inbox。
 - 旧记录没有 classifier 字段时保持兼容，但 prepared shell 仍排除；paper 的 `not_started` 可能承载有效 screening 判断，不能误删。
-- `find`、public `kb review` 与 batch confirm 必须消费同一筛选结果。
-- 当前 inbox 只覆盖 knowledge units；experiment diagnosis、program decision 与 learning 的待确认项由各自 owner 管理，公开说明必须诚实。
+- `find`、public `kb review` 与 batch confirm 对 knowledge unit 必须消费同一筛选结果。
+- experiment diagnosis、program decision、idea discussion conclusion 与 method selection 仍由各自 owner 持有和写入；shared discovery 只接收 non-empty canonical claims + current verification 的 side artifact，并把 owner-specific confirm/reject route 交给 kb-cli 私有 protocol。公共 inbox 按优先级与陈旧度排序，再按当前治理档冻结的批量上限展示并说明剩余数量（strict 3 条；personal 默认 10 条）。
+
+## Passage retrieval
+
+- 显式 index mutation 用 deterministic extractor 建完整临时 FTS5 数据库并原子替换；正文只能切段/切窗，不摘要或解释。
+- 每个 passage 保存 unit、kind、title、artifact、locator、原文与 source digest；路径必须 project-relative 且通过 containment，拒绝 symlink escape。fenced code 外 standalone `^block-id` 只作 locator metadata，不进入正文 passage。
+- `find` 是只读消费者。cache 先验内部 table/digest 自洽，再判 canonical stale；内部篡改归 `corrupt`，canonical 合法变化归 `stale`。cache 缺失、损坏或 stale 时调用同一 extractor 做内存 fallback，绝不在 query path 重建或修改 KB。
+- 公开结果最多五段，只显示短原文、unit 和可复开 locator；BM25/internal score、绝对路径与 cache 诊断只留在私有 protocol。
+- lexical search 支持同语种与 CJK/ASCII 混合 token，但不承诺翻译、embedding 或跨语言同义召回。
+- canonical concept 与其它 unit 一起进入 passage/index/Obsidian；公开 find 可显示 pending 状态。私有 `context-pack/v1` 只搬运 current ConfirmationReceipt 覆盖的 formal claims，summary/passage 明确是 navigation-only；本 owner 不生成答案或综合判断。
 
 ## 分层机械审计
 
@@ -35,7 +50,7 @@ Public review inbox 只包含真正 `ready_for_review` 且仍待用户确认的 
 - 它复用原有 lint，并检查 current verification/confirmation binding、未完成 journal、KB Git 中产品拥有的 dirty 文件、完整 paper 的空 metadata/default taxonomy、重复或可疑 figure label、symlink 越界。
 - 审计不得 bootstrap workspace、刷新 index、创建 lock/journal 或更改 Git/mtime；空库、干净库和坏库都必须字节级只读。
 - 输出只含相对 subject 与脱敏机械摘要，不含绝对路径、原始 source/evidence、用户消息或 traceback；网络、依赖漏洞与语义结论质量不在 D1 范围，必须如实说明不支持。
-- Agent 向用户用自然语言概述数量与建议，不直接倾倒 owner JSON；普通公开命令面仍只有既有 15 个 `kb <verb>`。
+- Agent 向用户用自然语言概述数量与建议，不直接倾倒 owner JSON；普通公开命令面仍只有既有 16 个 `kb <verb>`。
 
 ## Confirmation
 
@@ -67,3 +82,10 @@ Owner script、Python 命令、环境变量、内部 flags、绝对路径与 Age
 - AI inference、evaluation 与 user opinion 在合法 confirmation receipt 生成前保持 pending。
 - topic/tag/pool/summary 属于可覆盖治理层；history、links 与确认记录保留变更痕迹。
 - storage-sync 只处理 KB 数据范围，不重写分发 skill 或工作区根规则。
+
+脚本入口：`scripts/kb.py`（init / query / review-queue / confirm / promote / link / govern / audit / lint / resume / undo / restore）。
+
+## 启动澄清（Agent 用）
+
+- 对象：索引、链接、taxonomy/pool 治理还是审计？默认按请求路由。
+- 涉及批量改写（迁移/治理）时先出 dry-run 计划？默认是，确认后 apply。

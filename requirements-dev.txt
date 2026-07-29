@@ -1,5 +1,12 @@
 -r requirements.txt
 pytest==8.4.2
+tiktoken==0.13.0
+regex==2025.11.3
+requests==2.32.5
+charset_normalizer==3.4.4
+idna==3.11
+urllib3==2.6.1
+certifi==2025.11.12
 iniconfig==2.1.0
 packaging==26.2
 pluggy==1.6.0

@@ -6,6 +6,7 @@ of explicit initialization and mutation commands.
 from __future__ import annotations
 
 import copy
+import re
 from pathlib import Path
 from typing import Any
 
@@ -41,7 +42,6 @@ DEFAULT_SETTINGS_MARKDOWN = """# Research Settings
 - [x] 自动入库事实类基础信息
 - [x] 默认维护 topic / tag / candidate pool 治理目录
 - [x] 外部 source search 先进入 staging，再决定是否入库
-- [x] 新论文入库后自动快速筛选
 - [x] intake 阶段预热 PDF 解析缓存
 - [ ] 自动生成详细论文笔记
 - [ ] 完整笔记后自动提取 Figure / Table
@@ -60,7 +60,7 @@ DEFAULT_SETTINGS_MARKDOWN = """# Research Settings
 
 模式说明：
 
-- 论文完整笔记触发条件、完整笔记模式（`scaffold` / `draft`）请使用 runtime preferences 管理。
+- 论文完整笔记模式（`scaffold` / `draft`）请使用 runtime preferences 管理。
 """
 
 
@@ -93,25 +93,60 @@ DEFAULT_CANDIDATE_POOLS = {
 VERSIONING_COMMIT_MODES = {"manual", "milestone", "aggressive"}
 
 
+# Automation tier for a user-dropped link: either come back and ask before the
+# deep read, or run the deep read automatically up to (never past) the
+# user-confirmation gate.
+LINK_AUTODRIVE_MODES = {"ask_first", "auto_deep_read"}
+
+DEFAULT_LINK_AUTODRIVE = "ask_first"
+
+# Conversational stance the user prefers when discussing research judgements.
+DISCUSSION_STYLES = {"challenge", "refine", "adaptive"}
+
+DEFAULT_DISCUSSION_STYLE = "adaptive"
+
+
 DIAGNOSTIC_MODES = {"off", "errors-only", "developer"}
 
 
 DIAGNOSTIC_SKILL_MODES = {"inherit", *DIAGNOSTIC_MODES}
 
 
-PAPER_AUTO_COMPLETE_CONDITIONS = {
-    "after_screen",
-    "suggested_worth_reading",
-    "strong_relevance",
-}
-
-
 PAPER_NOTE_MODES = {"scaffold", "draft"}
+
+
+GOVERNANCE_PROFILES = {"personal", "strict"}
+DEFAULT_GOVERNANCE_PROFILE = "personal"
+LEGACY_GOVERNANCE_PROFILE = "strict"
+STRICT_REVIEW_ITEM_LIMIT = 3
+STRICT_REVIEW_CARD_TTL_HOURS = 24
+PERSONAL_REVIEW_ITEM_LIMIT = 10
+PERSONAL_REVIEW_CARD_TTL_HOURS = 24
+MAX_REVIEW_ITEM_LIMIT = 20
+MIN_PERSONAL_REVIEW_ITEM_LIMIT = 4
+MIN_REVIEW_CARD_TTL_HOURS = 1
+MAX_REVIEW_CARD_TTL_HOURS = 168
+
+
+_RETIRED_PAPER_PREFERENCES = {
+    "auto_screen_on_intake",
+    "auto_complete_note_condition",
+    "screening_mode",
+    "screening_context_pages",
+    "screening_max_chars",
+}
 
 
 def default_runtime_preferences() -> dict[str, Any]:
     return {
         **yaml_default("runtime-preferences", "research-config-manager", status="active"),
+        # New workspaces opt into the lower-ceremony profile explicitly.
+        # load_runtime_preferences keeps pre-profile workspaces strict.
+        "governance_profile": DEFAULT_GOVERNANCE_PROFILE,
+        "review": {
+            "batch_item_limit": PERSONAL_REVIEW_ITEM_LIMIT,
+            "card_ttl_hours": PERSONAL_REVIEW_CARD_TTL_HOURS,
+        },
         "browser": {
             "default_workbench_mode": "preview",
             "default_terminal_mode": "codex",
@@ -133,12 +168,11 @@ def default_runtime_preferences() -> dict[str, Any]:
             "cooldown_seconds": 0,
         },
         "autonomy": {
-            "auto_execute_scope": ["screen", "build-index", "refresh", "generate-note"],
+            "auto_execute_scope": ["ingest", "build-index", "refresh", "generate-note"],
+            "link_autodrive": DEFAULT_LINK_AUTODRIVE,
         },
         "paper": {
-            "auto_screen_on_intake": True,
             "auto_complete_note": False,
-            "auto_complete_note_condition": "suggested_worth_reading",
             "complete_note_mode": "scaffold",
             "auto_extract_figures_after_note": False,
             "auto_refresh_structure_after_note": True,
@@ -146,9 +180,6 @@ def default_runtime_preferences() -> dict[str, Any]:
             "parse_cache_front_limit": 8,
             "parse_cache_back_limit": 0,
             "parse_cache_per_page_char_limit": 3000,
-            "screening_mode": "heuristic_structured",
-            "screening_context_pages": 6,
-            "screening_max_chars": 12000,
             "prompt_for_preference_updates": True,
         },
         "pdf": {
@@ -208,11 +239,79 @@ def _normalize_diagnostics_preferences(value: object) -> dict[str, Any]:
     return diagnostics
 
 
+def _bounded_integer(value: object, default: int, *, minimum: int, maximum: int) -> int:
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        parsed = value
+    elif isinstance(value, str) and re.fullmatch(r"-?\d+", value.strip()):
+        parsed = int(value.strip())
+    else:
+        return default
+    return min(maximum, max(minimum, parsed))
+
+
+def _normalize_review_preferences(value: object) -> dict[str, int]:
+    review = copy.deepcopy(value) if isinstance(value, dict) else {}
+    return {
+        "batch_item_limit": _bounded_integer(
+            review.get("batch_item_limit"),
+            PERSONAL_REVIEW_ITEM_LIMIT,
+            minimum=MIN_PERSONAL_REVIEW_ITEM_LIMIT,
+            maximum=MAX_REVIEW_ITEM_LIMIT,
+        ),
+        "card_ttl_hours": _bounded_integer(
+            review.get("card_ttl_hours"),
+            PERSONAL_REVIEW_CARD_TTL_HOURS,
+            minimum=MIN_REVIEW_CARD_TTL_HOURS,
+            maximum=MAX_REVIEW_CARD_TTL_HOURS,
+        ),
+    }
+
+
+def effective_review_policy(project_root: Path) -> dict[str, Any]:
+    """Return the one normalized review policy consumed by public adapters.
+
+    Callers must copy these values into the one-time review snapshot.  Apply
+    paths consume that frozen snapshot and must not call this helper again.
+    """
+
+    preferences = load_runtime_preferences(project_root)
+    profile = str(preferences.get("governance_profile") or LEGACY_GOVERNANCE_PROFILE)
+    if profile != "personal":
+        return {
+            "governance_profile": "strict",
+            "item_limit": STRICT_REVIEW_ITEM_LIMIT,
+            "card_ttl_hours": STRICT_REVIEW_CARD_TTL_HOURS,
+            "ttl_seconds": STRICT_REVIEW_CARD_TTL_HOURS * 60 * 60,
+            "absolute_max_items": MAX_REVIEW_ITEM_LIMIT,
+        }
+    review = _normalize_review_preferences(preferences.get("review"))
+    ttl_hours = review["card_ttl_hours"]
+    return {
+        "governance_profile": "personal",
+        "item_limit": review["batch_item_limit"],
+        "card_ttl_hours": ttl_hours,
+        "ttl_seconds": ttl_hours * 60 * 60,
+        "absolute_max_items": MAX_REVIEW_ITEM_LIMIT,
+    }
+
+
 def load_runtime_preferences(project_root: Path) -> dict[str, Any]:
-    payload = load_yaml(runtime_preferences_path(project_root), default={})
-    if not isinstance(payload, dict) or not payload:
+    preferences_path = runtime_preferences_path(project_root)
+    has_existing_config = preferences_path.exists()
+    payload = load_yaml(preferences_path, default={})
+    raw_profile = payload.get("governance_profile") if isinstance(payload, dict) else None
+    has_existing_payload = isinstance(payload, dict) and bool(payload)
+    if not has_existing_payload:
         payload = default_runtime_preferences()
     normalized = _deep_fill_missing(payload, default_runtime_preferences())
+    if has_existing_config:
+        profile = str(raw_profile or "").strip().lower()
+        normalized["governance_profile"] = profile if profile in GOVERNANCE_PROFILES else LEGACY_GOVERNANCE_PROFILE
+    else:
+        normalized["governance_profile"] = DEFAULT_GOVERNANCE_PROFILE
+    normalized["review"] = _normalize_review_preferences(normalized.get("review"))
     browser = normalized.get("browser", {})
     if not isinstance(browser, dict):
         browser = {}
@@ -242,18 +341,19 @@ def load_runtime_preferences(project_root: Path) -> dict[str, Any]:
     scope = autonomy.get("auto_execute_scope", [])
     if not isinstance(scope, list):
         scope = copy.deepcopy(default_runtime_preferences()["autonomy"]["auto_execute_scope"])
-    autonomy["auto_execute_scope"] = [str(item).strip() for item in scope if str(item).strip()]
+    autonomy["auto_execute_scope"] = [
+        str(item).strip() for item in scope if str(item).strip() and str(item).strip() != "screen"
+    ]
+    autodrive = str(autonomy.get("link_autodrive") or DEFAULT_LINK_AUTODRIVE).strip().lower()
+    autonomy["link_autodrive"] = autodrive if autodrive in LINK_AUTODRIVE_MODES else DEFAULT_LINK_AUTODRIVE
     normalized["autonomy"] = autonomy
 
     paper = normalized.get("paper", {})
     if not isinstance(paper, dict):
         paper = {}
-    paper["auto_screen_on_intake"] = bool(paper.get("auto_screen_on_intake", True))
+    for retired_key in _RETIRED_PAPER_PREFERENCES:
+        paper.pop(retired_key, None)
     paper["auto_complete_note"] = bool(paper.get("auto_complete_note"))
-    condition = str(paper.get("auto_complete_note_condition") or "suggested_worth_reading").strip()
-    paper["auto_complete_note_condition"] = (
-        condition if condition in PAPER_AUTO_COMPLETE_CONDITIONS else "suggested_worth_reading"
-    )
     note_mode = str(paper.get("complete_note_mode") or "scaffold").strip()
     paper["complete_note_mode"] = note_mode if note_mode in PAPER_NOTE_MODES else "scaffold"
     paper["auto_extract_figures_after_note"] = bool(paper.get("auto_extract_figures_after_note"))
@@ -271,15 +371,6 @@ def load_runtime_preferences(project_root: Path) -> dict[str, Any]:
         paper["parse_cache_per_page_char_limit"] = max(500, int(paper.get("parse_cache_per_page_char_limit") or 3000))
     except (TypeError, ValueError):
         paper["parse_cache_per_page_char_limit"] = 3000
-    paper["screening_mode"] = str(paper.get("screening_mode") or "heuristic_structured").strip() or "heuristic_structured"
-    try:
-        paper["screening_context_pages"] = max(1, int(paper.get("screening_context_pages") or 6))
-    except (TypeError, ValueError):
-        paper["screening_context_pages"] = 6
-    try:
-        paper["screening_max_chars"] = max(1000, int(paper.get("screening_max_chars") or 12000))
-    except (TypeError, ValueError):
-        paper["screening_max_chars"] = 12000
     paper["prompt_for_preference_updates"] = bool(paper.get("prompt_for_preference_updates", True))
     normalized["paper"] = paper
 
@@ -335,7 +426,10 @@ def write_runtime_preferences(project_root: Path, payload: dict[str, Any]) -> Pa
     with mutation_transaction(project_root, "write-runtime-preferences", [path]):
         current = load_runtime_preferences(project_root)
         merged = copy.deepcopy(current)
-        for key in ("browser", "identity", "learned_preferences", "diagnostics", "autonomy", "paper", "pdf", "versioning"):
+        if "governance_profile" in payload:
+            profile = str(payload.get("governance_profile") or "").strip().lower()
+            merged["governance_profile"] = profile if profile in GOVERNANCE_PROFILES else LEGACY_GOVERNANCE_PROFILE
+        for key in ("review", "browser", "identity", "learned_preferences", "diagnostics", "autonomy", "paper", "pdf", "versioning"):
             value = payload.get(key)
             if isinstance(value, dict):
                 target = merged.setdefault(key, {})
@@ -344,7 +438,21 @@ def write_runtime_preferences(project_root: Path, payload: dict[str, Any]) -> Pa
                     merged[key] = target
                 target.update(value)
         normalized = _deep_fill_missing(merged, default_runtime_preferences())
+        profile = str(normalized.get("governance_profile") or "").strip().lower()
+        normalized["governance_profile"] = profile if profile in GOVERNANCE_PROFILES else LEGACY_GOVERNANCE_PROFILE
+        normalized["review"] = _normalize_review_preferences(normalized.get("review"))
         normalized["diagnostics"] = _normalize_diagnostics_preferences(normalized.get("diagnostics"))
+        autonomy = normalized.get("autonomy", {})
+        if isinstance(autonomy, dict):
+            scope = autonomy.get("auto_execute_scope", [])
+            autonomy["auto_execute_scope"] = [
+                str(item).strip()
+                for item in scope if str(item).strip() and str(item).strip() != "screen"
+            ] if isinstance(scope, list) else copy.deepcopy(default_runtime_preferences()["autonomy"]["auto_execute_scope"])
+        paper = normalized.get("paper", {})
+        if isinstance(paper, dict):
+            for retired_key in _RETIRED_PAPER_PREFERENCES:
+                paper.pop(retired_key, None)
         write_yaml_if_changed(path, normalized)
     return path
 
@@ -369,7 +477,10 @@ def ensure_workspace(project_root: Path) -> None:
         write_text_if_changed(settings, DEFAULT_SETTINGS_MARKDOWN)
     navigation = user_root(project_root) / "navigation.md"
     if not navigation.exists():
-        write_text_if_changed(navigation, "# Research Navigation\n\n- 运行 `research-navigator` 刷新当前入口页。\n")
+        write_text_if_changed(
+            navigation,
+            "# Research Navigation\n\n- Agent 可在需要时生成研究入口；这里暂时没有内容。\n",
+        )
     current_state = user_root(project_root) / "current-state.md"
     if not current_state.exists():
         write_text_if_changed(current_state, "# Current State\n\n尚未生成。\n")
@@ -386,10 +497,25 @@ __all__ = [
     "DEFAULT_TOPIC_TAXONOMY",
     "DEFAULT_CANDIDATE_POOLS",
     "VERSIONING_COMMIT_MODES",
+    "LINK_AUTODRIVE_MODES",
+    "DEFAULT_LINK_AUTODRIVE",
+    "DISCUSSION_STYLES",
+    "DEFAULT_DISCUSSION_STYLE",
     "DIAGNOSTIC_MODES",
     "DIAGNOSTIC_SKILL_MODES",
-    "PAPER_AUTO_COMPLETE_CONDITIONS",
     "PAPER_NOTE_MODES",
+    "GOVERNANCE_PROFILES",
+    "DEFAULT_GOVERNANCE_PROFILE",
+    "LEGACY_GOVERNANCE_PROFILE",
+    "STRICT_REVIEW_ITEM_LIMIT",
+    "STRICT_REVIEW_CARD_TTL_HOURS",
+    "PERSONAL_REVIEW_ITEM_LIMIT",
+    "PERSONAL_REVIEW_CARD_TTL_HOURS",
+    "MAX_REVIEW_ITEM_LIMIT",
+    "MIN_PERSONAL_REVIEW_ITEM_LIMIT",
+    "MIN_REVIEW_CARD_TTL_HOURS",
+    "MAX_REVIEW_CARD_TTL_HOURS",
+    "effective_review_policy",
     "default_runtime_preferences",
     "load_runtime_preferences",
     "write_runtime_preferences",

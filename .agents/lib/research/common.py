@@ -24,6 +24,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
+from .analyzer_registry import UNIT_ANALYZER_SCRIPT_BY_KIND
 from .dedup import canonicalize_url, normalize_remote_url, parse_arxiv_id
 from .slugs import KEYWORD_BLACKLIST, STOPWORDS, normalize_list, normalize_person_name, normalize_ref_key, normalize_title, parse_wikilinks, simple_slug, slugify, slugify_tag
 from .yaml_io import dump_yaml, load_yaml, write_text_if_changed, write_yaml_if_changed, yaml_duplicate_key_issues
@@ -32,10 +33,7 @@ from .yaml_io import dump_yaml, load_yaml, write_text_if_changed, write_yaml_if_
 RUNTIME_MODULES = ("yaml", "markdownify", "bs4", "pymupdf4llm", "fitz", "PyPDF2", "pypdf")
 COMMAND_PREFIX = "${RESEARCH_PYTHON:-python3}"
 CONFIRM_SCRIPT_BY_KIND = {
-    "paper": ".agents/skills/paper-analyst/scripts/paper.py",
-    "repo": ".agents/skills/repo-analyst/scripts/repo.py",
-    "dataset": ".agents/skills/dataset-analyst/scripts/dataset.py",
-    "blog": ".agents/skills/blog-analyst/scripts/blog.py",
+    **UNIT_ANALYZER_SCRIPT_BY_KIND,
     "experiment": ".agents/skills/experiment-workbench/scripts/experiment.py",
 }
 CONFIRM_ID_ARG_BY_KIND = {
@@ -163,17 +161,19 @@ def add_project_root_argument(parser: Any) -> None:
 
 
 def print_resolved_project_roots(project_root: Path) -> None:
-    print(f"[root] project: {project_root.resolve()}")
-    print(f"[root] kb: {research_root(project_root).resolve()}")
+    """Compatibility hook for callers that used to expose resolved roots.
+
+    Root resolution is an internal diagnostic fact.  Keep the hook so owner
+    scripts do not need a flag day, but deliberately leave the public stream
+    untouched.
+    """
 
 
 def warn_if_cwd_differs_from_project_root(project_root: Path, *, command: str) -> None:
     cwd = Path.cwd().resolve()
     root = project_root.resolve()
     if cwd != root:
-        print(f"[warn] {command}: cwd differs from resolved project root")
-        print(f"[warn] cwd: {cwd}")
-        print(f"[warn] project root: {root}")
+        print("提示：当前目录与目标工作区不同；操作仍按已选择的工作区执行。")
 
 
 def research_root(project_root: Path) -> Path:
@@ -1298,6 +1298,23 @@ def append_program_reporting_event(
                 normalized[key] = []
         if "stage" in normalized:
             normalized["stage"] = str(normalized.get("stage") or "").strip()
+        event_id = str(normalized.get("id") or "").strip()
+        if not event_id:
+            identity_payload = {"program_id": program_id, **normalized}
+            identity_digest = hashlib.sha256(
+                json.dumps(
+                    identity_payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            event_id = f"event-{identity_digest[:16]}"
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}", event_id) is None:
+            raise ValueError("reporting event id is not a stable reference-safe identity")
+        if any(str(item.get("id") or "").strip() == event_id for item in items):
+            raise ValueError("reporting event id already exists")
+        normalized["id"] = event_id
         items.append(normalized)
         payload["items"] = items
         write_yaml_if_changed(path, payload)

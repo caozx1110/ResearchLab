@@ -28,8 +28,10 @@ from research.learnings import (
     RECALL_KINDS,
     REVIEW_STATUSES,
     SOURCES,
+    apply_preference_review_decision,
     load_learnings,
     log_learning,
+    prepare_preference_review_decision,
     promote_learning,
     render_recall_digest,
     review_learning,
@@ -47,6 +49,8 @@ def build_parser() -> argparse.ArgumentParser:
     log_parser.add_argument("--text", required=True)
     log_parser.add_argument("--source", choices=sorted(SOURCES), default="agent")
     log_parser.add_argument("--skill", default="")
+    log_parser.add_argument("--operation", default="")
+    log_parser.add_argument("--observation", default="")
     log_parser.add_argument("--context", default="")
 
     recall_parser = subparsers.add_parser("recall", help="Print confirmed habits/gotchas or pending defects.")
@@ -63,6 +67,52 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def prepare_review_batch_decision(
+    root: Path,
+    item: dict,
+    decision: str,
+    *,
+    actor: str,
+    evidence: list[str],
+    user_authorization: str,
+    authorization_source: str,
+    rejection_reason: str,
+) -> dict:
+    del rejection_reason
+    return prepare_preference_review_decision(
+        root,
+        item,
+        decision,
+        actor=actor,
+        evidence=evidence,
+        user_authorization=user_authorization,
+        authorization_source=authorization_source,
+    )
+
+
+def apply_review_batch_decision(
+    root: Path,
+    item: dict,
+    decision: str,
+    *,
+    actor: str,
+    evidence: list[str],
+    user_authorization: str,
+    authorization_source: str,
+    rejection_reason: str,
+) -> list[Path]:
+    del rejection_reason
+    return apply_preference_review_decision(
+        root,
+        item,
+        decision,
+        actor=actor,
+        evidence=evidence,
+        user_authorization=user_authorization,
+        authorization_source=authorization_source,
+    )
+
+
 def main() -> int:
     args = build_parser().parse_args()
     root = project_root(PROJECT_ROOT, explicit_root=args.root)
@@ -76,6 +126,8 @@ def main() -> int:
                 text=args.text,
                 source=args.source,
                 skill=args.skill,
+                operation=args.operation,
+                observation=args.observation,
                 context=args.context,
             )
             action = "created" if created else "bumped"
@@ -104,3 +156,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+    apply_preference_review_decision,

@@ -13,6 +13,72 @@ except ModuleNotFoundError:
     _yaml = None
 
 
+class StrictYamlError(ValueError):
+    """Raised when canonical YAML bytes are ambiguous or not mapping data."""
+
+
+if _yaml is not None:
+    class _UniqueKeySafeLoader(_yaml.SafeLoader):
+        pass
+
+
+    class _IndentedSequenceSafeDumper(_yaml.SafeDumper):
+        """Emit block sequences in the form Obsidian writes back to Base files."""
+
+        def increase_indent(self, flow: bool = False, indentless: bool = False) -> Any:
+            return super().increase_indent(flow, False)
+
+
+    def _construct_unique_mapping(loader: Any, node: Any, deep: bool = False) -> dict[Any, Any]:
+        if not isinstance(node, _yaml.MappingNode):
+            raise StrictYamlError("canonical YAML mapping is malformed")
+        loader.flatten_mapping(node)
+        mapping: dict[Any, Any] = {}
+        for key_node, value_node in node.value:
+            key = loader.construct_object(key_node, deep=deep)
+            try:
+                duplicate = key in mapping
+            except TypeError as exc:
+                raise StrictYamlError("canonical YAML mapping key is not hashable") from exc
+            if duplicate:
+                raise StrictYamlError("canonical YAML contains a duplicate mapping key")
+            mapping[key] = loader.construct_object(value_node, deep=deep)
+        return mapping
+
+
+    _UniqueKeySafeLoader.add_constructor(
+        _yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+        _construct_unique_mapping,
+    )
+
+
+def load_yaml_bytes_strict(data: bytes) -> Any:
+    """Decode canonical UTF-8 YAML, rejecting duplicate mapping keys at any depth."""
+    if _yaml is None:
+        raise RuntimeError("PyYAML is required to read canonical research records safely.")
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise StrictYamlError("canonical YAML is not UTF-8") from exc
+    if not text.strip():
+        raise StrictYamlError("canonical YAML mapping is empty")
+    try:
+        payload = _yaml.load(text, Loader=_UniqueKeySafeLoader)
+    except StrictYamlError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - every malformed canonical record is isolated
+        raise StrictYamlError("canonical YAML cannot be parsed") from exc
+    return payload
+
+
+def load_yaml_mapping_bytes_strict(data: bytes) -> dict[Any, Any]:
+    """Decode one canonical UTF-8 YAML mapping, rejecting ambiguity at any depth."""
+    payload = load_yaml_bytes_strict(data)
+    if not isinstance(payload, dict):
+        raise StrictYamlError("canonical YAML must contain one mapping")
+    return payload
+
+
 def load_yaml(path: Path, default: Any | None = None) -> Any:
     if not path.exists():
         return default
@@ -27,9 +93,17 @@ def load_yaml(path: Path, default: Any | None = None) -> Any:
     )
 
 
-def dump_yaml(value: Any, *, width: int = 80) -> str:
+def dump_yaml(value: Any, *, width: int = 80, indent_sequences: bool = False) -> str:
     if _yaml is None:
         raise RuntimeError("PyYAML is required to write research workspace YAML safely.")
+    if indent_sequences:
+        return _yaml.dump(
+            value,
+            Dumper=_IndentedSequenceSafeDumper,
+            allow_unicode=True,
+            sort_keys=False,
+            width=width,
+        )
     return _yaml.safe_dump(value, allow_unicode=True, sort_keys=False, width=width)
 
 

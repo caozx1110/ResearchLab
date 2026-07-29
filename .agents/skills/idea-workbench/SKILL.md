@@ -11,7 +11,7 @@ description: 负责 core idea unit 的生成、evidence-first analysis、陪练�
 
 ## 负责范围
 
-1. 捕获单个 idea，或围绕一个主题生成多个候选 idea。
+1. 捕获单个 idea，或围绕一个主题以两阶段 Agent authoring 生成多个候选 idea。
 2. 用 prepare / verify 做 evidence-first novelty、feasibility、recommendation 与 killer-question 分析；判断由 runtime agent 产出，脚本只建空结构并验证逐字证据。
 3. 提供 idea 内建的「陪练 / sparring」模式：以领域专家 / reviewer 身份 challenge、probe、从 KB 拉 counter-example、追踪论证链，并给 constructive suggestion。
 4. 生成 evidence-backed review-ready idea card 与 review-assist。
@@ -25,6 +25,17 @@ description: 负责 core idea unit 的生成、evidence-first analysis、陪练�
 - verify 对每条 judgement claim 运行 `validate_claims`，再按 `source_unit_id` 定位 canonical KB unit，并用 `verify_claim_evidence` 对该 unit 内 artifact 做逐字 quote 校验。
 - retrieval 使用 agent 原生检索能力；本 skill 不建 semantic index。
 - 判断仍是 `pending_user_confirmation`。证据校验通过只代表 grounded，不等于用户确认判断。
+- `generate / analyze / review / discuss` 是真实 task-scoped preference consumer。prepare 暴露 value-free canonical task context；runtime Agent 可选择相关 soft preference，verify 重算 current record/request、immutable orientation 与冻结 evidence corpus 后再接受 receipt。无 receipt 时不读取 soft profile。
+- 产物只保存 `selection_id / selection_digest / task_context_digest / skill / operation`；不复制 preference value。偏好不能覆盖当前用户明确给出的题目、scope、资源边界，也不能削弱 evidence/confirmation。
+
+## Agent-authored generation
+
+`generate` 采用 `prepare|verify` 两阶段合同：
+
+1. `prepare` 只保存用户原始 title/problem/hypothesis/source/pool context、不可变 orientation、冻结的 canonical KB corpus binding 与指定数量的空候选槽位。
+2. runtime Agent 为每个槽位撰写 title、strategy、problem、hypothesis 与非空 next actions；脚本没有固定策略、语义默认或 winner 规则。
+3. `verify` 先重算 request/orientation/corpus 与可选 preference receipt，再完整验证所有槽位、唯一 identity、边界和 distinctness；全部通过后在一个 transaction 内创建所有 idea records 与 bundle。任一候选失败都零 candidate/bundle 写入。
+4. 用户明确提供的 title/problem/hypothesis 会逐字保留为 generation context；它们不会被脚本扩写成研究判断。
 
 ## Evidence-first analysis
 
@@ -34,15 +45,20 @@ description: 负责 core idea unit 的生成、evidence-first analysis、陪练�
 2. runtime agent 从 KB 检索相关 paper / repo / dataset / blog / idea，填入 claim 文本与逐字 `evidence_refs`。
 3. `verify` 拒绝空证据、找不到的 source unit、不可读 artifact、伪造 quote 或错误 PDF page locator；全部通过才持久化。
 4. `review` 可由 agent 填正整数 `selection_rank`，供 `select-best` 消费。新 review 不生成 heuristic `score_breakdown`；旧记录中已持久化的 score 仅作兼容读取。
+5. 若新增材料不在本轮 frozen corpus，先用 knowledge-base-manager 的 `link --from-id <idea-id> --to-id <unit-id> --relation evidence-for` 建 canonical link，再在同一 analyze/review prepare 加 `--refresh-corpus`；它保留已填白名单字段并重建证据边界。
+
+默认待填文件：analyze=`analyze-fill.yaml`，review=`review-fill.yaml`，discuss=`discussion-fill.yaml`；`--input` 只传 unit 根下 basename。
+scaffold 中 `idea_context` 即使为空也由 owner 管理、只读；Agent 只填写 claim/reviewer/rank 等明确列入白名单的判断字段与 evidence。
 
 ## 陪练模式
 
-`discuss`（别名 `spar`）也是 `prepare|verify` 两阶段合同，并按 conclusion 粒度持久化：
+`discuss`（别名 `spar`）采用 `prepare|verify|confirm|reject` 合同，并按 conclusion 粒度持久化：
 
-1. `prepare` 生成一份空白 conclusion，包含 `challenge`、`probe`、`counter-example`、`constructive-suggestion` 四条 judgement claims。
-2. runtime agent 填 reviewer、总结性 conclusion、四条 claim，以及每条 claim 的 KB 逐字证据。
+1. `prepare` 生成一份空白 conclusion，包含 `challenge`、`probe`、`counter-example`、`constructive-suggestion` 与 `conclusion` 五条 judgement claims。
+2. runtime agent 填 reviewer、总结性 conclusion、五条 claim，以及每条 claim 的 KB 逐字证据；canonical conclusion claim 的 text 必须与总结性 conclusion 完全一致。
 3. `verify` 对每个 evidence ref 到其 `source_unit_id` 的 canonical unit 中核验；例如 counter-example 引用 paper 时，quote 必须逐字存在于该 paper unit 的 artifact。
-4. 每次 verify 只追加一条 conclusion，不覆盖已有讨论结论。
+4. 每次 verify 向 `discussion-judgements.yaml` 追加独立 `idea_discussion_conclusion` subject，包含 canonical `payload.claims + payload.verification`；nested conclusion 只是人类可读 projection。
+5. `confirm` 只确认指定 conclusion subject 的当前 receipt；`reject` 只关闭同一个已核验 subject，不要求确认署名，也不覆盖其它轮次。多轮 spar 互不覆盖既有讨论历史或已确认 analysis/review claims。
 
 ### `payload.discussion.conclusions[]` schema
 
@@ -55,9 +71,11 @@ payload:
         reviewer: runtime-agent-or-human-id
         verified_at: ISO-8601 timestamp
         verification: evidence_verified
+        judgement_id: discussion-<digest>
+        confirmation_status: pending_user_confirmation|confirmed|rejected
         claims:
-          - id: challenge|probe|counter-example|constructive-suggestion
-            role: challenge|probe|counter-example|constructive-suggestion
+          - id: challenge|probe|counter-example|constructive-suggestion|conclusion
+            role: challenge|probe|counter-example|constructive-suggestion|conclusion
             text: agent-authored judgement
             claim_type: inference|evaluation
             confirmation_status: pending_user_confirmation
@@ -69,7 +87,7 @@ payload:
                 summary: optional relevance note
 ```
 
-`verified_at` / `verification` 记录脚本证据校验结果；claim 的 epistemic type 与 `pending_user_confirmation` 保持不变。
+`verified_at` / verification 只代表证据核验；claim 的 epistemic type 与 `pending_user_confirmation` 保持不变，直到显式用户确认。
 
 ## Agent 内部调用
 
@@ -77,7 +95,8 @@ payload:
 
 ```bash
 ${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py capture --title "retrieval-aware code assistant"
-${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py generate --title "adaptive retrieval policy" --count 4 --pool current-ideas
+${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py generate --title "adaptive retrieval policy" --count 4 --pool current-ideas --phase prepare
+${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py generate --title "adaptive retrieval policy" --count 4 --pool current-ideas --phase verify
 ${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py analyze --idea-id i-example-f7e91d86 --phase prepare
 ${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py analyze --idea-id i-example-f7e91d86 --phase verify
 ${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py review --idea-id i-example-f7e91d86 --phase prepare
@@ -89,3 +108,9 @@ ${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py select
 ${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py select-best --pool current-ideas --confirmed-by research-lead --evidence kb/programs/example-program/decision-log.md
 ${RESEARCH_PYTHON:-python3} .agents/skills/idea-workbench/scripts/idea.py archive --idea-id i-example-f7e91d86
 ```
+
+## 启动澄清（Agent 用）
+
+- 目标：捕获、批量生成、分析还是陪练讨论？默认按用户措辞路由。
+- 挑战强度：温和梳理还是高强度 reviewer 式挑战？默认中等。
+- 证据只用当前库内（冻结 corpus）？默认是；不足先明说再议扩语料。

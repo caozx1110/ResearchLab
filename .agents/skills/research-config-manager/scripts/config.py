@@ -23,6 +23,7 @@ if __name__ == "__main__":
     ensure_managed_runtime(PROJECT_ROOT)
 
 from research.common import add_project_root_argument, load_yaml, print_resolved_project_roots, slugify, warn_if_cwd_differs_from_project_root, write_text_if_changed, write_yaml_if_changed, yaml_default
+from research.confirm import is_ai_signer
 from research.journal import mutation_transaction
 from research.core import (
     candidate_pools_path,
@@ -36,9 +37,30 @@ from research.core import (
     project_root,
     runtime_preferences_path,
     topic_taxonomy_path,
+    write_candidate_pools,
     write_runtime_preferences,
+    write_topic_taxonomy,
 )
-from research.prefs import DIAGNOSTIC_MODES, DIAGNOSTIC_SKILL_MODES
+from research.prefs import (
+    DEFAULT_DISCUSSION_STYLE,
+    DIAGNOSTIC_MODES,
+    DIAGNOSTIC_SKILL_MODES,
+    DISCUSSION_STYLES,
+    GOVERNANCE_PROFILES,
+    LINK_AUTODRIVE_MODES,
+    MAX_REVIEW_CARD_TTL_HOURS,
+    MAX_REVIEW_ITEM_LIMIT,
+    MIN_PERSONAL_REVIEW_ITEM_LIMIT,
+    MIN_REVIEW_CARD_TTL_HOURS,
+    effective_review_policy,
+)
+from research.preference_selection import (
+    SKILL_IMPLEMENTATION_ALIASES,
+    eligible_preferences,
+    record_effective_selection,
+    resolve_task_preferences,
+    task_context_digest,
+)
 
 
 def profile_path(root: Path) -> Path:
@@ -50,7 +72,6 @@ def settings_path(root: Path) -> Path:
 
 
 TOGGLE_RUNTIME_PREFS = {
-    "新论文入库后自动快速筛选": [("paper", "auto_screen_on_intake", lambda on: on)],
     "intake 阶段预热 PDF 解析缓存": [("paper", "parse_cache_prewarm_on_intake", lambda on: on)],
     "自动生成详细论文笔记": [("paper", "auto_complete_note", lambda on: on)],
     "完整笔记后自动提取 Figure / Table": [("paper", "auto_extract_figures_after_note", lambda on: on)],
@@ -63,6 +84,9 @@ def _default_profile() -> dict:
         **yaml_default("research-user-profile", "research-config-manager", status="active"),
         "preferences": {
             "language_preference": "zh-CN",
+        },
+        "personalization": {
+            "discussion_style": DEFAULT_DISCUSSION_STYLE,
         },
         "resources": {},
         "constraints": [],
@@ -152,7 +176,7 @@ def print_personalization(root: Path) -> None:
     if not isinstance(personalization, dict) or not personalization:
         print("  未设置，可在 kb init 时填写。")
         return
-    for key in ("research_focus", "resources", "reporting_style", "collaboration_boundaries", "term_style"):
+    for key in ("research_focus", "resources", "reporting_style", "collaboration_boundaries", "term_style", "discussion_style"):
         value = personalization.get(key)
         if value not in (None, ""):
             print(f"  {key}: {value}")
@@ -165,10 +189,8 @@ def print_guide(root: Path, *, focus: str) -> None:
     versioning = runtime.get("versioning", {})
     if focus in {"all", "paper-intake"}:
         print("[paper-intake]")
-        print(f"- 自动快速筛选: {_onoff(bool(paper.get('auto_screen_on_intake', True)))}")
         print(f"- intake 预热解析缓存: {_onoff(bool(paper.get('parse_cache_prewarm_on_intake', True)))}")
         print(f"- 自动完整笔记: {_onoff(bool(paper.get('auto_complete_note')))}")
-        print(f"- 完整笔记触发条件: {paper.get('auto_complete_note_condition')}")
         print(f"- 完整笔记模式: {paper.get('complete_note_mode')}")
         print(f"- 完整笔记后自动提图: {_onoff(bool(paper.get('auto_extract_figures_after_note')))}")
         print(f"- 完整笔记后自动刷新结构: {_onoff(bool(paper.get('auto_refresh_structure_after_note', True)))}")
@@ -193,6 +215,14 @@ def print_guide(root: Path, *, focus: str) -> None:
         if str(versioning.get("auto_commit_mode") or "milestone") == "aggressive":
             print("- 当前 Git 自动提交较激进；如果你想少一点碎提交，可改回 milestone。")
         print("- 用 toggle 管布尔开关，用 set-runtime-pref 管模式类选项。")
+    if focus in {"all", "governance"}:
+        policy = effective_review_policy(root)
+        if focus == "all":
+            print("")
+        print("[governance]")
+        print(f"- 治理档位: {policy['governance_profile']}")
+        print(f"- 每批待确认上限: {policy['item_limit']}")
+        print(f"- 待确认卡片有效期: {policy['card_ttl_hours']} 小时")
 
 
 def upsert_taxonomy_seed(root: Path, *, topic: str, aliases: list[str], tags: list[str], note: str, status: str) -> Path:
@@ -222,8 +252,7 @@ def upsert_taxonomy_seed(root: Path, *, topic: str, aliases: list[str], tags: li
         if note and not tag_item.get("note"):
             tag_item["note"] = note
         tag_item["status"] = status
-    write_yaml_if_changed(topic_taxonomy_path(root), payload)
-    return topic_taxonomy_path(root)
+    return write_topic_taxonomy(root, payload)
 
 
 def upsert_pool(root: Path, *, pool: str, topics: list[str], tags: list[str], description: str, status: str) -> Path:
@@ -240,8 +269,7 @@ def upsert_pool(root: Path, *, pool: str, topics: list[str], tags: list[str], de
     if description:
         item["summary"] = description
     item["status"] = status
-    write_yaml_if_changed(candidate_pools_path(root), payload)
-    return candidate_pools_path(root)
+    return write_candidate_pools(root, payload)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -281,12 +309,34 @@ def build_parser() -> argparse.ArgumentParser:
     pool.add_argument("--status", default="active")
 
     guide = subparsers.add_parser("guide", help="Show practical guidance for current runtime modes")
-    guide.add_argument("--focus", choices=["all", "paper-intake"], default="all")
+    guide.add_argument("--focus", choices=["all", "paper-intake", "governance"], default="all")
 
-    runtime = subparsers.add_parser("set-runtime-pref", help="Persist browser / identity / autonomy / paper / pdf / versioning runtime preferences")
-    runtime.add_argument("--section", required=True, choices=["browser", "identity", "autonomy", "paper", "pdf", "versioning", "diagnostics"])
+    interaction = subparsers.add_parser(
+        "set-interaction",
+        help="Persist the canonical interaction preferences: link automation tier and discussion style",
+    )
+    interaction.add_argument(
+        "--auto-ingest-mode",
+        dest="auto_ingest_mode",
+        choices=sorted(LINK_AUTODRIVE_MODES),
+        help="Canonical write path for autonomy.link_autodrive (runtime preferences)",
+    )
+    interaction.add_argument(
+        "--discussion-style",
+        dest="discussion_style",
+        choices=sorted(DISCUSSION_STYLES),
+        help="Canonical write path for personalization.discussion_style (user profile)",
+    )
+
+    runtime = subparsers.add_parser("set-runtime-pref", help="Persist browser / identity / autonomy / paper / pdf / review / versioning runtime preferences")
+    runtime.add_argument("--section", required=True, choices=["browser", "identity", "autonomy", "paper", "pdf", "review", "versioning", "diagnostics"])
     runtime.add_argument("--key", required=True)
     runtime.add_argument("--value", required=True)
+
+    governance = subparsers.add_parser("set-governance", help="Set the workspace governance profile and personal review policy")
+    governance.add_argument("--profile", choices=sorted(GOVERNANCE_PROFILES))
+    governance.add_argument("--review-item-limit", type=int)
+    governance.add_argument("--card-ttl-hours", type=int)
 
     diagnostics = subparsers.add_parser("set-diagnostics", help="Configure optional local-only diagnostics")
     diagnostics.add_argument("--mode", choices=sorted(DIAGNOSTIC_MODES))
@@ -296,6 +346,20 @@ def build_parser() -> argparse.ArgumentParser:
     diagnostics.add_argument("--max-issues-per-task", type=int)
     diagnostics.add_argument("--dedup-window-seconds", type=int)
     diagnostics.add_argument("--cooldown-seconds", type=int)
+
+    eligible = subparsers.add_parser("eligible-preferences", help="Return the task-scoped eligible preference view")
+    eligible.add_argument("--skill", required=True)
+    eligible.add_argument("--operation", default="")
+    eligible.add_argument("--task-context-json", default="")
+
+    record_effective = subparsers.add_parser("record-effective", help="Validate and persist an Agent preference selection")
+    record_effective.add_argument("--selection-json", required=True)
+
+    load_effective = subparsers.add_parser("load-effective", help="Load a current task-scoped preference selection")
+    load_effective.add_argument("--selection-id", required=True)
+    load_effective.add_argument("--skill", required=True)
+    load_effective.add_argument("--operation", default="")
+    load_effective.add_argument("--task-context-json", required=True)
     return parser
 
 
@@ -303,7 +367,84 @@ def main() -> int:
     args = build_parser().parse_args()
     root = project_root(PROJECT_ROOT, explicit_root=args.root)
     print_resolved_project_roots(root)
-    ensure_workspace(root)
+    if args.command not in {"eligible-preferences", "load-effective"}:
+        ensure_workspace(root)
+
+    if args.command == "eligible-preferences":
+        # Both known input mistakes (an unregistered consumer operation, and
+        # canonical task inputs that miss/exceed the registered field set) must
+        # fail as one readable line, never as a raw traceback.
+        try:
+            result = eligible_preferences(root, skill=args.skill, operation=args.operation)
+        except ValueError as exc:
+            raise SystemExit(f"eligible-preferences 输入无效（invalid consumer）：{exc}") from exc
+        if args.task_context_json:
+            try:
+                task_context = json.loads(args.task_context_json)
+            except json.JSONDecodeError as exc:
+                raise SystemExit("Invalid canonical task context JSON") from exc
+            if not isinstance(task_context, dict):
+                raise SystemExit("Canonical task context must be an object")
+            try:
+                result["task_context_digest"] = task_context_digest(
+                    skill=args.skill,
+                    operation=args.operation,
+                    canonical_inputs=task_context,
+                )
+            except ValueError as exc:
+                raise SystemExit(f"eligible-preferences 输入无效（canonical task inputs）：{exc}") from exc
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+        return 0
+    if args.command == "record-effective":
+        selection_text = str(args.selection_json or "")
+        selection_reference = selection_text.strip()
+        # --selection-json accepts either the inline JSON object or the path of
+        # a JSON file; a value naming an existing file is read from disk.
+        if selection_reference:
+            try:
+                selection_file = Path(selection_reference).expanduser()
+                selection_is_file = selection_file.is_file()
+            except OSError:
+                selection_is_file = False
+            if selection_is_file:
+                try:
+                    selection_text = selection_file.read_text(encoding="utf-8")
+                except (OSError, UnicodeError) as exc:
+                    raise SystemExit(f"无法读取 selection JSON 文件：{selection_reference}") from exc
+        try:
+            selection = json.loads(selection_text)
+        except json.JSONDecodeError as exc:
+            raise SystemExit("Invalid effective preference selection JSON") from exc
+        if not isinstance(selection, dict):
+            raise SystemExit("Effective preference selection must be an object")
+        try:
+            path, receipt = record_effective_selection(root, selection)
+        except ValueError as exc:
+            raise SystemExit(f"record-effective selection 被拒绝：{exc}") from exc
+        checkpoint_and_report(
+            root,
+            trigger="milestone",
+            message=f"milestone: record effective preferences {receipt['selection_id']}",
+            target_paths=[path],
+        )
+        print(json.dumps(receipt, ensure_ascii=False, sort_keys=True))
+        return 0
+    if args.command == "load-effective":
+        try:
+            task_context = json.loads(args.task_context_json)
+        except json.JSONDecodeError as exc:
+            raise SystemExit("Invalid canonical task context JSON") from exc
+        if not isinstance(task_context, dict):
+            raise SystemExit("Canonical task context must be an object")
+        effective = resolve_task_preferences(
+            root,
+            selection_id=args.selection_id,
+            skill=args.skill,
+            operation=args.operation,
+            canonical_inputs=task_context,
+        )
+        print(json.dumps(effective, ensure_ascii=False, sort_keys=True))
+        return 0
 
     if args.command == "init":
         warn_if_cwd_differs_from_project_root(root, command="config.py init")
@@ -450,11 +591,56 @@ def main() -> int:
     if args.command == "guide":
         print_guide(root, focus=args.focus)
         return 0
+    if args.command == "set-interaction":
+        auto_ingest_mode = getattr(args, "auto_ingest_mode", None)
+        discussion_style = getattr(args, "discussion_style", None)
+        if auto_ingest_mode is None and discussion_style is None:
+            raise SystemExit("set-interaction requires --auto-ingest-mode and/or --discussion-style")
+        targets = []
+        if auto_ingest_mode is not None:
+            targets.append(runtime_preferences_path(root))
+        if discussion_style is not None:
+            targets.append(profile_path(root))
+        touched: list[str] = []
+        with mutation_transaction(root, "set-interaction", targets):
+            if auto_ingest_mode is not None:
+                payload = load_runtime_preferences(root)
+                _apply_runtime_pref(payload, "autonomy", "link_autodrive", auto_ingest_mode)
+                write_runtime_preferences(root, payload)
+                touched.append("autonomy.link_autodrive")
+            if discussion_style is not None:
+                profile = load_profile(root)
+                previous = profile.get("personalization", {})
+                previous = previous.get("discussion_style") if isinstance(previous, dict) else None
+                set_nested(profile, "personalization.discussion_style", discussion_style)
+                if previous != discussion_style:
+                    profile.setdefault("history", []).append(
+                        {
+                            "action": "set-interaction",
+                            "key": "personalization.discussion_style",
+                            "value": discussion_style,
+                        }
+                    )
+                write_yaml_if_changed(profile_path(root), profile)
+                touched.append("personalization.discussion_style")
+        checkpoint_and_report(
+            root,
+            trigger="milestone",
+            message="milestone: update interaction preferences",
+            target_paths=targets,
+        )
+        print(f"[ok] updated interaction preferences: {', '.join(touched)}")
+        return 0
     if args.command == "set-runtime-pref":
         path = runtime_preferences_path(root)
+        value = parse_value(args.value)
+        if args.section == "identity" and args.key == "default_confirmed_by":
+            signer = str(value or "").strip()
+            if not signer or is_ai_signer(signer):
+                raise SystemExit("default confirmation identity must be a real human name")
         with mutation_transaction(root, "set-runtime-pref", [path]):
             payload = load_runtime_preferences(root)
-            _apply_runtime_pref(payload, args.section, args.key, parse_value(args.value))
+            _apply_runtime_pref(payload, args.section, args.key, value)
             write_runtime_preferences(root, payload)
         print(f"[ok] updated {path.relative_to(root)}")
         checkpoint = checkpoint_and_report(
@@ -463,6 +649,42 @@ def main() -> int:
             message=f"milestone: update runtime pref {args.section}.{args.key}",
             target_paths=[path],
         )
+        return 0
+    if args.command == "set-governance":
+        if args.profile is None and args.review_item_limit is None and args.card_ttl_hours is None:
+            raise SystemExit("set-governance requires at least one policy change")
+        if args.review_item_limit is not None and not (
+            MIN_PERSONAL_REVIEW_ITEM_LIMIT <= args.review_item_limit <= MAX_REVIEW_ITEM_LIMIT
+        ):
+            raise SystemExit(
+                f"review item limit must be between {MIN_PERSONAL_REVIEW_ITEM_LIMIT} and {MAX_REVIEW_ITEM_LIMIT}"
+            )
+        if args.card_ttl_hours is not None and not (
+            MIN_REVIEW_CARD_TTL_HOURS <= args.card_ttl_hours <= MAX_REVIEW_CARD_TTL_HOURS
+        ):
+            raise SystemExit(
+                f"card TTL must be between {MIN_REVIEW_CARD_TTL_HOURS} and {MAX_REVIEW_CARD_TTL_HOURS} hours"
+            )
+        path = runtime_preferences_path(root)
+        with mutation_transaction(root, "set-governance", [path]):
+            update: dict[str, object] = {}
+            if args.profile is not None:
+                update["governance_profile"] = args.profile
+            review: dict[str, int] = {}
+            if args.review_item_limit is not None:
+                review["batch_item_limit"] = args.review_item_limit
+            if args.card_ttl_hours is not None:
+                review["card_ttl_hours"] = args.card_ttl_hours
+            if review:
+                update["review"] = review
+            write_runtime_preferences(root, update)
+        checkpoint_and_report(
+            root,
+            trigger="milestone",
+            message="milestone: update governance policy",
+            target_paths=[path],
+        )
+        print("[ok] updated workspace governance policy")
         return 0
     if args.command == "set-diagnostics":
         if bool(args.skill) != bool(args.skill_mode):
@@ -491,7 +713,12 @@ def main() -> int:
                 overrides = diagnostics.get("per_skill", {})
                 if not isinstance(overrides, dict):
                     overrides = {}
-                overrides[str(args.skill).strip().lower()] = args.skill_mode
+                requested_skill = str(args.skill).strip().lower()
+                overrides[requested_skill] = args.skill_mode
+                for implementation_skill in SKILL_IMPLEMENTATION_ALIASES.get(
+                    requested_skill, ()
+                ):
+                    overrides[implementation_skill] = args.skill_mode
                 diagnostics["per_skill"] = overrides
             for argument, key in (
                 (args.token_budget_per_task, "token_budget_per_task"),

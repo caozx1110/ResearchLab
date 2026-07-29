@@ -14,17 +14,27 @@ Use this skill to anchor work to a concrete research program.
 1. Create or reopen a program under `kb/programs/<program-id>/`.
 2. Keep `state.yaml` aligned with workflow counts and selected context.
 3. Persist `workflow/open-questions.yaml`, `workflow/evidence-requests.yaml`, `workflow/decision-log.md`, and `workflow/reporting-events.yaml`.
-4. Route source work to `source-intake`, analysis to analyst skills, experiments to `experiment-workbench`, and reports to `report-author`.
+4. Treat route keywords as factual hints only. For ambiguous, negated, or multi-step requests, the runtime Agent authors an ordered route over the complete formal owner catalog; the script validates formal membership and dependency order but never limits the Agent to keyword hits or decides the workflow semantically. The `kb-cli` adapter is not a routable owner; source-unit analysis routes to the `unit-analyst` facade while its internal implementation keeps the historical owner identity.
 5. Keep user constraints and resource boundaries visible in the program state.
 6. Program writes are serialized per program; `attach-unit` also backfills the unit-side `program_ids`.
+7. Treat cross-program planning as an Agent judgement over a complete factual candidate snapshot. Scripts enumerate and validate; they never assign semantic value scores or choose a winner.
 
 ## Shared Contract
 
 - Program coordination artifacts are durable inputs for later reopen, not chat-only summaries.
-- Any promised resumable deliverable, such as a batch survey or technical roadmap, must be written into a program `next_actions` entry before the conversation says `kb next` can resume it. Persisted program actions outrank loose maintenance suggestions; completed units do not generate work merely because a refresh ran.
-- Decision records may cite evidence, but if rationale contains AI judgement it should stay `pending_user_confirmation` unless the user explicitly confirms it.
+- An Agent-authored `RouteDecision` is a closed record with the current task digest, positive and negated intents, ordered steps, rationale, formal owners, dependencies, and governance gates. The verifier checks shape/current binding/order only; it never derives intents from keywords or grades the rationale.
+- Any promised resumable deliverable, such as a batch survey or technical roadmap, must be written into a program `next_actions` entry before the conversation says `kb next` can resume it. Persisted program actions and loose maintenance suggestions are peer candidates for the Agent to compare; neither category has a fixed priority. Completed units do not generate work merely because a refresh ran.
+- Decision records require non-empty agent-authored canonical claims with verified evidence and stay `pending_user_confirmation` until the user explicitly confirms the current receipt. A call without claims only prepares `workflow/decision-fill.yaml` in `awaiting_agent_fill`; it does not append a decision, update `last_decision`, or emit a reportable decision event.
+- Public review routes an accepted decision to private `confirm-decision` with current-message authorization, or a rejected decision to private `reject-decision` without requiring a signature. Rejection changes the canonical decision and all of its claims to `rejected`, updates `last_decision`, and never creates a confirmed reporting event.
+- Pending and confirmed decision events both bind the canonical decision subject, claim ids, content digest, and verification receipt. Report consumers must resolve that binding; an event name or `confirmation_status` string cannot manufacture trust.
 - `report-author` should read from `workflow/reporting-events.yaml`, so important state changes must emit reporting events.
 - Script-generated timestamps are stored in UTC.
+- `kb next` is a pure read. If no current portfolio decision exists, or its candidate/state/preference binding is stale, request an Agent planning pass instead of falling back to a fixed priority rule.
+- A `PortfolioDecision` is Agent-filled and must bind `decision_id`, the current `candidate_snapshot_digest`, one or more `selected_action_ids`, non-empty `rationale`, `expected_information_gain`, `cost_and_risk`, a current `research-orchestrator + plan` effective `preference_selection_id`, and a timezone-aware `decided_at`. The script checks shape and current bindings only; it never grades the rationale.
+- Candidate snapshots contain every legal persisted next action plus open evidence requests, open questions, ready Agent work, every cross-owner pending judgement, resumable composite survey state, loose-unit maintenance, due monitor subscriptions, and unresolved completed-monitor outcomes. `blocking`, declared priority, and due time are facts for the Agent, not an automatic winner. Terminal programs produce no ordinary program-work candidates.
+- Planning-required JSON carries no compatibility winner list: `items` is empty until a current `PortfolioDecision` exists. A side judgement binds its exact review snapshot; a completed-monitor outcome binds run revision, run digest, and outcome digest until it receives a durable disposition.
+- Portfolio history is append-only. State, evidence, unit content, candidate membership, or effective-preference changes make the latest bound decision stale and require the Agent to plan again.
+- A human gate is never safe to continue automatically. A planning choice that itself asserts a research winner, baseline, idea, causal conclusion, or other judgement must reference a verified program decision and continue through the existing user-confirmation gate; portfolio planning cannot confirm it.
 
 ## Commands
 
@@ -46,81 +56,18 @@ ${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchest
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py status --program-id example-program
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py dashboard --limit 10
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py next --limit 5
-${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py route --task "分析新论文是否值得细读"
+${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py prepare-next-selection --json
+${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py verify-next-selection --selection-file /tmp/portfolio-decision.yaml --json
+${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py record-next-selection --selection-file /tmp/portfolio-decision.yaml
+${RESEARCH_PYTHON:-python3} .agents/skills/research-orchestrator/scripts/orchestrate.py route --task "按论文类型完成新论文深读"
 ```
 
-## Phase-by-Phase Iterative Development Workflow (added 2026-05-13)
+## Optional experiment-heavy programs
 
-For programs that execute in multiple phases with **executor sub-agents producing experiments + feedback**, use this iterative protocol.
+When a program actually involves phased experiments, route experiment planning, run logs, diagnosis, and conclusion gates to `experiment-workbench`. The Agent may persist phase-specific inputs, outputs, resource budgets, evaluation criteria, failure handling, and artifact inventories as program actions or design notes. GPU allocation, training schedules, simulation environments, ablations, and executor-agent feedback formats are domain-specific options—not mandatory requirements for ordinary research programs. Any winner, causal conclusion, or phase-advance judgement still needs evidence and the existing user-confirmation gate.
 
-### Phase plan structure standard
+## 启动澄清（Agent 用）
 
-Each phase plan file under `kb/programs/<program-id>/design/<phase>-plan-<date>.md` MUST contain **in this order**:
-
-1. **High-level goal** — what this phase produces; how it relates to program vision (1 paragraph)
-2. **Inputs / Dependencies** — what previous phases / artifacts this phase reads (table)
-3. **Outputs / Deliverables** — concrete files / metrics / decisions this phase produces (table)
-4. **Methodology** — architecture, loss, training schedule (code-or-equation level detail)
-5. **Experimental Arms Registry** — default + alternative arms with switch variable + decision criterion (per program meta-principle "保留所有可选路径")
-6. **Evaluation protocol** — metrics, eval set, frequency
-7. **Convergence criteria** — pass / fail thresholds (yaml block, one-to-one to feedback metric table)
-8. **Resource budget** — wall-clock, GPU-h, sim envs
-9. **Failure handling** — known symptoms + actions (table)
-10. **Run grid** — concrete GPU assignment + seeds + config tags
-11. **Executor → Main Agent Feedback Protocol** — reference master plan's standardized format; specify phase-specific metric table + ablation table + recommendation options
-12. **Out of scope**
-
-Every plan must explicitly mark `pending_user_confirmation` until user explicitly confirms.
-
-### Iterative cycle
-
-```
-user launches executor sub-agent for phase N
-    ↓
-executor reads phase-N plan + dependent artifacts
-    ↓
-executor runs experiments per plan §X.X (default + ablation arms)
-    ↓
-executor produces standardized feedback report (per master plan §11)
-    ↓
-user delivers feedback report to main agent (the user-facing AI assistant)
-    ↓
-main agent:
-  1. Validate metrics vs artifacts (refuse claims without backing)
-  2. Update state.yaml (stage / next_actions / last_decision / counts)
-  3. Append decision-log.md with feedback path + decisions
-  4. Update open-questions.yaml with new OQs from feedback §6
-  5. Update reporting-events.yaml if milestone-worthy
-  6. Decide: proceed / revise plan / branch / halt
-  7. Notify user with summary + recommendation
-    ↓
-user reviews + approves next step (or pivots)
-    ↓
-cycle: launch phase N+1 executor agent
-```
-
-### Main agent obligations per cycle
-
-- **Validate**: cross-check feedback metric values against eval YAMLs in artifact inventory; never auto-accept claimed metrics.
-- **Propagate**: every accepted phase outcome must update `state.yaml` + `decision-log.md` + relevant workflow YAMLs.
-- **Mark pending**: AI judgements (winner selection, arm choice, OQ resolution) remain `pending_user_confirmation` unless user explicitly approves.
-- **Surface new OQs**: explicitly relay new open questions to user; do not bury them.
-- **Recommend** with reasoning: when suggesting next phase / revisions / fallback, cite the specific feedback report sections supporting the recommendation.
-
-### Standard feedback report format
-
-Defined in the program's `master-execution-plan-{date}.md §11`. Sections (in order):
-1. Phase status (pass / partial / fail / blow_up)
-2. Final metrics table (one-to-one with plan convergence criteria)
-3. Ablation arms decisions (one-to-one with plan Experimental Arms Registry)
-4. Surprises / unexpected observations
-5. Open issues identified during execution
-6. New open questions (OQ-XX format)
-7. Artifacts inventory
-8. Recommendation for next phase
-
-This format is **mandatory** for all phase executors. Main agent refuses to advance state without all sections present.
-
-### Cross-phase Experimental Arms Registry
-
-A program-level master plan should maintain a `§N.X Experimental Arms Registry` table aggregating default + alternatives across all phases. This enables quick lookup of all open design choices. Each row: `Phase | Arm ID | Default | Alternatives | Switch Variable | Decision Criterion`.
+- 新建 program 还是续接已有？默认续接同题 program。
+- 研究问题与本阶段目标一句话？默认从当前对话提炼后复述确认。
+- 现在要挂接哪些 unit？默认稍后随分析逐步 attach。

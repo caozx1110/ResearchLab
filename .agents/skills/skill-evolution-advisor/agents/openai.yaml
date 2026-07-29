@@ -1,6 +1,7 @@
 interface:
-  display_name: "Skill Evolution Advisor"
-  short_description: "Capture learnings and skill-evolution memory"
-  default_prompt: "Use $skill-evolution-advisor after a research workflow to log lightweight habits/gotchas/skill defects or to turn deeper routing, schema, script, or handoff friction into a small improvement prompt."
+  display_name: Skill Evolution Advisor
+  short_description: Capture learnings and skill-evolution memory
+  default_prompt: Use $skill-evolution-advisor after a research workflow to log lightweight habits/gotchas/skill defects or
+    to turn deeper routing, schema, script, or handoff friction into a small improvement prompt.
 policy:
   allow_implicit_invocation: true

@@ -15,7 +15,7 @@ import re
 import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from .journal import mutation_transaction
 from .paths import kb_root
@@ -55,6 +55,7 @@ _STANDALONE_CREDENTIAL_RE = re.compile(
 _ENV_ASSIGNMENT_RE = re.compile(r"\b[A-Z_][A-Z0-9_]{1,63}=\S+")
 _URL_CREDENTIAL_RE = re.compile(r"(?i)(https?://)[^/@\s:]+:[^/@\s]+@")
 _SAFE_IDENTIFIER_RE = re.compile(r"[^a-z0-9_.-]+")
+_AUTOMATIC_RUNTIME_CAPTURE = object()
 
 
 def diagnostics_path(project_root: Path) -> Path:
@@ -96,7 +97,8 @@ def _redacted_context_reference(value: str) -> str:
 def diagnostics_policy(project_root: Path, skill: str = "") -> dict[str, Any]:
     """Return a pure-read, normalized effective diagnostics policy."""
 
-    raw = load_runtime_preferences(project_root).get("diagnostics", {})
+    preferences = load_runtime_preferences(project_root)
+    raw = preferences.get("diagnostics", {})
     if not isinstance(raw, dict):
         raw = {}
     workspace_mode = str(raw.get("mode") or "off").strip().lower()
@@ -125,6 +127,9 @@ def diagnostics_policy(project_root: Path, skill: str = "") -> dict[str, Any]:
         "cooldown_seconds": _integer(raw.get("cooldown_seconds"), 0, minimum=0),
         "automatic_capture": effective_mode in {"errors-only", "developer"},
         "allow_agent_retrospective": effective_mode == "developer" and token_budget > 0,
+        "governance_profile": (
+            "personal" if str(preferences.get("governance_profile") or "") == "personal" else "strict"
+        ),
     }
     return policy
 
@@ -246,6 +251,35 @@ def _occurrences(issue: dict[str, Any]) -> int:
     return _integer(issue.get("occurrences"), 1, minimum=1)
 
 
+def _runtime_metadata(value: object) -> dict[str, Any]:
+    """Normalize the only four plaintext fields personal automatic capture may add."""
+
+    if not isinstance(value, Mapping):
+        return {}
+
+    def stable_identifier(raw: object, default: str) -> str:
+        candidate = str(raw or "").strip().lower()
+        return candidate if re.fullmatch(r"[a-z0-9][a-z0-9_.-]{0,79}", candidate) else default
+
+    category = stable_identifier(value.get("category"), "runtime-failure")
+    owner = stable_identifier(value.get("owner"), "unknown-skill")
+    operation = stable_identifier(value.get("operation"), "unknown-operation")
+    raw_return_code = value.get("return_code")
+    if isinstance(raw_return_code, bool):
+        return_code = 1
+    else:
+        try:
+            return_code = int(raw_return_code)
+        except (TypeError, ValueError):
+            return_code = 1
+    return {
+        "category": category,
+        "owner": owner,
+        "operation": operation,
+        "return_code": return_code,
+    }
+
+
 def record_diagnostic_issue(
     project_root: Path,
     *,
@@ -261,6 +295,8 @@ def record_diagnostic_issue(
     context: str = "",
     error_class: str = "",
     now: datetime | None = None,
+    _automatic_runtime_metadata: Mapping[str, Any] | None = None,
+    _capture_token: object | None = None,
 ) -> tuple[dict[str, Any], bool]:
     """Record an explicit issue even when automatic diagnostics are off."""
 
@@ -287,6 +323,11 @@ def record_diagnostic_issue(
     timestamp = _now(now)
     path = diagnostics_path(project_root)
     bundle_version, source_commit = _local_version(project_root)
+    mechanical = (
+        _runtime_metadata(_automatic_runtime_metadata)
+        if _capture_token is _AUTOMATIC_RUNTIME_CAPTURE
+        else {}
+    )
 
     with mutation_transaction(
         project_root,
@@ -305,6 +346,8 @@ def record_diagnostic_issue(
             old_severity = str(issue.get("severity") or "info")
             if SEVERITY_ORDER.get(normalized_severity, 0) > SEVERITY_ORDER.get(old_severity, 0):
                 issue["severity"] = normalized_severity
+            if mechanical:
+                issue.update(mechanical)
             write_yaml_if_changed(path, document)
             return dict(issue), False
 
@@ -330,6 +373,8 @@ def record_diagnostic_issue(
             "error_class": safe_error_class,
             "privacy_classification": PRIVACY_CLASSIFICATION,
         }
+        if mechanical:
+            issue.update(mechanical)
         issues.append(issue)
         issues.sort(key=lambda item: str(item.get("id") or ""))
         write_yaml_if_changed(path, document)
@@ -346,7 +391,8 @@ def capture_runtime_failure(
 ) -> dict[str, Any] | None:
     """Capture one nonzero owner exit when the effective policy allows it."""
 
-    if int(returncode) == 0 or not diagnostics_policy(project_root, skill).get("automatic_capture"):
+    policy = diagnostics_policy(project_root, skill)
+    if int(returncode) == 0 or not policy.get("automatic_capture"):
         return None
     summary = public_summary or "The requested knowledge-base operation did not complete."
     issue, _ = record_diagnostic_issue(
@@ -361,6 +407,17 @@ def capture_runtime_failure(
         source="runtime",
         reproducible="unknown",
         error_class="owner-nonzero-exit",
+        _automatic_runtime_metadata=(
+            {
+                "category": "runtime-failure",
+                "owner": skill,
+                "operation": operation,
+                "return_code": int(returncode),
+            }
+            if policy.get("governance_profile") == "personal"
+            else None
+        ),
+        _capture_token=_AUTOMATIC_RUNTIME_CAPTURE,
     )
     return issue
 
@@ -415,14 +472,21 @@ def export_diagnostic_preview(
         "error_class",
         "privacy_classification",
     )
+    issues = []
+    for issue in list_diagnostic_issues(project_root, status=status, skill=skill):
+        projected: dict[str, Any] = {}
+        for field in safe_fields:
+            value = issue.get(field, "")
+            if field in {"summary", "expected", "actual", "trigger"}:
+                projected[field] = redact_diagnostic_text(str(value), limit=300)
+            else:
+                projected[field] = value
+        issues.append(projected)
     return {
         "schema_version": 1,
         "local_only": True,
         "redacted": True,
-        "issues": [
-            {field: issue.get(field, "") for field in safe_fields}
-            for issue in list_diagnostic_issues(project_root, status=status, skill=skill)
-        ],
+        "issues": issues,
     }
 
 

@@ -21,7 +21,7 @@ if __name__ == "__main__":
     ensure_managed_runtime(PROJECT_ROOT)
 
 from research.common import add_project_root_argument, append_program_reporting_event, ensure_dir, print_resolved_project_roots, program_reporting_events_path, simple_slug, write_text_if_changed
-from research.core import project_root
+from research.core import checkpoint_and_report, project_root
 from research.journal import mutation_transaction
 
 
@@ -61,11 +61,13 @@ def main() -> int:
     lines = [
         f"# {args.title}",
         "",
+        "> Pending / Unverified judgement: this archive is a discussion projection, not a confirmed conclusion.",
+        "",
         "## Summary",
         "",
         args.summary,
         "",
-        "## Current Conclusion",
+        "## Proposed Conclusion",
         "",
         args.decision or "待确认",
         "",
@@ -92,15 +94,26 @@ def main() -> int:
             args.program_id,
             {
                 "source_skill": "discussion-archivist",
-                "event_type": "discussion-archived",
+                "event_type": "discussion-conclusion",
                 "title": args.title,
                 "summary": args.summary,
                 "stage": "discussion",
                 "artifacts": [path.relative_to(root).as_posix()],
-                "tags": ["discussion"],
+                "tags": ["discussion", "pending", "needs-agent-repair"],
+                "epistemic_type": "judgement",
+                "information_types": ["inference", "evaluation", "unverified"],
+                "confirmation_status": "pending_user_confirmation",
+                "needs_human_confirmation": True,
+                "governance_status": "needs_agent_repair",
             },
             generated_by="discussion-archivist",
         )
+    checkpoint_and_report(
+        root,
+        trigger="milestone",
+        message=f"milestone: archive discussion for {args.program_id}",
+        target_paths=[path, event_path],
+    )
     print(path.relative_to(root))
     return 0
 

@@ -19,5 +19,7 @@ __pycache__/
 
 temp/
 tmp/
+dev-docs/
 
 .claude/
+_to_delete/

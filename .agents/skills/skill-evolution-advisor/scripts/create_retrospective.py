@@ -217,7 +217,7 @@ def main() -> int:
     except RetrospectiveAlreadyExists:
         print("这次复盘已经记录过了，未覆盖已有内容。", file=sys.stderr)
         return 1
-    print(note_path)
+    print("复盘已记录。")
 
     if args.stdout_prompt:
         prompt = build_prompt(

@@ -2,13 +2,21 @@
 from __future__ import annotations
 
 import argparse
+import calendar
+import contextlib
+import hashlib
+import importlib.util
+import io
 import json
 import os
 import re
 import shlex
+import stat
 import subprocess
 import sys
+import time
 import unicodedata
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,29 +31,70 @@ for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
 else:
     raise SystemExit("Could not locate .agents/lib")
 
-from research.bootstrap import ensure_managed_runtime, is_current_python, managed_venv_dir, managed_venv_python
+from research.bootstrap import (
+    BOOTSTRAP_PROVISION_ENV,
+    NO_PDF_BACKEND_ENV,
+    entrypoint_public_verb,
+    ensure_managed_runtime,
+    is_current_python,
+    managed_venv_dir,
+    managed_venv_python,
+    render_runtime_unavailable_command,
+)
+from research.cli_contract import HELP_MENU, render_help_menu
 
 if __name__ == "__main__":
-    ensure_managed_runtime(DEFAULT_PROJECT_ROOT)
+    _bootstrap_verb = entrypoint_public_verb(sys.argv[1:])
+    _allow_bootstrap_provision = (
+        _bootstrap_verb not in {"help", "doctor"}
+        or os.environ.get(BOOTSTRAP_PROVISION_ENV) == "1"
+    )
+    try:
+        ensure_managed_runtime(
+            DEFAULT_PROJECT_ROOT,
+            allow_provision=_allow_bootstrap_provision,
+        )
+    except SystemExit:
+        if render_runtime_unavailable_command(DEFAULT_PROJECT_ROOT, _bootstrap_verb):
+            raise SystemExit(0)
+        raise
 
-from research.common import current_runtime_capabilities, find_project_root, load_yaml
+from research.analyzer_registry import UNIT_ANALYZER_PREPARE_BY_KIND
+from research.common import current_runtime_capabilities, exclusive_file_lock, find_project_root, load_yaml
+from research.context_pack import build_context_pack
 from research.core import (
     CLAIM_CONFIRMATION_VALUES,
     confirmation_track,
     confirmation_claims,
+    checkpoint_and_report,
     config_root,
     default_confirmed_by,
     default_runtime_preferences,
     is_ai_signer,
-    is_ready_for_human_review,
     iter_records,
+    git_checkpoint,
     kb_root,
     load_runtime_preferences,
+    record_path,
     record_workflow_state,
+    search_passages,
     search_records,
     validate_claims,
 )
 from research.sources import UnsafeLocalSourceError, validate_local_source
+from research.judgements import discover_pending_judgements, judgement_snapshot_binding
+from research.learnings import discover_pending_preference_review_cards
+from research.review_batches import (
+    ReviewBatchError,
+    consume_obsidian_review_batch,
+    create_obsidian_review_batch,
+    obsidian_review_batch_runtime_targets,
+    preflight_obsidian_review_batch,
+    preview_obsidian_review_batch,
+)
+from research.journal import committed_ops, current_operation_id, mutation_transaction, restorable_committed_ops
+from research.preference_selection import resolve_operation_preferences
+from research.prefs import effective_review_policy
 from research import updater
 from research.obsidian import obsidian_projection_status, update_obsidian_projection
 
@@ -62,37 +111,6 @@ except (ImportError, AttributeError):  # Parallel D1 dependency may not be merge
     _audit_workspace = None
 
 
-HELP_MENU: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
-    (
-        "kb 动词（16 个）",
-        (
-            ("打印能力菜单。", "kb help"),
-            ("初始化知识库布局、索引和基础偏好。", "kb init"),
-            ("检查运行环境、配置读写与论文解析能力，并检查材料 Markdown 转换能力。", "kb doctor"),
-            ("检查并在确认后更新研究能力包。", "kb update"),
-            ("生成或检查可由 Obsidian 直接浏览的知识网络视图。", "kb obsidian update"),
-            ("刷新并查看当前知识库和研究计划的状态摘要。", "kb status"),
-            ("查看下一步实验或研究计划推进建议。", "kb next"),
-            ("按关键词检索已入库知识单元。", "kb find <关键词>"),
-            ("把论文、代码仓、博客或本地文件轻量入库。", "kb add <链接或路径>"),
-            ("一条命令把资料来源加入知识库并备好待填骨架，随后 Agent 自动填写有逐字证据支持的笔记。", "kb ingest <链接或路径>"),
-            ("查看待确认的 AI 判断，并用自然语言确认或拒绝。", "kb review"),
-            ("把误建或不采纳的知识单元标记为已拒绝。", "kb reject <单元编号>"),
-            ("回忆已确认习惯、已知坑和待审能力问题。", "kb recall"),
-            ("恢复崩溃后未完成的知识库操作。", "kb resume"),
-            ("撤销最近一次已提交的知识库操作。", "kb undo"),
-            ("恢复到指定操作之前的状态。", "kb restore <操作编号>"),
-        ),
-    ),
-    (
-        "纯自然语言（无 kb 动词）",
-        (
-            ("围绕当前知识库推进候选 idea 的生成、分析和选择。", "请基于当前知识库给我 3 个候选 idea"),
-            ("汇总研究计划事件，生成周报、PPT 素材或阶段总结。", "为这个研究计划生成周报材料"),
-        ),
-    ),
-)
-
 def owner_script(skill: str, script_name: str) -> str:
     return "/".join((".agents", "skills", skill, "scripts", f"{script_name}.py"))
 
@@ -102,13 +120,23 @@ SCRIPT_BY_VERB = {
     "init_kb": owner_script("knowledge-base-manager", "kb"),
     "init_config": owner_script("research-config-manager", "config"),
     "review": owner_script("knowledge-base-manager", "kb"),
-    "status_current": owner_script("research-navigator", "navigate"),
+    "status_current": owner_script("knowledge-base-manager", "kb"),
     "status_program": owner_script("research-orchestrator", "orchestrate"),
     "next": owner_script("research-orchestrator", "orchestrate"),
     "find": owner_script("knowledge-base-manager", "kb"),
     "recovery": owner_script("knowledge-base-manager", "kb"),
     "recall": owner_script("skill-evolution-advisor", "learnings"),
 }
+REVIEW_OWNER_SCRIPTS = {
+    "knowledge-base-manager": owner_script("knowledge-base-manager", "kb"),
+    "research-orchestrator": owner_script("research-orchestrator", "orchestrate"),
+    "idea-workbench": owner_script("idea-workbench", "idea"),
+    "method-designer": owner_script("method-designer", "method"),
+    "literature-synthesizer": owner_script("literature-synthesizer", "synthesize"),
+    "report-author": owner_script("report-author", "report"),
+    "skill-evolution-advisor": owner_script("skill-evolution-advisor", "learnings"),
+}
+_REVIEW_OWNER_MODULES: dict[str, object] = {}
 
 
 @dataclass(frozen=True)
@@ -169,10 +197,27 @@ _RUNTIME_FAILURE_PUBLIC_SUMMARY = "知识库操作未完成。"
 
 
 Handler = Callable[[argparse.Namespace, Path], int]
-REVIEW_KIND_CHOICES = ("paper", "repo", "dataset", "blog", "idea", "experiment")
+REVIEW_KIND_CHOICES = ("paper", "repo", "dataset", "blog", "idea", "experiment", "concept")
+REVIEW_KIND_ALIASES = {
+    "paper": "paper",
+    "论文": "paper",
+    "repo": "repo",
+    "代码仓": "repo",
+    "dataset": "dataset",
+    "数据集": "dataset",
+    "blog": "blog",
+    "博客": "blog",
+    "idea": "idea",
+    "想法": "idea",
+    "experiment": "experiment",
+    "实验": "experiment",
+    "concept": "concept",
+    "概念": "concept",
+}
 LANG_CHOICES = ("zh", "en")
 AUTO_COMMIT_CHOICES = ("manual", "milestone", "aggressive")
-AUTO_SCREEN_CHOICES = ("true", "false")
+LINK_AUTODRIVE_CHOICES = ("ask_first", "auto_deep_read")
+DISCUSSION_STYLE_CHOICES = ("challenge", "refine", "adaptive")
 PERSONA_TERM_CHOICES = ("keep-en", "translate", "bilingual")
 PERSONA_FIELDS = (
     ("research_focus", "研究方向 / 关注领域（逗号分隔，回车跳过）"),
@@ -418,7 +463,7 @@ _PUBLIC_KB_VERB_ARITY: dict[str, tuple[int, int | None]] = {
     "next": (0, 1),
     "recall": (0, 1),
     "reject": (1, 1),
-    "restore": (1, 1),
+    "restore": (0, 1),
     "resume": (0, 0),
     "review": (0, 1),
     "status": (0, 1),
@@ -452,6 +497,7 @@ PUBLIC_KIND_LABELS = {
     "blog": "博客",
     "idea": "研究想法",
     "experiment": "实验",
+    "concept": "概念",
 }
 
 PUBLIC_KIND_COUNT_PHRASES = {
@@ -461,6 +507,7 @@ PUBLIC_KIND_COUNT_PHRASES = {
     "blog": "篇博客",
     "idea": "个研究想法",
     "experiment": "个实验",
+    "concept": "个概念",
 }
 
 _NEXT_INTERNAL_MARKERS = (
@@ -789,13 +836,40 @@ def _render_public_claim_text(value: object, root: Path) -> str | None:
             continue
         if ord(character) in _BIDI_CONTROL_CODEPOINTS or category in {"Cc", "Cf", "Cs"}:
             return None
-    if not text.strip() or not _public_line_is_safe(text, root):
+    # A bounded inline code symbol is prose, not a shell instruction. Project
+    # it to visibly inert reader text before command-shape classification;
+    # fences, whitespace-bearing commands, substitutions and unmatched ticks
+    # still fail closed.
+    inline_code = re.compile(r"(?<!`)`([A-Za-z_][A-Za-z0-9_.]{0,127})`(?!`)")
+    text = inline_code.sub(lambda match: f"〈代码：{match.group(1)}〉", text)
+    if text.count("`") >= 2 or not text.strip() or not _public_line_is_safe(text, root):
         return None
     text = re.sub(r"\s+", " ", text).strip()
     text = text.replace("\\", "\\\\")
     for marker in ("[", "]", "<", ">", "`"):
         text = text.replace(marker, f"\\{marker}")
     return text or None
+
+
+_PAPER_TYPE_PUBLIC_LABELS = {
+    "method_system": "方法或系统",
+    "benchmark": "基准",
+    "survey": "综述",
+}
+
+
+def _render_public_review_claim_text(claim: Mapping[str, object], root: Path) -> str | None:
+    """Render canonical review text, projecting the paper-type wire format safely."""
+    raw_text = str(claim.get("text") or "").strip()
+    if str(claim.get("id") or "") != "claim-paper-type":
+        return _render_public_claim_text(raw_text, root)
+    paper_type = str(claim.get("paper_type") or "").strip().lower()
+    label = _PAPER_TYPE_PUBLIC_LABELS.get(paper_type)
+    prefix = f"paper_type={paper_type};"
+    if label is None or not raw_text.startswith(prefix):
+        return None
+    reason = _render_public_claim_text(raw_text[len(prefix) :].strip(), root)
+    return f"论文类型：{label}；{reason}" if reason else None
 
 
 def _bounded_public_text(text: str, limit: int) -> str:
@@ -862,16 +936,6 @@ def emit_public_output(text: str, root: Path, *, error: bool = False) -> bool:
     return emitted
 
 
-def render_help_menu() -> str:
-    lines = ["# kb 快捷命令", ""]
-    for group, items in HELP_MENU:
-        lines.append(f"## {group}")
-        for sentence, ai_phrase in items:
-            lines.append(f"- {sentence} 也可以直接对 AI 说：\"{ai_phrase}\"。")
-        lines.append("")
-    return "\n".join(lines).rstrip() + "\n"
-
-
 def script_path(root: Path, relative_path: str) -> Path:
     project_script = root / relative_path
     if project_script.exists():
@@ -892,7 +956,13 @@ def forward_command(
     extra_env: Mapping[str, str] | None = None,
 ) -> CommandResult:
     argv = build_child_argv(root, relative_script, args)
-    env = {**os.environ, "RESEARCH_PROJECT_ROOT": str(root)}
+    env = {
+        **os.environ,
+        "RESEARCH_PROJECT_ROOT": str(root),
+        # A read such as `kb next` must not dirty an installed workspace merely
+        # because a newly introduced owner module has not been imported before.
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
     if extra_env:
         env.update({str(key): str(value) for key, value in extra_env.items()})
     completed = subprocess.run(argv, cwd=root, env=env, text=True, capture_output=True, check=False)
@@ -984,11 +1054,23 @@ def handle_doctor(args: argparse.Namespace, root: Path) -> int:
     del args
     capabilities = current_runtime_capabilities()
     modules = capabilities.get("modules", {})
+    if not isinstance(modules, dict):
+        modules = {}
     venv_dir = managed_venv_dir(DEFAULT_PROJECT_ROOT)
     venv_py = managed_venv_python(DEFAULT_PROJECT_ROOT)
     yaml_ready = bool(capabilities.get("yaml_support"))
     markdown_ready = bool(capabilities.get("markdown_support"))
     pdf_backend = str(capabilities.get("pdf_backend") or "").strip()
+    # Paper deep reading (intake page=N parsing) hard-requires pymupdf4llm+fitz;
+    # a fallback metadata backend such as pypdf must not be reported as ready.
+    pdf_deep_read_ready = bool(modules.get("pymupdf4llm")) and bool(modules.get("fitz"))
+    # An explicit RESEARCH_PYTHON override also disables managed-venv provisioning
+    # in research.bootstrap, so the auto-prepare promise would be false there.
+    auto_prepare_off = (
+        os.environ.get(NO_PDF_BACKEND_ENV) == "1"
+        or os.environ.get("RESEARCH_NO_MANAGED_VENV") == "1"
+        or bool(str(os.environ.get("RESEARCH_PYTHON") or "").strip())
+    )
     runtime_kind = "受管项目运行环境" if is_current_python(venv_py) else "当前已配置运行环境"
     raw_package_version = updater.read_local_version(DEFAULT_PROJECT_ROOT)
     public_version = _public_display_text(
@@ -1000,18 +1082,21 @@ def handle_doctor(args: argparse.Namespace, root: Path) -> int:
     print(f"研究能力包版本为 {public_version}。")
     print(f"{runtime_kind}可用；配置读写能力{'正常' if yaml_ready else '缺失'}。")
     print(f"材料 Markdown 阅读层转换能力{'已就绪' if markdown_ready else '尚未就绪'}。")
-    if pdf_backend:
-        print("论文解析能力已就绪。")
+    if pdf_deep_read_ready:
+        print("论文 PDF 深读能力已就绪。")
+    elif auto_prepare_off:
+        print("论文 PDF 深读能力未就绪，且自动准备运行环境已关闭；文本和网页资料仍可正常使用。")
     else:
-        print("论文解析能力尚未就绪；文本和网页资料仍可正常使用。")
+        print("论文 PDF 深读能力未就绪，首次需要时将自动准备运行环境；文本和网页资料仍可正常使用。")
     protocol_details: dict[str, object] = {
         "runtime": {
             "python": capabilities.get("python") or "",
             "version": capabilities.get("version") or "",
-            "modules": modules if isinstance(modules, dict) else {},
+            "modules": modules,
             "yaml_support": yaml_ready,
             "markdown_support": markdown_ready,
             "pdf_backend": pdf_backend,
+            "pdf_deep_read_ready": pdf_deep_read_ready,
             "package_version": raw_package_version,
             "managed_runtime": {
                 "directory": str(venv_dir),
@@ -1031,8 +1116,92 @@ def update_cache_dir() -> Path:
     return Path.home() / ".cache" / "research-skills"
 
 
+def _record_update_source_choice(root: Path, result: Mapping[str, object]) -> None:
+    try:
+        choice = updater.source_choice_request(root)
+    except updater.SourceRebindError as exc:
+        set_protocol_status(
+            "attention_required",
+            update=result,
+            source_choice_error={"code": exc.code, "message": str(exc)},
+        )
+        add_agent_action("inspect_update_installation", reason=exc.code)
+        return
+    set_protocol_status("needs_user_input", update=result, source_choice=choice)
+    add_agent_action(
+        "choose_update_source",
+        reason=str(result.get("message") or "missing update provenance"),
+        **choice,
+    )
+
+
+def _render_update_check(root: Path, result: Mapping[str, object], *, rebound: Mapping[str, object] | None = None) -> int:
+    local = _public_display_text(result.get("local") or "0.0.0", root, "未知", 64)
+    remote = _public_display_text(result.get("remote") or "unknown", root, "未知", 64)
+    print(f"当前研究能力包版本：{local}。")
+    if result.get("status") == "needs_source_choice":
+        print("更新源尚未确认；请告诉我应继续使用哪个源码仓或本地检出。")
+        _record_update_source_choice(root, result)
+        return 0
+    details: dict[str, object] = {"update": dict(result)}
+    if rebound is not None:
+        details["source_rebind"] = dict(rebound)
+    set_protocol_status("completed", **details)
+    if result.get("status") == "unknown":
+        print("更新源中的研究能力包版本：未知。")
+        print("暂时无法从更新源检查更新；当前安装未做任何改动。")
+        return 0
+    print(f"更新源中的研究能力包版本：{remote}。")
+    if result.get("status") == "update_available":
+        print("发现可用更新；确认前不会修改当前安装。")
+        print("如果你同意，我可以继续完成更新。")
+        set_protocol_status("needs_user_authorization", **details)
+        add_agent_action("request_update_authorization", then={"verb": "update", "apply": True})
+    else:
+        print("当前研究能力包已是最新版本。")
+    return 0
+
+
 def handle_update(args: argparse.Namespace, root: Path) -> int:
     cache_dir = update_cache_dir()
+    source_inputs = any(
+        str(value or "").strip()
+        for value in (
+            args.expected_manifest_digest,
+            args.source_origin,
+            args.source_checkout,
+            args.source_branch,
+            args.source_strategy,
+        )
+    )
+    if source_inputs:
+        if args.apply:
+            print("更新源选择未生效；请重新运行 kb update 后告诉我希望使用的更新源。")
+            set_protocol_status(
+                "error",
+                source_rebind={"status": "error", "code": "rebind-cannot-authorize-update"},
+            )
+            return 2
+        try:
+            rebound = updater.rebind_source(
+                root,
+                expected_manifest_digest=args.expected_manifest_digest,
+                source_origin=args.source_origin,
+                source_checkout=args.source_checkout,
+                source_branch=args.source_branch,
+                source_strategy=args.source_strategy,
+            )
+        except updater.SourceRebindError as exc:
+            print("更新源选择未生效；请重新运行 kb update 后告诉我希望使用的更新源。")
+            set_protocol_status(
+                "error",
+                source_rebind={"status": "error", "code": exc.code, "message": str(exc)},
+            )
+            return 2
+        print("更新源选择已保存；现在只重新检查可用更新，不会直接安装。")
+        result = updater.check(root, cache_dir)
+        return _render_update_check(root, result, rebound=rebound)
+
     if args.apply:
         result = updater.apply(root, cache_dir)
         if result.get("status") == "updated":
@@ -1047,44 +1216,14 @@ def handle_update(args: argparse.Namespace, root: Path) -> int:
             return 0
         if result.get("status") == "needs_source_choice":
             print("更新源尚未确认；请告诉我应继续使用哪个源码仓或本地检出。")
-            set_protocol_status("needs_user_input", update=result)
-            add_agent_action(
-                "choose_update_source",
-                fields=["source_origin", "source_checkout"],
-                reason=str(result.get("message") or "missing update provenance"),
-            )
+            _record_update_source_choice(root, result)
             return 2
         print("研究能力包更新未完成；详细诊断已保留给 Agent。")
         set_protocol_status("error", update=result)
         return 1
 
     result = updater.check(root, cache_dir)
-    set_protocol_status("completed", update=result)
-    local = _public_display_text(result.get("local") or "0.0.0", root, "未知", 64)
-    remote = _public_display_text(result.get("remote") or "unknown", root, "未知", 64)
-    print(f"当前研究能力包版本：{local}。")
-    if result.get("status") == "needs_source_choice":
-        print("更新源尚未确认；请告诉我应继续使用哪个源码仓或本地检出。")
-        set_protocol_status("needs_user_input", update=result)
-        add_agent_action(
-            "choose_update_source",
-            fields=["source_origin", "source_checkout"],
-            reason=str(result.get("message") or "missing update provenance"),
-        )
-        return 0
-    if result.get("status") == "unknown":
-        print("更新源中的研究能力包版本：未知。")
-        print("暂时无法从更新源检查更新；当前安装未做任何改动。")
-        return 0
-    print(f"更新源中的研究能力包版本：{remote}。")
-    if result.get("status") == "update_available":
-        print("发现可用更新；确认前不会修改当前安装。")
-        print("如果你同意，我可以继续完成更新。")
-        set_protocol_status("needs_user_authorization", update=result)
-        add_agent_action("request_update_authorization", then={"verb": "update", "apply": True})
-    else:
-        print("当前研究能力包已是最新版本。")
-    return 0
+    return _render_update_check(root, result)
 
 
 def handle_obsidian(args: argparse.Namespace, root: Path) -> int:
@@ -1137,6 +1276,53 @@ def _public_program_label(program_id: object, root: Path) -> str:
     return _public_display_text(raw_program_id, root, "名称需由 Agent 安全解释", 100)
 
 
+def _portfolio_candidate_failed_retryable(candidate: Mapping[str, object]) -> bool:
+    def contains(value: object) -> bool:
+        if isinstance(value, Mapping):
+            for key, child in value.items():
+                retry_fields = {"status", "state", "run_state", "workflow_state", "reason"}
+                if str(key) in retry_fields and str(child) == "failed_retryable":
+                    return True
+                if contains(child):
+                    return True
+        elif isinstance(value, list):
+            return any(contains(item) for item in value)
+        return False
+
+    return contains(candidate)
+
+
+def _status_portfolio_counts(candidates: Sequence[Mapping[str, object]]) -> dict[str, int]:
+    action_buckets = {
+        "review-judgement": "pending_review",
+        "run-due-monitor": "due_monitor",
+        "select-literature-candidates": "awaiting_literature_selection",
+        "resume-literature-search": "resumable_literature",
+        "resume-composite-survey": "resumable_composite",
+        "rebuild-stale-survey": "stale_survey",
+        "rebuild-taxonomy": "taxonomy_rebuild",
+    }
+    counts = {
+        "pending_review": 0,
+        "due_monitor": 0,
+        "awaiting_literature_selection": 0,
+        "resumable_literature": 0,
+        "resumable_composite": 0,
+        "stale_survey": 0,
+        "taxonomy_rebuild": 0,
+        "failed_retryable": 0,
+        "agent_progress": 0,
+    }
+    for candidate in candidates:
+        if _portfolio_candidate_failed_retryable(candidate):
+            counts["failed_retryable"] += 1
+            continue
+        action_type = str(candidate.get("action_type") or "")
+        bucket = action_buckets.get(action_type, "agent_progress")
+        counts[bucket] += 1
+    return counts
+
+
 def handle_status(args: argparse.Namespace, root: Path) -> int:
     public_program = _public_program_label(args.program, root)
     current = forward_command(
@@ -1163,6 +1349,45 @@ def handle_status(args: argparse.Namespace, root: Path) -> int:
         loaded_state = load_yaml(kb_root(root) / "programs" / args.program / "state.yaml", default={})
         program_state = loaded_state if isinstance(loaded_state, dict) else {}
 
+    portfolio_args = ["prepare-next-selection", "--json"]
+    if args.program:
+        portfolio_args.extend(["--program-id", args.program])
+    portfolio_result = forward_command(
+        root,
+        SCRIPT_BY_VERB["next"],
+        portfolio_args,
+        stream=False,
+    )
+    if portfolio_result.returncode != 0:
+        print("研究事项摘要暂时无法读取；详细诊断已保留给 Agent。", file=sys.stderr)
+        return portfolio_result.returncode
+    try:
+        portfolio_lines = [line for line in portfolio_result.stdout.splitlines() if line.strip()]
+        # A successful legacy/test owner may have no portfolio projection yet.
+        # Treat only *empty* output as an empty factual snapshot; any non-empty
+        # malformed payload still fails closed instead of hiding corruption.
+        portfolio_payload = (
+            json.loads(portfolio_lines[-1])
+            if portfolio_lines
+            else {
+                "candidate_snapshot": {
+                    "candidates": [],
+                    "program_contexts": [],
+                }
+            }
+        )
+        candidate_snapshot = portfolio_payload["candidate_snapshot"]
+        raw_candidates = candidate_snapshot["candidates"]
+        raw_program_contexts = candidate_snapshot["program_contexts"]
+        if not isinstance(raw_candidates, list) or not isinstance(raw_program_contexts, list):
+            raise TypeError
+        portfolio_candidates = [item for item in raw_candidates if isinstance(item, Mapping)]
+        program_contexts = [item for item in raw_program_contexts if isinstance(item, Mapping)]
+    except (json.JSONDecodeError, KeyError, TypeError):
+        print("研究事项摘要暂时无法读取；详细诊断已保留给 Agent。", file=sys.stderr)
+        set_protocol_status("error", reason="invalid portfolio status snapshot")
+        return 1
+
     all_records = iter_records(root)
     rejected_records = [record for record in all_records if _record_is_rejected(record)]
     records = [record for record in all_records if not _record_is_rejected(record)]
@@ -1179,9 +1404,37 @@ def handle_status(args: argparse.Namespace, root: Path) -> int:
         print(f"知识库目前收录 {len(records)} 条资料：{'、'.join(count_parts)}。")
     else:
         print("知识库尚未收录资料。")
-    ready_count = len([record for record in records if is_ready_for_human_review(record)])
-    if ready_count:
-        print(f"其中有 {ready_count} 条经过核验的判断等待你确认，可使用 kb review 查看。")
+    ready_count = len(_discover_pending_review_cards(root))
+
+    program_ids = [
+        str(item.get("program_id") or "")
+        for item in program_contexts
+        if str(item.get("program_id") or "")
+    ]
+    public_programs = [_public_program_label(program_id, root) for program_id in program_ids[:3]]
+    if program_ids:
+        remainder = len(program_ids) - len(public_programs)
+        suffix = f"，另有 {remainder} 个" if remainder else ""
+        print(f"目前有 {len(program_ids)} 个研究计划：{'、'.join(public_programs)}{suffix}。")
+    else:
+        print("目前没有研究计划。")
+
+    portfolio_counts = _status_portfolio_counts(portfolio_candidates)
+    # Canonical discovery is the only authority for the public review count;
+    # the portfolio projection is retained for all other factual work classes.
+    portfolio_counts["pending_review"] = ready_count
+    print(
+        "待处理事项："
+        f"{portfolio_counts['pending_review']} 条待确认判断、"
+        f"{portfolio_counts['due_monitor']} 个到期监控、"
+        f"{portfolio_counts['awaiting_literature_selection']} 组文献候选待选择、"
+        f"{portfolio_counts['resumable_literature']} 个可继续文献检索、"
+        f"{portfolio_counts['resumable_composite']} 个可恢复综述流程、"
+        f"{portfolio_counts['stale_survey']} 个过期综述待重建、"
+        f"{portfolio_counts['taxonomy_rebuild']} 个知识分类目录待刷新、"
+        f"{portfolio_counts['failed_retryable']} 个失败后可重试事项、"
+        f"{portfolio_counts['agent_progress']} 个可由 Agent 继续推进的事项。"
+    )
 
     if args.program:
         raw_focus = str(program_state.get("goal") or program_state.get("question") or "").strip()
@@ -1196,7 +1449,6 @@ def handle_status(args: argparse.Namespace, root: Path) -> int:
         if open_questions or evidence_requests:
             print(f"目前还有 {open_questions} 个待处理问题和 {evidence_requests} 项待补证据。")
 
-    program_ids = [path.parent.name for path in sorted((kb_root(root) / "programs").glob("*/state.yaml"))]
     set_protocol_status(
         "completed",
         record_count=len(records),
@@ -1206,6 +1458,8 @@ def handle_status(args: argparse.Namespace, root: Path) -> int:
         kind_counts=kind_counts,
         program_ids=program_ids,
         selected_program=program_state,
+        portfolio_counts=portfolio_counts,
+        candidate_snapshot=candidate_snapshot,
     )
     return 0
 
@@ -1235,9 +1489,88 @@ def _next_item_record_id(item: Mapping[str, object]) -> str:
     return ""
 
 
+def _next_synthetic_family(item: Mapping[str, object]) -> str:
+    program_id = str(item.get("program_id") or "").casefold()
+    record_id = str(item.get("record_id") or "").casefold()
+    step_type = str(item.get("step_type") or "").casefold()
+    stage = str(item.get("stage") or "").casefold()
+    if program_id.startswith("literature:") or step_type in {
+        "select-literature-candidates",
+        "resume-literature-search",
+    } or stage in {"literature-selection", "literature-search"}:
+        return "literature"
+    if program_id.startswith("review:"):
+        return "review"
+    if program_id.startswith("monitor:") or step_type in {
+        "run-due-monitor",
+        "resume-monitor-run",
+    } or stage.startswith("monitor-"):
+        return "monitor"
+    if (
+        program_id.startswith("survey:")
+        or step_type == "resume-composite-survey"
+        or (
+            record_id.startswith("survey-")
+            and stage
+            in {
+                "search",
+                "selection",
+                "source_intake",
+                "unit_analysis",
+                "synthesis",
+                "review_confirmation",
+                "report_consumption",
+            }
+        )
+    ):
+        return "survey"
+    if step_type == "rebuild-taxonomy" or stage == "gardening":
+        return "taxonomy"
+    return ""
+
+
+def _next_public_subject(item: Mapping[str, object], root: Path) -> str:
+    family = _next_synthetic_family(item)
+    title = str(item.get("title") or item.get("goal") or "").strip()
+    public_title = (
+        _public_display_text(title, root, "", 120)
+        if title and _public_line_is_safe(title, root)
+        else ""
+    )
+    if family == "literature":
+        return "文献候选选择" if str(item.get("stage") or "") == "literature-selection" else "文献检索"
+    if family == "review":
+        return f"待确认判断「{public_title}」" if public_title else "待确认判断"
+    if family == "monitor":
+        return f"研究跟踪「{public_title}」" if public_title else "研究跟踪"
+    if family == "survey":
+        return f"综述流程「{public_title}」" if public_title else "综述流程"
+    if family == "taxonomy":
+        return "知识分类目录"
+    return ""
+
+
 def _next_public_reason(item: dict[str, object], root: Path) -> str:
     step_type = str(item.get("step_type") or "")
     action_kind = str(item.get("action_kind") or "")
+    family = _next_synthetic_family(item)
+    stage = str(item.get("stage") or "")
+    if family == "literature":
+        if stage == "literature-selection" or _next_item_needs_human(item):
+            return "检索和筛选已经完成，等待你选择要保留的文献候选。"
+        return "Agent 需要继续已保存的文献检索。"
+    if family == "review":
+        return "已有经过核验的判断，等待你确认。"
+    if family == "monitor":
+        return "Agent 需要执行已到期或尚未完成的研究跟踪。"
+    if family == "survey":
+        if step_type == "rebuild-stale-survey" or stage == "stale-survey":
+            return "已确认综述的上游证据发生变化，需要重新准备、核验并再次确认。"
+        if _next_item_needs_human(item):
+            return "综述流程到了需要你确认的环节。"
+        return "Agent 需要继续已保存的综述流程。"
+    if family == "taxonomy":
+        return "知识分类目录与当前资料不一致，需要机械刷新；不会删除资料或确认判断。"
     if _next_item_needs_human(item):
         return "已有经过核验的判断，等待你确认。"
     if step_type == "agent-fill":
@@ -1290,7 +1623,10 @@ def _print_next_items(items: list[dict[str, object]], *, has_records: bool, root
     for item in items:
         program_id = str(item.get("program_id") or "")
         record_id = _next_item_record_id(item)
-        if record_id:
+        synthetic_subject = _next_public_subject(item, root)
+        if synthetic_subject:
+            subject = synthetic_subject
+        elif record_id:
             title = str(item.get("title") or item.get("goal") or record_id)
             public_record_id = _public_display_text(record_id, root, "编号已隐藏", 100)
             public_title = _public_display_text(title, root, "标题需由 Agent 安全解释", 160)
@@ -1323,6 +1659,70 @@ def handle_next(args: argparse.Namespace, root: Path) -> int:
         print("暂时无法判断下一步；详细诊断已保留给 Agent。", file=sys.stderr)
         set_protocol_status("error", reason="invalid orchestrator protocol")
         return 1
+    planning_required = bool(payload.get("planning_required")) if isinstance(payload, dict) else False
+    if planning_required:
+        snapshot = payload.get("candidate_snapshot") if isinstance(payload, dict) else None
+        if not isinstance(snapshot, dict):
+            print("暂时无法判断下一步；详细诊断已保留给 Agent。", file=sys.stderr)
+            set_protocol_status("error", reason="missing portfolio candidate snapshot")
+            return 1
+        raw_candidates = snapshot.get("candidates")
+        candidates = (
+            [dict(item) for item in raw_candidates if isinstance(item, dict)]
+            if isinstance(raw_candidates, list)
+            else []
+        )
+        has_records = bool(payload.get("has_records"))
+        fill_template = payload.get("portfolio_decision_fill") if isinstance(payload, dict) else None
+        if not isinstance(fill_template, dict):
+            fill_template = {
+                "decision_id": "",
+                "candidate_snapshot_digest": str(snapshot.get("candidate_snapshot_digest") or ""),
+                "selected_action_ids": [],
+                "rationale": "",
+                "expected_information_gain": "",
+                "cost_and_risk": "",
+                "preference_selection_id": "",
+                "decision_scope": "procedural_planning",
+                "program_decision_ids": [],
+                "decided_at": "",
+            }
+        if candidates:
+            set_protocol_status(
+                "agent_action_required",
+                has_records=has_records,
+                candidate_count=len(candidates),
+                candidate_snapshot=snapshot,
+                prior_portfolio_decision=payload.get("portfolio_decision"),
+            )
+            add_agent_action(
+                "plan_portfolio_next",
+                owner_skill="research-orchestrator",
+                operation="plan",
+                candidate_snapshot=snapshot,
+                portfolio_decision_fill=fill_template,
+                effective_preferences={
+                    "skill": "research-orchestrator",
+                    "operation": "plan",
+                    "task_context_digest": str(snapshot.get("candidate_snapshot_digest") or ""),
+                    "must_record_before_decision": True,
+                },
+                required_decision_fields=list(fill_template),
+                private_owner_contract={
+                    "prepare": "prepare-next-selection",
+                    "verify": "verify-next-selection",
+                    "record": "record-next-selection",
+                    "complete_in_current_turn": True,
+                },
+            )
+            print(f"Agent 需要比较当前 {len(candidates)} 项可行行动，再说明为什么选择下一步。")
+        else:
+            set_protocol_status("completed", has_records=has_records, candidate_count=0)
+            if has_records:
+                print("知识库已有资料，但目前没有待处理事项。")
+            else:
+                print("知识库还是空的。请告诉我一篇论文、一个代码仓或一篇博客的来源，或使用 kb ingest 添加资料。")
+        return 0
     raw_items = payload.get("items") if isinstance(payload, dict) else []
     items = [dict(item) for item in raw_items if isinstance(item, dict)] if isinstance(raw_items, list) else []
     has_records = bool(payload.get("has_records")) if isinstance(payload, dict) else False
@@ -1361,6 +1761,34 @@ def _protocol_record_summary(record: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _protocol_passage_summary(passage: Mapping[str, object]) -> dict[str, object]:
+    """Keep complete reopen data private while dropping implementation scores."""
+    allowed = (
+        "unit_id",
+        "kind",
+        "title",
+        "excerpt",
+        "artifact",
+        "locator",
+        "heading",
+        "line_start",
+        "line_end",
+    )
+    return {key: passage.get(key) for key in allowed}
+
+
+def _public_passage_locator(passage: Mapping[str, object], root: Path) -> str:
+    heading = _public_display_text(passage.get("heading") or "", root, "对应段落", 120)
+    try:
+        line_start = int(passage.get("line_start") or 0)
+        line_end = int(passage.get("line_end") or 0)
+    except (TypeError, ValueError):
+        line_start = line_end = 0
+    if line_start > 0 and line_end >= line_start:
+        return f"{heading}，第 {line_start}–{line_end} 行"
+    return heading or "标题或摘要"
+
+
 def handle_find(args: argparse.Namespace, root: Path) -> int:
     query = " ".join(args.keywords).strip()
     if not query:
@@ -1377,16 +1805,69 @@ def handle_find(args: argparse.Namespace, root: Path) -> int:
     matched_records = search_records(root, query)
     rejected_records = [record for record in matched_records if _record_is_rejected(record)]
     records = [record for record in matched_records if not _record_is_rejected(record)]
+    records_by_id = {str(record.get("id") or ""): record for record in records}
+    passage_payload = search_passages(root, query, limit=25)
+    raw_passages = passage_payload.get("results") if isinstance(passage_payload, Mapping) else []
+    raw_passages = raw_passages if isinstance(raw_passages, list) else []
+    rejected_ids = {
+        str(record.get("id") or "")
+        for record in [*rejected_records, *iter_records(root)]
+        if _record_is_rejected(record)
+    }
+    eligible_passages = [
+        dict(item)
+        for item in raw_passages
+        if isinstance(item, Mapping) and str(item.get("unit_id") or "") not in rejected_ids
+    ]
+    passages = eligible_passages[:5]
+    passage_summaries = [_protocol_passage_summary(item) for item in passages]
     summaries = [_protocol_record_summary(record) for record in records]
+    context_pack = build_context_pack(
+        root,
+        query=query,
+        matched_records=records,
+        passages=eligible_passages,
+    )
     set_protocol_status(
         "completed",
         query=query,
-        result_count=len(summaries),
+        result_count=len(passage_summaries) if passage_summaries else len(summaries),
         rejected_count=len(rejected_records),
         records=summaries,
+        passages=passage_summaries,
+        context_pack=context_pack,
+        search_index_health=str(passage_payload.get("health") or "unknown")
+        if isinstance(passage_payload, Mapping)
+        else "unknown",
     )
+    if passages:
+        print(f"找到 {len(passages)} 段相关内容：")
+        for passage in passages:
+            raw_unit_id = str(passage.get("unit_id") or "")
+            raw_title = str(passage.get("title") or raw_unit_id)
+            unit_id = _public_display_text(raw_unit_id, root, "编号已隐藏", 100)
+            title = _public_display_text(raw_title, root, "标题需由 Agent 安全解释", 160)
+            kind = PUBLIC_KIND_LABELS.get(str(passage.get("kind") or ""), "知识")
+            excerpt = _public_display_text(
+                passage.get("excerpt") or "",
+                root,
+                "摘录包含不适合直接展示的内容，请让 Agent 安全解释。",
+                320,
+            )
+            print(f"- {kind}「{title}」（{unit_id}）")
+            print(f"  定位：{_public_passage_locator(passage, root)}")
+            print(f"  摘录：{excerpt}")
+            record = records_by_id.get(raw_unit_id)
+            if record is None:
+                continue
+            workflow_state = record_workflow_state(record)
+            if workflow_state == "ready_for_review":
+                print("  这条判断已经核验，等待你确认；可使用 kb review 查看。")
+            elif workflow_state in {"source_ready", "awaiting_agent_fill", "ready_to_verify", "failed_retryable"}:
+                print("  Agent 还需要继续整理或核验这条资料。")
+        return 0
     if not records:
-        print("没有找到匹配的知识条目。")
+        print("没有找到匹配的知识内容。")
         return 0
     print(f"找到 {len(records)} 条相关资料：")
     for record in records:
@@ -1496,6 +1977,167 @@ def render_public_recall(owner_text: str, kind: str, root: Path) -> str:
     return "\n".join(lines) + "\n"
 
 
+_RESTORE_CATALOG_LIMIT = 10
+
+_OP_TYPE_PUBLIC_LABELS = {
+    "rebuild_obsidian_projection": "Obsidian 视图更新",
+    "kb-cli:dialogue-review-batch": "对话拍板批量应用",
+    "kb-cli:obsidian-review-batch": "Obsidian 批量拍板应用",
+    "batch_confirm": "批量确认",
+    "batch_confirm_review_queue": "确认收件箱批量处理",
+    "source-intake-add": "资料轻量入库",
+    "source-intake-materialize": "资料内容整理",
+    "source-intake-build-index": "资料索引重建",
+    "source-intake-attach-duplicate-selection": "重复资料并入",
+    "promote_record": "知识条目状态变更",
+    "write_record": "知识记录更新",
+    "link_records": "知识关联更新",
+    "govern_records": "知识记录治理",
+    "migrate_repo_to_dataset": "记录类型调整",
+    "compact_unit_ids": "知识编号整理",
+    "rebuild_index": "知识索引重建",
+    "rebuild_governance": "治理目录重建",
+    "refresh_reading_list": "阅读清单刷新",
+    "refresh_record_schemas": "记录结构刷新",
+    "refresh_user_navigation": "研究导航刷新",
+    "initialize_workspace": "知识库初始化",
+    "ensure_workspace": "知识库结构准备",
+    "config-init": "配置初始化",
+    "config-set": "配置更新",
+    "config-toggle": "配置开关切换",
+    "config-capture-resources": "资源信息记录",
+    "config-set-taxonomy-seed": "主题目录配置更新",
+    "config-set-pool": "候选池配置更新",
+    "set-interaction": "交互偏好更新",
+    "set-runtime-pref": "运行偏好更新",
+    "set-diagnostics": "诊断策略更新",
+    "write-runtime-preferences": "运行偏好更新",
+    "record-effective-preferences": "任务偏好选择记录",
+    "write-learnings": "经验记录更新",
+    "log-learning": "经验记录更新",
+    "review-learning": "经验记录复核",
+    "promote-learning": "经验记录晋升",
+    "create-skill-retrospective": "能力回顾记录",
+    "record-diagnostic-issue": "诊断问题记录",
+    "review-diagnostic-issue": "诊断问题复核",
+    "archive-discussion": "讨论归档",
+    "wiki-query-note": "百科查询笔记",
+    "write-research-value-report": "研究价值报告更新",
+    "update-composite-survey": "综述内容更新",
+    "prepare-composite-survey-gap": "综述缺口准备",
+    "stage_search_results": "检索结果暂存",
+    "mark_search_candidate": "检索候选标记",
+    "append_list_item": "清单条目更新",
+    "append_program_reporting_event": "研究计划事件记录",
+    "storage-sync": "存储同步",
+    "storage_sync": "存储同步",
+    "browser-save": "浏览器编辑保存",
+}
+
+_OP_TYPE_PREFIX_LABELS = (
+    ("research-monitor:", "研究监控更新"),
+    ("research-orchestrator:", "研究计划推进记录"),
+    ("method:", "方法设计操作"),
+    ("paper-analyst:", "论文分析笔记更新"),
+    ("blog-analyst:", "博客分析笔记更新"),
+    ("repo-analyst:", "代码仓分析笔记更新"),
+    ("dataset-analyst:", "数据集分析笔记更新"),
+    ("idea-workbench:", "研究想法推进"),
+    ("experiment-workbench:", "实验记录更新"),
+    ("prepare-", "分析骨架准备"),
+    ("verify-", "笔记核验"),
+)
+
+
+def _public_operation_label(op_type: str) -> str:
+    """Safe Chinese description of one journaled operation (never a path)."""
+    normalized = str(op_type or "").strip()
+    label = _OP_TYPE_PUBLIC_LABELS.get(normalized)
+    if label:
+        return label
+    for prefix, prefix_label in _OP_TYPE_PREFIX_LABELS:
+        if normalized.startswith(prefix):
+            return prefix_label
+    if normalized.endswith("-survey"):
+        return "综述整理"
+    return "知识库操作"
+
+
+def _restore_catalog_entries(root: Path) -> list[dict]:
+    entries = restorable_committed_ops(root)
+    entries.reverse()
+    return entries[:_RESTORE_CATALOG_LIMIT]
+
+
+def _public_operation_time(entry: Mapping[str, object]) -> str:
+    try:
+        epoch = int(entry.get("sequence_ns") or 0) / 1_000_000_000
+    except (TypeError, ValueError):
+        epoch = 0.0
+    if epoch <= 0:
+        return "时间未知"
+    return time.strftime("%m-%d %H:%M", time.localtime(epoch))
+
+
+def _journal_operation_label(root: Path, op_id: str) -> str:
+    """Best-effort label lookup; never let a diagnostics read break recovery."""
+    if not op_id:
+        return ""
+    try:
+        for entry in committed_ops(root):
+            if str(entry.get("op_id") or "") == op_id:
+                label = _public_operation_label(str(entry.get("op_type") or ""))
+                subjects: list[str] = []
+                for raw in entry.get("target_paths", []):
+                    parts = Path(str(raw or "")).parts
+                    subject = ""
+                    if len(parts) >= 4 and parts[0] == "units" and parts[-1] == "record.yaml":
+                        subject = parts[2]
+                    elif (
+                        len(parts) >= 5
+                        and parts[0] == "programs"
+                        and parts[2] == "method-design"
+                        and parts[-1] == "selection.yaml"
+                    ):
+                        subject = f"研究计划 {parts[1]} 中想法 {parts[3]} 的方法选择"
+                    elif (
+                        len(parts) == 4
+                        and parts[0] == "programs"
+                        and parts[2] == "design"
+                        and parts[-1].endswith("-repo-choice.yaml")
+                    ):
+                        idea_id = parts[-1][: -len("-repo-choice.yaml")]
+                        subject = f"研究计划 {parts[1]} 中想法 {idea_id} 的方法选择"
+                    elif len(parts) >= 4 and parts[0] == "programs" and parts[2] == "discussions":
+                        subject = f"研究计划 {parts[1]} 的讨论 {Path(parts[-1]).stem}"
+                    if subject and re.fullmatch(r"[\w.\-\u4e00-\u9fff ]+", subject) and subject not in subjects:
+                        subjects.append(subject)
+                if subjects:
+                    shown = "、".join(subjects[:3])
+                    if len(subjects) > 3:
+                        shown += f"等 {len(subjects)} 项"
+                    return f"{label}（对象：{shown}）"
+                return label
+    except (SystemExit, OSError, RuntimeError, TypeError, ValueError):
+        return ""
+    return ""
+
+
+_UNDO_OWNER_STDOUT_RE = re.compile(r"已撤销最近一次操作\s+(\S+)。")
+_RESTORE_OWNER_STDOUT_RE = re.compile(r"已恢复到操作\s+(\S+)\s+之前的状态。")
+
+# Owner recovery refusals that are already safe public Chinese one-liners
+# (no paths, no ids, no flags). Anything else stays private.
+_RECOVERY_SAFE_REFUSALS = (
+    "目标在该操作完成后又被修改；为避免覆盖后续改动，已停止恢复。",
+    "当前状态与已记录的恢复链不一致；可能存在未记账修改或日志损坏，为避免覆盖现有内容，已停止恢复。",
+    "检测到未完成的知识库操作；请先使用 kb resume 完成恢复。",
+    "只有已完成的操作可恢复；未完成操作只能通过 kb resume 自愈。",
+    "未完成操作必须按从新到旧的顺序恢复；已停止恢复。",
+    "恢复来源操作日志在执行前发生变化；已停止恢复。",
+)
+
+
 def _run_public_recovery(root: Path, action: str, action_args: Sequence[str]) -> int:
     result = forward_command(
         root,
@@ -1505,10 +2147,18 @@ def _run_public_recovery(root: Path, action: str, action_args: Sequence[str]) ->
     )
     if result.returncode != 0:
         private_diagnostic = f"{result.stdout}\n{result.stderr}"
-        if action == "restore" and "Unknown operation:" in private_diagnostic:
+        safe_refusal = next(
+            (line for line in _RECOVERY_SAFE_REFUSALS if line in private_diagnostic),
+            "",
+        )
+        if action == "restore" and (
+            "Unknown operation:" in private_diagnostic or "找不到指定的操作日志" in private_diagnostic
+        ):
             message = "没有找到对应的知识库操作；请检查编号后重试。"
         elif action == "undo" and "没有可撤销的已提交操作" in private_diagnostic:
             message = "目前没有可撤销的知识库操作。"
+        elif safe_refusal:
+            message = safe_refusal
         elif action == "undo":
             message = "知识库撤销未完成；详细诊断已保留给 Agent。"
         else:
@@ -1522,9 +2172,31 @@ def _run_public_recovery(root: Path, action: str, action_args: Sequence[str]) ->
         else:
             print("未完成的知识库操作已安全恢复。")
     elif action == "undo":
-        print("最近一次知识库操作已撤销。若还需要，可再次使用 kb undo 撤销更早的操作。")
+        matched = _UNDO_OWNER_STDOUT_RE.search(result.stdout)
+        undone_op_id = matched.group(1) if matched else ""
+        label = _journal_operation_label(root, undone_op_id)
+        set_protocol_status(
+            "completed",
+            undone_op_id=undone_op_id,
+            undone_operation_label=label or "知识库操作",
+        )
+        if label:
+            print(f"已撤销：{label}。若还需要，可再次使用 kb undo 撤销更早的操作。")
+        else:
+            print("最近一次知识库操作已撤销。若还需要，可再次使用 kb undo 撤销更早的操作。")
     else:
-        print("知识库已恢复到指定操作之前的状态。")
+        matched = _RESTORE_OWNER_STDOUT_RE.search(result.stdout)
+        restored_op_id = matched.group(1) if matched else ""
+        label = _journal_operation_label(root, restored_op_id)
+        set_protocol_status(
+            "completed",
+            restored_op_id=restored_op_id,
+            restored_operation_label=label or "知识库操作",
+        )
+        if label:
+            print(f"知识库已恢复到「{label}」这次操作之前的状态。")
+        else:
+            print("知识库已恢复到指定操作之前的状态。")
     return 0
 
 
@@ -1538,8 +2210,65 @@ def handle_resume(args: argparse.Namespace, root: Path) -> int:
     return _run_public_recovery(root, "resume", [])
 
 
+def _print_restore_catalog(root: Path) -> int:
+    """Read-only public listing of recent restorable operations."""
+    try:
+        entries = _restore_catalog_entries(root)
+    except SystemExit as exc:
+        set_protocol_status("agent_action_required", restore_catalog_error=str(exc.code or "unavailable"))
+        print("知识库操作清单暂时无法读取；详细诊断已保留给 Agent。", file=sys.stderr)
+        return 1
+    if not entries:
+        set_protocol_status("completed", restorable_operation_count=0)
+        print("目前没有可恢复的知识库操作。")
+        return 0
+    catalog: list[dict[str, object]] = []
+    print("最近可恢复的知识库操作（最新在前）：")
+    for index, entry in enumerate(entries, start=1):
+        label = _public_operation_label(str(entry.get("op_type") or ""))
+        moment = _public_operation_time(entry)
+        print(f"{index}. {moment} · {label}")
+        catalog.append(
+            {
+                "public_index": index,
+                "op_id": str(entry.get("op_id") or ""),
+                "op_type": str(entry.get("op_type") or ""),
+                "label": label,
+                "started_at": str(entry.get("started_at") or ""),
+            }
+        )
+    print("需要恢复时请说：kb restore <编号>，会回到该操作之前的状态；编号以本清单为准。")
+    set_protocol_status("completed", restorable_operation_count=len(catalog))
+    add_agent_action(
+        "present_restore_catalog",
+        operations=catalog,
+        apply={"verb": "restore", "input": "public_index_or_op_id"},
+    )
+    return 0
+
+
 def handle_restore(args: argparse.Namespace, root: Path) -> int:
-    return _run_public_recovery(root, "restore", [args.op_id])
+    requested = str(getattr(args, "op_id", "") or "").strip()
+    if not requested:
+        return _print_restore_catalog(root)
+    if re.fullmatch(r"\d{1,3}", requested):
+        try:
+            entries = _restore_catalog_entries(root)
+        except SystemExit as exc:
+            set_protocol_status("agent_action_required", restore_catalog_error=str(exc.code or "unavailable"))
+            print("知识库操作清单暂时无法读取；详细诊断已保留给 Agent。", file=sys.stderr)
+            return 1
+        index = int(requested)
+        if index < 1 or index > len(entries):
+            set_protocol_status(
+                "agent_action_required",
+                restore_index_error="out_of_range",
+                restorable_operation_count=len(entries),
+            )
+            print("没有找到对应的知识库操作；可先运行不带编号的 kb restore 查看当前清单。", file=sys.stderr)
+            return 1
+        requested = str(entries[index - 1].get("op_id") or "")
+    return _run_public_recovery(root, "restore", [requested])
 
 
 def handle_reject(args: argparse.Namespace, root: Path) -> int:
@@ -1645,27 +2374,240 @@ def _remote_repo_snapshot_result(source: str, kind: str, *, verb: str) -> int | 
     return 1
 
 
+def _validated_batch_intake_result(
+    payload: object,
+    *,
+    expected_item_count: int,
+) -> tuple[list[dict[str, object]], int, int]:
+    if not isinstance(payload, Mapping):
+        raise ValueError("batch intake protocol must be a mapping")
+    raw_results = payload.get("results")
+    if not isinstance(raw_results, list) or len(raw_results) != expected_item_count:
+        raise ValueError("batch intake result count is invalid")
+
+    def nonnegative_integer(field: str) -> int:
+        value = payload.get(field)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"batch intake {field} is invalid")
+        return value
+
+    item_count = nonnegative_integer("item_count")
+    created_count = nonnegative_integer("created_count")
+    duplicate_count = nonnegative_integer("duplicate_count")
+    if item_count != expected_item_count or created_count + duplicate_count != item_count:
+        raise ValueError("batch intake totals are inconsistent")
+    rows: list[dict[str, object]] = []
+    for raw in raw_results:
+        if not isinstance(raw, Mapping):
+            raise ValueError("batch intake result item is invalid")
+        row = dict(raw)
+        if str(row.get("status") or "") not in {"created", "duplicate", "merged"}:
+            raise ValueError("batch intake result status is invalid")
+        if str(row.get("kind") or "") not in {"paper", "repo", "dataset", "blog"}:
+            raise ValueError("batch intake result kind is invalid")
+        if not str(row.get("unit_id") or "").strip():
+            raise ValueError("batch intake result unit id is missing")
+        rows.append(row)
+    if sum(1 for row in rows if row["status"] == "created") != created_count:
+        raise ValueError("batch intake created total is inconsistent")
+    if sum(1 for row in rows if row["status"] != "created") != duplicate_count:
+        raise ValueError("batch intake duplicate total is inconsistent")
+    return rows, created_count, duplicate_count
+
+
 def handle_add(args: argparse.Namespace, root: Path) -> int:
-    unsafe_result = _unsafe_local_source_result(args.source, root)
-    if unsafe_result is not None:
-        return unsafe_result
-    kind = args.kind or infer_add_kind(args.source, root)
-    snapshot_result = _remote_repo_snapshot_result(args.source, kind, verb="add")
-    if snapshot_result is not None:
-        return snapshot_result
+    raw_sources = args.source if isinstance(args.source, list) else [args.source]
+    sources = [str(source) for source in raw_sources if str(source).strip()]
+    if not 1 <= len(sources) <= 20:
+        print("一次可以加入 1 到 20 项资料；请调整数量后重试。", file=sys.stderr)
+        set_protocol_status("invalid_batch_size", item_count=len(sources))
+        return 2
+    kinds = [args.kind or infer_add_kind(source, root) for source in sources]
+    for source in sources:
+        unsafe_result = _unsafe_local_source_result(source, root)
+        if unsafe_result is not None:
+            return unsafe_result
+    remote_repos = [
+        source
+        for source, kind in zip(sources, kinds)
+        if kind == "repo" and source.strip().lower().startswith(("http://", "https://", "git@"))
+    ]
+    if len(sources) > 1 and remote_repos:
+        print(
+            "这批资料中的远程代码仓需要先建立安全的本地只读快照；整批尚未创建知识条目。"
+            "请让 AI 继续，它会先备好全部快照再重试。",
+            file=sys.stderr,
+        )
+        set_protocol_status(
+            "needs_local_repo_snapshot",
+            source_kind="repo",
+            sources=remote_repos,
+            batch_item_count=len(sources),
+        )
+        add_agent_action(
+            "localize_repo_sources",
+            sources=remote_repos,
+            retry_verb="add",
+        )
+        return 1
+    try:
+        autonomy = load_runtime_preferences(root).get("autonomy", {})
+    except Exception:  # noqa: BLE001
+        autonomy = {}
+    link_autodrive = str(autonomy.get("link_autodrive") or "ask_first").strip().lower() if isinstance(autonomy, Mapping) else "ask_first"
+    if len(sources) == 1:
+        single_args = argparse.Namespace(**vars(args))
+        single_args.source = sources[0]
+        if link_autodrive == "auto_deep_read":
+            return handle_ingest(single_args, root)
+        kind = kinds[0]
+        snapshot_result = _remote_repo_snapshot_result(sources[0], kind, verb="add")
+        if snapshot_result is not None:
+            return snapshot_result
+        result = forward_command(
+            root,
+            SCRIPT_BY_VERB["add"],
+            ["add", "--kind", kind, "--source", sources[0]],
+            stream=False,
+        )
+        if result.returncode != 0:
+            if _source_revision_decision_required(result):
+                print(
+                    "旧的降级条目已经包含核验或确认过的判断，系统没有自动替换。"
+                    "请告诉我你想保留两个版本，还是先复核旧判断后再迁移。",
+                    file=sys.stderr,
+                )
+                set_protocol_status("needs_user_input", source_kind=kind, decision="source-revision")
+                add_agent_action("resolve_source_revision", source=sources[0], source_kind=kind)
+                return result.returncode
+            print(
+                "资料未能加入知识库；请让 Agent 查看诊断后重试。"
+                "若是网页链接，也可以上传 PDF 或 HTML，或改用本地文件。",
+                file=sys.stderr,
+            )
+            return result.returncode
+        unit_id, _status = _extract_ingest_unit_id(result.stdout)
+        upgraded_from = _extract_source_upgrade_id(result.stdout)
+        public_unit_id = _public_display_text(unit_id, root, "编号已隐藏", 100) if unit_id else ""
+        suffix = f"，条目编号是 {public_unit_id}" if public_unit_id else ""
+        upgrade_note = "；旧的降级版本已原样保留并归档" if upgraded_from else ""
+        print(f"资料已轻量加入知识库{suffix}{upgrade_note}。需要我现在继续深读吗？")
+        set_protocol_status(
+            "needs_user_input",
+            unit_id=unit_id,
+            source_kind=kind,
+            link_autodrive="ask_first",
+            upgraded_from=upgraded_from,
+        )
+        add_agent_action(
+            "ask_once_to_deep_read",
+            unit_id=unit_id,
+            source_kind=kind,
+            source=sources[0],
+            next_verb="ingest",
+        )
+        return 0
+
+    scope = effective_ingest_scope(root) if link_autodrive == "auto_deep_read" else set()
+    if link_autodrive == "auto_deep_read" and "ingest" not in scope:
+        print("当前自动化偏好暂停了这批入库；如果你愿意，我可以整批继续。")
+        set_protocol_status("paused_by_autonomy", batch_item_count=len(sources))
+        add_agent_action("run_batch_after_authorization", sources=sources, source_kinds=kinds)
+        return 0
+    batch_arguments = ["batch-add"]
+    for source, kind in zip(sources, kinds):
+        batch_arguments.extend(
+            [
+                "--item",
+                json.dumps(
+                    {"kind": kind, "source": source, "maturity": "lightweight"},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            ]
+        )
     result = forward_command(
         root,
         SCRIPT_BY_VERB["add"],
-        ["add", "--kind", kind, "--source", args.source],
+        batch_arguments,
         stream=False,
+        extra_env={"RESEARCH_INGEST_CHAIN": "1"},
     )
     if result.returncode != 0:
-        print("资料未能加入知识库；详细诊断已保留给 Agent。", file=sys.stderr)
+        print("这批资料未能完整加入知识库；详细诊断已保留给 Agent。", file=sys.stderr)
         return result.returncode
-    emitted = emit_public_output(result.stdout, root)
-    emitted = emit_public_output(result.stderr, root, error=True) or emitted
-    if not emitted:
-        print("资料已加入知识库。")
+    try:
+        batch_payload = next(
+            json.loads(line)
+            for line in reversed(result.stdout.splitlines())
+            if line.lstrip().startswith("{")
+        )
+        rows, created_count, duplicate_count = _validated_batch_intake_result(
+            batch_payload,
+            expected_item_count=len(sources),
+        )
+    except (StopIteration, json.JSONDecodeError, TypeError, ValueError):
+        print("这批资料已交给入库流程，但结果清单不完整；Agent 会检查详细记录。", file=sys.stderr)
+        set_protocol_status("error", reason="invalid batch intake protocol")
+        return 1
+    created = [item for item in rows if item.get("status") == "created"]
+    prepared_count = 0
+    prepare_failures: list[dict[str, str]] = []
+    if link_autodrive == "auto_deep_read" and "generate-note" in scope:
+        for item in created:
+            kind = str(item.get("kind") or "")
+            unit_id = str(item.get("unit_id") or "")
+            if kind not in INGEST_ANALYZER or not unit_id:
+                continue
+            relative_script, verb, id_flag = INGEST_ANALYZER[kind]
+            prepare = forward_command(
+                root,
+                relative_script,
+                [verb, id_flag, unit_id, "--phase", "prepare"],
+                stream=False,
+            )
+            if prepare.returncode == 0:
+                prepared_count += 1
+            else:
+                prepare_failures.append({"kind": kind, "unit_id": unit_id})
+    print(
+        f"整批入库已完成：共 {len(sources)} 项，新增 {created_count} 项，"
+        f"已有或合并 {duplicate_count} 项。"
+    )
+    if not created:
+        print("这批来源都已存在，本次没有新资料需要继续深读。")
+        set_protocol_status(
+            "completed",
+            batch_item_count=len(sources),
+            created_count=created_count,
+            duplicate_count=duplicate_count,
+            prepared_count=0,
+        )
+        return 0
+    if link_autodrive == "auto_deep_read":
+        if prepare_failures:
+            print(f"已为 {prepared_count} 个新条目备好深读骨架；其余条目由 Agent 检查后继续。")
+        else:
+            print(f"已为 {prepared_count} 个新条目备好深读骨架，Agent 接下来会逐项补全并核验。")
+        set_protocol_status(
+            "agent_action_required",
+            batch_item_count=len(sources),
+            created_count=created_count,
+            duplicate_count=duplicate_count,
+            prepared_count=prepared_count,
+            prepare_failures=prepare_failures,
+        )
+        add_agent_action("complete_grounded_batch", units=created)
+    else:
+        print("需要我现在继续深读这批新资料吗？")
+        set_protocol_status(
+            "needs_user_input",
+            batch_item_count=len(sources),
+            created_count=created_count,
+            duplicate_count=duplicate_count,
+            link_autodrive="ask_first",
+        )
+        add_agent_action("ask_once_to_deep_read_batch", units=created)
     return 0
 
 
@@ -1673,25 +2615,20 @@ def handle_add(args: argparse.Namespace, root: Path) -> int:
 # ingest: chain the scriptable prefix of the ingestion pipeline (SSOT §7).      #
 #                                                                              #
 # `kb ingest <src>` runs intake add -> first analyzer prepare and STOPS there.  #
-# For papers that first prepare is screening: the session agent must verify the #
-# agent-authored paper_type before preparing the type-specific note. Scripts     #
-# never auto-run verify because they cannot fill understanding.                  #
+# Papers use one deep-read scaffold containing the agent-authored paper_type and #
+# its selected element branch. Scripts never auto-run verify because they cannot #
+# fill understanding.                                                            #
 # --------------------------------------------------------------------------- #
 
 # Governance ceiling for ingest safe auto-steps, mirroring research-orchestrator's
 # GOVERNANCE_MAX_AUTO_STEPS. runtime-preferences.autonomy.auto_execute_scope may
 # NARROW this but can never widen it; verify/confirm are never in the set.
-INGEST_GOVERNANCE_MAX_AUTO_STEPS = frozenset({"screen", "build-index", "refresh", "generate-note"})
+INGEST_GOVERNANCE_MAX_AUTO_STEPS = frozenset({"ingest", "build-index", "refresh", "generate-note"})
 
 # Ordered ingest chain: (step, gating scope token). intake landing is a
-# "screen"-class safe step; prepare (fillable skeleton) is a "generate-note"-class
+# "ingest"-class safe step; prepare (fillable skeleton) is a "generate-note"-class
 # safe step. Walk in order; a narrowed scope stops the chain at the first gap.
-INGEST_ANALYZER: dict[str, tuple[str, str, str]] = {
-    "paper": (".agents/skills/paper-analyst/scripts/paper.py", "screen", "--paper-id"),
-    "repo": (".agents/skills/repo-analyst/scripts/repo.py", "map-capability", "--repo-id"),
-    "dataset": (".agents/skills/dataset-analyst/scripts/dataset.py", "profile", "--dataset-id"),
-    "blog": (".agents/skills/blog-analyst/scripts/blog.py", "complete-note", "--blog-id"),
-}
+INGEST_ANALYZER: dict[str, tuple[str, str, str]] = dict(UNIT_ANALYZER_PREPARE_BY_KIND)
 
 
 def effective_ingest_scope(root: Path) -> set[str]:
@@ -1708,9 +2645,9 @@ def effective_ingest_scope(root: Path) -> set[str]:
 def _extract_ingest_unit_id(stdout: str) -> tuple[str, str]:
     """Parse (unit_id, status) from intake add stdout.
 
-    status is "created" | "duplicate" | "unknown". A duplicate must NOT be
-    re-prepared (re-scaffolding would blank an agent's in-progress fill), so the
-    caller stops and reports it.
+    status is "created" | "duplicate" | "unknown". Duplicate handling is
+    state-aware: a source-only unit may continue to prepare, while an existing
+    fill is preserved and resumed through the private AgentProtocol.
     """
     created = re.search(r"\[ok\] created\s+.*?/([^/\s]+)/record\.yaml", stdout)
     if created:
@@ -1721,14 +2658,118 @@ def _extract_ingest_unit_id(stdout: str) -> tuple[str, str]:
     return "", "unknown"
 
 
+def _extract_source_upgrade_id(stdout: str) -> str:
+    matched = re.search(r"\[source\] upgraded_from=(\S+)", stdout)
+    return matched.group(1) if matched else ""
+
+
+def _source_revision_decision_required(result: CommandResult) -> bool:
+    return "explicit user migration approval is required" in f"{result.stdout}\n{result.stderr}"
+
+
+_INGEST_FILL_ARTIFACTS = {
+    "paper": "note-fill.yaml",
+    "repo": "capability-fill.yaml",
+    "dataset": "dataset-fill.yaml",
+    "blog": "blog-fill.yaml",
+}
+
+
+def _duplicate_ingest_state(root: Path, kind: str, unit_id: str) -> tuple[str, Path | None]:
+    """Return canonical workflow state and the expected current fill artifact."""
+    path = record_path(root, kind, unit_id)
+    record = load_yaml(path, default={})
+    if not isinstance(record, dict) or not record:
+        return "unknown", None
+    state = record_workflow_state(record)
+    unit_root = path.parent
+    fill_path = unit_root / _INGEST_FILL_ARTIFACTS[kind]
+    return state, fill_path
+
+
+def _resume_duplicate_ingest(
+    root: Path,
+    *,
+    kind: str,
+    unit_id: str,
+    public_unit_id: str,
+) -> tuple[bool, tuple[str, str, str] | None]:
+    """Preserve existing work and describe the safe continuation.
+
+    Returns ``(handled, prepare_spec)``. ``prepare_spec`` is non-None only when
+    no fill artifact exists and it is safe for the caller to create one.
+    """
+    state, fill_path = _duplicate_ingest_state(root, kind, unit_id)
+    relative_script, verb, id_flag = INGEST_ANALYZER[kind]
+    if state in {"source_ready", "awaiting_agent_fill"} and fill_path is not None and not fill_path.exists():
+        return False, (relative_script, verb, id_flag)
+
+    if state == "ready_for_review":
+        print(f"知识条目 {public_unit_id} 已完成核验，现有内容保持不变；接下来只需你确认判断。")
+        set_protocol_status("ready_for_review", unit_id=unit_id, source_kind=kind)
+        add_agent_action("request_user_confirmation", unit_id=unit_id, source_kind=kind)
+        return True, None
+    if state == "done":
+        print(f"知识条目 {public_unit_id} 已存在且流程已经完成，本次没有改动。")
+        set_protocol_status("already_complete", unit_id=unit_id, source_kind=kind)
+        return True, None
+    if state == "failed_retryable":
+        print(f"知识条目 {public_unit_id} 已存在，但上次处理尚未完成；现有内容保持不变，Agent 会检查后续恢复。")
+        set_protocol_status("failed_retryable", unit_id=unit_id, source_kind=kind)
+        add_agent_action("diagnose_retryable_ingest", unit_id=unit_id, source_kind=kind)
+        return True, None
+
+    if fill_path is not None and fill_path.exists():
+        print(f"知识条目 {public_unit_id} 已有待补全或待核验内容，现有填写已保留；Agent 会从当前阶段继续。")
+        set_protocol_status("agent_action_required", unit_id=unit_id, source_kind=kind, workflow_state=state)
+        add_agent_action(
+            "continue_existing_fill",
+            unit_id=unit_id,
+            source_kind=kind,
+            owner=relative_script,
+            arguments=[verb, id_flag, unit_id, "--phase", "verify"],
+        )
+        return True, None
+
+    print(f"知识条目 {public_unit_id} 已存在；现有内容保持不变，Agent 会检查当前阶段后继续。")
+    set_protocol_status("duplicate_needs_inspection", unit_id=unit_id, source_kind=kind, workflow_state=state)
+    add_agent_action("inspect_existing_unit", unit_id=unit_id, source_kind=kind)
+    return True, None
+
+
 def handle_ingest(args: argparse.Namespace, root: Path) -> int:
-    unsafe_result = _unsafe_local_source_result(args.source, root)
-    if unsafe_result is not None:
-        return unsafe_result
-    kind = args.kind or infer_add_kind(args.source, root)
-    snapshot_result = _remote_repo_snapshot_result(args.source, kind, verb="ingest")
-    if snapshot_result is not None:
-        return snapshot_result
+    human_note_area = str(getattr(args, "human_note_area", "") or "")
+    human_note_filename = str(getattr(args, "human_note_filename", "") or "")
+    human_note = bool(human_note_area or human_note_filename)
+    source = str(getattr(args, "source", "") or "")
+    if human_note:
+        if not human_note_area or not human_note_filename or source or getattr(args, "kind", None):
+            print("人工笔记选择不完整；请重新明确指定笔记所在区域和文件名。")
+            set_protocol_status("needs_user_input", source_origin="human-note")
+            add_agent_action("select_human_note", choices=["inbox", "annotations"])
+            return 2
+        kind = "blog"
+        intake_arguments = [
+            "human-note",
+            "--area",
+            human_note_area,
+            "--filename",
+            human_note_filename,
+        ]
+    else:
+        if not source:
+            print("请告诉我需要入库的链接或本地资料。")
+            set_protocol_status("needs_user_input")
+            add_agent_action("provide_ingest_source")
+            return 2
+        unsafe_result = _unsafe_local_source_result(source, root)
+        if unsafe_result is not None:
+            return unsafe_result
+        kind = args.kind or infer_add_kind(source, root)
+        snapshot_result = _remote_repo_snapshot_result(source, kind, verb="ingest")
+        if snapshot_result is not None:
+            return snapshot_result
+        intake_arguments = ["add", "--kind", kind, "--source", source]
     if kind not in INGEST_ANALYZER:
         print("暂时无法判断资料类型；请告诉我是论文、代码仓还是技术文章。")
         set_protocol_status("needs_user_input", inferred_kind=kind)
@@ -1736,35 +2777,55 @@ def handle_ingest(args: argparse.Namespace, root: Path) -> int:
         return 2
     scope = effective_ingest_scope(root)
 
-    # Step 1: intake add (safe step gated by "screen") — the scriptable half before
+    # Step 1: intake add (safe step gated by "ingest") — the scriptable half before
     # the agent fills. RESEARCH_INGEST_CHAIN tells intake the chain auto-continues.
-    if "screen" not in scope:
+    if "ingest" not in scope:
         print("当前自动化偏好暂停了这次入库；如果你愿意，我可以继续。")
         set_protocol_status("paused_by_autonomy", source_kind=kind)
         add_agent_action(
             "run_owner_step_after_authorization",
             owner=SCRIPT_BY_VERB["add"],
-            arguments=["add", "--kind", kind, "--source", args.source],
+            arguments=intake_arguments,
         )
         return 0
 
     intake = forward_command(
         root,
         SCRIPT_BY_VERB["add"],
-        ["add", "--kind", kind, "--source", args.source],
+        intake_arguments,
         stream=False,
         extra_env={"RESEARCH_INGEST_CHAIN": "1"},
     )
     if intake.returncode != 0:
-        print("资料未能加入知识库；详细诊断已保留给 Agent。", file=sys.stderr)
+        if _source_revision_decision_required(intake):
+            print(
+                "旧的降级条目已经包含核验或确认过的判断，系统没有自动替换。"
+                "请告诉我你想保留两个版本，还是先复核旧判断后再迁移。",
+                file=sys.stderr,
+            )
+            set_protocol_status("needs_user_input", source_kind=kind, decision="source-revision")
+            add_agent_action("resolve_source_revision", source=source, source_kind=kind)
+            return intake.returncode
+        print(
+            "资料未能加入知识库；请让 Agent 查看诊断后重试。"
+            "若是网页链接，也可以上传 PDF 或 HTML，或改用本地文件。",
+            file=sys.stderr,
+        )
         return intake.returncode
 
     unit_id, status = _extract_ingest_unit_id(intake.stdout)
+    upgraded_from = _extract_source_upgrade_id(intake.stdout)
     public_unit_id = _public_display_text(unit_id, root, "编号已隐藏", 100) if unit_id else ""
+    duplicate_prepare: tuple[str, str, str] | None = None
     if status == "duplicate":
-        print(f"知识条目 {public_unit_id} 已存在；为保护已有工作，本次没有重新生成骨架。")
-        set_protocol_status("duplicate", unit_id=unit_id, source_kind=kind)
-        return 0
+        handled, duplicate_prepare = _resume_duplicate_ingest(
+            root,
+            kind=kind,
+            unit_id=unit_id,
+            public_unit_id=public_unit_id,
+        )
+        if handled:
+            return 0
     if not unit_id:
         print("资料已交给入库流程，但暂时无法确认新条目编号；Agent 会检查详细结果。")
         set_protocol_status("error", source_kind=kind, reason="created unit id was not returned")
@@ -1773,8 +2834,7 @@ def handle_ingest(args: argparse.Namespace, root: Path) -> int:
     # Step 2: analyzer prepare (safe step gated by "generate-note") — produces the
     # fillable skeleton. NEVER verify (a script cannot fill understanding).
     if "generate-note" not in scope:
-        paused_stage = "初筛准备" if kind == "paper" else "深读准备"
-        print(f"资料已入库为 {public_unit_id}；当前自动化偏好暂停了{paused_stage}。")
+        print(f"资料已入库为 {public_unit_id}；当前自动化偏好暂停了深读准备。")
         relative_script, verb, id_flag = INGEST_ANALYZER[kind]
         set_protocol_status("paused_by_autonomy", unit_id=unit_id, source_kind=kind)
         add_agent_action(
@@ -1784,7 +2844,7 @@ def handle_ingest(args: argparse.Namespace, root: Path) -> int:
         )
         return 0
 
-    relative_script, verb, id_flag = INGEST_ANALYZER[kind]
+    relative_script, verb, id_flag = duplicate_prepare or INGEST_ANALYZER[kind]
     prepare = forward_command(
         root,
         relative_script,
@@ -1792,52 +2852,36 @@ def handle_ingest(args: argparse.Namespace, root: Path) -> int:
         stream=False,
     )
     if prepare.returncode != 0:
-        failed_stage = "初筛准备" if kind == "paper" else "深读准备"
-        print(f"资料已入库，但{failed_stage}未完成；详细诊断已保留给 Agent。")
+        print("资料已入库，但深读准备未完成；详细诊断已保留给 Agent。")
         set_protocol_status("error", unit_id=unit_id, source_kind=kind, stage="prepare")
         return prepare.returncode
 
     if kind == "paper":
+        upgrade_note = "旧的降级版本已原样保留并归档；" if upgraded_from else ""
         print(
-            f"资料已入库并备好初筛骨架，条目编号是 {public_unit_id}。"
-            "Agent 接下来会先用逐字证据确定论文类型，再生成对应的深读笔记；需要判断时再请你拍板。"
+            f"资料已入库并备好统一深读骨架，条目编号是 {public_unit_id}。"
+            f"{upgrade_note}Agent 接下来会用逐字证据填写论文类型及对应五要素并校验；整份判断只在最后请你拍板。"
         )
     else:
         print(f"资料已入库并备好深读骨架，条目编号是 {public_unit_id}。Agent 接下来会补全逐字证据并校验；需要判断时再请你拍板。")
     verify_arguments = [verb, id_flag, unit_id, "--phase", "verify"]
     if kind == "paper":
-        note_prepare_arguments = ["complete-note", id_flag, unit_id, "--phase", "prepare"]
-        note_verify_arguments = ["complete-note", id_flag, unit_id, "--phase", "verify"]
         remaining_steps: list[dict[str, object]] = [
             {
-                "step": "fill_grounded_screening",
+                "step": "fill_grounded_paper_note",
                 "source": "parse_cache",
                 "requirements": [
                     "paper_type",
-                    "worth_deep_reading",
-                    "judgement_reason",
-                    "relevance_to_current_research",
-                    "verbatim_quote",
-                    "locator",
+                    "paper_type_reason",
+                    "paper_type_evidence_refs",
+                    "selected_type_elements",
+                    "element_evidence_refs",
                 ],
-            },
-            {"step": "verify_screening", "owner": relative_script, "arguments": verify_arguments},
-            {
-                "step": "prepare_type_specific_note",
-                "owner": relative_script,
-                "arguments": note_prepare_arguments,
-                "requires": "verified_screening",
-            },
-            {
-                "step": "fill_grounded_elements",
-                "source": "parse_cache",
-                "element_set_source": "verified_screening.paper_type_or_method_system_fallback",
-                "requirements": ["verbatim_quote", "locator"],
             },
             {
                 "step": "verify_note",
                 "owner": relative_script,
-                "arguments": note_verify_arguments,
+                "arguments": verify_arguments,
                 "includes_configured_post_note_actions": True,
             },
         ]
@@ -1857,22 +2901,21 @@ def handle_ingest(args: argparse.Namespace, root: Path) -> int:
             "authorization_source": "user_message",
         }
     )
-    set_protocol_status("agent_action_required", unit_id=unit_id, source_kind=kind)
+    set_protocol_status(
+        "agent_action_required",
+        unit_id=unit_id,
+        source_kind=kind,
+        source_origin="human-note" if human_note else "external-source",
+    )
     add_agent_action(
         "complete_grounded_ingest",
         unit_id=unit_id,
         source_kind=kind,
+        source_origin="human-note" if human_note else "external-source",
         prepare_output=prepare.stdout,
         steps=remaining_steps,
     )
     return 0
-
-
-def bool_text(value: object, default: str = "true") -> str:
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    text = str(value or "").strip().lower()
-    return text if text in AUTO_SCREEN_CHOICES else default
 
 
 def language_text(value: object, default: str = "zh") -> str:
@@ -1887,8 +2930,8 @@ def language_text(value: object, default: str = "zh") -> str:
 def runtime_pref_defaults(root: Path) -> dict[str, object]:
     preferences = load_runtime_preferences(root)
     identity = preferences.get("identity", {}) if isinstance(preferences.get("identity"), dict) else {}
-    paper = preferences.get("paper", {}) if isinstance(preferences.get("paper"), dict) else {}
     versioning = preferences.get("versioning", {}) if isinstance(preferences.get("versioning"), dict) else {}
+    autonomy = preferences.get("autonomy", {}) if isinstance(preferences.get("autonomy"), dict) else {}
     profile = load_yaml(config_root(root) / "user-profile.yaml", default={})
     profile_preferences = profile.get("preferences", {}) if isinstance(profile, dict) and isinstance(profile.get("preferences"), dict) else {}
     personalization = profile.get("personalization", {}) if isinstance(profile, dict) and isinstance(profile.get("personalization"), dict) else {}
@@ -1911,6 +2954,12 @@ def runtime_pref_defaults(root: Path) -> dict[str, object]:
         or personalization.get("resources")
         or ""
     ).strip()
+    link_autodrive = str(autonomy.get("link_autodrive") or "ask_first").strip().lower()
+    if link_autodrive not in LINK_AUTODRIVE_CHOICES:
+        link_autodrive = "ask_first"
+    discussion_style = str(personalization.get("discussion_style") or "adaptive").strip().lower()
+    if discussion_style not in DISCUSSION_STYLE_CHOICES:
+        discussion_style = "adaptive"
     return {
         "name": str(identity.get("default_confirmed_by") or "").strip(),
         "lang": language_text(profile_preferences.get("language_preference", "zh")),
@@ -1925,7 +2974,8 @@ def runtime_pref_defaults(root: Path) -> dict[str, object]:
             "constraints": constraints,
         },
         "auto_commit": str(versioning.get("auto_commit_mode") or "milestone").strip().lower(),
-        "auto_screen": bool_text(paper.get("auto_screen_on_intake", True)),
+        "link_autodrive": link_autodrive,
+        "discussion_style": discussion_style,
     }
 
 
@@ -1940,11 +2990,19 @@ def public_init_defaults_summary(defaults: Mapping[str, object]) -> str:
         "milestone": "里程碑版本记录",
         "aggressive": "高频版本记录",
     }.get(str(defaults.get("auto_commit") or "").strip().lower(), "保留现有版本记录设置")
-    screening_label = {
-        "true": "论文自动初筛开启",
-        "false": "论文自动初筛关闭",
-    }.get(str(defaults.get("auto_screen") or "").strip().lower(), "保留现有论文初筛设置")
-    return f"选择“默认即可”会保留当前设置：{language_label}、{commit_label}、{screening_label}。"
+    autodrive_label = {
+        "ask_first": "丢链接后先轻量入库再询问是否深读",
+        "auto_deep_read": "丢链接后自动深读到待确认笔记",
+    }.get(str(defaults.get("link_autodrive") or "").strip().lower(), "保留现有链接处理档位")
+    discussion_label = {
+        "challenge": "讨论风格偏挑战",
+        "refine": "讨论风格偏打磨",
+        "adaptive": "讨论风格自适应",
+    }.get(str(defaults.get("discussion_style") or "").strip().lower(), "保留现有讨论风格")
+    return (
+        "选择“默认即可”会保留当前设置："
+        f"{language_label}、{commit_label}、{autodrive_label}、{discussion_label}。"
+    )
 
 
 def config_set_profile_command(key: str, value: str) -> tuple[str, Sequence[str]]:
@@ -1958,12 +3016,56 @@ def config_set_runtime_pref_command(section: str, key: str, value: str) -> tuple
     )
 
 
-def build_init_pref_commands(*, name: str, lang: str, auto_commit: str, auto_screen: str) -> list[tuple[str, Sequence[str]]]:
+_MISSING_CONFIG_VALUE = object()
+
+
+def _nested_config_value(payload: object, dotted_key: str) -> object:
+    current = payload
+    for key in (part for part in dotted_key.split(".") if part):
+        if not isinstance(current, dict) or key not in current:
+            return _MISSING_CONFIG_VALUE
+        current = current[key]
+    return current
+
+
+def _parsed_config_value(raw: object) -> object:
+    text = str(raw).strip()
+    if text.lower() in {"true", "false"}:
+        return text.lower() == "true"
+    if text.lower() == "null":
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return raw
+
+
+def _append_profile_update(
+    commands: list[tuple[str, Sequence[str]]],
+    profile: object,
+    key: str,
+    value: object,
+) -> None:
+    if _nested_config_value(profile, key) != _parsed_config_value(value):
+        commands.append(config_set_profile_command(key, str(value)))
+
+
+def _append_runtime_update(
+    commands: list[tuple[str, Sequence[str]]],
+    preferences: object,
+    section: str,
+    key: str,
+    value: object,
+) -> None:
+    if _nested_config_value(preferences, f"{section}.{key}") != _parsed_config_value(value):
+        commands.append(config_set_runtime_pref_command(section, key, str(value)))
+
+
+def build_init_pref_commands(*, name: str, lang: str, auto_commit: str) -> list[tuple[str, Sequence[str]]]:
     return [
         config_set_runtime_pref_command("identity", "default_confirmed_by", name),
         config_set_profile_command("preferences.language_preference", lang),
         config_set_runtime_pref_command("versioning", "auto_commit_mode", auto_commit),
-        config_set_runtime_pref_command("paper", "auto_screen_on_intake", auto_screen),
     ]
 
 
@@ -1982,31 +3084,48 @@ def build_headless_init_pref_commands(
         args.name is None
         and args.lang is None
         and args.auto_commit is None
-        and args.auto_screen is None
+        and getattr(args, "auto_ingest_mode", None) is None
+        and getattr(args, "discussion_style", None) is None
         and getattr(args, "quick_resource", None) is None
         and getattr(args, "quick_constraints", None) is None
         and all(value is None for _, value in persona_values)
     ):
         return None
     commands: list[tuple[str, Sequence[str]]] = []
+    profile = load_yaml(config_root(root) / "user-profile.yaml", default={})
+    preferences = load_runtime_preferences(root)
     if args.name is not None:
         name = str(args.name or "").strip()
         if not name:
             raise SystemExit("确认人姓名不能为空。")
         if is_ai_signer(name):
             raise SystemExit("确认人必须是真实用户，不能使用 AI 工具名称。")
-        commands.append(config_set_runtime_pref_command("identity", "default_confirmed_by", name))
+        _append_runtime_update(commands, preferences, "identity", "default_confirmed_by", name)
     if args.lang is not None:
-        commands.append(config_set_profile_command("preferences.language_preference", args.lang))
+        _append_profile_update(commands, profile, "preferences.language_preference", args.lang)
     if args.auto_commit is not None:
-        commands.append(config_set_runtime_pref_command("versioning", "auto_commit_mode", args.auto_commit))
-    if args.auto_screen is not None:
-        commands.append(config_set_runtime_pref_command("paper", "auto_screen_on_intake", args.auto_screen))
+        _append_runtime_update(commands, preferences, "versioning", "auto_commit_mode", args.auto_commit)
+    # Both interaction fields share research-config-manager's canonical
+    # `set-interaction` write path (I4): autonomy.link_autodrive lives in the
+    # runtime preferences, personalization.discussion_style in the profile.
+    interaction_flags: list[str] = []
+    auto_ingest_mode = getattr(args, "auto_ingest_mode", None)
+    if auto_ingest_mode is not None and _nested_config_value(
+        preferences, "autonomy.link_autodrive"
+    ) != _parsed_config_value(auto_ingest_mode):
+        interaction_flags.extend(["--auto-ingest-mode", str(auto_ingest_mode)])
+    discussion_style = getattr(args, "discussion_style", None)
+    if discussion_style is not None and _nested_config_value(
+        profile, "personalization.discussion_style"
+    ) != _parsed_config_value(discussion_style):
+        interaction_flags.extend(["--discussion-style", str(discussion_style)])
+    if interaction_flags:
+        commands.append((SCRIPT_BY_VERB["init_config"], ["set-interaction", *interaction_flags]))
     if getattr(args, "quick_resource", None) is not None:
         resource_statement = str(args.quick_resource or "").strip()
         if not resource_statement:
             raise SystemExit("资源说明不能为空。")
-        commands.append(config_set_profile_command("resources.quick_setup", resource_statement))
+        _append_profile_update(commands, profile, "resources.quick_setup", resource_statement)
     quick_constraints = getattr(args, "quick_constraints", None)
     if quick_constraints is not None:
         profile = load_yaml(config_root(root) / "user-profile.yaml", default={})
@@ -2026,15 +3145,15 @@ def build_headless_init_pref_commands(
                 merged.append(constraint)
                 seen.add(constraint)
         if merged != existing:
-            commands.append(
-                config_set_profile_command(
-                    "constraints",
-                    json.dumps(merged, ensure_ascii=False),
-                )
+            _append_profile_update(
+                commands,
+                profile,
+                "constraints",
+                json.dumps(merged, ensure_ascii=False),
             )
     for key, value in persona_values:
         if value is not None:
-            commands.append(config_set_profile_command(key, value))
+            _append_profile_update(commands, profile, key, value)
     return commands
 
 
@@ -2071,7 +3190,7 @@ def workspace_init_complete(root: Path) -> bool:
     kb = kb_root(root)
     required_directories = [
         kb / "units" / unit_dir
-        for unit_dir in ("papers", "repos", "datasets", "blogs", "ideas", "experiments")
+        for unit_dir in ("papers", "repos", "datasets", "blogs", "ideas", "experiments", "concepts")
     ] + [
         kb / "programs",
         kb / "user" / "reading-lists",
@@ -2162,6 +3281,8 @@ def handle_init(args: argparse.Namespace, root: Path) -> int:
     if not defaults["name"] or is_ai_signer(defaults["name"]):
         print(
             "知识库基础结构已准备好，现在可以开始使用。是否花约 1 分钟完成快速设置？"
+            "选“现在设置”会在同一回合一起确认：真实署名、语言与术语、研究方向、资源与约束，"
+            "以及丢链接后的处理档位（先询问再深读 / 自动深读）和讨论风格（挑战 / 打磨 / 自适应）。"
             "请回复“现在设置”（推荐）或“先跳过”；以后也可以直接说“补充我的研究偏好”。"
             f"{public_init_defaults_summary(defaults)}"
             "第一次确认研究判断前仍会询问真实署名。"
@@ -2178,6 +3299,8 @@ def handle_init(args: argparse.Namespace, root: Path) -> int:
                 "language_and_terminology",
                 "research_focus",
                 "resources_and_constraints",
+                "link_autodrive",
+                "discussion_style",
             ],
             defaults=defaults,
             required_before={"judgement_confirmation": ["human_name"]},
@@ -2198,6 +3321,28 @@ def handle_init(args: argparse.Namespace, root: Path) -> int:
                         "repeatable": True,
                         "merge": "append_deduplicate",
                     },
+                    "link_autodrive": {
+                        "input": "--auto-ingest-mode",
+                        "choices": list(LINK_AUTODRIVE_CHOICES),
+                        "default": "ask_first",
+                        "canonical": {
+                            "owner": "research-config-manager",
+                            "command": "set-interaction",
+                            "store": "runtime-preferences",
+                            "key": "autonomy.link_autodrive",
+                        },
+                    },
+                    "discussion_style": {
+                        "input": "--discussion-style",
+                        "choices": list(DISCUSSION_STYLE_CHOICES),
+                        "default": "adaptive",
+                        "canonical": {
+                            "owner": "research-config-manager",
+                            "command": "set-interaction",
+                            "store": "user-profile",
+                            "key": "personalization.discussion_style",
+                        },
+                    },
                 },
             },
             defer={
@@ -2216,20 +3361,52 @@ def handle_init(args: argparse.Namespace, root: Path) -> int:
 
 def build_review_list_args(fuzzy: str | None) -> list[str]:
     fuzzy_text = (fuzzy or "").strip()
-    fuzzy_kind = fuzzy_text.lower()
+    fuzzy_kind = REVIEW_KIND_ALIASES.get(fuzzy_text.casefold(), "")
     if not fuzzy_text:
         return ["review-queue"]
-    if fuzzy_kind in REVIEW_KIND_CHOICES:
+    if fuzzy_kind:
         return ["review-queue", "--kind", fuzzy_kind]
     return ["query", "--query", fuzzy_text, "--confirmation-status", "pending_user_confirmation"]
 
 
+def _review_unit_records(root: Path) -> dict[tuple[str, str], dict]:
+    records: dict[tuple[str, str], dict] = {}
+    duplicates: set[tuple[str, str]] = set()
+    for record in iter_records(root):
+        key = (str(record.get("kind") or ""), str(record.get("id") or ""))
+        if not all(key):
+            continue
+        if key in records:
+            duplicates.add(key)
+            continue
+        records[key] = record
+    for key in duplicates:
+        records.pop(key, None)
+    return records
+
+
+def _review_unit_titles(root: Path) -> dict[tuple[str, str], str]:
+    return {
+        key: str(record.get("title") or "")
+        for key, record in _review_unit_records(root).items()
+    }
+
+
 def load_review_records(root: Path, fuzzy: str | None) -> list[dict]:
-    fuzzy_text = (fuzzy or "").strip()
-    fuzzy_kind = fuzzy_text.lower()
-    if fuzzy_kind in REVIEW_KIND_CHOICES:
-        return search_records(root, "", kind=fuzzy_kind, confirmation_status="pending_user_confirmation")
-    return search_records(root, fuzzy_text, confirmation_status="pending_user_confirmation")
+    """Compatibility projection of only the canonical ready unit-card set."""
+    titles = _review_unit_titles(root)
+    records: list[dict] = []
+    for card in discover_pending_judgements(root):
+        subject = card.get("subject") if isinstance(card.get("subject"), Mapping) else {}
+        kind = str(subject.get("kind") or "")
+        subject_id = str(subject.get("id") or "")
+        if kind not in PUBLIC_KIND_LABELS:
+            continue
+        title = titles.get((kind, subject_id), "")
+        matched, _reason = _review_card_match(card, fuzzy, title=title)
+        if matched:
+            records.append(_review_card_record(card, title=title))
+    return records
 
 
 _PUBLIC_CLAIM_TYPE_LABELS = {
@@ -2238,6 +3415,340 @@ _PUBLIC_CLAIM_TYPE_LABELS = {
     "evaluation": "评价",
     "user_opinion": "用户观点",
 }
+
+_LEGACY_PUBLIC_REVIEW_LIMIT = 3
+_PUBLIC_REVIEW_ABSOLUTE_MAX = 20
+_REVIEW_SNAPSHOT_SCHEMA = "kb-review-snapshot/v2"
+_LEGACY_REVIEW_SNAPSHOT_TTL_SECONDS = 24 * 60 * 60
+_REVIEW_SNAPSHOT_TOMBSTONE_GRACE_SECONDS = 24 * 60 * 60
+_REVIEW_SNAPSHOT_GC_SCAN_LIMIT = 256
+_REVIEW_SNAPSHOT_TOKEN_RE = re.compile(r"[0-9a-f]{32}")
+_SIDE_JUDGEMENT_KIND_LABELS = {
+    "program_decision": "研究决策",
+    "idea_discussion_conclusion": "想法讨论结论",
+    "method_selection": "方法仓库选择",
+    "survey_judgement": "文献综述",
+    "paper_draft_section": "论文分节草稿",
+    "user_preference": "表达偏好",
+}
+_REVIEW_PRIORITY = {"critical": 4, "high": 3, "normal": 2, "low": 1}
+
+
+class ReviewSnapshotError(ValueError):
+    """Stable internal failure class for the one-time public review adapter."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+@dataclass(frozen=True)
+class ReviewSnapshotLease:
+    """Pure-read binding for one displayed review decision set."""
+
+    token: str
+    protocol_relative_path: str
+    review_items: tuple[dict[str, object], ...]
+    registry_path: Path
+    governance_profile: str
+    item_limit: int
+    ttl_seconds: int
+
+
+def _review_card_record(card: Mapping[str, object], *, title: str = "") -> dict[str, object]:
+    """Project an internal side-artifact card into the existing review renderer."""
+    subject = card.get("subject")
+    subject = subject if isinstance(subject, Mapping) else {}
+    kind = str(subject.get("kind") or "")
+    claims = card.get("claims")
+    claims = claims if isinstance(claims, list) else []
+    information_types = sorted(
+        {
+            str(claim.get("claim_type") or "")
+            for claim in claims
+            if isinstance(claim, Mapping) and str(claim.get("claim_type") or "")
+        }
+    )
+    substance = card.get("substance")
+    substance = dict(substance) if isinstance(substance, Mapping) else {}
+    return {
+        "id": str(subject.get("id") or ""),
+        "kind": kind,
+        "title": title or _SIDE_JUDGEMENT_KIND_LABELS.get(kind, "跨流程判断"),
+        "priority": str(card.get("priority") or "normal"),
+        "updated_at": str(card.get("updated_at") or ""),
+        "confirmation_status": "pending_user_confirmation",
+        "needs_human_confirmation": True,
+        "information_types": [*information_types, "unverified"],
+        "source": {"kind": "ai"},
+        "payload": {**substance, "claims": claims, "verification": dict(card.get("verification") or {})},
+    }
+
+
+def _review_card_match(
+    card: Mapping[str, object],
+    fuzzy: str | None,
+    *,
+    title: str = "",
+) -> tuple[bool, str]:
+    query = str(fuzzy or "").strip().casefold()
+    if not query:
+        return True, ""
+    subject = card.get("subject")
+    subject = subject if isinstance(subject, Mapping) else {}
+    kind = str(subject.get("kind") or "").casefold()
+    kind_filter = REVIEW_KIND_ALIASES.get(query)
+    if kind_filter:
+        return kind == kind_filter, "kind_alias" if kind == kind_filter else ""
+    if query in str(title or "").casefold():
+        return True, "title"
+    if query in str(subject.get("id") or "").casefold():
+        return True, "public_id"
+    claims = card.get("claims")
+    claims = claims if isinstance(claims, list) else []
+    if any(
+        query in str(claim.get("text") or "").casefold()
+        for claim in claims
+        if isinstance(claim, Mapping)
+    ):
+        return True, "confirmable_claim"
+    return False, ""
+
+
+def _review_match_public_reason(reason: str) -> str:
+    return {
+        "kind_alias": "资料类型",
+        "title": "标题",
+        "public_id": "公开编号",
+        "confirmable_claim": "可确认判断正文",
+    }.get(reason, "")
+
+
+def _review_sort_key(record: Mapping[str, object]) -> tuple[object, ...]:
+    priority = str(record.get("priority") or "normal").strip().casefold()
+    updated_at = str(record.get("updated_at") or record.get("timestamp") or "").strip()
+    return (
+        -_REVIEW_PRIORITY.get(priority, _REVIEW_PRIORITY["normal"]),
+        updated_at or "9999-12-31T23:59:59Z",
+        str(record.get("id") or ""),
+    )
+
+
+def _review_decision_routes(
+    record: Mapping[str, object],
+    card: Mapping[str, object] | None,
+) -> dict[str, object]:
+    kind = str(record.get("kind") or "")
+    subject_id = str(record.get("id") or "")
+    display = {
+        "kind": kind,
+        "title": str(record.get("title") or ""),
+    }
+    if kind in PUBLIC_KIND_LABELS:
+        routes = {
+            "subject": {"kind": kind, "id": subject_id, "owner": "knowledge-base-manager"},
+            "display": display,
+            "confirm_route": {
+                "owner": "knowledge-base-manager",
+                "action": "confirm",
+                "id": subject_id,
+            },
+            "reject_route": {
+                "owner": "knowledge-base-manager",
+                "action": "promote",
+                "id": subject_id,
+                "confirmation_status": "rejected",
+            },
+        }
+        routes["snapshot_binding"] = judgement_snapshot_binding(
+            dict(record),
+            owner="knowledge-base-manager",
+            path=record_path(Path("."), kind, subject_id).as_posix(),
+        )
+        return routes
+    raw_subject = card.get("subject") if isinstance(card, Mapping) else {}
+    subject = dict(raw_subject) if isinstance(raw_subject, Mapping) else {"kind": kind, "id": subject_id}
+    raw_confirm = card.get("confirm_route") if isinstance(card, Mapping) else {}
+    raw_confirm = raw_confirm if isinstance(raw_confirm, Mapping) else {}
+    owner = str(raw_confirm.get("owner") or subject.get("owner") or "")
+    if kind == "user_preference":
+        raw_reject = card.get("reject_route") if isinstance(card, Mapping) else {}
+        confirm_route = dict(raw_confirm)
+        reject_route = dict(raw_reject) if isinstance(raw_reject, Mapping) else {}
+    elif kind == "program_decision":
+        program_id = str(raw_confirm.get("program_id") or "")
+        confirm_route = {
+            "owner": owner or "research-orchestrator",
+            "action": "confirm-decision",
+            "program_id": program_id,
+            "decision_id": subject_id,
+        }
+        reject_route = {
+            "owner": owner or "research-orchestrator",
+            "action": "reject-decision",
+            "program_id": program_id,
+            "decision_id": subject_id,
+        }
+    elif kind == "idea_discussion_conclusion":
+        idea_id = str(raw_confirm.get("idea_id") or "")
+        confirm_route = {
+            "owner": owner or "idea-workbench",
+            "action": "discuss",
+            "phase": "confirm",
+            "idea_id": idea_id,
+            "conclusion_id": subject_id,
+        }
+        reject_route = {
+            "owner": owner or "idea-workbench",
+            "action": "discuss",
+            "phase": "reject",
+            "idea_id": idea_id,
+            "conclusion_id": subject_id,
+        }
+    elif kind == "method_selection":
+        program_id = str(raw_confirm.get("program_id") or "")
+        idea_id = str(raw_confirm.get("idea_id") or "")
+        confirm_route = {
+            "owner": owner or "method-designer",
+            "action": "confirm-selection",
+            "program_id": program_id,
+            "idea_id": idea_id,
+        }
+        reject_route = {
+            "owner": owner or "method-designer",
+            "action": "reject-selection",
+            "program_id": program_id,
+            "idea_id": idea_id,
+        }
+    elif kind == "paper_draft_section":
+        program_id = str(raw_confirm.get("program_id") or "")
+        section_id = str(raw_confirm.get("section_id") or "")
+        confirm_route = {
+            "owner": owner or "report-author",
+            "action": "confirm-section",
+            "program_id": program_id,
+            "section_id": section_id,
+            "subject_id": subject_id,
+        }
+        reject_route = {
+            "owner": owner or "report-author",
+            "action": "reject-section",
+            "program_id": program_id,
+            "section_id": section_id,
+            "subject_id": subject_id,
+        }
+    else:
+        confirm_route = dict(raw_confirm)
+        reject_route = {**confirm_route, "action": "reject"}
+    snapshot_binding = card.get("snapshot_binding") if isinstance(card, Mapping) else {}
+    snapshot_binding = dict(snapshot_binding) if isinstance(snapshot_binding, Mapping) else {}
+    return {
+        "subject": subject,
+        "display": display,
+        "confirm_route": confirm_route,
+        "reject_route": reject_route,
+        "snapshot_binding": snapshot_binding,
+    }
+
+
+_SIDE_SUBSTANCE_FIELDS = {
+    "user_preference": (
+        ("preference", "text", "希望记住"),
+        ("preference", "skill", "适用能力"),
+        ("preference", "operations", "适用操作"),
+        ("preference", "observation", "原话依据"),
+    ),
+    "program_decision": (
+        ("decision", "text", "决策内容"),
+        ("decision", "rationale", "决策理由"),
+        ("decision", "stage", "适用阶段"),
+        ("decision", "alternatives", "备选方案"),
+    ),
+    "idea_discussion_conclusion": (
+        ("discussion_conclusion", "text", "讨论结论"),
+        ("discussion_conclusion", "reviewer", "结论撰写者"),
+    ),
+    "method_selection": (
+        ("method_selection", "proposed_repo_id", "拟选代码仓"),
+        ("method_selection", "selected_repo_id", "确认后代码仓"),
+        ("method_selection", "selection_reason", "选择理由"),
+    ),
+}
+
+
+def _public_side_substance(record: Mapping[str, object], root: Path) -> tuple[str, list[dict[str, str]]]:
+    kind = str(record.get("kind") or "")
+    if kind == "paper_draft_section":
+        payload = record.get("payload")
+        payload = payload if isinstance(payload, Mapping) else {}
+        section = payload.get("paper_draft_section")
+        section = section if isinstance(section, Mapping) else {}
+        paragraphs = section.get("paragraphs")
+        if not isinstance(paragraphs, list) or not paragraphs:
+            return "invalid", []
+        rows: list[dict[str, str]] = []
+        title = _render_public_claim_text(str(section.get("title") or ""), root)
+        if title is None or not title:
+            return "unsafe", []
+        rows.append({"label": "分节", "text": title})
+        for index, paragraph in enumerate(paragraphs, start=1):
+            if not isinstance(paragraph, Mapping):
+                return "unsafe", []
+            prose = _render_public_claim_text(str(paragraph.get("prose") or ""), root)
+            supports = paragraph.get("support_claim_refs")
+            citations = paragraph.get("citation_keys")
+            figures = paragraph.get("figure_refs")
+            if (
+                prose is None
+                or not prose
+                or len(prose) > _PUBLIC_CLAIM_TEXT_HARD_CAP
+                or not isinstance(supports, list)
+                or not supports
+                or not isinstance(citations, list)
+                or not citations
+                or not isinstance(figures, list)
+            ):
+                return "unsafe", []
+            refs = "支撑 " + ", ".join(str(item) for item in supports)
+            refs += "；引用 " + ", ".join(str(item) for item in citations)
+            if figures:
+                refs += "；图 " + ", ".join(str(item) for item in figures)
+            public_refs = _render_public_claim_text(refs, root)
+            if public_refs is None or len(public_refs) > _PUBLIC_CLAIM_TEXT_HARD_CAP:
+                return "unsafe", []
+            rows.extend(
+                [
+                    {"label": f"段落 {index}", "text": prose},
+                    {"label": f"段落 {index} 绑定", "text": public_refs},
+                ]
+            )
+        return "ready", rows
+    fields = _SIDE_SUBSTANCE_FIELDS.get(kind)
+    if fields is None:
+        return "ready", []
+    payload = record.get("payload")
+    payload = payload if isinstance(payload, Mapping) else {}
+    rows: list[dict[str, str]] = []
+    for section, field, label in fields:
+        section_value = payload.get(section)
+        if not isinstance(section_value, Mapping):
+            continue
+        value = section_value.get(field)
+        if value in (None, "", [], {}):
+            continue
+        if isinstance(value, list) and all(not isinstance(item, (dict, list, tuple, set)) for item in value):
+            raw_text = "；".join(str(item) for item in value)
+        elif isinstance(value, (str, int, float, bool)):
+            raw_text = str(value)
+        else:
+            return "unsafe", []
+        text = _render_public_claim_text(raw_text, root)
+        if text is None or len(text) > _PUBLIC_CLAIM_TEXT_HARD_CAP:
+            return "unsafe", []
+        rows.append({"label": label, "text": text})
+    if not rows:
+        return "invalid", []
+    return "ready", rows
 
 
 def public_review_projection(record: dict, root: Path) -> dict[str, object]:
@@ -2302,7 +3813,7 @@ def public_review_projection(record: dict, root: Path) -> dict[str, object]:
         if (judgement_track and not quotes) or any(not quote for quote in quotes):
             structurally_invalid = True
             continue
-        text = _render_public_claim_text(raw_text, root)
+        text = _render_public_review_claim_text(claim, root)
         evidence_text = _sanitize_public_text(quotes[0], root) if quotes else ""
         if (
             text is None
@@ -2326,27 +3837,80 @@ def public_review_projection(record: dict, root: Path) -> dict[str, object]:
         return {"status": "unsafe", "track": track, "claims": []}
     if len(projected) != len(canonical_claims):
         return {"status": "invalid", "track": track, "claims": []}
-    return {"status": "ready", "track": track, "claims": projected, "fact_summary": ""}
+    substance_status, substance = _public_side_substance(record, root)
+    if substance_status != "ready":
+        return {"status": substance_status, "track": track, "claims": []}
+    return {
+        "status": "ready",
+        "track": track,
+        "claims": projected,
+        "fact_summary": "",
+        "substance": substance,
+    }
 
 
-def print_review_item(record: dict, projection: Mapping[str, object], root: Path) -> None:
+def review_display_preference_context(
+    review_items: Sequence[Mapping[str, object]],
+    *,
+    hard_display_cap: int,
+) -> dict[str, object]:
+    """Canonical, content-bound inputs for the optional review display receipt."""
+    serialized = json.dumps(
+        list(review_items),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return {
+        "review_snapshot_digest": hashlib.sha256(serialized).hexdigest(),
+        "displayed_count": len(review_items),
+        "hard_display_cap": hard_display_cap,
+    }
+
+
+def review_display_density(preferences: Mapping[str, object]) -> str:
+    """Map only an explicitly selected reporting style to display density."""
+    values = preferences.get("values_by_path")
+    values = values if isinstance(values, Mapping) else {}
+    reporting_style = str(values.get("profile.personalization.reporting_style") or "").strip().casefold()
+    if reporting_style in {"concise", "compact", "brief", "简洁", "精简"}:
+        return "compact"
+    if reporting_style in {"detailed", "expanded", "verbose", "详细", "展开"}:
+        return "expanded"
+    return "standard"
+
+
+def print_review_item(
+    record: dict,
+    projection: Mapping[str, object],
+    root: Path,
+    *,
+    density: str = "standard",
+    match_reason: str = "",
+) -> None:
     raw_unit_id = str(record.get("id") or "-")
     unit_id = _public_display_text(raw_unit_id, root, "编号已隐藏", 100)
-    kind = {
-        "paper": "论文",
-        "repo": "代码仓",
-        "dataset": "数据集",
-        "blog": "博客",
-        "idea": "研究想法",
-        "experiment": "实验",
-    }.get(str(record.get("kind") or ""), "知识条目")
+    raw_kind = str(record.get("kind") or "")
+    kind = PUBLIC_KIND_LABELS.get(raw_kind, _SIDE_JUDGEMENT_KIND_LABELS.get(raw_kind, "知识条目"))
     title = _public_display_text(record.get("title") or "-", root, "标题需由 Agent 安全解释", 160)
     print(f"- {kind}「{title}」（{unit_id}）")
+    public_match_reason = _review_match_public_reason(match_reason)
+    if public_match_reason:
+        print(f"  匹配依据：{public_match_reason}。")
     fact_summary = str(projection.get("fact_summary") or "")
     if fact_summary:
         print(f"  待确认的事实信息：{fact_summary}")
+    substance = projection.get("substance")
+    substance = substance if isinstance(substance, list) else []
+    if substance:
+        print("  本次拍板同时绑定：")
+        for item in substance:
+            print(f"  - {item['label']}：{item['text']}")
     claims = projection.get("claims")
     claims = claims if isinstance(claims, list) else []
+    if density == "expanded" and claims:
+        evidence_count = sum(1 + _natural_count(claim.get("extra_evidence_count")) for claim in claims)
+        print(f"  本项包含 {len(claims)} 条待确认判断，共绑定 {evidence_count} 条逐字证据。")
     if claims:
         print("  待确认内容：")
     for claim in claims:
@@ -2354,8 +3918,43 @@ def print_review_item(record: dict, projection: Mapping[str, object], root: Path
         if claim.get("evidence"):
             print(f"    证据摘录（安全显示）：“{claim['evidence']}”")
         extra_count = _natural_count(claim.get("extra_evidence_count"))
-        if extra_count:
+        if extra_count and density != "compact":
             print(f"    另有 {extra_count} 条已核验证据。")
+
+
+def _obsidian_review_display(
+    record: Mapping[str, object],
+    projection: Mapping[str, object],
+    root: Path,
+) -> dict[str, object]:
+    """Build the already-sanitized, human-visible part of an editable sheet."""
+    raw_kind = str(record.get("kind") or "")
+    kind_label = PUBLIC_KIND_LABELS.get(raw_kind, _SIDE_JUDGEMENT_KIND_LABELS.get(raw_kind, "知识条目"))
+    title = _public_display_text(record.get("title") or "-", root, "标题需由 Agent 安全解释", 160)
+    subject_id = _public_display_text(record.get("id") or "-", root, "编号已隐藏", 100)
+    source = record.get("source")
+    source = source if isinstance(source, Mapping) else {}
+    raw_location = (
+        source.get("original_uri")
+        or record.get("program_id")
+        or record.get("idea_id")
+        or f"{kind_label} · {subject_id}"
+    )
+    location_summary = _public_display_text(
+        raw_location,
+        root,
+        f"{kind_label} · {subject_id}",
+        240,
+    )
+    return {
+        "kind_label": kind_label,
+        "title": title,
+        "subject_id": subject_id,
+        "location_summary": location_summary,
+        "fact_summary": str(projection.get("fact_summary") or ""),
+        "substance": list(projection.get("substance") or []),
+        "claims": list(projection.get("claims") or []),
+    }
 
 
 def build_review_apply_commands(
@@ -2364,9 +3963,18 @@ def build_review_apply_commands(
     reject_ids: Sequence[str],
     evidence: str,
     *,
+    allowed_ids: Sequence[str],
     user_authorization: str = "",
     authorization_source: str = "user_message",
 ) -> list[tuple[str, Sequence[str]]]:
+    allowed = {str(item) for item in allowed_ids}
+    requested = {str(item) for item in [*confirm_ids, *reject_ids]}
+    outside_snapshot = sorted(requested - allowed)
+    if outside_snapshot:
+        raise ValueError(
+            "review decision includes subjects outside the displayed review snapshot: "
+            + ", ".join(outside_snapshot)
+        )
     commands: list[tuple[str, Sequence[str]]] = []
     if confirm_ids:
         confirm_args: list[str] = ["confirm"]
@@ -2385,7 +3993,1210 @@ def build_review_apply_commands(
     return commands
 
 
+def _review_subject_ref(subject: Mapping[str, object]) -> str:
+    return f"{str(subject.get('kind') or '')}:{str(subject.get('id') or '')}"
+
+
+def _review_now_epoch() -> float:
+    """Clock seam for deterministic TTL tests."""
+    return time.time()
+
+
+def _review_timestamp(epoch: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
+def _review_timestamp_epoch(value: object) -> float | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return float(calendar.timegm(time.strptime(text, "%Y-%m-%dT%H:%M:%SZ")))
+    except (OverflowError, ValueError):
+        return None
+
+
+def _review_snapshot_paths(root: Path, *, create: bool = True) -> tuple[Path, Path, Path] | None:
+    project_root = root.resolve()
+    kb_path = project_root / "kb"
+    runtime_path = kb_path / ".runtime"
+    for container in (kb_path, runtime_path):
+        if container.is_symlink() or (container.exists() and not container.is_dir()):
+            raise ReviewSnapshotError("tampered_or_unknown", "review snapshot runtime has an unsafe symlink")
+    if not runtime_path.exists() and not create:
+        return None
+    if create:
+        try:
+            runtime_path.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise ReviewSnapshotError("tampered_or_unknown", "review snapshot runtime is unavailable") from exc
+    runtime_root = runtime_path.resolve()
+    try:
+        runtime_root.relative_to(project_root)
+    except ValueError as exc:
+        raise ReviewSnapshotError("tampered_or_unknown", "review snapshot runtime escaped the workspace") from exc
+    snapshot_root = runtime_root / "review-snapshots"
+    lock_path = runtime_root / "review-snapshots.lock"
+    if snapshot_root.is_symlink() or (snapshot_root.exists() and not snapshot_root.is_dir()):
+        raise ReviewSnapshotError("tampered_or_unknown", "review snapshot registry is not a safe directory")
+    if not snapshot_root.exists() and not create:
+        return None
+    if create:
+        snapshot_root.mkdir(parents=True, exist_ok=True)
+    if snapshot_root.is_symlink() or snapshot_root.resolve() != snapshot_root:
+        raise ReviewSnapshotError("tampered_or_unknown", "review snapshot registry escaped its runtime root")
+    if lock_path.is_symlink() or (lock_path.exists() and not lock_path.is_file()):
+        raise ReviewSnapshotError("tampered_or_unknown", "review snapshot registry lock is unsafe")
+    return runtime_root, snapshot_root, lock_path
+
+
+def _atomic_write_review_snapshot(path: Path, payload: Mapping[str, object]) -> None:
+    parent = path.parent
+    try:
+        path.relative_to(parent)
+    except ValueError as exc:  # pragma: no cover - defensive invariant
+        raise ReviewSnapshotError("tampered_or_unknown", "review snapshot path escaped its registry") from exc
+    temporary = parent / f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(temporary, flags, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor = -1
+            handle.write(json.dumps(dict(payload), ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _regular_review_snapshot_payload(path: Path) -> dict[str, object] | None:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            return None
+        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+            descriptor = -1
+            payload = json.load(handle)
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    if not isinstance(payload, dict) or payload.get("schema") != _REVIEW_SNAPSHOT_SCHEMA:
+        return None
+    return payload
+
+
+def _gc_review_snapshots_locked(snapshot_root: Path, *, now: float) -> None:
+    """Bounded, non-recursive GC over immediate regular registry entries only."""
+    try:
+        children = snapshot_root.iterdir()
+    except OSError:
+        return
+    scanned = 0
+    for path in children:
+        if scanned >= _REVIEW_SNAPSHOT_GC_SCAN_LIMIT:
+            break
+        scanned += 1
+        if _REVIEW_SNAPSHOT_TOKEN_RE.fullmatch(path.stem) is None or path.suffix != ".json":
+            continue
+        payload = _regular_review_snapshot_payload(path)
+        if payload is None:
+            continue
+        status_value = str(payload.get("status") or "")
+        expires_at = _review_timestamp_epoch(payload.get("expires_at"))
+        if status_value == "unused" and expires_at is not None and now >= expires_at:
+            tombstone = {
+                "schema": _REVIEW_SNAPSHOT_SCHEMA,
+                "created_at": str(payload.get("created_at") or ""),
+                "expires_at": str(payload.get("expires_at") or ""),
+                "status": "expired",
+                "expired_at": _review_timestamp(expires_at),
+            }
+            _atomic_write_review_snapshot(path, tombstone)
+            payload = tombstone
+            status_value = "expired"
+        terminal_at = None
+        if status_value == "consumed":
+            terminal_at = _review_timestamp_epoch(payload.get("consumed_at"))
+        elif status_value == "expired":
+            terminal_at = _review_timestamp_epoch(payload.get("expired_at"))
+        if terminal_at is not None and now >= terminal_at + _REVIEW_SNAPSHOT_TOMBSTONE_GRACE_SECONDS:
+            try:
+                metadata = path.lstat()
+                if stat.S_ISREG(metadata.st_mode):
+                    path.unlink()
+            except OSError:
+                continue
+
+
+def _gc_review_snapshots(root: Path) -> None:
+    paths = _review_snapshot_paths(root, create=False)
+    if paths is None:
+        return
+    _runtime_root, snapshot_root, lock_path = paths
+    with exclusive_file_lock(lock_path):
+        _gc_review_snapshots_locked(snapshot_root, now=_review_now_epoch())
+
+
+def _store_review_snapshot(
+    root: Path,
+    protocol_name: str,
+    items: Sequence[Mapping[str, object]],
+    *,
+    policy: Mapping[str, object],
+) -> str:
+    protocol_path = agent_protocol_path(root, protocol_name)
+    paths = _review_snapshot_paths(root)
+    if paths is None:  # pragma: no cover - create=True invariant
+        raise ReviewSnapshotError("tampered_or_unknown", "review snapshot registry is unavailable")
+    runtime_root, snapshot_root, lock_path = paths
+    token = uuid.uuid4().hex
+    path = snapshot_root / f"{token}.json"
+    now = _review_now_epoch()
+    profile = str(policy.get("governance_profile") or "")
+    item_limit = int(policy.get("item_limit") or 0)
+    ttl_seconds = int(policy.get("ttl_seconds") or 0)
+    if (
+        profile not in {"personal", "strict"}
+        or item_limit < 1
+        or item_limit > _PUBLIC_REVIEW_ABSOLUTE_MAX
+        or ttl_seconds < 60 * 60
+        or ttl_seconds > 168 * 60 * 60
+        or not items
+        or len(items) > item_limit
+        or (profile == "personal" and item_limit < 4)
+    ):
+        raise ReviewSnapshotError("tampered_or_unknown", "effective review policy is invalid")
+    if profile == "strict" and (
+        item_limit != _LEGACY_PUBLIC_REVIEW_LIMIT
+        or ttl_seconds != _LEGACY_REVIEW_SNAPSHOT_TTL_SECONDS
+    ):
+        raise ReviewSnapshotError("tampered_or_unknown", "strict review policy was weakened")
+    payload = {
+        "schema": _REVIEW_SNAPSHOT_SCHEMA,
+        "created_at": _review_timestamp(now),
+        "expires_at": _review_timestamp(now + ttl_seconds),
+        "status": "unused",
+        "protocol_path": protocol_path.relative_to(runtime_root).as_posix(),
+        "review_items": [dict(item) for item in items],
+        "governance_profile": profile,
+        "item_limit": item_limit,
+        "ttl_seconds": ttl_seconds,
+    }
+    with exclusive_file_lock(lock_path):
+        _gc_review_snapshots_locked(snapshot_root, now=now)
+        _atomic_write_review_snapshot(path, payload)
+    return token
+
+
+def _load_review_snapshot(root: Path, requested: str) -> ReviewSnapshotLease:
+    """Validate a displayed snapshot without changing its lifecycle state."""
+    path = agent_protocol_path(root, requested)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ReviewSnapshotError("tampered_or_unknown", "review snapshot is missing or invalid") from exc
+    if payload.get("schema") != "kb-agent-protocol/v1" or payload.get("verb") != "review":
+        raise ReviewSnapshotError("tampered_or_unknown", "review snapshot has the wrong protocol type")
+    actions = payload.get("next_actions")
+    actions = actions if isinstance(actions, list) else []
+    present = next(
+        (item for item in actions if isinstance(item, dict) and item.get("action") == "present_review_items"),
+        None,
+    )
+    items = present.get("review_items") if isinstance(present, dict) else None
+    apply_contract = present.get("apply") if isinstance(present, dict) else None
+    apply_contract = apply_contract if isinstance(apply_contract, dict) else {}
+    token = str(apply_contract.get("snapshot_token") or "")
+    protocol_profile = str(apply_contract.get("governance_profile") or "strict")
+    try:
+        protocol_item_limit = int(
+            apply_contract.get("max_decisions_per_apply")
+            if "max_decisions_per_apply" in apply_contract
+            else _LEGACY_PUBLIC_REVIEW_LIMIT
+        )
+        protocol_ttl_seconds = int(
+            apply_contract.get("ttl_seconds")
+            if "ttl_seconds" in apply_contract
+            else _LEGACY_REVIEW_SNAPSHOT_TTL_SECONDS
+        )
+    except (TypeError, ValueError) as exc:
+        raise ReviewSnapshotError("tampered_or_unknown", "review snapshot policy is invalid") from exc
+    if (
+        protocol_profile not in {"personal", "strict"}
+        or protocol_item_limit < 1
+        or protocol_item_limit > _PUBLIC_REVIEW_ABSOLUTE_MAX
+        or protocol_ttl_seconds < 60 * 60
+        or protocol_ttl_seconds > 168 * 60 * 60
+        or not isinstance(items, list)
+        or not items
+        or len(items) > protocol_item_limit
+    ):
+        raise ReviewSnapshotError("tampered_or_unknown", "review snapshot has no displayed decision items")
+    if protocol_profile == "strict" and (
+        protocol_item_limit != _LEGACY_PUBLIC_REVIEW_LIMIT
+        or protocol_ttl_seconds != _LEGACY_REVIEW_SNAPSHOT_TTL_SECONDS
+    ):
+        raise ReviewSnapshotError("tampered_or_unknown", "strict review snapshot policy is invalid")
+    if protocol_profile == "personal" and protocol_item_limit < 4:
+        raise ReviewSnapshotError("tampered_or_unknown", "personal review snapshot item limit is invalid")
+    normalized = [dict(item) for item in items if isinstance(item, dict)]
+    refs = [_review_subject_ref(item.get("subject", {})) for item in normalized]
+    if len(normalized) != len(items) or len(set(refs)) != len(refs) or any(ref == ":" for ref in refs):
+        raise ReviewSnapshotError("tampered_or_unknown", "review snapshot contains ambiguous subjects")
+    if _REVIEW_SNAPSHOT_TOKEN_RE.fullmatch(token) is None:
+        raise ReviewSnapshotError("tampered_or_unknown", "review snapshot has no valid one-time token")
+    paths = _review_snapshot_paths(root, create=False)
+    if paths is None:
+        raise ReviewSnapshotError("tampered_or_unknown", "review snapshot token is unknown or invalid")
+    runtime_root, snapshot_root, lock_path = paths
+    stored_path = snapshot_root / f"{token}.json"
+    now = _review_now_epoch()
+    with exclusive_file_lock(lock_path):
+        stored = _regular_review_snapshot_payload(stored_path)
+        if stored is None:
+            raise ReviewSnapshotError("tampered_or_unknown", "review snapshot token is unknown or invalid")
+        status_value = str(stored.get("status") or "")
+        if status_value == "consumed":
+            raise ReviewSnapshotError("already_applied", "review snapshot token was already applied")
+        if status_value == "expired":
+            raise ReviewSnapshotError("expired", "review snapshot token expired")
+        expires_at = _review_timestamp_epoch(stored.get("expires_at"))
+        if status_value != "unused" or expires_at is None:
+            raise ReviewSnapshotError("tampered_or_unknown", "review snapshot lifecycle is invalid")
+        if now >= expires_at:
+            raise ReviewSnapshotError("expired", "review snapshot token expired")
+        protocol_relative_path = path.relative_to(runtime_root).as_posix()
+        stored_profile = str(stored.get("governance_profile") or "strict")
+        try:
+            stored_item_limit = int(stored.get("item_limit", _LEGACY_PUBLIC_REVIEW_LIMIT))
+            stored_ttl_seconds = int(stored.get("ttl_seconds", _LEGACY_REVIEW_SNAPSHOT_TTL_SECONDS))
+        except (TypeError, ValueError) as exc:
+            raise ReviewSnapshotError("tampered_or_unknown", "stored review policy is invalid") from exc
+        if (
+            stored.get("protocol_path") != protocol_relative_path
+            or stored.get("review_items") != normalized
+            or stored_profile != protocol_profile
+            or stored_item_limit != protocol_item_limit
+            or stored_ttl_seconds != protocol_ttl_seconds
+            or stored_item_limit < len(normalized)
+            or stored_item_limit > _PUBLIC_REVIEW_ABSOLUTE_MAX
+        ):
+            raise ReviewSnapshotError("tampered_or_unknown", "review snapshot does not match the displayed one-time decision set")
+        if stored_profile == "strict" and (
+            stored_item_limit != _LEGACY_PUBLIC_REVIEW_LIMIT
+            or stored_ttl_seconds != _LEGACY_REVIEW_SNAPSHOT_TTL_SECONDS
+        ):
+            raise ReviewSnapshotError("tampered_or_unknown", "strict review snapshot policy is invalid")
+        if stored_profile == "personal" and stored_item_limit < 4:
+            raise ReviewSnapshotError("tampered_or_unknown", "personal review snapshot item limit is invalid")
+    return ReviewSnapshotLease(
+        token=token,
+        protocol_relative_path=protocol_relative_path,
+        review_items=tuple(normalized),
+        registry_path=stored_path,
+        governance_profile=stored_profile,
+        item_limit=stored_item_limit,
+        ttl_seconds=stored_ttl_seconds,
+    )
+
+
+def _consume_review_snapshot(root: Path, lease: ReviewSnapshotLease) -> Path:
+    """Consume a revalidated lease inside the caller's root transaction."""
+    if not current_operation_id(root):
+        raise ReviewSnapshotError("tampered_or_unknown", "snapshot consumption requires a root transaction")
+    paths = _review_snapshot_paths(root, create=False)
+    if paths is None:
+        raise ReviewSnapshotError("tampered_or_unknown", "review snapshot token is unknown or invalid")
+    _runtime_root, snapshot_root, lock_path = paths
+    stored_path = snapshot_root / f"{lease.token}.json"
+    if stored_path != lease.registry_path:
+        raise ReviewSnapshotError("tampered_or_unknown", "review snapshot registry changed")
+    with exclusive_file_lock(lock_path):
+        stored = _regular_review_snapshot_payload(stored_path)
+        if stored is None:
+            raise ReviewSnapshotError("tampered_or_unknown", "review snapshot token is unknown or invalid")
+        status_value = str(stored.get("status") or "")
+        if status_value == "consumed":
+            raise ReviewSnapshotError("already_applied", "review snapshot token was already applied")
+        if status_value == "expired":
+            raise ReviewSnapshotError("expired", "review snapshot token expired")
+        expires_at = _review_timestamp_epoch(stored.get("expires_at"))
+        now = _review_now_epoch()
+        if status_value != "unused" or expires_at is None:
+            raise ReviewSnapshotError("tampered_or_unknown", "review snapshot lifecycle is invalid")
+        if now >= expires_at:
+            raise ReviewSnapshotError("expired", "review snapshot token expired")
+        try:
+            stored_item_limit = int(stored.get("item_limit", _LEGACY_PUBLIC_REVIEW_LIMIT))
+            stored_ttl_seconds = int(stored.get("ttl_seconds", _LEGACY_REVIEW_SNAPSHOT_TTL_SECONDS))
+        except (TypeError, ValueError) as exc:
+            raise ReviewSnapshotError("tampered_or_unknown", "stored review policy is invalid") from exc
+        if (
+            stored.get("protocol_path") != lease.protocol_relative_path
+            or stored.get("review_items") != list(lease.review_items)
+            or str(stored.get("governance_profile") or "strict") != lease.governance_profile
+            or stored_item_limit != lease.item_limit
+            or stored_ttl_seconds != lease.ttl_seconds
+        ):
+            raise ReviewSnapshotError("tampered_or_unknown", "review snapshot changed during apply")
+        consumed = dict(stored)
+        consumed["status"] = "consumed"
+        consumed["consumed_at"] = _review_timestamp(now)
+        _atomic_write_review_snapshot(stored_path, consumed)
+    return stored_path
+
+
+def _discover_pending_review_cards(root: Path) -> list[dict[str, object]]:
+    return [
+        *discover_pending_judgements(root),
+        *discover_pending_preference_review_cards(root),
+    ]
+
+
+def _current_review_item(root: Path, subject: Mapping[str, object]) -> dict[str, object]:
+    kind = str(subject.get("kind") or "")
+    subject_id = str(subject.get("id") or "")
+    matches = [
+        card
+        for card in _discover_pending_review_cards(root)
+        if str(card.get("subject", {}).get("kind") or "") == kind
+        and str(card.get("subject", {}).get("id") or "") == subject_id
+    ]
+    if len(matches) != 1:
+        raise ValueError("displayed judgement is no longer uniquely ready")
+    canonical_units = _review_unit_records(root) if kind in PUBLIC_KIND_LABELS else {}
+    canonical = canonical_units.get((kind, subject_id))
+    if kind in PUBLIC_KIND_LABELS and canonical is None:
+        raise ValueError("displayed knowledge judgement is no longer uniquely ready")
+    title = str(canonical.get("title") or "") if isinstance(canonical, Mapping) else ""
+    display_record = _review_card_record(matches[0], title=title)
+    if public_review_projection(display_record, root).get("status") != "ready":
+        raise ValueError("displayed judgement is no longer safe to confirm")
+    return _review_decision_routes(canonical or display_record, matches[0])
+
+
+def _review_owner_command(
+    item: Mapping[str, object],
+    decision: str,
+    *,
+    actor: str,
+    evidence: Sequence[str],
+    user_authorization: str,
+    rejection_reason: str,
+) -> tuple[str, list[str]]:
+    route_key = "confirm_route" if decision == "confirm" else "reject_route"
+    route = item.get(route_key)
+    route = route if isinstance(route, Mapping) else {}
+    owner = str(route.get("owner") or "")
+    action = str(route.get("action") or "")
+    script = REVIEW_OWNER_SCRIPTS.get(owner)
+    if script is None:
+        raise ValueError("review route owner is unsupported")
+    snapshot = item.get("snapshot_binding")
+    if not isinstance(snapshot, Mapping):
+        raise ValueError("review route has no snapshot binding")
+    expected_snapshot = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+    if owner == "knowledge-base-manager":
+        if decision == "confirm" and action == "confirm":
+            arguments = ["confirm", "--id", str(route.get("id") or "")]
+        elif decision == "reject" and action == "promote":
+            arguments = ["promote", "--id", str(route.get("id") or ""), "--confirmation-status", "rejected"]
+        else:
+            raise ValueError("knowledge review route is invalid")
+    elif owner == "research-orchestrator" and action in {"confirm-decision", "reject-decision"}:
+        arguments = [
+            action,
+            "--program-id",
+            str(route.get("program_id") or ""),
+            "--decision-id",
+            str(route.get("decision_id") or ""),
+        ]
+    elif owner == "idea-workbench" and action == "discuss":
+        arguments = [
+            "discuss",
+            "--idea-id",
+            str(route.get("idea_id") or ""),
+            "--phase",
+            str(route.get("phase") or ""),
+            "--conclusion-id",
+            str(route.get("conclusion_id") or ""),
+        ]
+    elif owner == "method-designer" and action in {"confirm-selection", "reject-selection"}:
+        arguments = [
+            action,
+            "--program-id",
+            str(route.get("program_id") or ""),
+            "--idea-id",
+            str(route.get("idea_id") or ""),
+        ]
+    elif owner == "literature-synthesizer" and action in {"confirm", "reject"}:
+        arguments = [
+            str(route.get("mode") or "survey"),
+            action,
+            "--expected-snapshot",
+            expected_snapshot,
+        ]
+    else:
+        raise ValueError("review route action is invalid")
+
+    if owner != "literature-synthesizer":
+        arguments.extend(["--expected-snapshot", expected_snapshot])
+    if decision == "confirm":
+        arguments.extend(["--confirmed-by", actor])
+        for item_evidence in evidence:
+            arguments.extend(["--evidence", str(item_evidence)])
+        arguments.extend(
+            [
+                "--user-authorization",
+                user_authorization,
+                "--authorization-source",
+                "user_message",
+            ]
+        )
+    elif rejection_reason:
+        if owner == "knowledge-base-manager":
+            arguments.extend(["--evidence", rejection_reason])
+        else:
+            arguments.extend(["--reason", rejection_reason])
+    return script, arguments
+
+
+def _review_apply_failure_message(code: str) -> str:
+    messages = {
+        "already_applied": "这条拍板已经应用过；请重新运行 kb review 查看剩余内容。",
+        "expired": "这份待确认清单已经过期；请重新运行 kb review 获取当前内容。",
+        "stale_content": "待确认内容已经更新，这次拍板没有应用；请重新运行 kb review 查看最新内容。",
+        "authorization_stale": "Obsidian 勾选与刚才展示的预览已经不同；没有应用任何决定，请重新预览后再授权。",
+        "tampered_or_unknown": "无法验证这份待确认清单；请重新运行 kb review 获取新的安全清单。",
+        "invalid_decision": "这次拍板不在刚才展示的范围内；没有应用任何决定。请回到 Agent 对话修正后用同一清单重试。",
+        "missing_confirmation_context": "拍板所需的真实署名、当前授权或证据还不完整；没有应用任何决定。补充后请回到 Agent 对话用同一清单重试。",
+        "sheet_tampered": "Obsidian 待确认表除勾选框外发生了变化；没有应用任何决定，请重新生成待确认表。",
+        "unsafe_display": "有内容不适合安全写入 Obsidian 待确认表；请先让 Agent 安全解释。",
+        "invalid_batch": "这份 Obsidian 待确认表不完整；请重新运行 kb review。",
+    }
+    return messages.get(code, "这次拍板没有完整应用；请重新运行 kb review 查看当前状态。")
+
+
+_REVIEW_APPLY_SNAPSHOT_HINT = (
+    "--apply-snapshot expects the protocol FILE NAME used with --agent-protocol when "
+    "kb review displayed these items (e.g. r1.json under kb/.runtime/), NOT the snapshot token."
+)
+_REVIEW_APPLY_SYNTAX = (
+    "kb --agent-protocol <new>.json review --apply-snapshot <display-protocol>.json "
+    "--confirm-ref <kind>:<id> [--reject-ref <kind>:<id>] [--defer-ref <kind>:<id>] "
+    "--user-authorization <用户原话> --decision-evidence <证据>"
+)
+
+
+def _review_registry_expected_snapshots(root: Path) -> list[dict[str, object]]:
+    """Best-effort read-only view of currently valid displayed review snapshots.
+
+    Used only to enrich the private protocol after an apply failure, so the
+    runtime agent can self-correct instead of guessing. Never raises.
+    """
+    try:
+        paths = _review_snapshot_paths(root, create=False)
+    except (ReviewSnapshotError, OSError):
+        return []
+    if paths is None:
+        return []
+    _runtime_root, snapshot_root, _lock_path = paths
+    now = _review_now_epoch()
+    expected: list[dict[str, object]] = []
+    try:
+        children = sorted(snapshot_root.iterdir())
+    except OSError:
+        return []
+    for path in children[:_REVIEW_SNAPSHOT_GC_SCAN_LIMIT]:
+        if _REVIEW_SNAPSHOT_TOKEN_RE.fullmatch(path.stem) is None or path.suffix != ".json":
+            continue
+        payload = _regular_review_snapshot_payload(path)
+        if payload is None or str(payload.get("status") or "") != "unused":
+            continue
+        expires_at = _review_timestamp_epoch(payload.get("expires_at"))
+        if expires_at is None or now >= expires_at:
+            continue
+        items = payload.get("review_items")
+        items = items if isinstance(items, list) else []
+        refs = [
+            _review_subject_ref(item.get("subject", {}))
+            for item in items
+            if isinstance(item, Mapping)
+        ]
+        expected.append(
+            {
+                "apply_snapshot": str(payload.get("protocol_path") or ""),
+                "valid_confirm_refs": refs,
+                "expires_at": str(payload.get("expires_at") or ""),
+            }
+        )
+    return expected
+
+
+def _review_apply_failure_details(
+    root: Path,
+    args: argparse.Namespace,
+    code: str,
+    *,
+    lease: "ReviewSnapshotLease | None",
+    reason_detail: str = "",
+) -> dict[str, object]:
+    """Structured, private-only expectations for a failed review apply."""
+    requested_refs = [
+        str(item)
+        for item in [
+            *getattr(args, "confirm_ref", []),
+            *getattr(args, "reject_ref", []),
+            *getattr(args, "defer_ref", []),
+        ]
+    ]
+    malformed_refs = [
+        ref
+        for ref in requested_refs
+        if ":" not in ref or not ref.split(":", 1)[0] or not ref.split(":", 1)[1]
+    ]
+    valid_refs: list[str] = []
+    snapshot_name = ""
+    displayed_snapshots: list[dict[str, object]] = []
+    if lease is not None:
+        valid_refs = [_review_subject_ref(item.get("subject", {})) for item in lease.review_items]
+        snapshot_name = lease.protocol_relative_path
+    else:
+        displayed_snapshots = _review_registry_expected_snapshots(root)
+        if len(displayed_snapshots) == 1:
+            only = displayed_snapshots[0]
+            refs = only.get("valid_confirm_refs")
+            valid_refs = [str(ref) for ref in refs] if isinstance(refs, list) else []
+            snapshot_name = str(only.get("apply_snapshot") or "")
+    outside_refs = sorted(set(requested_refs) - set(valid_refs)) if valid_refs else []
+    ref_suggestions: dict[str, str] = {}
+    by_bare_id = {ref.split(":", 1)[1]: ref for ref in valid_refs if ":" in ref}
+    for ref in requested_refs:
+        if ref in valid_refs:
+            continue
+        bare = ref.split(":", 1)[1] if ":" in ref else ref
+        suggestion = by_bare_id.get(bare)
+        if suggestion:
+            ref_suggestions[ref] = suggestion
+    requested_snapshot = str(getattr(args, "apply_snapshot", "") or "").strip()
+    reason_code = code
+    if code == "tampered_or_unknown" and _REVIEW_SNAPSHOT_TOKEN_RE.fullmatch(requested_snapshot):
+        reason_code = "apply_snapshot_looks_like_token"
+    elif code == "invalid_decision" and malformed_refs:
+        reason_code = "confirm_ref_format_invalid"
+    elif code == "invalid_decision":
+        reason_code = "outside_displayed_snapshot"
+    expected: dict[str, object] = {
+        "confirm_ref_format": "<kind>:<id>",
+        "valid_confirm_refs": valid_refs,
+        "apply_snapshot": snapshot_name,
+        "apply_snapshot_expects": _REVIEW_APPLY_SNAPSHOT_HINT,
+        "apply_syntax": _REVIEW_APPLY_SYNTAX,
+    }
+    if displayed_snapshots:
+        expected["displayed_snapshots"] = displayed_snapshots
+    failure: dict[str, object] = {
+        "code": code,
+        "reason_code": reason_code,
+        "requested_apply_snapshot": requested_snapshot,
+        "requested_refs": requested_refs,
+        "expected": expected,
+    }
+    if reason_detail:
+        failure["reason_detail"] = reason_detail
+    if malformed_refs:
+        failure["malformed_refs"] = malformed_refs
+    if outside_refs:
+        failure["outside_snapshot_refs"] = outside_refs
+    if ref_suggestions:
+        failure["ref_suggestions"] = ref_suggestions
+    return failure
+
+
+def _record_review_apply_failure(
+    root: Path,
+    args: argparse.Namespace,
+    code: str,
+    *,
+    lease: "ReviewSnapshotLease | None",
+    reason_detail: str = "",
+) -> None:
+    set_protocol_status(
+        "agent_action_required",
+        review_apply_error=code,
+        review_apply_failure=_review_apply_failure_details(
+            root,
+            args,
+            code,
+            lease=lease,
+            reason_detail=reason_detail,
+        ),
+    )
+
+
+def _obsidian_batch_decision_summary(
+    root: Path,
+    review_items: Sequence[Mapping[str, object]],
+    decisions: Sequence[Mapping[str, object]],
+) -> list[dict[str, str]]:
+    by_ref = {
+        _review_subject_ref(item.get("subject", {})): item
+        for item in review_items
+    }
+    summaries: list[dict[str, str]] = []
+    labels = {"confirm": "确认", "reject": "拒绝", "defer": "暂缓"}
+    for decision in decisions:
+        subject = decision.get("subject") if isinstance(decision, Mapping) else {}
+        subject = subject if isinstance(subject, Mapping) else {}
+        item = by_ref.get(_review_subject_ref(subject), {})
+        display = item.get("display") if isinstance(item, Mapping) else {}
+        display = display if isinstance(display, Mapping) else {}
+        raw_kind = str(display.get("kind") or subject.get("kind") or "")
+        summaries.append(
+            {
+                "decision": str(decision.get("decision") or ""),
+                "decision_label": labels.get(str(decision.get("decision") or ""), "暂缓"),
+                "kind_label": PUBLIC_KIND_LABELS.get(
+                    raw_kind,
+                    _SIDE_JUDGEMENT_KIND_LABELS.get(raw_kind, "判断"),
+                ),
+                "title": _public_display_text(
+                    display.get("title") or "",
+                    root,
+                    "标题需由 Agent 安全解释",
+                    160,
+                ),
+            }
+        )
+    return summaries
+
+
+def handle_obsidian_review_preview(args: argparse.Namespace, root: Path) -> int:
+    try:
+        preview = preview_obsidian_review_batch(root, str(args.preview_obsidian_batch or ""))
+    except ReviewBatchError as exc:
+        set_protocol_status("agent_action_required", review_apply_error=exc.code)
+        print(_review_apply_failure_message(exc.code), file=sys.stderr)
+        return 2
+    summaries = _obsidian_batch_decision_summary(root, preview.review_items, preview.decisions)
+    set_protocol_status(
+        "needs_user_authorization",
+        obsidian_review_count=len(summaries),
+        obsidian_review_confirm_count=sum(item["decision"] == "confirm" for item in summaries),
+        obsidian_review_reject_count=sum(item["decision"] == "reject" for item in summaries),
+        obsidian_review_defer_count=sum(item["decision"] == "defer" for item in summaries),
+    )
+    add_agent_action(
+        "present_obsidian_review_diff",
+        decisions=summaries,
+        apply={
+            "verb": "review",
+            "mode": "obsidian-batch-atomic",
+            "batch_ref": preview.batch_ref,
+            "expected_preview_digest": preview.decision_digest,
+            "requires_current_user_authorization": True,
+        },
+    )
+    print("已读取 Obsidian 中的勾选；下面是准备同步的决定草稿：")
+    for item in summaries:
+        print(f"- {item['decision_label']}{item['kind_label']}「{item['title']}」")
+    print("这些勾选尚未修改知识库。请核对后用自然语言明确授权 Agent 按以上决定同步。")
+    return 0
+
+
+def _review_owner_module(root: Path, owner: str) -> object:
+    cached = _REVIEW_OWNER_MODULES.get(owner)
+    if cached is not None:
+        return cached
+    relative = REVIEW_OWNER_SCRIPTS.get(owner)
+    if relative is None:
+        raise ValueError("review owner is unsupported")
+    script_path = (DEFAULT_PROJECT_ROOT / relative).resolve()
+    expected_root = (DEFAULT_PROJECT_ROOT / ".agents" / "skills").resolve()
+    try:
+        script_path.relative_to(expected_root)
+    except ValueError as exc:
+        raise ValueError("review owner script escaped the skill tree") from exc
+    path_digest = hashlib.sha256(os.fsencode(script_path)).hexdigest()
+    module_name = f"kb_review_owner_{owner.replace('-', '_')}_{path_digest}"
+    spec = importlib.util.spec_from_file_location(module_name, script_path)
+    if spec is None or spec.loader is None:
+        raise ValueError("review owner integration is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    registered_name = spec.name
+    sys.modules[registered_name] = module
+    try:
+        spec.loader.exec_module(module)
+        if not callable(getattr(module, "prepare_review_batch_decision", None)) or not callable(
+            getattr(module, "apply_review_batch_decision", None)
+        ):
+            raise ValueError("review owner integration is incomplete")
+    except BaseException:
+        if sys.modules.get(registered_name) is module:
+            del sys.modules[registered_name]
+        raise
+    _REVIEW_OWNER_MODULES[owner] = module
+    return module
+
+
+def _review_batch_owner_plan(
+    root: Path,
+    item: Mapping[str, object],
+    decision: str,
+    *,
+    actor: str,
+    evidence: list[str],
+    user_authorization: str,
+    authorization_source: str,
+    rejection_reason: str,
+) -> tuple[object, dict[str, object]]:
+    route = item.get("confirm_route" if decision == "confirm" else "reject_route")
+    route = route if isinstance(route, Mapping) else {}
+    owner = str(route.get("owner") or "")
+    module = _review_owner_module(root, owner)
+    plan = module.prepare_review_batch_decision(
+        root,
+        dict(item),
+        decision,
+        actor=actor,
+        evidence=evidence,
+        user_authorization=user_authorization,
+        authorization_source=authorization_source,
+        rejection_reason=rejection_reason,
+    )
+    if not isinstance(plan, dict) or plan.get("owner") != owner or plan.get("decision") != decision:
+        raise ValueError("review owner returned an invalid plan")
+    raw_targets = plan.get("target_paths")
+    if not isinstance(raw_targets, list) or not raw_targets:
+        raise ValueError("review owner returned no exact targets")
+    kb = (root / "kb").resolve()
+    targets: list[Path] = []
+    for raw_target in raw_targets:
+        target = Path(raw_target).resolve()
+        try:
+            target.relative_to(kb)
+        except ValueError as exc:
+            raise ValueError("review owner target escaped kb") from exc
+        targets.append(target)
+    plan["target_paths"] = sorted(set(targets), key=lambda path: path.as_posix())
+    return module, plan
+
+
+def _review_plan_identity(plan: Mapping[str, object]) -> tuple[tuple[str, str], ...]:
+    normalized: list[tuple[str, str]] = []
+    for key, value in plan.items():
+        if key == "target_paths":
+            normalized.append((key, "|".join(Path(path).as_posix() for path in value)))
+        else:
+            normalized.append((str(key), json.dumps(value, ensure_ascii=False, sort_keys=True)))
+    return tuple(sorted(normalized))
+
+
+def _review_batch_owner_plans(
+    root: Path,
+    current_items: Sequence[Mapping[str, object]],
+    decisions: Sequence[Mapping[str, object]],
+    *,
+    actor: str,
+    evidence: list[str],
+    user_authorization: str,
+    rejection_reason: str,
+) -> tuple[list[tuple[object, dict[str, object], dict[str, object], str]], list[Path]]:
+    if len(current_items) != len(decisions):
+        raise ReviewBatchError("invalid_decision", "review decisions do not match the validated subjects")
+    planned: list[tuple[object, dict[str, object], dict[str, object], str]] = []
+    canonical_targets: list[Path] = []
+    for current_item, chosen in zip(current_items, decisions):
+        decision = str(chosen.get("decision") or "")
+        if decision == "defer":
+            continue
+        if decision not in {"confirm", "reject"}:
+            raise ReviewBatchError("invalid_decision", "review decision is unsupported")
+        module, plan = _review_batch_owner_plan(
+            root,
+            current_item,
+            decision,
+            actor=actor,
+            evidence=evidence,
+            user_authorization=user_authorization,
+            authorization_source="user_message",
+            rejection_reason=rejection_reason,
+        )
+        canonical_targets.extend(plan["target_paths"])
+        planned.append((module, plan, dict(current_item), decision))
+    return planned, canonical_targets
+
+
+def _apply_review_atomic_batch(
+    root: Path,
+    *,
+    op_type: str,
+    current_items: Sequence[Mapping[str, object]],
+    decisions: Sequence[Mapping[str, object]],
+    runtime_targets: Sequence[Path],
+    actor: str,
+    evidence: list[str],
+    user_authorization: str,
+    rejection_reason: str,
+    locked_preflight: Callable[
+        [], tuple[Sequence[Mapping[str, object]], Sequence[Mapping[str, object]]]
+    ],
+    consume: Callable[[], object],
+) -> tuple[list[Path], int]:
+    """Apply dialogue or Obsidian decisions through one shared coordinator."""
+    expected_decisions = tuple(dict(item) for item in decisions)
+    planned, canonical_targets = _review_batch_owner_plans(
+        root,
+        current_items,
+        expected_decisions,
+        actor=actor,
+        evidence=evidence,
+        user_authorization=user_authorization,
+        rejection_reason=rejection_reason,
+    )
+    all_targets = sorted(set([*canonical_targets, *runtime_targets]), key=lambda path: path.as_posix())
+    with mutation_transaction(root, op_type, all_targets):
+        locked_items, locked_decisions = locked_preflight()
+        normalized_locked_decisions = tuple(dict(item) for item in locked_decisions)
+        if normalized_locked_decisions != expected_decisions:
+            raise ReviewBatchError("authorization_stale", "review decisions changed after authorization")
+        locked_plans, locked_targets = _review_batch_owner_plans(
+            root,
+            locked_items,
+            normalized_locked_decisions,
+            actor=actor,
+            evidence=evidence,
+            user_authorization=user_authorization,
+            rejection_reason=rejection_reason,
+        )
+        if sorted(set(locked_targets), key=lambda path: path.as_posix()) != sorted(
+            set(canonical_targets), key=lambda path: path.as_posix()
+        ) or [_review_plan_identity(item[1]) for item in locked_plans] != [
+            _review_plan_identity(item[1]) for item in planned
+        ]:
+            raise ReviewBatchError("stale_content", "review owner targets changed while applying")
+        for module, _plan, current_item, decision in locked_plans:
+            module.apply_review_batch_decision(
+                root,
+                current_item,
+                decision,
+                actor=actor,
+                evidence=evidence,
+                user_authorization=user_authorization,
+                authorization_source="user_message",
+                rejection_reason=rejection_reason,
+            )
+        consume()
+    return sorted(set(canonical_targets), key=lambda path: path.as_posix()), len(planned)
+
+
+def _bounded_review_owner_diagnostics(value: str) -> list[str]:
+    """Keep owner warnings in the private protocol, never on the public stderr."""
+    lines = [line.strip()[:1_000] for line in value.splitlines() if line.strip()]
+    if len(lines) > 20:
+        return [*lines[:20], "<additional owner diagnostics omitted>"]
+    return lines
+
+
+def handle_obsidian_review_apply(args: argparse.Namespace, root: Path) -> int:
+    actor = default_confirmed_by(root)
+    authorization = str(args.user_authorization or "").strip()
+    expected_preview_digest = str(getattr(args, "expected_preview_digest", "") or "").strip()
+    evidence = [str(item).strip() for item in args.decision_evidence if str(item).strip()]
+    rejection_reason = str(args.rejection_reason or "").strip()
+    try:
+        preflight = preflight_obsidian_review_batch(
+            root,
+            str(args.apply_obsidian_batch or ""),
+            current_item_resolver=lambda subject: _current_review_item(root, subject),
+        )
+        if not expected_preview_digest or preflight.preview.decision_digest != expected_preview_digest:
+            raise ReviewBatchError(
+                "authorization_stale",
+                "the authorized preview no longer matches the review decisions",
+            )
+        if not authorization:
+            raise ReviewBatchError(
+                "missing_confirmation_context",
+                "every review batch apply requires current-message user authorization",
+            )
+        confirm_count = sum(item.get("decision") == "confirm" for item in preflight.preview.decisions)
+        if confirm_count:
+            if not actor or is_ai_signer(actor) or not authorization or not evidence:
+                raise ReviewBatchError(
+                    "missing_confirmation_context",
+                    "confirmation requires a real signer, current authorization, and evidence",
+                )
+        runtime_targets = list(obsidian_review_batch_runtime_targets(root, preflight.preview.batch_ref))
+    except ReviewBatchError as exc:
+        set_protocol_status("agent_action_required", review_apply_error=exc.code)
+        print(_review_apply_failure_message(exc.code), file=sys.stderr)
+        return 2
+    except ValueError:
+        set_protocol_status("agent_action_required", review_apply_error="stale_content")
+        print(_review_apply_failure_message("stale_content"), file=sys.stderr)
+        return 2
+    except (OSError, RuntimeError, SystemExit, TypeError, ValueError):
+        set_protocol_status("agent_action_required", review_apply_error="stale_content")
+        print(_review_apply_failure_message("stale_content"), file=sys.stderr)
+        return 2
+
+    def locked_preflight() -> tuple[Sequence[Mapping[str, object]], Sequence[Mapping[str, object]]]:
+        locked = preflight_obsidian_review_batch(
+            root,
+            preflight.preview.batch_ref,
+            current_item_resolver=lambda subject: _current_review_item(root, subject),
+        )
+        if locked.preview.decision_digest != expected_preview_digest:
+            raise ReviewBatchError("authorization_stale", "review decisions changed after authorization")
+        return locked.current_items, locked.preview.decisions
+
+    owner_stderr = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(owner_stderr):
+            canonical_targets, applied_count = _apply_review_atomic_batch(
+                root,
+                op_type="kb-cli:obsidian-review-batch",
+                current_items=preflight.current_items,
+                decisions=preflight.preview.decisions,
+                runtime_targets=runtime_targets,
+                actor=actor,
+                evidence=evidence,
+                user_authorization=authorization,
+                rejection_reason=rejection_reason,
+                locked_preflight=locked_preflight,
+                consume=lambda: consume_obsidian_review_batch(root, preflight.preview.batch_ref),
+            )
+    except ReviewBatchError as exc:
+        set_protocol_status(
+            "agent_action_required",
+            review_apply_error=exc.code,
+            review_owner_diagnostics=_bounded_review_owner_diagnostics(owner_stderr.getvalue()),
+        )
+        print(_review_apply_failure_message(exc.code), file=sys.stderr)
+        return 2
+    except (OSError, RuntimeError, SystemExit, TypeError, ValueError):
+        set_protocol_status(
+            "agent_action_required",
+            review_apply_error="stale_content",
+            review_owner_diagnostics=_bounded_review_owner_diagnostics(owner_stderr.getvalue()),
+        )
+        print(_review_apply_failure_message("stale_content"), file=sys.stderr)
+        return 2
+
+    exact_checkpoint_targets = sorted(
+        set([*canonical_targets, runtime_targets[-1]]),
+        key=lambda path: path.as_posix(),
+    )
+    if exact_checkpoint_targets:
+        # The commit id is an internal recovery detail.  This public owner path
+        # reports only the atomic batch result.
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                checkpoint_and_report(
+                    root,
+                    trigger="milestone",
+                    message=f"milestone: apply Obsidian review batch ({applied_count} decisions)",
+                    target_paths=exact_checkpoint_targets,
+                )
+        except BaseException:
+            set_protocol_status(
+                "error",
+                checkpoint_status="failed_after_business_apply",
+                business_state="applied_before_checkpoint",
+            )
+            raise
+    summaries = _obsidian_batch_decision_summary(root, preflight.preview.review_items, preflight.preview.decisions)
+    set_protocol_status(
+        "completed",
+        obsidian_review_applied_count=applied_count,
+        obsidian_review_deferred_count=sum(item["decision"] == "defer" for item in summaries),
+        review_owner_diagnostics=_bounded_review_owner_diagnostics(owner_stderr.getvalue()),
+    )
+    print("Obsidian 中的决定已作为一个整体同步；所有项目均成功，待确认表已安全消费。")
+    return 0
+
+
+def handle_review_apply(args: argparse.Namespace, root: Path) -> int:
+    def current_selection(
+        lease: ReviewSnapshotLease,
+        selected_decisions: Mapping[str, str],
+    ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+        current_items: list[dict[str, object]] = []
+        decisions: list[dict[str, object]] = []
+        for snapshot_item in lease.review_items:
+            subject = snapshot_item.get("subject", {})
+            ref = _review_subject_ref(subject)
+            decision = selected_decisions.get(ref)
+            if decision is None:
+                continue
+            try:
+                current = _current_review_item(root, subject)
+            except ValueError as exc:
+                raise ReviewSnapshotError("stale_content", "displayed judgement is no longer current") from exc
+            if any(
+                current.get(key) != snapshot_item.get(key)
+                for key in ("subject", "snapshot_binding", "confirm_route", "reject_route")
+            ):
+                raise ReviewSnapshotError("stale_content", "review snapshot content is stale")
+            current_items.append(current)
+            decisions.append(
+                {
+                    "decision": decision,
+                    "subject": dict(subject) if isinstance(subject, Mapping) else {},
+                }
+            )
+        return current_items, decisions
+
+    lease: ReviewSnapshotLease | None = None
+    try:
+        lease = _load_review_snapshot(root, args.apply_snapshot)
+        snapshot_by_ref = {
+            _review_subject_ref(item.get("subject", {})): item
+            for item in lease.review_items
+        }
+        confirm_refs = [str(item) for item in args.confirm_ref]
+        reject_refs = [str(item) for item in args.reject_ref]
+        defer_refs = [str(item) for item in args.defer_ref]
+        requested = [*confirm_refs, *reject_refs, *defer_refs]
+        if not requested or len(requested) > lease.item_limit or len(set(requested)) != len(requested):
+            raise ReviewSnapshotError("invalid_decision", "review decisions are empty or duplicated")
+        outside = sorted(set(requested) - set(snapshot_by_ref))
+        if outside:
+            raise ReviewSnapshotError("invalid_decision", "review decision is outside the displayed snapshot")
+        selected_decisions = {
+            **{ref: "confirm" for ref in confirm_refs},
+            **{ref: "reject" for ref in reject_refs},
+            **{ref: "defer" for ref in defer_refs},
+        }
+        actor = default_confirmed_by(root)
+        if confirm_refs and (not actor or is_ai_signer(actor)):
+            raise ReviewSnapshotError("missing_confirmation_context", "a real human confirmation identity is required")
+        user_authorization = str(args.user_authorization or "").strip()
+        evidence = [str(item).strip() for item in args.decision_evidence if str(item).strip()]
+        if not user_authorization or (confirm_refs and not evidence):
+            raise ReviewSnapshotError(
+                "missing_confirmation_context",
+                "review decisions require current authorization; confirmation also requires evidence",
+            )
+        current_items, decisions = current_selection(lease, selected_decisions)
+    except ReviewSnapshotError as exc:
+        _record_review_apply_failure(root, args, exc.code, lease=lease, reason_detail=str(exc))
+        print(_review_apply_failure_message(exc.code), file=sys.stderr)
+        return 2
+    except ValueError as exc:
+        _record_review_apply_failure(root, args, "tampered_or_unknown", lease=lease, reason_detail=str(exc))
+        print(_review_apply_failure_message("tampered_or_unknown"), file=sys.stderr)
+        return 2
+
+    def locked_preflight() -> tuple[Sequence[Mapping[str, object]], Sequence[Mapping[str, object]]]:
+        locked_lease = _load_review_snapshot(root, args.apply_snapshot)
+        if locked_lease != lease:
+            raise ReviewSnapshotError("stale_content", "review snapshot changed while applying")
+        return current_selection(locked_lease, selected_decisions)
+
+    owner_stderr = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(owner_stderr):
+            canonical_targets, applied_count = _apply_review_atomic_batch(
+                root,
+                op_type="kb-cli:dialogue-review-batch",
+                current_items=current_items,
+                decisions=decisions,
+                runtime_targets=[lease.registry_path],
+                actor=actor,
+                evidence=evidence,
+                user_authorization=user_authorization,
+                rejection_reason=str(args.rejection_reason or "").strip(),
+                locked_preflight=locked_preflight,
+                consume=lambda: _consume_review_snapshot(root, _load_review_snapshot(root, args.apply_snapshot)),
+            )
+    except (ReviewBatchError, ReviewSnapshotError) as exc:
+        _record_review_apply_failure(root, args, exc.code, lease=lease, reason_detail=str(exc))
+        set_protocol_status(
+            "agent_action_required",
+            review_owner_diagnostics=_bounded_review_owner_diagnostics(owner_stderr.getvalue()),
+        )
+        print(_review_apply_failure_message(exc.code), file=sys.stderr)
+        return 2
+    except (OSError, RuntimeError, SystemExit, TypeError, ValueError):
+        _record_review_apply_failure(root, args, "stale_content", lease=lease)
+        set_protocol_status(
+            "agent_action_required",
+            review_owner_diagnostics=_bounded_review_owner_diagnostics(owner_stderr.getvalue()),
+        )
+        print(_review_apply_failure_message("stale_content"), file=sys.stderr)
+        return 2
+
+    if canonical_targets:
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                checkpoint_and_report(
+                    root,
+                    trigger="milestone",
+                    message=f"milestone: apply dialogue review batch ({applied_count} decisions)",
+                    target_paths=canonical_targets,
+                )
+        except BaseException:
+            set_protocol_status(
+                "error",
+                checkpoint_status="failed_after_business_apply",
+                business_state="applied_before_checkpoint",
+            )
+            raise
+    labels = {"confirm": "已确认", "reject": "已拒绝", "defer": "已暂缓"}
+    set_protocol_status(
+        "completed",
+        applied_review_count=applied_count,
+        deferred_review_count=len(defer_refs),
+        decided_review_count=len(requested),
+        review_owner_diagnostics=_bounded_review_owner_diagnostics(owner_stderr.getvalue()),
+    )
+    print(f"已应用 {len(requested)} 条拍板结果（原子批量）：")
+    for current_item, decision in zip(current_items, decisions):
+        display = current_item.get("display")
+        display = display if isinstance(display, Mapping) else {}
+        subject = current_item.get("subject")
+        subject = subject if isinstance(subject, Mapping) else {}
+        raw_kind = str(display.get("kind") or subject.get("kind") or "")
+        kind_label = PUBLIC_KIND_LABELS.get(raw_kind, _SIDE_JUDGEMENT_KIND_LABELS.get(raw_kind, "判断"))
+        title = _public_display_text(display.get("title") or "", root, "标题需由 Agent 安全解释", 160)
+        print(f"- {labels[str(decision['decision'])]}{kind_label}「{title}」")
+    print("这批决定已作为一个整体处理；可再次运行 kb review 查看剩余内容。")
+    return 0
+
+
 def handle_review(args: argparse.Namespace, root: Path) -> int:
+    if str(getattr(args, "preview_obsidian_batch", "") or "").strip():
+        return handle_obsidian_review_preview(args, root)
+    if str(getattr(args, "apply_obsidian_batch", "") or "").strip():
+        return handle_obsidian_review_apply(args, root)
+    if str(getattr(args, "apply_snapshot", "") or "").strip():
+        return handle_review_apply(args, root)
+    try:
+        _gc_review_snapshots(root)
+    except ReviewSnapshotError as exc:
+        set_protocol_status("agent_action_required", review_apply_error=exc.code)
+        print(_review_apply_failure_message(exc.code), file=sys.stderr)
+        return 2
     result = forward_command(
         root,
         SCRIPT_BY_VERB["review"],
@@ -2395,13 +5206,39 @@ def handle_review(args: argparse.Namespace, root: Path) -> int:
     if result.returncode != 0:
         print("确认收件箱暂时无法读取；详细诊断已保留给 Agent。", file=sys.stderr)
         return result.returncode
-    records = [record for record in load_review_records(root, args.fuzzy) if not _record_is_rejected(record)]
-    ready_candidates = [record for record in records if is_ready_for_human_review(record)]
+    canonical_units = _review_unit_records(root)
+    cards: list[dict[str, object]] = []
+    match_reason_by_subject: dict[tuple[str, str], str] = {}
+    for card in _discover_pending_review_cards(root):
+        subject = card.get("subject") if isinstance(card.get("subject"), Mapping) else {}
+        key = (str(subject.get("kind") or ""), str(subject.get("id") or ""))
+        canonical = canonical_units.get(key)
+        title = str(canonical.get("title") or "") if isinstance(canonical, Mapping) else ""
+        matched, match_reason = _review_card_match(card, args.fuzzy, title=title)
+        if matched:
+            cards.append(card)
+            match_reason_by_subject[key] = match_reason
+    card_by_subject: dict[tuple[str, str], dict[str, object]] = {}
+    for card in cards:
+        subject = card.get("subject")
+        subject = subject if isinstance(subject, Mapping) else {}
+        card_by_subject[(str(subject.get("kind") or ""), str(subject.get("id") or ""))] = card
+    records = [
+        _review_card_record(
+            card,
+            title=str(canonical_units.get(key, {}).get("title") or ""),
+        )
+        for key, card in card_by_subject.items()
+    ]
     pending: list[dict] = []
-    projection_by_id: dict[str, dict[str, object]] = {}
+    projection_by_subject: dict[tuple[str, str], dict[str, object]] = {}
     structurally_blocked: list[dict] = []
     unsafe_blocked: list[dict] = []
-    for record in ready_candidates:
+    for record in records:
+        key = (str(record.get("kind") or ""), str(record.get("id") or ""))
+        if key[0] in PUBLIC_KIND_LABELS and key not in canonical_units:
+            structurally_blocked.append(record)
+            continue
         projection = public_review_projection(record, root)
         if projection.get("status") == "invalid":
             structurally_blocked.append(record)
@@ -2410,28 +5247,154 @@ def handle_review(args: argparse.Namespace, root: Path) -> int:
             unsafe_blocked.append(record)
             continue
         pending.append(record)
-        projection_by_id[str(record.get("id") or "")] = projection
+        projection_by_subject[key] = projection
     blocked = [*structurally_blocked, *unsafe_blocked]
     if pending:
-        pending_ids = [str(record.get("id") or "") for record in pending]
+        pending.sort(key=_review_sort_key)
+        try:
+            review_policy = effective_review_policy(root)
+        except (OSError, TypeError, ValueError):
+            review_policy = {
+                "governance_profile": "strict",
+                "item_limit": _LEGACY_PUBLIC_REVIEW_LIMIT,
+                "card_ttl_hours": 24,
+                "ttl_seconds": _LEGACY_REVIEW_SNAPSHOT_TTL_SECONDS,
+                "absolute_max_items": _PUBLIC_REVIEW_ABSOLUTE_MAX,
+            }
+        review_limit = int(review_policy["item_limit"])
+        displayed = pending[:review_limit]
+        remaining_count = len(pending) - len(displayed)
+        displayed_ids = [str(record.get("id") or "") for record in displayed]
         configured_actor = default_confirmed_by(root)
         confirmation_identity_required = not configured_actor or is_ai_signer(configured_actor)
+        review_items = [
+            _review_decision_routes(
+                canonical_units.get(
+                    (str(record.get("kind") or ""), str(record.get("id") or "")),
+                    record,
+                ),
+                card_by_subject.get((str(record.get("kind") or ""), str(record.get("id") or ""))),
+            )
+            for record in displayed
+        ]
+        preference_task_context = review_display_preference_context(
+            review_items,
+            hard_display_cap=review_limit,
+        )
+        try:
+            effective_preferences = resolve_operation_preferences(
+                root,
+                selection_id=str(getattr(args, "preference_selection_id", "") or ""),
+                skill="kb-cli",
+                operation="review-display",
+                canonical_inputs=preference_task_context,
+            )
+        except ValueError:
+            set_protocol_status("agent_action_required", review_preference_error="stale_or_invalid")
+            print("这次显示偏好与当前待确认内容不一致；Agent 需要重新选择后再展示。", file=sys.stderr)
+            return 2
+        density = review_display_density(effective_preferences)
+        selected_soft_paths = sorted(
+            str(item.get("path") or "")
+            for item in effective_preferences.get("soft_items", [])
+            if isinstance(item, Mapping) and str(item.get("path") or "")
+        )
+        selection_binding = effective_preferences.get("binding")
+        selection_binding = dict(selection_binding) if isinstance(selection_binding, Mapping) else {}
         set_protocol_status(
             "needs_user_authorization",
             review_count=len(pending),
-            record_ids=pending_ids,
+            record_ids=displayed_ids,
+            displayed_review_count=len(displayed),
+            displayed_record_ids=displayed_ids,
+            remaining_review_count=remaining_count,
             blocked_review_count=len(blocked),
             blocked_review_records=blocked,
             invalid_review_count=len(structurally_blocked),
             unsafe_review_count=len(unsafe_blocked),
             confirmation_identity_required=confirmation_identity_required,
+            review_display_density=density,
+            preference_selection_applied=bool(selection_binding),
         )
+        snapshot_token = _store_review_snapshot(
+            root,
+            str(getattr(args, "agent_protocol", "") or ""),
+            review_items,
+            policy=review_policy,
+        ) if _ACTIVE_PROTOCOL is not None else ""
+        obsidian_batch: dict[str, object] | None = None
+        if bool(getattr(args, "obsidian_export", False)):
+            if not snapshot_token:
+                set_protocol_status("agent_action_required", review_apply_error="invalid_batch")
+                print("需要由 Agent 建立安全待确认表；请重新运行 kb review。", file=sys.stderr)
+                return 2
+            try:
+                obsidian_batch = create_obsidian_review_batch(
+                    root,
+                    source_snapshot_token=snapshot_token,
+                    review_items=review_items,
+                    display_items=[
+                        _obsidian_review_display(
+                            record,
+                            projection_by_subject[(str(record.get("kind") or ""), str(record.get("id") or ""))],
+                            root,
+                        )
+                        for record in displayed
+                    ],
+                    item_limit=review_limit,
+                )
+                sheet_path = root / str(obsidian_batch["sheet_relative_path"])
+                checkpoint = git_checkpoint(
+                    root,
+                    "milestone: export Obsidian review sheet",
+                    trigger="manual",
+                    auto_init=True,
+                    target_paths=[sheet_path],
+                )
+                if not checkpoint.get("committed"):
+                    raise ReviewBatchError("checkpoint_failed", "review sheet checkpoint was not created")
+            except ReviewBatchError as exc:
+                set_protocol_status("agent_action_required", review_apply_error=exc.code)
+                print(_review_apply_failure_message(exc.code), file=sys.stderr)
+                return 2
         add_agent_action(
             "present_review_items",
-            records=pending,
+            records=displayed,
+            review_items=review_items,
             decision_fields=["decision", "user_authorization", "authorization_source", "evidence"],
             authorization_source="user_message",
+            effective_preferences={
+                "skill": "kb-cli",
+                "operation": "review-display",
+                "task_context": preference_task_context,
+                "task_context_digest": effective_preferences["task_context_digest"],
+                "selection_binding": selection_binding,
+                "selection_applied": bool(selection_binding),
+                "selected_soft_paths": selected_soft_paths,
+                "neutral_without_selection": True,
+                "display_density": density,
+                "allowed_effect": "explanation-density-only",
+                "hard_display_cap": review_limit,
+            },
+            apply={
+                "verb": "review",
+                "mode": "snapshot-bound",
+                "snapshot_protocol": str(getattr(args, "agent_protocol", "") or ""),
+                "scope": "displayed_review_items_only",
+                "max_decisions_per_apply": review_limit,
+                "governance_profile": str(review_policy["governance_profile"]),
+                "ttl_seconds": int(review_policy["ttl_seconds"]),
+                "snapshot_token": snapshot_token,
+            },
         )
+        if obsidian_batch is not None:
+            add_agent_action(
+                "open_obsidian_review_sheet",
+                sheet_path=obsidian_batch["sheet_relative_path"],
+                batch_ref=obsidian_batch["batch_ref"],
+                expires_at=obsidian_batch["expires_at"],
+                then="preview_obsidian_review_diff",
+            )
         if confirmation_identity_required:
             add_agent_action(
                 "collect_confirmation_identity",
@@ -2444,12 +5407,32 @@ def handle_review(args: argparse.Namespace, root: Path) -> int:
                     "fields": ["human_name"],
                     "field_inputs": {"human_name": {"input": "--name"}},
                 },
-                then="apply_review_decision",
+                then="apply_review_snapshot_decision",
             )
-        print(f"有 {len(pending)} 条待确认内容已经准备好：")
-        for record in pending:
-            print_review_item(record, projection_by_id[str(record.get("id") or "")], root)
-        print("以上待确认内容已经过当前流程核验；以上内容需要你用自然语言确认或拒绝，在你拍板前不会写成已确认结论。")
+        if remaining_count:
+            print(f"有 {len(pending)} 条待确认内容已经准备好；本次先显示最需要你拍板的 {len(displayed)} 条：")
+        else:
+            print(f"有 {len(pending)} 条待确认内容已经准备好：")
+        for record in displayed:
+            print_review_item(
+                record,
+                projection_by_subject[(str(record.get("kind") or ""), str(record.get("id") or ""))],
+                root,
+                density=density,
+                match_reason=match_reason_by_subject.get(
+                    (str(record.get("kind") or ""), str(record.get("id") or "")),
+                    "",
+                ),
+            )
+        if remaining_count:
+            print(f"另有 {remaining_count} 条已准备好的内容暂未展开；处理这批后可继续查看。")
+        print(
+            "以上待确认内容已经过当前流程核验；请回到 Agent 对话，"
+            f"用自然语言一次确认、拒绝或暂缓最多 {review_limit} 项。"
+            "在你拍板前不会写成已确认结论。"
+        )
+        if obsidian_batch is not None:
+            print("已在 Obsidian 的人工批注区生成可编辑待确认表；勾选后请回到对话中要求 Agent 同步。")
         if confirmation_identity_required:
             print("如果你选择确认，确认前还需要你的真实署名。")
         if structurally_blocked:
@@ -2526,7 +5509,7 @@ def register_obsidian(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
 
 def register_add(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     parser = subparsers.add_parser("add", help="轻量入库 source")
-    parser.add_argument("source", metavar="<链接或路径>", help="论文、代码仓、数据集、博客链接或本地文件路径")
+    parser.add_argument("source", nargs="+", metavar="<链接或路径>", help="一次加入 1 到 20 个论文、代码仓、数据集、博客链接或本地文件路径")
     parser.add_argument("--kind", choices=["paper", "repo", "dataset", "blog"], help=argparse.SUPPRESS)
     parser.set_defaults(handler=handle_add)
 
@@ -2537,14 +5520,28 @@ def register_ingest(subparsers: argparse._SubParsersAction[argparse.ArgumentPars
         help="入库资料并备好待补全的分析骨架",
         description="资料会先安全入库，再交给 Agent 补全有证据的理解。",
     )
-    parser.add_argument("source", metavar="<链接或路径>", help="论文、代码仓、数据集、博客链接或本地文件路径")
+    parser.add_argument("source", nargs="?", metavar="<链接或路径>", help="论文、代码仓、数据集、博客链接或本地文件路径")
     parser.add_argument("--kind", choices=["paper", "repo", "dataset", "blog"], help=argparse.SUPPRESS)
+    parser.add_argument("--human-note-area", choices=["inbox", "annotations"], default="", help=argparse.SUPPRESS)
+    parser.add_argument("--human-note-filename", default="", help=argparse.SUPPRESS)
     parser.set_defaults(handler=handle_ingest)
 
 
 def register_review(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     parser = subparsers.add_parser("review", help="查看确认收件箱并用自然语言拍板")
     parser.add_argument("fuzzy", nargs="?", metavar="<筛选词>", help="可选的资料类型或关键词")
+    parser.add_argument("--obsidian-export", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--preview-obsidian-batch", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--apply-obsidian-batch", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--expected-preview-digest", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--apply-snapshot", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--confirm-ref", action="append", default=[], help=argparse.SUPPRESS)
+    parser.add_argument("--reject-ref", action="append", default=[], help=argparse.SUPPRESS)
+    parser.add_argument("--defer-ref", action="append", default=[], help=argparse.SUPPRESS)
+    parser.add_argument("--decision-evidence", action="append", default=[], help=argparse.SUPPRESS)
+    parser.add_argument("--user-authorization", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--rejection-reason", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--preference-selection-id", default="", help=argparse.SUPPRESS)
     parser.set_defaults(handler=handle_review)
 
 
@@ -2555,7 +5552,18 @@ def register_init(subparsers: argparse._SubParsersAction[argparse.ArgumentParser
     parser.add_argument("--name", help=argparse.SUPPRESS)
     parser.add_argument("--lang", choices=LANG_CHOICES, help=argparse.SUPPRESS)
     parser.add_argument("--auto-commit", choices=AUTO_COMMIT_CHOICES, help=argparse.SUPPRESS)
-    parser.add_argument("--auto-screen", choices=AUTO_SCREEN_CHOICES, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--auto-ingest-mode",
+        dest="auto_ingest_mode",
+        choices=LINK_AUTODRIVE_CHOICES,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--discussion-style",
+        dest="discussion_style",
+        choices=DISCUSSION_STYLE_CHOICES,
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument("--persona-focus", help=argparse.SUPPRESS)
     parser.add_argument("--persona-resources", help=argparse.SUPPRESS)
     parser.add_argument("--persona-report", help=argparse.SUPPRESS)
@@ -2606,6 +5614,11 @@ def register_undo(subparsers: argparse._SubParsersAction[argparse.ArgumentParser
 def register_update(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     parser = subparsers.add_parser("update", help="检查并在确认后更新研究能力包")
     parser.add_argument("--apply", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--source-origin", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--source-checkout", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--source-branch", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--source-strategy", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--expected-manifest-digest", default="", help=argparse.SUPPRESS)
     parser.set_defaults(handler=handle_update)
 
 
@@ -2615,8 +5628,14 @@ def register_resume(subparsers: argparse._SubParsersAction[argparse.ArgumentPars
 
 
 def register_restore(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    parser = subparsers.add_parser("restore", help="恢复到指定操作之前的状态")
-    parser.add_argument("op_id", metavar="<操作编号>", help="希望回到其之前状态的操作编号")
+    parser = subparsers.add_parser("restore", help="恢复到指定操作之前的状态；不带编号时列出最近可恢复的操作")
+    parser.add_argument(
+        "op_id",
+        nargs="?",
+        default="",
+        metavar="<操作编号>",
+        help="希望回到其之前状态的操作编号；省略时列出最近可恢复的操作清单",
+    )
     parser.set_defaults(handler=handle_restore)
 
 
@@ -2673,6 +5692,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     _ACTIVE_PROTOCOL = protocol
     _ACTIVE_PUBLIC_VERB = str(args.command or "")
     stopped: SystemExit | None = None
+    raised: BaseException | None = None
     exit_code = 0
     try:
         try:
@@ -2686,6 +5706,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if protocol.details is None:
                         protocol.details = {}
                     protocol.details["error"] = str(exc.code)
+        except BaseException as exc:
+            raised = exc
+            exit_code = 1
+            if protocol is not None:
+                protocol.status = "error"
+                if protocol.details is None:
+                    protocol.details = {}
+                protocol.details.setdefault("error_class", type(exc).__name__)
     finally:
         _ACTIVE_PROTOCOL = None
         _ACTIVE_PUBLIC_VERB = ""
@@ -2696,6 +5724,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             write_agent_protocol(root, str(args.agent_protocol), protocol)
     if stopped is not None:
         raise stopped
+    if raised is not None:
+        if isinstance(raised, BrokenPipeError):
+            # A closed public reader (e.g. `kb restore | head`) must never turn
+            # into a traceback on the user surface. Detach stdout so interpreter
+            # shutdown flushing stays quiet, then fail with a plain exit code.
+            try:
+                devnull = os.open(os.devnull, os.O_WRONLY)
+                os.dup2(devnull, sys.stdout.fileno())
+            except OSError:
+                pass
+            return 1
+        raise raised
     return exit_code
 
 

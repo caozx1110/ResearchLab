@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-The current candidate identifier is `0.2.0-rc.1`. It has passed the local release-candidate gate, but it has not been tagged or published and is not a stable or GA release. Hosted Linux/macOS CI remains a release-tag prerequisite. There is no stable supported release yet; security fixes target the current default branch and, when applicable, the current candidate line, while older snapshots may not receive backports.
+The current candidate identifier is `0.2.0-rc.7`. The identifier denotes a release candidate, not a stable or GA release; an exact published revision is identified by its Git tag, while a GitHub Release is optional. Every release tag is gated on hosted Linux/macOS CI plus exact-candidate real-source and Obsidian acceptance. Installation and core workflows do not require an external API Key, paid search quota, commercial database subscription, or paid plugin. There is no stable supported release yet; security fixes target the current default branch and, when applicable, the current candidate line, while older snapshots may not receive backports.
 
 ## Report a vulnerability privately
 
@@ -14,7 +14,7 @@ Include the affected commit or release candidate, operating system, minimal repr
 
 ## Security and governance invariants
 
-- AI cannot confirm its own judgement.
+- AI cannot confirm its own judgement. Signer normalization rejects generic AI/tool identities, localized AI markers, and model-name/version-only compounds; this heuristic is defense in depth and does not replace current-message authorization.
 - Judgement confirmation requires substantive content, evidence, a non-AI signer, and authorization from the current user interaction.
 - Confirmation is bound to current content and evidence digests; mutation invalidates stale receipts.
 - Raw source and complete parse caches are immutable derived evidence.
