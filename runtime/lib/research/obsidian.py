@@ -16,7 +16,7 @@ import sys
 from collections import defaultdict
 from copy import deepcopy
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 from urllib.parse import quote as url_quote
 
 from .common import utc_now_iso
@@ -1718,6 +1718,7 @@ class _PostAbortExchangeRecovery:
         desired_bytes: bytes,
         desired_identity: tuple[int, int, int, int, int, int],
         original_bytes: bytes,
+        staging_is_current: Callable[[], bool],
     ) -> None:
         self.staging_fd = os.dup(staging_fd)
         self.target_parent_fd = os.dup(target_parent_fd)
@@ -1728,10 +1729,16 @@ class _PostAbortExchangeRecovery:
         self.desired_bytes = desired_bytes
         self.desired_identity = desired_identity
         self.original_bytes = original_bytes
+        self.staging_is_current = staging_is_current
 
     def restore_displaced(self) -> None:
         """Restore the exact displaced inode after journal abort, without clobbering a third writer."""
         try:
+            # Re-open the lexical journal path even though recovery deliberately
+            # continues through the pinned descriptor when that path was
+            # detached.  The comparison prevents a replacement from being
+            # mistaken for our recovery directory.
+            staging_visible = self.staging_is_current()
             try:
                 recovery_bytes, _recovery_identity = _read_anchored_regular(
                     self.staging_fd,
@@ -1768,6 +1775,10 @@ class _PostAbortExchangeRecovery:
                 )
             if recovery_bytes != self.displaced_bytes:
                 raise RuntimeError("The displaced Base recovery bytes changed during journal abort.")
+            if staging_visible and not self.staging_is_current():
+                raise RuntimeError(
+                    "The visible Base staging directory changed again during post-abort recovery."
+                )
             current_bytes, current_identity = _read_anchored_regular(
                 self.target_parent_fd,
                 self.leaf,
@@ -1823,11 +1834,24 @@ def _new_base_exchange_temp_name() -> str:
     return f".presentation-reset-{secrets.token_hex(12)}.tmp"
 
 
+def _journal_staging_directory_is_current(
+    project_root: Path,
+    relative_path: str,
+    expected_identity: tuple[int, int, int],
+) -> bool:
+    try:
+        with _anchored_journal_directory(project_root, relative_path) as current_fd:
+            return _directory_capability(os.fstat(current_fd)) == expected_identity
+    except (OSError, RuntimeError, SystemExit):
+        return False
+
+
 def _replace_project_snapshot_bytes(
     snapshot: ProjectFileSnapshot,
     desired_bytes: bytes,
     *,
     staging_fd: int,
+    staging_is_current: Callable[[], bool],
     temp_name: str | None = None,
 ) -> None:
     """Atomically exchange one exact snapshot through its anchored parent."""
@@ -1844,6 +1868,8 @@ def _replace_project_snapshot_bytes(
         raise SystemExit("The Base atomic-exchange staging name is invalid.")
     temp_created = False
     preserve_recovery_material = False
+    if not staging_is_current():
+        raise SystemExit("The Base atomic-exchange staging directory changed before preparation.")
     with _anchored_target_parent(snapshot.project_root, target_key) as (parent_fd, leaf):
         if parent_fd is None or not snapshot.directory_capabilities:
             raise SystemExit("The Base reset parent is unavailable or unsafe.")
@@ -1889,6 +1915,8 @@ def _replace_project_snapshot_bytes(
                 raise SystemExit("The Base reset target changed before compare-and-replace.")
             if not snapshot.is_current():
                 raise SystemExit("The Base reset target or an ancestor changed before replacement.")
+            if not staging_is_current():
+                raise SystemExit("The Base atomic-exchange staging directory changed before replacement.")
             _atomic_exchange_at(staging_fd, temp_name, parent_fd, leaf)
             try:
                 displaced_bytes, displaced_identity = _read_anchored_regular(
@@ -1919,6 +1947,10 @@ def _replace_project_snapshot_bytes(
                     raise SystemExit(
                         "The Base reset target or an ancestor changed at replacement."
                     )
+                if not staging_is_current():
+                    raise SystemExit(
+                        "The Base atomic-exchange staging directory changed at replacement."
+                    )
             except BaseException as validation_error:
                 try:
                     displaced_bytes, displaced_identity = _read_anchored_regular(
@@ -1935,6 +1967,7 @@ def _replace_project_snapshot_bytes(
                         desired_bytes=desired_bytes,
                         desired_identity=desired_identity,
                         original_bytes=snapshot.raw_bytes,
+                        staging_is_current=staging_is_current,
                     )
                 except BaseException as recovery_error:
                     preserve_recovery_material = True
@@ -2317,16 +2350,27 @@ def reset_obsidian_base_presentation_drift(
                 raise SystemExit("The Base presentation drift changed after authorization; nothing was reset.")
             if [item["relative"] for item in locked_candidates] != [item["relative"] for item in candidates]:
                 raise SystemExit("The Base presentation reset target set changed; nothing was reset.")
+            staging_relative = f"{SNAPSHOT_DIRNAME}/{op_id}"
             with _anchored_journal_directory(
                 project_root,
-                f"{SNAPSHOT_DIRNAME}/{op_id}",
+                staging_relative,
             ) as staging_fd:
+                staging_identity = _directory_capability(os.fstat(staging_fd))
+
+                def staging_is_current() -> bool:
+                    return _journal_staging_directory_is_current(
+                        project_root,
+                        staging_relative,
+                        staging_identity,
+                    )
+
                 for item in locked_candidates:
                     try:
                         _replace_project_snapshot_bytes(
                             item["snapshot"],
                             str(item["desired_text"]).encode("utf-8"),
                             staging_fd=staging_fd,
+                            staging_is_current=staging_is_current,
                             temp_name=exchange_temp_names[str(item["relative"])],
                         )
                     except _AtomicExchangeConflict as conflict:

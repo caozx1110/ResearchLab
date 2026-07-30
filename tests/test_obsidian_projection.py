@@ -494,13 +494,20 @@ def test_base_presentation_reset_rolls_back_multi_file_write_failure(
         data: bytes,
         *,
         staging_fd: int,
+        staging_is_current,
         temp_name: str | None = None,
     ) -> None:
         nonlocal base_writes
         base_writes += 1
         if base_writes == 2:
             raise RuntimeError("injected Base write failure")
-        original_write(snapshot, data, staging_fd=staging_fd, temp_name=temp_name)
+        original_write(
+            snapshot,
+            data,
+            staging_fd=staging_fd,
+            staging_is_current=staging_is_current,
+            temp_name=temp_name,
+        )
 
     monkeypatch.setattr(
         obsidian_module,
@@ -1036,6 +1043,63 @@ def test_base_presentation_reset_restores_detached_leaf_after_final_ancestor_swa
     assert outside_base.read_bytes() == outside_before
     assert (detached / "All Units.base").read_bytes() == drift_bytes
     assert list(detached.glob(".presentation-reset-*.tmp")) == []
+
+
+def test_base_presentation_reset_restores_leaf_after_staging_directory_detach(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _record(tmp_path, "p-alpha-12345678", "Alpha")
+    update_obsidian_projection(tmp_path)
+    base = obsidian_managed_root(tmp_path) / "dashboards/All Units.base"
+    _apply_obsidian_1_12_7_title_sort(base)
+    drift_bytes = base.read_bytes()
+    preview = preview_obsidian_base_presentation_reset(tmp_path)
+    detached = tmp_path / "detached-staging-op"
+    original_exchange = obsidian_module._atomic_exchange_at
+    injected = False
+
+    def detach_staging_before_exchange(
+        left_parent_fd: int,
+        left: str,
+        right_parent_fd: int,
+        right: str,
+    ) -> None:
+        nonlocal injected
+        if (
+            not injected
+            and left.startswith(".presentation-reset-")
+            and right == "All Units.base"
+        ):
+            injected = True
+            current = incomplete_ops(tmp_path)
+            assert len(current) == 1
+            op_id = str(current[0]["op_id"])
+            staging = tmp_path / "kb/.journal/snapshots" / op_id
+            staging.rename(detached)
+            staging.mkdir(mode=0o700)
+        original_exchange(left_parent_fd, left, right_parent_fd, right)
+
+    monkeypatch.setattr(
+        obsidian_module,
+        "_atomic_exchange_at",
+        detach_staging_before_exchange,
+    )
+
+    with pytest.raises((SystemExit, RuntimeError)):
+        reset_obsidian_base_presentation_drift(
+            tmp_path,
+            expected_preview_digest=preview["preview_digest"],
+            expected_preview_token=preview["preview_token"],
+            user_authorization="确认按预览重置",
+            authorization_source="user_message",
+        )
+
+    assert injected is True
+    assert base.read_bytes() == drift_bytes
+    assert list(detached.glob(".presentation-reset-*.tmp")) == []
+    assert list(
+        (tmp_path / "kb/.journal/snapshots").rglob(".presentation-reset-*.tmp")
+    ) == []
 
 
 def test_base_presentation_sort_with_yaml_comment_remains_protected_drift(tmp_path: Path) -> None:
