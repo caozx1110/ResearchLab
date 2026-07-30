@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Repo analyst: script prepares fillable structure + verifies evidence; a runtime
-agent fills the understanding (SSOT Principle 1 / §3.3).
+agent fills the understanding (`docs/DESIGN.md`, "Prepare / fill / verify").
 
 The script is deliberately *not* allowed to understand the repo. It (a) scans the
 directory tree for mechanical facts (files, entrypoints, languages), (b) emits a
@@ -87,7 +87,7 @@ ENTRYPOINT_HINTS = {
 }
 
 # --------------------------------------------------------------------------- #
-# 3-element fill contract (SSOT §3.3 / repo paradigm shift).                   #
+# Fill contract (.agents/lib/research/SCHEMAS.md#unit-payload, repo payload).  #
 #                                                                             #
 # A runtime agent fills these three elements; every element is a judgement-    #
 # class claim and MUST carry >=1 evidence_ref (short verbatim quote from a     #
@@ -355,7 +355,7 @@ def build_capability_scaffold(
                 "repo, each backed by >=1 verbatim evidence_ref (a real repo file + line). "
                 "Then run `map-capability --phase verify` to validate + verbatim-check "
                 "evidence + persist. Empty or unevidenced elements are rejected; the script "
-                "never judges capability (SSOT §3.3)."
+                "never judges capability; that judgement belongs to the runtime Agent."
             ),
             "required_elements": list(CAP_ELEMENTS),
             "element_descriptions": {
@@ -603,7 +603,7 @@ def render_capability_md(record: dict, claims: list[dict]) -> str:
     lines = [
         f"# {title}",
         "",
-        "> 本笔记由 runtime agent 依据仓库文件填写；脚本已逐字校验每条 evidence（SSOT 原则1/原则2）。",
+        "> 本笔记由 runtime agent 依据仓库文件填写；脚本已逐字校验每条 evidence。",
     ]
     if repo_root:
         lines.extend(["", f"> repo_root: `{repo_root}`"])
@@ -663,7 +663,7 @@ def _resolve_fill_input(unit_root: Path, default_name: str, explicit: str | None
 
 
 def next_for_agent_capability(root: Path, record: dict, fill_path: Path) -> str:
-    """One machine-readable navigation line for the ingestion auto-drive (SSOT §7).
+    """One private navigation line for the Agent protocol in `docs/DESIGN.md`.
 
     Pure navigation: names the fill artifact to read (its agent_orientation digest),
     the elements to fill, and the exact verify command to run after. Repo evidence

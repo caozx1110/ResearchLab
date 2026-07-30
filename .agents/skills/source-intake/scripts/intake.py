@@ -263,7 +263,7 @@ def guidance_hints(kind: str, preferences: dict, *, has_pdf: bool, note_created:
 
 
 # kind -> (unit-analyst script, prepare verb, id flag). Used only to build the
-# machine-readable NEXT FOR AGENT navigation line (SSOT §7); no judgement here.
+# private NEXT FOR AGENT navigation line (`docs/DESIGN.md`, "对话层与 Agent 协议"); no judgement here.
 ANALYZER_PREPARE: dict[str, tuple[str, str, str]] = dict(UNIT_ANALYZER_PREPARE_BY_KIND)
 
 
@@ -273,7 +273,7 @@ def ingest_chain_active() -> bool:
 
 
 def next_for_agent_intake(root: Path, kind: str, record_id: str) -> str:
-    """One machine-readable navigation line after intake add (SSOT §7).
+    """One private navigation line after intake add, per the Agent protocol in `docs/DESIGN.md`.
 
     Inside a `kb ingest` chain (RESEARCH_INGEST_CHAIN set) the chain auto-runs prepare
     next, so we say so and point at prepare's own NEXT line. Standalone, it names the

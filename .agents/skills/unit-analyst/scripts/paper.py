@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Paper analyst: script prepares fillable structure + verifies evidence; a runtime
-agent fills the understanding (SSOT Principle 1 / §3.2).
+agent fills the understanding (`docs/DESIGN.md`, "Prepare / fill / verify").
 
 The script is deliberately *not* allowed to understand the paper. It (a) parses the
 source into a parse-cache, (b) emits a **fillable structure** (screening scaffold /
@@ -224,7 +224,7 @@ SCREENING_DIMENSION_RATINGS: dict[str, tuple[str, ...]] = {
 }
 
 # --------------------------------------------------------------------------- #
-# Per-paper-type 5-element fill contracts (SSOT §3.2).                         #
+# Fill contracts (.agents/lib/research/SCHEMAS.md#paper-element-sets).         #
 #                                                                             #
 # A runtime agent classifies the paper inside the deep-read fill and fills the  #
 # selected five elements; the type and every element are judgement-class       #
@@ -240,7 +240,8 @@ ELEMENT_SETS: dict[str, tuple[str, ...]] = {
 NOTE_ELEMENTS: tuple[str, ...] = ELEMENT_SETS["method_system"]
 
 # Every element is judgement-class so research.evidence.validate_claims enforces a
-# non-empty evidence_refs on each (SSOT Principle 2 gate interlock).
+# non-empty evidence_refs on each
+# (.agents/lib/research/SCHEMAS.md#evidence-claims gate interlock).
 ELEMENT_CLAIM_TYPE: dict[str, str] = {
     "motivation": "inference",
     "method": "inference",
@@ -336,7 +337,7 @@ def elements_for(record_or_type: dict | str) -> tuple[str, ...]:
 EVIDENCE_REF_FORMAT: dict[str, str] = {
     "source_unit_id": "p-... (this paper unit id)",
     "artifact": "parse-cache.yaml (unit-relative artifact the quote lives in)",
-    "locator": "PDF: page=N ; HTML: section or section:<anchor> (B4)",
+    "locator": "PDF: page=N ; HTML: section or section:<anchor>",
     "quote": "short verbatim snippet — script checks it is a whitespace-normalized substring of the artifact",
     "summary": "optional one-line paraphrase",
 }
@@ -488,7 +489,8 @@ def _cache_locator_kind(cache_path: Path) -> str:
 
 
 def _chunk_locator(chunk: dict, cache_locator_kind: str) -> str:
-    """Derive the evidence locator string for a parse-cache chunk (B4 two families).
+    """Derive a locator using the two families in
+    `.agents/lib/research/SCHEMAS.md#evidence-claims`.
 
     PDF chunks -> ``page=N``; HTML section chunks -> ``section:<anchor>`` / ``section``.
     This is pure transport: it copies the locator the agent should cite, it does not
@@ -511,7 +513,7 @@ def _chunk_locator(chunk: dict, cache_locator_kind: str) -> str:
 def _evidence_digest(source_chunks: list[dict], cache_locator_kind: str, *, chunk_limit: int, excerpt_chars: int) -> list[dict]:
     """Build a locator-tagged excerpt list from parse-cache chunks for the agent.
 
-    This is the "备料" (transport) half of Principle 1: it hands the agent the raw
+    This is the transport half of `docs/DESIGN.md` "Prepare / fill / verify": it hands the agent the raw
     front-matter text with citable locators. It contains no judgement and no grade.
     """
     digest: list[dict] = []
@@ -535,7 +537,7 @@ def _keyword_mentions(text: str, terms: list[str]) -> list[str]:
 
     Deliberately not counted, scored, or turned into a grade: it merely tells the
     agent which surface terms appear so it knows where to look. No caller may derive a
-    judgement field from this list (SSOT Principle 1).
+    judgement field from this list (`docs/DESIGN.md`, "Prepare / fill / verify").
     """
     mentions: list[str] = []
     lowered = text.lower()
@@ -588,7 +590,7 @@ def build_screening_scaffold(
                 "paper_type (method_system|benchmark|survey) + relevance_to_current_research, "
                 "and attaches judgement claims to `claims` "
                 "with verbatim evidence. Then run `screen --phase verify` to validate + persist. "
-                "The script does NOT decide worth — that judgement is the agent's (SSOT §3.2)."
+                "The script does NOT decide worth; that judgement belongs to the runtime Agent."
             ),
             "worth_deep_reading": "agent fills one quoted string: 'yes'|'no'|'maybe'",
             "paper_type": "agent fills: method_system|benchmark|survey",
@@ -982,7 +984,7 @@ def render_note_md(record: dict, claims: list[dict]) -> str:
     lines = [
         f"# {title}",
         "",
-        "> 本笔记由 runtime agent 依据 parse-cache 填写；脚本已逐字校验每条 evidence（SSOT 原则1/原则2）。",
+        "> 本笔记由 runtime agent 依据 parse-cache 填写；脚本已逐字校验每条 evidence。",
         "",
     ]
     for name in elements_for(record):
@@ -1333,8 +1335,9 @@ def _run_extract_figures(
 def _auto_post_note_steps(
     root: Path, record: dict, unit_root: Path, source_chunks: list[dict], cache_path: Path, paper_preferences: dict, defer_post_actions: bool
 ) -> None:
-    """SSOT 3.2 auto-refresh: after a successful note verify, auto-run the safe
-    post-note steps the prefs enable, gated by autonomy.auto_execute_scope. Never
+    """After successful note verification, run the safe post-note steps described
+    by `docs/DESIGN.md` "Prepare / fill / verify" when enabled by preferences and
+    gated by autonomy.auto_execute_scope. Never
     auto-verifies or auto-confirms; never re-parses the cache (F-a). When deferred,
     do nothing (the caller's own defer handles it)."""
     if defer_post_actions:
@@ -1796,7 +1799,7 @@ def _unit_owned_fill_path(unit_root: Path, fill_path: Path) -> Path | None:
 
 
 def next_for_agent_note(root: Path, record: dict, cache_path: Path, fill_path: Path) -> str:
-    """One machine-readable navigation line for the ingestion auto-drive (SSOT §7).
+    """One private navigation line for the Agent protocol in `docs/DESIGN.md`.
 
     Pure navigation: it names the parse-cache artifact to read, the elements to fill
     (each needs a verbatim quote + locator), and the exact verify command to run after.

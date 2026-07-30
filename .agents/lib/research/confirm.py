@@ -149,13 +149,13 @@ def is_ai_signer(actor: str) -> bool:
     return not possible_human_name_tokens
 
 
-# Substance-check (SSOT §3.11 / Principle 3 — plug the hollow confirmation gate).
+# Substance-check (.agents/lib/research/SCHEMAS.md#confirmation-gate).
 #
 # Per kind, the payload section(s) that hold the *substantive analysis* (the region
 # that becomes hollow when an analyst confirms an empty note). Paper intentionally
 # uses `core_content` so the emptiness caliber matches the G5 research-value harness
 # (`paper_core_content_empty`): a paper whose 8 core_content fields are ALL empty is
-# hollow. Field names are read from the schema SSOT (records.kind_payload_skeleton),
+# hollow. Field names come from the canonical `records.kind_payload_skeleton`,
 # so this stays aligned with the canonical fields the harness scans.
 SUBSTANCE_CONTENT_SECTIONS: dict[str, tuple[str, ...]] = {
     "paper": ("core_content",),
@@ -230,7 +230,8 @@ def has_substantive_content(record: dict[str, Any], kind: str | None = None) -> 
 
 
 def confirmation_track(record: dict[str, Any]) -> str:
-    """Two-track classification of a pending item (SSOT §3.11 decision ①).
+    """Two-track classification of a pending item
+    (`.agents/lib/research/SCHEMAS.md#confirmation-gate`).
 
     - ``'judgement'`` — the record carries AI inference/evaluation/user_opinion (or an
       AI source), i.e. it already needs the confirmation gate. Confirming it as fact
@@ -570,7 +571,8 @@ def confirm_unit(
                 + "\n  - ".join(lifecycle_violations)
             )
     _require_confirmable_claim_types(record)
-    # Substance gate (SSOT §3.11 / Principle 3). This is the PRIMARY user confirm path
+    # Substance gate (.agents/lib/research/SCHEMAS.md#confirmation-gate).
+    # This is the PRIMARY user confirm path
     # (paper.py confirm / kb.py confirm / interactive kb review), so the hollow-gate
     # check must live here too, not only in promote_record. Evaluate track + substance
     # on the ORIGINAL record before confirmation mutates gate state. Confirmation keeps
@@ -878,7 +880,8 @@ def promote_record(
     if confirmation_status:
         if confirmation_status == "confirmed":
             _require_confirmable_claim_types(record)
-            # Substance gate (SSOT §3.11 / Principle 3): a judgement-track record must
+            # Substance gate (.agents/lib/research/SCHEMAS.md#confirmation-gate):
+            # a judgement-track record must
             # carry real content before it can be confirmed as fact. This ADDED check
             # is layered on top of the existing provenance rule (never relaxes it) and
             # runs before any mutation is written, so a rejected record stays pending

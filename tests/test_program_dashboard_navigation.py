@@ -525,7 +525,8 @@ def test_orchestrator_empty_kb_outputs_onboarding_command() -> None:
     assert "kb ingest" in dashboard
     assert "kb ingest" in next_text
     # empty-KB onboarding must NOT name the internal `intake add` verb (users only
-    # have kb add / kb ingest) nor leak raw commands (SSOT principle 8).
+    # have kb add / kb ingest) nor leak raw commands (`docs/DESIGN.md`,
+    # "对话层与 Agent 协议").
     for rendered in (dashboard, next_text):
         assert "intake add" not in rendered
         for leaked_fragment in ("python3", ".py ", "--kind", "${"):

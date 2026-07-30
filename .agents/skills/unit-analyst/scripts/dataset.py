@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Dataset analyst: prepare a fillable profile and verify runtime-agent evidence.
-agent fills the understanding (SSOT Principle 1 / §3.4).
+agent fills the understanding (`docs/DESIGN.md`, "Prepare / fill / verify").
 
 The script is deliberately *not* allowed to understand the dataset. It (a) reads the
 parse-cache produced by source-intake, (b) emits a **fillable structure** (4-element
@@ -77,7 +77,7 @@ from research.preference_selection import (
 )
 
 # --------------------------------------------------------------------------- #
-# The 4-element fill contract (SSOT §3.3A).                                   #
+# Fill contract (.agents/lib/research/SCHEMAS.md#unit-payload, dataset).       #
 #                                                                              #
 # A runtime agent fills these four elements; every element is a               #
 # judgement-class claim and MUST carry >=1 evidence_ref (short verbatim       #
@@ -164,7 +164,7 @@ ELEMENT_HEADING: dict[str, str] = {
 EVIDENCE_REF_FORMAT: dict[str, str] = {
     "source_unit_id": "d-... (this dataset unit id)",
     "artifact": "parse-cache.yaml (unit-relative artifact the quote lives in)",
-    "locator": "HTML: section or section:<anchor> (B4) — no page numbers for web sources",
+    "locator": "HTML: section or section:<anchor> — no page numbers for web sources",
     "quote": "short verbatim snippet — script checks it is a whitespace-normalized substring of the artifact",
     "summary": "optional one-line paraphrase",
 }
@@ -228,7 +228,8 @@ def _normalized_cache_payload(payload: dict) -> dict:
 
 
 def _chunk_locator(chunk: dict) -> str:
-    """Derive the evidence locator string for an HTML section chunk (B4).
+    """Derive an HTML section locator per
+    `.agents/lib/research/SCHEMAS.md#evidence-claims`.
 
     Dataset-card parse-caches use section/anchor locators. Labels are ``section:<anchor>``
     or ``section:document``. This is pure transport — it copies the locator the
@@ -246,7 +247,7 @@ def _chunk_locator(chunk: dict) -> str:
 def _evidence_digest(chunks: list[dict], *, chunk_limit: int, excerpt_chars: int) -> list[dict]:
     """Build a locator-tagged excerpt list from parse-cache chunks for the agent.
 
-    This is the "备料" (transport) half of Principle 1: it hands the agent the
+    This is the transport half of `docs/DESIGN.md` "Prepare / fill / verify": it hands the agent the
     raw section text with citable locators. It contains no judgement and no grade.
     """
     digest: list[dict] = []
@@ -301,7 +302,7 @@ def build_note_scaffold(
                 "backed by >=1 verbatim evidence_ref from the parse-cache. Then run "
                 "`profile --phase verify` to validate + verbatim-check evidence + "
                 "write dataset-note.md + payload content. Empty or unevidenced elements are "
-                "rejected; the script never authors content (SSOT §3.3A)."
+                "rejected; the script validates runtime-Agent content and never authors it."
             ),
             "required_elements": list(NOTE_ELEMENTS),
             "element_claim_types": dict(ELEMENT_CLAIM_TYPE),
@@ -516,7 +517,7 @@ def render_note_md(record: dict, claims: list[dict]) -> str:
     lines = [
         f"# {title}",
         "",
-        "> 本笔记由 runtime agent 依据 parse-cache 填写；脚本已逐字校验每条 evidence（SSOT 原则1/原则2）。",
+        "> 本笔记由 runtime agent 依据 parse-cache 填写；脚本已逐字校验每条 evidence。",
         "> 数据卡证据使用 section/anchor 定位；脚本不依据字段名或规模自动判断数据质量。",
         "",
     ]
@@ -585,7 +586,7 @@ def _unit_owned_fill_path(unit_root: Path, fill_path: Path) -> Path | None:
 
 
 def next_for_agent_note(root: Path, record: dict, cache_path: Path, fill_path: Path) -> str:
-    """One machine-readable navigation line for the ingestion auto-drive (SSOT §7).
+    """One private navigation line for the Agent protocol in `docs/DESIGN.md`.
 
     Pure navigation: names the parse-cache artifact to read, the elements to fill
     (each needs a verbatim quote + section/anchor locator), and the exact verify

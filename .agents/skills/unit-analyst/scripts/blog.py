@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Blog analyst: script prepares fillable structure + verifies evidence; a runtime
-agent fills the understanding (SSOT Principle 1 / §3.4).
+agent fills the understanding (`docs/DESIGN.md`, "Prepare / fill / verify").
 
 The script is deliberately *not* allowed to understand the blog. It (a) reads the
 parse-cache produced by source-intake, (b) emits a **fillable structure** (4-element
@@ -79,7 +79,7 @@ from research.preference_selection import (
 )
 
 # --------------------------------------------------------------------------- #
-# The 4-element fill contract (SSOT §3.4).                                    #
+# Fill contract (.agents/lib/research/SCHEMAS.md#unit-payload, blog payload).  #
 #                                                                              #
 # A runtime agent fills these four elements; every element is a               #
 # judgement-class claim and MUST carry >=1 evidence_ref (short verbatim       #
@@ -250,7 +250,7 @@ def _chunk_locator(chunk: dict) -> str:
 def _evidence_digest(chunks: list[dict], *, chunk_limit: int, excerpt_chars: int) -> list[dict]:
     """Build a locator-tagged excerpt list from parse-cache chunks for the agent.
 
-    This is the "备料" (transport) half of Principle 1: it hands the agent the
+    This is the transport half of `docs/DESIGN.md` "Prepare / fill / verify": it hands the agent the
     raw section text with citable locators. It contains no judgement and no grade.
     """
     digest: list[dict] = []
@@ -306,7 +306,7 @@ def build_note_scaffold(
                 "backed by >=1 verbatim evidence_ref from the parse-cache. Then run "
                 "`complete-note --phase verify` to validate + verbatim-check evidence + "
                 "write blog-note.md + payload content. Empty or unevidenced elements are "
-                "rejected; the script never authors content (SSOT §3.4)."
+                "rejected; the script validates runtime-Agent content and never authors it."
             ),
             "required_elements": list(NOTE_ELEMENTS),
             "element_claim_types": dict(ELEMENT_CLAIM_TYPE),
@@ -520,7 +520,7 @@ def render_note_md(record: dict, claims: list[dict]) -> str:
     lines = [
         f"# {title}",
         "",
-        "> 本笔记由 runtime agent 依据 parse-cache 填写；脚本已逐字校验每条 evidence（SSOT 原则1/原则2）。",
+        "> 本笔记由 runtime agent 依据 parse-cache 填写；脚本已逐字校验每条 evidence。",
         "> 博客来源为网页内容（HTML section/anchor 定位，无页码）。",
         "",
     ]
@@ -589,7 +589,7 @@ def _unit_owned_fill_path(unit_root: Path, fill_path: Path) -> Path | None:
 
 
 def next_for_agent_note(root: Path, record: dict, cache_path: Path, fill_path: Path) -> str:
-    """One machine-readable navigation line for the ingestion auto-drive (SSOT §7).
+    """One private navigation line for the Agent protocol in `docs/DESIGN.md`.
 
     Pure navigation: names the parse-cache artifact to read, the elements to fill
     (each needs a verbatim quote + section/anchor locator), and the exact verify

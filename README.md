@@ -10,7 +10,7 @@ workspace/
 └── kb/        # your local research data
 ```
 
-The bundle identifier is **`0.2.0-rc.7`**, sourced from `.agents/VERSION`. The identifier denotes a release candidate, not a stable or GA release; an exact published revision is identified by its Git tag, while a GitHub Release is optional. [CHANGELOG.md](CHANGELOG.md) is the single source of truth for current acceptance evidence, remaining release gates, and compatibility or support-time scope. Installation and core workflows have no external API Key, paid search quota, commercial database, or paid plugin prerequisite.
+The bundle identifier is **`0.2.0-rc.7`**, sourced from `.agents/VERSION`. The identifier denotes a release candidate, not a stable or GA release; an exact published revision is identified by its Git tag, while a GitHub Release is optional. [CHANGELOG.md](CHANGELOG.md) records durable candidate/release acceptance summaries plus compatibility and support scope; active delivery gates, blockers, exact candidates, and live evidence belong to the linked GitHub Epic, Atomic Issues, PRs, and Actions. Installation and core workflows have no external API Key, paid search quota, commercial database, or paid plugin prerequisite.
 
 ## Capability maturity
 

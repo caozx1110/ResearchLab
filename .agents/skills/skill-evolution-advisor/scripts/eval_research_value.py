@@ -78,7 +78,7 @@ CORE_CONTENT_FIELDS = [
 ]
 
 # Grounded if this fraction of a fact's significant tokens appear in the source
-# artifact text (keyword-subset / fuzzy match, per design §5 grounding).
+# artifact text under the local diagnostic keyword-subset / fuzzy-match check.
 GROUNDING_THRESHOLD = 0.6
 
 REWRITTEN_MARKER = "REWRITTEN"

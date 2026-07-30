@@ -1263,7 +1263,7 @@ Reporting judgement events carry `confirmation_binding.subject` plus `claim_ids`
 
 > **状态（R1 trust chain 已落地）**：analyzer verify 将同一份 claims 写入 canonical `record.payload.claims` 并生成 byte-bound verification receipt；confirmation gate 复验 receipt 与逐字 evidence；report 只消费 current ConfirmationReceipt 覆盖的 canonical claims。Sidecar 可保留，但不是 SSOT。
 
-**契约目标（原则 2）**：每条 AI 判断（fact / inference / evaluation / user_opinion / unverified）都挂 `evidence_refs`，让"有理有据"从口号变成**可机器校验**——脚本能查"这条据在不在"。落盘位置：note / screening 产物内的 `claims` 列表（`attach_claims(payload, claims)` 写、`read_claims(payload)` 读）+ record 关联。
+**契约目标**：每条 AI 判断（fact / inference / evaluation / user_opinion / unverified）都挂 `evidence_refs`，让"有理有据"从口号变成**可机器校验**——脚本能查"这条据在不在"。落盘位置：note / screening 产物内的 `claims` 列表（`attach_claims(payload, claims)` 写、`read_claims(payload)` 读）+ record 关联。
 
 **canonical schema（锁定规格）**：
 
@@ -1278,8 +1278,8 @@ claim:
   evidence_refs:
     - source_unit_id: p-...       # 证据所在 unit
       artifact: parse-cache.yaml  # unit 内相对路径，或 source(pdf/html)
-      locator: "page=3"           # PDF: page=N|section|para ; HTML: section|anchor（B4）
-      quote: ""                   # 短逐字片段（B3）——脚本校验它逐字存在于 artifact
+      locator: "page=3"           # PDF: page=N|section|para ; HTML: section|anchor
+      quote: ""                   # 短逐字片段——脚本校验它逐字存在于 artifact
       summary: ""                 # 可选转述
 ```
 
@@ -1309,22 +1309,22 @@ Repo workspace 源码是唯一外部扩展，evidence ref 额外声明 `external
 | `source_unit_id` | ref | 证据所在 unit id。 |
 | `artifact` | ref | unit 内相对路径（`parse-cache.yaml` / `source/document.md` / `note.md` / source 文件）；逐字校验对此文件文本进行。 |
 | `locator` | ref | 定位提示，两套（见下）。 |
-| `quote` | ref | **短逐字片段（B3）**——脚本校验它逐字存在于 `artifact`。 |
+| `quote` | ref | **短逐字片段**——脚本校验它逐字存在于 `artifact`。 |
 | `summary` | ref | 可选转述（不参与逐字校验）。 |
 
-**逐字验证规则（`verify_claim_evidence(claim, unit_dir)`，原则 1）**：普通 artifact 必须是 unit-root 内相对路径；absolute、`..`、resolve 后 symlink escape 均拒绝。对 artifact 文本与 `quote` 做空白归一化后仍要求大小写/标点敏感的逐字子串。Repo 源码是唯一显式外部契约：ref 声明 `external_source: {kind: repo}`，但可信 `base_root` 必须由 repo record/caller 提供，claim 不能自报 base root；resolve 后仍须在该 root 内。Verification receipt 保存 canonical identity 与 artifact byte sha256，parse-cache 等不可变派生证据消费端只读不覆盖。
+**逐字验证规则（`verify_claim_evidence(claim, unit_dir)`）**：普通 artifact 必须是 unit-root 内相对路径；absolute、`..`、resolve 后 symlink escape 均拒绝。对 artifact 文本与 `quote` 做空白归一化后仍要求大小写/标点敏感的逐字子串。Repo 源码是唯一显式外部契约：ref 声明 `external_source: {kind: repo}`，但可信 `base_root` 必须由 repo record/caller 提供，claim 不能自报 base root；resolve 后仍须在该 root 内。Verification receipt 保存 canonical identity 与 artifact byte sha256，parse-cache 等不可变派生证据消费端只读不覆盖。
 
-**两套 locator（B4）**：**PDF 源**用 `page=N` / `section` / `para`；**HTML 源**用 `section` / `anchor`（HTML 无页码）。当 artifact 为含 per-page chunk（label 形如 `...:page-N`）的 parse-cache 且 locator 为 `page=N` 时，校验会**额外缩小到该页**：quote 逐字命中在文档但落在**别的页** → 记一条 locator-mismatch violation（页码引错也是接地缺陷）。逐字命中始终是硬性判据，页缩小是精度加成，无 per-page 结构时自动退化为全文校验。
+**按源类型区分 locator**：**PDF 源**用 `page=N` / `section` / `para`；**HTML 源**用 `section` / `anchor`（HTML 无页码）。当 artifact 为含 per-page chunk（label 形如 `...:page-N`）的 parse-cache 且 locator 为 `page=N` 时，校验会**额外缩小到该页**：quote 逐字命中在文档但落在**别的页** → 记一条 locator-mismatch violation（页码引错也是接地缺陷）。逐字命中始终是硬性判据，页缩小是精度加成，无 per-page 结构时自动退化为全文校验。
 
 **结构校验（`validate_claims(claims)`）**：逐条校验 claim 结构合法——必填字段齐全（`id`/`text`/`claim_type`/`confirmation_status`/`evidence_refs`）、`claim_type` ∈ 枚举、`confirmation_status` ∈ 枚举、`evidence_refs` 为列表——并施加**空据规则**：judgement-class（`inference`/`evaluation`/`user_opinion`）claim 的 `evidence_refs` **必须非空**（空 → violation）。fact / unverified claim 允许空列表，但凡存在的 ref 都必须完整填写 `source_unit_id` / `artifact` / `locator` / `quote`；`[{}]` 必须拒绝。返回 violation 列表（空 = 全部合法）。此函数是**纯判据**，不改任何 gate/record。
 
-**门控联动（原则 3）**：judgement-class claim 若 `evidence_refs` 为空，**不得 promote 成 `confirmed`**；`unverified` claim 无论 record 级标注如何都不可 confirmed。claim 语义只能加严 record 分轨，不得被 record 级 fact 标注降级。
+**门控联动**：judgement-class claim 若 `evidence_refs` 为空，**不得 promote 成 `confirmed`**；`unverified` claim 无论 record 级标注如何都不可 confirmed。claim 语义只能加严 record 分轨，不得被 record 级 fact 标注降级。
 
 ---
 
 ## evidence-first 产出子系统（survey / report / idea 讨论）<a id="evidence-first-outputs"></a>
 
-Wave3（2026-07-17）把 3.6/3.10/3.7 三个产出侧子系统从"一次性算完写盘"改成 **prepare/verify + 逐字证据**（同 paper-analyst 范式）：脚本搭可填结构 + 校验证据，理解与判断来自 agent（原则1/2）。
+Wave3（2026-07-17）把 survey / report / idea 三个产出侧子系统从"一次性算完写盘"改成 **prepare/verify + 逐字证据**（同 paper-analyst 范式）：脚本搭可填结构 + 校验证据，理解与判断来自 Agent。
 
 ### literature-synthesizer（survey）— `kb/synthesis/<slug>/survey-fill.yaml` → `survey.yaml` + `summary.md`
 
@@ -1354,7 +1354,7 @@ Wave3（2026-07-17）把 3.6/3.10/3.7 三个产出侧子系统从"一次性算�
 - prepare 只生成 exact empty `paper_draft_section_fill`，脚本不写正文。Agent 可为每节填写一到多个顺序编号 paragraph；每段必须含非空 plain-text prose、原 epistemic `claim_type`、至少一个 frozen support claim ref、至少一个 citation key，以及可选 figure refs。raw LaTeX/markup 字段、未知/重复 key、空壳段落、不可确认 claim type、symlink 或非普通 fill 路径一律拒绝。
 - verify 机械复制 support claim 的逐字 `evidence_refs`，并生成 pending `paper_draft_section` record；`payload.paper_draft_section.paragraphs` 与 `payload.claims` 一一对应，`payload.anchor` exact 绑定 manifest、outline、实际使用的 claim/citation/figure binding，`payload.verification` 由真实 evidence receipt 填充。该 kind 进入统一 dialogue/Obsidian review batch；public card 显示本节全部正文、support/citation/figure refs。确认仍要求当前消息授权、真实 human signer 与逐字 evidence，且 ConfirmationReceipt content scope 同时覆盖正文与 anchor；禁止自签、空壳确认和仅凭状态字符串消费。
 - section 的 readiness、确认 currentness 与发布消费都重跑完整 lifecycle：canonical identity/path/owner、manifest/outline、paragraph↔claim、机械 evidence projection、使用 refs↔anchor、upstream receipts、citation/figure bytes 必须全 current。任一上游或正文变化都会撤下 pending card或使旧确认失效。发布必须恰有七个、按固定顺序、各自 current confirmed 的 section；四个 output artifact 在单一 journal/lock/CAS transaction 中原子改写，commit boundary 再验全部输入。`publication-manifest.yaml` 绑定 draft manifest digest、七节 content + confirmation receipt digest，以及 MD/LaTeX/bib 的 byte sha256/count；旧输出在 stale/tamper 失败时保持原字节。
-- **缺输入显式标 `missing: X`**（缺 decisions/events/confirmed claims/evidence 都如实标），绝不脑补。用户可见输出无裸命令（原则8）。
+- **缺输入显式标 `missing: X`**（缺 decisions/events/confirmed claims/evidence 都如实标），绝不脑补。用户可见输出不得出现裸命令。
 - 报告模板是用户产物，不是内部 scaffold：neutral/default 使用中文标题、章节与“缺少：X”标记；只有当前 `report-author` operation 的 task-bound effective-preference receipt 明确选择 `profile.preferences.language_preference` 且值为英文时才切英文。operation allowlist 同时声明 language 与 reporting style；两者都只控制展示，不能改变、过滤或翻译逐字 evidence，也不能改变 epistemic/confirmation 类型。
 
 ### idea-workbench — 陪练 discussion + evidence-first analysis

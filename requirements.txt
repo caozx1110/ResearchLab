@@ -4,7 +4,7 @@
 # distributed to installed workspaces for offline or mirror-assisted recovery.
 PyYAML==6.0.3
 
-# Lightweight default PDF backend (SSOT 3.1 decision A): pure PyMuPDF, no torch,
+# Lightweight default PDF backend (docs/DESIGN.md, "Runtime bootstrap"): pure PyMuPDF, no torch,
 # no GPU, no multi-GB model download. Always installed so the dual-source
 # pipeline can parse non-arxiv PDFs into page=N chunks out of the box — this is
 # what kills the cold-start "silent empty parse" degradation. PyMuPDF (fitz) is

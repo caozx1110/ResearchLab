@@ -476,7 +476,8 @@ def apply_review_batch_decision(
 
 
 def partition_review_tracks(hits: list[dict]) -> tuple[list[dict], list[dict]]:
-    """Split pending items into the two confirmation tracks (SSOT §3.11 decision ①).
+    """Split pending items into the two tracks in
+    `.agents/lib/research/SCHEMAS.md#confirmation-gate`.
 
     Returns ``(fact_track, judgement_track)``. Fact = pure factual metadata eligible
     for light/batch confirm; judgement = AI inference/evaluation needing substance +
@@ -523,7 +524,8 @@ def batch_light_confirm_command(*, kind: str | None = None) -> str:
 
 
 def render_review_queue(root: Path, hits: list[dict], *, kind: str | None = None) -> None:
-    """Two-track grouped review queue (SSOT §3.11: fact metadata vs judgement).
+    """Render the fact/judgement tracks defined by
+    `.agents/lib/research/SCHEMAS.md#confirmation-gate`.
 
     Fact track: light/batch confirm supported. Judgement track: each item is marked
     'needs evidence + substantive content', and its runnable per-item confirm command
@@ -1054,7 +1056,7 @@ def main() -> int:
                 f"- {item['id']} | {item['kind']} | {item['title']} | "
                 f"{item.get('status')} | {item.get('confirmation_status')} | pools={pools or '-'}{score_text}"
             )
-            # Status-aware next-step hint (SSOT 3.11/A4), natural language only:
+            # Status-aware next-step hint (`docs/DESIGN.md`, "Prepare / fill / verify"), natural language only:
             # an unfilled note shell still needs the agent to fill it; a filled item
             # pending confirmation is ready for the user to confirm.
             if _is_unfilled_note_shell(item):
@@ -1073,7 +1075,7 @@ def main() -> int:
         if args.confirm:
             if args.confirmation_status != "pending_user_confirmation":
                 raise SystemExit("review-queue --confirm only supports --confirmation-status pending_user_confirmation.")
-            # Batch --confirm is the fact-track light-confirm path (SSOT §3.11): only
+            # Batch --confirm follows .agents/lib/research/SCHEMAS.md#confirmation-gate:
             # factual metadata is eligible for blind batch confirmation. Judgement-track
             # items need per-item substance + evidence and are never confirmed here.
             fact_track, judgement_track = partition_review_tracks(hits)

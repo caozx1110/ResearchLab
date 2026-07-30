@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 私密报告安全问题
+    url: https://github.com/caozx1110/ResearchLab/security/advisories/new
+    about: 治理绕过、路径穿越、数据丢失、凭据暴露或私有研究材料请勿放入公开 Issue。
