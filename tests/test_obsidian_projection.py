@@ -391,6 +391,44 @@ def test_base_presentation_reset_rejects_stale_preview_and_semantic_or_unknown_s
     assert base.read_bytes() == malformed_bytes
 
 
+@pytest.mark.parametrize(
+    "semantic_mutation",
+    ["filter", "order", "group_by", "property", "unknown_key"],
+)
+def test_base_presentation_sort_never_masks_semantic_drift(
+    tmp_path: Path, semantic_mutation: str
+) -> None:
+    _record(tmp_path, "p-alpha-12345678", "Alpha")
+    update_obsidian_projection(tmp_path)
+    base = obsidian_managed_root(tmp_path) / "dashboards/All Units.base"
+    _apply_obsidian_1_12_7_title_sort(base)
+    payload = yaml.safe_load(base.read_text(encoding="utf-8"))
+    if semantic_mutation == "filter":
+        payload["filters"] = {"and": ['file.ext == "canvas"']}
+    elif semantic_mutation == "order":
+        payload["views"][0]["order"] = list(reversed(payload["views"][0]["order"]))
+    elif semantic_mutation == "group_by":
+        payload["views"][0]["groupBy"] = "topics"
+    elif semantic_mutation == "property":
+        payload["properties"]["manual"] = {"displayName": "Manual"}
+    else:
+        payload["views"][0]["unknown"] = True
+    write_yaml_if_changed(base, payload)
+    changed_bytes = base.read_bytes()
+
+    report = obsidian_projection_status(tmp_path)
+
+    assert "OBSIDIAN_MANAGED_FILE_DRIFT" in {item["code"] for item in report["findings"]}
+    assert "OBSIDIAN_BASE_PRESENTATION_SORT_DRIFT" not in {
+        item["code"] for item in report["findings"]
+    }
+    with pytest.raises(SystemExit, match="not an allowlisted"):
+        preview_obsidian_base_presentation_reset(tmp_path)
+    with pytest.raises(SystemExit, match="human-edited"):
+        update_obsidian_projection(tmp_path)
+    assert base.read_bytes() == changed_bytes
+
+
 def test_base_presentation_reset_rejects_stale_canonical_inputs(tmp_path: Path) -> None:
     record = _record(tmp_path, "p-alpha-12345678", "Alpha")
     update_obsidian_projection(tmp_path)
