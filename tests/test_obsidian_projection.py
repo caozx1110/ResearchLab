@@ -753,6 +753,56 @@ def test_update_refuses_managed_drift_and_preserves_bytes(tmp_path: Path) -> Non
     assert "OBSIDIAN_MANAGED_FILE_DRIFT" in {item["code"] for item in report["findings"]}
 
 
+def test_post_intake_refresh_managed_drift_preserves_canonical_success_and_projection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    kb = _load_kb_cli()
+    _record(tmp_path, "p-existing-12345678", "Existing")
+    update_obsidian_projection(tmp_path)
+    managed_page = obsidian_managed_root(tmp_path) / "units/p-existing-12345678.md"
+    managed_page.write_text("human-managed-drift\n", encoding="utf-8")
+    managed_before = managed_page.read_bytes()
+    new_record_path = record_path(tmp_path, "paper", "p-new-12345678")
+    canonical_bytes: list[bytes] = []
+    monkeypatch.setattr(
+        kb,
+        "load_runtime_preferences",
+        lambda root: {"autonomy": {"link_autodrive": "ask_first"}},
+    )
+
+    def fake_forward(root, relative_script, args, **kwargs):
+        del kwargs
+        _record(root, "p-new-12345678", "New intake")
+        canonical_bytes.append(new_record_path.read_bytes())
+        return kb.CommandResult(
+            (relative_script, *args),
+            0,
+            "[ok] created kb/units/papers/p-new-12345678/record.yaml\n",
+        )
+
+    monkeypatch.setattr(kb, "forward_command", fake_forward)
+    monkeypatch.setattr(kb, "_capture_runtime_failure", lambda root, **kwargs: None)
+
+    assert kb.main(
+        ["--root", str(tmp_path), "--agent-protocol", "drift-refresh.json", "add", "https://example.com/new.pdf"]
+    ) == 0
+
+    assert new_record_path.read_bytes() == canonical_bytes[0]
+    assert managed_page.read_bytes() == managed_before
+    public = capsys.readouterr()
+    assert "资料已轻量加入知识库" in public.out
+    assert "Obsidian 视图暂未刷新" in public.err
+    assert "human-managed-drift" not in public.out + public.err
+    protocol = load_yaml(tmp_path / "kb/.runtime/drift-refresh.json", default={})
+    assert protocol["status"] == "needs_user_input"
+    assert protocol["details"]["obsidian_refresh"] == {
+        "failure_kind": "safety_check_failed",
+        "status": "warning",
+    }
+
+
 def test_update_refuses_unowned_generated_file_but_never_scans_human_area(tmp_path: Path) -> None:
     _record(tmp_path, "p-alpha-12345678", "Alpha")
     update_obsidian_projection(tmp_path)
