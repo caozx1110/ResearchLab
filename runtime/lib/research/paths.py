@@ -32,6 +32,9 @@ UNIT_KIND_DIRS = {
 TEXT_REWRITE_SUFFIXES = {".md", ".markdown", ".txt", ".yaml", ".yml", ".json"}
 
 
+PRIVATE_DIAGNOSTIC_PREFIX = "memory/skill-evolution/.private"
+
+
 KB_GITIGNORE_LINES = [
     "# Runtime state",
     ".runtime/",
@@ -45,6 +48,9 @@ KB_GITIGNORE_LINES = [
     "",
     "# Generated browser workspace",
     "user/kb/",
+    "",
+    "# Private local diagnostics",
+    f"{PRIVATE_DIAGNOSTIC_PREFIX}/",
     "",
     "# Generated Obsidian projection",
     "obsidian/managed/",
@@ -158,6 +164,15 @@ def ensure_kb_gitignore(project_root: Path) -> Path:
         merged.pop()
     write_text_if_changed(path, "\n".join(merged).strip() + "\n")
     return path
+
+
+def is_private_diagnostic_path(value: str) -> bool:
+    """Return whether a KB-relative lexical path is local diagnostic detail."""
+
+    normalized = str(value or "").strip().replace("\\", "/").strip("/")
+    return normalized == PRIVATE_DIAGNOSTIC_PREFIX or normalized.startswith(
+        f"{PRIVATE_DIAGNOSTIC_PREFIX}/"
+    )
 
 
 def _legacy_storage_map(project_root: Path, value: str) -> tuple[Path | None, Path | None]:
@@ -275,6 +290,7 @@ __all__ = [
     "UNIT_KIND_DIRS",
     "TEXT_REWRITE_SUFFIXES",
     "KB_GITIGNORE_LINES",
+    "PRIVATE_DIAGNOSTIC_PREFIX",
     "project_root",
     "kb_root",
     "units_root",
@@ -298,6 +314,7 @@ __all__ = [
     "skills_root",
     "rel",
     "ensure_kb_gitignore",
+    "is_private_diagnostic_path",
     "_legacy_storage_map",
     "resolve_local_reference",
     "normalize_storage_reference",

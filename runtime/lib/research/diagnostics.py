@@ -14,21 +14,29 @@ import json
 import os
 import re
 import stat
+import sys
 import time
 import unicodedata
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
 from .journal import mutation_transaction
 from .paths import kb_root
 from .prefs import load_runtime_preferences
-from .yaml_io import load_yaml, write_yaml_if_changed
+from .yaml_io import (
+    dump_yaml,
+    load_yaml,
+    load_yaml_mapping_bytes_strict,
+    write_yaml_if_changed,
+)
 
 
 DIAGNOSTIC_MODES = {"off", "errors-only", "developer"}
 SKILL_MODES = {"inherit", *DIAGNOSTIC_MODES}
+DETAIL_LEVELS = {"redacted", "local-detailed"}
+SKILL_DETAIL_LEVELS = {"inherit", *DETAIL_LEVELS}
 SEVERITIES = {"info", "low", "medium", "high", "critical"}
 SEVERITY_ORDER = {value: index for index, value in enumerate(("info", "low", "medium", "high", "critical"))}
 STATUSES = {"pending", "confirmed", "dismissed", "resolved"}
@@ -36,6 +44,7 @@ REVIEW_STATUSES = {"confirmed", "dismissed", "resolved"}
 SOURCES = {"user", "agent", "runtime"}
 REPRODUCIBLE_VALUES = {"unknown", "yes", "no", "intermittent"}
 PRIVACY_CLASSIFICATION = "local-redacted"
+DETAIL_PRIVACY_CLASSIFICATION = "local-detailed"
 INTAKE_FAILURE_STAGES = frozenset(
     {
         "source-recognition",
@@ -76,9 +85,45 @@ _URL_CREDENTIAL_RE = re.compile(r"(?i)(https?://)[^/@\s:]+:[^/@\s]+@")
 _SAFE_IDENTIFIER_RE = re.compile(r"[^a-z0-9_.-]+")
 _AUTOMATIC_RUNTIME_CAPTURE = object()
 
-
+_DETAIL_SCHEMA = "skill-diagnostic-detail/v1"
+_DETAIL_DIRECTORY = "kb/memory/skill-evolution/.private/details"
+_DETAIL_REF_PREFIX = "memory/skill-evolution/.private/details"
+_DETAIL_MAX_BYTES = 64 * 1024
+_DETAIL_HISTORY_LIMIT = 5
+_DETAIL_FRAME_LIMIT = 8
+_DETAIL_EVENT_LIMIT = 4
+_DETAIL_LIST_LIMIT = 5
+_DETAIL_TEXT_LIMIT = 300
+_DETAIL_ENVELOPE_KEYS = frozenset(
+    {
+        "schema",
+        "exception_class",
+        "failure_stage",
+        "frames",
+        "events",
+        "runtime_version",
+        "dependency_versions",
+    }
+)
+_DETAIL_ENVELOPE_SCHEMA = "diagnostic-mechanical-envelope/v1"
+_DETAIL_EVENT_CODES = frozenset(
+    {
+        "owner-nonzero-exit",
+        "dispatcher-capture",
+        "failure-stage-consumed",
+        "failure-stage-unknown",
+        "checkpoint-failure",
+    }
+)
 def diagnostics_path(project_root: Path) -> Path:
     return kb_root(project_root) / "memory" / "skill-evolution" / "issues.yaml"
+
+
+def diagnostic_detail_path(project_root: Path, issue_id: str) -> Path:
+    normalized = _safe_identifier(issue_id)
+    if not normalized or normalized != str(issue_id or "").strip().lower():
+        raise ValueError("diagnostic issue id must be one safe identifier")
+    return kb_root(project_root) / _DETAIL_REF_PREFIX / f"{normalized}.yaml"
 
 
 def _integer(value: Any, default: int, *, minimum: int) -> int:
@@ -379,6 +424,24 @@ def diagnostics_policy(project_root: Path, skill: str = "") -> dict[str, Any]:
     if skill_mode not in SKILL_MODES:
         skill_mode = "inherit"
     effective_mode = workspace_mode if skill_mode == "inherit" else skill_mode
+    workspace_detail_level = str(raw.get("detail_level") or "redacted").strip().lower()
+    if workspace_detail_level not in DETAIL_LEVELS:
+        workspace_detail_level = "redacted"
+    detail_overrides = raw.get("per_skill_detail_level", {})
+    if not isinstance(detail_overrides, dict):
+        detail_overrides = {}
+    skill_detail_level = (
+        str(detail_overrides.get(normalized_skill) or "inherit").strip().lower()
+        if normalized_skill
+        else "inherit"
+    )
+    if skill_detail_level not in SKILL_DETAIL_LEVELS:
+        skill_detail_level = "inherit"
+    effective_detail_level = (
+        workspace_detail_level
+        if skill_detail_level == "inherit"
+        else skill_detail_level
+    )
     token_budget = _integer(raw.get("token_budget_per_task"), 0, minimum=0)
     policy = {
         "mode": effective_mode,
@@ -386,6 +449,10 @@ def diagnostics_policy(project_root: Path, skill: str = "") -> dict[str, Any]:
         "workspace_mode": workspace_mode,
         "skill": normalized_skill,
         "skill_mode": skill_mode,
+        "detail_level": effective_detail_level,
+        "effective_detail_level": effective_detail_level,
+        "workspace_detail_level": workspace_detail_level,
+        "skill_detail_level": skill_detail_level,
         # This is forced rather than trusted from disk in D1.
         "local_only": True,
         "token_budget_per_task": token_budget,
@@ -394,6 +461,10 @@ def diagnostics_policy(project_root: Path, skill: str = "") -> dict[str, Any]:
         "cooldown_seconds": _integer(raw.get("cooldown_seconds"), 0, minimum=0),
         "automatic_capture": effective_mode in {"errors-only", "developer"},
         "allow_agent_retrospective": effective_mode == "developer" and token_budget > 0,
+        "persist_local_detail": (
+            effective_mode in {"errors-only", "developer"}
+            and effective_detail_level == "local-detailed"
+        ),
         "governance_profile": (
             "personal" if str(preferences.get("governance_profile") or "") == "personal" else "strict"
         ),
@@ -452,6 +523,295 @@ def _fingerprint(*, category: str, skill: str, summary: str, trigger: str, error
         )
     )
     return hashlib.sha256(signature.encode("utf-8")).hexdigest()
+
+
+def _detail_ref(issue_id: str) -> str:
+    return f"{_DETAIL_REF_PREFIX}/{issue_id}.yaml"
+
+
+def _detail_directory_flags() -> int:
+    return (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+
+
+def _open_detail_directory(project_root: Path, *, create: bool) -> int:
+    """Open the durable private detail directory without following links."""
+
+    descriptor = os.open(project_root.resolve(strict=True), _detail_directory_flags())
+    try:
+        parts = _DETAIL_DIRECTORY.split("/")
+        for index, part in enumerate(parts):
+            private_component = index >= len(parts) - 2
+            try:
+                child = os.open(part, _detail_directory_flags(), dir_fd=descriptor)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                try:
+                    os.mkdir(part, 0o700 if private_component else 0o755, dir_fd=descriptor)
+                except FileExistsError:
+                    pass
+                child = os.open(part, _detail_directory_flags(), dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+            if private_component:
+                metadata = os.fstat(descriptor)
+                if (
+                    not stat.S_ISDIR(metadata.st_mode)
+                    or metadata.st_uid != os.getuid()
+                    or stat.S_IMODE(metadata.st_mode) & 0o077
+                ):
+                    raise PermissionError("diagnostic detail directory is not private")
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _read_detail_bytes(project_root: Path, issue_id: str) -> bytes:
+    directory = _open_detail_directory(project_root, create=False)
+    filename = f"{issue_id}.yaml"
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(filename, flags, dir_fd=directory)
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_size > _DETAIL_MAX_BYTES
+        ):
+            raise PermissionError("diagnostic detail artifact is not a bounded private file")
+        chunks: list[bytes] = []
+        remaining = _DETAIL_MAX_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, min(remaining, 8192))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        if len(data) > _DETAIL_MAX_BYTES:
+            raise ValueError("diagnostic detail artifact exceeds its byte budget")
+        return data
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        os.close(directory)
+
+
+def _write_detail_bytes(project_root: Path, issue_id: str, data: bytes) -> None:
+    if len(data) > _DETAIL_MAX_BYTES:
+        raise ValueError("diagnostic detail artifact exceeds its byte budget")
+    directory = _open_detail_directory(project_root, create=True)
+    filename = f"{issue_id}.yaml"
+    temporary = f".{filename}.{uuid.uuid4().hex}.tmp"
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    descriptor: int | None = None
+    try:
+        try:
+            existing = os.stat(filename, dir_fd=directory, follow_symlinks=False)
+        except FileNotFoundError:
+            existing = None
+        if existing is not None and (
+            not stat.S_ISREG(existing.st_mode)
+            or existing.st_uid != os.getuid()
+            or stat.S_IMODE(existing.st_mode) != 0o600
+        ):
+            raise PermissionError("diagnostic detail artifact is not a private regular file")
+        descriptor = os.open(temporary, flags, 0o600, dir_fd=directory)
+        view = memoryview(data)
+        written = 0
+        while written < len(view):
+            count = os.write(descriptor, view[written:])
+            if count <= 0:
+                raise OSError("diagnostic detail write made no progress")
+            written += count
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = None
+        os.replace(temporary, filename, src_dir_fd=directory, dst_dir_fd=directory)
+        os.fsync(directory)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        try:
+            os.unlink(temporary, dir_fd=directory)
+        except FileNotFoundError:
+            pass
+        os.close(directory)
+
+
+def _safe_version(value: object, *, default: str = "") -> str:
+    candidate = str(value or "").strip()
+    if re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}", candidate):
+        return candidate
+    return default
+
+
+def _normalize_repo_frame(value: object) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != {"path", "line", "function"}:
+        raise ValueError("detail frame must use exactly path, line, and function")
+    raw_path = str(value.get("path") or "").strip().replace("\\", "/")
+    candidate = PurePosixPath(raw_path)
+    if not raw_path or candidate.is_absolute() or any(part in {"", ".", ".."} for part in candidate.parts):
+        raise ValueError("detail frame path must be a safe repository-relative path")
+    parts = candidate.parts
+    if parts[:2] == (".agents", "skills"):
+        parts = parts[1:]
+    elif parts[:3] == (".agents", "lib", "research"):
+        parts = ("runtime", "lib", *parts[2:])
+    allowed = parts[:1] == ("skills",) or parts[:3] == ("runtime", "lib", "research")
+    if not allowed:
+        raise ValueError("detail frame path is outside managed product source")
+    try:
+        line = int(value.get("line"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("detail frame line must be an integer") from exc
+    if isinstance(value.get("line"), bool) or not 1 <= line <= 10_000_000:
+        raise ValueError("detail frame line is outside the supported range")
+    function = str(value.get("function") or "").strip()
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.<>-]{0,79}", function):
+        raise ValueError("detail frame function must be one safe symbol")
+    return {"path": PurePosixPath(*parts).as_posix(), "line": line, "function": function}
+
+
+def _normalize_detail_envelope(value: Mapping[str, Any] | None, *, failure_stage: str) -> dict[str, Any]:
+    raw: Mapping[str, Any] = value if value is not None else {
+        "schema": _DETAIL_ENVELOPE_SCHEMA,
+        "exception_class": "owner-nonzero-exit",
+        "failure_stage": failure_stage or "unknown",
+        "frames": [],
+        "events": ["owner-nonzero-exit", "dispatcher-capture"],
+        "runtime_version": f"python-{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+        "dependency_versions": {},
+    }
+    if set(raw) != _DETAIL_ENVELOPE_KEYS or raw.get("schema") != _DETAIL_ENVELOPE_SCHEMA:
+        raise ValueError("diagnostic detail envelope has unsupported fields or schema")
+    frames_raw = raw.get("frames")
+    if not isinstance(frames_raw, list):
+        raise ValueError("diagnostic detail frames must be a list")
+    frames = [_normalize_repo_frame(item) for item in frames_raw[: _DETAIL_FRAME_LIMIT + 1]]
+    if len(frames) > _DETAIL_FRAME_LIMIT:
+        raise ValueError("diagnostic detail frame limit exceeded")
+    events_raw = raw.get("events")
+    if not isinstance(events_raw, list):
+        raise ValueError("diagnostic detail events must be a list")
+    events: list[str] = []
+    for item in events_raw[: _DETAIL_EVENT_LIMIT + 1]:
+        code = str(item or "").strip().lower()
+        if code not in _DETAIL_EVENT_CODES:
+            raise ValueError("diagnostic detail event is not allowlisted")
+        if code not in events:
+            events.append(code)
+    if len(events) > _DETAIL_EVENT_LIMIT:
+        raise ValueError("diagnostic detail event limit exceeded")
+    dependencies_raw = raw.get("dependency_versions")
+    if not isinstance(dependencies_raw, Mapping) or len(dependencies_raw) > 8:
+        raise ValueError("diagnostic dependency versions must be a small mapping")
+    dependencies: dict[str, str] = {}
+    for name, version in sorted(dependencies_raw.items(), key=lambda item: str(item[0])):
+        safe_name = _safe_identifier(str(name or ""))
+        safe_version = _safe_version(version)
+        if not safe_name or not safe_version:
+            raise ValueError("diagnostic dependency version is not a stable token")
+        dependencies[safe_name] = safe_version
+    return {
+        "exception_class": _safe_error_class(str(raw.get("exception_class") or "")),
+        "failure_stage": _safe_failure_stage(raw.get("failure_stage") or failure_stage),
+        "frames": frames,
+        "events": events,
+        "runtime_version": _safe_version(raw.get("runtime_version"), default="unknown"),
+        "dependency_versions": dependencies,
+    }
+
+
+def _detail_signature(*, owner: str, operation: str, envelope: Mapping[str, Any]) -> str:
+    stable = {
+        "owner": owner,
+        "operation": operation,
+        "exception_class": envelope["exception_class"],
+        "failure_stage": envelope["failure_stage"],
+        "frames": envelope["frames"],
+    }
+    return hashlib.sha256(
+        json.dumps(stable, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("ascii")
+    ).hexdigest()
+
+
+def _retrospective_state(policy: Mapping[str, Any]) -> dict[str, str]:
+    mode = str(policy.get("effective_mode") or "off")
+    budget = _integer(policy.get("token_budget_per_task"), 0, minimum=0)
+    if mode != "developer":
+        return {"status": "not-run", "reason": "mode-errors-only", "explanation": ""}
+    if budget <= 0:
+        return {"status": "not-run", "reason": "budget-zero", "explanation": ""}
+    return {"status": "pending", "reason": "awaiting-agent", "explanation": ""}
+
+
+def _detail_snapshot(
+    *,
+    timestamp: str,
+    mechanical: Mapping[str, Any],
+    envelope: Mapping[str, Any],
+    policy: Mapping[str, Any],
+    bundle_version: str,
+    source_commit: str,
+) -> dict[str, Any]:
+    return {
+        "captured_at": timestamp,
+        "observation": {
+            "category": str(mechanical.get("category") or "runtime-failure"),
+            "owner": str(mechanical.get("owner") or "unknown-skill"),
+            "operation": str(mechanical.get("operation") or "unknown-operation"),
+            "return_code": int(mechanical.get("return_code") or 1),
+            "exception_class": str(envelope["exception_class"]),
+            "failure_stage": str(envelope["failure_stage"]),
+            "bundle_version": bundle_version,
+            "source_commit": source_commit,
+            "runtime_version": str(envelope["runtime_version"]),
+            "dependency_versions": dict(envelope["dependency_versions"]),
+        },
+        "root_cause": _retrospective_state(policy),
+        "reproduction": [],
+        "relevant_trace": list(envelope["frames"]),
+        "safe_events": list(envelope["events"]),
+        "output_excerpt": [],
+        "optimization_candidates": [],
+        "next_validation": [],
+    }
+
+
+def _load_detail_document(project_root: Path, issue_id: str) -> tuple[dict[str, Any], bytes]:
+    data = _read_detail_bytes(project_root, issue_id)
+    payload = load_yaml_mapping_bytes_strict(data)
+    if not isinstance(payload, dict) or payload.get("schema") != _DETAIL_SCHEMA:
+        raise ValueError("diagnostic detail artifact schema is invalid")
+    if payload.get("issue_id") != issue_id:
+        raise ValueError("diagnostic detail artifact identity is invalid")
+    return payload, data
+
+
+def _serialize_detail_document(document: Mapping[str, Any]) -> bytes:
+    data = dump_yaml(dict(document)).encode("utf-8")
+    if len(data) > _DETAIL_MAX_BYTES:
+        raise ValueError("diagnostic detail artifact exceeds its byte budget")
+    return data
 
 
 def _load_document(project_root: Path) -> dict[str, Any]:
@@ -564,6 +924,8 @@ def record_diagnostic_issue(
     now: datetime | None = None,
     _automatic_runtime_metadata: Mapping[str, Any] | None = None,
     _automatic_failure_stage: str = "",
+    _automatic_detail_envelope: Mapping[str, Any] | None = None,
+    _suppress_detail: bool = False,
     _capture_token: object | None = None,
 ) -> tuple[dict[str, Any], bool]:
     """Record an explicit issue even when automatic diagnostics are off."""
@@ -580,14 +942,13 @@ def record_diagnostic_issue(
         raise ValueError("summary must not be empty after redaction")
     safe_trigger = redact_diagnostic_text(trigger, limit=160)
     safe_error_class = _safe_error_class(error_class)
-    fingerprint = _fingerprint(
+    summary_fingerprint = _fingerprint(
         category=normalized_category,
         skill=normalized_skill,
         summary=safe_summary,
         trigger=safe_trigger,
         error_class=safe_error_class,
     )
-    issue_id = f"diag-{fingerprint[:16]}"
     timestamp = _now(now)
     path = diagnostics_path(project_root)
     bundle_version, source_commit = _local_version(project_root)
@@ -601,11 +962,45 @@ def record_diagnostic_issue(
         if _capture_token is _AUTOMATIC_RUNTIME_CAPTURE and _automatic_failure_stage
         else ""
     )
+    policy = (
+        diagnostics_policy(project_root, normalized_skill)
+        if _capture_token is _AUTOMATIC_RUNTIME_CAPTURE
+        else {}
+    )
+    summary_mechanical = (
+        mechanical if policy.get("governance_profile") == "personal" else {}
+    )
+    detail_envelope: dict[str, Any] | None = None
+    detail_signature = ""
+    if mechanical and policy.get("persist_local_detail") and not _suppress_detail:
+        detail_envelope = _normalize_detail_envelope(
+            _automatic_detail_envelope,
+            failure_stage=automatic_failure_stage or "unknown",
+        )
+        detail_signature = _detail_signature(
+            owner=str(mechanical.get("owner") or "unknown-skill"),
+            operation=str(mechanical.get("operation") or "unknown-operation"),
+            envelope=detail_envelope,
+        )
+    fingerprint = (
+        hashlib.sha256(
+            f"{summary_fingerprint}\x1f{detail_signature}".encode("ascii")
+        ).hexdigest()
+        if detail_envelope is not None
+        else summary_fingerprint
+    )
+    issue_id = f"diag-{fingerprint[:16]}"
+    detail_path = diagnostic_detail_path(project_root, issue_id) if detail_envelope is not None else None
+    if detail_path is not None:
+        directory = _open_detail_directory(project_root, create=True)
+        os.close(directory)
+
+    transaction_targets = [path, detail_path] if detail_path is not None else [path]
 
     with mutation_transaction(
         project_root,
         "record-diagnostic-issue",
-        [path],
+        transaction_targets,
         undoable=False,
         operation_role="diagnostics",
     ):
@@ -619,10 +1014,59 @@ def record_diagnostic_issue(
             old_severity = str(issue.get("severity") or "info")
             if SEVERITY_ORDER.get(normalized_severity, 0) > SEVERITY_ORDER.get(old_severity, 0):
                 issue["severity"] = normalized_severity
-            if mechanical:
-                issue.update(mechanical)
+            if summary_mechanical:
+                issue.update(summary_mechanical)
             if automatic_failure_stage:
                 issue["failure_stage"] = automatic_failure_stage
+            if detail_envelope is not None and detail_path is not None:
+                try:
+                    detail_document, old_detail_bytes = _load_detail_document(project_root, issue_id)
+                except FileNotFoundError as exc:
+                    if issue.get("detail_ref"):
+                        raise ValueError("diagnostic detail reference is dangling") from exc
+                    detail_document = {
+                        "schema": _DETAIL_SCHEMA,
+                        "issue_id": issue_id,
+                        "summary_fingerprint": summary_fingerprint,
+                        "detail_signature": detail_signature,
+                        "privacy_classification": DETAIL_PRIVACY_CLASSIFICATION,
+                        "created_at": timestamp,
+                        "updated_at": timestamp,
+                        "occurrence_history": [],
+                        "dropped_history_count": 0,
+                    }
+                    old_detail_bytes = b""
+                if (
+                    old_detail_bytes
+                    and str(issue.get("detail_digest") or "")
+                    != hashlib.sha256(old_detail_bytes).hexdigest()
+                ):
+                    raise ValueError("diagnostic detail digest no longer matches the summary index")
+                history = detail_document.get("occurrence_history", [])
+                if not isinstance(history, list):
+                    raise ValueError("diagnostic detail history is invalid")
+                history.append(
+                    _detail_snapshot(
+                        timestamp=timestamp,
+                        mechanical=mechanical,
+                        envelope=detail_envelope,
+                        policy=policy,
+                        bundle_version=bundle_version,
+                        source_commit=source_commit,
+                    )
+                )
+                dropped = _integer(detail_document.get("dropped_history_count"), 0, minimum=0)
+                if len(history) > _DETAIL_HISTORY_LIMIT:
+                    dropped += len(history) - _DETAIL_HISTORY_LIMIT
+                    history = history[-_DETAIL_HISTORY_LIMIT:]
+                detail_document["occurrence_history"] = history
+                detail_document["dropped_history_count"] = dropped
+                detail_document["updated_at"] = timestamp
+                detail_bytes = _serialize_detail_document(detail_document)
+                _write_detail_bytes(project_root, issue_id, detail_bytes)
+                issue["detail_ref"] = _detail_ref(issue_id)
+                issue["detail_digest"] = hashlib.sha256(detail_bytes).hexdigest()
+                issue["retrospective_status"] = history[-1]["root_cause"]["status"]
             write_yaml_if_changed(path, document)
             return dict(issue), False
 
@@ -648,10 +1092,35 @@ def record_diagnostic_issue(
             "error_class": safe_error_class,
             "privacy_classification": PRIVACY_CLASSIFICATION,
         }
-        if mechanical:
-            issue.update(mechanical)
+        if summary_mechanical:
+            issue.update(summary_mechanical)
         if automatic_failure_stage:
             issue["failure_stage"] = automatic_failure_stage
+        if detail_envelope is not None and detail_path is not None:
+            snapshot = _detail_snapshot(
+                timestamp=timestamp,
+                mechanical=mechanical,
+                envelope=detail_envelope,
+                policy=policy,
+                bundle_version=bundle_version,
+                source_commit=source_commit,
+            )
+            detail_document = {
+                "schema": _DETAIL_SCHEMA,
+                "issue_id": issue_id,
+                "summary_fingerprint": summary_fingerprint,
+                "detail_signature": detail_signature,
+                "privacy_classification": DETAIL_PRIVACY_CLASSIFICATION,
+                "created_at": timestamp,
+                "updated_at": timestamp,
+                "occurrence_history": [snapshot],
+                "dropped_history_count": 0,
+            }
+            detail_bytes = _serialize_detail_document(detail_document)
+            _write_detail_bytes(project_root, issue_id, detail_bytes)
+            issue["detail_ref"] = _detail_ref(issue_id)
+            issue["detail_digest"] = hashlib.sha256(detail_bytes).hexdigest()
+            issue["retrospective_status"] = snapshot["root_cause"]["status"]
         issues.append(issue)
         issues.sort(key=lambda item: str(item.get("id") or ""))
         write_yaml_if_changed(path, document)
@@ -665,6 +1134,7 @@ def capture_runtime_failure(
     operation: str,
     returncode: int,
     public_summary: str = "",
+    detail_envelope: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Capture one nonzero owner exit when the effective policy allows it."""
 
@@ -681,36 +1151,169 @@ def capture_runtime_failure(
             operation=normalized_operation,
         )
     summary = public_summary or "The requested knowledge-base operation did not complete."
-    issue, _ = record_diagnostic_issue(
-        project_root,
-        category="runtime-failure",
-        severity="medium",
-        skill=skill,
-        summary=summary,
-        expected="The operation completes successfully.",
-        actual=f"The operation returned nonzero status {int(returncode)}.",
-        trigger=operation,
-        source="runtime",
-        reproducible="unknown",
-        error_class=(
+    automatic_metadata = {
+        "category": "runtime-failure",
+        "owner": skill,
+        "operation": operation,
+        "return_code": int(returncode),
+    }
+    record_kwargs = {
+        "category": "runtime-failure",
+        "severity": "medium",
+        "skill": skill,
+        "summary": summary,
+        "expected": "The operation completes successfully.",
+        "actual": f"The operation returned nonzero status {int(returncode)}.",
+        "trigger": operation,
+        "source": "runtime",
+        "reproducible": "unknown",
+        "error_class": (
             f"owner-nonzero-exit.{failure_stage}"
             if failure_stage
             else "owner-nonzero-exit"
         ),
-        _automatic_runtime_metadata=(
-            {
-                "category": "runtime-failure",
-                "owner": skill,
-                "operation": operation,
-                "return_code": int(returncode),
-            }
-            if policy.get("governance_profile") == "personal"
-            else None
-        ),
-        _automatic_failure_stage=failure_stage,
-        _capture_token=_AUTOMATIC_RUNTIME_CAPTURE,
-    )
+        "_automatic_runtime_metadata": automatic_metadata,
+        "_automatic_failure_stage": failure_stage,
+        "_automatic_detail_envelope": detail_envelope,
+        "_capture_token": _AUTOMATIC_RUNTIME_CAPTURE,
+    }
+    try:
+        issue, _ = record_diagnostic_issue(project_root, **record_kwargs)
+    except Exception:
+        if not policy.get("persist_local_detail"):
+            raise
+        # Optional detail persistence is fail-soft.  The original operation has
+        # already failed; retain the legacy redacted summary without weakening
+        # its exit code, public text, or recovery semantics.
+        record_kwargs["_suppress_detail"] = True
+        issue, _ = record_diagnostic_issue(project_root, **record_kwargs)
     return issue
+
+
+def load_diagnostic_detail(project_root: Path, *, issue_id: str) -> dict[str, Any]:
+    """Pure-read one private detail artifact after verifying its summary binding."""
+
+    normalized_issue_id = _safe_identifier(issue_id)
+    issue = next(
+        (
+            item
+            for item in _load_document(project_root)["issues"]
+            if str(item.get("id") or "") == normalized_issue_id
+        ),
+        None,
+    )
+    if issue is None or not issue.get("detail_ref"):
+        raise ValueError(f"diagnostic detail not found: {normalized_issue_id}")
+    if issue.get("detail_ref") != _detail_ref(normalized_issue_id):
+        raise ValueError("diagnostic detail reference is outside the private store")
+    document, data = _load_detail_document(project_root, normalized_issue_id)
+    digest = hashlib.sha256(data).hexdigest()
+    if str(issue.get("detail_digest") or "") != digest:
+        raise ValueError("diagnostic detail digest no longer matches the summary index")
+    return dict(document)
+
+
+def _safe_agent_text(value: object, *, field: str, required: bool) -> str:
+    safe = redact_diagnostic_text(str(value or ""), limit=_DETAIL_TEXT_LIMIT)
+    if required and not safe:
+        raise ValueError(f"{field} must not be empty after sanitization")
+    return safe
+
+
+def _safe_agent_text_list(value: object, *, field: str, required: bool = False) -> list[str]:
+    if not isinstance(value, list) or len(value) > _DETAIL_LIST_LIMIT:
+        raise ValueError(f"{field} must be a list of at most {_DETAIL_LIST_LIMIT} items")
+    items = [
+        _safe_agent_text(item, field=field, required=True)
+        for item in value
+    ]
+    if required and not items:
+        raise ValueError(f"{field} must contain at least one item")
+    return items
+
+
+def apply_diagnostic_retrospective(
+    project_root: Path,
+    *,
+    issue_id: str,
+    expected_detail_digest: str,
+    explanation: str,
+    reproduction: list[str],
+    optimization_candidates: list[str],
+    next_validation: list[str],
+) -> dict[str, Any]:
+    """Apply one digest-bound Agent hypothesis to the current private snapshot."""
+
+    normalized_issue_id = _safe_identifier(issue_id)
+    if normalized_issue_id != str(issue_id or "").strip().lower():
+        raise ValueError("diagnostic issue id must be one safe identifier")
+    expected_digest = str(expected_detail_digest or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_digest):
+        raise ValueError("expected detail digest must be one sha256 value")
+    safe_explanation = _safe_agent_text(explanation, field="explanation", required=True)
+    safe_reproduction = _safe_agent_text_list(reproduction, field="reproduction")
+    safe_optimizations = _safe_agent_text_list(
+        optimization_candidates,
+        field="optimization_candidates",
+        required=True,
+    )
+    safe_next_validation = _safe_agent_text_list(
+        next_validation,
+        field="next_validation",
+        required=True,
+    )
+    summary_path = diagnostics_path(project_root)
+    detail_path = diagnostic_detail_path(project_root, normalized_issue_id)
+    directory = _open_detail_directory(project_root, create=False)
+    os.close(directory)
+    with mutation_transaction(
+        project_root,
+        "apply-diagnostic-retrospective",
+        [summary_path, detail_path],
+        undoable=False,
+        operation_role="diagnostics",
+    ):
+        summary = _load_document(project_root)
+        issue = next(
+            (
+                item
+                for item in summary["issues"]
+                if str(item.get("id") or "") == normalized_issue_id
+            ),
+            None,
+        )
+        if issue is None or issue.get("detail_ref") != _detail_ref(normalized_issue_id):
+            raise ValueError(f"diagnostic detail not found: {normalized_issue_id}")
+        document, old_bytes = _load_detail_document(project_root, normalized_issue_id)
+        actual_digest = hashlib.sha256(old_bytes).hexdigest()
+        if actual_digest != expected_digest or str(issue.get("detail_digest") or "") != actual_digest:
+            raise ValueError("diagnostic detail changed; prepare a fresh retrospective")
+        history = document.get("occurrence_history")
+        if not isinstance(history, list) or not history or not isinstance(history[-1], dict):
+            raise ValueError("diagnostic detail history is invalid")
+        current = history[-1]
+        root_cause = current.get("root_cause")
+        if not isinstance(root_cause, dict) or root_cause.get("status") != "pending":
+            raise ValueError("diagnostic retrospective is not pending Agent analysis")
+        current["root_cause"] = {
+            "status": "hypothesis",
+            "reason": "agent-applied",
+            "explanation": safe_explanation,
+        }
+        current["reproduction"] = safe_reproduction
+        current["optimization_candidates"] = safe_optimizations
+        current["next_validation"] = safe_next_validation
+        document["updated_at"] = _now()
+        new_bytes = _serialize_detail_document(document)
+        _write_detail_bytes(project_root, normalized_issue_id, new_bytes)
+        issue["detail_digest"] = hashlib.sha256(new_bytes).hexdigest()
+        issue["retrospective_status"] = "hypothesis"
+        write_yaml_if_changed(summary_path, summary)
+        return {
+            "issue_id": normalized_issue_id,
+            "detail_digest": issue["detail_digest"],
+            "retrospective_status": "hypothesis",
+        }
 
 
 def review_diagnostic_issue(project_root: Path, *, issue_id: str, status: str) -> dict[str, Any]:
@@ -783,16 +1386,21 @@ def export_diagnostic_preview(
 
 
 __all__ = [
+    "DETAIL_LEVELS",
+    "DETAIL_PRIVACY_CLASSIFICATION",
     "DIAGNOSTIC_MODES",
     "INTAKE_FAILURE_STAGES",
     "PRIVACY_CLASSIFICATION",
     "REVIEW_STATUSES",
     "SEVERITIES",
     "STATUSES",
+    "apply_diagnostic_retrospective",
     "capture_runtime_failure",
+    "diagnostic_detail_path",
     "diagnostics_path",
     "diagnostics_policy",
     "export_diagnostic_preview",
+    "load_diagnostic_detail",
     "list_diagnostic_issues",
     "publish_runtime_failure_stage",
     "record_diagnostic_issue",

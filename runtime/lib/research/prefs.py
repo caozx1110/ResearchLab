@@ -112,6 +112,12 @@ DIAGNOSTIC_MODES = {"off", "errors-only", "developer"}
 DIAGNOSTIC_SKILL_MODES = {"inherit", *DIAGNOSTIC_MODES}
 
 
+DIAGNOSTIC_DETAIL_LEVELS = {"redacted", "local-detailed"}
+
+
+DIAGNOSTIC_SKILL_DETAIL_LEVELS = {"inherit", *DIAGNOSTIC_DETAIL_LEVELS}
+
+
 PAPER_NOTE_MODES = {"scaffold", "draft"}
 
 
@@ -161,6 +167,8 @@ def default_runtime_preferences() -> dict[str, Any]:
         "diagnostics": {
             "mode": "off",
             "per_skill": {},
+            "detail_level": "redacted",
+            "per_skill_detail_level": {},
             "local_only": True,
             "token_budget_per_task": 0,
             "max_issues_per_task": 20,
@@ -199,7 +207,13 @@ def default_runtime_preferences() -> dict[str, Any]:
             "auto_commit_mode": "milestone",
             "commit_on_browser_save": False,
             "debounce_seconds": 30,
-            "ignored_paths": ["raw/", "output/", "user/kb/", ".runtime/"],
+            "ignored_paths": [
+                "raw/",
+                "output/",
+                "user/kb/",
+                ".runtime/",
+                "memory/skill-evolution/.private/",
+            ],
         },
     }
 
@@ -217,6 +231,19 @@ def _normalize_diagnostics_preferences(value: object) -> dict[str, Any]:
             if skill and skill_mode in DIAGNOSTIC_SKILL_MODES:
                 per_skill[skill] = skill_mode
     diagnostics["per_skill"] = per_skill
+    detail_level = str(diagnostics.get("detail_level") or "redacted").strip().lower()
+    diagnostics["detail_level"] = (
+        detail_level if detail_level in DIAGNOSTIC_DETAIL_LEVELS else "redacted"
+    )
+    raw_per_skill_detail = diagnostics.get("per_skill_detail_level", {})
+    per_skill_detail: dict[str, str] = {}
+    if isinstance(raw_per_skill_detail, dict):
+        for raw_skill, raw_level in raw_per_skill_detail.items():
+            skill = str(raw_skill or "").strip().lower()
+            level = str(raw_level or "inherit").strip().lower()
+            if skill and level in DIAGNOSTIC_SKILL_DETAIL_LEVELS:
+                per_skill_detail[skill] = level
+    diagnostics["per_skill_detail_level"] = per_skill_detail
     # D1 is deliberately local-only.  Persisted attempts to disable this are
     # ignored so a malformed or older preference file cannot enable telemetry.
     diagnostics["local_only"] = True
@@ -416,6 +443,9 @@ def load_runtime_preferences(project_root: Path) -> dict[str, Any]:
             if text.startswith("kb/"):
                 text = text[3:]
             normalized_ignored.append(text)
+    private_diagnostics = "memory/skill-evolution/.private/"
+    if private_diagnostics not in normalized_ignored:
+        normalized_ignored.append(private_diagnostics)
     versioning["ignored_paths"] = normalized_ignored
     normalized["versioning"] = versioning
     return normalized
@@ -503,6 +533,8 @@ __all__ = [
     "DEFAULT_DISCUSSION_STYLE",
     "DIAGNOSTIC_MODES",
     "DIAGNOSTIC_SKILL_MODES",
+    "DIAGNOSTIC_DETAIL_LEVELS",
+    "DIAGNOSTIC_SKILL_DETAIL_LEVELS",
     "PAPER_NOTE_MODES",
     "GOVERNANCE_PROFILES",
     "DEFAULT_GOVERNANCE_PROFILE",

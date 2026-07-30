@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import stat
 import sys
 from pathlib import Path
 
@@ -35,10 +36,12 @@ from research.diagnostics import (
     SEVERITIES,
     SOURCES,
     STATUSES,
+    apply_diagnostic_retrospective,
     capture_runtime_failure,
     diagnostics_policy,
     export_diagnostic_preview,
     list_diagnostic_issues,
+    load_diagnostic_detail,
     record_diagnostic_issue,
     review_diagnostic_issue,
 )
@@ -88,7 +91,47 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--authorized", action="store_true", help="Assert explicit authorization in the current user message")
     export.add_argument("--status", choices=sorted(STATUSES), default="")
     export.add_argument("--skill", default="")
+
+    detail = subparsers.add_parser("detail", help="Read one private local-detailed artifact")
+    detail.add_argument("--id", required=True)
+
+    apply_retrospective = subparsers.add_parser(
+        "apply-retrospective",
+        help="Apply one digest-bound Agent hypothesis from a private runtime JSON file",
+    )
+    apply_retrospective.add_argument("--id", required=True)
+    apply_retrospective.add_argument("--expected-detail-digest", required=True)
+    apply_retrospective.add_argument("--analysis-file", required=True)
     return parser
+
+
+def _load_private_analysis(root: Path, value: str) -> dict[str, object]:
+    runtime_root = (root / "kb" / ".runtime").resolve()
+    candidate = Path(value).expanduser()
+    if not candidate.is_absolute():
+        candidate = runtime_root / candidate
+    if candidate.is_symlink():
+        raise SystemExit("retrospective analysis file must not be a symlink")
+    candidate = candidate.resolve(strict=True)
+    try:
+        candidate.relative_to(runtime_root)
+    except ValueError as exc:
+        raise SystemExit("retrospective analysis file must stay inside the private runtime area") from exc
+    metadata = candidate.stat()
+    if (
+        not candidate.is_file()
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or metadata.st_size > 16 * 1024
+    ):
+        raise SystemExit("retrospective analysis file must be one regular private runtime file")
+    try:
+        payload = json.loads(candidate.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise SystemExit("retrospective analysis file is not valid UTF-8 JSON") from exc
+    expected = {"explanation", "reproduction", "optimization_candidates", "next_validation"}
+    if not isinstance(payload, dict) or set(payload) != expected:
+        raise SystemExit("retrospective analysis must use the closed structured schema")
+    return payload
 
 
 def main() -> int:
@@ -139,6 +182,23 @@ def main() -> int:
                 authorized=args.authorized,
                 status=args.status,
                 skill=args.skill,
+            )
+        )
+        return 0
+    if args.command == "detail":
+        _print_json(load_diagnostic_detail(root, issue_id=args.id))
+        return 0
+    if args.command == "apply-retrospective":
+        analysis = _load_private_analysis(root, args.analysis_file)
+        _print_json(
+            apply_diagnostic_retrospective(
+                root,
+                issue_id=args.id,
+                expected_detail_digest=args.expected_detail_digest,
+                explanation=str(analysis["explanation"]),
+                reproduction=analysis["reproduction"],
+                optimization_candidates=analysis["optimization_candidates"],
+                next_validation=analysis["next_validation"],
             )
         )
         return 0

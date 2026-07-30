@@ -20,6 +20,7 @@ from .paths import (
     kb_root,
     kb_runtime_root,
     passage_search_cache_path,
+    is_private_diagnostic_path,
     versioning_state_path,
 )
 from .journal import (
@@ -349,9 +350,9 @@ def _normalize_git_paths(
             raise SystemExit("Checkpoint targets cannot include the ignored operation journal.")
         if relative_path == ".git" or relative_path.startswith(".git/"):
             raise SystemExit("Checkpoint targets cannot include kb/.git metadata.")
+        if is_private_diagnostic_path(relative_path):
+            continue
         normalized.add(relative_path)
-    if not normalized:
-        raise SystemExit("Checkpoint requires a non-empty explicit target_paths scope.")
     return sorted(normalized)
 
 
@@ -376,7 +377,11 @@ def dirty_kb_paths(project_root: Path) -> list[Path]:
         if result.returncode != 0:
             detail = result.stderr.strip() or result.stdout.strip() or "git status query failed"
             raise SystemExit(detail)
-        relative_paths.update(item for item in result.stdout.split("\0") if item)
+        relative_paths.update(
+            item
+            for item in result.stdout.split("\0")
+            if item and not is_private_diagnostic_path(item)
+        )
     repo = kb_repo_path(project_root)
     return [repo / relative_path for relative_path in sorted(relative_paths)]
 

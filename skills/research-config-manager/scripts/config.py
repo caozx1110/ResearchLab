@@ -47,7 +47,9 @@ from research.core import (
 )
 from research.prefs import (
     DEFAULT_DISCUSSION_STYLE,
+    DIAGNOSTIC_DETAIL_LEVELS,
     DIAGNOSTIC_MODES,
+    DIAGNOSTIC_SKILL_DETAIL_LEVELS,
     DIAGNOSTIC_SKILL_MODES,
     DISCUSSION_STYLES,
     GOVERNANCE_PROFILES,
@@ -344,8 +346,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     diagnostics = subparsers.add_parser("set-diagnostics", help="Configure optional local-only diagnostics")
     diagnostics.add_argument("--mode", choices=sorted(DIAGNOSTIC_MODES))
+    diagnostics.add_argument("--detail-level", choices=sorted(DIAGNOSTIC_DETAIL_LEVELS))
     diagnostics.add_argument("--skill", default="")
     diagnostics.add_argument("--skill-mode", choices=sorted(DIAGNOSTIC_SKILL_MODES))
+    diagnostics.add_argument(
+        "--skill-detail-level",
+        choices=sorted(DIAGNOSTIC_SKILL_DETAIL_LEVELS),
+    )
     diagnostics.add_argument("--token-budget-per-task", type=int)
     diagnostics.add_argument("--max-issues-per-task", type=int)
     diagnostics.add_argument("--dedup-window-seconds", type=int)
@@ -691,13 +698,18 @@ def main() -> int:
         print("[ok] updated workspace governance policy")
         return 0
     if args.command == "set-diagnostics":
-        if bool(args.skill) != bool(args.skill_mode):
-            raise SystemExit("--skill and --skill-mode must be provided together")
+        has_skill_override = args.skill_mode is not None or args.skill_detail_level is not None
+        if bool(args.skill) != has_skill_override:
+            raise SystemExit(
+                "--skill requires --skill-mode and/or --skill-detail-level, and overrides require --skill"
+            )
         if all(
             value is None
             for value in (
                 args.mode,
+                args.detail_level,
                 args.skill_mode,
+                args.skill_detail_level,
                 args.token_budget_per_task,
                 args.max_issues_per_task,
                 args.dedup_window_seconds,
@@ -713,6 +725,8 @@ def main() -> int:
                 diagnostics = {}
             if args.mode is not None:
                 diagnostics["mode"] = args.mode
+            if args.detail_level is not None:
+                diagnostics["detail_level"] = args.detail_level
             if args.skill_mode is not None:
                 overrides = diagnostics.get("per_skill", {})
                 if not isinstance(overrides, dict):
@@ -724,6 +738,17 @@ def main() -> int:
                 ):
                     overrides[implementation_skill] = args.skill_mode
                 diagnostics["per_skill"] = overrides
+            if args.skill_detail_level is not None:
+                detail_overrides = diagnostics.get("per_skill_detail_level", {})
+                if not isinstance(detail_overrides, dict):
+                    detail_overrides = {}
+                requested_skill = str(args.skill).strip().lower()
+                detail_overrides[requested_skill] = args.skill_detail_level
+                for implementation_skill in SKILL_IMPLEMENTATION_ALIASES.get(
+                    requested_skill, ()
+                ):
+                    detail_overrides[implementation_skill] = args.skill_detail_level
+                diagnostics["per_skill_detail_level"] = detail_overrides
             for argument, key in (
                 (args.token_budget_per_task, "token_budget_per_task"),
                 (args.max_issues_per_task, "max_issues_per_task"),
