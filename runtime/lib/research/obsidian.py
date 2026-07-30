@@ -1592,6 +1592,7 @@ def _base_sort_is_presentation_only(current: dict[str, Any], desired: dict[str, 
                 not isinstance(property_name, str)
                 or property_name not in order
                 or property_name in properties
+                or not isinstance(direction, str)
                 or direction not in _OBSIDIAN_BASE_SORT_DIRECTIONS
             ):
                 return False, 0

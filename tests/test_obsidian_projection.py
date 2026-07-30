@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.machinery
 import importlib.util
+import os
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -300,6 +301,14 @@ def test_obsidian_1_12_7_sort_fixture_previews_and_resets_without_canonical_writ
     assert {name: (managed / "dashboards" / name).read_bytes() for name in names} == drift_bytes
     with pytest.raises(SystemExit, match="human-edited"):
         update_obsidian_projection(tmp_path)
+    with pytest.raises(SystemExit, match="current-message"):
+        reset_obsidian_base_presentation_drift(
+            tmp_path,
+            expected_preview_digest=preview["preview_digest"],
+            user_authorization="Agent inferred approval",
+            authorization_source="agent_inference",
+        )
+    assert {name: (managed / "dashboards" / name).read_bytes() for name in names} == drift_bytes
 
     reset = reset_obsidian_base_presentation_drift(
         tmp_path,
@@ -372,6 +381,82 @@ def test_base_presentation_reset_rejects_stale_preview_and_semantic_or_unknown_s
         preview_obsidian_base_presentation_reset(tmp_path)
     assert base.read_bytes() == unknown_bytes
 
+    payload["views"][0]["sort"] = [{"property": "title", "direction": []}]
+    write_yaml_if_changed(base, payload)
+    malformed_bytes = base.read_bytes()
+    report = obsidian_projection_status(tmp_path)
+    assert "OBSIDIAN_MANAGED_FILE_DRIFT" in {item["code"] for item in report["findings"]}
+    with pytest.raises(SystemExit, match="not an allowlisted"):
+        preview_obsidian_base_presentation_reset(tmp_path)
+    assert base.read_bytes() == malformed_bytes
+
+
+def test_base_presentation_reset_rejects_stale_canonical_inputs(tmp_path: Path) -> None:
+    record = _record(tmp_path, "p-alpha-12345678", "Alpha")
+    update_obsidian_projection(tmp_path)
+    base = obsidian_managed_root(tmp_path) / "dashboards/All Units.base"
+    _apply_obsidian_1_12_7_title_sort(base)
+    preview = preview_obsidian_base_presentation_reset(tmp_path)
+    drift_bytes = base.read_bytes()
+    record["summary"] = "Canonical input changed after the preview."
+    write_yaml_if_changed(record_path(tmp_path, "paper", record["id"]), record)
+
+    with pytest.raises(SystemExit, match="stale"):
+        reset_obsidian_base_presentation_drift(
+            tmp_path,
+            expected_preview_digest=preview["preview_digest"],
+            user_authorization="确认按刚才的预览重置",
+            authorization_source="user_message",
+        )
+
+    assert base.read_bytes() == drift_bytes
+
+
+def test_base_presentation_reset_rolls_back_multi_file_write_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = _record(tmp_path, "p-alpha-12345678", "Alpha")
+    canonical_path = record_path(tmp_path, "paper", record["id"])
+    canonical_before = canonical_path.read_bytes()
+    update_obsidian_projection(tmp_path)
+    managed = obsidian_managed_root(tmp_path)
+    paths = [
+        managed / "dashboards/All Units.base",
+        managed / "dashboards/Pending Review.base",
+        managed / "dashboards/By Topic.base",
+    ]
+    for path in paths:
+        _apply_obsidian_1_12_7_title_sort(path)
+    drift_bytes = {path: path.read_bytes() for path in paths}
+    preview = preview_obsidian_base_presentation_reset(tmp_path)
+    original_write = obsidian_module.write_text_if_changed
+    base_writes = 0
+
+    def fail_second_base_write(path: Path, text: str) -> None:
+        nonlocal base_writes
+        if path.suffix == ".base":
+            base_writes += 1
+            if base_writes == 2:
+                raise RuntimeError("injected Base write failure")
+        original_write(path, text)
+
+    monkeypatch.setattr(obsidian_module, "write_text_if_changed", fail_second_base_write)
+
+    with pytest.raises(RuntimeError, match="injected Base write failure"):
+        reset_obsidian_base_presentation_drift(
+            tmp_path,
+            expected_preview_digest=preview["preview_digest"],
+            user_authorization="确认按刚才的预览重置",
+            authorization_source="user_message",
+        )
+
+    assert {path: path.read_bytes() for path in paths} == drift_bytes
+    assert canonical_path.read_bytes() == canonical_before
+    report = obsidian_projection_status(tmp_path)
+    assert [item["code"] for item in report["findings"]].count(
+        "OBSIDIAN_BASE_PRESENTATION_SORT_DRIFT"
+    ) == 3
+
 
 def test_public_obsidian_sort_reset_requires_preview_bound_current_authorization(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -439,7 +524,7 @@ def test_public_obsidian_sort_reset_requires_preview_bound_current_authorization
     assert obsidian_projection_status(tmp_path)["status"] == "PASS"
 
 
-def test_base_presentation_preview_never_follows_symlink_or_ambiguous_yaml(tmp_path: Path) -> None:
+def test_base_presentation_preview_rejects_symlink_special_or_ambiguous_yaml(tmp_path: Path) -> None:
     _record(tmp_path, "p-alpha-12345678", "Alpha")
     update_obsidian_projection(tmp_path)
     base = obsidian_managed_root(tmp_path) / "dashboards/All Units.base"
@@ -467,6 +552,12 @@ def test_base_presentation_preview_never_follows_symlink_or_ambiguous_yaml(tmp_p
     with pytest.raises(SystemExit, match="not an allowlisted"):
         preview_obsidian_base_presentation_reset(tmp_path)
     assert base.read_bytes() == ambiguous_before
+
+    if hasattr(os, "mkfifo"):
+        base.unlink()
+        os.mkfifo(base)
+        with pytest.raises(SystemExit, match="unsafe or unowned"):
+            preview_obsidian_base_presentation_reset(tmp_path)
 
 
 def test_concurrent_base_presentation_reset_has_one_atomic_winner(
