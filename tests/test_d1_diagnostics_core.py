@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import importlib.util
+import os
 import stat
 import sys
 import threading
@@ -641,6 +642,41 @@ def test_diagnostics_owner_script_exposes_locked_operations(tmp_path: Path) -> N
     analysis_path.chmod(0o644)
     with pytest.raises(SystemExit, match="regular private runtime file"):
         owner._load_private_analysis(root, "diagnostic-analysis.json")
+
+
+def test_owner_analysis_reader_rejects_leaf_swap_before_anchored_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _workspace(tmp_path)
+    owner = _load_owner_script(
+        ".agents/skills/skill-evolution-advisor/scripts/diagnostics.py",
+        "d1_diagnostics_owner_toc_script",
+    )
+    analysis_path = root / "kb/.runtime/diagnostic-analysis.json"
+    analysis_path.parent.mkdir(parents=True)
+    safe_payload = {
+        "explanation": "safe hypothesis",
+        "reproduction": [],
+        "optimization_candidates": ["safe candidate"],
+        "next_validation": ["safe validation"],
+    }
+    analysis_path.write_text(json.dumps(safe_payload), encoding="utf-8")
+    analysis_path.chmod(0o600)
+    outside = tmp_path / "outside-analysis.json"
+    outside.write_text(json.dumps({**safe_payload, "explanation": "outside sentinel"}), encoding="utf-8")
+    outside.chmod(0o600)
+    original_open = os.open
+
+    def swap_before_leaf_open(path: object, flags: int, *args: object, **kwargs: object) -> int:
+        if path == analysis_path.name and kwargs.get("dir_fd") is not None:
+            analysis_path.unlink()
+            analysis_path.symlink_to(outside)
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", swap_before_leaf_open)
+    with pytest.raises(SystemExit, match="regular private runtime file"):
+        owner._load_private_analysis(root, analysis_path.name)
 
 
 def test_config_owner_accepts_detail_only_skill_override_without_rewriting_mode_shape(

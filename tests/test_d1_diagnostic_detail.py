@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import stat
 import subprocess
 import threading
@@ -380,3 +381,117 @@ def test_private_detail_is_hard_excluded_from_dirty_discovery_and_checkpoint(
         target_paths=[detail_path],
     )
     assert result["status"] == "no-changes"
+    public_memory = root / "kb/memory/public-checkpoint.md"
+    public_memory.write_text("public\n", encoding="utf-8")
+
+    ancestor_result = git_checkpoint(
+        root,
+        "checkpoint public memory without private diagnostics",
+        auto_init=False,
+        target_paths=[root / "kb/memory"],
+    )
+    assert ancestor_result["committed"] is True
+    assert all("/.private/" not in f"/{path}" for path in ancestor_result["files"])
+    private_in_head = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root / "kb"),
+            "ls-tree",
+            "-r",
+            "--name-only",
+            "HEAD",
+            "--",
+            "memory/skill-evolution/.private",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert private_in_head == ""
+
+    public_skill_memory = root / "kb/memory/skill-evolution/public-checkpoint.md"
+    public_skill_memory.write_text("public skill memory\n", encoding="utf-8")
+    nested_ancestor_result = git_checkpoint(
+        root,
+        "checkpoint public skill memory without private diagnostics",
+        auto_init=False,
+        target_paths=[root / "kb/memory/skill-evolution"],
+    )
+    assert nested_ancestor_result["files"] == ["memory/skill-evolution/public-checkpoint.md"]
+    private_in_head = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root / "kb"),
+            "ls-tree",
+            "-r",
+            "--name-only",
+            "HEAD",
+            "--",
+            "memory/skill-evolution/.private",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert private_in_head == ""
+
+
+def test_private_detail_creation_survives_restrictive_umask(tmp_path: Path) -> None:
+    root = _workspace(tmp_path)
+    (root / "kb/memory/skill-evolution").mkdir(parents=True, exist_ok=True)
+
+    previous_umask = os.umask(0o700)
+    try:
+        descriptor = diagnostics._open_detail_directory(root, create=True)
+    finally:
+        os.umask(previous_umask)
+    os.close(descriptor)
+
+    private_root = root / "kb/memory/skill-evolution/.private"
+    assert stat.S_IMODE(private_root.stat().st_mode) == 0o700
+    assert stat.S_IMODE((private_root / "details").stat().st_mode) == 0o700
+
+
+def test_private_detail_creation_rejects_displaced_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _workspace(tmp_path)
+    parent = root / "kb/memory/skill-evolution"
+    parent.mkdir(parents=True, exist_ok=True)
+    displaced = parent / ".private-created"
+    original_open = os.open
+    swapped = False
+
+    def swap_created_directory(path: object, flags: int, *args: object, **kwargs: object) -> int:
+        nonlocal swapped
+        private_root = parent / ".private"
+        if path == ".private" and kwargs.get("dir_fd") is not None and private_root.exists() and not swapped:
+            private_root.rename(displaced)
+            private_root.mkdir(mode=0o700)
+            swapped = True
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", swap_created_directory)
+    with pytest.raises(PermissionError, match="creation was displaced"):
+        diagnostics._open_detail_directory(root, create=True)
+
+    assert swapped is True
+    assert displaced.is_dir()
+
+
+def test_private_detail_special_leaf_still_records_redacted_fallback(tmp_path: Path) -> None:
+    root = _workspace(tmp_path)
+    _enable_detail(root)
+    first = _capture(root, envelope=_envelope())
+    detail_path = diagnostic_detail_path(root, str(first["id"]))
+    detail_path.unlink()
+    os.mkfifo(detail_path, 0o600)
+
+    fallback = _capture(root, envelope=_envelope())
+
+    assert "detail_ref" not in fallback
+    assert fallback["occurrences"] >= 1
+    assert stat.S_ISFIFO(detail_path.lstat().st_mode)

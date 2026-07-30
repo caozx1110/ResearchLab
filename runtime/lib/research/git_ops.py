@@ -390,37 +390,48 @@ def _literal_git_pathspec(relative_path: str) -> str:
     return f":(top,literal){relative_path}"
 
 
-def _git_query_has_paths(project_root: Path, *args: str) -> bool:
-    result = _run_git(project_root, *args, check=False)
-    if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip() or "git path query failed"
-        raise SystemExit(detail)
-    return bool(result.stdout)
+def _git_paths_in_scope(project_root: Path, relative_path: str) -> tuple[set[str], set[str]]:
+    """Expand one literal scope to safe leaf paths known to Git.
 
-
-def _git_path_has_index_or_untracked_entry(project_root: Path, relative_path: str) -> bool:
-    """Whether a literal scope currently contains an index or unignored file."""
-    return _git_query_has_paths(
+    Returning leaf pathspecs is a hard privacy boundary: an ancestor such as
+    ``memory/`` must never allow an ignored-but-force-staged private diagnostic
+    descendant to hitchhike into ``git commit --only``.
+    """
+    pathspec = _literal_git_pathspec(relative_path)
+    present = _run_git(
         project_root,
         "ls-files",
         "--cached",
         "--others",
         "--exclude-standard",
+        "-z",
         "--",
-        _literal_git_pathspec(relative_path),
+        pathspec,
+        check=False,
     )
-
-
-def _git_path_has_staged_change(project_root: Path, relative_path: str) -> bool:
-    """Include a deletion already removed from the index but tracked by HEAD."""
-    return _git_query_has_paths(
+    staged = _run_git(
         project_root,
         "diff",
         "--cached",
         "--name-only",
+        "-z",
         "--",
-        _literal_git_pathspec(relative_path),
+        pathspec,
+        check=False,
     )
+    for result in (present, staged):
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip() or "git path query failed"
+            raise SystemExit(detail)
+
+    def safe_paths(output: str) -> set[str]:
+        return {
+            item
+            for item in output.split("\0")
+            if item and not is_private_diagnostic_path(item)
+        }
+
+    return safe_paths(present.stdout), safe_paths(staged.stdout)
 
 
 def _checkpointable_git_paths(
@@ -438,17 +449,14 @@ def _checkpointable_git_paths(
     The second result contains scopes that can safely be passed to ``git add``.
     A deletion already staged out of the index is checkpointable but not addable.
     """
-    checkpointable: list[str] = []
-    addable: list[str] = []
+    checkpointable: set[str] = set()
+    addable: set[str] = set()
     for relative_path in scoped_paths:
-        has_entry = _git_path_has_index_or_untracked_entry(project_root, relative_path)
-        has_staged_change = _git_path_has_staged_change(project_root, relative_path)
-        if not has_entry and not has_staged_change:
-            continue
-        checkpointable.append(relative_path)
-        if has_entry:
-            addable.append(relative_path)
-    return checkpointable, addable
+        present, staged = _git_paths_in_scope(project_root, relative_path)
+        addable.update(present)
+        checkpointable.update(present)
+        checkpointable.update(staged)
+    return sorted(checkpointable), sorted(addable)
 
 
 def restore_operation(project_root: Path, op_id: str, *, recovery_type: str = "restore") -> dict[str, Any]:

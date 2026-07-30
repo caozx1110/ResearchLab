@@ -547,22 +547,52 @@ def _open_detail_directory(project_root: Path, *, create: bool) -> int:
         for index, part in enumerate(parts):
             private_component = index >= len(parts) - 2
             created_component = False
+            created_identity: tuple[int, int, int] | None = None
             try:
                 child = os.open(part, _detail_directory_flags(), dir_fd=descriptor)
             except FileNotFoundError:
                 if not create:
                     raise
+                desired_mode = 0o700 if private_component else 0o755
                 try:
-                    os.mkdir(part, 0o700 if private_component else 0o755, dir_fd=descriptor)
+                    os.mkdir(part, desired_mode, dir_fd=descriptor)
                     created_component = True
                 except FileExistsError:
                     pass
+                if created_component:
+                    created = os.stat(part, dir_fd=descriptor, follow_symlinks=False)
+                    if not stat.S_ISDIR(created.st_mode) or created.st_uid != os.getuid():
+                        raise PermissionError("diagnostic detail directory creation was displaced")
+                    created_identity = (
+                        created.st_dev,
+                        created.st_ino,
+                        stat.S_IFMT(created.st_mode),
+                    )
+                    # A restrictive umask can remove the owner's search bits,
+                    # so repair only the directory this process just created
+                    # before attempting the anchored no-follow open.
+                    os.chmod(
+                        part,
+                        desired_mode,
+                        dir_fd=descriptor,
+                        follow_symlinks=False,
+                    )
                 child = os.open(part, _detail_directory_flags(), dir_fd=descriptor)
+            if created_identity is not None:
+                opened = os.fstat(child)
+                opened_identity = (
+                    opened.st_dev,
+                    opened.st_ino,
+                    stat.S_IFMT(opened.st_mode),
+                )
+                if opened_identity != created_identity:
+                    os.close(child)
+                    raise PermissionError("diagnostic detail directory creation was displaced")
             os.close(descriptor)
             descriptor = child
+            if created_component:
+                os.fchmod(descriptor, 0o700 if private_component else 0o755)
             if private_component:
-                if created_component:
-                    os.fchmod(descriptor, 0o700)
                 metadata = os.fstat(descriptor)
                 if (
                     not stat.S_ISDIR(metadata.st_mode)
@@ -1184,7 +1214,7 @@ def capture_runtime_failure(
     }
     try:
         issue, _ = record_diagnostic_issue(project_root, **record_kwargs)
-    except Exception:
+    except (Exception, SystemExit):
         if not policy.get("persist_local_detail"):
             raise
         # Optional detail persistence is fail-soft.  The original operation has

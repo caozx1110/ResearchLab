@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import stat
 import sys
 from pathlib import Path
@@ -106,27 +107,77 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _load_private_analysis(root: Path, value: str) -> dict[str, object]:
-    runtime_root = (root / "kb" / ".runtime").resolve()
+    resolved_root = root.resolve(strict=True)
+    runtime_root = resolved_root / "kb" / ".runtime"
     candidate = Path(value).expanduser()
     if not candidate.is_absolute():
         candidate = runtime_root / candidate
-    if candidate.is_symlink():
-        raise SystemExit("retrospective analysis file must not be a symlink")
-    candidate = candidate.resolve(strict=True)
+    candidate = Path(os.path.abspath(os.fspath(candidate)))
     try:
-        candidate.relative_to(runtime_root)
+        relative = candidate.relative_to(runtime_root)
     except ValueError as exc:
         raise SystemExit("retrospective analysis file must stay inside the private runtime area") from exc
-    metadata = candidate.stat()
-    if (
-        not candidate.is_file()
-        or stat.S_IMODE(metadata.st_mode) != 0o600
-        or metadata.st_size > 16 * 1024
-    ):
+    if not relative.parts:
         raise SystemExit("retrospective analysis file must be one regular private runtime file")
+
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    file_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    directory = -1
+    descriptor = -1
     try:
-        payload = json.loads(candidate.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        directory = os.open(resolved_root, directory_flags)
+        for part in ("kb", ".runtime", *relative.parts[:-1]):
+            child = os.open(part, directory_flags, dir_fd=directory)
+            os.close(directory)
+            directory = child
+        descriptor = os.open(relative.parts[-1], file_flags, dir_fd=directory)
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_size > 16 * 1024
+        ):
+            raise SystemExit("retrospective analysis file must be one regular private runtime file")
+        chunks: list[bytes] = []
+        remaining = 16 * 1024 + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, min(remaining, 8192))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        content = b"".join(chunks)
+        current = os.fstat(descriptor)
+        identity = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if (
+            len(content) != metadata.st_size
+            or any(getattr(metadata, field) != getattr(current, field) for field in identity)
+        ):
+            raise SystemExit("retrospective analysis file changed during its anchored read")
+    except SystemExit:
+        raise
+    except OSError as exc:
+        raise SystemExit("retrospective analysis file must be one regular private runtime file") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if directory >= 0:
+            os.close(directory)
+
+    try:
+        payload = json.loads(content.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
         raise SystemExit("retrospective analysis file is not valid UTF-8 JSON") from exc
     expected = {"explanation", "reproduction", "optimization_candidates", "next_validation"}
     if not isinstance(payload, dict) or set(payload) != expected:
