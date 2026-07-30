@@ -138,7 +138,7 @@ Agent 会连续完成安全步骤：轻量入库、保留原格式、生成完�
 
 把工作区的 `kb` 目录作为 Obsidian Vault 打开即可，无需社区插件。首次查看或 canonical 内容变化后使用 `kb obsidian update`；需要检查是否过期、断链或被人工改动时使用 `kb obsidian status`。
 
-如果你只在 Base 面板里设置了展示排序，Agent 可以先展示一个不改文件的安全修复预览。只有你在当前对话明确确认后，它才会把经验证仅含排序的变化重置为生成视图并重新刷新；预览后文件或输入变化会使授权失效。普通 `kb obsidian update` 和资料入库后的自动刷新不会自行覆盖这类变化。筛选、分组、列顺序、字段或其它人工修改仍会被当作受保护漂移保留，需人工判断。
+如果你只在 Base 面板里设置了展示排序，Agent 可以先展示一个不改文件的一次性安全修复预览。只有你在当前对话明确确认后，它才会把经验证仅含排序的变化重置为生成视图并重新刷新；预览不能重复使用，文件、输入或恢复历史变化也会使授权失效。普通 `kb obsidian update` 和资料入库后的自动刷新不会自行覆盖这类变化。筛选、分组、列顺序、字段、注释或其它人工修改仍会被当作受保护漂移保留，需人工判断。
 
 系统生成的页面位于 `obsidian/managed/`，包含 unit、program、topic、claim/evidence 块链接和三个原生 Bases 面板。Paper、文章和本地文档页还提供完整 Markdown 原文入口；已有 page/section locator 的 evidence 会尽量直接跳到该 Markdown 页或小节。Repo 证据在本地源码仍可达时可以直接打开对应代码文件，当前不保证精确跳到行号。这个目录和 Bases 都是只读可重建视图，不要直接编辑；你自己的阅读笔记分别放在 `obsidian/inbox/` 或 `obsidian/annotations/`。需要批量审核时，Agent 会在 annotations 生成一份只允许修改 checkbox 的待确认表。系统不会生成或修改 `.obsidian/` 配置。
 

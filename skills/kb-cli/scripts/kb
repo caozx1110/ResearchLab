@@ -1387,6 +1387,7 @@ def handle_obsidian(args: argparse.Namespace, root: Path) -> int:
                 "action": "update",
                 "mode": "base-presentation-reset",
                 "expected_preview_digest": str(preview.get("preview_digest") or ""),
+                "expected_preview_token": str(preview.get("preview_token") or ""),
                 "requires_current_user_authorization": True,
             },
         )
@@ -1404,6 +1405,7 @@ def handle_obsidian(args: argparse.Namespace, root: Path) -> int:
             reset = reset_obsidian_base_presentation_drift(
                 root,
                 expected_preview_digest=str(getattr(args, "expected_preview_digest", "") or ""),
+                expected_preview_token=str(getattr(args, "expected_preview_token", "") or ""),
                 user_authorization=str(getattr(args, "user_authorization", "") or ""),
                 authorization_source="user_message",
             )
@@ -5712,6 +5714,7 @@ def register_obsidian(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
     presentation.add_argument("--preview-presentation-reset", action="store_true", help=argparse.SUPPRESS)
     presentation.add_argument("--apply-presentation-reset", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--expected-preview-digest", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--expected-preview-token", default="", help=argparse.SUPPRESS)
     parser.add_argument("--user-authorization", default="", help=argparse.SUPPRESS)
     parser.set_defaults(handler=handle_obsidian)
 

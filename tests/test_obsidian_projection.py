@@ -4,6 +4,7 @@ import hashlib
 import importlib.machinery
 import importlib.util
 import os
+import stat
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -283,6 +284,8 @@ def test_obsidian_1_12_7_sort_fixture_previews_and_resets_without_canonical_writ
             assert path.read_bytes() == (fixture_root / "after.base").read_bytes()
 
     journals_before_preview = _journal_entries(tmp_path)
+    ledger_root = tmp_path / "kb/.runtime/obsidian-base-presentation-reset"
+    assert not ledger_root.exists()
     drift_bytes = {name: (managed / "dashboards" / name).read_bytes() for name in names}
     report = obsidian_projection_status(tmp_path)
     assert report["status"] == "WARN"
@@ -298,6 +301,7 @@ def test_obsidian_1_12_7_sort_fixture_previews_and_resets_without_canonical_writ
     assert preview["sort_count"] == 3
     assert len(preview["preview_digest"]) == 64
     assert _journal_entries(tmp_path) == journals_before_preview
+    assert not ledger_root.exists()
     assert {name: (managed / "dashboards" / name).read_bytes() for name in names} == drift_bytes
     with pytest.raises(SystemExit, match="human-edited"):
         update_obsidian_projection(tmp_path)
@@ -305,6 +309,7 @@ def test_obsidian_1_12_7_sort_fixture_previews_and_resets_without_canonical_writ
         reset_obsidian_base_presentation_drift(
             tmp_path,
             expected_preview_digest=preview["preview_digest"],
+            expected_preview_token=preview["preview_token"],
             user_authorization="Agent inferred approval",
             authorization_source="agent_inference",
         )
@@ -313,6 +318,7 @@ def test_obsidian_1_12_7_sort_fixture_previews_and_resets_without_canonical_writ
     reset = reset_obsidian_base_presentation_drift(
         tmp_path,
         expected_preview_digest=preview["preview_digest"],
+        expected_preview_token=preview["preview_token"],
         user_authorization="请按刚才的预览重置这三个 Base 的展示排序并刷新视图",
         authorization_source="user_message",
     )
@@ -330,16 +336,30 @@ def test_obsidian_1_12_7_sort_fixture_previews_and_resets_without_canonical_writ
     assert repair_journal["op_type"] == "reset_obsidian_base_presentation_sort"
     assert repair_journal["operation_role"] == "derived"
     assert repair_journal["target_paths"] == [
+        ".runtime/obsidian-base-presentation-reset",
         "obsidian/managed/dashboards/All Units.base",
         "obsidian/managed/dashboards/By Topic.base",
         "obsidian/managed/dashboards/Pending Review.base",
     ]
+    assert stat.S_IMODE(ledger_root.stat().st_mode) == 0o700
+    tombstones = list((ledger_root / "consumed").glob("*.yaml"))
+    assert len(tombstones) == 1
+    assert stat.S_IMODE(tombstones[0].stat().st_mode) == 0o600
 
     undo_last_operation(tmp_path)
 
     assert {name: (managed / "dashboards" / name).read_bytes() for name in names} == drift_bytes
     assert canonical_path.read_bytes() == canonical_before
     assert annotation.read_bytes() == annotation_before
+    assert not ledger_root.exists()
+    with pytest.raises(SystemExit, match="stale"):
+        reset_obsidian_base_presentation_drift(
+            tmp_path,
+            expected_preview_digest=preview["preview_digest"],
+            expected_preview_token=preview["preview_token"],
+            user_authorization="replayed authorization after undo",
+            authorization_source="user_message",
+        )
 
 
 def test_base_presentation_reset_rejects_stale_preview_and_semantic_or_unknown_sort(
@@ -357,6 +377,7 @@ def test_base_presentation_reset_rejects_stale_preview_and_semantic_or_unknown_s
         reset_obsidian_base_presentation_drift(
             tmp_path,
             expected_preview_digest=preview["preview_digest"],
+            expected_preview_token=preview["preview_token"],
             user_authorization="确认按预览重置",
             authorization_source="user_message",
         )
@@ -443,6 +464,7 @@ def test_base_presentation_reset_rejects_stale_canonical_inputs(tmp_path: Path) 
         reset_obsidian_base_presentation_drift(
             tmp_path,
             expected_preview_digest=preview["preview_digest"],
+            expected_preview_token=preview["preview_token"],
             user_authorization="确认按刚才的预览重置",
             authorization_source="user_message",
         )
@@ -467,23 +489,27 @@ def test_base_presentation_reset_rolls_back_multi_file_write_failure(
         _apply_obsidian_1_12_7_title_sort(path)
     drift_bytes = {path: path.read_bytes() for path in paths}
     preview = preview_obsidian_base_presentation_reset(tmp_path)
-    original_write = obsidian_module.write_text_if_changed
+    original_write = obsidian_module._replace_project_snapshot_bytes
     base_writes = 0
 
-    def fail_second_base_write(path: Path, text: str) -> None:
+    def fail_second_base_write(snapshot, data: bytes) -> None:
         nonlocal base_writes
-        if path.suffix == ".base":
-            base_writes += 1
-            if base_writes == 2:
-                raise RuntimeError("injected Base write failure")
-        original_write(path, text)
+        base_writes += 1
+        if base_writes == 2:
+            raise RuntimeError("injected Base write failure")
+        original_write(snapshot, data)
 
-    monkeypatch.setattr(obsidian_module, "write_text_if_changed", fail_second_base_write)
+    monkeypatch.setattr(
+        obsidian_module,
+        "_replace_project_snapshot_bytes",
+        fail_second_base_write,
+    )
 
     with pytest.raises(RuntimeError, match="injected Base write failure"):
         reset_obsidian_base_presentation_drift(
             tmp_path,
             expected_preview_digest=preview["preview_digest"],
+            expected_preview_token=preview["preview_token"],
             user_authorization="确认按刚才的预览重置",
             authorization_source="user_message",
         )
@@ -523,6 +549,7 @@ def test_public_obsidian_sort_reset_requires_preview_bound_current_authorization
     assert base.read_bytes() == drift_bytes
     protocol = load_yaml(tmp_path / "kb/.runtime/sort-preview.json", default={})
     preview_digest = protocol["details"]["obsidian_presentation_reset"]["preview_digest"]
+    preview_token = protocol["details"]["obsidian_presentation_reset"]["preview_token"]
     assert protocol["status"] == "needs_user_authorization"
 
     assert kb.main(
@@ -536,6 +563,8 @@ def test_public_obsidian_sort_reset_requires_preview_bound_current_authorization
             "--apply-presentation-reset",
             "--expected-preview-digest",
             preview_digest,
+            "--expected-preview-token",
+            preview_token,
         ]
     ) == 2
     assert "未执行" in capsys.readouterr().out
@@ -552,6 +581,8 @@ def test_public_obsidian_sort_reset_requires_preview_bound_current_authorization
             "--apply-presentation-reset",
             "--expected-preview-digest",
             preview_digest,
+            "--expected-preview-token",
+            preview_token,
             "--user-authorization",
             "请按刚才的展示排序预览重置并刷新",
         ]
@@ -610,8 +641,8 @@ def test_concurrent_base_presentation_reset_has_one_atomic_winner(
     local = threading.local()
     original = obsidian_module._base_presentation_reset_preview
 
-    def synchronized_preview(root):
-        result = original(root)
+    def synchronized_preview(root, *, preview_token):
+        result = original(root, preview_token=preview_token)
         if not getattr(local, "initial_preview_complete", False):
             local.initial_preview_complete = True
             barrier.wait(timeout=5)
@@ -624,6 +655,7 @@ def test_concurrent_base_presentation_reset_has_one_atomic_winner(
             return reset_obsidian_base_presentation_drift(
                 tmp_path,
                 expected_preview_digest=preview["preview_digest"],
+                expected_preview_token=preview["preview_token"],
                 user_authorization="确认按预览重置",
                 authorization_source="user_message",
             )
@@ -636,6 +668,158 @@ def test_concurrent_base_presentation_reset_has_one_atomic_winner(
     assert sum(isinstance(result, dict) for result in results) == 1
     assert sum(isinstance(result, str) for result in results) == 1
     assert obsidian_projection_status(tmp_path)["status"] == "PASS"
+
+
+def test_base_presentation_reset_preview_cannot_be_replayed_after_sort_reappears(
+    tmp_path: Path,
+) -> None:
+    _record(tmp_path, "p-alpha-12345678", "Alpha")
+    update_obsidian_projection(tmp_path)
+    base = obsidian_managed_root(tmp_path) / "dashboards/All Units.base"
+    _apply_obsidian_1_12_7_title_sort(base)
+    first = preview_obsidian_base_presentation_reset(tmp_path)
+    reset_obsidian_base_presentation_drift(
+        tmp_path,
+        expected_preview_digest=first["preview_digest"],
+        expected_preview_token=first["preview_token"],
+        user_authorization="确认第一次重置",
+        authorization_source="user_message",
+    )
+    _apply_obsidian_1_12_7_title_sort(base)
+    repeated_bytes = base.read_bytes()
+    second = preview_obsidian_base_presentation_reset(tmp_path)
+
+    assert second["preview_digest"] != first["preview_digest"]
+    with pytest.raises(SystemExit, match="stale"):
+        reset_obsidian_base_presentation_drift(
+            tmp_path,
+            expected_preview_digest=first["preview_digest"],
+            expected_preview_token=first["preview_token"],
+            user_authorization="replayed old authorization",
+            authorization_source="user_message",
+        )
+    assert base.read_bytes() == repeated_bytes
+
+
+def test_base_presentation_ledger_never_follows_replaced_private_directory(
+    tmp_path: Path,
+) -> None:
+    _record(tmp_path, "p-alpha-12345678", "Alpha")
+    update_obsidian_projection(tmp_path)
+    base = obsidian_managed_root(tmp_path) / "dashboards/All Units.base"
+    _apply_obsidian_1_12_7_title_sort(base)
+    preview = preview_obsidian_base_presentation_reset(tmp_path)
+    reset_obsidian_base_presentation_drift(
+        tmp_path,
+        expected_preview_digest=preview["preview_digest"],
+        expected_preview_token=preview["preview_token"],
+        user_authorization="确认第一次重置",
+        authorization_source="user_message",
+    )
+    _apply_obsidian_1_12_7_title_sort(base)
+    ledger = tmp_path / "kb/.runtime/obsidian-base-presentation-reset"
+    consumed = ledger / "consumed"
+    detached = tmp_path / "detached-consumed"
+    outside = tmp_path / "outside-ledger"
+    outside.mkdir()
+    sentinel = outside / "sentinel.yaml"
+    sentinel.write_text("outside ledger sentinel\n", encoding="utf-8")
+    outside_before = sentinel.read_bytes()
+    consumed.rename(detached)
+    consumed.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(SystemExit, match="not a safe directory"):
+        preview_obsidian_base_presentation_reset(tmp_path)
+
+    assert sentinel.read_bytes() == outside_before
+
+
+def test_base_presentation_reset_never_writes_through_swapped_parent_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _record(tmp_path, "p-alpha-12345678", "Alpha")
+    update_obsidian_projection(tmp_path)
+    managed = obsidian_managed_root(tmp_path)
+    dashboards = managed / "dashboards"
+    base = dashboards / "All Units.base"
+    _apply_obsidian_1_12_7_title_sort(base)
+    preview = preview_obsidian_base_presentation_reset(tmp_path)
+    detached = managed / "detached-dashboards"
+    outside = tmp_path / "outside-dashboards"
+    outside.mkdir()
+    outside_base = outside / "All Units.base"
+    outside_base.write_text("outside sentinel\n", encoding="utf-8")
+    outside_before = outside_base.read_bytes()
+    original_preview = obsidian_module._base_presentation_reset_preview
+    preview_calls = 0
+
+    def swap_after_locked_preview(root: Path, *, preview_token: str):
+        nonlocal preview_calls
+        result = original_preview(root, preview_token=preview_token)
+        preview_calls += 1
+        if preview_calls == 2:
+            dashboards.rename(detached)
+            dashboards.symlink_to(outside, target_is_directory=True)
+        return result
+
+    monkeypatch.setattr(
+        obsidian_module,
+        "_base_presentation_reset_preview",
+        swap_after_locked_preview,
+    )
+
+    with pytest.raises((SystemExit, RuntimeError)):
+        reset_obsidian_base_presentation_drift(
+            tmp_path,
+            expected_preview_digest=preview["preview_digest"],
+            expected_preview_token=preview["preview_token"],
+            user_authorization="确认按预览重置",
+            authorization_source="user_message",
+        )
+
+    assert outside_base.read_bytes() == outside_before
+
+
+def test_base_presentation_sort_with_yaml_comment_remains_protected_drift(tmp_path: Path) -> None:
+    _record(tmp_path, "p-alpha-12345678", "Alpha")
+    update_obsidian_projection(tmp_path)
+    base = obsidian_managed_root(tmp_path) / "dashboards/All Units.base"
+    _apply_obsidian_1_12_7_title_sort(base)
+    base.write_bytes(base.read_bytes() + b"# human comment\n")
+    commented_bytes = base.read_bytes()
+
+    report = obsidian_projection_status(tmp_path)
+
+    assert "OBSIDIAN_MANAGED_FILE_DRIFT" in {item["code"] for item in report["findings"]}
+    assert "OBSIDIAN_BASE_PRESENTATION_SORT_DRIFT" not in {
+        item["code"] for item in report["findings"]
+    }
+    with pytest.raises(SystemExit, match="not an allowlisted"):
+        preview_obsidian_base_presentation_reset(tmp_path)
+    assert base.read_bytes() == commented_bytes
+
+
+def test_base_presentation_preview_rejects_manifest_ownership_spoof(tmp_path: Path) -> None:
+    _record(tmp_path, "p-alpha-12345678", "Alpha")
+    update_obsidian_projection(tmp_path)
+    managed = obsidian_managed_root(tmp_path)
+    base = managed / "dashboards/All Units.base"
+    _apply_obsidian_1_12_7_title_sort(base)
+    manual = managed / "dashboards/Manual.base"
+    manual.write_text("manual content\n", encoding="utf-8")
+    manifest_path = managed / "manifest.yaml"
+    manifest = load_yaml(manifest_path, default={})
+    manifest["files"]["dashboards/Manual.base"] = hashlib.sha256(manual.read_bytes()).hexdigest()
+    manifest["manual_extension"] = True
+    write_yaml_if_changed(manifest_path, manifest)
+    base_before = base.read_bytes()
+    manual_before = manual.read_bytes()
+
+    with pytest.raises(SystemExit, match="manifest is invalid"):
+        preview_obsidian_base_presentation_reset(tmp_path)
+
+    assert base.read_bytes() == base_before
+    assert manual.read_bytes() == manual_before
 
 
 def test_projection_links_markdown_reading_view_and_local_repo_file(tmp_path: Path) -> None:

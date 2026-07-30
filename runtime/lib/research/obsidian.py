@@ -9,6 +9,8 @@ import hashlib
 import json
 import os
 import re
+import secrets
+import stat
 from copy import deepcopy
 from collections import defaultdict
 from pathlib import Path, PurePosixPath
@@ -16,9 +18,9 @@ from typing import Any, Iterable
 from urllib.parse import quote as url_quote
 
 from .common import utc_now_iso
-from .journal import mutation_transaction
+from .journal import _anchored_target_parent, committed_ops, mutation_transaction
 from .paths import UNIT_KIND_DIRS, ensure_kb_gitignore, kb_gitignore_path, kb_root, topic_taxonomy_path, unit_root, units_root
-from .records import normalize_record_schema, snapshot_project_file
+from .records import ProjectFileSnapshot, normalize_record_schema, snapshot_project_file
 from .figures import FigureIndexError, load_current_figure_index
 from .relations import (
     BLOCK_ID_RE,
@@ -41,6 +43,9 @@ OBSIDIAN_RENDERER_REVISION = 11
 MANIFEST_NAME = "manifest.yaml"
 HUMAN_DIRS = ("inbox", "annotations")
 OBSIDIAN_BASE_PRESENTATION_RESET_SCHEMA = "research-kb-obsidian-base-presentation-reset/v1"
+OBSIDIAN_BASE_PRESENTATION_CONSUMED_SCHEMA = (
+    "research-kb-obsidian-base-presentation-consumed/v1"
+)
 OBSIDIAN_BASE_PRESENTATION_FILES = frozenset(
     {
         "dashboards/All Units.base",
@@ -50,6 +55,19 @@ OBSIDIAN_BASE_PRESENTATION_FILES = frozenset(
 )
 _OBSIDIAN_BASE_MAX_BYTES = 256 * 1024
 _OBSIDIAN_BASE_SORT_DIRECTIONS = frozenset({"ASC", "DESC"})
+_OBSIDIAN_MANIFEST_KEYS = frozenset(
+    {
+        "schema",
+        "renderer_revision",
+        "generated_at",
+        "input_digest",
+        "record_count",
+        "program_count",
+        "files",
+    }
+)
+_OBSIDIAN_PRESENTATION_LEDGER_KEY = ".runtime/obsidian-base-presentation-reset"
+_OBSIDIAN_PRESENTATION_LEDGER_LIMIT = 4096
 UNIT_HEADINGS = frozenset(
     {
         "Overview", "Definition", "Associations", "Metadata", "Relationships", "Claims", "Figures",
@@ -1393,6 +1411,32 @@ def _strict_manifest_files(manifest: dict[str, Any]) -> dict[str, str] | None:
     return files
 
 
+def _manifest_shape_is_exact(manifest: dict[str, Any]) -> bool:
+    if set(manifest) != _OBSIDIAN_MANIFEST_KEYS:
+        return False
+    renderer_revision = manifest.get("renderer_revision")
+    if (
+        manifest.get("schema") != OBSIDIAN_PROJECTION_SCHEMA
+        or isinstance(renderer_revision, bool)
+        or not isinstance(renderer_revision, int)
+        or renderer_revision < 0
+        or not isinstance(manifest.get("generated_at"), str)
+        or not str(manifest.get("generated_at") or "").strip()
+        or len(str(manifest.get("generated_at") or "")) > 128
+    ):
+        return False
+    for key in ("record_count", "program_count"):
+        value = manifest.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return False
+    input_digest = manifest.get("input_digest")
+    return (
+        isinstance(input_digest, str)
+        and re.fullmatch(r"[0-9a-f]{64}", input_digest) is not None
+        and _strict_manifest_files(manifest) is not None
+    )
+
+
 def _manifest_renderer_revision(manifest: dict[str, Any]) -> int:
     value = manifest.get("renderer_revision")
     if isinstance(value, bool):
@@ -1438,7 +1482,7 @@ def _load_manifest(project_root: Path) -> tuple[dict[str, Any] | None, str]:
         payload = load_yaml(path, default={})
     except (OSError, RuntimeError):
         return None, "manifest-unreadable"
-    if not isinstance(payload, dict) or payload.get("schema") != OBSIDIAN_PROJECTION_SCHEMA:
+    if not isinstance(payload, dict) or not _manifest_shape_is_exact(payload):
         return None, "manifest-invalid"
     try:
         for relative in _manifest_files(payload):
@@ -1544,6 +1588,335 @@ def _preflight_update(
     return sorted(set(conflicts))
 
 
+def _stat_identity(metadata: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _directory_capability(metadata: os.stat_result) -> tuple[int, int, int]:
+    return (metadata.st_dev, metadata.st_ino, metadata.st_mode)
+
+
+def _read_anchored_regular(
+    parent_fd: int,
+    leaf: str,
+    *,
+    expected_identity: tuple[int, int, int, int, int, int] | None = None,
+    max_bytes: int = _OBSIDIAN_BASE_MAX_BYTES,
+) -> tuple[bytes, tuple[int, int, int, int, int, int]]:
+    metadata = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+    identity = _stat_identity(metadata)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_size > max_bytes
+        or (expected_identity is not None and identity != expected_identity)
+    ):
+        raise SystemExit("An anchored Obsidian file changed identity or is not a bounded regular file.")
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(leaf, flags, dir_fd=parent_fd)
+    try:
+        if _stat_identity(os.fstat(descriptor)) != identity:
+            raise SystemExit("An anchored Obsidian file changed while it was opened.")
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            remaining = max_bytes + 1 - total
+            if remaining <= 0:
+                raise SystemExit("An anchored Obsidian file exceeds the safe byte limit.")
+            chunk = os.read(descriptor, min(64 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        if total != metadata.st_size or _stat_identity(os.fstat(descriptor)) != identity:
+            raise SystemExit("An anchored Obsidian file changed while it was read.")
+    finally:
+        os.close(descriptor)
+    visible_after = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+    if _stat_identity(visible_after) != identity:
+        raise SystemExit("An anchored Obsidian file changed after it was read.")
+    return b"".join(chunks), identity
+
+
+def _replace_project_snapshot_bytes(snapshot: ProjectFileSnapshot, desired_bytes: bytes) -> None:
+    """CAS-replace one snapshot through its anchored parent directory."""
+    if not snapshot.relative_path.startswith("kb/"):
+        raise SystemExit("The Base reset target is outside the canonical knowledge base.")
+    if not snapshot.is_current():
+        raise SystemExit("The Base reset target or an ancestor changed after preview.")
+    target_key = snapshot.relative_path[len("kb/") :]
+    temp_name = f".presentation-reset-{secrets.token_hex(12)}.tmp"
+    temp_created = False
+    with _anchored_target_parent(snapshot.project_root, target_key) as (parent_fd, leaf):
+        if parent_fd is None or not snapshot.directory_capabilities:
+            raise SystemExit("The Base reset parent is unavailable or unsafe.")
+        if _directory_capability(os.fstat(parent_fd)) != snapshot.directory_capabilities[-1]:
+            raise SystemExit("The Base reset parent identity changed after preview.")
+        current_bytes, current_identity = _read_anchored_regular(
+            parent_fd,
+            leaf,
+            expected_identity=snapshot.file_identity,
+        )
+        if current_bytes != snapshot.raw_bytes:
+            raise SystemExit("The Base reset target bytes changed after preview.")
+        mode = stat.S_IMODE(current_identity[2])
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(temp_name, flags, mode, dir_fd=parent_fd)
+        temp_created = True
+        try:
+            offset = 0
+            while offset < len(desired_bytes):
+                written = os.write(descriptor, desired_bytes[offset:])
+                if written <= 0:
+                    raise OSError("anchored Base write made no progress")
+                offset += written
+            os.fchmod(descriptor, mode)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        try:
+            latest_bytes, latest_identity = _read_anchored_regular(
+                parent_fd,
+                leaf,
+                expected_identity=snapshot.file_identity,
+            )
+            if latest_bytes != snapshot.raw_bytes or latest_identity != current_identity:
+                raise SystemExit("The Base reset target changed before compare-and-replace.")
+            if not snapshot.is_current():
+                raise SystemExit("The Base reset target or an ancestor changed before replacement.")
+            os.rename(
+                temp_name,
+                leaf,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+            )
+            temp_created = False
+            installed = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+            installed_bytes, _installed_identity = _read_anchored_regular(
+                parent_fd,
+                leaf,
+                expected_identity=_stat_identity(installed),
+            )
+            if installed_bytes != desired_bytes:
+                raise SystemExit("The anchored Base replacement did not preserve the desired bytes.")
+            os.fsync(parent_fd)
+        finally:
+            if temp_created:
+                try:
+                    os.unlink(temp_name, dir_fd=parent_fd)
+                except FileNotFoundError:
+                    pass
+
+
+def _presentation_journal_anchor(project_root: Path) -> str:
+    entries = committed_ops(project_root)
+    last = entries[-1] if entries else {}
+    return _sha256_text(
+        _canonical_json(
+            {
+                "schema": "research-kb-journal-anchor/v1",
+                "last_committed": last,
+            }
+        )
+    )
+
+
+def _empty_presentation_ledger_anchor() -> str:
+    return _sha256_text(
+        _canonical_json(
+            {
+                "schema": "research-kb-obsidian-base-presentation-ledger/v1",
+                "state": "absent",
+                "entries": [],
+            }
+        )
+    )
+
+
+def _presentation_ledger_anchor(project_root: Path) -> str:
+    sentinel_key = f"{_OBSIDIAN_PRESENTATION_LEDGER_KEY}/.sentinel"
+    with _anchored_target_parent(project_root, sentinel_key) as (ledger_fd, _leaf):
+        if ledger_fd is None:
+            return _empty_presentation_ledger_anchor()
+        ledger_identity = _stat_identity(os.fstat(ledger_fd))
+        if stat.S_IMODE(ledger_identity[2]) != 0o700:
+            raise SystemExit("The private Base presentation ledger has unsafe permissions.")
+        root_entries = sorted(os.listdir(ledger_fd))
+        if any(name != "consumed" for name in root_entries):
+            raise SystemExit("The private Base presentation ledger contains unknown entries.")
+        if "consumed" not in root_entries:
+            return _sha256_text(
+                _canonical_json(
+                    {
+                        "schema": "research-kb-obsidian-base-presentation-ledger/v1",
+                        "state": "present",
+                        "root_identity": list(ledger_identity),
+                        "consumed_identity": [],
+                        "entries": [],
+                    }
+                )
+            )
+        consumed_meta = os.stat("consumed", dir_fd=ledger_fd, follow_symlinks=False)
+        if not stat.S_ISDIR(consumed_meta.st_mode) or stat.S_IMODE(consumed_meta.st_mode) != 0o700:
+            raise SystemExit("The private Base presentation ledger is not a safe directory.")
+        consumed_fd = os.open(
+            "consumed",
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=ledger_fd,
+        )
+        try:
+            if _stat_identity(os.fstat(consumed_fd)) != _stat_identity(consumed_meta):
+                raise SystemExit("The private Base presentation ledger changed while opening.")
+            names = sorted(os.listdir(consumed_fd))
+            if len(names) > _OBSIDIAN_PRESENTATION_LEDGER_LIMIT:
+                raise SystemExit("The private Base presentation ledger reached its safe entry limit.")
+            entries: list[dict[str, str]] = []
+            for name in names:
+                if re.fullmatch(r"[0-9a-f]{64}\.yaml", name) is None:
+                    raise SystemExit("The private Base presentation ledger contains an invalid entry.")
+                raw_bytes, identity = _read_anchored_regular(
+                    consumed_fd,
+                    name,
+                    max_bytes=16 * 1024,
+                )
+                if stat.S_IMODE(identity[2]) != 0o600:
+                    raise SystemExit("The private Base presentation ledger entry has unsafe permissions.")
+                payload = _strict_base_payload(raw_bytes)
+                expected_keys = {
+                    "schema",
+                    "revision",
+                    "status",
+                    "preview_digest",
+                    "consumed_at",
+                    "journal_anchor_before",
+                    "ledger_anchor_before",
+                }
+                if (
+                    payload is None
+                    or set(payload) != expected_keys
+                    or payload.get("schema") != OBSIDIAN_BASE_PRESENTATION_CONSUMED_SCHEMA
+                    or isinstance(payload.get("revision"), bool)
+                    or payload.get("revision") != 1
+                    or payload.get("status") != "consumed"
+                    or payload.get("preview_digest") != name[:-5]
+                    or not isinstance(payload.get("consumed_at"), str)
+                    or not str(payload.get("consumed_at") or "").strip()
+                    or len(str(payload.get("consumed_at") or "")) > 128
+                    or re.fullmatch(r"[0-9a-f]{64}", str(payload.get("journal_anchor_before") or ""))
+                    is None
+                    or re.fullmatch(r"[0-9a-f]{64}", str(payload.get("ledger_anchor_before") or ""))
+                    is None
+                    or raw_bytes != dump_yaml(payload).encode("utf-8")
+                ):
+                    raise SystemExit("The private Base presentation ledger entry is invalid.")
+                entries.append({"name": name, "digest": hashlib.sha256(raw_bytes).hexdigest()})
+            if _stat_identity(os.fstat(consumed_fd)) != _stat_identity(consumed_meta):
+                raise SystemExit("The private Base presentation ledger changed while reading.")
+        finally:
+            os.close(consumed_fd)
+        if _stat_identity(os.fstat(ledger_fd)) != ledger_identity:
+            raise SystemExit("The private Base presentation ledger root changed while reading.")
+    return _sha256_text(
+        _canonical_json(
+            {
+                "schema": "research-kb-obsidian-base-presentation-ledger/v1",
+                "state": "present",
+                "root_identity": list(ledger_identity),
+                "consumed_identity": list(_stat_identity(consumed_meta)),
+                "entries": entries,
+            }
+        )
+    )
+
+
+def _write_presentation_consumed_tombstone(
+    project_root: Path,
+    *,
+    preview_digest: str,
+    journal_anchor_before: str,
+    ledger_anchor_before: str,
+) -> None:
+    if _presentation_journal_anchor(project_root) != journal_anchor_before:
+        raise SystemExit("The committed operation history changed after preview.")
+    if _presentation_ledger_anchor(project_root) != ledger_anchor_before:
+        raise SystemExit("The Base presentation ledger changed after preview.")
+    sentinel_key = f"{_OBSIDIAN_PRESENTATION_LEDGER_KEY}/.sentinel"
+    with _anchored_target_parent(
+        project_root,
+        sentinel_key,
+        create_missing=True,
+    ) as (ledger_fd, _leaf):
+        if ledger_fd is None:
+            raise SystemExit("The private Base presentation ledger could not be created safely.")
+        os.fchmod(ledger_fd, 0o700)
+        try:
+            consumed_meta = os.stat("consumed", dir_fd=ledger_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            os.mkdir("consumed", 0o700, dir_fd=ledger_fd)
+            consumed_meta = os.stat("consumed", dir_fd=ledger_fd, follow_symlinks=False)
+        if not stat.S_ISDIR(consumed_meta.st_mode):
+            raise SystemExit("The private Base presentation ledger is not a safe directory.")
+        consumed_fd = os.open(
+            "consumed",
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=ledger_fd,
+        )
+        try:
+            if _stat_identity(os.fstat(consumed_fd)) != _stat_identity(consumed_meta):
+                raise SystemExit("The private Base presentation ledger changed while opening.")
+            os.fchmod(consumed_fd, 0o700)
+            name = f"{preview_digest}.yaml"
+            try:
+                os.stat(name, dir_fd=consumed_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                raise SystemExit("This Base presentation preview was already consumed.")
+            payload = {
+                "schema": OBSIDIAN_BASE_PRESENTATION_CONSUMED_SCHEMA,
+                "revision": 1,
+                "status": "consumed",
+                "preview_digest": preview_digest,
+                "consumed_at": utc_now_iso(),
+                "journal_anchor_before": journal_anchor_before,
+                "ledger_anchor_before": ledger_anchor_before,
+            }
+            data = dump_yaml(payload).encode("utf-8")
+            flags = (
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_NOFOLLOW", 0)
+            )
+            descriptor = os.open(name, flags, 0o600, dir_fd=consumed_fd)
+            try:
+                offset = 0
+                while offset < len(data):
+                    written = os.write(descriptor, data[offset:])
+                    if written <= 0:
+                        raise OSError("consumed tombstone write made no progress")
+                    offset += written
+                os.fchmod(descriptor, 0o600)
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            os.fsync(consumed_fd)
+            os.fsync(ledger_fd)
+        finally:
+            os.close(consumed_fd)
+
+
 def _base_sort_is_presentation_only(current: dict[str, Any], desired: dict[str, Any]) -> tuple[bool, int]:
     """Recognize only the exact sort shape saved by Obsidian 1.12.7.
 
@@ -1635,6 +2008,12 @@ def _presentation_sort_candidate(
     desired_payload = _strict_base_payload(desired_text.encode("utf-8"))
     if current_payload is None or desired_payload is None:
         return None
+    if snapshot.raw_bytes != dump_yaml(
+        current_payload,
+        width=1_000_000,
+        indent_sequences=True,
+    ).encode("utf-8"):
+        return None
     presentation_only, sort_count = _base_sort_is_presentation_only(current_payload, desired_payload)
     if not presentation_only or not snapshot.is_current():
         return None
@@ -1645,13 +2024,39 @@ def _presentation_sort_candidate(
         "desired_digest": desired_digest,
         "desired_text": desired_text,
         "sort_count": sort_count,
+        "snapshot": snapshot,
     }
+
+
+def _renderer_manifest_files(
+    project_root: Path,
+    inputs: dict[str, Any],
+    manifest: dict[str, Any],
+) -> dict[str, str] | None:
+    if not _manifest_shape_is_exact(manifest):
+        return None
+    if (
+        _manifest_renderer_revision(manifest) != OBSIDIAN_RENDERER_REVISION
+        or manifest.get("input_digest") != inputs["input_digest"]
+        or manifest.get("record_count") != len(inputs["records"])
+        or manifest.get("program_count") != len(inputs["programs"])
+    ):
+        return None
+    generated_at = str(manifest.get("generated_at") or "")
+    desired = _projection_files(project_root, inputs, generated_at=generated_at)
+    expected = {relative: _sha256_text(text) for relative, text in desired.items()}
+    actual = _strict_manifest_files(manifest)
+    return actual if actual == expected else None
 
 
 def _base_presentation_reset_preview(
     project_root: Path,
+    *,
+    preview_token: str,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Build a pure-read, exact-byte preview for a reset-to-renderer repair."""
+    if re.fullmatch(r"[0-9a-f]{64}", str(preview_token or "")) is None:
+        raise SystemExit("The Base presentation preview token is invalid.")
     inputs = _projection_inputs(project_root)
     if inputs["input_issues"]:
         raise SystemExit("Canonical projection inputs are unsafe; presentation reset was not prepared.")
@@ -1663,16 +2068,18 @@ def _base_presentation_reset_preview(
     if manifest_snapshot is None:
         raise SystemExit("The Obsidian projection manifest is unavailable; presentation reset was not prepared.")
     manifest = _strict_base_payload(manifest_snapshot.raw_bytes)
-    if manifest is None or manifest.get("schema") != OBSIDIAN_PROJECTION_SCHEMA:
+    if manifest is None or not _manifest_shape_is_exact(manifest):
         raise SystemExit("The Obsidian projection manifest is invalid; presentation reset was not prepared.")
-    manifest_files = _strict_manifest_files(manifest)
-    if manifest_files is None:
+    if manifest_snapshot.raw_bytes != dump_yaml(manifest).encode("utf-8"):
         raise SystemExit("The Obsidian projection manifest is invalid; presentation reset was not prepared.")
     if (
         _manifest_renderer_revision(manifest) != OBSIDIAN_RENDERER_REVISION
         or str(manifest.get("input_digest") or "") != inputs["input_digest"]
     ):
         raise SystemExit("The Obsidian projection is stale; refresh it before preparing presentation reset.")
+    manifest_files = _renderer_manifest_files(project_root, inputs, manifest)
+    if manifest_files is None:
+        raise SystemExit("The Obsidian projection manifest is invalid; presentation reset was not prepared.")
     managed = obsidian_managed_root(project_root)
     current_files, unsafe_entries = _safe_managed_entries(managed)
     if unsafe_entries or current_files != set(manifest_files):
@@ -1718,18 +2125,30 @@ def _base_presentation_reset_preview(
             "file_count": 0,
             "sort_count": 0,
             "files": [],
+            "preview_token": "",
+            "ledger_anchor": "",
+            "journal_anchor": "",
         }, []
+    ledger_anchor = _presentation_ledger_anchor(project_root)
+    journal_anchor = _presentation_journal_anchor(project_root)
     binding = {
         "schema": OBSIDIAN_BASE_PRESENTATION_RESET_SCHEMA,
+        "preview_token": preview_token,
         "renderer_revision": OBSIDIAN_RENDERER_REVISION,
         "input_digest": inputs["input_digest"],
         "manifest_digest": manifest_snapshot.byte_sha256,
+        "ledger_anchor": ledger_anchor,
+        "journal_anchor": journal_anchor,
         "files": [
             {
                 "relative": item["relative"],
                 "current_digest": item["current_digest"],
                 "desired_digest": item["desired_digest"],
                 "sort_count": item["sort_count"],
+                "file_identity": list(item["snapshot"].file_identity),
+                "directory_capabilities": [
+                    list(identity) for identity in item["snapshot"].directory_capabilities
+                ],
             }
             for item in candidates
         ],
@@ -1739,6 +2158,9 @@ def _base_presentation_reset_preview(
         "schema": OBSIDIAN_BASE_PRESENTATION_RESET_SCHEMA,
         "status": "needs_user_authorization",
         "preview_digest": preview_digest,
+        "preview_token": preview_token,
+        "ledger_anchor": ledger_anchor,
+        "journal_anchor": journal_anchor,
         "file_count": len(candidates),
         "sort_count": sum(int(item["sort_count"]) for item in candidates),
         "files": [Path(str(item["relative"])).name for item in candidates],
@@ -1747,7 +2169,10 @@ def _base_presentation_reset_preview(
 
 def preview_obsidian_base_presentation_reset(project_root: Path) -> dict[str, Any]:
     """Return a redacted, zero-write preview for allowlisted Base sort drift."""
-    preview, _candidates = _base_presentation_reset_preview(project_root)
+    preview, _candidates = _base_presentation_reset_preview(
+        project_root,
+        preview_token=secrets.token_hex(32),
+    )
     return preview
 
 
@@ -1755,6 +2180,7 @@ def reset_obsidian_base_presentation_drift(
     project_root: Path,
     *,
     expected_preview_digest: str,
+    expected_preview_token: str,
     user_authorization: str,
     authorization_source: str,
 ) -> dict[str, Any]:
@@ -1762,27 +2188,43 @@ def reset_obsidian_base_presentation_drift(
     if not str(user_authorization or "").strip() or authorization_source != "user_message":
         raise SystemExit("Base presentation reset requires current-message user authorization.")
     expected = str(expected_preview_digest or "").strip()
-    preview, candidates = _base_presentation_reset_preview(project_root)
+    token = str(expected_preview_token or "").strip()
+    preview, candidates = _base_presentation_reset_preview(project_root, preview_token=token)
     if (
         preview.get("status") != "needs_user_authorization"
         or not expected
         or expected != preview.get("preview_digest")
     ):
         raise SystemExit("The authorized Base presentation preview is stale; request a fresh preview.")
-    targets = [Path(item["path"]) for item in candidates]
+    targets = [
+        kb_root(project_root) / _OBSIDIAN_PRESENTATION_LEDGER_KEY,
+        *[Path(item["path"]) for item in candidates],
+    ]
     with mutation_transaction(
         project_root,
         "reset_obsidian_base_presentation_sort",
         targets,
         operation_role="derived",
     ):
-        locked_preview, locked_candidates = _base_presentation_reset_preview(project_root)
+        locked_preview, locked_candidates = _base_presentation_reset_preview(
+            project_root,
+            preview_token=token,
+        )
         if locked_preview.get("preview_digest") != expected:
             raise SystemExit("The Base presentation drift changed after authorization; nothing was reset.")
         if [item["relative"] for item in locked_candidates] != [item["relative"] for item in candidates]:
             raise SystemExit("The Base presentation reset target set changed; nothing was reset.")
+        _write_presentation_consumed_tombstone(
+            project_root,
+            preview_digest=expected,
+            journal_anchor_before=str(locked_preview["journal_anchor"]),
+            ledger_anchor_before=str(locked_preview["ledger_anchor"]),
+        )
         for item in locked_candidates:
-            write_text_if_changed(Path(item["path"]), str(item["desired_text"]))
+            _replace_project_snapshot_bytes(
+                item["snapshot"],
+                str(item["desired_text"]).encode("utf-8"),
+            )
     refreshed = update_obsidian_projection(project_root)
     final_status = obsidian_projection_status(project_root)
     blocking_codes = {
