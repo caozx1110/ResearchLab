@@ -546,6 +546,7 @@ def _open_detail_directory(project_root: Path, *, create: bool) -> int:
         parts = _DETAIL_DIRECTORY.split("/")
         for index, part in enumerate(parts):
             private_component = index >= len(parts) - 2
+            created_component = False
             try:
                 child = os.open(part, _detail_directory_flags(), dir_fd=descriptor)
             except FileNotFoundError:
@@ -553,12 +554,15 @@ def _open_detail_directory(project_root: Path, *, create: bool) -> int:
                     raise
                 try:
                     os.mkdir(part, 0o700 if private_component else 0o755, dir_fd=descriptor)
+                    created_component = True
                 except FileExistsError:
                     pass
                 child = os.open(part, _detail_directory_flags(), dir_fd=descriptor)
             os.close(descriptor)
             descriptor = child
             if private_component:
+                if created_component:
+                    os.fchmod(descriptor, 0o700)
                 metadata = os.fstat(descriptor)
                 if (
                     not stat.S_ISDIR(metadata.st_mode)
@@ -635,6 +639,7 @@ def _write_detail_bytes(project_root: Path, issue_id: str, data: bytes) -> None:
         ):
             raise PermissionError("diagnostic detail artifact is not a private regular file")
         descriptor = os.open(temporary, flags, 0o600, dir_fd=directory)
+        os.fchmod(descriptor, 0o600)
         view = memoryview(data)
         written = 0
         while written < len(view):
