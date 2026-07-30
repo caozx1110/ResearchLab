@@ -454,6 +454,23 @@ def test_private_detail_creation_survives_restrictive_umask(tmp_path: Path) -> N
     assert stat.S_IMODE((private_root / "details").stat().st_mode) == 0o700
 
 
+def test_private_detail_file_survives_restrictive_umask(tmp_path: Path) -> None:
+    root = _workspace(tmp_path)
+    (root / "kb/memory/skill-evolution").mkdir(parents=True, exist_ok=True)
+    directory = diagnostics._open_detail_directory(root, create=True)
+    os.close(directory)
+
+    previous_umask = os.umask(0o700)
+    try:
+        diagnostics._write_detail_bytes(root, "diag-umask", b"private detail\n")
+    finally:
+        os.umask(previous_umask)
+
+    detail_path = diagnostic_detail_path(root, "diag-umask")
+    assert detail_path.read_bytes() == b"private detail\n"
+    assert stat.S_IMODE(detail_path.stat().st_mode) == 0o600
+
+
 def test_private_detail_creation_rejects_displaced_directory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -480,6 +497,211 @@ def test_private_detail_creation_rejects_displaced_directory(
 
     assert swapped is True
     assert displaced.is_dir()
+
+
+def test_private_detail_creation_rejects_replacement_after_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _workspace(tmp_path)
+    parent = root / "kb/memory/skill-evolution"
+    parent.mkdir(parents=True, exist_ok=True)
+    displaced = parent / ".private-created"
+    original_open = os.open
+    swapped = False
+
+    def swap_after_open(path: object, flags: int, *args: object, **kwargs: object) -> int:
+        nonlocal swapped
+        descriptor = original_open(path, flags, *args, **kwargs)
+        private_root = parent / ".private"
+        if path == ".private" and kwargs.get("dir_fd") is not None and not swapped:
+            private_root.rename(displaced)
+            private_root.mkdir(mode=0o700)
+            swapped = True
+        return descriptor
+
+    monkeypatch.setattr(os, "open", swap_after_open)
+    descriptor = -1
+    try:
+        with pytest.raises(PermissionError, match="creation was displaced"):
+            descriptor = diagnostics._open_detail_directory(root, create=True)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+    assert swapped is True
+    assert not (displaced / "details").exists()
+
+
+def test_private_detail_write_falls_back_when_visible_directory_moves_after_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _workspace(tmp_path)
+    _enable_detail(root)
+    details = root / "kb/memory/skill-evolution/.private/details"
+    displaced = details.parent / "details-displaced"
+    original_open = os.open
+    original_write = diagnostics._write_detail_bytes
+    inside_write = False
+    swapped = False
+
+    def mark_detail_write(*args: object, **kwargs: object) -> None:
+        nonlocal inside_write
+        inside_write = True
+        try:
+            original_write(*args, **kwargs)
+        finally:
+            inside_write = False
+
+    def swap_details_after_open(path: object, flags: int, *args: object, **kwargs: object) -> int:
+        nonlocal swapped
+        descriptor = original_open(path, flags, *args, **kwargs)
+        if path == "details" and kwargs.get("dir_fd") is not None and inside_write and not swapped:
+            details.rename(displaced)
+            details.mkdir(mode=0o700)
+            swapped = True
+        return descriptor
+
+    monkeypatch.setattr(diagnostics, "_write_detail_bytes", mark_detail_write)
+    monkeypatch.setattr(os, "open", swap_details_after_open)
+    issue = _capture(root, envelope=_envelope())
+
+    assert swapped is True
+    assert "detail_ref" not in issue
+    assert list(details.glob("*.yaml")) == []
+    assert list(displaced.glob("*.yaml")) == []
+
+
+def test_private_detail_replace_conflict_fails_closed_and_preserves_old_backup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _workspace(tmp_path)
+    _enable_detail(root)
+    first = _capture(root, envelope=_envelope())
+    detail_path = diagnostic_detail_path(root, str(first["id"]))
+    old_bytes = detail_path.read_bytes()
+    original_replace = os.replace
+    injected = False
+
+    def replace_then_conflict(
+        source: object,
+        destination: object,
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        nonlocal injected
+        original_replace(source, destination, *args, **kwargs)
+        if (
+            not injected
+            and isinstance(source, str)
+            and source.startswith(f".{detail_path.name}.")
+            and source.endswith(".tmp")
+            and destination == detail_path.name
+            and kwargs.get("dst_dir_fd") is not None
+        ):
+            directory = int(kwargs["dst_dir_fd"])
+            os.unlink(detail_path.name, dir_fd=directory)
+            third_party = os.open(
+                detail_path.name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=directory,
+            )
+            try:
+                os.fchmod(third_party, 0o600)
+                os.write(third_party, b"third-party sentinel\n")
+                os.fsync(third_party)
+            finally:
+                os.close(third_party)
+            injected = True
+
+    monkeypatch.setattr(os, "replace", replace_then_conflict)
+    fallback = _capture(root, envelope=_envelope())
+
+    assert injected is True
+    assert "detail_ref" not in fallback
+    # The enclosing journal restores the visible target to its before bytes;
+    # the private hard-link backup must still survive the conflict path until
+    # an explicit recovery decision can safely dispose of it.
+    assert detail_path.read_bytes() == old_bytes
+    backups = list(detail_path.parent.glob(f".{detail_path.name}.*.bak"))
+    assert len(backups) == 1
+    assert backups[0].read_bytes() == old_bytes
+    assert stat.S_IMODE(backups[0].stat().st_mode) == 0o600
+
+
+def test_private_detail_post_write_visibility_failure_restores_old_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _workspace(tmp_path)
+    _enable_detail(root)
+    first = _capture(root, envelope=_envelope())
+    detail_path = diagnostic_detail_path(root, str(first["id"]))
+    old_bytes = detail_path.read_bytes()
+    original_write = diagnostics._write_detail_bytes
+    original_assert = diagnostics._assert_detail_directory_visible
+    inside_write = False
+    visibility_checks = 0
+
+    def mark_detail_write(*args: object, **kwargs: object) -> None:
+        nonlocal inside_write
+        inside_write = True
+        try:
+            original_write(*args, **kwargs)
+        finally:
+            inside_write = False
+
+    def fail_post_write_visibility(project_root: Path, descriptor: int) -> None:
+        nonlocal visibility_checks
+        if inside_write:
+            visibility_checks += 1
+            if visibility_checks == 4:
+                raise PermissionError("injected post-write visibility failure")
+        original_assert(project_root, descriptor)
+
+    monkeypatch.setattr(diagnostics, "_write_detail_bytes", mark_detail_write)
+    monkeypatch.setattr(diagnostics, "_assert_detail_directory_visible", fail_post_write_visibility)
+    fallback = _capture(root, envelope=_envelope())
+
+    assert visibility_checks == 4
+    assert "detail_ref" not in fallback
+    assert detail_path.read_bytes() == old_bytes
+    assert list(detail_path.parent.glob(f".{detail_path.name}.*.bak")) == []
+
+
+def test_private_detail_creation_closes_child_when_identity_check_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _workspace(tmp_path)
+    (root / "kb/memory/skill-evolution").mkdir(parents=True, exist_ok=True)
+    original_open = os.open
+    original_fstat = os.fstat
+    created_child = -1
+
+    def remember_created_child(path: object, flags: int, *args: object, **kwargs: object) -> int:
+        nonlocal created_child
+        descriptor = original_open(path, flags, *args, **kwargs)
+        if path == ".private" and kwargs.get("dir_fd") is not None:
+            created_child = descriptor
+        return descriptor
+
+    def fail_created_child_fstat(descriptor: int) -> os.stat_result:
+        if descriptor == created_child and created_child >= 0:
+            raise OSError("injected created child fstat failure")
+        return original_fstat(descriptor)
+
+    monkeypatch.setattr(os, "open", remember_created_child)
+    monkeypatch.setattr(os, "fstat", fail_created_child_fstat)
+    with pytest.raises(OSError, match="injected created child fstat failure"):
+        diagnostics._open_detail_directory(root, create=True)
+
+    assert created_child >= 0
+    with pytest.raises(OSError):
+        original_fstat(created_child)
 
 
 def test_private_detail_special_leaf_still_records_redacted_fallback(tmp_path: Path) -> None:

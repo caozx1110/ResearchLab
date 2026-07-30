@@ -538,6 +538,17 @@ def _detail_directory_flags() -> int:
     )
 
 
+def _directory_identity(metadata: os.stat_result) -> tuple[int, int, int]:
+    return metadata.st_dev, metadata.st_ino, stat.S_IFMT(metadata.st_mode)
+
+
+def _close_fd_quietly(descriptor: int) -> None:
+    try:
+        os.close(descriptor)
+    except OSError:
+        pass
+
+
 def _open_detail_directory(project_root: Path, *, create: bool) -> int:
     """Open the durable private detail directory without following links."""
 
@@ -547,9 +558,8 @@ def _open_detail_directory(project_root: Path, *, create: bool) -> int:
         for index, part in enumerate(parts):
             private_component = index >= len(parts) - 2
             created_component = False
-            created_identity: tuple[int, int, int] | None = None
             try:
-                child = os.open(part, _detail_directory_flags(), dir_fd=descriptor)
+                expected = os.stat(part, dir_fd=descriptor, follow_symlinks=False)
             except FileNotFoundError:
                 if not create:
                     raise
@@ -559,15 +569,10 @@ def _open_detail_directory(project_root: Path, *, create: bool) -> int:
                     created_component = True
                 except FileExistsError:
                     pass
+                expected = os.stat(part, dir_fd=descriptor, follow_symlinks=False)
                 if created_component:
-                    created = os.stat(part, dir_fd=descriptor, follow_symlinks=False)
-                    if not stat.S_ISDIR(created.st_mode) or created.st_uid != os.getuid():
+                    if not stat.S_ISDIR(expected.st_mode) or expected.st_uid != os.getuid():
                         raise PermissionError("diagnostic detail directory creation was displaced")
-                    created_identity = (
-                        created.st_dev,
-                        created.st_ino,
-                        stat.S_IFMT(created.st_mode),
-                    )
                     # A restrictive umask can remove the owner's search bits,
                     # so repair only the directory this process just created
                     # before attempting the anchored no-follow open.
@@ -577,33 +582,54 @@ def _open_detail_directory(project_root: Path, *, create: bool) -> int:
                         dir_fd=descriptor,
                         follow_symlinks=False,
                     )
+            child: int | None = None
+            try:
                 child = os.open(part, _detail_directory_flags(), dir_fd=descriptor)
-            if created_identity is not None:
                 opened = os.fstat(child)
-                opened_identity = (
-                    opened.st_dev,
-                    opened.st_ino,
-                    stat.S_IFMT(opened.st_mode),
-                )
-                if opened_identity != created_identity:
-                    os.close(child)
+                visible = os.stat(part, dir_fd=descriptor, follow_symlinks=False)
+                if not (
+                    _directory_identity(expected)
+                    == _directory_identity(opened)
+                    == _directory_identity(visible)
+                ):
                     raise PermissionError("diagnostic detail directory creation was displaced")
-            os.close(descriptor)
-            descriptor = child
-            if created_component:
-                os.fchmod(descriptor, 0o700 if private_component else 0o755)
-            if private_component:
-                metadata = os.fstat(descriptor)
-                if (
-                    not stat.S_ISDIR(metadata.st_mode)
-                    or metadata.st_uid != os.getuid()
-                    or stat.S_IMODE(metadata.st_mode) & 0o077
+                if created_component:
+                    os.fchmod(child, 0o700 if private_component else 0o755)
+                opened = os.fstat(child)
+                visible = os.stat(part, dir_fd=descriptor, follow_symlinks=False)
+                if _directory_identity(opened) != _directory_identity(visible):
+                    raise PermissionError("diagnostic detail directory creation was displaced")
+                if private_component and (
+                    not stat.S_ISDIR(opened.st_mode)
+                    or opened.st_uid != os.getuid()
+                    or stat.S_IMODE(opened.st_mode) & 0o077
                 ):
                     raise PermissionError("diagnostic detail directory is not private")
+            except BaseException:
+                if child is not None:
+                    _close_fd_quietly(child)
+                raise
+            try:
+                os.close(descriptor)
+            except BaseException:
+                _close_fd_quietly(child)
+                raise
+            descriptor = child
         return descriptor
     except BaseException:
-        os.close(descriptor)
+        _close_fd_quietly(descriptor)
         raise
+
+
+def _assert_detail_directory_visible(project_root: Path, descriptor: int) -> None:
+    """Confirm an anchored detail directory is still the visible no-follow chain."""
+
+    visible = _open_detail_directory(project_root, create=False)
+    try:
+        if _directory_identity(os.fstat(descriptor)) != _directory_identity(os.fstat(visible)):
+            raise PermissionError("diagnostic detail directory is no longer visible")
+    finally:
+        os.close(visible)
 
 
 def _read_detail_bytes(project_root: Path, issue_id: str) -> bytes:
@@ -616,13 +642,16 @@ def _read_detail_bytes(project_root: Path, issue_id: str) -> bytes:
     )
     descriptor: int | None = None
     try:
+        _assert_detail_directory_visible(project_root, directory)
         descriptor = os.open(filename, flags, dir_fd=directory)
         metadata = os.fstat(descriptor)
+        visible = os.stat(filename, dir_fd=directory, follow_symlinks=False)
         if (
             not stat.S_ISREG(metadata.st_mode)
             or metadata.st_uid != os.getuid()
             or stat.S_IMODE(metadata.st_mode) != 0o600
             or metadata.st_size > _DETAIL_MAX_BYTES
+            or _directory_identity(metadata) != _directory_identity(visible)
         ):
             raise PermissionError("diagnostic detail artifact is not a bounded private file")
         chunks: list[bytes] = []
@@ -636,6 +665,14 @@ def _read_detail_bytes(project_root: Path, issue_id: str) -> bytes:
         data = b"".join(chunks)
         if len(data) > _DETAIL_MAX_BYTES:
             raise ValueError("diagnostic detail artifact exceeds its byte budget")
+        current = os.fstat(descriptor)
+        visible = os.stat(filename, dir_fd=directory, follow_symlinks=False)
+        read_identity_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if any(getattr(metadata, field) != getattr(current, field) for field in read_identity_fields):
+            raise PermissionError("diagnostic detail artifact changed during its anchored read")
+        if _directory_identity(current) != _directory_identity(visible):
+            raise PermissionError("diagnostic detail artifact is no longer visible")
+        _assert_detail_directory_visible(project_root, directory)
         return data
     finally:
         if descriptor is not None:
@@ -648,7 +685,9 @@ def _write_detail_bytes(project_root: Path, issue_id: str, data: bytes) -> None:
         raise ValueError("diagnostic detail artifact exceeds its byte budget")
     directory = _open_detail_directory(project_root, create=True)
     filename = f"{issue_id}.yaml"
-    temporary = f".{filename}.{uuid.uuid4().hex}.tmp"
+    nonce = uuid.uuid4().hex
+    temporary = f".{filename}.{nonce}.tmp"
+    backup = f".{filename}.{nonce}.bak"
     flags = (
         os.O_WRONLY
         | os.O_CREAT
@@ -657,7 +696,10 @@ def _write_detail_bytes(project_root: Path, issue_id: str, data: bytes) -> None:
         | getattr(os, "O_CLOEXEC", 0)
     )
     descriptor: int | None = None
+    backup_created = False
+    preserve_backup = False
     try:
+        _assert_detail_directory_visible(project_root, directory)
         try:
             existing = os.stat(filename, dir_fd=directory, follow_symlinks=False)
         except FileNotFoundError:
@@ -678,10 +720,58 @@ def _write_detail_bytes(project_root: Path, issue_id: str, data: bytes) -> None:
                 raise OSError("diagnostic detail write made no progress")
             written += count
         os.fsync(descriptor)
-        os.close(descriptor)
-        descriptor = None
+        written_metadata = os.fstat(descriptor)
+        _assert_detail_directory_visible(project_root, directory)
+        if existing is not None:
+            os.link(
+                filename,
+                backup,
+                src_dir_fd=directory,
+                dst_dir_fd=directory,
+                follow_symlinks=False,
+            )
+            backup_created = True
+            linked = os.stat(backup, dir_fd=directory, follow_symlinks=False)
+            current = os.stat(filename, dir_fd=directory, follow_symlinks=False)
+            if not (
+                _directory_identity(existing)
+                == _directory_identity(linked)
+                == _directory_identity(current)
+            ):
+                raise PermissionError("diagnostic detail artifact changed before replacement")
+        _assert_detail_directory_visible(project_root, directory)
         os.replace(temporary, filename, src_dir_fd=directory, dst_dir_fd=directory)
+        try:
+            installed = os.stat(filename, dir_fd=directory, follow_symlinks=False)
+        except BaseException:
+            preserve_backup = backup_created
+            raise
+        if _directory_identity(installed) != _directory_identity(written_metadata):
+            preserve_backup = backup_created
+            raise PermissionError("diagnostic detail artifact replacement was displaced")
         os.fsync(directory)
+        try:
+            _assert_detail_directory_visible(project_root, directory)
+        except BaseException:
+            try:
+                current = os.stat(filename, dir_fd=directory, follow_symlinks=False)
+            except OSError:
+                preserve_backup = backup_created
+            else:
+                if _directory_identity(current) == _directory_identity(written_metadata):
+                    if backup_created:
+                        os.replace(backup, filename, src_dir_fd=directory, dst_dir_fd=directory)
+                        backup_created = False
+                    else:
+                        os.unlink(filename, dir_fd=directory)
+                    os.fsync(directory)
+                else:
+                    preserve_backup = backup_created
+            raise
+        if backup_created:
+            os.unlink(backup, dir_fd=directory)
+            backup_created = False
+            os.fsync(directory)
     finally:
         if descriptor is not None:
             os.close(descriptor)
@@ -689,6 +779,11 @@ def _write_detail_bytes(project_root: Path, issue_id: str, data: bytes) -> None:
             os.unlink(temporary, dir_fd=directory)
         except FileNotFoundError:
             pass
+        if backup_created and not preserve_backup:
+            try:
+                os.unlink(backup, dir_fd=directory)
+            except FileNotFoundError:
+                pass
         os.close(directory)
 
 
