@@ -1,0 +1,31 @@
+schema: obsidian-base-gui-fixture/v1
+application: Obsidian Desktop
+version: 1.12.7
+platform: macOS arm64
+release_url: https://github.com/obsidianmd/obsidian-releases/releases/tag/v1.12.7
+asset: Obsidian-1.12.7.dmg
+asset_sha256: 3b85c13b4ce55512e86e170a7cd2a494e2db695ac888c0601e153cb85b77881b
+vault: synthetic renderer-11 fixture only
+action:
+  - open one renderer-owned dashboard Base
+  - open Sort
+  - choose title
+  - choose ascending A to Z
+  - close the sort panel
+structural_diff:
+  path: views[0].sort
+  before: absent
+  after:
+    - property: title
+      direction: ASC
+all_other_fields_equal: true
+dashboard_hashes:
+  All Units.base:
+    before: 225178cc9efdc7da8eaf19d8140bed725d46f8796c576d9e79848334458accce
+    after: 6101e230e01b7e1fa46ccbd4b4fe1578a87ee14be93bff1b31861e2af904b617
+  Pending Review.base:
+    before: 89e0fc53eac06a784aa9d0a2b1f9649e2807928ccbf2c526bae1978ed18ba0d6
+    after: f37b705601bf4c65a7c88831fe6591a3e0ffa44ffbb7bcfce6537392fb856d46
+  By Topic.base:
+    before: 120e04eab3289bd1db8093d9f50237fcae831a31e2970b1776d712cbe93b9837
+    after: 6767349dcc4455bbc8fa1b6b8458776d5b69acc279cba7ff9828a8b7ebdaf18e

@@ -100,7 +100,12 @@ from research.journal import committed_ops, current_operation_id, mutation_trans
 from research.preference_selection import resolve_operation_preferences
 from research.prefs import effective_review_policy
 from research import updater
-from research.obsidian import obsidian_projection_status, update_obsidian_projection
+from research.obsidian import (
+    obsidian_projection_status,
+    preview_obsidian_base_presentation_reset,
+    reset_obsidian_base_presentation_drift,
+    update_obsidian_projection,
+)
 
 try:
     from research.diagnostics import capture_runtime_failure as _capture_runtime_failure
@@ -1355,6 +1360,64 @@ def handle_update(args: argparse.Namespace, root: Path) -> int:
 
 def handle_obsidian(args: argparse.Namespace, root: Path) -> int:
     action = str(args.action or "")
+    if bool(getattr(args, "preview_presentation_reset", False)):
+        if action != "update":
+            print("Base 展示排序修复预览只能与 kb obsidian update 配合使用。")
+            return 2
+        try:
+            preview = preview_obsidian_base_presentation_reset(root)
+        except SystemExit:
+            set_protocol_status(
+                "agent_action_required",
+                obsidian_presentation_reset={"status": "blocked_by_non_allowlisted_drift"},
+            )
+            print("Obsidian Base 的变化不符合安全展示排序边界；没有修改任何文件。")
+            return 2
+        if preview.get("status") == "no_presentation_drift":
+            set_protocol_status("completed", obsidian_presentation_reset=preview)
+            print("没有需要确认修复的 Obsidian Base 展示排序变化。")
+            return 0
+        set_protocol_status("needs_user_authorization", obsidian_presentation_reset=preview)
+        add_agent_action(
+            "present_obsidian_base_presentation_reset",
+            file_count=int(preview.get("file_count") or 0),
+            sort_count=int(preview.get("sort_count") or 0),
+            apply={
+                "verb": "obsidian",
+                "action": "update",
+                "mode": "base-presentation-reset",
+                "expected_preview_digest": str(preview.get("preview_digest") or ""),
+                "requires_current_user_authorization": True,
+            },
+        )
+        print(
+            f"检测到 {int(preview.get('file_count') or 0)} 个仅影响展示排序的 Obsidian Base 变化；"
+            "尚未修改文件，请核对后用自然语言明确授权 Agent 重置并刷新视图。"
+        )
+        return 0
+
+    if bool(getattr(args, "apply_presentation_reset", False)):
+        if action != "update":
+            print("Base 展示排序修复只能与 kb obsidian update 配合使用。")
+            return 2
+        try:
+            reset = reset_obsidian_base_presentation_drift(
+                root,
+                expected_preview_digest=str(getattr(args, "expected_preview_digest", "") or ""),
+                user_authorization=str(getattr(args, "user_authorization", "") or ""),
+                authorization_source="user_message",
+            )
+        except SystemExit:
+            set_protocol_status(
+                "agent_action_required",
+                obsidian_presentation_reset={"status": "authorization_or_currentness_failed"},
+            )
+            print("Obsidian Base 展示排序修复未执行；授权预览已过期或当前文件不再满足安全边界。")
+            return 2
+        set_protocol_status("completed", obsidian_presentation_reset=reset)
+        print("已按你的确认安全重置 Obsidian Base 展示排序，并重新验证知识网络视图。")
+        return 0
+
     if action == "status":
         report = obsidian_projection_status(root)
         set_protocol_status("completed" if report["status"] != "FAIL" else "attention_required", obsidian=report)
@@ -5645,6 +5708,11 @@ def register_doctor(subparsers: argparse._SubParsersAction[argparse.ArgumentPars
 def register_obsidian(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     parser = subparsers.add_parser("obsidian", help="生成或检查 Obsidian 知识网络视图")
     parser.add_argument("action", choices=["update", "status"], metavar="<update|status>", help=argparse.SUPPRESS)
+    presentation = parser.add_mutually_exclusive_group()
+    presentation.add_argument("--preview-presentation-reset", action="store_true", help=argparse.SUPPRESS)
+    presentation.add_argument("--apply-presentation-reset", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--expected-preview-digest", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--user-authorization", default="", help=argparse.SUPPRESS)
     parser.set_defaults(handler=handle_obsidian)
 
 

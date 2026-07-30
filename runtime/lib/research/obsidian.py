@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import re
+from copy import deepcopy
 from collections import defaultdict
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
@@ -17,7 +18,7 @@ from urllib.parse import quote as url_quote
 from .common import utc_now_iso
 from .journal import mutation_transaction
 from .paths import UNIT_KIND_DIRS, ensure_kb_gitignore, kb_gitignore_path, kb_root, topic_taxonomy_path, unit_root, units_root
-from .records import normalize_record_schema
+from .records import normalize_record_schema, snapshot_project_file
 from .figures import FigureIndexError, load_current_figure_index
 from .relations import (
     BLOCK_ID_RE,
@@ -25,13 +26,30 @@ from .relations import (
     project_relation_edges,
     stable_block_id,
 )
-from .yaml_io import dump_yaml, load_yaml, write_text_if_changed, write_yaml_if_changed
+from .yaml_io import (
+    StrictYamlError,
+    dump_yaml,
+    load_yaml,
+    load_yaml_mapping_bytes_strict,
+    write_text_if_changed,
+    write_yaml_if_changed,
+)
 
 
 OBSIDIAN_PROJECTION_SCHEMA = "research-kb-obsidian/v1"
 OBSIDIAN_RENDERER_REVISION = 11
 MANIFEST_NAME = "manifest.yaml"
 HUMAN_DIRS = ("inbox", "annotations")
+OBSIDIAN_BASE_PRESENTATION_RESET_SCHEMA = "research-kb-obsidian-base-presentation-reset/v1"
+OBSIDIAN_BASE_PRESENTATION_FILES = frozenset(
+    {
+        "dashboards/All Units.base",
+        "dashboards/Pending Review.base",
+        "dashboards/By Topic.base",
+    }
+)
+_OBSIDIAN_BASE_MAX_BYTES = 256 * 1024
+_OBSIDIAN_BASE_SORT_DIRECTIONS = frozenset({"ASC", "DESC"})
 UNIT_HEADINGS = frozenset(
     {
         "Overview", "Definition", "Associations", "Metadata", "Relationships", "Claims", "Figures",
@@ -1286,6 +1304,21 @@ def _render_home(
     return "\n".join(lines)
 
 
+def _base_projection_files(inputs: dict[str, Any]) -> dict[str, str]:
+    zh = str(inputs.get("locale") or "en") == "zh"
+    return {
+        "dashboards/All Units.base": _base_file(name=_t(zh, "All units", "全部单元"), zh=zh),
+        "dashboards/Pending Review.base": _base_file(
+            name=_t(zh, "Pending review", "待确认"),
+            view_filter='analysis_stage == "awaiting_confirmation"',
+            zh=zh,
+        ),
+        "dashboards/By Topic.base": _base_file(
+            name=_t(zh, "By topic", "按主题"), group_by="topics", zh=zh
+        ),
+    }
+
+
 def _projection_files(project_root: Path, inputs: dict[str, Any], *, generated_at: str) -> dict[str, str]:
     records = inputs["records"]
     programs = inputs["programs"]
@@ -1329,11 +1362,7 @@ def _projection_files(project_root: Path, inputs: dict[str, Any], *, generated_a
         files[f"topics/{_safe_component(topic_id, fallback='topic')}.md"] = _render_topic_page(
             topic_id, item, members.get(topic_id, []), records_by_id, zh=zh
         )
-    files["dashboards/All Units.base"] = _base_file(name=_t(zh, "All units", "全部单元"), zh=zh)
-    files["dashboards/Pending Review.base"] = _base_file(
-        name=_t(zh, "Pending review", "待确认"), view_filter='analysis_stage == "awaiting_confirmation"', zh=zh
-    )
-    files["dashboards/By Topic.base"] = _base_file(name=_t(zh, "By topic", "按主题"), group_by="topics", zh=zh)
+    files.update(_base_projection_files(inputs))
     return dict(sorted(files.items()))
 
 
@@ -1342,6 +1371,26 @@ def _manifest_files(manifest: dict[str, Any]) -> dict[str, str]:
     if not isinstance(values, dict):
         return {}
     return {str(path): str(digest) for path, digest in values.items() if str(path) and str(digest)}
+
+
+def _strict_manifest_files(manifest: dict[str, Any]) -> dict[str, str] | None:
+    values = manifest.get("files")
+    if not isinstance(values, dict) or not values:
+        return None
+    files: dict[str, str] = {}
+    for relative, digest in values.items():
+        if (
+            not isinstance(relative, str)
+            or not isinstance(digest, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", digest)
+        ):
+            return None
+        try:
+            _validate_relative_managed_path(relative)
+        except SystemExit:
+            return None
+        files[relative] = digest
+    return files
 
 
 def _manifest_renderer_revision(manifest: dict[str, Any]) -> int:
@@ -1495,6 +1544,267 @@ def _preflight_update(
     return sorted(set(conflicts))
 
 
+def _base_sort_is_presentation_only(current: dict[str, Any], desired: dict[str, Any]) -> tuple[bool, int]:
+    """Recognize only the exact sort shape saved by Obsidian 1.12.7.
+
+    ``sort`` remains a user-side presentation preference.  Recognition never
+    adopts it into renderer output; a separately authorized repair resets the
+    file to the current renderer bytes.
+    """
+    current_views = current.get("views")
+    desired_views = desired.get("views")
+    if not isinstance(current_views, list) or not isinstance(desired_views, list):
+        return False, 0
+    if not current_views or len(current_views) != len(desired_views):
+        return False, 0
+    normalized = deepcopy(current)
+    normalized_views = normalized.get("views")
+    if not isinstance(normalized_views, list):  # pragma: no cover - guarded above
+        return False, 0
+    sort_count = 0
+    for index, (current_view, desired_view) in enumerate(zip(current_views, desired_views)):
+        if not isinstance(current_view, dict) or not isinstance(desired_view, dict):
+            return False, 0
+        if "sort" in desired_view:
+            return False, 0
+        extra_keys = set(current_view) - set(desired_view)
+        if extra_keys not in (set(), {"sort"}):
+            return False, 0
+        if "sort" not in current_view:
+            continue
+        sort_items = current_view.get("sort")
+        order = desired_view.get("order")
+        if (
+            not isinstance(sort_items, list)
+            or not sort_items
+            or len(sort_items) > 32
+            or not isinstance(order, list)
+            or not all(isinstance(item, str) and item for item in order)
+        ):
+            return False, 0
+        properties: set[str] = set()
+        for item in sort_items:
+            if not isinstance(item, dict) or set(item) != {"property", "direction"}:
+                return False, 0
+            property_name = item.get("property")
+            direction = item.get("direction")
+            if (
+                not isinstance(property_name, str)
+                or property_name not in order
+                or property_name in properties
+                or direction not in _OBSIDIAN_BASE_SORT_DIRECTIONS
+            ):
+                return False, 0
+            properties.add(property_name)
+        normalized_view = normalized_views[index]
+        if not isinstance(normalized_view, dict):  # pragma: no cover - deepcopy preserves the shape
+            return False, 0
+        normalized_view.pop("sort", None)
+        sort_count += len(sort_items)
+    return normalized == desired and sort_count > 0, sort_count
+
+
+def _strict_base_payload(raw_bytes: bytes) -> dict[str, Any] | None:
+    try:
+        payload = load_yaml_mapping_bytes_strict(raw_bytes)
+    except (RuntimeError, StrictYamlError):
+        return None
+    if not all(isinstance(key, str) for key in payload):
+        return None
+    return payload
+
+
+def _presentation_sort_candidate(
+    project_root: Path,
+    *,
+    relative: str,
+    expected_digest: str,
+    desired_text: str,
+) -> dict[str, Any] | None:
+    if relative not in OBSIDIAN_BASE_PRESENTATION_FILES:
+        return None
+    desired_digest = _sha256_text(desired_text)
+    if expected_digest != desired_digest:
+        return None
+    project_relative = f"kb/obsidian/managed/{relative}"
+    snapshot = snapshot_project_file(project_root, project_relative, max_bytes=_OBSIDIAN_BASE_MAX_BYTES)
+    if snapshot is None or snapshot.byte_sha256 == desired_digest:
+        return None
+    current_payload = _strict_base_payload(snapshot.raw_bytes)
+    desired_payload = _strict_base_payload(desired_text.encode("utf-8"))
+    if current_payload is None or desired_payload is None:
+        return None
+    presentation_only, sort_count = _base_sort_is_presentation_only(current_payload, desired_payload)
+    if not presentation_only or not snapshot.is_current():
+        return None
+    return {
+        "relative": relative,
+        "path": snapshot.path,
+        "current_digest": snapshot.byte_sha256,
+        "desired_digest": desired_digest,
+        "desired_text": desired_text,
+        "sort_count": sort_count,
+    }
+
+
+def _base_presentation_reset_preview(
+    project_root: Path,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Build a pure-read, exact-byte preview for a reset-to-renderer repair."""
+    inputs = _projection_inputs(project_root)
+    if inputs["input_issues"]:
+        raise SystemExit("Canonical projection inputs are unsafe; presentation reset was not prepared.")
+    manifest_snapshot = snapshot_project_file(
+        project_root,
+        "kb/obsidian/managed/manifest.yaml",
+        max_bytes=_OBSIDIAN_BASE_MAX_BYTES,
+    )
+    if manifest_snapshot is None:
+        raise SystemExit("The Obsidian projection manifest is unavailable; presentation reset was not prepared.")
+    manifest = _strict_base_payload(manifest_snapshot.raw_bytes)
+    if manifest is None or manifest.get("schema") != OBSIDIAN_PROJECTION_SCHEMA:
+        raise SystemExit("The Obsidian projection manifest is invalid; presentation reset was not prepared.")
+    manifest_files = _strict_manifest_files(manifest)
+    if manifest_files is None:
+        raise SystemExit("The Obsidian projection manifest is invalid; presentation reset was not prepared.")
+    if (
+        _manifest_renderer_revision(manifest) != OBSIDIAN_RENDERER_REVISION
+        or str(manifest.get("input_digest") or "") != inputs["input_digest"]
+    ):
+        raise SystemExit("The Obsidian projection is stale; refresh it before preparing presentation reset.")
+    managed = obsidian_managed_root(project_root)
+    current_files, unsafe_entries = _safe_managed_entries(managed)
+    if unsafe_entries or current_files != set(manifest_files):
+        raise SystemExit("The Obsidian managed area contains unsafe or unowned content; nothing was reset.")
+    desired_bases = _base_projection_files(inputs)
+    candidates: list[dict[str, Any]] = []
+    for relative, expected_digest in sorted(manifest_files.items()):
+        path = _managed_path(managed, relative)
+        if path.is_symlink() or not path.is_file():
+            raise SystemExit("A managed projection path is unsafe or missing; nothing was reset.")
+        if relative in OBSIDIAN_BASE_PRESENTATION_FILES:
+            current_snapshot = snapshot_project_file(
+                project_root,
+                f"kb/obsidian/managed/{relative}",
+                max_bytes=_OBSIDIAN_BASE_MAX_BYTES,
+            )
+            if current_snapshot is None:
+                raise SystemExit("A managed Base is unsafe, oversized, or unreadable; nothing was reset.")
+            current_digest = current_snapshot.byte_sha256
+        else:
+            current_digest = _file_sha256(path)
+        if current_digest == expected_digest:
+            continue
+        desired_text = desired_bases.get(relative)
+        if desired_text is None:
+            raise SystemExit("Managed projection drift is not an allowlisted Base sort change; nothing was reset.")
+        candidate = _presentation_sort_candidate(
+            project_root,
+            relative=relative,
+            expected_digest=expected_digest,
+            desired_text=desired_text,
+        )
+        if candidate is None:
+            raise SystemExit("Managed projection drift is not an allowlisted Base sort change; nothing was reset.")
+        candidates.append(candidate)
+    if not manifest_snapshot.is_current():
+        raise SystemExit("The Obsidian projection changed while preparing the preview; retry from current state.")
+    if not candidates:
+        return {
+            "schema": OBSIDIAN_BASE_PRESENTATION_RESET_SCHEMA,
+            "status": "no_presentation_drift",
+            "preview_digest": "",
+            "file_count": 0,
+            "sort_count": 0,
+            "files": [],
+        }, []
+    binding = {
+        "schema": OBSIDIAN_BASE_PRESENTATION_RESET_SCHEMA,
+        "renderer_revision": OBSIDIAN_RENDERER_REVISION,
+        "input_digest": inputs["input_digest"],
+        "manifest_digest": manifest_snapshot.byte_sha256,
+        "files": [
+            {
+                "relative": item["relative"],
+                "current_digest": item["current_digest"],
+                "desired_digest": item["desired_digest"],
+                "sort_count": item["sort_count"],
+            }
+            for item in candidates
+        ],
+    }
+    preview_digest = _sha256_text(_canonical_json(binding))
+    return {
+        "schema": OBSIDIAN_BASE_PRESENTATION_RESET_SCHEMA,
+        "status": "needs_user_authorization",
+        "preview_digest": preview_digest,
+        "file_count": len(candidates),
+        "sort_count": sum(int(item["sort_count"]) for item in candidates),
+        "files": [Path(str(item["relative"])).name for item in candidates],
+    }, candidates
+
+
+def preview_obsidian_base_presentation_reset(project_root: Path) -> dict[str, Any]:
+    """Return a redacted, zero-write preview for allowlisted Base sort drift."""
+    preview, _candidates = _base_presentation_reset_preview(project_root)
+    return preview
+
+
+def reset_obsidian_base_presentation_drift(
+    project_root: Path,
+    *,
+    expected_preview_digest: str,
+    user_authorization: str,
+    authorization_source: str,
+) -> dict[str, Any]:
+    """Reset allowlisted Base sort drift after exact preview-bound authorization."""
+    if not str(user_authorization or "").strip() or authorization_source != "user_message":
+        raise SystemExit("Base presentation reset requires current-message user authorization.")
+    expected = str(expected_preview_digest or "").strip()
+    preview, candidates = _base_presentation_reset_preview(project_root)
+    if (
+        preview.get("status") != "needs_user_authorization"
+        or not expected
+        or expected != preview.get("preview_digest")
+    ):
+        raise SystemExit("The authorized Base presentation preview is stale; request a fresh preview.")
+    targets = [Path(item["path"]) for item in candidates]
+    with mutation_transaction(
+        project_root,
+        "reset_obsidian_base_presentation_sort",
+        targets,
+        operation_role="derived",
+    ):
+        locked_preview, locked_candidates = _base_presentation_reset_preview(project_root)
+        if locked_preview.get("preview_digest") != expected:
+            raise SystemExit("The Base presentation drift changed after authorization; nothing was reset.")
+        if [item["relative"] for item in locked_candidates] != [item["relative"] for item in candidates]:
+            raise SystemExit("The Base presentation reset target set changed; nothing was reset.")
+        for item in locked_candidates:
+            write_text_if_changed(Path(item["path"]), str(item["desired_text"]))
+    refreshed = update_obsidian_projection(project_root)
+    final_status = obsidian_projection_status(project_root)
+    blocking_codes = {
+        "OBSIDIAN_BASE_PRESENTATION_SORT_DRIFT",
+        "OBSIDIAN_MANAGED_FILE_DRIFT",
+        "OBSIDIAN_MANAGED_FILE_MISSING",
+        "OBSIDIAN_MANAGED_FILE_UNOWNED",
+        "OBSIDIAN_MANAGED_PATH_UNSAFE",
+        "OBSIDIAN_HUMAN_PATH_UNSAFE",
+        "OBSIDIAN_PROJECTION_STALE",
+    }
+    if any(finding.get("code") in blocking_codes for finding in final_status.get("findings", [])):
+        raise SystemExit("The Base presentation reset did not converge; detailed state was preserved for recovery.")
+    return {
+        "changed": True,
+        "file_count": len(candidates),
+        "sort_count": sum(int(item["sort_count"]) for item in candidates),
+        "preview_digest": expected,
+        "projection_changed": bool(refreshed.get("changed")),
+        "status": final_status,
+    }
+
+
 def _remove_empty_generated_dirs(managed: Path, paths: Iterable[Path]) -> None:
     candidates: set[Path] = set()
     for path in paths:
@@ -1546,6 +1856,7 @@ def update_obsidian_projection(project_root: Path) -> dict[str, Any]:
             "OBSIDIAN_PROJECTION_STALE",
             "OBSIDIAN_MANAGED_FILE_MISSING",
             "OBSIDIAN_MANAGED_FILE_DRIFT",
+            "OBSIDIAN_BASE_PRESENTATION_SORT_DRIFT",
             "OBSIDIAN_MANAGED_PATH_UNSAFE",
             "OBSIDIAN_MANAGED_FILE_UNOWNED",
         }
@@ -1908,6 +2219,7 @@ def obsidian_projection_status(project_root: Path) -> dict[str, Any]:
                 )
             )
     else:
+        presentation_desired: dict[str, str] = {}
         if (
             _manifest_renderer_revision(manifest) != OBSIDIAN_RENDERER_REVISION
             or str(manifest.get("input_digest") or "") != inputs["input_digest"]
@@ -1920,6 +2232,8 @@ def obsidian_projection_status(project_root: Path) -> dict[str, Any]:
                     "The canonical knowledge base changed after the last projection update.",
                 )
             )
+        else:
+            presentation_desired = _base_projection_files(inputs)
         for relative, expected_digest in _manifest_files(manifest).items():
             try:
                 path = _managed_path(managed, relative)
@@ -1934,14 +2248,33 @@ def obsidian_projection_status(project_root: Path) -> dict[str, Any]:
                 )
                 continue
             if _file_sha256(path) != expected_digest:
-                findings.append(
-                    _finding(
-                        "OBSIDIAN_MANAGED_FILE_DRIFT",
-                        "warning",
-                        relative,
-                        "A generated file was edited after projection; it was not overwritten.",
+                candidate = None
+                desired_text = presentation_desired.get(relative)
+                if desired_text is not None:
+                    candidate = _presentation_sort_candidate(
+                        project_root,
+                        relative=relative,
+                        expected_digest=expected_digest,
+                        desired_text=desired_text,
                     )
-                )
+                if candidate is not None:
+                    findings.append(
+                        _finding(
+                            "OBSIDIAN_BASE_PRESENTATION_SORT_DRIFT",
+                            "warning",
+                            relative,
+                            "A generated Base has an allowlisted presentation sort change; it was not reset.",
+                        )
+                    )
+                else:
+                    findings.append(
+                        _finding(
+                            "OBSIDIAN_MANAGED_FILE_DRIFT",
+                            "warning",
+                            relative,
+                            "A generated file was edited after projection; it was not overwritten.",
+                        )
+                    )
         current_files, unsafe_entries = _safe_managed_entries(managed)
         owned_files = set(_manifest_files(manifest))
         for relative in sorted(current_files - owned_files):
@@ -1996,6 +2329,7 @@ def obsidian_projection_status(project_root: Path) -> dict[str, Any]:
 __all__ = [
     "OBSIDIAN_PROJECTION_SCHEMA",
     "OBSIDIAN_RENDERER_REVISION",
+    "OBSIDIAN_BASE_PRESENTATION_RESET_SCHEMA",
     "MANIFEST_NAME",
     "HUMAN_DIRS",
     "obsidian_root",
@@ -2003,4 +2337,6 @@ __all__ = [
     "obsidian_manifest_path",
     "update_obsidian_projection",
     "obsidian_projection_status",
+    "preview_obsidian_base_presentation_reset",
+    "reset_obsidian_base_presentation_drift",
 ]

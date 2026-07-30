@@ -1,0 +1,37 @@
+filters:
+  and:
+    - file.inFolder("obsidian/managed/units")
+    - file.ext == "md"
+properties:
+  title:
+    displayName: Title
+  kind:
+    displayName: Kind
+  status:
+    displayName: Status
+  maturity:
+    displayName: Maturity
+  confirmation_status:
+    displayName: Confirmation
+  analysis_stage:
+    displayName: Analysis
+  materialization_status:
+    displayName: Source health
+  topics:
+    displayName: Topics
+  programs:
+    displayName: Programs
+  updated:
+    displayName: Updated
+views:
+  - type: table
+    name: All units
+    order:
+      - file.name
+      - title
+      - kind
+      - analysis_stage
+      - materialization_status
+      - confirmation_status
+      - topics
+      - updated

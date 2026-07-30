@@ -44,6 +44,7 @@ Schema details and enum/field contracts live in `.agents/lib/research/SCHEMAS.md
 ## Obsidian
 
 - Canonical records/programs/taxonomy/evidence remain the SSOT. `kb/obsidian/managed/` and Bases are generated read-only views; update/status never edits canonical data, human notes, or `.obsidian/`. Reading view is the supported presentation mode.
+- An exact allowlisted Base `views[i].sort` presentation drift may be reset only after the Agent presents a current preview and the user explicitly authorizes that same digest in the current message. Ordinary update and post-intake refresh never reset it automatically; mixed or semantic drift and every unsafe/unowned path remain fail-closed.
 - Human notes live one level below `kb/obsidian/inbox/` or `annotations/`. Only an explicit current-message selection of one Markdown basename may enter private human-note intake; never sweep or choose by recency. Reject review sheets, nested paths, symlinks, special files, non-UTF-8, and oversized input. Keep the original bytes unchanged, freeze a `blog` source with `source_origin=human-note`, then use normal Agent fill/verify and public confirmation.
 - Obsidian review checkboxes are drafts only. On return to chat, parse read-only, restate all choices, obtain current-message authorization, and apply the whole batch atomically. Projection refresh never consumes a sheet.
 

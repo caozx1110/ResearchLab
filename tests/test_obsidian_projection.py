@@ -19,6 +19,8 @@ from research.obsidian import (
     OBSIDIAN_RENDERER_REVISION,
     obsidian_managed_root,
     obsidian_projection_status,
+    preview_obsidian_base_presentation_reset,
+    reset_obsidian_base_presentation_drift,
     update_obsidian_projection,
 )
 from research.relations import project_relation_edges
@@ -224,6 +226,287 @@ def test_bases_are_byte_stable_after_obsidian_1_12_save_normalization(tmp_path: 
 
     assert obsidian_projection_status(tmp_path)["status"] == "PASS"
     assert update_obsidian_projection(tmp_path)["changed"] is False
+
+
+def _apply_obsidian_1_12_7_title_sort(path: Path, *, direction: str = "ASC") -> None:
+    payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    payload["views"][0]["sort"] = [{"property": "title", "direction": direction}]
+    path.write_text(
+        yaml.dump(
+            payload,
+            Dumper=_ObsidianBaseDumper,
+            allow_unicode=True,
+            sort_keys=False,
+            width=1_000_000,
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_obsidian_1_12_7_sort_fixture_previews_and_resets_without_canonical_write(
+    tmp_path: Path,
+) -> None:
+    record = _record(tmp_path, "p-alpha-12345678", "Alpha")
+    canonical_path = record_path(tmp_path, "paper", record["id"])
+    canonical_before = canonical_path.read_bytes()
+    update_obsidian_projection(tmp_path)
+    managed = obsidian_managed_root(tmp_path)
+    annotation = tmp_path / "kb/obsidian/annotations/human-note.md"
+    annotation.write_text("human note\n", encoding="utf-8")
+    annotation_before = annotation.read_bytes()
+    names = ("All Units.base", "Pending Review.base", "By Topic.base")
+    fixture_root = REPO_ROOT / "tests/fixtures/obsidian-1.12.7-base-sort"
+    fixture_metadata = load_yaml(fixture_root / "metadata.yaml", default={})
+    assert fixture_metadata["version"] == "1.12.7"
+    assert fixture_metadata["all_other_fields_equal"] is True
+    expected_before = {
+        "All Units.base": "225178cc9efdc7da8eaf19d8140bed725d46f8796c576d9e79848334458accce",
+        "Pending Review.base": "89e0fc53eac06a784aa9d0a2b1f9649e2807928ccbf2c526bae1978ed18ba0d6",
+        "By Topic.base": "120e04eab3289bd1db8093d9f50237fcae831a31e2970b1776d712cbe93b9837",
+    }
+    expected_after = {
+        "All Units.base": "6101e230e01b7e1fa46ccbd4b4fe1578a87ee14be93bff1b31861e2af904b617",
+        "Pending Review.base": "f37b705601bf4c65a7c88831fe6591a3e0ffa44ffbb7bcfce6537392fb856d46",
+        "By Topic.base": "6767349dcc4455bbc8fa1b6b8458776d5b69acc279cba7ff9828a8b7ebdaf18e",
+    }
+    original_bytes: dict[str, bytes] = {}
+    for name in names:
+        path = managed / "dashboards" / name
+        original_bytes[name] = path.read_bytes()
+        assert hashlib.sha256(original_bytes[name]).hexdigest() == expected_before[name]
+        if name == "All Units.base":
+            assert original_bytes[name] == (fixture_root / "before.base").read_bytes()
+        _apply_obsidian_1_12_7_title_sort(path)
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == expected_after[name]
+        if name == "All Units.base":
+            assert path.read_bytes() == (fixture_root / "after.base").read_bytes()
+
+    journals_before_preview = _journal_entries(tmp_path)
+    drift_bytes = {name: (managed / "dashboards" / name).read_bytes() for name in names}
+    report = obsidian_projection_status(tmp_path)
+    assert report["status"] == "WARN"
+    assert [item["code"] for item in report["findings"]].count(
+        "OBSIDIAN_BASE_PRESENTATION_SORT_DRIFT"
+    ) == 3
+    assert "OBSIDIAN_MANAGED_FILE_DRIFT" not in {item["code"] for item in report["findings"]}
+
+    preview = preview_obsidian_base_presentation_reset(tmp_path)
+
+    assert preview["status"] == "needs_user_authorization"
+    assert preview["file_count"] == 3
+    assert preview["sort_count"] == 3
+    assert len(preview["preview_digest"]) == 64
+    assert _journal_entries(tmp_path) == journals_before_preview
+    assert {name: (managed / "dashboards" / name).read_bytes() for name in names} == drift_bytes
+    with pytest.raises(SystemExit, match="human-edited"):
+        update_obsidian_projection(tmp_path)
+
+    reset = reset_obsidian_base_presentation_drift(
+        tmp_path,
+        expected_preview_digest=preview["preview_digest"],
+        user_authorization="请按刚才的预览重置这三个 Base 的展示排序并刷新视图",
+        authorization_source="user_message",
+    )
+
+    assert reset["changed"] is True
+    assert reset["file_count"] == 3
+    assert reset["projection_changed"] is False
+    assert reset["status"]["status"] == "PASS"
+    assert {name: (managed / "dashboards" / name).read_bytes() for name in names} == original_bytes
+    assert canonical_path.read_bytes() == canonical_before
+    assert annotation.read_bytes() == annotation_before
+    journals_after = _journal_entries(tmp_path)
+    assert len(journals_after) == len(journals_before_preview) + 1
+    repair_journal = load_yaml(journals_after[-1], default={})
+    assert repair_journal["op_type"] == "reset_obsidian_base_presentation_sort"
+    assert repair_journal["operation_role"] == "derived"
+    assert repair_journal["target_paths"] == [
+        "obsidian/managed/dashboards/All Units.base",
+        "obsidian/managed/dashboards/By Topic.base",
+        "obsidian/managed/dashboards/Pending Review.base",
+    ]
+
+    undo_last_operation(tmp_path)
+
+    assert {name: (managed / "dashboards" / name).read_bytes() for name in names} == drift_bytes
+    assert canonical_path.read_bytes() == canonical_before
+    assert annotation.read_bytes() == annotation_before
+
+
+def test_base_presentation_reset_rejects_stale_preview_and_semantic_or_unknown_sort(
+    tmp_path: Path,
+) -> None:
+    _record(tmp_path, "p-alpha-12345678", "Alpha")
+    update_obsidian_projection(tmp_path)
+    base = obsidian_managed_root(tmp_path) / "dashboards/All Units.base"
+    _apply_obsidian_1_12_7_title_sort(base)
+    preview = preview_obsidian_base_presentation_reset(tmp_path)
+    _apply_obsidian_1_12_7_title_sort(base, direction="DESC")
+    changed_after_preview = base.read_bytes()
+
+    with pytest.raises(SystemExit, match="stale"):
+        reset_obsidian_base_presentation_drift(
+            tmp_path,
+            expected_preview_digest=preview["preview_digest"],
+            user_authorization="确认按预览重置",
+            authorization_source="user_message",
+        )
+    assert base.read_bytes() == changed_after_preview
+
+    payload = yaml.safe_load(base.read_text(encoding="utf-8"))
+    payload["views"][0]["name"] = "Semantic rename"
+    write_yaml_if_changed(base, payload)
+    semantic_bytes = base.read_bytes()
+    with pytest.raises(SystemExit, match="not an allowlisted"):
+        preview_obsidian_base_presentation_reset(tmp_path)
+    report = obsidian_projection_status(tmp_path)
+    assert "OBSIDIAN_MANAGED_FILE_DRIFT" in {item["code"] for item in report["findings"]}
+    assert base.read_bytes() == semantic_bytes
+
+    payload = yaml.safe_load(semantic_bytes)
+    payload["views"][0]["name"] = "All units"
+    payload["views"][0]["sort"] = [{"property": "unknown", "direction": "ASC"}]
+    write_yaml_if_changed(base, payload)
+    unknown_bytes = base.read_bytes()
+    with pytest.raises(SystemExit, match="not an allowlisted"):
+        preview_obsidian_base_presentation_reset(tmp_path)
+    assert base.read_bytes() == unknown_bytes
+
+
+def test_public_obsidian_sort_reset_requires_preview_bound_current_authorization(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    kb = _load_kb_cli()
+    _record(tmp_path, "p-alpha-12345678", "Alpha")
+    update_obsidian_projection(tmp_path)
+    base = obsidian_managed_root(tmp_path) / "dashboards/All Units.base"
+    _apply_obsidian_1_12_7_title_sort(base)
+    drift_bytes = base.read_bytes()
+
+    assert kb.main(
+        [
+            "--root",
+            str(tmp_path),
+            "--agent-protocol",
+            "sort-preview.json",
+            "obsidian",
+            "update",
+            "--preview-presentation-reset",
+        ]
+    ) == 0
+    preview_output = capsys.readouterr().out
+    assert "尚未修改文件" in preview_output
+    assert "dashboards" not in preview_output
+    assert base.read_bytes() == drift_bytes
+    protocol = load_yaml(tmp_path / "kb/.runtime/sort-preview.json", default={})
+    preview_digest = protocol["details"]["obsidian_presentation_reset"]["preview_digest"]
+    assert protocol["status"] == "needs_user_authorization"
+
+    assert kb.main(
+        [
+            "--root",
+            str(tmp_path),
+            "--agent-protocol",
+            "sort-no-auth.json",
+            "obsidian",
+            "update",
+            "--apply-presentation-reset",
+            "--expected-preview-digest",
+            preview_digest,
+        ]
+    ) == 2
+    assert "未执行" in capsys.readouterr().out
+    assert base.read_bytes() == drift_bytes
+
+    assert kb.main(
+        [
+            "--root",
+            str(tmp_path),
+            "--agent-protocol",
+            "sort-apply.json",
+            "obsidian",
+            "update",
+            "--apply-presentation-reset",
+            "--expected-preview-digest",
+            preview_digest,
+            "--user-authorization",
+            "请按刚才的展示排序预览重置并刷新",
+        ]
+    ) == 0
+    applied_output = capsys.readouterr().out
+    assert "已按你的确认安全重置" in applied_output
+    assert "dashboards" not in applied_output
+    assert obsidian_projection_status(tmp_path)["status"] == "PASS"
+
+
+def test_base_presentation_preview_never_follows_symlink_or_ambiguous_yaml(tmp_path: Path) -> None:
+    _record(tmp_path, "p-alpha-12345678", "Alpha")
+    update_obsidian_projection(tmp_path)
+    base = obsidian_managed_root(tmp_path) / "dashboards/All Units.base"
+    renderer_bytes = base.read_bytes()
+    outside = tmp_path / "outside.base"
+    outside.write_bytes(renderer_bytes + b"# outside\n")
+    outside_before = outside.read_bytes()
+    base.unlink()
+    base.symlink_to(outside)
+
+    with pytest.raises(SystemExit, match="unsafe or unowned"):
+        preview_obsidian_base_presentation_reset(tmp_path)
+    assert outside.read_bytes() == outside_before
+
+    base.unlink()
+    base.write_bytes(
+        renderer_bytes
+        + b"views:\n"
+        + b"  - type: table\n"
+        + b"    name: duplicate\n"
+        + b"    order: [title]\n"
+        + b"    sort: [{property: title, direction: ASC}]\n"
+    )
+    ambiguous_before = base.read_bytes()
+    with pytest.raises(SystemExit, match="not an allowlisted"):
+        preview_obsidian_base_presentation_reset(tmp_path)
+    assert base.read_bytes() == ambiguous_before
+
+
+def test_concurrent_base_presentation_reset_has_one_atomic_winner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _record(tmp_path, "p-alpha-12345678", "Alpha")
+    update_obsidian_projection(tmp_path)
+    base = obsidian_managed_root(tmp_path) / "dashboards/All Units.base"
+    _apply_obsidian_1_12_7_title_sort(base)
+    preview = preview_obsidian_base_presentation_reset(tmp_path)
+    barrier = threading.Barrier(2)
+    local = threading.local()
+    original = obsidian_module._base_presentation_reset_preview
+
+    def synchronized_preview(root):
+        result = original(root)
+        if not getattr(local, "initial_preview_complete", False):
+            local.initial_preview_complete = True
+            barrier.wait(timeout=5)
+        return result
+
+    monkeypatch.setattr(obsidian_module, "_base_presentation_reset_preview", synchronized_preview)
+
+    def apply_once():
+        try:
+            return reset_obsidian_base_presentation_drift(
+                tmp_path,
+                expected_preview_digest=preview["preview_digest"],
+                user_authorization="确认按预览重置",
+                authorization_source="user_message",
+            )
+        except SystemExit as exc:
+            return str(exc)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _index: apply_once(), range(2)))
+
+    assert sum(isinstance(result, dict) for result in results) == 1
+    assert sum(isinstance(result, str) for result in results) == 1
+    assert obsidian_projection_status(tmp_path)["status"] == "PASS"
 
 
 def test_projection_links_markdown_reading_view_and_local_repo_file(tmp_path: Path) -> None:
