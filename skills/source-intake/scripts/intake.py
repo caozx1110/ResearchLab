@@ -2187,6 +2187,7 @@ def _run_batch_add(root: Path, raw_items: list[str]) -> dict[str, object]:
                 message=f"milestone: intake batch ({len(ready)})",
                 target_paths=checkpoint_targets,
             )
+            failure_stage = "unknown"
 
         results: list[dict[str, object]] = []
         emitted: set[tuple[str, str]] = set()

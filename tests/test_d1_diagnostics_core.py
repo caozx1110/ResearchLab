@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import importlib.util
+import stat
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -216,6 +217,81 @@ def test_intake_failure_stage_handoff_is_allowlisted_private_and_consumed(
     assert unknown is not None
     assert unknown["failure_stage"] == "unknown"
     assert unknown["error_class"] == "owner-nonzero-exit.unknown"
+
+
+def test_intake_failure_stage_handoff_has_exactly_one_concurrent_consumer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _workspace(tmp_path)
+    write_runtime_preferences(root, {"diagnostics": {"mode": "errors-only"}})
+    monkeypatch.setattr(diagnostics_module.os, "getppid", diagnostics_module.os.getpid)
+    assert publish_runtime_failure_stage(
+        root,
+        skill="source-intake",
+        operation="add",
+        failure_stage="checkpoint",
+    ) is True
+    original_claim = diagnostics_module._claim_failure_stage_receipt
+    start = threading.Barrier(2)
+
+    def gated_claim(
+        directory: int,
+        filename: str,
+    ) -> tuple[str, tuple[int, int]] | None:
+        start.wait(timeout=10)
+        return original_claim(directory, filename)
+
+    monkeypatch.setattr(diagnostics_module, "_claim_failure_stage_receipt", gated_claim)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(
+            pool.map(
+                lambda _index: diagnostics_module._consume_runtime_failure_stage(
+                    root,
+                    skill="source-intake",
+                    operation="add",
+                ),
+                range(2),
+            )
+        )
+
+    assert sorted(outcomes) == ["checkpoint", "unknown"]
+    receipt_directory = root / "kb" / ".runtime" / "diagnostics" / "failure-stages"
+    assert list(receipt_directory.iterdir()) == []
+
+
+def test_intake_failure_stage_handoff_rejects_world_writable_final_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _workspace(tmp_path)
+    write_runtime_preferences(root, {"diagnostics": {"mode": "errors-only"}})
+    monkeypatch.setattr(diagnostics_module.os, "getppid", diagnostics_module.os.getpid)
+    assert publish_runtime_failure_stage(
+        root,
+        skill="source-intake",
+        operation="add",
+        failure_stage="checkpoint",
+    ) is True
+    receipt_directory = root / "kb" / ".runtime" / "diagnostics" / "failure-stages"
+    receipt = next(receipt_directory.glob("*.json"))
+    before = receipt.read_bytes()
+    receipt_directory.chmod(0o777)
+
+    assert publish_runtime_failure_stage(
+        root,
+        skill="source-intake",
+        operation="add",
+        failure_stage="materialization",
+    ) is False
+    assert diagnostics_module._consume_runtime_failure_stage(
+        root,
+        skill="source-intake",
+        operation="add",
+    ) == "unknown"
+    assert stat.S_IMODE(receipt_directory.stat().st_mode) == 0o777
+    assert receipt.read_bytes() == before
+    assert list(receipt_directory.iterdir()) == [receipt]
 
 
 def test_intake_failure_stage_handoff_fails_closed_on_unsafe_directory(

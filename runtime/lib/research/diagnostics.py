@@ -135,6 +135,13 @@ def _open_failure_stage_directory(project_root: Path, *, create: bool) -> int:
                 child = os.open(part, _directory_flags(), dir_fd=descriptor)
             os.close(descriptor)
             descriptor = child
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) & 0o077
+        ):
+            raise PermissionError("failure-stage handoff directory is not private")
         return descriptor
     except BaseException:
         os.close(descriptor)
@@ -145,6 +152,31 @@ def _failure_stage_receipt_name(parent_pid: int) -> str:
     if isinstance(parent_pid, bool) or not 1 <= int(parent_pid) <= 2**31 - 1:
         raise ValueError("parent pid is outside the supported range")
     return f"{int(parent_pid)}.json"
+
+
+def _claim_failure_stage_receipt(
+    directory: int,
+    filename: str,
+) -> tuple[str, tuple[int, int]] | None:
+    """Atomically move one safe receipt to a private one-consumer name."""
+
+    try:
+        metadata = os.stat(filename, dir_fd=directory, follow_symlinks=False)
+    except OSError:
+        return None
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or metadata.st_size > _FAILURE_STAGE_RECEIPT_MAX_BYTES
+    ):
+        return None
+    claimed = f".{filename}.{uuid.uuid4().hex}.claim"
+    try:
+        os.replace(filename, claimed, src_dir_fd=directory, dst_dir_fd=directory)
+    except OSError:
+        return None
+    return claimed, (metadata.st_dev, metadata.st_ino)
 
 
 def _write_failure_stage_receipt(project_root: Path, payload: Mapping[str, Any]) -> None:
@@ -233,6 +265,11 @@ def _consume_runtime_failure_stage(
     except (OSError, ValueError):
         return "unknown"
     filename = _failure_stage_receipt_name(os.getpid())
+    claim = _claim_failure_stage_receipt(directory, filename)
+    if claim is None:
+        os.close(directory)
+        return "unknown"
+    claimed, claimed_identity = claim
     flags = (
         os.O_RDONLY
         | getattr(os, "O_NONBLOCK", 0)
@@ -240,17 +277,18 @@ def _consume_runtime_failure_stage(
         | getattr(os, "O_CLOEXEC", 0)
     )
     descriptor: int | None = None
-    identity: tuple[int, int] | None = None
+    identity: tuple[int, int] | None = claimed_identity
     data = b""
     try:
         try:
-            descriptor = os.open(filename, flags, dir_fd=directory)
+            descriptor = os.open(claimed, flags, dir_fd=directory)
         except OSError:
             return "unknown"
         metadata = os.fstat(descriptor)
         identity = (metadata.st_dev, metadata.st_ino)
         if (
             not stat.S_ISREG(metadata.st_mode)
+            or identity != claimed_identity
             or metadata.st_uid != os.getuid()
             or stat.S_IMODE(metadata.st_mode) != 0o600
             or metadata.st_size > _FAILURE_STAGE_RECEIPT_MAX_BYTES
@@ -272,12 +310,12 @@ def _consume_runtime_failure_stage(
             os.close(descriptor)
         if identity is not None:
             try:
-                current = os.stat(filename, dir_fd=directory, follow_symlinks=False)
+                current = os.stat(claimed, dir_fd=directory, follow_symlinks=False)
                 if (
                     stat.S_ISREG(current.st_mode)
                     and (current.st_dev, current.st_ino) == identity
                 ):
-                    os.unlink(filename, dir_fd=directory)
+                    os.unlink(claimed, dir_fd=directory)
                     os.fsync(directory)
             except OSError:
                 pass

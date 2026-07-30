@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -854,3 +855,34 @@ def test_safe_fixture_failure_matrix_reports_stable_intake_stage(
         assert records == []
     if token:
         assert not intake._prepared_dir(root, token).exists()
+
+
+def test_batch_post_checkpoint_internal_failure_falls_back_to_unknown_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    intake = _load_intake_module()
+    root = tmp_path / "workspace"
+    root.mkdir()
+    ensure_workspace(root)
+    source = root / "batch-blog.md"
+    source.write_text("# Batch blog\n\nSafe fixture bytes.\n", encoding="utf-8")
+    checkpointed: list[bool] = []
+    monkeypatch.setattr(
+        intake,
+        "checkpoint_and_report",
+        lambda *_args, **_kwargs: checkpointed.append(True) or {},
+    )
+    keys = iter((("blog", "request-key"), ("blog", "outcome-key")))
+    monkeypatch.setattr(intake, "_batch_dedup_key", lambda *_args, **_kwargs: next(keys))
+    raw = json.dumps(
+        {"kind": "blog", "source": str(source), "maturity": "lightweight"},
+        ensure_ascii=False,
+    )
+
+    with pytest.raises(KeyError) as raised:
+        intake._run_batch_add(root, [raw])
+
+    assert checkpointed == [True]
+    assert intake._intake_failure_stage(raised.value, default="missing") == "unknown"
+    assert len(list((root / "kb" / "units" / "blogs").glob("*/record.yaml"))) == 1
