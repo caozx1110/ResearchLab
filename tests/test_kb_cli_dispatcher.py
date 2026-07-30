@@ -2957,6 +2957,383 @@ def test_kb_add_ask_first_does_not_prepare_deep_read(monkeypatch, tmp_path: Path
     assert capsys.readouterr().out.count("需要我现在继续深读吗") == 1
 
 
+def test_kb_add_refreshes_obsidian_once_after_created_owner_checkpoint(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    kb = _load_kb_cli()
+    events: list[str] = []
+    monkeypatch.setattr(
+        kb,
+        "load_runtime_preferences",
+        lambda root: {"autonomy": {"link_autodrive": "ask_first"}},
+    )
+
+    def fake_forward(root, relative_script, args, **kwargs):
+        del relative_script, args, kwargs
+        events.append("intake-checkpoint-complete")
+        record = default_record("paper", title="Refresh me", maturity="lightweight")
+        record["id"] = "p-refresh-created"
+        write_yaml_if_changed(record_path(root, "paper", record["id"]), record)
+        return kb.CommandResult(
+            ("intake",),
+            0,
+            "[ok] created kb/units/papers/p-refresh-created/record.yaml\n",
+        )
+
+    def fake_refresh(root):
+        assert record_path(root, "paper", "p-refresh-created").is_file()
+        events.append("derived-refresh")
+        return {
+            "changed": True,
+            "status": {"status": "PASS", "findings": []},
+        }
+
+    monkeypatch.setattr(kb, "forward_command", fake_forward)
+    monkeypatch.setattr(kb, "update_obsidian_projection", fake_refresh)
+
+    assert kb.main(
+        ["--root", str(tmp_path), "--agent-protocol", "add-refresh.json", "add", "https://example.com/paper.pdf"]
+    ) == 0
+
+    assert events == ["intake-checkpoint-complete", "derived-refresh"]
+    protocol = json.loads((tmp_path / "kb/.runtime/add-refresh.json").read_text(encoding="utf-8"))
+    assert protocol["status"] == "needs_user_input"
+    assert protocol["details"]["obsidian_refresh"] == {
+        "changed": True,
+        "projection_status": "PASS",
+        "status": "updated",
+    }
+
+
+def test_kb_add_created_refresh_materializes_new_unit_without_changing_canonical_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    kb = _load_kb_cli()
+    canonical_bytes: list[bytes] = []
+    monkeypatch.setattr(
+        kb,
+        "load_runtime_preferences",
+        lambda root: {"autonomy": {"link_autodrive": "ask_first"}},
+    )
+
+    def fake_forward(root, relative_script, args, **kwargs):
+        del kwargs
+        record = default_record("paper", title="Projected intake", maturity="lightweight")
+        record["id"] = "p-projected-intake"
+        record["status"] = "active"
+        write_yaml_if_changed(record_path(root, "paper", record["id"]), record)
+        canonical_bytes.append(record_path(root, "paper", record["id"]).read_bytes())
+        return kb.CommandResult(
+            (relative_script, *args),
+            0,
+            "[ok] created kb/units/papers/p-projected-intake/record.yaml\n",
+        )
+
+    monkeypatch.setattr(kb, "forward_command", fake_forward)
+
+    assert kb.main(
+        ["--root", str(tmp_path), "--agent-protocol", "projected.json", "add", "https://example.com/paper.pdf"]
+    ) == 0
+
+    canonical = record_path(tmp_path, "paper", "p-projected-intake")
+    assert canonical.read_bytes() == canonical_bytes[0]
+    assert (tmp_path / "kb/obsidian/managed/units/p-projected-intake.md").is_file()
+    protocol = json.loads((tmp_path / "kb/.runtime/projected.json").read_text(encoding="utf-8"))
+    assert protocol["details"]["obsidian_refresh"]["status"] == "updated"
+    derived_roots = [
+        load_yaml(path, default={})
+        for path in (tmp_path / "kb/.journal").glob("*.yaml")
+        if int(load_yaml(path, default={}).get("transaction_depth") or 0) == 0
+    ]
+    assert any(
+        row.get("op_type") == "rebuild_obsidian_projection"
+        and row.get("operation_role") == "derived"
+        and row.get("state") == "commit"
+        for row in derived_roots
+    )
+
+
+def test_kb_add_duplicate_skips_obsidian_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    kb = _load_kb_cli()
+    monkeypatch.setattr(
+        kb,
+        "load_runtime_preferences",
+        lambda root: {"autonomy": {"link_autodrive": "ask_first"}},
+    )
+    monkeypatch.setattr(
+        kb,
+        "forward_command",
+        lambda root, relative_script, args, **kwargs: kb.CommandResult(
+            (relative_script, *args),
+            0,
+            "[ok] duplicate detected: p-existing-unit\n",
+        ),
+    )
+    monkeypatch.setattr(
+        kb,
+        "update_obsidian_projection",
+        lambda root: pytest.fail("duplicate intake must not refresh the projection"),
+    )
+
+    assert kb.main(
+        ["--root", str(tmp_path), "--agent-protocol", "add-duplicate.json", "add", "https://example.com/paper.pdf"]
+    ) == 0
+
+    protocol = json.loads((tmp_path / "kb/.runtime/add-duplicate.json").read_text(encoding="utf-8"))
+    assert protocol["details"]["obsidian_refresh"] == {
+        "reason": "no_canonical_change",
+        "status": "skipped",
+    }
+
+
+def test_kb_add_batch_refreshes_projection_once_for_all_created_units(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    kb = _load_kb_cli()
+    refreshes: list[Path] = []
+    monkeypatch.setattr(
+        kb,
+        "load_runtime_preferences",
+        lambda root: {"autonomy": {"link_autodrive": "ask_first"}},
+    )
+
+    def fake_forward(root, relative_script, args, **kwargs):
+        del kwargs
+        for kind, unit_id in (("paper", "p-batch-refresh"), ("blog", "b-batch-refresh")):
+            record = default_record(kind, title=unit_id, maturity="lightweight")
+            record["id"] = unit_id
+            write_yaml_if_changed(record_path(root, kind, unit_id), record)
+        payload = {
+            "item_count": 2,
+            "created_count": 2,
+            "duplicate_count": 0,
+            "results": [
+                {"status": "created", "kind": "paper", "unit_id": "p-batch-refresh"},
+                {"status": "created", "kind": "blog", "unit_id": "b-batch-refresh"},
+            ],
+        }
+        return kb.CommandResult((relative_script, *args), 0, json.dumps(payload) + "\n")
+
+    monkeypatch.setattr(kb, "forward_command", fake_forward)
+    monkeypatch.setattr(
+        kb,
+        "update_obsidian_projection",
+        lambda root: refreshes.append(root) or {
+            "changed": True,
+            "status": {"status": "PASS", "findings": []},
+        },
+    )
+
+    assert kb.main(
+        [
+            "--root",
+            str(tmp_path),
+            "add",
+            "https://example.com/one.pdf",
+            "https://example.com/two",
+        ]
+    ) == 0
+    assert refreshes == [tmp_path]
+
+
+@pytest.mark.parametrize(
+    ("failure", "failure_kind"),
+    [
+        (SystemExit("managed drift at /private/example"), "safety_check_failed"),
+        (SystemExit("unowned file at /private/example"), "safety_check_failed"),
+        (SystemExit("unsafe path at /private/example"), "safety_check_failed"),
+        (SystemExit("canonical inputs changed during update"), "safety_check_failed"),
+        (RuntimeError("internal failure at /private/example"), "internal_error"),
+    ],
+)
+def test_post_intake_refresh_failure_keeps_canonical_success_and_redacts_details(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    failure: BaseException,
+    failure_kind: str,
+) -> None:
+    kb = _load_kb_cli()
+    canonical = record_path(tmp_path, "paper", "p-refresh-preserved")
+    captured_diagnostics: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        kb,
+        "load_runtime_preferences",
+        lambda root: {"autonomy": {"link_autodrive": "ask_first"}},
+    )
+
+    def fake_forward(root, relative_script, args, **kwargs):
+        del kwargs
+        record = default_record("paper", title="Preserved", maturity="lightweight")
+        record["id"] = "p-refresh-preserved"
+        write_yaml_if_changed(canonical, record)
+        return kb.CommandResult(
+            (relative_script, *args),
+            0,
+            "[ok] created kb/units/papers/p-refresh-preserved/record.yaml\n",
+        )
+
+    def fail_refresh(root):
+        del root
+        raise failure
+
+    monkeypatch.setattr(kb, "forward_command", fake_forward)
+    monkeypatch.setattr(kb, "update_obsidian_projection", fail_refresh)
+    monkeypatch.setattr(
+        kb,
+        "_capture_runtime_failure",
+        lambda root, **kwargs: captured_diagnostics.append({"root": root, **kwargs}),
+    )
+
+    assert kb.main(
+        ["--root", str(tmp_path), "--agent-protocol", "refresh-failed.json", "add", "https://example.com/paper.pdf"]
+    ) == 0
+
+    assert canonical.is_file()
+    public = capsys.readouterr()
+    assert "资料已轻量加入知识库" in public.out
+    assert "Obsidian 视图暂未刷新" in public.err
+    assert "/private/example" not in public.out + public.err
+    protocol = json.loads((tmp_path / "kb/.runtime/refresh-failed.json").read_text(encoding="utf-8"))
+    assert protocol["status"] == "needs_user_input"
+    assert protocol["details"]["obsidian_refresh"] == {
+        "failure_kind": failure_kind,
+        "status": "warning",
+    }
+    assert captured_diagnostics == [
+        {
+            "root": tmp_path,
+            "skill": "kb-cli",
+            "operation": "post-intake-obsidian-refresh",
+            "returncode": 1,
+            "public_summary": "Obsidian 视图未能自动刷新。",
+        }
+    ]
+
+
+def test_post_intake_refresh_fail_report_is_warning_with_redacted_diagnostic(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    kb = _load_kb_cli()
+    captured_diagnostics: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        kb,
+        "load_runtime_preferences",
+        lambda root: {"autonomy": {"link_autodrive": "ask_first"}},
+    )
+
+    def fake_forward(root, relative_script, args, **kwargs):
+        del kwargs
+        record = default_record("paper", title="Projection finding", maturity="lightweight")
+        record["id"] = "p-projection-finding"
+        write_yaml_if_changed(record_path(root, "paper", record["id"]), record)
+        return kb.CommandResult(
+            (relative_script, *args),
+            0,
+            "[ok] created kb/units/papers/p-projection-finding/record.yaml\n",
+        )
+
+    monkeypatch.setattr(kb, "forward_command", fake_forward)
+    monkeypatch.setattr(
+        kb,
+        "update_obsidian_projection",
+        lambda root: {
+            "changed": True,
+            "status": {
+                "status": "FAIL",
+                "findings": [{"subject": "/private/secret", "message": "private detail"}],
+            },
+        },
+    )
+    monkeypatch.setattr(
+        kb,
+        "_capture_runtime_failure",
+        lambda root, **kwargs: captured_diagnostics.append({"root": root, **kwargs}),
+    )
+
+    assert kb.main(
+        ["--root", str(tmp_path), "--agent-protocol", "projection-fail.json", "add", "https://example.com/paper.pdf"]
+    ) == 0
+
+    public = capsys.readouterr()
+    assert "资料已轻量加入知识库" in public.out
+    assert "仍有需要处理的问题" in public.err
+    assert "/private/secret" not in public.out + public.err
+    protocol = json.loads((tmp_path / "kb/.runtime/projection-fail.json").read_text(encoding="utf-8"))
+    assert protocol["status"] == "needs_user_input"
+    assert protocol["details"]["obsidian_refresh"] == {
+        "changed": True,
+        "failure_kind": "projection_findings",
+        "projection_status": "FAIL",
+        "status": "warning",
+    }
+    assert captured_diagnostics[0]["operation"] == "post-intake-obsidian-refresh"
+    assert captured_diagnostics[0]["public_summary"] == "Obsidian 视图未能自动刷新。"
+
+
+def test_post_intake_refresh_diagnostic_failure_cannot_change_canonical_success(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    kb = _load_kb_cli()
+    monkeypatch.setattr(
+        kb,
+        "load_runtime_preferences",
+        lambda root: {"autonomy": {"link_autodrive": "ask_first"}},
+    )
+
+    def fake_forward(root, relative_script, args, **kwargs):
+        del kwargs
+        record = default_record("paper", title="Diagnostic failure", maturity="lightweight")
+        record["id"] = "p-diagnostic-failure"
+        write_yaml_if_changed(record_path(root, "paper", record["id"]), record)
+        return kb.CommandResult(
+            (relative_script, *args),
+            0,
+            "[ok] created kb/units/papers/p-diagnostic-failure/record.yaml\n",
+        )
+
+    monkeypatch.setattr(kb, "forward_command", fake_forward)
+    monkeypatch.setattr(
+        kb,
+        "update_obsidian_projection",
+        lambda root: (_ for _ in ()).throw(RuntimeError("derived failure")),
+    )
+    monkeypatch.setattr(
+        kb,
+        "_capture_runtime_failure",
+        lambda root, **kwargs: (_ for _ in ()).throw(SystemExit("private diagnostic failure")),
+    )
+
+    assert kb.main(
+        ["--root", str(tmp_path), "--agent-protocol", "diagnostic-fail.json", "add", "https://example.com/paper.pdf"]
+    ) == 0
+
+    public = capsys.readouterr()
+    assert "资料已轻量加入知识库" in public.out
+    assert "Obsidian 视图暂未刷新" in public.err
+    protocol_text = (tmp_path / "kb/.runtime/diagnostic-fail.json").read_text(encoding="utf-8")
+    protocol = json.loads(protocol_text)
+    assert protocol["exit_code"] == 0
+    assert protocol["details"]["diagnostic_events"] == [
+        {
+            "code": "runtime-failure-capture-failed",
+            "operation": "post-intake-obsidian-refresh",
+            "skill": "kb-cli",
+        }
+    ]
+    assert "private diagnostic failure" not in protocol_text
+
+
 def test_kb_add_batches_multiple_sources_with_independent_kind_inference(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -6029,6 +6406,43 @@ def test_kb_ingest_chains_intake_then_prepare_and_stops_before_verify(monkeypatc
     assert "parse-cache.yaml" in action["prepare_output"]
 
 
+def test_kb_ingest_refreshes_once_after_intake_checkpoint_and_prepare(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    kb = _load_kb_cli()
+    events: list[str] = []
+    monkeypatch.setattr(kb, "effective_ingest_scope", lambda root: set(FULL_SCOPE))
+
+    def fake_forward(root, relative_script, args, **kwargs):
+        del kwargs
+        if relative_script.endswith("intake.py"):
+            events.append("intake-checkpoint-complete")
+            record = default_record("paper", title="Ingest refresh", maturity="lightweight")
+            record["id"] = "p-ingest-refresh"
+            write_yaml_if_changed(record_path(root, "paper", record["id"]), record)
+            return kb.CommandResult(
+                (relative_script, *args),
+                0,
+                "[ok] created kb/units/papers/p-ingest-refresh/record.yaml\n",
+            )
+        events.append("prepare")
+        return kb.CommandResult((relative_script, *args), 0, _PAPER_PREPARE_STDOUT)
+
+    monkeypatch.setattr(kb, "forward_command", fake_forward)
+    monkeypatch.setattr(
+        kb,
+        "update_obsidian_projection",
+        lambda root: events.append("derived-refresh") or {
+            "changed": True,
+            "status": {"status": "PASS", "findings": []},
+        },
+    )
+
+    assert kb.main(["--root", str(tmp_path), "ingest", "notes/demo.pdf"]) == 0
+    assert events == ["intake-checkpoint-complete", "prepare", "derived-refresh"]
+
+
 def test_kb_ingest_narrowed_scope_without_generate_note_runs_only_intake(monkeypatch, tmp_path: Path, capsys) -> None:
     kb = _load_kb_cli()
     calls: list[dict] = []
@@ -6066,6 +6480,7 @@ def test_kb_ingest_narrowed_scope_without_ingest_runs_nothing(monkeypatch, tmp_p
 def test_kb_ingest_duplicate_source_ready_continues_safe_prepare(monkeypatch, tmp_path: Path, capsys) -> None:
     kb = _load_kb_cli()
     calls: list[tuple[str, tuple[str, ...]]] = []
+    refreshes: list[Path] = []
     write_yaml_if_changed(
         record_path(tmp_path, "paper", "p-demo-abcd1234"),
         {
@@ -6088,6 +6503,14 @@ def test_kb_ingest_duplicate_source_ready_continues_safe_prepare(monkeypatch, tm
 
     monkeypatch.setattr(kb, "effective_ingest_scope", lambda root: set(FULL_SCOPE))
     monkeypatch.setattr(kb, "forward_command", fake)
+    monkeypatch.setattr(
+        kb,
+        "update_obsidian_projection",
+        lambda root: refreshes.append(root) or {
+            "changed": True,
+            "status": {"status": "PASS", "findings": []},
+        },
+    )
 
     assert kb.main(["--root", str(tmp_path), "ingest", "notes/demo.pdf"]) == 0
 
@@ -6096,6 +6519,7 @@ def test_kb_ingest_duplicate_source_ready_continues_safe_prepare(monkeypatch, tm
         ".agents/skills/unit-analyst/scripts/paper.py",
     ]
     assert calls[1][1] == ("complete-note", "--paper-id", "p-demo-abcd1234", "--phase", "prepare")
+    assert refreshes == [tmp_path]
     out = capsys.readouterr().out
     assert "已入库并备好统一深读骨架" in out
     assert "--phase" not in out and ".py" not in out

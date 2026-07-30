@@ -198,6 +198,7 @@ _AUDIT_COUNT_KEYS = frozenset(
     }
 )
 _RUNTIME_FAILURE_PUBLIC_SUMMARY = "知识库操作未完成。"
+_OBSIDIAN_REFRESH_FAILURE_PUBLIC_SUMMARY = "Obsidian 视图未能自动刷新。"
 
 
 Handler = Callable[[argparse.Namespace, Path], int]
@@ -291,31 +292,40 @@ def _owner_skill(relative_script: str) -> str:
     return "unknown-owner"
 
 
-def _capture_owner_failure(root: Path, relative_script: str, returncode: int) -> None:
+def _capture_owner_failure(
+    root: Path,
+    relative_script: str,
+    returncode: int,
+    *,
+    operation: str = "",
+    public_summary: str = _RUNTIME_FAILURE_PUBLIC_SUMMARY,
+) -> None:
     """Best-effort D1 capture with a deliberately narrow, redacted payload."""
     skill = _owner_skill(relative_script)
-    operation = _ACTIVE_PUBLIC_VERB if _ACTIVE_PUBLIC_VERB in _PUBLIC_KB_VERB_ARITY else "owner-operation"
+    diagnostic_operation = operation or (
+        _ACTIVE_PUBLIC_VERB if _ACTIVE_PUBLIC_VERB in _PUBLIC_KB_VERB_ARITY else "owner-operation"
+    )
     capture = _capture_runtime_failure
     if capture is None:
         _record_private_diagnostic_event(
             "runtime-failure-capture-unavailable",
             skill=skill,
-            operation=operation,
+            operation=diagnostic_operation,
         )
         return
     try:
         capture(
             root,
             skill=skill,
-            operation=operation,
+            operation=diagnostic_operation,
             returncode=int(returncode),
-            public_summary=_RUNTIME_FAILURE_PUBLIC_SUMMARY,
+            public_summary=public_summary,
         )
-    except Exception:  # noqa: BLE001 - diagnostics must never mask the owner result
+    except (Exception, SystemExit):  # diagnostics must never mask the owner result
         _record_private_diagnostic_event(
             "runtime-failure-capture-failed",
             skill=skill,
-            operation=operation,
+            operation=diagnostic_operation,
         )
 
 
@@ -337,6 +347,118 @@ def set_protocol_status(status: str, **details: object) -> None:
         if protocol.details is None:
             protocol.details = {}
         protocol.details.update(details)
+
+
+def _set_obsidian_refresh_protocol(details: Mapping[str, object]) -> None:
+    """Attach only allowlisted, redacted post-intake refresh state."""
+    protocol = _ACTIVE_PROTOCOL
+    if protocol is None:
+        return
+    if protocol.details is None:
+        protocol.details = {}
+    protocol.details["obsidian_refresh"] = dict(details)
+
+
+def _created_intake_record_exists(root: Path, kind: str, unit_id: str) -> bool:
+    """Confirm an owner-reported created record exists before derived refresh."""
+    if kind not in {"paper", "repo", "dataset", "blog"} or not unit_id:
+        return False
+    path = record_path(root, kind, unit_id)
+    try:
+        return path.is_file() and not path.is_symlink()
+    except OSError:
+        return False
+
+
+def _warn_post_intake_obsidian_refresh(root: Path, failure_kind: str) -> None:
+    _set_obsidian_refresh_protocol(
+        {
+            "status": "warning",
+            "failure_kind": failure_kind,
+        }
+    )
+    _capture_owner_failure(
+        root,
+        owner_script("kb-cli", "kb"),
+        1,
+        operation="post-intake-obsidian-refresh",
+        public_summary=_OBSIDIAN_REFRESH_FAILURE_PUBLIC_SUMMARY,
+    )
+    print(
+        "资料已成功加入知识库，但 Obsidian 视图暂未刷新；入库结果和现有视图均已保留。",
+        file=sys.stderr,
+    )
+
+
+def _post_intake_obsidian_refresh(
+    root: Path,
+    created_units: Sequence[tuple[str, str]],
+) -> None:
+    """Best-effort derived refresh after the intake owner has checkpointed.
+
+    The owner command's successful return is the canonical commit/checkpoint
+    boundary.  Projection failures are therefore reported privately and to the
+    user as warnings, but can never change the already-successful public exit.
+    """
+    if not any(
+        _created_intake_record_exists(root, kind, unit_id)
+        for kind, unit_id in created_units
+    ):
+        _set_obsidian_refresh_protocol(
+            {
+                "status": "skipped",
+                "reason": "no_canonical_change",
+            }
+        )
+        return
+
+    try:
+        result = update_obsidian_projection(root)
+    except SystemExit:
+        _warn_post_intake_obsidian_refresh(root, "safety_check_failed")
+        return
+    except Exception:  # noqa: BLE001 - a derived failure cannot revoke canonical success
+        _warn_post_intake_obsidian_refresh(root, "internal_error")
+        return
+
+    report = result.get("status") if isinstance(result, Mapping) else None
+    projection_status = str(report.get("status") or "") if isinstance(report, Mapping) else ""
+    if projection_status not in {"PASS", "WARN", "FAIL"}:
+        _warn_post_intake_obsidian_refresh(root, "invalid_result")
+        return
+
+    changed = bool(result.get("changed"))
+    if projection_status == "PASS":
+        _set_obsidian_refresh_protocol(
+            {
+                "status": "updated" if changed else "current",
+                "changed": changed,
+                "projection_status": projection_status,
+            }
+        )
+        print("Obsidian 视图已同步刷新。")
+        return
+
+    _set_obsidian_refresh_protocol(
+        {
+            "status": "warning",
+            "failure_kind": "projection_findings",
+            "changed": changed,
+            "projection_status": projection_status,
+        }
+    )
+    if projection_status == "FAIL":
+        _capture_owner_failure(
+            root,
+            owner_script("kb-cli", "kb"),
+            1,
+            operation="post-intake-obsidian-refresh",
+            public_summary=_OBSIDIAN_REFRESH_FAILURE_PUBLIC_SUMMARY,
+        )
+    print(
+        "资料已成功加入知识库；Obsidian 视图已保留，但仍有需要处理的问题，详细诊断已留给 Agent。",
+        file=sys.stderr,
+    )
 
 
 def write_agent_protocol(root: Path, requested: str, protocol: AgentProtocol) -> None:
@@ -2491,8 +2613,12 @@ def handle_add(args: argparse.Namespace, root: Path) -> int:
                 file=sys.stderr,
             )
             return result.returncode
-        unit_id, _status = _extract_ingest_unit_id(result.stdout)
+        unit_id, status = _extract_ingest_unit_id(result.stdout)
         upgraded_from = _extract_source_upgrade_id(result.stdout)
+        _post_intake_obsidian_refresh(
+            root,
+            [(kind, unit_id)] if status == "created" else [],
+        )
         public_unit_id = _public_display_text(unit_id, root, "编号已隐藏", 100) if unit_id else ""
         suffix = f"，条目编号是 {public_unit_id}" if public_unit_id else ""
         upgrade_note = "；旧的降级版本已原样保留并归档" if upgraded_from else ""
@@ -2575,6 +2701,13 @@ def handle_add(args: argparse.Namespace, root: Path) -> int:
                 prepared_count += 1
             else:
                 prepare_failures.append({"kind": kind, "unit_id": unit_id})
+    _post_intake_obsidian_refresh(
+        root,
+        [
+            (str(item.get("kind") or ""), str(item.get("unit_id") or ""))
+            for item in created
+        ],
+    )
     print(
         f"整批入库已完成：共 {len(sources)} 项，新增 {created_count} 项，"
         f"已有或合并 {duplicate_count} 项。"
@@ -2820,6 +2953,7 @@ def handle_ingest(args: argparse.Namespace, root: Path) -> int:
 
     unit_id, status = _extract_ingest_unit_id(intake.stdout)
     upgraded_from = _extract_source_upgrade_id(intake.stdout)
+    created_units = [(kind, unit_id)] if status == "created" else []
     public_unit_id = _public_display_text(unit_id, root, "编号已隐藏", 100) if unit_id else ""
     duplicate_prepare: tuple[str, str, str] | None = None
     if status == "duplicate":
@@ -2830,6 +2964,7 @@ def handle_ingest(args: argparse.Namespace, root: Path) -> int:
             public_unit_id=public_unit_id,
         )
         if handled:
+            _post_intake_obsidian_refresh(root, created_units)
             return 0
     if not unit_id:
         print("资料已交给入库流程，但暂时无法确认新条目编号；Agent 会检查详细结果。")
@@ -2839,6 +2974,7 @@ def handle_ingest(args: argparse.Namespace, root: Path) -> int:
     # Step 2: analyzer prepare (safe step gated by "generate-note") — produces the
     # fillable skeleton. NEVER verify (a script cannot fill understanding).
     if "generate-note" not in scope:
+        _post_intake_obsidian_refresh(root, created_units)
         print(f"资料已入库为 {public_unit_id}；当前自动化偏好暂停了深读准备。")
         relative_script, verb, id_flag = INGEST_ANALYZER[kind]
         set_protocol_status("paused_by_autonomy", unit_id=unit_id, source_kind=kind)
@@ -2857,10 +2993,15 @@ def handle_ingest(args: argparse.Namespace, root: Path) -> int:
         stream=False,
     )
     if prepare.returncode != 0:
+        _post_intake_obsidian_refresh(root, created_units)
         print("资料已入库，但深读准备未完成；详细诊断已保留给 Agent。")
         set_protocol_status("error", unit_id=unit_id, source_kind=kind, stage="prepare")
         return prepare.returncode
 
+    refresh_units = created_units or (
+        [(kind, unit_id)] if duplicate_prepare is not None else []
+    )
+    _post_intake_obsidian_refresh(root, refresh_units)
     if kind == "paper":
         upgrade_note = "旧的降级版本已原样保留并归档；" if upgraded_from else ""
         print(
