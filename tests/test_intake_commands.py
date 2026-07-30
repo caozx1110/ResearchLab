@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -757,3 +758,131 @@ def test_prepared_token_concurrent_consumer_fails_closed_without_deleting_owner_
 
     assert intake._prepared_dir(root, token).is_dir()
     intake._safe_remove_prepared(root, token)
+
+
+@pytest.mark.parametrize(
+    ("expected_stage", "fault_target"),
+    [
+        ("source-recognition", "resolve"),
+        ("prepare-freeze", "backup"),
+        ("materialization", "materialize"),
+        ("canonical-transaction", "index"),
+        ("checkpoint", "checkpoint"),
+    ],
+)
+def test_safe_fixture_failure_matrix_reports_stable_intake_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    expected_stage: str,
+    fault_target: str,
+) -> None:
+    intake = _load_intake_module()
+    root = tmp_path / "workspace"
+    root.mkdir()
+    ensure_workspace(root)
+    source = root / "safe-fixture.md"
+    source.write_text("# Safe fixture\n\nSynthetic public test bytes.\n", encoding="utf-8")
+    args = _prepared_args(root, "blog", source)
+    published: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        intake,
+        "publish_runtime_failure_stage",
+        lambda _root, **payload: published.append(payload) or True,
+    )
+
+    token = ""
+    if fault_target == "resolve":
+        monkeypatch.setattr(
+            intake,
+            "_resolve_intake_request",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("injected source recognition failure")
+            ),
+        )
+    elif fault_target == "backup":
+        monkeypatch.setattr(
+            intake,
+            "backup_source",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("injected prepare failure")
+            ),
+        )
+    else:
+        prepared = intake._prepare_intake_snapshot(root, args)
+        token = str(prepared["token"])
+        if fault_target == "materialize":
+            monkeypatch.setattr(
+                intake,
+                "_materialize_staged_source",
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                    RuntimeError("injected materialization failure")
+                ),
+            )
+        elif fault_target == "index":
+            monkeypatch.setattr(
+                intake,
+                "_build_index_transaction",
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                    RuntimeError("injected canonical transaction failure")
+                ),
+            )
+        else:
+            monkeypatch.setattr(
+                intake,
+                "checkpoint_and_report",
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                    RuntimeError("injected checkpoint failure")
+                ),
+            )
+
+    monkeypatch.setattr(sys, "argv", _add_argv(root, args, token=token))
+    with pytest.raises((RuntimeError, SystemExit), match="injected"):
+        intake.main()
+
+    assert published == [
+        {
+            "skill": "source-intake",
+            "operation": "add",
+            "failure_stage": expected_stage,
+        }
+    ]
+    records = list((root / "kb" / "units" / "blogs").glob("*/record.yaml"))
+    if expected_stage == "checkpoint":
+        # A post-commit checkpoint failure must be distinguishable because
+        # retrying it as a failed canonical transaction would be unsafe.
+        assert len(records) == 1
+    else:
+        assert records == []
+    if token:
+        assert not intake._prepared_dir(root, token).exists()
+
+
+def test_batch_post_checkpoint_internal_failure_falls_back_to_unknown_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    intake = _load_intake_module()
+    root = tmp_path / "workspace"
+    root.mkdir()
+    ensure_workspace(root)
+    source = root / "batch-blog.md"
+    source.write_text("# Batch blog\n\nSafe fixture bytes.\n", encoding="utf-8")
+    checkpointed: list[bool] = []
+    monkeypatch.setattr(
+        intake,
+        "checkpoint_and_report",
+        lambda *_args, **_kwargs: checkpointed.append(True) or {},
+    )
+    keys = iter((("blog", "request-key"), ("blog", "outcome-key")))
+    monkeypatch.setattr(intake, "_batch_dedup_key", lambda *_args, **_kwargs: next(keys))
+    raw = json.dumps(
+        {"kind": "blog", "source": str(source), "maturity": "lightweight"},
+        ensure_ascii=False,
+    )
+
+    with pytest.raises(KeyError) as raised:
+        intake._run_batch_add(root, [raw])
+
+    assert checkpointed == [True]
+    assert intake._intake_failure_stage(raised.value, default="missing") == "unknown"
+    assert len(list((root / "kb" / "units" / "blogs").glob("*/record.yaml"))) == 1

@@ -779,10 +779,16 @@ issues:
     source_commit: ""                  # 本地 manifest 有合法 commit 时读取
     context: context-sha256:<prefix>    # 仅不可逆关联摘要，不持久化自由文本
     error_class: owner-nonzero-exit     # 稳定安全类名，不含 traceback/path
+    failure_stage: source-recognition | prepare-freeze | materialization |
+      canonical-transaction | checkpoint | unknown  # 可选；仅自动 source-intake:add 失败
     privacy_classification: local-redacted
 ```
 
 禁止写入 raw stdout/stderr、完整 traceback、用户原消息、secret、环境变量值、绝对路径、论文原文、raw/evidence 内容。导出只提供显式授权的本地 preview，并进一步省略 fingerprint/context；D1 不提供网络上传。每次 record/review 只以本文件为精确 transaction target，失败按 before-image 回滚，不留下半条 issue。
+
+`source-intake:add` 的自动失败可附加 `failure_stage`。Stage 是封闭 allowlist：`source-recognition` 表示来源/候选解析，`prepare-freeze` 表示安全 snapshot、归档和重验，`materialization` 表示 staged source 发布为 canonical unit，`canonical-transaction` 表示同一 intake root transaction 的其余写入/commit，`checkpoint` 表示 canonical commit 后的精确 checkpoint，无法可靠归类时必须写 `unknown`。Stage 不从错误文本推断；对应 `error_class` 为 `owner-nonzero-exit.<failure_stage>`，因此不同边界不会错误合并 occurrence。历史记录可以缺字段，按 `unknown` 理解且不回填。
+
+Owner 子进程只在 effective diagnostics 已开启且即将非零退出时，通过 `kb/.runtime/diagnostics/failure-stages/` 留下一个短时、parent-PID 绑定、`0600` regular-file handoff。Handoff 精确只含 schema、parent PID、`source-intake`、公开 operation `add`、allowlisted stage 和机械时间；禁止包含 source/title/record ID、arguments、stdout/stderr、exception、环境值或任何路径。Dispatcher 在 owner 非零退出后按 PID、owner、operation、TTL、大小、ownership、mode 与 no-follow 约束一次性消费；缺失、stale、篡改、并发不匹配或消费失败一律降级 `unknown`，且不得改变原 exit code。这个 handoff 不是 canonical 诊断真源、不进入 checkpoint/导出，消费后只留下可安全忽略的空 runtime 目录。
 
 ---
 
