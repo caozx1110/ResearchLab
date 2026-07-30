@@ -34,7 +34,7 @@ class _ObsidianBaseDumper(yaml.SafeDumper):
 
 def _load_kb_cli():
     project_root = REPO_ROOT
-    script = project_root / ".agents/skills/kb-cli/scripts/kb"
+    script = project_root / "skills/kb-cli/scripts/kb"
     loader = importlib.machinery.SourceFileLoader("kb_cli_obsidian_tests", str(script))
     spec = importlib.util.spec_from_loader(loader.name, loader)
     assert spec and spec.loader

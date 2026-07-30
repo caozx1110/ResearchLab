@@ -35,7 +35,7 @@ def _project_root() -> Path:
 
 
 def _load_kb_cli():
-    script = _project_root() / ".agents" / "skills" / "kb-cli" / "scripts" / "kb"
+    script = _project_root() / "skills" / "kb-cli" / "scripts" / "kb"
     loader = importlib.machinery.SourceFileLoader("kb_cli_d1_public_tests", str(script))
     spec = importlib.util.spec_from_loader(loader.name, loader)
     assert spec and spec.loader
@@ -309,7 +309,7 @@ def test_d1_keeps_exactly_sixteen_public_verbs() -> None:
 
 def test_d1_agent_rules_and_docs_keep_optional_diagnostics_honest() -> None:
     root = _project_root()
-    agent_rules = (root / ".agents" / "AGENTS.md").read_text(encoding="utf-8")
+    agent_rules = (root / "runtime" / "AGENTS.md").read_text(encoding="utf-8")
     readme = (root / "README.md").read_text(encoding="utf-8")
     guide = (root / "docs" / "USER_GUIDE.md").read_text(encoding="utf-8")
     design = (root / "docs" / "DESIGN.md").read_text(encoding="utf-8")

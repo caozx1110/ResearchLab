@@ -16,7 +16,7 @@ from research.records import iter_records
 
 
 def _load_intake_module():
-    script = REPO_ROOT / ".agents" / "skills" / "source-intake" / "scripts" / "intake.py"
+    script = REPO_ROOT / "skills" / "source-intake" / "scripts" / "intake.py"
     spec = importlib.util.spec_from_file_location("source_intake_human_note_tests", script)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -26,7 +26,7 @@ def _load_intake_module():
 
 
 def _load_kb_cli():
-    script = REPO_ROOT / ".agents" / "skills" / "kb-cli" / "scripts" / "kb"
+    script = REPO_ROOT / "skills" / "kb-cli" / "scripts" / "kb"
     loader = importlib.machinery.SourceFileLoader("kb_cli_human_note_tests", str(script))
     spec = importlib.util.spec_from_loader(loader.name, loader)
     assert spec and spec.loader
@@ -37,7 +37,7 @@ def _load_kb_cli():
 
 
 def _load_blog_module():
-    script = REPO_ROOT / ".agents" / "skills" / "unit-analyst" / "scripts" / "blog.py"
+    script = REPO_ROOT / "skills" / "unit-analyst" / "scripts" / "blog.py"
     spec = importlib.util.spec_from_file_location("blog_analyst_human_note_tests", script)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)

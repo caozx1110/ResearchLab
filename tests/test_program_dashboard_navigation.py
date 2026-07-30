@@ -24,7 +24,7 @@ def _load_script(skill: str, script_name: str, module_name: str):
     script = (
         MAINTAINER_NAVIGATOR_ROOT / "scripts" / script_name
         if skill == "research-navigator"
-        else root / ".agents" / "skills" / skill / "scripts" / script_name
+        else root / "skills" / skill / "scripts" / script_name
     )
     spec = importlib.util.spec_from_file_location(module_name, script)
     assert spec and spec.loader
@@ -916,7 +916,7 @@ def test_orchestrator_auto_execute_passes_root_env_and_arg_to_child(tmp_path: Pa
     command, kwargs = calls[0]
     assert command == [
         sys.executable,
-        ".agents/skills/idea-workbench/scripts/idea.py",
+        str(_project_root() / "skills/idea-workbench/scripts/idea.py"),
         "--root",
         str(root),
         "analyze",
@@ -994,7 +994,7 @@ def test_orchestrator_auto_execute_passes_root_to_child_under_symlinked_agents(t
         + "\n",
         encoding="utf-8",
     )
-    (symlink_target / ".agents" / "lib").symlink_to(_project_root() / ".agents" / "lib", target_is_directory=True)
+    (symlink_target / ".agents" / "lib").symlink_to(_project_root() / "runtime" / "lib", target_is_directory=True)
     (symlink_target / "AGENTS.md").write_text("# target\n", encoding="utf-8")
     sandbox_root.mkdir()
     (sandbox_root / ".agents").symlink_to(symlink_target / ".agents", target_is_directory=True)

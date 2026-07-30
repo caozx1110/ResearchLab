@@ -1,6 +1,6 @@
 # 设计说明
 
-本文面向想理解或扩展系统的开发者。它是 default branch 上当前设计意图、架构边界和系统不变量的 tracked SSOT；具体 on-disk 字段和枚举以 [SCHEMAS.md](../.agents/lib/research/SCHEMAS.md) 为准，长期设计取舍见 [决策记录](decisions/README.md)。
+本文面向想理解或扩展系统的开发者。它是 default branch 上当前设计意图、架构边界和系统不变量的 tracked SSOT；具体 on-disk 字段和枚举以 [SCHEMAS.md](../runtime/lib/research/SCHEMAS.md) 为准，长期设计取舍见 [决策记录](decisions/README.md)。
 
 拟议变更先进入 GitHub Epic/Atomic Issue；会影响长期架构、兼容、安全、恢复或 ownership 的取舍还须形成 tracked ADR。只有经人类 review 合入 default branch 的设计/ADR 才是 accepted contract，未合并分支上的内容仍是 proposal。活动范围、接力状态、候选 SHA、证据与 review 只存在于 GitHub Issue/PR/remote commits/Actions，不能由本机文件或聊天上下文补全；普通交付、按需增强控制与恢复规则见 [GitHub-only 开发工作流](DEVELOPMENT_WORKFLOW.md)。
 
@@ -19,18 +19,19 @@ Open Research Workspace Skills 是 knowledge-unit-first 的 research operating s
 ## 分发边界
 
 ```text
-release bundle                 installed workspace
-├── .agents/                   ├── .agents/
-│   ├── AGENTS.md              │   ├── AGENTS.md
-│   ├── AGENT_GUIDE.md         │   ├── AGENT_GUIDE.md
-│   ├── lib/research/          │   ├── lib/research/
-│   └── skills/                │   └── skills/
-├── AGENTS.md                  ├── AGENTS.md
-├── README.md                  └── kb/
+source checkout                    installed workspace
+├── skills/                        ├── .agents/
+│   └── <15 product skills>/       │   ├── skills/
+├── runtime/                       │   ├── lib/research/
+│   ├── AGENTS.md                  │   ├── AGENTS.md
+│   ├── AGENT_GUIDE.md             │   └── AGENT_GUIDE.md
+│   └── lib/research/              ├── AGENTS.md
+├── .agents/  # ignored local      └── kb/
+├── AGENTS.md
 └── docs/
 ```
 
-仓库根 `AGENTS.md` 是开发这套 skill 系统的工作流；分发树 `.agents/AGENTS.md` 是安装后 Agent 使用 KB 的 runtime 规则。两者不可混写。
+仓库根 `AGENTS.md` 是开发这套 skill 系统的工作流；`runtime/AGENTS.md` 是安装后 Agent 使用 KB 的 runtime 规则源码，并映射为 `.agents/AGENTS.md`。根 `/.agents/` 只放 ignored 本地工具，绝不进入产品 inventory、release enumeration、digest 或安装 payload。三者不可混写。
 
 Release bundle 不包含任何私有 `kb/`。安装、更新、storage sync 和卸载必须保持数据边界：workspace 的 `kb/` 永不成为发布内容，storage sync 不改 `.agents/**` 或根 `AGENTS.md`。
 
@@ -68,7 +69,7 @@ Release bundle 不包含任何私有 `kb/`。安装、更新、storage sync 和�
 
 ## 共享运行库
 
-`.agents/lib/research/core.py` 是兼容导出 facade，不再是业务 god-file。实现按职责拆分：
+`runtime/lib/research/core.py`（安装后为 `.agents/lib/research/core.py`）是兼容导出 facade，不再是业务 god-file。实现按职责拆分：
 
 - `paths.py`：KB 路径与存储约束；
 - `records.py`：record schema、迭代与 workflow state；
@@ -266,4 +267,4 @@ Install manifest 记录 `source_origin` 与 `source_branch`，本地安装还可
 10. 在 Linux 与 macOS 支持的 Python 版本上验证；
 11. 发布前由冷 acceptance agent 端到端复现关键路径。
 
-当前标识为 `0.2.0-rc.7`，由 `.agents/VERSION` 唯一控制；该标识表示 RC，不代表 stable/GA。精确发布 revision 由对应 Git tag 证明，GitHub Release 是可选分发入口而非必要条件。`CHANGELOG.md` 维护 durable candidate/release acceptance summary、兼容性与 SLA 范围；活动交付门、阻塞、精确候选和 live evidence 只在对应 GitHub Epic/Atomic Issue/PR/Actions 维护，README、用户指南与本设计文档不复制易漂移的运行状态。
+当前标识为 `0.2.0-rc.7`，由源码 `runtime/VERSION` 唯一控制并安装为 `.agents/VERSION`；该标识表示 RC，不代表 stable/GA。精确发布 revision 由对应 Git tag 证明，GitHub Release 是可选分发入口而非必要条件。`CHANGELOG.md` 维护 durable candidate/release acceptance summary、兼容性与 SLA 范围；活动交付门、阻塞、精确候选和 live evidence 只在对应 GitHub Epic/Atomic Issue/PR/Actions 维护，README、用户指南与本设计文档不复制易漂移的运行状态。

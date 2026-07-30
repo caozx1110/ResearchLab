@@ -11,13 +11,29 @@ from pathlib import Path
 
 def _discover_repo_root(start: Path) -> Path:
     for candidate in (start, *start.parents):
-        if (candidate / "pytest.ini").is_file() and (candidate / ".agents").is_dir():
+        if (
+            (candidate / "pytest.ini").is_file()
+            and (candidate / "skills" / "metadata.yaml").is_file()
+            and (candidate / "runtime" / "lib" / "research" / "__init__.py").is_file()
+        ):
             return candidate
     raise RuntimeError(f"could not discover repository root from {start}")
 
 
 REPO_ROOT = _discover_repo_root(Path(__file__).resolve().parent)
-AGENTS_ROOT = REPO_ROOT / ".agents"
-RESEARCH_LIB_ROOT = AGENTS_ROOT / "lib" / "research"
-SKILLS_ROOT = AGENTS_ROOT / "skills"
+RUNTIME_ROOT = REPO_ROOT / "runtime"
+RUNTIME_LIB_ROOT = RUNTIME_ROOT / "lib"
+RESEARCH_LIB_ROOT = RUNTIME_LIB_ROOT / "research"
+SKILLS_ROOT = REPO_ROOT / "skills"
 MAINTAINER_NAVIGATOR_ROOT = REPO_ROOT / "tools" / "research-navigator"
+
+
+def source_path(relative_path: str | Path) -> Path:
+    """Map an installed-form logical path to its tracked source location."""
+
+    path = Path(relative_path)
+    if path.parts[:2] == (".agents", "skills"):
+        return SKILLS_ROOT.joinpath(*path.parts[2:])
+    if path.parts[:3] == (".agents", "lib", "research"):
+        return RESEARCH_LIB_ROOT.joinpath(*path.parts[3:])
+    return REPO_ROOT / path

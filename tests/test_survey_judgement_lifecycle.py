@@ -40,8 +40,8 @@ from research.sources import mark_search_candidate, stage_search_results
 
 
 ROOT = REPO_ROOT
-SCRIPT = ROOT / ".agents" / "skills" / "literature-synthesizer" / "scripts" / "synthesize.py"
-INTAKE_SCRIPT = ROOT / ".agents" / "skills" / "source-intake" / "scripts" / "intake.py"
+SCRIPT = ROOT / "skills" / "literature-synthesizer" / "scripts" / "synthesize.py"
+INTAKE_SCRIPT = ROOT / "skills" / "source-intake" / "scripts" / "intake.py"
 QUOTE = "Alpha uses a hierarchical controller for long-horizon tasks."
 
 
@@ -62,7 +62,7 @@ def load_intake():
 
 
 def load_kb_cli():
-    script = ROOT / ".agents" / "skills" / "kb-cli" / "scripts" / "kb"
+    script = ROOT / "skills" / "kb-cli" / "scripts" / "kb"
     loader = importlib.machinery.SourceFileLoader("survey_lifecycle_kb_cli", str(script))
     spec = importlib.util.spec_from_loader(loader.name, loader)
     assert spec and spec.loader
@@ -73,7 +73,7 @@ def load_kb_cli():
 
 
 def load_orchestrator():
-    script = ROOT / ".agents" / "skills" / "research-orchestrator" / "scripts" / "orchestrate.py"
+    script = ROOT / "skills" / "research-orchestrator" / "scripts" / "orchestrate.py"
     spec = importlib.util.spec_from_file_location("survey_lifecycle_orchestrator", script)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)

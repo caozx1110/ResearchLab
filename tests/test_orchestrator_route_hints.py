@@ -15,7 +15,7 @@ def _project_root() -> Path:
 
 def _load_orchestrator_module():
     root = _project_root()
-    script = root / ".agents" / "skills" / "research-orchestrator" / "scripts" / "orchestrate.py"
+    script = root / "skills" / "research-orchestrator" / "scripts" / "orchestrate.py"
     spec = importlib.util.spec_from_file_location("research_orchestrator_script", script)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -26,7 +26,7 @@ def _load_orchestrator_module():
 
 def test_route_hints_point_to_existing_skill_dirs() -> None:
     root = _project_root()
-    skills_root = root / ".agents" / "skills"
+    skills_root = root / "skills"
     existing = {path.name for path in skills_root.iterdir() if path.is_dir()}
     module = _load_orchestrator_module()
 

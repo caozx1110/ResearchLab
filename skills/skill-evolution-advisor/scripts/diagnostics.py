@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+"""Owner-only CLI for local diagnostic issue capture and review."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+
+SCRIPT_PATH = Path(__file__).resolve()
+skills_dir = SCRIPT_PATH.parents[2]
+if skills_dir.name != "skills":
+    raise SystemExit("Could not locate the managed research runtime.")
+if skills_dir.parent.name == ".agents":
+    PROJECT_ROOT = skills_dir.parent.parent
+    lib = PROJECT_ROOT / ".agents" / "lib"
+else:
+    PROJECT_ROOT = skills_dir.parent
+    lib = PROJECT_ROOT / "runtime" / "lib"
+if not (skills_dir / "metadata.yaml").is_file() or not (lib / "research" / "__init__.py").is_file() or not (lib / "research" / "bootstrap.py").is_file():
+    raise SystemExit("Could not locate the managed research runtime.")
+sys.path.insert(0, str(lib))
+
+from research.bootstrap import ensure_managed_runtime
+
+if __name__ == "__main__":
+    ensure_managed_runtime(PROJECT_ROOT)
+
+from research.common import add_project_root_argument, print_resolved_project_roots
+from research.diagnostics import (
+    REPRODUCIBLE_VALUES,
+    REVIEW_STATUSES,
+    SEVERITIES,
+    SOURCES,
+    STATUSES,
+    capture_runtime_failure,
+    diagnostics_policy,
+    export_diagnostic_preview,
+    list_diagnostic_issues,
+    record_diagnostic_issue,
+    review_diagnostic_issue,
+)
+from research.paths import project_root
+
+
+def _print_json(value: object) -> None:
+    print(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True))
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Manage local-only redacted diagnostic issues.")
+    add_project_root_argument(parser)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    policy = subparsers.add_parser("policy", help="Read the normalized effective policy without writing")
+    policy.add_argument("--skill", default="")
+
+    record = subparsers.add_parser("record", help="Explicitly record one redacted issue")
+    record.add_argument("--category", required=True)
+    record.add_argument("--severity", choices=sorted(SEVERITIES), required=True)
+    record.add_argument("--skill", required=True)
+    record.add_argument("--summary", required=True)
+    record.add_argument("--expected", default="")
+    record.add_argument("--actual", default="")
+    record.add_argument("--trigger", default="")
+    record.add_argument("--source", choices=sorted(SOURCES), default="agent")
+    record.add_argument("--reproducible", choices=sorted(REPRODUCIBLE_VALUES), default="unknown")
+    record.add_argument("--context", default="")
+    record.add_argument("--error-class", default="")
+
+    runtime = subparsers.add_parser("capture-runtime-failure", help="Policy-gated nonzero owner exit capture")
+    runtime.add_argument("--skill", required=True)
+    runtime.add_argument("--operation", required=True)
+    runtime.add_argument("--returncode", type=int, required=True)
+    runtime.add_argument("--public-summary", default="")
+
+    listing = subparsers.add_parser("list", help="List locally recorded issues")
+    listing.add_argument("--status", choices=sorted(STATUSES), default="")
+    listing.add_argument("--skill", default="")
+
+    review = subparsers.add_parser("review", help="Confirm, dismiss, or resolve one issue")
+    review.add_argument("--id", required=True)
+    review.add_argument("--status", choices=sorted(REVIEW_STATUSES), required=True)
+
+    export = subparsers.add_parser("export-preview", help="Render a local redacted preview; never upload")
+    export.add_argument("--authorized", action="store_true", help="Assert explicit authorization in the current user message")
+    export.add_argument("--status", choices=sorted(STATUSES), default="")
+    export.add_argument("--skill", default="")
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    root = project_root(PROJECT_ROOT, explicit_root=args.root)
+    print_resolved_project_roots(root)
+
+    if args.command == "policy":
+        _print_json(diagnostics_policy(root, args.skill))
+        return 0
+    if args.command == "record":
+        issue, created = record_diagnostic_issue(
+            root,
+            category=args.category,
+            severity=args.severity,
+            skill=args.skill,
+            summary=args.summary,
+            expected=args.expected,
+            actual=args.actual,
+            trigger=args.trigger,
+            source=args.source,
+            reproducible=args.reproducible,
+            context=args.context,
+            error_class=args.error_class,
+        )
+        _print_json({"created": created, "issue": issue})
+        return 0
+    if args.command == "capture-runtime-failure":
+        issue = capture_runtime_failure(
+            root,
+            skill=args.skill,
+            operation=args.operation,
+            returncode=args.returncode,
+            public_summary=args.public_summary,
+        )
+        _print_json({"captured": issue is not None, "issue": issue})
+        return 0
+    if args.command == "list":
+        _print_json({"issues": list_diagnostic_issues(root, status=args.status, skill=args.skill)})
+        return 0
+    if args.command == "review":
+        _print_json(review_diagnostic_issue(root, issue_id=args.id, status=args.status))
+        return 0
+    if args.command == "export-preview":
+        _print_json(
+            export_diagnostic_preview(
+                root,
+                authorized=args.authorized,
+                status=args.status,
+                skill=args.skill,
+            )
+        )
+        return 0
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

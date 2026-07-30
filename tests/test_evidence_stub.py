@@ -46,8 +46,8 @@ def test_evidence_symbols_reexported_through_core_facade() -> None:
 
 def test_schemas_md_has_evidence_claims_section_matching_ssot_block() -> None:
     project_root = REPO_ROOT
-    text = (project_root / ".agents/lib/research/SCHEMAS.md").read_text(encoding="utf-8")
+    text = (project_root / "runtime/lib/research/SCHEMAS.md").read_text(encoding="utf-8")
     assert "## Evidence / Claims" in text
     assert '<a id="evidence-claims"></a>' in text
-    # The block from .agents/lib/research/SCHEMAS.md#evidence-claims is verbatim.
+    # The block from runtime/lib/research/SCHEMAS.md#evidence-claims is verbatim.
     assert EVIDENCE_SCHEMA.strip() in text

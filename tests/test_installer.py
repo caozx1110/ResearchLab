@@ -411,7 +411,7 @@ def test_agent_apply_rejects_uncommitted_distributable_drift_at_same_head_withou
     planned, plan = _plan_from_source(source, workspace, plan_path, env=env)
     assert planned.returncode == 0, planned.stdout + planned.stderr
     original_head = _git_output(source, "rev-parse", "HEAD")
-    source_agents = source / ".agents/AGENTS.md"
+    source_agents = source / "runtime/AGENTS.md"
     source_agents.write_text(source_agents.read_text(encoding="utf-8") + "\nUncommitted drift.\n", encoding="utf-8")
     assert _git_output(source, "rev-parse", "HEAD") == original_head
 
@@ -1777,7 +1777,7 @@ def test_codex_only_copy_lifecycle_ignores_unmanaged_claude_symlink(tmp_path: Pa
 def test_noninteractive_smoke_failure_hides_child_diagnostics(tmp_path: Path) -> None:
     source = _make_linked_source(tmp_path)
     private_detail = tmp_path / "internal" / "smoke-traceback.log"
-    smoke_script = source / ".agents" / "skills" / "kb-cli" / "scripts" / "kb"
+    smoke_script = source / "skills" / "kb-cli" / "scripts" / "kb"
     smoke_script.write_text(
         "#!/usr/bin/env bash\n"
         f"printf '%s\\n' 'Traceback: smoke child secret at {private_detail}' >&2\n"
@@ -2039,7 +2039,7 @@ def test_system_uninstall_removes_matching_shortcut_without_kb_flag_and_preserve
     home = tmp_path / "home"
     shortcut = home / ".local" / "bin" / "kb"
     shortcut.parent.mkdir(parents=True)
-    kb_script = _project_root() / ".agents" / "skills" / "kb-cli" / "scripts" / "kb"
+    kb_script = _project_root() / "skills" / "kb-cli" / "scripts" / "kb"
     shortcut.symlink_to(kb_script)
     env = {**os.environ, "HOME": str(home), "NO_COLOR": "1", "PATH": "/usr/bin:/bin"}
     command = [
@@ -2103,7 +2103,7 @@ def test_legacy_project_uninstall_removes_matching_shortcut_without_kb_flag(tmp_
     (workspace / ".agents").symlink_to(_project_root() / ".agents", target_is_directory=True)
     shortcut = workspace / "bin" / "kb"
     shortcut.parent.mkdir()
-    shortcut.symlink_to(_project_root() / ".agents" / "skills" / "kb-cli" / "scripts" / "kb")
+    shortcut.symlink_to(_project_root() / "skills" / "kb-cli" / "scripts" / "kb")
 
     result = subprocess.run(
         [

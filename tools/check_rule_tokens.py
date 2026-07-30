@@ -16,11 +16,11 @@ except ImportError as exc:  # pragma: no cover - dependency failure is a CLI dia
 
 ENCODING_NAME = "cl100k_base"
 DEFAULT_LIMIT = 8000
-GLOBAL_RULE_FILES = (Path(".agents/AGENTS.md"), Path(".agents/AGENT_GUIDE.md"))
+GLOBAL_RULE_FILES = (Path("runtime/AGENTS.md"), Path("runtime/AGENT_GUIDE.md"))
 
 
 def discover_skill_files(project_root: Path) -> list[Path]:
-    skills_root = project_root / ".agents" / "skills"
+    skills_root = project_root / "skills"
     return sorted(
         (path for path in skills_root.glob("*/SKILL.md") if path.is_file()),
         key=lambda path: path.parent.name,

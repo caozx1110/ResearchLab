@@ -26,7 +26,7 @@ def _project_root() -> Path:
 
 def _load_kb_module():
     root = _project_root()
-    script = root / ".agents" / "skills" / "knowledge-base-manager" / "scripts" / "kb.py"
+    script = root / "skills" / "knowledge-base-manager" / "scripts" / "kb.py"
     spec = importlib.util.spec_from_file_location("knowledge_base_manager_script", script)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -37,7 +37,7 @@ def _load_kb_module():
 
 def _load_idea_module():
     root = _project_root()
-    script = root / ".agents" / "skills" / "idea-workbench" / "scripts" / "idea.py"
+    script = root / "skills" / "idea-workbench" / "scripts" / "idea.py"
     spec = importlib.util.spec_from_file_location("idea_workbench_script_for_review_queue", script)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)

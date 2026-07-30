@@ -15,9 +15,9 @@ import yaml
 
 
 REPO_ROOT = REPO_ROOT
-LIB_ROOT = REPO_ROOT / ".agents" / "lib"
-SEARCH_SCRIPT = REPO_ROOT / ".agents" / "skills" / "literature-search" / "scripts" / "search.py"
-MONITOR_SCRIPT = REPO_ROOT / ".agents" / "skills" / "research-monitor" / "scripts" / "monitor.py"
+LIB_ROOT = REPO_ROOT / "runtime" / "lib"
+SEARCH_SCRIPT = REPO_ROOT / "skills" / "literature-search" / "scripts" / "search.py"
+MONITOR_SCRIPT = REPO_ROOT / "skills" / "research-monitor" / "scripts" / "monitor.py"
 if str(LIB_ROOT) not in sys.path:
     sys.path.insert(0, str(LIB_ROOT))
 
@@ -1549,5 +1549,5 @@ def test_module_has_no_network_client_or_content_judgement_heuristic() -> None:
 
 
 def test_research_monitor_skill_metadata_is_valid() -> None:
-    skill = REPO_ROOT / ".agents" / "skills" / "research-monitor"
+    skill = REPO_ROOT / "skills" / "research-monitor"
     assert validate_skill(skill) == []

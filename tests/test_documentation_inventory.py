@@ -23,7 +23,7 @@ LEGACY_PRIVATE_DESIGN_REFERENCE = re.compile(
 
 
 def _discoverable_skills() -> list[str]:
-    skills_root = REPO_ROOT / ".agents" / "skills"
+    skills_root = REPO_ROOT / "skills"
     return sorted(
         path.name
         for path in skills_root.iterdir()
@@ -41,7 +41,8 @@ def _current_markdown_files() -> list[Path]:
     ]
     for root in (
         REPO_ROOT / "docs",
-        REPO_ROOT / ".agents",
+        REPO_ROOT / "runtime",
+        REPO_ROOT / "skills",
         REPO_ROOT / ".github",
         REPO_ROOT / "tools",
     ):
@@ -51,7 +52,7 @@ def _current_markdown_files() -> list[Path]:
 
 def test_distributed_readme_matches_discoverable_skill_inventory() -> None:
     skills = _discoverable_skills()
-    readme = (REPO_ROOT / ".agents" / "README.md").read_text(encoding="utf-8")
+    readme = (REPO_ROOT / "runtime" / "README.md").read_text(encoding="utf-8")
 
     assert len(skills) == 15
     assert "15 个可发现 skill" in readme
@@ -226,6 +227,12 @@ def test_development_contract_is_github_remote_complete() -> None:
         / "decisions"
         / "0001-github-remote-complete-development.md"
     ).is_file()
+    assert (
+        REPO_ROOT
+        / "docs"
+        / "decisions"
+        / "0002-separate-product-source-and-local-agent-tools.md"
+    ).is_file()
 
     if not (REPO_ROOT / ".git").exists():
         return
@@ -241,7 +248,7 @@ def test_development_contract_is_github_remote_complete() -> None:
 
 def test_tracked_sources_do_not_point_to_retired_private_design_sections() -> None:
     stale: list[str] = []
-    roots = (REPO_ROOT / ".agents", REPO_ROOT / "tests")
+    roots = (REPO_ROOT / "runtime", REPO_ROOT / "skills", REPO_ROOT / "tests")
     candidates = [REPO_ROOT / "AGENTS.md", REPO_ROOT / "requirements.txt"]
     for root in roots:
         candidates.extend(

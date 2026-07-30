@@ -173,7 +173,7 @@ def _project_root() -> Path:
 
 
 def _load_report_module():
-    script = _project_root() / ".agents" / "skills" / "report-author" / "scripts" / "report.py"
+    script = _project_root() / "skills" / "report-author" / "scripts" / "report.py"
     spec = importlib.util.spec_from_file_location("report_author_script_under_test", script)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -183,7 +183,7 @@ def _load_report_module():
 
 
 def _load_synthesizer_module():
-    script = _project_root() / ".agents" / "skills" / "literature-synthesizer" / "scripts" / "synthesize.py"
+    script = _project_root() / "skills" / "literature-synthesizer" / "scripts" / "synthesize.py"
     spec = importlib.util.spec_from_file_location("report_survey_synthesizer_under_test", script)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)

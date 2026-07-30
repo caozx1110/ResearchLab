@@ -6,7 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from repo_paths import REPO_ROOT
+from repo_paths import REPO_ROOT, source_path
 
 import yaml
 
@@ -29,7 +29,7 @@ def _project_root() -> Path:
 
 
 def _load_script(relative: str, module_name: str):
-    path = _project_root() / relative
+    path = source_path(relative)
     loader = importlib.machinery.SourceFileLoader(module_name, str(path))
     spec = importlib.util.spec_from_loader(loader.name, loader)
     assert spec and spec.loader

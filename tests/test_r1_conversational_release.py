@@ -9,7 +9,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from repo_paths import REPO_ROOT
+from repo_paths import REPO_ROOT, source_path
 
 import pytest
 import yaml
@@ -82,7 +82,9 @@ def _project_root() -> Path:
 
 
 def _kb_script(root: Path | None = None) -> Path:
-    return (root or _project_root()) / ".agents" / "skills" / "kb-cli" / "scripts" / "kb"
+    if root is None:
+        return _project_root() / "skills" / "kb-cli" / "scripts" / "kb"
+    return root / ".agents" / "skills" / "kb-cli" / "scripts" / "kb"
 
 
 def _load_kb_cli():
@@ -154,14 +156,14 @@ def test_public_verb_registry_and_docs_match_exactly() -> None:
     assert tuple(subparsers.choices) == PUBLIC_VERBS
     assert len(kb.VERB_REGISTRARS) == len(PUBLIC_VERBS)
     for relative in ("README.md", "docs/USER_GUIDE.md"):
-        text = (_project_root() / relative).read_text(encoding="utf-8")
+        text = source_path(relative).read_text(encoding="utf-8")
         for verb in PUBLIC_VERBS:
             assert f"`kb {verb}" in text, f"{relative} does not document kb {verb}"
 
 
 def test_docs_disclose_every_skill_maturity_without_bundle_overclaim() -> None:
     for relative in ("README.md", "docs/USER_GUIDE.md"):
-        text = (_project_root() / relative).read_text(encoding="utf-8")
+        text = source_path(relative).read_text(encoding="utf-8")
         for label in ("stable", "beta", "scaffold", "dev-only"):
             assert label in text, f"{relative} does not define {label}"
         for skill, maturity in CAPABILITY_MATURITY.items():
@@ -587,7 +589,7 @@ def test_installed_copy_next_is_byte_identical_on_fresh_workspace(tmp_path: Path
 
 def test_release_metadata_is_honest_rc_and_ci_is_cross_platform() -> None:
     root = _project_root()
-    version = (root / ".agents" / "VERSION").read_text(encoding="utf-8").strip()
+    version = (root / "runtime" / "VERSION").read_text(encoding="utf-8").strip()
     assert re.fullmatch(r"\d+\.\d+\.\d+-rc\.\d+", version)
 
     changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
@@ -624,7 +626,7 @@ def test_release_metadata_is_honest_rc_and_ci_is_cross_platform() -> None:
 
 
 def test_idea_skill_documents_link_refresh_and_fill_names() -> None:
-    text = (_project_root() / ".agents" / "skills" / "idea-workbench" / "SKILL.md").read_text(
+    text = (_project_root() / "skills" / "idea-workbench" / "SKILL.md").read_text(
         encoding="utf-8"
     )
     for token in (
@@ -640,7 +642,7 @@ def test_idea_skill_documents_link_refresh_and_fill_names() -> None:
 
 
 def test_experiment_and_report_skills_document_private_minimum_invocations() -> None:
-    root = _project_root() / ".agents" / "skills"
+    root = _project_root() / "skills"
     experiment = (root / "experiment-workbench" / "SKILL.md").read_text(encoding="utf-8")
     report = (root / "report-author" / "SKILL.md").read_text(encoding="utf-8")
     for token in ("plan --title", "--program-id", "--hypothesis", "log-run --experiment-id", "--config-revision", "--seed"):
@@ -652,7 +654,7 @@ def test_experiment_and_report_skills_document_private_minimum_invocations() -> 
 def test_runtime_and_test_dependencies_are_exactly_locked_in_both_ci_jobs() -> None:
     root = _project_root()
     runtime_lines = _active_requirement_lines(root / "requirements.txt")
-    shipped_runtime_lines = _active_requirement_lines(root / ".agents" / "requirements.txt")
+    shipped_runtime_lines = _active_requirement_lines(root / "runtime" / "requirements.txt")
 
     assert _parse_exact_pins(runtime_lines) == EXPECTED_RUNTIME_PINS
     assert _parse_exact_pins(shipped_runtime_lines) == EXPECTED_RUNTIME_PINS

@@ -3,7 +3,7 @@
 Repository-only maintainer/development projection tool. It is not installed,
 discoverable, routable, or represented in the runtime preference registry.
 
-> 协议参考：`.agents/lib/research/SCHEMAS.md#program-files` · `#evidence-first-outputs` · `#ownership` · `#runtime`
+> 协议参考：`runtime/lib/research/SCHEMAS.md#program-files` · `#evidence-first-outputs` · `#ownership` · `#runtime`
 
 This is an optional maintainer/development helper for rebuilding derived pages or a local browser snapshot. Normal users start from `kb init`, `kb status`, `kb next`, and `kb obsidian`; generic navigation requests must not route here automatically. Nothing generated here is canonical or a formal selling point.
 

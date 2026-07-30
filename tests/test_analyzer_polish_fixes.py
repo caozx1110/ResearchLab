@@ -22,7 +22,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from repo_paths import REPO_ROOT
+from repo_paths import REPO_ROOT, source_path
 
 import pytest
 
@@ -36,7 +36,7 @@ def _project_root() -> Path:
 
 
 def _load_module(name: str, script_rel: str):
-    script = _project_root() / script_rel
+    script = source_path(script_rel)
     spec = importlib.util.spec_from_file_location(name, script)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)

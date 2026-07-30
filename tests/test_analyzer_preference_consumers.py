@@ -31,7 +31,7 @@ PREFERENCE_SENTINEL = "R11-SOFT-PREFERENCE-MUST-NOT-BE-COPIED"
 
 def _load_script(skill: str, filename: str):
     repository = REPO_ROOT
-    path = repository / ".agents" / "skills" / skill / "scripts" / filename
+    path = repository / "skills" / skill / "scripts" / filename
     name = f"r11_{skill.replace('-', '_')}_{id(path)}"
     spec = importlib.util.spec_from_file_location(name, path)
     assert spec and spec.loader

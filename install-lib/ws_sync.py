@@ -82,15 +82,15 @@ CLAUDE_INCLUDE_BLOCK = (
 CLAUDE_SKILLS_REL = ".claude/skills"
 CLAUDE_SKILLS_TARGET = "../.agents/skills"
 RELEASE_FILE_MAP = {
-    ".agents/AGENTS.md": ".agents/AGENTS.md",
-    ".agents/AGENT_GUIDE.md": ".agents/AGENT_GUIDE.md",
-    ".agents/requirements.txt": ".agents/requirements.txt",
-    ".agents/VERSION": ".agents/VERSION",
+    "runtime/AGENTS.md": ".agents/AGENTS.md",
+    "runtime/AGENT_GUIDE.md": ".agents/AGENT_GUIDE.md",
+    "runtime/requirements.txt": ".agents/requirements.txt",
+    "runtime/VERSION": ".agents/VERSION",
     "LICENSE": ".agents/LICENSE",
 }
-RELEASE_PREFIXES = (
-    ".agents/skills/",
-    ".agents/lib/research/",
+RELEASE_PREFIX_MAP = (
+    ("skills/", ".agents/skills/"),
+    ("runtime/lib/research/", ".agents/lib/research/"),
 )
 EXCLUDED_DIRS = {"__pycache__", ".venv", "tests"}
 EXCLUDED_SUFFIXES = {".pyc", ".pyo"}
@@ -194,7 +194,7 @@ def _source_is_git_worktree(source_root: Path) -> bool:
 def _snapshot_release_files(source_root: Path) -> list[str]:
     """Deterministic non-git enumeration of the packageable release set.
 
-    Walks only the release roots (``.agents`` plus the top-level ``LICENSE``),
+    Walks only the release roots (``skills``, ``runtime``, and ``LICENSE``),
     sorted for stable output, pruning VCS/runtime junk (.git/.venv/__pycache__/
     tests/.DS_Store/*.pyc …). Unlike ``git ls-files`` this cannot distinguish
     untracked files, which is why it stays behind the explicit
@@ -204,19 +204,19 @@ def _snapshot_release_files(source_root: Path) -> list[str]:
     license_path = source_root / "LICENSE"
     if license_path.is_file() and not license_path.is_symlink():
         names.append("LICENSE")
-    agents_dir = source_root / ".agents"
-    for current_root, dirs, files in os.walk(agents_dir, followlinks=False):
-        current = Path(current_root)
-        dirs[:] = sorted(
-            name
-            for name in dirs
-            if name not in SNAPSHOT_EXCLUDED_DIRS and not name.upper().startswith("RESEARCH_VALUE")
-        )
-        for name in sorted(files):
-            relative = (current / name).relative_to(source_root)
-            if should_exclude(relative):
-                continue
-            names.append(relative.as_posix())
+    for release_root in (source_root / "skills", source_root / "runtime"):
+        for current_root, dirs, files in os.walk(release_root, followlinks=False):
+            current = Path(current_root)
+            dirs[:] = sorted(
+                name
+                for name in dirs
+                if name not in SNAPSHOT_EXCLUDED_DIRS and not name.upper().startswith("RESEARCH_VALUE")
+            )
+            for name in sorted(files):
+                relative = (current / name).relative_to(source_root)
+                if should_exclude(relative):
+                    continue
+                names.append(relative.as_posix())
     return sorted(names)
 
 
@@ -224,7 +224,7 @@ def tracked_release_files(source_root: Path, *, allow_snapshot: bool = False) ->
     if _source_is_git_worktree(source_root):
         try:
             result = subprocess.run(
-                ["git", "-C", str(source_root), "ls-files", "-z", "--", ".agents", "LICENSE"],
+                ["git", "-C", str(source_root), "ls-files", "-z", "--", "skills", "runtime", "LICENSE"],
                 check=True,
                 capture_output=True,
             )
@@ -234,7 +234,9 @@ def tracked_release_files(source_root: Path, *, allow_snapshot: bool = False) ->
                 f"{NOT_GIT_WORKTREE_GUIDANCE}"
             )
         tracked = sorted(path.decode("utf-8") for path in result.stdout.split(b"\0") if path)
-        if any(rel == ".agents" or rel.startswith(".agents/") for rel in tracked):
+        if any(rel == "skills" or rel.startswith("skills/") for rel in tracked) and any(
+            rel == "runtime" or rel.startswith("runtime/") for rel in tracked
+        ):
             return tracked
         # Inside some git worktree, but the release tree itself is untracked
         # (e.g. a ZIP unpacked into an unrelated repository) — same remediation.
@@ -253,12 +255,13 @@ def release_destination(rel: str) -> str | None:
     mapped = RELEASE_FILE_MAP.get(rel)
     if mapped is not None:
         return mapped
-    if not rel.startswith(RELEASE_PREFIXES):
-        return None
     path = Path(rel)
     if should_exclude(path):
         return None
-    return rel
+    for source_prefix, destination_prefix in RELEASE_PREFIX_MAP:
+        if rel.startswith(source_prefix):
+            return destination_prefix + rel[len(source_prefix) :]
+    return None
 
 
 def assert_no_symlinked_source_subdirs(source_root: Path, rel: str) -> None:
@@ -277,10 +280,13 @@ def source_items(
     allow_snapshot: bool = False,
 ) -> dict[str, tuple[Path, str]]:
     source_root = (source or repo).resolve()
-    agents_src = source_root / ".agents"
-    agents_md_src = source_root / ".agents" / "AGENTS.md"
-    if not agents_src.is_dir():
-        die(f"source .agents directory not found: {agents_src}")
+    skills_src = source_root / "skills"
+    runtime_src = source_root / "runtime"
+    agents_md_src = runtime_src / "AGENTS.md"
+    if not skills_src.is_dir():
+        die(f"source skills directory not found: {skills_src}")
+    if not runtime_src.is_dir():
+        die(f"source runtime directory not found: {runtime_src}")
     if not agents_md_src.is_file():
         die(f"source AGENTS.md not found: {agents_md_src}")
     items: dict[str, tuple[Path, str]] = {}
@@ -292,17 +298,19 @@ def source_items(
         path = source_root / rel
         if path.is_symlink() or not path.is_file():
             die(f"allowlisted release file is not a regular file: {path}")
+        if destination in items:
+            die(f"multiple source release files map to the same destination: {destination}")
         items[destination] = (path, sha256_file(path))
     items["AGENTS.md"] = (agents_md_src, sha256_file(agents_md_src))
     return dict(sorted(items.items()))
 
 
-def source_agents_actual_nonempty(repo: Path, source: Path | None) -> bool:
+def source_release_actual_nonempty(repo: Path, source: Path | None) -> bool:
     source_root = (source or repo).resolve()
-    agents_src = source_root / ".agents"
-    for _root, dirs, files in os.walk(agents_src):
-        if dirs or files:
-            return True
+    for release_root in (source_root / "skills", source_root / "runtime"):
+        for _root, dirs, files in os.walk(release_root):
+            if dirs or files:
+                return True
     return False
 
 
@@ -1735,7 +1743,7 @@ def source_enumeration_looks_collapsed(
     new_files: dict[str, str],
     removed: list[str],
 ) -> bool:
-    if not source_agents_actual_nonempty(repo, source):
+    if not source_release_actual_nonempty(repo, source):
         return False
     old_agent_count = sum(1 for rel in old_files if rel.startswith(".agents/"))
     new_agent_count = sum(1 for rel in new_files if rel.startswith(".agents/"))
@@ -1823,8 +1831,8 @@ def build_writes(
 
 
 def read_source_version(repo: Path, source: Path | None) -> str:
-    """Read the bundle semver from the source's .agents/VERSION (empty if absent)."""
-    version_file = (source or repo).resolve() / ".agents" / "VERSION"
+    """Read the bundle semver from the source's runtime/VERSION (empty if absent)."""
+    version_file = (source or repo).resolve() / "runtime" / "VERSION"
     try:
         return version_file.read_text(encoding="utf-8").strip()
     except OSError:

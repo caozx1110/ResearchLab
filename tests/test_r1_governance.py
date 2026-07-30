@@ -22,7 +22,7 @@ from research.judgements import discover_pending_judgements
 
 def _load_skill_script(skill: str, script_name: str):
     project = REPO_ROOT
-    path = project / ".agents" / "skills" / skill / "scripts" / script_name
+    path = project / "skills" / skill / "scripts" / script_name
     module_name = f"r1_{skill.replace('-', '_')}_{script_name.replace('.py', '')}"
     spec = importlib.util.spec_from_file_location(module_name, path)
     assert spec and spec.loader

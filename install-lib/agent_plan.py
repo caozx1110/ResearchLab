@@ -155,7 +155,8 @@ def _git_tracked_paths(source_root: Path) -> list[str]:
                 "ls-files",
                 "-z",
                 "--",
-                ".agents",
+                "skills",
+                "runtime",
                 "LICENSE",
                 "install.sh",
                 "install-lib",
@@ -187,7 +188,7 @@ def distributable_tree(source_root: Path) -> dict[str, Any]:
         destinations: list[str] = []
         if destination is not None:
             destinations.append(destination)
-            if relative == ".agents/AGENTS.md":
+            if relative == "runtime/AGENTS.md":
                 destinations.append("AGENTS.md")
         entry: dict[str, Any] = {
             "path": relative,
@@ -203,8 +204,8 @@ def distributable_tree(source_root: Path) -> dict[str, Any]:
             raise ValueError(f"unsupported distributable path type: {relative}")
         entries.append(entry)
 
-    if not any(item["path"] == ".agents/AGENTS.md" for item in entries):
-        raise ValueError("canonical distributable tree is missing .agents/AGENTS.md")
+    if not any(item["path"] == "runtime/AGENTS.md" for item in entries):
+        raise ValueError("canonical distributable tree is missing runtime/AGENTS.md")
     entries.sort(key=lambda item: str(item["path"]))
     digest = sha256_bytes(canonical_json(entries))
     return {"schema": 1, "entry_count": len(entries), "entries": entries, "digest": digest}

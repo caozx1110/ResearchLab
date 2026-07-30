@@ -300,10 +300,10 @@ for arg in "$@"; do
   esac
 done
 
-[ -d "$REPO_ROOT/.agents/lib" ] || die "安装包不完整：缺少 .agents/lib"
-[ -d "$REPO_ROOT/.agents/skills" ] || die "安装包不完整：缺少 .agents/skills"
-[ -f "$REPO_ROOT/.agents/AGENTS.md" ] || die "安装包不完整：缺少 .agents/AGENTS.md"
-[ -f "$REPO_ROOT/.agents/AGENT_GUIDE.md" ] || die "安装包不完整：缺少 .agents/AGENT_GUIDE.md"
+[ -d "$REPO_ROOT/runtime/lib" ] || die "安装包不完整：缺少 runtime/lib"
+[ -d "$REPO_ROOT/skills" ] || die "安装包不完整：缺少 skills"
+[ -f "$REPO_ROOT/runtime/AGENTS.md" ] || die "安装包不完整：缺少 runtime/AGENTS.md"
+[ -f "$REPO_ROOT/runtime/AGENT_GUIDE.md" ] || die "安装包不完整：缺少 runtime/AGENT_GUIDE.md"
 [ -f "$REPO_ROOT/install-lib/ws_sync.py" ] || die "安装包不完整：缺少 install-lib/ws_sync.py"
 is_command python3 || die "需要 Python 3，请安装后重试"
 
@@ -912,8 +912,8 @@ if [ -z "$PROJECT_DIR" ]; then
   fi
 fi
 WORKSPACE_ROOT=$(abs_dir "$PROJECT_DIR")
-SKILLS_SRC="$REPO_ROOT/.agents/skills"
-KB_SCRIPT="$REPO_ROOT/.agents/skills/kb-cli/scripts/kb"
+SKILLS_SRC="$REPO_ROOT/skills"
+KB_SCRIPT="$REPO_ROOT/skills/kb-cli/scripts/kb"
 WS_KB_SCRIPT="$KB_SCRIPT"
 MANIFEST_PATH="$WORKSPACE_ROOT/.agents/.install-manifest.json"
 SELF_CONTAINED=0
@@ -1992,12 +1992,14 @@ link_force() {
 }
 
 remove_symlink_if_matches() {
-  local link=$1 expected=$2 expected_alt=${3:-}
+  local link=$1 expected=$2 expected_alt=${3:-} expected_legacy=${4:-}
   local actual
   guard_managed_directory_chain "$(dirname -- "$link")"
   [ -L "$link" ] || return 0
   actual=$(readlink "$link")
-  if [ "$actual" = "$expected" ] || { [ -n "$expected_alt" ] && [ "$actual" = "$expected_alt" ]; }; then
+  if [ "$actual" = "$expected" ] \
+    || { [ -n "$expected_alt" ] && [ "$actual" = "$expected_alt" ]; } \
+    || { [ -n "$expected_legacy" ] && [ "$actual" = "$expected_legacy" ]; }; then
     if [ "$DRY_RUN" -eq 1 ]; then
       if [ "$AGENT_PLAN" -eq 1 ]; then
         record_agent_plan_target "remove-symlink" "$link" "$actual"
@@ -2020,7 +2022,7 @@ write_managed_block() {
   [ ! -L "$file" ] || die "检测到符号链接形式的 Claude 配置；为避免跟随或替换链接，已停止"
   if [ "$AGENT_PLAN" -eq 1 ]; then
     [ -n "$planned_content_digest" ] || die "Agent 计划缺少 managed block 内容 digest"
-    record_agent_plan_target "write-managed-block" "$file" "$REPO_ROOT/.agents/AGENTS.md" "" "$planned_content_digest"
+    record_agent_plan_target "write-managed-block" "$file" "$REPO_ROOT/runtime/AGENTS.md" "" "$planned_content_digest"
     return 0
   fi
   tmp_file=$(mktemp "${TMPDIR:-/tmp}/${INSTALL_NAME}.XXXXXX")
@@ -2115,8 +2117,8 @@ render_claude_block() {
   if [ "$mode" = "include" ]; then
     printf '@AGENTS.md\n'
   else
-    printf '<!-- Generated from %s/.agents/AGENTS.md for workspace %s. -->\n\n' "$REPO_ROOT" "$ws"
-    sed -n '1,$p' "$REPO_ROOT/.agents/AGENTS.md"
+    printf '<!-- Generated from %s/runtime/AGENTS.md for workspace %s. -->\n\n' "$REPO_ROOT" "$ws"
+    sed -n '1,$p' "$REPO_ROOT/runtime/AGENTS.md"
   fi
   printf '%s\n' "$END_MARKER"
 }
@@ -2138,7 +2140,7 @@ install_claude_project() {
   ensure_dir "$claude_dir"
   # Self-contained workspaces keep .agents and AGENTS.md in the workspace root,
   # so Claude can use an include block plus a relative skills symlink.
-  if [ "$SELF_CONTAINED" -eq 1 ]; then
+  if [ "$COPY_PROJECT" -eq 1 ]; then
     link_target="../.agents/skills"
     if [ "$AGENT_PLAN" -eq 1 ]; then
       block_digest=$(claude_block_digest include "$WORKSPACE_ROOT")
@@ -2164,7 +2166,7 @@ install_claude_project() {
 
 uninstall_claude_project() {
   local expected
-  if [ "$SELF_CONTAINED" -eq 1 ]; then
+  if [ "$COPY_PROJECT" -eq 1 ]; then
     expected="../.agents/skills"
   else
     expected="$SKILLS_SRC"
@@ -2180,8 +2182,8 @@ uninstall_claude_project() {
 install_claude_system() {
   local skill name block_file block_digest
   ensure_dir "$HOME/.claude/skills"
-  # System scope links each skill back to the repo so __file__.resolve() can
-  # still find the sibling .agents/lib in the source checkout.
+  # System scope links each skill back to the source tree; entrypoints resolve
+  # runtime/lib from their own physical source path.
   for skill in "$SKILLS_SRC"/*; do
     [ -d "$skill" ] || continue
     name=${skill##*/}
@@ -2226,15 +2228,20 @@ uninstall_codex_project() {
     warn ".agents 不属于本安装器，已保留"
     INSTALL_INCOMPLETE=1
   fi
-  remove_symlink_if_matches "$WORKSPACE_ROOT/AGENTS.md" "$REPO_ROOT/.agents/AGENTS.md"
+  remove_symlink_if_matches "$WORKSPACE_ROOT/AGENTS.md" "$REPO_ROOT/runtime/AGENTS.md" "$REPO_ROOT/.agents/AGENTS.md"
 }
 
 install_codex_system() {
   local global_dir skill name
   global_dir="$HOME/.codex/$INSTALL_NAME"
   ensure_dir "$global_dir"
-  link_force "$REPO_ROOT/.agents" "$global_dir/.agents"
-  link_force "$REPO_ROOT/.agents/AGENTS.md" "$global_dir/AGENTS.md"
+  # Compose the installed shape from the separated source roots.  Do not link
+  # the repository-local .agents tree: it is reserved for untracked tools.
+  ensure_dir "$global_dir/.agents"
+  link_force "$REPO_ROOT/skills" "$global_dir/.agents/skills"
+  link_force "$REPO_ROOT/runtime/lib" "$global_dir/.agents/lib"
+  link_force "$REPO_ROOT/runtime/AGENTS.md" "$global_dir/.agents/AGENTS.md"
+  link_force "$REPO_ROOT/runtime/AGENTS.md" "$global_dir/AGENTS.md"
   if [ -d "$HOME/.codex/skills" ]; then
     for skill in "$SKILLS_SRC"/*; do
       [ -d "$skill" ] || continue
@@ -2252,8 +2259,13 @@ install_codex_system() {
 uninstall_codex_system() {
   local global_dir skill name
   global_dir="$HOME/.codex/$INSTALL_NAME"
+  remove_symlink_if_matches "$global_dir/.agents/skills" "$REPO_ROOT/skills" "$REPO_ROOT/.agents/skills"
+  remove_symlink_if_matches "$global_dir/.agents/lib" "$REPO_ROOT/runtime/lib" "$REPO_ROOT/.agents/lib"
+  remove_symlink_if_matches "$global_dir/.agents/AGENTS.md" "$REPO_ROOT/runtime/AGENTS.md" "$REPO_ROOT/.agents/AGENTS.md"
+  rmdir "$global_dir/.agents" >/dev/null 2>&1 || true
+  # Compatibility cleanup for system installs created before the source split.
   remove_symlink_if_matches "$global_dir/.agents" "$REPO_ROOT/.agents"
-  remove_symlink_if_matches "$global_dir/AGENTS.md" "$REPO_ROOT/.agents/AGENTS.md"
+  remove_symlink_if_matches "$global_dir/AGENTS.md" "$REPO_ROOT/runtime/AGENTS.md" "$REPO_ROOT/.agents/AGENTS.md"
   rmdir "$global_dir" >/dev/null 2>&1 || true
   if [ -d "$HOME/.codex/skills" ]; then
     for skill in "$SKILLS_SRC"/*; do
@@ -2299,7 +2311,7 @@ uninstall_kb_on_path() {
     INSTALL_INCOMPLETE=1
     return 0
   fi
-  remove_symlink_if_matches "$link" "$WS_KB_SCRIPT" "$KB_SCRIPT"
+  remove_symlink_if_matches "$link" "$WS_KB_SCRIPT" "$KB_SCRIPT" "$REPO_ROOT/.agents/skills/kb-cli/scripts/kb"
 }
 
 run_smoke() {

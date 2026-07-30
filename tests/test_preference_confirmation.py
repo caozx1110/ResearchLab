@@ -27,7 +27,7 @@ from research.preference_selection import eligible_preferences
 
 
 def _load_kb_cli():
-    script = REPO_ROOT / ".agents" / "skills" / "kb-cli" / "scripts" / "kb"
+    script = REPO_ROOT / "skills" / "kb-cli" / "scripts" / "kb"
     module_name = f"kb_cli_preference_confirmation_{id(script)}_{len(sys.modules)}"
     loader = importlib.machinery.SourceFileLoader(module_name, str(script))
     spec = importlib.util.spec_from_loader(loader.name, loader)

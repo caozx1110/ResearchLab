@@ -19,8 +19,8 @@ from research.sources import build_literature_search_stage_id, stage_search_resu
 
 
 ROOT = REPO_ROOT
-SEARCH_SCRIPT = ROOT / ".agents" / "skills" / "literature-search" / "scripts" / "search.py"
-INTAKE_SCRIPT = ROOT / ".agents" / "skills" / "source-intake" / "scripts" / "intake.py"
+SEARCH_SCRIPT = ROOT / "skills" / "literature-search" / "scripts" / "search.py"
+INTAKE_SCRIPT = ROOT / "skills" / "source-intake" / "scripts" / "intake.py"
 
 
 def _search_module():
@@ -183,12 +183,12 @@ def _title_excluded_candidate(candidate_id: str) -> dict:
 
 
 def test_literature_search_bundles_no_provider_client() -> None:
-    assert not (ROOT / ".agents" / "lib" / "research" / "openalex.py").exists()
+    assert not (ROOT / "runtime" / "lib" / "research" / "openalex.py").exists()
     script = SEARCH_SCRIPT.read_text(encoding="utf-8")
     assert "urlopen" not in script
     assert "requests" not in script
     assert "OpenAlex" not in script
-    skill = (ROOT / ".agents" / "skills" / "literature-search" / "SKILL.md").read_text(
+    skill = (ROOT / "skills" / "literature-search" / "SKILL.md").read_text(
         encoding="utf-8"
     )
     assert "当前会话真正可用" in skill

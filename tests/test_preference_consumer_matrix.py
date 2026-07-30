@@ -37,7 +37,7 @@ PAPER_OPERATIONS = (
 
 def _script(skill: str, filename: str):
     root = REPO_ROOT
-    path = root / ".agents" / "skills" / skill / "scripts" / filename
+    path = root / "skills" / skill / "scripts" / filename
     name = f"preference_matrix_{skill.replace('-', '_')}"
     spec = importlib.util.spec_from_file_location(name, path)
     assert spec and spec.loader

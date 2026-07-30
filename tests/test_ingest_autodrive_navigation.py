@@ -20,7 +20,7 @@ def _project_root() -> Path:
 
 
 def _load(skill: str, script_name: str, mod_name: str):
-    script = _project_root() / ".agents" / "skills" / skill / "scripts" / script_name
+    script = _project_root() / "skills" / skill / "scripts" / script_name
     spec = importlib.util.spec_from_file_location(mod_name, script)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)

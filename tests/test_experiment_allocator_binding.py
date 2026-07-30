@@ -19,7 +19,7 @@ from research.preference_selection import eligible_preferences, record_effective
 
 def _experiment_module():
     project_root = REPO_ROOT
-    script = project_root / ".agents" / "skills" / "experiment-workbench" / "scripts" / "experiment.py"
+    script = project_root / "skills" / "experiment-workbench" / "scripts" / "experiment.py"
     spec = importlib.util.spec_from_file_location("experiment_allocator_binding_script", script)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)

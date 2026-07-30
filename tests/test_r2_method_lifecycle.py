@@ -31,7 +31,7 @@ def _project_root() -> Path:
 
 
 def _load_method_module():
-    script = _project_root() / ".agents" / "skills" / "method-designer" / "scripts" / "method.py"
+    script = _project_root() / "skills" / "method-designer" / "scripts" / "method.py"
     spec = importlib.util.spec_from_file_location("r2_method_designer_script_for_tests", script)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)

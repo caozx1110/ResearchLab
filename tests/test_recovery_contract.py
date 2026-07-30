@@ -7,7 +7,7 @@ from contextlib import contextmanager
 import os
 from pathlib import Path
 
-from repo_paths import REPO_ROOT
+from repo_paths import REPO_ROOT, source_path
 import socket
 import stat
 import subprocess
@@ -49,7 +49,7 @@ def _project_root() -> Path:
 
 
 def _load_kb_module():
-    script = _project_root() / ".agents" / "skills" / "knowledge-base-manager" / "scripts" / "kb.py"
+    script = _project_root() / "skills" / "knowledge-base-manager" / "scripts" / "kb.py"
     spec = importlib.util.spec_from_file_location("kb_script_for_recovery_test", script)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -59,7 +59,7 @@ def _load_kb_module():
 
 
 def _load_paper_module():
-    script = _project_root() / ".agents" / "skills" / "unit-analyst" / "scripts" / "paper.py"
+    script = _project_root() / "skills" / "unit-analyst" / "scripts" / "paper.py"
     spec = importlib.util.spec_from_file_location("paper_script_for_checkpoint_recovery_test", script)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -98,7 +98,7 @@ def test_analyzer_fill_checkpoint_scope_rejects_external_and_symlink_inputs(
     tmp_path: Path,
     script_name: str,
 ) -> None:
-    script = _project_root() / ".agents" / "skills" / "unit-analyst" / "scripts" / script_name
+    script = _project_root() / "skills" / "unit-analyst" / "scripts" / script_name
     module_name = f"unit_analyst_{script_name.removesuffix('.py')}_fill_scope_test"
     spec = importlib.util.spec_from_file_location(module_name, script)
     assert spec and spec.loader
@@ -392,7 +392,7 @@ def test_explicit_abort_skips_unchanged_existing_and_absent_targets(tmp_path: Pa
 
 def _digest_in_bounded_subprocess(path: Path) -> str:
     environment = os.environ.copy()
-    library_root = _project_root() / ".agents" / "lib"
+    library_root = _project_root() / "runtime" / "lib"
     existing_pythonpath = environment.get("PYTHONPATH", "")
     environment["PYTHONPATH"] = os.pathsep.join(
         part for part in (str(library_root), existing_pythonpath) if part
@@ -2835,7 +2835,7 @@ def test_analyzer_index_transaction_targets_include_passage_cache(
     tmp_path: Path,
     script_name: str,
 ) -> None:
-    script = _project_root() / ".agents" / "skills" / "unit-analyst" / "scripts" / script_name
+    script = _project_root() / "skills" / "unit-analyst" / "scripts" / script_name
     module_name = f"unit_analyst_{script_name.removesuffix('.py')}_index_targets_test"
     spec = importlib.util.spec_from_file_location(module_name, script)
     assert spec and spec.loader
@@ -2869,7 +2869,7 @@ def test_index_builders_separate_passage_cache_transaction_from_checkpoint(
     transaction_builder: str,
     checkpoint_builder: str,
 ) -> None:
-    script = _project_root() / relative_script
+    script = source_path(relative_script)
     module_name = f"{script.stem}_index_envelope_test_{transaction_builder}"
     spec = importlib.util.spec_from_file_location(module_name, script)
     assert spec and spec.loader

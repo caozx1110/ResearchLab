@@ -84,6 +84,8 @@ def test_resolve_source_checkout_uses_manifest_checkout(tmp_path: Path) -> None:
     source = tmp_path / "source"
     (source / "install-lib").mkdir(parents=True)
     (source / "install-lib" / "ws_sync.py").write_text("", encoding="utf-8")
+    (source / "runtime").mkdir()
+    (source / "runtime" / "VERSION").write_text("0.1.0\n", encoding="utf-8")
     install = tmp_path / "install"
     manifest = install / updater.MANIFEST_REL
     manifest.parent.mkdir(parents=True)
@@ -94,7 +96,9 @@ def test_resolve_source_checkout_uses_manifest_checkout(tmp_path: Path) -> None:
 
 def test_apply_checkout_uses_ff_only_pull_and_never_pushes(monkeypatch, tmp_path: Path) -> None:
     (tmp_path / ".git").mkdir()
-    version_path = tmp_path / ".agents" / "VERSION"
+    (tmp_path / "install-lib").mkdir()
+    (tmp_path / "install-lib" / "ws_sync.py").write_text("", encoding="utf-8")
+    version_path = tmp_path / "runtime" / "VERSION"
     version_path.parent.mkdir()
     version_path.write_text("0.1.0\n", encoding="utf-8")
     calls: list[tuple[Path, tuple[str, ...]]] = []
@@ -122,8 +126,8 @@ def test_apply_copy_install_invokes_ws_sync_update_without_force(monkeypatch, tm
     (source / ".git").mkdir(parents=True)
     (source / "install-lib").mkdir()
     (source / "install-lib" / "ws_sync.py").write_text("", encoding="utf-8")
-    (source / ".agents").mkdir()
-    (source / ".agents" / "VERSION").write_text("0.2.0\n", encoding="utf-8")
+    (source / "runtime").mkdir()
+    (source / "runtime" / "VERSION").write_text("0.2.0\n", encoding="utf-8")
     manifest_path = install / updater.MANIFEST_REL
     manifest_path.parent.mkdir(parents=True)
     manifest_path.write_text(
@@ -207,8 +211,8 @@ def test_apply_copy_install_skips_sync_when_source_is_not_newer(
     (source / ".git").mkdir(parents=True)
     (source / "install-lib").mkdir()
     (source / "install-lib" / "ws_sync.py").write_text("", encoding="utf-8")
-    (source / ".agents").mkdir()
-    source_version_path = source / ".agents" / "VERSION"
+    (source / "runtime").mkdir()
+    source_version_path = source / "runtime" / "VERSION"
     source_version_path.write_text("9.9.9\n", encoding="utf-8")
     (install / ".agents").mkdir(parents=True)
     (install / ".agents" / "VERSION").write_text(f"{installed_version}\n", encoding="utf-8")
@@ -309,20 +313,21 @@ def _git(cwd: Path, *args: str) -> str:
 def test_non_main_fork_update_preserves_branch_and_updates_manifest_e2e(tmp_path: Path) -> None:
     project = REPO_ROOT
     source = tmp_path / "source"
+    shutil.copytree(project / "skills", source / "skills")
     shutil.copytree(
-        project / ".agents",
-        source / ".agents",
+        project / "runtime",
+        source / "runtime",
         ignore=shutil.ignore_patterns("__pycache__", "tests", "*.pyc", "*.pyo"),
     )
     shutil.copytree(project / "install-lib", source / "install-lib")
     shutil.copy2(project / "LICENSE", source / "LICENSE")
-    (source / ".agents" / "VERSION").write_text("0.1.0\n", encoding="utf-8")
+    (source / "runtime" / "VERSION").write_text("0.1.0\n", encoding="utf-8")
 
     subprocess.run(["git", "init", str(source)], check=True, capture_output=True, text=True)
     _git(source, "config", "user.name", "Updater E2E")
     _git(source, "config", "user.email", "updater@example.test")
     _git(source, "checkout", "-b", "release/r1")
-    _git(source, "add", ".agents", "install-lib", "LICENSE")
+    _git(source, "add", "skills", "runtime", "install-lib", "LICENSE")
     _git(source, "commit", "-m", "baseline")
 
     remote = tmp_path / "fork.git"
@@ -363,8 +368,8 @@ def test_non_main_fork_update_preserves_branch_and_updates_manifest_e2e(tmp_path
     assert initial_manifest["source_checkout"] == ""
     assert initial_manifest["source_strategy"] == "remote-branch"
 
-    (source / ".agents" / "VERSION").write_text("0.2.0-rc.1\n", encoding="utf-8")
-    _git(source, "add", ".agents/VERSION")
+    (source / "runtime" / "VERSION").write_text("0.2.0-rc.1\n", encoding="utf-8")
+    _git(source, "add", "runtime/VERSION")
     _git(source, "commit", "-m", "release candidate")
     _git(source, "push", "origin", "release/r1")
     release_commit = _git(source, "rev-parse", "HEAD")
@@ -395,8 +400,8 @@ def test_local_checkout_strategy_with_remote_origin_never_uses_network(monkeypat
     (source / ".git").mkdir(parents=True)
     (source / "install-lib").mkdir(parents=True)
     (source / "install-lib" / "ws_sync.py").write_text("", encoding="utf-8")
-    (source / ".agents").mkdir()
-    (source / ".agents" / "VERSION").write_text("0.2.0\n", encoding="utf-8")
+    (source / "runtime").mkdir()
+    (source / "runtime" / "VERSION").write_text("0.2.0\n", encoding="utf-8")
     (install / ".agents").mkdir(parents=True)
     (install / ".agents" / "VERSION").write_text("0.1.0\n", encoding="utf-8")
     (install / updater.MANIFEST_REL).write_text(
@@ -459,8 +464,8 @@ def test_local_checkout_skips_sync_when_worktree_version_is_not_newer(monkeypatc
     (source / ".git").mkdir(parents=True)
     (source / "install-lib").mkdir(parents=True)
     (source / "install-lib" / "ws_sync.py").write_text("", encoding="utf-8")
-    (source / ".agents").mkdir()
-    (source / ".agents" / "VERSION").write_text("0.2.0\n", encoding="utf-8")
+    (source / "runtime").mkdir()
+    (source / "runtime" / "VERSION").write_text("0.2.0\n", encoding="utf-8")
     (install / ".agents").mkdir(parents=True)
     (install / ".agents" / "VERSION").write_text("0.2.0\n", encoding="utf-8")
     (install / updater.MANIFEST_REL).write_text(
@@ -521,8 +526,8 @@ def test_remote_origin_local_checkout_requires_matching_symbolic_branch(
     (source / ".git").mkdir(parents=True)
     (source / "install-lib").mkdir()
     (source / "install-lib" / "ws_sync.py").write_text("", encoding="utf-8")
-    (source / ".agents").mkdir()
-    (source / ".agents" / "VERSION").write_text("0.2.0\n", encoding="utf-8")
+    (source / "runtime").mkdir()
+    (source / "runtime" / "VERSION").write_text("0.2.0\n", encoding="utf-8")
     (install / ".agents").mkdir(parents=True)
     (install / ".agents" / "VERSION").write_text("0.1.0\n", encoding="utf-8")
     (install / updater.MANIFEST_REL).write_text(
@@ -559,8 +564,8 @@ def test_remote_origin_local_checkout_rejects_origin_change_without_network(monk
     (source / ".git").mkdir(parents=True)
     (source / "install-lib").mkdir()
     (source / "install-lib" / "ws_sync.py").write_text("", encoding="utf-8")
-    (source / ".agents").mkdir()
-    (source / ".agents" / "VERSION").write_text("0.2.0\n", encoding="utf-8")
+    (source / "runtime").mkdir()
+    (source / "runtime" / "VERSION").write_text("0.2.0\n", encoding="utf-8")
     (install / ".agents").mkdir(parents=True)
     (install / ".agents" / "VERSION").write_text("0.1.0\n", encoding="utf-8")
     (install / updater.MANIFEST_REL).write_text(
@@ -656,6 +661,8 @@ def test_linked_worktree_marker_is_accepted_for_local_checkout(monkeypatch, tmp_
     (source / ".git").write_text("gitdir: /tmp/example-worktree-metadata\n", encoding="utf-8")
     (source / "install-lib").mkdir()
     (source / "install-lib" / "ws_sync.py").write_text("", encoding="utf-8")
+    (source / "runtime").mkdir()
+    (source / "runtime" / "VERSION").write_text("0.1.0\n", encoding="utf-8")
     manifest = install / updater.MANIFEST_REL
     manifest.parent.mkdir(parents=True)
     manifest.write_text(
@@ -687,8 +694,8 @@ def test_detached_copy_manifest_choice_requests_only_branch_and_remote_rebind_is
     install = tmp_path / "install"
     detached = tmp_path / "detached"
     (detached / ".git").mkdir(parents=True)
-    (detached / ".agents").mkdir()
-    (detached / ".agents" / "VERSION").write_text("0.2.0\n", encoding="utf-8")
+    (detached / "runtime").mkdir()
+    (detached / "runtime" / "VERSION").write_text("0.2.0\n", encoding="utf-8")
     (detached / "install-lib").mkdir()
     (detached / "install-lib" / "ws_sync.py").write_text("", encoding="utf-8")
     manifest_path = _write_copy_manifest(
@@ -773,15 +780,15 @@ def test_local_checkout_rebind_verifies_origin_branch_and_preserves_manifest(tmp
     install = tmp_path / "install"
     manifest_path = _write_copy_manifest(install, source_repo="")
     source = tmp_path / "source"
-    (source / ".agents").mkdir(parents=True)
-    (source / ".agents" / "VERSION").write_text("0.2.0\n", encoding="utf-8")
+    (source / "runtime").mkdir(parents=True)
+    (source / "runtime" / "VERSION").write_text("0.2.0\n", encoding="utf-8")
     (source / "install-lib").mkdir()
     (source / "install-lib" / "ws_sync.py").write_text("", encoding="utf-8")
     subprocess.run(["git", "init", str(source)], check=True, capture_output=True, text=True)
     _git(source, "config", "user.name", "Updater Rebind")
     _git(source, "config", "user.email", "updater-rebind@example.test")
     _git(source, "checkout", "-b", "feature/local")
-    _git(source, "add", ".agents", "install-lib")
+    _git(source, "add", "runtime", "install-lib")
     _git(source, "commit", "-m", "source")
     remote = tmp_path / "source.git"
     subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True, text=True)
@@ -820,15 +827,15 @@ def test_legacy_local_choice_derives_attached_checkout_origin_and_branch(tmp_pat
     assert local_choice["fields"] == ["source_checkout"]
 
     source = tmp_path / "attached-source"
-    (source / ".agents").mkdir(parents=True)
-    (source / ".agents" / "VERSION").write_text("0.2.0\n", encoding="utf-8")
+    (source / "runtime").mkdir(parents=True)
+    (source / "runtime" / "VERSION").write_text("0.2.0\n", encoding="utf-8")
     (source / "install-lib").mkdir()
     (source / "install-lib" / "ws_sync.py").write_text("", encoding="utf-8")
     subprocess.run(["git", "init", str(source)], check=True, capture_output=True, text=True)
     _git(source, "config", "user.name", "Updater Rebind")
     _git(source, "config", "user.email", "updater-rebind@example.test")
     _git(source, "checkout", "-b", "feature/inferred")
-    _git(source, "add", ".agents", "install-lib")
+    _git(source, "add", "runtime", "install-lib")
     _git(source, "commit", "-m", "source")
     remote = tmp_path / "attached.git"
     subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True, text=True)
@@ -853,15 +860,15 @@ def test_detached_git_local_rebind_fails_closed_without_manifest_churn(tmp_path:
     install = tmp_path / "install"
     manifest_path = _write_copy_manifest(install, source_repo="")
     source = tmp_path / "detached-local-source"
-    (source / ".agents").mkdir(parents=True)
-    (source / ".agents" / "VERSION").write_text("0.2.0\n", encoding="utf-8")
+    (source / "runtime").mkdir(parents=True)
+    (source / "runtime" / "VERSION").write_text("0.2.0\n", encoding="utf-8")
     (source / "install-lib").mkdir()
     (source / "install-lib" / "ws_sync.py").write_text("", encoding="utf-8")
     subprocess.run(["git", "init", str(source)], check=True, capture_output=True, text=True)
     _git(source, "config", "user.name", "Updater Rebind")
     _git(source, "config", "user.email", "updater-rebind@example.test")
     _git(source, "checkout", "-b", "feature/local")
-    _git(source, "add", ".agents", "install-lib")
+    _git(source, "add", "runtime", "install-lib")
     _git(source, "commit", "-m", "source")
     _git(source, "checkout", "--detach", "HEAD")
     before = manifest_path.read_bytes()
@@ -927,15 +934,15 @@ def test_attached_git_and_nongit_local_rebinds_are_explicitly_supported(tmp_path
     attached_install = tmp_path / "attached-install"
     attached_manifest = _write_copy_manifest(attached_install, source_repo="")
     attached = tmp_path / "attached-local-source"
-    (attached / ".agents").mkdir(parents=True)
-    (attached / ".agents" / "VERSION").write_text("0.2.0\n", encoding="utf-8")
+    (attached / "runtime").mkdir(parents=True)
+    (attached / "runtime" / "VERSION").write_text("0.2.0\n", encoding="utf-8")
     (attached / "install-lib").mkdir()
     (attached / "install-lib" / "ws_sync.py").write_text("", encoding="utf-8")
     subprocess.run(["git", "init", str(attached)], check=True, capture_output=True, text=True)
     _git(attached, "config", "user.name", "Updater Rebind")
     _git(attached, "config", "user.email", "updater-rebind@example.test")
     _git(attached, "checkout", "-b", "feature/local")
-    _git(attached, "add", ".agents", "install-lib")
+    _git(attached, "add", "runtime", "install-lib")
     _git(attached, "commit", "-m", "source")
 
     attached_result = updater.rebind_source(
@@ -953,8 +960,8 @@ def test_attached_git_and_nongit_local_rebinds_are_explicitly_supported(tmp_path
     nongit_install = tmp_path / "nongit-install"
     nongit_manifest = _write_copy_manifest(nongit_install, source_repo="")
     nongit = tmp_path / "nongit-source"
-    (nongit / ".agents").mkdir(parents=True)
-    (nongit / ".agents" / "VERSION").write_text("0.2.0\n", encoding="utf-8")
+    (nongit / "runtime").mkdir(parents=True)
+    (nongit / "runtime" / "VERSION").write_text("0.2.0\n", encoding="utf-8")
     (nongit / "install-lib").mkdir()
     (nongit / "install-lib" / "ws_sync.py").write_text("", encoding="utf-8")
 
@@ -1043,8 +1050,8 @@ def test_rebind_rejects_stale_digest_and_local_mismatch_without_byte_change(monk
 
     source = tmp_path / "source"
     (source / ".git").mkdir(parents=True)
-    (source / ".agents").mkdir()
-    (source / ".agents" / "VERSION").write_text("0.2.0\n", encoding="utf-8")
+    (source / "runtime").mkdir()
+    (source / "runtime" / "VERSION").write_text("0.2.0\n", encoding="utf-8")
     (source / "install-lib").mkdir()
     (source / "install-lib" / "ws_sync.py").write_text("", encoding="utf-8")
     monkeypatch.setattr(updater, "_checkout_origin", lambda _checkout: "ssh://example.test/actual.git")
@@ -1081,8 +1088,8 @@ def test_local_rebind_rechecks_checkout_head_at_manifest_commit_boundary(monkeyp
     inode_before = manifest.stat().st_ino
     source = tmp_path / "source"
     (source / ".git").mkdir(parents=True)
-    (source / ".agents").mkdir()
-    (source / ".agents" / "VERSION").write_text("0.2.0\n", encoding="utf-8")
+    (source / "runtime").mkdir()
+    (source / "runtime" / "VERSION").write_text("0.2.0\n", encoding="utf-8")
     (source / "install-lib").mkdir()
     (source / "install-lib" / "ws_sync.py").write_text("", encoding="utf-8")
     monkeypatch.setattr(updater, "_checkout_origin", lambda _checkout: "ssh://example.test/team/source.git")
@@ -1227,8 +1234,8 @@ def test_apply_noop_revalidates_original_manifest_snapshot(monkeypatch, tmp_path
     source = tmp_path / "source"
     (source / "install-lib").mkdir(parents=True)
     (source / "install-lib" / "ws_sync.py").write_text("", encoding="utf-8")
-    (source / ".agents").mkdir()
-    (source / ".agents" / "VERSION").write_text("0.1.0\n", encoding="utf-8")
+    (source / "runtime").mkdir()
+    (source / "runtime" / "VERSION").write_text("0.1.0\n", encoding="utf-8")
     manifest = _write_copy_manifest(
         install,
         source_origin="local",

@@ -23,5 +23,6 @@ Include the affected commit or release candidate, operating system, minimal repr
 - Multi-file KB writes use explicit targets, journaling, locks, revision checks, and scoped checkpoints.
 - Update provenance preserves local checkouts and forks; unknown legacy provenance requires a user choice.
 - Install, update, migration, and uninstall do not treat private `kb/` as release content.
+- Repository-local `/.agents/` is ignored local tooling and is never enumerated, hashed, validated, or installed as product payload; only tracked `skills/` and `runtime/` feed the release mapping.
 
 If a report could weaken one of these invariants, treat it as security-sensitive even when it is not a conventional remote-code-execution issue.

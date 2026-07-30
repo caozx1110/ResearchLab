@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
-from repo_paths import REPO_ROOT
+from repo_paths import REPO_ROOT, source_path
 
 import pytest
 
@@ -66,7 +66,7 @@ def _record(root: Path, summary: str, **overrides: object) -> tuple[dict, bool]:
 
 
 def _load_owner_script(relative_path: str, module_name: str):
-    script = REPO_ROOT / relative_path
+    script = source_path(relative_path)
     spec = importlib.util.spec_from_file_location(module_name, script)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
