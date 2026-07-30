@@ -37,6 +37,7 @@ from research.bibliography import citation_key_for_unit_id, normalize_arxiv_id, 
 from research.analyzer_registry import UNIT_ANALYZER_PREPARE_BY_KIND
 from research.common import add_project_root_argument, confirm_command as shared_confirm_command, extract_pdf_record, load_yaml, parse_arxiv_id, print_resolved_project_roots, skill_script_for_command
 from research.confirm import require_user_authorization
+from research.diagnostics import publish_runtime_failure_stage
 from research.journal import mutation_transaction
 from research.intake_cli import add_intake_add_arguments
 from research.ids import canonical_unit_id_with_hash
@@ -83,6 +84,35 @@ HUMAN_NOTE_MAX_BYTES = 1024 * 1024
 HUMAN_NOTE_ORIGIN = "human-note"
 HUMAN_NOTE_REVIEW_SCHEMA = "kb-obsidian-review-sheet/v1"
 HUMAN_NOTE_REVIEW_MARKER = re.compile(r"<!--\s*kb-review-batch:[0-9a-f]{64}\s*-->", re.IGNORECASE)
+_INTAKE_FAILURE_STAGE_ATTRIBUTE = "_research_intake_failure_stage"
+
+
+def _tag_intake_failure(exc: BaseException, stage: str) -> None:
+    """Attach only a stable internal stage token; never attach exception text."""
+
+    if not getattr(exc, _INTAKE_FAILURE_STAGE_ATTRIBUTE, ""):
+        setattr(exc, _INTAKE_FAILURE_STAGE_ATTRIBUTE, stage)
+
+
+def _intake_failure_stage(exc: BaseException, *, default: str) -> str:
+    return str(getattr(exc, _INTAKE_FAILURE_STAGE_ATTRIBUTE, "") or default)
+
+
+def _call_at_intake_stage(stage: str, callback, *args, **kwargs):
+    try:
+        return callback(*args, **kwargs)
+    except (Exception, SystemExit) as exc:
+        _tag_intake_failure(exc, stage)
+        raise
+
+
+def _publish_intake_failure_stage(root: Path, operation: str, exc: BaseException) -> None:
+    publish_runtime_failure_stage(
+        root,
+        skill="source-intake",
+        operation=operation,
+        failure_stage=_intake_failure_stage(exc, default="unknown"),
+    )
 
 
 def infer_title(source: str) -> str:
@@ -1468,16 +1498,23 @@ def _finish_prepared_record(
 
 
 def _prepare_intake_snapshot(root: Path, args: argparse.Namespace) -> dict[str, object]:
-    source, initial_title, paper_metadata, staged_candidate, staged_search = _resolve_intake_request(
-        root, args
+    source, initial_title, paper_metadata, staged_candidate, staged_search = _call_at_intake_stage(
+        "source-recognition",
+        _resolve_intake_request,
+        root,
+        args,
     )
-    _assert_expected_literature_stage_digest(root, args)
+    _call_at_intake_stage(
+        "source-recognition", _assert_expected_literature_stage_digest, root, args
+    )
     candidate_digest = _candidate_binding_digest(
         stage=staged_search,
         candidate=staged_candidate,
     )
-    source_input_digest = _source_input_digest(root, source)
-    token, prepared_root = _new_prepared_dir(root)
+    source_input_digest = _call_at_intake_stage(
+        "source-recognition", _source_input_digest, root, source
+    )
+    token, prepared_root = _call_at_intake_stage("prepare-freeze", _new_prepared_dir, root)
     try:
         if staged_candidate is not None and staged_search is not None:
             if str(getattr(args, "expected_literature_stage_digest", "") or ""):
@@ -1708,7 +1745,9 @@ def _prepare_intake_snapshot(root: Path, args: argparse.Namespace) -> dict[str, 
         payload["manifest_digest"] = _canonical_digest(payload)
         _write_prepared_manifest(prepared_root / "prepared.json", payload)
         return payload
-    except BaseException:
+    except BaseException as exc:
+        if isinstance(exc, (Exception, SystemExit)):
+            _tag_intake_failure(exc, "prepare-freeze")
         _safe_remove_prepared(root, token)
         raise
 
@@ -1969,13 +2008,20 @@ def _batch_dedup_key(
 
 
 def _run_batch_add(root: Path, raw_items: list[str]) -> dict[str, object]:
+    failure_stage = "source-recognition"
     if not 1 <= len(raw_items) <= BATCH_INTAKE_MAX_ITEMS:
-        raise SystemExit(f"Batch intake requires 1..{BATCH_INTAKE_MAX_ITEMS} items.")
-    args_items = [_batch_item_args(raw) for raw in raw_items]
+        exc = SystemExit(f"Batch intake requires 1..{BATCH_INTAKE_MAX_ITEMS} items.")
+        _tag_intake_failure(exc, failure_stage)
+        raise exc
+    args_items = [
+        _call_at_intake_stage("source-recognition", _batch_item_args, raw)
+        for raw in raw_items
+    ]
     prepared_rows: list[tuple[argparse.Namespace, dict[str, object], str]] = []
     prepared_tokens: list[str] = []
     try:
         # Finish all external snapshot/parse work before the first canonical write.
+        failure_stage = "prepare-freeze"
         for item_args in args_items:
             prepared = _prepare_intake_snapshot(root, item_args)
             token = str(prepared["token"])
@@ -1996,8 +2042,10 @@ def _run_batch_add(root: Path, raw_items: list[str]) -> dict[str, object]:
         ready: list[dict[str, object]] = []
         outcomes: dict[tuple[str, str], dict[str, object]] = {}
         for item_args, _prepared, token in unique_rows:
-            _claim_prepared_intake(root, token)
-            prepared, stage_dir = _load_prepared_intake(root, item_args, token)
+            _call_at_intake_stage("prepare-freeze", _claim_prepared_intake, root, token)
+            prepared, stage_dir = _call_at_intake_stage(
+                "prepare-freeze", _load_prepared_intake, root, item_args, token
+            )
             if str(prepared.get("superseded_record_relative") or ""):
                 raise SystemExit("Source upgrades must be applied as a single-item intake.")
             record = prepared.get("record")
@@ -2017,7 +2065,9 @@ def _run_batch_add(root: Path, raw_items: list[str]) -> dict[str, object]:
                 canonical_pools=list(record.get("candidate_pools") or []),
                 canonical_inputs=canonical_inputs,
             )
-            _load_prepared_intake(root, item_args, token)
+            _call_at_intake_stage(
+                "prepare-freeze", _load_prepared_intake, root, item_args, token
+            )
             record["payload"]["preference_contract"] = operation_contract(
                 skill="source-intake", operation="add"
             )
@@ -2058,6 +2108,7 @@ def _run_batch_add(root: Path, raw_items: list[str]) -> dict[str, object]:
             )
 
         if ready:
+            failure_stage = "canonical-transaction"
             seed_targets = [path for path in _workspace_seed_paths(root) if not path.exists()]
             checkpoint_targets = [*seed_targets, *_index_target_paths(root)]
             for item in ready:
@@ -2099,8 +2150,16 @@ def _run_batch_add(root: Path, raw_items: list[str]) -> dict[str, object]:
                     assert isinstance(item_args, argparse.Namespace)
                     assert isinstance(prepared, dict) and isinstance(record, dict)
                     assert isinstance(source_info, dict) and isinstance(stage_dir, Path)
-                    _load_prepared_intake(root, item_args, str(prepared["token"]))
-                    path, duplicate, _canonical_source_info = _materialize_staged_source(
+                    _call_at_intake_stage(
+                        "prepare-freeze",
+                        _load_prepared_intake,
+                        root,
+                        item_args,
+                        str(prepared["token"]),
+                    )
+                    path, duplicate, _canonical_source_info = _call_at_intake_stage(
+                        "materialization",
+                        _materialize_staged_source,
                         root,
                         kind=item_args.kind,
                         source=str(prepared.get("source") or ""),
@@ -2119,7 +2178,10 @@ def _run_batch_add(root: Path, raw_items: list[str]) -> dict[str, object]:
                         "unit_id": str(record["id"]),
                     }
                 _build_index_transaction(root)
-            checkpoint_and_report(
+            failure_stage = "checkpoint"
+            _call_at_intake_stage(
+                "checkpoint",
+                checkpoint_and_report,
                 root,
                 trigger="milestone",
                 message=f"milestone: intake batch ({len(ready)})",
@@ -2140,6 +2202,9 @@ def _run_batch_add(root: Path, raw_items: list[str]) -> dict[str, object]:
             "duplicate_count": sum(1 for item in results if item["status"] != "created"),
             "results": results,
         }
+    except (Exception, SystemExit) as exc:
+        _tag_intake_failure(exc, failure_stage)
+        raise
     finally:
         for token in prepared_tokens:
             _safe_remove_prepared(root, token)
@@ -2423,75 +2488,81 @@ def _execute_intake_transaction(
     auto_outputs: list[str] = []
     note_created = False
     updated_stage_path: Path | None = None
-    with mutation_transaction(
-        root,
-        "source-intake-add",
-        targets,
-        commit_guard=lambda: _single_commit_guard(root, args, prepared),
-    ):
-        _assert_expected_literature_stage_digest(root, args)
-        superseded_record: dict | None = None
-        if superseded_path is not None:
-            superseded_record, current_path = locate_record(
-                root,
-                superseded_id,
-                kind="paper",
-                fuzzy=False,
-            )
-            if (
-                current_path != superseded_path
-                or _path_snapshot_digest(current_path) != superseded_digest
-                or not _source_upgrade_identity_matches(superseded_record, source, title)
-                or not _source_upgrade_is_complete(source_info)
-            ):
-                raise SystemExit("The source-upgrade binding changed before publication.")
-            _ensure_source_revision_link(record, superseded_id, "supersedes")
-        path, concurrent_duplicate, canonical_source_info = _materialize_staged_source(
+    try:
+        with mutation_transaction(
             root,
-            kind=args.kind,
-            source=source,
-            title=title,
-            record=record,
-            source_info=source_info,
-            stage_dir=stage_dir,
-            source_origin=str(getattr(args, "source_origin", "") or ""),
-            superseded_record_id=superseded_id,
-        )
-        if concurrent_duplicate:
-            raise SystemExit(
-                "A duplicate appeared after intake preparation; retry with a fresh snapshot."
-            )
-        if path is None:
-            raise RuntimeError("Source materialization completed without a canonical record path.")
-
-        if superseded_record is not None:
-            superseded_record["status"] = "archived"
-            _ensure_source_revision_link(
-                superseded_record,
-                str(record.get("id") or ""),
-                "superseded_by",
-            )
-            append_history(
-                superseded_record,
-                action="source-revision-superseded",
-                summary="Archived after a complete replacement source was materialized as a new unit.",
-                information_types=["fact"],
-            )
-            write_record(root, superseded_record)
-
-        # Source intake never authors or prepares research understanding.  The
-        # public wrapper consumes link_autodrive and, when requested, starts the
-        # analyzer's unified deep-read prepare after this transaction commits.
-
-        _build_index_transaction(root)
-        if args.stage_id and args.candidate_id:
-            updated_stage_path = mark_search_candidate(
+            "source-intake-add",
+            targets,
+            commit_guard=lambda: _single_commit_guard(root, args, prepared),
+        ):
+            _assert_expected_literature_stage_digest(root, args)
+            superseded_record: dict | None = None
+            if superseded_path is not None:
+                superseded_record, current_path = locate_record(
+                    root,
+                    superseded_id,
+                    kind="paper",
+                    fuzzy=False,
+                )
+                if (
+                    current_path != superseded_path
+                    or _path_snapshot_digest(current_path) != superseded_digest
+                    or not _source_upgrade_identity_matches(superseded_record, source, title)
+                    or not _source_upgrade_is_complete(source_info)
+                ):
+                    raise SystemExit("The source-upgrade binding changed before publication.")
+                _ensure_source_revision_link(record, superseded_id, "supersedes")
+            path, concurrent_duplicate, canonical_source_info = _call_at_intake_stage(
+                "materialization",
+                _materialize_staged_source,
                 root,
-                args.stage_id,
-                args.candidate_id,
-                status="materialized",
-                record_id=str(record["id"]),
+                kind=args.kind,
+                source=source,
+                title=title,
+                record=record,
+                source_info=source_info,
+                stage_dir=stage_dir,
+                source_origin=str(getattr(args, "source_origin", "") or ""),
+                superseded_record_id=superseded_id,
             )
+            if concurrent_duplicate:
+                raise SystemExit(
+                    "A duplicate appeared after intake preparation; retry with a fresh snapshot."
+                )
+            if path is None:
+                raise RuntimeError("Source materialization completed without a canonical record path.")
+
+            if superseded_record is not None:
+                superseded_record["status"] = "archived"
+                _ensure_source_revision_link(
+                    superseded_record,
+                    str(record.get("id") or ""),
+                    "superseded_by",
+                )
+                append_history(
+                    superseded_record,
+                    action="source-revision-superseded",
+                    summary="Archived after a complete replacement source was materialized as a new unit.",
+                    information_types=["fact"],
+                )
+                write_record(root, superseded_record)
+
+            # Source intake never authors or prepares research understanding.  The
+            # public wrapper consumes link_autodrive and, when requested, starts the
+            # analyzer's unified deep-read prepare after this transaction commits.
+
+            _build_index_transaction(root)
+            if args.stage_id and args.candidate_id:
+                updated_stage_path = mark_search_candidate(
+                    root,
+                    args.stage_id,
+                    args.candidate_id,
+                    status="materialized",
+                    record_id=str(record["id"]),
+                )
+    except (Exception, SystemExit) as exc:
+        _tag_intake_failure(exc, "canonical-transaction")
+        raise
     return path, None, canonical_source_info, auto_outputs, note_created, updated_stage_path
 
 
@@ -2501,7 +2572,13 @@ def main() -> int:
     print_resolved_project_roots(root)
 
     if args.command == "human-note":
-        args = _normalize_human_note_args(root, args)
+        try:
+            args = _call_at_intake_stage(
+                "source-recognition", _normalize_human_note_args, root, args
+            )
+        except (Exception, SystemExit) as exc:
+            _publish_intake_failure_stage(root, "add", exc)
+            raise
 
     if args.command in {"search", "stage-search"}:
         ensure_workspace(root)
@@ -2533,6 +2610,8 @@ def main() -> int:
         try:
             payload = _run_batch_add(root, list(args.item or []))
         except (Exception, SystemExit) as exc:
+            # The dispatcher exposes both single and batch intake as `kb add`.
+            _publish_intake_failure_stage(root, "add", exc)
             error = str(exc).strip() or exc.__class__.__name__
             raise SystemExit(f"Batch source intake failed; retry is safe: {error}") from exc
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
@@ -2546,6 +2625,7 @@ def main() -> int:
         try:
             prepared = _prepare_intake_snapshot(root, args)
         except (Exception, SystemExit) as exc:
+            _publish_intake_failure_stage(root, "add", exc)
             error = str(exc).strip() or exc.__class__.__name__
             raise SystemExit(f"Source intake failed; retry is safe: {error}") from exc
         print(
@@ -2569,13 +2649,17 @@ def main() -> int:
         try:
             token = str(_prepare_intake_snapshot(root, args)["token"])
         except (Exception, SystemExit) as exc:
+            _publish_intake_failure_stage(root, "add", exc)
             error = str(exc).strip() or exc.__class__.__name__
             raise SystemExit(f"Source intake failed; retry is safe: {error}") from exc
     claimed = False
+    failure_stage = "prepare-freeze"
     try:
-        _claim_prepared_intake(root, token)
+        _call_at_intake_stage("prepare-freeze", _claim_prepared_intake, root, token)
         claimed = True
-        prepared, stage_dir = _load_prepared_intake(root, args, token)
+        prepared, stage_dir = _call_at_intake_stage(
+            "prepare-freeze", _load_prepared_intake, root, args, token
+        )
         record = prepared["record"]
         source_info = prepared["source_info"]
         canonical_inputs = prepared["canonical_inputs"]
@@ -2596,7 +2680,7 @@ def main() -> int:
         )
         # Re-open every external and canonical input after receipt validation so
         # a same-path mutation cannot be promoted with the old receipt.
-        _load_prepared_intake(root, args, token)
+        _call_at_intake_stage("prepare-freeze", _load_prepared_intake, root, args, token)
 
         record["payload"]["preference_contract"] = operation_contract(
             skill="source-intake", operation="add"
@@ -2628,7 +2712,9 @@ def main() -> int:
                 raise SystemExit(
                     "A duplicate appeared after intake preparation; retry with a fresh snapshot."
                 )
-            _attach_duplicate_selection_and_mark(
+            _call_at_intake_stage(
+                "canonical-transaction",
+                _attach_duplicate_selection_and_mark,
                 root,
                 args=args,
                 duplicate=duplicate,
@@ -2644,7 +2730,8 @@ def main() -> int:
             print(f"[ok] duplicate detected: {duplicate['id']}")
             return 0
 
-        ensure_workspace(root)
+        failure_stage = "canonical-transaction"
+        _call_at_intake_stage("canonical-transaction", ensure_workspace, root)
         created_seed_paths = [path for path in missing_seed_paths if path.exists()]
         backup_warning = str(source_info.get("backup_warning") or "").strip()
         parse_cache_path = (
@@ -2695,12 +2782,16 @@ def main() -> int:
             checkpoint_targets.append(root / superseded_relative)
         if updated_stage_path is not None:
             checkpoint_targets.append(updated_stage_path)
-        checkpoint_and_report(
+        failure_stage = "checkpoint"
+        _call_at_intake_stage(
+            "checkpoint",
+            checkpoint_and_report,
             root,
             trigger="milestone",
             message=f"milestone: intake {args.kind} {record['id']}",
             target_paths=list(dict.fromkeys(checkpoint_targets)),
         )
+        failure_stage = "unknown"
         for hint in guidance_hints(
             args.kind,
             paper_preferences,
@@ -2712,6 +2803,10 @@ def main() -> int:
             print(f"[source] upgraded_from={superseded_id}")
         print(next_for_agent_intake(root, args.kind, record["id"]))
         return 0
+    except (Exception, SystemExit) as exc:
+        _tag_intake_failure(exc, failure_stage)
+        _publish_intake_failure_stage(root, "add", exc)
+        raise
     finally:
         if claimed or created_here:
             _safe_remove_prepared(root, token)

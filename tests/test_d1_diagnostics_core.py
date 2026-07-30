@@ -19,6 +19,7 @@ from research.diagnostics import (
     diagnostics_policy,
     export_diagnostic_preview,
     list_diagnostic_issues,
+    publish_runtime_failure_stage,
     record_diagnostic_issue,
     redact_diagnostic_text,
     review_diagnostic_issue,
@@ -159,6 +160,100 @@ def test_automatic_capture_respects_off_but_explicit_capture_does_not(tmp_path: 
     assert automatic["error_class"] == "owner-nonzero-exit"
     assert automatic["bundle_version"] == "0.2.0-rc.1"
     assert automatic["source_commit"] == "9dcd1ad6134e7700fbfe641d938dae6958af71f4"
+
+
+def test_intake_failure_stage_handoff_is_allowlisted_private_and_consumed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _workspace(tmp_path)
+    write_runtime_preferences(root, {"diagnostics": {"mode": "errors-only"}})
+    monkeypatch.setattr(diagnostics_module.os, "getppid", diagnostics_module.os.getpid)
+
+    assert publish_runtime_failure_stage(
+        root,
+        skill="source-intake",
+        operation="add",
+        failure_stage="materialization",
+    ) is True
+    receipt_directory = root / "kb" / ".runtime" / "diagnostics" / "failure-stages"
+    receipts = list(receipt_directory.glob("*.json"))
+    assert len(receipts) == 1
+    receipt = json.loads(receipts[0].read_text(encoding="ascii"))
+    assert set(receipt) == {
+        "schema",
+        "parent_pid",
+        "skill",
+        "operation",
+        "failure_stage",
+        "created_at_epoch",
+    }
+    assert receipt["failure_stage"] == "materialization"
+    assert receipt["skill"] == "source-intake"
+    assert receipt["operation"] == "add"
+    assert receipts[0].stat().st_mode & 0o777 == 0o600
+
+    issue = capture_runtime_failure(
+        root,
+        skill="source-intake",
+        operation="add",
+        returncode=1,
+        public_summary="知识库操作未完成。",
+    )
+    assert issue is not None
+    assert issue["failure_stage"] == "materialization"
+    assert issue["error_class"] == "owner-nonzero-exit.materialization"
+    assert list(receipt_directory.glob("*.json")) == []
+    assert export_diagnostic_preview(root, authorized=True)["issues"][0]["failure_stage"] == "materialization"
+
+    unknown = capture_runtime_failure(
+        root,
+        skill="source-intake",
+        operation="add",
+        returncode=1,
+        public_summary="知识库操作未完成。",
+    )
+    assert unknown is not None
+    assert unknown["failure_stage"] == "unknown"
+    assert unknown["error_class"] == "owner-nonzero-exit.unknown"
+
+
+def test_intake_failure_stage_handoff_fails_closed_on_unsafe_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _workspace(tmp_path)
+    write_runtime_preferences(root, {"diagnostics": {"mode": "errors-only"}})
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    parent = root / "kb" / ".runtime" / "diagnostics"
+    parent.mkdir(parents=True)
+    (parent / "failure-stages").symlink_to(outside, target_is_directory=True)
+    monkeypatch.setattr(diagnostics_module.os, "getppid", diagnostics_module.os.getpid)
+
+    assert publish_runtime_failure_stage(
+        root,
+        skill="source-intake",
+        operation="add",
+        failure_stage="checkpoint",
+    ) is False
+    assert list(outside.iterdir()) == []
+
+
+def test_intake_failure_stage_handoff_off_mode_writes_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _workspace(tmp_path)
+    monkeypatch.setattr(diagnostics_module.os, "getppid", diagnostics_module.os.getpid)
+
+    assert publish_runtime_failure_stage(
+        root,
+        skill="source-intake",
+        operation="add",
+        failure_stage="checkpoint",
+    ) is False
+    assert not (root / "kb").exists()
 
 
 def test_personal_automatic_capture_keeps_only_normalized_mechanical_fields_and_export_strips_them(

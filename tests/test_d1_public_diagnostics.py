@@ -9,6 +9,9 @@ from pathlib import Path
 
 from repo_paths import REPO_ROOT
 
+from research.diagnostics import list_diagnostic_issues
+from research.prefs import write_runtime_preferences
+
 
 PUBLIC_VERBS = (
     "help",
@@ -209,6 +212,32 @@ def test_capture_exception_preserves_original_exit_and_public_text(
     ]
     assert "secret traceback" not in protocol_text
     assert "/absolute/private/path" not in protocol_text
+
+
+def test_real_intake_child_hands_allowlisted_failure_stage_to_dispatcher(tmp_path: Path) -> None:
+    kb = _load_kb_cli()
+    write_runtime_preferences(tmp_path, {"diagnostics": {"mode": "errors-only"}})
+    kb._ACTIVE_PUBLIC_VERB = "add"
+
+    result = kb.forward_command(
+        tmp_path,
+        ".agents/skills/source-intake/scripts/intake.py",
+        ["add", "--kind", "blog", "--source", ""],
+        stream=False,
+    )
+
+    assert result.returncode == 1
+    issues = list_diagnostic_issues(tmp_path, skill="source-intake")
+    assert len(issues) == 1
+    assert issues[0]["failure_stage"] == "source-recognition"
+    assert issues[0]["error_class"] == "owner-nonzero-exit.source-recognition"
+    serialized = (tmp_path / "kb" / "memory" / "skill-evolution" / "issues.yaml").read_text(
+        encoding="utf-8"
+    )
+    assert str(tmp_path) not in serialized
+    assert list(
+        (tmp_path / "kb" / ".runtime" / "diagnostics" / "failure-stages").glob("*.json")
+    ) == []
 
 
 def test_plain_doctor_is_read_only_and_does_not_run_private_diagnostics(
