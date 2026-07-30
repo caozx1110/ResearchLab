@@ -632,6 +632,85 @@ def test_private_detail_replace_conflict_fails_closed_and_preserves_old_backup(
     assert stat.S_IMODE(backups[0].stat().st_mode) == 0o600
 
 
+def test_private_detail_recovery_backup_is_single_bounded_slot_and_next_write_cleans_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _workspace(tmp_path)
+    _enable_detail(root)
+    first = _capture(root, envelope=_envelope())
+    detail_path = diagnostic_detail_path(root, str(first["id"]))
+    old_bytes = detail_path.read_bytes()
+    original_replace = os.replace
+    conflicts = 0
+
+    def replace_then_conflict(
+        source: object,
+        destination: object,
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        nonlocal conflicts
+        original_replace(source, destination, *args, **kwargs)
+        if (
+            isinstance(source, str)
+            and source.startswith(f".{detail_path.name}.")
+            and source.endswith(".tmp")
+            and destination == detail_path.name
+            and kwargs.get("dst_dir_fd") is not None
+        ):
+            directory = int(kwargs["dst_dir_fd"])
+            os.unlink(detail_path.name, dir_fd=directory)
+            third_party = os.open(
+                detail_path.name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=directory,
+            )
+            try:
+                os.fchmod(third_party, 0o600)
+                os.write(third_party, f"conflict-{conflicts}\n".encode("ascii"))
+                os.fsync(third_party)
+            finally:
+                os.close(third_party)
+            conflicts += 1
+
+    monkeypatch.setattr(os, "replace", replace_then_conflict)
+    for _ in range(3):
+        fallback = _capture(root, envelope=_envelope())
+        assert "detail_ref" not in fallback
+        assert detail_path.read_bytes() == old_bytes
+        backups = list(detail_path.parent.glob(f".{detail_path.name}*.bak"))
+        assert len(backups) == 1
+        assert backups[0].read_bytes() == old_bytes
+
+    assert conflicts == 3
+    monkeypatch.setattr(os, "replace", original_replace)
+    recovered = _capture(root, envelope=_envelope())
+    assert recovered["detail_ref"].endswith(f"/{first['id']}.yaml")
+    assert list(detail_path.parent.glob(f".{detail_path.name}*.bak")) == []
+
+
+def test_private_detail_recovery_slot_mismatch_stays_bounded_and_fails_closed(
+    tmp_path: Path,
+) -> None:
+    root = _workspace(tmp_path)
+    _enable_detail(root)
+    first = _capture(root, envelope=_envelope())
+    detail_path = diagnostic_detail_path(root, str(first["id"]))
+    old_bytes = detail_path.read_bytes()
+    backup = detail_path.parent / f".{detail_path.name}.recovery.bak"
+    backup.write_bytes(b"mismatched recovery bytes\n")
+    backup.chmod(0o600)
+
+    fallback = _capture(root, envelope=_envelope())
+
+    assert "detail_ref" not in fallback
+    assert detail_path.read_bytes() == old_bytes
+    assert backup.read_bytes() == b"mismatched recovery bytes\n"
+    assert list(detail_path.parent.glob(f".{detail_path.name}*.bak")) == [backup]
+
+
 def test_private_detail_post_write_visibility_failure_restores_old_bytes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

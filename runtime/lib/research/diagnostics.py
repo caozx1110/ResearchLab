@@ -632,18 +632,15 @@ def _assert_detail_directory_visible(project_root: Path, descriptor: int) -> Non
         os.close(visible)
 
 
-def _read_detail_bytes(project_root: Path, issue_id: str) -> bytes:
-    directory = _open_detail_directory(project_root, create=False)
-    filename = f"{issue_id}.yaml"
+def _read_private_detail_file_at(directory: int, filename: str) -> tuple[bytes, os.stat_result]:
     flags = (
         os.O_RDONLY
+        | getattr(os, "O_NONBLOCK", 0)
         | getattr(os, "O_NOFOLLOW", 0)
         | getattr(os, "O_CLOEXEC", 0)
     )
-    descriptor: int | None = None
+    descriptor = os.open(filename, flags, dir_fd=directory)
     try:
-        _assert_detail_directory_visible(project_root, directory)
-        descriptor = os.open(filename, flags, dir_fd=directory)
         metadata = os.fstat(descriptor)
         visible = os.stat(filename, dir_fd=directory, follow_symlinks=False)
         if (
@@ -663,20 +660,30 @@ def _read_detail_bytes(project_root: Path, issue_id: str) -> bytes:
             chunks.append(chunk)
             remaining -= len(chunk)
         data = b"".join(chunks)
-        if len(data) > _DETAIL_MAX_BYTES:
-            raise ValueError("diagnostic detail artifact exceeds its byte budget")
         current = os.fstat(descriptor)
         visible = os.stat(filename, dir_fd=directory, follow_symlinks=False)
-        read_identity_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
-        if any(getattr(metadata, field) != getattr(current, field) for field in read_identity_fields):
+        identity_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if (
+            len(data) != metadata.st_size
+            or len(data) > _DETAIL_MAX_BYTES
+            or any(getattr(metadata, field) != getattr(current, field) for field in identity_fields)
+            or _directory_identity(current) != _directory_identity(visible)
+        ):
             raise PermissionError("diagnostic detail artifact changed during its anchored read")
-        if _directory_identity(current) != _directory_identity(visible):
-            raise PermissionError("diagnostic detail artifact is no longer visible")
+        return data, current
+    finally:
+        os.close(descriptor)
+
+
+def _read_detail_bytes(project_root: Path, issue_id: str) -> bytes:
+    directory = _open_detail_directory(project_root, create=False)
+    filename = f"{issue_id}.yaml"
+    try:
+        _assert_detail_directory_visible(project_root, directory)
+        data, _ = _read_private_detail_file_at(directory, filename)
         _assert_detail_directory_visible(project_root, directory)
         return data
     finally:
-        if descriptor is not None:
-            os.close(descriptor)
         os.close(directory)
 
 
@@ -687,7 +694,7 @@ def _write_detail_bytes(project_root: Path, issue_id: str, data: bytes) -> None:
     filename = f"{issue_id}.yaml"
     nonce = uuid.uuid4().hex
     temporary = f".{filename}.{nonce}.tmp"
-    backup = f".{filename}.{nonce}.bak"
+    backup = f".{filename}.recovery.bak"
     flags = (
         os.O_WRONLY
         | os.O_CREAT
@@ -710,6 +717,23 @@ def _write_detail_bytes(project_root: Path, issue_id: str, data: bytes) -> None:
             or stat.S_IMODE(existing.st_mode) != 0o600
         ):
             raise PermissionError("diagnostic detail artifact is not a private regular file")
+        try:
+            backup_metadata = os.stat(backup, dir_fd=directory, follow_symlinks=False)
+        except FileNotFoundError:
+            backup_metadata = None
+        if backup_metadata is not None:
+            if existing is None:
+                raise PermissionError("diagnostic detail recovery backup has no visible peer")
+            visible_bytes, _ = _read_private_detail_file_at(directory, filename)
+            backup_bytes, opened_backup = _read_private_detail_file_at(directory, backup)
+            current_backup = os.stat(backup, dir_fd=directory, follow_symlinks=False)
+            if (
+                visible_bytes != backup_bytes
+                or _directory_identity(opened_backup) != _directory_identity(current_backup)
+            ):
+                raise PermissionError("diagnostic detail recovery backup requires manual inspection")
+            os.unlink(backup, dir_fd=directory)
+            os.fsync(directory)
         descriptor = os.open(temporary, flags, 0o600, dir_fd=directory)
         os.fchmod(descriptor, 0o600)
         view = memoryview(data)
