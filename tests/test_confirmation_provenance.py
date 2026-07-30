@@ -31,7 +31,7 @@ def _project_root() -> Path:
 
 
 def _script_text(skill: str, script_name: str) -> str:
-    return (_project_root() / ".agents" / "skills" / skill / "scripts" / script_name).read_text(encoding="utf-8")
+    return (_project_root() / "skills" / skill / "scripts" / script_name).read_text(encoding="utf-8")
 
 
 def _has_required_arg(text: str, arg_name: str) -> bool:

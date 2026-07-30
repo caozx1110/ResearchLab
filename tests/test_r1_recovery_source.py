@@ -58,7 +58,7 @@ def _project_root() -> Path:
 
 
 def _load_intake_module():
-    script = _project_root() / ".agents" / "skills" / "source-intake" / "scripts" / "intake.py"
+    script = _project_root() / "skills" / "source-intake" / "scripts" / "intake.py"
     spec = importlib.util.spec_from_file_location("r1_source_intake_script", script)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -68,7 +68,7 @@ def _load_intake_module():
 
 
 def _load_config_module():
-    script = _project_root() / ".agents" / "skills" / "research-config-manager" / "scripts" / "config.py"
+    script = _project_root() / "skills" / "research-config-manager" / "scripts" / "config.py"
     spec = importlib.util.spec_from_file_location("r1_research_config_script", script)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -386,7 +386,7 @@ def test_subprocess_nested_covered_target_inherits_without_deadlock_and_escape_f
     unit_dir = tmp_path / "kb" / "units" / "blogs" / "b-subprocess"
     record_path = unit_dir / "record.yaml"
     outside = tmp_path / "kb" / "notes" / "subprocess-escape.md"
-    lib_root = _project_root() / ".agents" / "lib"
+    lib_root = _project_root() / "runtime" / "lib"
     child_code = """
 import sys
 from pathlib import Path
@@ -455,7 +455,7 @@ def test_subprocess_nested_commit_guard_rejects_preflight_and_body(tmp_path: Pat
     unit_dir = tmp_path / "kb" / "units" / "blogs" / "b-guarded-subprocess"
     record_path = unit_dir / "record.yaml"
     preflight_marker = unit_dir / "preflight-ran"
-    lib_root = _project_root() / ".agents" / "lib"
+    lib_root = _project_root() / "runtime" / "lib"
     child_code = """
 import sys
 from pathlib import Path

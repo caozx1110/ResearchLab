@@ -10,7 +10,7 @@ from research.core import UNIT_KIND_DIRS, kind_payload_skeleton
 
 def test_schema_payload_sections_are_backed_by_skeleton_keys() -> None:
     project_root = REPO_ROOT
-    schemas = project_root / ".agents/lib/research/SCHEMAS.md"
+    schemas = project_root / "runtime/lib/research/SCHEMAS.md"
     text = schemas.read_text(encoding="utf-8")
     table_lines = [line for line in text.splitlines() if re.match(r"^\| (paper|repo|dataset|blog|idea|experiment|concept) \|", line)]
 
@@ -25,7 +25,7 @@ def test_schema_payload_sections_are_backed_by_skeleton_keys() -> None:
 
 def test_schema_confirmation_gate_documents_default_confirmer_and_evidence() -> None:
     project_root = REPO_ROOT
-    text = (project_root / ".agents/lib/research/SCHEMAS.md").read_text(encoding="utf-8")
+    text = (project_root / "runtime/lib/research/SCHEMAS.md").read_text(encoding="utf-8")
 
     assert "`--confirmed-by` 或 `identity.default_confirmed_by`" in text
     assert "至少一条 `--evidence`" in text

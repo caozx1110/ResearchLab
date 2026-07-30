@@ -36,7 +36,7 @@ MUTATIONS = (
 
 def _experiment_module():
     project_root = REPO_ROOT
-    script = project_root / ".agents" / "skills" / "experiment-workbench" / "scripts" / "experiment.py"
+    script = project_root / "skills" / "experiment-workbench" / "scripts" / "experiment.py"
     spec = importlib.util.spec_from_file_location(
         f"experiment_postcreate_consistency_{os.urandom(6).hex()}",
         script,

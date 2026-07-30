@@ -23,7 +23,7 @@ from research.preference_selection import (
 
 def _idea_module(name: str):
     repo = REPO_ROOT
-    path = repo / ".agents/skills/idea-workbench/scripts/idea.py"
+    path = repo / "skills/idea-workbench/scripts/idea.py"
     spec = importlib.util.spec_from_file_location(name, path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)

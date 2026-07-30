@@ -6,7 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from repo_paths import REPO_ROOT
+from repo_paths import REPO_ROOT, source_path
 
 import pytest
 
@@ -211,7 +211,7 @@ def test_side_discovery_rejects_malformed_container_replaced_by_duplicate(
 
 def _run(script: str, root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [sys.executable, str(ROOT / script), "--root", str(root), *args],
+        [sys.executable, str(source_path(script)), "--root", str(root), *args],
         check=check,
         capture_output=True,
         text=True,
@@ -219,7 +219,7 @@ def _run(script: str, root: Path, *args: str, check: bool = True) -> subprocess.
 
 
 def _report_module():
-    path = ROOT / ".agents/skills/report-author/scripts/report.py"
+    path = ROOT / "skills/report-author/scripts/report.py"
     spec = importlib.util.spec_from_file_location("r2_report_module", path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)

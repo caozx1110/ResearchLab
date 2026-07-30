@@ -17,7 +17,6 @@ import pytest
 REPO_ROOT = REPO_ROOT
 HARNESS_PATH = (
     REPO_ROOT
-    / ".agents"
     / "skills"
     / "skill-evolution-advisor"
     / "scripts"

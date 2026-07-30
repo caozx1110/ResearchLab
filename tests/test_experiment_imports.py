@@ -15,7 +15,7 @@ from research.index import audit_workspace
 
 
 PROJECT_ROOT = REPO_ROOT
-EXPERIMENT_SCRIPT = PROJECT_ROOT / ".agents" / "skills" / "experiment-workbench" / "scripts" / "experiment.py"
+EXPERIMENT_SCRIPT = PROJECT_ROOT / "skills" / "experiment-workbench" / "scripts" / "experiment.py"
 
 
 def _experiment_module():

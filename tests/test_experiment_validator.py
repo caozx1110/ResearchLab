@@ -13,7 +13,7 @@ from research.paths import config_root
 
 def _experiment_module():
     project_root = REPO_ROOT
-    script = project_root / ".agents" / "skills" / "experiment-workbench" / "scripts" / "experiment.py"
+    script = project_root / "skills" / "experiment-workbench" / "scripts" / "experiment.py"
     spec = importlib.util.spec_from_file_location("experiment_workbench_script", script)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -23,7 +23,7 @@ def _experiment_module():
 
 def _run_experiment(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     project_root = REPO_ROOT
-    script = project_root / ".agents" / "skills" / "experiment-workbench" / "scripts" / "experiment.py"
+    script = project_root / "skills" / "experiment-workbench" / "scripts" / "experiment.py"
     return subprocess.run(
         [sys.executable, str(script), "--root", str(root), *args],
         check=check,
@@ -34,7 +34,7 @@ def _run_experiment(root: Path, *args: str, check: bool = True) -> subprocess.Co
 
 def _run_report(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     project_root = REPO_ROOT
-    script = project_root / ".agents" / "skills" / "report-author" / "scripts" / "report.py"
+    script = project_root / "skills" / "report-author" / "scripts" / "report.py"
     return subprocess.run(
         [sys.executable, str(script), "--root", str(root), *args],
         check=check,
@@ -252,7 +252,7 @@ def test_concurrent_runs_allocate_unique_monotonic_ids(tmp_path: Path) -> None:
     record_path = next((tmp_path / "kb" / "units" / "experiments").glob("*/record.yaml"))
     experiment_id = load_yaml(record_path)["id"]
     project_root = REPO_ROOT
-    script = project_root / ".agents" / "skills" / "experiment-workbench" / "scripts" / "experiment.py"
+    script = project_root / "skills" / "experiment-workbench" / "scripts" / "experiment.py"
     commands = [
         [
             sys.executable,

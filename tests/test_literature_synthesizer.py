@@ -28,7 +28,7 @@ import research.surveys as surveys_module
 
 
 ROOT = REPO_ROOT
-SCRIPT = ROOT / ".agents" / "skills" / "literature-synthesizer" / "scripts" / "synthesize.py"
+SCRIPT = ROOT / "skills" / "literature-synthesizer" / "scripts" / "synthesize.py"
 
 
 def load_synthesizer():

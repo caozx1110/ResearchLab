@@ -21,7 +21,7 @@ def _project_root() -> Path:
 
 
 def _load_kb_module():
-    script = _project_root() / ".agents" / "skills" / "knowledge-base-manager" / "scripts" / "kb.py"
+    script = _project_root() / "skills" / "knowledge-base-manager" / "scripts" / "kb.py"
     loader = importlib.machinery.SourceFileLoader("kb_manager_next_hint_under_test", str(script))
     spec = importlib.util.spec_from_loader(loader.name, loader)
     assert spec and spec.loader
@@ -32,7 +32,7 @@ def _load_kb_module():
 
 
 def _analyzer_verbs(skill: str, script_name: str) -> set[str]:
-    script = _project_root() / ".agents" / "skills" / skill / "scripts" / script_name
+    script = _project_root() / "skills" / skill / "scripts" / script_name
     text = script.read_text(encoding="utf-8")
     return set(re.findall(r'add_parser\(\s*"([a-z0-9-]+)"', text))
 

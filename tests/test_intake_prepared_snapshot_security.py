@@ -18,7 +18,7 @@ from research.prefs import ensure_workspace
 
 def _load_intake_module():
     root = REPO_ROOT
-    script = root / ".agents" / "skills" / "source-intake" / "scripts" / "intake.py"
+    script = root / "skills" / "source-intake" / "scripts" / "intake.py"
     spec = importlib.util.spec_from_file_location("source_intake_prepared_security", script)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)

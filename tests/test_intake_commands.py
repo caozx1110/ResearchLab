@@ -22,7 +22,7 @@ def _project_root() -> Path:
 
 def _load_intake_module():
     root = _project_root()
-    script = root / ".agents" / "skills" / "source-intake" / "scripts" / "intake.py"
+    script = root / "skills" / "source-intake" / "scripts" / "intake.py"
     spec = importlib.util.spec_from_file_location("source_intake_script_for_commands", script)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)

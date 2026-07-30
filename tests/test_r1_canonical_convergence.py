@@ -27,7 +27,7 @@ def _load_script(skill: str, script_name: str, module_name: str):
     script = (
         MAINTAINER_NAVIGATOR_ROOT / "scripts" / script_name
         if skill == "research-navigator"
-        else _project_root() / ".agents" / "skills" / skill / "scripts" / script_name
+        else _project_root() / "skills" / skill / "scripts" / script_name
     )
     spec = importlib.util.spec_from_file_location(module_name, script)
     assert spec and spec.loader
@@ -40,22 +40,22 @@ def _load_script(skill: str, script_name: str, module_name: str):
 def test_cross_track_compatibility_shims_are_absent() -> None:
     root = _project_root()
     banned = {
-        root / ".agents" / "lib" / "research" / "records.py": (
+        root / "runtime" / "lib" / "research" / "records.py": (
             "tempfile",
             "_atomic_restore_bytes",
             "journaled_op",
         ),
-        root / ".agents" / "lib" / "research" / "confirm.py": (
+        root / "runtime" / "lib" / "research" / "confirm.py": (
             "exclusive_file_lock",
             "operation_lock_path",
             "journaled_op",
         ),
-        root / ".agents" / "skills" / "research-orchestrator" / "scripts" / "orchestrate.py": (
+        root / "skills" / "research-orchestrator" / "scripts" / "orchestrate.py": (
             "program_file_lock",
             ".program.lock",
             "journaled_op",
         ),
-        root / ".agents" / "skills" / "knowledge-base-manager" / "scripts" / "kb.py": (
+        root / "skills" / "knowledge-base-manager" / "scripts" / "kb.py": (
             "import inspect",
             "inspect.signature",
             "_confirm_unit_compat",

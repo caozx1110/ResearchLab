@@ -15,12 +15,11 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlparse
 
-for candidate in [Path(__file__).resolve()] + list(Path(__file__).resolve().parents):
-    lib_root = candidate / ".agents" / "lib"
-    if (lib_root / "research" / "common.py").exists():
-        sys.path.insert(0, str(lib_root))
-        PROJECT_ROOT = candidate
-        break
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+lib_root = PROJECT_ROOT / "runtime" / "lib"
+if not (lib_root / "research" / "common.py").is_file():
+    raise SystemExit("Could not locate the managed research runtime.")
+sys.path.insert(0, str(lib_root))
 
 from research.bootstrap import ensure_managed_runtime  # type: ignore
 

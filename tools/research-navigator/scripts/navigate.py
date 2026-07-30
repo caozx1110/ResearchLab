@@ -6,14 +6,11 @@ import sys
 from pathlib import Path
 
 SCRIPT_PATH = Path(__file__).resolve()
-for candidate in [SCRIPT_PATH.parent, *SCRIPT_PATH.parents]:
-    lib = candidate / ".agents" / "lib"
-    if lib.exists():
-        sys.path.insert(0, str(lib))
-        PROJECT_ROOT = candidate
-        break
-else:
-    raise SystemExit("Could not locate .agents/lib")
+PROJECT_ROOT = SCRIPT_PATH.parents[3]
+lib = PROJECT_ROOT / "runtime" / "lib"
+if not (lib / "research" / "bootstrap.py").is_file():
+    raise SystemExit("Could not locate the managed research runtime.")
+sys.path.insert(0, str(lib))
 
 from research.bootstrap import ensure_managed_runtime
 

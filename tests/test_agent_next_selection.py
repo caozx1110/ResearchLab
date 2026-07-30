@@ -39,7 +39,7 @@ def _project_root() -> Path:
 
 
 def _load_orchestrator(module_name: str):
-    script = _project_root() / ".agents" / "skills" / "research-orchestrator" / "scripts" / "orchestrate.py"
+    script = _project_root() / "skills" / "research-orchestrator" / "scripts" / "orchestrate.py"
     spec = importlib.util.spec_from_file_location(module_name, script)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)

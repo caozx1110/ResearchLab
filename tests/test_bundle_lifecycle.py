@@ -362,9 +362,11 @@ def test_update_removes_legacy_analyzer_resource_directories(
 ) -> None:
     ws_sync = _load_ws_sync()
     old_source = tmp_path / "old-source"
-    old_agents = old_source / ".agents"
-    old_agents.mkdir(parents=True)
-    for relative_path in (".agents/AGENTS.md", ".agents/VERSION", "LICENSE"):
+    old_runtime = old_source / "runtime"
+    old_skills = old_source / "skills"
+    old_runtime.mkdir(parents=True)
+    old_skills.mkdir()
+    for relative_path in ("runtime/AGENTS.md", "runtime/VERSION", "LICENSE"):
         source = _project_root() / relative_path
         destination = old_source / relative_path
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -377,10 +379,10 @@ def test_update_removes_legacy_analyzer_resource_directories(
         "blog": "blog-analyst",
     }
     for kind, owner in owners.items():
-        destination = old_agents / "skills" / owner / "scripts" / f"{kind}.py"
+        destination = old_skills / owner / "scripts" / f"{kind}.py"
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(
-            _project_root() / ".agents" / "skills" / "unit-analyst" / "scripts" / f"{kind}.py",
+            _project_root() / "skills" / "unit-analyst" / "scripts" / f"{kind}.py",
             destination,
         )
 
@@ -435,7 +437,8 @@ def test_update_removes_legacy_analyzer_resource_directories(
         legacy_path = f".agents/skills/{owner}/scripts/{kind}.py"
         assert canonical in updated_manifest["files"]
         assert legacy_path not in updated_manifest["files"]
-        assert (workspace / canonical).read_bytes() == (_project_root() / canonical).read_bytes()
+        source_canonical = _project_root() / "skills" / "unit-analyst" / "scripts" / f"{kind}.py"
+        assert (workspace / canonical).read_bytes() == source_canonical.read_bytes()
         assert not (workspace / ".agents" / "skills" / owner).exists()
 
 
@@ -1636,7 +1639,7 @@ def test_stale_manifest_blocks_payload_and_project_claude_as_one_transaction(tmp
             replacement_manifest,
             dry_run=False,
             expected_manifest=snapshot,
-            project_claude=(True, False, _project_root() / ".agents" / "skills"),
+            project_claude=(True, False, _project_root() / "skills"),
         )
 
     assert manifest_path.read_bytes() == manifest_before

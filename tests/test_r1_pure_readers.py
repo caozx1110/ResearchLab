@@ -86,7 +86,7 @@ def test_orchestrator_semantic_reads_do_not_seed_fresh_workspace(
 ) -> None:
     root = tmp_path / "fresh-project"
     before = _tree_snapshot(root)
-    script = _project_root() / ".agents" / "skills" / "research-orchestrator" / "scripts" / "orchestrate.py"
+    script = _project_root() / "skills" / "research-orchestrator" / "scripts" / "orchestrate.py"
 
     completed = subprocess.run(
         [sys.executable, "-B", str(script), "--root", str(root), *arguments],

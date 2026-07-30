@@ -8,7 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from repo_paths import REPO_ROOT
+from repo_paths import REPO_ROOT, source_path
 
 from research.common import write_yaml_if_changed
 from research.core import (
@@ -86,7 +86,7 @@ def _codes(report: dict) -> set[str]:
 
 
 def _load_script(relative_path: str, name: str):
-    path = REPO_ROOT / relative_path
+    path = source_path(relative_path)
     spec = importlib.util.spec_from_file_location(name, path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)

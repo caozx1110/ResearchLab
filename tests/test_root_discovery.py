@@ -18,7 +18,7 @@ def _project_root() -> Path:
 
 def _load_script_module(skill: str, script_name: str, module_name: str):
     root = _project_root()
-    script = root / ".agents" / "skills" / skill / "scripts" / script_name
+    script = root / "skills" / skill / "scripts" / script_name
     spec = importlib.util.spec_from_file_location(module_name, script)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -47,12 +47,21 @@ def test_skills_root_ignores_decoupled_kb_workspace(tmp_path: Path, monkeypatch)
 
     assert skills_root() == real_root
     assert skills_root() != project_root()
-    assert (skills_root() / ".agents" / "skills").is_dir()
+    assert (skills_root() / "skills").is_dir()
+
+
+def test_skills_root_explicit_start_searches_trusted_product_ancestors() -> None:
+    script = _project_root() / "skills" / "kb-cli" / "scripts" / "kb"
+
+    assert skills_root(script) == _project_root()
 
 
 def test_skills_root_env_override(tmp_path: Path, monkeypatch) -> None:
     skills_home = tmp_path / "skills-home"
     (skills_home / ".agents" / "skills").mkdir(parents=True)
+    (skills_home / ".agents" / "skills" / "metadata.yaml").write_text("skills: {}\n", encoding="utf-8")
+    (skills_home / ".agents" / "lib" / "research").mkdir(parents=True)
+    (skills_home / ".agents" / "lib" / "research" / "__init__.py").write_text("", encoding="utf-8")
     monkeypatch.setenv("RESEARCH_SKILLS_HOME", str(skills_home))
 
     assert skills_root() == skills_home.resolve()
@@ -67,12 +76,14 @@ def test_write_command_root_and_env_override_symlinked_agents_target(tmp_path: P
     sandbox_root = tmp_path / "sandbox"
     symlink_target.mkdir()
     sandbox_root.mkdir()
-    (symlink_target / ".agents").symlink_to(real_root / ".agents", target_is_directory=True)
+    (symlink_target / ".agents").mkdir()
+    (symlink_target / ".agents" / "skills").symlink_to(real_root / "skills", target_is_directory=True)
+    (symlink_target / ".agents" / "lib").symlink_to(real_root / "runtime" / "lib", target_is_directory=True)
     (symlink_target / "AGENTS.md").write_text("# target\n", encoding="utf-8")
     (sandbox_root / ".agents").symlink_to(symlink_target / ".agents", target_is_directory=True)
     (sandbox_root / "AGENTS.md").write_text("# sandbox\n", encoding="utf-8")
     script = sandbox_root / ".agents" / "skills" / "knowledge-base-manager" / "scripts" / "kb.py"
-    env = {**os.environ, "PYTHONPATH": str(real_root / ".agents" / "lib")}
+    env = {**os.environ, "PYTHONPATH": str(real_root / "runtime" / "lib")}
 
     root_result = subprocess.run(
         [sys.executable, str(script), "--root", str(sandbox_root), "init"],
@@ -138,11 +149,10 @@ def test_config_init_warns_when_cwd_differs_from_explicit_root(tmp_path: Path, m
 
 def test_owner_json_and_write_success_hide_resolved_paths(tmp_path: Path) -> None:
     real_root = _project_root()
-    env = {**os.environ, "PYTHONPATH": str(real_root / ".agents" / "lib")}
+    env = {**os.environ, "PYTHONPATH": str(real_root / "runtime" / "lib")}
 
     eval_script = (
         real_root
-        / ".agents"
         / "skills"
         / "skill-evolution-advisor"
         / "scripts"
@@ -166,7 +176,6 @@ def test_owner_json_and_write_success_hide_resolved_paths(tmp_path: Path) -> Non
 
     retrospective_script = (
         real_root
-        / ".agents"
         / "skills"
         / "skill-evolution-advisor"
         / "scripts"
@@ -196,13 +205,13 @@ def test_owner_json_and_write_success_hide_resolved_paths(tmp_path: Path) -> Non
 
 def test_kb_git_init_reports_state_without_repository_path(tmp_path: Path) -> None:
     real_root = _project_root()
-    script = real_root / ".agents" / "skills" / "knowledge-base-manager" / "scripts" / "kb.py"
+    script = real_root / "skills" / "knowledge-base-manager" / "scripts" / "kb.py"
     root = tmp_path / "git-workspace"
     root.mkdir()
     result = subprocess.run(
         [sys.executable, str(script), "--root", str(root), "git-init", "--no-initial-commit"],
         cwd=root,
-        env={**os.environ, "PYTHONPATH": str(real_root / ".agents" / "lib")},
+        env={**os.environ, "PYTHONPATH": str(real_root / "runtime" / "lib")},
         text=True,
         capture_output=True,
         check=False,

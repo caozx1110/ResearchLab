@@ -10,7 +10,7 @@ workspace/
 └── kb/        # your local research data
 ```
 
-The bundle identifier is **`0.2.0-rc.7`**, sourced from `.agents/VERSION`. The identifier denotes a release candidate, not a stable or GA release; an exact published revision is identified by its Git tag, while a GitHub Release is optional. [CHANGELOG.md](CHANGELOG.md) records durable candidate/release acceptance summaries plus compatibility and support scope; active delivery gates, blockers, exact candidates, and live evidence belong to the linked GitHub Epic, Atomic Issues, PRs, and Actions. Installation and core workflows have no external API Key, paid search quota, commercial database, or paid plugin prerequisite.
+The bundle identifier is **`0.2.0-rc.7`**, sourced from `runtime/VERSION` and installed as `.agents/VERSION`. The identifier denotes a release candidate, not a stable or GA release; an exact published revision is identified by its Git tag, while a GitHub Release is optional. [CHANGELOG.md](CHANGELOG.md) records durable candidate/release acceptance summaries plus compatibility and support scope; active delivery gates, blockers, exact candidates, and live evidence belong to the linked GitHub Epic, Atomic Issues, PRs, and Actions. Installation and core workflows have no external API Key, paid search quota, commercial database, or paid plugin prerequisite.
 
 ## Capability maturity
 
@@ -190,4 +190,4 @@ The release bundle contains no private `kb/`. Storage migration and updates are 
 - [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
 
-The on-disk schema is documented in [`.agents/lib/research/SCHEMAS.md`](.agents/lib/research/SCHEMAS.md). The root [AGENTS.md](AGENTS.md) is for contributors developing this skill system; the distributed [`.agents/AGENTS.md`](.agents/AGENTS.md) governs agents using an installed workspace. The distributed [`.agents/AGENT_GUIDE.md`](.agents/AGENT_GUIDE.md) is the runtime agent's session-start quick reference: dispatcher calling conventions, confirmation syntax, failure recovery, and the interaction charter.
+The on-disk schema source is [runtime/lib/research/SCHEMAS.md](runtime/lib/research/SCHEMAS.md). The root [AGENTS.md](AGENTS.md) is for contributors developing this skill system; [runtime/AGENTS.md](runtime/AGENTS.md) and [runtime/AGENT_GUIDE.md](runtime/AGENT_GUIDE.md) are installed into `.agents/` for runtime agents. Repository-local `/.agents/` is ignored and reserved for maintainers' own tools; it is never product source or release input.

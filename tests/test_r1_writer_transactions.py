@@ -5,7 +5,7 @@ import sys
 from datetime import datetime as RealDateTime
 from pathlib import Path
 
-from repo_paths import REPO_ROOT
+from repo_paths import REPO_ROOT, source_path
 
 import pytest
 
@@ -19,7 +19,7 @@ ROOT = REPO_ROOT
 
 
 def _load(relative: str, name: str):
-    path = ROOT / relative
+    path = source_path(relative)
     spec = importlib.util.spec_from_file_location(name, path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)

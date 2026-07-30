@@ -29,7 +29,7 @@ def _project_root() -> Path:
 
 
 def _argparse_subcommands(skill: str, script_name: str) -> set[str]:
-    script = _project_root() / ".agents" / "skills" / skill / "scripts" / script_name
+    script = _project_root() / "skills" / skill / "scripts" / script_name
     tree = ast.parse(script.read_text(encoding="utf-8"))
     subcommands: set[str] = set()
     for node in ast.walk(tree):
@@ -61,7 +61,7 @@ def _argparse_subcommands(skill: str, script_name: str) -> set[str]:
 
 
 def _documented_subcommands(skill: str, script_name: str, *, doc_skill: str | None = None) -> set[str]:
-    text = (_project_root() / ".agents" / "skills" / (doc_skill or skill) / "SKILL.md").read_text(encoding="utf-8")
+    text = (_project_root() / "skills" / (doc_skill or skill) / "SKILL.md").read_text(encoding="utf-8")
     pattern = re.compile(rf"scripts/{re.escape(script_name)}\s+([^\s\\]+)")
     return {match.group(1) for match in pattern.finditer(text) if not match.group(1).startswith("-")}
 

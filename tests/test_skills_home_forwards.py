@@ -14,7 +14,7 @@ def _project_root() -> Path:
 
 
 def _load_script_module(skill: str, script_name: str, module_name: str):
-    script = _project_root() / ".agents" / "skills" / skill / "scripts" / script_name
+    script = _project_root() / "skills" / skill / "scripts" / script_name
     spec = importlib.util.spec_from_file_location(module_name, script)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -45,7 +45,7 @@ def test_wiki_add_forward_uses_skills_home_without_workspace_agents(tmp_path: Pa
 
     assert wiki.run_intake_add(kb_workspace, args) == 0
 
-    expected_script = _project_root() / ".agents" / "skills" / "source-intake" / "scripts" / "intake.py"
+    expected_script = _project_root() / "skills" / "source-intake" / "scripts" / "intake.py"
     assert captured_argv[1] == str(expected_script)
     assert Path(captured_argv[1]).exists()
     assert captured_argv[2:4] == ["--root", str(kb_workspace)]

@@ -16,7 +16,7 @@
 
 仓库对 Agent 的安装合同如下，Agent 应自行完成，不让用户复制内部 flags：
 
-1. 将链接视为代码来源而不是知识材料；先用版本控制把它检出到临时目录，不通过管道执行远端脚本。记录仓库 origin、branch 与 commit，并检查根目录存在 `install.sh`、`.agents/VERSION`、`.agents/AGENTS.md` 与 `.agents/skills/`。
+1. 将链接视为代码来源而不是知识材料；先用版本控制把它检出到临时目录，不通过管道执行远端脚本。记录仓库 origin、branch 与 commit，并检查根目录存在 `install.sh`、`runtime/VERSION`、`runtime/AGENTS.md` 与 `skills/`。
 2. 把当前 workspace 根作为安装目标，绝不能把 `kb/` 当目标；已有普通根 `AGENTS.md` 时，确认安装器只追加/更新带 marker 的受管区块并保留块外原文。目标是 symlink、类型冲突、marker 异常或已有受管区块漂移时停止解释，不能覆盖整文件或猜测修复。
 3. 先让安装器生成 Agent JSON 计划（它隐含 dry-run）。终端保持短预览并显示目标数、冲突数和 semantic plan digest；JSON 精确列出 action、scope、tools、source provenance、canonical distributable tree map/digest、按执行顺序排列的全部 targets、每项来源内容 digest 与目标前置状态、冲突、条件性 runtime 变化及可复现的 apply contract。除 Agent 明确指定的 JSON 计划文件外，这一步不写 workspace、HOME、runtime 或 Python cache。计划文件必须位于目标 workspace 与 HOME 之外。
 4. 核对计划中的 source commit 与 source tree digest 仍等于当前 checkout，目标只包含受管 `.agents/`、根规则文件、所选 Agent 接入和明确标出的条件性 `.venv` runtime tree。完成审阅后，Agent 自动计算这份最终计划文件的精确 byte SHA-256，替换 apply contract 中的 `COMPUTE_AFTER_REVIEW` 占位，再在用户已要求“安装”的授权范围内执行；用户不需要查看、复制或填写 digest。安装器会在解析 JSON 或触碰首个目标前，以 no-follow 方式读取同一个普通文件 inode，同时校验外部 byte SHA 与 semantic plan digest，再验证源码树和每个目标的前置状态。计划后出现空白、换行、键序、编码字节、未提交源码、来源身份或目标状态变化时整次操作零写失败。计划和应用都使用显式参数，非交互运行不读取 stdin。
@@ -163,11 +163,11 @@ bash install.sh --all --project /path/to/workspace
 如果你在 bundle 源仓库内开发，安装器不会 copy，也不会写 manifest。这个模式用于维护 bundle，不是面向普通 workspace 的推荐安装路径。Claude 使用：
 
 ```text
-.claude/skills -> ../.agents/skills
+.claude/skills -> ../skills
 CLAUDE.md      # managed block 内使用 @AGENTS.md
 ```
 
-Codex 直接读取仓库已有的 `AGENTS.md`（开发者工作流；`CLAUDE.md` 为其软链）和 `.agents/`（含使用规则 `.agents/AGENTS.md`）。
+Codex 直接读取仓库已有的 `AGENTS.md`（开发者工作流；`CLAUDE.md` 为其软链）。顶层 `skills/` 是普通产品源码，不会作为 workspace skill 自动发现；根 `/.agents/` 只保留维护者明确安装的本地自用工具，安装器也不会把它打包。
 
 ### 推荐：外部 workspace copy
 
@@ -187,6 +187,10 @@ Codex 直接读取仓库已有的 `AGENTS.md`（开发者工作流；`CLAUDE.md`
 # >>> workspace-oss managed >>>
 # <<< workspace-oss managed <<<
 ```
+
+### 从旧源码布局升级
+
+现有外部 workspace 的安装目标仍是 `.agents/**`，`kb/` 不需要迁移。若旧版本的 `kb update` 因为无法识别新的 `skills/`、`runtime/` 源码布局而不能自助跨越这次结构迁移，请让 Agent 检出最新源码并对同一 workspace 执行一次 `reinstall`；安装器会沿用既有 manifest、原子替换受管文件并保留 `kb/`。完成这次桥接后，后续 `update` 继续使用新布局。
 
 如果目标 workspace 已有普通 `AGENTS.md` 且没有异常 marker，安装器会保留块外原文并加入本 bundle 区块；update/reinstall 也只维护该区块。`AGENTS.md` 是 symlink、非普通文件、marker 结构异常，或已有受管区块发生未授权漂移时会 fail closed，不跟随链接、不替换整文件。
 

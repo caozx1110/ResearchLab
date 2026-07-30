@@ -6,6 +6,7 @@ All notable changes to this project will be documented here. The format follows 
 
 ### Changed
 
+- Product sources now live in top-level `skills/` and `runtime/`, while repository-local `/.agents/` is ignored and reserved for maintainers' own tools. The installer preserves the external `.agents/**` layout through an explicit source-to-installed mapping, and local tools no longer affect product inventory, validation, rule budgets, release digests, or manifests.
 - Development collaboration is now GitHub-remote-complete: tracked design/ADR/schema contracts, Epic and Atomic Issues, pushed checkpoints, consolidated PRs, Actions evidence, and human review form the complete handoff chain. Ordinary changes use a lightweight path; frozen ownership, takeover approval, exact dependency binding, and release controls are added only when the risk requires them. Local workspaces, one-off prompts, tool memory, chats, stashes, and unpushed state are no longer workflow inputs or evidence.
 - Source comments and analyzer scaffold/note explanations no longer cite retired private design section numbers; current contracts are self-contained or point to tracked `docs/DESIGN.md` and `SCHEMAS.md` anchors, without changing the evidence or confirmation semantics.
 

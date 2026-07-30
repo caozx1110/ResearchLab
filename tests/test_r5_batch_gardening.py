@@ -25,7 +25,7 @@ from research.core import default_record, write_record
 
 
 def _load_intake():
-    script = REPO_ROOT / ".agents" / "skills" / "source-intake" / "scripts" / "intake.py"
+    script = REPO_ROOT / "skills" / "source-intake" / "scripts" / "intake.py"
     spec = importlib.util.spec_from_file_location("r5_batch_intake", script)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -35,7 +35,7 @@ def _load_intake():
 
 
 def _load_script(skill: str, script_name: str, module_name: str):
-    script = REPO_ROOT / ".agents" / "skills" / skill / "scripts" / script_name
+    script = REPO_ROOT / "skills" / skill / "scripts" / script_name
     spec = importlib.util.spec_from_file_location(module_name, script)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)

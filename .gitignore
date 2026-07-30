@@ -23,4 +23,7 @@ dev-docs/
 
 # Generated Claude integration tree, not development-agent memory
 .claude/
+
+# Repository-local Agent tools are developer-owned and never product payload.
+/.agents/
 _to_delete/

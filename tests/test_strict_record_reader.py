@@ -115,7 +115,7 @@ def _write_ready_unit(root: Path, kind: str, unit_id: str) -> Path:
 
 
 def _load_orchestrator():
-    script = ROOT / ".agents" / "skills" / "research-orchestrator" / "scripts" / "orchestrate.py"
+    script = ROOT / "skills" / "research-orchestrator" / "scripts" / "orchestrate.py"
     name = "strict_record_reader_orchestrator"
     spec = importlib.util.spec_from_file_location(name, script)
     assert spec and spec.loader
@@ -126,7 +126,7 @@ def _load_orchestrator():
 
 
 def _load_kb_cli():
-    script = ROOT / ".agents" / "skills" / "kb-cli" / "scripts" / "kb"
+    script = ROOT / "skills" / "kb-cli" / "scripts" / "kb"
     loader = importlib.machinery.SourceFileLoader("strict_record_reader_kb", str(script))
     spec = importlib.util.spec_from_loader(loader.name, loader)
     assert spec and spec.loader
@@ -611,7 +611,7 @@ assert [item['id'] for item in items] == ['p-valid-123456']
 """
 
     result = subprocess.run(
-        [sys.executable, "-c", code, str(ROOT / ".agents" / "lib"), str(root)],
+        [sys.executable, "-c", code, str(ROOT / "runtime" / "lib"), str(root)],
         capture_output=True,
         text=True,
         timeout=3,
@@ -1217,7 +1217,7 @@ else:
 """
 
     result = subprocess.run(
-        [sys.executable, "-c", code, str(ROOT / ".agents" / "lib"), str(root)],
+        [sys.executable, "-c", code, str(ROOT / "runtime" / "lib"), str(root)],
         capture_output=True,
         text=True,
         timeout=3,

@@ -1,6 +1,6 @@
 # --- Core runtime and shipped recovery lock --------------------------------
 # The hard imports are yaml + markdownify + bs4.  Keep every active pin in
-# byte-for-byte package/version sync with .agents/requirements.txt, which is
+# byte-for-byte package/version sync with runtime/requirements.txt, which is
 # distributed to installed workspaces for offline or mirror-assisted recovery.
 PyYAML==6.0.3
 

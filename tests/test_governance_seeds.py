@@ -22,7 +22,7 @@ from research.core import (
 
 
 def _load_config_module():
-    script = REPO_ROOT / ".agents" / "skills" / "research-config-manager" / "scripts" / "config.py"
+    script = REPO_ROOT / "skills" / "research-config-manager" / "scripts" / "config.py"
     spec = importlib.util.spec_from_file_location("governance_seed_config", script)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)

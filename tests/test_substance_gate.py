@@ -38,7 +38,7 @@ def _project_root() -> Path:
 
 def _load_g5_harness():
     """Load the read-only G5 research-value harness by path (not on pytest pythonpath)."""
-    script = _project_root() / ".agents" / "skills" / "skill-evolution-advisor" / "scripts" / "eval_research_value.py"
+    script = _project_root() / "skills" / "skill-evolution-advisor" / "scripts" / "eval_research_value.py"
     spec = importlib.util.spec_from_file_location("eval_research_value_for_substance_test", script)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -529,7 +529,7 @@ def test_promote_rejects_unverified_claim_and_preserves_disk_state(tmp_path: Pat
 # review-queue two-track display (kb.py) — grouping + fact-track batch scoping.
 # --------------------------------------------------------------------------- #
 def _load_kb_module():
-    script = _project_root() / ".agents" / "skills" / "knowledge-base-manager" / "scripts" / "kb.py"
+    script = _project_root() / "skills" / "knowledge-base-manager" / "scripts" / "kb.py"
     spec = importlib.util.spec_from_file_location("kb_script_for_substance_test", script)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)

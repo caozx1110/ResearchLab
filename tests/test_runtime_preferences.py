@@ -24,11 +24,11 @@ def test_pdf_figure_extraction_mode_surfaces_in_runtime_preferences_and_config_g
 
     assert preferences["pdf"]["figure_extraction_mode"] == "caption-region"
 
-    script = _project_root() / ".agents" / "skills" / "research-config-manager" / "scripts" / "config.py"
+    script = _project_root() / "skills" / "research-config-manager" / "scripts" / "config.py"
     result = subprocess.run(
         [sys.executable, str(script), "--root", str(root), "guide", "--focus", "paper-intake"],
         cwd=root,
-        env={**os.environ, "PYTHONPATH": str(_project_root() / ".agents" / "lib")},
+        env={**os.environ, "PYTHONPATH": str(_project_root() / "runtime" / "lib")},
         text=True,
         capture_output=True,
         check=False,
@@ -131,7 +131,7 @@ def test_effective_review_policy_preserves_strict_and_bounds_personal_configurat
 def test_config_owner_sets_governance_profile_and_review_policy(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
     root.mkdir()
-    script = _project_root() / ".agents" / "skills" / "research-config-manager" / "scripts" / "config.py"
+    script = _project_root() / "skills" / "research-config-manager" / "scripts" / "config.py"
     result = subprocess.run(
         [
             sys.executable,
@@ -147,7 +147,7 @@ def test_config_owner_sets_governance_profile_and_review_policy(tmp_path: Path) 
             "72",
         ],
         cwd=root,
-        env={**os.environ, "PYTHONPATH": str(_project_root() / ".agents" / "lib")},
+        env={**os.environ, "PYTHONPATH": str(_project_root() / "runtime" / "lib")},
         text=True,
         capture_output=True,
         check=False,
@@ -160,7 +160,7 @@ def test_config_owner_sets_governance_profile_and_review_policy(tmp_path: Path) 
     guide = subprocess.run(
         [sys.executable, str(script), "--root", str(root), "guide", "--focus", "governance"],
         cwd=root,
-        env={**os.environ, "PYTHONPATH": str(_project_root() / ".agents" / "lib")},
+        env={**os.environ, "PYTHONPATH": str(_project_root() / "runtime" / "lib")},
         text=True,
         capture_output=True,
         check=False,

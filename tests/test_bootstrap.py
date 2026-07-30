@@ -237,7 +237,7 @@ def test_kb_help_and_doctor_remain_read_only_without_core_runtime(tmp_path: Path
     home = tmp_path / "home"
     home.mkdir()
     project_root = Path(__file__).resolve().parents[1]
-    kb_script = project_root / ".agents" / "skills" / "kb-cli" / "scripts" / "kb"
+    kb_script = project_root / "skills" / "kb-cli" / "scripts" / "kb"
     env = {
         **os.environ,
         "HOME": str(home),

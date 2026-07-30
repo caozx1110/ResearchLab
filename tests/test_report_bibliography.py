@@ -16,7 +16,7 @@ from research.prefs import ensure_workspace
 
 def _report_module():
     root = REPO_ROOT
-    path = root / ".agents" / "skills" / "report-author" / "scripts" / "report.py"
+    path = root / "skills" / "report-author" / "scripts" / "report.py"
     spec = importlib.util.spec_from_file_location("report_bibliography_integration", path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)

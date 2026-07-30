@@ -35,7 +35,7 @@ def _project_root() -> Path:
 
 
 def _load_blog_module():
-    script = _project_root() / ".agents" / "skills" / "unit-analyst" / "scripts" / "blog.py"
+    script = _project_root() / "skills" / "unit-analyst" / "scripts" / "blog.py"
     spec = importlib.util.spec_from_file_location("blog_analyst_script_under_test", script)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -197,7 +197,7 @@ def test_note_scaffold_has_four_blank_elements(tmp_path: Path) -> None:
 def test_note_scaffold_has_no_python_judgement() -> None:
     """Anti-pattern guard: no Python-derived positioning or value assignment."""
     src = (
-        _project_root() / ".agents" / "skills" / "unit-analyst" / "scripts" / "blog.py"
+        _project_root() / "skills" / "unit-analyst" / "scripts" / "blog.py"
     ).read_text("utf-8")
     # No literal placeholder templates
     assert "待确认" not in src

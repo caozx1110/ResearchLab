@@ -25,7 +25,7 @@ from research.report_editorial import (
 
 
 PROJECT_ROOT = REPO_ROOT
-REPORT_SCRIPT = PROJECT_ROOT / ".agents" / "skills" / "report-author" / "scripts" / "report.py"
+REPORT_SCRIPT = PROJECT_ROOT / "skills" / "report-author" / "scripts" / "report.py"
 
 
 def _report_module():

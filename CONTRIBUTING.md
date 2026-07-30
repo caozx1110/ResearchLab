@@ -1,17 +1,17 @@
 # Contributing
 
-人类可读 Markdown 默认中文优先。仓库开发规则见 [AGENTS.md](AGENTS.md)（`CLAUDE.md` 为其软链）；普通流程、并行与恢复细则见 [GitHub-only 开发工作流](docs/DEVELOPMENT_WORKFLOW.md)；安装后使用 kb 的规则见 [.agents/AGENTS.md](.agents/AGENTS.md)。
+人类可读 Markdown 默认中文优先。仓库开发规则见 [AGENTS.md](AGENTS.md)（`CLAUDE.md` 为其软链）；普通流程、并行与恢复细则见 [GitHub-only 开发工作流](docs/DEVELOPMENT_WORKFLOW.md)；安装后使用 kb 的规则源码见 [runtime/AGENTS.md](runtime/AGENTS.md)。
 
 ## 文档与协作边界
 
 - 当前设计：`docs/DESIGN.md`、`docs/decisions/`、schema、代码和测试。
 - 当前交付：GitHub Epic、Atomic Issue、remote commits、PR 和 Actions。
 - 用户合同：`README.md`、用户文档、`CHANGELOG.md`、`SECURITY.md`。
-- 安装后 Agent 合同：`.agents/AGENTS.md`、`.agents/AGENT_GUIDE.md`、各 `SKILL.md`。
+- 安装后 Agent 合同源码：`runtime/AGENTS.md`、`runtime/AGENT_GUIDE.md`、`skills/*/SKILL.md`；安装目标保持 `.agents/**`。
 
 GitHub 上的 tracked files、Issue、PR、remote refs/commits 和 Actions 是唯一协作与接力面。本地 scratch、提示词、聊天、模型 memory、worktree、stash、未 push commit 或本机日志都不能成为贡献前置或验收证据。
 
-Python floor: `python_requires >= 3.9`。本仓库保留 `PYTHONPATH=.agents/lib` 约定，不新增 `pyproject.toml`。
+Python floor: `python_requires >= 3.9`。源码 checkout 使用 `PYTHONPATH=runtime/lib`；安装后仍使用 `.agents/lib`。本仓库不新增 `pyproject.toml`。
 
 ## GitHub 交付流程
 
@@ -32,7 +32,7 @@ Issue/PR 是公开记录。漏洞、治理绕过、路径穿越、数据丢失�
 ```bash
 pip install -r requirements-dev.txt && python -m pytest tests -q
 python tools/check_rule_tokens.py
-python .agents/lib/research/skill_validator.py .agents/skills
+python runtime/lib/research/skill_validator.py skills
 ```
 
 如果改过脚本，还要运行对应脚本的 `--help`，确认 CLI 仍能加载。

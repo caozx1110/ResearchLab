@@ -21,14 +21,14 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements-dev.txt
       - name: Compile Python files
-        run: python -m compileall .agents/skills .agents/lib tests
+        run: python -m compileall skills runtime/lib tests
       - name: Validate installer scripts
         run: |
           bash -n install.sh
           python -m py_compile install-lib/ws_sync.py
       - name: Validate skill metadata
         run: |
-          python .agents/lib/research/skill_validator.py .agents/skills
+          python runtime/lib/research/skill_validator.py skills
           python tools/check_rule_tokens.py
       - name: Configure git identity for checkpoint tests
         run: |
@@ -60,8 +60,8 @@ jobs:
       - name: Validate scripts and metadata
         run: |
           bash -n install.sh
-          PYTHONPYCACHEPREFIX="$RUNNER_TEMP/pycache" python -m compileall -q .agents/skills .agents/lib tests install-lib/ws_sync.py
-          python .agents/lib/research/skill_validator.py .agents/skills
+          PYTHONPYCACHEPREFIX="$RUNNER_TEMP/pycache" python -m compileall -q skills runtime/lib tests install-lib/ws_sync.py
+          python runtime/lib/research/skill_validator.py skills
           python tools/check_rule_tokens.py
       - name: Configure git identity for installer and recovery tests
         run: |

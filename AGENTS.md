@@ -13,7 +13,7 @@
 |---|---|
 | 当前接受的设计、架构和边界 | `docs/DESIGN.md` |
 | 长期决策与取舍 | `docs/decisions/*.md` |
-| 当前实现与数据模型 | default branch 的代码、测试、`.agents/lib/research/SCHEMAS.md` |
+| 当前实现与数据模型 | default branch 的代码、测试、`runtime/lib/research/SCHEMAS.md` |
 | 新蓝图的最终目标和 waves | GitHub Initiative/Epic |
 | 单项范围、方案、验收和接力状态 | GitHub Atomic Issue |
 | 候选、CI、review 与合并 | remote commits、PR、Actions |
@@ -25,14 +25,15 @@
 
 Issue/PR 是公开记录，只写脱敏事实。漏洞、凭据暴露、治理绕过、路径穿越、数据丢失或私有研究材料按 `SECURITY.md` 走 private reporting。
 
-## 开发态禁止自调用 shipping skills
+## 产品源码、安装态与本地工具边界
 
-本仓库 `.agents/skills/*` 是被开发的产品源码，不是当前开发任务的执行规则：
+本仓库把三类内容物理分开：
 
-- 不得加载或调用 shipping `SKILL.md` 来决定其自身需求、设计或验收。
-- 可以把 `SKILL.md`、脚本和协议当普通代码阅读、检索和测试。
-- 只有明确的行为测试、全新上下文冷验收，或用户明确要求测试某个 skill 时，才可在隔离临时目录调用；不得触碰真实 `kb/`，也不得把 skill 自述当独立证据。
-- 开发态服从本文件、tracked design/ADR/schema、当前 Epic/Atomic Issue、remote commit、PR 和 Actions；安装后才由工作区根 `AGENTS.md` 与 installed skills 接管运行态。
+- `skills/` 是 15 个 shipping skill 的 tracked 产品源码；`runtime/` 是共享库和安装后规则的 tracked 产品源码。它们是普通代码，不是当前开发任务自动加载的执行规则。
+- 根 `/.agents/` 已被 Git 忽略，只供维护者安装自用 skill 或本地工具。这里的工具可以按正常适用规则辅助开发，但它们不是产品、release input、设计依据或验收证据，也不得与 shipping inventory 混算。
+- 安装器把 `skills/**` 与 `runtime/**` 映射到外部 workspace 的 `.agents/**`；安装后才由 workspace 根 `AGENTS.md`、`.agents/AGENT_GUIDE.md` 与 installed skills 接管运行态。
+
+不得调用 `skills/*/SKILL.md` 来决定其自身需求、设计或验收；可以把这些 `SKILL.md`、脚本和协议当普通代码阅读、检索和测试。只有明确的行为测试、全新上下文冷验收，或用户明确要求测试某个 shipping skill 时，才可在隔离临时目录调用；不得触碰真实 `kb/`，也不得把 skill 自述当独立证据。开发态服从本文件、tracked design/ADR/schema、当前 Epic/Atomic Issue、remote commit、PR 和 Actions。
 
 ## 普通工作流
 
