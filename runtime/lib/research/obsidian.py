@@ -5,20 +5,31 @@ module; ``inbox`` and ``annotations`` are human space and are never traversed.
 """
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
 import os
 import re
 import secrets
 import stat
-from copy import deepcopy
+import sys
 from collections import defaultdict
+from copy import deepcopy
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 from urllib.parse import quote as url_quote
 
 from .common import utc_now_iso
-from .journal import _anchored_target_parent, committed_ops, mutation_transaction
+from .journal import (
+    SNAPSHOT_DIRNAME,
+    _anchored_journal_directory,
+    _anchored_target_parent,
+    _preflight_journal_envelopes,
+    committed_ops,
+    current_operation_id,
+    incomplete_ops,
+    mutation_transaction,
+)
 from .paths import UNIT_KIND_DIRS, ensure_kb_gitignore, kb_gitignore_path, kb_root, topic_taxonomy_path, unit_root, units_root
 from .records import ProjectFileSnapshot, normalize_record_schema, snapshot_project_file
 from .figures import FigureIndexError, load_current_figure_index
@@ -43,9 +54,6 @@ OBSIDIAN_RENDERER_REVISION = 11
 MANIFEST_NAME = "manifest.yaml"
 HUMAN_DIRS = ("inbox", "annotations")
 OBSIDIAN_BASE_PRESENTATION_RESET_SCHEMA = "research-kb-obsidian-base-presentation-reset/v1"
-OBSIDIAN_BASE_PRESENTATION_CONSUMED_SCHEMA = (
-    "research-kb-obsidian-base-presentation-consumed/v1"
-)
 OBSIDIAN_BASE_PRESENTATION_FILES = frozenset(
     {
         "dashboards/All Units.base",
@@ -66,8 +74,6 @@ _OBSIDIAN_MANIFEST_KEYS = frozenset(
         "files",
     }
 )
-_OBSIDIAN_PRESENTATION_LEDGER_KEY = ".runtime/obsidian-base-presentation-reset"
-_OBSIDIAN_PRESENTATION_LEDGER_LIMIT = 4096
 UNIT_HEADINGS = frozenset(
     {
         "Overview", "Definition", "Associations", "Metadata", "Relationships", "Claims", "Figures",
@@ -1644,15 +1650,200 @@ def _read_anchored_regular(
     return b"".join(chunks), identity
 
 
-def _replace_project_snapshot_bytes(snapshot: ProjectFileSnapshot, desired_bytes: bytes) -> None:
-    """CAS-replace one snapshot through its anchored parent directory."""
+def _stable_exchange_identity(
+    identity: tuple[int, int, int, int, int, int],
+) -> tuple[int, int, int, int, int]:
+    """Return identity fields that an in-directory rename does not change."""
+    return identity[:5]
+
+
+def _atomic_exchange_at(
+    left_parent_fd: int,
+    left: str,
+    right_parent_fd: int,
+    right: str,
+) -> None:
+    """Atomically exchange two names on one filesystem through anchored directories.
+
+    There is deliberately no ordinary-rename fallback: the presentation reset
+    is unavailable when the host cannot provide an atomic exchange primitive.
+    """
+    library = ctypes.CDLL(None, use_errno=True)
+    left_bytes = os.fsencode(left)
+    right_bytes = os.fsencode(right)
+    if sys.platform.startswith("linux"):
+        exchange = getattr(library, "renameat2", None)
+        flag = 0x2  # RENAME_EXCHANGE
+    elif sys.platform == "darwin":
+        exchange = getattr(library, "renameatx_np", None)
+        flag = 0x2  # RENAME_SWAP
+    else:
+        exchange = None
+        flag = 0
+    if exchange is None:
+        raise SystemExit("Atomic Base replacement is unavailable on this platform.")
+    exchange.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    exchange.restype = ctypes.c_int
+    ctypes.set_errno(0)
+    result = exchange(
+        left_parent_fd,
+        left_bytes,
+        right_parent_fd,
+        right_bytes,
+        flag,
+    )
+    if result != 0:
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number))
+
+
+class _PostAbortExchangeRecovery:
+    """Hold a displaced inode until the enclosing journal has finished aborting."""
+
+    def __init__(
+        self,
+        staging_fd: int,
+        target_parent_fd: int,
+        temp_name: str,
+        leaf: str,
+        *,
+        displaced_bytes: bytes,
+        displaced_identity: tuple[int, int, int, int, int, int],
+        desired_bytes: bytes,
+        desired_identity: tuple[int, int, int, int, int, int],
+        original_bytes: bytes,
+    ) -> None:
+        self.staging_fd = os.dup(staging_fd)
+        self.target_parent_fd = os.dup(target_parent_fd)
+        self.temp_name = temp_name
+        self.leaf = leaf
+        self.displaced_bytes = displaced_bytes
+        self.displaced_identity = displaced_identity
+        self.desired_bytes = desired_bytes
+        self.desired_identity = desired_identity
+        self.original_bytes = original_bytes
+
+    def restore_displaced(self) -> None:
+        """Restore the exact displaced inode after journal abort, without clobbering a third writer."""
+        try:
+            try:
+                recovery_bytes, _recovery_identity = _read_anchored_regular(
+                    self.staging_fd,
+                    self.temp_name,
+                )
+            except FileNotFoundError:
+                mode = stat.S_IMODE(self.displaced_identity[2])
+                flags = (
+                    os.O_WRONLY
+                    | os.O_CREAT
+                    | os.O_EXCL
+                    | getattr(os, "O_NOFOLLOW", 0)
+                )
+                descriptor = os.open(
+                    self.temp_name,
+                    flags,
+                    mode,
+                    dir_fd=self.staging_fd,
+                )
+                try:
+                    offset = 0
+                    while offset < len(self.displaced_bytes):
+                        written = os.write(descriptor, self.displaced_bytes[offset:])
+                        if written <= 0:
+                            raise OSError("post-abort Base recovery write made no progress")
+                        offset += written
+                    os.fchmod(descriptor, mode)
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                recovery_bytes, _recovery_identity = _read_anchored_regular(
+                    self.staging_fd,
+                    self.temp_name,
+                )
+            if recovery_bytes != self.displaced_bytes:
+                raise RuntimeError("The displaced Base recovery bytes changed during journal abort.")
+            current_bytes, current_identity = _read_anchored_regular(
+                self.target_parent_fd,
+                self.leaf,
+            )
+            still_ours = (
+                current_bytes == self.desired_bytes
+                and _stable_exchange_identity(current_identity)
+                == _stable_exchange_identity(self.desired_identity)
+            )
+            journal_restored = current_bytes == self.original_bytes
+            if not still_ours and not journal_restored:
+                raise RuntimeError(
+                    "The Base target changed again during abort; displaced recovery material was preserved."
+                )
+            _atomic_exchange_at(
+                self.staging_fd,
+                self.temp_name,
+                self.target_parent_fd,
+                self.leaf,
+            )
+            restored_bytes, restored_identity = _read_anchored_regular(
+                self.target_parent_fd,
+                self.leaf,
+            )
+            if (
+                restored_bytes != self.displaced_bytes
+                or _stable_exchange_identity(restored_identity)
+                != _stable_exchange_identity(self.displaced_identity)
+            ):
+                raise RuntimeError("The post-abort atomic recovery restored an unexpected inode.")
+            os.unlink(self.temp_name, dir_fd=self.staging_fd)
+            os.fsync(self.staging_fd)
+            os.fsync(self.target_parent_fd)
+        finally:
+            os.close(self.target_parent_fd)
+            os.close(self.staging_fd)
+
+
+class _AtomicExchangeConflict(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        recovery: _PostAbortExchangeRecovery,
+        cause: BaseException,
+    ) -> None:
+        super().__init__(message)
+        self.recovery = recovery
+        self.cause = cause
+
+
+def _new_base_exchange_temp_name() -> str:
+    return f".presentation-reset-{secrets.token_hex(12)}.tmp"
+
+
+def _replace_project_snapshot_bytes(
+    snapshot: ProjectFileSnapshot,
+    desired_bytes: bytes,
+    *,
+    staging_fd: int,
+    temp_name: str | None = None,
+) -> None:
+    """Atomically exchange one exact snapshot through its anchored parent."""
     if not snapshot.relative_path.startswith("kb/"):
         raise SystemExit("The Base reset target is outside the canonical knowledge base.")
     if not snapshot.is_current():
         raise SystemExit("The Base reset target or an ancestor changed after preview.")
     target_key = snapshot.relative_path[len("kb/") :]
-    temp_name = f".presentation-reset-{secrets.token_hex(12)}.tmp"
+    temp_name = temp_name or _new_base_exchange_temp_name()
+    if (
+        Path(temp_name).name != temp_name
+        or re.fullmatch(r"\.presentation-reset-[0-9a-f]{24}\.tmp", temp_name) is None
+    ):
+        raise SystemExit("The Base atomic-exchange staging name is invalid.")
     temp_created = False
+    preserve_recovery_material = False
     with _anchored_target_parent(snapshot.project_root, target_key) as (parent_fd, leaf):
         if parent_fd is None or not snapshot.directory_capabilities:
             raise SystemExit("The Base reset parent is unavailable or unsafe.")
@@ -1672,7 +1863,7 @@ def _replace_project_snapshot_bytes(snapshot: ProjectFileSnapshot, desired_bytes
             | os.O_EXCL
             | getattr(os, "O_NOFOLLOW", 0)
         )
-        descriptor = os.open(temp_name, flags, mode, dir_fd=parent_fd)
+        descriptor = os.open(temp_name, flags, mode, dir_fd=staging_fd)
         temp_created = True
         try:
             offset = 0
@@ -1685,6 +1876,9 @@ def _replace_project_snapshot_bytes(snapshot: ProjectFileSnapshot, desired_bytes
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
+        desired_identity = _stat_identity(
+            os.stat(temp_name, dir_fd=staging_fd, follow_symlinks=False)
+        )
         try:
             latest_bytes, latest_identity = _read_anchored_regular(
                 parent_fd,
@@ -1695,31 +1889,90 @@ def _replace_project_snapshot_bytes(snapshot: ProjectFileSnapshot, desired_bytes
                 raise SystemExit("The Base reset target changed before compare-and-replace.")
             if not snapshot.is_current():
                 raise SystemExit("The Base reset target or an ancestor changed before replacement.")
-            os.rename(
-                temp_name,
-                leaf,
-                src_dir_fd=parent_fd,
-                dst_dir_fd=parent_fd,
-            )
+            _atomic_exchange_at(staging_fd, temp_name, parent_fd, leaf)
+            try:
+                displaced_bytes, displaced_identity = _read_anchored_regular(
+                    staging_fd,
+                    temp_name,
+                )
+                if (
+                    displaced_bytes != snapshot.raw_bytes
+                    or _stable_exchange_identity(displaced_identity)
+                    != _stable_exchange_identity(snapshot.file_identity)
+                ):
+                    raise SystemExit(
+                        "The Base reset target changed at the atomic exchange boundary."
+                    )
+                installed_snapshot = snapshot_project_file(
+                    snapshot.project_root,
+                    snapshot.relative_path,
+                    max_bytes=_OBSIDIAN_BASE_MAX_BYTES,
+                )
+                if (
+                    installed_snapshot is None
+                    or installed_snapshot.raw_bytes != desired_bytes
+                    or installed_snapshot.directory_capabilities
+                    != snapshot.directory_capabilities
+                    or _stable_exchange_identity(installed_snapshot.file_identity)
+                    != _stable_exchange_identity(desired_identity)
+                ):
+                    raise SystemExit(
+                        "The Base reset target or an ancestor changed at replacement."
+                    )
+            except BaseException as validation_error:
+                try:
+                    displaced_bytes, displaced_identity = _read_anchored_regular(
+                        staging_fd,
+                        temp_name,
+                    )
+                    recovery = _PostAbortExchangeRecovery(
+                        staging_fd,
+                        parent_fd,
+                        temp_name,
+                        leaf,
+                        displaced_bytes=displaced_bytes,
+                        displaced_identity=displaced_identity,
+                        desired_bytes=desired_bytes,
+                        desired_identity=desired_identity,
+                        original_bytes=snapshot.raw_bytes,
+                    )
+                except BaseException as recovery_error:
+                    preserve_recovery_material = True
+                    raise RuntimeError(
+                        "Atomic Base validation failed and recovery material could not be anchored."
+                    ) from recovery_error
+                preserve_recovery_material = True
+                raise _AtomicExchangeConflict(
+                    "Atomic Base replacement validation failed.",
+                    recovery=recovery,
+                    cause=validation_error,
+                ) from validation_error
+            os.unlink(temp_name, dir_fd=staging_fd)
             temp_created = False
-            installed = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
-            installed_bytes, _installed_identity = _read_anchored_regular(
-                parent_fd,
-                leaf,
-                expected_identity=_stat_identity(installed),
-            )
-            if installed_bytes != desired_bytes:
-                raise SystemExit("The anchored Base replacement did not preserve the desired bytes.")
+            os.fsync(staging_fd)
             os.fsync(parent_fd)
         finally:
-            if temp_created:
+            if temp_created and not preserve_recovery_material:
                 try:
-                    os.unlink(temp_name, dir_fd=parent_fd)
+                    os.unlink(temp_name, dir_fd=staging_fd)
                 except FileNotFoundError:
                     pass
 
 
-def _presentation_journal_anchor(project_root: Path) -> str:
+def _presentation_journal_anchor(
+    project_root: Path,
+    *,
+    allow_current_operation: bool = False,
+) -> str:
+    _preflight_journal_envelopes(project_root)
+    incomplete = incomplete_ops(project_root)
+    if incomplete:
+        active_id = current_operation_id(project_root) if allow_current_operation else ""
+        incomplete_ids = {str(entry.get("op_id") or "") for entry in incomplete}
+        if not active_id or incomplete_ids != {active_id}:
+            raise SystemExit(
+                "An unfinished knowledge-base operation must be recovered before Base preview."
+            )
     entries = committed_ops(project_root)
     last = entries[-1] if entries else {}
     return _sha256_text(
@@ -1730,191 +1983,6 @@ def _presentation_journal_anchor(project_root: Path) -> str:
             }
         )
     )
-
-
-def _empty_presentation_ledger_anchor() -> str:
-    return _sha256_text(
-        _canonical_json(
-            {
-                "schema": "research-kb-obsidian-base-presentation-ledger/v1",
-                "state": "absent",
-                "entries": [],
-            }
-        )
-    )
-
-
-def _presentation_ledger_anchor(project_root: Path) -> str:
-    sentinel_key = f"{_OBSIDIAN_PRESENTATION_LEDGER_KEY}/.sentinel"
-    with _anchored_target_parent(project_root, sentinel_key) as (ledger_fd, _leaf):
-        if ledger_fd is None:
-            return _empty_presentation_ledger_anchor()
-        ledger_identity = _stat_identity(os.fstat(ledger_fd))
-        if stat.S_IMODE(ledger_identity[2]) != 0o700:
-            raise SystemExit("The private Base presentation ledger has unsafe permissions.")
-        root_entries = sorted(os.listdir(ledger_fd))
-        if any(name != "consumed" for name in root_entries):
-            raise SystemExit("The private Base presentation ledger contains unknown entries.")
-        if "consumed" not in root_entries:
-            return _sha256_text(
-                _canonical_json(
-                    {
-                        "schema": "research-kb-obsidian-base-presentation-ledger/v1",
-                        "state": "present",
-                        "root_identity": list(ledger_identity),
-                        "consumed_identity": [],
-                        "entries": [],
-                    }
-                )
-            )
-        consumed_meta = os.stat("consumed", dir_fd=ledger_fd, follow_symlinks=False)
-        if not stat.S_ISDIR(consumed_meta.st_mode) or stat.S_IMODE(consumed_meta.st_mode) != 0o700:
-            raise SystemExit("The private Base presentation ledger is not a safe directory.")
-        consumed_fd = os.open(
-            "consumed",
-            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
-            dir_fd=ledger_fd,
-        )
-        try:
-            if _stat_identity(os.fstat(consumed_fd)) != _stat_identity(consumed_meta):
-                raise SystemExit("The private Base presentation ledger changed while opening.")
-            names = sorted(os.listdir(consumed_fd))
-            if len(names) > _OBSIDIAN_PRESENTATION_LEDGER_LIMIT:
-                raise SystemExit("The private Base presentation ledger reached its safe entry limit.")
-            entries: list[dict[str, str]] = []
-            for name in names:
-                if re.fullmatch(r"[0-9a-f]{64}\.yaml", name) is None:
-                    raise SystemExit("The private Base presentation ledger contains an invalid entry.")
-                raw_bytes, identity = _read_anchored_regular(
-                    consumed_fd,
-                    name,
-                    max_bytes=16 * 1024,
-                )
-                if stat.S_IMODE(identity[2]) != 0o600:
-                    raise SystemExit("The private Base presentation ledger entry has unsafe permissions.")
-                payload = _strict_base_payload(raw_bytes)
-                expected_keys = {
-                    "schema",
-                    "revision",
-                    "status",
-                    "preview_digest",
-                    "consumed_at",
-                    "journal_anchor_before",
-                    "ledger_anchor_before",
-                }
-                if (
-                    payload is None
-                    or set(payload) != expected_keys
-                    or payload.get("schema") != OBSIDIAN_BASE_PRESENTATION_CONSUMED_SCHEMA
-                    or isinstance(payload.get("revision"), bool)
-                    or payload.get("revision") != 1
-                    or payload.get("status") != "consumed"
-                    or payload.get("preview_digest") != name[:-5]
-                    or not isinstance(payload.get("consumed_at"), str)
-                    or not str(payload.get("consumed_at") or "").strip()
-                    or len(str(payload.get("consumed_at") or "")) > 128
-                    or re.fullmatch(r"[0-9a-f]{64}", str(payload.get("journal_anchor_before") or ""))
-                    is None
-                    or re.fullmatch(r"[0-9a-f]{64}", str(payload.get("ledger_anchor_before") or ""))
-                    is None
-                    or raw_bytes != dump_yaml(payload).encode("utf-8")
-                ):
-                    raise SystemExit("The private Base presentation ledger entry is invalid.")
-                entries.append({"name": name, "digest": hashlib.sha256(raw_bytes).hexdigest()})
-            if _stat_identity(os.fstat(consumed_fd)) != _stat_identity(consumed_meta):
-                raise SystemExit("The private Base presentation ledger changed while reading.")
-        finally:
-            os.close(consumed_fd)
-        if _stat_identity(os.fstat(ledger_fd)) != ledger_identity:
-            raise SystemExit("The private Base presentation ledger root changed while reading.")
-    return _sha256_text(
-        _canonical_json(
-            {
-                "schema": "research-kb-obsidian-base-presentation-ledger/v1",
-                "state": "present",
-                "root_identity": list(ledger_identity),
-                "consumed_identity": list(_stat_identity(consumed_meta)),
-                "entries": entries,
-            }
-        )
-    )
-
-
-def _write_presentation_consumed_tombstone(
-    project_root: Path,
-    *,
-    preview_digest: str,
-    journal_anchor_before: str,
-    ledger_anchor_before: str,
-) -> None:
-    if _presentation_journal_anchor(project_root) != journal_anchor_before:
-        raise SystemExit("The committed operation history changed after preview.")
-    if _presentation_ledger_anchor(project_root) != ledger_anchor_before:
-        raise SystemExit("The Base presentation ledger changed after preview.")
-    sentinel_key = f"{_OBSIDIAN_PRESENTATION_LEDGER_KEY}/.sentinel"
-    with _anchored_target_parent(
-        project_root,
-        sentinel_key,
-        create_missing=True,
-    ) as (ledger_fd, _leaf):
-        if ledger_fd is None:
-            raise SystemExit("The private Base presentation ledger could not be created safely.")
-        os.fchmod(ledger_fd, 0o700)
-        try:
-            consumed_meta = os.stat("consumed", dir_fd=ledger_fd, follow_symlinks=False)
-        except FileNotFoundError:
-            os.mkdir("consumed", 0o700, dir_fd=ledger_fd)
-            consumed_meta = os.stat("consumed", dir_fd=ledger_fd, follow_symlinks=False)
-        if not stat.S_ISDIR(consumed_meta.st_mode):
-            raise SystemExit("The private Base presentation ledger is not a safe directory.")
-        consumed_fd = os.open(
-            "consumed",
-            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
-            dir_fd=ledger_fd,
-        )
-        try:
-            if _stat_identity(os.fstat(consumed_fd)) != _stat_identity(consumed_meta):
-                raise SystemExit("The private Base presentation ledger changed while opening.")
-            os.fchmod(consumed_fd, 0o700)
-            name = f"{preview_digest}.yaml"
-            try:
-                os.stat(name, dir_fd=consumed_fd, follow_symlinks=False)
-            except FileNotFoundError:
-                pass
-            else:
-                raise SystemExit("This Base presentation preview was already consumed.")
-            payload = {
-                "schema": OBSIDIAN_BASE_PRESENTATION_CONSUMED_SCHEMA,
-                "revision": 1,
-                "status": "consumed",
-                "preview_digest": preview_digest,
-                "consumed_at": utc_now_iso(),
-                "journal_anchor_before": journal_anchor_before,
-                "ledger_anchor_before": ledger_anchor_before,
-            }
-            data = dump_yaml(payload).encode("utf-8")
-            flags = (
-                os.O_WRONLY
-                | os.O_CREAT
-                | os.O_EXCL
-                | getattr(os, "O_NOFOLLOW", 0)
-            )
-            descriptor = os.open(name, flags, 0o600, dir_fd=consumed_fd)
-            try:
-                offset = 0
-                while offset < len(data):
-                    written = os.write(descriptor, data[offset:])
-                    if written <= 0:
-                        raise OSError("consumed tombstone write made no progress")
-                    offset += written
-                os.fchmod(descriptor, 0o600)
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
-            os.fsync(consumed_fd)
-            os.fsync(ledger_fd)
-        finally:
-            os.close(consumed_fd)
 
 
 def _base_sort_is_presentation_only(current: dict[str, Any], desired: dict[str, Any]) -> tuple[bool, int]:
@@ -2008,14 +2076,34 @@ def _presentation_sort_candidate(
     desired_payload = _strict_base_payload(desired_text.encode("utf-8"))
     if current_payload is None or desired_payload is None:
         return None
-    if snapshot.raw_bytes != dump_yaml(
-        current_payload,
+    presentation_only, sort_count = _base_sort_is_presentation_only(current_payload, desired_payload)
+    if not presentation_only:
+        return None
+    gui_payload = deepcopy(desired_payload)
+    gui_views = gui_payload.get("views")
+    current_views = current_payload.get("views")
+    if not isinstance(gui_views, list) or not isinstance(current_views, list):
+        return None
+    for gui_view, current_view in zip(gui_views, current_views):
+        if not isinstance(gui_view, dict) or not isinstance(current_view, dict):
+            return None
+        if "sort" in current_view:
+            # Obsidian 1.12.7 appends ``sort`` after the renderer's existing
+            # view keys. Build the sole accepted bytes from renderer output;
+            # the current payload cannot certify its own serialization.
+            gui_view["sort"] = [
+                {
+                    "property": item["property"],
+                    "direction": item["direction"],
+                }
+                for item in current_view["sort"]
+            ]
+    expected_gui_bytes = dump_yaml(
+        gui_payload,
         width=1_000_000,
         indent_sequences=True,
-    ).encode("utf-8"):
-        return None
-    presentation_only, sort_count = _base_sort_is_presentation_only(current_payload, desired_payload)
-    if not presentation_only or not snapshot.is_current():
+    ).encode("utf-8")
+    if snapshot.raw_bytes != expected_gui_bytes or not snapshot.is_current():
         return None
     return {
         "relative": relative,
@@ -2046,17 +2134,22 @@ def _renderer_manifest_files(
     desired = _projection_files(project_root, inputs, generated_at=generated_at)
     expected = {relative: _sha256_text(text) for relative, text in desired.items()}
     actual = _strict_manifest_files(manifest)
-    return actual if actual == expected else None
+    return expected if actual == expected else None
 
 
 def _base_presentation_reset_preview(
     project_root: Path,
     *,
     preview_token: str,
+    allow_current_operation: bool = False,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Build a pure-read, exact-byte preview for a reset-to-renderer repair."""
     if re.fullmatch(r"[0-9a-f]{64}", str(preview_token or "")) is None:
         raise SystemExit("The Base presentation preview token is invalid.")
+    journal_anchor = _presentation_journal_anchor(
+        project_root,
+        allow_current_operation=allow_current_operation,
+    )
     inputs = _projection_inputs(project_root)
     if inputs["input_issues"]:
         raise SystemExit("Canonical projection inputs are unsafe; presentation reset was not prepared.")
@@ -2079,6 +2172,17 @@ def _base_presentation_reset_preview(
         raise SystemExit("The Obsidian projection is stale; refresh it before preparing presentation reset.")
     manifest_files = _renderer_manifest_files(project_root, inputs, manifest)
     if manifest_files is None:
+        raise SystemExit("The Obsidian projection manifest is invalid; presentation reset was not prepared.")
+    expected_manifest = {
+        "schema": OBSIDIAN_PROJECTION_SCHEMA,
+        "renderer_revision": OBSIDIAN_RENDERER_REVISION,
+        "generated_at": str(manifest.get("generated_at") or ""),
+        "input_digest": inputs["input_digest"],
+        "record_count": len(inputs["records"]),
+        "program_count": len(inputs["programs"]),
+        "files": manifest_files,
+    }
+    if manifest_snapshot.raw_bytes != dump_yaml(expected_manifest).encode("utf-8"):
         raise SystemExit("The Obsidian projection manifest is invalid; presentation reset was not prepared.")
     managed = obsidian_managed_root(project_root)
     current_files, unsafe_entries = _safe_managed_entries(managed)
@@ -2126,18 +2230,14 @@ def _base_presentation_reset_preview(
             "sort_count": 0,
             "files": [],
             "preview_token": "",
-            "ledger_anchor": "",
-            "journal_anchor": "",
+            "journal_anchor": journal_anchor,
         }, []
-    ledger_anchor = _presentation_ledger_anchor(project_root)
-    journal_anchor = _presentation_journal_anchor(project_root)
     binding = {
         "schema": OBSIDIAN_BASE_PRESENTATION_RESET_SCHEMA,
         "preview_token": preview_token,
         "renderer_revision": OBSIDIAN_RENDERER_REVISION,
         "input_digest": inputs["input_digest"],
         "manifest_digest": manifest_snapshot.byte_sha256,
-        "ledger_anchor": ledger_anchor,
         "journal_anchor": journal_anchor,
         "files": [
             {
@@ -2159,7 +2259,6 @@ def _base_presentation_reset_preview(
         "status": "needs_user_authorization",
         "preview_digest": preview_digest,
         "preview_token": preview_token,
-        "ledger_anchor": ledger_anchor,
         "journal_anchor": journal_anchor,
         "file_count": len(candidates),
         "sort_count": sum(int(item["sort_count"]) for item in candidates),
@@ -2196,35 +2295,54 @@ def reset_obsidian_base_presentation_drift(
         or expected != preview.get("preview_digest")
     ):
         raise SystemExit("The authorized Base presentation preview is stale; request a fresh preview.")
-    targets = [
-        kb_root(project_root) / _OBSIDIAN_PRESENTATION_LEDGER_KEY,
-        *[Path(item["path"]) for item in candidates],
-    ]
-    with mutation_transaction(
-        project_root,
-        "reset_obsidian_base_presentation_sort",
-        targets,
-        operation_role="derived",
-    ):
-        locked_preview, locked_candidates = _base_presentation_reset_preview(
+    exchange_temp_names = {
+        str(item["relative"]): _new_base_exchange_temp_name()
+        for item in candidates
+    }
+    targets = [Path(item["path"]) for item in candidates]
+    pending_recovery: _PostAbortExchangeRecovery | None = None
+    try:
+        with mutation_transaction(
             project_root,
-            preview_token=token,
-        )
-        if locked_preview.get("preview_digest") != expected:
-            raise SystemExit("The Base presentation drift changed after authorization; nothing was reset.")
-        if [item["relative"] for item in locked_candidates] != [item["relative"] for item in candidates]:
-            raise SystemExit("The Base presentation reset target set changed; nothing was reset.")
-        _write_presentation_consumed_tombstone(
-            project_root,
-            preview_digest=expected,
-            journal_anchor_before=str(locked_preview["journal_anchor"]),
-            ledger_anchor_before=str(locked_preview["ledger_anchor"]),
-        )
-        for item in locked_candidates:
-            _replace_project_snapshot_bytes(
-                item["snapshot"],
-                str(item["desired_text"]).encode("utf-8"),
+            "reset_obsidian_base_presentation_sort",
+            targets,
+            operation_role="derived",
+        ) as op_id:
+            locked_preview, locked_candidates = _base_presentation_reset_preview(
+                project_root,
+                preview_token=token,
+                allow_current_operation=True,
             )
+            if locked_preview.get("preview_digest") != expected:
+                raise SystemExit("The Base presentation drift changed after authorization; nothing was reset.")
+            if [item["relative"] for item in locked_candidates] != [item["relative"] for item in candidates]:
+                raise SystemExit("The Base presentation reset target set changed; nothing was reset.")
+            with _anchored_journal_directory(
+                project_root,
+                f"{SNAPSHOT_DIRNAME}/{op_id}",
+            ) as staging_fd:
+                for item in locked_candidates:
+                    try:
+                        _replace_project_snapshot_bytes(
+                            item["snapshot"],
+                            str(item["desired_text"]).encode("utf-8"),
+                            staging_fd=staging_fd,
+                            temp_name=exchange_temp_names[str(item["relative"])],
+                        )
+                    except _AtomicExchangeConflict as conflict:
+                        pending_recovery = conflict.recovery
+                        raise
+    except BaseException as transaction_error:
+        if pending_recovery is not None:
+            try:
+                pending_recovery.restore_displaced()
+            except BaseException as recovery_error:
+                raise RuntimeError(
+                    "The Base transaction abort could not safely restore displaced concurrent bytes."
+                ) from recovery_error
+            if isinstance(transaction_error, _AtomicExchangeConflict):
+                raise transaction_error.cause
+        raise
     refreshed = update_obsidian_projection(project_root)
     final_status = obsidian_projection_status(project_root)
     blocking_codes = {

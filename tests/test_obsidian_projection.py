@@ -4,7 +4,6 @@ import hashlib
 import importlib.machinery
 import importlib.util
 import os
-import stat
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -17,6 +16,8 @@ import yaml
 
 from research.common import load_yaml, write_yaml_if_changed
 from research.core import default_record, link_records, record_path, undo_last_operation
+from research.git_ops import restore_operation
+from research.journal import begin_op, incomplete_ops
 from research.obsidian import (
     OBSIDIAN_RENDERER_REVISION,
     obsidian_managed_root,
@@ -335,16 +336,12 @@ def test_obsidian_1_12_7_sort_fixture_previews_and_resets_without_canonical_writ
     repair_journal = load_yaml(journals_after[-1], default={})
     assert repair_journal["op_type"] == "reset_obsidian_base_presentation_sort"
     assert repair_journal["operation_role"] == "derived"
-    assert repair_journal["target_paths"] == [
-        ".runtime/obsidian-base-presentation-reset",
+    assert set(repair_journal["target_paths"]) == {
         "obsidian/managed/dashboards/All Units.base",
         "obsidian/managed/dashboards/By Topic.base",
         "obsidian/managed/dashboards/Pending Review.base",
-    ]
-    assert stat.S_IMODE(ledger_root.stat().st_mode) == 0o700
-    tombstones = list((ledger_root / "consumed").glob("*.yaml"))
-    assert len(tombstones) == 1
-    assert stat.S_IMODE(tombstones[0].stat().st_mode) == 0o600
+    }
+    assert not ledger_root.exists()
 
     undo_last_operation(tmp_path)
 
@@ -492,12 +489,18 @@ def test_base_presentation_reset_rolls_back_multi_file_write_failure(
     original_write = obsidian_module._replace_project_snapshot_bytes
     base_writes = 0
 
-    def fail_second_base_write(snapshot, data: bytes) -> None:
+    def fail_second_base_write(
+        snapshot,
+        data: bytes,
+        *,
+        staging_fd: int,
+        temp_name: str | None = None,
+    ) -> None:
         nonlocal base_writes
         base_writes += 1
         if base_writes == 2:
             raise RuntimeError("injected Base write failure")
-        original_write(snapshot, data)
+        original_write(snapshot, data, staging_fd=staging_fd, temp_name=temp_name)
 
     monkeypatch.setattr(
         obsidian_module,
@@ -520,6 +523,165 @@ def test_base_presentation_reset_rolls_back_multi_file_write_failure(
     assert [item["code"] for item in report["findings"]].count(
         "OBSIDIAN_BASE_PRESENTATION_SORT_DRIFT"
     ) == 3
+
+    monkeypatch.setattr(
+        obsidian_module,
+        "_replace_project_snapshot_bytes",
+        original_write,
+    )
+    with pytest.raises(SystemExit, match="stale"):
+        reset_obsidian_base_presentation_drift(
+            tmp_path,
+            expected_preview_digest=preview["preview_digest"],
+            expected_preview_token=preview["preview_token"],
+            user_authorization="旧身份绑定不得在 journal 换 inode 后重试",
+            authorization_source="user_message",
+        )
+    fresh = preview_obsidian_base_presentation_reset(tmp_path)
+    retried = reset_obsidian_base_presentation_drift(
+        tmp_path,
+        expected_preview_digest=fresh["preview_digest"],
+        expected_preview_token=fresh["preview_token"],
+        user_authorization="确认按新的零写预览重试",
+        authorization_source="user_message",
+    )
+    assert retried["changed"] is True
+    assert obsidian_projection_status(tmp_path)["status"] == "PASS"
+
+
+def test_base_presentation_preview_rejects_incomplete_root_journal_without_writes(
+    tmp_path: Path,
+) -> None:
+    _record(tmp_path, "p-alpha-12345678", "Alpha")
+    update_obsidian_projection(tmp_path)
+    base = obsidian_managed_root(tmp_path) / "dashboards/All Units.base"
+    _apply_obsidian_1_12_7_title_sort(base)
+    begin_op(
+        tmp_path,
+        "synthetic-incomplete",
+        [tmp_path / "kb/synthetic-incomplete.yaml"],
+    )
+    assert len(incomplete_ops(tmp_path)) == 1
+    base_before = base.read_bytes()
+    journal_before = {
+        path.relative_to(tmp_path).as_posix(): path.read_bytes()
+        for path in (tmp_path / "kb/.journal").rglob("*")
+        if path.is_file()
+    }
+
+    with pytest.raises(SystemExit, match="unfinished|incomplete|恢复"):
+        preview_obsidian_base_presentation_reset(tmp_path)
+
+    assert base.read_bytes() == base_before
+    assert {
+        path.relative_to(tmp_path).as_posix(): path.read_bytes()
+        for path in (tmp_path / "kb/.journal").rglob("*")
+        if path.is_file()
+    } == journal_before
+
+
+def test_base_presentation_preview_rejects_malformed_journal_without_writes(
+    tmp_path: Path,
+) -> None:
+    _record(tmp_path, "p-alpha-12345678", "Alpha")
+    update_obsidian_projection(tmp_path)
+    base = obsidian_managed_root(tmp_path) / "dashboards/All Units.base"
+    _apply_obsidian_1_12_7_title_sort(base)
+    malformed = tmp_path / "kb/.journal/malformed.yaml"
+    malformed.write_text("op_id: malformed\nstate: [\n", encoding="utf-8")
+    base_before = base.read_bytes()
+    malformed_before = malformed.read_bytes()
+
+    with pytest.raises(SystemExit, match="隔离|解析|journal"):
+        preview_obsidian_base_presentation_reset(tmp_path)
+
+    assert base.read_bytes() == base_before
+    assert malformed.read_bytes() == malformed_before
+
+
+def test_base_atomic_exchange_fails_closed_on_unsupported_platform(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    left.write_bytes(b"left\n")
+    right.write_bytes(b"right\n")
+    descriptor = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    monkeypatch.setattr(obsidian_module.sys, "platform", "unsupported-test-platform")
+    try:
+        with pytest.raises(SystemExit, match="unavailable"):
+            obsidian_module._atomic_exchange_at(
+                descriptor,
+                left.name,
+                descriptor,
+                right.name,
+            )
+    finally:
+        os.close(descriptor)
+
+    assert left.read_bytes() == b"left\n"
+    assert right.read_bytes() == b"right\n"
+
+
+def test_crashed_base_exchange_is_resumed_without_managed_staging_file(
+    tmp_path: Path,
+) -> None:
+    _record(tmp_path, "p-alpha-12345678", "Alpha")
+    update_obsidian_projection(tmp_path)
+    managed = obsidian_managed_root(tmp_path)
+    base = managed / "dashboards/All Units.base"
+    _apply_obsidian_1_12_7_title_sort(base)
+    drift_bytes = base.read_bytes()
+    desired_bytes = obsidian_module._base_projection_files(
+        obsidian_module._projection_inputs(tmp_path)
+    )["dashboards/All Units.base"].encode("utf-8")
+    op_id = begin_op(
+        tmp_path,
+        "synthetic-crashed-base-exchange",
+        [base],
+    )
+    temp_name = obsidian_module._new_base_exchange_temp_name()
+    with obsidian_module._anchored_journal_directory(
+        tmp_path,
+        f"{obsidian_module.SNAPSHOT_DIRNAME}/{op_id}",
+    ) as staging_fd:
+        descriptor = os.open(
+            temp_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+            dir_fd=staging_fd,
+        )
+        try:
+            os.write(descriptor, desired_bytes)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        target_fd = os.open(base.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            obsidian_module._atomic_exchange_at(
+                staging_fd,
+                temp_name,
+                target_fd,
+                base.name,
+            )
+        finally:
+            os.close(target_fd)
+
+    assert base.read_bytes() == desired_bytes
+    assert list(managed.rglob(".presentation-reset-*.tmp")) == []
+    assert len(incomplete_ops(tmp_path)) == 1
+    with pytest.raises(SystemExit, match="unfinished|incomplete|恢复"):
+        preview_obsidian_base_presentation_reset(tmp_path)
+
+    recovered = restore_operation(tmp_path, op_id, recovery_type="resume")
+
+    assert recovered["op_id"] == op_id
+    assert base.read_bytes() == drift_bytes
+    assert list(managed.rglob(".presentation-reset-*.tmp")) == []
+    assert incomplete_ops(tmp_path) == []
+    private_recovery = tmp_path / "kb/.journal/snapshots" / op_id / temp_name
+    assert private_recovery.read_bytes() == drift_bytes
+    assert preview_obsidian_base_presentation_reset(tmp_path)["status"] == "needs_user_authorization"
 
 
 def test_public_obsidian_sort_reset_requires_preview_bound_current_authorization(
@@ -641,8 +803,12 @@ def test_concurrent_base_presentation_reset_has_one_atomic_winner(
     local = threading.local()
     original = obsidian_module._base_presentation_reset_preview
 
-    def synchronized_preview(root, *, preview_token):
-        result = original(root, preview_token=preview_token)
+    def synchronized_preview(root, *, preview_token, allow_current_operation=False):
+        result = original(
+            root,
+            preview_token=preview_token,
+            allow_current_operation=allow_current_operation,
+        )
         if not getattr(local, "initial_preview_complete", False):
             local.initial_preview_complete = True
             barrier.wait(timeout=5)
@@ -701,39 +867,6 @@ def test_base_presentation_reset_preview_cannot_be_replayed_after_sort_reappears
     assert base.read_bytes() == repeated_bytes
 
 
-def test_base_presentation_ledger_never_follows_replaced_private_directory(
-    tmp_path: Path,
-) -> None:
-    _record(tmp_path, "p-alpha-12345678", "Alpha")
-    update_obsidian_projection(tmp_path)
-    base = obsidian_managed_root(tmp_path) / "dashboards/All Units.base"
-    _apply_obsidian_1_12_7_title_sort(base)
-    preview = preview_obsidian_base_presentation_reset(tmp_path)
-    reset_obsidian_base_presentation_drift(
-        tmp_path,
-        expected_preview_digest=preview["preview_digest"],
-        expected_preview_token=preview["preview_token"],
-        user_authorization="确认第一次重置",
-        authorization_source="user_message",
-    )
-    _apply_obsidian_1_12_7_title_sort(base)
-    ledger = tmp_path / "kb/.runtime/obsidian-base-presentation-reset"
-    consumed = ledger / "consumed"
-    detached = tmp_path / "detached-consumed"
-    outside = tmp_path / "outside-ledger"
-    outside.mkdir()
-    sentinel = outside / "sentinel.yaml"
-    sentinel.write_text("outside ledger sentinel\n", encoding="utf-8")
-    outside_before = sentinel.read_bytes()
-    consumed.rename(detached)
-    consumed.symlink_to(outside, target_is_directory=True)
-
-    with pytest.raises(SystemExit, match="not a safe directory"):
-        preview_obsidian_base_presentation_reset(tmp_path)
-
-    assert sentinel.read_bytes() == outside_before
-
-
 def test_base_presentation_reset_never_writes_through_swapped_parent_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -753,9 +886,18 @@ def test_base_presentation_reset_never_writes_through_swapped_parent_directory(
     original_preview = obsidian_module._base_presentation_reset_preview
     preview_calls = 0
 
-    def swap_after_locked_preview(root: Path, *, preview_token: str):
+    def swap_after_locked_preview(
+        root: Path,
+        *,
+        preview_token: str,
+        allow_current_operation: bool = False,
+    ):
         nonlocal preview_calls
-        result = original_preview(root, preview_token=preview_token)
+        result = original_preview(
+            root,
+            preview_token=preview_token,
+            allow_current_operation=allow_current_operation,
+        )
         preview_calls += 1
         if preview_calls == 2:
             dashboards.rename(detached)
@@ -780,6 +922,122 @@ def test_base_presentation_reset_never_writes_through_swapped_parent_directory(
     assert outside_base.read_bytes() == outside_before
 
 
+def test_base_presentation_reset_does_not_overwrite_concurrent_leaf_at_replace_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _record(tmp_path, "p-alpha-12345678", "Alpha")
+    update_obsidian_projection(tmp_path)
+    base = obsidian_managed_root(tmp_path) / "dashboards/All Units.base"
+    _apply_obsidian_1_12_7_title_sort(base)
+    preview = preview_obsidian_base_presentation_reset(tmp_path)
+    sentinel_bytes = b"concurrent reviewer sentinel\n"
+    original_replace = os.replace
+    original_exchange = obsidian_module._atomic_exchange_at
+    injected = False
+
+    def inject_before_exchange(
+        left_parent_fd: int,
+        left: str,
+        right_parent_fd: int,
+        right: str,
+    ) -> None:
+        nonlocal injected
+        if (
+            not injected
+            and left.startswith(".presentation-reset-")
+            and right == "All Units.base"
+        ):
+            injected = True
+            sentinel_name = ".reviewer-concurrent-sentinel.tmp"
+            descriptor = os.open(
+                sentinel_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=right_parent_fd,
+            )
+            try:
+                os.write(descriptor, sentinel_bytes)
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            original_replace(
+                sentinel_name,
+                right,
+                src_dir_fd=right_parent_fd,
+                dst_dir_fd=right_parent_fd,
+            )
+        original_exchange(left_parent_fd, left, right_parent_fd, right)
+
+    monkeypatch.setattr(obsidian_module, "_atomic_exchange_at", inject_before_exchange)
+
+    with pytest.raises((SystemExit, RuntimeError)):
+        reset_obsidian_base_presentation_drift(
+            tmp_path,
+            expected_preview_digest=preview["preview_digest"],
+            expected_preview_token=preview["preview_token"],
+            user_authorization="确认按预览重置",
+            authorization_source="user_message",
+        )
+
+    assert injected is True
+    assert base.read_bytes() == sentinel_bytes
+    assert list(base.parent.glob(".presentation-reset-*.tmp")) == []
+
+
+def test_base_presentation_reset_restores_detached_leaf_after_final_ancestor_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _record(tmp_path, "p-alpha-12345678", "Alpha")
+    update_obsidian_projection(tmp_path)
+    managed = obsidian_managed_root(tmp_path)
+    dashboards = managed / "dashboards"
+    base = dashboards / "All Units.base"
+    _apply_obsidian_1_12_7_title_sort(base)
+    drift_bytes = base.read_bytes()
+    preview = preview_obsidian_base_presentation_reset(tmp_path)
+    detached = managed / "detached-at-final-replace"
+    outside = tmp_path / "outside-at-final-replace"
+    outside.mkdir()
+    outside_base = outside / "All Units.base"
+    outside_base.write_bytes(b"outside reviewer sentinel\n")
+    outside_before = outside_base.read_bytes()
+    original_exchange = obsidian_module._atomic_exchange_at
+    injected = False
+
+    def swap_ancestor_before_exchange(
+        left_parent_fd: int,
+        left: str,
+        right_parent_fd: int,
+        right: str,
+    ) -> None:
+        nonlocal injected
+        if (
+            not injected
+            and left.startswith(".presentation-reset-")
+            and right == "All Units.base"
+        ):
+            injected = True
+            dashboards.rename(detached)
+            dashboards.symlink_to(outside, target_is_directory=True)
+        original_exchange(left_parent_fd, left, right_parent_fd, right)
+
+    monkeypatch.setattr(obsidian_module, "_atomic_exchange_at", swap_ancestor_before_exchange)
+
+    with pytest.raises((SystemExit, RuntimeError)):
+        reset_obsidian_base_presentation_drift(
+            tmp_path,
+            expected_preview_digest=preview["preview_digest"],
+            expected_preview_token=preview["preview_token"],
+            user_authorization="确认按预览重置",
+            authorization_source="user_message",
+        )
+
+    assert injected is True
+    assert outside_base.read_bytes() == outside_before
+    assert (detached / "All Units.base").read_bytes() == drift_bytes
+    assert list(detached.glob(".presentation-reset-*.tmp")) == []
+
+
 def test_base_presentation_sort_with_yaml_comment_remains_protected_drift(tmp_path: Path) -> None:
     _record(tmp_path, "p-alpha-12345678", "Alpha")
     update_obsidian_projection(tmp_path)
@@ -797,6 +1055,64 @@ def test_base_presentation_sort_with_yaml_comment_remains_protected_drift(tmp_pa
     with pytest.raises(SystemExit, match="not an allowlisted"):
         preview_obsidian_base_presentation_reset(tmp_path)
     assert base.read_bytes() == commented_bytes
+
+
+def test_base_presentation_sort_with_reordered_view_keys_remains_protected_drift(
+    tmp_path: Path,
+) -> None:
+    _record(tmp_path, "p-alpha-12345678", "Alpha")
+    update_obsidian_projection(tmp_path)
+    base = obsidian_managed_root(tmp_path) / "dashboards/All Units.base"
+    payload = yaml.safe_load(base.read_text(encoding="utf-8"))
+    view = payload["views"][0]
+    payload["views"][0] = {
+        "name": view["name"],
+        "type": view["type"],
+        "order": view["order"],
+        "sort": [{"property": "title", "direction": "ASC"}],
+    }
+    base.write_text(
+        yaml.dump(
+            payload,
+            Dumper=_ObsidianBaseDumper,
+            allow_unicode=True,
+            sort_keys=False,
+            width=1_000_000,
+        ),
+        encoding="utf-8",
+    )
+    reordered_bytes = base.read_bytes()
+
+    with pytest.raises(SystemExit, match="not an allowlisted"):
+        preview_obsidian_base_presentation_reset(tmp_path)
+
+    assert base.read_bytes() == reordered_bytes
+
+
+def test_base_presentation_sort_with_reordered_sort_item_keys_remains_protected_drift(
+    tmp_path: Path,
+) -> None:
+    _record(tmp_path, "p-alpha-12345678", "Alpha")
+    update_obsidian_projection(tmp_path)
+    base = obsidian_managed_root(tmp_path) / "dashboards/All Units.base"
+    payload = yaml.safe_load(base.read_text(encoding="utf-8"))
+    payload["views"][0]["sort"] = [{"direction": "ASC", "property": "title"}]
+    base.write_text(
+        yaml.dump(
+            payload,
+            Dumper=_ObsidianBaseDumper,
+            allow_unicode=True,
+            sort_keys=False,
+            width=1_000_000,
+        ),
+        encoding="utf-8",
+    )
+    reordered_bytes = base.read_bytes()
+
+    with pytest.raises(SystemExit, match="not an allowlisted"):
+        preview_obsidian_base_presentation_reset(tmp_path)
+
+    assert base.read_bytes() == reordered_bytes
 
 
 def test_base_presentation_preview_rejects_manifest_ownership_spoof(tmp_path: Path) -> None:
@@ -820,6 +1136,54 @@ def test_base_presentation_preview_rejects_manifest_ownership_spoof(tmp_path: Pa
 
     assert base.read_bytes() == base_before
     assert manual.read_bytes() == manual_before
+
+
+def test_base_presentation_preview_rejects_reordered_manifest_bytes(tmp_path: Path) -> None:
+    _record(tmp_path, "p-alpha-12345678", "Alpha")
+    update_obsidian_projection(tmp_path)
+    managed = obsidian_managed_root(tmp_path)
+    base = managed / "dashboards/All Units.base"
+    _apply_obsidian_1_12_7_title_sort(base)
+    manifest_path = managed / "manifest.yaml"
+    manifest = load_yaml(manifest_path, default={})
+    reordered = dict(reversed(list(manifest.items())))
+    manifest_path.write_text(
+        obsidian_module.dump_yaml(reordered),
+        encoding="utf-8",
+    )
+    manifest_bytes = manifest_path.read_bytes()
+    base_bytes = base.read_bytes()
+
+    with pytest.raises(SystemExit, match="manifest is invalid"):
+        preview_obsidian_base_presentation_reset(tmp_path)
+
+    assert manifest_path.read_bytes() == manifest_bytes
+    assert base.read_bytes() == base_bytes
+
+
+def test_base_presentation_preview_rejects_reordered_manifest_files_mapping(
+    tmp_path: Path,
+) -> None:
+    _record(tmp_path, "p-alpha-12345678", "Alpha")
+    update_obsidian_projection(tmp_path)
+    managed = obsidian_managed_root(tmp_path)
+    base = managed / "dashboards/All Units.base"
+    _apply_obsidian_1_12_7_title_sort(base)
+    manifest_path = managed / "manifest.yaml"
+    manifest = load_yaml(manifest_path, default={})
+    manifest["files"] = dict(reversed(list(manifest["files"].items())))
+    manifest_path.write_text(
+        obsidian_module.dump_yaml(manifest),
+        encoding="utf-8",
+    )
+    manifest_bytes = manifest_path.read_bytes()
+    base_bytes = base.read_bytes()
+
+    with pytest.raises(SystemExit, match="manifest is invalid"):
+        preview_obsidian_base_presentation_reset(tmp_path)
+
+    assert manifest_path.read_bytes() == manifest_bytes
+    assert base.read_bytes() == base_bytes
 
 
 def test_projection_links_markdown_reading_view_and_local_repo_file(tmp_path: Path) -> None:
