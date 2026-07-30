@@ -11,8 +11,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import stat
+import time
 import unicodedata
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -32,6 +36,21 @@ REVIEW_STATUSES = {"confirmed", "dismissed", "resolved"}
 SOURCES = {"user", "agent", "runtime"}
 REPRODUCIBLE_VALUES = {"unknown", "yes", "no", "intermittent"}
 PRIVACY_CLASSIFICATION = "local-redacted"
+INTAKE_FAILURE_STAGES = frozenset(
+    {
+        "source-recognition",
+        "prepare-freeze",
+        "materialization",
+        "canonical-transaction",
+        "checkpoint",
+        "unknown",
+    }
+)
+
+_FAILURE_STAGE_RECEIPT_DIRECTORY = "kb/.runtime/diagnostics/failure-stages"
+_FAILURE_STAGE_RECEIPT_SCHEMA = 1
+_FAILURE_STAGE_RECEIPT_MAX_BYTES = 1024
+_FAILURE_STAGE_RECEIPT_TTL_SECONDS = 120
 
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _TRACEBACK_RE = re.compile(r"(?is)\btraceback\s*\(most recent call last\).*?(?=(?:\n\S)|\Z)")
@@ -82,6 +101,254 @@ def _safe_error_class(value: str) -> str:
         return text.lower()
     match = re.match(r"[A-Za-z][A-Za-z0-9_.-]{0,79}", text)
     return match.group(0).lower() if match else "unspecified"
+
+
+def _safe_failure_stage(value: object, *, default: str = "unknown") -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in INTAKE_FAILURE_STAGES else default
+
+
+def _directory_flags() -> int:
+    return (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+
+
+def _open_failure_stage_directory(project_root: Path, *, create: bool) -> int:
+    """Open the private handoff directory without following workspace links."""
+
+    descriptor = os.open(project_root.resolve(strict=True), _directory_flags())
+    try:
+        for part in _FAILURE_STAGE_RECEIPT_DIRECTORY.split("/"):
+            try:
+                child = os.open(part, _directory_flags(), dir_fd=descriptor)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                try:
+                    os.mkdir(part, 0o700, dir_fd=descriptor)
+                except FileExistsError:
+                    pass
+                child = os.open(part, _directory_flags(), dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) & 0o077
+        ):
+            raise PermissionError("failure-stage handoff directory is not private")
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _failure_stage_receipt_name(parent_pid: int) -> str:
+    if isinstance(parent_pid, bool) or not 1 <= int(parent_pid) <= 2**31 - 1:
+        raise ValueError("parent pid is outside the supported range")
+    return f"{int(parent_pid)}.json"
+
+
+def _claim_failure_stage_receipt(
+    directory: int,
+    filename: str,
+) -> tuple[str, tuple[int, int]] | None:
+    """Atomically move one safe receipt to a private one-consumer name."""
+
+    try:
+        metadata = os.stat(filename, dir_fd=directory, follow_symlinks=False)
+    except OSError:
+        return None
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or metadata.st_size > _FAILURE_STAGE_RECEIPT_MAX_BYTES
+    ):
+        return None
+    claimed = f".{filename}.{uuid.uuid4().hex}.claim"
+    try:
+        os.replace(filename, claimed, src_dir_fd=directory, dst_dir_fd=directory)
+    except OSError:
+        return None
+    return claimed, (metadata.st_dev, metadata.st_ino)
+
+
+def _write_failure_stage_receipt(project_root: Path, payload: Mapping[str, Any]) -> None:
+    directory = _open_failure_stage_directory(project_root, create=True)
+    filename = _failure_stage_receipt_name(int(payload["parent_pid"]))
+    temporary = f".{filename}.{uuid.uuid4().hex}.tmp"
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    data = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode(
+        "ascii"
+    )
+    if len(data) > _FAILURE_STAGE_RECEIPT_MAX_BYTES:
+        os.close(directory)
+        raise ValueError("failure-stage receipt exceeds its byte budget")
+    try:
+        descriptor = os.open(temporary, flags, 0o600, dir_fd=directory)
+        try:
+            view = memoryview(data)
+            written = 0
+            while written < len(view):
+                written += os.write(descriptor, view[written:])
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.replace(temporary, filename, src_dir_fd=directory, dst_dir_fd=directory)
+        os.fsync(directory)
+    finally:
+        try:
+            os.unlink(temporary, dir_fd=directory)
+        except FileNotFoundError:
+            pass
+        os.close(directory)
+
+
+def publish_runtime_failure_stage(
+    project_root: Path,
+    *,
+    skill: str,
+    operation: str,
+    failure_stage: str,
+) -> bool:
+    """Best-effort, allowlisted child-to-dispatcher failure-stage handoff.
+
+    This receipt exists only long enough for the parent dispatcher to consume
+    it after a nonzero child exit.  It never contains source text, arguments,
+    output, exception text, environment values, or paths.  Failure to publish
+    must never replace the owner's original failure.
+    """
+
+    try:
+        normalized_skill = _safe_identifier(skill, default="unknown-skill")
+        normalized_operation = _safe_identifier(operation, default="unknown-operation")
+        normalized_stage = _safe_failure_stage(failure_stage)
+        if not diagnostics_policy(project_root, normalized_skill).get("automatic_capture"):
+            return False
+        parent_pid = os.getppid()
+        payload = {
+            "schema": _FAILURE_STAGE_RECEIPT_SCHEMA,
+            "parent_pid": parent_pid,
+            "skill": normalized_skill,
+            "operation": normalized_operation,
+            "failure_stage": normalized_stage,
+            "created_at_epoch": int(time.time()),
+        }
+        _write_failure_stage_receipt(project_root, payload)
+        return True
+    except Exception:  # noqa: BLE001 - optional diagnostics never replace the owner failure
+        return False
+
+
+def _consume_runtime_failure_stage(
+    project_root: Path,
+    *,
+    skill: str,
+    operation: str,
+) -> str:
+    """Consume only the current dispatcher's fresh, bounded regular receipt."""
+
+    try:
+        directory = _open_failure_stage_directory(project_root, create=False)
+    except (OSError, ValueError):
+        return "unknown"
+    filename = _failure_stage_receipt_name(os.getpid())
+    claim = _claim_failure_stage_receipt(directory, filename)
+    if claim is None:
+        os.close(directory)
+        return "unknown"
+    claimed, claimed_identity = claim
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    descriptor: int | None = None
+    identity: tuple[int, int] | None = claimed_identity
+    data = b""
+    try:
+        try:
+            descriptor = os.open(claimed, flags, dir_fd=directory)
+        except OSError:
+            return "unknown"
+        metadata = os.fstat(descriptor)
+        identity = (metadata.st_dev, metadata.st_ino)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or identity != claimed_identity
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_size > _FAILURE_STAGE_RECEIPT_MAX_BYTES
+        ):
+            return "unknown"
+        chunks: list[bytes] = []
+        remaining = _FAILURE_STAGE_RECEIPT_MAX_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, min(remaining, 4096))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        if len(data) > _FAILURE_STAGE_RECEIPT_MAX_BYTES:
+            return "unknown"
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if identity is not None:
+            try:
+                current = os.stat(claimed, dir_fd=directory, follow_symlinks=False)
+                if (
+                    stat.S_ISREG(current.st_mode)
+                    and (current.st_dev, current.st_ino) == identity
+                ):
+                    os.unlink(claimed, dir_fd=directory)
+                    os.fsync(directory)
+            except OSError:
+                pass
+        os.close(directory)
+
+    try:
+        payload = json.loads(data.decode("ascii"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return "unknown"
+    if not isinstance(payload, dict) or set(payload) != {
+        "schema",
+        "parent_pid",
+        "skill",
+        "operation",
+        "failure_stage",
+        "created_at_epoch",
+    }:
+        return "unknown"
+    try:
+        age = int(time.time()) - int(payload["created_at_epoch"])
+        parent_pid = int(payload["parent_pid"])
+    except (TypeError, ValueError):
+        return "unknown"
+    if (
+        payload.get("schema") != _FAILURE_STAGE_RECEIPT_SCHEMA
+        or parent_pid != os.getpid()
+        or age < -5
+        or age > _FAILURE_STAGE_RECEIPT_TTL_SECONDS
+        or payload.get("skill") != _safe_identifier(skill, default="unknown-skill")
+        or payload.get("operation") != _safe_identifier(operation, default="unknown-operation")
+    ):
+        return "unknown"
+    return _safe_failure_stage(payload.get("failure_stage"))
 
 
 def _redacted_context_reference(value: str) -> str:
@@ -296,6 +563,7 @@ def record_diagnostic_issue(
     error_class: str = "",
     now: datetime | None = None,
     _automatic_runtime_metadata: Mapping[str, Any] | None = None,
+    _automatic_failure_stage: str = "",
     _capture_token: object | None = None,
 ) -> tuple[dict[str, Any], bool]:
     """Record an explicit issue even when automatic diagnostics are off."""
@@ -328,6 +596,11 @@ def record_diagnostic_issue(
         if _capture_token is _AUTOMATIC_RUNTIME_CAPTURE
         else {}
     )
+    automatic_failure_stage = (
+        _safe_failure_stage(_automatic_failure_stage)
+        if _capture_token is _AUTOMATIC_RUNTIME_CAPTURE and _automatic_failure_stage
+        else ""
+    )
 
     with mutation_transaction(
         project_root,
@@ -348,6 +621,8 @@ def record_diagnostic_issue(
                 issue["severity"] = normalized_severity
             if mechanical:
                 issue.update(mechanical)
+            if automatic_failure_stage:
+                issue["failure_stage"] = automatic_failure_stage
             write_yaml_if_changed(path, document)
             return dict(issue), False
 
@@ -375,6 +650,8 @@ def record_diagnostic_issue(
         }
         if mechanical:
             issue.update(mechanical)
+        if automatic_failure_stage:
+            issue["failure_stage"] = automatic_failure_stage
         issues.append(issue)
         issues.sort(key=lambda item: str(item.get("id") or ""))
         write_yaml_if_changed(path, document)
@@ -394,6 +671,15 @@ def capture_runtime_failure(
     policy = diagnostics_policy(project_root, skill)
     if int(returncode) == 0 or not policy.get("automatic_capture"):
         return None
+    normalized_skill = _safe_identifier(skill, default="unknown-skill")
+    normalized_operation = _safe_identifier(operation, default="unknown-operation")
+    failure_stage = ""
+    if normalized_skill == "source-intake" and normalized_operation == "add":
+        failure_stage = _consume_runtime_failure_stage(
+            project_root,
+            skill=normalized_skill,
+            operation=normalized_operation,
+        )
     summary = public_summary or "The requested knowledge-base operation did not complete."
     issue, _ = record_diagnostic_issue(
         project_root,
@@ -406,7 +692,11 @@ def capture_runtime_failure(
         trigger=operation,
         source="runtime",
         reproducible="unknown",
-        error_class="owner-nonzero-exit",
+        error_class=(
+            f"owner-nonzero-exit.{failure_stage}"
+            if failure_stage
+            else "owner-nonzero-exit"
+        ),
         _automatic_runtime_metadata=(
             {
                 "category": "runtime-failure",
@@ -417,6 +707,7 @@ def capture_runtime_failure(
             if policy.get("governance_profile") == "personal"
             else None
         ),
+        _automatic_failure_stage=failure_stage,
         _capture_token=_AUTOMATIC_RUNTIME_CAPTURE,
     )
     return issue
@@ -470,6 +761,7 @@ def export_diagnostic_preview(
         "bundle_version",
         "source_commit",
         "error_class",
+        "failure_stage",
         "privacy_classification",
     )
     issues = []
@@ -492,6 +784,7 @@ def export_diagnostic_preview(
 
 __all__ = [
     "DIAGNOSTIC_MODES",
+    "INTAKE_FAILURE_STAGES",
     "PRIVACY_CLASSIFICATION",
     "REVIEW_STATUSES",
     "SEVERITIES",
@@ -501,6 +794,7 @@ __all__ = [
     "diagnostics_policy",
     "export_diagnostic_preview",
     "list_diagnostic_issues",
+    "publish_runtime_failure_stage",
     "record_diagnostic_issue",
     "redact_diagnostic_text",
     "review_diagnostic_issue",
