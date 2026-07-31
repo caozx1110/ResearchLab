@@ -203,11 +203,13 @@ Idea analyze/review 的 frozen corpus 若因新关联材料而不足，普通 pr
 
 D1 把强制正确性门和可选质量诊断分开。Schema、evidence、confirmation、containment、journal、lock、CAS 与 recovery 在所有配置下都必须执行；配置只能关闭额外记录和 Agent 复盘。
 
-诊断模式为 `off`、`errors-only`、`developer`，默认 `off`，并允许单个 skill 用更严格的有效模式覆盖 workspace。`errors-only` 只运行确定性捕获，不消费 LLM token；`developer` 才允许在每任务 token/issue budget 内做触发式短复盘。用户当前消息明确要求记录时不受自动模式关闭影响。
+诊断捕获模式与本地细节级别正交。`diagnostics.mode=off|errors-only|developer` 默认 `off`，语义不变；`diagnostics.detail_level=redacted|local-detailed` 默认 `redacted`。既有 scalar `per_skill` mode override 保持兼容，逐 skill 细节使用独立 `per_skill_detail_level`。`errors-only` 只运行确定性捕获，不消费 LLM token；`developer` 才允许在每任务 token/issue budget 内请求触发式短复盘。用户当前消息明确要求记录时不受自动模式关闭影响。
 
-Dispatcher 只在 owner 已返回非零结果之后尝试捕获，并且只交付稳定 skill、公开 operation、return code 和固定中文安全摘要。Raw stdout/stderr、traceback、arguments、用户原文、source/evidence、secret、环境变量和绝对路径都禁止进入 capture API。捕获异常只能写入私有 Agent protocol，不能改变原 exit code 或 public message；成功与 no-op 不产生 issue。
+Dispatcher 只在 owner 已返回非零结果之后尝试捕获。公开摘要仍只接收稳定 skill、公开 operation、return code 和固定中文安全摘要；启用 local-detailed 时，另交付一个封闭的 `diagnostic-mechanical-envelope/v1`，只含安全 exception class、allowlisted failure stage、已验证且不含源码文本的产品源码 repo-relative frame token、allowlisted event 与稳定版本 token。源码 checkout 的 frame 必须逐字匹配 Git `HEAD` blob，安装态 frame 必须逐字匹配 copy-project manifest 中该路径的 digest；路径全程 anchored no-follow，未跟踪、已修改、自用、链接、special 或并发移位文件一律拒绝。Dispatcher 不从 child argv/stdout/stderr 构造该 envelope。Raw stdout/stderr、traceback 文本、arguments、用户原文、source/evidence、secret、环境变量和绝对路径始终禁止进入 capture API。捕获异常只能写入私有 Agent protocol，不能改变原 exit code 或 public message；成功与 no-op 不产生 issue。
 
-结构化问题保存在本地 skill-evolution 记忆中，近重复确定性合并 occurrence。Issue 永不自动改 skill、roadmap 或已确认研究结论。D1 没有后台 telemetry 或第三方上传；脱敏导出预览也必须由当前用户消息授权。
+`kb/memory/skill-evolution/issues.yaml` 继续是本地脱敏索引；redacted 模式保持原 fingerprint 与 occurrence 行为。local-detailed 在 `memory/skill-evolution/.private/details/` 为每个诊断 identity 保存一个有界、`0600`、digest-bound artifact，私有 signature 可用稳定 class/stage/frame 区分不同机械失败形态，但不证明根因。summary/detail 在同一 transaction 成功或回滚，history 最多保留五个 snapshot；新建要求目标不存在，更新以此前读取的精确 bytes 做 CAS，孤立或并发变化的 artifact 不会被覆盖。替换冲突至多保留一个有界私有 recovery backup，后续写入仅在它与可见文件逐字一致时清理，否则等待人工检查。私有 subtree 即使曾被 force-add 也从 checkpoint path discovery 硬排除，export/public protocol/versioning/sync/install/update 永不读取。
+
+`errors-only + local-detailed` 的 root cause 明确为 `not-run`。`developer + local-detailed` 在预算为零时仍为 `not-run`，预算允许时只产生绑定 issue ID 与当前 detail digest 的私有 Agent action，状态先为 `pending`；Agent 经 owner-only apply 写入的只能是脱敏 `hypothesis`、复现线索、优化候选与下一步验证，脚本不推断原因、不伪造 token usage、不自动确认。Issue 永不自动改 skill、roadmap 或已确认研究结论。D1 没有后台 telemetry 或第三方上传；脱敏导出预览也必须由当前用户消息授权且永不包含 private detail。
 
 机械 workspace audit 是字节级只读操作，按 `schema`、`integrity`、`recovery`、`security`、`quality` 分层报告稳定 finding。它检查可确定判断的结构、绑定、journal、产品拥有文件、基础 metadata、figure 候选和 symlink containment，不判断语义矛盾或研究结论质量。`kb doctor` 的普通输出仍只有简洁中文；显式 Agent protocol 可以包含有效模式与 audit status/counts，但不投影 raw finding。
 

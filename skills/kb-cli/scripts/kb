@@ -292,6 +292,22 @@ def _owner_skill(relative_script: str) -> str:
     return "unknown-owner"
 
 
+def _diagnostic_detail_envelope() -> dict[str, object]:
+    """Build the closed mechanical envelope accepted by private diagnostics."""
+
+    return {
+        "schema": "diagnostic-mechanical-envelope/v1",
+        "exception_class": "owner-nonzero-exit",
+        "failure_stage": "unknown",
+        "frames": [],
+        "events": ["owner-nonzero-exit", "dispatcher-capture"],
+        "runtime_version": (
+            f"python-{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+        ),
+        "dependency_versions": {},
+    }
+
+
 def _capture_owner_failure(
     root: Path,
     relative_script: str,
@@ -314,13 +330,25 @@ def _capture_owner_failure(
         )
         return
     try:
-        capture(
+        issue = capture(
             root,
             skill=skill,
             operation=diagnostic_operation,
             returncode=int(returncode),
             public_summary=public_summary,
+            detail_envelope=_diagnostic_detail_envelope(),
         )
+        if isinstance(issue, Mapping) and issue.get("retrospective_status") == "pending":
+            issue_id = str(issue.get("id") or "").strip().lower()
+            detail_digest = str(issue.get("detail_digest") or "").strip().lower()
+            if re.fullmatch(r"diag-[0-9a-f]{16}", issue_id) and re.fullmatch(
+                r"[0-9a-f]{64}", detail_digest
+            ):
+                add_agent_action(
+                    "run_diagnostic_retrospective",
+                    issue_id=issue_id,
+                    expected_detail_digest=detail_digest,
+                )
     except (Exception, SystemExit):  # diagnostics must never mask the owner result
         _record_private_diagnostic_event(
             "runtime-failure-capture-failed",

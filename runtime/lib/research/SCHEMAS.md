@@ -647,6 +647,8 @@ topics:
 - `identity.default_confirmed_by`: 可选的人类确认身份默认值。只用于补齐 `--confirmed-by`；`--evidence` 仍必须由调用方显式提供，系统不得默认使用 AI 写出的单元笔记作为 evidence。
 - `diagnostics.mode`: `off | errors-only | developer`，默认 `off`。只控制额外诊断，不控制 schema/evidence/confirmation/recovery 等强制门。
 - `diagnostics.per_skill.<skill>`: `inherit | off | errors-only | developer`。逐 skill 覆盖 workspace 总模式。
+- `diagnostics.detail_level`: `redacted | local-detailed`，默认/非法值均归一为 `redacted`。它只控制本地持久化细节，与 capture mode 正交；第一版不存在 `local-raw`。
+- `diagnostics.per_skill_detail_level.<skill>`: `inherit | redacted | local-detailed`。独立覆盖 workspace detail level，不改变既有 scalar `diagnostics.per_skill.<skill>` 的读取、写入或 round-trip 形态。
 - `diagnostics.local_only`: D1 永远归一为 `true`，磁盘上的 `false` 也不能启用上传或遥测。
 - `diagnostics.token_budget_per_task`: 非负整数；只有 effective mode 为 `developer` 且预算大于 0 时，Agent 才可做触发式短复盘。
 - `diagnostics.max_issues_per_task`: 正整数；以及非负的 `dedup_window_seconds` / `cooldown_seconds`，供 runtime/Agent 限流。机械记录本身不调用 LLM。
@@ -754,7 +756,7 @@ operation: map-capability
 
 ### skill-evolution/issues.yaml <a id="diagnostic-issues-yaml"></a>
 
-落在 `kb/memory/skill-evolution/issues.yaml`，由 `skill-evolution-advisor` 独占写入。它是本地、脱敏、结构化的运行问题真源，不是 telemetry，也不自动修改 skill、roadmap 或知识内容。显式用户记录不受自动模式 `off` 限制；自动 runtime 捕获必须先通过 effective policy。自由文本字段必须确定性移除绝对路径、邮箱、键值型 secret、常见独立 credential 形状、环境变量值与 traceback；`context` 只保留不可逆摘要。
+落在 `kb/memory/skill-evolution/issues.yaml`，由 `skill-evolution-advisor` 独占写入。它是本地、脱敏、结构化的可审阅摘要索引；完整 local-detailed payload 只由其 digest-bound private artifact 承载。两者都不是 telemetry，也不自动修改 skill、roadmap 或知识内容。显式用户记录不受自动模式 `off` 限制；自动 runtime 捕获必须先通过 effective policy。自由文本字段必须确定性移除绝对路径、邮箱、键值型 secret、常见独立 credential 形状、环境变量值与 traceback；`context` 只保留不可逆摘要。
 
 ```yaml
 schema_version: 1
@@ -782,9 +784,57 @@ issues:
     failure_stage: source-recognition | prepare-freeze | materialization |
       canonical-transaction | checkpoint | unknown  # 可选；仅自动 source-intake:add 失败
     privacy_classification: local-redacted
+    detail_ref: memory/skill-evolution/.private/details/diag-<prefix>.yaml # 仅 local-detailed
+    detail_digest: <sha256>             # 当前 private artifact bytes binding
+    retrospective_status: not-run | pending | hypothesis
 ```
 
-禁止写入 raw stdout/stderr、完整 traceback、用户原消息、secret、环境变量值、绝对路径、论文原文、raw/evidence 内容。导出只提供显式授权的本地 preview，并进一步省略 fingerprint/context；D1 不提供网络上传。每次 record/review 只以本文件为精确 transaction target，失败按 before-image 回滚，不留下半条 issue。
+禁止写入 raw stdout/stderr、完整 traceback、用户原消息、secret、环境变量值、绝对路径、论文原文、raw/evidence 内容。导出只提供显式授权的本地 preview，并进一步省略 fingerprint/context/detail_ref/detail_digest/retrospective_status；D1 不提供网络上传。redacted record/review 只以本文件为精确 transaction target；local-detailed record 与 Agent retrospective apply 把 summary 和一个 exact detail artifact 声明为同一 root transaction targets，失败恢复两者 before-image，不留下 dangling ref 或半条 issue。
+
+### skill-evolution/.private/details/*.yaml <a id="diagnostic-private-detail-yaml"></a>
+
+仅当 effective detail level 为 `local-detailed` 且 effective mode 为 `errors-only|developer` 时创建。路径固定在 `kb/memory/skill-evolution/.private/details/<issue-id>.yaml`；summary 中只保存 KB-relative `detail_ref` 与 exact bytes SHA-256。目录逐层 anchored no-follow 打开并要求当前用户 ownership；private directories 为 `0700`，artifacts 为 `0600` regular files；artifact 上限 64 KiB。读取不修复 symlink、special file、owner/mode/size、visible-name identity、digest 或 dangling-ref 异常。
+
+```yaml
+schema: skill-diagnostic-detail/v1
+issue_id: diag-<fingerprint-prefix>
+summary_fingerprint: <sha256>           # legacy redacted identity
+detail_signature: <sha256>             # stable owner/operation/class/stage/frames only
+privacy_classification: local-detailed
+created_at: <UTC ISO-8601>
+updated_at: <UTC ISO-8601>
+occurrence_history:                     # newest five snapshots only
+  - captured_at: <UTC ISO-8601>
+    observation:
+      category: runtime-failure
+      owner: source-intake
+      operation: add
+      return_code: 1
+      exception_class: owner-nonzero-exit
+      failure_stage: source-recognition | prepare-freeze | materialization |
+        canonical-transaction | checkpoint | unknown
+      bundle_version: ""
+      source_commit: ""
+      runtime_version: python-<major.minor.patch> | unknown
+      dependency_versions: {}           # 至多 8 个 allowlisted exact installed versions
+    root_cause:
+      status: not-run | pending | hypothesis
+      reason: mode-errors-only | budget-zero | awaiting-agent | agent-applied
+      explanation: ""                  # 仅 hypothesis 非空；最长 300 chars，已脱敏
+    reproduction: []                    # Agent apply；至多 5 个脱敏短项
+    relevant_trace: []                  # 至多 8 个 {path,line,function}，须匹配 Git HEAD / install manifest 拥有的真实 managed Python source
+    safe_events: []                     # 至多 4 个 allowlisted mechanical codes
+    output_excerpt: []                  # v1 保留字段，恒为空；capture API 不接受 child output
+    optimization_candidates: []         # Agent apply；至多 5 个脱敏短项
+    next_validation: []                 # Agent apply；至多 5 个脱敏短项
+dropped_history_count: 0
+```
+
+封闭 `diagnostic-mechanical-envelope/v1` 的 exact keys 为 `schema/exception_class/failure_stage/frames/events/runtime_version/dependency_versions`；多余/缺失 key、非 allowlist class/event/dependency、源码文本、绝对/父级路径、非真实 managed Python file/function/line、非当前 runtime version（`unknown` 除外）或不匹配当前安装的 dependency version 均拒绝 private detail。Source checkout frame 必须逐字匹配 Git `HEAD` blob；installed frame 必须逐字匹配 copy-project manifest 中该路径的 digest，所有路径组件使用 anchored no-follow traversal。Failure stage 非 allowlist 时归一为 `unknown`；`source-intake:add` 的 one-use owner receipt 可把 `unknown` 精化为已验证 stage，冲突时 private detail fail closed 并回退 legacy redacted summary。Dispatcher 只从固定机械事实构造 envelope，不读取 child arguments/stdout/stderr。
+
+`errors-only` snapshot 的 root cause 必须为 `not-run/mode-errors-only`。`developer` budget 为 0 时为 `not-run/budget-zero`；非零时为 `pending/awaiting-agent`，dispatcher 只向 private Agent protocol 添加 `{action: run_diagnostic_retrospective, issue_id, expected_detail_digest}`。Agent 先由 owner 读取当前 digest-bound detail，再把结构化分析暂存在 `kb/.runtime/` 私有 regular file；owner-only apply 重验 issue ID/digest、只接受 explanation/reproduction/optimization_candidates/next_validation allowlist，成功后写 `hypothesis/agent-applied`。脚本不推断 root cause、不记录虚构 token usage，也不把 hypothesis 自动改为 confirmed。
+
+Private subtree 具有双重隔离：canonical `.gitignore` 忽略它，checkpoint dirty-path discovery 和任何祖先 target expansion 还必须硬排除 exact private descendants，即使旧文件曾被 force-add。`export-preview`、公开 stdout/stderr、Agent public projection、sync、installer、updater 和 versioning 不得枚举或读取该 subtree。切回 `redacted` 不再创建/更新 detail，但不得静默删除已有 artifact。
 
 `source-intake:add` 的自动失败可附加 `failure_stage`。Stage 是封闭 allowlist：`source-recognition` 表示来源/候选解析，`prepare-freeze` 表示安全 snapshot、归档和重验，`materialization` 表示 staged source 发布为 canonical unit，`canonical-transaction` 表示同一 intake root transaction 的其余写入/commit，`checkpoint` 表示 canonical commit 后的精确 checkpoint，无法可靠归类时必须写 `unknown`。Stage 不从错误文本推断；对应 `error_class` 为 `owner-nonzero-exit.<failure_stage>`，因此不同边界不会错误合并 occurrence。历史记录可以缺字段，按 `unknown` 理解且不回填。
 
@@ -1176,6 +1226,7 @@ Read path 先校验 cache 内部 metadata/source table/passage rows/digests/sche
 | `kb/monitoring/runs/*.yaml` | research-monitor | research-orchestrator、report consumers | frozen run receipt；Agent judgement 必须挂当前引用 |
 | kb/memory/learnings.yaml | skill-evolution-advisor | kb-cli、runtime Agent（通过 recall 摘要） | 经验/习惯/skill 缺陷记忆；skill-defect record-only |
 | kb/memory/skill-evolution/issues.yaml | skill-evolution-advisor | dispatcher、research-config-manager、全部（通过私有摘要） | 本地脱敏诊断 issue；无 telemetry、无自动修 skill |
+| `kb/memory/skill-evolution/.private/details/*.yaml` | skill-evolution-advisor diagnostics owner | runtime Agent（仅 digest-bound owner read/apply） | bounded local-detailed artifact；禁止 export/versioning/sync/install/update/public projection |
 | kb/user/* | research-config-manager（初始化）、source-intake / knowledge-base-manager / report-author（各自投影） | 用户、runtime Agent | 人面向可重建入口；公共 status/find 保持只读，maintainer 工具不拥有 canonical 写入 |
 
 ---

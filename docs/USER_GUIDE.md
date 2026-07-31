@@ -263,6 +263,14 @@ Run log 是事实；diagnosis 是推断，默认待确认。报告系统从 prog
 ```
 
 ```text
+保持仅在出错时记录，把诊断细节设为仅本地详细；unit-analyst 仍只保留脱敏摘要。
+```
+
+```text
+把所有诊断恢复为脱敏级别，不删除已有的本地详细记录。
+```
+
+```text
 把刚才的失败做脱敏记录和短复盘，不要上传。
 ```
 
@@ -270,9 +278,11 @@ Run log 是事实；diagnosis 是推断，默认待确认。报告系统从 prog
 检查知识库健康，只做只读机械检查，不要修改资料。
 ```
 
-三种模式的含义是：`off` 不自动记录；`errors-only` 只做确定性失败捕获，不调用 Agent 复盘；`developer` 允许在每任务 token 与问题数量预算内做触发式短复盘。单个能力可以设置得比 workspace 更严格。即使自动诊断关闭，你当前消息中明确要求“记下这个问题”时，Agent 仍会记录；没有明确要求时，纠正和可复用摩擦只在策略允许时自动捕获。
+捕获模式与细节级别是两个独立设置。三种模式的含义是：`off` 不自动记录；`errors-only` 只做确定性失败捕获，不调用 Agent 复盘；`developer` 允许在每任务 token 与问题数量预算内请求触发式短复盘。细节默认是 `redacted`；只有你明确启用 `local-detailed` 后，系统才会在本地保存有界机械细节。workspace 和单个能力都可以覆盖细节级别，既有逐 skill mode 配置保持兼容。即使自动诊断关闭，你当前消息中明确要求“记下这个问题”时，Agent 仍会记录；没有明确要求时，纠正和可复用摩擦只在策略允许时自动捕获。
 
-诊断资料只保存在本地，没有后台 telemetry 或自动上传。生成脱敏导出预览需要你在当前消息中明确授权；D1 不负责上传第三方 issue tracker。默认不会包含论文原文、逐字 evidence、用户消息、绝对路径、环境变量、secret 或完整 traceback，记录也不会自动修改 skill、roadmap 或研究结论。
+脱敏摘要保存在 `issues.yaml`；local-detailed 使用独立私有记录并以 digest 绑定摘要。`errors-only` 的原因状态始终是“未运行”；`developer` 预算为零时也明确标记未运行，预算允许时先标记待 Agent 分析。Agent 只能通过当前 issue ID 与 detail digest 匹配的 owner 操作写入“假设”、复现线索、优化候选和下一步验证，脚本不会推断或自动确认根因。
+
+诊断资料只保存在本地，没有后台 telemetry 或自动上传。生成脱敏导出预览需要你在当前消息中明确授权；D1 不负责上传第三方 issue tracker，导出也永远不读取 private detail。公开输出、版本记录、同步、安装和更新同样排除 detailed artifact。任何档位的诊断 summary/detail artifact 都不会保存完整参数、stdout/stderr、traceback 文本、论文/source/evidence 原文、用户完整消息、绝对路径、环境变量值或 secret；详细捕获失败只回退为原有脱敏记录，不改变原操作的退出状态或用户文案。已有 private detail 不会因切回 redacted 被静默删除，记录也不会自动修改 skill、roadmap 或研究结论。
 
 普通 `kb doctor` 仍只显示简短的运行能力结果。即使首次安装时因为无网或镜像不可用而缺少核心依赖，`kb help` 与 `kb doctor` 也保持只读可用，不会为了诊断再次创建环境或运行 pip；doctor 会如实说明 runtime 尚未就绪，由 Agent 按安装文档的离线恢复步骤处理。由 Agent 执行完整健康检查时，它可以私下读取当前诊断模式和机械 audit 计数，再用中文解释；公开面保持十六个动词，不增加 `lint` 或 `diagnostics` 入口。
 

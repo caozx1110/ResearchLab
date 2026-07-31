@@ -21,7 +21,7 @@ description: 管理 core 研究系统配置，包括资源画像、语言偏好�
 4. 让其他 skills 可以稳定读取统一配置。
 5. 管理 `kb` 独立仓库的 versioning 策略，例如 `manual | milestone | aggressive`。
 6. 管理链接自动化档位与讨论风格；论文 quick-screen 配置已经退役。
-7. 管理本地可选诊断策略：workspace `off|errors-only|developer`、逐 skill override、任务 token/issue 上限与 dedup/cooldown；`local_only=true` 不可关闭。
+7. 管理本地可选诊断策略：workspace `off|errors-only|developer` capture mode、独立的 `redacted|local-detailed` detail level、两者各自的逐 skill override、任务 token/issue 上限与 dedup/cooldown；`local_only=true` 不可关闭，也不存在 `local-raw`。
 8. 为具体任务生成分层偏好视图：本 skill 保持总偏好唯一事实源，规则只筛出目标 skill/operation 有资格看到的字段，runtime Agent 再选择本次真正相关的子集并记录理由。
 
 ## 分层偏好分发
@@ -47,12 +47,15 @@ Agent 必须遵循 init private protocol 的逐字段 input mapping，不自行�
 
 ## 诊断配置交互
 
-普通用户无需记命令。Agent 接到“开启开发者诊断”“只在出错时记录”“关闭 unit-analyst 诊断”等自然语言请求后，私下写 runtime preference，再用自然语言确认 effective mode。`unit-analyst` 的设置会机械同步到四个历史 implementation identity；诊断只控制额外记录与复盘，绝不能关闭 evidence、confirmation、schema、containment 或 recovery 门。
+普通用户无需记命令。Agent 接到“开启开发者诊断”“只在出错时记录”“把诊断细节设为仅本地详细”“恢复为脱敏诊断”“关闭 unit-analyst 诊断”等自然语言请求后，私下写 runtime preference，再用自然语言分别确认 effective mode 与 effective detail level。`unit-analyst` 的 mode/detail 设置都会机械同步到四个历史 implementation identity；诊断只控制额外记录、细节和复盘，绝不能关闭 evidence、confirmation、schema、containment 或 recovery 门。
 
 - `off`：不自动记录、不做 Agent 复盘；用户明确要求“记下这个问题”时仍记录。
 - `errors-only`：只做确定性失败捕获，不调用 LLM。
 - `developer`：包含 errors-only，并允许预算内触发式短复盘。
 - per-skill `inherit` 跟随 workspace 总模式，其余值覆盖总模式。
+- `redacted`：默认，只保存兼容的脱敏 summary；非法/缺失值也归一为此档。
+- `local-detailed`：显式选择后保存有界私有机械细节；不保存 raw output/traceback/arguments/user/source/evidence 内容，也不改变 export 或同步边界。
+- `per_skill_detail_level` 与旧 scalar `per_skill` mode 独立；更新一个不得改变另一个的 shape 或 effective value。
 
 D1 无 telemetry、网络上传或自动修改 skill。不要向用户展示 owner 命令、flags、内部路径或 token 计数实现细节。
 
@@ -71,8 +74,9 @@ ${RESEARCH_PYTHON:-python3} .agents/skills/research-config-manager/scripts/confi
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-config-manager/scripts/config.py set-runtime-pref --section paper --key auto_complete_note --value true
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-config-manager/scripts/config.py set-runtime-pref --section versioning --key auto_commit_mode --value milestone
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-config-manager/scripts/config.py set-diagnostics --mode errors-only
-${RESEARCH_PYTHON:-python3} .agents/skills/research-config-manager/scripts/config.py set-diagnostics --mode developer --token-budget-per-task 2000 --max-issues-per-task 20
+${RESEARCH_PYTHON:-python3} .agents/skills/research-config-manager/scripts/config.py set-diagnostics --mode developer --detail-level local-detailed --token-budget-per-task 2000 --max-issues-per-task 20
 ${RESEARCH_PYTHON:-python3} .agents/skills/research-config-manager/scripts/config.py set-diagnostics --skill unit-analyst --skill-mode off
+${RESEARCH_PYTHON:-python3} .agents/skills/research-config-manager/scripts/config.py set-diagnostics --skill unit-analyst --skill-detail-level redacted
 ```
 
 ## 启动澄清（Agent 用）

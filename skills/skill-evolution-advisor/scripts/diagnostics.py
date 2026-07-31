@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import stat
 import sys
 from pathlib import Path
 
@@ -35,10 +37,12 @@ from research.diagnostics import (
     SEVERITIES,
     SOURCES,
     STATUSES,
+    apply_diagnostic_retrospective,
     capture_runtime_failure,
     diagnostics_policy,
     export_diagnostic_preview,
     list_diagnostic_issues,
+    load_diagnostic_detail,
     record_diagnostic_issue,
     review_diagnostic_issue,
 )
@@ -88,7 +92,97 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--authorized", action="store_true", help="Assert explicit authorization in the current user message")
     export.add_argument("--status", choices=sorted(STATUSES), default="")
     export.add_argument("--skill", default="")
+
+    detail = subparsers.add_parser("detail", help="Read one private local-detailed artifact")
+    detail.add_argument("--id", required=True)
+
+    apply_retrospective = subparsers.add_parser(
+        "apply-retrospective",
+        help="Apply one digest-bound Agent hypothesis from a private runtime JSON file",
+    )
+    apply_retrospective.add_argument("--id", required=True)
+    apply_retrospective.add_argument("--expected-detail-digest", required=True)
+    apply_retrospective.add_argument("--analysis-file", required=True)
     return parser
+
+
+def _load_private_analysis(root: Path, value: str) -> dict[str, object]:
+    resolved_root = root.resolve(strict=True)
+    runtime_root = resolved_root / "kb" / ".runtime"
+    candidate = Path(value).expanduser()
+    if not candidate.is_absolute():
+        candidate = runtime_root / candidate
+    candidate = Path(os.path.abspath(os.fspath(candidate)))
+    try:
+        relative = candidate.relative_to(runtime_root)
+    except ValueError as exc:
+        raise SystemExit("retrospective analysis file must stay inside the private runtime area") from exc
+    if not relative.parts:
+        raise SystemExit("retrospective analysis file must be one regular private runtime file")
+
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    file_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    directory = -1
+    descriptor = -1
+    try:
+        directory = os.open(resolved_root, directory_flags)
+        for part in ("kb", ".runtime", *relative.parts[:-1]):
+            child = os.open(part, directory_flags, dir_fd=directory)
+            os.close(directory)
+            directory = child
+        descriptor = os.open(relative.parts[-1], file_flags, dir_fd=directory)
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_size > 16 * 1024
+        ):
+            raise SystemExit("retrospective analysis file must be one regular private runtime file")
+        chunks: list[bytes] = []
+        remaining = 16 * 1024 + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, min(remaining, 8192))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        content = b"".join(chunks)
+        current = os.fstat(descriptor)
+        identity = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if (
+            len(content) != metadata.st_size
+            or any(getattr(metadata, field) != getattr(current, field) for field in identity)
+        ):
+            raise SystemExit("retrospective analysis file changed during its anchored read")
+    except SystemExit:
+        raise
+    except OSError as exc:
+        raise SystemExit("retrospective analysis file must be one regular private runtime file") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if directory >= 0:
+            os.close(directory)
+
+    try:
+        payload = json.loads(content.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise SystemExit("retrospective analysis file is not valid UTF-8 JSON") from exc
+    expected = {"explanation", "reproduction", "optimization_candidates", "next_validation"}
+    if not isinstance(payload, dict) or set(payload) != expected:
+        raise SystemExit("retrospective analysis must use the closed structured schema")
+    return payload
 
 
 def main() -> int:
@@ -139,6 +233,23 @@ def main() -> int:
                 authorized=args.authorized,
                 status=args.status,
                 skill=args.skill,
+            )
+        )
+        return 0
+    if args.command == "detail":
+        _print_json(load_diagnostic_detail(root, issue_id=args.id))
+        return 0
+    if args.command == "apply-retrospective":
+        analysis = _load_private_analysis(root, args.analysis_file)
+        _print_json(
+            apply_diagnostic_retrospective(
+                root,
+                issue_id=args.id,
+                expected_detail_digest=args.expected_detail_digest,
+                explanation=str(analysis["explanation"]),
+                reproduction=analysis["reproduction"],
+                optimization_candidates=analysis["optimization_candidates"],
+                next_validation=analysis["next_validation"],
             )
         )
         return 0
