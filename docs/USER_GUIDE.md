@@ -138,7 +138,7 @@ Agent 会连续完成安全步骤：轻量入库、保留原格式、生成完�
 
 把工作区的 `kb` 目录作为 Obsidian Vault 打开即可，无需社区插件。首次查看或 canonical 内容变化后使用 `kb obsidian update`；需要检查是否过期、断链或被人工改动时使用 `kb obsidian status`。
 
-系统生成的页面位于 `obsidian/managed/`，包含 unit、program、topic、claim/evidence 块链接和三个原生 Bases 面板。Paper、文章和本地文档页还提供完整 Markdown 原文入口；已有 page/section locator 的 evidence 会尽量直接跳到该 Markdown 页或小节。Repo 证据在本地源码仍可达时可以直接打开对应代码文件，当前不保证精确跳到行号。这个目录和 Bases 都是只读可重建视图，不要直接编辑；你自己的阅读笔记分别放在 `obsidian/inbox/` 或 `obsidian/annotations/`。需要批量审核时，Agent 会在 annotations 生成一份只允许修改 checkbox 的待确认表。系统不会生成或修改 `.obsidian/` 配置。
+系统生成的页面位于 `obsidian/managed/`，包含 unit、program、topic、claim/evidence 块链接和三个原生 Bases 面板。Paper、文章和本地文档页还提供完整 Markdown 原文入口；已有 page/section locator 的 evidence 会尽量直接跳到该 Markdown 页或小节。Repo 证据在本地源码仍可达时可以直接打开对应代码文件，当前不保证精确跳到行号。这个目录和 Bases 都是只读可重建视图，不要直接编辑：下次刷新会直接丢弃 Base 中的手工排序或其他内容并恢复 renderer 默认值；managed Markdown 的人工改动则会被保留并阻止刷新。你自己的阅读笔记分别放在 `obsidian/inbox/` 或 `obsidian/annotations/`。需要批量审核时，Agent 会在 annotations 生成一份只允许修改 checkbox 的待确认表。系统不会生成或修改 `.obsidian/` 配置。
 
 若想把自己的笔记整理进知识库，请在当前消息里明确点名 `inbox` 或 `annotations` 中的一份 Markdown 文件。Agent 只读取这一份单层普通文件，把 exact bytes 冻结成独立 provenance 的 blog 来源，再从冻结副本填写有逐字证据的结构化理解；原笔记逐字不改，review sheet 也绝不会被当成资料。即使笔记是你写的，结构化判断仍保持待确认，“我”或笔记作者身份都不会自动成为确认签名。
 
