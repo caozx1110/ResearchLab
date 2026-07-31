@@ -5,30 +5,31 @@ module; ``inbox`` and ``annotations`` are human space and are never traversed.
 """
 from __future__ import annotations
 
-import ctypes
 import hashlib
 import json
 import os
 import re
 import secrets
 import stat
-import sys
 from collections import defaultdict
 from copy import deepcopy
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Iterable
+from typing import Any, Iterable
 from urllib.parse import quote as url_quote
 
 from .common import utc_now_iso
 from .journal import (
     SNAPSHOT_DIRNAME,
     _anchored_journal_directory,
-    _anchored_target_parent,
     _preflight_journal_envelopes,
+    arm_abort_cas,
     committed_ops,
     current_operation_id,
+    exchange_abort_cas,
     incomplete_ops,
+    load_op_view,
     mutation_transaction,
+    retain_abort_cas,
 )
 from .paths import UNIT_KIND_DIRS, ensure_kb_gitignore, kb_gitignore_path, kb_root, topic_taxonomy_path, unit_root, units_root
 from .records import ProjectFileSnapshot, normalize_record_schema, snapshot_project_file
@@ -1605,10 +1606,6 @@ def _stat_identity(metadata: os.stat_result) -> tuple[int, int, int, int, int, i
     )
 
 
-def _directory_capability(metadata: os.stat_result) -> tuple[int, int, int]:
-    return (metadata.st_dev, metadata.st_ino, metadata.st_mode)
-
-
 def _read_anchored_regular(
     parent_fd: int,
     leaf: str,
@@ -1650,346 +1647,51 @@ def _read_anchored_regular(
     return b"".join(chunks), identity
 
 
-def _stable_exchange_identity(
-    identity: tuple[int, int, int, int, int, int],
-) -> tuple[int, int, int, int, int]:
-    """Return identity fields that an in-directory rename does not change."""
-    return identity[:5]
-
-
-def _atomic_exchange_at(
-    left_parent_fd: int,
-    left: str,
-    right_parent_fd: int,
-    right: str,
-) -> None:
-    """Atomically exchange two names on one filesystem through anchored directories.
-
-    There is deliberately no ordinary-rename fallback: the presentation reset
-    is unavailable when the host cannot provide an atomic exchange primitive.
-    """
-    library = ctypes.CDLL(None, use_errno=True)
-    left_bytes = os.fsencode(left)
-    right_bytes = os.fsencode(right)
-    if sys.platform.startswith("linux"):
-        exchange = getattr(library, "renameat2", None)
-        flag = 0x2  # RENAME_EXCHANGE
-    elif sys.platform == "darwin":
-        exchange = getattr(library, "renameatx_np", None)
-        flag = 0x2  # RENAME_SWAP
-    else:
-        exchange = None
-        flag = 0
-    if exchange is None:
-        raise SystemExit("Atomic Base replacement is unavailable on this platform.")
-    exchange.argtypes = [
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_uint,
-    ]
-    exchange.restype = ctypes.c_int
-    ctypes.set_errno(0)
-    result = exchange(
-        left_parent_fd,
-        left_bytes,
-        right_parent_fd,
-        right_bytes,
-        flag,
-    )
-    if result != 0:
-        error_number = ctypes.get_errno()
-        raise OSError(error_number, os.strerror(error_number))
-
-
-class _PostAbortExchangeRecovery:
-    """Hold a displaced inode until the enclosing journal has finished aborting."""
-
-    def __init__(
-        self,
-        staging_fd: int,
-        target_parent_fd: int,
-        temp_name: str,
-        leaf: str,
-        *,
-        displaced_bytes: bytes,
-        displaced_identity: tuple[int, int, int, int, int, int],
-        desired_bytes: bytes,
-        desired_identity: tuple[int, int, int, int, int, int],
-        original_bytes: bytes,
-        staging_is_current: Callable[[], bool],
-    ) -> None:
-        self.staging_fd = os.dup(staging_fd)
-        self.target_parent_fd = os.dup(target_parent_fd)
-        self.temp_name = temp_name
-        self.leaf = leaf
-        self.displaced_bytes = displaced_bytes
-        self.displaced_identity = displaced_identity
-        self.desired_bytes = desired_bytes
-        self.desired_identity = desired_identity
-        self.original_bytes = original_bytes
-        self.staging_is_current = staging_is_current
-
-    def restore_displaced(self) -> None:
-        """Restore the exact displaced inode after journal abort, without clobbering a third writer."""
-        try:
-            # Re-open the lexical journal path even though recovery deliberately
-            # continues through the pinned descriptor when that path was
-            # detached.  The comparison prevents a replacement from being
-            # mistaken for our recovery directory.
-            staging_visible = self.staging_is_current()
-            try:
-                recovery_bytes, _recovery_identity = _read_anchored_regular(
-                    self.staging_fd,
-                    self.temp_name,
-                )
-            except FileNotFoundError:
-                mode = stat.S_IMODE(self.displaced_identity[2])
-                flags = (
-                    os.O_WRONLY
-                    | os.O_CREAT
-                    | os.O_EXCL
-                    | getattr(os, "O_NOFOLLOW", 0)
-                )
-                descriptor = os.open(
-                    self.temp_name,
-                    flags,
-                    mode,
-                    dir_fd=self.staging_fd,
-                )
-                try:
-                    offset = 0
-                    while offset < len(self.displaced_bytes):
-                        written = os.write(descriptor, self.displaced_bytes[offset:])
-                        if written <= 0:
-                            raise OSError("post-abort Base recovery write made no progress")
-                        offset += written
-                    os.fchmod(descriptor, mode)
-                    os.fsync(descriptor)
-                finally:
-                    os.close(descriptor)
-                recovery_bytes, _recovery_identity = _read_anchored_regular(
-                    self.staging_fd,
-                    self.temp_name,
-                )
-            if recovery_bytes != self.displaced_bytes:
-                raise RuntimeError("The displaced Base recovery bytes changed during journal abort.")
-            if staging_visible and not self.staging_is_current():
-                raise RuntimeError(
-                    "The visible Base staging directory changed again during post-abort recovery."
-                )
-            current_bytes, current_identity = _read_anchored_regular(
-                self.target_parent_fd,
-                self.leaf,
-            )
-            still_ours = (
-                current_bytes == self.desired_bytes
-                and _stable_exchange_identity(current_identity)
-                == _stable_exchange_identity(self.desired_identity)
-            )
-            journal_restored = current_bytes == self.original_bytes
-            if not still_ours and not journal_restored:
-                raise RuntimeError(
-                    "The Base target changed again during abort; displaced recovery material was preserved."
-                )
-            _atomic_exchange_at(
-                self.staging_fd,
-                self.temp_name,
-                self.target_parent_fd,
-                self.leaf,
-            )
-            restored_bytes, restored_identity = _read_anchored_regular(
-                self.target_parent_fd,
-                self.leaf,
-            )
-            if (
-                restored_bytes != self.displaced_bytes
-                or _stable_exchange_identity(restored_identity)
-                != _stable_exchange_identity(self.displaced_identity)
-            ):
-                raise RuntimeError("The post-abort atomic recovery restored an unexpected inode.")
-            os.unlink(self.temp_name, dir_fd=self.staging_fd)
-            os.fsync(self.staging_fd)
-            os.fsync(self.target_parent_fd)
-        finally:
-            os.close(self.target_parent_fd)
-            os.close(self.staging_fd)
-
-
-class _AtomicExchangeConflict(RuntimeError):
-    def __init__(
-        self,
-        message: str,
-        *,
-        recovery: _PostAbortExchangeRecovery,
-        cause: BaseException,
-    ) -> None:
-        super().__init__(message)
-        self.recovery = recovery
-        self.cause = cause
-
-
 def _new_base_exchange_temp_name() -> str:
     return f".presentation-reset-{secrets.token_hex(12)}.tmp"
 
 
-def _journal_staging_directory_is_current(
-    project_root: Path,
-    relative_path: str,
-    expected_identity: tuple[int, int, int],
-) -> bool:
-    try:
-        with _anchored_journal_directory(project_root, relative_path) as current_fd:
-            return _directory_capability(os.fstat(current_fd)) == expected_identity
-    except (OSError, RuntimeError, SystemExit):
-        return False
-
-
-def _replace_project_snapshot_bytes(
+def _stage_base_exchange_bytes(
     snapshot: ProjectFileSnapshot,
     desired_bytes: bytes,
     *,
     staging_fd: int,
-    staging_is_current: Callable[[], bool],
     temp_name: str | None = None,
 ) -> None:
-    """Atomically exchange one exact snapshot through its anchored parent."""
+    """Create and durably publish one desired staging file for journal-owned exchange."""
     if not snapshot.relative_path.startswith("kb/"):
         raise SystemExit("The Base reset target is outside the canonical knowledge base.")
     if not snapshot.is_current():
         raise SystemExit("The Base reset target or an ancestor changed after preview.")
-    target_key = snapshot.relative_path[len("kb/") :]
     temp_name = temp_name or _new_base_exchange_temp_name()
     if (
         Path(temp_name).name != temp_name
         or re.fullmatch(r"\.presentation-reset-[0-9a-f]{24}\.tmp", temp_name) is None
     ):
         raise SystemExit("The Base atomic-exchange staging name is invalid.")
-    temp_created = False
-    preserve_recovery_material = False
-    if not staging_is_current():
-        raise SystemExit("The Base atomic-exchange staging directory changed before preparation.")
-    with _anchored_target_parent(snapshot.project_root, target_key) as (parent_fd, leaf):
-        if parent_fd is None or not snapshot.directory_capabilities:
-            raise SystemExit("The Base reset parent is unavailable or unsafe.")
-        if _directory_capability(os.fstat(parent_fd)) != snapshot.directory_capabilities[-1]:
-            raise SystemExit("The Base reset parent identity changed after preview.")
-        current_bytes, current_identity = _read_anchored_regular(
-            parent_fd,
-            leaf,
-            expected_identity=snapshot.file_identity,
-        )
-        if current_bytes != snapshot.raw_bytes:
-            raise SystemExit("The Base reset target bytes changed after preview.")
-        mode = stat.S_IMODE(current_identity[2])
-        flags = (
-            os.O_WRONLY
-            | os.O_CREAT
-            | os.O_EXCL
-            | getattr(os, "O_NOFOLLOW", 0)
-        )
-        descriptor = os.open(temp_name, flags, mode, dir_fd=staging_fd)
-        temp_created = True
-        try:
-            offset = 0
-            while offset < len(desired_bytes):
-                written = os.write(descriptor, desired_bytes[offset:])
-                if written <= 0:
-                    raise OSError("anchored Base write made no progress")
-                offset += written
-            os.fchmod(descriptor, mode)
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-        desired_identity = _stat_identity(
-            os.stat(temp_name, dir_fd=staging_fd, follow_symlinks=False)
-        )
-        try:
-            latest_bytes, latest_identity = _read_anchored_regular(
-                parent_fd,
-                leaf,
-                expected_identity=snapshot.file_identity,
-            )
-            if latest_bytes != snapshot.raw_bytes or latest_identity != current_identity:
-                raise SystemExit("The Base reset target changed before compare-and-replace.")
-            if not snapshot.is_current():
-                raise SystemExit("The Base reset target or an ancestor changed before replacement.")
-            if not staging_is_current():
-                raise SystemExit("The Base atomic-exchange staging directory changed before replacement.")
-            _atomic_exchange_at(staging_fd, temp_name, parent_fd, leaf)
-            try:
-                displaced_bytes, displaced_identity = _read_anchored_regular(
-                    staging_fd,
-                    temp_name,
-                )
-                if (
-                    displaced_bytes != snapshot.raw_bytes
-                    or _stable_exchange_identity(displaced_identity)
-                    != _stable_exchange_identity(snapshot.file_identity)
-                ):
-                    raise SystemExit(
-                        "The Base reset target changed at the atomic exchange boundary."
-                    )
-                installed_snapshot = snapshot_project_file(
-                    snapshot.project_root,
-                    snapshot.relative_path,
-                    max_bytes=_OBSIDIAN_BASE_MAX_BYTES,
-                )
-                if (
-                    installed_snapshot is None
-                    or installed_snapshot.raw_bytes != desired_bytes
-                    or installed_snapshot.directory_capabilities
-                    != snapshot.directory_capabilities
-                    or _stable_exchange_identity(installed_snapshot.file_identity)
-                    != _stable_exchange_identity(desired_identity)
-                ):
-                    raise SystemExit(
-                        "The Base reset target or an ancestor changed at replacement."
-                    )
-                if not staging_is_current():
-                    raise SystemExit(
-                        "The Base atomic-exchange staging directory changed at replacement."
-                    )
-            except BaseException as validation_error:
-                try:
-                    displaced_bytes, displaced_identity = _read_anchored_regular(
-                        staging_fd,
-                        temp_name,
-                    )
-                    recovery = _PostAbortExchangeRecovery(
-                        staging_fd,
-                        parent_fd,
-                        temp_name,
-                        leaf,
-                        displaced_bytes=displaced_bytes,
-                        displaced_identity=displaced_identity,
-                        desired_bytes=desired_bytes,
-                        desired_identity=desired_identity,
-                        original_bytes=snapshot.raw_bytes,
-                        staging_is_current=staging_is_current,
-                    )
-                except BaseException as recovery_error:
-                    preserve_recovery_material = True
-                    raise RuntimeError(
-                        "Atomic Base validation failed and recovery material could not be anchored."
-                    ) from recovery_error
-                preserve_recovery_material = True
-                raise _AtomicExchangeConflict(
-                    "Atomic Base replacement validation failed.",
-                    recovery=recovery,
-                    cause=validation_error,
-                ) from validation_error
-            os.unlink(temp_name, dir_fd=staging_fd)
-            temp_created = False
-            os.fsync(staging_fd)
-            os.fsync(parent_fd)
-        finally:
-            if temp_created and not preserve_recovery_material:
-                try:
-                    os.unlink(temp_name, dir_fd=staging_fd)
-                except FileNotFoundError:
-                    pass
+    mode = stat.S_IMODE(snapshot.file_identity[2])
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = os.open(temp_name, flags, mode, dir_fd=staging_fd)
+    try:
+        offset = 0
+        while offset < len(desired_bytes):
+            written = os.write(descriptor, desired_bytes[offset:])
+            if written <= 0:
+                raise OSError("anchored Base staging write made no progress")
+            offset += written
+        os.fchmod(descriptor, mode)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    os.fsync(staging_fd)
+    staged_bytes, _staged_identity = _read_anchored_regular(staging_fd, temp_name)
+    if staged_bytes != desired_bytes:
+        raise RuntimeError("The durable Base staging file did not retain the requested bytes.")
 
 
 def _presentation_journal_anchor(
@@ -2333,60 +2035,56 @@ def reset_obsidian_base_presentation_drift(
         for item in candidates
     }
     targets = [Path(item["path"]) for item in candidates]
-    pending_recovery: _PostAbortExchangeRecovery | None = None
-    try:
-        with mutation_transaction(
+    with mutation_transaction(
+        project_root,
+        "reset_obsidian_base_presentation_sort",
+        targets,
+        operation_role="derived",
+        abort_cas=True,
+    ) as op_id:
+        journal_digest = load_op_view(project_root, op_id)[1]
+        locked_preview, locked_candidates = _base_presentation_reset_preview(
             project_root,
-            "reset_obsidian_base_presentation_sort",
-            targets,
-            operation_role="derived",
-        ) as op_id:
-            locked_preview, locked_candidates = _base_presentation_reset_preview(
-                project_root,
-                preview_token=token,
-                allow_current_operation=True,
-            )
-            if locked_preview.get("preview_digest") != expected:
-                raise SystemExit("The Base presentation drift changed after authorization; nothing was reset.")
-            if [item["relative"] for item in locked_candidates] != [item["relative"] for item in candidates]:
-                raise SystemExit("The Base presentation reset target set changed; nothing was reset.")
-            staging_relative = f"{SNAPSHOT_DIRNAME}/{op_id}"
-            with _anchored_journal_directory(
-                project_root,
-                staging_relative,
-            ) as staging_fd:
-                staging_identity = _directory_capability(os.fstat(staging_fd))
-
-                def staging_is_current() -> bool:
-                    return _journal_staging_directory_is_current(
-                        project_root,
-                        staging_relative,
-                        staging_identity,
-                    )
-
-                for item in locked_candidates:
-                    try:
-                        _replace_project_snapshot_bytes(
-                            item["snapshot"],
-                            str(item["desired_text"]).encode("utf-8"),
-                            staging_fd=staging_fd,
-                            staging_is_current=staging_is_current,
-                            temp_name=exchange_temp_names[str(item["relative"])],
-                        )
-                    except _AtomicExchangeConflict as conflict:
-                        pending_recovery = conflict.recovery
-                        raise
-    except BaseException as transaction_error:
-        if pending_recovery is not None:
-            try:
-                pending_recovery.restore_displaced()
-            except BaseException as recovery_error:
-                raise RuntimeError(
-                    "The Base transaction abort could not safely restore displaced concurrent bytes."
-                ) from recovery_error
-            if isinstance(transaction_error, _AtomicExchangeConflict):
-                raise transaction_error.cause
-        raise
+            preview_token=token,
+            allow_current_operation=True,
+        )
+        if locked_preview.get("preview_digest") != expected:
+            raise SystemExit("The Base presentation drift changed after authorization; nothing was reset.")
+        if [item["relative"] for item in locked_candidates] != [item["relative"] for item in candidates]:
+            raise SystemExit("The Base presentation reset target set changed; nothing was reset.")
+        staging_relative = f"{SNAPSHOT_DIRNAME}/{op_id}"
+        with _anchored_journal_directory(
+            project_root,
+            staging_relative,
+        ) as staging_fd:
+            for item in locked_candidates:
+                target = Path(item["path"])
+                staging_leaf = exchange_temp_names[str(item["relative"])]
+                _stage_base_exchange_bytes(
+                    item["snapshot"],
+                    str(item["desired_text"]).encode("utf-8"),
+                    staging_fd=staging_fd,
+                    temp_name=staging_leaf,
+                )
+                journal_digest = arm_abort_cas(
+                    project_root,
+                    op_id,
+                    target,
+                    expected_journal_digest=journal_digest,
+                    staging_leaf=staging_leaf,
+                )
+                journal_digest = exchange_abort_cas(
+                    project_root,
+                    op_id,
+                    target,
+                    expected_journal_digest=journal_digest,
+                )
+                journal_digest = retain_abort_cas(
+                    project_root,
+                    op_id,
+                    target,
+                    expected_journal_digest=journal_digest,
+                )
     refreshed = update_obsidian_projection(project_root)
     final_status = obsidian_projection_status(project_root)
     blocking_codes = {

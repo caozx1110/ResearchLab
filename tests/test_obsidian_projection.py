@@ -29,6 +29,7 @@ from research.obsidian import (
 )
 from research.relations import project_relation_edges
 import research.obsidian as obsidian_module
+import research.journal as journal_module
 
 
 class _ObsidianBaseDumper(yaml.SafeDumper):
@@ -342,6 +343,20 @@ def test_obsidian_1_12_7_sort_fixture_previews_and_resets_without_canonical_writ
         "obsidian/managed/dashboards/By Topic.base",
         "obsidian/managed/dashboards/Pending Review.base",
     }
+    assert repair_journal["abort_cas"]["schema"] == "research-kb-abort-cas/v1"
+    assert {
+        guard["phase"]
+        for guard in repair_journal["abort_cas"]["targets"].values()
+    } == {"retained"}
+    retained = sorted(
+        (tmp_path / "kb/.journal/snapshots" / repair_journal["op_id"]).glob(
+            ".presentation-reset-*.tmp"
+        )
+    )
+    assert len(retained) == 3
+    assert {hashlib.sha256(path.read_bytes()).hexdigest() for path in retained} == {
+        hashlib.sha256(data).hexdigest() for data in drift_bytes.values()
+    }
     assert not ledger_root.exists()
 
     undo_last_operation(tmp_path)
@@ -487,7 +502,7 @@ def test_base_presentation_reset_rolls_back_multi_file_write_failure(
         _apply_obsidian_1_12_7_title_sort(path)
     drift_bytes = {path: path.read_bytes() for path in paths}
     preview = preview_obsidian_base_presentation_reset(tmp_path)
-    original_write = obsidian_module._replace_project_snapshot_bytes
+    original_write = obsidian_module._stage_base_exchange_bytes
     base_writes = 0
 
     def fail_second_base_write(
@@ -495,7 +510,6 @@ def test_base_presentation_reset_rolls_back_multi_file_write_failure(
         data: bytes,
         *,
         staging_fd: int,
-        staging_is_current,
         temp_name: str | None = None,
     ) -> None:
         nonlocal base_writes
@@ -506,13 +520,12 @@ def test_base_presentation_reset_rolls_back_multi_file_write_failure(
             snapshot,
             data,
             staging_fd=staging_fd,
-            staging_is_current=staging_is_current,
             temp_name=temp_name,
         )
 
     monkeypatch.setattr(
         obsidian_module,
-        "_replace_project_snapshot_bytes",
+        "_stage_base_exchange_bytes",
         fail_second_base_write,
     )
 
@@ -534,23 +547,14 @@ def test_base_presentation_reset_rolls_back_multi_file_write_failure(
 
     monkeypatch.setattr(
         obsidian_module,
-        "_replace_project_snapshot_bytes",
+        "_stage_base_exchange_bytes",
         original_write,
     )
-    with pytest.raises(SystemExit, match="stale"):
-        reset_obsidian_base_presentation_drift(
-            tmp_path,
-            expected_preview_digest=preview["preview_digest"],
-            expected_preview_token=preview["preview_token"],
-            user_authorization="旧身份绑定不得在 journal 换 inode 后重试",
-            authorization_source="user_message",
-        )
-    fresh = preview_obsidian_base_presentation_reset(tmp_path)
     retried = reset_obsidian_base_presentation_drift(
         tmp_path,
-        expected_preview_digest=fresh["preview_digest"],
-        expected_preview_token=fresh["preview_token"],
-        user_authorization="确认按新的零写预览重试",
+        expected_preview_digest=preview["preview_digest"],
+        expected_preview_token=preview["preview_token"],
+        user_authorization="完整恢复了原 inode，确认按同一预览重试",
         authorization_source="user_message",
     )
     assert retried["changed"] is True
@@ -615,10 +619,10 @@ def test_base_atomic_exchange_fails_closed_on_unsupported_platform(
     left.write_bytes(b"left\n")
     right.write_bytes(b"right\n")
     descriptor = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
-    monkeypatch.setattr(obsidian_module.sys, "platform", "unsupported-test-platform")
+    monkeypatch.setattr(journal_module.sys, "platform", "unsupported-test-platform")
     try:
         with pytest.raises(SystemExit, match="unavailable"):
-            obsidian_module._atomic_exchange_at(
+            journal_module.atomic_exchange_at(
                 descriptor,
                 left.name,
                 descriptor,
@@ -666,7 +670,7 @@ def test_crashed_base_exchange_is_resumed_without_managed_staging_file(
             os.close(descriptor)
         target_fd = os.open(base.parent, os.O_RDONLY | os.O_DIRECTORY)
         try:
-            obsidian_module._atomic_exchange_at(
+            journal_module.atomic_exchange_at(
                 staging_fd,
                 temp_name,
                 target_fd,
@@ -1083,7 +1087,7 @@ def test_base_presentation_reset_does_not_overwrite_concurrent_leaf_at_replace_b
     preview = preview_obsidian_base_presentation_reset(tmp_path)
     sentinel_bytes = b"concurrent reviewer sentinel\n"
     original_replace = os.replace
-    original_exchange = obsidian_module._atomic_exchange_at
+    original_exchange = journal_module.atomic_exchange_at
     injected = False
 
     def inject_before_exchange(
@@ -1119,7 +1123,7 @@ def test_base_presentation_reset_does_not_overwrite_concurrent_leaf_at_replace_b
             )
         original_exchange(left_parent_fd, left, right_parent_fd, right)
 
-    monkeypatch.setattr(obsidian_module, "_atomic_exchange_at", inject_before_exchange)
+    monkeypatch.setattr(journal_module, "atomic_exchange_at", inject_before_exchange)
 
     with pytest.raises((SystemExit, RuntimeError)):
         reset_obsidian_base_presentation_drift(
@@ -1133,6 +1137,72 @@ def test_base_presentation_reset_does_not_overwrite_concurrent_leaf_at_replace_b
     assert injected is True
     assert base.read_bytes() == sentinel_bytes
     assert list(base.parent.glob(".presentation-reset-*.tmp")) == []
+
+
+def test_base_presentation_reset_arm_rejects_same_bytes_on_a_new_inode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _record(tmp_path, "p-alpha-12345678", "Alpha")
+    update_obsidian_projection(tmp_path)
+    base = obsidian_managed_root(tmp_path) / "dashboards/All Units.base"
+    _apply_obsidian_1_12_7_title_sort(base)
+    drift_bytes = base.read_bytes()
+    original_inode = base.stat().st_ino
+    preview = preview_obsidian_base_presentation_reset(tmp_path)
+    original_stage = obsidian_module._stage_base_exchange_bytes
+    replacement_inode: int | None = None
+
+    def replace_same_bytes_after_staging(
+        snapshot,
+        data: bytes,
+        *,
+        staging_fd: int,
+        temp_name: str | None = None,
+    ) -> None:
+        nonlocal replacement_inode
+        original_stage(
+            snapshot,
+            data,
+            staging_fd=staging_fd,
+            temp_name=temp_name,
+        )
+        replacement = snapshot.path.with_name(".reviewer-same-bytes-new-inode.tmp")
+        descriptor = os.open(
+            replacement,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        try:
+            os.write(descriptor, snapshot.raw_bytes)
+            os.fchmod(descriptor, stat.S_IMODE(snapshot.file_identity[2]))
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.replace(replacement, snapshot.path)
+        replacement_inode = snapshot.path.stat().st_ino
+
+    monkeypatch.setattr(
+        obsidian_module,
+        "_stage_base_exchange_bytes",
+        replace_same_bytes_after_staging,
+    )
+
+    with pytest.raises((RuntimeError, SystemExit)):
+        reset_obsidian_base_presentation_drift(
+            tmp_path,
+            expected_preview_digest=preview["preview_digest"],
+            expected_preview_token=preview["preview_token"],
+            user_authorization="确认按预览重置",
+            authorization_source="user_message",
+        )
+
+    assert replacement_inode is not None and replacement_inode != original_inode
+    assert base.stat().st_ino == replacement_inode
+    assert base.read_bytes() == drift_bytes
+    quarantined = incomplete_ops(tmp_path)
+    assert len(quarantined) == 1
+    assert quarantined[0]["state"] == "abort_failed"
 
 
 @pytest.mark.parametrize("replacement_kind", ["absent", "symlink", "fifo"])
@@ -1149,7 +1219,7 @@ def test_base_presentation_reset_preserves_concurrent_non_regular_leaf_state(
     outside = tmp_path / "outside-reviewer-sentinel.base"
     outside.write_bytes(b"outside reviewer sentinel\n")
     outside_before = outside.read_bytes()
-    original_exchange = obsidian_module._atomic_exchange_at
+    original_exchange = journal_module.atomic_exchange_at
     injected = False
 
     def inject_non_regular_leaf_before_exchange(
@@ -1173,8 +1243,8 @@ def test_base_presentation_reset_preserves_concurrent_non_regular_leaf_state(
         original_exchange(left_parent_fd, left, right_parent_fd, right)
 
     monkeypatch.setattr(
-        obsidian_module,
-        "_atomic_exchange_at",
+        journal_module,
+        "atomic_exchange_at",
         inject_non_regular_leaf_before_exchange,
     )
 
@@ -1197,9 +1267,16 @@ def test_base_presentation_reset_preserves_concurrent_non_regular_leaf_state(
     else:
         assert stat.S_ISFIFO(base.lstat().st_mode)
     assert outside.read_bytes() == outside_before
-    assert list(
+    retained = list(
         (tmp_path / "kb/.journal/snapshots").rglob(".presentation-reset-*.tmp")
-    ) == []
+    )
+    assert len(retained) == 1
+    assert retained[0].is_file() and not retained[0].is_symlink()
+    quarantined = incomplete_ops(tmp_path)
+    assert len(quarantined) == 1
+    assert quarantined[0]["state"] == "abort_failed"
+    with pytest.raises(SystemExit, match="unfinished|incomplete|恢复"):
+        preview_obsidian_base_presentation_reset(tmp_path)
 
 
 def test_base_presentation_reset_restores_detached_leaf_after_final_ancestor_swap(
@@ -1219,7 +1296,7 @@ def test_base_presentation_reset_restores_detached_leaf_after_final_ancestor_swa
     outside_base = outside / "All Units.base"
     outside_base.write_bytes(b"outside reviewer sentinel\n")
     outside_before = outside_base.read_bytes()
-    original_exchange = obsidian_module._atomic_exchange_at
+    original_exchange = journal_module.atomic_exchange_at
     injected = False
 
     def swap_ancestor_before_exchange(
@@ -1239,7 +1316,7 @@ def test_base_presentation_reset_restores_detached_leaf_after_final_ancestor_swa
             dashboards.symlink_to(outside, target_is_directory=True)
         original_exchange(left_parent_fd, left, right_parent_fd, right)
 
-    monkeypatch.setattr(obsidian_module, "_atomic_exchange_at", swap_ancestor_before_exchange)
+    monkeypatch.setattr(journal_module, "atomic_exchange_at", swap_ancestor_before_exchange)
 
     with pytest.raises((SystemExit, RuntimeError)):
         reset_obsidian_base_presentation_drift(
@@ -1266,7 +1343,7 @@ def test_base_presentation_reset_restores_leaf_after_staging_directory_detach(
     drift_bytes = base.read_bytes()
     preview = preview_obsidian_base_presentation_reset(tmp_path)
     detached = tmp_path / "detached-staging-op"
-    original_exchange = obsidian_module._atomic_exchange_at
+    original_exchange = journal_module.atomic_exchange_at
     injected = False
 
     def detach_staging_before_exchange(
@@ -1291,8 +1368,8 @@ def test_base_presentation_reset_restores_leaf_after_staging_directory_detach(
         original_exchange(left_parent_fd, left, right_parent_fd, right)
 
     monkeypatch.setattr(
-        obsidian_module,
-        "_atomic_exchange_at",
+        journal_module,
+        "atomic_exchange_at",
         detach_staging_before_exchange,
     )
 
@@ -1307,10 +1384,15 @@ def test_base_presentation_reset_restores_leaf_after_staging_directory_detach(
 
     assert injected is True
     assert base.read_bytes() == drift_bytes
-    assert list(detached.glob(".presentation-reset-*.tmp")) == []
+    detached_material = list(detached.glob(".presentation-reset-*.tmp"))
+    assert len(detached_material) == 1
+    assert detached_material[0].is_file() and not detached_material[0].is_symlink()
     assert list(
         (tmp_path / "kb/.journal/snapshots").rglob(".presentation-reset-*.tmp")
     ) == []
+    quarantined = incomplete_ops(tmp_path)
+    assert len(quarantined) == 1
+    assert quarantined[0]["state"] == "abort_failed"
 
 
 def test_base_presentation_sort_with_yaml_comment_remains_protected_drift(tmp_path: Path) -> None:
