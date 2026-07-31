@@ -18,7 +18,7 @@ import yaml
 from research.common import load_yaml, write_yaml_if_changed
 from research.core import default_record, link_records, record_path, undo_last_operation
 from research.git_ops import restore_operation
-from research.journal import begin_op, incomplete_ops
+from research.journal import begin_op, incomplete_ops, load_op
 from research.obsidian import (
     OBSIDIAN_RENDERER_REVISION,
     obsidian_managed_root,
@@ -246,6 +246,22 @@ def _apply_obsidian_1_12_7_title_sort(path: Path, *, direction: str = "ASC") -> 
         ),
         encoding="utf-8",
     )
+
+
+def _stat_identity(metadata: os.stat_result) -> tuple[int, int, int, int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_rdev,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+    )
+
+
+def _leaf_identity(path: Path) -> tuple[int, int, int, int, int, int, int]:
+    return _stat_identity(path.lstat())
 
 
 def test_obsidian_1_12_7_sort_fixture_previews_and_resets_without_canonical_write(
@@ -550,15 +566,117 @@ def test_base_presentation_reset_rolls_back_multi_file_write_failure(
         "_stage_base_exchange_bytes",
         original_write,
     )
+    # Even an exact-inode, zero-churn abort leaves a durable journal event and
+    # private recovery material; do not replay authorization from before it.
+    retry_preview = preview_obsidian_base_presentation_reset(tmp_path)
     retried = reset_obsidian_base_presentation_drift(
         tmp_path,
-        expected_preview_digest=preview["preview_digest"],
-        expected_preview_token=preview["preview_token"],
-        user_authorization="完整恢复了原 inode，确认按同一预览重试",
+        expected_preview_digest=retry_preview["preview_digest"],
+        expected_preview_token=retry_preview["preview_token"],
+        user_authorization="已获取新的预览，确认重试",
         authorization_source="user_message",
     )
     assert retried["changed"] is True
     assert obsidian_projection_status(tmp_path)["status"] == "PASS"
+
+
+def test_base_presentation_reset_arms_all_targets_before_first_exchange(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _record(tmp_path, "p-alpha-12345678", "Alpha")
+    update_obsidian_projection(tmp_path)
+    managed = obsidian_managed_root(tmp_path)
+    paths = [
+        managed / "dashboards/All Units.base",
+        managed / "dashboards/Pending Review.base",
+    ]
+    for path in paths:
+        _apply_obsidian_1_12_7_title_sort(path)
+    before = {
+        path: (path.read_bytes(), _leaf_identity(path))
+        for path in paths
+    }
+    preview = preview_obsidian_base_presentation_reset(tmp_path)
+    original_stage = obsidian_module._stage_base_exchange_bytes
+    original_exchange = journal_module.atomic_exchange_at
+    staged_paths: list[Path] = []
+    replacement_inode: int | None = None
+    business_exchanges = 0
+
+    def replace_second_target_after_staging(
+        snapshot,
+        data: bytes,
+        *,
+        staging_fd: int,
+        temp_name: str | None = None,
+    ) -> None:
+        nonlocal replacement_inode
+        original_stage(
+            snapshot,
+            data,
+            staging_fd=staging_fd,
+            temp_name=temp_name,
+        )
+        staged_paths.append(snapshot.path)
+        if len(staged_paths) != 2:
+            return
+        replacement = snapshot.path.with_name(".reviewer-second-target-conflict.tmp")
+        descriptor = os.open(
+            replacement,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        try:
+            os.write(descriptor, snapshot.raw_bytes)
+            os.fchmod(descriptor, stat.S_IMODE(snapshot.file_identity[2]))
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.replace(replacement, snapshot.path)
+        replacement_inode = snapshot.path.stat().st_ino
+
+    def count_business_exchange(
+        left_parent_fd: int,
+        left: str,
+        right_parent_fd: int,
+        right: str,
+    ) -> None:
+        nonlocal business_exchanges
+        if left.startswith(".presentation-reset-") and right.endswith(".base"):
+            business_exchanges += 1
+        original_exchange(left_parent_fd, left, right_parent_fd, right)
+
+    monkeypatch.setattr(
+        obsidian_module,
+        "_stage_base_exchange_bytes",
+        replace_second_target_after_staging,
+    )
+    monkeypatch.setattr(journal_module, "atomic_exchange_at", count_business_exchange)
+
+    with pytest.raises((RuntimeError, SystemExit)):
+        reset_obsidian_base_presentation_drift(
+            tmp_path,
+            expected_preview_digest=preview["preview_digest"],
+            expected_preview_token=preview["preview_token"],
+            user_authorization="确认按预览重置",
+            authorization_source="user_message",
+        )
+
+    assert len(staged_paths) == 2
+    first, second = staged_paths
+    assert first.read_bytes() == before[first][0]
+    assert _leaf_identity(first) == before[first][1]
+    assert second.read_bytes() == before[second][0]
+    assert replacement_inode is not None
+    assert replacement_inode != before[second][1][1]
+    assert _leaf_identity(second)[1] == replacement_inode
+    assert business_exchanges == 0
+    quarantined = incomplete_ops(tmp_path)
+    assert len(quarantined) == 1
+    assert quarantined[0]["state"] == "abort_failed"
+    with pytest.raises(SystemExit, match="unfinished|incomplete|恢复"):
+        preview_obsidian_base_presentation_reset(tmp_path)
 
 
 def test_base_presentation_preview_rejects_incomplete_root_journal_without_writes(
@@ -1083,12 +1201,15 @@ def test_base_presentation_reset_does_not_overwrite_concurrent_leaf_at_replace_b
     _record(tmp_path, "p-alpha-12345678", "Alpha")
     update_obsidian_projection(tmp_path)
     base = obsidian_managed_root(tmp_path) / "dashboards/All Units.base"
+    desired_bytes = base.read_bytes()
     _apply_obsidian_1_12_7_title_sort(base)
     preview = preview_obsidian_base_presentation_reset(tmp_path)
     sentinel_bytes = b"concurrent reviewer sentinel\n"
     original_replace = os.replace
     original_exchange = journal_module.atomic_exchange_at
     injected = False
+    owned_identity: tuple[int, int, int, int, int, int, int] | None = None
+    sentinel_identity: tuple[int, int, int, int, int, int, int] | None = None
 
     def inject_before_exchange(
         left_parent_fd: int,
@@ -1096,13 +1217,16 @@ def test_base_presentation_reset_does_not_overwrite_concurrent_leaf_at_replace_b
         right_parent_fd: int,
         right: str,
     ) -> None:
-        nonlocal injected
+        nonlocal injected, owned_identity, sentinel_identity
         if (
             not injected
             and left.startswith(".presentation-reset-")
             and right == "All Units.base"
         ):
             injected = True
+            owned_identity = _stat_identity(
+                os.stat(left, dir_fd=left_parent_fd, follow_symlinks=False)
+            )
             sentinel_name = ".reviewer-concurrent-sentinel.tmp"
             descriptor = os.open(
                 sentinel_name,
@@ -1121,6 +1245,9 @@ def test_base_presentation_reset_does_not_overwrite_concurrent_leaf_at_replace_b
                 src_dir_fd=right_parent_fd,
                 dst_dir_fd=right_parent_fd,
             )
+            sentinel_identity = _stat_identity(
+                os.stat(right, dir_fd=right_parent_fd, follow_symlinks=False)
+            )
         original_exchange(left_parent_fd, left, right_parent_fd, right)
 
     monkeypatch.setattr(journal_module, "atomic_exchange_at", inject_before_exchange)
@@ -1135,8 +1262,21 @@ def test_base_presentation_reset_does_not_overwrite_concurrent_leaf_at_replace_b
         )
 
     assert injected is True
-    assert base.read_bytes() == sentinel_bytes
-    assert list(base.parent.glob(".presentation-reset-*.tmp")) == []
+    assert owned_identity is not None
+    assert sentinel_identity is not None
+    assert base.read_bytes() == desired_bytes
+    assert _leaf_identity(base) == owned_identity
+    retained = list(
+        (tmp_path / "kb/.journal/snapshots").rglob(".presentation-reset-*.tmp")
+    )
+    assert len(retained) == 1
+    assert retained[0].read_bytes() == sentinel_bytes
+    assert _leaf_identity(retained[0]) == sentinel_identity
+    quarantined = incomplete_ops(tmp_path)
+    assert len(quarantined) == 1
+    assert quarantined[0]["state"] == "abort_failed"
+    with pytest.raises(SystemExit, match="unfinished|incomplete|恢复"):
+        preview_obsidian_base_presentation_reset(tmp_path)
 
 
 def test_base_presentation_reset_arm_rejects_same_bytes_on_a_new_inode(
@@ -1214,6 +1354,7 @@ def test_base_presentation_reset_preserves_concurrent_non_regular_leaf_state(
     _record(tmp_path, "p-alpha-12345678", "Alpha")
     update_obsidian_projection(tmp_path)
     base = obsidian_managed_root(tmp_path) / "dashboards/All Units.base"
+    desired_bytes = base.read_bytes()
     _apply_obsidian_1_12_7_title_sort(base)
     preview = preview_obsidian_base_presentation_reset(tmp_path)
     outside = tmp_path / "outside-reviewer-sentinel.base"
@@ -1221,6 +1362,8 @@ def test_base_presentation_reset_preserves_concurrent_non_regular_leaf_state(
     outside_before = outside.read_bytes()
     original_exchange = journal_module.atomic_exchange_at
     injected = False
+    owned_identity: tuple[int, int, int, int, int, int, int] | None = None
+    replacement_identity: tuple[int, int, int, int, int, int, int] | None = None
 
     def inject_non_regular_leaf_before_exchange(
         left_parent_fd: int,
@@ -1228,18 +1371,26 @@ def test_base_presentation_reset_preserves_concurrent_non_regular_leaf_state(
         right_parent_fd: int,
         right: str,
     ) -> None:
-        nonlocal injected
+        nonlocal injected, owned_identity, replacement_identity
         if (
             not injected
             and left.startswith(".presentation-reset-")
             and right == "All Units.base"
         ):
             injected = True
+            owned_identity = _stat_identity(
+                os.stat(left, dir_fd=left_parent_fd, follow_symlinks=False)
+            )
             os.unlink(right, dir_fd=right_parent_fd)
             if replacement_kind == "symlink":
                 os.symlink(str(outside), right, dir_fd=right_parent_fd)
             elif replacement_kind == "fifo":
-                os.mkfifo(right, 0o600, dir_fd=right_parent_fd)
+                # The macOS Python 3.9 runtime does not expose mkfifo(dir_fd=).
+                os.mkfifo(base, 0o600)
+            if replacement_kind != "absent":
+                replacement_identity = _stat_identity(
+                    os.stat(right, dir_fd=right_parent_fd, follow_symlinks=False)
+                )
         original_exchange(left_parent_fd, left, right_parent_fd, right)
 
     monkeypatch.setattr(
@@ -1258,20 +1409,30 @@ def test_base_presentation_reset_preserves_concurrent_non_regular_leaf_state(
         )
 
     assert injected is True
+    assert owned_identity is not None
     if replacement_kind == "absent":
         assert not base.exists()
         assert not base.is_symlink()
-    elif replacement_kind == "symlink":
-        assert base.is_symlink()
-        assert base.readlink() == outside
     else:
-        assert stat.S_ISFIFO(base.lstat().st_mode)
+        assert base.read_bytes() == desired_bytes
+        assert _leaf_identity(base) == owned_identity
     assert outside.read_bytes() == outside_before
     retained = list(
         (tmp_path / "kb/.journal/snapshots").rglob(".presentation-reset-*.tmp")
     )
     assert len(retained) == 1
-    assert retained[0].is_file() and not retained[0].is_symlink()
+    if replacement_kind == "absent":
+        assert retained[0].read_bytes() == desired_bytes
+        assert _leaf_identity(retained[0]) == owned_identity
+    elif replacement_kind == "symlink":
+        assert replacement_identity is not None
+        assert retained[0].is_symlink()
+        assert retained[0].readlink() == outside
+        assert _leaf_identity(retained[0]) == replacement_identity
+    else:
+        assert replacement_identity is not None
+        assert stat.S_ISFIFO(retained[0].lstat().st_mode)
+        assert _leaf_identity(retained[0]) == replacement_identity
     quarantined = incomplete_ops(tmp_path)
     assert len(quarantined) == 1
     assert quarantined[0]["state"] == "abort_failed"
@@ -1345,6 +1506,7 @@ def test_base_presentation_reset_restores_leaf_after_staging_directory_detach(
     detached = tmp_path / "detached-staging-op"
     original_exchange = journal_module.atomic_exchange_at
     injected = False
+    op_id: str | None = None
 
     def detach_staging_before_exchange(
         left_parent_fd: int,
@@ -1352,7 +1514,7 @@ def test_base_presentation_reset_restores_leaf_after_staging_directory_detach(
         right_parent_fd: int,
         right: str,
     ) -> None:
-        nonlocal injected
+        nonlocal injected, op_id
         if (
             not injected
             and left.startswith(".presentation-reset-")
@@ -1383,6 +1545,7 @@ def test_base_presentation_reset_restores_leaf_after_staging_directory_detach(
         )
 
     assert injected is True
+    assert op_id is not None
     assert base.read_bytes() == drift_bytes
     detached_material = list(detached.glob(".presentation-reset-*.tmp"))
     assert len(detached_material) == 1
@@ -1390,9 +1553,11 @@ def test_base_presentation_reset_restores_leaf_after_staging_directory_detach(
     assert list(
         (tmp_path / "kb/.journal/snapshots").rglob(".presentation-reset-*.tmp")
     ) == []
-    quarantined = incomplete_ops(tmp_path)
-    assert len(quarantined) == 1
-    assert quarantined[0]["state"] == "abort_failed"
+    assert load_op(tmp_path, op_id)["state"] == "abort_failed"
+    with pytest.raises(SystemExit, match="快照|恢复|snapshot|recovery|staging|quarantine|unsafe"):
+        incomplete_ops(tmp_path)
+    with pytest.raises(SystemExit, match="unfinished|incomplete|恢复|snapshot|recovery"):
+        preview_obsidian_base_presentation_reset(tmp_path)
 
 
 def test_base_presentation_sort_with_yaml_comment_remains_protected_drift(tmp_path: Path) -> None:

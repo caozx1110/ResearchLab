@@ -1402,6 +1402,42 @@ def _ensure_journal_runtime(project_root: Path) -> None:
         pass
 
 
+def _create_operation_snapshot_directory(project_root: Path, op_id: str) -> None:
+    """Durably create the per-operation CAS/snapshot directory for every op."""
+    _journal_entry_name(op_id)
+    with _anchored_journal_root_fd(project_root, create=True) as journal_fd:
+        assert journal_fd is not None
+        snapshots_metadata = _lstat_at(journal_fd, SNAPSHOT_DIRNAME)
+        snapshots_created = snapshots_metadata is None
+        if snapshots_created:
+            os.mkdir(SNAPSHOT_DIRNAME, 0o700, dir_fd=journal_fd)
+            snapshots_metadata = _lstat_at(journal_fd, SNAPSHOT_DIRNAME)
+        if snapshots_metadata is None or _node_kind(snapshots_metadata) != "directory":
+            raise RuntimeError("Journal snapshot root is not a safe directory.")
+        snapshots_fd = os.open(SNAPSHOT_DIRNAME, _directory_open_flags(), dir_fd=journal_fd)
+        try:
+            if not _same_node(snapshots_metadata, os.fstat(snapshots_fd)):
+                raise RuntimeError("Journal snapshot root changed while opening.")
+            if _lstat_at(snapshots_fd, op_id) is not None:
+                raise FileExistsError(f"{SNAPSHOT_DIRNAME}/{op_id}")
+            os.mkdir(op_id, 0o700, dir_fd=snapshots_fd)
+            op_metadata = _lstat_at(snapshots_fd, op_id)
+            if op_metadata is None or _node_kind(op_metadata) != "directory":
+                raise RuntimeError("Journal operation snapshot directory was not created safely.")
+            op_fd = os.open(op_id, _directory_open_flags(), dir_fd=snapshots_fd)
+            try:
+                if not _same_node(op_metadata, os.fstat(op_fd)):
+                    raise RuntimeError("Journal operation snapshot directory changed while opening.")
+                os.fsync(op_fd)
+            finally:
+                os.close(op_fd)
+            os.fsync(snapshots_fd)
+            if snapshots_created:
+                os.fsync(journal_fd)
+        finally:
+            os.close(snapshots_fd)
+
+
 def _valid_digest(value: object) -> bool:
     return (
         isinstance(value, str)
@@ -2588,6 +2624,43 @@ def exchange_abort_cas(
     )
 
 
+def _fsync_abort_cas_retained_leaf_at(
+    staging_fd: int,
+    staging_leaf: str,
+    expected_leaf: Mapping[str, object],
+) -> None:
+    """Durably retain one exact leaf; only regular leaves are ever opened."""
+    displaced = abort_cas_leaf_state(staging_fd, staging_leaf)
+    if not _abort_cas_same_leaf(displaced, expected_leaf):
+        raise SystemExit("abort-CAS displaced staging changed before retention.")
+    if displaced.get("kind") == "regular":
+        displaced_metadata = _lstat_at(staging_fd, staging_leaf)
+        if displaced_metadata is None:
+            raise SystemExit("abort-CAS displaced staging disappeared before file fsync.")
+        displaced_fd = _open_regular_at(
+            staging_fd,
+            staging_leaf,
+            displaced_metadata,
+        )
+        try:
+            os.fsync(displaced_fd)
+            if not _same_read_identity(displaced_metadata, os.fstat(displaced_fd)):
+                raise RuntimeError("abort-CAS displaced staging changed during file fsync.")
+        finally:
+            os.close(displaced_fd)
+        if not _abort_cas_same_leaf(
+            abort_cas_leaf_state(staging_fd, staging_leaf),
+            expected_leaf,
+        ):
+            raise RuntimeError("abort-CAS displaced staging changed after file fsync.")
+    os.fsync(staging_fd)
+    if not _abort_cas_same_leaf(
+        abort_cas_leaf_state(staging_fd, staging_leaf),
+        expected_leaf,
+    ):
+        raise RuntimeError("abort-CAS retained leaf changed during directory fsync.")
+
+
 def retain_abort_cas(
     project_root: Path,
     op_id: str,
@@ -2617,15 +2690,11 @@ def retain_abort_cas(
         with _anchored_journal_directory(project_root, staging["directory"]) as staging_fd:
             if _directory_capability(os.fstat(staging_fd)) != staging["directory_capability"]:
                 raise SystemExit("abort-CAS staging directory changed before retention.")
-            displaced = abort_cas_leaf_state(staging_fd, staging["leaf"])
-            if not _abort_cas_same_leaf(displaced, record["displaced_leaf"]):
-                raise SystemExit("abort-CAS displaced staging changed before retention.")
-            os.fsync(staging_fd)
-            if not _abort_cas_same_leaf(
-                abort_cas_leaf_state(staging_fd, staging["leaf"]),
+            _fsync_abort_cas_retained_leaf_at(
+                staging_fd,
+                staging["leaf"],
                 record["displaced_leaf"],
-            ):
-                raise RuntimeError("abort-CAS retained leaf changed during directory fsync.")
+            )
     if not _abort_cas_target_is_current(project_root, key, record["target_parent_capabilities"]):
         raise SystemExit("abort-CAS target ancestry changed during retention.")
     if not _abort_cas_staging_is_current(
@@ -2739,6 +2808,7 @@ def _begin_op_with_keys(
     abort_cas_before: dict[str, dict[str, object]] = {}
     abort_cas_parent_caps: dict[str, list[list[int]]] = {}
     try:
+        _create_operation_snapshot_directory(project_root, op_id)
         before_snapshots = {key: _snapshot_target(project_root, op_id, key) for key in keys}
         if abort_cas:
             for key in keys:
@@ -3091,6 +3161,10 @@ def recover_abort_cas(
                 retained_leaf = abort_cas_leaf_state(staging_fd, staging["leaf"])
                 if not _abort_cas_same_leaf(current_owned, record["owned_leaf"]):
                     raise RuntimeError(f"abort-CAS owned target changed during recovery: {key}")
+                if not _abort_cas_same_leaf(retained_leaf, record["displaced_leaf"]):
+                    raise RuntimeError(
+                        f"abort-CAS retained recovery leaf changed before exchange: {key}"
+                    )
                 atomic_exchange_at(staging_fd, staging["leaf"], target_fd, target_leaf)
                 target_after = abort_cas_leaf_state(target_fd, target_leaf)
                 staging_after = abort_cas_leaf_state(staging_fd, staging["leaf"])

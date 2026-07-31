@@ -2057,6 +2057,7 @@ def reset_obsidian_base_presentation_drift(
             project_root,
             staging_relative,
         ) as staging_fd:
+            armed_targets: list[Path] = []
             for item in locked_candidates:
                 target = Path(item["path"])
                 staging_leaf = exchange_temp_names[str(item["relative"])]
@@ -2073,12 +2074,15 @@ def reset_obsidian_base_presentation_drift(
                     expected_journal_digest=journal_digest,
                     staging_leaf=staging_leaf,
                 )
+                armed_targets.append(target)
+            for target in armed_targets:
                 journal_digest = exchange_abort_cas(
                     project_root,
                     op_id,
                     target,
                     expected_journal_digest=journal_digest,
                 )
+            for target in armed_targets:
                 journal_digest = retain_abort_cas(
                     project_root,
                     op_id,

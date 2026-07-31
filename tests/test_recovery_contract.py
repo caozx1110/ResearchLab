@@ -214,6 +214,21 @@ def test_begin_journal_persists_exact_unarmed_abort_cas_envelope(tmp_path: Path)
     }
 
 
+def test_abort_cas_unarmed_absent_leaf_can_abort_with_journal_cas(tmp_path: Path) -> None:
+    target = tmp_path / "kb" / "notes" / "absent-guarded.md"
+    target.parent.mkdir(parents=True)
+    op_id = begin_op(tmp_path, "guarded-absent", [target], abort_cas=True)
+
+    operation_snapshots = tmp_path / "kb/.journal/snapshots" / op_id
+    assert operation_snapshots.is_dir()
+
+    abort_op(tmp_path, op_id, restore=True, error="simulated no-write failure")
+
+    assert not target.exists() and not target.is_symlink()
+    assert load_op(tmp_path, op_id)["state"] == "abort"
+    assert incomplete_ops(tmp_path) == []
+
+
 def test_abort_cas_arm_exchange_retain_and_commit_preserves_private_recovery_leaf(
     tmp_path: Path,
 ) -> None:
@@ -620,6 +635,38 @@ def test_abort_cas_leaf_state_classifies_absent_regular_symlink_and_fifo_without
         os.close(descriptor)
 
 
+@pytest.mark.parametrize("leaf_kind", ["symlink", "fifo"])
+def test_retain_fsync_never_opens_symlink_or_fifo_leaf(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    leaf_kind: str,
+) -> None:
+    parent = tmp_path / "retained-special"
+    parent.mkdir()
+    leaf = parent / leaf_kind
+    if leaf_kind == "symlink":
+        leaf.symlink_to("third-party-link-target")
+    else:
+        os.mkfifo(leaf, 0o600)
+    descriptor = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+    expected = journal.abort_cas_leaf_state(descriptor, leaf.name)
+    before = _lstat_state(leaf)
+    real_open = journal.os.open
+
+    def refuse_retained_leaf_open(path: object, *args: object, **kwargs: object) -> int:
+        if path == leaf.name:
+            raise AssertionError(f"retained {leaf_kind} leaf was opened")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(journal.os, "open", refuse_retained_leaf_open)
+    try:
+        journal._fsync_abort_cas_retained_leaf_at(descriptor, leaf.name, expected)
+    finally:
+        os.close(descriptor)
+
+    assert _lstat_state(leaf) == before
+
+
 def test_abort_cas_exchange_rejects_staging_directory_rebind_without_replacement_write(
     tmp_path: Path,
 ) -> None:
@@ -726,6 +773,51 @@ def test_abort_cas_arm_fsyncs_owned_file_before_directory_and_failure_stays_unar
     assert seen == ["regular"]
     assert load_op(tmp_path, op_id)["abort_cas"]["targets"]["notes/guarded.md"]["phase"] == "unarmed"
     assert staging.read_bytes() == b"desired\n"
+
+
+def test_retain_fsyncs_displaced_regular_before_directory_and_phase_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target, op_id, staging, digest, _before_state = _prepared_abort_cas(tmp_path)
+    digest = exchange_abort_cas(
+        tmp_path,
+        op_id,
+        target,
+        expected_journal_digest=digest,
+    )
+    target_state = _lstat_state(target)
+    staging_state = _lstat_state(staging)
+    displaced_inode = staging.lstat().st_ino
+    journal_before, journal_digest_before = load_op_view(tmp_path, op_id)
+    real_fsync = os.fsync
+    injected = False
+
+    def fail_displaced_file_fsync(descriptor: int) -> None:
+        nonlocal injected
+        metadata = os.fstat(descriptor)
+        if not injected and stat.S_ISREG(metadata.st_mode) and metadata.st_ino == displaced_inode:
+            injected = True
+            raise OSError("injected displaced regular file fsync failure")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(os, "fsync", fail_displaced_file_fsync)
+
+    with pytest.raises(OSError, match="injected displaced regular file fsync failure"):
+        retain_abort_cas(
+            tmp_path,
+            op_id,
+            target,
+            expected_journal_digest=digest,
+        )
+
+    assert injected is True
+    assert _lstat_state(target) == target_state
+    assert _lstat_state(staging) == staging_state
+    journal_after, journal_digest_after = load_op_view(tmp_path, op_id)
+    assert journal_after == journal_before
+    assert journal_digest_after == journal_digest_before
+    assert journal_after["abort_cas"]["targets"]["notes/guarded.md"]["phase"] == "validated"
 
 
 def test_abort_cas_abort_failure_never_relabels_raced_source_journal(
@@ -865,6 +957,49 @@ def test_abort_cas_recovery_exchange_race_preserves_observed_third_party_positio
 
     assert third_party_state is not None and _lstat_state(target) == third_party_state
     assert staging.read_bytes() == b"desired:guarded.md\n"
+    assert parked_before.read_bytes() == b"before:guarded.md\n"
+    assert load_op(tmp_path, op_id)["state"] == "abort_failed"
+
+
+def test_recovery_rechecks_staging_after_full_preflight_before_exchange(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target, op_id, staging, digest, _before_state = _prepared_abort_cas(tmp_path)
+    digest = exchange_abort_cas(tmp_path, op_id, target, expected_journal_digest=digest)
+    retain_abort_cas(tmp_path, op_id, target, expected_journal_digest=digest)
+    target_state = _lstat_state(target)
+    parked_before = tmp_path / "parked-before-after-preflight"
+    real_observation = journal._abort_cas_observation
+    observations = 0
+    third_party_state: tuple[int, int, int, object] | None = None
+
+    def replace_staging_after_full_preflight(
+        root: Path,
+        key: str,
+        record,
+    ):
+        nonlocal observations, third_party_state
+        result = real_observation(root, key, record)
+        observations += 1
+        if observations == 1:
+            os.replace(staging, parked_before)
+            staging.write_bytes(b"third-party-after-full-preflight\n")
+            third_party_state = _lstat_state(staging)
+        return result
+
+    monkeypatch.setattr(
+        journal,
+        "_abort_cas_observation",
+        replace_staging_after_full_preflight,
+    )
+
+    with pytest.raises(RuntimeError, match="Failed to restore"):
+        abort_op(tmp_path, op_id, restore=True)
+
+    assert observations == 1
+    assert _lstat_state(target) == target_state
+    assert third_party_state is not None and _lstat_state(staging) == third_party_state
     assert parked_before.read_bytes() == b"before:guarded.md\n"
     assert load_op(tmp_path, op_id)["state"] == "abort_failed"
 
@@ -1281,6 +1416,28 @@ def test_resume_of_unchanged_incomplete_operation_preserves_target_identity(
     assert recovery["state"] == "commit"
     assert recovery["before_digests"] == recovery["after_digests"]
     abort_op(tmp_path, operation_id)
+    assert load_op(tmp_path, operation_id)["state"] == "abort"
+    assert incomplete_ops(tmp_path) == []
+
+
+def test_absent_only_resume_has_durable_journal_cas_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "kb" / "notes" / "created-after-begin.md"
+    target.parent.mkdir(parents=True)
+    operation_id = begin_op(tmp_path, "absent-only-incomplete", [target])
+    target.write_bytes(b"partial create\n")
+    monkeypatch.setattr(
+        git_ops,
+        "git_checkpoint",
+        lambda *args, **kwargs: {"committed": False, "files": []},
+    )
+
+    result = restore_operation(tmp_path, operation_id, recovery_type="resume")
+
+    assert not target.exists() and not target.is_symlink()
+    assert result["restored_paths"] == ["notes/created-after-begin.md"]
     assert load_op(tmp_path, operation_id)["state"] == "abort"
     assert incomplete_ops(tmp_path) == []
 
