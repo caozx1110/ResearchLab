@@ -25,7 +25,7 @@ from .relations import (
     project_relation_edges,
     stable_block_id,
 )
-from .yaml_io import dump_yaml, load_yaml, write_text_if_changed, write_yaml_if_changed
+from .yaml_io import dump_yaml, load_yaml, write_bytes_atomic, write_text_if_changed, write_yaml_if_changed
 
 
 OBSIDIAN_PROJECTION_SCHEMA = "research-kb-obsidian/v1"
@@ -1144,59 +1144,6 @@ def _base_file(*, name: str, view_filter: str = "", group_by: str = "", zh: bool
     return dump_yaml(payload, width=1_000_000, indent_sequences=True)
 
 
-def _legacy_obsidian_normalized_base(relative: str) -> dict[str, Any] | None:
-    """Known Obsidian 1.12 normalization of renderer revision 3 Base files.
-
-    This narrow migration exception lets a generated v3 projection converge to
-    v4 without treating Obsidian's own ``note.foo`` -> ``foo`` rewrite as a
-    human edit.  Any other semantic or structural change remains a conflict.
-    """
-    definitions = {
-        "dashboards/All Units.base": ("All units", "", ""),
-        "dashboards/Pending Review.base": (
-            "Pending review",
-            'confirmation_status == "pending_user_confirmation"',
-            "",
-        ),
-        "dashboards/By Topic.base": ("By topic", "", "topics"),
-    }
-    definition = definitions.get(relative)
-    if definition is None:
-        return None
-    name, view_filter, group_by = definition
-    view: dict[str, Any] = {
-        "type": "table",
-        "name": name,
-        "order": [
-            "file.name",
-            "title",
-            "kind",
-            "status",
-            "maturity",
-            "confirmation_status",
-            "topics",
-            "programs",
-        ],
-    }
-    if view_filter:
-        view["filters"] = {"and": [view_filter]}
-    if group_by:
-        view["groupBy"] = {"property": group_by, "direction": "ASC"}
-    return {
-        "filters": {"and": ['file.inFolder("obsidian/managed/units")', 'file.ext == "md"']},
-        "properties": {
-            "title": {"displayName": "Title"},
-            "kind": {"displayName": "Kind"},
-            "status": {"displayName": "Status"},
-            "maturity": {"displayName": "Maturity"},
-            "confirmation_status": {"displayName": "Confirmation"},
-            "topics": {"displayName": "Topics"},
-            "programs": {"displayName": "Programs"},
-        },
-        "views": [view],
-    }
-
-
 def _render_home(
     project_root: Path,
     generated_at: str,
@@ -1286,6 +1233,23 @@ def _render_home(
     return "\n".join(lines)
 
 
+def _projection_base_files(inputs: dict[str, Any]) -> dict[str, str]:
+    zh = str(inputs.get("locale") or "en") == "zh"
+    return {
+        "dashboards/All Units.base": _base_file(name=_t(zh, "All units", "全部单元"), zh=zh),
+        "dashboards/Pending Review.base": _base_file(
+            name=_t(zh, "Pending review", "待确认"),
+            view_filter='analysis_stage == "awaiting_confirmation"',
+            zh=zh,
+        ),
+        "dashboards/By Topic.base": _base_file(
+            name=_t(zh, "By topic", "按主题"),
+            group_by="topics",
+            zh=zh,
+        ),
+    }
+
+
 def _projection_files(project_root: Path, inputs: dict[str, Any], *, generated_at: str) -> dict[str, str]:
     records = inputs["records"]
     programs = inputs["programs"]
@@ -1329,11 +1293,7 @@ def _projection_files(project_root: Path, inputs: dict[str, Any], *, generated_a
         files[f"topics/{_safe_component(topic_id, fallback='topic')}.md"] = _render_topic_page(
             topic_id, item, members.get(topic_id, []), records_by_id, zh=zh
         )
-    files["dashboards/All Units.base"] = _base_file(name=_t(zh, "All units", "全部单元"), zh=zh)
-    files["dashboards/Pending Review.base"] = _base_file(
-        name=_t(zh, "Pending review", "待确认"), view_filter='analysis_stage == "awaiting_confirmation"', zh=zh
-    )
-    files["dashboards/By Topic.base"] = _base_file(name=_t(zh, "By topic", "按主题"), group_by="topics", zh=zh)
+    files.update(_projection_base_files(inputs))
     return dict(sorted(files.items()))
 
 
@@ -1352,6 +1312,20 @@ def _manifest_renderer_revision(manifest: dict[str, Any]) -> int:
         return int(value)
     except (TypeError, ValueError):
         return 0
+
+
+def _is_managed_base_path(relative: str) -> bool:
+    return PurePosixPath(relative).suffix == ".base"
+
+
+def _write_managed_projection_file(path: Path, relative: str, text: str) -> None:
+    if not _is_managed_base_path(relative):
+        write_text_if_changed(path, text)
+        return
+    desired = text.encode("utf-8")
+    if path.exists() and path.read_bytes() == desired:
+        return
+    write_bytes_atomic(path, desired)
 
 
 def _validate_relative_managed_path(value: str) -> PurePosixPath:
@@ -1459,6 +1433,10 @@ def _preflight_update(
             continue
         if not path.exists():
             continue
+        if _is_managed_base_path(relative):
+            if relative not in previous_files:
+                conflicts.append(relative)
+            continue
         current_digest = _file_sha256(path)
         desired_digest = _sha256_text(text)
         if current_digest == desired_digest:
@@ -1466,18 +1444,6 @@ def _preflight_update(
         previous_digest = previous_files.get(relative)
         if previous_digest is not None and current_digest == previous_digest:
             continue
-        legacy_expected = (
-            _legacy_obsidian_normalized_base(relative)
-            if _manifest_renderer_revision(previous) == 3
-            else None
-        )
-        if legacy_expected is not None:
-            try:
-                current_payload = load_yaml(path, default={})
-            except (OSError, RuntimeError):
-                current_payload = None
-            if current_payload == legacy_expected:
-                continue
         conflicts.append(relative)
 
     for relative, previous_digest in previous_files.items():
@@ -1490,7 +1456,10 @@ def _preflight_update(
             continue
         if not path.exists() and not path.is_symlink():
             continue
-        if path.is_symlink() or not path.is_file() or _file_sha256(path) != previous_digest:
+        if path.is_symlink() or not path.is_file():
+            conflicts.append(relative)
+            continue
+        if not _is_managed_base_path(relative) and _file_sha256(path) != previous_digest:
             conflicts.append(relative)
     return sorted(set(conflicts))
 
@@ -1546,6 +1515,7 @@ def update_obsidian_projection(project_root: Path) -> dict[str, Any]:
             "OBSIDIAN_PROJECTION_STALE",
             "OBSIDIAN_MANAGED_FILE_MISSING",
             "OBSIDIAN_MANAGED_FILE_DRIFT",
+            "OBSIDIAN_MANAGED_BASE_STALE",
             "OBSIDIAN_MANAGED_PATH_UNSAFE",
             "OBSIDIAN_MANAGED_FILE_UNOWNED",
         }
@@ -1619,7 +1589,7 @@ def update_obsidian_projection(project_root: Path) -> dict[str, Any]:
         if not gitignore_ready:
             ensure_kb_gitignore(project_root)
         for relative, text in desired.items():
-            write_text_if_changed(_managed_path(managed, relative), text)
+            _write_managed_projection_file(_managed_path(managed, relative), relative, text)
         removed: list[Path] = []
         for relative in sorted(set(_manifest_files(locked_previous or {})) - set(desired)):
             path = _managed_path(managed, relative)
@@ -1869,6 +1839,7 @@ def obsidian_projection_status(project_root: Path) -> dict[str, Any]:
     )
     manifest, manifest_state = _load_manifest(project_root)
     managed = obsidian_managed_root(project_root)
+    desired_bases = _projection_base_files(inputs)
     if manifest is None:
         if manifest_state not in {"missing", "ok"}:
             findings.append(
@@ -1920,7 +1891,17 @@ def obsidian_projection_status(project_root: Path) -> dict[str, Any]:
                     "The canonical knowledge base changed after the last projection update.",
                 )
             )
-        for relative, expected_digest in _manifest_files(manifest).items():
+        manifest_files = _manifest_files(manifest)
+        for relative in sorted(set(desired_bases) - set(manifest_files)):
+            findings.append(
+                _finding(
+                    "OBSIDIAN_MANAGED_BASE_STALE",
+                    "warning",
+                    relative,
+                    "A renderer-default Base is absent from the managed projection and will be rebuilt on update.",
+                )
+            )
+        for relative, expected_digest in manifest_files.items():
             try:
                 path = _managed_path(managed, relative)
             except SystemExit:
@@ -1933,7 +1914,21 @@ def obsidian_projection_status(project_root: Path) -> dict[str, Any]:
                     _finding("OBSIDIAN_MANAGED_FILE_MISSING", "error", relative, "A manifest-owned file is missing or retyped.")
                 )
                 continue
-            if _file_sha256(path) != expected_digest:
+            current_digest = _file_sha256(path)
+            if _is_managed_base_path(relative):
+                desired = desired_bases.get(relative)
+                desired_digest = _sha256_text(desired) if desired is not None else ""
+                if current_digest != desired_digest or expected_digest != desired_digest:
+                    findings.append(
+                        _finding(
+                            "OBSIDIAN_MANAGED_BASE_STALE",
+                            "warning",
+                            relative,
+                            "A generated Base differs from the renderer default and will be rebuilt on update.",
+                        )
+                    )
+                continue
+            if current_digest != expected_digest:
                 findings.append(
                     _finding(
                         "OBSIDIAN_MANAGED_FILE_DRIFT",
@@ -1943,7 +1938,7 @@ def obsidian_projection_status(project_root: Path) -> dict[str, Any]:
                     )
                 )
         current_files, unsafe_entries = _safe_managed_entries(managed)
-        owned_files = set(_manifest_files(manifest))
+        owned_files = set(manifest_files)
         for relative in sorted(current_files - owned_files):
             findings.append(
                 _finding(

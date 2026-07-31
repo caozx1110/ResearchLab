@@ -246,7 +246,7 @@ files:
   units/<unit-id>.md: <sha256>
 ```
 
-`files` 的 key 只能是 `managed/` 内相对路径且不得包含 absolute/`.`/`..`，manifest 不拥有自身。更新只覆盖 digest 仍匹配上一 manifest 的文件；过期清理只删除上一 manifest 明确拥有且 bytes 未漂移的普通文件。symlink、特殊类型、未登记文件与人工改动一律保留并报告。renderer 11 的三份 `.base` 直接使用 Obsidian 1.12.7 保存后的 block-sequence 缩进和 view 键序；打开面板不能再改变受管 bytes 或触发虚假 drift。整个 managed 更新走 operation journal；manifest 最后写，意外中断后可重跑或通过恢复合同撤销。
+`files` 的 key 只能是 `managed/` 内相对路径且不得包含 absolute/`.`/`..`，manifest 不拥有自身。普通 managed Markdown 只在 digest 仍匹配上一 manifest 时覆盖，过期清理也只删除上一 manifest 明确拥有且 bytes 未漂移的普通 Markdown；内容漂移必须保留并报告。manifest-owned 普通 `.base` 则是 renderer 完整拥有的可重建派生视图：无论当前内容是否仍是合法 YAML，更新都直接恢复 renderer 默认 bytes，且不保存手工排序、filter、query、注释或其他 Base 内容。`.base` symlink、特殊类型、未登记文件与不安全路径仍拒绝并保留。renderer 11 的三份 `.base` 继续使用 Obsidian 1.12.7 保存后的 block-sequence 缩进和 view 键序。整个 managed 更新走既有 operation journal；manifest 最后写，意外中断后可重跑或通过通用恢复合同撤销。
 
 ### per-kind payload <a id="unit-payload"></a>
 
