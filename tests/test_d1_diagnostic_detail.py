@@ -86,6 +86,21 @@ def _capture(root: Path, *, envelope: dict[str, object] | None = None) -> dict[s
     return issue
 
 
+def _set_product_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    layout: str,
+    root: Path,
+) -> None:
+    monkeypatch.setattr(diagnostics, "_DETAIL_PRODUCT_LAYOUT", layout)
+    monkeypatch.setattr(diagnostics, "_DETAIL_PRODUCT_ROOT", root)
+    monkeypatch.setattr(
+        diagnostics,
+        "_DETAIL_PRODUCT_ROOT_IDENTITY",
+        diagnostics._directory_identity(os.stat(root, follow_symlinks=False)),
+    )
+
+
 def test_detail_policy_is_orthogonal_and_legacy_scalar_modes_survive_round_trip(
     tmp_path: Path,
 ) -> None:
@@ -252,6 +267,237 @@ def test_detail_frame_must_resolve_to_real_product_source(
     assert "user-source-title" not in serialized
 
 
+@pytest.mark.parametrize("state", ("untracked", "modified"))
+def test_source_frame_must_match_the_head_owned_blob(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+) -> None:
+    bundle = tmp_path / "source"
+    module = bundle / "runtime/lib/research/diagnostics.py"
+    frame = bundle / "skills/example/scripts/worker.py"
+    module.parent.mkdir(parents=True)
+    frame.parent.mkdir(parents=True)
+    module.write_text("# synthetic diagnostics module\n", encoding="utf-8")
+    frame.write_text("def run():\n    return 1\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(bundle)], check=True)
+    subprocess.run(["git", "-C", str(bundle), "config", "user.name", "Test User"], check=True)
+    subprocess.run(["git", "-C", str(bundle), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(bundle), "add", "runtime/lib/research/diagnostics.py"], check=True)
+    if state == "modified":
+        subprocess.run(["git", "-C", str(bundle), "add", "skills/example/scripts/worker.py"], check=True)
+    subprocess.run(["git", "-C", str(bundle), "commit", "-qm", "baseline"], check=True)
+    _set_product_bundle(monkeypatch, layout="source", root=bundle)
+    if state == "modified":
+        monkeypatch.setenv("GIT_DIR", str(tmp_path / "attacker-controlled-git-dir"))
+        assert diagnostics._managed_frame_source(
+            ("skills", "example", "scripts", "worker.py")
+        ) == "def run():\n    return 1\n"
+        frame.write_text("def run():\n    return 2\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="managed product source"):
+        diagnostics._managed_frame_source(("skills", "example", "scripts", "worker.py"))
+
+
+def test_installed_frame_must_match_the_install_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agents = tmp_path / "workspace/.agents"
+    module = agents / "lib/research/diagnostics.py"
+    frame = agents / "skills/local-user-skill/scripts/leaky.py"
+    module.parent.mkdir(parents=True)
+    frame.parent.mkdir(parents=True)
+    module.write_text("# synthetic installed diagnostics module\n", encoding="utf-8")
+    frame.write_text("def run():\n    return 1\n", encoding="utf-8")
+    (agents / ".install-manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "install_name": "workspace-oss",
+                "install_mode": "copy-project",
+                "files": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _set_product_bundle(monkeypatch, layout="installed", root=agents)
+
+    with pytest.raises(ValueError, match="managed product source"):
+        diagnostics._managed_frame_source(
+            ("skills", "local-user-skill", "scripts", "leaky.py")
+        )
+
+    (agents / ".install-manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "install_name": "workspace-oss",
+                "install_mode": "copy-project",
+                "files": {
+                    ".agents/skills/local-user-skill/scripts/leaky.py": hashlib.sha256(
+                        frame.read_bytes()
+                    ).hexdigest()
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert diagnostics._managed_frame_source(
+        ("skills", "local-user-skill", "scripts", "leaky.py")
+    ) == "def run():\n    return 1\n"
+
+
+def test_frame_read_rejects_intermediate_directory_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agents = tmp_path / "workspace/.agents"
+    module = agents / "lib/research/diagnostics.py"
+    example = agents / "skills/example"
+    frame = example / "scripts/worker.py"
+    outside = tmp_path / "outside"
+    outside_frame = outside / "scripts/worker.py"
+    module.parent.mkdir(parents=True)
+    frame.parent.mkdir(parents=True)
+    outside_frame.parent.mkdir(parents=True)
+    module.write_text("# synthetic installed diagnostics module\n", encoding="utf-8")
+    frame.write_text("def run():\n    return 1\n", encoding="utf-8")
+    outside_frame.write_text("def run():\n    return 'secret'\n", encoding="utf-8")
+    (agents / ".install-manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "install_name": "workspace-oss",
+                "install_mode": "copy-project",
+                "files": {
+                    ".agents/skills/example/scripts/worker.py": hashlib.sha256(
+                        frame.read_bytes()
+                    ).hexdigest()
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    displaced = agents / "skills/example-displaced"
+    original_open = os.open
+    swapped = False
+
+    def swap_parent(path: object, flags: int, *args: object, **kwargs: object) -> int:
+        nonlocal swapped
+        if path == "scripts" and kwargs.get("dir_fd") is not None and not swapped:
+            example.rename(displaced)
+            example.symlink_to(outside, target_is_directory=True)
+            swapped = True
+        return original_open(path, flags, *args, **kwargs)
+
+    _set_product_bundle(monkeypatch, layout="installed", root=agents)
+    monkeypatch.setattr(os, "open", swap_parent)
+
+    with pytest.raises(ValueError, match="managed product source"):
+        diagnostics._managed_frame_source(("skills", "example", "scripts", "worker.py"))
+
+    assert swapped is True
+
+
+def test_frame_read_rejects_product_root_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle = tmp_path / "source"
+    module = bundle / "runtime/lib/research/diagnostics.py"
+    module.parent.mkdir(parents=True)
+    module.write_text("# original diagnostics module\n", encoding="utf-8")
+    _set_product_bundle(monkeypatch, layout="source", root=bundle)
+
+    attacker = tmp_path / "attacker"
+    attacker_module = attacker / "runtime/lib/research/diagnostics.py"
+    attacker_frame = attacker / "skills/ghp_AAAAAAAAAAAAAAA/scripts/leaky.py"
+    attacker_module.parent.mkdir(parents=True)
+    attacker_frame.parent.mkdir(parents=True)
+    attacker_module.write_text("# attacker diagnostics module\n", encoding="utf-8")
+    attacker_frame.write_text(
+        "def api_key_sensitive_value():\n    return 1\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "init", "-q", str(attacker)], check=True)
+    subprocess.run(["git", "-C", str(attacker), "config", "user.name", "Test User"], check=True)
+    subprocess.run(["git", "-C", str(attacker), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(attacker), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(attacker), "commit", "-qm", "attacker"], check=True)
+
+    displaced = tmp_path / "source-displaced"
+    original_open = os.open
+    swapped = False
+
+    def swap_root(path: object, flags: int, *args: object, **kwargs: object) -> int:
+        nonlocal swapped
+        if Path(path) == bundle and kwargs.get("dir_fd") is None and not swapped:
+            bundle.rename(displaced)
+            attacker.rename(bundle)
+            swapped = True
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", swap_root)
+
+    with pytest.raises(ValueError, match="managed product source"):
+        diagnostics._normalize_repo_frame(
+            {
+                "path": "skills/ghp_AAAAAAAAAAAAAAA/scripts/leaky.py",
+                "line": 1,
+                "function": "api_key_sensitive_value",
+            }
+        )
+
+    assert swapped is True
+
+
+def test_anchored_source_reader_closes_child_fd_when_validation_raises(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "bundle"
+    target = root / "a/source.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("def run():\n    return 1\n", encoding="utf-8")
+    root_identity = diagnostics._directory_identity(os.stat(root, follow_symlinks=False))
+    original_open = os.open
+    original_stat = os.stat
+    child_fd = -1
+    a_stats = 0
+
+    def remember_child(path: object, flags: int, *args: object, **kwargs: object) -> int:
+        nonlocal child_fd
+        descriptor = original_open(path, flags, *args, **kwargs)
+        if path == "a" and kwargs.get("dir_fd") is not None:
+            child_fd = descriptor
+        return descriptor
+
+    def fail_post_open_stat(path: object, *args: object, **kwargs: object) -> os.stat_result:
+        nonlocal a_stats
+        if path == "a" and kwargs.get("dir_fd") is not None:
+            a_stats += 1
+            if a_stats == 2:
+                raise OSError("injected directory validation failure")
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", remember_child)
+    monkeypatch.setattr(os, "stat", fail_post_open_stat)
+
+    with pytest.raises(OSError, match="injected directory validation failure"):
+        diagnostics._read_anchored_regular(
+            root,
+            ("a", "source.py"),
+            max_bytes=1024,
+            expected_root_identity=root_identity,
+        )
+
+    assert child_fd >= 0
+    with pytest.raises(OSError):
+        os.fstat(child_fd)
+
+
 @pytest.mark.parametrize(
     "unsafe_field",
     ("exception-class", "runtime-version", "dependency-name", "dependency-version", "function"),
@@ -286,8 +532,10 @@ def test_closed_envelope_rejects_sensitive_shaped_tokens(
     assert "synthetic-secret" not in diagnostics_path(root).read_text(encoding="utf-8")
 
 
-def test_preexisting_oversized_detail_artifact_is_not_overwritten(
+@pytest.mark.parametrize("oversized", (False, True))
+def test_preexisting_unbound_detail_artifact_is_not_overwritten(
     tmp_path: Path,
+    oversized: bool,
 ) -> None:
     probe = _workspace(tmp_path / "probe")
     _enable_detail(probe)
@@ -299,14 +547,72 @@ def test_preexisting_oversized_detail_artifact_is_not_overwritten(
     target.parent.mkdir(parents=True)
     os.chmod(target.parent.parent, 0o700)
     os.chmod(target.parent, 0o700)
-    oversized = b"x" * (diagnostics._DETAIL_MAX_BYTES + 1)
-    target.write_bytes(oversized)
+    preexisting = (
+        b"x" * (diagnostics._DETAIL_MAX_BYTES + 1)
+        if oversized
+        else b"bounded orphan detail bytes\n"
+    )
+    target.write_bytes(preexisting)
     os.chmod(target, 0o600)
 
     fallback = _capture(root, envelope=_envelope())
 
     assert "detail_ref" not in fallback
-    assert target.read_bytes() == oversized
+    assert target.read_bytes() == preexisting
+
+
+def test_detail_creation_uses_atomic_no_clobber_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _workspace(tmp_path)
+    (root / "kb/memory/skill-evolution").mkdir(parents=True)
+    directory = diagnostics._open_detail_directory(root, create=True)
+    os.close(directory)
+    issue_id = "diag-create-race"
+    target = diagnostic_detail_path(root, issue_id)
+    sentinel = b"third-party bounded bytes\n"
+    original_link = os.link
+    injected = False
+
+    def inject_before_link(
+        source: object,
+        destination: object,
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        nonlocal injected
+        if (
+            not injected
+            and isinstance(source, str)
+            and source.startswith(f".{target.name}.")
+            and source.endswith(".tmp")
+            and destination == target.name
+            and kwargs.get("dst_dir_fd") is not None
+        ):
+            directory_fd = int(kwargs["dst_dir_fd"])
+            intruder = os.open(
+                target.name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=directory_fd,
+            )
+            try:
+                os.fchmod(intruder, 0o600)
+                os.write(intruder, sentinel)
+                os.fsync(intruder)
+            finally:
+                os.close(intruder)
+            injected = True
+        original_link(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(os, "link", inject_before_link)
+
+    with pytest.raises(PermissionError, match="appeared before creation"):
+        diagnostics._write_detail_bytes(root, issue_id, b"managed detail bytes\n")
+
+    assert injected is True
+    assert target.read_bytes() == sentinel
 
 
 def test_owner_failure_stage_conflict_falls_back_to_redacted_summary(

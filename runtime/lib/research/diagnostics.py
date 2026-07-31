@@ -16,6 +16,7 @@ import json
 import os
 import re
 import stat
+import subprocess
 import sys
 import time
 import unicodedata
@@ -97,6 +98,7 @@ _DETAIL_EVENT_LIMIT = 4
 _DETAIL_LIST_LIMIT = 5
 _DETAIL_TEXT_LIMIT = 300
 _DETAIL_SOURCE_MAX_BYTES = 2 * 1024 * 1024
+_DETAIL_MANIFEST_MAX_BYTES = 16 * 1024 * 1024
 _DETAIL_EXCEPTION_CLASSES = frozenset(
     {
         "calledprocesserror",
@@ -713,7 +715,13 @@ def _read_detail_bytes(project_root: Path, issue_id: str) -> bytes:
         os.close(directory)
 
 
-def _write_detail_bytes(project_root: Path, issue_id: str, data: bytes) -> None:
+def _write_detail_bytes(
+    project_root: Path,
+    issue_id: str,
+    data: bytes,
+    *,
+    expected_existing: bytes | None = None,
+) -> None:
     if len(data) > _DETAIL_MAX_BYTES:
         raise ValueError("diagnostic detail artifact exceeds its byte budget")
     directory = _open_detail_directory(project_root, create=True)
@@ -737,13 +745,19 @@ def _write_detail_bytes(project_root: Path, issue_id: str, data: bytes) -> None:
             existing = os.stat(filename, dir_fd=directory, follow_symlinks=False)
         except FileNotFoundError:
             existing = None
-        if existing is not None and (
-            not stat.S_ISREG(existing.st_mode)
-            or existing.st_uid != os.getuid()
-            or stat.S_IMODE(existing.st_mode) != 0o600
-            or existing.st_size > _DETAIL_MAX_BYTES
-        ):
-            raise PermissionError("diagnostic detail artifact is not a private regular file")
+        if existing is None:
+            if expected_existing is not None:
+                raise PermissionError("diagnostic detail artifact disappeared before replacement")
+        else:
+            if expected_existing is None:
+                raise PermissionError("diagnostic detail artifact is not bound to this write")
+            existing_bytes, opened_existing = _read_private_detail_file_at(directory, filename)
+            if (
+                existing_bytes != expected_existing
+                or _directory_identity(existing) != _directory_identity(opened_existing)
+            ):
+                raise PermissionError("diagnostic detail artifact changed before replacement")
+            existing = opened_existing
         try:
             backup_metadata = os.stat(backup, dir_fd=directory, follow_symlinks=False)
         except FileNotFoundError:
@@ -791,7 +805,27 @@ def _write_detail_bytes(project_root: Path, issue_id: str, data: bytes) -> None:
             ):
                 raise PermissionError("diagnostic detail artifact changed before replacement")
         _assert_detail_directory_visible(project_root, directory)
-        os.replace(temporary, filename, src_dir_fd=directory, dst_dir_fd=directory)
+        if existing is None:
+            try:
+                os.stat(backup, dir_fd=directory, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                raise PermissionError("diagnostic detail recovery backup appeared before creation")
+            try:
+                os.link(
+                    temporary,
+                    filename,
+                    src_dir_fd=directory,
+                    dst_dir_fd=directory,
+                    follow_symlinks=False,
+                )
+            except FileExistsError as exc:
+                raise PermissionError(
+                    "diagnostic detail artifact appeared before creation"
+                ) from exc
+        else:
+            os.replace(temporary, filename, src_dir_fd=directory, dst_dir_fd=directory)
         try:
             installed = os.stat(filename, dir_fd=directory, follow_symlinks=False)
         except BaseException:
@@ -800,6 +834,17 @@ def _write_detail_bytes(project_root: Path, issue_id: str, data: bytes) -> None:
         if _directory_identity(installed) != _directory_identity(written_metadata):
             preserve_backup = backup_created
             raise PermissionError("diagnostic detail artifact replacement was displaced")
+        if existing is None:
+            try:
+                os.stat(backup, dir_fd=directory, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                current = os.stat(filename, dir_fd=directory, follow_symlinks=False)
+                if _directory_identity(current) == _directory_identity(written_metadata):
+                    os.unlink(filename, dir_fd=directory)
+                    os.fsync(directory)
+                raise PermissionError("diagnostic detail recovery backup appeared during creation")
         os.fsync(directory)
         try:
             _assert_detail_directory_visible(project_root, directory)
@@ -845,62 +890,231 @@ def _safe_version(value: object, *, default: str = "") -> str:
     return default
 
 
-def _managed_frame_source(parts: tuple[str, ...]) -> str:
+def _discover_detail_product_bundle() -> tuple[str, Path, tuple[int, int, int]]:
     module_path = Path(__file__).resolve(strict=True)
     if tuple(module_path.parts[-4:]) == ("runtime", "lib", "research", "diagnostics.py"):
-        product_root = module_path.parents[3]
-        target = product_root.joinpath(*parts)
+        layout = "source"
+        root = module_path.parents[3]
     elif tuple(module_path.parts[-4:]) == (".agents", "lib", "research", "diagnostics.py"):
-        product_root = module_path.parents[2]
-        target = product_root.joinpath(*(parts if parts[0] == "skills" else parts[1:]))
+        layout = "installed"
+        root = module_path.parents[2]
     else:
-        raise ValueError("diagnostic frame cannot resolve the managed product bundle")
+        raise RuntimeError("diagnostics module is outside a supported product bundle")
+    metadata = os.stat(root, follow_symlinks=False)
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise RuntimeError("diagnostics product root is not a directory")
+    return layout, root, _directory_identity(metadata)
+
+
+(
+    _DETAIL_PRODUCT_LAYOUT,
+    _DETAIL_PRODUCT_ROOT,
+    _DETAIL_PRODUCT_ROOT_IDENTITY,
+) = _discover_detail_product_bundle()
+
+
+def _read_anchored_regular(
+    root: Path,
+    parts: tuple[str, ...],
+    *,
+    max_bytes: int,
+    expected_root_identity: tuple[int, int, int],
+) -> bytes:
+    """Read one bounded file while every path component remains descriptor-anchored."""
+
+    if not parts or any(not part or part in {".", ".."} or "/" in part for part in parts):
+        raise ValueError("managed source path is invalid")
+    root_path = root
+    expected_root = os.stat(root_path, follow_symlinks=False)
+    root_descriptor = os.open(root_path, _directory_flags())
+    descriptors: list[int] = [root_descriptor]
+    directory_parts = parts[:-1]
     try:
-        if target.resolve(strict=True) != target:
-            raise ValueError("diagnostic frame path must not cross a link")
-        descriptor = os.open(
-            target,
+        opened_root = os.fstat(root_descriptor)
+        visible_root = os.stat(root_path, follow_symlinks=False)
+        if not (
+            stat.S_ISDIR(opened_root.st_mode)
+            and expected_root_identity
+            == _directory_identity(expected_root)
+            == _directory_identity(opened_root)
+            == _directory_identity(visible_root)
+        ):
+            raise PermissionError("managed product root changed before its anchored read")
+        for part in directory_parts:
+            parent = descriptors[-1]
+            expected = os.stat(part, dir_fd=parent, follow_symlinks=False)
+            child = os.open(part, _directory_flags(), dir_fd=parent)
+            descriptors.append(child)
+            opened = os.fstat(child)
+            visible = os.stat(part, dir_fd=parent, follow_symlinks=False)
+            if (
+                not stat.S_ISDIR(opened.st_mode)
+                or not (
+                    _directory_identity(expected)
+                    == _directory_identity(opened)
+                    == _directory_identity(visible)
+                )
+            ):
+                raise PermissionError("managed source directory changed while opening")
+
+        parent = descriptors[-1]
+        filename = parts[-1]
+        expected = os.stat(filename, dir_fd=parent, follow_symlinks=False)
+        flags = (
             os.O_RDONLY
             | getattr(os, "O_NONBLOCK", 0)
             | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_CLOEXEC", 0),
+            | getattr(os, "O_CLOEXEC", 0)
         )
-    except (OSError, ValueError) as exc:
-        raise ValueError("diagnostic frame path is not managed product source") from exc
-    try:
-        opened = os.fstat(descriptor)
-        visible = os.stat(target, follow_symlinks=False)
-        if (
-            not stat.S_ISREG(opened.st_mode)
-            or opened.st_size > _DETAIL_SOURCE_MAX_BYTES
-            or _directory_identity(opened) != _directory_identity(visible)
-        ):
-            raise ValueError("diagnostic frame path is not one bounded regular source file")
-        chunks: list[bytes] = []
-        remaining = opened.st_size
-        while remaining > 0:
-            chunk = os.read(descriptor, min(remaining, 64 * 1024))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        data = b"".join(chunks)
-        current = os.fstat(descriptor)
-        current_visible = os.stat(target, follow_symlinks=False)
-        if (
-            len(data) != opened.st_size
-            or _directory_identity(opened) != _directory_identity(current)
-            or _directory_identity(opened) != _directory_identity(current_visible)
-            or current.st_size != opened.st_size
-            or current.st_mtime_ns != opened.st_mtime_ns
-            or current.st_ctime_ns != opened.st_ctime_ns
-            or target.resolve(strict=True) != target
-        ):
-            raise ValueError("diagnostic frame source changed during validation")
-    except (OSError, ValueError) as exc:
-        raise ValueError("diagnostic frame source could not be validated") from exc
+        descriptor = os.open(filename, flags, dir_fd=parent)
+        try:
+            opened = os.fstat(descriptor)
+            visible = os.stat(filename, dir_fd=parent, follow_symlinks=False)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_size > max_bytes
+                or not (
+                    _directory_identity(expected)
+                    == _directory_identity(opened)
+                    == _directory_identity(visible)
+                )
+            ):
+                raise PermissionError("managed source is not one bounded regular file")
+            chunks: list[bytes] = []
+            remaining = max_bytes + 1
+            while remaining > 0:
+                chunk = os.read(descriptor, min(remaining, 64 * 1024))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            data = b"".join(chunks)
+            current = os.fstat(descriptor)
+            current_visible = os.stat(filename, dir_fd=parent, follow_symlinks=False)
+            identity_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+            if (
+                len(data) != opened.st_size
+                or len(data) > max_bytes
+                or any(getattr(opened, field) != getattr(current, field) for field in identity_fields)
+                or _directory_identity(current) != _directory_identity(current_visible)
+            ):
+                raise PermissionError("managed source changed during its anchored read")
+        finally:
+            os.close(descriptor)
+
+        for index, part in enumerate(directory_parts):
+            visible = os.stat(part, dir_fd=descriptors[index], follow_symlinks=False)
+            opened = os.fstat(descriptors[index + 1])
+            if _directory_identity(visible) != _directory_identity(opened):
+                raise PermissionError("managed source directory is no longer visible")
+        visible_root = os.stat(root_path, follow_symlinks=False)
+        if _directory_identity(visible_root) != expected_root_identity:
+            raise PermissionError("managed product root is no longer visible")
+        return data
     finally:
-        os.close(descriptor)
+        for descriptor in reversed(descriptors):
+            _close_fd_quietly(descriptor)
+
+
+def _git_head_source(repo_root: Path, logical_path: str, visible: bytes) -> None:
+    environment = os.environ.copy()
+    for name in tuple(environment):
+        if name.startswith("GIT_"):
+            environment.pop(name, None)
+    environment["GIT_NO_REPLACE_OBJECTS"] = "1"
+    environment["GIT_OPTIONAL_LOCKS"] = "0"
+
+    def run(*arguments: str, text: bool = False) -> subprocess.CompletedProcess[Any]:
+        return subprocess.run(
+            ["git", "-C", str(repo_root), *arguments],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            check=False,
+            text=text,
+            timeout=5,
+            env=environment,
+        )
+
+    resolved = run("rev-parse", "--verify", f"HEAD:{logical_path}", text=True)
+    blob = str(resolved.stdout or "").strip()
+    if resolved.returncode != 0 or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", blob):
+        raise ValueError("diagnostic frame path is not HEAD-owned product source")
+    measured = run("cat-file", "-s", blob, text=True)
+    size = str(measured.stdout or "").strip()
+    if (
+        measured.returncode != 0
+        or not size.isdigit()
+        or int(size) > _DETAIL_SOURCE_MAX_BYTES
+        or int(size) != len(visible)
+    ):
+        raise ValueError("diagnostic frame HEAD blob is not bounded product source")
+    blob_data = run("cat-file", "blob", blob)
+    if blob_data.returncode != 0 or blob_data.stdout != visible:
+        raise ValueError("diagnostic frame source does not match its HEAD-owned blob")
+
+
+def _installed_manifest_source(
+    agents_root: Path,
+    manifest_key: str,
+    visible: bytes,
+    *,
+    expected_root_identity: tuple[int, int, int],
+) -> None:
+    manifest_bytes = _read_anchored_regular(
+        agents_root,
+        (".install-manifest.json",),
+        max_bytes=_DETAIL_MANIFEST_MAX_BYTES,
+        expected_root_identity=expected_root_identity,
+    )
+    try:
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("installed product manifest is invalid") from exc
+    files = manifest.get("files") if isinstance(manifest, dict) else None
+    expected = files.get(manifest_key) if isinstance(files, dict) else None
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("schema") != 1
+        or manifest.get("install_name") != "workspace-oss"
+        or manifest.get("install_mode") != "copy-project"
+        or not isinstance(files, dict)
+        or not isinstance(expected, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", expected)
+        or not hashlib.sha256(visible).hexdigest() == expected
+    ):
+        raise ValueError("diagnostic frame path is not manifest-owned product source")
+
+
+def _managed_frame_source(parts: tuple[str, ...]) -> str:
+    if not parts:
+        raise ValueError("diagnostic frame path is not managed product source")
+    product_root = _DETAIL_PRODUCT_ROOT
+    if _DETAIL_PRODUCT_LAYOUT == "source":
+        source_parts = parts
+        ownership = ("source", "/".join(parts))
+    elif _DETAIL_PRODUCT_LAYOUT == "installed":
+        source_parts = parts if parts[0] == "skills" else parts[1:]
+        ownership = ("installed", f".agents/{'/'.join(source_parts)}")
+    else:
+        raise ValueError("diagnostic frame cannot resolve the managed product bundle")
+    try:
+        data = _read_anchored_regular(
+            product_root,
+            source_parts,
+            max_bytes=_DETAIL_SOURCE_MAX_BYTES,
+            expected_root_identity=_DETAIL_PRODUCT_ROOT_IDENTITY,
+        )
+        if ownership[0] == "source":
+            _git_head_source(product_root, ownership[1], data)
+        else:
+            _installed_manifest_source(
+                product_root,
+                ownership[1],
+                data,
+                expected_root_identity=_DETAIL_PRODUCT_ROOT_IDENTITY,
+            )
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        raise ValueError("diagnostic frame path is not managed product source") from exc
     try:
         return data.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -1345,7 +1559,12 @@ def record_diagnostic_issue(
                 detail_document["dropped_history_count"] = dropped
                 detail_document["updated_at"] = timestamp
                 detail_bytes = _serialize_detail_document(detail_document)
-                _write_detail_bytes(project_root, issue_id, detail_bytes)
+                _write_detail_bytes(
+                    project_root,
+                    issue_id,
+                    detail_bytes,
+                    expected_existing=old_detail_bytes or None,
+                )
                 issue["detail_ref"] = _detail_ref(issue_id)
                 issue["detail_digest"] = hashlib.sha256(detail_bytes).hexdigest()
                 issue["retrospective_status"] = history[-1]["root_cause"]["status"]
@@ -1587,7 +1806,12 @@ def apply_diagnostic_retrospective(
         current["next_validation"] = safe_next_validation
         document["updated_at"] = _now()
         new_bytes = _serialize_detail_document(document)
-        _write_detail_bytes(project_root, normalized_issue_id, new_bytes)
+        _write_detail_bytes(
+            project_root,
+            normalized_issue_id,
+            new_bytes,
+            expected_existing=old_bytes,
+        )
         issue["detail_digest"] = hashlib.sha256(new_bytes).hexdigest()
         issue["retrospective_status"] = "hypothesis"
         write_yaml_if_changed(summary_path, summary)
