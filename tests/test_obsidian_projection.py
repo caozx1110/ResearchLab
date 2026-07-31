@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import importlib.machinery
 import importlib.util
+import os
+import stat
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -601,7 +603,7 @@ def test_renderer_revision_marks_old_projection_stale_and_forces_rebuild(tmp_pat
     assert load_yaml(manifest_path, default={})["renderer_revision"] == OBSIDIAN_RENDERER_REVISION
 
 
-def test_revision_three_bases_normalized_by_obsidian_converge_without_weakening_drift_guard(
+def test_revision_three_bases_and_later_base_edits_rebuild_from_renderer(
     tmp_path: Path,
 ) -> None:
     _record(tmp_path, "p-alpha-12345678", "Alpha")
@@ -616,7 +618,7 @@ def test_revision_three_bases_normalized_by_obsidian_converge_without_weakening_
         "dashboards/Pending Review.base",
         "dashboards/By Topic.base",
     ):
-        write_yaml_if_changed(managed / relative, obsidian_module._legacy_obsidian_normalized_base(relative))
+        (managed / relative).write_text("legacy renderer-three Base\n", encoding="utf-8")
 
     rebuilt = update_obsidian_projection(tmp_path)
 
@@ -638,8 +640,9 @@ def test_revision_three_bases_normalized_by_obsidian_converge_without_weakening_
     record = load_yaml(record_path(tmp_path, "paper", "p-alpha-12345678"), default={})
     record["summary"] = "Canonical input changed."
     write_yaml_if_changed(record_path(tmp_path, "paper", record["id"]), record)
-    with pytest.raises(SystemExit, match="human-edited"):
-        update_obsidian_projection(tmp_path)
+    rebuilt = update_obsidian_projection(tmp_path)
+    assert rebuilt["status"]["status"] == "PASS"
+    assert load_yaml(all_units, default={})["views"][0]["name"] != "Human rename"
 
 
 def test_status_is_zero_write_for_an_empty_missing_workspace(tmp_path: Path) -> None:
@@ -751,6 +754,140 @@ def test_update_refuses_managed_drift_and_preserves_bytes(tmp_path: Path) -> Non
     assert page.read_bytes() == before
     report = obsidian_projection_status(tmp_path)
     assert "OBSIDIAN_MANAGED_FILE_DRIFT" in {item["code"] for item in report["findings"]}
+
+
+@pytest.mark.parametrize(
+    "manual_bytes",
+    [
+        b"views:\n  - type: table\n    sort:\n      - property: title\n        direction: ASC\n",
+        b"filters: changed\nviews:\n  - type: cards\n    name: Manual\n",
+        b"# manual comment\nviews: []\n",
+        b"not: [valid\n",
+        b"\xff\xfe\x00manual-base",
+    ],
+    ids=["sort", "semantic-fields", "comment", "invalid-yaml", "arbitrary-bytes"],
+)
+def test_update_rebuilds_manifest_owned_regular_base_from_renderer(
+    tmp_path: Path,
+    manual_bytes: bytes,
+) -> None:
+    record = _record(tmp_path, "p-alpha-12345678", "Alpha")
+    update_obsidian_projection(tmp_path)
+    managed = obsidian_managed_root(tmp_path)
+    base = managed / "dashboards/All Units.base"
+    renderer_bytes = base.read_bytes()
+    canonical_path = record_path(tmp_path, "paper", record["id"])
+    canonical_before = canonical_path.read_bytes()
+    annotation = tmp_path / "kb/obsidian/annotations/manual.md"
+    annotation.write_text("human note\n", encoding="utf-8")
+    annotation_before = annotation.read_bytes()
+    obsidian_config = tmp_path / "kb/.obsidian/preferences.json"
+    obsidian_config.parent.mkdir()
+    obsidian_config.write_text('{"theme":"system"}\n', encoding="utf-8")
+    config_before = obsidian_config.read_bytes()
+    base.write_bytes(manual_bytes)
+
+    report = obsidian_projection_status(tmp_path)
+    codes = {item["code"] for item in report["findings"]}
+    assert "OBSIDIAN_MANAGED_BASE_STALE" in codes
+    assert "OBSIDIAN_MANAGED_FILE_DRIFT" not in codes
+
+    rebuilt = update_obsidian_projection(tmp_path)
+
+    assert rebuilt["changed"] is True
+    assert rebuilt["status"]["status"] == "PASS"
+    assert base.read_bytes() == renderer_bytes
+    assert canonical_path.read_bytes() == canonical_before
+    assert annotation.read_bytes() == annotation_before
+    assert obsidian_config.read_bytes() == config_before
+
+
+@pytest.mark.parametrize("unsafe_kind", ["symlink", "fifo"])
+def test_update_refuses_unsafe_manifest_owned_base(tmp_path: Path, unsafe_kind: str) -> None:
+    _record(tmp_path, "p-alpha-12345678", "Alpha")
+    update_obsidian_projection(tmp_path)
+    base = obsidian_managed_root(tmp_path) / "dashboards/All Units.base"
+    base.unlink()
+    outside = tmp_path / "outside.base"
+    if unsafe_kind == "symlink":
+        outside.write_bytes(b"outside\n")
+        base.symlink_to(outside)
+    else:
+        os.mkfifo(base)
+
+    report = obsidian_projection_status(tmp_path)
+    assert "OBSIDIAN_MANAGED_PATH_UNSAFE" in {item["code"] for item in report["findings"]}
+    with pytest.raises(SystemExit):
+        update_obsidian_projection(tmp_path)
+
+    if unsafe_kind == "symlink":
+        assert outside.read_bytes() == b"outside\n"
+        assert base.is_symlink()
+    else:
+        assert stat.S_ISFIFO(os.lstat(base).st_mode)
+
+
+def test_update_refuses_regular_base_not_owned_by_manifest(tmp_path: Path) -> None:
+    _record(tmp_path, "p-alpha-12345678", "Alpha")
+    update_obsidian_projection(tmp_path)
+    managed = obsidian_managed_root(tmp_path)
+    base = managed / "dashboards/All Units.base"
+    base.write_bytes(b"unowned base must survive\n")
+    before = base.read_bytes()
+    manifest_path = managed / "manifest.yaml"
+    manifest = load_yaml(manifest_path, default={})
+    manifest["files"].pop("dashboards/All Units.base")
+    write_yaml_if_changed(manifest_path, manifest)
+
+    report = obsidian_projection_status(tmp_path)
+    assert "OBSIDIAN_MANAGED_FILE_UNOWNED" in {item["code"] for item in report["findings"]}
+    with pytest.raises(SystemExit):
+        update_obsidian_projection(tmp_path)
+    assert base.read_bytes() == before
+
+
+def test_update_rebuilds_owned_base_when_manifest_digest_matches_manual_content(tmp_path: Path) -> None:
+    _record(tmp_path, "p-alpha-12345678", "Alpha")
+    update_obsidian_projection(tmp_path)
+    managed = obsidian_managed_root(tmp_path)
+    base = managed / "dashboards/All Units.base"
+    renderer_bytes = base.read_bytes()
+    manual_bytes = b"views:\n  - type: cards\n    name: Manual\n"
+    base.write_bytes(manual_bytes)
+    manifest_path = managed / "manifest.yaml"
+    manifest = load_yaml(manifest_path, default={})
+    manifest["files"]["dashboards/All Units.base"] = hashlib.sha256(manual_bytes).hexdigest()
+    write_yaml_if_changed(manifest_path, manifest)
+
+    report = obsidian_projection_status(tmp_path)
+    assert "OBSIDIAN_MANAGED_BASE_STALE" in {item["code"] for item in report["findings"]}
+
+    rebuilt = update_obsidian_projection(tmp_path)
+    assert rebuilt["changed"] is True
+    assert rebuilt["status"]["status"] == "PASS"
+    assert base.read_bytes() == renderer_bytes
+
+
+def test_update_restores_missing_renderer_base_and_manifest_entry(tmp_path: Path) -> None:
+    _record(tmp_path, "p-alpha-12345678", "Alpha")
+    update_obsidian_projection(tmp_path)
+    managed = obsidian_managed_root(tmp_path)
+    base = managed / "dashboards/All Units.base"
+    renderer_bytes = base.read_bytes()
+    base.unlink()
+    manifest_path = managed / "manifest.yaml"
+    manifest = load_yaml(manifest_path, default={})
+    manifest["files"].pop("dashboards/All Units.base")
+    write_yaml_if_changed(manifest_path, manifest)
+
+    report = obsidian_projection_status(tmp_path)
+    assert "OBSIDIAN_MANAGED_BASE_STALE" in {item["code"] for item in report["findings"]}
+
+    rebuilt = update_obsidian_projection(tmp_path)
+    assert rebuilt["changed"] is True
+    assert rebuilt["status"]["status"] == "PASS"
+    assert base.read_bytes() == renderer_bytes
+    assert "dashboards/All Units.base" in load_yaml(manifest_path, default={})["files"]
 
 
 def test_post_intake_refresh_managed_drift_preserves_canonical_success_and_projection(
