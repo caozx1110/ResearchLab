@@ -615,6 +615,123 @@ def test_detail_creation_uses_atomic_no_clobber_publication(
     assert target.read_bytes() == sentinel
 
 
+def test_detail_update_rechecks_linked_bytes_before_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _workspace(tmp_path)
+    (root / "kb/memory/skill-evolution").mkdir(parents=True)
+    directory = diagnostics._open_detail_directory(root, create=True)
+    os.close(directory)
+    issue_id = "diag-update-race"
+    target = diagnostic_detail_path(root, issue_id)
+    original = b"original detail bytes\n"
+    concurrent = b"concurrent local bytes\n"
+    diagnostics._write_detail_bytes(root, issue_id, original)
+    original_link = os.link
+    injected = False
+
+    def modify_before_backup_link(
+        source: object,
+        destination: object,
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        nonlocal injected
+        if (
+            not injected
+            and source == target.name
+            and destination == f".{target.name}.recovery.bak"
+            and kwargs.get("src_dir_fd") is not None
+        ):
+            directory_fd = int(kwargs["src_dir_fd"])
+            writer = os.open(
+                target.name,
+                os.O_WRONLY | os.O_TRUNC,
+                dir_fd=directory_fd,
+            )
+            try:
+                os.write(writer, concurrent)
+                os.fsync(writer)
+            finally:
+                os.close(writer)
+            injected = True
+        original_link(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(os, "link", modify_before_backup_link)
+
+    with pytest.raises(PermissionError, match="bytes changed before replacement"):
+        diagnostics._write_detail_bytes(
+            root,
+            issue_id,
+            b"managed desired bytes\n",
+            expected_existing=original,
+        )
+
+    assert injected is True
+    assert target.read_bytes() == concurrent
+    backups = list(target.parent.glob(f".{target.name}*.bak"))
+    assert len(backups) == 1
+    assert backups[0].read_bytes() == concurrent
+
+
+def test_detail_update_restores_backup_changed_during_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _workspace(tmp_path)
+    (root / "kb/memory/skill-evolution").mkdir(parents=True)
+    directory = diagnostics._open_detail_directory(root, create=True)
+    os.close(directory)
+    issue_id = "diag-update-post-race"
+    target = diagnostic_detail_path(root, issue_id)
+    original = b"original detail bytes\n"
+    concurrent = b"concurrent local bytes\n"
+    diagnostics._write_detail_bytes(root, issue_id, original)
+    backup_name = f".{target.name}.recovery.bak"
+    original_replace = os.replace
+    injected = False
+
+    def modify_backup_after_replace(
+        source: object,
+        destination: object,
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        nonlocal injected
+        original_replace(source, destination, *args, **kwargs)
+        if (
+            not injected
+            and isinstance(source, str)
+            and source.startswith(f".{target.name}.")
+            and source.endswith(".tmp")
+            and destination == target.name
+            and kwargs.get("dst_dir_fd") is not None
+        ):
+            directory_fd = int(kwargs["dst_dir_fd"])
+            writer = os.open(backup_name, os.O_WRONLY | os.O_TRUNC, dir_fd=directory_fd)
+            try:
+                os.write(writer, concurrent)
+                os.fsync(writer)
+            finally:
+                os.close(writer)
+            injected = True
+
+    monkeypatch.setattr(os, "replace", modify_backup_after_replace)
+
+    with pytest.raises(PermissionError, match="bytes changed during replacement"):
+        diagnostics._write_detail_bytes(
+            root,
+            issue_id,
+            b"managed desired bytes\n",
+            expected_existing=original,
+        )
+
+    assert injected is True
+    assert target.read_bytes() == concurrent
+    assert list(target.parent.glob(f".{target.name}*.bak")) == []
+
+
 def test_owner_failure_stage_conflict_falls_back_to_redacted_summary(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

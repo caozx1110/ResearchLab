@@ -803,7 +803,19 @@ def _write_detail_bytes(
                 == _directory_identity(linked)
                 == _directory_identity(current)
             ):
+                preserve_backup = True
                 raise PermissionError("diagnostic detail artifact changed before replacement")
+            try:
+                linked_bytes, opened_link = _read_private_detail_file_at(directory, backup)
+            except BaseException:
+                preserve_backup = True
+                raise
+            if (
+                linked_bytes != expected_existing
+                or _directory_identity(opened_link) != _directory_identity(current)
+            ):
+                preserve_backup = True
+                raise PermissionError("diagnostic detail bytes changed before replacement")
         _assert_detail_directory_visible(project_root, directory)
         if existing is None:
             try:
@@ -834,6 +846,25 @@ def _write_detail_bytes(
         if _directory_identity(installed) != _directory_identity(written_metadata):
             preserve_backup = backup_created
             raise PermissionError("diagnostic detail artifact replacement was displaced")
+        if backup_created:
+            try:
+                backup_bytes, opened_backup = _read_private_detail_file_at(directory, backup)
+                current_backup = os.stat(backup, dir_fd=directory, follow_symlinks=False)
+            except BaseException:
+                preserve_backup = True
+                raise
+            if (
+                backup_bytes != expected_existing
+                or _directory_identity(opened_backup) != _directory_identity(current_backup)
+            ):
+                current = os.stat(filename, dir_fd=directory, follow_symlinks=False)
+                if _directory_identity(current) == _directory_identity(written_metadata):
+                    os.replace(backup, filename, src_dir_fd=directory, dst_dir_fd=directory)
+                    backup_created = False
+                    os.fsync(directory)
+                else:
+                    preserve_backup = True
+                raise PermissionError("diagnostic detail bytes changed during replacement")
         if existing is None:
             try:
                 os.stat(backup, dir_fd=directory, follow_symlinks=False)
