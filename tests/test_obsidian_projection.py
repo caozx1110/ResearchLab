@@ -4,6 +4,7 @@ import hashlib
 import importlib.machinery
 import importlib.util
 import os
+import stat
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -762,6 +763,93 @@ def test_public_obsidian_sort_reset_requires_preview_bound_current_authorization
     assert obsidian_projection_status(tmp_path)["status"] == "PASS"
 
 
+@pytest.mark.parametrize("failure_type", [RuntimeError, OSError])
+def test_public_obsidian_sort_reset_redacts_expected_safety_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failure_type: type[BaseException],
+) -> None:
+    kb = _load_kb_cli()
+    private_failure = (
+        f"{failure_type.__name__}: reviewer-only /private/reset/path "
+        "--expected-preview-token secret-token"
+    )
+
+    def fail_reset(*args, **kwargs):
+        raise failure_type(private_failure)
+
+    monkeypatch.setattr(kb, "reset_obsidian_base_presentation_drift", fail_reset)
+    protocol_name = f"sort-{failure_type.__name__.lower()}-failure.json"
+
+    assert kb.main(
+        [
+            "--root",
+            str(tmp_path),
+            "--agent-protocol",
+            protocol_name,
+            "obsidian",
+            "update",
+            "--apply-presentation-reset",
+            "--expected-preview-digest",
+            "synthetic-preview-digest",
+            "--expected-preview-token",
+            "secret-token",
+            "--user-authorization",
+            "确认按刚才的展示排序预览重置",
+        ]
+    ) == 2
+
+    public = capsys.readouterr()
+    protocol_bytes = (tmp_path / "kb/.runtime" / protocol_name).read_text(encoding="utf-8")
+    combined = public.out + public.err + protocol_bytes
+    assert "Obsidian Base 展示排序修复未完成" in public.out
+    assert private_failure not in combined
+    assert "/private/reset/path" not in combined
+    assert "secret-token" not in combined
+    assert "--expected-preview-token" not in combined
+    protocol = load_yaml(tmp_path / "kb/.runtime" / protocol_name, default={})
+    assert protocol["status"] == "agent_action_required"
+    assert protocol["details"]["obsidian_presentation_reset"] == {
+        "status": "safety_failure",
+        "code": "reset_safety_failure",
+    }
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [KeyboardInterrupt(), GeneratorExit(), ValueError("programming error")],
+    ids=["keyboard-interrupt", "generator-exit", "programming-error"],
+)
+def test_public_obsidian_sort_reset_does_not_swallow_unrelated_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: BaseException,
+) -> None:
+    kb = _load_kb_cli()
+
+    def fail_reset(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(kb, "reset_obsidian_base_presentation_drift", fail_reset)
+    with pytest.raises(type(failure)):
+        kb.main(
+            [
+                "--root",
+                str(tmp_path),
+                "obsidian",
+                "update",
+                "--apply-presentation-reset",
+                "--expected-preview-digest",
+                "synthetic-preview-digest",
+                "--expected-preview-token",
+                "synthetic-preview-token",
+                "--user-authorization",
+                "确认按刚才的展示排序预览重置",
+            ]
+        )
+
+
 def test_base_presentation_preview_rejects_symlink_special_or_ambiguous_yaml(tmp_path: Path) -> None:
     _record(tmp_path, "p-alpha-12345678", "Alpha")
     update_obsidian_projection(tmp_path)
@@ -989,6 +1077,73 @@ def test_base_presentation_reset_does_not_overwrite_concurrent_leaf_at_replace_b
     assert injected is True
     assert base.read_bytes() == sentinel_bytes
     assert list(base.parent.glob(".presentation-reset-*.tmp")) == []
+
+
+@pytest.mark.parametrize("replacement_kind", ["absent", "symlink", "fifo"])
+def test_base_presentation_reset_preserves_concurrent_non_regular_leaf_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement_kind: str,
+) -> None:
+    _record(tmp_path, "p-alpha-12345678", "Alpha")
+    update_obsidian_projection(tmp_path)
+    base = obsidian_managed_root(tmp_path) / "dashboards/All Units.base"
+    _apply_obsidian_1_12_7_title_sort(base)
+    preview = preview_obsidian_base_presentation_reset(tmp_path)
+    outside = tmp_path / "outside-reviewer-sentinel.base"
+    outside.write_bytes(b"outside reviewer sentinel\n")
+    outside_before = outside.read_bytes()
+    original_exchange = obsidian_module._atomic_exchange_at
+    injected = False
+
+    def inject_non_regular_leaf_before_exchange(
+        left_parent_fd: int,
+        left: str,
+        right_parent_fd: int,
+        right: str,
+    ) -> None:
+        nonlocal injected
+        if (
+            not injected
+            and left.startswith(".presentation-reset-")
+            and right == "All Units.base"
+        ):
+            injected = True
+            os.unlink(right, dir_fd=right_parent_fd)
+            if replacement_kind == "symlink":
+                os.symlink(str(outside), right, dir_fd=right_parent_fd)
+            elif replacement_kind == "fifo":
+                os.mkfifo(right, 0o600, dir_fd=right_parent_fd)
+        original_exchange(left_parent_fd, left, right_parent_fd, right)
+
+    monkeypatch.setattr(
+        obsidian_module,
+        "_atomic_exchange_at",
+        inject_non_regular_leaf_before_exchange,
+    )
+
+    with pytest.raises((OSError, RuntimeError, SystemExit)):
+        reset_obsidian_base_presentation_drift(
+            tmp_path,
+            expected_preview_digest=preview["preview_digest"],
+            expected_preview_token=preview["preview_token"],
+            user_authorization="确认按预览重置",
+            authorization_source="user_message",
+        )
+
+    assert injected is True
+    if replacement_kind == "absent":
+        assert not base.exists()
+        assert not base.is_symlink()
+    elif replacement_kind == "symlink":
+        assert base.is_symlink()
+        assert base.readlink() == outside
+    else:
+        assert stat.S_ISFIFO(base.lstat().st_mode)
+    assert outside.read_bytes() == outside_before
+    assert list(
+        (tmp_path / "kb/.journal/snapshots").rglob(".presentation-reset-*.tmp")
+    ) == []
 
 
 def test_base_presentation_reset_restores_detached_leaf_after_final_ancestor_swap(
