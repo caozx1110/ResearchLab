@@ -857,13 +857,11 @@ def _write_detail_bytes(
                 backup_bytes != expected_existing
                 or _directory_identity(opened_backup) != _directory_identity(current_backup)
             ):
-                current = os.stat(filename, dir_fd=directory, follow_symlinks=False)
-                if _directory_identity(current) == _directory_identity(written_metadata):
-                    os.replace(backup, filename, src_dir_fd=directory, dst_dir_fd=directory)
-                    backup_created = False
-                    os.fsync(directory)
-                else:
-                    preserve_backup = True
+                # The enclosing mutation transaction owns restoration of the
+                # declared visible target.  Keep the changed old inode in the
+                # one bounded recovery slot so abort cannot erase concurrent
+                # bytes while restoring its own before-image.
+                preserve_backup = True
                 raise PermissionError("diagnostic detail bytes changed during replacement")
         if existing is None:
             try:

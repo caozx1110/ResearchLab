@@ -675,7 +675,7 @@ def test_detail_update_rechecks_linked_bytes_before_replacement(
     assert backups[0].read_bytes() == concurrent
 
 
-def test_detail_update_restores_backup_changed_during_replacement(
+def test_detail_update_preserves_backup_changed_during_replacement(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -728,8 +728,61 @@ def test_detail_update_restores_backup_changed_during_replacement(
         )
 
     assert injected is True
-    assert target.read_bytes() == concurrent
-    assert list(target.parent.glob(f".{target.name}*.bak")) == []
+    assert target.read_bytes() == b"managed desired bytes\n"
+    backups = list(target.parent.glob(f".{target.name}*.bak"))
+    assert len(backups) == 1
+    assert backups[0].read_bytes() == concurrent
+
+
+def test_detail_transaction_abort_preserves_concurrent_recovery_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _workspace(tmp_path)
+    _enable_detail(root)
+    first = _capture(root, envelope=_envelope())
+    target = diagnostic_detail_path(root, str(first["id"]))
+    original = target.read_bytes()
+    concurrent = b"concurrent local bytes\n"
+    backup_name = f".{target.name}.recovery.bak"
+    original_replace = os.replace
+    injected = False
+
+    def modify_backup_after_replace(
+        source: object,
+        destination: object,
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        nonlocal injected
+        original_replace(source, destination, *args, **kwargs)
+        if (
+            not injected
+            and isinstance(source, str)
+            and source.startswith(f".{target.name}.")
+            and source.endswith(".tmp")
+            and destination == target.name
+            and kwargs.get("dst_dir_fd") is not None
+        ):
+            directory_fd = int(kwargs["dst_dir_fd"])
+            writer = os.open(backup_name, os.O_WRONLY | os.O_TRUNC, dir_fd=directory_fd)
+            try:
+                os.write(writer, concurrent)
+                os.fsync(writer)
+            finally:
+                os.close(writer)
+            injected = True
+
+    monkeypatch.setattr(os, "replace", modify_backup_after_replace)
+
+    fallback = _capture(root, envelope=_envelope())
+
+    assert injected is True
+    assert "detail_ref" not in fallback
+    assert target.read_bytes() == original
+    backups = list(target.parent.glob(f".{target.name}*.bak"))
+    assert len(backups) == 1
+    assert backups[0].read_bytes() == concurrent
 
 
 def test_owner_failure_stage_conflict_falls_back_to_redacted_summary(
