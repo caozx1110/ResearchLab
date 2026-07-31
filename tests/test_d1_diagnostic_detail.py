@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import json
 import os
 import stat
 import subprocess
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -52,14 +54,22 @@ def _enable_detail(root: Path, *, mode: str = "errors-only", budget: int = 0) ->
 
 
 def _envelope(path: str = "skills/source-intake/scripts/intake.py") -> dict[str, object]:
+    if path == "runtime/lib/research/records.py":
+        line = 458
+        function = "snapshot_project_file"
+    else:
+        line = 91
+        function = "_tag_intake_failure"
     return {
         "schema": "diagnostic-mechanical-envelope/v1",
-        "exception_class": "OwnerExit",
+        "exception_class": "owner-nonzero-exit",
         "failure_stage": "materialization",
-        "frames": [{"path": path, "line": 91, "function": "materialize"}],
+        "frames": [{"path": path, "line": line, "function": function}],
         "events": ["owner-nonzero-exit", "dispatcher-capture"],
-        "runtime_version": "python-3.13.5",
-        "dependency_versions": {"pyyaml": "6.0.2"},
+        "runtime_version": (
+            f"python-{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+        ),
+        "dependency_versions": {"pyyaml": importlib.metadata.version("PyYAML")},
     }
 
 
@@ -141,7 +151,7 @@ def test_errors_only_detail_is_private_bounded_and_export_remains_summary_only(
         {
             "path": "skills/source-intake/scripts/intake.py",
             "line": 91,
-            "function": "materialize",
+            "function": "_tag_intake_failure",
         }
     ]
     assert current["output_excerpt"] == []
@@ -218,6 +228,85 @@ def test_closed_envelope_rejects_arbitrary_output_and_falls_back_to_redacted_sum
     serialized = diagnostics_path(root).read_text(encoding="utf-8")
     assert "raw user" not in serialized
     assert "secret-value" not in serialized
+
+
+def test_detail_frame_must_resolve_to_real_product_source(
+    tmp_path: Path,
+) -> None:
+    root = _workspace(tmp_path)
+    _enable_detail(root)
+    unsafe = _envelope()
+    unsafe["frames"] = [
+        {
+            "path": "skills/token=synthetic-secret/user-source-title.py",
+            "line": 1,
+            "function": "user_source_title",
+        }
+    ]
+
+    issue = _capture(root, envelope=unsafe)
+
+    assert "detail_ref" not in issue
+    serialized = diagnostics_path(root).read_text(encoding="utf-8")
+    assert "synthetic-secret" not in serialized
+    assert "user-source-title" not in serialized
+
+
+@pytest.mark.parametrize(
+    "unsafe_field",
+    ("exception-class", "runtime-version", "dependency-name", "dependency-version", "function"),
+)
+def test_closed_envelope_rejects_sensitive_shaped_tokens(
+    tmp_path: Path,
+    unsafe_field: str,
+) -> None:
+    root = _workspace(tmp_path)
+    _enable_detail(root)
+    unsafe = _envelope()
+    if unsafe_field == "exception-class":
+        unsafe["exception_class"] = "runtimeerror.synthetic-secret"
+    elif unsafe_field == "runtime-version":
+        unsafe["runtime_version"] = "python-3.13.5-synthetic-secret"
+    elif unsafe_field == "dependency-name":
+        unsafe["dependency_versions"] = {"synthetic-secret": "1.0"}
+    elif unsafe_field == "dependency-version":
+        unsafe["dependency_versions"] = {"pyyaml": "6.0.3-synthetic-secret"}
+    else:
+        unsafe["frames"] = [
+            {
+                "path": "skills/source-intake/scripts/intake.py",
+                "line": 91,
+                "function": "synthetic_secret",
+            }
+        ]
+
+    issue = _capture(root, envelope=unsafe)
+
+    assert "detail_ref" not in issue
+    assert "synthetic-secret" not in diagnostics_path(root).read_text(encoding="utf-8")
+
+
+def test_preexisting_oversized_detail_artifact_is_not_overwritten(
+    tmp_path: Path,
+) -> None:
+    probe = _workspace(tmp_path / "probe")
+    _enable_detail(probe)
+    issue_id = str(_capture(probe, envelope=_envelope())["id"])
+
+    root = _workspace(tmp_path / "target")
+    _enable_detail(root)
+    target = diagnostic_detail_path(root, issue_id)
+    target.parent.mkdir(parents=True)
+    os.chmod(target.parent.parent, 0o700)
+    os.chmod(target.parent, 0o700)
+    oversized = b"x" * (diagnostics._DETAIL_MAX_BYTES + 1)
+    target.write_bytes(oversized)
+    os.chmod(target, 0o600)
+
+    fallback = _capture(root, envelope=_envelope())
+
+    assert "detail_ref" not in fallback
+    assert target.read_bytes() == oversized
 
 
 def test_owner_failure_stage_conflict_falls_back_to_redacted_summary(

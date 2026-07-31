@@ -9,7 +9,9 @@ automatic policy is off.
 
 from __future__ import annotations
 
+import ast
 import hashlib
+import importlib.metadata
 import json
 import os
 import re
@@ -94,6 +96,30 @@ _DETAIL_FRAME_LIMIT = 8
 _DETAIL_EVENT_LIMIT = 4
 _DETAIL_LIST_LIMIT = 5
 _DETAIL_TEXT_LIMIT = 300
+_DETAIL_SOURCE_MAX_BYTES = 2 * 1024 * 1024
+_DETAIL_EXCEPTION_CLASSES = frozenset(
+    {
+        "calledprocesserror",
+        "exception",
+        "fileexistserror",
+        "filenotfounderror",
+        "oserror",
+        "owner-nonzero-exit",
+        "permissionerror",
+        "runtimeerror",
+        "subprocesserror",
+        "systemexit",
+        "timeouterror",
+        "typeerror",
+        "valueerror",
+    }
+)
+_DETAIL_DEPENDENCY_DISTRIBUTIONS = {
+    "pymupdf": "PyMuPDF",
+    "pymupdf4llm": "pymupdf4llm",
+    "pyyaml": "PyYAML",
+    "tiktoken": "tiktoken",
+}
 _DETAIL_ENVELOPE_KEYS = frozenset(
     {
         "schema",
@@ -715,6 +741,7 @@ def _write_detail_bytes(project_root: Path, issue_id: str, data: bytes) -> None:
             not stat.S_ISREG(existing.st_mode)
             or existing.st_uid != os.getuid()
             or stat.S_IMODE(existing.st_mode) != 0o600
+            or existing.st_size > _DETAIL_MAX_BYTES
         ):
             raise PermissionError("diagnostic detail artifact is not a private regular file")
         try:
@@ -818,6 +845,86 @@ def _safe_version(value: object, *, default: str = "") -> str:
     return default
 
 
+def _managed_frame_source(parts: tuple[str, ...]) -> str:
+    module_path = Path(__file__).resolve(strict=True)
+    if tuple(module_path.parts[-4:]) == ("runtime", "lib", "research", "diagnostics.py"):
+        product_root = module_path.parents[3]
+        target = product_root.joinpath(*parts)
+    elif tuple(module_path.parts[-4:]) == (".agents", "lib", "research", "diagnostics.py"):
+        product_root = module_path.parents[2]
+        target = product_root.joinpath(*(parts if parts[0] == "skills" else parts[1:]))
+    else:
+        raise ValueError("diagnostic frame cannot resolve the managed product bundle")
+    try:
+        if target.resolve(strict=True) != target:
+            raise ValueError("diagnostic frame path must not cross a link")
+        descriptor = os.open(
+            target,
+            os.O_RDONLY
+            | getattr(os, "O_NONBLOCK", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+    except (OSError, ValueError) as exc:
+        raise ValueError("diagnostic frame path is not managed product source") from exc
+    try:
+        opened = os.fstat(descriptor)
+        visible = os.stat(target, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_size > _DETAIL_SOURCE_MAX_BYTES
+            or _directory_identity(opened) != _directory_identity(visible)
+        ):
+            raise ValueError("diagnostic frame path is not one bounded regular source file")
+        chunks: list[bytes] = []
+        remaining = opened.st_size
+        while remaining > 0:
+            chunk = os.read(descriptor, min(remaining, 64 * 1024))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        current = os.fstat(descriptor)
+        current_visible = os.stat(target, follow_symlinks=False)
+        if (
+            len(data) != opened.st_size
+            or _directory_identity(opened) != _directory_identity(current)
+            or _directory_identity(opened) != _directory_identity(current_visible)
+            or current.st_size != opened.st_size
+            or current.st_mtime_ns != opened.st_mtime_ns
+            or current.st_ctime_ns != opened.st_ctime_ns
+            or target.resolve(strict=True) != target
+        ):
+            raise ValueError("diagnostic frame source changed during validation")
+    except (OSError, ValueError) as exc:
+        raise ValueError("diagnostic frame source could not be validated") from exc
+    finally:
+        os.close(descriptor)
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("diagnostic frame source is not UTF-8") from exc
+
+
+def _validate_frame_location(parts: tuple[str, ...], *, line: int, function: str) -> None:
+    if not parts[-1].lower().endswith(".py"):
+        raise ValueError("diagnostic frame must reference Python product source")
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,79}", function):
+        raise ValueError("diagnostic frame function must be one Python symbol")
+    source = _managed_frame_source(parts)
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as exc:
+        raise ValueError("diagnostic frame source is not valid Python") from exc
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) or node.name != function:
+            continue
+        if node.lineno <= line <= int(getattr(node, "end_lineno", node.lineno)):
+            return
+    raise ValueError("diagnostic frame does not match a managed source function")
+
+
 def _normalize_repo_frame(value: object) -> dict[str, Any]:
     if not isinstance(value, Mapping) or set(value) != {"path", "line", "function"}:
         raise ValueError("detail frame must use exactly path, line, and function")
@@ -840,8 +947,7 @@ def _normalize_repo_frame(value: object) -> dict[str, Any]:
     if isinstance(value.get("line"), bool) or not 1 <= line <= 10_000_000:
         raise ValueError("detail frame line is outside the supported range")
     function = str(value.get("function") or "").strip()
-    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.<>-]{0,79}", function):
-        raise ValueError("detail frame function must be one safe symbol")
+    _validate_frame_location(parts, line=line, function=function)
     return {"path": PurePosixPath(*parts).as_posix(), "line": line, "function": function}
 
 
@@ -880,11 +986,27 @@ def _normalize_detail_envelope(value: Mapping[str, Any] | None, *, failure_stage
         raise ValueError("diagnostic dependency versions must be a small mapping")
     dependencies: dict[str, str] = {}
     for name, version in sorted(dependencies_raw.items(), key=lambda item: str(item[0])):
-        safe_name = _safe_identifier(str(name or ""))
+        safe_name = str(name or "").strip().lower()
+        distribution = _DETAIL_DEPENDENCY_DISTRIBUTIONS.get(safe_name)
+        if distribution is None:
+            raise ValueError("diagnostic dependency is not allowlisted")
+        try:
+            actual_version = importlib.metadata.version(distribution)
+        except importlib.metadata.PackageNotFoundError as exc:
+            raise ValueError("diagnostic dependency is not installed") from exc
         safe_version = _safe_version(version)
-        if not safe_name or not safe_version:
-            raise ValueError("diagnostic dependency version is not a stable token")
+        if safe_version != actual_version:
+            raise ValueError("diagnostic dependency version does not match the runtime")
         dependencies[safe_name] = safe_version
+    exception_class = str(raw.get("exception_class") or "").strip().lower()
+    if exception_class not in _DETAIL_EXCEPTION_CLASSES:
+        raise ValueError("diagnostic exception class is not allowlisted")
+    runtime_version = str(raw.get("runtime_version") or "").strip()
+    expected_runtime_version = (
+        f"python-{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    )
+    if runtime_version not in {"unknown", expected_runtime_version}:
+        raise ValueError("diagnostic runtime version does not match the current runtime")
     envelope_failure_stage = _safe_failure_stage(raw.get("failure_stage") or failure_stage)
     consumed_failure_stage = _safe_failure_stage(failure_stage)
     if consumed_failure_stage != "unknown":
@@ -892,11 +1014,11 @@ def _normalize_detail_envelope(value: Mapping[str, Any] | None, *, failure_stage
             raise ValueError("diagnostic detail failure stage conflicts with the owner receipt")
         envelope_failure_stage = consumed_failure_stage
     return {
-        "exception_class": _safe_error_class(str(raw.get("exception_class") or "")),
+        "exception_class": exception_class,
         "failure_stage": envelope_failure_stage,
         "frames": frames,
         "events": events,
-        "runtime_version": _safe_version(raw.get("runtime_version"), default="unknown"),
+        "runtime_version": runtime_version,
         "dependency_versions": dependencies,
     }
 

@@ -816,13 +816,13 @@ occurrence_history:                     # newest five snapshots only
       bundle_version: ""
       source_commit: ""
       runtime_version: python-<major.minor.patch> | unknown
-      dependency_versions: {}           # 至多 8 个 safe name/version tokens
+      dependency_versions: {}           # 至多 8 个 allowlisted exact installed versions
     root_cause:
       status: not-run | pending | hypothesis
       reason: mode-errors-only | budget-zero | awaiting-agent | agent-applied
       explanation: ""                  # 仅 hypothesis 非空；最长 300 chars，已脱敏
     reproduction: []                    # Agent apply；至多 5 个脱敏短项
-    relevant_trace: []                  # 至多 8 个 {path,line,function}，仅产品源码相对路径
+    relevant_trace: []                  # 至多 8 个 {path,line,function}，须匹配真实 managed Python source
     safe_events: []                     # 至多 4 个 allowlisted mechanical codes
     output_excerpt: []                  # v1 保留字段，恒为空；capture API 不接受 child output
     optimization_candidates: []         # Agent apply；至多 5 个脱敏短项
@@ -830,7 +830,7 @@ occurrence_history:                     # newest five snapshots only
 dropped_history_count: 0
 ```
 
-封闭 `diagnostic-mechanical-envelope/v1` 的 exact keys 为 `schema/exception_class/failure_stage/frames/events/runtime_version/dependency_versions`；多余/缺失 key、非 allowlist event、非产品源码 frame token、源码文本、绝对/父级路径或不安全 dependency token 均拒绝 private detail。Exception class、failure stage 与 runtime version 只保留确定性安全 token，非法值分别降级为稳定安全 class、`unknown` 或 `unknown`。Dispatcher 只从固定机械事实构造 envelope，不读取 child arguments/stdout/stderr；`source-intake:add` 的 one-use owner receipt 可把 `unknown` stage 精化为已验证 stage，冲突时 private detail fail closed 并回退 legacy redacted summary。
+封闭 `diagnostic-mechanical-envelope/v1` 的 exact keys 为 `schema/exception_class/failure_stage/frames/events/runtime_version/dependency_versions`；多余/缺失 key、非 allowlist class/event/dependency、源码文本、绝对/父级路径、非真实 managed Python file/function/line、非当前 runtime version（`unknown` 除外）或不匹配当前安装的 dependency version 均拒绝 private detail。Failure stage 非 allowlist 时归一为 `unknown`；`source-intake:add` 的 one-use owner receipt 可把 `unknown` 精化为已验证 stage，冲突时 private detail fail closed 并回退 legacy redacted summary。Dispatcher 只从固定机械事实构造 envelope，不读取 child arguments/stdout/stderr。
 
 `errors-only` snapshot 的 root cause 必须为 `not-run/mode-errors-only`。`developer` budget 为 0 时为 `not-run/budget-zero`；非零时为 `pending/awaiting-agent`，dispatcher 只向 private Agent protocol 添加 `{action: run_diagnostic_retrospective, issue_id, expected_detail_digest}`。Agent 先由 owner 读取当前 digest-bound detail，再把结构化分析暂存在 `kb/.runtime/` 私有 regular file；owner-only apply 重验 issue ID/digest、只接受 explanation/reproduction/optimization_candidates/next_validation allowlist，成功后写 `hypothesis/agent-applied`。脚本不推断 root cause、不记录虚构 token usage，也不把 hypothesis 自动改为 confirmed。
 
