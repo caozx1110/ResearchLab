@@ -764,6 +764,53 @@ def test_public_obsidian_sort_reset_requires_preview_bound_current_authorization
 
 
 @pytest.mark.parametrize("failure_type", [RuntimeError, OSError])
+def test_public_obsidian_sort_preview_redacts_expected_safety_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failure_type: type[BaseException],
+) -> None:
+    kb = _load_kb_cli()
+    private_failure = (
+        f"{failure_type.__name__}: reviewer-only /private/preview/path "
+        "--expected-preview-token secret-token"
+    )
+
+    def fail_preview(*args, **kwargs):
+        raise failure_type(private_failure)
+
+    monkeypatch.setattr(kb, "preview_obsidian_base_presentation_reset", fail_preview)
+    protocol_name = f"sort-preview-{failure_type.__name__.lower()}-failure.json"
+
+    assert kb.main(
+        [
+            "--root",
+            str(tmp_path),
+            "--agent-protocol",
+            protocol_name,
+            "obsidian",
+            "update",
+            "--preview-presentation-reset",
+        ]
+    ) == 2
+
+    public = capsys.readouterr()
+    protocol_bytes = (tmp_path / "kb/.runtime" / protocol_name).read_text(encoding="utf-8")
+    combined = public.out + public.err + protocol_bytes
+    assert "Obsidian Base 展示排序修复预览未完成" in public.out
+    assert private_failure not in combined
+    assert "/private/preview/path" not in combined
+    assert "secret-token" not in combined
+    assert "--expected-preview-token" not in combined
+    protocol = load_yaml(tmp_path / "kb/.runtime" / protocol_name, default={})
+    assert protocol["status"] == "agent_action_required"
+    assert protocol["details"]["obsidian_presentation_reset"] == {
+        "status": "safety_failure",
+        "code": "preview_safety_failure",
+    }
+
+
+@pytest.mark.parametrize("failure_type", [RuntimeError, OSError])
 def test_public_obsidian_sort_reset_redacts_expected_safety_failures(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -821,17 +868,32 @@ def test_public_obsidian_sort_reset_redacts_expected_safety_failures(
     [KeyboardInterrupt(), GeneratorExit(), ValueError("programming error")],
     ids=["keyboard-interrupt", "generator-exit", "programming-error"],
 )
+@pytest.mark.parametrize("surface", ["preview", "apply"])
 def test_public_obsidian_sort_reset_does_not_swallow_unrelated_failures(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     failure: BaseException,
+    surface: str,
 ) -> None:
     kb = _load_kb_cli()
 
-    def fail_reset(*args, **kwargs):
+    def fail_operation(*args, **kwargs):
         raise failure
 
-    monkeypatch.setattr(kb, "reset_obsidian_base_presentation_drift", fail_reset)
+    if surface == "preview":
+        monkeypatch.setattr(kb, "preview_obsidian_base_presentation_reset", fail_operation)
+        operation_args = ["--preview-presentation-reset"]
+    else:
+        monkeypatch.setattr(kb, "reset_obsidian_base_presentation_drift", fail_operation)
+        operation_args = [
+            "--apply-presentation-reset",
+            "--expected-preview-digest",
+            "synthetic-preview-digest",
+            "--expected-preview-token",
+            "synthetic-preview-token",
+            "--user-authorization",
+            "确认按刚才的展示排序预览重置",
+        ]
     with pytest.raises(type(failure)):
         kb.main(
             [
@@ -839,13 +901,7 @@ def test_public_obsidian_sort_reset_does_not_swallow_unrelated_failures(
                 str(tmp_path),
                 "obsidian",
                 "update",
-                "--apply-presentation-reset",
-                "--expected-preview-digest",
-                "synthetic-preview-digest",
-                "--expected-preview-token",
-                "synthetic-preview-token",
-                "--user-authorization",
-                "确认按刚才的展示排序预览重置",
+                *operation_args,
             ]
         )
 

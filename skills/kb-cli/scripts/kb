@@ -1373,6 +1373,16 @@ def handle_obsidian(args: argparse.Namespace, root: Path) -> int:
             )
             print("Obsidian Base 的变化不符合安全展示排序边界；没有修改任何文件。")
             return 2
+        except (RuntimeError, OSError):
+            set_protocol_status(
+                "agent_action_required",
+                obsidian_presentation_reset={
+                    "status": "safety_failure",
+                    "code": "preview_safety_failure",
+                },
+            )
+            print("Obsidian Base 展示排序修复预览未完成；检测到安全状态冲突，详细诊断已保留给 Agent。")
+            return 2
         if preview.get("status") == "no_presentation_drift":
             set_protocol_status("completed", obsidian_presentation_reset=preview)
             print("没有需要确认修复的 Obsidian Base 展示排序变化。")
