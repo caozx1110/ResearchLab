@@ -9,7 +9,7 @@ from pathlib import Path
 
 from repo_paths import REPO_ROOT
 
-from research.diagnostics import list_diagnostic_issues
+from research.diagnostics import load_diagnostic_detail, list_diagnostic_issues
 from research.prefs import write_runtime_preferences
 
 
@@ -68,12 +68,14 @@ class CaptureDependencyStub:
         operation: str,
         returncode: int,
         public_summary: str = "",
+        detail_envelope: dict[str, object] | None = None,
     ) -> dict[str, object] | None:
         payload = {
             "skill": skill,
             "operation": operation,
             "returncode": returncode,
             "public_summary": public_summary,
+            "detail_envelope": detail_envelope,
         }
         self.calls.append(payload)
         effective = self.skill_modes.get(skill, "inherit")
@@ -131,6 +133,17 @@ def test_default_off_failure_creates_no_diagnostic_write(monkeypatch, tmp_path: 
             "operation": "status",
             "returncode": 17,
             "public_summary": "知识库操作未完成。",
+            "detail_envelope": {
+                "schema": "diagnostic-mechanical-envelope/v1",
+                "exception_class": "owner-nonzero-exit",
+                "failure_stage": "unknown",
+                "frames": [],
+                "events": ["owner-nonzero-exit", "dispatcher-capture"],
+                "runtime_version": (
+                    f"python-{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+                ),
+                "dependency_versions": {},
+            },
         }
     ]
     assert not (tmp_path / "kb").exists()
@@ -216,7 +229,10 @@ def test_capture_exception_preserves_original_exit_and_public_text(
 
 def test_real_intake_child_hands_allowlisted_failure_stage_to_dispatcher(tmp_path: Path) -> None:
     kb = _load_kb_cli()
-    write_runtime_preferences(tmp_path, {"diagnostics": {"mode": "errors-only"}})
+    write_runtime_preferences(
+        tmp_path,
+        {"diagnostics": {"mode": "errors-only", "detail_level": "local-detailed"}},
+    )
     kb._ACTIVE_PUBLIC_VERB = "add"
 
     result = kb.forward_command(
@@ -231,6 +247,8 @@ def test_real_intake_child_hands_allowlisted_failure_stage_to_dispatcher(tmp_pat
     assert len(issues) == 1
     assert issues[0]["failure_stage"] == "source-recognition"
     assert issues[0]["error_class"] == "owner-nonzero-exit.source-recognition"
+    detail = load_diagnostic_detail(tmp_path, issue_id=str(issues[0]["id"]))
+    assert detail["occurrence_history"][-1]["observation"]["failure_stage"] == "source-recognition"
     serialized = (tmp_path / "kb" / "memory" / "skill-evolution" / "issues.yaml").read_text(
         encoding="utf-8"
     )
@@ -238,6 +256,142 @@ def test_real_intake_child_hands_allowlisted_failure_stage_to_dispatcher(tmp_pat
     assert list(
         (tmp_path / "kb" / ".runtime" / "diagnostics" / "failure-stages").glob("*.json")
     ) == []
+
+
+def test_dispatcher_hands_only_closed_mechanical_detail_to_private_store(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    kb = _load_kb_cli()
+    write_runtime_preferences(
+        tmp_path,
+        {"diagnostics": {"mode": "errors-only", "detail_level": "local-detailed"}},
+    )
+    kb._ACTIVE_PUBLIC_VERB = "status"
+    monkeypatch.setattr(
+        kb.subprocess,
+        "run",
+        lambda *args, **kwargs: _child_result(
+            19,
+            stdout="private paper text token=unsafe-value",
+            stderr=f'Traceback File "{tmp_path}/secret.py", line 7 user words',
+        ),
+    )
+
+    result = kb.forward_command(
+        tmp_path,
+        ".agents/skills/knowledge-base-manager/scripts/kb.py",
+        ["status", "--secret", "unsafe-value"],
+        stream=False,
+    )
+
+    assert result.returncode == 19
+    issue = list_diagnostic_issues(tmp_path, skill="knowledge-base-manager")[0]
+    detail = load_diagnostic_detail(tmp_path, issue_id=str(issue["id"]))
+    latest = detail["occurrence_history"][-1]
+    assert latest["observation"]["exception_class"] == "owner-nonzero-exit"
+    assert latest["observation"]["failure_stage"] == "unknown"
+    assert latest["relevant_trace"] == []
+    assert latest["safe_events"] == ["owner-nonzero-exit", "dispatcher-capture"]
+    assert latest["output_excerpt"] == []
+    private_text = (tmp_path / "kb" / issue["detail_ref"]).read_text(encoding="utf-8")
+    for forbidden in (
+        "private paper text",
+        "unsafe-value",
+        "secret.py",
+        str(tmp_path),
+        "--secret",
+    ):
+        assert forbidden not in private_text
+
+
+def test_developer_local_detail_emits_digest_bound_private_agent_action(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    kb = _load_kb_cli()
+    write_runtime_preferences(
+        tmp_path,
+        {
+            "diagnostics": {
+                "mode": "developer",
+                "detail_level": "local-detailed",
+                "token_budget_per_task": 128,
+            }
+        },
+    )
+    monkeypatch.setattr(
+        kb.subprocess,
+        "run",
+        lambda *args, **kwargs: _child_result(
+            29,
+            stdout="private paper text token=unsafe-value",
+            stderr=f'Traceback File "{tmp_path}/secret.py", line 7 user words',
+        ),
+    )
+
+    assert kb.main(
+        ["--root", str(tmp_path), "--agent-protocol", "failure.json", "status"]
+    ) == 29
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "知识库状态暂时无法读取；详细诊断已保留给 Agent。\n"
+    for forbidden in (
+        "detail_digest",
+        "detail_ref",
+        "occurrence_history",
+        "private paper text",
+        "unsafe-value",
+        "secret.py",
+        str(tmp_path),
+    ):
+        assert forbidden not in captured.out + captured.err
+    issue = list_diagnostic_issues(tmp_path, skill="knowledge-base-manager")[0]
+    protocol = json.loads(
+        (tmp_path / "kb" / ".runtime" / "failure.json").read_text(encoding="utf-8")
+    )
+    assert protocol["next_actions"] == [
+        {
+            "action": "run_diagnostic_retrospective",
+            "issue_id": issue["id"],
+            "expected_detail_digest": issue["detail_digest"],
+        }
+    ]
+    protocol_text = json.dumps(protocol, ensure_ascii=False)
+    assert "detail_ref" not in protocol_text
+    assert "occurrence_history" not in protocol_text
+
+
+def test_noneligible_detail_states_emit_no_retrospective_action(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    for index, diagnostics in enumerate(
+        (
+            {"mode": "errors-only", "detail_level": "local-detailed"},
+            {
+                "mode": "developer",
+                "detail_level": "local-detailed",
+                "token_budget_per_task": 0,
+            },
+            {"mode": "developer", "detail_level": "redacted", "token_budget_per_task": 128},
+        )
+    ):
+        root = tmp_path / f"case-{index}"
+        kb = _load_kb_cli()
+        write_runtime_preferences(root, {"diagnostics": diagnostics})
+        monkeypatch.setattr(kb.subprocess, "run", lambda *args, **kwargs: _child_result(31))
+
+        assert kb.main(
+            ["--root", str(root), "--agent-protocol", "failure.json", "status"]
+        ) == 31
+
+        protocol = json.loads(
+            (root / "kb" / ".runtime" / "failure.json").read_text(encoding="utf-8")
+        )
+        assert protocol["next_actions"] == []
 
 
 def test_plain_doctor_is_read_only_and_does_not_run_private_diagnostics(
@@ -343,6 +497,15 @@ def test_d1_agent_rules_and_docs_keep_optional_diagnostics_honest() -> None:
     guide = (root / "docs" / "USER_GUIDE.md").read_text(encoding="utf-8")
     design = (root / "docs" / "DESIGN.md").read_text(encoding="utf-8")
     changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+    schema = (root / "runtime" / "lib" / "research" / "SCHEMAS.md").read_text(
+        encoding="utf-8"
+    )
+    decision = (
+        root
+        / "docs"
+        / "decisions"
+        / "0003-separate-diagnostic-capture-mode-from-local-detail.md"
+    ).read_text(encoding="utf-8")
 
     for mode in ("off", "errors-only", "developer"):
         assert mode in agent_rules
@@ -365,3 +528,9 @@ def test_d1_agent_rules_and_docs_keep_optional_diagnostics_honest() -> None:
     assert "beta/scaffold" in changelog
     assert "never auto-edits a skill" in agent_rules
     assert "不能关闭 schema、evidence、confirmation" in guide
+    for document in (agent_rules, guide, design, readme, changelog, schema, decision):
+        assert "local-detailed" in document
+        assert "redacted" in document
+    assert "diagnostics.detail_level" in schema
+    assert 'id="diagnostic-private-detail-yaml"' in schema
+    assert "run_diagnostic_retrospective" in schema

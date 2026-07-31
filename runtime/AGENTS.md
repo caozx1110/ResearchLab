@@ -50,9 +50,9 @@ Schema details and enum/field contracts live in `.agents/lib/research/SCHEMAS.md
 ## Recovery, update, and diagnostics
 
 - `resume`, `undo`, and `restore` follow the journal contract in the guide. Update provenance is explicit: local/fork/branch stays on its recorded source; detached installs remain pinned until the user chooses. Unknown provenance asks rather than falling back to canonical upstream or `main`.
-- Diagnostics are optional, local-only, and never weaken evidence/governance. `off` captures nothing automatically; `errors-only` may store fixed redacted failure fields; `developer` may add a bounded retrospective. Per-skill `off` wins. Explicit user requests to record a problem still route to `skill-evolution-advisor`.
-- Natural-language triggers include “开启开发者诊断”, “仅在出错时记录”, “关闭 unit-analyst 诊断”, and “检查知识库健康”; they add no public verb.
-- Never place raw stdout/stderr, traceback, arguments, user/source/evidence text, secrets, environment values, or absolute paths in diagnostics. It never auto-edits a skill, uploads data, creates a background watcher, or changes confirmed research because of a captured issue.
+- Diagnostics are optional/local-only and never weaken governance. Mode `off|errors-only|developer` and detail `redacted|local-detailed` (default `redacted`) are independent workspace/per-skill policies. Per-skill `off` wins; explicit record requests still route to `skill-evolution-advisor`.
+- Recognize “开启开发者诊断”, “仅在出错时记录”, “把诊断细节设为仅本地详细”, “恢复为脱敏诊断”, “关闭 unit-analyst 诊断”, and “检查知识库健康”; add no public verb.
+- `issues.yaml` is the redacted review/export index; detail is private, bounded, digest-bound, and excluded from public output/export/versioning/sync/install/update. `errors-only` never infers; eligible `developer` analysis uses owner read/apply with current issue ID + digest and stays `hypothesis`. Diagnostic artifacts never retain raw output, traceback/source text, arguments, user/source/evidence text, secrets, environment values, or absolute paths. It never auto-edits a skill, uploads, watches in background, or changes confirmed research.
 
 ## Layout and routing
 

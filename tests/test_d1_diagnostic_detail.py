@@ -220,6 +220,25 @@ def test_closed_envelope_rejects_arbitrary_output_and_falls_back_to_redacted_sum
     assert "secret-value" not in serialized
 
 
+def test_owner_failure_stage_conflict_falls_back_to_redacted_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _workspace(tmp_path)
+    _enable_detail(root)
+    monkeypatch.setattr(
+        diagnostics,
+        "_consume_runtime_failure_stage",
+        lambda *args, **kwargs: "source-recognition",
+    )
+
+    issue = _capture(root, envelope=_envelope())
+
+    assert issue["failure_stage"] == "source-recognition"
+    assert "detail_ref" not in issue
+    assert not (root / "kb/memory/skill-evolution/.private").exists()
+
+
 def test_detail_signature_splits_stable_roots_and_merges_equivalent_occurrences(
     tmp_path: Path,
 ) -> None:

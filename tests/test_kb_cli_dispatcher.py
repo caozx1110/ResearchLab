@@ -3213,6 +3213,7 @@ def test_post_intake_refresh_failure_keeps_canonical_success_and_redacts_details
             "operation": "post-intake-obsidian-refresh",
             "returncode": 1,
             "public_summary": "Obsidian 视图未能自动刷新。",
+            "detail_envelope": kb._diagnostic_detail_envelope(),
         }
     ]
 

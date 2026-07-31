@@ -885,9 +885,15 @@ def _normalize_detail_envelope(value: Mapping[str, Any] | None, *, failure_stage
         if not safe_name or not safe_version:
             raise ValueError("diagnostic dependency version is not a stable token")
         dependencies[safe_name] = safe_version
+    envelope_failure_stage = _safe_failure_stage(raw.get("failure_stage") or failure_stage)
+    consumed_failure_stage = _safe_failure_stage(failure_stage)
+    if consumed_failure_stage != "unknown":
+        if envelope_failure_stage not in {"unknown", consumed_failure_stage}:
+            raise ValueError("diagnostic detail failure stage conflicts with the owner receipt")
+        envelope_failure_stage = consumed_failure_stage
     return {
         "exception_class": _safe_error_class(str(raw.get("exception_class") or "")),
-        "failure_stage": _safe_failure_stage(raw.get("failure_stage") or failure_stage),
+        "failure_stage": envelope_failure_stage,
         "frames": frames,
         "events": events,
         "runtime_version": _safe_version(raw.get("runtime_version"), default="unknown"),
